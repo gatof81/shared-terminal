@@ -43,15 +43,18 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 
 const server = http.createServer(app);
 
-const wss = new WebSocketServer({
-        server,
-        // Only handle upgrade requests targeting our WS path prefix.
-        path: undefined, // handled manually below so we can route by prefix
-});
+// noServer: true — we manage the upgrade event ourselves so we can
+// filter by path prefix before handing off to the WS server.
+// If we passed { server } instead, ws would register its own 'upgrade'
+// listener that fires before ours, then ours would call handleUpgrade a
+// second time on an already-consumed socket → browser sees code 1006.
+const wss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
         const url = req.url ?? "";
         if (!url.startsWith("/ws/sessions/")) {
+                // Reject any upgrade not aimed at our WS endpoint (e.g. stray requests).
+                socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
                 socket.destroy();
                 return;
         }
