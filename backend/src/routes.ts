@@ -38,14 +38,28 @@ export function buildRouter(
                         return;
                 }
 
+                let meta;
                 try {
-                        const meta = sessions.create({ userId, name, cols, rows, shell, cwd });
+                        meta = sessions.create({ userId, name, cols, rows, shell, cwd });
+                } catch (err) {
+                        // Validation error (bad name, etc.)
+                        res.status(400).json({ error: (err as Error).message });
+                        return;
+                }
+
+                try {
                         // Spawn the PTY immediately so the session is live from the start.
                         ptys.spawn(meta.sessionId);
-                        res.status(201).json(serializeMeta(meta));
                 } catch (err) {
-                        res.status(400).json({ error: (err as Error).message });
+                        // PTY spawn failed — clean up the metadata so the session doesn't
+                        // appear in the list in a broken state.
+                        sessions.terminate(meta.sessionId);
+                        console.error(`[routes] PTY spawn failed for session ${meta.sessionId}:`, (err as Error).message);
+                        res.status(500).json({ error: `Failed to start shell process: ${(err as Error).message}` });
+                        return;
                 }
+
+                res.status(201).json(serializeMeta(meta));
         });
 
         // ── GET /sessions ─────────────────────────────────────────────────────────
