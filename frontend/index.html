@@ -3,6 +3,28 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      CSP notes:
+      - 'unsafe-eval' is required by xterm.js (it uses new Function() internally
+        for its canvas renderer optimisations).
+      - connect-src must include ws://localhost:3001 because in dev mode the
+        WebSocket connects directly to the backend (not through the Vite proxy).
+      - 'unsafe-inline' is needed for style attributes xterm.js injects.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="
+        default-src 'self';
+        script-src  'self' 'unsafe-eval';
+        style-src   'self' 'unsafe-inline';
+        img-src     'self' data: blob:;
+        font-src    'self' data:;
+        connect-src 'self'
+                    ws://localhost:3001
+                    wss://localhost:3001
+                    http://localhost:3001;
+      "
+    />
     <title>Shared Terminal</title>
     <style>
       /* ── Reset & base ─────────────────────────────────────────────────── */
