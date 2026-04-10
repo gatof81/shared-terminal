@@ -56,11 +56,10 @@ export function openTerminalSession(opts: {
         // ── WebSocket connection ──────────────────────────────────────────────────
         // Use relative path — Vite dev proxy rewrites /ws/* → ws://localhost:3001/ws/*.
         const wsUrl = buildWsUrl(sessionId);
-        const ws = new WebSocket(wsUrl, ["shared-terminal"]);
-
-        // Attach X-User-Id via a URL query param since the WS API doesn't allow
-        // custom headers from the browser. We then read it server-side from the URL.
-        // (See NOTE below — we actually use query string instead of sub-protocol.)
+        // Do NOT pass a subprotocol string here: the browser requires the server
+        // to echo back a matching Sec-WebSocket-Protocol header or it closes the
+        // connection immediately. Our server doesn't negotiate subprotocols.
+        const ws = new WebSocket(wsUrl);
 
         ws.onopen = () => {
                 // Tell the server our user identity and start heartbeat.
@@ -156,27 +155,36 @@ export function openTerminalSession(opts: {
 // ── URL builder ──────────────────────────────────────────────────────────────
 
 /**
- * NOTE on authentication over WebSocket:
- * Browser WebSocket API does not allow setting custom headers. Two common
- * patterns are:
- *   1. Pass the token in the URL query string (simple, MVP-appropriate).
- *   2. Send an auth message as the first WS frame.
+ * Build the WebSocket URL for a session.
  *
- * We use the Vite proxy here, which forwards the WS upgrade including cookies
- * and query params. The backend reads X-User-Id from the *HTTP upgrade request
- * headers*. Since we can't set that header from a browser WS client, we
- * instead have the frontend pass the userId in the query string and the backend
- * reads it there as a fallback.
+ * In development (Vite dev server on :5173) we connect directly to the
+ * backend on :3001, bypassing the Vite HMR proxy which can intercept WS
+ * upgrade events before the /ws proxy rule fires.
  *
- * In extractUserId (auth.ts) we already handle the header; we add a small
- * companion function in the backend that also reads `?userId=` from the URL.
- * See wsHandler.ts — it calls extractUserId which checks both.
+ * In production the frontend is served from the same origin as the backend
+ * so we use a relative ws:// URL (same host, same port).
  *
- * For this MVP the backend also checks `?userId=` in the URL.
+ * Override with VITE_WS_BASE env var for custom deployments:
+ *   VITE_WS_BASE=wss://api.example.com npm run build
  */
 function buildWsUrl(sessionId: string): string {
-        const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-        const host = window.location.host; // includes port if non-standard
         const userId = sessionStorage.getItem("userId") ?? "anonymous";
-        return `${proto}//${host}/ws/sessions/${sessionId}?userId=${encodeURIComponent(userId)}`;
+        const params = `?userId=${encodeURIComponent(userId)}`;
+
+        // Allow explicit override via env var (set in .env or CI).
+        const envBase = (import.meta as { env?: Record<string, string> }).env?.VITE_WS_BASE;
+        if (envBase) {
+                return `${envBase}/ws/sessions/${sessionId}${params}`;
+        }
+
+        // In Vite dev mode the page is on :5173 but the backend WS is on :3001.
+        // Connect directly to avoid Vite HMR proxy interference.
+        if (window.location.port === "5173") {
+                const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+                return `${proto}//localhost:3001/ws/sessions/${sessionId}${params}`;
+        }
+
+        // Production: same host/port as the page.
+        const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+        return `${proto}//${window.location.host}/ws/sessions/${sessionId}${params}`;
 }
