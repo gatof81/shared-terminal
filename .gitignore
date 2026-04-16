@@ -28,3 +28,7 @@ Thumbs.db
 .vscode/settings.json
 .idea/
 *.swp
+
+# Local-only review artifacts (security findings — don't publish until fixed)
+.issues/
+REVIEW.md
