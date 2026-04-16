@@ -1,56 +1,117 @@
-import { Request, Response, NextFunction } from "express";
-
 /**
- * MVP authentication: caller supplies their user-id via the `X-User-Id` header.
+ * auth.ts — JWT authentication + user management.
  *
- * ⚠️  Security note: This is intentionally minimal for the exercise.
- *     In production you would validate a signed JWT / session cookie instead.
- *     Never trust a client-supplied identity header in a real system.
+ * Provides:
+ *   - User registration & login (bcrypt passwords, JWT tokens)
+ *   - Express middleware that extracts the JWT from Authorization header
+ *   - WebSocket auth helper that reads token from query string
  */
-export function requireUserId(
-        req: Request,
-        res: Response,
-        next: NextFunction,
-): void {
-        const userId = extractUserId(req.headers);
-        if (!userId) {
-                res.status(401).json({ error: "Missing X-User-Id header" });
+
+import { Request, Response, NextFunction } from "express";
+import jwt from "jsonwebtoken";
+import bcrypt from "bcryptjs";
+import { v4 as uuidv4 } from "uuid";
+import { getDb } from "./db.js";
+import { JwtPayload } from "./types.js";
+
+const JWT_SECRET = process.env.JWT_SECRET ?? "change-me-in-production";
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN ?? "7d";
+const BCRYPT_ROUNDS = 10;
+
+// ── Augment Express Request ─────────────────────────────────────────────────
+
+export interface AuthedRequest extends Request {
+        userId: string;
+        username: string;
+}
+
+// ── User management ─────────────────────────────────────────────────────────
+
+export function registerUser(username: string, password: string): { userId: string; token: string } {
+        const db = getDb();
+
+        // Check if user exists
+        const existing = db.prepare("SELECT id FROM users WHERE username = ?").get(username);
+        if (existing) {
+                throw new Error("Username already taken");
+        }
+
+        const userId = uuidv4();
+        const passwordHash = bcrypt.hashSync(password, BCRYPT_ROUNDS);
+
+        db.prepare("INSERT INTO users (id, username, password_hash) VALUES (?, ?, ?)").run(
+                userId,
+                username,
+                passwordHash,
+        );
+
+        const token = signToken(userId, username);
+        return { userId, token };
+}
+
+export function loginUser(username: string, password: string): { userId: string; token: string } {
+        const db = getDb();
+
+        const row = db.prepare("SELECT id, password_hash FROM users WHERE username = ?").get(username) as
+                | { id: string; password_hash: string }
+                | undefined;
+
+        if (!row || !bcrypt.compareSync(password, row.password_hash)) {
+                throw new Error("Invalid credentials");
+        }
+
+        const token = signToken(row.id, username);
+        return { userId: row.id, token };
+}
+
+function signToken(userId: string, username: string): string {
+        const payload: JwtPayload = { sub: userId, username };
+        return jwt.sign(payload, JWT_SECRET, {
+                expiresIn: JWT_EXPIRES_IN as any,
+        });
+}
+
+// ── Express middleware ──────────────────────────────────────────────────────
+
+export function requireAuth(req: Request, res: Response, next: NextFunction): void {
+        const header = req.headers.authorization;
+        if (!header?.startsWith("Bearer ")) {
+                res.status(401).json({ error: "Missing or invalid Authorization header" });
                 return;
         }
-        // Attach to request for downstream handlers.
-        (req as AuthedRequest).userId = userId;
-        next();
+
+        const token = header.slice(7);
+        try {
+                const payload = jwt.verify(token, JWT_SECRET) as JwtPayload;
+                (req as AuthedRequest).userId = payload.sub;
+                (req as AuthedRequest).username = payload.username;
+                next();
+        } catch {
+                res.status(401).json({ error: "Invalid or expired token" });
+        }
 }
 
-export function extractUserId(
-        headers: Record<string, string | string[] | undefined>,
-): string | null {
-        const raw = headers["x-user-id"];
-        if (!raw) return null;
-        const id = Array.isArray(raw) ? raw[0] : raw;
-        // Basic sanitisation — allow only alphanumeric + hyphen/underscore, max 64 chars.
-        return /^[\w-]{1,64}$/.test(id) ? id : null;
-}
+// ── WebSocket auth ──────────────────────────────────────────────────────────
 
 /**
- * Extract user ID from a URL query string — fallback for WebSocket connections
- * where the browser cannot set custom HTTP headers.
- *
- * Example: /ws/sessions/abc?userId=alice
+ * Extract and verify JWT from a WebSocket URL query string (?token=...).
+ * Returns the payload on success, null on failure.
  */
-export function extractUserIdFromUrl(url: string | undefined): string | null {
+export function verifyWsToken(url: string | undefined): JwtPayload | null {
         if (!url) return null;
         try {
-                // URL constructor needs an absolute URL; use a dummy base.
                 const parsed = new URL(url, "http://localhost");
-                const id = parsed.searchParams.get("userId") ?? "";
-                return /^[\w-]{1,64}$/.test(id) ? id : null;
+                const token = parsed.searchParams.get("token");
+                if (!token) return null;
+                return jwt.verify(token, JWT_SECRET) as JwtPayload;
         } catch {
                 return null;
         }
 }
 
-/** Convenience type so downstream code can access req.userId without casts. */
-export interface AuthedRequest extends Request {
-        userId: string;
+/** Check if at least one user exists (for first-run setup flow). */
+export function hasAnyUsers(): boolean {
+        const db = getDb();
+        const row = db.prepare("SELECT COUNT(*) as count FROM users").get() as { count: number };
+        return row.count > 0;
 }

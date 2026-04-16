@@ -1,118 +1,155 @@
-import { v4 as uuidv4 } from "uuid";
-import { SessionMeta, SessionStatus } from "./types.js";
-
 /**
- * SessionManager — authoritative, in-memory registry of all terminal sessions.
+ * sessionManager.ts — SQLite-backed session metadata.
  *
- * Responsibilities:
- *   - Create / lookup / list / terminate session *metadata*.
- *   - Does NOT hold PTY references (those live in PtyManager).
- *   - Does NOT hold WebSocket references (those live in WsHandler).
- *
- * Design note: separating metadata from runtime references means a session can
- * exist (and be reconnectable) independently of whether a PTY or WS connection
- * is currently live.
+ * Manages the lifecycle of session records.  Docker container management
+ * is handled by DockerManager; this module only deals with metadata.
  */
 
-const SESSION_NAME_RE = /^[\w\- ]{1,64}$/;
+import { v4 as uuidv4 } from "uuid";
+import { getDb } from "./db.js";
+import { SessionMeta, SessionStatus, CreateSessionOpts } from "./types.js";
+
+// ── Custom errors ───────────────────────────────────────────────────────────
+
+export class NotFoundError extends Error {
+        constructor(msg = "Session not found") {
+                super(msg);
+                this.name = "NotFoundError";
+        }
+}
+
+export class ForbiddenError extends Error {
+        constructor(msg = "Access denied") {
+                super(msg);
+                this.name = "ForbiddenError";
+        }
+}
+
+// ── Row → domain mapper ────────────────────────────────────────────────────
+
+interface SessionRow {
+        session_id: string;
+        user_id: string;
+        name: string;
+        status: string;
+        container_id: string | null;
+        container_name: string;
+        cols: number;
+        rows: number;
+        env_vars: string;
+        created_at: string;
+        last_connected_at: string | null;
+}
+
+function rowToMeta(row: SessionRow): SessionMeta {
+        return {
+                sessionId: row.session_id,
+                userId: row.user_id,
+                name: row.name,
+                status: row.status as SessionStatus,
+                containerId: row.container_id,
+                containerName: row.container_name,
+                cols: row.cols,
+                rows: row.rows,
+                envVars: JSON.parse(row.env_vars),
+                createdAt: new Date(row.created_at + "Z"),
+                lastConnectedAt: row.last_connected_at ? new Date(row.last_connected_at + "Z") : null,
+        };
+}
+
+// ── SessionManager ──────────────────────────────────────────────────────────
 
 export class SessionManager {
-        private readonly sessions = new Map<string, SessionMeta>();
+        /**
+         * Create a new session record and return its metadata.
+         * The container is NOT started here — call DockerManager.spawn() after.
+         */
+        create(opts: CreateSessionOpts): SessionMeta {
+                const db = getDb();
+                const sessionId = uuidv4();
+                const containerName = `st-${sessionId.slice(0, 12)}`;
+                const cols = opts.cols ?? 120;
+                const rows = opts.rows ?? 36;
+                const envVars = opts.envVars ?? {};
 
-        // ── CRUD ────────────────────────────────────────────────────────────────────
+                db.prepare(`
+                        INSERT INTO sessions (session_id, user_id, name, container_name, cols, rows, env_vars)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                `).run(sessionId, opts.userId, opts.name, containerName, cols, rows, JSON.stringify(envVars));
 
-        create(opts: {
-                userId: string;
-                name: string;
-                cols?: number;
-                rows?: number;
-                shell?: string;
-                cwd?: string;
-        }): SessionMeta {
-                if (!SESSION_NAME_RE.test(opts.name)) {
-                        throw new Error(
-                                "Invalid session name. Use letters, numbers, spaces, hyphens or underscores (max 64).",
-                        );
-                }
+                return this.get(sessionId)!;
+        }
 
-                const meta: SessionMeta = {
-                        sessionId: uuidv4(),
-                        userId: opts.userId,
-                        name: opts.name.trim(),
-                        status: "running",
-                        createdAt: new Date(),
-                        lastConnectedAt: null,
-                        cols: opts.cols ?? 80,
-                        rows: opts.rows ?? 24,
-                        pid: null,
-                        shell: opts.shell ?? (process.env.SHELL ?? "/bin/bash"),
-                        cwd: opts.cwd ?? (process.env.HOME ?? "/"),
-                };
+        /** Get a session by ID, or null if not found. */
+        get(sessionId: string): SessionMeta | null {
+                const db = getDb();
+                const row = db.prepare("SELECT * FROM sessions WHERE session_id = ?").get(sessionId) as
+                        | SessionRow
+                        | undefined;
+                return row ? rowToMeta(row) : null;
+        }
 
-                this.sessions.set(meta.sessionId, meta);
+        /** Get a session by ID or throw NotFoundError. */
+        getOrThrow(sessionId: string): SessionMeta {
+                const meta = this.get(sessionId);
+                if (!meta) throw new NotFoundError();
                 return meta;
         }
 
-        get(sessionId: string): SessionMeta | undefined {
-                return this.sessions.get(sessionId);
+        /** Assert that userId owns sessionId. Returns the session. */
+        assertOwnership(sessionId: string, userId: string): SessionMeta {
+                const meta = this.getOrThrow(sessionId);
+                if (meta.userId !== userId) throw new ForbiddenError();
+                return meta;
         }
 
-        /** Return all non-terminated sessions belonging to a user. */
+        /** List non-terminated sessions for a user. */
         listForUser(userId: string): SessionMeta[] {
-                return [...this.sessions.values()].filter(
-                        (s) => s.userId === userId && s.status !== "terminated",
+                const db = getDb();
+                const rows = db
+                        .prepare("SELECT * FROM sessions WHERE user_id = ? AND status != 'terminated' ORDER BY created_at DESC")
+                        .all(userId) as SessionRow[];
+                return rows.map(rowToMeta);
+        }
+
+        /** List ALL sessions for a user (including terminated). */
+        listAllForUser(userId: string): SessionMeta[] {
+                const db = getDb();
+                const rows = db
+                        .prepare("SELECT * FROM sessions WHERE user_id = ? ORDER BY created_at DESC")
+                        .all(userId) as SessionRow[];
+                return rows.map(rowToMeta);
+        }
+
+        /** Update the Docker container ID after spawn. */
+        setContainerId(sessionId: string, containerId: string): void {
+                const db = getDb();
+                db.prepare("UPDATE sessions SET container_id = ? WHERE session_id = ?").run(containerId, sessionId);
+        }
+
+        /** Update session status. */
+        updateStatus(sessionId: string, status: SessionStatus): void {
+                const db = getDb();
+                db.prepare("UPDATE sessions SET status = ? WHERE session_id = ?").run(status, sessionId);
+        }
+
+        /** Mark session as recently connected. */
+        updateConnected(sessionId: string): void {
+                const db = getDb();
+                db.prepare("UPDATE sessions SET last_connected_at = datetime('now') WHERE session_id = ?").run(sessionId);
+        }
+
+        /** Update per-session environment variables. */
+        updateEnvVars(sessionId: string, envVars: Record<string, string>): void {
+                const db = getDb();
+                db.prepare("UPDATE sessions SET env_vars = ? WHERE session_id = ?").run(
+                        JSON.stringify(envVars),
+                        sessionId,
                 );
         }
 
-        /** Persist PTY pid once the PTY process has been spawned. */
-        setPid(sessionId: string, pid: number): void {
-                const s = this.sessions.get(sessionId);
-                if (s) s.pid = pid;
+        /** Terminate a session (marks as terminated in DB). */
+        terminate(sessionId: string): void {
+                this.updateStatus(sessionId, "terminated");
         }
-
-        updateStatus(sessionId: string, status: SessionStatus): void {
-                const s = this.sessions.get(sessionId);
-                if (s) s.status = status;
-        }
-
-        updateConnected(sessionId: string): void {
-                const s = this.sessions.get(sessionId);
-                if (s) {
-                        s.lastConnectedAt = new Date();
-                        s.status = "running";
-                }
-        }
-
-        updateDimensions(sessionId: string, cols: number, rows: number): void {
-                const s = this.sessions.get(sessionId);
-                if (s) {
-                        s.cols = cols;
-                        s.rows = rows;
-                }
-        }
-
-        terminate(sessionId: string): boolean {
-                const s = this.sessions.get(sessionId);
-                if (!s || s.status === "terminated") return false;
-                s.status = "terminated";
-                s.pid = null;
-                return true;
-        }
-
-        // ── Ownership guard ──────────────────────────────────────────────────────────
-
-        /** Throws if the session doesn't exist or doesn't belong to userId. */
-        assertOwnership(sessionId: string, userId: string): SessionMeta {
-                const s = this.sessions.get(sessionId);
-                if (!s) throw new NotFoundError("Session not found");
-                if (s.userId !== userId) throw new ForbiddenError("Access denied");
-                return s;
-        }
-}
-
-export class NotFoundError extends Error {
-        readonly statusCode = 404;
-}
-export class ForbiddenError extends Error {
-        readonly statusCode = 403;
 }

@@ -1,22 +1,30 @@
 {
   "name": "shared-terminal-backend",
-  "version": "1.0.0",
-  "description": "Shared terminal service backend",
+  "version": "2.0.0",
+  "description": "Shared terminal service — Docker-based sessions with persistent storage",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "postinstall": "node -e \"const os=require('os'),fs=require('fs'),path=require('path');if(os.platform()==='darwin'){const h=path.join(__dirname,'node_modules','node-pty','prebuilds','darwin-'+os.arch(),'spawn-helper');if(fs.existsSync(h))fs.chmodSync(h,0o755);}\""
+    "db:init": "node -e \"require('./dist/db.js').getDb()\"",
+    "docker:build-session": "docker build -t shared-terminal-session ../session-image"
   },
   "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "dockerode": "^4.0.4",
     "express": "^4.19.2",
-    "node-pty": "^1.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "bcryptjs": "^2.4.3",
     "uuid": "^9.0.1",
     "ws": "^8.17.1"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/dockerode": "^3.3.31",
     "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/bcryptjs": "^2.4.6",
     "@types/node": "^20.14.2",
     "@types/uuid": "^9.0.8",
     "@types/ws": "^8.5.10",

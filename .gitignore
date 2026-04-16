@@ -8,6 +8,9 @@ frontend/src/*.js
 backend/dist/
 frontend/dist/
 
+# Runtime data
+data/
+
 # Environment
 .env
 .env.local

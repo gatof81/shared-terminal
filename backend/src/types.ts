@@ -1,22 +1,51 @@
-// ─── Domain types ─────────────────────────────────────────────────────────────
+/**
+ * types.ts — Domain types and WebSocket protocol messages.
+ */
 
-export type SessionStatus = "running" | "disconnected" | "terminated";
+// ── Session ─────────────────────────────────────────────────────────────────
+
+export type SessionStatus = "running" | "stopped" | "terminated";
 
 export interface SessionMeta {
         sessionId: string;
         userId: string;
         name: string;
         status: SessionStatus;
+        containerId: string | null;
+        containerName: string;
         createdAt: Date;
         lastConnectedAt: Date | null;
         cols: number;
         rows: number;
-        pid: number | null;
-        shell: string;
-        cwd: string;
+        /** Per-session environment variables (key=value pairs). */
+        envVars: Record<string, string>;
 }
 
-// ─── WebSocket message shapes (client → server) ───────────────────────────────
+export interface CreateSessionOpts {
+        userId: string;
+        name: string;
+        cols?: number;
+        rows?: number;
+        envVars?: Record<string, string>;
+}
+
+// ── Auth ────────────────────────────────────────────────────────────────────
+
+export interface UserRecord {
+        id: string;
+        username: string;
+        passwordHash: string;
+        createdAt: Date;
+}
+
+export interface JwtPayload {
+        sub: string;        // userId
+        username: string;
+        iat?: number;
+        exp?: number;
+}
+
+// ── WebSocket client → server messages ──────────────────────────────────────
 
 export interface WsInputMessage {
         type: "input";
@@ -35,7 +64,7 @@ export interface WsPingMessage {
 
 export type WsClientMessage = WsInputMessage | WsResizeMessage | WsPingMessage;
 
-// ─── WebSocket message shapes (server → client) ───────────────────────────────
+// ── WebSocket server → client messages ──────────────────────────────────────
 
 export interface WsOutputMessage {
         type: "output";

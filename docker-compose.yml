@@ -1,0 +1,32 @@
+version: "3.9"
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${PORT:-3001}:3001"
+    volumes:
+      - ./data:/app/data
+      - ${WORKSPACE_ROOT:-/var/shared-terminal/workspaces}:/var/shared-terminal/workspaces
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - PORT=3001
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
+      - JWT_EXPIRES_IN=${JWT_EXPIRES_IN:-7d}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - SESSION_IMAGE=${SESSION_IMAGE:-shared-terminal-session}
+      - WORKSPACE_ROOT=/var/shared-terminal/workspaces
+      - DATA_DIR=/app/data
+    restart: unless-stopped
+    depends_on:
+      - session-image
+
+  # Dummy service that just builds the session image
+  session-image:
+    build:
+      context: ./session-image
+    image: shared-terminal-session
+    command: ["echo", "image built"]
+    restart: "no"

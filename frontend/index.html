@@ -3,31 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <!--
-      CSP notes:
-      - 'unsafe-eval' is required by xterm.js (it uses new Function() internally
-        for its canvas renderer optimisations).
-      - connect-src must include ws://localhost:3001 because in dev mode the
-        WebSocket connects directly to the backend (not through the Vite proxy).
-      - 'unsafe-inline' is needed for style attributes xterm.js injects.
-    -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="
-        default-src 'self';
-        script-src  'self' 'unsafe-eval';
-        style-src   'self' 'unsafe-inline';
-        img-src     'self' data: blob:;
-        font-src    'self' data:;
-        connect-src 'self'
-                    ws://localhost:3001
-                    wss://localhost:3001
-                    http://localhost:3001;
-      "
+      content="default-src 'self'; script-src 'self' 'unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws://localhost:3001 wss://localhost:3001 http://localhost:3001;"
     />
     <title>Shared Terminal</title>
     <style>
-      /* ── Reset & base ─────────────────────────────────────────────────── */
       *,
       *::before,
       *::after {
@@ -35,7 +16,6 @@
         margin: 0;
         padding: 0;
       }
-
       body {
         font-family: system-ui, sans-serif;
         background: #0d1117;
@@ -45,7 +25,84 @@
         flex-direction: column;
       }
 
-      /* ── Header ───────────────────────────────────────────────────────── */
+      /* ── Auth view ──────────────────────────────────────────────── */
+      #auth-view {
+        display: none;
+        align-items: center;
+        justify-content: center;
+        flex: 1;
+        background: #0d1117;
+      }
+      .auth-card {
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 12px;
+        padding: 2rem;
+        width: 340px;
+        max-width: 90vw;
+      }
+      .auth-card h2 {
+        text-align: center;
+        margin-bottom: 1.5rem;
+        color: #58a6ff;
+        font-size: 1.3rem;
+      }
+      .auth-card input {
+        display: block;
+        width: 100%;
+        padding: 0.6rem 0.8rem;
+        margin-bottom: 0.8rem;
+        background: #0d1117;
+        border: 1px solid #30363d;
+        border-radius: 6px;
+        color: #e6edf3;
+        font-size: 0.9rem;
+        outline: none;
+      }
+      .auth-card input:focus {
+        border-color: #58a6ff;
+      }
+      .auth-card button[type="submit"] {
+        width: 100%;
+        padding: 0.6rem;
+        background: #238636;
+        border: none;
+        border-radius: 6px;
+        color: #fff;
+        font-size: 0.9rem;
+        cursor: pointer;
+        font-weight: 600;
+        margin-top: 0.4rem;
+      }
+      .auth-card button:hover {
+        background: #2ea043;
+      }
+      #auth-error {
+        color: #f85149;
+        font-size: 0.8rem;
+        min-height: 1.2rem;
+        margin-bottom: 0.5rem;
+        text-align: center;
+      }
+      #auth-toggle {
+        text-align: center;
+        margin-top: 1rem;
+        font-size: 0.8rem;
+        color: #8b949e;
+      }
+      #auth-toggle a {
+        color: #58a6ff;
+        text-decoration: none;
+      }
+
+      /* ── App view ───────────────────────────────────────────────── */
+      #app-view {
+        display: none;
+        flex-direction: column;
+        flex: 1;
+        overflow: hidden;
+      }
+
       header {
         display: flex;
         align-items: center;
@@ -60,17 +117,30 @@
         font-weight: 600;
         color: #58a6ff;
       }
-      #user-badge {
+      .header-right {
         margin-left: auto;
-        font-size: 0.75rem;
-        color: #8b949e;
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
       }
-      #user-badge span {
-        color: #e6edf3;
-        font-weight: 500;
+      #user-display {
+        font-size: 0.8rem;
+        color: #3fb950;
+      }
+      #logout-btn {
+        background: transparent;
+        border: 1px solid #30363d;
+        border-radius: 6px;
+        color: #8b949e;
+        font-size: 0.75rem;
+        padding: 0.25rem 0.6rem;
+        cursor: pointer;
+      }
+      #logout-btn:hover {
+        border-color: #f85149;
+        color: #f85149;
       }
 
-      /* ── Layout ───────────────────────────────────────────────────────── */
       main {
         flex: 1;
         display: grid;
@@ -78,7 +148,7 @@
         overflow: hidden;
       }
 
-      /* ── Sidebar ──────────────────────────────────────────────────────── */
+      /* ── Sidebar ────────────────────────────────────────────────── */
       #sidebar {
         background: #161b22;
         border-right: 1px solid #30363d;
@@ -89,9 +159,6 @@
       #sidebar-header {
         padding: 0.75rem 1rem;
         border-bottom: 1px solid #30363d;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
       }
       #sidebar-header h2 {
         font-size: 0.75rem;
@@ -100,8 +167,6 @@
         letter-spacing: 0.05em;
         color: #8b949e;
       }
-
-      /* New-session form */
       #new-session-form {
         padding: 0.75rem 1rem;
         border-bottom: 1px solid #30363d;
@@ -134,13 +199,12 @@
       #new-session-form button:hover {
         background: #2ea043;
       }
-
-      /* Session list */
       #session-list {
         flex: 1;
         overflow-y: auto;
         padding: 0.5rem;
       }
+
       .session-item {
         display: flex;
         align-items: center;
@@ -166,7 +230,7 @@
       .session-dot.running {
         background: #3fb950;
       }
-      .session-dot.disconnected {
+      .session-dot.stopped {
         background: #e3b341;
       }
       .session-dot.terminated {
@@ -179,24 +243,40 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      .session-kill {
+      .session-actions {
+        display: flex;
+        gap: 2px;
         opacity: 0;
+      }
+      .session-item:hover .session-actions {
+        opacity: 1;
+      }
+      .session-action-btn,
+      .session-kill {
         background: transparent;
         border: none;
-        color: #f85149;
         font-size: 0.75rem;
         cursor: pointer;
         padding: 2px 4px;
         border-radius: 4px;
       }
-      .session-item:hover .session-kill {
-        opacity: 1;
+      .session-action-btn.start {
+        color: #3fb950;
+      }
+      .session-action-btn.stop {
+        color: #e3b341;
+      }
+      .session-kill {
+        color: #f85149;
+      }
+      .session-action-btn:hover {
+        background: rgba(255, 255, 255, 0.1);
       }
       .session-kill:hover {
         background: rgba(248, 81, 73, 0.15);
       }
 
-      /* ── Terminal area ────────────────────────────────────────────────── */
+      /* ── Terminal area ──────────────────────────────────────────── */
       #terminal-area {
         display: flex;
         flex-direction: column;
@@ -209,7 +289,7 @@
         border-bottom: 1px solid #30363d;
         font-size: 0.78rem;
         color: #8b949e;
-        display: flex;
+        display: none;
         align-items: center;
         gap: 0.75rem;
         flex-shrink: 0;
@@ -229,26 +309,24 @@
         background: rgba(63, 185, 80, 0.2);
         color: #3fb950;
       }
-      #terminal-status-badge.disconnected {
+      #terminal-status-badge.stopped {
         background: rgba(227, 179, 65, 0.2);
         color: #e3b341;
       }
-      #terminal-status-badge.terminated {
-        background: rgba(248, 81, 73, 0.2);
-        color: #f85149;
+      #terminal-status-badge.disconnected {
+        background: rgba(139, 148, 158, 0.2);
+        color: #8b949e;
       }
-
       #terminal-container {
         flex: 1;
         overflow: hidden;
         padding: 4px;
         background: #0d1117;
+        display: none;
       }
-      /* xterm.js internal canvas fills the container */
       #terminal-container .xterm {
         height: 100%;
       }
-
       #empty-state {
         display: flex;
         align-items: center;
@@ -258,7 +336,7 @@
         font-size: 0.9rem;
       }
 
-      /* ── Toast notifications ──────────────────────────────────────────── */
+      /* ── Toast ──────────────────────────────────────────────────── */
       #toast {
         position: fixed;
         bottom: 1.5rem;
@@ -268,7 +346,7 @@
         border-radius: 8px;
         padding: 0.6rem 1rem;
         font-size: 0.82rem;
-        max-width: 320px;
+        max-width: 360px;
         opacity: 0;
         pointer-events: none;
         transition: opacity 0.2s;
@@ -280,45 +358,82 @@
         border-color: #f85149;
         color: #f85149;
       }
+
+      /* ── Mobile ─────────────────────────────────────────────────── */
+      @media (max-width: 640px) {
+        main {
+          grid-template-columns: 1fr;
+        }
+        #sidebar {
+          display: none;
+        }
+      }
     </style>
   </head>
   <body>
-    <header>
-      <h1>⬛ Shared Terminal</h1>
-      <div id="user-badge">Logged in as <span id="user-id-display"></span></div>
-    </header>
-
-    <main>
-      <aside id="sidebar">
-        <div id="sidebar-header">
-          <h2>Sessions</h2>
-        </div>
-        <form id="new-session-form">
+    <!-- Auth view -->
+    <div id="auth-view">
+      <div class="auth-card">
+        <h2 id="auth-title">Login</h2>
+        <form id="auth-form">
           <input
-            id="new-session-input"
+            id="auth-username"
             type="text"
-            placeholder="New session name…"
-            maxlength="64"
-            autocomplete="off"
+            placeholder="Username"
+            autocomplete="username"
           />
-          <button type="submit">+ New</button>
+          <input
+            id="auth-password"
+            type="password"
+            placeholder="Password"
+            autocomplete="current-password"
+          />
+          <div id="auth-error"></div>
+          <button type="submit" id="auth-submit">Login</button>
         </form>
-        <div id="session-list"></div>
-      </aside>
+        <p id="auth-toggle">
+          No account? <a href="#" id="auth-toggle-link">Register</a>
+        </p>
+      </div>
+    </div>
 
-      <section id="terminal-area">
-        <div id="empty-state">Select or create a session →</div>
-        <div id="terminal-toolbar" style="display: none">
-          <span>Session:</span>
-          <span id="terminal-session-name"></span>
-          <span id="terminal-status-badge"></span>
+    <!-- App view -->
+    <div id="app-view">
+      <header>
+        <h1>⬛ Shared Terminal</h1>
+        <div class="header-right">
+          <span id="user-display"></span>
+          <button id="logout-btn">Logout</button>
         </div>
-        <div id="terminal-container" style="display: none"></div>
-      </section>
-    </main>
+      </header>
+      <main>
+        <aside id="sidebar">
+          <div id="sidebar-header"><h2>Sessions</h2></div>
+          <form id="new-session-form">
+            <input
+              id="new-session-input"
+              type="text"
+              placeholder="New session name…"
+              maxlength="64"
+              autocomplete="off"
+            />
+            <button type="submit">+ New</button>
+          </form>
+          <div id="session-list"></div>
+        </aside>
+        <section id="terminal-area">
+          <div id="empty-state">Select or create a session →</div>
+          <div id="terminal-toolbar">
+            <span>Session:</span>
+            <span id="terminal-session-name"></span>
+            <span id="terminal-status-badge"></span>
+          </div>
+          <div id="terminal-container"></div>
+        </section>
+      </main>
+    </div>
 
     <div id="toast"></div>
-
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
