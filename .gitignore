@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 
+# Auto-generated JS files from TS sources (IDE/compiler artifacts)
+frontend/src/*.js
+
 # Build output
 backend/dist/
 frontend/dist/
