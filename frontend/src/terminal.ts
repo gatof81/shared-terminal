@@ -46,8 +46,12 @@ export function openTerminalSession(opts: {
         fitAddon.fit();
 
         // ── WebSocket connection ────────────────────────────────────────────────
+        // Pass the JWT as a subprotocol (`auth.bearer.<jwt>`) so it never hits
+        // the URL — and therefore never ends up in server/tunnel access logs,
+        // browser history, or Referer headers.
         const wsUrl = buildWsUrl(sessionId);
-        const ws = new WebSocket(wsUrl);
+        const token = getToken() ?? "";
+        const ws = new WebSocket(wsUrl, [`auth.bearer.${token}`]);
 
         ws.onopen = () => {
                 send({ type: "ping" });
@@ -136,12 +140,9 @@ export function openTerminalSession(opts: {
 // ── URL builder ─────────────────────────────────────────────────────────────
 
 function buildWsUrl(sessionId: string): string {
-        const token = getToken() ?? "";
-        const params = `?token=${encodeURIComponent(token)}`;
-
         // Use VITE_API_URL to derive the WebSocket URL
         const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
         const url = new URL(apiUrl);
         const wsProto = url.protocol === "https:" ? "wss:" : "ws:";
-        return `${wsProto}//${url.host}/ws/sessions/${sessionId}${params}`;
+        return `${wsProto}//${url.host}/ws/sessions/${sessionId}`;
 }

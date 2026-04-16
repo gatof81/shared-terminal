@@ -25,7 +25,7 @@ export function handleWsConnection(
         }
         const sessionId = match[1];
 
-        const payload = verifyWsToken(req.url);
+        const payload = verifyWsToken(req.headers["sec-websocket-protocol"]);
         if (!payload) {
                 sendError(ws, "Missing or invalid token");
                 ws.close(1008, "Unauthorized");
