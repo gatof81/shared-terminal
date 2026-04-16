@@ -139,11 +139,9 @@ function buildWsUrl(sessionId: string): string {
         const token = getToken() ?? "";
         const params = `?token=${encodeURIComponent(token)}`;
 
-        // Dev mode: direct to backend
-        if (window.location.port === "5173") {
-                return `ws://localhost:3001/ws/sessions/${sessionId}${params}`;
-        }
-        // Production: same origin
-        const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-        return `${proto}//${window.location.host}/ws/sessions/${sessionId}${params}`;
+        // Use VITE_API_URL to derive the WebSocket URL
+        const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
+        const url = new URL(apiUrl);
+        const wsProto = url.protocol === "https:" ? "wss:" : "ws:";
+        return `${wsProto}//${url.host}/ws/sessions/${sessionId}${params}`;
 }

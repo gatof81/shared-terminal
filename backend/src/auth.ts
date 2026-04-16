@@ -1,24 +1,17 @@
 /**
- * auth.ts — JWT authentication + user management.
- *
- * Provides:
- *   - User registration & login (bcrypt passwords, JWT tokens)
- *   - Express middleware that extracts the JWT from Authorization header
- *   - WebSocket auth helper that reads token from query string
+ * auth.ts — JWT authentication + user management (D1-backed).
  */
 
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { v4 as uuidv4 } from "uuid";
-import { getDb } from "./db.js";
+import { d1Query } from "./db.js";
 import { JwtPayload } from "./types.js";
 
 const JWT_SECRET = process.env.JWT_SECRET ?? "change-me-in-production";
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN ?? "7d";
 const BCRYPT_ROUNDS = 10;
-
-// ── Augment Express Request ─────────────────────────────────────────────────
 
 export interface AuthedRequest extends Request {
         userId: string;
@@ -27,35 +20,32 @@ export interface AuthedRequest extends Request {
 
 // ── User management ─────────────────────────────────────────────────────────
 
-export function registerUser(username: string, password: string): { userId: string; token: string } {
-        const db = getDb();
-
-        // Check if user exists
-        const existing = db.prepare("SELECT id FROM users WHERE username = ?").get(username);
-        if (existing) {
+export async function registerUser(username: string, password: string): Promise<{ userId: string; token: string }> {
+        const existing = await d1Query<{ id: string }>("SELECT id FROM users WHERE username = ?", [username]);
+        if (existing.results.length > 0) {
                 throw new Error("Username already taken");
         }
 
         const userId = uuidv4();
         const passwordHash = bcrypt.hashSync(password, BCRYPT_ROUNDS);
 
-        db.prepare("INSERT INTO users (id, username, password_hash) VALUES (?, ?, ?)").run(
+        await d1Query("INSERT INTO users (id, username, password_hash) VALUES (?, ?, ?)", [
                 userId,
                 username,
                 passwordHash,
-        );
+        ]);
 
         const token = signToken(userId, username);
         return { userId, token };
 }
 
-export function loginUser(username: string, password: string): { userId: string; token: string } {
-        const db = getDb();
+export async function loginUser(username: string, password: string): Promise<{ userId: string; token: string }> {
+        const result = await d1Query<{ id: string; password_hash: string }>(
+                "SELECT id, password_hash FROM users WHERE username = ?",
+                [username],
+        );
 
-        const row = db.prepare("SELECT id, password_hash FROM users WHERE username = ?").get(username) as
-                | { id: string; password_hash: string }
-                | undefined;
-
+        const row = result.results[0];
         if (!row || !bcrypt.compareSync(password, row.password_hash)) {
                 throw new Error("Invalid credentials");
         }
@@ -66,9 +56,7 @@ export function loginUser(username: string, password: string): { userId: string;
 
 function signToken(userId: string, username: string): string {
         const payload: JwtPayload = { sub: userId, username };
-        return jwt.sign(payload, JWT_SECRET, {
-                expiresIn: JWT_EXPIRES_IN as any,
-        });
+        return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN as any });
 }
 
 // ── Express middleware ──────────────────────────────────────────────────────
@@ -93,10 +81,6 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
 
 // ── WebSocket auth ──────────────────────────────────────────────────────────
 
-/**
- * Extract and verify JWT from a WebSocket URL query string (?token=...).
- * Returns the payload on success, null on failure.
- */
 export function verifyWsToken(url: string | undefined): JwtPayload | null {
         if (!url) return null;
         try {
@@ -109,9 +93,7 @@ export function verifyWsToken(url: string | undefined): JwtPayload | null {
         }
 }
 
-/** Check if at least one user exists (for first-run setup flow). */
-export function hasAnyUsers(): boolean {
-        const db = getDb();
-        const row = db.prepare("SELECT COUNT(*) as count FROM users").get() as { count: number };
-        return row.count > 0;
+export async function hasAnyUsers(): Promise<boolean> {
+        const result = await d1Query<{ count: number }>("SELECT COUNT(*) as count FROM users");
+        return result.results[0].count > 0;
 }

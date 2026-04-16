@@ -1,45 +1,91 @@
 /**
- * db.ts — SQLite database layer using better-sqlite3.
+ * db.ts — Cloudflare D1 database client.
  *
- * Stores session metadata and user credentials so they survive server restarts.
- * The DB file lives at DATA_DIR/shared-terminal.db (default: ./data/).
+ * All session & user data lives on Cloudflare D1 (serverless SQLite).
+ * Accessed via the D1 HTTP API from the home server backend.
+ *
+ * Required env vars:
+ *   CLOUDFLARE_ACCOUNT_ID
+ *   CLOUDFLARE_API_TOKEN
+ *   D1_DATABASE_ID
  */
 
-import Database from "better-sqlite3";
-import path from "path";
-import fs from "fs";
+const ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID ?? "";
+const API_TOKEN = process.env.CLOUDFLARE_API_TOKEN ?? "";
+const DATABASE_ID = process.env.D1_DATABASE_ID ?? "";
 
-const DATA_DIR = process.env.DATA_DIR ?? path.join(process.cwd(), "data");
-
-let _db: Database.Database | null = null;
-
-export function getDb(): Database.Database {
-        if (_db) return _db;
-
-        fs.mkdirSync(DATA_DIR, { recursive: true });
-        const dbPath = path.join(DATA_DIR, "shared-terminal.db");
-        _db = new Database(dbPath);
-
-        // Performance pragmas
-        _db.pragma("journal_mode = WAL");
-        _db.pragma("foreign_keys = ON");
-
-        migrate(_db);
-        return _db;
+interface D1QueryResult<T = Record<string, unknown>> {
+        results: T[];
+        success: boolean;
+        meta: { changes: number; duration: number; last_row_id: number };
 }
 
-function migrate(db: Database.Database): void {
-        db.exec(`
-                CREATE TABLE IF NOT EXISTS users (
+interface D1ApiResponse<T = Record<string, unknown>> {
+        result: D1QueryResult<T>[];
+        success: boolean;
+        errors: Array<{ code: number; message: string }>;
+}
+
+/**
+ * Execute a single SQL statement against D1.
+ * Returns the results array for SELECT, or meta for INSERT/UPDATE/DELETE.
+ */
+export async function d1Query<T = Record<string, unknown>>(
+        sql: string,
+        params?: unknown[],
+): Promise<D1QueryResult<T>> {
+        const url = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/d1/database/${DATABASE_ID}/query`;
+
+        const res = await fetch(url, {
+                method: "POST",
+                headers: {
+                        Authorization: `Bearer ${API_TOKEN}`,
+                        "Content-Type": "application/json",
+                },
+                body: JSON.stringify({ sql, params: params ?? [] }),
+        });
+
+        if (!res.ok) {
+                const text = await res.text();
+                throw new Error(`D1 API error (${res.status}): ${text}`);
+        }
+
+        const data = (await res.json()) as D1ApiResponse<T>;
+        if (!data.success) {
+                throw new Error(`D1 query failed: ${data.errors.map((e) => e.message).join(", ")}`);
+        }
+
+        return data.result[0];
+}
+
+/**
+ * Execute multiple SQL statements (for migrations).
+ */
+export async function d1Batch(statements: string[]): Promise<void> {
+        // D1 doesn't have a batch endpoint via HTTP, so run sequentially
+        for (const sql of statements) {
+                const trimmed = sql.trim();
+                if (!trimmed) continue;
+                await d1Query(trimmed);
+        }
+}
+
+/**
+ * Run migrations to create tables if they don't exist.
+ * Call once on server startup.
+ */
+export async function migrateDb(): Promise<void> {
+        console.log("[db] running D1 migrations…");
+        await d1Batch([
+                `CREATE TABLE IF NOT EXISTS users (
                         id          TEXT PRIMARY KEY,
                         username    TEXT UNIQUE NOT NULL,
                         password_hash TEXT NOT NULL,
                         created_at  TEXT NOT NULL DEFAULT (datetime('now'))
-                );
-
-                CREATE TABLE IF NOT EXISTS sessions (
+                )`,
+                `CREATE TABLE IF NOT EXISTS sessions (
                         session_id      TEXT PRIMARY KEY,
-                        user_id         TEXT NOT NULL REFERENCES users(id),
+                        user_id         TEXT NOT NULL,
                         name            TEXT NOT NULL,
                         status          TEXT NOT NULL DEFAULT 'running',
                         container_id    TEXT,
@@ -49,16 +95,18 @@ function migrate(db: Database.Database): void {
                         env_vars        TEXT NOT NULL DEFAULT '{}',
                         created_at      TEXT NOT NULL DEFAULT (datetime('now')),
                         last_connected_at TEXT
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_sessions_user
-                        ON sessions(user_id, status);
-        `);
+                )`,
+                `CREATE INDEX IF NOT EXISTS idx_sessions_user
+                        ON sessions(user_id, status)`,
+        ]);
+        console.log("[db] migrations complete");
 }
 
-export function closeDb(): void {
-        if (_db) {
-                _db.close();
-                _db = null;
+/** Validate that D1 credentials are configured. */
+export function validateD1Config(): void {
+        if (!ACCOUNT_ID || !API_TOKEN || !DATABASE_ID) {
+                throw new Error(
+                        "Missing Cloudflare D1 config. Set CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, and D1_DATABASE_ID env vars.",
+                );
         }
 }

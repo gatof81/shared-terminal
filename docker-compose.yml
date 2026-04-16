@@ -8,7 +8,6 @@ services:
     ports:
       - "${PORT:-3001}:3001"
     volumes:
-      - ./data:/app/data
       - ${WORKSPACE_ROOT:-/var/shared-terminal/workspaces}:/var/shared-terminal/workspaces
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
@@ -18,7 +17,9 @@ services:
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
       - SESSION_IMAGE=${SESSION_IMAGE:-shared-terminal-session}
       - WORKSPACE_ROOT=/var/shared-terminal/workspaces
-      - DATA_DIR=/app/data
+      - CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID}
+      - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
+      - D1_DATABASE_ID=${D1_DATABASE_ID}
     restart: unless-stopped
     depends_on:
       - session-image

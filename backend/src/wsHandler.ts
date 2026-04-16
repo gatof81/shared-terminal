@@ -1,9 +1,5 @@
 /**
  * wsHandler.ts — WebSocket connection handler for Docker-based sessions.
- *
- * Each WebSocket connection creates a Docker exec that attaches to the
- * session's tmux.  Input from the browser is piped to the exec's stdin,
- * and exec stdout is streamed back as "output" messages.
  */
 
 import { IncomingMessage } from "http";
@@ -20,7 +16,6 @@ export function handleWsConnection(
         sessions: SessionManager,
         docker: DockerManager,
 ): void {
-        // ── Resolve session id from URL ─────────────────────────────────────────
         const url = req.url ?? "";
         const match = url.match(/\/ws\/sessions\/([^/?#]+)/);
         if (!match) {
@@ -30,7 +25,6 @@ export function handleWsConnection(
         }
         const sessionId = match[1];
 
-        // ── Authenticate via JWT in query string ────────────────────────────────
         const payload = verifyWsToken(req.url);
         if (!payload) {
                 sendError(ws, "Missing or invalid token");
@@ -39,11 +33,69 @@ export function handleWsConnection(
         }
         const userId = payload.sub;
 
-        // ── Authorise ───────────────────────────────────────────────────────────
-        let session;
-        try {
-                session = sessions.assertOwnership(sessionId, userId);
-        } catch (err) {
+        // Async auth + attach flow
+        (async () => {
+                // Authorise
+                const session = await sessions.assertOwnership(sessionId, userId);
+
+                if (session.status === "terminated") {
+                        sendError(ws, "Session is terminated");
+                        ws.close(1008, "Session terminated");
+                        return;
+                }
+
+                // Attach to Docker container
+                const attachId = `${sessionId}:${uuidv4().slice(0, 8)}`;
+                const outputListener = (data: string) => {
+                        sendMsg(ws, { type: "output", data });
+                };
+
+                const { replay } = await docker.attach(
+                        sessionId, attachId, session.cols, session.rows, outputListener,
+                );
+
+                sendMsg(ws, { type: "status", status: "running" });
+                if (replay) {
+                        sendMsg(ws, { type: "output", data: replay });
+                }
+
+                console.log(`[ws] user=${userId} attached to session=${sessionId} (exec=${attachId})`);
+
+                // Message handler
+                ws.on("message", (raw) => {
+                        let msg: WsClientMessage;
+                        try {
+                                msg = JSON.parse(raw.toString()) as WsClientMessage;
+                        } catch {
+                                sendError(ws, "Invalid JSON");
+                                return;
+                        }
+
+                        switch (msg.type) {
+                                case "input":
+                                        docker.write(attachId, msg.data);
+                                        break;
+                                case "resize":
+                                        if (msg.cols > 0 && msg.rows > 0) {
+                                                docker.resize(attachId, msg.cols, msg.rows).catch(() => { });
+                                        }
+                                        break;
+                                case "ping":
+                                        sendMsg(ws, { type: "pong" });
+                                        break;
+                        }
+                });
+
+                ws.on("close", () => {
+                        console.log(`[ws] user=${userId} detached from session=${sessionId}`);
+                        docker.detach(attachId);
+                });
+
+                ws.on("error", (err) => {
+                        console.error(`[ws] error on session=${sessionId}:`, err.message);
+                        docker.detach(attachId);
+                });
+        })().catch((err) => {
                 if (err instanceof NotFoundError) {
                         sendError(ws, "Session not found");
                         ws.close(1008, "Not found");
@@ -51,91 +103,12 @@ export function handleWsConnection(
                         sendError(ws, "Access denied");
                         ws.close(1008, "Forbidden");
                 } else {
-                        sendError(ws, "Internal error");
-                        ws.close(1011, "Internal error");
-                }
-                return;
-        }
-
-        if (session.status === "terminated") {
-                sendError(ws, "Session is terminated");
-                ws.close(1008, "Session terminated");
-                return;
-        }
-
-        // ── Attach to Docker container ──────────────────────────────────────────
-        const attachId = `${sessionId}:${uuidv4().slice(0, 8)}`;
-
-        const outputListener = (data: string) => {
-                sendMsg(ws, { type: "output", data });
-        };
-
-        docker
-                .attach(sessionId, attachId, session.cols, session.rows, outputListener)
-                .then(({ replay }) => {
-                        sendMsg(ws, { type: "status", status: "running" });
-
-                        // Send buffered output for replay
-                        if (replay) {
-                                sendMsg(ws, { type: "output", data: replay });
-                        }
-
-                        console.log(`[ws] user=${userId} attached to session=${sessionId} (exec=${attachId})`);
-                })
-                .catch((err) => {
                         console.error(`[ws] attach failed for session=${sessionId}:`, (err as Error).message);
                         sendError(ws, `Failed to attach: ${(err as Error).message}`);
                         ws.close(1011, "Attach failed");
-                });
-
-        // ── Message handler ─────────────────────────────────────────────────────
-        ws.on("message", (raw) => {
-                let msg: WsClientMessage;
-                try {
-                        msg = JSON.parse(raw.toString()) as WsClientMessage;
-                } catch {
-                        sendError(ws, "Invalid JSON");
-                        return;
                 }
-
-                switch (msg.type) {
-                        case "input":
-                                docker.write(attachId, msg.data);
-                                break;
-
-                        case "resize":
-                                if (
-                                        typeof msg.cols === "number" &&
-                                        typeof msg.rows === "number" &&
-                                        msg.cols > 0 &&
-                                        msg.rows > 0
-                                ) {
-                                        docker.resize(attachId, msg.cols, msg.rows).catch(() => { });
-                                }
-                                break;
-
-                        case "ping":
-                                sendMsg(ws, { type: "pong" });
-                                break;
-
-                        default:
-                                break;
-                }
-        });
-
-        // ── Disconnect handler ──────────────────────────────────────────────────
-        ws.on("close", () => {
-                console.log(`[ws] user=${userId} detached from session=${sessionId}`);
-                docker.detach(attachId);
-        });
-
-        ws.on("error", (err) => {
-                console.error(`[ws] error on session=${sessionId}:`, err.message);
-                docker.detach(attachId);
         });
 }
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
 
 function sendMsg(ws: WebSocket, msg: WsServerMessage): void {
         if (ws.readyState === WebSocket.OPEN) {

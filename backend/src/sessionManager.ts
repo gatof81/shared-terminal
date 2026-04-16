@@ -1,12 +1,11 @@
 /**
- * sessionManager.ts — SQLite-backed session metadata.
+ * sessionManager.ts — D1-backed session metadata.
  *
- * Manages the lifecycle of session records.  Docker container management
- * is handled by DockerManager; this module only deals with metadata.
+ * All methods are async since D1 is accessed via HTTP API.
  */
 
 import { v4 as uuidv4 } from "uuid";
-import { getDb } from "./db.js";
+import { d1Query } from "./db.js";
 import { SessionMeta, SessionStatus, CreateSessionOpts } from "./types.js";
 
 // ── Custom errors ───────────────────────────────────────────────────────────
@@ -60,96 +59,81 @@ function rowToMeta(row: SessionRow): SessionMeta {
 // ── SessionManager ──────────────────────────────────────────────────────────
 
 export class SessionManager {
-        /**
-         * Create a new session record and return its metadata.
-         * The container is NOT started here — call DockerManager.spawn() after.
-         */
-        create(opts: CreateSessionOpts): SessionMeta {
-                const db = getDb();
+        async create(opts: CreateSessionOpts): Promise<SessionMeta> {
                 const sessionId = uuidv4();
                 const containerName = `st-${sessionId.slice(0, 12)}`;
                 const cols = opts.cols ?? 120;
                 const rows = opts.rows ?? 36;
                 const envVars = opts.envVars ?? {};
 
-                db.prepare(`
-                        INSERT INTO sessions (session_id, user_id, name, container_name, cols, rows, env_vars)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                `).run(sessionId, opts.userId, opts.name, containerName, cols, rows, JSON.stringify(envVars));
+                await d1Query(
+                        `INSERT INTO sessions (session_id, user_id, name, container_name, cols, rows, env_vars)
+                         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                        [sessionId, opts.userId, opts.name, containerName, cols, rows, JSON.stringify(envVars)],
+                );
 
-                return this.get(sessionId)!;
+                return (await this.get(sessionId))!;
         }
 
-        /** Get a session by ID, or null if not found. */
-        get(sessionId: string): SessionMeta | null {
-                const db = getDb();
-                const row = db.prepare("SELECT * FROM sessions WHERE session_id = ?").get(sessionId) as
-                        | SessionRow
-                        | undefined;
-                return row ? rowToMeta(row) : null;
+        async get(sessionId: string): Promise<SessionMeta | null> {
+                const result = await d1Query<SessionRow>(
+                        "SELECT * FROM sessions WHERE session_id = ?",
+                        [sessionId],
+                );
+                return result.results.length > 0 ? rowToMeta(result.results[0]) : null;
         }
 
-        /** Get a session by ID or throw NotFoundError. */
-        getOrThrow(sessionId: string): SessionMeta {
-                const meta = this.get(sessionId);
+        async getOrThrow(sessionId: string): Promise<SessionMeta> {
+                const meta = await this.get(sessionId);
                 if (!meta) throw new NotFoundError();
                 return meta;
         }
 
-        /** Assert that userId owns sessionId. Returns the session. */
-        assertOwnership(sessionId: string, userId: string): SessionMeta {
-                const meta = this.getOrThrow(sessionId);
+        async assertOwnership(sessionId: string, userId: string): Promise<SessionMeta> {
+                const meta = await this.getOrThrow(sessionId);
                 if (meta.userId !== userId) throw new ForbiddenError();
                 return meta;
         }
 
-        /** List non-terminated sessions for a user. */
-        listForUser(userId: string): SessionMeta[] {
-                const db = getDb();
-                const rows = db
-                        .prepare("SELECT * FROM sessions WHERE user_id = ? AND status != 'terminated' ORDER BY created_at DESC")
-                        .all(userId) as SessionRow[];
-                return rows.map(rowToMeta);
+        async listForUser(userId: string): Promise<SessionMeta[]> {
+                const result = await d1Query<SessionRow>(
+                        "SELECT * FROM sessions WHERE user_id = ? AND status != 'terminated' ORDER BY created_at DESC",
+                        [userId],
+                );
+                return result.results.map(rowToMeta);
         }
 
-        /** List ALL sessions for a user (including terminated). */
-        listAllForUser(userId: string): SessionMeta[] {
-                const db = getDb();
-                const rows = db
-                        .prepare("SELECT * FROM sessions WHERE user_id = ? ORDER BY created_at DESC")
-                        .all(userId) as SessionRow[];
-                return rows.map(rowToMeta);
+        async listAllForUser(userId: string): Promise<SessionMeta[]> {
+                const result = await d1Query<SessionRow>(
+                        "SELECT * FROM sessions WHERE user_id = ? ORDER BY created_at DESC",
+                        [userId],
+                );
+                return result.results.map(rowToMeta);
         }
 
-        /** Update the Docker container ID after spawn. */
-        setContainerId(sessionId: string, containerId: string): void {
-                const db = getDb();
-                db.prepare("UPDATE sessions SET container_id = ? WHERE session_id = ?").run(containerId, sessionId);
+        async setContainerId(sessionId: string, containerId: string): Promise<void> {
+                await d1Query("UPDATE sessions SET container_id = ? WHERE session_id = ?", [containerId, sessionId]);
         }
 
-        /** Update session status. */
-        updateStatus(sessionId: string, status: SessionStatus): void {
-                const db = getDb();
-                db.prepare("UPDATE sessions SET status = ? WHERE session_id = ?").run(status, sessionId);
+        async updateStatus(sessionId: string, status: SessionStatus): Promise<void> {
+                await d1Query("UPDATE sessions SET status = ? WHERE session_id = ?", [status, sessionId]);
         }
 
-        /** Mark session as recently connected. */
-        updateConnected(sessionId: string): void {
-                const db = getDb();
-                db.prepare("UPDATE sessions SET last_connected_at = datetime('now') WHERE session_id = ?").run(sessionId);
-        }
-
-        /** Update per-session environment variables. */
-        updateEnvVars(sessionId: string, envVars: Record<string, string>): void {
-                const db = getDb();
-                db.prepare("UPDATE sessions SET env_vars = ? WHERE session_id = ?").run(
-                        JSON.stringify(envVars),
-                        sessionId,
+        async updateConnected(sessionId: string): Promise<void> {
+                await d1Query(
+                        "UPDATE sessions SET last_connected_at = datetime('now') WHERE session_id = ?",
+                        [sessionId],
                 );
         }
 
-        /** Terminate a session (marks as terminated in DB). */
-        terminate(sessionId: string): void {
-                this.updateStatus(sessionId, "terminated");
+        async updateEnvVars(sessionId: string, envVars: Record<string, string>): Promise<void> {
+                await d1Query("UPDATE sessions SET env_vars = ? WHERE session_id = ?", [
+                        JSON.stringify(envVars),
+                        sessionId,
+                ]);
+        }
+
+        async terminate(sessionId: string): Promise<void> {
+                await this.updateStatus(sessionId, "terminated");
         }
 }

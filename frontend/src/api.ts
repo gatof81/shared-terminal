@@ -2,7 +2,10 @@
  * api.ts — REST client for the shared-terminal backend.
  */
 
-const API_BASE = import.meta.env.DEV ? "http://localhost:3001/api" : "/api";
+// VITE_API_URL should point to the backend (via Cloudflare Tunnel or localhost)
+// e.g. https://api.terminal.yourdomain.com
+const BACKEND_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
+const API_BASE = `${BACKEND_URL}/api`;
 
 // ── Token management ────────────────────────────────────────────────────────
 
