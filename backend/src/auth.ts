@@ -81,16 +81,37 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
 
 // ── WebSocket auth ──────────────────────────────────────────────────────────
 
-export function verifyWsToken(url: string | undefined): JwtPayload | null {
-        if (!url) return null;
+const WS_AUTH_PROTOCOL_PREFIX = "auth.bearer.";
+
+/**
+ * Extract the bearer token from the Sec-WebSocket-Protocol header and verify it.
+ * The header is a comma-separated list of subprotocols; the client should
+ * include `auth.bearer.<jwt>`.
+ */
+export function verifyWsToken(protocolHeader: string | string[] | undefined): JwtPayload | null {
+        if (!protocolHeader) return null;
+        const header = Array.isArray(protocolHeader) ? protocolHeader.join(",") : protocolHeader;
+        const protocols = header.split(",").map((s) => s.trim());
+        const authProto = protocols.find((p) => p.startsWith(WS_AUTH_PROTOCOL_PREFIX));
+        if (!authProto) return null;
+        const token = authProto.slice(WS_AUTH_PROTOCOL_PREFIX.length);
+        if (!token) return null;
         try {
-                const parsed = new URL(url, "http://localhost");
-                const token = parsed.searchParams.get("token");
-                if (!token) return null;
                 return jwt.verify(token, JWT_SECRET) as JwtPayload;
         } catch {
                 return null;
         }
+}
+
+/**
+ * Pick the `auth.bearer.<jwt>` subprotocol from an offered set so the server
+ * can echo it back in the handshake response (required by RFC 6455).
+ */
+export function selectWsAuthProtocol(protocols: Set<string>): string | false {
+        for (const p of protocols) {
+                if (p.startsWith(WS_AUTH_PROTOCOL_PREFIX)) return p;
+        }
+        return false;
 }
 
 export async function hasAnyUsers(): Promise<boolean> {

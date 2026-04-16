@@ -13,6 +13,7 @@ import { SessionManager } from "./sessionManager.js";
 import { DockerManager } from "./dockerManager.js";
 import { buildRouter } from "./routes.js";
 import { handleWsConnection } from "./wsHandler.js";
+import { selectWsAuthProtocol } from "./auth.js";
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -54,7 +55,10 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 // ── HTTP + WebSocket server ───────────────────────────────────────────────────
 
 const server = http.createServer(app);
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({
+        noServer: true,
+        handleProtocols: (protocols) => selectWsAuthProtocol(protocols),
+});
 
 server.on("upgrade", (req, socket, head) => {
         const url = req.url ?? "";

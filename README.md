@@ -131,7 +131,8 @@ cloudflared tunnel --url http://localhost:3001 run shared-terminal
 ### WebSocket
 
 ```
-ws://host/ws/sessions/:id?token=<jwt>
+ws://host/ws/sessions/:id
+Sec-WebSocket-Protocol: auth.bearer.<jwt>
 ```
 
 **Client → Server:** `input`, `resize`, `ping`
