@@ -86,9 +86,13 @@ export function verifyWsToken(url: string | undefined): JwtPayload | null {
         try {
                 const parsed = new URL(url, "http://localhost");
                 const token = parsed.searchParams.get("token");
-                if (!token) return null;
+                if (!token) {
+                        console.error("[verifyWsToken] no token in query string");
+                        return null;
+                }
                 return jwt.verify(token, JWT_SECRET) as JwtPayload;
-        } catch {
+        } catch (err) {
+                console.error("[verifyWsToken]", (err as Error).name, (err as Error).message);
                 return null;
         }
 }
