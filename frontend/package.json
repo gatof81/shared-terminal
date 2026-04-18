@@ -2,6 +2,7 @@
   "name": "shared-terminal-frontend",
   "version": "1.0.0",
   "description": "Shared terminal service frontend",
+  "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

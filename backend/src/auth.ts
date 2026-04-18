@@ -97,8 +97,15 @@ export function verifyWsToken(protocolHeader: string | string[] | undefined): Jw
         const token = authProto.slice(WS_AUTH_PROTOCOL_PREFIX.length);
         if (!token) return null;
         try {
+                const parsed = new URL(url, "http://localhost");
+                const token = parsed.searchParams.get("token");
+                if (!token) {
+                        console.error("[verifyWsToken] no token in query string");
+                        return null;
+                }
                 return jwt.verify(token, JWT_SECRET) as JwtPayload;
-        } catch {
+        } catch (err) {
+                console.error("[verifyWsToken]", (err as Error).name, (err as Error).message);
                 return null;
         }
 }
