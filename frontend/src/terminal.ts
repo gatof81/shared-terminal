@@ -46,11 +46,13 @@ export function openTerminalSession(opts: {
         fitAddon.fit();
 
         // ── WebSocket connection ────────────────────────────────────────────────
-        // Pass the JWT as a subprotocol (`auth.bearer.<jwt>`) so it never hits
-        // the URL — and therefore never ends up in server/tunnel access logs,
-        // browser history, or Referer headers.
-        const wsUrl = buildWsUrl(sessionId);
+        // Prefer passing the JWT as a subprotocol (`auth.bearer.<jwt>`) so the
+        // token stays out of the URL, access logs, browser history and Referer
+        // headers. Some proxies/tunnels silently strip `Sec-WebSocket-Protocol`
+        // though, so we also include the token as a `?token=` query param as a
+        // fallback — the backend accepts either.
         const token = getToken() ?? "";
+        const wsUrl = buildWsUrl(sessionId, token);
         const ws = new WebSocket(wsUrl, [`auth.bearer.${token}`]);
 
         ws.onopen = () => {
@@ -139,10 +141,11 @@ export function openTerminalSession(opts: {
 
 // ── URL builder ─────────────────────────────────────────────────────────────
 
-function buildWsUrl(sessionId: string): string {
+function buildWsUrl(sessionId: string, token: string): string {
         // Use VITE_API_URL to derive the WebSocket URL
         const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
         const url = new URL(apiUrl);
         const wsProto = url.protocol === "https:" ? "wss:" : "ws:";
-        return `${wsProto}//${url.host}/ws/sessions/${sessionId}`;
+        const base = `${wsProto}//${url.host}/ws/sessions/${sessionId}`;
+        return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }
