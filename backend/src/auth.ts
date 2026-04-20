@@ -89,23 +89,26 @@ const WS_AUTH_PROTOCOL_PREFIX = "auth.bearer.";
  * include `auth.bearer.<jwt>`.
  */
 export function verifyWsToken(protocolHeader: string | string[] | undefined): JwtPayload | null {
-        if (!protocolHeader) return null;
+        if (!protocolHeader) {
+                console.error("[verifyWsToken] no Sec-WebSocket-Protocol header present");
+                return null;
+        }
         const header = Array.isArray(protocolHeader) ? protocolHeader.join(",") : protocolHeader;
         const protocols = header.split(",").map((s) => s.trim());
         const authProto = protocols.find((p) => p.startsWith(WS_AUTH_PROTOCOL_PREFIX));
-        if (!authProto) return null;
+        if (!authProto) {
+                console.error("[verifyWsToken] no auth.bearer.* subprotocol offered (got: %s)", header);
+                return null;
+        }
         const token = authProto.slice(WS_AUTH_PROTOCOL_PREFIX.length);
-        if (!token) return null;
+        if (!token) {
+                console.error("[verifyWsToken] empty token after auth.bearer. prefix");
+                return null;
+        }
         try {
-                const parsed = new URL(url, "http://localhost");
-                const token = parsed.searchParams.get("token");
-                if (!token) {
-                        console.error("[verifyWsToken] no token in query string");
-                        return null;
-                }
                 return jwt.verify(token, JWT_SECRET) as JwtPayload;
         } catch (err) {
-                console.error("[verifyWsToken]", (err as Error).name, (err as Error).message);
+                console.error("[verifyWsToken] jwt verify failed:", (err as Error).name, (err as Error).message);
                 return null;
         }
 }
