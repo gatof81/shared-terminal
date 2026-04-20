@@ -32,3 +32,6 @@ Thumbs.db
 # Local-only review artifacts (security findings — don't publish until fixed)
 .issues/
 REVIEW.md
+
+# Claude Code worktrees / local agent state — never commit
+.claude/
