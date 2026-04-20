@@ -84,31 +84,65 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
 const WS_AUTH_PROTOCOL_PREFIX = "auth.bearer.";
 
 /**
- * Extract the bearer token from the Sec-WebSocket-Protocol header and verify it.
- * The header is a comma-separated list of subprotocols; the client should
- * include `auth.bearer.<jwt>`.
+ * Extract the bearer token from either:
+ *   1. The `Sec-WebSocket-Protocol` header as `auth.bearer.<jwt>` (preferred —
+ *      keeps the token out of URLs, access logs and Referer headers), or
+ *   2. The `?token=<jwt>` query string (fallback for proxies / tunnels that
+ *      strip the `Sec-WebSocket-Protocol` header).
+ *
+ * Then verify it and return the decoded payload, or null on any failure.
  */
-export function verifyWsToken(protocolHeader: string | string[] | undefined): JwtPayload | null {
-        if (!protocolHeader) {
-                console.error("[verifyWsToken] no Sec-WebSocket-Protocol header present");
-                return null;
-        }
-        const header = Array.isArray(protocolHeader) ? protocolHeader.join(",") : protocolHeader;
-        const protocols = header.split(",").map((s) => s.trim());
-        const authProto = protocols.find((p) => p.startsWith(WS_AUTH_PROTOCOL_PREFIX));
-        if (!authProto) {
-                console.error("[verifyWsToken] no auth.bearer.* subprotocol offered (got: %s)", header);
-                return null;
-        }
-        const token = authProto.slice(WS_AUTH_PROTOCOL_PREFIX.length);
+export function verifyWsToken(
+        protocolHeader: string | string[] | undefined,
+        requestUrl: string | undefined,
+): JwtPayload | null {
+        const fromProtocol = extractTokenFromProtocol(protocolHeader);
+        const fromUrl = fromProtocol ? null : extractTokenFromUrl(requestUrl);
+        const token = fromProtocol ?? fromUrl;
+
         if (!token) {
-                console.error("[verifyWsToken] empty token after auth.bearer. prefix");
+                // Help operators tell which channel(s) were tried. The subprotocol path
+                // is preferred; the query-string path only kicks in as a fallback for
+                // proxies that strip Sec-WebSocket-Protocol.
+                if (!protocolHeader && !requestUrl) {
+                        console.error("[verifyWsToken] no Sec-WebSocket-Protocol header and no request URL");
+                } else if (!protocolHeader) {
+                        console.error("[verifyWsToken] no Sec-WebSocket-Protocol header and no ?token= query param");
+                } else {
+                        const header = Array.isArray(protocolHeader) ? protocolHeader.join(",") : protocolHeader;
+                        console.error(
+                                "[verifyWsToken] no usable auth.bearer.* subprotocol (got: %s) and no ?token= query param",
+                                header,
+                        );
+                }
                 return null;
         }
+
         try {
                 return jwt.verify(token, JWT_SECRET) as JwtPayload;
         } catch (err) {
                 console.error("[verifyWsToken] jwt verify failed:", (err as Error).name, (err as Error).message);
+                return null;
+        }
+}
+
+function extractTokenFromProtocol(protocolHeader: string | string[] | undefined): string | null {
+        if (!protocolHeader) return null;
+        const header = Array.isArray(protocolHeader) ? protocolHeader.join(",") : protocolHeader;
+        const protocols = header.split(",").map((s) => s.trim());
+        const authProto = protocols.find((p) => p.startsWith(WS_AUTH_PROTOCOL_PREFIX));
+        if (!authProto) return null;
+        const token = authProto.slice(WS_AUTH_PROTOCOL_PREFIX.length);
+        return token || null;
+}
+
+function extractTokenFromUrl(requestUrl: string | undefined): string | null {
+        if (!requestUrl) return null;
+        try {
+                const parsed = new URL(requestUrl, "http://localhost");
+                const token = parsed.searchParams.get("token");
+                return token || null;
+        } catch {
                 return null;
         }
 }
