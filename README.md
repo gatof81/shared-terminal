@@ -51,27 +51,57 @@ cd backend && npm install && cd ..
 cd frontend && npm install && cd ..
 ```
 
-### 2. Configure environment
+### 2. Provision Cloudflare D1
+
+The backend reads and writes all session/user metadata through Cloudflare's D1 HTTP API, so a D1 database must exist before the backend can start. You will end up with three values: `CLOUDFLARE_ACCOUNT_ID`, `D1_DATABASE_ID`, and `CLOUDFLARE_API_TOKEN`.
+
+**a. Create the database with Wrangler**
+
+```bash
+npm i -g wrangler
+wrangler login                       # opens a browser, authorizes your account
+wrangler d1 create shared-terminal   # prints the database UUID — this is D1_DATABASE_ID
+```
+
+If you prefer the dashboard: **Workers & Pages → D1 → Create database**. The database ID is shown on the database's detail page.
+
+**b. Find your account ID**
+
+Run `wrangler whoami`, or open the Cloudflare dashboard — the account ID is in the right sidebar of any Workers & Pages page. This is `CLOUDFLARE_ACCOUNT_ID`.
+
+**c. Create an API token**
+
+Dashboard → **My Profile → API Tokens → Create Token → Create Custom Token**. The token needs:
+
+| Scope   | Permission    |
+| ------- | ------------- |
+| Account | **D1 → Edit** |
+
+Restrict "Account Resources" to the account you just used and save the token — this is `CLOUDFLARE_API_TOKEN`. Cloudflare only shows it once.
+
+No schema migration step is needed — the backend runs `migrateDb()` against the empty D1 database on its first startup.
+
+### 3. Configure environment
 
 ```bash
 cp .env.example .env
 # Fill in CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, D1_DATABASE_ID, and JWT_SECRET
 ```
 
-### 3. Build the session image
+### 4. Build the session image
 
 ```bash
 docker build -t shared-terminal-session ./session-image
 ```
 
-### 4. Create workspace directory
+### 5. Create workspace directory
 
 ```bash
 sudo mkdir -p /var/shared-terminal/workspaces
 sudo chown $USER /var/shared-terminal/workspaces
 ```
 
-### 5. Start dev servers
+### 6. Start dev servers
 
 ```bash
 # Terminal 1: Backend — will run migrateDb() against D1 on first start
