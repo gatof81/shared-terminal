@@ -96,13 +96,24 @@ export function verifyWsToken(
         protocolHeader: string | string[] | undefined,
         requestUrl: string | undefined,
 ): JwtPayload | null {
-        const token = extractTokenFromProtocol(protocolHeader) ?? extractTokenFromUrl(requestUrl);
+        const fromProtocol = extractTokenFromProtocol(protocolHeader);
+        const fromUrl = fromProtocol ? null : extractTokenFromUrl(requestUrl);
+        const token = fromProtocol ?? fromUrl;
 
         if (!token) {
-                if (!protocolHeader) {
-                        console.error("[verifyWsToken] no Sec-WebSocket-Protocol header present and no ?token= query param");
+                // Help operators tell which channel(s) were tried. The subprotocol path
+                // is preferred; the query-string path only kicks in as a fallback for
+                // proxies that strip Sec-WebSocket-Protocol.
+                if (!protocolHeader && !requestUrl) {
+                        console.error("[verifyWsToken] no Sec-WebSocket-Protocol header and no request URL");
+                } else if (!protocolHeader) {
+                        console.error("[verifyWsToken] no Sec-WebSocket-Protocol header and no ?token= query param");
                 } else {
-                        console.error("[verifyWsToken] no auth.bearer.* subprotocol offered and no ?token= query param");
+                        const header = Array.isArray(protocolHeader) ? protocolHeader.join(",") : protocolHeader;
+                        console.error(
+                                "[verifyWsToken] no usable auth.bearer.* subprotocol (got: %s) and no ?token= query param",
+                                header,
+                        );
                 }
                 return null;
         }
