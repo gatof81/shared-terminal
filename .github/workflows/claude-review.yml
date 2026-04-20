@@ -1,5 +1,19 @@
 name: Claude PR Review
 
+# Security notes:
+# - Uses `pull_request` (NOT pull_request_target): fork PRs run without repo
+#   secrets, so an attacker who opens a PR cannot invoke Claude or post as it.
+# - Permissions are the minimum needed. No `contents: write` — the bot cannot
+#   push code. No `issues: write` — it's PR-only.
+# - `id-token: write` is required: the action uses GitHub's OIDC to mint a
+#   short-lived, scoped GitHub App installation token for posting comments.
+#   This is NOT equivalent to `contents: write` — it does not grant code-push
+#   rights; the resulting token is bounded by the Claude GitHub App's own
+#   install permissions on this repo.
+# - `--max-turns 5` caps iteration blast radius if prompt injection occurs.
+# - Action is pinned to major version `@v1`. Consider pinning to a commit SHA
+#   for stricter supply-chain hygiene.
+
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -15,13 +29,13 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-      issues: write
-      actions: read
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Claude review
         uses: anthropics/claude-code-action@v1
@@ -29,7 +43,7 @@ jobs:
           # Claude Max / Pro subscription (OAuth). For pay-as-you-go API billing instead,
           # comment the line below and use: anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: --model claude-sonnet-4-6
+          claude_args: --model claude-sonnet-4-6 --max-turns 5
           prompt: |
             You are reviewing a pull request on the shared-terminal repo
             (public TypeScript/Node project: Cloudflare Pages frontend,
