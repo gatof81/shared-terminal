@@ -95,8 +95,9 @@ export async function createSession(
         return res.json();
 }
 
-export async function listSessions(): Promise<SessionInfo[]> {
-        const res = await apiFetch("/sessions");
+export async function listSessions(includeTerminated = false): Promise<SessionInfo[]> {
+        const path = includeTerminated ? "/sessions?all=true" : "/sessions";
+        const res = await apiFetch(path);
         if (!res.ok) throw new Error("Failed to list sessions");
         return res.json();
 }
@@ -107,8 +108,18 @@ export async function getSession(id: string): Promise<SessionInfo> {
         return res.json();
 }
 
-export async function deleteSession(id: string): Promise<void> {
-        const res = await apiFetch(`/sessions/${id}`, { method: "DELETE" });
+/**
+ * Delete a session.
+ *
+ * - Soft delete (default): stops and removes the Docker container, marks the
+ *   session as `terminated`. Workspace files on disk are kept so the session
+ *   can later be restored via `startSession`.
+ * - Hard delete (`hard = true`): same as soft delete, then also wipes the
+ *   workspace directory and removes the session record entirely.
+ */
+export async function deleteSession(id: string, hard = false): Promise<void> {
+        const qs = hard ? "?hard=true" : "";
+        const res = await apiFetch(`/sessions/${id}${qs}`, { method: "DELETE" });
         if (!res.ok && res.status !== 204) {
                 throw new Error("Failed to delete session");
         }

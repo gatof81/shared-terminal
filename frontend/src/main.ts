@@ -29,6 +29,7 @@ const logoutBtn = document.getElementById("logout-btn")!;
 const sessionList = document.getElementById("session-list")!;
 const newSessionForm = document.getElementById("new-session-form") as HTMLFormElement;
 const newSessionInput = document.getElementById("new-session-input") as HTMLInputElement;
+const showTerminatedToggle = document.getElementById("show-terminated-toggle") as HTMLInputElement;
 
 const terminalToolbar = document.getElementById("terminal-toolbar")!;
 const terminalSessionName = document.getElementById("terminal-session-name")!;
@@ -43,6 +44,7 @@ let sessions: SessionInfo[] = [];
 let activeSessionId: string | null = null;
 let activeTerminal: TerminalSession | null = null;
 let isRegisterMode = false;
+let showTerminated = false;
 
 // ── Auth flow ───────────────────────────────────────────────────────────────
 
@@ -133,7 +135,7 @@ logoutBtn.addEventListener("click", () => {
 
 async function refreshSessions() {
         try {
-                sessions = await listSessions();
+                sessions = await listSessions(showTerminated);
                 renderSessionList();
         } catch (err) {
                 showToast((err as Error).message, true);
@@ -144,7 +146,8 @@ function renderSessionList() {
         sessionList.innerHTML = "";
         for (const s of sessions) {
                 const item = document.createElement("div");
-                item.className = `session-item${s.sessionId === activeSessionId ? " active" : ""}`;
+                const terminatedCls = s.status === "terminated" ? " terminated" : "";
+                item.className = `session-item${s.sessionId === activeSessionId ? " active" : ""}${terminatedCls}`;
 
                 const dot = document.createElement("span");
                 dot.className = `session-dot ${s.status}`;
@@ -185,17 +188,48 @@ function renderSessionList() {
                                 } catch (err) { showToast((err as Error).message, true); }
                         });
                         actions.appendChild(stopBtn);
+                } else if (s.status === "terminated") {
+                        // Restore — spawns a fresh container reusing the original
+                        // container name + workspace bind mount. Files are preserved.
+                        const restoreBtn = document.createElement("button");
+                        restoreBtn.className = "session-action-btn start";
+                        restoreBtn.textContent = "↻";
+                        restoreBtn.title = "Restore (respawn container with existing workspace files)";
+                        restoreBtn.addEventListener("click", async (e) => {
+                                e.stopPropagation();
+                                try {
+                                        showToast(`Restoring "${s.name}"…`);
+                                        await startSession(s.sessionId);
+                                        await refreshSessions();
+                                        showToast(`Session "${s.name}" restored`);
+                                } catch (err) { showToast((err as Error).message, true); }
+                        });
+                        actions.appendChild(restoreBtn);
                 }
 
                 const killBtn = document.createElement("button");
                 killBtn.className = "session-kill";
                 killBtn.textContent = "✕";
-                killBtn.title = "Terminate";
+                // Shift-click enables hard delete — also wipes workspace files and
+                // removes the session record entirely. Plain click is a soft delete,
+                // which keeps the workspace files so the session can be restored.
+                killBtn.title = s.status === "terminated"
+                        ? "Delete permanently (wipes workspace files)"
+                        : "Terminate (Shift-click to also wipe workspace files)";
                 killBtn.addEventListener("click", async (e) => {
                         e.stopPropagation();
-                        if (!confirm(`Terminate "${s.name}"? Container will be removed.`)) return;
+                        const mouseEvent = e as MouseEvent;
+                        // If the session is already terminated, the only meaningful action
+                        // is hard delete — otherwise there's nothing to do.
+                        const hard = s.status === "terminated" || mouseEvent.shiftKey;
+
+                        const prompt = hard
+                                ? `Permanently delete "${s.name}"?\n\nThis stops and removes the container, wipes workspace files from disk, and removes the session record. This cannot be undone.`
+                                : `Terminate "${s.name}"?\n\nContainer will be stopped and removed. Workspace files are preserved — you can restore the session later.`;
+                        if (!confirm(prompt)) return;
+
                         try {
-                                await deleteSession(s.sessionId);
+                                await deleteSession(s.sessionId, hard);
                                 if (activeSessionId === s.sessionId) {
                                         activeTerminal?.dispose();
                                         activeTerminal = null;
@@ -292,6 +326,13 @@ function showToast(message: string, isError = false) {
                 toast.className = "";
         }, 4000);
 }
+
+// ── Show terminated toggle ──────────────────────────────────────────────────
+
+showTerminatedToggle.addEventListener("change", () => {
+        showTerminated = showTerminatedToggle.checked;
+        refreshSessions();
+});
 
 // ── Auto-refresh ────────────────────────────────────────────────────────────
 

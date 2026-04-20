@@ -90,10 +90,34 @@ export function buildRouter(sessions: SessionManager, docker: DockerManager): Ro
 
         router.delete("/sessions/:id", async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
+                // `?hard=true` turns this into a hard delete: container is killed,
+                // workspace files are wiped from disk, and the D1 row is removed.
+                // Without it, we do a soft delete — container goes away but the row
+                // stays (status=terminated) and the workspace dir is preserved so
+                // the user can later restore the session.
+                const hard = req.query.hard === "true" || req.query.hard === "1";
+
                 try {
-                        await sessions.assertOwnership(req.params.id, userId);
-                        await docker.kill(req.params.id);
-                        await sessions.terminate(req.params.id);
+                        const meta = await sessions.assertOwnership(req.params.id, userId);
+
+                        // Idempotent path: only tear down the container + flip to
+                        // terminated the first time. Subsequent calls skip this.
+                        if (meta.status !== "terminated") {
+                                await docker.kill(req.params.id);
+                                await sessions.terminate(req.params.id);
+                        }
+
+                        if (hard) {
+                                // Wipe workspace files and drop the row entirely.
+                                try {
+                                        await docker.purgeWorkspace(req.params.id);
+                                } catch (err) {
+                                        console.error(`[routes] purgeWorkspace failed for ${req.params.id}:`, (err as Error).message);
+                                        // Fall through — we still want to remove the row.
+                                }
+                                await sessions.deleteRow(req.params.id);
+                        }
+
                         res.status(204).send();
                 } catch (err) {
                         handleSessionError(err, res);

@@ -159,6 +159,10 @@
       #sidebar-header {
         padding: 0.75rem 1rem;
         border-bottom: 1px solid #30363d;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
       }
       #sidebar-header h2 {
         font-size: 0.75rem;
@@ -166,6 +170,19 @@
         text-transform: uppercase;
         letter-spacing: 0.05em;
         color: #8b949e;
+      }
+      #show-terminated-label {
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+        font-size: 0.7rem;
+        color: #8b949e;
+        cursor: pointer;
+        user-select: none;
+      }
+      #show-terminated-label input {
+        accent-color: #58a6ff;
+        cursor: pointer;
       }
       #new-session-form {
         padding: 0.75rem 1rem;
@@ -220,6 +237,10 @@
       }
       .session-item.active {
         background: #1f3348;
+      }
+      .session-item.terminated .session-name {
+        color: #8b949e;
+        font-style: italic;
       }
       .session-dot {
         width: 8px;
@@ -408,7 +429,16 @@
       </header>
       <main>
         <aside id="sidebar">
-          <div id="sidebar-header"><h2>Sessions</h2></div>
+          <div id="sidebar-header">
+            <h2>Sessions</h2>
+            <label
+              id="show-terminated-label"
+              title="Include terminated sessions so you can restore them"
+            >
+              <input type="checkbox" id="show-terminated-toggle" />
+              Show terminated
+            </label>
+          </div>
           <form id="new-session-form">
             <input
               id="new-session-input"
