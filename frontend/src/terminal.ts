@@ -4,6 +4,7 @@
 
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { getToken } from "./api.js";
 
@@ -42,6 +43,15 @@ export function openTerminalSession(opts: {
 
         const fitAddon = new FitAddon();
         term.loadAddon(fitAddon);
+        // URLs in terminal output become clickable — opens in a new tab, which
+        // matters for OAuth flows (e.g. `claude` login) where the container
+        // can't open a browser itself.
+        term.loadAddon(
+                new WebLinksAddon((event, uri) => {
+                        event.preventDefault();
+                        window.open(uri, "_blank", "noopener,noreferrer");
+                }),
+        );
         term.open(container);
         fitAddon.fit();
 
