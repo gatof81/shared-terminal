@@ -5,26 +5,29 @@ A self-hosted web-based terminal that runs on an always-on Linux server at home.
 ## Architecture
 
 ```
-[Any Device] ←HTTPS→ [Cloudflare Tunnel] ←HTTP/WS→ [Linux Server]
-                                                          ├── Backend (Node.js + Express + WebSocket)
-                                                          ├── Frontend (Vite + TypeScript + xterm.js)
-                                                          └── Docker Engine
-                                                               ├── Container: project-acme  (tmux + claude CLI)
-                                                               ├── Container: project-beta  (tmux + claude CLI)
-                                                               └── ...
+[Any Device] ──HTTPS──▶ [Cloudflare Pages] ── static frontend (Vite + xterm.js)
+                                 │
+                                 ├──────────────▶ [Cloudflare D1] ── session + user metadata
+                                 │
+                                 └──HTTPS/WSS──▶ [Cloudflare Tunnel] ──▶ [Linux Server]
+                                                                                ├── Backend (Node.js + Express + WebSocket)
+                                                                                └── Docker Engine
+                                                                                     ├── Container: project-acme  (tmux + claude CLI)
+                                                                                     ├── Container: project-beta  (tmux + claude CLI)
+                                                                                     └── ...
 ```
 
 ### Key Features
 
 - **Docker-isolated sessions** — each session runs in its own container with dev tools pre-installed
 - **Persistent sessions** — tmux inside each container keeps your terminal alive across disconnects
-- **Persistent workspaces** — each session gets a Docker volume mounted at `/home/developer/workspace`
+- **Persistent workspaces** — each session gets a bind-mounted host directory at `/home/developer/workspace`
 - **JWT authentication** — secure login with bcrypt-hashed passwords
 - **Per-session environment variables** — configure API keys, secrets per project
 - **Real terminal emulation** — xterm.js in the browser with 256-color support, mouse, resize
 - **Reconnect replay** — ring buffer replays recent output when you reconnect
-- **SQLite storage** — session metadata survives server restarts
-- **Docker Compose deployment** — one command to build and run everything
+- **Cloudflare D1 storage** — serverless SQLite on Cloudflare; session metadata survives server restarts and is accessible from anywhere
+- **Docker Compose deployment** — one command to build and run the backend
 
 ## Quick Start (Development)
 
@@ -33,6 +36,7 @@ A self-hosted web-based terminal that runs on an always-on Linux server at home.
 - Node.js 22+
 - Docker
 - Git
+- A Cloudflare account with a D1 database provisioned (you'll need the account ID, an API token with D1 write permission, and the database ID)
 
 ### 1. Clone and install
 
@@ -47,23 +51,30 @@ cd backend && npm install && cd ..
 cd frontend && npm install && cd ..
 ```
 
-### 2. Build the session image
+### 2. Configure environment
+
+```bash
+cp .env.example .env
+# Fill in CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, D1_DATABASE_ID, and JWT_SECRET
+```
+
+### 3. Build the session image
 
 ```bash
 docker build -t shared-terminal-session ./session-image
 ```
 
-### 3. Create workspace directory
+### 4. Create workspace directory
 
 ```bash
 sudo mkdir -p /var/shared-terminal/workspaces
 sudo chown $USER /var/shared-terminal/workspaces
 ```
 
-### 4. Start dev servers
+### 5. Start dev servers
 
 ```bash
-# Terminal 1: Backend
+# Terminal 1: Backend — will run migrateDb() against D1 on first start
 cd backend && npm run dev
 
 # Terminal 2: Frontend
@@ -74,23 +85,27 @@ Open http://localhost:5173 — on first visit you'll be prompted to create an ac
 
 ## Production Deployment
 
-### Using Docker Compose
+### Backend (Docker Compose)
 
 ```bash
 # Copy and edit environment variables
 cp .env.example .env
-# IMPORTANT: Change JWT_SECRET to a random string!
+# IMPORTANT: change JWT_SECRET and fill in CLOUDFLARE_* / D1_DATABASE_ID
 nano .env
 
 # Build and start
 docker compose up -d --build
 ```
 
-The app will be available at `http://localhost:3001`.
+The backend will be available at `http://localhost:3001`.
+
+### Frontend (Cloudflare Pages)
+
+The frontend is a static Vite build. Deploy `frontend/dist` to Cloudflare Pages and set the `VITE_API_URL` env var in the Pages dashboard to your backend's public URL (e.g. `https://api.terminal.yourdomain.com`). `vite.config.ts` rewrites the CSP meta tag from that value so the browser allows connections back to your backend.
 
 ### With Cloudflare Tunnel
 
-To access from outside your local network:
+To expose the backend from your home server without opening ports:
 
 ```bash
 # Install cloudflared
@@ -100,7 +115,7 @@ To access from outside your local network:
 cloudflared tunnel create shared-terminal
 
 # Route DNS
-cloudflared tunnel route dns shared-terminal terminal.yourdomain.com
+cloudflared tunnel route dns shared-terminal api.terminal.yourdomain.com
 
 # Run the tunnel
 cloudflared tunnel --url http://localhost:3001 run shared-terminal
@@ -118,15 +133,16 @@ cloudflared tunnel --url http://localhost:3001 run shared-terminal
 
 ### Sessions (require `Authorization: Bearer <token>`)
 
-| Method | Path                    | Description                         |
-| ------ | ----------------------- | ----------------------------------- |
-| POST   | /api/sessions           | Create session + Docker container   |
-| GET    | /api/sessions           | List active sessions                |
-| GET    | /api/sessions/:id       | Get session details                 |
-| DELETE | /api/sessions/:id       | Terminate (stop + remove container) |
-| POST   | /api/sessions/:id/stop  | Stop container (preservable)        |
-| POST   | /api/sessions/:id/start | Restart stopped container           |
-| PATCH  | /api/sessions/:id/env   | Update environment variables        |
+| Method | Path                          | Description                                                   |
+| ------ | ----------------------------- | ------------------------------------------------------------- |
+| POST   | /api/sessions                 | Create session + Docker container                             |
+| GET    | /api/sessions                 | List active sessions (append `?all=true` to include terminated) |
+| GET    | /api/sessions/:id             | Get session details                                           |
+| DELETE | /api/sessions/:id             | Soft delete (container killed, workspace kept, row→terminated) |
+| DELETE | /api/sessions/:id?hard=true   | Hard delete (also purge workspace dir + drop the D1 row)      |
+| POST   | /api/sessions/:id/stop        | Stop container (preservable)                                  |
+| POST   | /api/sessions/:id/start       | Restart or respawn stopped container                          |
+| PATCH  | /api/sessions/:id/env         | Update environment variables                                  |
 
 ### WebSocket
 
@@ -134,6 +150,8 @@ cloudflared tunnel --url http://localhost:3001 run shared-terminal
 ws://host/ws/sessions/:id
 Sec-WebSocket-Protocol: auth.bearer.<jwt>
 ```
+
+The token may also be passed as `?token=<jwt>` as a fallback for proxies that strip the `Sec-WebSocket-Protocol` header.
 
 **Client → Server:** `input`, `resize`, `ping`
 **Server → Client:** `output`, `status`, `pong`, `error`
@@ -145,21 +163,22 @@ Each session runs in a Docker container based on `session-image/Dockerfile`:
 - **OS:** Ubuntu 24.04
 - **Dev tools:** git, curl, build-essential, python3, Node.js 22, vim, nano, htop, jq
 - **Claude CLI:** `@anthropic-ai/claude-code` (globally installed)
-- **Terminal:** tmux with catppuccin-inspired theme, 50k scrollback, mouse support
+- **Terminal:** tmux with a session named `main`, 50k scrollback, mouse support
 - **User:** `developer` (sudo, no password)
-- **Workspace:** `/home/developer/workspace` (persistent Docker volume)
-- **Resources:** 2 GB RAM, 2 CPUs per container (configurable)
+- **Workspace:** `/home/developer/workspace` (bind-mounted from `<WORKSPACE_ROOT>/<sessionId>` on the host)
+- **Resources:** 2 GB RAM, 2 CPUs per container (configurable in `dockerManager.ts`)
 
 ## Tech Stack
 
-| Layer      | Technology                       |
-| ---------- | -------------------------------- |
-| Frontend   | TypeScript, Vite, xterm.js       |
-| Backend    | TypeScript, Node.js, Express, ws |
-| Auth       | JWT (jsonwebtoken), bcrypt       |
-| Database   | SQLite (better-sqlite3)          |
-| Containers | Docker (dockerode), tmux         |
-| Tunnel     | Cloudflare Tunnel                |
+| Layer      | Technology                        |
+| ---------- | --------------------------------- |
+| Frontend   | TypeScript, Vite, xterm.js        |
+| Backend    | TypeScript, Node.js, Express, ws  |
+| Auth       | JWT (jsonwebtoken), bcryptjs      |
+| Database   | Cloudflare D1 (accessed via HTTP) |
+| Containers | Docker (dockerode), tmux          |
+| Tunnel     | Cloudflare Tunnel                 |
+| Hosting    | Cloudflare Pages (frontend), self-hosted (backend) |
 
 ## Project Structure
 
@@ -167,17 +186,18 @@ Each session runs in a Docker container based on `session-image/Dockerfile`:
 shared-terminal/
 ├── backend/
 │   └── src/
-│       ├── index.ts          # Server entry point
-│       ├── db.ts             # SQLite database layer
-│       ├── auth.ts           # JWT auth + user management
-│       ├── sessionManager.ts # Session metadata (CRUD)
-│       ├── dockerManager.ts  # Docker container lifecycle
-│       ├── wsHandler.ts      # WebSocket → Docker exec bridge
+│       ├── index.ts          # Server entry point (Express + ws on one HTTP server)
+│       ├── db.ts             # Cloudflare D1 client (HTTP API) + migrations
+│       ├── auth.ts           # JWT auth + user management (REST + WS subprotocol)
+│       ├── sessionManager.ts # Session metadata (D1-backed CRUD)
+│       ├── dockerManager.ts  # Docker container lifecycle + exec/attach
+│       ├── wsHandler.ts      # WebSocket → docker exec tmux bridge
 │       ├── routes.ts         # REST API routes
-│       ├── ringBuffer.ts     # Circular buffer for replay
-│       └── types.ts          # Shared types
+│       ├── ringBuffer.ts     # Circular buffer for reconnect replay
+│       └── types.ts          # Shared types + WS protocol messages
 ├── frontend/
 │   ├── index.html            # SPA shell (auth + terminal UI)
+│   ├── vite.config.ts        # Rewrites CSP from VITE_API_URL
 │   └── src/
 │       ├── main.ts           # App entry (auth flow, session sidebar)
 │       ├── api.ts            # REST client with JWT
@@ -186,7 +206,7 @@ shared-terminal/
 │   ├── Dockerfile            # Session container image
 │   ├── entrypoint.sh         # tmux startup script
 │   └── tmux.conf             # tmux theme & settings
-├── Dockerfile                # Multi-stage build (app)
-├── docker-compose.yml        # Full deployment
+├── Dockerfile                # Backend-only image (frontend ships via Pages)
+├── docker-compose.yml        # Backend + session image build
 └── .env.example              # Environment template
 ```
