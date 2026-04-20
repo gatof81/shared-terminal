@@ -111,7 +111,7 @@ export class SessionManager {
                 return result.results.map(rowToMeta);
         }
 
-        async setContainerId(sessionId: string, containerId: string): Promise<void> {
+        async setContainerId(sessionId: string, containerId: string | null): Promise<void> {
                 await d1Query("UPDATE sessions SET container_id = ? WHERE session_id = ?", [containerId, sessionId]);
         }
 
@@ -135,5 +135,14 @@ export class SessionManager {
 
         async terminate(sessionId: string): Promise<void> {
                 await this.updateStatus(sessionId, "terminated");
+        }
+
+        /**
+         * Permanently delete the session row (hard delete). Caller is responsible
+         * for having already killed any running container and for cleaning up any
+         * workspace data on disk.
+         */
+        async deleteRow(sessionId: string): Promise<void> {
+                await d1Query("DELETE FROM sessions WHERE session_id = ?", [sessionId]);
         }
 }

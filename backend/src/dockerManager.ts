@@ -7,6 +7,8 @@
 
 import Dockerode from "dockerode";
 import { Duplex } from "stream";
+import { promises as fs } from "fs";
+import path from "path";
 import { SessionManager } from "./sessionManager.js";
 import { RingBuffer } from "./ringBuffer.js";
 import { d1Query } from "./db.js";
@@ -72,14 +74,25 @@ export class DockerManager {
 
         async kill(sessionId: string): Promise<void> {
                 const meta = await this.sessions.get(sessionId);
-                if (!meta?.containerId) return;
 
-                try {
-                        const container = this.docker.getContainer(meta.containerId);
-                        try { await container.stop({ t: 5 }); } catch { /* already stopped */ }
-                        try { await container.remove({ force: true }); } catch { /* already removed */ }
-                } catch (err) {
-                        console.error(`[docker] error killing container for session ${sessionId}:`, (err as Error).message);
+                if (meta?.containerId) {
+                        try {
+                                const container = this.docker.getContainer(meta.containerId);
+                                try { await container.stop({ t: 5 }); } catch { /* already stopped */ }
+                                // `v: true` also removes any anonymous volumes attached to the
+                                // container (bind mounts are unaffected — those are cleaned by
+                                // purgeWorkspace on hard delete).
+                                try { await container.remove({ force: true, v: true }); } catch { /* already removed */ }
+                        } catch (err) {
+                                console.error(`[docker] error killing container for session ${sessionId}:`, (err as Error).message);
+                        }
+                        // The container no longer exists in Docker — reflect that in D1 so any
+                        // later lookup doesn't chase a dead container id.
+                        try {
+                                await this.sessions.setContainerId(sessionId, null);
+                        } catch (err) {
+                                console.error(`[docker] failed to null container_id for session ${sessionId}:`, (err as Error).message);
+                        }
                 }
 
                 for (const [key, handle] of this.execs) {
@@ -91,6 +104,33 @@ export class DockerManager {
                 this.buffers.delete(sessionId);
                 this.listeners.delete(sessionId);
                 console.log(`[docker] killed container for session ${sessionId}`);
+        }
+
+        /**
+         * Delete the bind-mounted workspace directory for a session.
+         *
+         * This is intentionally strict about the path it will remove: it refuses
+         * to touch anything that does not resolve to a child of WORKSPACE_ROOT.
+         * Missing directories are a no-op (idempotent hard delete).
+         */
+        async purgeWorkspace(sessionId: string): Promise<void> {
+                const rootAbs = path.resolve(WORKSPACE_ROOT);
+                const sessionAbs = path.resolve(path.join(WORKSPACE_ROOT, sessionId));
+
+                // Safety: the resolved session dir must be a strict child of rootAbs.
+                if (!sessionAbs.startsWith(rootAbs + path.sep)) {
+                        throw new Error(
+                                `[docker] refusing to purge workspace outside root (root=${rootAbs}, target=${sessionAbs})`,
+                        );
+                }
+
+                try {
+                        await fs.rm(sessionAbs, { recursive: true, force: true });
+                        console.log(`[docker] purged workspace dir ${sessionAbs}`);
+                } catch (err) {
+                        console.error(`[docker] failed to purge workspace ${sessionAbs}:`, (err as Error).message);
+                        throw err;
+                }
         }
 
         async isAlive(sessionId: string): Promise<boolean> {
@@ -106,10 +146,33 @@ export class DockerManager {
 
         async startContainer(sessionId: string): Promise<void> {
                 const meta = await this.sessions.getOrThrow(sessionId);
-                if (!meta.containerId) throw new Error("No container ID for this session");
-                await this.docker.getContainer(meta.containerId).start();
-                await this.sessions.updateStatus(sessionId, "running");
-                console.log(`[docker] restarted container for session ${sessionId}`);
+
+                // Case 1: no container exists (terminated session, or one whose container
+                // was removed out-of-band). Spawn a fresh container reusing the existing
+                // container name + workspace bind mount.
+                if (!meta.containerId) {
+                        await this.spawn(sessionId);
+                        await this.sessions.updateStatus(sessionId, "running");
+                        console.log(`[docker] respawned container for session ${sessionId}`);
+                        return;
+                }
+
+                // Case 2: container id is on file. Check it still exists in Docker; if it
+                // does, just start it. If Docker has no record of it, forget the stale id
+                // and spawn a replacement.
+                try {
+                        const info = await this.docker.getContainer(meta.containerId).inspect();
+                        if (!info.State.Running) {
+                                await this.docker.getContainer(meta.containerId).start();
+                        }
+                        await this.sessions.updateStatus(sessionId, "running");
+                        console.log(`[docker] restarted container for session ${sessionId}`);
+                } catch {
+                        console.log(`[docker] stale container_id for session ${sessionId}, respawning`);
+                        await this.sessions.setContainerId(sessionId, null);
+                        await this.spawn(sessionId);
+                        await this.sessions.updateStatus(sessionId, "running");
+                }
         }
 
         async stopContainer(sessionId: string): Promise<void> {
