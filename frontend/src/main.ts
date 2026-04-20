@@ -44,7 +44,6 @@ let sessions: SessionInfo[] = [];
 let activeSessionId: string | null = null;
 let activeTerminal: TerminalSession | null = null;
 let isRegisterMode = false;
-let showTerminated = false;
 
 // ── Auth flow ───────────────────────────────────────────────────────────────
 
@@ -134,8 +133,15 @@ logoutBtn.addEventListener("click", () => {
 // ── Session management ──────────────────────────────────────────────────────
 
 async function refreshSessions() {
+        // Read the checkbox state fresh every time so there's no stale
+        // module-variable to get out of sync with the DOM.
+        const includeTerminated = showTerminatedToggle.checked;
         try {
-                sessions = await listSessions(showTerminated);
+                sessions = await listSessions(includeTerminated);
+                console.debug(
+                        `[sessions] fetched ${sessions.length} session(s) (includeTerminated=${includeTerminated})`,
+                        sessions.map((s) => ({ id: s.sessionId.slice(0, 8), name: s.name, status: s.status })),
+                );
                 renderSessionList();
         } catch (err) {
                 showToast((err as Error).message, true);
@@ -330,7 +336,7 @@ function showToast(message: string, isError = false) {
 // ── Show terminated toggle ──────────────────────────────────────────────────
 
 showTerminatedToggle.addEventListener("change", () => {
-        showTerminated = showTerminatedToggle.checked;
+        console.debug(`[sessions] show-terminated toggled → ${showTerminatedToggle.checked}`);
         refreshSessions();
 });
 
