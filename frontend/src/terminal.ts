@@ -59,6 +59,11 @@ export function openTerminalSession(opts: {
         term.loadAddon(fitAddon);
         term.open(container);
         fitAddon.fit();
+        // Suppress the browser context menu over the terminal so tmux mouse
+        // mode (enabled in session-image/tmux.conf) actually receives the
+        // right-click as an SGR mouse event instead of the OS menu eating it.
+        const suppressContextMenu = (e: Event) => e.preventDefault();
+        container.addEventListener("contextmenu", suppressContextMenu);
         // Cmd/Ctrl + C copies the current xterm selection to the clipboard.
         // Without this, Cmd-C falls through to the terminal (Claude Code
         // intercepts it as SIGINT) and nothing gets copied.
@@ -173,6 +178,7 @@ export function openTerminalSession(opts: {
         function dispose() {
                 if (heartbeatInterval !== null) clearInterval(heartbeatInterval);
                 ro.disconnect();
+                container.removeEventListener("contextmenu", suppressContextMenu);
                 inputDisposable.dispose();
                 linkProviderDisposable.dispose();
                 ws.close(1000, "User navigated away");
