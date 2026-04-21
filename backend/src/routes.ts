@@ -3,24 +3,47 @@
  */
 
 import { Router, Request, Response } from "express";
-import { AuthedRequest, requireAuth, registerUser, loginUser, hasAnyUsers } from "./auth.js";
+import { AuthedRequest, requireAuth, registerUser, loginUser, hasAnyUsers, InvalidCredentialsError } from "./auth.js";
 import { SessionManager, NotFoundError, ForbiddenError } from "./sessionManager.js";
 import { DockerManager } from "./dockerManager.js";
 import { SessionMeta } from "./types.js";
+import {
+        RateLimitConfig,
+        DEFAULT_RATE_LIMIT_CONFIG,
+        createAuthRateLimiters,
+        UsernameRateLimiter,
+} from "./rateLimit.js";
 
-export function buildRouter(sessions: SessionManager, docker: DockerManager): Router {
+export function buildRouter(
+        sessions: SessionManager,
+        docker: DockerManager,
+        rateLimitConfig: RateLimitConfig = DEFAULT_RATE_LIMIT_CONFIG,
+): Router {
         const router = Router();
 
         // ── Auth routes (public) ────────────────────────────────────────────────
+
+        const { loginIp, registerIp } = createAuthRateLimiters(rateLimitConfig);
+        const usernameLimiter = new UsernameRateLimiter(
+                rateLimitConfig.login.usernameMax,
+                rateLimitConfig.login.usernameWindowMs,
+        );
+        // Cap username length at the request boundary so huge strings can't
+        // land in the limiter map or D1.
+        const USERNAME_MAX_LEN = 64;
 
         router.get("/auth/status", async (_req: Request, res: Response) => {
                 res.json({ needsSetup: !(await hasAnyUsers()) });
         });
 
-        router.post("/auth/register", async (req: Request, res: Response) => {
+        router.post("/auth/register", registerIp, async (req: Request, res: Response) => {
                 const { username, password } = req.body as { username?: string; password?: string };
                 if (!username || !password || password.length < 6) {
                         res.status(400).json({ error: "username and password (min 6 chars) required" });
+                        return;
+                }
+                if (username.length > USERNAME_MAX_LEN) {
+                        res.status(400).json({ error: `username must be at most ${USERNAME_MAX_LEN} characters` });
                         return;
                 }
                 try {
@@ -31,18 +54,65 @@ export function buildRouter(sessions: SessionManager, docker: DockerManager): Ro
                 }
         });
 
-        router.post("/auth/login", async (req: Request, res: Response) => {
+        router.post("/auth/login", loginIp, async (req: Request, res: Response) => {
                 const { username, password } = req.body as { username?: string; password?: string };
                 if (!username || !password) {
                         res.status(400).json({ error: "username and password required" });
                         return;
                 }
-                try {
-                        const result = await loginUser(username, password);
-                        res.json(result);
-                } catch (err) {
-                        res.status(401).json({ error: (err as Error).message });
+                if (username.length > USERNAME_MAX_LEN) {
+                        res.status(400).json({ error: `username must be at most ${USERNAME_MAX_LEN} characters` });
+                        return;
                 }
+
+                // Per-username gate runs before bcrypt. `scope` distinguishes an
+                // account lockout from the IP-layer 429 above. Emits the same
+                // draft-7 RateLimit-* headers as express-rate-limit does on the
+                // IP 429 so clients parsing them see a consistent shape.
+                const check = usernameLimiter.check(username);
+                if (!check.allowed) {
+                        const windowSeconds = Math.ceil(rateLimitConfig.login.usernameWindowMs / 1000);
+                        res.setHeader("Retry-After", String(check.retryAfterSeconds));
+                        res.setHeader(
+                                "RateLimit-Policy",
+                                `${rateLimitConfig.login.usernameMax};w=${windowSeconds}`,
+                        );
+                        res.setHeader(
+                                "RateLimit",
+                                `limit=${rateLimitConfig.login.usernameMax}, remaining=0, reset=${check.retryAfterSeconds}`,
+                        );
+                        res.status(429).json({
+                                error: "Too many failed login attempts for this account, try again later",
+                                scope: "username",
+                        });
+                        return;
+                }
+
+                // Concurrency note: check() is sync but loginUser is async, so
+                // `max + parallelism` slippage is possible in theory. Today
+                // parallelism is effectively 1 because loginUser uses
+                // `bcrypt.compareSync`, which blocks the event loop — that
+                // synchronous call is what pins the bound, not an explicit
+                // mutex. Swapping to the async `bcrypt.compare` removes the
+                // guarantee, so either add queueing or re-check the limit
+                // after the await.
+                let result: { userId: string; token: string };
+                try {
+                        result = await loginUser(username, password);
+                } catch (err) {
+                        if (err instanceof InvalidCredentialsError) {
+                                // Only bad creds count — infra errors must not lock real users out.
+                                usernameLimiter.recordFailure(username);
+                                res.status(401).json({ error: err.message });
+                                return;
+                        }
+                        // Username omitted from the log to avoid an enumeration vector.
+                        console.error(`[auth] login failed unexpectedly:`, (err as Error).message);
+                        res.status(500).json({ error: "Internal server error" });
+                        return;
+                }
+                usernameLimiter.reset(username);
+                res.json(result);
         });
 
         // ── Session routes (authenticated) ──────────────────────────────────────

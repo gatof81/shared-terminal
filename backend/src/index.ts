@@ -19,6 +19,17 @@ import { selectWsAuthProtocol } from "./auth.js";
 
 const PORT = parseInt(process.env.PORT ?? "3001", 10);
 const CORS_ORIGINS = (process.env.CORS_ORIGINS ?? "*").split(",");
+// TRUST_PROXY: used by req.ip (and therefore auth rate limiting) to pick the
+// real client from X-Forwarded-For instead of the tunnel's socket address.
+// Set to the number of known hops in front of the backend — "1" for a
+// single Cloudflare Tunnel. Leave unset for direct localhost dev.
+//
+// Do NOT set this to "true": Express then takes the LEFTMOST X-Forwarded-For
+// entry, which is fully attacker-controlled. An attacker rotating
+// `X-Forwarded-For: <random>` per request would bypass the per-IP limiter
+// entirely. The hop count ("1", "2", …) picks the rightmost-untrusted
+// address, which is the real client.
+const TRUST_PROXY = process.env.TRUST_PROXY;
 
 // ── Validate config ───────────────────────────────────────────────────────────
 
@@ -32,6 +43,34 @@ const docker = new DockerManager(sessions);
 // ── Express app ───────────────────────────────────────────────────────────────
 
 const app = express();
+if (TRUST_PROXY !== undefined) {
+        // Env values are strings; coerce "1" → 1 and "false" → false.
+        // Anything else passes through as an IP/subnet/"loopback"/etc.
+        // "true" is explicitly refused — see note above.
+        if (TRUST_PROXY === "true") {
+                console.error(
+                        "[server] TRUST_PROXY=true is refused: Express would take the leftmost " +
+                        "X-Forwarded-For entry (attacker-controlled), bypassing per-IP rate limiting. " +
+                        "Use a hop count (e.g. TRUST_PROXY=1) instead.",
+                );
+                process.exit(1);
+        }
+        let coerced: number | boolean | string;
+        // Explicit "0"/"false" → boolean false so we don't rely on Express's
+        // (undocumented) compileTrust(0) returning "never trust". If that
+        // internal ever changes, a string mistakenly treated as an IP would
+        // silently mis-trust; the explicit boolean keeps us pinned.
+        if (TRUST_PROXY === "0" || TRUST_PROXY === "false") coerced = false;
+        else if (/^\d+$/.test(TRUST_PROXY)) coerced = Number(TRUST_PROXY);
+        else coerced = TRUST_PROXY;
+        app.set("trust proxy", coerced);
+        // Log the effective value so ops can spot a misconfigured prod
+        // (e.g. TRUST_PROXY=0 behind a tunnel would silently collapse
+        // per-IP rate limits into one bucket).
+        console.log(`[server] trust proxy = ${JSON.stringify(coerced)}`);
+} else {
+        console.log("[server] trust proxy = unset (req.ip will be the socket address)");
+}
 app.use(express.json());
 
 // CORS — allow frontend from Cloudflare Pages (or any configured origin)
