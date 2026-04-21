@@ -9,9 +9,34 @@ import { v4 as uuidv4 } from "uuid";
 import { d1Query } from "./db.js";
 import { JwtPayload } from "./types.js";
 
-const JWT_SECRET = process.env.JWT_SECRET ?? "change-me-in-production";
+// Dev fallback. Production deployments must supply JWT_SECRET — validateJwtSecret()
+// below refuses to start the server if this literal is still in use.
+const INSECURE_DEFAULT_JWT_SECRET = "change-me-in-production";
+const JWT_SECRET = process.env.JWT_SECRET ?? INSECURE_DEFAULT_JWT_SECRET;
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN ?? "7d";
 const BCRYPT_ROUNDS = 10;
+
+// Call at server startup. In production (NODE_ENV === "production") throws if
+// JWT_SECRET is missing or still the insecure default, so a misconfigured
+// deploy (e.g. .env missing) exits loudly instead of booting with a
+// publicly-known signing key. In other environments, logs a warning when the
+// default is in use so the footgun stays visible during dev.
+export function validateJwtSecret(): void {
+        const raw = process.env.JWT_SECRET;
+        const usingDefault = !raw || raw === INSECURE_DEFAULT_JWT_SECRET;
+        if (process.env.NODE_ENV === "production" && usingDefault) {
+                throw new Error(
+                        "JWT_SECRET must be set to a non-default value in production. " +
+                        "Refusing to start with the insecure placeholder — anyone would be able to forge JWTs.",
+                );
+        }
+        if (usingDefault) {
+                console.warn(
+                        "[auth] JWT_SECRET not set — using the insecure default. " +
+                        "Set JWT_SECRET in your .env before any non-local use.",
+                );
+        }
+}
 
 export interface AuthedRequest extends Request {
         userId: string;
