@@ -19,10 +19,11 @@ export type ErrorCallback = (message: string) => void;
 export function openTerminalSession(opts: {
         container: HTMLElement;
         sessionId: string;
+        tabId?: string;
         onStatus: StatusCallback;
         onError: ErrorCallback;
 }): TerminalSession {
-        const { container, sessionId, onStatus, onError } = opts;
+        const { container, sessionId, tabId, onStatus, onError } = opts;
 
         // ── xterm.js setup ──────────────────────────────────────────────────────
         const term = new Terminal({
@@ -93,7 +94,7 @@ export function openTerminalSession(opts: {
         // though, so we also include the token as a `?token=` query param as a
         // fallback — the backend accepts either.
         const token = getToken() ?? "";
-        const wsUrl = buildWsUrl(sessionId, token);
+        const wsUrl = buildWsUrl(sessionId, token, tabId);
         const ws = new WebSocket(wsUrl, [`auth.bearer.${token}`]);
 
         ws.onopen = () => {
@@ -342,11 +343,15 @@ class MultilineUrlLinkProvider implements ILinkProvider {
 
 // ── URL builder ─────────────────────────────────────────────────────────────
 
-function buildWsUrl(sessionId: string, token: string): string {
+function buildWsUrl(sessionId: string, token: string, tabId?: string): string {
         // Use VITE_API_URL to derive the WebSocket URL
         const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
         const url = new URL(apiUrl);
         const wsProto = url.protocol === "https:" ? "wss:" : "ws:";
         const base = `${wsProto}//${url.host}/ws/sessions/${sessionId}`;
-        return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+        const params = new URLSearchParams();
+        if (token) params.set("token", token);
+        if (tabId) params.set("tab", tabId);
+        const qs = params.toString();
+        return qs ? `${base}?${qs}` : base;
 }

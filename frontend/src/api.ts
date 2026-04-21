@@ -146,6 +146,53 @@ export async function updateEnvVars(id: string, envVars: Record<string, string>)
         return res.json();
 }
 
+// ── Tabs API ────────────────────────────────────────────────────────────────
+
+export interface Tab {
+        tabId: string;
+        label: string;
+        createdAt: number;
+}
+
+export async function listTabs(sessionId: string): Promise<Tab[]> {
+        const res = await apiFetch(`/sessions/${sessionId}/tabs`);
+        if (!res.ok) throw new Error("Failed to list tabs");
+        return res.json();
+}
+
+export async function createTab(sessionId: string, label?: string): Promise<Tab> {
+        const res = await apiFetch(`/sessions/${sessionId}/tabs`, {
+                method: "POST",
+                body: JSON.stringify(label ? { label } : {}),
+        });
+        if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.error ?? "Failed to create tab");
+        }
+        return res.json();
+}
+
+/** Close a tab. Throws `LastTabError` if the backend refuses because this is
+ *  the session's only remaining tab — callers should surface that to the user
+ *  rather than retrying. */
+export async function deleteTab(sessionId: string, tabId: string): Promise<void> {
+        const res = await apiFetch(`/sessions/${sessionId}/tabs/${tabId}`, { method: "DELETE" });
+        if (res.status === 409) {
+                throw new LastTabError();
+        }
+        if (!res.ok && res.status !== 204) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.error ?? "Failed to close tab");
+        }
+}
+
+export class LastTabError extends Error {
+        constructor() {
+                super("Can't close the last tab of a session");
+                this.name = "LastTabError";
+        }
+}
+
 // ── Fetch wrapper ───────────────────────────────────────────────────────────
 
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {

@@ -8,7 +8,8 @@
 import {
         isLoggedIn, login, register, logout, checkAuthStatus,
         listSessions, createSession, deleteSession, stopSession, startSession,
-        type SessionInfo,
+        listTabs, createTab, deleteTab, LastTabError,
+        type SessionInfo, type Tab,
 } from "./api.js";
 import { openTerminalSession, type TerminalSession, type SessionStatus } from "./terminal.js";
 
@@ -34,6 +35,7 @@ const showTerminatedToggle = document.getElementById("show-terminated-toggle") a
 const terminalToolbar = document.getElementById("terminal-toolbar")!;
 const terminalSessionName = document.getElementById("terminal-session-name")!;
 const terminalStatusBadge = document.getElementById("terminal-status-badge")!;
+const terminalTabs = document.getElementById("terminal-tabs")!;
 const terminalContainer = document.getElementById("terminal-container")!;
 const emptyState = document.getElementById("empty-state")!;
 const toast = document.getElementById("toast")!;
@@ -42,8 +44,28 @@ const toast = document.getElementById("toast")!;
 
 let sessions: SessionInfo[] = [];
 let activeSessionId: string | null = null;
-let activeTerminal: TerminalSession | null = null;
 let isRegisterMode = false;
+
+// Tab state — only for the CURRENTLY active session. Switching sessions
+// disposes these terminals (tmux keeps the tabs alive server-side, so
+// reconnecting replays from the ring buffer). Switching tabs WITHIN the
+// active session keeps every tab's xterm + WS live so background work
+// (e.g. a dev server running in a closed tab) isn't interrupted.
+interface ActiveTerminal { pane: HTMLDivElement; term: TerminalSession }
+let currentTabs: Tab[] = [];
+let currentActiveTabId: string | null = null;
+const currentTerminals = new Map<string, ActiveTerminal>();
+
+function disposeAllCurrentTerminals() {
+        for (const { term, pane } of currentTerminals.values()) {
+                term.dispose();
+                pane.remove();
+        }
+        currentTerminals.clear();
+        currentTabs = [];
+        currentActiveTabId = null;
+        terminalTabs.innerHTML = "";
+}
 
 // ── Auth flow ───────────────────────────────────────────────────────────────
 
@@ -123,8 +145,7 @@ authForm.addEventListener("submit", async (e) => {
 
 logoutBtn.addEventListener("click", () => {
         logout();
-        activeTerminal?.dispose();
-        activeTerminal = null;
+        disposeAllCurrentTerminals();
         activeSessionId = null;
         sessions = [];
         showAuth();
@@ -237,8 +258,7 @@ function renderSessionList() {
                         try {
                                 await deleteSession(s.sessionId, hard);
                                 if (activeSessionId === s.sessionId) {
-                                        activeTerminal?.dispose();
-                                        activeTerminal = null;
+                                        disposeAllCurrentTerminals();
                                         activeSessionId = null;
                                         updateToolbar();
                                 }
@@ -251,7 +271,7 @@ function renderSessionList() {
                 // Click to open session
                 item.addEventListener("click", () => {
                         if (s.status === "running") {
-                                openSession(s.sessionId);
+                                void openSession(s.sessionId);
                         } else if (s.status === "stopped") {
                                 showToast("Start the session first", true);
                         }
@@ -261,44 +281,189 @@ function renderSessionList() {
         }
 }
 
-function openSession(sessionId: string) {
+async function openSession(sessionId: string) {
         if (activeSessionId === sessionId) return;
 
-        activeTerminal?.dispose();
-        activeTerminal = null;
+        // Tear down the previous session's terminals. (Switching tabs within
+        // a session keeps them alive; switching sessions doesn't.)
+        disposeAllCurrentTerminals();
         terminalContainer.innerHTML = "";
 
         activeSessionId = sessionId;
         renderSessionList();
         updateToolbar();
 
-        activeTerminal = openTerminalSession({
-                container: terminalContainer,
-                sessionId,
-                onStatus: (status: SessionStatus) => {
-                        const s = sessions.find((x) => x.sessionId === sessionId);
-                        if (s) s.status = status as SessionInfo["status"];
-                        updateToolbar();
-                        renderSessionList();
-                },
-                onError: (msg: string) => showToast(msg, true),
-        });
+        // Pull tabs from the backend. An empty list is unusual (the entrypoint
+        // always creates tab-default) but we auto-create one so the user can
+        // keep working instead of being stuck.
+        try {
+                const tabs = await listTabs(sessionId);
+                // tmux list-sessions emits alphabetical order; show creation order
+                // instead so the +-added tabs stay on the right.
+                currentTabs = tabs.sort((a, b) => a.createdAt - b.createdAt);
+                if (currentTabs.length === 0) {
+                        const created = await createTab(sessionId);
+                        currentTabs = [created];
+                }
+        } catch (err) {
+                showToast((err as Error).message, true);
+                return;
+        }
+
+        renderTabBar();
+        if (currentTabs.length > 0) openTab(currentTabs[0]!.tabId);
 }
 
 function updateToolbar() {
         const s = sessions.find((x) => x.sessionId === activeSessionId);
         if (!s) {
                 terminalToolbar.style.display = "none";
+                terminalTabs.style.display = "none";
                 terminalContainer.style.display = "none";
                 emptyState.style.display = "flex";
                 return;
         }
         terminalToolbar.style.display = "flex";
+        terminalTabs.style.display = "flex";
         terminalContainer.style.display = "block";
         emptyState.style.display = "none";
         terminalSessionName.textContent = s.name;
         terminalStatusBadge.textContent = s.status;
         terminalStatusBadge.className = s.status;
+}
+
+// ── Tabs within the active session ──────────────────────────────────────────
+
+function renderTabBar() {
+        terminalTabs.innerHTML = "";
+        if (!activeSessionId) return;
+
+        for (const tab of currentTabs) {
+                const chip = document.createElement("div");
+                chip.className = `tab-chip${tab.tabId === currentActiveTabId ? " active" : ""}`;
+                chip.dataset.tabId = tab.tabId;
+                chip.title = tab.label;
+
+                const label = document.createElement("span");
+                label.className = "tab-chip-label";
+                label.textContent = tab.label;
+                chip.appendChild(label);
+
+                const close = document.createElement("button");
+                close.className = "tab-close";
+                close.textContent = "×";
+                close.title = "Close tab";
+                close.disabled = currentTabs.length <= 1;
+                close.addEventListener("click", (e) => {
+                        e.stopPropagation();
+                        void closeTab(tab.tabId);
+                });
+                chip.appendChild(close);
+
+                chip.addEventListener("click", () => openTab(tab.tabId));
+                terminalTabs.appendChild(chip);
+        }
+
+        const addBtn = document.createElement("button");
+        addBtn.id = "tab-add";
+        addBtn.type = "button";
+        addBtn.textContent = "+";
+        addBtn.title = "Open a new tab (runs services independently; close to SIGHUP them)";
+        addBtn.addEventListener("click", () => void addTab(addBtn));
+        terminalTabs.appendChild(addBtn);
+}
+
+function openTab(tabId: string) {
+        if (!activeSessionId) return;
+        if (!currentTabs.some((t) => t.tabId === tabId)) return;
+
+        // Hide the current pane (don't dispose).
+        if (currentActiveTabId) {
+                currentTerminals.get(currentActiveTabId)?.pane.classList.remove("active");
+        }
+
+        // Lazily spin up the xterm+WS for this tab. Subsequent re-opens of the
+        // same tab just toggle .active without reconnecting.
+        let entry = currentTerminals.get(tabId);
+        if (!entry) {
+                const pane = document.createElement("div");
+                pane.className = "tab-pane";
+                pane.dataset.tabId = tabId;
+                terminalContainer.appendChild(pane);
+
+                const term = openTerminalSession({
+                        container: pane,
+                        sessionId: activeSessionId,
+                        tabId,
+                        onStatus: (status: SessionStatus) => {
+                                // Session status travels via the tab's WS too. We still
+                                // update the session-level indicator so the sidebar is
+                                // honest about "disconnected".
+                                const s = sessions.find((x) => x.sessionId === activeSessionId);
+                                if (s) s.status = status as SessionInfo["status"];
+                                updateToolbar();
+                                renderSessionList();
+                        },
+                        onError: (msg: string) => showToast(msg, true),
+                });
+                entry = { pane, term };
+                currentTerminals.set(tabId, entry);
+        }
+
+        entry.pane.classList.add("active");
+        currentActiveTabId = tabId;
+        renderTabBar();
+}
+
+async function addTab(triggeredBy?: HTMLButtonElement) {
+        if (!activeSessionId) return;
+        if (triggeredBy) triggeredBy.disabled = true;
+        try {
+                // Default label is "Tab N" where N is the next slot, since the
+                // backend's tabId (`tab-<uuid8>`) is not user-friendly to display.
+                const label = `Tab ${currentTabs.length + 1}`;
+                const tab = await createTab(activeSessionId, label);
+                currentTabs.push(tab);
+                renderTabBar();
+                openTab(tab.tabId);
+        } catch (err) {
+                showToast((err as Error).message, true);
+        } finally {
+                if (triggeredBy) triggeredBy.disabled = false;
+        }
+}
+
+async function closeTab(tabId: string) {
+        if (!activeSessionId) return;
+        if (currentTabs.length <= 1) {
+                showToast("Can't close the last tab", true);
+                return;
+        }
+
+        try {
+                await deleteTab(activeSessionId, tabId);
+        } catch (err) {
+                if (err instanceof LastTabError) {
+                        showToast("Can't close the last tab", true);
+                } else {
+                        showToast((err as Error).message, true);
+                }
+                return;
+        }
+
+        const entry = currentTerminals.get(tabId);
+        if (entry) {
+                entry.term.dispose();
+                entry.pane.remove();
+                currentTerminals.delete(tabId);
+        }
+        currentTabs = currentTabs.filter((t) => t.tabId !== tabId);
+
+        if (currentActiveTabId === tabId) {
+                currentActiveTabId = null;
+                if (currentTabs.length > 0) openTab(currentTabs[0]!.tabId);
+        }
+        renderTabBar();
 }
 
 // ── New session ─────────────────────────────────────────────────────────────
@@ -313,7 +478,7 @@ newSessionForm.addEventListener("submit", async (e) => {
                 const session = await createSession(name);
                 sessions.unshift(session);
                 renderSessionList();
-                openSession(session.sessionId);
+                void openSession(session.sessionId);
                 showToast(`Session "${name}" created`);
         } catch (err) {
                 showToast((err as Error).message, true);
