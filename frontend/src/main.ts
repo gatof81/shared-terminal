@@ -62,6 +62,7 @@ function disposeAllCurrentTerminals() {
         currentActiveTabId = null;
         terminalTabs.innerHTML = "";
         terminalTabs.style.display = "none";
+        terminalContainer.style.display = "none";
 }
 
 // ── Auth flow ───────────────────────────────────────────────────────────────
@@ -335,10 +336,9 @@ function updateToolbar() {
                 return;
         }
         terminalToolbar.style.display = "flex";
-        // Tab bar visibility is owned by renderTabBar — it flips display:flex
-        // only after tabs have actually been populated, avoiding the empty-bar
-        // flash during the listTabs round-trip.
-        terminalContainer.style.display = "block";
+        // #terminal-tabs is owned by renderTabBar, #terminal-container by
+        // openTab — both flip to visible only once real content is ready,
+        // avoiding empty-bar/empty-pane flashes during the listTabs round-trip.
         emptyState.style.display = "none";
         terminalSessionName.textContent = s.name;
         terminalStatusBadge.textContent = s.status;
@@ -436,6 +436,7 @@ function openTab(tabId: string) {
         }
 
         entry.pane.classList.add("active");
+        terminalContainer.style.display = "block";
         currentActiveTabId = tabId;
         renderTabBar();
 }
@@ -503,7 +504,14 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
 
         if (currentActiveTabId === tabId) {
                 currentActiveTabId = null;
-                if (currentTabs.length > 0) openTab(currentTabs[0]!.tabId);
+                // Only fall through to a neighbour if the session is still
+                // running (closeTab's await can race the session going stopped).
+                // openTab will call renderTabBar itself on success.
+                const s = sessions.find((x) => x.sessionId === activeSessionId);
+                if (currentTabs.length > 0 && s?.status === "running") {
+                        openTab(currentTabs[0]!.tabId);
+                        return;
+                }
         }
         renderTabBar();
 }
