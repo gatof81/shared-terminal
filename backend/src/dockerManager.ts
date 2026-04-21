@@ -9,6 +9,7 @@ import Dockerode from "dockerode";
 import { Duplex } from "stream";
 import { promises as fs } from "fs";
 import path from "path";
+import { randomBytes } from "crypto";
 import { SessionManager } from "./sessionManager.js";
 import { RingBuffer } from "./ringBuffer.js";
 import { d1Query } from "./db.js";
@@ -25,10 +26,16 @@ export interface ExecHandle {
 
 export type OutputListener = (data: string) => void;
 
+export interface Tab {
+        tabId: string;      // tmux session name inside the container (e.g. "tab-default", "tab-abc12345")
+        label: string;      // display label (tmux user-option @tab-label)
+        createdAt: number;  // unix seconds
+}
+
 // One shared `tmux attach` exec per target key. All WS clients pointing at the
-// same session (later: same session+window) multiplex over this single exec —
-// tmux already mirrors output to every attached client, so if we made one exec
-// per client, each byte would fan out N times.
+// same session+tab multiplex over this single exec — tmux already mirrors
+// output to every attached client, so if we made one exec per client, each
+// byte would fan out N times.
 interface SharedExec {
         execId: string;
         stream: Duplex;
@@ -50,12 +57,16 @@ export class DockerManager {
                 this.sessions = sessions;
         }
 
-        // Today one target per session (the default tmux window). When per-tab
-        // windows land this will return `${sessionId}:${windowId}` — callers stay
-        // the same; only the key-construction changes.
-        private targetKey(sessionId: string /*, windowId?: string*/): string {
-                return sessionId;
+        // Each tab inside a session is its own tmux session in the container and
+        // gets its own shared exec + ring buffer. The targetKey is the join key.
+        private targetKey(sessionId: string, tabId: string): string {
+                return `${sessionId}:${tabId}`;
         }
+
+        // Default tab name that the session-image entrypoint creates on first boot.
+        // Used as the fallback when a WS connects without a `tab` query param so
+        // we keep a sensible experience for single-tab users.
+        static readonly DEFAULT_TAB_ID = "tab-default";
 
         // ── Container lifecycle ─────────────────────────────────────────────────
 
@@ -225,15 +236,16 @@ export class DockerManager {
                 cols: number,
                 rows: number,
                 onOutput: OutputListener,
+                tabId: string = DockerManager.DEFAULT_TAB_ID,
         ): Promise<{ handle: ExecHandle; replay: string | null }> {
-                const key = this.targetKey(sessionId);
+                const key = this.targetKey(sessionId, tabId);
 
                 // Reuse the shared exec if one already exists (or is being spawned).
                 // Concurrent first-attach calls await the same promise → exactly one
                 // `container.exec` on the wire.
                 let pending = this.shared.get(key);
                 if (!pending) {
-                        pending = this.spawnSharedExec(sessionId, key);
+                        pending = this.spawnSharedExec(sessionId, key, tabId);
                         // Clear the slot on rejection so the next attach retries.
                         // `.catch` here doesn't consume the rejection — awaiters on the
                         // original promise still see it; this handler exists so Node
@@ -321,13 +333,13 @@ export class DockerManager {
 
         // ── Shared exec internals ──────────────────────────────────────────────
 
-        private async spawnSharedExec(sessionId: string, key: string): Promise<SharedExec> {
+        private async spawnSharedExec(sessionId: string, key: string, tabId: string): Promise<SharedExec> {
                 const meta = await this.sessions.getOrThrow(sessionId);
                 if (!meta.containerId) throw new Error("No container for this session");
 
                 const container = this.docker.getContainer(meta.containerId);
                 const exec = await container.exec({
-                        Cmd: ["tmux", "attach", "-t", "main"],
+                        Cmd: ["tmux", "attach", "-t", tabId],
                         AttachStdin: true,
                         AttachStdout: true,
                         AttachStderr: true,
@@ -385,6 +397,117 @@ export class DockerManager {
 
                 console.log(`[docker] spawned shared exec for ${key}`);
                 return s;
+        }
+
+        // ── Tabs (tmux session per tab) ────────────────────────────────────────
+
+        async listTabs(sessionId: string): Promise<Tab[]> {
+                const { stdout, exitCode } = await this.execOneShot(sessionId, [
+                        "tmux", "list-sessions", "-F",
+                        "#{session_name}\t#{?@tab-label,#{@tab-label},#{session_name}}\t#{session_created}",
+                ]);
+                // tmux returns 1 with "no server running" when the server died. That is
+                // an unusable container for us — surface as empty so callers can recover.
+                if (exitCode !== 0) return [];
+                return stdout
+                        .split("\n")
+                        .map((line) => line.trim())
+                        .filter((line) => line.length > 0)
+                        .map((line): Tab => {
+                                const [tabId = "", label = "", createdAt = "0"] = line.split("\t");
+                                return { tabId, label, createdAt: Number(createdAt) || 0 };
+                        });
+        }
+
+        async createTab(sessionId: string, label?: string): Promise<Tab> {
+                const tabId = `tab-${randomBytes(4).toString("hex")}`;
+                const displayLabel = (label ?? "").trim() || tabId;
+
+                const create = await this.execOneShot(sessionId, [
+                        "tmux", "new-session", "-d", "-s", tabId, "-x", "120", "-y", "36",
+                ]);
+                if (create.exitCode !== 0) {
+                        throw new Error(`tmux new-session failed (exit ${create.exitCode}): ${create.stdout}`);
+                }
+
+                // User-option stays with the tmux session for its lifetime — survives
+                // backend restarts, doesn't need a D1 table.
+                await this.execOneShot(sessionId, [
+                        "tmux", "set-option", "-t", tabId, "@tab-label", displayLabel,
+                ]);
+
+                const now = Math.floor(Date.now() / 1000);
+                console.log(`[docker] created tab ${tabId} (${displayLabel}) in session ${sessionId}`);
+                return { tabId, label: displayLabel, createdAt: now };
+        }
+
+        async deleteTab(sessionId: string, tabId: string): Promise<void> {
+                // Tear down any shared exec + buffer for this tab first so we don't
+                // leave dangling handles pointing at a dead tmux session.
+                const key = this.targetKey(sessionId, tabId);
+                const pending = this.shared.get(key);
+                if (pending) {
+                        this.shared.delete(key);
+                        pending.then(
+                                (s) => { try { s.stream.destroy(); } catch { /* already destroyed */ } },
+                                () => { /* spawn rejected — nothing to destroy */ },
+                        );
+                }
+                this.buffers.delete(key);
+                for (const [attachId, k] of this.keyOf) {
+                        if (k === key) this.keyOf.delete(attachId);
+                }
+
+                const { exitCode } = await this.execOneShot(sessionId, ["tmux", "kill-session", "-t", tabId]);
+                if (exitCode !== 0) {
+                        // kill-session returns non-zero if the target doesn't exist — OK for
+                        // the idempotent case; caller has already validated it existed.
+                        console.warn(`[docker] kill-session ${tabId} exited ${exitCode}`);
+                }
+                console.log(`[docker] deleted tab ${tabId} from session ${sessionId}`);
+        }
+
+        /** Resolve a sane default when a caller didn't specify a tabId. Returns the
+         *  first tab from `listTabs`, falling back to DEFAULT_TAB_ID if we can't
+         *  reach the container (e.g. reconcile race). */
+        async getDefaultTabId(sessionId: string): Promise<string> {
+                try {
+                        const tabs = await this.listTabs(sessionId);
+                        if (tabs.length > 0) return tabs[0]!.tabId;
+                } catch { /* fall through to static default */ }
+                return DockerManager.DEFAULT_TAB_ID;
+        }
+
+        private async execOneShot(
+                sessionId: string,
+                cmd: string[],
+        ): Promise<{ stdout: string; exitCode: number }> {
+                const meta = await this.sessions.getOrThrow(sessionId);
+                if (!meta.containerId) throw new Error("No container for this session");
+                const container = this.docker.getContainer(meta.containerId);
+
+                const exec = await container.exec({
+                        Cmd: cmd,
+                        AttachStdin: false,
+                        AttachStdout: true,
+                        AttachStderr: true,
+                        // Tty:true merges stdout/stderr onto a single stream so we don't
+                        // need the docker frame demuxer for these short-lived tmux calls.
+                        Tty: true,
+                });
+                const stream = await exec.start({ hijack: false, stdin: false });
+                const chunks: Buffer[] = [];
+                stream.on("data", (c: Buffer) => chunks.push(c));
+                await new Promise<void>((resolve, reject) => {
+                        stream.on("end", () => resolve());
+                        stream.on("close", () => resolve());
+                        stream.on("error", reject);
+                });
+                const info = await exec.inspect();
+                return {
+                        stdout: Buffer.concat(chunks).toString("utf-8").replace(/\r/g, ""),
+                        exitCode: info.ExitCode ?? 0,
+                };
         }
 
         private async recomputeSize(s: SharedExec): Promise<void> {
