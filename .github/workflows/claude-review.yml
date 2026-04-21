@@ -43,15 +43,28 @@ jobs:
           # Claude Max / Pro subscription (OAuth). For pay-as-you-go API billing instead,
           # comment the line below and use: anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: --model claude-sonnet-4-6 --max-turns 10
+          # The action doesn't auto-post Claude's text — Claude has to actively
+          # call a tool. We allowlist just the read-only PR tools + `gh pr comment`
+          # so the review lands as a top-level PR comment.
+          claude_args: >
+            --model claude-sonnet-4-6
+            --max-turns 10
+            --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*)"
           prompt: |
+            REPO: ${{ github.repository }}
+            PR: #${{ github.event.pull_request.number }}
+
             You are reviewing a pull request on the shared-terminal repo
             (public TypeScript/Node project: Cloudflare Pages frontend,
             Proxmox + Cloudflare Tunnel backend). This is a solo repo with
             no human reviewer, so be direct and actionable.
 
             Produce ONE review comment with the headings below. Skip any
-            section that has nothing real to say — do not pad.
+            section that has nothing real to say — do not pad. Post it as
+            a top-level PR comment via
+              gh pr comment ${{ github.event.pull_request.number }} --body "$(cat <<'EOF' … EOF)"
+            Do not reply with the review as an assistant message — only the
+            `gh pr comment` call produces user-visible output.
 
             ## Summary
             2-4 sentences describing what this PR actually changes and why,
