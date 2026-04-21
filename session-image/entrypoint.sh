@@ -2,20 +2,24 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # Session container entrypoint.
 #
-# Starts a detached tmux session named "main" and then waits forever so the
-# container stays alive.  The backend attaches via:
-#   docker exec -it <container> tmux attach -t main
+# Each tmux session inside the container is ONE browser tab. We boot with a
+# single default tab (`tab-default`); additional tabs are created by the
+# backend via `tmux new-session`, and closed via `tmux kill-session`. The
+# container stays alive as long as any tmux session exists.
 # ──────────────────────────────────────────────────────────────────────────────
 set -e
 
 # Navigate to workspace
 cd /home/developer/workspace
 
-# Create the detached tmux session
-tmux new-session -d -s main -x 120 -y 36
+# Create the detached default tab. Named deterministically so the backend
+# can address it without an extra round-trip on first attach.
+tmux new-session -d -s tab-default -x 120 -y 36
+tmux set-option -t tab-default @tab-label "main"
 
-echo "[entrypoint] tmux session 'main' started — waiting for connections…"
+echo "[entrypoint] tmux session 'tab-default' started — waiting for connections…"
 
-# Keep the container alive.  Use `wait` on tmux server so the container
-# exits if tmux dies (e.g., last window closed).
+# Keep the container alive. Tmux server exits when its last session closes,
+# which bubbles out here and terminates the container — matching "always at
+# least one tab per session" enforced by the backend kill-last guard.
 exec tmux wait-for exit-signal

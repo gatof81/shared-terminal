@@ -165,6 +165,59 @@ export function buildRouter(sessions: SessionManager, docker: DockerManager): Ro
                 }
         });
 
+        // ── Tabs within a session ──────────────────────────────────────────────
+        // Each tab is a tmux session inside the container. The backend owns the
+        // tabId → tmux session name mapping; the UI treats tabId as an opaque
+        // string. Deleting a tab SIGHUPs everything inside it.
+
+        router.get("/sessions/:id/tabs", async (req: Request, res: Response) => {
+                const { userId } = req as AuthedRequest;
+                try {
+                        await sessions.assertOwnership(req.params.id, userId);
+                        const tabs = await docker.listTabs(req.params.id);
+                        res.json(tabs);
+                } catch (err) {
+                        handleSessionError(err, res);
+                }
+        });
+
+        router.post("/sessions/:id/tabs", async (req: Request, res: Response) => {
+                const { userId } = req as AuthedRequest;
+                const { label } = (req.body ?? {}) as { label?: string };
+                try {
+                        await sessions.assertOwnership(req.params.id, userId);
+                        const tab = await docker.createTab(req.params.id, label);
+                        res.status(201).json(tab);
+                } catch (err) {
+                        handleSessionError(err, res);
+                }
+        });
+
+        router.delete("/sessions/:id/tabs/:tabId", async (req: Request, res: Response) => {
+                const { userId } = req as AuthedRequest;
+                const { id, tabId } = req.params;
+                try {
+                        await sessions.assertOwnership(id, userId);
+
+                        // Enforce "always at least one tab per session" — refuse the close
+                        // and let the client decide whether to create a new tab first.
+                        const tabs = await docker.listTabs(id);
+                        if (!tabs.some((t) => t.tabId === tabId)) {
+                                res.status(404).json({ error: "tab not found" });
+                                return;
+                        }
+                        if (tabs.length <= 1) {
+                                res.status(409).json({ error: "cannot close the last tab" });
+                                return;
+                        }
+
+                        await docker.deleteTab(id, tabId);
+                        res.status(204).send();
+                } catch (err) {
+                        handleSessionError(err, res);
+                }
+        });
+
         return router;
 }
 
