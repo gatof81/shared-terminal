@@ -67,9 +67,11 @@ export function buildRouter(
                 }
 
                 // Per-username gate runs before bcrypt so guesses can't burn CPU
-                // or leak timing info. Message distinguishes "this account is
-                // locked" from the IP-layer 429 above so the user knows to wait
-                // rather than suspect a service outage.
+                // or leak timing info. `scope` distinguishes "this account is
+                // locked" from the IP-layer 429 above. assertAllowed only ever
+                // throws RateLimitError; anything else is a programming bug we
+                // want to surface as 500 rather than an unhandled promise
+                // rejection (async handler, Express 4 has no next wired up).
                 try {
                         usernameLimiter.assertAllowed(username);
                 } catch (err) {
@@ -81,7 +83,9 @@ export function buildRouter(
                                 });
                                 return;
                         }
-                        throw err;
+                        console.error(`[auth] unexpected error from usernameLimiter:`, (err as Error).message);
+                        res.status(500).json({ error: "Internal server error" });
+                        return;
                 }
 
                 // Note on race: assertAllowed is sync, loginUser is async. On a
@@ -102,7 +106,9 @@ export function buildRouter(
                                 res.status(401).json({ error: err.message });
                                 return;
                         }
-                        console.error(`[auth] login failed unexpectedly for ${username}:`, (err as Error).message);
+                        // Don't log the submitted username — would be an
+                        // enumeration vector if logs leak.
+                        console.error(`[auth] login failed unexpectedly:`, (err as Error).message);
                         res.status(500).json({ error: "Internal server error" });
                         return;
                 }
