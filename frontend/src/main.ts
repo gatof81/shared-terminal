@@ -396,6 +396,11 @@ function openTab(tabId: string) {
                 return;
         }
 
+        // Capture the previously-active tab before stripping .active so we can
+        // restore the UI if openTerminalSession throws below — otherwise the
+        // prev pane stays invisible AND the `tabId === currentActiveTabId`
+        // guard above prevents the user from re-clicking its chip.
+        const prevActiveTabId = currentActiveTabId;
         if (currentActiveTabId) {
                 currentTerminals.get(currentActiveTabId)?.pane.classList.remove("active");
         }
@@ -435,8 +440,10 @@ function openTab(tabId: string) {
                         entry = { pane, term };
                         currentTerminals.set(tabId, entry);
                 } catch (err) {
-                        // Avoid orphaning the already-appended pane.
                         pane.remove();
+                        if (prevActiveTabId) {
+                                currentTerminals.get(prevActiveTabId)?.pane.classList.add("active");
+                        }
                         throw err;
                 }
         }
@@ -469,7 +476,20 @@ async function addTab(triggeredBy?: HTMLButtonElement) {
                         return;
                 }
                 currentTabs.push(tab);
-                openTab(tab.tabId);
+                try {
+                        openTab(tab.tabId);
+                } catch (err) {
+                        // Roll back the push so the chip doesn't linger pointing at a
+                        // tab with no currentTerminals entry, and clean up the backend
+                        // tab fire-and-forget since it was never actually shown.
+                        currentTabs = currentTabs.filter((t) => t.tabId !== tab.tabId);
+                        void deleteTab(sessionId, tab.tabId).catch((cleanupErr) => {
+                                console.warn(`[tabs] rollback cleanup failed for ${tab.tabId}:`, cleanupErr);
+                                showToast(`Orphan tab left on server: ${(cleanupErr as Error).message}`, true);
+                        });
+                        renderTabBar();
+                        throw err;
+                }
         } catch (err) {
                 showToast((err as Error).message, true);
         } finally {
