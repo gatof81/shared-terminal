@@ -282,35 +282,31 @@ function renderSessionList() {
 async function openSession(sessionId: string) {
         if (activeSessionId === sessionId) return;
 
-        // Tear down the previous session's terminals. (Switching tabs within
-        // a session keeps them alive; switching sessions doesn't.)
+        // Tabs stay alive across tab-switch, but are torn down on session-switch.
         disposeAllCurrentTerminals();
 
         activeSessionId = sessionId;
         renderSessionList();
         updateToolbar();
 
-        // Pull tabs from the backend. An empty list is unusual (the entrypoint
-        // always creates tab-default) but we auto-create one so the user can
-        // keep working instead of being stuck. `sessionId` is captured here so
-        // a second rapid click on another session doesn't let this resolution
-        // clobber the newer one's state — each `await` re-checks identity.
+        // Capturing `sessionId` guards against a rapid second openSession call
+        // clobbering this one — each `await` re-checks identity.
         try {
                 const tabs = await listTabs(sessionId);
-                if (activeSessionId !== sessionId) return; // superseded by another click
-                // tmux list-sessions emits alphabetical order; show creation order
-                // instead so the +-added tabs stay on the right.
+                if (activeSessionId !== sessionId) return;
+                // Sort by creation order so +-added tabs stay on the right
+                // (listTabs returns alphabetical from tmux list-sessions).
                 currentTabs = tabs.sort((a, b) => a.createdAt - b.createdAt);
                 if (currentTabs.length === 0) {
+                        // Unusual (entrypoint creates tab-default) but recover instead
+                        // of leaving the user stuck with no tabs.
                         const created = await createTab(sessionId);
                         if (activeSessionId !== sessionId) return;
                         currentTabs = [created];
                 }
         } catch (err) {
-                // If nothing else claimed the slot in the meantime, drop back to
-                // the empty state — otherwise the toolbar/container would stay
-                // visible with no tabs rendered. Toast is always shown so the
-                // user knows what happened.
+                // Drop back to empty state so the toolbar/container don't linger
+                // visible with no tabs.
                 if (activeSessionId === sessionId) {
                         activeSessionId = null;
                         currentTabs = [];
@@ -321,7 +317,6 @@ async function openSession(sessionId: string) {
                 return;
         }
 
-        // openTab renders the bar; no need for an extra pre-render here.
         if (currentTabs.length > 0) openTab(currentTabs[0]!.tabId);
 }
 
@@ -335,9 +330,9 @@ function updateToolbar() {
                 return;
         }
         terminalToolbar.style.display = "flex";
-        // #terminal-tabs is owned by renderTabBar, #terminal-container by
-        // openTab — both flip to visible only once real content is ready,
-        // avoiding empty-bar/empty-pane flashes during the listTabs round-trip.
+        // #terminal-tabs and #terminal-container are flipped to visible only
+        // by renderTabBar/openTab — avoids an empty-bar flash before listTabs
+        // resolves.
         emptyState.style.display = "none";
         terminalSessionName.textContent = s.name;
         terminalStatusBadge.textContent = s.status;
@@ -401,13 +396,12 @@ function openTab(tabId: string) {
                 return;
         }
 
-        // Hide the current pane (don't dispose).
         if (currentActiveTabId) {
                 currentTerminals.get(currentActiveTabId)?.pane.classList.remove("active");
         }
 
-        // Lazily spin up the xterm+WS for this tab. Subsequent re-opens of the
-        // same tab just toggle .active without reconnecting.
+        // Lazily spin up the xterm+WS; re-opens of the same tab just toggle
+        // .active without reconnecting.
         let entry = currentTerminals.get(tabId);
         if (!entry) {
                 const pane = document.createElement("div");
@@ -425,10 +419,12 @@ function openTab(tabId: string) {
                                 sessionId: ownSessionId,
                                 tabId,
                                 onStatus: (status: SessionStatus) => {
-                                        // Ignore events from terminals that aren't currently active —
-                                        // they're either disposing (post session switch) or backgrounded.
-                                        // In those cases the status is local to the tab, not the session.
+                                        // Only the active tab drives the shared session status. A
+                                        // background tab's WS drop (idle TCP teardown) must not mark
+                                        // the whole session "disconnected" while the foreground tab
+                                        // is still live.
                                         if (activeSessionId !== ownSessionId) return;
+                                        if (tabId !== currentActiveTabId) return;
                                         const s = sessions.find((x) => x.sessionId === ownSessionId);
                                         if (s) s.status = status as SessionInfo["status"];
                                         updateToolbar();
@@ -439,8 +435,7 @@ function openTab(tabId: string) {
                         entry = { pane, term };
                         currentTerminals.set(tabId, entry);
                 } catch (err) {
-                        // Clean up the pane we already appended so it doesn't orphan
-                        // in the container. Re-throw so callers see the failure.
+                        // Avoid orphaning the already-appended pane.
                         pane.remove();
                         throw err;
                 }
@@ -464,10 +459,12 @@ async function addTab(triggeredBy?: HTMLButtonElement) {
                 if (activeSessionId !== sessionId) {
                         // User switched away before the POST resolved. The backend tab
                         // exists but was never shown; clean it up so it doesn't resurface
-                        // on the next listTabs for that session. Fire-and-forget, but log
-                        // if the cleanup itself fails so the orphan is at least traceable.
+                        // on the next listTabs for that session. Fire-and-forget, but if
+                        // the cleanup fails surface a toast so the user knows backend
+                        // state drifted from what the UI shows.
                         void deleteTab(sessionId, tab.tabId).catch((err) => {
                                 console.warn(`[tabs] orphan cleanup failed for ${tab.tabId}:`, err);
+                                showToast(`Orphan tab left on server: ${(err as Error).message}`, true);
                         });
                         return;
                 }
@@ -539,6 +536,9 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
                                 return;
                         }
                 }
+                // No running sibling to switch to — hide the container so we
+                // don't leave an empty block sitting where the terminal was.
+                terminalContainer.style.display = "none";
         }
         renderTabBar();
 }

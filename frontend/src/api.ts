@@ -108,15 +108,7 @@ export async function getSession(id: string): Promise<SessionInfo> {
         return res.json();
 }
 
-/**
- * Delete a session.
- *
- * - Soft delete (default): stops and removes the Docker container, marks the
- *   session as `terminated`. Workspace files on disk are kept so the session
- *   can later be restored via `startSession`.
- * - Hard delete (`hard = true`): same as soft delete, then also wipes the
- *   workspace directory and removes the session record entirely.
- */
+/** Soft delete stops the container and keeps the workspace; `hard` also wipes files + row. */
 export async function deleteSession(id: string, hard = false): Promise<void> {
         const qs = hard ? "?hard=true" : "";
         const res = await apiFetch(`/sessions/${id}${qs}`, { method: "DELETE" });
@@ -172,9 +164,7 @@ export async function createTab(sessionId: string, label?: string): Promise<Tab>
         return res.json();
 }
 
-/** Close a tab. Throws `LastTabError` if the backend refuses because this is
- *  the session's only remaining tab — callers should surface that to the user
- *  rather than retrying. */
+/** Throws `LastTabError` (HTTP 409) when the tab is the last one — callers should surface, not retry. */
 export async function deleteTab(sessionId: string, tabId: string): Promise<void> {
         const res = await apiFetch(`/sessions/${sessionId}/tabs/${tabId}`, { method: "DELETE" });
         if (res.status === 409) {
