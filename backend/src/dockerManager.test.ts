@@ -331,6 +331,11 @@ describe("DockerManager tabs", () => {
 		// tmux new-session then set-option @tab-label
 		expect(calls[0]?.slice(0, 3)).toEqual(["tmux", "new-session", "-d"]);
 		expect(calls[0]).toContain(tab.tabId);
+		// New tabs must start in the workspace bind mount, not the image's
+		// /home/developer WORKDIR — otherwise the user lands next to
+		// entrypoint.sh instead of in their project files.
+		expect(calls[0]).toContain("-c");
+		expect(calls[0]).toContain("/home/developer/workspace");
 		expect(calls[1]?.slice(0, 2)).toEqual(["tmux", "set-option"]);
 		expect(calls[1]).toContain("@tab-label");
 		expect(calls[1]).toContain("git");

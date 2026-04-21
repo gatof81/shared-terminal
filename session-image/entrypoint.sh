@@ -14,7 +14,7 @@ cd /home/developer/workspace
 
 # Create the detached default tab. Named deterministically so the backend
 # can address it without an extra round-trip on first attach.
-tmux new-session -d -s tab-default -x 120 -y 36
+tmux new-session -d -s tab-default -c /home/developer/workspace -x 120 -y 36
 tmux set-option -t tab-default @tab-label "main"
 
 echo "[entrypoint] tmux session 'tab-default' started — waiting for connections…"
