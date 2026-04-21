@@ -260,6 +260,32 @@ describe("auth route rate limiting", () => {
 		expect(r4.headers.get("retry-after")).not.toBeNull();
 	});
 
+	it("successful logins don't consume the login IP budget (skipSuccessfulRequests)", async () => {
+		// ipMax=2. Three successes shouldn't move the budget; two subsequent
+		// failures exhaust it and the third is 429.
+		await spinUp({
+			login: { ipMax: 2, ipWindowMs: 60_000, usernameMax: 1_000, usernameWindowMs: 60_000 },
+			register: { ipMax: 100, ipWindowMs: 60_000 },
+		});
+
+		authStubs.loginUser.mockImplementation(async () => ({ userId: "u1", token: "tok" }));
+		for (let i = 0; i < 3; i++) {
+			const ok = await postLogin({ username: `u${i}`, password: "good" });
+			expect(ok.status).toBe(200);
+		}
+
+		authStubs.loginUser.mockImplementation(async () => {
+			throw new authStubs.InvalidCredentialsError();
+		});
+		const f1 = await postLogin({ username: "x", password: "bad" });
+		const f2 = await postLogin({ username: "y", password: "bad" });
+		const f3 = await postLogin({ username: "z", password: "bad" });
+		expect(f1.status).toBe(401);
+		expect(f2.status).toBe(401);
+		expect(f3.status).toBe(429);
+		expect(await f3.json()).toMatchObject({ scope: "ip" });
+	});
+
 	it("register returns 429 after ipMax attempts with Retry-After set", async () => {
 		await spinUp({
 			login: { ipMax: 100, ipWindowMs: 60_000, usernameMax: 100, usernameWindowMs: 60_000 },
@@ -368,6 +394,10 @@ describe("auth route rate limiting", () => {
 		const usernameBlocked = await postLogin({ username: "alice", password: "bad" });
 		expect(usernameBlocked.status).toBe(429);
 		expect(await usernameBlocked.json()).toMatchObject({ scope: "username" });
+		// Emits the same draft-7 shape the IP limiter does — clients parsing
+		// RateLimit-Policy see a consistent response across both layers.
+		expect(usernameBlocked.headers.get("ratelimit-policy")).toMatch(/^\d+;w=\d+$/);
+		expect(usernameBlocked.headers.get("ratelimit")).toMatch(/limit=\d+, remaining=0, reset=\d+/);
 	});
 
 	it("once per-username max is reached, even the correct password 429s until the window resets", async () => {

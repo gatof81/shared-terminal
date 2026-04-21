@@ -66,10 +66,21 @@ export function buildRouter(
                 }
 
                 // Per-username gate runs before bcrypt. `scope` distinguishes an
-                // account lockout from the IP-layer 429 above.
+                // account lockout from the IP-layer 429 above. Emits the same
+                // draft-7 RateLimit-* headers as express-rate-limit does on the
+                // IP 429 so clients parsing them see a consistent shape.
                 const check = usernameLimiter.check(username);
                 if (!check.allowed) {
+                        const windowSeconds = Math.ceil(rateLimitConfig.login.usernameWindowMs / 1000);
                         res.setHeader("Retry-After", String(check.retryAfterSeconds));
+                        res.setHeader(
+                                "RateLimit-Policy",
+                                `${rateLimitConfig.login.usernameMax};w=${windowSeconds}`,
+                        );
+                        res.setHeader(
+                                "RateLimit",
+                                `limit=${rateLimitConfig.login.usernameMax}, remaining=0, reset=${check.retryAfterSeconds}`,
+                        );
                         res.status(429).json({
                                 error: "Too many failed login attempts for this account, try again later",
                                 scope: "username",
@@ -77,9 +88,14 @@ export function buildRouter(
                         return;
                 }
 
-                // Race note: check() is sync, loginUser is async — in-flight
-                // requests can slip past by `parallelism`. bcrypt serialises on
-                // the event loop so parallelism is effectively 1.
+                // Concurrency note: check() is sync but loginUser is async, so
+                // `max + parallelism` slippage is possible in theory. Today
+                // parallelism is effectively 1 because loginUser uses
+                // `bcrypt.compareSync`, which blocks the event loop — that
+                // synchronous call is what pins the bound, not an explicit
+                // mutex. Swapping to the async `bcrypt.compare` removes the
+                // guarantee, so either add queueing or re-check the limit
+                // after the await.
                 let result: { userId: string; token: string };
                 try {
                         result = await loginUser(username, password);

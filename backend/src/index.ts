@@ -56,8 +56,12 @@ if (TRUST_PROXY !== undefined) {
                 process.exit(1);
         }
         let coerced: number | boolean | string;
-        if (/^\d+$/.test(TRUST_PROXY)) coerced = Number(TRUST_PROXY);
-        else if (TRUST_PROXY === "false") coerced = false;
+        // Explicit "0"/"false" → boolean false so we don't rely on Express's
+        // (undocumented) compileTrust(0) returning "never trust". If that
+        // internal ever changes, a string mistakenly treated as an IP would
+        // silently mis-trust; the explicit boolean keeps us pinned.
+        if (TRUST_PROXY === "0" || TRUST_PROXY === "false") coerced = false;
+        else if (/^\d+$/.test(TRUST_PROXY)) coerced = Number(TRUST_PROXY);
         else coerced = TRUST_PROXY;
         app.set("trust proxy", coerced);
         // Log the effective value so ops can spot a misconfigured prod

@@ -47,6 +47,11 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		limit: cfg.login.ipMax,
 		standardHeaders: "draft-7",
 		legacyHeaders: false,
+		// Only failed logins count toward the IP budget. Brings the IP layer
+		// in line with the per-username layer (which also only counts failures)
+		// and means a legitimate user re-logging in ten times in 15 min
+		// doesn't self-block. Attackers burn the budget on failures anyway.
+		skipSuccessfulRequests: true,
 		message: { error: "Too many login attempts from this IP, try again later", scope: "ip" },
 	});
 	const registerIp = rateLimit({
@@ -147,6 +152,8 @@ export class UsernameRateLimiter {
 		this.attempts.clear();
 	}
 
+	// Map iteration is spec'd to tolerate in-loop deletes of already-visited
+	// or current keys (ECMA-262 §24.1.3.5), so this pattern is safe.
 	private evictExpired(now: number): void {
 		for (const [key, entry] of this.attempts) {
 			if (now >= entry.resetAt) this.attempts.delete(key);
