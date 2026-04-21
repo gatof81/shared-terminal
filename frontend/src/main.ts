@@ -285,8 +285,6 @@ async function openSession(sessionId: string) {
         // Tear down the previous session's terminals. (Switching tabs within
         // a session keeps them alive; switching sessions doesn't.)
         disposeAllCurrentTerminals();
-        // Belt-and-suspenders: catches any pane created before openTerminalSession threw.
-        terminalContainer.innerHTML = "";
 
         activeSessionId = sessionId;
         renderSessionList();
@@ -421,21 +419,31 @@ function openTab(tabId: string) {
                 // sessions while this WS is closing, `onStatus("disconnected")`
                 // mustn't write to whatever session happens to be active *now*.
                 const ownSessionId = activeSessionId;
-                const term = openTerminalSession({
-                        container: pane,
-                        sessionId: ownSessionId,
-                        tabId,
-                        onStatus: (status: SessionStatus) => {
-                                const s = sessions.find((x) => x.sessionId === ownSessionId);
-                                if (s) s.status = status as SessionInfo["status"];
-                                // Only repaint the toolbar if this terminal still owns it.
-                                if (activeSessionId === ownSessionId) updateToolbar();
-                                renderSessionList();
-                        },
-                        onError: (msg: string) => showToast(msg, true),
-                });
-                entry = { pane, term };
-                currentTerminals.set(tabId, entry);
+                try {
+                        const term = openTerminalSession({
+                                container: pane,
+                                sessionId: ownSessionId,
+                                tabId,
+                                onStatus: (status: SessionStatus) => {
+                                        // Ignore events from terminals that aren't currently active —
+                                        // they're either disposing (post session switch) or backgrounded.
+                                        // In those cases the status is local to the tab, not the session.
+                                        if (activeSessionId !== ownSessionId) return;
+                                        const s = sessions.find((x) => x.sessionId === ownSessionId);
+                                        if (s) s.status = status as SessionInfo["status"];
+                                        updateToolbar();
+                                        renderSessionList();
+                                },
+                                onError: (msg: string) => showToast(msg, true),
+                        });
+                        entry = { pane, term };
+                        currentTerminals.set(tabId, entry);
+                } catch (err) {
+                        // Clean up the pane we already appended so it doesn't orphan
+                        // in the container. Re-throw so callers see the failure.
+                        pane.remove();
+                        throw err;
+                }
         }
 
         entry.pane.classList.add("active");
@@ -518,13 +526,18 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
                 currentActiveTabId = null;
                 // Nearest surviving neighbour: what was at the same index is now
                 // the next sibling; clamp to the new last tab when we closed the
-                // rightmost one. Matches standard browser-tab behaviour — better
-                // than always jumping back to the first tab.
+                // rightmost one. If the tab wasn't in currentTabs at findIndex
+                // time (state drifted from under us), fall back to index 0.
                 const s = sessions.find((x) => x.sessionId === activeSessionId);
                 if (currentTabs.length > 0 && s?.status === "running") {
-                        const next = currentTabs[Math.min(closedIndex, currentTabs.length - 1)]!;
-                        openTab(next.tabId);
-                        return;
+                        const idx = closedIndex < 0
+                                ? 0
+                                : Math.min(closedIndex, currentTabs.length - 1);
+                        const next = currentTabs[idx];
+                        if (next) {
+                                openTab(next.tabId);
+                                return;
+                        }
                 }
         }
         renderTabBar();
