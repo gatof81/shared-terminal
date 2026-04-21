@@ -295,17 +295,31 @@ async function openSession(sessionId: string) {
 
         // Pull tabs from the backend. An empty list is unusual (the entrypoint
         // always creates tab-default) but we auto-create one so the user can
-        // keep working instead of being stuck.
+        // keep working instead of being stuck. `sessionId` is captured here so
+        // a second rapid click on another session doesn't let this resolution
+        // clobber the newer one's state — each `await` re-checks identity.
         try {
                 const tabs = await listTabs(sessionId);
+                if (activeSessionId !== sessionId) return; // superseded by another click
                 // tmux list-sessions emits alphabetical order; show creation order
                 // instead so the +-added tabs stay on the right.
                 currentTabs = tabs.sort((a, b) => a.createdAt - b.createdAt);
                 if (currentTabs.length === 0) {
                         const created = await createTab(sessionId);
+                        if (activeSessionId !== sessionId) return;
                         currentTabs = [created];
                 }
         } catch (err) {
+                // If nothing else claimed the slot in the meantime, drop back to
+                // the empty state — otherwise the toolbar/container would stay
+                // visible with no tabs rendered. Toast is always shown so the
+                // user knows what happened.
+                if (activeSessionId === sessionId) {
+                        activeSessionId = null;
+                        currentTabs = [];
+                        renderSessionList();
+                        updateToolbar();
+                }
                 showToast((err as Error).message, true);
                 return;
         }
@@ -377,6 +391,16 @@ function openTab(tabId: string) {
         if (!activeSessionId) return;
         if (!currentTabs.some((t) => t.tabId === tabId)) return;
 
+        // Mirror the sidebar's rule: we only spin up a terminal for a running
+        // session. If the user clicked a tab chip while the session was
+        // stopped/terminated/disconnected, bail with a toast instead of
+        // opening a WS that would immediately fail.
+        const s = sessions.find((x) => x.sessionId === activeSessionId);
+        if (s && s.status !== "running") {
+                showToast("Session isn't running — start it first", true);
+                return;
+        }
+
         // Hide the current pane (don't dispose).
         if (currentActiveTabId) {
                 currentTerminals.get(currentActiveTabId)?.pane.classList.remove("active");
@@ -417,12 +441,14 @@ function openTab(tabId: string) {
 
 async function addTab(triggeredBy?: HTMLButtonElement) {
         if (!activeSessionId) return;
+        const sessionId = activeSessionId;
         if (triggeredBy) triggeredBy.disabled = true;
         try {
-                // Default label is "Tab N" where N is the next slot, since the
-                // backend's tabId (`tab-<uuid8>`) is not user-friendly to display.
-                const label = `Tab ${currentTabs.length + 1}`;
-                const tab = await createTab(activeSessionId, label);
+                // Default label: smallest "Tab N" not already in use. Using
+                // `currentTabs.length + 1` would collide after a middle tab
+                // was closed (e.g. [Tab 1, Tab 3] + add → another "Tab 3").
+                const tab = await createTab(sessionId, nextDefaultLabel());
+                if (activeSessionId !== sessionId) return;
                 currentTabs.push(tab);
                 renderTabBar();
                 openTab(tab.tabId);
@@ -433,15 +459,23 @@ async function addTab(triggeredBy?: HTMLButtonElement) {
         }
 }
 
+function nextDefaultLabel(): string {
+        const used = new Set(currentTabs.map((t) => t.label));
+        let n = 1;
+        while (used.has(`Tab ${n}`)) n++;
+        return `Tab ${n}`;
+}
+
 async function closeTab(tabId: string) {
         if (!activeSessionId) return;
+        const sessionId = activeSessionId;
         if (currentTabs.length <= 1) {
                 showToast("Can't close the last tab", true);
                 return;
         }
 
         try {
-                await deleteTab(activeSessionId, tabId);
+                await deleteTab(sessionId, tabId);
         } catch (err) {
                 if (err instanceof LastTabError) {
                         showToast("Can't close the last tab", true);
@@ -450,6 +484,10 @@ async function closeTab(tabId: string) {
                 }
                 return;
         }
+        // Guard against the user switching sessions during the DELETE — the
+        // session we closed the tab on is no longer the active one, so our
+        // in-memory state has already been torn down by openSession().
+        if (activeSessionId !== sessionId) return;
 
         const entry = currentTerminals.get(tabId);
         if (entry) {

@@ -180,7 +180,7 @@ export async function deleteTab(sessionId: string, tabId: string): Promise<void>
         if (res.status === 409) {
                 throw new LastTabError();
         }
-        if (!res.ok && res.status !== 204) {
+        if (!res.ok) {
                 const body = await res.json().catch(() => ({}));
                 throw new Error(body.error ?? "Failed to close tab");
         }
