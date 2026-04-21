@@ -579,8 +579,19 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
                                 : Math.min(closedIndex, currentTabs.length - 1);
                         const next = currentTabs[idx];
                         if (next) {
-                                openTab(next.tabId);
-                                return;
+                                // closeTab runs as `void`, so a sync throw from openTab
+                                // (openTerminalSession init failure) would be swallowed.
+                                // openTab's own prevActiveTabId restore is a no-op here
+                                // since the prev tab was just removed — recover directly.
+                                try {
+                                        openTab(next.tabId);
+                                        return;
+                                } catch (err) {
+                                        showToast((err as Error).message, true);
+                                        terminalContainer.style.display = "none";
+                                        renderTabBar();
+                                        return;
+                                }
                         }
                 }
                 // No running sibling to switch to — hide the container so we
