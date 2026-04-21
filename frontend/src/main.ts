@@ -322,7 +322,7 @@ async function openSession(sessionId: string) {
                 return;
         }
 
-        renderTabBar();
+        // openTab renders the bar; no need for an extra pre-render here.
         if (currentTabs.length > 0) openTab(currentTabs[0]!.tabId);
 }
 
@@ -416,17 +416,19 @@ function openTab(tabId: string) {
                 pane.dataset.tabId = tabId;
                 terminalContainer.appendChild(pane);
 
+                // Capture the sessionId for this terminal — if the user switches
+                // sessions while this WS is closing, `onStatus("disconnected")`
+                // mustn't write to whatever session happens to be active *now*.
+                const ownSessionId = activeSessionId;
                 const term = openTerminalSession({
                         container: pane,
-                        sessionId: activeSessionId,
+                        sessionId: ownSessionId,
                         tabId,
                         onStatus: (status: SessionStatus) => {
-                                // Session status travels via the tab's WS too. We still
-                                // update the session-level indicator so the sidebar is
-                                // honest about "disconnected".
-                                const s = sessions.find((x) => x.sessionId === activeSessionId);
+                                const s = sessions.find((x) => x.sessionId === ownSessionId);
                                 if (s) s.status = status as SessionInfo["status"];
-                                updateToolbar();
+                                // Only repaint the toolbar if this terminal still owns it.
+                                if (activeSessionId === ownSessionId) updateToolbar();
                                 renderSessionList();
                         },
                         onError: (msg: string) => showToast(msg, true),
@@ -450,9 +452,15 @@ async function addTab(triggeredBy?: HTMLButtonElement) {
                 // `currentTabs.length + 1` would collide after a middle tab
                 // was closed (e.g. [Tab 1, Tab 3] + add → another "Tab 3").
                 const tab = await createTab(sessionId, nextDefaultLabel());
-                if (activeSessionId !== sessionId) return;
+                if (activeSessionId !== sessionId) {
+                        // User switched away before the POST resolved. The backend tab
+                        // exists but was never shown; clean it up so it doesn't resurface
+                        // on the next listTabs for that session. Fire-and-forget: any
+                        // failure (container gone, etc.) is tolerable noise here.
+                        void deleteTab(sessionId, tab.tabId).catch(() => { /* ignored */ });
+                        return;
+                }
                 currentTabs.push(tab);
-                renderTabBar();
                 openTab(tab.tabId);
         } catch (err) {
                 showToast((err as Error).message, true);
@@ -494,6 +502,7 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
         // the old `triggeredBy` becomes detached — no need to re-enable it.
         if (activeSessionId !== sessionId) return;
 
+        const closedIndex = currentTabs.findIndex((t) => t.tabId === tabId);
         const entry = currentTerminals.get(tabId);
         if (entry) {
                 entry.term.dispose();
@@ -504,12 +513,14 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
 
         if (currentActiveTabId === tabId) {
                 currentActiveTabId = null;
-                // Only fall through to a neighbour if the session is still
-                // running (closeTab's await can race the session going stopped).
-                // openTab will call renderTabBar itself on success.
+                // Nearest surviving neighbour: what was at the same index is now
+                // the next sibling; clamp to the new last tab when we closed the
+                // rightmost one. Matches standard browser-tab behaviour — better
+                // than always jumping back to the first tab.
                 const s = sessions.find((x) => x.sessionId === activeSessionId);
                 if (currentTabs.length > 0 && s?.status === "running") {
-                        openTab(currentTabs[0]!.tabId);
+                        const next = currentTabs[Math.min(closedIndex, currentTabs.length - 1)]!;
+                        openTab(next.tabId);
                         return;
                 }
         }
