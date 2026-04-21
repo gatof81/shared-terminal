@@ -34,6 +34,11 @@ export function buildRouter(
                 rateLimitConfig.login.usernameWindowMs,
         );
 
+        // Cap username length at the request boundary so a huge string never
+        // becomes a key in the in-memory limiter's map or a query param in
+        // D1. 64 is generous for human-typed usernames.
+        const USERNAME_MAX_LEN = 64;
+
         router.get("/auth/status", async (_req: Request, res: Response) => {
                 res.json({ needsSetup: !(await hasAnyUsers()) });
         });
@@ -42,6 +47,10 @@ export function buildRouter(
                 const { username, password } = req.body as { username?: string; password?: string };
                 if (!username || !password || password.length < 6) {
                         res.status(400).json({ error: "username and password (min 6 chars) required" });
+                        return;
+                }
+                if (username.length > USERNAME_MAX_LEN) {
+                        res.status(400).json({ error: `username must be at most ${USERNAME_MAX_LEN} characters` });
                         return;
                 }
                 try {
@@ -56,6 +65,11 @@ export function buildRouter(
                 const { username, password } = req.body as { username?: string; password?: string };
                 if (!username || !password) {
                         res.status(400).json({ error: "username and password required" });
+                        return;
+                }
+                if (username.length > USERNAME_MAX_LEN) {
+                        // Reject before anything lands in the per-username limiter map.
+                        res.status(400).json({ error: `username must be at most ${USERNAME_MAX_LEN} characters` });
                         return;
                 }
 

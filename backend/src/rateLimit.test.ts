@@ -286,6 +286,25 @@ describe("auth route rate limiting", () => {
 		expect(r4.status).toBe(401);
 	});
 
+	it("rejects usernames over 64 chars with 400 before touching the limiter or auth module", async () => {
+		await spinUp({
+			login: { ipMax: 100, ipWindowMs: 60_000, usernameMax: 2, usernameWindowMs: 60_000 },
+			register: { ipMax: 100, ipWindowMs: 60_000 },
+		});
+		const huge = "a".repeat(65);
+
+		const loginRes = await postLogin({ username: huge, password: "bad" });
+		expect(loginRes.status).toBe(400);
+		const registerRes = await postRegister({ username: huge, password: "secret123" });
+		expect(registerRes.status).toBe(400);
+
+		// Neither request reached the auth module — the whole point of the
+		// upfront length check is to keep huge strings out of both D1 and
+		// the in-memory limiter map.
+		expect(authStubs.loginUser).not.toHaveBeenCalled();
+		expect(authStubs.registerUser).not.toHaveBeenCalled();
+	});
+
 	it("once per-username max is reached, even the correct password 429s until the window resets", async () => {
 		// Strict lockout: we assertAllowed BEFORE verifying the password, so a
 		// blocked account stays blocked for the rest of the window. Trade-off

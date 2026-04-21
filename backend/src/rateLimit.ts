@@ -167,12 +167,12 @@ export class UsernameRateLimiter {
 		this.attempts.delete(username);
 	}
 
-	/** Test helper: wipe all state. */
+	/** @internal Test helper: wipe all state. */
 	clear(): void {
 		this.attempts.clear();
 	}
 
-	/** Test helper: current map size, for the eviction tests. */
+	/** @internal Test helper: current map size, for the eviction tests. */
 	size(): number {
 		return this.attempts.size;
 	}
