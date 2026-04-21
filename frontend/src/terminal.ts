@@ -357,9 +357,11 @@ function buildWsUrl(sessionId: string, token: string, tabId?: string): string {
         const base = `${wsProto}//${url.host}/ws/sessions/${sessionId}`;
         const params = new URLSearchParams();
         if (token) params.set("token", token);
-        // tabId is server-issued. Backend re-validates against
-        // /^[a-zA-Z0-9._-]{1,64}$/ in wsHandler.ts — colons and `@` would
-        // otherwise let this inject tmux target syntax into `tmux attach -t`.
+        // tabId is server-issued and re-validated on the backend before any
+        // `tmux attach -t` — see backend/src/wsHandler.ts (rawTab regex
+        // /^[a-zA-Z0-9._-]{1,64}$/). Excluding `:` is the load-bearing part:
+        // tmux target syntax needs a colon to parse `session:window.pane`, so
+        // `.` alone can't escalate a tabId into a different tmux target.
         if (tabId) params.set("tab", tabId);
         const qs = params.toString();
         return qs ? `${base}?${qs}` : base;

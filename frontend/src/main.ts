@@ -486,6 +486,14 @@ function openTab(tabId: string) {
 async function addTab(triggeredBy?: HTMLButtonElement) {
         if (!activeSessionId) return;
         const sessionId = activeSessionId;
+        const sessionName = sessions.find((x) => x.sessionId === sessionId)?.name ?? sessionId.slice(0, 8);
+        // Pre-check: don't create a backend tab we can't attach to. Matches
+        // openTab's own guard so this short-circuits before the POST.
+        const statusBefore = sessions.find((x) => x.sessionId === sessionId)?.status;
+        if (statusBefore && statusBefore !== "running") {
+                showToast("Session isn't running — start it first", true);
+                return;
+        }
         if (triggeredBy) triggeredBy.disabled = true;
         try {
                 // Default label: smallest "Tab N" not already in use. Using
@@ -496,12 +504,26 @@ async function addTab(triggeredBy?: HTMLButtonElement) {
                         // User switched away before the POST resolved. The backend tab
                         // exists but was never shown; clean it up so it doesn't resurface
                         // on the next listTabs for that session. Fire-and-forget, but if
-                        // the cleanup fails surface a toast so the user knows backend
-                        // state drifted from what the UI shows.
+                        // the cleanup fails surface a toast — include the owning session
+                        // name so the user knows WHICH session has the orphan, not just
+                        // whichever session happens to be active now.
                         void deleteTab(sessionId, tab.tabId).catch((err) => {
                                 console.warn(`[tabs] orphan cleanup failed for ${tab.tabId}:`, err);
-                                showToast(`Orphan tab left on server: ${(err as Error).message}`, true);
+                                showToast(`Orphan tab left on "${sessionName}": ${(err as Error).message}`, true);
                         });
+                        return;
+                }
+                // Post-check: session may have stopped during the POST round-trip.
+                // openTab returns early (silent toast + return) on non-running
+                // sessions, which would otherwise leave us with currentTabs and
+                // a backend tab both pointing at an unattachable tmux session.
+                const statusAfter = sessions.find((x) => x.sessionId === sessionId)?.status;
+                if (!statusAfter || statusAfter !== "running") {
+                        void deleteTab(sessionId, tab.tabId).catch((err) => {
+                                console.warn(`[tabs] post-stop cleanup failed for ${tab.tabId}:`, err);
+                                showToast(`Orphan tab left on "${sessionName}": ${(err as Error).message}`, true);
+                        });
+                        showToast("Session stopped — tab discarded", true);
                         return;
                 }
                 currentTabs.push(tab);
@@ -514,7 +536,7 @@ async function addTab(triggeredBy?: HTMLButtonElement) {
                         currentTabs = currentTabs.filter((t) => t.tabId !== tab.tabId);
                         void deleteTab(sessionId, tab.tabId).catch((cleanupErr) => {
                                 console.warn(`[tabs] rollback cleanup failed for ${tab.tabId}:`, cleanupErr);
-                                showToast(`Orphan tab left on server: ${(cleanupErr as Error).message}`, true);
+                                showToast(`Orphan tab left on "${sessionName}": ${(cleanupErr as Error).message}`, true);
                         });
                         renderTabBar();
                         throw err;
