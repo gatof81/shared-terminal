@@ -25,16 +25,36 @@ export interface ExecHandle {
 
 export type OutputListener = (data: string) => void;
 
+// One shared `tmux attach` exec per target key. All WS clients pointing at the
+// same session (later: same session+window) multiplex over this single exec —
+// tmux already mirrors output to every attached client, so if we made one exec
+// per client, each byte would fan out N times.
+interface SharedExec {
+        execId: string;
+        stream: Duplex;
+        resize(cols: number, rows: number): Promise<void>;
+        listeners: Map<string /*attachId*/, OutputListener>;
+        clientSizes: Map<string /*attachId*/, { cols: number; rows: number }>;
+        appliedSize: { cols: number; rows: number };
+}
+
 export class DockerManager {
         private docker: Dockerode;
         private sessions: SessionManager;
-        private buffers = new Map<string, RingBuffer>();
-        private listeners = new Map<string, Set<OutputListener>>();
-        private execs = new Map<string, ExecHandle>();
+        private buffers = new Map<string /*targetKey*/, RingBuffer>();
+        private shared = new Map<string /*targetKey*/, Promise<SharedExec>>();
+        private keyOf = new Map<string /*attachId*/, string /*targetKey*/>();
 
         constructor(sessions: SessionManager, dockerOpts?: Dockerode.DockerOptions) {
                 this.docker = new Dockerode(dockerOpts ?? { socketPath: "/var/run/docker.sock" });
                 this.sessions = sessions;
+        }
+
+        // Today one target per session (the default tmux window). When per-tab
+        // windows land this will return `${sessionId}:${windowId}` — callers stay
+        // the same; only the key-construction changes.
+        private targetKey(sessionId: string /*, windowId?: string*/): string {
+                return sessionId;
         }
 
         // ── Container lifecycle ─────────────────────────────────────────────────
@@ -95,14 +115,26 @@ export class DockerManager {
                         }
                 }
 
-                for (const [key, handle] of this.execs) {
-                        if (key.startsWith(sessionId)) {
-                                handle.destroy();
-                                this.execs.delete(key);
+                // Destroy any shared exec and per-attach routing for this session.
+                // Match on equality or on `sessionId:…` prefix so this keeps working
+                // once per-tab targetKeys (sessionId:windowId) exist.
+                const prefix = `${sessionId}:`;
+                for (const [key, pending] of this.shared) {
+                        if (key === sessionId || key.startsWith(prefix)) {
+                                this.shared.delete(key);
+                                this.buffers.delete(key);
+                                pending.then(
+                                        (s) => { try { s.stream.destroy(); } catch { /* already destroyed */ } },
+                                        () => { /* spawn rejected — nothing to destroy */ },
+                                );
+                        }
+                }
+                for (const [attachId, key] of this.keyOf) {
+                        if (key === sessionId || key.startsWith(prefix)) {
+                                this.keyOf.delete(attachId);
                         }
                 }
                 this.buffers.delete(sessionId);
-                this.listeners.delete(sessionId);
                 console.log(`[docker] killed container for session ${sessionId}`);
         }
 
@@ -194,6 +226,102 @@ export class DockerManager {
                 rows: number,
                 onOutput: OutputListener,
         ): Promise<{ handle: ExecHandle; replay: string | null }> {
+                const key = this.targetKey(sessionId);
+
+                // Reuse the shared exec if one already exists (or is being spawned).
+                // Concurrent first-attach calls await the same promise → exactly one
+                // `container.exec` on the wire.
+                let pending = this.shared.get(key);
+                if (!pending) {
+                        pending = this.spawnSharedExec(sessionId, key);
+                        // Clear the slot on rejection so the next attach retries.
+                        // `.catch` here doesn't consume the rejection — awaiters on the
+                        // original promise still see it; this handler exists so Node
+                        // doesn't flag an unhandledRejection if the awaiter finishes
+                        // before this microtask.
+                        pending.catch((err) => {
+                                if (this.shared.get(key) === pending) this.shared.delete(key);
+                                console.error(`[docker] shared exec spawn failed for ${key}:`, (err as Error).message);
+                        });
+                        this.shared.set(key, pending);
+                }
+
+                const s = await pending;
+
+                s.listeners.set(attachId, onOutput);
+                s.clientSizes.set(attachId, { cols, rows });
+                this.keyOf.set(attachId, key);
+
+                await this.recomputeSize(s);
+
+                const replay = this.getOrCreateBuffer(key).drain();
+                await this.sessions.updateConnected(sessionId);
+                console.log(`[docker] attached ${attachId} to session ${sessionId} (listeners=${s.listeners.size})`);
+
+                const handle: ExecHandle = {
+                        execId: attachId,
+                        stream: s.stream,
+                        resize: (c: number, r: number) => this.resize(attachId, c, r),
+                        destroy: () => this.detach(attachId),
+                };
+                return { handle, replay: replay.length > 0 ? replay : null };
+        }
+
+        write(attachId: string, data: string): void {
+                const key = this.keyOf.get(attachId);
+                if (!key) return;
+                const pending = this.shared.get(key);
+                if (!pending) return;
+                // By the time a client sends input, attach() has awaited `pending`,
+                // so it's already resolved — the .then just defensively handles the
+                // not-yet-resolved path. No error handler needed: a rejected spawn
+                // clears the slot above; pending would already be gone.
+                pending.then((s) => {
+                        if (!s.stream.destroyed) s.stream.write(data);
+                }, () => { /* spawn failed; nothing to write to */ });
+        }
+
+        async resize(attachId: string, cols: number, rows: number): Promise<void> {
+                const key = this.keyOf.get(attachId);
+                if (!key) return;
+                const pending = this.shared.get(key);
+                if (!pending) return;
+                const s = await pending.catch(() => null);
+                if (!s) return;
+                if (!s.clientSizes.has(attachId)) return;
+                s.clientSizes.set(attachId, { cols, rows });
+                await this.recomputeSize(s);
+        }
+
+        detach(attachId: string): void {
+                const key = this.keyOf.get(attachId);
+                if (!key) return;
+                this.keyOf.delete(attachId);
+                const pending = this.shared.get(key);
+                if (!pending) return;
+
+                pending.then((s) => {
+                        s.listeners.delete(attachId);
+                        s.clientSizes.delete(attachId);
+
+                        if (s.listeners.size === 0) {
+                                // Last client gone — tear down the shared exec. The ring
+                                // buffer is kept so a future re-attach gets scrollback.
+                                if (this.shared.get(key) === pending) this.shared.delete(key);
+                                try { s.stream.destroy(); } catch { /* already destroyed */ }
+                                console.log(`[docker] detached ${attachId}; last client, shared exec closed`);
+                        } else {
+                                // Someone else may have had a smaller terminal; recompute so
+                                // the survivors don't stay pinned to a too-small size.
+                                void this.recomputeSize(s);
+                                console.log(`[docker] detached ${attachId}; ${s.listeners.size} listener(s) remain`);
+                        }
+                }, () => { /* spawn rejected; nothing to detach from */ });
+        }
+
+        // ── Shared exec internals ──────────────────────────────────────────────
+
+        private async spawnSharedExec(sessionId: string, key: string): Promise<SharedExec> {
                 const meta = await this.sessions.getOrThrow(sessionId);
                 if (!meta.containerId) throw new Error("No container for this session");
 
@@ -204,67 +332,72 @@ export class DockerManager {
                         AttachStdout: true,
                         AttachStderr: true,
                         Tty: true,
-                        Env: [`COLUMNS=${cols}`, `LINES=${rows}`],
+                        // Initial env size is a placeholder — recomputeSize applies the real
+                        // min-of-all-clients size as soon as the first attach() registers.
+                        Env: [`COLUMNS=80`, `LINES=24`],
                 });
 
                 const stream = await exec.start({ hijack: true, stdin: true, Tty: true });
-                try { await exec.resize({ h: rows, w: cols }); } catch { /* ignore */ }
 
-                const buffer = this.getOrCreateBuffer(sessionId);
-
-                stream.on("data", (chunk: Buffer) => {
-                        const data = chunk.toString("utf-8");
-                        buffer.push(data);
-                        const ls = this.listeners.get(sessionId);
-                        if (ls) {
-                                for (const l of ls) {
-                                        try { l(data); } catch { /* listener error */ }
-                                }
-                        }
-                });
-
-                if (!this.listeners.has(sessionId)) {
-                        this.listeners.set(sessionId, new Set());
-                }
-                this.listeners.get(sessionId)!.add(onOutput);
-
-                const handle: ExecHandle = {
-                        execId: attachId,
+                const buffer = this.getOrCreateBuffer(key);
+                const s: SharedExec = {
+                        execId: key,
                         stream,
                         resize: async (c: number, r: number) => {
                                 try { await exec.resize({ h: r, w: c }); } catch { /* ignore */ }
                         },
-                        destroy: () => {
-                                stream.destroy();
-                                this.listeners.get(sessionId)?.delete(onOutput);
-                                this.execs.delete(attachId);
-                        },
+                        listeners: new Map(),
+                        clientSizes: new Map(),
+                        // Sentinel {0,0} forces the first recomputeSize to actually call
+                        // exec.resize — any real client size differs from this.
+                        appliedSize: { cols: 0, rows: 0 },
                 };
 
-                this.execs.set(attachId, handle);
-                const replay = buffer.drain();
-                await this.sessions.updateConnected(sessionId);
-                console.log(`[docker] attached exec ${attachId} to session ${sessionId}`);
-                return { handle, replay };
+                // Single fan-out for the entire session. Each byte from tmux fires this
+                // exactly once, regardless of how many clients are attached.
+                stream.on("data", (chunk: Buffer) => {
+                        const data = chunk.toString("utf-8");
+                        buffer.push(data);
+                        for (const l of s.listeners.values()) {
+                                try { l(data); } catch { /* listener error */ }
+                        }
+                });
+
+                // If the stream dies on its own (tmux server exits, container restarted,
+                // docker daemon hiccup), forget the shared entry so the next attach will
+                // respawn. We guard the delete with a stream-identity check so we never
+                // clobber a newer spawn that replaced us. Orphaned listeners clean
+                // themselves up when their WS closes and detach() runs.
+                const forgetIfCurrent = async () => {
+                        const currentP = this.shared.get(key);
+                        if (!currentP) return;
+                        try {
+                                const currentS = await currentP;
+                                if (currentS.stream === stream) this.shared.delete(key);
+                        } catch { /* newer spawn rejected; not our concern */ }
+                };
+                stream.on("end", () => { void forgetIfCurrent(); });
+                stream.on("close", () => { void forgetIfCurrent(); });
+                stream.on("error", (err) => {
+                        console.error(`[docker] shared exec stream error for ${key}:`, (err as Error).message);
+                        void forgetIfCurrent();
+                });
+
+                console.log(`[docker] spawned shared exec for ${key}`);
+                return s;
         }
 
-        write(attachId: string, data: string): void {
-                const handle = this.execs.get(attachId);
-                if (handle && !handle.stream.destroyed) {
-                        handle.stream.write(data);
+        private async recomputeSize(s: SharedExec): Promise<void> {
+                if (s.clientSizes.size === 0) return;
+                let minCols = Number.POSITIVE_INFINITY;
+                let minRows = Number.POSITIVE_INFINITY;
+                for (const { cols, rows } of s.clientSizes.values()) {
+                        if (cols < minCols) minCols = cols;
+                        if (rows < minRows) minRows = rows;
                 }
-        }
-
-        async resize(attachId: string, cols: number, rows: number): Promise<void> {
-                const handle = this.execs.get(attachId);
-                if (handle) await handle.resize(cols, rows);
-        }
-
-        detach(attachId: string): void {
-                const handle = this.execs.get(attachId);
-                if (handle) {
-                        handle.destroy();
-                        console.log(`[docker] detached exec ${attachId}`);
+                if (minCols !== s.appliedSize.cols || minRows !== s.appliedSize.rows) {
+                        s.appliedSize = { cols: minCols, rows: minRows };
+                        await s.resize(minCols, minRows);
                 }
         }
 
