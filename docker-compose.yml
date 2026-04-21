@@ -15,6 +15,10 @@ services:
       - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
       - JWT_EXPIRES_IN=${JWT_EXPIRES_IN:-7d}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      # Default "1" = trust exactly one hop in front of us (the Cloudflare
+      # Tunnel). Load-bearing for /auth per-IP rate limiting — without it
+      # every request shares the tunnel's IP. Set to "0" for direct dev.
+      - TRUST_PROXY=${TRUST_PROXY:-1}
       - SESSION_IMAGE=${SESSION_IMAGE:-shared-terminal-session}
       - WORKSPACE_ROOT=/var/shared-terminal/workspaces
       - CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID}
