@@ -1,16 +1,4 @@
-/**
- * rateLimit.ts — Rate limiters for the public /auth routes.
- *
- * Two layers defend against credential brute-force:
- *  1. Per-IP, via `express-rate-limit` (middleware). Stops a single machine
- *     from hammering the endpoint.
- *  2. Per-username, via the in-process `UsernameRateLimiter` below. Counts
- *     FAILED logins only and resets on success, so a botnet distributing
- *     guesses across many IPs can still be throttled on a single account.
- *
- * Both are in-memory — fine for the single-node deployment described in
- * CLAUDE.md. If this ever scales horizontally, swap the store for Redis.
- */
+// rateLimit.ts — per-IP and per-username limiters for the /auth routes.
 
 import rateLimit, { type RateLimitRequestHandler } from "express-rate-limit";
 
@@ -51,23 +39,22 @@ export interface AuthRateLimiters {
 }
 
 export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
-	// standardHeaders: draft-7 sends RateLimit-* and Retry-After on 429.
-	// legacyHeaders: false suppresses the older X-RateLimit-* variants.
-	// Response body is explicit JSON so the frontend can read `error` like
-	// every other 4xx on this surface.
+	// draft-7 gives us RateLimit-* and Retry-After; legacyHeaders off.
+	// `scope` lets the frontend tell an IP block apart from a per-account
+	// lockout and surface a useful message.
 	const loginIp = rateLimit({
 		windowMs: cfg.login.ipWindowMs,
 		limit: cfg.login.ipMax,
 		standardHeaders: "draft-7",
 		legacyHeaders: false,
-		message: { error: "Too many login attempts from this IP, try again later" },
+		message: { error: "Too many login attempts from this IP, try again later", scope: "ip" },
 	});
 	const registerIp = rateLimit({
 		windowMs: cfg.register.ipWindowMs,
 		limit: cfg.register.ipMax,
 		standardHeaders: "draft-7",
 		legacyHeaders: false,
-		message: { error: "Too many registration attempts from this IP, try again later" },
+		message: { error: "Too many registration attempts from this IP, try again later", scope: "ip" },
 	});
 	return { loginIp, registerIp };
 }
@@ -88,28 +75,13 @@ interface FailedAttempts {
 	resetAt: number;
 }
 
-// Hard cap on how many distinct usernames we'll track at once. Without this,
-// a caller hitting /auth/login with a large pool of unique usernames could
-// force the map to grow unbounded for the full window — a real DoS vector on
-// a public endpoint. JS Map preserves insertion order, so evicting the
-// oldest entry when we overflow (FIFO) is cheap: `map.keys().next().value`.
-// LRU would be nicer but needs re-insertion on each access; FIFO is enough
-// for DoS defence — under steady attack the oldest buckets are the ones
-// most likely to have already expired anyway.
+// Cap distinct tracked usernames so a flood of unique keys can't grow the
+// map unbounded. FIFO eviction (Map preserves insertion order).
 const DEFAULT_MAX_TRACKED_USERNAMES = 10_000;
 
-/**
- * Tracks failed logins per username, with a sliding-ish window: the counter
- * resets the first time it's consulted past `resetAt`. Successful logins call
- * `reset()` so legitimate users aren't locked out after one typo.
- *
- * NOTE on case sensitivity: usernames are stored verbatim in D1 and looked
- * up with `WHERE username = ?` (case-sensitive collation), so "Alice" and
- * "alice" are distinct accounts. This limiter keys on the same literal
- * string and therefore locks the same identity the auth module authenticates.
- * If username normalization is ever introduced in `auth.ts`, this class must
- * apply the same normalization or the two layers will diverge.
- */
+// Keyed on the literal username string because auth.ts looks up D1 with the
+// same literal (case-sensitive). If auth.ts ever normalizes, this class must
+// mirror the normalization or the two layers diverge.
 export class UsernameRateLimiter {
 	private attempts = new Map<string, FailedAttempts>();
 	private readonly maxTracked: number;
@@ -145,13 +117,8 @@ export class UsernameRateLimiter {
 		const now = Date.now();
 		const entry = this.attempts.get(username);
 		if (!entry || now >= entry.resetAt) {
-			// Opportunistic GC: if we're about to insert and the map is full,
-			// first drop any entries whose windows have already expired. Cheap
-			// O(n) sweep but amortizes across many requests.
+			// On overflow: sweep expired entries first, then FIFO-evict.
 			if (this.attempts.size >= this.maxTracked) this.evictExpired(now);
-			// Still full? Evict the oldest (FIFO) to make room for the new
-			// tracker. The attacker keeps winning the race, but we stay within
-			// the memory budget.
 			if (this.attempts.size >= this.maxTracked) {
 				const oldestKey = this.attempts.keys().next().value;
 				if (oldestKey !== undefined) this.attempts.delete(oldestKey);

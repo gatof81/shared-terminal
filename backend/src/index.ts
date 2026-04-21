@@ -44,23 +44,21 @@ const docker = new DockerManager(sessions);
 
 const app = express();
 if (TRUST_PROXY !== undefined) {
-        // Env values are strings; Express accepts a number (hop count), a
-        // boolean, or an IP/subnet list. Coerce "1" → 1, "false" → false,
-        // otherwise pass through for IPs/subnets. "true" is coerced and
-        // logged as a warning — see the security note above const
-        // TRUST_PROXY for why it's unsafe on a public endpoint.
+        // Env values are strings; coerce "1" → 1 and "false" → false.
+        // Anything else passes through as an IP/subnet/"loopback"/etc.
+        // "true" is explicitly refused — see note above.
+        if (TRUST_PROXY === "true") {
+                console.error(
+                        "[server] TRUST_PROXY=true is refused: Express would take the leftmost " +
+                        "X-Forwarded-For entry (attacker-controlled), bypassing per-IP rate limiting. " +
+                        "Use a hop count (e.g. TRUST_PROXY=1) instead.",
+                );
+                process.exit(1);
+        }
         let coerced: number | boolean | string;
         if (/^\d+$/.test(TRUST_PROXY)) coerced = Number(TRUST_PROXY);
-        else if (TRUST_PROXY === "true") coerced = true;
         else if (TRUST_PROXY === "false") coerced = false;
         else coerced = TRUST_PROXY;
-        if (coerced === true) {
-                console.warn(
-                        "[server] TRUST_PROXY=true is UNSAFE: Express will take the leftmost " +
-                        "X-Forwarded-For entry (attacker-controlled), which bypasses per-IP " +
-                        "rate limiting on /auth. Use a hop count like '1' instead.",
-                );
-        }
         app.set("trust proxy", coerced);
 }
 app.use(express.json());

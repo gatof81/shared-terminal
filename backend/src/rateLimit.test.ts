@@ -4,20 +4,24 @@ import type { AddressInfo } from "net";
 import express from "express";
 
 import { UsernameRateLimiter, RateLimitError } from "./rateLimit.js";
+import { InvalidCredentialsError } from "./auth.js";
 
-// `routes.ts` calls registerUser / loginUser / hasAnyUsers from `./auth.js`,
-// which talk to D1. Stub the whole module so routing tests don't need a real
-// database. Stubs are configured per-test via the handles captured below.
+// Stub the auth module so routing tests don't touch D1.
 const authStubs = vi.hoisted(() => ({
 	registerUser: vi.fn(async (_u: string, _p: string) => ({ userId: "u1", token: "tok" })),
 	loginUser: vi.fn(async (_u: string, _p: string) => ({ userId: "u1", token: "tok" })),
 	hasAnyUsers: vi.fn(async () => true),
 	requireAuth: (_req: unknown, _res: unknown, next: () => void) => next(),
+	// Re-export the error class so `import { InvalidCredentialsError }` above
+	// resolves to the same constructor the route handler uses (module-local
+	// mocks replace the whole module).
+	InvalidCredentialsError: class extends Error {
+		constructor() { super("Invalid credentials"); this.name = "InvalidCredentialsError"; }
+	},
 }));
 vi.mock("./auth.js", () => authStubs);
 
 // `buildRouter` is imported AFTER the mock is in place.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 import { buildRouter } from "./routes.js";
 
 // ── UsernameRateLimiter unit tests ─────────────────────────────────────────
@@ -159,8 +163,9 @@ describe("auth route rate limiting", () => {
 	beforeEach(() => {
 		authStubs.registerUser.mockClear();
 		authStubs.loginUser.mockClear();
+		// Default: loginUser rejects as bad creds (typed so the handler counts it).
 		authStubs.loginUser.mockImplementation(async () => {
-			throw new Error("Invalid credentials");
+			throw new authStubs.InvalidCredentialsError();
 		});
 		authStubs.registerUser.mockImplementation(async () => ({ userId: "u1", token: "tok" }));
 	});
@@ -303,6 +308,52 @@ describe("auth route rate limiting", () => {
 		// the in-memory limiter map.
 		expect(authStubs.loginUser).not.toHaveBeenCalled();
 		expect(authStubs.registerUser).not.toHaveBeenCalled();
+	});
+
+	it("infra errors from loginUser don't count toward the per-username lockout", async () => {
+		// Regression guard: a D1 outage would otherwise be indistinguishable
+		// from a bad password and lock out legitimate users during downtime.
+		await spinUp({
+			login: { ipMax: 100, ipWindowMs: 60_000, usernameMax: 2, usernameWindowMs: 60_000 },
+			register: { ipMax: 100, ipWindowMs: 60_000 },
+		});
+		authStubs.loginUser.mockImplementation(async () => {
+			throw new Error("D1 timeout");
+		});
+
+		// Three attempts — if the handler incremented on every throw, the 3rd
+		// would be 429. With typed-error filtering, all three should 500.
+		const r1 = await postLogin({ username: "alice", password: "bad" });
+		const r2 = await postLogin({ username: "alice", password: "bad" });
+		const r3 = await postLogin({ username: "alice", password: "bad" });
+		expect(r1.status).toBe(500);
+		expect(r2.status).toBe(500);
+		expect(r3.status).toBe(500);
+	});
+
+	it("429 bodies carry a `scope` field so the UI can tell IP vs username lockout apart", async () => {
+		// IP-scoped 429 from express-rate-limit.
+		await spinUp({
+			login: { ipMax: 1, ipWindowMs: 60_000, usernameMax: 100, usernameWindowMs: 60_000 },
+			register: { ipMax: 100, ipWindowMs: 60_000 },
+		});
+		await postLogin({ username: "u1", password: "bad" });
+		const ipBlocked = await postLogin({ username: "u2", password: "bad" });
+		expect(ipBlocked.status).toBe(429);
+		expect(await ipBlocked.json()).toMatchObject({ scope: "ip" });
+
+		// Tear down and bring up a fresh server where only the username layer fires.
+		await new Promise<void>((resolve) => server!.close(() => resolve()));
+		server = null;
+
+		await spinUp({
+			login: { ipMax: 100, ipWindowMs: 60_000, usernameMax: 1, usernameWindowMs: 60_000 },
+			register: { ipMax: 100, ipWindowMs: 60_000 },
+		});
+		await postLogin({ username: "alice", password: "bad" });
+		const usernameBlocked = await postLogin({ username: "alice", password: "bad" });
+		expect(usernameBlocked.status).toBe(429);
+		expect(await usernameBlocked.json()).toMatchObject({ scope: "username" });
 	});
 
 	it("once per-username max is reached, even the correct password 429s until the window resets", async () => {

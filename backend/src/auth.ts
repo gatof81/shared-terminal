@@ -39,6 +39,16 @@ export async function registerUser(username: string, password: string): Promise<
         return { userId, token };
 }
 
+// Thrown on wrong-username-or-password, and only that. Infra failures (D1
+// timeouts, bcrypt crashes, …) propagate as regular Errors so the route
+// handler can 500 them instead of counting them toward the lockout budget.
+export class InvalidCredentialsError extends Error {
+        constructor() {
+                super("Invalid credentials");
+                this.name = "InvalidCredentialsError";
+        }
+}
+
 export async function loginUser(username: string, password: string): Promise<{ userId: string; token: string }> {
         const result = await d1Query<{ id: string; password_hash: string }>(
                 "SELECT id, password_hash FROM users WHERE username = ?",
@@ -47,7 +57,7 @@ export async function loginUser(username: string, password: string): Promise<{ u
 
         const row = result.results[0];
         if (!row || !bcrypt.compareSync(password, row.password_hash)) {
-                throw new Error("Invalid credentials");
+                throw new InvalidCredentialsError();
         }
 
         const token = signToken(row.id, username);

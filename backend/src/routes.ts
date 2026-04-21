@@ -3,7 +3,7 @@
  */
 
 import { Router, Request, Response } from "express";
-import { AuthedRequest, requireAuth, registerUser, loginUser, hasAnyUsers } from "./auth.js";
+import { AuthedRequest, requireAuth, registerUser, loginUser, hasAnyUsers, InvalidCredentialsError } from "./auth.js";
 import { SessionManager, NotFoundError, ForbiddenError } from "./sessionManager.js";
 import { DockerManager } from "./dockerManager.js";
 import { SessionMeta } from "./types.js";
@@ -24,19 +24,13 @@ export function buildRouter(
 
         // ── Auth routes (public) ────────────────────────────────────────────────
 
-        // Two-layer rate limiting on the public auth surface:
-        //  - loginIp / registerIp: per-IP, defends against a single attacker.
-        //  - usernameLimiter: per-username (failed logins only), defends against
-        //    a distributed attack on a specific account.
         const { loginIp, registerIp } = createAuthRateLimiters(rateLimitConfig);
         const usernameLimiter = new UsernameRateLimiter(
                 rateLimitConfig.login.usernameMax,
                 rateLimitConfig.login.usernameWindowMs,
         );
-
-        // Cap username length at the request boundary so a huge string never
-        // becomes a key in the in-memory limiter's map or a query param in
-        // D1. 64 is generous for human-typed usernames.
+        // Cap username length at the request boundary so huge strings can't
+        // land in the limiter map or D1.
         const USERNAME_MAX_LEN = 64;
 
         router.get("/auth/status", async (_req: Request, res: Response) => {
@@ -68,33 +62,52 @@ export function buildRouter(
                         return;
                 }
                 if (username.length > USERNAME_MAX_LEN) {
-                        // Reject before anything lands in the per-username limiter map.
                         res.status(400).json({ error: `username must be at most ${USERNAME_MAX_LEN} characters` });
                         return;
                 }
 
-                // Per-username gate BEFORE credential verification so repeated
-                // guesses don't get to run bcrypt (which would be expensive and
-                // also leak timing info).
+                // Per-username gate runs before bcrypt so guesses can't burn CPU
+                // or leak timing info. Message distinguishes "this account is
+                // locked" from the IP-layer 429 above so the user knows to wait
+                // rather than suspect a service outage.
                 try {
                         usernameLimiter.assertAllowed(username);
                 } catch (err) {
                         if (err instanceof RateLimitError) {
                                 res.setHeader("Retry-After", String(err.retryAfterSeconds));
-                                res.status(429).json({ error: err.message });
+                                res.status(429).json({
+                                        error: "Too many failed login attempts for this account, try again later",
+                                        scope: "username",
+                                });
                                 return;
                         }
                         throw err;
                 }
 
+                // Note on race: assertAllowed is sync, loginUser is async. On a
+                // single Node process this can let `concurrent in-flight requests`
+                // slip past the limit — acceptable given the attacker still can't
+                // meaningfully exceed `max + parallelism`, and parallelism is 1 in
+                // practice (bcrypt serialises on the event loop).
+                let result: { userId: string; token: string };
                 try {
-                        const result = await loginUser(username, password);
-                        usernameLimiter.reset(username);
-                        res.json(result);
+                        result = await loginUser(username, password);
                 } catch (err) {
-                        usernameLimiter.recordFailure(username);
-                        res.status(401).json({ error: (err as Error).message });
+                        if (err instanceof InvalidCredentialsError) {
+                                // Only bad credentials count toward lockout. Infra
+                                // errors (D1 down, bcrypt crash, …) must NOT
+                                // increment the counter — a transient outage would
+                                // otherwise silently lock legitimate users out.
+                                usernameLimiter.recordFailure(username);
+                                res.status(401).json({ error: err.message });
+                                return;
+                        }
+                        console.error(`[auth] login failed unexpectedly for ${username}:`, (err as Error).message);
+                        res.status(500).json({ error: "Internal server error" });
+                        return;
                 }
+                usernameLimiter.reset(username);
+                res.json(result);
         });
 
         // ── Session routes (authenticated) ──────────────────────────────────────
