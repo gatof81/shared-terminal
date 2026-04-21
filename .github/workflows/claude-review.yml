@@ -10,7 +10,7 @@ name: Claude PR Review
 #   This is NOT equivalent to `contents: write` — it does not grant code-push
 #   rights; the resulting token is bounded by the Claude GitHub App's own
 #   install permissions on this repo.
-# - `--max-turns 5` caps iteration blast radius if prompt injection occurs.
+# - `--max-turns 10` caps iteration blast radius if prompt injection occurs.
 # - Action is pinned to major version `@v1`. Consider pinning to a commit SHA
 #   for stricter supply-chain hygiene.
 
@@ -43,7 +43,7 @@ jobs:
           # Claude Max / Pro subscription (OAuth). For pay-as-you-go API billing instead,
           # comment the line below and use: anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: --model claude-sonnet-4-6 --max-turns 5
+          claude_args: --model claude-sonnet-4-6 --max-turns 10
           prompt: |
             You are reviewing a pull request on the shared-terminal repo
             (public TypeScript/Node project: Cloudflare Pages frontend,
