@@ -413,8 +413,11 @@ function openTab(tabId: string) {
         if (!currentTabs.some((t) => t.tabId === tabId)) return;
 
         // Only spin up a terminal for a running session — matches the sidebar.
+        // Treat a missing sessions[] entry as not-running too; if the list is
+        // stale or the session was deleted externally, attaching would just
+        // fail via the WS and leave a blank pane mounted as the active tab.
         const s = sessions.find((x) => x.sessionId === activeSessionId);
-        if (s && s.status !== "running") {
+        if (!s || s.status !== "running") {
                 showToast("Session isn't running — start it first", true);
                 return;
         }
@@ -542,14 +545,11 @@ async function addTab(triggeredBy?: HTMLButtonElement) {
                         throw err;
                 }
         } catch (err) {
-                // Two distinct failure modes funnel here: (a) createTab itself
-                // rejected — backend state is clean; (b) the inner openTab
-                // rollback re-threw — backend cleanup is already in flight
-                // fire-and-forget. Today both just surface the same toast, but
-                // future retry logic should branch on these two paths.
                 showToast((err as Error).message, true);
         } finally {
-                if (triggeredBy) triggeredBy.disabled = false;
+                // The inner-catch renderTabBar() rebuilds the + button, so the
+                // original triggeredBy may be detached by the time we get here.
+                if (triggeredBy?.isConnected) triggeredBy.disabled = false;
         }
 }
 
@@ -626,7 +626,9 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
                                         openTab(next.tabId);
                                         return;
                                 } catch (err) {
-                                        showToast((err as Error).message, true);
+                                        // Spell out the connection — the user sees a blank
+                                        // panel otherwise with no hint why.
+                                        showToast(`Couldn't switch to "${next.label}": ${(err as Error).message}`, true);
                                         terminalContainer.style.display = "none";
                                         renderTabBar();
                                         return;
