@@ -357,6 +357,9 @@ function buildWsUrl(sessionId: string, token: string, tabId?: string): string {
         const base = `${wsProto}//${url.host}/ws/sessions/${sessionId}`;
         const params = new URLSearchParams();
         if (token) params.set("token", token);
+        // tabId is server-issued. Backend re-validates against
+        // /^[a-zA-Z0-9._-]{1,64}$/ in wsHandler.ts — colons and `@` would
+        // otherwise let this inject tmux target syntax into `tmux attach -t`.
         if (tabId) params.set("tab", tabId);
         const qs = params.toString();
         return qs ? `${base}?${qs}` : base;

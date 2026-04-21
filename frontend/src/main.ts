@@ -384,7 +384,10 @@ function renderTabBar() {
                 close.className = "tab-close";
                 close.textContent = "×";
                 close.title = "Close tab";
-                close.disabled = currentTabs.length <= 1;
+                // Mirror the closeTab guard so the × doesn't render enabled
+                // while a concurrent close is in flight — clicking would just
+                // produce a misleading "Can't close the last tab" toast.
+                close.disabled = currentTabs.length - closingTabs.size <= 1;
                 close.addEventListener("click", (e) => {
                         e.stopPropagation();
                         void closeTab(tab.tabId, close);
@@ -511,6 +514,11 @@ async function addTab(triggeredBy?: HTMLButtonElement) {
                         throw err;
                 }
         } catch (err) {
+                // Two distinct failure modes funnel here: (a) createTab itself
+                // rejected — backend state is clean; (b) the inner openTab
+                // rollback re-threw — backend cleanup is already in flight
+                // fire-and-forget. Today both just surface the same toast, but
+                // future retry logic should branch on these two paths.
                 showToast((err as Error).message, true);
         } finally {
                 if (triggeredBy) triggeredBy.disabled = false;
@@ -537,13 +545,16 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
                 return;
         }
         closingTabs.add(tabId);
-        // Disable the × so a double-click doesn't fire a second DELETE mid-flight.
+        // Re-render so sibling chips' × reflects the in-flight close (their
+        // disabled state mirrors the same guard).
+        renderTabBar();
         if (triggeredBy) triggeredBy.disabled = true;
 
         try {
                 await deleteTab(sessionId, tabId);
         } catch (err) {
                 closingTabs.delete(tabId);
+                renderTabBar();
                 if (err instanceof LastTabError) {
                         showToast("Can't close the last tab", true);
                 } else {
