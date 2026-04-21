@@ -458,7 +458,13 @@ function openTab(tabId: string) {
                                         updateToolbar();
                                         renderSessionList();
                                 },
-                                onError: (msg: string) => showToast(msg, true),
+                                onError: (msg: string) => {
+                                        // Same identity guard as onStatus: background tabs
+                                        // and post-session-switch WS errors must not surface
+                                        // toasts attributed to whatever session is current now.
+                                        if (activeSessionId !== ownSessionId) return;
+                                        showToast(msg, true);
+                                },
                         });
                         entry = { pane, term };
                         currentTerminals.set(tabId, entry);

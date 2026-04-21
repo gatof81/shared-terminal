@@ -379,6 +379,9 @@
       .tab-chip-label {
         overflow: hidden;
         text-overflow: ellipsis;
+        /* Flex children default to min-width: auto, which prevents shrink
+           below content width and makes ellipsis dead. */
+        min-width: 0;
       }
       .tab-close {
         background: transparent;
