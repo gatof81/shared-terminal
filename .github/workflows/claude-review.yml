@@ -1,0 +1,77 @@
+name: Claude PR Review
+
+# Security notes:
+# - Uses `pull_request` (NOT pull_request_target): fork PRs run without repo
+#   secrets, so an attacker who opens a PR cannot invoke Claude or post as it.
+# - Permissions are the minimum needed. No `contents: write` — the bot cannot
+#   push code. No `issues: write` — it's PR-only.
+# - `id-token: write` is required: the action uses GitHub's OIDC to mint a
+#   short-lived, scoped GitHub App installation token for posting comments.
+#   This is NOT equivalent to `contents: write` — it does not grant code-push
+#   rights; the resulting token is bounded by the Claude GitHub App's own
+#   install permissions on this repo.
+# - `--max-turns 10` caps iteration blast radius if prompt injection occurs.
+# - Action is pinned to major version `@v1`. Consider pinning to a commit SHA
+#   for stricter supply-chain hygiene.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# If a PR gets pushed to rapidly, cancel the in-flight review.
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Claude review
+        uses: anthropics/claude-code-action@v1
+        with:
+          # Claude Max / Pro subscription (OAuth). For pay-as-you-go API billing instead,
+          # comment the line below and use: anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: --model claude-sonnet-4-6 --max-turns 10
+          prompt: |
+            You are reviewing a pull request on the shared-terminal repo
+            (public TypeScript/Node project: Cloudflare Pages frontend,
+            Proxmox + Cloudflare Tunnel backend). This is a solo repo with
+            no human reviewer, so be direct and actionable.
+
+            Produce ONE review comment with the headings below. Skip any
+            section that has nothing real to say — do not pad.
+
+            ## Summary
+            2-4 sentences describing what this PR actually changes and why,
+            so a future skim of the PR list makes sense.
+
+            ## Bugs & correctness
+            Logic errors, off-by-ones, unhandled errors, race conditions,
+            wrong types, broken or missing tests. Cite file:line.
+
+            ## Security
+            Secrets in code, command/shell injection, unsafe exec paths,
+            auth/authz gaps, unsanitized input reaching the terminal
+            backend or tunnel, overly permissive CORS. This repo exposes
+            a terminal — treat command-exec paths with extra skepticism.
+
+            ## Style & conventions
+            Only things that hurt readability or deviate from patterns
+            already in the repo. Do not nitpick what a linter would catch.
+
+            ## Verdict
+            One of: LGTM / Minor nits / Needs changes.
+
+            Be terse. No emojis. No praise. No trailing summary.
