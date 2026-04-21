@@ -394,7 +394,15 @@ function renderTabBar() {
                 });
                 chip.appendChild(close);
 
-                chip.addEventListener("click", () => openTab(tab.tabId));
+                chip.addEventListener("click", () => {
+                        // Click handlers eat synchronous throws — surface them as
+                        // a toast instead of letting the UI silently revert.
+                        try {
+                                openTab(tab.tabId);
+                        } catch (err) {
+                                showToast((err as Error).message, true);
+                        }
+                });
                 terminalTabs.appendChild(chip);
         }
 
@@ -491,9 +499,11 @@ async function addTab(triggeredBy?: HTMLButtonElement) {
         const sessionId = activeSessionId;
         const sessionName = sessions.find((x) => x.sessionId === sessionId)?.name ?? sessionId.slice(0, 8);
         // Pre-check: don't create a backend tab we can't attach to. Matches
-        // openTab's own guard so this short-circuits before the POST.
+        // openTab's own guard so this short-circuits before the POST. Treat
+        // "session missing from local list" as not-running too, matching both
+        // openTab and the post-check below.
         const statusBefore = sessions.find((x) => x.sessionId === sessionId)?.status;
-        if (statusBefore && statusBefore !== "running") {
+        if (!statusBefore || statusBefore !== "running") {
                 showToast("Session isn't running — start it first", true);
                 return;
         }
