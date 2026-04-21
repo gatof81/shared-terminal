@@ -285,6 +285,7 @@ async function openSession(sessionId: string) {
         // Tear down the previous session's terminals. (Switching tabs within
         // a session keeps them alive; switching sessions doesn't.)
         disposeAllCurrentTerminals();
+        // Belt-and-suspenders: catches any pane created before openTerminalSession threw.
         terminalContainer.innerHTML = "";
 
         activeSessionId = sessionId;
@@ -455,9 +456,11 @@ async function addTab(triggeredBy?: HTMLButtonElement) {
                 if (activeSessionId !== sessionId) {
                         // User switched away before the POST resolved. The backend tab
                         // exists but was never shown; clean it up so it doesn't resurface
-                        // on the next listTabs for that session. Fire-and-forget: any
-                        // failure (container gone, etc.) is tolerable noise here.
-                        void deleteTab(sessionId, tab.tabId).catch(() => { /* ignored */ });
+                        // on the next listTabs for that session. Fire-and-forget, but log
+                        // if the cleanup itself fails so the orphan is at least traceable.
+                        void deleteTab(sessionId, tab.tabId).catch((err) => {
+                                console.warn(`[tabs] orphan cleanup failed for ${tab.tabId}:`, err);
+                        });
                         return;
                 }
                 currentTabs.push(tab);
