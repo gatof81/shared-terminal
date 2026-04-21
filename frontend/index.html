@@ -430,9 +430,7 @@
         display: none;
         position: relative;
       }
-      /* Each tab gets its own pane stacked in the same container; we toggle
-         visibility rather than remount xterm so switching tabs is instant
-         and background tabs keep receiving output. */
+      /* Panes stack absolutely; toggling .active avoids remounting xterm. */
       .tab-pane {
         position: absolute;
         inset: 4px;

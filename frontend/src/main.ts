@@ -46,11 +46,7 @@ let sessions: SessionInfo[] = [];
 let activeSessionId: string | null = null;
 let isRegisterMode = false;
 
-// Tab state — only for the CURRENTLY active session. Switching sessions
-// disposes these terminals (tmux keeps the tabs alive server-side, so
-// reconnecting replays from the ring buffer). Switching tabs WITHIN the
-// active session keeps every tab's xterm + WS live so background work
-// (e.g. a dev server running in a closed tab) isn't interrupted.
+// Active session's tabs only; switching sessions tears these down.
 interface ActiveTerminal { pane: HTMLDivElement; term: TerminalSession }
 let currentTabs: Tab[] = [];
 let currentActiveTabId: string | null = null;
@@ -65,6 +61,7 @@ function disposeAllCurrentTerminals() {
         currentTabs = [];
         currentActiveTabId = null;
         terminalTabs.innerHTML = "";
+        terminalTabs.style.display = "none";
 }
 
 // ── Auth flow ───────────────────────────────────────────────────────────────
@@ -338,7 +335,9 @@ function updateToolbar() {
                 return;
         }
         terminalToolbar.style.display = "flex";
-        terminalTabs.style.display = "flex";
+        // Tab bar visibility is owned by renderTabBar — it flips display:flex
+        // only after tabs have actually been populated, avoiding the empty-bar
+        // flash during the listTabs round-trip.
         terminalContainer.style.display = "block";
         emptyState.style.display = "none";
         terminalSessionName.textContent = s.name;
@@ -350,7 +349,11 @@ function updateToolbar() {
 
 function renderTabBar() {
         terminalTabs.innerHTML = "";
-        if (!activeSessionId) return;
+        if (!activeSessionId || currentTabs.length === 0) {
+                terminalTabs.style.display = "none";
+                return;
+        }
+        terminalTabs.style.display = "flex";
 
         for (const tab of currentTabs) {
                 const chip = document.createElement("div");
@@ -370,7 +373,7 @@ function renderTabBar() {
                 close.disabled = currentTabs.length <= 1;
                 close.addEventListener("click", (e) => {
                         e.stopPropagation();
-                        void closeTab(tab.tabId);
+                        void closeTab(tab.tabId, close);
                 });
                 chip.appendChild(close);
 
@@ -389,12 +392,10 @@ function renderTabBar() {
 
 function openTab(tabId: string) {
         if (!activeSessionId) return;
+        if (tabId === currentActiveTabId) return;
         if (!currentTabs.some((t) => t.tabId === tabId)) return;
 
-        // Mirror the sidebar's rule: we only spin up a terminal for a running
-        // session. If the user clicked a tab chip while the session was
-        // stopped/terminated/disconnected, bail with a toast instead of
-        // opening a WS that would immediately fail.
+        // Only spin up a terminal for a running session — matches the sidebar.
         const s = sessions.find((x) => x.sessionId === activeSessionId);
         if (s && s.status !== "running") {
                 showToast("Session isn't running — start it first", true);
@@ -466,13 +467,16 @@ function nextDefaultLabel(): string {
         return `Tab ${n}`;
 }
 
-async function closeTab(tabId: string) {
+async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
         if (!activeSessionId) return;
         const sessionId = activeSessionId;
         if (currentTabs.length <= 1) {
                 showToast("Can't close the last tab", true);
                 return;
         }
+        // Disable the × so a double-click doesn't fire a second DELETE mid-flight
+        // (the second would race to a 409 and produce a spurious toast).
+        if (triggeredBy) triggeredBy.disabled = true;
 
         try {
                 await deleteTab(sessionId, tabId);
@@ -482,11 +486,11 @@ async function closeTab(tabId: string) {
                 } else {
                         showToast((err as Error).message, true);
                 }
+                if (triggeredBy?.isConnected) triggeredBy.disabled = false;
                 return;
         }
-        // Guard against the user switching sessions during the DELETE — the
-        // session we closed the tab on is no longer the active one, so our
-        // in-memory state has already been torn down by openSession().
+        // Stale-session guard: renderTabBar() below rebuilds chips anyway, so
+        // the old `triggeredBy` becomes detached — no need to re-enable it.
         if (activeSessionId !== sessionId) return;
 
         const entry = currentTerminals.get(tabId);
