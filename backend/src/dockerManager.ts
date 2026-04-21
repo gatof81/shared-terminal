@@ -423,8 +423,14 @@ export class DockerManager {
                 const tabId = `tab-${randomBytes(4).toString("hex")}`;
                 const displayLabel = (label ?? "").trim() || tabId;
 
+                // `-c` pins the new tab's starting directory to the bind-mounted
+                // workspace. Without it, tmux inherits cwd from docker exec, which
+                // uses the image's WORKDIR (/home/developer) and dumps the user
+                // next to entrypoint.sh instead of in their project files.
                 const create = await this.execOneShot(sessionId, [
-                        "tmux", "new-session", "-d", "-s", tabId, "-x", "120", "-y", "36",
+                        "tmux", "new-session", "-d", "-s", tabId,
+                        "-c", "/home/developer/workspace",
+                        "-x", "120", "-y", "36",
                 ]);
                 if (create.exitCode !== 0) {
                         throw new Error(`tmux new-session failed (exit ${create.exitCode}): ${create.stdout}`);
