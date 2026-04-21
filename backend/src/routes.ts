@@ -7,17 +7,38 @@ import { AuthedRequest, requireAuth, registerUser, loginUser, hasAnyUsers } from
 import { SessionManager, NotFoundError, ForbiddenError } from "./sessionManager.js";
 import { DockerManager } from "./dockerManager.js";
 import { SessionMeta } from "./types.js";
+import {
+        RateLimitConfig,
+        DEFAULT_RATE_LIMIT_CONFIG,
+        createAuthRateLimiters,
+        UsernameRateLimiter,
+        RateLimitError,
+} from "./rateLimit.js";
 
-export function buildRouter(sessions: SessionManager, docker: DockerManager): Router {
+export function buildRouter(
+        sessions: SessionManager,
+        docker: DockerManager,
+        rateLimitConfig: RateLimitConfig = DEFAULT_RATE_LIMIT_CONFIG,
+): Router {
         const router = Router();
 
         // ── Auth routes (public) ────────────────────────────────────────────────
+
+        // Two-layer rate limiting on the public auth surface:
+        //  - loginIp / registerIp: per-IP, defends against a single attacker.
+        //  - usernameLimiter: per-username (failed logins only), defends against
+        //    a distributed attack on a specific account.
+        const { loginIp, registerIp } = createAuthRateLimiters(rateLimitConfig);
+        const usernameLimiter = new UsernameRateLimiter(
+                rateLimitConfig.login.usernameMax,
+                rateLimitConfig.login.usernameWindowMs,
+        );
 
         router.get("/auth/status", async (_req: Request, res: Response) => {
                 res.json({ needsSetup: !(await hasAnyUsers()) });
         });
 
-        router.post("/auth/register", async (req: Request, res: Response) => {
+        router.post("/auth/register", registerIp, async (req: Request, res: Response) => {
                 const { username, password } = req.body as { username?: string; password?: string };
                 if (!username || !password || password.length < 6) {
                         res.status(400).json({ error: "username and password (min 6 chars) required" });
@@ -31,16 +52,33 @@ export function buildRouter(sessions: SessionManager, docker: DockerManager): Ro
                 }
         });
 
-        router.post("/auth/login", async (req: Request, res: Response) => {
+        router.post("/auth/login", loginIp, async (req: Request, res: Response) => {
                 const { username, password } = req.body as { username?: string; password?: string };
                 if (!username || !password) {
                         res.status(400).json({ error: "username and password required" });
                         return;
                 }
+
+                // Per-username gate BEFORE credential verification so repeated
+                // guesses don't get to run bcrypt (which would be expensive and
+                // also leak timing info).
+                try {
+                        usernameLimiter.assertAllowed(username);
+                } catch (err) {
+                        if (err instanceof RateLimitError) {
+                                res.setHeader("Retry-After", String(err.retryAfterSeconds));
+                                res.status(429).json({ error: err.message });
+                                return;
+                        }
+                        throw err;
+                }
+
                 try {
                         const result = await loginUser(username, password);
+                        usernameLimiter.reset(username);
                         res.json(result);
                 } catch (err) {
+                        usernameLimiter.recordFailure(username);
                         res.status(401).json({ error: (err as Error).message });
                 }
         });

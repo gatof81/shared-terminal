@@ -19,6 +19,11 @@ import { selectWsAuthProtocol } from "./auth.js";
 
 const PORT = parseInt(process.env.PORT ?? "3001", 10);
 const CORS_ORIGINS = (process.env.CORS_ORIGINS ?? "*").split(",");
+// TRUST_PROXY: used by req.ip (and therefore auth rate limiting) to pick the
+// real client from X-Forwarded-For instead of the tunnel's socket address.
+// Set to "1" for a single known proxy (e.g. Cloudflare Tunnel), a count, or
+// "true" to trust everything. Leave unset for direct localhost dev.
+const TRUST_PROXY = process.env.TRUST_PROXY;
 
 // ── Validate config ───────────────────────────────────────────────────────────
 
@@ -32,6 +37,14 @@ const docker = new DockerManager(sessions);
 // ── Express app ───────────────────────────────────────────────────────────────
 
 const app = express();
+if (TRUST_PROXY !== undefined) {
+        // Numbers and "true" are meaningful to express; pass the raw string and
+        // let it coerce. This is load-bearing for rate limiting — without it,
+        // req.ip behind a tunnel is always the tunnel's IP so per-IP buckets
+        // collapse into one.
+        const coerced = /^\d+$/.test(TRUST_PROXY) ? Number(TRUST_PROXY) : TRUST_PROXY;
+        app.set("trust proxy", coerced);
+}
 app.use(express.json());
 
 // CORS — allow frontend from Cloudflare Pages (or any configured origin)
