@@ -51,6 +51,10 @@ interface ActiveTerminal { pane: HTMLDivElement; term: TerminalSession }
 let currentTabs: Tab[] = [];
 let currentActiveTabId: string | null = null;
 const currentTerminals = new Map<string, ActiveTerminal>();
+// Tabs whose DELETE is in flight. Used so the last-tab guard accounts for
+// concurrent closes — two × clicks on two different chips would each see
+// currentTabs.length == 2 and race, with the second eating a spurious 409.
+const closingTabs = new Set<string>();
 
 function disposeAllCurrentTerminals() {
         for (const { term, pane } of currentTerminals.values()) {
@@ -60,6 +64,7 @@ function disposeAllCurrentTerminals() {
         currentTerminals.clear();
         currentTabs = [];
         currentActiveTabId = null;
+        closingTabs.clear();
         terminalTabs.innerHTML = "";
         terminalTabs.style.display = "none";
         terminalContainer.style.display = "none";
@@ -317,7 +322,22 @@ async function openSession(sessionId: string) {
                 return;
         }
 
-        if (currentTabs.length > 0) openTab(currentTabs[0]!.tabId);
+        // openTab can throw synchronously (openTerminalSession init failure) —
+        // openSession is called with `void`, so an unhandled throw here would
+        // become an unhandled rejection with no toast and the UI left mid-switch.
+        if (currentTabs.length > 0) {
+                try {
+                        openTab(currentTabs[0]!.tabId);
+                } catch (err) {
+                        if (activeSessionId === sessionId) {
+                                activeSessionId = null;
+                                currentTabs = [];
+                                renderSessionList();
+                                updateToolbar();
+                        }
+                        showToast((err as Error).message, true);
+                }
+        }
 }
 
 function updateToolbar() {
@@ -507,17 +527,23 @@ function nextDefaultLabel(): string {
 async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
         if (!activeSessionId) return;
         const sessionId = activeSessionId;
-        if (currentTabs.length <= 1) {
+        if (closingTabs.has(tabId)) return; // duplicate invocation for same tab
+        // Subtract in-flight closes so two × clicks on different chips can't
+        // both pass the last-tab check — without this, each would see length=2
+        // and the second DELETE would get a 409 from the backend's last-tab
+        // guard and surface a spurious "can't close" toast.
+        if (currentTabs.length - closingTabs.size <= 1) {
                 showToast("Can't close the last tab", true);
                 return;
         }
-        // Disable the × so a double-click doesn't fire a second DELETE mid-flight
-        // (the second would race to a 409 and produce a spurious toast).
+        closingTabs.add(tabId);
+        // Disable the × so a double-click doesn't fire a second DELETE mid-flight.
         if (triggeredBy) triggeredBy.disabled = true;
 
         try {
                 await deleteTab(sessionId, tabId);
         } catch (err) {
+                closingTabs.delete(tabId);
                 if (err instanceof LastTabError) {
                         showToast("Can't close the last tab", true);
                 } else {
@@ -526,6 +552,7 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
                 if (triggeredBy?.isConnected) triggeredBy.disabled = false;
                 return;
         }
+        closingTabs.delete(tabId);
         // Stale-session guard: renderTabBar() below rebuilds chips anyway, so
         // the old `triggeredBy` becomes detached — no need to re-enable it.
         if (activeSessionId !== sessionId) return;

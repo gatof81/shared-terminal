@@ -153,9 +153,11 @@ export async function listTabs(sessionId: string): Promise<Tab[]> {
 }
 
 export async function createTab(sessionId: string, label?: string): Promise<Tab> {
+        // JSON.stringify drops undefined props, so this serialises to `{}` when
+        // no label is supplied — backend `req.body ?? {}` handles either form.
         const res = await apiFetch(`/sessions/${sessionId}/tabs`, {
                 method: "POST",
-                body: JSON.stringify(label ? { label } : {}),
+                body: JSON.stringify({ label }),
         });
         if (!res.ok) {
                 const body = await res.json().catch(() => ({}));
