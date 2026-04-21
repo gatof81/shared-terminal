@@ -60,6 +60,12 @@ if (TRUST_PROXY !== undefined) {
         else if (TRUST_PROXY === "false") coerced = false;
         else coerced = TRUST_PROXY;
         app.set("trust proxy", coerced);
+        // Log the effective value so ops can spot a misconfigured prod
+        // (e.g. TRUST_PROXY=0 behind a tunnel would silently collapse
+        // per-IP rate limits into one bucket).
+        console.log(`[server] trust proxy = ${JSON.stringify(coerced)}`);
+} else {
+        console.log("[server] trust proxy = unset (req.ip will be the socket address)");
 }
 app.use(express.json());
 

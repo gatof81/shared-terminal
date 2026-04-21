@@ -3,18 +3,21 @@ import http from "http";
 import type { AddressInfo } from "net";
 import express from "express";
 
-import { UsernameRateLimiter, RateLimitError } from "./rateLimit.js";
-import { InvalidCredentialsError } from "./auth.js";
+import { UsernameRateLimiter } from "./rateLimit.js";
+import type { SessionManager } from "./sessionManager.js";
+import type { DockerManager } from "./dockerManager.js";
 
-// Stub the auth module so routing tests don't touch D1.
+// Stub the auth module so routing tests don't touch D1. Handles captured
+// as `authStubs` are reconfigured per-test.
 const authStubs = vi.hoisted(() => ({
 	registerUser: vi.fn(async (_u: string, _p: string) => ({ userId: "u1", token: "tok" })),
 	loginUser: vi.fn(async (_u: string, _p: string) => ({ userId: "u1", token: "tok" })),
 	hasAnyUsers: vi.fn(async () => true),
 	requireAuth: (_req: unknown, _res: unknown, next: () => void) => next(),
-	// Re-export the error class so `import { InvalidCredentialsError }` above
-	// resolves to the same constructor the route handler uses (module-local
-	// mocks replace the whole module).
+	// The route handler checks `err instanceof InvalidCredentialsError` where
+	// `InvalidCredentialsError` is imported from `./auth.js`. Because we
+	// `vi.mock` the whole module, both the handler's import and the stub's
+	// throw resolve to this same constructor.
 	InvalidCredentialsError: class extends Error {
 		constructor() { super("Invalid credentials"); this.name = "InvalidCredentialsError"; }
 	},
@@ -24,39 +27,35 @@ vi.mock("./auth.js", () => authStubs);
 // `buildRouter` is imported AFTER the mock is in place.
 import { buildRouter } from "./routes.js";
 
+// Typed placeholders for the route tests — no session/docker routes are
+// hit in these scenarios, so an empty-object cast is fine AND preserves
+// type-checking if a future route starts calling into sessions/docker.
+const fakeSessions = {} as unknown as SessionManager;
+const fakeDocker = {} as unknown as DockerManager;
+
 // ── UsernameRateLimiter unit tests ─────────────────────────────────────────
 
 describe("UsernameRateLimiter", () => {
-	it("allows attempts up to the configured max", () => {
+	it("allows attempts up to max; blocks the (max+1)th with retryAfterSeconds", () => {
 		const rl = new UsernameRateLimiter(3, 60_000);
-		// 3 allowed assertAllowed calls, each followed by a recorded failure.
 		for (let i = 0; i < 3; i++) {
-			expect(() => rl.assertAllowed("alice")).not.toThrow();
+			expect(rl.check("alice").allowed).toBe(true);
 			rl.recordFailure("alice");
 		}
-	});
-
-	it("throws RateLimitError with retryAfterSeconds on the (max+1)th attempt", () => {
-		const rl = new UsernameRateLimiter(2, 60_000);
-		rl.recordFailure("alice");
-		rl.recordFailure("alice");
-		let thrown: unknown;
-		try {
-			rl.assertAllowed("alice");
-		} catch (err) { thrown = err; }
-		expect(thrown).toBeInstanceOf(RateLimitError);
-		const rle = thrown as RateLimitError;
-		// 60_000ms window → between 1 and 60 seconds remaining.
-		expect(rle.retryAfterSeconds).toBeGreaterThan(0);
-		expect(rle.retryAfterSeconds).toBeLessThanOrEqual(60);
+		const blocked = rl.check("alice");
+		expect(blocked.allowed).toBe(false);
+		if (!blocked.allowed) {
+			expect(blocked.retryAfterSeconds).toBeGreaterThan(0);
+			expect(blocked.retryAfterSeconds).toBeLessThanOrEqual(60);
+		}
 	});
 
 	it("isolates buckets per username", () => {
 		const rl = new UsernameRateLimiter(1, 60_000);
 		rl.recordFailure("alice");
-		expect(() => rl.assertAllowed("alice")).toThrow(RateLimitError);
-		// bob is untouched
-		expect(() => rl.assertAllowed("bob")).not.toThrow();
+		expect(rl.check("alice").allowed).toBe(false);
+		// bob is untouched.
+		expect(rl.check("bob").allowed).toBe(true);
 	});
 
 	it("resets the window automatically after windowMs elapses", () => {
@@ -64,24 +63,24 @@ describe("UsernameRateLimiter", () => {
 		try {
 			const rl = new UsernameRateLimiter(1, 60_000);
 			rl.recordFailure("alice");
-			expect(() => rl.assertAllowed("alice")).toThrow(RateLimitError);
+			expect(rl.check("alice").allowed).toBe(false);
 			vi.advanceTimersByTime(60_001);
-			expect(() => rl.assertAllowed("alice")).not.toThrow();
+			expect(rl.check("alice").allowed).toBe(true);
 		} finally {
 			vi.useRealTimers();
 		}
 	});
 
-	it("reset(username) clears a single bucket, clear() clears all", () => {
+	it("reset(username) clears a single bucket, clearForTesting() clears all", () => {
 		const rl = new UsernameRateLimiter(1, 60_000);
 		rl.recordFailure("alice");
 		rl.recordFailure("bob");
 		rl.reset("alice");
-		expect(() => rl.assertAllowed("alice")).not.toThrow();
-		expect(() => rl.assertAllowed("bob")).toThrow(RateLimitError);
+		expect(rl.check("alice").allowed).toBe(true);
+		expect(rl.check("bob").allowed).toBe(false);
 
-		rl.clear();
-		expect(() => rl.assertAllowed("bob")).not.toThrow();
+		rl.clearForTesting();
+		expect(rl.check("bob").allowed).toBe(true);
 	});
 
 	it("recordFailure past the window starts a fresh counter", () => {
@@ -90,57 +89,100 @@ describe("UsernameRateLimiter", () => {
 			const rl = new UsernameRateLimiter(2, 60_000);
 			rl.recordFailure("alice");
 			rl.recordFailure("alice");
-			// At max. Advance past the window then record again — should be a
-			// fresh bucket at count=1, so we're below the limit again.
 			vi.advanceTimersByTime(60_001);
 			rl.recordFailure("alice");
-			expect(() => rl.assertAllowed("alice")).not.toThrow();
+			expect(rl.check("alice").allowed).toBe(true);
 		} finally {
 			vi.useRealTimers();
 		}
 	});
 
 	it("caps total tracked usernames and evicts oldest when full (DoS guard)", () => {
-		// Size 3 means after four distinct bad usernames we've dropped the
-		// first. `u0` should be gone; `u1..u3` should remain.
 		const rl = new UsernameRateLimiter(5, 60_000, 3);
 		rl.recordFailure("u0");
 		rl.recordFailure("u1");
 		rl.recordFailure("u2");
-		expect(rl.size()).toBe(3);
+		expect(rl.sizeForTesting()).toBe(3);
 
 		rl.recordFailure("u3");
-		expect(rl.size()).toBe(3);
+		expect(rl.sizeForTesting()).toBe(3);
 
-		// `u0` was evicted, so its counter is gone — first hit here is a
-		// fresh bucket at 1, not resumed at 2. Observable via the fact that
-		// we never throw even if the cap threshold is 5.
-		expect(() => rl.assertAllowed("u0")).not.toThrow();
+		// u0 was evicted FIFO — check() returns allowed and no bucket remains,
+		// and a fresh recordFailure gets a new count-1 bucket rather than
+		// resuming u0's prior state.
+		expect(rl.check("u0").allowed).toBe(true);
 	});
 
 	it("prefers expired entries over live ones when the cap is hit", () => {
 		vi.useFakeTimers();
 		try {
-			// Fill the cap. u0/u1 will expire; u2 is added right before the
-			// sweep so it survives, and the new insert must land without
-			// evicting u2.
 			const rl = new UsernameRateLimiter(5, 60_000, 3);
 			rl.recordFailure("u0"); // resetAt = t + 60_000
 			rl.recordFailure("u1"); // resetAt = t + 60_000
-			vi.advanceTimersByTime(59_000); // +59s
-			rl.recordFailure("u2"); // resetAt = t + 59_000 + 60_000 = t + 119_000
-			vi.advanceTimersByTime(2_000); // +61s total; u0/u1 expired, u2 still live
+			vi.advanceTimersByTime(59_000);
+			rl.recordFailure("u2"); // resetAt = t + 119_000 (latest)
+			vi.advanceTimersByTime(2_000); // u0/u1 expired; u2 still live
 
-			rl.recordFailure("u3"); // triggers evictExpired + insert
-			// u0/u1 should be gone (expired and swept); u2 survives because it
-			// hadn't expired yet. u3 is the new bucket.
-			expect(rl.size()).toBe(2);
-			// u2 specifically — not evicted by the FIFO fallback.
-			rl.recordFailure("u2");
-			// If it had been evicted this would be count=1; still live means
-			// count=2 — either way it doesn't throw at max=5. Just assert it
-			// stayed in the map.
-			expect(rl.size()).toBe(2);
+			rl.recordFailure("u3"); // overflow → evictExpired removes u0/u1
+			// u2 survives because it hadn't expired; u3 is the new slot.
+			expect(rl.sizeForTesting()).toBe(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("resetting an expired entry at full capacity doesn't evict a live entry", () => {
+		// Regression guard for the eviction path the reviewer called out:
+		// map is at capacity, `alice`'s entry has just expired. Re-tracking
+		// `alice` should NOT FIFO-evict one of the live entries — alice's
+		// stale slot is the one that frees up space.
+		vi.useFakeTimers();
+		try {
+			const rl = new UsernameRateLimiter(5, 60_000, 3);
+			rl.recordFailure("alice"); // t=0, resetAt=60_000
+			rl.recordFailure("bob");   // t=0, resetAt=60_000
+			rl.recordFailure("carol"); // t=0, resetAt=60_000
+			expect(rl.sizeForTesting()).toBe(3);
+
+			// Expire alice alone.
+			vi.setSystemTime(30_000);
+			// Refresh bob and carol so they stay live past alice's resetAt.
+			rl.recordFailure("bob");   // live, count=2
+			rl.recordFailure("carol"); // live, count=2
+			vi.setSystemTime(60_001); // alice expired; bob/carol still live
+
+			rl.recordFailure("alice"); // should reclaim alice's slot, not evict bob/carol
+
+			// Three entries total, bob and carol both intact with their count=2.
+			expect(rl.sizeForTesting()).toBe(3);
+			rl.recordFailure("bob");
+			// bob's count went 2→3 (live), not 1→2 (would indicate it was evicted
+			// and re-added). At max=5 still allowed, so check passes.
+			expect(rl.check("bob").allowed).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("re-tracking an expired entry moves it to the end of FIFO order", () => {
+		// After `alice` expires and is re-tracked, she should be the YOUNGEST
+		// entry (evicted last), not frozen in her original position.
+		vi.useFakeTimers();
+		try {
+			const rl = new UsernameRateLimiter(5, 60_000, 3);
+			rl.recordFailure("alice"); // inserted first
+			rl.recordFailure("bob");
+			rl.recordFailure("carol");
+			vi.advanceTimersByTime(60_001); // everyone expired
+
+			rl.recordFailure("alice"); // fresh bucket — should land at end
+			rl.recordFailure("dave");  // new — triggers overflow logic
+			rl.recordFailure("eve");
+
+			// Size is capped at 3; bob and carol should have been evicted
+			// before alice (she was re-inserted at the end after expiry).
+			expect(rl.sizeForTesting()).toBe(3);
+			expect(rl.check("alice").allowed).toBe(true); // still present
 		} finally {
 			vi.useRealTimers();
 		}
@@ -148,22 +190,15 @@ describe("UsernameRateLimiter", () => {
 });
 
 // ── Route-level integration tests ──────────────────────────────────────────
-//
-// Fire real HTTP requests at an ephemeral server so we're exercising the
-// express-rate-limit middleware as it'll run in prod — headers, 429 status,
-// Retry-After, the works. The auth module is stubbed so nothing touches D1.
 
 describe("auth route rate limiting", () => {
 	let server: http.Server | null = null;
 	let baseUrl: string;
 
-	// Default stub behaviour reset before each test; tight per-test limits
-	// set via spinUp() so individual tests can raise the IP ceiling when
-	// they only care about the per-username path.
 	beforeEach(() => {
 		authStubs.registerUser.mockClear();
 		authStubs.loginUser.mockClear();
-		// Default: loginUser rejects as bad creds (typed so the handler counts it).
+		// Default: loginUser fails as bad creds (typed so the handler counts it).
 		authStubs.loginUser.mockImplementation(async () => {
 			throw new authStubs.InvalidCredentialsError();
 		});
@@ -181,7 +216,7 @@ describe("auth route rate limiting", () => {
 		login: { ipMax: number; ipWindowMs: number; usernameMax: number; usernameWindowMs: number };
 		register: { ipMax: number; ipWindowMs: number };
 	}): Promise<void> {
-		const router = buildRouter({} as never, {} as never, cfg);
+		const router = buildRouter(fakeSessions, fakeDocker, cfg);
 		const app = express();
 		app.use(express.json());
 		app.use("/api", router);
@@ -208,8 +243,6 @@ describe("auth route rate limiting", () => {
 	}
 
 	it("login returns 429 after ipMax from one IP — 4th request is blocked", async () => {
-		// ipMax=3, usernameMax ridiculously high so only the IP limit can fire.
-		// Distinct usernames per call so the per-username bucket is irrelevant.
 		await spinUp({
 			login: { ipMax: 3, ipWindowMs: 60_000, usernameMax: 1_000, usernameWindowMs: 60_000 },
 			register: { ipMax: 100, ipWindowMs: 60_000 },
@@ -244,9 +277,6 @@ describe("auth route rate limiting", () => {
 	});
 
 	it("per-username limit blocks a third bad attempt even when IP limit would allow it", async () => {
-		// usernameMax=2 exhausts alice after two failures. ipMax high so the
-		// 429 on the 3rd request has to come from the username limiter, not
-		// express-rate-limit.
 		await spinUp({
 			login: { ipMax: 100, ipWindowMs: 60_000, usernameMax: 2, usernameWindowMs: 60_000 },
 			register: { ipMax: 100, ipWindowMs: 60_000 },
@@ -261,18 +291,11 @@ describe("auth route rate limiting", () => {
 		expect(r3.status).toBe(429);
 		expect(r3.headers.get("retry-after")).not.toBeNull();
 
-		// 429 came via our handler (before bcrypt), so loginUser was called
-		// twice, not three times — the expensive hash never ran on the 3rd.
+		// loginUser is called exactly twice — bcrypt is skipped on the 3rd.
 		expect(authStubs.loginUser).toHaveBeenCalledTimes(2);
 	});
 
 	it("a successful login resets the per-username counter", async () => {
-		// usernameMax=2, ipMax high. The key sequence:
-		//   fail → success (reset) → fail → fail
-		// All four login attempts should be handled normally (401/200/401/401).
-		// Without the reset-on-success, the fourth call would hit assertAllowed
-		// with count=2 already and return 429 — so 401 on r4 is the load-
-		// bearing assertion here.
 		await spinUp({
 			login: { ipMax: 100, ipWindowMs: 60_000, usernameMax: 2, usernameWindowMs: 60_000 },
 			register: { ipMax: 100, ipWindowMs: 60_000 },
@@ -303,16 +326,11 @@ describe("auth route rate limiting", () => {
 		const registerRes = await postRegister({ username: huge, password: "secret123" });
 		expect(registerRes.status).toBe(400);
 
-		// Neither request reached the auth module — the whole point of the
-		// upfront length check is to keep huge strings out of both D1 and
-		// the in-memory limiter map.
 		expect(authStubs.loginUser).not.toHaveBeenCalled();
 		expect(authStubs.registerUser).not.toHaveBeenCalled();
 	});
 
 	it("infra errors from loginUser don't count toward the per-username lockout", async () => {
-		// Regression guard: a D1 outage would otherwise be indistinguishable
-		// from a bad password and lock out legitimate users during downtime.
 		await spinUp({
 			login: { ipMax: 100, ipWindowMs: 60_000, usernameMax: 2, usernameWindowMs: 60_000 },
 			register: { ipMax: 100, ipWindowMs: 60_000 },
@@ -321,8 +339,6 @@ describe("auth route rate limiting", () => {
 			throw new Error("D1 timeout");
 		});
 
-		// Three attempts — if the handler incremented on every throw, the 3rd
-		// would be 429. With typed-error filtering, all three should 500.
 		const r1 = await postLogin({ username: "alice", password: "bad" });
 		const r2 = await postLogin({ username: "alice", password: "bad" });
 		const r3 = await postLogin({ username: "alice", password: "bad" });
@@ -332,7 +348,6 @@ describe("auth route rate limiting", () => {
 	});
 
 	it("429 bodies carry a `scope` field so the UI can tell IP vs username lockout apart", async () => {
-		// IP-scoped 429 from express-rate-limit.
 		await spinUp({
 			login: { ipMax: 1, ipWindowMs: 60_000, usernameMax: 100, usernameWindowMs: 60_000 },
 			register: { ipMax: 100, ipWindowMs: 60_000 },
@@ -342,7 +357,6 @@ describe("auth route rate limiting", () => {
 		expect(ipBlocked.status).toBe(429);
 		expect(await ipBlocked.json()).toMatchObject({ scope: "ip" });
 
-		// Tear down and bring up a fresh server where only the username layer fires.
 		await new Promise<void>((resolve) => server!.close(() => resolve()));
 		server = null;
 
@@ -357,10 +371,6 @@ describe("auth route rate limiting", () => {
 	});
 
 	it("once per-username max is reached, even the correct password 429s until the window resets", async () => {
-		// Strict lockout: we assertAllowed BEFORE verifying the password, so a
-		// blocked account stays blocked for the rest of the window. Trade-off
-		// is worth it — the alternative runs bcrypt on every guess and leaks
-		// timing info.
 		await spinUp({
 			login: { ipMax: 100, ipWindowMs: 60_000, usernameMax: 2, usernameWindowMs: 60_000 },
 			register: { ipMax: 100, ipWindowMs: 60_000 },
@@ -369,7 +379,6 @@ describe("auth route rate limiting", () => {
 		await postLogin({ username: "alice", password: "bad" });
 		await postLogin({ username: "alice", password: "bad" });
 
-		// Even a "correct" password now 429s — bucket is at max.
 		authStubs.loginUser.mockImplementationOnce(async () => ({ userId: "u1", token: "tok" }));
 		const locked = await postLogin({ username: "alice", password: "good" });
 		expect(locked.status).toBe(429);

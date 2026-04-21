@@ -12,7 +12,6 @@ import {
         DEFAULT_RATE_LIMIT_CONFIG,
         createAuthRateLimiters,
         UsernameRateLimiter,
-        RateLimitError,
 } from "./rateLimit.js";
 
 export function buildRouter(
@@ -66,48 +65,32 @@ export function buildRouter(
                         return;
                 }
 
-                // Per-username gate runs before bcrypt so guesses can't burn CPU
-                // or leak timing info. `scope` distinguishes "this account is
-                // locked" from the IP-layer 429 above. assertAllowed only ever
-                // throws RateLimitError; anything else is a programming bug we
-                // want to surface as 500 rather than an unhandled promise
-                // rejection (async handler, Express 4 has no next wired up).
-                try {
-                        usernameLimiter.assertAllowed(username);
-                } catch (err) {
-                        if (err instanceof RateLimitError) {
-                                res.setHeader("Retry-After", String(err.retryAfterSeconds));
-                                res.status(429).json({
-                                        error: "Too many failed login attempts for this account, try again later",
-                                        scope: "username",
-                                });
-                                return;
-                        }
-                        console.error(`[auth] unexpected error from usernameLimiter:`, (err as Error).message);
-                        res.status(500).json({ error: "Internal server error" });
+                // Per-username gate runs before bcrypt. `scope` distinguishes an
+                // account lockout from the IP-layer 429 above.
+                const check = usernameLimiter.check(username);
+                if (!check.allowed) {
+                        res.setHeader("Retry-After", String(check.retryAfterSeconds));
+                        res.status(429).json({
+                                error: "Too many failed login attempts for this account, try again later",
+                                scope: "username",
+                        });
                         return;
                 }
 
-                // Note on race: assertAllowed is sync, loginUser is async. On a
-                // single Node process this can let `concurrent in-flight requests`
-                // slip past the limit — acceptable given the attacker still can't
-                // meaningfully exceed `max + parallelism`, and parallelism is 1 in
-                // practice (bcrypt serialises on the event loop).
+                // Race note: check() is sync, loginUser is async — in-flight
+                // requests can slip past by `parallelism`. bcrypt serialises on
+                // the event loop so parallelism is effectively 1.
                 let result: { userId: string; token: string };
                 try {
                         result = await loginUser(username, password);
                 } catch (err) {
                         if (err instanceof InvalidCredentialsError) {
-                                // Only bad credentials count toward lockout. Infra
-                                // errors (D1 down, bcrypt crash, …) must NOT
-                                // increment the counter — a transient outage would
-                                // otherwise silently lock legitimate users out.
+                                // Only bad creds count — infra errors must not lock real users out.
                                 usernameLimiter.recordFailure(username);
                                 res.status(401).json({ error: err.message });
                                 return;
                         }
-                        // Don't log the submitted username — would be an
-                        // enumeration vector if logs leak.
+                        // Username omitted from the log to avoid an enumeration vector.
                         console.error(`[auth] login failed unexpectedly:`, (err as Error).message);
                         res.status(500).json({ error: "Internal server error" });
                         return;

@@ -61,14 +61,9 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 
 // ── Per-username limiter ────────────────────────────────────────────────────
 
-export class RateLimitError extends Error {
-	readonly retryAfterSeconds: number;
-	constructor(retryAfterSeconds: number) {
-		super("Too many failed attempts for this username, try again later");
-		this.name = "RateLimitError";
-		this.retryAfterSeconds = retryAfterSeconds;
-	}
-}
+export type UsernameCheckResult =
+	| { allowed: true }
+	| { allowed: false; retryAfterSeconds: number };
 
 interface FailedAttempts {
 	count: number;
@@ -94,54 +89,62 @@ export class UsernameRateLimiter {
 		this.maxTracked = maxTracked;
 	}
 
-	/**
-	 * Throws `RateLimitError` when the username has already hit the max within
-	 * the current window. Call before attempting verification.
-	 */
-	assertAllowed(username: string): void {
+	// Returns allowed=false only when the bucket is full inside its window.
+	// Result-based (never throws) so callers don't need try/catch around an
+	// otherwise-synchronous check inside an async handler.
+	check(username: string): UsernameCheckResult {
 		const now = Date.now();
 		const entry = this.attempts.get(username);
-		if (!entry) return;
+		if (!entry) return { allowed: true };
 		if (now >= entry.resetAt) {
 			this.attempts.delete(username);
-			return;
+			return { allowed: true };
 		}
 		if (entry.count >= this.max) {
-			const retryAfterSeconds = Math.max(1, Math.ceil((entry.resetAt - now) / 1000));
-			throw new RateLimitError(retryAfterSeconds);
+			return {
+				allowed: false,
+				retryAfterSeconds: Math.max(1, Math.ceil((entry.resetAt - now) / 1000)),
+			};
 		}
+		return { allowed: true };
 	}
 
-	/** Bump the counter for this username. Call after a failed verification. */
+	// Bump the counter for this username. Call after a failed verification.
 	recordFailure(username: string): void {
 		const now = Date.now();
-		const entry = this.attempts.get(username);
-		if (!entry || now >= entry.resetAt) {
-			// On overflow: sweep expired entries first, then FIFO-evict.
-			if (this.attempts.size >= this.maxTracked) this.evictExpired(now);
+		const existing = this.attempts.get(username);
+		if (existing && now < existing.resetAt) {
+			existing.count++;
+			return;
+		}
+		// Either a genuinely new key or an expired entry being reset. Remove
+		// the stale slot first so the fresh bucket re-enters at the END of
+		// Map insertion order — otherwise an expired entry would be resurrected
+		// in its old (early) FIFO position and evicted prematurely on the
+		// next overflow.
+		if (existing) this.attempts.delete(username);
+		if (this.attempts.size >= this.maxTracked) {
+			this.evictExpired(now);
 			if (this.attempts.size >= this.maxTracked) {
 				const oldestKey = this.attempts.keys().next().value;
 				if (oldestKey !== undefined) this.attempts.delete(oldestKey);
 			}
-			this.attempts.set(username, { count: 1, resetAt: now + this.windowMs });
-			return;
 		}
-		entry.count++;
+		this.attempts.set(username, { count: 1, resetAt: now + this.windowMs });
 	}
 
-	/** Forget any prior failures for this username (called after a successful login). */
+	// Forget any prior failures for this username (call after a successful login).
 	reset(username: string): void {
 		this.attempts.delete(username);
 	}
 
-	// test helper: wipe all state
-	clear(): void {
-		this.attempts.clear();
-	}
-
-	// test helper: current map size, for the eviction tests
-	size(): number {
+	// TEST-ONLY: exposed so eviction/size tests can observe internal state.
+	// Do not call from production code.
+	sizeForTesting(): number {
 		return this.attempts.size;
+	}
+	clearForTesting(): void {
+		this.attempts.clear();
 	}
 
 	private evictExpired(now: number): void {
