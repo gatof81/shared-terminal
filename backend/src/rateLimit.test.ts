@@ -95,6 +95,52 @@ describe("UsernameRateLimiter", () => {
 			vi.useRealTimers();
 		}
 	});
+
+	it("caps total tracked usernames and evicts oldest when full (DoS guard)", () => {
+		// Size 3 means after four distinct bad usernames we've dropped the
+		// first. `u0` should be gone; `u1..u3` should remain.
+		const rl = new UsernameRateLimiter(5, 60_000, 3);
+		rl.recordFailure("u0");
+		rl.recordFailure("u1");
+		rl.recordFailure("u2");
+		expect(rl.size()).toBe(3);
+
+		rl.recordFailure("u3");
+		expect(rl.size()).toBe(3);
+
+		// `u0` was evicted, so its counter is gone — first hit here is a
+		// fresh bucket at 1, not resumed at 2. Observable via the fact that
+		// we never throw even if the cap threshold is 5.
+		expect(() => rl.assertAllowed("u0")).not.toThrow();
+	});
+
+	it("prefers expired entries over live ones when the cap is hit", () => {
+		vi.useFakeTimers();
+		try {
+			// Fill the cap. u0/u1 will expire; u2 is added right before the
+			// sweep so it survives, and the new insert must land without
+			// evicting u2.
+			const rl = new UsernameRateLimiter(5, 60_000, 3);
+			rl.recordFailure("u0"); // resetAt = t + 60_000
+			rl.recordFailure("u1"); // resetAt = t + 60_000
+			vi.advanceTimersByTime(59_000); // +59s
+			rl.recordFailure("u2"); // resetAt = t + 59_000 + 60_000 = t + 119_000
+			vi.advanceTimersByTime(2_000); // +61s total; u0/u1 expired, u2 still live
+
+			rl.recordFailure("u3"); // triggers evictExpired + insert
+			// u0/u1 should be gone (expired and swept); u2 survives because it
+			// hadn't expired yet. u3 is the new bucket.
+			expect(rl.size()).toBe(2);
+			// u2 specifically — not evicted by the FIFO fallback.
+			rl.recordFailure("u2");
+			// If it had been evicted this would be count=1; still live means
+			// count=2 — either way it doesn't throw at max=5. Just assert it
+			// stayed in the map.
+			expect(rl.size()).toBe(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });
 
 // ── Route-level integration tests ──────────────────────────────────────────

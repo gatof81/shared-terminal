@@ -88,18 +88,39 @@ interface FailedAttempts {
 	resetAt: number;
 }
 
+// Hard cap on how many distinct usernames we'll track at once. Without this,
+// a caller hitting /auth/login with a large pool of unique usernames could
+// force the map to grow unbounded for the full window — a real DoS vector on
+// a public endpoint. JS Map preserves insertion order, so evicting the
+// oldest entry when we overflow (FIFO) is cheap: `map.keys().next().value`.
+// LRU would be nicer but needs re-insertion on each access; FIFO is enough
+// for DoS defence — under steady attack the oldest buckets are the ones
+// most likely to have already expired anyway.
+const DEFAULT_MAX_TRACKED_USERNAMES = 10_000;
+
 /**
  * Tracks failed logins per username, with a sliding-ish window: the counter
  * resets the first time it's consulted past `resetAt`. Successful logins call
  * `reset()` so legitimate users aren't locked out after one typo.
+ *
+ * NOTE on case sensitivity: usernames are stored verbatim in D1 and looked
+ * up with `WHERE username = ?` (case-sensitive collation), so "Alice" and
+ * "alice" are distinct accounts. This limiter keys on the same literal
+ * string and therefore locks the same identity the auth module authenticates.
+ * If username normalization is ever introduced in `auth.ts`, this class must
+ * apply the same normalization or the two layers will diverge.
  */
 export class UsernameRateLimiter {
 	private attempts = new Map<string, FailedAttempts>();
+	private readonly maxTracked: number;
 
 	constructor(
 		private readonly max: number,
 		private readonly windowMs: number,
-	) { }
+		maxTracked: number = DEFAULT_MAX_TRACKED_USERNAMES,
+	) {
+		this.maxTracked = maxTracked;
+	}
 
 	/**
 	 * Throws `RateLimitError` when the username has already hit the max within
@@ -124,6 +145,17 @@ export class UsernameRateLimiter {
 		const now = Date.now();
 		const entry = this.attempts.get(username);
 		if (!entry || now >= entry.resetAt) {
+			// Opportunistic GC: if we're about to insert and the map is full,
+			// first drop any entries whose windows have already expired. Cheap
+			// O(n) sweep but amortizes across many requests.
+			if (this.attempts.size >= this.maxTracked) this.evictExpired(now);
+			// Still full? Evict the oldest (FIFO) to make room for the new
+			// tracker. The attacker keeps winning the race, but we stay within
+			// the memory budget.
+			if (this.attempts.size >= this.maxTracked) {
+				const oldestKey = this.attempts.keys().next().value;
+				if (oldestKey !== undefined) this.attempts.delete(oldestKey);
+			}
 			this.attempts.set(username, { count: 1, resetAt: now + this.windowMs });
 			return;
 		}
@@ -138,5 +170,16 @@ export class UsernameRateLimiter {
 	/** Test helper: wipe all state. */
 	clear(): void {
 		this.attempts.clear();
+	}
+
+	/** Test helper: current map size, for the eviction tests. */
+	size(): number {
+		return this.attempts.size;
+	}
+
+	private evictExpired(now: number): void {
+		for (const [key, entry] of this.attempts) {
+			if (now >= entry.resetAt) this.attempts.delete(key);
+		}
 	}
 }

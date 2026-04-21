@@ -38,11 +38,18 @@ const docker = new DockerManager(sessions);
 
 const app = express();
 if (TRUST_PROXY !== undefined) {
-        // Numbers and "true" are meaningful to express; pass the raw string and
-        // let it coerce. This is load-bearing for rate limiting — without it,
-        // req.ip behind a tunnel is always the tunnel's IP so per-IP buckets
-        // collapse into one.
-        const coerced = /^\d+$/.test(TRUST_PROXY) ? Number(TRUST_PROXY) : TRUST_PROXY;
+        // Express accepts a boolean, a number (hop count), or a string/fn
+        // describing which IPs to trust. Environment values are always
+        // strings, so coerce "1" → 1, "true" → true, "false" → false
+        // explicitly; anything else (IPs, subnets, "loopback", …) passes
+        // through unchanged. Load-bearing for /auth rate limiting — without
+        // it, req.ip behind a tunnel is always the tunnel's IP so per-IP
+        // buckets collapse into one.
+        let coerced: number | boolean | string;
+        if (/^\d+$/.test(TRUST_PROXY)) coerced = Number(TRUST_PROXY);
+        else if (TRUST_PROXY === "true") coerced = true;
+        else if (TRUST_PROXY === "false") coerced = false;
+        else coerced = TRUST_PROXY;
         app.set("trust proxy", coerced);
 }
 app.use(express.json());
