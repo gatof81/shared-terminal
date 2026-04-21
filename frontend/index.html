@@ -338,12 +338,109 @@
         background: rgba(139, 148, 158, 0.2);
         color: #8b949e;
       }
+      #terminal-tabs {
+        display: none;
+        align-items: stretch;
+        gap: 4px;
+        padding: 4px 8px 0 8px;
+        background: #0d1117;
+        border-bottom: 1px solid #30363d;
+        overflow-x: auto;
+        scrollbar-width: thin;
+        flex-shrink: 0;
+      }
+      .tab-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.3rem 0.55rem;
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-bottom: none;
+        border-radius: 6px 6px 0 0;
+        color: #8b949e;
+        font-size: 0.78rem;
+        cursor: pointer;
+        white-space: nowrap;
+        user-select: none;
+        max-width: 200px;
+      }
+      .tab-chip:hover {
+        background: #1c222b;
+        color: #e6edf3;
+      }
+      .tab-chip.active {
+        background: #0d1117;
+        color: #e6edf3;
+        border-color: #30363d;
+        position: relative;
+        top: 1px;
+      }
+      .tab-chip-label {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        /* Flex children default to min-width: auto, which prevents shrink
+           below content width and makes ellipsis dead. */
+        min-width: 0;
+      }
+      .tab-close {
+        background: transparent;
+        border: none;
+        color: #8b949e;
+        font-size: 0.9rem;
+        line-height: 1;
+        cursor: pointer;
+        padding: 2px 4px;
+        border-radius: 4px;
+        opacity: 0;
+      }
+      .tab-chip:hover .tab-close,
+      .tab-chip.active .tab-close {
+        opacity: 1;
+      }
+      .tab-close:hover {
+        background: rgba(248, 81, 73, 0.2);
+        color: #f85149;
+      }
+      .tab-close:disabled {
+        cursor: not-allowed;
+        opacity: 0.2 !important;
+      }
+      #tab-add {
+        background: transparent;
+        border: 1px dashed #30363d;
+        border-bottom: none;
+        border-radius: 6px 6px 0 0;
+        color: #8b949e;
+        font-size: 0.9rem;
+        padding: 0.2rem 0.55rem;
+        cursor: pointer;
+        flex-shrink: 0;
+      }
+      #tab-add:hover {
+        border-color: #58a6ff;
+        color: #58a6ff;
+      }
+      #tab-add:disabled {
+        cursor: progress;
+        opacity: 0.6;
+      }
       #terminal-container {
         flex: 1;
         overflow: hidden;
         padding: 4px;
         background: #0d1117;
         display: none;
+        position: relative;
+      }
+      /* Panes stack absolutely; toggling .active avoids remounting xterm. */
+      .tab-pane {
+        position: absolute;
+        inset: 4px;
+        display: none;
+      }
+      .tab-pane.active {
+        display: block;
       }
       #terminal-container .xterm {
         height: 100%;
@@ -458,6 +555,7 @@
             <span id="terminal-session-name"></span>
             <span id="terminal-status-badge"></span>
           </div>
+          <div id="terminal-tabs"></div>
           <div id="terminal-container"></div>
         </section>
       </main>

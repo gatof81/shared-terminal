@@ -108,15 +108,7 @@ export async function getSession(id: string): Promise<SessionInfo> {
         return res.json();
 }
 
-/**
- * Delete a session.
- *
- * - Soft delete (default): stops and removes the Docker container, marks the
- *   session as `terminated`. Workspace files on disk are kept so the session
- *   can later be restored via `startSession`.
- * - Hard delete (`hard = true`): same as soft delete, then also wipes the
- *   workspace directory and removes the session record entirely.
- */
+/** Soft delete stops the container and keeps the workspace; `hard` also wipes files + row. */
 export async function deleteSession(id: string, hard = false): Promise<void> {
         const qs = hard ? "?hard=true" : "";
         const res = await apiFetch(`/sessions/${id}${qs}`, { method: "DELETE" });
@@ -144,6 +136,53 @@ export async function updateEnvVars(id: string, envVars: Record<string, string>)
         });
         if (!res.ok) throw new Error("Failed to update env vars");
         return res.json();
+}
+
+// ── Tabs API ────────────────────────────────────────────────────────────────
+
+export interface Tab {
+        tabId: string;
+        label: string;
+        createdAt: number;
+}
+
+export async function listTabs(sessionId: string): Promise<Tab[]> {
+        const res = await apiFetch(`/sessions/${sessionId}/tabs`);
+        if (!res.ok) throw new Error("Failed to list tabs");
+        return res.json();
+}
+
+export async function createTab(sessionId: string, label?: string): Promise<Tab> {
+        // JSON.stringify drops undefined props, so this serialises to `{}` when
+        // no label is supplied — backend `req.body ?? {}` handles either form.
+        const res = await apiFetch(`/sessions/${sessionId}/tabs`, {
+                method: "POST",
+                body: JSON.stringify({ label }),
+        });
+        if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.error ?? "Failed to create tab");
+        }
+        return res.json();
+}
+
+/** Throws `LastTabError` (HTTP 409) when the tab is the last one — callers should surface, not retry. */
+export async function deleteTab(sessionId: string, tabId: string): Promise<void> {
+        const res = await apiFetch(`/sessions/${sessionId}/tabs/${tabId}`, { method: "DELETE" });
+        if (res.status === 409) {
+                throw new LastTabError();
+        }
+        if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.error ?? "Failed to close tab");
+        }
+}
+
+export class LastTabError extends Error {
+        constructor() {
+                super("Can't close the last tab of a session");
+                this.name = "LastTabError";
+        }
 }
 
 // ── Fetch wrapper ───────────────────────────────────────────────────────────
