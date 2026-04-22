@@ -32,6 +32,7 @@ const newSessionForm = document.getElementById("new-session-form") as HTMLFormEl
 const newSessionInput = document.getElementById("new-session-input") as HTMLInputElement;
 const showTerminatedToggle = document.getElementById("show-terminated-toggle") as HTMLInputElement;
 const mainEl = document.querySelector("main")!;
+const sidebarEl = document.getElementById("sidebar")!;
 const sidebarToggleBtn = document.getElementById("sidebar-toggle") as HTMLButtonElement;
 const sidebarBackdrop = document.getElementById("sidebar-backdrop")!;
 
@@ -704,8 +705,26 @@ const mobileMql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT_PX}px)`);
 const isMobile = () => mobileMql.matches;
 
 function setSidebarOpen(open: boolean) {
+        const wasOpen = mainEl.classList.contains("sidebar-open");
         mainEl.classList.toggle("sidebar-open", open);
         sidebarToggleBtn.setAttribute("aria-expanded", String(open));
+
+        // Focus management is only meaningful on mobile, where the sidebar
+        // is a modal-style drawer — keyboard users opening it expect focus
+        // to land inside, and closing it should return focus to the toggle
+        // (only when focus was inside the drawer; otherwise the user has
+        // already moved on and we'd be stealing their focus).
+        if (!isMobile()) return;
+        if (open && !wasOpen) {
+                const firstFocusable = sidebarEl.querySelector<HTMLElement>(
+                        'input, button, a, [tabindex]:not([tabindex="-1"])',
+                );
+                firstFocusable?.focus();
+        } else if (!open && wasOpen) {
+                if (sidebarEl.contains(document.activeElement)) {
+                        sidebarToggleBtn.focus();
+                }
+        }
 }
 
 sidebarToggleBtn.addEventListener("click", () => {
@@ -713,6 +732,16 @@ sidebarToggleBtn.addEventListener("click", () => {
 });
 
 sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
+
+// Escape closes the mobile drawer, matching the WAI-ARIA modal-dialog
+// expectation. Desktop ignores this — the sidebar is always part of the
+// layout there and Escape conflicts with terminal/xterm key handling.
+document.addEventListener("keydown", (e) => {
+        if (e.key !== "Escape") return;
+        if (!isMobile()) return;
+        if (!mainEl.classList.contains("sidebar-open")) return;
+        setSidebarOpen(false);
+});
 
 // On mobile, picking a session should dismiss the drawer so the user can
 // see the terminal — desktop keeps it pinned.

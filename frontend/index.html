@@ -190,6 +190,12 @@
         min-width: 0;
       }
       #sidebar-backdrop {
+        /* Pulled out of flow unconditionally so a future style edit can't
+           accidentally let the backdrop occupy a grid track and collapse
+           the terminal to a second row of zero height. The mobile rule
+           below only flips `display`, never `position`. */
+        position: absolute;
+        inset: 0;
         display: none;
       }
       #sidebar-header {
@@ -537,9 +543,10 @@
           transform: translateX(0);
         }
         main.sidebar-open #sidebar-backdrop {
+          /* `position: absolute; inset: 0` lives on the base #sidebar-backdrop
+             rule so the element is unconditionally out of grid flow — the
+             only mobile-specific bit here is paint + stacking. */
           display: block;
-          position: absolute;
-          inset: 0;
           background: rgba(0, 0, 0, 0.5);
           z-index: 15;
         }
