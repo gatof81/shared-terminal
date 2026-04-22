@@ -8,7 +8,7 @@
 import {
         isLoggedIn, login, register, logout, checkAuthStatus,
         listSessions, createSession, deleteSession, stopSession, startSession,
-        listTabs, createTab, deleteTab, LastTabError,
+        listTabs, createTab, deleteTab, LastTabError, TabNotFoundError,
         type SessionInfo, type Tab,
 } from "./api.js";
 import { openTerminalSession, type TerminalSession, type SessionStatus } from "./terminal.js";
@@ -582,6 +582,10 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
                 showToast("Can't close the last tab", true);
                 return;
         }
+        const tabLabel = currentTabs.find((t) => t.tabId === tabId)?.label ?? tabId;
+        if (!confirm(`Close tab "${tabLabel}"?\n\nAny processes running in this tab will be terminated (SIGHUP).`)) {
+                return;
+        }
         closingTabs.add(tabId);
         // Re-render so sibling chips' × reflects the in-flight close (their
         // disabled state mirrors the same guard).
@@ -591,15 +595,22 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
         try {
                 await deleteTab(sessionId, tabId);
         } catch (err) {
-                closingTabs.delete(tabId);
-                renderTabBar();
-                if (err instanceof LastTabError) {
-                        showToast("Can't close the last tab", true);
+                // 404 means the backend already lost the tab (e.g. tmux server died).
+                // Drop the stale chip from the UI rather than leaving the user stuck
+                // with an unremovable phantom tab.
+                if (err instanceof TabNotFoundError) {
+                        // fall through to the success path below
                 } else {
-                        showToast((err as Error).message, true);
+                        closingTabs.delete(tabId);
+                        renderTabBar();
+                        if (err instanceof LastTabError) {
+                                showToast("Can't close the last tab", true);
+                        } else {
+                                showToast((err as Error).message, true);
+                        }
+                        if (triggeredBy?.isConnected) triggeredBy.disabled = false;
+                        return;
                 }
-                if (triggeredBy?.isConnected) triggeredBy.disabled = false;
-                return;
         }
         closingTabs.delete(tabId);
         // Stale-session guard: renderTabBar() below rebuilds chips anyway, so

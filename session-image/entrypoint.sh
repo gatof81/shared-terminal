@@ -13,9 +13,10 @@ set -e
 cd /home/developer/workspace
 
 # Create the detached default tab. Named deterministically so the backend
-# can address it without an extra round-trip on first attach.
+# can address it without an extra round-trip on first attach. No `@tab-label`
+# is set — the UI falls back to the tabId, so it shows as "tab-default"
+# rather than a misleading "main" label that read as a special tab.
 tmux new-session -d -s tab-default -c /home/developer/workspace -x 120 -y 36
-tmux set-option -t tab-default @tab-label "main"
 
 echo "[entrypoint] tmux session 'tab-default' started — waiting for connections…"
 
