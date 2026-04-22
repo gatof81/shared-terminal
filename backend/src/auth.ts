@@ -12,9 +12,15 @@ import { JwtPayload } from "./types.js";
 // Dev fallback. Production deployments must supply JWT_SECRET — validateJwtSecret()
 // below refuses to start the server if this literal is still in use.
 const INSECURE_DEFAULT_JWT_SECRET = "change-me-in-production";
-const JWT_SECRET = process.env.JWT_SECRET ?? INSECURE_DEFAULT_JWT_SECRET;
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN ?? "7d";
 const BCRYPT_ROUNDS = 10;
+
+// Read at call time (not captured at module load) so signing/verification
+// always sees the same env the validator saw. Protects against a future
+// import ordering where a signing helper is pulled in before the env is set.
+function jwtSecret(): string {
+        return process.env.JWT_SECRET ?? INSECURE_DEFAULT_JWT_SECRET;
+}
 
 // Call at server startup. In production (NODE_ENV === "production") throws if
 // JWT_SECRET is missing or still the insecure default, so a misconfigured
@@ -23,17 +29,23 @@ const BCRYPT_ROUNDS = 10;
 // default is in use so the footgun stays visible during dev.
 export function validateJwtSecret(): void {
         const raw = process.env.JWT_SECRET;
-        const usingDefault = !raw || raw === INSECURE_DEFAULT_JWT_SECRET;
-        if (process.env.NODE_ENV === "production" && usingDefault) {
+        const missing = !raw;
+        const usingPlaceholder = raw === INSECURE_DEFAULT_JWT_SECRET;
+        if (process.env.NODE_ENV === "production" && (missing || usingPlaceholder)) {
                 throw new Error(
                         "JWT_SECRET must be set to a non-default value in production. " +
                         "Refusing to start with the insecure placeholder — anyone would be able to forge JWTs.",
                 );
         }
-        if (usingDefault) {
+        if (missing) {
                 console.warn(
-                        "[auth] JWT_SECRET not set — using the insecure default. " +
+                        "[auth] JWT_SECRET is not set — using the insecure default. " +
                         "Set JWT_SECRET in your .env before any non-local use.",
+                );
+        } else if (usingPlaceholder) {
+                console.warn(
+                        "[auth] JWT_SECRET is set to the insecure placeholder value. " +
+                        "Replace it in your .env before any non-local use.",
                 );
         }
 }
@@ -91,7 +103,7 @@ export async function loginUser(username: string, password: string): Promise<{ u
 
 function signToken(userId: string, username: string): string {
         const payload: JwtPayload = { sub: userId, username };
-        return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN as any });
+        return jwt.sign(payload, jwtSecret(), { expiresIn: JWT_EXPIRES_IN as any });
 }
 
 // ── Express middleware ──────────────────────────────────────────────────────
@@ -105,7 +117,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
 
         const token = header.slice(7);
         try {
-                const payload = jwt.verify(token, JWT_SECRET) as JwtPayload;
+                const payload = jwt.verify(token, jwtSecret()) as JwtPayload;
                 (req as AuthedRequest).userId = payload.sub;
                 (req as AuthedRequest).username = payload.username;
                 next();
@@ -154,7 +166,7 @@ export function verifyWsToken(
         }
 
         try {
-                return jwt.verify(token, JWT_SECRET) as JwtPayload;
+                return jwt.verify(token, jwtSecret()) as JwtPayload;
         } catch (err) {
                 console.error("[verifyWsToken] jwt verify failed:", (err as Error).name, (err as Error).message);
                 return null;
