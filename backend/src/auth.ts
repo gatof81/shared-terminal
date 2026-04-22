@@ -61,6 +61,13 @@ export function validateJwtSecret(): void {
         capturedJwtSecret = raw ?? INSECURE_DEFAULT_JWT_SECRET;
 }
 
+// Test-only: reset the captured secret so each test starts from the
+// "validateJwtSecret has not run yet" state. Must not be called from
+// production code paths.
+export function __resetJwtSecretForTests(): void {
+        capturedJwtSecret = null;
+}
+
 export interface AuthedRequest extends Request {
         userId: string;
         username: string;

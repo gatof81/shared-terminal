@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { validateJwtSecret } from "./auth.js";
+import { validateJwtSecret, __resetJwtSecretForTests } from "./auth.js";
 
 // These tests manipulate process.env.{JWT_SECRET, NODE_ENV} and use a
 // spy on console.warn. Snapshot + restore each to avoid cross-test leakage.
@@ -11,6 +11,10 @@ describe("validateJwtSecret", () => {
 		delete process.env.JWT_SECRET;
 		delete process.env.NODE_ENV;
 		warnSpy = vi.spyOn(console, "warn").mockImplementation(() => { /* swallow */ });
+		// Reset the module-level captured secret so each test starts from
+		// "validateJwtSecret has not run yet". Without this, the capture
+		// from an earlier successful validate leaks into later tests.
+		__resetJwtSecretForTests();
 	});
 
 	afterEach(() => {
