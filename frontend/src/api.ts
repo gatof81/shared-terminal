@@ -31,6 +31,13 @@ export async function checkAuthStatus(): Promise<{ needsSetup: boolean }> {
         return res.json();
 }
 
+export class InviteRequiredError extends Error {
+        constructor(message: string) {
+                super(message);
+                this.name = "InviteRequiredError";
+        }
+}
+
 export async function register(
         username: string,
         password: string,
@@ -41,7 +48,10 @@ export async function register(
                 body: JSON.stringify({ username, password, inviteCode }),
         });
         if (!res.ok) {
-                const body = await res.json();
+                const body = await res.json().catch(() => ({}));
+                if (res.status === 403) {
+                        throw new InviteRequiredError(body.error ?? "Invite code required");
+                }
                 throw new Error(body.error ?? "Registration failed");
         }
         const data = await res.json();

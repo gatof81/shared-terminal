@@ -6,6 +6,7 @@ import { Router, Request, Response } from "express";
 import {
         AuthedRequest, requireAuth, registerUser, loginUser, hasAnyUsers,
         InvalidCredentialsError, InviteRequiredError, UsernameTakenError,
+        InviteQuotaExceededError,
         createInvite, listInvites, revokeInvite,
 } from "./auth.js";
 import { SessionManager, NotFoundError, ForbiddenError } from "./sessionManager.js";
@@ -158,6 +159,10 @@ export function buildRouter(
                         const invite = await createInvite(userId);
                         res.status(201).json(invite);
                 } catch (err) {
+                        if (err instanceof InviteQuotaExceededError) {
+                                res.status(429).json({ error: err.message });
+                                return;
+                        }
                         console.error(`[invites] create failed:`, (err as Error).message);
                         res.status(500).json({ error: "Internal server error" });
                 }

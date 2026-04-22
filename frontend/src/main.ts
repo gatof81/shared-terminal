@@ -9,7 +9,7 @@ import {
         isLoggedIn, login, register, logout, checkAuthStatus,
         listSessions, createSession, deleteSession, stopSession, startSession,
         listTabs, createTab, deleteTab, LastTabError, TabNotFoundError,
-        listInvites, createInvite, revokeInvite,
+        listInvites, createInvite, revokeInvite, InviteRequiredError,
         type SessionInfo, type Tab, type Invite,
 } from "./api.js";
 import { openTerminalSession, type TerminalSession, type SessionStatus } from "./terminal.js";
@@ -167,6 +167,17 @@ authForm.addEventListener("submit", async (e) => {
                 }
                 showApp();
         } catch (err) {
+                // The bootstrap window can close between page load and submit
+                // (a concurrent register sneaks in, or the page sat open after
+                // someone else set up the first account). The backend signals
+                // this with 403 InviteRequired — clear the flag and reveal the
+                // invite-code field so the user can retry without reloading.
+                if (err instanceof InviteRequiredError && isBootstrapRegister) {
+                        isBootstrapRegister = false;
+                        updateAuthUI();
+                        authError.textContent = "An account already exists — enter an invite code to register.";
+                        return;
+                }
                 authError.textContent = (err as Error).message;
         }
 });
