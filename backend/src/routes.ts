@@ -3,7 +3,11 @@
  */
 
 import { Router, Request, Response } from "express";
-import { AuthedRequest, requireAuth, registerUser, loginUser, hasAnyUsers, InvalidCredentialsError } from "./auth.js";
+import {
+        AuthedRequest, requireAuth, registerUser, loginUser, hasAnyUsers,
+        InvalidCredentialsError, InviteRequiredError, UsernameTakenError,
+        createInvite, listInvites, revokeInvite,
+} from "./auth.js";
 import { SessionManager, NotFoundError, ForbiddenError } from "./sessionManager.js";
 import { DockerManager } from "./dockerManager.js";
 import { SessionMeta } from "./types.js";
@@ -37,7 +41,9 @@ export function buildRouter(
         });
 
         router.post("/auth/register", registerIp, async (req: Request, res: Response) => {
-                const { username, password } = req.body as { username?: string; password?: string };
+                const { username, password, inviteCode } = req.body as {
+                        username?: string; password?: string; inviteCode?: string;
+                };
                 if (!username || !password || password.length < 6) {
                         res.status(400).json({ error: "username and password (min 6 chars) required" });
                         return;
@@ -47,10 +53,23 @@ export function buildRouter(
                         return;
                 }
                 try {
-                        const result = await registerUser(username, password);
+                        const result = await registerUser(username, password, inviteCode?.trim() || undefined);
                         res.status(201).json(result);
                 } catch (err) {
-                        res.status(409).json({ error: (err as Error).message });
+                        if (err instanceof InviteRequiredError) {
+                                // 403 — caller authenticated nothing yet, but the action is
+                                // forbidden without a valid invite. Distinct from 409 so the
+                                // frontend can render the invite-code field instead of a
+                                // username-taken message.
+                                res.status(403).json({ error: err.message });
+                                return;
+                        }
+                        if (err instanceof UsernameTakenError) {
+                                res.status(409).json({ error: err.message });
+                                return;
+                        }
+                        console.error(`[auth] register failed unexpectedly:`, (err as Error).message);
+                        res.status(500).json({ error: "Internal server error" });
                 }
         });
 
@@ -113,6 +132,54 @@ export function buildRouter(
                 }
                 usernameLimiter.reset(username);
                 res.json(result);
+        });
+
+        // ── Invite routes (authenticated) ───────────────────────────────────────
+        // Any authenticated user can mint invites — there is no admin tier yet.
+        // If you ever want to gate this to specific accounts, add an is_admin
+        // column to users and a middleware check here.
+
+        router.use("/invites", requireAuth);
+
+        router.get("/invites", async (req: Request, res: Response) => {
+                const { userId } = req as AuthedRequest;
+                try {
+                        const invites = await listInvites(userId);
+                        res.json(invites);
+                } catch (err) {
+                        console.error(`[invites] list failed:`, (err as Error).message);
+                        res.status(500).json({ error: "Internal server error" });
+                }
+        });
+
+        router.post("/invites", async (req: Request, res: Response) => {
+                const { userId } = req as AuthedRequest;
+                try {
+                        const invite = await createInvite(userId);
+                        res.status(201).json(invite);
+                } catch (err) {
+                        console.error(`[invites] create failed:`, (err as Error).message);
+                        res.status(500).json({ error: "Internal server error" });
+                }
+        });
+
+        router.delete("/invites/:code", async (req: Request, res: Response) => {
+                const { userId } = req as AuthedRequest;
+                const { code } = req.params;
+                try {
+                        const removed = await revokeInvite(userId, code);
+                        if (!removed) {
+                                // Vague on purpose: don't distinguish missing / already-used /
+                                // owned-by-someone-else, since that would let a caller probe for
+                                // codes outside their ownership.
+                                res.status(404).json({ error: "Invite not found or already used" });
+                                return;
+                        }
+                        res.status(204).send();
+                } catch (err) {
+                        console.error(`[invites] revoke failed:`, (err as Error).message);
+                        res.status(500).json({ error: "Internal server error" });
+                }
         });
 
         // ── Session routes (authenticated) ──────────────────────────────────────

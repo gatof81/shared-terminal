@@ -160,6 +160,160 @@
         border-color: #f85149;
         color: #f85149;
       }
+      #invites-btn {
+        background: transparent;
+        border: 1px solid #30363d;
+        border-radius: 6px;
+        color: #8b949e;
+        font-size: 0.75rem;
+        padding: 0.25rem 0.6rem;
+        cursor: pointer;
+      }
+      #invites-btn:hover {
+        border-color: #58a6ff;
+        color: #58a6ff;
+      }
+
+      /* ── Modal (invites) ────────────────────────────────────────── */
+      .modal {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 100;
+        align-items: center;
+        justify-content: center;
+      }
+      .modal.open {
+        display: flex;
+      }
+      .modal-backdrop {
+        position: absolute;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.6);
+      }
+      .modal-card {
+        position: relative;
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 12px;
+        padding: 1.25rem 1.25rem 1rem;
+        width: 480px;
+        max-width: 92vw;
+        max-height: 80vh;
+        display: flex;
+        flex-direction: column;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+      }
+      .modal-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 0.5rem;
+      }
+      .modal-header h2 {
+        font-size: 1rem;
+        color: #e6edf3;
+        font-weight: 600;
+      }
+      .modal-close {
+        background: transparent;
+        border: none;
+        color: #8b949e;
+        font-size: 1.4rem;
+        line-height: 1;
+        cursor: pointer;
+        padding: 0 0.4rem;
+        border-radius: 4px;
+      }
+      .modal-close:hover {
+        background: rgba(255, 255, 255, 0.08);
+        color: #e6edf3;
+      }
+      .modal-hint {
+        font-size: 0.78rem;
+        color: #8b949e;
+        margin-bottom: 0.85rem;
+        line-height: 1.45;
+      }
+      #invite-create-btn {
+        background: #238636;
+        border: none;
+        border-radius: 6px;
+        padding: 0.45rem 0.75rem;
+        color: #fff;
+        font-size: 0.82rem;
+        cursor: pointer;
+        margin-bottom: 0.85rem;
+        align-self: flex-start;
+      }
+      #invite-create-btn:hover {
+        background: #2ea043;
+      }
+      #invite-create-btn:disabled {
+        opacity: 0.6;
+        cursor: progress;
+      }
+      .invite-list {
+        flex: 1;
+        overflow-y: auto;
+        border-top: 1px solid #21262d;
+        padding-top: 0.5rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+      }
+      .invite-row {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        padding: 0.45rem 0.6rem;
+        background: #0d1117;
+        border: 1px solid #21262d;
+        border-radius: 6px;
+        font-size: 0.8rem;
+      }
+      .invite-row.used {
+        opacity: 0.55;
+      }
+      .invite-code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: #e6edf3;
+        flex: 1;
+        overflow-x: auto;
+        white-space: nowrap;
+      }
+      .invite-status {
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: #8b949e;
+      }
+      .invite-status.unused {
+        color: #3fb950;
+      }
+      .invite-action-btn {
+        background: transparent;
+        border: 1px solid #30363d;
+        border-radius: 4px;
+        color: #8b949e;
+        padding: 0.2rem 0.5rem;
+        font-size: 0.72rem;
+        cursor: pointer;
+      }
+      .invite-action-btn:hover {
+        color: #e6edf3;
+        border-color: #58a6ff;
+      }
+      .invite-action-btn.revoke:hover {
+        color: #f85149;
+        border-color: #f85149;
+      }
+      .invite-empty {
+        text-align: center;
+        color: #8b949e;
+        font-size: 0.8rem;
+        padding: 1rem 0;
+      }
 
       main {
         flex: 1;
@@ -571,6 +725,14 @@
             placeholder="Password"
             autocomplete="current-password"
           />
+          <input
+            id="auth-invite-code"
+            type="text"
+            placeholder="Invite code"
+            autocomplete="off"
+            spellcheck="false"
+            style="display: none"
+          />
           <div id="auth-error"></div>
           <button type="submit" id="auth-submit">Login</button>
         </form>
@@ -609,6 +771,7 @@
         <h1>⬛ Shared Terminal</h1>
         <div class="header-right">
           <span id="user-display"></span>
+          <button id="invites-btn" title="Manage invite codes">Invites</button>
           <button id="logout-btn">Logout</button>
         </div>
       </header>
@@ -651,6 +814,34 @@
     </div>
 
     <div id="toast"></div>
+
+    <!-- Invites modal -->
+    <div id="invites-modal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close-modal></div>
+      <div
+        class="modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="invites-modal-title"
+      >
+        <div class="modal-header">
+          <h2 id="invites-modal-title">Invite codes</h2>
+          <button
+            class="modal-close"
+            type="button"
+            aria-label="Close"
+            data-close-modal
+          >×</button>
+        </div>
+        <p class="modal-hint">
+          Share an invite code with someone to let them register an account.
+          Each code can only be used once.
+        </p>
+        <button id="invite-create-btn" type="button">+ Generate new invite</button>
+        <div id="invite-list" class="invite-list"></div>
+      </div>
+    </div>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

@@ -31,10 +31,14 @@ export async function checkAuthStatus(): Promise<{ needsSetup: boolean }> {
         return res.json();
 }
 
-export async function register(username: string, password: string): Promise<{ userId: string; token: string }> {
+export async function register(
+        username: string,
+        password: string,
+        inviteCode?: string,
+): Promise<{ userId: string; token: string }> {
         const res = await apiFetch("/auth/register", {
                 method: "POST",
-                body: JSON.stringify({ username, password }),
+                body: JSON.stringify({ username, password, inviteCode }),
         });
         if (!res.ok) {
                 const body = await res.json();
@@ -195,6 +199,39 @@ export class TabNotFoundError extends Error {
         constructor() {
                 super("Tab no longer exists in the session");
                 this.name = "TabNotFoundError";
+        }
+}
+
+// ── Invites API ─────────────────────────────────────────────────────────────
+
+export interface Invite {
+        code: string;
+        createdBy: string;
+        createdAt: string;
+        usedBy: string | null;
+        usedAt: string | null;
+}
+
+export async function listInvites(): Promise<Invite[]> {
+        const res = await apiFetch("/invites");
+        if (!res.ok) throw new Error("Failed to list invites");
+        return res.json();
+}
+
+export async function createInvite(): Promise<Invite> {
+        const res = await apiFetch("/invites", { method: "POST" });
+        if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.error ?? "Failed to create invite");
+        }
+        return res.json();
+}
+
+export async function revokeInvite(code: string): Promise<void> {
+        const res = await apiFetch(`/invites/${encodeURIComponent(code)}`, { method: "DELETE" });
+        if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.error ?? "Failed to revoke invite");
         }
 }
 

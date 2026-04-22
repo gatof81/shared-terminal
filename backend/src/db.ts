@@ -98,6 +98,20 @@ export async function migrateDb(): Promise<void> {
                 )`,
                 `CREATE INDEX IF NOT EXISTS idx_sessions_user
                         ON sessions(user_id, status)`,
+                // Invite-only registration. The first user is allowed to register
+                // without an invite (bootstrap); every subsequent register must
+                // claim a row here. Atomic claim is enforced by an UPDATE …
+                // WHERE used_at IS NULL with `meta.changes === 1` check, so two
+                // concurrent registers can't redeem the same code.
+                `CREATE TABLE IF NOT EXISTS invite_codes (
+                        code        TEXT PRIMARY KEY,
+                        created_by  TEXT NOT NULL,
+                        created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                        used_by     TEXT,
+                        used_at     TEXT
+                )`,
+                `CREATE INDEX IF NOT EXISTS idx_invite_codes_creator
+                        ON invite_codes(created_by)`,
         ]);
         console.log("[db] migrations complete");
 }
