@@ -9,9 +9,68 @@ import { v4 as uuidv4 } from "uuid";
 import { d1Query } from "./db.js";
 import { JwtPayload } from "./types.js";
 
-const JWT_SECRET = process.env.JWT_SECRET ?? "change-me-in-production";
+// Dev fallback. Production deployments must supply JWT_SECRET — validateJwtSecret()
+// below refuses to start the server if this literal is still in use.
+const INSECURE_DEFAULT_JWT_SECRET = "change-me-in-production";
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN ?? "7d";
 const BCRYPT_ROUNDS = 10;
+
+// Populated by validateJwtSecret() at startup, then read by signing and
+// verification helpers. Captured once so env mutations after startup
+// cannot silently change the key used to sign/verify tokens.
+let capturedJwtSecret: string | null = null;
+
+function jwtSecret(): string {
+        if (capturedJwtSecret === null) {
+                throw new Error(
+                        "jwtSecret() called before validateJwtSecret(). " +
+                        "validateJwtSecret() must run at server startup before any JWT sign/verify.",
+                );
+        }
+        return capturedJwtSecret;
+}
+
+// Call at server startup. In production (NODE_ENV === "production") throws if
+// JWT_SECRET is missing or still the insecure default, so a misconfigured
+// deploy (e.g. .env missing) exits loudly instead of booting with a
+// publicly-known signing key. In other environments, logs a warning when the
+// default is in use so the footgun stays visible during dev. On success,
+// captures the secret into module state so jwtSecret() returns a value
+// frozen at validation time rather than re-reading process.env.
+export function validateJwtSecret(): void {
+        const raw = process.env.JWT_SECRET;
+        const missing = !raw;
+        const usingPlaceholder = raw === INSECURE_DEFAULT_JWT_SECRET;
+        if (process.env.NODE_ENV === "production" && (missing || usingPlaceholder)) {
+                throw new Error(
+                        "JWT_SECRET must be set to a non-default value in production. " +
+                        "Refusing to start with the insecure placeholder — anyone would be able to forge JWTs.",
+                );
+        }
+        if (missing) {
+                console.warn(
+                        "[auth] JWT_SECRET is not set — using the insecure default. " +
+                        "Set JWT_SECRET in your .env before any non-local use.",
+                );
+        } else if (usingPlaceholder) {
+                console.warn(
+                        "[auth] JWT_SECRET is set to the insecure placeholder value. " +
+                        "Replace it in your .env before any non-local use.",
+                );
+        }
+        // Use `||` (not `??`) so an empty-string JWT_SECRET= falls back to
+        // the default, matching the `missing = !raw` classification above.
+        // `??` only triggers on null/undefined and would leave "" captured,
+        // causing the server to sign tokens with an empty-string key in dev.
+        capturedJwtSecret = raw || INSECURE_DEFAULT_JWT_SECRET;
+}
+
+// Test-only: reset the captured secret so each test starts from the
+// "validateJwtSecret has not run yet" state. Must not be called from
+// production code paths.
+export function __resetJwtSecretForTests(): void {
+        capturedJwtSecret = null;
+}
 
 export interface AuthedRequest extends Request {
         userId: string;
@@ -66,7 +125,7 @@ export async function loginUser(username: string, password: string): Promise<{ u
 
 function signToken(userId: string, username: string): string {
         const payload: JwtPayload = { sub: userId, username };
-        return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN as any });
+        return jwt.sign(payload, jwtSecret(), { expiresIn: JWT_EXPIRES_IN as any });
 }
 
 // ── Express middleware ──────────────────────────────────────────────────────
@@ -80,7 +139,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
 
         const token = header.slice(7);
         try {
-                const payload = jwt.verify(token, JWT_SECRET) as JwtPayload;
+                const payload = jwt.verify(token, jwtSecret()) as JwtPayload;
                 (req as AuthedRequest).userId = payload.sub;
                 (req as AuthedRequest).username = payload.username;
                 next();
@@ -129,7 +188,7 @@ export function verifyWsToken(
         }
 
         try {
-                return jwt.verify(token, JWT_SECRET) as JwtPayload;
+                return jwt.verify(token, jwtSecret()) as JwtPayload;
         } catch (err) {
                 console.error("[verifyWsToken] jwt verify failed:", (err as Error).name, (err as Error).message);
                 return null;
