@@ -15,18 +15,28 @@ const INSECURE_DEFAULT_JWT_SECRET = "change-me-in-production";
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN ?? "7d";
 const BCRYPT_ROUNDS = 10;
 
-// Read at call time (not captured at module load) so signing/verification
-// always sees the same env the validator saw. Protects against a future
-// import ordering where a signing helper is pulled in before the env is set.
+// Populated by validateJwtSecret() at startup, then read by signing and
+// verification helpers. Captured once so env mutations after startup
+// cannot silently change the key used to sign/verify tokens.
+let capturedJwtSecret: string | null = null;
+
 function jwtSecret(): string {
-        return process.env.JWT_SECRET ?? INSECURE_DEFAULT_JWT_SECRET;
+        if (capturedJwtSecret === null) {
+                throw new Error(
+                        "jwtSecret() called before validateJwtSecret(). " +
+                        "validateJwtSecret() must run at server startup before any JWT sign/verify.",
+                );
+        }
+        return capturedJwtSecret;
 }
 
 // Call at server startup. In production (NODE_ENV === "production") throws if
 // JWT_SECRET is missing or still the insecure default, so a misconfigured
 // deploy (e.g. .env missing) exits loudly instead of booting with a
 // publicly-known signing key. In other environments, logs a warning when the
-// default is in use so the footgun stays visible during dev.
+// default is in use so the footgun stays visible during dev. On success,
+// captures the secret into module state so jwtSecret() returns a value
+// frozen at validation time rather than re-reading process.env.
 export function validateJwtSecret(): void {
         const raw = process.env.JWT_SECRET;
         const missing = !raw;
@@ -48,6 +58,7 @@ export function validateJwtSecret(): void {
                         "Replace it in your .env before any non-local use.",
                 );
         }
+        capturedJwtSecret = raw ?? INSECURE_DEFAULT_JWT_SECRET;
 }
 
 export interface AuthedRequest extends Request {
