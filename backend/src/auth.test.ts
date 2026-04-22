@@ -63,4 +63,20 @@ describe("validateJwtSecret", () => {
 		expect(() => validateJwtSecret()).not.toThrow();
 		expect(warnSpy).not.toHaveBeenCalled();
 	});
+
+	// Regression: `!raw` is true for both undefined and "". Without the
+	// matching `raw || DEFAULT` on the capture line, an empty-string env
+	// var would be captured verbatim and used to sign tokens.
+	it("throws in production when JWT_SECRET is an empty string", () => {
+		process.env.NODE_ENV = "production";
+		process.env.JWT_SECRET = "";
+		expect(() => validateJwtSecret()).toThrow(/JWT_SECRET must be set/);
+	});
+
+	it("in dev, treats an empty-string JWT_SECRET as unset", () => {
+		process.env.JWT_SECRET = "";
+		expect(() => validateJwtSecret()).not.toThrow();
+		expect(warnSpy).toHaveBeenCalledOnce();
+		expect(warnSpy.mock.calls[0]?.[0]).toMatch(/JWT_SECRET is not set/);
+	});
 });

@@ -14,6 +14,11 @@ services:
       - PORT=3001
       # Marks this as a production deploy so validateJwtSecret()
       # treats the insecure-default signing key as a hard error.
+      # Trust model: explicitly overriding this (NODE_ENV=development
+      # docker compose up) downgrades the placeholder check from throw
+      # to warn. The `:?` check on JWT_SECRET below still covers the
+      # accidental "forgot to set it entirely" case, so the weakened
+      # path is only reachable by deliberate action.
       - NODE_ENV=${NODE_ENV:-production}
       # `:?msg` form makes `docker compose up` fail fast if JWT_SECRET
       # isn't set in .env instead of booting with a known-public default.

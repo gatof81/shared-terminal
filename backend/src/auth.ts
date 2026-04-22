@@ -58,7 +58,11 @@ export function validateJwtSecret(): void {
                         "Replace it in your .env before any non-local use.",
                 );
         }
-        capturedJwtSecret = raw ?? INSECURE_DEFAULT_JWT_SECRET;
+        // Use `||` (not `??`) so an empty-string JWT_SECRET= falls back to
+        // the default, matching the `missing = !raw` classification above.
+        // `??` only triggers on null/undefined and would leave "" captured,
+        // causing the server to sign tokens with an empty-string key in dev.
+        capturedJwtSecret = raw || INSECURE_DEFAULT_JWT_SECRET;
 }
 
 // Test-only: reset the captured secret so each test starts from the
