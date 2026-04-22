@@ -696,8 +696,12 @@ showTerminatedToggle.addEventListener("change", () => {
 
 // ── Sidebar toggle ──────────────────────────────────────────────────────────
 
+// Mirrored in index.html `@media (max-width: 768px)` — keep in sync. The CSS
+// query is the source of truth for visual behaviour; this constant exists so
+// the JS-side default (open on desktop, closed on mobile) matches.
 const MOBILE_BREAKPOINT_PX = 768;
-const isMobile = () => window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT_PX}px)`).matches;
+const mobileMql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT_PX}px)`);
+const isMobile = () => mobileMql.matches;
 
 function setSidebarOpen(open: boolean) {
         mainEl.classList.toggle("sidebar-open", open);
@@ -711,8 +715,7 @@ sidebarToggleBtn.addEventListener("click", () => {
 sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
 
 // On mobile, picking a session should dismiss the drawer so the user can
-// see the terminal — desktop keeps it pinned. Capture phase so we run
-// before the session-item click handler triggers any layout reflow.
+// see the terminal — desktop keeps it pinned.
 sessionList.addEventListener("click", (e) => {
         if (!isMobile()) return;
         // Ignore clicks on action buttons (start/stop/delete) — those don't
@@ -722,10 +725,19 @@ sessionList.addEventListener("click", (e) => {
         if (target.closest(".session-item")) setSidebarOpen(false);
 });
 
-// Default state: open on desktop, closed on mobile. We set this on first
-// app render rather than on script load so the auth view doesn't briefly
-// show a sidebar drawer animation on narrow screens.
+// Crossing the breakpoint resets to the default state for that mode —
+// otherwise a desktop user who shrinks the window would have the drawer
+// already slid in (sidebar-open class still set, mobile CSS reads it as
+// "show drawer"), and a mobile user who widens the window would find the
+// sidebar column pinned at 0 with no visible trigger to recover.
+mobileMql.addEventListener("change", () => setSidebarOpen(!isMobile()));
+
+// Default state: open on desktop, closed on mobile. The HTML+CSS start in
+// the closed state with transitions suppressed via `[data-sidebar-ready]`,
+// so this synchronous flip-then-enable avoids the 0→260px expand animation
+// that would otherwise fire on every desktop page load.
 setSidebarOpen(!isMobile());
+mainEl.setAttribute("data-sidebar-ready", "");
 
 // ── Auto-refresh ────────────────────────────────────────────────────────────
 

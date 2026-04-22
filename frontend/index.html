@@ -172,6 +172,13 @@
       main.sidebar-open {
         grid-template-columns: 260px 1fr;
       }
+      /* Suppress the column transition during the JS-driven init pass so
+         desktop doesn't see a 0→260px expand on every page load. main.ts
+         removes this attribute after applying the initial state. */
+      main:not([data-sidebar-ready]),
+      main:not([data-sidebar-ready]) #sidebar {
+        transition: none !important;
+      }
 
       /* ── Sidebar ────────────────────────────────────────────────── */
       #sidebar {
@@ -507,6 +514,7 @@
       }
 
       /* ── Mobile ─────────────────────────────────────────────────── */
+      /* Breakpoint mirrored in main.ts as MOBILE_BREAKPOINT_PX — keep in sync. */
       @media (max-width: 768px) {
         /* Drop the grid column entirely on mobile — the sidebar floats
            over the terminal as a drawer instead of pushing it. */
@@ -572,7 +580,7 @@
           id="sidebar-toggle"
           type="button"
           aria-label="Toggle sessions sidebar"
-          aria-expanded="true"
+          aria-expanded="false"
           aria-controls="sidebar"
         >
           <svg
