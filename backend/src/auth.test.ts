@@ -51,6 +51,7 @@ describe("validateJwtSecret", () => {
 		process.env.JWT_SECRET = "change-me-in-production";
 		expect(() => validateJwtSecret()).not.toThrow();
 		expect(warnSpy).toHaveBeenCalledOnce();
+		expect(warnSpy.mock.calls[0]?.[0]).toMatch(/JWT_SECRET not set/);
 	});
 
 	it("in dev, stays silent when a real secret is supplied", () => {
