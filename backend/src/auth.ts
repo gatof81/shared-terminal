@@ -101,11 +101,6 @@ export async function registerUser(
         password: string,
         inviteCode: string | undefined,
 ): Promise<{ userId: string; token: string }> {
-        const existing = await d1Query<{ id: string }>("SELECT id FROM users WHERE username = ?", [username]);
-        if (existing.results.length > 0) {
-                throw new UsernameTakenError();
-        }
-
         const userId = uuidv4();
         const passwordHash = bcrypt.hashSync(password, BCRYPT_ROUNDS);
 
@@ -120,13 +115,19 @@ export async function registerUser(
                 // simultaneous first-ever registers could both observe zero users
                 // without this guard. Only one of them gets `meta.changes === 1`;
                 // the loser falls through to the invite-required path below.
-                const insert = await d1Query(
-                        "INSERT INTO users (id, username, password_hash) " +
-                                "SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM users)",
-                        [userId, username, passwordHash],
-                );
-                if (insert.meta.changes === 1) {
-                        return { userId, token: signToken(userId, username) };
+                try {
+                        const insert = await d1Query(
+                                "INSERT INTO users (id, username, password_hash) " +
+                                        "SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM users)",
+                                [userId, username, passwordHash],
+                        );
+                        if (insert.meta.changes === 1) {
+                                return { userId, token: signToken(userId, username) };
+                        }
+                } catch (err) {
+                        // UNIQUE collision can't happen here (no users yet by definition),
+                        // so any error from this INSERT is infra, not a duplicate username.
+                        throw err;
                 }
                 // Race loser: a concurrent bootstrap got there first. Require an
                 // invite from this point on, just like the steady-state path.
@@ -137,9 +138,12 @@ export async function registerUser(
         }
         // Atomic claim: the WHERE used_at IS NULL clause prevents two concurrent
         // registers from redeeming the same code. The race loser sees changes
-        // === 0 and is rejected. If the user INSERT below fails (e.g. concurrent
-        // username-uniqueness collision), we best-effort release the claim so
-        // the invite isn't burned by a register that never produced an account.
+        // === 0 and is rejected. The claim happens BEFORE any check on the
+        // username so an unauthenticated caller without a valid invite always
+        // sees 403 — never a 409 that would let them probe for existing
+        // usernames. If the user INSERT below fails (UNIQUE collision), we
+        // best-effort release the claim so the invite isn't burned by a
+        // register that never produced an account.
         const claim = await d1Query(
                 "UPDATE invite_codes SET used_by = ?, used_at = datetime('now') " +
                         "WHERE code = ? AND used_at IS NULL",
@@ -170,6 +174,13 @@ export async function registerUser(
                                 "[auth] invite release after failed user insert errored:",
                                 (releaseErr as Error).message,
                         );
+                }
+                // SQLite UNIQUE-constraint violation → username already taken.
+                // D1 surfaces the SQLite error message in the d1Query throw, so
+                // we sniff for it rather than introducing a typed-error layer
+                // around the whole D1 client.
+                if (/UNIQUE constraint failed: users\.username/i.test((err as Error).message)) {
+                        throw new UsernameTakenError();
                 }
                 throw err;
         }
@@ -202,26 +213,35 @@ export interface Invite {
 }
 
 export async function createInvite(creatorUserId: string): Promise<Invite> {
-        const countResult = await d1Query<{ count: number }>(
-                "SELECT COUNT(*) as count FROM invite_codes WHERE created_by = ? AND used_at IS NULL",
-                [creatorUserId],
-        );
-        if ((countResult.results[0]?.count ?? 0) >= MAX_UNUSED_INVITES_PER_USER) {
-                throw new InviteQuotaExceededError();
-        }
-
         // 16 hex chars = 64 bits of entropy — plenty for a single-use,
         // typically short-lived invite code, and short enough to paste.
+        //
+        // Codes are stored in plaintext rather than hashed: they are
+        // single-use, expected to be short-lived, and the user needs to read
+        // them back from the UI to share with invitees. A D1 breach would
+        // expose unused codes immediately — an acceptable trade-off given
+        // those properties, but flagged here so it's a conscious choice.
         const code = randomBytes(8).toString("hex");
         // Pass created_at explicitly so we can return it without a follow-up
         // SELECT that could orphan a valid invite row on read failure. Format
         // matches D1's `datetime('now')` output (UTC, no fractional seconds)
         // so existing rows and new ones sort/compare consistently.
         const createdAt = new Date().toISOString().replace("T", " ").slice(0, 19);
-        await d1Query(
-                "INSERT INTO invite_codes (code, created_by, created_at) VALUES (?, ?, ?)",
-                [code, creatorUserId, createdAt],
+        // Atomic quota check: collapse the count + insert into one statement
+        // so two concurrent POST /invites requests can't both observe count
+        // < MAX and both insert. The WHERE clause is evaluated as part of the
+        // INSERT, so SQLite serialises the read+write. Same changes-based
+        // pattern as the bootstrap and invite-claim paths above.
+        const insert = await d1Query(
+                "INSERT INTO invite_codes (code, created_by, created_at) " +
+                        "SELECT ?, ?, ? WHERE (" +
+                        "SELECT COUNT(*) FROM invite_codes WHERE created_by = ? AND used_at IS NULL" +
+                        ") < ?",
+                [code, creatorUserId, createdAt, creatorUserId, MAX_UNUSED_INVITES_PER_USER],
         );
+        if (insert.meta.changes !== 1) {
+                throw new InviteQuotaExceededError();
+        }
         return { code, createdBy: creatorUserId, createdAt, usedBy: null, usedAt: null };
 }
 

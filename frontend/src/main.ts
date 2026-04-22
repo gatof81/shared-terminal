@@ -127,12 +127,12 @@ function updateAuthUI() {
                 authToggle.innerHTML = 'Already have an account? <a href="#" id="auth-toggle-link">Login</a>';
                 // Invite code is required for every register except the bootstrap
                 // first user — show the field accordingly.
-                authInviteCode.style.display = isBootstrapRegister ? "none" : "block";
+                authInviteCode.classList.toggle("hidden", isBootstrapRegister);
         } else {
                 authTitle.textContent = "Login";
                 authSubmitBtn.textContent = "Login";
                 authToggle.innerHTML = 'No account? <a href="#" id="auth-toggle-link">Register</a>';
-                authInviteCode.style.display = "none";
+                authInviteCode.classList.add("hidden");
         }
         // Re-bind toggle link
         document.getElementById("auth-toggle-link")?.addEventListener("click", (e) => {

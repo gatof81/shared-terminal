@@ -25,6 +25,11 @@
         flex-direction: column;
       }
 
+      /* ── Utilities ──────────────────────────────────────────────── */
+      .hidden {
+        display: none !important;
+      }
+
       /* ── Auth view ──────────────────────────────────────────────── */
       #auth-view {
         display: none;
@@ -727,11 +732,11 @@
           />
           <input
             id="auth-invite-code"
+            class="hidden"
             type="text"
             placeholder="Invite code"
             autocomplete="off"
             spellcheck="false"
-            style="display: none"
           />
           <div id="auth-error"></div>
           <button type="submit" id="auth-submit">Login</button>
