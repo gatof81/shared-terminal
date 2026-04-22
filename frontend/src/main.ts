@@ -31,6 +31,10 @@ const sessionList = document.getElementById("session-list")!;
 const newSessionForm = document.getElementById("new-session-form") as HTMLFormElement;
 const newSessionInput = document.getElementById("new-session-input") as HTMLInputElement;
 const showTerminatedToggle = document.getElementById("show-terminated-toggle") as HTMLInputElement;
+const mainEl = document.querySelector("main")!;
+const sidebarEl = document.getElementById("sidebar")!;
+const sidebarToggleBtn = document.getElementById("sidebar-toggle") as HTMLButtonElement;
+const sidebarBackdrop = document.getElementById("sidebar-backdrop")!;
 
 const terminalToolbar = document.getElementById("terminal-toolbar")!;
 const terminalSessionName = document.getElementById("terminal-session-name")!;
@@ -701,6 +705,79 @@ showTerminatedToggle.addEventListener("change", () => {
         console.debug(`[sessions] show-terminated toggled → ${showTerminatedToggle.checked}`);
         refreshSessions();
 });
+
+// ── Sidebar toggle ──────────────────────────────────────────────────────────
+
+// Mirrored in index.html `@media (max-width: 768px)` — keep in sync. The CSS
+// query is the source of truth for visual behaviour; this constant exists so
+// the JS-side default (open on desktop, closed on mobile) matches.
+const MOBILE_BREAKPOINT_PX = 768;
+const mobileMql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT_PX}px)`);
+const isMobile = () => mobileMql.matches;
+
+function setSidebarOpen(open: boolean) {
+        const wasOpen = mainEl.classList.contains("sidebar-open");
+        mainEl.classList.toggle("sidebar-open", open);
+        sidebarToggleBtn.setAttribute("aria-expanded", String(open));
+
+        // Focus management is only meaningful on mobile, where the sidebar
+        // is a modal-style drawer — keyboard users opening it expect focus
+        // to land inside, and closing it should return focus to the toggle
+        // (only when focus was inside the drawer; otherwise the user has
+        // already moved on and we'd be stealing their focus).
+        if (!isMobile()) return;
+        if (open && !wasOpen) {
+                const firstFocusable = sidebarEl.querySelector<HTMLElement>(
+                        'input, button, a, [tabindex]:not([tabindex="-1"])',
+                );
+                firstFocusable?.focus();
+        } else if (!open && wasOpen) {
+                if (sidebarEl.contains(document.activeElement)) {
+                        sidebarToggleBtn.focus();
+                }
+        }
+}
+
+sidebarToggleBtn.addEventListener("click", () => {
+        setSidebarOpen(!mainEl.classList.contains("sidebar-open"));
+});
+
+sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
+
+// Escape closes the mobile drawer, matching the WAI-ARIA modal-dialog
+// expectation. Desktop ignores this — the sidebar is always part of the
+// layout there and Escape conflicts with terminal/xterm key handling.
+document.addEventListener("keydown", (e) => {
+        if (e.key !== "Escape") return;
+        if (!isMobile()) return;
+        if (!mainEl.classList.contains("sidebar-open")) return;
+        setSidebarOpen(false);
+});
+
+// On mobile, picking a session should dismiss the drawer so the user can
+// see the terminal — desktop keeps it pinned.
+sessionList.addEventListener("click", (e) => {
+        if (!isMobile()) return;
+        // Ignore clicks on action buttons (start/stop/delete) — those don't
+        // switch the active session, so dismissing the drawer is jarring.
+        const target = e.target as HTMLElement;
+        if (target.closest(".session-actions")) return;
+        if (target.closest(".session-item")) setSidebarOpen(false);
+});
+
+// Crossing the breakpoint resets to the default state for that mode —
+// otherwise a desktop user who shrinks the window would have the drawer
+// already slid in (sidebar-open class still set, mobile CSS reads it as
+// "show drawer"), and a mobile user who widens the window would find the
+// sidebar column pinned at 0 with no visible trigger to recover.
+mobileMql.addEventListener("change", () => setSidebarOpen(!isMobile()));
+
+// Default state: open on desktop, closed on mobile. The HTML+CSS start in
+// the closed state with transitions suppressed via `[data-sidebar-ready]`,
+// so this synchronous flip-then-enable avoids the 0→260px expand animation
+// that would otherwise fire on every desktop page load.
+setSidebarOpen(!isMobile());
+mainEl.setAttribute("data-sidebar-ready", "");
 
 // ── Auto-refresh ────────────────────────────────────────────────────────────
 
