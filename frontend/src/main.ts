@@ -31,6 +31,9 @@ const sessionList = document.getElementById("session-list")!;
 const newSessionForm = document.getElementById("new-session-form") as HTMLFormElement;
 const newSessionInput = document.getElementById("new-session-input") as HTMLInputElement;
 const showTerminatedToggle = document.getElementById("show-terminated-toggle") as HTMLInputElement;
+const mainEl = document.querySelector("main")!;
+const sidebarToggleBtn = document.getElementById("sidebar-toggle") as HTMLButtonElement;
+const sidebarBackdrop = document.getElementById("sidebar-backdrop")!;
 
 const terminalToolbar = document.getElementById("terminal-toolbar")!;
 const terminalSessionName = document.getElementById("terminal-session-name")!;
@@ -690,6 +693,39 @@ showTerminatedToggle.addEventListener("change", () => {
         console.debug(`[sessions] show-terminated toggled → ${showTerminatedToggle.checked}`);
         refreshSessions();
 });
+
+// ── Sidebar toggle ──────────────────────────────────────────────────────────
+
+const MOBILE_BREAKPOINT_PX = 768;
+const isMobile = () => window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT_PX}px)`).matches;
+
+function setSidebarOpen(open: boolean) {
+        mainEl.classList.toggle("sidebar-open", open);
+        sidebarToggleBtn.setAttribute("aria-expanded", String(open));
+}
+
+sidebarToggleBtn.addEventListener("click", () => {
+        setSidebarOpen(!mainEl.classList.contains("sidebar-open"));
+});
+
+sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
+
+// On mobile, picking a session should dismiss the drawer so the user can
+// see the terminal — desktop keeps it pinned. Capture phase so we run
+// before the session-item click handler triggers any layout reflow.
+sessionList.addEventListener("click", (e) => {
+        if (!isMobile()) return;
+        // Ignore clicks on action buttons (start/stop/delete) — those don't
+        // switch the active session, so dismissing the drawer is jarring.
+        const target = e.target as HTMLElement;
+        if (target.closest(".session-actions")) return;
+        if (target.closest(".session-item")) setSidebarOpen(false);
+});
+
+// Default state: open on desktop, closed on mobile. We set this on first
+// app render rather than on script load so the auth view doesn't briefly
+// show a sidebar drawer animation on narrow screens.
+setSidebarOpen(!isMobile());
 
 // ── Auto-refresh ────────────────────────────────────────────────────────────
 
