@@ -14,7 +14,11 @@ describe("validateJwtSecret", () => {
 	});
 
 	afterEach(() => {
-		process.env = { ...originalEnv };
+		// Restore the real process.env in place — reassigning with
+		// `process.env = …` would drop Node's string-coercion behaviour and
+		// break any module that captured a reference to the original object.
+		for (const k of Object.keys(process.env)) delete process.env[k];
+		Object.assign(process.env, originalEnv);
 		warnSpy.mockRestore();
 	});
 
