@@ -36,13 +36,23 @@ services:
       - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
       - D1_DATABASE_ID=${D1_DATABASE_ID}
     restart: unless-stopped
-    depends_on:
-      - session-image
 
-  # Dummy service that just builds the session image
+  # Build-only helper — the session image needs to exist in Docker's image
+  # store before `app` can spawn session containers, but we don't want to
+  # *run* anything from it as a long-lived service. The `session-image`
+  # Dockerfile has an ENTRYPOINT (tmux + sleep), so starting a container
+  # here would leave an idle parasite container running forever.
+  #
+  # With `profiles: ["build"]` this service is never started by a plain
+  # `docker compose up`. To (re)build the image, run:
+  #
+  #     docker compose build session-image
+  #
+  # (`docker compose build <name>` works regardless of profile.) Or use
+  # the standalone `docker build -t shared-terminal-session ./session-image`
+  # from the repo root — both produce the same image.
   session-image:
+    profiles: ["build"]
     build:
       context: ./session-image
     image: shared-terminal-session
-    command: ["echo", "image built"]
-    restart: "no"
