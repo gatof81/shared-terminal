@@ -210,6 +210,12 @@ export function openTerminalSession(opts: {
                 const cellH = getCellHeight();
                 const deltaPx = lastTouchY - y;
                 const lines = Math.trunc(deltaPx / cellH);
+
+                // Once the gesture is classified as a scroll, keep suppressing
+                // xterm's drag-selection handler on every subsequent frame —
+                // including sub-cell frames where lines === 0. Without this,
+                // slow swipes leave an unguarded window at the start.
+                if (touchIsScroll) ev.preventDefault();
                 if (lines === 0) return;
 
                 touchIsScroll = true;
@@ -233,7 +239,10 @@ export function openTerminalSession(opts: {
                 // If the finger never moved a full cell it was a tap: focus xterm
                 // so the OS keyboard appears for typing. Scroll gestures skip this
                 // so the keyboard doesn't flash open mid-swipe.
-                if (!touchIsScroll) term.focus();
+                // Guard on lastTouchY !== null: a multi-touch start (pinch) clears
+                // lastTouchY and resets touchIsScroll, so when one finger lifts we
+                // must not treat it as a tap and pop the keyboard.
+                if (!touchIsScroll && lastTouchY !== null) term.focus();
                 lastTouchY = null;
                 touchIsScroll = false;
         };
