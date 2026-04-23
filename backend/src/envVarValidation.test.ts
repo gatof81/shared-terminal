@@ -1,11 +1,11 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-        validateEnvVars,
         EnvVarValidationError,
         MAX_ENV_VAR_COUNT,
         MAX_ENV_VAR_NAME_LENGTH,
         MAX_ENV_VAR_VALUE_LENGTH,
         MAX_ENV_VARS_TOTAL_BYTES,
+        validateEnvVars,
 } from "./envVarValidation.js";
 
 describe("validateEnvVars", () => {
