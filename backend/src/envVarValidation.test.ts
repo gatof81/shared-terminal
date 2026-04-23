@@ -213,4 +213,62 @@ describe("validateEnvVars", () => {
                 // clarity and makes debugging client bugs easier.
                 expect(() => validateEnvVars({ "LD-PRELOAD": "x" })).toThrow(/not a valid POSIX/);
         });
+
+        it("rejects interpreter/runtime injection vars (Node, Python, JVM, Ruby, Perl)", () => {
+                // Round-2 reviewer noted the denylist's stated goal — "no silent
+                // hooks in the shell startup" — was incomplete while NODE_OPTIONS,
+                // PYTHONSTARTUP, JAVA_TOOL_OPTIONS, RUBYOPT, PERL5OPT etc. could
+                // still slip through. Each of these is honoured by its runtime at
+                // interpreter startup and could inject code into every invocation.
+                expect(() => validateEnvVars({ NODE_OPTIONS: "--require /evil.js" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ NODE_PATH: "/evil" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ PYTHONPATH: "/evil" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ PYTHONSTARTUP: "/evil.py" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ PYTHONINSPECT: "1" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ PYTHONHOME: "/evil" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ PYTHONBREAKPOINT: "sys.exit" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ JAVA_TOOL_OPTIONS: "-javaagent:/x.jar" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ _JAVA_OPTIONS: "-Dfoo=bar" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ JDK_JAVA_OPTIONS: "-Xmx1g" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ RUBYOPT: "-r/evil" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ RUBYLIB: "/evil" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ PERL5OPT: "-Mevil" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ PERL5LIB: "/evil" })).toThrow(/reserved/);
+        });
+
+        it("rejects all DYLD_* dynamic-linker variables (macOS prefix match)", () => {
+                // macOS counterpart to LD_*. Our runtime is Linux, but we want a
+                // clear 400 rather than a silently-ignored value when somebody
+                // pastes a DYLD_* var from habit.
+                expect(() => validateEnvVars({ DYLD_INSERT_LIBRARIES: "/x.dylib" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ DYLD_LIBRARY_PATH: "/x" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ DYLD_MADE_UP_TOMORROW: "x" })).toThrow(/reserved/);
+        });
+
+        // ── prototype-pollution vector names ──────────────────────────────
+
+        it("rejects __proto__, constructor, prototype with a specific message", () => {
+                // These pass the POSIX-identifier regex (all letters/underscores)
+                // and so would otherwise be accepted by the POSIX check. Rejecting
+                // them explicitly gives the caller a specific error and means the
+                // normalised output object can safely be a plain {} without being
+                // hit by the Object.prototype setter dance on assignment.
+                for (const name of ["__proto__", "constructor", "prototype"]) {
+                        expect(() => validateEnvVars({ [name]: "x" })).toThrow(EnvVarValidationError);
+                        expect(() => validateEnvVars({ [name]: "x" })).toThrow(/conflicts with JS object semantics/);
+                }
+        });
+
+        it("returns a plain object — Object.prototype methods work directly on the result", () => {
+                // The previous implementation returned an Object.create(null) map,
+                // which would TypeError if a future caller did `.hasOwnProperty`,
+                // `.toString`, etc. directly. Switched to plain {} now that
+                // __proto__ is rejected at validation time; this test pins that
+                // direct Object.prototype calls work.
+                const result = validateEnvVars({ FOO: "bar" });
+                // These would all throw "is not a function" on a null-proto object.
+                expect(result.hasOwnProperty("FOO")).toBe(true);
+                expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
+                expect(typeof result.toString).toBe("function");
+        });
 });

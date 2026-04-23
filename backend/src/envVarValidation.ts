@@ -41,35 +41,101 @@ export const MAX_ENV_VARS_TOTAL_BYTES = 64 * 1024;
 const ENV_VAR_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 // Denylist of env var names that would hijack dynamic linking, command
-// resolution, or identity. In a single-tenant full-shell session these
-// are NOT a privilege-escalation vector — the user can `export` any of
-// them inside their shell anyway — so the rule is about transparency,
-// not isolation:
+// resolution, interpreter/runtime behaviour, or identity. In a single-
+// tenant full-shell session these are NOT a privilege-escalation vector
+// — the user can `export` any of them inside their shell anyway — so
+// the rule is about transparency, not isolation:
 //
-//   - Baking `LD_PRELOAD=/some/lib.so` into the container env means
-//     every process spawned inside the session (including entrypoint
-//     scripts, hooks, and anything the user didn't type themselves)
-//     inherits the hook silently.
+//   - Baking `LD_PRELOAD=/some/lib.so`, `NODE_OPTIONS=--require ...`,
+//     or `JAVA_TOOL_OPTIONS=-javaagent:...` into the container env
+//     means every process spawned inside the session (including
+//     entrypoint scripts, hooks, and anything the user didn't type
+//     themselves) inherits the hook silently. node, python, java, etc.
+//     all honour these env vars at interpreter startup.
 //   - A session's declared envVars are user-visible in the UI; what
 //     lands inside the container should match. Letting PATH/HOME/etc.
 //     through would let a caller create a session whose shell starts
 //     with a config the session metadata doesn't obviously reveal.
 //
+// This is a blocklist, not an allowlist — novel interpreter injection
+// knobs (future node/python releases) may sneak through until they're
+// added here. The round-2 reviewer flagged that rightly. The trade-off
+// (strictness vs not breaking legitimate workflows that set e.g.
+// DATABASE_URL) favours enumerating well-known knobs; if the threat
+// model ever shifts to multi-tenant, this should flip to an allowlist.
+//
 // Result: what you PUT in the session body matches what the shell
-// SEES at startup, with no silent linker/interpreter hooks.
+// SEES at startup, with no silent linker/interpreter hooks for the
+// known injection surfaces.
 const DENIED_ENV_VAR_NAMES = new Set([
+        // Identity / shell config
         "PATH",
         "HOME",
         "USER",
         "LOGNAME",
         "SHELL",
+
+        // Node.js — NODE_OPTIONS accepts --require/--import which runs
+        // arbitrary JS at every `node` invocation. NODE_PATH changes the
+        // module resolver and would let an env set shadow stdlib requires.
+        "NODE_OPTIONS",
+        "NODE_PATH",
+
+        // Python — PYTHONSTARTUP runs a file at REPL startup;
+        // PYTHONINSPECT drops into a REPL after script exit (side-channel
+        // for persistent code exec); PYTHONBREAKPOINT routes breakpoint()
+        // through an arbitrary callable; PYTHONPATH changes module
+        // resolution; PYTHONHOME relocates the interpreter stdlib.
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "PYTHONINSPECT",
+        "PYTHONHOME",
+        "PYTHONBREAKPOINT",
+
+        // JVM — _JAVA_OPTIONS / JAVA_TOOL_OPTIONS / JDK_JAVA_OPTIONS are
+        // all honoured by the launcher and can `-javaagent:` arbitrary
+        // JARs or flip security-relevant flags.
+        "JAVA_TOOL_OPTIONS",
+        "_JAVA_OPTIONS",
+        "JDK_JAVA_OPTIONS",
+
+        // Ruby — RUBYOPT prepends arbitrary flags (incl. `-r<file>`)
+        // to every `ruby` invocation; RUBYLIB extends $LOAD_PATH.
+        "RUBYOPT",
+        "RUBYLIB",
+
+        // Perl — PERL5OPT is the Perl analogue of RUBYOPT; PERL5LIB
+        // extends @INC.
+        "PERL5OPT",
+        "PERL5LIB",
 ]);
 
-// Prefix matches for categories that grow over time (new LD_* vars are
-// added across glibc releases; enumerating them is a moving target).
-// LD_* covers the entire dynamic-linker surface — LD_PRELOAD,
-// LD_LIBRARY_PATH, LD_AUDIT, LD_DEBUG, LD_ORIGIN_PATH, etc.
-const DENIED_ENV_VAR_PREFIXES = ["LD_"];
+// Prefix matches for categories that grow over time (new LD_* / DYLD_*
+// vars are added across linker releases; enumerating them is a moving
+// target).
+//   - LD_*  : glibc dynamic-linker surface on Linux (LD_PRELOAD,
+//             LD_LIBRARY_PATH, LD_AUDIT, LD_DEBUG, LD_ORIGIN_PATH, …).
+//   - DYLD_*: the macOS counterpart (DYLD_INSERT_LIBRARIES,
+//             DYLD_LIBRARY_PATH, …). Our runtime is Linux, but the
+//             session image is pulled in dev on macOS too and a user
+//             might paste a DYLD_* value from habit; block it so the
+//             rejection is a clear 400 rather than a "silently ignored
+//             on Linux" surprise.
+const DENIED_ENV_VAR_PREFIXES = ["LD_", "DYLD_"];
+
+// Prototype-pollution vector names that pass the POSIX-identifier
+// regex and would interact oddly with JS object semantics if used as
+// keys. `__proto__` is the critical one: on a regular object,
+// `obj["__proto__"] = "string"` invokes the Object.prototype setter
+// (no-op for non-object values, silently dropping the entry) — which
+// means a user-supplied `__proto__` env var either gets swallowed or
+// pollutes the prototype chain depending on how downstream code
+// constructs its maps. Rejecting at validation time gives the caller
+// a clear 400 instead of either of those confusing outcomes, and lets
+// the validator return a plain {} (no null-prototype footgun).
+// `constructor` and `prototype` aren't as dangerous but are included
+// for defensiveness — they're never legitimate env var names.
+const PROTOTYPE_POLLUTION_NAMES = new Set(["__proto__", "constructor", "prototype"]);
 
 
 export class EnvVarValidationError extends Error {
@@ -99,9 +165,10 @@ export class EnvVarValidationError extends Error {
  * user's env vars instead of surfacing the bug, which is exactly the
  * kind of desync validation should catch. Reject it.
  *
- * Returns a plain `Record<string, string>` stripped of any inherited /
- * non-enumerable properties — callers can safely JSON-stringify or iterate
- * without worrying about prototype pollution from user input.
+ * Returns a plain `Record<string, string>` containing only the caller-
+ * supplied own enumerable keys — no prototype-chain properties, no
+ * silently-dropped `__proto__` entries (those are rejected explicitly).
+ * Safe to JSON-stringify, iterate, or call Object.prototype methods on.
  */
 export function validateEnvVars(
         envVars: unknown,
@@ -119,7 +186,9 @@ export function validateEnvVars(
 
         // Use Object.entries so we only see the object's own enumerable string-keyed
         // properties — not anything from the prototype chain. This also matches the
-        // iteration order we'd get from JSON.parse output.
+        // iteration order we'd get from JSON.parse output. `Object.entries` always
+        // yields string keys by spec (ES2017 §19.1.2.5), so the loop below doesn't
+        // need to re-check `typeof name === "string"`.
         const entries = Object.entries(envVars as Record<string, unknown>);
 
         if (entries.length > MAX_ENV_VAR_COUNT) {
@@ -128,18 +197,17 @@ export function validateEnvVars(
                 );
         }
 
-        // Null-prototype object so a key like "__proto__" or "constructor"
-        // in the input can't traverse into Object.prototype via this map.
-        // NOTE: the return value intentionally has no prototype. Callers
-        // that need Object.prototype methods (.hasOwnProperty, .toString)
-        // must route through Object.prototype.hasOwnProperty.call(obj, k)
-        // — the value is typed as Record<string, string> but those methods
-        // will throw at runtime if invoked directly on it. The two current
-        // call sites only JSON.stringify or for..in iterate, both of which
-        // are prototype-agnostic.
-        const normalised: Record<string, string> = Object.create(null);
+        // Plain object. Previous versions used Object.create(null) to dodge
+        // the edge case where `normalised["__proto__"] = value` would invoke
+        // the Object.prototype setter (silently dropping non-object values)
+        // — but that traded a security non-issue for a real footgun:
+        // callers can't invoke .hasOwnProperty, .toString, etc. directly on
+        // the result without a TypeError. Instead we reject `__proto__` et
+        // al. at the key-validation step below, which closes the original
+        // concern and lets this be a normal object.
+        const normalised: Record<string, string> = {};
         for (const [name, value] of entries) {
-                if (typeof name !== "string" || name.length === 0) {
+                if (name.length === 0) {
                         throw new EnvVarValidationError("envVars keys must be non-empty strings");
                 }
                 if (name.length > MAX_ENV_VAR_NAME_LENGTH) {
@@ -147,6 +215,21 @@ export function validateEnvVars(
                                 `envVars key '${name.slice(0, 32)}…' exceeds ${MAX_ENV_VAR_NAME_LENGTH} characters`,
                         );
                 }
+
+                // Reject prototype-pollution vector names BEFORE the POSIX
+                // check: `__proto__` (and friends) match the identifier
+                // regex, so the POSIX check would accept them. We want a
+                // specific error message here so the caller sees *why* this
+                // particular name is rejected rather than a generic "not a
+                // valid name". Also means the next assignment below can be
+                // a plain `normalised[name] = value` without hitting the
+                // Object.prototype setter dance.
+                if (PROTOTYPE_POLLUTION_NAMES.has(name)) {
+                        throw new EnvVarValidationError(
+                                `envVars key '${name}' is reserved (conflicts with JS object semantics)`,
+                        );
+                }
+
                 if (!ENV_VAR_NAME_PATTERN.test(name)) {
                         // Include the offending key in the error so the caller can fix
                         // their payload — it came from them, so there's no leakage.
