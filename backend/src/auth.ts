@@ -547,6 +547,26 @@ export function selectWsAuthProtocol(protocols: Set<string>): string | false {
 }
 
 /**
+ * Split-and-trim the raw `CORS_ORIGINS` env value into the shape used
+ * by the HTTP CORS middleware AND `isAllowedWsOrigin` below. Whitespace
+ * around entries is trimmed (so `"https://a, https://b"` — the obvious
+ * human-readable format — works), and empty entries are dropped (so a
+ * blank `CORS_ORIGINS=""` becomes `[]` rather than `[""]`, which would
+ * otherwise let an origin-header value of `""` match literally).
+ *
+ * Unset or whitespace-only input falls back to `["*"]`, matching the
+ * pre-existing default. Kept pure + exported so the split/trim is
+ * testable without standing up the HTTP server.
+ */
+export function parseCorsOrigins(raw: string | undefined): string[] {
+        if (raw === undefined || raw.trim() === "") return ["*"];
+        return raw
+                .split(",")
+                .map((s) => s.trim())
+                .filter((s) => s.length > 0);
+}
+
+/**
  * Decide whether a WebSocket upgrade with the given Origin header should
  * be accepted. The caller (index.ts' `upgrade` handler) uses the result
  * to 403 out BEFORE the handshake completes, so a rejected origin never

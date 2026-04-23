@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
 	__resetJwtSecretForTests,
 	isAllowedWsOrigin,
+	parseCorsOrigins,
 	validateJwtSecret,
 	warnIfWildcardCorsInProduction,
 } from "./auth.js";
@@ -213,5 +214,61 @@ describe("warnIfWildcardCorsInProduction", () => {
 		const warn = vi.fn();
 		warnIfWildcardCorsInProduction(["https://frontend"], "production", { warn });
 		expect(warn).not.toHaveBeenCalled();
+	});
+});
+
+// Regression coverage for the original parse — `CORS_ORIGINS.split(",")`
+// with no trim silently broke exact-match enforcement on any origin past
+// the first if the operator wrote the obvious comma-space form. Caught
+// in review of the initial CSWSH fix; these tests pin the call-site
+// parse shape so a future refactor that drops the trim is a test
+// failure, not a production incident.
+describe("parseCorsOrigins", () => {
+	it("defaults to ['*'] when unset", () => {
+		expect(parseCorsOrigins(undefined)).toEqual(["*"]);
+	});
+
+	it("defaults to ['*'] when blank or whitespace-only", () => {
+		// An operator who blanks CORS_ORIGINS= in a secrets manager
+		// expecting "no origins" should get the documented default
+		// instead of [""] (which would match a literal "" origin).
+		expect(parseCorsOrigins("")).toEqual(["*"]);
+		expect(parseCorsOrigins("   ")).toEqual(["*"]);
+	});
+
+	it("trims whitespace around each entry", () => {
+		// The original bug. Leading spaces after commas used to produce
+		// [' https://b.example.com'] which never equalled the Origin
+		// header the browser actually sends.
+		expect(
+			parseCorsOrigins("https://a.example.com, https://b.example.com"),
+		).toEqual(["https://a.example.com", "https://b.example.com"]);
+	});
+
+	it("handles tabs and surrounding whitespace uniformly", () => {
+		expect(parseCorsOrigins("\thttps://a ,https://b\t")).toEqual([
+			"https://a",
+			"https://b",
+		]);
+	});
+
+	it("drops empty entries after trimming", () => {
+		// Trailing comma is common in edit-via-secrets-manager flows.
+		// Leaves the allowlist clean instead of carrying a "" entry
+		// that would match a literal empty Origin header (branch 2 of
+		// isAllowedWsOrigin) — an ambiguous failure mode we'd rather
+		// not have.
+		expect(parseCorsOrigins("https://a,,https://b,")).toEqual([
+			"https://a",
+			"https://b",
+		]);
+	});
+
+	it("preserves '*' when explicitly set", () => {
+		// Don't accidentally strip the wildcard. The default fallback
+		// above produces the same output, but the explicit path must
+		// also round-trip.
+		expect(parseCorsOrigins("*")).toEqual(["*"]);
+		expect(parseCorsOrigins("*, https://b")).toEqual(["*", "https://b"]);
 	});
 });
