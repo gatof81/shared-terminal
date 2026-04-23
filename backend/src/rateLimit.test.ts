@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import http from "http";
-import type { AddressInfo } from "net";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import express from "express";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { UsernameRateLimiter } from "./rateLimit.js";
 import type { SessionManager } from "./sessionManager.js";
@@ -347,8 +347,14 @@ describe("auth route rate limiting", () => {
 	});
 
 	afterEach(async () => {
-		if (server) {
-			await new Promise<void>((resolve) => server!.close(() => resolve()));
+		// Capture into a local so the Promise executor has a narrowed,
+		// non-nullable reference — TS doesn't carry the `if (server)`
+		// narrowing into the async callback below. Same pattern used
+		// everywhere else in this file where we touch `server` inside
+		// a Promise executor, so the non-null assertions are gone.
+		const s = server;
+		if (s) {
+			await new Promise<void>((resolve) => s.close(() => resolve()));
 			server = null;
 		}
 	});
@@ -371,9 +377,10 @@ describe("auth route rate limiting", () => {
 		app.use(express.json());
 		app.use("/api", router);
 
-		server = http.createServer(app);
-		await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
-		const { port } = server.address() as AddressInfo;
+		const s = http.createServer(app);
+		server = s;
+		await new Promise<void>((resolve) => s.listen(0, "127.0.0.1", resolve));
+		const { port } = s.address() as AddressInfo;
 		baseUrl = `http://127.0.0.1:${port}`;
 	}
 
@@ -533,7 +540,14 @@ describe("auth route rate limiting", () => {
 		expect(ipBlocked.status).toBe(429);
 		expect(await ipBlocked.json()).toMatchObject({ scope: "ip" });
 
-		await new Promise<void>((resolve) => server!.close(() => resolve()));
+		// Same Promise-executor-narrowing dance as afterEach. Invariant
+		// violation (server was null here) would be a test bug — throw
+		// loudly rather than silently skip, since the block below spins
+		// up a new server and we'd otherwise get a misleading failure
+		// in a completely different test phase.
+		const s = server;
+		if (!s) throw new Error("test invariant: server was null at mid-test restart");
+		await new Promise<void>((resolve) => s.close(() => resolve()));
 		server = null;
 
 		await spinUp({
