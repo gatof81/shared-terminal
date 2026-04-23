@@ -165,10 +165,17 @@ export function openTerminalSession(opts: {
         };
 
         ws.onerror = () => {
+                if (disposed) return;
                 onError("WebSocket connection error");
         };
 
         ws.onclose = (ev) => {
+                // Intentional dispose — don't clobber the session status. The race:
+                // dispose() calls ws.close(1000) asynchronously; if the user returns
+                // to the same session+tab before this fires, both onStatus guards pass
+                // (same ownSessionId, same tabId) and the stale close would write
+                // "disconnected" into sessions[], making the session unclickable.
+                if (disposed) return;
                 if (ev.code !== 1000) {
                         onError(`Connection closed (${ev.code}): ${ev.reason || "unknown reason"}`);
                 }
@@ -313,6 +320,7 @@ export function openTerminalSession(opts: {
 
         // ── Heartbeat ───────────────────────────────────────────────────────────
         let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+        let disposed = false;
         function startHeartbeat() {
                 heartbeatInterval = setInterval(() => {
                         if (ws.readyState === WebSocket.OPEN) send({ type: "ping" });
@@ -333,6 +341,7 @@ export function openTerminalSession(opts: {
 
         // ── Dispose ─────────────────────────────────────────────────────────────
         function dispose() {
+                disposed = true;
                 if (heartbeatInterval !== null) clearInterval(heartbeatInterval);
                 ro.disconnect();
                 document.removeEventListener("visibilitychange", onVisibilityChange);
