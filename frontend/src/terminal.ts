@@ -261,26 +261,59 @@ export function openTerminalSession(opts: {
 
         // ── Resize ──────────────────────────────────────────────────────────────
         // ResizeObserver fires continuously during mobile viewport churn (URL
-        // bar show/hide, soft-keyboard open/close, rotation). Coalescing to
-        // one fit per frame avoids overlapping tmux redraws that leave
-        // half-painted cells on screen.
+        // bar show/hide, soft-keyboard open/close, rotation) and desktop
+        // window drags. Coalescing to one fit per frame avoids overlapping
+        // tmux redraws that leave half-painted cells on screen.
         //
-        // We also only emit the `resize` WS message when cols/rows actually
-        // changed — ResizeObserver fires on every pixel change, but tmux only
-        // cares about cell-count changes.
-        let lastCols = term.cols;
-        let lastRows = term.rows;
+        // LOCAL fit runs every animation frame so the visible terminal
+        // tracks the container smoothly (xterm handles the cell math client
+        // side). The REMOTE resize notification is trailing-debounced on a
+        // short idle window, because every `{type:"resize"}` WS message
+        // triggers a synchronous chain on the backend:
+        //
+        //   wsHandler → DockerManager.resize → recomputeSize →
+        //   exec.resize → tmux resize-window → pane repaint fan-out.
+        //
+        // A sustained window-edge drag on a 1080p display can cross cell
+        // boundaries ~50× per second; forwarding every crossing lets the
+        // Docker exec API queue up dozens of resizes that tmux processes
+        // after the fact, producing a cascade of repaints that each get
+        // invalidated by the next one. Debouncing collapses a drag into a
+        // single backend resize at the settled size.
+        //
+        // 100 ms is enough to absorb the noisy tail of a mouse-drag or
+        // soft-keyboard slide but short enough to feel "instant" when the
+        // user stops adjusting.
+        const RESIZE_DEBOUNCE_MS = 100;
+        let lastSentCols = term.cols;
+        let lastSentRows = term.rows;
         let fitScheduled = false;
+        let resizeSendTimer: ReturnType<typeof setTimeout> | null = null;
+        const sendResizeDebounced = () => {
+                if (resizeSendTimer !== null) clearTimeout(resizeSendTimer);
+                resizeSendTimer = setTimeout(() => {
+                        resizeSendTimer = null;
+                        // Skip if disposed between schedule and fire — the socket is
+                        // already being torn down by the parent component.
+                        if (disposed) return;
+                        // Re-check dimensions at fire time; they may have bounced back
+                        // to the last-sent size during the debounce window (e.g. user
+                        // overshoots a drag and returns). No point spending a round
+                        // trip for a no-op.
+                        if (term.cols === lastSentCols && term.rows === lastSentRows) return;
+                        lastSentCols = term.cols;
+                        lastSentRows = term.rows;
+                        send({ type: "resize", cols: term.cols, rows: term.rows });
+                }, RESIZE_DEBOUNCE_MS);
+        };
         const scheduleFit = () => {
                 if (fitScheduled) return;
                 fitScheduled = true;
                 requestAnimationFrame(() => {
                         fitScheduled = false;
                         try { fitAddon.fit(); } catch { /* container detached mid-resize */ }
-                        if (term.cols !== lastCols || term.rows !== lastRows) {
-                                lastCols = term.cols;
-                                lastRows = term.rows;
-                                send({ type: "resize", cols: term.cols, rows: term.rows });
+                        if (term.cols !== lastSentCols || term.rows !== lastSentRows) {
+                                sendResizeDebounced();
                         }
                 });
         };
@@ -339,6 +372,16 @@ export function openTerminalSession(opts: {
         function dispose() {
                 disposed = true;
                 if (heartbeatInterval !== null) clearInterval(heartbeatInterval);
+                // The resize send is debounced on a trailing 100 ms window; if the
+                // user navigates away inside that window the timer would fire after
+                // the socket closes. The `if (disposed) return` guard at the top of
+                // the callback already makes this harmless today — but it leaves
+                // the pending timer holding a closure reference to the (disposed)
+                // xterm + ws for up to 100 ms, and any future logic added to the
+                // callback ahead of that guard would run post-dispose. Cancelling
+                // here matches the heartbeatInterval path and removes the subtle
+                // refactor trap.
+                if (resizeSendTimer !== null) clearTimeout(resizeSendTimer);
                 ro.disconnect();
                 document.removeEventListener("visibilitychange", onVisibilityChange);
                 window.removeEventListener("focus", onWindowFocus);

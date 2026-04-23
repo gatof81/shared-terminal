@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { PassThrough } from "stream";
-import { DockerManager } from "./dockerManager.js";
+import { DockerManager, type OutputListener } from "./dockerManager.js";
 import type { SessionManager } from "./sessionManager.js";
 
 // ── Test harness ────────────────────────────────────────────────────────────
@@ -59,14 +59,29 @@ function makeFakeContainer(oneShot?: OneShotHook): FakeContainer {
 			const resizes: Array<{ h: number; w: number }> = [];
 			streams.push(stream);
 
-			// One-shot tmux commands (list-sessions, new-session, set-option,
+			// One-shot tmux commands (list-sessions, new-session -d, set-option,
 			// kill-session, has-session) don't hijack the stream. If a test
-			// supplied a hook, let it decide the stdout + exit code. `tmux attach`
-			// is explicitly NOT a one-shot — it keeps a long-lived stream open.
-			const isAttach = opts.Cmd[0] === "tmux" && opts.Cmd[1] === "attach";
+			// supplied a hook, let it decide the stdout + exit code. Attaches
+			// (`tmux attach` or the self-healing `tmux new-session -A`) are
+			// explicitly NOT one-shots — they keep a long-lived stream open and
+			// the test drives output by writing to `container._streams[...]`.
+			const isAttach =
+				opts.Cmd[0] === "tmux" &&
+				(
+					opts.Cmd[1] === "attach" ||
+					(opts.Cmd[1] === "new-session" && opts.Cmd.includes("-A"))
+				);
+			// Every one-shot tmux command (capture-pane, list-sessions, kill-session,
+			// set-option, new-session -d, …) needs SOME canned response — otherwise
+			// execOneShot's `await stream.on("end")` hangs the test forever. If the
+			// caller provided a hook and it answers for this command, use that; if
+			// the hook returns undefined or wasn't provided, default to an empty
+			// stdout + exit 0 so tests that don't care about the one-shot machinery
+			// (e.g. the fan-out test that doesn't use capture-pane) don't have to
+			// wire up a full oneShot mock just to unblock attach().
 			const oneShotResult =
-				!isAttach && opts.Cmd[0] === "tmux" && opts.Tty === true && oneShot
-					? oneShot(opts.Cmd)
+				!isAttach && opts.Cmd[0] === "tmux" && opts.Tty === true
+					? (oneShot?.(opts.Cmd) ?? { stdout: "", exitCode: 0 })
 					: undefined;
 
 			const exec: FakeExec = {
@@ -115,6 +130,52 @@ function makeDocker(opts?: { sessions?: SessionManager; oneShot?: OneShotHook })
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
+// Every attach() fires a capture-pane one-shot in addition to the long-lived
+// new-session -A attach, so `container.exec` is called multiple times per
+// attach. When the unit under test is the number of distinct SHARED execs
+// (i.e. the multiplex guarantee), filter on the attach exec signature.
+//
+// We count via the mock's call history rather than `_execs`, because a test
+// may force container.exec to throw — in that case the exec object is never
+// pushed, but the CALL was still made and should be counted.
+function countAttachExecs(container: FakeContainer): number {
+	const calls = (container.exec as unknown as { mock: { calls: Array<[{ Cmd: string[] }]> } }).mock.calls;
+	return calls.filter(
+		([opts]) => opts.Cmd[0] === "tmux" && opts.Cmd[1] === "new-session" && opts.Cmd.includes("-A"),
+	).length;
+}
+
+// Array.prototype.find typed as `T | undefined` but in tests we often KNOW the
+// value exists (the harness spawned it above) and treating it as undefined
+// clutters every callsite with `?.` + its downstream undefined-propagation. A
+// miss here is a test-harness bug, not a production concern, so throw eagerly.
+function mustFind<T>(arr: readonly T[], pred: (v: T) => boolean, label: string): T {
+	const found = arr.find(pred);
+	if (!found) throw new Error(`expected to find ${label}`);
+	return found;
+}
+
+const isAttachExec = (e: FakeExec): boolean =>
+	e._cmd[1] === "new-session" && e._cmd.includes("-A");
+
+// attach() now returns an armed listener (see dockerManager.attach() docs):
+// live bytes pile into a tail array until wsHandler calls flushTail(). Tests
+// that assert listener behaviour have to flush explicitly to mirror the
+// production call-site.
+async function attachAndFlush(
+	dm: DockerManager,
+	sessionId: string,
+	attachId: string,
+	cols: number,
+	rows: number,
+	listener: OutputListener,
+	tabId: string,
+): Promise<{ replay: string | null }> {
+	const result = await dm.attach(sessionId, attachId, cols, rows, listener, tabId);
+	result.flushTail();
+	return { replay: result.replay };
+}
+
 describe("DockerManager shared-exec multiplexing", () => {
 	it("creates only one shared exec across multiple attaches to the same session", async () => {
 		const { dm, container } = makeDocker();
@@ -122,7 +183,7 @@ describe("DockerManager shared-exec multiplexing", () => {
 		await dm.attach("s1", "a1", 80, 24, () => { /* noop */ }, "tab-test");
 		await dm.attach("s1", "a2", 80, 24, () => { /* noop */ }, "tab-test");
 
-		expect(container.exec).toHaveBeenCalledTimes(1);
+		expect(countAttachExecs(container)).toBe(1);
 	});
 
 	it("fans each byte of tmux output to each listener exactly once (no N× duplication)", async () => {
@@ -130,36 +191,50 @@ describe("DockerManager shared-exec multiplexing", () => {
 		const a1 = vi.fn();
 		const a2 = vi.fn();
 
-		await dm.attach("s1", "a1", 80, 24, a1, "tab-test");
-		await dm.attach("s1", "a2", 80, 24, a2, "tab-test");
+		await attachAndFlush(dm, "s1", "a1", 80, 24, a1, "tab-test");
+		await attachAndFlush(dm, "s1", "a2", 80, 24, a2, "tab-test");
 
-		container._streams[0]!.write("hello");
+		// Find the LONG-LIVED attach stream (not any short-lived one-shot
+		// streams like capture-pane that attach() also spawns).
+		const attachStream = mustFind(container._execs, isAttachExec, "attach exec")._stream;
+		attachStream.write("hello");
 		await tick();
 
 		expect(a1).toHaveBeenCalledTimes(1);
 		expect(a1).toHaveBeenCalledWith("hello");
 		expect(a2).toHaveBeenCalledTimes(1);
 		expect(a2).toHaveBeenCalledWith("hello");
-
-		// Ring buffer holds one copy of the output, not N.
-		const buffer = (dm as unknown as { buffers: Map<string, { byteLength: number }> }).buffers.get("s1:tab-test");
-		expect(buffer?.byteLength).toBe(5);
 	});
 
 	it("serializes concurrent first-attach calls onto a single container.exec()", async () => {
 		const { dm, container } = makeDocker();
 
-		// Block exec.start so both attaches queue up on the same in-flight spawn.
-		let resolveStart: ((val: PassThrough) => void) | null = null;
+		// Block exec.start ONLY for the long-lived attach exec so both attaches
+		// queue up on the same in-flight spawnSharedExec. Capture-pane one-shots
+		// fire later (after await pending resolves) and must be allowed to
+		// complete normally — otherwise attach() itself never returns and the
+		// test deadlocks.
+		let resolveAttachStart: ((val: PassThrough) => void) | null = null;
 		const origExec = container.exec;
-		container.exec = vi.fn(async () => {
+		container.exec = vi.fn(async (opts: { Cmd: string[] }) => {
+			const isAttach =
+				opts.Cmd[0] === "tmux"
+				&& opts.Cmd[1] === "new-session"
+				&& opts.Cmd.includes("-A");
+			if (!isAttach) {
+				// Fall through to the default fake for one-shots.
+				return (origExec as (...a: unknown[]) => Promise<FakeExec>).apply(container, [opts]);
+			}
+
 			const stream = new PassThrough();
 			container._streams.push(stream);
 			const exec: FakeExec = {
-				start: vi.fn(() => new Promise<PassThrough>((r) => { resolveStart = r; })),
+				start: vi.fn(() => new Promise<PassThrough>((r) => { resolveAttachStart = r; })),
 				resize: vi.fn(async () => { /* noop */ }),
+				inspect: vi.fn(async () => ({ ExitCode: 0 })),
 				_resizes: [],
 				_stream: stream,
+				_cmd: opts.Cmd,
 			};
 			container._execs.push(exec);
 			return exec;
@@ -168,30 +243,49 @@ describe("DockerManager shared-exec multiplexing", () => {
 		const p1 = dm.attach("s1", "a1", 80, 24, () => { /* noop */ }, "tab-test");
 		const p2 = dm.attach("s1", "a2", 80, 24, () => { /* noop */ }, "tab-test");
 
-		// Both calls are now awaiting the same spawnSharedExec promise.
+		// Both calls are now awaiting the same spawnSharedExec promise — exactly
+		// one attach exec has been requested on the wire.
 		await tick();
-		expect(container.exec).toHaveBeenCalledTimes(1);
+		expect(countAttachExecs(container)).toBe(1);
 
-		resolveStart!(container._streams[0]!);
+		resolveAttachStart!(container._streams[0]!);
 		await Promise.all([p1, p2]);
 
-		expect(container.exec).toHaveBeenCalledTimes(1);
+		// Still one attach exec after both resolve; the second attach reused
+		// the first's shared exec rather than spawning a new one.
+		expect(countAttachExecs(container)).toBe(1);
 	});
 
-	it("replays buffered output to new attachers without re-sending to existing ones", async () => {
-		const { dm, container } = makeDocker();
+	it("returns the tmux capture-pane snapshot as replay for new attachers without re-sending to existing ones", async () => {
+		// Capture-pane replay lets every joiner see the same canonical view of
+		// the pane regardless of when they joined. We script the snapshot via
+		// the one-shot hook so we don't need a live tmux.
+		const { dm } = makeDocker({
+			oneShot: (cmd) => {
+				if (cmd[1] === "capture-pane") {
+					return { stdout: "line-a\nline-b", exitCode: 0 };
+				}
+				return undefined;
+			},
+		});
 		const a1 = vi.fn();
 		const a2 = vi.fn();
 
 		await dm.attach("s1", "a1", 80, 24, a1, "tab-test");
-		container._streams[0]!.write("abc");
-		await tick();
+		// a1 has already received its own replay frame via the first attach
+		// (captured before any live write). Clear so the post-attach
+		// assertion is about what happens to existing clients during a
+		// second attach.
+		a1.mockClear();
 
 		const { replay } = await dm.attach("s1", "a2", 80, 24, a2, "tab-test");
 
-		expect(replay).toBe("abc");
-		// a1 got "abc" once via fan-out; replay goes back to the caller only.
-		expect(a1).toHaveBeenCalledTimes(1);
+		// capture-pane stdout, with \n promoted to \r\n for xterm.
+		expect(replay).toBe("line-a\r\nline-b");
+		// Second attach must not cross-fan to the first listener, and a2
+		// receives the replay via its return value (wsHandler, not the
+		// listener) so the listener stays unfired.
+		expect(a1).not.toHaveBeenCalled();
 		expect(a2).not.toHaveBeenCalled();
 	});
 
@@ -213,40 +307,100 @@ describe("DockerManager shared-exec multiplexing", () => {
 		expect(after[after.length - 1]).toEqual({ h: 30, w: 100 });
 	});
 
-	it("destroys the shared exec on last detach but preserves the ring buffer", async () => {
-		const { dm, container } = makeDocker();
+	it("destroys the shared exec on last detach; next attach respawns and replays the latest capture-pane", async () => {
+		// The snapshot the hook returns is a proxy for "whatever tmux currently
+		// shows". A real re-attach would re-run capture-pane and see the
+		// post-detach screen contents.
+		let paneSnapshot = "";
+		const { dm, container } = makeDocker({
+			oneShot: (cmd) => {
+				if (cmd[1] === "capture-pane") return { stdout: paneSnapshot, exitCode: 0 };
+				return undefined;
+			},
+		});
 
 		await dm.attach("s1", "a1", 80, 24, () => { /* noop */ }, "tab-test");
-		container._streams[0]!.write("abc");
+		const attachStream = mustFind(container._execs, isAttachExec, "attach exec")._stream;
+		attachStream.write("abc");
 		await tick();
 
 		dm.detach("a1");
 		await tick();
 		await tick();
 
-		expect(container._streams[0]!.destroyed).toBe(true);
+		expect(attachStream.destroyed).toBe(true);
 		const shared = (dm as unknown as { shared: Map<string, unknown> }).shared;
 		expect(shared.has("s1:tab-test")).toBe(false);
 
-		// Re-attach: new exec, replay still contains the earlier output.
+		// Simulate tmux now showing "abc" in the pane, then re-attach. The
+		// replay should reflect the current pane view.
+		paneSnapshot = "abc";
 		const a2 = vi.fn();
+		const attachExecsBefore = container._execs.filter(
+			(e) => e._cmd[1] === "new-session" && e._cmd.includes("-A"),
+		).length;
 		const { replay } = await dm.attach("s1", "a2", 80, 24, a2, "tab-test");
-		expect(container.exec).toHaveBeenCalledTimes(2);
+		const attachExecsAfter = container._execs.filter(
+			(e) => e._cmd[1] === "new-session" && e._cmd.includes("-A"),
+		).length;
+		expect(attachExecsAfter).toBe(attachExecsBefore + 1);
 		expect(replay).toBe("abc");
+	});
+
+	it("detaches the armed listener when a post-register await throws, so it doesn't orphan", async () => {
+		// The armed bufferedListener is installed in s.listeners BEFORE we
+		// await recomputeSize / updateConnected. A throw from either would
+		// leak the listener — it would keep piling bytes into a tail array
+		// that nothing ever drains — unless attach() explicitly tears down
+		// on failure. Simulate that by making updateConnected reject.
+		const sessions = makeFakeSessions();
+		(sessions.updateConnected as unknown as ReturnType<typeof vi.fn>)
+			.mockRejectedValueOnce(new Error("db down"));
+		const { dm, container } = makeDocker({ sessions });
+
+		await expect(
+			dm.attach("s1", "a1", 80, 24, () => { /* noop */ }, "tab-test"),
+		).rejects.toThrow("db down");
+		// detach() schedules the listeners.delete on a microtask via
+		// pending.then, so wait one tick before asserting. The "last
+		// listener gone" branch also does `if (this.shared.get(key) === pending)
+		// this.shared.delete(key)` via another microtask, hence two ticks.
+		await tick();
+		await tick();
+
+		const shared = (dm as unknown as { shared: Map<string, unknown> }).shared;
+		// Since this was the only listener, detach's "last client gone" branch
+		// fires: listeners.size === 0 → shared entry cleared, stream destroyed.
+		// This is the strongest form of "listener not orphaned": the whole
+		// bucket the listener lived in is gone.
+		expect(shared.has("s1:tab-test")).toBe(false);
+
+		// keyOf mapping for the failed attach is cleared too.
+		expect((dm as unknown as { keyOf: Map<string, string> }).keyOf.has("a1")).toBe(false);
+
+		// The attach stream should have been destroyed as part of the
+		// last-listener teardown.
+		const attachStream = mustFind(container._execs, isAttachExec, "attach exec")._stream;
+		expect(attachStream.destroyed).toBe(true);
 	});
 
 	it("clears the shared slot when spawnSharedExec rejects so retries succeed", async () => {
 		const { dm, container } = makeDocker();
 
-		// Make the first container.exec call throw, then let subsequent calls succeed.
+		// Make the first ATTACH container.exec call throw, then let subsequent
+		// calls (attaches and one-shots alike) succeed normally.
 		let rejectedOnce = false;
 		const origExec = container.exec;
-		container.exec = vi.fn(async (...args: unknown[]) => {
-			if (!rejectedOnce) {
+		container.exec = vi.fn(async (opts: { Cmd: string[] }) => {
+			const isAttach =
+				opts.Cmd[0] === "tmux"
+				&& opts.Cmd[1] === "new-session"
+				&& opts.Cmd.includes("-A");
+			if (isAttach && !rejectedOnce) {
 				rejectedOnce = true;
 				throw new Error("kaboom");
 			}
-			return (origExec as (...a: unknown[]) => Promise<FakeExec>).apply(container, args);
+			return (origExec as (...a: unknown[]) => Promise<FakeExec>).apply(container, [opts]);
 		}) as typeof origExec;
 
 		await expect(dm.attach("s1", "a1", 80, 24, () => { /* noop */ }, "tab-test")).rejects.toThrow("kaboom");
@@ -254,7 +408,8 @@ describe("DockerManager shared-exec multiplexing", () => {
 		await tick();
 
 		await dm.attach("s1", "a2", 80, 24, () => { /* noop */ }, "tab-test");
-		expect(container.exec).toHaveBeenCalledTimes(2);
+		// One throw + one success = two attach execs requested.
+		expect(countAttachExecs(container)).toBe(2);
 	});
 });
 
@@ -264,18 +419,25 @@ describe("DockerManager tabs", () => {
 		const aListener = vi.fn();
 		const bListener = vi.fn();
 
-		await dm.attach("s1", "a1", 80, 24, aListener, "tab-a");
-		await dm.attach("s1", "b1", 80, 24, bListener, "tab-b");
+		await attachAndFlush(dm, "s1", "a1", 80, 24, aListener, "tab-a");
+		await attachAndFlush(dm, "s1", "b1", 80, 24, bListener, "tab-b");
 
-		// Two separate `tmux attach -t <tabId>` calls.
-		expect(container.exec).toHaveBeenCalledTimes(2);
-		const attachCmds = container._execs.map((e) => e._cmd.join(" "));
-		expect(attachCmds).toContain("tmux attach -t tab-a");
-		expect(attachCmds).toContain("tmux attach -t tab-b");
+		// Two separate attach execs, each via self-healing `tmux new-session -A`
+		// (see dockerManager.ts: same Cmd creates-or-attaches so a dead tmux
+		// server doesn't fail the user's click on a stale tab). Each attach()
+		// ALSO fires a capture-pane one-shot, so container.exec runs 4× total.
+		const attachExecs = container._execs.filter(
+			(e) => e._cmd[1] === "new-session" && e._cmd.includes("-A"),
+		);
+		expect(attachExecs).toHaveLength(2);
+		expect(attachExecs[0]!._cmd.slice(0, 3)).toEqual(["tmux", "new-session", "-A"]);
+		expect(attachExecs[0]!._cmd).toContain("tab-a");
+		expect(attachExecs[1]!._cmd.slice(0, 3)).toEqual(["tmux", "new-session", "-A"]);
+		expect(attachExecs[1]!._cmd).toContain("tab-b");
 
 		// tab-a's stream emits — only tab-a's listener fires.
-		const execA = container._execs.find((e) => e._cmd.includes("tab-a"))!;
-		const execB = container._execs.find((e) => e._cmd.includes("tab-b"))!;
+		const execA = attachExecs.find((e) => e._cmd.includes("tab-a"))!;
+		const execB = attachExecs.find((e) => e._cmd.includes("tab-b"))!;
 		execA._stream.write("hello-a");
 		execB._stream.write("hello-b");
 		await tick();
@@ -350,19 +512,17 @@ describe("DockerManager tabs", () => {
 		await dm.attach("s1", "a1", 80, 24, () => { /* noop */ }, "tab-x");
 
 		const bufKey = "s1:tab-x";
-		expect((dm as unknown as { buffers: Map<string, unknown> }).buffers.has(bufKey)).toBe(true);
 		expect((dm as unknown as { shared: Map<string, unknown> }).shared.has(bufKey)).toBe(true);
 
 		await dm.deleteTab("s1", "tab-x");
 		await tick();
 
 		// tmux kill-session got called with the right target.
-		const killCmd = container._execs.find((e) => e._cmd.includes("kill-session"))!;
+		const killCmd = mustFind(container._execs, (e) => e._cmd.includes("kill-session"), "kill-session exec");
 		expect(killCmd._cmd).toEqual(["tmux", "kill-session", "-t", "tab-x"]);
 
-		// The shared exec slot and ring buffer for that tab are gone.
+		// The shared exec slot for that tab is gone.
 		expect((dm as unknown as { shared: Map<string, unknown> }).shared.has(bufKey)).toBe(false);
-		expect((dm as unknown as { buffers: Map<string, unknown> }).buffers.has(bufKey)).toBe(false);
 		// keyOf mapping for the detached attach is cleared.
 		expect((dm as unknown as { keyOf: Map<string, string> }).keyOf.has("a1")).toBe(false);
 	});
