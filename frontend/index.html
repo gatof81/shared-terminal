@@ -20,7 +20,12 @@
         font-family: system-ui, sans-serif;
         background: #0d1117;
         color: #e6edf3;
-        height: 100dvh;
+        /* --app-vh is pinned by main.ts off visualViewport.height so the
+           terminal fits between the status/address bar and the soft
+           keyboard on mobile — dvh alone doesn't account for iOS's
+           keyboard overlay. Falls back to 100dvh on browsers without
+           visualViewport. */
+        height: var(--app-vh, 100dvh);
         display: flex;
         flex-direction: column;
       }
@@ -539,6 +544,21 @@
         background: rgba(139, 148, 158, 0.2);
         color: #8b949e;
       }
+      #font-size-btn {
+        margin-left: auto;
+        background: transparent;
+        border: 1px solid #30363d;
+        border-radius: 6px;
+        color: #8b949e;
+        font-size: 0.75rem;
+        padding: 0.2rem 0.55rem;
+        cursor: pointer;
+        line-height: 1;
+      }
+      #font-size-btn:hover {
+        border-color: #58a6ff;
+        color: #58a6ff;
+      }
       #terminal-tabs {
         display: none;
         align-items: stretch;
@@ -645,6 +665,15 @@
       }
       #terminal-container .xterm {
         height: 100%;
+      }
+      /* Stop the OS from claiming vertical drags as page-scroll — our
+         touch handler in terminal.ts routes them to term.scrollLines or
+         synthetic arrow keys. touch-action has to be on xterm's own
+         layers, not just the wrapping container. */
+      #terminal-container .xterm,
+      #terminal-container .xterm-viewport,
+      #terminal-container .xterm-screen {
+        touch-action: none;
       }
       #empty-state {
         display: flex;
@@ -811,6 +840,14 @@
             <span>Session:</span>
             <span id="terminal-session-name"></span>
             <span id="terminal-status-badge"></span>
+            <button
+              id="font-size-btn"
+              type="button"
+              title="Cycle terminal font size"
+              aria-label="Change terminal font size"
+            >
+              Aa
+            </button>
           </div>
           <div id="terminal-tabs"></div>
           <div id="terminal-container"></div>
