@@ -347,6 +347,43 @@ describe("DockerManager shared-exec multiplexing", () => {
 		expect(replay).toBe("abc");
 	});
 
+	it("detaches the armed listener when a post-register await throws, so it doesn't orphan", async () => {
+		// The armed bufferedListener is installed in s.listeners BEFORE we
+		// await recomputeSize / updateConnected. A throw from either would
+		// leak the listener — it would keep piling bytes into a tail array
+		// that nothing ever drains — unless attach() explicitly tears down
+		// on failure. Simulate that by making updateConnected reject.
+		const sessions = makeFakeSessions();
+		(sessions.updateConnected as unknown as ReturnType<typeof vi.fn>)
+			.mockRejectedValueOnce(new Error("db down"));
+		const { dm, container } = makeDocker({ sessions });
+
+		await expect(
+			dm.attach("s1", "a1", 80, 24, () => { /* noop */ }, "tab-test"),
+		).rejects.toThrow("db down");
+		// detach() schedules the listeners.delete on a microtask via
+		// pending.then, so wait one tick before asserting. The "last
+		// listener gone" branch also does `if (this.shared.get(key) === pending)
+		// this.shared.delete(key)` via another microtask, hence two ticks.
+		await tick();
+		await tick();
+
+		const shared = (dm as unknown as { shared: Map<string, unknown> }).shared;
+		// Since this was the only listener, detach's "last client gone" branch
+		// fires: listeners.size === 0 → shared entry cleared, stream destroyed.
+		// This is the strongest form of "listener not orphaned": the whole
+		// bucket the listener lived in is gone.
+		expect(shared.has("s1:tab-test")).toBe(false);
+
+		// keyOf mapping for the failed attach is cleared too.
+		expect((dm as unknown as { keyOf: Map<string, string> }).keyOf.has("a1")).toBe(false);
+
+		// The attach stream should have been destroyed as part of the
+		// last-listener teardown.
+		const attachStream = mustFind(container._execs, isAttachExec, "attach exec")._stream;
+		expect(attachStream.destroyed).toBe(true);
+	});
+
 	it("clears the shared slot when spawnSharedExec rejects so retries succeed", async () => {
 		const { dm, container } = makeDocker();
 

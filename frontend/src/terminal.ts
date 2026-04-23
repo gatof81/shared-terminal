@@ -372,6 +372,16 @@ export function openTerminalSession(opts: {
         function dispose() {
                 disposed = true;
                 if (heartbeatInterval !== null) clearInterval(heartbeatInterval);
+                // The resize send is debounced on a trailing 100 ms window; if the
+                // user navigates away inside that window the timer would fire after
+                // the socket closes. The `if (disposed) return` guard at the top of
+                // the callback already makes this harmless today — but it leaves
+                // the pending timer holding a closure reference to the (disposed)
+                // xterm + ws for up to 100 ms, and any future logic added to the
+                // callback ahead of that guard would run post-dispose. Cancelling
+                // here matches the heartbeatInterval path and removes the subtle
+                // refactor trap.
+                if (resizeSendTimer !== null) clearTimeout(resizeSendTimer);
                 ro.disconnect();
                 document.removeEventListener("visibilitychange", onVisibilityChange);
                 window.removeEventListener("focus", onWindowFocus);

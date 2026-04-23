@@ -411,6 +411,23 @@ export class DockerManager {
                 // (the listener wasn't armed yet). The client won't see them until
                 // the next live byte forces a redraw.
                 //
+                // Self-heal timing depends on what the pane is doing:
+                //   - Interactive shell / TUI: the next keystroke echo or cursor
+                //     blink redraws within ~seconds — bytes are deferred, not
+                //     permanently lost.
+                //   - Non-interactive output (a running `tail -f`, a build log, a
+                //     background process writing periodically): the deferred bytes
+                //     stay deferred until the next spontaneous write, which could
+                //     be seconds or minutes away. They DO eventually repaint (the
+                //     missing chars are still on the pane; any subsequent redraw
+                //     of those cells shows them), but the snapshot the joining
+                //     client initially sees is stale for the duration.
+                //   - Fully quiet pane: deferred bytes stay missing from the
+                //     client's view until *something* forces a redraw — e.g. a
+                //     resize, a keystroke, or next attach. The pane is still
+                //     correct server-side; only this client's initial view is
+                //     behind.
+                //
                 // We deliberately don't close this window by arming the listener
                 // BEFORE capture-pane: that would double-render every byte tmux
                 // emitted between `listener registered` and `snapshot captured`,
@@ -419,9 +436,7 @@ export class DockerManager {
                 // snapshot and again in the tail. A byte-correct fix would need
                 // position-aware dedup (snapshot cursor at capture time vs tail
                 // start), which is more machinery than the lost-bytes symptom
-                // warrants. The symptom is small and self-healing: a few ms of
-                // output gets deferred until the next write, which in an
-                // interactive terminal is almost always within a keystroke or two.
+                // warrants in a terminal product.
                 const snapshot = await this.capturePane(sessionId, tabId);
 
                 const tail: string[] = [];
@@ -438,8 +453,23 @@ export class DockerManager {
                 s.clientSizes.set(attachId, { cols, rows });
                 this.keyOf.set(attachId, key);
 
-                await this.recomputeSize(s);
-                await this.sessions.updateConnected(sessionId);
+                // Once the listener is in `s.listeners`, any throw before we return
+                // a handle to the caller would orphan it: wsHandler closes the
+                // socket without knowing attach() got partway through, so detach()
+                // is never called, and the armed `bufferedListener` keeps piling
+                // live bytes into a `tail` array that nothing will ever drain.
+                // recomputeSize swallows exec.resize errors internally today, but
+                // updateConnected is a D1 write that CAN reject — and a future
+                // refactor of either path might start propagating. Make the
+                // post-register teardown explicit instead of hoping the callees
+                // stay infallible.
+                try {
+                        await this.recomputeSize(s);
+                        await this.sessions.updateConnected(sessionId);
+                } catch (err) {
+                        this.detach(attachId);
+                        throw err;
+                }
                 console.log(`[docker] attached ${attachId} to session ${sessionId} (listeners=${s.listeners.size})`);
 
                 const flushTail = () => {
@@ -496,7 +526,7 @@ export class DockerManager {
                         // tmux helpers cleanly. For a screen dump, xterm needs each line
                         // terminator to be CRLF so the cursor returns to column 0 — put
                         // the \r back.
-                        return stdout.split("\n").join("\r\n");
+                        return stdout.replace(/\n/g, "\r\n");
                 } catch (err) {
                         console.warn(`[docker] capture-pane failed for ${this.targetKey(sessionId, tabId)}:`, (err as Error).message);
                         return "";
