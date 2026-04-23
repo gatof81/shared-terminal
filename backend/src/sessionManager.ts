@@ -67,8 +67,15 @@ export class SessionQuotaExceededError extends Error {
         readonly quota: number;
 
         constructor(quota: number) {
+                // Phrase as "limit reached" rather than "you already have N
+                // active sessions". When this throws, the count is exactly
+                // `quota` (the atomic INSERT's WHERE clause guarantees that),
+                // so "you already have 20" reads as a count statement — but
+                // the purpose of the message is to communicate the *cap*, not
+                // a tally. Naming the number as a limit makes the fix
+                // (terminate something) obvious.
                 super(
-                        `You already have ${quota} active sessions — terminate some ` +
+                        `Active session limit (${quota}) reached — terminate a session ` +
                         `before creating more`,
                 );
                 this.name = "SessionQuotaExceededError";
