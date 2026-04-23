@@ -875,11 +875,13 @@ async function renderInvites() {
 
         for (const invite of invites) {
                 const used = invite.usedAt !== null;
-                // expires_at is server-stored as "YYYY-MM-DD HH:MM:SS" UTC. Append
-                // "Z" so Date parses it as UTC instead of local time, otherwise
-                // an invite minted UTC-late could appear expired in a CET browser.
+                // expires_at is server-stored as "YYYY-MM-DD HH:MM:SS" UTC. Swap
+                // the space for "T" before appending "Z" so the result is valid
+                // ISO 8601 — Safari rejects the space-separated form and returns
+                // Invalid Date, which would silently misclassify expired invites
+                // as Unused.
                 const expired = !used && invite.expiresAt !== null
-                        && new Date(`${invite.expiresAt}Z`).getTime() <= Date.now();
+                        && new Date(`${invite.expiresAt.replace(" ", "T")}Z`).getTime() <= Date.now();
                 const inert = used || expired;
                 const row = document.createElement("div");
                 row.className = `invite-row${inert ? " used" : ""}`;
