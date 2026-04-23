@@ -7,7 +7,7 @@
 
 import Dockerode from "dockerode";
 import { Duplex } from "stream";
-import { promises as fs } from "fs";
+import { promises as fs, Dirent } from "fs";
 import path from "path";
 import { randomBytes } from "crypto";
 import { SessionManager } from "./sessionManager.js";
@@ -25,6 +25,20 @@ const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/works
 // instead.
 const WORKSPACE_UID = Number.parseInt(process.env.WORKSPACE_UID ?? "1000", 10);
 const WORKSPACE_GID = Number.parseInt(process.env.WORKSPACE_GID ?? "1000", 10);
+
+// Opt-in: repair ownership on pre-existing *contents* under the session
+// directory, not just the top-level dir. Useful one-shot for deployments
+// that lived through the earlier bug where Docker auto-created the bind
+// source as root, leaving nested files/dirs unwritable even after the
+// top-level was fixed. Default off because:
+//   - chowning arbitrary files the operator deliberately set to another
+//     owner would be surprising;
+//   - a deep traversal on a large workspace can be slow, and we don't
+//     want to pay that cost on every spawn.
+// Flip on for one boot, restart the affected sessions, flip off again.
+const WORKSPACE_CHOWN_RECURSIVE =
+        process.env.WORKSPACE_CHOWN_RECURSIVE === "true"
+        || process.env.WORKSPACE_CHOWN_RECURSIVE === "1";
 
 export interface ExecHandle {
         execId: string;
@@ -78,28 +92,12 @@ export class DockerManager {
                 const meta = await this.sessions.getOrThrow(sessionId);
                 const envArray = Object.entries(meta.envVars).map(([k, v]) => `${k}=${v}`);
 
-                // Pre-create the bind-mount target. If Docker creates it for us it
-                // lands root-owned, which leaves the container's `developer` user
-                // unable to write to its own workspace. chown needs CAP_CHOWN —
-                // the backend runs as root inside its own container (see Dockerfile)
-                // so this works in production; in dev the operator is expected to
-                // have set WORKSPACE_ROOT up with matching ownership themselves, so
-                // we downgrade EPERM to a warning rather than fail the spawn.
+                // Pre-create the bind-mount target so Docker doesn't auto-create it
+                // as root. See `ensureWorkspaceOwnership` for the full story and the
+                // non-recursive invariant.
                 const workspaceDir = path.join(WORKSPACE_ROOT, sessionId);
                 await fs.mkdir(workspaceDir, { recursive: true });
-                try {
-                        await fs.chown(workspaceDir, WORKSPACE_UID, WORKSPACE_GID);
-                } catch (err) {
-                        const code = (err as NodeJS.ErrnoException).code;
-                        if (code === "EPERM" || code === "ENOSYS") {
-                                console.warn(
-                                        `[docker] couldn't chown ${workspaceDir} to ${WORKSPACE_UID}:${WORKSPACE_GID} (${code}); ` +
-                                        `ensure WORKSPACE_ROOT is pre-created with matching ownership or run the backend as root.`,
-                                );
-                        } else {
-                                throw err;
-                        }
-                }
+                await this.ensureWorkspaceOwnership(workspaceDir);
 
                 const container = await this.docker.createContainer({
                         Image: SESSION_IMAGE,
@@ -130,6 +128,72 @@ export class DockerManager {
 
                 console.log(`[docker] spawned container ${meta.containerName} (${containerId.slice(0, 12)}) for session ${sessionId}`);
                 return containerId;
+        }
+
+        /**
+         * Apply `WORKSPACE_UID:WORKSPACE_GID` to the session workspace.
+         *
+         * By default this chowns only the top-level directory, not its contents.
+         * The invariant is "freshly-created or already correctly-owned": nested
+         * files are assumed to have been written by the container itself (so they
+         * already have the right owner). If the operator set
+         * WORKSPACE_CHOWN_RECURSIVE=true we also walk descendants — useful for
+         * one-shot repair of workspaces left inconsistent by an earlier version
+         * that let Docker create the bind source root-owned.
+         *
+         * All chown calls downgrade EPERM/ENOSYS to a warning so unprivileged
+         * dev mode still works; any other errno is re-thrown so we don't
+         * silently boot a session with a broken workspace.
+         */
+        private async ensureWorkspaceOwnership(dir: string): Promise<void> {
+                const chownOne = async (target: string) => {
+                        try {
+                                await fs.chown(target, WORKSPACE_UID, WORKSPACE_GID);
+                        } catch (err) {
+                                const code = (err as NodeJS.ErrnoException).code;
+                                if (code === "EPERM" || code === "ENOSYS") {
+                                        // Logged once per target — high-volume recursive mode
+                                        // could be noisy, but seeing which paths failed is more
+                                        // valuable than a compact summary.
+                                        console.warn(
+                                                `[docker] couldn't chown ${target} to ${WORKSPACE_UID}:${WORKSPACE_GID} (${code}); ` +
+                                                `run the backend as root or pre-create paths with matching ownership.`,
+                                        );
+                                } else {
+                                        throw err;
+                                }
+                        }
+                };
+
+                await chownOne(dir);
+
+                if (!WORKSPACE_CHOWN_RECURSIVE) return;
+
+                // Walk the tree iteratively (not recursively) to avoid stack
+                // growth on deep workspaces. `withFileTypes: true` avoids a stat
+                // per entry. Symlinks are chowned in place (lchown-equivalent)
+                // so we don't follow them out of the workspace root.
+                const stack: string[] = [dir];
+                while (stack.length > 0) {
+                        const current = stack.pop()!;
+                        let entries: Dirent[];
+                        try {
+                                entries = await fs.readdir(current, { withFileTypes: true });
+                        } catch (err) {
+                                const code = (err as NodeJS.ErrnoException).code;
+                                // A sibling-modified workspace (file removed mid-walk) shouldn't
+                                // abort the whole repair; log and keep going.
+                                if (code === "ENOENT" || code === "ENOTDIR") continue;
+                                throw err;
+                        }
+                        for (const entry of entries) {
+                                const full = path.join(current, entry.name);
+                                await chownOne(full);
+                                if (entry.isDirectory() && !entry.isSymbolicLink()) {
+                                        stack.push(full);
+                                }
+                        }
+                }
         }
 
         async kill(sessionId: string): Promise<void> {
