@@ -14,6 +14,7 @@ import { DockerManager } from "./dockerManager.js";
 import { buildRouter } from "./routes.js";
 import { handleWsConnection } from "./wsHandler.js";
 import { selectWsAuthProtocol, validateJwtSecret } from "./auth.js";
+import { parseTrustProxy, warnIfProductionMisconfigured, TrustProxyError } from "./trustProxy.js";
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -21,20 +22,34 @@ const PORT = parseInt(process.env.PORT ?? "3001", 10);
 const CORS_ORIGINS = (process.env.CORS_ORIGINS ?? "*").split(",");
 // TRUST_PROXY: used by req.ip (and therefore auth rate limiting) to pick the
 // real client from X-Forwarded-For instead of the tunnel's socket address.
-// Set to the number of known hops in front of the backend — "1" for a
-// single Cloudflare Tunnel. Leave unset for direct localhost dev.
-//
-// Do NOT set this to "true": Express then takes the LEFTMOST X-Forwarded-For
-// entry, which is fully attacker-controlled. An attacker rotating
-// `X-Forwarded-For: <random>` per request would bypass the per-IP limiter
-// entirely. The hop count ("1", "2", …) picks the rightmost-untrusted
-// address, which is the real client.
-const TRUST_PROXY = process.env.TRUST_PROXY;
+// See trustProxy.ts for the full set of accepted values. "true" is refused
+// because Express then picks the leftmost (attacker-controlled) XFF entry.
+const TRUST_PROXY_RAW = process.env.TRUST_PROXY;
 
 // ── Validate config ───────────────────────────────────────────────────────────
 
 validateD1Config();
 validateJwtSecret();
+
+// Warn early if NODE_ENV=production but TRUST_PROXY is unset — a likely
+// misconfig where per-IP rate limits collapse into a single bucket. Runs
+// before the parse so the warning fires even on unset (which is not an
+// error, just a smell in production).
+warnIfProductionMisconfigured(TRUST_PROXY_RAW, process.env.NODE_ENV);
+
+// Parse upfront so a bad value fails the process immediately rather than
+// silently serving traffic with req.ip derived from the wrong source.
+let trustProxyValue: boolean | number | string | undefined;
+try {
+        trustProxyValue = parseTrustProxy(TRUST_PROXY_RAW);
+} catch (err) {
+        if (err instanceof TrustProxyError) {
+                console.error("[server]", err.message);
+                process.exit(1);
+        }
+        throw err;
+}
+
 
 // ── Singletons ────────────────────────────────────────────────────────────────
 
@@ -44,31 +59,12 @@ const docker = new DockerManager(sessions);
 // ── Express app ───────────────────────────────────────────────────────────────
 
 const app = express();
-if (TRUST_PROXY !== undefined) {
-        // Env values are strings; coerce "1" → 1 and "false" → false.
-        // Anything else passes through as an IP/subnet/"loopback"/etc.
-        // "true" is explicitly refused — see note above.
-        if (TRUST_PROXY === "true") {
-                console.error(
-                        "[server] TRUST_PROXY=true is refused: Express would take the leftmost " +
-                        "X-Forwarded-For entry (attacker-controlled), bypassing per-IP rate limiting. " +
-                        "Use a hop count (e.g. TRUST_PROXY=1) instead.",
-                );
-                process.exit(1);
-        }
-        let coerced: number | boolean | string;
-        // Explicit "0"/"false" → boolean false so we don't rely on Express's
-        // (undocumented) compileTrust(0) returning "never trust". If that
-        // internal ever changes, a string mistakenly treated as an IP would
-        // silently mis-trust; the explicit boolean keeps us pinned.
-        if (TRUST_PROXY === "0" || TRUST_PROXY === "false") coerced = false;
-        else if (/^\d+$/.test(TRUST_PROXY)) coerced = Number(TRUST_PROXY);
-        else coerced = TRUST_PROXY;
-        app.set("trust proxy", coerced);
+if (trustProxyValue !== undefined) {
+        app.set("trust proxy", trustProxyValue);
         // Log the effective value so ops can spot a misconfigured prod
         // (e.g. TRUST_PROXY=0 behind a tunnel would silently collapse
         // per-IP rate limits into one bucket).
-        console.log(`[server] trust proxy = ${JSON.stringify(coerced)}`);
+        console.log(`[server] trust proxy = ${JSON.stringify(trustProxyValue)}`);
 } else {
         console.log("[server] trust proxy = unset (req.ip will be the socket address)");
 }
