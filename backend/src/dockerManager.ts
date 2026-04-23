@@ -17,6 +17,15 @@ import { d1Query } from "./db.js";
 const SESSION_IMAGE = process.env.SESSION_IMAGE ?? "shared-terminal-session";
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
 
+// Owner applied to freshly-created workspace directories. Must match the
+// `developer` user inside session-image/Dockerfile (uid/gid 1000 by default).
+// Overridable via env for deployments that customise the session image.
+// Docker auto-creates missing bind sources as root, which locks the container
+// user out of its own workspace — we pre-create the dir with the right owner
+// instead.
+const WORKSPACE_UID = Number.parseInt(process.env.WORKSPACE_UID ?? "1000", 10);
+const WORKSPACE_GID = Number.parseInt(process.env.WORKSPACE_GID ?? "1000", 10);
+
 export interface ExecHandle {
         execId: string;
         stream: Duplex;
@@ -69,6 +78,29 @@ export class DockerManager {
                 const meta = await this.sessions.getOrThrow(sessionId);
                 const envArray = Object.entries(meta.envVars).map(([k, v]) => `${k}=${v}`);
 
+                // Pre-create the bind-mount target. If Docker creates it for us it
+                // lands root-owned, which leaves the container's `developer` user
+                // unable to write to its own workspace. chown needs CAP_CHOWN —
+                // the backend runs as root inside its own container (see Dockerfile)
+                // so this works in production; in dev the operator is expected to
+                // have set WORKSPACE_ROOT up with matching ownership themselves, so
+                // we downgrade EPERM to a warning rather than fail the spawn.
+                const workspaceDir = path.join(WORKSPACE_ROOT, sessionId);
+                await fs.mkdir(workspaceDir, { recursive: true });
+                try {
+                        await fs.chown(workspaceDir, WORKSPACE_UID, WORKSPACE_GID);
+                } catch (err) {
+                        const code = (err as NodeJS.ErrnoException).code;
+                        if (code === "EPERM" || code === "ENOSYS") {
+                                console.warn(
+                                        `[docker] couldn't chown ${workspaceDir} to ${WORKSPACE_UID}:${WORKSPACE_GID} (${code}); ` +
+                                        `ensure WORKSPACE_ROOT is pre-created with matching ownership or run the backend as root.`,
+                                );
+                        } else {
+                                throw err;
+                        }
+                }
+
                 const container = await this.docker.createContainer({
                         Image: SESSION_IMAGE,
                         name: meta.containerName,
@@ -92,7 +124,9 @@ export class DockerManager {
                 await container.start();
                 const containerId = container.id;
                 await this.sessions.setContainerId(sessionId, containerId);
-                this.buffers.set(sessionId, new RingBuffer(128 * 1024));
+                // Ring buffers are keyed on `${sessionId}:${tabId}` (see targetKey)
+                // and lazy-allocated by attach() → getOrCreateBuffer(). Nothing to
+                // pre-allocate at container-spawn time.
 
                 console.log(`[docker] spawned container ${meta.containerName} (${containerId.slice(0, 12)}) for session ${sessionId}`);
                 return containerId;
@@ -255,13 +289,27 @@ export class DockerManager {
 
                 const s = await pending;
 
+                // Snapshot the replay BEFORE registering the listener so the `await
+                // recomputeSize(s)` window below can't cause duplication: if we
+                // registered first, any byte arriving during that await would fire
+                // onOutput (live delivery) AND be drained into the replay payload
+                // (historical delivery), so the client would render it twice. By
+                // draining first, the two steps partition cleanly — drain() and
+                // listeners.set() are adjacent synchronous statements that Node
+                // cannot interleave with the stream's 'data' event, so every byte
+                // is either in the captured replay xor dispatched live, never both.
+                //
+                // Note: the caller (wsHandler) sends the replay after attach()
+                // returns, so in-flight live bytes could still arrive at the socket
+                // before the historical replay on a very busy session. That's a
+                // separate ordering issue — tracked but not fixed here.
+                const replay = this.getOrCreateBuffer(key).drain();
+
                 s.listeners.set(attachId, onOutput);
                 s.clientSizes.set(attachId, { cols, rows });
                 this.keyOf.set(attachId, key);
 
                 await this.recomputeSize(s);
-
-                const replay = this.getOrCreateBuffer(key).drain();
                 await this.sessions.updateConnected(sessionId);
                 console.log(`[docker] attached ${attachId} to session ${sessionId} (listeners=${s.listeners.size})`);
 
