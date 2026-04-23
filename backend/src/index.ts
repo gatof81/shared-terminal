@@ -13,7 +13,7 @@ import { SessionManager } from "./sessionManager.js";
 import { DockerManager } from "./dockerManager.js";
 import { buildRouter } from "./routes.js";
 import { handleWsConnection } from "./wsHandler.js";
-import { selectWsAuthProtocol } from "./auth.js";
+import { selectWsAuthProtocol, validateJwtSecret } from "./auth.js";
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -34,6 +34,7 @@ const TRUST_PROXY = process.env.TRUST_PROXY;
 // ── Validate config ───────────────────────────────────────────────────────────
 
 validateD1Config();
+validateJwtSecret();
 
 // ── Singletons ────────────────────────────────────────────────────────────────
 

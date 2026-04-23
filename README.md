@@ -123,11 +123,20 @@ cp .env.example .env
 # IMPORTANT: change JWT_SECRET and fill in CLOUDFLARE_* / D1_DATABASE_ID
 nano .env
 
-# Build and start
+# Build the session image (first time + whenever session-image/ changes)
+docker compose build session-image
+# or equivalently: docker build -t shared-terminal-session ./session-image
+
+# Build and start the backend
 docker compose up -d --build
 ```
 
 The backend will be available at `http://localhost:3001`.
+
+> **Note:** the `session-image` service lives behind a `build` compose profile so
+> it is only built on demand and never runs as a long-lived container. `app` does
+> not depend on it at runtime — it just needs the `shared-terminal-session` image
+> to exist in Docker's image store before creating sessions.
 
 ### Frontend (Cloudflare Pages)
 
@@ -163,16 +172,16 @@ cloudflared tunnel --url http://localhost:3001 run shared-terminal
 
 ### Sessions (require `Authorization: Bearer <token>`)
 
-| Method | Path                          | Description                                                   |
-| ------ | ----------------------------- | ------------------------------------------------------------- |
-| POST   | /api/sessions                 | Create session + Docker container                             |
-| GET    | /api/sessions                 | List active sessions (append `?all=true` to include terminated) |
-| GET    | /api/sessions/:id             | Get session details                                           |
-| DELETE | /api/sessions/:id             | Soft delete (container killed, workspace kept, row→terminated) |
-| DELETE | /api/sessions/:id?hard=true   | Hard delete (also purge workspace dir + drop the D1 row)      |
-| POST   | /api/sessions/:id/stop        | Stop container (preservable)                                  |
-| POST   | /api/sessions/:id/start       | Restart or respawn stopped container                          |
-| PATCH  | /api/sessions/:id/env         | Update environment variables                                  |
+| Method | Path                        | Description                                                     |
+| ------ | --------------------------- | --------------------------------------------------------------- |
+| POST   | /api/sessions               | Create session + Docker container                               |
+| GET    | /api/sessions               | List active sessions (append `?all=true` to include terminated) |
+| GET    | /api/sessions/:id           | Get session details                                             |
+| DELETE | /api/sessions/:id           | Soft delete (container killed, workspace kept, row→terminated)  |
+| DELETE | /api/sessions/:id?hard=true | Hard delete (also purge workspace dir + drop the D1 row)        |
+| POST   | /api/sessions/:id/stop      | Stop container (preservable)                                    |
+| POST   | /api/sessions/:id/start     | Restart or respawn stopped container                            |
+| PATCH  | /api/sessions/:id/env       | Update environment variables                                    |
 
 ### WebSocket
 
@@ -200,14 +209,14 @@ Each session runs in a Docker container based on `session-image/Dockerfile`:
 
 ## Tech Stack
 
-| Layer      | Technology                        |
-| ---------- | --------------------------------- |
-| Frontend   | TypeScript, Vite, xterm.js        |
-| Backend    | TypeScript, Node.js, Express, ws  |
-| Auth       | JWT (jsonwebtoken), bcryptjs      |
-| Database   | Cloudflare D1 (accessed via HTTP) |
-| Containers | Docker (dockerode), tmux          |
-| Tunnel     | Cloudflare Tunnel                 |
+| Layer      | Technology                                         |
+| ---------- | -------------------------------------------------- |
+| Frontend   | TypeScript, Vite, xterm.js                         |
+| Backend    | TypeScript, Node.js, Express, ws                   |
+| Auth       | JWT (jsonwebtoken), bcryptjs                       |
+| Database   | Cloudflare D1 (accessed via HTTP)                  |
+| Containers | Docker (dockerode), tmux                           |
+| Tunnel     | Cloudflare Tunnel                                  |
 | Hosting    | Cloudflare Pages (frontend), self-hosted (backend) |
 
 ## Project Structure

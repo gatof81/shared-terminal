@@ -8,8 +8,9 @@
 import {
         isLoggedIn, login, register, logout, checkAuthStatus,
         listSessions, createSession, deleteSession, stopSession, startSession,
-        listTabs, createTab, deleteTab,
-        type SessionInfo, type Tab,
+        listTabs, createTab, deleteTab, TabNotFoundError,
+        listInvites, createInvite, revokeInvite, InviteRequiredError,
+        type SessionInfo, type Tab, type Invite,
 } from "./api.js";
 import { openTerminalSession, type TerminalSession, type SessionStatus } from "./terminal.js";
 
@@ -23,14 +24,23 @@ const authToggle = document.getElementById("auth-toggle")!;
 const authError = document.getElementById("auth-error")!;
 const authUsername = document.getElementById("auth-username") as HTMLInputElement;
 const authPassword = document.getElementById("auth-password") as HTMLInputElement;
+const authInviteCode = document.getElementById("auth-invite-code") as HTMLInputElement;
 const authSubmitBtn = document.getElementById("auth-submit") as HTMLButtonElement;
 
 const userDisplay = document.getElementById("user-display")!;
 const logoutBtn = document.getElementById("logout-btn")!;
+const invitesBtn = document.getElementById("invites-btn") as HTMLButtonElement;
+const invitesModal = document.getElementById("invites-modal")!;
+const inviteCreateBtn = document.getElementById("invite-create-btn") as HTMLButtonElement;
+const inviteList = document.getElementById("invite-list")!;
 const sessionList = document.getElementById("session-list")!;
 const newSessionForm = document.getElementById("new-session-form") as HTMLFormElement;
 const newSessionInput = document.getElementById("new-session-input") as HTMLInputElement;
 const showTerminatedToggle = document.getElementById("show-terminated-toggle") as HTMLInputElement;
+const mainEl = document.querySelector("main")!;
+const sidebarEl = document.getElementById("sidebar")!;
+const sidebarToggleBtn = document.getElementById("sidebar-toggle") as HTMLButtonElement;
+const sidebarBackdrop = document.getElementById("sidebar-backdrop")!;
 
 const terminalToolbar = document.getElementById("terminal-toolbar")!;
 const terminalSessionName = document.getElementById("terminal-session-name")!;
@@ -38,7 +48,37 @@ const terminalStatusBadge = document.getElementById("terminal-status-badge")!;
 const terminalTabs = document.getElementById("terminal-tabs")!;
 const terminalContainer = document.getElementById("terminal-container")!;
 const emptyState = document.getElementById("empty-state")!;
+const fontSizeBtn = document.getElementById("font-size-btn") as HTMLButtonElement;
 const toast = document.getElementById("toast")!;
+
+// ── Viewport height ─────────────────────────────────────────────────────────
+// iOS Safari's soft keyboard overlays the layout viewport without resizing
+// it, so `100dvh` on <body> leaves the terminal partially behind the
+// keyboard. VisualViewport fires resize events as the keyboard opens/closes
+// and as the URL bar shows/hides — we mirror its height into --app-vh so the
+// xterm host container refits to the space actually visible to the user.
+function syncViewportHeight() {
+	const vv = window.visualViewport;
+	const h = vv ? vv.height : window.innerHeight;
+	document.documentElement.style.setProperty("--app-vh", `${h}px`);
+}
+syncViewportHeight();
+window.visualViewport?.addEventListener("resize", syncViewportHeight);
+window.visualViewport?.addEventListener("scroll", syncViewportHeight);
+window.addEventListener("resize", syncViewportHeight);
+
+// ── Font size ───────────────────────────────────────────────────────────────
+// Persisted across reloads via localStorage. Mobile users want ~16 px on a
+// 6" phone, desktop users typically 13–15 px — let them pick once and stick.
+const FONT_SIZE_STEPS = [11, 12, 13, 14, 15, 16, 18];
+const DEFAULT_FONT_SIZE = 14;
+const FONT_SIZE_KEY = "shared-terminal:font-size";
+function readFontSize(): number {
+	const raw = localStorage.getItem(FONT_SIZE_KEY);
+	const n = raw ? Number.parseInt(raw, 10) : DEFAULT_FONT_SIZE;
+	return FONT_SIZE_STEPS.includes(n) ? n : DEFAULT_FONT_SIZE;
+}
+let currentFontSize = readFontSize();
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -71,6 +111,11 @@ function disposeAllCurrentTerminals() {
 
 // ── Auth flow ───────────────────────────────────────────────────────────────
 
+// True only on the very first ever visit before any account exists. The
+// backend lets the first register go through without an invite (bootstrap);
+// we hide the invite-code field in that case so the screen looks normal.
+let isBootstrapRegister = false;
+
 async function initAuth() {
         if (isLoggedIn()) {
                 showApp();
@@ -81,6 +126,7 @@ async function initAuth() {
                 const { needsSetup } = await checkAuthStatus();
                 if (needsSetup) {
                         isRegisterMode = true;
+                        isBootstrapRegister = true;
                         updateAuthUI();
                 }
         } catch {
@@ -108,16 +154,31 @@ function updateAuthUI() {
                 authTitle.textContent = "Create Account";
                 authSubmitBtn.textContent = "Register";
                 authToggle.innerHTML = 'Already have an account? <a href="#" id="auth-toggle-link">Login</a>';
+                // Invite code is required for every register except the bootstrap
+                // first user — show the field accordingly.
+                authInviteCode.classList.toggle("hidden", isBootstrapRegister);
         } else {
                 authTitle.textContent = "Login";
                 authSubmitBtn.textContent = "Login";
                 authToggle.innerHTML = 'No account? <a href="#" id="auth-toggle-link">Register</a>';
+                authInviteCode.classList.add("hidden");
         }
         // Re-bind toggle link
-        document.getElementById("auth-toggle-link")?.addEventListener("click", (e) => {
+        document.getElementById("auth-toggle-link")?.addEventListener("click", async (e) => {
                 e.preventDefault();
                 isRegisterMode = !isRegisterMode;
                 authError.textContent = "";
+                // Re-fetch the canonical bootstrap state when entering register
+                // mode. Otherwise isBootstrapRegister is whatever it was at page
+                // load — toggling login → register would silently keep the flag
+                // (and the hidden invite field) even if the bootstrap window
+                // closed in the interim. Single GET, only on the toggle click.
+                if (isRegisterMode) {
+                        try {
+                                const { needsSetup } = await checkAuthStatus();
+                                isBootstrapRegister = needsSetup;
+                        } catch { /* status check failed — keep prior flag value */ }
+                }
                 updateAuthUI();
         });
 }
@@ -127,20 +188,53 @@ authForm.addEventListener("submit", async (e) => {
         authError.textContent = "";
         const username = authUsername.value.trim();
         const password = authPassword.value;
+        const inviteCode = authInviteCode.value.trim();
 
         if (!username || !password) {
                 authError.textContent = "Username and password required";
                 return;
         }
+        if (isRegisterMode && !isBootstrapRegister && !inviteCode) {
+                authError.textContent = "Invite code required";
+                return;
+        }
 
         try {
                 if (isRegisterMode) {
-                        await register(username, password);
+                        await register(username, password, inviteCode || undefined);
                 } else {
                         await login(username, password);
                 }
                 showApp();
         } catch (err) {
+                // The bootstrap window can close between page load and submit
+                // (a concurrent register sneaks in, or the page sat open after
+                // someone else set up the first account). The backend signals
+                // this with 403 InviteRequired — clear the flag and reveal the
+                // invite-code field so the user can retry without reloading.
+                if (err instanceof InviteRequiredError && isBootstrapRegister) {
+                        isBootstrapRegister = false;
+                        updateAuthUI();
+                        authError.textContent = "An account already exists — enter an invite code to register.";
+                        return;
+                }
+                // Non-403 failures during bootstrap (transient 500, network blip)
+                // would otherwise leave isBootstrapRegister=true forever — the
+                // invite field stays hidden and every retry re-fires the no-invite
+                // path, which the backend may now reject if a concurrent register
+                // already grabbed the bootstrap slot. Re-fetch the canonical state
+                // so the next submit either retries cleanly or shows the invite
+                // field. checkAuthStatus is cheap and only runs on the rare
+                // bootstrap-error path.
+                if (isRegisterMode && isBootstrapRegister) {
+                        try {
+                                const { needsSetup } = await checkAuthStatus();
+                                if (!needsSetup) {
+                                        isBootstrapRegister = false;
+                                        updateAuthUI();
+                                }
+                        } catch { /* status check itself failed — keep the flag, surface the original error */ }
+                }
                 authError.textContent = (err as Error).message;
         }
 });
@@ -572,6 +666,10 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
         if (!activeSessionId) return;
         const sessionId = activeSessionId;
         if (closingTabs.has(tabId)) return; // duplicate invocation for same tab
+        const tabLabel = currentTabs.find((t) => t.tabId === tabId)?.label ?? tabId;
+        if (!confirm(`Close tab "${tabLabel}"?\n\nAny processes running in this tab will be terminated (SIGHUP).`)) {
+                return;
+        }
         closingTabs.add(tabId);
         // Re-render so sibling chips' × reflects the in-flight close (their
         // disabled state mirrors the same guard).
@@ -581,11 +679,18 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
         try {
                 await deleteTab(sessionId, tabId);
         } catch (err) {
-                closingTabs.delete(tabId);
-                renderTabBar();
-                showToast((err as Error).message, true);
-                if (triggeredBy?.isConnected) triggeredBy.disabled = false;
-                return;
+                // 404 means the backend already lost the tab (e.g. tmux server died).
+                // Drop the stale chip from the UI rather than leaving the user stuck
+                // with an unremovable phantom tab.
+                if (err instanceof TabNotFoundError) {
+                        // fall through to the success path below
+                } else {
+                        closingTabs.delete(tabId);
+                        renderTabBar();
+                        showToast((err as Error).message, true);
+                        if (triggeredBy?.isConnected) triggeredBy.disabled = false;
+                        return;
+                }
         }
         closingTabs.delete(tabId);
         // Stale-session guard: renderTabBar() below rebuilds chips anyway, so
@@ -675,6 +780,236 @@ function showToast(message: string, isError = false) {
 showTerminatedToggle.addEventListener("change", () => {
         console.debug(`[sessions] show-terminated toggled → ${showTerminatedToggle.checked}`);
         refreshSessions();
+});
+
+// ── Sidebar toggle ──────────────────────────────────────────────────────────
+
+// Mirrored in index.html `@media (max-width: 768px)` — keep in sync. The CSS
+// query is the source of truth for visual behaviour; this constant exists so
+// the JS-side default (open on desktop, closed on mobile) matches.
+const MOBILE_BREAKPOINT_PX = 768;
+const mobileMql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT_PX}px)`);
+const isMobile = () => mobileMql.matches;
+
+function setSidebarOpen(open: boolean) {
+        const wasOpen = mainEl.classList.contains("sidebar-open");
+        mainEl.classList.toggle("sidebar-open", open);
+        sidebarToggleBtn.setAttribute("aria-expanded", String(open));
+
+        // Focus management is only meaningful on mobile, where the sidebar
+        // is a modal-style drawer — keyboard users opening it expect focus
+        // to land inside, and closing it should return focus to the toggle
+        // (only when focus was inside the drawer; otherwise the user has
+        // already moved on and we'd be stealing their focus).
+        if (!isMobile()) return;
+        if (open && !wasOpen) {
+                const firstFocusable = sidebarEl.querySelector<HTMLElement>(
+                        'input, button, a, [tabindex]:not([tabindex="-1"])',
+                );
+                firstFocusable?.focus();
+        } else if (!open && wasOpen) {
+                if (sidebarEl.contains(document.activeElement)) {
+                        sidebarToggleBtn.focus();
+                }
+        }
+}
+
+sidebarToggleBtn.addEventListener("click", () => {
+        setSidebarOpen(!mainEl.classList.contains("sidebar-open"));
+});
+
+sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
+
+// Escape closes the mobile drawer, matching the WAI-ARIA modal-dialog
+// expectation. Desktop ignores this — the sidebar is always part of the
+// layout there and Escape conflicts with terminal/xterm key handling.
+document.addEventListener("keydown", (e) => {
+        if (e.key !== "Escape") return;
+        if (!isMobile()) return;
+        if (!mainEl.classList.contains("sidebar-open")) return;
+        setSidebarOpen(false);
+});
+
+// On mobile, picking a session should dismiss the drawer so the user can
+// see the terminal — desktop keeps it pinned.
+sessionList.addEventListener("click", (e) => {
+        if (!isMobile()) return;
+        // Ignore clicks on action buttons (start/stop/delete) — those don't
+        // switch the active session, so dismissing the drawer is jarring.
+        const target = e.target as HTMLElement;
+        if (target.closest(".session-actions")) return;
+        if (target.closest(".session-item")) setSidebarOpen(false);
+});
+
+// Crossing the breakpoint resets to the default state for that mode —
+// otherwise a desktop user who shrinks the window would have the drawer
+// already slid in (sidebar-open class still set, mobile CSS reads it as
+// "show drawer"), and a mobile user who widens the window would find the
+// sidebar column pinned at 0 with no visible trigger to recover.
+mobileMql.addEventListener("change", () => setSidebarOpen(!isMobile()));
+
+// Default state: open on desktop, closed on mobile. The HTML+CSS start in
+// the closed state with transitions suppressed via `[data-sidebar-ready]`,
+// so this synchronous flip-then-enable avoids the 0→260px expand animation
+// that would otherwise fire on every desktop page load.
+setSidebarOpen(!isMobile());
+mainEl.setAttribute("data-sidebar-ready", "");
+
+// ── Font size cycle button ──────────────────────────────────────────────────
+
+function nextFontSize(current: number): number {
+	const i = FONT_SIZE_STEPS.indexOf(current);
+	if (i === -1) return DEFAULT_FONT_SIZE;
+	return FONT_SIZE_STEPS[(i + 1) % FONT_SIZE_STEPS.length]!;
+}
+
+fontSizeBtn.addEventListener("click", () => {
+	currentFontSize = nextFontSize(currentFontSize);
+	localStorage.setItem(FONT_SIZE_KEY, String(currentFontSize));
+	fontSizeBtn.textContent = `Aa ${currentFontSize}`;
+	for (const { term } of currentTerminals.values()) {
+		term.setFontSize(currentFontSize);
+	}
+});
+// Reflect the persisted size in the label on load so users see e.g. "Aa 16"
+// rather than a generic "Aa" after they've picked their size once.
+fontSizeBtn.textContent = `Aa ${currentFontSize}`;
+
+// ── Invites modal ───────────────────────────────────────────────────────────
+
+function openInvitesModal() {
+        invitesModal.classList.add("open");
+        invitesModal.setAttribute("aria-hidden", "false");
+        // Move focus into the dialog so a keyboard user activating the Invites
+        // button via Enter doesn't have their first Tab walk through the page
+        // behind the backdrop. Mirrors the invitesBtn.focus() in close.
+        inviteCreateBtn.focus();
+        void renderInvites();
+}
+
+function closeInvitesModal() {
+        invitesModal.classList.remove("open");
+        invitesModal.setAttribute("aria-hidden", "true");
+        invitesBtn.focus();
+}
+
+async function renderInvites() {
+        inviteList.textContent = "Loading…";
+        let invites: Invite[];
+        try {
+                invites = await listInvites();
+        } catch (err) {
+                inviteList.textContent = "";
+                showToast((err as Error).message, true);
+                return;
+        }
+
+        inviteList.textContent = "";
+        if (invites.length === 0) {
+                const empty = document.createElement("div");
+                empty.className = "invite-empty";
+                empty.textContent = "No invites yet — generate one above.";
+                inviteList.appendChild(empty);
+                return;
+        }
+
+        for (const invite of invites) {
+                const used = invite.usedAt !== null;
+                // expires_at is server-stored as "YYYY-MM-DD HH:MM:SS" UTC. Swap
+                // the space for "T" before appending "Z" so the result is valid
+                // ISO 8601 — Safari rejects the space-separated form and returns
+                // Invalid Date, which would silently misclassify expired invites
+                // as Unused.
+                const expired = !used && invite.expiresAt !== null
+                        && new Date(`${invite.expiresAt.replace(" ", "T")}Z`).getTime() <= Date.now();
+                const inert = used || expired;
+                const row = document.createElement("div");
+                row.className = `invite-row${inert ? " used" : ""}`;
+
+                const code = document.createElement("span");
+                code.className = "invite-code";
+                code.textContent = invite.code;
+                row.appendChild(code);
+
+                const status = document.createElement("span");
+                status.className = `invite-status ${inert ? "used" : "unused"}`;
+                status.textContent = used ? "Used" : expired ? "Expired" : "Unused";
+                if (!used && !expired && invite.expiresAt) {
+                        status.title = `Expires ${invite.expiresAt} UTC`;
+                }
+                row.appendChild(status);
+
+                // Copy is only meaningful while the code can still be redeemed.
+                if (!inert) {
+                        const copyBtn = document.createElement("button");
+                        copyBtn.type = "button";
+                        copyBtn.className = "invite-action-btn";
+                        copyBtn.textContent = "Copy";
+                        copyBtn.addEventListener("click", async () => {
+                                try {
+                                        await navigator.clipboard.writeText(invite.code);
+                                        copyBtn.textContent = "Copied";
+                                        setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500);
+                                } catch {
+                                        showToast("Couldn't copy — select the code manually", true);
+                                }
+                        });
+                        row.appendChild(copyBtn);
+                }
+
+                // Revoke is offered for both unused and expired invites — the
+                // backend DELETE matches WHERE used_at IS NULL, so expired-but-
+                // unused codes can be cleared from the list. Quota slots are
+                // already auto-freed by the expiry filter on the COUNT subquery,
+                // so this is purely UI hygiene.
+                if (!used) {
+                        const revokeBtn = document.createElement("button");
+                        revokeBtn.type = "button";
+                        revokeBtn.className = "invite-action-btn revoke";
+                        revokeBtn.textContent = "Revoke";
+                        revokeBtn.addEventListener("click", async () => {
+                                if (!confirm(`Revoke invite "${invite.code}"?`)) return;
+                                revokeBtn.disabled = true;
+                                try {
+                                        await revokeInvite(invite.code);
+                                        await renderInvites();
+                                } catch (err) {
+                                        revokeBtn.disabled = false;
+                                        showToast((err as Error).message, true);
+                                }
+                        });
+                        row.appendChild(revokeBtn);
+                }
+
+                inviteList.appendChild(row);
+        }
+}
+
+invitesBtn.addEventListener("click", openInvitesModal);
+
+inviteCreateBtn.addEventListener("click", async () => {
+        inviteCreateBtn.disabled = true;
+        try {
+                await createInvite();
+                await renderInvites();
+        } catch (err) {
+                showToast((err as Error).message, true);
+        } finally {
+                inviteCreateBtn.disabled = false;
+        }
+});
+
+// data-close-modal lives on both the backdrop and the × button — one
+// listener handles both rather than wiring two element refs.
+invitesModal.addEventListener("click", (e) => {
+        const target = e.target as HTMLElement;
+        if (target.hasAttribute("data-close-modal")) closeInvitesModal();
+});
+
+document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && invitesModal.classList.contains("open")) {
+                closeInvitesModal();
+        }
 });
 
 // ── Auto-refresh ────────────────────────────────────────────────────────────

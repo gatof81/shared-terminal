@@ -215,8 +215,12 @@ describe("auth route rate limiting", () => {
 	async function spinUp(cfg: {
 		login: { ipMax: number; ipWindowMs: number; usernameMax: number; usernameWindowMs: number };
 		register: { ipMax: number; ipWindowMs: number };
+		invites?: { ipMax: number; ipWindowMs: number };
 	}): Promise<void> {
-		const router = buildRouter(fakeSessions, fakeDocker, cfg);
+		// invites limiter was added later; supply a permissive default for tests
+		// that pre-date it and only exercise login/register surface.
+		const fullCfg = { invites: { ipMax: 1000, ipWindowMs: 60_000 }, ...cfg };
+		const router = buildRouter(fakeSessions, fakeDocker, fullCfg);
 		const app = express();
 		app.use(express.json());
 		app.use("/api", router);

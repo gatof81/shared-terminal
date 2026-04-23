@@ -15,9 +15,20 @@ export interface RateLimitConfig {
 		ipMax: number;
 		ipWindowMs: number;
 	};
+	// Caps how often a single IP can mint invite codes. The atomic per-user
+	// quota (20 outstanding) bounds the steady-state surface, but a stolen
+	// JWT could otherwise burst all 20 mints in milliseconds before anyone
+	// notices. Slower than registerIp because legitimate use is "invite a
+	// few friends, then idle for weeks".
+	invites: {
+		ipMax: number;
+		ipWindowMs: number;
+	};
 }
 
 // Defaults match issue #10: login 10/15min, register 5/1h, per-username 10/15min.
+// Invites: 10/1h — generous for legitimate inviting bursts, restrictive for
+// JWT-theft pre-mint floods.
 export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 	login: {
 		ipMax: 10,
@@ -29,6 +40,10 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 		ipMax: 5,
 		ipWindowMs: 60 * 60 * 1000,
 	},
+	invites: {
+		ipMax: 10,
+		ipWindowMs: 60 * 60 * 1000,
+	},
 };
 
 // ── IP-based limiters (express-rate-limit) ─────────────────────────────────
@@ -36,6 +51,7 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 export interface AuthRateLimiters {
 	loginIp: RateLimitRequestHandler;
 	registerIp: RateLimitRequestHandler;
+	invitesIp: RateLimitRequestHandler;
 }
 
 export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
@@ -61,7 +77,14 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		legacyHeaders: false,
 		message: { error: "Too many registration attempts from this IP, try again later", scope: "ip" },
 	});
-	return { loginIp, registerIp };
+	const invitesIp = rateLimit({
+		windowMs: cfg.invites.ipWindowMs,
+		limit: cfg.invites.ipMax,
+		standardHeaders: "draft-7",
+		legacyHeaders: false,
+		message: { error: "Too many invite-mint requests from this IP, try again later", scope: "ip" },
+	});
+	return { loginIp, registerIp, invitesIp };
 }
 
 // ── Per-username limiter ────────────────────────────────────────────────────

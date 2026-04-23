@@ -3,7 +3,12 @@
  */
 
 import { Router, Request, Response } from "express";
-import { AuthedRequest, requireAuth, registerUser, loginUser, hasAnyUsers, InvalidCredentialsError } from "./auth.js";
+import {
+        AuthedRequest, requireAuth, registerUser, loginUser, hasAnyUsers,
+        InvalidCredentialsError, InviteRequiredError, UsernameTakenError,
+        InviteQuotaExceededError,
+        createInvite, listInvites, revokeInvite,
+} from "./auth.js";
 import { SessionManager, NotFoundError, ForbiddenError } from "./sessionManager.js";
 import { DockerManager } from "./dockerManager.js";
 import { SessionMeta } from "./types.js";
@@ -23,7 +28,7 @@ export function buildRouter(
 
         // ── Auth routes (public) ────────────────────────────────────────────────
 
-        const { loginIp, registerIp } = createAuthRateLimiters(rateLimitConfig);
+        const { loginIp, registerIp, invitesIp } = createAuthRateLimiters(rateLimitConfig);
         const usernameLimiter = new UsernameRateLimiter(
                 rateLimitConfig.login.usernameMax,
                 rateLimitConfig.login.usernameWindowMs,
@@ -37,7 +42,9 @@ export function buildRouter(
         });
 
         router.post("/auth/register", registerIp, async (req: Request, res: Response) => {
-                const { username, password } = req.body as { username?: string; password?: string };
+                const { username, password, inviteCode } = req.body as {
+                        username?: string; password?: string; inviteCode?: string;
+                };
                 if (!username || !password || password.length < 6) {
                         res.status(400).json({ error: "username and password (min 6 chars) required" });
                         return;
@@ -46,11 +53,52 @@ export function buildRouter(
                         res.status(400).json({ error: `username must be at most ${USERNAME_MAX_LEN} characters` });
                         return;
                 }
+                // The frontend always sends a string or omits the field, but a hand-
+                // crafted POST with `inviteCode: 123` would crash `.trim()` and
+                // surface as a 500. Guard at the boundary so callers get a clear 400.
+                if (inviteCode !== undefined && typeof inviteCode !== "string") {
+                        res.status(400).json({ error: "inviteCode must be a string" });
+                        return;
+                }
+                // Cap length too — invite codes mint at 16 hex chars, so anything
+                // larger is a client bug or a probe. Without this, a megabyte-long
+                // string would still hit D1 as a parameter.
+                if (inviteCode !== undefined && inviteCode.length > 64) {
+                        res.status(400).json({ error: "inviteCode must be at most 64 characters" });
+                        return;
+                }
+                // Distinguish "field absent" from "field present but whitespace-only".
+                // Without this, `inviteCode = "   "` would trim to "" and `|| undefined`
+                // would coerce it to absent, surfacing as "Invite code required" instead
+                // of "invalid". Whitespace-only is an explicit attempt — treat it as
+                // an invalid code so the user sees the right error.
+                let trimmedInviteCode: string | undefined;
+                if (inviteCode === undefined) {
+                        trimmedInviteCode = undefined;
+                } else if (inviteCode.trim() === "") {
+                        res.status(403).json({ error: "Invite code is invalid, expired, or already used" });
+                        return;
+                } else {
+                        trimmedInviteCode = inviteCode.trim();
+                }
                 try {
-                        const result = await registerUser(username, password);
+                        const result = await registerUser(username, password, trimmedInviteCode);
                         res.status(201).json(result);
                 } catch (err) {
-                        res.status(409).json({ error: (err as Error).message });
+                        if (err instanceof InviteRequiredError) {
+                                // 403 — caller authenticated nothing yet, but the action is
+                                // forbidden without a valid invite. Distinct from 409 so the
+                                // frontend can render the invite-code field instead of a
+                                // username-taken message.
+                                res.status(403).json({ error: err.message });
+                                return;
+                        }
+                        if (err instanceof UsernameTakenError) {
+                                res.status(409).json({ error: err.message });
+                                return;
+                        }
+                        console.error(`[auth] register failed unexpectedly:`, (err as Error).message);
+                        res.status(500).json({ error: "Internal server error" });
                 }
         });
 
@@ -115,9 +163,69 @@ export function buildRouter(
                 res.json(result);
         });
 
-        // ── Session routes (authenticated) ──────────────────────────────────────
+        // ── Authenticated route prefixes ────────────────────────────────────────
 
+        router.use("/invites", requireAuth);
         router.use("/sessions", requireAuth);
+
+        // ── Invite routes ───────────────────────────────────────────────────────
+        // Any authenticated user can mint invites — there is no admin tier yet.
+        // If you ever want to gate this to specific accounts, add an is_admin
+        // column to users and a middleware check here.
+
+        router.get("/invites", async (req: Request, res: Response) => {
+                const { userId } = req as AuthedRequest;
+                try {
+                        const invites = await listInvites(userId);
+                        res.json(invites);
+                } catch (err) {
+                        console.error(`[invites] list failed:`, (err as Error).message);
+                        res.status(500).json({ error: "Internal server error" });
+                }
+        });
+
+        router.post("/invites", invitesIp, async (req: Request, res: Response) => {
+                const { userId } = req as AuthedRequest;
+                try {
+                        const invite = await createInvite(userId);
+                        res.status(201).json(invite);
+                } catch (err) {
+                        if (err instanceof InviteQuotaExceededError) {
+                                res.status(429).json({ error: err.message });
+                                return;
+                        }
+                        console.error(`[invites] create failed:`, (err as Error).message);
+                        res.status(500).json({ error: "Internal server error" });
+                }
+        });
+
+        router.delete("/invites/:code", invitesIp, async (req: Request, res: Response) => {
+                const { userId } = req as AuthedRequest;
+                const { code } = req.params;
+                // Same 64-char ceiling as the inviteCode body field at register —
+                // codes mint at 16 hex chars, anything larger is a probe and
+                // shouldn't reach D1 even as a parameterized arg.
+                if (code.length > 64) {
+                        res.status(400).json({ error: "code must be at most 64 characters" });
+                        return;
+                }
+                try {
+                        const removed = await revokeInvite(userId, code);
+                        if (!removed) {
+                                // Vague on purpose: don't distinguish missing / already-used /
+                                // owned-by-someone-else, since that would let a caller probe for
+                                // codes outside their ownership.
+                                res.status(404).json({ error: "Invite not found or already used" });
+                                return;
+                        }
+                        res.status(204).send();
+                } catch (err) {
+                        console.error(`[invites] revoke failed:`, (err as Error).message);
+                        res.status(500).json({ error: "Internal server error" });
+                }
+        });
+
+        // ── Session routes ──────────────────────────────────────────────────────
 
         router.post("/sessions", async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
