@@ -126,6 +126,29 @@ export function parseTrustProxy(raw: string | undefined): TrustProxyValue | unde
  * Logger is injectable so tests can assert on calls without stealing
  * console.warn globally.
  */
+// Intentional scope: this helper only flags the "unset / blank" case. It
+// does NOT re-validate a set value — that's parseTrustProxy's job and is
+// called separately at boot. It also does NOT warn when the operator
+// explicitly sets TRUST_PROXY=0 / =false in production, even though that
+// has the same collapse-all-IPs-into-one-bucket effect as leaving it
+// unset behind a proxy. Distinguishing the two cases is deliberate:
+//
+//   - unset  = "operator didn't think about it" → warn, it's probably a
+//              misconfiguration the operator hasn't noticed yet.
+//   - 0/false = "operator explicitly chose to distrust all proxies"   →
+//              silent, on the assumption that a deployment directly
+//              exposed to the internet (e.g. a host-network container
+//              with no CDN in front) is the legitimate scenario. If the
+//              caller set it to false AND is behind a proxy, that's a
+//              deployment mistake this helper can't distinguish from a
+//              correct direct-exposure setup — so we defer to operator
+//              intent rather than guess.
+//
+// If the threat model ever extends to "ops typed `false` because they
+// saw it was a valid value and didn't read the docs", flip this to also
+// warn on explicit falsy values — the corresponding test
+// ('stays quiet when TRUST_PROXY is set in production') would also need
+// to drop its `"false"` case.
 export function warnIfProductionMisconfigured(
         raw: string | undefined,
         nodeEnv: string | undefined,
