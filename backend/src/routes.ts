@@ -236,13 +236,35 @@ export function buildRouter(
                         res.status(400).json({ error: "body.name is required" });
                         return;
                 }
+                // `sessions.create` writes a D1 row BEFORE `docker.spawn` runs, so a
+                // spawn failure (missing image, docker daemon down, name collision on
+                // the 12-char container-name prefix, workspace chown EACCES) would
+                // otherwise leak a phantom `running` session with a null container_id.
+                // reconcile() would later flip it to `stopped`, but the row stays
+                // forever and users see a zombie entry in their sidebar. Roll back
+                // the D1 row explicitly on any spawn failure.
+                let meta: Awaited<ReturnType<SessionManager["create"]>> | null = null;
                 try {
-                        const meta = await sessions.create({ userId, name, cols, rows, envVars });
+                        meta = await sessions.create({ userId, name, cols, rows, envVars });
                         await docker.spawn(meta.sessionId);
                         const updated = await sessions.get(meta.sessionId);
                         res.status(201).json(serializeMeta(updated!));
                 } catch (err) {
                         console.error(`[routes] session create failed:`, (err as Error).message);
+                        if (meta) {
+                                // Best-effort rollback. If deleteRow itself fails (D1 blip),
+                                // the reconciler will eventually flip status to stopped but
+                                // the row remains — we log loudly so an operator can clean
+                                // it up manually.
+                                try {
+                                        await sessions.deleteRow(meta.sessionId);
+                                } catch (cleanupErr) {
+                                        console.error(
+                                                `[routes] CRITICAL: spawn rollback failed for session ${meta.sessionId}:`,
+                                                (cleanupErr as Error).message,
+                                        );
+                                }
+                        }
                         res.status(500).json({ error: (err as Error).message });
                 }
         });

@@ -140,8 +140,37 @@ start().catch((err) => {
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 
+// SIGTERM/SIGINT can fire twice (e.g. docker compose down then Ctrl-C). The
+// second invocation should skip teardown — wss.close() is idempotent but
+// `server.close()` throws ERR_SERVER_NOT_RUNNING on re-entry.
+let shuttingDown = false;
+
 function shutdown() {
+        if (shuttingDown) return;
+        shuttingDown = true;
         console.log("[server] shutting down…");
+
+        // Actively close live WS clients. `wss.close()` alone only stops accepting
+        // new upgrades — existing connections stay open, which keeps `server.close()`
+        // hanging on its keepalive-held sockets until the OS eventually kills the
+        // process. Send 1001 ("going away") so the browser surfaces a clean reason
+        // rather than "connection error".
+        for (const client of wss.clients) {
+                try { client.close(1001, "server shutting down"); } catch { /* already closed */ }
+        }
         wss.close();
-        server.close(() => process.exit(0));
+
+        // Watchdog: if a client stalls its close handshake (or some other handle
+        // keeps the event loop alive), exit anyway after a grace period instead of
+        // hanging the orchestrator's stop timeout.
+        const watchdog = setTimeout(() => {
+                console.warn("[server] shutdown watchdog fired — forcing exit");
+                process.exit(1);
+        }, 10_000);
+        watchdog.unref();
+
+        server.close(() => {
+                clearTimeout(watchdog);
+                process.exit(0);
+        });
 }
