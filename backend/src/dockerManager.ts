@@ -512,6 +512,10 @@ export class DockerManager {
                         } catch { /* newer spawn rejected; not our concern */ }
                 };
                 stream.on("end", () => { broadcast(decoder.end()); void forgetIfCurrent(); });
+                // "close" fires on abrupt destroy (container killed). We intentionally
+                // skip decoder.end() here — calling it would emit U+FFFD for any bytes
+                // stranded in the decoder, and a partial sequence at hard close is
+                // unrecoverable anyway.
                 stream.on("close", () => { void forgetIfCurrent(); });
                 stream.on("error", (err) => {
                         console.error(`[docker] shared exec stream error for ${key}:`, (err as Error).message);
