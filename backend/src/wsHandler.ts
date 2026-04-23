@@ -69,7 +69,16 @@ export function handleWsConnection(
                         sendMsg(ws, { type: "output", data });
                 };
 
-                const { replay } = await docker.attach(
+                // attach() hands back `flushTail` — until we call it, the listener
+                // installed inside attach() piles incoming live bytes into a local
+                // array instead of forwarding them. This lets us guarantee the
+                // on-the-wire order is [replay][live], even on a noisy session
+                // where bytes stream in between attach() returning and this
+                // function sending the replay frame. See attach() for the full
+                // rationale. `sendMsg` is synchronous, so there is no await
+                // between the replay frame and flushTail() — a stream 'data'
+                // event cannot interleave.
+                const { replay, flushTail } = await docker.attach(
                         sessionId, attachId, session.cols, session.rows, outputListener, tabId,
                 );
 
@@ -77,6 +86,7 @@ export function handleWsConnection(
                 if (replay) {
                         sendMsg(ws, { type: "output", data: replay });
                 }
+                flushTail();
 
                 console.log(`[ws] user=${userId} attached to session=${sessionId} tab=${tabId} (exec=${attachId})`);
 

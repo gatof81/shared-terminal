@@ -13,7 +13,6 @@ import type { Duplex } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import Dockerode from "dockerode";
 import { d1Query } from "./db.js";
-import { RingBuffer } from "./ringBuffer.js";
 import type { SessionManager } from "./sessionManager.js";
 
 const SESSION_IMAGE = process.env.SESSION_IMAGE ?? "shared-terminal-session";
@@ -73,7 +72,6 @@ interface SharedExec {
 export class DockerManager {
         private docker: Dockerode;
         private sessions: SessionManager;
-        private buffers = new Map<string /*targetKey*/, RingBuffer>();
         private shared = new Map<string /*targetKey*/, Promise<SharedExec>>();
         private keyOf = new Map<string /*attachId*/, string /*targetKey*/>();
 
@@ -83,7 +81,9 @@ export class DockerManager {
         }
 
         // Each tab inside a session is its own tmux session in the container and
-        // gets its own shared exec + ring buffer. The targetKey is the join key.
+        // gets its own shared exec. The targetKey is the join key; replay on
+        // reconnect is a tmux capture-pane snapshot (see capturePane()), not a
+        // server-side byte buffer.
         private targetKey(sessionId: string, tabId: string): string {
                 return `${sessionId}:${tabId}`;
         }
@@ -125,9 +125,6 @@ export class DockerManager {
                 await container.start();
                 const containerId = container.id;
                 await this.sessions.setContainerId(sessionId, containerId);
-                // Ring buffers are keyed on `${sessionId}:${tabId}` (see targetKey)
-                // and lazy-allocated by attach() → getOrCreateBuffer(). Nothing to
-                // pre-allocate at container-spawn time.
 
                 console.log(`[docker] spawned container ${meta.containerName} (${containerId.slice(0, 12)}) for session ${sessionId}`);
                 return containerId;
@@ -237,7 +234,6 @@ export class DockerManager {
                 for (const [key, pending] of this.shared) {
                         if (key === sessionId || key.startsWith(prefix)) {
                                 this.shared.delete(key);
-                                this.buffers.delete(key);
                                 pending.then(
                                         (s) => { try { s.stream.destroy(); } catch { /* already destroyed */ } },
                                         () => { /* spawn rejected — nothing to destroy */ },
@@ -249,7 +245,6 @@ export class DockerManager {
                                 this.keyOf.delete(attachId);
                         }
                 }
-                this.buffers.delete(sessionId);
                 console.log(`[docker] killed container for session ${sessionId}`);
         }
 
@@ -341,7 +336,7 @@ export class DockerManager {
                 rows: number,
                 onOutput: OutputListener,
                 tabId: string,
-        ): Promise<{ handle: ExecHandle; replay: string | null }> {
+        ): Promise<{ handle: ExecHandle; replay: string | null; flushTail: () => void }> {
                 const key = this.targetKey(sessionId, tabId);
 
                 // Reuse the shared exec if one already exists (or is being spawned).
@@ -364,23 +359,54 @@ export class DockerManager {
 
                 const s = await pending;
 
-                // Snapshot the replay BEFORE registering the listener so the `await
-                // recomputeSize(s)` window below can't cause duplication: if we
-                // registered first, any byte arriving during that await would fire
-                // onOutput (live delivery) AND be drained into the replay payload
-                // (historical delivery), so the client would render it twice. By
-                // draining first, the two steps partition cleanly — drain() and
-                // listeners.set() are adjacent synchronous statements that Node
-                // cannot interleave with the stream's 'data' event, so every byte
-                // is either in the captured replay xor dispatched live, never both.
+                // ── Replay strategy ───────────────────────────────────────────────
+                // We capture the pane's canonical state via `tmux capture-pane -p -e`
+                // and use *that* as the replay payload. This replaces the old
+                // ring-buffer-of-raw-bytes strategy that had two known defects:
                 //
-                // Note: the caller (wsHandler) sends the replay after attach()
-                // returns, so in-flight live bytes could still arrive at the socket
-                // before the historical replay on a very busy session. That's a
-                // separate ordering issue — tracked but not fixed here.
-                const replay = this.getOrCreateBuffer(key).drain();
+                //   (a) a 64 KB byte ring hands the client a mid-sequence tail of
+                //       escape codes, so xterm's state (cursor pos, attrs, alt
+                //       screen) could be left inconsistent after replay — classic
+                //       "junk redraw" on reconnect;
+                //   (b) the ring needed bytes accumulated *while at least one other
+                //       client was attached* — reconnecting after a quiet period
+                //       replayed nothing, leaving the user looking at a blank term.
+                //
+                // capture-pane is tmux's own idea of "what is on screen right now"
+                // including colours and cursor attrs (the -e flag), so the replay
+                // is always a valid, self-contained redraw.
+                //
+                // ── Live-vs-replay ordering ───────────────────────────────────────
+                // We also have to deliver bytes to the client in the correct order:
+                // the replay must land BEFORE any live bytes that arrive afterwards
+                // — otherwise the user sees fresh output get overwritten by a stale
+                // snapshot. Without buffering, these two concurrent streams race:
+                //
+                //   attach() returns → wsHandler sends replay → [live bytes can
+                //   fire between these two steps] → wsHandler sends live delta →
+                //   client paints replay on top of the delta it just rendered.
+                //
+                // To serialise them we arm an "until-flushed" listener: while armed
+                // it piles live bytes into a local `tail` array instead of calling
+                // onOutput. wsHandler sends the replay payload and THEN calls
+                // flushTail(), which drains the tail in order and flips the listener
+                // to forward-directly. Because flushTail is synchronous (no awaits,
+                // ws.send is sync too) and capture-pane's snapshot was taken BEFORE
+                // the first live byte the client could see, the final client-visible
+                // sequence is: [captured screen][every delta in arrival order].
+                const snapshot = await this.capturePane(sessionId, tabId);
 
-                s.listeners.set(attachId, onOutput);
+                const tail: string[] = [];
+                let armed = true;
+                const bufferedListener: OutputListener = (data) => {
+                        if (armed) {
+                                tail.push(data);
+                        } else {
+                                try { onOutput(data); } catch { /* downstream error */ }
+                        }
+                };
+
+                s.listeners.set(attachId, bufferedListener);
                 s.clientSizes.set(attachId, { cols, rows });
                 this.keyOf.set(attachId, key);
 
@@ -388,13 +414,54 @@ export class DockerManager {
                 await this.sessions.updateConnected(sessionId);
                 console.log(`[docker] attached ${attachId} to session ${sessionId} (listeners=${s.listeners.size})`);
 
+                const flushTail = () => {
+                        // Drain in arrival order, then flip the gate. The gate flip MUST
+                        // come after the drain — otherwise a reentrant listener firing
+                        // during drain would call onOutput for a byte whose predecessor
+                        // is still queued, reordering us.
+                        for (const chunk of tail) {
+                                try { onOutput(chunk); } catch { /* downstream error */ }
+                        }
+                        tail.length = 0;
+                        armed = false;
+                };
+
                 const handle: ExecHandle = {
                         execId: attachId,
                         stream: s.stream,
                         resize: (c: number, r: number) => this.resize(attachId, c, r),
                         destroy: () => this.detach(attachId),
                 };
-                return { handle, replay: replay.length > 0 ? replay : null };
+                return { handle, replay: snapshot.length > 0 ? snapshot : null, flushTail };
+        }
+
+        /**
+         * Dump the tab's active pane as an escape-sequence-preserving snapshot
+         * ready to write directly to an xterm. Returns "" on any failure so
+         * attach() stays robust — a failed snapshot just means the client starts
+         * blank and gets redrawn by the next live activity.
+         *
+         * `-p` prints to stdout (no paste-buffer staging), `-e` preserves colours
+         * and attributes. We deliberately DON'T pass `-S -` to include scrollback:
+         * the client's xterm already has its own scrollback, and dumping a full
+         * history on every reconnect is both expensive and surprising (stale
+         * lines moving up at connect time).
+         */
+        private async capturePane(sessionId: string, tabId: string): Promise<string> {
+                try {
+                        const { stdout, exitCode } = await this.execOneShot(sessionId, [
+                                "tmux", "capture-pane", "-t", tabId, "-p", "-e",
+                        ]);
+                        if (exitCode !== 0) return "";
+                        // execOneShot strips \r so we can parse token-per-line output from
+                        // tmux helpers cleanly. For a screen dump, xterm needs each line
+                        // terminator to be CRLF so the cursor returns to column 0 — put
+                        // the \r back.
+                        return stdout.split("\n").join("\r\n");
+                } catch (err) {
+                        console.warn(`[docker] capture-pane failed for ${this.targetKey(sessionId, tabId)}:`, (err as Error).message);
+                        return "";
+                }
         }
 
         write(attachId: string, data: string): void {
@@ -435,8 +502,9 @@ export class DockerManager {
                         s.clientSizes.delete(attachId);
 
                         if (s.listeners.size === 0) {
-                                // Last client gone — tear down the shared exec. The ring
-                                // buffer is kept so a future re-attach gets scrollback.
+                                // Last client gone — tear down the shared exec. On next
+                                // attach we respawn and capture-pane replays whatever
+                                // state tmux has kept alive in the container.
                                 if (this.shared.get(key) === pending) this.shared.delete(key);
                                 try { s.stream.destroy(); } catch { /* already destroyed */ }
                                 console.log(`[docker] detached ${attachId}; last client, shared exec closed`);
@@ -486,7 +554,6 @@ export class DockerManager {
 
                 const stream = await exec.start({ hijack: true, stdin: true, Tty: true });
 
-                const buffer = this.getOrCreateBuffer(key);
                 const s: SharedExec = {
                         execId: key,
                         stream,
@@ -506,7 +573,6 @@ export class DockerManager {
                 const decoder = new StringDecoder("utf8");
                 const broadcast = (data: string) => {
                         if (!data) return;
-                        buffer.push(data);
                         for (const l of s.listeners.values()) {
                                 try { l(data); } catch { /* listener error */ }
                         }
@@ -590,8 +656,8 @@ export class DockerManager {
         }
 
         async deleteTab(sessionId: string, tabId: string): Promise<void> {
-                // Tear down any shared exec + buffer for this tab first so we don't
-                // leave dangling handles pointing at a dead tmux session.
+                // Tear down any shared exec for this tab first so we don't leave
+                // dangling handles pointing at a dead tmux session.
                 const key = this.targetKey(sessionId, tabId);
                 const pending = this.shared.get(key);
                 if (pending) {
@@ -601,7 +667,6 @@ export class DockerManager {
                                 () => { /* spawn rejected — nothing to destroy */ },
                         );
                 }
-                this.buffers.delete(key);
                 for (const [attachId, k] of this.keyOf) {
                         if (k === key) this.keyOf.delete(attachId);
                 }
@@ -662,15 +727,6 @@ export class DockerManager {
         }
 
         // ── Helpers ─────────────────────────────────────────────────────────────
-
-        private getOrCreateBuffer(sessionId: string): RingBuffer {
-                let buf = this.buffers.get(sessionId);
-                if (!buf) {
-                        buf = new RingBuffer(128 * 1024);
-                        this.buffers.set(sessionId, buf);
-                }
-                return buf;
-        }
 
         async reconcile(): Promise<void> {
                 console.log("[docker] reconciling session state with Docker…");
