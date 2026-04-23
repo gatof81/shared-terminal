@@ -484,11 +484,8 @@ export class DockerManager {
                 };
 
                 // Single fan-out for the entire session. Each byte from tmux fires this
-                // exactly once, regardless of how many clients are attached.
-                //
-                // StringDecoder buffers incomplete multi-byte UTF-8 sequences across
-                // chunk boundaries. Without it, chunk.toString("utf-8") on a Buffer
-                // split mid-character produces U+FFFD replacement characters.
+                // exactly once, regardless of how many clients are attached. StringDecoder
+                // buffers partial multi-byte UTF-8 sequences across chunk boundaries.
                 const decoder = new StringDecoder("utf8");
                 const broadcast = (data: string) => {
                         if (!data) return;
