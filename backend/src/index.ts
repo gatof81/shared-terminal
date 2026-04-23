@@ -50,7 +50,6 @@ try {
         throw err;
 }
 
-
 // ── Singletons ────────────────────────────────────────────────────────────────
 
 const sessions = new SessionManager();

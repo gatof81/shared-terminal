@@ -159,9 +159,11 @@ export class UsernameRateLimiter {
 	// Result-based (never throws) so callers don't need try/catch around an
 	// otherwise-synchronous check inside an async handler.
 	//
-	// Read-only — does not reserve a slot. Callers doing async verification
+	// Does not reserve an in-flight slot — callers doing async verification
 	// (bcrypt, D1) should use beginAttempt/endAttempt instead so the bound
-	// holds across awaits.
+	// holds across awaits. Note that this method IS NOT pure: it
+	// opportunistically evicts an expired entry for the queried username as
+	// a side effect (harmless GC — the entry's window had already elapsed).
 	check(username: string): UsernameCheckResult {
 		const now = Date.now();
 		const entry = this.attempts.get(username);
