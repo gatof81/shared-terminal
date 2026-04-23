@@ -8,7 +8,13 @@
 import http from "node:http";
 import express from "express";
 import { WebSocketServer } from "ws";
-import { ensureAuthReady, selectWsAuthProtocol, validateJwtSecret } from "./auth.js";
+import {
+        ensureAuthReady,
+        isAllowedWsOrigin,
+        selectWsAuthProtocol,
+        validateJwtSecret,
+        warnIfWildcardCorsInProduction,
+} from "./auth.js";
 import { migrateDb, validateD1Config } from "./db.js";
 import { DockerManager } from "./dockerManager.js";
 import { buildRouter } from "./routes.js";
@@ -36,6 +42,12 @@ validateJwtSecret();
 // before the parse so the warning fires even on unset (which is not an
 // error, just a smell in production).
 warnIfProductionMisconfigured(TRUST_PROXY_RAW, process.env.NODE_ENV);
+// Related warning: if CORS_ORIGINS is "*" in production, the HTTP CORS
+// layer is happy but the WebSocket upgrade handler below will refuse
+// every Origin. Surface this at boot so an operator sees the reason
+// for "why won't my WebSocket connect" in the same place they'd look
+// for the TRUST_PROXY warning.
+warnIfWildcardCorsInProduction(CORS_ORIGINS, process.env.NODE_ENV);
 
 // Parse upfront so a bad value fails the process immediately rather than
 // silently serving traffic with req.ip derived from the wrong source.
@@ -102,6 +114,28 @@ server.on("upgrade", (req, socket, head) => {
                 socket.destroy();
                 return;
         }
+
+        // CSWSH defence: reject the upgrade BEFORE the handshake completes
+        // when the Origin header isn't allowed. Done here (not inside the
+        // `wss.on("connection")` handler) so a rejected origin never gets
+        // a WebSocket object, never runs verifyWsToken, and never appears
+        // in wss.clients — closes the window where a CSWSH'd socket could
+        // do anything observable before the server hung up.
+        //
+        // See isAllowedWsOrigin in auth.ts for the policy (in particular:
+        // missing Origin is allowed because it indicates non-browser
+        // clients, and "*" in CORS_ORIGINS is denied in production).
+        const origin = req.headers.origin;
+        if (!isAllowedWsOrigin(origin, CORS_ORIGINS, process.env.NODE_ENV)) {
+                console.warn(
+                        "[server] rejecting WebSocket upgrade: Origin=%s not in allowlist",
+                        origin ?? "<absent>",
+                );
+                socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+                socket.destroy();
+                return;
+        }
+
         wss.handleUpgrade(req, socket, head, (ws) => {
                 wss.emit("connection", ws, req);
         });

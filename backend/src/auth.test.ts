@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { validateJwtSecret, __resetJwtSecretForTests } from "./auth.js";
+import {
+	__resetJwtSecretForTests,
+	isAllowedWsOrigin,
+	validateJwtSecret,
+	warnIfWildcardCorsInProduction,
+} from "./auth.js";
 
 // These tests manipulate process.env.{JWT_SECRET, NODE_ENV} and use a
 // spy on console.warn. Snapshot + restore each to avoid cross-test leakage.
@@ -78,5 +83,135 @@ describe("validateJwtSecret", () => {
 		expect(() => validateJwtSecret()).not.toThrow();
 		expect(warnSpy).toHaveBeenCalledOnce();
 		expect(warnSpy.mock.calls[0]?.[0]).toMatch(/JWT_SECRET is not set/);
+	});
+});
+
+// Pinning the four branches of the CSWSH policy documented on the
+// function. The `allowlist` shapes mirror what `CORS_ORIGINS.split(",")`
+// produces in index.ts (the real caller) — NOT an arbitrary array
+// literal — so these tests catch a regression where someone changes the
+// parse at the call site without updating the helper.
+describe("isAllowedWsOrigin", () => {
+	const ALLOWED_ORIGIN = "https://terminal.example.com";
+	const allowlist = [ALLOWED_ORIGIN, "https://other.example.com"];
+
+	// ── Branch 1: absent Origin ────────────────────────────────────────
+	it("allows a missing Origin header (non-browser client)", () => {
+		// Browsers ALWAYS send Origin on WS. The CSWSH threat strictly
+		// requires a browser, so absent Origin is out of scope.
+		expect(isAllowedWsOrigin(undefined, allowlist, "production")).toBe(true);
+	});
+
+	it("allows an empty-string Origin the same as absent", () => {
+		// Some proxies normalise missing headers to empty strings. The
+		// helper has to cover both shapes or this branch is a lie.
+		expect(isAllowedWsOrigin("", allowlist, "production")).toBe(true);
+	});
+
+	// ── Branch 2: explicit match ───────────────────────────────────────
+	it("allows an Origin that exactly matches the allowlist", () => {
+		expect(isAllowedWsOrigin(ALLOWED_ORIGIN, allowlist, "production")).toBe(true);
+	});
+
+	it("rejects a prefix of an allowlisted origin", () => {
+		// e.g. `https://terminal.example.com` is allowed, but
+		// `https://terminal.example.co` must NOT match. Guard against a
+		// future "use startsWith" refactor.
+		expect(isAllowedWsOrigin("https://terminal.example.co", allowlist, "production")).toBe(false);
+	});
+
+	it("rejects an origin that contains an allowlisted origin as a substring", () => {
+		// Classic `attackerour-domain.com` bypass: make sure exact-match
+		// semantics hold.
+		expect(
+			isAllowedWsOrigin(
+				"https://attackerhttps://terminal.example.com",
+				allowlist,
+				"production",
+			),
+		).toBe(false);
+	});
+
+	it("is case-sensitive on the host portion", () => {
+		// Origin header is always sent lowercase by browsers. A case
+		// mismatch from our allowlist therefore indicates either a
+		// hand-crafted request or a misconfiguration — either way, not
+		// an allow.
+		expect(
+			isAllowedWsOrigin("HTTPS://terminal.example.com", allowlist, "production"),
+		).toBe(false);
+	});
+
+	// ── Branch 3: wildcard ─────────────────────────────────────────────
+	it("rejects a non-matching origin under '*' in production", () => {
+		expect(isAllowedWsOrigin("https://evil.example.com", ["*"], "production")).toBe(false);
+	});
+
+	it("allows a non-matching origin under '*' outside production", () => {
+		// undefined NODE_ENV is the local-dev case (nothing set).
+		expect(isAllowedWsOrigin("https://evil.example.com", ["*"], undefined)).toBe(true);
+		expect(isAllowedWsOrigin("https://evil.example.com", ["*"], "development")).toBe(true);
+		expect(isAllowedWsOrigin("https://evil.example.com", ["*"], "test")).toBe(true);
+	});
+
+	it("still allows an explicit-match origin even when '*' and prod coexist", () => {
+		// A deployment could have CORS_ORIGINS="*,https://real-frontend"
+		// (unusual but legal). The explicit entry should take precedence
+		// over the wildcard's production-refusal.
+		expect(
+			isAllowedWsOrigin(ALLOWED_ORIGIN, ["*", ALLOWED_ORIGIN], "production"),
+		).toBe(true);
+	});
+
+	// ── Branch 4: everything else ─────────────────────────────────────
+	it("rejects any origin when the allowlist is empty", () => {
+		// `"".split(",")` returns `[""]`, not `[]`, so the call-site
+		// shape has one empty-string entry. An empty string isn't a
+		// valid origin and shouldn't be treated as one — but the caller
+		// could also realistically pass `[]` after a future refactor,
+		// so pin both.
+		expect(isAllowedWsOrigin("https://anything.example", [], "production")).toBe(false);
+		expect(isAllowedWsOrigin("https://anything.example", [""], "production")).toBe(false);
+	});
+
+	it("rejects a non-allowlisted origin with no wildcard present", () => {
+		expect(
+			isAllowedWsOrigin("https://evil.example.com", allowlist, "production"),
+		).toBe(false);
+	});
+});
+
+// The warning is a startup-time signal for the "CORS_ORIGINS='*' in
+// production" foot-gun. Test it via an injected logger so we don't have
+// to spy on console.warn globally.
+describe("warnIfWildcardCorsInProduction", () => {
+	it("warns when '*' is present and NODE_ENV=production", () => {
+		const warn = vi.fn();
+		warnIfWildcardCorsInProduction(["*"], "production", { warn });
+		expect(warn).toHaveBeenCalledOnce();
+		expect(warn.mock.calls[0]?.[0]).toMatch(/CORS_ORIGINS contains '\*' in production/);
+	});
+
+	it("still warns when '*' is mixed with explicit entries in production", () => {
+		// Defence in depth: the explicit entries give most users a
+		// working WS, but the '*' is still a live attack surface via the
+		// HTTP layer, so the warning should fire anyway.
+		const warn = vi.fn();
+		warnIfWildcardCorsInProduction(["*", "https://frontend"], "production", { warn });
+		expect(warn).toHaveBeenCalledOnce();
+	});
+
+	it("stays quiet outside production regardless of wildcard", () => {
+		const warn = vi.fn();
+		warnIfWildcardCorsInProduction(["*"], undefined, { warn });
+		warnIfWildcardCorsInProduction(["*"], "development", { warn });
+		warnIfWildcardCorsInProduction(["*"], "test", { warn });
+		expect(warn).not.toHaveBeenCalled();
+	});
+
+	it("stays quiet when '*' is absent in production", () => {
+		const warn = vi.fn();
+		warnIfWildcardCorsInProduction(["https://frontend"], "production", { warn });
+		expect(warn).not.toHaveBeenCalled();
 	});
 });

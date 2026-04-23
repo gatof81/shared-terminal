@@ -546,6 +546,102 @@ export function selectWsAuthProtocol(protocols: Set<string>): string | false {
         return false;
 }
 
+/**
+ * Decide whether a WebSocket upgrade with the given Origin header should
+ * be accepted. The caller (index.ts' `upgrade` handler) uses the result
+ * to 403 out BEFORE the handshake completes, so a rejected origin never
+ * reaches verifyWsToken / handleWsConnection and never shows up in the
+ * `wss.clients` set either.
+ *
+ * Threat model: Cross-Site WebSocket Hijacking (CSWSH). A page a
+ * logged-in user visits opens `new WebSocket("wss://…")` against our
+ * server. Browsers do NOT apply Same-Origin Policy to WebSockets —
+ * there's no preflight, no `Access-Control-*` enforcement. The only
+ * origin-based defence the browser gives us is that it DOES always send
+ * the `Origin` header on WS handshakes, and an attacker page cannot
+ * forge it. So: server-side Origin allowlist is the whole defence.
+ *
+ * Policy:
+ *
+ * 1. No Origin header (undefined or empty string): allow.
+ *    Browsers ALWAYS send Origin on WS. Absence means a non-browser
+ *    client (curl, a native app, a server-to-server caller). That's
+ *    outside the CSWSH threat model — a server-side attacker with a
+ *    valid JWT already bypasses any origin check by just not setting
+ *    Origin, and doesn't need to "hijack" anything. Blocking empty
+ *    Origin would break legitimate CLI tooling without closing the
+ *    CSWSH gap.
+ *
+ * 2. Origin exactly in `allowedOrigins`: allow.
+ *    Substring/suffix matching is tempting (`ends with our-domain.com`)
+ *    but enables `attackerour-domain.com` attacks. Exact match only.
+ *
+ * 3. allowedOrigins contains "*":
+ *    - In production: DENY, and the caller logs a loud warning once at
+ *      startup. The HTTP CORS layer treats "*" as "anyone can hit
+ *      public endpoints without credentials" — mostly harmless because
+ *      browsers refuse to send credentials to `*`. WS has no such
+ *      browser-side guard: the browser DOES send the auth.bearer.* sub-
+ *      protocol on a WS to any origin. "*" for WS in production means
+ *      "any page on the web can CSWSH our authenticated users".
+ *    - Outside production: allow. Local dev frequently runs on
+ *      multiple/ephemeral ports, and the CSWSH prerequisite (attacker
+ *      site in the victim's browser) is ~never the local-dev threat
+ *      model. A dev should not have to configure CORS_ORIGINS just to
+ *      get `localhost` working.
+ *
+ * 4. Everything else: deny.
+ *
+ * Returns boolean; the caller decides the wire response (403 + socket
+ * destroy). Kept pure so auth.test.ts can pin all four branches without
+ * touching http.
+ */
+export function isAllowedWsOrigin(
+        origin: string | undefined,
+        allowedOrigins: readonly string[],
+        nodeEnv: string | undefined,
+): boolean {
+        // Branch 1: not a browser, not a CSWSH vector.
+        if (!origin) return true;
+
+        // Branch 2: explicitly whitelisted.
+        if (allowedOrigins.includes(origin)) return true;
+
+        // Branch 3: "*" wildcard.
+        if (allowedOrigins.includes("*")) {
+                return nodeEnv !== "production";
+        }
+
+        // Branch 4.
+        return false;
+}
+
+/**
+ * Called once at startup. Warns loudly if `CORS_ORIGINS` contains "*"
+ * in production — see isAllowedWsOrigin's branch 3 comment for why
+ * this is a refused-by-default condition on the WS path.
+ *
+ * Pulled out of the upgrade handler so the warning fires exactly once
+ * (on boot) rather than per-rejected-request, which would be noisy and
+ * drown out genuine attack-surface signals.
+ *
+ * Logger is injectable for the test.
+ */
+export function warnIfWildcardCorsInProduction(
+        allowedOrigins: readonly string[],
+        nodeEnv: string | undefined,
+        logger: Pick<Console, "warn"> = console,
+): void {
+        if (nodeEnv !== "production") return;
+        if (!allowedOrigins.includes("*")) return;
+        logger.warn(
+                "[server] CORS_ORIGINS contains '*' in production. The HTTP layer " +
+                "still honours this, but the WebSocket upgrade handler refuses it " +
+                "(CSWSH protection). Set CORS_ORIGINS to an explicit origin list " +
+                "to re-enable WebSocket connections from production clients.",
+        );
+}
+
 export async function hasAnyUsers(): Promise<boolean> {
         const result = await d1Query<{ count: number }>("SELECT COUNT(*) as count FROM users");
         return result.results[0].count > 0;
