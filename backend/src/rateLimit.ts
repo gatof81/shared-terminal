@@ -161,9 +161,19 @@ export class UsernameRateLimiter {
 	//
 	// Does not reserve an in-flight slot — callers doing async verification
 	// (bcrypt, D1) should use beginAttempt/endAttempt instead so the bound
-	// holds across awaits. Note that this method IS NOT pure: it
-	// opportunistically evicts an expired entry for the queried username as
-	// a side effect (harmless GC — the entry's window had already elapsed).
+	// holds across awaits.
+	//
+	// NOT pure: if the queried username's entry is present but past its
+	// resetAt, it's deleted here. This is not just opportunistic GC —
+	// beginAttempt calls check() first and then probes
+	// `!this.attempts.has(username)` for the maxTracked bound. When check
+	// deletes an expired entry, that `.has` flips to false in the same
+	// call and beginAttempt treats the user as brand-new for the tracked-
+	// username cap. That's the correct semantics (an expired window SHOULD
+	// free the cap slot) but the interaction is subtle enough that a
+	// reader glancing at check() could miss it — flagging it here so a
+	// future refactor that moves the delete out of check() remembers to
+	// adjust beginAttempt's cap accounting in lockstep.
 	check(username: string): UsernameCheckResult {
 		const now = Date.now();
 		const entry = this.attempts.get(username);
