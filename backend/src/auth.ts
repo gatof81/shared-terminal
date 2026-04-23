@@ -261,7 +261,19 @@ export async function createInvite(creatorUserId: string): Promise<Invite> {
         // consistently.
         const now = new Date();
         const createdAt = formatD1Datetime(now);
-        const expiresAt = formatD1Datetime(new Date(now.getTime() + INVITE_EXPIRY_DAYS * 86400_000));
+        // Enforce a minimum 1-second future expiry, even when INVITE_EXPIRY_DAYS=0.
+        // Without this, expires_at would resolve to the same UTC second as
+        // datetime('now') in the quota subquery's strict `>` filter, so the
+        // freshly inserted row would be classified as already-expired and would
+        // not count toward the cap. The result: every POST /invites would see
+        // COUNT(*)=0 and succeed, letting an attacker fill invite_codes with
+        // garbage. The 1s minimum still satisfies the test-plan scenario where
+        // INVITE_EXPIRY_DAYS=0 is set to verify the Expired UI label.
+        const expiresAtMs = Math.max(
+                now.getTime() + INVITE_EXPIRY_DAYS * 86400_000,
+                now.getTime() + 1000,
+        );
+        const expiresAt = formatD1Datetime(new Date(expiresAtMs));
         // Atomic quota check: collapse the count + insert into one statement
         // so two concurrent POST /invites requests can't both observe count
         // < MAX and both insert. The WHERE clause is evaluated as part of the

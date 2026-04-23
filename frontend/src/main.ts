@@ -178,6 +178,23 @@ authForm.addEventListener("submit", async (e) => {
                         authError.textContent = "An account already exists — enter an invite code to register.";
                         return;
                 }
+                // Non-403 failures during bootstrap (transient 500, network blip)
+                // would otherwise leave isBootstrapRegister=true forever — the
+                // invite field stays hidden and every retry re-fires the no-invite
+                // path, which the backend may now reject if a concurrent register
+                // already grabbed the bootstrap slot. Re-fetch the canonical state
+                // so the next submit either retries cleanly or shows the invite
+                // field. checkAuthStatus is cheap and only runs on the rare
+                // bootstrap-error path.
+                if (isRegisterMode && isBootstrapRegister) {
+                        try {
+                                const { needsSetup } = await checkAuthStatus();
+                                if (!needsSetup) {
+                                        isBootstrapRegister = false;
+                                        updateAuthUI();
+                                }
+                        } catch { /* status check itself failed — keep the flag, surface the original error */ }
+                }
                 authError.textContent = (err as Error).message;
         }
 });

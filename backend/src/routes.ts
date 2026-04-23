@@ -142,12 +142,18 @@ export function buildRouter(
                 res.json(result);
         });
 
-        // ── Invite routes (authenticated) ───────────────────────────────────────
+        // ── Authenticated route prefixes ────────────────────────────────────────
+        // Grouped so an auth-coverage audit is a single scan rather than a
+        // file-wide search. Order doesn't affect correctness — each `use(path,
+        // middleware)` only runs for routes mounted on that path *afterwards*.
+
+        router.use("/invites", requireAuth);
+        router.use("/sessions", requireAuth);
+
+        // ── Invite routes ───────────────────────────────────────────────────────
         // Any authenticated user can mint invites — there is no admin tier yet.
         // If you ever want to gate this to specific accounts, add an is_admin
         // column to users and a middleware check here.
-
-        router.use("/invites", requireAuth);
 
         router.get("/invites", async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
@@ -194,9 +200,7 @@ export function buildRouter(
                 }
         });
 
-        // ── Session routes (authenticated) ──────────────────────────────────────
-
-        router.use("/sessions", requireAuth);
+        // ── Session routes ──────────────────────────────────────────────────────
 
         router.post("/sessions", async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
