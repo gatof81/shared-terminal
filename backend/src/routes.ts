@@ -377,15 +377,12 @@ export function buildRouter(
                 try {
                         await sessions.assertOwnership(id, userId);
 
-                        // Enforce "always at least one tab per session" — refuse the close
-                        // and let the client decide whether to create a new tab first.
+                        // Closing all tabs is allowed — the container lifecycle is
+                        // independent of tmux now, so a session with zero tabs is a
+                        // valid state (the user creates a new tab from the +).
                         const tabs = await docker.listTabs(id);
                         if (!tabs.some((t) => t.tabId === tabId)) {
                                 res.status(404).json({ error: "tab not found" });
-                                return;
-                        }
-                        if (tabs.length <= 1) {
-                                res.status(409).json({ error: "cannot close the last tab" });
                                 return;
                         }
 

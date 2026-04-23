@@ -119,8 +119,8 @@ describe("DockerManager shared-exec multiplexing", () => {
 	it("creates only one shared exec across multiple attaches to the same session", async () => {
 		const { dm, container } = makeDocker();
 
-		await dm.attach("s1", "a1", 80, 24, () => { /* noop */ });
-		await dm.attach("s1", "a2", 80, 24, () => { /* noop */ });
+		await dm.attach("s1", "a1", 80, 24, () => { /* noop */ }, "tab-test");
+		await dm.attach("s1", "a2", 80, 24, () => { /* noop */ }, "tab-test");
 
 		expect(container.exec).toHaveBeenCalledTimes(1);
 	});
@@ -130,8 +130,8 @@ describe("DockerManager shared-exec multiplexing", () => {
 		const a1 = vi.fn();
 		const a2 = vi.fn();
 
-		await dm.attach("s1", "a1", 80, 24, a1);
-		await dm.attach("s1", "a2", 80, 24, a2);
+		await dm.attach("s1", "a1", 80, 24, a1, "tab-test");
+		await dm.attach("s1", "a2", 80, 24, a2, "tab-test");
 
 		container._streams[0]!.write("hello");
 		await tick();
@@ -142,7 +142,7 @@ describe("DockerManager shared-exec multiplexing", () => {
 		expect(a2).toHaveBeenCalledWith("hello");
 
 		// Ring buffer holds one copy of the output, not N.
-		const buffer = (dm as unknown as { buffers: Map<string, { byteLength: number }> }).buffers.get("s1:tab-default");
+		const buffer = (dm as unknown as { buffers: Map<string, { byteLength: number }> }).buffers.get("s1:tab-test");
 		expect(buffer?.byteLength).toBe(5);
 	});
 
@@ -165,8 +165,8 @@ describe("DockerManager shared-exec multiplexing", () => {
 			return exec;
 		}) as typeof origExec;
 
-		const p1 = dm.attach("s1", "a1", 80, 24, () => { /* noop */ });
-		const p2 = dm.attach("s1", "a2", 80, 24, () => { /* noop */ });
+		const p1 = dm.attach("s1", "a1", 80, 24, () => { /* noop */ }, "tab-test");
+		const p2 = dm.attach("s1", "a2", 80, 24, () => { /* noop */ }, "tab-test");
 
 		// Both calls are now awaiting the same spawnSharedExec promise.
 		await tick();
@@ -183,11 +183,11 @@ describe("DockerManager shared-exec multiplexing", () => {
 		const a1 = vi.fn();
 		const a2 = vi.fn();
 
-		await dm.attach("s1", "a1", 80, 24, a1);
+		await dm.attach("s1", "a1", 80, 24, a1, "tab-test");
 		container._streams[0]!.write("abc");
 		await tick();
 
-		const { replay } = await dm.attach("s1", "a2", 80, 24, a2);
+		const { replay } = await dm.attach("s1", "a2", 80, 24, a2, "tab-test");
 
 		expect(replay).toBe("abc");
 		// a1 got "abc" once via fan-out; replay goes back to the caller only.
@@ -198,9 +198,9 @@ describe("DockerManager shared-exec multiplexing", () => {
 	it("resizes the shared exec to min(cols) × min(rows) and recomputes on detach", async () => {
 		const { dm, container } = makeDocker();
 
-		await dm.attach("s1", "a1", 80, 24, () => { /* noop */ });
-		await dm.attach("s1", "a2", 120, 36, () => { /* noop */ });
-		await dm.attach("s1", "a3", 100, 30, () => { /* noop */ });
+		await dm.attach("s1", "a1", 80, 24, () => { /* noop */ }, "tab-test");
+		await dm.attach("s1", "a2", 120, 36, () => { /* noop */ }, "tab-test");
+		await dm.attach("s1", "a3", 100, 30, () => { /* noop */ }, "tab-test");
 
 		const resizes = container._execs[0]!._resizes;
 		expect(resizes[resizes.length - 1]).toEqual({ h: 24, w: 80 });
@@ -216,7 +216,7 @@ describe("DockerManager shared-exec multiplexing", () => {
 	it("destroys the shared exec on last detach but preserves the ring buffer", async () => {
 		const { dm, container } = makeDocker();
 
-		await dm.attach("s1", "a1", 80, 24, () => { /* noop */ });
+		await dm.attach("s1", "a1", 80, 24, () => { /* noop */ }, "tab-test");
 		container._streams[0]!.write("abc");
 		await tick();
 
@@ -226,11 +226,11 @@ describe("DockerManager shared-exec multiplexing", () => {
 
 		expect(container._streams[0]!.destroyed).toBe(true);
 		const shared = (dm as unknown as { shared: Map<string, unknown> }).shared;
-		expect(shared.has("s1:tab-default")).toBe(false);
+		expect(shared.has("s1:tab-test")).toBe(false);
 
 		// Re-attach: new exec, replay still contains the earlier output.
 		const a2 = vi.fn();
-		const { replay } = await dm.attach("s1", "a2", 80, 24, a2);
+		const { replay } = await dm.attach("s1", "a2", 80, 24, a2, "tab-test");
 		expect(container.exec).toHaveBeenCalledTimes(2);
 		expect(replay).toBe("abc");
 	});
@@ -249,11 +249,11 @@ describe("DockerManager shared-exec multiplexing", () => {
 			return (origExec as (...a: unknown[]) => Promise<FakeExec>).apply(container, args);
 		}) as typeof origExec;
 
-		await expect(dm.attach("s1", "a1", 80, 24, () => { /* noop */ })).rejects.toThrow("kaboom");
+		await expect(dm.attach("s1", "a1", 80, 24, () => { /* noop */ }, "tab-test")).rejects.toThrow("kaboom");
 		// Let the .catch handler clear the slot.
 		await tick();
 
-		await dm.attach("s1", "a2", 80, 24, () => { /* noop */ });
+		await dm.attach("s1", "a2", 80, 24, () => { /* noop */ }, "tab-test");
 		expect(container.exec).toHaveBeenCalledTimes(2);
 	});
 });
@@ -291,7 +291,7 @@ describe("DockerManager tabs", () => {
 			oneShot: (cmd) => {
 				if (cmd[1] === "list-sessions") {
 					return {
-						stdout: "tab-default\tmain\t1700000000\ntab-abc12345\tclaude\t1700000050\n",
+						stdout: "tab-00000001\tshell\t1700000000\ntab-abc12345\tclaude\t1700000050\n",
 						exitCode: 0,
 					};
 				}
@@ -301,7 +301,7 @@ describe("DockerManager tabs", () => {
 
 		const tabs = await dm.listTabs("s1");
 		expect(tabs).toEqual([
-			{ tabId: "tab-default", label: "main", createdAt: 1700000000 },
+			{ tabId: "tab-00000001", label: "shell", createdAt: 1700000000 },
 			{ tabId: "tab-abc12345", label: "claude", createdAt: 1700000050 },
 		]);
 	});
@@ -367,11 +367,4 @@ describe("DockerManager tabs", () => {
 		expect((dm as unknown as { keyOf: Map<string, string> }).keyOf.has("a1")).toBe(false);
 	});
 
-	it("attach without tabId uses DEFAULT_TAB_ID, yielding key `${sessionId}:tab-default`", async () => {
-		const { dm } = makeDocker();
-		await dm.attach("s1", "a1", 80, 24, () => { /* noop */ });
-
-		const buffers = (dm as unknown as { buffers: Map<string, unknown> }).buffers;
-		expect(buffers.has("s1:tab-default")).toBe(true);
-	});
 });

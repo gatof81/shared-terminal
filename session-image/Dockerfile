@@ -57,8 +57,9 @@ COPY --chown=developer:developer tmux.conf /home/developer/.tmux.conf
 RUN mkdir -p /home/developer/workspace
 
 # ── Entrypoint ───────────────────────────────────────────────────────────────
-# Start a detached tmux session named "main" and then sleep forever so the
-# container stays alive.  The backend attaches via `docker exec`.
+# Keep the container alive. No tmux session is created at boot — tabs are
+# provisioned on demand by the backend via `tmux new-session`, and the
+# container outlives them.
 COPY --chown=developer:developer entrypoint.sh /home/developer/entrypoint.sh
 RUN chmod +x /home/developer/entrypoint.sh
 

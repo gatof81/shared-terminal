@@ -180,28 +180,17 @@ export async function createTab(sessionId: string, label?: string): Promise<Tab>
         return res.json();
 }
 
-/** Throws `LastTabError` (HTTP 409) when the tab is the last one — callers should surface, not retry.
- *  Throws `TabNotFoundError` (HTTP 404) when the tab is already gone in the backend (e.g. tmux
+/** Throws `TabNotFoundError` (HTTP 404) when the tab is already gone in the backend (e.g. tmux
  *  server died and dropped its sessions); callers should treat this as success and drop the
  *  stale chip from the UI. */
 export async function deleteTab(sessionId: string, tabId: string): Promise<void> {
         const res = await apiFetch(`/sessions/${sessionId}/tabs/${tabId}`, { method: "DELETE" });
-        if (res.status === 409) {
-                throw new LastTabError();
-        }
         if (res.status === 404) {
                 throw new TabNotFoundError();
         }
         if (!res.ok) {
                 const body = await res.json().catch(() => ({}));
                 throw new Error(body.error ?? "Failed to close tab");
-        }
-}
-
-export class LastTabError extends Error {
-        constructor() {
-                super("Can't close the last tab of a session");
-                this.name = "LastTabError";
         }
 }
 

@@ -27,7 +27,7 @@ export interface ExecHandle {
 export type OutputListener = (data: string) => void;
 
 export interface Tab {
-        tabId: string;      // tmux session name inside the container (e.g. "tab-default", "tab-abc12345")
+        tabId: string;      // tmux session name inside the container (e.g. "tab-abc12345")
         label: string;      // display label (tmux user-option @tab-label)
         createdAt: number;  // unix seconds
 }
@@ -62,11 +62,6 @@ export class DockerManager {
         private targetKey(sessionId: string, tabId: string): string {
                 return `${sessionId}:${tabId}`;
         }
-
-        // Default tab name that the session-image entrypoint creates on first boot.
-        // Used as the fallback when a WS connects without a `tab` query param so
-        // we keep a sensible experience for single-tab users.
-        static readonly DEFAULT_TAB_ID = "tab-default";
 
         // ── Container lifecycle ─────────────────────────────────────────────────
 
@@ -236,7 +231,7 @@ export class DockerManager {
                 cols: number,
                 rows: number,
                 onOutput: OutputListener,
-                tabId: string = DockerManager.DEFAULT_TAB_ID,
+                tabId: string,
         ): Promise<{ handle: ExecHandle; replay: string | null }> {
                 const key = this.targetKey(sessionId, tabId);
 
@@ -471,17 +466,6 @@ export class DockerManager {
                         console.warn(`[docker] kill-session ${tabId} exited ${exitCode}`);
                 }
                 console.log(`[docker] deleted tab ${tabId} from session ${sessionId}`);
-        }
-
-        /** Resolve a sane default when a caller didn't specify a tabId. Returns the
-         *  first tab from `listTabs`, falling back to DEFAULT_TAB_ID if we can't
-         *  reach the container (e.g. reconcile race). */
-        async getDefaultTabId(sessionId: string): Promise<string> {
-                try {
-                        const tabs = await this.listTabs(sessionId);
-                        if (tabs.length > 0) return tabs[0]!.tabId;
-                } catch { /* fall through to static default */ }
-                return DockerManager.DEFAULT_TAB_ID;
         }
 
         private async execOneShot(
