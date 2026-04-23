@@ -60,6 +60,13 @@ export function buildRouter(
                         res.status(400).json({ error: "inviteCode must be a string" });
                         return;
                 }
+                // Cap length too — invite codes mint at 16 hex chars, so anything
+                // larger is a client bug or a probe. Without this, a megabyte-long
+                // string would still hit D1 as a parameter.
+                if (inviteCode !== undefined && inviteCode.length > 64) {
+                        res.status(400).json({ error: "inviteCode must be at most 64 characters" });
+                        return;
+                }
                 try {
                         const result = await registerUser(username, password, inviteCode?.trim() || undefined);
                         res.status(201).json(result);

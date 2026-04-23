@@ -135,10 +135,21 @@ function updateAuthUI() {
                 authInviteCode.classList.add("hidden");
         }
         // Re-bind toggle link
-        document.getElementById("auth-toggle-link")?.addEventListener("click", (e) => {
+        document.getElementById("auth-toggle-link")?.addEventListener("click", async (e) => {
                 e.preventDefault();
                 isRegisterMode = !isRegisterMode;
                 authError.textContent = "";
+                // Re-fetch the canonical bootstrap state when entering register
+                // mode. Otherwise isBootstrapRegister is whatever it was at page
+                // load — toggling login → register would silently keep the flag
+                // (and the hidden invite field) even if the bootstrap window
+                // closed in the interim. Single GET, only on the toggle click.
+                if (isRegisterMode) {
+                        try {
+                                const { needsSetup } = await checkAuthStatus();
+                                isBootstrapRegister = needsSetup;
+                        } catch { /* status check failed — keep prior flag value */ }
+                }
                 updateAuthUI();
         });
 }
