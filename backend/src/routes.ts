@@ -18,6 +18,7 @@ import {
         createAuthRateLimiters,
         UsernameRateLimiter,
 } from "./rateLimit.js";
+import { validateEnvVars, EnvVarValidationError } from "./envVarValidation.js";
 
 export function buildRouter(
         sessions: SessionManager,
@@ -230,11 +231,21 @@ export function buildRouter(
         router.post("/sessions", async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
                 const { name, cols, rows, envVars } = req.body as {
-                        name?: string; cols?: number; rows?: number; envVars?: Record<string, string>;
+                        name?: string; cols?: number; rows?: number; envVars?: unknown;
                 };
                 if (!name || typeof name !== "string") {
                         res.status(400).json({ error: "body.name is required" });
                         return;
+                }
+                let validatedEnvVars: Record<string, string>;
+                try {
+                        validatedEnvVars = validateEnvVars(envVars);
+                } catch (err) {
+                        if (err instanceof EnvVarValidationError) {
+                                res.status(400).json({ error: err.message });
+                                return;
+                        }
+                        throw err;
                 }
                 // `sessions.create` writes a D1 row BEFORE `docker.spawn` runs, so a
                 // spawn failure (missing image, docker daemon down, name collision on
@@ -245,7 +256,7 @@ export function buildRouter(
                 // the D1 row explicitly on any spawn failure.
                 let meta: Awaited<ReturnType<SessionManager["create"]>> | null = null;
                 try {
-                        meta = await sessions.create({ userId, name, cols, rows, envVars });
+                        meta = await sessions.create({ userId, name, cols, rows, envVars: validatedEnvVars });
                         await docker.spawn(meta.sessionId);
                         const updated = await sessions.get(meta.sessionId);
                         res.status(201).json(serializeMeta(updated!));
@@ -350,14 +361,27 @@ export function buildRouter(
 
         router.patch("/sessions/:id/env", async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
-                const { envVars } = req.body as { envVars?: Record<string, string> };
-                if (!envVars || typeof envVars !== "object") {
-                        res.status(400).json({ error: "body.envVars must be an object" });
+                const { envVars } = req.body as { envVars?: unknown };
+                // Require envVars to be explicitly present. An omitted body field here
+                // is almost certainly a client bug — if the user really wants to clear
+                // their vars they should PATCH with `{ envVars: {} }`.
+                if (envVars === undefined) {
+                        res.status(400).json({ error: "body.envVars is required" });
                         return;
+                }
+                let validatedEnvVars: Record<string, string>;
+                try {
+                        validatedEnvVars = validateEnvVars(envVars);
+                } catch (err) {
+                        if (err instanceof EnvVarValidationError) {
+                                res.status(400).json({ error: err.message });
+                                return;
+                        }
+                        throw err;
                 }
                 try {
                         await sessions.assertOwnership(req.params.id, userId);
-                        await sessions.updateEnvVars(req.params.id, envVars);
+                        await sessions.updateEnvVars(req.params.id, validatedEnvVars);
                         const updated = await sessions.get(req.params.id);
                         res.json(serializeMeta(updated!));
                 } catch (err) {

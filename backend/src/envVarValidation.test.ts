@@ -1,0 +1,146 @@
+import { describe, it, expect } from "vitest";
+import {
+        validateEnvVars,
+        EnvVarValidationError,
+        MAX_ENV_VAR_COUNT,
+        MAX_ENV_VAR_NAME_LENGTH,
+        MAX_ENV_VAR_VALUE_LENGTH,
+        MAX_ENV_VARS_TOTAL_BYTES,
+} from "./envVarValidation.js";
+
+describe("validateEnvVars", () => {
+        it("returns an empty object for undefined/null/empty input", () => {
+                expect(validateEnvVars(undefined)).toEqual({});
+                expect(validateEnvVars(null)).toEqual({});
+                expect(validateEnvVars({})).toEqual({});
+        });
+
+        it("accepts conventional env var shapes", () => {
+                const input = {
+                        DATABASE_URL: "postgres://localhost/db",
+                        _LEADING_UNDERSCORE: "ok",
+                        WITH_DIGITS_123: "v1",
+                        ONE_CHAR_NAME: "x",
+                        A: "minimal",
+                };
+                // Result should be strictly equal by value (same keys, same values).
+                expect(validateEnvVars(input)).toEqual(input);
+        });
+
+        it("strips prototype-chain properties", () => {
+                // Constructing an object with an inherited property so we can verify
+                // the validator only looks at own enumerable keys — a conventional
+                // POST body won't carry this, but a malicious client could.
+                const parent = { INHERITED: "should-not-appear" };
+                const child = Object.create(parent);
+                child.OWN = "visible";
+                const result = validateEnvVars(child);
+                expect(result).toEqual({ OWN: "visible" });
+                expect(Object.prototype.hasOwnProperty.call(result, "INHERITED")).toBe(false);
+        });
+
+        // ── type/shape errors ──────────────────────────────────────────────
+
+        it("rejects non-object inputs", () => {
+                expect(() => validateEnvVars("foo")).toThrow(EnvVarValidationError);
+                expect(() => validateEnvVars(42)).toThrow(EnvVarValidationError);
+                expect(() => validateEnvVars(true)).toThrow(EnvVarValidationError);
+                expect(() => validateEnvVars([])).toThrow(EnvVarValidationError);
+        });
+
+        it("rejects non-string values", () => {
+                expect(() => validateEnvVars({ FOO: 123 })).toThrow(/must be a string/);
+                expect(() => validateEnvVars({ FOO: null })).toThrow(/must be a string/);
+                expect(() => validateEnvVars({ FOO: { nested: "obj" } })).toThrow(/must be a string/);
+        });
+
+        // ── name-shape errors ──────────────────────────────────────────────
+
+        it("rejects keys that start with a digit", () => {
+                expect(() => validateEnvVars({ "1FOO": "v" })).toThrow(/not a valid POSIX/);
+        });
+
+        it("rejects keys containing '=' or whitespace", () => {
+                expect(() => validateEnvVars({ "FOO=BAR": "v" })).toThrow(/not a valid POSIX/);
+                expect(() => validateEnvVars({ "FOO BAR": "v" })).toThrow(/not a valid POSIX/);
+                expect(() => validateEnvVars({ "FOO\tBAR": "v" })).toThrow(/not a valid POSIX/);
+                expect(() => validateEnvVars({ "FOO\nBAR": "v" })).toThrow(/not a valid POSIX/);
+        });
+
+        it("rejects keys with dashes, dots, or non-ASCII", () => {
+                expect(() => validateEnvVars({ "FOO-BAR": "v" })).toThrow(/not a valid POSIX/);
+                expect(() => validateEnvVars({ "FOO.BAR": "v" })).toThrow(/not a valid POSIX/);
+                expect(() => validateEnvVars({ "FÖO": "v" })).toThrow(/not a valid POSIX/);
+        });
+
+        it("rejects empty-string keys", () => {
+                expect(() => validateEnvVars({ "": "v" })).toThrow(/non-empty/);
+        });
+
+        // ── length/size caps ───────────────────────────────────────────────
+
+        it("rejects keys longer than MAX_ENV_VAR_NAME_LENGTH", () => {
+                const longKey = "A".repeat(MAX_ENV_VAR_NAME_LENGTH + 1);
+                expect(() => validateEnvVars({ [longKey]: "v" })).toThrow(
+                        new RegExp(`exceeds ${MAX_ENV_VAR_NAME_LENGTH} characters`),
+                );
+        });
+
+        it("accepts keys exactly at MAX_ENV_VAR_NAME_LENGTH", () => {
+                const boundaryKey = "A".repeat(MAX_ENV_VAR_NAME_LENGTH);
+                expect(() => validateEnvVars({ [boundaryKey]: "v" })).not.toThrow();
+        });
+
+        it("rejects values longer than MAX_ENV_VAR_VALUE_LENGTH", () => {
+                const longValue = "x".repeat(MAX_ENV_VAR_VALUE_LENGTH + 1);
+                expect(() => validateEnvVars({ FOO: longValue })).toThrow(
+                        new RegExp(`exceeds ${MAX_ENV_VAR_VALUE_LENGTH} characters`),
+                );
+        });
+
+        it("rejects payloads with more than MAX_ENV_VAR_COUNT entries", () => {
+                const tooMany: Record<string, string> = {};
+                for (let i = 0; i <= MAX_ENV_VAR_COUNT; i++) tooMany[`VAR_${i}`] = "v";
+                expect(() => validateEnvVars(tooMany)).toThrow(
+                        new RegExp(`not contain more than ${MAX_ENV_VAR_COUNT} entries`),
+                );
+        });
+
+        it("accepts exactly MAX_ENV_VAR_COUNT entries", () => {
+                const maxed: Record<string, string> = {};
+                for (let i = 0; i < MAX_ENV_VAR_COUNT; i++) maxed[`VAR_${i}`] = "v";
+                expect(() => validateEnvVars(maxed)).not.toThrow();
+        });
+
+        it("rejects payloads whose total serialised size exceeds MAX_ENV_VARS_TOTAL_BYTES", () => {
+                // Pack values up to the per-value cap and count entries until we clear
+                // the total-bytes threshold. Keeps the test honest against the exact
+                // constant values without hard-coding sizes.
+                const bigValue = "x".repeat(MAX_ENV_VAR_VALUE_LENGTH);
+                const bigPayload: Record<string, string> = {};
+                let i = 0;
+                while (JSON.stringify(bigPayload).length <= MAX_ENV_VARS_TOTAL_BYTES && i < MAX_ENV_VAR_COUNT) {
+                        bigPayload[`V_${i}`] = bigValue;
+                        i++;
+                }
+                expect(() => validateEnvVars(bigPayload)).toThrow(/total size/);
+        });
+
+        // ── structural / content hazards ───────────────────────────────────
+
+        it("rejects values containing NUL bytes", () => {
+                expect(() => validateEnvVars({ FOO: "a\0b" })).toThrow(/NUL byte/);
+        });
+
+        it("permits values with newlines and shell metacharacters", () => {
+                // Docker passes env directly to execve — no shell parsing — so these
+                // are safe to store. Test pins the behaviour so a future validator
+                // change doesn't silently break users with multi-line PEM keys etc.
+                const result = validateEnvVars({
+                        CERT: "-----BEGIN-----\nline2\nline3\n-----END-----",
+                        QUOTE_ME: `"double" 'single' $VAR;rm -rf /`,
+                });
+                expect(result.CERT).toContain("line2");
+                expect(result.QUOTE_ME).toContain("rm -rf");
+        });
+});
