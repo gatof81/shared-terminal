@@ -126,11 +126,13 @@ export async function registerUser(
                 // Bootstrap is the one path where we hash before validating an
                 // invite — there's nothing to validate, and we need the hash for
                 // the conditional INSERT. The cost is one bcrypt per first-ever
-                // visit, which happens at most once per deployment.
-                const bootstrapHash = bcrypt.hashSync(password, BCRYPT_ROUNDS);
+                // visit, which happens at most once per deployment. Async bcrypt
+                // here (and everywhere below) so the event loop keeps serving
+                // other requests while the hash runs on the libuv threadpool.
+                const bootstrapHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
                 const insert = await d1Query(
                         "INSERT INTO users (id, username, password_hash) " +
-                                "SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM users)",
+                        "SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM users)",
                         [userId, username, bootstrapHash],
                 );
                 if (insert.meta.changes === 1) {
@@ -152,18 +154,20 @@ export async function registerUser(
         // never produced an account.
         const claim = await d1Query(
                 "UPDATE invite_codes SET used_by = ?, used_at = datetime('now') " +
-                        "WHERE code = ? AND used_at IS NULL " +
-                        "AND (expires_at IS NULL OR expires_at > datetime('now'))",
+                "WHERE code = ? AND used_at IS NULL " +
+                "AND (expires_at IS NULL OR expires_at > datetime('now'))",
                 [userId, inviteCode],
         );
         if (claim.meta.changes !== 1) {
                 throw new InviteRequiredError("Invite code is invalid, expired, or already used");
         }
 
-        // Hash only after the invite is confirmed valid. bcrypt.hashSync blocks
-        // the event loop, so doing it before the claim would let an unauth'd
-        // caller burn server CPU just by spamming bogus codes.
-        const passwordHash = bcrypt.hashSync(password, BCRYPT_ROUNDS);
+        // Hash only after the invite is confirmed valid. Even though async
+        // bcrypt runs off the main thread, the libuv threadpool is bounded
+        // (default 4 threads) — accepting un-gated hashes would let an
+        // unauth'd caller exhaust those threads just by spamming bogus codes,
+        // backing up every other async operation in the process.
+        const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
         try {
                 await d1Query("INSERT INTO users (id, username, password_hash) VALUES (?, ?, ?)", [
@@ -178,7 +182,7 @@ export async function registerUser(
                 try {
                         await d1Query(
                                 "UPDATE invite_codes SET used_by = NULL, used_at = NULL " +
-                                        "WHERE code = ? AND used_by = ?",
+                                "WHERE code = ? AND used_by = ?",
                                 [inviteCode, userId],
                         );
                 } catch (releaseErr) {
@@ -190,7 +194,7 @@ export async function registerUser(
                         // invite_codes table and reissue if needed.
                         console.error(
                                 "[auth] CRITICAL: invite release failed — code %s is permanently consumed without an account. " +
-                                        "Insert error: %s. Release error: %s",
+                                "Insert error: %s. Release error: %s",
                                 inviteCode,
                                 (err as Error).message,
                                 (releaseErr as Error).message,
@@ -286,11 +290,11 @@ export async function createInvite(creatorUserId: string): Promise<Invite> {
         // and an attacker could just wait out the expiry instead of revoking.
         const insert = await d1Query(
                 "INSERT INTO invite_codes (code, created_by, created_at, expires_at) " +
-                        "SELECT ?, ?, ?, ? WHERE (" +
-                        "SELECT COUNT(*) FROM invite_codes " +
-                        "WHERE created_by = ? AND used_at IS NULL " +
-                        "AND (expires_at IS NULL OR expires_at > datetime('now'))" +
-                        ") < ?",
+                "SELECT ?, ?, ?, ? WHERE (" +
+                "SELECT COUNT(*) FROM invite_codes " +
+                "WHERE created_by = ? AND used_at IS NULL " +
+                "AND (expires_at IS NULL OR expires_at > datetime('now'))" +
+                ") < ?",
                 [code, creatorUserId, createdAt, expiresAt, creatorUserId, MAX_UNUSED_INVITES_PER_USER],
         );
         if (insert.meta.changes !== 1) {
@@ -308,7 +312,7 @@ const INVITE_LIST_LIMIT = 100;
 export async function listInvites(creatorUserId: string): Promise<Invite[]> {
         const result = await d1Query<InviteRow>(
                 "SELECT code, created_at, used_at, expires_at FROM invite_codes " +
-                        "WHERE created_by = ? ORDER BY created_at DESC LIMIT ?",
+                "WHERE created_by = ? ORDER BY created_at DESC LIMIT ?",
                 [creatorUserId, INVITE_LIST_LIMIT],
         );
         return result.results.map(rowToInvite);
@@ -366,7 +370,15 @@ export async function loginUser(username: string, password: string): Promise<{ u
         );
 
         const row = result.results[0];
-        if (!row || !bcrypt.compareSync(password, row.password_hash)) {
+        // Always run a bcrypt compare, even if the user doesn't exist, so an
+        // attacker can't distinguish "unknown username" from "wrong password"
+        // by timing. Comparing against a fixed dummy hash keeps the work
+        // roughly equivalent. Length-matched to a real 10-round bcrypt output
+        // so the compare spends the same CPU as the real-user path.
+        const dummyHash = "$2a$10$" + "x".repeat(53);
+        const hashToCompare = row?.password_hash ?? dummyHash;
+        const ok = await bcrypt.compare(password, hashToCompare);
+        if (!row || !ok) {
                 throw new InvalidCredentialsError();
         }
 

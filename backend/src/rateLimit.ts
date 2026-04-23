@@ -107,6 +107,17 @@ const DEFAULT_MAX_TRACKED_USERNAMES = 10_000;
 // mirror the normalization or the two layers diverge.
 export class UsernameRateLimiter {
 	private attempts = new Map<string, FailedAttempts>();
+	// In-flight attempts (currently waiting on bcrypt or a D1 round-trip).
+	// Tracked separately from the window-bounded `attempts` map because
+	// in-flight slots are transient: they're released when the attempt
+	// finishes, regardless of the window. Counted against the same `max`
+	// budget so a burst of concurrent attempts can't slip past check()
+	// between the gate and the first recordFailure.
+	//
+	// Kept as a plain Map so eviction semantics stay simple — cleared
+	// per-username in endAttempt(), no TTL needed (if the process crashes
+	// with slots reserved, the restart clears everything anyway).
+	private inflight = new Map<string, number>();
 	private readonly maxTracked: number;
 
 	constructor(
@@ -120,21 +131,54 @@ export class UsernameRateLimiter {
 	// Returns allowed=false only when the bucket is full inside its window.
 	// Result-based (never throws) so callers don't need try/catch around an
 	// otherwise-synchronous check inside an async handler.
+	//
+	// Read-only — does not reserve a slot. Callers doing async verification
+	// (bcrypt, D1) should use beginAttempt/endAttempt instead so the bound
+	// holds across awaits.
 	check(username: string): UsernameCheckResult {
 		const now = Date.now();
 		const entry = this.attempts.get(username);
-		if (!entry) return { allowed: true };
-		if (now >= entry.resetAt) {
+		const failed = entry && now < entry.resetAt ? entry.count : 0;
+		const inflight = this.inflight.get(username) ?? 0;
+		if (entry && now >= entry.resetAt) {
 			this.attempts.delete(username);
-			return { allowed: true };
 		}
-		if (entry.count >= this.max) {
+		if (failed + inflight >= this.max) {
+			// Re-fetch after the possible delete above; entry may be gone, in
+			// which case all `max` slots are held by in-flight attempts and the
+			// soonest possible release is on the order of a single bcrypt —
+			// report 1 second as the minimum advisory.
+			const resetAt = entry && now < entry.resetAt ? entry.resetAt : now + 1000;
 			return {
 				allowed: false,
-				retryAfterSeconds: Math.max(1, Math.ceil((entry.resetAt - now) / 1000)),
+				retryAfterSeconds: Math.max(1, Math.ceil((resetAt - now) / 1000)),
 			};
 		}
 		return { allowed: true };
+	}
+
+	// Atomically check AND reserve one in-flight slot for an async
+	// verification. Callers MUST pair every allowed beginAttempt with an
+	// endAttempt (use try/finally) or the slot leaks until process restart.
+	//
+	// Existed as a single method so there's no window between "check passed"
+	// and "slot reserved" where a parallel request could observe the same
+	// pre-reservation state and also pass.
+	beginAttempt(username: string): UsernameCheckResult {
+		const result = this.check(username);
+		if (!result.allowed) return result;
+		const current = this.inflight.get(username) ?? 0;
+		this.inflight.set(username, current + 1);
+		return { allowed: true };
+	}
+
+	// Release a slot reserved by beginAttempt. Safe to call multiple times
+	// against an empty slot (no-op), which keeps try/finally cleanup simple
+	// even if the caller accidentally double-releases on an error path.
+	endAttempt(username: string): void {
+		const current = this.inflight.get(username) ?? 0;
+		if (current <= 1) this.inflight.delete(username);
+		else this.inflight.set(username, current - 1);
 	}
 
 	// Bump the counter for this username. Call after a failed verification.

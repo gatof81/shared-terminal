@@ -97,6 +97,63 @@ describe("UsernameRateLimiter", () => {
 		}
 	});
 
+	// ── beginAttempt / endAttempt (in-flight accounting) ────────────────
+
+	it("beginAttempt reserves a slot so concurrent attempts share the bound", () => {
+		// Pins the concurrency invariant that motivates beginAttempt: with
+		// async bcrypt, N parallel requests against the same username could
+		// all pass check() before any recordFailure lands. beginAttempt
+		// reserves a slot atomically so the (max+1)th in-flight attempt is
+		// rejected even without a single failure recorded yet.
+		const rl = new UsernameRateLimiter(3, 60_000);
+		expect(rl.beginAttempt("alice").allowed).toBe(true);
+		expect(rl.beginAttempt("alice").allowed).toBe(true);
+		expect(rl.beginAttempt("alice").allowed).toBe(true);
+		const overflow = rl.beginAttempt("alice");
+		expect(overflow.allowed).toBe(false);
+		if (!overflow.allowed) {
+			expect(overflow.retryAfterSeconds).toBeGreaterThan(0);
+		}
+	});
+
+	it("endAttempt releases an in-flight slot so the next attempt can proceed", () => {
+		const rl = new UsernameRateLimiter(1, 60_000);
+		expect(rl.beginAttempt("alice").allowed).toBe(true);
+		expect(rl.beginAttempt("alice").allowed).toBe(false);
+		rl.endAttempt("alice");
+		expect(rl.beginAttempt("alice").allowed).toBe(true);
+	});
+
+	it("endAttempt is idempotent when no slot is held (over-release is safe)", () => {
+		// Route handlers call endAttempt in a `finally`; if an earlier error
+		// path also released, the second call must not throw or skew the
+		// counter below zero.
+		const rl = new UsernameRateLimiter(1, 60_000);
+		rl.endAttempt("alice"); // nothing held
+		rl.endAttempt("alice"); // still nothing held
+		expect(rl.beginAttempt("alice").allowed).toBe(true);
+	});
+
+	it("in-flight and recorded failures share the same max budget", () => {
+		// One in-flight + (max-1) recorded failures = full budget. The next
+		// beginAttempt must be rejected. Covers the transient window around
+		// recordFailure (which bumps the counter before endAttempt releases
+		// the inflight slot) — the overlap is intentionally pessimistic.
+		const rl = new UsernameRateLimiter(3, 60_000);
+		rl.recordFailure("alice");
+		rl.recordFailure("alice");
+		expect(rl.beginAttempt("alice").allowed).toBe(true); // 2 failed + 1 inflight = 3
+		expect(rl.beginAttempt("alice").allowed).toBe(false);
+	});
+
+	it("beginAttempt isolates slot counts per username", () => {
+		const rl = new UsernameRateLimiter(1, 60_000);
+		expect(rl.beginAttempt("alice").allowed).toBe(true);
+		// Alice's slot is held; bob should still be free.
+		expect(rl.beginAttempt("bob").allowed).toBe(true);
+		expect(rl.beginAttempt("alice").allowed).toBe(false);
+	});
+
 	it("caps total tracked usernames and evicts oldest when full (DoS guard)", () => {
 		const rl = new UsernameRateLimiter(5, 60_000, 3);
 		rl.recordFailure("u0");

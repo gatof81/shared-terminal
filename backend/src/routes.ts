@@ -120,7 +120,13 @@ export function buildRouter(
                 // account lockout from the IP-layer 429 above. Emits the same
                 // draft-7 RateLimit-* headers as express-rate-limit does on the
                 // IP 429 so clients parsing them see a consistent shape.
-                const check = usernameLimiter.check(username);
+                //
+                // beginAttempt reserves an in-flight slot atomically — important
+                // now that loginUser uses async bcrypt.compare (no longer blocks
+                // the event loop). Without the reservation, a burst of N requests
+                // against the same username could all pass check() and all start
+                // bcrypt before any recordFailure lands, breaking the bound.
+                const check = usernameLimiter.beginAttempt(username);
                 if (!check.allowed) {
                         const windowSeconds = Math.ceil(rateLimitConfig.login.usernameWindowMs / 1000);
                         res.setHeader("Retry-After", String(check.retryAfterSeconds));
@@ -139,31 +145,32 @@ export function buildRouter(
                         return;
                 }
 
-                // Concurrency note: check() is sync but loginUser is async, so
-                // `max + parallelism` slippage is possible in theory. Today
-                // parallelism is effectively 1 because loginUser uses
-                // `bcrypt.compareSync`, which blocks the event loop — that
-                // synchronous call is what pins the bound, not an explicit
-                // mutex. Swapping to the async `bcrypt.compare` removes the
-                // guarantee, so either add queueing or re-check the limit
-                // after the await.
                 let result: { userId: string; token: string };
                 try {
-                        result = await loginUser(username, password);
-                } catch (err) {
-                        if (err instanceof InvalidCredentialsError) {
-                                // Only bad creds count — infra errors must not lock real users out.
-                                usernameLimiter.recordFailure(username);
-                                res.status(401).json({ error: err.message });
+                        try {
+                                result = await loginUser(username, password);
+                        } catch (err) {
+                                if (err instanceof InvalidCredentialsError) {
+                                        // Only bad creds count — infra errors must not lock real users out.
+                                        usernameLimiter.recordFailure(username);
+                                        res.status(401).json({ error: err.message });
+                                        return;
+                                }
+                                // Username omitted from the log to avoid an enumeration vector.
+                                console.error(`[auth] login failed unexpectedly:`, (err as Error).message);
+                                res.status(500).json({ error: "Internal server error" });
                                 return;
                         }
-                        // Username omitted from the log to avoid an enumeration vector.
-                        console.error(`[auth] login failed unexpectedly:`, (err as Error).message);
-                        res.status(500).json({ error: "Internal server error" });
-                        return;
+                        usernameLimiter.reset(username);
+                        res.json(result);
+                } finally {
+                        // Always release the in-flight slot — success, invalid creds,
+                        // or infra error alike. `reset()` above wipes the failure
+                        // counter but not this slot; pairing it with endAttempt keeps
+                        // the invariant that every beginAttempt has exactly one
+                        // endAttempt.
+                        usernameLimiter.endAttempt(username);
                 }
-                usernameLimiter.reset(username);
-                res.json(result);
         });
 
         // ── Authenticated route prefixes ────────────────────────────────────────
