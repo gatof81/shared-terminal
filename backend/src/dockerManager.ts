@@ -10,6 +10,7 @@ import type { Dirent } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Duplex } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
 import Dockerode from "dockerode";
 import { d1Query } from "./db.js";
 import { RingBuffer } from "./ringBuffer.js";
@@ -483,13 +484,19 @@ export class DockerManager {
 
                 // Single fan-out for the entire session. Each byte from tmux fires this
                 // exactly once, regardless of how many clients are attached.
-                stream.on("data", (chunk: Buffer) => {
-                        const data = chunk.toString("utf-8");
+                //
+                // StringDecoder buffers incomplete multi-byte UTF-8 sequences across
+                // chunk boundaries. Without it, chunk.toString("utf-8") on a Buffer
+                // split mid-character produces U+FFFD replacement characters.
+                const decoder = new StringDecoder("utf8");
+                const broadcast = (data: string) => {
+                        if (!data) return;
                         buffer.push(data);
                         for (const l of s.listeners.values()) {
                                 try { l(data); } catch { /* listener error */ }
                         }
-                });
+                };
+                stream.on("data", (chunk: Buffer) => { broadcast(decoder.write(chunk)); });
 
                 // If the stream dies on its own (tmux server exits, container restarted,
                 // docker daemon hiccup), forget the shared entry so the next attach will
@@ -504,7 +511,11 @@ export class DockerManager {
                                 if (currentS.stream === stream) this.shared.delete(key);
                         } catch { /* newer spawn rejected; not our concern */ }
                 };
-                stream.on("end", () => { void forgetIfCurrent(); });
+                stream.on("end", () => { broadcast(decoder.end()); void forgetIfCurrent(); });
+                // "close" fires on abrupt destroy (container killed). We intentionally
+                // skip decoder.end() here — calling it would emit U+FFFD for any bytes
+                // stranded in the decoder, and a partial sequence at hard close is
+                // unrecoverable anyway.
                 stream.on("close", () => { void forgetIfCurrent(); });
                 stream.on("error", (err) => {
                         console.error(`[docker] shared exec stream error for ${key}:`, (err as Error).message);
