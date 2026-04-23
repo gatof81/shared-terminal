@@ -191,6 +191,13 @@ export function buildRouter(
         router.delete("/invites/:code", async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
                 const { code } = req.params;
+                // Same 64-char ceiling as the inviteCode body field at register —
+                // codes mint at 16 hex chars, anything larger is a probe and
+                // shouldn't reach D1 even as a parameterized arg.
+                if (code.length > 64) {
+                        res.status(400).json({ error: "code must be at most 64 characters" });
+                        return;
+                }
                 try {
                         const removed = await revokeInvite(userId, code);
                         if (!removed) {

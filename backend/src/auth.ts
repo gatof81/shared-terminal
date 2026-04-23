@@ -288,11 +288,17 @@ export async function createInvite(creatorUserId: string): Promise<Invite> {
         return { code, createdBy: creatorUserId, createdAt, usedBy: null, usedAt: null, expiresAt };
 }
 
+// LIMIT bounds the response size so historical used/expired rows can't
+// silently grow the payload over time. 100 is 5x the active quota — enough
+// headroom that a user always sees their full active set plus a long tail
+// of recent history. The UI doesn't paginate.
+const INVITE_LIST_LIMIT = 100;
+
 export async function listInvites(creatorUserId: string): Promise<Invite[]> {
         const result = await d1Query<InviteRow>(
                 "SELECT code, created_by, created_at, used_by, used_at, expires_at FROM invite_codes " +
-                        "WHERE created_by = ? ORDER BY created_at DESC",
-                [creatorUserId],
+                        "WHERE created_by = ? ORDER BY created_at DESC LIMIT ?",
+                [creatorUserId, INVITE_LIST_LIMIT],
         );
         return result.results.map(rowToInvite);
 }

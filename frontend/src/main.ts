@@ -919,7 +919,9 @@ async function renderInvites() {
 
                 // Revoke is offered for both unused and expired invites — the
                 // backend DELETE matches WHERE used_at IS NULL, so expired-but-
-                // unused codes can still be cleaned up to free a quota slot.
+                // unused codes can be cleared from the list. Quota slots are
+                // already auto-freed by the expiry filter on the COUNT subquery,
+                // so this is purely UI hygiene.
                 if (!used) {
                         const revokeBtn = document.createElement("button");
                         revokeBtn.type = "button";
