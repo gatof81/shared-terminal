@@ -2,25 +2,37 @@
  * routes.ts — REST API routes.
  */
 
-import { Router, Request, Response } from "express";
+import type { Request, Response } from "express";
+import { Router } from "express";
+import type { AuthedRequest } from "./auth.js";
 import {
-        AuthedRequest, requireAuth, registerUser, loginUser, hasAnyUsers,
-        InvalidCredentialsError, InviteRequiredError, UsernameTakenError,
+        createInvite,
+        hasAnyUsers,
+        InvalidCredentialsError,
         InviteQuotaExceededError,
-        createInvite, listInvites, revokeInvite,
+        InviteRequiredError,
+        listInvites,
+        loginUser,
+        registerUser,
+        requireAuth,
+        revokeInvite,
+        UsernameTakenError,
 } from "./auth.js";
+import type { DockerManager } from "./dockerManager.js";
+import { EnvVarValidationError, validateEnvVars } from "./envVarValidation.js";
+import type { RateLimitConfig } from "./rateLimit.js";
 import {
-        SessionManager, NotFoundError, ForbiddenError, SessionQuotaExceededError,
-} from "./sessionManager.js";
-import { DockerManager } from "./dockerManager.js";
-import { SessionMeta } from "./types.js";
-import {
-        RateLimitConfig,
-        DEFAULT_RATE_LIMIT_CONFIG,
         createAuthRateLimiters,
+        DEFAULT_RATE_LIMIT_CONFIG,
         UsernameRateLimiter,
 } from "./rateLimit.js";
-import { validateEnvVars, EnvVarValidationError } from "./envVarValidation.js";
+import type { SessionManager } from "./sessionManager.js";
+import {
+        ForbiddenError,
+        NotFoundError,
+        SessionQuotaExceededError,
+} from "./sessionManager.js";
+import type { SessionMeta } from "./types.js";
 
 export function buildRouter(
         sessions: SessionManager,
@@ -268,7 +280,15 @@ export function buildRouter(
                         meta = await sessions.create({ userId, name, cols, rows, envVars: validatedEnvVars });
                         await docker.spawn(meta.sessionId);
                         const updated = await sessions.get(meta.sessionId);
-                        res.status(201).json(serializeMeta(updated!));
+                        if (!updated) {
+                                // Shouldn't happen: sessions.create above just inserted this row,
+                                // and nothing in this handler deletes it. Guard so serializeMeta
+                                // doesn't get null. The throw falls into the catch below which
+                                // runs the spawn rollback and returns 500 — correct disposition
+                                // for a server-side invariant violation.
+                                throw new Error(`session ${meta.sessionId} missing from D1 after create`);
+                        }
+                        res.status(201).json(serializeMeta(updated));
                 } catch (err) {
                         // Quota errors come from sessions.create before any D1 row or
                         // container is written, so there's nothing to roll back — return
@@ -359,7 +379,14 @@ export function buildRouter(
                         await sessions.assertOwnership(req.params.id, userId);
                         await docker.stopContainer(req.params.id);
                         const updated = await sessions.get(req.params.id);
-                        res.json(serializeMeta(updated!));
+                        if (!updated) {
+                                // Race: the session was deleted between assertOwnership
+                                // above and this re-read. Return 404 rather than TypeError
+                                // on serializeMeta(null).
+                                res.status(404).json({ error: "Session not found" });
+                                return;
+                        }
+                        res.json(serializeMeta(updated));
                 } catch (err) {
                         handleSessionError(err, res);
                 }
@@ -371,7 +398,13 @@ export function buildRouter(
                         await sessions.assertOwnership(req.params.id, userId);
                         await docker.startContainer(req.params.id);
                         const updated = await sessions.get(req.params.id);
-                        res.json(serializeMeta(updated!));
+                        if (!updated) {
+                                // Race: deleted between assertOwnership and get. See
+                                // stopContainer handler above for the full explanation.
+                                res.status(404).json({ error: "Session not found" });
+                                return;
+                        }
+                        res.json(serializeMeta(updated));
                 } catch (err) {
                         handleSessionError(err, res);
                 }
@@ -401,7 +434,13 @@ export function buildRouter(
                         await sessions.assertOwnership(req.params.id, userId);
                         await sessions.updateEnvVars(req.params.id, validatedEnvVars);
                         const updated = await sessions.get(req.params.id);
-                        res.json(serializeMeta(updated!));
+                        if (!updated) {
+                                // Race: deleted between assertOwnership and get. See
+                                // stopContainer handler above for the full explanation.
+                                res.status(404).json({ error: "Session not found" });
+                                return;
+                        }
+                        res.json(serializeMeta(updated));
                 } catch (err) {
                         handleSessionError(err, res);
                 }
