@@ -8,7 +8,14 @@
 import http from "node:http";
 import express from "express";
 import { WebSocketServer } from "ws";
-import { ensureAuthReady, selectWsAuthProtocol, validateJwtSecret } from "./auth.js";
+import {
+        ensureAuthReady,
+        isAllowedWsOrigin,
+        parseCorsOrigins,
+        selectWsAuthProtocol,
+        validateJwtSecret,
+        warnIfWildcardCorsInProduction,
+} from "./auth.js";
 import { migrateDb, validateD1Config } from "./db.js";
 import { DockerManager } from "./dockerManager.js";
 import { buildRouter } from "./routes.js";
@@ -19,7 +26,12 @@ import { handleWsConnection } from "./wsHandler.js";
 // ── Configuration ─────────────────────────────────────────────────────────────
 
 const PORT = parseInt(process.env.PORT ?? "3001", 10);
-const CORS_ORIGINS = (process.env.CORS_ORIGINS ?? "*").split(",");
+// Trim+filter so that the obvious human-readable format
+// `CORS_ORIGINS="https://a, https://b"` doesn't silently fail the
+// exact-match check in isAllowedWsOrigin (leading space on the second
+// entry would never equal the browser-sent Origin). Also applies to
+// the HTTP CORS middleware below — same allowlist, same parse.
+const CORS_ORIGINS = parseCorsOrigins(process.env.CORS_ORIGINS);
 // TRUST_PROXY: used by req.ip (and therefore auth rate limiting) to pick the
 // real client from X-Forwarded-For instead of the tunnel's socket address.
 // See trustProxy.ts for the full set of accepted values. "true" is refused
@@ -36,6 +48,12 @@ validateJwtSecret();
 // before the parse so the warning fires even on unset (which is not an
 // error, just a smell in production).
 warnIfProductionMisconfigured(TRUST_PROXY_RAW, process.env.NODE_ENV);
+// Related warning: if CORS_ORIGINS is "*" in production, the HTTP CORS
+// layer is happy but the WebSocket upgrade handler below will refuse
+// every Origin. Surface this at boot so an operator sees the reason
+// for "why won't my WebSocket connect" in the same place they'd look
+// for the TRUST_PROXY warning.
+warnIfWildcardCorsInProduction(CORS_ORIGINS, process.env.NODE_ENV);
 
 // Parse upfront so a bad value fails the process immediately rather than
 // silently serving traffic with req.ip derived from the wrong source.
@@ -98,10 +116,37 @@ const wss = new WebSocketServer({
 server.on("upgrade", (req, socket, head) => {
         const url = req.url ?? "";
         if (!url.startsWith("/ws/sessions/")) {
-                socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
-                socket.destroy();
+                // socket.end() drains the write buffer before closing, so the
+                // 404 line actually reaches the client. socket.write() +
+                // socket.destroy() (the previous form) issues immediate
+                // teardown with no drain guarantee — the status line can be
+                // dropped, making "why did my WS fail" harder to debug.
+                socket.end("HTTP/1.1 404 Not Found\r\n\r\n");
                 return;
         }
+
+        // CSWSH defence: reject the upgrade BEFORE the handshake completes
+        // when the Origin header isn't allowed. Done here (not inside the
+        // `wss.on("connection")` handler) so a rejected origin never gets
+        // a WebSocket object, never runs verifyWsToken, and never appears
+        // in wss.clients — closes the window where a CSWSH'd socket could
+        // do anything observable before the server hung up.
+        //
+        // See isAllowedWsOrigin in auth.ts for the policy (in particular:
+        // missing Origin is allowed because it indicates non-browser
+        // clients, and "*" in CORS_ORIGINS is denied in production).
+        //
+        // No per-request log on rejection: an attacker can flood the upgrade
+        // handler with garbage Origin headers and drown out signal. The
+        // CORS_ORIGINS=* case is already covered by warnIfWildcardCorsIn-
+        // Production at startup; deliberate operator misconfiguration will
+        // surface through the 403 status code + the boot warning, not
+        // through per-request log spam.
+        if (!isAllowedWsOrigin(req.headers.origin, CORS_ORIGINS, process.env.NODE_ENV)) {
+                socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+                return;
+        }
+
         wss.handleUpgrade(req, socket, head, (ws) => {
                 wss.emit("connection", ws, req);
         });
