@@ -196,6 +196,30 @@ export class UsernameRateLimiter {
 	beginAttempt(username: string): UsernameCheckResult {
 		const result = this.check(username);
 		if (!result.allowed) return result;
+
+		// Memory bound on the inflight map. `attempts` is already capped by
+		// maxTracked (with FIFO eviction in recordFailure), but without this
+		// guard a flood of unique usernames — each within its own per-IP
+		// limit — could accumulate inflight entries indefinitely. Practical
+		// ceiling is low (libuv's 4-thread pool serialises bcrypt, so only
+		// ~4 slots exist in a draining state at any moment) but the
+		// invariant still matters: no unbounded state keyed on attacker-
+		// controlled strings.
+		//
+		// Refuse the reservation when the tracked-username cap is full AND
+		// this particular username is not already tracked in EITHER map.
+		// Re-entrant attempts from an already-tracked user stay allowed —
+		// those don't grow the set of unique keys. Retry advisory is 1s
+		// (matches the "all max slots held by in-flight" branch in check()
+		// — soonest a slot could free up is one bcrypt worth of time).
+		if (
+			this.attempts.size >= this.maxTracked &&
+			!this.attempts.has(username) &&
+			!this.inflight.has(username)
+		) {
+			return { allowed: false, retryAfterSeconds: 1 };
+		}
+
 		const current = this.inflight.get(username) ?? 0;
 		this.inflight.set(username, current + 1);
 		return { allowed: true };

@@ -221,6 +221,34 @@ describe("UsernameRateLimiter", () => {
 		}
 	});
 
+	it("beginAttempt honours maxTracked: new usernames refused once cap is full", () => {
+		// The attempts map is already FIFO-capped in recordFailure, but
+		// before this fix beginAttempt could still grow the inflight map
+		// without bound — a flood of unique usernames (each within its own
+		// per-IP limit) would insert an inflight entry for every first
+		// attempt. This test pins that beginAttempt now refuses to add a
+		// brand-new username to inflight once the tracked-username cap is
+		// full, while already-tracked users remain allowed (they don't
+		// grow the unique-key set).
+		const rl = new UsernameRateLimiter(5, 60_000, 3);
+		rl.recordFailure("u0");
+		rl.recordFailure("u1");
+		rl.recordFailure("u2");
+		expect(rl.sizeForTesting()).toBe(3);
+
+		// Brand-new username, cap is full — refused with 1s retry advisory
+		// (the minimum reflecting a single-bcrypt time to free up a slot).
+		const fresh = rl.beginAttempt("u3");
+		expect(fresh.allowed).toBe(false);
+		if (!fresh.allowed) expect(fresh.retryAfterSeconds).toBe(1);
+
+		// Already-tracked username at cap — allowed. Re-entrant attempts
+		// for an existing key don't grow the unique-key set, so they
+		// shouldn't be penalised by the tracked-username bound.
+		expect(rl.beginAttempt("u0").allowed).toBe(true);
+		rl.endAttempt("u0");
+	});
+
 	it("re-tracking an expired entry moves it to the end of FIFO order", () => {
 		// After `alice` expires and is re-tracked, she should be the YOUNGEST
 		// entry (evicted last), not frozen in her original position.
