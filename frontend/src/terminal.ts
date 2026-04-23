@@ -4,6 +4,7 @@
 
 import { Terminal, ILink, ILinkProvider, IDisposable } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { getToken } from "./api.js";
 
@@ -11,6 +12,7 @@ export type SessionStatus = "running" | "stopped" | "terminated" | "disconnected
 
 export interface TerminalSession {
         dispose(): void;
+        setFontSize(px: number): void;
 }
 
 export type StatusCallback = (status: SessionStatus) => void;
@@ -20,10 +22,11 @@ export function openTerminalSession(opts: {
         container: HTMLElement;
         sessionId: string;
         tabId?: string;
+        fontSize?: number;
         onStatus: StatusCallback;
         onError: ErrorCallback;
 }): TerminalSession {
-        const { container, sessionId, tabId, onStatus, onError } = opts;
+        const { container, sessionId, tabId, fontSize, onStatus, onError } = opts;
 
         // ── xterm.js setup ──────────────────────────────────────────────────────
         const term = new Terminal({
@@ -34,7 +37,7 @@ export function openTerminalSession(opts: {
                         selectionBackground: "#264f78",
                 },
                 fontFamily: '"Cascadia Code", "Fira Code", "JetBrains Mono", monospace',
-                fontSize: 14,
+                fontSize: fontSize ?? 14,
                 lineHeight: 1.2,
                 cursorBlink: true,
                 convertEol: true,
@@ -49,21 +52,37 @@ export function openTerminalSession(opts: {
                         },
                         allowNonHttpProtocols: false,
                 },
-                // Auto-copy selected text to the clipboard — avoids the xterm quirk
-                // where Cmd-C doesn't copy unless a custom key handler intercepts.
-                // Works on secure contexts (https + localhost).
                 scrollback: 5000,
         });
 
         const fitAddon = new FitAddon();
         term.loadAddon(fitAddon);
         term.open(container);
+
+        // Touch-action none so the OS doesn't eat vertical drags as page-scroll
+        // — our touch handler below routes them into terminal scroll instead.
+        container.style.touchAction = "none";
+
+        // ── WebGL renderer ──────────────────────────────────────────────────────
+        // WebGL avoids the DOM renderer's visibility-loss glitches (rows written
+        // while a tab is hidden drop out of the paint). Activate after open so
+        // the canvas exists. If the GPU driver revokes the context we dispose
+        // the addon and xterm silently falls back to the DOM renderer.
+        let webgl: WebglAddon | null = null;
+        try {
+                webgl = new WebglAddon();
+                webgl.onContextLoss(() => {
+                        webgl?.dispose();
+                        webgl = null;
+                });
+                term.loadAddon(webgl);
+        } catch (err) {
+                console.warn("[terminal] WebGL renderer unavailable, falling back to DOM:", err);
+                webgl = null;
+        }
+
         fitAddon.fit();
-        // Suppress the browser context menu over the terminal so tmux mouse
-        // mode (enabled in session-image/tmux.conf) actually receives the
-        // right-click as an SGR mouse event instead of the OS menu eating it.
-        const suppressContextMenu = (e: Event) => e.preventDefault();
-        container.addEventListener("contextmenu", suppressContextMenu);
+
         // Cmd/Ctrl + C copies the current xterm selection to the clipboard.
         // Without this, Cmd-C falls through to the terminal (Claude Code
         // intercepts it as SIGINT) and nothing gets copied.
@@ -91,6 +110,12 @@ export function openTerminalSession(opts: {
         const linkProviderDisposable = term.registerLinkProvider(
                 new MultilineUrlLinkProvider(term),
         );
+
+        // Mobile: tapping the terminal should move the keyboard caret here so
+        // the user can actually type. xterm only auto-focuses on mouse clicks,
+        // not on touch taps inside its helper textarea layout.
+        const focusOnPointer = () => term.focus();
+        container.addEventListener("pointerdown", focusOnPointer);
 
         // ── WebSocket connection ────────────────────────────────────────────────
         // Prefer passing the JWT as a subprotocol (`auth.bearer.<jwt>`) so the
@@ -152,12 +177,105 @@ export function openTerminalSession(opts: {
                 send({ type: "input", data });
         });
 
+        // ── Touch scroll ────────────────────────────────────────────────────────
+        // On mobile there are no wheel events, and `mouse on` in tmux means
+        // finger drags aren't forwarded as anything useful. We translate the
+        // drag into terminal scroll:
+        //
+        //  - Main buffer (shell prompt, command output): scroll xterm's own
+        //    scrollback with `scrollLines`. Users expect to pull older lines
+        //    back into view; we don't involve tmux at all, so there's no weird
+        //    copy-mode dance.
+        //  - Alt buffer (vim, less, Claude Code, htop, …): synthesise
+        //    up/down arrow keys. Every TUI app responds to arrows, so the
+        //    user can navigate without needing mouse-wheel support in the app
+        //    or tmux copy-mode.
+        //
+        // Direction follows iOS/Android convention — content tracks the
+        // finger: drag up → view moves up → scroll toward newer (bottom).
+        let lastTouchY: number | null = null;
+        const getCellHeight = () => (term.rows > 0 ? container.clientHeight / term.rows : 20);
+
+        const onTouchStart = (ev: TouchEvent) => {
+                if (ev.touches.length !== 1) { lastTouchY = null; return; }
+                lastTouchY = ev.touches[0]!.clientY;
+        };
+        const onTouchMove = (ev: TouchEvent) => {
+                if (lastTouchY === null || ev.touches.length !== 1) return;
+                const y = ev.touches[0]!.clientY;
+                const cellH = getCellHeight();
+                const deltaPx = lastTouchY - y;
+                const lines = Math.trunc(deltaPx / cellH);
+                if (lines === 0) return;
+
+                if (term.buffer.active.type === "alternate") {
+                        // Cap the burst so a fast flick doesn't fire 100+ arrows
+                        // at the app in one frame.
+                        const n = Math.min(Math.abs(lines), 20);
+                        const key = lines > 0 ? "\x1b[B" : "\x1b[A";
+                        send({ type: "input", data: key.repeat(n) });
+                } else {
+                        term.scrollLines(lines);
+                }
+                lastTouchY -= lines * cellH;
+        };
+        const onTouchEnd = () => { lastTouchY = null; };
+
+        container.addEventListener("touchstart", onTouchStart, { passive: true });
+        container.addEventListener("touchmove", onTouchMove, { passive: true });
+        container.addEventListener("touchend", onTouchEnd, { passive: true });
+        container.addEventListener("touchcancel", onTouchEnd, { passive: true });
+
         // ── Resize ──────────────────────────────────────────────────────────────
-        const ro = new ResizeObserver(() => {
-                fitAddon.fit();
-                send({ type: "resize", cols: term.cols, rows: term.rows });
-        });
+        // ResizeObserver fires continuously during mobile viewport churn (URL
+        // bar show/hide, soft-keyboard open/close, rotation). Coalescing to
+        // one fit per frame avoids overlapping tmux redraws that leave
+        // half-painted cells on screen.
+        //
+        // We also only emit the `resize` WS message when cols/rows actually
+        // changed — ResizeObserver fires on every pixel change, but tmux only
+        // cares about cell-count changes.
+        let lastCols = term.cols;
+        let lastRows = term.rows;
+        let fitScheduled = false;
+        const scheduleFit = () => {
+                if (fitScheduled) return;
+                fitScheduled = true;
+                requestAnimationFrame(() => {
+                        fitScheduled = false;
+                        try { fitAddon.fit(); } catch { /* container detached mid-resize */ }
+                        if (term.cols !== lastCols || term.rows !== lastRows) {
+                                lastCols = term.cols;
+                                lastRows = term.rows;
+                                send({ type: "resize", cols: term.cols, rows: term.rows });
+                        }
+                });
+        };
+        const ro = new ResizeObserver(scheduleFit);
         ro.observe(container);
+
+        // ── Visibility / focus refresh ──────────────────────────────────────────
+        // Backgrounded tabs get rAF throttled, so xterm's renderer stops
+        // flushing dirty cells while the user is away. Output still streams
+        // in and lands in the internal buffer, but the painted DOM/canvas
+        // can end up several screens stale by the time the tab returns.
+        //
+        // On return, re-fit (viewport may have resized while hidden), wipe
+        // the WebGL texture atlas (fonts render sharp again after DPR change
+        // or OS font-smoothing toggles), and force a full refresh so every
+        // row repaints.
+        const onVisibilityChange = () => {
+                if (document.hidden) return;
+                scheduleFit();
+                webgl?.clearTextureAtlas();
+                term.refresh(0, term.rows - 1);
+        };
+        const onWindowFocus = () => {
+                scheduleFit();
+                term.refresh(0, term.rows - 1);
+        };
+        document.addEventListener("visibilitychange", onVisibilityChange);
+        window.addEventListener("focus", onWindowFocus);
 
         // ── Heartbeat ───────────────────────────────────────────────────────────
         let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
@@ -174,18 +292,30 @@ export function openTerminalSession(opts: {
                 }
         }
 
+        function setFontSize(px: number) {
+                term.options.fontSize = px;
+                scheduleFit();
+        }
+
         // ── Dispose ─────────────────────────────────────────────────────────────
         function dispose() {
                 if (heartbeatInterval !== null) clearInterval(heartbeatInterval);
                 ro.disconnect();
-                container.removeEventListener("contextmenu", suppressContextMenu);
+                document.removeEventListener("visibilitychange", onVisibilityChange);
+                window.removeEventListener("focus", onWindowFocus);
+                container.removeEventListener("pointerdown", focusOnPointer);
+                container.removeEventListener("touchstart", onTouchStart);
+                container.removeEventListener("touchmove", onTouchMove);
+                container.removeEventListener("touchend", onTouchEnd);
+                container.removeEventListener("touchcancel", onTouchEnd);
                 inputDisposable.dispose();
                 linkProviderDisposable.dispose();
+                webgl?.dispose();
                 ws.close(1000, "User navigated away");
                 term.dispose();
         }
 
-        return { dispose };
+        return { dispose, setFontSize };
 }
 
 // ── Multiline URL link provider ─────────────────────────────────────────────
@@ -261,12 +391,12 @@ class MultilineUrlLinkProvider implements ILinkProvider {
 
                 // "Terminators" that can't appear inside a URL. Includes whitespace,
                 // common quote/bracket chars, and the Unicode Box Drawing block
-                // (\u2500-\u257F — covers │ ─ ╭ ╮ etc. that ink/React TUIs draw
+                // (─-╿ — covers │ ─ ╭ ╮ etc. that ink/React TUIs draw
                 // around their panels). This lets us treat a row's URL "zone" as
                 // the contiguous run of URL-safe chars between the left and right
                 // borders/padding of the row.
-                const NON_URL = /[\s<>"'`{}()[\]\u2500-\u257F|]/;
-                const URL_RE = /https?:\/\/[^\s<>"'`{}()[\]\u2500-\u257F|]+/g;
+                const NON_URL = /[\s<>"'`{}()[\]─-╿|]/;
+                const URL_RE = /https?:\/\/[^\s<>"'`{}()[\]─-╿|]+/g;
 
                 // Phase 1 — for every row in the buffer, strip leading/trailing
                 // non-URL chars (borders, padding) and record where the interior
