@@ -128,6 +128,15 @@ export function validateEnvVars(
                 );
         }
 
+        // Null-prototype object so a key like "__proto__" or "constructor"
+        // in the input can't traverse into Object.prototype via this map.
+        // NOTE: the return value intentionally has no prototype. Callers
+        // that need Object.prototype methods (.hasOwnProperty, .toString)
+        // must route through Object.prototype.hasOwnProperty.call(obj, k)
+        // — the value is typed as Record<string, string> but those methods
+        // will throw at runtime if invoked directly on it. The two current
+        // call sites only JSON.stringify or for..in iterate, both of which
+        // are prototype-agnostic.
         const normalised: Record<string, string> = Object.create(null);
         for (const [name, value] of entries) {
                 if (typeof name !== "string" || name.length === 0) {

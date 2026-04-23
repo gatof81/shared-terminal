@@ -363,6 +363,22 @@ export class InvalidCredentialsError extends Error {
         }
 }
 
+// Timing-parity dummy hash for the unknown-username path: bcrypt.compare
+// against a real-shape bcrypt string still does the full work-factor
+// computation before the result is known, matching the CPU cost of the
+// real-user branch so an attacker can't distinguish "unknown username"
+// from "wrong password" by timing.
+//
+// Format: "$2a$10$" (7 chars: version + cost + separator) + 53 chars of
+// valid bcrypt-base64 = 60 chars total, matching the real output shape.
+// "x" is in bcrypt's alphabet, so the library runs through salt decode
+// and the full 2^10 work without short-circuiting on a parse error.
+//
+// Hoisted to module scope so we're not allocating this on every login —
+// it's a constant, and loginUser runs on the hot path. The cost of the
+// old per-call allocation was trivial but pointless.
+const DUMMY_PASSWORD_HASH = "$2a$10$" + "x".repeat(53);
+
 export async function loginUser(username: string, password: string): Promise<{ userId: string; token: string }> {
         const result = await d1Query<{ id: string; password_hash: string }>(
                 "SELECT id, password_hash FROM users WHERE username = ?",
@@ -372,11 +388,8 @@ export async function loginUser(username: string, password: string): Promise<{ u
         const row = result.results[0];
         // Always run a bcrypt compare, even if the user doesn't exist, so an
         // attacker can't distinguish "unknown username" from "wrong password"
-        // by timing. Comparing against a fixed dummy hash keeps the work
-        // roughly equivalent. Length-matched to a real 10-round bcrypt output
-        // so the compare spends the same CPU as the real-user path.
-        const dummyHash = "$2a$10$" + "x".repeat(53);
-        const hashToCompare = row?.password_hash ?? dummyHash;
+        // by timing. See DUMMY_PASSWORD_HASH above for the shape rationale.
+        const hashToCompare = row?.password_hash ?? DUMMY_PASSWORD_HASH;
         const ok = await bcrypt.compare(password, hashToCompare);
         if (!row || !ok) {
                 throw new InvalidCredentialsError();
