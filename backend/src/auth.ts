@@ -2,13 +2,13 @@
  * auth.ts — JWT authentication + user management (D1-backed).
  */
 
-import { Request, Response, NextFunction } from "express";
-import jwt from "jsonwebtoken";
-import bcrypt from "bcryptjs";
-import { v4 as uuidv4 } from "uuid";
 import { randomBytes } from "node:crypto";
+import bcrypt from "bcryptjs";
+import type { NextFunction, Request, Response } from "express";
+import jwt from "jsonwebtoken";
+import { v4 as uuidv4 } from "uuid";
 import { d1Query } from "./db.js";
-import { JwtPayload } from "./types.js";
+import type { JwtPayload } from "./types.js";
 
 // Dev fallback. Production deployments must supply JWT_SECRET — validateJwtSecret()
 // below refuses to start the server if this literal is still in use.
@@ -377,7 +377,7 @@ export class InvalidCredentialsError extends Error {
 // Hoisted to module scope so we're not allocating this on every login —
 // it's a constant, and loginUser runs on the hot path. The cost of the
 // old per-call allocation was trivial but pointless.
-const DUMMY_PASSWORD_HASH = "$2a$10$" + "x".repeat(53);
+const DUMMY_PASSWORD_HASH = `$2a$10$${"x".repeat(53)}`;
 
 export async function loginUser(username: string, password: string): Promise<{ userId: string; token: string }> {
         const result = await d1Query<{ id: string; password_hash: string }>(
@@ -401,7 +401,15 @@ export async function loginUser(username: string, password: string): Promise<{ u
 
 function signToken(userId: string, username: string): string {
         const payload: JwtPayload = { sub: userId, username };
-        return jwt.sign(payload, jwtSecret(), { expiresIn: JWT_EXPIRES_IN as any });
+        // `expiresIn` in jsonwebtoken is typed as `number | StringValue`,
+        // where StringValue is a template-literal type from the `ms`
+        // package (e.g. "7d", "1h"). JWT_EXPIRES_IN comes from process.env
+        // as a plain string, so we cast through the library's own option
+        // type rather than `any` — keeps the check narrow to this one
+        // field and doesn't opt the whole sign-options shape out of
+        // type-checking.
+        const options: jwt.SignOptions = { expiresIn: JWT_EXPIRES_IN as jwt.SignOptions["expiresIn"] };
+        return jwt.sign(payload, jwtSecret(), options);
 }
 
 // ── Express middleware ──────────────────────────────────────────────────────
