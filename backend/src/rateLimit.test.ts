@@ -249,6 +249,62 @@ describe("UsernameRateLimiter", () => {
 		rl.endAttempt("u0");
 	});
 
+	it("beginAttempt honours maxTracked even when attempts is empty but inflight is full", () => {
+		// Regression for the second-round review gap: the previous fix
+		// checked only `attempts.size >= maxTracked`, which missed the
+		// case where attempts had expired (or been cleared by successful
+		// logins) while inflight still held long-running bcrypts. Brand-
+		// new usernames would then keep slipping past the guard and the
+		// inflight map would grow without bound.
+		const rl = new UsernameRateLimiter(5, 60_000, 3);
+
+		// Fill inflight with 3 distinct usernames, no recorded failures.
+		// attempts.size === 0, inflight.size === 3.
+		expect(rl.beginAttempt("u0").allowed).toBe(true);
+		expect(rl.beginAttempt("u1").allowed).toBe(true);
+		expect(rl.beginAttempt("u2").allowed).toBe(true);
+		expect(rl.sizeForTesting()).toBe(0); // attempts untouched
+
+		// Brand-new username with inflight at the cap — must be refused.
+		// The old single-map check (attempts.size >= maxTracked) would
+		// have erroneously allowed this.
+		const fresh = rl.beginAttempt("u3");
+		expect(fresh.allowed).toBe(false);
+		if (!fresh.allowed) expect(fresh.retryAfterSeconds).toBe(1);
+
+		// Releasing one inflight slot frees a unique-key slot — next
+		// brand-new username is allowed again.
+		rl.endAttempt("u0");
+		expect(rl.beginAttempt("u3").allowed).toBe(true);
+		rl.endAttempt("u3");
+		rl.endAttempt("u1");
+		rl.endAttempt("u2");
+	});
+
+	it("beginAttempt cap uses sum of attempts + inflight (conservative bound)", () => {
+		// The bound computes `attempts.size + inflight.size >= maxTracked`
+		// rather than the true union. That's a deliberate over-count to
+		// avoid an O(min(|a|,|b|)) per-call scan on the login hot path —
+		// documented as "refuse slightly early, never late" in the source.
+		// This test pins the over-count behaviour so a future refactor
+		// that switches to exact-union semantics is a conscious choice,
+		// not an accident.
+		const rl = new UsernameRateLimiter(5, 60_000, 3);
+		rl.recordFailure("alice"); // attempts={alice}, inflight={}
+
+		// alice is in attempts; beginAttempt("alice") is re-entrant so
+		// !attempts.has and !inflight.has are both false → cap check is
+		// skipped and the reservation succeeds.
+		expect(rl.beginAttempt("alice").allowed).toBe(true);
+		// Now attempts={alice}, inflight={alice}. Sum = 2, but true union
+		// is 1. Adding bob (brand new) takes sum to 3 = maxTracked, so
+		// the next brand-new username is refused even though the true
+		// union (alice, bob) would only be 2. Correct: conservative.
+		rl.recordFailure("bob");
+		const refused = rl.beginAttempt("charlie");
+		expect(refused.allowed).toBe(false);
+	});
+
 	it("re-tracking an expired entry moves it to the end of FIFO order", () => {
 		// After `alice` expires and is re-tracked, she should be the YOUNGEST
 		// entry (evicted last), not frozen in her original position.

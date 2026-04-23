@@ -197,25 +197,34 @@ export class UsernameRateLimiter {
 		const result = this.check(username);
 		if (!result.allowed) return result;
 
-		// Memory bound on the inflight map. `attempts` is already capped by
-		// maxTracked (with FIFO eviction in recordFailure), but without this
-		// guard a flood of unique usernames — each within its own per-IP
-		// limit — could accumulate inflight entries indefinitely. Practical
-		// ceiling is low (libuv's 4-thread pool serialises bcrypt, so only
-		// ~4 slots exist in a draining state at any moment) but the
-		// invariant still matters: no unbounded state keyed on attacker-
-		// controlled strings.
+		// Memory bound on the combined state of attempts + inflight. The
+		// previous version checked only `attempts.size >= maxTracked`,
+		// which missed the case where all attempts entries had expired (or
+		// been cleared by successful logins) while inflight still held
+		// many long-running bcrypts — brand-new usernames would keep
+		// passing the guard and accumulating inflight entries past the
+		// cap.
 		//
-		// Refuse the reservation when the tracked-username cap is full AND
-		// this particular username is not already tracked in EITHER map.
-		// Re-entrant attempts from an already-tracked user stay allowed —
-		// those don't grow the set of unique keys. Retry advisory is 1s
-		// (matches the "all max slots held by in-flight" branch in check()
-		// — soonest a slot could free up is one bcrypt worth of time).
+		// We want to bound the union of the two keysets at maxTracked,
+		// but computing the union exactly is O(min(|a|,|b|)) on every
+		// call — too much for the login hot path. Use the SUM instead as
+		// a conservative upper bound: it over-counts any username present
+		// in BOTH maps (a user who has a recorded failure AND is currently
+		// holding an inflight slot), which means we start refusing brand-
+		// new usernames slightly earlier than strictly necessary. That's
+		// the correct direction to err in — the worst case is refusing a
+		// legitimate username at ~half capacity, with a 1-second retry
+		// advisory, which a human retry will clear.
+		//
+		// `!has` guards on both maps remain: re-entrant attempts from an
+		// already-tracked user don't grow the unique-key set, so they
+		// shouldn't be blocked by the cap. Refusal carries a 1s retry
+		// (matches the "all max slots held by in-flight" branch in
+		// check() — one bcrypt is the soonest a slot could free up).
 		if (
-			this.attempts.size >= this.maxTracked &&
 			!this.attempts.has(username) &&
-			!this.inflight.has(username)
+			!this.inflight.has(username) &&
+			this.attempts.size + this.inflight.size >= this.maxTracked
 		) {
 			return { allowed: false, retryAfterSeconds: 1 };
 		}
