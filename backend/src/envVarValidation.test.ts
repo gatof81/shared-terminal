@@ -143,4 +143,59 @@ describe("validateEnvVars", () => {
                 expect(result.CERT).toContain("line2");
                 expect(result.QUOTE_ME).toContain("rm -rf");
         });
+
+        // ── denylist ───────────────────────────────────────────────────────
+
+        it("rejects reserved names that would hijack the shell's environment", () => {
+                // Not a privilege boundary in a single-tenant shell (the user
+                // can `export` these anyway), but baking them into the session
+                // config would silently affect every process the session
+                // spawns. Explicit reject keeps session env transparent.
+                expect(() => validateEnvVars({ PATH: "/evil" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ HOME: "/tmp/x" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ USER: "root" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ LOGNAME: "root" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ SHELL: "/bin/sh" })).toThrow(/reserved/);
+        });
+
+        it("rejects all LD_* dynamic-linker variables (prefix match)", () => {
+                // LD_PRELOAD and friends are the obvious ones; the prefix
+                // match also catches less-well-known vectors (LD_AUDIT,
+                // LD_DEBUG, LD_ORIGIN_PATH) and future additions we haven't
+                // enumerated individually.
+                expect(() => validateEnvVars({ LD_PRELOAD: "/x.so" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ LD_LIBRARY_PATH: "/x" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ LD_AUDIT: "/x.so" })).toThrow(/reserved/);
+                expect(() => validateEnvVars({ LD_DEBUG: "symbols" })).toThrow(/reserved/);
+                // Catch-all: any LD_-prefixed name, even one we don't know
+                // about, is rejected. Guards against future linker additions.
+                expect(() => validateEnvVars({ LD_MADE_UP_TOMORROW: "x" })).toThrow(/reserved/);
+        });
+
+        it("does NOT reject names that merely look similar to reserved ones", () => {
+                // The denylist is exact-match on names and prefix-match on
+                // LD_*. A user's own `PATHS`, `HOMEBREW_*`, or `LD` (no
+                // underscore) aren't linker/identity vectors and must still
+                // be allowed.
+                const result = validateEnvVars({
+                        PATHS: "ok",
+                        HOMEBREW_PREFIX: "/opt/homebrew",
+                        LD: "not-a-linker-var",
+                        MYPATH: "ok",
+                        USERLAND: "ok",
+                });
+                expect(result.PATHS).toBe("ok");
+                expect(result.HOMEBREW_PREFIX).toBe("/opt/homebrew");
+                expect(result.LD).toBe("not-a-linker-var");
+                expect(result.MYPATH).toBe("ok");
+                expect(result.USERLAND).toBe("ok");
+        });
+
+        it("denylist fires AFTER the POSIX-name check, so garbage keys get the real error", () => {
+                // A caller sending 'LD-PRELOAD' (dash, not underscore) should
+                // see "not a valid POSIX env var name" — the actual problem —
+                // not the less-specific "reserved" message. Preserves error
+                // clarity and makes debugging client bugs easier.
+                expect(() => validateEnvVars({ "LD-PRELOAD": "x" })).toThrow(/not a valid POSIX/);
+        });
 });

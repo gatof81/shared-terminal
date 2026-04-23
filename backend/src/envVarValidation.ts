@@ -40,6 +40,38 @@ export const MAX_ENV_VARS_TOTAL_BYTES = 64 * 1024;
 // and any non-ASCII. Matches the shape `execve` / bash / dash all accept.
 const ENV_VAR_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+// Denylist of env var names that would hijack dynamic linking, command
+// resolution, or identity. In a single-tenant full-shell session these
+// are NOT a privilege-escalation vector — the user can `export` any of
+// them inside their shell anyway — so the rule is about transparency,
+// not isolation:
+//
+//   - Baking `LD_PRELOAD=/some/lib.so` into the container env means
+//     every process spawned inside the session (including entrypoint
+//     scripts, hooks, and anything the user didn't type themselves)
+//     inherits the hook silently.
+//   - A session's declared envVars are user-visible in the UI; what
+//     lands inside the container should match. Letting PATH/HOME/etc.
+//     through would let a caller create a session whose shell starts
+//     with a config the session metadata doesn't obviously reveal.
+//
+// Result: what you PUT in the session body matches what the shell
+// SEES at startup, with no silent linker/interpreter hooks.
+const DENIED_ENV_VAR_NAMES = new Set([
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+]);
+
+// Prefix matches for categories that grow over time (new LD_* vars are
+// added across glibc releases; enumerating them is a moving target).
+// LD_* covers the entire dynamic-linker surface — LD_PRELOAD,
+// LD_LIBRARY_PATH, LD_AUDIT, LD_DEBUG, LD_ORIGIN_PATH, etc.
+const DENIED_ENV_VAR_PREFIXES = ["LD_"];
+
+
 export class EnvVarValidationError extends Error {
         constructor(message: string) {
                 super(message);
@@ -95,6 +127,19 @@ export function validateEnvVars(
                         throw new EnvVarValidationError(
                                 `envVars key '${name}' is not a valid POSIX env var name ` +
                                 `(must match /^[A-Za-z_][A-Za-z0-9_]*$/)`,
+                        );
+                }
+
+                // Apply the denylist AFTER the POSIX-name check: a name that
+                // isn't a valid identifier couldn't match anyway, so we'd just
+                // be hiding the real problem behind a less-specific error.
+                if (
+                        DENIED_ENV_VAR_NAMES.has(name) ||
+                        DENIED_ENV_VAR_PREFIXES.some((p) => name.startsWith(p))
+                ) {
+                        throw new EnvVarValidationError(
+                                `envVars key '${name}' is reserved and cannot be set via session config. ` +
+                                `Set it inside the shell if needed.`,
                         );
                 }
 
