@@ -25,19 +25,24 @@ export function handleWsConnection(
         }
         const sessionId = match[1]!;
 
-        // Optional ?tab=<tabId>. If absent, we resolve to the first tab in the
-        // container below so clients that predate the tabs feature keep working.
-        // Strict charset: tmux session names + our own prefix; no shell metas
+        // Required ?tab=<tabId>. The container no longer creates a default tab
+        // at boot, so every WS attach must name its target explicitly. Strict
+        // charset: tmux session names + our own prefix; no shell metas
         // (docker exec takes argv, not a shell line, but a defensive allowlist
         // keeps surprising tmux targets like "main:1" out of the path).
         const tabQueryMatch = url.match(/[?&]tab=([^&#]+)/);
         const rawTab = tabQueryMatch ? decodeURIComponent(tabQueryMatch[1]!) : null;
-        if (rawTab !== null && !/^[a-zA-Z0-9._-]{1,64}$/.test(rawTab)) {
+        if (rawTab === null) {
+                sendError(ws, "Missing tab id");
+                ws.close(1008, "Missing tab");
+                return;
+        }
+        if (!/^[a-zA-Z0-9._-]{1,64}$/.test(rawTab)) {
                 sendError(ws, "Invalid tab id");
                 ws.close(1008, "Invalid tab");
                 return;
         }
-        const requestedTabId = rawTab;
+        const tabId = rawTab;
 
         const payload = verifyWsToken(req.headers["sec-websocket-protocol"], req.url);
         if (!payload) {
@@ -57,12 +62,6 @@ export function handleWsConnection(
                         ws.close(1008, "Session terminated");
                         return;
                 }
-
-                // Resolve tab: explicit ?tab=… wins; otherwise pick the first tab
-                // the container actually has. That lets existing clients (no tab
-                // query) land on a sensible default regardless of whether the
-                // container was created pre- or post-tabs.
-                const tabId = requestedTabId ?? (await docker.getDefaultTabId(sessionId));
 
                 // Attach to Docker container
                 const attachId = `${sessionId}:${uuidv4().slice(0, 8)}`;

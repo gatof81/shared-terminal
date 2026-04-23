@@ -8,7 +8,7 @@
 import {
         isLoggedIn, login, register, logout, checkAuthStatus,
         listSessions, createSession, deleteSession, stopSession, startSession,
-        listTabs, createTab, deleteTab, LastTabError,
+        listTabs, createTab, deleteTab,
         type SessionInfo, type Tab,
 } from "./api.js";
 import { openTerminalSession, type TerminalSession, type SessionStatus } from "./terminal.js";
@@ -51,9 +51,8 @@ interface ActiveTerminal { pane: HTMLDivElement; term: TerminalSession }
 let currentTabs: Tab[] = [];
 let currentActiveTabId: string | null = null;
 const currentTerminals = new Map<string, ActiveTerminal>();
-// Tabs whose DELETE is in flight. Used so the last-tab guard accounts for
-// concurrent closes — two × clicks on two different chips would each see
-// currentTabs.length == 2 and race, with the second eating a spurious 409.
+// Tabs whose DELETE is in flight. Used so the same × can't fire twice
+// while the request is pending (renderTabBar disables the button).
 const closingTabs = new Set<string>();
 
 function disposeAllCurrentTerminals() {
@@ -302,13 +301,6 @@ async function openSession(sessionId: string) {
                 // Sort by creation order so +-added tabs stay on the right
                 // (listTabs returns alphabetical from tmux list-sessions).
                 currentTabs = tabs.sort((a, b) => a.createdAt - b.createdAt);
-                if (currentTabs.length === 0) {
-                        // Unusual (entrypoint creates tab-default) but recover instead
-                        // of leaving the user stuck with no tabs.
-                        const created = await createTab(sessionId);
-                        if (activeSessionId !== sessionId) return;
-                        currentTabs = [created];
-                }
         } catch (err) {
                 // Drop back to empty state so the toolbar/container don't linger
                 // visible with no tabs.
@@ -322,21 +314,27 @@ async function openSession(sessionId: string) {
                 return;
         }
 
+        // Freshly-spawned session legitimately has zero tabs — the container no
+        // longer creates one at boot. Render just the + so the user can open
+        // their first tab, and keep the terminal pane hidden.
+        if (currentTabs.length === 0) {
+                renderTabBar();
+                return;
+        }
+
         // openTab can throw synchronously (openTerminalSession init failure) —
         // openSession is called with `void`, so an unhandled throw here would
         // become an unhandled rejection with no toast and the UI left mid-switch.
-        if (currentTabs.length > 0) {
-                try {
-                        openTab(currentTabs[0]!.tabId);
-                } catch (err) {
-                        if (activeSessionId === sessionId) {
-                                activeSessionId = null;
-                                currentTabs = [];
-                                renderSessionList();
-                                updateToolbar();
-                        }
-                        showToast((err as Error).message, true);
+        try {
+                openTab(currentTabs[0]!.tabId);
+        } catch (err) {
+                if (activeSessionId === sessionId) {
+                        activeSessionId = null;
+                        currentTabs = [];
+                        renderSessionList();
+                        updateToolbar();
                 }
+                showToast((err as Error).message, true);
         }
 }
 
@@ -363,10 +361,13 @@ function updateToolbar() {
 
 function renderTabBar() {
         terminalTabs.innerHTML = "";
-        if (!activeSessionId || currentTabs.length === 0) {
+        if (!activeSessionId) {
                 terminalTabs.style.display = "none";
                 return;
         }
+        // Render even at currentTabs.length === 0 so the + button is reachable
+        // — a brand-new session starts with no tabs and the user opens the
+        // first one from here.
         terminalTabs.style.display = "flex";
 
         for (const tab of currentTabs) {
@@ -384,10 +385,7 @@ function renderTabBar() {
                 close.className = "tab-close";
                 close.textContent = "×";
                 close.title = "Close tab";
-                // Mirror the closeTab guard so the × doesn't render enabled
-                // while a concurrent close is in flight — clicking would just
-                // produce a misleading "Can't close the last tab" toast.
-                close.disabled = currentTabs.length - closingTabs.size <= 1;
+                close.disabled = closingTabs.has(tab.tabId);
                 close.addEventListener("click", (e) => {
                         e.stopPropagation();
                         void closeTab(tab.tabId, close);
@@ -574,14 +572,6 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
         if (!activeSessionId) return;
         const sessionId = activeSessionId;
         if (closingTabs.has(tabId)) return; // duplicate invocation for same tab
-        // Subtract in-flight closes so two × clicks on different chips can't
-        // both pass the last-tab check — without this, each would see length=2
-        // and the second DELETE would get a 409 from the backend's last-tab
-        // guard and surface a spurious "can't close" toast.
-        if (currentTabs.length - closingTabs.size <= 1) {
-                showToast("Can't close the last tab", true);
-                return;
-        }
         closingTabs.add(tabId);
         // Re-render so sibling chips' × reflects the in-flight close (their
         // disabled state mirrors the same guard).
@@ -593,11 +583,7 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
         } catch (err) {
                 closingTabs.delete(tabId);
                 renderTabBar();
-                if (err instanceof LastTabError) {
-                        showToast("Can't close the last tab", true);
-                } else {
-                        showToast((err as Error).message, true);
-                }
+                showToast((err as Error).message, true);
                 if (triggeredBy?.isConnected) triggeredBy.disabled = false;
                 return;
         }
