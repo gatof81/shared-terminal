@@ -221,7 +221,7 @@ const INVITE_EXPIRY_DAYS = Number(process.env.INVITE_EXPIRY_DAYS) || 30;
 
 export class InviteQuotaExceededError extends Error {
         constructor() {
-                super(`You already have ${MAX_UNUSED_INVITES_PER_USER} unused invite codes — revoke or wait for some to be used before minting more`);
+                super(`You already have ${MAX_UNUSED_INVITES_PER_USER} active invite codes — revoke some, or wait for them to be used or expire, before minting more`);
                 this.name = "InviteQuotaExceededError";
         }
 }
@@ -258,10 +258,18 @@ export async function createInvite(creatorUserId: string): Promise<Invite> {
         // < MAX and both insert. The WHERE clause is evaluated as part of the
         // INSERT, so SQLite serialises the read+write. Same changes-based
         // pattern as the bootstrap and invite-claim paths above.
+        //
+        // Expired codes are excluded from the count: the cap exists to bound
+        // *concurrently redeemable* invites (blast radius), and an expired
+        // code is no more redeemable than a used one. Without this filter, a
+        // forgetful user silently hits the cap 30 days after their last mint
+        // and an attacker could just wait out the expiry instead of revoking.
         const insert = await d1Query(
                 "INSERT INTO invite_codes (code, created_by, created_at, expires_at) " +
                         "SELECT ?, ?, ?, ? WHERE (" +
-                        "SELECT COUNT(*) FROM invite_codes WHERE created_by = ? AND used_at IS NULL" +
+                        "SELECT COUNT(*) FROM invite_codes " +
+                        "WHERE created_by = ? AND used_at IS NULL " +
+                        "AND (expires_at IS NULL OR expires_at > datetime('now'))" +
                         ") < ?",
                 [code, creatorUserId, createdAt, expiresAt, creatorUserId, MAX_UNUSED_INVITES_PER_USER],
         );
