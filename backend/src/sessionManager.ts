@@ -24,6 +24,44 @@ export class ForbiddenError extends Error {
         }
 }
 
+// Caps the number of concurrently *active* sessions (running / stopped /
+// anything that hasn't been terminated) a single user can own. Bounds
+// resource consumption if an account is compromised or a runaway script
+// spams `POST /sessions`: a stolen JWT can create at most this many
+// containers, D1 rows, and workspace directories before hitting the
+// cap. Terminated sessions don't count — they free a slot immediately
+// so the user can always recycle.
+//
+// Overridable via MAX_ACTIVE_SESSIONS_PER_USER env var. Parsed at module
+// load (so changes require a restart), validated to a positive integer;
+// any unparseable / non-positive / non-finite value falls back to the
+// default rather than silently disabling the cap.
+const DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER = 20;
+const MAX_ACTIVE_SESSIONS_PER_USER = ((): number => {
+        const raw = process.env.MAX_ACTIVE_SESSIONS_PER_USER;
+        if (raw === undefined || raw.trim() === "") return DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER;
+        const n = Number(raw);
+        if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
+                return DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER;
+        }
+        return n;
+})();
+
+export class SessionQuotaExceededError extends Error {
+        // Passed through to the HTTP response — include the effective cap so the
+        // user knows what "too many" means without asking support.
+        readonly quota: number;
+
+        constructor(quota: number) {
+                super(
+                        `You already have ${quota} active sessions — terminate some ` +
+                        `before creating more`,
+                );
+                this.name = "SessionQuotaExceededError";
+                this.quota = quota;
+        }
+}
+
 // ── Row → domain mapper ────────────────────────────────────────────────────
 
 interface SessionRow {
@@ -84,11 +122,32 @@ export class SessionManager {
                 const rows = opts.rows ?? 36;
                 const envVars = opts.envVars ?? {};
 
-                await d1Query(
+                // Atomic quota check: fold the per-user count into the INSERT so two
+                // concurrent POST /sessions from the same user can't both read
+                // `count = cap-1` and both insert. Same SQLite-serialised pattern as
+                // invite mint and bootstrap-register elsewhere in the codebase. The
+                // race loser observes `meta.changes === 0` and raises a typed error
+                // the route can map to 429.
+                //
+                // The count filter matches `listForUser`, which is what the UI shows —
+                // so "active" here means the same thing the user sees in their sidebar.
+                // Terminated rows don't count against the cap; they'll be garbage-
+                // collected by the hard-delete path or left as history.
+                const insert = await d1Query(
                         `INSERT INTO sessions (session_id, user_id, name, container_name, cols, rows, env_vars)
-                         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-                        [sessionId, opts.userId, opts.name, containerName, cols, rows, JSON.stringify(envVars)],
+                         SELECT ?, ?, ?, ?, ?, ?, ?
+                         WHERE (
+                                 SELECT COUNT(*) FROM sessions
+                                 WHERE user_id = ? AND status != 'terminated'
+                         ) < ?`,
+                        [
+                                sessionId, opts.userId, opts.name, containerName, cols, rows, JSON.stringify(envVars),
+                                opts.userId, MAX_ACTIVE_SESSIONS_PER_USER,
+                        ],
                 );
+                if (insert.meta.changes !== 1) {
+                        throw new SessionQuotaExceededError(MAX_ACTIVE_SESSIONS_PER_USER);
+                }
 
                 return (await this.get(sessionId))!;
         }

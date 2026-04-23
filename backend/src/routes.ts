@@ -9,7 +9,9 @@ import {
         InviteQuotaExceededError,
         createInvite, listInvites, revokeInvite,
 } from "./auth.js";
-import { SessionManager, NotFoundError, ForbiddenError } from "./sessionManager.js";
+import {
+        SessionManager, NotFoundError, ForbiddenError, SessionQuotaExceededError,
+} from "./sessionManager.js";
 import { DockerManager } from "./dockerManager.js";
 import { SessionMeta } from "./types.js";
 import {
@@ -261,6 +263,15 @@ export function buildRouter(
                         const updated = await sessions.get(meta.sessionId);
                         res.status(201).json(serializeMeta(updated!));
                 } catch (err) {
+                        // Quota errors come from sessions.create before any D1 row or
+                        // container is written, so there's nothing to roll back — return
+                        // 429 directly. Checking before the generic error log too, so a
+                        // routine quota hit doesn't spam the logs as a "session create
+                        // failed" line.
+                        if (err instanceof SessionQuotaExceededError) {
+                                res.status(429).json({ error: err.message, quota: err.quota });
+                                return;
+                        }
                         console.error(`[routes] session create failed:`, (err as Error).message);
                         if (meta) {
                                 // Best-effort rollback. If deleteRow itself fails (D1 blip),
