@@ -5,14 +5,15 @@
  * via WebSocket we `docker exec … tmux attach` to get a live TTY stream.
  */
 
+import { randomBytes } from "node:crypto";
+import type { Dirent } from "node:fs";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import type { Duplex } from "node:stream";
 import Dockerode from "dockerode";
-import { Duplex } from "stream";
-import { promises as fs, Dirent } from "fs";
-import path from "path";
-import { randomBytes } from "crypto";
-import { SessionManager } from "./sessionManager.js";
-import { RingBuffer } from "./ringBuffer.js";
 import { d1Query } from "./db.js";
+import { RingBuffer } from "./ringBuffer.js";
+import type { SessionManager } from "./sessionManager.js";
 
 const SESSION_IMAGE = process.env.SESSION_IMAGE ?? "shared-terminal-session";
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
@@ -175,7 +176,15 @@ export class DockerManager {
                 // so we don't follow them out of the workspace root.
                 const stack: string[] = [dir];
                 while (stack.length > 0) {
-                        const current = stack.pop()!;
+                        // `pop()` returns `T | undefined`. The while condition
+                        // already guarantees the stack is non-empty, so the
+                        // undefined branch is unreachable — but we check anyway to
+                        // satisfy biome's no-non-null-assertion rule and to keep
+                        // the code safe if the loop header is ever refactored (e.g.
+                        // changed to `while (true)`) without re-analysing the
+                        // invariant.
+                        const current = stack.pop();
+                        if (current === undefined) break;
                         let entries: Dirent[];
                         try {
                                 entries = await fs.readdir(current, { withFileTypes: true });

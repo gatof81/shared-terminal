@@ -2,22 +2,37 @@
  * routes.ts — REST API routes.
  */
 
-import { Router, Request, Response } from "express";
+import type { Request, Response } from "express";
+import { Router } from "express";
+import type { AuthedRequest } from "./auth.js";
 import {
-        AuthedRequest, requireAuth, registerUser, loginUser, hasAnyUsers,
-        InvalidCredentialsError, InviteRequiredError, UsernameTakenError,
+        createInvite,
+        hasAnyUsers,
+        InvalidCredentialsError,
         InviteQuotaExceededError,
-        createInvite, listInvites, revokeInvite,
+        InviteRequiredError,
+        listInvites,
+        loginUser,
+        registerUser,
+        requireAuth,
+        revokeInvite,
+        UsernameTakenError,
 } from "./auth.js";
-import { SessionManager, NotFoundError, ForbiddenError } from "./sessionManager.js";
-import { DockerManager } from "./dockerManager.js";
-import { SessionMeta } from "./types.js";
+import type { DockerManager } from "./dockerManager.js";
+import { EnvVarValidationError, validateEnvVars } from "./envVarValidation.js";
+import type { RateLimitConfig } from "./rateLimit.js";
 import {
-        RateLimitConfig,
-        DEFAULT_RATE_LIMIT_CONFIG,
         createAuthRateLimiters,
+        DEFAULT_RATE_LIMIT_CONFIG,
         UsernameRateLimiter,
 } from "./rateLimit.js";
+import type { SessionManager } from "./sessionManager.js";
+import {
+        ForbiddenError,
+        NotFoundError,
+        SessionQuotaExceededError,
+} from "./sessionManager.js";
+import type { SessionMeta } from "./types.js";
 
 export function buildRouter(
         sessions: SessionManager,
@@ -28,7 +43,7 @@ export function buildRouter(
 
         // ── Auth routes (public) ────────────────────────────────────────────────
 
-        const { loginIp, registerIp, invitesIp } = createAuthRateLimiters(rateLimitConfig);
+        const { loginIp, registerIp, invitesCreateIp, invitesRevokeIp } = createAuthRateLimiters(rateLimitConfig);
         const usernameLimiter = new UsernameRateLimiter(
                 rateLimitConfig.login.usernameMax,
                 rateLimitConfig.login.usernameWindowMs,
@@ -117,7 +132,13 @@ export function buildRouter(
                 // account lockout from the IP-layer 429 above. Emits the same
                 // draft-7 RateLimit-* headers as express-rate-limit does on the
                 // IP 429 so clients parsing them see a consistent shape.
-                const check = usernameLimiter.check(username);
+                //
+                // beginAttempt reserves an in-flight slot atomically — important
+                // now that loginUser uses async bcrypt.compare (no longer blocks
+                // the event loop). Without the reservation, a burst of N requests
+                // against the same username could all pass check() and all start
+                // bcrypt before any recordFailure lands, breaking the bound.
+                const check = usernameLimiter.beginAttempt(username);
                 if (!check.allowed) {
                         const windowSeconds = Math.ceil(rateLimitConfig.login.usernameWindowMs / 1000);
                         res.setHeader("Retry-After", String(check.retryAfterSeconds));
@@ -136,31 +157,32 @@ export function buildRouter(
                         return;
                 }
 
-                // Concurrency note: check() is sync but loginUser is async, so
-                // `max + parallelism` slippage is possible in theory. Today
-                // parallelism is effectively 1 because loginUser uses
-                // `bcrypt.compareSync`, which blocks the event loop — that
-                // synchronous call is what pins the bound, not an explicit
-                // mutex. Swapping to the async `bcrypt.compare` removes the
-                // guarantee, so either add queueing or re-check the limit
-                // after the await.
                 let result: { userId: string; token: string };
                 try {
-                        result = await loginUser(username, password);
-                } catch (err) {
-                        if (err instanceof InvalidCredentialsError) {
-                                // Only bad creds count — infra errors must not lock real users out.
-                                usernameLimiter.recordFailure(username);
-                                res.status(401).json({ error: err.message });
+                        try {
+                                result = await loginUser(username, password);
+                        } catch (err) {
+                                if (err instanceof InvalidCredentialsError) {
+                                        // Only bad creds count — infra errors must not lock real users out.
+                                        usernameLimiter.recordFailure(username);
+                                        res.status(401).json({ error: err.message });
+                                        return;
+                                }
+                                // Username omitted from the log to avoid an enumeration vector.
+                                console.error(`[auth] login failed unexpectedly:`, (err as Error).message);
+                                res.status(500).json({ error: "Internal server error" });
                                 return;
                         }
-                        // Username omitted from the log to avoid an enumeration vector.
-                        console.error(`[auth] login failed unexpectedly:`, (err as Error).message);
-                        res.status(500).json({ error: "Internal server error" });
-                        return;
+                        usernameLimiter.reset(username);
+                        res.json(result);
+                } finally {
+                        // Always release the in-flight slot — success, invalid creds,
+                        // or infra error alike. `reset()` above wipes the failure
+                        // counter but not this slot; pairing it with endAttempt keeps
+                        // the invariant that every beginAttempt has exactly one
+                        // endAttempt.
+                        usernameLimiter.endAttempt(username);
                 }
-                usernameLimiter.reset(username);
-                res.json(result);
         });
 
         // ── Authenticated route prefixes ────────────────────────────────────────
@@ -184,7 +206,7 @@ export function buildRouter(
                 }
         });
 
-        router.post("/invites", invitesIp, async (req: Request, res: Response) => {
+        router.post("/invites", invitesCreateIp, async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
                 try {
                         const invite = await createInvite(userId);
@@ -199,7 +221,7 @@ export function buildRouter(
                 }
         });
 
-        router.delete("/invites/:code", invitesIp, async (req: Request, res: Response) => {
+        router.delete("/invites/:code", invitesRevokeIp, async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
                 const { code } = req.params;
                 // Same 64-char ceiling as the inviteCode body field at register —
@@ -230,11 +252,21 @@ export function buildRouter(
         router.post("/sessions", async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
                 const { name, cols, rows, envVars } = req.body as {
-                        name?: string; cols?: number; rows?: number; envVars?: Record<string, string>;
+                        name?: string; cols?: number; rows?: number; envVars?: unknown;
                 };
                 if (!name || typeof name !== "string") {
                         res.status(400).json({ error: "body.name is required" });
                         return;
+                }
+                let validatedEnvVars: Record<string, string>;
+                try {
+                        validatedEnvVars = validateEnvVars(envVars);
+                } catch (err) {
+                        if (err instanceof EnvVarValidationError) {
+                                res.status(400).json({ error: err.message });
+                                return;
+                        }
+                        throw err;
                 }
                 // `sessions.create` writes a D1 row BEFORE `docker.spawn` runs, so a
                 // spawn failure (missing image, docker daemon down, name collision on
@@ -245,11 +277,28 @@ export function buildRouter(
                 // the D1 row explicitly on any spawn failure.
                 let meta: Awaited<ReturnType<SessionManager["create"]>> | null = null;
                 try {
-                        meta = await sessions.create({ userId, name, cols, rows, envVars });
+                        meta = await sessions.create({ userId, name, cols, rows, envVars: validatedEnvVars });
                         await docker.spawn(meta.sessionId);
                         const updated = await sessions.get(meta.sessionId);
-                        res.status(201).json(serializeMeta(updated!));
+                        if (!updated) {
+                                // Shouldn't happen: sessions.create above just inserted this row,
+                                // and nothing in this handler deletes it. Guard so serializeMeta
+                                // doesn't get null. The throw falls into the catch below which
+                                // runs the spawn rollback and returns 500 — correct disposition
+                                // for a server-side invariant violation.
+                                throw new Error(`session ${meta.sessionId} missing from D1 after create`);
+                        }
+                        res.status(201).json(serializeMeta(updated));
                 } catch (err) {
+                        // Quota errors come from sessions.create before any D1 row or
+                        // container is written, so there's nothing to roll back — return
+                        // 429 directly. Checking before the generic error log too, so a
+                        // routine quota hit doesn't spam the logs as a "session create
+                        // failed" line.
+                        if (err instanceof SessionQuotaExceededError) {
+                                res.status(429).json({ error: err.message, quota: err.quota });
+                                return;
+                        }
                         console.error(`[routes] session create failed:`, (err as Error).message);
                         if (meta) {
                                 // Best-effort rollback. If deleteRow itself fails (D1 blip),
@@ -330,7 +379,14 @@ export function buildRouter(
                         await sessions.assertOwnership(req.params.id, userId);
                         await docker.stopContainer(req.params.id);
                         const updated = await sessions.get(req.params.id);
-                        res.json(serializeMeta(updated!));
+                        if (!updated) {
+                                // Race: the session was deleted between assertOwnership
+                                // above and this re-read. Return 404 rather than TypeError
+                                // on serializeMeta(null).
+                                res.status(404).json({ error: "Session not found" });
+                                return;
+                        }
+                        res.json(serializeMeta(updated));
                 } catch (err) {
                         handleSessionError(err, res);
                 }
@@ -342,7 +398,13 @@ export function buildRouter(
                         await sessions.assertOwnership(req.params.id, userId);
                         await docker.startContainer(req.params.id);
                         const updated = await sessions.get(req.params.id);
-                        res.json(serializeMeta(updated!));
+                        if (!updated) {
+                                // Race: deleted between assertOwnership and get. See
+                                // stopContainer handler above for the full explanation.
+                                res.status(404).json({ error: "Session not found" });
+                                return;
+                        }
+                        res.json(serializeMeta(updated));
                 } catch (err) {
                         handleSessionError(err, res);
                 }
@@ -350,16 +412,35 @@ export function buildRouter(
 
         router.patch("/sessions/:id/env", async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
-                const { envVars } = req.body as { envVars?: Record<string, string> };
-                if (!envVars || typeof envVars !== "object") {
-                        res.status(400).json({ error: "body.envVars must be an object" });
+                const { envVars } = req.body as { envVars?: unknown };
+                // Require envVars to be explicitly present. An omitted body field here
+                // is almost certainly a client bug — if the user really wants to clear
+                // their vars they should PATCH with `{ envVars: {} }`.
+                if (envVars === undefined) {
+                        res.status(400).json({ error: "body.envVars is required" });
                         return;
+                }
+                let validatedEnvVars: Record<string, string>;
+                try {
+                        validatedEnvVars = validateEnvVars(envVars);
+                } catch (err) {
+                        if (err instanceof EnvVarValidationError) {
+                                res.status(400).json({ error: err.message });
+                                return;
+                        }
+                        throw err;
                 }
                 try {
                         await sessions.assertOwnership(req.params.id, userId);
-                        await sessions.updateEnvVars(req.params.id, envVars);
+                        await sessions.updateEnvVars(req.params.id, validatedEnvVars);
                         const updated = await sessions.get(req.params.id);
-                        res.json(serializeMeta(updated!));
+                        if (!updated) {
+                                // Race: deleted between assertOwnership and get. See
+                                // stopContainer handler above for the full explanation.
+                                res.status(404).json({ error: "Session not found" });
+                                return;
+                        }
+                        res.json(serializeMeta(updated));
                 } catch (err) {
                         handleSessionError(err, res);
                 }

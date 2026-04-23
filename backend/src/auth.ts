@@ -2,13 +2,13 @@
  * auth.ts — JWT authentication + user management (D1-backed).
  */
 
-import { Request, Response, NextFunction } from "express";
-import jwt from "jsonwebtoken";
-import bcrypt from "bcryptjs";
-import { v4 as uuidv4 } from "uuid";
 import { randomBytes } from "node:crypto";
+import bcrypt from "bcryptjs";
+import type { NextFunction, Request, Response } from "express";
+import jwt from "jsonwebtoken";
+import { v4 as uuidv4 } from "uuid";
 import { d1Query } from "./db.js";
-import { JwtPayload } from "./types.js";
+import type { JwtPayload } from "./types.js";
 
 // Dev fallback. Production deployments must supply JWT_SECRET — validateJwtSecret()
 // below refuses to start the server if this literal is still in use.
@@ -126,11 +126,13 @@ export async function registerUser(
                 // Bootstrap is the one path where we hash before validating an
                 // invite — there's nothing to validate, and we need the hash for
                 // the conditional INSERT. The cost is one bcrypt per first-ever
-                // visit, which happens at most once per deployment.
-                const bootstrapHash = bcrypt.hashSync(password, BCRYPT_ROUNDS);
+                // visit, which happens at most once per deployment. Async bcrypt
+                // here (and everywhere below) so the event loop keeps serving
+                // other requests while the hash runs on the libuv threadpool.
+                const bootstrapHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
                 const insert = await d1Query(
                         "INSERT INTO users (id, username, password_hash) " +
-                                "SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM users)",
+                        "SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM users)",
                         [userId, username, bootstrapHash],
                 );
                 if (insert.meta.changes === 1) {
@@ -152,18 +154,20 @@ export async function registerUser(
         // never produced an account.
         const claim = await d1Query(
                 "UPDATE invite_codes SET used_by = ?, used_at = datetime('now') " +
-                        "WHERE code = ? AND used_at IS NULL " +
-                        "AND (expires_at IS NULL OR expires_at > datetime('now'))",
+                "WHERE code = ? AND used_at IS NULL " +
+                "AND (expires_at IS NULL OR expires_at > datetime('now'))",
                 [userId, inviteCode],
         );
         if (claim.meta.changes !== 1) {
                 throw new InviteRequiredError("Invite code is invalid, expired, or already used");
         }
 
-        // Hash only after the invite is confirmed valid. bcrypt.hashSync blocks
-        // the event loop, so doing it before the claim would let an unauth'd
-        // caller burn server CPU just by spamming bogus codes.
-        const passwordHash = bcrypt.hashSync(password, BCRYPT_ROUNDS);
+        // Hash only after the invite is confirmed valid. Even though async
+        // bcrypt runs off the main thread, the libuv threadpool is bounded
+        // (default 4 threads) — accepting un-gated hashes would let an
+        // unauth'd caller exhaust those threads just by spamming bogus codes,
+        // backing up every other async operation in the process.
+        const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
         try {
                 await d1Query("INSERT INTO users (id, username, password_hash) VALUES (?, ?, ?)", [
@@ -178,7 +182,7 @@ export async function registerUser(
                 try {
                         await d1Query(
                                 "UPDATE invite_codes SET used_by = NULL, used_at = NULL " +
-                                        "WHERE code = ? AND used_by = ?",
+                                "WHERE code = ? AND used_by = ?",
                                 [inviteCode, userId],
                         );
                 } catch (releaseErr) {
@@ -190,7 +194,7 @@ export async function registerUser(
                         // invite_codes table and reissue if needed.
                         console.error(
                                 "[auth] CRITICAL: invite release failed — code %s is permanently consumed without an account. " +
-                                        "Insert error: %s. Release error: %s",
+                                "Insert error: %s. Release error: %s",
                                 inviteCode,
                                 (err as Error).message,
                                 (releaseErr as Error).message,
@@ -286,11 +290,11 @@ export async function createInvite(creatorUserId: string): Promise<Invite> {
         // and an attacker could just wait out the expiry instead of revoking.
         const insert = await d1Query(
                 "INSERT INTO invite_codes (code, created_by, created_at, expires_at) " +
-                        "SELECT ?, ?, ?, ? WHERE (" +
-                        "SELECT COUNT(*) FROM invite_codes " +
-                        "WHERE created_by = ? AND used_at IS NULL " +
-                        "AND (expires_at IS NULL OR expires_at > datetime('now'))" +
-                        ") < ?",
+                "SELECT ?, ?, ?, ? WHERE (" +
+                "SELECT COUNT(*) FROM invite_codes " +
+                "WHERE created_by = ? AND used_at IS NULL " +
+                "AND (expires_at IS NULL OR expires_at > datetime('now'))" +
+                ") < ?",
                 [code, creatorUserId, createdAt, expiresAt, creatorUserId, MAX_UNUSED_INVITES_PER_USER],
         );
         if (insert.meta.changes !== 1) {
@@ -308,7 +312,7 @@ const INVITE_LIST_LIMIT = 100;
 export async function listInvites(creatorUserId: string): Promise<Invite[]> {
         const result = await d1Query<InviteRow>(
                 "SELECT code, created_at, used_at, expires_at FROM invite_codes " +
-                        "WHERE created_by = ? ORDER BY created_at DESC LIMIT ?",
+                "WHERE created_by = ? ORDER BY created_at DESC LIMIT ?",
                 [creatorUserId, INVITE_LIST_LIMIT],
         );
         return result.results.map(rowToInvite);
@@ -359,6 +363,54 @@ export class InvalidCredentialsError extends Error {
         }
 }
 
+// Timing-parity dummy hash for the unknown-username path: bcrypt.compare
+// against a real-shape bcrypt string runs the full work-factor computation
+// before returning false, matching the CPU cost of the real-user branch
+// so an attacker can't distinguish "unknown username" from "wrong
+// password" by timing.
+//
+// Previously this was a synthetic hardcoded string ("$2a$10$" + 53 "x"):
+// library-valid base64, correct shape, meant to exercise bcrypt's full
+// 2^10 work because the parser couldn't short-circuit on it. That worked,
+// but the guarantee was structural — it depended on bcryptjs NEVER adding
+// a fast-fail path for inputs that happen to look synthetic. There's no
+// test we can write to pin "the library didn't short-circuit" other than
+// wall-clock timing (fragile), so a future bcryptjs release could
+// regress the timing protection silently.
+//
+// Replaced with a real hash derived at module load by bcrypt.hash itself,
+// on a fixed throwaway password. Key properties:
+//
+//   1. Structurally indistinguishable from a real user's hash — produced
+//      by the same library we'll compare against. If the library ever
+//      changes the output format or the work cost, this hash follows.
+//      No test needed; the invariant is "bcrypt.compare(x, bcrypt.hash(
+//      anything, rounds)) takes full bcrypt time", which is the library's
+//      contract, not ours.
+//   2. Computed once at module import, cached as a Promise. Node is
+//      CommonJS here (tsconfig module=commonjs), so we can't top-level
+//      await — the first login (specifically the first login against an
+//      unknown user) would otherwise block on the computation. index.ts
+//      pre-awaits `ensureAuthReady()` before server.listen so that first
+//      login doesn't leak cold-start latency as a timing side channel.
+//   3. The password ("__dummy__") can be anything — bcrypt.compare will
+//      never match the supplied login password against it in practice,
+//      because hashes salt-in the generated salt, not the password.
+const DUMMY_PASSWORD_HASH_PROMISE: Promise<string> = bcrypt.hash("__dummy__", BCRYPT_ROUNDS);
+
+// Awaited from index.ts before server.listen so the first unknown-user
+// login doesn't pay ~2^BCRYPT_ROUNDS-ms of cold-start latency — which
+// would itself be a timing leak vs first known-user login ("known user"
+// short-circuits to row.password_hash without ever touching this
+// promise). After this resolves, the `await` inside loginUser is a free
+// microtask tick.
+//
+// Safe to call more than once; it returns the same settled promise on
+// every call.
+export async function ensureAuthReady(): Promise<void> {
+        await DUMMY_PASSWORD_HASH_PROMISE;
+}
+
 export async function loginUser(username: string, password: string): Promise<{ userId: string; token: string }> {
         const result = await d1Query<{ id: string; password_hash: string }>(
                 "SELECT id, password_hash FROM users WHERE username = ?",
@@ -366,7 +418,15 @@ export async function loginUser(username: string, password: string): Promise<{ u
         );
 
         const row = result.results[0];
-        if (!row || !bcrypt.compareSync(password, row.password_hash)) {
+        // Always run a bcrypt compare, even if the user doesn't exist, so an
+        // attacker can't distinguish "unknown username" from "wrong password"
+        // by timing. The `??` short-circuits on the known-user path, so
+        // known-user logins don't pay the awaited-promise cost (negligible
+        // post-init anyway, but cleaner to avoid the microtask on the hot
+        // path). See DUMMY_PASSWORD_HASH_PROMISE above for the rationale.
+        const hashToCompare = row?.password_hash ?? (await DUMMY_PASSWORD_HASH_PROMISE);
+        const ok = await bcrypt.compare(password, hashToCompare);
+        if (!row || !ok) {
                 throw new InvalidCredentialsError();
         }
 
@@ -376,7 +436,15 @@ export async function loginUser(username: string, password: string): Promise<{ u
 
 function signToken(userId: string, username: string): string {
         const payload: JwtPayload = { sub: userId, username };
-        return jwt.sign(payload, jwtSecret(), { expiresIn: JWT_EXPIRES_IN as any });
+        // `expiresIn` in jsonwebtoken is typed as `number | StringValue`,
+        // where StringValue is a template-literal type from the `ms`
+        // package (e.g. "7d", "1h"). JWT_EXPIRES_IN comes from process.env
+        // as a plain string, so we cast through the library's own option
+        // type rather than `any` — keeps the check narrow to this one
+        // field and doesn't opt the whole sign-options shape out of
+        // type-checking.
+        const options: jwt.SignOptions = { expiresIn: JWT_EXPIRES_IN as jwt.SignOptions["expiresIn"] };
+        return jwt.sign(payload, jwtSecret(), options);
 }
 
 // ── Express middleware ──────────────────────────────────────────────────────

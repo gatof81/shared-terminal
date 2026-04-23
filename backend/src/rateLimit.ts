@@ -20,15 +20,30 @@ export interface RateLimitConfig {
 	// JWT could otherwise burst all 20 mints in milliseconds before anyone
 	// notices. Slower than registerIp because legitimate use is "invite a
 	// few friends, then idle for weeks".
-	invites: {
+	invitesCreate: {
+		ipMax: number;
+		ipWindowMs: number;
+	};
+	// Caps how often a single IP can revoke invites. Kept separate from
+	// invitesCreate because:
+	//   1. Revoke is a cleanup action the legitimate user may need to do in
+	//      bursts (e.g. panic-rotate after suspecting JWT theft, or bulk-
+	//      clean stale codes). Pinning it to the mint rate would starve the
+	//      legitimate use case.
+	//   2. A combined budget means an attacker who exhausted the mint quota
+	//      could also prevent the victim from revoking their pre-minted
+	//      codes — revoke is precisely the action we want available during
+	//      an incident.
+	// Separate budget, more generous window, distinct 429 message.
+	invitesRevoke: {
 		ipMax: number;
 		ipWindowMs: number;
 	};
 }
 
 // Defaults match issue #10: login 10/15min, register 5/1h, per-username 10/15min.
-// Invites: 10/1h — generous for legitimate inviting bursts, restrictive for
-// JWT-theft pre-mint floods.
+// Invites: create 10/h, revoke 60/h — revoke has to cover incident-response
+// bursts, so it's 6x the mint rate.
 export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 	login: {
 		ipMax: 10,
@@ -40,8 +55,12 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 		ipMax: 5,
 		ipWindowMs: 60 * 60 * 1000,
 	},
-	invites: {
+	invitesCreate: {
 		ipMax: 10,
+		ipWindowMs: 60 * 60 * 1000,
+	},
+	invitesRevoke: {
+		ipMax: 60,
 		ipWindowMs: 60 * 60 * 1000,
 	},
 };
@@ -51,7 +70,8 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 export interface AuthRateLimiters {
 	loginIp: RateLimitRequestHandler;
 	registerIp: RateLimitRequestHandler;
-	invitesIp: RateLimitRequestHandler;
+	invitesCreateIp: RateLimitRequestHandler;
+	invitesRevokeIp: RateLimitRequestHandler;
 }
 
 export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
@@ -77,14 +97,21 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		legacyHeaders: false,
 		message: { error: "Too many registration attempts from this IP, try again later", scope: "ip" },
 	});
-	const invitesIp = rateLimit({
-		windowMs: cfg.invites.ipWindowMs,
-		limit: cfg.invites.ipMax,
+	const invitesCreateIp = rateLimit({
+		windowMs: cfg.invitesCreate.ipWindowMs,
+		limit: cfg.invitesCreate.ipMax,
 		standardHeaders: "draft-7",
 		legacyHeaders: false,
 		message: { error: "Too many invite-mint requests from this IP, try again later", scope: "ip" },
 	});
-	return { loginIp, registerIp, invitesIp };
+	const invitesRevokeIp = rateLimit({
+		windowMs: cfg.invitesRevoke.ipWindowMs,
+		limit: cfg.invitesRevoke.ipMax,
+		standardHeaders: "draft-7",
+		legacyHeaders: false,
+		message: { error: "Too many invite-revoke requests from this IP, try again later", scope: "ip" },
+	});
+	return { loginIp, registerIp, invitesCreateIp, invitesRevokeIp };
 }
 
 // ── Per-username limiter ────────────────────────────────────────────────────
@@ -107,6 +134,17 @@ const DEFAULT_MAX_TRACKED_USERNAMES = 10_000;
 // mirror the normalization or the two layers diverge.
 export class UsernameRateLimiter {
 	private attempts = new Map<string, FailedAttempts>();
+	// In-flight attempts (currently waiting on bcrypt or a D1 round-trip).
+	// Tracked separately from the window-bounded `attempts` map because
+	// in-flight slots are transient: they're released when the attempt
+	// finishes, regardless of the window. Counted against the same `max`
+	// budget so a burst of concurrent attempts can't slip past check()
+	// between the gate and the first recordFailure.
+	//
+	// Kept as a plain Map so eviction semantics stay simple — cleared
+	// per-username in endAttempt(), no TTL needed (if the process crashes
+	// with slots reserved, the restart clears everything anyway).
+	private inflight = new Map<string, number>();
 	private readonly maxTracked: number;
 
 	constructor(
@@ -120,21 +158,99 @@ export class UsernameRateLimiter {
 	// Returns allowed=false only when the bucket is full inside its window.
 	// Result-based (never throws) so callers don't need try/catch around an
 	// otherwise-synchronous check inside an async handler.
+	//
+	// Does not reserve an in-flight slot — callers doing async verification
+	// (bcrypt, D1) should use beginAttempt/endAttempt instead so the bound
+	// holds across awaits.
+	//
+	// NOT pure: if the queried username's entry is present but past its
+	// resetAt, it's deleted here. This is not just opportunistic GC —
+	// beginAttempt calls check() first and then probes
+	// `!this.attempts.has(username)` for the maxTracked bound. When check
+	// deletes an expired entry, that `.has` flips to false in the same
+	// call and beginAttempt treats the user as brand-new for the tracked-
+	// username cap. That's the correct semantics (an expired window SHOULD
+	// free the cap slot) but the interaction is subtle enough that a
+	// reader glancing at check() could miss it — flagging it here so a
+	// future refactor that moves the delete out of check() remembers to
+	// adjust beginAttempt's cap accounting in lockstep.
 	check(username: string): UsernameCheckResult {
 		const now = Date.now();
 		const entry = this.attempts.get(username);
-		if (!entry) return { allowed: true };
-		if (now >= entry.resetAt) {
+		const failed = entry && now < entry.resetAt ? entry.count : 0;
+		const inflight = this.inflight.get(username) ?? 0;
+		if (entry && now >= entry.resetAt) {
 			this.attempts.delete(username);
-			return { allowed: true };
 		}
-		if (entry.count >= this.max) {
+		if (failed + inflight >= this.max) {
+			// Re-fetch after the possible delete above; entry may be gone, in
+			// which case all `max` slots are held by in-flight attempts and the
+			// soonest possible release is on the order of a single bcrypt —
+			// report 1 second as the minimum advisory.
+			const resetAt = entry && now < entry.resetAt ? entry.resetAt : now + 1000;
 			return {
 				allowed: false,
-				retryAfterSeconds: Math.max(1, Math.ceil((entry.resetAt - now) / 1000)),
+				retryAfterSeconds: Math.max(1, Math.ceil((resetAt - now) / 1000)),
 			};
 		}
 		return { allowed: true };
+	}
+
+	// Atomically check AND reserve one in-flight slot for an async
+	// verification. Callers MUST pair every allowed beginAttempt with an
+	// endAttempt (use try/finally) or the slot leaks until process restart.
+	//
+	// Existed as a single method so there's no window between "check passed"
+	// and "slot reserved" where a parallel request could observe the same
+	// pre-reservation state and also pass.
+	beginAttempt(username: string): UsernameCheckResult {
+		const result = this.check(username);
+		if (!result.allowed) return result;
+
+		// Memory bound on the combined state of attempts + inflight. The
+		// previous version checked only `attempts.size >= maxTracked`,
+		// which missed the case where all attempts entries had expired (or
+		// been cleared by successful logins) while inflight still held
+		// many long-running bcrypts — brand-new usernames would keep
+		// passing the guard and accumulating inflight entries past the
+		// cap.
+		//
+		// We want to bound the union of the two keysets at maxTracked,
+		// but computing the union exactly is O(min(|a|,|b|)) on every
+		// call — too much for the login hot path. Use the SUM instead as
+		// a conservative upper bound: it over-counts any username present
+		// in BOTH maps (a user who has a recorded failure AND is currently
+		// holding an inflight slot), which means we start refusing brand-
+		// new usernames slightly earlier than strictly necessary. That's
+		// the correct direction to err in — the worst case is refusing a
+		// legitimate username at ~half capacity, with a 1-second retry
+		// advisory, which a human retry will clear.
+		//
+		// `!has` guards on both maps remain: re-entrant attempts from an
+		// already-tracked user don't grow the unique-key set, so they
+		// shouldn't be blocked by the cap. Refusal carries a 1s retry
+		// (matches the "all max slots held by in-flight" branch in
+		// check() — one bcrypt is the soonest a slot could free up).
+		if (
+			!this.attempts.has(username) &&
+			!this.inflight.has(username) &&
+			this.attempts.size + this.inflight.size >= this.maxTracked
+		) {
+			return { allowed: false, retryAfterSeconds: 1 };
+		}
+
+		const current = this.inflight.get(username) ?? 0;
+		this.inflight.set(username, current + 1);
+		return { allowed: true };
+	}
+
+	// Release a slot reserved by beginAttempt. Safe to call multiple times
+	// against an empty slot (no-op), which keeps try/finally cleanup simple
+	// even if the caller accidentally double-releases on an error path.
+	endAttempt(username: string): void {
+		const current = this.inflight.get(username) ?? 0;
+		if (current <= 1) this.inflight.delete(username);
+		else this.inflight.set(username, current - 1);
 	}
 
 	// Bump the counter for this username. Call after a failed verification.

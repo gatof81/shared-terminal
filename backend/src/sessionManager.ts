@@ -6,7 +6,7 @@
 
 import { v4 as uuidv4 } from "uuid";
 import { d1Query } from "./db.js";
-import { SessionMeta, SessionStatus, CreateSessionOpts } from "./types.js";
+import type { CreateSessionOpts, SessionMeta, SessionStatus } from "./types.js";
 
 // ── Custom errors ───────────────────────────────────────────────────────────
 
@@ -21,6 +21,65 @@ export class ForbiddenError extends Error {
         constructor(msg = "Access denied") {
                 super(msg);
                 this.name = "ForbiddenError";
+        }
+}
+
+// Caps the number of concurrently *active* sessions (running / stopped /
+// anything that hasn't been terminated) a single user can own. Bounds
+// resource consumption if an account is compromised or a runaway script
+// spams `POST /sessions`: a stolen JWT can create at most this many
+// containers, D1 rows, and workspace directories before hitting the
+// cap. Terminated sessions don't count — they free a slot immediately
+// so the user can always recycle.
+//
+// Overridable via MAX_ACTIVE_SESSIONS_PER_USER env var. Parsed at module
+// load (so changes require a restart), validated to a positive integer;
+// any unparseable / non-positive / non-finite value falls back to the
+// default AND logs a warning — silently defaulting to 20 when an operator
+// set it to "0" (expecting "freeze new sessions") or a typo like "20 "
+// with a trailing non-ASCII character would ship the wrong cap with no
+// ops-visible signal.
+const DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER = 20;
+const MAX_ACTIVE_SESSIONS_PER_USER = ((): number => {
+        const raw = process.env.MAX_ACTIVE_SESSIONS_PER_USER;
+        if (raw === undefined || raw.trim() === "") return DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER;
+        const n = Number(raw);
+        if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
+                // Surface the original value (quoted, so "  " etc. stay visible)
+                // and the effective fallback — ops should be able to tell at a
+                // glance which variable was wrong and what the server is
+                // actually running with. Uses console.warn rather than throw
+                // because a startup abort here would gate the whole server on
+                // a non-critical config typo, which is worse than running with
+                // the documented default.
+                console.warn(
+                        `[sessionManager] MAX_ACTIVE_SESSIONS_PER_USER=${JSON.stringify(raw)} ` +
+                        `is not a positive integer; falling back to ${DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER}`,
+                );
+                return DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER;
+        }
+        return n;
+})();
+
+export class SessionQuotaExceededError extends Error {
+        // Passed through to the HTTP response — include the effective cap so the
+        // user knows what "too many" means without asking support.
+        readonly quota: number;
+
+        constructor(quota: number) {
+                // Phrase as "limit reached" rather than "you already have N
+                // active sessions". When this throws, the count is exactly
+                // `quota` (the atomic INSERT's WHERE clause guarantees that),
+                // so "you already have 20" reads as a count statement — but
+                // the purpose of the message is to communicate the *cap*, not
+                // a tally. Naming the number as a limit makes the fix
+                // (terminate something) obvious.
+                super(
+                        `Active session limit (${quota}) reached — terminate a session ` +
+                        `before creating more`,
+                );
+                this.name = "SessionQuotaExceededError";
+                this.quota = quota;
         }
 }
 
@@ -49,7 +108,7 @@ interface SessionRow {
 // ISO 8601 offsets like `+00:00`.
 function parseD1UtcTimestamp(raw: string): Date {
         const hasSuffix = /[zZ]$/.test(raw) || /[+-]\d{2}:?\d{2}$/.test(raw);
-        const d = new Date(hasSuffix ? raw : raw + "Z");
+        const d = new Date(hasSuffix ? raw : `${raw}Z`);
         if (Number.isNaN(d.getTime())) {
                 // Better to crash loudly here than return "Invalid Date" that
                 // would later serialize to null in JSON.
@@ -84,13 +143,45 @@ export class SessionManager {
                 const rows = opts.rows ?? 36;
                 const envVars = opts.envVars ?? {};
 
-                await d1Query(
+                // Atomic quota check: fold the per-user count into the INSERT so two
+                // concurrent POST /sessions from the same user can't both read
+                // `count = cap-1` and both insert. Same SQLite-serialised pattern as
+                // invite mint and bootstrap-register elsewhere in the codebase. The
+                // race loser observes `meta.changes === 0` and raises a typed error
+                // the route can map to 429.
+                //
+                // The count filter matches `listForUser`, which is what the UI shows —
+                // so "active" here means the same thing the user sees in their sidebar.
+                // Terminated rows don't count against the cap; they'll be garbage-
+                // collected by the hard-delete path or left as history.
+                const insert = await d1Query(
                         `INSERT INTO sessions (session_id, user_id, name, container_name, cols, rows, env_vars)
-                         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-                        [sessionId, opts.userId, opts.name, containerName, cols, rows, JSON.stringify(envVars)],
+                         SELECT ?, ?, ?, ?, ?, ?, ?
+                         WHERE (
+                                 SELECT COUNT(*) FROM sessions
+                                 WHERE user_id = ? AND status != 'terminated'
+                         ) < ?`,
+                        [
+                                sessionId, opts.userId, opts.name, containerName, cols, rows, JSON.stringify(envVars),
+                                opts.userId, MAX_ACTIVE_SESSIONS_PER_USER,
+                        ],
                 );
+                if (insert.meta.changes !== 1) {
+                        throw new SessionQuotaExceededError(MAX_ACTIVE_SESSIONS_PER_USER);
+                }
 
-                return (await this.get(sessionId))!;
+                const meta = await this.get(sessionId);
+                if (!meta) {
+                        // Unreachable in practice: we just inserted this row and
+                        // confirmed changes === 1. Guard anyway so the return type
+                        // is honest (no non-null assertion) and a hypothetical
+                        // read-after-write hiccup becomes a loud error rather than
+                        // a TypeError downstream when callers access .sessionId.
+                        throw new Error(
+                                `sessionManager.create: session ${sessionId} missing from D1 after insert`,
+                        );
+                }
+                return meta;
         }
 
         async get(sessionId: string): Promise<SessionMeta | null> {

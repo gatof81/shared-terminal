@@ -1,11 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import http from "http";
-import type { AddressInfo } from "net";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import express from "express";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { DockerManager } from "./dockerManager.js";
 import { UsernameRateLimiter } from "./rateLimit.js";
 import type { SessionManager } from "./sessionManager.js";
-import type { DockerManager } from "./dockerManager.js";
 
 // Stub the auth module so routing tests don't touch D1. Handles captured
 // as `authStubs` are reconfigured per-test.
@@ -97,6 +97,63 @@ describe("UsernameRateLimiter", () => {
 		}
 	});
 
+	// ── beginAttempt / endAttempt (in-flight accounting) ────────────────
+
+	it("beginAttempt reserves a slot so concurrent attempts share the bound", () => {
+		// Pins the concurrency invariant that motivates beginAttempt: with
+		// async bcrypt, N parallel requests against the same username could
+		// all pass check() before any recordFailure lands. beginAttempt
+		// reserves a slot atomically so the (max+1)th in-flight attempt is
+		// rejected even without a single failure recorded yet.
+		const rl = new UsernameRateLimiter(3, 60_000);
+		expect(rl.beginAttempt("alice").allowed).toBe(true);
+		expect(rl.beginAttempt("alice").allowed).toBe(true);
+		expect(rl.beginAttempt("alice").allowed).toBe(true);
+		const overflow = rl.beginAttempt("alice");
+		expect(overflow.allowed).toBe(false);
+		if (!overflow.allowed) {
+			expect(overflow.retryAfterSeconds).toBeGreaterThan(0);
+		}
+	});
+
+	it("endAttempt releases an in-flight slot so the next attempt can proceed", () => {
+		const rl = new UsernameRateLimiter(1, 60_000);
+		expect(rl.beginAttempt("alice").allowed).toBe(true);
+		expect(rl.beginAttempt("alice").allowed).toBe(false);
+		rl.endAttempt("alice");
+		expect(rl.beginAttempt("alice").allowed).toBe(true);
+	});
+
+	it("endAttempt is idempotent when no slot is held (over-release is safe)", () => {
+		// Route handlers call endAttempt in a `finally`; if an earlier error
+		// path also released, the second call must not throw or skew the
+		// counter below zero.
+		const rl = new UsernameRateLimiter(1, 60_000);
+		rl.endAttempt("alice"); // nothing held
+		rl.endAttempt("alice"); // still nothing held
+		expect(rl.beginAttempt("alice").allowed).toBe(true);
+	});
+
+	it("in-flight and recorded failures share the same max budget", () => {
+		// One in-flight + (max-1) recorded failures = full budget. The next
+		// beginAttempt must be rejected. Covers the transient window around
+		// recordFailure (which bumps the counter before endAttempt releases
+		// the inflight slot) — the overlap is intentionally pessimistic.
+		const rl = new UsernameRateLimiter(3, 60_000);
+		rl.recordFailure("alice");
+		rl.recordFailure("alice");
+		expect(rl.beginAttempt("alice").allowed).toBe(true); // 2 failed + 1 inflight = 3
+		expect(rl.beginAttempt("alice").allowed).toBe(false);
+	});
+
+	it("beginAttempt isolates slot counts per username", () => {
+		const rl = new UsernameRateLimiter(1, 60_000);
+		expect(rl.beginAttempt("alice").allowed).toBe(true);
+		// Alice's slot is held; bob should still be free.
+		expect(rl.beginAttempt("bob").allowed).toBe(true);
+		expect(rl.beginAttempt("alice").allowed).toBe(false);
+	});
+
 	it("caps total tracked usernames and evicts oldest when full (DoS guard)", () => {
 		const rl = new UsernameRateLimiter(5, 60_000, 3);
 		rl.recordFailure("u0");
@@ -164,6 +221,90 @@ describe("UsernameRateLimiter", () => {
 		}
 	});
 
+	it("beginAttempt honours maxTracked: new usernames refused once cap is full", () => {
+		// The attempts map is already FIFO-capped in recordFailure, but
+		// before this fix beginAttempt could still grow the inflight map
+		// without bound — a flood of unique usernames (each within its own
+		// per-IP limit) would insert an inflight entry for every first
+		// attempt. This test pins that beginAttempt now refuses to add a
+		// brand-new username to inflight once the tracked-username cap is
+		// full, while already-tracked users remain allowed (they don't
+		// grow the unique-key set).
+		const rl = new UsernameRateLimiter(5, 60_000, 3);
+		rl.recordFailure("u0");
+		rl.recordFailure("u1");
+		rl.recordFailure("u2");
+		expect(rl.sizeForTesting()).toBe(3);
+
+		// Brand-new username, cap is full — refused with 1s retry advisory
+		// (the minimum reflecting a single-bcrypt time to free up a slot).
+		const fresh = rl.beginAttempt("u3");
+		expect(fresh.allowed).toBe(false);
+		if (!fresh.allowed) expect(fresh.retryAfterSeconds).toBe(1);
+
+		// Already-tracked username at cap — allowed. Re-entrant attempts
+		// for an existing key don't grow the unique-key set, so they
+		// shouldn't be penalised by the tracked-username bound.
+		expect(rl.beginAttempt("u0").allowed).toBe(true);
+		rl.endAttempt("u0");
+	});
+
+	it("beginAttempt honours maxTracked even when attempts is empty but inflight is full", () => {
+		// Regression for the second-round review gap: the previous fix
+		// checked only `attempts.size >= maxTracked`, which missed the
+		// case where attempts had expired (or been cleared by successful
+		// logins) while inflight still held long-running bcrypts. Brand-
+		// new usernames would then keep slipping past the guard and the
+		// inflight map would grow without bound.
+		const rl = new UsernameRateLimiter(5, 60_000, 3);
+
+		// Fill inflight with 3 distinct usernames, no recorded failures.
+		// attempts.size === 0, inflight.size === 3.
+		expect(rl.beginAttempt("u0").allowed).toBe(true);
+		expect(rl.beginAttempt("u1").allowed).toBe(true);
+		expect(rl.beginAttempt("u2").allowed).toBe(true);
+		expect(rl.sizeForTesting()).toBe(0); // attempts untouched
+
+		// Brand-new username with inflight at the cap — must be refused.
+		// The old single-map check (attempts.size >= maxTracked) would
+		// have erroneously allowed this.
+		const fresh = rl.beginAttempt("u3");
+		expect(fresh.allowed).toBe(false);
+		if (!fresh.allowed) expect(fresh.retryAfterSeconds).toBe(1);
+
+		// Releasing one inflight slot frees a unique-key slot — next
+		// brand-new username is allowed again.
+		rl.endAttempt("u0");
+		expect(rl.beginAttempt("u3").allowed).toBe(true);
+		rl.endAttempt("u3");
+		rl.endAttempt("u1");
+		rl.endAttempt("u2");
+	});
+
+	it("beginAttempt cap uses sum of attempts + inflight (conservative bound)", () => {
+		// The bound computes `attempts.size + inflight.size >= maxTracked`
+		// rather than the true union. That's a deliberate over-count to
+		// avoid an O(min(|a|,|b|)) per-call scan on the login hot path —
+		// documented as "refuse slightly early, never late" in the source.
+		// This test pins the over-count behaviour so a future refactor
+		// that switches to exact-union semantics is a conscious choice,
+		// not an accident.
+		const rl = new UsernameRateLimiter(5, 60_000, 3);
+		rl.recordFailure("alice"); // attempts={alice}, inflight={}
+
+		// alice is in attempts; beginAttempt("alice") is re-entrant so
+		// !attempts.has and !inflight.has are both false → cap check is
+		// skipped and the reservation succeeds.
+		expect(rl.beginAttempt("alice").allowed).toBe(true);
+		// Now attempts={alice}, inflight={alice}. Sum = 2, but true union
+		// is 1. Adding bob (brand new) takes sum to 3 = maxTracked, so
+		// the next brand-new username is refused even though the true
+		// union (alice, bob) would only be 2. Correct: conservative.
+		rl.recordFailure("bob");
+		const refused = rl.beginAttempt("charlie");
+		expect(refused.allowed).toBe(false);
+	});
+
 	it("re-tracking an expired entry moves it to the end of FIFO order", () => {
 		// After `alice` expires and is re-tracked, she should be the YOUNGEST
 		// entry (evicted last), not frozen in her original position.
@@ -206,8 +347,14 @@ describe("auth route rate limiting", () => {
 	});
 
 	afterEach(async () => {
-		if (server) {
-			await new Promise<void>((resolve) => server!.close(() => resolve()));
+		// Capture into a local so the Promise executor has a narrowed,
+		// non-nullable reference — TS doesn't carry the `if (server)`
+		// narrowing into the async callback below. Same pattern used
+		// everywhere else in this file where we touch `server` inside
+		// a Promise executor, so the non-null assertions are gone.
+		const s = server;
+		if (s) {
+			await new Promise<void>((resolve) => s.close(() => resolve()));
 			server = null;
 		}
 	});
@@ -215,19 +362,25 @@ describe("auth route rate limiting", () => {
 	async function spinUp(cfg: {
 		login: { ipMax: number; ipWindowMs: number; usernameMax: number; usernameWindowMs: number };
 		register: { ipMax: number; ipWindowMs: number };
-		invites?: { ipMax: number; ipWindowMs: number };
+		invitesCreate?: { ipMax: number; ipWindowMs: number };
+		invitesRevoke?: { ipMax: number; ipWindowMs: number };
 	}): Promise<void> {
-		// invites limiter was added later; supply a permissive default for tests
-		// that pre-date it and only exercise login/register surface.
-		const fullCfg = { invites: { ipMax: 1000, ipWindowMs: 60_000 }, ...cfg };
+		// Invite limiters were split into create/revoke later; both default to
+		// permissive settings for tests that only exercise login/register.
+		const fullCfg = {
+			invitesCreate: { ipMax: 1000, ipWindowMs: 60_000 },
+			invitesRevoke: { ipMax: 1000, ipWindowMs: 60_000 },
+			...cfg,
+		};
 		const router = buildRouter(fakeSessions, fakeDocker, fullCfg);
 		const app = express();
 		app.use(express.json());
 		app.use("/api", router);
 
-		server = http.createServer(app);
-		await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
-		const { port } = server.address() as AddressInfo;
+		const s = http.createServer(app);
+		server = s;
+		await new Promise<void>((resolve) => s.listen(0, "127.0.0.1", resolve));
+		const { port } = s.address() as AddressInfo;
 		baseUrl = `http://127.0.0.1:${port}`;
 	}
 
@@ -387,7 +540,14 @@ describe("auth route rate limiting", () => {
 		expect(ipBlocked.status).toBe(429);
 		expect(await ipBlocked.json()).toMatchObject({ scope: "ip" });
 
-		await new Promise<void>((resolve) => server!.close(() => resolve()));
+		// Same Promise-executor-narrowing dance as afterEach. Invariant
+		// violation (server was null here) would be a test bug — throw
+		// loudly rather than silently skip, since the block below spins
+		// up a new server and we'd otherwise get a misleading failure
+		// in a completely different test phase.
+		const s = server;
+		if (!s) throw new Error("test invariant: server was null at mid-test restart");
+		await new Promise<void>((resolve) => s.close(() => resolve()));
 		server = null;
 
 		await spinUp({
