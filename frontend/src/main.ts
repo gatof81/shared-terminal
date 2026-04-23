@@ -9,7 +9,8 @@ import {
         isLoggedIn, login, register, logout, checkAuthStatus,
         listSessions, createSession, deleteSession, stopSession, startSession,
         listTabs, createTab, deleteTab, LastTabError, TabNotFoundError,
-        type SessionInfo, type Tab,
+        listInvites, createInvite, revokeInvite, InviteRequiredError,
+        type SessionInfo, type Tab, type Invite,
 } from "./api.js";
 import { openTerminalSession, type TerminalSession, type SessionStatus } from "./terminal.js";
 
@@ -23,10 +24,15 @@ const authToggle = document.getElementById("auth-toggle")!;
 const authError = document.getElementById("auth-error")!;
 const authUsername = document.getElementById("auth-username") as HTMLInputElement;
 const authPassword = document.getElementById("auth-password") as HTMLInputElement;
+const authInviteCode = document.getElementById("auth-invite-code") as HTMLInputElement;
 const authSubmitBtn = document.getElementById("auth-submit") as HTMLButtonElement;
 
 const userDisplay = document.getElementById("user-display")!;
 const logoutBtn = document.getElementById("logout-btn")!;
+const invitesBtn = document.getElementById("invites-btn") as HTMLButtonElement;
+const invitesModal = document.getElementById("invites-modal")!;
+const inviteCreateBtn = document.getElementById("invite-create-btn") as HTMLButtonElement;
+const inviteList = document.getElementById("invite-list")!;
 const sessionList = document.getElementById("session-list")!;
 const newSessionForm = document.getElementById("new-session-form") as HTMLFormElement;
 const newSessionInput = document.getElementById("new-session-input") as HTMLInputElement;
@@ -76,6 +82,11 @@ function disposeAllCurrentTerminals() {
 
 // ── Auth flow ───────────────────────────────────────────────────────────────
 
+// True only on the very first ever visit before any account exists. The
+// backend lets the first register go through without an invite (bootstrap);
+// we hide the invite-code field in that case so the screen looks normal.
+let isBootstrapRegister = false;
+
 async function initAuth() {
         if (isLoggedIn()) {
                 showApp();
@@ -86,6 +97,7 @@ async function initAuth() {
                 const { needsSetup } = await checkAuthStatus();
                 if (needsSetup) {
                         isRegisterMode = true;
+                        isBootstrapRegister = true;
                         updateAuthUI();
                 }
         } catch {
@@ -113,16 +125,31 @@ function updateAuthUI() {
                 authTitle.textContent = "Create Account";
                 authSubmitBtn.textContent = "Register";
                 authToggle.innerHTML = 'Already have an account? <a href="#" id="auth-toggle-link">Login</a>';
+                // Invite code is required for every register except the bootstrap
+                // first user — show the field accordingly.
+                authInviteCode.classList.toggle("hidden", isBootstrapRegister);
         } else {
                 authTitle.textContent = "Login";
                 authSubmitBtn.textContent = "Login";
                 authToggle.innerHTML = 'No account? <a href="#" id="auth-toggle-link">Register</a>';
+                authInviteCode.classList.add("hidden");
         }
         // Re-bind toggle link
-        document.getElementById("auth-toggle-link")?.addEventListener("click", (e) => {
+        document.getElementById("auth-toggle-link")?.addEventListener("click", async (e) => {
                 e.preventDefault();
                 isRegisterMode = !isRegisterMode;
                 authError.textContent = "";
+                // Re-fetch the canonical bootstrap state when entering register
+                // mode. Otherwise isBootstrapRegister is whatever it was at page
+                // load — toggling login → register would silently keep the flag
+                // (and the hidden invite field) even if the bootstrap window
+                // closed in the interim. Single GET, only on the toggle click.
+                if (isRegisterMode) {
+                        try {
+                                const { needsSetup } = await checkAuthStatus();
+                                isBootstrapRegister = needsSetup;
+                        } catch { /* status check failed — keep prior flag value */ }
+                }
                 updateAuthUI();
         });
 }
@@ -132,20 +159,53 @@ authForm.addEventListener("submit", async (e) => {
         authError.textContent = "";
         const username = authUsername.value.trim();
         const password = authPassword.value;
+        const inviteCode = authInviteCode.value.trim();
 
         if (!username || !password) {
                 authError.textContent = "Username and password required";
                 return;
         }
+        if (isRegisterMode && !isBootstrapRegister && !inviteCode) {
+                authError.textContent = "Invite code required";
+                return;
+        }
 
         try {
                 if (isRegisterMode) {
-                        await register(username, password);
+                        await register(username, password, inviteCode || undefined);
                 } else {
                         await login(username, password);
                 }
                 showApp();
         } catch (err) {
+                // The bootstrap window can close between page load and submit
+                // (a concurrent register sneaks in, or the page sat open after
+                // someone else set up the first account). The backend signals
+                // this with 403 InviteRequired — clear the flag and reveal the
+                // invite-code field so the user can retry without reloading.
+                if (err instanceof InviteRequiredError && isBootstrapRegister) {
+                        isBootstrapRegister = false;
+                        updateAuthUI();
+                        authError.textContent = "An account already exists — enter an invite code to register.";
+                        return;
+                }
+                // Non-403 failures during bootstrap (transient 500, network blip)
+                // would otherwise leave isBootstrapRegister=true forever — the
+                // invite field stays hidden and every retry re-fires the no-invite
+                // path, which the backend may now reject if a concurrent register
+                // already grabbed the bootstrap slot. Re-fetch the canonical state
+                // so the next submit either retries cleanly or shows the invite
+                // field. checkAuthStatus is cheap and only runs on the rare
+                // bootstrap-error path.
+                if (isRegisterMode && isBootstrapRegister) {
+                        try {
+                                const { needsSetup } = await checkAuthStatus();
+                                if (!needsSetup) {
+                                        isBootstrapRegister = false;
+                                        updateAuthUI();
+                                }
+                        } catch { /* status check itself failed — keep the flag, surface the original error */ }
+                }
                 authError.textContent = (err as Error).message;
         }
 });
@@ -778,6 +838,143 @@ mobileMql.addEventListener("change", () => setSidebarOpen(!isMobile()));
 // that would otherwise fire on every desktop page load.
 setSidebarOpen(!isMobile());
 mainEl.setAttribute("data-sidebar-ready", "");
+
+// ── Invites modal ───────────────────────────────────────────────────────────
+
+function openInvitesModal() {
+        invitesModal.classList.add("open");
+        invitesModal.setAttribute("aria-hidden", "false");
+        // Move focus into the dialog so a keyboard user activating the Invites
+        // button via Enter doesn't have their first Tab walk through the page
+        // behind the backdrop. Mirrors the invitesBtn.focus() in close.
+        inviteCreateBtn.focus();
+        void renderInvites();
+}
+
+function closeInvitesModal() {
+        invitesModal.classList.remove("open");
+        invitesModal.setAttribute("aria-hidden", "true");
+        invitesBtn.focus();
+}
+
+async function renderInvites() {
+        inviteList.textContent = "Loading…";
+        let invites: Invite[];
+        try {
+                invites = await listInvites();
+        } catch (err) {
+                inviteList.textContent = "";
+                showToast((err as Error).message, true);
+                return;
+        }
+
+        inviteList.textContent = "";
+        if (invites.length === 0) {
+                const empty = document.createElement("div");
+                empty.className = "invite-empty";
+                empty.textContent = "No invites yet — generate one above.";
+                inviteList.appendChild(empty);
+                return;
+        }
+
+        for (const invite of invites) {
+                const used = invite.usedAt !== null;
+                // expires_at is server-stored as "YYYY-MM-DD HH:MM:SS" UTC. Swap
+                // the space for "T" before appending "Z" so the result is valid
+                // ISO 8601 — Safari rejects the space-separated form and returns
+                // Invalid Date, which would silently misclassify expired invites
+                // as Unused.
+                const expired = !used && invite.expiresAt !== null
+                        && new Date(`${invite.expiresAt.replace(" ", "T")}Z`).getTime() <= Date.now();
+                const inert = used || expired;
+                const row = document.createElement("div");
+                row.className = `invite-row${inert ? " used" : ""}`;
+
+                const code = document.createElement("span");
+                code.className = "invite-code";
+                code.textContent = invite.code;
+                row.appendChild(code);
+
+                const status = document.createElement("span");
+                status.className = `invite-status ${inert ? "used" : "unused"}`;
+                status.textContent = used ? "Used" : expired ? "Expired" : "Unused";
+                if (!used && !expired && invite.expiresAt) {
+                        status.title = `Expires ${invite.expiresAt} UTC`;
+                }
+                row.appendChild(status);
+
+                // Copy is only meaningful while the code can still be redeemed.
+                if (!inert) {
+                        const copyBtn = document.createElement("button");
+                        copyBtn.type = "button";
+                        copyBtn.className = "invite-action-btn";
+                        copyBtn.textContent = "Copy";
+                        copyBtn.addEventListener("click", async () => {
+                                try {
+                                        await navigator.clipboard.writeText(invite.code);
+                                        copyBtn.textContent = "Copied";
+                                        setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500);
+                                } catch {
+                                        showToast("Couldn't copy — select the code manually", true);
+                                }
+                        });
+                        row.appendChild(copyBtn);
+                }
+
+                // Revoke is offered for both unused and expired invites — the
+                // backend DELETE matches WHERE used_at IS NULL, so expired-but-
+                // unused codes can be cleared from the list. Quota slots are
+                // already auto-freed by the expiry filter on the COUNT subquery,
+                // so this is purely UI hygiene.
+                if (!used) {
+                        const revokeBtn = document.createElement("button");
+                        revokeBtn.type = "button";
+                        revokeBtn.className = "invite-action-btn revoke";
+                        revokeBtn.textContent = "Revoke";
+                        revokeBtn.addEventListener("click", async () => {
+                                if (!confirm(`Revoke invite "${invite.code}"?`)) return;
+                                revokeBtn.disabled = true;
+                                try {
+                                        await revokeInvite(invite.code);
+                                        await renderInvites();
+                                } catch (err) {
+                                        revokeBtn.disabled = false;
+                                        showToast((err as Error).message, true);
+                                }
+                        });
+                        row.appendChild(revokeBtn);
+                }
+
+                inviteList.appendChild(row);
+        }
+}
+
+invitesBtn.addEventListener("click", openInvitesModal);
+
+inviteCreateBtn.addEventListener("click", async () => {
+        inviteCreateBtn.disabled = true;
+        try {
+                await createInvite();
+                await renderInvites();
+        } catch (err) {
+                showToast((err as Error).message, true);
+        } finally {
+                inviteCreateBtn.disabled = false;
+        }
+});
+
+// data-close-modal lives on both the backdrop and the × button — one
+// listener handles both rather than wiring two element refs.
+invitesModal.addEventListener("click", (e) => {
+        const target = e.target as HTMLElement;
+        if (target.hasAttribute("data-close-modal")) closeInvitesModal();
+});
+
+document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && invitesModal.classList.contains("open")) {
+                closeInvitesModal();
+        }
+});
 
 // ── Auto-refresh ────────────────────────────────────────────────────────────
 

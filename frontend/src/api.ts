@@ -31,13 +31,27 @@ export async function checkAuthStatus(): Promise<{ needsSetup: boolean }> {
         return res.json();
 }
 
-export async function register(username: string, password: string): Promise<{ userId: string; token: string }> {
+export class InviteRequiredError extends Error {
+        constructor(message: string) {
+                super(message);
+                this.name = "InviteRequiredError";
+        }
+}
+
+export async function register(
+        username: string,
+        password: string,
+        inviteCode?: string,
+): Promise<{ userId: string; token: string }> {
         const res = await apiFetch("/auth/register", {
                 method: "POST",
-                body: JSON.stringify({ username, password }),
+                body: JSON.stringify({ username, password, inviteCode }),
         });
         if (!res.ok) {
-                const body = await res.json();
+                const body = await res.json().catch(() => ({}));
+                if (res.status === 403) {
+                        throw new InviteRequiredError(body.error ?? "Invite code required");
+                }
                 throw new Error(body.error ?? "Registration failed");
         }
         const data = await res.json();
@@ -195,6 +209,44 @@ export class TabNotFoundError extends Error {
         constructor() {
                 super("Tab no longer exists in the session");
                 this.name = "TabNotFoundError";
+        }
+}
+
+// ── Invites API ─────────────────────────────────────────────────────────────
+
+export interface Invite {
+        code: string;
+        createdAt: string;
+        usedAt: string | null;
+        expiresAt: string | null;
+}
+
+export async function listInvites(): Promise<Invite[]> {
+        const res = await apiFetch("/invites");
+        if (!res.ok) throw new Error("Failed to list invites");
+        return res.json();
+}
+
+export async function createInvite(): Promise<Invite> {
+        const res = await apiFetch("/invites", { method: "POST" });
+        if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.error ?? "Failed to create invite");
+        }
+        return res.json();
+}
+
+export async function revokeInvite(code: string): Promise<void> {
+        const res = await apiFetch(`/invites/${encodeURIComponent(code)}`, { method: "DELETE" });
+        // 404 means the row is already gone (concurrent revoke from another
+        // tab, or the invite was redeemed in the interim). The user-visible
+        // outcome — "the code is no longer in the list" — is identical to a
+        // 204, so swallow it. Without this, two tabs racing on the same code
+        // would show one success and one spurious "not found" toast.
+        if (res.status === 404) return;
+        if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.error ?? "Failed to revoke invite");
         }
 }
 

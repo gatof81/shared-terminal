@@ -98,7 +98,35 @@ export async function migrateDb(): Promise<void> {
                 )`,
                 `CREATE INDEX IF NOT EXISTS idx_sessions_user
                         ON sessions(user_id, status)`,
+                // Invite-only registration. The first user is allowed to register
+                // without an invite (bootstrap); every subsequent register must
+                // claim a row here. Atomic claim is enforced by an UPDATE …
+                // WHERE used_at IS NULL with `meta.changes === 1` check, so two
+                // concurrent registers can't redeem the same code. expires_at
+                // bounds how long an unredeemed code stays valid (NULL = never).
+                `CREATE TABLE IF NOT EXISTS invite_codes (
+                        code        TEXT PRIMARY KEY,
+                        created_by  TEXT NOT NULL,
+                        created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                        used_by     TEXT,
+                        used_at     TEXT,
+                        expires_at  TEXT
+                )`,
+                `CREATE INDEX IF NOT EXISTS idx_invite_codes_creator
+                        ON invite_codes(created_by)`,
         ]);
+        // ALTER for any table that pre-dates the expires_at column (e.g. a dev
+        // DB that ran the original migration before this column existed). SQLite
+        // has no ADD COLUMN IF NOT EXISTS, so we run it unguarded and swallow
+        // the "duplicate column" error. CREATE TABLE above already includes the
+        // column for fresh deploys, so this is a no-op there.
+        try {
+                await d1Query("ALTER TABLE invite_codes ADD COLUMN expires_at TEXT");
+        } catch (err) {
+                if (!/duplicate column name|already exists/i.test((err as Error).message)) {
+                        throw err;
+                }
+        }
         console.log("[db] migrations complete");
 }
 
