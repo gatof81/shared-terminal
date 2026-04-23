@@ -256,6 +256,18 @@ export function validateEnvVars(
                 // which Object.entries already filters, and plain repeat keys, which
                 // JSON.parse collapses — but we check for completeness in case a
                 // future caller constructs the object programmatically).
+                //
+                // Ideally this would use Object.hasOwn (ES2022) — biome's
+                // preferred form — but tsconfig lib is currently ES2020 and
+                // Object.hasOwn isn't in that lib. Using the
+                // Object.prototype.hasOwnProperty.call idiom for now, which
+                // is the safe form (direct `.hasOwnProperty` could collide
+                // with a user-supplied key named `hasOwnProperty`, though in
+                // practice that's already rejected by the POSIX-name check).
+                // If tsconfig ever bumps to ES2022 (Node 22 runtime already
+                // supports it), this line should be simplified to
+                // `Object.hasOwn(normalised, name)` and the ignore dropped.
+                // biome-ignore lint/suspicious/noPrototypeBuiltins: Object.hasOwn unavailable under ES2020 lib; Object.prototype.hasOwnProperty.call is the safe idiom on this target.
                 if (Object.prototype.hasOwnProperty.call(normalised, name)) {
                         throw new EnvVarValidationError(`envVars contains duplicate key '${name}'`);
                 }
