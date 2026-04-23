@@ -386,23 +386,42 @@ export class DockerManager {
                 // hand it out to co-arriving joiners. Not worth the state today.
                 //
                 // ── Live-vs-replay ordering ───────────────────────────────────────
-                // We also have to deliver bytes to the client in the correct order:
-                // the replay must land BEFORE any live bytes that arrive afterwards
-                // — otherwise the user sees fresh output get overwritten by a stale
+                // We have to deliver bytes to the client in the correct order: the
+                // replay must land BEFORE any live bytes that arrive afterwards —
+                // otherwise the user sees fresh output get overwritten by a stale
                 // snapshot. Without buffering, these two concurrent streams race:
                 //
                 //   attach() returns → wsHandler sends replay → [live bytes can
                 //   fire between these two steps] → wsHandler sends live delta →
                 //   client paints replay on top of the delta it just rendered.
                 //
-                // To serialise them we arm an "until-flushed" listener: while armed
-                // it piles live bytes into a local `tail` array instead of calling
-                // onOutput. wsHandler sends the replay payload and THEN calls
-                // flushTail(), which drains the tail in order and flips the listener
-                // to forward-directly. Because flushTail is synchronous (no awaits,
-                // ws.send is sync too) and capture-pane's snapshot was taken BEFORE
-                // the first live byte the client could see, the final client-visible
-                // sequence is: [captured screen][every delta in arrival order].
+                // To serialise them we arm an "until-flushed" listener BELOW: while
+                // armed it piles live bytes into a local `tail` array instead of
+                // calling onOutput. wsHandler sends the replay payload and THEN
+                // calls flushTail(), which drains the tail in order and flips the
+                // listener to forward-directly. Because flushTail is synchronous
+                // (no awaits, ws.send is sync too) the client-visible sequence
+                // from the moment the listener is registered onward is deterministic:
+                // [captured screen][every live delta in arrival order].
+                //
+                // Residual race we accept: there is a narrow window between when
+                // capture-pane is issued and when the listener below is registered.
+                // Bytes tmux emits during that window are not in the snapshot (they
+                // weren't on the pane when capture-pane ran) AND not in the tail
+                // (the listener wasn't armed yet). The client won't see them until
+                // the next live byte forces a redraw.
+                //
+                // We deliberately don't close this window by arming the listener
+                // BEFORE capture-pane: that would double-render every byte tmux
+                // emitted between `listener registered` and `snapshot captured`,
+                // because those bytes already updated the pane state that ends up
+                // in the snapshot — so the client would see them once in the
+                // snapshot and again in the tail. A byte-correct fix would need
+                // position-aware dedup (snapshot cursor at capture time vs tail
+                // start), which is more machinery than the lost-bytes symptom
+                // warrants. The symptom is small and self-healing: a few ms of
+                // output gets deferred until the next write, which in an
+                // interactive terminal is almost always within a keystroke or two.
                 const snapshot = await this.capturePane(sessionId, tabId);
 
                 const tail: string[] = [];
