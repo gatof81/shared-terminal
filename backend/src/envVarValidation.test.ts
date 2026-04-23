@@ -51,7 +51,12 @@ describe("validateEnvVars", () => {
                 child.OWN = "visible";
                 const result = validateEnvVars(child);
                 expect(result).toEqual({ OWN: "visible" });
-                expect(Object.prototype.hasOwnProperty.call(result, "INHERITED")).toBe(false);
+                // Object.hasOwn (ES2022) is biome's preferred form over
+                // Object.prototype.hasOwnProperty.call — same semantics, no
+                // prototype-chain surprise if the object itself defines a
+                // `hasOwnProperty` key. Node 16.9+ ships it; our backend is on
+                // Node 20, so unconditionally safe.
+                expect(Object.hasOwn(result, "INHERITED")).toBe(false);
         });
 
         // ── type/shape errors ──────────────────────────────────────────────
@@ -266,7 +271,16 @@ describe("validateEnvVars", () => {
                 // __proto__ is rejected at validation time; this test pins that
                 // direct Object.prototype calls work.
                 const result = validateEnvVars({ FOO: "bar" });
-                // These would all throw "is not a function" on a null-proto object.
+                // These would all throw "is not a function" on a null-proto
+                // object. The direct `.hasOwnProperty` method call is the
+                // exact pattern this test exists to pin — swapping to
+                // Object.hasOwn would still pass on a null-proto object
+                // (Object.hasOwn doesn't consult the prototype) and so would
+                // defeat the purpose. We want to catch the day someone
+                // re-introduces Object.create(null) and breaks callers that
+                // use the native method form. Hence the biome-ignore on the
+                // next line only.
+                // biome-ignore lint/suspicious/noPrototypeBuiltins: see comment above — this test intentionally exercises the prototype-method form.
                 expect(result.hasOwnProperty("FOO")).toBe(true);
                 expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
                 expect(typeof result.toString).toBe("function");
