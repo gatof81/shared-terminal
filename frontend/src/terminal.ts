@@ -129,6 +129,7 @@ export function openTerminalSession(opts: {
         const token = getToken() ?? "";
         const wsUrl = buildWsUrl(sessionId, token, tabId);
         const ws = new WebSocket(wsUrl, [`auth.bearer.${token}`]);
+        let disposed = false;
 
         ws.onopen = () => {
                 send({ type: "ping" });
@@ -165,10 +166,13 @@ export function openTerminalSession(opts: {
         };
 
         ws.onerror = () => {
+                if (disposed) return;
                 onError("WebSocket connection error");
         };
 
         ws.onclose = (ev) => {
+                // disposed: stale async close from a prior navigate-away — ignore
+                if (disposed) return;
                 if (ev.code !== 1000) {
                         onError(`Connection closed (${ev.code}): ${ev.reason || "unknown reason"}`);
                 }
@@ -333,6 +337,7 @@ export function openTerminalSession(opts: {
 
         // ── Dispose ─────────────────────────────────────────────────────────────
         function dispose() {
+                disposed = true;
                 if (heartbeatInterval !== null) clearInterval(heartbeatInterval);
                 ro.disconnect();
                 document.removeEventListener("visibilitychange", onVisibilityChange);
