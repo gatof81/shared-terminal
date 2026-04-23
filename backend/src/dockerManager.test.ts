@@ -145,6 +145,19 @@ function countAttachExecs(container: FakeContainer): number {
 	).length;
 }
 
+// Array.prototype.find typed as `T | undefined` but in tests we often KNOW the
+// value exists (the harness spawned it above) and treating it as undefined
+// clutters every callsite with `?.` + its downstream undefined-propagation. A
+// miss here is a test-harness bug, not a production concern, so throw eagerly.
+function mustFind<T>(arr: readonly T[], pred: (v: T) => boolean, label: string): T {
+	const found = arr.find(pred);
+	if (!found) throw new Error(`expected to find ${label}`);
+	return found;
+}
+
+const isAttachExec = (e: FakeExec): boolean =>
+	e._cmd[1] === "new-session" && e._cmd.includes("-A");
+
 // attach() now returns an armed listener (see dockerManager.attach() docs):
 // live bytes pile into a tail array until wsHandler calls flushTail(). Tests
 // that assert listener behaviour have to flush explicitly to mirror the
@@ -183,9 +196,7 @@ describe("DockerManager shared-exec multiplexing", () => {
 
 		// Find the LONG-LIVED attach stream (not any short-lived one-shot
 		// streams like capture-pane that attach() also spawns).
-		const attachStream = container._execs.find(
-			(e) => e._cmd[1] === "new-session" && e._cmd.includes("-A"),
-		)!._stream;
+		const attachStream = mustFind(container._execs, isAttachExec, "attach exec")._stream;
 		attachStream.write("hello");
 		await tick();
 
@@ -309,9 +320,7 @@ describe("DockerManager shared-exec multiplexing", () => {
 		});
 
 		await dm.attach("s1", "a1", 80, 24, () => { /* noop */ }, "tab-test");
-		const attachStream = container._execs.find(
-			(e) => e._cmd[1] === "new-session" && e._cmd.includes("-A"),
-		)!._stream;
+		const attachStream = mustFind(container._execs, isAttachExec, "attach exec")._stream;
 		attachStream.write("abc");
 		await tick();
 
@@ -472,7 +481,7 @@ describe("DockerManager tabs", () => {
 		await tick();
 
 		// tmux kill-session got called with the right target.
-		const killCmd = container._execs.find((e) => e._cmd.includes("kill-session"))!;
+		const killCmd = mustFind(container._execs, (e) => e._cmd.includes("kill-session"), "kill-session exec");
 		expect(killCmd._cmd).toEqual(["tmux", "kill-session", "-t", "tab-x"]);
 
 		// The shared exec slot for that tab is gone.
