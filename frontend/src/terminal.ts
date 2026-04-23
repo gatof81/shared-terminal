@@ -129,6 +129,7 @@ export function openTerminalSession(opts: {
         const token = getToken() ?? "";
         const wsUrl = buildWsUrl(sessionId, token, tabId);
         const ws = new WebSocket(wsUrl, [`auth.bearer.${token}`]);
+        let disposed = false;
 
         ws.onopen = () => {
                 send({ type: "ping" });
@@ -170,11 +171,7 @@ export function openTerminalSession(opts: {
         };
 
         ws.onclose = (ev) => {
-                // Intentional dispose — don't clobber the session status. The race:
-                // dispose() calls ws.close(1000) asynchronously; if the user returns
-                // to the same session+tab before this fires, both onStatus guards pass
-                // (same ownSessionId, same tabId) and the stale close would write
-                // "disconnected" into sessions[], making the session unclickable.
+                // disposed: stale async close from a prior navigate-away — ignore
                 if (disposed) return;
                 if (ev.code !== 1000) {
                         onError(`Connection closed (${ev.code}): ${ev.reason || "unknown reason"}`);
@@ -320,7 +317,6 @@ export function openTerminalSession(opts: {
 
         // ── Heartbeat ───────────────────────────────────────────────────────────
         let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-        let disposed = false;
         function startHeartbeat() {
                 heartbeatInterval = setInterval(() => {
                         if (ws.readyState === WebSocket.OPEN) send({ type: "ping" });
