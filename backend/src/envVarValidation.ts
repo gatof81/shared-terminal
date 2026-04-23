@@ -82,8 +82,22 @@ export class EnvVarValidationError extends Error {
 /**
  * Validate and normalise an envVars payload.
  *
- * Accepts `undefined` (treated as an empty map) so route handlers can pass
- * the raw body field without a null-coalesce at every call site.
+ * Accepts `undefined` (treated as an empty map) so the POST /sessions
+ * route can pass the raw body field without a null-coalesce at the call
+ * site when the field is omitted entirely.
+ *
+ * Does NOT accept `null`. The two callers have different contracts:
+ *   - POST /sessions: envVars is optional. "Not set" is expressed by
+ *     omitting the field; the body parser surfaces that as `undefined`.
+ *   - PATCH /sessions/:id/env: envVars is REQUIRED (the route rejects
+ *     `undefined` with a 400). "Explicitly empty" is expressed by
+ *     sending `{}`.
+ *
+ * In neither case is `null` a meaningful shape — it can only arrive as a
+ * client bug (e.g. a frontend that didn't guard a nullable field before
+ * serialising). Treating `null` as `{}` on PATCH silently clears the
+ * user's env vars instead of surfacing the bug, which is exactly the
+ * kind of desync validation should catch. Reject it.
  *
  * Returns a plain `Record<string, string>` stripped of any inherited /
  * non-enumerable properties — callers can safely JSON-stringify or iterate
@@ -92,11 +106,14 @@ export class EnvVarValidationError extends Error {
 export function validateEnvVars(
         envVars: unknown,
 ): Record<string, string> {
-        if (envVars === undefined || envVars === null) return {};
+        if (envVars === undefined) return {};
 
-        // Must be a plain object. Arrays and other exotics pass `typeof === "object"`
-        // but would iterate in surprising ways; refuse up front.
-        if (typeof envVars !== "object" || Array.isArray(envVars)) {
+        // Must be a plain object. `null` trips this branch (typeof null ===
+        // "object") along with arrays and other exotics; refuse all of them
+        // up front with the same "must be an object" message. The important
+        // case is `null` — accepting it as an empty map would let a PATCH
+        // bug silently wipe a user's env instead of 400ing.
+        if (envVars === null || typeof envVars !== "object" || Array.isArray(envVars)) {
                 throw new EnvVarValidationError("envVars must be an object");
         }
 

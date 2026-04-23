@@ -9,10 +9,25 @@ import {
 } from "./envVarValidation.js";
 
 describe("validateEnvVars", () => {
-        it("returns an empty object for undefined/null/empty input", () => {
+        it("returns an empty object for undefined or empty-object input", () => {
+                // `undefined` means the field was omitted from the body (POST
+                // /sessions allows that; the route defaults to an empty env).
+                // `{}` is the explicit "clear everything" shape used by the
+                // PATCH route. `null` is deliberately excluded — see the next
+                // test for why.
                 expect(validateEnvVars(undefined)).toEqual({});
-                expect(validateEnvVars(null)).toEqual({});
                 expect(validateEnvVars({})).toEqual({});
+        });
+
+        it("rejects null so a client bug can't silently wipe env on PATCH", () => {
+                // The PATCH /sessions/:id/env handler rejects `undefined`
+                // with a 400 ("body.envVars is required") so callers are
+                // forced to be explicit. But `null` slips past that check
+                // (null !== undefined) — if we collapsed null to {} here,
+                // a frontend that forgot to guard a nullable field would
+                // silently wipe the user's env vars instead of 400ing.
+                // Reject null as invalid shape.
+                expect(() => validateEnvVars(null)).toThrow(/must be an object/);
         });
 
         it("accepts conventional env var shapes", () => {
