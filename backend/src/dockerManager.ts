@@ -109,6 +109,7 @@ export class DockerManager {
                                 `SESSION_ID=${sessionId}`,
                                 `SESSION_NAME=${meta.name}`,
                                 `TERM=xterm-256color`,
+                                `COLORTERM=truecolor`,
                                 ...envArray,
                         ],
                         HostConfig: {
