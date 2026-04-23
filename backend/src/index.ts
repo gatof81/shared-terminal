@@ -8,7 +8,7 @@
 import http from "node:http";
 import express from "express";
 import { WebSocketServer } from "ws";
-import { selectWsAuthProtocol, validateJwtSecret } from "./auth.js";
+import { ensureAuthReady, selectWsAuthProtocol, validateJwtSecret } from "./auth.js";
 import { migrateDb, validateD1Config } from "./db.js";
 import { DockerManager } from "./dockerManager.js";
 import { buildRouter } from "./routes.js";
@@ -116,6 +116,13 @@ wss.on("connection", (ws, req) => {
 async function start() {
         await migrateDb();
         await docker.reconcile();
+        // Wait for the timing-parity dummy bcrypt hash to finish computing
+        // before accepting requests. Without this, the first unknown-user
+        // login would block on the ~2^BCRYPT_ROUNDS-ms hash computation,
+        // producing a latency signal distinguishable from a known-user
+        // login (which short-circuits the dummy path) — exactly the
+        // timing leak the dummy is supposed to prevent.
+        await ensureAuthReady();
 
         server.listen(PORT, () => {
                 console.log(`[server] listening on http://localhost:${PORT}`);

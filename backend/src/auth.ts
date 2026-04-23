@@ -364,20 +364,52 @@ export class InvalidCredentialsError extends Error {
 }
 
 // Timing-parity dummy hash for the unknown-username path: bcrypt.compare
-// against a real-shape bcrypt string still does the full work-factor
-// computation before the result is known, matching the CPU cost of the
-// real-user branch so an attacker can't distinguish "unknown username"
-// from "wrong password" by timing.
+// against a real-shape bcrypt string runs the full work-factor computation
+// before returning false, matching the CPU cost of the real-user branch
+// so an attacker can't distinguish "unknown username" from "wrong
+// password" by timing.
 //
-// Format: "$2a$10$" (7 chars: version + cost + separator) + 53 chars of
-// valid bcrypt-base64 = 60 chars total, matching the real output shape.
-// "x" is in bcrypt's alphabet, so the library runs through salt decode
-// and the full 2^10 work without short-circuiting on a parse error.
+// Previously this was a synthetic hardcoded string ("$2a$10$" + 53 "x"):
+// library-valid base64, correct shape, meant to exercise bcrypt's full
+// 2^10 work because the parser couldn't short-circuit on it. That worked,
+// but the guarantee was structural — it depended on bcryptjs NEVER adding
+// a fast-fail path for inputs that happen to look synthetic. There's no
+// test we can write to pin "the library didn't short-circuit" other than
+// wall-clock timing (fragile), so a future bcryptjs release could
+// regress the timing protection silently.
 //
-// Hoisted to module scope so we're not allocating this on every login —
-// it's a constant, and loginUser runs on the hot path. The cost of the
-// old per-call allocation was trivial but pointless.
-const DUMMY_PASSWORD_HASH = `$2a$10$${"x".repeat(53)}`;
+// Replaced with a real hash derived at module load by bcrypt.hash itself,
+// on a fixed throwaway password. Key properties:
+//
+//   1. Structurally indistinguishable from a real user's hash — produced
+//      by the same library we'll compare against. If the library ever
+//      changes the output format or the work cost, this hash follows.
+//      No test needed; the invariant is "bcrypt.compare(x, bcrypt.hash(
+//      anything, rounds)) takes full bcrypt time", which is the library's
+//      contract, not ours.
+//   2. Computed once at module import, cached as a Promise. Node is
+//      CommonJS here (tsconfig module=commonjs), so we can't top-level
+//      await — the first login (specifically the first login against an
+//      unknown user) would otherwise block on the computation. index.ts
+//      pre-awaits `ensureAuthReady()` before server.listen so that first
+//      login doesn't leak cold-start latency as a timing side channel.
+//   3. The password ("__dummy__") can be anything — bcrypt.compare will
+//      never match the supplied login password against it in practice,
+//      because hashes salt-in the generated salt, not the password.
+const DUMMY_PASSWORD_HASH_PROMISE: Promise<string> = bcrypt.hash("__dummy__", BCRYPT_ROUNDS);
+
+// Awaited from index.ts before server.listen so the first unknown-user
+// login doesn't pay ~2^BCRYPT_ROUNDS-ms of cold-start latency — which
+// would itself be a timing leak vs first known-user login ("known user"
+// short-circuits to row.password_hash without ever touching this
+// promise). After this resolves, the `await` inside loginUser is a free
+// microtask tick.
+//
+// Safe to call more than once; it returns the same settled promise on
+// every call.
+export async function ensureAuthReady(): Promise<void> {
+        await DUMMY_PASSWORD_HASH_PROMISE;
+}
 
 export async function loginUser(username: string, password: string): Promise<{ userId: string; token: string }> {
         const result = await d1Query<{ id: string; password_hash: string }>(
@@ -388,8 +420,11 @@ export async function loginUser(username: string, password: string): Promise<{ u
         const row = result.results[0];
         // Always run a bcrypt compare, even if the user doesn't exist, so an
         // attacker can't distinguish "unknown username" from "wrong password"
-        // by timing. See DUMMY_PASSWORD_HASH above for the shape rationale.
-        const hashToCompare = row?.password_hash ?? DUMMY_PASSWORD_HASH;
+        // by timing. The `??` short-circuits on the known-user path, so
+        // known-user logins don't pay the awaited-promise cost (negligible
+        // post-init anyway, but cleaner to avoid the microtask on the hot
+        // path). See DUMMY_PASSWORD_HASH_PROMISE above for the rationale.
+        const hashToCompare = row?.password_hash ?? (await DUMMY_PASSWORD_HASH_PROMISE);
         const ok = await bcrypt.compare(password, hashToCompare);
         if (!row || !ok) {
                 throw new InvalidCredentialsError();
