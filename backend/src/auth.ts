@@ -102,7 +102,6 @@ export async function registerUser(
         inviteCode: string | undefined,
 ): Promise<{ userId: string; token: string }> {
         const userId = uuidv4();
-        const passwordHash = bcrypt.hashSync(password, BCRYPT_ROUNDS);
 
         // Bootstrap exception: the very first account doesn't need an invite,
         // since there's nobody to issue one. Every subsequent register must
@@ -115,19 +114,19 @@ export async function registerUser(
                 // simultaneous first-ever registers could both observe zero users
                 // without this guard. Only one of them gets `meta.changes === 1`;
                 // the loser falls through to the invite-required path below.
-                try {
-                        const insert = await d1Query(
-                                "INSERT INTO users (id, username, password_hash) " +
-                                        "SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM users)",
-                                [userId, username, passwordHash],
-                        );
-                        if (insert.meta.changes === 1) {
-                                return { userId, token: signToken(userId, username) };
-                        }
-                } catch (err) {
-                        // UNIQUE collision can't happen here (no users yet by definition),
-                        // so any error from this INSERT is infra, not a duplicate username.
-                        throw err;
+                //
+                // Bootstrap is the one path where we hash before validating an
+                // invite — there's nothing to validate, and we need the hash for
+                // the conditional INSERT. The cost is one bcrypt per first-ever
+                // visit, which happens at most once per deployment.
+                const bootstrapHash = bcrypt.hashSync(password, BCRYPT_ROUNDS);
+                const insert = await d1Query(
+                        "INSERT INTO users (id, username, password_hash) " +
+                                "SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM users)",
+                        [userId, username, bootstrapHash],
+                );
+                if (insert.meta.changes === 1) {
+                        return { userId, token: signToken(userId, username) };
                 }
                 // Race loser: a concurrent bootstrap got there first. Require an
                 // invite from this point on, just like the steady-state path.
@@ -141,17 +140,24 @@ export async function registerUser(
         // === 0 and is rejected. The claim happens BEFORE any check on the
         // username so an unauthenticated caller without a valid invite always
         // sees 403 — never a 409 that would let them probe for existing
-        // usernames. If the user INSERT below fails (UNIQUE collision), we
-        // best-effort release the claim so the invite isn't burned by a
-        // register that never produced an account.
+        // usernames. The expires_at filter rejects stale codes the same way.
+        // If the user INSERT below fails (UNIQUE collision), we best-effort
+        // release the claim so the invite isn't burned by a register that
+        // never produced an account.
         const claim = await d1Query(
                 "UPDATE invite_codes SET used_by = ?, used_at = datetime('now') " +
-                        "WHERE code = ? AND used_at IS NULL",
+                        "WHERE code = ? AND used_at IS NULL " +
+                        "AND (expires_at IS NULL OR expires_at > datetime('now'))",
                 [userId, inviteCode],
         );
         if (claim.meta.changes !== 1) {
-                throw new InviteRequiredError("Invite code is invalid or already used");
+                throw new InviteRequiredError("Invite code is invalid, expired, or already used");
         }
+
+        // Hash only after the invite is confirmed valid. bcrypt.hashSync blocks
+        // the event loop, so doing it before the claim would let an unauth'd
+        // caller burn server CPU just by spamming bogus codes.
+        const passwordHash = bcrypt.hashSync(password, BCRYPT_ROUNDS);
 
         try {
                 await d1Query("INSERT INTO users (id, username, password_hash) VALUES (?, ?, ?)", [
@@ -170,8 +176,17 @@ export async function registerUser(
                                 [inviteCode, userId],
                         );
                 } catch (releaseErr) {
+                        // The release UPDATE failed, so the invite is now permanently
+                        // consumed without producing an account. The invitee will see
+                        // a 409 (or 500) response and has no way of knowing the code
+                        // is burned — they'll have to ask whoever issued it for a new
+                        // one. Log loudly with the code so an operator can audit the
+                        // invite_codes table and reissue if needed.
                         console.error(
-                                "[auth] invite release after failed user insert errored:",
+                                "[auth] CRITICAL: invite release failed — code %s is permanently consumed without an account. " +
+                                        "Insert error: %s. Release error: %s",
+                                inviteCode,
+                                (err as Error).message,
                                 (releaseErr as Error).message,
                         );
                 }
@@ -197,6 +212,13 @@ export async function registerUser(
 // slot. Tune up if a legitimate workflow needs more concurrent invites.
 const MAX_UNUSED_INVITES_PER_USER = 20;
 
+// How long an unredeemed invite stays valid. 30 days bounds the window in
+// which a stolen JWT's pre-minted codes remain useful — the attacker has 20
+// quota slots, but anything they minted before losing the JWT becomes inert
+// after this window. Override via INVITE_EXPIRY_DAYS env var if a deployment
+// needs longer-lived invites.
+const INVITE_EXPIRY_DAYS = Number(process.env.INVITE_EXPIRY_DAYS) || 30;
+
 export class InviteQuotaExceededError extends Error {
         constructor() {
                 super(`You already have ${MAX_UNUSED_INVITES_PER_USER} unused invite codes — revoke or wait for some to be used before minting more`);
@@ -210,6 +232,7 @@ export interface Invite {
         createdAt: string;
         usedBy: string | null;
         usedAt: string | null;
+        expiresAt: string | null;
 }
 
 export async function createInvite(creatorUserId: string): Promise<Invite> {
@@ -222,32 +245,35 @@ export async function createInvite(creatorUserId: string): Promise<Invite> {
         // expose unused codes immediately — an acceptable trade-off given
         // those properties, but flagged here so it's a conscious choice.
         const code = randomBytes(8).toString("hex");
-        // Pass created_at explicitly so we can return it without a follow-up
-        // SELECT that could orphan a valid invite row on read failure. Format
-        // matches D1's `datetime('now')` output (UTC, no fractional seconds)
-        // so existing rows and new ones sort/compare consistently.
-        const createdAt = new Date().toISOString().replace("T", " ").slice(0, 19);
+        // Pass created_at + expires_at explicitly so we can return them
+        // without a follow-up SELECT that could orphan a valid invite row on
+        // read failure. Format matches D1's `datetime('now')` output (UTC,
+        // no fractional seconds) so existing rows and new ones sort/compare
+        // consistently.
+        const now = new Date();
+        const createdAt = formatD1Datetime(now);
+        const expiresAt = formatD1Datetime(new Date(now.getTime() + INVITE_EXPIRY_DAYS * 86400_000));
         // Atomic quota check: collapse the count + insert into one statement
         // so two concurrent POST /invites requests can't both observe count
         // < MAX and both insert. The WHERE clause is evaluated as part of the
         // INSERT, so SQLite serialises the read+write. Same changes-based
         // pattern as the bootstrap and invite-claim paths above.
         const insert = await d1Query(
-                "INSERT INTO invite_codes (code, created_by, created_at) " +
-                        "SELECT ?, ?, ? WHERE (" +
+                "INSERT INTO invite_codes (code, created_by, created_at, expires_at) " +
+                        "SELECT ?, ?, ?, ? WHERE (" +
                         "SELECT COUNT(*) FROM invite_codes WHERE created_by = ? AND used_at IS NULL" +
                         ") < ?",
-                [code, creatorUserId, createdAt, creatorUserId, MAX_UNUSED_INVITES_PER_USER],
+                [code, creatorUserId, createdAt, expiresAt, creatorUserId, MAX_UNUSED_INVITES_PER_USER],
         );
         if (insert.meta.changes !== 1) {
                 throw new InviteQuotaExceededError();
         }
-        return { code, createdBy: creatorUserId, createdAt, usedBy: null, usedAt: null };
+        return { code, createdBy: creatorUserId, createdAt, usedBy: null, usedAt: null, expiresAt };
 }
 
 export async function listInvites(creatorUserId: string): Promise<Invite[]> {
         const result = await d1Query<InviteRow>(
-                "SELECT code, created_by, created_at, used_by, used_at FROM invite_codes " +
+                "SELECT code, created_by, created_at, used_by, used_at, expires_at FROM invite_codes " +
                         "WHERE created_by = ? ORDER BY created_at DESC",
                 [creatorUserId],
         );
@@ -272,6 +298,7 @@ interface InviteRow {
         created_at: string;
         used_by: string | null;
         used_at: string | null;
+        expires_at: string | null;
 }
 
 function rowToInvite(row: InviteRow): Invite {
@@ -281,7 +308,15 @@ function rowToInvite(row: InviteRow): Invite {
                 createdAt: row.created_at,
                 usedBy: row.used_by,
                 usedAt: row.used_at,
+                expiresAt: row.expires_at,
         };
+}
+
+// "YYYY-MM-DD HH:MM:SS" UTC, matching D1's datetime('now') format so direct
+// SQL comparisons (`expires_at > datetime('now')`) work without timezone
+// surprises.
+function formatD1Datetime(d: Date): string {
+        return d.toISOString().replace("T", " ").slice(0, 19);
 }
 
 // Thrown on wrong-username-or-password, and only that. Infra failures (D1

@@ -220,6 +220,7 @@ export interface Invite {
         createdAt: string;
         usedBy: string | null;
         usedAt: string | null;
+        expiresAt: string | null;
 }
 
 export async function listInvites(): Promise<Invite[]> {

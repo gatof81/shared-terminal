@@ -847,8 +847,14 @@ async function renderInvites() {
 
         for (const invite of invites) {
                 const used = invite.usedAt !== null;
+                // expires_at is server-stored as "YYYY-MM-DD HH:MM:SS" UTC. Append
+                // "Z" so Date parses it as UTC instead of local time, otherwise
+                // an invite minted UTC-late could appear expired in a CET browser.
+                const expired = !used && invite.expiresAt !== null
+                        && new Date(`${invite.expiresAt}Z`).getTime() <= Date.now();
+                const inert = used || expired;
                 const row = document.createElement("div");
-                row.className = `invite-row${used ? " used" : ""}`;
+                row.className = `invite-row${inert ? " used" : ""}`;
 
                 const code = document.createElement("span");
                 code.className = "invite-code";
@@ -856,11 +862,15 @@ async function renderInvites() {
                 row.appendChild(code);
 
                 const status = document.createElement("span");
-                status.className = `invite-status ${used ? "used" : "unused"}`;
-                status.textContent = used ? "Used" : "Unused";
+                status.className = `invite-status ${inert ? "used" : "unused"}`;
+                status.textContent = used ? "Used" : expired ? "Expired" : "Unused";
+                if (!used && !expired && invite.expiresAt) {
+                        status.title = `Expires ${invite.expiresAt} UTC`;
+                }
                 row.appendChild(status);
 
-                if (!used) {
+                // Copy is only meaningful while the code can still be redeemed.
+                if (!inert) {
                         const copyBtn = document.createElement("button");
                         copyBtn.type = "button";
                         copyBtn.className = "invite-action-btn";
@@ -875,7 +885,12 @@ async function renderInvites() {
                                 }
                         });
                         row.appendChild(copyBtn);
+                }
 
+                // Revoke is offered for both unused and expired invites — the
+                // backend DELETE matches WHERE used_at IS NULL, so expired-but-
+                // unused codes can still be cleaned up to free a quota slot.
+                if (!used) {
                         const revokeBtn = document.createElement("button");
                         revokeBtn.type = "button";
                         revokeBtn.className = "invite-action-btn revoke";
