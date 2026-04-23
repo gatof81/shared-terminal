@@ -3,9 +3,9 @@ import type { AddressInfo } from "node:net";
 import express from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { DockerManager } from "./dockerManager.js";
 import { UsernameRateLimiter } from "./rateLimit.js";
 import type { SessionManager } from "./sessionManager.js";
-import type { DockerManager } from "./dockerManager.js";
 
 // Stub the auth module so routing tests don't touch D1. Handles captured
 // as `authStubs` are reconfigured per-test.
