@@ -40,7 +40,7 @@ export function openTerminalSession(opts: {
                 fontSize: fontSize ?? 14,
                 lineHeight: 1.2,
                 cursorBlink: true,
-                cursorInactiveStyle: 'outline',
+                cursorInactiveStyle: "outline",
                 convertEol: true,
                 allowProposedApi: true,
                 // Apps like Claude Code emit OSC 8 hyperlink escapes. xterm renders
