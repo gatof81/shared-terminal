@@ -35,13 +35,27 @@ export class ForbiddenError extends Error {
 // Overridable via MAX_ACTIVE_SESSIONS_PER_USER env var. Parsed at module
 // load (so changes require a restart), validated to a positive integer;
 // any unparseable / non-positive / non-finite value falls back to the
-// default rather than silently disabling the cap.
+// default AND logs a warning — silently defaulting to 20 when an operator
+// set it to "0" (expecting "freeze new sessions") or a typo like "20 "
+// with a trailing non-ASCII character would ship the wrong cap with no
+// ops-visible signal.
 const DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER = 20;
 const MAX_ACTIVE_SESSIONS_PER_USER = ((): number => {
         const raw = process.env.MAX_ACTIVE_SESSIONS_PER_USER;
         if (raw === undefined || raw.trim() === "") return DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER;
         const n = Number(raw);
         if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
+                // Surface the original value (quoted, so "  " etc. stay visible)
+                // and the effective fallback — ops should be able to tell at a
+                // glance which variable was wrong and what the server is
+                // actually running with. Uses console.warn rather than throw
+                // because a startup abort here would gate the whole server on
+                // a non-critical config typo, which is worse than running with
+                // the documented default.
+                console.warn(
+                        `[sessionManager] MAX_ACTIVE_SESSIONS_PER_USER=${JSON.stringify(raw)} ` +
+                        `is not a positive integer; falling back to ${DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER}`,
+                );
                 return DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER;
         }
         return n;
