@@ -31,7 +31,7 @@ export function buildRouter(
 
         // ── Auth routes (public) ────────────────────────────────────────────────
 
-        const { loginIp, registerIp, invitesIp } = createAuthRateLimiters(rateLimitConfig);
+        const { loginIp, registerIp, invitesCreateIp, invitesRevokeIp } = createAuthRateLimiters(rateLimitConfig);
         const usernameLimiter = new UsernameRateLimiter(
                 rateLimitConfig.login.usernameMax,
                 rateLimitConfig.login.usernameWindowMs,
@@ -194,7 +194,7 @@ export function buildRouter(
                 }
         });
 
-        router.post("/invites", invitesIp, async (req: Request, res: Response) => {
+        router.post("/invites", invitesCreateIp, async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
                 try {
                         const invite = await createInvite(userId);
@@ -209,7 +209,7 @@ export function buildRouter(
                 }
         });
 
-        router.delete("/invites/:code", invitesIp, async (req: Request, res: Response) => {
+        router.delete("/invites/:code", invitesRevokeIp, async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
                 const { code } = req.params;
                 // Same 64-char ceiling as the inviteCode body field at register —

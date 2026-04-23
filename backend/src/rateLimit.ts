@@ -20,15 +20,30 @@ export interface RateLimitConfig {
 	// JWT could otherwise burst all 20 mints in milliseconds before anyone
 	// notices. Slower than registerIp because legitimate use is "invite a
 	// few friends, then idle for weeks".
-	invites: {
+	invitesCreate: {
+		ipMax: number;
+		ipWindowMs: number;
+	};
+	// Caps how often a single IP can revoke invites. Kept separate from
+	// invitesCreate because:
+	//   1. Revoke is a cleanup action the legitimate user may need to do in
+	//      bursts (e.g. panic-rotate after suspecting JWT theft, or bulk-
+	//      clean stale codes). Pinning it to the mint rate would starve the
+	//      legitimate use case.
+	//   2. A combined budget means an attacker who exhausted the mint quota
+	//      could also prevent the victim from revoking their pre-minted
+	//      codes — revoke is precisely the action we want available during
+	//      an incident.
+	// Separate budget, more generous window, distinct 429 message.
+	invitesRevoke: {
 		ipMax: number;
 		ipWindowMs: number;
 	};
 }
 
 // Defaults match issue #10: login 10/15min, register 5/1h, per-username 10/15min.
-// Invites: 10/1h — generous for legitimate inviting bursts, restrictive for
-// JWT-theft pre-mint floods.
+// Invites: create 10/h, revoke 60/h — revoke has to cover incident-response
+// bursts, so it's 6x the mint rate.
 export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 	login: {
 		ipMax: 10,
@@ -40,8 +55,12 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 		ipMax: 5,
 		ipWindowMs: 60 * 60 * 1000,
 	},
-	invites: {
+	invitesCreate: {
 		ipMax: 10,
+		ipWindowMs: 60 * 60 * 1000,
+	},
+	invitesRevoke: {
+		ipMax: 60,
 		ipWindowMs: 60 * 60 * 1000,
 	},
 };
@@ -51,7 +70,8 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 export interface AuthRateLimiters {
 	loginIp: RateLimitRequestHandler;
 	registerIp: RateLimitRequestHandler;
-	invitesIp: RateLimitRequestHandler;
+	invitesCreateIp: RateLimitRequestHandler;
+	invitesRevokeIp: RateLimitRequestHandler;
 }
 
 export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
@@ -77,14 +97,21 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		legacyHeaders: false,
 		message: { error: "Too many registration attempts from this IP, try again later", scope: "ip" },
 	});
-	const invitesIp = rateLimit({
-		windowMs: cfg.invites.ipWindowMs,
-		limit: cfg.invites.ipMax,
+	const invitesCreateIp = rateLimit({
+		windowMs: cfg.invitesCreate.ipWindowMs,
+		limit: cfg.invitesCreate.ipMax,
 		standardHeaders: "draft-7",
 		legacyHeaders: false,
 		message: { error: "Too many invite-mint requests from this IP, try again later", scope: "ip" },
 	});
-	return { loginIp, registerIp, invitesIp };
+	const invitesRevokeIp = rateLimit({
+		windowMs: cfg.invitesRevoke.ipWindowMs,
+		limit: cfg.invitesRevoke.ipMax,
+		standardHeaders: "draft-7",
+		legacyHeaders: false,
+		message: { error: "Too many invite-revoke requests from this IP, try again later", scope: "ip" },
+	});
+	return { loginIp, registerIp, invitesCreateIp, invitesRevokeIp };
 }
 
 // ── Per-username limiter ────────────────────────────────────────────────────
