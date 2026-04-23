@@ -5,16 +5,16 @@
  * Database is Cloudflare D1 (accessed via HTTP API).
  */
 
-import http from "http";
+import http from "node:http";
 import express from "express";
 import { WebSocketServer } from "ws";
-import { validateD1Config, migrateDb } from "./db.js";
-import { SessionManager } from "./sessionManager.js";
+import { selectWsAuthProtocol, validateJwtSecret } from "./auth.js";
+import { migrateDb, validateD1Config } from "./db.js";
 import { DockerManager } from "./dockerManager.js";
 import { buildRouter } from "./routes.js";
+import { SessionManager } from "./sessionManager.js";
+import { parseTrustProxy, TrustProxyError, warnIfProductionMisconfigured } from "./trustProxy.js";
 import { handleWsConnection } from "./wsHandler.js";
-import { selectWsAuthProtocol, validateJwtSecret } from "./auth.js";
-import { parseTrustProxy, warnIfProductionMisconfigured, TrustProxyError } from "./trustProxy.js";
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
