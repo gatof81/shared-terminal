@@ -522,10 +522,8 @@ export class DockerManager {
                         // "" here means the client starts with a blank pane and the
                         // very next byte of live output redraws it. Intentional.
                         if (exitCode !== 0) return "";
-                        // execOneShot strips \r so we can parse token-per-line output from
-                        // tmux helpers cleanly. For a screen dump, xterm needs each line
-                        // terminator to be CRLF so the cursor returns to column 0 — put
-                        // the \r back.
+                        // execOneShot returns clean stdout (no PTY, no \r). For a screen
+                        // dump xterm needs CRLF line terminators — add the \r back.
                         return stdout.replace(/\n/g, "\r\n");
                 } catch (err) {
                         console.warn(`[docker] capture-pane failed for ${this.targetKey(sessionId, tabId)}:`, (err as Error).message);
@@ -762,9 +760,10 @@ export class DockerManager {
                         AttachStdin: false,
                         AttachStdout: true,
                         AttachStderr: true,
-                        // Tty:true merges stdout/stderr onto a single stream so we don't
-                        // need the docker frame demuxer for these short-lived tmux calls.
-                        Tty: true,
+                        // Tty:false keeps stdout in Docker multiplexed frames (type=1).
+                        // Tty:true would allocate a PTY which expands \t → spaces,
+                        // corrupting the tab-separated output from tmux list-sessions.
+                        Tty: false,
                 });
                 const stream = await exec.start({ hijack: false, stdin: false });
                 const chunks: Buffer[] = [];
@@ -776,7 +775,7 @@ export class DockerManager {
                 });
                 const info = await exec.inspect();
                 return {
-                        stdout: Buffer.concat(chunks).toString("utf-8").replace(/\r/g, ""),
+                        stdout: demuxDockerOutput(Buffer.concat(chunks), 1),
                         exitCode: info.ExitCode ?? 0,
                 };
         }
@@ -819,4 +818,23 @@ export class DockerManager {
                 }
                 console.log("[docker] reconciliation complete");
         }
+}
+
+// ── Module-level helpers ─────────────────────────────────────────────────────
+
+// Parse the Docker multiplexed stream format used when Tty:false.
+// Frame layout: [type(1)][pad(3)][size(4 BE)] followed by `size` payload bytes.
+// type 1 = stdout, type 2 = stderr. We collect only the requested type.
+function demuxDockerOutput(raw: Buffer, type: 1 | 2): string {
+	const chunks: Buffer[] = [];
+	let off = 0;
+	while (off + 8 <= raw.length) {
+		const frameType = raw[off]!;
+		const size = raw.readUInt32BE(off + 4);
+		off += 8;
+		if (off + size > raw.length) break;
+		if (frameType === type) chunks.push(raw.subarray(off, off + size));
+		off += size;
+	}
+	return Buffer.concat(chunks).toString("utf-8");
 }

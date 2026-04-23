@@ -80,7 +80,7 @@ function makeFakeContainer(oneShot?: OneShotHook): FakeContainer {
 			// (e.g. the fan-out test that doesn't use capture-pane) don't have to
 			// wire up a full oneShot mock just to unblock attach().
 			const oneShotResult =
-				!isAttach && opts.Cmd[0] === "tmux" && opts.Tty === true
+				!isAttach && opts.Cmd[0] === "tmux" && opts.Tty === false
 					? (oneShot?.(opts.Cmd) ?? { stdout: "", exitCode: 0 })
 					: undefined;
 
@@ -88,7 +88,12 @@ function makeFakeContainer(oneShot?: OneShotHook): FakeContainer {
 				start: vi.fn(async () => {
 					if (oneShotResult) {
 						setImmediate(() => {
-							stream.write(oneShotResult.stdout);
+							// Wrap in Docker multiplexed frame (type=1/stdout) to mirror Tty:false.
+							const payload = Buffer.from(oneShotResult.stdout, "utf-8");
+							const header = Buffer.alloc(8);
+							header[0] = 1; // stdout
+							header.writeUInt32BE(payload.length, 4);
+							stream.write(Buffer.concat([header, payload]));
 							stream.end();
 						});
 					}
