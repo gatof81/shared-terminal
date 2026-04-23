@@ -137,7 +137,6 @@ const DENIED_ENV_VAR_PREFIXES = ["LD_", "DYLD_"];
 // for defensiveness — they're never legitimate env var names.
 const PROTOTYPE_POLLUTION_NAMES = new Set(["__proto__", "constructor", "prototype"]);
 
-
 export class EnvVarValidationError extends Error {
         constructor(message: string) {
                 super(message);
