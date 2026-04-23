@@ -456,8 +456,25 @@ export class DockerManager {
                 if (!meta.containerId) throw new Error("No container for this session");
 
                 const container = this.docker.getContainer(meta.containerId);
+                // `new-session -A` attaches if the tmux session exists, creates it
+                // if not. This is the self-healing path: if the tmux server died
+                // (OOM, user `exit`ed the last pane, crash) the very next WS attach
+                // respawns it transparently instead of hitting "no server running"
+                // and surfacing an error toast. The `-c` keeps the freshly-created
+                // session pointed at the workspace so a recreated tab doesn't land
+                // next to the entrypoint script.
+                //
+                // Trade-off: a recreated tab loses its @tab-label user-option (the
+                // label is stored in tmux memory, not D1, so a tmux restart wipes
+                // it). `listTabs` falls back to `session_name` for that case, which
+                // is an acceptable degradation — it's still reachable, just named
+                // after its id.
                 const exec = await container.exec({
-                        Cmd: ["tmux", "attach", "-t", tabId],
+                        Cmd: [
+                                "tmux", "new-session", "-A",
+                                "-s", tabId,
+                                "-c", "/home/developer/workspace",
+                        ],
                         AttachStdin: true,
                         AttachStdout: true,
                         AttachStderr: true,

@@ -59,11 +59,18 @@ function makeFakeContainer(oneShot?: OneShotHook): FakeContainer {
 			const resizes: Array<{ h: number; w: number }> = [];
 			streams.push(stream);
 
-			// One-shot tmux commands (list-sessions, new-session, set-option,
+			// One-shot tmux commands (list-sessions, new-session -d, set-option,
 			// kill-session, has-session) don't hijack the stream. If a test
-			// supplied a hook, let it decide the stdout + exit code. `tmux attach`
-			// is explicitly NOT a one-shot — it keeps a long-lived stream open.
-			const isAttach = opts.Cmd[0] === "tmux" && opts.Cmd[1] === "attach";
+			// supplied a hook, let it decide the stdout + exit code. Attaches
+			// (`tmux attach` or the self-healing `tmux new-session -A`) are
+			// explicitly NOT one-shots — they keep a long-lived stream open and
+			// the test drives output by writing to `container._streams[...]`.
+			const isAttach =
+				opts.Cmd[0] === "tmux" &&
+				(
+					opts.Cmd[1] === "attach" ||
+					(opts.Cmd[1] === "new-session" && opts.Cmd.includes("-A"))
+				);
 			const oneShotResult =
 				!isAttach && opts.Cmd[0] === "tmux" && opts.Tty === true && oneShot
 					? oneShot(opts.Cmd)
@@ -152,14 +159,16 @@ describe("DockerManager shared-exec multiplexing", () => {
 		// Block exec.start so both attaches queue up on the same in-flight spawn.
 		let resolveStart: ((val: PassThrough) => void) | null = null;
 		const origExec = container.exec;
-		container.exec = vi.fn(async () => {
+		container.exec = vi.fn(async (opts: { Cmd: string[] }) => {
 			const stream = new PassThrough();
 			container._streams.push(stream);
 			const exec: FakeExec = {
 				start: vi.fn(() => new Promise<PassThrough>((r) => { resolveStart = r; })),
 				resize: vi.fn(async () => { /* noop */ }),
+				inspect: vi.fn(async () => ({ ExitCode: 0 })),
 				_resizes: [],
 				_stream: stream,
+				_cmd: opts.Cmd,
 			};
 			container._execs.push(exec);
 			return exec;
@@ -267,11 +276,16 @@ describe("DockerManager tabs", () => {
 		await dm.attach("s1", "a1", 80, 24, aListener, "tab-a");
 		await dm.attach("s1", "b1", 80, 24, bListener, "tab-b");
 
-		// Two separate `tmux attach -t <tabId>` calls.
+		// Two separate attach execs, each via self-healing `tmux new-session -A`
+		// (see dockerManager.ts: same Cmd creates-or-attaches so a dead tmux
+		// server doesn't fail the user's click on a stale tab).
 		expect(container.exec).toHaveBeenCalledTimes(2);
-		const attachCmds = container._execs.map((e) => e._cmd.join(" "));
-		expect(attachCmds).toContain("tmux attach -t tab-a");
-		expect(attachCmds).toContain("tmux attach -t tab-b");
+		const attachA = container._execs.find((e) => e._cmd.includes("tab-a"))!;
+		const attachB = container._execs.find((e) => e._cmd.includes("tab-b"))!;
+		expect(attachA._cmd.slice(0, 3)).toEqual(["tmux", "new-session", "-A"]);
+		expect(attachA._cmd).toContain("tab-a");
+		expect(attachB._cmd.slice(0, 3)).toEqual(["tmux", "new-session", "-A"]);
+		expect(attachB._cmd).toContain("tab-b");
 
 		// tab-a's stream emits — only tab-a's listener fires.
 		const execA = container._execs.find((e) => e._cmd.includes("tab-a"))!;
