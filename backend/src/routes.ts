@@ -53,6 +53,13 @@ export function buildRouter(
                         res.status(400).json({ error: `username must be at most ${USERNAME_MAX_LEN} characters` });
                         return;
                 }
+                // The frontend always sends a string or omits the field, but a hand-
+                // crafted POST with `inviteCode: 123` would crash `.trim()` and
+                // surface as a 500. Guard at the boundary so callers get a clear 400.
+                if (inviteCode !== undefined && typeof inviteCode !== "string") {
+                        res.status(400).json({ error: "inviteCode must be a string" });
+                        return;
+                }
                 try {
                         const result = await registerUser(username, password, inviteCode?.trim() || undefined);
                         res.status(201).json(result);

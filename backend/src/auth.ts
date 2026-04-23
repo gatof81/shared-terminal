@@ -216,8 +216,17 @@ const MAX_UNUSED_INVITES_PER_USER = 20;
 // which a stolen JWT's pre-minted codes remain useful — the attacker has 20
 // quota slots, but anything they minted before losing the JWT becomes inert
 // after this window. Override via INVITE_EXPIRY_DAYS env var if a deployment
-// needs longer-lived invites.
-const INVITE_EXPIRY_DAYS = Number(process.env.INVITE_EXPIRY_DAYS) || 30;
+// needs longer-lived invites; "0" is a valid override (immediate expiry,
+// useful for tests) which `Number(x) || 30` would silently coerce to 30.
+const INVITE_EXPIRY_DAYS = ((): number => {
+        const raw = process.env.INVITE_EXPIRY_DAYS;
+        if (raw === undefined) return 30;
+        const n = Number(raw);
+        // Reject NaN / -Infinity / negative inputs by falling back to the
+        // default rather than producing nonsense expiry timestamps. `0` is
+        // explicitly allowed so a test can mint already-expired invites.
+        return Number.isFinite(n) && n >= 0 ? n : 30;
+})();
 
 export class InviteQuotaExceededError extends Error {
         constructor() {
