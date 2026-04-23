@@ -145,7 +145,6 @@ function countAttachExecs(container: FakeContainer): number {
 	).length;
 }
 
-
 // attach() now returns an armed listener (see dockerManager.attach() docs):
 // live bytes pile into a tail array until wsHandler calls flushTail(). Tests
 // that assert listener behaviour have to flush explicitly to mirror the

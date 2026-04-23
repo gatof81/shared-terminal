@@ -320,7 +320,6 @@ export function openTerminalSession(opts: {
         const ro = new ResizeObserver(scheduleFit);
         ro.observe(container);
 
-
         // ── Visibility / focus refresh ──────────────────────────────────────────
         // Backgrounded tabs get rAF throttled, so xterm's renderer stops
         // flushing dirty cells while the user is away. Output still streams

@@ -376,6 +376,15 @@ export class DockerManager {
                 // including colours and cursor attrs (the -e flag), so the replay
                 // is always a valid, self-contained redraw.
                 //
+                // Cost note: capture-pane is a separate `docker exec` per joiner.
+                // N simultaneous reconnecters to a popular session fire N sequential
+                // one-shots against the same container — there's no dedup window.
+                // The per-call cost is small (tens of ms each in practice) and the
+                // joiner already awaited spawnSharedExec, so this isn't on a path
+                // that blocks live bytes for other clients. If it ever becomes an
+                // amplifier we can cache a snapshot per-tab with a short TTL and
+                // hand it out to co-arriving joiners. Not worth the state today.
+                //
                 // ── Live-vs-replay ordering ───────────────────────────────────────
                 // We also have to deliver bytes to the client in the correct order:
                 // the replay must land BEFORE any live bytes that arrive afterwards
@@ -415,10 +424,15 @@ export class DockerManager {
                 console.log(`[docker] attached ${attachId} to session ${sessionId} (listeners=${s.listeners.size})`);
 
                 const flushTail = () => {
-                        // Drain in arrival order, then flip the gate. The gate flip MUST
-                        // come after the drain — otherwise a reentrant listener firing
-                        // during drain would call onOutput for a byte whose predecessor
-                        // is still queued, reordering us.
+                        // Drain in arrival order, then flip the gate. Node is
+                        // single-threaded so the for-of loop runs atomically w.r.t.
+                        // stream 'data' events (they queue on the event loop and can't
+                        // interleave with synchronous JS). The order still matters at
+                        // source level though: if we flipped `armed` before draining,
+                        // a later refactor that inserted an await inside the loop (say
+                        // for async onOutput) would let queued 'data' events wake up
+                        // mid-drain and race the tail. Drain-then-flip makes that
+                        // refactor-safe without needing to re-audit the invariant.
                         for (const chunk of tail) {
                                 try { onOutput(chunk); } catch { /* downstream error */ }
                         }
@@ -452,6 +466,12 @@ export class DockerManager {
                         const { stdout, exitCode } = await this.execOneShot(sessionId, [
                                 "tmux", "capture-pane", "-t", tabId, "-p", "-e",
                         ]);
+                        // A non-zero exit is the common "benign race" path: when
+                        // spawnSharedExec's `new-session -A` has just restarted tmux,
+                        // the server socket may not be ready when capture-pane races
+                        // it — tmux prints "no server running" and exits 1. Returning
+                        // "" here means the client starts with a blank pane and the
+                        // very next byte of live output redraws it. Intentional.
                         if (exitCode !== 0) return "";
                         // execOneShot strips \r so we can parse token-per-line output from
                         // tmux helpers cleanly. For a screen dump, xterm needs each line
