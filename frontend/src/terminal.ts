@@ -85,9 +85,10 @@ export function openTerminalSession(opts: {
         // Sleep/wake and monitor hot-plug cause the browser to park and then
         // reinstate the WebGL context. Re-attach the addon on restore so the
         // terminal doesn't stay on the slower DOM renderer until the next reload.
+        // webglcontextrestored bubbles, so listening on container is reliable
+        // regardless of which canvas layer xterm assigns the WebGL context to.
         // The `if (webgl) return` guard prevents thrashing when the context
         // bounces repeatedly (rare GPU driver bug).
-        const webglCanvas = webgl ? container.querySelector("canvas") : null;
         const onContextRestored = () => {
                 if (webgl) return;
                 try {
@@ -100,7 +101,7 @@ export function openTerminalSession(opts: {
                         console.warn("[terminal] WebGL restore failed:", err);
                 }
         };
-        webglCanvas?.addEventListener("webglcontextrestored", onContextRestored);
+        if (webgl) container.addEventListener("webglcontextrestored", onContextRestored);
 
         fitAddon.fit();
 
@@ -412,7 +413,7 @@ export function openTerminalSession(opts: {
                 container.removeEventListener("touchcancel", onTouchCancel);
                 inputDisposable.dispose();
                 linkProviderDisposable.dispose();
-                webglCanvas?.removeEventListener("webglcontextrestored", onContextRestored);
+                container.removeEventListener("webglcontextrestored", onContextRestored);
                 webgl?.dispose();
                 ws.close(1000, "User navigated away");
                 term.dispose();
