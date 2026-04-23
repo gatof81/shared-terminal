@@ -216,9 +216,7 @@ export class TabNotFoundError extends Error {
 
 export interface Invite {
         code: string;
-        createdBy: string;
         createdAt: string;
-        usedBy: string | null;
         usedAt: string | null;
         expiresAt: string | null;
 }

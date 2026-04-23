@@ -245,11 +245,12 @@ export class InviteQuotaExceededError extends Error {
         }
 }
 
+// Wire shape intentionally omits created_by (always the authenticated caller,
+// so redundant) and used_by (exposes another user's internal UUID for no UI
+// benefit — the frontend derives used/unused from `usedAt !== null`).
 export interface Invite {
         code: string;
-        createdBy: string;
         createdAt: string;
-        usedBy: string | null;
         usedAt: string | null;
         expiresAt: string | null;
 }
@@ -295,7 +296,7 @@ export async function createInvite(creatorUserId: string): Promise<Invite> {
         if (insert.meta.changes !== 1) {
                 throw new InviteQuotaExceededError();
         }
-        return { code, createdBy: creatorUserId, createdAt, usedBy: null, usedAt: null, expiresAt };
+        return { code, createdAt, usedAt: null, expiresAt };
 }
 
 // LIMIT bounds the response size so historical used/expired rows can't
@@ -306,7 +307,7 @@ const INVITE_LIST_LIMIT = 100;
 
 export async function listInvites(creatorUserId: string): Promise<Invite[]> {
         const result = await d1Query<InviteRow>(
-                "SELECT code, created_by, created_at, used_by, used_at, expires_at FROM invite_codes " +
+                "SELECT code, created_at, used_at, expires_at FROM invite_codes " +
                         "WHERE created_by = ? ORDER BY created_at DESC LIMIT ?",
                 [creatorUserId, INVITE_LIST_LIMIT],
         );
@@ -327,9 +328,7 @@ export async function revokeInvite(creatorUserId: string, code: string): Promise
 
 interface InviteRow {
         code: string;
-        created_by: string;
         created_at: string;
-        used_by: string | null;
         used_at: string | null;
         expires_at: string | null;
 }
@@ -337,9 +336,7 @@ interface InviteRow {
 function rowToInvite(row: InviteRow): Invite {
         return {
                 code: row.code,
-                createdBy: row.created_by,
                 createdAt: row.created_at,
-                usedBy: row.used_by,
                 usedAt: row.used_at,
                 expiresAt: row.expires_at,
         };

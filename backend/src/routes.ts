@@ -164,9 +164,6 @@ export function buildRouter(
         });
 
         // ── Authenticated route prefixes ────────────────────────────────────────
-        // Grouped so an auth-coverage audit is a single scan rather than a
-        // file-wide search. Order doesn't affect correctness — each `use(path,
-        // middleware)` only runs for routes mounted on that path *afterwards*.
 
         router.use("/invites", requireAuth);
         router.use("/sessions", requireAuth);
@@ -202,7 +199,7 @@ export function buildRouter(
                 }
         });
 
-        router.delete("/invites/:code", async (req: Request, res: Response) => {
+        router.delete("/invites/:code", invitesIp, async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
                 const { code } = req.params;
                 // Same 64-char ceiling as the inviteCode body field at register —
