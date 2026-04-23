@@ -36,10 +36,11 @@ export function openTerminalSession(opts: {
                         cursor: "#58a6ff",
                         selectionBackground: "#264f78",
                 },
-                fontFamily: '"Cascadia Code", "Fira Code", "JetBrains Mono", monospace',
+                fontFamily: '"Cascadia Code", "Fira Code", "JetBrains Mono", "Monaco", "Courier New", monospace',
                 fontSize: fontSize ?? 14,
                 lineHeight: 1.2,
                 cursorBlink: true,
+                cursorInactiveStyle: "outline",
                 convertEol: true,
                 allowProposedApi: true,
                 // Apps like Claude Code emit OSC 8 hyperlink escapes. xterm renders
@@ -295,7 +296,12 @@ export function openTerminalSession(opts: {
         const onVisibilityChange = () => {
                 if (document.hidden) return;
                 scheduleFit();
-                webgl?.clearTextureAtlas();
+                try {
+                        webgl?.clearTextureAtlas();
+                } catch {
+                        webgl?.dispose();
+                        webgl = null;
+                }
                 term.refresh(0, term.rows - 1);
         };
         const onWindowFocus = () => {

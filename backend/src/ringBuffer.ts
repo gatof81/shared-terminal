@@ -17,12 +17,12 @@ export class RingBuffer {
 
         push(data: string): void {
                 this.chunks.push(data);
-                this.totalBytes += data.length;
+                this.totalBytes += Buffer.byteLength(data, "utf8");
 
                 // Evict oldest chunks until we are back within capacity.
                 while (this.totalBytes > this.capacityBytes && this.chunks.length > 0) {
                         const evicted = this.chunks.shift()!;
-                        this.totalBytes -= evicted.length;
+                        this.totalBytes -= Buffer.byteLength(evicted, "utf8");
                 }
         }
 
