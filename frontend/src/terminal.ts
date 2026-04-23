@@ -111,10 +111,12 @@ export function openTerminalSession(opts: {
                 new MultilineUrlLinkProvider(term),
         );
 
-        // Mobile: tapping the terminal should move the keyboard caret here so
-        // the user can actually type. xterm only auto-focuses on mouse clicks,
-        // not on touch taps inside its helper textarea layout.
-        const focusOnPointer = () => term.focus();
+        // Mouse clicks should focus xterm immediately. Touch taps are handled
+        // in onTouchEnd below — we wait until touchend to distinguish a tap
+        // from a scroll gesture so a swipe doesn't pop the keyboard mid-drag.
+        const focusOnPointer = (ev: PointerEvent) => {
+                if (ev.pointerType !== "touch") term.focus();
+        };
         container.addEventListener("pointerdown", focusOnPointer);
 
         // ── WebSocket connection ────────────────────────────────────────────────
@@ -194,11 +196,13 @@ export function openTerminalSession(opts: {
         // Direction follows iOS/Android convention — content tracks the
         // finger: drag up → view moves up → scroll toward newer (bottom).
         let lastTouchY: number | null = null;
+        let touchIsScroll = false; // true once the gesture has moved ≥1 cell
         const getCellHeight = () => (term.rows > 0 ? container.clientHeight / term.rows : 20);
 
         const onTouchStart = (ev: TouchEvent) => {
-                if (ev.touches.length !== 1) { lastTouchY = null; return; }
+                if (ev.touches.length !== 1) { lastTouchY = null; touchIsScroll = false; return; }
                 lastTouchY = ev.touches[0]!.clientY;
+                touchIsScroll = false;
         };
         const onTouchMove = (ev: TouchEvent) => {
                 if (lastTouchY === null || ev.touches.length !== 1) return;
@@ -207,6 +211,12 @@ export function openTerminalSession(opts: {
                 const deltaPx = lastTouchY - y;
                 const lines = Math.trunc(deltaPx / cellH);
                 if (lines === 0) return;
+
+                touchIsScroll = true;
+                // Prevent xterm from treating the drag as a text-selection gesture
+                // (touch-action:none is set in CSS, so this won't cause a passive
+                // event listener warning).
+                ev.preventDefault();
 
                 if (term.buffer.active.type === "alternate") {
                         // Cap the burst so a fast flick doesn't fire 100+ arrows
@@ -219,12 +229,21 @@ export function openTerminalSession(opts: {
                 }
                 lastTouchY -= lines * cellH;
         };
-        const onTouchEnd = () => { lastTouchY = null; };
+        const onTouchEnd = () => {
+                // If the finger never moved a full cell it was a tap: focus xterm
+                // so the OS keyboard appears for typing. Scroll gestures skip this
+                // so the keyboard doesn't flash open mid-swipe.
+                if (!touchIsScroll) term.focus();
+                lastTouchY = null;
+                touchIsScroll = false;
+        };
+        const onTouchCancel = () => { lastTouchY = null; touchIsScroll = false; };
 
         container.addEventListener("touchstart", onTouchStart, { passive: true });
-        container.addEventListener("touchmove", onTouchMove, { passive: true });
+        // passive:false required so ev.preventDefault() can stop xterm's drag-selection
+        container.addEventListener("touchmove", onTouchMove, { passive: false });
         container.addEventListener("touchend", onTouchEnd, { passive: true });
-        container.addEventListener("touchcancel", onTouchEnd, { passive: true });
+        container.addEventListener("touchcancel", onTouchCancel, { passive: true });
 
         // ── Resize ──────────────────────────────────────────────────────────────
         // ResizeObserver fires continuously during mobile viewport churn (URL
@@ -307,7 +326,7 @@ export function openTerminalSession(opts: {
                 container.removeEventListener("touchstart", onTouchStart);
                 container.removeEventListener("touchmove", onTouchMove);
                 container.removeEventListener("touchend", onTouchEnd);
-                container.removeEventListener("touchcancel", onTouchEnd);
+                container.removeEventListener("touchcancel", onTouchCancel);
                 inputDisposable.dispose();
                 linkProviderDisposable.dispose();
                 webgl?.dispose();
