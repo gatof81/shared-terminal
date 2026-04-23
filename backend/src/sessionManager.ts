@@ -6,7 +6,7 @@
 
 import { v4 as uuidv4 } from "uuid";
 import { d1Query } from "./db.js";
-import { SessionMeta, SessionStatus, CreateSessionOpts } from "./types.js";
+import type { CreateSessionOpts, SessionMeta, SessionStatus } from "./types.js";
 
 // ── Custom errors ───────────────────────────────────────────────────────────
 
@@ -101,7 +101,7 @@ interface SessionRow {
 // ISO 8601 offsets like `+00:00`.
 function parseD1UtcTimestamp(raw: string): Date {
         const hasSuffix = /[zZ]$/.test(raw) || /[+-]\d{2}:?\d{2}$/.test(raw);
-        const d = new Date(hasSuffix ? raw : raw + "Z");
+        const d = new Date(hasSuffix ? raw : `${raw}Z`);
         if (Number.isNaN(d.getTime())) {
                 // Better to crash loudly here than return "Invalid Date" that
                 // would later serialize to null in JSON.
@@ -163,7 +163,18 @@ export class SessionManager {
                         throw new SessionQuotaExceededError(MAX_ACTIVE_SESSIONS_PER_USER);
                 }
 
-                return (await this.get(sessionId))!;
+                const meta = await this.get(sessionId);
+                if (!meta) {
+                        // Unreachable in practice: we just inserted this row and
+                        // confirmed changes === 1. Guard anyway so the return type
+                        // is honest (no non-null assertion) and a hypothetical
+                        // read-after-write hiccup becomes a loud error rather than
+                        // a TypeError downstream when callers access .sessionId.
+                        throw new Error(
+                                `sessionManager.create: session ${sessionId} missing from D1 after insert`,
+                        );
+                }
+                return meta;
         }
 
         async get(sessionId: string): Promise<SessionMeta | null> {
