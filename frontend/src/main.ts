@@ -844,6 +844,10 @@ mainEl.setAttribute("data-sidebar-ready", "");
 function openInvitesModal() {
         invitesModal.classList.add("open");
         invitesModal.setAttribute("aria-hidden", "false");
+        // Move focus into the dialog so a keyboard user activating the Invites
+        // button via Enter doesn't have their first Tab walk through the page
+        // behind the backdrop. Mirrors the invitesBtn.focus() in close.
+        inviteCreateBtn.focus();
         void renderInvites();
 }
 

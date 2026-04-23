@@ -106,14 +106,22 @@ export async function registerUser(
         // Bootstrap exception: the very first account doesn't need an invite,
         // since there's nobody to issue one. Every subsequent register must
         // claim an unused invite_codes row atomically.
-        const isBootstrap = !(await hasAnyUsers());
-
-        if (isBootstrap) {
+        //
+        // Only call hasAnyUsers() when no inviteCode was provided — the
+        // steady-state register-with-invite path doesn't need to know whether
+        // bootstrap is open, so skipping the round-trip cuts D1 chatter on
+        // the hot path. When the caller did supply a code, they couldn't be
+        // a bootstrap anyway (no codes exist yet), so skipping is also
+        // semantically correct.
+        if (!inviteCode) {
+                const isBootstrap = !(await hasAnyUsers());
+                if (!isBootstrap) {
+                        throw new InviteRequiredError("Invite code required");
+                }
                 // INSERT … WHERE NOT EXISTS closes the bootstrap TOCTOU window:
                 // hasAnyUsers() and INSERT are separate D1 round-trips, so two
                 // simultaneous first-ever registers could both observe zero users
-                // without this guard. Only one of them gets `meta.changes === 1`;
-                // the loser falls through to the invite-required path below.
+                // without this guard. Only one of them gets `meta.changes === 1`.
                 //
                 // Bootstrap is the one path where we hash before validating an
                 // invite — there's nothing to validate, and we need the hash for
@@ -128,11 +136,9 @@ export async function registerUser(
                 if (insert.meta.changes === 1) {
                         return { userId, token: signToken(userId, username) };
                 }
-                // Race loser: a concurrent bootstrap got there first. Require an
-                // invite from this point on, just like the steady-state path.
-        }
-
-        if (!inviteCode) {
+                // Race loser: a concurrent bootstrap got there first and we have
+                // no invite to fall back on. Match the steady-state response so
+                // the user can retry once they've been given a code.
                 throw new InviteRequiredError("Invite code required");
         }
         // Atomic claim: the WHERE used_at IS NULL clause prevents two concurrent
@@ -222,7 +228,11 @@ const MAX_UNUSED_INVITES_PER_USER = 20;
 const INVITE_EXPIRY_MIN_DAYS = 1 / 1440; // 1 minute
 const INVITE_EXPIRY_DAYS = ((): number => {
         const raw = process.env.INVITE_EXPIRY_DAYS;
-        if (raw === undefined) return 30;
+        // Treat blank ("" or whitespace-only) the same as unset. Without this
+        // Number("") === 0 would slip past the finite/non-negative check and
+        // land at the 1-minute floor — an operator who blanks the variable in
+        // a secrets manager would silently get near-zero TTL.
+        if (raw === undefined || raw.trim() === "") return 30;
         const n = Number(raw);
         if (!Number.isFinite(n) || n < 0) return 30;
         return Math.max(n, INVITE_EXPIRY_MIN_DAYS);
