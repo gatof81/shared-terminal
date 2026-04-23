@@ -28,7 +28,7 @@ export function buildRouter(
 
         // ── Auth routes (public) ────────────────────────────────────────────────
 
-        const { loginIp, registerIp } = createAuthRateLimiters(rateLimitConfig);
+        const { loginIp, registerIp, invitesIp } = createAuthRateLimiters(rateLimitConfig);
         const usernameLimiter = new UsernameRateLimiter(
                 rateLimitConfig.login.usernameMax,
                 rateLimitConfig.login.usernameWindowMs,
@@ -67,8 +67,22 @@ export function buildRouter(
                         res.status(400).json({ error: "inviteCode must be at most 64 characters" });
                         return;
                 }
+                // Distinguish "field absent" from "field present but whitespace-only".
+                // Without this, `inviteCode = "   "` would trim to "" and `|| undefined`
+                // would coerce it to absent, surfacing as "Invite code required" instead
+                // of "invalid". Whitespace-only is an explicit attempt — treat it as
+                // an invalid code so the user sees the right error.
+                let trimmedInviteCode: string | undefined;
+                if (inviteCode === undefined) {
+                        trimmedInviteCode = undefined;
+                } else if (inviteCode.trim() === "") {
+                        res.status(403).json({ error: "Invite code is invalid, expired, or already used" });
+                        return;
+                } else {
+                        trimmedInviteCode = inviteCode.trim();
+                }
                 try {
-                        const result = await registerUser(username, password, inviteCode?.trim() || undefined);
+                        const result = await registerUser(username, password, trimmedInviteCode);
                         res.status(201).json(result);
                 } catch (err) {
                         if (err instanceof InviteRequiredError) {
@@ -173,7 +187,7 @@ export function buildRouter(
                 }
         });
 
-        router.post("/invites", async (req: Request, res: Response) => {
+        router.post("/invites", invitesIp, async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
                 try {
                         const invite = await createInvite(userId);

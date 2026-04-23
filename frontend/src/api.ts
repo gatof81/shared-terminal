@@ -240,6 +240,12 @@ export async function createInvite(): Promise<Invite> {
 
 export async function revokeInvite(code: string): Promise<void> {
         const res = await apiFetch(`/invites/${encodeURIComponent(code)}`, { method: "DELETE" });
+        // 404 means the row is already gone (concurrent revoke from another
+        // tab, or the invite was redeemed in the interim). The user-visible
+        // outcome — "the code is no longer in the list" — is identical to a
+        // 204, so swallow it. Without this, two tabs racing on the same code
+        // would show one success and one spurious "not found" toast.
+        if (res.status === 404) return;
         if (!res.ok) {
                 const body = await res.json().catch(() => ({}));
                 throw new Error(body.error ?? "Failed to revoke invite");
