@@ -13,7 +13,6 @@ import {
         SESSION_EXPIRED_EVENT,
         type SessionInfo, type Tab, type Invite,
 } from "./api.js";
-
 import { openTerminalSession, type TerminalSession, type SessionStatus } from "./terminal.js";
 
 // ── DOM refs ────────────────────────────────────────────────────────────────

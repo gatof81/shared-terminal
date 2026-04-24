@@ -32,7 +32,6 @@ export const SESSION_EXPIRED_EVENT = "st:session-expired";
 
 export async function checkAuthStatus(): Promise<{ needsSetup: boolean }> {
         const res = await apiFetch("/auth/status");
-
         return res.json();
 }
 
@@ -262,31 +261,18 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
         }
         const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
 
-        // Centralised stale-token handling. Fires for #95: without this, the
-        // 15 s session poll produces an error toast every 15 s forever once
-        // the JWT expires, because nothing in the app clears _token on 401.
+        // Centralised stale-token handling (#95). Without this, the 15 s
+        // session poll toasts an error every 15 s forever once the JWT
+        // expires, because nothing else clears _token on 401.
         //
-        // Three-way guard:
-        //   1. sentAuth   — only touch token state when we actually offered
-        //                   one. /auth/login 401 (wrong password) must NOT
-        //                   log the already-logged-in-in-another-tab user
-        //                   out; it's a distinct failure mode.
-        //   2. 401 status — 403 is "insufficient privilege", not "your token
-        //                   is dead". Don't conflate them.
-        //   3. _token !== null at emit time — a burst of N concurrent authed
-        //                   requests all race to 401 together (e.g. the
-        //                   session poll + a user-triggered listTabs). First
-        //                   one through clears _token; subsequent ones
-        //                   short-circuit here so the event fires once, not
-        //                   N times. Without this guard, the listener in
-        //                   main.ts would toast N times and call showAuth()
-        //                   N times (harmless but wasteful).
-        //
-        // The response itself is still returned unchanged — callers that
-        // want to show a more specific error can still read body/status.
-        // In practice the session-expired event swaps the UI to the auth
-        // view before those paths render, so the caller's error path is a
-        // no-op on screen.
+        // - sentAuth (captured pre-fetch) distinguishes authed 401s from
+        //   unauthed ones like a wrong-password /auth/login on a session
+        //   that already has a token — we mustn't clear auth state on that.
+        // - 401 is specifically "token stale"; 403 is policy and must not
+        //   trigger a logout.
+        // - _token !== null dedups concurrent 401 bursts (session poll +
+        //   a user-triggered call racing): the first setToken(null) through
+        //   silences the rest so the event fires exactly once per burst.
         if (sentAuth && res.status === 401 && _token !== null) {
                 setToken(null);
                 window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT));
@@ -294,4 +280,3 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
 
         return res;
 }
-
