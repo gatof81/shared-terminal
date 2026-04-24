@@ -1,0 +1,730 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+body {
+  font-family: system-ui, sans-serif;
+  background: #0d1117;
+  color: #e6edf3;
+  /* --app-vh is pinned by main.ts off visualViewport.height so the
+     terminal fits between the status/address bar and the soft
+     keyboard on mobile — dvh alone doesn't account for iOS's
+     keyboard overlay. Falls back to 100dvh on browsers without
+     visualViewport. */
+  height: var(--app-vh, 100dvh);
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Utilities ──────────────────────────────────────────────── */
+.hidden {
+  display: none !important;
+}
+
+/* ── Auth view ──────────────────────────────────────────────── */
+#auth-view {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  background: #0d1117;
+}
+.auth-card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  padding: 2rem;
+  width: 340px;
+  max-width: 90vw;
+}
+.auth-card h2 {
+  text-align: center;
+  margin-bottom: 1.5rem;
+  color: #58a6ff;
+  font-size: 1.3rem;
+}
+.auth-card input {
+  display: block;
+  width: 100%;
+  padding: 0.6rem 0.8rem;
+  margin-bottom: 0.8rem;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #e6edf3;
+  font-size: 0.9rem;
+  outline: none;
+}
+.auth-card input:focus {
+  border-color: #58a6ff;
+}
+.auth-card button[type="submit"] {
+  width: 100%;
+  padding: 0.6rem;
+  background: #238636;
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 0.9rem;
+  cursor: pointer;
+  font-weight: 600;
+  margin-top: 0.4rem;
+}
+.auth-card button:hover {
+  background: #2ea043;
+}
+#auth-error {
+  color: #f85149;
+  font-size: 0.8rem;
+  min-height: 1.2rem;
+  margin-bottom: 0.5rem;
+  text-align: center;
+}
+#auth-toggle {
+  text-align: center;
+  margin-top: 1rem;
+  font-size: 0.8rem;
+  color: #8b949e;
+}
+#auth-toggle a {
+  color: #58a6ff;
+  text-decoration: none;
+}
+
+/* ── App view ───────────────────────────────────────────────── */
+#app-view {
+  display: none;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1.25rem;
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+  flex-shrink: 0;
+}
+header h1 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #58a6ff;
+}
+#sidebar-toggle {
+  background: transparent;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #8b949e;
+  padding: 0.3rem 0.55rem;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+#sidebar-toggle:hover {
+  border-color: #58a6ff;
+  color: #58a6ff;
+}
+#sidebar-toggle svg {
+  display: block;
+}
+.header-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+#user-display {
+  font-size: 0.8rem;
+  color: #3fb950;
+}
+#logout-btn {
+  background: transparent;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #8b949e;
+  font-size: 0.75rem;
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+}
+#logout-btn:hover {
+  border-color: #f85149;
+  color: #f85149;
+}
+#invites-btn {
+  background: transparent;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #8b949e;
+  font-size: 0.75rem;
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+}
+#invites-btn:hover {
+  border-color: #58a6ff;
+  color: #58a6ff;
+}
+
+/* ── Modal (invites) ────────────────────────────────────────── */
+.modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  align-items: center;
+  justify-content: center;
+}
+.modal.open {
+  display: flex;
+}
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+}
+.modal-card {
+  position: relative;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  padding: 1.25rem 1.25rem 1rem;
+  width: 480px;
+  max-width: 92vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+.modal-header h2 {
+  font-size: 1rem;
+  color: #e6edf3;
+  font-weight: 600;
+}
+.modal-close {
+  background: transparent;
+  border: none;
+  color: #8b949e;
+  font-size: 1.4rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 0.4rem;
+  border-radius: 4px;
+}
+.modal-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e6edf3;
+}
+.modal-hint {
+  font-size: 0.78rem;
+  color: #8b949e;
+  margin-bottom: 0.85rem;
+  line-height: 1.45;
+}
+#invite-create-btn {
+  background: #238636;
+  border: none;
+  border-radius: 6px;
+  padding: 0.45rem 0.75rem;
+  color: #fff;
+  font-size: 0.82rem;
+  cursor: pointer;
+  margin-bottom: 0.85rem;
+  align-self: flex-start;
+}
+#invite-create-btn:hover {
+  background: #2ea043;
+}
+#invite-create-btn:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+.invite-list {
+  flex: 1;
+  overflow-y: auto;
+  border-top: 1px solid #21262d;
+  padding-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.invite-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.45rem 0.6rem;
+  background: #0d1117;
+  border: 1px solid #21262d;
+  border-radius: 6px;
+  font-size: 0.8rem;
+}
+.invite-row.used {
+  opacity: 0.55;
+}
+.invite-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #e6edf3;
+  flex: 1;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.invite-status {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #8b949e;
+}
+.invite-status.unused {
+  color: #3fb950;
+}
+.invite-action-btn {
+  background: transparent;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  color: #8b949e;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+.invite-action-btn:hover {
+  color: #e6edf3;
+  border-color: #58a6ff;
+}
+.invite-action-btn.revoke:hover {
+  color: #f85149;
+  border-color: #f85149;
+}
+.invite-empty {
+  text-align: center;
+  color: #8b949e;
+  font-size: 0.8rem;
+  padding: 1rem 0;
+}
+
+main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 0 1fr;
+  overflow: hidden;
+  transition: grid-template-columns 0.2s ease;
+  position: relative;
+}
+main.sidebar-open {
+  grid-template-columns: 260px 1fr;
+}
+/* Suppress the column transition during the JS-driven init pass so
+   desktop doesn't see a 0→260px expand on every page load. main.ts
+   removes this attribute after applying the initial state. */
+main:not([data-sidebar-ready]),
+main:not([data-sidebar-ready]) #sidebar {
+  transition: none !important;
+}
+
+/* ── Sidebar ────────────────────────────────────────────────── */
+#sidebar {
+  background: #161b22;
+  border-right: 1px solid #30363d;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+#sidebar-backdrop {
+  /* Pulled out of flow unconditionally so a future style edit can't
+     accidentally let the backdrop occupy a grid track and collapse
+     the terminal to a second row of zero height. The mobile rule
+     below only flips `display`, never `position`. */
+  position: absolute;
+  inset: 0;
+  display: none;
+}
+#sidebar-header {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #30363d;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+#sidebar-header h2 {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #8b949e;
+}
+#show-terminated-label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.7rem;
+  color: #8b949e;
+  cursor: pointer;
+  user-select: none;
+}
+#show-terminated-label input {
+  accent-color: #58a6ff;
+  cursor: pointer;
+}
+#new-session-form {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #30363d;
+  display: flex;
+  gap: 0.5rem;
+}
+#new-session-form input {
+  flex: 1;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.8rem;
+  color: #e6edf3;
+  outline: none;
+}
+#new-session-form input:focus {
+  border-color: #58a6ff;
+}
+#new-session-form button {
+  background: #238636;
+  border: none;
+  border-radius: 6px;
+  padding: 0.35rem 0.65rem;
+  color: #fff;
+  font-size: 0.8rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+#new-session-form button:hover {
+  background: #2ea043;
+}
+#session-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.5rem;
+}
+
+.session-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: 6px;
+  cursor: pointer;
+  margin-bottom: 2px;
+  transition: background 0.1s;
+}
+.session-item:hover {
+  background: #21262d;
+}
+.session-item.active {
+  background: #1f3348;
+}
+.session-item.terminated .session-name {
+  color: #8b949e;
+  font-style: italic;
+}
+.session-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.session-dot.running {
+  background: #3fb950;
+}
+.session-dot.stopped {
+  background: #e3b341;
+}
+.session-dot.terminated {
+  background: #f85149;
+}
+.session-name {
+  flex: 1;
+  font-size: 0.82rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-actions {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+}
+.session-item:hover .session-actions {
+  opacity: 1;
+}
+.session-action-btn,
+.session-kill {
+  background: transparent;
+  border: none;
+  font-size: 0.75rem;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.session-action-btn.start {
+  color: #3fb950;
+}
+.session-action-btn.stop {
+  color: #e3b341;
+}
+.session-kill {
+  color: #f85149;
+}
+.session-action-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+.session-kill:hover {
+  background: rgba(248, 81, 73, 0.15);
+}
+
+/* ── Terminal area ──────────────────────────────────────────── */
+#terminal-area {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+#terminal-toolbar {
+  padding: 0.5rem 1rem;
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+  font-size: 0.78rem;
+  color: #8b949e;
+  display: none;
+  align-items: center;
+  gap: 0.75rem;
+  flex-shrink: 0;
+}
+#terminal-session-name {
+  color: #e6edf3;
+  font-weight: 500;
+}
+#terminal-status-badge {
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+#terminal-status-badge.running {
+  background: rgba(63, 185, 80, 0.2);
+  color: #3fb950;
+}
+#terminal-status-badge.stopped {
+  background: rgba(227, 179, 65, 0.2);
+  color: #e3b341;
+}
+#terminal-status-badge.disconnected {
+  background: rgba(139, 148, 158, 0.2);
+  color: #8b949e;
+}
+#font-size-btn {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #8b949e;
+  font-size: 0.75rem;
+  padding: 0.2rem 0.55rem;
+  cursor: pointer;
+  line-height: 1;
+}
+#font-size-btn:hover {
+  border-color: #58a6ff;
+  color: #58a6ff;
+}
+#terminal-tabs {
+  display: none;
+  align-items: stretch;
+  gap: 4px;
+  padding: 4px 8px 0 8px;
+  background: #0d1117;
+  border-bottom: 1px solid #30363d;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  flex-shrink: 0;
+}
+.tab-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.55rem;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  color: #8b949e;
+  font-size: 0.78rem;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+  max-width: 200px;
+}
+.tab-chip:hover {
+  background: #1c222b;
+  color: #e6edf3;
+}
+.tab-chip.active {
+  background: #0d1117;
+  color: #e6edf3;
+  border-color: #30363d;
+  position: relative;
+  top: 1px;
+}
+.tab-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* Flex children default to min-width: auto, which prevents shrink
+     below content width and makes ellipsis dead. */
+  min-width: 0;
+}
+.tab-close {
+  background: transparent;
+  border: none;
+  color: #8b949e;
+  font-size: 0.9rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  opacity: 0;
+}
+.tab-chip:hover .tab-close,
+.tab-chip.active .tab-close {
+  opacity: 1;
+}
+.tab-close:hover {
+  background: rgba(248, 81, 73, 0.2);
+  color: #f85149;
+}
+.tab-close:disabled {
+  cursor: not-allowed;
+  opacity: 0.2 !important;
+}
+#tab-add {
+  background: transparent;
+  border: 1px dashed #30363d;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  color: #8b949e;
+  font-size: 0.9rem;
+  padding: 0.2rem 0.55rem;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+#tab-add:hover {
+  border-color: #58a6ff;
+  color: #58a6ff;
+}
+#tab-add:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+#terminal-container {
+  flex: 1;
+  overflow: hidden;
+  padding: 4px;
+  background: #0d1117;
+  display: none;
+  position: relative;
+}
+/* Panes stack absolutely; toggling .active avoids remounting xterm. */
+.tab-pane {
+  position: absolute;
+  inset: 4px;
+  display: none;
+}
+.tab-pane.active {
+  display: block;
+}
+#terminal-container .xterm {
+  height: 100%;
+}
+/* Stop the OS from claiming vertical drags as page-scroll — our
+   touch handler in terminal.ts routes them to term.scrollLines or
+   synthetic arrow keys. touch-action has to be on xterm's own
+   layers, not just the wrapping container. */
+#terminal-container .xterm,
+#terminal-container .xterm-viewport,
+#terminal-container .xterm-screen {
+  touch-action: none;
+}
+#empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: #8b949e;
+  font-size: 0.9rem;
+}
+
+/* ── Toast ──────────────────────────────────────────────────── */
+#toast {
+  position: fixed;
+  bottom: 1.5rem;
+  right: 1.5rem;
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 0.6rem 1rem;
+  font-size: 0.82rem;
+  max-width: 360px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+}
+#toast.visible {
+  opacity: 1;
+}
+#toast.error {
+  border-color: #f85149;
+  color: #f85149;
+}
+
+/* ── Mobile ─────────────────────────────────────────────────── */
+/* Breakpoint mirrored in main.ts as MOBILE_BREAKPOINT_PX — keep in sync. */
+@media (max-width: 768px) {
+  /* Drop the grid column entirely on mobile — the sidebar floats
+     over the terminal as a drawer instead of pushing it. */
+  main,
+  main.sidebar-open {
+    grid-template-columns: 1fr;
+  }
+  #sidebar {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(280px, 85vw);
+    z-index: 20;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: 4px 0 16px rgba(0, 0, 0, 0.4);
+  }
+  main.sidebar-open #sidebar {
+    transform: translateX(0);
+  }
+  main.sidebar-open #sidebar-backdrop {
+    /* `position: absolute; inset: 0` lives on the base #sidebar-backdrop
+       rule so the element is unconditionally out of grid flow — the
+       only mobile-specific bit here is paint + stacking. */
+    display: block;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 15;
+  }
+}
