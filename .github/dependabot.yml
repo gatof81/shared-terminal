@@ -1,0 +1,20 @@
+version: 2
+
+# github-actions ecosystem: keeps the SHA pins in .github/workflows/*.yml
+# current. Without this, SHA-pinning locks us to a specific action version
+# forever and we miss security fixes in newer releases. Dependabot opens a
+# PR per update with the new SHA and a version comment, so the pin stays
+# explicit but tracked.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # Collapse all action updates into a single PR so we don't end up
+      # with N separate PRs on a quiet week.
+      actions:
+        patterns:
+          - "*"
