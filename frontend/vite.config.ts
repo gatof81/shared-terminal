@@ -15,9 +15,13 @@ export default defineConfig(({ mode }) => {
 	const apiUrl = env.VITE_API_URL || "http://localhost:3001";
 	const wsUrl = apiUrl.replace(/^http(s?):\/\//, "ws$1://");
 
+	// script-src kept at 'self' — Vite 8 uses native ESM in dev, no eval.
+	// style-src still allows 'unsafe-inline' because xterm's DOM-renderer
+	// fallback (used when WebGL is unavailable) writes per-cell styles via
+	// setAttribute('style', …), which CSP classifies as inline.
 	const csp = [
 		"default-src 'self'",
-		"script-src 'self' 'unsafe-eval' 'unsafe-inline'",
+		"script-src 'self'",
 		"style-src 'self' 'unsafe-inline'",
 		"img-src 'self' data: blob:",
 		"font-src 'self' data:",

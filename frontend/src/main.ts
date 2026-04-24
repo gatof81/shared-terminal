@@ -5,11 +5,17 @@
  * and terminal panel lifecycle.
  */
 
+// Side-effect import: Vite bundles and injects this stylesheet. Kept as the
+// first import so rules land in the document before any module-side DOM
+// manipulation, minimising FOUC.
+import "./main.css";
+
 import {
         isLoggedIn, login, register, logout, checkAuthStatus,
         listSessions, createSession, deleteSession, stopSession, startSession,
         listTabs, createTab, deleteTab, TabNotFoundError,
         listInvites, createInvite, revokeInvite, InviteRequiredError,
+        SESSION_EXPIRED_EVENT,
         type SessionInfo, type Tab, type Invite,
 } from "./api.js";
 import { openTerminalSession, type TerminalSession, type SessionStatus } from "./terminal.js";
@@ -58,9 +64,9 @@ const toast = document.getElementById("toast")!;
 // and as the URL bar shows/hides — we mirror its height into --app-vh so the
 // xterm host container refits to the space actually visible to the user.
 function syncViewportHeight() {
-	const vv = window.visualViewport;
-	const h = vv ? vv.height : window.innerHeight;
-	document.documentElement.style.setProperty("--app-vh", `${h}px`);
+        const vv = window.visualViewport;
+        const h = vv ? vv.height : window.innerHeight;
+        document.documentElement.style.setProperty("--app-vh", `${h}px`);
 }
 syncViewportHeight();
 window.visualViewport?.addEventListener("resize", syncViewportHeight);
@@ -74,9 +80,9 @@ const FONT_SIZE_STEPS = [11, 12, 13, 14, 15, 16, 18];
 const DEFAULT_FONT_SIZE = 14;
 const FONT_SIZE_KEY = "shared-terminal:font-size";
 function readFontSize(): number {
-	const raw = localStorage.getItem(FONT_SIZE_KEY);
-	const n = raw ? Number.parseInt(raw, 10) : DEFAULT_FONT_SIZE;
-	return FONT_SIZE_STEPS.includes(n) ? n : DEFAULT_FONT_SIZE;
+        const raw = localStorage.getItem(FONT_SIZE_KEY);
+        const n = raw ? Number.parseInt(raw, 10) : DEFAULT_FONT_SIZE;
+        return FONT_SIZE_STEPS.includes(n) ? n : DEFAULT_FONT_SIZE;
 }
 let currentFontSize = readFontSize();
 
@@ -239,12 +245,37 @@ authForm.addEventListener("submit", async (e) => {
         }
 });
 
-logoutBtn.addEventListener("click", () => {
+// Shared teardown for both the explicit logout button and the auto-triggered
+// session-expired path below. Idempotent: `logout()` clears the already-null
+// token on a second call, disposeAllCurrentTerminals() handles an empty
+// terminal map, and showAuth() just re-applies display styles. So the burst
+// case (multiple 401s briefly racing before _token is cleared) is safe even
+// though apiFetch's `_token !== null` guard already deduplicates.
+function handleLogout(toastMessage?: string): void {
         logout();
         disposeAllCurrentTerminals();
         activeSessionId = null;
         sessions = [];
         showAuth();
+        if (toastMessage) showToast(toastMessage, true);
+}
+
+logoutBtn.addEventListener("click", () => {
+        handleLogout();
+});
+
+// Listen for the api-layer signal that our JWT is no longer accepted (#95).
+// Without this, a `refreshSessions()` tick 15 s after expiry produces a
+// 401 → red toast, the next tick does the same, and so on forever because
+// nothing was clearing `_token`. api.ts now clears the token at the 401 and
+// dispatches this event; we pair that with a UI transition back to the
+// login view and a single explanatory toast.
+//
+// One-shot per burst: apiFetch's internal `_token !== null` guard ensures
+// the event fires at most once per 401 burst, so we don't need extra
+// debouncing here.
+window.addEventListener(SESSION_EXPIRED_EVENT, () => {
+        handleLogout("Your session has expired — please sign in again");
 });
 
 // ── Session management ──────────────────────────────────────────────────────
@@ -858,18 +889,18 @@ mainEl.setAttribute("data-sidebar-ready", "");
 // ── Font size cycle button ──────────────────────────────────────────────────
 
 function nextFontSize(current: number): number {
-	const i = FONT_SIZE_STEPS.indexOf(current);
-	if (i === -1) return DEFAULT_FONT_SIZE;
-	return FONT_SIZE_STEPS[(i + 1) % FONT_SIZE_STEPS.length]!;
+        const i = FONT_SIZE_STEPS.indexOf(current);
+        if (i === -1) return DEFAULT_FONT_SIZE;
+        return FONT_SIZE_STEPS[(i + 1) % FONT_SIZE_STEPS.length]!;
 }
 
 fontSizeBtn.addEventListener("click", () => {
-	currentFontSize = nextFontSize(currentFontSize);
-	localStorage.setItem(FONT_SIZE_KEY, String(currentFontSize));
-	fontSizeBtn.textContent = `Aa ${currentFontSize}`;
-	for (const { term } of currentTerminals.values()) {
-		term.setFontSize(currentFontSize);
-	}
+        currentFontSize = nextFontSize(currentFontSize);
+        localStorage.setItem(FONT_SIZE_KEY, String(currentFontSize));
+        fontSizeBtn.textContent = `Aa ${currentFontSize}`;
+        for (const { term } of currentTerminals.values()) {
+                term.setFontSize(currentFontSize);
+        }
 });
 // Reflect the persisted size in the label on load so users see e.g. "Aa 16"
 // rather than a generic "Aa" after they've picked their size once.
