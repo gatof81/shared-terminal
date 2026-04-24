@@ -581,14 +581,61 @@ function openTab(tabId: string) {
                                 sessionId: ownSessionId,
                                 tabId,
                                 onStatus: (status: SessionStatus) => {
-                                        // Only the active tab drives the shared session status. A
-                                        // background tab's WS drop (idle TCP teardown) must not mark
-                                        // the whole session "disconnected" while the foreground tab
-                                        // is still live.
                                         if (activeSessionId !== ownSessionId) return;
+
+                                        if (status === "disconnected") {
+                                                // "disconnected" is a frontend-only synthetic state
+                                                // fired by ws.onclose — the backend never sends it.
+                                                // Writing it into s.status casts an out-of-type value
+                                                // into SessionInfo.status (typed only as
+                                                // "running"|"stopped"|"terminated") and used to brick
+                                                // the session on any transient WS drop (Cloudflare
+                                                // Tunnel idle timeout ≈100 s, JWT refresh, network
+                                                // blip):
+                                                //   - the sidebar click handler matches neither
+                                                //     "running" nor "stopped" → clicking the session
+                                                //     became a silent no-op. Users reported this as
+                                                //     "my tab went invalid when I came back to the
+                                                //     session" — it's the session, not the tab.
+                                                //   - openTab's `status !== "running"` guard refused
+                                                //     to attach on a perfectly healthy backend.
+                                                //
+                                                // Leave s.status alone; pull the authoritative status
+                                                // with refreshSessions() so the sidebar reflects
+                                                // whatever the backend actually says. Also tear down
+                                                // the dead terminal for this tab so a later click on
+                                                // its chip recreates a fresh WebSocket instead of
+                                                // re-activating a frozen pane. The tab itself stays
+                                                // in currentTabs (still a valid tmux session on the
+                                                // backend) so it remains reachable from the tab bar.
+                                                const entry = currentTerminals.get(tabId);
+                                                if (entry) {
+                                                        // queueMicrotask so we don't dispose xterm
+                                                        // synchronously inside its own ws.onclose
+                                                        // callback chain.
+                                                        queueMicrotask(() => {
+                                                                const latest = currentTerminals.get(tabId);
+                                                                if (!latest || latest !== entry) return;
+                                                                latest.term.dispose();
+                                                                latest.pane.remove();
+                                                                currentTerminals.delete(tabId);
+                                                                if (currentActiveTabId === tabId) {
+                                                                        currentActiveTabId = null;
+                                                                        terminalContainer.style.display = "none";
+                                                                }
+                                                                renderTabBar();
+                                                        });
+                                                }
+                                                void refreshSessions();
+                                                return;
+                                        }
+
+                                        // Backend-sourced status ("running" on attach). Only the
+                                        // active tab drives the shared session badge — a background
+                                        // tab's signal must not override the foreground view.
                                         if (tabId !== currentActiveTabId) return;
                                         const s = sessions.find((x) => x.sessionId === ownSessionId);
-                                        if (s) s.status = status as SessionInfo["status"];
+                                        if (s) s.status = status;
                                         updateToolbar();
                                         renderSessionList();
                                 },
