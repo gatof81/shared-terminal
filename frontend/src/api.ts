@@ -24,6 +24,24 @@ export function setToken(token: string | null): void {
 
 export function isLoggedIn(): boolean { return !!_token; }
 
+/**
+ * Dispatched by `apiFetch` when an authenticated request is rejected with
+ * HTTP 401 — i.e. the JWT we hold is no longer accepted (natural expiry,
+ * server-side secret rotation, or future revocation paths). By the time
+ * this fires, the token has already been cleared via setToken(null).
+ *
+ * main.ts listens for this event and performs the UI-side teardown
+ * (dispose active terminals, clear session list, swap back to the auth
+ * view, show a one-shot "session expired" toast). The event-driven
+ * handoff keeps api.ts free of DOM/terminal concerns; the alternative
+ * of having `apiFetch` import from main.ts would be a circular dep.
+ *
+ * Consumers: window.addEventListener(SESSION_EXPIRED_EVENT, handler).
+ * Fires at most once per burst of concurrent 401s — see apiFetch below.
+ */
+export const SESSION_EXPIRED_EVENT = "st:session-expired";
+
+
 // ── Auth API ────────────────────────────────────────────────────────────────
 
 export async function checkAuthStatus(): Promise<{ needsSetup: boolean }> {
@@ -246,8 +264,47 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
                 "Content-Type": "application/json",
                 ...(init?.headers as Record<string, string> ?? {}),
         };
+        // Captured before the fetch so a concurrent setToken(null) between
+        // here and the response doesn't change how we classify the 401 below.
+        // `sentAuth` pins "this request carried an Authorization header" —
+        // only authed 401s are treated as "token is stale"; an unauthed 401
+        // (e.g. wrong password on /auth/login) must not clear token state.
+        const sentAuth = !!_token;
         if (_token) {
                 headers["Authorization"] = `Bearer ${_token}`;
         }
-        return fetch(`${API_BASE}${path}`, { ...init, headers });
+        const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
+
+        // Centralised stale-token handling. Fires for #95: without this, the
+        // 15 s session poll produces an error toast every 15 s forever once
+        // the JWT expires, because nothing in the app clears _token on 401.
+        //
+        // Three-way guard:
+        //   1. sentAuth   — only touch token state when we actually offered
+        //                   one. /auth/login 401 (wrong password) must NOT
+        //                   log the already-logged-in-in-another-tab user
+        //                   out; it's a distinct failure mode.
+        //   2. 401 status — 403 is "insufficient privilege", not "your token
+        //                   is dead". Don't conflate them.
+        //   3. _token !== null at emit time — a burst of N concurrent authed
+        //                   requests all race to 401 together (e.g. the
+        //                   session poll + a user-triggered listTabs). First
+        //                   one through clears _token; subsequent ones
+        //                   short-circuit here so the event fires once, not
+        //                   N times. Without this guard, the listener in
+        //                   main.ts would toast N times and call showAuth()
+        //                   N times (harmless but wasteful).
+        //
+        // The response itself is still returned unchanged — callers that
+        // want to show a more specific error can still read body/status.
+        // In practice the session-expired event swaps the UI to the auth
+        // view before those paths render, so the caller's error path is a
+        // no-op on screen.
+        if (sentAuth && res.status === 401 && _token !== null) {
+                setToken(null);
+                window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT));
+        }
+
+        return res;
 }
+
