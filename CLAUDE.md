@@ -85,3 +85,76 @@ All `db.ts` calls are HTTP round-trips to Cloudflare. Keep query counts low on h
 - Section dividers in the form `// ── Section ───` are used throughout the backend — preserve them when editing.
 - Commit messages follow Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`, …).
 - Frontend deliberately has no framework — do not add React/Vue/etc. without discussion.
+
+## Git workflow
+
+- **Never commit or push directly to `main`.** Every change — feature, fix, docs, CI, config — goes on a branch and through a PR. Main is branch-protected, but this is the policy regardless.
+- **Rebase the branch on `origin/main` before pushing** so the PR diff is clean and CI runs against current main. If conflicts surface, resolve them locally, re-run `npm run build` / `npm test` where relevant, then push.
+- Branch names use the commit-type prefix: `feat/…`, `fix/…`, `docs/…`, `ci/…`, `refactor/…`.
+- One PR = one coherent change. Don't bundle unrelated fixes; open separate PRs so the review bot and humans can read each cleanly.
+
+## Reporting findings
+
+When reviewing code or reporting issues, format each finding as a structured block — not freeform prose. This mirrors the PR review bot's output (`.github/workflows/claude-review.yml`) so both channels look the same to the reader.
+
+### Template
+
+```markdown
+### [SEVERITY] <one-line headline>
+**Where:** `<relative/file/path.ts:start-end>`
+**What:** <what's wrong; quote the relevant code inline>
+**Why it matters:** <concrete consequence — not "might be bad">
+**Fix:** <smallest change that resolves it; a few lines of pseudo-diff are fine>
+```
+
+### Severity labels
+
+- **[BLOCKER]** — data loss, RCE, auth bypass, irreversible bad state.
+- **[SHOULD-FIX]** — correctness bug users will hit, a likely security issue, or a meaningful defense-in-depth gap.
+- **[NIT]** — readability/subjective (not linter territory).
+
+Match actual impact, not a default.
+
+### Full-review envelope
+
+For a top-to-bottom review ("review this PR", "audit this file"), wrap the blocks:
+
+```markdown
+## Summary
+2-4 sentences: what the change actually does and any mismatch with its stated intent.
+
+## Findings
+_No issues found._  — or one finding block per issue —
+
+## Verdict
+**BLOCKER** / **SHOULD-FIX** / **NIT** / **LGTM**
+```
+
+For an incidental finding surfaced while doing other work, a bare block is fine — skip the envelope.
+
+### Rules
+
+- Zero findings is a valid outcome. Don't invent issues to look thorough.
+- Quote code directly — single-backtick for ≤1 line, four-space-indented for multi-line. Don't paraphrase.
+- `file:line` anchors are mandatory.
+- "Why it matters" names a concrete consequence (data loss, auth bypass, wrong answer for user X, slow render, …). If you can only write "might be bad", drop it.
+- Inconclusive cross-file check? Prefix the headline with `needs verification:` — at most once per review.
+- Don't nitpick what a linter would catch.
+
+### Example
+
+```markdown
+### [SHOULD-FIX] reconcile() leaves stale container_id on externally removed container
+**Where:** `backend/src/dockerManager.ts:847-855`
+**What:** The catch branch flips status but never nulls `container_id`:
+
+    } catch (err) {
+        await this.sessions.updateStatus(row.session_id, "stopped");
+    }
+
+**Why it matters:** Any WS attach between reconcile and the next `/start` hands the dead id to Docker and the user sees "No such container".
+**Fix:** Null the id atomically:
+
+    - await this.sessions.updateStatus(row.session_id, "stopped");
+    + await this.sessions.recordContainerGone(row.session_id);
+```
