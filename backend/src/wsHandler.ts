@@ -16,6 +16,20 @@ export function handleWsConnection(
         sessions: SessionManager,
         docker: DockerManager,
 ): void {
+        // Synchronous safety net registered BEFORE any await or sync ws.close().
+        // Node's EventEmitter routes an 'error' emission with no listener to
+        // process.emit('uncaughtException') → the whole server process dies,
+        // dropping every other attached session. The `ws` package emits
+        // 'error' on transport-level failures — RSTd TCP, malformed frames,
+        // invalid UTF-8 — any of which can land during the handshake/close
+        // dance or during the two awaits below (sessions.assertOwnership,
+        // docker.attach). A second ws.on('error', …) is added after attach()
+        // succeeds to also tear the exec down; `on` is additive, so both run.
+        // See issue #91 for the DoS reproduction path.
+        ws.on("error", (err) => {
+                console.error(`[ws] socket error: ${(err as Error).message}`);
+        });
+
         const url = req.url ?? "";
         const match = url.match(/\/ws\/sessions\/([^/?#]+)/);
         if (!match) {

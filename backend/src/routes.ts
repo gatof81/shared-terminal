@@ -464,7 +464,38 @@ export function buildRouter(
 
         router.post("/sessions/:id/tabs", async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
-                const { label } = (req.body ?? {}) as { label?: string };
+                const { label } = (req.body ?? {}) as { label?: unknown };
+                // Validate at the API boundary before the value reaches
+                // createTab. The label is stored in a tmux user-option that
+                // listTabs emits in a TSV format (\t-separated fields,
+                // \n-separated rows): a \t or \n in the label corrupts that
+                // parser, producing rows with the createdAt stuffed into the
+                // wrong field (timestamp becomes 0) or phantom tabs that
+                // don't exist in tmux. \r is silently stripped by
+                // execOneShot's demux, so the stored label wouldn't match
+                // what the client sent. Reject the whole ASCII-control block
+                // uniformly (0x00-0x1F, 0x7F) — higher code points are
+                // opaque to the TSV parser and safe to keep. See issue #92.
+                if (label !== undefined) {
+                        if (typeof label !== "string") {
+                                res.status(400).json({ error: "label must be a string" });
+                                return;
+                        }
+                        if (label.length > 64) {
+                                res.status(400).json({ error: "label must be at most 64 characters" });
+                                return;
+                        }
+                        // Reject \t, \n, \r, NUL and the rest of the ASCII control
+                        // block before they reach tmux/TSV land. Higher code points
+                        // are opaque to the list-sessions parser and safe to keep.
+                        // biome-ignore lint/suspicious/noControlCharactersInRegex: matching control chars IS the rejection criterion
+                        if (/[\u0000-\u001F\u007F]/.test(label)) {
+                                res.status(400).json({
+                                        error: "label must not contain control characters (tab, newline, etc.)",
+                                });
+                                return;
+                        }
+                }
                 try {
                         await sessions.assertOwnership(req.params.id, userId);
                         const tab = await docker.createTab(req.params.id, label);

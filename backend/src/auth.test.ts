@@ -228,12 +228,17 @@ describe("parseCorsOrigins", () => {
 		expect(parseCorsOrigins(undefined)).toEqual(["*"]);
 	});
 
-	it("defaults to ['*'] when blank or whitespace-only", () => {
+	it("returns [] when blank or whitespace-only (opt-in HTTP deny-all)", () => {
 		// An operator who blanks CORS_ORIGINS= in a secrets manager
-		// expecting "no origins" should get the documented default
-		// instead of [""] (which would match a literal "" origin).
-		expect(parseCorsOrigins("")).toEqual(["*"]);
-		expect(parseCorsOrigins("   ")).toEqual(["*"]);
+		// gets "deny all cross-origin HTTP" — NOT wildcard allow. The
+		// old behaviour silently widened blank to ["*"] after PR #64;
+		// issue #65 restored the explicit deny-all path. Note the
+		// different semantics vs undefined (the unset case above):
+		//   - undefined → ["*"]    (dev default, no config)
+		//   - ""        → []       (explicit lock-down)
+		// The WS allowlist treats [] as branch-4-deny, matching intent.
+		expect(parseCorsOrigins("")).toEqual([]);
+		expect(parseCorsOrigins("   ")).toEqual([]);
 	});
 
 	it("trims whitespace around each entry", () => {
