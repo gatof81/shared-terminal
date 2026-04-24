@@ -550,16 +550,26 @@ export function selectWsAuthProtocol(protocols: Set<string>): string | false {
  * Split-and-trim the raw `CORS_ORIGINS` env value into the shape used
  * by the HTTP CORS middleware AND `isAllowedWsOrigin` below. Whitespace
  * around entries is trimmed (so `"https://a, https://b"` — the obvious
- * human-readable format — works), and empty entries are dropped (so a
- * blank `CORS_ORIGINS=""` becomes `[]` rather than `[""]`, which would
- * otherwise let an origin-header value of `""` match literally).
+ * human-readable format — works), and empty entries are dropped (so
+ * `"a,,b,"` becomes `["a", "b"]` rather than `["a", "", "b", ""]`,
+ * which would otherwise let an origin-header value of `""` match
+ * literally).
  *
- * Unset or whitespace-only input falls back to `["*"]`, matching the
- * pre-existing default. Kept pure + exported so the split/trim is
- * testable without standing up the HTTP server.
+ * Semantics per input:
+ *   - `undefined` (unset) → `["*"]` — matches the pre-existing default
+ *     and keeps local dev working without configuration.
+ *   - `""` or whitespace-only → `[]` — explicit opt-in deny-all for the
+ *     HTTP layer. An operator who blanks `CORS_ORIGINS=` in a secrets
+ *     manager gets "no cross-origin HTTP", not "wildcard allow".
+ *     Restores the pre-#64 behaviour that a round-2 reviewer flagged
+ *     had been silently widened to `["*"]`. See issue #65.
+ *   - `"a, b"` etc. → `["a", "b"]` — trimmed, empties dropped.
+ *
+ * Kept pure + exported so the split/trim is testable without standing
+ * up the HTTP server.
  */
 export function parseCorsOrigins(raw: string | undefined): string[] {
-        if (raw === undefined || raw.trim() === "") return ["*"];
+        if (raw === undefined) return ["*"];
         return raw
                 .split(",")
                 .map((s) => s.trim())
