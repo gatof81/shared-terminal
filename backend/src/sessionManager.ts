@@ -228,6 +228,19 @@ export class SessionManager {
                 await d1Query("UPDATE sessions SET status = ? WHERE session_id = ?", [status, sessionId]);
         }
 
+        // Atomic "container was removed out-of-band" write. Collapsing the two
+        // fields into one UPDATE closes the crash window where nulling the id
+        // would succeed but the status flip wouldn't — leaving the row at
+        // (null, running), which a subsequent `WHERE status='running'` reconcile
+        // would re-pick up anyway, but a /start or WS attach in between would
+        // misread.
+        async recordContainerGone(sessionId: string): Promise<void> {
+                await d1Query(
+                        "UPDATE sessions SET status = 'stopped', container_id = NULL WHERE session_id = ?",
+                        [sessionId],
+                );
+        }
+
         async updateConnected(sessionId: string): Promise<void> {
                 await d1Query(
                         "UPDATE sessions SET last_connected_at = datetime('now') WHERE session_id = ?",

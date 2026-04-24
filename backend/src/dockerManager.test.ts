@@ -1,5 +1,14 @@
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 import { PassThrough } from "stream";
+
+// d1Query is the only direct D1 touch-point in DockerManager (reconcile()).
+// Every other path is reached through the fake SessionManager. Default to an
+// empty result so tests that don't exercise reconcile aren't affected.
+const dbStubs = vi.hoisted(() => ({
+	d1Query: vi.fn(async () => ({ results: [], meta: { changes: 0 } })),
+}));
+vi.mock("./db.js", () => dbStubs);
+
 import { DockerManager, type OutputListener } from "./dockerManager.js";
 import type { SessionManager } from "./sessionManager.js";
 
@@ -27,6 +36,7 @@ function makeFakeSessions(containerId: string | null = "container-123"): Session
 		updateConnected: vi.fn(async () => { /* noop */ }),
 		updateStatus: vi.fn(async () => { /* noop */ }),
 		setContainerId: vi.fn(async () => { /* noop */ }),
+		recordContainerGone: vi.fn(async () => { /* noop */ }),
 	} as unknown as SessionManager;
 }
 
@@ -532,4 +542,62 @@ describe("DockerManager tabs", () => {
 		expect((dm as unknown as { keyOf: Map<string, string> }).keyOf.has("a1")).toBe(false);
 	});
 
+});
+
+describe("DockerManager.reconcile", () => {
+	// d1Query is a module-level mock; reset between tests so a mockResolvedValueOnce
+	// from one test can't bleed into the next (or into any future test elsewhere
+	// that touches reconcile).
+	beforeEach(() => {
+		dbStubs.d1Query.mockReset();
+		dbStubs.d1Query.mockResolvedValue({ results: [], meta: { changes: 0 } });
+	});
+
+	function makeDockerWithInspectError(err: Error & { statusCode?: number }): {
+		dm: DockerManager;
+		sessions: SessionManager;
+	} {
+		const sessions = makeFakeSessions();
+		const dm = new DockerManager(sessions);
+		(dm as unknown as { docker: unknown }).docker = {
+			getContainer: vi.fn(() => ({
+				inspect: vi.fn(async () => { throw err; }),
+			})),
+		};
+		return { dm, sessions };
+	}
+
+	it("atomically clears container_id and sets status=stopped on 404", async () => {
+		const err = Object.assign(new Error("No such container"), { statusCode: 404 });
+		const { dm, sessions } = makeDockerWithInspectError(err);
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [{ session_id: "s1", container_id: "container-123" }],
+			meta: { changes: 0 },
+		});
+
+		await dm.reconcile();
+
+		// Single atomic write — no separate setContainerId / updateStatus pair
+		// that a crash between could split.
+		expect(sessions.recordContainerGone).toHaveBeenCalledWith("s1");
+		expect(sessions.setContainerId).not.toHaveBeenCalled();
+		expect(sessions.updateStatus).not.toHaveBeenCalled();
+	});
+
+	it("preserves container_id on non-404 inspect failure (transient daemon error)", async () => {
+		// No statusCode — simulates a daemon-unreachable / socket error where
+		// the container may well still be alive. Nulling the id here would
+		// orphan it (no D1 row points at it, so nothing ever cleans it up).
+		const { dm, sessions } = makeDockerWithInspectError(new Error("ECONNREFUSED"));
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [{ session_id: "s1", container_id: "container-123" }],
+			meta: { changes: 0 },
+		});
+
+		await dm.reconcile();
+
+		expect(sessions.recordContainerGone).not.toHaveBeenCalled();
+		expect(sessions.setContainerId).not.toHaveBeenCalled();
+		expect(sessions.updateStatus).toHaveBeenCalledWith("s1", "stopped");
+	});
 });
