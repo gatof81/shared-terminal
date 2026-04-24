@@ -82,6 +82,34 @@ export function openTerminalSession(opts: {
                 webgl = null;
         }
 
+        // webglcontextlost bubbles; webglcontextrestored does not — listen on the
+        // canvas obtained from the loss event's target.
+        let pendingRestoreCanvas: HTMLCanvasElement | null = null;
+        const onContextRestored = () => {
+                // Guard against misbehaving drivers; the prior loss handler nulled webgl first.
+                if (webgl) return;
+                pendingRestoreCanvas = null;
+                let restoredAddon: WebglAddon | undefined;
+                try {
+                        const addon = new WebglAddon();
+                        restoredAddon = addon;
+                        addon.onContextLoss(() => { addon.dispose(); webgl = null; });
+                        term.loadAddon(addon);
+                        webgl = addon;
+                        console.debug("[terminal] WebGL context restored, re-enabled GPU renderer");
+                } catch (err) {
+                        restoredAddon?.dispose();
+                        console.warn("[terminal] WebGL restore failed:", err);
+                }
+        };
+        const onContextLost = (ev: Event) => {
+                if (!(ev.target instanceof HTMLCanvasElement)) return;
+                pendingRestoreCanvas?.removeEventListener("webglcontextrestored", onContextRestored);
+                pendingRestoreCanvas = ev.target;
+                pendingRestoreCanvas.addEventListener("webglcontextrestored", onContextRestored, { once: true });
+        };
+        if (webgl) container.addEventListener("webglcontextlost", onContextLost);
+
         fitAddon.fit();
 
         // Cmd/Ctrl + C copies the current xterm selection to the clipboard.
@@ -392,6 +420,8 @@ export function openTerminalSession(opts: {
                 container.removeEventListener("touchcancel", onTouchCancel);
                 inputDisposable.dispose();
                 linkProviderDisposable.dispose();
+                pendingRestoreCanvas?.removeEventListener("webglcontextrestored", onContextRestored);
+                container.removeEventListener("webglcontextlost", onContextLost);
                 webgl?.dispose();
                 ws.close(1000, "User navigated away");
                 term.dispose();
