@@ -844,9 +844,19 @@ export class DockerManager {
                                 if (!info.State.Running) {
                                         await this.sessions.updateStatus(row.session_id, "stopped");
                                 }
-                        } catch {
-                                // container gone externally — null stale id so spawnSharedExec doesn't get "No such container".
-                                await this.sessions.setContainerId(row.session_id, null);
+                        } catch (err) {
+                                // Only a 404 means the container is actually gone; any other
+                                // inspect failure (daemon unreachable, timeout, …) could be
+                                // transient, and nulling the id on those would orphan a live
+                                // container — D1 forgets it, so no code path ever cleans it up.
+                                // On non-404 we still flip to stopped (the UI shouldn't lie)
+                                // but keep the id so /start can retry the real container.
+                                const statusCode = (err as { statusCode?: number }).statusCode;
+                                if (statusCode === 404) {
+                                        await this.sessions.setContainerId(row.session_id, null);
+                                } else {
+                                        console.warn(`[docker] reconcile inspect failed for session ${row.session_id}: ${(err as Error).message}`);
+                                }
                                 await this.sessions.updateStatus(row.session_id, "stopped");
                         }
                 }

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 import { PassThrough } from "stream";
 
 // d1Query is the only direct D1 touch-point in DockerManager (reconcile()).
@@ -544,17 +544,31 @@ describe("DockerManager tabs", () => {
 });
 
 describe("DockerManager.reconcile", () => {
-	it("nulls stale container_id before flipping status to stopped when inspect throws", async () => {
+	// d1Query is a module-level mock; reset between tests so a mockResolvedValueOnce
+	// from one test can't bleed into the next (or into any future test elsewhere
+	// that touches reconcile).
+	beforeEach(() => {
+		dbStubs.d1Query.mockReset();
+		dbStubs.d1Query.mockResolvedValue({ results: [], meta: { changes: 0 } });
+	});
+
+	function makeDockerWithInspectError(err: Error & { statusCode?: number }): {
+		dm: DockerManager;
+		sessions: SessionManager;
+	} {
 		const sessions = makeFakeSessions();
 		const dm = new DockerManager(sessions);
-		// Swap in a fake Dockerode whose inspect always throws — simulates a
-		// container that was removed out-of-band (the bug scenario).
 		(dm as unknown as { docker: unknown }).docker = {
 			getContainer: vi.fn(() => ({
-				inspect: vi.fn(async () => { throw new Error("No such container"); }),
+				inspect: vi.fn(async () => { throw err; }),
 			})),
 		};
+		return { dm, sessions };
+	}
 
+	it("nulls stale container_id before flipping status to stopped on 404", async () => {
+		const err = Object.assign(new Error("No such container"), { statusCode: 404 });
+		const { dm, sessions } = makeDockerWithInspectError(err);
 		dbStubs.d1Query.mockResolvedValueOnce({
 			results: [{ session_id: "s1", container_id: "container-123" }],
 			meta: { changes: 0 },
@@ -569,5 +583,21 @@ describe("DockerManager.reconcile", () => {
 		// Null-then-stopped matches the setContainerId → updateStatus order
 		// used in startContainer's respawn path.
 		expect(setCalls.invocationCallOrder[0]).toBeLessThan(statusCalls.invocationCallOrder[0]);
+	});
+
+	it("preserves container_id on non-404 inspect failure (transient daemon error)", async () => {
+		// No statusCode — simulates a daemon-unreachable / socket error where
+		// the container may well still be alive. Nulling the id here would
+		// orphan it (no D1 row points at it, so nothing ever cleans it up).
+		const { dm, sessions } = makeDockerWithInspectError(new Error("ECONNREFUSED"));
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [{ session_id: "s1", container_id: "container-123" }],
+			meta: { changes: 0 },
+		});
+
+		await dm.reconcile();
+
+		expect(sessions.setContainerId).not.toHaveBeenCalled();
+		expect(sessions.updateStatus).toHaveBeenCalledWith("s1", "stopped");
 	});
 });
