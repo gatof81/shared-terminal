@@ -36,6 +36,7 @@ function makeFakeSessions(containerId: string | null = "container-123"): Session
 		updateConnected: vi.fn(async () => { /* noop */ }),
 		updateStatus: vi.fn(async () => { /* noop */ }),
 		setContainerId: vi.fn(async () => { /* noop */ }),
+		recordContainerGone: vi.fn(async () => { /* noop */ }),
 	} as unknown as SessionManager;
 }
 
@@ -566,7 +567,7 @@ describe("DockerManager.reconcile", () => {
 		return { dm, sessions };
 	}
 
-	it("nulls stale container_id before flipping status to stopped on 404", async () => {
+	it("atomically clears container_id and sets status=stopped on 404", async () => {
 		const err = Object.assign(new Error("No such container"), { statusCode: 404 });
 		const { dm, sessions } = makeDockerWithInspectError(err);
 		dbStubs.d1Query.mockResolvedValueOnce({
@@ -576,13 +577,11 @@ describe("DockerManager.reconcile", () => {
 
 		await dm.reconcile();
 
-		const setCalls = (sessions.setContainerId as ReturnType<typeof vi.fn>).mock;
-		const statusCalls = (sessions.updateStatus as ReturnType<typeof vi.fn>).mock;
-		expect(setCalls.calls).toEqual([["s1", null]]);
-		expect(statusCalls.calls).toEqual([["s1", "stopped"]]);
-		// Null-then-stopped matches the setContainerId → updateStatus order
-		// used in startContainer's respawn path.
-		expect(setCalls.invocationCallOrder[0]).toBeLessThan(statusCalls.invocationCallOrder[0]);
+		// Single atomic write — no separate setContainerId / updateStatus pair
+		// that a crash between could split.
+		expect(sessions.recordContainerGone).toHaveBeenCalledWith("s1");
+		expect(sessions.setContainerId).not.toHaveBeenCalled();
+		expect(sessions.updateStatus).not.toHaveBeenCalled();
 	});
 
 	it("preserves container_id on non-404 inspect failure (transient daemon error)", async () => {
@@ -597,6 +596,7 @@ describe("DockerManager.reconcile", () => {
 
 		await dm.reconcile();
 
+		expect(sessions.recordContainerGone).not.toHaveBeenCalled();
 		expect(sessions.setContainerId).not.toHaveBeenCalled();
 		expect(sessions.updateStatus).toHaveBeenCalledWith("s1", "stopped");
 	});

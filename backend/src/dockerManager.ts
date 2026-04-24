@@ -845,19 +845,16 @@ export class DockerManager {
                                         await this.sessions.updateStatus(row.session_id, "stopped");
                                 }
                         } catch (err) {
-                                // Only a 404 means the container is actually gone; any other
-                                // inspect failure (daemon unreachable, timeout, …) could be
-                                // transient, and nulling the id on those would orphan a live
-                                // container — D1 forgets it, so no code path ever cleans it up.
-                                // On non-404 we still flip to stopped (the UI shouldn't lie)
-                                // but keep the id so /start can retry the real container.
+                                // Only 404 means container is actually gone (atomic null+stopped).
+                                // Non-404 (daemon unreachable, etc.) might be transient — keep the
+                                // id so /start can retry the real container, don't orphan it.
                                 const statusCode = (err as { statusCode?: number }).statusCode;
                                 if (statusCode === 404) {
-                                        await this.sessions.setContainerId(row.session_id, null);
+                                        await this.sessions.recordContainerGone(row.session_id);
                                 } else {
                                         console.warn(`[docker] reconcile inspect failed for session ${row.session_id}: ${(err as Error).message}`);
+                                        await this.sessions.updateStatus(row.session_id, "stopped");
                                 }
-                                await this.sessions.updateStatus(row.session_id, "stopped");
                         }
                 }
                 console.log("[docker] reconciliation complete");
