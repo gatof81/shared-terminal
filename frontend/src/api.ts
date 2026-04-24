@@ -24,28 +24,15 @@ export function setToken(token: string | null): void {
 
 export function isLoggedIn(): boolean { return !!_token; }
 
-/**
- * Dispatched by `apiFetch` when an authenticated request is rejected with
- * HTTP 401 — i.e. the JWT we hold is no longer accepted (natural expiry,
- * server-side secret rotation, or future revocation paths). By the time
- * this fires, the token has already been cleared via setToken(null).
- *
- * main.ts listens for this event and performs the UI-side teardown
- * (dispose active terminals, clear session list, swap back to the auth
- * view, show a one-shot "session expired" toast). The event-driven
- * handoff keeps api.ts free of DOM/terminal concerns; the alternative
- * of having `apiFetch` import from main.ts would be a circular dep.
- *
- * Consumers: window.addEventListener(SESSION_EXPIRED_EVENT, handler).
- * Fires at most once per burst of concurrent 401s — see apiFetch below.
- */
+/** Fired by `apiFetch` once per 401-burst after clearing the stale token —
+ * main.ts listens to perform UI teardown. See apiFetch for the emit guard. */
 export const SESSION_EXPIRED_EVENT = "st:session-expired";
-
 
 // ── Auth API ────────────────────────────────────────────────────────────────
 
 export async function checkAuthStatus(): Promise<{ needsSetup: boolean }> {
         const res = await apiFetch("/auth/status");
+
         return res.json();
 }
 

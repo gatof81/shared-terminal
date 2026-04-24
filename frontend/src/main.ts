@@ -274,7 +274,6 @@ window.addEventListener(SESSION_EXPIRED_EVENT, () => {
         handleLogout("Your session has expired — please sign in again");
 });
 
-
 // ── Session management ──────────────────────────────────────────────────────
 
 async function refreshSessions() {
