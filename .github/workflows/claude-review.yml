@@ -10,7 +10,15 @@ name: Claude PR Review
 #   This is NOT equivalent to `contents: write` — it does not grant code-push
 #   rights; the resulting token is bounded by the Claude GitHub App's own
 #   install permissions on this repo.
-# - `--max-turns 10` caps iteration blast radius if prompt injection occurs.
+# - `--max-turns 20` caps iteration blast radius if prompt injection occurs.
+#   Previously 10, bumped after a PR where the agent hit the ceiling before
+#   posting — mostly because permission denials on read-only tools (Read,
+#   Grep, etc.) burnt turns. See the allowlist below for the read-only
+#   tools that were added in the same change.
+# - Allowlist is read-only: only gh/git read commands and read-only fs
+#   tools (Read, Grep, Glob). Nothing that can write, push, or reach
+#   network, so a prompt-injection attack can't pivot beyond influencing
+#   the single review comment.
 # - Action is pinned to major version `@v1`. Consider pinning to a commit SHA
 #   for stricter supply-chain hygiene.
 
@@ -48,8 +56,8 @@ jobs:
           # so the review lands as a top-level PR comment.
           claude_args: >
             --model claude-sonnet-4-6
-            --max-turns 10
-            --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*)"
+            --max-turns 20
+            --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh pr checks:*),Bash(git log:*),Bash(git blame:*),Bash(git show:*),Read,Grep,Glob"
           prompt: |
             REPO: ${{ github.repository }}
             PR: #${{ github.event.pull_request.number }}
