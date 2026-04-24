@@ -694,9 +694,41 @@ export class DockerManager {
                         });
         }
 
+        /**
+         * Create a new tmux session inside the container, tagged with a
+         * user-visible label stored as a tmux user-option (`@tab-label`).
+         *
+         * ## Label contract
+         *
+         * Callers must hand in a label that's already been validated — no
+         * leading/trailing whitespace, no ASCII control chars, 1–64 chars, or
+         * `undefined` to auto-default to the generated tabId. The REST route
+         * enforces this (see `validateTabLabel` in routes.ts); this method
+         * does NO normalisation and stores the label verbatim.
+         *
+         * Why the strictness matters: `listTabs` reads labels back via
+         * `tmux list-sessions -F "…#{@tab-label}…"` which emits results in a
+         * TSV format (\t-separated fields, \n-separated rows). A \t or \n
+         * inside the stored label silently corrupts that parser — the
+         * createdAt field ends up holding label fragments (timestamp parses
+         * as 0) or phantom tabs appear that don't exist in tmux. \r is
+         * stripped by execOneShot's demuxer, which would make the stored
+         * label mismatch the sent one. Rejecting the whole 0x00–0x1F, 0x7F
+         * range at the API boundary keeps all three paths sound. Higher code
+         * points (emoji, accented letters, non-Latin scripts) are opaque to
+         * the TSV parser and safe. See issue #92.
+         *
+         * Avoiding `.trim()` here is deliberate: a silent trim would let a
+         * client observe "what I sent ≠ what came back" (send " foo", get
+         * "foo" from listTabs). The API rejects leading/trailing whitespace
+         * instead, so the value stored equals the value accepted.
+         */
         async createTab(sessionId: string, label?: string): Promise<Tab> {
                 const tabId = `tab-${randomBytes(4).toString("hex")}`;
-                const displayLabel = (label ?? "").trim() || tabId;
+                // `label` is pre-validated by the route handler (non-empty,
+                // trimmed, no control chars). No normalisation here — the
+                // round-trip stored == sent invariant depends on it.
+                const displayLabel = label ?? tabId;
 
                 // `-c` pins the new tab's starting directory to the bind-mounted
                 // workspace. Without it, tmux inherits cwd from docker exec, which
@@ -826,15 +858,15 @@ export class DockerManager {
 // Frame layout: [type(1)][pad(3)][size(4 BE)] followed by `size` payload bytes.
 // type 1 = stdout, type 2 = stderr. We collect only the requested type.
 function demuxDockerOutput(raw: Buffer, type: 1 | 2): string {
-	const chunks: Buffer[] = [];
-	let off = 0;
-	while (off + 8 <= raw.length) {
-		const frameType = raw[off]!;
-		const size = raw.readUInt32BE(off + 4);
-		off += 8;
-		if (off + size > raw.length) break;
-		if (frameType === type) chunks.push(raw.subarray(off, off + size));
-		off += size;
-	}
-	return Buffer.concat(chunks).toString("utf-8");
+        const chunks: Buffer[] = [];
+        let off = 0;
+        while (off + 8 <= raw.length) {
+                const frameType = raw[off]!;
+                const size = raw.readUInt32BE(off + 4);
+                off += 8;
+                if (off + size > raw.length) break;
+                if (frameType === type) chunks.push(raw.subarray(off, off + size));
+                off += size;
+        }
+        return Buffer.concat(chunks).toString("utf-8");
 }
