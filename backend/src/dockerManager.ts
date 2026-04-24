@@ -844,8 +844,17 @@ export class DockerManager {
                                 if (!info.State.Running) {
                                         await this.sessions.updateStatus(row.session_id, "stopped");
                                 }
-                        } catch {
-                                await this.sessions.updateStatus(row.session_id, "stopped");
+                        } catch (err) {
+                                // Only 404 means container is actually gone (atomic null+stopped).
+                                // Non-404 (daemon unreachable, etc.) might be transient — keep the
+                                // id so /start can retry the real container, don't orphan it.
+                                const statusCode = (err as { statusCode?: number }).statusCode;
+                                if (statusCode === 404) {
+                                        await this.sessions.recordContainerGone(row.session_id);
+                                } else {
+                                        console.warn(`[docker] reconcile inspect failed for session ${row.session_id}: ${(err as Error).message}`);
+                                        await this.sessions.updateStatus(row.session_id, "stopped");
+                                }
                         }
                 }
                 console.log("[docker] reconciliation complete");
