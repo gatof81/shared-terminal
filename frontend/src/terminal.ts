@@ -165,24 +165,9 @@ export function openTerminalSession(opts: {
         };
 
         ws.onmessage = (ev) => {
-                // disposed: the session has been torn down but the WebSocket is
-                // still in CLOSING (ws.close() initiates the handshake; `CLOSED`
-                // only arrives after the server's ACK). Any frame the server
-                // sent before receiving the close frame — or that was already
-                // buffered in the browser's network stack — still fires here,
-                // and term.write() on an xterm that's been dispose()d throws
-                // "Cannot read properties of null" from the zeroed internals.
-                //
-                // Surfaces most often when:
-                //   - a backgrounded tab (Chrome/Safari page-freeze) wakes up
-                //     with queued frames after the parent component already
-                //     tore down the session,
-                //   - the user switches between active sessions on a busy tab
-                //     (e.g. Claude Code streaming output) and the last 1-2
-                //     frames from the old session land after dispose().
-                //
-                // Siblings (onopen/onerror/onclose) all have this guard; this
-                // one was missed when PR #77 added the `disposed` flag. See #93.
+                // disposed: post-close frames buffered by the browser or in flight
+                // from the server still fire here, and term.write() throws on a
+                // disposed xterm. Sibling of the onerror/onclose guards below (#93).
                 if (disposed) return;
                 type Msg =
                         | { type: "output"; data: string }

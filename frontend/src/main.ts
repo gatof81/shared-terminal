@@ -60,9 +60,9 @@ const toast = document.getElementById("toast")!;
 // and as the URL bar shows/hides — we mirror its height into --app-vh so the
 // xterm host container refits to the space actually visible to the user.
 function syncViewportHeight() {
-        const vv = window.visualViewport;
-        const h = vv ? vv.height : window.innerHeight;
-        document.documentElement.style.setProperty("--app-vh", `${h}px`);
+	const vv = window.visualViewport;
+	const h = vv ? vv.height : window.innerHeight;
+	document.documentElement.style.setProperty("--app-vh", `${h}px`);
 }
 syncViewportHeight();
 window.visualViewport?.addEventListener("resize", syncViewportHeight);
@@ -76,9 +76,9 @@ const FONT_SIZE_STEPS = [11, 12, 13, 14, 15, 16, 18];
 const DEFAULT_FONT_SIZE = 14;
 const FONT_SIZE_KEY = "shared-terminal:font-size";
 function readFontSize(): number {
-        const raw = localStorage.getItem(FONT_SIZE_KEY);
-        const n = raw ? Number.parseInt(raw, 10) : DEFAULT_FONT_SIZE;
-        return FONT_SIZE_STEPS.includes(n) ? n : DEFAULT_FONT_SIZE;
+	const raw = localStorage.getItem(FONT_SIZE_KEY);
+	const n = raw ? Number.parseInt(raw, 10) : DEFAULT_FONT_SIZE;
+	return FONT_SIZE_STEPS.includes(n) ? n : DEFAULT_FONT_SIZE;
 }
 let currentFontSize = readFontSize();
 
@@ -885,18 +885,18 @@ mainEl.setAttribute("data-sidebar-ready", "");
 // ── Font size cycle button ──────────────────────────────────────────────────
 
 function nextFontSize(current: number): number {
-        const i = FONT_SIZE_STEPS.indexOf(current);
-        if (i === -1) return DEFAULT_FONT_SIZE;
-        return FONT_SIZE_STEPS[(i + 1) % FONT_SIZE_STEPS.length]!;
+	const i = FONT_SIZE_STEPS.indexOf(current);
+	if (i === -1) return DEFAULT_FONT_SIZE;
+	return FONT_SIZE_STEPS[(i + 1) % FONT_SIZE_STEPS.length]!;
 }
 
 fontSizeBtn.addEventListener("click", () => {
-        currentFontSize = nextFontSize(currentFontSize);
-        localStorage.setItem(FONT_SIZE_KEY, String(currentFontSize));
-        fontSizeBtn.textContent = `Aa ${currentFontSize}`;
-        for (const { term } of currentTerminals.values()) {
-                term.setFontSize(currentFontSize);
-        }
+	currentFontSize = nextFontSize(currentFontSize);
+	localStorage.setItem(FONT_SIZE_KEY, String(currentFontSize));
+	fontSizeBtn.textContent = `Aa ${currentFontSize}`;
+	for (const { term } of currentTerminals.values()) {
+		term.setFontSize(currentFontSize);
+	}
 });
 // Reflect the persisted size in the label on load so users see e.g. "Aa 16"
 // rather than a generic "Aa" after they've picked their size once.
