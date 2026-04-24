@@ -86,6 +86,13 @@ All `db.ts` calls are HTTP round-trips to Cloudflare. Keep query counts low on h
 - Commit messages follow Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`, …).
 - Frontend deliberately has no framework — do not add React/Vue/etc. without discussion.
 
+## Git workflow
+
+- **Never commit or push directly to `main`.** Every change — feature, fix, docs, CI, config — goes on a branch and through a PR. Main is branch-protected, but this is the policy regardless.
+- **Rebase the branch on `origin/main` before pushing** so the PR diff is clean and CI runs against current main. If conflicts surface, resolve them locally, re-run `npm run build` / `npm test` where relevant, then push.
+- Branch names use the commit-type prefix: `feat/…`, `fix/…`, `docs/…`, `ci/…`, `refactor/…`.
+- One PR = one coherent change. Don't bundle unrelated fixes; open separate PRs so the review bot and humans can read each cleanly.
+
 ## Reporting findings
 
 When reviewing code or reporting issues, format each finding as a structured block — not freeform prose. This mirrors the PR review bot's output (`.github/workflows/claude-review.yml`) so both channels look the same to the reader.
