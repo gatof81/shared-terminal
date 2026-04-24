@@ -82,10 +82,8 @@ export function openTerminalSession(opts: {
                 webgl = null;
         }
 
-        // webglcontextlost bubbles; webglcontextrestored does not. Use the loss
-        // event's target to register the restore listener directly on the canvas
-        // that owns the GL context. Track the canvas so dispose() can remove the
-        // pending listener if the user navigates away before the GPU restores.
+        // webglcontextlost bubbles; webglcontextrestored does not — listen on the
+        // canvas obtained from the loss event's target.
         let pendingRestoreCanvas: HTMLCanvasElement | null = null;
         const onContextRestored = () => {
                 pendingRestoreCanvas = null;
@@ -97,7 +95,7 @@ export function openTerminalSession(opts: {
                         addon.onContextLoss(() => { addon.dispose(); webgl = null; });
                         term.loadAddon(addon);
                         webgl = addon;
-                        console.log("[terminal] WebGL context restored, re-enabled GPU renderer");
+                        console.debug("[terminal] WebGL context restored, re-enabled GPU renderer");
                 } catch (err) {
                         restoredAddon?.dispose();
                         console.warn("[terminal] WebGL restore failed:", err);
