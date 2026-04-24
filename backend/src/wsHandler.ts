@@ -27,8 +27,18 @@ export function handleWsConnection(
         // succeeds to also tear the exec down; `on` is additive, so both run.
         // See issue #91 for the DoS reproduction path.
         ws.on("error", (err) => {
-                console.error(`[ws] socket error: ${(err as Error).message}`);
+                console.error(`[ws] socket error: ${err.message}`);
+                // Don't trust the transport to always emit 'close' after
+                // 'error'. Some failure modes (RSTd TCP mid-handshake, upgrade
+                // parse error before the WS protocol is fully up) leave the
+                // underlying socket half-open until Node's GC notices. Close
+                // explicitly with 1011 "internal error"; ws.close() is a no-op
+                // on a socket already CLOSING/CLOSED, so this is safe for
+                // post-attach errors where the inner 'close' listener would
+                // also run.
+                ws.close(1011, "socket error");
         });
+
 
         const url = req.url ?? "";
         const match = url.match(/\/ws\/sessions\/([^/?#]+)/);

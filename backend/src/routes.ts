@@ -465,45 +465,25 @@ export function buildRouter(
         router.post("/sessions/:id/tabs", async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
                 const { label } = (req.body ?? {}) as { label?: unknown };
-                // Validate at the API boundary before the value reaches
-                // createTab. The label is stored in a tmux user-option that
-                // listTabs emits in a TSV format (\t-separated fields,
-                // \n-separated rows): a \t or \n in the label corrupts that
-                // parser, producing rows with the createdAt stuffed into the
-                // wrong field (timestamp becomes 0) or phantom tabs that
-                // don't exist in tmux. \r is silently stripped by
-                // execOneShot's demux, so the stored label wouldn't match
-                // what the client sent. Reject the whole ASCII-control block
-                // uniformly (0x00-0x1F, 0x7F) — higher code points are
-                // opaque to the TSV parser and safe to keep. See issue #92.
-                if (label !== undefined) {
-                        if (typeof label !== "string") {
-                                res.status(400).json({ error: "label must be a string" });
-                                return;
-                        }
-                        if (label.length > 64) {
-                                res.status(400).json({ error: "label must be at most 64 characters" });
-                                return;
-                        }
-                        // Reject \t, \n, \r, NUL and the rest of the ASCII control
-                        // block before they reach tmux/TSV land. Higher code points
-                        // are opaque to the list-sessions parser and safe to keep.
-                        // biome-ignore lint/suspicious/noControlCharactersInRegex: matching control chars IS the rejection criterion
-                        if (/[\u0000-\u001F\u007F]/.test(label)) {
-                                res.status(400).json({
-                                        error: "label must not contain control characters (tab, newline, etc.)",
-                                });
-                                return;
-                        }
+                // Tab-label invariants for the tmux TSV listTabs parser — see
+                // the JSDoc on DockerManager.createTab for the full rationale
+                // (issue #92). Enforced here so dockerManager can trust its
+                // input and avoid silent normalisation (a .trim() there would
+                // cause "what you sent ≠ what's stored").
+                const labelValidation = validateTabLabel(label);
+                if (labelValidation) {
+                        res.status(400).json({ error: labelValidation });
+                        return;
                 }
                 try {
                         await sessions.assertOwnership(req.params.id, userId);
-                        const tab = await docker.createTab(req.params.id, label);
+                        const tab = await docker.createTab(req.params.id, label as string | undefined);
                         res.status(201).json(tab);
                 } catch (err) {
                         handleSessionError(err, res);
                 }
         });
+
 
         router.delete("/sessions/:id/tabs/:tabId", async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
@@ -545,7 +525,42 @@ function serializeMeta(m: SessionMeta) {
         };
 }
 
+/**
+ * Validate a tab label for the /sessions/:id/tabs POST body. Returns an
+ * error string suitable for a 400, or null if the label is acceptable
+ * (including the `undefined` case — omitted labels fall back to tabId
+ * inside DockerManager.createTab). See the JSDoc on createTab for the
+ * TSV-parser constraints these rules enforce (issue #92).
+ *
+ * The order matters — we reject the cheapest-to-detect problems first,
+ * so a malformed body gets a fast 400 without running the control-char
+ * regex.
+ */
+function validateTabLabel(label: unknown): string | null {
+        if (label === undefined) return null;
+        if (typeof label !== "string") return "label must be a string";
+        if (label.length === 0) return "label must not be empty";
+        if (label.length > 64) return "label must be at most 64 characters";
+        // Reject leading/trailing whitespace explicitly rather than silently
+        // trimming downstream. If we trimmed we'd have "what the client sent
+        // ≠ what's stored", and future GETs would surface the normalised form
+        // — a surprise the client can't see coming. A strict 400 lets the
+        // caller fix its own UX (e.g. trim the input field) instead.
+        if (label !== label.trim()) return "label must not have leading or trailing whitespace";
+        // ASCII-control block rejection. \t and \n break the TSV parser in
+        // listTabs; \r is silently stripped by execOneShot's demux (stored
+        // label wouldn't match the sent label). Higher code points (emoji,
+        // non-Latin scripts, typographic punctuation) are opaque to the
+        // parser and kept as-is.
+        // biome-ignore lint/suspicious/noControlCharactersInRegex: matching control chars IS the rejection criterion
+        if (/[\u0000-\u001F\u007F]/.test(label)) {
+                return "label must not contain control characters (tab, newline, etc.)";
+        }
+        return null;
+}
+
 function handleSessionError(err: unknown, res: Response): void {
+
         if (err instanceof NotFoundError) {
                 res.status(404).json({ error: err.message });
         } else if (err instanceof ForbiddenError) {
