@@ -484,7 +484,6 @@ export function buildRouter(
                 }
         });
 
-
         router.delete("/sessions/:id/tabs/:tabId", async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
                 const { id, tabId } = req.params;

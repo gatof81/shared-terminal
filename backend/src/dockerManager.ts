@@ -730,7 +730,6 @@ export class DockerManager {
                 // round-trip stored == sent invariant depends on it.
                 const displayLabel = label ?? tabId;
 
-
                 // `-c` pins the new tab's starting directory to the bind-mounted
                 // workspace. Without it, tmux inherits cwd from docker exec, which
                 // uses the image's WORKDIR (/home/developer) and dumps the user

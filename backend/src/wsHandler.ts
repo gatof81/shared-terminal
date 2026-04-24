@@ -39,7 +39,6 @@ export function handleWsConnection(
                 ws.close(1011, "socket error");
         });
 
-
         const url = req.url ?? "";
         const match = url.match(/\/ws\/sessions\/([^/?#]+)/);
         if (!match) {
