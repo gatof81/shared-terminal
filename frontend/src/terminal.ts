@@ -84,8 +84,11 @@ export function openTerminalSession(opts: {
 
         // webglcontextlost bubbles; webglcontextrestored does not. Use the loss
         // event's target to register the restore listener directly on the canvas
-        // that owns the GL context.
+        // that owns the GL context. Track the canvas so dispose() can remove the
+        // pending listener if the user navigates away before the GPU restores.
+        let pendingRestoreCanvas: HTMLCanvasElement | null = null;
         const onContextRestored = () => {
+                pendingRestoreCanvas = null;
                 if (webgl) return;
                 let restoredAddon: WebglAddon | undefined;
                 try {
@@ -101,7 +104,8 @@ export function openTerminalSession(opts: {
                 }
         };
         const onContextLost = (ev: Event) => {
-                (ev.target as HTMLCanvasElement).addEventListener("webglcontextrestored", onContextRestored, { once: true });
+                pendingRestoreCanvas = ev.target as HTMLCanvasElement;
+                pendingRestoreCanvas.addEventListener("webglcontextrestored", onContextRestored, { once: true });
         };
         if (webgl) container.addEventListener("webglcontextlost", onContextLost);
 
@@ -415,6 +419,7 @@ export function openTerminalSession(opts: {
                 container.removeEventListener("touchcancel", onTouchCancel);
                 inputDisposable.dispose();
                 linkProviderDisposable.dispose();
+                pendingRestoreCanvas?.removeEventListener("webglcontextrestored", onContextRestored);
                 container.removeEventListener("webglcontextlost", onContextLost);
                 webgl?.dispose();
                 ws.close(1000, "User navigated away");
