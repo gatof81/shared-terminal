@@ -165,6 +165,10 @@ export function openTerminalSession(opts: {
         };
 
         ws.onmessage = (ev) => {
+                // disposed: post-close frames buffered by the browser or in flight
+                // from the server still fire here, and term.write() throws on a
+                // disposed xterm. Sibling of the onerror/onclose guards below (#93).
+                if (disposed) return;
                 type Msg =
                         | { type: "output"; data: string }
                         | { type: "status"; status: SessionStatus }

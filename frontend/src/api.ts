@@ -24,6 +24,10 @@ export function setToken(token: string | null): void {
 
 export function isLoggedIn(): boolean { return !!_token; }
 
+/** Fired by `apiFetch` once per 401-burst after clearing the stale token —
+ * main.ts listens to perform UI teardown. See apiFetch for the emit guard. */
+export const SESSION_EXPIRED_EVENT = "st:session-expired";
+
 // ── Auth API ────────────────────────────────────────────────────────────────
 
 export async function checkAuthStatus(): Promise<{ needsSetup: boolean }> {
@@ -246,8 +250,33 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
                 "Content-Type": "application/json",
                 ...(init?.headers as Record<string, string> ?? {}),
         };
+        // Captured before the fetch so a concurrent setToken(null) between
+        // here and the response doesn't change how we classify the 401 below.
+        // `sentAuth` pins "this request carried an Authorization header" —
+        // only authed 401s are treated as "token is stale"; an unauthed 401
+        // (e.g. wrong password on /auth/login) must not clear token state.
+        const sentAuth = !!_token;
         if (_token) {
                 headers["Authorization"] = `Bearer ${_token}`;
         }
-        return fetch(`${API_BASE}${path}`, { ...init, headers });
+        const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
+
+        // Centralised stale-token handling (#95). Without this, the 15 s
+        // session poll toasts an error every 15 s forever once the JWT
+        // expires, because nothing else clears _token on 401.
+        //
+        // - sentAuth (captured pre-fetch) distinguishes authed 401s from
+        //   unauthed ones like a wrong-password /auth/login on a session
+        //   that already has a token — we mustn't clear auth state on that.
+        // - 401 is specifically "token stale"; 403 is policy and must not
+        //   trigger a logout.
+        // - _token !== null dedups concurrent 401 bursts (session poll +
+        //   a user-triggered call racing): the first setToken(null) through
+        //   silences the rest so the event fires exactly once per burst.
+        if (sentAuth && res.status === 401 && _token !== null) {
+                setToken(null);
+                window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT));
+        }
+
+        return res;
 }

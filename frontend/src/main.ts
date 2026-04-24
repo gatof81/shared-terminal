@@ -10,6 +10,7 @@ import {
         listSessions, createSession, deleteSession, stopSession, startSession,
         listTabs, createTab, deleteTab, TabNotFoundError,
         listInvites, createInvite, revokeInvite, InviteRequiredError,
+        SESSION_EXPIRED_EVENT,
         type SessionInfo, type Tab, type Invite,
 } from "./api.js";
 import { openTerminalSession, type TerminalSession, type SessionStatus } from "./terminal.js";
@@ -239,12 +240,37 @@ authForm.addEventListener("submit", async (e) => {
         }
 });
 
-logoutBtn.addEventListener("click", () => {
+// Shared teardown for both the explicit logout button and the auto-triggered
+// session-expired path below. Idempotent: `logout()` clears the already-null
+// token on a second call, disposeAllCurrentTerminals() handles an empty
+// terminal map, and showAuth() just re-applies display styles. So the burst
+// case (multiple 401s briefly racing before _token is cleared) is safe even
+// though apiFetch's `_token !== null` guard already deduplicates.
+function handleLogout(toastMessage?: string): void {
         logout();
         disposeAllCurrentTerminals();
         activeSessionId = null;
         sessions = [];
         showAuth();
+        if (toastMessage) showToast(toastMessage, true);
+}
+
+logoutBtn.addEventListener("click", () => {
+        handleLogout();
+});
+
+// Listen for the api-layer signal that our JWT is no longer accepted (#95).
+// Without this, a `refreshSessions()` tick 15 s after expiry produces a
+// 401 → red toast, the next tick does the same, and so on forever because
+// nothing was clearing `_token`. api.ts now clears the token at the 401 and
+// dispatches this event; we pair that with a UI transition back to the
+// login view and a single explanatory toast.
+//
+// One-shot per burst: apiFetch's internal `_token !== null` guard ensures
+// the event fires at most once per 401 burst, so we don't need extra
+// debouncing here.
+window.addEventListener(SESSION_EXPIRED_EVENT, () => {
+        handleLogout("Your session has expired — please sign in again");
 });
 
 // ── Session management ──────────────────────────────────────────────────────
