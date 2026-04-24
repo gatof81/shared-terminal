@@ -813,6 +813,13 @@ export class DockerManager {
                                         await this.sessions.updateStatus(row.session_id, "stopped");
                                 }
                         } catch {
+                                // Container is gone (externally removed, daemon forgot it).
+                                // Null the stale id so any reader between now and the next
+                                // /start — e.g. a WS attach → spawnSharedExec — doesn't hand
+                                // it to Docker and get "No such container". /start's Case 1
+                                // path will spawn a replacement against the preserved
+                                // workspace bind mount.
+                                await this.sessions.setContainerId(row.session_id, null);
                                 await this.sessions.updateStatus(row.session_id, "stopped");
                         }
                 }
