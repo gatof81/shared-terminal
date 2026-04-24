@@ -86,8 +86,7 @@ export function openTerminalSession(opts: {
         // canvas obtained from the loss event's target.
         let pendingRestoreCanvas: HTMLCanvasElement | null = null;
         const onContextRestored = () => {
-                // Normally null by the time this fires (xterm's canvas-level loss handler
-                // clears it first), but guard defensively against out-of-order driver events.
+                // Guard against misbehaving drivers; by spec webgl is always null here.
                 if (webgl) return;
                 pendingRestoreCanvas = null;
                 let restoredAddon: WebglAddon | undefined;
