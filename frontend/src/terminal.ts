@@ -91,13 +91,15 @@ export function openTerminalSession(opts: {
         // bounces repeatedly (rare GPU driver bug).
         const onContextRestored = () => {
                 if (webgl) return;
+                let addon: WebglAddon | undefined;
                 try {
-                        const addon = new WebglAddon();
-                        addon.onContextLoss(() => { addon.dispose(); webgl = null; });
+                        addon = new WebglAddon();
+                        addon.onContextLoss(() => { addon!.dispose(); webgl = null; });
                         term.loadAddon(addon);
                         webgl = addon;
                         console.log("[terminal] WebGL context restored, re-enabled GPU renderer");
                 } catch (err) {
+                        addon?.dispose();
                         console.warn("[terminal] WebGL restore failed:", err);
                 }
         };
