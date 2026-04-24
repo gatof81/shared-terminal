@@ -82,28 +82,28 @@ export function openTerminalSession(opts: {
                 webgl = null;
         }
 
-        // Sleep/wake and monitor hot-plug cause the browser to park and then
-        // reinstate the WebGL context. Re-attach the addon on restore so the
-        // terminal doesn't stay on the slower DOM renderer until the next reload.
-        // webglcontextrestored bubbles, so listening on container is reliable
-        // regardless of which canvas layer xterm assigns the WebGL context to.
-        // The `if (webgl) return` guard prevents thrashing when the context
-        // bounces repeatedly (rare GPU driver bug).
+        // webglcontextlost bubbles; webglcontextrestored does not. Use the loss
+        // event's target to register the restore listener directly on the canvas
+        // that owns the GL context.
         const onContextRestored = () => {
                 if (webgl) return;
-                let addon: WebglAddon | undefined;
+                let restoredAddon: WebglAddon | undefined;
                 try {
-                        addon = new WebglAddon();
-                        addon.onContextLoss(() => { addon!.dispose(); webgl = null; });
+                        const addon = new WebglAddon();
+                        restoredAddon = addon;
+                        addon.onContextLoss(() => { addon.dispose(); webgl = null; });
                         term.loadAddon(addon);
                         webgl = addon;
                         console.log("[terminal] WebGL context restored, re-enabled GPU renderer");
                 } catch (err) {
-                        addon?.dispose();
+                        restoredAddon?.dispose();
                         console.warn("[terminal] WebGL restore failed:", err);
                 }
         };
-        if (webgl) container.addEventListener("webglcontextrestored", onContextRestored);
+        const onContextLost = (ev: Event) => {
+                (ev.target as HTMLCanvasElement).addEventListener("webglcontextrestored", onContextRestored, { once: true });
+        };
+        if (webgl) container.addEventListener("webglcontextlost", onContextLost);
 
         fitAddon.fit();
 
@@ -415,7 +415,7 @@ export function openTerminalSession(opts: {
                 container.removeEventListener("touchcancel", onTouchCancel);
                 inputDisposable.dispose();
                 linkProviderDisposable.dispose();
-                container.removeEventListener("webglcontextrestored", onContextRestored);
+                container.removeEventListener("webglcontextlost", onContextLost);
                 webgl?.dispose();
                 ws.close(1000, "User navigated away");
                 term.dispose();
