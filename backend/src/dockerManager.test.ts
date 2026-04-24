@@ -1,5 +1,14 @@
 import { describe, it, expect, vi } from "vitest";
 import { PassThrough } from "stream";
+
+// d1Query is the only direct D1 touch-point in DockerManager (reconcile()).
+// Every other path is reached through the fake SessionManager. Default to an
+// empty result so tests that don't exercise reconcile aren't affected.
+const dbStubs = vi.hoisted(() => ({
+	d1Query: vi.fn(async () => ({ results: [], meta: { changes: 0 } })),
+}));
+vi.mock("./db.js", () => dbStubs);
+
 import { DockerManager, type OutputListener } from "./dockerManager.js";
 import type { SessionManager } from "./sessionManager.js";
 
@@ -532,4 +541,33 @@ describe("DockerManager tabs", () => {
 		expect((dm as unknown as { keyOf: Map<string, string> }).keyOf.has("a1")).toBe(false);
 	});
 
+});
+
+describe("DockerManager.reconcile", () => {
+	it("nulls stale container_id before flipping status to stopped when inspect throws", async () => {
+		const sessions = makeFakeSessions();
+		const dm = new DockerManager(sessions);
+		// Swap in a fake Dockerode whose inspect always throws — simulates a
+		// container that was removed out-of-band (the bug scenario).
+		(dm as unknown as { docker: unknown }).docker = {
+			getContainer: vi.fn(() => ({
+				inspect: vi.fn(async () => { throw new Error("No such container"); }),
+			})),
+		};
+
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [{ session_id: "s1", container_id: "container-123" }],
+			meta: { changes: 0 },
+		});
+
+		await dm.reconcile();
+
+		const setCalls = (sessions.setContainerId as ReturnType<typeof vi.fn>).mock;
+		const statusCalls = (sessions.updateStatus as ReturnType<typeof vi.fn>).mock;
+		expect(setCalls.calls).toEqual([["s1", null]]);
+		expect(statusCalls.calls).toEqual([["s1", "stopped"]]);
+		// Null-then-stopped matches the setContainerId → updateStatus order
+		// used in startContainer's respawn path.
+		expect(setCalls.invocationCallOrder[0]).toBeLessThan(statusCalls.invocationCallOrder[0]);
+	});
 });
