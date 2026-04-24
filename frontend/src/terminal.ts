@@ -87,6 +87,8 @@ export function openTerminalSession(opts: {
         let pendingRestoreCanvas: HTMLCanvasElement | null = null;
         const onContextRestored = () => {
                 pendingRestoreCanvas = null;
+                // webgl is null here: xterm's canvas-level onContextLoss fires before
+                // this bubbled handler, so the addon is already disposed.
                 let restoredAddon: WebglAddon | undefined;
                 try {
                         const addon = new WebglAddon();
