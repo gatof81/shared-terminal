@@ -87,7 +87,6 @@ export function openTerminalSession(opts: {
         let pendingRestoreCanvas: HTMLCanvasElement | null = null;
         const onContextRestored = () => {
                 pendingRestoreCanvas = null;
-                if (webgl) return;
                 let restoredAddon: WebglAddon | undefined;
                 try {
                         const addon = new WebglAddon();
@@ -102,7 +101,8 @@ export function openTerminalSession(opts: {
                 }
         };
         const onContextLost = (ev: Event) => {
-                pendingRestoreCanvas = ev.target as HTMLCanvasElement;
+                if (!(ev.target instanceof HTMLCanvasElement)) return;
+                pendingRestoreCanvas = ev.target;
                 pendingRestoreCanvas.addEventListener("webglcontextrestored", onContextRestored, { once: true });
         };
         if (webgl) container.addEventListener("webglcontextlost", onContextLost);
