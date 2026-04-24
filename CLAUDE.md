@@ -29,7 +29,7 @@ docker build -t shared-terminal-session ./session-image
 docker compose up -d --build
 ```
 
-There is no test suite and no linter configured — verify changes by running `npm run build` in both workspaces and exercising the feature in a browser.
+Backend has a vitest suite — `cd backend && npm test` (also runs in CI). No frontend tests yet, and no linter is wired up. CI (`.github/workflows/ci.yml`) runs `tsc` and (backend) `vitest` on every PR, so typos and broken tests will block merge. Beyond that, verify by running `npm run build` in both workspaces and exercising the feature in a browser.
 
 ## Required environment
 
@@ -49,12 +49,14 @@ Three pieces cooperate:
 
 ### The terminal data path
 
-`wsHandler.ts` → `DockerManager.attach()` runs `docker exec … tmux attach -t main` with `Tty: true`. The hijacked stream is piped both ways:
+`wsHandler.ts` → `DockerManager.attach()` runs `docker exec … tmux new-session -A -s <tabId>` with `Tty: true`. `-A` is the self-heal: attach if the tab's tmux session exists, create it if it doesn't. The hijacked exec stream is piped both ways:
 
-- bytes from tmux → pushed into a per-session `RingBuffer` (128 KB) **and** broadcast to all listeners for that session;
+- bytes from tmux → fanned out via `broadcast(…)` to every live listener for that session;
 - bytes from the browser → `docker.write(attachId, …)` back into the exec stdin.
 
-On reconnect, the ring buffer is drained and sent as a single `output` message so the user sees recent scrollback. Multiple browser tabs can attach to the same session — they all share the same tmux and see the same stream (each with its own `attachId`, listener, and resize).
+Replay on reconnect is a `tmux capture-pane -p -e` snapshot of the current pane (colour + position preserved), not a raw byte stream — there is no `RingBuffer`. To avoid a live/replay ordering race, `attach()` installs an armed `bufferedListener` that collects live bytes into a local tail array during the attach window; `wsHandler` sends the replay, then calls `flushTail()` which drains the tail in order and flips the listener to forward-directly. From the moment the listener is armed onward, the client-visible sequence is deterministic: `[replay][every live delta in arrival order]`.
+
+Multiple browser tabs attaching to the same session share the same tmux exec (each has its own `attachId`, listener, and resize).
 
 ### Persistence model
 
