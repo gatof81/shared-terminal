@@ -119,17 +119,22 @@ RUN set -eux; \
 # `useradd -m developer` would skip 1000 (taken) and fall through to 1001,
 # silently breaking the invariant — that exact mismatch caused container
 # crash-loops where every `docker exec tmux list-sessions` returned 500
-# from /api/sessions/:id/tabs. Drop the `ubuntu` user (and its group)
-# explicitly so the slot is free, then create developer pinned to 1000.
-# `userdel -r` removes the home dir too; the `|| true` is defensive in
-# case Canonical ever drops the default user from the base image.
+# from /api/sessions/:id/tabs. Drop the `ubuntu` user explicitly so the
+# slot is free, then create developer pinned to 1000.
+#
+# `userdel -r` also removes the home dir and (because Ubuntu defaults
+# USERGROUPS_ENAB=yes in /etc/login.defs) the matching primary group
+# `ubuntu`, so we don't need a separate `groupdel`. The `|| true` is
+# defensive in case Canonical ever drops the pre-baked user from the
+# base image, which would make `userdel ubuntu` fail with "user does
+# not exist" — non-fatal here, since the slot is already free.
 RUN userdel -r ubuntu 2>/dev/null || true \
-    && groupdel ubuntu 2>/dev/null || true \
     && useradd -m -s /bin/bash -u 1000 -U -G sudo developer \
     && echo "developer ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/developer
 
 USER developer
 WORKDIR /home/developer
+
 
 # ── tmux config (nice defaults) ──────────────────────────────────────────────
 COPY --chown=developer:developer tmux.conf /home/developer/.tmux.conf
