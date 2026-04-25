@@ -820,7 +820,14 @@ main:not([data-sidebar-ready]) #sidebar {
     width: 1px;
     height: 1px;
     overflow: hidden;
-    clip: rect(0 0 0 0);
+    /* CSS 2.1 requires the rect() args to be comma-separated; the space-
+       separated form is a quirk most browsers still tolerate but isn't
+       guaranteed long-term. clip itself is deprecated, so pair it with the
+       modern clip-path so future engines that drop clip still hide the
+       node. Both rules together remain the canonical "visually hidden"
+       recipe (matches Bootstrap's .visually-hidden, Tailwind's sr-only). */
+    clip: rect(0, 0, 0, 0);
+    clip-path: inset(50%);
     white-space: nowrap;
   }
   .header-right {

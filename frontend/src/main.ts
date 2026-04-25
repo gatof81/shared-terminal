@@ -478,12 +478,20 @@ async function openSession(sessionId: string) {
                 return;
         }
 
+        // Tapping a session in the sidebar drawer is the user's "go to that
+        // tmux" gesture; collapse the chrome drawer too so the freshly-attached
+        // terminal gets the full viewport. Mirrors the chip-click and addTab
+        // success paths — without this, switching session-to-session on mobile
+        // leaves whichever drawer state was last set by the previous session
+        // covering the top of the viewport.
+        if (isMobile()) setChromeOpen(false);
 
         // openTab can throw synchronously (openTerminalSession init failure) —
         // openSession is called with `void`, so an unhandled throw here would
         // become an unhandled rejection with no toast and the UI left mid-switch.
         try {
                 openTab(currentTabs[0]!.tabId);
+
         } catch (err) {
                 if (activeSessionId === sessionId) {
                         activeSessionId = null;
