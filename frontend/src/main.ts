@@ -34,6 +34,8 @@ const authInviteCode = document.getElementById("auth-invite-code") as HTMLInputE
 const authSubmitBtn = document.getElementById("auth-submit") as HTMLButtonElement;
 
 const userDisplay = document.getElementById("user-display")!;
+const sidebarUserDisplay = document.getElementById("sidebar-user-display")!;
+
 const logoutBtn = document.getElementById("logout-btn")!;
 const invitesBtn = document.getElementById("invites-btn") as HTMLButtonElement;
 const invitesModal = document.getElementById("invites-modal")!;
@@ -47,6 +49,10 @@ const mainEl = document.querySelector("main")!;
 const sidebarEl = document.getElementById("sidebar")!;
 const sidebarToggleBtn = document.getElementById("sidebar-toggle") as HTMLButtonElement;
 const sidebarBackdrop = document.getElementById("sidebar-backdrop")!;
+const sidebarInvitesBtn = document.getElementById("sidebar-invites-btn") as HTMLButtonElement;
+const sidebarLogoutBtn = document.getElementById("sidebar-logout-btn") as HTMLButtonElement;
+const chromeToggleBtn = document.getElementById("chrome-toggle") as HTMLButtonElement;
+const chromeToggleLabel = document.getElementById("chrome-toggle-label")!;
 
 const terminalToolbar = document.getElementById("terminal-toolbar")!;
 const terminalSessionName = document.getElementById("terminal-session-name")!;
@@ -56,6 +62,7 @@ const terminalContainer = document.getElementById("terminal-container")!;
 const emptyState = document.getElementById("empty-state")!;
 const fontSizeBtn = document.getElementById("font-size-btn") as HTMLButtonElement;
 const toast = document.getElementById("toast")!;
+
 
 // ── Viewport height ─────────────────────────────────────────────────────────
 // iOS Safari's soft keyboard overlays the layout viewport without resizing
@@ -113,7 +120,13 @@ function disposeAllCurrentTerminals() {
         terminalTabs.innerHTML = "";
         terminalTabs.style.display = "none";
         terminalContainer.style.display = "none";
+        // Clearing the tabs invalidates the chrome-toggle label — refresh
+        // even though updateToolbar() (which would also do this) typically
+        // runs immediately after. The defensive call costs almost nothing
+        // and stops a stale "Tab N" lingering in the header on logout.
+        updateChromeToggle();
 }
+
 
 // ── Auth flow ───────────────────────────────────────────────────────────────
 
@@ -152,8 +165,13 @@ function showApp() {
         authView.style.display = "none";
         appView.style.display = "flex";
         userDisplay.textContent = "●";
+        // Keep the sidebar-footer marker in lockstep with the header one so
+        // a future swap of "●" for the actual username only needs editing
+        // a single line.
+        sidebarUserDisplay.textContent = userDisplay.textContent;
         refreshSessions();
 }
+
 
 function updateAuthUI() {
         if (isRegisterMode) {
@@ -263,6 +281,15 @@ function handleLogout(toastMessage?: string): void {
 logoutBtn.addEventListener("click", () => {
         handleLogout();
 });
+
+// Logout from the sidebar footer just delegates — handleLogout() tears
+// the whole UI down so focus return is moot. Invites is wired separately
+// further below: closeInvitesModal needs the actual opener button to
+// restore focus to (the desktop invitesBtn is `display:none` on mobile,
+// so a delegated `invitesBtn.click()` would silently lose focus on close).
+sidebarLogoutBtn.addEventListener("click", () => logoutBtn.click());
+
+
 
 // Listen for the api-layer signal that our JWT is no longer accepted (#95).
 // Without this, a `refreshSessions()` tick 15 s after expiry produces a
@@ -444,14 +471,27 @@ async function openSession(sessionId: string) {
         // their first tab, and keep the terminal pane hidden.
         if (currentTabs.length === 0) {
                 renderTabBar();
+                // On mobile the chrome drawer (where the + button lives) is
+                // collapsed by default — auto-expand it for the empty session
+                // so the user can actually find the + without hunting for it.
+                if (isMobile()) setChromeOpen(true);
                 return;
         }
+
+        // Tapping a session in the sidebar drawer is the user's "go to that
+        // tmux" gesture; collapse the chrome drawer too so the freshly-attached
+        // terminal gets the full viewport. Mirrors the chip-click and addTab
+        // success paths — without this, switching session-to-session on mobile
+        // leaves whichever drawer state was last set by the previous session
+        // covering the top of the viewport.
+        if (isMobile()) setChromeOpen(false);
 
         // openTab can throw synchronously (openTerminalSession init failure) —
         // openSession is called with `void`, so an unhandled throw here would
         // become an unhandled rejection with no toast and the UI left mid-switch.
         try {
                 openTab(currentTabs[0]!.tabId);
+
         } catch (err) {
                 if (activeSessionId === sessionId) {
                         activeSessionId = null;
@@ -470,6 +510,7 @@ function updateToolbar() {
                 terminalTabs.style.display = "none";
                 terminalContainer.style.display = "none";
                 emptyState.style.display = "flex";
+                updateChromeToggle();
                 return;
         }
         terminalToolbar.style.display = "flex";
@@ -480,7 +521,11 @@ function updateToolbar() {
         terminalSessionName.textContent = s.name;
         terminalStatusBadge.textContent = s.status;
         terminalStatusBadge.className = s.status;
+        // Refresh the mobile header context pill — its label tracks the
+        // active session/tab, and visibility flips on/off here.
+        updateChromeToggle();
 }
+
 
 // ── Tabs within the active session ──────────────────────────────────────────
 
@@ -536,7 +581,13 @@ function renderTabBar() {
         addBtn.title = "Open a new tab (runs services independently; close to SIGHUP them)";
         addBtn.addEventListener("click", () => void addTab(addBtn));
         terminalTabs.appendChild(addBtn);
+        // The chrome-toggle label tracks whichever tab is active — refresh
+        // every time the bar is rebuilt so renames/closes/switches stay in
+        // sync without having to thread updateChromeToggle() through every
+        // caller of openTab/addTab/closeTab.
+        updateChromeToggle();
 }
+
 
 function openTab(tabId: string) {
         if (!activeSessionId) return;
@@ -723,7 +774,15 @@ async function addTab(triggeredBy?: HTMLButtonElement) {
                 currentTabs.push(tab);
                 try {
                         openTab(tab.tabId);
+                        // The tab-bar click listener auto-closes the chrome drawer
+                        // on chip clicks, but the + button is filtered out of that
+                        // path (it's not a chip yet at click time). Mirror the
+                        // behaviour here so adding a tab on mobile drops the user
+                        // straight into the new tmux pane instead of leaving the
+                        // drawer covering the top of the viewport.
+                        if (isMobile()) setChromeOpen(false);
                 } catch (err) {
+
                         // Roll back the push so the chip doesn't linger pointing at a
                         // tab with no currentTerminals entry, and clean up the backend
                         // tab fire-and-forget since it was never actually shown.
@@ -795,7 +854,16 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
         }
         currentTabs = currentTabs.filter((t) => t.tabId !== tabId);
 
+        // Closing the last tab on mobile leaves the chrome drawer collapsed
+        // (default state), and the CSS hides #terminal-tabs entirely while
+        // collapsed — so the + button rebuilt by renderTabBar() below isn't
+        // reachable until the user discovers the header pill. Mirror the
+        // openSession empty-tabs branch and auto-expand here too, so the
+        // first new tab is always one tap away.
+        if (isMobile() && currentTabs.length === 0) setChromeOpen(true);
+
         if (currentActiveTabId === tabId) {
+
                 currentActiveTabId = null;
                 // Nearest surviving neighbour: what was at the same index is now
                 // the next sibling; clamp to the new last tab when we closed the
@@ -935,7 +1003,13 @@ sessionList.addEventListener("click", (e) => {
 // already slid in (sidebar-open class still set, mobile CSS reads it as
 // "show drawer"), and a mobile user who widens the window would find the
 // sidebar column pinned at 0 with no visible trigger to recover.
-mobileMql.addEventListener("change", () => setSidebarOpen(!isMobile()));
+mobileMql.addEventListener("change", () => {
+        setSidebarOpen(!isMobile());
+        // Re-derive the chrome drawer state too — desktop always wants it open
+        // (since the toolbar/tabs are part of the layout there), and mobile
+        // wants it closed unless the user is mid-onboarding (no tabs yet).
+        setChromeOpen(chromeDefaultOpen());
+});
 
 // Default state: open on desktop, closed on mobile. The HTML+CSS start in
 // the closed state with transitions suppressed via `[data-sidebar-ready]`,
@@ -943,6 +1017,76 @@ mobileMql.addEventListener("change", () => setSidebarOpen(!isMobile()));
 // that would otherwise fire on every desktop page load.
 setSidebarOpen(!isMobile());
 mainEl.setAttribute("data-sidebar-ready", "");
+
+// ── Chrome (toolbar + tabs) drawer toggle ───────────────────────────────────
+// Mobile only — desktop always shows the toolbar+tabs as part of the layout.
+// On mobile we hide them by default to give tmux the full viewport, and
+// surface a slim toggle in the header that mirrors the sessions-sidebar
+// pattern: tap to expand, tap a tab to collapse again.
+
+function chromeDefaultOpen(): boolean {
+        // Desktop: always open — the layout includes the toolbar/tabs row.
+        if (!isMobile()) return true;
+        // Mobile + active session with no tabs: expand so the user can see
+        // the "+" button and create their first tab. Without this they'd
+        // land on a blank screen with no obvious way forward.
+        if (activeSessionId !== null && currentTabs.length === 0) return true;
+        return false;
+}
+
+function setChromeOpen(open: boolean) {
+        mainEl.classList.toggle("chrome-open", open);
+        chromeToggleBtn.setAttribute("aria-expanded", String(open));
+}
+
+// Keep the header chrome-toggle's label in sync with the active session
+// and tab. On mobile this IS the only on-screen indication of "where you
+// are" — sessions sidebar and tabs row are both hidden by default.
+function updateChromeToggle() {
+        const s = sessions.find((x) => x.sessionId === activeSessionId);
+        // Hide the toggle entirely when there's no session — there's nothing
+        // for it to toggle, and the empty-state message in the terminal area
+        // already explains what to do next.
+        if (!s) {
+                chromeToggleBtn.hidden = true;
+                return;
+        }
+        chromeToggleBtn.hidden = false;
+        const activeTab = currentTabs.find((t) => t.tabId === currentActiveTabId);
+        // Format: "session › tab". Falls back to just the session name when
+        // no tab is active yet (fresh session, between switches). Using a
+        // thin space + chevron keeps it scannable on a 430-pt-wide screen.
+        chromeToggleLabel.textContent = activeTab
+                ? `${s.name} › ${activeTab.label}`
+                : s.name;
+}
+
+chromeToggleBtn.addEventListener("click", () => {
+        setChromeOpen(!mainEl.classList.contains("chrome-open"));
+});
+
+// On mobile, picking a tab from the chrome drawer is the user's signal
+// that they're done with the controls and want to focus on tmux —
+// auto-collapse so the terminal regains the full viewport. Mirrors the
+// sessions-sidebar drawer behaviour. Closing/adding tabs and the font-size
+// button are NOT collapse triggers: those are tweaks the user often
+// repeats in succession, and forcing a re-expand each time is annoying.
+terminalTabs.addEventListener("click", (e) => {
+        if (!isMobile()) return;
+        const target = e.target as HTMLElement;
+        // Ignore the × close button and the + add button — they're explicit
+        // affordances inside the chrome drawer that the user expects to stay
+        // accessible. Only collapse on a chip click (tab switch).
+        if (target.closest(".tab-close")) return;
+        if (target.closest("#tab-add")) return;
+        if (target.closest(".tab-chip")) setChromeOpen(false);
+});
+
+// Default chrome state — apply once, then defer to the per-action
+// setChromeOpen calls scattered through openSession/openTab/etc.
+setChromeOpen(chromeDefaultOpen());
+updateChromeToggle();
+
 
 // ── Font size cycle button ──────────────────────────────────────────────────
 
@@ -966,12 +1110,20 @@ fontSizeBtn.textContent = `Aa ${currentFontSize}`;
 
 // ── Invites modal ───────────────────────────────────────────────────────────
 
-function openInvitesModal() {
+// Tracks which button opened the modal so close can return focus to the
+// same element. Without this, mobile users opening via the sidebar footer
+// would have focus restored to the desktop `invitesBtn` (display:none on
+// mobile) and lose their place in the tab order — `.focus()` is a no-op
+// on hidden elements.
+let invitesOpener: HTMLButtonElement | null = null;
+
+function openInvitesModal(opener: HTMLButtonElement) {
+        invitesOpener = opener;
         invitesModal.classList.add("open");
         invitesModal.setAttribute("aria-hidden", "false");
         // Move focus into the dialog so a keyboard user activating the Invites
         // button via Enter doesn't have their first Tab walk through the page
-        // behind the backdrop. Mirrors the invitesBtn.focus() in close.
+        // behind the backdrop. Restored to invitesOpener on close.
         inviteCreateBtn.focus();
         void renderInvites();
 }
@@ -979,8 +1131,15 @@ function openInvitesModal() {
 function closeInvitesModal() {
         invitesModal.classList.remove("open");
         invitesModal.setAttribute("aria-hidden", "true");
-        invitesBtn.focus();
+        // Fall back to invitesBtn if the opener is missing (legacy path or
+        // a future caller that forgot to set it). On mobile invitesBtn is
+        // hidden, so a missing opener would still drop focus — but that's
+        // a regression to flag in code review, not something to silently
+        // paper over here.
+        (invitesOpener ?? invitesBtn).focus();
+        invitesOpener = null;
 }
+
 
 async function renderInvites() {
         inviteList.textContent = "Loading…";
@@ -1074,7 +1233,9 @@ async function renderInvites() {
         }
 }
 
-invitesBtn.addEventListener("click", openInvitesModal);
+invitesBtn.addEventListener("click", () => openInvitesModal(invitesBtn));
+sidebarInvitesBtn.addEventListener("click", () => openInvitesModal(sidebarInvitesBtn));
+
 
 inviteCreateBtn.addEventListener("click", async () => {
         inviteCreateBtn.disabled = true;

@@ -70,7 +70,31 @@
             <line x1="3" y1="18" x2="21" y2="18"></line>
           </svg>
         </button>
-        <h1>⬛ Shared Terminal</h1>
+        <h1 id="app-title">⬛ Shared Terminal</h1>
+        <button
+          id="chrome-toggle"
+          type="button"
+          aria-label="Toggle session controls"
+          aria-expanded="false"
+          aria-controls="terminal-toolbar terminal-tabs"
+          hidden
+        >
+          <span id="chrome-toggle-label">Session</span>
+          <svg
+            id="chrome-toggle-icon"
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.4"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
+        </button>
         <div class="header-right">
           <span id="user-display"></span>
           <button id="invites-btn" title="Manage invite codes">Invites</button>
@@ -101,6 +125,11 @@
             <button type="submit">+ New</button>
           </form>
           <div id="session-list"></div>
+          <div id="sidebar-footer">
+            <span id="sidebar-user-display" aria-hidden="true"></span>
+            <button id="sidebar-invites-btn" type="button">Invites</button>
+            <button id="sidebar-logout-btn" type="button">Logout</button>
+          </div>
         </aside>
         <section id="terminal-area">
           <div id="empty-state">Select or create a session →</div>
