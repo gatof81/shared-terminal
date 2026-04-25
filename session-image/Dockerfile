@@ -43,6 +43,28 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 # Install globally so every session has it available.
 RUN npm install -g @anthropic-ai/claude-code
 
+# ── VS Code CLI (`code tunnel`) ──────────────────────────────────────────────
+# Standalone CLI from Microsoft. Lets the user run `code tunnel` from inside
+# the session and attach to the container from desktop VS Code (or vscode.dev)
+# on any device — no SSH, no exposed ports, auth goes through GitHub/Microsoft.
+#
+# We pull the static linux build that matches the container arch (TARGETARCH
+# is set automatically by Docker Buildx: amd64 on Intel / x86 hosts, arm64
+# on Apple Silicon). The archive only contains a single `code` binary.
+ARG TARGETARCH
+RUN set -eux; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) VSCODE_ARCH=cli-alpine-x64 ;; \
+      arm64) VSCODE_ARCH=cli-alpine-arm64 ;; \
+      *) echo "unsupported arch: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fLsS "https://code.visualstudio.com/sha/download?build=stable&os=${VSCODE_ARCH}" \
+         -o /tmp/vscode-cli.tar.gz; \
+    tar -xzf /tmp/vscode-cli.tar.gz -C /usr/local/bin; \
+    rm /tmp/vscode-cli.tar.gz; \
+    chmod +x /usr/local/bin/code; \
+    /usr/local/bin/code --version
+
 # ── Non-root user ────────────────────────────────────────────────────────────
 RUN useradd -m -s /bin/bash -G sudo developer \
     && echo "developer ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/developer

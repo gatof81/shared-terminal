@@ -202,10 +202,47 @@ Each session runs in a Docker container based on `session-image/Dockerfile`:
 - **OS:** Ubuntu 24.04
 - **Dev tools:** git, curl, build-essential, python3, Node.js 22, vim, nano, htop, jq
 - **Claude CLI:** `@anthropic-ai/claude-code` (globally installed)
+- **VS Code CLI:** `code` (standalone) — see [Connecting from VS Code](#connecting-from-vs-code) below
 - **Terminal:** tmux with a session named `main`, 50k scrollback, mouse support
 - **User:** `developer` (sudo, no password)
 - **Workspace:** `/home/developer/workspace` (bind-mounted from `<WORKSPACE_ROOT>/<sessionId>` on the host)
 - **Resources:** 2 GB RAM, 2 CPUs per container (configurable in `dockerManager.ts`)
+
+## Connecting from VS Code
+
+The session image ships the standalone Microsoft VS Code CLI, so any session
+can be opened in desktop VS Code (or `vscode.dev`) without SSH, port-forwards,
+or extra ingress on the home server. The tunnel goes outbound to Microsoft and
+auth is handled through your GitHub or Microsoft account.
+
+**From inside the browser terminal of a session:**
+
+```bash
+# First time only — register this container as a tunnel host.
+# It prints a short device-code URL; paste it on your Mac and sign in
+# with the same GitHub/Microsoft account you'll connect from.
+code tunnel
+
+# Subsequent runs in the same container can skip the prompt:
+#   code tunnel --accept-server-license-terms --name <session-name>
+```
+
+`code tunnel` keeps running in the foreground, so leave it in its own tmux
+tab — the container survives disconnects, and the tunnel comes back as soon
+as the container is started again.
+
+**On your Mac:**
+
+1. Install the [Remote - Tunnels](https://marketplace.visualstudio.com/items?itemName=ms-vscode.remote-server)
+   extension in VS Code.
+2. Open the Command Palette → **Remote-Tunnels: Connect to Tunnel…** and pick
+   the session you just registered. The workspace at
+   `/home/developer/workspace` is the one bind-mounted from the host, so
+   anything you save there is persisted across container restarts.
+
+> The tunnel binary is per-arch — the Dockerfile picks `cli-alpine-x64` or
+> `cli-alpine-arm64` automatically based on Buildx `TARGETARCH`, so it works
+> on both Intel servers and Apple Silicon hosts running the image natively.
 
 ## Tech Stack
 
