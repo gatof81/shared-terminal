@@ -228,8 +228,13 @@ code tunnel
 ```
 
 `code tunnel` keeps running in the foreground, so leave it in its own tmux
-tab — the container survives disconnects, and the tunnel comes back as soon
-as the container is started again.
+tab. The CLI's auth state is stored under `~/.vscode-cli/`, which the
+session entrypoint symlinks into `~/workspace/.vscode-cli/` — that path is
+bind-mounted from the host, so the device-login token survives container
+restarts (soft-delete + restart, host reboot triggering reconcile, etc.).
+After a restart you only need to re-launch `code tunnel`; it picks the
+existing registration up automatically. The state is purged on a hard
+delete, same as the rest of the workspace.
 
 **On your Mac:**
 

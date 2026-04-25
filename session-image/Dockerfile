@@ -96,7 +96,7 @@ RUN set -eux; \
       *) echo "unsupported arch: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     if [ -z "${VSCODE_SHA256}" ]; then \
-      echo "ERROR: no SHA-256 set for ${TARGETARCH} — refusing to install an unverified VS Code CLI. Override VSCODE_CLI_VERSION + VSCODE_CLI_SHA256_${TARGETARCH} together." >&2; \
+      echo "ERROR: no SHA-256 set for ${VSCODE_ARCH} — refusing to install an unverified VS Code CLI. Override VSCODE_CLI_VERSION together with VSCODE_CLI_SHA256_AMD64 / VSCODE_CLI_SHA256_ARM64." >&2; \
       exit 1; \
     fi; \
     curl -fLsS "https://update.code.visualstudio.com/${VSCODE_CLI_VERSION}/${VSCODE_ARCH}/stable" \
