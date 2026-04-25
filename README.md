@@ -240,9 +240,24 @@ as the container is started again.
    `/home/developer/workspace` is the one bind-mounted from the host, so
    anything you save there is persisted across container restarts.
 
-> The tunnel binary is per-arch — the Dockerfile picks `cli-alpine-x64` or
-> `cli-alpine-arm64` automatically based on Buildx `TARGETARCH`, so it works
+> The tunnel binary is per-arch — the Dockerfile picks `cli-linux-x64` or
+> `cli-linux-arm64` automatically based on Buildx `TARGETARCH`, so it works
 > on both Intel servers and Apple Silicon hosts running the image natively.
+> (We use the glibc `cli-linux-*` builds rather than the musl `cli-alpine-*`
+> ones because the base image is `ubuntu:24.04`.)
+>
+> For reproducible builds, pin the CLI release and verify its SHA-256 at
+> build time:
+>
+> ```bash
+> docker build \
+>   --build-arg VSCODE_CLI_VERSION=1.96.4 \
+>   --build-arg VSCODE_CLI_SHA256=<sha256 of the matching .tar.gz> \
+>   -t shared-terminal-session ./session-image
+> ```
+>
+> Without `VSCODE_CLI_SHA256` the build still succeeds but logs a warning,
+> since the `latest`-tracking default cannot be hash-pinned.
 
 ## Tech Stack
 

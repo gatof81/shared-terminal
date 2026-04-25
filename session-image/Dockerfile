@@ -64,8 +64,26 @@ RUN npm install -g @anthropic-ai/claude-code
 #
 #     docker build --build-arg VSCODE_CLI_VERSION=1.96.4 ./session-image
 #     docker build --build-arg VSCODE_CLI_VERSION=commit:fabdb6a ./session-image
+#
+# Integrity: every other install in this image is verified (apt = GPG,
+# npm = package-lock integrity hashes) — this download is not, so a
+# compromised CDN response would install an arbitrary executable into
+# /usr/local/bin/code that every session container then runs as a user
+# with NOPASSWD:ALL sudo. To close that gap, pass an expected SHA-256 of
+# the .tar.gz alongside the pinned version. Only meaningful with a pinned
+# VSCODE_CLI_VERSION (the rolling `latest` artifact is hash-unstable):
+#
+#     docker build \
+#       --build-arg VSCODE_CLI_VERSION=1.96.4 \
+#       --build-arg VSCODE_CLI_SHA256=<sha256 of the matching .tar.gz> \
+#       ./session-image
+#
+# When VSCODE_CLI_SHA256 is empty the build still succeeds but logs a
+# loud warning, so the unverified path is opt-out by silence rather than
+# the default-blessed path.
 ARG TARGETARCH
 ARG VSCODE_CLI_VERSION=latest
+ARG VSCODE_CLI_SHA256=
 RUN set -eux; \
     case "${TARGETARCH:-amd64}" in \
       amd64) VSCODE_ARCH=cli-linux-x64 ;; \
@@ -74,6 +92,11 @@ RUN set -eux; \
     esac; \
     curl -fLsS "https://update.code.visualstudio.com/${VSCODE_CLI_VERSION}/${VSCODE_ARCH}/stable" \
          -o /tmp/vscode-cli.tar.gz; \
+    if [ -n "${VSCODE_CLI_SHA256}" ]; then \
+      echo "${VSCODE_CLI_SHA256}  /tmp/vscode-cli.tar.gz" | sha256sum -c -; \
+    else \
+      echo "WARNING: VSCODE_CLI_SHA256 not set — installing unverified VS Code CLI tarball from update.code.visualstudio.com. Pin VSCODE_CLI_VERSION + VSCODE_CLI_SHA256 for reproducible, attested builds." >&2; \
+    fi; \
     tar -xzf /tmp/vscode-cli.tar.gz -C /usr/local/bin; \
     rm /tmp/vscode-cli.tar.gz; \
     chmod +x /usr/local/bin/code; \
