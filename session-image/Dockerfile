@@ -108,11 +108,39 @@ RUN set -eux; \
     /usr/local/bin/code --version
 
 # ── Non-root user ────────────────────────────────────────────────────────────
-RUN useradd -m -s /bin/bash -G sudo developer \
+# UID 1000 is non-negotiable: the backend chowns each session's workspace
+# bind-mount to WORKSPACE_UID:WORKSPACE_GID (default 1000:1000, see
+# dockerManager.ts) before starting the container. Anything else and
+# `developer` won't be able to write to /home/developer/workspace, which
+# bricks the entrypoint's `.vscode-cli` setup and any in-tab work.
+#
+# The wrinkle: Ubuntu 23.04+ base images (including 24.04 here) ship with
+# a pre-baked `ubuntu` user already holding UID/GID 1000. Plain
+# `useradd -m developer` would skip 1000 (taken) and fall through to 1001,
+# silently breaking the invariant — that exact mismatch caused container
+# crash-loops where every `docker exec tmux list-sessions` returned 500
+# from /api/sessions/:id/tabs. Drop the `ubuntu` user explicitly so the
+# slot is free, then create developer pinned to 1000.
+#
+# `userdel -r` also removes the home dir and (because Ubuntu defaults
+# USERGROUPS_ENAB=yes in /etc/login.defs) the matching primary group
+# `ubuntu`, so we don't need a separate `groupdel`. The `|| true` is
+# defensive in case Canonical ever drops the pre-baked user from the
+# base image, which would make `userdel ubuntu` fail with "user does
+# not exist" — non-fatal here, since the slot is already free. We
+# deliberately do NOT redirect stderr: if userdel ever fails for some
+# other reason (e.g. a future base where /home/ubuntu is a non-removable
+# mount), the build will still proceed via `|| true` but the next step's
+# "UID 1000 is not unique" failure will at least come with the actual
+# root cause printed in the build log.
+RUN userdel -r ubuntu || true \
+    && useradd -m -s /bin/bash -u 1000 -U -G sudo developer \
     && echo "developer ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/developer
+
 
 USER developer
 WORKDIR /home/developer
+
 
 # ── tmux config (nice defaults) ──────────────────────────────────────────────
 COPY --chown=developer:developer tmux.conf /home/developer/.tmux.conf
