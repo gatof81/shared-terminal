@@ -35,14 +35,21 @@ cd /home/developer/workspace
 # auth persistence is a nice-to-have; keeping the container alive isn't.
 # Trap the failure, log loudly enough that an operator can find it, and
 # carry on.
-if ! mkdir -p /home/developer/workspace/.vscode-cli 2>/dev/null; then
+#
+# stderr stays visible for the same reason the Dockerfile's `userdel`
+# does — the WARN line gives context, but the kernel's actual errno
+# (EACCES vs. ENOSPC vs. EROFS) is what an operator needs to fix the
+# real problem in `docker logs`. The `if !` test handles the non-zero
+# exit; we don't need to swallow the message too.
+if ! mkdir -p /home/developer/workspace/.vscode-cli; then
         echo "[entrypoint] WARN: couldn't create workspace .vscode-cli dir " \
              "(uid=$(id -u), workspace owner=$(stat -c '%u:%g' /home/developer/workspace 2>/dev/null || echo '?')). " \
              "code tunnel auth won't persist across restarts." >&2
-elif ! ln -sfn /home/developer/workspace/.vscode-cli /home/developer/.vscode-cli 2>/dev/null; then
+elif ! ln -sfn /home/developer/workspace/.vscode-cli /home/developer/.vscode-cli; then
         echo "[entrypoint] WARN: couldn't symlink ~/.vscode-cli into workspace; " \
              "code tunnel auth won't persist across restarts." >&2
 fi
+
 
 echo "[entrypoint] container ready — create a tab from the UI to begin"
 
