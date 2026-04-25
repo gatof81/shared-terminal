@@ -275,13 +275,13 @@ logoutBtn.addEventListener("click", () => {
         handleLogout();
 });
 
-// Mobile sidebar buttons just delegate to the desktop ones — single source
-// of truth for the actual handlers, so future changes to invites/logout
-// behaviour don't need to be mirrored in two places. Click() is enough
-// here: invitesBtn opens a modal (which manages its own focus), and
-// logoutBtn calls handleLogout() which tears the whole UI down anyway.
-sidebarInvitesBtn.addEventListener("click", () => invitesBtn.click());
+// Logout from the sidebar footer just delegates — handleLogout() tears
+// the whole UI down so focus return is moot. Invites is wired separately
+// further below: closeInvitesModal needs the actual opener button to
+// restore focus to (the desktop invitesBtn is `display:none` on mobile,
+// so a delegated `invitesBtn.click()` would silently lose focus on close).
 sidebarLogoutBtn.addEventListener("click", () => logoutBtn.click());
+
 
 
 // Listen for the api-layer signal that our JWT is no longer accepted (#95).
@@ -1086,12 +1086,20 @@ fontSizeBtn.textContent = `Aa ${currentFontSize}`;
 
 // ── Invites modal ───────────────────────────────────────────────────────────
 
-function openInvitesModal() {
+// Tracks which button opened the modal so close can return focus to the
+// same element. Without this, mobile users opening via the sidebar footer
+// would have focus restored to the desktop `invitesBtn` (display:none on
+// mobile) and lose their place in the tab order — `.focus()` is a no-op
+// on hidden elements.
+let invitesOpener: HTMLButtonElement | null = null;
+
+function openInvitesModal(opener: HTMLButtonElement) {
+        invitesOpener = opener;
         invitesModal.classList.add("open");
         invitesModal.setAttribute("aria-hidden", "false");
         // Move focus into the dialog so a keyboard user activating the Invites
         // button via Enter doesn't have their first Tab walk through the page
-        // behind the backdrop. Mirrors the invitesBtn.focus() in close.
+        // behind the backdrop. Restored to invitesOpener on close.
         inviteCreateBtn.focus();
         void renderInvites();
 }
@@ -1099,8 +1107,15 @@ function openInvitesModal() {
 function closeInvitesModal() {
         invitesModal.classList.remove("open");
         invitesModal.setAttribute("aria-hidden", "true");
-        invitesBtn.focus();
+        // Fall back to invitesBtn if the opener is missing (legacy path or
+        // a future caller that forgot to set it). On mobile invitesBtn is
+        // hidden, so a missing opener would still drop focus — but that's
+        // a regression to flag in code review, not something to silently
+        // paper over here.
+        (invitesOpener ?? invitesBtn).focus();
+        invitesOpener = null;
 }
+
 
 async function renderInvites() {
         inviteList.textContent = "Loading…";
@@ -1194,7 +1209,9 @@ async function renderInvites() {
         }
 }
 
-invitesBtn.addEventListener("click", openInvitesModal);
+invitesBtn.addEventListener("click", () => openInvitesModal(invitesBtn));
+sidebarInvitesBtn.addEventListener("click", () => openInvitesModal(sidebarInvitesBtn));
+
 
 inviteCreateBtn.addEventListener("click", async () => {
         inviteCreateBtn.disabled = true;
