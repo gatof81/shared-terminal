@@ -127,10 +127,16 @@ RUN set -eux; \
 # `ubuntu`, so we don't need a separate `groupdel`. The `|| true` is
 # defensive in case Canonical ever drops the pre-baked user from the
 # base image, which would make `userdel ubuntu` fail with "user does
-# not exist" — non-fatal here, since the slot is already free.
-RUN userdel -r ubuntu 2>/dev/null || true \
+# not exist" — non-fatal here, since the slot is already free. We
+# deliberately do NOT redirect stderr: if userdel ever fails for some
+# other reason (e.g. a future base where /home/ubuntu is a non-removable
+# mount), the build will still proceed via `|| true` but the next step's
+# "UID 1000 is not unique" failure will at least come with the actual
+# root cause printed in the build log.
+RUN userdel -r ubuntu || true \
     && useradd -m -s /bin/bash -u 1000 -U -G sudo developer \
     && echo "developer ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/developer
+
 
 USER developer
 WORKDIR /home/developer
