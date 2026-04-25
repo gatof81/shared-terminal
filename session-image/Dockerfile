@@ -51,14 +51,28 @@ RUN npm install -g @anthropic-ai/claude-code
 # We pull the static linux build that matches the container arch (TARGETARCH
 # is set automatically by Docker Buildx: amd64 on Intel / x86 hosts, arm64
 # on Apple Silicon). The archive only contains a single `code` binary.
+#
+# Linkage: this base image is glibc (ubuntu:24.04), so we use the
+# `cli-linux-*` artifacts. The `cli-alpine-*` builds are musl-linked and
+# will fail at runtime on glibc with "not found" / "Exec format error".
+#
+# Pinning: VSCODE_CLI_VERSION defaults to `latest`, which resolves to the
+# current stable release at build time. The download URL is otherwise
+# unversioned, so the docker layer cache key would not invalidate when
+# upstream ships a new build — set this arg to pin a known-good version
+# for reproducible images:
+#
+#     docker build --build-arg VSCODE_CLI_VERSION=1.96.4 ./session-image
+#     docker build --build-arg VSCODE_CLI_VERSION=commit:fabdb6a ./session-image
 ARG TARGETARCH
+ARG VSCODE_CLI_VERSION=latest
 RUN set -eux; \
     case "${TARGETARCH:-amd64}" in \
-      amd64) VSCODE_ARCH=cli-alpine-x64 ;; \
-      arm64) VSCODE_ARCH=cli-alpine-arm64 ;; \
+      amd64) VSCODE_ARCH=cli-linux-x64 ;; \
+      arm64) VSCODE_ARCH=cli-linux-arm64 ;; \
       *) echo "unsupported arch: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
-    curl -fLsS "https://code.visualstudio.com/sha/download?build=stable&os=${VSCODE_ARCH}" \
+    curl -fLsS "https://update.code.visualstudio.com/${VSCODE_CLI_VERSION}/${VSCODE_ARCH}/stable" \
          -o /tmp/vscode-cli.tar.gz; \
     tar -xzf /tmp/vscode-cli.tar.gz -C /usr/local/bin; \
     rm /tmp/vscode-cli.tar.gz; \
