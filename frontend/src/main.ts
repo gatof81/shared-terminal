@@ -34,6 +34,8 @@ const authInviteCode = document.getElementById("auth-invite-code") as HTMLInputE
 const authSubmitBtn = document.getElementById("auth-submit") as HTMLButtonElement;
 
 const userDisplay = document.getElementById("user-display")!;
+const sidebarUserDisplay = document.getElementById("sidebar-user-display")!;
+
 const logoutBtn = document.getElementById("logout-btn")!;
 const invitesBtn = document.getElementById("invites-btn") as HTMLButtonElement;
 const invitesModal = document.getElementById("invites-modal")!;
@@ -163,8 +165,13 @@ function showApp() {
         authView.style.display = "none";
         appView.style.display = "flex";
         userDisplay.textContent = "●";
+        // Keep the sidebar-footer marker in lockstep with the header one so
+        // a future swap of "●" for the actual username only needs editing
+        // a single line.
+        sidebarUserDisplay.textContent = userDisplay.textContent;
         refreshSessions();
 }
+
 
 function updateAuthUI() {
         if (isRegisterMode) {
@@ -839,7 +846,16 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
         }
         currentTabs = currentTabs.filter((t) => t.tabId !== tabId);
 
+        // Closing the last tab on mobile leaves the chrome drawer collapsed
+        // (default state), and the CSS hides #terminal-tabs entirely while
+        // collapsed — so the + button rebuilt by renderTabBar() below isn't
+        // reachable until the user discovers the header pill. Mirror the
+        // openSession empty-tabs branch and auto-expand here too, so the
+        // first new tab is always one tap away.
+        if (isMobile() && currentTabs.length === 0) setChromeOpen(true);
+
         if (currentActiveTabId === tabId) {
+
                 currentActiveTabId = null;
                 // Nearest surviving neighbour: what was at the same index is now
                 // the next sibling; clamp to the new last tab when we closed the
