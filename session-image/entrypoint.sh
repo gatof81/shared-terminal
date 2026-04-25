@@ -24,8 +24,25 @@ cd /home/developer/workspace
 # same lifetime contract as the user's source tree (kept on soft-delete +
 # restart, purged on hard-delete). Dot-prefixed so it stays out of normal
 # `ls` output and out of git's view.
-mkdir -p /home/developer/workspace/.vscode-cli
-ln -sfn /home/developer/workspace/.vscode-cli /home/developer/.vscode-cli
+#
+# Both steps are best-effort: if the workspace mount is owned by a UID the
+# `developer` user can't write to (e.g. operator misconfigured WORKSPACE_UID,
+# or future Ubuntu base bumps and the Dockerfile fix slips), `mkdir` would
+# fail with EACCES and `set -e` would kill the entrypoint. That used to
+# crash-loop the whole container, taking every `docker exec` (including
+# `tmux list-sessions` from listTabs) down with it — a 500 from
+# /api/sessions/:id/tabs on every freshly-spawned session. Code tunnel
+# auth persistence is a nice-to-have; keeping the container alive isn't.
+# Trap the failure, log loudly enough that an operator can find it, and
+# carry on.
+if ! mkdir -p /home/developer/workspace/.vscode-cli 2>/dev/null; then
+        echo "[entrypoint] WARN: couldn't create workspace .vscode-cli dir " \
+             "(uid=$(id -u), workspace owner=$(stat -c '%u:%g' /home/developer/workspace 2>/dev/null || echo '?')). " \
+             "code tunnel auth won't persist across restarts." >&2
+elif ! ln -sfn /home/developer/workspace/.vscode-cli /home/developer/.vscode-cli 2>/dev/null; then
+        echo "[entrypoint] WARN: couldn't symlink ~/.vscode-cli into workspace; " \
+             "code tunnel auth won't persist across restarts." >&2
+fi
 
 echo "[entrypoint] container ready — create a tab from the UI to begin"
 

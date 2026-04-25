@@ -108,7 +108,24 @@ RUN set -eux; \
     /usr/local/bin/code --version
 
 # ── Non-root user ────────────────────────────────────────────────────────────
-RUN useradd -m -s /bin/bash -G sudo developer \
+# UID 1000 is non-negotiable: the backend chowns each session's workspace
+# bind-mount to WORKSPACE_UID:WORKSPACE_GID (default 1000:1000, see
+# dockerManager.ts) before starting the container. Anything else and
+# `developer` won't be able to write to /home/developer/workspace, which
+# bricks the entrypoint's `.vscode-cli` setup and any in-tab work.
+#
+# The wrinkle: Ubuntu 23.04+ base images (including 24.04 here) ship with
+# a pre-baked `ubuntu` user already holding UID/GID 1000. Plain
+# `useradd -m developer` would skip 1000 (taken) and fall through to 1001,
+# silently breaking the invariant — that exact mismatch caused container
+# crash-loops where every `docker exec tmux list-sessions` returned 500
+# from /api/sessions/:id/tabs. Drop the `ubuntu` user (and its group)
+# explicitly so the slot is free, then create developer pinned to 1000.
+# `userdel -r` removes the home dir too; the `|| true` is defensive in
+# case Canonical ever drops the default user from the base image.
+RUN userdel -r ubuntu 2>/dev/null || true \
+    && groupdel ubuntu 2>/dev/null || true \
+    && useradd -m -s /bin/bash -u 1000 -U -G sudo developer \
     && echo "developer ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/developer
 
 USER developer
