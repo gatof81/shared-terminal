@@ -136,6 +136,47 @@ header h1 {
 #sidebar-toggle svg {
   display: block;
 }
+/* Chrome-toggle: a mobile-only button that surfaces the current session/tab
+   context AND toggles the toolbar+tabs drawer. Hidden on desktop because the
+   toolbar+tabs are always visible there; the explicit `hidden` attribute on
+   the element gives us the same effect when the app first paints, then JS
+   removes/re-applies it as the session state changes. */
+#chrome-toggle {
+  display: none;
+  align-items: center;
+  gap: 0.4rem;
+  background: transparent;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #c9d1d9;
+  font-size: 0.78rem;
+  padding: 0.3rem 0.55rem;
+  cursor: pointer;
+  /* Squeeze the label so it ellipsises rather than wrapping when the
+     active tab name is long ("npm-run-dev-watch-mode" etc.). */
+  min-width: 0;
+  max-width: 60vw;
+}
+#chrome-toggle:hover {
+  border-color: #58a6ff;
+  color: #58a6ff;
+}
+#chrome-toggle[hidden] {
+  display: none !important;
+}
+#chrome-toggle-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+#chrome-toggle-icon {
+  flex-shrink: 0;
+  transition: transform 0.15s ease;
+}
+main.chrome-open #chrome-toggle-icon {
+  transform: rotate(180deg);
+}
 .header-right {
   margin-left: auto;
   display: flex;
@@ -415,6 +456,42 @@ main:not([data-sidebar-ready]) #sidebar {
   flex: 1;
   overflow-y: auto;
   padding: 0.5rem;
+}
+/* Mobile-only menu inside the sidebar drawer. On desktop the same
+   actions live in the header; on mobile we surface them here so the
+   header can stay slim. Hidden by default — the mobile media query
+   below flips this to flex. */
+#sidebar-footer {
+  display: none;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 1rem;
+  border-top: 1px solid #30363d;
+  background: #0d1117;
+  flex-shrink: 0;
+}
+#sidebar-user-display {
+  font-size: 0.7rem;
+  color: #3fb950;
+  margin-right: auto;
+}
+#sidebar-invites-btn,
+#sidebar-logout-btn {
+  background: transparent;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #8b949e;
+  font-size: 0.78rem;
+  padding: 0.35rem 0.7rem;
+  cursor: pointer;
+}
+#sidebar-invites-btn:hover {
+  border-color: #58a6ff;
+  color: #58a6ff;
+}
+#sidebar-logout-btn:hover {
+  border-color: #f85149;
+  color: #f85149;
 }
 
 .session-item {
@@ -726,5 +803,78 @@ main:not([data-sidebar-ready]) #sidebar {
     display: block;
     background: rgba(0, 0, 0, 0.5);
     z-index: 15;
+  }
+
+  /* Slim header — every pixel here comes off the terminal viewport.
+     Drop the title text and the desktop user/invites/logout cluster;
+     the sidebar drawer's footer surfaces the same actions at the
+     ergonomic bottom of the screen instead. */
+  header {
+    padding: 0.45rem 0.6rem;
+    gap: 0.5rem;
+  }
+  header h1 {
+    /* Hide rather than remove from layout — keeps the document
+       outline intact for screen readers. */
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .header-right {
+    display: none;
+  }
+  /* The chrome-toggle replaces the title as the centre-of-screen widget
+     while a session is active — its label shows "session › tab" so the
+     user always knows their context without expanding anything. */
+  #chrome-toggle:not([hidden]) {
+    display: inline-flex;
+    flex: 1;
+  }
+
+  /* Surface the mobile menu inside the sidebar drawer. */
+  #sidebar-footer {
+    display: flex;
+  }
+
+  /* When the chrome drawer is closed (default on mobile), force the
+     toolbar + tabs out of the layout entirely so the terminal owns
+     the full viewport. The desktop inline `display: flex/none` set
+     by main.ts toolbar/tabs visibility logic is preserved when the
+     drawer is open — we just gate it behind .chrome-open. */
+  main:not(.chrome-open) #terminal-toolbar,
+  main:not(.chrome-open) #terminal-tabs {
+    display: none !important;
+  }
+
+  /* Compact toolbar+tabs when they DO show — saves another ~30 % of
+     vertical space on a 430-pt-wide screen. */
+  #terminal-toolbar {
+    padding: 0.4rem 0.6rem;
+    gap: 0.5rem;
+    font-size: 0.72rem;
+  }
+  #terminal-tabs {
+    padding: 4px 6px 0 6px;
+  }
+  .tab-chip {
+    padding: 0.3rem 0.45rem;
+    max-width: 140px;
+  }
+  /* Touch targets — tap-to-close needs to stay reachable without zoom,
+     and the always-visible × is fine on mobile (no hover state to
+     gate it on like desktop has). */
+  .tab-close {
+    opacity: 1;
+    padding: 4px 6px;
+  }
+
+  /* Active session/tab in the sidebar should already be obvious — but
+     surfacing the action buttons (start/stop/✕) only on hover doesn't
+     work without a hover state on touch. Show them always on mobile. */
+  .session-actions {
+    opacity: 1;
   }
 }
