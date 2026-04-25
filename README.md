@@ -246,18 +246,21 @@ as the container is started again.
 > (We use the glibc `cli-linux-*` builds rather than the musl `cli-alpine-*`
 > ones because the base image is `ubuntu:24.04`.)
 >
-> For reproducible builds, pin the CLI release and verify its SHA-256 at
-> build time:
+> The default build is reproducible and verified out of the box — the CLI
+> version is pinned to a specific commit and the per-arch SHA-256 of each
+> tarball is checked with `sha256sum -c` before extraction. There is no
+> "skip the hash check" path; an empty SHA fails the build. To bump the
+> pin (or override for a CVE patch), update the three `ARG VSCODE_CLI_*`
+> defaults in `session-image/Dockerfile` together, or pass them on the
+> command line:
 >
 > ```bash
 > docker build \
->   --build-arg VSCODE_CLI_VERSION=1.96.4 \
->   --build-arg VSCODE_CLI_SHA256=<sha256 of the matching .tar.gz> \
+>   --build-arg VSCODE_CLI_VERSION=commit:<sha> \
+>   --build-arg VSCODE_CLI_SHA256_AMD64=<x64 sha256 of the .tar.gz> \
+>   --build-arg VSCODE_CLI_SHA256_ARM64=<arm64 sha256 of the .tar.gz> \
 >   -t shared-terminal-session ./session-image
 > ```
->
-> Without `VSCODE_CLI_SHA256` the build still succeeds but logs a warning,
-> since the `latest`-tracking default cannot be hash-pinned.
 
 ## Tech Stack
 
