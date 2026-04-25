@@ -622,6 +622,17 @@ function openTab(tabId: string) {
                                                                 if (currentActiveTabId === tabId) {
                                                                         currentActiveTabId = null;
                                                                         terminalContainer.style.display = "none";
+                                                                        // refreshSessions() below will eventually round-trip
+                                                                        // and call updateToolbar(), but until that resolves
+                                                                        // the toolbar still shows the session name + status
+                                                                        // badge with no terminal beneath it. Match the rest
+                                                                        // of the codebase (closeTab, openSession's error
+                                                                        // paths) by syncing the toolbar to the new state
+                                                                        // synchronously — if the session was meanwhile
+                                                                        // dropped from sessions[] (rare, but possible if
+                                                                        // refreshSessions raced ahead), the empty-state
+                                                                        // panel takes over instead of an orphan toolbar.
+                                                                        updateToolbar();
                                                                 }
                                                                 renderTabBar();
                                                         });
