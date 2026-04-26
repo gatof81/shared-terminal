@@ -1415,9 +1415,11 @@ pasteClipboardBtn.addEventListener("click", async () => {
                 // clipboard text". null = API unavailable/denied. "" = iOS
                 // resolved without engaging the consent chip, OR the
                 // clipboard genuinely is empty. Either way the textarea
-                // (long-press fallback) is the right next step.
+                // (long-press fallback) is the right next step. The toast
+                // covers both interpretations because we can't distinguish
+                // them: iOS doesn't tell us which "" we got.
                 if (!clip) {
-                        showToast("Couldn't read clipboard — long-press to paste manually", true);
+                        showToast("Clipboard is empty or couldn't be read — long-press to paste manually", true);
                         return;
                 }
                 if (clip.length > MAX_PASTE_CHARS) {
