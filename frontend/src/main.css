@@ -682,22 +682,30 @@ main:not([data-sidebar-ready]) #sidebar {
   border-color: #58a6ff;
   color: #58a6ff;
 }
-/* Paste button is mobile-only — desktop xterm handles Cmd/Ctrl+V natively.
-   Shown via the @media (max-width: 768px) block below. */
+/* Paste button lives in the header; mobile-only because desktop xterm
+   handles Cmd/Ctrl+V natively. The default `display: none` keeps it out
+   of the desktop layout entirely, the @media (max-width: 768px) block
+   below flips it to inline-flex when not [hidden] (the hidden attribute
+   is toggled by main.ts in lockstep with the chrome-toggle pill — both
+   are gated on whether there's an active session). */
 #paste-btn {
   display: none;
   background: transparent;
   border: 1px solid #30363d;
   border-radius: 6px;
-  color: #8b949e;
-  font-size: 0.75rem;
-  padding: 0.2rem 0.55rem;
+  color: #c9d1d9;
+  font-size: 0.78rem;
+  padding: 0.3rem 0.7rem;
   cursor: pointer;
   line-height: 1;
+  font-weight: 500;
 }
 #paste-btn:hover {
   border-color: #58a6ff;
   color: #58a6ff;
+}
+#paste-btn:active {
+  background: rgba(88, 166, 255, 0.1);
 }
 #terminal-tabs {
   display: none;
@@ -959,17 +967,10 @@ main:not([data-sidebar-ready]) #sidebar {
     opacity: 1;
   }
 
-  /* Paste button surfaces only on mobile and sits left of the font-size
-     button on the right side of the toolbar. paste-btn carries the
-     `margin-left: auto` that pushes the action cluster to the right; we
-     drop font-size-btn's own auto-margin so the two don't fight over the
-     free space (two auto margins in the same flex line would split the
-     slack and leave paste-btn floating in the middle). */
-  #paste-btn {
+  /* Paste lives at the right edge of the mobile header. The chrome-toggle
+     pill in the middle has `flex: 1`, so it eats the slack and pushes
+     paste-btn naturally to the right — no margin-left:auto needed. */
+  #paste-btn:not([hidden]) {
     display: inline-flex;
-    margin-left: auto;
-  }
-  #font-size-btn {
-    margin-left: 0;
   }
 }

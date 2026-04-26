@@ -1051,6 +1051,8 @@ function setChromeOpen(open: boolean) {
 // Keep the header chrome-toggle's label in sync with the active session
 // and tab. On mobile this IS the only on-screen indication of "where you
 // are" — sessions sidebar and tabs row are both hidden by default.
+// The mobile paste button rides the same visibility lifecycle: nothing
+// to paste into when no session is active, so hide both together.
 function updateChromeToggle() {
         const s = sessions.find((x) => x.sessionId === activeSessionId);
         // Hide the toggle entirely when there's no session — there's nothing
@@ -1058,9 +1060,11 @@ function updateChromeToggle() {
         // already explains what to do next.
         if (!s) {
                 chromeToggleBtn.hidden = true;
+                pasteBtn.hidden = true;
                 return;
         }
         chromeToggleBtn.hidden = false;
+        pasteBtn.hidden = false;
         const activeTab = currentTabs.find((t) => t.tabId === currentActiveTabId);
         // Format: "session › tab". Falls back to just the session name when
         // no tab is active yet (fresh session, between switches). Using a

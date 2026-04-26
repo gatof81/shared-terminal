@@ -100,6 +100,15 @@
           <button id="invites-btn" title="Manage invite codes">Invites</button>
           <button id="logout-btn">Logout</button>
         </div>
+        <button
+          id="paste-btn"
+          type="button"
+          title="Paste text into the terminal"
+          aria-label="Paste text into the terminal"
+          hidden
+        >
+          Paste
+        </button>
       </header>
       <main>
         <div id="sidebar-backdrop" aria-hidden="true"></div>
@@ -137,14 +146,6 @@
             <span>Session:</span>
             <span id="terminal-session-name"></span>
             <span id="terminal-status-badge"></span>
-            <button
-              id="paste-btn"
-              type="button"
-              title="Paste text into the terminal"
-              aria-label="Paste text into the terminal"
-            >
-              Paste
-            </button>
             <button
               id="font-size-btn"
               type="button"
