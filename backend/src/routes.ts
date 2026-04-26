@@ -531,8 +531,17 @@ export function buildRouter(
                 upload.array("files", 8)(req, res, (err: unknown) => {
                         if (!err) { next(); return; }
                         if (err instanceof multer.MulterError) {
-                                const status = err.code === "LIMIT_FILE_SIZE" ? 413 : 400;
-                                res.status(status).json({ error: `Upload rejected: ${err.message}` });
+                                if (err.code === "LIMIT_FILE_SIZE") {
+                                        res.status(413).json({ error: `Upload rejected: ${err.message}` });
+                                        return;
+                                }
+                                if (err.code === "LIMIT_UNEXPECTED_FILE") {
+                                        // Default message ("Unexpected field") doesn't tell the
+                                        // caller what field name we DO expect — name it explicitly.
+                                        res.status(400).json({ error: "Upload rejected: field must be named 'files' (multipart/form-data)" });
+                                        return;
+                                }
+                                res.status(400).json({ error: `Upload rejected: ${err.message}` });
                                 return;
                         }
                         console.error("[routes] upload middleware error:", (err as Error).message);

@@ -1543,6 +1543,11 @@ fileInput.addEventListener("change", async () => {
                         showToast("No active session", true);
                         return;
                 }
+                // Snapshot the id before any await so a session-switch or
+                // logout that flips activeSessionId mid-upload doesn't end
+                // up POSTing to /sessions/null/files. Same pattern as
+                // addTab — see main.ts:741-style snapshot in this file.
+                const sessionId = activeSessionId;
                 if (picked.length > MAX_ATTACH_FILES) {
                         showToast(`Too many files (${picked.length}; max ${MAX_ATTACH_FILES})`, true);
                         return;
@@ -1556,7 +1561,7 @@ fileInput.addEventListener("change", async () => {
                 showToast(`Uploading ${picked.length} file${picked.length === 1 ? "" : "s"}…`);
                 let result: { paths: string[] };
                 try {
-                        result = await uploadSessionFiles(activeSessionId, picked);
+                        result = await uploadSessionFiles(sessionId, picked);
                 } catch (err) {
                         showToast(`Upload failed: ${(err as Error).message}`, true);
                         return;
