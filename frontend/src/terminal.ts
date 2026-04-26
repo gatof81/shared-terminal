@@ -407,7 +407,6 @@ export function openTerminalSession(opts: {
         // bash, zsh, and Claude CLI all do — so multi-line content arrives as
         // one paste event instead of being executed line-by-line.
         function paste(text: string) {
-                if (!text) return;
                 term.paste(text);
         }
 

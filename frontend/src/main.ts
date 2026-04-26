@@ -1315,6 +1315,12 @@ function closePasteModal() {
         pasteModal.setAttribute("aria-hidden", "true");
         pasteTextarea.value = "";
         pasteSendBtn.disabled = true;
+        // Release the pasteBtn in-flight guard. The pasteBtn click handler
+        // intentionally leaves it set on the modal-open path so a second
+        // tap can't kick off a parallel readClipboardText() while the modal
+        // is open; closure of the modal is the signal that the cycle is
+        // truly finished.
+        pasteInFlight = false;
         // Restore focus to the opener; on mobile the chrome drawer is open
         // when the modal is dismissed, so paste-btn is reachable. If the
         // opener is somehow gone (drawer collapsed externally), the focus
@@ -1338,17 +1344,25 @@ async function readClipboardText(): Promise<string | null> {
         }
 }
 
-// Guards against the iOS "Paste" consent chip race: the chip can take a
-// second to appear, and a second tap during that window would re-enter
-// this handler. If the chip is then dismissed on both paths, both calls
-// fall through to openPasteModal(), and the second one resets
-// pasteTextarea.value silently — clobbering anything the user just
-// started typing in the modal opened by the first call.
+// Guards against two distinct races:
+//   1. iOS "Paste" consent chip: the chip can take a second to appear,
+//      and a second tap during that window would re-enter the async path
+//      and queue a second clipboard read.
+//   2. Modal-open window: openPasteModal() is synchronous, so a naive
+//      try/finally would clear the guard the moment the modal opens —
+//      letting another tap re-fire and re-initialise the modal,
+//      clobbering text the user has started typing in the textarea.
+//
+// The guard therefore stays held across the modal lifetime; closePasteModal
+// is the single release point. The local `releaseGuard` boolean tracks
+// which exit path we're on so the silent-paste path still releases via
+// finally without depending on a synthetic catch-and-rethrow.
 let pasteInFlight = false;
 
 pasteBtn.addEventListener("click", async () => {
         if (pasteInFlight) return;
         pasteInFlight = true;
+        let releaseGuard = true;
         try {
                 const term = getActiveTerminal();
                 if (!term) {
@@ -1370,9 +1384,13 @@ pasteBtn.addEventListener("click", async () => {
                         return;
                 }
                 // Clipboard API unavailable or denied — surface the manual fallback.
+                // Hand the guard ownership to closePasteModal so the second-tap
+                // protection covers the entire modal lifetime, not just the
+                // synchronous tail of this handler.
                 openPasteModal(pasteBtn);
+                releaseGuard = false;
         } finally {
-                pasteInFlight = false;
+                if (releaseGuard) pasteInFlight = false;
         }
 });
 
