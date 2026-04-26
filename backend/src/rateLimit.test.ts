@@ -30,8 +30,13 @@ import { buildRouter } from "./routes.js";
 // Typed placeholders for the route tests — no session/docker routes are
 // hit in these scenarios, so an empty-object cast is fine AND preserves
 // type-checking if a future route starts calling into sessions/docker.
+// getUploadTmpDir IS called eagerly during buildRouter() when configuring
+// multer's diskStorage destination, so fakeDocker has to provide a stub
+// even though no upload route runs in these tests.
 const fakeSessions = {} as unknown as SessionManager;
-const fakeDocker = {} as unknown as DockerManager;
+const fakeDocker = {
+	getUploadTmpDir: () => "/tmp/shared-terminal-test-uploads",
+} as unknown as DockerManager;
 
 // ── UsernameRateLimiter unit tests ─────────────────────────────────────────
 

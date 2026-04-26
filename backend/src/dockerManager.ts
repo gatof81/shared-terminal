@@ -223,40 +223,96 @@ export class DockerManager {
          */
         async writeUploads(
                 sessionId: string,
-                files: ReadonlyArray<{ originalname: string; buffer: Buffer }>,
+                files: ReadonlyArray<{ originalname: string; path: string }>,
         ): Promise<string[]> {
                 if (files.length === 0) return [];
-                const rootAbs = path.resolve(WORKSPACE_ROOT);
                 const uploadsHostDir = path.join(WORKSPACE_ROOT, sessionId, "uploads");
+                // Lexical sanity check (matches purgeWorkspace at L306).
+                // assertOwnership already constrains sessionId to a UUID from D1,
+                // but if a future refactor ever lets a path-traversal-shaped
+                // sessionId reach here we must not even mkdir outside WORKSPACE_ROOT.
+                const rootAbs = path.resolve(WORKSPACE_ROOT);
                 const uploadsHostDirAbs = path.resolve(uploadsHostDir);
-                // Defence-in-depth (matches purgeWorkspace at L306): assertOwnership
-                // already constrains sessionId to a UUID from D1, but if a future
-                // refactor ever lets a path-traversal-shaped sessionId reach here we
-                // must not create directories or write files outside WORKSPACE_ROOT.
                 if (!uploadsHostDirAbs.startsWith(`${rootAbs}${path.sep}`)) {
+                        await this.cleanupTmp(files);
                         throw new Error(`unsafe session path resolved outside ${rootAbs}: ${uploadsHostDirAbs}`);
                 }
                 await fs.mkdir(uploadsHostDir, { recursive: true });
-                await this.chownToWorkspaceUser(uploadsHostDir);
+
+                // Lexical resolve() above is purely string manipulation — it
+                // does NOT follow symlinks. A container owns its bind-mounted
+                // workspace and could replace `uploads/` with a symlink to /etc
+                // before we got here; the lexical check would still pass and
+                // a subsequent chown would change ownership of the link target.
+                // fs.realpath canonicalises through the filesystem, so a
+                // mis-pointed symlink shows up as a real-path outside
+                // WORKSPACE_ROOT and we bail before touching anything.
+                const rootReal = await fs.realpath(WORKSPACE_ROOT);
+                const realUploadsDir = await fs.realpath(uploadsHostDir);
+                if (!realUploadsDir.startsWith(`${rootReal}${path.sep}`)) {
+                        await this.cleanupTmp(files);
+                        throw new Error(`uploads dir escaped workspace root: ${realUploadsDir}`);
+                }
+                // Chown the canonical path, not the lexical one — fs.chown
+                // follows symlinks, but realUploadsDir is already the resolved
+                // target, so we operate on the real directory.
+                await this.chownToWorkspaceUser(realUploadsDir);
 
                 const containerPaths: string[] = [];
                 const now = Date.now().toString(36);
-                for (const file of files) {
-                        const safeBase = sanitiseUploadName(file.originalname);
-                        // Random suffix on top of the timestamp so two uploads
-                        // landing in the same millisecond don't collide.
-                        const suffix = randomBytes(3).toString("hex");
-                        const filename = `${now}-${suffix}-${safeBase}`;
-                        const hostPath = path.join(uploadsHostDir, filename);
-                        const hostPathAbs = path.resolve(hostPath);
-                        if (!hostPathAbs.startsWith(`${uploadsHostDirAbs}${path.sep}`)) {
-                                throw new Error(`unsafe upload path resolved outside ${uploadsHostDirAbs}: ${hostPathAbs}`);
+                // Track which multer tmp files we've successfully moved so the
+                // finally block can clean up anything we didn't get to.
+                const remaining = new Set(files.map((f) => f.path));
+                try {
+                        for (const file of files) {
+                                const safeBase = sanitiseUploadName(file.originalname);
+                                // Random suffix on top of the timestamp so two uploads
+                                // landing in the same millisecond don't collide.
+                                const suffix = randomBytes(3).toString("hex");
+                                const filename = `${now}-${suffix}-${safeBase}`;
+                                const finalPath = path.join(realUploadsDir, filename);
+                                const finalPathAbs = path.resolve(finalPath);
+                                if (!finalPathAbs.startsWith(`${realUploadsDir}${path.sep}`)) {
+                                        throw new Error(`unsafe upload path resolved outside ${realUploadsDir}: ${finalPathAbs}`);
+                                }
+                                // Atomic move within the same filesystem (multer's
+                                // tmp dir lives under WORKSPACE_ROOT — see routes.ts).
+                                // EXDEV would fire if someone repointed multer's tmp
+                                // root elsewhere; surfacing the error is fine because
+                                // the tmp file is still cleaned up by the finally below.
+                                await fs.rename(file.path, finalPath);
+                                remaining.delete(file.path);
+                                await fs.chmod(finalPath, 0o644);
+                                await this.chownToWorkspaceUser(finalPath);
+                                containerPaths.push(`/home/developer/workspace/uploads/${filename}`);
                         }
-                        await fs.writeFile(hostPath, file.buffer, { mode: 0o644 });
-                        await this.chownToWorkspaceUser(hostPath);
-                        containerPaths.push(`/home/developer/workspace/uploads/${filename}`);
+                } finally {
+                        await this.cleanupTmp([...remaining].map((p) => ({ originalname: "", path: p })));
                 }
                 return containerPaths;
+        }
+
+        /**
+         * Absolute host path where multer streams uploaded bodies before
+         * `writeUploads` moves them to their final per-session location.
+         * Lives directly under WORKSPACE_ROOT (NOT inside any session
+         * subdirectory) so it's never bind-mounted into a container, and
+         * `fs.rename` from here to the final path is a same-filesystem
+         * atomic move.
+         */
+        getUploadTmpDir(): string {
+                return path.join(WORKSPACE_ROOT, ".tmp-uploads");
+        }
+
+        // Best-effort cleanup of multer's on-disk temp files. Used on the
+        // bail-out paths in writeUploads (containment-check failure, mid-loop
+        // throw). Each unlink is independently swallowed because the only
+        // failure modes here are "file already gone" or "no permission" —
+        // neither is something the upload caller should hear about.
+        private async cleanupTmp(
+                files: ReadonlyArray<{ path: string }>,
+        ): Promise<void> {
+                await Promise.allSettled(files.map((f) => fs.unlink(f.path)));
         }
 
         async kill(sessionId: string): Promise<void> {

@@ -2,6 +2,8 @@
  * routes.ts — REST API routes.
  */
 
+import { randomBytes } from "node:crypto";
+import { promises as fs } from "node:fs";
 import type { NextFunction, Request, Response } from "express";
 import { Router } from "express";
 import multer from "multer";
@@ -510,15 +512,39 @@ export function buildRouter(
         // ── File uploads ────────────────────────────────────────────────────────
         // Drop user-uploaded files into the session's bind-mounted workspace
         // (under uploads/) so the container — and Claude CLI in it — can read
-        // them. Memory storage is fine at the configured size cap; multer
-        // streams the multipart upload, only buffering a single file at a
-        // time. Caps:
+        // them.
+        //
+        // Disk storage (NOT memoryStorage) is the load-bearing choice here.
+        // 8 × 25 MB = 200 MB of body per request, and the per-IP rate
+        // limiter (30/5min) doesn't bound concurrency — 30 concurrent
+        // requests with memoryStorage would peak at ~6 GB of heap and
+        // OOM-kill the backend. Disk storage streams bytes through Node
+        // into the OS page cache, then `writeUploads` atomically renames
+        // the temp file into the final per-session location.
+        //
+        // Caps:
         //   - 25 MB per file: covers the images / PDFs Claude actually
         //     accepts without forcing chunked upload UI.
         //   - 8 files per request: enough for a typical "drop a few
-        //     screenshots" gesture, low enough to bound peak memory.
+        //     screenshots" gesture, low enough to bound peak disk usage
+        //     per request.
+        const uploadTmpDir = docker.getUploadTmpDir();
         const upload = multer({
-                storage: multer.memoryStorage(),
+                storage: multer.diskStorage({
+                        destination: (_req, _file, cb) => {
+                                // Idempotent — the dir often already exists; recursive: true
+                                // makes mkdir a no-op in that case.
+                                fs.mkdir(uploadTmpDir, { recursive: true })
+                                        .then(() => cb(null, uploadTmpDir))
+                                        .catch((err: Error) => cb(err, ""));
+                        },
+                        filename: (_req, _file, cb) => {
+                                // multer-internal name only; writeUploads renames to the
+                                // user-facing `<ts>-<rand>-<safeBase>` form when it moves
+                                // the file into the per-session uploads/ dir.
+                                cb(null, `${Date.now().toString(36)}-${randomBytes(8).toString("hex")}`);
+                        },
+                }),
                 limits: {
                         fileSize: 25 * 1024 * 1024,
                         files: 8,
@@ -572,18 +598,26 @@ export function buildRouter(
                 requireSessionOwnership,
                 handleUploadMiddleware,
                 async (req: Request, res: Response) => {
+                        const files = (req.files as Express.Multer.File[] | undefined) ?? [];
                         try {
-                                const files = (req.files as Express.Multer.File[] | undefined) ?? [];
                                 if (files.length === 0) {
                                         res.status(400).json({ error: "no files provided (use 'files' field, multipart/form-data)" });
                                         return;
                                 }
                                 const paths = await docker.writeUploads(
                                         req.params.id,
-                                        files.map((f) => ({ originalname: f.originalname, buffer: f.buffer })),
+                                        // diskStorage — pass the on-disk tmp path, not a buffer.
+                                        files.map((f) => ({ originalname: f.originalname, path: f.path })),
                                 );
                                 res.status(201).json({ paths });
                         } catch (err) {
+                                // writeUploads owns its own tmp cleanup, but a throw
+                                // before it gets called (e.g. the empty-files 400 above
+                                // would only happen if multer ran with no files in the
+                                // form, in which case there's nothing on disk anyway)
+                                // can leave stragglers. Best-effort unlink — failures
+                                // here are not interesting to the caller.
+                                await Promise.allSettled(files.map((f) => fs.unlink(f.path)));
                                 handleSessionError(err, res);
                         }
                 },
