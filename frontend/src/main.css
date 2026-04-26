@@ -968,9 +968,11 @@ main:not([data-sidebar-ready]) #sidebar {
   }
 
   /* Paste lives at the right edge of the mobile header. The chrome-toggle
-     pill in the middle has `flex: 1`, so it eats the slack and pushes
-     paste-btn naturally to the right — no margin-left:auto needed. */
+     pill in the middle has `flex: 1` when active, but it can be hidden
+     (no session selected) — `margin-left: auto` pins paste-btn to the
+     right edge in both cases. */
   #paste-btn:not([hidden]) {
     display: inline-flex;
+    margin-left: auto;
   }
 }

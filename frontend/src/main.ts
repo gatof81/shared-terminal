@@ -1374,11 +1374,14 @@ pasteBtn.addEventListener("click", async () => {
                         return;
                 }
                 const clip = await readClipboardText();
-                if (clip !== null) {
-                        if (clip.length === 0) {
-                                showToast("Clipboard is empty", true);
-                                return;
-                        }
+                // Empty string is treated the same as null. iOS Safari can
+                // resolve readText() with "" when the user dismisses or
+                // never engages with the system "Paste" consent chip — even
+                // if the clipboard genuinely has content. Treating that as
+                // success would dead-end the user with a misleading
+                // "clipboard empty" toast; falling through to the modal
+                // gives them a long-press path that always works.
+                if (clip) {
                         if (clip.length > MAX_PASTE_CHARS) {
                                 showToast(`Clipboard too large (${clip.length} chars; max ${MAX_PASTE_CHARS})`, true);
                                 return;
@@ -1387,10 +1390,11 @@ pasteBtn.addEventListener("click", async () => {
                         showToast(`Pasted ${clip.length} character${clip.length === 1 ? "" : "s"}`);
                         return;
                 }
-                // Clipboard API unavailable or denied — surface the manual fallback.
-                // Hand the guard ownership to closePasteModal so the second-tap
-                // protection covers the entire modal lifetime, not just the
-                // synchronous tail of this handler.
+                // Clipboard API unavailable, denied, or returned empty —
+                // surface the manual fallback. Hand the guard ownership to
+                // closePasteModal so the second-tap protection covers the
+                // entire modal lifetime, not just the synchronous tail of
+                // this handler.
                 openPasteModal(pasteBtn);
                 releaseGuard = false;
         } finally {
