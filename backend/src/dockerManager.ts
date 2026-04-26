@@ -146,26 +146,7 @@ export class DockerManager {
          * silently boot a session with a broken workspace.
          */
         private async ensureWorkspaceOwnership(dir: string): Promise<void> {
-                const chownOne = async (target: string) => {
-                        try {
-                                await fs.chown(target, WORKSPACE_UID, WORKSPACE_GID);
-                        } catch (err) {
-                                const code = (err as NodeJS.ErrnoException).code;
-                                if (code === "EPERM" || code === "ENOSYS") {
-                                        // Logged once per target — high-volume recursive mode
-                                        // could be noisy, but seeing which paths failed is more
-                                        // valuable than a compact summary.
-                                        console.warn(
-                                                `[docker] couldn't chown ${target} to ${WORKSPACE_UID}:${WORKSPACE_GID} (${code}); ` +
-                                                `run the backend as root or pre-create paths with matching ownership.`,
-                                        );
-                                } else {
-                                        throw err;
-                                }
-                        }
-                };
-
-                await chownOne(dir);
+                await this.chownToWorkspaceUser(dir);
 
                 if (!WORKSPACE_CHOWN_RECURSIVE) return;
 
@@ -196,12 +177,78 @@ export class DockerManager {
                         }
                         for (const entry of entries) {
                                 const full = path.join(current, entry.name);
-                                await chownOne(full);
+                                await this.chownToWorkspaceUser(full);
                                 if (entry.isDirectory() && !entry.isSymbolicLink()) {
                                         stack.push(full);
                                 }
                         }
                 }
+        }
+
+        /**
+         * chown a single path to WORKSPACE_UID:WORKSPACE_GID. Downgrades
+         * EPERM/ENOSYS to a warning (unprivileged dev mode), re-throws
+         * everything else so a real broken-workspace error doesn't get
+         * swallowed. Shared by the spawn-time ownership pass and the
+         * upload writer below.
+         */
+        private async chownToWorkspaceUser(target: string): Promise<void> {
+                try {
+                        await fs.chown(target, WORKSPACE_UID, WORKSPACE_GID);
+                } catch (err) {
+                        const code = (err as NodeJS.ErrnoException).code;
+                        if (code === "EPERM" || code === "ENOSYS") {
+                                console.warn(
+                                        `[docker] couldn't chown ${target} to ${WORKSPACE_UID}:${WORKSPACE_GID} (${code}); ` +
+                                        `run the backend as root or pre-create paths with matching ownership.`,
+                                );
+                        } else {
+                                throw err;
+                        }
+                }
+        }
+
+        /**
+         * Save uploaded files into the session workspace under `uploads/`
+         * and return their in-container paths. Caller must have already
+         * verified ownership of `sessionId`.
+         *
+         * Filenames are sanitised to a safe basename and prefixed with a
+         * monotonic timestamp + short random suffix so concurrent uploads
+         * of the same name don't clobber each other. The host path of
+         * every write is `path.resolve()`d and verified to sit inside the
+         * uploads directory before opening the file — the sanitiser
+         * already strips path separators, but the resolve-and-check is a
+         * defence-in-depth belt against a future regression.
+         */
+        async writeUploads(
+                sessionId: string,
+                files: ReadonlyArray<{ originalname: string; buffer: Buffer }>,
+        ): Promise<string[]> {
+                if (files.length === 0) return [];
+                const uploadsHostDir = path.join(WORKSPACE_ROOT, sessionId, "uploads");
+                const uploadsHostDirAbs = path.resolve(uploadsHostDir);
+                await fs.mkdir(uploadsHostDir, { recursive: true });
+                await this.chownToWorkspaceUser(uploadsHostDir);
+
+                const containerPaths: string[] = [];
+                const now = Date.now().toString(36);
+                for (const file of files) {
+                        const safeBase = sanitiseUploadName(file.originalname);
+                        // Random suffix on top of the timestamp so two uploads
+                        // landing in the same millisecond don't collide.
+                        const suffix = randomBytes(3).toString("hex");
+                        const filename = `${now}-${suffix}-${safeBase}`;
+                        const hostPath = path.join(uploadsHostDir, filename);
+                        const hostPathAbs = path.resolve(hostPath);
+                        if (!hostPathAbs.startsWith(`${uploadsHostDirAbs}${path.sep}`)) {
+                                throw new Error(`unsafe upload path resolved outside ${uploadsHostDirAbs}: ${hostPathAbs}`);
+                        }
+                        await fs.writeFile(hostPath, file.buffer, { mode: 0o644 });
+                        await this.chownToWorkspaceUser(hostPath);
+                        containerPaths.push(`/home/developer/workspace/uploads/${filename}`);
+                }
+                return containerPaths;
         }
 
         async kill(sessionId: string): Promise<void> {
@@ -862,6 +909,27 @@ export class DockerManager {
 }
 
 // ── Module-level helpers ─────────────────────────────────────────────────────
+
+// Sanitise an uploaded file's original name into a safe basename that's
+// guaranteed to land inside the uploads directory. Strips any path
+// components, restricts the character set, preserves a short extension,
+// and falls back to "file" if everything got stripped.
+function sanitiseUploadName(original: string): string {
+        const base = path.basename(original ?? "");
+        // Restrict to a small Latin set so the path is shell-safe (the user
+        // pastes it into the terminal as-is) and filesystem-portable.
+        // Anything else is collapsed to underscore.
+        const cleaned = base.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^[._]+/, "");
+        if (!cleaned) return "file";
+        // Preserve the extension up to a max stem length so names stay
+        // readable in `ls` and don't blow past common filesystem limits.
+        const MAX_LEN = 80;
+        if (cleaned.length <= MAX_LEN) return cleaned;
+        const dot = cleaned.lastIndexOf(".");
+        if (dot < 0 || dot >= cleaned.length - 1) return cleaned.slice(0, MAX_LEN);
+        const ext = cleaned.slice(dot).slice(0, 16); // also cap extension
+        return cleaned.slice(0, MAX_LEN - ext.length) + ext;
+}
 
 // Parse the Docker multiplexed stream format used when Tty:false.
 // Frame layout: [type(1)][pad(3)][size(4 BE)] followed by `size` payload bytes.

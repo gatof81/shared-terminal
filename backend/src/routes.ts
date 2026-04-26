@@ -2,8 +2,9 @@
  * routes.ts — REST API routes.
  */
 
-import type { Request, Response } from "express";
+import type { NextFunction, Request, Response } from "express";
 import { Router } from "express";
+import multer from "multer";
 import type { AuthedRequest } from "./auth.js";
 import {
         createInvite,
@@ -501,6 +502,58 @@ export function buildRouter(
 
                         await docker.deleteTab(id, tabId);
                         res.status(204).send();
+                } catch (err) {
+                        handleSessionError(err, res);
+                }
+        });
+
+        // ── File uploads ────────────────────────────────────────────────────────
+        // Drop user-uploaded files into the session's bind-mounted workspace
+        // (under uploads/) so the container — and Claude CLI in it — can read
+        // them. Memory storage is fine at the configured size cap; multer
+        // streams the multipart upload, only buffering a single file at a
+        // time. Caps:
+        //   - 25 MB per file: covers the images / PDFs Claude actually
+        //     accepts without forcing chunked upload UI.
+        //   - 8 files per request: enough for a typical "drop a few
+        //     screenshots" gesture, low enough to bound peak memory.
+        const upload = multer({
+                storage: multer.memoryStorage(),
+                limits: {
+                        fileSize: 25 * 1024 * 1024,
+                        files: 8,
+                },
+        });
+
+        // Wrap multer so its async-throw errors land in our handleSessionError-style
+        // responder instead of Express's default HTML 500 page.
+        const handleUploadMiddleware = (req: Request, res: Response, next: NextFunction): void => {
+                upload.array("files", 8)(req, res, (err: unknown) => {
+                        if (!err) { next(); return; }
+                        if (err instanceof multer.MulterError) {
+                                const status = err.code === "LIMIT_FILE_SIZE" ? 413 : 400;
+                                res.status(status).json({ error: `Upload rejected: ${err.message}` });
+                                return;
+                        }
+                        console.error("[routes] upload middleware error:", (err as Error).message);
+                        res.status(500).json({ error: "Upload failed" });
+                });
+        };
+
+        router.post("/sessions/:id/files", handleUploadMiddleware, async (req: Request, res: Response) => {
+                const { userId } = req as AuthedRequest;
+                try {
+                        await sessions.assertOwnership(req.params.id, userId);
+                        const files = (req.files as Express.Multer.File[] | undefined) ?? [];
+                        if (files.length === 0) {
+                                res.status(400).json({ error: "no files provided (use 'files' field, multipart/form-data)" });
+                                return;
+                        }
+                        const paths = await docker.writeUploads(
+                                req.params.id,
+                                files.map((f) => ({ originalname: f.originalname, buffer: f.buffer })),
+                        );
+                        res.status(201).json({ paths });
                 } catch (err) {
                         handleSessionError(err, res);
                 }
