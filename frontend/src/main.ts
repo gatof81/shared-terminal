@@ -1283,6 +1283,15 @@ document.addEventListener("keydown", (e) => {
 // Android Chrome and after iOS's first consent), and fall back to a
 // long-press-able textarea when the API is blocked or rejected.
 
+// Mirror of the textarea's HTML `maxlength` (frontend/index.html). The
+// silent clipboard path bypasses the textarea entirely, and `pasteTextarea
+// .value = clip` in the clipboard-fill handler isn't constrained by HTML
+// maxlength either (that attribute only gates user typing). A user with a
+// multi-megabyte clipboard pasted straight to the tmux exec stream would
+// freeze the pane long before the WS layer's default 100 MB limit fired —
+// cap explicitly so the toast is the worst they see.
+const MAX_PASTE_CHARS = 65_536;
+
 let pasteOpener: HTMLButtonElement | null = null;
 
 function getActiveTerminal(): TerminalSession | null {
@@ -1352,6 +1361,10 @@ pasteBtn.addEventListener("click", async () => {
                                 showToast("Clipboard is empty", true);
                                 return;
                         }
+                        if (clip.length > MAX_PASTE_CHARS) {
+                                showToast(`Clipboard too large (${clip.length} chars; max ${MAX_PASTE_CHARS})`, true);
+                                return;
+                        }
                         term.paste(clip);
                         showToast(`Pasted ${clip.length} character${clip.length === 1 ? "" : "s"}`);
                         return;
@@ -1373,6 +1386,10 @@ pasteClipboardBtn.addEventListener("click", async () => {
                 showToast("Clipboard is empty", true);
                 return;
         }
+        if (clip.length > MAX_PASTE_CHARS) {
+                showToast(`Clipboard too large (${clip.length} chars; max ${MAX_PASTE_CHARS})`, true);
+                return;
+        }
         pasteTextarea.value = clip;
         pasteSendBtn.disabled = false;
         pasteTextarea.focus();
@@ -1385,6 +1402,13 @@ pasteTextarea.addEventListener("input", () => {
 pasteSendBtn.addEventListener("click", () => {
         const text = pasteTextarea.value;
         if (!text) return;
+        // Defence in depth — HTML maxlength gates user typing but not
+        // programmatic value sets, so a clipboard-fill of >65 KB could
+        // sneak past it before this point.
+        if (text.length > MAX_PASTE_CHARS) {
+                showToast(`Too large (${text.length} chars; max ${MAX_PASTE_CHARS})`, true);
+                return;
+        }
         const term = getActiveTerminal();
         if (!term) {
                 showToast("No active session", true);
