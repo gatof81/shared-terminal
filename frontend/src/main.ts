@@ -1411,12 +1411,13 @@ pasteClipboardBtn.addEventListener("click", async () => {
         pasteClipboardBtn.disabled = true;
         try {
                 const clip = await readClipboardText();
-                if (clip === null) {
+                // Collapse null and "" — both mean "we couldn't get usable
+                // clipboard text". null = API unavailable/denied. "" = iOS
+                // resolved without engaging the consent chip, OR the
+                // clipboard genuinely is empty. Either way the textarea
+                // (long-press fallback) is the right next step.
+                if (!clip) {
                         showToast("Couldn't read clipboard — long-press to paste manually", true);
-                        return;
-                }
-                if (clip.length === 0) {
-                        showToast("Clipboard is empty", true);
                         return;
                 }
                 if (clip.length > MAX_PASTE_CHARS) {
