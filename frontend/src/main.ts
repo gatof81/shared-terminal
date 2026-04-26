@@ -1377,22 +1377,32 @@ pasteBtn.addEventListener("click", async () => {
 });
 
 pasteClipboardBtn.addEventListener("click", async () => {
-        const clip = await readClipboardText();
-        if (clip === null) {
-                showToast("Couldn't read clipboard — long-press to paste manually", true);
-                return;
+        // Disable for the duration of the async readText() so a double-tap on
+        // a slow iOS consent chip doesn't queue a stale second resolve. Same
+        // intent as the pasteBtn pasteInFlight guard, just expressed via the
+        // button's own disabled state since there's nowhere visual to look
+        // for in-flight feedback otherwise.
+        pasteClipboardBtn.disabled = true;
+        try {
+                const clip = await readClipboardText();
+                if (clip === null) {
+                        showToast("Couldn't read clipboard — long-press to paste manually", true);
+                        return;
+                }
+                if (clip.length === 0) {
+                        showToast("Clipboard is empty", true);
+                        return;
+                }
+                if (clip.length > MAX_PASTE_CHARS) {
+                        showToast(`Clipboard too large (${clip.length} chars; max ${MAX_PASTE_CHARS})`, true);
+                        return;
+                }
+                pasteTextarea.value = clip;
+                pasteSendBtn.disabled = false;
+                pasteTextarea.focus();
+        } finally {
+                pasteClipboardBtn.disabled = false;
         }
-        if (clip.length === 0) {
-                showToast("Clipboard is empty", true);
-                return;
-        }
-        if (clip.length > MAX_PASTE_CHARS) {
-                showToast(`Clipboard too large (${clip.length} chars; max ${MAX_PASTE_CHARS})`, true);
-                return;
-        }
-        pasteTextarea.value = clip;
-        pasteSendBtn.disabled = false;
-        pasteTextarea.focus();
 });
 
 pasteTextarea.addEventListener("input", () => {
