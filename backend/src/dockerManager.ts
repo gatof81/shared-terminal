@@ -253,10 +253,18 @@ export class DockerManager {
                         await this.cleanupTmp(files);
                         throw new Error(`uploads dir escaped workspace root: ${realUploadsDir}`);
                 }
-                // Chown the canonical path, not the lexical one — fs.chown
-                // follows symlinks, but realUploadsDir is already the resolved
-                // target, so we operate on the real directory.
-                await this.chownToWorkspaceUser(realUploadsDir);
+                // Deliberately NOT chowning realUploadsDir to the workspace user.
+                // The container owns the parent `<sessionId>/` directory (set by
+                // spawn-time ensureWorkspaceOwnership), so it can rmdir/rename
+                // any subdir it owns. If we chowned uploads/ to uid 1000, the
+                // container could empty the dir then `ln -s /etc uploads/` —
+                // resolving the path string at rename(2) time would land the
+                // backend write outside WORKSPACE_ROOT despite the realpath
+                // check above (TOCTOU on the path component, not the file).
+                // Keeping uploads/ owned by the backend (typically root,
+                // mode 0755) means the container can still traverse and read
+                // its own files (per-file chown to uid 1000 below) but can't
+                // empty or write inside the dir to stage the swap.
 
                 const containerPaths: string[] = [];
                 const now = Date.now().toString(36);
