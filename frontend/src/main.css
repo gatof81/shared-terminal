@@ -967,10 +967,15 @@ main:not([data-sidebar-ready]) #sidebar {
     opacity: 1;
   }
 
-  /* Paste lives at the right edge of the mobile header. The chrome-toggle
-     pill in the middle has `flex: 1`, so it eats the slack and pushes
-     paste-btn naturally to the right — no margin-left:auto needed. */
+  /* Paste lives at the right edge of the mobile header. chrome-toggle
+     has `flex: 1` when active, but it can be hidden (no session
+     selected) — `margin-left: auto` pins paste-btn to the right edge
+     in both cases. Safe inside this @media block because #paste-btn
+     is `display: none` at the desktop default; if the button is ever
+     exposed at the desktop breakpoint, this rule needs to lose the
+     auto-margin or it'll fight `.header-right`'s own auto-margin. */
   #paste-btn:not([hidden]) {
     display: inline-flex;
+    margin-left: auto;
   }
 }
