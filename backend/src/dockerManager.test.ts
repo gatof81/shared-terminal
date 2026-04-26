@@ -9,7 +9,7 @@ const dbStubs = vi.hoisted(() => ({
 }));
 vi.mock("./db.js", () => dbStubs);
 
-import { DockerManager, type OutputListener } from "./dockerManager.js";
+import { DockerManager, sanitiseUploadName, type OutputListener } from "./dockerManager.js";
 import type { SessionManager } from "./sessionManager.js";
 
 // ── Test harness ────────────────────────────────────────────────────────────
@@ -599,5 +599,75 @@ describe("DockerManager.reconcile", () => {
 		expect(sessions.recordContainerGone).not.toHaveBeenCalled();
 		expect(sessions.setContainerId).not.toHaveBeenCalled();
 		expect(sessions.updateStatus).toHaveBeenCalledWith("s1", "stopped");
+	});
+});
+
+// ── sanitiseUploadName ──────────────────────────────────────────────────────
+// Security-sensitive: the result is concatenated into a host filesystem path
+// AND pasted directly into the user's terminal, so it has to (a) prevent any
+// path-traversal segment from being written outside <uploads>/ and (b) keep
+// the resulting filename safe to surface as a shell argument. Tests cover
+// the categories the bot called out: normal pass-through, path-separator
+// stripping, full-strip fallback, length cap with extension preservation,
+// and Unicode-only names.
+
+describe("sanitiseUploadName", () => {
+	it("preserves a normal filename verbatim", () => {
+		expect(sanitiseUploadName("screenshot.png")).toBe("screenshot.png");
+		expect(sanitiseUploadName("notes-2026_04_26.txt")).toBe("notes-2026_04_26.txt");
+	});
+
+	it("strips path separators and traversal segments", () => {
+		// path.basename takes the last segment; the regex collapses anything
+		// non-safe to underscore. The combined effect must never let a
+		// "../" make it through.
+		expect(sanitiseUploadName("../../etc/passwd")).toBe("passwd");
+		expect(sanitiseUploadName("/absolute/path/file.png")).toBe("file.png");
+		expect(sanitiseUploadName("..\\..\\windows\\sys.ini")).toBe("windows_sys.ini");
+		expect(sanitiseUploadName("./hidden.png")).toBe("hidden.png");
+	});
+
+	it("collapses spaces and shell metachars to underscore", () => {
+		// The result is pasted into the terminal; spaces would unquote the
+		// path, dollar signs would expand, and so on. The regex restricts
+		// to [A-Za-z0-9._-] so all of those become _.
+		expect(sanitiseUploadName("my file (1).png")).toBe("my_file_1_.png");
+		expect(sanitiseUploadName("$(whoami).png")).toBe("whoami_.png");
+		// No path separator here — the basename pass would otherwise eat
+		// the dangerous prefix and leave us asserting against ".txt".
+		expect(sanitiseUploadName("a; rm -rf .txt")).toBe("a_rm_-rf_.txt");
+	});
+
+	it("falls back to 'file' when sanitisation strips everything", () => {
+		// All-dots, leading-strip, and Unicode-only names all collapse to
+		// empty after the basename + restrict + leading-strip pipeline.
+		expect(sanitiseUploadName("")).toBe("file");
+		expect(sanitiseUploadName("...")).toBe("file");
+		expect(sanitiseUploadName("___")).toBe("file");
+		expect(sanitiseUploadName("中文")).toBe("file");
+		expect(sanitiseUploadName("📎")).toBe("file");
+	});
+
+	it("preserves a short extension when truncating long names", () => {
+		// 100-char stem + ".png" → MAX_LEN=80 enforced, ext kept.
+		const stem = "a".repeat(100);
+		const out = sanitiseUploadName(`${stem}.png`);
+		expect(out.length).toBe(80);
+		expect(out.endsWith(".png")).toBe(true);
+	});
+
+	it("caps a pathological extension so it can't blow past MAX_LEN", () => {
+		// Hostile name: ".aaa..." with a 200-char extension. Extension cap
+		// is 16 chars, so the trimmed stem still fits inside MAX_LEN=80.
+		const out = sanitiseUploadName(`name.${"x".repeat(200)}`);
+		expect(out.length).toBeLessThanOrEqual(80);
+		expect(out.startsWith("name.")).toBe(true);
+	});
+
+	it("handles names that are nothing but an extension", () => {
+		// `lastIndexOf(".") >= cleaned.length - 1` means extension-only names
+		// shouldn't try to "preserve the extension" — they fall through to
+		// the simple slice path.
+		expect(sanitiseUploadName(".gitignore")).toBe("gitignore"); // leading dot stripped
 	});
 });

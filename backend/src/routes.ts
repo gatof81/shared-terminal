@@ -44,7 +44,7 @@ export function buildRouter(
 
         // ── Auth routes (public) ────────────────────────────────────────────────
 
-        const { loginIp, registerIp, invitesCreateIp, invitesRevokeIp } = createAuthRateLimiters(rateLimitConfig);
+        const { loginIp, registerIp, invitesCreateIp, invitesRevokeIp, fileUploadIp } = createAuthRateLimiters(rateLimitConfig);
         const usernameLimiter = new UsernameRateLimiter(
                 rateLimitConfig.login.usernameMax,
                 rateLimitConfig.login.usernameWindowMs,
@@ -540,7 +540,7 @@ export function buildRouter(
                 });
         };
 
-        router.post("/sessions/:id/files", handleUploadMiddleware, async (req: Request, res: Response) => {
+        router.post("/sessions/:id/files", fileUploadIp, handleUploadMiddleware, async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
                 try {
                         await sessions.assertOwnership(req.params.id, userId);

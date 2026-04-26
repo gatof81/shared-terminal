@@ -39,6 +39,16 @@ export interface RateLimitConfig {
 		ipMax: number;
 		ipWindowMs: number;
 	};
+	// Caps how often a single IP can POST file uploads. Each request can
+	// carry up to 8 × 25 MB = 200 MB; without a limiter a valid JWT could
+	// loop the route and fill the host disk (workspace files survive
+	// soft-delete). Sized for the legitimate "drop a few screenshots in a
+	// row" pattern — well above human cadence, well below sustained
+	// abuse rates.
+	fileUpload: {
+		ipMax: number;
+		ipWindowMs: number;
+	};
 }
 
 // Defaults match issue #10: login 10/15min, register 5/1h, per-username 10/15min.
@@ -63,6 +73,10 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 		ipMax: 60,
 		ipWindowMs: 60 * 60 * 1000,
 	},
+	fileUpload: {
+		ipMax: 30,
+		ipWindowMs: 5 * 60 * 1000,
+	},
 };
 
 // ── IP-based limiters (express-rate-limit) ─────────────────────────────────
@@ -72,6 +86,7 @@ export interface AuthRateLimiters {
 	registerIp: RateLimitRequestHandler;
 	invitesCreateIp: RateLimitRequestHandler;
 	invitesRevokeIp: RateLimitRequestHandler;
+	fileUploadIp: RateLimitRequestHandler;
 }
 
 export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
@@ -111,7 +126,14 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		legacyHeaders: false,
 		message: { error: "Too many invite-revoke requests from this IP, try again later", scope: "ip" },
 	});
-	return { loginIp, registerIp, invitesCreateIp, invitesRevokeIp };
+	const fileUploadIp = rateLimit({
+		windowMs: cfg.fileUpload.ipWindowMs,
+		limit: cfg.fileUpload.ipMax,
+		standardHeaders: "draft-7",
+		legacyHeaders: false,
+		message: { error: "Too many file uploads from this IP, try again later", scope: "ip" },
+	});
+	return { loginIp, registerIp, invitesCreateIp, invitesRevokeIp, fileUploadIp };
 }
 
 // ── Per-username limiter ────────────────────────────────────────────────────

@@ -226,8 +226,16 @@ export class DockerManager {
                 files: ReadonlyArray<{ originalname: string; buffer: Buffer }>,
         ): Promise<string[]> {
                 if (files.length === 0) return [];
+                const rootAbs = path.resolve(WORKSPACE_ROOT);
                 const uploadsHostDir = path.join(WORKSPACE_ROOT, sessionId, "uploads");
                 const uploadsHostDirAbs = path.resolve(uploadsHostDir);
+                // Defence-in-depth (matches purgeWorkspace at L306): assertOwnership
+                // already constrains sessionId to a UUID from D1, but if a future
+                // refactor ever lets a path-traversal-shaped sessionId reach here we
+                // must not create directories or write files outside WORKSPACE_ROOT.
+                if (!uploadsHostDirAbs.startsWith(`${rootAbs}${path.sep}`)) {
+                        throw new Error(`unsafe session path resolved outside ${rootAbs}: ${uploadsHostDirAbs}`);
+                }
                 await fs.mkdir(uploadsHostDir, { recursive: true });
                 await this.chownToWorkspaceUser(uploadsHostDir);
 
@@ -913,8 +921,8 @@ export class DockerManager {
 // Sanitise an uploaded file's original name into a safe basename that's
 // guaranteed to land inside the uploads directory. Strips any path
 // components, restricts the character set, preserves a short extension,
-// and falls back to "file" if everything got stripped.
-function sanitiseUploadName(original: string): string {
+// and falls back to "file" if everything got stripped. Exported for tests.
+export function sanitiseUploadName(original: string): string {
         const base = path.basename(original ?? "");
         // Restrict to a small Latin set so the path is shell-safe (the user
         // pastes it into the terminal as-is) and filesystem-portable.
