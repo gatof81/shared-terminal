@@ -985,9 +985,13 @@ sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
 // Escape closes the mobile drawer, matching the WAI-ARIA modal-dialog
 // expectation. Desktop ignores this — the sidebar is always part of the
 // layout there and Escape conflicts with terminal/xterm key handling.
+// Skip when a modal is open: WAI-ARIA says Escape dismisses the topmost
+// dialog, not every overlay at once. Without this guard, an Escape press
+// while paste/invites and the sidebar are both open would close both.
 document.addEventListener("keydown", (e) => {
         if (e.key !== "Escape") return;
         if (!isMobile()) return;
+        if (invitesModal.classList.contains("open") || pasteModal.classList.contains("open")) return;
         if (!mainEl.classList.contains("sidebar-open")) return;
         setSidebarOpen(false);
 });
@@ -1325,24 +1329,38 @@ async function readClipboardText(): Promise<string | null> {
         }
 }
 
+// Guards against the iOS "Paste" consent chip race: the chip can take a
+// second to appear, and a second tap during that window would re-enter
+// this handler. If the chip is then dismissed on both paths, both calls
+// fall through to openPasteModal(), and the second one resets
+// pasteTextarea.value silently — clobbering anything the user just
+// started typing in the modal opened by the first call.
+let pasteInFlight = false;
+
 pasteBtn.addEventListener("click", async () => {
-        const term = getActiveTerminal();
-        if (!term) {
-                showToast("No active session", true);
-                return;
-        }
-        const clip = await readClipboardText();
-        if (clip !== null) {
-                if (clip.length === 0) {
-                        showToast("Clipboard is empty", true);
+        if (pasteInFlight) return;
+        pasteInFlight = true;
+        try {
+                const term = getActiveTerminal();
+                if (!term) {
+                        showToast("No active session", true);
                         return;
                 }
-                term.paste(clip);
-                showToast(`Pasted ${clip.length} character${clip.length === 1 ? "" : "s"}`);
-                return;
+                const clip = await readClipboardText();
+                if (clip !== null) {
+                        if (clip.length === 0) {
+                                showToast("Clipboard is empty", true);
+                                return;
+                        }
+                        term.paste(clip);
+                        showToast(`Pasted ${clip.length} character${clip.length === 1 ? "" : "s"}`);
+                        return;
+                }
+                // Clipboard API unavailable or denied — surface the manual fallback.
+                openPasteModal(pasteBtn);
+        } finally {
+                pasteInFlight = false;
         }
-        // Clipboard API unavailable or denied — surface the manual fallback.
-        openPasteModal(pasteBtn);
 });
 
 pasteClipboardBtn.addEventListener("click", async () => {
