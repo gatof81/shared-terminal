@@ -549,24 +549,45 @@ export function buildRouter(
                 });
         };
 
-        router.post("/sessions/:id/files", fileUploadIp, handleUploadMiddleware, async (req: Request, res: Response) => {
-                const { userId } = req as AuthedRequest;
+        // Verify ownership BEFORE multer reads any bytes from the wire. With
+        // up to 200 MB (8 × 25 MB) per request, running the ownership check
+        // in the route handler — i.e. after multer has already buffered
+        // everything into the Node heap — let an authenticated user with a
+        // valid JWT but a foreign session ID cause N × 200 MB allocations
+        // bounded only by the per-IP rate limiter. Doing it here means
+        // unauthorised requests close the socket on the 403 with no body
+        // ever buffered.
+        const requireSessionOwnership = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
                 try {
-                        await sessions.assertOwnership(req.params.id, userId);
-                        const files = (req.files as Express.Multer.File[] | undefined) ?? [];
-                        if (files.length === 0) {
-                                res.status(400).json({ error: "no files provided (use 'files' field, multipart/form-data)" });
-                                return;
-                        }
-                        const paths = await docker.writeUploads(
-                                req.params.id,
-                                files.map((f) => ({ originalname: f.originalname, buffer: f.buffer })),
-                        );
-                        res.status(201).json({ paths });
+                        await sessions.assertOwnership(req.params.id, (req as AuthedRequest).userId);
+                        next();
                 } catch (err) {
                         handleSessionError(err, res);
                 }
-        });
+        };
+
+        router.post(
+                "/sessions/:id/files",
+                fileUploadIp,
+                requireSessionOwnership,
+                handleUploadMiddleware,
+                async (req: Request, res: Response) => {
+                        try {
+                                const files = (req.files as Express.Multer.File[] | undefined) ?? [];
+                                if (files.length === 0) {
+                                        res.status(400).json({ error: "no files provided (use 'files' field, multipart/form-data)" });
+                                        return;
+                                }
+                                const paths = await docker.writeUploads(
+                                        req.params.id,
+                                        files.map((f) => ({ originalname: f.originalname, buffer: f.buffer })),
+                                );
+                                res.status(201).json({ paths });
+                        } catch (err) {
+                                handleSessionError(err, res);
+                        }
+                },
+        );
 
         return router;
 }

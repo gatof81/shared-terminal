@@ -1536,7 +1536,13 @@ fileInput.addEventListener("change", async () => {
         // Clear immediately so a re-pick of the same files still triggers change.
         fileInput.value = "";
         if (picked.length === 0) return;
-        if (attachInFlight) return;
+        if (attachInFlight) {
+                // Without the toast the picker silently closes and nothing
+                // happens — the prior "Uploading…" toast may have already
+                // scrolled away, so the user has no feedback.
+                showToast("Upload in progress, try again shortly", true);
+                return;
+        }
         attachInFlight = true;
         try {
                 if (!activeSessionId) {
