@@ -138,6 +138,14 @@
             <span id="terminal-session-name"></span>
             <span id="terminal-status-badge"></span>
             <button
+              id="paste-btn"
+              type="button"
+              title="Paste text into the terminal"
+              aria-label="Paste text into the terminal"
+            >
+              Paste
+            </button>
+            <button
               id="font-size-btn"
               type="button"
               title="Cycle terminal font size"
@@ -182,6 +190,49 @@
           + Generate new invite
         </button>
         <div id="invite-list" class="invite-list"></div>
+      </div>
+    </div>
+
+    <!-- Paste-into-terminal modal (mobile) -->
+    <div id="paste-modal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close-modal></div>
+      <div
+        class="modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="paste-modal-title"
+      >
+        <div class="modal-header">
+          <h2 id="paste-modal-title">Paste into terminal</h2>
+          <button
+            class="modal-close"
+            type="button"
+            aria-label="Close"
+            data-close-modal
+          >
+            ×
+          </button>
+        </div>
+        <p class="modal-hint">
+          Long-press to paste from your clipboard, then tap Send. Multi-line
+          content is bracketed so it won't auto-execute on paste.
+        </p>
+        <textarea
+          id="paste-textarea"
+          rows="6"
+          maxlength="65536"
+          placeholder="Paste here…"
+          autocomplete="off"
+          autocorrect="off"
+          autocapitalize="off"
+          spellcheck="false"
+        ></textarea>
+        <div class="paste-modal-actions">
+          <button id="paste-clipboard-btn" type="button">
+            Paste from clipboard
+          </button>
+          <button id="paste-send-btn" type="button" disabled>Send</button>
+        </div>
       </div>
     </div>
 

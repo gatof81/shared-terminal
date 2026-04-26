@@ -13,6 +13,7 @@ export type SessionStatus = "running" | "stopped" | "terminated" | "disconnected
 export interface TerminalSession {
         dispose(): void;
         setFontSize(px: number): void;
+        paste(text: string): void;
 }
 
 export type StatusCallback = (status: SessionStatus) => void;
@@ -400,6 +401,15 @@ export function openTerminalSession(opts: {
                 scheduleFit();
         }
 
+        // term.paste() routes through the same onData handler that pipes browser
+        // → WS, and wraps the bytes in DECSET 2004 bracketed-paste sequences
+        // (\e[200~ … \e[201~) when the receiving app has bracketed paste on —
+        // bash, zsh, and Claude CLI all do — so multi-line content arrives as
+        // one paste event instead of being executed line-by-line.
+        function paste(text: string) {
+                term.paste(text);
+        }
+
         // ── Dispose ─────────────────────────────────────────────────────────────
         function dispose() {
                 disposed = true;
@@ -431,7 +441,7 @@ export function openTerminalSession(opts: {
                 term.dispose();
         }
 
-        return { dispose, setFontSize };
+        return { dispose, setFontSize, paste };
 }
 
 // ── Multiline URL link provider ─────────────────────────────────────────────

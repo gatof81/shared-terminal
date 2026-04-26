@@ -355,6 +355,63 @@ main.chrome-open #chrome-toggle-icon {
   padding: 1rem 0;
 }
 
+/* ── Modal (paste) ─────────────────────────────────────────── */
+#paste-textarea {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #e6edf3;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  padding: 0.55rem 0.65rem;
+  resize: vertical;
+  min-height: 110px;
+  max-height: 50vh;
+  margin-bottom: 0.75rem;
+  width: 100%;
+  box-sizing: border-box;
+}
+#paste-textarea:focus {
+  outline: none;
+  border-color: #58a6ff;
+}
+.paste-modal-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+#paste-clipboard-btn {
+  background: transparent;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #8b949e;
+  font-size: 0.82rem;
+  padding: 0.4rem 0.85rem;
+  cursor: pointer;
+}
+#paste-clipboard-btn:hover {
+  border-color: #58a6ff;
+  color: #58a6ff;
+}
+#paste-send-btn {
+  background: #238636;
+  border: 1px solid #238636;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 0.82rem;
+  padding: 0.4rem 0.85rem;
+  cursor: pointer;
+}
+#paste-send-btn:hover:not(:disabled) {
+  background: #2ea043;
+  border-color: #2ea043;
+}
+#paste-send-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 main {
   flex: 1;
   display: grid;
@@ -625,6 +682,23 @@ main:not([data-sidebar-ready]) #sidebar {
   border-color: #58a6ff;
   color: #58a6ff;
 }
+/* Paste button is mobile-only — desktop xterm handles Cmd/Ctrl+V natively.
+   Shown via the @media (max-width: 768px) block below. */
+#paste-btn {
+  display: none;
+  background: transparent;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #8b949e;
+  font-size: 0.75rem;
+  padding: 0.2rem 0.55rem;
+  cursor: pointer;
+  line-height: 1;
+}
+#paste-btn:hover {
+  border-color: #58a6ff;
+  color: #58a6ff;
+}
 #terminal-tabs {
   display: none;
   align-items: stretch;
@@ -883,5 +957,19 @@ main:not([data-sidebar-ready]) #sidebar {
      work without a hover state on touch. Show them always on mobile. */
   .session-actions {
     opacity: 1;
+  }
+
+  /* Paste button surfaces only on mobile and sits left of the font-size
+     button on the right side of the toolbar. paste-btn carries the
+     `margin-left: auto` that pushes the action cluster to the right; we
+     drop font-size-btn's own auto-margin so the two don't fight over the
+     free space (two auto margins in the same flex line would split the
+     slack and leave paste-btn floating in the middle). */
+  #paste-btn {
+    display: inline-flex;
+    margin-left: auto;
+  }
+  #font-size-btn {
+    margin-left: 0;
   }
 }

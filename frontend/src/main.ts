@@ -61,6 +61,11 @@ const terminalTabs = document.getElementById("terminal-tabs")!;
 const terminalContainer = document.getElementById("terminal-container")!;
 const emptyState = document.getElementById("empty-state")!;
 const fontSizeBtn = document.getElementById("font-size-btn") as HTMLButtonElement;
+const pasteBtn = document.getElementById("paste-btn") as HTMLButtonElement;
+const pasteModal = document.getElementById("paste-modal")!;
+const pasteTextarea = document.getElementById("paste-textarea") as HTMLTextAreaElement;
+const pasteClipboardBtn = document.getElementById("paste-clipboard-btn") as HTMLButtonElement;
+const pasteSendBtn = document.getElementById("paste-send-btn") as HTMLButtonElement;
 const toast = document.getElementById("toast")!;
 
 
@@ -980,9 +985,13 @@ sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
 // Escape closes the mobile drawer, matching the WAI-ARIA modal-dialog
 // expectation. Desktop ignores this — the sidebar is always part of the
 // layout there and Escape conflicts with terminal/xterm key handling.
+// Skip when a modal is open: WAI-ARIA says Escape dismisses the topmost
+// dialog, not every overlay at once. Without this guard, an Escape press
+// while paste/invites and the sidebar are both open would close both.
 document.addEventListener("keydown", (e) => {
         if (e.key !== "Escape") return;
         if (!isMobile()) return;
+        if (invitesModal.classList.contains("open") || pasteModal.classList.contains("open")) return;
         if (!mainEl.classList.contains("sidebar-open")) return;
         setSidebarOpen(false);
 });
@@ -1257,9 +1266,191 @@ invitesModal.addEventListener("click", (e) => {
 });
 
 document.addEventListener("keydown", (e) => {
-        if (e.key === "Escape" && invitesModal.classList.contains("open")) {
+        if (e.key !== "Escape") return;
+        if (invitesModal.classList.contains("open")) {
                 closeInvitesModal();
+        } else if (pasteModal.classList.contains("open")) {
+                closePasteModal();
         }
+});
+
+// ── Paste modal ─────────────────────────────────────────────────────────────
+// Mobile soft-keyboards don't surface a usable Cmd-V into xterm's helper
+// textarea — the OS clipboard chooser either does nothing or trickles bytes
+// in as individual keystrokes that bypass bracketed-paste, so a multi-line
+// paste gets line-by-line executed by the shell. This modal gives users a
+// reliable surface: try `navigator.clipboard.readText()` first (silent on
+// Android Chrome and after iOS's first consent), and fall back to a
+// long-press-able textarea when the API is blocked or rejected.
+
+// Mirror of the textarea's HTML `maxlength` (frontend/index.html). The
+// silent clipboard path bypasses the textarea entirely, and `pasteTextarea
+// .value = clip` in the clipboard-fill handler isn't constrained by HTML
+// maxlength either (that attribute only gates user typing). A user with a
+// multi-megabyte clipboard pasted straight to the tmux exec stream would
+// freeze the pane long before the WS layer's default 100 MB limit fired —
+// cap explicitly so the toast is the worst they see.
+const MAX_PASTE_CHARS = 65_536;
+
+let pasteOpener: HTMLButtonElement | null = null;
+
+function getActiveTerminal(): TerminalSession | null {
+        if (!currentActiveTabId) return null;
+        return currentTerminals.get(currentActiveTabId)?.term ?? null;
+}
+
+function openPasteModal(opener: HTMLButtonElement) {
+        pasteOpener = opener;
+        pasteModal.classList.add("open");
+        pasteModal.setAttribute("aria-hidden", "false");
+        pasteTextarea.value = "";
+        pasteSendBtn.disabled = true;
+        // Focus the textarea so the soft keyboard pops and a long-press
+        // immediately offers Paste — saves the user one tap.
+        pasteTextarea.focus();
+}
+
+function closePasteModal() {
+        pasteModal.classList.remove("open");
+        pasteModal.setAttribute("aria-hidden", "true");
+        pasteTextarea.value = "";
+        pasteSendBtn.disabled = true;
+        // Release the pasteBtn in-flight guard. The pasteBtn click handler
+        // intentionally leaves it set on the modal-open path so a second
+        // tap can't kick off a parallel readClipboardText() while the modal
+        // is open; closure of the modal is the signal that the cycle is
+        // truly finished.
+        pasteInFlight = false;
+        // Restore focus to the opener; on mobile the chrome drawer is open
+        // when the modal is dismissed, so paste-btn is reachable. If the
+        // opener is somehow gone (drawer collapsed externally), the focus
+        // call is a harmless no-op.
+        pasteOpener?.focus();
+        pasteOpener = null;
+}
+
+async function readClipboardText(): Promise<string | null> {
+        // navigator.clipboard.readText is the silent path. Returns null when
+        // the API is unavailable, rejected (permission denied / in-app
+        // webview), or throws synchronously on browsers that ship the API
+        // gated on a secure context they don't recognise.
+        if (!navigator.clipboard || typeof navigator.clipboard.readText !== "function") {
+                return null;
+        }
+        try {
+                return await navigator.clipboard.readText();
+        } catch {
+                return null;
+        }
+}
+
+// Guards against two distinct races:
+//   1. iOS "Paste" consent chip: the chip can take a second to appear,
+//      and a second tap during that window would re-enter the async path
+//      and queue a second clipboard read.
+//   2. Modal-open window: openPasteModal() is synchronous, so a naive
+//      try/finally would clear the guard the moment the modal opens —
+//      letting another tap re-fire and re-initialise the modal,
+//      clobbering text the user has started typing in the textarea.
+//
+// The guard therefore stays held across the modal lifetime; closePasteModal
+// is the single release point. The local `releaseGuard` boolean tracks
+// which exit path we're on so the silent-paste path still releases via
+// finally without depending on a synthetic catch-and-rethrow.
+let pasteInFlight = false;
+
+pasteBtn.addEventListener("click", async () => {
+        if (pasteInFlight) return;
+        pasteInFlight = true;
+        let releaseGuard = true;
+        try {
+                const term = getActiveTerminal();
+                if (!term) {
+                        showToast("No active session", true);
+                        return;
+                }
+                const clip = await readClipboardText();
+                if (clip !== null) {
+                        if (clip.length === 0) {
+                                showToast("Clipboard is empty", true);
+                                return;
+                        }
+                        if (clip.length > MAX_PASTE_CHARS) {
+                                showToast(`Clipboard too large (${clip.length} chars; max ${MAX_PASTE_CHARS})`, true);
+                                return;
+                        }
+                        term.paste(clip);
+                        showToast(`Pasted ${clip.length} character${clip.length === 1 ? "" : "s"}`);
+                        return;
+                }
+                // Clipboard API unavailable or denied — surface the manual fallback.
+                // Hand the guard ownership to closePasteModal so the second-tap
+                // protection covers the entire modal lifetime, not just the
+                // synchronous tail of this handler.
+                openPasteModal(pasteBtn);
+                releaseGuard = false;
+        } finally {
+                if (releaseGuard) pasteInFlight = false;
+        }
+});
+
+pasteClipboardBtn.addEventListener("click", async () => {
+        // Disable for the duration of the async readText() so a double-tap on
+        // a slow iOS consent chip doesn't queue a stale second resolve. Same
+        // intent as the pasteBtn pasteInFlight guard, just expressed via the
+        // button's own disabled state since there's nowhere visual to look
+        // for in-flight feedback otherwise.
+        pasteClipboardBtn.disabled = true;
+        try {
+                const clip = await readClipboardText();
+                if (clip === null) {
+                        showToast("Couldn't read clipboard — long-press to paste manually", true);
+                        return;
+                }
+                if (clip.length === 0) {
+                        showToast("Clipboard is empty", true);
+                        return;
+                }
+                if (clip.length > MAX_PASTE_CHARS) {
+                        showToast(`Clipboard too large (${clip.length} chars; max ${MAX_PASTE_CHARS})`, true);
+                        return;
+                }
+                pasteTextarea.value = clip;
+                pasteSendBtn.disabled = false;
+                pasteTextarea.focus();
+        } finally {
+                pasteClipboardBtn.disabled = false;
+        }
+});
+
+pasteTextarea.addEventListener("input", () => {
+        pasteSendBtn.disabled = pasteTextarea.value.length === 0;
+});
+
+pasteSendBtn.addEventListener("click", () => {
+        const text = pasteTextarea.value;
+        if (!text) return;
+        // Defence in depth — HTML maxlength gates user typing but not
+        // programmatic value sets, so a clipboard-fill of >65 KB could
+        // sneak past it before this point.
+        if (text.length > MAX_PASTE_CHARS) {
+                showToast(`Too large (${text.length} chars; max ${MAX_PASTE_CHARS})`, true);
+                return;
+        }
+        const term = getActiveTerminal();
+        if (!term) {
+                showToast("No active session", true);
+                closePasteModal();
+                return;
+        }
+        term.paste(text);
+        showToast(`Pasted ${text.length} character${text.length === 1 ? "" : "s"}`);
+        closePasteModal();
+});
+
+pasteModal.addEventListener("click", (e) => {
+        const target = e.target as HTMLElement;
+        if (target.hasAttribute("data-close-modal")) closePasteModal();
 });
 
 // ── Auto-refresh ────────────────────────────────────────────────────────────
