@@ -87,9 +87,19 @@ export function openTerminalSession(opts: {
         // canvas obtained from the loss event's target.
         let pendingRestoreCanvas: HTMLCanvasElement | null = null;
         const onContextRestored = () => {
-                // Guard against misbehaving drivers; the prior loss handler nulled webgl first.
+                // Don't load a second addon while one is already live (prior loss handler nulls webgl).
                 if (webgl) return;
                 pendingRestoreCanvas = null;
+                // The let/const split is deliberate. `restoredAddon` (let, outer) is
+                // the catch-block's only handle for disposing a partially-initialised
+                // addon if `term.loadAddon(addon)` throws after construction —
+                // otherwise the just-allocated WebGL context would leak. `addon`
+                // (const, inner) is what the onContextLoss closure binds to: a
+                // const here keeps the closure immune to a future refactor that
+                // reassigns `restoredAddon` between construction and the closure
+                // firing, which would otherwise have the closure dispose the wrong
+                // addon. Both bindings point at the same object on the success path;
+                // they only diverge on the partial-failure path. Don't collapse them.
                 let restoredAddon: WebglAddon | undefined;
                 try {
                         const addon = new WebglAddon();
@@ -109,7 +119,15 @@ export function openTerminalSession(opts: {
                 pendingRestoreCanvas = ev.target;
                 pendingRestoreCanvas.addEventListener("webglcontextrestored", onContextRestored, { once: true });
         };
-        if (webgl) container.addEventListener("webglcontextlost", onContextLost);
+        // Listener is registered unconditionally. The cost is one no-op
+        // attach when WebGL never initialised (no canvas under `container`
+        // ever fires webglcontextlost), but in exchange a future code path
+        // that hot-swaps the renderer — disposing the addon and replacing it
+        // without a full navigate-away — gets the loss/restore plumbing
+        // already wired for free, instead of having to re-register the
+        // listener from inside that swap. The dispose path was already
+        // unconditional, so the symmetry is now properly established.
+        container.addEventListener("webglcontextlost", onContextLost);
 
         fitAddon.fit();
 
@@ -243,24 +261,46 @@ export function openTerminalSession(opts: {
                 touchIsScroll = false;
         };
         const onTouchMove = (ev: TouchEvent) => {
-                if (lastTouchY === null || ev.touches.length !== 1) return;
+                if (lastTouchY === null || ev.touches.length !== 1) {
+                        // Defence-in-depth: clear lastTouchY whenever we see a non-
+                        // single-touch frame. onTouchStart already clears it when a
+                        // second finger lands (touchstart fires for each new touch
+                        // point), so under normal browser behaviour this is a no-op.
+                        // But touch events are notoriously flaky on the long tail of
+                        // mobile browsers — Safari has shipped bugs where a touch's
+                        // touchstart was suppressed while it still appeared in
+                        // ev.touches on a later move. If anything ever skips that
+                        // path, lastTouchY would carry over from before the multi-
+                        // touch and produce a phantom scroll jump on the first
+                        // single-touch frame after the second finger lifts. Clearing
+                        // here makes that impossible regardless.
+                        if (ev.touches.length !== 1) lastTouchY = null;
+                        return;
+                }
                 const y = ev.touches[0]!.clientY;
                 const cellH = getCellHeight();
                 const deltaPx = lastTouchY - y;
                 const lines = Math.trunc(deltaPx / cellH);
 
-                // Once the gesture is classified as a scroll, keep suppressing
-                // xterm's drag-selection handler on every subsequent frame —
-                // including sub-cell frames where lines === 0. Without this,
-                // slow swipes leave an unguarded window at the start.
-                if (touchIsScroll) ev.preventDefault();
+                // Suppress xterm's drag-selection handler on every frame the
+                // gesture qualifies as a scroll — either because it's already
+                // been classified as one (touchIsScroll) or because *this* frame
+                // crossed at least one cell (lines !== 0) and is about to flip
+                // the flag. A single call covers both paths:
+                //   - First qualifying frame: lines !== 0 trips the OR;
+                //     touchIsScroll flips below.
+                //   - Subsequent frames once classified: touchIsScroll trips
+                //     the OR, including sub-cell frames where lines === 0.
+                // Previously this was two separate ev.preventDefault() calls
+                // straddling the `if (lines === 0)` early return — correct
+                // (preventDefault is idempotent) but the duplication looked
+                // suspicious. touch-action:none is set in CSS, so calling
+                // preventDefault here doesn't trigger a passive-listener
+                // warning even on the first qualifying frame.
+                if (touchIsScroll || lines !== 0) ev.preventDefault();
                 if (lines === 0) return;
 
                 touchIsScroll = true;
-                // Prevent xterm from treating the drag as a text-selection gesture
-                // (touch-action:none is set in CSS, so this won't cause a passive
-                // event listener warning).
-                ev.preventDefault();
 
                 if (term.buffer.active.type === "alternate") {
                         // Cap the burst so a fast flick doesn't fire 100+ arrows
@@ -515,14 +555,18 @@ class MultilineUrlLinkProvider implements ILinkProvider {
                 this.cache = [];
                 const buf = this.term.buffer.active;
 
-                // "Terminators" that can't appear inside a URL. Includes whitespace,
-                // common quote/bracket chars, and the Unicode Box Drawing block
-                // (─-╿ — covers │ ─ ╭ ╮ etc. that ink/React TUIs draw
-                // around their panels). This lets us treat a row's URL "zone" as
-                // the contiguous run of URL-safe chars between the left and right
-                // borders/padding of the row.
-                const NON_URL = /[\s<>"'`{}()[\]─-╿|]/;
-                const URL_RE = /https?:\/\/[^\s<>"'`{}()[\]─-╿|]+/g;
+                // "Terminators" that can't appear inside a URL. Includes
+                // whitespace, common quote/bracket chars, and the Unicode Box
+                // Drawing block — the `─-╿` range covers U+2500–U+257F (│ ─
+                // ╭ ╮ etc. that ink/React TUIs draw around their panels). The
+                // dash inside the brackets is a regex range operator, NOT a
+                // literal hyphen-or-three-chars; flagging this so a future
+                // reviewer doesn't "fix" what looks like a typo. This lets
+                // us treat a row's URL "zone" as the contiguous run of
+                // URL-safe chars between the left and right borders/padding
+                // of the row.
+                const NON_URL = /[\s<>"'`{}()[\]─-╿|]/; //   ─-╿ = box-drawing range
+                const URL_RE = /https?:\/\/[^\s<>"'`{}()[\]─-╿|]+/g; // ─-╿ = box-drawing range
 
                 // Phase 1 — for every row in the buffer, strip leading/trailing
                 // non-URL chars (borders, padding) and record where the interior
