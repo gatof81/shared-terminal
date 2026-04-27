@@ -44,10 +44,13 @@ export class UploadQuotaExceededError extends Error {
         readonly used: number;
         readonly attempted: number;
         constructor(used: number, attempted: number, quota: number) {
-                super(
-                        `Per-session upload quota exceeded: ${used} bytes used + ${attempted} attempted ` +
-                        `> ${quota} cap. Delete files from uploads/ to free space.`,
-                );
+                // Generic, byte-count-free message — handleSessionError ships
+                // err.message verbatim as the 413 body, so anything precise
+                // here would leak the same per-session usage that route's
+                // structured-field suppression is meant to hide. Server-side
+                // logging happens in writeUploads at the throw site so the
+                // operator still has the detail for capacity planning.
+                super("Per-session upload quota exceeded. Delete files from uploads/ to free space.");
                 this.name = "UploadQuotaExceededError";
                 this.used = used;
                 this.attempted = attempted;
@@ -357,6 +360,13 @@ export class DockerManager {
                         attemptedBytes += stat.size;
                 }
                 if (usedBytes + attemptedBytes > UPLOAD_QUOTA_BYTES) {
+                        // Log the detail server-side; the thrown error carries
+                        // a generic message so the byte counts don't ride out
+                        // in the 413 body to the client.
+                        console.warn(
+                                `[docker] upload quota rejected for session ${sessionId}: ` +
+                                `${usedBytes} used + ${attemptedBytes} attempted > ${UPLOAD_QUOTA_BYTES} cap`,
+                        );
                         await this.cleanupTmp(files);
                         throw new UploadQuotaExceededError(usedBytes, attemptedBytes, UPLOAD_QUOTA_BYTES);
                 }
