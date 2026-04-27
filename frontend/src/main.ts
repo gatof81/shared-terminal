@@ -1577,6 +1577,18 @@ fileInput.addEventListener("change", async () => {
                         showToast(`Upload failed: ${(err as Error).message}`, true);
                         return;
                 }
+                // Re-check identity post-await: if the user switched away
+                // from this session while the upload was in flight, pasting
+                // its paths into whatever terminal they're now looking at
+                // would silently inject foreign-session paths into their
+                // current command. Mirrors the same guard pattern used in
+                // addTab/openSession/closeTab. The files still landed in
+                // session A's workspace; the user can switch back and
+                // reference them manually.
+                if (activeSessionId !== sessionId) {
+                        showToast(`Uploaded ${result.paths.length} to the previous session`);
+                        return;
+                }
                 const term = getActiveTerminal();
                 if (term && result.paths.length > 0) {
                         // Quote any path containing whitespace — the sanitiser shouldn't
