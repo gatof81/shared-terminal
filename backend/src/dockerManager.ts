@@ -173,6 +173,17 @@ export class DockerManager {
                                 Memory: 2 * 1024 * 1024 * 1024,
                                 NanoCpus: 2_000_000_000,
                                 RestartPolicy: { Name: "unless-stopped" },
+                                // Defense-in-depth (issue #15): the image already runs as
+                                // unprivileged UID 1000 with no sudo, but we still strip
+                                // every Linux capability from the bag the kernel hands the
+                                // container. tmux, node, git, claude-code, and `code tunnel`
+                                // all run unprivileged and need none of CAP_NET_RAW /
+                                // CAP_SYS_ADMIN / CAP_CHOWN / etc., so dropping ALL is the
+                                // tightest baseline. Pair with no-new-privileges so even if
+                                // a future image change reintroduces a setuid binary, it
+                                // cannot raise effective UID/caps at exec time.
+                                CapDrop: ["ALL"],
+                                SecurityOpt: ["no-new-privileges:true"],
                         },
                         OpenStdin: true,
                         Tty: true,
