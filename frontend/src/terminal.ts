@@ -109,7 +109,15 @@ export function openTerminalSession(opts: {
                 pendingRestoreCanvas = ev.target;
                 pendingRestoreCanvas.addEventListener("webglcontextrestored", onContextRestored, { once: true });
         };
-        if (webgl) container.addEventListener("webglcontextlost", onContextLost);
+        // Listener is registered unconditionally. The cost is one no-op
+        // attach when WebGL never initialised (no canvas under `container`
+        // ever fires webglcontextlost), but in exchange a future code path
+        // that hot-swaps the renderer — disposing the addon and replacing it
+        // without a full navigate-away — gets the loss/restore plumbing
+        // already wired for free, instead of having to re-register the
+        // listener from inside that swap. The dispose path was already
+        // unconditional, so the symmetry is now properly established.
+        container.addEventListener("webglcontextlost", onContextLost);
 
         fitAddon.fit();
 
