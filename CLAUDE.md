@@ -86,6 +86,38 @@ All `db.ts` calls are HTTP round-trips to Cloudflare. Keep query counts low on h
 - Commit messages follow Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`, …).
 - Frontend deliberately has no framework — do not add React/Vue/etc. without discussion.
 
+### Comments
+
+The repo's convention — codified here so PR reviews stop disputing it
+(see #69) — is **WHY-driven, not length-capped**.
+
+- **Default to no comment.** If the code is self-explanatory, leave it
+  alone. A comment that paraphrases the next line is noise.
+- **Add a comment when the WHY is non-obvious.** Subtle correctness
+  invariants (TOCTOU, ordering, atomicity, timing side-channels),
+  config foot-guns, third-party API quirks, intentional deviations
+  from the obvious-looking implementation, security-relevant choices
+  — these belong inline with the code, not in a PR description that
+  vanishes from the file's context the moment the PR is merged.
+- **Length follows the WHY.** A one-liner is fine when the WHY fits
+  in a one-liner. A multi-paragraph block is fine when the WHY needs
+  one — the existing `DUMMY_PASSWORD_HASH_PROMISE` block in
+  `backend/src/auth.ts` and the `TRUST_PROXY` validation block in
+  `backend/src/index.ts` are the canonical examples. Don't pad short
+  WHYs into long blocks; don't compress real reasoning into one line
+  to satisfy a length rule.
+- **Anchor to the load-bearing line, not the file top.** A comment
+  about why a particular `await` order matters goes immediately above
+  that `await`, not in the function's docstring.
+- **PR descriptions are not durable documentation.** If a reviewer
+  asks "why is this written this way?" and the answer wouldn't be
+  obvious to the next reader six months from now, the answer is a
+  comment.
+
+PR review bots and human reviewers should not flag a multi-paragraph
+comment as "too long" by itself — only "the WHY here is obvious /
+already covered elsewhere / wrong" is a valid objection.
+
 ## Git workflow
 
 - **Never commit or push directly to `main`.** Every change — feature, fix, docs, CI, config — goes on a branch and through a PR. Main is branch-protected, but this is the policy regardless.
@@ -101,6 +133,7 @@ When reviewing code or reporting issues, format each finding as a structured blo
 
 ```markdown
 ### [SEVERITY] <one-line headline>
+
 **Where:** `<relative/file/path.ts:start-end>`
 **What:** <what's wrong; quote the relevant code inline>
 **Why it matters:** <concrete consequence — not "might be bad">
@@ -121,12 +154,15 @@ For a top-to-bottom review ("review this PR", "audit this file"), wrap the block
 
 ```markdown
 ## Summary
+
 2-4 sentences: what the change actually does and any mismatch with its stated intent.
 
 ## Findings
-_No issues found._  — or one finding block per issue —
+
+_No issues found._ — or one finding block per issue —
 
 ## Verdict
+
 **BLOCKER** / **SHOULD-FIX** / **NIT** / **LGTM**
 ```
 
@@ -145,6 +181,7 @@ For an incidental finding surfaced while doing other work, a bare block is fine 
 
 ```markdown
 ### [SHOULD-FIX] reconcile() leaves stale container_id on externally removed container
+
 **Where:** `backend/src/dockerManager.ts:847-855`
 **What:** The catch branch flips status but never nulls `container_id`:
 
