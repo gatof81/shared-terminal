@@ -590,25 +590,7 @@ export class DockerManager {
                 // and spawn a replacement.
                 try {
                         const info = await this.docker.getContainer(meta.containerId).inspect();
-                        // Warn if the existing container predates the issue-#15 hardening.
-                        // Docker pins HostConfig at create time, so `container.start()`
-                        // re-uses the original CapDrop / SecurityOpt regardless of what
-                        // spawn() would set today. An operator who deploys this build
-                        // and only stop+starts (instead of DELETE + POST /start) ends
-                        // up with sessions that look fine but still have full caps and
-                        // a setuid sudo from the old image. Detect that explicitly so
-                        // the migration mistake shows up in `docker logs` instead of
-                        // failing silently.
-                        const capDrop = info.HostConfig?.CapDrop ?? [];
-                        const securityOpt = info.HostConfig?.SecurityOpt ?? [];
-                        if (!capDrop.includes("ALL") || !securityOpt.includes("no-new-privileges:true")) {
-                                console.warn(
-                                        `[docker] session ${sessionId} container ${meta.containerId.slice(0, 12)} ` +
-                                        `predates issue-#15 hardening (CapDrop=${JSON.stringify(capDrop)}, ` +
-                                        `SecurityOpt=${JSON.stringify(securityOpt)}). ` +
-                                        `Recycle via DELETE /api/sessions/${sessionId} then POST /start to apply current HostConfig.`,
-                                );
-                        }
+                        this.warnIfPreHardened(sessionId, meta.containerId, info.HostConfig);
                         if (!info.State.Running) {
                                 await this.docker.getContainer(meta.containerId).start();
                         }
@@ -620,6 +602,31 @@ export class DockerManager {
                         await this.spawn(sessionId);
                         await this.sessions.updateStatus(sessionId, "running");
                 }
+        }
+
+        // Detects containers that predate the issue-#15 hardening. Docker pins
+        // HostConfig at create time, so `container.start()` re-uses the original
+        // CapDrop / SecurityOpt regardless of what spawn() would set today. An
+        // operator who deploys this build and only stop+starts (instead of
+        // DELETE + POST /start) ends up with sessions that look fine but still
+        // have full Linux caps and a setuid sudo from the old image. This helper
+        // is the choke point for surfacing that mistake — call it from any code
+        // path that inspects an existing container so the migration footgun
+        // shows up in `docker logs` instead of failing silently.
+        private warnIfPreHardened(
+                sessionId: string,
+                containerId: string,
+                hostConfig: { CapDrop?: string[] | null; SecurityOpt?: string[] | null } | undefined,
+        ): void {
+                const capDrop = hostConfig?.CapDrop ?? [];
+                const securityOpt = hostConfig?.SecurityOpt ?? [];
+                if (capDrop.includes("ALL") && securityOpt.includes("no-new-privileges:true")) return;
+                console.warn(
+                        `[docker] session ${sessionId} container ${containerId.slice(0, 12)} ` +
+                        `predates issue-#15 hardening (CapDrop=${JSON.stringify(capDrop)}, ` +
+                        `SecurityOpt=${JSON.stringify(securityOpt)}). ` +
+                        `Recycle via DELETE /api/sessions/${sessionId} then POST /start to apply current HostConfig.`,
+                );
         }
 
         async stopContainer(sessionId: string): Promise<void> {
@@ -1182,7 +1189,15 @@ export class DockerManager {
                         }
                         try {
                                 const info = await this.docker.getContainer(row.container_id).inspect();
-                                if (!info.State.Running) {
+                                if (info.State.Running) {
+                                        // reconcile() runs on every backend boot, which is
+                                        // the most-likely deploy moment. Surface pre-#15
+                                        // containers here too so an operator who only
+                                        // restarts the backend (without recycling sessions)
+                                        // sees the warn at startup, not just on the next
+                                        // /start.
+                                        this.warnIfPreHardened(row.session_id, row.container_id, info.HostConfig);
+                                } else {
                                         await this.sessions.updateStatus(row.session_id, "stopped");
                                 }
                         } catch (err) {
