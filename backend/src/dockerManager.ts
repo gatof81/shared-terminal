@@ -102,6 +102,11 @@ export class DockerManager {
         private sessions: SessionManager;
         private shared = new Map<string /*targetKey*/, Promise<SharedExec>>();
         private keyOf = new Map<string /*attachId*/, string /*targetKey*/>();
+        // Serialises writeUploads calls per session so the quota check
+        // (read existing + add new) can't race two concurrent requests
+        // and let both pass with the same usedBytes snapshot. Entries
+        // self-clean when the chain head finishes.
+        private uploadLocks = new Map<string /*sessionId*/, Promise<void>>();
 
         constructor(sessions: SessionManager, dockerOpts?: Dockerode.DockerOptions) {
                 this.docker = new Dockerode(dockerOpts ?? { socketPath: "/var/run/docker.sock" });
@@ -254,6 +259,32 @@ export class DockerManager {
                 files: ReadonlyArray<{ originalname: string; path: string }>,
         ): Promise<string[]> {
                 if (files.length === 0) return [];
+                // Per-session serialisation. Synchronously chain a new lock
+                // *before* awaiting the prior one, so a concurrent call sees
+                // the chained lock — not an empty slot — and waits behind us.
+                const prior = this.uploadLocks.get(sessionId);
+                let release: () => void = () => { /* set below */ };
+                const ours = new Promise<void>((r) => { release = r; });
+                const newLock = prior ? prior.then(() => ours, () => ours) : ours;
+                this.uploadLocks.set(sessionId, newLock);
+                if (prior) await prior.catch(() => { /* ignore prior errors */ });
+                try {
+                        return await this.writeUploadsImpl(sessionId, files);
+                } finally {
+                        release();
+                        // Clean up if we're still the head — i.e. no later caller
+                        // chained on. Stops the map from growing without bound
+                        // for sessions that aren't actively uploading.
+                        if (this.uploadLocks.get(sessionId) === newLock) {
+                                this.uploadLocks.delete(sessionId);
+                        }
+                }
+        }
+
+        private async writeUploadsImpl(
+                sessionId: string,
+                files: ReadonlyArray<{ originalname: string; path: string }>,
+        ): Promise<string[]> {
                 const uploadsHostDir = path.join(WORKSPACE_ROOT, sessionId, "uploads");
                 // Lexical sanity check (matches purgeWorkspace at L306).
                 // assertOwnership already constrains sessionId to a UUID from D1,
@@ -339,7 +370,12 @@ export class DockerManager {
                         realUploadsDir,
                         nodeFsConstants.O_DIRECTORY | nodeFsConstants.O_NOFOLLOW,
                 );
-                let stableIno: bigint | number;
+                // Stats inherit Node's default (non-BigInt) ino representation.
+                // Narrow to `number` so the strict-equality check against the
+                // post-rename lstat below stays type-aligned — a future
+                // statBig() call would silently break the comparison if this
+                // were the wider `bigint | number` union.
+                let stableIno: number;
                 try {
                         stableIno = (await dirHandle.stat()).ino;
                 } catch (err) {
@@ -1068,12 +1104,19 @@ export class DockerManager {
                         }
                         return;
                 }
-                if (entries.length === 0) return;
+                // Filter to plain files. `fs.unlink` on a directory returns
+                // EISDIR — not actionable here and would skew the
+                // success/failure log. No code path in this module creates
+                // subdirs under .tmp-uploads today, but a future regression
+                // (or operator dropping something there) would silently
+                // accumulate without this guard.
+                const fileEntries = entries.filter((e) => e.isFile());
+                if (fileEntries.length === 0) return;
                 const results = await Promise.allSettled(
-                        entries.map((e) => fs.unlink(path.join(dir, e.name))),
+                        fileEntries.map((e) => fs.unlink(path.join(dir, e.name))),
                 );
                 const failed = results.filter((r) => r.status === "rejected").length;
-                console.log(`[docker] sweepUploadTmp removed ${entries.length - failed}/${entries.length} stale tmp files`);
+                console.log(`[docker] sweepUploadTmp removed ${fileEntries.length - failed}/${fileEntries.length} stale tmp files`);
         }
 
         async reconcile(): Promise<void> {
