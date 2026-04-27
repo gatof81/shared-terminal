@@ -308,8 +308,13 @@ export class DockerManager {
                 try {
                         const existing = await fs.readdir(realUploadsDir);
                         for (const entry of existing) {
-                                const stat = await fs.stat(path.join(realUploadsDir, entry));
-                                if (stat.isFile()) usedBytes += stat.size;
+                                // lstat (not stat) so a container-planted symlink in
+                                // its own uploads/ pointing at e.g. /var/log/syslog
+                                // counts as the link's own bytes (~80) rather than
+                                // the target's size — otherwise the container could
+                                // self-DoS by inflating its perceived quota usage.
+                                const st = await fs.lstat(path.join(realUploadsDir, entry));
+                                if (st.isFile()) usedBytes += st.size;
                         }
                 } catch (err) {
                         // ENOENT is fine — fresh session with no uploads yet.
