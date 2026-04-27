@@ -175,13 +175,19 @@ export class DockerManager {
                                 RestartPolicy: { Name: "unless-stopped" },
                                 // Defense-in-depth (issue #15): the image already runs as
                                 // unprivileged UID 1000 with no sudo, but we still strip
-                                // every Linux capability from the bag the kernel hands the
-                                // container. tmux, node, git, claude-code, and `code tunnel`
-                                // all run unprivileged and need none of CAP_NET_RAW /
-                                // CAP_SYS_ADMIN / CAP_CHOWN / etc., so dropping ALL is the
-                                // tightest baseline. Pair with no-new-privileges so even if
-                                // a future image change reintroduces a setuid binary, it
-                                // cannot raise effective UID/caps at exec time.
+                                // every Linux capability from the bounding set Docker
+                                // hands the container. None of tmux, node, git,
+                                // claude-code, or `code tunnel` need any of the default
+                                // bag (e.g. CAP_NET_RAW for raw sockets / ICMP,
+                                // CAP_NET_BIND_SERVICE for ports < 1024, CAP_AUDIT_WRITE,
+                                // CAP_MKNOD), so dropping ALL is the tightest baseline.
+                                // Note: this is about the *container's* bounding set,
+                                // not the backend host process — host-side chowns in
+                                // ensureWorkspaceOwnership rely on the backend's own
+                                // CAP_CHOWN and are unaffected. Pair with
+                                // no-new-privileges so even if a future image change
+                                // reintroduces a setuid binary it cannot raise
+                                // effective UID/caps at exec time.
                                 CapDrop: ["ALL"],
                                 SecurityOpt: ["no-new-privileges:true"],
                         },
