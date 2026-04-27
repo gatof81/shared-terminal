@@ -47,7 +47,7 @@ export function buildRouter(
 
         // ── Auth routes (public) ────────────────────────────────────────────────
 
-        const { loginIp, registerIp, invitesCreateIp, invitesRevokeIp, fileUploadIp } = createAuthRateLimiters(rateLimitConfig);
+        const { loginIp, registerIp, invitesCreateIp, invitesListIp, invitesRevokeIp, fileUploadIp } = createAuthRateLimiters(rateLimitConfig);
         const usernameLimiter = new UsernameRateLimiter(
                 rateLimitConfig.login.usernameMax,
                 rateLimitConfig.login.usernameWindowMs,
@@ -199,7 +199,11 @@ export function buildRouter(
         // If you ever want to gate this to specific accounts, add an is_admin
         // column to users and a middleware check here.
 
-        router.get("/invites", async (req: Request, res: Response) => {
+        // GET is rate-limited symmetrically with POST/DELETE (issue #47):
+        // a much higher cap because reads are cheap, but the same per-IP
+        // shape so the asymmetry doesn't read as accidental and a runaway
+        // client polling in a loop can't hammer D1 unbounded.
+        router.get("/invites", invitesListIp, async (req: Request, res: Response) => {
                 const { userId } = req as AuthedRequest;
                 try {
                         const invites = await listInvites(userId);

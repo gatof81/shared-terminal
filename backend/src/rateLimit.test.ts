@@ -368,6 +368,7 @@ describe("auth route rate limiting", () => {
 		login: { ipMax: number; ipWindowMs: number; usernameMax: number; usernameWindowMs: number };
 		register: { ipMax: number; ipWindowMs: number };
 		invitesCreate?: { ipMax: number; ipWindowMs: number };
+		invitesList?: { ipMax: number; ipWindowMs: number };
 		invitesRevoke?: { ipMax: number; ipWindowMs: number };
 		fileUpload?: { ipMax: number; ipWindowMs: number };
 	}): Promise<void> {
@@ -376,6 +377,7 @@ describe("auth route rate limiting", () => {
 		// don't trip them.
 		const fullCfg = {
 			invitesCreate: { ipMax: 1000, ipWindowMs: 60_000 },
+			invitesList: { ipMax: 1000, ipWindowMs: 60_000 },
 			invitesRevoke: { ipMax: 1000, ipWindowMs: 60_000 },
 			fileUpload: { ipMax: 1000, ipWindowMs: 60_000 },
 			...cfg,
