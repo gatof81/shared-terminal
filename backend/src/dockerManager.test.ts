@@ -640,9 +640,13 @@ describe("DockerManager.reconcile", () => {
 	});
 
 	it("warns even when the pre-#15 container is stopped at reconcile time", async () => {
-		// Operators who stop all sessions before deploying would otherwise
-		// only see the warn on the next /start — and might never recycle if
-		// they forget to start each one. The warn has to fire here too.
+		// reconcile() queries WHERE status = 'running', so this exercises the
+		// case where D1 still says 'running' but the Docker process is down
+		// (external `docker stop`, OOM kill, host reboot mid-flight). The
+		// warn must fire regardless of Docker's State.Running so the
+		// migration footgun surfaces even on containers that happen to be
+		// dead at reconcile time — they'll be respawned later, and the
+		// operator needs to know the old image is involved.
 		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 		const { dm, sessions } = makeDockerWithInspectResult({
 			State: { Running: false },
