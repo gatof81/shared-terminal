@@ -556,6 +556,18 @@ export function buildRouter(
         const handleUploadMiddleware = (req: Request, res: Response, next: NextFunction): void => {
                 upload.array("files", 8)(req, res, (err: unknown) => {
                         if (!err) { next(); return; }
+                        // When multer aborts mid-batch (e.g. file 8 trips
+                        // LIMIT_FILE_SIZE after files 1–7 already streamed to
+                        // .tmp-uploads/), it auto-removes only the partial
+                        // file for the entry that errored. The earlier
+                        // successfully-streamed files sit in req.files and
+                        // would otherwise leak — at 30 reqs / 5min × 7 ×
+                        // ~25 MB = ~5 GB/window of orphaned tmp files. Clear
+                        // them on every error branch before returning.
+                        const partial = (req.files as Express.Multer.File[] | undefined) ?? [];
+                        if (partial.length > 0) {
+                                void Promise.allSettled(partial.map((f) => fs.unlink(f.path)));
+                        }
                         if (err instanceof multer.MulterError) {
                                 if (err.code === "LIMIT_FILE_SIZE") {
                                         res.status(413).json({ error: `Upload rejected: ${err.message}` });
