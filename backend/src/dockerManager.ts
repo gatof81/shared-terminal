@@ -1038,8 +1038,37 @@ export class DockerManager {
 
         // ── Helpers ─────────────────────────────────────────────────────────────
 
+        /**
+         * Best-effort sweep of the multer tmp directory at startup. If the
+         * backend was OOM-killed or crashed mid-upload, multer's tmp files
+         * (which the upload route would normally rename or unlink) are left
+         * behind forever — harmless to security but accumulates on disk
+         * over crash/restart cycles. Called from reconcile() so the same
+         * startup hook handles both forms of stale state.
+         */
+        async sweepUploadTmp(): Promise<void> {
+                const dir = this.getUploadTmpDir();
+                let entries: Dirent[];
+                try {
+                        entries = await fs.readdir(dir, { withFileTypes: true });
+                } catch (err) {
+                        // ENOENT is expected on a fresh deployment — nothing to sweep.
+                        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+                                console.warn(`[docker] sweepUploadTmp readdir failed for ${dir}: ${(err as Error).message}`);
+                        }
+                        return;
+                }
+                if (entries.length === 0) return;
+                const results = await Promise.allSettled(
+                        entries.map((e) => fs.unlink(path.join(dir, e.name))),
+                );
+                const failed = results.filter((r) => r.status === "rejected").length;
+                console.log(`[docker] sweepUploadTmp removed ${entries.length - failed}/${entries.length} stale tmp files`);
+        }
+
         async reconcile(): Promise<void> {
                 console.log("[docker] reconciling session state with Docker…");
+                await this.sweepUploadTmp();
                 const result = await d1Query<{ session_id: string; container_id: string | null }>(
                         "SELECT session_id, container_id FROM sessions WHERE status = 'running'",
                 );
