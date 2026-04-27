@@ -160,6 +160,115 @@ cloudflared tunnel route dns shared-terminal api.terminal.yourdomain.com
 cloudflared tunnel --url http://localhost:3001 run shared-terminal
 ```
 
+## Security model
+
+Read this before exposing the backend to the public internet.
+
+### Threat model
+
+The backend's job is to spawn, attach to, and kill Docker containers
+on demand. To do that, `docker-compose.yml` bind-mounts the host's
+`/var/run/docker.sock` into the backend container:
+
+```yaml
+volumes:
+  - /var/run/docker.sock:/var/run/docker.sock
+```
+
+This is the standard tradeoff for a session-orchestrator design, but
+the consequences need to be explicit:
+
+- **The backend has full Docker daemon access.** The Docker API the
+  socket exposes is unauthenticated to anything that can `connect(2)`
+  to it. There is no per-endpoint ACL on a vanilla socket.
+- **An RCE in the backend is host root.** An attacker who reaches
+  arbitrary code execution inside the backend container can ask the
+  daemon to start a privileged container that bind-mounts the host
+  rootfs and chroots into it. There is no container-level mitigation
+  for this once the socket is reachable.
+- **The session containers themselves run unprivileged** (no
+  `--privileged`, no extra capabilities, no host PID/net namespaces).
+  The socket exposure is a backend-trust property, not a session-
+  trust property.
+
+### Recommended deployment posture
+
+- **Do not expose port 3001 directly to the internet.** Treat the
+  backend as a private service.
+- **Run behind Cloudflare Tunnel** (already documented above) so the
+  origin has no inbound ports open at all. The tunnel terminates at
+  Cloudflare; the home server only makes outbound connections.
+- **Gate the tunnel hostname with Cloudflare Access.** A short Access
+  policy ("emails matching me@example.com") in front of the tunnel
+  hostname turns "anyone on the internet" into "people who can prove
+  they're me" before any HTTP request reaches the backend. The
+  in-app JWT auth is still the primary control; Access is a hard
+  belt around it.
+- **Keep the host patched and the backend image rebuilt.** Both the
+  Node runtime and the dependencies in `backend/package.json` are
+  CVE-bearing surfaces, and an unpatched RCE there inherits the
+  socket-access blast radius above.
+
+### Optional: docker-socket-proxy
+
+For deployments that want to shrink the backend's daemon surface
+below "all of the Docker API", you can interpose a proxy that only
+exposes the endpoints this app actually needs. The backend uses the
+daemon for: container create, start, stop, kill, remove, inspect,
+exec create + start + resize.
+
+[`tecnativa/docker-socket-proxy`](https://github.com/Tecnativa/docker-socket-proxy)
+is a small HAProxy-based filter that does exactly this. With it,
+even an RCE in the backend can't pull images, mount host paths into
+new containers, or read other containers' configs — only the
+endpoints listed below resolve.
+
+A drop-in `docker-compose.yml` overlay (illustrative — verify the
+endpoint set against the proxy's docs when you adopt it):
+
+```yaml
+services:
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    restart: unless-stopped
+    environment:
+      # Endpoints required by dockerManager.ts:
+      CONTAINERS: 1 # create, inspect, list, start, stop, kill, remove
+      EXEC: 1 # exec create + start + resize (WS attach path)
+      POST: 1 # POST verbs (create/start/exec/resize)
+      # Default-deny everything else: IMAGES, NETWORKS, VOLUMES,
+      # SERVICES, SWARM, NODES, INFO, AUTH, BUILD, COMMIT, etc.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    # Internal only: never publish ports to the host or the public net.
+    expose:
+      - "2375"
+
+  app:
+    # Replace the direct socket mount with a network connection to the proxy.
+    environment:
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
+    depends_on:
+      - docker-socket-proxy
+    # Drop the /var/run/docker.sock bind mount from the default service.
+    volumes:
+      - ${WORKSPACE_ROOT:-/var/shared-terminal/workspaces}:/var/shared-terminal/workspaces
+      # /var/run/docker.sock:/var/run/docker.sock  ← removed
+```
+
+Caveats:
+
+- The backend uses dockerode's default socket path. Setting
+  `DOCKER_HOST=tcp://…` is the supported override; no code change
+  is required.
+- Bind-mount paths the backend asks for (`<WORKSPACE_ROOT>/<id>`,
+  `.uploads/<id>`) must still exist on the _host_ — the proxy
+  forwards container-create requests verbatim, so the daemon
+  resolves bind sources from its own filesystem.
+- A scoped proxy reduces blast radius. It does **not** make the
+  backend safe to expose without authentication; the tunnel + Access
+  posture above is still load-bearing.
+
 ## API Reference
 
 ### Auth (public)
