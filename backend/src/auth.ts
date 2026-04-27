@@ -2,7 +2,7 @@
  * auth.ts — JWT authentication + user management (D1-backed).
  */
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import bcrypt from "bcryptjs";
 import type { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
@@ -190,12 +190,36 @@ export async function registerUser(
                         // consumed without producing an account. The invitee will see
                         // a 409 (or 500) response and has no way of knowing the code
                         // is burned — they'll have to ask whoever issued it for a new
-                        // one. Log loudly with the code so an operator can audit the
-                        // invite_codes table and reissue if needed.
+                        // one.
+                        //
+                        // Log a SHA-256 of the code, NOT the raw value (#51). The
+                        // earlier shape included the plaintext so an operator could
+                        // grep the invite_codes table — but any log aggregator /
+                        // SIEM that indexes this line would then hold a usable code:
+                        //
+                        //   - The "code is already consumed" reasoning assumed the
+                        //     UPDATE had landed (used_at IS NOT NULL). If the
+                        //     release UPDATE failed in a way that left the row
+                        //     claimable (write didn't reach D1 at all), the logged
+                        //     plaintext was still live.
+                        //   - Even in the consumed case, a rotated D1 admin token
+                        //     could let an attacker manually un-claim the row and
+                        //     redeem the code — defeating the "burned therefore
+                        //     safe" assumption.
+                        //
+                        // Hashing turns "operator finds the orphan" into:
+                        //
+                        //     SELECT … FROM invite_codes
+                        //     WHERE printf('%x', sha256(code)) = '<hash from log>'
+                        //
+                        // — small one-liner D1 query, no extra column needed today,
+                        // and trivially aligns with #49 if invite codes get hashed
+                        // at rest later (the column would already be the hash).
+                        const codeHash = createHash("sha256").update(inviteCode).digest("hex");
                         console.error(
-                                "[auth] CRITICAL: invite release failed — code %s is permanently consumed without an account. " +
+                                "[auth] CRITICAL: invite release failed — code hash %s is permanently consumed without an account. " +
                                 "Insert error: %s. Release error: %s",
-                                inviteCode,
+                                codeHash,
                                 (err as Error).message,
                                 (releaseErr as Error).message,
                         );
