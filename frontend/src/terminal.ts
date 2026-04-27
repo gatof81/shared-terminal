@@ -90,6 +90,16 @@ export function openTerminalSession(opts: {
                 // Don't load a second addon while one is already live (prior loss handler nulls webgl).
                 if (webgl) return;
                 pendingRestoreCanvas = null;
+                // The let/const split is deliberate. `restoredAddon` (let, outer) is
+                // the catch-block's only handle for disposing a partially-initialised
+                // addon if `term.loadAddon(addon)` throws after construction —
+                // otherwise the just-allocated WebGL context would leak. `addon`
+                // (const, inner) is what the onContextLoss closure binds to: a
+                // const here keeps the closure immune to a future refactor that
+                // reassigns `restoredAddon` between construction and the closure
+                // firing, which would otherwise have the closure dispose the wrong
+                // addon. Both bindings point at the same object on the success path;
+                // they only diverge on the partial-failure path. Don't collapse them.
                 let restoredAddon: WebglAddon | undefined;
                 try {
                         const addon = new WebglAddon();
