@@ -247,7 +247,7 @@ services:
     restart: unless-stopped
     environment:
       # Endpoints required by dockerManager.ts:
-      CONTAINERS: 1 # create, inspect, start, stop, kill, remove
+      CONTAINERS: 1 # create, inspect, start, stop, remove
       EXEC: 1 # exec create + start + resize (WS attach path)
       POST: 1 # POST verbs (create/start/exec/resize/stop/kill)
       DELETE: 1 # DELETE /containers/{id} for container.remove() on
