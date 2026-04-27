@@ -515,14 +515,18 @@ class MultilineUrlLinkProvider implements ILinkProvider {
                 this.cache = [];
                 const buf = this.term.buffer.active;
 
-                // "Terminators" that can't appear inside a URL. Includes whitespace,
-                // common quote/bracket chars, and the Unicode Box Drawing block
-                // (─-╿ — covers │ ─ ╭ ╮ etc. that ink/React TUIs draw
-                // around their panels). This lets us treat a row's URL "zone" as
-                // the contiguous run of URL-safe chars between the left and right
-                // borders/padding of the row.
-                const NON_URL = /[\s<>"'`{}()[\]─-╿|]/;
-                const URL_RE = /https?:\/\/[^\s<>"'`{}()[\]─-╿|]+/g;
+                // "Terminators" that can't appear inside a URL. Includes
+                // whitespace, common quote/bracket chars, and the Unicode Box
+                // Drawing block — the `─-╿` range covers U+2500–U+257F (│ ─
+                // ╭ ╮ etc. that ink/React TUIs draw around their panels). The
+                // dash inside the brackets is a regex range operator, NOT a
+                // literal hyphen-or-three-chars; flagging this so a future
+                // reviewer doesn't "fix" what looks like a typo. This lets
+                // us treat a row's URL "zone" as the contiguous run of
+                // URL-safe chars between the left and right borders/padding
+                // of the row.
+                const NON_URL = /[\s<>"'`{}()[\]─-╿|]/; //   ─-╿ = box-drawing range
+                const URL_RE = /https?:\/\/[^\s<>"'`{}()[\]─-╿|]+/g; // ─-╿ = box-drawing range
 
                 // Phase 1 — for every row in the buffer, strip leading/trailing
                 // non-URL chars (borders, padding) and record where the interior
