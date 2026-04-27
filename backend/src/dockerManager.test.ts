@@ -679,6 +679,35 @@ describe("DockerManager.reconcile", () => {
 	});
 });
 
+describe("DockerManager.startContainer", () => {
+	// Case 2 (containerId on file, container exists in Docker) is the
+	// interactive `POST /api/sessions/:id/start` path. A pre-#15 container
+	// reached this way must surface the same warn as reconcile so a future
+	// refactor can't silently drop the call.
+	it("warns when starting an existing pre-#15 container (Case 2)", async () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const sessions = makeFakeSessions();
+		const dm = new DockerManager(sessions);
+		(dm as unknown as { docker: unknown }).docker = {
+			getContainer: vi.fn(() => ({
+				inspect: vi.fn(async () => ({
+					State: { Running: false },
+					HostConfig: { CapDrop: [], SecurityOpt: [] },
+				})),
+				start: vi.fn(async () => { /* started */ }),
+			})),
+		};
+
+		await dm.startContainer("s1");
+
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy.mock.calls[0]?.[0]).toMatch(/predates issue-#15 hardening/);
+		expect(warnSpy.mock.calls[0]?.[0]).toMatch(/session s1/);
+		expect(sessions.updateStatus).toHaveBeenCalledWith("s1", "running");
+		warnSpy.mockRestore();
+	});
+});
+
 // ── sanitiseUploadName ──────────────────────────────────────────────────────
 // Security-sensitive: the result is concatenated into a host filesystem path
 // AND pasted directly into the user's terminal, so it has to (a) prevent any
