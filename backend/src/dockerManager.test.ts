@@ -137,8 +137,13 @@ function makeDocker(opts?: { sessions?: SessionManager; oneShot?: OneShotHook })
 	const sessions = opts?.sessions ?? makeFakeSessions();
 	const container = makeFakeContainer(opts?.oneShot);
 	const dm = new DockerManager(sessions);
-	// Swap in the fake Dockerode. The constructor already instantiated a real
-	// one against /var/run/docker.sock but we never touch it before this.
+	// Swap in the fake Dockerode BEFORE any method on `dm` is called. The
+	// constructor's default-selection logic now picks between letting
+	// docker-modem read DOCKER_HOST (env var present) and pinning to
+	// /var/run/docker.sock (env var absent), so the "real" client it
+	// instantiated could be aimed at either depending on the runner's
+	// environment. The swap is safe regardless because the field is
+	// replaced before any code path that would actually open a connection.
 	(dm as unknown as { docker: unknown }).docker = makeFakeDocker(container);
 	return { dm, container };
 }
