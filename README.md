@@ -229,7 +229,14 @@ endpoint set against the proxy's docs when you adopt it):
 ```yaml
 services:
   docker-socket-proxy:
-    image: tecnativa/docker-socket-proxy:latest
+    # Pin to an immutable digest in production (`image:
+    # tecnativa/docker-socket-proxy@sha256:…`) so a future
+    # `docker compose pull` can't silently swap the proxy out from
+    # under the operator. A floating `:latest` defeats the
+    # blast-radius story this whole section is selling. The
+    # explicit version tag below is the minimum bar; the digest is
+    # the right answer.
+    image: tecnativa/docker-socket-proxy:v0.4.2
     restart: unless-stopped
     environment:
       # Endpoints required by dockerManager.ts:
@@ -265,6 +272,12 @@ Caveats:
   `.uploads/<id>`) must still exist on the _host_ — the proxy
   forwards container-create requests verbatim, so the daemon
   resolves bind sources from its own filesystem.
+- Pin the proxy image to an immutable digest
+  (`@sha256:…`) in production. A floating `:latest` would let a
+  future `docker compose pull` silently change the proxy under
+  you, defeating the point of installing it. The example above
+  uses an explicit version tag as the minimum bar — promote to a
+  digest when you adopt this in your own deployment.
 - A scoped proxy reduces blast radius. It does **not** make the
   backend safe to expose without authentication; the tunnel + Access
   posture above is still load-bearing.
