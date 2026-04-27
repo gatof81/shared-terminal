@@ -724,11 +724,13 @@ function handleSessionError(err: unknown, res: Response): void {
                 res.status(403).json({ error: err.message });
         } else if (err instanceof UploadQuotaExceededError) {
                 // 413 Payload Too Large is the HTTP-spec answer for "request
-                // would push you past a server-enforced size cap". The
-                // err.message string already carries used/attempted/quota
-                // for display; drop the structured byte-count fields so
-                // we don't surface another user's disk usage if sessions
-                // ever become shared.
+                // would push you past a server-enforced size cap".
+                // err.message is intentionally generic — no byte counts —
+                // and the structured used/attempted/quota fields are logged
+                // server-side by writeUploads at the throw site, never
+                // surfaced in the response. Two-layer suppression so a
+                // future tweak to either side doesn't silently leak per-
+                // session usage to the client.
                 res.status(413).json({ error: err.message });
         } else {
                 console.error("[routes] unexpected error:", (err as Error).message);

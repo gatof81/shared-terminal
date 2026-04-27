@@ -387,9 +387,15 @@ export class DockerManager {
                 // top of the realpath check); the captured inode is the
                 // anchor we compare against after each rename to catch a
                 // swap performed during the loop.
+                // O_DIRECTORY is Linux-only — undefined on macOS. The
+                // bitwise OR would silently drop it on dev macOS hosts and
+                // open the path without the "must-be-a-directory" check.
+                // Production target is Linux per CLAUDE.md, but `?? 0` keeps
+                // the fallback explicit so a dev iterating on macOS doesn't
+                // hit a confusing later-stage stat failure instead.
                 const dirHandle = await fs.open(
                         realUploadsDir,
-                        nodeFsConstants.O_DIRECTORY | nodeFsConstants.O_NOFOLLOW,
+                        (nodeFsConstants.O_DIRECTORY ?? 0) | nodeFsConstants.O_NOFOLLOW,
                 );
                 // Use the bigint stat variant on BOTH sides of the inode
                 // comparison. Default `number` ino loses precision past 2^53,
