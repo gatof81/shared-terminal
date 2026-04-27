@@ -6,7 +6,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import type { Dirent } from "node:fs";
+import { constants as nodeFsConstants, type Dirent } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Duplex } from "node:stream";
@@ -26,6 +26,34 @@ const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/works
 // instead.
 const WORKSPACE_UID = Number.parseInt(process.env.WORKSPACE_UID ?? "1000", 10);
 const WORKSPACE_GID = Number.parseInt(process.env.WORKSPACE_GID ?? "1000", 10);
+
+// Per-session disk cap on user-uploaded files. The IP rate limiter (30/5min)
+// bounds request count, not bytes — without this an authenticated user could
+// write 30 × 8 × 25 MB = 6 GB / 5 min of uploads to disk indefinitely
+// (workspace files survive soft-delete). Default is 1 GB; ample for legit
+// "drop a few screenshots" usage, well below host-disk-fill range.
+const UPLOAD_QUOTA_BYTES = (() => {
+        const raw = process.env.UPLOAD_QUOTA_BYTES;
+        if (!raw) return 1024 * 1024 * 1024;
+        const n = Number.parseInt(raw, 10);
+        return Number.isFinite(n) && n > 0 ? n : 1024 * 1024 * 1024;
+})();
+
+export class UploadQuotaExceededError extends Error {
+        readonly quota: number;
+        readonly used: number;
+        readonly attempted: number;
+        constructor(used: number, attempted: number, quota: number) {
+                super(
+                        `Per-session upload quota exceeded: ${used} bytes used + ${attempted} attempted ` +
+                        `> ${quota} cap. Delete files from uploads/ to free space.`,
+                );
+                this.name = "UploadQuotaExceededError";
+                this.used = used;
+                this.attempted = attempted;
+                this.quota = quota;
+        }
+}
 
 // Opt-in: repair ownership on pre-existing *contents* under the session
 // directory, not just the top-level dir. Useful one-shot for deployments
@@ -254,17 +282,65 @@ export class DockerManager {
                         throw new Error(`uploads dir escaped workspace root: ${realUploadsDir}`);
                 }
                 // Deliberately NOT chowning realUploadsDir to the workspace user.
-                // The container owns the parent `<sessionId>/` directory (set by
-                // spawn-time ensureWorkspaceOwnership), so it can rmdir/rename
-                // any subdir it owns. If we chowned uploads/ to uid 1000, the
-                // container could empty the dir then `ln -s /etc uploads/` —
-                // resolving the path string at rename(2) time would land the
-                // backend write outside WORKSPACE_ROOT despite the realpath
-                // check above (TOCTOU on the path component, not the file).
-                // Keeping uploads/ owned by the backend (typically root,
-                // mode 0755) means the container can still traverse and read
-                // its own files (per-file chown to uid 1000 below) but can't
-                // empty or write inside the dir to stage the swap.
+                // Even with uploads/ owned by root and the per-file chown below,
+                // the container still owns the parent `<sessionId>/` directory
+                // (set by spawn-time ensureWorkspaceOwnership) — POSIX rename(2)
+                // requires write on the source-parent only, NOT ownership of the
+                // entry being renamed, so the container can do
+                //   `mv uploads uploads.bak; ln -s /etc uploads`
+                // mid-loop and have the next rename(2) re-resolve the path
+                // string into /etc. This is a TOCTOU residue we can't fully
+                // close without openat/renameat (Node lacks bindings) or a
+                // separate non-bind-mounted uploads dir (architectural change).
+                // Mitigation: hold uploadsHostDir open via O_DIRECTORY|
+                // O_NOFOLLOW so a freshly-replaced symlink is detected at fd
+                // open time, and re-lstat the dir entry after each rename to
+                // detect a swap during the loop. Window narrows from "the
+                // entire upload" to "the gap between the lstat and the next
+                // rename", on the order of microseconds.
+
+                // Per-session disk-quota check: count current bytes in
+                // uploads/ + bytes about to be added; reject before moving any
+                // tmp file if the cap would be exceeded. Sum-of-statSize is a
+                // tight enough approximation — uploads/ is always one level
+                // deep (writeUploads only writes flat) so no recursion.
+                let usedBytes = 0;
+                try {
+                        const existing = await fs.readdir(realUploadsDir);
+                        for (const entry of existing) {
+                                const stat = await fs.stat(path.join(realUploadsDir, entry));
+                                if (stat.isFile()) usedBytes += stat.size;
+                        }
+                } catch (err) {
+                        // ENOENT is fine — fresh session with no uploads yet.
+                        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+                }
+                let attemptedBytes = 0;
+                for (const file of files) {
+                        const stat = await fs.stat(file.path);
+                        attemptedBytes += stat.size;
+                }
+                if (usedBytes + attemptedBytes > UPLOAD_QUOTA_BYTES) {
+                        await this.cleanupTmp(files);
+                        throw new UploadQuotaExceededError(usedBytes, attemptedBytes, UPLOAD_QUOTA_BYTES);
+                }
+
+                // Open the dir as a stable fd. O_NOFOLLOW makes this fail if
+                // realUploadsDir is already a symlink (defence-in-depth on
+                // top of the realpath check); the captured inode is the
+                // anchor we compare against after each rename to catch a
+                // swap performed during the loop.
+                const dirHandle = await fs.open(
+                        realUploadsDir,
+                        nodeFsConstants.O_DIRECTORY | nodeFsConstants.O_NOFOLLOW,
+                );
+                let stableIno: bigint | number;
+                try {
+                        stableIno = (await dirHandle.stat()).ino;
+                } catch (err) {
+                        await dirHandle.close();
+                        throw err;
+                }
 
                 const containerPaths: string[] = [];
                 const now = Date.now().toString(36);
@@ -285,16 +361,26 @@ export class DockerManager {
                                 }
                                 // Atomic move within the same filesystem (multer's
                                 // tmp dir lives under WORKSPACE_ROOT — see routes.ts).
-                                // EXDEV would fire if someone repointed multer's tmp
-                                // root elsewhere; surfacing the error is fine because
-                                // the tmp file is still cleaned up by the finally below.
                                 await fs.rename(file.path, finalPath);
                                 remaining.delete(file.path);
+                                // TOCTOU sentinel: if the entry at realUploadsDir
+                                // now resolves to a different inode than the dir
+                                // we opened above, something swapped it during
+                                // the loop. The rename may have landed in the
+                                // swap target; best-effort unlink (which follows
+                                // the symlink, removing the leaked file) and bail
+                                // before any more writes go through.
+                                const liveIno = (await fs.lstat(realUploadsDir)).ino;
+                                if (liveIno !== stableIno) {
+                                        await fs.unlink(finalPath).catch(() => { /* best-effort */ });
+                                        throw new Error("uploads dir was swapped during write — possible TOCTOU attack");
+                                }
                                 await fs.chmod(finalPath, 0o644);
                                 await this.chownToWorkspaceUser(finalPath);
                                 containerPaths.push(`/home/developer/workspace/uploads/${filename}`);
                         }
                 } finally {
+                        await dirHandle.close();
                         await this.cleanupTmp([...remaining].map((p) => ({ originalname: "", path: p })));
                 }
                 return containerPaths;

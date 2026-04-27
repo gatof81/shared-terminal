@@ -22,6 +22,7 @@ import {
         UsernameTakenError,
 } from "./auth.js";
 import type { DockerManager } from "./dockerManager.js";
+import { UploadQuotaExceededError } from "./dockerManager.js";
 import { EnvVarValidationError, validateEnvVars } from "./envVarValidation.js";
 import type { RateLimitConfig } from "./rateLimit.js";
 import {
@@ -548,6 +549,15 @@ export function buildRouter(
                 limits: {
                         fileSize: 25 * 1024 * 1024,
                         files: 8,
+                        // Endpoint accepts only file parts (named "files"), no
+                        // text fields. Cap fields/parts so a JWT holder can't
+                        // make busboy parse thousands of throwaway parts before
+                        // the file count hits its limit. parts = files (8) + 1
+                        // headroom; fields = 0 means any non-file part trips
+                        // LIMIT_PART_COUNT immediately.
+                        fields: 0,
+                        parts: 9,
+                        fieldNameSize: 64,
                 },
         });
 
@@ -693,6 +703,10 @@ function handleSessionError(err: unknown, res: Response): void {
                 res.status(404).json({ error: err.message });
         } else if (err instanceof ForbiddenError) {
                 res.status(403).json({ error: err.message });
+        } else if (err instanceof UploadQuotaExceededError) {
+                // 413 Payload Too Large is the HTTP-spec answer for "request
+                // would push you past a server-enforced size cap".
+                res.status(413).json({ error: err.message, used: err.used, attempted: err.attempted, quota: err.quota });
         } else {
                 console.error("[routes] unexpected error:", (err as Error).message);
                 res.status(500).json({ error: "Internal server error" });
