@@ -447,6 +447,22 @@ export class DockerManager {
                                 // alter permissions of arbitrary host files.
                                 await fs.chmod(file.path, 0o644);
                                 await this.chownToWorkspaceUser(file.path);
+                                // Pre-rename TOCTOU check. Without this, file 1
+                                // of every batch is unprotected: the dir-fd
+                                // anchor was set before the loop started, and
+                                // the first rename could land in a swapped
+                                // symlink before the post-rename lstat catches
+                                // it. Pairing pre+post checks narrows the
+                                // attack window to the microsecond gap between
+                                // the pre-check and the rename for every file.
+                                const preIno = (await fs.lstat(realUploadsDir, { bigint: true })).ino;
+                                if (preIno !== stableIno) {
+                                        console.error(
+                                                `[docker] TOCTOU (pre-rename): uploads dir for session ${sessionId} ` +
+                                                `was swapped before write (anchor inode ${stableIno}, live ${preIno})`,
+                                        );
+                                        throw new Error("uploads dir was swapped during write — possible TOCTOU attack");
+                                }
                                 // Atomic move within the same filesystem (multer's
                                 // tmp dir lives under WORKSPACE_ROOT — see routes.ts).
                                 await fs.rename(file.path, finalPath);
@@ -1219,7 +1235,12 @@ export function sanitiseUploadName(original: string): string {
         // Restrict to a small Latin set so the path is shell-safe (the user
         // pastes it into the terminal as-is) and filesystem-portable.
         // Anything else is collapsed to underscore.
-        const cleaned = base.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^[._]+/, "");
+        // Strip leading [._-] so the sanitised name can never start with a
+        // dash. Today the result is always pasted as part of an absolute
+        // path (so a leading "-" wouldn't matter as a shell flag), but a
+        // future caller passing safeBase as a bare argument would otherwise
+        // be vulnerable to flag injection (`-rf.sh` parsed as `-r -f .sh`).
+        const cleaned = base.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^[._-]+/, "");
         if (!cleaned) return "file";
         // Preserve the extension up to a max stem length so names stay
         // readable in `ls` and don't blow past common filesystem limits.

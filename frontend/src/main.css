@@ -682,15 +682,14 @@ main:not([data-sidebar-ready]) #sidebar {
   border-color: #58a6ff;
   color: #58a6ff;
 }
-/* Actions button (+ menu) lives in the header. Mobile-only because
-   desktop xterm handles Cmd/Ctrl+V natively, and drag-drop covers
-   file uploads on desktop. The default `display: none` keeps it out
-   of the desktop layout; the @media (max-width: 768px) block below
-   flips it to inline-flex when not [hidden] (the hidden attribute is
-   toggled by main.ts in lockstep with the chrome-toggle pill — both
-   are gated on whether there's an active session). */
+/* Actions button (+ menu) lives in the header on every viewport. The
+   menu hosts both the paste flow (mobile-essential, desktop-handy as a
+   text-paste fallback) and the file-attach flow (useful everywhere).
+   `display: inline-flex` is the visible default; the [hidden] attribute
+   from main.ts gates it on whether there's an active session, in
+   lockstep with the chrome-toggle pill. */
 #actions-btn {
-  display: none;
+  display: inline-flex;
   background: transparent;
   border: 1px solid #30363d;
   border-radius: 6px;
@@ -704,6 +703,12 @@ main:not([data-sidebar-ready]) #sidebar {
      to ride high inside a tightly-padded button; nudge baseline down
      a hair so it sits centred next to the chrome-toggle pill. */
   padding-bottom: 0.24rem;
+}
+#actions-btn[hidden] {
+  /* The [hidden] attribute defaults to `display: none` in user-agent
+     stylesheets, but our `display: inline-flex` rule above wins on
+     specificity — so we have to spell it out for the hidden case. */
+  display: none;
 }
 #actions-btn:hover {
   border-color: #58a6ff;
@@ -1018,13 +1023,12 @@ main:not([data-sidebar-ready]) #sidebar {
   /* Actions (+) button lives at the right edge of the mobile header.
      chrome-toggle has `flex: 1` when active, but it can be hidden (no
      session selected) — `margin-left: auto` pins actions-btn to the
-     right edge in both cases. Safe inside this @media block because
-     #actions-btn is `display: none` at the desktop default; if the
-     button is ever exposed at the desktop breakpoint, this rule needs
-     to lose the auto-margin or it'll fight `.header-right`'s own
-     auto-margin. */
+     right edge in both cases. Desktop doesn't need the auto-margin
+     because .header-right (which sits earlier in the DOM and carries
+     `margin-left: auto` itself) already pushes itself + actions-btn
+     to the right; on mobile .header-right is `display: none` and
+     would-be auto-pusher disappears, so we need our own. */
   #actions-btn:not([hidden]) {
-    display: inline-flex;
     margin-left: auto;
   }
 }

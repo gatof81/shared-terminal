@@ -636,6 +636,14 @@ export function buildRouter(
 
         router.post(
                 "/sessions/:id/files",
+                // Explicit requireAuth so the route doesn't silently inherit
+                // its auth gate from `router.use("/sessions", requireAuth)`
+                // earlier in this file. If a future refactor lifts this
+                // route out of the /sessions prefix, the explicit guard
+                // makes the failure mode a 401 (loud) instead of an
+                // anon-userId reaching assertOwnership and surfacing as a
+                // confusing 404.
+                requireAuth,
                 fileUploadIp,
                 requireSessionOwnership,
                 handleUploadMiddleware,

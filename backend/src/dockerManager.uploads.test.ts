@@ -149,6 +149,38 @@ describe("writeUploads", () => {
                 expect(onDisk).toHaveLength(1);
         });
 
+        it("serialises concurrent writeUploads for the same session so two batches can't both pass the quota check", async () => {
+                // Each batch is 6 KB on its own; either alone fits under the
+                // 10 KB cap. Together they would push to 12 KB and break the
+                // cap — but only if the two reads of usedBytes both saw
+                // zero. The per-session lock guarantees the second batch
+                // reads the first's bytes, so exactly one wins.
+                const a = await makeTmpFile(dm, "a.txt", "x".repeat(6000));
+                const b = await makeTmpFile(dm, "b.txt", "x".repeat(6000));
+
+                const results = await Promise.allSettled([
+                        dm.writeUploads("session-concurrent", [a]),
+                        dm.writeUploads("session-concurrent", [b]),
+                ]);
+
+                const fulfilled = results.filter((r) => r.status === "fulfilled");
+                const rejected = results.filter((r) => r.status === "rejected");
+                expect(fulfilled).toHaveLength(1);
+                expect(rejected).toHaveLength(1);
+                expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
+                        UploadQuotaExceededError,
+                );
+
+                // Exactly one file on disk under uploads/.
+                const onDisk = await fs.readdir(
+                        path.join(WORKSPACE_ROOT, "session-concurrent", "uploads"),
+                );
+                expect(onDisk).toHaveLength(1);
+                // Both tmp files cleaned up — winner via rename, loser via cleanupTmp.
+                const tmpEntries = await fs.readdir(dm.getUploadTmpDir());
+                expect(tmpEntries).toHaveLength(0);
+        });
+
         it("rejects when the resolved session path escapes WORKSPACE_ROOT", async () => {
                 // sessionId starts with .. so path.join collapses it one level
                 // above WORKSPACE_ROOT — the lexical containment check should

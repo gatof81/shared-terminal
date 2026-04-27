@@ -647,8 +647,20 @@ describe("sanitiseUploadName", () => {
 		expect(sanitiseUploadName("")).toBe("file");
 		expect(sanitiseUploadName("...")).toBe("file");
 		expect(sanitiseUploadName("___")).toBe("file");
+		expect(sanitiseUploadName("---")).toBe("file");
 		expect(sanitiseUploadName("中文")).toBe("file");
 		expect(sanitiseUploadName("📎")).toBe("file");
+	});
+
+	it("strips leading dashes so the result can't start with a flag-like char", () => {
+		// Defends a hypothetical future caller that passes safeBase as a
+		// bare subprocess argument. Today the path is always absolute so
+		// "-rf.sh" wouldn't collide with anything, but an evolving call
+		// site might lose that invariant.
+		expect(sanitiseUploadName("-rf.sh")).toBe("rf.sh");
+		expect(sanitiseUploadName("--help.txt")).toBe("help.txt");
+		// Mid-string dashes are kept; only leading ones are stripped.
+		expect(sanitiseUploadName("data-2026-04-27.csv")).toBe("data-2026-04-27.csv");
 	});
 
 	it("preserves a short extension when truncating long names", () => {
