@@ -87,7 +87,7 @@ export function openTerminalSession(opts: {
         // canvas obtained from the loss event's target.
         let pendingRestoreCanvas: HTMLCanvasElement | null = null;
         const onContextRestored = () => {
-                // Guard against misbehaving drivers; the prior loss handler nulled webgl first.
+                // Don't load a second addon while one is already live (prior loss handler nulls webgl).
                 if (webgl) return;
                 pendingRestoreCanvas = null;
                 let restoredAddon: WebglAddon | undefined;
