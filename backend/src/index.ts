@@ -139,13 +139,22 @@ server.on("upgrade", (req, socket, head) => {
         // missing Origin is allowed because it indicates non-browser
         // clients, and "*" in CORS_ORIGINS is denied in production).
         //
-        // No per-request log on rejection: an attacker can flood the upgrade
-        // handler with garbage Origin headers and drown out signal. The
-        // CORS_ORIGINS=* case is already covered by warnIfWildcardCorsIn-
-        // Production at startup; deliberate operator misconfiguration will
-        // surface through the 403 status code + the boot warning, not
-        // through per-request log spam.
+        // No per-request log in PRODUCTION: an attacker can flood the
+        // upgrade handler with garbage Origin headers and drown out signal.
+        // The CORS_ORIGINS=* case is already covered by warnIfWildcard-
+        // CorsInProduction at startup; deliberate operator misconfiguration
+        // surfaces through the 403 status code + the boot warning, not
+        // through per-request log spam. In dev/staging we DO log (gated
+        // below) so an operator deploying a typo'd Origin can grep for it.
         if (!isAllowedWsOrigin(req.headers.origin, CORS_ORIGINS, process.env.NODE_ENV)) {
+                // Dev/staging only: see the block comment above and issue #66.
+                if (process.env.NODE_ENV !== "production") {
+                        console.debug(
+                                "[ws] rejecting upgrade: Origin=%s not in allowlist %j",
+                                req.headers.origin ?? "<absent>",
+                                CORS_ORIGINS,
+                        );
+                }
                 endUpgradeSocketWithReply(socket, "HTTP/1.1 403 Forbidden\r\n\r\n");
                 return;
         }
