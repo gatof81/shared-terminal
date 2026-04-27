@@ -618,9 +618,12 @@ describe("sanitiseUploadName", () => {
 	});
 
 	it("strips path separators and traversal segments", () => {
-		// path.basename takes the last segment; the regex collapses anything
-		// non-safe to underscore. The combined effect must never let a
-		// "../" make it through.
+		// Two layered defences: path.basename strips POSIX `/`-separated
+		// segments (covers cases 1, 2, 4 below); for backslash-only paths
+		// on Linux — where `\` is NOT a path separator — basename leaves
+		// the whole string intact and the `[^A-Za-z0-9._-]+` regex
+		// collapses each `\` run to `_`, then the leading-underscore
+		// strip removes them (case 3). Either way, no "../" escapes.
 		expect(sanitiseUploadName("../../etc/passwd")).toBe("passwd");
 		expect(sanitiseUploadName("/absolute/path/file.png")).toBe("file.png");
 		expect(sanitiseUploadName("..\\..\\windows\\sys.ini")).toBe("windows_sys.ini");
