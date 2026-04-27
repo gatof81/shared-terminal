@@ -299,6 +299,17 @@ export class DockerManager {
                         await this.cleanupTmp(files);
                         throw new Error(`unsafe session path resolved outside ${rootAbs}: ${uploadsHostDirAbs}`);
                 }
+                // mkdir-before-realpath note: the realpath check below catches
+                // a symlink-replaced uploads/ (the only entry the container
+                // can swap, since `<sessionId>/` is the bind-mount target —
+                // not removable from inside the container). For the broader
+                // "container replaces `<sessionId>/` itself" attack to land
+                // here, the attacker would need to pre-create that entry on
+                // the host before mkdir runs — but sessionId is a UUID minted
+                // in D1 and gated by assertOwnership in routes.ts, so a
+                // foreign attacker can't guess the path and the legitimate
+                // owner can't reach the host filesystem outside their bind
+                // mount. mkdir is therefore safe to run before realpath.
                 await fs.mkdir(uploadsHostDir, { recursive: true });
 
                 // Lexical resolve() above is purely string manipulation — it

@@ -595,6 +595,14 @@ export function buildRouter(
                                         res.status(413).json({ error: `Upload rejected: ${err.message}` });
                                         return;
                                 }
+                                if (err.code === "LIMIT_FILE_COUNT" || err.code === "LIMIT_PART_COUNT") {
+                                        // Both are payload-too-large in spirit: the request
+                                        // exceeds a server cap (8 files / 9 parts). 413 is
+                                        // the spec answer and lets clients distinguish
+                                        // "retry-may-help" 4xxs from this hard cap.
+                                        res.status(413).json({ error: `Upload rejected: ${err.message}` });
+                                        return;
+                                }
                                 if (err.code === "LIMIT_UNEXPECTED_FILE") {
                                         // Default message ("Unexpected field") doesn't tell the
                                         // caller what field name we DO expect — name it explicitly.
