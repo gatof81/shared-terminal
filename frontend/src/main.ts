@@ -1544,6 +1544,11 @@ fileInput.addEventListener("change", async () => {
                 return;
         }
         attachInFlight = true;
+        // Every `return` inside this try { } is covered by the finally below
+        // that resets attachInFlight — including the early validation
+        // returns. Don't move attachInFlight = false above the try or
+        // duplicate it on each early return; the finally is the single
+        // release point.
         try {
                 if (!activeSessionId) {
                         showToast("No active session", true);

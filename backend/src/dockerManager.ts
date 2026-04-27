@@ -400,6 +400,19 @@ export class DockerManager {
                                 if (!finalPathAbs.startsWith(`${realUploadsDir}${path.sep}`)) {
                                         throw new Error(`unsafe upload path resolved outside ${realUploadsDir}: ${finalPathAbs}`);
                                 }
+                                // Apply final mode + ownership BEFORE the rename, on
+                                // the multer tmp file in .tmp-uploads/ (root-owned,
+                                // not bind-mounted into any container). rename(2)
+                                // moves the inode in place — mode and owner are
+                                // preserved at the destination — so any post-rename
+                                // chmod/chown that would re-resolve through the
+                                // attacker-planted symlink is unnecessary. Order
+                                // matters: doing chmod/chown after rename leaves a
+                                // residual TOCTOU window where a swap mid-loop
+                                // would have those calls follow the symlink and
+                                // alter permissions of arbitrary host files.
+                                await fs.chmod(file.path, 0o644);
+                                await this.chownToWorkspaceUser(file.path);
                                 // Atomic move within the same filesystem (multer's
                                 // tmp dir lives under WORKSPACE_ROOT — see routes.ts).
                                 await fs.rename(file.path, finalPath);
@@ -426,8 +439,6 @@ export class DockerManager {
                                         );
                                         throw new Error("uploads dir was swapped during write — possible TOCTOU attack");
                                 }
-                                await fs.chmod(finalPath, 0o644);
-                                await this.chownToWorkspaceUser(finalPath);
                                 containerPaths.push(`/home/developer/workspace/uploads/${filename}`);
                         }
                 } finally {
