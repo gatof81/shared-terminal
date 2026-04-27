@@ -243,7 +243,22 @@ export function openTerminalSession(opts: {
                 touchIsScroll = false;
         };
         const onTouchMove = (ev: TouchEvent) => {
-                if (lastTouchY === null || ev.touches.length !== 1) return;
+                if (lastTouchY === null || ev.touches.length !== 1) {
+                        // Defence-in-depth: clear lastTouchY whenever we see a non-
+                        // single-touch frame. onTouchStart already clears it when a
+                        // second finger lands (touchstart fires for each new touch
+                        // point), so under normal browser behaviour this is a no-op.
+                        // But touch events are notoriously flaky on the long tail of
+                        // mobile browsers — Safari has shipped bugs where a touch's
+                        // touchstart was suppressed while it still appeared in
+                        // ev.touches on a later move. If anything ever skips that
+                        // path, lastTouchY would carry over from before the multi-
+                        // touch and produce a phantom scroll jump on the first
+                        // single-touch frame after the second finger lifts. Clearing
+                        // here makes that impossible regardless.
+                        if (ev.touches.length !== 1) lastTouchY = null;
+                        return;
+                }
                 const y = ev.touches[0]!.clientY;
                 const cellH = getCellHeight();
                 const deltaPx = lastTouchY - y;
