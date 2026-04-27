@@ -166,10 +166,23 @@ export class DockerManager {
                 // No chown — backend (typically root) owns the dir, container
                 // reads via the read-only mount; no need for it to own anything.
 
+                // RFC 1123 forbids hostname labels from starting or ending with
+                // `-`, and Docker rejects createContainer with such hostnames.
+                // The previous one-liner only filtered the *charset* — a session
+                // named "-foo" or "foo-" produced a hostname Docker refused, and
+                // a session named "---" (or any name made entirely of forbidden
+                // chars) produced an empty hostname which Docker also refuses.
+                // Build the sanitised hostname in three steps and fall back to
+                // the short session id if every char gets stripped.
+                const hostname =
+                        meta.name
+                                .replace(/[^a-zA-Z0-9-]/g, "-")
+                                .replace(/^-+|-+$/g, "")
+                                .slice(0, 63) || `session-${sessionId.slice(0, 8)}`;
                 const container = await this.docker.createContainer({
                         Image: SESSION_IMAGE,
                         name: meta.containerName,
-                        Hostname: meta.name.replace(/[^a-zA-Z0-9-]/g, "-").slice(0, 63),
+                        Hostname: hostname,
                         Env: [
                                 `SESSION_ID=${sessionId}`,
                                 `SESSION_NAME=${meta.name}`,
