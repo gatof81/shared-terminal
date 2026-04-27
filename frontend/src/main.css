@@ -682,30 +682,83 @@ main:not([data-sidebar-ready]) #sidebar {
   border-color: #58a6ff;
   color: #58a6ff;
 }
-/* Paste button lives in the header; mobile-only because desktop xterm
-   handles Cmd/Ctrl+V natively. The default `display: none` keeps it out
-   of the desktop layout entirely, the @media (max-width: 768px) block
-   below flips it to inline-flex when not [hidden] (the hidden attribute
-   is toggled by main.ts in lockstep with the chrome-toggle pill — both
-   are gated on whether there's an active session). */
-#paste-btn {
-  display: none;
+/* Actions button (+ menu) lives in the header on every viewport. The
+   menu hosts both the paste flow (mobile-essential, desktop-handy as a
+   text-paste fallback) and the file-attach flow (useful everywhere).
+   `display: inline-flex` is the visible default; the [hidden] attribute
+   from main.ts gates it on whether there's an active session, in
+   lockstep with the chrome-toggle pill. */
+#actions-btn {
+  display: inline-flex;
   background: transparent;
   border: 1px solid #30363d;
   border-radius: 6px;
   color: #c9d1d9;
-  font-size: 0.78rem;
-  padding: 0.3rem 0.7rem;
+  font-size: 1.05rem;
+  padding: 0.18rem 0.62rem;
   cursor: pointer;
   line-height: 1;
-  font-weight: 500;
+  font-weight: 600;
+  /* The "+" glyph is heavier than the prior "Paste" label and tends
+     to ride high inside a tightly-padded button; nudge baseline down
+     a hair so it sits centred next to the chrome-toggle pill. */
+  padding-bottom: 0.24rem;
 }
-#paste-btn:hover {
+#actions-btn[hidden] {
+  /* The [hidden] attribute defaults to `display: none` in user-agent
+     stylesheets, but our `display: inline-flex` rule above wins on
+     specificity — so we have to spell it out for the hidden case. */
+  display: none;
+}
+#actions-btn:hover {
   border-color: #58a6ff;
   color: #58a6ff;
 }
-#paste-btn:active {
-  background: rgba(88, 166, 255, 0.1);
+#actions-btn:active,
+#actions-btn[aria-expanded="true"] {
+  background: rgba(88, 166, 255, 0.12);
+  border-color: #58a6ff;
+  color: #58a6ff;
+}
+
+/* ── Actions menu (mobile + sheet) ─────────────────────────── */
+.actions-menu-card {
+  width: 360px;
+  max-width: 92vw;
+  padding: 1rem 1rem 0.75rem;
+  gap: 0.5rem;
+}
+.actions-menu-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  padding: 0.7rem 0.85rem;
+  background: #0d1117;
+  border: 1px solid #21262d;
+  border-radius: 8px;
+  color: #e6edf3;
+  cursor: pointer;
+  text-align: left;
+  margin-bottom: 0.4rem;
+}
+.actions-menu-item:hover {
+  border-color: #58a6ff;
+  background: #0e1622;
+}
+.actions-menu-item:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.actions-menu-item-title {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: #e6edf3;
+}
+.actions-menu-item-hint {
+  font-size: 0.72rem;
+  color: #8b949e;
+  line-height: 1.35;
 }
 #terminal-tabs {
   display: none;
@@ -967,15 +1020,15 @@ main:not([data-sidebar-ready]) #sidebar {
     opacity: 1;
   }
 
-  /* Paste lives at the right edge of the mobile header. chrome-toggle
-     has `flex: 1` when active, but it can be hidden (no session
-     selected) — `margin-left: auto` pins paste-btn to the right edge
-     in both cases. Safe inside this @media block because #paste-btn
-     is `display: none` at the desktop default; if the button is ever
-     exposed at the desktop breakpoint, this rule needs to lose the
-     auto-margin or it'll fight `.header-right`'s own auto-margin. */
-  #paste-btn:not([hidden]) {
-    display: inline-flex;
+  /* Actions (+) button lives at the right edge of the mobile header.
+     chrome-toggle has `flex: 1` when active, but it can be hidden (no
+     session selected) — `margin-left: auto` pins actions-btn to the
+     right edge in both cases. Desktop doesn't need the auto-margin
+     because .header-right (which sits earlier in the DOM and carries
+     `margin-left: auto` itself) already pushes itself + actions-btn
+     to the right; on mobile .header-right is `display: none` and
+     would-be auto-pusher disappears, so we need our own. */
+  #actions-btn:not([hidden]) {
     margin-left: auto;
   }
 }

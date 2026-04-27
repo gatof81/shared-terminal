@@ -27,6 +27,37 @@ const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/works
 const WORKSPACE_UID = Number.parseInt(process.env.WORKSPACE_UID ?? "1000", 10);
 const WORKSPACE_GID = Number.parseInt(process.env.WORKSPACE_GID ?? "1000", 10);
 
+// Per-session disk cap on user-uploaded files. The IP rate limiter (30/5min)
+// bounds request count, not bytes — without this an authenticated user could
+// write 30 × 8 × 25 MB = 6 GB / 5 min of uploads to disk indefinitely
+// (workspace files survive soft-delete). Default is 1 GB; ample for legit
+// "drop a few screenshots" usage, well below host-disk-fill range.
+const UPLOAD_QUOTA_BYTES = (() => {
+        const raw = process.env.UPLOAD_QUOTA_BYTES;
+        if (!raw) return 1024 * 1024 * 1024;
+        const n = Number.parseInt(raw, 10);
+        return Number.isFinite(n) && n > 0 ? n : 1024 * 1024 * 1024;
+})();
+
+export class UploadQuotaExceededError extends Error {
+        readonly quota: number;
+        readonly used: number;
+        readonly attempted: number;
+        constructor(used: number, attempted: number, quota: number) {
+                // Generic, byte-count-free message — handleSessionError ships
+                // err.message verbatim as the 413 body, so anything precise
+                // here would leak the same per-session usage that route's
+                // structured-field suppression is meant to hide. Server-side
+                // logging happens in writeUploads at the throw site so the
+                // operator still has the detail for capacity planning.
+                super("Per-session upload quota exceeded. Delete files from uploads/ to free space.");
+                this.name = "UploadQuotaExceededError";
+                this.used = used;
+                this.attempted = attempted;
+                this.quota = quota;
+        }
+}
+
 // Opt-in: repair ownership on pre-existing *contents* under the session
 // directory, not just the top-level dir. Useful one-shot for deployments
 // that lived through the earlier bug where Docker auto-created the bind
@@ -74,6 +105,11 @@ export class DockerManager {
         private sessions: SessionManager;
         private shared = new Map<string /*targetKey*/, Promise<SharedExec>>();
         private keyOf = new Map<string /*attachId*/, string /*targetKey*/>();
+        // Serialises writeUploads calls per session so the quota check
+        // (read existing + add new) can't race two concurrent requests
+        // and let both pass with the same usedBytes snapshot. Entries
+        // self-clean when the chain head finishes.
+        private uploadLocks = new Map<string /*sessionId*/, Promise<void>>();
 
         constructor(sessions: SessionManager, dockerOpts?: Dockerode.DockerOptions) {
                 this.docker = new Dockerode(dockerOpts ?? { socketPath: "/var/run/docker.sock" });
@@ -101,6 +137,23 @@ export class DockerManager {
                 await fs.mkdir(workspaceDir, { recursive: true });
                 await this.ensureWorkspaceOwnership(workspaceDir);
 
+                // Pre-create the per-session uploads dir at its OUT-OF-WORKSPACE
+                // location and bind-mount it read-only into the container at
+                // /home/developer/workspace/uploads/. Critical TOCTOU defence:
+                // because the container's view is a mount point, the container
+                // can NOT replace, rename, or rmdir the uploads/ entry from
+                // inside (the kernel rejects any modification to a mount point
+                // from the mount user's namespace). Read-only also stops the
+                // container from writing/modifying uploaded files, so an
+                // attacker can't poison files between writes — combined with
+                // writeUploads' atomic rename from .tmp-uploads/ into
+                // .uploads/<sessionId>/, the symlink-swap attack window the
+                // older in-workspace layout had is closed structurally.
+                const uploadsHostDir = path.join(WORKSPACE_ROOT, ".uploads", sessionId);
+                await fs.mkdir(uploadsHostDir, { recursive: true });
+                // No chown — backend (typically root) owns the dir, container
+                // reads via the read-only mount; no need for it to own anything.
+
                 const container = await this.docker.createContainer({
                         Image: SESSION_IMAGE,
                         name: meta.containerName,
@@ -113,7 +166,10 @@ export class DockerManager {
                                 ...envArray,
                         ],
                         HostConfig: {
-                                Binds: [`${WORKSPACE_ROOT}/${sessionId}:/home/developer/workspace`],
+                                Binds: [
+                                        `${WORKSPACE_ROOT}/${sessionId}:/home/developer/workspace`,
+                                        `${uploadsHostDir}:/home/developer/workspace/uploads:ro`,
+                                ],
                                 Memory: 2 * 1024 * 1024 * 1024,
                                 NanoCpus: 2_000_000_000,
                                 RestartPolicy: { Name: "unless-stopped" },
@@ -146,26 +202,7 @@ export class DockerManager {
          * silently boot a session with a broken workspace.
          */
         private async ensureWorkspaceOwnership(dir: string): Promise<void> {
-                const chownOne = async (target: string) => {
-                        try {
-                                await fs.chown(target, WORKSPACE_UID, WORKSPACE_GID);
-                        } catch (err) {
-                                const code = (err as NodeJS.ErrnoException).code;
-                                if (code === "EPERM" || code === "ENOSYS") {
-                                        // Logged once per target — high-volume recursive mode
-                                        // could be noisy, but seeing which paths failed is more
-                                        // valuable than a compact summary.
-                                        console.warn(
-                                                `[docker] couldn't chown ${target} to ${WORKSPACE_UID}:${WORKSPACE_GID} (${code}); ` +
-                                                `run the backend as root or pre-create paths with matching ownership.`,
-                                        );
-                                } else {
-                                        throw err;
-                                }
-                        }
-                };
-
-                await chownOne(dir);
+                await this.chownToWorkspaceUser(dir);
 
                 if (!WORKSPACE_CHOWN_RECURSIVE) return;
 
@@ -196,12 +233,227 @@ export class DockerManager {
                         }
                         for (const entry of entries) {
                                 const full = path.join(current, entry.name);
-                                await chownOne(full);
+                                await this.chownToWorkspaceUser(full);
                                 if (entry.isDirectory() && !entry.isSymbolicLink()) {
                                         stack.push(full);
                                 }
                         }
                 }
+        }
+
+        /**
+         * chown a single path to WORKSPACE_UID:WORKSPACE_GID. Downgrades
+         * EPERM/ENOSYS to a warning (unprivileged dev mode), re-throws
+         * everything else so a real broken-workspace error doesn't get
+         * swallowed. Shared by the spawn-time ownership pass and the
+         * upload writer below.
+         */
+        private async chownToWorkspaceUser(target: string): Promise<void> {
+                try {
+                        await fs.chown(target, WORKSPACE_UID, WORKSPACE_GID);
+                } catch (err) {
+                        const code = (err as NodeJS.ErrnoException).code;
+                        if (code === "EPERM" || code === "ENOSYS") {
+                                console.warn(
+                                        `[docker] couldn't chown ${target} to ${WORKSPACE_UID}:${WORKSPACE_GID} (${code}); ` +
+                                        `run the backend as root or pre-create paths with matching ownership.`,
+                                );
+                        } else {
+                                throw err;
+                        }
+                }
+        }
+
+        /**
+         * Save uploaded files into the session workspace under `uploads/`
+         * and return their in-container paths. Caller must have already
+         * verified ownership of `sessionId`.
+         *
+         * Filenames are sanitised to a safe basename and prefixed with a
+         * monotonic timestamp + short random suffix so concurrent uploads
+         * of the same name don't clobber each other. The host path of
+         * every write is `path.resolve()`d and verified to sit inside the
+         * uploads directory before any rename — the sanitiser already
+         * strips path separators, but the resolve-and-check is a defence-
+         * in-depth belt against a future regression. Concurrent calls for
+         * the same session are serialised via `uploadLocks` so the quota
+         * check (read-then-write) can't race itself.
+         */
+        async writeUploads(
+                sessionId: string,
+                files: ReadonlyArray<{ originalname: string; path: string }>,
+        ): Promise<string[]> {
+                if (files.length === 0) return [];
+                // Per-session serialisation. Synchronously chain a new lock
+                // *before* awaiting the prior one, so a concurrent call sees
+                // the chained lock — not an empty slot — and waits behind us.
+                const prior = this.uploadLocks.get(sessionId);
+                let release: () => void = () => { /* set below */ };
+                const ours = new Promise<void>((r) => { release = r; });
+                const newLock = prior ? prior.then(() => ours, () => ours) : ours;
+                this.uploadLocks.set(sessionId, newLock);
+                if (prior) await prior.catch(() => { /* ignore prior errors */ });
+                try {
+                        return await this.writeUploadsImpl(sessionId, files);
+                } finally {
+                        release();
+                        // Clean up if we're still the head — i.e. no later caller
+                        // chained on. Stops the map from growing without bound
+                        // for sessions that aren't actively uploading.
+                        if (this.uploadLocks.get(sessionId) === newLock) {
+                                this.uploadLocks.delete(sessionId);
+                        }
+                }
+        }
+
+        private async writeUploadsImpl(
+                sessionId: string,
+                files: ReadonlyArray<{ originalname: string; path: string }>,
+        ): Promise<string[]> {
+                // Architectural TOCTOU fix: the uploads directory lives at
+                // <WORKSPACE_ROOT>/.uploads/<sessionId>/ — OUTSIDE the
+                // container's bind-mount tree. spawn() bind-mounts this dir
+                // read-only into the container at /home/developer/workspace/
+                // uploads/, so:
+                //   1. The container CANNOT remove or replace /home/developer/
+                //      workspace/uploads (it's a mount point — kernel rejects
+                //      modification from the mount user's namespace).
+                //   2. The container CANNOT write into uploads/ (read-only mount).
+                //   3. The container's bind mount on /home/developer/workspace/
+                //      doesn't reach .uploads/ on the host, so nothing inside
+                //      the container can plant symlinks at the upload destination.
+                // The earlier in-workspace layout needed a stack of defences
+                // (realpath, O_DIRECTORY|O_NOFOLLOW, pre+post inode sentinels)
+                // because the container could replace uploads/ with a symlink
+                // and race rename(2). With the new layout that whole class of
+                // attacks is structurally impossible, so the per-rename TOCTOU
+                // machinery is gone. The lexical containment check stays as a
+                // belt against any future regression that lets a non-UUID
+                // sessionId reach this method.
+                const uploadsHostDir = path.join(WORKSPACE_ROOT, ".uploads", sessionId);
+                // Containment check: must resolve under <WORKSPACE_ROOT>/.uploads/,
+                // not just under WORKSPACE_ROOT. A traversal-shaped sessionId
+                // like "../escape" would otherwise let path.join collapse to
+                // <WORKSPACE_ROOT>/escape — still under WORKSPACE_ROOT but
+                // outside the per-session uploads namespace.
+                const uploadsBaseAbs = path.resolve(WORKSPACE_ROOT, ".uploads");
+                const uploadsHostDirAbs = path.resolve(uploadsHostDir);
+                if (!uploadsHostDirAbs.startsWith(`${uploadsBaseAbs}${path.sep}`)) {
+                        await this.cleanupTmp(files);
+                        throw new Error(`unsafe session path resolved outside ${uploadsBaseAbs}: ${uploadsHostDirAbs}`);
+                }
+                // spawn() pre-creates this dir, but a writeUploads call for a
+                // session that has been spawned but not running (or for one
+                // started before this code shipped) needs us to create it
+                // here too. recursive: true is a no-op when it already exists.
+                await fs.mkdir(uploadsHostDir, { recursive: true });
+
+                // Per-session disk-quota check: count current bytes in
+                // uploads/ + bytes about to be added; reject before moving any
+                // tmp file if the cap would be exceeded. Sum-of-statSize is a
+                // tight enough approximation — uploads/ is always one level
+                // deep (writeUploads only writes flat) so no recursion.
+                // lstat (not stat) so any stale symlink left over from the
+                // previous in-workspace layout — or one a future bug plants
+                // here — counts as zero bytes (st.isFile() is false for
+                // symlinks) rather than inflating the quota with the
+                // target's size.
+                let usedBytes = 0;
+                try {
+                        const existing = await fs.readdir(uploadsHostDir);
+                        for (const entry of existing) {
+                                const st = await fs.lstat(path.join(uploadsHostDir, entry));
+                                if (st.isFile()) usedBytes += st.size;
+                        }
+                } catch (err) {
+                        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+                }
+                let attemptedBytes = 0;
+                for (const file of files) {
+                        const stat = await fs.stat(file.path);
+                        attemptedBytes += stat.size;
+                }
+                if (usedBytes + attemptedBytes > UPLOAD_QUOTA_BYTES) {
+                        // Log the detail server-side; the thrown error carries
+                        // a generic message so byte counts don't ride out in
+                        // the 413 body to the client.
+                        console.warn(
+                                `[docker] upload quota rejected for session ${sessionId}: ` +
+                                `${usedBytes} used + ${attemptedBytes} attempted > ${UPLOAD_QUOTA_BYTES} cap`,
+                        );
+                        await this.cleanupTmp(files);
+                        throw new UploadQuotaExceededError(usedBytes, attemptedBytes, UPLOAD_QUOTA_BYTES);
+                }
+
+                const containerPaths: string[] = [];
+                const now = Date.now().toString(36);
+                // Track which multer tmp files we've successfully moved so
+                // the finally block can clean up anything we didn't get to.
+                const remaining = new Set(files.map((f) => f.path));
+                try {
+                        for (const file of files) {
+                                const safeBase = sanitiseUploadName(file.originalname);
+                                // Random suffix on top of the timestamp so two
+                                // uploads landing in the same millisecond don't
+                                // collide.
+                                const suffix = randomBytes(3).toString("hex");
+                                const filename = `${now}-${suffix}-${safeBase}`;
+                                const finalPath = path.join(uploadsHostDir, filename);
+                                const finalPathAbs = path.resolve(finalPath);
+                                // Defence-in-depth per-file containment: the
+                                // sanitiser already strips path separators so
+                                // sanitiseUploadName(x) can never escape the
+                                // dir, but resolve+startsWith is one extra
+                                // line of insurance against a future regression
+                                // in the sanitiser.
+                                if (!finalPathAbs.startsWith(`${uploadsHostDirAbs}${path.sep}`)) {
+                                        throw new Error(`unsafe upload path resolved outside ${uploadsHostDirAbs}: ${finalPathAbs}`);
+                                }
+                                // chmod + chown the multer tmp file BEFORE the
+                                // rename. rename(2) preserves mode + owner at
+                                // the destination, so the file lands in
+                                // uploads/ with mode 0644 owned by uid 1000
+                                // (the container user). With the read-only
+                                // bind mount the container can read but not
+                                // modify the file — chowning to uid 1000 is
+                                // mostly cosmetic now but keeps the in-
+                                // container `ls -l` output consistent with the
+                                // rest of the workspace.
+                                await fs.chmod(file.path, 0o644);
+                                await this.chownToWorkspaceUser(file.path);
+                                // Atomic same-filesystem move from the multer
+                                // tmp dir to the per-session uploads dir.
+                                await fs.rename(file.path, finalPath);
+                                remaining.delete(file.path);
+                                containerPaths.push(`/home/developer/workspace/uploads/${filename}`);
+                        }
+                } finally {
+                        await this.cleanupTmp([...remaining].map((p) => ({ originalname: "", path: p })));
+                }
+                return containerPaths;
+        }
+
+        /**
+         * Absolute host path where multer streams uploaded bodies before
+         * `writeUploads` moves them to their final per-session location.
+         * Lives directly under WORKSPACE_ROOT (NOT inside any session
+         * subdirectory) so it's never bind-mounted into a container, and
+         * `fs.rename` from here to the final path is a same-filesystem
+         * atomic move.
+         */
+        getUploadTmpDir(): string {
+                return path.join(WORKSPACE_ROOT, ".tmp-uploads");
+        }
+
+        // Best-effort cleanup of multer's on-disk temp files. Used on the
+        // bail-out paths in writeUploads (containment-check failure, mid-loop
+        // throw). Each unlink is independently swallowed because the only
+        // failure modes here are "file already gone" or "no permission" —
+        // neither is something the upload caller should hear about.
+        private async cleanupTmp(
+                files: ReadonlyArray<{ path: string }>,
+        ): Promise<void> {
+                await Promise.allSettled(files.map((f) => fs.unlink(f.path)));
         }
 
         async kill(sessionId: string): Promise<void> {
@@ -258,11 +510,17 @@ export class DockerManager {
         async purgeWorkspace(sessionId: string): Promise<void> {
                 const rootAbs = path.resolve(WORKSPACE_ROOT);
                 const sessionAbs = path.resolve(path.join(WORKSPACE_ROOT, sessionId));
+                const uploadsAbs = path.resolve(path.join(WORKSPACE_ROOT, ".uploads", sessionId));
 
-                // Safety: the resolved session dir must be a strict child of rootAbs.
+                // Safety: both resolved dirs must be strict children of rootAbs.
                 if (!sessionAbs.startsWith(rootAbs + path.sep)) {
                         throw new Error(
                                 `[docker] refusing to purge workspace outside root (root=${rootAbs}, target=${sessionAbs})`,
+                        );
+                }
+                if (!uploadsAbs.startsWith(rootAbs + path.sep)) {
+                        throw new Error(
+                                `[docker] refusing to purge uploads outside root (root=${rootAbs}, target=${uploadsAbs})`,
                         );
                 }
 
@@ -271,6 +529,17 @@ export class DockerManager {
                         console.log(`[docker] purged workspace dir ${sessionAbs}`);
                 } catch (err) {
                         console.error(`[docker] failed to purge workspace ${sessionAbs}:`, (err as Error).message);
+                        throw err;
+                }
+                // Per-session uploads dir lives at <WORKSPACE_ROOT>/.uploads/<sessionId>/
+                // (out-of-workspace TOCTOU isolation — see writeUploadsImpl). Hard
+                // delete must clean this too or uploaded files would persist
+                // forever for a row that no longer exists in D1.
+                try {
+                        await fs.rm(uploadsAbs, { recursive: true, force: true });
+                        console.log(`[docker] purged uploads dir ${uploadsAbs}`);
+                } catch (err) {
+                        console.error(`[docker] failed to purge uploads ${uploadsAbs}:`, (err as Error).message);
                         throw err;
                 }
         }
@@ -828,8 +1097,44 @@ export class DockerManager {
 
         // ── Helpers ─────────────────────────────────────────────────────────────
 
+        /**
+         * Best-effort sweep of the multer tmp directory at startup. If the
+         * backend was OOM-killed or crashed mid-upload, multer's tmp files
+         * (which the upload route would normally rename or unlink) are left
+         * behind forever — harmless to security but accumulates on disk
+         * over crash/restart cycles. Called from reconcile() so the same
+         * startup hook handles both forms of stale state.
+         */
+        async sweepUploadTmp(): Promise<void> {
+                const dir = this.getUploadTmpDir();
+                let entries: Dirent[];
+                try {
+                        entries = await fs.readdir(dir, { withFileTypes: true });
+                } catch (err) {
+                        // ENOENT is expected on a fresh deployment — nothing to sweep.
+                        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+                                console.warn(`[docker] sweepUploadTmp readdir failed for ${dir}: ${(err as Error).message}`);
+                        }
+                        return;
+                }
+                // Filter to plain files. `fs.unlink` on a directory returns
+                // EISDIR — not actionable here and would skew the
+                // success/failure log. No code path in this module creates
+                // subdirs under .tmp-uploads today, but a future regression
+                // (or operator dropping something there) would silently
+                // accumulate without this guard.
+                const fileEntries = entries.filter((e) => e.isFile());
+                if (fileEntries.length === 0) return;
+                const results = await Promise.allSettled(
+                        fileEntries.map((e) => fs.unlink(path.join(dir, e.name))),
+                );
+                const failed = results.filter((r) => r.status === "rejected").length;
+                console.log(`[docker] sweepUploadTmp removed ${fileEntries.length - failed}/${fileEntries.length} stale tmp files`);
+        }
+
         async reconcile(): Promise<void> {
                 console.log("[docker] reconciling session state with Docker…");
+                await this.sweepUploadTmp();
                 const result = await d1Query<{ session_id: string; container_id: string | null }>(
                         "SELECT session_id, container_id FROM sessions WHERE status = 'running'",
                 );
@@ -862,6 +1167,32 @@ export class DockerManager {
 }
 
 // ── Module-level helpers ─────────────────────────────────────────────────────
+
+// Sanitise an uploaded file's original name into a safe basename that's
+// guaranteed to land inside the uploads directory. Strips any path
+// components, restricts the character set, preserves a short extension,
+// and falls back to "file" if everything got stripped. Exported for tests.
+export function sanitiseUploadName(original: string): string {
+        const base = path.basename(original ?? "");
+        // Restrict to a small Latin set so the path is shell-safe (the user
+        // pastes it into the terminal as-is) and filesystem-portable.
+        // Anything else is collapsed to underscore.
+        // Strip leading [._-] so the sanitised name can never start with a
+        // dash. Today the result is always pasted as part of an absolute
+        // path (so a leading "-" wouldn't matter as a shell flag), but a
+        // future caller passing safeBase as a bare argument would otherwise
+        // be vulnerable to flag injection (`-rf.sh` parsed as `-r -f .sh`).
+        const cleaned = base.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^[._-]+/, "");
+        if (!cleaned) return "file";
+        // Preserve the extension up to a max stem length so names stay
+        // readable in `ls` and don't blow past common filesystem limits.
+        const MAX_LEN = 80;
+        if (cleaned.length <= MAX_LEN) return cleaned;
+        const dot = cleaned.lastIndexOf(".");
+        if (dot < 0 || dot >= cleaned.length - 1) return cleaned.slice(0, MAX_LEN);
+        const ext = cleaned.slice(dot).slice(0, 16); // also cap extension
+        return cleaned.slice(0, MAX_LEN - ext.length) + ext;
+}
 
 // Parse the Docker multiplexed stream format used when Tty:false.
 // Frame layout: [type(1)][pad(3)][size(4 BE)] followed by `size` payload bytes.

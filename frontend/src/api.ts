@@ -243,11 +243,39 @@ export async function revokeInvite(code: string): Promise<void> {
         }
 }
 
+// ── File uploads ────────────────────────────────────────────────────────────
+
+/**
+ * Upload one or more files to a session's workspace. The backend writes
+ * them under `<workspace>/uploads/` and returns the in-container paths
+ * the user can pass to Claude CLI.
+ */
+export async function uploadSessionFiles(
+        sessionId: string,
+        files: File[],
+): Promise<{ paths: string[] }> {
+        const fd = new FormData();
+        for (const f of files) fd.append("files", f, f.name);
+        const res = await apiFetch(`/sessions/${sessionId}/files`, {
+                method: "POST",
+                body: fd,
+        });
+        if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.error ?? `Upload failed (${res.status})`);
+        }
+        return res.json() as Promise<{ paths: string[] }>;
+}
+
 // ── Fetch wrapper ───────────────────────────────────────────────────────────
 
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+        // FormData carries its own multipart boundary — letting us set
+        // Content-Type would clobber that and the server would fail to
+        // parse the upload. Skip the JSON default in that case.
+        const isFormData = typeof FormData !== "undefined" && init?.body instanceof FormData;
         const headers: Record<string, string> = {
-                "Content-Type": "application/json",
+                ...(isFormData ? {} : { "Content-Type": "application/json" }),
                 ...(init?.headers as Record<string, string> ?? {}),
         };
         // Captured before the fetch so a concurrent setToken(null) between

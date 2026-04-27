@@ -15,6 +15,7 @@ import {
         listSessions, createSession, deleteSession, stopSession, startSession,
         listTabs, createTab, deleteTab, TabNotFoundError,
         listInvites, createInvite, revokeInvite, InviteRequiredError,
+        uploadSessionFiles,
         SESSION_EXPIRED_EVENT,
         type SessionInfo, type Tab, type Invite,
 } from "./api.js";
@@ -61,7 +62,11 @@ const terminalTabs = document.getElementById("terminal-tabs")!;
 const terminalContainer = document.getElementById("terminal-container")!;
 const emptyState = document.getElementById("empty-state")!;
 const fontSizeBtn = document.getElementById("font-size-btn") as HTMLButtonElement;
-const pasteBtn = document.getElementById("paste-btn") as HTMLButtonElement;
+const actionsBtn = document.getElementById("actions-btn") as HTMLButtonElement;
+const actionsMenu = document.getElementById("actions-menu")!;
+const actionsPasteBtn = document.getElementById("actions-paste-btn") as HTMLButtonElement;
+const actionsAttachBtn = document.getElementById("actions-attach-btn") as HTMLButtonElement;
+const fileInput = document.getElementById("file-input") as HTMLInputElement;
 const pasteModal = document.getElementById("paste-modal")!;
 const pasteTextarea = document.getElementById("paste-textarea") as HTMLTextAreaElement;
 const pasteClipboardBtn = document.getElementById("paste-clipboard-btn") as HTMLButtonElement;
@@ -991,7 +996,7 @@ sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
 document.addEventListener("keydown", (e) => {
         if (e.key !== "Escape") return;
         if (!isMobile()) return;
-        if (invitesModal.classList.contains("open") || pasteModal.classList.contains("open")) return;
+        if (invitesModal.classList.contains("open") || pasteModal.classList.contains("open") || actionsMenu.classList.contains("open")) return;
         if (!mainEl.classList.contains("sidebar-open")) return;
         setSidebarOpen(false);
 });
@@ -1051,8 +1056,9 @@ function setChromeOpen(open: boolean) {
 // Keep the header chrome-toggle's label in sync with the active session
 // and tab. On mobile this IS the only on-screen indication of "where you
 // are" — sessions sidebar and tabs row are both hidden by default.
-// The mobile paste button rides the same visibility lifecycle: nothing
-// to paste into when no session is active, so hide both together.
+// The mobile actions (+) button rides the same visibility lifecycle:
+// nothing to paste into or attach to when no session is active, so hide
+// both together.
 function updateChromeToggle() {
         const s = sessions.find((x) => x.sessionId === activeSessionId);
         // Hide the toggle entirely when there's no session — there's nothing
@@ -1060,11 +1066,11 @@ function updateChromeToggle() {
         // already explains what to do next.
         if (!s) {
                 chromeToggleBtn.hidden = true;
-                pasteBtn.hidden = true;
+                actionsBtn.hidden = true;
                 return;
         }
         chromeToggleBtn.hidden = false;
-        pasteBtn.hidden = false;
+        actionsBtn.hidden = false;
         const activeTab = currentTabs.find((t) => t.tabId === currentActiveTabId);
         // Format: "session › tab". Falls back to just the session name when
         // no tab is active yet (fresh session, between switches). Using a
@@ -1275,6 +1281,9 @@ document.addEventListener("keydown", (e) => {
                 closeInvitesModal();
         } else if (pasteModal.classList.contains("open")) {
                 closePasteModal();
+        } else if (actionsMenu.classList.contains("open")) {
+                closeActionsMenu();
+                actionsBtn.focus();
         }
 });
 
@@ -1319,16 +1328,15 @@ function closePasteModal() {
         pasteModal.setAttribute("aria-hidden", "true");
         pasteTextarea.value = "";
         pasteSendBtn.disabled = true;
-        // Release the pasteBtn in-flight guard. The pasteBtn click handler
-        // intentionally leaves it set on the modal-open path so a second
-        // tap can't kick off a parallel readClipboardText() while the modal
-        // is open; closure of the modal is the signal that the cycle is
-        // truly finished.
+        // Release the runPasteFlow in-flight guard. The flow intentionally
+        // leaves it set on the modal-open path so a second tap can't kick
+        // off a parallel readClipboardText() while the modal is open;
+        // closure of the modal is the signal that the cycle is truly
+        // finished.
         pasteInFlight = false;
-        // Restore focus to the opener; on mobile the chrome drawer is open
-        // when the modal is dismissed, so paste-btn is reachable. If the
-        // opener is somehow gone (drawer collapsed externally), the focus
-        // call is a harmless no-op.
+        // Restore focus to the opener — typically actionsBtn, which is
+        // visible whenever a session is active. If it's somehow gone the
+        // focus call is a harmless no-op.
         pasteOpener?.focus();
         pasteOpener = null;
 }
@@ -1363,7 +1371,7 @@ async function readClipboardText(): Promise<string | null> {
 // finally without depending on a synthetic catch-and-rethrow.
 let pasteInFlight = false;
 
-pasteBtn.addEventListener("click", async () => {
+async function runPasteFlow(opener: HTMLButtonElement) {
         if (pasteInFlight) return;
         pasteInFlight = true;
         let releaseGuard = true;
@@ -1395,19 +1403,19 @@ pasteBtn.addEventListener("click", async () => {
                 // closePasteModal so the second-tap protection covers the
                 // entire modal lifetime, not just the synchronous tail of
                 // this handler.
-                openPasteModal(pasteBtn);
+                openPasteModal(opener);
                 releaseGuard = false;
         } finally {
                 if (releaseGuard) pasteInFlight = false;
         }
-});
+}
 
 pasteClipboardBtn.addEventListener("click", async () => {
         // Disable for the duration of the async readText() so a double-tap on
         // a slow iOS consent chip doesn't queue a stale second resolve. Same
-        // intent as the pasteBtn pasteInFlight guard, just expressed via the
-        // button's own disabled state since there's nowhere visual to look
-        // for in-flight feedback otherwise.
+        // intent as the runPasteFlow pasteInFlight guard, just expressed via
+        // the button's own disabled state since there's nowhere visual to
+        // look for in-flight feedback otherwise.
         pasteClipboardBtn.disabled = true;
         try {
                 const clip = await readClipboardText();
@@ -1462,6 +1470,144 @@ pasteSendBtn.addEventListener("click", () => {
 pasteModal.addEventListener("click", (e) => {
         const target = e.target as HTMLElement;
         if (target.hasAttribute("data-close-modal")) closePasteModal();
+});
+
+// ── Actions (+) menu ────────────────────────────────────────────────────────
+// The mobile "+" button hosts both the existing paste flow and the new
+// file-attach flow. Two-step UX (open menu → pick action) is the cost of
+// supporting more than one command from a single header button.
+
+function openActionsMenu() {
+        actionsMenu.classList.add("open");
+        actionsMenu.setAttribute("aria-hidden", "false");
+        actionsBtn.setAttribute("aria-expanded", "true");
+        actionsPasteBtn.focus();
+}
+
+function closeActionsMenu() {
+        actionsMenu.classList.remove("open");
+        actionsMenu.setAttribute("aria-hidden", "true");
+        actionsBtn.setAttribute("aria-expanded", "false");
+}
+
+actionsBtn.addEventListener("click", () => {
+        if (actionsMenu.classList.contains("open")) {
+                closeActionsMenu();
+                actionsBtn.focus();
+        } else {
+                openActionsMenu();
+        }
+});
+
+actionsMenu.addEventListener("click", (e) => {
+        const target = e.target as HTMLElement;
+        if (target.hasAttribute("data-close-modal")) {
+                closeActionsMenu();
+                actionsBtn.focus();
+        }
+});
+
+actionsPasteBtn.addEventListener("click", async () => {
+        closeActionsMenu();
+        // actionsBtn is the visible widget the user tapped first; route focus
+        // back to it when the paste modal eventually closes.
+        await runPasteFlow(actionsBtn);
+});
+
+actionsAttachBtn.addEventListener("click", () => {
+        closeActionsMenu();
+        // Reset the input so picking the same file twice in a row still
+        // fires `change` (browsers no-op when value is unchanged).
+        fileInput.value = "";
+        fileInput.click();
+});
+
+// ── File attachment flow ────────────────────────────────────────────────────
+// Upload via multipart, then type the in-container paths into the active
+// terminal so the user can keep typing their prompt around them.
+
+const MAX_ATTACH_FILES = 8;        // mirrors backend multer cap
+const MAX_ATTACH_BYTES = 25 * 1024 * 1024; // mirrors backend per-file cap
+
+let attachInFlight = false;
+
+fileInput.addEventListener("change", async () => {
+        const picked = Array.from(fileInput.files ?? []);
+        // Clear immediately so a re-pick of the same files still triggers change.
+        fileInput.value = "";
+        if (picked.length === 0) return;
+        if (attachInFlight) {
+                // Without the toast the picker silently closes and nothing
+                // happens — the prior "Uploading…" toast may have already
+                // scrolled away, so the user has no feedback.
+                showToast("Upload in progress, try again shortly", true);
+                return;
+        }
+        attachInFlight = true;
+        // Every `return` inside this try { } is covered by the finally below
+        // that resets attachInFlight — including the early validation
+        // returns. Don't move attachInFlight = false above the try or
+        // duplicate it on each early return; the finally is the single
+        // release point.
+        try {
+                if (!activeSessionId) {
+                        showToast("No active session", true);
+                        return;
+                }
+                // Snapshot the id before any await so a session-switch or
+                // logout that flips activeSessionId mid-upload doesn't end
+                // up POSTing to /sessions/null/files. Same pattern as
+                // addTab and openSession.
+                const sessionId = activeSessionId;
+                if (picked.length > MAX_ATTACH_FILES) {
+                        showToast(`Too many files (${picked.length}; max ${MAX_ATTACH_FILES})`, true);
+                        return;
+                }
+                const oversized = picked.find((f) => f.size > MAX_ATTACH_BYTES);
+                if (oversized) {
+                        const mb = (oversized.size / (1024 * 1024)).toFixed(1);
+                        showToast(`"${oversized.name}" is ${mb} MB — files must be ≤25 MB`, true);
+                        return;
+                }
+                showToast(`Uploading ${picked.length} file${picked.length === 1 ? "" : "s"}…`);
+                let result: { paths: string[] };
+                try {
+                        result = await uploadSessionFiles(sessionId, picked);
+                } catch (err) {
+                        showToast(`Upload failed: ${(err as Error).message}`, true);
+                        return;
+                }
+                // Re-check identity post-await: if the user switched away
+                // from this session while the upload was in flight, pasting
+                // its paths into whatever terminal they're now looking at
+                // would silently inject foreign-session paths into their
+                // current command. Mirrors the same guard pattern used in
+                // addTab/openSession/closeTab. The files still landed in
+                // session A's workspace; the user can switch back and
+                // reference them manually.
+                if (activeSessionId !== sessionId) {
+                        showToast(`Uploaded ${result.paths.length} to the previous session`);
+                        return;
+                }
+                const term = getActiveTerminal();
+                if (term && result.paths.length > 0) {
+                        // Quote any path containing whitespace — the sanitiser shouldn't
+                        // produce one, but the user pastes this directly into the shell.
+                        // Trailing space lets them keep typing immediately after.
+                        const inserted = result.paths
+                                .map((p) => (/\s/.test(p) ? `"${p}"` : p))
+                                .join(" ") + " ";
+                        term.paste(inserted);
+                        showToast(`Attached ${result.paths.length} file${result.paths.length === 1 ? "" : "s"}`);
+                } else {
+                        // Container isn't running, so there's nothing to type into. The
+                        // files still land in the workspace and survive a /start, so the
+                        // user can reference them later.
+                        showToast(`Uploaded ${result.paths.length}; start the session to use them`);
+                }
+        } finally {
+                attachInFlight = false;
+        }
 });
 
 // ── Auto-refresh ────────────────────────────────────────────────────────────

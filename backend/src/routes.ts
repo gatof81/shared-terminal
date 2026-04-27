@@ -2,8 +2,11 @@
  * routes.ts — REST API routes.
  */
 
-import type { Request, Response } from "express";
+import { randomBytes } from "node:crypto";
+import { promises as fs } from "node:fs";
+import type { NextFunction, Request, Response } from "express";
 import { Router } from "express";
+import multer from "multer";
 import type { AuthedRequest } from "./auth.js";
 import {
         createInvite,
@@ -19,6 +22,7 @@ import {
         UsernameTakenError,
 } from "./auth.js";
 import type { DockerManager } from "./dockerManager.js";
+import { UploadQuotaExceededError } from "./dockerManager.js";
 import { EnvVarValidationError, validateEnvVars } from "./envVarValidation.js";
 import type { RateLimitConfig } from "./rateLimit.js";
 import {
@@ -43,7 +47,7 @@ export function buildRouter(
 
         // ── Auth routes (public) ────────────────────────────────────────────────
 
-        const { loginIp, registerIp, invitesCreateIp, invitesRevokeIp } = createAuthRateLimiters(rateLimitConfig);
+        const { loginIp, registerIp, invitesCreateIp, invitesRevokeIp, fileUploadIp } = createAuthRateLimiters(rateLimitConfig);
         const usernameLimiter = new UsernameRateLimiter(
                 rateLimitConfig.login.usernameMax,
                 rateLimitConfig.login.usernameWindowMs,
@@ -506,6 +510,168 @@ export function buildRouter(
                 }
         });
 
+        // ── File uploads ────────────────────────────────────────────────────────
+        // Drop user-uploaded files into the session's bind-mounted workspace
+        // (under uploads/) so the container — and Claude CLI in it — can read
+        // them.
+        //
+        // Disk storage (NOT memoryStorage) is the load-bearing choice here.
+        // 8 × 25 MB = 200 MB of body per request, and the per-IP rate
+        // limiter (30/5min) doesn't bound concurrency — 30 concurrent
+        // requests with memoryStorage would peak at ~6 GB of heap and
+        // OOM-kill the backend. Disk storage streams bytes through Node
+        // into the OS page cache, then `writeUploads` atomically renames
+        // the temp file into the final per-session location.
+        //
+        // Caps:
+        //   - 25 MB per file: covers the images / PDFs Claude actually
+        //     accepts without forcing chunked upload UI.
+        //   - 8 files per request: enough for a typical "drop a few
+        //     screenshots" gesture, low enough to bound peak disk usage
+        //     per request.
+        const uploadTmpDir = docker.getUploadTmpDir();
+        const upload = multer({
+                storage: multer.diskStorage({
+                        destination: (_req, _file, cb) => {
+                                // Idempotent — the dir often already exists; recursive: true
+                                // makes mkdir a no-op in that case.
+                                fs.mkdir(uploadTmpDir, { recursive: true })
+                                        .then(() => cb(null, uploadTmpDir))
+                                        .catch((err: Error) => cb(err, ""));
+                        },
+                        filename: (_req, _file, cb) => {
+                                // multer-internal name only; writeUploads renames to the
+                                // user-facing `<ts>-<rand>-<safeBase>` form when it moves
+                                // the file into the per-session uploads/ dir.
+                                cb(null, `${Date.now().toString(36)}-${randomBytes(8).toString("hex")}`);
+                        },
+                }),
+                limits: {
+                        fileSize: 25 * 1024 * 1024,
+                        files: 8,
+                        // Endpoint accepts only file parts (named "files"), no
+                        // text fields. Cap fields/parts so a JWT holder can't
+                        // make busboy parse thousands of throwaway parts before
+                        // the file count hits its limit. parts = files (8) + 1
+                        // headroom; fields = 0 means any non-file part trips
+                        // LIMIT_PART_COUNT immediately.
+                        fields: 0,
+                        parts: 9,
+                        fieldNameSize: 64,
+                },
+        });
+
+        // Wrap multer so its async-throw errors land in our handleSessionError-style
+        // responder instead of Express's default HTML 500 page.
+        const handleUploadMiddleware = (req: Request, res: Response, next: NextFunction): void => {
+                upload.array("files", 8)(req, res, (err: unknown) => {
+                        if (!err) { next(); return; }
+                        // When multer aborts mid-batch (e.g. file 8 trips
+                        // LIMIT_FILE_SIZE after files 1–7 already streamed to
+                        // .tmp-uploads/), it auto-removes only the partial
+                        // file for the entry that errored. The earlier
+                        // successfully-streamed files sit in req.files and
+                        // would otherwise leak — at 30 reqs / 5min × 7 ×
+                        // ~25 MB = ~5 GB/window of orphaned tmp files. Clear
+                        // them on every error branch before returning.
+                        const partial = (req.files as Express.Multer.File[] | undefined) ?? [];
+                        if (partial.length > 0) {
+                                void Promise.allSettled(partial.map((f) => fs.unlink(f.path))).then((results) => {
+                                        // Log unlink failures (e.g. EPERM from a misconfigured
+                                        // tmp dir owner) so a real filesystem problem doesn't
+                                        // sit invisible until the next startup sweep. ENOENT
+                                        // is the expected outcome on a never-streamed entry
+                                        // and gets logged too — noise here is a clearer
+                                        // signal than silence.
+                                        for (const r of results) {
+                                                if (r.status === "rejected") {
+                                                        console.warn("[routes] tmp unlink failed:", (r.reason as Error).message);
+                                                }
+                                        }
+                                });
+                        }
+                        if (err instanceof multer.MulterError) {
+                                if (err.code === "LIMIT_FILE_SIZE") {
+                                        res.status(413).json({ error: `Upload rejected: ${err.message}` });
+                                        return;
+                                }
+                                if (err.code === "LIMIT_FILE_COUNT" || err.code === "LIMIT_PART_COUNT") {
+                                        // Both are payload-too-large in spirit: the request
+                                        // exceeds a server cap (8 files / 9 parts). 413 is
+                                        // the spec answer and lets clients distinguish
+                                        // "retry-may-help" 4xxs from this hard cap.
+                                        res.status(413).json({ error: `Upload rejected: ${err.message}` });
+                                        return;
+                                }
+                                if (err.code === "LIMIT_UNEXPECTED_FILE") {
+                                        // Default message ("Unexpected field") doesn't tell the
+                                        // caller what field name we DO expect — name it explicitly.
+                                        res.status(400).json({ error: "Upload rejected: field must be named 'files' (multipart/form-data)" });
+                                        return;
+                                }
+                                res.status(400).json({ error: `Upload rejected: ${err.message}` });
+                                return;
+                        }
+                        console.error("[routes] upload middleware error:", (err as Error).message);
+                        res.status(500).json({ error: "Upload failed" });
+                });
+        };
+
+        // Verify ownership BEFORE multer reads any bytes from the wire. With
+        // up to 200 MB (8 × 25 MB) per request, running the ownership check
+        // in the route handler — i.e. after multer has already buffered
+        // everything into the Node heap — let an authenticated user with a
+        // valid JWT but a foreign session ID cause N × 200 MB allocations
+        // bounded only by the per-IP rate limiter. Doing it here means
+        // unauthorised requests close the socket on the 403 with no body
+        // ever buffered.
+        const requireSessionOwnership = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+                try {
+                        await sessions.assertOwnership(req.params.id, (req as AuthedRequest).userId);
+                        next();
+                } catch (err) {
+                        handleSessionError(err, res);
+                }
+        };
+
+        router.post(
+                "/sessions/:id/files",
+                // Explicit requireAuth so the route doesn't silently inherit
+                // its auth gate from `router.use("/sessions", requireAuth)`
+                // earlier in this file. If a future refactor lifts this
+                // route out of the /sessions prefix, the explicit guard
+                // makes the failure mode a 401 (loud) instead of an
+                // anon-userId reaching assertOwnership and surfacing as a
+                // confusing 404.
+                requireAuth,
+                fileUploadIp,
+                requireSessionOwnership,
+                handleUploadMiddleware,
+                async (req: Request, res: Response) => {
+                        const files = (req.files as Express.Multer.File[] | undefined) ?? [];
+                        try {
+                                if (files.length === 0) {
+                                        res.status(400).json({ error: "no files provided (use 'files' field, multipart/form-data)" });
+                                        return;
+                                }
+                                const paths = await docker.writeUploads(
+                                        req.params.id,
+                                        // diskStorage — pass the on-disk tmp path, not a buffer.
+                                        files.map((f) => ({ originalname: f.originalname, path: f.path })),
+                                );
+                                res.status(201).json({ paths });
+                        } catch (err) {
+                                // No tmp cleanup needed here — writeUploads owns
+                                // its own finally block that unlinks every tmp file
+                                // it didn't move. The empty-files 400 above returns
+                                // before the writeUploads call (and only triggers
+                                // when multer parsed zero files, in which case
+                                // there's nothing on disk to clean either way).
+                                handleSessionError(err, res);
+                        }
+                },
+        );
+
         return router;
 }
 
@@ -564,6 +730,16 @@ function handleSessionError(err: unknown, res: Response): void {
                 res.status(404).json({ error: err.message });
         } else if (err instanceof ForbiddenError) {
                 res.status(403).json({ error: err.message });
+        } else if (err instanceof UploadQuotaExceededError) {
+                // 413 Payload Too Large is the HTTP-spec answer for "request
+                // would push you past a server-enforced size cap".
+                // err.message is intentionally generic — no byte counts —
+                // and the structured used/attempted/quota fields are logged
+                // server-side by writeUploads at the throw site, never
+                // surfaced in the response. Two-layer suppression so a
+                // future tweak to either side doesn't silently leak per-
+                // session usage to the client.
+                res.status(413).json({ error: err.message });
         } else {
                 console.error("[routes] unexpected error:", (err as Error).message);
                 res.status(500).json({ error: "Internal server error" });

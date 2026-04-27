@@ -101,13 +101,15 @@
           <button id="logout-btn">Logout</button>
         </div>
         <button
-          id="paste-btn"
+          id="actions-btn"
           type="button"
-          title="Paste text into the terminal"
-          aria-label="Paste text into the terminal"
+          title="Insert into terminal"
+          aria-label="Insert into terminal"
+          aria-haspopup="menu"
+          aria-expanded="false"
           hidden
         >
-          Paste
+          +
         </button>
       </header>
       <main>
@@ -236,6 +238,39 @@
         </div>
       </div>
     </div>
+
+    <!-- Actions menu — surfaces Paste / Attach below the + button -->
+    <div id="actions-menu" class="modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close-modal></div>
+      <div
+        class="modal-card actions-menu-card"
+        role="menu"
+        aria-labelledby="actions-menu-title"
+      >
+        <div class="modal-header">
+          <h2 id="actions-menu-title">Insert</h2>
+          <button
+            class="modal-close"
+            type="button"
+            aria-label="Close"
+            data-close-modal
+          >
+            ×
+          </button>
+        </div>
+        <button class="actions-menu-item" id="actions-paste-btn" type="button" role="menuitem">
+          <span class="actions-menu-item-title">Paste text</span>
+          <span class="actions-menu-item-hint">Send clipboard or typed text into the terminal</span>
+        </button>
+        <button class="actions-menu-item" id="actions-attach-btn" type="button" role="menuitem">
+          <span class="actions-menu-item-title">Attach file</span>
+          <span class="actions-menu-item-hint">Upload an image, PDF, or any file Claude CLI can read</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Hidden file picker target wired to the Attach action above -->
+    <input id="file-input" type="file" multiple hidden />
 
     <script type="module" src="/src/main.ts"></script>
   </body>
