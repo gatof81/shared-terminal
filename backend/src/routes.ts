@@ -633,13 +633,12 @@ export function buildRouter(
                                 );
                                 res.status(201).json({ paths });
                         } catch (err) {
-                                // writeUploads owns its own tmp cleanup, but a throw
-                                // before it gets called (e.g. the empty-files 400 above
-                                // would only happen if multer ran with no files in the
-                                // form, in which case there's nothing on disk anyway)
-                                // can leave stragglers. Best-effort unlink — failures
-                                // here are not interesting to the caller.
-                                await Promise.allSettled(files.map((f) => fs.unlink(f.path)));
+                                // No tmp cleanup needed here — writeUploads owns
+                                // its own finally block that unlinks every tmp file
+                                // it didn't move. The empty-files 400 above returns
+                                // before the writeUploads call (and only triggers
+                                // when multer parsed zero files, in which case
+                                // there's nothing on disk to clean either way).
                                 handleSessionError(err, res);
                         }
                 },

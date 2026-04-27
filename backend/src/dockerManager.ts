@@ -372,12 +372,22 @@ export class DockerManager {
                                 // now resolves to a different inode than the dir
                                 // we opened above, something swapped it during
                                 // the loop. The rename may have landed in the
-                                // swap target; best-effort unlink (which follows
-                                // the symlink, removing the leaked file) and bail
-                                // before any more writes go through.
+                                // swap target — DO NOT try to unlink finalPath
+                                // here: that path now resolves through the
+                                // attacker-planted symlink, and fs.unlink follows
+                                // links on Linux. A "cleanup" unlink would
+                                // delete whatever host file the symlink targets
+                                // (potentially anywhere the backend's uid can
+                                // reach). The leaked file is the container's
+                                // problem; our obligation is to stop writing,
+                                // which the throw below does.
                                 const liveIno = (await fs.lstat(realUploadsDir)).ino;
                                 if (liveIno !== stableIno) {
-                                        await fs.unlink(finalPath).catch(() => { /* best-effort */ });
+                                        console.error(
+                                                `[docker] TOCTOU: uploads dir for session ${sessionId} was swapped ` +
+                                                `during write (anchor inode ${stableIno}, live ${liveIno}); leaked file ` +
+                                                `at ${finalPath} (NOT unlinking — would follow attacker symlink)`,
+                                        );
                                         throw new Error("uploads dir was swapped during write — possible TOCTOU attack");
                                 }
                                 await fs.chmod(finalPath, 0o644);
