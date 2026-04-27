@@ -281,10 +281,12 @@ Caveats:
   connection options to dockerode and lets docker-modem read the
   URL from the environment. With `DOCKER_HOST` unset it falls back
   to `/var/run/docker.sock`, so the default `docker-compose.yml`
-  stack continues to work untouched. Don't try to reach the proxy
-  by also bind-mounting `/var/run/docker.sock` — the explicit
-  socket option would shadow `DOCKER_HOST` and pin the backend to
-  the daemon.
+  stack continues to work untouched. If you also bind-mount
+  `/var/run/docker.sock` while `DOCKER_HOST` is set, the bind-mount
+  is silently ignored — `DOCKER_HOST` wins because no `socketPath`
+  is forwarded to dockerode at all in that branch. Drop the bind-
+  mount in the proxy overlay (the snippet above already does) so
+  there's nothing left for an RCE to fall back to.
 - Bind-mount paths the backend asks for (`<WORKSPACE_ROOT>/<id>`,
   `.uploads/<id>`) must still exist on the _host_ — the proxy
   forwards container-create requests verbatim, so the daemon
