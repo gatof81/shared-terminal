@@ -9,10 +9,13 @@ COPY backend/ .
 RUN npm run build
 
 FROM node:22-slim AS runtime
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      docker.io \
-    && rm -rf /var/lib/apt/lists/*
-
+# No Docker CLI in the runtime stage on purpose: the backend talks to
+# /var/run/docker.sock through dockerode (HTTP over the unix socket), not
+# through the `docker` CLI. The previous `apt-get install docker.io` line
+# pulled in ~100 MB of containerd/runc/etc. for nothing — every daemon verb
+# the backend needs is a method on dockerode (see backend/src/dockerManager.ts:
+# spawn / inspect / start / stop / kill / remove / exec). The bind-mounted
+# socket is the only ingress to the daemon and stays mounted from compose.
 WORKDIR /app
 COPY backend/package.json backend/package-lock.json ./
 RUN npm ci --omit=dev
