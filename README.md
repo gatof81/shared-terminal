@@ -218,10 +218,17 @@ daemon for: container create, start, stop, kill, remove, inspect,
 exec create + start + resize.
 
 [`tecnativa/docker-socket-proxy`](https://github.com/Tecnativa/docker-socket-proxy)
-is a small HAProxy-based filter that does exactly this. With it,
-even an RCE in the backend can't pull images, mount host paths into
-new containers, or read other containers' configs — only the
-endpoints listed below resolve.
+is a small HAProxy-based filter that does exactly this. With the
+ruleset below, an RCE in the backend can't pull or build images,
+reach the Swarm/network/volume APIs, or touch any daemon surface
+outside `/containers/*` and `/exec/*`. It **can** still create a
+container — including one that bind-mounts the host rootfs
+(`HostConfig.Binds`) — and inspect existing containers (which
+exposes their environment variables). The proxy is blast-radius
+reduction, not a privilege boundary: a determined attacker with
+RCE can still escape via a new privileged container, just not via
+the image/network/volume side of the API. Treat it as one layer of
+defence in depth, paired with the tunnel + Access posture above.
 
 A drop-in `docker-compose.yml` overlay (illustrative — verify the
 endpoint set against the proxy's docs when you adopt it):
@@ -240,7 +247,7 @@ services:
     restart: unless-stopped
     environment:
       # Endpoints required by dockerManager.ts:
-      CONTAINERS: 1 # create, inspect, list
+      CONTAINERS: 1 # create, inspect, start, stop, kill, remove
       EXEC: 1 # exec create + start + resize (WS attach path)
       POST: 1 # POST verbs (create/start/exec/resize/stop/kill)
       DELETE: 1 # DELETE /containers/{id} for container.remove() on
