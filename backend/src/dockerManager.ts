@@ -370,14 +370,17 @@ export class DockerManager {
                         realUploadsDir,
                         nodeFsConstants.O_DIRECTORY | nodeFsConstants.O_NOFOLLOW,
                 );
-                // Stats inherit Node's default (non-BigInt) ino representation.
-                // Narrow to `number` so the strict-equality check against the
-                // post-rename lstat below stays type-aligned — a future
-                // statBig() call would silently break the comparison if this
-                // were the wider `bigint | number` union.
-                let stableIno: number;
+                // Use the bigint stat variant on BOTH sides of the inode
+                // comparison. Default `number` ino loses precision past 2^53,
+                // which btrfs and XFS routinely exceed on large filesystems —
+                // two distinct inodes that differ only in high bits would
+                // collide as `===` after float truncation, silently disabling
+                // the swap-detection sentinel. bigint is both precision-safe
+                // and type-exact (no number/bigint mismatch on the live-side
+                // lstat below).
+                let stableIno: bigint;
                 try {
-                        stableIno = (await dirHandle.stat()).ino;
+                        stableIno = (await dirHandle.stat({ bigint: true })).ino;
                 } catch (err) {
                         await dirHandle.close();
                         throw err;
@@ -430,7 +433,17 @@ export class DockerManager {
                                 // reach). The leaked file is the container's
                                 // problem; our obligation is to stop writing,
                                 // which the throw below does.
-                                const liveIno = (await fs.lstat(realUploadsDir)).ino;
+                                //
+                                // Known false-negative: a swap-and-swap-back
+                                // entirely within this rename→lstat window
+                                // (microseconds) leaves the live inode matching
+                                // the anchor and the file still landed at the
+                                // attacker's chosen path. Not closeable without
+                                // renameat2 (Node lacks bindings); the
+                                // architectural fix is moving the bind mount
+                                // off the parent of uploads/ so the container
+                                // can't replace the entry at all.
+                                const liveIno = (await fs.lstat(realUploadsDir, { bigint: true })).ino;
                                 if (liveIno !== stableIno) {
                                         console.error(
                                                 `[docker] TOCTOU: uploads dir for session ${sessionId} was swapped ` +

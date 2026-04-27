@@ -576,7 +576,19 @@ export function buildRouter(
                         // them on every error branch before returning.
                         const partial = (req.files as Express.Multer.File[] | undefined) ?? [];
                         if (partial.length > 0) {
-                                void Promise.allSettled(partial.map((f) => fs.unlink(f.path)));
+                                void Promise.allSettled(partial.map((f) => fs.unlink(f.path))).then((results) => {
+                                        // Log unlink failures (e.g. EPERM from a misconfigured
+                                        // tmp dir owner) so a real filesystem problem doesn't
+                                        // sit invisible until the next startup sweep. ENOENT
+                                        // is the expected outcome on a never-streamed entry
+                                        // and gets logged too — noise here is a clearer
+                                        // signal than silence.
+                                        for (const r of results) {
+                                                if (r.status === "rejected") {
+                                                        console.warn("[routes] tmp unlink failed:", (r.reason as Error).message);
+                                                }
+                                        }
+                                });
                         }
                         if (err instanceof multer.MulterError) {
                                 if (err.code === "LIMIT_FILE_SIZE") {
@@ -704,8 +716,12 @@ function handleSessionError(err: unknown, res: Response): void {
                 res.status(403).json({ error: err.message });
         } else if (err instanceof UploadQuotaExceededError) {
                 // 413 Payload Too Large is the HTTP-spec answer for "request
-                // would push you past a server-enforced size cap".
-                res.status(413).json({ error: err.message, used: err.used, attempted: err.attempted, quota: err.quota });
+                // would push you past a server-enforced size cap". The
+                // err.message string already carries used/attempted/quota
+                // for display; drop the structured byte-count fields so
+                // we don't surface another user's disk usage if sessions
+                // ever become shared.
+                res.status(413).json({ error: err.message });
         } else {
                 console.error("[routes] unexpected error:", (err as Error).message);
                 res.status(500).json({ error: "Internal server error" });
