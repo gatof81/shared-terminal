@@ -240,9 +240,13 @@ services:
     restart: unless-stopped
     environment:
       # Endpoints required by dockerManager.ts:
-      CONTAINERS: 1 # create, inspect, list, start, stop, kill, remove
+      CONTAINERS: 1 # create, inspect, list
       EXEC: 1 # exec create + start + resize (WS attach path)
-      POST: 1 # POST verbs (create/start/exec/resize)
+      POST: 1 # POST verbs (create/start/exec/resize/stop/kill)
+      DELETE: 1 # DELETE /containers/{id} for container.remove() on
+      # session kill — without this the call is silently swallowed
+      # by dockerManager's try/catch and stopped containers pile up
+      # on the host indefinitely.
       # Default-deny everything else: IMAGES, NETWORKS, VOLUMES,
       # SERVICES, SWARM, NODES, INFO, AUTH, BUILD, COMMIT, etc.
     volumes:
@@ -265,9 +269,15 @@ services:
 
 Caveats:
 
-- The backend uses dockerode's default socket path. Setting
-  `DOCKER_HOST=tcp://…` is the supported override; no code change
-  is required.
+- The backend honours `DOCKER_HOST` when it's set: with that env
+  var present, the `DockerManager` constructor passes no explicit
+  connection options to dockerode and lets docker-modem read the
+  URL from the environment. With `DOCKER_HOST` unset it falls back
+  to `/var/run/docker.sock`, so the default `docker-compose.yml`
+  stack continues to work untouched. Don't try to reach the proxy
+  by also bind-mounting `/var/run/docker.sock` — the explicit
+  socket option would shadow `DOCKER_HOST` and pin the backend to
+  the daemon.
 - Bind-mount paths the backend asks for (`<WORKSPACE_ROOT>/<id>`,
   `.uploads/<id>`) must still exist on the _host_ — the proxy
   forwards container-create requests verbatim, so the daemon
