@@ -70,7 +70,16 @@ describe("writeUploads", () => {
                 dm = makeDocker();
         });
 
-        it("writes each file under <session>/uploads and returns the container path", async () => {
+        // Helper: per-session uploads dir on host, where writeUploads
+        // actually moves files to. Lives at <WORKSPACE_ROOT>/.uploads/
+        // <sessionId>/ — out-of-workspace by design (TOCTOU isolation,
+        // see writeUploadsImpl). spawn() bind-mounts this dir read-only
+        // into the container at /home/developer/workspace/uploads/, but
+        // these tests never construct containers — they only exercise
+        // host-side state.
+        const uploadsHostDir = (sid: string) => path.join(WORKSPACE_ROOT, ".uploads", sid);
+
+        it("writes each file under .uploads/<session>/ and returns the in-container path", async () => {
                 // Two small files, well under the 10 KB quota.
                 const a = await makeTmpFile(dm, "alpha.png", "alpha-bytes");
                 const b = await makeTmpFile(dm, "beta.txt", "beta-bytes");
@@ -84,8 +93,7 @@ describe("writeUploads", () => {
                 // The container paths' filenames map directly onto the
                 // host-side basenames — useful guarantee for tests that want
                 // to spot-check on-disk state.
-                const uploadsDir = path.join(WORKSPACE_ROOT, "session-happy", "uploads");
-                const onDisk = await fs.readdir(uploadsDir);
+                const onDisk = await fs.readdir(uploadsHostDir("session-happy"));
                 expect(onDisk).toHaveLength(2);
                 for (const p of result) {
                         expect(onDisk).toContain(path.basename(p));
@@ -104,9 +112,7 @@ describe("writeUploads", () => {
                 const [containerPath] = await dm.writeUploads("session-content", [f]);
                 expect(containerPath).toBeDefined();
                 const hostPath = path.join(
-                        WORKSPACE_ROOT,
-                        "session-content",
-                        "uploads",
+                        uploadsHostDir("session-content"),
                         path.basename(containerPath as string),
                 );
                 const written = await fs.readFile(hostPath);
@@ -126,8 +132,7 @@ describe("writeUploads", () => {
                 expect(tmpEntries).toHaveLength(0);
 
                 // Nothing landed in the session's uploads dir.
-                const uploadsDir = path.join(WORKSPACE_ROOT, "session-quota", "uploads");
-                const onDisk = await fs.readdir(uploadsDir).catch(() => [] as string[]);
+                const onDisk = await fs.readdir(uploadsHostDir("session-quota")).catch(() => [] as string[]);
                 expect(onDisk).toHaveLength(0);
         });
 
@@ -143,9 +148,7 @@ describe("writeUploads", () => {
                 );
 
                 // First file is still in place; only the second was rejected.
-                const onDisk = await fs.readdir(
-                        path.join(WORKSPACE_ROOT, "session-cumulative", "uploads"),
-                );
+                const onDisk = await fs.readdir(uploadsHostDir("session-cumulative"));
                 expect(onDisk).toHaveLength(1);
         });
 
@@ -172,19 +175,20 @@ describe("writeUploads", () => {
                 );
 
                 // Exactly one file on disk under uploads/.
-                const onDisk = await fs.readdir(
-                        path.join(WORKSPACE_ROOT, "session-concurrent", "uploads"),
-                );
+                const onDisk = await fs.readdir(uploadsHostDir("session-concurrent"));
                 expect(onDisk).toHaveLength(1);
                 // Both tmp files cleaned up — winner via rename, loser via cleanupTmp.
                 const tmpEntries = await fs.readdir(dm.getUploadTmpDir());
                 expect(tmpEntries).toHaveLength(0);
         });
 
-        it("rejects when the resolved session path escapes WORKSPACE_ROOT", async () => {
-                // sessionId starts with .. so path.join collapses it one level
-                // above WORKSPACE_ROOT — the lexical containment check should
-                // catch it before any fs op runs.
+        it("rejects when the resolved session path escapes the .uploads/ namespace", async () => {
+                // sessionId "../escape" makes path.join collapse one level —
+                // path.join(WORKSPACE_ROOT, ".uploads", "../escape") is
+                // <WORKSPACE_ROOT>/escape, still under WORKSPACE_ROOT but
+                // outside .uploads/. The containment check below is scoped to
+                // .uploads/ specifically (NOT just WORKSPACE_ROOT) so the
+                // traversal is caught before any fs op runs.
                 const f = await makeTmpFile(dm, "evil.txt", "payload");
                 await expect(dm.writeUploads("../escape", [f])).rejects.toThrow(/unsafe session path/);
                 // Tmp file cleaned up on the bail-out.
@@ -196,7 +200,7 @@ describe("writeUploads", () => {
                 const result = await dm.writeUploads("session-empty", []);
                 expect(result).toEqual([]);
                 // Should not even mkdir the uploads dir for an empty batch.
-                const sessionDir = path.join(WORKSPACE_ROOT, "session-empty");
+                const sessionDir = uploadsHostDir("session-empty");
                 const exists = await fs.stat(sessionDir).then(() => true, () => false);
                 expect(exists).toBe(false);
         });

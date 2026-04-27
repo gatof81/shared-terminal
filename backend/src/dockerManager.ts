@@ -6,7 +6,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { constants as nodeFsConstants, type Dirent } from "node:fs";
+import type { Dirent } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Duplex } from "node:stream";
@@ -137,6 +137,23 @@ export class DockerManager {
                 await fs.mkdir(workspaceDir, { recursive: true });
                 await this.ensureWorkspaceOwnership(workspaceDir);
 
+                // Pre-create the per-session uploads dir at its OUT-OF-WORKSPACE
+                // location and bind-mount it read-only into the container at
+                // /home/developer/workspace/uploads/. Critical TOCTOU defence:
+                // because the container's view is a mount point, the container
+                // can NOT replace, rename, or rmdir the uploads/ entry from
+                // inside (the kernel rejects any modification to a mount point
+                // from the mount user's namespace). Read-only also stops the
+                // container from writing/modifying uploaded files, so an
+                // attacker can't poison files between writes — combined with
+                // writeUploads' atomic rename from .tmp-uploads/ into
+                // .uploads/<sessionId>/, the symlink-swap attack window the
+                // older in-workspace layout had is closed structurally.
+                const uploadsHostDir = path.join(WORKSPACE_ROOT, ".uploads", sessionId);
+                await fs.mkdir(uploadsHostDir, { recursive: true });
+                // No chown — backend (typically root) owns the dir, container
+                // reads via the read-only mount; no need for it to own anything.
+
                 const container = await this.docker.createContainer({
                         Image: SESSION_IMAGE,
                         name: meta.containerName,
@@ -149,7 +166,10 @@ export class DockerManager {
                                 ...envArray,
                         ],
                         HostConfig: {
-                                Binds: [`${WORKSPACE_ROOT}/${sessionId}:/home/developer/workspace`],
+                                Binds: [
+                                        `${WORKSPACE_ROOT}/${sessionId}:/home/developer/workspace`,
+                                        `${uploadsHostDir}:/home/developer/workspace/uploads:ro`,
+                                ],
                                 Memory: 2 * 1024 * 1024 * 1024,
                                 NanoCpus: 2_000_000_000,
                                 RestartPolicy: { Name: "unless-stopped" },
@@ -290,83 +310,62 @@ export class DockerManager {
                 sessionId: string,
                 files: ReadonlyArray<{ originalname: string; path: string }>,
         ): Promise<string[]> {
-                const uploadsHostDir = path.join(WORKSPACE_ROOT, sessionId, "uploads");
-                // Lexical sanity check (matches the same belt in purgeWorkspace).
-                // assertOwnership already constrains sessionId to a UUID from D1,
-                // but if a future refactor ever lets a path-traversal-shaped
-                // sessionId reach here we must not even mkdir outside WORKSPACE_ROOT.
-                const rootAbs = path.resolve(WORKSPACE_ROOT);
+                // Architectural TOCTOU fix: the uploads directory lives at
+                // <WORKSPACE_ROOT>/.uploads/<sessionId>/ — OUTSIDE the
+                // container's bind-mount tree. spawn() bind-mounts this dir
+                // read-only into the container at /home/developer/workspace/
+                // uploads/, so:
+                //   1. The container CANNOT remove or replace /home/developer/
+                //      workspace/uploads (it's a mount point — kernel rejects
+                //      modification from the mount user's namespace).
+                //   2. The container CANNOT write into uploads/ (read-only mount).
+                //   3. The container's bind mount on /home/developer/workspace/
+                //      doesn't reach .uploads/ on the host, so nothing inside
+                //      the container can plant symlinks at the upload destination.
+                // The earlier in-workspace layout needed a stack of defences
+                // (realpath, O_DIRECTORY|O_NOFOLLOW, pre+post inode sentinels)
+                // because the container could replace uploads/ with a symlink
+                // and race rename(2). With the new layout that whole class of
+                // attacks is structurally impossible, so the per-rename TOCTOU
+                // machinery is gone. The lexical containment check stays as a
+                // belt against any future regression that lets a non-UUID
+                // sessionId reach this method.
+                const uploadsHostDir = path.join(WORKSPACE_ROOT, ".uploads", sessionId);
+                // Containment check: must resolve under <WORKSPACE_ROOT>/.uploads/,
+                // not just under WORKSPACE_ROOT. A traversal-shaped sessionId
+                // like "../escape" would otherwise let path.join collapse to
+                // <WORKSPACE_ROOT>/escape — still under WORKSPACE_ROOT but
+                // outside the per-session uploads namespace.
+                const uploadsBaseAbs = path.resolve(WORKSPACE_ROOT, ".uploads");
                 const uploadsHostDirAbs = path.resolve(uploadsHostDir);
-                if (!uploadsHostDirAbs.startsWith(`${rootAbs}${path.sep}`)) {
+                if (!uploadsHostDirAbs.startsWith(`${uploadsBaseAbs}${path.sep}`)) {
                         await this.cleanupTmp(files);
-                        throw new Error(`unsafe session path resolved outside ${rootAbs}: ${uploadsHostDirAbs}`);
+                        throw new Error(`unsafe session path resolved outside ${uploadsBaseAbs}: ${uploadsHostDirAbs}`);
                 }
-                // mkdir-before-realpath note: the realpath check below catches
-                // a symlink-replaced uploads/ (the only entry the container
-                // can swap, since `<sessionId>/` is the bind-mount target —
-                // not removable from inside the container). For the broader
-                // "container replaces `<sessionId>/` itself" attack to land
-                // here, the attacker would need to pre-create that entry on
-                // the host before mkdir runs — but sessionId is a UUID minted
-                // in D1 and gated by assertOwnership in routes.ts, so a
-                // foreign attacker can't guess the path and the legitimate
-                // owner can't reach the host filesystem outside their bind
-                // mount. mkdir is therefore safe to run before realpath.
+                // spawn() pre-creates this dir, but a writeUploads call for a
+                // session that has been spawned but not running (or for one
+                // started before this code shipped) needs us to create it
+                // here too. recursive: true is a no-op when it already exists.
                 await fs.mkdir(uploadsHostDir, { recursive: true });
-
-                // Lexical resolve() above is purely string manipulation — it
-                // does NOT follow symlinks. A container owns its bind-mounted
-                // workspace and could replace `uploads/` with a symlink to /etc
-                // before we got here; the lexical check would still pass and
-                // a subsequent chown would change ownership of the link target.
-                // fs.realpath canonicalises through the filesystem, so a
-                // mis-pointed symlink shows up as a real-path outside
-                // WORKSPACE_ROOT and we bail before touching anything.
-                const rootReal = await fs.realpath(WORKSPACE_ROOT);
-                const realUploadsDir = await fs.realpath(uploadsHostDir);
-                if (!realUploadsDir.startsWith(`${rootReal}${path.sep}`)) {
-                        await this.cleanupTmp(files);
-                        throw new Error(`uploads dir escaped workspace root: ${realUploadsDir}`);
-                }
-                // Deliberately NOT chowning realUploadsDir to the workspace user.
-                // Even with uploads/ owned by root and the per-file chown below,
-                // the container still owns the parent `<sessionId>/` directory
-                // (set by spawn-time ensureWorkspaceOwnership) — POSIX rename(2)
-                // requires write on the source-parent only, NOT ownership of the
-                // entry being renamed, so the container can do
-                //   `mv uploads uploads.bak; ln -s /etc uploads`
-                // mid-loop and have the next rename(2) re-resolve the path
-                // string into /etc. This is a TOCTOU residue we can't fully
-                // close without openat/renameat (Node lacks bindings) or a
-                // separate non-bind-mounted uploads dir (architectural change).
-                // Mitigation: hold uploadsHostDir open via O_DIRECTORY|
-                // O_NOFOLLOW so a freshly-replaced symlink is detected at fd
-                // open time, and re-lstat the dir entry after each rename to
-                // detect a swap during the loop. Window narrows from "the
-                // entire upload" to "the gap between the lstat and the next
-                // rename", on the order of microseconds.
 
                 // Per-session disk-quota check: count current bytes in
                 // uploads/ + bytes about to be added; reject before moving any
                 // tmp file if the cap would be exceeded. Sum-of-statSize is a
                 // tight enough approximation — uploads/ is always one level
                 // deep (writeUploads only writes flat) so no recursion.
+                // lstat (not stat) so any stale symlink left over from the
+                // previous in-workspace layout — or one a future bug plants
+                // here — counts as zero bytes (st.isFile() is false for
+                // symlinks) rather than inflating the quota with the
+                // target's size.
                 let usedBytes = 0;
                 try {
-                        const existing = await fs.readdir(realUploadsDir);
+                        const existing = await fs.readdir(uploadsHostDir);
                         for (const entry of existing) {
-                                // lstat (not stat) so a container-planted symlink in
-                                // its own uploads/ pointing at e.g. /var/log/syslog
-                                // is excluded from the quota count entirely —
-                                // st.isFile() returns false for symlinks, so they
-                                // contribute zero bytes rather than inflating with
-                                // the target's size and letting the container self-
-                                // DoS its own quota.
-                                const st = await fs.lstat(path.join(realUploadsDir, entry));
+                                const st = await fs.lstat(path.join(uploadsHostDir, entry));
                                 if (st.isFile()) usedBytes += st.size;
                         }
                 } catch (err) {
-                        // ENOENT is fine — fresh session with no uploads yet.
                         if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
                 }
                 let attemptedBytes = 0;
@@ -376,8 +375,8 @@ export class DockerManager {
                 }
                 if (usedBytes + attemptedBytes > UPLOAD_QUOTA_BYTES) {
                         // Log the detail server-side; the thrown error carries
-                        // a generic message so the byte counts don't ride out
-                        // in the 413 body to the client.
+                        // a generic message so byte counts don't ride out in
+                        // the 413 body to the client.
                         console.warn(
                                 `[docker] upload quota rejected for session ${sessionId}: ` +
                                 `${usedBytes} used + ${attemptedBytes} attempted > ${UPLOAD_QUOTA_BYTES} cap`,
@@ -386,123 +385,49 @@ export class DockerManager {
                         throw new UploadQuotaExceededError(usedBytes, attemptedBytes, UPLOAD_QUOTA_BYTES);
                 }
 
-                // Open the dir as a stable fd. O_NOFOLLOW makes this fail if
-                // realUploadsDir is already a symlink (defence-in-depth on
-                // top of the realpath check); the captured inode is the
-                // anchor we compare against after each rename to catch a
-                // swap performed during the loop.
-                // O_DIRECTORY is Linux-only — undefined on macOS. The
-                // bitwise OR would silently drop it on dev macOS hosts and
-                // open the path without the "must-be-a-directory" check.
-                // Production target is Linux per CLAUDE.md, but `?? 0` keeps
-                // the fallback explicit so a dev iterating on macOS doesn't
-                // hit a confusing later-stage stat failure instead.
-                const dirHandle = await fs.open(
-                        realUploadsDir,
-                        (nodeFsConstants.O_DIRECTORY ?? 0) | nodeFsConstants.O_NOFOLLOW,
-                );
-                // Use the bigint stat variant on BOTH sides of the inode
-                // comparison. Default `number` ino loses precision past 2^53,
-                // which btrfs and XFS routinely exceed on large filesystems —
-                // two distinct inodes that differ only in high bits would
-                // collide as `===` after float truncation, silently disabling
-                // the swap-detection sentinel. bigint is both precision-safe
-                // and type-exact (no number/bigint mismatch on the live-side
-                // lstat below).
-                let stableIno: bigint;
-                try {
-                        stableIno = (await dirHandle.stat({ bigint: true })).ino;
-                } catch (err) {
-                        await dirHandle.close();
-                        throw err;
-                }
-
                 const containerPaths: string[] = [];
                 const now = Date.now().toString(36);
-                // Track which multer tmp files we've successfully moved so the
-                // finally block can clean up anything we didn't get to.
+                // Track which multer tmp files we've successfully moved so
+                // the finally block can clean up anything we didn't get to.
                 const remaining = new Set(files.map((f) => f.path));
                 try {
                         for (const file of files) {
                                 const safeBase = sanitiseUploadName(file.originalname);
-                                // Random suffix on top of the timestamp so two uploads
-                                // landing in the same millisecond don't collide.
+                                // Random suffix on top of the timestamp so two
+                                // uploads landing in the same millisecond don't
+                                // collide.
                                 const suffix = randomBytes(3).toString("hex");
                                 const filename = `${now}-${suffix}-${safeBase}`;
-                                const finalPath = path.join(realUploadsDir, filename);
+                                const finalPath = path.join(uploadsHostDir, filename);
                                 const finalPathAbs = path.resolve(finalPath);
-                                if (!finalPathAbs.startsWith(`${realUploadsDir}${path.sep}`)) {
-                                        throw new Error(`unsafe upload path resolved outside ${realUploadsDir}: ${finalPathAbs}`);
+                                // Defence-in-depth per-file containment: the
+                                // sanitiser already strips path separators so
+                                // sanitiseUploadName(x) can never escape the
+                                // dir, but resolve+startsWith is one extra
+                                // line of insurance against a future regression
+                                // in the sanitiser.
+                                if (!finalPathAbs.startsWith(`${uploadsHostDirAbs}${path.sep}`)) {
+                                        throw new Error(`unsafe upload path resolved outside ${uploadsHostDirAbs}: ${finalPathAbs}`);
                                 }
-                                // Apply final mode + ownership BEFORE the rename, on
-                                // the multer tmp file in .tmp-uploads/ (root-owned,
-                                // not bind-mounted into any container). rename(2)
-                                // moves the inode in place — mode and owner are
-                                // preserved at the destination — so any post-rename
-                                // chmod/chown that would re-resolve through the
-                                // attacker-planted symlink is unnecessary. Order
-                                // matters: doing chmod/chown after rename leaves a
-                                // residual TOCTOU window where a swap mid-loop
-                                // would have those calls follow the symlink and
-                                // alter permissions of arbitrary host files.
+                                // chmod + chown the multer tmp file BEFORE the
+                                // rename. rename(2) preserves mode + owner at
+                                // the destination, so the file lands in
+                                // uploads/ with mode 0644 owned by uid 1000
+                                // (the container user). With the read-only
+                                // bind mount the container can read but not
+                                // modify the file — chowning to uid 1000 is
+                                // mostly cosmetic now but keeps the in-
+                                // container `ls -l` output consistent with the
+                                // rest of the workspace.
                                 await fs.chmod(file.path, 0o644);
                                 await this.chownToWorkspaceUser(file.path);
-                                // Pre-rename TOCTOU check. Without this, file 1
-                                // of every batch is unprotected: the dir-fd
-                                // anchor was set before the loop started, and
-                                // the first rename could land in a swapped
-                                // symlink before the post-rename lstat catches
-                                // it. Pairing pre+post checks narrows the
-                                // attack window to the microsecond gap between
-                                // the pre-check and the rename for every file.
-                                const preIno = (await fs.lstat(realUploadsDir, { bigint: true })).ino;
-                                if (preIno !== stableIno) {
-                                        console.error(
-                                                `[docker] TOCTOU (pre-rename): uploads dir for session ${sessionId} ` +
-                                                `was swapped before write (anchor inode ${stableIno}, live ${preIno})`,
-                                        );
-                                        throw new Error("uploads dir was swapped during write — possible TOCTOU attack");
-                                }
-                                // Atomic move within the same filesystem (multer's
-                                // tmp dir lives under WORKSPACE_ROOT — see routes.ts).
+                                // Atomic same-filesystem move from the multer
+                                // tmp dir to the per-session uploads dir.
                                 await fs.rename(file.path, finalPath);
                                 remaining.delete(file.path);
-                                // TOCTOU sentinel: if the entry at realUploadsDir
-                                // now resolves to a different inode than the dir
-                                // we opened above, something swapped it during
-                                // the loop. The rename may have landed in the
-                                // swap target — DO NOT try to unlink finalPath
-                                // here: that path now resolves through the
-                                // attacker-planted symlink, and fs.unlink follows
-                                // links on Linux. A "cleanup" unlink would
-                                // delete whatever host file the symlink targets
-                                // (potentially anywhere the backend's uid can
-                                // reach). The leaked file is the container's
-                                // problem; our obligation is to stop writing,
-                                // which the throw below does.
-                                //
-                                // Known false-negative: a swap-and-swap-back
-                                // entirely within this rename→lstat window
-                                // (microseconds) leaves the live inode matching
-                                // the anchor and the file still landed at the
-                                // attacker's chosen path. Not closeable without
-                                // renameat2 (Node lacks bindings); the
-                                // architectural fix is moving the bind mount
-                                // off the parent of uploads/ so the container
-                                // can't replace the entry at all.
-                                const liveIno = (await fs.lstat(realUploadsDir, { bigint: true })).ino;
-                                if (liveIno !== stableIno) {
-                                        console.error(
-                                                `[docker] TOCTOU: uploads dir for session ${sessionId} was swapped ` +
-                                                `during write (anchor inode ${stableIno}, live ${liveIno}); leaked file ` +
-                                                `at ${finalPath} (NOT unlinking — would follow attacker symlink)`,
-                                        );
-                                        throw new Error("uploads dir was swapped during write — possible TOCTOU attack");
-                                }
                                 containerPaths.push(`/home/developer/workspace/uploads/${filename}`);
                         }
                 } finally {
-                        await dirHandle.close();
                         await this.cleanupTmp([...remaining].map((p) => ({ originalname: "", path: p })));
                 }
                 return containerPaths;
@@ -585,11 +510,17 @@ export class DockerManager {
         async purgeWorkspace(sessionId: string): Promise<void> {
                 const rootAbs = path.resolve(WORKSPACE_ROOT);
                 const sessionAbs = path.resolve(path.join(WORKSPACE_ROOT, sessionId));
+                const uploadsAbs = path.resolve(path.join(WORKSPACE_ROOT, ".uploads", sessionId));
 
-                // Safety: the resolved session dir must be a strict child of rootAbs.
+                // Safety: both resolved dirs must be strict children of rootAbs.
                 if (!sessionAbs.startsWith(rootAbs + path.sep)) {
                         throw new Error(
                                 `[docker] refusing to purge workspace outside root (root=${rootAbs}, target=${sessionAbs})`,
+                        );
+                }
+                if (!uploadsAbs.startsWith(rootAbs + path.sep)) {
+                        throw new Error(
+                                `[docker] refusing to purge uploads outside root (root=${rootAbs}, target=${uploadsAbs})`,
                         );
                 }
 
@@ -598,6 +529,17 @@ export class DockerManager {
                         console.log(`[docker] purged workspace dir ${sessionAbs}`);
                 } catch (err) {
                         console.error(`[docker] failed to purge workspace ${sessionAbs}:`, (err as Error).message);
+                        throw err;
+                }
+                // Per-session uploads dir lives at <WORKSPACE_ROOT>/.uploads/<sessionId>/
+                // (out-of-workspace TOCTOU isolation — see writeUploadsImpl). Hard
+                // delete must clean this too or uploaded files would persist
+                // forever for a row that no longer exists in D1.
+                try {
+                        await fs.rm(uploadsAbs, { recursive: true, force: true });
+                        console.log(`[docker] purged uploads dir ${uploadsAbs}`);
+                } catch (err) {
+                        console.error(`[docker] failed to purge uploads ${uploadsAbs}:`, (err as Error).message);
                         throw err;
                 }
         }
