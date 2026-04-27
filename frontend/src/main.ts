@@ -1557,7 +1557,7 @@ fileInput.addEventListener("change", async () => {
                 // Snapshot the id before any await so a session-switch or
                 // logout that flips activeSessionId mid-upload doesn't end
                 // up POSTing to /sessions/null/files. Same pattern as
-                // addTab — see main.ts:741-style snapshot in this file.
+                // addTab and openSession.
                 const sessionId = activeSessionId;
                 if (picked.length > MAX_ATTACH_FILES) {
                         showToast(`Too many files (${picked.length}; max ${MAX_ATTACH_FILES})`, true);

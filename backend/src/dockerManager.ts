@@ -253,9 +253,11 @@ export class DockerManager {
          * monotonic timestamp + short random suffix so concurrent uploads
          * of the same name don't clobber each other. The host path of
          * every write is `path.resolve()`d and verified to sit inside the
-         * uploads directory before opening the file — the sanitiser
-         * already strips path separators, but the resolve-and-check is a
-         * defence-in-depth belt against a future regression.
+         * uploads directory before any rename — the sanitiser already
+         * strips path separators, but the resolve-and-check is a defence-
+         * in-depth belt against a future regression. Concurrent calls for
+         * the same session are serialised via `uploadLocks` so the quota
+         * check (read-then-write) can't race itself.
          */
         async writeUploads(
                 sessionId: string,
@@ -289,7 +291,7 @@ export class DockerManager {
                 files: ReadonlyArray<{ originalname: string; path: string }>,
         ): Promise<string[]> {
                 const uploadsHostDir = path.join(WORKSPACE_ROOT, sessionId, "uploads");
-                // Lexical sanity check (matches purgeWorkspace at L306).
+                // Lexical sanity check (matches the same belt in purgeWorkspace).
                 // assertOwnership already constrains sessionId to a UUID from D1,
                 // but if a future refactor ever lets a path-traversal-shaped
                 // sessionId reach here we must not even mkdir outside WORKSPACE_ROOT.
@@ -355,9 +357,11 @@ export class DockerManager {
                         for (const entry of existing) {
                                 // lstat (not stat) so a container-planted symlink in
                                 // its own uploads/ pointing at e.g. /var/log/syslog
-                                // counts as the link's own bytes (~80) rather than
-                                // the target's size — otherwise the container could
-                                // self-DoS by inflating its perceived quota usage.
+                                // is excluded from the quota count entirely —
+                                // st.isFile() returns false for symlinks, so they
+                                // contribute zero bytes rather than inflating with
+                                // the target's size and letting the container self-
+                                // DoS its own quota.
                                 const st = await fs.lstat(path.join(realUploadsDir, entry));
                                 if (st.isFile()) usedBytes += st.size;
                         }
