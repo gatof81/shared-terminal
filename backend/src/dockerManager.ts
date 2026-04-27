@@ -1189,15 +1189,15 @@ export class DockerManager {
                         }
                         try {
                                 const info = await this.docker.getContainer(row.container_id).inspect();
-                                if (info.State.Running) {
-                                        // reconcile() runs on every backend boot, which is
-                                        // the most-likely deploy moment. Surface pre-#15
-                                        // containers here too so an operator who only
-                                        // restarts the backend (without recycling sessions)
-                                        // sees the warn at startup, not just on the next
-                                        // /start.
-                                        this.warnIfPreHardened(row.session_id, row.container_id, info.HostConfig);
-                                } else {
+                                // reconcile() runs on every backend boot, which is the
+                                // most-likely deploy moment. Surface pre-#15 containers
+                                // here regardless of running state — operators who stop
+                                // all sessions before deploying still need the warning,
+                                // since the next `/start` would be the only other place
+                                // it'd surface and that requires the operator to remember
+                                // to start each one.
+                                this.warnIfPreHardened(row.session_id, row.container_id, info.HostConfig);
+                                if (!info.State.Running) {
                                         await this.sessions.updateStatus(row.session_id, "stopped");
                                 }
                         } catch (err) {
