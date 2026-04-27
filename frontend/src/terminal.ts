@@ -282,18 +282,25 @@ export function openTerminalSession(opts: {
                 const deltaPx = lastTouchY - y;
                 const lines = Math.trunc(deltaPx / cellH);
 
-                // Once the gesture is classified as a scroll, keep suppressing
-                // xterm's drag-selection handler on every subsequent frame —
-                // including sub-cell frames where lines === 0. Without this,
-                // slow swipes leave an unguarded window at the start.
-                if (touchIsScroll) ev.preventDefault();
+                // Suppress xterm's drag-selection handler on every frame the
+                // gesture qualifies as a scroll — either because it's already
+                // been classified as one (touchIsScroll) or because *this* frame
+                // crossed at least one cell (lines !== 0) and is about to flip
+                // the flag. A single call covers both paths:
+                //   - First qualifying frame: lines !== 0 trips the OR;
+                //     touchIsScroll flips below.
+                //   - Subsequent frames once classified: touchIsScroll trips
+                //     the OR, including sub-cell frames where lines === 0.
+                // Previously this was two separate ev.preventDefault() calls
+                // straddling the `if (lines === 0)` early return — correct
+                // (preventDefault is idempotent) but the duplication looked
+                // suspicious. touch-action:none is set in CSS, so calling
+                // preventDefault here doesn't trigger a passive-listener
+                // warning even on the first qualifying frame.
+                if (touchIsScroll || lines !== 0) ev.preventDefault();
                 if (lines === 0) return;
 
                 touchIsScroll = true;
-                // Prevent xterm from treating the drag as a text-selection gesture
-                // (touch-action:none is set in CSS, so this won't cause a passive
-                // event listener warning).
-                ev.preventDefault();
 
                 if (term.buffer.active.type === "alternate") {
                         // Cap the burst so a fast flick doesn't fire 100+ arrows
