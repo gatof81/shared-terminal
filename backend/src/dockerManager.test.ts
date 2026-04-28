@@ -732,6 +732,19 @@ describe("DockerManager constructor", () => {
 	// docker-modem behaviour, not DockerManager behaviour, so the FakeDocker
 	// shim used by every other test would defeat the assertion.
 	//
+	// FRAGILITY NOTE: both branches assert on `docker.modem.socketPath`,
+	// which is a docker-modem private field — not part of dockerode's
+	// public surface. A future docker-modem version that renames or
+	// lazily-initialises that field would break these tests with no
+	// behavioural change in DockerManager. If they fail after a `npm
+	// update` of dockerode/docker-modem, look for the field rename in
+	// node_modules/docker-modem/lib/modem.js BEFORE assuming
+	// DockerManager regressed. The tradeoff is intentional: the only
+	// equivalent we could observe through dockerode's public API would
+	// involve actually opening a connection, which would either need a
+	// real Docker daemon or a TCP fixture per test — both heavier and
+	// slower than this targeted private-field read.
+	//
 	// process.env.DOCKER_HOST is process-global state, so save and restore
 	// it around each case. A leak into other suites in the same vitest
 	// run could change the implicit constructor branch the harness exercises
