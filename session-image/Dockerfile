@@ -26,7 +26,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       nano \
       htop \
       tree \
-      sudo \
       locales \
     && rm -rf /var/lib/apt/lists/*
 
@@ -133,9 +132,18 @@ RUN set -eux; \
 # mount), the build will still proceed via `|| true` but the next step's
 # "UID 1000 is not unique" failure will at least come with the actual
 # root cause printed in the build log.
+# No sudo / no extra groups: the session user runs unprivileged. The image
+# previously shipped `sudo` + `NOPASSWD:ALL` for in-tab `apt-get install …`
+# convenience, but on a host bind mount that's a footgun — `sudo chown
+# -R 0:0 /home/developer/workspace` rewrites host-side file ownership to
+# root through the UID-mapped mount (issue #15). Removing the sudo package
+# entirely also drops /usr/bin/sudo as a setuid binary, which combined
+# with the runtime no-new-privileges flag (see dockerManager.ts) means
+# there is no path to elevation even if a future CVE in a setuid helper
+# surfaces. Users who genuinely need elevated tools should rebuild with
+# a custom image.
 RUN userdel -r ubuntu || true \
-    && useradd -m -s /bin/bash -u 1000 -U -G sudo developer \
-    && echo "developer ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/developer
+    && useradd -m -s /bin/bash -u 1000 -U developer
 
 
 USER developer

@@ -605,6 +605,116 @@ describe("DockerManager.reconcile", () => {
 		expect(sessions.setContainerId).not.toHaveBeenCalled();
 		expect(sessions.updateStatus).toHaveBeenCalledWith("s1", "stopped");
 	});
+
+	// Issue-#15 hardening migration. The warn fires for any pre-hardened
+	// container reconcile sees, regardless of running state — operators who
+	// stopped sessions before redeploying still need the heads-up at boot.
+	function makeDockerWithInspectResult(info: {
+		State: { Running: boolean };
+		HostConfig: { CapDrop?: string[]; SecurityOpt?: string[] };
+	}): { dm: DockerManager; sessions: SessionManager } {
+		const sessions = makeFakeSessions();
+		const dm = new DockerManager(sessions);
+		(dm as unknown as { docker: unknown }).docker = {
+			getContainer: vi.fn(() => ({
+				inspect: vi.fn(async () => info),
+			})),
+		};
+		return { dm, sessions };
+	}
+
+	it("warns when reconcile inspects a running pre-#15 container (no CapDrop/SecurityOpt)", async () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const { dm, sessions } = makeDockerWithInspectResult({
+			State: { Running: true },
+			HostConfig: { CapDrop: [], SecurityOpt: [] },
+		});
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [{ session_id: "s1", container_id: "container-old" }],
+			meta: { changes: 0 },
+		});
+
+		await dm.reconcile();
+
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy.mock.calls[0]?.[0]).toMatch(/predates issue-#15 hardening/);
+		expect(warnSpy.mock.calls[0]?.[0]).toMatch(/session s1/);
+		// Running container — reconcile shouldn't flip status.
+		expect(sessions.updateStatus).not.toHaveBeenCalled();
+		warnSpy.mockRestore();
+	});
+
+	it("warns even when the pre-#15 container is stopped at reconcile time", async () => {
+		// reconcile() queries WHERE status = 'running', so this exercises the
+		// case where D1 still says 'running' but the Docker process is down
+		// (external `docker stop`, OOM kill, host reboot mid-flight). The
+		// warn must fire regardless of Docker's State.Running so the
+		// migration footgun surfaces even on containers that happen to be
+		// dead at reconcile time — they'll be respawned later, and the
+		// operator needs to know the old image is involved.
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const { dm, sessions } = makeDockerWithInspectResult({
+			State: { Running: false },
+			HostConfig: { CapDrop: [], SecurityOpt: [] },
+		});
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [{ session_id: "s2", container_id: "container-old-stopped" }],
+			meta: { changes: 0 },
+		});
+
+		await dm.reconcile();
+
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy.mock.calls[0]?.[0]).toMatch(/session s2/);
+		expect(sessions.updateStatus).toHaveBeenCalledWith("s2", "stopped");
+		warnSpy.mockRestore();
+	});
+
+	it("does not warn for properly hardened containers", async () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const { dm } = makeDockerWithInspectResult({
+			State: { Running: true },
+			HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"] },
+		});
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [{ session_id: "s3", container_id: "container-new" }],
+			meta: { changes: 0 },
+		});
+
+		await dm.reconcile();
+
+		expect(warnSpy).not.toHaveBeenCalled();
+		warnSpy.mockRestore();
+	});
+});
+
+describe("DockerManager.startContainer", () => {
+	// Case 2 (containerId on file, container exists in Docker) is the
+	// interactive `POST /api/sessions/:id/start` path. A pre-#15 container
+	// reached this way must surface the same warn as reconcile so a future
+	// refactor can't silently drop the call.
+	it("warns when starting an existing pre-#15 container (Case 2)", async () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const sessions = makeFakeSessions();
+		const dm = new DockerManager(sessions);
+		(dm as unknown as { docker: unknown }).docker = {
+			getContainer: vi.fn(() => ({
+				inspect: vi.fn(async () => ({
+					State: { Running: false },
+					HostConfig: { CapDrop: [], SecurityOpt: [] },
+				})),
+				start: vi.fn(async () => { /* started */ }),
+			})),
+		};
+
+		await dm.startContainer("s1");
+
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy.mock.calls[0]?.[0]).toMatch(/predates issue-#15 hardening/);
+		expect(warnSpy.mock.calls[0]?.[0]).toMatch(/session s1/);
+		expect(sessions.updateStatus).toHaveBeenCalledWith("s1", "running");
+		warnSpy.mockRestore();
+	});
 });
 
 // ── sanitiseUploadName ──────────────────────────────────────────────────────

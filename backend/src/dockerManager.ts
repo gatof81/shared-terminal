@@ -185,6 +185,23 @@ export class DockerManager {
                                 Memory: 2 * 1024 * 1024 * 1024,
                                 NanoCpus: 2_000_000_000,
                                 RestartPolicy: { Name: "unless-stopped" },
+                                // Defense-in-depth (issue #15): the image already runs as
+                                // unprivileged UID 1000 with no sudo, but we still strip
+                                // every Linux capability from the bounding set Docker
+                                // hands the container. None of tmux, node, git,
+                                // claude-code, or `code tunnel` need any of the default
+                                // bag (e.g. CAP_NET_RAW for raw sockets / ICMP,
+                                // CAP_NET_BIND_SERVICE for ports < 1024, CAP_AUDIT_WRITE,
+                                // CAP_MKNOD), so dropping ALL is the tightest baseline.
+                                // Note: this is about the *container's* bounding set,
+                                // not the backend host process — host-side chowns in
+                                // ensureWorkspaceOwnership rely on the backend's own
+                                // CAP_CHOWN and are unaffected. Pair with
+                                // no-new-privileges so even if a future image change
+                                // reintroduces a setuid binary it cannot raise
+                                // effective UID/caps at exec time.
+                                CapDrop: ["ALL"],
+                                SecurityOpt: ["no-new-privileges:true"],
                         },
                         OpenStdin: true,
                         Tty: true,
@@ -585,6 +602,7 @@ export class DockerManager {
                 // and spawn a replacement.
                 try {
                         const info = await this.docker.getContainer(meta.containerId).inspect();
+                        this.warnIfPreHardened(sessionId, meta.containerId, info.HostConfig);
                         if (!info.State.Running) {
                                 await this.docker.getContainer(meta.containerId).start();
                         }
@@ -596,6 +614,31 @@ export class DockerManager {
                         await this.spawn(sessionId);
                         await this.sessions.updateStatus(sessionId, "running");
                 }
+        }
+
+        // Detects containers that predate the issue-#15 hardening. Docker pins
+        // HostConfig at create time, so `container.start()` re-uses the original
+        // CapDrop / SecurityOpt regardless of what spawn() would set today. An
+        // operator who deploys this build and only stop+starts (instead of
+        // DELETE + POST /start) ends up with sessions that look fine but still
+        // have full Linux caps and a setuid sudo from the old image. This helper
+        // is the choke point for surfacing that mistake — call it from any code
+        // path that inspects an existing container so the migration footgun
+        // shows up in `docker logs` instead of failing silently.
+        private warnIfPreHardened(
+                sessionId: string,
+                containerId: string,
+                hostConfig: { CapDrop?: string[] | null; SecurityOpt?: string[] | null } | undefined,
+        ): void {
+                const capDrop = hostConfig?.CapDrop ?? [];
+                const securityOpt = hostConfig?.SecurityOpt ?? [];
+                if (capDrop.includes("ALL") && securityOpt.includes("no-new-privileges:true")) return;
+                console.warn(
+                        `[docker] session ${sessionId} container ${containerId.slice(0, 12)} ` +
+                        `predates issue-#15 hardening (CapDrop=${JSON.stringify(capDrop)}, ` +
+                        `SecurityOpt=${JSON.stringify(securityOpt)}). ` +
+                        `Recycle via DELETE /api/sessions/${sessionId} then POST /start to apply current HostConfig.`,
+                );
         }
 
         async stopContainer(sessionId: string): Promise<void> {
@@ -1158,6 +1201,14 @@ export class DockerManager {
                         }
                         try {
                                 const info = await this.docker.getContainer(row.container_id).inspect();
+                                // reconcile() runs on every backend boot, which is the
+                                // most-likely deploy moment. Surface pre-#15 containers
+                                // here regardless of running state — operators who stop
+                                // all sessions before deploying still need the warning,
+                                // since the next `/start` would be the only other place
+                                // it'd surface and that requires the operator to remember
+                                // to start each one.
+                                this.warnIfPreHardened(row.session_id, row.container_id, info.HostConfig);
                                 if (!info.State.Running) {
                                         await this.sessions.updateStatus(row.session_id, "stopped");
                                 }
