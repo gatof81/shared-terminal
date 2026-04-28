@@ -112,7 +112,19 @@ export class DockerManager {
         private uploadLocks = new Map<string /*sessionId*/, Promise<void>>();
 
         constructor(sessions: SessionManager, dockerOpts?: Dockerode.DockerOptions) {
-                this.docker = new Dockerode(dockerOpts ?? { socketPath: "/var/run/docker.sock" });
+                // docker-modem reads DOCKER_HOST from the environment ONLY when the
+                // caller passes no connection options at all. The previous default
+                // of `{ socketPath: "/var/run/docker.sock" }` therefore silently
+                // shadowed DOCKER_HOST, which matters for the docker-socket-proxy
+                // deployment shape (overlay sets DOCKER_HOST=tcp://proxy:2375 and
+                // drops the bind mount). Behaviour: explicit `dockerOpts` always
+                // wins (tests rely on this); otherwise honour DOCKER_HOST when
+                // present; finally fall back to the canonical Unix socket so the
+                // default docker-compose.yml stack still works untouched.
+                const defaultOpts: Dockerode.DockerOptions | undefined = process.env.DOCKER_HOST
+                        ? undefined
+                        : { socketPath: "/var/run/docker.sock" };
+                this.docker = new Dockerode(dockerOpts ?? defaultOpts);
                 this.sessions = sessions;
         }
 

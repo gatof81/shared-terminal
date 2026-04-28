@@ -1,4 +1,4 @@
-import { beforeEach, describe, it, expect, vi } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { PassThrough } from "stream";
 
 // d1Query is the only direct D1 touch-point in DockerManager (reconcile()).
@@ -137,8 +137,13 @@ function makeDocker(opts?: { sessions?: SessionManager; oneShot?: OneShotHook })
 	const sessions = opts?.sessions ?? makeFakeSessions();
 	const container = makeFakeContainer(opts?.oneShot);
 	const dm = new DockerManager(sessions);
-	// Swap in the fake Dockerode. The constructor already instantiated a real
-	// one against /var/run/docker.sock but we never touch it before this.
+	// Swap in the fake Dockerode BEFORE any method on `dm` is called. The
+	// constructor's default-selection logic now picks between letting
+	// docker-modem read DOCKER_HOST (env var present) and pinning to
+	// /var/run/docker.sock (env var absent), so the "real" client it
+	// instantiated could be aimed at either depending on the runner's
+	// environment. The swap is safe regardless because the field is
+	// replaced before any code path that would actually open a connection.
 	(dm as unknown as { docker: unknown }).docker = makeFakeDocker(container);
 	return { dm, container };
 }
@@ -619,7 +624,7 @@ describe("DockerManager.reconcile", () => {
 	}
 
 	it("warns when reconcile inspects a running pre-#15 container (no CapDrop/SecurityOpt)", async () => {
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => { });
 		const { dm, sessions } = makeDockerWithInspectResult({
 			State: { Running: true },
 			HostConfig: { CapDrop: [], SecurityOpt: [] },
@@ -647,7 +652,7 @@ describe("DockerManager.reconcile", () => {
 		// migration footgun surfaces even on containers that happen to be
 		// dead at reconcile time — they'll be respawned later, and the
 		// operator needs to know the old image is involved.
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => { });
 		const { dm, sessions } = makeDockerWithInspectResult({
 			State: { Running: false },
 			HostConfig: { CapDrop: [], SecurityOpt: [] },
@@ -666,7 +671,7 @@ describe("DockerManager.reconcile", () => {
 	});
 
 	it("does not warn for properly hardened containers", async () => {
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => { });
 		const { dm } = makeDockerWithInspectResult({
 			State: { Running: true },
 			HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"] },
@@ -689,7 +694,7 @@ describe("DockerManager.startContainer", () => {
 	// reached this way must surface the same warn as reconcile so a future
 	// refactor can't silently drop the call.
 	it("warns when starting an existing pre-#15 container (Case 2)", async () => {
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => { });
 		const sessions = makeFakeSessions();
 		const dm = new DockerManager(sessions);
 		(dm as unknown as { docker: unknown }).docker = {
@@ -709,6 +714,80 @@ describe("DockerManager.startContainer", () => {
 		expect(warnSpy.mock.calls[0]?.[0]).toMatch(/session s1/);
 		expect(sessions.updateStatus).toHaveBeenCalledWith("s1", "running");
 		warnSpy.mockRestore();
+	});
+});
+
+describe("DockerManager constructor", () => {
+	// The constructor's default-selection logic — pass `{ socketPath: '/var/
+	// run/docker.sock' }` when DOCKER_HOST is unset, and `undefined` when it
+	// IS set so docker-modem reads the URL from the env — is trivial in
+	// shape but load-bearing for the optional docker-socket-proxy
+	// deployment posture documented in the README. A future refactor that
+	// reinstates the always-socketPath default would silently break proxy
+	// deployments and only surface at deploy time, so pin both branches.
+	//
+	// We have to do real `new DockerManager()` instantiation here (no fake-
+	// Dockerode swap) because the unit under test is what `new Dockerode(
+	// opts)` ends up doing with the options the constructor picks. That's
+	// docker-modem behaviour, not DockerManager behaviour, so the FakeDocker
+	// shim used by every other test would defeat the assertion.
+	//
+	// FRAGILITY NOTE: both branches assert on `docker.modem.socketPath`,
+	// which is a docker-modem private field — not part of dockerode's
+	// public surface. A future docker-modem version that renames or
+	// lazily-initialises that field would break these tests with no
+	// behavioural change in DockerManager. If they fail after a `npm
+	// update` of dockerode/docker-modem, look for the field rename in
+	// node_modules/docker-modem/lib/modem.js BEFORE assuming
+	// DockerManager regressed. The tradeoff is intentional: the only
+	// equivalent we could observe through dockerode's public API would
+	// involve actually opening a connection, which would either need a
+	// real Docker daemon or a TCP fixture per test — both heavier and
+	// slower than this targeted private-field read.
+	//
+	// process.env.DOCKER_HOST is process-global state, so save and restore
+	// it around each case. A leak into other suites in the same vitest
+	// run could change the implicit constructor branch the harness exercises
+	// (see makeDocker comment) and produce confusing failures elsewhere.
+
+	let savedDockerHost: string | undefined;
+	beforeEach(() => {
+		savedDockerHost = process.env.DOCKER_HOST;
+	});
+	afterEach(() => {
+		if (savedDockerHost === undefined) {
+			delete process.env.DOCKER_HOST;
+		} else {
+			process.env.DOCKER_HOST = savedDockerHost;
+		}
+	});
+
+	it("falls back to /var/run/docker.sock when DOCKER_HOST is unset", () => {
+		// Explicit delete rather than 'if undefined skip' — a CI runner that
+		// happens to have DOCKER_HOST inherited from the shell would silently
+		// flip this case into the wrong branch and pass for the wrong reason.
+		delete process.env.DOCKER_HOST;
+		const dm = new DockerManager(makeFakeSessions());
+		// docker-modem exposes the resolved transport on .modem; the field is
+		// untyped on dockerode's side so we cast.
+		const modem = (dm as unknown as { docker: { modem: { socketPath?: string } } }).docker.modem;
+		expect(modem.socketPath).toBe("/var/run/docker.sock");
+	});
+
+	it("forwards no socketPath to dockerode when DOCKER_HOST is set (proxy posture)", () => {
+		// Use a syntactically valid URL so docker-modem's parser is happy.
+		// We never actually open a connection — DockerManager doesn't
+		// exercise the client at construction time, so just instantiating
+		// is enough to inspect what options ended up on the modem.
+		process.env.DOCKER_HOST = "tcp://docker-socket-proxy:2375";
+		const dm = new DockerManager(makeFakeSessions());
+		const modem = (dm as unknown as { docker: { modem: { socketPath?: string } } }).docker.modem;
+		// The proxy overlay in README "Security model" depends on this
+		// branch: with socketPath undefined, docker-modem reads
+		// DOCKER_HOST and routes to the proxy. If a refactor reinstates a
+		// hardcoded socketPath, this assertion fails and CI catches it
+		// before deploy.
+		expect(modem.socketPath).toBeUndefined();
 	});
 });
 
