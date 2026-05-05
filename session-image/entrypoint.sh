@@ -64,7 +64,12 @@ NPM_GLOBAL_OLD="${NPM_GLOBAL_HOME}.old"
 # will retry, and if the cleanup rm fails .old leaks (cosmetic, not
 # functional). The entrypoint must not exit on these.
 if [ -e "$NPM_GLOBAL_OLD" ]; then
-        if [ ! -e "$NPM_GLOBAL_HOME" ]; then
+        # `-e` follows symlinks and reports false on a dangling one (target
+        # gone, e.g. workspace unmounted after a successful ln). Without the
+        # `-L` clause the dangling-symlink + stale-.old case would mis-route
+        # to the restore branch and the .old dir would replace the symlink,
+        # contradicting the comment above ("symlink case → drop .old").
+        if [ ! -e "$NPM_GLOBAL_HOME" ] && [ ! -L "$NPM_GLOBAL_HOME" ]; then
                 mv "$NPM_GLOBAL_OLD" "$NPM_GLOBAL_HOME" || true
         else
                 rm -rf "$NPM_GLOBAL_OLD" || true
