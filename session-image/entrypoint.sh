@@ -19,50 +19,64 @@ cd /home/developer/workspace
 # would land in the container layer and vanish on the next /start, putting
 # the user back on whatever version the image baked.
 #
-# The wrinkle vs. the .vscode-cli block below: ~/.npm-global already
-# exists as a populated directory after the image build, so a plain
-# `mkdir -p` + `ln -sfn` would put a symlink *inside* the existing dir
-# instead of replacing it. We branch on what's already there:
+# Two-step structure:
 #
-#   - Symlink already in place — left over within this container's
-#     lifetime. Nothing to do; the rest of the entrypoint can run.
-#   - Workspace already seeded — operator/user has prior state. Drop the
-#     image's fresh copy and symlink the home path into the workspace.
-#     User-persisted version wins over a re-baked image so a self-updated
-#     Claude survives an image bump.
-#   - First boot, no workspace seed — move the image's directory into
-#     the bind mount, then symlink. Bind mounts and the container layer
-#     are different filesystems so `mv` falls back to copy+unlink, which
-#     is what we want.
+#   1. Seed the workspace dir from the image's copy if the workspace
+#      doesn't have one yet (first boot of a fresh workspace). `cp -a`
+#      preserves the source — the image's directory stays available so
+#      Step 2 has something to fall back on if the symlink swap fails.
 #
-# Best-effort: any failure WARNs loudly and falls through to use the
-# image's local copy at ~/.npm-global (still on PATH, since
-# /home/developer/.npm-global/bin is prepended in the Dockerfile). Claude
-# still works in that container, it just won't persist self-updates.
+#   2. Replace ~/.npm-global with a symlink to the workspace dir. This
+#      uses a rename-then-restore dance instead of `rm -rf && ln -sfn`:
+#      stash the image dir to .old, then ln, then drop .old on success;
+#      on ln failure, restore .old back to ~/.npm-global. The naive
+#      rm-then-ln approach would leave the container with neither the
+#      directory nor the symlink if ln failed mid-step, taking `claude`
+#      offline entirely (not just non-persistent) — see the bot review
+#      on PR #131 for the original analysis. The dance keeps the image
+#      copy reachable through every transient failure mode.
+#
+# Best-effort throughout: any failure WARNs and either (a) falls through
+# to use the image's local copy at ~/.npm-global (still on PATH, since
+# /home/developer/.npm-global/bin is prepended in the Dockerfile), or
+# (b) restores the image copy from .old. Either way, claude is still
+# usable in that container — only persistence is at risk.
 NPM_GLOBAL_HOME=/home/developer/.npm-global
 NPM_GLOBAL_WS=/home/developer/workspace/.npm-global
+NPM_GLOBAL_OLD="${NPM_GLOBAL_HOME}.old"
 
 if [ ! -L "$NPM_GLOBAL_HOME" ]; then
-        if [ -d "$NPM_GLOBAL_WS" ]; then
-                if ! rm -rf "$NPM_GLOBAL_HOME"; then
-                        echo "[entrypoint] WARN: couldn't drop image .npm-global; " \
-                             "claude self-updates and runtime npm globals won't persist across restarts." >&2
-                fi
-        elif [ -d "$NPM_GLOBAL_HOME" ]; then
-                if ! mv "$NPM_GLOBAL_HOME" "$NPM_GLOBAL_WS"; then
+        # Step 1: seed the workspace dir on first boot. cp -a (not mv)
+        # so the image copy stays in place if Step 2 needs to roll back.
+        if [ ! -d "$NPM_GLOBAL_WS" ] && [ -d "$NPM_GLOBAL_HOME" ]; then
+                if ! cp -a "$NPM_GLOBAL_HOME" "$NPM_GLOBAL_WS"; then
                         echo "[entrypoint] WARN: couldn't seed workspace .npm-global from image " \
                              "(uid=$(id -u), workspace owner=$(stat -c '%u:%g' /home/developer/workspace 2>/dev/null || echo '?')). " \
                              "claude self-updates and runtime npm globals won't persist across restarts." >&2
                 fi
         fi
-        # Skip the symlink if the prior step left ~/.npm-global in place —
-        # `ln -sfn` against an existing real directory creates the link
-        # *inside* it (with the basename of the target), which is exactly
-        # the breakage we're trying to avoid.
-        if [ ! -e "$NPM_GLOBAL_HOME" ] && [ -d "$NPM_GLOBAL_WS" ]; then
-                if ! ln -sfn "$NPM_GLOBAL_WS" "$NPM_GLOBAL_HOME"; then
-                        echo "[entrypoint] WARN: couldn't symlink ~/.npm-global into workspace; " \
+
+        # Step 2: rename-then-restore swap. Only runs if both the workspace
+        # dir is present (either pre-seeded or freshly seeded above) and the
+        # image's ~/.npm-global is still a real directory waiting to be
+        # replaced.
+        if [ -d "$NPM_GLOBAL_WS" ] && [ -d "$NPM_GLOBAL_HOME" ] && [ ! -e "$NPM_GLOBAL_OLD" ]; then
+                if ! mv "$NPM_GLOBAL_HOME" "$NPM_GLOBAL_OLD"; then
+                        echo "[entrypoint] WARN: couldn't rename ~/.npm-global to swap in symlink; " \
                              "claude self-updates and runtime npm globals won't persist across restarts." >&2
+                elif ln -sfn "$NPM_GLOBAL_WS" "$NPM_GLOBAL_HOME"; then
+                        rm -rf "$NPM_GLOBAL_OLD"
+                else
+                        # ln failed after successful rename. Roll back so
+                        # ~/.npm-global is the image's regular directory
+                        # again — claude stays available, persistence is
+                        # the only thing lost. The mv-back is best-effort
+                        # itself; if it fails the container is broken, but
+                        # at that point the operator has bigger problems
+                        # than this entrypoint.
+                        mv "$NPM_GLOBAL_OLD" "$NPM_GLOBAL_HOME" || true
+                        echo "[entrypoint] WARN: couldn't symlink ~/.npm-global into workspace; " \
+                             "image copy restored — claude works but self-updates won't persist across restarts." >&2
                 fi
         fi
 fi

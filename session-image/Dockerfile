@@ -117,9 +117,19 @@ RUN set -eux; \
 # /usr/local/bin alongside it.
 #
 # Bumping the pin: pick a release from https://github.com/cli/cli/releases,
-# then capture both arches' SHA-256:
+# then capture both arches' SHA-256. The release ships a published
+# `checksums.txt` listing every artifact's hash — pull that and read the
+# linux_amd64 / linux_arm64 lines, instead of (only) hashing the tarballs
+# yourself, so a tampered tarball can't paper over its own hash at bump
+# time:
 #
 #     GH_VERSION=v2.92.0
+#     curl -fL "https://github.com/cli/cli/releases/download/${GH_VERSION}/gh_${GH_VERSION#v}_checksums.txt" \
+#       | grep -E 'linux_(amd64|arm64).tar.gz$'
+#
+# For belt-and-braces, also re-hash the tarballs themselves and confirm
+# the values match the checksums file:
+#
 #     for ARCH in amd64 arm64; do
 #       curl -fL "https://github.com/cli/cli/releases/download/${GH_VERSION}/gh_${GH_VERSION#v}_linux_${ARCH}.tar.gz" \
 #         | sha256sum
