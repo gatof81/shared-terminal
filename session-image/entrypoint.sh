@@ -45,6 +45,32 @@ NPM_GLOBAL_HOME=/home/developer/.npm-global
 NPM_GLOBAL_WS=/home/developer/workspace/.npm-global
 NPM_GLOBAL_OLD="${NPM_GLOBAL_HOME}.old"
 
+# Step 0: recover from a prior-boot crash mid-swap. The container can be
+# SIGKILL'd / OOM'd / lose the host between Step 2's `mv` and `ln`, leaving
+# .old behind on disk. `docker start` re-runs entrypoint with that state on
+# disk (the layer is preserved across stop/start, this only resets on
+# /sessions/:id/start which recreates the container). Three cases:
+#
+#   - ~/.npm-global is missing, .old exists → crash between mv and ln on
+#     a prior boot. Restore from .old so PATH lookups work and Step 2 can
+#     re-attempt the swap.
+#   - ~/.npm-global is a symlink or directory, .old exists → either a
+#     crash between ln and rm (symlink case), or a more exotic interleave
+#     where home was rebuilt (directory case). Either way .old is stale;
+#     drop it so Step 2 isn't gated by the `[ ! -e $NPM_GLOBAL_OLD ]`
+#     guard below.
+#
+# Both branches are best-effort: if the restore mv fails the next boot
+# will retry, and if the cleanup rm fails .old leaks (cosmetic, not
+# functional). The entrypoint must not exit on these.
+if [ -e "$NPM_GLOBAL_OLD" ]; then
+        if [ ! -e "$NPM_GLOBAL_HOME" ]; then
+                mv "$NPM_GLOBAL_OLD" "$NPM_GLOBAL_HOME" || true
+        else
+                rm -rf "$NPM_GLOBAL_OLD" || true
+        fi
+fi
+
 if [ ! -L "$NPM_GLOBAL_HOME" ]; then
         # Step 1: seed the workspace dir on first boot. cp -a (not mv)
         # so the image copy stays in place if Step 2 needs to roll back.
@@ -59,13 +85,20 @@ if [ ! -L "$NPM_GLOBAL_HOME" ]; then
         # Step 2: rename-then-restore swap. Only runs if both the workspace
         # dir is present (either pre-seeded or freshly seeded above) and the
         # image's ~/.npm-global is still a real directory waiting to be
-        # replaced.
+        # replaced. Step 0 ensures .old is absent here under normal
+        # conditions; the guard is belt-and-braces in case the recovery mv
+        # itself failed.
         if [ -d "$NPM_GLOBAL_WS" ] && [ -d "$NPM_GLOBAL_HOME" ] && [ ! -e "$NPM_GLOBAL_OLD" ]; then
                 if ! mv "$NPM_GLOBAL_HOME" "$NPM_GLOBAL_OLD"; then
                         echo "[entrypoint] WARN: couldn't rename ~/.npm-global to swap in symlink; " \
                              "claude self-updates and runtime npm globals won't persist across restarts." >&2
                 elif ln -sfn "$NPM_GLOBAL_WS" "$NPM_GLOBAL_HOME"; then
-                        rm -rf "$NPM_GLOBAL_OLD"
+                        # `|| true`: a failure here just leaks .old in the
+                        # container layer (Step 0 will clean it on the next
+                        # boot). Honour the block's "WARN-and-carry-on"
+                        # contract instead of letting `set -e` crash the
+                        # entrypoint.
+                        rm -rf "$NPM_GLOBAL_OLD" || true
                 else
                         # ln failed after successful rename. Roll back so
                         # ~/.npm-global is the image's regular directory
