@@ -38,10 +38,6 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Claude CLI ───────────────────────────────────────────────────────────────
-# Install globally so every session has it available.
-RUN npm install -g @anthropic-ai/claude-code
-
 # ── VS Code CLI (`code tunnel`) ──────────────────────────────────────────────
 # Standalone CLI from Microsoft. Lets the user run `code tunnel` from inside
 # the session and attach to the container from desktop VS Code (or vscode.dev)
@@ -149,6 +145,34 @@ RUN userdel -r ubuntu || true \
 USER developer
 WORKDIR /home/developer
 
+# ── Per-user npm prefix ──────────────────────────────────────────────────────
+# Global npm installs land under $HOME instead of /usr/lib/node_modules so the
+# developer user can update / uninstall / let `claude` self-update without
+# sudo. With sudo gone (#15), a root-owned global prefix turns every npm
+# global into a permanent fixture: `npm install -g @anthropic-ai/claude-code`
+# at build time wrote `/usr/bin/claude` + `/usr/lib/node_modules/...` owned
+# by uid 0, and a non-privileged developer can't even `npm uninstall -g` it.
+#
+# Putting the prefix under $HOME keeps /usr/lib/node_modules root-owned and
+# untouchable (the security posture we want), while making in-container npm
+# tooling actually usable.
+#
+# PATH ordering matters: prepend the user prefix so a newer self-updated
+# `claude` shadows any stale /usr/bin/claude that might land in a future
+# image revision. The mkdir is here (not at install time) so the directory
+# exists when a user runs `npm install -g …` at runtime, not just for the
+# build-time install below.
+ENV NPM_CONFIG_PREFIX=/home/developer/.npm-global
+ENV PATH=/home/developer/.npm-global/bin:$PATH
+RUN mkdir -p /home/developer/.npm-global
+
+# ── Claude CLI ───────────────────────────────────────────────────────────────
+# Installed as `developer` (not root) so the binary is updateable in place.
+# Lives in the container layer, so self-updates do not survive a container
+# recreate (POST /sessions/:id/start respawns from the image) — image rebuild
+# is still the durable update path. That's consistent with every other tool
+# in this image.
+RUN npm install -g @anthropic-ai/claude-code
 
 # ── tmux config (nice defaults) ──────────────────────────────────────────────
 COPY --chown=developer:developer tmux.conf /home/developer/.tmux.conf
