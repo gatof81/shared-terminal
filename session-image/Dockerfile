@@ -168,10 +168,13 @@ RUN mkdir -p /home/developer/.npm-global
 
 # ── Claude CLI ───────────────────────────────────────────────────────────────
 # Installed as `developer` (not root) so the binary is updateable in place.
-# Lives in the container layer, so self-updates do not survive a container
-# recreate (POST /sessions/:id/start respawns from the image) — image rebuild
-# is still the durable update path. That's consistent with every other tool
-# in this image.
+# Lands in /home/developer/.npm-global, which entrypoint.sh migrates into
+# the workspace bind mount on first boot — so `claude --update` (and any
+# user-installed npm global) survives a container recreate (POST
+# /sessions/:id/start respawns the container, but the workspace dir
+# persists by design). Image rebuilds reseed the workspace copy only on
+# first boot of a fresh workspace; existing workspaces keep their
+# self-updated version, since a user who chose v.X probably wants v.X.
 RUN npm install -g @anthropic-ai/claude-code
 
 # ── tmux config (nice defaults) ──────────────────────────────────────────────

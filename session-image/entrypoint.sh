@@ -11,6 +11,62 @@ set -e
 
 cd /home/developer/workspace
 
+# Persist the user-level npm global prefix across container replacement.
+#
+# Dockerfile sets NPM_CONFIG_PREFIX=/home/developer/.npm-global and bakes
+# the Claude CLI into that directory at build time. Without this block,
+# every `claude` self-update (and any user-installed `npm install -g …`)
+# would land in the container layer and vanish on the next /start, putting
+# the user back on whatever version the image baked.
+#
+# The wrinkle vs. the .vscode-cli block below: ~/.npm-global already
+# exists as a populated directory after the image build, so a plain
+# `mkdir -p` + `ln -sfn` would put a symlink *inside* the existing dir
+# instead of replacing it. We branch on what's already there:
+#
+#   - Symlink already in place — left over within this container's
+#     lifetime. Nothing to do; the rest of the entrypoint can run.
+#   - Workspace already seeded — operator/user has prior state. Drop the
+#     image's fresh copy and symlink the home path into the workspace.
+#     User-persisted version wins over a re-baked image so a self-updated
+#     Claude survives an image bump.
+#   - First boot, no workspace seed — move the image's directory into
+#     the bind mount, then symlink. Bind mounts and the container layer
+#     are different filesystems so `mv` falls back to copy+unlink, which
+#     is what we want.
+#
+# Best-effort: any failure WARNs loudly and falls through to use the
+# image's local copy at ~/.npm-global (still on PATH, since
+# /home/developer/.npm-global/bin is prepended in the Dockerfile). Claude
+# still works in that container, it just won't persist self-updates.
+NPM_GLOBAL_HOME=/home/developer/.npm-global
+NPM_GLOBAL_WS=/home/developer/workspace/.npm-global
+
+if [ ! -L "$NPM_GLOBAL_HOME" ]; then
+        if [ -d "$NPM_GLOBAL_WS" ]; then
+                if ! rm -rf "$NPM_GLOBAL_HOME"; then
+                        echo "[entrypoint] WARN: couldn't drop image .npm-global; " \
+                             "claude self-updates and runtime npm globals won't persist across restarts." >&2
+                fi
+        elif [ -d "$NPM_GLOBAL_HOME" ]; then
+                if ! mv "$NPM_GLOBAL_HOME" "$NPM_GLOBAL_WS"; then
+                        echo "[entrypoint] WARN: couldn't seed workspace .npm-global from image " \
+                             "(uid=$(id -u), workspace owner=$(stat -c '%u:%g' /home/developer/workspace 2>/dev/null || echo '?')). " \
+                             "claude self-updates and runtime npm globals won't persist across restarts." >&2
+                fi
+        fi
+        # Skip the symlink if the prior step left ~/.npm-global in place —
+        # `ln -sfn` against an existing real directory creates the link
+        # *inside* it (with the basename of the target), which is exactly
+        # the breakage we're trying to avoid.
+        if [ ! -e "$NPM_GLOBAL_HOME" ] && [ -d "$NPM_GLOBAL_WS" ]; then
+                if ! ln -sfn "$NPM_GLOBAL_WS" "$NPM_GLOBAL_HOME"; then
+                        echo "[entrypoint] WARN: couldn't symlink ~/.npm-global into workspace; " \
+                             "claude self-updates and runtime npm globals won't persist across restarts." >&2
+                fi
+        fi
+fi
+
 # Persist VS Code CLI tunnel state across container replacement.
 #
 # `code tunnel` writes its device-login token, tunnel name, and registration
