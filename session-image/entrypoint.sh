@@ -137,7 +137,6 @@ elif ! ln -sfn /home/developer/workspace/.config/gh /home/developer/.config/gh; 
              "gh auth state won't persist across restarts." >&2
 fi
 
-
 echo "[entrypoint] container ready — create a tab from the UI to begin"
 
 # Keep PID 1 alive independent of tmux. tmux-server now starts lazily on the
