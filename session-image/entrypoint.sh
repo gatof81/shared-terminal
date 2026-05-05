@@ -106,6 +106,37 @@ elif ! ln -sfn /home/developer/workspace/.vscode-cli /home/developer/.vscode-cli
              "code tunnel auth won't persist across restarts." >&2
 fi
 
+# Persist GitHub CLI auth state across container replacement.
+#
+# `gh auth login` writes its OAuth token + host config to
+# ~/.config/gh/{hosts,state}.yml. That path lives in the container layer,
+# so without this redirection every `POST /start` (which respawns the
+# container, see Architecture in CLAUDE.md) would force the user back
+# through the device-code flow. README's "auth once" line implicitly
+# assumes the redirection is in place.
+#
+# Auth lifetime intentionally tied to the *workspace*, not the *image*:
+# - New session (fresh workspace) → empty .config/gh → no leaked tokens
+#   from a previous user / context.
+# - Existing session restarted (same workspace) → tokens persist, no
+#   re-auth on every container recycle.
+# Same contract as ~/.vscode-cli above and ~/.npm-global below.
+#
+# Only ~/.config/gh is symlinked, not ~/.config wholesale: other tools
+# may also use XDG and we don't want their state hitching a ride into
+# the workspace bind mount unintentionally. ~/.config itself stays a
+# real directory in the container layer so the symlink lands cleanly.
+#
+# Best-effort, same WARN-and-carry-on pattern as the blocks above.
+if ! mkdir -p /home/developer/.config /home/developer/workspace/.config/gh; then
+        echo "[entrypoint] WARN: couldn't create workspace .config/gh dir " \
+             "(uid=$(id -u), workspace owner=$(stat -c '%u:%g' /home/developer/workspace 2>/dev/null || echo '?')). " \
+             "gh auth state won't persist across restarts." >&2
+elif ! ln -sfn /home/developer/workspace/.config/gh /home/developer/.config/gh; then
+        echo "[entrypoint] WARN: couldn't symlink ~/.config/gh into workspace; " \
+             "gh auth state won't persist across restarts." >&2
+fi
+
 
 echo "[entrypoint] container ready — create a tab from the UI to begin"
 
