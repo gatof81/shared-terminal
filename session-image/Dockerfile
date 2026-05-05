@@ -144,6 +144,11 @@ RUN set -eux; \
 #       --build-arg GH_CLI_SHA256_AMD64=<x64 sha256> \
 #       --build-arg GH_CLI_SHA256_ARM64=<arm64 sha256> \
 #       ./session-image
+# Re-declare TARGETARCH so this block doesn't rely on the VS Code
+# section's earlier ARG remaining in scope. ARGs survive within a stage,
+# but if the VS Code block is later removed or reordered, an implicit
+# dependency would silently fall back to `:-amd64` on every architecture.
+ARG TARGETARCH
 ARG GH_CLI_VERSION=v2.92.0
 ARG GH_CLI_SHA256_AMD64=b57848131bdf0c229cd35e1f2a51aa718199858b2e728410b37e89a428943ec4
 ARG GH_CLI_SHA256_ARM64=c2248526dd0160c08d3fccca2332c3c1a07c15a78b23978e77735f1b5a18cfee

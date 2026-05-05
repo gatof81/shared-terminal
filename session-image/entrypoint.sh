@@ -167,7 +167,7 @@ fi
 #   from a previous user / context.
 # - Existing session restarted (same workspace) → tokens persist, no
 #   re-auth on every container recycle.
-# Same contract as ~/.vscode-cli above and ~/.npm-global below.
+# Same contract as ~/.npm-global and ~/.vscode-cli above.
 #
 # Only ~/.config/gh is symlinked, not ~/.config wholesale: other tools
 # may also use XDG and we don't want their state hitching a ride into
