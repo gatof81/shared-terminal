@@ -39,19 +39,11 @@ export function handleWsConnection(
                 ws.close(1011, "socket error");
         });
 
-        // Verify the JWT BEFORE inspecting the URL. The previous order
-        // (path → tab present → tab charset → token) leaked a four-state
-        // probe oracle to unauthenticated callers via the pre-close error
-        // frame: a stranger could distinguish "Invalid WebSocket path" /
-        // "Missing tab id" / "Invalid tab id" / "Missing or invalid token"
-        // and infer that, e.g., /ws/sessions/<id> was a live route before
-        // we'd established the caller is even a user of the product.
-        // Origin verification (issue #3) already covered the gross CSWSH
-        // case; this closes the informational-leak sibling. See issue #82.
-        //
-        // Authenticated callers still get the specific path/tab errors
-        // below — at that point we know the caller is a user, and a
-        // specific message is useful for diagnosing client bugs.
+        // Auth must run before path/tab inspection: distinct pre-close
+        // error reasons ("Invalid path" / "Missing tab" / …) leaked a
+        // probe oracle to unauthenticated callers (issue #82). Once we
+        // know the caller is a user, the specific errors below are fine
+        // — they're useful for diagnosing client bugs.
         const url = req.url ?? "";
         const payload = verifyWsToken(req.headers["sec-websocket-protocol"], url);
         if (!payload) {
