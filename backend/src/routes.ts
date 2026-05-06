@@ -214,8 +214,15 @@ export function buildRouter(
 	// Logout is intentionally NOT auth-gated: the action is "discard the
 	// cookie", which is harmless to the server even on a missing/invalid
 	// session — and gating it would mean that an already-expired token
-	// couldn't even be cleaned up locally. SameSite=Strict on the cookie
-	// itself blocks any cross-site forced logout.
+	// couldn't even be cleaned up locally.
+	//
+	// In production the auth cookie is SameSite=None (required for the
+	// cross-site Pages → Tunnel deployment), so a cross-site form POST
+	// to this endpoint *can* reach the server. The consequence is user
+	// inconvenience only — no data is exposed, no session can be hijacked
+	// by clearing the victim's cookie. State-changing routes that DO
+	// matter for CSRF (POST/DELETE/PATCH with JSON bodies) are
+	// preflight-gated by the CORS middleware in index.ts.
 	router.post("/auth/logout", (_req: Request, res: Response) => {
 		clearAuthCookie(res);
 		res.status(204).send();
