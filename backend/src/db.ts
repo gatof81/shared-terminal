@@ -61,21 +61,24 @@ export async function d1Query<T = Record<string, unknown>>(
 }
 
 /**
- * Execute multiple SQL statements as one HTTP round-trip via D1's
- * documented `batch` parameter on `/query`: the body is `{ batch: [...] }`
- * with one `{ sql, params }` object per statement. Sequential execution;
- * no documented rollback guarantee at the REST layer (that's the Workers
- * `db.batch()` binding's promise, not this endpoint's). Treat a failed
- * statement as "the schema is now partial — fix it manually" and throw
- * on every per-statement failure so a silent partial migration can't
- * boot the server.
+ * Execute multiple SQL statements as one HTTP round-trip via D1's `batch`
+ * parameter on `/query` — body is `{ batch: [{ sql, params }, ...] }`.
+ * Per the D1 REST API reference, `/query` and `/raw` both accept this
+ * shape; there is no separate `/batch` endpoint. Sequential execution;
+ * no documented rollback guarantee at the REST layer (the transactional
+ * promise belongs to the Workers `db.batch()` binding, not this endpoint).
+ * Treat a failed statement as "the schema is now partial — fix it
+ * manually" and throw on every per-statement failure so a silent
+ * partial migration can't boot the server.
  *
- * Migration-only and parameter-free by construction. The semicolon-
- * joined `{ sql }` shape is undocumented for multi-statement execution
- * and could plausibly run only the first; the `{ batch }` shape is
- * the spec'd path. `d1Query`'s envelope-only check + `result[0]`
- * surface would also have masked a mid-batch failure, so the fetch
- * is inlined here to walk every statement's `success` flag.
+ * Migration-only and parameter-free by construction. `d1Query`'s
+ * envelope-only check + `result[0]` surface would mask a mid-batch
+ * failure, so the fetch is inlined here so we can walk every
+ * statement's `success` flag. The length-check guard below also
+ * catches a silent-no-op shape where D1 ignored the `batch` field
+ * entirely (zero results returned for N statements sent) — without
+ * it that path would log "migrations complete" and break at first
+ * real request.
  */
 export async function d1Batch(statements: string[]): Promise<void> {
 	const trimmed = statements.map((s) => s.trim()).filter(Boolean);
@@ -100,10 +103,17 @@ export async function d1Batch(statements: string[]): Promise<void> {
 	if (!data.success) {
 		throw new Error(`D1 batch envelope failed: ${data.errors.map((e) => e.message).join(", ")}`);
 	}
+	// Length guard: a 200 with zero results despite N statements sent is
+	// the silent-no-op shape — endpoint shape mismatched, server applied
+	// nothing. Make it loud here rather than at the first real request.
+	if (data.result.length !== trimmed.length) {
+		throw new Error(
+			`D1 batch: sent ${trimmed.length} statement(s) but got ${data.result.length} result(s); ` +
+				"schema is partial or unapplied — check D1 dashboard / API contract.",
+		);
+	}
 	// Per-statement check: D1 may set data.success=true while reporting a
-	// per-result failure for one of the statements. Envelope-only check
-	// like d1Query does is enough for single-statement queries but masks
-	// a mid-batch failure here.
+	// per-result failure for one of the statements.
 	for (const [i, r] of data.result.entries()) {
 		if (!r.success) {
 			// `D1QueryResult` doesn't currently surface a per-statement
