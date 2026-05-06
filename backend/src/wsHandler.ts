@@ -8,6 +8,7 @@ import { v4 as uuidv4 } from "uuid";
 import { WebSocket } from "ws";
 import { verifyWsToken } from "./auth.js";
 import type { DockerManager } from "./dockerManager.js";
+import { logger } from "./logger.js";
 import { ForbiddenError, NotFoundError, type SessionManager } from "./sessionManager.js";
 import type { WsClientMessage, WsServerMessage } from "./types.js";
 
@@ -59,7 +60,7 @@ export function handleWsConnection(
 	// succeeds to also tear the exec down; `on` is additive, so both run.
 	// See issue #91 for the DoS reproduction path.
 	ws.on("error", (err) => {
-		console.error(`[ws] socket error: ${err.message}`);
+		logger.error(`[ws] socket error: ${err.message}`);
 		// Don't trust the transport to always emit 'close' after
 		// 'error'. Some failure modes (RSTd TCP mid-handshake, upgrade
 		// parse error before the WS protocol is fully up) leave the
@@ -153,7 +154,7 @@ export function handleWsConnection(
 		}
 		flushTail();
 
-		console.log(
+		logger.info(
 			`[ws] user=${userId} attached to session=${sessionId} tab=${tabId} (exec=${attachId})`,
 		);
 
@@ -183,12 +184,12 @@ export function handleWsConnection(
 		});
 
 		ws.on("close", () => {
-			console.log(`[ws] user=${userId} detached from session=${sessionId}`);
+			logger.info(`[ws] user=${userId} detached from session=${sessionId}`);
 			docker.detach(attachId);
 		});
 
 		ws.on("error", (err) => {
-			console.error(`[ws] error on session=${sessionId}:`, err.message);
+			logger.error(`[ws] error on session=${sessionId}: ${err.message}`);
 			docker.detach(attachId);
 		});
 	})().catch((err) => {
@@ -199,7 +200,7 @@ export function handleWsConnection(
 			sendError(ws, "Access denied");
 			ws.close(1008, "Forbidden");
 		} else {
-			console.error(`[ws] attach failed for session=${sessionId}:`, (err as Error).message);
+			logger.error(`[ws] attach failed for session=${sessionId}: ${(err as Error).message}`);
 			sendError(ws, `Failed to attach: ${(err as Error).message}`);
 			ws.close(1011, "Attach failed");
 		}

@@ -13,6 +13,7 @@ import type { Duplex } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import Dockerode from "dockerode";
 import { d1Query } from "./db.js";
+import { logger } from "./logger.js";
 import type { SessionManager } from "./sessionManager.js";
 
 const SESSION_IMAGE = process.env.SESSION_IMAGE ?? "shared-terminal-session";
@@ -211,7 +212,7 @@ export class DockerManager {
 		const containerId = container.id;
 		await this.sessions.setContainerId(sessionId, containerId);
 
-		console.log(
+		logger.info(
 			`[docker] spawned container ${meta.containerName} (${containerId.slice(0, 12)}) for session ${sessionId}`,
 		);
 		return containerId;
@@ -285,7 +286,7 @@ export class DockerManager {
 		} catch (err) {
 			const code = (err as NodeJS.ErrnoException).code;
 			if (code === "EPERM" || code === "ENOSYS") {
-				console.warn(
+				logger.warn(
 					`[docker] couldn't chown ${target} to ${WORKSPACE_UID}:${WORKSPACE_GID} (${code}); ` +
 						`run the backend as root or pre-create paths with matching ownership.`,
 				);
@@ -422,7 +423,7 @@ export class DockerManager {
 			// Log the detail server-side; the thrown error carries
 			// a generic message so byte counts don't ride out in
 			// the 413 body to the client.
-			console.warn(
+			logger.warn(
 				`[docker] upload quota rejected for session ${sessionId}: ` +
 					`${usedBytes} used + ${attemptedBytes} attempted > ${UPLOAD_QUOTA_BYTES} cap`,
 			);
@@ -521,9 +522,8 @@ export class DockerManager {
 					/* already removed */
 				}
 			} catch (err) {
-				console.error(
-					`[docker] error killing container for session ${sessionId}:`,
-					(err as Error).message,
+				logger.error(
+					`[docker] error killing container for session ${sessionId}: ${(err as Error).message}`,
 				);
 			}
 			// The container no longer exists in Docker — reflect that in D1 so any
@@ -531,9 +531,8 @@ export class DockerManager {
 			try {
 				await this.sessions.setContainerId(sessionId, null);
 			} catch (err) {
-				console.error(
-					`[docker] failed to null container_id for session ${sessionId}:`,
-					(err as Error).message,
+				logger.error(
+					`[docker] failed to null container_id for session ${sessionId}: ${(err as Error).message}`,
 				);
 			}
 		}
@@ -564,7 +563,7 @@ export class DockerManager {
 				this.keyOf.delete(attachId);
 			}
 		}
-		console.log(`[docker] killed container for session ${sessionId}`);
+		logger.info(`[docker] killed container for session ${sessionId}`);
 	}
 
 	/**
@@ -593,9 +592,9 @@ export class DockerManager {
 
 		try {
 			await fs.rm(sessionAbs, { recursive: true, force: true });
-			console.log(`[docker] purged workspace dir ${sessionAbs}`);
+			logger.info(`[docker] purged workspace dir ${sessionAbs}`);
 		} catch (err) {
-			console.error(`[docker] failed to purge workspace ${sessionAbs}:`, (err as Error).message);
+			logger.error(`[docker] failed to purge workspace ${sessionAbs}: ${(err as Error).message}`);
 			throw err;
 		}
 		// Per-session uploads dir lives at <WORKSPACE_ROOT>/.uploads/<sessionId>/
@@ -604,9 +603,9 @@ export class DockerManager {
 		// forever for a row that no longer exists in D1.
 		try {
 			await fs.rm(uploadsAbs, { recursive: true, force: true });
-			console.log(`[docker] purged uploads dir ${uploadsAbs}`);
+			logger.info(`[docker] purged uploads dir ${uploadsAbs}`);
 		} catch (err) {
-			console.error(`[docker] failed to purge uploads ${uploadsAbs}:`, (err as Error).message);
+			logger.error(`[docker] failed to purge uploads ${uploadsAbs}: ${(err as Error).message}`);
 			throw err;
 		}
 	}
@@ -631,7 +630,7 @@ export class DockerManager {
 		if (!meta.containerId) {
 			await this.spawn(sessionId);
 			await this.sessions.updateStatus(sessionId, "running");
-			console.log(`[docker] respawned container for session ${sessionId}`);
+			logger.info(`[docker] respawned container for session ${sessionId}`);
 			return;
 		}
 
@@ -645,9 +644,9 @@ export class DockerManager {
 				await this.docker.getContainer(meta.containerId).start();
 			}
 			await this.sessions.updateStatus(sessionId, "running");
-			console.log(`[docker] restarted container for session ${sessionId}`);
+			logger.info(`[docker] restarted container for session ${sessionId}`);
 		} catch {
-			console.log(`[docker] stale container_id for session ${sessionId}, respawning`);
+			logger.info(`[docker] stale container_id for session ${sessionId}, respawning`);
 			await this.sessions.setContainerId(sessionId, null);
 			await this.spawn(sessionId);
 			await this.sessions.updateStatus(sessionId, "running");
@@ -671,7 +670,7 @@ export class DockerManager {
 		const capDrop = hostConfig?.CapDrop ?? [];
 		const securityOpt = hostConfig?.SecurityOpt ?? [];
 		if (capDrop.includes("ALL") && securityOpt.includes("no-new-privileges:true")) return;
-		console.warn(
+		logger.warn(
 			`[docker] session ${sessionId} container ${containerId.slice(0, 12)} ` +
 				`predates issue-#15 hardening (CapDrop=${JSON.stringify(capDrop)}, ` +
 				`SecurityOpt=${JSON.stringify(securityOpt)}). ` +
@@ -688,7 +687,7 @@ export class DockerManager {
 			/* already stopped */
 		}
 		await this.sessions.updateStatus(sessionId, "stopped");
-		console.log(`[docker] stopped container for session ${sessionId}`);
+		logger.info(`[docker] stopped container for session ${sessionId}`);
 	}
 
 	// ── Exec attach ────────────────────────────────────────────────────────
@@ -716,7 +715,7 @@ export class DockerManager {
 			// before this microtask.
 			pending.catch((err) => {
 				if (this.shared.get(key) === pending) this.shared.delete(key);
-				console.error(`[docker] shared exec spawn failed for ${key}:`, (err as Error).message);
+				logger.error(`[docker] shared exec spawn failed for ${key}: ${(err as Error).message}`);
 			});
 			this.shared.set(key, pending);
 		}
@@ -838,7 +837,7 @@ export class DockerManager {
 			this.detach(attachId);
 			throw err;
 		}
-		console.log(
+		logger.info(
 			`[docker] attached ${attachId} to session ${sessionId} (listeners=${s.listeners.size})`,
 		);
 
@@ -905,9 +904,8 @@ export class DockerManager {
 			// dump xterm needs CRLF line terminators — add the \r back.
 			return stdout.replace(/\n/g, "\r\n");
 		} catch (err) {
-			console.warn(
-				`[docker] capture-pane failed for ${this.targetKey(sessionId, tabId)}:`,
-				(err as Error).message,
+			logger.warn(
+				`[docker] capture-pane failed for ${this.targetKey(sessionId, tabId)}: ${(err as Error).message}`,
 			);
 			return "";
 		}
@@ -966,12 +964,12 @@ export class DockerManager {
 					} catch {
 						/* already destroyed */
 					}
-					console.log(`[docker] detached ${attachId}; last client, shared exec closed`);
+					logger.info(`[docker] detached ${attachId}; last client, shared exec closed`);
 				} else {
 					// Someone else may have had a smaller terminal; recompute so
 					// the survivors don't stay pinned to a too-small size.
 					void this.recomputeSize(s);
-					console.log(`[docker] detached ${attachId}; ${s.listeners.size} listener(s) remain`);
+					logger.info(`[docker] detached ${attachId}; ${s.listeners.size} listener(s) remain`);
 				}
 			},
 			() => {
@@ -1079,11 +1077,11 @@ export class DockerManager {
 			void forgetIfCurrent();
 		});
 		stream.on("error", (err) => {
-			console.error(`[docker] shared exec stream error for ${key}:`, (err as Error).message);
+			logger.error(`[docker] shared exec stream error for ${key}: ${(err as Error).message}`);
 			void forgetIfCurrent();
 		});
 
-		console.log(`[docker] spawned shared exec for ${key}`);
+		logger.info(`[docker] spawned shared exec for ${key}`);
 		return s;
 	}
 
@@ -1178,7 +1176,7 @@ export class DockerManager {
 		]);
 
 		const now = Math.floor(Date.now() / 1000);
-		console.log(`[docker] created tab ${tabId} (${displayLabel}) in session ${sessionId}`);
+		logger.info(`[docker] created tab ${tabId} (${displayLabel}) in session ${sessionId}`);
 		return { tabId, label: displayLabel, createdAt: now };
 	}
 
@@ -1210,9 +1208,9 @@ export class DockerManager {
 		if (exitCode !== 0) {
 			// kill-session returns non-zero if the target doesn't exist — OK for
 			// the idempotent case; caller has already validated it existed.
-			console.warn(`[docker] kill-session ${tabId} exited ${exitCode}`);
+			logger.warn(`[docker] kill-session ${tabId} exited ${exitCode}`);
 		}
-		console.log(`[docker] deleted tab ${tabId} from session ${sessionId}`);
+		logger.info(`[docker] deleted tab ${tabId} from session ${sessionId}`);
 	}
 
 	private async execOneShot(
@@ -1280,9 +1278,7 @@ export class DockerManager {
 		} catch (err) {
 			// ENOENT is expected on a fresh deployment — nothing to sweep.
 			if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-				console.warn(
-					`[docker] sweepUploadTmp readdir failed for ${dir}: ${(err as Error).message}`,
-				);
+				logger.warn(`[docker] sweepUploadTmp readdir failed for ${dir}: ${(err as Error).message}`);
 			}
 			return;
 		}
@@ -1298,13 +1294,13 @@ export class DockerManager {
 			fileEntries.map((e) => fs.unlink(path.join(dir, e.name))),
 		);
 		const failed = results.filter((r) => r.status === "rejected").length;
-		console.log(
+		logger.info(
 			`[docker] sweepUploadTmp removed ${fileEntries.length - failed}/${fileEntries.length} stale tmp files`,
 		);
 	}
 
 	async reconcile(): Promise<void> {
-		console.log("[docker] reconciling session state with Docker…");
+		logger.info("[docker] reconciling session state with Docker…");
 		await this.sweepUploadTmp();
 		const result = await d1Query<{ session_id: string; container_id: string | null }>(
 			"SELECT session_id, container_id FROM sessions WHERE status = 'running'",
@@ -1336,14 +1332,14 @@ export class DockerManager {
 				if (statusCode === 404) {
 					await this.sessions.recordContainerGone(row.session_id);
 				} else {
-					console.warn(
+					logger.warn(
 						`[docker] reconcile inspect failed for session ${row.session_id}: ${(err as Error).message}`,
 					);
 					await this.sessions.updateStatus(row.session_id, "stopped");
 				}
 			}
 		}
-		console.log("[docker] reconciliation complete");
+		logger.info("[docker] reconciliation complete");
 	}
 }
 

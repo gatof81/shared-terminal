@@ -6,9 +6,12 @@ import {
 	validateJwtSecret,
 	warnIfWildcardCorsInProduction,
 } from "./auth.js";
+import { logger } from "./logger.js";
 
-// These tests manipulate process.env.{JWT_SECRET, NODE_ENV} and use a
-// spy on console.warn. Snapshot + restore each to avoid cross-test leakage.
+// These tests manipulate process.env.{JWT_SECRET, NODE_ENV} and spy on
+// the pino logger's `warn` method (production code now logs through the
+// shared logger, not raw console). Snapshot + restore each to avoid
+// cross-test leakage.
 describe("validateJwtSecret", () => {
 	const originalEnv = { ...process.env };
 	let warnSpy: ReturnType<typeof vi.spyOn>;
@@ -16,7 +19,7 @@ describe("validateJwtSecret", () => {
 	beforeEach(() => {
 		delete process.env.JWT_SECRET;
 		delete process.env.NODE_ENV;
-		warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {
+		warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {
 			/* swallow */
 		});
 		// Reset the module-level captured secret so each test starts from

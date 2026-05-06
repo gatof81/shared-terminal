@@ -24,6 +24,7 @@ import {
 import type { DockerManager } from "./dockerManager.js";
 import { UploadQuotaExceededError } from "./dockerManager.js";
 import { EnvVarValidationError, validateEnvVars } from "./envVarValidation.js";
+import { logger } from "./logger.js";
 import type { RateLimitConfig } from "./rateLimit.js";
 import {
 	createAuthRateLimiters,
@@ -115,7 +116,7 @@ export function buildRouter(
 				res.status(409).json({ error: err.message });
 				return;
 			}
-			console.error(`[auth] register failed unexpectedly:`, (err as Error).message);
+			logger.error(`[auth] register failed unexpectedly: ${(err as Error).message}`);
 			res.status(500).json({ error: "Internal server error" });
 		}
 	});
@@ -169,7 +170,7 @@ export function buildRouter(
 					return;
 				}
 				// Username omitted from the log to avoid an enumeration vector.
-				console.error(`[auth] login failed unexpectedly:`, (err as Error).message);
+				logger.error(`[auth] login failed unexpectedly: ${(err as Error).message}`);
 				res.status(500).json({ error: "Internal server error" });
 				return;
 			}
@@ -205,7 +206,7 @@ export function buildRouter(
 			const invites = await listInvites(userId);
 			res.json(invites);
 		} catch (err) {
-			console.error(`[invites] list failed:`, (err as Error).message);
+			logger.error(`[invites] list failed: ${(err as Error).message}`);
 			res.status(500).json({ error: "Internal server error" });
 		}
 	});
@@ -220,7 +221,7 @@ export function buildRouter(
 				res.status(429).json({ error: err.message });
 				return;
 			}
-			console.error(`[invites] create failed:`, (err as Error).message);
+			logger.error(`[invites] create failed: ${(err as Error).message}`);
 			res.status(500).json({ error: "Internal server error" });
 		}
 	});
@@ -246,7 +247,7 @@ export function buildRouter(
 			}
 			res.status(204).send();
 		} catch (err) {
-			console.error(`[invites] revoke failed:`, (err as Error).message);
+			logger.error(`[invites] revoke failed: ${(err as Error).message}`);
 			res.status(500).json({ error: "Internal server error" });
 		}
 	});
@@ -306,7 +307,7 @@ export function buildRouter(
 				res.status(429).json({ error: err.message, quota: err.quota });
 				return;
 			}
-			console.error(`[routes] session create failed:`, (err as Error).message);
+			logger.error(`[routes] session create failed: ${(err as Error).message}`);
 			if (meta) {
 				// Best-effort rollback. If deleteRow itself fails (D1 blip),
 				// the reconciler will eventually flip status to stopped but
@@ -315,9 +316,8 @@ export function buildRouter(
 				try {
 					await sessions.deleteRow(meta.sessionId);
 				} catch (cleanupErr) {
-					console.error(
-						`[routes] CRITICAL: spawn rollback failed for session ${meta.sessionId}:`,
-						(cleanupErr as Error).message,
+					logger.error(
+						`[routes] CRITICAL: spawn rollback failed for session ${meta.sessionId}: ${(cleanupErr as Error).message}`,
 					);
 				}
 			}
@@ -368,9 +368,8 @@ export function buildRouter(
 				try {
 					await docker.purgeWorkspace(req.params.id);
 				} catch (err) {
-					console.error(
-						`[routes] purgeWorkspace failed for ${req.params.id}:`,
-						(err as Error).message,
+					logger.error(
+						`[routes] purgeWorkspace failed for ${req.params.id}: ${(err as Error).message}`,
 					);
 					// Fall through — we still want to remove the row.
 				}
@@ -594,7 +593,7 @@ export function buildRouter(
 					// signal than silence.
 					for (const r of results) {
 						if (r.status === "rejected") {
-							console.warn("[routes] tmp unlink failed:", (r.reason as Error).message);
+							logger.warn(`[routes] tmp unlink failed: ${(r.reason as Error).message}`);
 						}
 					}
 				});
@@ -623,7 +622,7 @@ export function buildRouter(
 				res.status(400).json({ error: `Upload rejected: ${err.message}` });
 				return;
 			}
-			console.error("[routes] upload middleware error:", (err as Error).message);
+			logger.error(`[routes] upload middleware error: ${(err as Error).message}`);
 			res.status(500).json({ error: "Upload failed" });
 		});
 	};
@@ -757,7 +756,7 @@ function handleSessionError(err: unknown, res: Response): void {
 		// session usage to the client.
 		res.status(413).json({ error: err.message });
 	} else {
-		console.error("[routes] unexpected error:", (err as Error).message);
+		logger.error(`[routes] unexpected error: ${(err as Error).message}`);
 		res.status(500).json({ error: "Internal server error" });
 	}
 }
