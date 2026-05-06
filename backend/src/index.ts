@@ -21,7 +21,7 @@ import { DockerManager } from "./dockerManager.js";
 import { buildRouter } from "./routes.js";
 import { SessionManager } from "./sessionManager.js";
 import { parseTrustProxy, TrustProxyError, warnIfProductionMisconfigured } from "./trustProxy.js";
-import { handleWsConnection } from "./wsHandler.js";
+import { endUpgradeSocketWithReply, handleWsConnection } from "./wsHandler.js";
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -121,7 +121,10 @@ server.on("upgrade", (req, socket, head) => {
                 // socket.destroy() (the previous form) issues immediate
                 // teardown with no drain guarantee — the status line can be
                 // dropped, making "why did my WS fail" harder to debug.
-                socket.end("HTTP/1.1 404 Not Found\r\n\r\n");
+                // The bounded-destroy timer in endUpgradeSocketWithReply
+                // closes the CLOSE_WAIT window a half-close otherwise opens
+                // up against a peer that never FINs (#67).
+                endUpgradeSocketWithReply(socket, "HTTP/1.1 404 Not Found\r\n\r\n");
                 return;
         }
 
@@ -143,7 +146,7 @@ server.on("upgrade", (req, socket, head) => {
         // surface through the 403 status code + the boot warning, not
         // through per-request log spam.
         if (!isAllowedWsOrigin(req.headers.origin, CORS_ORIGINS, process.env.NODE_ENV)) {
-                socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+                endUpgradeSocketWithReply(socket, "HTTP/1.1 403 Forbidden\r\n\r\n");
                 return;
         }
 
