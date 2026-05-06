@@ -9,6 +9,7 @@ import { Router } from "express";
 import multer from "multer";
 import type { AuthedRequest } from "./auth.js";
 import {
+	AUTH_COOKIE_NAME,
 	clearAuthCookie,
 	createInvite,
 	extractTokenFromCookieHeader,
@@ -70,7 +71,7 @@ export function buildRouter(
 			cookies?: Record<string, string | undefined>;
 		};
 		const token =
-			reqWithCookies.cookies?.st_token ??
+			reqWithCookies.cookies?.[AUTH_COOKIE_NAME] ??
 			extractTokenFromCookieHeader(req.headers.cookie) ??
 			undefined;
 		const authenticated = verifyJwt(token) !== null;
