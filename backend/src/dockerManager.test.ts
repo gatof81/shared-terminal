@@ -15,6 +15,7 @@ import {
 	sanitiseHostname,
 	sanitiseUploadName,
 } from "./dockerManager.js";
+import { logger } from "./logger.js";
 import type { SessionManager } from "./sessionManager.js";
 
 // ── Test harness ────────────────────────────────────────────────────────────
@@ -753,7 +754,7 @@ describe("DockerManager.reconcile", () => {
 	}
 
 	it("warns when reconcile inspects a running pre-#15 container (no CapDrop/SecurityOpt)", async () => {
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const { dm, sessions } = makeDockerWithInspectResult({
 			State: { Running: true },
 			HostConfig: { CapDrop: [], SecurityOpt: [] },
@@ -781,7 +782,7 @@ describe("DockerManager.reconcile", () => {
 		// migration footgun surfaces even on containers that happen to be
 		// dead at reconcile time — they'll be respawned later, and the
 		// operator needs to know the old image is involved.
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const { dm, sessions } = makeDockerWithInspectResult({
 			State: { Running: false },
 			HostConfig: { CapDrop: [], SecurityOpt: [] },
@@ -800,7 +801,7 @@ describe("DockerManager.reconcile", () => {
 	});
 
 	it("does not warn for properly hardened containers", async () => {
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const { dm } = makeDockerWithInspectResult({
 			State: { Running: true },
 			HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"] },
@@ -823,7 +824,7 @@ describe("DockerManager.startContainer", () => {
 	// reached this way must surface the same warn as reconcile so a future
 	// refactor can't silently drop the call.
 	it("warns when starting an existing pre-#15 container (Case 2)", async () => {
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const sessions = makeFakeSessions();
 		const dm = new DockerManager(sessions);
 		(dm as unknown as { docker: unknown }).docker = {

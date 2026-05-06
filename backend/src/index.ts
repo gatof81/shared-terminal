@@ -18,6 +18,7 @@ import {
 } from "./auth.js";
 import { migrateDb, validateD1Config } from "./db.js";
 import { DockerManager } from "./dockerManager.js";
+import { logger } from "./logger.js";
 import { buildRouter } from "./routes.js";
 import { SessionManager } from "./sessionManager.js";
 import { parseTrustProxy, TrustProxyError, warnIfProductionMisconfigured } from "./trustProxy.js";
@@ -62,7 +63,7 @@ try {
 	trustProxyValue = parseTrustProxy(TRUST_PROXY_RAW);
 } catch (err) {
 	if (err instanceof TrustProxyError) {
-		console.error("[server]", err.message);
+		logger.error(`[server] ${err.message}`);
 		process.exit(1);
 	}
 	throw err;
@@ -81,9 +82,9 @@ if (trustProxyValue !== undefined) {
 	// Log the effective value so ops can spot a misconfigured prod
 	// (e.g. TRUST_PROXY=0 behind a tunnel would silently collapse
 	// per-IP rate limits into one bucket).
-	console.log(`[server] trust proxy = ${JSON.stringify(trustProxyValue)}`);
+	logger.info(`[server] trust proxy = ${JSON.stringify(trustProxyValue)}`);
 } else {
-	console.log("[server] trust proxy = unset (req.ip will be the socket address)");
+	logger.info("[server] trust proxy = unset (req.ip will be the socket address)");
 }
 app.use(express.json());
 
@@ -149,7 +150,7 @@ server.on("upgrade", (req, socket, head) => {
 	if (!isAllowedWsOrigin(req.headers.origin, CORS_ORIGINS, process.env.NODE_ENV)) {
 		// Dev/staging only: see the block comment above and issue #66.
 		if (process.env.NODE_ENV !== "production") {
-			console.log(
+			logger.info(
 				"[ws] rejecting upgrade: Origin=%s not in allowlist %j",
 				req.headers.origin ?? "<absent>",
 				CORS_ORIGINS,
@@ -182,15 +183,15 @@ async function start() {
 	await ensureAuthReady();
 
 	server.listen(PORT, () => {
-		console.log(`[server] listening on http://localhost:${PORT}`);
-		console.log(`[server] WebSocket: ws://localhost:${PORT}/ws/sessions/:id`);
-		console.log(`[server] CORS origins: ${CORS_ORIGINS.join(", ")}`);
-		console.log(`[server] Database: Cloudflare D1`);
+		logger.info(`[server] listening on http://localhost:${PORT}`);
+		logger.info(`[server] WebSocket: ws://localhost:${PORT}/ws/sessions/:id`);
+		logger.info(`[server] CORS origins: ${CORS_ORIGINS.join(", ")}`);
+		logger.info(`[server] Database: Cloudflare D1`);
 	});
 }
 
 start().catch((err) => {
-	console.error("[server] failed to start:", err);
+	logger.error(`[server] failed to start: ${err}`);
 	process.exit(1);
 });
 
@@ -207,7 +208,7 @@ let shuttingDown = false;
 function shutdown() {
 	if (shuttingDown) return;
 	shuttingDown = true;
-	console.log("[server] shutting down…");
+	logger.info("[server] shutting down…");
 
 	// Actively close live WS clients. `wss.close()` alone only stops accepting
 	// new upgrades — existing connections stay open, which keeps `server.close()`
@@ -227,7 +228,7 @@ function shutdown() {
 	// keeps the event loop alive), exit anyway after a grace period instead of
 	// hanging the orchestrator's stop timeout.
 	const watchdog = setTimeout(() => {
-		console.warn("[server] shutdown watchdog fired — forcing exit");
+		logger.warn("[server] shutdown watchdog fired — forcing exit");
 		process.exit(1);
 	}, 10_000);
 	watchdog.unref();

@@ -10,6 +10,8 @@
  *   D1_DATABASE_ID
  */
 
+import { logger } from "./logger.js";
+
 const ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID ?? "";
 const API_TOKEN = process.env.CLOUDFLARE_API_TOKEN ?? "";
 const DATABASE_ID = process.env.D1_DATABASE_ID ?? "";
@@ -75,7 +77,7 @@ export async function d1Batch(statements: string[]): Promise<void> {
  * Call once on server startup.
  */
 export async function migrateDb(): Promise<void> {
-	console.log("[db] running D1 migrations…");
+	logger.info("[db] running D1 migrations…");
 	await d1Batch([
 		`CREATE TABLE IF NOT EXISTS users (
                         id          TEXT PRIMARY KEY,
@@ -165,7 +167,7 @@ export async function migrateDb(): Promise<void> {
 					"and re-INSERT into the new (code_hash, code_prefix, …) shape.",
 			);
 		}
-		console.warn("[db] migrating empty pre-#49 invite_codes table to hashed-at-rest shape");
+		logger.warn("[db] migrating empty pre-#49 invite_codes table to hashed-at-rest shape");
 		await d1Query("DROP TABLE invite_codes");
 		await d1Query(
 			`CREATE TABLE invite_codes (
@@ -182,7 +184,7 @@ export async function migrateDb(): Promise<void> {
 			"CREATE INDEX IF NOT EXISTS idx_invite_codes_creator ON invite_codes(created_by)",
 		);
 	}
-	console.log("[db] migrations complete");
+	logger.info("[db] migrations complete");
 }
 
 /** Validate that D1 credentials are configured. */

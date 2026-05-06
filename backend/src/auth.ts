@@ -8,6 +8,7 @@ import type { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import { v4 as uuidv4 } from "uuid";
 import { d1Query } from "./db.js";
+import { logger } from "./logger.js";
 import type { JwtPayload } from "./types.js";
 
 // Dev fallback. Production deployments must supply JWT_SECRET — validateJwtSecret()
@@ -49,12 +50,12 @@ export function validateJwtSecret(): void {
 		);
 	}
 	if (missing) {
-		console.warn(
+		logger.warn(
 			"[auth] JWT_SECRET is not set — using the insecure default. " +
 				"Set JWT_SECRET in your .env before any non-local use.",
 		);
 	} else if (usingPlaceholder) {
-		console.warn(
+		logger.warn(
 			"[auth] JWT_SECRET is set to the insecure placeholder value. " +
 				"Replace it in your .env before any non-local use.",
 		);
@@ -213,13 +214,9 @@ export async function registerUser(
 			//
 			//   DELETE FROM invite_codes
 			//   WHERE code_hash = '<hash>' AND used_by = '<userId>';
-			console.error(
-				"[auth] CRITICAL: invite release failed — code hash %s claimed by user %s is permanently consumed without an account. " +
-					"Insert error: %s. Release error: %s",
-				inviteHash,
-				userId,
-				(err as Error).message,
-				(releaseErr as Error).message,
+			logger.error(
+				`[auth] CRITICAL: invite release failed — code hash ${inviteHash} claimed by user ${userId} is permanently consumed without an account. ` +
+					`Insert error: ${(err as Error).message}. Release error: ${(releaseErr as Error).message}`,
 			);
 		}
 		// SQLite UNIQUE-constraint violation → username already taken.
@@ -547,12 +544,12 @@ export function verifyWsToken(
 		// is preferred; the query-string path only kicks in as a fallback for
 		// proxies that strip Sec-WebSocket-Protocol.
 		if (!protocolHeader && !requestUrl) {
-			console.error("[verifyWsToken] no Sec-WebSocket-Protocol header and no request URL");
+			logger.error("[verifyWsToken] no Sec-WebSocket-Protocol header and no request URL");
 		} else if (!protocolHeader) {
-			console.error("[verifyWsToken] no Sec-WebSocket-Protocol header and no ?token= query param");
+			logger.error("[verifyWsToken] no Sec-WebSocket-Protocol header and no ?token= query param");
 		} else {
 			const header = Array.isArray(protocolHeader) ? protocolHeader.join(",") : protocolHeader;
-			console.error(
+			logger.error(
 				"[verifyWsToken] no usable auth.bearer.* subprotocol (got: %s) and no ?token= query param",
 				header,
 			);
@@ -563,10 +560,8 @@ export function verifyWsToken(
 	try {
 		return jwt.verify(token, jwtSecret()) as JwtPayload;
 	} catch (err) {
-		console.error(
-			"[verifyWsToken] jwt verify failed:",
-			(err as Error).name,
-			(err as Error).message,
+		logger.error(
+			`[verifyWsToken] jwt verify failed: ${(err as Error).name}: ${(err as Error).message}`,
 		);
 		return null;
 	}
@@ -713,16 +708,18 @@ export function isAllowedWsOrigin(
  * (on boot) rather than per-rejected-request, which would be noisy and
  * drown out genuine attack-surface signals.
  *
- * Logger is injectable for the test.
+ * `out` is injectable for the test — defaults to the module-level pino
+ * logger; tests pass a `{ warn: vi.fn() }` and assert on it. The
+ * parameter name avoids shadowing the imported `logger`.
  */
 export function warnIfWildcardCorsInProduction(
 	allowedOrigins: readonly string[],
 	nodeEnv: string | undefined,
-	logger: Pick<Console, "warn"> = console,
+	out: { warn: (msg: string) => void } = logger,
 ): void {
 	if (nodeEnv !== "production") return;
 	if (!allowedOrigins.includes("*")) return;
-	logger.warn(
+	out.warn(
 		"[server] CORS_ORIGINS contains '*' in production. The HTTP layer " +
 			"still honours this, but the WebSocket upgrade handler refuses it " +
 			"(CSWSH protection). Set CORS_ORIGINS to an explicit origin list " +

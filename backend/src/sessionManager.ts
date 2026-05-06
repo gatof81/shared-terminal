@@ -6,6 +6,7 @@
 
 import { v4 as uuidv4 } from "uuid";
 import { d1Query } from "./db.js";
+import { logger } from "./logger.js";
 import type { CreateSessionOpts, SessionMeta, SessionStatus } from "./types.js";
 
 // ── Custom errors ───────────────────────────────────────────────────────────
@@ -48,11 +49,11 @@ const MAX_ACTIVE_SESSIONS_PER_USER = ((): number => {
 		// Surface the original value (quoted, so "  " etc. stay visible)
 		// and the effective fallback — ops should be able to tell at a
 		// glance which variable was wrong and what the server is
-		// actually running with. Uses console.warn rather than throw
+		// actually running with. Uses logger.warn rather than throw
 		// because a startup abort here would gate the whole server on
 		// a non-critical config typo, which is worse than running with
 		// the documented default.
-		console.warn(
+		logger.warn(
 			`[sessionManager] MAX_ACTIVE_SESSIONS_PER_USER=${JSON.stringify(raw)} ` +
 				`is not a positive integer; falling back to ${DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER}`,
 		);
