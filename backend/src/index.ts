@@ -6,13 +6,13 @@
  */
 
 import http from "node:http";
+import cookieParser from "cookie-parser";
 import express from "express";
 import { WebSocketServer } from "ws";
 import {
 	ensureAuthReady,
 	isAllowedWsOrigin,
 	parseCorsOrigins,
-	selectWsAuthProtocol,
 	validateJwtSecret,
 	warnIfWildcardCorsInProduction,
 } from "./auth.js";
@@ -87,15 +87,33 @@ if (trustProxyValue !== undefined) {
 	logger.info("[server] trust proxy = unset (req.ip will be the socket address)");
 }
 app.use(express.json());
+// Populates `req.cookies` from the Cookie header. requireAuth reads the
+// JWT from `req.cookies.st_token` (#18). No `secret` is passed because we
+// don't use signed cookies — the JWT itself is the integrity-protected
+// payload, and signing the cookie wrapping it would be redundant.
+app.use(cookieParser());
 
-// CORS — allow frontend from Cloudflare Pages (or any configured origin)
+// CORS — allow frontend from Cloudflare Pages (or any configured origin).
+//
+// Cookie-based auth (#18) requires:
+//   - `Access-Control-Allow-Credentials: true`, so the browser is willing
+//     to send the cookie cross-origin.
+//   - A specific `Access-Control-Allow-Origin` echoing the request's
+//     origin — `*` is illegal alongside credentials and the browser
+//     refuses the response. We never echo `*` here.
+//
+// `Authorization` is no longer in `Allow-Headers` because the frontend
+// never sends one — auth travels in the cookie and there's no read path
+// for the frontend that needs to inspect or set it.
 app.use((_req, res, next) => {
 	const origin = _req.headers.origin ?? "";
-	if (CORS_ORIGINS.includes("*") || CORS_ORIGINS.includes(origin)) {
-		res.setHeader("Access-Control-Allow-Origin", origin || "*");
+	if (origin && (CORS_ORIGINS.includes("*") || CORS_ORIGINS.includes(origin))) {
+		res.setHeader("Access-Control-Allow-Origin", origin);
+		res.setHeader("Access-Control-Allow-Credentials", "true");
+		res.setHeader("Vary", "Origin");
 	}
 	res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,PATCH,OPTIONS");
-	res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
+	res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 	if (_req.method === "OPTIONS") {
 		res.sendStatus(204);
 		return;
@@ -109,10 +127,10 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 // ── HTTP + WebSocket server ───────────────────────────────────────────────────
 
 const server = http.createServer(app);
-const wss = new WebSocketServer({
-	noServer: true,
-	handleProtocols: (protocols) => selectWsAuthProtocol(protocols),
-});
+// Auth lands via the request's Cookie header (#18) — no protocol selection
+// is needed for auth purposes, so handleProtocols is dropped along with
+// the `auth.bearer.<jwt>` subprotocol convention.
+const wss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
 	const url = req.url ?? "";

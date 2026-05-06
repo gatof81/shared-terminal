@@ -15,6 +15,17 @@ const authStubs = vi.hoisted(() => ({
 	hasAnyUsers: vi.fn(async () => true),
 	listInvites: vi.fn(async (_u?: string) => [] as unknown[]),
 	requireAuth: (_req: unknown, _res: unknown, next: () => void) => next(),
+	// Cookie-auth helpers (#18). Tests don't read the cookie back, so a
+	// no-op for set/clear and a permissive shape-only verify is enough.
+	AUTH_COOKIE_NAME: "st_token",
+	setAuthCookie: vi.fn(() => {
+		/* no-op */
+	}),
+	clearAuthCookie: vi.fn(() => {
+		/* no-op */
+	}),
+	extractTokenFromCookieHeader: vi.fn(() => null),
+	verifyJwt: vi.fn(() => null),
 	// The route handler checks `err instanceof InvalidCredentialsError` where
 	// `InvalidCredentialsError` is imported from `./auth.js`. Because we
 	// `vi.mock` the whole module, both the handler's import and the stub's

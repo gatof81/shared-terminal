@@ -163,13 +163,16 @@ function disposeAllCurrentTerminals() {
 let isBootstrapRegister = false;
 
 async function initAuth() {
-	if (isLoggedIn()) {
-		showApp();
-		return;
-	}
-
+	// Cookie-based auth (#18): the only way to know if we're already
+	// authenticated is to ask the server, since the cookie is httpOnly.
+	// /auth/status fields both questions in one round-trip — `authenticated`
+	// for "show app vs. login" and `needsSetup` for "show invite field".
 	try {
-		const { needsSetup } = await checkAuthStatus();
+		const { needsSetup, authenticated } = await checkAuthStatus();
+		if (authenticated) {
+			showApp();
+			return;
+		}
 		if (needsSetup) {
 			isRegisterMode = true;
 			isBootstrapRegister = true;
@@ -294,13 +297,18 @@ authForm.addEventListener("submit", async (e) => {
 });
 
 // Shared teardown for both the explicit logout button and the auto-triggered
-// session-expired path below. Idempotent: `logout()` clears the already-null
-// token on a second call, disposeAllCurrentTerminals() handles an empty
-// terminal map, and showAuth() just re-applies display styles. So the burst
-// case (multiple 401s briefly racing before _token is cleared) is safe even
-// though apiFetch's `_token !== null` guard already deduplicates.
+// session-expired path below. Idempotent: `logout()` is safe to call from a
+// logged-out state (it just POSTs /auth/logout and the server returns 204
+// either way), disposeAllCurrentTerminals() handles an empty terminal map,
+// and showAuth() just re-applies display styles. So the burst case (multiple
+// 401s briefly racing) is safe even though apiFetch's `_loggedIn` guard
+// already deduplicates.
+//
+// Fire and forget on the network call — the UI teardown shouldn't block on
+// the round-trip, and the server's POST /auth/logout response carries no
+// information we'd act on.
 function handleLogout(toastMessage?: string): void {
-	logout();
+	void logout();
 	disposeAllCurrentTerminals();
 	activeSessionId = null;
 	sessions = [];

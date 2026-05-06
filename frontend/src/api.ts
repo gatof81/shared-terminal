@@ -7,36 +7,39 @@
 const BACKEND_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
 const API_BASE = `${BACKEND_URL}/api`;
 
-// ── Token management ────────────────────────────────────────────────────────
+// ── Auth state (#18) ────────────────────────────────────────────────────────
+//
+// The JWT lives in an httpOnly cookie that JS cannot read. The boolean below
+// is just an in-memory mirror of "do we currently have a valid session" so
+// the UI can route between the login screen and the app without doing a
+// round-trip on every navigation. It's hydrated on boot from /auth/status
+// (which the server populates from req.cookies), and updated on
+// login/register/logout/401.
 
-let _token: string | null = localStorage.getItem("st_token");
-
-export function getToken(): string | null {
-	return _token;
-}
-
-export function setToken(token: string | null): void {
-	_token = token;
-	if (token) {
-		localStorage.setItem("st_token", token);
-	} else {
-		localStorage.removeItem("st_token");
-	}
-}
+let _loggedIn = false;
 
 export function isLoggedIn(): boolean {
-	return !!_token;
+	return _loggedIn;
 }
 
-/** Fired by `apiFetch` once per 401-burst after clearing the stale token —
+/** Fired by `apiFetch` once per 401-burst after flipping `_loggedIn` to false —
  * main.ts listens to perform UI teardown. See apiFetch for the emit guard. */
 export const SESSION_EXPIRED_EVENT = "st:session-expired";
 
 // ── Auth API ────────────────────────────────────────────────────────────────
 
-export async function checkAuthStatus(): Promise<{ needsSetup: boolean }> {
+export interface AuthStatus {
+	needsSetup: boolean;
+	authenticated: boolean;
+}
+
+export async function checkAuthStatus(): Promise<AuthStatus> {
 	const res = await apiFetch("/auth/status");
-	return res.json();
+	const data = (await res.json()) as AuthStatus;
+	// The server is the source of truth for cookie presence. Mirror it
+	// into module state so isLoggedIn() can answer instantly thereafter.
+	_loggedIn = data.authenticated;
+	return data;
 }
 
 export class InviteRequiredError extends Error {
@@ -50,7 +53,7 @@ export async function register(
 	username: string,
 	password: string,
 	inviteCode?: string,
-): Promise<{ userId: string; token: string }> {
+): Promise<{ userId: string }> {
 	const res = await apiFetch("/auth/register", {
 		method: "POST",
 		body: JSON.stringify({ username, password, inviteCode }),
@@ -62,15 +65,12 @@ export async function register(
 		}
 		throw new Error(body.error ?? "Registration failed");
 	}
-	const data = await res.json();
-	setToken(data.token);
+	const data = (await res.json()) as { userId: string };
+	_loggedIn = true;
 	return data;
 }
 
-export async function login(
-	username: string,
-	password: string,
-): Promise<{ userId: string; token: string }> {
+export async function login(username: string, password: string): Promise<{ userId: string }> {
 	const res = await apiFetch("/auth/login", {
 		method: "POST",
 		body: JSON.stringify({ username, password }),
@@ -79,13 +79,26 @@ export async function login(
 		const body = await res.json();
 		throw new Error(body.error ?? "Login failed");
 	}
-	const data = await res.json();
-	setToken(data.token);
+	const data = (await res.json()) as { userId: string };
+	_loggedIn = true;
 	return data;
 }
 
-export function logout(): void {
-	setToken(null);
+export async function logout(): Promise<void> {
+	// POST so SameSite=Strict applies (a cross-site GET would still be
+	// blocked, but POST is the canonical "this is a state change"
+	// signal). The endpoint is unauthenticated server-side — we don't
+	// want a stale cookie to lock the user out of clearing it.
+	//
+	// Swallow network errors so a logout-while-offline still tears down
+	// local state. The server's view becomes consistent on the next
+	// /auth/status round-trip after the user comes back online.
+	try {
+		await apiFetch("/auth/logout", { method: "POST" });
+	} catch {
+		/* network down — local teardown is what the user actually wants */
+	}
+	_loggedIn = false;
 }
 
 // ── Session types ───────────────────────────────────────────────────────────
@@ -299,31 +312,36 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
 		...(isFormData ? {} : { "Content-Type": "application/json" }),
 		...((init?.headers as Record<string, string>) ?? {}),
 	};
-	// Captured before the fetch so a concurrent setToken(null) between
-	// here and the response doesn't change how we classify the 401 below.
-	// `sentAuth` pins "this request carried an Authorization header" —
-	// only authed 401s are treated as "token is stale"; an unauthed 401
-	// (e.g. wrong password on /auth/login) must not clear token state.
-	const sentAuth = !!_token;
-	if (_token) {
-		headers.Authorization = `Bearer ${_token}`;
-	}
-	const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
+	// Captured before the fetch so a concurrent flip of `_loggedIn`
+	// between here and the response doesn't change how we classify the
+	// 401 below. `sentAuth` is "we believed we were logged in when this
+	// request started"; only those 401s are treated as "session expired".
+	// A 401 from /auth/login on bad credentials, with `_loggedIn === false`
+	// before the call, must NOT trigger the SESSION_EXPIRED_EVENT.
+	const sentAuth = _loggedIn;
+	// `credentials: "include"` is mandatory for cookie-based auth across
+	// origins (frontend on Pages, backend on Tunnel). Without it the
+	// browser silently drops the auth cookie.
+	const res = await fetch(`${API_BASE}${path}`, {
+		...init,
+		headers,
+		credentials: "include",
+	});
 
-	// Centralised stale-token handling (#95). Without this, the 15 s
+	// Centralised stale-cookie handling (#95). Without this, the 15 s
 	// session poll toasts an error every 15 s forever once the JWT
-	// expires, because nothing else clears _token on 401.
+	// expires, because nothing else flips `_loggedIn` on 401.
 	//
-	// - sentAuth (captured pre-fetch) distinguishes authed 401s from
-	//   unauthed ones like a wrong-password /auth/login on a session
-	//   that already has a token — we mustn't clear auth state on that.
-	// - 401 is specifically "token stale"; 403 is policy and must not
+	// - sentAuth distinguishes authed 401s from unauthed ones like a
+	//   wrong-password /auth/login on a logged-out session — we mustn't
+	//   pretend a session existed when one didn't.
+	// - 401 is specifically "session stale"; 403 is policy and must not
 	//   trigger a logout.
-	// - _token !== null dedups concurrent 401 bursts (session poll +
-	//   a user-triggered call racing): the first setToken(null) through
-	//   silences the rest so the event fires exactly once per burst.
-	if (sentAuth && res.status === 401 && _token !== null) {
-		setToken(null);
+	// - `_loggedIn` check dedups concurrent 401 bursts (session poll +
+	//   a user-triggered call racing): the first one through flips it
+	//   false and the rest see false, so the event fires exactly once.
+	if (sentAuth && res.status === 401 && _loggedIn) {
+		_loggedIn = false;
 		window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT));
 	}
 

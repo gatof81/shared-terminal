@@ -46,7 +46,9 @@ function makeReq(
 	const headers: Record<string, string | undefined> = {};
 	if (withToken) {
 		const token = jwt.sign({ sub: "user-1" }, TEST_SECRET);
-		headers["sec-websocket-protocol"] = `auth.bearer.${token}`;
+		// Cookie-based auth (#18): browsers send the auth cookie on the
+		// WS upgrade automatically; tests inject the same shape.
+		headers.cookie = `st_token=${token}`;
 	}
 	return { url, headers };
 }

@@ -78,7 +78,7 @@ export function handleWsConnection(
 	// know the caller is a user, the specific errors below are fine
 	// — they're useful for diagnosing client bugs.
 	const url = req.url ?? "";
-	const payload = verifyWsToken(req.headers["sec-websocket-protocol"], url);
+	const payload = verifyWsToken(req.headers.cookie);
 	if (!payload) {
 		sendError(ws, "Unauthorized");
 		ws.close(1008, "Unauthorized");

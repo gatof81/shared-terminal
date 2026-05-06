@@ -2,20 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ── Test harness ────────────────────────────────────────────────────────────
 //
-// api.ts caches the token in module state and reads `localStorage` *once* at
-// import time. Most tests can manipulate state via `setToken`, but anything
-// that depends on the load-time read (the `_token` initialiser at the top of
-// api.ts) needs `vi.resetModules()` + a fresh import. The helper below makes
-// that explicit so individual tests don't have to reach for vi.resetModules
-// themselves.
+// Auth state lives in module-level memory now (#18). Tests that need to start
+// from a known state load a fresh module via vi.resetModules() + dynamic
+// import — `loadApi()` handles both.
 
 interface Api {
-	getToken: typeof import("./api.js").getToken;
-	setToken: typeof import("./api.js").setToken;
 	isLoggedIn: typeof import("./api.js").isLoggedIn;
-	logout: typeof import("./api.js").logout;
+	checkAuthStatus: typeof import("./api.js").checkAuthStatus;
 	register: typeof import("./api.js").register;
 	login: typeof import("./api.js").login;
+	logout: typeof import("./api.js").logout;
 	createSession: typeof import("./api.js").createSession;
 	listSessions: typeof import("./api.js").listSessions;
 	deleteTab: typeof import("./api.js").deleteTab;
@@ -46,7 +42,6 @@ function mockFetchResponse(init: { status?: number; ok?: boolean; json?: unknown
 let fetchSpy: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
-	localStorage.clear();
 	fetchSpy = vi.fn();
 	globalThis.fetch = fetchSpy as unknown as typeof fetch;
 });
@@ -55,72 +50,93 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-// ── Token management ───────────────────────────────────────────────────────
+// ── Login state mirror ─────────────────────────────────────────────────────
 
-describe("token management", () => {
-	it("setToken persists to localStorage; getToken / isLoggedIn reflect the cached value", async () => {
+describe("login state", () => {
+	it("isLoggedIn defaults to false on a fresh load (cookie not yet observed)", async () => {
 		const api = await loadApi();
-		expect(api.getToken()).toBeNull();
 		expect(api.isLoggedIn()).toBe(false);
-
-		api.setToken("abc.def.ghi");
-		expect(api.getToken()).toBe("abc.def.ghi");
-		expect(api.isLoggedIn()).toBe(true);
-		expect(localStorage.getItem("st_token")).toBe("abc.def.ghi");
 	});
 
-	it("setToken(null) clears localStorage; logout is sugar for it", async () => {
+	it("checkAuthStatus mirrors the server's `authenticated` field into module state", async () => {
 		const api = await loadApi();
-		api.setToken("abc");
-		api.logout();
-		expect(api.getToken()).toBeNull();
-		expect(api.isLoggedIn()).toBe(false);
-		expect(localStorage.getItem("st_token")).toBeNull();
+		fetchSpy.mockResolvedValueOnce(
+			mockFetchResponse({ json: { needsSetup: false, authenticated: true } }),
+		);
+
+		const status = await api.checkAuthStatus();
+		expect(status.authenticated).toBe(true);
+		expect(api.isLoggedIn()).toBe(true);
 	});
 
-	it("module load picks up an existing token from localStorage", async () => {
-		// The load-time read in `let _token = localStorage.getItem(...)` is the
-		// only way returning users stay logged in across tab reopens. Pin it.
-		localStorage.setItem("st_token", "from-disk");
+	it("checkAuthStatus authenticated=false leaves isLoggedIn() false", async () => {
 		const api = await loadApi();
-		expect(api.getToken()).toBe("from-disk");
+		fetchSpy.mockResolvedValueOnce(
+			mockFetchResponse({ json: { needsSetup: false, authenticated: false } }),
+		);
+
+		await api.checkAuthStatus();
+		expect(api.isLoggedIn()).toBe(false);
+	});
+
+	it("login flips isLoggedIn to true on success", async () => {
+		const api = await loadApi();
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1" } }));
+
+		await api.login("alice", "secret");
 		expect(api.isLoggedIn()).toBe(true);
+	});
+
+	it("logout POSTs /auth/logout and flips isLoggedIn to false even if the call fails", async () => {
+		const api = await loadApi();
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1" } }));
+		await api.login("alice", "secret");
+		expect(api.isLoggedIn()).toBe(true);
+
+		// Even an outright network rejection must not leave the UI thinking
+		// it's still logged in — fail-closed.
+		fetchSpy.mockRejectedValueOnce(new Error("offline"));
+		await api.logout();
+		expect(api.isLoggedIn()).toBe(false);
+
+		// Confirm the logout endpoint was hit (last call before the test ends).
+		const calls = fetchSpy.mock.calls;
+		const last = calls[calls.length - 1];
+		expect(last[0]).toBe("http://localhost:3001/api/auth/logout");
+		expect(last[1].method).toBe("POST");
 	});
 });
 
 // ── apiFetch wrapper ───────────────────────────────────────────────────────
-//
-// apiFetch is private but we exercise it indirectly via every public route.
-// Pinned behaviours: Authorization header gating, Content-Type vs FormData
-// and the 401 stale-token logout.
 
-describe("apiFetch — Authorization + Content-Type", () => {
-	it("omits Authorization when no token is set", async () => {
+describe("apiFetch — credentials and headers (#18)", () => {
+	it("sends `credentials: include` on every request so the auth cookie travels cross-origin", async () => {
 		const api = await loadApi();
 		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: [] }));
 
 		await api.listSessions();
 
 		const [, init] = fetchSpy.mock.calls[0];
+		expect(init.credentials).toBe("include");
+	});
+
+	it("never sends an Authorization header (cookie-based auth, post-#18)", async () => {
+		const api = await loadApi();
+		// Simulate a logged-in session.
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1" } }));
+		await api.login("alice", "secret");
+
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: [] }));
+		await api.listSessions();
+
+		const [, init] = fetchSpy.mock.calls[1];
 		const headers = init.headers as Record<string, string>;
 		expect(headers.Authorization).toBeUndefined();
 		expect(headers["Content-Type"]).toBe("application/json");
 	});
 
-	it("sets `Authorization: Bearer <token>` when a token is present", async () => {
-		const api = await loadApi();
-		api.setToken("tok-123");
-		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: [] }));
-
-		await api.listSessions();
-
-		const [, init] = fetchSpy.mock.calls[0];
-		expect((init.headers as Record<string, string>).Authorization).toBe("Bearer tok-123");
-	});
-
 	it("does NOT set Content-Type when the body is FormData (boundary clobber)", async () => {
 		const api = await loadApi();
-		api.setToken("tok");
 		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { paths: [] } }));
 
 		const file = new File(["hi"], "a.txt", { type: "text/plain" });
@@ -129,8 +145,7 @@ describe("apiFetch — Authorization + Content-Type", () => {
 		const [, init] = fetchSpy.mock.calls[0];
 		const headers = init.headers as Record<string, string>;
 		expect(headers["Content-Type"]).toBeUndefined();
-		// Authorization still gets through — only Content-Type is suppressed.
-		expect(headers.Authorization).toBe("Bearer tok");
+		expect(init.credentials).toBe("include");
 		expect(init.body).toBeInstanceOf(FormData);
 	});
 
@@ -146,12 +161,14 @@ describe("apiFetch — Authorization + Content-Type", () => {
 	});
 });
 
-// ── 401 stale-token handling ───────────────────────────────────────────────
+// ── 401 stale-session handling ─────────────────────────────────────────────
 
-describe("apiFetch — 401 stale-token semantics (issue #95)", () => {
-	it("authed 401 clears the token AND dispatches SESSION_EXPIRED_EVENT exactly once", async () => {
+describe("apiFetch — 401 stale-session semantics (issue #95)", () => {
+	it("authed 401 flips isLoggedIn to false AND dispatches SESSION_EXPIRED_EVENT exactly once", async () => {
 		const api = await loadApi();
-		api.setToken("stale");
+		// Establish a logged-in state so the 401 is classified as "stale".
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1" } }));
+		await api.login("alice", "secret");
 
 		const handler = vi.fn();
 		window.addEventListener(api.SESSION_EXPIRED_EVENT, handler);
@@ -161,17 +178,19 @@ describe("apiFetch — 401 stale-token semantics (issue #95)", () => {
 			/* listSessions throws on !ok; we only care about side-effects here */
 		});
 
-		expect(api.getToken()).toBeNull();
+		expect(api.isLoggedIn()).toBe(false);
 		expect(handler).toHaveBeenCalledTimes(1);
 
 		window.removeEventListener(api.SESSION_EXPIRED_EVENT, handler);
 	});
 
-	it("unauthed 401 (e.g. wrong-password /auth/login) does NOT clear token state", async () => {
+	it("unauthed 401 (e.g. wrong-password /auth/login) does NOT dispatch the event", async () => {
 		const api = await loadApi();
-		// Simulate the case where the user is logged out but tries to log in
-		// with a bad password — the 401 from /auth/login is policy, not stale.
-		expect(api.getToken()).toBeNull();
+		// Logged-out state — login attempt with bad creds returns 401.
+		expect(api.isLoggedIn()).toBe(false);
+
+		const handler = vi.fn();
+		window.addEventListener(api.SESSION_EXPIRED_EVENT, handler);
 		fetchSpy.mockResolvedValueOnce(
 			mockFetchResponse({ status: 401, json: { error: "bad creds" } }),
 		);
@@ -180,19 +199,20 @@ describe("apiFetch — 401 stale-token semantics (issue #95)", () => {
 			/* login throws on !ok */
 		});
 
-		// _token must remain null (not actively set, but also not "cleared by
-		// the 401 path" — these tests are belt-and-braces).
-		expect(api.getToken()).toBeNull();
+		expect(api.isLoggedIn()).toBe(false);
+		expect(handler).not.toHaveBeenCalled();
+		window.removeEventListener(api.SESSION_EXPIRED_EVENT, handler);
 	});
 
-	it("dedups concurrent 401 bursts so only one event fires per stale-token window", async () => {
+	it("dedups concurrent 401 bursts so only one event fires per stale-session window", async () => {
 		const api = await loadApi();
-		api.setToken("stale");
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1" } }));
+		await api.login("alice", "secret");
 
 		const handler = vi.fn();
 		window.addEventListener(api.SESSION_EXPIRED_EVENT, handler);
-		// Two concurrent authed 401s — the dedup gate is `_token !== null`,
-		// so the first response clears _token and the second sees null.
+		// Two concurrent authed 401s — the dedup gate is `_loggedIn`,
+		// so the first response flips it false and the second sees false.
 		fetchSpy
 			.mockResolvedValueOnce(mockFetchResponse({ status: 401 }))
 			.mockResolvedValueOnce(mockFetchResponse({ status: 401 }));
@@ -210,9 +230,11 @@ describe("apiFetch — 401 stale-token semantics (issue #95)", () => {
 		window.removeEventListener(api.SESSION_EXPIRED_EVENT, handler);
 	});
 
-	it("403 does NOT clear the token (policy, not stale)", async () => {
+	it("403 does NOT flip isLoggedIn (policy, not stale)", async () => {
 		const api = await loadApi();
-		api.setToken("good");
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1" } }));
+		await api.login("alice", "secret");
+
 		fetchSpy.mockResolvedValueOnce(
 			mockFetchResponse({ status: 403, json: { error: "forbidden" } }),
 		);
@@ -221,22 +243,20 @@ describe("apiFetch — 401 stale-token semantics (issue #95)", () => {
 			/* createSession throws on !ok */
 		});
 
-		expect(api.getToken()).toBe("good");
+		expect(api.isLoggedIn()).toBe(true);
 	});
 });
 
 // ── Auth + invite-required path ───────────────────────────────────────────
 
 describe("auth API", () => {
-	it("register success stores the returned token and resolves to the body", async () => {
+	it("register success returns the userId and flips isLoggedIn", async () => {
 		const api = await loadApi();
-		fetchSpy.mockResolvedValueOnce(
-			mockFetchResponse({ status: 201, json: { userId: "u1", token: "t1" } }),
-		);
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ status: 201, json: { userId: "u1" } }));
 
 		const data = await api.register("alice", "secret");
-		expect(data).toEqual({ userId: "u1", token: "t1" });
-		expect(api.getToken()).toBe("t1");
+		expect(data).toEqual({ userId: "u1" });
+		expect(api.isLoggedIn()).toBe(true);
 	});
 
 	it("register 403 throws InviteRequiredError carrying the server message", async () => {
@@ -247,8 +267,7 @@ describe("auth API", () => {
 
 		await expect(api.register("u", "p")).rejects.toThrow(api.InviteRequiredError);
 		await expect(api.register("u", "p")).rejects.toThrow("Invite code required");
-		// Token stays null on the failed register.
-		expect(api.getToken()).toBeNull();
+		expect(api.isLoggedIn()).toBe(false);
 	});
 
 	it("register on other errors throws a generic Error with the body message", async () => {
@@ -258,14 +277,15 @@ describe("auth API", () => {
 		);
 
 		await expect(api.register("u", "p")).rejects.toThrow("Username taken");
+		expect(api.isLoggedIn()).toBe(false);
 	});
 
-	it("login success stores the returned token", async () => {
+	it("login success returns the userId", async () => {
 		const api = await loadApi();
-		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1", token: "tok" } }));
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1" } }));
 
-		await api.login("u", "p");
-		expect(api.getToken()).toBe("tok");
+		const data = await api.login("u", "p");
+		expect(data).toEqual({ userId: "u1" });
 	});
 });
 
@@ -274,7 +294,6 @@ describe("auth API", () => {
 describe("idempotent-delete semantics", () => {
 	it("deleteTab on a 404 throws TabNotFoundError so callers can drop the chip", async () => {
 		const api = await loadApi();
-		api.setToken("tok");
 		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ status: 404 }));
 
 		await expect(api.deleteTab("session-1", "tab-1")).rejects.toThrow(api.TabNotFoundError);
@@ -282,7 +301,6 @@ describe("idempotent-delete semantics", () => {
 
 	it("revokeInvite on a 404 resolves silently (concurrent revoke / redemption)", async () => {
 		const api = await loadApi();
-		api.setToken("tok");
 		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ status: 404 }));
 
 		// Post-#49 the argument is the SHA-256 hex hash, not the plaintext.
@@ -292,7 +310,6 @@ describe("idempotent-delete semantics", () => {
 
 	it("revokeInvite targets /invites/<hash> (post-#49 — plaintext is gone)", async () => {
 		const api = await loadApi();
-		api.setToken("tok");
 		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ status: 204 }));
 
 		const hash = "deadbeef".repeat(8); // 64 hex chars
@@ -309,7 +326,6 @@ describe("idempotent-delete semantics", () => {
 describe("invite hash-at-rest wire shape", () => {
 	it("createInvite returns the plaintext code alongside hash and prefix exactly once", async () => {
 		const api = await loadApi();
-		api.setToken("tok");
 		fetchSpy.mockResolvedValueOnce(
 			mockFetchResponse({
 				status: 201,
@@ -333,7 +349,6 @@ describe("invite hash-at-rest wire shape", () => {
 
 	it("listInvites returns hash + prefix and never carries plaintext", async () => {
 		const api = await loadApi();
-		api.setToken("tok");
 		fetchSpy.mockResolvedValueOnce(
 			mockFetchResponse({
 				json: [
@@ -353,7 +368,6 @@ describe("invite hash-at-rest wire shape", () => {
 		expect(list).toHaveLength(1);
 		expect(list[0].codeHash).toBe("0".repeat(64));
 		expect(list[0].codePrefix).toBe("ab12");
-		// The Invite type explicitly omits plaintext — guard the wire too.
 		expect((list[0] as unknown as Record<string, unknown>).code).toBeUndefined();
 	});
 });
