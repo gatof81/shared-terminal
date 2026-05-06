@@ -166,10 +166,11 @@ export class DockerManager {
                 // No chown — backend (typically root) owns the dir, container
                 // reads via the read-only mount; no need for it to own anything.
 
+                const hostname = sanitiseHostname(meta.name, sessionId);
                 const container = await this.docker.createContainer({
                         Image: SESSION_IMAGE,
                         name: meta.containerName,
-                        Hostname: meta.name.replace(/[^a-zA-Z0-9-]/g, "-").slice(0, 63),
+                        Hostname: hostname,
                         Env: [
                                 `SESSION_ID=${sessionId}`,
                                 `SESSION_NAME=${meta.name}`,
@@ -1230,6 +1231,21 @@ export class DockerManager {
 }
 
 // ── Module-level helpers ─────────────────────────────────────────────────────
+
+// RFC 1123 forbids hostname labels from starting or ending with `-`, and
+// Docker rejects createContainer for such hostnames. Order matters: slice
+// *before* the boundary strip so a name longer than 63 chars whose 63rd
+// char is `-` doesn't sneak a trailing dash past the regex. Fall back to a
+// short-session-id label if every char gets stripped (e.g. "---", "中文").
+// Exported for tests.
+export function sanitiseHostname(name: string, sessionId: string): string {
+        return (
+                name
+                        .replace(/[^a-zA-Z0-9-]/g, "-")
+                        .slice(0, 63)
+                        .replace(/^-+|-+$/g, "") || `session-${sessionId.slice(0, 8)}`
+        );
+}
 
 // Sanitise an uploaded file's original name into a safe basename that's
 // guaranteed to land inside the uploads directory. Strips any path
