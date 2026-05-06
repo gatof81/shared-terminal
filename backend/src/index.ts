@@ -113,9 +113,20 @@ app.use((_req, res, next) => {
 	// the tunnel today; this is hardening for the moment one is added.
 	res.setHeader("Vary", "Origin");
 	const origin = _req.headers.origin ?? "";
-	if (origin && (CORS_ORIGINS.includes("*") || CORS_ORIGINS.includes(origin))) {
+	// `Access-Control-Allow-Credentials: true` is only safe when the
+	// caller's origin is in our exact-match allowlist. Cookie auth means
+	// the browser auto-attaches the cookie on credentialed requests —
+	// echoing `Allow-Credentials` for an arbitrary origin would let any
+	// page on the internet make authenticated calls and read the
+	// responses. Wildcard config (`CORS_ORIGINS=*`) falls back to a
+	// plain wildcard, no credentials: cross-origin callers get the
+	// cookie dropped by the browser and effectively a 401 from the
+	// auth middleware, while the wildcard still answers public reads.
+	if (origin && CORS_ORIGINS.includes(origin)) {
 		res.setHeader("Access-Control-Allow-Origin", origin);
 		res.setHeader("Access-Control-Allow-Credentials", "true");
+	} else if (CORS_ORIGINS.includes("*")) {
+		res.setHeader("Access-Control-Allow-Origin", "*");
 	}
 	res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,PATCH,OPTIONS");
 	res.setHeader("Access-Control-Allow-Headers", "Content-Type");
