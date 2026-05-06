@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	__resetJwtSecretForTests,
 	isAllowedWsOrigin,
@@ -16,7 +16,9 @@ describe("validateJwtSecret", () => {
 	beforeEach(() => {
 		delete process.env.JWT_SECRET;
 		delete process.env.NODE_ENV;
-		warnSpy = vi.spyOn(console, "warn").mockImplementation(() => { /* swallow */ });
+		warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {
+			/* swallow */
+		});
 		// Reset the module-level captured secret so each test starts from
 		// "validateJwtSecret has not run yet". Without this, the capture
 		// from an earlier successful validate leaks into later tests.
@@ -125,11 +127,7 @@ describe("isAllowedWsOrigin", () => {
 		// Classic `attackerour-domain.com` bypass: make sure exact-match
 		// semantics hold.
 		expect(
-			isAllowedWsOrigin(
-				"https://attackerhttps://terminal.example.com",
-				allowlist,
-				"production",
-			),
+			isAllowedWsOrigin("https://attackerhttps://terminal.example.com", allowlist, "production"),
 		).toBe(false);
 	});
 
@@ -138,9 +136,7 @@ describe("isAllowedWsOrigin", () => {
 		// mismatch from our allowlist therefore indicates either a
 		// hand-crafted request or a misconfiguration — either way, not
 		// an allow.
-		expect(
-			isAllowedWsOrigin("HTTPS://terminal.example.com", allowlist, "production"),
-		).toBe(false);
+		expect(isAllowedWsOrigin("HTTPS://terminal.example.com", allowlist, "production")).toBe(false);
 	});
 
 	// ── Branch 3: wildcard ─────────────────────────────────────────────
@@ -159,9 +155,7 @@ describe("isAllowedWsOrigin", () => {
 		// A deployment could have CORS_ORIGINS="*,https://real-frontend"
 		// (unusual but legal). The explicit entry should take precedence
 		// over the wildcard's production-refusal.
-		expect(
-			isAllowedWsOrigin(ALLOWED_ORIGIN, ["*", ALLOWED_ORIGIN], "production"),
-		).toBe(true);
+		expect(isAllowedWsOrigin(ALLOWED_ORIGIN, ["*", ALLOWED_ORIGIN], "production")).toBe(true);
 	});
 
 	// ── Branch 4: everything else ─────────────────────────────────────
@@ -176,9 +170,7 @@ describe("isAllowedWsOrigin", () => {
 	});
 
 	it("rejects a non-allowlisted origin with no wildcard present", () => {
-		expect(
-			isAllowedWsOrigin("https://evil.example.com", allowlist, "production"),
-		).toBe(false);
+		expect(isAllowedWsOrigin("https://evil.example.com", allowlist, "production")).toBe(false);
 	});
 });
 
@@ -245,16 +237,14 @@ describe("parseCorsOrigins", () => {
 		// The original bug. Leading spaces after commas used to produce
 		// [' https://b.example.com'] which never equalled the Origin
 		// header the browser actually sends.
-		expect(
-			parseCorsOrigins("https://a.example.com, https://b.example.com"),
-		).toEqual(["https://a.example.com", "https://b.example.com"]);
+		expect(parseCorsOrigins("https://a.example.com, https://b.example.com")).toEqual([
+			"https://a.example.com",
+			"https://b.example.com",
+		]);
 	});
 
 	it("handles tabs and surrounding whitespace uniformly", () => {
-		expect(parseCorsOrigins("\thttps://a ,https://b\t")).toEqual([
-			"https://a",
-			"https://b",
-		]);
+		expect(parseCorsOrigins("\thttps://a ,https://b\t")).toEqual(["https://a", "https://b"]);
 	});
 
 	it("drops empty entries after trimming", () => {
@@ -263,10 +253,7 @@ describe("parseCorsOrigins", () => {
 		// that would match a literal empty Origin header (branch 2 of
 		// isAllowedWsOrigin) — an ambiguous failure mode we'd rather
 		// not have.
-		expect(parseCorsOrigins("https://a,,https://b,")).toEqual([
-			"https://a",
-			"https://b",
-		]);
+		expect(parseCorsOrigins("https://a,,https://b,")).toEqual(["https://a", "https://b"]);
 	});
 
 	it("preserves '*' when explicitly set", () => {

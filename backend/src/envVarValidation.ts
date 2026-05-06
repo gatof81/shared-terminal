@@ -68,46 +68,46 @@ const ENV_VAR_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 // SEES at startup, with no silent linker/interpreter hooks for the
 // known injection surfaces.
 const DENIED_ENV_VAR_NAMES = new Set([
-        // Identity / shell config
-        "PATH",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "SHELL",
+	// Identity / shell config
+	"PATH",
+	"HOME",
+	"USER",
+	"LOGNAME",
+	"SHELL",
 
-        // Node.js — NODE_OPTIONS accepts --require/--import which runs
-        // arbitrary JS at every `node` invocation. NODE_PATH changes the
-        // module resolver and would let an env set shadow stdlib requires.
-        "NODE_OPTIONS",
-        "NODE_PATH",
+	// Node.js — NODE_OPTIONS accepts --require/--import which runs
+	// arbitrary JS at every `node` invocation. NODE_PATH changes the
+	// module resolver and would let an env set shadow stdlib requires.
+	"NODE_OPTIONS",
+	"NODE_PATH",
 
-        // Python — PYTHONSTARTUP runs a file at REPL startup;
-        // PYTHONINSPECT drops into a REPL after script exit (side-channel
-        // for persistent code exec); PYTHONBREAKPOINT routes breakpoint()
-        // through an arbitrary callable; PYTHONPATH changes module
-        // resolution; PYTHONHOME relocates the interpreter stdlib.
-        "PYTHONPATH",
-        "PYTHONSTARTUP",
-        "PYTHONINSPECT",
-        "PYTHONHOME",
-        "PYTHONBREAKPOINT",
+	// Python — PYTHONSTARTUP runs a file at REPL startup;
+	// PYTHONINSPECT drops into a REPL after script exit (side-channel
+	// for persistent code exec); PYTHONBREAKPOINT routes breakpoint()
+	// through an arbitrary callable; PYTHONPATH changes module
+	// resolution; PYTHONHOME relocates the interpreter stdlib.
+	"PYTHONPATH",
+	"PYTHONSTARTUP",
+	"PYTHONINSPECT",
+	"PYTHONHOME",
+	"PYTHONBREAKPOINT",
 
-        // JVM — _JAVA_OPTIONS / JAVA_TOOL_OPTIONS / JDK_JAVA_OPTIONS are
-        // all honoured by the launcher and can `-javaagent:` arbitrary
-        // JARs or flip security-relevant flags.
-        "JAVA_TOOL_OPTIONS",
-        "_JAVA_OPTIONS",
-        "JDK_JAVA_OPTIONS",
+	// JVM — _JAVA_OPTIONS / JAVA_TOOL_OPTIONS / JDK_JAVA_OPTIONS are
+	// all honoured by the launcher and can `-javaagent:` arbitrary
+	// JARs or flip security-relevant flags.
+	"JAVA_TOOL_OPTIONS",
+	"_JAVA_OPTIONS",
+	"JDK_JAVA_OPTIONS",
 
-        // Ruby — RUBYOPT prepends arbitrary flags (incl. `-r<file>`)
-        // to every `ruby` invocation; RUBYLIB extends $LOAD_PATH.
-        "RUBYOPT",
-        "RUBYLIB",
+	// Ruby — RUBYOPT prepends arbitrary flags (incl. `-r<file>`)
+	// to every `ruby` invocation; RUBYLIB extends $LOAD_PATH.
+	"RUBYOPT",
+	"RUBYLIB",
 
-        // Perl — PERL5OPT is the Perl analogue of RUBYOPT; PERL5LIB
-        // extends @INC.
-        "PERL5OPT",
-        "PERL5LIB",
+	// Perl — PERL5OPT is the Perl analogue of RUBYOPT; PERL5LIB
+	// extends @INC.
+	"PERL5OPT",
+	"PERL5LIB",
 ]);
 
 // Prefix matches for categories that grow over time (new LD_* / DYLD_*
@@ -138,10 +138,10 @@ const DENIED_ENV_VAR_PREFIXES = ["LD_", "DYLD_"];
 const PROTOTYPE_POLLUTION_NAMES = new Set(["__proto__", "constructor", "prototype"]);
 
 export class EnvVarValidationError extends Error {
-        constructor(message: string) {
-                super(message);
-                this.name = "EnvVarValidationError";
-        }
+	constructor(message: string) {
+		super(message);
+		this.name = "EnvVarValidationError";
+	}
 }
 
 /**
@@ -169,135 +169,130 @@ export class EnvVarValidationError extends Error {
  * silently-dropped `__proto__` entries (those are rejected explicitly).
  * Safe to JSON-stringify, iterate, or call Object.prototype methods on.
  */
-export function validateEnvVars(
-        envVars: unknown,
-): Record<string, string> {
-        if (envVars === undefined) return {};
+export function validateEnvVars(envVars: unknown): Record<string, string> {
+	if (envVars === undefined) return {};
 
-        // Must be a plain object. `null` trips this branch (typeof null ===
-        // "object") along with arrays and other exotics; refuse all of them
-        // up front with the same "must be an object" message. The important
-        // case is `null` — accepting it as an empty map would let a PATCH
-        // bug silently wipe a user's env instead of 400ing.
-        if (envVars === null || typeof envVars !== "object" || Array.isArray(envVars)) {
-                throw new EnvVarValidationError("envVars must be an object");
-        }
+	// Must be a plain object. `null` trips this branch (typeof null ===
+	// "object") along with arrays and other exotics; refuse all of them
+	// up front with the same "must be an object" message. The important
+	// case is `null` — accepting it as an empty map would let a PATCH
+	// bug silently wipe a user's env instead of 400ing.
+	if (envVars === null || typeof envVars !== "object" || Array.isArray(envVars)) {
+		throw new EnvVarValidationError("envVars must be an object");
+	}
 
-        // Use Object.entries so we only see the object's own enumerable string-keyed
-        // properties — not anything from the prototype chain. This also matches the
-        // iteration order we'd get from JSON.parse output. `Object.entries` always
-        // yields string keys by spec (ES2017 §19.1.2.5), so the loop below doesn't
-        // need to re-check `typeof name === "string"`.
-        const entries = Object.entries(envVars as Record<string, unknown>);
+	// Use Object.entries so we only see the object's own enumerable string-keyed
+	// properties — not anything from the prototype chain. This also matches the
+	// iteration order we'd get from JSON.parse output. `Object.entries` always
+	// yields string keys by spec (ES2017 §19.1.2.5), so the loop below doesn't
+	// need to re-check `typeof name === "string"`.
+	const entries = Object.entries(envVars as Record<string, unknown>);
 
-        if (entries.length > MAX_ENV_VAR_COUNT) {
-                throw new EnvVarValidationError(
-                        `envVars may not contain more than ${MAX_ENV_VAR_COUNT} entries (got ${entries.length})`,
-                );
-        }
+	if (entries.length > MAX_ENV_VAR_COUNT) {
+		throw new EnvVarValidationError(
+			`envVars may not contain more than ${MAX_ENV_VAR_COUNT} entries (got ${entries.length})`,
+		);
+	}
 
-        // Plain object. Previous versions used Object.create(null) to dodge
-        // the edge case where `normalised["__proto__"] = value` would invoke
-        // the Object.prototype setter (silently dropping non-object values)
-        // — but that traded a security non-issue for a real footgun:
-        // callers can't invoke .hasOwnProperty, .toString, etc. directly on
-        // the result without a TypeError. Instead we reject `__proto__` et
-        // al. at the key-validation step below, which closes the original
-        // concern and lets this be a normal object.
-        const normalised: Record<string, string> = {};
-        for (const [name, value] of entries) {
-                if (name.length === 0) {
-                        throw new EnvVarValidationError("envVars keys must be non-empty strings");
-                }
-                if (name.length > MAX_ENV_VAR_NAME_LENGTH) {
-                        throw new EnvVarValidationError(
-                                `envVars key '${name.slice(0, 32)}…' exceeds ${MAX_ENV_VAR_NAME_LENGTH} characters`,
-                        );
-                }
+	// Plain object. Previous versions used Object.create(null) to dodge
+	// the edge case where `normalised["__proto__"] = value` would invoke
+	// the Object.prototype setter (silently dropping non-object values)
+	// — but that traded a security non-issue for a real footgun:
+	// callers can't invoke .hasOwnProperty, .toString, etc. directly on
+	// the result without a TypeError. Instead we reject `__proto__` et
+	// al. at the key-validation step below, which closes the original
+	// concern and lets this be a normal object.
+	const normalised: Record<string, string> = {};
+	for (const [name, value] of entries) {
+		if (name.length === 0) {
+			throw new EnvVarValidationError("envVars keys must be non-empty strings");
+		}
+		if (name.length > MAX_ENV_VAR_NAME_LENGTH) {
+			throw new EnvVarValidationError(
+				`envVars key '${name.slice(0, 32)}…' exceeds ${MAX_ENV_VAR_NAME_LENGTH} characters`,
+			);
+		}
 
-                // Reject prototype-pollution vector names BEFORE the POSIX
-                // check: `__proto__` (and friends) match the identifier
-                // regex, so the POSIX check would accept them. We want a
-                // specific error message here so the caller sees *why* this
-                // particular name is rejected rather than a generic "not a
-                // valid name". Also means the next assignment below can be
-                // a plain `normalised[name] = value` without hitting the
-                // Object.prototype setter dance.
-                if (PROTOTYPE_POLLUTION_NAMES.has(name)) {
-                        throw new EnvVarValidationError(
-                                `envVars key '${name}' is reserved (conflicts with JS object semantics)`,
-                        );
-                }
+		// Reject prototype-pollution vector names BEFORE the POSIX
+		// check: `__proto__` (and friends) match the identifier
+		// regex, so the POSIX check would accept them. We want a
+		// specific error message here so the caller sees *why* this
+		// particular name is rejected rather than a generic "not a
+		// valid name". Also means the next assignment below can be
+		// a plain `normalised[name] = value` without hitting the
+		// Object.prototype setter dance.
+		if (PROTOTYPE_POLLUTION_NAMES.has(name)) {
+			throw new EnvVarValidationError(
+				`envVars key '${name}' is reserved (conflicts with JS object semantics)`,
+			);
+		}
 
-                if (!ENV_VAR_NAME_PATTERN.test(name)) {
-                        // Include the offending key in the error so the caller can fix
-                        // their payload — it came from them, so there's no leakage.
-                        throw new EnvVarValidationError(
-                                `envVars key '${name}' is not a valid POSIX env var name ` +
-                                `(must match /^[A-Za-z_][A-Za-z0-9_]*$/)`,
-                        );
-                }
+		if (!ENV_VAR_NAME_PATTERN.test(name)) {
+			// Include the offending key in the error so the caller can fix
+			// their payload — it came from them, so there's no leakage.
+			throw new EnvVarValidationError(
+				`envVars key '${name}' is not a valid POSIX env var name ` +
+					`(must match /^[A-Za-z_][A-Za-z0-9_]*$/)`,
+			);
+		}
 
-                // Apply the denylist AFTER the POSIX-name check: a name that
-                // isn't a valid identifier couldn't match anyway, so we'd just
-                // be hiding the real problem behind a less-specific error.
-                if (
-                        DENIED_ENV_VAR_NAMES.has(name) ||
-                        DENIED_ENV_VAR_PREFIXES.some((p) => name.startsWith(p))
-                ) {
-                        throw new EnvVarValidationError(
-                                `envVars key '${name}' is reserved and cannot be set via session config. ` +
-                                `Set it inside the shell if needed.`,
-                        );
-                }
+		// Apply the denylist AFTER the POSIX-name check: a name that
+		// isn't a valid identifier couldn't match anyway, so we'd just
+		// be hiding the real problem behind a less-specific error.
+		if (DENIED_ENV_VAR_NAMES.has(name) || DENIED_ENV_VAR_PREFIXES.some((p) => name.startsWith(p))) {
+			throw new EnvVarValidationError(
+				`envVars key '${name}' is reserved and cannot be set via session config. ` +
+					`Set it inside the shell if needed.`,
+			);
+		}
 
-                // Reject any form of duplicate (including prototype-chain shadowing,
-                // which Object.entries already filters, and plain repeat keys, which
-                // JSON.parse collapses — but we check for completeness in case a
-                // future caller constructs the object programmatically).
-                //
-                // Ideally this would use Object.hasOwn (ES2022) — biome's
-                // preferred form — but tsconfig lib is currently ES2020 and
-                // Object.hasOwn isn't in that lib. Using the
-                // Object.prototype.hasOwnProperty.call idiom for now, which
-                // is the safe form (direct `.hasOwnProperty` could collide
-                // with a user-supplied key named `hasOwnProperty`, though in
-                // practice that's already rejected by the POSIX-name check).
-                // If tsconfig ever bumps to ES2022 (Node 22 runtime already
-                // supports it), this line should be simplified to
-                // `Object.hasOwn(normalised, name)` and the ignore dropped.
-                // biome-ignore lint/suspicious/noPrototypeBuiltins: Object.hasOwn unavailable under ES2020 lib; Object.prototype.hasOwnProperty.call is the safe idiom on this target.
-                if (Object.prototype.hasOwnProperty.call(normalised, name)) {
-                        throw new EnvVarValidationError(`envVars contains duplicate key '${name}'`);
-                }
+		// Reject any form of duplicate (including prototype-chain shadowing,
+		// which Object.entries already filters, and plain repeat keys, which
+		// JSON.parse collapses — but we check for completeness in case a
+		// future caller constructs the object programmatically).
+		//
+		// Ideally this would use Object.hasOwn (ES2022) — biome's
+		// preferred form — but tsconfig lib is currently ES2020 and
+		// Object.hasOwn isn't in that lib. Using the
+		// Object.prototype.hasOwnProperty.call idiom for now, which
+		// is the safe form (direct `.hasOwnProperty` could collide
+		// with a user-supplied key named `hasOwnProperty`, though in
+		// practice that's already rejected by the POSIX-name check).
+		// If tsconfig ever bumps to ES2022 (Node 22 runtime already
+		// supports it), this line should be simplified to
+		// `Object.hasOwn(normalised, name)` and the ignore dropped.
+		// biome-ignore lint/suspicious/noPrototypeBuiltins: Object.hasOwn unavailable under ES2020 lib; Object.prototype.hasOwnProperty.call is the safe idiom on this target.
+		if (Object.prototype.hasOwnProperty.call(normalised, name)) {
+			throw new EnvVarValidationError(`envVars contains duplicate key '${name}'`);
+		}
 
-                if (typeof value !== "string") {
-                        throw new EnvVarValidationError(`envVars['${name}'] must be a string (got ${typeof value})`);
-                }
-                if (value.length > MAX_ENV_VAR_VALUE_LENGTH) {
-                        throw new EnvVarValidationError(
-                                `envVars['${name}'] exceeds ${MAX_ENV_VAR_VALUE_LENGTH} characters`,
-                        );
-                }
-                // NUL bytes are illegal in environment values on POSIX (execve treats
-                // `NUL` as the terminator). Silently accepting them would truncate the
-                // value the container sees, so caller sees one thing and container sees
-                // another — exactly the kind of desync a validator should catch.
-                if (value.includes("\0")) {
-                        throw new EnvVarValidationError(`envVars['${name}'] contains a NUL byte`);
-                }
-                normalised[name] = value;
-        }
+		if (typeof value !== "string") {
+			throw new EnvVarValidationError(`envVars['${name}'] must be a string (got ${typeof value})`);
+		}
+		if (value.length > MAX_ENV_VAR_VALUE_LENGTH) {
+			throw new EnvVarValidationError(
+				`envVars['${name}'] exceeds ${MAX_ENV_VAR_VALUE_LENGTH} characters`,
+			);
+		}
+		// NUL bytes are illegal in environment values on POSIX (execve treats
+		// `NUL` as the terminator). Silently accepting them would truncate the
+		// value the container sees, so caller sees one thing and container sees
+		// another — exactly the kind of desync a validator should catch.
+		if (value.includes("\0")) {
+			throw new EnvVarValidationError(`envVars['${name}'] contains a NUL byte`);
+		}
+		normalised[name] = value;
+	}
 
-        // Total-size cap applies to the serialised form since that's what lands in
-        // D1 and flows over the network. Using Buffer.byteLength catches multi-byte
-        // UTF-8 that string.length would under-count.
-        const serialisedBytes = Buffer.byteLength(JSON.stringify(normalised), "utf8");
-        if (serialisedBytes > MAX_ENV_VARS_TOTAL_BYTES) {
-                throw new EnvVarValidationError(
-                        `envVars total size (${serialisedBytes} bytes) exceeds ${MAX_ENV_VARS_TOTAL_BYTES} bytes`,
-                );
-        }
+	// Total-size cap applies to the serialised form since that's what lands in
+	// D1 and flows over the network. Using Buffer.byteLength catches multi-byte
+	// UTF-8 that string.length would under-count.
+	const serialisedBytes = Buffer.byteLength(JSON.stringify(normalised), "utf8");
+	if (serialisedBytes > MAX_ENV_VARS_TOTAL_BYTES) {
+		throw new EnvVarValidationError(
+			`envVars total size (${serialisedBytes} bytes) exceeds ${MAX_ENV_VARS_TOTAL_BYTES} bytes`,
+		);
+	}
 
-        return normalised;
+	return normalised;
 }

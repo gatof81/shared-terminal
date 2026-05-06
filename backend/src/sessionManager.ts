@@ -11,17 +11,17 @@ import type { CreateSessionOpts, SessionMeta, SessionStatus } from "./types.js";
 // ── Custom errors ───────────────────────────────────────────────────────────
 
 export class NotFoundError extends Error {
-        constructor(msg = "Session not found") {
-                super(msg);
-                this.name = "NotFoundError";
-        }
+	constructor(msg = "Session not found") {
+		super(msg);
+		this.name = "NotFoundError";
+	}
 }
 
 export class ForbiddenError extends Error {
-        constructor(msg = "Access denied") {
-                super(msg);
-                this.name = "ForbiddenError";
-        }
+	constructor(msg = "Access denied") {
+		super(msg);
+		this.name = "ForbiddenError";
+	}
 }
 
 // Caps the number of concurrently *active* sessions (running / stopped /
@@ -41,62 +41,59 @@ export class ForbiddenError extends Error {
 // ops-visible signal.
 const DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER = 20;
 const MAX_ACTIVE_SESSIONS_PER_USER = ((): number => {
-        const raw = process.env.MAX_ACTIVE_SESSIONS_PER_USER;
-        if (raw === undefined || raw.trim() === "") return DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER;
-        const n = Number(raw);
-        if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
-                // Surface the original value (quoted, so "  " etc. stay visible)
-                // and the effective fallback — ops should be able to tell at a
-                // glance which variable was wrong and what the server is
-                // actually running with. Uses console.warn rather than throw
-                // because a startup abort here would gate the whole server on
-                // a non-critical config typo, which is worse than running with
-                // the documented default.
-                console.warn(
-                        `[sessionManager] MAX_ACTIVE_SESSIONS_PER_USER=${JSON.stringify(raw)} ` +
-                        `is not a positive integer; falling back to ${DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER}`,
-                );
-                return DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER;
-        }
-        return n;
+	const raw = process.env.MAX_ACTIVE_SESSIONS_PER_USER;
+	if (raw === undefined || raw.trim() === "") return DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER;
+	const n = Number(raw);
+	if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
+		// Surface the original value (quoted, so "  " etc. stay visible)
+		// and the effective fallback — ops should be able to tell at a
+		// glance which variable was wrong and what the server is
+		// actually running with. Uses console.warn rather than throw
+		// because a startup abort here would gate the whole server on
+		// a non-critical config typo, which is worse than running with
+		// the documented default.
+		console.warn(
+			`[sessionManager] MAX_ACTIVE_SESSIONS_PER_USER=${JSON.stringify(raw)} ` +
+				`is not a positive integer; falling back to ${DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER}`,
+		);
+		return DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER;
+	}
+	return n;
 })();
 
 export class SessionQuotaExceededError extends Error {
-        // Passed through to the HTTP response — include the effective cap so the
-        // user knows what "too many" means without asking support.
-        readonly quota: number;
+	// Passed through to the HTTP response — include the effective cap so the
+	// user knows what "too many" means without asking support.
+	readonly quota: number;
 
-        constructor(quota: number) {
-                // Phrase as "limit reached" rather than "you already have N
-                // active sessions". When this throws, the count is exactly
-                // `quota` (the atomic INSERT's WHERE clause guarantees that),
-                // so "you already have 20" reads as a count statement — but
-                // the purpose of the message is to communicate the *cap*, not
-                // a tally. Naming the number as a limit makes the fix
-                // (terminate something) obvious.
-                super(
-                        `Active session limit (${quota}) reached — terminate a session ` +
-                        `before creating more`,
-                );
-                this.name = "SessionQuotaExceededError";
-                this.quota = quota;
-        }
+	constructor(quota: number) {
+		// Phrase as "limit reached" rather than "you already have N
+		// active sessions". When this throws, the count is exactly
+		// `quota` (the atomic INSERT's WHERE clause guarantees that),
+		// so "you already have 20" reads as a count statement — but
+		// the purpose of the message is to communicate the *cap*, not
+		// a tally. Naming the number as a limit makes the fix
+		// (terminate something) obvious.
+		super(`Active session limit (${quota}) reached — terminate a session before creating more`);
+		this.name = "SessionQuotaExceededError";
+		this.quota = quota;
+	}
 }
 
 // ── Row → domain mapper ────────────────────────────────────────────────────
 
 interface SessionRow {
-        session_id: string;
-        user_id: string;
-        name: string;
-        status: string;
-        container_id: string | null;
-        container_name: string;
-        cols: number;
-        rows: number;
-        env_vars: string;
-        created_at: string;
-        last_connected_at: string | null;
+	session_id: string;
+	user_id: string;
+	name: string;
+	status: string;
+	container_id: string | null;
+	container_name: string;
+	cols: number;
+	rows: number;
+	env_vars: string;
+	created_at: string;
+	last_connected_at: string | null;
 }
 
 // D1's `datetime('now')` returns SQLite's canonical UTC format — no 'Z' or
@@ -107,164 +104,170 @@ interface SessionRow {
 // already — double-Z is an invalid date and silently NaNs. Also catch full
 // ISO 8601 offsets like `+00:00`.
 function parseD1UtcTimestamp(raw: string): Date {
-        const hasSuffix = /[zZ]$/.test(raw) || /[+-]\d{2}:?\d{2}$/.test(raw);
-        const d = new Date(hasSuffix ? raw : `${raw}Z`);
-        if (Number.isNaN(d.getTime())) {
-                // Better to crash loudly here than return "Invalid Date" that
-                // would later serialize to null in JSON.
-                throw new Error(`D1 returned unparseable timestamp: ${raw}`);
-        }
-        return d;
+	const hasSuffix = /[zZ]$/.test(raw) || /[+-]\d{2}:?\d{2}$/.test(raw);
+	const d = new Date(hasSuffix ? raw : `${raw}Z`);
+	if (Number.isNaN(d.getTime())) {
+		// Better to crash loudly here than return "Invalid Date" that
+		// would later serialize to null in JSON.
+		throw new Error(`D1 returned unparseable timestamp: ${raw}`);
+	}
+	return d;
 }
 
 function rowToMeta(row: SessionRow): SessionMeta {
-        return {
-                sessionId: row.session_id,
-                userId: row.user_id,
-                name: row.name,
-                status: row.status as SessionStatus,
-                containerId: row.container_id,
-                containerName: row.container_name,
-                cols: row.cols,
-                rows: row.rows,
-                envVars: JSON.parse(row.env_vars),
-                createdAt: parseD1UtcTimestamp(row.created_at),
-                lastConnectedAt: row.last_connected_at ? parseD1UtcTimestamp(row.last_connected_at) : null,
-        };
+	return {
+		sessionId: row.session_id,
+		userId: row.user_id,
+		name: row.name,
+		status: row.status as SessionStatus,
+		containerId: row.container_id,
+		containerName: row.container_name,
+		cols: row.cols,
+		rows: row.rows,
+		envVars: JSON.parse(row.env_vars),
+		createdAt: parseD1UtcTimestamp(row.created_at),
+		lastConnectedAt: row.last_connected_at ? parseD1UtcTimestamp(row.last_connected_at) : null,
+	};
 }
 
 // ── SessionManager ──────────────────────────────────────────────────────────
 
 export class SessionManager {
-        async create(opts: CreateSessionOpts): Promise<SessionMeta> {
-                const sessionId = uuidv4();
-                const containerName = `st-${sessionId.slice(0, 12)}`;
-                const cols = opts.cols ?? 120;
-                const rows = opts.rows ?? 36;
-                const envVars = opts.envVars ?? {};
+	async create(opts: CreateSessionOpts): Promise<SessionMeta> {
+		const sessionId = uuidv4();
+		const containerName = `st-${sessionId.slice(0, 12)}`;
+		const cols = opts.cols ?? 120;
+		const rows = opts.rows ?? 36;
+		const envVars = opts.envVars ?? {};
 
-                // Atomic quota check: fold the per-user count into the INSERT so two
-                // concurrent POST /sessions from the same user can't both read
-                // `count = cap-1` and both insert. Same SQLite-serialised pattern as
-                // invite mint and bootstrap-register elsewhere in the codebase. The
-                // race loser observes `meta.changes === 0` and raises a typed error
-                // the route can map to 429.
-                //
-                // The count filter matches `listForUser`, which is what the UI shows —
-                // so "active" here means the same thing the user sees in their sidebar.
-                // Terminated rows don't count against the cap; they'll be garbage-
-                // collected by the hard-delete path or left as history.
-                const insert = await d1Query(
-                        `INSERT INTO sessions (session_id, user_id, name, container_name, cols, rows, env_vars)
+		// Atomic quota check: fold the per-user count into the INSERT so two
+		// concurrent POST /sessions from the same user can't both read
+		// `count = cap-1` and both insert. Same SQLite-serialised pattern as
+		// invite mint and bootstrap-register elsewhere in the codebase. The
+		// race loser observes `meta.changes === 0` and raises a typed error
+		// the route can map to 429.
+		//
+		// The count filter matches `listForUser`, which is what the UI shows —
+		// so "active" here means the same thing the user sees in their sidebar.
+		// Terminated rows don't count against the cap; they'll be garbage-
+		// collected by the hard-delete path or left as history.
+		const insert = await d1Query(
+			`INSERT INTO sessions (session_id, user_id, name, container_name, cols, rows, env_vars)
                          SELECT ?, ?, ?, ?, ?, ?, ?
                          WHERE (
                                  SELECT COUNT(*) FROM sessions
                                  WHERE user_id = ? AND status != 'terminated'
                          ) < ?`,
-                        [
-                                sessionId, opts.userId, opts.name, containerName, cols, rows, JSON.stringify(envVars),
-                                opts.userId, MAX_ACTIVE_SESSIONS_PER_USER,
-                        ],
-                );
-                if (insert.meta.changes !== 1) {
-                        throw new SessionQuotaExceededError(MAX_ACTIVE_SESSIONS_PER_USER);
-                }
+			[
+				sessionId,
+				opts.userId,
+				opts.name,
+				containerName,
+				cols,
+				rows,
+				JSON.stringify(envVars),
+				opts.userId,
+				MAX_ACTIVE_SESSIONS_PER_USER,
+			],
+		);
+		if (insert.meta.changes !== 1) {
+			throw new SessionQuotaExceededError(MAX_ACTIVE_SESSIONS_PER_USER);
+		}
 
-                const meta = await this.get(sessionId);
-                if (!meta) {
-                        // Unreachable in practice: we just inserted this row and
-                        // confirmed changes === 1. Guard anyway so the return type
-                        // is honest (no non-null assertion) and a hypothetical
-                        // read-after-write hiccup becomes a loud error rather than
-                        // a TypeError downstream when callers access .sessionId.
-                        throw new Error(
-                                `sessionManager.create: session ${sessionId} missing from D1 after insert`,
-                        );
-                }
-                return meta;
-        }
+		const meta = await this.get(sessionId);
+		if (!meta) {
+			// Unreachable in practice: we just inserted this row and
+			// confirmed changes === 1. Guard anyway so the return type
+			// is honest (no non-null assertion) and a hypothetical
+			// read-after-write hiccup becomes a loud error rather than
+			// a TypeError downstream when callers access .sessionId.
+			throw new Error(`sessionManager.create: session ${sessionId} missing from D1 after insert`);
+		}
+		return meta;
+	}
 
-        async get(sessionId: string): Promise<SessionMeta | null> {
-                const result = await d1Query<SessionRow>(
-                        "SELECT * FROM sessions WHERE session_id = ?",
-                        [sessionId],
-                );
-                return result.results.length > 0 ? rowToMeta(result.results[0]) : null;
-        }
+	async get(sessionId: string): Promise<SessionMeta | null> {
+		const result = await d1Query<SessionRow>("SELECT * FROM sessions WHERE session_id = ?", [
+			sessionId,
+		]);
+		return result.results.length > 0 ? rowToMeta(result.results[0]) : null;
+	}
 
-        async getOrThrow(sessionId: string): Promise<SessionMeta> {
-                const meta = await this.get(sessionId);
-                if (!meta) throw new NotFoundError();
-                return meta;
-        }
+	async getOrThrow(sessionId: string): Promise<SessionMeta> {
+		const meta = await this.get(sessionId);
+		if (!meta) throw new NotFoundError();
+		return meta;
+	}
 
-        async assertOwnership(sessionId: string, userId: string): Promise<SessionMeta> {
-                const meta = await this.getOrThrow(sessionId);
-                if (meta.userId !== userId) throw new ForbiddenError();
-                return meta;
-        }
+	async assertOwnership(sessionId: string, userId: string): Promise<SessionMeta> {
+		const meta = await this.getOrThrow(sessionId);
+		if (meta.userId !== userId) throw new ForbiddenError();
+		return meta;
+	}
 
-        async listForUser(userId: string): Promise<SessionMeta[]> {
-                const result = await d1Query<SessionRow>(
-                        "SELECT * FROM sessions WHERE user_id = ? AND status != 'terminated' ORDER BY created_at DESC",
-                        [userId],
-                );
-                return result.results.map(rowToMeta);
-        }
+	async listForUser(userId: string): Promise<SessionMeta[]> {
+		const result = await d1Query<SessionRow>(
+			"SELECT * FROM sessions WHERE user_id = ? AND status != 'terminated' ORDER BY created_at DESC",
+			[userId],
+		);
+		return result.results.map(rowToMeta);
+	}
 
-        async listAllForUser(userId: string): Promise<SessionMeta[]> {
-                const result = await d1Query<SessionRow>(
-                        "SELECT * FROM sessions WHERE user_id = ? ORDER BY created_at DESC",
-                        [userId],
-                );
-                return result.results.map(rowToMeta);
-        }
+	async listAllForUser(userId: string): Promise<SessionMeta[]> {
+		const result = await d1Query<SessionRow>(
+			"SELECT * FROM sessions WHERE user_id = ? ORDER BY created_at DESC",
+			[userId],
+		);
+		return result.results.map(rowToMeta);
+	}
 
-        async setContainerId(sessionId: string, containerId: string | null): Promise<void> {
-                await d1Query("UPDATE sessions SET container_id = ? WHERE session_id = ?", [containerId, sessionId]);
-        }
+	async setContainerId(sessionId: string, containerId: string | null): Promise<void> {
+		await d1Query("UPDATE sessions SET container_id = ? WHERE session_id = ?", [
+			containerId,
+			sessionId,
+		]);
+	}
 
-        async updateStatus(sessionId: string, status: SessionStatus): Promise<void> {
-                await d1Query("UPDATE sessions SET status = ? WHERE session_id = ?", [status, sessionId]);
-        }
+	async updateStatus(sessionId: string, status: SessionStatus): Promise<void> {
+		await d1Query("UPDATE sessions SET status = ? WHERE session_id = ?", [status, sessionId]);
+	}
 
-        // Atomic "container was removed out-of-band" write. Collapsing the two
-        // fields into one UPDATE closes the crash window where nulling the id
-        // would succeed but the status flip wouldn't — leaving the row at
-        // (null, running), which a subsequent `WHERE status='running'` reconcile
-        // would re-pick up anyway, but a /start or WS attach in between would
-        // misread.
-        async recordContainerGone(sessionId: string): Promise<void> {
-                await d1Query(
-                        "UPDATE sessions SET status = 'stopped', container_id = NULL WHERE session_id = ?",
-                        [sessionId],
-                );
-        }
+	// Atomic "container was removed out-of-band" write. Collapsing the two
+	// fields into one UPDATE closes the crash window where nulling the id
+	// would succeed but the status flip wouldn't — leaving the row at
+	// (null, running), which a subsequent `WHERE status='running'` reconcile
+	// would re-pick up anyway, but a /start or WS attach in between would
+	// misread.
+	async recordContainerGone(sessionId: string): Promise<void> {
+		await d1Query(
+			"UPDATE sessions SET status = 'stopped', container_id = NULL WHERE session_id = ?",
+			[sessionId],
+		);
+	}
 
-        async updateConnected(sessionId: string): Promise<void> {
-                await d1Query(
-                        "UPDATE sessions SET last_connected_at = datetime('now') WHERE session_id = ?",
-                        [sessionId],
-                );
-        }
+	async updateConnected(sessionId: string): Promise<void> {
+		await d1Query("UPDATE sessions SET last_connected_at = datetime('now') WHERE session_id = ?", [
+			sessionId,
+		]);
+	}
 
-        async updateEnvVars(sessionId: string, envVars: Record<string, string>): Promise<void> {
-                await d1Query("UPDATE sessions SET env_vars = ? WHERE session_id = ?", [
-                        JSON.stringify(envVars),
-                        sessionId,
-                ]);
-        }
+	async updateEnvVars(sessionId: string, envVars: Record<string, string>): Promise<void> {
+		await d1Query("UPDATE sessions SET env_vars = ? WHERE session_id = ?", [
+			JSON.stringify(envVars),
+			sessionId,
+		]);
+	}
 
-        async terminate(sessionId: string): Promise<void> {
-                await this.updateStatus(sessionId, "terminated");
-        }
+	async terminate(sessionId: string): Promise<void> {
+		await this.updateStatus(sessionId, "terminated");
+	}
 
-        /**
-         * Permanently delete the session row (hard delete). Caller is responsible
-         * for having already killed any running container and for cleaning up any
-         * workspace data on disk.
-         */
-        async deleteRow(sessionId: string): Promise<void> {
-                await d1Query("DELETE FROM sessions WHERE session_id = ?", [sessionId]);
-        }
+	/**
+	 * Permanently delete the session row (hard delete). Caller is responsible
+	 * for having already killed any running container and for cleaning up any
+	 * workspace data on disk.
+	 */
+	async deleteRow(sessionId: string): Promise<void> {
+		await d1Query("DELETE FROM sessions WHERE session_id = ?", [sessionId]);
+	}
 }

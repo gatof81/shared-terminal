@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
-import { PassThrough } from "stream";
+import { PassThrough } from "node:stream";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // d1Query is the only direct D1 touch-point in DockerManager (reconcile()).
 // Every other path is reached through the fake SessionManager. Default to an
@@ -9,7 +9,12 @@ const dbStubs = vi.hoisted(() => ({
 }));
 vi.mock("./db.js", () => dbStubs);
 
-import { DockerManager, sanitiseHostname, sanitiseUploadName, type OutputListener } from "./dockerManager.js";
+import {
+	DockerManager,
+	type OutputListener,
+	sanitiseHostname,
+	sanitiseUploadName,
+} from "./dockerManager.js";
 import type { SessionManager } from "./sessionManager.js";
 
 // ── Test harness ────────────────────────────────────────────────────────────
@@ -33,10 +38,18 @@ function makeFakeSessions(containerId: string | null = "container-123"): Session
 	return {
 		getOrThrow: vi.fn(async () => meta),
 		get: vi.fn(async () => meta),
-		updateConnected: vi.fn(async () => { /* noop */ }),
-		updateStatus: vi.fn(async () => { /* noop */ }),
-		setContainerId: vi.fn(async () => { /* noop */ }),
-		recordContainerGone: vi.fn(async () => { /* noop */ }),
+		updateConnected: vi.fn(async () => {
+			/* noop */
+		}),
+		updateStatus: vi.fn(async () => {
+			/* noop */
+		}),
+		setContainerId: vi.fn(async () => {
+			/* noop */
+		}),
+		recordContainerGone: vi.fn(async () => {
+			/* noop */
+		}),
 	} as unknown as SessionManager;
 }
 
@@ -77,10 +90,7 @@ function makeFakeContainer(oneShot?: OneShotHook): FakeContainer {
 			// the test drives output by writing to `container._streams[...]`.
 			const isAttach =
 				opts.Cmd[0] === "tmux" &&
-				(
-					opts.Cmd[1] === "attach" ||
-					(opts.Cmd[1] === "new-session" && opts.Cmd.includes("-A"))
-				);
+				(opts.Cmd[1] === "attach" || (opts.Cmd[1] === "new-session" && opts.Cmd.includes("-A")));
 			// Every one-shot tmux command (capture-pane, list-sessions, kill-session,
 			// set-option, new-session -d, …) needs SOME canned response — otherwise
 			// execOneShot's `await stream.on("end")` hangs the test forever. If the
@@ -159,7 +169,8 @@ function makeDocker(opts?: { sessions?: SessionManager; oneShot?: OneShotHook })
 // may force container.exec to throw — in that case the exec object is never
 // pushed, but the CALL was still made and should be counted.
 function countAttachExecs(container: FakeContainer): number {
-	const calls = (container.exec as unknown as { mock: { calls: Array<[{ Cmd: string[] }]> } }).mock.calls;
+	const calls = (container.exec as unknown as { mock: { calls: Array<[{ Cmd: string[] }]> } }).mock
+		.calls;
 	return calls.filter(
 		([opts]) => opts.Cmd[0] === "tmux" && opts.Cmd[1] === "new-session" && opts.Cmd.includes("-A"),
 	).length;
@@ -175,8 +186,7 @@ function mustFind<T>(arr: readonly T[], pred: (v: T) => boolean, label: string):
 	return found;
 }
 
-const isAttachExec = (e: FakeExec): boolean =>
-	e._cmd[1] === "new-session" && e._cmd.includes("-A");
+const isAttachExec = (e: FakeExec): boolean => e._cmd[1] === "new-session" && e._cmd.includes("-A");
 
 // attach() now returns an armed listener (see dockerManager.attach() docs):
 // live bytes pile into a tail array until wsHandler calls flushTail(). Tests
@@ -200,8 +210,26 @@ describe("DockerManager shared-exec multiplexing", () => {
 	it("creates only one shared exec across multiple attaches to the same session", async () => {
 		const { dm, container } = makeDocker();
 
-		await dm.attach("s1", "a1", 80, 24, () => { /* noop */ }, "tab-test");
-		await dm.attach("s1", "a2", 80, 24, () => { /* noop */ }, "tab-test");
+		await dm.attach(
+			"s1",
+			"a1",
+			80,
+			24,
+			() => {
+				/* noop */
+			},
+			"tab-test",
+		);
+		await dm.attach(
+			"s1",
+			"a2",
+			80,
+			24,
+			() => {
+				/* noop */
+			},
+			"tab-test",
+		);
 
 		expect(countAttachExecs(container)).toBe(1);
 	});
@@ -238,9 +266,7 @@ describe("DockerManager shared-exec multiplexing", () => {
 		const origExec = container.exec;
 		container.exec = vi.fn(async (opts: { Cmd: string[] }) => {
 			const isAttach =
-				opts.Cmd[0] === "tmux"
-				&& opts.Cmd[1] === "new-session"
-				&& opts.Cmd.includes("-A");
+				opts.Cmd[0] === "tmux" && opts.Cmd[1] === "new-session" && opts.Cmd.includes("-A");
 			if (!isAttach) {
 				// Fall through to the default fake for one-shots.
 				return (origExec as (...a: unknown[]) => Promise<FakeExec>).apply(container, [opts]);
@@ -249,8 +275,15 @@ describe("DockerManager shared-exec multiplexing", () => {
 			const stream = new PassThrough();
 			container._streams.push(stream);
 			const exec: FakeExec = {
-				start: vi.fn(() => new Promise<PassThrough>((r) => { resolveAttachStart = r; })),
-				resize: vi.fn(async () => { /* noop */ }),
+				start: vi.fn(
+					() =>
+						new Promise<PassThrough>((r) => {
+							resolveAttachStart = r;
+						}),
+				),
+				resize: vi.fn(async () => {
+					/* noop */
+				}),
 				inspect: vi.fn(async () => ({ ExitCode: 0 })),
 				_resizes: [],
 				_stream: stream,
@@ -260,8 +293,26 @@ describe("DockerManager shared-exec multiplexing", () => {
 			return exec;
 		}) as typeof origExec;
 
-		const p1 = dm.attach("s1", "a1", 80, 24, () => { /* noop */ }, "tab-test");
-		const p2 = dm.attach("s1", "a2", 80, 24, () => { /* noop */ }, "tab-test");
+		const p1 = dm.attach(
+			"s1",
+			"a1",
+			80,
+			24,
+			() => {
+				/* noop */
+			},
+			"tab-test",
+		);
+		const p2 = dm.attach(
+			"s1",
+			"a2",
+			80,
+			24,
+			() => {
+				/* noop */
+			},
+			"tab-test",
+		);
 
 		// Both calls are now awaiting the same spawnSharedExec promise — exactly
 		// one attach exec has been requested on the wire.
@@ -312,9 +363,36 @@ describe("DockerManager shared-exec multiplexing", () => {
 	it("resizes the shared exec to min(cols) × min(rows) and recomputes on detach", async () => {
 		const { dm, container } = makeDocker();
 
-		await dm.attach("s1", "a1", 80, 24, () => { /* noop */ }, "tab-test");
-		await dm.attach("s1", "a2", 120, 36, () => { /* noop */ }, "tab-test");
-		await dm.attach("s1", "a3", 100, 30, () => { /* noop */ }, "tab-test");
+		await dm.attach(
+			"s1",
+			"a1",
+			80,
+			24,
+			() => {
+				/* noop */
+			},
+			"tab-test",
+		);
+		await dm.attach(
+			"s1",
+			"a2",
+			120,
+			36,
+			() => {
+				/* noop */
+			},
+			"tab-test",
+		);
+		await dm.attach(
+			"s1",
+			"a3",
+			100,
+			30,
+			() => {
+				/* noop */
+			},
+			"tab-test",
+		);
 
 		const resizes = container._execs[0]!._resizes;
 		expect(resizes[resizes.length - 1]).toEqual({ h: 24, w: 80 });
@@ -339,7 +417,16 @@ describe("DockerManager shared-exec multiplexing", () => {
 			},
 		});
 
-		await dm.attach("s1", "a1", 80, 24, () => { /* noop */ }, "tab-test");
+		await dm.attach(
+			"s1",
+			"a1",
+			80,
+			24,
+			() => {
+				/* noop */
+			},
+			"tab-test",
+		);
 		const attachStream = mustFind(container._execs, isAttachExec, "attach exec")._stream;
 		attachStream.write("abc");
 		await tick();
@@ -374,12 +461,22 @@ describe("DockerManager shared-exec multiplexing", () => {
 		// that nothing ever drains — unless attach() explicitly tears down
 		// on failure. Simulate that by making updateConnected reject.
 		const sessions = makeFakeSessions();
-		(sessions.updateConnected as unknown as ReturnType<typeof vi.fn>)
-			.mockRejectedValueOnce(new Error("db down"));
+		(sessions.updateConnected as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+			new Error("db down"),
+		);
 		const { dm, container } = makeDocker({ sessions });
 
 		await expect(
-			dm.attach("s1", "a1", 80, 24, () => { /* noop */ }, "tab-test"),
+			dm.attach(
+				"s1",
+				"a1",
+				80,
+				24,
+				() => {
+					/* noop */
+				},
+				"tab-test",
+			),
 		).rejects.toThrow("db down");
 		// detach() schedules the listeners.delete on a microtask via
 		// pending.then, so wait one tick before asserting. The "last
@@ -413,9 +510,7 @@ describe("DockerManager shared-exec multiplexing", () => {
 		const origExec = container.exec;
 		container.exec = vi.fn(async (opts: { Cmd: string[] }) => {
 			const isAttach =
-				opts.Cmd[0] === "tmux"
-				&& opts.Cmd[1] === "new-session"
-				&& opts.Cmd.includes("-A");
+				opts.Cmd[0] === "tmux" && opts.Cmd[1] === "new-session" && opts.Cmd.includes("-A");
 			if (isAttach && !rejectedOnce) {
 				rejectedOnce = true;
 				throw new Error("kaboom");
@@ -423,11 +518,31 @@ describe("DockerManager shared-exec multiplexing", () => {
 			return (origExec as (...a: unknown[]) => Promise<FakeExec>).apply(container, [opts]);
 		}) as typeof origExec;
 
-		await expect(dm.attach("s1", "a1", 80, 24, () => { /* noop */ }, "tab-test")).rejects.toThrow("kaboom");
+		await expect(
+			dm.attach(
+				"s1",
+				"a1",
+				80,
+				24,
+				() => {
+					/* noop */
+				},
+				"tab-test",
+			),
+		).rejects.toThrow("kaboom");
 		// Let the .catch handler clear the slot.
 		await tick();
 
-		await dm.attach("s1", "a2", 80, 24, () => { /* noop */ }, "tab-test");
+		await dm.attach(
+			"s1",
+			"a2",
+			80,
+			24,
+			() => {
+				/* noop */
+			},
+			"tab-test",
+		);
 		// One throw + one success = two attach execs requested.
 		expect(countAttachExecs(container)).toBe(2);
 	});
@@ -529,7 +644,16 @@ describe("DockerManager tabs", () => {
 			oneShot: () => ({ stdout: "", exitCode: 0 }),
 		});
 
-		await dm.attach("s1", "a1", 80, 24, () => { /* noop */ }, "tab-x");
+		await dm.attach(
+			"s1",
+			"a1",
+			80,
+			24,
+			() => {
+				/* noop */
+			},
+			"tab-x",
+		);
 
 		const bufKey = "s1:tab-x";
 		expect((dm as unknown as { shared: Map<string, unknown> }).shared.has(bufKey)).toBe(true);
@@ -538,7 +662,11 @@ describe("DockerManager tabs", () => {
 		await tick();
 
 		// tmux kill-session got called with the right target.
-		const killCmd = mustFind(container._execs, (e) => e._cmd.includes("kill-session"), "kill-session exec");
+		const killCmd = mustFind(
+			container._execs,
+			(e) => e._cmd.includes("kill-session"),
+			"kill-session exec",
+		);
 		expect(killCmd._cmd).toEqual(["tmux", "kill-session", "-t", "tab-x"]);
 
 		// The shared exec slot for that tab is gone.
@@ -546,7 +674,6 @@ describe("DockerManager tabs", () => {
 		// keyOf mapping for the detached attach is cleared.
 		expect((dm as unknown as { keyOf: Map<string, string> }).keyOf.has("a1")).toBe(false);
 	});
-
 });
 
 describe("DockerManager.reconcile", () => {
@@ -566,7 +693,9 @@ describe("DockerManager.reconcile", () => {
 		const dm = new DockerManager(sessions);
 		(dm as unknown as { docker: unknown }).docker = {
 			getContainer: vi.fn(() => ({
-				inspect: vi.fn(async () => { throw err; }),
+				inspect: vi.fn(async () => {
+					throw err;
+				}),
 			})),
 		};
 		return { dm, sessions };
@@ -624,7 +753,7 @@ describe("DockerManager.reconcile", () => {
 	}
 
 	it("warns when reconcile inspects a running pre-#15 container (no CapDrop/SecurityOpt)", async () => {
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => { });
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 		const { dm, sessions } = makeDockerWithInspectResult({
 			State: { Running: true },
 			HostConfig: { CapDrop: [], SecurityOpt: [] },
@@ -652,7 +781,7 @@ describe("DockerManager.reconcile", () => {
 		// migration footgun surfaces even on containers that happen to be
 		// dead at reconcile time — they'll be respawned later, and the
 		// operator needs to know the old image is involved.
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => { });
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 		const { dm, sessions } = makeDockerWithInspectResult({
 			State: { Running: false },
 			HostConfig: { CapDrop: [], SecurityOpt: [] },
@@ -671,7 +800,7 @@ describe("DockerManager.reconcile", () => {
 	});
 
 	it("does not warn for properly hardened containers", async () => {
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => { });
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 		const { dm } = makeDockerWithInspectResult({
 			State: { Running: true },
 			HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"] },
@@ -694,7 +823,7 @@ describe("DockerManager.startContainer", () => {
 	// reached this way must surface the same warn as reconcile so a future
 	// refactor can't silently drop the call.
 	it("warns when starting an existing pre-#15 container (Case 2)", async () => {
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => { });
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 		const sessions = makeFakeSessions();
 		const dm = new DockerManager(sessions);
 		(dm as unknown as { docker: unknown }).docker = {
@@ -703,7 +832,9 @@ describe("DockerManager.startContainer", () => {
 					State: { Running: false },
 					HostConfig: { CapDrop: [], SecurityOpt: [] },
 				})),
-				start: vi.fn(async () => { /* started */ }),
+				start: vi.fn(async () => {
+					/* started */
+				}),
 			})),
 		};
 
@@ -912,7 +1043,7 @@ describe("sanitiseHostname", () => {
 		// 62 'a's + '-' + 'rest' is 67 chars; charset-replace is a no-op,
 		// slice(0,63) cuts to "aa…aa-" (62 'a' + '-'), strip trims the
 		// trailing dash — Docker would otherwise refuse the hostname.
-		const longWithDashAtBoundary = "a".repeat(62) + "-rest";
+		const longWithDashAtBoundary = `${"a".repeat(62)}-rest`;
 		const out = sanitiseHostname(longWithDashAtBoundary, sid);
 		expect(out).toBe("a".repeat(62));
 		expect(out.length).toBe(62);

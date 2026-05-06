@@ -9,12 +9,12 @@ import http from "node:http";
 import express from "express";
 import { WebSocketServer } from "ws";
 import {
-        ensureAuthReady,
-        isAllowedWsOrigin,
-        parseCorsOrigins,
-        selectWsAuthProtocol,
-        validateJwtSecret,
-        warnIfWildcardCorsInProduction,
+	ensureAuthReady,
+	isAllowedWsOrigin,
+	parseCorsOrigins,
+	selectWsAuthProtocol,
+	validateJwtSecret,
+	warnIfWildcardCorsInProduction,
 } from "./auth.js";
 import { migrateDb, validateD1Config } from "./db.js";
 import { DockerManager } from "./dockerManager.js";
@@ -59,13 +59,13 @@ warnIfWildcardCorsInProduction(CORS_ORIGINS, process.env.NODE_ENV);
 // silently serving traffic with req.ip derived from the wrong source.
 let trustProxyValue: boolean | number | string | undefined;
 try {
-        trustProxyValue = parseTrustProxy(TRUST_PROXY_RAW);
+	trustProxyValue = parseTrustProxy(TRUST_PROXY_RAW);
 } catch (err) {
-        if (err instanceof TrustProxyError) {
-                console.error("[server]", err.message);
-                process.exit(1);
-        }
-        throw err;
+	if (err instanceof TrustProxyError) {
+		console.error("[server]", err.message);
+		process.exit(1);
+	}
+	throw err;
 }
 
 // ── Singletons ────────────────────────────────────────────────────────────────
@@ -77,29 +77,29 @@ const docker = new DockerManager(sessions);
 
 const app = express();
 if (trustProxyValue !== undefined) {
-        app.set("trust proxy", trustProxyValue);
-        // Log the effective value so ops can spot a misconfigured prod
-        // (e.g. TRUST_PROXY=0 behind a tunnel would silently collapse
-        // per-IP rate limits into one bucket).
-        console.log(`[server] trust proxy = ${JSON.stringify(trustProxyValue)}`);
+	app.set("trust proxy", trustProxyValue);
+	// Log the effective value so ops can spot a misconfigured prod
+	// (e.g. TRUST_PROXY=0 behind a tunnel would silently collapse
+	// per-IP rate limits into one bucket).
+	console.log(`[server] trust proxy = ${JSON.stringify(trustProxyValue)}`);
 } else {
-        console.log("[server] trust proxy = unset (req.ip will be the socket address)");
+	console.log("[server] trust proxy = unset (req.ip will be the socket address)");
 }
 app.use(express.json());
 
 // CORS — allow frontend from Cloudflare Pages (or any configured origin)
 app.use((_req, res, next) => {
-        const origin = _req.headers.origin ?? "";
-        if (CORS_ORIGINS.includes("*") || CORS_ORIGINS.includes(origin)) {
-                res.setHeader("Access-Control-Allow-Origin", origin || "*");
-        }
-        res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,PATCH,OPTIONS");
-        res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
-        if (_req.method === "OPTIONS") {
-                res.sendStatus(204);
-                return;
-        }
-        next();
+	const origin = _req.headers.origin ?? "";
+	if (CORS_ORIGINS.includes("*") || CORS_ORIGINS.includes(origin)) {
+		res.setHeader("Access-Control-Allow-Origin", origin || "*");
+	}
+	res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,PATCH,OPTIONS");
+	res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
+	if (_req.method === "OPTIONS") {
+		res.sendStatus(204);
+		return;
+	}
+	next();
 });
 
 app.use("/api", buildRouter(sessions, docker));
@@ -109,89 +109,89 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({
-        noServer: true,
-        handleProtocols: (protocols) => selectWsAuthProtocol(protocols),
+	noServer: true,
+	handleProtocols: (protocols) => selectWsAuthProtocol(protocols),
 });
 
 server.on("upgrade", (req, socket, head) => {
-        const url = req.url ?? "";
-        if (!url.startsWith("/ws/sessions/")) {
-                // socket.end() drains the write buffer before closing, so the
-                // 404 line actually reaches the client. socket.write() +
-                // socket.destroy() (the previous form) issues immediate
-                // teardown with no drain guarantee — the status line can be
-                // dropped, making "why did my WS fail" harder to debug.
-                // The bounded-destroy timer in endUpgradeSocketWithReply
-                // closes the CLOSE_WAIT window a half-close otherwise opens
-                // up against a peer that never FINs (#67).
-                endUpgradeSocketWithReply(socket, "HTTP/1.1 404 Not Found\r\n\r\n");
-                return;
-        }
+	const url = req.url ?? "";
+	if (!url.startsWith("/ws/sessions/")) {
+		// socket.end() drains the write buffer before closing, so the
+		// 404 line actually reaches the client. socket.write() +
+		// socket.destroy() (the previous form) issues immediate
+		// teardown with no drain guarantee — the status line can be
+		// dropped, making "why did my WS fail" harder to debug.
+		// The bounded-destroy timer in endUpgradeSocketWithReply
+		// closes the CLOSE_WAIT window a half-close otherwise opens
+		// up against a peer that never FINs (#67).
+		endUpgradeSocketWithReply(socket, "HTTP/1.1 404 Not Found\r\n\r\n");
+		return;
+	}
 
-        // CSWSH defence: reject the upgrade BEFORE the handshake completes
-        // when the Origin header isn't allowed. Done here (not inside the
-        // `wss.on("connection")` handler) so a rejected origin never gets
-        // a WebSocket object, never runs verifyWsToken, and never appears
-        // in wss.clients — closes the window where a CSWSH'd socket could
-        // do anything observable before the server hung up.
-        //
-        // See isAllowedWsOrigin in auth.ts for the policy (in particular:
-        // missing Origin is allowed because it indicates non-browser
-        // clients, and "*" in CORS_ORIGINS is denied in production).
-        //
-        // No per-request log in PRODUCTION: an attacker can flood the
-        // upgrade handler with garbage Origin headers and drown out signal.
-        // The CORS_ORIGINS=* case is already covered by warnIfWildcard-
-        // CorsInProduction at startup; deliberate operator misconfiguration
-        // surfaces through the 403 status code + the boot warning, not
-        // through per-request log spam. In dev/staging we DO log (gated
-        // below) so an operator deploying a typo'd Origin can grep for it.
-        if (!isAllowedWsOrigin(req.headers.origin, CORS_ORIGINS, process.env.NODE_ENV)) {
-                // Dev/staging only: see the block comment above and issue #66.
-                if (process.env.NODE_ENV !== "production") {
-                        console.log(
-                                "[ws] rejecting upgrade: Origin=%s not in allowlist %j",
-                                req.headers.origin ?? "<absent>",
-                                CORS_ORIGINS,
-                        );
-                }
-                endUpgradeSocketWithReply(socket, "HTTP/1.1 403 Forbidden\r\n\r\n");
-                return;
-        }
+	// CSWSH defence: reject the upgrade BEFORE the handshake completes
+	// when the Origin header isn't allowed. Done here (not inside the
+	// `wss.on("connection")` handler) so a rejected origin never gets
+	// a WebSocket object, never runs verifyWsToken, and never appears
+	// in wss.clients — closes the window where a CSWSH'd socket could
+	// do anything observable before the server hung up.
+	//
+	// See isAllowedWsOrigin in auth.ts for the policy (in particular:
+	// missing Origin is allowed because it indicates non-browser
+	// clients, and "*" in CORS_ORIGINS is denied in production).
+	//
+	// No per-request log in PRODUCTION: an attacker can flood the
+	// upgrade handler with garbage Origin headers and drown out signal.
+	// The CORS_ORIGINS=* case is already covered by warnIfWildcard-
+	// CorsInProduction at startup; deliberate operator misconfiguration
+	// surfaces through the 403 status code + the boot warning, not
+	// through per-request log spam. In dev/staging we DO log (gated
+	// below) so an operator deploying a typo'd Origin can grep for it.
+	if (!isAllowedWsOrigin(req.headers.origin, CORS_ORIGINS, process.env.NODE_ENV)) {
+		// Dev/staging only: see the block comment above and issue #66.
+		if (process.env.NODE_ENV !== "production") {
+			console.log(
+				"[ws] rejecting upgrade: Origin=%s not in allowlist %j",
+				req.headers.origin ?? "<absent>",
+				CORS_ORIGINS,
+			);
+		}
+		endUpgradeSocketWithReply(socket, "HTTP/1.1 403 Forbidden\r\n\r\n");
+		return;
+	}
 
-        wss.handleUpgrade(req, socket, head, (ws) => {
-                wss.emit("connection", ws, req);
-        });
+	wss.handleUpgrade(req, socket, head, (ws) => {
+		wss.emit("connection", ws, req);
+	});
 });
 
 wss.on("connection", (ws, req) => {
-        handleWsConnection(ws, req, sessions, docker);
+	handleWsConnection(ws, req, sessions, docker);
 });
 
 // ── Startup ───────────────────────────────────────────────────────────────────
 
 async function start() {
-        await migrateDb();
-        await docker.reconcile();
-        // Wait for the timing-parity dummy bcrypt hash to finish computing
-        // before accepting requests. Without this, the first unknown-user
-        // login would block on the ~2^BCRYPT_ROUNDS-ms hash computation,
-        // producing a latency signal distinguishable from a known-user
-        // login (which short-circuits the dummy path) — exactly the
-        // timing leak the dummy is supposed to prevent.
-        await ensureAuthReady();
+	await migrateDb();
+	await docker.reconcile();
+	// Wait for the timing-parity dummy bcrypt hash to finish computing
+	// before accepting requests. Without this, the first unknown-user
+	// login would block on the ~2^BCRYPT_ROUNDS-ms hash computation,
+	// producing a latency signal distinguishable from a known-user
+	// login (which short-circuits the dummy path) — exactly the
+	// timing leak the dummy is supposed to prevent.
+	await ensureAuthReady();
 
-        server.listen(PORT, () => {
-                console.log(`[server] listening on http://localhost:${PORT}`);
-                console.log(`[server] WebSocket: ws://localhost:${PORT}/ws/sessions/:id`);
-                console.log(`[server] CORS origins: ${CORS_ORIGINS.join(", ")}`);
-                console.log(`[server] Database: Cloudflare D1`);
-        });
+	server.listen(PORT, () => {
+		console.log(`[server] listening on http://localhost:${PORT}`);
+		console.log(`[server] WebSocket: ws://localhost:${PORT}/ws/sessions/:id`);
+		console.log(`[server] CORS origins: ${CORS_ORIGINS.join(", ")}`);
+		console.log(`[server] Database: Cloudflare D1`);
+	});
 }
 
 start().catch((err) => {
-        console.error("[server] failed to start:", err);
-        process.exit(1);
+	console.error("[server] failed to start:", err);
+	process.exit(1);
 });
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
@@ -205,31 +205,35 @@ process.on("SIGINT", shutdown);
 let shuttingDown = false;
 
 function shutdown() {
-        if (shuttingDown) return;
-        shuttingDown = true;
-        console.log("[server] shutting down…");
+	if (shuttingDown) return;
+	shuttingDown = true;
+	console.log("[server] shutting down…");
 
-        // Actively close live WS clients. `wss.close()` alone only stops accepting
-        // new upgrades — existing connections stay open, which keeps `server.close()`
-        // hanging on its keepalive-held sockets until the OS eventually kills the
-        // process. Send 1001 ("going away") so the browser surfaces a clean reason
-        // rather than "connection error".
-        for (const client of wss.clients) {
-                try { client.close(1001, "server shutting down"); } catch { /* already closed */ }
-        }
-        wss.close();
+	// Actively close live WS clients. `wss.close()` alone only stops accepting
+	// new upgrades — existing connections stay open, which keeps `server.close()`
+	// hanging on its keepalive-held sockets until the OS eventually kills the
+	// process. Send 1001 ("going away") so the browser surfaces a clean reason
+	// rather than "connection error".
+	for (const client of wss.clients) {
+		try {
+			client.close(1001, "server shutting down");
+		} catch {
+			/* already closed */
+		}
+	}
+	wss.close();
 
-        // Watchdog: if a client stalls its close handshake (or some other handle
-        // keeps the event loop alive), exit anyway after a grace period instead of
-        // hanging the orchestrator's stop timeout.
-        const watchdog = setTimeout(() => {
-                console.warn("[server] shutdown watchdog fired — forcing exit");
-                process.exit(1);
-        }, 10_000);
-        watchdog.unref();
+	// Watchdog: if a client stalls its close handshake (or some other handle
+	// keeps the event loop alive), exit anyway after a grace period instead of
+	// hanging the orchestrator's stop timeout.
+	const watchdog = setTimeout(() => {
+		console.warn("[server] shutdown watchdog fired — forcing exit");
+		process.exit(1);
+	}, 10_000);
+	watchdog.unref();
 
-        server.close(() => {
-                clearTimeout(watchdog);
-                process.exit(0);
-        });
+	server.close(() => {
+		clearTimeout(watchdog);
+		process.exit(0);
+	});
 }

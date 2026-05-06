@@ -154,7 +154,10 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		limit: cfg.invitesRevoke.ipMax,
 		standardHeaders: "draft-7",
 		legacyHeaders: false,
-		message: { error: "Too many invite-revoke requests from this IP, try again later", scope: "ip" },
+		message: {
+			error: "Too many invite-revoke requests from this IP, try again later",
+			scope: "ip",
+		},
 	});
 	const fileUploadIp = rateLimit({
 		windowMs: cfg.fileUpload.ipWindowMs,
@@ -168,9 +171,7 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 
 // ── Per-username limiter ────────────────────────────────────────────────────
 
-export type UsernameCheckResult =
-	| { allowed: true }
-	| { allowed: false; retryAfterSeconds: number };
+export type UsernameCheckResult = { allowed: true } | { allowed: false; retryAfterSeconds: number };
 
 interface FailedAttempts {
 	count: number;

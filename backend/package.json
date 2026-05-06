@@ -9,6 +9,9 @@
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
+    "lint": "biome check src/",
+    "lint:fix": "biome check src/ --write",
+    "format": "biome format src/ --write",
     "db:migrate": "node -e \"require('./dist/db.js').migrateDb().then(() => console.log('done'))\"",
     "docker:build-session": "docker build -t shared-terminal-session ../session-image"
   },
@@ -23,6 +26,7 @@
     "ws": "^8.17.1"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.14",
     "@types/bcryptjs": "^2.4.6",
     "@types/dockerode": "^3.3.31",
     "@types/express": "^4.17.21",
