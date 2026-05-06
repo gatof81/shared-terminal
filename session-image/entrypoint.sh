@@ -180,6 +180,26 @@ fi
 # real directory in the container layer so the symlink lands cleanly.
 #
 # Best-effort, same WARN-and-carry-on pattern as the blocks above.
+# Drop a pre-existing real ~/.config/gh before the symlink swap. This
+# covers two scenarios that would otherwise silently lose tokens on the
+# next /start: (a) an older image that shipped without this entrypoint
+# block had `gh auth login` run inside it, leaving credentials in the
+# container layer; (b) a prior boot's `ln -sfn` failed (mkdir succeeded,
+# WARN fired) and `gh auth login` then wrote to the resulting real
+# directory. In either case `ln -sfn` against a non-empty real dir
+# fails — `unlink(2)` refuses to remove a directory — so the symlink is
+# never created and `gh` writes into the ephemeral container layer.
+# The user sees auth "work" until the container is recycled, then it
+# vanishes with only a stale WARN in the logs.
+#
+# Pre-removing the dir means a one-time re-auth on the upgrade path,
+# which is strictly better than the silent-loss path. Best-effort with
+# `|| true`: if the rm fails, the WARN below will fire and the operator
+# at least gets a signal.
+if [ -d /home/developer/.config/gh ] && [ ! -L /home/developer/.config/gh ]; then
+        rm -rf /home/developer/.config/gh || true
+fi
+
 if ! mkdir -p /home/developer/.config /home/developer/workspace/.config/gh; then
         echo "[entrypoint] WARN: couldn't create workspace .config/gh dir " \
              "(uid=$(id -u), workspace owner=$(stat -c '%u:%g' /home/developer/workspace 2>/dev/null || echo '?')). " \
