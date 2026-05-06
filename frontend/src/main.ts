@@ -1283,6 +1283,19 @@ async function renderInvites() {
 
 		inviteList.appendChild(row);
 	}
+
+	// Backend caps the response at INVITE_LIST_LIMIT=100 (#54). When we
+	// hit that boundary, the modal is silently truncated — surface a
+	// hint so a user with > 100 historical invites isn't misled into
+	// thinking that's everything. Real cursor pagination is overkill
+	// today; this footer is the cheap signal that something was elided.
+	const SERVER_INVITE_LIMIT = 100;
+	if (invites.length === SERVER_INVITE_LIMIT) {
+		const footer = document.createElement("div");
+		footer.className = "invite-empty";
+		footer.textContent = "Older invites not shown — only the most recent 100 are listed.";
+		inviteList.appendChild(footer);
+	}
 }
 
 invitesBtn.addEventListener("click", () => openInvitesModal(invitesBtn));
