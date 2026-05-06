@@ -1156,13 +1156,25 @@ function nextFontSize(current: number): number {
 	return FONT_SIZE_STEPS[(i + 1) % FONT_SIZE_STEPS.length]!;
 }
 
+// RAF-coalesce the per-tab apply (#56). Each click cycles
+// `currentFontSize` immediately so the button label stays in lock-step
+// with what the user clicked, but the per-tab `setFontSize` (which
+// triggers an xterm re-layout + refit per tab) defers to the next
+// animation frame and reads the latest value once. A burst of N clicks
+// inside one frame collapses to exactly one apply per terminal.
+let fontSizeRafScheduled = false;
 fontSizeBtn.addEventListener("click", () => {
 	currentFontSize = nextFontSize(currentFontSize);
 	localStorage.setItem(FONT_SIZE_KEY, String(currentFontSize));
 	fontSizeBtn.textContent = `Aa ${currentFontSize}`;
-	for (const { term } of currentTerminals.values()) {
-		term.setFontSize(currentFontSize);
-	}
+	if (fontSizeRafScheduled) return;
+	fontSizeRafScheduled = true;
+	requestAnimationFrame(() => {
+		fontSizeRafScheduled = false;
+		for (const { term } of currentTerminals.values()) {
+			term.setFontSize(currentFontSize);
+		}
+	});
 });
 // Reflect the persisted size in the label on load so users see e.g. "Aa 16"
 // rather than a generic "Aa" after they've picked their size once.
