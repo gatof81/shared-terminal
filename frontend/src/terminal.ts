@@ -133,10 +133,13 @@ export function openTerminalSession(opts: {
 		} catch (err) {
 			restoredAddon?.dispose();
 			console.warn("[terminal] WebGL restore failed:", err);
-			// Restore failed — we're locked into the DOM renderer for
-			// this tab. Surface the same one-time notice so the user
-			// understands the slowdown that started at context loss
-			// will persist.
+			// In the common loss → restore → restore-fail sequence the
+			// "context lost" notice already fired and `noticeFallback`
+			// here is a no-op (the once-per-tab gate is already set).
+			// Kept so a future change that resets the flag between
+			// loss and restore — e.g. to allow re-notice after an
+			// interim successful restore — wouldn't silently skip
+			// surfacing this terminal-state failure.
 			noticeFallback("restore failed");
 		}
 	};
