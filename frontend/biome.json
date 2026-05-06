@@ -21,7 +21,7 @@
 			"style": {
 				"noNonNullAssertion": "off",
 				"useImportType": "error",
-				"useNodejsImportProtocol": "error",
+				"useNodejsImportProtocol": "off",
 				"useTemplate": "error"
 			},
 			"suspicious": {
