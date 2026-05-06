@@ -182,6 +182,23 @@ fi
 # (EACCES vs. ENOSPC vs. EROFS) is what an operator needs to fix the
 # real problem in `docker logs`. The `if !` test handles the non-zero
 # exit; we don't need to swallow the message too.
+# Drop a pre-existing real ~/.vscode-cli before the symlink swap. Same
+# silent-loss path as the ~/.config/gh block below (and fixed there in
+# #132): if `code tunnel` ever ran on an image without this persistence
+# block, or a prior boot's `ln -sfn` failed and code tunnel then wrote
+# to the resulting real directory, `unlink(2)` refuses to remove a
+# non-empty directory and `ln -sfn` exits non-zero. The user sees auth
+# "work" until the container is recycled, then it vanishes with only a
+# stale WARN in the logs.
+#
+# Pre-removing means a one-time re-auth via the device-code flow on the
+# upgrade path, which is strictly better than the silent-loss path. Best-
+# effort with `|| true`: if the rm fails the WARN below still fires and
+# the operator has a signal.
+if [ -d /home/developer/.vscode-cli ] && [ ! -L /home/developer/.vscode-cli ]; then
+        rm -rf /home/developer/.vscode-cli || true
+fi
+
 if ! mkdir -p /home/developer/workspace/.vscode-cli; then
         echo "[entrypoint] WARN: couldn't create workspace .vscode-cli dir " \
              "(uid=$(id -u), workspace owner=$(stat -c '%u:%g' /home/developer/workspace 2>/dev/null || echo '?')). " \
