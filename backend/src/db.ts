@@ -62,9 +62,15 @@ export async function d1Query<T = Record<string, unknown>>(
 
 /**
  * Execute multiple SQL statements (for migrations).
+ *
+ * Sequential one-statement-per-request. The D1 REST `/query` endpoint
+ * does have undocumented multi-statement shapes (semicolon-joined SQL,
+ * `{ batch: [...] }` body), but neither has been empirically verified
+ * here. Five DDL round-trips at cold start is negligible; trading
+ * proven reliability for that tiny optimisation regresses the only
+ * code path that runs at every boot. See PR #141 review history.
  */
 export async function d1Batch(statements: string[]): Promise<void> {
-	// D1 doesn't have a batch endpoint via HTTP, so run sequentially
 	for (const sql of statements) {
 		const trimmed = sql.trim();
 		if (!trimmed) continue;
@@ -85,6 +91,18 @@ export async function migrateDb(): Promise<void> {
                         password_hash TEXT NOT NULL,
                         created_at  TEXT NOT NULL DEFAULT (datetime('now'))
                 )`,
+		// `sessions` must follow `users` — the FK on user_id references
+		// users(id), and these statements run sequentially. Don't reorder
+		// without also handling deferred-FK semantics on D1.
+		// FK on user_id (#20): D1 enables foreign-key enforcement on every
+		// connection by default, so this is load-bearing once user
+		// deletion lands. ON DELETE CASCADE: deleting a user purges their
+		// sessions atomically, no orphan rows. Pre-existing tables
+		// (created before this migration) won't pick up the FK — SQLite
+		// has no ADD CONSTRAINT, only table rebuild — so existing
+		// deployments need a manual rebuild if they want enforcement on
+		// rows that already exist. Documented as a known limitation in
+		// the issue.
 		`CREATE TABLE IF NOT EXISTS sessions (
                         session_id      TEXT PRIMARY KEY,
                         user_id         TEXT NOT NULL,
@@ -96,7 +114,8 @@ export async function migrateDb(): Promise<void> {
                         rows            INTEGER NOT NULL DEFAULT 36,
                         env_vars        TEXT NOT NULL DEFAULT '{}',
                         created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-                        last_connected_at TEXT
+                        last_connected_at TEXT,
+                        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                 )`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_user
                         ON sessions(user_id, status)`,
