@@ -106,11 +106,16 @@ app.use(cookieParser());
 // never sends one — auth travels in the cookie and there's no read path
 // for the frontend that needs to inspect or set it.
 app.use((_req, res, next) => {
+	// `Vary: Origin` set unconditionally so an intermediate cache can't
+	// serve a same-origin (no-CORS) cached response to a cross-origin
+	// client, which would arrive without `Access-Control-Allow-Origin`
+	// and trip the browser's same-origin block. No CDN sits in front of
+	// the tunnel today; this is hardening for the moment one is added.
+	res.setHeader("Vary", "Origin");
 	const origin = _req.headers.origin ?? "";
 	if (origin && (CORS_ORIGINS.includes("*") || CORS_ORIGINS.includes(origin))) {
 		res.setHeader("Access-Control-Allow-Origin", origin);
 		res.setHeader("Access-Control-Allow-Credentials", "true");
-		res.setHeader("Vary", "Origin");
 	}
 	res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,PATCH,OPTIONS");
 	res.setHeader("Access-Control-Allow-Headers", "Content-Type");
