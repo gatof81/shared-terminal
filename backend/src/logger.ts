@@ -53,6 +53,12 @@ export const logger = pino({
 	// log object should grow this list, not depend on every caller
 	// remembering to scrub.
 	redact: {
+		// Field-name list, not substring match. Picked specifically so a
+		// future caller logging `{ code: statusCode }` (HTTP status, error
+		// code, anything-but-an-invite-secret) doesn't get silently
+		// redacted — `inviteCode` / `invite_code` cover the actual
+		// plaintext-bearing fields, and any new secret carrier should
+		// land here under its own specific key.
 		paths: [
 			"password",
 			"passwordHash",
@@ -63,7 +69,6 @@ export const logger = pino({
 			"JWT_SECRET",
 			"inviteCode",
 			"invite_code",
-			"code",
 			"authorization",
 			"Authorization",
 			"cookie",
