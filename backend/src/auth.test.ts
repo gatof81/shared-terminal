@@ -1,8 +1,13 @@
+import type { NextFunction, Request, Response } from "express";
+import jwt from "jsonwebtoken";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	__resetJwtSecretForTests,
+	AUTH_COOKIE_NAME,
+	extractTokenFromCookieHeader,
 	isAllowedWsOrigin,
 	parseCorsOrigins,
+	requireAuth,
 	validateJwtSecret,
 	warnIfWildcardCorsInProduction,
 } from "./auth.js";
@@ -265,5 +270,174 @@ describe("parseCorsOrigins", () => {
 		// also round-trip.
 		expect(parseCorsOrigins("*")).toEqual(["*"]);
 		expect(parseCorsOrigins("*, https://b")).toEqual(["*", "https://b"]);
+	});
+});
+
+// ── Cookie auth primitives (#18) ───────────────────────────────────────────
+
+describe("extractTokenFromCookieHeader", () => {
+	it("returns null on missing or malformed inputs", () => {
+		expect(extractTokenFromCookieHeader(undefined)).toBeNull();
+		expect(extractTokenFromCookieHeader("")).toBeNull();
+		// No `=` at all → ignore the part.
+		expect(extractTokenFromCookieHeader("badheader")).toBeNull();
+		// Cookie with our name but empty value → null, not "".
+		expect(extractTokenFromCookieHeader(`${AUTH_COOKIE_NAME}=`)).toBeNull();
+	});
+
+	it("picks our cookie out of a multi-cookie header regardless of position", () => {
+		expect(
+			extractTokenFromCookieHeader(`other=value; ${AUTH_COOKIE_NAME}=tok-123; trailing=stuff`),
+		).toBe("tok-123");
+		expect(extractTokenFromCookieHeader(`${AUTH_COOKIE_NAME}=tok-first; other=ignored`)).toBe(
+			"tok-first",
+		);
+	});
+
+	it("trims surrounding whitespace on both name and value", () => {
+		expect(extractTokenFromCookieHeader(`  ${AUTH_COOKIE_NAME} = tok-spacey  `)).toBe("tok-spacey");
+	});
+
+	it("URL-decodes percent-encoded values", () => {
+		// `=` shows up in the JWT padding for some payloads; servers
+		// percent-encode cookie values when setting them. Make sure we
+		// undo that on read.
+		const encoded = encodeURIComponent("tok+with/special=chars");
+		expect(extractTokenFromCookieHeader(`${AUTH_COOKIE_NAME}=${encoded}`)).toBe(
+			"tok+with/special=chars",
+		);
+	});
+
+	it("returns the raw value when decodeURIComponent throws on a malformed sequence", () => {
+		// `%E0%A4%A` is a truncated UTF-8 sequence that decodeURIComponent
+		// rejects with URIError. We'd rather hand the verifier a string
+		// it'll reject downstream than 500 the request here.
+		expect(extractTokenFromCookieHeader(`${AUTH_COOKIE_NAME}=tok%E0%A4%A`)).toBe("tok%E0%A4%A");
+	});
+
+	it("ignores cookies with other names", () => {
+		expect(extractTokenFromCookieHeader("session=foo; csrf=bar")).toBeNull();
+	});
+
+	it("flattens an array Cookie header (not standard but tolerated)", () => {
+		// Some frameworks coerce duplicate Cookie headers into a string[].
+		// Joining mirrors what the browser actually transmits — a single
+		// string with `; ` between entries.
+		expect(extractTokenFromCookieHeader(["other=value", `${AUTH_COOKIE_NAME}=tok-arr`])).toBe(
+			"tok-arr",
+		);
+	});
+});
+
+describe("requireAuth", () => {
+	const TEST_SECRET = "test-secret-do-not-use-in-prod";
+	const originalEnv = { ...process.env };
+
+	beforeEach(() => {
+		process.env.JWT_SECRET = TEST_SECRET;
+		__resetJwtSecretForTests();
+		validateJwtSecret();
+	});
+
+	afterEach(() => {
+		for (const k of Object.keys(process.env)) delete process.env[k];
+		Object.assign(process.env, originalEnv);
+		__resetJwtSecretForTests();
+	});
+
+	type CookieReq = Request & { cookies?: Record<string, string> };
+
+	function makeReq(opts: { cookies?: Record<string, string>; cookieHeader?: string }): CookieReq {
+		return {
+			cookies: opts.cookies,
+			headers: { cookie: opts.cookieHeader },
+		} as unknown as CookieReq;
+	}
+
+	function makeRes(): {
+		res: Response;
+		status: ReturnType<typeof vi.fn>;
+		json: ReturnType<typeof vi.fn>;
+	} {
+		const json = vi.fn();
+		const status = vi.fn(() => ({ json }) as unknown as Response);
+		return {
+			res: { status } as unknown as Response,
+			status,
+			json,
+		};
+	}
+
+	it("401s when no cookie is present anywhere", () => {
+		const req = makeReq({});
+		const { res, status, json } = makeRes();
+		const next = vi.fn() as unknown as NextFunction;
+
+		requireAuth(req, res, next);
+
+		expect(status).toHaveBeenCalledWith(401);
+		expect(json).toHaveBeenCalledWith({ error: "Missing or invalid auth cookie" });
+		expect(next).not.toHaveBeenCalled();
+	});
+
+	it("401s when the cookie carries a malformed JWT", () => {
+		const req = makeReq({ cookies: { [AUTH_COOKIE_NAME]: "not-a-jwt" } });
+		const { res, status, json } = makeRes();
+		const next = vi.fn() as unknown as NextFunction;
+
+		requireAuth(req, res, next);
+
+		expect(status).toHaveBeenCalledWith(401);
+		expect(json).toHaveBeenCalledWith({ error: "Missing or invalid auth cookie" });
+		expect(next).not.toHaveBeenCalled();
+	});
+
+	it("populates userId/username from a valid cookie via cookie-parser path", () => {
+		const token = jwt.sign({ sub: "u-1", username: "alice" }, TEST_SECRET);
+		const req = makeReq({ cookies: { [AUTH_COOKIE_NAME]: token } });
+		const { res } = makeRes();
+		const next = vi.fn() as unknown as NextFunction;
+
+		requireAuth(req, res, next);
+
+		const reqWithIdent = req as unknown as { userId: string; username: string };
+		expect(reqWithIdent.userId).toBe("u-1");
+		expect(reqWithIdent.username).toBe("alice");
+		expect(next).toHaveBeenCalled();
+	});
+
+	it("falls back to the raw Cookie header when req.cookies is absent", () => {
+		// Simulates a path that bypassed cookie-parser. The fallback exists
+		// strictly for defence in depth — if the middleware is wired
+		// correctly the bypass never fires, but a future test stubbing
+		// the express stack should still authenticate.
+		const token = jwt.sign({ sub: "u-2", username: "bob" }, TEST_SECRET);
+		const req = makeReq({ cookieHeader: `other=x; ${AUTH_COOKIE_NAME}=${token}` });
+		const { res } = makeRes();
+		const next = vi.fn() as unknown as NextFunction;
+
+		requireAuth(req, res, next);
+
+		const reqWithIdent = req as unknown as { userId: string; username: string };
+		expect(reqWithIdent.userId).toBe("u-2");
+		expect(next).toHaveBeenCalled();
+	});
+
+	it("prefers req.cookies over the raw Cookie header (cookie-parser is authoritative)", () => {
+		// If both somehow exist, the parsed map wins so behaviour matches
+		// the rest of the app, which trusts cookie-parser.
+		const tokenA = jwt.sign({ sub: "from-cookies", username: "a" }, TEST_SECRET);
+		const tokenB = jwt.sign({ sub: "from-header", username: "b" }, TEST_SECRET);
+		const req = makeReq({
+			cookies: { [AUTH_COOKIE_NAME]: tokenA },
+			cookieHeader: `${AUTH_COOKIE_NAME}=${tokenB}`,
+		});
+		const { res } = makeRes();
+		const next = vi.fn() as unknown as NextFunction;
+
+		requireAuth(req, res, next);
+
+		expect((req as unknown as { userId: string }).userId).toBe("from-cookies");
+		expect(next).toHaveBeenCalled();
 	});
 });

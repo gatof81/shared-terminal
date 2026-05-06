@@ -9,7 +9,10 @@ import { Router } from "express";
 import multer from "multer";
 import type { AuthedRequest } from "./auth.js";
 import {
+	AUTH_COOKIE_NAME,
+	clearAuthCookie,
 	createInvite,
+	extractTokenFromCookieHeader,
 	hasAnyUsers,
 	InvalidCredentialsError,
 	InviteQuotaExceededError,
@@ -19,7 +22,9 @@ import {
 	registerUser,
 	requireAuth,
 	revokeInvite,
+	setAuthCookie,
 	UsernameTakenError,
+	verifyJwt,
 } from "./auth.js";
 import type { DockerManager } from "./dockerManager.js";
 import { UploadQuotaExceededError } from "./dockerManager.js";
@@ -44,8 +49,15 @@ export function buildRouter(
 
 	// ── Auth routes (public) ────────────────────────────────────────────────
 
-	const { loginIp, registerIp, invitesCreateIp, invitesListIp, invitesRevokeIp, fileUploadIp } =
-		createAuthRateLimiters(rateLimitConfig);
+	const {
+		loginIp,
+		registerIp,
+		invitesCreateIp,
+		invitesListIp,
+		invitesRevokeIp,
+		fileUploadIp,
+		logoutIp,
+	} = createAuthRateLimiters(rateLimitConfig);
 	const usernameLimiter = new UsernameRateLimiter(
 		rateLimitConfig.login.usernameMax,
 		rateLimitConfig.login.usernameWindowMs,
@@ -54,8 +66,23 @@ export function buildRouter(
 	// land in the limiter map or D1.
 	const USERNAME_MAX_LEN = 64;
 
-	router.get("/auth/status", async (_req: Request, res: Response) => {
-		res.json({ needsSetup: !(await hasAnyUsers()) });
+	router.get("/auth/status", async (req: Request, res: Response) => {
+		// `authenticated` lets the frontend decide between "show login" and
+		// "show app" on first load, since the cookie is httpOnly and JS
+		// can't observe it directly. Read from req.cookies (populated by
+		// cookie-parser); fall back to the raw header for tests / paths
+		// that bypass middleware. Verification failures land as
+		// `authenticated: false`, never as a 4xx — this endpoint is
+		// public-by-design.
+		const reqWithCookies = req as Request & {
+			cookies?: Record<string, string | undefined>;
+		};
+		const token =
+			reqWithCookies.cookies?.[AUTH_COOKIE_NAME] ??
+			extractTokenFromCookieHeader(req.headers.cookie) ??
+			undefined;
+		const authenticated = verifyJwt(token) !== null;
+		res.json({ needsSetup: !(await hasAnyUsers()), authenticated });
 	});
 
 	router.post("/auth/register", registerIp, async (req: Request, res: Response) => {
@@ -102,7 +129,11 @@ export function buildRouter(
 		}
 		try {
 			const result = await registerUser(username, password, trimmedInviteCode);
-			res.status(201).json(result);
+			// JWT goes out as an httpOnly cookie (#18); the response body
+			// keeps the userId for clients that want to address the new
+			// account, but never the raw token.
+			setAuthCookie(res, result.token);
+			res.status(201).json({ userId: result.userId });
 		} catch (err) {
 			if (err instanceof InviteRequiredError) {
 				// 403 — caller authenticated nothing yet, but the action is
@@ -175,7 +206,8 @@ export function buildRouter(
 				return;
 			}
 			usernameLimiter.reset(username);
-			res.json(result);
+			setAuthCookie(res, result.token);
+			res.json({ userId: result.userId });
 		} finally {
 			// Always release the in-flight slot — success, invalid creds,
 			// or infra error alike. `reset()` above wipes the failure
@@ -184,6 +216,23 @@ export function buildRouter(
 			// endAttempt.
 			usernameLimiter.endAttempt(username);
 		}
+	});
+
+	// Logout is intentionally NOT auth-gated: the action is "discard the
+	// cookie", which is harmless to the server even on a missing/invalid
+	// session — and gating it would mean that an already-expired token
+	// couldn't even be cleaned up locally.
+	//
+	// In production the auth cookie is SameSite=None (required for the
+	// cross-site Pages → Tunnel deployment), so a cross-site form POST
+	// to this endpoint *can* reach the server. The consequence is user
+	// inconvenience only — no data is exposed, no session can be hijacked
+	// by clearing the victim's cookie. State-changing routes that DO
+	// matter for CSRF (POST/DELETE/PATCH with JSON bodies) are
+	// preflight-gated by the CORS middleware in index.ts.
+	router.post("/auth/logout", logoutIp, (_req: Request, res: Response) => {
+		clearAuthCookie(res);
+		res.status(204).send();
 	});
 
 	// ── Authenticated route prefixes ────────────────────────────────────────

@@ -498,65 +498,155 @@ function signToken(userId: string, username: string): string {
 	return jwt.sign(payload, jwtSecret(), options);
 }
 
+// ── Cookie auth (#18) ──────────────────────────────────────────────────────
+
+export const AUTH_COOKIE_NAME = "st_token";
+
+// SameSite/Secure pair driven by NODE_ENV. Cross-site delivery (frontend
+// on `*.pages.dev`, backend on a tunnel with a custom domain — different
+// eTLD+1) requires `SameSite=None`, which the spec forces to come with
+// `Secure`. Dev (http://localhost) keeps `Strict` because same-site is
+// guaranteed there and `Secure` would refuse to set on plain HTTP.
+//
+// CSRF guarantees with `SameSite=None`:
+//   - State-changing routes are POST/DELETE/PATCH with
+//     `Content-Type: application/json`, so the browser preflights them.
+//     CORS rejects unlisted origins → the actual request never fires.
+//   - WebSocket upgrades go through `isAllowedWsOrigin` (CSWSH) which
+//     enforces the same allowlist independently of SameSite.
+const isProduction = (): boolean => process.env.NODE_ENV === "production";
+const cookieSameSite = (): "strict" | "none" => (isProduction() ? "none" : "strict");
+
+/**
+ * Set the JWT as an httpOnly cookie. `maxAge` is derived from the JWT's
+ * own `exp` claim so the cookie expires exactly when the token does —
+ * no "cookie says logged in but every request comes back 401" window
+ * if JWT_EXPIRES_IN is changed.
+ */
+export function setAuthCookie(res: Response, token: string): void {
+	// jwt.decode does NOT verify the signature — safe only because every
+	// caller hands us a token freshly produced by signToken(). If a future
+	// caller passes an externally-supplied token here, switch to
+	// jwt.verify (or compute maxAge from JWT_EXPIRES_IN directly), since
+	// an attacker could otherwise lift the cookie's lifetime to anything.
+	const decoded = jwt.decode(token) as { exp?: number } | null;
+	const expSec = decoded?.exp;
+	const maxAge = expSec ? Math.max(0, expSec * 1000 - Date.now()) : 0;
+	res.cookie(AUTH_COOKIE_NAME, token, {
+		httpOnly: true,
+		secure: isProduction(),
+		sameSite: cookieSameSite(),
+		path: "/",
+		maxAge,
+	});
+}
+
+export function clearAuthCookie(res: Response): void {
+	// Clearing has to mirror the same cookie attributes (path, sameSite,
+	// secure) the browser used to scope the cookie, otherwise it picks a
+	// different stored cookie and the live one survives.
+	res.clearCookie(AUTH_COOKIE_NAME, {
+		httpOnly: true,
+		secure: isProduction(),
+		sameSite: cookieSameSite(),
+		path: "/",
+	});
+}
+
+/**
+ * Verify a raw JWT string. Returns the payload, or null on any JWT-level
+ * failure (missing token, expired, bad signature, malformed). Configuration
+ * panics from `jwtSecret()` are *not* swallowed: a deploy that forgot to
+ * call `validateJwtSecret()` would otherwise present as "every user is
+ * silently rejected" with no log trail. Re-throwing surfaces the misconfig
+ * loudly via the global error handler.
+ */
+export function verifyJwt(token: string | undefined): JwtPayload | null {
+	if (!token) return null;
+	try {
+		return jwt.verify(token, jwtSecret()) as JwtPayload;
+	} catch (err) {
+		// jwtSecret() throws a fixed-prefix message when called before
+		// validateJwtSecret(). Anything else is a JWT-level failure
+		// (TokenExpiredError, JsonWebTokenError, etc.) — treat as null.
+		if ((err as Error).message?.startsWith("jwtSecret() called before")) {
+			throw err;
+		}
+		return null;
+	}
+}
+
+/**
+ * Pick the JWT out of a `Cookie` request header, returning the raw token or
+ * null if the cookie isn't present. Tolerates the various encodings real
+ * clients send: missing header, multiple cookies, leading/trailing whitespace,
+ * URL-encoded values. Used by both the WS upgrade path and (via cookie-parser
+ * in production) the REST middleware for a defence-in-depth fallback when the
+ * middleware is somehow bypassed.
+ */
+export function extractTokenFromCookieHeader(
+	cookieHeader: string | string[] | undefined,
+): string | null {
+	if (!cookieHeader) return null;
+	const raw = Array.isArray(cookieHeader) ? cookieHeader.join("; ") : cookieHeader;
+	for (const part of raw.split(";")) {
+		const eq = part.indexOf("=");
+		if (eq <= 0) continue;
+		const name = part.slice(0, eq).trim();
+		if (name !== AUTH_COOKIE_NAME) continue;
+		const value = part.slice(eq + 1).trim();
+		if (!value) return null;
+		// Cookie values may be URL-encoded. decodeURIComponent throws on a
+		// malformed sequence — treat as missing rather than 500.
+		try {
+			return decodeURIComponent(value);
+		} catch {
+			return value;
+		}
+	}
+	return null;
+}
+
 // ── Express middleware ──────────────────────────────────────────────────────
 
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
-	const header = req.headers.authorization;
-	if (!header?.startsWith("Bearer ")) {
-		res.status(401).json({ error: "Missing or invalid Authorization header" });
+	// `cookie-parser` is wired in index.ts and populates req.cookies. The
+	// header-fallback below only runs if the middleware is somehow absent
+	// (e.g. a future test bypassing express). It's not load-bearing —
+	// strictly defence-in-depth.
+	const cookies = (req as Request & { cookies?: Record<string, string> }).cookies;
+	const token = cookies?.[AUTH_COOKIE_NAME] ?? extractTokenFromCookieHeader(req.headers.cookie);
+	const payload = verifyJwt(token);
+	if (!payload) {
+		res.status(401).json({ error: "Missing or invalid auth cookie" });
 		return;
 	}
-
-	const token = header.slice(7);
-	try {
-		const payload = jwt.verify(token, jwtSecret()) as JwtPayload;
-		(req as AuthedRequest).userId = payload.sub;
-		(req as AuthedRequest).username = payload.username;
-		next();
-	} catch {
-		res.status(401).json({ error: "Invalid or expired token" });
-	}
+	(req as AuthedRequest).userId = payload.sub;
+	(req as AuthedRequest).username = payload.username;
+	next();
 }
 
 // ── WebSocket auth ──────────────────────────────────────────────────────────
 
-const WS_AUTH_PROTOCOL_PREFIX = "auth.bearer.";
-
 /**
- * Extract the bearer token from either:
- *   1. The `Sec-WebSocket-Protocol` header as `auth.bearer.<jwt>` (preferred —
- *      keeps the token out of URLs, access logs and Referer headers), or
- *   2. The `?token=<jwt>` query string (fallback for proxies / tunnels that
- *      strip the `Sec-WebSocket-Protocol` header).
+ * Verify the JWT carried by an incoming WS upgrade. Reads from the request's
+ * `Cookie` header — browsers send cookies on the WS handshake to the cookie's
+ * domain regardless of the page's origin (CSWSH protection lives separately
+ * via the `Origin` allowlist).
  *
- * Then verify it and return the decoded payload, or null on any failure.
+ * Log the specific JWT error name+message on failure: WS-auth misses are
+ * uncommon and almost always signal something specific (expired token,
+ * wrong-secret deploy, malformed cookie). Dropping the detail to a generic
+ * "verification failed" makes 2-AM triage harder than it needs to be. The
+ * REST `requireAuth` path stays quiet because it's exposed to unauthenticated
+ * probing and the same logging there would be a flood.
  */
-export function verifyWsToken(
-	protocolHeader: string | string[] | undefined,
-	requestUrl: string | undefined,
-): JwtPayload | null {
-	const fromProtocol = extractTokenFromProtocol(protocolHeader);
-	const fromUrl = fromProtocol ? null : extractTokenFromUrl(requestUrl);
-	const token = fromProtocol ?? fromUrl;
-
+export function verifyWsToken(cookieHeader: string | string[] | undefined): JwtPayload | null {
+	const token = extractTokenFromCookieHeader(cookieHeader);
 	if (!token) {
-		// Help operators tell which channel(s) were tried. The subprotocol path
-		// is preferred; the query-string path only kicks in as a fallback for
-		// proxies that strip Sec-WebSocket-Protocol.
-		if (!protocolHeader && !requestUrl) {
-			logger.error("[verifyWsToken] no Sec-WebSocket-Protocol header and no request URL");
-		} else if (!protocolHeader) {
-			logger.error("[verifyWsToken] no Sec-WebSocket-Protocol header and no ?token= query param");
-		} else {
-			const header = Array.isArray(protocolHeader) ? protocolHeader.join(",") : protocolHeader;
-			logger.error(
-				"[verifyWsToken] no usable auth.bearer.* subprotocol (got: %s) and no ?token= query param",
-				header,
-			);
-		}
+		logger.error("[verifyWsToken] no auth cookie on upgrade request");
 		return null;
 	}
-
 	try {
 		return jwt.verify(token, jwtSecret()) as JwtPayload;
 	} catch (err) {
@@ -565,38 +655,6 @@ export function verifyWsToken(
 		);
 		return null;
 	}
-}
-
-function extractTokenFromProtocol(protocolHeader: string | string[] | undefined): string | null {
-	if (!protocolHeader) return null;
-	const header = Array.isArray(protocolHeader) ? protocolHeader.join(",") : protocolHeader;
-	const protocols = header.split(",").map((s) => s.trim());
-	const authProto = protocols.find((p) => p.startsWith(WS_AUTH_PROTOCOL_PREFIX));
-	if (!authProto) return null;
-	const token = authProto.slice(WS_AUTH_PROTOCOL_PREFIX.length);
-	return token || null;
-}
-
-function extractTokenFromUrl(requestUrl: string | undefined): string | null {
-	if (!requestUrl) return null;
-	try {
-		const parsed = new URL(requestUrl, "http://localhost");
-		const token = parsed.searchParams.get("token");
-		return token || null;
-	} catch {
-		return null;
-	}
-}
-
-/**
- * Pick the `auth.bearer.<jwt>` subprotocol from an offered set so the server
- * can echo it back in the handshake response (required by RFC 6455).
- */
-export function selectWsAuthProtocol(protocols: Set<string>): string | false {
-	for (const p of protocols) {
-		if (p.startsWith(WS_AUTH_PROTOCOL_PREFIX)) return p;
-	}
-	return false;
 }
 
 /**
@@ -663,10 +721,14 @@ export function parseCorsOrigins(raw: string | undefined): string[] {
  *    - In production: DENY, and the caller logs a loud warning once at
  *      startup. The HTTP CORS layer treats "*" as "anyone can hit
  *      public endpoints without credentials" — mostly harmless because
- *      browsers refuse to send credentials to `*`. WS has no such
- *      browser-side guard: the browser DOES send the auth.bearer.* sub-
- *      protocol on a WS to any origin. "*" for WS in production means
- *      "any page on the web can CSWSH our authenticated users".
+ *      browsers refuse to send credentials to `*` (post-#18 the CORS
+ *      middleware here also gates `Access-Control-Allow-Credentials` on
+ *      an exact-origin match). WS has no such browser-side guard: the
+ *      browser DOES send cookies (including `st_token`) on a WS upgrade
+ *      to any origin when SameSite permits it, and SameSite=None is the
+ *      production setting for the cross-site Pages → Tunnel deploy.
+ *      "*" for WS in production therefore means "any page on the web
+ *      can CSWSH our authenticated users".
  *    - Outside production: allow. Local dev frequently runs on
  *      multiple/ephemeral ports, and the CSWSH prerequisite (attacker
  *      site in the victim's browser) is ~never the local-dev threat
@@ -720,10 +782,13 @@ export function warnIfWildcardCorsInProduction(
 	if (nodeEnv !== "production") return;
 	if (!allowedOrigins.includes("*")) return;
 	out.warn(
-		"[server] CORS_ORIGINS contains '*' in production. The HTTP layer " +
-			"still honours this, but the WebSocket upgrade handler refuses it " +
-			"(CSWSH protection). Set CORS_ORIGINS to an explicit origin list " +
-			"to re-enable WebSocket connections from production clients.",
+		"[server] CORS_ORIGINS contains '*' in production. " +
+			"Cookie auth (#18) requires an exact-origin match to send " +
+			"Access-Control-Allow-Credentials, so authenticated REST calls " +
+			"from cross-origin browsers will silently 401 — the cookie is " +
+			"dropped by the browser. The WebSocket upgrade handler also " +
+			"refuses wildcard origins (CSWSH protection). Set CORS_ORIGINS " +
+			"to an explicit origin list to re-enable both.",
 	);
 }
 

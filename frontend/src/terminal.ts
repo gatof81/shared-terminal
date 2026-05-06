@@ -6,7 +6,6 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { type IDisposable, type ILink, type ILinkProvider, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { getToken } from "./api.js";
 
 export type SessionStatus = "running" | "stopped" | "terminated" | "disconnected";
 
@@ -172,14 +171,12 @@ export function openTerminalSession(opts: {
 	container.addEventListener("pointerdown", focusOnPointer);
 
 	// ── WebSocket connection ────────────────────────────────────────────────
-	// Prefer passing the JWT as a subprotocol (`auth.bearer.<jwt>`) so the
-	// token stays out of the URL, access logs, browser history and Referer
-	// headers. Some proxies/tunnels silently strip `Sec-WebSocket-Protocol`
-	// though, so we also include the token as a `?token=` query param as a
-	// fallback — the backend accepts either.
-	const token = getToken() ?? "";
-	const wsUrl = buildWsUrl(sessionId, token, tabId);
-	const ws = new WebSocket(wsUrl, [`auth.bearer.${token}`]);
+	// Auth lives in an httpOnly cookie (#18). Browsers send cookies on the
+	// WS upgrade to the cookie's domain automatically — no token needs to
+	// be threaded through here. Origin policy (CSWSH protection) is
+	// enforced server-side by isAllowedWsOrigin against CORS_ORIGINS.
+	const wsUrl = buildWsUrl(sessionId, tabId);
+	const ws = new WebSocket(wsUrl);
 	let disposed = false;
 
 	ws.onopen = () => {
@@ -661,20 +658,20 @@ class MultilineUrlLinkProvider implements ILinkProvider {
 
 // ── URL builder ─────────────────────────────────────────────────────────────
 
-function buildWsUrl(sessionId: string, token: string, tabId?: string): string {
+function buildWsUrl(sessionId: string, tabId?: string): string {
 	// Use VITE_API_URL to derive the WebSocket URL
 	const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
 	const url = new URL(apiUrl);
 	const wsProto = url.protocol === "https:" ? "wss:" : "ws:";
 	const base = `${wsProto}//${url.host}/ws/sessions/${sessionId}`;
-	const params = new URLSearchParams();
-	if (token) params.set("token", token);
 	// tabId is server-issued and re-validated on the backend before any
 	// `tmux attach -t` — see backend/src/wsHandler.ts (rawTab regex
 	// /^[a-zA-Z0-9._-]{1,64}$/). Excluding `:` is the load-bearing part:
 	// tmux target syntax needs a colon to parse `session:window.pane`, so
 	// `.` alone can't escalate a tabId into a different tmux target.
-	if (tabId) params.set("tab", tabId);
-	const qs = params.toString();
-	return qs ? `${base}?${qs}` : base;
+	if (tabId) {
+		const params = new URLSearchParams({ tab: tabId });
+		return `${base}?${params.toString()}`;
+	}
+	return base;
 }

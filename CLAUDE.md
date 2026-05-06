@@ -70,8 +70,9 @@ Multiple browser tabs attaching to the same session share the same tmux exec (ea
 
 ### Auth
 
-- REST: `Authorization: Bearer <jwt>` via `requireAuth` middleware. First visit shows `needsSetup: true` from `/api/auth/status` and the frontend drives user creation.
-- WebSocket: token is passed via the `Sec-WebSocket-Protocol` header as `auth.bearer.<jwt>` (preferred — keeps it out of URLs/access logs), with a `?token=<jwt>` query-param fallback for proxies that strip the subprotocol header. `selectWsAuthProtocol` echoes the chosen subprotocol back in the handshake (RFC 6455 requires this).
+- JWT is delivered as an httpOnly cookie named `st_token` set by `setAuthCookie` in `auth.ts`. `Secure` is on in production, `SameSite=None` in production (cross-site Pages → Tunnel) / `SameSite=Strict` in dev. CSRF for state-changing JSON routes is handled by the CORS preflight + `Content-Type: application/json` requirement; the CORS middleware in `index.ts` only echoes `Access-Control-Allow-Credentials: true` for an exact-origin match against `CORS_ORIGINS`. JS cannot read the token (closing the XSS exfiltration path).
+- REST: `requireAuth` middleware reads `req.cookies.st_token` (cookie-parser populated) with a raw-`Cookie`-header fallback for tests bypassing middleware. First visit shows `needsSetup: true` from `/api/auth/status`, which also returns `authenticated` so the frontend can route between login and app on first load without a separate round-trip.
+- WebSocket: `verifyWsToken` reads the cookie from the upgrade request's `Cookie` header — browsers send cookies on the WS handshake to the cookie's domain automatically. CSWSH protection is independent: `isAllowedWsOrigin` rejects unlisted origins before `wss.handleUpgrade` runs. There is no subprotocol or query-string auth fallback.
 - `sessions.assertOwnership(sessionId, userId)` is the single choke point for authorization on REST and WebSocket paths.
 
 ### Notes on D1
