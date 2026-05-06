@@ -76,7 +76,26 @@ if [ -e "$NPM_GLOBAL_OLD" ]; then
         fi
 fi
 
-if [ ! -L "$NPM_GLOBAL_HOME" ]; then
+# Enter the seed-and-swap block if ~/.npm-global is anything other than a
+# *working* symlink: a real directory (image-fresh container), a missing
+# path (defensive), or a dangling symlink (user wiped workspace/.npm-global
+# from inside the session, then container restarted without recreating —
+# the container layer's symlink survived but the target is gone).
+#
+# A dangling symlink alone wouldn't be cleared by the rest of the block:
+# Step 1 needs ~/.npm-global to be a real directory to cp from, and Step 2
+# needs it to be a real directory to mv. Both tests fail on a dangling
+# symlink. Clear it explicitly so subsequent commands aren't confused, and
+# so PATH lookups stop resolving through a stale entry.
+#
+# Recreate (POST /sessions/:id/start) resets the container layer to the
+# image's real ~/.npm-global directory, so this branch isn't needed there.
+# The dangling case is specifically for the stop+start path that preserves
+# the layer.
+if [ ! -L "$NPM_GLOBAL_HOME" ] || [ ! -e "$NPM_GLOBAL_HOME" ]; then
+        if [ -L "$NPM_GLOBAL_HOME" ]; then
+                rm -f "$NPM_GLOBAL_HOME" || true
+        fi
         # Step 1: seed the workspace dir on first boot. cp -a (not mv)
         # so the image copy stays in place if Step 2 needs to roll back.
         if [ ! -d "$NPM_GLOBAL_WS" ] && [ -d "$NPM_GLOBAL_HOME" ]; then
