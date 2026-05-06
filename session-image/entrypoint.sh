@@ -182,6 +182,7 @@ fi
 # (EACCES vs. ENOSPC vs. EROFS) is what an operator needs to fix the
 # real problem in `docker logs`. The `if !` test handles the non-zero
 # exit; we don't need to swallow the message too.
+
 # Drop a pre-existing real ~/.vscode-cli before the symlink swap. Same
 # silent-loss path as the ~/.config/gh block below (and fixed there in
 # #132): if `code tunnel` ever ran on an image without this persistence
