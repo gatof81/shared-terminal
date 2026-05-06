@@ -502,14 +502,26 @@ function signToken(userId: string, username: string): string {
 
 export const AUTH_COOKIE_NAME = "st_token";
 
+// SameSite/Secure pair driven by NODE_ENV. Cross-site delivery (frontend
+// on `*.pages.dev`, backend on a tunnel with a custom domain — different
+// eTLD+1) requires `SameSite=None`, which the spec forces to come with
+// `Secure`. Dev (http://localhost) keeps `Strict` because same-site is
+// guaranteed there and `Secure` would refuse to set on plain HTTP.
+//
+// CSRF guarantees with `SameSite=None`:
+//   - State-changing routes are POST/DELETE/PATCH with
+//     `Content-Type: application/json`, so the browser preflights them.
+//     CORS rejects unlisted origins → the actual request never fires.
+//   - WebSocket upgrades go through `isAllowedWsOrigin` (CSWSH) which
+//     enforces the same allowlist independently of SameSite.
+const isProduction = (): boolean => process.env.NODE_ENV === "production";
+const cookieSameSite = (): "strict" | "none" => (isProduction() ? "none" : "strict");
+
 /**
- * Set the JWT as an httpOnly Secure SameSite=Strict cookie. `Secure` is
- * conditional on production so the dev server (http://localhost) can set
- * the cookie at all — Chrome/Firefox refuse Secure cookies on plain HTTP.
- *
- * `maxAge` derived from the JWT's own `exp` claim so the cookie expires
- * exactly when the token does — no "cookie says logged in but every
- * request comes back 401" window if JWT_EXPIRES_IN is changed.
+ * Set the JWT as an httpOnly cookie. `maxAge` is derived from the JWT's
+ * own `exp` claim so the cookie expires exactly when the token does —
+ * no "cookie says logged in but every request comes back 401" window
+ * if JWT_EXPIRES_IN is changed.
  */
 export function setAuthCookie(res: Response, token: string): void {
 	const decoded = jwt.decode(token) as { exp?: number } | null;
@@ -517,8 +529,8 @@ export function setAuthCookie(res: Response, token: string): void {
 	const maxAge = expSec ? Math.max(0, expSec * 1000 - Date.now()) : 0;
 	res.cookie(AUTH_COOKIE_NAME, token, {
 		httpOnly: true,
-		secure: process.env.NODE_ENV === "production",
-		sameSite: "strict",
+		secure: isProduction(),
+		sameSite: cookieSameSite(),
 		path: "/",
 		maxAge,
 	});
@@ -530,8 +542,8 @@ export function clearAuthCookie(res: Response): void {
 	// different stored cookie and the live one survives.
 	res.clearCookie(AUTH_COOKIE_NAME, {
 		httpOnly: true,
-		secure: process.env.NODE_ENV === "production",
-		sameSite: "strict",
+		secure: isProduction(),
+		sameSite: cookieSameSite(),
 		path: "/",
 	});
 }
