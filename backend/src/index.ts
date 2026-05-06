@@ -149,7 +149,7 @@ server.on("upgrade", (req, socket, head) => {
         if (!isAllowedWsOrigin(req.headers.origin, CORS_ORIGINS, process.env.NODE_ENV)) {
                 // Dev/staging only: see the block comment above and issue #66.
                 if (process.env.NODE_ENV !== "production") {
-                        console.debug(
+                        console.log(
                                 "[ws] rejecting upgrade: Origin=%s not in allowlist %j",
                                 req.headers.origin ?? "<absent>",
                                 CORS_ORIGINS,
