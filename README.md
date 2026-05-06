@@ -407,6 +407,7 @@ Each session runs in a Docker container based on `session-image/Dockerfile`:
 - **Dev tools:** git, curl, build-essential, python3, Node.js 22, vim, nano, htop, jq
 - **Claude CLI:** `@anthropic-ai/claude-code` (globally installed)
 - **VS Code CLI:** `code` (standalone) — see [Connecting from VS Code](#connecting-from-vs-code) below
+- **GitHub CLI:** `gh` (standalone) — auth once with `gh auth login`, then drive PRs / issues / `gh api …` from the session
 - **Terminal:** tmux with a session named `main`, 50k scrollback, mouse support
 - **User:** `developer` (UID 1000, unprivileged — no sudo, all Linux capabilities dropped, `no-new-privileges` set)
 - **Workspace:** `/home/developer/workspace` (bind-mounted from `<WORKSPACE_ROOT>/<sessionId>` on the host)

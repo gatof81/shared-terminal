@@ -102,6 +102,75 @@ RUN set -eux; \
     chmod +x /usr/local/bin/code; \
     /usr/local/bin/code --version
 
+# ── GitHub CLI (`gh`) ────────────────────────────────────────────────────────
+# Standalone CLI from GitHub. Lets the user run `gh auth login` once per
+# session and then drive PRs / issues / releases / `gh api …` from the
+# terminal without round-tripping through the browser. Closes the gap left
+# by removing sudo (#15) — `apt-get install gh` is no longer reachable
+# in-session, so the binary has to ship in the image.
+#
+# Same supply-chain posture as the VS Code CLI block above: pinned release
+# tag, per-arch SHA-256 verified before extraction, no "skip the hash
+# check" escape hatch. The published tarball contains a binary, man pages,
+# completions, and LICENSE; we extract only the binary by name (not the
+# whole archive) so a tampered tarball can't drop extra executables into
+# /usr/local/bin alongside it.
+#
+# Bumping the pin: pick a release from https://github.com/cli/cli/releases,
+# then capture both arches' SHA-256. The release ships a published
+# `checksums.txt` listing every artifact's hash — pull that and read the
+# linux_amd64 / linux_arm64 lines, instead of (only) hashing the tarballs
+# yourself, so a tampered tarball can't paper over its own hash at bump
+# time:
+#
+#     GH_VERSION=v2.92.0
+#     curl -fL "https://github.com/cli/cli/releases/download/${GH_VERSION}/gh_${GH_VERSION#v}_checksums.txt" \
+#       | grep -E 'linux_(amd64|arm64).tar.gz$'
+#
+# For belt-and-braces, also re-hash the tarballs themselves and confirm
+# the values match the checksums file:
+#
+#     for ARCH in amd64 arm64; do
+#       curl -fL "https://github.com/cli/cli/releases/download/${GH_VERSION}/gh_${GH_VERSION#v}_linux_${ARCH}.tar.gz" \
+#         | sha256sum
+#     done
+#
+# Update GH_CLI_VERSION + GH_CLI_SHA256_AMD64 + GH_CLI_SHA256_ARM64 in
+# lockstep. Operators can also override on the command line for a CVE
+# bump without touching the file:
+#
+#     docker build \
+#       --build-arg GH_CLI_VERSION=v2.92.0 \
+#       --build-arg GH_CLI_SHA256_AMD64=<x64 sha256> \
+#       --build-arg GH_CLI_SHA256_ARM64=<arm64 sha256> \
+#       ./session-image
+# Re-declare TARGETARCH so this block doesn't rely on the VS Code
+# section's earlier ARG remaining in scope. ARGs survive within a stage,
+# but if the VS Code block is later removed or reordered, an implicit
+# dependency would silently fall back to `:-amd64` on every architecture.
+ARG TARGETARCH
+ARG GH_CLI_VERSION=v2.92.0
+ARG GH_CLI_SHA256_AMD64=b57848131bdf0c229cd35e1f2a51aa718199858b2e728410b37e89a428943ec4
+ARG GH_CLI_SHA256_ARM64=c2248526dd0160c08d3fccca2332c3c1a07c15a78b23978e77735f1b5a18cfee
+RUN set -eux; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) GH_ARCH=amd64; GH_SHA256="${GH_CLI_SHA256_AMD64}" ;; \
+      arm64) GH_ARCH=arm64; GH_SHA256="${GH_CLI_SHA256_ARM64}" ;; \
+      *) echo "unsupported arch: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    if [ -z "${GH_SHA256}" ]; then \
+      echo "ERROR: no SHA-256 set for gh_linux_${GH_ARCH} — refusing to install an unverified GitHub CLI. Override GH_CLI_VERSION together with GH_CLI_SHA256_AMD64 / GH_CLI_SHA256_ARM64." >&2; \
+      exit 1; \
+    fi; \
+    GH_DIR="gh_${GH_CLI_VERSION#v}_linux_${GH_ARCH}"; \
+    curl -fLsS "https://github.com/cli/cli/releases/download/${GH_CLI_VERSION}/${GH_DIR}.tar.gz" \
+         -o /tmp/gh.tar.gz; \
+    echo "${GH_SHA256}  /tmp/gh.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/gh.tar.gz --strip-components=2 -C /usr/local/bin "${GH_DIR}/bin/gh"; \
+    rm /tmp/gh.tar.gz; \
+    chmod +x /usr/local/bin/gh; \
+    /usr/local/bin/gh --version
+
 # ── Non-root user ────────────────────────────────────────────────────────────
 # UID 1000 is non-negotiable: the backend chowns each session's workspace
 # bind-mount to WORKSPACE_UID:WORKSPACE_GID (default 1000:1000, see
@@ -168,10 +237,13 @@ RUN mkdir -p /home/developer/.npm-global
 
 # ── Claude CLI ───────────────────────────────────────────────────────────────
 # Installed as `developer` (not root) so the binary is updateable in place.
-# Lives in the container layer, so self-updates do not survive a container
-# recreate (POST /sessions/:id/start respawns from the image) — image rebuild
-# is still the durable update path. That's consistent with every other tool
-# in this image.
+# Lands in /home/developer/.npm-global, which entrypoint.sh migrates into
+# the workspace bind mount on first boot — so `claude --update` (and any
+# user-installed npm global) survives a container recreate (POST
+# /sessions/:id/start respawns the container, but the workspace dir
+# persists by design). Image rebuilds reseed the workspace copy only on
+# first boot of a fresh workspace; existing workspaces keep their
+# self-updated version, since a user who chose v.X probably wants v.X.
 RUN npm install -g @anthropic-ai/claude-code
 
 # ── tmux config (nice defaults) ──────────────────────────────────────────────
