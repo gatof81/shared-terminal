@@ -750,6 +750,16 @@ function openTab(tabId: string) {
 					if (activeSessionId !== ownSessionId) return;
 					showToast(msg, true);
 				},
+				onRendererFallback: (msg: string) => {
+					// Show even for non-active tabs — a backgrounded tab
+					// that loses its WebGL context will surface the
+					// notice when it next becomes active or, in this
+					// flow, immediately. Toast is one-time per tab
+					// (gated inside terminal.ts) so a flapping driver
+					// can't spam it. Surfaced as a non-error toast
+					// because the terminal still works, just slower.
+					showToast(`${msg} Reload the tab to retry GPU rendering.`);
+				},
 			});
 			entry = { pane, term };
 			currentTerminals.set(tabId, entry);
@@ -1156,13 +1166,25 @@ function nextFontSize(current: number): number {
 	return FONT_SIZE_STEPS[(i + 1) % FONT_SIZE_STEPS.length]!;
 }
 
+// RAF-coalesce the per-tab apply (#56). Each click cycles
+// `currentFontSize` immediately so the button label stays in lock-step
+// with what the user clicked, but the per-tab `setFontSize` (which
+// triggers an xterm re-layout + refit per tab) defers to the next
+// animation frame and reads the latest value once. A burst of N clicks
+// inside one frame collapses to exactly one apply per terminal.
+let fontSizeRafScheduled = false;
 fontSizeBtn.addEventListener("click", () => {
 	currentFontSize = nextFontSize(currentFontSize);
 	localStorage.setItem(FONT_SIZE_KEY, String(currentFontSize));
 	fontSizeBtn.textContent = `Aa ${currentFontSize}`;
-	for (const { term } of currentTerminals.values()) {
-		term.setFontSize(currentFontSize);
-	}
+	if (fontSizeRafScheduled) return;
+	fontSizeRafScheduled = true;
+	requestAnimationFrame(() => {
+		fontSizeRafScheduled = false;
+		for (const { term } of currentTerminals.values()) {
+			term.setFontSize(currentFontSize);
+		}
+	});
 });
 // Reflect the persisted size in the label on load so users see e.g. "Aa 16"
 // rather than a generic "Aa" after they've picked their size once.
@@ -1282,6 +1304,19 @@ async function renderInvites() {
 		}
 
 		inviteList.appendChild(row);
+	}
+
+	// Backend caps the response at INVITE_LIST_LIMIT=100 (#54). When we
+	// hit that boundary, the modal is silently truncated — surface a
+	// hint so a user with > 100 historical invites isn't misled into
+	// thinking that's everything. Real cursor pagination is overkill
+	// today; this footer is the cheap signal that something was elided.
+	const SERVER_INVITE_LIMIT = 100;
+	if (invites.length === SERVER_INVITE_LIMIT) {
+		const footer = document.createElement("div");
+		footer.className = "invite-empty";
+		footer.textContent = "Older invites not shown — only the most recent 100 are listed.";
+		inviteList.appendChild(footer);
 	}
 }
 
