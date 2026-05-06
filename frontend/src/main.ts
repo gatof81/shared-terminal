@@ -750,6 +750,16 @@ function openTab(tabId: string) {
 					if (activeSessionId !== ownSessionId) return;
 					showToast(msg, true);
 				},
+				onRendererFallback: (msg: string) => {
+					// Show even for non-active tabs — a backgrounded tab
+					// that loses its WebGL context will surface the
+					// notice when it next becomes active or, in this
+					// flow, immediately. Toast is one-time per tab
+					// (gated inside terminal.ts) so a flapping driver
+					// can't spam it. Surfaced as a non-error toast
+					// because the terminal still works, just slower.
+					showToast(`${msg} Reload the tab to retry GPU rendering.`);
+				},
 			});
 			entry = { pane, term };
 			currentTerminals.set(tabId, entry);

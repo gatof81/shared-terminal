@@ -17,6 +17,10 @@ export interface TerminalSession {
 
 export type StatusCallback = (status: SessionStatus) => void;
 export type ErrorCallback = (message: string) => void;
+/** Notice fired the first time WebGL is unavailable on this tab — once
+ *  per terminal lifetime. Used by main.ts to surface a one-time toast
+ *  so the user knows why their session feels slower (#55). */
+export type RendererNoticeCallback = (message: string) => void;
 
 export function openTerminalSession(opts: {
 	container: HTMLElement;
@@ -25,8 +29,20 @@ export function openTerminalSession(opts: {
 	fontSize?: number;
 	onStatus: StatusCallback;
 	onError: ErrorCallback;
+	onRendererFallback?: RendererNoticeCallback;
 }): TerminalSession {
-	const { container, sessionId, tabId, fontSize, onStatus, onError } = opts;
+	const { container, sessionId, tabId, fontSize, onStatus, onError, onRendererFallback } = opts;
+	// Fires the fallback notice at most once per tab, regardless of how
+	// many times the WebGL context flaps (#55). A flapping driver
+	// shouldn't toast on every cycle.
+	let rendererFallbackNoticed = false;
+	const noticeFallback = (reason: string) => {
+		if (rendererFallbackNoticed) return;
+		rendererFallbackNoticed = true;
+		onRendererFallback?.(
+			`GPU rendering unavailable (${reason}) — falling back to slower DOM renderer.`,
+		);
+	};
 
 	// ── xterm.js setup ──────────────────────────────────────────────────────
 	const term = new Terminal({
@@ -76,11 +92,13 @@ export function openTerminalSession(opts: {
 		webgl.onContextLoss(() => {
 			webgl?.dispose();
 			webgl = null;
+			noticeFallback("context lost");
 		});
 		term.loadAddon(webgl);
 	} catch (err) {
 		console.warn("[terminal] WebGL renderer unavailable, falling back to DOM:", err);
 		webgl = null;
+		noticeFallback("addon init failed");
 	}
 
 	// webglcontextlost bubbles; webglcontextrestored does not — listen on the
@@ -107,6 +125,7 @@ export function openTerminalSession(opts: {
 			addon.onContextLoss(() => {
 				addon.dispose();
 				webgl = null;
+				noticeFallback("context lost");
 			});
 			term.loadAddon(addon);
 			webgl = addon;
@@ -114,6 +133,11 @@ export function openTerminalSession(opts: {
 		} catch (err) {
 			restoredAddon?.dispose();
 			console.warn("[terminal] WebGL restore failed:", err);
+			// Restore failed — we're locked into the DOM renderer for
+			// this tab. Surface the same one-time notice so the user
+			// understands the slowdown that started at context loss
+			// will persist.
+			noticeFallback("restore failed");
 		}
 	};
 	const onContextLost = (ev: Event) => {
