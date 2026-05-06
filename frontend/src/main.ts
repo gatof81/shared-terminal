@@ -327,15 +327,15 @@ logoutBtn.addEventListener("click", () => {
 // so a delegated `invitesBtn.click()` would silently lose focus on close).
 sidebarLogoutBtn.addEventListener("click", () => logoutBtn.click());
 
-// Listen for the api-layer signal that our JWT is no longer accepted (#95).
-// Without this, a `refreshSessions()` tick 15 s after expiry produces a
-// 401 → red toast, the next tick does the same, and so on forever because
-// nothing was clearing `_token`. api.ts now clears the token at the 401 and
-// dispatches this event; we pair that with a UI transition back to the
-// login view and a single explanatory toast.
+// Listen for the api-layer signal that our session cookie is no longer
+// accepted (#95). Without this, a `refreshSessions()` tick 15 s after
+// expiry produces a 401 → red toast, the next tick does the same, and
+// so on forever because nothing was flipping `_loggedIn` to false. api.ts
+// now does that at the 401 and dispatches this event; we pair that with
+// a UI transition back to the login view and a single explanatory toast.
 //
-// One-shot per burst: apiFetch's internal `_token !== null` guard ensures
-// the event fires at most once per 401 burst, so we don't need extra
+// One-shot per burst: apiFetch's internal `_loggedIn` guard ensures the
+// event fires at most once per 401 burst, so we don't need extra
 // debouncing here.
 window.addEventListener(SESSION_EXPIRED_EVENT, () => {
 	handleLogout("Your session has expired — please sign in again");
