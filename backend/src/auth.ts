@@ -615,6 +615,13 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
  * `Cookie` header — browsers send cookies on the WS handshake to the cookie's
  * domain regardless of the page's origin (CSWSH protection lives separately
  * via the `Origin` allowlist).
+ *
+ * Log the specific JWT error name+message on failure: WS-auth misses are
+ * uncommon and almost always signal something specific (expired token,
+ * wrong-secret deploy, malformed cookie). Dropping the detail to a generic
+ * "verification failed" makes 2-AM triage harder than it needs to be. The
+ * REST `requireAuth` path stays quiet because it's exposed to unauthenticated
+ * probing and the same logging there would be a flood.
  */
 export function verifyWsToken(cookieHeader: string | string[] | undefined): JwtPayload | null {
 	const token = extractTokenFromCookieHeader(cookieHeader);
@@ -622,12 +629,14 @@ export function verifyWsToken(cookieHeader: string | string[] | undefined): JwtP
 		logger.error("[verifyWsToken] no auth cookie on upgrade request");
 		return null;
 	}
-	const payload = verifyJwt(token);
-	if (!payload) {
-		logger.error("[verifyWsToken] auth cookie failed JWT verification");
+	try {
+		return jwt.verify(token, jwtSecret()) as JwtPayload;
+	} catch (err) {
+		logger.error(
+			`[verifyWsToken] jwt verify failed: ${(err as Error).name}: ${(err as Error).message}`,
+		);
 		return null;
 	}
-	return payload;
 }
 
 /**
