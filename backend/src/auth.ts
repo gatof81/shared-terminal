@@ -524,6 +524,11 @@ const cookieSameSite = (): "strict" | "none" => (isProduction() ? "none" : "stri
  * if JWT_EXPIRES_IN is changed.
  */
 export function setAuthCookie(res: Response, token: string): void {
+	// jwt.decode does NOT verify the signature — safe only because every
+	// caller hands us a token freshly produced by signToken(). If a future
+	// caller passes an externally-supplied token here, switch to
+	// jwt.verify (or compute maxAge from JWT_EXPIRES_IN directly), since
+	// an attacker could otherwise lift the cookie's lifetime to anything.
 	const decoded = jwt.decode(token) as { exp?: number } | null;
 	const expSec = decoded?.exp;
 	const maxAge = expSec ? Math.max(0, expSec * 1000 - Date.now()) : 0;
@@ -548,12 +553,25 @@ export function clearAuthCookie(res: Response): void {
 	});
 }
 
-/** Verify a raw JWT string. Returns the payload, or null on any failure. */
+/**
+ * Verify a raw JWT string. Returns the payload, or null on any JWT-level
+ * failure (missing token, expired, bad signature, malformed). Configuration
+ * panics from `jwtSecret()` are *not* swallowed: a deploy that forgot to
+ * call `validateJwtSecret()` would otherwise present as "every user is
+ * silently rejected" with no log trail. Re-throwing surfaces the misconfig
+ * loudly via the global error handler.
+ */
 export function verifyJwt(token: string | undefined): JwtPayload | null {
 	if (!token) return null;
 	try {
 		return jwt.verify(token, jwtSecret()) as JwtPayload;
-	} catch {
+	} catch (err) {
+		// jwtSecret() throws a fixed-prefix message when called before
+		// validateJwtSecret(). Anything else is a JWT-level failure
+		// (TokenExpiredError, JsonWebTokenError, etc.) — treat as null.
+		if ((err as Error).message?.startsWith("jwtSecret() called before")) {
+			throw err;
+		}
 		return null;
 	}
 }
@@ -703,10 +721,14 @@ export function parseCorsOrigins(raw: string | undefined): string[] {
  *    - In production: DENY, and the caller logs a loud warning once at
  *      startup. The HTTP CORS layer treats "*" as "anyone can hit
  *      public endpoints without credentials" — mostly harmless because
- *      browsers refuse to send credentials to `*`. WS has no such
- *      browser-side guard: the browser DOES send the auth.bearer.* sub-
- *      protocol on a WS to any origin. "*" for WS in production means
- *      "any page on the web can CSWSH our authenticated users".
+ *      browsers refuse to send credentials to `*` (post-#18 the CORS
+ *      middleware here also gates `Access-Control-Allow-Credentials` on
+ *      an exact-origin match). WS has no such browser-side guard: the
+ *      browser DOES send cookies (including `st_token`) on a WS upgrade
+ *      to any origin when SameSite permits it, and SameSite=None is the
+ *      production setting for the cross-site Pages → Tunnel deploy.
+ *      "*" for WS in production therefore means "any page on the web
+ *      can CSWSH our authenticated users".
  *    - Outside production: allow. Local dev frequently runs on
  *      multiple/ephemeral ports, and the CSWSH prerequisite (attacker
  *      site in the victim's browser) is ~never the local-dev threat

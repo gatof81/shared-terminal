@@ -62,6 +62,18 @@ export interface RateLimitConfig {
 		ipMax: number;
 		ipWindowMs: number;
 	};
+	// Caps how often a single IP can POST /auth/logout. Logout is
+	// unauthenticated by design (a stale cookie has to be clearable), so
+	// post-#18 with SameSite=None a malicious page could fire a simple
+	// cross-site form POST in a loop and repeatedly log a victim out.
+	// User-inconvenience attack only — no data exposed — but trivially
+	// preventable. Dedicated bucket so the abuse path can't drain the
+	// login budget too: sharing with `loginIp` would let an attacker
+	// who hammers logout starve the victim's ability to log back in.
+	logout: {
+		ipMax: number;
+		ipWindowMs: number;
+	};
 }
 
 // Defaults match issue #10: login 10/15min, register 5/1h, per-username 10/15min.
@@ -97,6 +109,14 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 		ipMax: 30,
 		ipWindowMs: 5 * 60 * 1000,
 	},
+	// 30 logouts per 15 min per IP. Legitimate use is at most "click
+	// logout once, maybe twice if the network blipped" — well under
+	// the cap. The cap is high enough that a session-expired race
+	// (multiple tabs all firing logout at once) won't trip it.
+	logout: {
+		ipMax: 30,
+		ipWindowMs: 15 * 60 * 1000,
+	},
 };
 
 // ── IP-based limiters (express-rate-limit) ─────────────────────────────────
@@ -108,6 +128,7 @@ export interface AuthRateLimiters {
 	invitesListIp: RateLimitRequestHandler;
 	invitesRevokeIp: RateLimitRequestHandler;
 	fileUploadIp: RateLimitRequestHandler;
+	logoutIp: RateLimitRequestHandler;
 }
 
 export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
@@ -166,7 +187,22 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		legacyHeaders: false,
 		message: { error: "Too many file uploads from this IP, try again later", scope: "ip" },
 	});
-	return { loginIp, registerIp, invitesCreateIp, invitesListIp, invitesRevokeIp, fileUploadIp };
+	const logoutIp = rateLimit({
+		windowMs: cfg.logout.ipWindowMs,
+		limit: cfg.logout.ipMax,
+		standardHeaders: "draft-7",
+		legacyHeaders: false,
+		message: { error: "Too many logout attempts from this IP, try again later", scope: "ip" },
+	});
+	return {
+		loginIp,
+		registerIp,
+		invitesCreateIp,
+		invitesListIp,
+		invitesRevokeIp,
+		fileUploadIp,
+		logoutIp,
+	};
 }
 
 // ── Per-username limiter ────────────────────────────────────────────────────

@@ -49,8 +49,15 @@ export function buildRouter(
 
 	// ── Auth routes (public) ────────────────────────────────────────────────
 
-	const { loginIp, registerIp, invitesCreateIp, invitesListIp, invitesRevokeIp, fileUploadIp } =
-		createAuthRateLimiters(rateLimitConfig);
+	const {
+		loginIp,
+		registerIp,
+		invitesCreateIp,
+		invitesListIp,
+		invitesRevokeIp,
+		fileUploadIp,
+		logoutIp,
+	} = createAuthRateLimiters(rateLimitConfig);
 	const usernameLimiter = new UsernameRateLimiter(
 		rateLimitConfig.login.usernameMax,
 		rateLimitConfig.login.usernameWindowMs,
@@ -223,7 +230,7 @@ export function buildRouter(
 	// by clearing the victim's cookie. State-changing routes that DO
 	// matter for CSRF (POST/DELETE/PATCH with JSON bodies) are
 	// preflight-gated by the CORS middleware in index.ts.
-	router.post("/auth/logout", (_req: Request, res: Response) => {
+	router.post("/auth/logout", logoutIp, (_req: Request, res: Response) => {
 		clearAuthCookie(res);
 		res.status(204).send();
 	});

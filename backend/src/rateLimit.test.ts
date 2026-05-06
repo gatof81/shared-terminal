@@ -386,15 +386,17 @@ describe("auth route rate limiting", () => {
 		invitesList?: { ipMax: number; ipWindowMs: number };
 		invitesRevoke?: { ipMax: number; ipWindowMs: number };
 		fileUpload?: { ipMax: number; ipWindowMs: number };
+		logout?: { ipMax: number; ipWindowMs: number };
 	}): Promise<void> {
-		// Invite + upload limiters were added later; default each to a
-		// permissive setting so tests that only exercise login/register
+		// Invite + upload + logout limiters were added later; default each
+		// to a permissive setting so tests that only exercise login/register
 		// don't trip them.
 		const fullCfg = {
 			invitesCreate: { ipMax: 1000, ipWindowMs: 60_000 },
 			invitesList: { ipMax: 1000, ipWindowMs: 60_000 },
 			invitesRevoke: { ipMax: 1000, ipWindowMs: 60_000 },
 			fileUpload: { ipMax: 1000, ipWindowMs: 60_000 },
+			logout: { ipMax: 1000, ipWindowMs: 60_000 },
 			...cfg,
 		};
 		const router = buildRouter(fakeSessions, fakeDocker, fullCfg);
