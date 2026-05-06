@@ -104,6 +104,20 @@ if [ ! -L "$NPM_GLOBAL_HOME" ] || [ ! -e "$NPM_GLOBAL_HOME" ]; then
                              "(uid=$(id -u), workspace owner=$(stat -c '%u:%g' /home/developer/workspace 2>/dev/null || echo '?')). " \
                              "claude self-updates and runtime npm globals won't persist across restarts." >&2
                 fi
+        elif [ ! -d "$NPM_GLOBAL_WS" ]; then
+                # Both source and destination are gone. Reachable when the
+                # user wiped ~/workspace/.npm-global from inside the session
+                # and the container is then stop+started (the layer's
+                # symlink is dangling and was just rm'd by the outer-guard
+                # cleanup, but the image's real ~/.npm-global was already
+                # consumed by a prior boot's swap). Step 2 will skip, and
+                # without this branch we'd exit with no log line — the user
+                # would see `claude: command not found` and no entrypoint
+                # signal pointing them at the recovery path. POST /start
+                # (full recreate) re-seeds from the image.
+                echo "[entrypoint] WARN: workspace .npm-global gone and image copy unavailable; " \
+                     "claude is not reachable on this container — recover via container recreate " \
+                     "(DELETE + POST /sessions/:id/start) so the image's npm-global is re-applied." >&2
         fi
 
         # Step 2: rename-then-restore swap. Only runs if both the workspace
