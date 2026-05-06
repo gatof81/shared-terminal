@@ -3,12 +3,40 @@
  */
 
 import { IncomingMessage } from "http";
+import type { Duplex } from "node:stream";
 import { WebSocket } from "ws";
 import { v4 as uuidv4 } from "uuid";
 import { verifyWsToken } from "./auth.js";
 import { SessionManager, NotFoundError, ForbiddenError } from "./sessionManager.js";
 import { DockerManager } from "./dockerManager.js";
 import { WsClientMessage, WsServerMessage } from "./types.js";
+
+// Send a tiny HTTP error response on the raw upgrade socket and tear it
+// down with a bounded grace window.
+//
+// socket.end(msg) flushes the status line, sends FIN, and waits for the
+// peer's FIN before fully releasing the fd. A misbehaving peer that never
+// sends FIN leaves the socket in CLOSE_WAIT until kernel keepalive kicks
+// in (minutes to hours depending on tuning) — and on the 403 path that's
+// cheap to script, since an attacker piling up garbage-Origin upgrades
+// and dropping post-response could exhaust the process fd table.
+// socket.destroy() alone (the pre-#64 form) was bounded but didn't
+// guarantee the status line flushed first, hiding the 4xx reason from
+// anyone debugging. Belt-and-braces: end() for the flush, then a hard
+// destroy() after 500 ms if the peer hasn't FIN'd. unref()'d so the timer
+// never holds the process open during shutdown. See issue #67.
+// `Duplex` matches the upgrade-event signature for http.Server and a
+// hypothetical https.Server (TLSSocket extends Duplex too).
+export function endUpgradeSocketWithReply(socket: Duplex, reply: string): void {
+        // socket.end() on an already-destroyed socket is a no-op in Node 20+,
+        // so the asymmetry with the guarded destroy() below is intentional —
+        // the only failure mode worth swallowing is a peer that RST'd between
+        // the upgrade event and our 500 ms timer firing.
+        socket.end(reply);
+        setTimeout(() => {
+                try { socket.destroy(); } catch { /* already destroyed */ }
+        }, 500).unref();
+}
 
 export function handleWsConnection(
         ws: WebSocket,

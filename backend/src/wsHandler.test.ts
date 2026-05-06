@@ -1,7 +1,7 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import jwt from "jsonwebtoken";
 import { __resetJwtSecretForTests, validateJwtSecret } from "./auth.js";
-import { handleWsConnection } from "./wsHandler.js";
+import { endUpgradeSocketWithReply, handleWsConnection } from "./wsHandler.js";
 import type { SessionManager } from "./sessionManager.js";
 import type { DockerManager } from "./dockerManager.js";
 
@@ -129,5 +129,58 @@ describe("handleWsConnection auth-first ordering", () => {
 		expect(ws.close).toHaveBeenCalledWith(1008, "Missing tab");
 		const errPayloads = ws.send.mock.calls.map((c) => c[0] as string);
 		expect(errPayloads).toContain(JSON.stringify({ type: "error", message: "Missing tab id" }));
+	});
+});
+
+// ── endUpgradeSocketWithReply ──────────────────────────────────────────────
+// Pins the half-close → bounded-destroy invariant from issue #67. A peer
+// that never FINs would otherwise hold the upgrade socket in CLOSE_WAIT
+// until kernel keepalive kicks in; the 500 ms timer caps the window so
+// an attacker can't pile up dangling rejected upgrades.
+
+describe("endUpgradeSocketWithReply", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	function makeFakeSocket() {
+		return {
+			end: vi.fn(),
+			destroy: vi.fn(),
+		};
+	}
+
+	it("calls end() synchronously with the reply and defers destroy() by 500 ms", () => {
+		const socket = makeFakeSocket();
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		endUpgradeSocketWithReply(socket as any, "HTTP/1.1 403 Forbidden\r\n\r\n");
+
+		expect(socket.end).toHaveBeenCalledTimes(1);
+		expect(socket.end).toHaveBeenCalledWith("HTTP/1.1 403 Forbidden\r\n\r\n");
+		expect(socket.destroy).not.toHaveBeenCalled();
+
+		vi.advanceTimersByTime(499);
+		expect(socket.destroy).not.toHaveBeenCalled();
+
+		vi.advanceTimersByTime(1);
+		expect(socket.destroy).toHaveBeenCalledTimes(1);
+	});
+
+	it("swallows a destroy() error from a socket the peer already RST'd", () => {
+		const socket = {
+			end: vi.fn(),
+			destroy: vi.fn(() => {
+				throw new Error("ERR_SOCKET_ALREADY_DESTROYED");
+			}),
+		};
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		endUpgradeSocketWithReply(socket as any, "HTTP/1.1 404 Not Found\r\n\r\n");
+
+		// Advancing past 500 ms must not propagate the throw.
+		expect(() => vi.advanceTimersByTime(500)).not.toThrow();
+		expect(socket.destroy).toHaveBeenCalledTimes(1);
 	});
 });

@@ -21,7 +21,7 @@ import { DockerManager } from "./dockerManager.js";
 import { buildRouter } from "./routes.js";
 import { SessionManager } from "./sessionManager.js";
 import { parseTrustProxy, TrustProxyError, warnIfProductionMisconfigured } from "./trustProxy.js";
-import { handleWsConnection } from "./wsHandler.js";
+import { endUpgradeSocketWithReply, handleWsConnection } from "./wsHandler.js";
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -112,34 +112,6 @@ const wss = new WebSocketServer({
         noServer: true,
         handleProtocols: (protocols) => selectWsAuthProtocol(protocols),
 });
-
-// Send a tiny HTTP error response on the raw upgrade socket and tear
-// it down with a bounded grace window.
-//
-// socket.end(msg) flushes the status line, sends FIN, and waits for the
-// peer's FIN before fully releasing the fd. A misbehaving peer that
-// never sends FIN leaves the socket in CLOSE_WAIT until kernel keep-
-// alive kicks in (minutes to hours depending on tuning) — and on the
-// 403 path that's cheap to script, since an attacker piling up garbage-
-// Origin upgrades and dropping post-response could exhaust the process
-// fd table. socket.destroy() alone (the form before #64) was bounded
-// but didn't guarantee the status line flushed first, hiding the 4xx
-// reason from anyone debugging.
-//
-// Belt-and-braces: end() for the flush, then a hard destroy() after
-// 500 ms if the peer hasn't FIN'd. unref()'d so the timer never holds
-// the process open during shutdown. 500 ms is generous for any real
-// client to ack and tight enough that a flood can't accumulate.
-// See issue #67.
-function endUpgradeSocketWithReply(
-        socket: NodeJS.Socket & { end: (data?: string) => void; destroy: () => void },
-        reply: string,
-): void {
-        socket.end(reply);
-        setTimeout(() => {
-                try { socket.destroy(); } catch { /* already destroyed */ }
-        }, 500).unref();
-}
 
 server.on("upgrade", (req, socket, head) => {
         const url = req.url ?? "";
