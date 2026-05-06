@@ -172,13 +172,15 @@ export class DockerManager {
                 // named "-foo" or "foo-" produced a hostname Docker refused, and
                 // a session named "---" (or any name made entirely of forbidden
                 // chars) produced an empty hostname which Docker also refuses.
-                // Build the sanitised hostname in three steps and fall back to
-                // the short session id if every char gets stripped.
+                // Order matters: slice *before* the boundary strip so a name
+                // longer than 63 chars whose 63rd char is `-` doesn't sneak a
+                // trailing dash past the regex. Fall back to the short session
+                // id if every char gets stripped.
                 const hostname =
                         meta.name
                                 .replace(/[^a-zA-Z0-9-]/g, "-")
-                                .replace(/^-+|-+$/g, "")
-                                .slice(0, 63) || `session-${sessionId.slice(0, 8)}`;
+                                .slice(0, 63)
+                                .replace(/^-+|-+$/g, "") || `session-${sessionId.slice(0, 8)}`;
                 const container = await this.docker.createContainer({
                         Image: SESSION_IMAGE,
                         name: meta.containerName,
