@@ -61,17 +61,22 @@ export async function d1Query<T = Record<string, unknown>>(
 }
 
 /**
- * Execute multiple SQL statements as a single batch (one HTTP round-trip)
- * on Cloudflare D1's `/query` endpoint, which "supports multiple statements,
- * joined by semicolons, which will be executed as a batch" (per the D1 REST
- * API docs). The batch runs as one transaction — any single statement
- * failing rolls all of them back and surfaces as a throw from `d1Query`.
+ * Execute multiple SQL statements as a single semicolon-joined batch on
+ * Cloudflare D1's `/query` endpoint (one HTTP round-trip, per the D1 REST
+ * API docs). Migration-only and parameter-free by construction; the SQL
+ * is concatenated verbatim, so don't pass user input without escaping.
  *
- * Migration-only and parameter-free by construction. Don't pass user input
- * here without escaping; the SQL is concatenated verbatim. The return shape
- * for a multi-statement batch is an array of one result per statement;
- * callers don't read it (this returns void), so the lie inside `d1Query` —
- * which only surfaces `result[0]` — doesn't matter for migration.
+ * D1's `/query` endpoint executes statements sequentially. Whether it
+ * rolls back on a mid-batch failure is not documented for the REST
+ * endpoint (the transactional guarantee is the Workers `db.batch()`
+ * binding's, not `/query`'s). Treat a failed statement as "the schema
+ * is now in an inconsistent state — fix it manually" and surface every
+ * per-statement failure with a throw.
+ *
+ * `d1Query` only surfaces `result[0]`, so calling it with a multi-stmt
+ * SQL would silently drop a failure at index > 0. Inline the fetch here
+ * so we can check every statement's `success` flag instead of relying
+ * on the envelope-level `data.success` alone.
  */
 export async function d1Batch(statements: string[]): Promise<void> {
 	const sql = statements
@@ -79,7 +84,35 @@ export async function d1Batch(statements: string[]): Promise<void> {
 		.filter(Boolean)
 		.join(";\n");
 	if (!sql) return;
-	await d1Query(sql);
+
+	const url = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/d1/database/${DATABASE_ID}/query`;
+	const res = await fetch(url, {
+		method: "POST",
+		headers: {
+			Authorization: `Bearer ${API_TOKEN}`,
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify({ sql }),
+	});
+	if (!res.ok) {
+		const text = await res.text();
+		throw new Error(`D1 batch HTTP error (${res.status}): ${text}`);
+	}
+	const data = (await res.json()) as D1ApiResponse;
+	if (!data.success) {
+		throw new Error(`D1 batch envelope failed: ${data.errors.map((e) => e.message).join(", ")}`);
+	}
+	// Per-statement check: D1 may set data.success=true while reporting a
+	// per-result failure for one of the statements. The envelope-only
+	// check d1Query does is enough for single-statement queries but not
+	// for a batch where the result array has N entries.
+	for (const [i, r] of data.result.entries()) {
+		if (!r.success) {
+			throw new Error(
+				`D1 batch statement ${i} reported failure (no message in per-statement payload — check the upstream SQL)`,
+			);
+		}
+	}
 }
 
 /**
