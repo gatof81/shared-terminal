@@ -152,11 +152,16 @@ export async function registerUser(
 	// If the user INSERT below fails (UNIQUE collision), we best-effort
 	// release the claim so the invite isn't burned by a register that
 	// never produced an account.
+	//
+	// Codes are stored hashed at rest (#49), so we hash the caller's
+	// plaintext before the lookup. The hash is also what's logged on a
+	// release-failure (see catch arm below).
+	const inviteHash = createHash("sha256").update(inviteCode).digest("hex");
 	const claim = await d1Query(
 		"UPDATE invite_codes SET used_by = ?, used_at = datetime('now') " +
-			"WHERE code = ? AND used_at IS NULL " +
+			"WHERE code_hash = ? AND used_at IS NULL " +
 			"AND (expires_at IS NULL OR expires_at > datetime('now'))",
-		[userId, inviteCode],
+		[userId, inviteHash],
 	);
 	if (claim.meta.changes !== 1) {
 		throw new InviteRequiredError("Invite code is invalid, expired, or already used");
@@ -182,8 +187,8 @@ export async function registerUser(
 		try {
 			await d1Query(
 				"UPDATE invite_codes SET used_by = NULL, used_at = NULL " +
-					"WHERE code = ? AND used_by = ?",
-				[inviteCode, userId],
+					"WHERE code_hash = ? AND used_by = ?",
+				[inviteHash, userId],
 			);
 		} catch (releaseErr) {
 			// The release UPDATE failed, so the invite is now permanently
@@ -192,41 +197,27 @@ export async function registerUser(
 			// is burned — they'll have to ask whoever issued it for a new
 			// one.
 			//
-			// Log a SHA-256 of the code, NOT the raw value (#51). The
-			// earlier shape included the plaintext so an operator could
-			// grep the invite_codes table — but any log aggregator /
-			// SIEM that indexes this line would then hold a usable code:
+			// Log the SHA-256 of the code, never the raw value (#51).
+			// The plaintext is gone from the DB anyway since #49, but
+			// keep the log shape stable across the no-plaintext-anywhere
+			// invariant: a log aggregator / SIEM that indexes this line
+			// must hold no usable secret. The userId IS in the log so
+			// the operator can scope the recovery DELETE defensively.
 			//
-			//   - The "code is already consumed" reasoning assumed the
-			//     UPDATE had landed (used_at IS NOT NULL). If the
-			//     release UPDATE failed in a way that left the row
-			//     claimable (write didn't reach D1 at all), the logged
-			//     plaintext was still live.
-			//   - Even in the consumed case, a rotated D1 admin token
-			//     could let an attacker manually un-claim the row and
-			//     redeem the code — defeating the "burned therefore
-			//     safe" assumption.
+			// Recovery: `code_hash` is now a column (post-#49), so the
+			// orphan is one equality query away:
 			//
-			// Recovery: D1/SQLite has no built-in sha256(), so the hash
-			// can't be matched in SQL directly. Two-step procedure:
+			//   SELECT * FROM invite_codes WHERE code_hash = '<hash>';
 			//
-			//   1. SELECT * FROM invite_codes
-			//      WHERE used_at IS NOT NULL
-			//        AND used_by NOT IN (SELECT id FROM users);
-			//      — this yields exactly the orphan rows (claimed but
-			//      with no corresponding user). Usually one.
-			//   2. For each candidate, compute SHA-256 of `code`
-			//      externally and compare to the hash from the log,
-			//      e.g. `node -e 'console.log(require("crypto").createHash("sha256").update("CODE").digest("hex"))'`.
+			// To clear the orphan and free the row for re-mint:
 			//
-			// Aligns with #49: if codes get hashed at rest later, the
-			// column would already be the hash and step 2 collapses to
-			// a direct equality.
-			const codeHash = createHash("sha256").update(inviteCode).digest("hex");
+			//   DELETE FROM invite_codes
+			//   WHERE code_hash = '<hash>' AND used_by = '<userId>';
 			console.error(
-				"[auth] CRITICAL: invite release failed — code hash %s is permanently consumed without an account. " +
+				"[auth] CRITICAL: invite release failed — code hash %s claimed by user %s is permanently consumed without an account. " +
 					"Insert error: %s. Release error: %s",
-				codeHash,
+				inviteHash,
+				userId,
 				(err as Error).message,
 				(releaseErr as Error).message,
 			);
@@ -285,23 +276,39 @@ export class InviteQuotaExceededError extends Error {
 // Wire shape intentionally omits created_by (always the authenticated caller,
 // so redundant) and used_by (exposes another user's internal UUID for no UI
 // benefit — the frontend derives used/unused from `usedAt !== null`).
+//
+// `code_hash` is the public id used for revoke; `code_prefix` is the first
+// 4 hex chars of the original plaintext, kept for UI recognition (#49). The
+// plaintext itself only appears in the `MintedInvite` shape returned from
+// `createInvite()` and is never persisted server-side.
 export interface Invite {
-	code: string;
+	codeHash: string;
+	codePrefix: string;
 	createdAt: string;
 	usedAt: string | null;
 	expiresAt: string | null;
 }
 
-export async function createInvite(creatorUserId: string): Promise<Invite> {
+export interface MintedInvite extends Invite {
+	/** Plaintext, returned to the minter once at creation. Never stored. */
+	code: string;
+}
+
+const INVITE_PREFIX_LEN = 4;
+
+export async function createInvite(creatorUserId: string): Promise<MintedInvite> {
 	// 16 hex chars = 64 bits of entropy — plenty for a single-use,
 	// typically short-lived invite code, and short enough to paste.
 	//
-	// Codes are stored in plaintext rather than hashed: they are
-	// single-use, expected to be short-lived, and the user needs to read
-	// them back from the UI to share with invitees. A D1 breach would
-	// expose unused codes immediately — an acceptable trade-off given
-	// those properties, but flagged here so it's a conscious choice.
+	// Stored hashed at rest (#49): the plaintext is returned exactly
+	// once, then dropped — a D1 leak no longer hands the attacker a
+	// usable code. The 4-char prefix is kept in clear so the minter
+	// can recognise their own codes in the list ("ab12…" — yes, that's
+	// the one I sent to bob); leaks 16 of the 64 bits, leaving 48 bits
+	// (~280 trillion) of secret.
 	const code = randomBytes(8).toString("hex");
+	const codeHash = createHash("sha256").update(code).digest("hex");
+	const codePrefix = code.slice(0, INVITE_PREFIX_LEN);
 	// Pass created_at + expires_at explicitly so we can return them
 	// without a follow-up SELECT that could orphan a valid invite row on
 	// read failure. Format matches D1's `datetime('now')` output (UTC,
@@ -322,18 +329,26 @@ export async function createInvite(creatorUserId: string): Promise<Invite> {
 	// forgetful user silently hits the cap 30 days after their last mint
 	// and an attacker could just wait out the expiry instead of revoking.
 	const insert = await d1Query(
-		"INSERT INTO invite_codes (code, created_by, created_at, expires_at) " +
-			"SELECT ?, ?, ?, ? WHERE (" +
+		"INSERT INTO invite_codes (code_hash, code_prefix, created_by, created_at, expires_at) " +
+			"SELECT ?, ?, ?, ?, ? WHERE (" +
 			"SELECT COUNT(*) FROM invite_codes " +
 			"WHERE created_by = ? AND used_at IS NULL " +
 			"AND (expires_at IS NULL OR expires_at > datetime('now'))" +
 			") < ?",
-		[code, creatorUserId, createdAt, expiresAt, creatorUserId, MAX_UNUSED_INVITES_PER_USER],
+		[
+			codeHash,
+			codePrefix,
+			creatorUserId,
+			createdAt,
+			expiresAt,
+			creatorUserId,
+			MAX_UNUSED_INVITES_PER_USER,
+		],
 	);
 	if (insert.meta.changes !== 1) {
 		throw new InviteQuotaExceededError();
 	}
-	return { code, createdAt, usedAt: null, expiresAt };
+	return { code, codeHash, codePrefix, createdAt, usedAt: null, expiresAt };
 }
 
 // LIMIT bounds the response size so historical used/expired rows can't
@@ -344,27 +359,29 @@ const INVITE_LIST_LIMIT = 100;
 
 export async function listInvites(creatorUserId: string): Promise<Invite[]> {
 	const result = await d1Query<InviteRow>(
-		"SELECT code, created_at, used_at, expires_at FROM invite_codes " +
+		"SELECT code_hash, code_prefix, created_at, used_at, expires_at FROM invite_codes " +
 			"WHERE created_by = ? ORDER BY created_at DESC LIMIT ?",
 		[creatorUserId, INVITE_LIST_LIMIT],
 	);
 	return result.results.map(rowToInvite);
 }
 
-// Revoke an unused invite. Returns true if a row was removed, false if the
+// Revoke an unused invite by its hash (the only public id post-#49 — the
+// plaintext is gone). Returns true if a row was removed, false if the
 // invite was missing, already used, or owned by a different user. The wire
 // surface is intentionally vague so a caller can't enumerate codes belonging
 // to other users.
-export async function revokeInvite(creatorUserId: string, code: string): Promise<boolean> {
+export async function revokeInvite(creatorUserId: string, codeHash: string): Promise<boolean> {
 	const result = await d1Query(
-		"DELETE FROM invite_codes WHERE code = ? AND created_by = ? AND used_at IS NULL",
-		[code, creatorUserId],
+		"DELETE FROM invite_codes WHERE code_hash = ? AND created_by = ? AND used_at IS NULL",
+		[codeHash, creatorUserId],
 	);
 	return result.meta.changes === 1;
 }
 
 interface InviteRow {
-	code: string;
+	code_hash: string;
+	code_prefix: string;
 	created_at: string;
 	used_at: string | null;
 	expires_at: string | null;
@@ -372,7 +389,8 @@ interface InviteRow {
 
 function rowToInvite(row: InviteRow): Invite {
 	return {
-		code: row.code,
+		codeHash: row.code_hash,
+		codePrefix: row.code_prefix,
 		createdAt: row.created_at,
 		usedAt: row.used_at,
 		expiresAt: row.expires_at,

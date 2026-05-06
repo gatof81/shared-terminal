@@ -1223,7 +1223,12 @@ async function renderInvites() {
 
 		const code = document.createElement("span");
 		code.className = "invite-code";
-		code.textContent = invite.code;
+		// Plaintext is gone post-#49 — show the 4-char prefix the server
+		// kept for recognition, padded with U+2022 so it visually reads
+		// as "starts with abc1, rest hidden" rather than a partial code
+		// the user might try to share.
+		code.textContent = `${invite.codePrefix}••••••••••••`;
+		code.title = `Hash ${invite.codeHash}`;
 		row.appendChild(code);
 
 		const status = document.createElement("span");
@@ -1234,25 +1239,9 @@ async function renderInvites() {
 		}
 		row.appendChild(status);
 
-		// Copy is only meaningful while the code can still be redeemed.
-		if (!inert) {
-			const copyBtn = document.createElement("button");
-			copyBtn.type = "button";
-			copyBtn.className = "invite-action-btn";
-			copyBtn.textContent = "Copy";
-			copyBtn.addEventListener("click", async () => {
-				try {
-					await navigator.clipboard.writeText(invite.code);
-					copyBtn.textContent = "Copied";
-					setTimeout(() => {
-						copyBtn.textContent = "Copy";
-					}, 1500);
-				} catch {
-					showToast("Couldn't copy — select the code manually", true);
-				}
-			});
-			row.appendChild(copyBtn);
-		}
+		// No "Copy" affordance: the plaintext is no longer recoverable
+		// from the list. The post-mint reveal in the click handler below
+		// is the only window in which the user can copy the live code.
 
 		// Revoke is offered for both unused and expired invites — the
 		// backend DELETE matches WHERE used_at IS NULL, so expired-but-
@@ -1265,10 +1254,10 @@ async function renderInvites() {
 			revokeBtn.className = "invite-action-btn revoke";
 			revokeBtn.textContent = "Revoke";
 			revokeBtn.addEventListener("click", async () => {
-				if (!confirm(`Revoke invite "${invite.code}"?`)) return;
+				if (!confirm(`Revoke invite starting with "${invite.codePrefix}"?`)) return;
 				revokeBtn.disabled = true;
 				try {
-					await revokeInvite(invite.code);
+					await revokeInvite(invite.codeHash);
 					await renderInvites();
 				} catch (err) {
 					revokeBtn.disabled = false;
@@ -1285,10 +1274,29 @@ async function renderInvites() {
 invitesBtn.addEventListener("click", () => openInvitesModal(invitesBtn));
 sidebarInvitesBtn.addEventListener("click", () => openInvitesModal(sidebarInvitesBtn));
 
+// Mint flow: the server returns plaintext exactly once. We surface it
+// to the user with a copy-now-or-lose-it confirm dialog before refreshing
+// the list (which only carries the prefix from this point on). The
+// confirm() copy is not pretty UX, but it's the one universally available
+// "you must dismiss this" affordance the codebase already leans on (see
+// the revoke prompt above and the hard-delete prompt elsewhere); a custom
+// modal would expand scope without changing the security property.
 inviteCreateBtn.addEventListener("click", async () => {
 	inviteCreateBtn.disabled = true;
 	try {
-		await createInvite();
+		const minted = await createInvite();
+		try {
+			await navigator.clipboard.writeText(minted.code);
+			showToast(`Invite code copied to clipboard: ${minted.code}`);
+		} catch {
+			// Clipboard write can fail under permission-denied / non-secure-
+			// context. Fall back to alert() so the plaintext still reaches
+			// the user before it's gone forever.
+			alert(
+				`Invite code (won't be shown again — copy now):\n\n${minted.code}\n\n` +
+					"You can share this code with someone you want to invite.",
+			);
+		}
 		await renderInvites();
 	} catch (err) {
 		showToast((err as Error).message, true);

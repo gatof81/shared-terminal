@@ -104,8 +104,16 @@ export async function migrateDb(): Promise<void> {
 		// WHERE used_at IS NULL with `meta.changes === 1` check, so two
 		// concurrent registers can't redeem the same code. expires_at
 		// bounds how long an unredeemed code stays valid (NULL = never).
+		//
+		// `code_hash` (SHA-256 hex of the plaintext) is stored at rest;
+		// the plaintext is only returned to the minter once at creation
+		// time and never persisted (#49). `code_prefix` is the first
+		// 4 hex chars of the plaintext — leaks 16 bits but lets the
+		// minter recognise their own codes in the list ("oh, the one
+		// starting `ab12` is for bob"); 48 bits of secret remain.
 		`CREATE TABLE IF NOT EXISTS invite_codes (
-                        code        TEXT PRIMARY KEY,
+                        code_hash   TEXT PRIMARY KEY,
+                        code_prefix TEXT NOT NULL,
                         created_by  TEXT NOT NULL,
                         created_at  TEXT NOT NULL DEFAULT (datetime('now')),
                         used_by     TEXT,
@@ -126,6 +134,53 @@ export async function migrateDb(): Promise<void> {
 		if (!/duplicate column name|already exists/i.test((err as Error).message)) {
 			throw err;
 		}
+	}
+	// #49 migration: pre-existing `invite_codes` tables that still have
+	// the old plaintext `code` column need to be rebuilt. Cloudflare D1
+	// has no built-in `sha256()`, so the hash has to be computed in app
+	// code — we can't do this purely in SQL, and a streaming rebuild
+	// would interleave with normal traffic. Strategy:
+	//
+	//   - Empty old shape (no rows): drop and let the CREATE TABLE above
+	//     recreate with the new shape on the next migrateDb() call.
+	//   - Non-empty old shape: refuse, log loudly with recovery steps.
+	//     This codebase had no production invites at the time of
+	//     migration, so the loud-fail path is never expected to trip.
+	//
+	// `PRAGMA table_info` is a SELECT-shaped statement in SQLite; D1
+	// returns its rows under `results`.
+	const cols = await d1Query<{ name: string }>("PRAGMA table_info(invite_codes)");
+	const colNames = new Set(cols.results.map((r) => r.name));
+	const isOldShape = colNames.has("code") && !colNames.has("code_hash");
+	if (isOldShape) {
+		const rowCount = await d1Query<{ n: number }>("SELECT COUNT(*) AS n FROM invite_codes");
+		const n = rowCount.results[0]?.n ?? 0;
+		if (n > 0) {
+			// Loud abort — rebuild logic isn't worth shipping for a path
+			// that wasn't hit at the time of migration. Operator runs the
+			// rebuild manually if they ever land here.
+			throw new Error(
+				`invite_codes still has the pre-#49 schema with ${n} row(s). ` +
+					"Rebuild manually: dump the rows, hash each `code` to SHA-256 hex, " +
+					"and re-INSERT into the new (code_hash, code_prefix, …) shape.",
+			);
+		}
+		console.warn("[db] migrating empty pre-#49 invite_codes table to hashed-at-rest shape");
+		await d1Query("DROP TABLE invite_codes");
+		await d1Query(
+			`CREATE TABLE invite_codes (
+                                code_hash   TEXT PRIMARY KEY,
+                                code_prefix TEXT NOT NULL,
+                                created_by  TEXT NOT NULL,
+                                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                                used_by     TEXT,
+                                used_at     TEXT,
+                                expires_at  TEXT
+                        )`,
+		);
+		await d1Query(
+			"CREATE INDEX IF NOT EXISTS idx_invite_codes_creator ON invite_codes(created_by)",
+		);
 	}
 	console.log("[db] migrations complete");
 }
