@@ -39,7 +39,20 @@ export function handleWsConnection(
                 ws.close(1011, "socket error");
         });
 
+        // Auth must run before path/tab inspection: distinct pre-close
+        // error reasons ("Invalid path" / "Missing tab" / …) leaked a
+        // probe oracle to unauthenticated callers (issue #82). Once we
+        // know the caller is a user, the specific errors below are fine
+        // — they're useful for diagnosing client bugs.
         const url = req.url ?? "";
+        const payload = verifyWsToken(req.headers["sec-websocket-protocol"], url);
+        if (!payload) {
+                sendError(ws, "Unauthorized");
+                ws.close(1008, "Unauthorized");
+                return;
+        }
+        const userId = payload.sub;
+
         const match = url.match(/\/ws\/sessions\/([^/?#]+)/);
         if (!match) {
                 sendError(ws, "Invalid WebSocket path");
@@ -66,14 +79,6 @@ export function handleWsConnection(
                 return;
         }
         const tabId = rawTab;
-
-        const payload = verifyWsToken(req.headers["sec-websocket-protocol"], req.url);
-        if (!payload) {
-                sendError(ws, "Missing or invalid token");
-                ws.close(1008, "Unauthorized");
-                return;
-        }
-        const userId = payload.sub;
 
         // Async auth + attach flow
         (async () => {
