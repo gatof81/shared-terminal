@@ -9,7 +9,7 @@ const dbStubs = vi.hoisted(() => ({
 }));
 vi.mock("./db.js", () => dbStubs);
 
-import { DockerManager, sanitiseUploadName, type OutputListener } from "./dockerManager.js";
+import { DockerManager, sanitiseHostname, sanitiseUploadName, type OutputListener } from "./dockerManager.js";
 import type { SessionManager } from "./sessionManager.js";
 
 // ── Test harness ────────────────────────────────────────────────────────────
@@ -873,5 +873,55 @@ describe("sanitiseUploadName", () => {
 		// shouldn't try to "preserve the extension" — they fall through to
 		// the simple slice path.
 		expect(sanitiseUploadName(".gitignore")).toBe("gitignore"); // leading dot stripped
+	});
+});
+
+// ── sanitiseHostname ────────────────────────────────────────────────────────
+// RFC 1123 says a hostname label can't start or end with `-`, max 63 chars.
+// Docker enforces this at createContainer; a violation is a 400 the user
+// can't recover from without renaming the session. The slice-before-strip
+// ordering invariant is what keeps a >63-char name with a dash at index 62
+// from sneaking a trailing dash past the regex.
+describe("sanitiseHostname", () => {
+	const sid = "abcdef1234567890"; // 8-char prefix → "session-abcdef12"
+
+	it("returns a clean name unchanged", () => {
+		expect(sanitiseHostname("my-session", sid)).toBe("my-session");
+		expect(sanitiseHostname("Project42", sid)).toBe("Project42");
+	});
+
+	it("collapses non-alphanumeric chars to dashes", () => {
+		expect(sanitiseHostname("my session!", sid)).toBe("my-session");
+		expect(sanitiseHostname("foo_bar.baz", sid)).toBe("foo-bar-baz");
+	});
+
+	it("strips leading and trailing boundary dashes", () => {
+		expect(sanitiseHostname("-foo", sid)).toBe("foo");
+		expect(sanitiseHostname("foo-", sid)).toBe("foo");
+		expect(sanitiseHostname("-foo-", sid)).toBe("foo");
+		expect(sanitiseHostname("---foo---", sid)).toBe("foo");
+	});
+
+	it("falls back to a session-prefixed label when the result collapses to empty", () => {
+		expect(sanitiseHostname("---", sid)).toBe("session-abcdef12");
+		expect(sanitiseHostname("中文", sid)).toBe("session-abcdef12");
+		expect(sanitiseHostname("", sid)).toBe("session-abcdef12");
+	});
+
+	it("truncates to 63 chars and re-strips trailing dashes left by truncation", () => {
+		// 62 'a's + '-' + 'rest' is 67 chars; charset-replace is a no-op,
+		// slice(0,63) cuts to "aa…aa-" (62 'a' + '-'), strip trims the
+		// trailing dash — Docker would otherwise refuse the hostname.
+		const longWithDashAtBoundary = "a".repeat(62) + "-rest";
+		const out = sanitiseHostname(longWithDashAtBoundary, sid);
+		expect(out).toBe("a".repeat(62));
+		expect(out.length).toBe(62);
+		expect(out.endsWith("-")).toBe(false);
+	});
+
+	it("caps length at 63 chars for any input", () => {
+		const out = sanitiseHostname("x".repeat(200), sid);
+		expect(out.length).toBe(63);
+		expect(out).toBe("x".repeat(63));
 	});
 });
