@@ -246,6 +246,35 @@ RUN mkdir -p /home/developer/.npm-global
 # self-updated version, since a user who chose v.X probably wants v.X.
 RUN npm install -g @anthropic-ai/claude-code
 
+# ── Default `claude` to --dangerously-skip-permissions in this image ────────
+# The session container is already a hard sandbox: no sudo (#15), all Linux
+# capabilities dropped, no-new-privileges set, network egress only, the
+# workspace bind mount is the only path that escapes the container layer,
+# and the backend runs each session under its own UID-mapped mount. The
+# per-tool permission prompts Claude Code shows by default add friction
+# (every read / edit / bash invocation pauses for an answer the user
+# almost always says yes to in this environment) without a meaningful
+# security gain — there is no "ask before doing X" privilege the prompt
+# protects that the sandbox isn't already enforcing.
+#
+# Wire this through a bash alias rather than a /usr/local/bin/claude
+# wrapper:
+#   - PATH puts /home/developer/.npm-global/bin first (so npm self-updates
+#     win), and a wrapper anywhere else on PATH would be silently shadowed.
+#   - Self-aliasing is bash-detected: `claude` inside the alias body resolves
+#     to the binary on PATH, not back to the alias, so there is no infinite
+#     loop. (Bash manual: aliases are not re-expanded for the same name.)
+#   - Users who genuinely want the prompts back can `\claude …` or
+#     `command claude …` to bypass the alias for a single invocation, or
+#     `unalias claude` for the rest of the shell.
+#
+# Aliases only fire in interactive bash, so non-interactive invocations
+# (scripts, `bash -c`, child processes) still get the upstream default.
+# That is the right boundary: the friction we are removing is a UX
+# friction in the terminal session; scripts that automate Claude can opt
+# in explicitly.
+RUN echo "alias claude='claude --dangerously-skip-permissions'" >> /home/developer/.bashrc
+
 # ── tmux config (nice defaults) ──────────────────────────────────────────────
 COPY --chown=developer:developer tmux.conf /home/developer/.tmux.conf
 
