@@ -20,9 +20,9 @@
 			"recommended": true,
 			"style": {
 				"noNonNullAssertion": "off",
-				"useImportType": "warn",
-				"useNodejsImportProtocol": "warn",
-				"useTemplate": "warn"
+				"useImportType": "error",
+				"useNodejsImportProtocol": "error",
+				"useTemplate": "error"
 			},
 			"suspicious": {
 				"noExplicitAny": "warn"
