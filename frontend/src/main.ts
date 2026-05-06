@@ -964,6 +964,12 @@ function showToast(message: string, isError = false) {
 	if (toastTimer) clearTimeout(toastTimer);
 	toastTimer = setTimeout(() => {
 		toast.className = "";
+		// Clear textContent too, not just the visibility class. Without
+		// this the message stays readable to anything that queries the
+		// DOM (devtools, browser extensions, an XSS payload) long after
+		// the visual window closes — material when the message carries
+		// a one-time secret like a freshly-minted invite code (#49).
+		toast.textContent = "";
 	}, 4000);
 }
 
@@ -1287,7 +1293,11 @@ inviteCreateBtn.addEventListener("click", async () => {
 		const minted = await createInvite();
 		try {
 			await navigator.clipboard.writeText(minted.code);
-			showToast(`Invite code copied to clipboard: ${minted.code}`);
+			// Don't echo the code into the toast — the clipboard already
+			// has it, and the toast element keeps its text in the DOM
+			// for the lifetime of the page. Cheap defense in depth on
+			// top of the textContent-clearing in showToast itself.
+			showToast("Invite code copied to clipboard");
 		} catch {
 			// Clipboard write can fail under permission-denied / non-secure-
 			// context. Fall back to alert() so the plaintext still reaches

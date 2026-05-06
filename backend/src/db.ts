@@ -141,8 +141,8 @@ export async function migrateDb(): Promise<void> {
 	// code — we can't do this purely in SQL, and a streaming rebuild
 	// would interleave with normal traffic. Strategy:
 	//
-	//   - Empty old shape (no rows): drop and let the CREATE TABLE above
-	//     recreate with the new shape on the next migrateDb() call.
+	//   - Empty old shape (no rows): drop and immediately recreate
+	//     inline with the new (code_hash, code_prefix, …) shape.
 	//   - Non-empty old shape: refuse, log loudly with recovery steps.
 	//     This codebase had no production invites at the time of
 	//     migration, so the loud-fail path is never expected to trip.
