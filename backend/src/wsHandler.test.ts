@@ -1,9 +1,9 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import jwt from "jsonwebtoken";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { __resetJwtSecretForTests, validateJwtSecret } from "./auth.js";
-import { endUpgradeSocketWithReply, handleWsConnection } from "./wsHandler.js";
-import type { SessionManager } from "./sessionManager.js";
 import type { DockerManager } from "./dockerManager.js";
+import type { SessionManager } from "./sessionManager.js";
+import { endUpgradeSocketWithReply, handleWsConnection } from "./wsHandler.js";
 
 // ── Test harness ────────────────────────────────────────────────────────────
 
@@ -36,7 +36,10 @@ function makeFakeWs(): FakeWs {
 	};
 }
 
-function makeReq(url: string, withToken: boolean): {
+function makeReq(
+	url: string,
+	withToken: boolean,
+): {
 	url: string;
 	headers: Record<string, string | undefined>;
 } {
@@ -117,7 +120,9 @@ describe("handleWsConnection auth-first ordering", () => {
 
 		expect(ws.close).toHaveBeenCalledWith(1008, "Invalid path");
 		const errPayloads = ws.send.mock.calls.map((c) => c[0] as string);
-		expect(errPayloads).toContain(JSON.stringify({ type: "error", message: "Invalid WebSocket path" }));
+		expect(errPayloads).toContain(
+			JSON.stringify({ type: "error", message: "Invalid WebSocket path" }),
+		);
 	});
 
 	it("authenticated caller missing the tab param receives 'Missing tab'", () => {

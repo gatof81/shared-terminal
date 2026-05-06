@@ -20,7 +20,10 @@ const authStubs = vi.hoisted(() => ({
 	// `vi.mock` the whole module, both the handler's import and the stub's
 	// throw resolve to this same constructor.
 	InvalidCredentialsError: class extends Error {
-		constructor() { super("Invalid credentials"); this.name = "InvalidCredentialsError"; }
+		constructor() {
+			super("Invalid credentials");
+			this.name = "InvalidCredentialsError";
+		}
 	},
 }));
 vi.mock("./auth.js", () => authStubs);
@@ -203,14 +206,14 @@ describe("UsernameRateLimiter", () => {
 		try {
 			const rl = new UsernameRateLimiter(5, 60_000, 3);
 			rl.recordFailure("alice"); // t=0, resetAt=60_000
-			rl.recordFailure("bob");   // t=0, resetAt=60_000
+			rl.recordFailure("bob"); // t=0, resetAt=60_000
 			rl.recordFailure("carol"); // t=0, resetAt=60_000
 			expect(rl.sizeForTesting()).toBe(3);
 
 			// Expire alice alone.
 			vi.setSystemTime(30_000);
 			// Refresh bob and carol so they stay live past alice's resetAt.
-			rl.recordFailure("bob");   // live, count=2
+			rl.recordFailure("bob"); // live, count=2
 			rl.recordFailure("carol"); // live, count=2
 			vi.setSystemTime(60_001); // alice expired; bob/carol still live
 
@@ -323,7 +326,7 @@ describe("UsernameRateLimiter", () => {
 			vi.advanceTimersByTime(60_001); // everyone expired
 
 			rl.recordFailure("alice"); // fresh bucket — should land at end
-			rl.recordFailure("dave");  // new — triggers overflow logic
+			rl.recordFailure("dave"); // new — triggers overflow logic
 			rl.recordFailure("eve");
 
 			// Size is capped at 3; bob and carol should have been evicted

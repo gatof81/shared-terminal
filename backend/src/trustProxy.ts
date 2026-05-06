@@ -17,10 +17,10 @@
 export type TrustProxyValue = boolean | number | string;
 
 export class TrustProxyError extends Error {
-        constructor(message: string) {
-                super(message);
-                this.name = "TrustProxyError";
-        }
+	constructor(message: string) {
+		super(message);
+		this.name = "TrustProxyError";
+	}
 }
 
 // Express's named presets. Anything outside this set that isn't a number,
@@ -56,58 +56,61 @@ const IP_OR_CIDR = /^(?:\d{1,3}(?:\.\d{1,3}){3}|[\da-fA-F]*:[\da-fA-F:]*)(?:\/\d
  *   - unrecognised strings (typos in preset names, non-IP-shaped tokens)
  */
 export function parseTrustProxy(raw: string | undefined): TrustProxyValue | undefined {
-        if (raw === undefined || raw.trim() === "") return undefined;
-        const trimmed = raw.trim();
+	if (raw === undefined || raw.trim() === "") return undefined;
+	const trimmed = raw.trim();
 
-        // "true" is the single most common wrong value — it looks right to
-        // anyone who reads "trust proxy" as a boolean knob, but Express then
-        // takes the LEFTMOST X-Forwarded-For entry, which the client controls.
-        // Refuse it with a message that names the correct alternative.
-        if (trimmed === "true") {
-                throw new TrustProxyError(
-                        "TRUST_PROXY=true is refused: Express would take the leftmost " +
-                        "X-Forwarded-For entry (attacker-controlled), bypassing per-IP " +
-                        "rate limiting. Use a hop count (e.g. TRUST_PROXY=1) instead.",
-                );
-        }
+	// "true" is the single most common wrong value — it looks right to
+	// anyone who reads "trust proxy" as a boolean knob, but Express then
+	// takes the LEFTMOST X-Forwarded-For entry, which the client controls.
+	// Refuse it with a message that names the correct alternative.
+	if (trimmed === "true") {
+		throw new TrustProxyError(
+			"TRUST_PROXY=true is refused: Express would take the leftmost " +
+				"X-Forwarded-For entry (attacker-controlled), bypassing per-IP " +
+				"rate limiting. Use a hop count (e.g. TRUST_PROXY=1) instead.",
+		);
+	}
 
-        // Explicit "0"/"false" → boolean false so we don't rely on Express's
-        // (undocumented) compileTrust(0) returning "never trust". If that
-        // internal ever changes, a string mistakenly treated as an IP would
-        // silently mis-trust; the explicit boolean keeps us pinned.
-        if (trimmed === "false" || trimmed === "0") return false;
+	// Explicit "0"/"false" → boolean false so we don't rely on Express's
+	// (undocumented) compileTrust(0) returning "never trust". If that
+	// internal ever changes, a string mistakenly treated as an IP would
+	// silently mis-trust; the explicit boolean keeps us pinned.
+	if (trimmed === "false" || trimmed === "0") return false;
 
-        // Hop-count form. Reject a leading "+", scientific notation, or
-        // anything else that Number("…") would happily coerce but isn't a
-        // legitimate count.
-        if (/^\d+$/.test(trimmed)) {
-                const n = Number(trimmed);
-                if (!Number.isSafeInteger(n) || n < 0) {
-                        throw new TrustProxyError(
-                                `TRUST_PROXY="${raw}" is not a valid non-negative integer hop count`,
-                        );
-                }
-                return n;
-        }
+	// Hop-count form. Reject a leading "+", scientific notation, or
+	// anything else that Number("…") would happily coerce but isn't a
+	// legitimate count.
+	if (/^\d+$/.test(trimmed)) {
+		const n = Number(trimmed);
+		if (!Number.isSafeInteger(n) || n < 0) {
+			throw new TrustProxyError(
+				`TRUST_PROXY="${raw}" is not a valid non-negative integer hop count`,
+			);
+		}
+		return n;
+	}
 
-        // Comma-separated list of named presets, IPs, or CIDRs. Express accepts
-        // all three in the same comma-separated format, so we validate every
-        // token before passing the whole string through.
-        const tokens = trimmed.split(",").map((t) => t.trim()).filter(Boolean);
-        if (tokens.length === 0) {
-                throw new TrustProxyError(`TRUST_PROXY="${raw}" has no valid tokens after splitting`);
-        }
-        for (const token of tokens) {
-                if (NAMED_PRESETS.has(token)) continue;
-                if (IP_OR_CIDR.test(token)) continue;
-                throw new TrustProxyError(
-                        `TRUST_PROXY contains unrecognised value "${token}". ` +
-                        `Expected a non-negative integer hop count (e.g. "1"), "false"/"0", ` +
-                        `one of [${[...NAMED_PRESETS].join(", ")}], an IP/CIDR, ` +
-                        `or a comma-separated list of those.`,
-                );
-        }
-        return trimmed;
+	// Comma-separated list of named presets, IPs, or CIDRs. Express accepts
+	// all three in the same comma-separated format, so we validate every
+	// token before passing the whole string through.
+	const tokens = trimmed
+		.split(",")
+		.map((t) => t.trim())
+		.filter(Boolean);
+	if (tokens.length === 0) {
+		throw new TrustProxyError(`TRUST_PROXY="${raw}" has no valid tokens after splitting`);
+	}
+	for (const token of tokens) {
+		if (NAMED_PRESETS.has(token)) continue;
+		if (IP_OR_CIDR.test(token)) continue;
+		throw new TrustProxyError(
+			`TRUST_PROXY contains unrecognised value "${token}". ` +
+				`Expected a non-negative integer hop count (e.g. "1"), "false"/"0", ` +
+				`one of [${[...NAMED_PRESETS].join(", ")}], an IP/CIDR, ` +
+				`or a comma-separated list of those.`,
+		);
+	}
+	return trimmed;
 }
 
 /**
@@ -150,18 +153,18 @@ export function parseTrustProxy(raw: string | undefined): TrustProxyValue | unde
 // ('stays quiet when TRUST_PROXY is set in production') would also need
 // to drop its `"false"` case.
 export function warnIfProductionMisconfigured(
-        raw: string | undefined,
-        nodeEnv: string | undefined,
-        logger: Pick<Console, "warn"> = console,
+	raw: string | undefined,
+	nodeEnv: string | undefined,
+	logger: Pick<Console, "warn"> = console,
 ): void {
-        if (nodeEnv !== "production") return;
-        if (raw !== undefined && raw.trim() !== "") return;
-        logger.warn(
-                "[server] NODE_ENV=production but TRUST_PROXY is unset. " +
-                "If the backend is behind a reverse proxy, CDN, or tunnel, " +
-                "req.ip will be the proxy's socket address — collapsing per-IP " +
-                "rate limits into a single global bucket. Set TRUST_PROXY to the " +
-                "hop count (e.g. 1 for a single Cloudflare Tunnel), or leave unset " +
-                "ONLY if the backend is directly internet-facing.",
-        );
+	if (nodeEnv !== "production") return;
+	if (raw !== undefined && raw.trim() !== "") return;
+	logger.warn(
+		"[server] NODE_ENV=production but TRUST_PROXY is unset. " +
+			"If the backend is behind a reverse proxy, CDN, or tunnel, " +
+			"req.ip will be the proxy's socket address — collapsing per-IP " +
+			"rate limits into a single global bucket. Set TRUST_PROXY to the " +
+			"hop count (e.g. 1 for a single Cloudflare Tunnel), or leave unset " +
+			"ONLY if the backend is directly internet-facing.",
+	);
 }
