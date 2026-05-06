@@ -207,14 +207,21 @@ export async function registerUser(
                         //     redeem the code — defeating the "burned therefore
                         //     safe" assumption.
                         //
-                        // Hashing turns "operator finds the orphan" into:
+                        // Recovery: D1/SQLite has no built-in sha256(), so the hash
+                        // can't be matched in SQL directly. Two-step procedure:
                         //
-                        //     SELECT … FROM invite_codes
-                        //     WHERE printf('%x', sha256(code)) = '<hash from log>'
+                        //   1. SELECT * FROM invite_codes
+                        //      WHERE used_at IS NOT NULL
+                        //        AND used_by NOT IN (SELECT id FROM users);
+                        //      — this yields exactly the orphan rows (claimed but
+                        //      with no corresponding user). Usually one.
+                        //   2. For each candidate, compute SHA-256 of `code`
+                        //      externally and compare to the hash from the log,
+                        //      e.g. `node -e 'console.log(require("crypto").createHash("sha256").update("CODE").digest("hex"))'`.
                         //
-                        // — small one-liner D1 query, no extra column needed today,
-                        // and trivially aligns with #49 if invite codes get hashed
-                        // at rest later (the column would already be the hash).
+                        // Aligns with #49: if codes get hashed at rest later, the
+                        // column would already be the hash and step 2 collapses to
+                        // a direct equality.
                         const codeHash = createHash("sha256").update(inviteCode).digest("hex");
                         console.error(
                                 "[auth] CRITICAL: invite release failed — code hash %s is permanently consumed without an account. " +
