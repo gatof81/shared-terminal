@@ -13,6 +13,7 @@ const authStubs = vi.hoisted(() => ({
 	registerUser: vi.fn(async (_u: string, _p: string) => ({ userId: "u1", token: "tok" })),
 	loginUser: vi.fn(async (_u: string, _p: string) => ({ userId: "u1", token: "tok" })),
 	hasAnyUsers: vi.fn(async () => true),
+	listInvites: vi.fn(async (_u?: string) => [] as unknown[]),
 	requireAuth: (_req: unknown, _res: unknown, next: () => void) => next(),
 	// The route handler checks `err instanceof InvalidCredentialsError` where
 	// `InvalidCredentialsError` is imported from `./auth.js`. Because we
@@ -368,6 +369,7 @@ describe("auth route rate limiting", () => {
 		login: { ipMax: number; ipWindowMs: number; usernameMax: number; usernameWindowMs: number };
 		register: { ipMax: number; ipWindowMs: number };
 		invitesCreate?: { ipMax: number; ipWindowMs: number };
+		invitesList?: { ipMax: number; ipWindowMs: number };
 		invitesRevoke?: { ipMax: number; ipWindowMs: number };
 		fileUpload?: { ipMax: number; ipWindowMs: number };
 	}): Promise<void> {
@@ -376,6 +378,7 @@ describe("auth route rate limiting", () => {
 		// don't trip them.
 		const fullCfg = {
 			invitesCreate: { ipMax: 1000, ipWindowMs: 60_000 },
+			invitesList: { ipMax: 1000, ipWindowMs: 60_000 },
 			invitesRevoke: { ipMax: 1000, ipWindowMs: 60_000 },
 			fileUpload: { ipMax: 1000, ipWindowMs: 60_000 },
 			...cfg,
@@ -584,5 +587,27 @@ describe("auth route rate limiting", () => {
 		authStubs.loginUser.mockImplementationOnce(async () => ({ userId: "u1", token: "tok" }));
 		const locked = await postLogin({ username: "alice", password: "good" });
 		expect(locked.status).toBe(429);
+	});
+
+	it("GET /invites returns 429 after invitesList.ipMax requests", async () => {
+		// Issue #47: GET /invites must be rate-limited symmetrically with
+		// POST/DELETE so an unbounded polling client can't hammer D1.
+		// If a future refactor drops `invitesListIp` from the route signature
+		// this test will surface it as a 200 on the third call.
+		await spinUp({
+			login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
+			register: { ipMax: 1000, ipWindowMs: 60_000 },
+			invitesList: { ipMax: 2, ipWindowMs: 60_000 },
+		});
+
+		const r1 = await fetch(`${baseUrl}/api/invites`);
+		const r2 = await fetch(`${baseUrl}/api/invites`);
+		const r3 = await fetch(`${baseUrl}/api/invites`);
+
+		expect(r1.status).toBe(200);
+		expect(r2.status).toBe(200);
+		expect(r3.status).toBe(429);
+		expect(await r3.json()).toMatchObject({ scope: "ip" });
+		expect(r3.headers.get("retry-after")).not.toBeNull();
 	});
 });

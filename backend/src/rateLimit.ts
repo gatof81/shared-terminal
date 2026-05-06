@@ -24,6 +24,19 @@ export interface RateLimitConfig {
 		ipMax: number;
 		ipWindowMs: number;
 	};
+	// Caps how often a single IP can list invites. Kept separate from
+	// invitesCreate because reads are cheap (one D1 SELECT, capped at
+	// INVITE_LIST_LIMIT = 100 rows the caller already owns) and the UI
+	// may legitimately poll the modal — pinning it to the mint rate
+	// would 429 on every other refresh. Mostly here for symmetry with
+	// the other invite endpoints (issue #47): the asymmetry of "POST
+	// and DELETE rate-limited, GET wide open" reads as accidental.
+	// Also bounds runaway client behaviour and D1 read load if a
+	// logged-in client tab gets stuck in a tight refresh loop.
+	invitesList: {
+		ipMax: number;
+		ipWindowMs: number;
+	};
 	// Caps how often a single IP can revoke invites. Kept separate from
 	// invitesCreate because:
 	//   1. Revoke is a cleanup action the legitimate user may need to do in
@@ -52,8 +65,11 @@ export interface RateLimitConfig {
 }
 
 // Defaults match issue #10: login 10/15min, register 5/1h, per-username 10/15min.
-// Invites: create 10/h, revoke 60/h — revoke has to cover incident-response
-// bursts, so it's 6x the mint rate.
+// Invites: create 10/h, list 120/h, revoke 60/h. List is cheapest (a single
+// SELECT, capped at INVITE_LIST_LIMIT = 100 owned rows) so it has the most
+// generous default — 120/h ≈ 2/min sustained, plenty for a UI that
+// polls when the modal is open. Revoke is 6x mint to cover incident-response
+// bursts (panic-rotate after suspecting JWT theft).
 export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 	login: {
 		ipMax: 10,
@@ -67,6 +83,10 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 	},
 	invitesCreate: {
 		ipMax: 10,
+		ipWindowMs: 60 * 60 * 1000,
+	},
+	invitesList: {
+		ipMax: 120,
 		ipWindowMs: 60 * 60 * 1000,
 	},
 	invitesRevoke: {
@@ -85,6 +105,7 @@ export interface AuthRateLimiters {
 	loginIp: RateLimitRequestHandler;
 	registerIp: RateLimitRequestHandler;
 	invitesCreateIp: RateLimitRequestHandler;
+	invitesListIp: RateLimitRequestHandler;
 	invitesRevokeIp: RateLimitRequestHandler;
 	fileUploadIp: RateLimitRequestHandler;
 }
@@ -119,6 +140,15 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		legacyHeaders: false,
 		message: { error: "Too many invite-mint requests from this IP, try again later", scope: "ip" },
 	});
+	const invitesListIp = rateLimit({
+		windowMs: cfg.invitesList.ipWindowMs,
+		limit: cfg.invitesList.ipMax,
+		standardHeaders: "draft-7",
+		legacyHeaders: false,
+		// Distinct 429 message so a 429 on the list endpoint isn't mis-
+		// attributed to the mint or revoke endpoint when troubleshooting.
+		message: { error: "Too many invite-list requests from this IP, try again later", scope: "ip" },
+	});
 	const invitesRevokeIp = rateLimit({
 		windowMs: cfg.invitesRevoke.ipWindowMs,
 		limit: cfg.invitesRevoke.ipMax,
@@ -133,7 +163,7 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		legacyHeaders: false,
 		message: { error: "Too many file uploads from this IP, try again later", scope: "ip" },
 	});
-	return { loginIp, registerIp, invitesCreateIp, invitesRevokeIp, fileUploadIp };
+	return { loginIp, registerIp, invitesCreateIp, invitesListIp, invitesRevokeIp, fileUploadIp };
 }
 
 // ── Per-username limiter ────────────────────────────────────────────────────
