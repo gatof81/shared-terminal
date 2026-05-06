@@ -85,10 +85,13 @@ export async function login(username: string, password: string): Promise<{ userI
 }
 
 export async function logout(): Promise<void> {
-	// POST so SameSite=Strict applies (a cross-site GET would still be
-	// blocked, but POST is the canonical "this is a state change"
-	// signal). The endpoint is unauthenticated server-side — we don't
-	// want a stale cookie to lock the user out of clearing it.
+	// POST is the canonical HTTP verb for state-changing operations.
+	// The CSRF guard in production is the CORS + Content-Type preflight,
+	// not SameSite — the cookie is SameSite=None there to permit
+	// cross-site delivery on the Pages → Tunnel deploy. The endpoint is
+	// unauthenticated server-side because we don't want a stale cookie
+	// to lock the user out of clearing it; the only consequence of a
+	// forced cross-site logout is user inconvenience.
 	//
 	// Swallow network errors so a logout-while-offline still tears down
 	// local state. The server's view becomes consistent on the next
