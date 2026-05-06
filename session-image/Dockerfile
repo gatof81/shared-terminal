@@ -247,15 +247,25 @@ RUN mkdir -p /home/developer/.npm-global
 RUN npm install -g @anthropic-ai/claude-code
 
 # ── Default `claude` to --dangerously-skip-permissions in this image ────────
-# The session container is already a hard sandbox: no sudo (#15), all Linux
-# capabilities dropped, no-new-privileges set, network egress only, the
-# workspace bind mount is the only path that escapes the container layer,
-# and the backend runs each session under its own UID-mapped mount. The
-# per-tool permission prompts Claude Code shows by default add friction
-# (every read / edit / bash invocation pauses for an answer the user
-# almost always says yes to in this environment) without a meaningful
-# security gain — there is no "ask before doing X" privilege the prompt
-# protects that the sandbox isn't already enforcing.
+# The session container is a hard sandbox against the *host*: no sudo
+# (#15), all Linux capabilities dropped, no-new-privileges set, network
+# egress only, the workspace bind mount is the only path that escapes
+# the container layer, and the backend runs each session under its own
+# UID-mapped mount. So the per-tool prompts Claude Code shows by default
+# don't gate any *privilege* — they cannot grant access to the host or
+# escalate within the container.
+#
+# What the prompts DO gate, and what we are intentionally giving up by
+# defaulting them off, is in-session damage to workspace files: a
+# misinterpreted instruction could have Claude run `rm -rf ~/workspace/x`
+# or overwrite a tracked file with no confirmation. The workspace is
+# persistent by design (survives container recycles, only purged on
+# DELETE ?hard=true), so a destructive command lands on real data the
+# user wants to keep. We are accepting this tradeoff because in this
+# environment the prompt-fatigue cost is high (every read / edit / bash
+# pauses for an answer the user almost always says yes to) and the
+# workspace is presumed to be under git or similar version control.
+# Users who would rather keep the prompts can unalias.
 #
 # Wire this through a bash alias rather than a /usr/local/bin/claude
 # wrapper:
