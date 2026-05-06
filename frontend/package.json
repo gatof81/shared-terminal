@@ -9,7 +9,9 @@
     "preview": "vite preview",
     "lint": "biome check src/",
     "lint:fix": "biome check src/ --write",
-    "format": "biome format src/ --write"
+    "format": "biome format src/ --write",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
@@ -18,7 +20,9 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.14",
+    "jsdom": "^29.1.1",
     "typescript": "^5.4.5",
-    "vite": "^8.0.9"
+    "vite": "^8.0.9",
+    "vitest": "^2.1.9"
   }
 }

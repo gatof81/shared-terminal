@@ -80,6 +80,9 @@ jobs:
       - name: Lint (Biome)
         run: npm run lint
 
+      - name: Tests
+        run: npm test
+
       # `npm run build` is `tsc && vite build`. VITE_API_URL is consumed by
       # vite.config.ts to rewrite the CSP meta tag; falls back to localhost
       # if unset, but setting it here exercises the replacement path.
