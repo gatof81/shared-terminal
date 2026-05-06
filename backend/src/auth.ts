@@ -751,10 +751,13 @@ export function warnIfWildcardCorsInProduction(
 	if (nodeEnv !== "production") return;
 	if (!allowedOrigins.includes("*")) return;
 	out.warn(
-		"[server] CORS_ORIGINS contains '*' in production. The HTTP layer " +
-			"still honours this, but the WebSocket upgrade handler refuses it " +
-			"(CSWSH protection). Set CORS_ORIGINS to an explicit origin list " +
-			"to re-enable WebSocket connections from production clients.",
+		"[server] CORS_ORIGINS contains '*' in production. " +
+			"Cookie auth (#18) requires an exact-origin match to send " +
+			"Access-Control-Allow-Credentials, so authenticated REST calls " +
+			"from cross-origin browsers will silently 401 — the cookie is " +
+			"dropped by the browser. The WebSocket upgrade handler also " +
+			"refuses wildcard origins (CSWSH protection). Set CORS_ORIGINS " +
+			"to an explicit origin list to re-enable both.",
 	);
 }
 
