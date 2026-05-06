@@ -61,15 +61,25 @@ export async function d1Query<T = Record<string, unknown>>(
 }
 
 /**
- * Execute multiple SQL statements (for migrations).
+ * Execute multiple SQL statements as a single batch (one HTTP round-trip)
+ * on Cloudflare D1's `/query` endpoint, which "supports multiple statements,
+ * joined by semicolons, which will be executed as a batch" (per the D1 REST
+ * API docs). The batch runs as one transaction — any single statement
+ * failing rolls all of them back and surfaces as a throw from `d1Query`.
+ *
+ * Migration-only and parameter-free by construction. Don't pass user input
+ * here without escaping; the SQL is concatenated verbatim. The return shape
+ * for a multi-statement batch is an array of one result per statement;
+ * callers don't read it (this returns void), so the lie inside `d1Query` —
+ * which only surfaces `result[0]` — doesn't matter for migration.
  */
 export async function d1Batch(statements: string[]): Promise<void> {
-	// D1 doesn't have a batch endpoint via HTTP, so run sequentially
-	for (const sql of statements) {
-		const trimmed = sql.trim();
-		if (!trimmed) continue;
-		await d1Query(trimmed);
-	}
+	const sql = statements
+		.map((s) => s.trim())
+		.filter(Boolean)
+		.join(";\n");
+	if (!sql) return;
+	await d1Query(sql);
 }
 
 /**
@@ -85,6 +95,15 @@ export async function migrateDb(): Promise<void> {
                         password_hash TEXT NOT NULL,
                         created_at  TEXT NOT NULL DEFAULT (datetime('now'))
                 )`,
+		// FK on user_id (#20): D1 enables foreign-key enforcement on every
+		// connection by default, so this is load-bearing once user
+		// deletion lands. ON DELETE CASCADE: deleting a user purges their
+		// sessions atomically, no orphan rows. Pre-existing tables
+		// (created before this migration) won't pick up the FK — SQLite
+		// has no ADD CONSTRAINT, only table rebuild — so existing
+		// deployments need a manual rebuild if they want enforcement on
+		// rows that already exist. Documented as a known limitation in
+		// the issue.
 		`CREATE TABLE IF NOT EXISTS sessions (
                         session_id      TEXT PRIMARY KEY,
                         user_id         TEXT NOT NULL,
@@ -96,7 +115,8 @@ export async function migrateDb(): Promise<void> {
                         rows            INTEGER NOT NULL DEFAULT 36,
                         env_vars        TEXT NOT NULL DEFAULT '{}',
                         created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-                        last_connected_at TEXT
+                        last_connected_at TEXT,
+                        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                 )`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_user
                         ON sessions(user_id, status)`,
