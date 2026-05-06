@@ -225,18 +225,18 @@ export function buildRouter(
 		}
 	});
 
-	router.delete("/invites/:code", invitesRevokeIp, async (req: Request, res: Response) => {
+	router.delete("/invites/:hash", invitesRevokeIp, async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
-		const { code } = req.params;
-		// Same 64-char ceiling as the inviteCode body field at register —
-		// codes mint at 16 hex chars, anything larger is a probe and
-		// shouldn't reach D1 even as a parameterized arg.
-		if (code.length > 64) {
-			res.status(400).json({ error: "code must be at most 64 characters" });
+		const { hash } = req.params;
+		// SHA-256 hex is exactly 64 lowercase hex chars. Reject anything
+		// else before the D1 round-trip — a caller probing arbitrary
+		// strings shouldn't reach the database.
+		if (!/^[0-9a-f]{64}$/.test(hash)) {
+			res.status(400).json({ error: "hash must be a 64-char lowercase hex SHA-256 digest" });
 			return;
 		}
 		try {
-			const removed = await revokeInvite(userId, code);
+			const removed = await revokeInvite(userId, hash);
 			if (!removed) {
 				// Vague on purpose: don't distinguish missing / already-used /
 				// owned-by-someone-else, since that would let a caller probe for

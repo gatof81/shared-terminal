@@ -19,6 +19,8 @@ interface Api {
 	createSession: typeof import("./api.js").createSession;
 	listSessions: typeof import("./api.js").listSessions;
 	deleteTab: typeof import("./api.js").deleteTab;
+	createInvite: typeof import("./api.js").createInvite;
+	listInvites: typeof import("./api.js").listInvites;
 	revokeInvite: typeof import("./api.js").revokeInvite;
 	uploadSessionFiles: typeof import("./api.js").uploadSessionFiles;
 	InviteRequiredError: typeof import("./api.js").InviteRequiredError;
@@ -283,17 +285,75 @@ describe("idempotent-delete semantics", () => {
 		api.setToken("tok");
 		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ status: 404 }));
 
-		await expect(api.revokeInvite("CODE")).resolves.toBeUndefined();
+		// Post-#49 the argument is the SHA-256 hex hash, not the plaintext.
+		const hash = "a".repeat(64);
+		await expect(api.revokeInvite(hash)).resolves.toBeUndefined();
 	});
 
-	it("revokeInvite URL-encodes the code so special characters don't break the path", async () => {
+	it("revokeInvite targets /invites/<hash> (post-#49 — plaintext is gone)", async () => {
 		const api = await loadApi();
 		api.setToken("tok");
 		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ status: 204 }));
 
-		await api.revokeInvite("a/b c");
+		const hash = "deadbeef".repeat(8); // 64 hex chars
+		await api.revokeInvite(hash);
 
-		const [url] = fetchSpy.mock.calls[0];
-		expect(url).toBe("http://localhost:3001/api/invites/a%2Fb%20c");
+		const [url, init] = fetchSpy.mock.calls[0];
+		expect(url).toBe(`http://localhost:3001/api/invites/${hash}`);
+		expect(init.method).toBe("DELETE");
+	});
+});
+
+// ── Invite mint + list shape (#49) ──────────────────────────────────────────
+
+describe("invite hash-at-rest wire shape", () => {
+	it("createInvite returns the plaintext code alongside hash and prefix exactly once", async () => {
+		const api = await loadApi();
+		api.setToken("tok");
+		fetchSpy.mockResolvedValueOnce(
+			mockFetchResponse({
+				status: 201,
+				json: {
+					code: "ab12cd34ef567890",
+					codeHash: "f".repeat(64),
+					codePrefix: "ab12",
+					createdAt: "2026-05-06 20:00:00",
+					usedAt: null,
+					expiresAt: "2026-06-05 20:00:00",
+				},
+			}),
+		);
+
+		const minted = await api.createInvite();
+
+		expect(minted.code).toBe("ab12cd34ef567890");
+		expect(minted.codeHash).toBe("f".repeat(64));
+		expect(minted.codePrefix).toBe("ab12");
+	});
+
+	it("listInvites returns hash + prefix and never carries plaintext", async () => {
+		const api = await loadApi();
+		api.setToken("tok");
+		fetchSpy.mockResolvedValueOnce(
+			mockFetchResponse({
+				json: [
+					{
+						codeHash: "0".repeat(64),
+						codePrefix: "ab12",
+						createdAt: "2026-05-06 20:00:00",
+						usedAt: null,
+						expiresAt: null,
+					},
+				],
+			}),
+		);
+
+		const list = await api.listInvites();
+
+		expect(list).toHaveLength(1);
+		expect(list[0].codeHash).toBe("0".repeat(64));
+		expect(list[0].codePrefix).toBe("ab12");
+		// The Invite type explicitly omits plaintext — guard the wire too.
+		expect((list[0] as unknown as Record<string, unknown>).code).toBeUndefined();
 	});
 });

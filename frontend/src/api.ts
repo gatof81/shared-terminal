@@ -217,11 +217,22 @@ export class TabNotFoundError extends Error {
 
 // ── Invites API ─────────────────────────────────────────────────────────────
 
+// Codes are hashed at rest (#49). `codeHash` is the public id (used for
+// revoke); `codePrefix` is a 4-char display hint so the user can recognise
+// their own codes in the list. The plaintext only appears in the
+// `MintedInvite` returned by `createInvite()` and is never persisted.
 export interface Invite {
-	code: string;
+	codeHash: string;
+	codePrefix: string;
 	createdAt: string;
 	usedAt: string | null;
 	expiresAt: string | null;
+}
+
+export interface MintedInvite extends Invite {
+	/** Plaintext returned once at creation. Surface to the user immediately —
+	 *  it cannot be recovered after this response. */
+	code: string;
 }
 
 export async function listInvites(): Promise<Invite[]> {
@@ -230,7 +241,7 @@ export async function listInvites(): Promise<Invite[]> {
 	return res.json();
 }
 
-export async function createInvite(): Promise<Invite> {
+export async function createInvite(): Promise<MintedInvite> {
 	const res = await apiFetch("/invites", { method: "POST" });
 	if (!res.ok) {
 		const body = await res.json().catch(() => ({}));
@@ -239,8 +250,8 @@ export async function createInvite(): Promise<Invite> {
 	return res.json();
 }
 
-export async function revokeInvite(code: string): Promise<void> {
-	const res = await apiFetch(`/invites/${encodeURIComponent(code)}`, { method: "DELETE" });
+export async function revokeInvite(codeHash: string): Promise<void> {
+	const res = await apiFetch(`/invites/${encodeURIComponent(codeHash)}`, { method: "DELETE" });
 	// 404 means the row is already gone (concurrent revoke from another
 	// tab, or the invite was redeemed in the interim). The user-visible
 	// outcome — "the code is no longer in the list" — is identical to a
