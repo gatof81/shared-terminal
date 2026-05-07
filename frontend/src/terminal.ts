@@ -407,6 +407,15 @@ export function openTerminalSession(opts: {
 	// the leftover pixels across events — same trick as the touch handler's
 	// `lastTouchY -= lines * cellH`.
 	let wheelResidue = 0;
+	// Known limitation: tmux copy-mode (Ctrl-b [) is *not* the alternate
+	// screen — `pane_in_mode` is tmux-internal state that doesn't propagate
+	// to xterm.buffer.active.type, so this handler still hits the main-buffer
+	// branch in copy-mode and scrolls xterm's own scrollback instead of
+	// driving copy-mode's cursor. The visible result is the scrollback
+	// moves while copy-mode's selection cursor stays frozen. Querying
+	// `#{pane_in_mode}` from the frontend would need a side-channel we
+	// don't have. Workaround for users in copy-mode: use keyboard
+	// navigation (arrow keys, Page Up/Down) instead of the wheel.
 	term.attachCustomWheelEventHandler((ev) => {
 		if (term.buffer.active.type === "alternate") return true;
 		const cellH = getCellHeight();
@@ -425,7 +434,12 @@ export function openTerminalSession(opts: {
 		// long downward swipe followed by a short upward flick would have
 		// to "spend" the accumulated downward residue before any upward
 		// scroll registered, which feels broken at the input boundary.
-		if (deltaPx < 0 !== wheelResidue < 0) wheelResidue = 0;
+		// Gate on `deltaPx !== 0` so a horizontal-only wheel event
+		// (`ev.deltaY === 0`, common on trackpads doing diagonal/sideways
+		// gestures) doesn't trip the reset: `0 < 0` is false, which would
+		// always look like "opposite sign" against any upward (negative)
+		// residue and silently discard it mid-gesture.
+		if (deltaPx !== 0 && deltaPx < 0 !== wheelResidue < 0) wheelResidue = 0;
 		wheelResidue += deltaPx;
 		const lines = Math.trunc(wheelResidue / cellH);
 		if (lines !== 0) {
