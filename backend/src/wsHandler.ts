@@ -177,9 +177,6 @@ export function handleWsConnection(
 						docker.resize(attachId, msg.cols, msg.rows).catch(() => {});
 					}
 					break;
-				case "ping":
-					sendMsg(ws, { type: "pong" });
-					break;
 			}
 		});
 

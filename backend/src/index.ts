@@ -8,7 +8,7 @@
 import http from "node:http";
 import cookieParser from "cookie-parser";
 import express from "express";
-import { WebSocketServer } from "ws";
+import { type WebSocket, WebSocketServer } from "ws";
 import {
 	ensureAuthReady,
 	isAllowedWsOrigin,
@@ -201,7 +201,51 @@ server.on("upgrade", (req, socket, head) => {
 	});
 });
 
+// ── Liveness heartbeat (#79) ─────────────────────────────────────────────────
+//
+// Bidirectional protocol-level ping/pong via the `ws` package's built-in
+// control frames. The previous app-layer `{type:"ping"}` was unidirectional
+// (client → server only), so a hung server with a still-alive TCP socket
+// (Docker daemon stalled, event loop blocked, half-closed TCP sitting in a
+// NAT translation table) left the client staring at a frozen terminal with
+// no reconnect prompt — `ws.readyState` stayed OPEN until kernel keepalive
+// reaped the socket minutes later. And the server never noticed a backgrounded
+// browser tab going silent at all.
+//
+// Pattern (from the `ws` README): mark each connection alive on attach, flip
+// to `isAlive=false` on every interval tick, fire `ws.ping()`. Browsers auto-
+// reply at the protocol layer; the pong handler flips `isAlive` back to true.
+// If the next tick still sees `isAlive=false`, the peer didn't respond inside
+// the window and we `terminate()` (immediate, no graceful close — we already
+// know the peer is dead). Protocol-level pings also pass through middleboxes
+// that idle out app-layer JSON traffic.
+const HEARTBEAT_INTERVAL_MS = 30_000;
+interface WsWithLiveness extends WebSocket {
+	isAlive?: boolean;
+}
+const heartbeat = setInterval(() => {
+	for (const client of wss.clients) {
+		const c = client as unknown as WsWithLiveness;
+		if (c.isAlive === false) {
+			c.terminate();
+			continue;
+		}
+		c.isAlive = false;
+		try {
+			(c as unknown as { ping: () => void }).ping();
+		} catch {
+			// Peer already dead — terminate on the next tick (isAlive stays false).
+		}
+	}
+}, HEARTBEAT_INTERVAL_MS);
+heartbeat.unref();
+
 wss.on("connection", (ws, req) => {
+	const c = ws as unknown as WsWithLiveness;
+	c.isAlive = true;
+	ws.on("pong", () => {
+		c.isAlive = true;
+	});
 	handleWsConnection(ws, req, sessions, docker);
 });
 
@@ -245,6 +289,10 @@ function shutdown() {
 	if (shuttingDown) return;
 	shuttingDown = true;
 	logger.info("[server] shutting down…");
+
+	// Stop the heartbeat first so it doesn't try to ping a half-closed
+	// client during teardown (would race with the close calls below).
+	clearInterval(heartbeat);
 
 	// Actively close live WS clients. `wss.close()` alone only stops accepting
 	// new upgrades — existing connections stay open, which keeps `server.close()`
