@@ -384,6 +384,57 @@ export function openTerminalSession(opts: {
 	container.addEventListener("touchend", onTouchEnd, { passive: true });
 	container.addEventListener("touchcancel", onTouchCancel, { passive: true });
 
+	// ── Wheel scroll ────────────────────────────────────────────────────────
+	// Desktop wheel/trackpad must scroll xterm's own scrollback in the main
+	// buffer instead of being swallowed by tmux's mouse-tracking. With
+	// `set -g mouse on` (session-image/tmux.conf) xterm's default behaviour
+	// is to forward wheel events as SGR mouse-tracking sequences. tmux's
+	// `WheelUpPane`/`WheelDownPane` bindings discard those when no app
+	// requested mouse and the alt buffer isn't active, so without
+	// intercepting here the wheel is silently dead in the bash main buffer
+	// (#171). The buffer split mirrors onTouchMove above:
+	//   - Main buffer: scroll xterm's own scrollback locally; `return false`
+	//     cancels xterm's default forward so the SGR sequence never goes
+	//     out and tmux never gets a chance to discard it.
+	//   - Alt buffer (vim, less, claude TUI, htop, …): `return true` lets
+	//     xterm forward as before — those apps consume mouse events for
+	//     their own UI (or rely on tmux's `alternate_on` branch in the
+	//     WheelUpPane binding to send-keys -M to them).
+	//
+	// Sub-cell residue: trackpad two-finger swipes deliver many small
+	// `deltaY` values, each <1 cell. Truncating each event in isolation
+	// would silently consume the swipe with no visible scroll. Accumulate
+	// the leftover pixels across events — same trick as the touch handler's
+	// `lastTouchY -= lines * cellH`.
+	let wheelResidue = 0;
+	term.attachCustomWheelEventHandler((ev) => {
+		if (term.buffer.active.type === "alternate") return true;
+		const cellH = getCellHeight();
+		let deltaPx: number;
+		switch (ev.deltaMode) {
+			case 1: // DOM_DELTA_LINE
+				deltaPx = ev.deltaY * cellH;
+				break;
+			case 2: // DOM_DELTA_PAGE
+				deltaPx = ev.deltaY * cellH * term.rows;
+				break;
+			default: // DOM_DELTA_PIXEL — what trackpads and most mice emit
+				deltaPx = ev.deltaY;
+		}
+		// Reset the residue if the user reverses direction — otherwise a
+		// long downward swipe followed by a short upward flick would have
+		// to "spend" the accumulated downward residue before any upward
+		// scroll registered, which feels broken at the input boundary.
+		if ((deltaPx < 0) !== (wheelResidue < 0)) wheelResidue = 0;
+		wheelResidue += deltaPx;
+		const lines = Math.trunc(wheelResidue / cellH);
+		if (lines !== 0) {
+			wheelResidue -= lines * cellH;
+			term.scrollLines(lines);
+		}
+		return false;
+	});
+
 	// ── Resize ──────────────────────────────────────────────────────────────
 	// ResizeObserver fires continuously during mobile viewport churn (URL
 	// bar show/hide, soft-keyboard open/close, rotation) and desktop
