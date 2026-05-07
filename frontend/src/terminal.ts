@@ -202,15 +202,23 @@ export function openTerminalSession(opts: {
 	// WS upgrade to the cookie's domain automatically — no token needs to
 	// be threaded through here. Origin policy (CSWSH protection) is
 	// enforced server-side by isAllowedWsOrigin against CORS_ORIGINS.
-	const wsUrl = buildWsUrl(sessionId, tabId);
+	// Pass the post-fit geometry through the URL so capture-pane on the
+	// backend runs at the actual viewport size, not D1's stored default.
+	// Without this, the replay arrives at the wrong cols/rows and renders
+	// mis-aligned in xterm until the next resize event (sidebar toggle,
+	// viewport change). Validated server-side; backend falls back to D1
+	// if the params are missing or out of range. Sending geometry as a
+	// WS message after open would be too late: the backend ships the
+	// replay before its `ws.on("message", …)` listener registers, so the
+	// frame would be silently dropped by EventEmitter.
+	//
+	// Liveness (post-open) is handled at the protocol layer (ws.ping/pong)
+	// from the server — see backend/src/index.ts heartbeat. Browsers
+	// auto-reply to server pings with no JS hook required, so there is
+	// no `ws.onopen` handler.
+	const wsUrl = buildWsUrl(sessionId, tabId, term.cols, term.rows);
 	const ws = new WebSocket(wsUrl);
 	let disposed = false;
-
-	ws.onopen = () => {
-		// Liveness is now handled at the protocol layer (ws.ping/pong)
-		// from the server side — see backend/src/index.ts heartbeat.
-		// Browsers auto-reply to server pings with no JS hook required.
-	};
 
 	ws.onmessage = (ev) => {
 		// disposed: post-close frames buffered by the browser or in flight
@@ -673,20 +681,28 @@ class MultilineUrlLinkProvider implements ILinkProvider {
 
 // ── URL builder ─────────────────────────────────────────────────────────────
 
-function buildWsUrl(sessionId: string, tabId?: string): string {
+function buildWsUrl(
+	sessionId: string,
+	tabId: string | undefined,
+	cols: number,
+	rows: number,
+): string {
 	// Use VITE_API_URL to derive the WebSocket URL
 	const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
 	const url = new URL(apiUrl);
 	const wsProto = url.protocol === "https:" ? "wss:" : "ws:";
 	const base = `${wsProto}//${url.host}/ws/sessions/${sessionId}`;
+	const params = new URLSearchParams();
 	// tabId is server-issued and re-validated on the backend before any
 	// `tmux attach -t` — see backend/src/wsHandler.ts (rawTab regex
 	// /^[a-zA-Z0-9._-]{1,64}$/). Excluding `:` is the load-bearing part:
 	// tmux target syntax needs a colon to parse `session:window.pane`, so
 	// `.` alone can't escalate a tabId into a different tmux target.
-	if (tabId) {
-		const params = new URLSearchParams({ tab: tabId });
-		return `${base}?${params.toString()}`;
-	}
-	return base;
+	if (tabId) params.set("tab", tabId);
+	// Geometry is bounds-checked server-side (1..1024 integer); a missing
+	// or out-of-range value falls back to D1's stored session.cols/rows.
+	if (Number.isInteger(cols) && cols > 0) params.set("cols", String(cols));
+	if (Number.isInteger(rows) && rows > 0) params.set("rows", String(rows));
+	const qs = params.toString();
+	return qs ? `${base}?${qs}` : base;
 }

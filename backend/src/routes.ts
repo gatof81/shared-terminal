@@ -816,7 +816,9 @@ export function buildRouter(
 // (most clients stay under 500×200) and well below sizes that would
 // upset xterm/tmux. See #149.
 const SESSION_NAME_MAX_LEN = 64;
-const TERMINAL_DIM_MAX = 1024;
+// Exported so wsHandler can apply the same upper bound when validating
+// cols/rows from the WS upgrade URL — keep both guards moving together.
+export const TERMINAL_DIM_MAX = 1024;
 
 // Type-guard for the cols/rows numeric inputs on POST /sessions.
 // Returns true only for finite integers in [1, TERMINAL_DIM_MAX] —

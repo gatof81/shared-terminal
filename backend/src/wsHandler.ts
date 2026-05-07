@@ -9,6 +9,7 @@ import { WebSocket, type WebSocketServer } from "ws";
 import { verifyWsToken } from "./auth.js";
 import type { DockerManager } from "./dockerManager.js";
 import { logger } from "./logger.js";
+import { TERMINAL_DIM_MAX } from "./routes.js";
 import { ForbiddenError, NotFoundError, type SessionManager } from "./sessionManager.js";
 import type { WsClientMessage, WsServerMessage } from "./types.js";
 
@@ -128,6 +129,25 @@ export function handleWsConnection(
 	}
 	const tabId = rawTab;
 
+	// Optional geometry hint from the client. Used in lieu of
+	// session.cols/rows (the persisted last-good size from D1) so
+	// capture-pane runs at the actual viewport size on this attach;
+	// otherwise the replay arrives at D1's stored size and the user
+	// sees mis-aligned columns until something fires a frontend
+	// resize. Bounds match POST /sessions (TERMINAL_DIM_MAX shared
+	// from routes.ts so both validators move together).
+	const parseDim = (re: RegExp): number | null => {
+		const m = url.match(re);
+		if (m === null) return null;
+		const n = Number.parseInt(m[1]!, 10);
+		return Number.isInteger(n) && n >= 1 && n <= TERMINAL_DIM_MAX ? n : null;
+	};
+	// `\d{1,4}` (not `[^&#]+`) so values like `cols=100abc` don't
+	// silently truncate via parseInt's partial-parse — the value will
+	// just fail to match and fall through to session.cols.
+	const urlCols = parseDim(/[?&]cols=(\d{1,4})/);
+	const urlRows = parseDim(/[?&]rows=(\d{1,4})/);
+
 	// Async auth + attach flow
 	(async () => {
 		// Authorise
@@ -157,8 +177,8 @@ export function handleWsConnection(
 		const { replay, flushTail } = await docker.attach(
 			sessionId,
 			attachId,
-			session.cols,
-			session.rows,
+			urlCols ?? session.cols,
+			urlRows ?? session.rows,
 			outputListener,
 			tabId,
 		);
