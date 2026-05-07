@@ -6,6 +6,7 @@ import {
 	AUTH_COOKIE_NAME,
 	extractTokenFromCookieHeader,
 	isAllowedWsOrigin,
+	originMatches,
 	parseCorsOrigins,
 	requireAuth,
 	validateJwtSecret,
@@ -252,6 +253,75 @@ describe("isAllowedWsOrigin", () => {
 				isAllowedWsOrigin("https://attacker.example.org", ["https://*.example.com"], "production"),
 			).toBe(false);
 		});
+	});
+});
+
+// Direct contract tests for `originMatches`. The `isAllowedWsOrigin` block
+// already exercises the helper indirectly, but those tests bind the
+// behaviour to the WS branch's specific shape — a future refactor of the
+// CORS middleware in index.ts could disconnect it from `originMatches`
+// without breaking any of those WS-flavoured assertions. Pinning the
+// helper as its own thing keeps the contract stable across both callers.
+describe("originMatches", () => {
+	it("returns false for an empty allowlist", () => {
+		expect(originMatches("https://anything.example", [])).toBe(false);
+	});
+
+	it("matches an exact entry", () => {
+		expect(originMatches("https://app.example.com", ["https://app.example.com"])).toBe(true);
+	});
+
+	it("rejects a near-miss exact entry (case, trailing slash)", () => {
+		expect(originMatches("https://APP.example.com", ["https://app.example.com"])).toBe(false);
+		expect(originMatches("https://app.example.com/", ["https://app.example.com"])).toBe(false);
+	});
+
+	it("matches a single-DNS-label glob", () => {
+		expect(originMatches("https://abc.example.com", ["https://*.example.com"])).toBe(true);
+	});
+
+	it("rejects a multi-label substitution", () => {
+		// Glob `*` is `[^.]+` — refuses dots inside the substitution,
+		// so `a.b.example.com` doesn't match `*.example.com`.
+		expect(originMatches("https://a.b.example.com", ["https://*.example.com"])).toBe(false);
+	});
+
+	it("rejects a suffix-bypass shape", () => {
+		// `https://app.example.com.evil.com` must not match
+		// `https://*.example.com` — the trailing anchor (`$`) blocks
+		// any characters past the pattern.
+		expect(originMatches("https://app.example.com.evil.com", ["https://*.example.com"])).toBe(
+			false,
+		);
+	});
+
+	it("treats the literal `.` in the pattern as a literal dot, not regex any-char", () => {
+		// The escape pass turns `.` into `\.`. A character that's not
+		// a dot in the matching position must NOT match.
+		expect(originMatches("https://abc.exampleAcom", ["https://*.example.com"])).toBe(false);
+	});
+
+	it('skips bare `"*"` entries (callers handle that token separately)', () => {
+		// CORS middleware downgrades bare `*` to no-credentials wildcard;
+		// `isAllowedWsOrigin` denies in production. If `originMatches`
+		// treated `*` as match-everything, both policies would silently
+		// bypass.
+		expect(originMatches("https://anything.example", ["*"])).toBe(false);
+	});
+
+	it("works in a mixed allowlist of exact + glob entries", () => {
+		const mixed = ["https://prod.example.com", "https://*.staging.example.com"];
+		expect(originMatches("https://prod.example.com", mixed)).toBe(true);
+		expect(originMatches("https://api.staging.example.com", mixed)).toBe(true);
+		expect(originMatches("https://other.example.com", mixed)).toBe(false);
+	});
+
+	it("supports multiple `*` substitutions in one entry", () => {
+		// Not the common case, but the regex compilation has no special
+		// limit on `*` count — pin the behaviour so it can't silently
+		// regress.
+		expect(originMatches("https://a.b.example.com", ["https://*.*.example.com"])).toBe(true);
+		expect(originMatches("https://a.b.c.example.com", ["https://*.*.example.com"])).toBe(false);
 	});
 });
 
