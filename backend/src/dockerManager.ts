@@ -885,24 +885,56 @@ export class DockerManager {
 	 */
 	private async capturePane(sessionId: string, tabId: string): Promise<string> {
 		try {
-			const { stdout, exitCode } = await this.execOneShot(sessionId, [
-				"tmux",
-				"capture-pane",
-				"-t",
-				tabId,
-				"-p",
-				"-e",
+			// Run capture-pane and display-message in parallel — both go
+			// through execOneShot (a fresh `docker exec`), so the round trip
+			// is the same as one alone. We need the cursor position because
+			// capture-pane only emits row content + newlines, no cursor
+			// escape. After feeding the snapshot to xterm, the local
+			// cursor ends up wherever the trailing \n's left it (typically
+			// one row past the last content row), which doesn't match where
+			// tmux thinks the shell's cursor actually is. Subsequent typed
+			// input renders at xterm's stale cursor — visibly "one row
+			// below the prompt" — until tmux happens to emit a cursor-
+			// position escape (often only when there's something to redraw).
+			// Appending an explicit CUP at the end of the replay puts xterm
+			// in sync with tmux from the first character.
+			const [snap, cur] = await Promise.all([
+				this.execOneShot(sessionId, ["tmux", "capture-pane", "-t", tabId, "-p", "-e"]),
+				this.execOneShot(sessionId, [
+					"tmux",
+					"display-message",
+					"-t",
+					tabId,
+					"-p",
+					"#{cursor_y};#{cursor_x}",
+				]),
 			]);
-			// A non-zero exit is the common "benign race" path: when
-			// spawnSharedExec's `new-session -A` has just restarted tmux,
-			// the server socket may not be ready when capture-pane races
-			// it — tmux prints "no server running" and exits 1. Returning
-			// "" here means the client starts with a blank pane and the
-			// very next byte of live output redraws it. Intentional.
-			if (exitCode !== 0) return "";
+			// A non-zero exit on capture-pane is the common "benign race"
+			// path: when spawnSharedExec's `new-session -A` has just
+			// restarted tmux, the server socket may not be ready when
+			// capture-pane races it — tmux prints "no server running" and
+			// exits 1. Returning "" here means the client starts with a
+			// blank pane and the very next byte of live output redraws it.
+			// Intentional.
+			if (snap.exitCode !== 0) return "";
 			// execOneShot returns clean stdout (no PTY, no \r). For a screen
 			// dump xterm needs CRLF line terminators — add the \r back.
-			return stdout.replace(/\n/g, "\r\n");
+			const screen = snap.stdout.replace(/\n/g, "\r\n");
+			// Cursor positioning: tmux's #{cursor_x}/#{cursor_y} are 0-based
+			// (column-from-left, row-from-top of the pane). ANSI CUP
+			// (CSI <row>;<col> H) is 1-based. If the display-message call
+			// failed or returned an unparseable string (older tmux, quote
+			// stripping mishaps), we fall through and accept the trailing-
+			// newline drift rather than emitting a malformed escape.
+			if (cur.exitCode === 0) {
+				const m = cur.stdout.trim().match(/^(\d+);(\d+)$/);
+				if (m) {
+					const y = Number.parseInt(m[1]!, 10) + 1;
+					const x = Number.parseInt(m[2]!, 10) + 1;
+					return `${screen}\x1b[${y};${x}H`;
+				}
+			}
+			return screen;
 		} catch (err) {
 			logger.warn(
 				`[docker] capture-pane failed for ${this.targetKey(sessionId, tabId)}: ${(err as Error).message}`,
