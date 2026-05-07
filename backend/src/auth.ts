@@ -295,8 +295,9 @@ export async function createInvite(creatorUserId: string): Promise<MintedInvite>
 }
 
 // 5× the active-quota of 20: enough room for a long tail of expired/used
-// history. UI doesn't paginate; #54 surfaces a footer when the list hits
-// this cap so the truncation isn't silent.
+// history. UI doesn't paginate; renderInvites in main.ts surfaces a
+// "older invites not shown" footer when the list arrives at this cap
+// (#54, landed in PR #142) so the truncation isn't silent.
 const INVITE_LIST_LIMIT = 100;
 
 export async function listInvites(creatorUserId: string): Promise<Invite[]> {
