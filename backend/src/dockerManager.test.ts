@@ -331,11 +331,18 @@ describe("DockerManager shared-exec multiplexing", () => {
 	it("returns the tmux capture-pane snapshot as replay for new attachers without re-sending to existing ones", async () => {
 		// Capture-pane replay lets every joiner see the same canonical view of
 		// the pane regardless of when they joined. We script the snapshot via
-		// the one-shot hook so we don't need a live tmux.
+		// the one-shot hook so we don't need a live tmux. display-message is
+		// also called now (in parallel) to fetch tmux's actual cursor position
+		// so the replay can append a CUP escape — see the
+		// "appends cursor position" test below for the cursor-specific
+		// invariant.
 		const { dm } = makeDocker({
 			oneShot: (cmd) => {
 				if (cmd[1] === "capture-pane") {
 					return { stdout: "line-a\nline-b", exitCode: 0 };
+				}
+				if (cmd[1] === "display-message") {
+					return { stdout: "1;3\n", exitCode: 0 };
 				}
 				return undefined;
 			},
@@ -352,13 +359,62 @@ describe("DockerManager shared-exec multiplexing", () => {
 
 		const { replay } = await dm.attach("s1", "a2", 80, 24, a2, "tab-test");
 
-		// capture-pane stdout, with \n promoted to \r\n for xterm.
-		expect(replay).toBe("line-a\r\nline-b");
+		// capture-pane stdout with \n promoted to \r\n, plus the CUP escape
+		// derived from display-message (1;3 → row 2 col 4 in 1-based ANSI).
+		expect(replay).toBe("line-a\r\nline-b\x1b[2;4H");
 		// Second attach must not cross-fan to the first listener, and a2
 		// receives the replay via its return value (wsHandler, not the
 		// listener) so the listener stays unfired.
 		expect(a1).not.toHaveBeenCalled();
 		expect(a2).not.toHaveBeenCalled();
+	});
+
+	it("appends an explicit CUP escape derived from tmux's cursor position", async () => {
+		// Without this escape, xterm's local cursor lands one row past the
+		// last replay row (each \r\n advances the cursor) — typed input then
+		// renders below the visible prompt until tmux happens to redraw. The
+		// CUP suffix re-syncs xterm to where tmux says the shell's cursor
+		// actually is. tmux's #{cursor_y}/#{cursor_x} are 0-based, ANSI CUP
+		// is 1-based — pin the +1 conversion.
+		const { dm } = makeDocker({
+			oneShot: (cmd) => {
+				if (cmd[1] === "capture-pane") return { stdout: "$ ", exitCode: 0 };
+				if (cmd[1] === "display-message") return { stdout: "0;2\n", exitCode: 0 };
+				return undefined;
+			},
+		});
+		const { replay } = await dm.attach("s1", "a1", 80, 24, vi.fn(), "tab-cur");
+		// 0;2 → row 1 col 3 in 1-based ANSI.
+		expect(replay).toBe("$ \x1b[1;3H");
+	});
+
+	it("falls through to plain snapshot if display-message exits non-zero", async () => {
+		// Older tmux, race with `new-session -A`, or a malformed format
+		// string can all yield a non-zero exit on display-message. We
+		// deliberately accept the trailing-newline drift in that case
+		// rather than emit a malformed escape — the user gets the same
+		// behaviour as before this fix landed, not a broken one.
+		const { dm } = makeDocker({
+			oneShot: (cmd) => {
+				if (cmd[1] === "capture-pane") return { stdout: "$ ", exitCode: 0 };
+				if (cmd[1] === "display-message") return { stdout: "", exitCode: 1 };
+				return undefined;
+			},
+		});
+		const { replay } = await dm.attach("s1", "a1", 80, 24, vi.fn(), "tab-cur");
+		expect(replay).toBe("$ ");
+	});
+
+	it("falls through to plain snapshot if display-message returns unparseable output", async () => {
+		const { dm } = makeDocker({
+			oneShot: (cmd) => {
+				if (cmd[1] === "capture-pane") return { stdout: "$ ", exitCode: 0 };
+				if (cmd[1] === "display-message") return { stdout: "garbage\n", exitCode: 0 };
+				return undefined;
+			},
+		});
+		const { replay } = await dm.attach("s1", "a1", 80, 24, vi.fn(), "tab-cur");
+		expect(replay).toBe("$ ");
 	});
 
 	it("resizes the shared exec to min(cols) × min(rows) and recomputes on detach", async () => {
