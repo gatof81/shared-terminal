@@ -208,6 +208,34 @@ export function openTerminalSession(opts: {
 	};
 	container.addEventListener("pointerdown", focusOnPointer);
 
+	// ── Scrollback / selection preservation ────────────────────────────────
+	// xterm auto-tracks output to the bottom of the buffer (cursor follows
+	// what tmux/the shell writes). When the user is either parked in
+	// scrollback OR holding a live selection, that auto-track yanks the
+	// viewport away from whatever they were reading mid-stream — every
+	// fresh byte of `tail -f`, a streaming build log, or a claude TUI
+	// pulse snaps the screen back to the prompt and erases their place
+	// (#157).
+	//
+	// Track scrollback parking via `term.onScroll` (the buffer geometry
+	// is `viewportY < baseY` whenever the user has scrolled up — at
+	// bottom both equal `baseY`), check `term.hasSelection()` at write
+	// time for selection state, and if either is true capture the
+	// pre-write viewport line and restore it from `term.write`'s
+	// parser-drained callback.
+	//
+	// Restoring from the callback (not synchronously after the call)
+	// is load-bearing: xterm parses input asynchronously, so a sync
+	// read of `viewportY` right after `term.write()` returns can land
+	// before the parser has applied the cursor moves the new bytes
+	// caused. The callback fires once the bytes have actually been
+	// written and the auto-snap (if any) has happened.
+	let userScrolled = false;
+	const scrollDisposable = term.onScroll(() => {
+		const buf = term.buffer.active;
+		userScrolled = buf.viewportY < buf.baseY;
+	});
+
 	// ── WebSocket connection ────────────────────────────────────────────────
 	// Auth lives in an httpOnly cookie (#18). Browsers send cookies on the
 	// WS upgrade to the cookie's domain automatically — no token needs to
@@ -249,9 +277,30 @@ export function openTerminalSession(opts: {
 		}
 
 		switch (msg.type) {
-			case "output":
-				term.write(msg.data);
+			case "output": {
+				// Fast path when the user is at the bottom with no selection:
+				// no callback, no closure allocation, identical to the prior
+				// behaviour for the common case (user typing at the prompt).
+				const wasOffBottom = userScrolled || term.hasSelection();
+				if (!wasOffBottom) {
+					term.write(msg.data);
+					break;
+				}
+				const yBefore = term.buffer.active.viewportY;
+				term.write(msg.data, () => {
+					// Re-check at parser-drain time: a user who scrolled
+					// back to the bottom or cleared their selection during
+					// the parse window shouldn't get pinned to a stale
+					// viewport. (Selection clears synchronously on click;
+					// scroll fires its own onScroll, which already updated
+					// `userScrolled`.)
+					if (!userScrolled && !term.hasSelection()) return;
+					if (term.buffer.active.viewportY !== yBefore) {
+						term.scrollToLine(yBefore);
+					}
+				});
 				break;
+			}
 			case "status":
 				onStatus(msg.status);
 				break;
@@ -585,6 +634,7 @@ export function openTerminalSession(opts: {
 		container.removeEventListener("touchcancel", onTouchCancel);
 		inputDisposable.dispose();
 		linkProviderDisposable.dispose();
+		scrollDisposable.dispose();
 		pendingRestoreCanvas?.removeEventListener("webglcontextrestored", onContextRestored);
 		container.removeEventListener("webglcontextlost", onContextLost);
 		webgl?.dispose();
