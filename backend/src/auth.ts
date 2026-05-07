@@ -594,10 +594,11 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
  * trusting a JWT-embedded flag so that admin grant/revoke takes effect
  * without users needing to log out and back in.
  *
- * #50: today this gates POST /invites and DELETE /invites/:hash. GET
- * /invites stays auth-only so a non-admin sees their (always-empty) list
- * and the "you can't mint" UX comes from the missing button rather than
- * a confusing 403 on read.
+ * #50: gates GET, POST, and DELETE on /invites — list, mint, and
+ * revoke are a single coherent admin surface. Earlier rounds of #146
+ * gated only POST/DELETE and let GET fall through on auth, but that
+ * left pre-#50 codes minted by non-admins invisible (and so
+ * unrevocable) to the admin tier this PR exists to centralise on.
  */
 export async function requireAdmin(req: Request, res: Response, next: NextFunction): Promise<void> {
 	const userId = (req as AuthedRequest).userId;
