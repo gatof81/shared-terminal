@@ -14,13 +14,22 @@ const authStubs = vi.hoisted(() => ({
 	loginUser: vi.fn(async (_u: string, _p: string) => ({ userId: "u1", token: "tok" })),
 	hasAnyUsers: vi.fn(async () => true),
 	listInvites: vi.fn(async (_u?: string) => [] as unknown[]),
+	createInvite: vi.fn(async (_u: string) => ({
+		code: "deadbeefdeadbeef",
+		codeHash: "f".repeat(64),
+		codePrefix: "dead",
+		createdAt: "2026-05-07 00:00:00",
+		usedAt: null,
+		expiresAt: null,
+	})),
 	requireAuth: (_req: unknown, _res: unknown, next: () => void) => next(),
-	// Sync passthrough — tests in this file don't exercise the admin
-	// gate, they exercise the rate limiters that sit alongside it. The
-	// real requireAdmin is async (D1 lookup); express middleware doesn't
-	// await return values, so a sync next() is fine here precisely
-	// because the gate isn't under test.
-	requireAdmin: (_req: unknown, _res: unknown, next: () => void) => next(),
+	// vi.fn so individual tests can override (the admin-gate test below
+	// flips the default-passthrough behaviour to a 403 to pin the
+	// route-level wiring). Default impl is the same passthrough every
+	// other test in this file relies on.
+	requireAdmin: vi.fn((_req: unknown, _res: unknown, next: () => void) => {
+		next();
+	}),
 	// Cookie-auth helpers (#18). Tests don't read the cookie back, so a
 	// no-op for set/clear and a permissive shape-only verify is enough.
 	AUTH_COOKIE_NAME: "st_token",
@@ -631,5 +640,36 @@ describe("auth route rate limiting", () => {
 		expect(r3.status).toBe(429);
 		expect(await r3.json()).toMatchObject({ scope: "ip" });
 		expect(r3.headers.get("retry-after")).not.toBeNull();
+	});
+
+	// #50 route-level wiring: the requireAdmin middleware unit-tests pin
+	// the gate's behaviour given a userId; this pins that the gate is
+	// actually wired in front of the create-invite handler at the route
+	// level. A future refactor that swaps middleware order or drops the
+	// gate would surface here as a 201 reaching the createInvite stub.
+	it("POST /invites returns 403 (and never reaches the handler) when requireAdmin denies", async () => {
+		await spinUp({
+			login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
+			register: { ipMax: 1000, ipWindowMs: 60_000 },
+		});
+		// Override the default passthrough to deny — the gate-fail path.
+		authStubs.requireAdmin.mockImplementation(
+			(_req: unknown, res: { status: (n: number) => { json: (b: unknown) => unknown } }) => {
+				res.status(403).json({ error: "Admin privileges required" });
+			},
+		);
+		authStubs.createInvite.mockClear();
+
+		const r = await fetch(`${baseUrl}/api/invites`, { method: "POST" });
+
+		expect(r.status).toBe(403);
+		expect(await r.json()).toMatchObject({ error: "Admin privileges required" });
+		// The route handler must never have been invoked.
+		expect(authStubs.createInvite).not.toHaveBeenCalled();
+
+		// Restore for any subsequent tests.
+		authStubs.requireAdmin.mockImplementation((_req: unknown, _res: unknown, next: () => void) => {
+			next();
+		});
 	});
 });

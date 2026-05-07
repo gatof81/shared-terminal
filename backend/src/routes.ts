@@ -91,19 +91,21 @@ export function buildRouter(
 			undefined;
 		const payload = verifyJwt(token);
 		const authenticated = payload !== null;
-		let isAdmin = false;
-		if (authenticated) {
-			try {
-				const result = await d1Query<{ is_admin: number }>(
-					"SELECT is_admin FROM users WHERE id = ?",
-					[payload.sub],
-				);
-				isAdmin = result.results[0]?.is_admin === 1;
-			} catch {
-				/* Surface as isAdmin=false; the auth check itself succeeded. */
-			}
-		}
-		res.json({ needsSetup: !(await hasAnyUsers()), authenticated, isAdmin });
+		// Run the admin-lookup and hasAnyUsers in parallel — they have
+		// no data dependency, and CLAUDE.md flags D1 round-trips as the
+		// expensive thing on hot paths. The admin lookup catches its
+		// own error (surfaces as isAdmin=false); hasAnyUsers throwing
+		// is a real boot-state failure and propagates to the 500 handler.
+		const [adminLookup, anyUsers] = await Promise.all([
+			payload
+				? d1Query<{ is_admin: number }>("SELECT is_admin FROM users WHERE id = ?", [
+						payload.sub,
+					]).catch(() => null)
+				: Promise.resolve(null),
+			hasAnyUsers(),
+		]);
+		const isAdmin = adminLookup?.results[0]?.is_admin === 1;
+		res.json({ needsSetup: !anyUsers, authenticated, isAdmin });
 	});
 
 	router.post("/auth/register", registerIp, async (req: Request, res: Response) => {
