@@ -1137,7 +1137,11 @@ export class DockerManager {
 	 * instead, so the value stored equals the value accepted.
 	 */
 	async createTab(sessionId: string, label?: string): Promise<Tab> {
-		const tabId = `tab-${randomBytes(4).toString("hex")}`;
+		// 64 bits of entropy. 32 bits (the previous size) is unlikely to
+		// collide at realistic per-session tab counts, but if it ever does
+		// the inner `tmux new-session -d -s <tabId>` exits non-zero and
+		// the route surfaces a confusing 500. Bumping costs nothing. See #150.
+		const tabId = `tab-${randomBytes(8).toString("hex")}`;
 		// `label` is pre-validated by the route handler (non-empty,
 		// trimmed, no control chars). No normalisation here — the
 		// round-trip stored == sent invariant depends on it.
