@@ -60,10 +60,8 @@ export function validateJwtSecret(): void {
 				"Replace it in your .env before any non-local use.",
 		);
 	}
-	// Use `||` (not `??`) so an empty-string JWT_SECRET= falls back to
-	// the default, matching the `missing = !raw` classification above.
-	// `??` only triggers on null/undefined and would leave "" captured,
-	// causing the server to sign tokens with an empty-string key in dev.
+	// `||` not `??`: an empty-string env var must fall back to the default,
+	// matching the `missing = !raw` branch above. `??` would capture "".
 	capturedJwtSecret = raw || INSECURE_DEFAULT_JWT_SECRET;
 }
 
@@ -104,32 +102,21 @@ export async function registerUser(
 ): Promise<{ userId: string; token: string }> {
 	const userId = uuidv4();
 
-	// Bootstrap exception: the very first account doesn't need an invite,
-	// since there's nobody to issue one. Every subsequent register must
-	// claim an unused invite_codes row atomically.
-	//
-	// Only call hasAnyUsers() when no inviteCode was provided — the
-	// steady-state register-with-invite path doesn't need to know whether
-	// bootstrap is open, so skipping the round-trip cuts D1 chatter on
-	// the hot path. When the caller did supply a code, they couldn't be
-	// a bootstrap anyway (no codes exist yet), so skipping is also
-	// semantically correct.
+	// Bootstrap: first account ever doesn't need an invite. Skip
+	// hasAnyUsers() when an invite code was supplied — they couldn't be
+	// the bootstrap anyway (no codes exist yet) and the round-trip is
+	// pure D1 chatter on the steady-state hot path.
 	if (!inviteCode) {
 		const isBootstrap = !(await hasAnyUsers());
 		if (!isBootstrap) {
 			throw new InviteRequiredError("Invite code required");
 		}
-		// INSERT … WHERE NOT EXISTS closes the bootstrap TOCTOU window:
-		// hasAnyUsers() and INSERT are separate D1 round-trips, so two
-		// simultaneous first-ever registers could both observe zero users
-		// without this guard. Only one of them gets `meta.changes === 1`.
-		//
-		// Bootstrap is the one path where we hash before validating an
-		// invite — there's nothing to validate, and we need the hash for
-		// the conditional INSERT. The cost is one bcrypt per first-ever
-		// visit, which happens at most once per deployment. Async bcrypt
-		// here (and everywhere below) so the event loop keeps serving
-		// other requests while the hash runs on the libuv threadpool.
+		// INSERT … WHERE NOT EXISTS closes the bootstrap TOCTOU: hasAnyUsers
+		// and INSERT are separate D1 round-trips, so two simultaneous
+		// first-ever registers could both observe zero users; only one
+		// gets `meta.changes === 1`. Hashing before this INSERT (the
+		// only path where we hash unconditionally — every other path
+		// validates an invite first) is required by the conditional shape.
 		const bootstrapHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
 		const insert = await d1Query(
 			"INSERT INTO users (id, username, password_hash) " +
@@ -144,19 +131,16 @@ export async function registerUser(
 		// the user can retry once they've been given a code.
 		throw new InviteRequiredError("Invite code required");
 	}
-	// Atomic claim: the WHERE used_at IS NULL clause prevents two concurrent
-	// registers from redeeming the same code. The race loser sees changes
-	// === 0 and is rejected. The claim happens BEFORE any check on the
-	// username so an unauthenticated caller without a valid invite always
-	// sees 403 — never a 409 that would let them probe for existing
-	// usernames. The expires_at filter rejects stale codes the same way.
-	// If the user INSERT below fails (UNIQUE collision), we best-effort
-	// release the claim so the invite isn't burned by a register that
-	// never produced an account.
+	// Atomic claim: WHERE used_at IS NULL serialises concurrent
+	// redemptions; the race loser sees changes === 0. The claim runs
+	// BEFORE any username check so an unauthenticated caller without
+	// a valid invite always sees 403 — never a 409 they could use to
+	// probe for existing usernames. The expires_at filter rejects
+	// stale codes via the same shape.
 	//
-	// Codes are stored hashed at rest (#49), so we hash the caller's
-	// plaintext before the lookup. The hash is also what's logged on a
-	// release-failure (see catch arm below).
+	// Codes are stored hashed at rest (#49), so hash the plaintext
+	// before the lookup. Same hash gets logged on release-failure (see
+	// catch arm below).
 	const inviteHash = createHash("sha256").update(inviteCode).digest("hex");
 	const claim = await d1Query(
 		"UPDATE invite_codes SET used_by = ?, used_at = datetime('now') " +
@@ -168,11 +152,9 @@ export async function registerUser(
 		throw new InviteRequiredError("Invite code is invalid, expired, or already used");
 	}
 
-	// Hash only after the invite is confirmed valid. Even though async
-	// bcrypt runs off the main thread, the libuv threadpool is bounded
-	// (default 4 threads) — accepting un-gated hashes would let an
-	// unauth'd caller exhaust those threads just by spamming bogus codes,
-	// backing up every other async operation in the process.
+	// Hash only after the invite is confirmed valid: the libuv threadpool
+	// is bounded (default 4), so un-gated hashes would let an unauth'd
+	// caller spam bogus codes to starve every other async op in the process.
 	const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
 	try {
@@ -192,37 +174,23 @@ export async function registerUser(
 				[inviteHash, userId],
 			);
 		} catch (releaseErr) {
-			// The release UPDATE failed, so the invite is now permanently
-			// consumed without producing an account. The invitee will see
-			// a 409 (or 500) response and has no way of knowing the code
-			// is burned — they'll have to ask whoever issued it for a new
-			// one.
-			//
-			// Log the SHA-256 of the code, never the raw value (#51).
-			// The plaintext is gone from the DB anyway since #49, but
-			// keep the log shape stable across the no-plaintext-anywhere
-			// invariant: a log aggregator / SIEM that indexes this line
-			// must hold no usable secret. The userId IS in the log so
-			// the operator can scope the recovery DELETE defensively.
-			//
-			// Recovery: `code_hash` is now a column (post-#49), so the
-			// orphan is one equality query away:
+			// Release UPDATE failed — the invite is now permanently
+			// consumed without producing an account. Log the SHA-256
+			// (never plaintext, even though plaintext is already gone
+			// from D1 post-#49) so an operator with log access never
+			// holds a usable secret. Recovery (orphan is exactly one
+			// row, code_hash is a column post-#49):
 			//
 			//   SELECT * FROM invite_codes WHERE code_hash = '<hash>';
-			//
-			// To clear the orphan and free the row for re-mint:
-			//
 			//   DELETE FROM invite_codes
-			//   WHERE code_hash = '<hash>' AND used_by = '<userId>';
+			//     WHERE code_hash = '<hash>' AND used_by = '<userId>';
 			logger.error(
 				`[auth] CRITICAL: invite release failed — code hash ${inviteHash} claimed by user ${userId} is permanently consumed without an account. ` +
 					`Insert error: ${(err as Error).message}. Release error: ${(releaseErr as Error).message}`,
 			);
 		}
-		// SQLite UNIQUE-constraint violation → username already taken.
-		// D1 surfaces the SQLite error message in the d1Query throw, so
-		// we sniff for it rather than introducing a typed-error layer
-		// around the whole D1 client.
+		// SQLite UNIQUE-constraint → username taken. Sniffing the message
+		// avoids a typed-error layer around the D1 client.
 		if (/UNIQUE constraint failed: users\.username/i.test((err as Error).message)) {
 			throw new UsernameTakenError();
 		}
@@ -234,27 +202,20 @@ export async function registerUser(
 
 // ── Invites ────────────────────────────────────────────────────────────────
 
-// Caps the number of *outstanding* (unused) invites a single account can mint.
-// Bounds the blast radius if an account is compromised: even with a stolen
-// JWT the attacker can issue at most this many fresh invites before the cap
-// trips. Used codes don't count — revoking or seeing a redemption frees a
-// slot. Tune up if a legitimate workflow needs more concurrent invites.
+// Caps *outstanding* (unused) invites per account — bounds blast radius
+// from a stolen JWT. Used / expired codes don't count.
 const MAX_UNUSED_INVITES_PER_USER = 20;
 
-// How long an unredeemed invite stays valid. 30 days bounds the window in
-// which a stolen JWT's pre-minted codes remain useful. Override via
-// INVITE_EXPIRY_DAYS env var (decimal days). A 1-minute floor is enforced —
-// any lower value would let an authenticated user mint unbounded codes by
-// burst-cycling: at very short TTLs, 20 codes drain from the quota count in
-// seconds and another 20 can be minted, repeating without bound. 1 minute
-// caps the steady-state rate at 20/min/user.
+// 30-day default for unredeemed-invite TTL, overridable via env.
+// 1-minute floor: any lower TTL lets an authenticated user burst-cycle
+// the quota indefinitely (20 codes drain from the count in seconds → mint
+// another 20, repeat). The floor caps steady-state at 20/min/user.
 const INVITE_EXPIRY_MIN_DAYS = 1 / 1440; // 1 minute
 const INVITE_EXPIRY_DAYS = ((): number => {
 	const raw = process.env.INVITE_EXPIRY_DAYS;
-	// Treat blank ("" or whitespace-only) the same as unset. Without this
-	// Number("") === 0 would slip past the finite/non-negative check and
-	// land at the 1-minute floor — an operator who blanks the variable in
-	// a secrets manager would silently get near-zero TTL.
+	// Blank ("" / whitespace) → unset. Without this, Number("") === 0
+	// would slip past the finite/negative check and land at the 1-minute
+	// floor; a blanked secret-manager value would silently set near-zero TTL.
 	if (raw === undefined || raw.trim() === "") return 30;
 	const n = Number(raw);
 	if (!Number.isFinite(n) || n < 0) return 30;
@@ -294,37 +255,22 @@ export interface MintedInvite extends Invite {
 const INVITE_PREFIX_LEN = 4;
 
 export async function createInvite(creatorUserId: string): Promise<MintedInvite> {
-	// 16 hex chars = 64 bits of entropy — plenty for a single-use,
-	// typically short-lived invite code, and short enough to paste.
-	//
-	// Stored hashed at rest (#49): the plaintext is returned exactly
-	// once, then dropped — a D1 leak no longer hands the attacker a
-	// usable code. The 4-char prefix is kept in clear so the minter
-	// can recognise their own codes in the list ("ab12…" — yes, that's
-	// the one I sent to bob); leaks 16 of the 64 bits, leaving 48 bits
-	// (~280 trillion) of secret.
+	// 16 hex chars = 64 bits of entropy. Hashed at rest (#49); the
+	// 4-char prefix kept in clear leaks 16 bits but lets the minter
+	// recognise their own codes in the list (48 bits of secret remain).
 	const code = randomBytes(8).toString("hex");
 	const codeHash = createHash("sha256").update(code).digest("hex");
 	const codePrefix = code.slice(0, INVITE_PREFIX_LEN);
-	// Pass created_at + expires_at explicitly so we can return them
-	// without a follow-up SELECT that could orphan a valid invite row on
-	// read failure. Format matches D1's `datetime('now')` output (UTC,
-	// no fractional seconds) so existing rows and new ones sort/compare
-	// consistently.
+	// Compute timestamps client-side so we can return them without a
+	// follow-up SELECT (which could orphan a valid row on read failure).
 	const now = new Date();
 	const createdAt = formatD1Datetime(now);
 	const expiresAt = formatD1Datetime(new Date(now.getTime() + INVITE_EXPIRY_DAYS * 86400_000));
-	// Atomic quota check: collapse the count + insert into one statement
-	// so two concurrent POST /invites requests can't both observe count
-	// < MAX and both insert. The WHERE clause is evaluated as part of the
-	// INSERT, so SQLite serialises the read+write. Same changes-based
-	// pattern as the bootstrap and invite-claim paths above.
-	//
-	// Expired codes are excluded from the count: the cap exists to bound
-	// *concurrently redeemable* invites (blast radius), and an expired
-	// code is no more redeemable than a used one. Without this filter, a
-	// forgetful user silently hits the cap 30 days after their last mint
-	// and an attacker could just wait out the expiry instead of revoking.
+	// Atomic count + insert: two concurrent POST /invites can't both see
+	// count < MAX and both insert. Expired codes are excluded from the
+	// count — cap is on *concurrently redeemable* invites; an expired
+	// row is as harmless as a used one and an attacker could otherwise
+	// wait out the expiry instead of revoking.
 	const insert = await d1Query(
 		"INSERT INTO invite_codes (code_hash, code_prefix, created_by, created_at, expires_at) " +
 			"SELECT ?, ?, ?, ?, ? WHERE (" +
@@ -348,10 +294,10 @@ export async function createInvite(creatorUserId: string): Promise<MintedInvite>
 	return { code, codeHash, codePrefix, createdAt, usedAt: null, expiresAt };
 }
 
-// LIMIT bounds the response size so historical used/expired rows can't
-// silently grow the payload over time. 100 is 5x the active quota — enough
-// headroom that a user always sees their full active set plus a long tail
-// of recent history. The UI doesn't paginate.
+// 5× the active-quota of 20: enough room for a long tail of expired/used
+// history. UI doesn't paginate; renderInvites in main.ts surfaces a
+// "older invites not shown" footer when the list arrives at this cap
+// (#54, landed in PR #142) so the truncation isn't silent.
 const INVITE_LIST_LIMIT = 100;
 
 export async function listInvites(creatorUserId: string): Promise<Invite[]> {
@@ -487,13 +433,8 @@ export async function loginUser(
 
 function signToken(userId: string, username: string): string {
 	const payload: JwtPayload = { sub: userId, username };
-	// `expiresIn` in jsonwebtoken is typed as `number | StringValue`,
-	// where StringValue is a template-literal type from the `ms`
-	// package (e.g. "7d", "1h"). JWT_EXPIRES_IN comes from process.env
-	// as a plain string, so we cast through the library's own option
-	// type rather than `any` — keeps the check narrow to this one
-	// field and doesn't opt the whole sign-options shape out of
-	// type-checking.
+	// Cast narrows to the library's own option-field type instead of `any`
+	// to handle the env-string vs `ms`-template-literal mismatch.
 	const options: jwt.SignOptions = { expiresIn: JWT_EXPIRES_IN as jwt.SignOptions["expiresIn"] };
 	return jwt.sign(payload, jwtSecret(), options);
 }
