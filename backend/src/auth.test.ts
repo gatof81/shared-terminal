@@ -6,6 +6,7 @@ import {
 	AUTH_COOKIE_NAME,
 	extractTokenFromCookieHeader,
 	isAllowedWsOrigin,
+	originMatches,
 	parseCorsOrigins,
 	requireAuth,
 	validateJwtSecret,
@@ -179,6 +180,148 @@ describe("isAllowedWsOrigin", () => {
 
 	it("rejects a non-allowlisted origin with no wildcard present", () => {
 		expect(isAllowedWsOrigin("https://evil.example.com", allowlist, "production")).toBe(false);
+	});
+
+	// ── Glob entries (single-DNS-label `*`) ───────────────────────────
+	// Useful for Cloudflare Pages preview URLs where each push lands on
+	// a fresh subdomain — listing `https://*.<project>.pages.dev` once
+	// covers them all without shipping a bypass for arbitrary origins.
+	describe("glob entries", () => {
+		const globAllow = ["https://*.shared-terminal.pages.dev"];
+
+		it("matches a single-label substitution", () => {
+			expect(
+				isAllowedWsOrigin("https://abc123.shared-terminal.pages.dev", globAllow, "production"),
+			).toBe(true);
+			expect(
+				isAllowedWsOrigin("https://feat-foo.shared-terminal.pages.dev", globAllow, "production"),
+			).toBe(true);
+		});
+
+		it("rejects an origin with two labels where the glob expects one", () => {
+			// `*` is `[^.]+` — no dots — so a multi-label segment doesn't
+			// match. Closes the `attacker.shared-terminal.pages.dev.evil.com`
+			// suffix-bypass class.
+			expect(
+				isAllowedWsOrigin("https://a.b.shared-terminal.pages.dev", globAllow, "production"),
+			).toBe(false);
+		});
+
+		it("rejects an origin that prepends/appends extra to the glob shape", () => {
+			expect(
+				isAllowedWsOrigin(
+					"https://abc.shared-terminal.pages.dev.evil.com",
+					globAllow,
+					"production",
+				),
+			).toBe(false);
+			expect(
+				isAllowedWsOrigin(
+					"https://evil.https://abc.shared-terminal.pages.dev",
+					globAllow,
+					"production",
+				),
+			).toBe(false);
+		});
+
+		it("rejects a same-host origin on the wrong scheme", () => {
+			expect(
+				isAllowedWsOrigin("http://abc.shared-terminal.pages.dev", globAllow, "production"),
+			).toBe(false);
+		});
+
+		it("doesn't treat a literal-dot in the glob as a regex wildcard", () => {
+			// The pattern `https://*.shared-terminal.pages.dev` must NOT
+			// match `https://abc.shared-terminalApages.dev` — escaping
+			// the dots in the entry is load-bearing.
+			expect(
+				isAllowedWsOrigin("https://abc.shared-terminalXpages.dev", globAllow, "production"),
+			).toBe(false);
+		});
+
+		it("mixed allowlist: exact + glob both work, neither shadows the other", () => {
+			const mixed = ["https://prod.example.com", "https://*.staging.example.com"];
+			expect(isAllowedWsOrigin("https://prod.example.com", mixed, "production")).toBe(true);
+			expect(isAllowedWsOrigin("https://api.staging.example.com", mixed, "production")).toBe(true);
+			expect(isAllowedWsOrigin("https://other.example.com", mixed, "production")).toBe(false);
+		});
+
+		it("a glob entry does NOT make bare `*` semantics fire", () => {
+			// `https://*.example.com` is a glob, not the wildcard token.
+			// The prod-deny path on bare `*` should not engage from a glob.
+			expect(
+				isAllowedWsOrigin("https://attacker.example.org", ["https://*.example.com"], "production"),
+			).toBe(false);
+		});
+	});
+});
+
+// Direct contract tests for `originMatches`. The `isAllowedWsOrigin` block
+// already exercises the helper indirectly, but those tests bind the
+// behaviour to the WS branch's specific shape — a future refactor of the
+// CORS middleware in index.ts could disconnect it from `originMatches`
+// without breaking any of those WS-flavoured assertions. Pinning the
+// helper as its own thing keeps the contract stable across both callers.
+describe("originMatches", () => {
+	it("returns false for an empty allowlist", () => {
+		expect(originMatches("https://anything.example", [])).toBe(false);
+	});
+
+	it("matches an exact entry", () => {
+		expect(originMatches("https://app.example.com", ["https://app.example.com"])).toBe(true);
+	});
+
+	it("rejects a near-miss exact entry (case, trailing slash)", () => {
+		expect(originMatches("https://APP.example.com", ["https://app.example.com"])).toBe(false);
+		expect(originMatches("https://app.example.com/", ["https://app.example.com"])).toBe(false);
+	});
+
+	it("matches a single-DNS-label glob", () => {
+		expect(originMatches("https://abc.example.com", ["https://*.example.com"])).toBe(true);
+	});
+
+	it("rejects a multi-label substitution", () => {
+		// Glob `*` is `[^.]+` — refuses dots inside the substitution,
+		// so `a.b.example.com` doesn't match `*.example.com`.
+		expect(originMatches("https://a.b.example.com", ["https://*.example.com"])).toBe(false);
+	});
+
+	it("rejects a suffix-bypass shape", () => {
+		// `https://app.example.com.evil.com` must not match
+		// `https://*.example.com` — the trailing anchor (`$`) blocks
+		// any characters past the pattern.
+		expect(originMatches("https://app.example.com.evil.com", ["https://*.example.com"])).toBe(
+			false,
+		);
+	});
+
+	it("treats the literal `.` in the pattern as a literal dot, not regex any-char", () => {
+		// The escape pass turns `.` into `\.`. A character that's not
+		// a dot in the matching position must NOT match.
+		expect(originMatches("https://abc.exampleAcom", ["https://*.example.com"])).toBe(false);
+	});
+
+	it('skips bare `"*"` entries (callers handle that token separately)', () => {
+		// CORS middleware downgrades bare `*` to no-credentials wildcard;
+		// `isAllowedWsOrigin` denies in production. If `originMatches`
+		// treated `*` as match-everything, both policies would silently
+		// bypass.
+		expect(originMatches("https://anything.example", ["*"])).toBe(false);
+	});
+
+	it("works in a mixed allowlist of exact + glob entries", () => {
+		const mixed = ["https://prod.example.com", "https://*.staging.example.com"];
+		expect(originMatches("https://prod.example.com", mixed)).toBe(true);
+		expect(originMatches("https://api.staging.example.com", mixed)).toBe(true);
+		expect(originMatches("https://other.example.com", mixed)).toBe(false);
+	});
+
+	it("supports multiple `*` substitutions in one entry", () => {
+		// Not the common case, but the regex compilation has no special
+		// limit on `*` count — pin the behaviour so it can't silently
+		// regress.
+		expect(originMatches("https://a.b.example.com", ["https://*.*.example.com"])).toBe(true);
+		expect(originMatches("https://a.b.c.example.com", ["https://*.*.example.com"])).toBe(false);
 	});
 });
 
