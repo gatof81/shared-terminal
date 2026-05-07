@@ -425,7 +425,7 @@ export function openTerminalSession(opts: {
 		// long downward swipe followed by a short upward flick would have
 		// to "spend" the accumulated downward residue before any upward
 		// scroll registered, which feels broken at the input boundary.
-		if ((deltaPx < 0) !== (wheelResidue < 0)) wheelResidue = 0;
+		if (deltaPx < 0 !== wheelResidue < 0) wheelResidue = 0;
 		wheelResidue += deltaPx;
 		const lines = Math.trunc(wheelResidue / cellH);
 		if (lines !== 0) {
