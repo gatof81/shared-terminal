@@ -795,6 +795,12 @@ function openTab(tabId: string) {
 			pane.remove();
 			if (prevActiveTabId) {
 				currentTerminals.get(prevActiveTabId)?.pane.classList.add("active");
+			} else {
+				// We just flipped terminalContainer to display:block to host
+				// the new pane; with no prev pane to swap back to and our
+				// pane removed, leaving display:block would render an empty
+				// dark box. Revert.
+				terminalContainer.style.display = "none";
 			}
 			throw err;
 		}
