@@ -74,6 +74,18 @@ export interface RateLimitConfig {
 		ipMax: number;
 		ipWindowMs: number;
 	};
+	// Caps how often a single IP can hit GET /auth/status. The route
+	// is public (the frontend uses it to decide between login and app
+	// on first load, since the auth cookie is httpOnly), but every
+	// call runs hasAnyUsers() and — if a cookie is present — a second
+	// users SELECT for the admin lookup. Unbounded an attacker can
+	// spam D1 reads from a single IP. Sized permissively so legit UI
+	// polling never trips, but bounded enough that abuse is capped.
+	// See #148.
+	authStatus: {
+		ipMax: number;
+		ipWindowMs: number;
+	};
 }
 
 // Defaults match issue #10: login 10/15min, register 5/1h, per-username 10/15min.
@@ -117,6 +129,20 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 		ipMax: 30,
 		ipWindowMs: 15 * 60 * 1000,
 	},
+	// 60/min per IP for /auth/status. Public-by-design endpoint (it
+	// drives the login-vs-app routing decision when JS can't read the
+	// httpOnly cookie), but it runs two D1 round-trips per call —
+	// hasAnyUsers() always plus a users SELECT for the admin lookup if
+	// a cookie is present. Without a limiter an attacker IP can spam
+	// it indefinitely to amplify D1 cost / push the account toward
+	// Cloudflare's per-database query throttle. 60/min ≈ 1/sec
+	// sustained — well above any realistic UI cadence (the frontend
+	// hits this once on first load), well below sustained abuse rates.
+	// See #148.
+	authStatus: {
+		ipMax: 60,
+		ipWindowMs: 60 * 1000,
+	},
 };
 
 // ── IP-based limiters (express-rate-limit) ─────────────────────────────────
@@ -129,6 +155,7 @@ export interface AuthRateLimiters {
 	invitesRevokeIp: RateLimitRequestHandler;
 	fileUploadIp: RateLimitRequestHandler;
 	logoutIp: RateLimitRequestHandler;
+	authStatusIp: RateLimitRequestHandler;
 }
 
 export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
@@ -194,6 +221,13 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		legacyHeaders: false,
 		message: { error: "Too many logout attempts from this IP, try again later", scope: "ip" },
 	});
+	const authStatusIp = rateLimit({
+		windowMs: cfg.authStatus.ipWindowMs,
+		limit: cfg.authStatus.ipMax,
+		standardHeaders: "draft-7",
+		legacyHeaders: false,
+		message: { error: "Too many auth-status requests from this IP, try again later", scope: "ip" },
+	});
 	return {
 		loginIp,
 		registerIp,
@@ -202,6 +236,7 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		invitesRevokeIp,
 		fileUploadIp,
 		logoutIp,
+		authStatusIp,
 	};
 }
 

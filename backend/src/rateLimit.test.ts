@@ -423,16 +423,18 @@ describe("auth route rate limiting", () => {
 		invitesRevoke?: { ipMax: number; ipWindowMs: number };
 		fileUpload?: { ipMax: number; ipWindowMs: number };
 		logout?: { ipMax: number; ipWindowMs: number };
+		authStatus?: { ipMax: number; ipWindowMs: number };
 	}): Promise<void> {
-		// Invite + upload + logout limiters were added later; default each
-		// to a permissive setting so tests that only exercise login/register
-		// don't trip them.
+		// Invite + upload + logout + authStatus limiters were added later;
+		// default each to a permissive setting so tests that only exercise
+		// login/register don't trip them.
 		const fullCfg = {
 			invitesCreate: { ipMax: 1000, ipWindowMs: 60_000 },
 			invitesList: { ipMax: 1000, ipWindowMs: 60_000 },
 			invitesRevoke: { ipMax: 1000, ipWindowMs: 60_000 },
 			fileUpload: { ipMax: 1000, ipWindowMs: 60_000 },
 			logout: { ipMax: 1000, ipWindowMs: 60_000 },
+			authStatus: { ipMax: 1000, ipWindowMs: 60_000 },
 			...cfg,
 		};
 		const router = buildRouter(fakeSessions, fakeDocker, fullCfg);
@@ -734,5 +736,30 @@ describe("auth route rate limiting", () => {
 
 		expect(r.status).toBe(403);
 		expect(await r.json()).toMatchObject({ error: "Admin privileges required" });
+	});
+
+	// Regression test for #148. /auth/status is public-by-design (the
+	// frontend uses it on first load to decide between login and app),
+	// but every call hits D1 — without an IP limiter an attacker can
+	// amplify D1 cost / push the account toward Cloudflare's per-database
+	// query throttle.
+	it("GET /auth/status returns 429 after authStatus.ipMax from one IP", async () => {
+		await spinUp({
+			login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
+			register: { ipMax: 1000, ipWindowMs: 60_000 },
+			authStatus: { ipMax: 3, ipWindowMs: 60_000 },
+		});
+
+		const r1 = await fetch(`${baseUrl}/api/auth/status`);
+		const r2 = await fetch(`${baseUrl}/api/auth/status`);
+		const r3 = await fetch(`${baseUrl}/api/auth/status`);
+		const r4 = await fetch(`${baseUrl}/api/auth/status`);
+
+		expect(r1.status).toBe(200);
+		expect(r2.status).toBe(200);
+		expect(r3.status).toBe(200);
+		expect(r4.status).toBe(429);
+		expect(r4.headers.get("retry-after")).not.toBeNull();
+		expect(await r4.json()).toMatchObject({ scope: "ip" });
 	});
 });

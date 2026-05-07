@@ -59,6 +59,7 @@ export function buildRouter(
 		invitesRevokeIp,
 		fileUploadIp,
 		logoutIp,
+		authStatusIp,
 	} = createAuthRateLimiters(rateLimitConfig);
 	const usernameLimiter = new UsernameRateLimiter(
 		rateLimitConfig.login.usernameMax,
@@ -68,7 +69,15 @@ export function buildRouter(
 	// land in the limiter map or D1.
 	const USERNAME_MAX_LEN = 64;
 
-	router.get("/auth/status", async (req: Request, res: Response) => {
+	// Public-by-design (the frontend uses it to decide between login and
+	// app on first load, since the auth cookie is httpOnly), but it runs
+	// hasAnyUsers() on every call plus a users SELECT for the admin
+	// lookup if a cookie is present. Without authStatusIp, an attacker
+	// IP could spam this to amplify D1 cost or push the account toward
+	// Cloudflare's per-database query throttle. Sized permissively at
+	// 60/min so legit UI cadence (one call on page load, occasional
+	// re-checks) never trips it. See #148.
+	router.get("/auth/status", authStatusIp, async (req: Request, res: Response) => {
 		// `authenticated` lets the frontend decide between "show login" and
 		// "show app" on first load, since the cookie is httpOnly and JS
 		// can't observe it directly. Read from req.cookies (populated by
