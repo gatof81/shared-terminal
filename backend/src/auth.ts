@@ -312,25 +312,29 @@ export async function createInvite(creatorUserId: string): Promise<MintedInvite>
 // (#54, landed in PR #142) so the truncation isn't silent.
 const INVITE_LIST_LIMIT = 100;
 
-export async function listInvites(creatorUserId: string): Promise<Invite[]> {
+// Admin-scoped (#50): all GET /invites, POST /invites, DELETE /invites/:hash
+// routes are gated by `requireAdmin`, so list and revoke see/affect every
+// row in the table — not just the admin's own. The `created_by` column
+// still records who minted what (for audit + the per-user mint quota in
+// createInvite), but it's no longer a filter on read or delete. Without
+// this scope, codes minted before #50 by then-non-admin accounts would
+// be invisible to admins and unrevocable until expiry.
+export async function listInvites(): Promise<Invite[]> {
 	const result = await d1Query<InviteRow>(
 		"SELECT code_hash, code_prefix, created_at, used_at, expires_at FROM invite_codes " +
-			"WHERE created_by = ? ORDER BY created_at DESC LIMIT ?",
-		[creatorUserId, INVITE_LIST_LIMIT],
+			"ORDER BY created_at DESC LIMIT ?",
+		[INVITE_LIST_LIMIT],
 	);
 	return result.results.map(rowToInvite);
 }
 
-// Revoke an unused invite by its hash (the only public id post-#49 — the
-// plaintext is gone). Returns true if a row was removed, false if the
-// invite was missing, already used, or owned by a different user. The wire
-// surface is intentionally vague so a caller can't enumerate codes belonging
-// to other users.
-export async function revokeInvite(creatorUserId: string, codeHash: string): Promise<boolean> {
-	const result = await d1Query(
-		"DELETE FROM invite_codes WHERE code_hash = ? AND created_by = ? AND used_at IS NULL",
-		[codeHash, creatorUserId],
-	);
+// Revoke an unused invite by its hash. Returns true if a row was removed,
+// false if the invite was missing or already used. Admin-scoped (no
+// created_by filter) — see listInvites.
+export async function revokeInvite(codeHash: string): Promise<boolean> {
+	const result = await d1Query("DELETE FROM invite_codes WHERE code_hash = ? AND used_at IS NULL", [
+		codeHash,
+	]);
 	return result.meta.changes === 1;
 }
 

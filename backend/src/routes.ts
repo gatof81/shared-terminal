@@ -264,19 +264,22 @@ export function buildRouter(
 	router.use("/sessions", requireAuth);
 
 	// ── Invite routes ───────────────────────────────────────────────────────
-	// POST and DELETE are gated by `requireAdmin` (#50); GET stays
-	// auth-only so non-admins see their (always-empty) list and the
-	// missing UI buttons tell them they can't mint, instead of a
-	// confusing 403 on read.
+	// All three routes are gated by `requireAdmin` (#50). Non-admins
+	// don't need invite access at all — they can't mint, and pre-#50
+	// codes minted by then-non-admin accounts must remain manageable
+	// somewhere; admin-scoped list/revoke is the cleaner answer than
+	// per-user filtering that would orphan those rows.
+	//
+	// requireAuth is provided by `router.use("/invites", requireAuth)`
+	// above — requireAdmin reads `req.userId` populated there.
 
 	// GET is rate-limited symmetrically with POST/DELETE (issue #47):
 	// a much higher cap because reads are cheap, but the same per-IP
 	// shape so the asymmetry doesn't read as accidental and a runaway
 	// client polling in a loop can't hammer D1 unbounded.
-	router.get("/invites", invitesListIp, async (req: Request, res: Response) => {
-		const { userId } = req as AuthedRequest;
+	router.get("/invites", invitesListIp, requireAdmin, async (_req: Request, res: Response) => {
 		try {
-			const invites = await listInvites(userId);
+			const invites = await listInvites();
 			res.json(invites);
 		} catch (err) {
 			logger.error(`[invites] list failed: ${(err as Error).message}`);
@@ -284,8 +287,6 @@ export function buildRouter(
 		}
 	});
 
-	// requireAuth provided by `router.use("/invites", requireAuth)` above —
-	// requireAdmin reads `req.userId` populated there.
 	router.post("/invites", invitesCreateIp, requireAdmin, async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
 		try {
@@ -301,14 +302,11 @@ export function buildRouter(
 		}
 	});
 
-	// requireAuth provided by `router.use("/invites", requireAuth)` above —
-	// requireAdmin reads `req.userId` populated there.
 	router.delete(
 		"/invites/:hash",
 		invitesRevokeIp,
 		requireAdmin,
 		async (req: Request, res: Response) => {
-			const { userId } = req as AuthedRequest;
 			const { hash } = req.params;
 			// SHA-256 hex is exactly 64 lowercase hex chars. Reject anything
 			// else before the D1 round-trip — a caller probing arbitrary
@@ -318,11 +316,10 @@ export function buildRouter(
 				return;
 			}
 			try {
-				const removed = await revokeInvite(userId, hash);
+				const removed = await revokeInvite(hash);
 				if (!removed) {
-					// Vague on purpose: don't distinguish missing / already-used /
-					// owned-by-someone-else, since that would let a caller probe for
-					// codes outside their ownership.
+					// Vague on purpose: missing vs. already-used should not be
+					// distinguishable from the wire (no enumeration vector).
 					res.status(404).json({ error: "Invite not found or already used" });
 					return;
 				}
