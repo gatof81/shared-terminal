@@ -326,6 +326,12 @@ function handleLogout(toastMessage?: string): void {
 	activeSessionId = null;
 	sessions = [];
 	showAuth();
+	// Symmetry with showApp(): keep the admin-button visibility in
+	// lockstep with the api-layer's _isAdmin flag, which logout() and
+	// the 401 path both reset to false. No user-visible effect today
+	// (showAuth() hides appView entirely), but a future code path that
+	// reads admin visibility post-logout sees the right state.
+	applyAdminVisibility();
 	if (toastMessage) showToast(toastMessage, true);
 }
 

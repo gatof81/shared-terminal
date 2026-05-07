@@ -214,8 +214,12 @@ export async function registerUser(
 
 // ── Invites ────────────────────────────────────────────────────────────────
 
-// Caps *outstanding* (unused) invites per account — bounds blast radius
-// from a stolen JWT. Used / expired codes don't count.
+// Caps *outstanding* (unused) invites per minting account — bounds
+// blast radius from a stolen JWT. Used / expired codes don't count.
+// Post-#50 invite minting is admin-only, so in typical single-admin
+// deploys the cap effectively applies to one account; the SQL
+// (`WHERE created_by = ?`) keeps the per-account framing in case of
+// multi-admin deployments.
 const MAX_UNUSED_INVITES_PER_USER = 20;
 
 // 30-day default for unredeemed-invite TTL, overridable via env.
