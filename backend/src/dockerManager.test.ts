@@ -622,7 +622,8 @@ describe("DockerManager tabs", () => {
 
 		const tab = await dm.createTab("s1", "git");
 
-		expect(tab.tabId).toMatch(/^tab-[0-9a-f]{8}$/);
+		// 8 random bytes → 16 hex chars (#150).
+		expect(tab.tabId).toMatch(/^tab-[0-9a-f]{16}$/);
 		expect(tab.label).toBe("git");
 		expect(tab.createdAt).toBeGreaterThan(0);
 
