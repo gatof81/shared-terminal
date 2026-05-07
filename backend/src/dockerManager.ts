@@ -900,6 +900,11 @@ export class DockerManager {
 			// in sync with tmux from the first character.
 			const [snap, cur] = await Promise.all([
 				this.execOneShot(sessionId, ["tmux", "capture-pane", "-t", tabId, "-p", "-e"]),
+				// Wrap in .catch so a display-message exception (e.g. container
+				// dies between the two execs) degrades to "no cursor escape"
+				// rather than rejecting the whole Promise.all and dropping a
+				// perfectly valid capture-pane snapshot. Same shape of fallback
+				// as exitCode !== 0 below.
 				this.execOneShot(sessionId, [
 					"tmux",
 					"display-message",
@@ -907,7 +912,7 @@ export class DockerManager {
 					tabId,
 					"-p",
 					"#{cursor_y};#{cursor_x}",
-				]),
+				]).catch(() => ({ stdout: "", exitCode: 1 })),
 			]);
 			// A non-zero exit on capture-pane is the common "benign race"
 			// path: when spawnSharedExec's `new-session -A` has just
