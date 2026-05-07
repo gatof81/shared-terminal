@@ -550,6 +550,27 @@ async function openSession(sessionId: string) {
 	// covering the top of the viewport.
 	if (isMobile()) setChromeOpen(false);
 
+	// Render the tab bar BEFORE calling openTab — disposeAllCurrentTerminals()
+	// at the top of openSession set #terminal-tabs to display:none, and
+	// openTab's own renderTabBar() runs at its tail (after the new pane has
+	// been mounted and openTerminalSession's synchronous fitAddon.fit() has
+	// already read pane dimensions). Without this pre-render the first auto-
+	// opened tab fits at the too-tall geometry of a tab-bar-less layout, the
+	// WS opens at that wrong cols/rows (geometry is baked into the upgrade
+	// URL — see terminal.ts buildWsUrl), and the backend's attach() / tmux
+	// resize-window runs at the wrong size. ResizeObserver corrects xterm
+	// locally on the next frame but the backend resize is debounced 100 ms,
+	// so the snapshot replay and the first ~100 ms of tmux output land at
+	// the wrong row count — visible as a one-row drift where typed input
+	// renders below where the prompt actually is, only fixable by a
+	// subsequent layout-changing event (sidebar toggle) that bumps tmux
+	// into a full repaint at the correct geometry. Subsequent openTab
+	// calls (chip clicks, +-add) don't hit this because the tabs row is
+	// already laid out by then. openTab's own renderTabBar() at its tail
+	// re-runs to mark the active chip — this pre-render just ensures the
+	// height is settled.
+	renderTabBar();
+
 	// openTab can throw synchronously (openTerminalSession init failure) —
 	// openSession is called with `void`, so an unhandled throw here would
 	// become an unhandled rejection with no toast and the UI left mid-switch.
