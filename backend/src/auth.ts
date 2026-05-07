@@ -730,7 +730,8 @@ export function parseCorsOrigins(raw: string | undefined): string[] {
  *      public endpoints without credentials" — mostly harmless because
  *      browsers refuse to send credentials to `*` (post-#18 the CORS
  *      middleware here also gates `Access-Control-Allow-Credentials` on
- *      an exact-origin match). WS has no such browser-side guard: the
+ *      an allowlist match — exact or single-label glob, see
+ *      `originMatches`). WS has no such browser-side guard: the
  *      browser DOES send cookies (including `st_token`) on a WS upgrade
  *      to any origin when SameSite permits it, and SameSite=None is the
  *      production setting for the cross-site Pages → Tunnel deploy.

@@ -115,7 +115,8 @@ app.use((_req, res, next) => {
 	res.setHeader("Vary", "Origin");
 	const origin = _req.headers.origin ?? "";
 	// `Access-Control-Allow-Credentials: true` is only safe when the
-	// caller's origin is in our exact-match allowlist. Cookie auth means
+	// caller's origin is in our allowlist (exact or single-label glob —
+	// see originMatches). Cookie auth means
 	// the browser auto-attaches the cookie on credentialed requests —
 	// echoing `Allow-Credentials` for an arbitrary origin would let any
 	// page on the internet make authenticated calls and read the
