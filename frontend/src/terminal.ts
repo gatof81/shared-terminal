@@ -434,64 +434,61 @@ export function openTerminalSession(opts: {
 	container.addEventListener("touchcancel", onTouchCancel, { passive: true });
 
 	// ── Wheel scroll ────────────────────────────────────────────────────────
-	// Desktop wheel/trackpad routing matches the touch handler's buffer-type
-	// split, with a cell-pixel residue accumulator so trackpad two-finger
-	// swipes don't drop sub-cell deltas. With `set -g mouse on`
-	// (session-image/tmux.conf) xterm's default would forward wheel events
-	// as SGR mouse-tracking sequences; tmux's `WheelUpPane`/`WheelDownPane`
-	// bindings then discard or re-emit them depending on `pane_in_mode` /
-	// `mouse_any_flag` / `alternate_on`. We intercept ahead of that:
+	// Desktop wheel/trackpad routing pairs with the WheelUpPane/WheelDownPane
+	// bindings in `session-image/tmux.conf`. xterm's default with
+	// `set -g mouse on` is to forward wheel events as SGR mouse-tracking; we
+	// intercept ahead of that:
 	//
 	//   - Main buffer (shell): scroll xterm's own scrollback via
 	//     `scrollLines`. `return false` cancels xterm's forward so the SGR
-	//     sequence never leaves the browser (#171).
-	//   - Alt buffer (claude TUI, less, htop, vim, …): synthesise Up/Down
-	//     arrow keys, mirroring `onTouchMove`. Every TUI navigates with
-	//     arrows; relying on mouse-tracking for alt-buffer scroll only
-	//     worked for apps that explicitly handle SGR mouse (vim, htop) —
-	//     for claude / Ink-based TUIs the forwarded event landed on the
-	//     floor and the user couldn't scroll at all. Trade-off: in vim
-	//     this means wheel moves the cursor instead of scrolling the
-	//     viewport; that's the same trade-off the touch path has shipped
-	//     with for months.
+	//     sequence never leaves the browser, and tmux can't discard it
+	//     (#171).
+	//   - Alt buffer (claude TUI, less, vim, htop, …): `return true`. Let
+	//     xterm forward as SGR mouse-tracking and let tmux's WheelUpPane
+	//     binding decide. tmux now routes that into copy-mode for apps
+	//     that don't request mouse (claude / Ink) so the user reaches the
+	//     pane history; vim/htop still get `send-keys -M` because they
+	//     set `mouse_any_flag`. See the binding rationale in tmux.conf.
+	//     Earlier attempts to synthesise arrow keys here (#176) ended up
+	//     navigating the *input* line history (readline-style) for claude
+	//     instead of scrolling the rendered output, so this path was
+	//     reverted to forward-and-let-tmux-handle.
 	//
-	// Line-mode sensitivity: `WheelEvent.deltaMode === 1` (a notched mouse
-	// reporting in lines) typically delivers `deltaY === 1` per notch.
-	// Without a sensitivity multiplier that became one-line-per-notch,
-	// far slower than the OS-typical 3 lines/notch and the convention
-	// xterm's own `scrollSensitivity` config defaults users towards.
-	// Multiplier applies ONLY to line-mode — pixel-mode events (Magic
-	// Mouse, trackpads, modern smooth-scroll mice) already deliver
-	// pixel chunks that divide naturally into multiple lines via
-	// `cellH`, and amplifying those would make a casual flick scroll
-	// hundreds of rows.
-	const WHEEL_LINE_SENSITIVITY = 3;
-	// Cap arrow-key bursts in the alt buffer. Mirrors the touch-handler
-	// cap so a fast wheel flick doesn't synthesise a hundred arrows in
-	// a single frame and queue keypresses past the user's actual gesture.
-	const MAX_ARROWS_PER_EVENT = 20;
+	// Sensitivity: notched mice can deliver either `DOM_DELTA_LINE`
+	// (`deltaY === 1` per notch) or `DOM_DELTA_PIXEL` (`deltaY` close to
+	// `cellH` per notch). Both produced one-line-per-notch with a 1×
+	// multiplier, far slower than the OS-typical ~3 lines/notch. Apply a
+	// shared multiplier to both modes. Trackpad smooth-scroll (many
+	// small `DOM_DELTA_PIXEL` events) is amplified too, but the residue
+	// accumulator and small per-event `deltaY` keep the felt speed
+	// reasonable in practice; tunable up/down here without touching the
+	// rest of the handler.
+	const WHEEL_SENSITIVITY = 3;
 	let wheelResidue = 0;
 	// Known limitation: tmux copy-mode (Ctrl-b [) is *not* the alternate
 	// screen — `pane_in_mode` is tmux-internal state that doesn't propagate
-	// to xterm.buffer.active.type, so this handler still hits the main-buffer
-	// branch in copy-mode and scrolls xterm's own scrollback instead of
-	// driving copy-mode's cursor. The visible result is the scrollback
-	// moves while copy-mode's selection cursor stays frozen. Querying
+	// to `xterm.buffer.active.type`. When the user has manually entered
+	// copy-mode from the main buffer, this handler still scrolls xterm's
+	// own scrollback instead of driving copy-mode's cursor. Querying
 	// `#{pane_in_mode}` from the frontend would need a side-channel we
-	// don't have. Workaround for users in copy-mode: use keyboard
-	// navigation (arrow keys, Page Up/Down) instead of the wheel.
+	// don't have. Workaround for users in main-buffer copy-mode: arrow
+	// keys / Page Up/Down inside copy-mode instead of the wheel.
 	term.attachCustomWheelEventHandler((ev) => {
+		// Alt buffer → forward to xterm's default; tmux's binding takes it
+		// from there. Keep the early return *before* residue accounting so
+		// switching buffers mid-gesture doesn't carry residue across modes.
+		if (term.buffer.active.type === "alternate") return true;
 		const cellH = getCellHeight();
 		let deltaPx: number;
 		switch (ev.deltaMode) {
 			case 1: // DOM_DELTA_LINE
-				deltaPx = ev.deltaY * cellH * WHEEL_LINE_SENSITIVITY;
+				deltaPx = ev.deltaY * cellH * WHEEL_SENSITIVITY;
 				break;
 			case 2: // DOM_DELTA_PAGE
 				deltaPx = ev.deltaY * cellH * term.rows;
 				break;
-			default: // DOM_DELTA_PIXEL — what trackpads and most mice emit
-				deltaPx = ev.deltaY;
+			default: // DOM_DELTA_PIXEL — what trackpads and most modern mice emit
+				deltaPx = ev.deltaY * WHEEL_SENSITIVITY;
 		}
 		// Reset the residue if the user reverses direction — otherwise a
 		// long downward swipe followed by a short upward flick would have
@@ -507,16 +504,7 @@ export function openTerminalSession(opts: {
 		const lines = Math.trunc(wheelResidue / cellH);
 		if (lines === 0) return false;
 		wheelResidue -= lines * cellH;
-		if (term.buffer.active.type === "alternate") {
-			const n = Math.min(Math.abs(lines), MAX_ARROWS_PER_EVENT);
-			// `lines > 0` = scroll down (toward newer content) → Down
-			// arrow `\x1b[B`; negative = up → `\x1b[A`. Same direction
-			// convention as `onTouchMove`'s alt-buffer branch.
-			const key = lines > 0 ? "\x1b[B" : "\x1b[A";
-			send({ type: "input", data: key.repeat(n) });
-		} else {
-			term.scrollLines(lines);
-		}
+		term.scrollLines(lines);
 		return false;
 	});
 
