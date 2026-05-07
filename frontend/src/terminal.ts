@@ -293,8 +293,16 @@ export function openTerminalSession(opts: {
 					if (disposed) return;
 					if (preserve && term.buffer.active.viewportY !== yBefore) {
 						restoring = true;
-						term.scrollToLine(yBefore);
-						restoring = false;
+						try {
+							term.scrollToLine(yBefore);
+						} finally {
+							// finally so a scrollToLine throw can't leave the
+							// flag latched on — it would silence onScroll for
+							// the rest of the session and the user could no
+							// longer "unlock" preservation by scrolling to
+							// the bottom.
+							restoring = false;
+						}
 					}
 				});
 				break;
