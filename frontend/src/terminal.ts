@@ -384,6 +384,71 @@ export function openTerminalSession(opts: {
 	container.addEventListener("touchend", onTouchEnd, { passive: true });
 	container.addEventListener("touchcancel", onTouchCancel, { passive: true });
 
+	// ── Wheel scroll ────────────────────────────────────────────────────────
+	// Desktop wheel/trackpad must scroll xterm's own scrollback in the main
+	// buffer instead of being swallowed by tmux's mouse-tracking. With
+	// `set -g mouse on` (session-image/tmux.conf) xterm's default behaviour
+	// is to forward wheel events as SGR mouse-tracking sequences. tmux's
+	// `WheelUpPane`/`WheelDownPane` bindings discard those when no app
+	// requested mouse and the alt buffer isn't active, so without
+	// intercepting here the wheel is silently dead in the bash main buffer
+	// (#171). The buffer split mirrors onTouchMove above:
+	//   - Main buffer: scroll xterm's own scrollback locally; `return false`
+	//     cancels xterm's default forward so the SGR sequence never goes
+	//     out and tmux never gets a chance to discard it.
+	//   - Alt buffer (vim, less, claude TUI, htop, …): `return true` lets
+	//     xterm forward as before — those apps consume mouse events for
+	//     their own UI (or rely on tmux's `alternate_on` branch in the
+	//     WheelUpPane binding to send-keys -M to them).
+	//
+	// Sub-cell residue: trackpad two-finger swipes deliver many small
+	// `deltaY` values, each <1 cell. Truncating each event in isolation
+	// would silently consume the swipe with no visible scroll. Accumulate
+	// the leftover pixels across events — same trick as the touch handler's
+	// `lastTouchY -= lines * cellH`.
+	let wheelResidue = 0;
+	// Known limitation: tmux copy-mode (Ctrl-b [) is *not* the alternate
+	// screen — `pane_in_mode` is tmux-internal state that doesn't propagate
+	// to xterm.buffer.active.type, so this handler still hits the main-buffer
+	// branch in copy-mode and scrolls xterm's own scrollback instead of
+	// driving copy-mode's cursor. The visible result is the scrollback
+	// moves while copy-mode's selection cursor stays frozen. Querying
+	// `#{pane_in_mode}` from the frontend would need a side-channel we
+	// don't have. Workaround for users in copy-mode: use keyboard
+	// navigation (arrow keys, Page Up/Down) instead of the wheel.
+	term.attachCustomWheelEventHandler((ev) => {
+		if (term.buffer.active.type === "alternate") return true;
+		const cellH = getCellHeight();
+		let deltaPx: number;
+		switch (ev.deltaMode) {
+			case 1: // DOM_DELTA_LINE
+				deltaPx = ev.deltaY * cellH;
+				break;
+			case 2: // DOM_DELTA_PAGE
+				deltaPx = ev.deltaY * cellH * term.rows;
+				break;
+			default: // DOM_DELTA_PIXEL — what trackpads and most mice emit
+				deltaPx = ev.deltaY;
+		}
+		// Reset the residue if the user reverses direction — otherwise a
+		// long downward swipe followed by a short upward flick would have
+		// to "spend" the accumulated downward residue before any upward
+		// scroll registered, which feels broken at the input boundary.
+		// Gate on `deltaPx !== 0` so a horizontal-only wheel event
+		// (`ev.deltaY === 0`, common on trackpads doing diagonal/sideways
+		// gestures) doesn't trip the reset: `0 < 0` is false, which would
+		// always look like "opposite sign" against any upward (negative)
+		// residue and silently discard it mid-gesture.
+		if (deltaPx !== 0 && deltaPx < 0 !== wheelResidue < 0) wheelResidue = 0;
+		wheelResidue += deltaPx;
+		const lines = Math.trunc(wheelResidue / cellH);
+		if (lines !== 0) {
+			wheelResidue -= lines * cellH;
+			term.scrollLines(lines);
+		}
+		return false;
+	});
+
 	// ── Resize ──────────────────────────────────────────────────────────────
 	// ResizeObserver fires continuously during mobile viewport churn (URL
 	// bar show/hide, soft-keyboard open/close, rotation) and desktop
