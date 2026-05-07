@@ -775,8 +775,15 @@ main:not([data-sidebar-ready]) #sidebar {
   padding: 4px 8px 0 8px;
   background: #0d1117;
   border-bottom: 1px solid #30363d;
-  overflow-x: auto;
-  scrollbar-width: thin;
+  /* `overflow-x: clip` (not `auto`/`hidden`) — clip avoids establishing a
+     scroll container, so the previous thin horizontal scrollbar that ate
+     ~6 px from the ~32 px strip height (and visually jittered the chips
+     once it appeared) goes away. Chips that exceed the strip width are
+     simply not painted; reaching them needs a separate affordance
+     (wrap-to-row, fade+arrows, picker) which is intentionally out of
+     scope for this issue. `clip` over `hidden` because we don't want a
+     positioning context here either. */
+  overflow-x: clip;
   flex-shrink: 0;
 }
 .tab-chip {
