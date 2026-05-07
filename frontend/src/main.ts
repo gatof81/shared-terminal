@@ -1098,10 +1098,12 @@ mobileMql.addEventListener("change", () => {
 	setChromeOpen(chromeDefaultOpen());
 });
 
-// Default state: open on desktop, closed on mobile. The HTML+CSS start in
-// the closed state with transitions suppressed via `[data-sidebar-ready]`,
-// so this synchronous flip-then-enable avoids the 0→260px expand animation
-// that would otherwise fire on every desktop page load.
+// Default state: open on desktop, closed on mobile. The HTML+CSS start
+// with the mobile drawer's transform-transition suppressed via
+// `[data-sidebar-ready]`, so the synchronous flip below doesn't slide
+// the drawer in on every page load. (The desktop grid-template-columns
+// transition was removed in a fix for the resize race — see
+// main.css `main { ... }`.)
 setSidebarOpen(!isMobile());
 mainEl.setAttribute("data-sidebar-ready", "");
 
