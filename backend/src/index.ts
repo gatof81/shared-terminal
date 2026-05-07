@@ -23,7 +23,7 @@ import { logger } from "./logger.js";
 import { buildRouter } from "./routes.js";
 import { SessionManager } from "./sessionManager.js";
 import { parseTrustProxy, TrustProxyError, warnIfProductionMisconfigured } from "./trustProxy.js";
-import { endUpgradeSocketWithReply, handleWsConnection } from "./wsHandler.js";
+import { endUpgradeSocketWithReply, handleWsConnection, startWsHeartbeat } from "./wsHandler.js";
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -201,6 +201,12 @@ server.on("upgrade", (req, socket, head) => {
 	});
 });
 
+// Liveness heartbeat (#79). The helper sets the per-connection `pong`
+// listener and runs the 30 s interval; we keep the cleanup so the
+// shutdown path can stop the timer before `wss.close()` to avoid
+// racing teardown.
+const stopHeartbeat = startWsHeartbeat(wss, 30_000);
+
 wss.on("connection", (ws, req) => {
 	handleWsConnection(ws, req, sessions, docker);
 });
@@ -245,6 +251,10 @@ function shutdown() {
 	if (shuttingDown) return;
 	shuttingDown = true;
 	logger.info("[server] shutting down…");
+
+	// Stop the heartbeat first so it doesn't try to ping a half-closed
+	// client during teardown (would race with the close calls below).
+	stopHeartbeat();
 
 	// Actively close live WS clients. `wss.close()` alone only stops accepting
 	// new upgrades — existing connections stay open, which keeps `server.close()`

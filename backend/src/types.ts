@@ -58,21 +58,16 @@ export interface WsResizeMessage {
 	rows: number;
 }
 
-export interface WsPingMessage {
-	type: "ping";
-}
-
-export type WsClientMessage = WsInputMessage | WsResizeMessage | WsPingMessage;
+// Liveness is now bidirectional protocol-level ws.ping/pong (#79); no
+// app-layer ping message required. The control frames travel below the
+// JSON message layer, so message-shape unions stay clean.
+export type WsClientMessage = WsInputMessage | WsResizeMessage;
 
 // ── WebSocket server → client messages ──────────────────────────────────────
 
 export interface WsOutputMessage {
 	type: "output";
 	data: string;
-}
-
-export interface WsPongMessage {
-	type: "pong";
 }
 
 export interface WsErrorMessage {
@@ -85,4 +80,4 @@ export interface WsStatusMessage {
 	status: SessionStatus;
 }
 
-export type WsServerMessage = WsOutputMessage | WsPongMessage | WsErrorMessage | WsStatusMessage;
+export type WsServerMessage = WsOutputMessage | WsErrorMessage | WsStatusMessage;
