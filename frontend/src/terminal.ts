@@ -468,6 +468,13 @@ export function openTerminalSession(opts: {
 	// row repaints.
 	const onVisibilityChange = () => {
 		if (document.hidden) return;
+		// scheduleFit's rAF will atlas-clear + refresh too, but only if the fit
+		// detects a dimension change. The synchronous pair below covers the
+		// no-change case — tab hidden then restored at the same size, where
+		// the GPU may still need a fresh atlas (DPR change, OS font-smoothing
+		// toggle) and the canvas needs a repaint to flush rows that streamed
+		// in while rAF was throttled. The double-fire on the dimension-change
+		// path is harmless: refresh is idempotent and atlas clear is cheap.
 		scheduleFit();
 		try {
 			webgl?.clearTextureAtlas();
