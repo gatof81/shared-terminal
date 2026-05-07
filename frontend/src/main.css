@@ -417,16 +417,24 @@ main {
   display: grid;
   grid-template-columns: 0 1fr;
   overflow: hidden;
-  transition: grid-template-columns 0.2s ease;
   position: relative;
 }
 main.sidebar-open {
   grid-template-columns: 260px 1fr;
 }
-/* Suppress the column transition during the JS-driven init pass so
-   desktop doesn't see a 0→260px expand on every page load. main.ts
-   removes this attribute after applying the initial state. */
-main:not([data-sidebar-ready]),
+/* No transition on the grid: an animated grid-template-columns change
+   races the terminal's resize path. ResizeObserver fires every frame
+   of the animation, fitAddon recomputes cols immediately, but the
+   backend resize message is debounced 100 ms — so for ~300 ms after
+   each toggle, tmux is still emitting at the old col count while
+   xterm renders at the new one. Output (prompt redraw, key echo,
+   status bar) lands in cells that don't match what's on screen,
+   producing visible glyph drift and "text outside the input line".
+   Instant grid change keeps the two sides locked.
+   The mobile sidebar drawer (transform on #sidebar inside the
+   max-width media query) is unaffected because its open/close does
+   not change the terminal's width — the drawer floats above the
+   terminal on mobile rather than pushing it. */
 main:not([data-sidebar-ready]) #sidebar {
   transition: none !important;
 }
