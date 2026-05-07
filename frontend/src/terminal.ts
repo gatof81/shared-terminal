@@ -206,6 +206,24 @@ export function openTerminalSession(opts: {
 	};
 	container.addEventListener("pointerdown", focusOnPointer);
 
+	// ── Scrollback preservation ────────────────────────────────────────────
+	// While the user is reading scrollback (or has an active selection),
+	// streaming output from tmux must NOT yank the viewport back to the
+	// cursor. xterm's default is to track the cursor when the program
+	// writes — fine when the user is at the bottom, awful when they've
+	// scrolled up to read a build log or an OAuth URL that just disappeared.
+	//
+	// onScroll fires on every viewport movement (user wheel/swipe AND any
+	// scroll xterm does internally during a write). We sample
+	// `viewportY < baseY` to flip a flag. On the output-write path we
+	// capture viewportY pre-write and, if the flag was set, restore it
+	// in xterm's post-parse callback. Selection-active is the same case:
+	// the user is actively reading what they selected, so don't move them.
+	let userScrolled = false;
+	const scrollListener = term.onScroll(() => {
+		userScrolled = term.buffer.active.viewportY < term.buffer.active.baseY;
+	});
+
 	// ── WebSocket connection ────────────────────────────────────────────────
 	// Auth lives in an httpOnly cookie (#18). Browsers send cookies on the
 	// WS upgrade to the cookie's domain automatically — no token needs to
@@ -239,9 +257,25 @@ export function openTerminalSession(opts: {
 		}
 
 		switch (msg.type) {
-			case "output":
-				term.write(msg.data);
+			case "output": {
+				// hasSelection() and userScrolled both mean "user is reading
+				// something above the cursor" — don't yank them away.
+				const preserve = userScrolled || term.hasSelection();
+				const yBefore = term.buffer.active.viewportY;
+				term.write(msg.data, () => {
+					// xterm fires this after parsing the chunk. If the write
+					// triggered an internal scroll (cursor advanced past the
+					// visible viewport, alt-buffer cup, screen clear, …),
+					// viewportY will have moved; restore it so the user
+					// keeps reading whatever they were reading. Skip when
+					// disposed: the parent has already torn down the term.
+					if (disposed) return;
+					if (preserve && term.buffer.active.viewportY !== yBefore) {
+						term.scrollToLine(yBefore);
+					}
+				});
 				break;
+			}
 			case "status":
 				onStatus(msg.status);
 				break;
@@ -543,6 +577,7 @@ export function openTerminalSession(opts: {
 		container.removeEventListener("touchcancel", onTouchCancel);
 		inputDisposable.dispose();
 		linkProviderDisposable.dispose();
+		scrollListener.dispose();
 		pendingRestoreCanvas?.removeEventListener("webglcontextrestored", onContextRestored);
 		container.removeEventListener("webglcontextlost", onContextLost);
 		webgl?.dispose();
