@@ -684,7 +684,12 @@ class MultilineUrlLinkProvider implements ILinkProvider {
 
 // ── URL builder ─────────────────────────────────────────────────────────────
 
-function buildWsUrl(sessionId: string, tabId: string | undefined, cols: number, rows: number): string {
+function buildWsUrl(
+	sessionId: string,
+	tabId: string | undefined,
+	cols: number,
+	rows: number,
+): string {
 	// Use VITE_API_URL to derive the WebSocket URL
 	const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
 	const url = new URL(apiUrl);
