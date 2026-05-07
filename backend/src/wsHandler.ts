@@ -100,10 +100,25 @@ export function handleWsConnection(
 	// (docker exec takes argv, not a shell line, but a defensive allowlist
 	// keeps surprising tmux targets like "main:1" out of the path).
 	const tabQueryMatch = url.match(/[?&]tab=([^&#]+)/);
-	const rawTab = tabQueryMatch ? decodeURIComponent(tabQueryMatch[1]!) : null;
-	if (rawTab === null) {
+	if (tabQueryMatch === null) {
 		sendError(ws, "Missing tab id");
 		ws.close(1008, "Missing tab");
+		return;
+	}
+	// decodeURIComponent throws URIError on malformed sequences (e.g.
+	// `?tab=%G%`). Without a guard the throw propagates out of
+	// wss.emit("connection", …) and there is no uncaughtException
+	// handler — Node terminates the process, dropping every other
+	// attached session. Auth runs before this so an unauth'd caller
+	// can't trigger it, but any logged-in user could DoS the entire
+	// server with one bad URL otherwise. Same shape of "one socket
+	// kills the process" bug as #91. See #147.
+	let rawTab: string;
+	try {
+		rawTab = decodeURIComponent(tabQueryMatch[1]!);
+	} catch {
+		sendError(ws, "Invalid tab id");
+		ws.close(1008, "Invalid tab");
 		return;
 	}
 	if (!/^[a-zA-Z0-9._-]{1,64}$/.test(rawTab)) {
