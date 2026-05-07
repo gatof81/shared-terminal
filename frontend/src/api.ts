@@ -7,19 +7,25 @@
 const BACKEND_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
 const API_BASE = `${BACKEND_URL}/api`;
 
-// ── Auth state (#18) ────────────────────────────────────────────────────────
+// ── Auth state (#18, #50) ───────────────────────────────────────────────────
 //
-// The JWT lives in an httpOnly cookie that JS cannot read. The boolean below
-// is just an in-memory mirror of "do we currently have a valid session" so
-// the UI can route between the login screen and the app without doing a
-// round-trip on every navigation. It's hydrated on boot from /auth/status
-// (which the server populates from req.cookies), and updated on
-// login/register/logout/401.
+// The JWT lives in an httpOnly cookie that JS cannot read. The booleans below
+// are an in-memory mirror so the UI can route (login vs app, hide vs show
+// admin features) without a round-trip per navigation. Hydrated on boot from
+// /auth/status, updated on login/register/logout/401.
 
 let _loggedIn = false;
+let _isAdmin = false;
 
 export function isLoggedIn(): boolean {
 	return _loggedIn;
+}
+
+/** True iff `users.is_admin = 1` for the current session (#50). Gates
+ *  invite-mint UI in main.ts. Refreshes on every /auth/status call so a
+ *  promotion / demotion takes effect on the next reload. */
+export function isAdmin(): boolean {
+	return _isAdmin;
 }
 
 /** Fired by `apiFetch` once per 401-burst after flipping `_loggedIn` to false —
@@ -31,14 +37,17 @@ export const SESSION_EXPIRED_EVENT = "st:session-expired";
 export interface AuthStatus {
 	needsSetup: boolean;
 	authenticated: boolean;
+	isAdmin: boolean;
 }
 
 export async function checkAuthStatus(): Promise<AuthStatus> {
 	const res = await apiFetch("/auth/status");
 	const data = (await res.json()) as AuthStatus;
-	// The server is the source of truth for cookie presence. Mirror it
-	// into module state so isLoggedIn() can answer instantly thereafter.
+	// The server is the source of truth for cookie presence + admin
+	// status. Mirror both so isLoggedIn() / isAdmin() can answer
+	// instantly thereafter.
 	_loggedIn = data.authenticated;
+	_isAdmin = data.isAdmin;
 	return data;
 }
 
@@ -49,11 +58,16 @@ export class InviteRequiredError extends Error {
 	}
 }
 
+export interface AuthSuccess {
+	userId: string;
+	isAdmin: boolean;
+}
+
 export async function register(
 	username: string,
 	password: string,
 	inviteCode?: string,
-): Promise<{ userId: string }> {
+): Promise<AuthSuccess> {
 	const res = await apiFetch("/auth/register", {
 		method: "POST",
 		body: JSON.stringify({ username, password, inviteCode }),
@@ -65,12 +79,13 @@ export async function register(
 		}
 		throw new Error(body.error ?? "Registration failed");
 	}
-	const data = (await res.json()) as { userId: string };
+	const data = (await res.json()) as AuthSuccess;
 	_loggedIn = true;
+	_isAdmin = data.isAdmin;
 	return data;
 }
 
-export async function login(username: string, password: string): Promise<{ userId: string }> {
+export async function login(username: string, password: string): Promise<AuthSuccess> {
 	const res = await apiFetch("/auth/login", {
 		method: "POST",
 		body: JSON.stringify({ username, password }),
@@ -79,8 +94,9 @@ export async function login(username: string, password: string): Promise<{ userI
 		const body = await res.json();
 		throw new Error(body.error ?? "Login failed");
 	}
-	const data = (await res.json()) as { userId: string };
+	const data = (await res.json()) as AuthSuccess;
 	_loggedIn = true;
+	_isAdmin = data.isAdmin;
 	return data;
 }
 
@@ -102,6 +118,7 @@ export async function logout(): Promise<void> {
 		/* network down — local teardown is what the user actually wants */
 	}
 	_loggedIn = false;
+	_isAdmin = false;
 }
 
 // ── Session types ───────────────────────────────────────────────────────────
@@ -345,6 +362,7 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
 	//   false and the rest see false, so the event fires exactly once.
 	if (sentAuth && res.status === 401 && _loggedIn) {
 		_loggedIn = false;
+		_isAdmin = false;
 		window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT));
 	}
 

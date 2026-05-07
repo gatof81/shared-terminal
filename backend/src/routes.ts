@@ -20,12 +20,14 @@ import {
 	listInvites,
 	loginUser,
 	registerUser,
+	requireAdmin,
 	requireAuth,
 	revokeInvite,
 	setAuthCookie,
 	UsernameTakenError,
 	verifyJwt,
 } from "./auth.js";
+import { d1Query } from "./db.js";
 import type { DockerManager } from "./dockerManager.js";
 import { UploadQuotaExceededError } from "./dockerManager.js";
 import { EnvVarValidationError, validateEnvVars } from "./envVarValidation.js";
@@ -74,6 +76,12 @@ export function buildRouter(
 		// that bypass middleware. Verification failures land as
 		// `authenticated: false`, never as a 4xx — this endpoint is
 		// public-by-design.
+		//
+		// `isAdmin` is fetched fresh from D1 (#50) rather than from a
+		// JWT-embedded claim so admin grant/revoke takes effect without
+		// requiring users to log out and back in. Falls back to false on
+		// lookup failure or unauthenticated callers — UI should treat
+		// the boolean as "show admin features" only when explicitly true.
 		const reqWithCookies = req as Request & {
 			cookies?: Record<string, string | undefined>;
 		};
@@ -81,8 +89,23 @@ export function buildRouter(
 			reqWithCookies.cookies?.[AUTH_COOKIE_NAME] ??
 			extractTokenFromCookieHeader(req.headers.cookie) ??
 			undefined;
-		const authenticated = verifyJwt(token) !== null;
-		res.json({ needsSetup: !(await hasAnyUsers()), authenticated });
+		const payload = verifyJwt(token);
+		const authenticated = payload !== null;
+		// Run the admin-lookup and hasAnyUsers in parallel — they have
+		// no data dependency, and CLAUDE.md flags D1 round-trips as the
+		// expensive thing on hot paths. The admin lookup catches its
+		// own error (surfaces as isAdmin=false); hasAnyUsers throwing
+		// is a real boot-state failure and propagates to the 500 handler.
+		const [adminLookup, anyUsers] = await Promise.all([
+			payload
+				? d1Query<{ is_admin: number }>("SELECT is_admin FROM users WHERE id = ?", [
+						payload.sub,
+					]).catch(() => null)
+				: Promise.resolve(null),
+			hasAnyUsers(),
+		]);
+		const isAdmin = adminLookup?.results[0]?.is_admin === 1;
+		res.json({ needsSetup: !anyUsers, authenticated, isAdmin });
 	});
 
 	router.post("/auth/register", registerIp, async (req: Request, res: Response) => {
@@ -133,7 +156,7 @@ export function buildRouter(
 			// keeps the userId for clients that want to address the new
 			// account, but never the raw token.
 			setAuthCookie(res, result.token);
-			res.status(201).json({ userId: result.userId });
+			res.status(201).json({ userId: result.userId, isAdmin: result.isAdmin });
 		} catch (err) {
 			if (err instanceof InviteRequiredError) {
 				// 403 — caller authenticated nothing yet, but the action is
@@ -189,7 +212,7 @@ export function buildRouter(
 			return;
 		}
 
-		let result: { userId: string; token: string };
+		let result: { userId: string; token: string; isAdmin: boolean };
 		try {
 			try {
 				result = await loginUser(username, password);
@@ -207,7 +230,7 @@ export function buildRouter(
 			}
 			usernameLimiter.reset(username);
 			setAuthCookie(res, result.token);
-			res.json({ userId: result.userId });
+			res.json({ userId: result.userId, isAdmin: result.isAdmin });
 		} finally {
 			// Always release the in-flight slot — success, invalid creds,
 			// or infra error alike. `reset()` above wipes the failure
@@ -241,18 +264,22 @@ export function buildRouter(
 	router.use("/sessions", requireAuth);
 
 	// ── Invite routes ───────────────────────────────────────────────────────
-	// Any authenticated user can mint invites — there is no admin tier yet.
-	// If you ever want to gate this to specific accounts, add an is_admin
-	// column to users and a middleware check here.
+	// All three routes are gated by `requireAdmin` (#50). Non-admins
+	// don't need invite access at all — they can't mint, and pre-#50
+	// codes minted by then-non-admin accounts must remain manageable
+	// somewhere; admin-scoped list/revoke is the cleaner answer than
+	// per-user filtering that would orphan those rows.
+	//
+	// requireAuth is provided by `router.use("/invites", requireAuth)`
+	// above — requireAdmin reads `req.userId` populated there.
 
 	// GET is rate-limited symmetrically with POST/DELETE (issue #47):
 	// a much higher cap because reads are cheap, but the same per-IP
 	// shape so the asymmetry doesn't read as accidental and a runaway
 	// client polling in a loop can't hammer D1 unbounded.
-	router.get("/invites", invitesListIp, async (req: Request, res: Response) => {
-		const { userId } = req as AuthedRequest;
+	router.get("/invites", invitesListIp, requireAdmin, async (_req: Request, res: Response) => {
 		try {
-			const invites = await listInvites(userId);
+			const invites = await listInvites();
 			res.json(invites);
 		} catch (err) {
 			logger.error(`[invites] list failed: ${(err as Error).message}`);
@@ -260,7 +287,7 @@ export function buildRouter(
 		}
 	});
 
-	router.post("/invites", invitesCreateIp, async (req: Request, res: Response) => {
+	router.post("/invites", invitesCreateIp, requireAdmin, async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
 		try {
 			const invite = await createInvite(userId);
@@ -275,31 +302,34 @@ export function buildRouter(
 		}
 	});
 
-	router.delete("/invites/:hash", invitesRevokeIp, async (req: Request, res: Response) => {
-		const { userId } = req as AuthedRequest;
-		const { hash } = req.params;
-		// SHA-256 hex is exactly 64 lowercase hex chars. Reject anything
-		// else before the D1 round-trip — a caller probing arbitrary
-		// strings shouldn't reach the database.
-		if (!/^[0-9a-f]{64}$/.test(hash)) {
-			res.status(400).json({ error: "hash must be a 64-char lowercase hex SHA-256 digest" });
-			return;
-		}
-		try {
-			const removed = await revokeInvite(userId, hash);
-			if (!removed) {
-				// Vague on purpose: don't distinguish missing / already-used /
-				// owned-by-someone-else, since that would let a caller probe for
-				// codes outside their ownership.
-				res.status(404).json({ error: "Invite not found or already used" });
+	router.delete(
+		"/invites/:hash",
+		invitesRevokeIp,
+		requireAdmin,
+		async (req: Request, res: Response) => {
+			const { hash } = req.params;
+			// SHA-256 hex is exactly 64 lowercase hex chars. Reject anything
+			// else before the D1 round-trip — a caller probing arbitrary
+			// strings shouldn't reach the database.
+			if (!/^[0-9a-f]{64}$/.test(hash)) {
+				res.status(400).json({ error: "hash must be a 64-char lowercase hex SHA-256 digest" });
 				return;
 			}
-			res.status(204).send();
-		} catch (err) {
-			logger.error(`[invites] revoke failed: ${(err as Error).message}`);
-			res.status(500).json({ error: "Internal server error" });
-		}
-	});
+			try {
+				const removed = await revokeInvite(hash);
+				if (!removed) {
+					// Vague on purpose: missing vs. already-used should not be
+					// distinguishable from the wire (no enumeration vector).
+					res.status(404).json({ error: "Invite not found or already used" });
+					return;
+				}
+				res.status(204).send();
+			} catch (err) {
+				logger.error(`[invites] revoke failed: ${(err as Error).message}`);
+				res.status(500).json({ error: "Internal server error" });
+			}
+		},
+	);
 
 	// ── Session routes ──────────────────────────────────────────────────────
 

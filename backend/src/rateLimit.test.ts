@@ -10,11 +10,34 @@ import type { SessionManager } from "./sessionManager.js";
 // Stub the auth module so routing tests don't touch D1. Handles captured
 // as `authStubs` are reconfigured per-test.
 const authStubs = vi.hoisted(() => ({
-	registerUser: vi.fn(async (_u: string, _p: string) => ({ userId: "u1", token: "tok" })),
-	loginUser: vi.fn(async (_u: string, _p: string) => ({ userId: "u1", token: "tok" })),
+	registerUser: vi.fn(async (_u: string, _p: string) => ({
+		userId: "u1",
+		token: "tok",
+		isAdmin: false,
+	})),
+	loginUser: vi.fn(async (_u: string, _p: string) => ({
+		userId: "u1",
+		token: "tok",
+		isAdmin: false,
+	})),
 	hasAnyUsers: vi.fn(async () => true),
-	listInvites: vi.fn(async (_u?: string) => [] as unknown[]),
+	listInvites: vi.fn(async () => [] as unknown[]),
+	createInvite: vi.fn(async (_u: string) => ({
+		code: "deadbeefdeadbeef",
+		codeHash: "f".repeat(64),
+		codePrefix: "dead",
+		createdAt: "2026-05-07 00:00:00",
+		usedAt: null,
+		expiresAt: null,
+	})),
 	requireAuth: (_req: unknown, _res: unknown, next: () => void) => next(),
+	// vi.fn so individual tests can override (the admin-gate test below
+	// flips the default-passthrough behaviour to a 403 to pin the
+	// route-level wiring). Default impl is the same passthrough every
+	// other test in this file relies on.
+	requireAdmin: vi.fn((_req: unknown, _res: unknown, next: () => void) => {
+		next();
+	}),
 	// Cookie-auth helpers (#18). Tests don't read the cookie back, so a
 	// no-op for set/clear and a permissive shape-only verify is enough.
 	AUTH_COOKIE_NAME: "st_token",
@@ -359,11 +382,24 @@ describe("auth route rate limiting", () => {
 	beforeEach(() => {
 		authStubs.registerUser.mockClear();
 		authStubs.loginUser.mockClear();
+		authStubs.createInvite.mockClear();
+		authStubs.listInvites.mockClear();
 		// Default: loginUser fails as bad creds (typed so the handler counts it).
 		authStubs.loginUser.mockImplementation(async () => {
 			throw new authStubs.InvalidCredentialsError();
 		});
-		authStubs.registerUser.mockImplementation(async () => ({ userId: "u1", token: "tok" }));
+		authStubs.registerUser.mockImplementation(async () => ({
+			userId: "u1",
+			token: "tok",
+			isAdmin: false,
+		}));
+		// Reset requireAdmin to its passthrough default. Individual tests
+		// that exercise the admin-gate path override this with a 403
+		// implementation; restoring here means a thrown expect inside such
+		// a test can't leak the override into the next test.
+		authStubs.requireAdmin.mockImplementation((_req: unknown, _res: unknown, next: () => void) => {
+			next();
+		});
 	});
 
 	afterEach(async () => {
@@ -452,7 +488,11 @@ describe("auth route rate limiting", () => {
 			register: { ipMax: 100, ipWindowMs: 60_000 },
 		});
 
-		authStubs.loginUser.mockImplementation(async () => ({ userId: "u1", token: "tok" }));
+		authStubs.loginUser.mockImplementation(async () => ({
+			userId: "u1",
+			token: "tok",
+			isAdmin: false,
+		}));
 		for (let i = 0; i < 3; i++) {
 			const ok = await postLogin({ username: `u${i}`, password: "good" });
 			expect(ok.status).toBe(200);
@@ -514,7 +554,11 @@ describe("auth route rate limiting", () => {
 		const r1 = await postLogin({ username: "alice", password: "bad" });
 		expect(r1.status).toBe(401);
 
-		authStubs.loginUser.mockImplementationOnce(async () => ({ userId: "u1", token: "tok" }));
+		authStubs.loginUser.mockImplementationOnce(async () => ({
+			userId: "u1",
+			token: "tok",
+			isAdmin: false,
+		}));
 		const r2 = await postLogin({ username: "alice", password: "good" });
 		expect(r2.status).toBe(200);
 
@@ -600,7 +644,11 @@ describe("auth route rate limiting", () => {
 		await postLogin({ username: "alice", password: "bad" });
 		await postLogin({ username: "alice", password: "bad" });
 
-		authStubs.loginUser.mockImplementationOnce(async () => ({ userId: "u1", token: "tok" }));
+		authStubs.loginUser.mockImplementationOnce(async () => ({
+			userId: "u1",
+			token: "tok",
+			isAdmin: false,
+		}));
 		const locked = await postLogin({ username: "alice", password: "good" });
 		expect(locked.status).toBe(429);
 	});
@@ -625,5 +673,66 @@ describe("auth route rate limiting", () => {
 		expect(r3.status).toBe(429);
 		expect(await r3.json()).toMatchObject({ scope: "ip" });
 		expect(r3.headers.get("retry-after")).not.toBeNull();
+	});
+
+	// #50 route-level wiring. The `requireAdmin` middleware unit tests
+	// pin the gate's behaviour given a userId; these route-level tests
+	// pin that the gate is actually wired in front of every invite
+	// handler. A future refactor that swaps middleware order or drops
+	// the gate from one of the routes would surface here as a 2xx
+	// reaching the corresponding handler stub. The `beforeEach` above
+	// restores the passthrough so an override here doesn't leak into
+	// later tests if an `expect` throws.
+	function denyAdmin() {
+		authStubs.requireAdmin.mockImplementation(
+			(_req: unknown, res: { status: (n: number) => { json: (b: unknown) => unknown } }) => {
+				res.status(403).json({ error: "Admin privileges required" });
+			},
+		);
+	}
+
+	it("POST /invites returns 403 (and never reaches the handler) when requireAdmin denies", async () => {
+		await spinUp({
+			login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
+			register: { ipMax: 1000, ipWindowMs: 60_000 },
+		});
+		denyAdmin();
+
+		const r = await fetch(`${baseUrl}/api/invites`, { method: "POST" });
+
+		expect(r.status).toBe(403);
+		expect(await r.json()).toMatchObject({ error: "Admin privileges required" });
+		expect(authStubs.createInvite).not.toHaveBeenCalled();
+	});
+
+	it("GET /invites returns 403 when requireAdmin denies", async () => {
+		await spinUp({
+			login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
+			register: { ipMax: 1000, ipWindowMs: 60_000 },
+		});
+		denyAdmin();
+
+		const r = await fetch(`${baseUrl}/api/invites`);
+
+		expect(r.status).toBe(403);
+		expect(await r.json()).toMatchObject({ error: "Admin privileges required" });
+		expect(authStubs.listInvites).not.toHaveBeenCalled();
+	});
+
+	it("DELETE /invites/:hash returns 403 when requireAdmin denies", async () => {
+		await spinUp({
+			login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
+			register: { ipMax: 1000, ipWindowMs: 60_000 },
+		});
+		denyAdmin();
+
+		// Valid hash shape so the request makes it past the route's
+		// regex guard — we want the gate's 403, not a 400 from input
+		// validation, to be the response.
+		const hash = "a".repeat(64);
+		const r = await fetch(`${baseUrl}/api/invites/${hash}`, { method: "DELETE" });
+
+		expect(r.status).toBe(403);
+		expect(await r.json()).toMatchObject({ error: "Admin privileges required" });
 	});
 });

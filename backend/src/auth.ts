@@ -95,11 +95,18 @@ export class UsernameTakenError extends Error {
 	}
 }
 
+export interface RegisterResult {
+	userId: string;
+	token: string;
+	/** Bootstrap user gets is_admin=1; everyone else defaults to 0 (#50). */
+	isAdmin: boolean;
+}
+
 export async function registerUser(
 	username: string,
 	password: string,
 	inviteCode: string | undefined,
-): Promise<{ userId: string; token: string }> {
+): Promise<RegisterResult> {
 	const userId = uuidv4();
 
 	// Bootstrap: first account ever doesn't need an invite. Skip
@@ -118,13 +125,16 @@ export async function registerUser(
 		// only path where we hash unconditionally — every other path
 		// validates an invite first) is required by the conditional shape.
 		const bootstrapHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+		// Bootstrap user gets is_admin=1 inline (#50). The conditional
+		// INSERT shape stays — only the loser race-arm doesn't reach
+		// here.
 		const insert = await d1Query(
-			"INSERT INTO users (id, username, password_hash) " +
-				"SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM users)",
+			"INSERT INTO users (id, username, password_hash, is_admin) " +
+				"SELECT ?, ?, ?, 1 WHERE NOT EXISTS (SELECT 1 FROM users)",
 			[userId, username, bootstrapHash],
 		);
 		if (insert.meta.changes === 1) {
-			return { userId, token: signToken(userId, username) };
+			return { userId, token: signToken(userId, username), isAdmin: true };
 		}
 		// Race loser: a concurrent bootstrap got there first and we have
 		// no invite to fall back on. Match the steady-state response so
@@ -197,13 +207,19 @@ export async function registerUser(
 		throw err;
 	}
 
-	return { userId, token: signToken(userId, username) };
+	// Steady-state register: invite-redeeming users default to non-admin
+	// (the column default in db.ts). Promotion happens manually post-bootstrap.
+	return { userId, token: signToken(userId, username), isAdmin: false };
 }
 
 // ── Invites ────────────────────────────────────────────────────────────────
 
-// Caps *outstanding* (unused) invites per account — bounds blast radius
-// from a stolen JWT. Used / expired codes don't count.
+// Caps *outstanding* (unused) invites per minting account — bounds
+// blast radius from a stolen JWT. Used / expired codes don't count.
+// Post-#50 invite minting is admin-only, so in typical single-admin
+// deploys the cap effectively applies to one account; the SQL
+// (`WHERE created_by = ?`) keeps the per-account framing in case of
+// multi-admin deployments.
 const MAX_UNUSED_INVITES_PER_USER = 20;
 
 // 30-day default for unredeemed-invite TTL, overridable via env.
@@ -300,25 +316,29 @@ export async function createInvite(creatorUserId: string): Promise<MintedInvite>
 // (#54, landed in PR #142) so the truncation isn't silent.
 const INVITE_LIST_LIMIT = 100;
 
-export async function listInvites(creatorUserId: string): Promise<Invite[]> {
+// Admin-scoped (#50): all GET /invites, POST /invites, DELETE /invites/:hash
+// routes are gated by `requireAdmin`, so list and revoke see/affect every
+// row in the table — not just the admin's own. The `created_by` column
+// still records who minted what (for audit + the per-user mint quota in
+// createInvite), but it's no longer a filter on read or delete. Without
+// this scope, codes minted before #50 by then-non-admin accounts would
+// be invisible to admins and unrevocable until expiry.
+export async function listInvites(): Promise<Invite[]> {
 	const result = await d1Query<InviteRow>(
 		"SELECT code_hash, code_prefix, created_at, used_at, expires_at FROM invite_codes " +
-			"WHERE created_by = ? ORDER BY created_at DESC LIMIT ?",
-		[creatorUserId, INVITE_LIST_LIMIT],
+			"ORDER BY created_at DESC LIMIT ?",
+		[INVITE_LIST_LIMIT],
 	);
 	return result.results.map(rowToInvite);
 }
 
-// Revoke an unused invite by its hash (the only public id post-#49 — the
-// plaintext is gone). Returns true if a row was removed, false if the
-// invite was missing, already used, or owned by a different user. The wire
-// surface is intentionally vague so a caller can't enumerate codes belonging
-// to other users.
-export async function revokeInvite(creatorUserId: string, codeHash: string): Promise<boolean> {
-	const result = await d1Query(
-		"DELETE FROM invite_codes WHERE code_hash = ? AND created_by = ? AND used_at IS NULL",
-		[codeHash, creatorUserId],
-	);
+// Revoke an unused invite by its hash. Returns true if a row was removed,
+// false if the invite was missing or already used. Admin-scoped (no
+// created_by filter) — see listInvites.
+export async function revokeInvite(codeHash: string): Promise<boolean> {
+	const result = await d1Query("DELETE FROM invite_codes WHERE code_hash = ? AND used_at IS NULL", [
+		codeHash,
+	]);
 	return result.meta.changes === 1;
 }
 
@@ -405,12 +425,16 @@ export async function ensureAuthReady(): Promise<void> {
 	await DUMMY_PASSWORD_HASH_PROMISE;
 }
 
-export async function loginUser(
-	username: string,
-	password: string,
-): Promise<{ userId: string; token: string }> {
-	const result = await d1Query<{ id: string; password_hash: string }>(
-		"SELECT id, password_hash FROM users WHERE username = ?",
+export interface LoginResult {
+	userId: string;
+	token: string;
+	/** Pulled from the same row as the password hash — no extra D1 round-trip. */
+	isAdmin: boolean;
+}
+
+export async function loginUser(username: string, password: string): Promise<LoginResult> {
+	const result = await d1Query<{ id: string; password_hash: string; is_admin: number }>(
+		"SELECT id, password_hash, is_admin FROM users WHERE username = ?",
 		[username],
 	);
 
@@ -428,7 +452,7 @@ export async function loginUser(
 	}
 
 	const token = signToken(row.id, username);
-	return { userId: row.id, token };
+	return { userId: row.id, token, isAdmin: row.is_admin === 1 };
 }
 
 function signToken(userId: string, username: string): string {
@@ -565,6 +589,43 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
 	(req as AuthedRequest).userId = payload.sub;
 	(req as AuthedRequest).username = payload.username;
 	next();
+}
+
+/**
+ * Gate a route on the caller having `is_admin = 1` in `users`. MUST chain
+ * after `requireAuth` — reads `req.userId` from the AuthedRequest the
+ * preceding middleware populated. Does its own D1 lookup rather than
+ * trusting a JWT-embedded flag so that admin grant/revoke takes effect
+ * without users needing to log out and back in.
+ *
+ * #50: gates GET, POST, and DELETE on /invites — list, mint, and
+ * revoke are a single coherent admin surface. Earlier rounds of #146
+ * gated only POST/DELETE and let GET fall through on auth, but that
+ * left pre-#50 codes minted by non-admins invisible (and so
+ * unrevocable) to the admin tier this PR exists to centralise on.
+ */
+export async function requireAdmin(req: Request, res: Response, next: NextFunction): Promise<void> {
+	const userId = (req as AuthedRequest).userId;
+	if (!userId) {
+		// Belt-and-braces: if a future caller forgets to chain after
+		// requireAuth, fail loud rather than silently allow.
+		res.status(401).json({ error: "Authentication required" });
+		return;
+	}
+	try {
+		const result = await d1Query<{ is_admin: number }>("SELECT is_admin FROM users WHERE id = ?", [
+			userId,
+		]);
+		const row = result.results[0];
+		if (!row || row.is_admin !== 1) {
+			res.status(403).json({ error: "Admin privileges required" });
+			return;
+		}
+		next();
+	} catch (err) {
+		logger.error(`[auth] requireAdmin lookup failed: ${(err as Error).message}`);
+		res.status(500).json({ error: "Internal server error" });
+	}
 }
 
 // ── WebSocket auth ──────────────────────────────────────────────────────────
