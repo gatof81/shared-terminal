@@ -187,7 +187,12 @@ describe("handleWsConnection geometry from URL", () => {
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		handleWsConnection(ws as any, req as any, sessions, docker);
 		// Drain the async IIFE that runs assertOwnership → docker.attach.
-		await new Promise((r) => setImmediate(r));
+		// Wait for the async IIFE (assertOwnership → docker.attach chain) to
+		// reach attach. waitFor polls until the assertion holds, robust
+		// against any number of intermediate awaits in the handler.
+		await vi.waitFor(() => {
+			expect(docker.attach).toHaveBeenCalled();
+		});
 
 		expect(docker.attach).toHaveBeenCalledWith(
 			"abc",
@@ -205,7 +210,12 @@ describe("handleWsConnection geometry from URL", () => {
 		const req = makeReq("/ws/sessions/abc?tab=tab-1", true);
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		handleWsConnection(ws as any, req as any, sessions, docker);
-		await new Promise((r) => setImmediate(r));
+		// Wait for the async IIFE (assertOwnership → docker.attach chain) to
+		// reach attach. waitFor polls until the assertion holds, robust
+		// against any number of intermediate awaits in the handler.
+		await vi.waitFor(() => {
+			expect(docker.attach).toHaveBeenCalled();
+		});
 
 		expect(docker.attach).toHaveBeenCalledWith(
 			"abc",
@@ -224,7 +234,12 @@ describe("handleWsConnection geometry from URL", () => {
 		const req = makeReq("/ws/sessions/abc?tab=tab-1&cols=0&rows=9999", true);
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		handleWsConnection(ws as any, req as any, sessions, docker);
-		await new Promise((r) => setImmediate(r));
+		// Wait for the async IIFE (assertOwnership → docker.attach chain) to
+		// reach attach. waitFor polls until the assertion holds, robust
+		// against any number of intermediate awaits in the handler.
+		await vi.waitFor(() => {
+			expect(docker.attach).toHaveBeenCalled();
+		});
 
 		expect(docker.attach).toHaveBeenCalledWith(
 			"abc",

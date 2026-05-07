@@ -207,21 +207,18 @@ export function openTerminalSession(opts: {
 	// Without this, the replay arrives at the wrong cols/rows and renders
 	// mis-aligned in xterm until the next resize event (sidebar toggle,
 	// viewport change). Validated server-side; backend falls back to D1
-	// if the params are missing or out of range.
+	// if the params are missing or out of range. Sending geometry as a
+	// WS message after open would be too late: the backend ships the
+	// replay before its `ws.on("message", …)` listener registers, so the
+	// frame would be silently dropped by EventEmitter.
+	//
+	// Liveness (post-open) is handled at the protocol layer (ws.ping/pong)
+	// from the server — see backend/src/index.ts heartbeat. Browsers
+	// auto-reply to server pings with no JS hook required, so there is
+	// no `ws.onopen` handler.
 	const wsUrl = buildWsUrl(sessionId, tabId, term.cols, term.rows);
 	const ws = new WebSocket(wsUrl);
 	let disposed = false;
-
-	ws.onopen = () => {
-		// Liveness is handled at the protocol layer (ws.ping/pong) from
-		// the server side — see backend/src/index.ts heartbeat. Browsers
-		// auto-reply to server pings with no JS hook required.
-		// Initial geometry is communicated via the upgrade URL (cols/rows
-		// query params consumed by wsHandler.attach). Sending it as a WS
-		// message here would be too late — the backend ships the replay
-		// before its `ws.on("message", …)` listener registers, so any
-		// frame from this hook is silently dropped by EventEmitter.
-	};
 
 	ws.onmessage = (ev) => {
 		// disposed: post-close frames buffered by the browser or in flight
