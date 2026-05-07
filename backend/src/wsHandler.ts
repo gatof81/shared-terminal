@@ -5,7 +5,7 @@
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { v4 as uuidv4 } from "uuid";
-import { WebSocket } from "ws";
+import { WebSocket, type WebSocketServer } from "ws";
 import { verifyWsToken } from "./auth.js";
 import type { DockerManager } from "./dockerManager.js";
 import { logger } from "./logger.js";
@@ -202,6 +202,61 @@ export function handleWsConnection(
 			ws.close(1011, "Attach failed");
 		}
 	});
+}
+
+/**
+ * Bidirectional protocol-level liveness heartbeat for the WebSocket
+ * server (#79). Tags each connection with `isAlive` (set true on
+ * connect and on every pong frame from the peer), and on every tick
+ * terminates any client that didn't pong since the previous tick,
+ * then re-pings the survivors. The legacy app-layer `{type:"ping"}`
+ * was unidirectional (client → server only) and missed both:
+ *   - server-side hangs that left TCP alive but the WS unresponsive
+ *     (the client saw a frozen terminal until kernel keepalive
+ *     reaped the socket — minutes later);
+ *   - clients that went silent (backgrounded mobile tab, frozen JS),
+ *     where the server kept the shared exec up indefinitely.
+ *
+ * Returns a cleanup function the caller invokes during shutdown to
+ * stop the interval before `wss.close()` so a tick doesn't race
+ * teardown and ping a half-closed client.
+ */
+export function startWsHeartbeat(wss: WebSocketServer, intervalMs: number): () => void {
+	const onConnection = (ws: WebSocket) => {
+		const c = ws as WebSocket & { isAlive?: boolean };
+		c.isAlive = true;
+		ws.on("pong", () => {
+			c.isAlive = true;
+		});
+	};
+	wss.on("connection", onConnection);
+
+	const tick = setInterval(() => {
+		// Snapshot the client set: terminate() fires `close` synchronously
+		// and `ws` removes the client from `wss.clients` inside the loop,
+		// which silently skips the next iterator entry on a live Set.
+		// Reaping a dead peer one tick late isn't a safety bug, but the
+		// snapshot keeps the cadence honest.
+		for (const client of [...wss.clients]) {
+			const c = client as WebSocket & { isAlive?: boolean };
+			if (c.isAlive === false) {
+				c.terminate();
+				continue;
+			}
+			c.isAlive = false;
+			try {
+				c.ping();
+			} catch {
+				// Peer already dead — terminate on the next tick (isAlive stays false).
+			}
+		}
+	}, intervalMs);
+	tick.unref();
+
+	return () => {
+		clearInterval(tick);
+		wss.off("connection", onConnection);
+	};
 }
 
 function sendMsg(ws: WebSocket, msg: WsServerMessage): void {

@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { __resetJwtSecretForTests, validateJwtSecret } from "./auth.js";
 import type { DockerManager } from "./dockerManager.js";
 import type { SessionManager } from "./sessionManager.js";
-import { endUpgradeSocketWithReply, handleWsConnection } from "./wsHandler.js";
+import { endUpgradeSocketWithReply, handleWsConnection, startWsHeartbeat } from "./wsHandler.js";
 
 // ── Test harness ────────────────────────────────────────────────────────────
 
@@ -189,5 +189,181 @@ describe("endUpgradeSocketWithReply", () => {
 		// Advancing past 500 ms must not propagate the throw.
 		expect(() => vi.advanceTimersByTime(500)).not.toThrow();
 		expect(socket.destroy).toHaveBeenCalledTimes(1);
+	});
+});
+
+// ── startWsHeartbeat ───────────────────────────────────────────────────────
+// Pins the bidirectional liveness invariants from issue #79: every tick
+// pings each client, terminates anything that didn't pong since the
+// previous tick, and the cleanup function returned by startWsHeartbeat
+// stops the timer cleanly.
+
+describe("startWsHeartbeat", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	type FakeWs = {
+		isAlive?: boolean;
+		ping: ReturnType<typeof vi.fn>;
+		terminate: ReturnType<typeof vi.fn>;
+		on: ReturnType<typeof vi.fn>;
+		_pongHandler?: () => void;
+	};
+
+	function makeFakeWs(): FakeWs {
+		const ws: FakeWs = {
+			ping: vi.fn(),
+			terminate: vi.fn(),
+			on: vi.fn(),
+		};
+		// Capture the pong handler the moment it's registered so the test
+		// can fire it synthetically — that's the path the production code
+		// expects, and it's what flips `isAlive` back to true.
+		ws.on.mockImplementation((event: string, handler: () => void) => {
+			if (event === "pong") ws._pongHandler = handler;
+		});
+		return ws;
+	}
+
+	function makeFakeWss(): {
+		wss: { clients: Set<FakeWs>; on: ReturnType<typeof vi.fn>; off: ReturnType<typeof vi.fn> };
+		fireConnection: (ws: FakeWs) => void;
+	} {
+		const clients = new Set<FakeWs>();
+		let connectionHandler: ((ws: FakeWs) => void) | undefined;
+		const on = vi.fn((event: string, handler: (ws: FakeWs) => void) => {
+			if (event === "connection") connectionHandler = handler;
+		});
+		const off = vi.fn();
+		return {
+			wss: { clients, on, off },
+			fireConnection: (ws: FakeWs) => {
+				clients.add(ws);
+				connectionHandler?.(ws);
+			},
+		};
+	}
+
+	it("pings every connected client on each tick and marks them not-yet-replied", () => {
+		const { wss, fireConnection } = makeFakeWss();
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		startWsHeartbeat(wss as any, 30_000);
+
+		const ws = makeFakeWs();
+		fireConnection(ws);
+		expect(ws.isAlive).toBe(true);
+
+		vi.advanceTimersByTime(30_000);
+		expect(ws.ping).toHaveBeenCalledTimes(1);
+		expect(ws.isAlive).toBe(false);
+	});
+
+	it("terminates a client that didn't pong before the next tick", () => {
+		const { wss, fireConnection } = makeFakeWss();
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		startWsHeartbeat(wss as any, 30_000);
+
+		const ws = makeFakeWs();
+		fireConnection(ws);
+
+		// Tick 1: ping, isAlive flipped to false. No pong fired.
+		vi.advanceTimersByTime(30_000);
+		expect(ws.terminate).not.toHaveBeenCalled();
+
+		// Tick 2: still false → terminate.
+		vi.advanceTimersByTime(30_000);
+		expect(ws.terminate).toHaveBeenCalledTimes(1);
+	});
+
+	it("does NOT terminate a client whose pong fired before the next tick", () => {
+		const { wss, fireConnection } = makeFakeWss();
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		startWsHeartbeat(wss as any, 30_000);
+
+		const ws = makeFakeWs();
+		fireConnection(ws);
+
+		vi.advanceTimersByTime(30_000);
+		// Production path: browser auto-replies → ws emits 'pong' → handler
+		// flips isAlive back to true.
+		ws._pongHandler?.();
+		expect(ws.isAlive).toBe(true);
+
+		vi.advanceTimersByTime(30_000);
+		expect(ws.terminate).not.toHaveBeenCalled();
+		expect(ws.ping).toHaveBeenCalledTimes(2);
+	});
+
+	it("swallows a ping() throw and terminates on the next tick", () => {
+		const { wss, fireConnection } = makeFakeWss();
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		startWsHeartbeat(wss as any, 30_000);
+
+		const ws = makeFakeWs();
+		ws.ping.mockImplementation(() => {
+			throw new Error("ERR_SOCKET_CLOSED");
+		});
+		fireConnection(ws);
+
+		// Tick 1: ping throws, isAlive stays false (already set before
+		// the try/catch). Must not propagate.
+		expect(() => vi.advanceTimersByTime(30_000)).not.toThrow();
+
+		// Tick 2: still false → terminate.
+		vi.advanceTimersByTime(30_000);
+		expect(ws.terminate).toHaveBeenCalledTimes(1);
+	});
+
+	it("cleanup function stops the interval AND drops the connection listener", () => {
+		const { wss, fireConnection } = makeFakeWss();
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const stop = startWsHeartbeat(wss as any, 30_000);
+
+		const ws = makeFakeWs();
+		fireConnection(ws);
+
+		stop();
+		// No more ticks after cleanup.
+		vi.advanceTimersByTime(120_000);
+		expect(ws.ping).not.toHaveBeenCalled();
+		expect(ws.terminate).not.toHaveBeenCalled();
+		// Connection listener removed so a future post-shutdown connection
+		// (e.g. a buffered upgrade flushing late) doesn't get tagged.
+		expect(wss.off).toHaveBeenCalledWith("connection", expect.any(Function));
+	});
+
+	it("snapshots wss.clients so terminating mid-iteration doesn't skip the next client", () => {
+		// `ws` removes terminated clients from `wss.clients` synchronously
+		// on the close event. Iterating the live Set would silently skip
+		// the entry after a terminated one, postponing its reaping by a
+		// full tick.
+		const { wss, fireConnection } = makeFakeWss();
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		startWsHeartbeat(wss as any, 30_000);
+
+		const dead = makeFakeWs();
+		const alive = makeFakeWs();
+		fireConnection(dead);
+		fireConnection(alive);
+
+		// Stale `dead`: simulate a missed pong by forcing isAlive false
+		// before the tick. The handler also removes from the set on
+		// terminate, mirroring `ws`'s real behaviour.
+		dead.isAlive = false;
+		dead.terminate.mockImplementation(() => {
+			wss.clients.delete(dead);
+		});
+
+		vi.advanceTimersByTime(30_000);
+
+		expect(dead.terminate).toHaveBeenCalledTimes(1);
+		// `alive` MUST still be visited inside the same tick — otherwise
+		// the snapshot guarantee is broken.
+		expect(alive.ping).toHaveBeenCalledTimes(1);
+		expect(alive.isAlive).toBe(false);
 	});
 });
