@@ -9,6 +9,7 @@ import { WebSocket, type WebSocketServer } from "ws";
 import { verifyWsToken } from "./auth.js";
 import type { DockerManager } from "./dockerManager.js";
 import { logger } from "./logger.js";
+import { TERMINAL_DIM_MAX } from "./routes.js";
 import { ForbiddenError, NotFoundError, type SessionManager } from "./sessionManager.js";
 import type { WsClientMessage, WsServerMessage } from "./types.js";
 
@@ -133,16 +134,19 @@ export function handleWsConnection(
 	// capture-pane runs at the actual viewport size on this attach;
 	// otherwise the replay arrives at D1's stored size and the user
 	// sees mis-aligned columns until something fires a frontend
-	// resize. Bounds match POST /sessions in routes.ts.
-	const URL_DIM_MAX = 1024;
+	// resize. Bounds match POST /sessions (TERMINAL_DIM_MAX shared
+	// from routes.ts so both validators move together).
 	const parseDim = (re: RegExp): number | null => {
 		const m = url.match(re);
 		if (m === null) return null;
 		const n = Number.parseInt(m[1]!, 10);
-		return Number.isInteger(n) && n >= 1 && n <= URL_DIM_MAX ? n : null;
+		return Number.isInteger(n) && n >= 1 && n <= TERMINAL_DIM_MAX ? n : null;
 	};
-	const urlCols = parseDim(/[?&]cols=([^&#]+)/);
-	const urlRows = parseDim(/[?&]rows=([^&#]+)/);
+	// `\d{1,4}` (not `[^&#]+`) so values like `cols=100abc` don't
+	// silently truncate via parseInt's partial-parse — the value will
+	// just fail to match and fall through to session.cols.
+	const urlCols = parseDim(/[?&]cols=(\d{1,4})/);
+	const urlRows = parseDim(/[?&]rows=(\d{1,4})/);
 
 	// Async auth + attach flow
 	(async () => {
