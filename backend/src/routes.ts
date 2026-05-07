@@ -354,6 +354,34 @@ export function buildRouter(
 			res.status(400).json({ error: "body.name is required" });
 			return;
 		}
+		// Cap session name at the request boundary. The 100KB express.json
+		// body limit is the only upstream bound otherwise — a 50KB name
+		// would land in D1 verbatim and ride out on every list response.
+		// 64 matches USERNAME_MAX_LEN and the tab-label cap; same shape of
+		// "user-controlled string with no other natural limit" → same cap.
+		// The empty-string case is already handled by the `!name` guard
+		// above; only the upper bound needs to be checked here. See #149.
+		if (name.length > SESSION_NAME_MAX_LEN) {
+			res
+				.status(400)
+				.json({ error: `body.name must be at most ${SESSION_NAME_MAX_LEN} characters` });
+			return;
+		}
+		// Numeric dimensions: integer + sane range. xterm uses these to drive
+		// PTY size, and tmux can be unhappy with extreme values; also keeps
+		// nonsense like cols: -1 / cols: 1e9 out of the row.
+		if (cols !== undefined && !isValidTerminalDim(cols)) {
+			res.status(400).json({
+				error: `body.cols must be an integer in 1..${TERMINAL_DIM_MAX}`,
+			});
+			return;
+		}
+		if (rows !== undefined && !isValidTerminalDim(rows)) {
+			res.status(400).json({
+				error: `body.rows must be an integer in 1..${TERMINAL_DIM_MAX}`,
+			});
+			return;
+		}
 		let validatedEnvVars: Record<string, string>;
 		try {
 			validatedEnvVars = validateEnvVars(envVars);
@@ -777,6 +805,28 @@ export function buildRouter(
 	);
 
 	return router;
+}
+
+// POST /sessions input caps. Bound user-controlled fields at the
+// request boundary so D1 rows and future name-rendering UI don't
+// have to defend against multi-KB strings or absurd terminal sizes.
+// 64 for the name matches USERNAME_MAX_LEN and the tab-label cap
+// (same shape of "user-controlled string with no other natural
+// limit"). 1024 for cols/rows is well above any realistic terminal
+// (most clients stay under 500×200) and well below sizes that would
+// upset xterm/tmux. See #149.
+const SESSION_NAME_MAX_LEN = 64;
+const TERMINAL_DIM_MAX = 1024;
+
+// Type-guard for the cols/rows numeric inputs on POST /sessions.
+// Returns true only for finite integers in [1, TERMINAL_DIM_MAX] —
+// rejects NaN, Infinity, floats, negatives, and absurd values that
+// would persist in D1 even though tmux/xterm would clamp or refuse
+// them at runtime.
+function isValidTerminalDim(value: unknown): value is number {
+	return (
+		typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= TERMINAL_DIM_MAX
+	);
 }
 
 function serializeMeta(m: SessionMeta) {

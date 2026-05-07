@@ -762,4 +762,71 @@ describe("auth route rate limiting", () => {
 		expect(r4.headers.get("retry-after")).not.toBeNull();
 		expect(await r4.json()).toMatchObject({ scope: "ip" });
 	});
+
+	// ── POST /sessions input validation (#149) ────────────────────────────
+	// These tests pin the request-boundary caps on session name / cols /
+	// rows. Without them, express.json's 100KB body limit would be the
+	// only upstream bound — a 50KB session name would land in D1 verbatim,
+	// and `cols: -1` / `cols: 1e9` would persist to the row.
+	//
+	// The auth.js mock passes requireAuth through as a no-op, so the
+	// handler runs with `req.userId === undefined`. All four cases below
+	// fail at the validation step BEFORE touching userId or sessions.create,
+	// so the missing userId is fine.
+
+	async function postSession(body: unknown): Promise<Response> {
+		return fetch(`${baseUrl}/api/sessions`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+		});
+	}
+
+	it("POST /sessions rejects a name longer than 64 chars with 400", async () => {
+		await spinUp({
+			login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
+			register: { ipMax: 1000, ipWindowMs: 60_000 },
+		});
+
+		const r = await postSession({ name: "a".repeat(65) });
+
+		expect(r.status).toBe(400);
+		expect(await r.json()).toMatchObject({ error: expect.stringContaining("64") });
+	});
+
+	it("POST /sessions rejects negative cols with 400", async () => {
+		await spinUp({
+			login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
+			register: { ipMax: 1000, ipWindowMs: 60_000 },
+		});
+
+		const r = await postSession({ name: "ok", cols: -1 });
+
+		expect(r.status).toBe(400);
+		expect(await r.json()).toMatchObject({ error: expect.stringContaining("body.cols") });
+	});
+
+	it("POST /sessions rejects non-integer rows with 400", async () => {
+		await spinUp({
+			login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
+			register: { ipMax: 1000, ipWindowMs: 60_000 },
+		});
+
+		const r = await postSession({ name: "ok", rows: 24.5 });
+
+		expect(r.status).toBe(400);
+		expect(await r.json()).toMatchObject({ error: expect.stringContaining("body.rows") });
+	});
+
+	it("POST /sessions rejects rows above the 1024 cap with 400", async () => {
+		await spinUp({
+			login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
+			register: { ipMax: 1000, ipWindowMs: 60_000 },
+		});
+
+		const r = await postSession({ name: "ok", rows: 100_000 });
+
+		expect(r.status).toBe(400);
+		expect(await r.json()).toMatchObject({ error: expect.stringContaining("1024") });
+	});
 });
