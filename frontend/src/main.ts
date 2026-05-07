@@ -19,6 +19,7 @@ import {
 	deleteTab,
 	type Invite,
 	InviteRequiredError,
+	isAdmin,
 	isLoggedIn,
 	listInvites,
 	listSessions,
@@ -199,7 +200,19 @@ function showApp() {
 	// a future swap of "●" for the actual username only needs editing
 	// a single line.
 	sidebarUserDisplay.textContent = userDisplay.textContent;
+	applyAdminVisibility();
 	refreshSessions();
+}
+
+// #50: gate invite-mint UI on the current session's admin status.
+// Both buttons (desktop top bar + mobile sidebar) flip together. Read
+// from the api-layer mirror, which is itself hydrated from /auth/status
+// and the login/register responses, so this just reflects the current
+// authoritative answer without needing its own round-trip.
+function applyAdminVisibility() {
+	const admin = isAdmin();
+	invitesBtn.classList.toggle("hidden", !admin);
+	sidebarInvitesBtn.classList.toggle("hidden", !admin);
 }
 
 function updateAuthUI() {

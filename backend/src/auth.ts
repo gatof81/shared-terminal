@@ -95,11 +95,18 @@ export class UsernameTakenError extends Error {
 	}
 }
 
+export interface RegisterResult {
+	userId: string;
+	token: string;
+	/** Bootstrap user gets is_admin=1; everyone else defaults to 0 (#50). */
+	isAdmin: boolean;
+}
+
 export async function registerUser(
 	username: string,
 	password: string,
 	inviteCode: string | undefined,
-): Promise<{ userId: string; token: string }> {
+): Promise<RegisterResult> {
 	const userId = uuidv4();
 
 	// Bootstrap: first account ever doesn't need an invite. Skip
@@ -118,13 +125,16 @@ export async function registerUser(
 		// only path where we hash unconditionally — every other path
 		// validates an invite first) is required by the conditional shape.
 		const bootstrapHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+		// Bootstrap user gets is_admin=1 inline (#50). The conditional
+		// INSERT shape stays — only the loser race-arm doesn't reach
+		// here.
 		const insert = await d1Query(
-			"INSERT INTO users (id, username, password_hash) " +
-				"SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM users)",
+			"INSERT INTO users (id, username, password_hash, is_admin) " +
+				"SELECT ?, ?, ?, 1 WHERE NOT EXISTS (SELECT 1 FROM users)",
 			[userId, username, bootstrapHash],
 		);
 		if (insert.meta.changes === 1) {
-			return { userId, token: signToken(userId, username) };
+			return { userId, token: signToken(userId, username), isAdmin: true };
 		}
 		// Race loser: a concurrent bootstrap got there first and we have
 		// no invite to fall back on. Match the steady-state response so
@@ -197,7 +207,9 @@ export async function registerUser(
 		throw err;
 	}
 
-	return { userId, token: signToken(userId, username) };
+	// Steady-state register: invite-redeeming users default to non-admin
+	// (the column default in db.ts). Promotion happens manually post-bootstrap.
+	return { userId, token: signToken(userId, username), isAdmin: false };
 }
 
 // ── Invites ────────────────────────────────────────────────────────────────
@@ -405,12 +417,16 @@ export async function ensureAuthReady(): Promise<void> {
 	await DUMMY_PASSWORD_HASH_PROMISE;
 }
 
-export async function loginUser(
-	username: string,
-	password: string,
-): Promise<{ userId: string; token: string }> {
-	const result = await d1Query<{ id: string; password_hash: string }>(
-		"SELECT id, password_hash FROM users WHERE username = ?",
+export interface LoginResult {
+	userId: string;
+	token: string;
+	/** Pulled from the same row as the password hash — no extra D1 round-trip. */
+	isAdmin: boolean;
+}
+
+export async function loginUser(username: string, password: string): Promise<LoginResult> {
+	const result = await d1Query<{ id: string; password_hash: string; is_admin: number }>(
+		"SELECT id, password_hash, is_admin FROM users WHERE username = ?",
 		[username],
 	);
 
@@ -428,7 +444,7 @@ export async function loginUser(
 	}
 
 	const token = signToken(row.id, username);
-	return { userId: row.id, token };
+	return { userId: row.id, token, isAdmin: row.is_admin === 1 };
 }
 
 function signToken(userId: string, username: string): string {
@@ -565,6 +581,42 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
 	(req as AuthedRequest).userId = payload.sub;
 	(req as AuthedRequest).username = payload.username;
 	next();
+}
+
+/**
+ * Gate a route on the caller having `is_admin = 1` in `users`. MUST chain
+ * after `requireAuth` — reads `req.userId` from the AuthedRequest the
+ * preceding middleware populated. Does its own D1 lookup rather than
+ * trusting a JWT-embedded flag so that admin grant/revoke takes effect
+ * without users needing to log out and back in.
+ *
+ * #50: today this gates POST /invites and DELETE /invites/:hash. GET
+ * /invites stays auth-only so a non-admin sees their (always-empty) list
+ * and the "you can't mint" UX comes from the missing button rather than
+ * a confusing 403 on read.
+ */
+export async function requireAdmin(req: Request, res: Response, next: NextFunction): Promise<void> {
+	const userId = (req as AuthedRequest).userId;
+	if (!userId) {
+		// Belt-and-braces: if a future caller forgets to chain after
+		// requireAuth, fail loud rather than silently allow.
+		res.status(401).json({ error: "Authentication required" });
+		return;
+	}
+	try {
+		const result = await d1Query<{ is_admin: number }>("SELECT is_admin FROM users WHERE id = ?", [
+			userId,
+		]);
+		const row = result.results[0];
+		if (!row || row.is_admin !== 1) {
+			res.status(403).json({ error: "Admin privileges required" });
+			return;
+		}
+		next();
+	} catch (err) {
+		logger.error(`[auth] requireAdmin lookup failed: ${(err as Error).message}`);
+		res.status(500).json({ error: "Internal server error" });
+	}
 }
 
 // ── WebSocket auth ──────────────────────────────────────────────────────────

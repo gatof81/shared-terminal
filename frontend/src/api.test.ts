@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 interface Api {
 	isLoggedIn: typeof import("./api.js").isLoggedIn;
+	isAdmin: typeof import("./api.js").isAdmin;
 	checkAuthStatus: typeof import("./api.js").checkAuthStatus;
 	register: typeof import("./api.js").register;
 	login: typeof import("./api.js").login;
@@ -61,7 +62,7 @@ describe("login state", () => {
 	it("checkAuthStatus mirrors the server's `authenticated` field into module state", async () => {
 		const api = await loadApi();
 		fetchSpy.mockResolvedValueOnce(
-			mockFetchResponse({ json: { needsSetup: false, authenticated: true } }),
+			mockFetchResponse({ json: { needsSetup: false, authenticated: true, isAdmin: false } }),
 		);
 
 		const status = await api.checkAuthStatus();
@@ -72,7 +73,7 @@ describe("login state", () => {
 	it("checkAuthStatus authenticated=false leaves isLoggedIn() false", async () => {
 		const api = await loadApi();
 		fetchSpy.mockResolvedValueOnce(
-			mockFetchResponse({ json: { needsSetup: false, authenticated: false } }),
+			mockFetchResponse({ json: { needsSetup: false, authenticated: false, isAdmin: false } }),
 		);
 
 		await api.checkAuthStatus();
@@ -81,7 +82,7 @@ describe("login state", () => {
 
 	it("login flips isLoggedIn to true on success", async () => {
 		const api = await loadApi();
-		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1" } }));
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1", isAdmin: false } }));
 
 		await api.login("alice", "secret");
 		expect(api.isLoggedIn()).toBe(true);
@@ -89,7 +90,7 @@ describe("login state", () => {
 
 	it("logout POSTs /auth/logout and flips isLoggedIn to false even if the call fails", async () => {
 		const api = await loadApi();
-		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1" } }));
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1", isAdmin: false } }));
 		await api.login("alice", "secret");
 		expect(api.isLoggedIn()).toBe(true);
 
@@ -123,7 +124,7 @@ describe("apiFetch — credentials and headers (#18)", () => {
 	it("never sends an Authorization header (cookie-based auth, post-#18)", async () => {
 		const api = await loadApi();
 		// Simulate a logged-in session.
-		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1" } }));
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1", isAdmin: false } }));
 		await api.login("alice", "secret");
 
 		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: [] }));
@@ -167,7 +168,7 @@ describe("apiFetch — 401 stale-session semantics (issue #95)", () => {
 	it("authed 401 flips isLoggedIn to false AND dispatches SESSION_EXPIRED_EVENT exactly once", async () => {
 		const api = await loadApi();
 		// Establish a logged-in state so the 401 is classified as "stale".
-		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1" } }));
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1", isAdmin: false } }));
 		await api.login("alice", "secret");
 
 		const handler = vi.fn();
@@ -206,7 +207,7 @@ describe("apiFetch — 401 stale-session semantics (issue #95)", () => {
 
 	it("dedups concurrent 401 bursts so only one event fires per stale-session window", async () => {
 		const api = await loadApi();
-		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1" } }));
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1", isAdmin: false } }));
 		await api.login("alice", "secret");
 
 		const handler = vi.fn();
@@ -232,7 +233,7 @@ describe("apiFetch — 401 stale-session semantics (issue #95)", () => {
 
 	it("403 does NOT flip isLoggedIn (policy, not stale)", async () => {
 		const api = await loadApi();
-		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1" } }));
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1", isAdmin: false } }));
 		await api.login("alice", "secret");
 
 		fetchSpy.mockResolvedValueOnce(
@@ -252,10 +253,12 @@ describe("apiFetch — 401 stale-session semantics (issue #95)", () => {
 describe("auth API", () => {
 	it("register success returns the userId and flips isLoggedIn", async () => {
 		const api = await loadApi();
-		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ status: 201, json: { userId: "u1" } }));
+		fetchSpy.mockResolvedValueOnce(
+			mockFetchResponse({ status: 201, json: { userId: "u1", isAdmin: false } }),
+		);
 
 		const data = await api.register("alice", "secret");
-		expect(data).toEqual({ userId: "u1" });
+		expect(data).toEqual({ userId: "u1", isAdmin: false });
 		expect(api.isLoggedIn()).toBe(true);
 	});
 
@@ -282,10 +285,10 @@ describe("auth API", () => {
 
 	it("login success returns the userId", async () => {
 		const api = await loadApi();
-		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1" } }));
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1", isAdmin: false } }));
 
 		const data = await api.login("u", "p");
-		expect(data).toEqual({ userId: "u1" });
+		expect(data).toEqual({ userId: "u1", isAdmin: false });
 	});
 });
 
@@ -369,5 +372,67 @@ describe("invite hash-at-rest wire shape", () => {
 		expect(list[0].codeHash).toBe("0".repeat(64));
 		expect(list[0].codePrefix).toBe("ab12");
 		expect((list[0] as unknown as Record<string, unknown>).code).toBeUndefined();
+	});
+});
+
+// ── Admin mirror (#50) ──────────────────────────────────────────────────────
+
+describe("admin state mirror", () => {
+	it("isAdmin defaults to false on a fresh load", async () => {
+		const api = await loadApi();
+		expect(api.isAdmin()).toBe(false);
+	});
+
+	it("checkAuthStatus mirrors isAdmin: true into the module state", async () => {
+		const api = await loadApi();
+		fetchSpy.mockResolvedValueOnce(
+			mockFetchResponse({ json: { needsSetup: false, authenticated: true, isAdmin: true } }),
+		);
+		await api.checkAuthStatus();
+		expect(api.isAdmin()).toBe(true);
+	});
+
+	it("login response sets isAdmin from the server payload", async () => {
+		const api = await loadApi();
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1", isAdmin: true } }));
+		await api.login("admin", "secret");
+		expect(api.isAdmin()).toBe(true);
+	});
+
+	it("register response sets isAdmin from the server payload (bootstrap path)", async () => {
+		const api = await loadApi();
+		// Bootstrap-register returns isAdmin: true so the new user sees
+		// the invite UI without waiting for the next /auth/status call.
+		fetchSpy.mockResolvedValueOnce(
+			mockFetchResponse({ status: 201, json: { userId: "u1", isAdmin: true } }),
+		);
+		await api.register("alice", "secret");
+		expect(api.isAdmin()).toBe(true);
+	});
+
+	it("logout flips isAdmin back to false", async () => {
+		const api = await loadApi();
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1", isAdmin: true } }));
+		await api.login("admin", "secret");
+		expect(api.isAdmin()).toBe(true);
+
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ status: 204 }));
+		await api.logout();
+		expect(api.isAdmin()).toBe(false);
+	});
+
+	it("authed 401 flips isAdmin back to false alongside isLoggedIn", async () => {
+		const api = await loadApi();
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ json: { userId: "u1", isAdmin: true } }));
+		await api.login("admin", "secret");
+		expect(api.isAdmin()).toBe(true);
+
+		fetchSpy.mockResolvedValueOnce(mockFetchResponse({ status: 401 }));
+		await api.listSessions().catch(() => {
+			/* drop */
+		});
+
+		expect(api.isAdmin()).toBe(false);
+		expect(api.isLoggedIn()).toBe(false);
 	});
 });

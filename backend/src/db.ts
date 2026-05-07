@@ -85,11 +85,18 @@ export async function d1Batch(statements: string[]): Promise<void> {
 export async function migrateDb(): Promise<void> {
 	logger.info("[db] running D1 migrations…");
 	await d1Batch([
+		// `is_admin` (0/1) gates invite-mint and revoke (#50). The
+		// bootstrap-register path INSERTs is_admin=1; every other account
+		// defaults to 0. Auto-promotion of an existing earliest-created
+		// user happens AFTER the d1Batch (see migration block below) so a
+		// pre-existing single-user deploy doesn't get locked out of
+		// minting after the column is added.
 		`CREATE TABLE IF NOT EXISTS users (
                         id          TEXT PRIMARY KEY,
                         username    TEXT UNIQUE NOT NULL,
                         password_hash TEXT NOT NULL,
-                        created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+                        created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                        is_admin    INTEGER NOT NULL DEFAULT 0
                 )`,
 		// `sessions` must follow `users` — the FK on user_id references
 		// users(id), and these statements run sequentially. Don't reorder
@@ -156,6 +163,26 @@ export async function migrateDb(): Promise<void> {
 			throw err;
 		}
 	}
+	// #50: same shape — add `users.is_admin` to pre-existing tables.
+	try {
+		await d1Query("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0");
+	} catch (err) {
+		if (!/duplicate column name|already exists/i.test((err as Error).message)) {
+			throw err;
+		}
+	}
+	// Auto-promote the earliest-created user when no admin exists yet.
+	// Idempotent: re-runs are no-ops once an admin row exists. Both
+	// fresh deploys post-bootstrap and pre-#50 single-user dev DBs
+	// converge on "first user is admin" without operator action. On a
+	// truly empty users table the inner SELECT is null → the outer WHERE
+	// can't match → no-op, and the bootstrap-register path will set
+	// is_admin=1 directly when the first account lands.
+	await d1Query(
+		"UPDATE users SET is_admin = 1 " +
+			"WHERE NOT EXISTS (SELECT 1 FROM users WHERE is_admin = 1) " +
+			"AND id = (SELECT id FROM users ORDER BY created_at ASC, id ASC LIMIT 1)",
+	);
 	// #49 migration: pre-existing `invite_codes` tables that still have
 	// the old plaintext `code` column need to be rebuilt. Cloudflare D1
 	// has no built-in `sha256()`, so the hash has to be computed in app

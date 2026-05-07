@@ -1,6 +1,17 @@
 import type { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// `requireAdmin` runs a D1 lookup; mock the db module so tests don't
+// need network access. The other functions exercised in this file are
+// pure (validateJwtSecret reads env, isAllowedWsOrigin etc. are
+// in-memory) so they don't reach this stub. Defined at module scope and
+// hoisted so the mock is in place before `import { … } from "./auth.js"`.
+const dbStubs = vi.hoisted(() => ({
+	d1Query: vi.fn(async () => ({ results: [], meta: { changes: 0 } })),
+}));
+vi.mock("./db.js", () => dbStubs);
+
 import {
 	__resetJwtSecretForTests,
 	AUTH_COOKIE_NAME,
@@ -8,6 +19,7 @@ import {
 	isAllowedWsOrigin,
 	originMatches,
 	parseCorsOrigins,
+	requireAdmin,
 	requireAuth,
 	validateJwtSecret,
 	warnIfWildcardCorsInProduction,
@@ -582,5 +594,111 @@ describe("requireAuth", () => {
 
 		expect((req as unknown as { userId: string }).userId).toBe("from-cookies");
 		expect(next).toHaveBeenCalled();
+	});
+});
+
+// ── requireAdmin (#50) ─────────────────────────────────────────────────────
+// Pins the gate that protects POST /invites and DELETE /invites/:hash.
+// The middleware does a D1 lookup so admin grant/revoke takes effect
+// without users needing to log out and back in — these tests exercise
+// the lookup against a hoisted vi.fn() stub.
+
+describe("requireAdmin", () => {
+	beforeEach(() => {
+		dbStubs.d1Query.mockReset();
+	});
+
+	function makeRes(): {
+		res: Response;
+		status: ReturnType<typeof vi.fn>;
+		json: ReturnType<typeof vi.fn>;
+	} {
+		const json = vi.fn();
+		const status = vi.fn(() => ({ json }) as unknown as Response);
+		return { res: { status } as unknown as Response, status, json };
+	}
+
+	it("401s when chained without requireAuth (req.userId missing)", async () => {
+		const req = {} as unknown as Request;
+		const { res, status, json } = makeRes();
+		const next = vi.fn() as unknown as NextFunction;
+
+		await requireAdmin(req, res, next);
+
+		expect(status).toHaveBeenCalledWith(401);
+		expect(json).toHaveBeenCalledWith({ error: "Authentication required" });
+		expect(next).not.toHaveBeenCalled();
+		// Belt-and-braces guard fires before the D1 round-trip.
+		expect(dbStubs.d1Query).not.toHaveBeenCalled();
+	});
+
+	it("403s when the user row is_admin = 0", async () => {
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [{ is_admin: 0 }],
+			meta: { changes: 0 },
+		});
+		const req = { userId: "u-1", username: "alice" } as unknown as Request;
+		const { res, status, json } = makeRes();
+		const next = vi.fn() as unknown as NextFunction;
+
+		await requireAdmin(req, res, next);
+
+		expect(status).toHaveBeenCalledWith(403);
+		expect(json).toHaveBeenCalledWith({ error: "Admin privileges required" });
+		expect(next).not.toHaveBeenCalled();
+	});
+
+	it("403s when the user row is missing entirely (deleted mid-session)", async () => {
+		// User was deleted between the JWT being issued and now. JWT still
+		// validates, but the user row is gone — must not be admin.
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [],
+			meta: { changes: 0 },
+		});
+		const req = { userId: "u-ghost", username: "ghost" } as unknown as Request;
+		const { res, status } = makeRes();
+		const next = vi.fn() as unknown as NextFunction;
+
+		await requireAdmin(req, res, next);
+
+		expect(status).toHaveBeenCalledWith(403);
+		expect(next).not.toHaveBeenCalled();
+	});
+
+	it("calls next() when is_admin = 1", async () => {
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [{ is_admin: 1 }],
+			meta: { changes: 0 },
+		});
+		const req = { userId: "u-admin", username: "boss" } as unknown as Request;
+		const { res } = makeRes();
+		const next = vi.fn() as unknown as NextFunction;
+
+		await requireAdmin(req, res, next);
+
+		expect(next).toHaveBeenCalledTimes(1);
+		// SQL shape pin so a refactor renaming the column would surface.
+		expect(dbStubs.d1Query.mock.calls[0]?.[0]).toMatch(/SELECT is_admin FROM users WHERE id = \?/i);
+		expect(dbStubs.d1Query.mock.calls[0]?.[1]).toEqual(["u-admin"]);
+	});
+
+	it("500s on a D1 error rather than letting the middleware crash", async () => {
+		// A transient D1 fault should not be silently treated as 'not
+		// admin' (would lock out admins on every blip) nor surface a
+		// stack trace. 500 + a generic message is the right shape.
+		dbStubs.d1Query.mockRejectedValueOnce(new Error("ECONNRESET"));
+		const errSpy = vi.spyOn(logger, "error").mockImplementation(() => {
+			/* swallow */
+		});
+		const req = { userId: "u-1", username: "alice" } as unknown as Request;
+		const { res, status, json } = makeRes();
+		const next = vi.fn() as unknown as NextFunction;
+
+		await requireAdmin(req, res, next);
+
+		expect(status).toHaveBeenCalledWith(500);
+		expect(json).toHaveBeenCalledWith({ error: "Internal server error" });
+		expect(next).not.toHaveBeenCalled();
+		errSpy.mockRestore();
 	});
 });

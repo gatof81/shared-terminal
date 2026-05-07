@@ -15,6 +15,11 @@ const authStubs = vi.hoisted(() => ({
 	hasAnyUsers: vi.fn(async () => true),
 	listInvites: vi.fn(async (_u?: string) => [] as unknown[]),
 	requireAuth: (_req: unknown, _res: unknown, next: () => void) => next(),
+	// requireAdmin is async in production but the route chain handles
+	// either return shape (express awaits the next() call effectively
+	// via promise resolution); a sync passthrough is enough for tests
+	// that don't care about the admin gate.
+	requireAdmin: (_req: unknown, _res: unknown, next: () => void) => next(),
 	// Cookie-auth helpers (#18). Tests don't read the cookie back, so a
 	// no-op for set/clear and a permissive shape-only verify is enough.
 	AUTH_COOKIE_NAME: "st_token",
