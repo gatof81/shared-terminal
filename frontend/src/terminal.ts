@@ -220,8 +220,29 @@ export function openTerminalSession(opts: {
 	// in xterm's post-parse callback. Selection-active is the same case:
 	// the user is actively reading what they selected, so don't move them.
 	let userScrolled = false;
+	// `restoring` gates onScroll re-sampling during our own scrollToLine
+	// callback. scrollToLine in xterm v5 fires onScroll synchronously, and
+	// at that point baseY may already have advanced (the write that just
+	// completed appended rows), so a naive re-sample of viewportY < baseY
+	// could observe transient ordering and flip userScrolled to false for
+	// one tick — the next write would then snap the viewport to the
+	// cursor and the flag would re-latch on the user's next wheel/swipe,
+	// producing a visible jitter at the boundary case. Skipping the
+	// re-sample while we're the one driving the scroll keeps the flag
+	// monotonic for the lifetime of the user's scrollback session.
+	let restoring = false;
 	const scrollListener = term.onScroll(() => {
+		if (restoring) return;
 		userScrolled = term.buffer.active.viewportY < term.buffer.active.baseY;
+	});
+	// When the program switches between main and alternate buffers (vim,
+	// claude interactive, htop, …) the previous buffer's scrollback is
+	// no longer the buffer the user sees. Carry-over `userScrolled = true`
+	// from main → alt would currently be saved only by the coincidence
+	// that alt-buffer viewportY === baseY === 0; clear it explicitly so
+	// the invariant doesn't depend on an undocumented xterm assumption.
+	const bufferChangeListener = term.buffer.onBufferChange(() => {
+		userScrolled = false;
 	});
 
 	// ── WebSocket connection ────────────────────────────────────────────────
@@ -271,7 +292,9 @@ export function openTerminalSession(opts: {
 					// disposed: the parent has already torn down the term.
 					if (disposed) return;
 					if (preserve && term.buffer.active.viewportY !== yBefore) {
+						restoring = true;
 						term.scrollToLine(yBefore);
+						restoring = false;
 					}
 				});
 				break;
@@ -578,6 +601,7 @@ export function openTerminalSession(opts: {
 		inputDisposable.dispose();
 		linkProviderDisposable.dispose();
 		scrollListener.dispose();
+		bufferChangeListener.dispose();
 		pendingRestoreCanvas?.removeEventListener("webglcontextrestored", onContextRestored);
 		container.removeEventListener("webglcontextlost", onContextLost);
 		webgl?.dispose();
