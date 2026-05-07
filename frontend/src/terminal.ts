@@ -55,16 +55,7 @@ export function openTerminalSession(opts: {
 		fontFamily:
 			'"Cascadia Code", "Fira Code", "JetBrains Mono", "Monaco", "Courier New", monospace',
 		fontSize: fontSize ?? 14,
-		// Stay at xterm's default 1.0. A non-integer factor (we previously had
-		// 1.2) yields a fractional cell pixel height at common DPRs — xterm
-		// rounds independently between the WebGL canvas and the DOM viewport,
-		// so the two paint surfaces disagree on where row N ends. The touch-
-		// scroll math in onTouchMove also derives cell height from
-		// container.clientHeight / term.rows, so a sub-pixel mismatch turns
-		// into a per-frame drift between fingers and content. Every fontSize
-		// in FONT_SIZE_STEPS (main.ts) is an integer, so factor 1.0 keeps the
-		// cell height integer at every step.
-		lineHeight: 1,
+		lineHeight: 1.2,
 		cursorBlink: true,
 		cursorInactiveStyle: "outline",
 		convertEol: true,
