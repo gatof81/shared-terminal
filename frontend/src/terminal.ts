@@ -556,7 +556,49 @@ export function openTerminalSession(opts: {
 				/* container detached mid-resize */
 			}
 			if (term.cols !== lastSentCols || term.rows !== lastSentRows) {
-				sendResizeDebounced();
+				// Soft-keyboard slide-in, URL bar reveal, font-size cycle, and
+				// rotation can all narrow xterm to fewer rows/cols mid-stream.
+				// Two failure modes (#155):
+				//
+				//   1. WebGL atlas stale — at a different cell pixel height
+				//      (font-size cycle, DPR change while we were fitting),
+				//      cached glyph textures don't align with the new grid;
+				//      tmux's repaint lands on top of misaligned cells and
+				//      leaves duplicated rows / ghost glyphs visible until
+				//      the next visibility change.
+				//   2. Backend lag on shrink — tmux is still painting at the
+				//      OLD size for the duration of the debounce window.
+				//      Anything it writes past the new bottom row lands on
+				//      cells xterm has already reflowed away. Bypassing the
+				//      debounce in the shrink direction tells tmux to resize
+				//      now so it stops over-painting; growth still coalesces
+				//      because nothing on the wire goes wrong if tmux paints
+				//      at a SMALLER size than xterm has already reflowed to.
+				//
+				// History note: this block was originally landed in #159 and
+				// reverted in #163 during a debugging session attributing
+				// "text outside input lines" / "Mac wheel dead" to it. Those
+				// symptoms have since been traced to other root causes —
+				// #169 (first-tab fit-before-tab-bar layout race) and #173
+				// (tmux mouse-on consuming wheel events) — and fixed
+				// independently. Re-applying with that diagnostic context.
+				const shrinking = term.rows < lastSentRows || term.cols < lastSentCols;
+				try {
+					webgl?.clearTextureAtlas();
+				} catch {
+					webgl?.dispose();
+					webgl = null;
+				}
+				term.refresh(0, term.rows - 1);
+				if (shrinking) {
+					if (resizeSendTimer !== null) clearTimeout(resizeSendTimer);
+					resizeSendTimer = null;
+					lastSentCols = term.cols;
+					lastSentRows = term.rows;
+					send({ type: "resize", cols: term.cols, rows: term.rows });
+				} else {
+					sendResizeDebounced();
+				}
 			}
 		});
 	};
@@ -575,6 +617,14 @@ export function openTerminalSession(opts: {
 	// row repaints.
 	const onVisibilityChange = () => {
 		if (document.hidden) return;
+		// scheduleFit's rAF will atlas-clear + refresh too, but only if the
+		// fit detects a dimension change. The synchronous pair below covers
+		// the no-change case — tab hidden then restored at the same size,
+		// where the GPU may still need a fresh atlas (DPR change, OS font-
+		// smoothing toggle) and the canvas needs a repaint to flush rows
+		// that streamed in while rAF was throttled. The double-fire on the
+		// dimension-change path is harmless: refresh is idempotent and
+		// atlas clear is cheap.
 		scheduleFit();
 		try {
 			webgl?.clearTextureAtlas();
