@@ -206,6 +206,45 @@ export function openTerminalSession(opts: {
 	};
 	container.addEventListener("pointerdown", focusOnPointer);
 
+	// ── Scrollback preservation ────────────────────────────────────────────
+	// While the user is reading scrollback (or has an active selection),
+	// streaming output from tmux must NOT yank the viewport back to the
+	// cursor. xterm's default is to track the cursor when the program
+	// writes — fine when the user is at the bottom, awful when they've
+	// scrolled up to read a build log or an OAuth URL that just disappeared.
+	//
+	// onScroll fires on every viewport movement (user wheel/swipe AND any
+	// scroll xterm does internally during a write). We sample
+	// `viewportY < baseY` to flip a flag. On the output-write path we
+	// capture viewportY pre-write and, if the flag was set, restore it
+	// in xterm's post-parse callback. Selection-active is the same case:
+	// the user is actively reading what they selected, so don't move them.
+	let userScrolled = false;
+	// `restoring` gates onScroll re-sampling during our own scrollToLine
+	// callback. scrollToLine in xterm v5 fires onScroll synchronously, and
+	// at that point baseY may already have advanced (the write that just
+	// completed appended rows), so a naive re-sample of viewportY < baseY
+	// could observe transient ordering and flip userScrolled to false for
+	// one tick — the next write would then snap the viewport to the
+	// cursor and the flag would re-latch on the user's next wheel/swipe,
+	// producing a visible jitter at the boundary case. Skipping the
+	// re-sample while we're the one driving the scroll keeps the flag
+	// monotonic for the lifetime of the user's scrollback session.
+	let restoring = false;
+	const scrollListener = term.onScroll(() => {
+		if (restoring) return;
+		userScrolled = term.buffer.active.viewportY < term.buffer.active.baseY;
+	});
+	// When the program switches between main and alternate buffers (vim,
+	// claude interactive, htop, …) the previous buffer's scrollback is
+	// no longer the buffer the user sees. Carry-over `userScrolled = true`
+	// from main → alt would currently be saved only by the coincidence
+	// that alt-buffer viewportY === baseY === 0; clear it explicitly so
+	// the invariant doesn't depend on an undocumented xterm assumption.
+	const bufferChangeListener = term.buffer.onBufferChange(() => {
+		userScrolled = false;
+	});
+
 	// ── WebSocket connection ────────────────────────────────────────────────
 	// Auth lives in an httpOnly cookie (#18). Browsers send cookies on the
 	// WS upgrade to the cookie's domain automatically — no token needs to
@@ -239,9 +278,40 @@ export function openTerminalSession(opts: {
 		}
 
 		switch (msg.type) {
-			case "output":
-				term.write(msg.data);
+			case "output": {
+				// yBefore must be captured pre-write — that's the position
+				// we want to hold the user at if the write moves the viewport.
+				// The "should we preserve?" decision, by contrast, is sampled
+				// AT CALLBACK TIME: term.write is async (parser drain) and
+				// the user can scroll back to the live tail during that
+				// window. A stale capture would snap them away from the
+				// new bottom for one write before self-correcting.
+				const yBefore = term.buffer.active.viewportY;
+				term.write(msg.data, () => {
+					// xterm fires this after parsing the chunk. If the write
+					// triggered an internal scroll (cursor advanced past the
+					// visible viewport, alt-buffer cup, screen clear, …),
+					// viewportY will have moved; restore it so the user
+					// keeps reading whatever they were reading. Skip when
+					// disposed: the parent has already torn down the term.
+					if (disposed) return;
+					const preserve = userScrolled || term.hasSelection();
+					if (preserve && term.buffer.active.viewportY !== yBefore) {
+						restoring = true;
+						try {
+							term.scrollToLine(yBefore);
+						} finally {
+							// finally so a scrollToLine throw can't leave the
+							// flag latched on — it would silence onScroll for
+							// the rest of the session and the user could no
+							// longer "unlock" preservation by scrolling to
+							// the bottom.
+							restoring = false;
+						}
+					}
+				});
 				break;
+			}
 			case "status":
 				onStatus(msg.status);
 				break;
@@ -543,6 +613,8 @@ export function openTerminalSession(opts: {
 		container.removeEventListener("touchcancel", onTouchCancel);
 		inputDisposable.dispose();
 		linkProviderDisposable.dispose();
+		scrollListener.dispose();
+		bufferChangeListener.dispose();
 		pendingRestoreCanvas?.removeEventListener("webglcontextrestored", onContextRestored);
 		container.removeEventListener("webglcontextlost", onContextLost);
 		webgl?.dispose();
