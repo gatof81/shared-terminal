@@ -279,9 +279,13 @@ export function openTerminalSession(opts: {
 
 		switch (msg.type) {
 			case "output": {
-				// hasSelection() and userScrolled both mean "user is reading
-				// something above the cursor" — don't yank them away.
-				const preserve = userScrolled || term.hasSelection();
+				// yBefore must be captured pre-write — that's the position
+				// we want to hold the user at if the write moves the viewport.
+				// The "should we preserve?" decision, by contrast, is sampled
+				// AT CALLBACK TIME: term.write is async (parser drain) and
+				// the user can scroll back to the live tail during that
+				// window. A stale capture would snap them away from the
+				// new bottom for one write before self-correcting.
 				const yBefore = term.buffer.active.viewportY;
 				term.write(msg.data, () => {
 					// xterm fires this after parsing the chunk. If the write
@@ -291,6 +295,7 @@ export function openTerminalSession(opts: {
 					// keeps reading whatever they were reading. Skip when
 					// disposed: the parent has already torn down the term.
 					if (disposed) return;
+					const preserve = userScrolled || term.hasSelection();
 					if (preserve && term.buffer.active.viewportY !== yBefore) {
 						restoring = true;
 						try {
