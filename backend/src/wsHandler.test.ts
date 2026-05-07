@@ -137,6 +137,24 @@ describe("handleWsConnection auth-first ordering", () => {
 		const errPayloads = ws.send.mock.calls.map((c) => c[0] as string);
 		expect(errPayloads).toContain(JSON.stringify({ type: "error", message: "Missing tab id" }));
 	});
+
+	// Regression test for #147. decodeURIComponent throws URIError on
+	// malformed sequences like `%G%`; without the try/catch the throw
+	// propagates out of the wss connection emit and (with no
+	// uncaughtException handler) terminates the entire backend,
+	// dropping every other attached session.
+	it("authenticated caller with an undecodable tab gets 'Invalid tab', does not throw", () => {
+		const ws = makeFakeWs();
+		const req = makeReq("/ws/sessions/abc?tab=%G%", true);
+		expect(() => {
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			handleWsConnection(ws as any, req as any, fakeSessions, fakeDocker);
+		}).not.toThrow();
+
+		expect(ws.close).toHaveBeenCalledWith(1008, "Invalid tab");
+		const errPayloads = ws.send.mock.calls.map((c) => c[0] as string);
+		expect(errPayloads).toContain(JSON.stringify({ type: "error", message: "Invalid tab id" }));
+	});
 });
 
 // ── endUpgradeSocketWithReply ──────────────────────────────────────────────
