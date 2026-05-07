@@ -679,9 +679,18 @@ function openTab(tabId: string) {
 	let entry = currentTerminals.get(tabId);
 	if (!entry) {
 		const pane = document.createElement("div");
-		pane.className = "tab-pane";
+		// `active` from creation, and the parent flipped to display:block
+		// BEFORE openTerminalSession runs. xterm's fit() inside that call
+		// is synchronous and reads container.clientWidth/Height — if the
+		// pane is still inside a display:none subtree it sees 0, falls
+		// back to the 80x24 default, and the WS opens at that bogus
+		// geometry. tmux then attaches/resumes at 80x24 and the visible
+		// terminal shows mis-columned output until the next resize event
+		// (sidebar toggle, viewport change) bumps it to real cols/rows.
+		pane.className = "tab-pane active";
 		pane.dataset.tabId = tabId;
 		terminalContainer.appendChild(pane);
+		terminalContainer.style.display = "block";
 
 		// Capture the sessionId for this terminal — if the user switches
 		// sessions while this WS is closing, `onStatus("disconnected")`
@@ -786,6 +795,12 @@ function openTab(tabId: string) {
 			pane.remove();
 			if (prevActiveTabId) {
 				currentTerminals.get(prevActiveTabId)?.pane.classList.add("active");
+			} else {
+				// We just flipped terminalContainer to display:block to host
+				// the new pane; with no prev pane to swap back to and our
+				// pane removed, leaving display:block would render an empty
+				// dark box. Revert.
+				terminalContainer.style.display = "none";
 			}
 			throw err;
 		}
