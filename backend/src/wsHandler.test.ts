@@ -157,6 +157,86 @@ describe("handleWsConnection auth-first ordering", () => {
 	});
 });
 
+// ── Geometry forwarding ───────────────────────────────────────────────────
+// On WS upgrade, the client passes its post-fit cols/rows in the URL so
+// docker.attach (and capture-pane downstream) run at the actual viewport
+// size — not at D1's stored last-known size. Without this, the replay
+// arrives at the wrong cols and the user sees mis-aligned columns until
+// a frontend resize event triggers a manual reflow. Bounds are 1..1024
+// integer; out-of-range or missing values fall back to session.cols/rows.
+
+describe("handleWsConnection geometry from URL", () => {
+	function makeMocks(sessionCols = 80, sessionRows = 24) {
+		const sessions = {
+			assertOwnership: vi
+				.fn()
+				.mockResolvedValue({ status: "running", cols: sessionCols, rows: sessionRows }),
+			updateConnected: vi.fn().mockResolvedValue(undefined),
+		} as unknown as SessionManager;
+		const docker = {
+			attach: vi.fn().mockResolvedValue({ replay: null, flushTail: () => {} }),
+			detach: vi.fn(),
+		} as unknown as DockerManager;
+		return { sessions, docker };
+	}
+
+	it("uses cols/rows from URL when both are valid", async () => {
+		const ws = makeFakeWs();
+		const { sessions, docker } = makeMocks();
+		const req = makeReq("/ws/sessions/abc?tab=tab-1&cols=200&rows=60", true);
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		handleWsConnection(ws as any, req as any, sessions, docker);
+		// Drain the async IIFE that runs assertOwnership → docker.attach.
+		await new Promise((r) => setImmediate(r));
+
+		expect(docker.attach).toHaveBeenCalledWith(
+			"abc",
+			expect.any(String),
+			200,
+			60,
+			expect.any(Function),
+			"tab-1",
+		);
+	});
+
+	it("falls back to session.cols/rows when URL omits them", async () => {
+		const ws = makeFakeWs();
+		const { sessions, docker } = makeMocks(120, 40);
+		const req = makeReq("/ws/sessions/abc?tab=tab-1", true);
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		handleWsConnection(ws as any, req as any, sessions, docker);
+		await new Promise((r) => setImmediate(r));
+
+		expect(docker.attach).toHaveBeenCalledWith(
+			"abc",
+			expect.any(String),
+			120,
+			40,
+			expect.any(Function),
+			"tab-1",
+		);
+	});
+
+	it("falls back to session.cols/rows when URL values are out of range", async () => {
+		const ws = makeFakeWs();
+		const { sessions, docker } = makeMocks(120, 40);
+		// 0 fails the >=1 guard, 9999 fails the <=1024 guard.
+		const req = makeReq("/ws/sessions/abc?tab=tab-1&cols=0&rows=9999", true);
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		handleWsConnection(ws as any, req as any, sessions, docker);
+		await new Promise((r) => setImmediate(r));
+
+		expect(docker.attach).toHaveBeenCalledWith(
+			"abc",
+			expect.any(String),
+			120,
+			40,
+			expect.any(Function),
+			"tab-1",
+		);
+	});
+});
+
 // ── endUpgradeSocketWithReply ──────────────────────────────────────────────
 // Pins the half-close → bounded-destroy invariant from issue #67. A peer
 // that never FINs would otherwise hold the upgrade socket in CLOSE_WAIT

@@ -128,6 +128,22 @@ export function handleWsConnection(
 	}
 	const tabId = rawTab;
 
+	// Optional geometry hint from the client. Used in lieu of
+	// session.cols/rows (the persisted last-good size from D1) so
+	// capture-pane runs at the actual viewport size on this attach;
+	// otherwise the replay arrives at D1's stored size and the user
+	// sees mis-aligned columns until something fires a frontend
+	// resize. Bounds match POST /sessions in routes.ts.
+	const URL_DIM_MAX = 1024;
+	const parseDim = (re: RegExp): number | null => {
+		const m = url.match(re);
+		if (m === null) return null;
+		const n = Number.parseInt(m[1]!, 10);
+		return Number.isInteger(n) && n >= 1 && n <= URL_DIM_MAX ? n : null;
+	};
+	const urlCols = parseDim(/[?&]cols=([^&#]+)/);
+	const urlRows = parseDim(/[?&]rows=([^&#]+)/);
+
 	// Async auth + attach flow
 	(async () => {
 		// Authorise
@@ -157,8 +173,8 @@ export function handleWsConnection(
 		const { replay, flushTail } = await docker.attach(
 			sessionId,
 			attachId,
-			session.cols,
-			session.rows,
+			urlCols ?? session.cols,
+			urlRows ?? session.rows,
 			outputListener,
 			tabId,
 		);

@@ -202,28 +202,25 @@ export function openTerminalSession(opts: {
 	// WS upgrade to the cookie's domain automatically — no token needs to
 	// be threaded through here. Origin policy (CSWSH protection) is
 	// enforced server-side by isAllowedWsOrigin against CORS_ORIGINS.
-	const wsUrl = buildWsUrl(sessionId, tabId);
+	// Pass the post-fit geometry through the URL so capture-pane on the
+	// backend runs at the actual viewport size, not D1's stored default.
+	// Without this, the replay arrives at the wrong cols/rows and renders
+	// mis-aligned in xterm until the next resize event (sidebar toggle,
+	// viewport change). Validated server-side; backend falls back to D1
+	// if the params are missing or out of range.
+	const wsUrl = buildWsUrl(sessionId, tabId, term.cols, term.rows);
 	const ws = new WebSocket(wsUrl);
 	let disposed = false;
 
 	ws.onopen = () => {
-		// Send our geometry immediately. Backend's attach() resizes tmux to
-		// session.cols/rows from D1 (the persisted "last good" geometry, or
-		// the POST /sessions defaults — often 80×24) BEFORE running
-		// capture-pane and shipping the replay. If that differs from what
-		// fit() computed for the actual viewport, the replay arrives at the
-		// stored size and renders mis-columned in our wider/narrower xterm,
-		// and `scheduleFit` won't help because lastSentCols/Rows already
-		// equal term.cols/rows post-fit — nothing has *changed* to trip
-		// the "send if changed" guard. Forcing a resize here makes the
-		// first tmux resize-window happen as part of session start; the
-		// transient size mismatch is bounded by the round-trip (a frame
-		// or two) instead of "until the user happens to toggle the
-		// sidebar".
-		send({ type: "resize", cols: term.cols, rows: term.rows });
 		// Liveness is handled at the protocol layer (ws.ping/pong) from
 		// the server side — see backend/src/index.ts heartbeat. Browsers
 		// auto-reply to server pings with no JS hook required.
+		// Initial geometry is communicated via the upgrade URL (cols/rows
+		// query params consumed by wsHandler.attach). Sending it as a WS
+		// message here would be too late — the backend ships the replay
+		// before its `ws.on("message", …)` listener registers, so any
+		// frame from this hook is silently dropped by EventEmitter.
 	};
 
 	ws.onmessage = (ev) => {
@@ -687,20 +684,23 @@ class MultilineUrlLinkProvider implements ILinkProvider {
 
 // ── URL builder ─────────────────────────────────────────────────────────────
 
-function buildWsUrl(sessionId: string, tabId?: string): string {
+function buildWsUrl(sessionId: string, tabId: string | undefined, cols: number, rows: number): string {
 	// Use VITE_API_URL to derive the WebSocket URL
 	const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
 	const url = new URL(apiUrl);
 	const wsProto = url.protocol === "https:" ? "wss:" : "ws:";
 	const base = `${wsProto}//${url.host}/ws/sessions/${sessionId}`;
+	const params = new URLSearchParams();
 	// tabId is server-issued and re-validated on the backend before any
 	// `tmux attach -t` — see backend/src/wsHandler.ts (rawTab regex
 	// /^[a-zA-Z0-9._-]{1,64}$/). Excluding `:` is the load-bearing part:
 	// tmux target syntax needs a colon to parse `session:window.pane`, so
 	// `.` alone can't escalate a tabId into a different tmux target.
-	if (tabId) {
-		const params = new URLSearchParams({ tab: tabId });
-		return `${base}?${params.toString()}`;
-	}
-	return base;
+	if (tabId) params.set("tab", tabId);
+	// Geometry is bounds-checked server-side (1..1024 integer); a missing
+	// or out-of-range value falls back to D1's stored session.cols/rows.
+	if (Number.isInteger(cols) && cols > 0) params.set("cols", String(cols));
+	if (Number.isInteger(rows) && rows > 0) params.set("rows", String(rows));
+	const qs = params.toString();
+	return qs ? `${base}?${qs}` : base;
 }
