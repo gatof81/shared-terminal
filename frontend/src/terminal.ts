@@ -207,9 +207,23 @@ export function openTerminalSession(opts: {
 	let disposed = false;
 
 	ws.onopen = () => {
-		// Liveness is now handled at the protocol layer (ws.ping/pong)
-		// from the server side — see backend/src/index.ts heartbeat.
-		// Browsers auto-reply to server pings with no JS hook required.
+		// Send our geometry immediately. Backend's attach() resizes tmux to
+		// session.cols/rows from D1 (the persisted "last good" geometry, or
+		// the POST /sessions defaults — often 80×24) BEFORE running
+		// capture-pane and shipping the replay. If that differs from what
+		// fit() computed for the actual viewport, the replay arrives at the
+		// stored size and renders mis-columned in our wider/narrower xterm,
+		// and `scheduleFit` won't help because lastSentCols/Rows already
+		// equal term.cols/rows post-fit — nothing has *changed* to trip
+		// the "send if changed" guard. Forcing a resize here makes the
+		// first tmux resize-window happen as part of session start; the
+		// transient size mismatch is bounded by the round-trip (a frame
+		// or two) instead of "until the user happens to toggle the
+		// sidebar".
+		send({ type: "resize", cols: term.cols, rows: term.rows });
+		// Liveness is handled at the protocol layer (ws.ping/pong) from
+		// the server side — see backend/src/index.ts heartbeat. Browsers
+		// auto-reply to server pings with no JS hook required.
 	};
 
 	ws.onmessage = (ev) => {
