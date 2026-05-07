@@ -180,6 +180,79 @@ describe("isAllowedWsOrigin", () => {
 	it("rejects a non-allowlisted origin with no wildcard present", () => {
 		expect(isAllowedWsOrigin("https://evil.example.com", allowlist, "production")).toBe(false);
 	});
+
+	// ── Glob entries (single-DNS-label `*`) ───────────────────────────
+	// Useful for Cloudflare Pages preview URLs where each push lands on
+	// a fresh subdomain — listing `https://*.<project>.pages.dev` once
+	// covers them all without shipping a bypass for arbitrary origins.
+	describe("glob entries", () => {
+		const globAllow = ["https://*.shared-terminal.pages.dev"];
+
+		it("matches a single-label substitution", () => {
+			expect(
+				isAllowedWsOrigin("https://abc123.shared-terminal.pages.dev", globAllow, "production"),
+			).toBe(true);
+			expect(
+				isAllowedWsOrigin("https://feat-foo.shared-terminal.pages.dev", globAllow, "production"),
+			).toBe(true);
+		});
+
+		it("rejects an origin with two labels where the glob expects one", () => {
+			// `*` is `[^.]+` — no dots — so a multi-label segment doesn't
+			// match. Closes the `attacker.shared-terminal.pages.dev.evil.com`
+			// suffix-bypass class.
+			expect(
+				isAllowedWsOrigin("https://a.b.shared-terminal.pages.dev", globAllow, "production"),
+			).toBe(false);
+		});
+
+		it("rejects an origin that prepends/appends extra to the glob shape", () => {
+			expect(
+				isAllowedWsOrigin(
+					"https://abc.shared-terminal.pages.dev.evil.com",
+					globAllow,
+					"production",
+				),
+			).toBe(false);
+			expect(
+				isAllowedWsOrigin(
+					"https://evil.https://abc.shared-terminal.pages.dev",
+					globAllow,
+					"production",
+				),
+			).toBe(false);
+		});
+
+		it("rejects a same-host origin on the wrong scheme", () => {
+			expect(
+				isAllowedWsOrigin("http://abc.shared-terminal.pages.dev", globAllow, "production"),
+			).toBe(false);
+		});
+
+		it("doesn't treat a literal-dot in the glob as a regex wildcard", () => {
+			// The pattern `https://*.shared-terminal.pages.dev` must NOT
+			// match `https://abc.shared-terminalApages.dev` — escaping
+			// the dots in the entry is load-bearing.
+			expect(
+				isAllowedWsOrigin("https://abc.shared-terminalXpages.dev", globAllow, "production"),
+			).toBe(false);
+		});
+
+		it("mixed allowlist: exact + glob both work, neither shadows the other", () => {
+			const mixed = ["https://prod.example.com", "https://*.staging.example.com"];
+			expect(isAllowedWsOrigin("https://prod.example.com", mixed, "production")).toBe(true);
+			expect(isAllowedWsOrigin("https://api.staging.example.com", mixed, "production")).toBe(true);
+			expect(isAllowedWsOrigin("https://other.example.com", mixed, "production")).toBe(false);
+		});
+
+		it("a glob entry does NOT make bare `*` semantics fire", () => {
+			// `https://*.example.com` is a glob, not the wildcard token.
+			// The prod-deny path on bare `*` should not engage from a glob.
+			expect(
+				isAllowedWsOrigin("https://attacker.example.org", ["https://*.example.com"], "production"),
+			).toBe(false);
+		});
+	});
 });
 
 // The warning is a startup-time signal for the "CORS_ORIGINS='*' in

@@ -12,6 +12,7 @@ import { WebSocketServer } from "ws";
 import {
 	ensureAuthReady,
 	isAllowedWsOrigin,
+	originMatches,
 	parseCorsOrigins,
 	validateJwtSecret,
 	warnIfWildcardCorsInProduction,
@@ -122,7 +123,7 @@ app.use((_req, res, next) => {
 	// plain wildcard, no credentials: cross-origin callers get the
 	// cookie dropped by the browser and effectively a 401 from the
 	// auth middleware, while the wildcard still answers public reads.
-	if (origin && CORS_ORIGINS.includes(origin)) {
+	if (origin && originMatches(origin, CORS_ORIGINS)) {
 		res.setHeader("Access-Control-Allow-Origin", origin);
 		res.setHeader("Access-Control-Allow-Credentials", "true");
 	} else if (CORS_ORIGINS.includes("*")) {

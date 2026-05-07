@@ -713,9 +713,16 @@ export function parseCorsOrigins(raw: string | undefined): string[] {
  *    Origin would break legitimate CLI tooling without closing the
  *    CSWSH gap.
  *
- * 2. Origin exactly in `allowedOrigins`: allow.
- *    Substring/suffix matching is tempting (`ends with our-domain.com`)
- *    but enables `attackerour-domain.com` attacks. Exact match only.
+ * 2. Origin in `allowedOrigins`: allow.
+ *    An entry can be exact (`https://app.example.com`) or a glob with
+ *    `*` matching exactly one DNS label (`https://*.example.com`
+ *    matches `https://api.example.com` but NOT `https://a.b.example.com`
+ *    or `attacker.example.com.evil.com`). Substring/suffix matching is
+ *    tempting but enables `attackerour-domain.com` and similar
+ *    bypasses; the regex anchors plus the no-dot constraint inside the
+ *    `*` segment close those attacks. Useful for Cloudflare Pages
+ *    preview URLs (`<commit>.<project>.pages.dev`) without listing
+ *    every preview by hand.
  *
  * 3. allowedOrigins contains "*":
  *    - In production: DENY, and the caller logs a loud warning once at
@@ -749,8 +756,8 @@ export function isAllowedWsOrigin(
 	// Branch 1: not a browser, not a CSWSH vector.
 	if (!origin) return true;
 
-	// Branch 2: explicitly whitelisted.
-	if (allowedOrigins.includes(origin)) return true;
+	// Branch 2: explicitly whitelisted (exact origin or single-label glob).
+	if (originMatches(origin, allowedOrigins)) return true;
 
 	// Branch 3: "*" wildcard.
 	if (allowedOrigins.includes("*")) {
@@ -758,6 +765,40 @@ export function isAllowedWsOrigin(
 	}
 
 	// Branch 4.
+	return false;
+}
+
+/**
+ * Match a request origin against an allowlist where each entry is either
+ * an exact origin or a glob with `*` standing for exactly one DNS label
+ * (no dots inside the `*`). Useful for Cloudflare Pages preview URLs
+ * like `<commit>.<project>.pages.dev` where every push lands on a fresh
+ * subdomain — listing the wildcard pattern once subsumes them all.
+ *
+ * Bare `"*"` entries are skipped here on purpose: that token has
+ * different semantics in each caller (CORS middleware downgrades to
+ * no-credentials wildcard; isAllowedWsOrigin denies in production for
+ * CSWSH protection). Letting it match-everything inside this helper
+ * would silently bypass both policies.
+ *
+ * Anchored regex (`^…$`) plus a no-dot character class (`[^.]+`) inside
+ * each `*` keeps the classic `attackerour-domain.com` and
+ * `our-domain.com.evil.com` bypasses out — the match is exact-shape,
+ * not substring or suffix.
+ */
+export function originMatches(origin: string, allowedOrigins: readonly string[]): boolean {
+	for (const entry of allowedOrigins) {
+		if (entry === "*") continue;
+		if (entry.includes("*")) {
+			// Escape regex metacharacters EXCEPT `*` (we want it to stay
+			// literal so the next replace can convert it to `[^.]+`).
+			const escaped = entry.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+			const re = new RegExp(`^${escaped.replace(/\*/g, "[^.]+")}$`);
+			if (re.test(origin)) return true;
+		} else if (entry === origin) {
+			return true;
+		}
+	}
 	return false;
 }
 
