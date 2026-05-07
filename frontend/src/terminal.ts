@@ -58,7 +58,18 @@ export function openTerminalSession(opts: {
 		lineHeight: 1.2,
 		cursorBlink: true,
 		cursorInactiveStyle: "outline",
-		convertEol: true,
+		// `convertEol` (default false in xterm) was previously `true`, which
+		// rewrote every standalone \n into \r\n on write. tmux, bash, and
+		// most TUIs already emit \r\n where they want both line-feed and
+		// carriage-return; the option was harmless for them. But Ink
+		// (Claude CLI's renderer) emits standalone \n in places where it
+		// wants pure line-feed — keep cursor in the same column on the next
+		// row — and tracks cursor state assuming that behaviour. With
+		// convertEol:true xterm moved the cursor to col 1 instead of
+		// preserving the column, so Ink's next absolute write landed in a
+		// cell it didn't expect: visible as "after typing for a while in
+		// claude, text jumps to the next row and stays one row off". Default
+		// false matches what Ink (and standard TUI conventions) expect.
 		allowProposedApi: true,
 		// Apps like Claude Code emit OSC 8 hyperlink escapes. xterm renders
 		// them (underline + pointer cursor) but needs an explicit handler
