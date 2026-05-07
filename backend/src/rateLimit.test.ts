@@ -10,8 +10,16 @@ import type { SessionManager } from "./sessionManager.js";
 // Stub the auth module so routing tests don't touch D1. Handles captured
 // as `authStubs` are reconfigured per-test.
 const authStubs = vi.hoisted(() => ({
-	registerUser: vi.fn(async (_u: string, _p: string) => ({ userId: "u1", token: "tok" })),
-	loginUser: vi.fn(async (_u: string, _p: string) => ({ userId: "u1", token: "tok" })),
+	registerUser: vi.fn(async (_u: string, _p: string) => ({
+		userId: "u1",
+		token: "tok",
+		isAdmin: false,
+	})),
+	loginUser: vi.fn(async (_u: string, _p: string) => ({
+		userId: "u1",
+		token: "tok",
+		isAdmin: false,
+	})),
 	hasAnyUsers: vi.fn(async () => true),
 	listInvites: vi.fn(async () => [] as unknown[]),
 	createInvite: vi.fn(async (_u: string) => ({
@@ -380,7 +388,11 @@ describe("auth route rate limiting", () => {
 		authStubs.loginUser.mockImplementation(async () => {
 			throw new authStubs.InvalidCredentialsError();
 		});
-		authStubs.registerUser.mockImplementation(async () => ({ userId: "u1", token: "tok" }));
+		authStubs.registerUser.mockImplementation(async () => ({
+			userId: "u1",
+			token: "tok",
+			isAdmin: false,
+		}));
 		// Reset requireAdmin to its passthrough default. Individual tests
 		// that exercise the admin-gate path override this with a 403
 		// implementation; restoring here means a thrown expect inside such
@@ -476,7 +488,11 @@ describe("auth route rate limiting", () => {
 			register: { ipMax: 100, ipWindowMs: 60_000 },
 		});
 
-		authStubs.loginUser.mockImplementation(async () => ({ userId: "u1", token: "tok" }));
+		authStubs.loginUser.mockImplementation(async () => ({
+			userId: "u1",
+			token: "tok",
+			isAdmin: false,
+		}));
 		for (let i = 0; i < 3; i++) {
 			const ok = await postLogin({ username: `u${i}`, password: "good" });
 			expect(ok.status).toBe(200);
@@ -538,7 +554,11 @@ describe("auth route rate limiting", () => {
 		const r1 = await postLogin({ username: "alice", password: "bad" });
 		expect(r1.status).toBe(401);
 
-		authStubs.loginUser.mockImplementationOnce(async () => ({ userId: "u1", token: "tok" }));
+		authStubs.loginUser.mockImplementationOnce(async () => ({
+			userId: "u1",
+			token: "tok",
+			isAdmin: false,
+		}));
 		const r2 = await postLogin({ username: "alice", password: "good" });
 		expect(r2.status).toBe(200);
 
@@ -624,7 +644,11 @@ describe("auth route rate limiting", () => {
 		await postLogin({ username: "alice", password: "bad" });
 		await postLogin({ username: "alice", password: "bad" });
 
-		authStubs.loginUser.mockImplementationOnce(async () => ({ userId: "u1", token: "tok" }));
+		authStubs.loginUser.mockImplementationOnce(async () => ({
+			userId: "u1",
+			token: "tok",
+			isAdmin: false,
+		}));
 		const locked = await postLogin({ username: "alice", password: "good" });
 		expect(locked.status).toBe(429);
 	});
