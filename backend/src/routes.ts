@@ -262,9 +262,10 @@ export function buildRouter(
 	router.use("/sessions", requireAuth);
 
 	// ── Invite routes ───────────────────────────────────────────────────────
-	// Any authenticated user can mint invites — there is no admin tier yet.
-	// If you ever want to gate this to specific accounts, add an is_admin
-	// column to users and a middleware check here.
+	// POST and DELETE are gated by `requireAdmin` (#50); GET stays
+	// auth-only so non-admins see their (always-empty) list and the
+	// missing UI buttons tell them they can't mint, instead of a
+	// confusing 403 on read.
 
 	// GET is rate-limited symmetrically with POST/DELETE (issue #47):
 	// a much higher cap because reads are cheap, but the same per-IP
@@ -281,6 +282,8 @@ export function buildRouter(
 		}
 	});
 
+	// requireAuth provided by `router.use("/invites", requireAuth)` above —
+	// requireAdmin reads `req.userId` populated there.
 	router.post("/invites", invitesCreateIp, requireAdmin, async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
 		try {
@@ -296,6 +299,8 @@ export function buildRouter(
 		}
 	});
 
+	// requireAuth provided by `router.use("/invites", requireAuth)` above —
+	// requireAdmin reads `req.userId` populated there.
 	router.delete(
 		"/invites/:hash",
 		invitesRevokeIp,

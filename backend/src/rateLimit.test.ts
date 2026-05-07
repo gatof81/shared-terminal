@@ -15,10 +15,11 @@ const authStubs = vi.hoisted(() => ({
 	hasAnyUsers: vi.fn(async () => true),
 	listInvites: vi.fn(async (_u?: string) => [] as unknown[]),
 	requireAuth: (_req: unknown, _res: unknown, next: () => void) => next(),
-	// requireAdmin is async in production but the route chain handles
-	// either return shape (express awaits the next() call effectively
-	// via promise resolution); a sync passthrough is enough for tests
-	// that don't care about the admin gate.
+	// Sync passthrough — tests in this file don't exercise the admin
+	// gate, they exercise the rate limiters that sit alongside it. The
+	// real requireAdmin is async (D1 lookup); express middleware doesn't
+	// await return values, so a sync next() is fine here precisely
+	// because the gate isn't under test.
 	requireAdmin: (_req: unknown, _res: unknown, next: () => void) => next(),
 	// Cookie-auth helpers (#18). Tests don't read the cookie back, so a
 	// no-op for set/clear and a permissive shape-only verify is enough.
