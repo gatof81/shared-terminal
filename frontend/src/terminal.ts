@@ -287,14 +287,23 @@ export function openTerminalSession(opts: {
 					break;
 				}
 				const yBefore = term.buffer.active.viewportY;
+				// Use the pre-write `wasOffBottom` for the restore decision —
+				// NOT a re-check at callback time. xterm's auto-track-to-bottom
+				// during the write fires `onScroll`, which our listener
+				// reads as `viewportY === baseY` and sets `userScrolled =
+				// false`. From inside `onScroll` there's no signal to
+				// distinguish that auto-snap from a user-initiated scroll-
+				// down, so re-checking inside the callback always sees the
+				// auto-snapped state and skips the restore — yanking the
+				// user back to the bottom on every output frame. The
+				// captured `wasOffBottom` is the only source of truth that
+				// survives the parse window; the trade-off is a user who
+				// genuinely scrolls back to the bottom mid-parse will be
+				// briefly restored to `yBefore` for ~one write before the
+				// next call's `wasOffBottom` correctly reads `false`. That
+				// edge case is far less disruptive than the previous bug
+				// (every output write snapped scroll-back to bottom).
 				term.write(msg.data, () => {
-					// Re-check at parser-drain time: a user who scrolled
-					// back to the bottom or cleared their selection during
-					// the parse window shouldn't get pinned to a stale
-					// viewport. (Selection clears synchronously on click;
-					// scroll fires its own onScroll, which already updated
-					// `userScrolled`.)
-					if (!userScrolled && !term.hasSelection()) return;
 					if (term.buffer.active.viewportY !== yBefore) {
 						term.scrollToLine(yBefore);
 					}
