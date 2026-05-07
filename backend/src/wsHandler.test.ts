@@ -186,7 +186,6 @@ describe("handleWsConnection geometry from URL", () => {
 		const req = makeReq("/ws/sessions/abc?tab=tab-1&cols=200&rows=60", true);
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		handleWsConnection(ws as any, req as any, sessions, docker);
-		// Drain the async IIFE that runs assertOwnership → docker.attach.
 		// Wait for the async IIFE (assertOwnership → docker.attach chain) to
 		// reach attach. waitFor polls until the assertion holds, robust
 		// against any number of intermediate awaits in the handler.
