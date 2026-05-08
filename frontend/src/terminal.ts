@@ -551,19 +551,11 @@ export function openTerminalSession(opts: {
 		wheelResidue -= lines * cellH;
 		term.scrollLines(lines);
 		const _bufAfter = term.buffer.active;
-		console.log("[wheel-debug] scrollLines", {
-			deltaMode: ev.deltaMode,
-			deltaY: ev.deltaY,
-			cellH,
-			deltaPx,
-			lines,
-			bufType: _bufType,
-			yBefore: _yBefore,
-			yAfter: _bufAfter.viewportY,
-			baseBefore: _baseBefore,
-			baseAfter: _bufAfter.baseY,
-			scrolled: _bufAfter.viewportY !== _yBefore,
-		});
+		// Pre-formatted string so the browser console can't truncate
+		// the trailing fields with `…`.
+		console.log(
+			`[wheel-debug] scrollLines lines=${lines} yBefore=${_yBefore} yAfter=${_bufAfter.viewportY} baseBefore=${_baseBefore} baseAfter=${_bufAfter.baseY} scrolled=${_bufAfter.viewportY !== _yBefore} bufType=${_bufType} length=${_bufAfter.length}`,
+		);
 		return false;
 	});
 
