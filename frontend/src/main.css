@@ -891,6 +891,20 @@ main:not([data-sidebar-ready]) #sidebar {
 #terminal-container .xterm-screen {
   touch-action: none;
 }
+/* Hide xterm.js's built-in viewport scrollbar. xterm's local scrollback
+   is structurally empty in our stack — tmux manages the pane in-place
+   so bytes never flow off the top of xterm's buffer (see WheelUpPane
+   comment block in session-image/tmux.conf for the full rationale).
+   The scrollbar that xterm draws unconditionally for `overflow-y:
+   scroll` therefore reflects nothing scrollable; it's visual noise
+   and has no use. `overflow-y: hidden !important` (with !important
+   because xterm.js's own stylesheet sets `scroll`) hides it and
+   short-circuits the native scroll path. Pane history navigation
+   happens through tmux copy-mode (entered automatically on wheel-up
+   per the WheelUpPane binding), not xterm-viewport scroll. */
+#terminal-container .xterm-viewport {
+  overflow-y: hidden !important;
+}
 #empty-state {
   display: flex;
   align-items: center;
