@@ -226,6 +226,10 @@ export function openTerminalSession(opts: {
 		) {
 			const sel = term.getSelection();
 			if (sel) {
+				// Sync the dedup state with the auto-copy path so a
+				// Cmd-C inside the auto-copy debounce window doesn't
+				// fire a redundant write when the timer settles.
+				lastCopiedSelection = sel;
 				copyToClipboard(sel);
 				return false;
 			}
