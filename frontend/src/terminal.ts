@@ -21,6 +21,20 @@ export type ErrorCallback = (message: string) => void;
  *  per terminal lifetime. Used by main.ts to surface a one-time toast
  *  so the user knows why their session feels slower (#55). */
 export type RendererNoticeCallback = (message: string) => void;
+/** Fired after a clipboard write attempt (Cmd-C or auto-copy on
+ *  selection-finalize). `ok=true` on success, `false` on rejection
+ *  (permission-denied, focus issue, etc.). main.ts uses it to toast
+ *  on failure only — a per-event success toast would be too chatty
+ *  given the auto-copy path fires on every finalised selection (#158). */
+export type CopyCallback = (ok: boolean) => void;
+/** Predicate the session calls before writing to the system clipboard
+ *  on the auto-copy path. Returns true iff this session's tab is the
+ *  one the user is currently looking at — selections in a background
+ *  tab whose debounced finalise fires *after* the user switched away
+ *  must NOT clobber the clipboard with content from a pane the user
+ *  isn't viewing (#158 NIT). main.ts wires this against
+ *  `currentActiveTabId` / `activeSessionId`. */
+export type ActivePredicate = () => boolean;
 
 export function openTerminalSession(opts: {
 	container: HTMLElement;
@@ -30,8 +44,20 @@ export function openTerminalSession(opts: {
 	onStatus: StatusCallback;
 	onError: ErrorCallback;
 	onRendererFallback?: RendererNoticeCallback;
+	onCopy?: CopyCallback;
+	isActive?: ActivePredicate;
 }): TerminalSession {
-	const { container, sessionId, tabId, fontSize, onStatus, onError, onRendererFallback } = opts;
+	const {
+		container,
+		sessionId,
+		tabId,
+		fontSize,
+		onStatus,
+		onError,
+		onRendererFallback,
+		onCopy,
+		isActive,
+	} = opts;
 	// Fires the fallback notice at most once per tab, regardless of how
 	// many times the WebGL context flaps (#55). A flapping driver
 	// shouldn't toast on every cycle.
@@ -174,6 +200,39 @@ export function openTerminalSession(opts: {
 
 	fitAddon.fit();
 
+	// Helper: write to clipboard and surface success/failure to the
+	// caller. Used by both the Cmd-C handler (explicit user gesture)
+	// and the onSelectionChange auto-copy path below (selection
+	// finalisation). Centralised so the same notification path runs
+	// for both, keeping toast policy (failure-only by default) in
+	// main.ts rather than duplicated here.
+	const copyToClipboard = (text: string): Promise<boolean> => {
+		return navigator.clipboard.writeText(text).then(
+			() => {
+				onCopy?.(true);
+				return true;
+			},
+			(err) => {
+				// Surface the underlying DOMException to the console so a
+				// developer debugging a field report can tell NotAllowedError
+				// (permission denied — fixable by the user) from a transient
+				// SecurityError (e.g. a context-restored race) without having
+				// to monkey-patch the helper. The user-facing toast in main.ts
+				// is intentionally generic; this is the diagnostic channel.
+				console.warn("[terminal] clipboard write failed:", err);
+				onCopy?.(false);
+				return false;
+			},
+		);
+	};
+	// Dedup state shared between the Cmd-C handler and the auto-copy
+	// onSelectionChange path below — declared up here so both writers
+	// see a fully-initialised binding (the Cmd-C closure was previously
+	// a forward reference into the auto-copy block; safe because the
+	// closure only runs at event time, but a footgun for any future
+	// refactor that runs the Cmd-C registration inside an IIFE).
+	let lastCopiedSelection = "";
+
 	// Cmd/Ctrl + C copies the current xterm selection to the clipboard.
 	// Without this, Cmd-C falls through to the terminal (Claude Code
 	// intercepts it as SIGINT) and nothing gets copied.
@@ -187,7 +246,21 @@ export function openTerminalSession(opts: {
 		) {
 			const sel = term.getSelection();
 			if (sel) {
-				navigator.clipboard.writeText(sel).catch(() => {});
+				// Sync the dedup state with the auto-copy path so a
+				// Cmd-C inside the auto-copy debounce window doesn't
+				// fire a redundant write when the timer settles.
+				lastCopiedSelection = sel;
+				copyToClipboard(sel).then((ok) => {
+					// On failure, clear the dedup state we just set so a
+					// follow-up auto-copy of the same selection (after the
+					// user fixes the permission issue) actually fires
+					// instead of being silently skipped by the dedup
+					// guard. Identity-check against `sel` first because a
+					// later successful copy of a different selection may
+					// have advanced `lastCopiedSelection` in the
+					// meantime; we only want to clear our own poison.
+					if (!ok && lastCopiedSelection === sel) lastCopiedSelection = "";
+				});
 				return false;
 			}
 		}
@@ -199,6 +272,62 @@ export function openTerminalSession(opts: {
 	// complete URL. No-op when the app already emits OSC 8 (xterm's native
 	// hyperlink handling takes precedence per-cell).
 	const linkProviderDisposable = term.registerLinkProvider(new MultilineUrlLinkProvider(term));
+
+	// ── Auto-copy on selection-finalise ─────────────────────────────────────
+	// xterm fires `onSelectionChange` continuously while the user drags to
+	// select — once per cell of mouse movement. Copying on every fire would
+	// hit `navigator.clipboard.writeText` 50+ times per gesture, slow and
+	// rate-limited by browsers in some configurations. Debounce to ~100 ms
+	// so we copy once after the selection settles (mouse release / final
+	// shift-arrow), not on every intermediate frame.
+	//
+	// Skip empty selections — those fire on click-to-deselect and we don't
+	// want to clobber the user's clipboard with "" every time they click.
+	// `lastCopiedSelection` deduplicates the case where xterm fires
+	// onSelectionChange after we've already copied (e.g. xterm's
+	// post-render reconciliation pass) — without it we'd toast twice
+	// for the same logical selection.
+	const SELECTION_DEBOUNCE_MS = 100;
+	let selectionDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+	const selectionDisposable = term.onSelectionChange(() => {
+		if (selectionDebounceTimer !== null) clearTimeout(selectionDebounceTimer);
+		selectionDebounceTimer = setTimeout(() => {
+			selectionDebounceTimer = null;
+			const sel = term.getSelection();
+			if (!sel) {
+				// Click-to-deselect. Reset the dedup so a subsequent
+				// re-selection of identical text WILL re-copy — the
+				// user may have intentionally written something else
+				// to the clipboard between the original copy and the
+				// re-selection (external app, manual Cmd-C of an
+				// unrelated string), and silently skipping that
+				// re-selection because of stale state would leave the
+				// user's clipboard out of sync with what they just
+				// re-selected.
+				lastCopiedSelection = "";
+				return;
+			}
+			if (sel === lastCopiedSelection) return;
+			// Don't clobber the clipboard for a background tab — user
+			// might have switched to another tab during the 100 ms
+			// debounce window, in which case writing tab A's selection
+			// while they're looking at tab B is a footgun. `onCopy`'s
+			// failure toast already gates on the active-tab check; the
+			// write itself needs the same gate, otherwise the clipboard
+			// is silently overwritten with stale content. Cmd-C path
+			// doesn't need this guard because it requires keyboard
+			// focus, which a background tab can't have.
+			if (isActive && !isActive()) return;
+			lastCopiedSelection = sel;
+			copyToClipboard(sel).then((ok) => {
+				// See Cmd-C handler above for the rationale: on failure,
+				// undo our dedup poison so the user can re-trigger the
+				// copy by re-selecting the same text once they've
+				// resolved the permission issue.
+				if (!ok && lastCopiedSelection === sel) lastCopiedSelection = "";
+			});
+		}, SELECTION_DEBOUNCE_MS);
+	});
 
 	// Mouse clicks should focus xterm immediately. Touch taps are handled
 	// in onTouchEnd below — we wait until touchend to distinguish a tap
@@ -670,6 +799,14 @@ export function openTerminalSession(opts: {
 		inputDisposable.dispose();
 		linkProviderDisposable.dispose();
 		scrollDisposable.dispose();
+		// dispose() cuts the onSelectionChange feed first; THEN cancel
+		// any already-queued debounce timer. Inverse order would also
+		// be safe today (clearTimeout returns nothing for an
+		// already-fired timer), but doing dispose-first guarantees no
+		// post-cancel re-arm is possible. Keep this order; symmetry
+		// with other dispose pairs above is intentional.
+		selectionDisposable.dispose();
+		if (selectionDebounceTimer !== null) clearTimeout(selectionDebounceTimer);
 		pendingRestoreCanvas?.removeEventListener("webglcontextrestored", onContextRestored);
 		container.removeEventListener("webglcontextlost", onContextLost);
 		webgl?.dispose();
