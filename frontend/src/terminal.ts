@@ -764,6 +764,12 @@ export function openTerminalSession(opts: {
 		inputDisposable.dispose();
 		linkProviderDisposable.dispose();
 		scrollDisposable.dispose();
+		// dispose() cuts the onSelectionChange feed first; THEN cancel
+		// any already-queued debounce timer. Inverse order would also
+		// be safe today (clearTimeout returns nothing for an
+		// already-fired timer), but doing dispose-first guarantees no
+		// post-cancel re-arm is possible. Keep this order; symmetry
+		// with other dispose pairs above is intentional.
 		selectionDisposable.dispose();
 		if (selectionDebounceTimer !== null) clearTimeout(selectionDebounceTimer);
 		pendingRestoreCanvas?.removeEventListener("webglcontextrestored", onContextRestored);
