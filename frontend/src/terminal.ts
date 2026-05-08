@@ -261,7 +261,20 @@ export function openTerminalSession(opts: {
 		selectionDebounceTimer = setTimeout(() => {
 			selectionDebounceTimer = null;
 			const sel = term.getSelection();
-			if (!sel || sel === lastCopiedSelection) return;
+			if (!sel) {
+				// Click-to-deselect. Reset the dedup so a subsequent
+				// re-selection of identical text WILL re-copy — the
+				// user may have intentionally written something else
+				// to the clipboard between the original copy and the
+				// re-selection (external app, manual Cmd-C of an
+				// unrelated string), and silently skipping that
+				// re-selection because of stale state would leave the
+				// user's clipboard out of sync with what they just
+				// re-selected.
+				lastCopiedSelection = "";
+				return;
+			}
+			if (sel === lastCopiedSelection) return;
 			// Don't clobber the clipboard for a background tab — user
 			// might have switched to another tab during the 100 ms
 			// debounce window, in which case writing tab A's selection
