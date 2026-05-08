@@ -206,9 +206,12 @@ export function openTerminalSession(opts: {
 	// finalisation). Centralised so the same notification path runs
 	// for both, keeping toast policy (failure-only by default) in
 	// main.ts rather than duplicated here.
-	const copyToClipboard = (text: string) => {
-		navigator.clipboard.writeText(text).then(
-			() => onCopy?.(true),
+	const copyToClipboard = (text: string): Promise<boolean> => {
+		return navigator.clipboard.writeText(text).then(
+			() => {
+				onCopy?.(true);
+				return true;
+			},
 			(err) => {
 				// Surface the underlying DOMException to the console so a
 				// developer debugging a field report can tell NotAllowedError
@@ -218,6 +221,7 @@ export function openTerminalSession(opts: {
 				// is intentionally generic; this is the diagnostic channel.
 				console.warn("[terminal] clipboard write failed:", err);
 				onCopy?.(false);
+				return false;
 			},
 		);
 	};
@@ -246,7 +250,17 @@ export function openTerminalSession(opts: {
 				// Cmd-C inside the auto-copy debounce window doesn't
 				// fire a redundant write when the timer settles.
 				lastCopiedSelection = sel;
-				copyToClipboard(sel);
+				copyToClipboard(sel).then((ok) => {
+					// On failure, clear the dedup state we just set so a
+					// follow-up auto-copy of the same selection (after the
+					// user fixes the permission issue) actually fires
+					// instead of being silently skipped by the dedup
+					// guard. Identity-check against `sel` first because a
+					// later successful copy of a different selection may
+					// have advanced `lastCopiedSelection` in the
+					// meantime; we only want to clear our own poison.
+					if (!ok && lastCopiedSelection === sel) lastCopiedSelection = "";
+				});
 				return false;
 			}
 		}
@@ -305,7 +319,13 @@ export function openTerminalSession(opts: {
 			// focus, which a background tab can't have.
 			if (isActive && !isActive()) return;
 			lastCopiedSelection = sel;
-			copyToClipboard(sel);
+			copyToClipboard(sel).then((ok) => {
+				// See Cmd-C handler above for the rationale: on failure,
+				// undo our dedup poison so the user can re-trigger the
+				// copy by re-selecting the same text once they've
+				// resolved the permission issue.
+				if (!ok && lastCopiedSelection === sel) lastCopiedSelection = "";
+			});
 		}, SELECTION_DEBOUNCE_MS);
 	});
 
