@@ -234,13 +234,6 @@ export function openTerminalSession(opts: {
 	const scrollDisposable = term.onScroll(() => {
 		const buf = term.buffer.active;
 		userScrolled = buf.viewportY < buf.baseY;
-		// DEBUG (#178 follow-up). Remove once diagnosed.
-		console.log("[scroll-debug] onScroll", {
-			viewportY: buf.viewportY,
-			baseY: buf.baseY,
-			userScrolled,
-			bufType: buf.type,
-		});
 	});
 
 	// ── WebSocket connection ────────────────────────────────────────────────
@@ -350,14 +343,24 @@ export function openTerminalSession(opts: {
 	// finger drags aren't forwarded as anything useful. We translate the
 	// drag into terminal scroll:
 	//
-	//  - Main buffer (shell prompt, command output): scroll xterm's own
-	//    scrollback with `scrollLines`. Users expect to pull older lines
-	//    back into view; we don't involve tmux at all, so there's no weird
-	//    copy-mode dance.
 	//  - Alt buffer (vim, less, Claude Code, htop, …): synthesise
 	//    up/down arrow keys. Every TUI app responds to arrows, so the
 	//    user can navigate without needing mouse-wheel support in the app
 	//    or tmux copy-mode.
+	//  - Main buffer (shell): we still call `term.scrollLines` here, but
+	//    *that's a no-op in this stack* — see the wheel comment block
+	//    below for the full rationale. tmux manages the pane in-place,
+	//    so xterm's local scrollback stays empty regardless of how much
+	//    output has rendered. The
+	//    real fix is to route this through tmux copy-mode the same way
+	//    the wheel path now does (forward as SGR mouse-tracking and let
+	//    tmux's `WheelUpPane` binding handle it), but synthesising
+	//    mouse-tracking from touch coordinates is a bigger change —
+	//    tracked separately. The current call is left in place so the
+	//    finger-drag still suppresses xterm's drag-selection handler
+	//    (preventDefault above), which on mobile is the more visible
+	//    misbehaviour to avoid; users just won't see scrollback move
+	//    until that follow-up lands.
 	//
 	// Direction follows iOS/Android convention — content tracks the
 	// finger: drag up → view moves up → scroll toward newer (bottom).
@@ -450,122 +453,28 @@ export function openTerminalSession(opts: {
 	container.addEventListener("touchcancel", onTouchCancel, { passive: true });
 
 	// ── Wheel scroll ────────────────────────────────────────────────────────
-	// Desktop wheel/trackpad routing pairs with the WheelUpPane/WheelDownPane
-	// bindings in `session-image/tmux.conf`. xterm's default with
-	// `set -g mouse on` is to forward wheel events as SGR mouse-tracking; we
-	// intercept ahead of that:
+	// xterm's default with `set -g mouse on` (session-image/tmux.conf) is
+	// to forward wheel events as SGR mouse-tracking sequences. tmux's
+	// `WheelUpPane` / `WheelDownPane` bindings then decide what to do —
+	// see the rationale block above those bindings in tmux.conf.
 	//
-	//   - Main buffer (shell): scroll xterm's own scrollback via
-	//     `scrollLines`. `return false` cancels xterm's forward so the SGR
-	//     sequence never leaves the browser, and tmux can't discard it
-	//     (#171).
-	//   - Alt buffer (claude TUI, less, vim, htop, …): `return true`. Let
-	//     xterm forward as SGR mouse-tracking and let tmux's WheelUpPane
-	//     binding decide. tmux now routes that into copy-mode for apps
-	//     that don't request mouse (claude / Ink) so the user reaches the
-	//     pane history; vim/htop still get `send-keys -M` because they
-	//     set `mouse_any_flag`. See the binding rationale in tmux.conf.
-	//     Earlier attempts to synthesise arrow keys here (#176) ended up
-	//     navigating the *input* line history (readline-style) for claude
-	//     instead of scrolling the rendered output, so this path was
-	//     reverted to forward-and-let-tmux-handle.
+	// We deliberately do NOT register `term.attachCustomWheelEventHandler`.
+	// Earlier attempts (#171/#173, #176, #177) tried to drive
+	// `term.scrollLines()` against xterm's local scrollback for the main
+	// buffer, then alt-buffer arrow synthesis, then a hybrid. None worked
+	// because **tmux manages the pane in-place**: when content fills the
+	// pane height tmux scrolls in place via cursor-move + write escapes,
+	// so bytes never flow off the top of xterm's buffer and xterm's
+	// scrollback (`scrollback: 5000` above) effectively stays empty —
+	// confirmed empirically with debug logs in PR #179 (`baseY === 0`,
+	// `length === rows`, scroll calls all no-op). Pane history lives in
+	// tmux only (`history-limit 50000`), reachable only via tmux
+	// copy-mode. Letting xterm forward and tmux's bindings decide is the
+	// correct routing for every scenario; the frontend has nothing to
+	// add. Touch handling stays separate because there's no
+	// mouse-tracking to forward into on touch.
 	//
-	// Sensitivity: notched mice can deliver either `DOM_DELTA_LINE`
-	// (`deltaY === 1` per notch) or `DOM_DELTA_PIXEL` (`deltaY` close to
-	// `cellH` per notch). Both produced one-line-per-notch with a 1×
-	// multiplier, far slower than the OS-typical ~3 lines/notch. Apply a
-	// shared multiplier to both modes. Trackpad smooth-scroll (many
-	// small `DOM_DELTA_PIXEL` events) is amplified too, but the residue
-	// accumulator and small per-event `deltaY` keep the felt speed
-	// reasonable in practice; tunable up/down here without touching the
-	// rest of the handler.
-	const WHEEL_SENSITIVITY = 3;
-	let wheelResidue = 0;
-	// Known limitation: tmux copy-mode (Ctrl-b [) is *not* the alternate
-	// screen — `pane_in_mode` is tmux-internal state that doesn't propagate
-	// to `xterm.buffer.active.type`. When the user has manually entered
-	// copy-mode from the main buffer, this handler still scrolls xterm's
-	// own scrollback instead of driving copy-mode's cursor. Querying
-	// `#{pane_in_mode}` from the frontend would need a side-channel we
-	// don't have. Workaround for users in main-buffer copy-mode: arrow
-	// keys / Page Up/Down inside copy-mode instead of the wheel.
-	term.attachCustomWheelEventHandler((ev) => {
-		// DEBUG (#178 follow-up): user reports wheel does nothing in bash
-		// despite scrollback content. Log every wheel event + the buffer/
-		// scroll state so we can see whether the handler fires, what
-		// values the browser delivers, and whether `term.scrollLines`
-		// has any visible effect on `viewportY`. Remove once diagnosed.
-		const _bufBefore = term.buffer.active;
-		const _yBefore = _bufBefore.viewportY;
-		const _baseBefore = _bufBefore.baseY;
-		const _bufType = _bufBefore.type;
-		// Alt buffer → forward to xterm's default; tmux's binding takes it
-		// from there. Keep the early return *before* residue accounting so
-		// switching buffers mid-gesture doesn't carry residue across modes.
-		if (term.buffer.active.type === "alternate") {
-			console.log("[wheel-debug] ALT-BUFFER forward", {
-				deltaMode: ev.deltaMode,
-				deltaY: ev.deltaY,
-				bufType: _bufType,
-			});
-			return true;
-		}
-		const cellH = getCellHeight();
-		let deltaPx: number;
-		switch (ev.deltaMode) {
-			case 1: // DOM_DELTA_LINE
-				deltaPx = ev.deltaY * cellH * WHEEL_SENSITIVITY;
-				break;
-			case 2: // DOM_DELTA_PAGE
-				deltaPx = ev.deltaY * cellH * term.rows;
-				break;
-			default: // DOM_DELTA_PIXEL — what trackpads and most modern mice emit
-				deltaPx = ev.deltaY * WHEEL_SENSITIVITY;
-		}
-		// Reset the residue if the user reverses direction — otherwise a
-		// long downward swipe followed by a short upward flick would have
-		// to "spend" the accumulated downward residue before any upward
-		// scroll registered, which feels broken at the input boundary.
-		// Gate on `deltaPx !== 0` so a horizontal-only wheel event
-		// (`ev.deltaY === 0`, common on trackpads doing diagonal/sideways
-		// gestures) doesn't trip the reset: `0 < 0` is false, which would
-		// always look like "opposite sign" against any upward (negative)
-		// residue and silently discard it mid-gesture.
-		if (deltaPx !== 0 && deltaPx < 0 !== wheelResidue < 0) wheelResidue = 0;
-		wheelResidue += deltaPx;
-		const lines = Math.trunc(wheelResidue / cellH);
-		if (lines === 0) {
-			console.log("[wheel-debug] no-op", {
-				deltaMode: ev.deltaMode,
-				deltaY: ev.deltaY,
-				cellH,
-				deltaPx,
-				wheelResidue,
-				lines,
-				bufType: _bufType,
-				yBefore: _yBefore,
-				baseBefore: _baseBefore,
-			});
-			return false;
-		}
-		wheelResidue -= lines * cellH;
-		term.scrollLines(lines);
-		const _bufAfter = term.buffer.active;
-		console.log("[wheel-debug] scrollLines", {
-			deltaMode: ev.deltaMode,
-			deltaY: ev.deltaY,
-			cellH,
-			deltaPx,
-			lines,
-			bufType: _bufType,
-			yBefore: _yBefore,
-			yAfter: _bufAfter.viewportY,
-			baseBefore: _baseBefore,
-			baseAfter: _bufAfter.baseY,
-			scrolled: _bufAfter.viewportY !== _yBefore,
-		});
-		return false;
-	});
+	// `getCellHeight` (defined above) is still used by the touch handler.
 
 	// ── Resize ──────────────────────────────────────────────────────────────
 	// ResizeObserver fires continuously during mobile viewport churn (URL
