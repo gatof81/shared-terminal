@@ -343,14 +343,24 @@ export function openTerminalSession(opts: {
 	// finger drags aren't forwarded as anything useful. We translate the
 	// drag into terminal scroll:
 	//
-	//  - Main buffer (shell prompt, command output): scroll xterm's own
-	//    scrollback with `scrollLines`. Users expect to pull older lines
-	//    back into view; we don't involve tmux at all, so there's no weird
-	//    copy-mode dance.
 	//  - Alt buffer (vim, less, Claude Code, htop, …): synthesise
 	//    up/down arrow keys. Every TUI app responds to arrows, so the
 	//    user can navigate without needing mouse-wheel support in the app
 	//    or tmux copy-mode.
+	//  - Main buffer (shell): we still call `term.scrollLines` here, but
+	//    *that's a no-op in this stack* — see the wheel comment block
+	//    below and the `project_tmux_xterm_scrollback.md` rationale.
+	//    tmux manages the pane in-place, so xterm's local scrollback
+	//    stays empty regardless of how much output has rendered. The
+	//    real fix is to route this through tmux copy-mode the same way
+	//    the wheel path now does (forward as SGR mouse-tracking and let
+	//    tmux's `WheelUpPane` binding handle it), but synthesising
+	//    mouse-tracking from touch coordinates is a bigger change —
+	//    tracked separately. The current call is left in place so the
+	//    finger-drag still suppresses xterm's drag-selection handler
+	//    (preventDefault above), which on mobile is the more visible
+	//    misbehaviour to avoid; users just won't see scrollback move
+	//    until that follow-up lands.
 	//
 	// Direction follows iOS/Android convention — content tracks the
 	// finger: drag up → view moves up → scroll toward newer (bottom).
