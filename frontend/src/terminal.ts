@@ -234,6 +234,13 @@ export function openTerminalSession(opts: {
 	const scrollDisposable = term.onScroll(() => {
 		const buf = term.buffer.active;
 		userScrolled = buf.viewportY < buf.baseY;
+		// DEBUG (#178 follow-up). Remove once diagnosed.
+		console.log("[scroll-debug] onScroll", {
+			viewportY: buf.viewportY,
+			baseY: buf.baseY,
+			userScrolled,
+			bufType: buf.type,
+		});
 	});
 
 	// ── WebSocket connection ────────────────────────────────────────────────
@@ -483,10 +490,26 @@ export function openTerminalSession(opts: {
 	// don't have. Workaround for users in main-buffer copy-mode: arrow
 	// keys / Page Up/Down inside copy-mode instead of the wheel.
 	term.attachCustomWheelEventHandler((ev) => {
+		// DEBUG (#178 follow-up): user reports wheel does nothing in bash
+		// despite scrollback content. Log every wheel event + the buffer/
+		// scroll state so we can see whether the handler fires, what
+		// values the browser delivers, and whether `term.scrollLines`
+		// has any visible effect on `viewportY`. Remove once diagnosed.
+		const _bufBefore = term.buffer.active;
+		const _yBefore = _bufBefore.viewportY;
+		const _baseBefore = _bufBefore.baseY;
+		const _bufType = _bufBefore.type;
 		// Alt buffer → forward to xterm's default; tmux's binding takes it
 		// from there. Keep the early return *before* residue accounting so
 		// switching buffers mid-gesture doesn't carry residue across modes.
-		if (term.buffer.active.type === "alternate") return true;
+		if (term.buffer.active.type === "alternate") {
+			console.log("[wheel-debug] ALT-BUFFER forward", {
+				deltaMode: ev.deltaMode,
+				deltaY: ev.deltaY,
+				bufType: _bufType,
+			});
+			return true;
+		}
 		const cellH = getCellHeight();
 		let deltaPx: number;
 		switch (ev.deltaMode) {
@@ -511,9 +534,36 @@ export function openTerminalSession(opts: {
 		if (deltaPx !== 0 && deltaPx < 0 !== wheelResidue < 0) wheelResidue = 0;
 		wheelResidue += deltaPx;
 		const lines = Math.trunc(wheelResidue / cellH);
-		if (lines === 0) return false;
+		if (lines === 0) {
+			console.log("[wheel-debug] no-op", {
+				deltaMode: ev.deltaMode,
+				deltaY: ev.deltaY,
+				cellH,
+				deltaPx,
+				wheelResidue,
+				lines,
+				bufType: _bufType,
+				yBefore: _yBefore,
+				baseBefore: _baseBefore,
+			});
+			return false;
+		}
 		wheelResidue -= lines * cellH;
 		term.scrollLines(lines);
+		const _bufAfter = term.buffer.active;
+		console.log("[wheel-debug] scrollLines", {
+			deltaMode: ev.deltaMode,
+			deltaY: ev.deltaY,
+			cellH,
+			deltaPx,
+			lines,
+			bufType: _bufType,
+			yBefore: _yBefore,
+			yAfter: _bufAfter.viewportY,
+			baseBefore: _baseBefore,
+			baseAfter: _bufAfter.baseY,
+			scrolled: _bufAfter.viewportY !== _yBefore,
+		});
 		return false;
 	});
 
