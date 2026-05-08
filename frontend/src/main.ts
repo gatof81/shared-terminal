@@ -823,6 +823,7 @@ function openTab(tabId: string) {
 					if (tabId !== currentActiveTabId) return;
 					if (!ok) showToast("Copy failed — clipboard permission denied?", true);
 				},
+				isActive: () => activeSessionId === ownSessionId && tabId === currentActiveTabId,
 			});
 			entry = { pane, term };
 			currentTerminals.set(tabId, entry);

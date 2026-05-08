@@ -27,6 +27,14 @@ export type RendererNoticeCallback = (message: string) => void;
  *  on failure only — a per-event success toast would be too chatty
  *  given the auto-copy path fires on every finalised selection (#158). */
 export type CopyCallback = (ok: boolean) => void;
+/** Predicate the session calls before writing to the system clipboard
+ *  on the auto-copy path. Returns true iff this session's tab is the
+ *  one the user is currently looking at — selections in a background
+ *  tab whose debounced finalise fires *after* the user switched away
+ *  must NOT clobber the clipboard with content from a pane the user
+ *  isn't viewing (#158 NIT). main.ts wires this against
+ *  `currentActiveTabId` / `activeSessionId`. */
+export type ActivePredicate = () => boolean;
 
 export function openTerminalSession(opts: {
 	container: HTMLElement;
@@ -37,9 +45,19 @@ export function openTerminalSession(opts: {
 	onError: ErrorCallback;
 	onRendererFallback?: RendererNoticeCallback;
 	onCopy?: CopyCallback;
+	isActive?: ActivePredicate;
 }): TerminalSession {
-	const { container, sessionId, tabId, fontSize, onStatus, onError, onRendererFallback, onCopy } =
-		opts;
+	const {
+		container,
+		sessionId,
+		tabId,
+		fontSize,
+		onStatus,
+		onError,
+		onRendererFallback,
+		onCopy,
+		isActive,
+	} = opts;
 	// Fires the fallback notice at most once per tab, regardless of how
 	// many times the WebGL context flaps (#55). A flapping driver
 	// shouldn't toast on every cycle.
@@ -244,6 +262,16 @@ export function openTerminalSession(opts: {
 			selectionDebounceTimer = null;
 			const sel = term.getSelection();
 			if (!sel || sel === lastCopiedSelection) return;
+			// Don't clobber the clipboard for a background tab — user
+			// might have switched to another tab during the 100 ms
+			// debounce window, in which case writing tab A's selection
+			// while they're looking at tab B is a footgun. `onCopy`'s
+			// failure toast already gates on the active-tab check; the
+			// write itself needs the same gate, otherwise the clipboard
+			// is silently overwritten with stale content. Cmd-C path
+			// doesn't need this guard because it requires keyboard
+			// focus, which a background tab can't have.
+			if (isActive && !isActive()) return;
 			lastCopiedSelection = sel;
 			copyToClipboard(sel);
 		}, SELECTION_DEBOUNCE_MS);
