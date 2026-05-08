@@ -21,6 +21,12 @@ export type ErrorCallback = (message: string) => void;
  *  per terminal lifetime. Used by main.ts to surface a one-time toast
  *  so the user knows why their session feels slower (#55). */
 export type RendererNoticeCallback = (message: string) => void;
+/** Fired after a clipboard write attempt (Cmd-C or auto-copy on
+ *  selection-finalize). `ok=true` on success, `false` on rejection
+ *  (permission-denied, focus issue, etc.). main.ts uses it to toast
+ *  on failure only — a per-event success toast would be too chatty
+ *  given the auto-copy path fires on every finalised selection (#158). */
+export type CopyCallback = (ok: boolean) => void;
 
 export function openTerminalSession(opts: {
 	container: HTMLElement;
@@ -30,8 +36,10 @@ export function openTerminalSession(opts: {
 	onStatus: StatusCallback;
 	onError: ErrorCallback;
 	onRendererFallback?: RendererNoticeCallback;
+	onCopy?: CopyCallback;
 }): TerminalSession {
-	const { container, sessionId, tabId, fontSize, onStatus, onError, onRendererFallback } = opts;
+	const { container, sessionId, tabId, fontSize, onStatus, onError, onRendererFallback, onCopy } =
+		opts;
 	// Fires the fallback notice at most once per tab, regardless of how
 	// many times the WebGL context flaps (#55). A flapping driver
 	// shouldn't toast on every cycle.
@@ -174,6 +182,19 @@ export function openTerminalSession(opts: {
 
 	fitAddon.fit();
 
+	// Helper: write to clipboard and surface success/failure to the
+	// caller. Used by both the Cmd-C handler (explicit user gesture)
+	// and the onSelectionChange auto-copy path below (selection
+	// finalisation). Centralised so the same notification path runs
+	// for both, keeping toast policy (failure-only by default) in
+	// main.ts rather than duplicated here.
+	const copyToClipboard = (text: string) => {
+		navigator.clipboard.writeText(text).then(
+			() => onCopy?.(true),
+			() => onCopy?.(false),
+		);
+	};
+
 	// Cmd/Ctrl + C copies the current xterm selection to the clipboard.
 	// Without this, Cmd-C falls through to the terminal (Claude Code
 	// intercepts it as SIGINT) and nothing gets copied.
@@ -187,7 +208,7 @@ export function openTerminalSession(opts: {
 		) {
 			const sel = term.getSelection();
 			if (sel) {
-				navigator.clipboard.writeText(sel).catch(() => {});
+				copyToClipboard(sel);
 				return false;
 			}
 		}
@@ -199,6 +220,34 @@ export function openTerminalSession(opts: {
 	// complete URL. No-op when the app already emits OSC 8 (xterm's native
 	// hyperlink handling takes precedence per-cell).
 	const linkProviderDisposable = term.registerLinkProvider(new MultilineUrlLinkProvider(term));
+
+	// ── Auto-copy on selection-finalise ─────────────────────────────────────
+	// xterm fires `onSelectionChange` continuously while the user drags to
+	// select — once per cell of mouse movement. Copying on every fire would
+	// hit `navigator.clipboard.writeText` 50+ times per gesture, slow and
+	// rate-limited by browsers in some configurations. Debounce to ~100 ms
+	// so we copy once after the selection settles (mouse release / final
+	// shift-arrow), not on every intermediate frame.
+	//
+	// Skip empty selections — those fire on click-to-deselect and we don't
+	// want to clobber the user's clipboard with "" every time they click.
+	// `lastCopiedSelection` deduplicates the case where xterm fires
+	// onSelectionChange after we've already copied (e.g. xterm's
+	// post-render reconciliation pass) — without it we'd toast twice
+	// for the same logical selection.
+	const SELECTION_DEBOUNCE_MS = 100;
+	let selectionDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+	let lastCopiedSelection = "";
+	const selectionDisposable = term.onSelectionChange(() => {
+		if (selectionDebounceTimer !== null) clearTimeout(selectionDebounceTimer);
+		selectionDebounceTimer = setTimeout(() => {
+			selectionDebounceTimer = null;
+			const sel = term.getSelection();
+			if (!sel || sel === lastCopiedSelection) return;
+			lastCopiedSelection = sel;
+			copyToClipboard(sel);
+		}, SELECTION_DEBOUNCE_MS);
+	});
 
 	// Mouse clicks should focus xterm immediately. Touch taps are handled
 	// in onTouchEnd below — we wait until touchend to distinguish a tap
@@ -663,6 +712,8 @@ export function openTerminalSession(opts: {
 		inputDisposable.dispose();
 		linkProviderDisposable.dispose();
 		scrollDisposable.dispose();
+		selectionDisposable.dispose();
+		if (selectionDebounceTimer !== null) clearTimeout(selectionDebounceTimer);
 		pendingRestoreCanvas?.removeEventListener("webglcontextrestored", onContextRestored);
 		container.removeEventListener("webglcontextlost", onContextLost);
 		webgl?.dispose();

@@ -809,6 +809,16 @@ function openTab(tabId: string) {
 					// because the terminal still works, just slower.
 					showToast(`${msg} Reload the tab to retry GPU rendering.`);
 				},
+				onCopy: (ok: boolean) => {
+					// Failure-only toast policy: silent on success matches
+					// the native Cmd-C feel and avoids flooding the user
+					// with chips on every selection-finalize (#158).
+					// Active-session guard so a stale copy attempt from a
+					// torn-down tab doesn't toast against whatever session
+					// is current now.
+					if (activeSessionId !== ownSessionId) return;
+					if (!ok) showToast("Copy failed — clipboard permission denied?", true);
+				},
 			});
 			entry = { pane, term };
 			currentTerminals.set(tabId, entry);
