@@ -349,9 +349,9 @@ export function openTerminalSession(opts: {
 	//    or tmux copy-mode.
 	//  - Main buffer (shell): we still call `term.scrollLines` here, but
 	//    *that's a no-op in this stack* — see the wheel comment block
-	//    below and the `project_tmux_xterm_scrollback.md` rationale.
-	//    tmux manages the pane in-place, so xterm's local scrollback
-	//    stays empty regardless of how much output has rendered. The
+	//    below for the full rationale. tmux manages the pane in-place,
+	//    so xterm's local scrollback stays empty regardless of how much
+	//    output has rendered. The
 	//    real fix is to route this through tmux copy-mode the same way
 	//    the wheel path now does (forward as SGR mouse-tracking and let
 	//    tmux's `WheelUpPane` binding handle it), but synthesising
