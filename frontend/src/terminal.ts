@@ -389,30 +389,37 @@ export function openTerminalSession(opts: {
 
 	// ── Touch scroll ────────────────────────────────────────────────────────
 	// On mobile there are no wheel events, and `mouse on` in tmux means
-	// finger drags aren't forwarded as anything useful. We translate the
-	// drag into terminal scroll:
+	// finger drags aren't forwarded as anything useful by xterm itself.
+	// Translate the drag into a stream of SGR-1006 mouse-tracking wheel
+	// events sent as input on the WS — same wire format xterm would emit
+	// if a real wheel were turning, so tmux's `WheelUpPane` /
+	// `WheelDownPane` bindings handle it identically:
 	//
-	//  - Alt buffer (vim, less, Claude Code, htop, …): synthesise
-	//    up/down arrow keys. Every TUI app responds to arrows, so the
-	//    user can navigate without needing mouse-wheel support in the app
-	//    or tmux copy-mode.
-	//  - Main buffer (shell): we still call `term.scrollLines` here, but
-	//    *that's a no-op in this stack* — see the wheel comment block
-	//    below for the full rationale. tmux manages the pane in-place,
-	//    so xterm's local scrollback stays empty regardless of how much
-	//    output has rendered. The
-	//    real fix is to route this through tmux copy-mode the same way
-	//    the wheel path now does (forward as SGR mouse-tracking and let
-	//    tmux's `WheelUpPane` binding handle it), but synthesising
-	//    mouse-tracking from touch coordinates is a bigger change —
-	//    tracked separately. The current call is left in place so the
-	//    finger-drag still suppresses xterm's drag-selection handler
-	//    (preventDefault above), which on mobile is the more visible
-	//    misbehaviour to avoid; users just won't see scrollback move
-	//    until that follow-up lands.
+	//   - Main bash (no mouse-app): tmux enters copy-mode and scrolls
+	//     pane history — exactly what wheel does on desktop now.
+	//   - Alt buffer with `mouse_any_flag` (vim, htop, claude with
+	//     explicit mouse): tmux forwards via `send-keys -M` so the app
+	//     handles wheel itself.
+	//   - Alt buffer without (claude TUI / Ink, less, man): tmux enters
+	//     copy-mode and scrolls.
+	//
+	// Earlier this branch synthesised Up/Down arrow keys for the alt
+	// buffer (#176, #177) and called `term.scrollLines()` for the main
+	// buffer — the arrows misfired into claude's *input* history and
+	// the scrollLines was a no-op because tmux manages the pane
+	// in-place (xterm's local scrollback stays empty; see the wheel
+	// comment below). Routing through tmux's wheel bindings unifies
+	// touch with wheel and matches user expectation across both
+	// buffer types (#181).
+	//
+	// Coordinates 1;1 in the SGR sequence — tmux's bindings don't read
+	// the position, just the button. Button 64 = wheel-up (older),
+	// button 65 = wheel-down (newer). One sequence per cell of drag,
+	// capped per frame so a fast flick doesn't queue hundreds of events.
 	//
 	// Direction follows iOS/Android convention — content tracks the
-	// finger: drag up → view moves up → scroll toward newer (bottom).
+	// finger: drag up → view moves up → scroll toward newer (bottom),
+	// which is the wheel-down direction.
 	let lastTouchY: number | null = null;
 	let touchIsScroll = false; // true once the gesture has moved ≥1 cell
 	const getCellHeight = () => (term.rows > 0 ? container.clientHeight / term.rows : 20);
@@ -468,15 +475,15 @@ export function openTerminalSession(opts: {
 
 		touchIsScroll = true;
 
-		if (term.buffer.active.type === "alternate") {
-			// Cap the burst so a fast flick doesn't fire 100+ arrows
-			// at the app in one frame.
-			const n = Math.min(Math.abs(lines), 20);
-			const key = lines > 0 ? "\x1b[B" : "\x1b[A";
-			send({ type: "input", data: key.repeat(n) });
-		} else {
-			term.scrollLines(lines);
-		}
+		// Cap the burst so a fast flick doesn't queue hundreds of
+		// wheel events at tmux in a single frame.
+		const n = Math.min(Math.abs(lines), 20);
+		// SGR 1006 mouse-tracking encoding: ESC[<button;col;rowM
+		// 64 = wheel-up (older content), 65 = wheel-down (newer).
+		// `lines > 0` = finger drag up = scroll toward newer = wheel-down.
+		const button = lines > 0 ? 65 : 64;
+		const seq = `\x1b[<${button};1;1M`;
+		send({ type: "input", data: seq.repeat(n) });
 		lastTouchY -= lines * cellH;
 	};
 	const onTouchEnd = () => {
