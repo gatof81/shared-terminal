@@ -212,6 +212,13 @@ export function openTerminalSession(opts: {
 			() => onCopy?.(false),
 		);
 	};
+	// Dedup state shared between the Cmd-C handler and the auto-copy
+	// onSelectionChange path below — declared up here so both writers
+	// see a fully-initialised binding (the Cmd-C closure was previously
+	// a forward reference into the auto-copy block; safe because the
+	// closure only runs at event time, but a footgun for any future
+	// refactor that runs the Cmd-C registration inside an IIFE).
+	let lastCopiedSelection = "";
 
 	// Cmd/Ctrl + C copies the current xterm selection to the clipboard.
 	// Without this, Cmd-C falls through to the terminal (Claude Code
@@ -259,7 +266,6 @@ export function openTerminalSession(opts: {
 	// for the same logical selection.
 	const SELECTION_DEBOUNCE_MS = 100;
 	let selectionDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-	let lastCopiedSelection = "";
 	const selectionDisposable = term.onSelectionChange(() => {
 		if (selectionDebounceTimer !== null) clearTimeout(selectionDebounceTimer);
 		selectionDebounceTimer = setTimeout(() => {
