@@ -150,6 +150,43 @@ export async function migrateDb(): Promise<void> {
                 )`,
 		`CREATE INDEX IF NOT EXISTS idx_invite_codes_creator
                         ON invite_codes(created_by)`,
+		// Session configuration is 1:1 with `sessions.session_id` and is
+		// bound at create time (see epic #184 / issue #185). Every column
+		// is nullable so a bare `POST /api/sessions` with no config still
+		// produces a valid sessions row without forcing a config row to
+		// exist; today there's no FK from sessions → session_configs, only
+		// the reverse, so a missing config row is the legitimate "no
+		// config supplied" state. ON DELETE CASCADE on the FK keeps the
+		// table garbage-free when a hard-delete drops the parent.
+		//
+		// Structured columns where the field has a defined scalar shape;
+		// JSON columns for repeating sub-records (repos, ports, env vars)
+		// because storing them relationally would require a child table
+		// per shape and #184 deliberately defers that scope. Each child
+		// issue (#186 env, #188 repos, #190 ports, #191 hooks, #194
+		// resources) hardens validation when its UI lands.
+		//
+		// `bootstrapped_at` gates the one-shot postCreate hook (PR 185b):
+		// NULL = not yet run; set to an ISO timestamp on success. The
+		// runner uses an UPDATE … WHERE bootstrapped_at IS NULL with
+		// `meta.changes === 1` to make the gate atomic across concurrent
+		// `start()` calls (e.g. two browser tabs racing to revive a stopped
+		// session). See PR 185b for the runner.
+		`CREATE TABLE IF NOT EXISTS session_configs (
+                        session_id          TEXT PRIMARY KEY,
+                        workspace_strategy  TEXT,
+                        cpu_limit           INTEGER,
+                        mem_limit           INTEGER,
+                        idle_ttl_seconds    INTEGER,
+                        post_create_cmd     TEXT,
+                        post_start_cmd      TEXT,
+                        repos_json          TEXT,
+                        ports_json          TEXT,
+                        env_vars_json       TEXT,
+                        bootstrapped_at     TEXT,
+                        created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+                        FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                )`,
 	]);
 	// ALTER for any table that pre-dates the expires_at column (e.g. a dev
 	// DB that ran the original migration before this column existed). SQLite

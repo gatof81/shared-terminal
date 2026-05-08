@@ -60,8 +60,11 @@ const invitesModal = document.getElementById("invites-modal")!;
 const inviteCreateBtn = document.getElementById("invite-create-btn") as HTMLButtonElement;
 const inviteList = document.getElementById("invite-list")!;
 const sessionList = document.getElementById("session-list")!;
+const newSessionBtn = document.getElementById("new-session-btn") as HTMLButtonElement;
+const newSessionModal = document.getElementById("new-session-modal")!;
 const newSessionForm = document.getElementById("new-session-form") as HTMLFormElement;
 const newSessionInput = document.getElementById("new-session-input") as HTMLInputElement;
+const newSessionSubmitBtn = document.getElementById("new-session-submit") as HTMLButtonElement;
 const showTerminatedToggle = document.getElementById("show-terminated-toggle") as HTMLInputElement;
 const mainEl = document.querySelector("main")!;
 const sidebarEl = document.getElementById("sidebar")!;
@@ -1024,21 +1027,130 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
 }
 
 // ── New session ─────────────────────────────────────────────────────────────
+//
+// The new-session UI is a tabbed modal: Basics / Repo / Env / Ports / Advanced.
+// Foundation lands in #185; only the Basics tab (session name) is functional
+// today. The other tabs render placeholder copy linking to the child issue
+// that wires each one up so users can see what's coming. PR 185b adds the
+// bootstrap-output live-tail panel inside the modal once the runner exists.
+
+const SESSION_TAB_PLACEHOLDERS: Record<string, { title: string; body: string; issueUrl: string }> =
+	{
+		repo: {
+			title: "Clone a repo into the workspace",
+			body: "Public or private (PAT / SSH), pick a branch or ref, optionally replace the workspace.",
+			issueUrl: "https://github.com/gatof81/shared-terminal/issues/188",
+		},
+		env: {
+			title: "Environment variables and secrets",
+			body: "Plain values are stored in cleartext; secrets are AES-GCM-encrypted at rest and never echoed by listing endpoints.",
+			issueUrl: "https://github.com/gatof81/shared-terminal/issues/186",
+		},
+		ports: {
+			title: "Expose ports to the outside",
+			body: "Per-session subdomains, dynamic host ports, auth-gated by default (independent of session ownership).",
+			issueUrl: "https://github.com/gatof81/shared-terminal/issues/190",
+		},
+	};
+
+let newSessionOpener: HTMLElement | null = null;
+
+function renderSessionTabPlaceholders() {
+	for (const [key, info] of Object.entries(SESSION_TAB_PLACEHOLDERS)) {
+		const panel = document.getElementById(`session-tab-${key}`);
+		if (!panel || panel.childElementCount > 0) continue;
+		const wrap = document.createElement("p");
+		wrap.className = "session-placeholder";
+		// textContent path for the title + body so any future copy
+		// change with user-supplied parts can't smuggle markup. The
+		// trailing link is built with createElement and assembled below.
+		const strong = document.createElement("strong");
+		strong.textContent = info.title;
+		wrap.appendChild(strong);
+		wrap.appendChild(document.createElement("br"));
+		wrap.appendChild(document.createTextNode(info.body));
+		wrap.appendChild(document.createElement("br"));
+		const a = document.createElement("a");
+		a.href = info.issueUrl;
+		a.target = "_blank";
+		a.rel = "noopener";
+		a.textContent = "Track progress on this tab →";
+		wrap.appendChild(a);
+		panel.appendChild(wrap);
+	}
+}
+
+function setActiveSessionTab(key: string) {
+	const tabs = newSessionModal.querySelectorAll<HTMLButtonElement>(".session-tab");
+	const panels = newSessionModal.querySelectorAll<HTMLDivElement>(".session-tab-panel");
+	for (const tab of tabs) {
+		const active = tab.dataset.sessionTab === key;
+		tab.classList.toggle("is-active", active);
+		tab.setAttribute("aria-selected", active ? "true" : "false");
+	}
+	for (const panel of panels) {
+		const active = panel.id === `session-tab-${key}`;
+		panel.classList.toggle("is-active", active);
+		// `hidden` is the source of truth for accessibility-tree
+		// visibility; the .is-active class only handles the CSS
+		// transitions. Keep them in sync so a screen reader doesn't
+		// announce four placeholder panels every time the modal opens.
+		panel.toggleAttribute("hidden", !active);
+	}
+}
+
+function openNewSessionModal(opener: HTMLElement) {
+	newSessionOpener = opener;
+	renderSessionTabPlaceholders();
+	setActiveSessionTab("basics");
+	newSessionInput.value = "";
+	newSessionSubmitBtn.disabled = false;
+	newSessionModal.classList.add("open");
+	newSessionModal.setAttribute("aria-hidden", "false");
+	// Defer focus to the next paint so the input is reliably focusable
+	// (some browsers ignore .focus() on an element that just transitioned
+	// from display:none in the same frame).
+	requestAnimationFrame(() => newSessionInput.focus());
+}
+
+function closeNewSessionModal() {
+	newSessionModal.classList.remove("open");
+	newSessionModal.setAttribute("aria-hidden", "true");
+	(newSessionOpener ?? newSessionBtn).focus();
+	newSessionOpener = null;
+}
+
+newSessionBtn.addEventListener("click", () => openNewSessionModal(newSessionBtn));
+
+newSessionModal.addEventListener("click", (e) => {
+	const target = e.target as HTMLElement;
+	if (target.hasAttribute("data-close-modal")) closeNewSessionModal();
+	const tab = target.closest<HTMLButtonElement>("[data-session-tab]");
+	if (tab?.dataset.sessionTab) setActiveSessionTab(tab.dataset.sessionTab);
+});
 
 newSessionForm.addEventListener("submit", async (e) => {
 	e.preventDefault();
 	const name = newSessionInput.value.trim();
-	if (!name) return;
-	newSessionInput.value = "";
+	if (!name) {
+		newSessionInput.focus();
+		return;
+	}
+	// Disable the submit button for the duration of the request so a
+	// double-click doesn't fire two POSTs (which would create two
+	// sessions and burn quota silently).
+	newSessionSubmitBtn.disabled = true;
 	try {
 		showToast("Creating session…");
 		const session = await createSession(name);
 		sessions.unshift(session);
 		renderSessionList();
+		closeNewSessionModal();
 		void openSession(session.sessionId);
 		showToast(`Session "${name}" created`);
 	} catch (err) {
 		showToast((err as Error).message, true);
+		newSessionSubmitBtn.disabled = false;
 	}
 });
 
@@ -1118,7 +1230,8 @@ document.addEventListener("keydown", (e) => {
 	if (
 		invitesModal.classList.contains("open") ||
 		pasteModal.classList.contains("open") ||
-		actionsMenu.classList.contains("open")
+		actionsMenu.classList.contains("open") ||
+		newSessionModal.classList.contains("open")
 	)
 		return;
 	if (!mainEl.classList.contains("sidebar-open")) return;
@@ -1439,7 +1552,9 @@ invitesModal.addEventListener("click", (e) => {
 
 document.addEventListener("keydown", (e) => {
 	if (e.key !== "Escape") return;
-	if (invitesModal.classList.contains("open")) {
+	if (newSessionModal.classList.contains("open")) {
+		closeNewSessionModal();
+	} else if (invitesModal.classList.contains("open")) {
 		closeInvitesModal();
 	} else if (pasteModal.classList.contains("open")) {
 		closePasteModal();

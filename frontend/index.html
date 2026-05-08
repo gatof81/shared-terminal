@@ -125,16 +125,7 @@
               Show terminated
             </label>
           </div>
-          <form id="new-session-form">
-            <input
-              id="new-session-input"
-              type="text"
-              placeholder="New session name…"
-              maxlength="64"
-              autocomplete="off"
-            />
-            <button type="submit">+ New</button>
-          </form>
+          <button id="new-session-btn" type="button">+ New session</button>
           <div id="session-list"></div>
           <div id="sidebar-footer">
             <span id="sidebar-user-display" aria-hidden="true"></span>
@@ -164,6 +155,158 @@
     </div>
 
     <div id="toast"></div>
+
+    <!-- New-session modal — tabbed form for the session-config epic (#184).
+         Only the Basics tab is functionally complete in this issue (#185);
+         the other tabs render placeholder copy linking to their child
+         issues so users can see what's coming. -->
+    <div id="new-session-modal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close-modal></div>
+      <div
+        class="modal-card session-modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="new-session-modal-title"
+      >
+        <div class="modal-header">
+          <h2 id="new-session-modal-title">New session</h2>
+          <button
+            class="modal-close"
+            type="button"
+            aria-label="Close"
+            data-close-modal
+          >
+            ×
+          </button>
+        </div>
+        <div class="session-tabs" role="tablist" aria-label="Session configuration sections">
+          <button
+            class="session-tab is-active"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            aria-controls="session-tab-basics"
+            data-session-tab="basics"
+          >
+            Basics
+          </button>
+          <button
+            class="session-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="session-tab-repo"
+            data-session-tab="repo"
+          >
+            Repo
+          </button>
+          <button
+            class="session-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="session-tab-env"
+            data-session-tab="env"
+          >
+            Env
+          </button>
+          <button
+            class="session-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="session-tab-ports"
+            data-session-tab="ports"
+          >
+            Ports
+          </button>
+          <button
+            class="session-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="session-tab-advanced"
+            data-session-tab="advanced"
+          >
+            Advanced
+          </button>
+        </div>
+        <form id="new-session-form" novalidate>
+          <div
+            class="session-tab-panel is-active"
+            id="session-tab-basics"
+            role="tabpanel"
+            aria-labelledby="session-tab-basics-tab"
+          >
+            <label class="session-field">
+              <span class="session-field-label">Session name</span>
+              <input
+                id="new-session-input"
+                type="text"
+                placeholder="my-project"
+                maxlength="64"
+                autocomplete="off"
+                required
+              />
+            </label>
+            <p class="modal-hint">
+              All other settings are optional. Visit the tabs above to add a
+              repo, env vars, exposed ports, or lifecycle hooks.
+            </p>
+          </div>
+          <div
+            class="session-tab-panel"
+            id="session-tab-repo"
+            role="tabpanel"
+            hidden
+            data-issue-link="https://github.com/gatof81/shared-terminal/issues/188"
+          ></div>
+          <div
+            class="session-tab-panel"
+            id="session-tab-env"
+            role="tabpanel"
+            hidden
+            data-issue-link="https://github.com/gatof81/shared-terminal/issues/186"
+          ></div>
+          <div
+            class="session-tab-panel"
+            id="session-tab-ports"
+            role="tabpanel"
+            hidden
+            data-issue-link="https://github.com/gatof81/shared-terminal/issues/190"
+          ></div>
+          <div
+            class="session-tab-panel"
+            id="session-tab-advanced"
+            role="tabpanel"
+            hidden
+          >
+            <p class="session-placeholder">
+              Lifecycle hooks (post-create / post-start commands), dotfiles,
+              git identity, agent config seed, and per-session resource caps
+              live here. Wired up in
+              <a
+                href="https://github.com/gatof81/shared-terminal/issues/191"
+                target="_blank"
+                rel="noopener"
+                >#191</a
+              >
+              and
+              <a
+                href="https://github.com/gatof81/shared-terminal/issues/194"
+                target="_blank"
+                rel="noopener"
+                >#194</a
+              >.
+            </p>
+          </div>
+          <div class="session-modal-actions">
+            <button type="button" data-close-modal>Cancel</button>
+            <button type="submit" id="new-session-submit">Create session</button>
+          </div>
+        </form>
+      </div>
+    </div>
 
     <!-- Invites modal -->
     <div id="invites-modal" class="modal" aria-hidden="true">

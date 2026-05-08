@@ -138,13 +138,35 @@ export interface SessionInfo {
 
 // ── Session API ─────────────────────────────────────────────────────────────
 
+/**
+ * Typed session configuration sent under POST /sessions `body.config`.
+ *
+ * Mirrors `SessionConfigSchema` in the backend (`backend/src/sessionConfig.ts`).
+ * Every sub-field is optional; today the new-session modal only fills in the
+ * `name` (Basics tab) and leaves `config` undefined — children of epic #184
+ * (#186, #188, #190, #191, #194) flesh out their respective fields as they
+ * ship. Keep this in sync with the backend Zod schema or the call will 400.
+ */
+export interface SessionConfigPayload {
+	workspaceStrategy?: "preserve" | "clone";
+	cpuLimit?: number;
+	memLimit?: number;
+	idleTtlSeconds?: number;
+	postCreateCmd?: string;
+	postStartCmd?: string;
+	repos?: Array<{ url: string; ref?: string }>;
+	ports?: Array<{ port: number; protocol?: "http" | "tcp" }>;
+	envVars?: Record<string, string>;
+}
+
 export async function createSession(
 	name: string,
 	envVars?: Record<string, string>,
+	config?: SessionConfigPayload,
 ): Promise<SessionInfo> {
 	const res = await apiFetch("/sessions", {
 		method: "POST",
-		body: JSON.stringify({ name, envVars }),
+		body: JSON.stringify({ name, envVars, config }),
 	});
 	if (!res.ok) {
 		const body = await res.json();
