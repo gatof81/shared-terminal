@@ -209,7 +209,16 @@ export function openTerminalSession(opts: {
 	const copyToClipboard = (text: string) => {
 		navigator.clipboard.writeText(text).then(
 			() => onCopy?.(true),
-			() => onCopy?.(false),
+			(err) => {
+				// Surface the underlying DOMException to the console so a
+				// developer debugging a field report can tell NotAllowedError
+				// (permission denied — fixable by the user) from a transient
+				// SecurityError (e.g. a context-restored race) without having
+				// to monkey-patch the helper. The user-facing toast in main.ts
+				// is intentionally generic; this is the diagnostic channel.
+				console.warn("[terminal] clipboard write failed:", err);
+				onCopy?.(false);
+			},
 		);
 	};
 	// Dedup state shared between the Cmd-C handler and the auto-copy
