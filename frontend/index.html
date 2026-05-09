@@ -426,7 +426,27 @@
             role="tabpanel"
             aria-labelledby="session-tab-ports-tab"
             hidden
-          ></div>
+          >
+            <p class="modal-hint">
+              Container ports published as
+              <code>p&lt;port&gt;-&lt;sessionId&gt;.&lt;base&gt;</code>.
+              Public ports skip the
+              <code>st_token</code> cookie check (webhook /
+              OAuth-callback shape) — only enable for receivers that
+              expect arbitrary callers.
+            </p>
+            <table class="ports-table">
+              <thead>
+                <tr>
+                  <th>Container port</th>
+                  <th>Public</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="ports-table-body"></tbody>
+            </table>
+            <button type="button" id="ports-add-row" class="env-add-row">+ Add port</button>
+          </div>
           <div
             class="session-tab-panel"
             id="session-tab-advanced"
@@ -577,6 +597,25 @@
                   <code>bootstrap</code>. For long-running daemons
                   (e.g. <code>code tunnel</code>, <code>npm run dev</code>).
                 </span>
+              </label>
+            </fieldset>
+
+            <fieldset class="advanced-section">
+              <legend>Privileged ports</legend>
+              <p class="modal-hint">
+                Container processes can't bind to ports below 1024
+                without <code>CAP_NET_BIND_SERVICE</code>. Toggle this
+                ON to grant exactly that capability (and only that one)
+                on <code>docker run</code>, allowing the Ports tab to
+                accept entries like <code>80</code> or <code>443</code>.
+                The container's other capabilities stay dropped.
+              </p>
+              <label class="modal-field modal-field-checkbox">
+                <input
+                  type="checkbox"
+                  id="allow-privileged-ports"
+                />
+                <span>Allow ports &lt; 1024 (grants CAP_NET_BIND_SERVICE)</span>
               </label>
             </fieldset>
           </div>
