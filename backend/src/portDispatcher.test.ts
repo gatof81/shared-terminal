@@ -225,7 +225,9 @@ describe("createPortDispatcher (HTTP middleware)", () => {
 			corsOrigins: ["https://app.example.com"],
 			lookupTarget: vi.fn(async () => opts.target),
 			verifyToken: vi.fn(() =>
-				opts.token === undefined || opts.token === null ? null : { sub: opts.token },
+				opts.token === undefined || opts.token === null
+					? null
+					: { sub: opts.token, username: "test-user" },
 			),
 			proxy: fakeProxy,
 		});
@@ -389,7 +391,9 @@ describe("createPortDispatcher (WS upgrade)", () => {
 			corsOrigins: opts?.corsOrigins ?? ["https://app.example.com"],
 			nodeEnv: opts?.nodeEnv,
 			lookupTarget: vi.fn(async () => target),
-			verifyToken: vi.fn(() => (token === undefined || token === null ? null : { sub: token })),
+			verifyToken: vi.fn(() =>
+				token === undefined || token === null ? null : { sub: token, username: "test-user" },
+			),
 			proxy: { web: vi.fn(), ws: wsSpy, on: vi.fn() } as unknown as Parameters<
 				typeof createPortDispatcher
 			>[0]["proxy"],
@@ -471,7 +475,7 @@ describe("createPortDispatcher (WS upgrade)", () => {
 			isPublic: false,
 			ownerUserId: "u-owner",
 		}));
-		const verify = vi.fn(() => ({ sub: "u-owner" }));
+		const verify = vi.fn(() => ({ sub: "u-owner", username: "owner" }));
 		const wsSpy = vi.fn();
 		const dispatcher = createPortDispatcher({
 			baseDomain: "tunnel.example.com",

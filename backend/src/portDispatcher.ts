@@ -34,6 +34,7 @@ import httpProxy from "http-proxy";
 import { isAllowedWsOrigin, verifyJwt } from "./auth.js";
 import { logger } from "./logger.js";
 import { lookupDispatchTarget } from "./portMappings.js";
+import type { JwtPayload } from "./types.js";
 import { endUpgradeSocketWithReply } from "./wsHandler.js";
 
 /**
@@ -195,8 +196,14 @@ export interface DispatcherDeps {
 	parseHost?: (host: string | undefined) => ParsedHost | null;
 	/** Test seam: target lookup. Defaults to D1-backed `lookupDispatchTarget`. */
 	lookupTarget?: typeof lookupDispatchTarget;
-	/** Test seam: cookie verifier. Defaults to JWT verifyJwt. */
-	verifyToken?: (token: string | undefined) => { sub: string } | null;
+	/**
+	 * Test seam: cookie verifier. Defaults to JWT `verifyJwt`. Typed
+	 * with the same `JwtPayload | null` shape so a stub can't silently
+	 * narrow the contract — `authorize()` only reads `payload.sub`
+	 * today, but matching the production return type keeps the seam
+	 * honest if a future check reads `username` (PR #223 round 3 NIT).
+	 */
+	verifyToken?: (token: string | undefined) => JwtPayload | null;
 	/** Test seam: pre-built proxy (so tests can spy without binding sockets). */
 	proxy?: httpProxy;
 }
