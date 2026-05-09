@@ -66,7 +66,7 @@ Multiple browser tabs attaching to the same session share the same tmux exec (ea
 
 ### Bootstrap (lifecycle hooks)
 
-`POST /api/sessions` returns 201 immediately and runs the bootstrap pipeline asynchronously: git identity → dotfiles → agent seed → repo clone → `postCreate` command. `postCreate` is gated by an atomic `session_configs.bootstrapped_at` flip so it runs **exactly once** per session even under concurrent retries (see `bootstrap.ts`). `postStart` re-runs on every container start (intended for daemons). Total wall-clock cap is 10 minutes — `streamExec` is destroyed past that and the session hard-fails. Live output streams over `/ws/bootstrap/<sessionId>` (auth identical to terminal attach but routed to `BootstrapBroadcaster`'s per-session listener set, not `docker.attach`).
+`POST /api/sessions` returns 201 immediately and runs the bootstrap pipeline asynchronously: git identity → repo clone → dotfiles → agent seed → `postCreate` command. The clone-before-dotfiles ordering is load-bearing: dotfiles may reference repo-specific config, and the agent seed is intentionally last so a cloned project's `CLAUDE.md` is on disk before the seed fires. `postCreate` is gated by an atomic `session_configs.bootstrapped_at` flip so it runs **exactly once** per session even under concurrent retries (see `bootstrap.ts`). `postStart` re-runs on every container start (intended for daemons). Total wall-clock cap is 10 minutes — `streamExec` is destroyed past that and the session hard-fails. Live output streams over `/ws/bootstrap/<sessionId>` (auth identical to terminal attach but routed to `BootstrapBroadcaster`'s per-session listener set, not `docker.attach`).
 
 ### Delete semantics
 
