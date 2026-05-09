@@ -18,7 +18,6 @@ import {
 	decryptSecret,
 	type EncryptedSecret,
 	encryptSecret,
-	secretsEqual,
 	validateSecretsKey,
 } from "./secrets.js";
 
@@ -156,30 +155,5 @@ describe("decryptSecret integrity", () => {
 		const blob = encryptSecret("payload");
 		const tampered: EncryptedSecret = { ...blob, tag: Buffer.alloc(8).toString("base64") };
 		expect(() => decryptSecret(tampered)).toThrowError(/tag/);
-	});
-});
-
-// ── secretsEqual ─────────────────────────────────────────────────────────
-
-describe("secretsEqual", () => {
-	it("returns true for the same ciphertext bytes", () => {
-		const blob = encryptSecret("k");
-		// Compare the same blob to itself — `secretsEqual` only
-		// inspects ciphertext bytes (IVs differ between fresh
-		// encrypts of the same plaintext, so equality must NOT be
-		// based on plaintext content).
-		expect(secretsEqual(blob, blob)).toBe(true);
-	});
-
-	it("returns false when ciphertexts differ", () => {
-		const a = encryptSecret("k1");
-		const b = encryptSecret("k2");
-		expect(secretsEqual(a, b)).toBe(false);
-	});
-
-	it("returns false when ciphertext lengths differ", () => {
-		const a = encryptSecret("short");
-		const b = encryptSecret("very long plaintext value");
-		expect(secretsEqual(a, b)).toBe(false);
 	});
 });

@@ -43,7 +43,7 @@
  *   the wrong length.
  */
 
-import { createCipheriv, createDecipheriv, randomBytes, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
 const KEY_BYTES = 32; // AES-256 = 256-bit key
 const IV_BYTES = 12; // GCM-recommended 96-bit IV
@@ -66,12 +66,12 @@ function getKey(): Buffer {
 				"Generate one with `openssl rand -base64 32` and set it in your env.",
 		);
 	}
-	let decoded: Buffer;
-	try {
-		decoded = Buffer.from(raw, "base64");
-	} catch (err) {
-		throw new Error(`${ENV_VAR} is not valid base64: ${(err as Error).message}`);
-	}
+	// `Buffer.from(s, "base64")` does NOT throw on bad input — it
+	// silently drops non-base64 characters and returns a possibly-
+	// shortened buffer. The length check below is the only thing that
+	// catches typo'd / line-wrapped / wrong-encoding keys; don't wrap
+	// in try/catch because there's nothing to catch (#209 review).
+	const decoded = Buffer.from(raw, "base64");
 	if (decoded.length !== KEY_BYTES) {
 		throw new Error(
 			`${ENV_VAR} must decode to exactly ${KEY_BYTES} bytes (got ${decoded.length}). ` +
@@ -139,21 +139,6 @@ export function decryptSecret(blob: EncryptedSecret): string {
 	decipher.setAuthTag(tag);
 	const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 	return plaintext.toString("utf-8");
-}
-
-/**
- * Constant-time compare two `EncryptedSecret` blobs by ciphertext.
- * Used by the merge path that needs to detect "same secret already
- * stored" without leaking timing on prefix-match. Currently unused
- * in this PR but exported for #195 (templates) which dedups secrets
- * across template loads. Kept here so the timing-safe primitive
- * lives in the crypto module rather than duplicated at call sites.
- */
-export function secretsEqual(a: EncryptedSecret, b: EncryptedSecret): boolean {
-	const aBuf = Buffer.from(a.ciphertext, "base64");
-	const bBuf = Buffer.from(b.ciphertext, "base64");
-	if (aBuf.length !== bBuf.length) return false;
-	return timingSafeEqual(aBuf, bBuf);
 }
 
 /** Test-only: clear the memoised key. Public-but-test-only, called
