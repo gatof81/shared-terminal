@@ -22,6 +22,13 @@ services:
       # isn't set in .env instead of booting with a known-public default.
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set in .env (see .env.example)}
       - JWT_EXPIRES_IN=${JWT_EXPIRES_IN:-7d}
+      # `SECRETS_ENCRYPTION_KEY` is required for #186's AES-256-GCM
+      # secret-entry path; the backend `validateSecretsKey()` boot
+      # check throws on a missing/malformed key and the container
+      # crash-loops. The `:?` guard here surfaces the failure to
+      # `docker compose up` directly so the operator sees it without
+      # tailing container logs. Generate with: openssl rand -base64 32
+      - SECRETS_ENCRYPTION_KEY=${SECRETS_ENCRYPTION_KEY:?SECRETS_ENCRYPTION_KEY must be set in .env — generate with: openssl rand -base64 32 (see .env.example)}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
       # Defaults to "0" (trust nothing) so a direct-connection dev setup
       # can't be XFF-spoofed. Set to "1" in your .env when deploying behind

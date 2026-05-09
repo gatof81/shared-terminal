@@ -40,7 +40,9 @@ import {
 	UsernameRateLimiter,
 } from "./rateLimit.js";
 import {
+	encryptSecretEntries,
 	isEmptyConfig,
+	type PersistableSessionConfig,
 	persistSessionConfig,
 	type SessionConfig,
 	SessionConfigValidationError,
@@ -448,7 +450,17 @@ export function buildRouter(
 			// case (validatedConfig === undefined) implicitly via the
 			// outer guard.
 			if (validatedConfig && !isEmptyConfig(validatedConfig)) {
-				await persistSessionConfig(meta.sessionId, validatedConfig);
+				// Encrypt `secret` env-var entries BEFORE the row hits
+				// D1 (#186). Plaintext is in scope only inside this
+				// handler; once `persistable` is built, the only thing
+				// that can leak is ciphertext.
+				const persistable: PersistableSessionConfig = {
+					...validatedConfig,
+					envVars: validatedConfig.envVars
+						? encryptSecretEntries(validatedConfig.envVars)
+						: undefined,
+				};
+				await persistSessionConfig(meta.sessionId, persistable);
 			}
 			await docker.spawn(meta.sessionId);
 			const updated = await sessions.get(meta.sessionId);

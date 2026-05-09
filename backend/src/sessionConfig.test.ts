@@ -12,9 +12,12 @@ const dbStubs = vi.hoisted(() => ({
 vi.mock("./db.js", () => dbStubs);
 
 import {
+	decryptStoredEntries,
+	encryptSecretEntries,
 	getSessionConfig,
 	isEmptyConfig,
 	persistSessionConfig,
+	redactStoredEntries,
 	type SessionConfig,
 	SessionConfigSchema,
 	SessionConfigValidationError,
@@ -29,6 +32,11 @@ beforeEach(() => {
 		meta: { changes: 0, duration: 0, last_row_id: 0 },
 	}));
 });
+
+// Set the encryption key so encrypt/decrypt helpers exercise the real
+// AES-GCM primitive in the round-trip tests below. 32 bytes of `0x42`
+// is the same deterministic key the secrets.test.ts suite uses.
+process.env.SECRETS_ENCRYPTION_KEY = Buffer.alloc(32, 0x42).toString("base64");
 
 // ── Schema validation ─────────────────────────────────────────────────────
 
@@ -48,7 +56,7 @@ describe("validateSessionConfig", () => {
 			postStartCmd: "npm run dev",
 			repos: [{ url: "https://github.com/example/repo", ref: "main" }],
 			ports: [{ port: 3000, protocol: "http" }],
-			envVars: { FOO: "bar" },
+			envVars: [{ name: "FOO", type: "plain", value: "bar" }],
 		};
 		const got = validateSessionConfig(raw);
 		expect(got).toEqual(raw);
@@ -182,43 +190,133 @@ describe("validateSessionConfig", () => {
 		).toBeDefined();
 	});
 
-	// envVars contents must run through validateEnvVars (POSIX key shape,
-	// caps, NUL rejection, denylist) — the Zod record-of-strings is a
-	// shape check, not a content check.
-	it("rejects config.envVars with denylisted keys (LD_PRELOAD)", () => {
-		expect(() => validateSessionConfig({ envVars: { LD_PRELOAD: "/evil.so" } })).toThrowError(
-			SessionConfigValidationError,
-		);
+	// envVars contents flow through validateEnvVars per-entry — POSIX
+	// name format is also enforced by Zod regex (uppercase only), but
+	// the denylist (PATH/LD_*/SESSION_ID/etc.) and NUL-byte rejection
+	// fire from the existing `validateEnvVars` routine reused on the
+	// new typed-array shape.
+	it("rejects config.envVars entries with denylisted names (LD_PRELOAD)", () => {
+		expect(() =>
+			validateSessionConfig({
+				envVars: [{ name: "LD_PRELOAD", type: "plain", value: "/evil.so" }],
+			}),
+		).toThrowError(SessionConfigValidationError);
 	});
 
-	it("rejects config.envVars with non-POSIX key shapes", () => {
-		expect(() => validateSessionConfig({ envVars: { "BAD-KEY": "x" } })).toThrowError(
-			SessionConfigValidationError,
-		);
+	it("rejects entry names that fail the uppercase POSIX regex", () => {
+		// "BAD-KEY" has a dash and lowercase — fails the Zod regex
+		// `/^[A-Z_][A-Z0-9_]*$/` enforced on each entry's name.
+		expect(() =>
+			validateSessionConfig({ envVars: [{ name: "BAD-KEY", type: "plain", value: "x" }] }),
+		).toThrowError(SessionConfigValidationError);
 	});
 
-	it("rejects config.envVars values containing NUL bytes", () => {
-		expect(() => validateSessionConfig({ envVars: { GOOD_NAME: "value\0withnul" } })).toThrowError(
-			SessionConfigValidationError,
-		);
+	it("rejects entry values containing NUL bytes", () => {
+		expect(() =>
+			validateSessionConfig({
+				envVars: [{ name: "GOOD_NAME", type: "plain", value: "value\0withnul" }],
+			}),
+		).toThrowError(SessionConfigValidationError);
 	});
 
-	it("rejects config.envVars exceeding the entry-count cap", () => {
-		const big: Record<string, string> = {};
-		for (let i = 0; i < 65; i++) big[`KEY_${i}`] = "v";
+	it("rejects entries exceeding the 64-entry cap", () => {
+		const big = Array.from({ length: 65 }, (_, i) => ({
+			name: `KEY_${i}`,
+			type: "plain" as const,
+			value: "v",
+		}));
 		expect(() => validateSessionConfig({ envVars: big })).toThrowError(
 			SessionConfigValidationError,
 		);
 	});
 
+	// Duplicate-name dedup fires inside validateSessionConfig (not in
+	// Zod itself — discriminated unions don't dedup by a shared key).
+	it("rejects duplicate entry names", () => {
+		expect(() =>
+			validateSessionConfig({
+				envVars: [
+					{ name: "FOO", type: "plain", value: "a" },
+					{ name: "FOO", type: "plain", value: "b" },
+				],
+			}),
+		).toThrowError(/duplicate entry name 'FOO'/);
+	});
+
+	// `secret-slot` is the template-load wire shape; never valid on
+	// POST /sessions because there's no value to persist.
+	it("rejects 'secret-slot' entries (template-load only)", () => {
+		expect(() =>
+			validateSessionConfig({ envVars: [{ name: "FOO", type: "secret-slot" }] }),
+		).toThrowError(/secret-slot/);
+	});
+
+	it("rejects an empty secret value", () => {
+		// Plain values can be empty (POSIX `KEY=`); secret values must
+		// have content — an "empty secret" is meaningless and was
+		// almost certainly a UX bug at the form layer.
+		expect(() =>
+			validateSessionConfig({ envVars: [{ name: "FOO", type: "secret", value: "" }] }),
+		).toThrowError(SessionConfigValidationError);
+	});
+
 	it("attributes envVars validation errors to the config.envVars path", () => {
 		try {
-			validateSessionConfig({ envVars: { PATH: "x" } });
+			validateSessionConfig({ envVars: [{ name: "PATH", type: "plain", value: "x" }] });
 		} catch (err) {
 			expect((err as SessionConfigValidationError).path).toBe("config.envVars");
 			return;
 		}
 		throw new Error("expected throw");
+	});
+
+	// PR #210 round 1: legacy validateEnvVars enforces 128-char name
+	// and 4096-char value caps; the typed path advertises 256 / 16 KiB
+	// per the #186 spec. Pin that the typed caps actually take effect
+	// (i.e. the targeted checkEnvVarSafety helper isn't re-applying
+	// the legacy length limits).
+	it("accepts entry names up to 256 chars (typed path cap, not legacy 128)", () => {
+		const longName = "A".repeat(256);
+		expect(
+			validateSessionConfig({
+				envVars: [{ name: longName, type: "plain", value: "x" }],
+			}),
+		).toBeDefined();
+	});
+
+	it("accepts entry values up to 16 KiB (typed path cap, not legacy 4096)", () => {
+		// 5000 ASCII chars exceeds the legacy 4096 char cap but is
+		// well under the typed-path 16 KiB byte cap. Validation must
+		// accept; if validateEnvVars's length cap leaks into the
+		// typed path again, this trips immediately.
+		const fiveK = "x".repeat(5000);
+		expect(
+			validateSessionConfig({
+				envVars: [{ name: "FOO", type: "plain", value: fiveK }],
+			}),
+		).toBeDefined();
+	});
+
+	it("rejects an entry list that exceeds the 256 KiB aggregate ceiling", () => {
+		// Each entry: name ~3 chars + ~16 KiB value = ~16 KiB. 17
+		// entries lands at ~272 KiB, over the cap. Lower-numbered
+		// names so the regex passes (`E0`–`E9`, `EA`–`EG`).
+		const entries = Array.from({ length: 17 }, (_, i) => ({
+			name: `E${String.fromCharCode(0x41 + i)}`,
+			type: "plain" as const,
+			value: "x".repeat(16 * 1024),
+		}));
+		expect(() => validateSessionConfig({ envVars: entries })).toThrowError(/total size .+ exceeds/);
+	});
+
+	it("accepts a mixed plain + secret entry list", () => {
+		const got = validateSessionConfig({
+			envVars: [
+				{ name: "FOO", type: "plain", value: "bar" },
+				{ name: "API_KEY", type: "secret", value: "sk-test-1234" },
+			],
+		});
+		expect(got?.envVars).toHaveLength(2);
 	});
 });
 
@@ -231,7 +329,10 @@ describe("isEmptyConfig", () => {
 
 	it("returns false when any field is defined", () => {
 		expect(isEmptyConfig({ cpuLimit: 1 })).toBe(false);
-		expect(isEmptyConfig({ envVars: {} })).toBe(false); // the empty object is itself a defined value
+		// An empty array is itself a defined value (jsonOrNull will
+		// collapse it to NULL on the way to D1, but isEmptyConfig is
+		// only the "skip the INSERT entirely" predicate).
+		expect(isEmptyConfig({ envVars: [] })).toBe(false);
 	});
 });
 
@@ -281,11 +382,11 @@ describe("persistSessionConfig", () => {
 		expect((params as unknown[]).length).toBe(10);
 	});
 
-	it("collapses empty array / empty object sub-records to NULL (no D1 row bloat)", async () => {
+	it("collapses empty array sub-records to NULL (no D1 row bloat)", async () => {
 		await persistSessionConfig("sess-empty", {
 			repos: [],
 			ports: [],
-			envVars: {},
+			envVars: [],
 		});
 		const [, params] = dbStubs.d1Query.mock.calls[0]!;
 		// repos_json (param[7]), ports_json (param[8]), env_vars_json (param[9])
@@ -294,14 +395,36 @@ describe("persistSessionConfig", () => {
 		expect(params?.[9]).toBeNull();
 	});
 
-	it("serialises envVars + ports JSON columns", async () => {
+	it("serialises envVars + ports JSON columns (storage shape)", async () => {
 		await persistSessionConfig("sess-2", {
 			ports: [{ port: 3000, protocol: "http" }],
-			envVars: { FOO: "bar" },
+			// Already-encrypted storage shape — the route encrypts
+			// before calling persistSessionConfig.
+			envVars: [
+				{ name: "FOO", type: "plain", value: "bar" },
+				{
+					name: "API_KEY",
+					type: "secret",
+					ciphertext: "ZW5jcnlwdGVk",
+					iv: "MTIzNDU2Nzg5MDEy",
+					tag: "MTIzNDU2Nzg5MDEyMzQ1Ng==",
+				},
+			],
 		});
 		const [, params] = dbStubs.d1Query.mock.calls[0]!;
 		expect(params?.[8]).toBe(JSON.stringify([{ port: 3000, protocol: "http" }]));
-		expect(params?.[9]).toBe(JSON.stringify({ FOO: "bar" }));
+		const envJson = JSON.parse(params?.[9] as string) as unknown[];
+		expect(envJson).toHaveLength(2);
+		expect(envJson[0]).toMatchObject({ name: "FOO", type: "plain", value: "bar" });
+		expect(envJson[1]).toMatchObject({
+			name: "API_KEY",
+			type: "secret",
+			ciphertext: "ZW5jcnlwdGVk",
+		});
+		// Critical: no `value` field on the secret row — only
+		// ciphertext + iv + tag. A future serializer mistake that
+		// re-introduces plaintext would trip this.
+		expect(envJson[1]).not.toHaveProperty("value");
 	});
 });
 
@@ -328,7 +451,7 @@ describe("getSessionConfig", () => {
 					post_start_cmd: null,
 					repos_json: JSON.stringify([{ url: "https://example.com/r" }]),
 					ports_json: null,
-					env_vars_json: JSON.stringify({ FOO: "bar" }),
+					env_vars_json: JSON.stringify([{ name: "FOO", type: "plain", value: "bar" }]),
 					bootstrapped_at: "2026-05-08 12:00:00",
 				},
 			],
@@ -340,9 +463,123 @@ describe("getSessionConfig", () => {
 		expect(got?.workspaceStrategy).toBe("preserve");
 		expect(got?.cpuLimit).toBe(2_000_000_000);
 		expect(got?.repos).toEqual([{ url: "https://example.com/r" }]);
-		expect(got?.envVars).toEqual({ FOO: "bar" });
+		expect(got?.envVars).toEqual([{ name: "FOO", type: "plain", value: "bar" }]);
 		// D1 returns suffix-less UTC; getter must not interpret as local.
 		expect(got?.bootstrappedAt?.toISOString()).toBe("2026-05-08T12:00:00.000Z");
+	});
+
+	// PR #210 round 2 fix: `session_configs.env_vars_json` had a
+	// pre-typed-shape that wrote `{"FOO":"bar"}` (plain Record). On
+	// deploy with existing rows, the new code casted that object to
+	// EnvVarEntryStored[] and dropped every env var because objects
+	// have no `.length`. Backward-compat shim promotes legacy Records
+	// to typed `plain` entries on the fly.
+	// PR #210 round 3 fix: a hand-crafted D1 row that snuck a
+	// `secret-slot` entry into storage, or a `secret` entry missing
+	// ciphertext/iv/tag, must NOT reach the decrypt path — that
+	// would let a write-capable D1 attacker DoS the session by
+	// causing every spawn to throw. Filter at rehydration; log +
+	// drop the bad entry; keep the good ones.
+	it("filters out structurally-invalid array entries (defence against crafted D1 rows)", async () => {
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [
+				{
+					session_id: "sess-bad-array",
+					workspace_strategy: null,
+					cpu_limit: null,
+					mem_limit: null,
+					idle_ttl_seconds: null,
+					post_create_cmd: null,
+					post_start_cmd: null,
+					repos_json: null,
+					ports_json: null,
+					env_vars_json: JSON.stringify([
+						// Valid plain — kept.
+						{ name: "FOO", type: "plain", value: "bar" },
+						// Valid secret — kept.
+						{
+							name: "API_KEY",
+							type: "secret",
+							ciphertext: "Y3Q=",
+							iv: "MTIzNDU2Nzg5MDEy",
+							tag: "MTIzNDU2Nzg5MDEyMzQ1Ng==",
+						},
+						// secret-slot in storage — must be dropped (the
+						// decryptor would crash on the missing fields).
+						{ name: "STRAY_SLOT", type: "secret-slot" },
+						// Secret missing tag — must be dropped (the GCM
+						// auth check would throw on every spawn).
+						{ name: "BROKEN_SECRET", type: "secret", ciphertext: "Y3Q=", iv: "x" },
+						// Plain missing value — must be dropped.
+						{ name: "BROKEN_PLAIN", type: "plain" },
+						// Wrong shape (no name) — dropped.
+						{ type: "plain", value: "x" },
+					]),
+					bootstrapped_at: null,
+				},
+			],
+			success: true as const,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		const got = await getSessionConfig("sess-bad-array");
+		expect(got?.envVars).toHaveLength(2);
+		expect(got?.envVars?.[0]).toMatchObject({ name: "FOO", type: "plain", value: "bar" });
+		expect(got?.envVars?.[1]).toMatchObject({ name: "API_KEY", type: "secret" });
+	});
+
+	it("rehydrates legacy Record<string,string> env_vars_json into typed plain entries", async () => {
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [
+				{
+					session_id: "sess-legacy",
+					workspace_strategy: null,
+					cpu_limit: null,
+					mem_limit: null,
+					idle_ttl_seconds: null,
+					post_create_cmd: null,
+					post_start_cmd: null,
+					repos_json: null,
+					ports_json: null,
+					// Pre-typed shape: Record<string,string>.
+					env_vars_json: JSON.stringify({ FOO: "bar", BAR: "baz" }),
+					bootstrapped_at: null,
+				},
+			],
+			success: true as const,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		const got = await getSessionConfig("sess-legacy");
+		expect(got?.envVars).toEqual([
+			{ name: "FOO", type: "plain", value: "bar" },
+			{ name: "BAR", type: "plain", value: "baz" },
+		]);
+	});
+
+	it("skips non-string values in legacy Record env_vars_json without throwing", async () => {
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [
+				{
+					session_id: "sess-mixed",
+					workspace_strategy: null,
+					cpu_limit: null,
+					mem_limit: null,
+					idle_ttl_seconds: null,
+					post_create_cmd: null,
+					post_start_cmd: null,
+					repos_json: null,
+					ports_json: null,
+					env_vars_json: JSON.stringify({ FOO: "bar", BAD: 42 }),
+					bootstrapped_at: null,
+				},
+			],
+			success: true as const,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		const got = await getSessionConfig("sess-mixed");
+		// FOO survives; BAD (numeric) is logged + skipped rather than
+		// crashing the spawn path. Defensive against a future migration
+		// that wrote a non-string by mistake.
+		expect(got?.envVars).toEqual([{ name: "FOO", type: "plain", value: "bar" }]);
 	});
 
 	it("degrades malformed JSON columns to undefined instead of throwing", async () => {
@@ -408,5 +645,67 @@ describe("SessionConfigSchema export", () => {
 		// validateSessionConfig wrapper) yields the same data shape.
 		const r = SessionConfigSchema.safeParse({ cpuLimit: 1 });
 		expect(r.success).toBe(true);
+	});
+});
+
+// ── Encrypt / decrypt / redact round-trip (PR #210 round 4) ──────────────
+
+describe("encryptSecretEntries / decryptStoredEntries / redactStoredEntries", () => {
+	it("round-trips secret values via real AES-GCM (no hardcoded ciphertext)", () => {
+		// The secrets.test.ts suite covers the raw AES-GCM primitive;
+		// this test pins the wiring — encryptSecretEntries produces a
+		// shape decryptStoredEntries can rehydrate, and the recovered
+		// plaintext matches.
+		const stored = encryptSecretEntries([
+			{ name: "FOO", type: "plain", value: "bar" },
+			{ name: "API_KEY", type: "secret", value: "sk-test-1234" },
+			{ name: "DB_PASSWORD", type: "secret", value: "p@ssw0rd!" },
+		]);
+		expect(stored).toHaveLength(3);
+		// Plain pass-through.
+		expect(stored[0]).toEqual({ name: "FOO", type: "plain", value: "bar" });
+		// Secret rows: no `value`, all three crypto fields populated.
+		expect(stored[1]).toMatchObject({ name: "API_KEY", type: "secret" });
+		expect(stored[1]).not.toHaveProperty("value");
+		expect((stored[1] as { ciphertext?: string }).ciphertext).toBeTruthy();
+		expect((stored[1] as { iv?: string }).iv).toBeTruthy();
+		expect((stored[1] as { tag?: string }).tag).toBeTruthy();
+		// Round-trip: recovered plaintext map matches the original
+		// inputs across both plain and secret rows.
+		const decrypted = decryptStoredEntries(stored);
+		expect(decrypted).toEqual({
+			FOO: "bar",
+			API_KEY: "sk-test-1234",
+			DB_PASSWORD: "p@ssw0rd!",
+		});
+	});
+
+	it("redactStoredEntries collapses secret rows to { name, type, isSet: true }", () => {
+		const stored = encryptSecretEntries([
+			{ name: "FOO", type: "plain", value: "bar" },
+			{ name: "API_KEY", type: "secret", value: "sk-test-1234" },
+		]);
+		const publicShape = redactStoredEntries(stored);
+		expect(publicShape).toHaveLength(2);
+		// Plain entry passes through verbatim.
+		expect(publicShape[0]).toEqual({ name: "FOO", type: "plain", value: "bar" });
+		// Secret entry: NO ciphertext, iv, or tag in the public shape.
+		expect(publicShape[1]).toEqual({ name: "API_KEY", type: "secret", isSet: true });
+		expect(publicShape[1]).not.toHaveProperty("ciphertext");
+		expect(publicShape[1]).not.toHaveProperty("iv");
+		expect(publicShape[1]).not.toHaveProperty("tag");
+		expect(publicShape[1]).not.toHaveProperty("value");
+	});
+
+	it("decryptStoredEntries throws on a tampered secret entry (GCM auth tag)", () => {
+		const stored = encryptSecretEntries([{ name: "K", type: "secret", value: "v" }]);
+		const tampered = stored.map((e) => {
+			if (e.type !== "secret") return e;
+			// Flip the last byte of the tag — auth check fails.
+			const tagBytes = Buffer.from(e.tag, "base64");
+			tagBytes[tagBytes.length - 1] ^= 0x01;
+			return { ...e, tag: tagBytes.toString("base64") };
+		});
+		expect(() => decryptStoredEntries(tampered)).toThrow();
 	});
 });

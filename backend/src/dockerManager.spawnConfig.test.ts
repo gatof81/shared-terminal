@@ -272,7 +272,13 @@ describe("DockerManager.spawn config-applied", () => {
 					post_start_cmd: null,
 					repos_json: null,
 					ports_json: null,
-					env_vars_json: JSON.stringify({ NEW_KEY: "from-config", LEGACY_KEY: "wins" }),
+					// Storage shape (#186): typed entry list, plain rows have
+					// `{ name, type: "plain", value }`. The route encrypts
+					// secret entries before they land here.
+					env_vars_json: JSON.stringify([
+						{ name: "NEW_KEY", type: "plain", value: "from-config" },
+						{ name: "LEGACY_KEY", type: "plain", value: "wins" },
+					]),
 					bootstrapped_at: null,
 				},
 			],
@@ -287,6 +293,57 @@ describe("DockerManager.spawn config-applied", () => {
 		// must NOT appear; only the config "wins" value.
 		expect(env).toContain("LEGACY_KEY=wins");
 		expect(env).not.toContain("LEGACY_KEY=legacy");
+	});
+
+	// PR #210 round 4: previous tests covered only `plain` rows in the
+	// stored shape, so the `secret` branch of `decryptStoredEntries`
+	// — and the merge of decrypted plaintext into Env — was untested
+	// at the spawn layer. Use the real `encryptSecret` primitive to
+	// build a stored secret row and assert the plaintext lands in
+	// the container Env.
+	it("decrypts a secret-typed stored entry and surfaces plaintext in Env", async () => {
+		// Set the AES key the secrets module needs. Tests above the
+		// `describe` already use the same constant; reset cache to be
+		// safe for any test that might run before this one.
+		process.env.SECRETS_ENCRYPTION_KEY = Buffer.alloc(32, 0x42).toString("base64");
+		const { _clearKeyCacheForTesting, encryptSecret } = await import("./secrets.js");
+		_clearKeyCacheForTesting();
+		const blob = encryptSecret("sk-prod-realvalue");
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [
+				{
+					session_id: "sess-1",
+					workspace_strategy: null,
+					cpu_limit: null,
+					mem_limit: null,
+					idle_ttl_seconds: null,
+					post_create_cmd: null,
+					post_start_cmd: null,
+					repos_json: null,
+					ports_json: null,
+					env_vars_json: JSON.stringify([
+						{
+							name: "API_KEY",
+							type: "secret",
+							ciphertext: blob.ciphertext,
+							iv: blob.iv,
+							tag: blob.tag,
+						},
+					]),
+					bootstrapped_at: null,
+				},
+			],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		const { dm, captured } = makeDmWithCreateCapture();
+		await dm.spawn("sess-1");
+		const env = captured.opts.Env as string[];
+		// Plaintext recovered + handed to docker run. Ciphertext or
+		// any base64-y string in the Env array would mean the
+		// decrypt path didn't fire.
+		expect(env).toContain("API_KEY=sk-prod-realvalue");
+		expect(env.some((e) => e.includes(blob.ciphertext))).toBe(false);
 	});
 
 	// One field set, the other null: the unset field must fall back to
