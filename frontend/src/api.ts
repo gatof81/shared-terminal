@@ -126,7 +126,7 @@ export async function logout(): Promise<void> {
 export interface SessionInfo {
 	sessionId: string;
 	name: string;
-	status: "running" | "stopped" | "terminated";
+	status: "running" | "stopped" | "terminated" | "failed";
 	containerId: string | null;
 	containerName: string;
 	createdAt: string;

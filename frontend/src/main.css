@@ -736,6 +736,14 @@ main:not([data-sidebar-ready]) #sidebar {
 .session-dot.terminated {
   background: #f85149;
 }
+/* `failed` (#185) — postCreate hook exited non-zero. Distinct from
+   terminated (red) so users can tell at a glance which sessions need
+   recreation vs which were soft-deleted. Amber matches the "needs
+   user attention" semantics elsewhere in the UI. */
+.session-dot.failed {
+  background: #db6d28;
+  box-shadow: 0 0 0 1px rgba(248, 81, 73, 0.45);
+}
 .session-name {
   flex: 1;
   font-size: 0.82rem;

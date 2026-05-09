@@ -496,6 +496,12 @@ function renderSessionList() {
 				void openSession(s.sessionId);
 			} else if (s.status === "stopped") {
 				showToast("Start the session first", true);
+			} else if (s.status === "failed") {
+				// Failed sessions are unrecoverable via /start (the server
+				// 409s); clicking them used to silently no-op which left
+				// the user wondering if the click registered. Toast points
+				// them at the recovery path: recreate to retry.
+				showToast("Session failed during postCreate — recreate to retry", true);
 			}
 		});
 

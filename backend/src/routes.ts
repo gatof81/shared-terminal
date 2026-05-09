@@ -470,7 +470,23 @@ export function buildRouter(
 							`[routes] kill after failed postCreate ${meta?.sessionId} threw: ${(e as Error).message}`,
 						);
 					});
-					await sessions.updateStatus(meta.sessionId, "failed");
+					// Swallow D1 transients here on purpose: a thrown
+					// `updateStatus` would propagate to the outer catch,
+					// which would then call `sessions.deleteRow` — wiping
+					// the very row the `failed` status is meant to
+					// preserve for audit (the captured output already
+					// went into the response below, but the sidebar
+					// would never show the failure). Loud log so an
+					// operator can manually flip the row from `running`
+					// to `failed` after the fact; the user still sees
+					// the captured `bootstrapOutput` in this response.
+					await sessions.updateStatus(meta.sessionId, "failed").catch((e) => {
+						logger.error(
+							`[routes] CRITICAL: could not flip session ${meta?.sessionId} to failed: ${(e as Error).message}. ` +
+								"Container is killed; row likely still shows status=running. " +
+								"Operator must update D1 manually to reflect the failure.",
+						);
+					});
 					res.status(500).json({
 						error: `postCreate hook failed (exit ${exitCode})`,
 						sessionId: meta.sessionId,
