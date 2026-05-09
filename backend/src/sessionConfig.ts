@@ -440,11 +440,7 @@ function rowToRecord(row: SessionConfigRow): SessionConfigRecord {
 		postStartCmd: row.post_start_cmd ?? undefined,
 		repos: parseJsonColumn<SessionConfig["repos"]>(row.session_id, "repos_json", row.repos_json),
 		ports: parseJsonColumn<SessionConfig["ports"]>(row.session_id, "ports_json", row.ports_json),
-		envVars: parseJsonColumn<EnvVarEntryStored[]>(
-			row.session_id,
-			"env_vars_json",
-			row.env_vars_json,
-		),
+		envVars: parseEnvVarsColumn(row.session_id, row.env_vars_json),
 		bootstrappedAt: row.bootstrapped_at ? parseD1Utc(row.bootstrapped_at) : null,
 	};
 }
@@ -471,6 +467,65 @@ function parseJsonColumn<T>(sessionId: string, column: string, raw: string | nul
 		);
 		return undefined;
 	}
+}
+
+/**
+ * Backward-compat env-vars rehydrator (#186 / PR 210 round 2 review).
+ *
+ * `session_configs.env_vars_json` had two on-disk shapes across this
+ * epic:
+ *
+ *   - Pre-PR-210: a JSON object — `{"FOO":"bar","BAR":"baz"}` — the
+ *     loose Record-of-strings shape that PR #205 (185a) introduced.
+ *   - Post-PR-210: a JSON array of typed entries —
+ *     `[{"name":"FOO","type":"plain","value":"bar"}, …]`.
+ *
+ * Without this shim, a row written by the pre-PR-210 code parses
+ * cleanly through `JSON.parse` (no error), but the resulting object
+ * has no `.length`, so `DockerManager.spawn`'s
+ * `config.envVars && config.envVars.length > 0` check silently
+ * skips decrypt+merge and the user's container respawns missing
+ * every config-supplied env var. That's silent data loss on a
+ * deploy with existing rows.
+ *
+ * Convert the legacy object shape into typed `plain` entries on the
+ * fly. Secret entries can't have existed in the legacy shape (PR
+ * 186a/210 introduced encryption), so promoting all old keys to
+ * `plain` is correct. Once a session is recycled (DELETE + POST
+ * /start) its row gets rewritten in the new shape and this branch
+ * stops firing for it.
+ */
+function parseEnvVarsColumn(
+	sessionId: string,
+	raw: string | null,
+): EnvVarEntryStored[] | undefined {
+	const parsed = parseJsonColumn<unknown>(sessionId, "env_vars_json", raw);
+	if (parsed === undefined) return undefined;
+	if (Array.isArray(parsed)) return parsed as EnvVarEntryStored[];
+	if (parsed !== null && typeof parsed === "object") {
+		// Legacy Record<string,string> shape; promote to typed plain.
+		// Defensive: skip non-string values rather than throw — a
+		// future migration that wrote a numeric metric in here by
+		// mistake shouldn't take a session offline.
+		const entries: EnvVarEntryStored[] = [];
+		for (const [name, value] of Object.entries(parsed as Record<string, unknown>)) {
+			if (typeof value !== "string") {
+				logger.warn(
+					`[sessionConfig] legacy env_vars_json entry '${name}' for session ${sessionId} is not a string; skipping`,
+				);
+				continue;
+			}
+			entries.push({ name, type: "plain", value });
+		}
+		return entries;
+	}
+	// JSON parsed to something exotic (number, string, null) — log and
+	// degrade. Same shape of fault-tolerance the rest of parseJsonColumn
+	// applies for malformed JSON.
+	logger.warn(
+		`[sessionConfig] env_vars_json for session ${sessionId} parsed to non-array, non-object value; skipping`,
+	);
+	return undefined;
 }
 
 // Mirrors sessionManager.parseD1UtcTimestamp — D1's `datetime('now')` lacks

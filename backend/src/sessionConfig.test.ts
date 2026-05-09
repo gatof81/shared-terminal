@@ -460,6 +460,67 @@ describe("getSessionConfig", () => {
 		expect(got?.bootstrappedAt?.toISOString()).toBe("2026-05-08T12:00:00.000Z");
 	});
 
+	// PR #210 round 2 fix: `session_configs.env_vars_json` had a
+	// pre-typed-shape that wrote `{"FOO":"bar"}` (plain Record). On
+	// deploy with existing rows, the new code casted that object to
+	// EnvVarEntryStored[] and dropped every env var because objects
+	// have no `.length`. Backward-compat shim promotes legacy Records
+	// to typed `plain` entries on the fly.
+	it("rehydrates legacy Record<string,string> env_vars_json into typed plain entries", async () => {
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [
+				{
+					session_id: "sess-legacy",
+					workspace_strategy: null,
+					cpu_limit: null,
+					mem_limit: null,
+					idle_ttl_seconds: null,
+					post_create_cmd: null,
+					post_start_cmd: null,
+					repos_json: null,
+					ports_json: null,
+					// Pre-typed shape: Record<string,string>.
+					env_vars_json: JSON.stringify({ FOO: "bar", BAR: "baz" }),
+					bootstrapped_at: null,
+				},
+			],
+			success: true as const,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		const got = await getSessionConfig("sess-legacy");
+		expect(got?.envVars).toEqual([
+			{ name: "FOO", type: "plain", value: "bar" },
+			{ name: "BAR", type: "plain", value: "baz" },
+		]);
+	});
+
+	it("skips non-string values in legacy Record env_vars_json without throwing", async () => {
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [
+				{
+					session_id: "sess-mixed",
+					workspace_strategy: null,
+					cpu_limit: null,
+					mem_limit: null,
+					idle_ttl_seconds: null,
+					post_create_cmd: null,
+					post_start_cmd: null,
+					repos_json: null,
+					ports_json: null,
+					env_vars_json: JSON.stringify({ FOO: "bar", BAD: 42 }),
+					bootstrapped_at: null,
+				},
+			],
+			success: true as const,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		const got = await getSessionConfig("sess-mixed");
+		// FOO survives; BAD (numeric) is logged + skipped rather than
+		// crashing the spawn path. Defensive against a future migration
+		// that wrote a non-string by mistake.
+		expect(got?.envVars).toEqual([{ name: "FOO", type: "plain", value: "bar" }]);
+	});
+
 	it("degrades malformed JSON columns to undefined instead of throwing", async () => {
 		dbStubs.d1Query.mockImplementationOnce(async () => ({
 			results: [
