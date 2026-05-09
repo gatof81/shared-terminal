@@ -1051,14 +1051,12 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
 // that wires each one up so users can see what's coming. PR 185b adds the
 // bootstrap-output live-tail panel inside the modal once the runner exists.
 
+// All previously-placeholder tabs (env / hooks / ports) are now wired
+// up to real form UI, but the registry stays so a future #197 / #199
+// child issue can drop in a placeholder without re-adding the
+// rendering scaffold below.
 const SESSION_TAB_PLACEHOLDERS: Record<string, { title: string; body: string; issueUrl: string }> =
-	{
-		ports: {
-			title: "Expose ports to the outside",
-			body: "Per-session subdomains, dynamic host ports, auth-gated by default (independent of session ownership).",
-			issueUrl: "https://github.com/gatof81/shared-terminal/issues/190",
-		},
-	};
+	{};
 
 let newSessionOpener: HTMLElement | null = null;
 
@@ -1227,6 +1225,10 @@ function closeNewSessionModal() {
 	// Reset Advanced-tab state on close (#191 PR 191c). Same
 	// rationale plus the agent-seed bodies can be substantial.
 	resetAdvancedTab();
+	// Reset Ports-tab state on close (#190 PR 190d). Drops any
+	// configured ports + the allowPrivilegedPorts toggle so a stale
+	// 80/443 row from an earlier modal session doesn't carry over.
+	resetPortsTab();
 	(newSessionOpener ?? newSessionBtn).focus();
 	newSessionOpener = null;
 }
@@ -1779,6 +1781,7 @@ newSessionForm.addEventListener("submit", async (e) => {
 		const envVars = collectEnvVarsForSubmit();
 		const { repo, auth } = collectRepoForSubmit();
 		const advanced = collectAdvancedForSubmit();
+		const { ports, allowPrivilegedPorts } = collectPortsForSubmit();
 		// Build the config payload only when something is actually
 		// configured. A bare `POST /sessions` (no config field) stays
 		// the steady-state for users not exercising any of the tabs.
@@ -1788,13 +1791,16 @@ newSessionForm.addEventListener("submit", async (e) => {
 			advanced.agentSeed !== undefined ||
 			advanced.postCreateCmd !== undefined ||
 			advanced.postStartCmd !== undefined;
+		const portsHasContent = ports !== undefined || allowPrivilegedPorts === true;
 		const config: SessionConfigPayload | undefined =
-			envVars || repo || advancedHasContent
+			envVars || repo || advancedHasContent || portsHasContent
 				? {
 						...(envVars ? { envVars } : {}),
 						...(repo ? { repo } : {}),
 						...(auth ? { auth } : {}),
 						...advanced,
+						...(ports ? { ports } : {}),
+						...(allowPrivilegedPorts ? { allowPrivilegedPorts } : {}),
 					}
 				: undefined;
 		const session = await createSession(name, undefined, config);
@@ -1816,6 +1822,199 @@ newSessionForm.addEventListener("submit", async (e) => {
 		newSessionSubmitBtn.disabled = false;
 	}
 });
+
+// ── Ports tab (#190 / PR 190d) ──────────────────────────────────────────────
+//
+// Mirror of the env-tab pattern. Rows hold `{ container, public }` plus a
+// stable per-row id for DOM identity across re-renders. The
+// `allowPrivilegedPorts` toggle lives on the Advanced tab (granting
+// CAP_NET_BIND_SERVICE is a different mental model than picking ports;
+// keeps the Ports tab itself cognitively narrow). Backend rejects
+// privileged ports without the toggle, so a user who tries to enter
+// `80` while the toggle is off gets a 400 with a precise path
+// (`config.ports.0.container`) — surfaced via the existing
+// createSession error handler.
+
+interface PortRow {
+	id: string; // stable per-row key for the DOM (not sent to the server)
+	container: string; // raw input value; parsed to int on submit
+	public: boolean;
+}
+
+let portRows: PortRow[] = [];
+
+const portsTableBody = document.getElementById("ports-table-body") as HTMLTableSectionElement;
+const portsAddRowBtn = document.getElementById("ports-add-row") as HTMLButtonElement;
+const allowPrivilegedPortsCheckbox = document.getElementById(
+	"allow-privileged-ports",
+) as HTMLInputElement;
+
+function newPortRowId(): string {
+	return `port-row-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function renderPortRows() {
+	portsTableBody.textContent = "";
+	for (const row of portRows) {
+		const tr = document.createElement("tr");
+		tr.className = "ports-row";
+		tr.dataset.rowId = row.id;
+
+		const containerCell = document.createElement("td");
+		const containerInput = document.createElement("input");
+		containerInput.type = "number";
+		// Don't pin `min`/`max` on the input itself — privileged-port
+		// rejection is a cross-field rule (depends on the Advanced
+		// toggle), and the backend's superRefine produces the
+		// authoritative error with the right path. Letting the input
+		// accept the full TCP range here keeps the form usable when
+		// the user enables the toggle and edits an existing row.
+		containerInput.inputMode = "numeric";
+		containerInput.value = row.container;
+		containerInput.placeholder = "3000";
+		containerInput.spellcheck = false;
+		containerInput.autocomplete = "off";
+		containerInput.className = "env-input";
+		containerInput.dataset.field = "container";
+		containerCell.appendChild(containerInput);
+		tr.appendChild(containerCell);
+
+		const publicCell = document.createElement("td");
+		const publicWrap = document.createElement("label");
+		publicWrap.className = "ports-public-toggle";
+		const publicInput = document.createElement("input");
+		publicInput.type = "checkbox";
+		publicInput.checked = row.public;
+		publicInput.dataset.field = "public";
+		publicWrap.appendChild(publicInput);
+		// Warning chip only when the row is currently `public: true` —
+		// the issue spec calls this out as a deliberate UX cue so a
+		// user can't tick public by accident without seeing the
+		// "anyone with the URL" implication.
+		if (row.public) {
+			const chip = document.createElement("span");
+			chip.className = "ports-public-warning";
+			chip.textContent = "anyone with the URL can reach this port";
+			publicWrap.appendChild(chip);
+		}
+		publicCell.appendChild(publicWrap);
+		tr.appendChild(publicCell);
+
+		const removeCell = document.createElement("td");
+		const removeBtn = document.createElement("button");
+		removeBtn.type = "button";
+		removeBtn.className = "env-row-remove";
+		removeBtn.textContent = "✕";
+		removeBtn.title = "Remove this port";
+		removeBtn.setAttribute("aria-label", `Remove port ${row.container || "(empty)"}`);
+		removeBtn.dataset.action = "remove";
+		removeCell.appendChild(removeBtn);
+		tr.appendChild(removeCell);
+
+		portsTableBody.appendChild(tr);
+	}
+}
+
+/**
+ * Pull current input values out of the DOM into `portRows` before any
+ * operation that re-renders. Same shape as `syncEnvRowsFromDom`: the
+ * in-memory array is the source of truth, and a partially-typed input
+ * would otherwise be lost on add / remove / public-toggle.
+ */
+function syncPortRowsFromDom() {
+	const trs = portsTableBody.querySelectorAll<HTMLTableRowElement>(".ports-row");
+	for (const tr of trs) {
+		const id = tr.dataset.rowId ?? "";
+		const row = portRows.find((r) => r.id === id);
+		if (!row) continue;
+		const containerInput = tr.querySelector<HTMLInputElement>('[data-field="container"]');
+		const publicInput = tr.querySelector<HTMLInputElement>('[data-field="public"]');
+		if (containerInput) row.container = containerInput.value.trim();
+		if (publicInput) row.public = publicInput.checked;
+	}
+}
+
+function resetPortsTab() {
+	portRows = [];
+	renderPortRows();
+	allowPrivilegedPortsCheckbox.checked = false;
+}
+
+portsAddRowBtn.addEventListener("click", () => {
+	syncPortRowsFromDom();
+	portRows.push({ id: newPortRowId(), container: "", public: false });
+	renderPortRows();
+	const last = portsTableBody.lastElementChild?.querySelector<HTMLInputElement>(
+		'[data-field="container"]',
+	);
+	last?.focus();
+});
+
+portsTableBody.addEventListener("click", (e) => {
+	const target = e.target as HTMLElement;
+	const action = target.dataset.action;
+	if (action !== "remove") return;
+	const tr = target.closest<HTMLTableRowElement>(".ports-row");
+	const id = tr?.dataset.rowId ?? "";
+	syncPortRowsFromDom();
+	portRows = portRows.filter((r) => r.id !== id);
+	renderPortRows();
+});
+
+// `change` (not `click`) so keyboard interaction with the checkbox
+// (Space) also re-renders. The render swap toggles the warning chip;
+// without re-render the chip wouldn't appear/disappear when public
+// flips.
+portsTableBody.addEventListener("change", (e) => {
+	const target = e.target as HTMLElement;
+	if (target.dataset.field !== "public") return;
+	syncPortRowsFromDom();
+	renderPortRows();
+});
+
+/**
+ * Collect the in-memory `portRows` + `allowPrivilegedPorts` toggle
+ * into the wire shape `SessionConfigPayload` accepts. Returns
+ * `undefined` for both when the user touched neither — a bare
+ * POST keeps the field absent so the backend's `.strict()` stays
+ * happy and the row in `session_configs.ports_json` collapses to
+ * NULL.
+ *
+ * Container values that don't parse to a positive integer are
+ * skipped silently; the backend would reject them at validation
+ * with a precise error path, but it's better UX to drop a stray
+ * empty row than to surface "ports.3.container: expected number"
+ * for a row the user clearly didn't fill in. Out-of-range
+ * integers (negative, > 65535) are still sent — those are real
+ * misconfigurations the backend's error path should surface.
+ */
+export function collectPortsForSubmit(): {
+	ports?: SessionConfigPayload["ports"];
+	allowPrivilegedPorts?: boolean;
+} {
+	syncPortRowsFromDom();
+	const out: NonNullable<SessionConfigPayload["ports"]> = [];
+	for (const row of portRows) {
+		if (row.container === "") continue;
+		// `Number()` + `Number.isInteger` REJECTS decimal-like input
+		// instead of silently truncating it. `Number("3000.9")` is
+		// `3000.9` → not an integer → row dropped, the user retypes a
+		// real port. `parseInt("3000.9", 10)` would return `3000`,
+		// which is exactly the truncation we want to avoid (a user
+		// who typed `3000.9` clearly didn't mean port 3000).
+		// `type="number"` step=1 mostly prevents this at the browser
+		// layer, but pasted text or a non-strict browser can still
+		// surface it. PR #224 round 2 NIT (corrects round 1, which
+		// inadvertently used `parseInt` and silently truncated).
+		const parsed = Number(row.container);
+		if (!Number.isInteger(parsed)) continue;
+		out.push({ container: parsed, public: row.public });
+	}
+	const result: ReturnType<typeof collectPortsForSubmit> = {};
+	if (out.length > 0) result.ports = out;
+	if (allowPrivilegedPortsCheckbox.checked) result.allowPrivilegedPorts = true;
+	return result;
+}
 
 // ── Toast ───────────────────────────────────────────────────────────────────
 

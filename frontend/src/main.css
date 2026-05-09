@@ -869,6 +869,68 @@ main:not([data-sidebar-ready]) #sidebar {
   color: #e6edf3;
   border-style: solid;
 }
+/* #190 PR 190d — Ports tab. Reuses .env-table layout for the row
+   structure but adds its own toggle + warning chip styles. */
+.ports-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  margin-bottom: 0.5rem;
+}
+.ports-table thead th {
+  text-align: left;
+  font-weight: 500;
+  color: #8b949e;
+  padding: 0.3rem 0.4rem;
+  border-bottom: 1px solid #21262d;
+}
+.ports-table tbody td {
+  padding: 0.25rem 0.4rem;
+  vertical-align: middle;
+}
+.ports-row .env-input {
+  width: 6rem;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+  color: #e6edf3;
+  font-size: 0.8rem;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  outline: none;
+}
+.ports-row .env-input:focus {
+  border-color: #58a6ff;
+}
+.ports-public-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+/* Warning chip surfaces only on rows currently set public — visually
+   loud (amber border) so a user can't tick public without seeing the
+   "anyone with the URL" implication the issue spec calls out. */
+.ports-public-warning {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border: 1px solid rgba(255, 188, 0, 0.55);
+  border-radius: 999px;
+  background: rgba(255, 188, 0, 0.08);
+  color: #f5b044;
+  font-size: 0.7rem;
+  font-family: -apple-system, sans-serif;
+  white-space: nowrap;
+}
+.modal-field-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.55rem;
+}
+.modal-field-checkbox input[type="checkbox"] {
+  margin: 0;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;
