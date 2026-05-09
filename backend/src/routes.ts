@@ -549,6 +549,27 @@ export function buildRouter(
 				// the reconciler will eventually flip status to stopped but
 				// the row remains — we log loudly so an operator can clean
 				// it up manually.
+				//
+				// Kill any running container BEFORE deleting the D1 row.
+				// Without this, the post-spawn failure paths (e.g.
+				// `markBootstrapped` throws on a D1 transient AFTER
+				// `docker.spawn` succeeded and `runPostCreate` exited
+				// cleanly) would orphan a live container with no row to
+				// reach it through — `reconcile()` queries
+				// `WHERE status='running'`, so a deleted row means the
+				// container survives until the next host reboot. The
+				// non-zero-exit path inside the try/ catch already kills
+				// the container before throwing; this guard covers every
+				// other post-spawn failure shape (markBootstrapped,
+				// runPostStart, sessions.get, the synthetic invariant
+				// throw above). Idempotent: the failure-branch
+				// `docker.kill` already ran on hard-fail, and `kill`
+				// swallows "no such container" internally.
+				await docker.kill(meta.sessionId).catch((killErr) => {
+					logger.error(
+						`[routes] CRITICAL: kill during create rollback for session ${meta?.sessionId} failed: ${(killErr as Error).message}`,
+					);
+				});
 				try {
 					await sessions.deleteRow(meta.sessionId);
 				} catch (cleanupErr) {
