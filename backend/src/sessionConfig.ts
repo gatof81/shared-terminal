@@ -22,7 +22,7 @@ import { z } from "zod";
 import { d1Query } from "./db.js";
 import { checkEnvVarSafety, EnvVarValidationError } from "./envVarValidation.js";
 import { logger } from "./logger.js";
-import { decryptSecret, type EncryptedSecret, encryptSecret } from "./secrets.js";
+import { decryptSecret, encryptSecret } from "./secrets.js";
 
 // ── Bounds (shape-level only; children tighten) ─────────────────────────────
 
@@ -421,22 +421,6 @@ export function redactStoredEntries(entries: EnvVarEntryStored[]): EnvVarEntryPu
 		return { name: entry.name, type: "secret", isSet: true };
 	});
 }
-
-/** Storage-shape blob of a stored secret entry, exported for type
- *  parity with EncryptedSecret. */
-export type StoredSecretEntry = Extract<EnvVarEntryStored, { type: "secret" }>;
-// Local widening for tests that want to construct the EncryptedSecret
-// half of a stored entry without rebuilding the whole shape.
-export const _testOnly_storedFromEncrypted = (
-	name: string,
-	blob: EncryptedSecret,
-): StoredSecretEntry => ({
-	name,
-	type: "secret",
-	ciphertext: blob.ciphertext,
-	iv: blob.iv,
-	tag: blob.tag,
-});
 
 // ── D1 persistence ─────────────────────────────────────────────────────────
 
