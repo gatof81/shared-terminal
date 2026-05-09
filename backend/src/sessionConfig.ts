@@ -250,10 +250,27 @@ const WireAuthSpec = z
 // itself accepts anything. The regex catches obvious typos
 // ("user@", "@example.com", whitespace-only) without the false
 // negatives a strict spec would produce.
+//
+// `name` rejects control characters (PR #217 round 1 SHOULD-FIX).
+// `git config --global user.name "<name>"` writes the value into
+// `~/.gitconfig`, which is INI-format with newlines as record
+// separators. A `\n` in `name` would corrupt the file — even with
+// argv-only invocation, the bytes land in the INI verbatim and could
+// inject additional config keys (e.g. `\n[user]\nemail = evil@…`)
+// that subsequent git operations honor. Reject at the schema boundary
+// so the runner doesn't need to defend at the write site.
 const GIT_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+$/;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: deliberate — the whole point of this regex is to reject control bytes that would corrupt INI-format git config when written by `git config --global`.
+const CONTROL_CHAR_PATTERN = /[\x00-\x1f\x7f]/;
 const GitIdentitySpec = z
 	.object({
-		name: z.string().min(1).max(MAX_GIT_NAME_LEN),
+		name: z
+			.string()
+			.min(1)
+			.max(MAX_GIT_NAME_LEN)
+			.refine((n) => !CONTROL_CHAR_PATTERN.test(n), {
+				message: "name must not contain control characters (would corrupt ~/.gitconfig)",
+			}),
 		email: z
 			.string()
 			.min(1)
@@ -270,6 +287,17 @@ const GitIdentitySpec = z
 // one PAT / SSH identity per session; a per-repo identity is a
 // follow-up (#189). `installScript` is a path INSIDE the cloned
 // dotfiles repo; same path-traversal defence as `repo.target`.
+//
+// NOTE: unlike `RepoSpec`, this schema has NO `auth` selector and
+// NO cross-field validation against `config.auth.ssh` / `config.auth.pat`.
+// The auth blob is shared with the main repo, so a `git@…` dotfiles
+// URL relies on `config.auth.ssh` being populated by the main-repo
+// path. 191b's bootstrap runner is the right place to enforce that
+// pairing — at validation time we'd need access to whichever of
+// `repo.auth: "ssh"` or a future "dotfiles only uses SSH" intent
+// signals it. Kept light here; the runner fails loudly if the auth
+// blob is missing when it tries to clone (PR #217 round 1 NIT
+// flagged the gap; this comment is the holding pattern until 191b).
 const DOTFILES_INSTALL_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9._/-]*$/;
 const DotfilesSpec = z
 	.object({
@@ -318,11 +346,20 @@ const DotfilesSpec = z
 // (Zod refine), since writing invalid JSON to settings.json would
 // crash the agent on next start with no signal that the operator
 // pasted invalid content. `claudeMd` is free markdown.
+//
+// Byte-cap (NOT char-cap) on both fields. Zod's `.max()` counts
+// UTF-16 code units, NOT UTF-8 bytes — a 256K-codepoint string of
+// 4-byte chars (e.g. emoji) would be 1 MiB on disk, four times the
+// intended cap. Mirror the env-var pattern (`MAX_ENV_VALUE_BYTES`)
+// and use `Buffer.byteLength(v, "utf-8")` explicitly so the cap
+// matches the column-size budget. PR #217 round 1 SHOULD-FIX.
+const agentSeedByteCap = (label: string) =>
+	z.string().refine((s) => Buffer.byteLength(s, "utf-8") <= MAX_AGENT_SEED_BYTES, {
+		message: `${label} must not exceed ${MAX_AGENT_SEED_BYTES} bytes`,
+	});
 const AgentSeedSpec = z
 	.object({
-		settings: z
-			.string()
-			.max(MAX_AGENT_SEED_BYTES)
+		settings: agentSeedByteCap("settings")
 			.refine(
 				(s) => {
 					if (s === "") return true; // empty = "don't write the file"
@@ -337,7 +374,7 @@ const AgentSeedSpec = z
 			)
 			.nullable()
 			.optional(),
-		claudeMd: z.string().max(MAX_AGENT_SEED_BYTES).nullable().optional(),
+		claudeMd: agentSeedByteCap("claudeMd").nullable().optional(),
 	})
 	.strict();
 

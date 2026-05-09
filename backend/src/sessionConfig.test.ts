@@ -419,6 +419,34 @@ describe("validateSessionConfig", () => {
 		).toThrowError(SessionConfigValidationError);
 	});
 
+	// PR #217 round 1 SHOULD-FIX: a `\n` in `name` would corrupt
+	// `~/.gitconfig` (INI format, newline-delimited records) when the
+	// 191b stage runs `git config --global user.name "<name>"`. Reject
+	// at the schema boundary so the runner doesn't need to defend at
+	// the write site.
+	it("rejects gitIdentity.name containing control characters", () => {
+		for (const name of ["Ada\nuser.email = evil@evil.com", "X\rY", "X\tY", "X Y", "XY"]) {
+			expect(() =>
+				validateSessionConfig({
+					gitIdentity: { name, email: "a@b.com" },
+				}),
+			).toThrowError(SessionConfigValidationError);
+		}
+	});
+
+	// Defence: regular space (0x20) and printable Unicode are NOT
+	// control chars. Names like "Ada Lovelace" or "François" must
+	// keep working past the new control-char regex.
+	it("accepts gitIdentity.name with spaces and printable Unicode", () => {
+		for (const name of ["Ada Lovelace", "François", "李雷"]) {
+			expect(
+				validateSessionConfig({
+					gitIdentity: { name, email: "a@b.com" },
+				}),
+			).toBeDefined();
+		}
+	});
+
 	it("accepts dotfiles with bare URL (clone-only, no install script)", () => {
 		expect(
 			validateSessionConfig({
@@ -503,6 +531,22 @@ describe("validateSessionConfig", () => {
 			SessionConfigValidationError,
 		);
 		expect(() => validateSessionConfig({ agentSeed: { claudeMd: big } })).toThrowError(
+			SessionConfigValidationError,
+		);
+	});
+
+	// PR #217 round 1 SHOULD-FIX: Zod's `.max()` counts UTF-16 code
+	// units, NOT UTF-8 bytes. A 4-byte-per-char string of 100 K
+	// codepoints (e.g. 💥) is 400 K UTF-8 bytes (over the 256 KiB
+	// cap) but only 200 K UTF-16 code units (under any naive
+	// char-count cap). The Buffer.byteLength refine catches this
+	// where `.max()` would have let it through.
+	it("rejects agentSeed bodies whose UTF-8 byte size exceeds the cap (4-byte chars)", () => {
+		const bigEmoji = "💥".repeat(100 * 1024); // 400 KiB UTF-8 bytes
+		expect(() => validateSessionConfig({ agentSeed: { claudeMd: bigEmoji } })).toThrowError(
+			SessionConfigValidationError,
+		);
+		expect(() => validateSessionConfig({ agentSeed: { settings: bigEmoji } })).toThrowError(
 			SessionConfigValidationError,
 		);
 	});
@@ -771,6 +815,38 @@ describe("persistSessionConfig", () => {
 		// ciphertext + iv + tag. A future serializer mistake that
 		// re-introduces plaintext would trip this.
 		expect(envJson[1]).not.toHaveProperty("value");
+	});
+
+	// PR #217 round 1 NIT: pin the wire shape of the three new
+	// 191a columns. Without this, a future rename of a TS field
+	// (`gitIdentity` → `identity`) would produce `jsonOrNull(undefined)
+	// → null` — silent data loss while every existing test passes
+	// because they all use null fixtures.
+	it("serialises gitIdentity / dotfiles / agentSeed JSON columns (191a)", async () => {
+		await persistSessionConfig("sess-191a", {
+			gitIdentity: { name: "Ada Lovelace", email: "ada@example.com" },
+			dotfiles: {
+				url: "https://github.com/u/dotfiles.git",
+				ref: "main",
+				installScript: "install.sh",
+			},
+			agentSeed: { settings: '{"theme":"dark"}', claudeMd: "# notes" },
+		});
+		const [, params] = dbStubs.d1Query.mock.calls[0]!;
+		// git_identity_json is param[11], dotfiles_json [12], agent_seed_json [13].
+		expect(JSON.parse(params?.[11] as string)).toEqual({
+			name: "Ada Lovelace",
+			email: "ada@example.com",
+		});
+		expect(JSON.parse(params?.[12] as string)).toEqual({
+			url: "https://github.com/u/dotfiles.git",
+			ref: "main",
+			installScript: "install.sh",
+		});
+		expect(JSON.parse(params?.[13] as string)).toEqual({
+			settings: '{"theme":"dark"}',
+			claudeMd: "# notes",
+		});
 	});
 });
 
