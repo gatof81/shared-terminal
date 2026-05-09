@@ -31,6 +31,7 @@ import {
 	register,
 	revokeInvite,
 	SESSION_EXPIRED_EVENT,
+	type SessionConfigPayload,
 	type SessionInfo,
 	startSession,
 	stopSession,
@@ -1052,11 +1053,6 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
 
 const SESSION_TAB_PLACEHOLDERS: Record<string, { title: string; body: string; issueUrl: string }> =
 	{
-		repo: {
-			title: "Clone a repo into the workspace",
-			body: "Public or private (PAT / SSH), pick a branch or ref, optionally replace the workspace.",
-			issueUrl: "https://github.com/gatof81/shared-terminal/issues/188",
-		},
 		ports: {
 			title: "Expose ports to the outside",
 			body: "Per-session subdomains, dynamic host ports, auth-gated by default (independent of session ownership).",
@@ -1224,6 +1220,10 @@ function closeNewSessionModal() {
 	// and re-open. The redundant reset on `openNewSessionModal` is
 	// gone — closing always leaves the array empty.
 	resetEnvTab();
+	// Reset Repo-tab state on close (#188 PR 188e). Critical for the
+	// credential fields (PAT, SSH key) — leaving them mounted would
+	// risk leaking a stale credential into the next session create.
+	resetRepoTab();
 	(newSessionOpener ?? newSessionBtn).focus();
 	newSessionOpener = null;
 }
@@ -1236,6 +1236,143 @@ newSessionModal.addEventListener("click", (e) => {
 	const tab = target.closest<HTMLButtonElement>("[data-session-tab]");
 	if (tab?.dataset.sessionTab) setActiveSessionTab(tab.dataset.sessionTab);
 });
+
+// ── Repo tab (#188 / PR 188e) ───────────────────────────────────────────────
+//
+// State + render + wiring for the repo-clone Repo tab. The tab is the
+// frontend half of #188; backend pieces shipped in 188a-188d.
+//
+// Three auth modes selected by the `Auth` dropdown:
+//   - `none` — anonymous HTTPS clone, no credentials.
+//   - `pat`  — HTTPS + personal access token. Token panel reveals.
+//   - `ssh`  — SSH clone (git@host:path). Key + known_hosts panel reveals.
+//
+// State here is read directly from the DOM at submit time
+// (`collectRepoForSubmit`) — no in-memory mirror. The form is small
+// enough that the env-tab's array-source-of-truth pattern would be
+// overkill, and a single-shot collect avoids needing to sync after
+// every keystroke.
+//
+// `resetRepoTab()` runs on modal close so a partially-typed PAT or
+// SSH key doesn't leak into the next session create.
+
+const repoUrl = document.getElementById("repo-url") as HTMLInputElement;
+const repoRef = document.getElementById("repo-ref") as HTMLInputElement;
+const repoTarget = document.getElementById("repo-target") as HTMLInputElement;
+const repoDepth = document.getElementById("repo-depth") as HTMLInputElement;
+const repoAuth = document.getElementById("repo-auth") as HTMLSelectElement;
+const repoAuthPatPanel = document.getElementById("repo-auth-pat-panel") as HTMLDivElement;
+const repoAuthPatToken = document.getElementById("repo-auth-pat-token") as HTMLInputElement;
+const repoAuthSshPanel = document.getElementById("repo-auth-ssh-panel") as HTMLDivElement;
+const repoAuthSshKey = document.getElementById("repo-auth-ssh-key") as HTMLTextAreaElement;
+const repoAuthSshKnownHostsMode = document.getElementById(
+	"repo-auth-ssh-known-hosts-mode",
+) as HTMLSelectElement;
+const repoAuthSshKnownHostsCustomWrap = document.getElementById(
+	"repo-auth-ssh-known-hosts-custom-wrap",
+) as HTMLLabelElement;
+const repoAuthSshKnownHostsCustom = document.getElementById(
+	"repo-auth-ssh-known-hosts-custom",
+) as HTMLTextAreaElement;
+
+/** Show/hide the auth subpanel based on the dropdown selection. */
+function syncRepoAuthPanels(): void {
+	const mode = repoAuth.value;
+	repoAuthPatPanel.toggleAttribute("hidden", mode !== "pat");
+	repoAuthSshPanel.toggleAttribute("hidden", mode !== "ssh");
+}
+
+/** Show/hide the custom-paste textarea based on the known_hosts mode. */
+function syncRepoSshKnownHostsCustom(): void {
+	const mode = repoAuthSshKnownHostsMode.value;
+	repoAuthSshKnownHostsCustomWrap.toggleAttribute("hidden", mode !== "custom");
+}
+
+repoAuth.addEventListener("change", syncRepoAuthPanels);
+repoAuthSshKnownHostsMode.addEventListener("change", syncRepoSshKnownHostsCustom);
+
+/**
+ * Wipe Repo-tab state on modal close. Critical for the credential
+ * fields (PAT, SSH private key) — leaving them in the DOM after a
+ * close would let the next session-create operator (or even the
+ * same user reopening for a different repo) accidentally submit a
+ * stale credential. Reset to the default "none" auth mode so the
+ * subpanels collapse too.
+ */
+function resetRepoTab(): void {
+	repoUrl.value = "";
+	repoRef.value = "";
+	repoTarget.value = "";
+	repoDepth.value = "";
+	repoAuth.value = "none";
+	repoAuthPatToken.value = "";
+	repoAuthSshKey.value = "";
+	repoAuthSshKnownHostsMode.value = "default";
+	repoAuthSshKnownHostsCustom.value = "";
+	syncRepoAuthPanels();
+	syncRepoSshKnownHostsCustom();
+}
+
+/**
+ * Read the Repo tab into the wire shape the backend accepts. Returns
+ * `undefined` when no URL is set — that's the "no repo configured"
+ * signal the bootstrap runner reads as a no-op.
+ *
+ * Trims input strings; empty `ref` / `target` are passed through as
+ * empty strings (the backend interprets `ref: ""` as "remote HEAD"
+ * and `target: ""` as "workspace root"). `depth` is parsed as int
+ * if non-empty.
+ *
+ * The collected shape is the `{ repo, auth }` pair the backend's
+ * `validateSessionConfig` cross-field check expects. We do NOT
+ * pre-validate URL scheme / refname rules here — the backend's Zod
+ * schema is the single source of truth; client-side mirroring would
+ * just be one more place to keep in sync. The user gets a 400 with
+ * a precise field path on submit.
+ *
+ * Exported for unit tests that pin the wire shape per (auth-mode)
+ * variant.
+ */
+export function collectRepoForSubmit(): {
+	repo: SessionConfigPayload["repo"];
+	auth: SessionConfigPayload["auth"];
+} {
+	const url = repoUrl.value.trim();
+	if (url === "") return { repo: undefined, auth: undefined };
+	const ref = repoRef.value.trim();
+	const target = repoTarget.value.trim();
+	const depthRaw = repoDepth.value.trim();
+	const depth = depthRaw === "" ? undefined : Number.parseInt(depthRaw, 10);
+	const auth = repoAuth.value as "none" | "pat" | "ssh";
+
+	const repo: NonNullable<SessionConfigPayload["repo"]> = {
+		url,
+		auth,
+	};
+	if (ref !== "") repo.ref = ref;
+	if (target !== "") repo.target = target;
+	if (depth !== undefined && Number.isFinite(depth)) repo.depth = depth;
+
+	if (auth === "none") {
+		return { repo, auth: undefined };
+	}
+	if (auth === "pat") {
+		const token = repoAuthPatToken.value;
+		// Plaintext token flows into the payload — sent over HTTPS,
+		// encrypted server-side at the route boundary before D1 write.
+		// Empty token is allowed through here; the backend will 400 on
+		// the cross-field check (`auth.pat required when repo.auth='pat'`).
+		return { repo, auth: { pat: token } };
+	}
+	// auth === "ssh"
+	const privateKey = repoAuthSshKey.value;
+	const knownHostsMode = repoAuthSshKnownHostsMode.value;
+	// "default" is the wire-shape sentinel the backend resolves to the
+	// bundled github/gitlab/bitbucket fingerprints (see 188d's
+	// knownHosts.ts). Custom mode passes the textarea content verbatim.
+	const knownHosts = knownHostsMode === "custom" ? repoAuthSshKnownHostsCustom.value : "default";
+	return { repo, auth: { ssh: { privateKey, knownHosts } } };
+}
 
 // ── Env tab (#186 / PR 186c) ────────────────────────────────────────────────
 //
@@ -1479,7 +1616,18 @@ newSessionForm.addEventListener("submit", async (e) => {
 	try {
 		showToast("Creating session…");
 		const envVars = collectEnvVarsForSubmit();
-		const config = envVars ? { envVars } : undefined;
+		const { repo, auth } = collectRepoForSubmit();
+		// Build the config payload only when something is actually
+		// configured. A bare `POST /sessions` (no config field) stays
+		// the steady-state for users not exercising any of the tabs.
+		const config: SessionConfigPayload | undefined =
+			envVars || repo
+				? {
+						...(envVars ? { envVars } : {}),
+						...(repo ? { repo } : {}),
+						...(auth ? { auth } : {}),
+					}
+				: undefined;
 		const session = await createSession(name, undefined, config);
 		sessions.unshift(session);
 		renderSessionList();
