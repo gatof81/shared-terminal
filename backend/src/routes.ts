@@ -624,7 +624,24 @@ export function buildRouter(
 	router.post("/sessions/:id/start", async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
 		try {
-			await sessions.assertOwnership(req.params.id, userId);
+			const meta = await sessions.assertOwnership(req.params.id, userId);
+			// `failed` (#185) means the create-time postCreate hook
+			// exited non-zero. Refuse the restart explicitly — letting it
+			// through would spawn a fresh container without re-running
+			// postCreate (the gate is single-use), leaving the user with
+			// what looks like a healthy "running" session whose
+			// environment was never bootstrapped. The session can carry
+			// partial workspace artefacts from the failed attempt; the
+			// safe path is `recreate it to retry`. 409 Conflict reflects
+			// "valid request, current state forbids it" — not 400 (the
+			// payload is fine) and not 403 (it's not an auth issue).
+			if (meta.status === "failed") {
+				res.status(409).json({
+					error:
+						"Session failed during postCreate; recreate it to retry. The original output is still in the failed-row history.",
+				});
+				return;
+			}
 			await docker.startContainer(req.params.id);
 			const updated = await sessions.get(req.params.id);
 			if (!updated) {
