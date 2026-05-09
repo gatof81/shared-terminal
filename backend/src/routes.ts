@@ -27,6 +27,7 @@ import {
 	UsernameTakenError,
 	verifyJwt,
 } from "./auth.js";
+import { markBootstrapped } from "./bootstrap.js";
 import { d1Query } from "./db.js";
 import type { DockerManager } from "./dockerManager.js";
 import { UploadQuotaExceededError } from "./dockerManager.js";
@@ -449,6 +450,63 @@ export function buildRouter(
 				await persistSessionConfig(meta.sessionId, validatedConfig);
 			}
 			await docker.spawn(meta.sessionId);
+			// postCreate hook (#185): one-shot bootstrap that runs once
+			// per session. Synchronous wait here means the modal stays
+			// open until the hook exits; PR 185b2b will layer a streaming
+			// WS channel so the user sees output live instead of waiting
+			// blind on the HTTP request. Hard-fail semantics from #185:
+			// non-zero exit → kill the container, flip status to `failed`,
+			// return 500 with the captured output. The row stays so the
+			// user can read what the hook printed (and so a recreate
+			// doesn't collide with leftover state on the same name).
+			if (validatedConfig?.postCreateCmd) {
+				const { exitCode, output } = await docker.runPostCreate(
+					meta.sessionId,
+					validatedConfig.postCreateCmd,
+				);
+				if (exitCode !== 0) {
+					await docker.kill(meta.sessionId).catch((e) => {
+						logger.error(
+							`[routes] kill after failed postCreate ${meta?.sessionId} threw: ${(e as Error).message}`,
+						);
+					});
+					await sessions.updateStatus(meta.sessionId, "failed");
+					res.status(500).json({
+						error: `postCreate hook failed (exit ${exitCode})`,
+						sessionId: meta.sessionId,
+						bootstrapOutput: output,
+						bootstrapExitCode: exitCode,
+					});
+					return;
+				}
+				// Atomic UPDATE … WHERE bootstrapped_at IS NULL — the only
+				// place in the codebase that sets this column. A retry
+				// race (e.g. two concurrent retries of the same create
+				// after a partial network failure) sees changes === 0 on
+				// the loser and we just skip the no-op. Returns true if
+				// THIS caller won; we ignore the boolean here because the
+				// route is single-shot per session — the gate exists for
+				// the runner's own sanity in 185b2b's async flow.
+				await markBootstrapped(meta.sessionId);
+			}
+			// postStart hook fires from `docker.spawn` -> nope, spawn doesn't
+			// call it; only `startContainer`. The first start happens here
+			// inside spawn (via container.start), so trigger postStart for
+			// the create path explicitly. Subsequent /start calls go
+			// through `startContainer` which already runs postStart.
+			if (validatedConfig?.postStartCmd) {
+				try {
+					await docker.runPostStart(meta.sessionId, validatedConfig.postStartCmd);
+				} catch (err) {
+					// Like the runPostStartIfConfigured wrapper, don't fail the
+					// create on a postStart launch error — the container is
+					// up, postCreate succeeded, the user can still use the
+					// session.
+					logger.warn(
+						`[routes] postStart launch failed for ${meta.sessionId}: ${(err as Error).message}`,
+					);
+				}
+			}
 			const updated = await sessions.get(meta.sessionId);
 			if (!updated) {
 				// Shouldn't happen: sessions.create above just inserted this row,

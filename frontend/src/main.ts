@@ -11,6 +11,7 @@
 import "./main.css";
 
 import {
+	BootstrapFailedError,
 	checkAuthStatus,
 	createInvite,
 	createSession,
@@ -1105,12 +1106,47 @@ function openNewSessionModal(opener: HTMLElement) {
 	setActiveSessionTab("basics");
 	newSessionInput.value = "";
 	newSessionSubmitBtn.disabled = false;
+	clearBootstrapError();
 	newSessionModal.classList.add("open");
 	newSessionModal.setAttribute("aria-hidden", "false");
 	// Defer focus to the next paint so the input is reliably focusable
 	// (some browsers ignore .focus() on an element that just transitioned
 	// from display:none in the same frame).
 	requestAnimationFrame(() => newSessionInput.focus());
+}
+
+/**
+ * Render a postCreate-hook failure inline in the modal — the user sees
+ * the captured stdout/stderr without losing the form they were filling
+ * out. Clears on next open / next submit. PR 185b2b will replace the
+ * static `<pre>` with a live-tail panel that shows output as it
+ * streams.
+ */
+function renderBootstrapError(err: BootstrapFailedError) {
+	clearBootstrapError();
+	const panel = document.createElement("div");
+	panel.className = "bootstrap-error";
+	panel.id = "bootstrap-error-panel";
+	const heading = document.createElement("strong");
+	heading.textContent = `postCreate hook failed (exit ${err.exitCode})`;
+	panel.appendChild(heading);
+	const hint = document.createElement("p");
+	hint.className = "bootstrap-error-hint";
+	hint.textContent =
+		"The session was created but the bootstrap command exited non-zero, " +
+		"so the container was killed and the session marked failed. " +
+		"Captured output below — fix the command and create a new session.";
+	panel.appendChild(hint);
+	const pre = document.createElement("pre");
+	pre.className = "bootstrap-error-output";
+	pre.textContent = err.output || "(no output captured)";
+	panel.appendChild(pre);
+	const basicsPanel = document.getElementById("session-tab-basics");
+	basicsPanel?.appendChild(panel);
+}
+
+function clearBootstrapError() {
+	document.getElementById("bootstrap-error-panel")?.remove();
 }
 
 function closeNewSessionModal() {
@@ -1140,6 +1176,7 @@ newSessionForm.addEventListener("submit", async (e) => {
 	// double-click doesn't fire two POSTs (which would create two
 	// sessions and burn quota silently).
 	newSessionSubmitBtn.disabled = true;
+	clearBootstrapError();
 	try {
 		showToast("Creating session…");
 		const session = await createSession(name);
@@ -1149,7 +1186,17 @@ newSessionForm.addEventListener("submit", async (e) => {
 		void openSession(session.sessionId);
 		showToast(`Session "${name}" created`);
 	} catch (err) {
-		showToast((err as Error).message, true);
+		if (err instanceof BootstrapFailedError) {
+			// postCreate hook hard-failed (#185). Server already killed
+			// the container and flipped status=failed. Refresh the
+			// sidebar so the failed row shows up, and surface the hook's
+			// captured stdout/stderr inline in the modal so the user can
+			// see what went wrong without leaving the form.
+			void refreshSessions();
+			renderBootstrapError(err);
+		} else {
+			showToast((err as Error).message, true);
+		}
 		newSessionSubmitBtn.disabled = false;
 	}
 });

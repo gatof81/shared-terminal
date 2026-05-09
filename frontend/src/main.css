@@ -624,6 +624,41 @@ main:not([data-sidebar-ready]) #sidebar {
   opacity: 0.6;
   cursor: progress;
 }
+
+/* postCreate hard-fail panel inside the new-session modal (#185). */
+.bootstrap-error {
+  margin-top: 0.85rem;
+  background: rgba(248, 81, 73, 0.08);
+  border: 1px solid #f85149;
+  border-radius: 8px;
+  padding: 0.75rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.bootstrap-error strong {
+  color: #ff8682;
+  font-size: 0.85rem;
+}
+.bootstrap-error-hint {
+  color: #b3a4a3;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  margin: 0;
+}
+.bootstrap-error-output {
+  background: #0d1117;
+  color: #e6edf3;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.78rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 6px;
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
 #session-list {
   flex: 1;
   overflow-y: auto;
