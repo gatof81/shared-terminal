@@ -145,6 +145,22 @@ describe("validatePortProxyBaseDomain", () => {
 		expect(validatePortProxyBaseDomain("tunnel.example.com/path")).toBeNull();
 		expect(validatePortProxyBaseDomain("tunnel example.com")).toBeNull();
 	});
+
+	// PR #223 round 3 NIT: RFC 1123 §2.1 says hostname labels must
+	// start AND end with alphanumeric — hyphens only in interior
+	// positions. The earlier `[a-z0-9-]+` accepted leading/trailing
+	// hyphens which a Tunnel ingress would silently fail to match,
+	// surfacing as "dispatcher never fires" instead of a startup
+	// warning.
+	it("rejects labels starting or ending with a hyphen (RFC 1123)", () => {
+		expect(validatePortProxyBaseDomain("-tunnel.example.com")).toBeNull();
+		expect(validatePortProxyBaseDomain("tunnel-.example.com")).toBeNull();
+		expect(validatePortProxyBaseDomain("tunnel.example-.com")).toBeNull();
+		// Single-char interior labels are still valid.
+		expect(validatePortProxyBaseDomain("a.b.c")).toBe("a.b.c");
+		// Interior hyphens stay legal.
+		expect(validatePortProxyBaseDomain("my-tunnel.example.com")).toBe("my-tunnel.example.com");
+	});
 });
 
 // ── Dispatcher: HTTP middleware ──────────────────────────────────────────
@@ -537,5 +553,80 @@ describe("createPortDispatcher (WS upgrade)", () => {
 		);
 		await new Promise((r) => setImmediate(r));
 		expect(wsSpy).toHaveBeenCalledTimes(1);
+	});
+
+	// PR #223 round 3 NIT: pin the WS-side branches the HTTP tests
+	// already cover so a future refactor that splits the auth flow
+	// between the two paths can't silently diverge.
+
+	it("403s a private-port WS upgrade owned by a different user", async () => {
+		const { handleUpgrade, wsSpy } = makeDispatcherWith(
+			{ hostPort: 32768, isPublic: false, ownerUserId: "u-owner" },
+			"u-attacker",
+		);
+		const { socket, written } = makeSocket();
+		handleUpgrade(
+			makeReq(`p3000-${SID}.tunnel.example.com`, "st_token=jwt"),
+			socket,
+			Buffer.alloc(0),
+		);
+		await new Promise((r) => setImmediate(r));
+		expect(written.some((line) => line.includes("403"))).toBe(true);
+		expect(wsSpy).not.toHaveBeenCalled();
+	});
+
+	it("502s a WS upgrade when authorize() throws (D1 unreachable)", async () => {
+		const wsSpy = vi.fn();
+		const dispatcher = createPortDispatcher({
+			baseDomain: "tunnel.example.com",
+			corsOrigins: ["https://app.example.com"],
+			lookupTarget: vi.fn(async () => {
+				throw new Error("D1 unreachable");
+			}),
+			verifyToken: vi.fn(() => null),
+			proxy: { web: vi.fn(), ws: wsSpy, on: vi.fn() } as unknown as Parameters<
+				typeof createPortDispatcher
+			>[0]["proxy"],
+		});
+		const { socket, written } = makeSocket();
+		dispatcher.handleUpgrade(makeReq(`p3000-${SID}.tunnel.example.com`), socket, Buffer.alloc(0));
+		await new Promise((r) => setImmediate(r));
+		expect(written.some((line) => line.includes("502"))).toBe(true);
+		expect(wsSpy).not.toHaveBeenCalled();
+	});
+
+	it("returns false from handleUpgrade when the dispatcher is disabled", () => {
+		// Symmetric with the HTTP fall-through test — a disabled
+		// dispatcher must hand every upgrade back to the existing
+		// /ws/* path so dev/local without PORT_PROXY_BASE_DOMAIN
+		// keeps working.
+		const dispatcher = createPortDispatcher({ baseDomain: null, corsOrigins: [] });
+		const { socket } = {
+			socket: { write: vi.fn(), end: vi.fn(), destroy: vi.fn() } as unknown as Duplex,
+		};
+		expect(
+			dispatcher.handleUpgrade(makeReq(`p3000-${SID}.tunnel.example.com`), socket, Buffer.alloc(0)),
+		).toBe(false);
+	});
+
+	// PR #223 round 3 SHOULD-FIX: `isDispatcherHost` is the rate
+	// limiter's `skip` predicate. It MUST share the parser the
+	// dispatcher uses so the limiter and the dispatch decision stay
+	// in lockstep — a divergence would either rate-limit non-
+	// dispatcher requests (false positive on /api) or skip
+	// dispatcher requests (defeating the budget cap).
+	it("isDispatcherHost agrees with the dispatch decision", () => {
+		const dispatcher = createPortDispatcher({
+			baseDomain: "tunnel.example.com",
+			corsOrigins: [],
+		});
+		expect(dispatcher.isDispatcherHost(`p3000-${SID}.tunnel.example.com`)).toBe(true);
+		expect(dispatcher.isDispatcherHost(`p3000-${SID}.tunnel.example.com:443`)).toBe(true);
+		expect(dispatcher.isDispatcherHost("api.example.com")).toBe(false);
+		expect(dispatcher.isDispatcherHost(undefined)).toBe(false);
+		// Disabled dispatcher: no host is ever a dispatcher host,
+		// so the limiter's `skip` is always true.
+		const disabled = createPortDispatcher({ baseDomain: null, corsOrigins: [] });
+		expect(disabled.isDispatcherHost(`p3000-${SID}.tunnel.example.com`)).toBe(false);
 	});
 });

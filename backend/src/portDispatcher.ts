@@ -215,6 +215,16 @@ export interface DispatcherDeps {
 export function createPortDispatcher(deps: DispatcherDeps): {
 	middleware: (req: IncomingMessage, res: ServerResponse, next: () => void) => void;
 	handleUpgrade: (req: IncomingMessage, socket: Duplex, head: Buffer) => boolean;
+	/**
+	 * Cheap "would the dispatcher claim this host?" predicate that the
+	 * rate-limit middleware in `index.ts` uses as its `skip` function so
+	 * the limiter only counts requests heading into the dispatcher
+	 * namespace (no impact on /api or /health). Same parser the real
+	 * dispatch path runs, so the predicate and the dispatch decision
+	 * stay in lockstep — no chance of "limited but not dispatched" or
+	 * vice versa.
+	 */
+	isDispatcherHost: (host: string | undefined) => boolean;
 } {
 	if (!deps.baseDomain) {
 		// Disabled: every request falls through, every upgrade is
@@ -227,6 +237,10 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 		return {
 			middleware: (_req, _res, next) => next(),
 			handleUpgrade: () => false,
+			// Disabled dispatcher → no host is ever a dispatcher
+			// host, so the rate limiter's `skip` always returns
+			// true and the limiter is a no-op.
+			isDispatcherHost: () => false,
 		};
 	}
 
@@ -353,7 +367,11 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 		return true;
 	}
 
-	return { middleware, handleUpgrade };
+	return {
+		middleware,
+		handleUpgrade,
+		isDispatcherHost: (host) => parseHost(host) !== null,
+	};
 }
 
 /**
@@ -373,7 +391,15 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 export function validatePortProxyBaseDomain(raw: string | undefined): string | null {
 	if (raw === undefined || raw.trim() === "") return null;
 	const v = raw.trim().toLowerCase();
-	const ok = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(v) && !v.includes("..") && !v.startsWith(".");
+	// RFC 1123 §2.1: hostname labels must start AND end with alphanumeric;
+	// hyphens may appear only in interior positions. The earlier
+	// `[a-z0-9-]+` form passed through `tunnel-.example.com` and
+	// `-tunnel.example.com`, which a Tunnel ingress would silently fail
+	// to match — operator sees a dispatcher that never fires instead of
+	// a startup warning. Tightened per PR #223 round 3 NIT.
+	const labelStrict = /[a-z0-9]([a-z0-9-]*[a-z0-9])?/.source;
+	const domainStrict = new RegExp(`^${labelStrict}(\\.${labelStrict})+$`);
+	const ok = domainStrict.test(v) && !v.includes("..") && !v.startsWith(".");
 	if (!ok) {
 		logger.warn(
 			`[port-dispatcher] PORT_PROXY_BASE_DOMAIN=${JSON.stringify(raw)} is malformed; ` +

@@ -8,6 +8,7 @@
 import http from "node:http";
 import cookieParser from "cookie-parser";
 import express from "express";
+import rateLimit from "express-rate-limit";
 import { WebSocketServer } from "ws";
 import {
 	ensureAuthReady,
@@ -129,6 +130,34 @@ if (trustProxyValue !== undefined) {
 } else {
 	logger.info("[server] trust proxy = unset (req.ip will be the socket address)");
 }
+// #190 PR 190c — in-process rate limit on the dispatcher namespace.
+// The dispatcher costs at minimum one D1 round-trip per request
+// (lookupDispatchTarget) and `public: true` ports are intentionally
+// unauthenticated — without a backstop, an attacker who learns the
+// host shape can flood D1 indefinitely (and hammer the container app
+// behind a public port). Cloudflare Tunnel can supply WAF rules at
+// the edge, but this is the in-process belt-and-braces for any
+// deployment without that layer configured. `skip` short-circuits
+// every non-dispatcher request so /api / /health are unaffected;
+// `isDispatcherHost` shares the same parser the dispatch decision
+// uses so the limiter and the dispatcher stay in lockstep. WS
+// upgrades bypass Express middleware entirely (handled in the
+// `server.on('upgrade')` event below), so this limiter applies only
+// to HTTP — WS rate-limit is a future follow-up if it bites. Mounted
+// BEFORE the dispatcher so a 429 short-circuits before any D1 call.
+// PR #223 round 3 SHOULD-FIX.
+const dispatcherLimiter = rateLimit({
+	windowMs: 60 * 1000,
+	limit: 300,
+	standardHeaders: "draft-7",
+	legacyHeaders: false,
+	skip: (req) => !portDispatcher.isDispatcherHost(req.headers.host),
+	message: {
+		error: "Too many requests to port dispatcher, please slow down.",
+		scope: "dispatcher",
+	},
+});
+app.use(dispatcherLimiter);
 // #190 PR 190c — dispatcher mounts BEFORE json/cookieParser/CORS so a
 // proxied container request reaches `proxy.web()` with its body stream
 // intact (express.json would otherwise consume it) and without an
