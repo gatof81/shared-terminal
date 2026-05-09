@@ -172,6 +172,21 @@ export async function migrateDb(): Promise<void> {
 		// `meta.changes === 1` to make the gate atomic across concurrent
 		// `start()` calls (e.g. two browser tabs racing to revive a stopped
 		// session). See PR 185b for the runner.
+		//
+		// IMPORTANT — `bootstrapped_at` MUST stay nullable with no
+		// DEFAULT. If a `DEFAULT (datetime('now'))` were added (or `NOT
+		// NULL` without an explicit insert column), every freshly-
+		// persisted config row would land with `bootstrapped_at` already
+		// set, the runner's `WHERE bootstrapped_at IS NULL` predicate
+		// would never match, and the one-shot postCreate hook would
+		// silently never fire — a data-loss-class silent failure for
+		// users who expected their repo to be cloned / bootstrap to have
+		// run. `created_at` directly below is the only column on this
+		// table that legitimately uses `NOT NULL DEFAULT (datetime('now'))`.
+		// `persistSessionConfig` deliberately omits `bootstrapped_at`
+		// from its INSERT column list to preserve the NULL-on-create
+		// invariant; `sessionConfig.test.ts` locks this with an explicit
+		// SQL-shape assertion.
 		`CREATE TABLE IF NOT EXISTS session_configs (
                         session_id          TEXT PRIMARY KEY,
                         workspace_strategy  TEXT,

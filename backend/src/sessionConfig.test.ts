@@ -250,6 +250,21 @@ describe("persistSessionConfig", () => {
 		]);
 	});
 
+	// Invariant lock for the `bootstrapped_at` NULL-on-create gate that
+	// PR 185b's bootstrap runner depends on. The column is nullable in
+	// the DDL with no DEFAULT, and the INSERT column list deliberately
+	// omits it — both must stay that way or the one-shot postCreate hook
+	// would silently never fire (a data-loss-class regression).
+	it("must NOT include bootstrapped_at in the INSERT column list", async () => {
+		await persistSessionConfig("sess-bootstrap", { cpuLimit: 1 });
+		const [sql, params] = dbStubs.d1Query.mock.calls[0]!;
+		expect(sql).not.toMatch(/bootstrapped_at/);
+		// Defensive cross-check: the params length must match the column
+		// count, so a future caller adding bootstrapped_at to either side
+		// without updating the other trips this assertion immediately.
+		expect((params as unknown[]).length).toBe(10);
+	});
+
 	it("serialises envVars + ports JSON columns", async () => {
 		await persistSessionConfig("sess-2", {
 			ports: [{ port: 3000, protocol: "http" }],
