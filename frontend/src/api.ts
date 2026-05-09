@@ -461,6 +461,25 @@ export async function getTemplate(id: string): Promise<Template> {
 	return res.json();
 }
 
+export async function updateTemplate(
+	id: string,
+	input: {
+		name: string;
+		description?: string | null;
+		config: SessionConfigPayload;
+	},
+): Promise<Template> {
+	const res = await apiFetch(`/templates/${encodeURIComponent(id)}`, {
+		method: "PUT",
+		body: JSON.stringify(input),
+	});
+	if (!res.ok) {
+		const body = (await res.json().catch(() => ({}))) as { error?: string; path?: string };
+		throw new Error(body.error ?? `Failed to update template (${res.status})`);
+	}
+	return res.json();
+}
+
 export async function deleteTemplate(id: string): Promise<void> {
 	const res = await apiFetch(`/templates/${encodeURIComponent(id)}`, {
 		method: "DELETE",
