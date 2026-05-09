@@ -108,6 +108,75 @@ describe("validateSessionConfig", () => {
 		);
 	});
 
+	// #194 PR 194a — pin the per-deployment bounds. Edges checked
+	// from BOTH sides so a future relaxation can't silently widen the
+	// range without trip-wiring at least one assertion.
+
+	it("rejects cpuLimit below the 0.25-core floor", () => {
+		// 250M-1 nano-CPUs = just under 0.25 cores. The form (194c)
+		// will quantise to integer cores before submit, but the schema
+		// stays the source of truth.
+		expect(() => validateSessionConfig({ cpuLimit: 249_999_999 })).toThrowError(
+			SessionConfigValidationError,
+		);
+	});
+
+	it("accepts cpuLimit exactly at the 0.25-core floor", () => {
+		expect(validateSessionConfig({ cpuLimit: 250_000_000 })?.cpuLimit).toBe(250_000_000);
+	});
+
+	it("rejects cpuLimit above the 8-core ceiling", () => {
+		expect(() => validateSessionConfig({ cpuLimit: 8_000_000_001 })).toThrowError(
+			SessionConfigValidationError,
+		);
+	});
+
+	it("accepts cpuLimit exactly at the 8-core ceiling", () => {
+		expect(validateSessionConfig({ cpuLimit: 8_000_000_000 })?.cpuLimit).toBe(8_000_000_000);
+	});
+
+	it("rejects memLimit below the 256-MiB floor", () => {
+		expect(() => validateSessionConfig({ memLimit: 256 * 1024 * 1024 - 1 })).toThrowError(
+			SessionConfigValidationError,
+		);
+	});
+
+	it("accepts memLimit exactly at the 256-MiB floor", () => {
+		const v = 256 * 1024 * 1024;
+		expect(validateSessionConfig({ memLimit: v })?.memLimit).toBe(v);
+	});
+
+	it("rejects memLimit above the 16-GiB ceiling", () => {
+		expect(() => validateSessionConfig({ memLimit: 16 * 1024 * 1024 * 1024 + 1 })).toThrowError(
+			SessionConfigValidationError,
+		);
+	});
+
+	it("accepts memLimit exactly at the 16-GiB ceiling", () => {
+		const v = 16 * 1024 * 1024 * 1024;
+		expect(validateSessionConfig({ memLimit: v })?.memLimit).toBe(v);
+	});
+
+	it("rejects idleTtlSeconds below the 60-second floor", () => {
+		expect(() => validateSessionConfig({ idleTtlSeconds: 59 })).toThrowError(
+			SessionConfigValidationError,
+		);
+	});
+
+	it("accepts idleTtlSeconds exactly at the 60-second floor", () => {
+		expect(validateSessionConfig({ idleTtlSeconds: 60 })?.idleTtlSeconds).toBe(60);
+	});
+
+	it("rejects idleTtlSeconds above the 24-hour ceiling", () => {
+		expect(() => validateSessionConfig({ idleTtlSeconds: 24 * 60 * 60 + 1 })).toThrowError(
+			SessionConfigValidationError,
+		);
+	});
+
+	it("accepts idleTtlSeconds exactly at the 24-hour ceiling", () => {
+		expect(validateSessionConfig({ idleTtlSeconds: 86_400 })?.idleTtlSeconds).toBe(86_400);
+	});
+
 	it("rejects out-of-range port numbers", () => {
 		expect(() => validateSessionConfig({ ports: [{ container: 0, public: false }] })).toThrowError(
 			SessionConfigValidationError,
@@ -1457,7 +1526,9 @@ describe("SessionConfigSchema export", () => {
 	it("is reusable for fragment validation in tests / future child issues", () => {
 		// Smoke check: parsing through the bare schema (skipping the
 		// validateSessionConfig wrapper) yields the same data shape.
-		const r = SessionConfigSchema.safeParse({ cpuLimit: 1 });
+		// 1_000_000_000 nano-CPUs = 1 core, comfortably inside the
+		// 0.25 → 8 cores band #194 PR 194a tightened the bounds to.
+		const r = SessionConfigSchema.safeParse({ cpuLimit: 1_000_000_000 });
 		expect(r.success).toBe(true);
 	});
 });
