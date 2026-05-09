@@ -117,13 +117,6 @@ export function extractAuthToken(cookieHeader: string | undefined): string | nul
 }
 
 /**
- * Singleton proxy. http-proxy keeps a per-target socket pool internally;
- * one proxy instance is enough for the whole dispatcher. We wire a
- * single `error` handler so a target-side failure (container died
- * mid-request, refused connection on the host port) returns 502 to the
- * client instead of crashing the backend with an unhandled error event.
- */
-/**
  * `proxy.on("error")` handler. Extracted (and exported) so unit tests
  * can exercise the `headersSent` branches and the WS-vs-HTTP shape
  * detection directly — the in-flight `proxy.web()` path is awkward to
@@ -160,13 +153,26 @@ export function handleProxyError(
 	}
 }
 
+/**
+ * Singleton proxy. http-proxy keeps a per-target socket pool internally;
+ * one proxy instance is enough for the whole dispatcher. The `error`
+ * event is wired to `handleProxyError` so a target-side failure
+ * (container died mid-request, refused connection on the host port,
+ * proxyTimeout expiry) returns 502 to the client instead of crashing
+ * the backend with an unhandled error event.
+ */
 function buildProxy(): httpProxy {
 	const proxy = httpProxy.createProxyServer({
-		// `xfwd: true` adds X-Forwarded-{For,Host,Proto,Port} headers
-		// the container app may use to log the real client IP. The
-		// `For` value is what Express's req.ip resolves to under our
-		// `trust proxy` setting, so the chain stays consistent end-to-
-		// end.
+		// `xfwd: true` appends `req.socket.remoteAddress` (the
+		// Tunnel's egress IP, when behind a Tunnel) to the inbound
+		// X-Forwarded-For chain that Cloudflare already populated
+		// with the real client IP. A container app configured with
+		// `trust proxy = 1` peels the Tunnel egress and sees the
+		// real client address. The earlier comment here referred
+		// to "Express's req.ip", which is wrong — http-proxy
+		// receives a raw IncomingMessage with no Express decoration,
+		// and the value it appends is the socket address. PR #223
+		// round 7 NIT.
 		xfwd: true,
 		// `ws: false` here — the dispatcher hand-routes WS upgrades
 		// via proxy.ws() in `dispatchUpgrade` below, not auto.

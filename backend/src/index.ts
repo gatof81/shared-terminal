@@ -15,6 +15,7 @@ import {
 	isAllowedWsOrigin,
 	originMatches,
 	parseCorsOrigins,
+	resolveCookieDomain,
 	validateJwtSecret,
 	warnIfWildcardCorsInProduction,
 } from "./auth.js";
@@ -112,9 +113,22 @@ if (PORT_PROXY_BASE_DOMAIN) {
 	// some deployments may share a hostname with the dispatcher
 	// (the only topology the cookie's default scoping covers) and
 	// don't need this knob.
-	if (!process.env.COOKIE_DOMAIN || process.env.COOKIE_DOMAIN.trim() === "") {
+	//
+	// Three states to distinguish so the operator gets actionable
+	// signal instead of silent failure (PR #223 round 7 SHOULD-FIX):
+	//   - Unset / empty   → "set it" warning.
+	//   - Non-empty, malformed (typo) → "your value failed validation"
+	//                                   warning, with the offending
+	//                                   value echoed back.
+	//   - Non-empty, valid → silent (logged via the success path).
+	const rawCookieDomain = process.env.COOKIE_DOMAIN?.trim();
+	if (!rawCookieDomain) {
 		logger.warn(
 			"[server] PORT_PROXY_BASE_DOMAIN is set but COOKIE_DOMAIN is unset — private-port auth will fail in any deployment where the API and dispatcher live on different hostnames (host-only cookie won't reach the dispatcher's subdomains). See .env.example.",
+		);
+	} else if (resolveCookieDomain(rawCookieDomain) === null) {
+		logger.warn(
+			`[server] COOKIE_DOMAIN=${JSON.stringify(rawCookieDomain)} failed validation — cookie will be set host-only and private-port auth will fail. Expected a parent domain like 'terminal.example.com'. See .env.example.`,
 		);
 	}
 } else {

@@ -21,6 +21,7 @@ import {
 	parseCorsOrigins,
 	requireAdmin,
 	requireAuth,
+	resolveCookieDomain,
 	validateJwtSecret,
 	warnIfWildcardCorsInProduction,
 } from "./auth.js";
@@ -700,5 +701,40 @@ describe("requireAdmin", () => {
 		expect(json).toHaveBeenCalledWith({ error: "Internal server error" });
 		expect(next).not.toHaveBeenCalled();
 		errSpy.mockRestore();
+	});
+});
+
+// PR #223 round 7 SHOULD-FIX. `resolveCookieDomain` is the single
+// validator that decides whether the JWT cookie carries a `Domain`
+// attribute (so it can traverse to the dispatcher's per-session
+// subdomains). Index.ts uses the same function to log a warn when
+// the operator's value fails validation — without that, a typo'd
+// COOKIE_DOMAIN would silently fall back to host-only and private-
+// port auth would 401 in production with no log evidence.
+describe("resolveCookieDomain", () => {
+	it("returns null for unset / empty / whitespace", () => {
+		expect(resolveCookieDomain(undefined)).toBeNull();
+		expect(resolveCookieDomain("")).toBeNull();
+		expect(resolveCookieDomain("   ")).toBeNull();
+	});
+
+	it("normalises case and trims whitespace", () => {
+		expect(resolveCookieDomain("Tunnel.Example.Com")).toBe("tunnel.example.com");
+		expect(resolveCookieDomain("  example.com  ")).toBe("example.com");
+	});
+
+	it("strips a legacy leading dot (RFC 2109 form)", () => {
+		expect(resolveCookieDomain(".example.com")).toBe("example.com");
+		expect(resolveCookieDomain(".sub.example.com")).toBe("sub.example.com");
+	});
+
+	it("returns null on RFC-1123 violations (the index.ts warn-trigger path)", () => {
+		// Operator typos that must NOT silently disable the cookie:
+		expect(resolveCookieDomain("tunnel-.example.com")).toBeNull();
+		expect(resolveCookieDomain("-tunnel.example.com")).toBeNull();
+		expect(resolveCookieDomain("a..b.com")).toBeNull();
+		expect(resolveCookieDomain("localhost")).toBeNull(); // bare TLD
+		expect(resolveCookieDomain("tun_nel.example.com")).toBeNull();
+		expect(resolveCookieDomain("tunnel.example.com/path")).toBeNull();
 	});
 });

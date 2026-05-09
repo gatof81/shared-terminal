@@ -498,20 +498,30 @@ const cookieSameSite = (): "strict" | "none" => (isProduction() ? "none" : "stri
 // `validatePortProxyBaseDomain`: non-empty, dot-separated labels,
 // optional leading dot allowed (legacy form some operators paste).
 // PR #223 round 6 SHOULD-FIX.
-const cookieDomain = (): string | undefined => {
-	const raw = process.env.COOKIE_DOMAIN?.trim().toLowerCase();
-	if (!raw) return undefined;
+// Exported for the boot-time warning in `index.ts` — without it the
+// `index.ts` guard can only catch the unset / empty case, leaving a
+// non-empty-but-malformed `COOKIE_DOMAIN` (operator typo like
+// `tunnel-.example.com`) silently host-only with no log evidence.
+// Returns the normalized domain on success or `null` on validation
+// failure; callers that just need "is it set?" (the cookie helpers
+// below) can ?? `undefined`. PR #223 round 7 SHOULD-FIX.
+export function resolveCookieDomain(raw: string | undefined): string | null {
+	const trimmed = raw?.trim().toLowerCase();
+	if (!trimmed) return null;
 	// Strip the legacy leading dot (RFC 2109 form). Modern browsers
 	// treat `.example.com` and `example.com` as the same host-pattern
 	// match, but Express's cookie lib emits whatever string we hand
 	// it and some intermediaries fail to normalise. Keep the wire
 	// shape clean.
-	const v = raw.startsWith(".") ? raw.slice(1) : raw;
+	const v = trimmed.startsWith(".") ? trimmed.slice(1) : trimmed;
 	if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(v)) {
-		return undefined;
+		return null;
 	}
 	return v;
-};
+}
+
+const cookieDomain = (): string | undefined =>
+	resolveCookieDomain(process.env.COOKIE_DOMAIN) ?? undefined;
 
 /**
  * Set the JWT as an httpOnly cookie. `maxAge` is derived from the JWT's
