@@ -177,9 +177,12 @@ export async function update(
 	userId: string,
 	input: TemplateInput,
 ): Promise<Template> {
-	// `assertOwnership` runs first so a non-owner can't tell from
-	// the response whether the row exists (404 from missing vs 403
-	// from forbidden — both are surfaced cleanly by the route).
+	// `assertOwnership` distinguishes 404 (no row) from 403 (row
+	// exists, wrong owner) — destructive paths get the explicit
+	// signal, by design (the read path's `getOwned` is the one
+	// that collapses both into 404 to avoid existence-leak via
+	// status-code timing). Running it first keeps the UPDATE
+	// off the wire when ownership fails.
 	await assertOwnership(templateId, userId);
 	await d1Query(
 		"UPDATE templates SET name = ?, description = ?, config = ?, updated_at = datetime('now') " +
