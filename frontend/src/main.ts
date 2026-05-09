@@ -1330,8 +1330,12 @@ function resetRepoTab(): void {
  * just be one more place to keep in sync. The user gets a 400 with
  * a precise field path on submit.
  *
- * Exported for unit tests that pin the wire shape per (auth-mode)
- * variant.
+ * Exported so a future test file (jsdom + DOM seed) can pin the
+ * wire shape per (auth-mode) variant without going through the
+ * full main.ts side-effect chain. None ship in this PR — the
+ * Env tab's equivalent (`collectEnvVarsForSubmit`) is also
+ * untested and the precedent is to add tests when the form is
+ * extracted into its own module.
  */
 export function collectRepoForSubmit(): {
 	repo: SessionConfigPayload["repo"];
@@ -1367,8 +1371,10 @@ export function collectRepoForSubmit(): {
 		const token = repoAuthPatToken.value.trim();
 		// Plaintext token flows into the payload — sent over HTTPS,
 		// encrypted server-side at the route boundary before D1 write.
-		// Empty token is allowed through here; the backend will 400 on
-		// the cross-field check (`auth.pat required when repo.auth='pat'`).
+		// Empty token is allowed through here; the backend rejects it
+		// in Zod's `.min(1)` check on `auth.pat` (the cross-field guard
+		// only fires when `auth.pat` is `undefined`, not `""` — PR #216
+		// round 2 NIT corrected the misstatement here).
 		return { repo, auth: { pat: token } };
 	}
 	// auth === "ssh"
