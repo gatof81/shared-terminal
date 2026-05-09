@@ -235,6 +235,14 @@ export function openBootstrapWs(
 
 	return {
 		close: () => {
+			// Mark `terminal` BEFORE the close so the asynchronous
+			// `close` event handler's guard short-circuits and we
+			// don't synthesize a fake `fail` message for an
+			// intentional cancel (PR #208 round 3). Without this the
+			// modal would render "Bootstrap channel closed unexpectedly"
+			// every time the user closed the new-session modal during
+			// a hook, even though they explicitly chose to cancel.
+			terminal = true;
 			try {
 				ws.close(1000, "client cancelled");
 			} catch {

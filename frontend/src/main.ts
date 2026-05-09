@@ -1197,6 +1197,12 @@ function teardownBootstrapTail() {
 		activeBootstrap.close();
 		activeBootstrap = null;
 	}
+	// Clear any rendered tail / error panel too. Without this, a
+	// cancelled-mid-bootstrap close left the error-styled panel in
+	// the DOM; the next time the modal opened it briefly flashed a
+	// "postCreate hook failed" message that didn't apply to the new
+	// session (PR #208 round 3).
+	clearBootstrapError();
 }
 
 function clearBootstrapError() {
