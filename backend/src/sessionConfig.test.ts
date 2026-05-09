@@ -123,6 +123,75 @@ describe("validateSessionConfig", () => {
 			SessionConfigValidationError,
 		);
 	});
+
+	// Repo URL scheme allowlist — closes the file:// / ssh:// hole the
+	// review bot flagged. PR 188 will read these values straight into a
+	// git-clone consumer, so refusing them at ingest is the only place
+	// this can be blocked without a duplicate validator downstream.
+	it("rejects repo URLs with file:// or ssh:// schemes", () => {
+		for (const url of ["file:///etc/passwd", "ssh://attacker.example/r", "javascript:alert(1)"]) {
+			expect(() => validateSessionConfig({ repos: [{ url }] })).toThrowError(
+				SessionConfigValidationError,
+			);
+		}
+	});
+
+	it("rejects repo URLs that are not URLs at all", () => {
+		expect(() => validateSessionConfig({ repos: [{ url: "just-a-name" }] })).toThrowError(
+			SessionConfigValidationError,
+		);
+	});
+
+	it("accepts https / http / git scheme repo URLs", () => {
+		expect(
+			validateSessionConfig({
+				repos: [
+					{ url: "https://example.com/r" },
+					{ url: "http://example.com/r" },
+					{ url: "git://example.com/r" },
+				],
+			}),
+		).toBeDefined();
+	});
+
+	// envVars contents must run through validateEnvVars (POSIX key shape,
+	// caps, NUL rejection, denylist) — the Zod record-of-strings is a
+	// shape check, not a content check.
+	it("rejects config.envVars with denylisted keys (LD_PRELOAD)", () => {
+		expect(() => validateSessionConfig({ envVars: { LD_PRELOAD: "/evil.so" } })).toThrowError(
+			SessionConfigValidationError,
+		);
+	});
+
+	it("rejects config.envVars with non-POSIX key shapes", () => {
+		expect(() => validateSessionConfig({ envVars: { "BAD-KEY": "x" } })).toThrowError(
+			SessionConfigValidationError,
+		);
+	});
+
+	it("rejects config.envVars values containing NUL bytes", () => {
+		expect(() => validateSessionConfig({ envVars: { GOOD_NAME: "value\0withnul" } })).toThrowError(
+			SessionConfigValidationError,
+		);
+	});
+
+	it("rejects config.envVars exceeding the entry-count cap", () => {
+		const big: Record<string, string> = {};
+		for (let i = 0; i < 65; i++) big[`KEY_${i}`] = "v";
+		expect(() => validateSessionConfig({ envVars: big })).toThrowError(
+			SessionConfigValidationError,
+		);
+	});
+
+	it("attributes envVars validation errors to the config.envVars path", () => {
+		try {
+			validateSessionConfig({ envVars: { PATH: "x" } });
+		} catch (err) {
+			expect((err as SessionConfigValidationError).path).toBe("config.envVars");
+			return;
+		}
+		throw new Error("expected throw");
+	});
 });
 
 // ── isEmptyConfig ─────────────────────────────────────────────────────────
@@ -218,6 +287,36 @@ describe("getSessionConfig", () => {
 		expect(got?.envVars).toEqual({ FOO: "bar" });
 		// D1 returns suffix-less UTC; getter must not interpret as local.
 		expect(got?.bootstrappedAt?.toISOString()).toBe("2026-05-08T12:00:00.000Z");
+	});
+
+	it("degrades malformed JSON columns to undefined instead of throwing", async () => {
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [
+				{
+					session_id: "sess-bad-json",
+					workspace_strategy: null,
+					cpu_limit: null,
+					mem_limit: null,
+					idle_ttl_seconds: null,
+					post_create_cmd: null,
+					post_start_cmd: null,
+					// All three JSON columns deliberately broken — a direct
+					// SQL write or migration corruption is the only way to
+					// reach this state, and the row should still be readable.
+					repos_json: "{not json",
+					ports_json: "[oh no",
+					env_vars_json: "definitely not",
+					bootstrapped_at: null,
+				},
+			],
+			success: true as const,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		const got = await getSessionConfig("sess-bad-json");
+		expect(got).not.toBeNull();
+		expect(got?.repos).toBeUndefined();
+		expect(got?.ports).toBeUndefined();
+		expect(got?.envVars).toBeUndefined();
 	});
 
 	it("treats unknown workspace_strategy values as undefined (defence-in-depth)", async () => {

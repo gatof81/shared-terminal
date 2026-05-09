@@ -20,6 +20,8 @@
 
 import { z } from "zod";
 import { d1Query } from "./db.js";
+import { EnvVarValidationError, validateEnvVars } from "./envVarValidation.js";
+import { logger } from "./logger.js";
 
 // ── Bounds (shape-level only; children tighten) ─────────────────────────────
 
@@ -43,9 +45,24 @@ const MAX_PORTS = 20;
 
 // Minimal placeholder for #188. Just shape today: the URL / ref pair.
 // Auth method, replace-workspace flag, etc. land with the repo-clone child.
+//
+// URL scheme allowlist is enforced at INGEST so a stored value can never
+// reach the #188 git-clone consumer with a `file://` (clone from arbitrary
+// host paths including the bind-mounted workspace) or `ssh://attacker/`
+// (SSRF / host-key confusion) URL. The schema is the right enforcement
+// point — once a row is in D1, the child issue has no obvious place to
+// re-validate without a duplicate codebase. `git+...` variants stay out
+// pending a real reason to need them.
+const REPO_URL_SCHEME = /^(?:https?|git):\/\//;
 const RepoSpec = z
 	.object({
-		url: z.string().min(1).max(500),
+		url: z
+			.string()
+			.min(1)
+			.max(500)
+			.refine((u) => REPO_URL_SCHEME.test(u), {
+				message: "url must use https://, http://, or git:// scheme",
+			}),
 		ref: z.string().max(200).optional(),
 	})
 	.strict();
@@ -134,6 +151,24 @@ export function validateSessionConfig(raw: unknown): SessionConfig | undefined {
 		const path = ["config", ...issue.path.map(String)].join(".");
 		throw new SessionConfigValidationError(path, `${path}: ${issue.message}`);
 	}
+	// Run `config.envVars` through the same `validateEnvVars` guards the
+	// legacy top-level `body.envVars` path uses — POSIX key format,
+	// per-key/value caps, total-size cap, NUL-byte rejection, and the
+	// LD_PRELOAD/NODE_OPTIONS-style injection denylist. PR 185b will
+	// hand `session_configs.env_vars_json` straight to `docker run` /
+	// `docker exec`, so a value that bypasses these rules at INGEST
+	// would reach the consumer unchecked. Z is on shape; envVarValidation
+	// is on contents; both are needed.
+	if (result.data.envVars !== undefined) {
+		try {
+			result.data.envVars = validateEnvVars(result.data.envVars);
+		} catch (err) {
+			if (err instanceof EnvVarValidationError) {
+				throw new SessionConfigValidationError("config.envVars", `config.envVars: ${err.message}`);
+			}
+			throw err;
+		}
+	}
 	return result.data;
 }
 
@@ -165,13 +200,39 @@ function rowToRecord(row: SessionConfigRow): SessionConfigRecord {
 		idleTtlSeconds: row.idle_ttl_seconds ?? undefined,
 		postCreateCmd: row.post_create_cmd ?? undefined,
 		postStartCmd: row.post_start_cmd ?? undefined,
-		repos: row.repos_json ? (JSON.parse(row.repos_json) as SessionConfig["repos"]) : undefined,
-		ports: row.ports_json ? (JSON.parse(row.ports_json) as SessionConfig["ports"]) : undefined,
-		envVars: row.env_vars_json
-			? (JSON.parse(row.env_vars_json) as SessionConfig["envVars"])
-			: undefined,
+		repos: parseJsonColumn<SessionConfig["repos"]>(row.session_id, "repos_json", row.repos_json),
+		ports: parseJsonColumn<SessionConfig["ports"]>(row.session_id, "ports_json", row.ports_json),
+		envVars: parseJsonColumn<SessionConfig["envVars"]>(
+			row.session_id,
+			"env_vars_json",
+			row.env_vars_json,
+		),
 		bootstrappedAt: row.bootstrapped_at ? parseD1Utc(row.bootstrapped_at) : null,
 	};
+}
+
+/**
+ * `JSON.parse` wrapper for the three JSON-shaped columns on `session_configs`.
+ *
+ * Rows are only written by `persistSessionConfig` (which uses `JSON.stringify`),
+ * so a malformed value would have to come from a direct SQL write, a future
+ * migration that rewrites the column, or D1 corruption. Any of those is rare
+ * enough that throwing would be a real bug — but a `SyntaxError` bubbling
+ * through `getSessionConfig` would crash whatever request triggered the read
+ * (and on session-attach paths that's a 500 the user just sees as "session
+ * broken"). Degrade to `undefined` + a loud `logger.warn` so the rest of the
+ * row stays usable and the operator sees the inconsistency.
+ */
+function parseJsonColumn<T>(sessionId: string, column: string, raw: string | null): T | undefined {
+	if (raw === null) return undefined;
+	try {
+		return JSON.parse(raw) as T;
+	} catch (err) {
+		logger.warn(
+			`[sessionConfig] malformed JSON in ${column} for session ${sessionId}: ${(err as Error).message}`,
+		);
+		return undefined;
+	}
 }
 
 // Mirrors sessionManager.parseD1UtcTimestamp — D1's `datetime('now')` lacks
