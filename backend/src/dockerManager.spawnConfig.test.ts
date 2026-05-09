@@ -272,7 +272,13 @@ describe("DockerManager.spawn config-applied", () => {
 					post_start_cmd: null,
 					repos_json: null,
 					ports_json: null,
-					env_vars_json: JSON.stringify({ NEW_KEY: "from-config", LEGACY_KEY: "wins" }),
+					// Storage shape (#186): typed entry list, plain rows have
+					// `{ name, type: "plain", value }`. The route encrypts
+					// secret entries before they land here.
+					env_vars_json: JSON.stringify([
+						{ name: "NEW_KEY", type: "plain", value: "from-config" },
+						{ name: "LEGACY_KEY", type: "plain", value: "wins" },
+					]),
 					bootstrapped_at: null,
 				},
 			],

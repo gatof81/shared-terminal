@@ -48,7 +48,7 @@ describe("validateSessionConfig", () => {
 			postStartCmd: "npm run dev",
 			repos: [{ url: "https://github.com/example/repo", ref: "main" }],
 			ports: [{ port: 3000, protocol: "http" }],
-			envVars: { FOO: "bar" },
+			envVars: [{ name: "FOO", type: "plain", value: "bar" }],
 		};
 		const got = validateSessionConfig(raw);
 		expect(got).toEqual(raw);
@@ -182,43 +182,94 @@ describe("validateSessionConfig", () => {
 		).toBeDefined();
 	});
 
-	// envVars contents must run through validateEnvVars (POSIX key shape,
-	// caps, NUL rejection, denylist) — the Zod record-of-strings is a
-	// shape check, not a content check.
-	it("rejects config.envVars with denylisted keys (LD_PRELOAD)", () => {
-		expect(() => validateSessionConfig({ envVars: { LD_PRELOAD: "/evil.so" } })).toThrowError(
-			SessionConfigValidationError,
-		);
+	// envVars contents flow through validateEnvVars per-entry — POSIX
+	// name format is also enforced by Zod regex (uppercase only), but
+	// the denylist (PATH/LD_*/SESSION_ID/etc.) and NUL-byte rejection
+	// fire from the existing `validateEnvVars` routine reused on the
+	// new typed-array shape.
+	it("rejects config.envVars entries with denylisted names (LD_PRELOAD)", () => {
+		expect(() =>
+			validateSessionConfig({
+				envVars: [{ name: "LD_PRELOAD", type: "plain", value: "/evil.so" }],
+			}),
+		).toThrowError(SessionConfigValidationError);
 	});
 
-	it("rejects config.envVars with non-POSIX key shapes", () => {
-		expect(() => validateSessionConfig({ envVars: { "BAD-KEY": "x" } })).toThrowError(
-			SessionConfigValidationError,
-		);
+	it("rejects entry names that fail the uppercase POSIX regex", () => {
+		// "BAD-KEY" has a dash and lowercase — fails the Zod regex
+		// `/^[A-Z_][A-Z0-9_]*$/` enforced on each entry's name.
+		expect(() =>
+			validateSessionConfig({ envVars: [{ name: "BAD-KEY", type: "plain", value: "x" }] }),
+		).toThrowError(SessionConfigValidationError);
 	});
 
-	it("rejects config.envVars values containing NUL bytes", () => {
-		expect(() => validateSessionConfig({ envVars: { GOOD_NAME: "value\0withnul" } })).toThrowError(
-			SessionConfigValidationError,
-		);
+	it("rejects entry values containing NUL bytes", () => {
+		expect(() =>
+			validateSessionConfig({
+				envVars: [{ name: "GOOD_NAME", type: "plain", value: "value\0withnul" }],
+			}),
+		).toThrowError(SessionConfigValidationError);
 	});
 
-	it("rejects config.envVars exceeding the entry-count cap", () => {
-		const big: Record<string, string> = {};
-		for (let i = 0; i < 65; i++) big[`KEY_${i}`] = "v";
+	it("rejects entries exceeding the 64-entry cap", () => {
+		const big = Array.from({ length: 65 }, (_, i) => ({
+			name: `KEY_${i}`,
+			type: "plain" as const,
+			value: "v",
+		}));
 		expect(() => validateSessionConfig({ envVars: big })).toThrowError(
 			SessionConfigValidationError,
 		);
 	});
 
+	// Duplicate-name dedup fires inside validateSessionConfig (not in
+	// Zod itself — discriminated unions don't dedup by a shared key).
+	it("rejects duplicate entry names", () => {
+		expect(() =>
+			validateSessionConfig({
+				envVars: [
+					{ name: "FOO", type: "plain", value: "a" },
+					{ name: "FOO", type: "plain", value: "b" },
+				],
+			}),
+		).toThrowError(/duplicate entry name 'FOO'/);
+	});
+
+	// `secret-slot` is the template-load wire shape; never valid on
+	// POST /sessions because there's no value to persist.
+	it("rejects 'secret-slot' entries (template-load only)", () => {
+		expect(() =>
+			validateSessionConfig({ envVars: [{ name: "FOO", type: "secret-slot" }] }),
+		).toThrowError(/secret-slot/);
+	});
+
+	it("rejects an empty secret value", () => {
+		// Plain values can be empty (POSIX `KEY=`); secret values must
+		// have content — an "empty secret" is meaningless and was
+		// almost certainly a UX bug at the form layer.
+		expect(() =>
+			validateSessionConfig({ envVars: [{ name: "FOO", type: "secret", value: "" }] }),
+		).toThrowError(SessionConfigValidationError);
+	});
+
 	it("attributes envVars validation errors to the config.envVars path", () => {
 		try {
-			validateSessionConfig({ envVars: { PATH: "x" } });
+			validateSessionConfig({ envVars: [{ name: "PATH", type: "plain", value: "x" }] });
 		} catch (err) {
 			expect((err as SessionConfigValidationError).path).toBe("config.envVars");
 			return;
 		}
 		throw new Error("expected throw");
+	});
+
+	it("accepts a mixed plain + secret entry list", () => {
+		const got = validateSessionConfig({
+			envVars: [
+				{ name: "FOO", type: "plain", value: "bar" },
+				{ name: "API_KEY", type: "secret", value: "sk-test-1234" },
+			],
+		});
+		expect(got?.envVars).toHaveLength(2);
 	});
 });
 
@@ -231,7 +282,10 @@ describe("isEmptyConfig", () => {
 
 	it("returns false when any field is defined", () => {
 		expect(isEmptyConfig({ cpuLimit: 1 })).toBe(false);
-		expect(isEmptyConfig({ envVars: {} })).toBe(false); // the empty object is itself a defined value
+		// An empty array is itself a defined value (jsonOrNull will
+		// collapse it to NULL on the way to D1, but isEmptyConfig is
+		// only the "skip the INSERT entirely" predicate).
+		expect(isEmptyConfig({ envVars: [] })).toBe(false);
 	});
 });
 
@@ -281,11 +335,11 @@ describe("persistSessionConfig", () => {
 		expect((params as unknown[]).length).toBe(10);
 	});
 
-	it("collapses empty array / empty object sub-records to NULL (no D1 row bloat)", async () => {
+	it("collapses empty array sub-records to NULL (no D1 row bloat)", async () => {
 		await persistSessionConfig("sess-empty", {
 			repos: [],
 			ports: [],
-			envVars: {},
+			envVars: [],
 		});
 		const [, params] = dbStubs.d1Query.mock.calls[0]!;
 		// repos_json (param[7]), ports_json (param[8]), env_vars_json (param[9])
@@ -294,14 +348,36 @@ describe("persistSessionConfig", () => {
 		expect(params?.[9]).toBeNull();
 	});
 
-	it("serialises envVars + ports JSON columns", async () => {
+	it("serialises envVars + ports JSON columns (storage shape)", async () => {
 		await persistSessionConfig("sess-2", {
 			ports: [{ port: 3000, protocol: "http" }],
-			envVars: { FOO: "bar" },
+			// Already-encrypted storage shape — the route encrypts
+			// before calling persistSessionConfig.
+			envVars: [
+				{ name: "FOO", type: "plain", value: "bar" },
+				{
+					name: "API_KEY",
+					type: "secret",
+					ciphertext: "ZW5jcnlwdGVk",
+					iv: "MTIzNDU2Nzg5MDEy",
+					tag: "MTIzNDU2Nzg5MDEyMzQ1Ng==",
+				},
+			],
 		});
 		const [, params] = dbStubs.d1Query.mock.calls[0]!;
 		expect(params?.[8]).toBe(JSON.stringify([{ port: 3000, protocol: "http" }]));
-		expect(params?.[9]).toBe(JSON.stringify({ FOO: "bar" }));
+		const envJson = JSON.parse(params?.[9] as string) as unknown[];
+		expect(envJson).toHaveLength(2);
+		expect(envJson[0]).toMatchObject({ name: "FOO", type: "plain", value: "bar" });
+		expect(envJson[1]).toMatchObject({
+			name: "API_KEY",
+			type: "secret",
+			ciphertext: "ZW5jcnlwdGVk",
+		});
+		// Critical: no `value` field on the secret row — only
+		// ciphertext + iv + tag. A future serializer mistake that
+		// re-introduces plaintext would trip this.
+		expect(envJson[1]).not.toHaveProperty("value");
 	});
 });
 
@@ -328,7 +404,7 @@ describe("getSessionConfig", () => {
 					post_start_cmd: null,
 					repos_json: JSON.stringify([{ url: "https://example.com/r" }]),
 					ports_json: null,
-					env_vars_json: JSON.stringify({ FOO: "bar" }),
+					env_vars_json: JSON.stringify([{ name: "FOO", type: "plain", value: "bar" }]),
 					bootstrapped_at: "2026-05-08 12:00:00",
 				},
 			],
@@ -340,7 +416,7 @@ describe("getSessionConfig", () => {
 		expect(got?.workspaceStrategy).toBe("preserve");
 		expect(got?.cpuLimit).toBe(2_000_000_000);
 		expect(got?.repos).toEqual([{ url: "https://example.com/r" }]);
-		expect(got?.envVars).toEqual({ FOO: "bar" });
+		expect(got?.envVars).toEqual([{ name: "FOO", type: "plain", value: "bar" }]);
 		// D1 returns suffix-less UTC; getter must not interpret as local.
 		expect(got?.bootstrappedAt?.toISOString()).toBe("2026-05-08T12:00:00.000Z");
 	});

@@ -22,6 +22,7 @@ import { z } from "zod";
 import { d1Query } from "./db.js";
 import { EnvVarValidationError, validateEnvVars } from "./envVarValidation.js";
 import { logger } from "./logger.js";
+import { decryptSecret, type EncryptedSecret, encryptSecret } from "./secrets.js";
 
 // ── Bounds (shape-level only; children tighten) ─────────────────────────────
 
@@ -40,6 +41,15 @@ const MAX_IDLE_TTL_S = 30 * 24 * 60 * 60; // 30 days
 // product UX.
 const MAX_REPOS = 10;
 const MAX_PORTS = 20;
+// #186 env-var entry caps. Hard-line the per-entry value at 16 KiB as
+// the issue spec requires; total list capped via array max so the
+// row's env_vars_json column can't blow past D1-friendly sizes even
+// with all values at the per-entry cap (64 × 16 KiB ≈ 1 MiB worst case
+// on size, smaller in practice because the JSON envelope dominates).
+const MAX_ENV_ENTRIES = 64;
+const MAX_ENV_VALUE_BYTES = 16 * 1024;
+const ENV_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
+const MAX_ENV_NAME_LEN = 256;
 
 // ── Zod schemas ─────────────────────────────────────────────────────────────
 
@@ -95,6 +105,71 @@ const PortSpec = z
 	})
 	.strict();
 
+// #186 — typed env-var entries replace the loose Record<string,string>
+// shape. Three variants:
+//   - `plain`       : visible value, stored verbatim in D1.
+//   - `secret`      : value encrypted before persistence; never returned
+//                     by listing endpoints (see the redact path).
+//   - `secret-slot` : a placeholder a #195 template surfaces to the
+//                     recipient as "you must fill this in"; rejected
+//                     at POST /sessions because there's no value to
+//                     persist for the slot itself.
+//
+// The schema describes the WIRE shape (what clients send): both
+// `plain` and `secret` carry a plaintext `value` field. The persisted
+// shape on `secret` rows replaces `value` with `{ ciphertext, iv, tag }`
+// (see `encryptSecretEntries`). The two shapes are kept separate
+// because the wire-side validators (Zod) and the storage-side
+// validators (rowToRecord rehydration) have different invariants.
+const ENV_NAME_REJECT = "name must match /^[A-Z_][A-Z0-9_]*$/ (uppercase POSIX env var)";
+const PlainEnvEntry = z
+	.object({
+		name: z.string().regex(ENV_NAME_PATTERN, ENV_NAME_REJECT).max(MAX_ENV_NAME_LEN),
+		type: z.literal("plain"),
+		value: z.string().refine((v) => Buffer.byteLength(v, "utf-8") <= MAX_ENV_VALUE_BYTES, {
+			message: `value exceeds ${MAX_ENV_VALUE_BYTES} bytes`,
+		}),
+	})
+	.strict();
+const SecretEnvEntry = z
+	.object({
+		name: z.string().regex(ENV_NAME_PATTERN, ENV_NAME_REJECT).max(MAX_ENV_NAME_LEN),
+		type: z.literal("secret"),
+		value: z
+			.string()
+			.min(1, "secret value must not be empty")
+			.refine((v) => Buffer.byteLength(v, "utf-8") <= MAX_ENV_VALUE_BYTES, {
+				message: `value exceeds ${MAX_ENV_VALUE_BYTES} bytes`,
+			}),
+	})
+	.strict();
+// `secret-slot` is wire-only on the template-load path (#195); we
+// declare it here so the schema knows about all three variants and
+// `validateSessionConfig` can reject it explicitly with a clear
+// message rather than dropping it through a permissive union check.
+const SecretSlotEnvEntry = z
+	.object({
+		name: z.string().regex(ENV_NAME_PATTERN, ENV_NAME_REJECT).max(MAX_ENV_NAME_LEN),
+		type: z.literal("secret-slot"),
+	})
+	.strict();
+const EnvVarEntry = z.discriminatedUnion("type", [
+	PlainEnvEntry,
+	SecretEnvEntry,
+	SecretSlotEnvEntry,
+]);
+export type EnvVarEntryInput = z.infer<typeof EnvVarEntry>;
+/** Storage shape after encryption — secret entries lose `value` and gain
+ *  `{ ciphertext, iv, tag }`. Plain entries are unchanged. */
+export type EnvVarEntryStored =
+	| { name: string; type: "plain"; value: string }
+	| { name: string; type: "secret"; ciphertext: string; iv: string; tag: string };
+/** Public/redacted shape returned by listing endpoints — secret values
+ *  collapse to `{ isSet: true }`. Used by routes' serializer. */
+export type EnvVarEntryPublic =
+	| { name: string; type: "plain"; value: string }
+	| { name: string; type: "secret"; isSet: true };
+
 /**
  * The shape `POST /api/sessions` accepts under `body.config`. Every field
  * is optional — bare POSTs (no `config`) stay valid. `.strict()` rejects
@@ -120,11 +195,11 @@ export const SessionConfigSchema = z
 		postStartCmd: z.string().min(1).max(MAX_HOOK_LEN).optional(),
 		// #190 — populated by the ports form
 		ports: z.array(PortSpec).max(MAX_PORTS).optional(),
-		// #186 — populated by the env/secrets form. Loose Record-of-strings
-		// today so callers that only need plain env can use it; #186 swaps
-		// in the typed { name, value, secret } entry shape with AES-GCM
-		// secret encryption.
-		envVars: z.record(z.string(), z.string()).optional(),
+		// #186 — typed entry list. `plain` values stored verbatim;
+		// `secret` values encrypted before D1 write (see
+		// `encryptSecretEntries`) and redacted in listing endpoints.
+		// `secret-slot` is template-load-only and rejected on POST.
+		envVars: z.array(EnvVarEntry).max(MAX_ENV_ENTRIES).optional(),
 	})
 	.strict();
 
@@ -136,9 +211,13 @@ export type SessionConfig = z.infer<typeof SessionConfigSchema>;
  * (PR 185b) writes once postCreate has succeeded — exposed here so the
  * runner can read it without going back through `d1Query` directly.
  */
-export interface SessionConfigRecord extends SessionConfig {
+export interface SessionConfigRecord extends Omit<SessionConfig, "envVars"> {
 	sessionId: string;
 	bootstrappedAt: Date | null;
+	// Storage-shape env vars: `secret` rows carry ciphertext + iv +
+	// tag (no plaintext value). DockerManager.spawn decrypts via
+	// `decryptStoredEntries` before handing them to `docker run`.
+	envVars?: EnvVarEntryStored[];
 }
 
 // ── Validation helper ──────────────────────────────────────────────────────
@@ -175,26 +254,140 @@ export function validateSessionConfig(raw: unknown): SessionConfig | undefined {
 		const path = ["config", ...issue.path.map(String)].join(".");
 		throw new SessionConfigValidationError(path, `${path}: ${issue.message}`);
 	}
-	// Run `config.envVars` through the same `validateEnvVars` guards the
-	// legacy top-level `body.envVars` path uses — POSIX key format,
-	// per-key/value caps, total-size cap, NUL-byte rejection, and the
-	// LD_PRELOAD/NODE_OPTIONS-style injection denylist. PR 185b will
-	// hand `session_configs.env_vars_json` straight to `docker run` /
-	// `docker exec`, so a value that bypasses these rules at INGEST
-	// would reach the consumer unchecked. Z is on shape; envVarValidation
-	// is on contents; both are needed.
+	// Apply the existing envVarValidation content rules (denylist of
+	// PATH/LD_*/SESSION_ID/etc., NUL-byte rejection) to each entry's
+	// name+value pair. Zod handled shape (POSIX-name regex, length
+	// caps, discriminated-union variant); envVarValidation handles
+	// content (denylist matches, NUL bytes, exact name+value rules).
+	// `secret-slot` is rejected outright — it's a template wire shape
+	// only, never a valid POST input. Dedup by name fires here too;
+	// two entries with the same name are an unambiguous client bug.
 	if (result.data.envVars !== undefined) {
-		try {
-			result.data.envVars = validateEnvVars(result.data.envVars);
-		} catch (err) {
-			if (err instanceof EnvVarValidationError) {
-				throw new SessionConfigValidationError("config.envVars", `config.envVars: ${err.message}`);
+		const seen = new Set<string>();
+		for (const entry of result.data.envVars) {
+			if (seen.has(entry.name)) {
+				throw new SessionConfigValidationError(
+					"config.envVars",
+					`config.envVars: duplicate entry name '${entry.name}'`,
+				);
 			}
-			throw err;
+			seen.add(entry.name);
+			if (entry.type === "secret-slot") {
+				throw new SessionConfigValidationError(
+					"config.envVars",
+					`config.envVars[${entry.name}]: 'secret-slot' is template-load only; provide a 'secret' or 'plain' entry instead`,
+				);
+			}
+			// `validateEnvVars` reuse: hand it a one-key map and let
+			// the existing denylist + NUL-check fire. Errors are
+			// re-thrown with the SessionConfigValidationError shape so
+			// the route returns the same precise 400.
+			try {
+				validateEnvVars({ [entry.name]: entry.value });
+			} catch (err) {
+				if (err instanceof EnvVarValidationError) {
+					throw new SessionConfigValidationError(
+						"config.envVars",
+						`config.envVars[${entry.name}]: ${err.message}`,
+					);
+				}
+				throw err;
+			}
 		}
 	}
 	return result.data;
 }
+
+// ── Encryption helpers ──────────────────────────────────────────────────
+
+/**
+ * Convert validated wire entries (with plaintext on secret rows) into
+ * the storage shape that lands in `session_configs.env_vars_json`.
+ * Plain entries pass through; `secret` entries get
+ * `{ name, type, ciphertext, iv, tag }` after AES-256-GCM encrypt.
+ *
+ * Caller (route) MUST invoke this between `validateSessionConfig` and
+ * `persistSessionConfig`. Encrypting at the route boundary means
+ * plaintext is in scope only inside the request handler — the D1
+ * column never sees secret plaintext, and a future serialization
+ * mistake leaks ciphertext at worst.
+ */
+export function encryptSecretEntries(entries: EnvVarEntryInput[]): EnvVarEntryStored[] {
+	return entries.map((entry) => {
+		if (entry.type === "plain") return entry;
+		// Already filtered by validateSessionConfig, but keep the type
+		// guard tight — a future caller bypassing validation would
+		// otherwise silently drop secret-slot here.
+		if (entry.type === "secret") {
+			const blob = encryptSecret(entry.value);
+			return {
+				name: entry.name,
+				type: "secret",
+				ciphertext: blob.ciphertext,
+				iv: blob.iv,
+				tag: blob.tag,
+			};
+		}
+		throw new Error(`encryptSecretEntries: unexpected variant ${(entry as { type: string }).type}`);
+	});
+}
+
+/**
+ * Decrypt a stored entry list into the `KEY=VALUE` plaintext array
+ * Docker's `Env` field wants. Used by `DockerManager.spawn` at the
+ * single point where plaintext has to be in memory.
+ *
+ * `decryptSecret` throws on tag mismatch (tampered ciphertext, wrong
+ * key after rotation, D1 corruption) — the throw must NOT be
+ * swallowed at the call site. Spawn fails loudly rather than starting
+ * a container with a missing or wrong-valued env var.
+ */
+export function decryptStoredEntries(entries: EnvVarEntryStored[]): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const entry of entries) {
+		if (entry.type === "plain") {
+			out[entry.name] = entry.value;
+		} else {
+			out[entry.name] = decryptSecret({
+				ciphertext: entry.ciphertext,
+				iv: entry.iv,
+				tag: entry.tag,
+			});
+		}
+	}
+	return out;
+}
+
+/**
+ * Redact stored entries for listing endpoints. Plain entries pass
+ * through; secret entries collapse to `{ name, type, isSet: true }`
+ * so neither plaintext nor ciphertext leaks via `GET /api/sessions/:id`
+ * or list. Belt-and-suspenders against a future serializer change
+ * forgetting to redact — the encryption already keeps plaintext out
+ * of the response, but `isSet` is the contract clients code against.
+ */
+export function redactStoredEntries(entries: EnvVarEntryStored[]): EnvVarEntryPublic[] {
+	return entries.map((entry) => {
+		if (entry.type === "plain") return entry;
+		return { name: entry.name, type: "secret", isSet: true };
+	});
+}
+
+/** Storage-shape blob of a stored secret entry, exported for type
+ *  parity with EncryptedSecret. */
+export type StoredSecretEntry = Extract<EnvVarEntryStored, { type: "secret" }>;
+// Local widening for tests that want to construct the EncryptedSecret
+// half of a stored entry without rebuilding the whole shape.
+export const _testOnly_storedFromEncrypted = (
+	name: string,
+	blob: EncryptedSecret,
+): StoredSecretEntry => ({
+	name,
+	type: "secret",
+	ciphertext: blob.ciphertext,
+	iv: blob.iv,
+	tag: blob.tag,
+});
 
 // ── D1 persistence ─────────────────────────────────────────────────────────
 
@@ -226,7 +419,7 @@ function rowToRecord(row: SessionConfigRow): SessionConfigRecord {
 		postStartCmd: row.post_start_cmd ?? undefined,
 		repos: parseJsonColumn<SessionConfig["repos"]>(row.session_id, "repos_json", row.repos_json),
 		ports: parseJsonColumn<SessionConfig["ports"]>(row.session_id, "ports_json", row.ports_json),
-		envVars: parseJsonColumn<SessionConfig["envVars"]>(
+		envVars: parseJsonColumn<EnvVarEntryStored[]>(
 			row.session_id,
 			"env_vars_json",
 			row.env_vars_json,
@@ -273,15 +466,30 @@ function parseD1Utc(raw: string): Date {
 }
 
 /**
- * Persist a validated config for `sessionId`. Idempotent on the primary
- * key — a second call with the same sessionId replaces the row, which
- * matches "config is bound at create time" since callers only ever
- * invoke this from the create path. PR 185b will gate `bootstrapped_at`
- * on a separate write path.
+ * Shape `persistSessionConfig` accepts. Most fields match `SessionConfig`
+ * directly; `envVars` is the post-encryption storage shape so the route
+ * is the only place plaintext lives. Callers MUST run `validateSessionConfig`
+ * + `encryptSecretEntries` first; this module's serializer trusts both.
+ */
+export type PersistableSessionConfig = Omit<SessionConfig, "envVars"> & {
+	envVars?: EnvVarEntryStored[];
+};
+
+/**
+ * Persist a validated + encrypted config for `sessionId`. Idempotent on
+ * the primary key — a second call with the same sessionId replaces the
+ * row, which matches "config is bound at create time" since callers
+ * only ever invoke this from the create path. PR 185b gates
+ * `bootstrapped_at` on a separate write path.
+ *
+ * `envVars` (if present) is already in storage shape — secret rows
+ * carry `ciphertext` + `iv` + `tag` instead of `value`. The route
+ * encrypts before calling here so plaintext never appears in the D1
+ * column.
  */
 export async function persistSessionConfig(
 	sessionId: string,
-	config: SessionConfig,
+	config: PersistableSessionConfig,
 ): Promise<void> {
 	await d1Query(
 		`INSERT INTO session_configs
@@ -348,6 +556,6 @@ export async function getSessionConfig(sessionId: string): Promise<SessionConfig
  * the client sends `config: {}` — it's a production guard, not a test
  * helper. Tests reuse it for the same shape check.
  */
-export function isEmptyConfig(config: SessionConfig): boolean {
+export function isEmptyConfig(config: SessionConfig | PersistableSessionConfig): boolean {
 	return Object.values(config).every((v) => v === undefined);
 }

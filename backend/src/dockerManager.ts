@@ -14,7 +14,11 @@ import { StringDecoder } from "node:string_decoder";
 import Dockerode from "dockerode";
 import { d1Query } from "./db.js";
 import { logger } from "./logger.js";
-import { getSessionConfig, type SessionConfigRecord } from "./sessionConfig.js";
+import {
+	decryptStoredEntries,
+	getSessionConfig,
+	type SessionConfigRecord,
+} from "./sessionConfig.js";
 import type { SessionManager } from "./sessionManager.js";
 
 const SESSION_IMAGE = process.env.SESSION_IMAGE ?? "shared-terminal-session";
@@ -181,7 +185,17 @@ export class DockerManager {
 		// inside the helper rather than failing the spawn; the alternative
 		// would gate every session creation on D1 health.
 		const config = await this.loadConfigForSpawn(sessionId);
-		const envArray = mergeEnvForSpawn(meta.envVars, config?.envVars);
+		// #186 — decrypt `secret`-typed entries before merge. Plaintext
+		// is in memory only here, between decrypt and the
+		// `createContainer` Env field. Tag-mismatch in `decryptSecret`
+		// throws (wrong key, tampered ciphertext) and we let it
+		// propagate — failing the spawn loudly is strictly better than
+		// starting a container with a missing env var.
+		const decryptedConfigEnv: Record<string, string> | undefined =
+			config?.envVars && config.envVars.length > 0
+				? decryptStoredEntries(config.envVars)
+				: undefined;
+		const envArray = mergeEnvForSpawn(meta.envVars, decryptedConfigEnv);
 
 		// Pre-create the bind-mount target so Docker doesn't auto-create it
 		// as root. See `ensureWorkspaceOwnership` for the full story and the
