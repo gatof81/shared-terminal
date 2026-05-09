@@ -451,15 +451,6 @@ export function buildRouter(
 				await persistSessionConfig(meta.sessionId, validatedConfig);
 			}
 			await docker.spawn(meta.sessionId);
-			// postCreate hook (#185): one-shot bootstrap that runs once
-			// per session. Synchronous wait here means the modal stays
-			// open until the hook exits; PR 185b2b will layer a streaming
-			// WS channel so the user sees output live instead of waiting
-			// blind on the HTTP request. Hard-fail semantics from #185:
-			// non-zero exit → kill the container, flip status to `failed`,
-			// return 500 with the captured output. The row stays so the
-			// user can read what the hook printed (and so a recreate
-			// doesn't collide with leftover state on the same name).
 			const updated = await sessions.get(meta.sessionId);
 			if (!updated) {
 				// Shouldn't happen: sessions.create above just inserted this row,

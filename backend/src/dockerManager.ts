@@ -820,6 +820,10 @@ export class DockerManager {
 			pending = off === pending.length ? Buffer.alloc(0) : pending.subarray(off);
 		});
 
+		// Resolve on whichever fires first: a typical Readable emits
+		// `end` then `close`, but Dockerode streams can emit `close`
+		// without `end` on a dropped daemon connection. Promise spec
+		// silently drops the second resolve.
 		await new Promise<void>((resolve, reject) => {
 			stream.on("end", () => resolve());
 			stream.on("close", () => resolve());
