@@ -212,26 +212,16 @@ export class DockerManager {
 			Image: SESSION_IMAGE,
 			name: meta.containerName,
 			Hostname: hostname,
-			// Env order is intentional: hardcoded entries first, then user
-			// envArray. Linux execve is last-duplicate-wins, so:
-			//   - SESSION_ID / SESSION_NAME — protected by the
-			//     envVarValidation denylist (#206), so they CANNOT appear
-			//     in envArray; the placement here is for tidiness, not
-			//     defence. Hooks introduced in #191 read SESSION_ID as the
-			//     authoritative session identity.
-			//   - TERM / COLORTERM — deliberately user-overridable (e.g.
-			//     `TERM=tmux-256color` for nested-tmux workflows). Putting
-			//     them before envArray IS the mechanism that lets a user
-			//     opt out of the defaults; reordering would silently break
-			//     that affordance, so don't move `...envArray` above the
-			//     hardcoded entries without a replacement design.
-			Env: [
-				`SESSION_ID=${sessionId}`,
-				`SESSION_NAME=${meta.name}`,
-				`TERM=xterm-256color`,
-				`COLORTERM=truecolor`,
-				...envArray,
-			],
+			// `buildContainerEnv` returns a deduplicated `KEY=VALUE[]` array
+			// so the precedence is unambiguous regardless of which reader
+			// resolves the var inside the container. Duplicates in
+			// Docker's `Env` are surprisingly hostile: glibc's `getenv(3)`
+			// is FIRST-wins (scans `environ` from index 0), bash's startup
+			// parser is LAST-wins (each `bind_variable` overwrites), and
+			// programs the user runs may use either. Emitting a single
+			// entry per name closes that ambiguity. See `buildContainerEnv`
+			// for the precedence rules.
+			Env: buildContainerEnv(sessionId, meta.name, envArray),
 			HostConfig: {
 				Binds: [
 					`${WORKSPACE_ROOT}/${sessionId}:/home/developer/workspace`,
@@ -1482,6 +1472,58 @@ export function mergeEnvForSpawn(
 		for (const [k, v] of Object.entries(configEnv)) merged[k] = v;
 	}
 	return Object.entries(merged).map(([k, v]) => `${k}=${v}`);
+}
+
+/**
+ * Build the deduplicated `Env` array Docker hands to the container.
+ *
+ * Precedence (highest → lowest), applied as a Map merge so each name
+ * appears exactly once in the result:
+ *
+ *   1. **SESSION_ID / SESSION_NAME** — backend infrastructure identity.
+ *      These cannot appear in `userEnv` because `validateEnvVars`
+ *      denylists them at ingest (#206). Set last so they overwrite any
+ *      pathological value that somehow slipped past the denylist (e.g.
+ *      via direct D1 write).
+ *   2. **userEnv** — the merged session+config user env. Beats the
+ *      defaults in (3).
+ *   3. **TERM / COLORTERM** — terminal driver hints. Deliberately
+ *      user-overridable (e.g. `TERM=tmux-256color` for nested-tmux
+ *      workflows), so they sit at the lowest precedence: applied first,
+ *      then user env can replace them.
+ *
+ * Why dedupe at all: passing duplicates through to Docker's `Env` is
+ * surprisingly hostile. glibc's `getenv(3)` returns the FIRST match;
+ * bash's startup parser uses the LAST (each `bind_variable_value`
+ * overwrites); programs the user runs inside the container may call
+ * either. A single entry per name closes that ambiguity entirely.
+ *
+ * Exported for the test suite.
+ */
+export function buildContainerEnv(
+	sessionId: string,
+	sessionName: string,
+	userEnv: string[],
+): string[] {
+	const out = new Map<string, string>();
+	// (3) Lowest-precedence defaults first.
+	out.set("TERM", "xterm-256color");
+	out.set("COLORTERM", "truecolor");
+	// (2) User entries override the defaults above. `userEnv` is the
+	// already-merged session+config array — itself dedup'd by
+	// `mergeEnvForSpawn`. Defensive guard: skip malformed entries
+	// missing `=` rather than crash; the validators upstream already
+	// reject these shapes, but a future caller bypassing them would
+	// otherwise corrupt the map.
+	for (const entry of userEnv) {
+		const eq = entry.indexOf("=");
+		if (eq <= 0) continue;
+		out.set(entry.slice(0, eq), entry.slice(eq + 1));
+	}
+	// (1) Highest-precedence infra identity. Overwrites anything else.
+	out.set("SESSION_ID", sessionId);
+	out.set("SESSION_NAME", sessionName);
+	return Array.from(out, ([k, v]) => `${k}=${v}`);
 }
 
 // Sanitise an uploaded file's original name into a safe basename that's

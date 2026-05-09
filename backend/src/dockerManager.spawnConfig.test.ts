@@ -38,7 +38,7 @@ vi.mock("node:fs", () => ({
 	},
 }));
 
-import { DockerManager, mergeEnvForSpawn } from "./dockerManager.js";
+import { buildContainerEnv, DockerManager, mergeEnvForSpawn } from "./dockerManager.js";
 import type { SessionManager } from "./sessionManager.js";
 
 // ── Fakes ────────────────────────────────────────────────────────────────
@@ -122,6 +122,80 @@ describe("mergeEnvForSpawn", () => {
 		expect(mergeEnvForSpawn({ DUP: "legacy" }, { DUP: "from-config" })).toEqual([
 			"DUP=from-config",
 		]);
+	});
+});
+
+// ── buildContainerEnv ────────────────────────────────────────────────────
+
+describe("buildContainerEnv", () => {
+	function toMap(env: string[]): Record<string, string> {
+		const m: Record<string, string> = {};
+		for (const e of env) {
+			const eq = e.indexOf("=");
+			m[e.slice(0, eq)] = e.slice(eq + 1);
+		}
+		return m;
+	}
+	function countOccurrences(env: string[], name: string): number {
+		return env.filter((e) => e.startsWith(`${name}=`)).length;
+	}
+
+	it("emits SESSION_ID / SESSION_NAME / TERM / COLORTERM when no user env supplied", () => {
+		const env = buildContainerEnv("sess-x", "my-session", []);
+		const m = toMap(env);
+		expect(m.SESSION_ID).toBe("sess-x");
+		expect(m.SESSION_NAME).toBe("my-session");
+		expect(m.TERM).toBe("xterm-256color");
+		expect(m.COLORTERM).toBe("truecolor");
+	});
+
+	// Dedupe is the whole point of the helper — duplicates make the
+	// effective value depend on which reader resolves it (getenv first-
+	// wins vs bash startup last-wins). Asserting one entry per name
+	// regardless of input shape locks the invariant.
+	it("emits exactly one entry per name, even when defaults overlap with user env", () => {
+		const env = buildContainerEnv("sess-x", "my-session", ["TERM=tmux-256color", "FOO=bar"]);
+		expect(countOccurrences(env, "TERM")).toBe(1);
+		expect(countOccurrences(env, "COLORTERM")).toBe(1);
+		expect(countOccurrences(env, "SESSION_ID")).toBe(1);
+		expect(countOccurrences(env, "SESSION_NAME")).toBe(1);
+		expect(countOccurrences(env, "FOO")).toBe(1);
+	});
+
+	// Round-4 fix: user TERM/COLORTERM must be honoured. Previous
+	// ordering (hardcoded first, user spread last) made TERM hard-
+	// defaulted under getenv first-wins semantics.
+	it("user-supplied TERM / COLORTERM beat the hardcoded defaults", () => {
+		const env = buildContainerEnv("sess-x", "my-session", [
+			"TERM=tmux-256color",
+			"COLORTERM=24bit",
+		]);
+		const m = toMap(env);
+		expect(m.TERM).toBe("tmux-256color");
+		expect(m.COLORTERM).toBe("24bit");
+	});
+
+	// Defence-in-depth: SESSION_ID / SESSION_NAME come after user env in
+	// the precedence chain. The denylist already prevents these names
+	// from arriving in userEnv, but if a future caller bypasses validation
+	// (e.g. a direct D1 write) the infra values still win.
+	it("SESSION_ID / SESSION_NAME are immutable from user env", () => {
+		const env = buildContainerEnv("sess-x", "my-session", [
+			"SESSION_ID=spoofed",
+			"SESSION_NAME=other",
+		]);
+		const m = toMap(env);
+		expect(m.SESSION_ID).toBe("sess-x");
+		expect(m.SESSION_NAME).toBe("my-session");
+	});
+
+	it("skips malformed env entries missing '='", () => {
+		// Validators upstream already reject these, but a future regression
+		// shouldn't corrupt the Map iteration.
+		const env = buildContainerEnv("sess-x", "my-session", ["BAREWORD", "=NOKEY", "FOO=bar"]);
+		const m = toMap(env);
+		expect(m.FOO).toBe("bar");
+		expect(countOccurrences(env, "BAREWORD")).toBe(0);
 	});
 });
 
