@@ -104,6 +104,19 @@ const bootstrapBroadcaster = new BootstrapBroadcaster();
 const PORT_PROXY_BASE_DOMAIN = validatePortProxyBaseDomain(process.env.PORT_PROXY_BASE_DOMAIN);
 if (PORT_PROXY_BASE_DOMAIN) {
 	logger.info(`[server] port dispatcher enabled at *.${PORT_PROXY_BASE_DOMAIN}`);
+	// PR #223 round 6 SHOULD-FIX. With port exposure on, the JWT
+	// cookie must traverse from the API's hostname to the per-
+	// session subdomains; without `COOKIE_DOMAIN` set to a shared
+	// parent, RFC 6265 §5.3 host-only scoping makes private-port
+	// auth structurally non-functional. Warn (not refuse) because
+	// some deployments may share a hostname with the dispatcher
+	// (the only topology the cookie's default scoping covers) and
+	// don't need this knob.
+	if (!process.env.COOKIE_DOMAIN || process.env.COOKIE_DOMAIN.trim() === "") {
+		logger.warn(
+			"[server] PORT_PROXY_BASE_DOMAIN is set but COOKIE_DOMAIN is unset — private-port auth will fail in any deployment where the API and dispatcher live on different hostnames (host-only cookie won't reach the dispatcher's subdomains). See .env.example.",
+		);
+	}
 } else {
 	logger.info(
 		"[server] PORT_PROXY_BASE_DOMAIN unset — port-exposure dispatcher disabled (set to *.<base> to enable)",
@@ -264,12 +277,17 @@ server.on("upgrade", (req, socket, head) => {
 		// `socket` is typed as `Duplex` in the upgrade event but at
 		// runtime is always a `net.Socket` (or TLSSocket, which
 		// extends it). `remoteAddress` lives on net.Socket; cast
-		// once to read it. `resolveClientIp` mirrors Express's `req.ip`
-		// resolution under `trust proxy` so behind a Cloudflare Tunnel
-		// we key on the original client (X-Forwarded-For[0]) instead
-		// of the Tunnel's shared egress IP — without this the per-IP
-		// budget collapses to a single shared bucket and one user's
-		// reconnect storm locks everyone out. PR #223 round 5
+		// once to read it. `resolveClientIp` mirrors proxy-addr's
+		// numeric-trust algorithm: peel `trustProxyValue` entries
+		// from the right of `[...XFF, remoteAddress]` so behind a
+		// Cloudflare Tunnel we key on the original client appended
+		// by the trusted proxy, NOT the Tunnel's shared egress IP
+		// (which would collapse every user into one bucket) and NOT
+		// the leftmost XFF entry (which would let an attacker pin
+		// the rate-limit bucket on a victim's IP). The algorithm
+		// matches what Express's req.ip computes under our
+		// `app.set('trust proxy', N)` setting, so the WS limiter
+		// and the HTTP `dispatcherLimiter` agree. PR #223 round 6
 		// SHOULD-FIX.
 		const remote = (socket as { remoteAddress?: string }).remoteAddress;
 		const clientIp = resolveClientIp(req.headers["x-forwarded-for"], remote, trustProxyValue);

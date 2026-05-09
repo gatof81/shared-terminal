@@ -120,23 +120,52 @@ describe("createWsUpgradeRateLimiter", () => {
 // ── resolveClientIp ──────────────────────────────────────────────────────
 
 describe("resolveClientIp", () => {
-	it("uses remoteAddress when trust proxy is unset", () => {
+	it("uses remoteAddress when trust proxy is unset / 0 / non-numeric", () => {
+		// Per PR #223 round 6 SHOULD-FIX: only positive-numeric trust
+		// is acted on. Anything else (boolean true was already
+		// rejected by parseTrustProxy; strings would need proxy-addr's
+		// full IP/CIDR matcher) falls back to remoteAddress so we
+		// don't accidentally take the leftmost XFF.
 		expect(resolveClientIp("203.0.113.5", "1.2.3.4", undefined)).toBe("1.2.3.4");
-	});
-
-	it("uses remoteAddress when trust proxy is 0 / false / '0'", () => {
 		expect(resolveClientIp("203.0.113.5", "1.2.3.4", 0)).toBe("1.2.3.4");
 		expect(resolveClientIp("203.0.113.5", "1.2.3.4", false)).toBe("1.2.3.4");
-		expect(resolveClientIp("203.0.113.5", "1.2.3.4", "0")).toBe("1.2.3.4");
+		expect(resolveClientIp("203.0.113.5", "1.2.3.4", true)).toBe("1.2.3.4");
+		expect(resolveClientIp("203.0.113.5", "1.2.3.4", "loopback")).toBe("1.2.3.4");
 	});
 
-	it("uses XFF[0] when trust proxy is enabled (Cloudflare Tunnel shape)", () => {
-		expect(resolveClientIp("203.0.113.5", "1.2.3.4", 1)).toBe("203.0.113.5");
-		expect(resolveClientIp("203.0.113.5, 198.51.100.7", "1.2.3.4", 1)).toBe("203.0.113.5");
+	it("peels 1 hop from the right (Cloudflare Tunnel single-hop)", () => {
+		// xff=[203.0.113.5], remote=10.0.0.1, trust=1
+		// ips=[203.0.113.5, 10.0.0.1]; peel 1 → idx=0 → 203.0.113.5
+		expect(resolveClientIp("203.0.113.5", "10.0.0.1", 1)).toBe("203.0.113.5");
 	});
 
-	it("trims whitespace from the parsed XFF entry", () => {
-		expect(resolveClientIp("  203.0.113.5  , 198.51.100.7", "1.2.3.4", 1)).toBe("203.0.113.5");
+	it("peels 1 hop from the right when an attacker injects XFF[0]", () => {
+		// The bug Express's "trust proxy: true" exhibits — leftmost-
+		// XFF logic — would return "1.2.3.4 (forged)". Numeric peel
+		// returns the real client appended by the trusted proxy.
+		// xff=[forged, real], remote=tunnelEgress, trust=1
+		// ips=[forged, real, tunnelEgress]; peel 1 → idx=1 → real
+		expect(resolveClientIp("1.2.3.4, 203.0.113.5", "10.0.0.1", 1)).toBe("203.0.113.5");
+	});
+
+	it("peels N hops correctly when trust > 1", () => {
+		// trust=2 with [forged, victim, real, remote]
+		// idx = 4 - 2 - 1 = 1 → "victim"
+		expect(resolveClientIp("forged, victim, real", "remote", 2)).toBe("victim");
+		// trust=3 with [forged, victim, real, remote]
+		// idx = 4 - 3 - 1 = 0 → "forged" (we've trusted everything to
+		// the right; original-client position is the leftmost)
+		expect(resolveClientIp("forged, victim, real", "remote", 3)).toBe("forged");
+	});
+
+	it("returns the leftmost when trustProxy exceeds chain length", () => {
+		// xff=[a], remote=b, trust=5
+		// ips=[a, b], idx = 2 - 5 - 1 = -4 → fall back to ips[0] = a
+		expect(resolveClientIp("a", "b", 5)).toBe("a");
+	});
+
+	it("trims whitespace from XFF entries", () => {
+		expect(resolveClientIp("  203.0.113.5  , 198.51.100.7", "10.0.0.1", 1)).toBe("198.51.100.7");
 	});
 
 	it("falls back to remoteAddress when XFF is empty / whitespace", () => {
@@ -145,8 +174,11 @@ describe("resolveClientIp", () => {
 		expect(resolveClientIp(undefined, "1.2.3.4", 1)).toBe("1.2.3.4");
 	});
 
-	it("handles array-shaped XFF (rare but Node sometimes emits one)", () => {
-		expect(resolveClientIp(["203.0.113.5", "ignored"], "1.2.3.4", 1)).toBe("203.0.113.5");
+	it("joins array-shaped XFF before peeling", () => {
+		// Node sometimes hands an array for repeated headers. The
+		// peel algorithm wants a single comma-joined chain so the
+		// rightmost trusted-proxy hop always lines up the same way.
+		expect(resolveClientIp(["forged", "real"], "remote", 1)).toBe("real");
 	});
 
 	it("returns undefined when both XFF and remoteAddress are absent", () => {

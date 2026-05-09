@@ -52,23 +52,36 @@ export interface WsUpgradeRateLimiter {
 }
 
 /**
- * Resolve the client IP for upgrade-event rate-limiting in a way that
- * mirrors Express's `req.ip` resolution under our `trust proxy` setting.
- * Without this, the limiter keys on `socket.remoteAddress`, which behind
- * a Cloudflare Tunnel is the Tunnel's egress IP — shared by every user,
- * so the per-IP budget collapses to a single shared bucket and a small
- * burst of legitimate reconnects locks everyone out. PR #223 round 5
- * SHOULD-FIX.
+ * Resolve the client IP for upgrade-event rate-limiting using the same
+ * peel-from-right algorithm proxy-addr (Express) uses for `req.ip`.
  *
- * Logic:
- *   - `trust proxy` enabled (number > 0 or non-`false` truthy value)
- *     → take the leftmost X-Forwarded-For value; that's the original
- *     client when exactly one trusted proxy (the Tunnel) sits in front.
- *     Multi-hop infrastructure (CF → corporate proxy → backend) would
- *     need a richer proxy-addr-style resolution, but the documented
- *     deployment is one hop and that's what this matches.
- *   - `trust proxy` unset / 0 / false → use `socket.remoteAddress`
- *     (direct connection or local dev).
+ * `parseTrustProxy` already refuses `TRUST_PROXY=true` precisely
+ * because Express in that mode takes the *leftmost* X-Forwarded-For
+ * entry (attacker-controlled), defeating per-IP rate limits. The
+ * earlier shape of this helper accidentally replicated that rejected
+ * pattern — it took XFF[0] for any truthy trustProxy value. PR #223
+ * round 6 SHOULD-FIX hardened it: only positive-numeric trust is
+ * acted on, and the algorithm now mirrors proxy-addr — peel
+ * `trustProxy` entries from the right of `[...XFF, remoteAddress]`
+ * and return the first non-trusted entry (the `(trustProxy+1)`th
+ * from the right).
+ *
+ * Examples (single-hop Cloudflare Tunnel, `TRUST_PROXY=1`):
+ *
+ *     xff = "203.0.113.5"          remote = "10.0.0.1" (Tunnel egress)
+ *     ips = ["203.0.113.5", "10.0.0.1"]
+ *     idx = 2 - 1 - 1 = 0          → "203.0.113.5" ✓ (real client)
+ *
+ * Multi-hop attacker injection (still `TRUST_PROXY=1`):
+ *
+ *     xff = "1.2.3.4 (forged), 203.0.113.5 (real)"   remote = Tunnel
+ *     ips = ["1.2.3.4", "203.0.113.5", "10.0.0.1"]
+ *     idx = 3 - 1 - 1 = 1          → "203.0.113.5" ✓ (NOT the forged head)
+ *
+ * For boolean / string / undefined `trustProxy` the helper falls back
+ * to `remoteAddress` rather than try to parse XFF — those cases need
+ * proxy-addr's full IP/CIDR matcher (`"loopback"`, `"linklocal"`,
+ * comma-separated CIDRs), which is out of scope here.
  *
  * `undefined` return falls open in `attempt()` — same as a missing
  * remoteAddress; better to occasionally over-allow than to drop a
@@ -79,16 +92,22 @@ export function resolveClientIp(
 	remoteAddress: string | undefined,
 	trustProxy: boolean | number | string | undefined,
 ): string | undefined {
-	const proxyTrusted =
-		trustProxy !== undefined && trustProxy !== false && trustProxy !== 0 && trustProxy !== "0";
-	if (proxyTrusted) {
-		const xff = Array.isArray(xForwardedFor) ? xForwardedFor[0] : xForwardedFor;
-		if (typeof xff === "string" && xff.length > 0) {
-			const first = xff.split(",")[0]!.trim();
-			if (first.length > 0) return first;
-		}
+	if (typeof trustProxy !== "number" || trustProxy <= 0) {
+		return remoteAddress;
 	}
-	return remoteAddress;
+	const xff = Array.isArray(xForwardedFor) ? xForwardedFor.join(",") : (xForwardedFor ?? "");
+	const parts = xff
+		.split(",")
+		.map((s) => s.trim())
+		.filter((s) => s.length > 0);
+	const ips: string[] = [...parts];
+	if (remoteAddress) ips.push(remoteAddress);
+	if (ips.length === 0) return undefined;
+	const idx = ips.length - trustProxy - 1;
+	// idx < 0 means we trust more hops than the chain has — every
+	// entry is "trusted", so take the leftmost (the original client
+	// per Express semantics).
+	return idx < 0 ? ips[0] : ips[idx];
 }
 
 // Hard cap on bucket count. With 60-byte rows this caps heap at
