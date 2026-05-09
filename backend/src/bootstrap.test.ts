@@ -9,6 +9,25 @@ const dbStubs = vi.hoisted(() => ({
 }));
 vi.mock("./db.js", () => dbStubs);
 
+// `runAsyncBootstrap` calls `getSessionConfig` at the top to load the
+// repo + auth blob (#188 PR 188c). These tests target the orchestrator
+// behaviour, not the config rehydration, so mock it to return null by
+// default — that's the "no repo configured" branch, which is what
+// every existing test was implicitly relying on.
+const sessionConfigStubs = vi.hoisted(() => ({
+	getSessionConfig: vi.fn(async () => null),
+}));
+vi.mock("./sessionConfig.js", () => sessionConfigStubs);
+
+// `runCloneRepo` is the new step before postCreate. The default mock
+// returns success+exit 0; tests that target the clone step override
+// this per-case. Existing tests (postCreate-focused) inherit the
+// success default so the clone step is effectively a no-op for them.
+const cloneStubs = vi.hoisted(() => ({
+	runCloneRepo: vi.fn(async () => ({ exitCode: 0 })),
+}));
+vi.mock("./bootstrap/cloneRepo.js", () => cloneStubs);
+
 import {
 	BootstrapBroadcaster,
 	type BootstrapMessage,
@@ -20,6 +39,10 @@ import type { SessionManager } from "./sessionManager.js";
 
 beforeEach(() => {
 	dbStubs.d1Query.mockReset();
+	sessionConfigStubs.getSessionConfig.mockReset();
+	sessionConfigStubs.getSessionConfig.mockImplementation(async () => null);
+	cloneStubs.runCloneRepo.mockReset();
+	cloneStubs.runCloneRepo.mockImplementation(async () => ({ exitCode: 0 }));
 });
 
 describe("markBootstrapped", () => {
@@ -287,6 +310,146 @@ describe("runAsyncBootstrap", () => {
 		);
 		await settle();
 
+		expect(spies.runPostStart).toHaveBeenCalledWith("sess-1", "npm run dev");
+		expect(final).toEqual([{ type: "done", success: true }]);
+	});
+
+	// ── #188 PR 188c — clone step orchestration ─────────────────────────────
+
+	// Step ordering invariant. The runner must clone BEFORE postCreate so
+	// the user's hook can `cd` into the cloned repo or run `npm install`
+	// inside it. A swap would break the documented contract.
+	it("runs clone BEFORE postCreate when both are configured", async () => {
+		const { sessions, docker, broadcaster, spies } = makeFakes();
+		const order: string[] = [];
+		// Stub a config row so the clone runner is invoked. Shape
+		// matches SessionConfigRecord just enough — the runCloneRepo
+		// mock doesn't read it.
+		sessionConfigStubs.getSessionConfig.mockResolvedValueOnce({
+			sessionId: "sess-1",
+			repo: { url: "https://example.com/r", auth: "none" },
+			bootstrappedAt: null,
+		} as never);
+		cloneStubs.runCloneRepo.mockImplementation(async () => {
+			order.push("clone");
+			return { exitCode: 0 };
+		});
+		spies.runPostCreate.mockImplementation(async () => {
+			order.push("postCreate");
+			return { exitCode: 0 };
+		});
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ postCreateCmd: "npm install", hasRepo: true },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		expect(order).toEqual(["clone", "postCreate"]);
+	});
+
+	// PR #214 round 2 NIT: `hasRepo: false` (or omitted) gates the
+	// `getSessionConfig` D1 fetch. The pre-188c steady-state is
+	// postCreate-only; that path must not pay for a repo D1 round-trip
+	// every session create.
+	it("hasRepo=false skips the getSessionConfig D1 fetch (no extra round-trip)", async () => {
+		const { sessions, docker, broadcaster, spies } = makeFakes();
+		spies.runPostCreate.mockImplementation(async () => ({ exitCode: 0 }));
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ postCreateCmd: "npm install" /* hasRepo omitted = false */ },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		expect(sessionConfigStubs.getSessionConfig).not.toHaveBeenCalled();
+		expect(cloneStubs.runCloneRepo).not.toHaveBeenCalled();
+		expect(spies.runPostCreate).toHaveBeenCalledWith("sess-1", "npm install", expect.any(Function));
+	});
+
+	// A non-zero clone exit must hard-fail the session via the SAME
+	// status-flip-before-kill path that postCreate uses. Without this,
+	// a failed clone would leave a dangling container the reconcile
+	// loop would silently promote to stopped.
+	it("fail path: clone non-zero exit flips status, kills, broadcasts fail (postCreate not run)", async () => {
+		const { sessions, docker, broadcaster, final, spies } = makeFakes();
+		const order: string[] = [];
+		spies.updateStatus.mockImplementation(async () => {
+			order.push("updateStatus");
+		});
+		spies.kill.mockImplementation(async () => {
+			order.push("kill");
+		});
+		sessionConfigStubs.getSessionConfig.mockResolvedValueOnce({
+			sessionId: "sess-1",
+			repo: { url: "https://example.com/r", auth: "none" },
+			bootstrappedAt: null,
+		} as never);
+		cloneStubs.runCloneRepo.mockImplementation(async () => ({ exitCode: 128 }));
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ postCreateCmd: "npm install", hasRepo: true },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		expect(spies.updateStatus).toHaveBeenCalledWith("sess-1", "failed");
+		expect(spies.kill).toHaveBeenCalledWith("sess-1");
+		expect(order).toEqual(["updateStatus", "kill"]);
+		expect(spies.runPostCreate).not.toHaveBeenCalled();
+		expect(final).toEqual([{ type: "fail", exitCode: 128 }]);
+	});
+
+	it("throw path: runCloneRepo throws → flip + kill + broadcast fail with error", async () => {
+		const { sessions, docker, broadcaster, final, spies } = makeFakes();
+		sessionConfigStubs.getSessionConfig.mockResolvedValueOnce({
+			sessionId: "sess-1",
+			repo: { url: "https://example.com/r", auth: "none" },
+			bootstrappedAt: null,
+		} as never);
+		cloneStubs.runCloneRepo.mockRejectedValueOnce(new Error("git not found"));
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ postCreateCmd: "npm install", hasRepo: true },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		expect(spies.updateStatus).toHaveBeenCalledWith("sess-1", "failed");
+		expect(spies.kill).toHaveBeenCalledWith("sess-1");
+		expect(spies.runPostCreate).not.toHaveBeenCalled();
+		expect(final).toHaveLength(1);
+		expect(final[0]).toMatchObject({ type: "fail", exitCode: -1 });
+	});
+
+	// Repo-only sessions (clone configured, no postCreate) — bootstrap
+	// runs the clone, marks bootstrapped, broadcasts done.
+	it("repo-only path: no postCreateCmd → clone runs, gate marked, postStart fires, broadcast done", async () => {
+		const { sessions, docker, broadcaster, final, spies } = makeFakes();
+		sessionConfigStubs.getSessionConfig.mockResolvedValueOnce({
+			sessionId: "sess-1",
+			repo: { url: "https://example.com/r", auth: "none" },
+			bootstrappedAt: null,
+		} as never);
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [],
+			success: true,
+			meta: { changes: 1, duration: 0, last_row_id: 0 },
+		});
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ postStartCmd: "npm run dev", hasRepo: true },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		expect(cloneStubs.runCloneRepo).toHaveBeenCalled();
+		expect(spies.runPostCreate).not.toHaveBeenCalled();
 		expect(spies.runPostStart).toHaveBeenCalledWith("sess-1", "npm run dev");
 		expect(final).toEqual([{ type: "done", success: true }]);
 	});

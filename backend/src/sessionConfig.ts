@@ -589,6 +589,21 @@ export function validateSessionConfig(raw: unknown): SessionConfig | undefined {
 			);
 		}
 	}
+	// #188 PR 188c — schema accepts auth ∈ {"none","pat","ssh"} (188b
+	// shipped the wire shape) but the clone runner only implements
+	// "none" until 188d wires PAT and SSH. Without this guard the route
+	// would 201-return + spawn the container, then the bootstrap runner
+	// would throw `CloneAuthNotImplementedError` and broadcast a
+	// dev-facing failure message to the user's modal. Reject at the
+	// route boundary instead so the user sees a clean 400 with an
+	// actionable message and we don't burn a quota slot on a session
+	// that's guaranteed to fail. 188d removes this guard.
+	if (result.data.repo && result.data.repo.auth !== "none") {
+		throw new SessionConfigValidationError(
+			"config.repo.auth",
+			"config.repo.auth: only 'none' (anonymous HTTPS) is supported in this version; PAT and SSH support is in flight",
+		);
+	}
 	return result.data;
 }
 
