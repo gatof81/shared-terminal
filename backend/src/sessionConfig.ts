@@ -38,14 +38,19 @@ const MAX_HOOK_LEN = 8 * 1024;
 //     unit) to keep the wire shape integer-only and avoid the float-
 //     precision foot-gun JSON Number has at the high end.
 //   - Memory: 256 MiB → 16 GiB.
-//   - Idle TTL: 60 s → 24 h, or null (= never auto-stop).
+//   - Idle TTL: 60 s → 24 h. OMIT the field (undefined) to disable
+//     auto-stop; `null` is NOT accepted (the schema is `.optional()`,
+//     not `.nullable()` — sending `null` returns 400).
 //
 // These are HARDCODED for v1; #200 introduces operator overrides via
-// env. The hardcoded values match `dockerManager.ts`'s
-// `DEFAULT_NANO_CPUS` / `DEFAULT_MEMORY_BYTES` defaults at the lower
-// bound so a session created without explicit caps falls back to a
-// value that's still a legal "user-supplied" entry — keeps the
-// schema and the spawn defaults coherent.
+// env. `dockerManager.ts`'s `DEFAULT_NANO_CPUS` (2 cores) and
+// `DEFAULT_MEMORY_BYTES` (2 GiB) both fall comfortably INSIDE these
+// bands — a session created without explicit caps spawns with a
+// resource allocation that's still a legal "user-supplied" entry,
+// keeping the schema and the spawn defaults coherent. (The defaults
+// are not AT the lower bounds — the floor of 0.25 cores / 256 MiB is
+// 8× below them; #200 should not anchor operator overrides to the
+// defaults.)
 const CPU_NANO_MIN = 250_000_000; // 0.25 cores
 const CPU_NANO_MAX = 8_000_000_000; // 8 cores
 const MEM_BYTES_MIN = 256 * 1024 * 1024; // 256 MiB
