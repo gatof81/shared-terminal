@@ -17,6 +17,7 @@ import {
 	createTab,
 	deleteSession,
 	deleteTab,
+	type EnvVarEntryInput,
 	type Invite,
 	InviteRequiredError,
 	isAdmin,
@@ -37,6 +38,7 @@ import {
 	TabNotFoundError,
 	uploadSessionFiles,
 } from "./api.js";
+import { parseDotEnv } from "./envParser.js";
 import { openTerminalSession, type SessionStatus, type TerminalSession } from "./terminal.js";
 
 // ── DOM refs ────────────────────────────────────────────────────────────────
@@ -1055,11 +1057,6 @@ const SESSION_TAB_PLACEHOLDERS: Record<string, { title: string; body: string; is
 			body: "Public or private (PAT / SSH), pick a branch or ref, optionally replace the workspace.",
 			issueUrl: "https://github.com/gatof81/shared-terminal/issues/188",
 		},
-		env: {
-			title: "Environment variables and secrets",
-			body: "Plain values are stored in cleartext; secrets are AES-GCM-encrypted at rest and never echoed by listing endpoints.",
-			issueUrl: "https://github.com/gatof81/shared-terminal/issues/186",
-		},
 		ports: {
 			title: "Expose ports to the outside",
 			body: "Per-session subdomains, dynamic host ports, auth-gated by default (independent of session ownership).",
@@ -1120,6 +1117,7 @@ function openNewSessionModal(opener: HTMLElement) {
 	newSessionInput.value = "";
 	newSessionSubmitBtn.disabled = false;
 	clearBootstrapError();
+	resetEnvTab();
 	newSessionModal.classList.add("open");
 	newSessionModal.setAttribute("aria-hidden", "false");
 	// Defer focus to the next paint so the input is reliably focusable
@@ -1232,6 +1230,225 @@ newSessionModal.addEventListener("click", (e) => {
 	if (tab?.dataset.sessionTab) setActiveSessionTab(tab.dataset.sessionTab);
 });
 
+// ── Env tab (#186 / PR 186c) ────────────────────────────────────────────────
+//
+// State + render + wiring for the typed env-var Env tab. Each row
+// holds `{ name, value, type }`; the type cell is a toggle that flips
+// between plain and secret. Secret rows mask the value input
+// (`type="password"`) so the value isn't shoulder-surfable; the
+// underlying string still flows out via the form's submit handler.
+//
+// Invariant: the in-memory `envRows` is the source of truth. We
+// re-render rows from the array on every mutation rather than mutating
+// the DOM in place — keeps the table mirror of state simple and
+// avoids drift between input values and the array.
+
+interface EnvRow {
+	id: string; // stable per-row key for the DOM (not sent to the server)
+	name: string;
+	value: string;
+	type: "plain" | "secret";
+}
+
+let envRows: EnvRow[] = [];
+
+const envTableBody = document.getElementById("env-table-body") as HTMLTableSectionElement;
+const envAddRowBtn = document.getElementById("env-add-row") as HTMLButtonElement;
+const envPasteToggle = document.getElementById("env-paste-toggle") as HTMLButtonElement;
+const envPastePanel = document.getElementById("env-paste-panel") as HTMLDivElement;
+const envPasteTextarea = document.getElementById("env-paste-textarea") as HTMLTextAreaElement;
+const envPasteCancel = document.getElementById("env-paste-cancel") as HTMLButtonElement;
+const envPasteImport = document.getElementById("env-paste-import") as HTMLButtonElement;
+const envPasteStatus = document.getElementById("env-paste-status") as HTMLSpanElement;
+
+function newEnvRowId(): string {
+	// Random per-row id stays stable across re-renders so input focus
+	// can be preserved (we read DOM input values BEFORE re-rendering;
+	// the id is the table row's `data-row-id`).
+	return `env-row-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function renderEnvRows() {
+	envTableBody.textContent = "";
+	for (const row of envRows) {
+		const tr = document.createElement("tr");
+		tr.className = "env-row";
+		tr.dataset.rowId = row.id;
+
+		const nameCell = document.createElement("td");
+		const nameInput = document.createElement("input");
+		nameInput.type = "text";
+		nameInput.value = row.name;
+		nameInput.placeholder = "FOO";
+		nameInput.spellcheck = false;
+		nameInput.autocapitalize = "characters";
+		nameInput.className = "env-input env-input-name";
+		nameInput.dataset.field = "name";
+		nameCell.appendChild(nameInput);
+		tr.appendChild(nameCell);
+
+		const valueCell = document.createElement("td");
+		const valueInput = document.createElement("input");
+		// Secret rows mask the value visually — the user-typed string
+		// still flows through `.value` on submit; password masking is
+		// purely UX (shoulder-surfing defence).
+		valueInput.type = row.type === "secret" ? "password" : "text";
+		valueInput.value = row.value;
+		valueInput.placeholder = row.type === "secret" ? "••••••••" : "value";
+		valueInput.spellcheck = false;
+		valueInput.autocomplete = "off";
+		valueInput.className = "env-input env-input-value";
+		valueInput.dataset.field = "value";
+		valueCell.appendChild(valueInput);
+		tr.appendChild(valueCell);
+
+		const typeCell = document.createElement("td");
+		const typeToggle = document.createElement("button");
+		typeToggle.type = "button";
+		typeToggle.className = `env-type-toggle env-type-${row.type}`;
+		typeToggle.textContent = row.type === "secret" ? "secret" : "plain";
+		typeToggle.title =
+			row.type === "secret"
+				? "Click to mark this entry plain (value visible)"
+				: "Click to mark this entry secret (value masked + encrypted server-side)";
+		typeToggle.dataset.action = "toggle-type";
+		typeCell.appendChild(typeToggle);
+		tr.appendChild(typeCell);
+
+		const removeCell = document.createElement("td");
+		const removeBtn = document.createElement("button");
+		removeBtn.type = "button";
+		removeBtn.className = "env-row-remove";
+		removeBtn.textContent = "✕";
+		removeBtn.title = "Remove this entry";
+		removeBtn.setAttribute("aria-label", `Remove ${row.name || "entry"}`);
+		removeBtn.dataset.action = "remove";
+		removeCell.appendChild(removeBtn);
+		tr.appendChild(removeCell);
+
+		envTableBody.appendChild(tr);
+	}
+}
+
+/**
+ * Pull the latest input values out of the DOM into `envRows` before
+ * any operation that re-renders. Without this, a user typing into a
+ * row and then clicking Add / toggle / Delete on a different row
+ * would lose their pending edit when render wipes the table.
+ */
+function syncEnvRowsFromDom() {
+	const trs = envTableBody.querySelectorAll<HTMLTableRowElement>(".env-row");
+	for (const tr of trs) {
+		const id = tr.dataset.rowId ?? "";
+		const row = envRows.find((r) => r.id === id);
+		if (!row) continue;
+		const nameInput = tr.querySelector<HTMLInputElement>('[data-field="name"]');
+		const valueInput = tr.querySelector<HTMLInputElement>('[data-field="value"]');
+		if (nameInput) row.name = nameInput.value;
+		if (valueInput) row.value = valueInput.value;
+	}
+}
+
+function resetEnvTab() {
+	envRows = [];
+	renderEnvRows();
+	envPastePanel.hidden = true;
+	envPasteToggle.setAttribute("aria-expanded", "false");
+	envPasteTextarea.value = "";
+	envPasteStatus.textContent = "";
+}
+
+envAddRowBtn.addEventListener("click", () => {
+	syncEnvRowsFromDom();
+	envRows.push({ id: newEnvRowId(), name: "", value: "", type: "plain" });
+	renderEnvRows();
+	// Focus the new row's name input so the user can type immediately.
+	const last =
+		envTableBody.lastElementChild?.querySelector<HTMLInputElement>('[data-field="name"]');
+	last?.focus();
+});
+
+envTableBody.addEventListener("click", (e) => {
+	const target = e.target as HTMLElement;
+	const action = target.dataset.action;
+	if (!action) return;
+	const tr = target.closest<HTMLTableRowElement>(".env-row");
+	const id = tr?.dataset.rowId ?? "";
+	syncEnvRowsFromDom();
+	if (action === "toggle-type") {
+		const row = envRows.find((r) => r.id === id);
+		if (row) row.type = row.type === "secret" ? "plain" : "secret";
+		renderEnvRows();
+	} else if (action === "remove") {
+		envRows = envRows.filter((r) => r.id !== id);
+		renderEnvRows();
+	}
+});
+
+envPasteToggle.addEventListener("click", () => {
+	const isOpen = !envPastePanel.hidden;
+	envPastePanel.hidden = isOpen;
+	envPasteToggle.setAttribute("aria-expanded", String(!isOpen));
+	if (!isOpen) requestAnimationFrame(() => envPasteTextarea.focus());
+});
+
+envPasteCancel.addEventListener("click", () => {
+	envPastePanel.hidden = true;
+	envPasteToggle.setAttribute("aria-expanded", "false");
+	envPasteTextarea.value = "";
+	envPasteStatus.textContent = "";
+});
+
+envPasteImport.addEventListener("click", () => {
+	syncEnvRowsFromDom();
+	const result = parseDotEnv(envPasteTextarea.value);
+	for (const entry of result.parsed) {
+		// Spec: imported entries default to `plain`. User flips to
+		// `secret` afterwards by clicking the type toggle on the row.
+		envRows.push({
+			id: newEnvRowId(),
+			name: entry.name,
+			value: entry.value,
+			type: "plain",
+		});
+	}
+	const skippedSummary = result.skipped
+		.slice(0, 3) // first 3 reasons; "+N more" if longer
+		.map((s) => `line ${s.line}: ${s.reason}`)
+		.join("; ");
+	const moreCount = result.skipped.length - 3;
+	const more = moreCount > 0 ? ` (+${moreCount} more)` : "";
+	envPasteStatus.textContent =
+		result.skipped.length === 0
+			? `Imported ${result.parsed.length} entr${result.parsed.length === 1 ? "y" : "ies"}.`
+			: `Imported ${result.parsed.length}, skipped ${result.skipped.length} — ${skippedSummary}${more}`;
+	envPasteTextarea.value = "";
+	envPastePanel.hidden = true;
+	envPasteToggle.setAttribute("aria-expanded", "false");
+	renderEnvRows();
+});
+
+/**
+ * Collect the in-memory `envRows` into the wire shape the backend
+ * accepts under `body.config.envVars`. Drops fully-empty rows
+ * (user added an entry then deleted both fields) but DOES surface
+ * partially-filled rows so the backend's clear 400 covers the typo
+ * cases the user is most likely to hit.
+ */
+function collectEnvVarsForSubmit(): EnvVarEntryInput[] | undefined {
+	syncEnvRowsFromDom();
+	const out: EnvVarEntryInput[] = [];
+	for (const row of envRows) {
+		if (row.name === "" && row.value === "") continue;
+		out.push(
+			row.type === "secret"
+				? { name: row.name, type: "secret", value: row.value }
+				: { name: row.name, type: "plain", value: row.value },
+		);
+	}
+	return out.length > 0 ? out : undefined;
+}
+
 newSessionForm.addEventListener("submit", async (e) => {
 	e.preventDefault();
 	const name = newSessionInput.value.trim();
@@ -1247,7 +1464,9 @@ newSessionForm.addEventListener("submit", async (e) => {
 	teardownBootstrapTail();
 	try {
 		showToast("Creating session…");
-		const session = await createSession(name);
+		const envVars = collectEnvVarsForSubmit();
+		const config = envVars ? { envVars } : undefined;
+		const session = await createSession(name, undefined, config);
 		sessions.unshift(session);
 		renderSessionList();
 		if (session.bootstrapping) {

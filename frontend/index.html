@@ -272,7 +272,50 @@
             role="tabpanel"
             aria-labelledby="session-tab-env-tab"
             hidden
-          ></div>
+          >
+            <p class="modal-hint">
+              Plain values are stored verbatim; secrets are
+              AES-GCM-encrypted at rest and never echoed back. Names use
+              POSIX shell convention (uppercase letters, digits,
+              underscore; must start with a letter or _).
+            </p>
+            <div class="env-paste-toolbar">
+              <button
+                type="button"
+                id="env-paste-toggle"
+                class="env-paste-toggle"
+                aria-controls="env-paste-panel"
+                aria-expanded="false"
+              >
+                Paste .env
+              </button>
+              <span id="env-paste-status" class="env-paste-status" aria-live="polite"></span>
+            </div>
+            <div id="env-paste-panel" class="env-paste-panel" hidden>
+              <textarea
+                id="env-paste-textarea"
+                rows="6"
+                placeholder="DATABASE_URL=postgres://...&#10;OPENAI_KEY=sk-...&#10;# comments are ignored"
+                spellcheck="false"
+              ></textarea>
+              <div class="env-paste-actions">
+                <button type="button" id="env-paste-cancel">Cancel</button>
+                <button type="button" id="env-paste-import">Import as plain</button>
+              </div>
+            </div>
+            <table class="env-table" id="env-table">
+              <thead>
+                <tr>
+                  <th scope="col">Name</th>
+                  <th scope="col">Value</th>
+                  <th scope="col">Type</th>
+                  <th scope="col"><span class="visually-hidden">Remove</span></th>
+                </tr>
+              </thead>
+              <tbody id="env-table-body"></tbody>
+            </table>
+            <button type="button" id="env-add-row" class="env-add-row">+ Add entry</button>
+          </div>
           <div
             class="session-tab-panel"
             id="session-tab-ports"

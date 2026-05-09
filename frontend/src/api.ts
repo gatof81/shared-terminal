@@ -151,6 +151,19 @@ export interface SessionInfo {
  * (#186, #188, #190, #191, #194) flesh out their respective fields as they
  * ship. Keep this in sync with the backend Zod schema or the call will 400.
  */
+/**
+ * Typed env-var entry on the wire (#186 / PR 186c). Mirrors the
+ * backend `EnvVarEntryInput` discriminated union from
+ * `backend/src/sessionConfig.ts`. Both `plain` and `secret` carry
+ * plaintext `value`; the backend encrypts secret values before they
+ * reach D1, so plaintext is in scope only inside the request handler.
+ * `secret-slot` is template-load-only (#195) and rejected at POST.
+ */
+export type EnvVarEntryInput =
+	| { name: string; type: "plain"; value: string }
+	| { name: string; type: "secret"; value: string }
+	| { name: string; type: "secret-slot" };
+
 export interface SessionConfigPayload {
 	workspaceStrategy?: "preserve" | "clone";
 	cpuLimit?: number;
@@ -160,7 +173,7 @@ export interface SessionConfigPayload {
 	postStartCmd?: string;
 	repos?: Array<{ url: string; ref?: string }>;
 	ports?: Array<{ port: number; protocol?: "http" | "tcp" }>;
-	envVars?: Record<string, string>;
+	envVars?: EnvVarEntryInput[];
 }
 
 // ── Bootstrap live-tail WS (#185 / PR 185b2b) ───────────────────────────────
