@@ -1190,7 +1190,7 @@ export function buildRouter(
 const MAX_TEMPLATE_NAME_LEN = 64;
 const MAX_TEMPLATE_DESCRIPTION_LEN = 512;
 
-class TemplateBodyError extends Error {
+export class TemplateBodyError extends Error {
 	constructor(
 		message: string,
 		public readonly path: string,
@@ -1221,7 +1221,7 @@ class TemplateBodyError extends Error {
  *     the template preserves intent without the secret.
  *   - everything else passes through.
  */
-function assertTemplateConfigShape(config: unknown): void {
+export function assertTemplateConfigShape(config: unknown): void {
 	if (config === null || typeof config !== "object" || Array.isArray(config)) return;
 	const c = config as Record<string, unknown>;
 	const envVars = c.envVars;
