@@ -15,6 +15,7 @@ import {
 	createInvite,
 	createSession,
 	createTab,
+	createTemplate,
 	deleteSession,
 	deleteTab,
 	type EnvVarEntryInput,
@@ -35,6 +36,7 @@ import {
 	type SessionInfo,
 	startSession,
 	stopSession,
+	stripConfigForTemplate,
 	type Tab,
 	TabNotFoundError,
 	uploadSessionFiles,
@@ -1880,6 +1882,95 @@ newSessionForm.addEventListener("submit", async (e) => {
 	} catch (err) {
 		showToast((err as Error).message, true);
 		newSessionSubmitBtn.disabled = false;
+	}
+});
+
+// ── Save-as-template flow (#195 / PR 195b) ──────────────────────────────────
+//
+// "Save as template…" button on the create-session modal opens a tiny
+// dialog (name + optional description), strips secrets from the
+// current form state via `stripConfigForTemplate`, and POSTs to
+// `/api/templates`. The create-session modal stays open underneath so
+// the user can still create the session after saving the template, or
+// dismiss both. The Templates *page* (list / use / delete) lands in
+// the next sub-PR; this PR is "save only".
+
+const saveTemplateBtn = document.getElementById("save-as-template-btn") as HTMLButtonElement;
+const saveTemplateModal = document.getElementById("save-template-modal")!;
+const saveTemplateForm = document.getElementById("save-template-form") as HTMLFormElement;
+const saveTemplateNameInput = document.getElementById("save-template-name") as HTMLInputElement;
+const saveTemplateDescriptionInput = document.getElementById(
+	"save-template-description",
+) as HTMLInputElement;
+const saveTemplateSubmit = document.getElementById("save-template-submit") as HTMLButtonElement;
+
+function openSaveTemplateModal() {
+	saveTemplateNameInput.value = "";
+	saveTemplateDescriptionInput.value = "";
+	saveTemplateSubmit.disabled = false;
+	saveTemplateModal.classList.add("open");
+	saveTemplateModal.setAttribute("aria-hidden", "false");
+	requestAnimationFrame(() => saveTemplateNameInput.focus());
+}
+
+function closeSaveTemplateModal() {
+	saveTemplateModal.classList.remove("open");
+	saveTemplateModal.setAttribute("aria-hidden", "true");
+}
+
+saveTemplateBtn.addEventListener("click", () => {
+	openSaveTemplateModal();
+});
+
+saveTemplateModal.addEventListener("click", (e) => {
+	const target = e.target as HTMLElement;
+	if (target.hasAttribute("data-close-modal")) closeSaveTemplateModal();
+});
+
+/**
+ * Build the same `body.config` payload `createSession` would send,
+ * then strip secrets before handing it to `createTemplate`. Reuses
+ * the four collectors so the template captures EXACTLY what the
+ * user sees in the form — no drift between "what would I create"
+ * and "what would I save".
+ */
+function buildTemplateConfigFromForm(): SessionConfigPayload {
+	const envVars = collectEnvVarsForSubmit();
+	const { repo, auth } = collectRepoForSubmit();
+	const advanced = collectAdvancedForSubmit();
+	const { ports, allowPrivilegedPorts } = collectPortsForSubmit();
+	const config: SessionConfigPayload = {
+		...(envVars ? { envVars } : {}),
+		...(repo ? { repo } : {}),
+		...(auth ? { auth } : {}),
+		...advanced,
+		...(ports ? { ports } : {}),
+		...(allowPrivilegedPorts ? { allowPrivilegedPorts } : {}),
+	};
+	return stripConfigForTemplate(config);
+}
+
+saveTemplateForm.addEventListener("submit", async (e) => {
+	e.preventDefault();
+	const name = saveTemplateNameInput.value.trim();
+	if (!name) {
+		saveTemplateNameInput.focus();
+		return;
+	}
+	const description = saveTemplateDescriptionInput.value.trim();
+	saveTemplateSubmit.disabled = true;
+	try {
+		const config = buildTemplateConfigFromForm();
+		await createTemplate({
+			name,
+			...(description !== "" ? { description } : {}),
+			config,
+		});
+		closeSaveTemplateModal();
+		showToast(`Template "${name}" saved`);
+	} catch (err) {
+		showToast((err as Error).message, true);
+		saveTemplateSubmit.disabled = false;
 	}
 });
 
