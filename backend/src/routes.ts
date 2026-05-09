@@ -1324,6 +1324,14 @@ function handleTemplateError(err: unknown, res: Response): void {
 		res.status(403).json({ error: "Forbidden" });
 		return;
 	}
+	if (err instanceof templates.TemplateQuotaExceededError) {
+		// 429 (Too Many Requests) matches the spec's "rate-limit-
+		// shape" for "you're at your quota; the system isn't broken".
+		// Mirrors the session-quota response code used by the
+		// create-session route.
+		res.status(429).json({ error: err.message });
+		return;
+	}
 	if (err instanceof TemplateBodyError) {
 		res.status(400).json({ error: err.message, path: err.path });
 		return;

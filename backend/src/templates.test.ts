@@ -52,8 +52,20 @@ function mockOnceRows(rows: ReturnType<typeof row>[]) {
 // ── create ──────────────────────────────────────────────────────────────
 
 describe("templates.create", () => {
+	function mockUnderQuota(currentCount = 0) {
+		// SELECT COUNT(*) — first call. Returns the user's current
+		// template count so create() decides whether to throw the
+		// quota error.
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [{ n: currentCount }],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+	}
+
 	it("inserts a new row and re-reads it back", async () => {
-		// First call: INSERT (returns no results). Second: SELECT (returns
+		mockUnderQuota(5);
+		// Second call: INSERT (returns no results). Third: SELECT (returns
 		// the row).
 		dbStubs.d1Query
 			.mockImplementationOnce(async () => ({
@@ -73,7 +85,7 @@ describe("templates.create", () => {
 			config: '{"cpuLimit":1000000000}',
 		});
 
-		const insertCall = dbStubs.d1Query.mock.calls[0]!;
+		const insertCall = dbStubs.d1Query.mock.calls[1]!;
 		expect(insertCall[0]).toMatch(/INSERT INTO templates/);
 		// Param shape: id, owner_user_id, name, description, config.
 		expect(insertCall[1]?.[1]).toBe("u1");
@@ -88,6 +100,7 @@ describe("templates.create", () => {
 	});
 
 	it("treats missing description as null on persist", async () => {
+		mockUnderQuota(0);
 		dbStubs.d1Query
 			.mockImplementationOnce(async () => ({
 				results: [],
@@ -100,8 +113,44 @@ describe("templates.create", () => {
 				meta: { changes: 0, duration: 0, last_row_id: 0 },
 			}));
 		await templates.create("u1", { name: "T", config: "{}" });
-		const insertCall = dbStubs.d1Query.mock.calls[0]!;
+		const insertCall = dbStubs.d1Query.mock.calls[1]!;
 		expect(insertCall[1]?.[3]).toBeNull();
+	});
+
+	// PR #228 round 4 SHOULD-FIX: per-user template count cap. Mirrors
+	// the session-quota pattern; keeps an authenticated user from
+	// exhausting D1 row / storage quotas with a tight create loop.
+	it("rejects with TemplateQuotaExceededError once the user is at cap", async () => {
+		mockUnderQuota(templates.MAX_TEMPLATES_PER_USER);
+		await expect(templates.create("u1", { name: "T", config: "{}" })).rejects.toBeInstanceOf(
+			templates.TemplateQuotaExceededError,
+		);
+	});
+
+	it("does NOT issue an INSERT when at cap (avoids partial state)", async () => {
+		mockUnderQuota(templates.MAX_TEMPLATES_PER_USER);
+		await expect(templates.create("u1", { name: "T", config: "{}" })).rejects.toBeInstanceOf(
+			templates.TemplateQuotaExceededError,
+		);
+		// Only the COUNT query fired; no INSERT, no follow-up SELECT.
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(1);
+		expect(dbStubs.d1Query.mock.calls[0]?.[0]).toMatch(/SELECT COUNT/);
+	});
+
+	it("allows create at exactly cap-minus-one (boundary pin)", async () => {
+		mockUnderQuota(templates.MAX_TEMPLATES_PER_USER - 1);
+		dbStubs.d1Query
+			.mockImplementationOnce(async () => ({
+				results: [],
+				success: true,
+				meta: { changes: 1, duration: 0, last_row_id: 0 },
+			}))
+			.mockImplementationOnce(async () => ({
+				results: [row({ name: "T" })],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			}));
+		await expect(templates.create("u1", { name: "T", config: "{}" })).resolves.toBeDefined();
 	});
 });
 
@@ -144,15 +193,13 @@ describe("templates.getOwned", () => {
 		// "this id exists, you can't see it" vs "this id doesn't
 		// exist" by status-code timing on the read path. Both
 		// collapse to 404. Same posture sessions.assertOwnership
-		// uses on the dispatcher path.
+		// uses on the dispatcher path. Pinning that the rejection
+		// is NotFoundError (and explicitly NOT ForbiddenError) so a
+		// future refactor that swaps the throw types trips this.
 		mockOnceRows([row({ id: "t-1", owner: "u-other" })]);
 		await expect(templates.getOwned("t-1", "u1")).rejects.toBeInstanceOf(NotFoundError);
-		// And specifically NOT ForbiddenError, otherwise the distinction
-		// would leak via instanceof in the route handler.
-		await mockOnceRows([row({ id: "t-1", owner: "u-other" })]);
-		await templates.getOwned("t-1", "u1").catch((err) => {
-			expect(err).not.toBeInstanceOf(ForbiddenError);
-		});
+		mockOnceRows([row({ id: "t-1", owner: "u-other" })]);
+		await expect(templates.getOwned("t-1", "u1")).rejects.not.toBeInstanceOf(ForbiddenError);
 	});
 });
 

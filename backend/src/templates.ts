@@ -84,10 +84,42 @@ function parseD1Utc(raw: string): Date {
 	return d;
 }
 
+/**
+ * Per-user template cap. Mirrors the session-quota pattern in
+ * `sessionManager` — without a ceiling, an authenticated user can
+ * spam template creation and exhaust D1 row / storage quotas for
+ * the whole service. 100 is generous (templates are static config,
+ * not running containers) without being unbounded.
+ */
+export const MAX_TEMPLATES_PER_USER = 100;
+
+/** Thrown by `create` when the caller is at the per-user template
+ *  cap. The route maps this to 429. */
+export class TemplateQuotaExceededError extends Error {
+	constructor() {
+		super(`Template count exceeds per-user cap of ${MAX_TEMPLATES_PER_USER}`);
+		this.name = "TemplateQuotaExceededError";
+	}
+}
+
 /** Create a new template owned by `userId`. Caller has already
  *  validated `input.config` is the right shape. Returns the
- *  generated id. */
+ *  generated id. Throws `TemplateQuotaExceededError` if the user
+ *  already owns the maximum allowed templates. */
 export async function create(userId: string, input: TemplateInput): Promise<Template> {
+	// Pre-insert count check. Not atomic with the INSERT (D1's HTTP
+	// API has no transaction primitive), so a tight create-create
+	// race could land the user one row over the cap — acceptable
+	// vs the cost of a per-user lock or a SQL constraint we don't
+	// have on D1. The session-quota path uses the same shape.
+	const countResult = await d1Query<{ n: number }>(
+		"SELECT COUNT(*) AS n FROM templates WHERE owner_user_id = ?",
+		[userId],
+	);
+	const existing = countResult.results[0]?.n ?? 0;
+	if (existing >= MAX_TEMPLATES_PER_USER) {
+		throw new TemplateQuotaExceededError();
+	}
 	const id = randomUUID();
 	await d1Query(
 		"INSERT INTO templates (id, owner_user_id, name, description, config) " +
@@ -164,8 +196,11 @@ export async function update(
 	return rowToTemplate(row);
 }
 
-/** Delete the template. Owner-gated; idempotent — calling on an
- *  already-deleted id returns NotFoundError. */
+/** Delete the template. Owner-gated. A second call on an
+ *  already-deleted id throws `NotFoundError` (route 404) — the
+ *  first call's success was 204, so re-deletion is NOT idempotent
+ *  in the response shape; clients that retry on a partial network
+ *  failure must tolerate the 404 themselves. */
 export async function deleteTemplate(templateId: string, userId: string): Promise<void> {
 	await assertOwnership(templateId, userId);
 	await d1Query("DELETE FROM templates WHERE id = ?", [templateId]);
