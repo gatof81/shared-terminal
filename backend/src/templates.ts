@@ -155,7 +155,12 @@ export async function update(
 		[input.name, input.description ?? null, input.config, templateId],
 	);
 	const row = await fetchRow(templateId);
-	if (!row) throw new Error("templates.update: row vanished after UPDATE");
+	// Race window: a sibling DELETE between the assertOwnership SELECT
+	// and the UPDATE+re-read below leaves no row. Surface as 404 (the
+	// route's `handleTemplateError` maps NotFoundError to 404; a bare
+	// `Error` would fall through to 500 and look like a server bug
+	// for what's actually a benign concurrent-edit race).
+	if (!row) throw new NotFoundError(TEMPLATE_NOT_FOUND);
 	return rowToTemplate(row);
 }
 

@@ -1086,14 +1086,27 @@ export function buildRouter(
 		try {
 			const { name, description } = parseTemplateBody(body);
 			// Validate the config shape via the same `SessionConfigSchema`
-			// the create-session route uses, with `allowSecretSlots: true`
-			// flipping the env-var variant gate. `POST /sessions` rejects
-			// `secret-slot` entries (no value to spawn with); the template
-			// flow needs them — they're placeholders the `Use template`
-			// flow re-prompts for. Without the flag, every save-as-template
-			// 400s as soon as the user has any secret env entries
-			// (PR #228 round 1 BLOCKER).
-			validateSessionConfig(body.config, { allowSecretSlots: true });
+			// the create-session route uses, with two flags flipped on for
+			// the template path:
+			//   - `allowSecretSlots: true` lets `secret-slot` env entries
+			//     pass (POST /sessions rejects them — no value to spawn
+			//     with — but templates EXPECT them).
+			//   - `allowMissingAuth: true` tolerates a `repo.auth: "pat"` /
+			//     `"ssh"` declaration without the matching credential,
+			//     so the template preserves intent ("this template wants
+			//     PAT auth") without persisting the PAT itself.
+			// PR #228 round 1+2 BLOCKER+SHOULD-FIX.
+			validateSessionConfig(body.config, {
+				allowSecretSlots: true,
+				allowMissingAuth: true,
+			});
+			// Belt-and-braces: the storage column is raw JSON, not the
+			// AES-GCM-encrypted `auth_json` / `env_vars_json` columns
+			// that `session_configs` uses. Reject plaintext secret
+			// entries and live credentials at the route boundary so a
+			// misbehaving client can't smuggle a PAT / SSH key into the
+			// template row. PR #228 round 3 BLOCKER.
+			assertTemplateConfigShape(body.config);
 			const t = await templates.create(userId, {
 				name,
 				description,
@@ -1130,11 +1143,16 @@ export function buildRouter(
 		const body = req.body as { name?: unknown; description?: unknown; config?: unknown };
 		try {
 			const { name, description } = parseTemplateBody(body);
-			// Same `allowSecretSlots` rationale as POST: a template
-			// PUT must accept the same shapes the POST did, otherwise
-			// renaming a template that has secret-slot env vars would
-			// 400 on every save. PR #228 round 2 SHOULD-FIX.
-			validateSessionConfig(body.config, { allowSecretSlots: true });
+			// Same flags as POST. The PUT path must accept exactly
+			// the shapes the POST accepted; without symmetric flag
+			// handling, a no-op rename of a template that already
+			// has secret-slot env vars or a credential-less private
+			// repo would 400 on every save.
+			validateSessionConfig(body.config, {
+				allowSecretSlots: true,
+				allowMissingAuth: true,
+			});
+			assertTemplateConfigShape(body.config);
 			const t = await templates.update(req.params.id, userId, {
 				name,
 				description,
@@ -1179,6 +1197,66 @@ class TemplateBodyError extends Error {
 	) {
 		super(message);
 		this.name = "TemplateBodyError";
+	}
+}
+
+/**
+ * Reject live credential shapes — plaintext-`secret` env entries,
+ * `auth.pat`, `auth.ssh.privateKey` — at the route boundary so they
+ * can never land in `templates.config` (which is stored as raw JSON,
+ * not encrypted via the `secrets.ts` AES-GCM path that
+ * `session_configs` uses). The frontend save-as-template flow
+ * (195b) is responsible for stripping these into `secret-slot`
+ * markers + omitted-credential placeholders before submit; this
+ * function is the server-side regression guard if a client
+ * misbehaves. PR #228 round 3 BLOCKER.
+ *
+ * The shape we accept after this gate:
+ *   - envVars: only `plain` and `secret-slot` (the latter is the
+ *     placeholder a `Use template` flow re-prompts for);
+ *   - auth: `repo.auth: "none" | "pat" | "ssh"` is fine, but
+ *     `auth.pat` and `auth.ssh.privateKey` MUST be omitted —
+ *     `validateSessionConfig`'s `allowMissingAuth` flag tolerates
+ *     a `"pat"` / `"ssh"` declaration without the credential, so
+ *     the template preserves intent without the secret.
+ *   - everything else passes through.
+ */
+function assertTemplateConfigShape(config: unknown): void {
+	if (config === null || typeof config !== "object" || Array.isArray(config)) return;
+	const c = config as Record<string, unknown>;
+	const envVars = c.envVars;
+	if (Array.isArray(envVars)) {
+		for (const entry of envVars) {
+			if (entry === null || typeof entry !== "object") continue;
+			const t = (entry as { type?: unknown }).type;
+			if (t === "secret") {
+				throw new TemplateBodyError(
+					"config.envVars: 'secret' entries are not allowed in templates; strip to 'secret-slot' before saving",
+					"config.envVars",
+				);
+			}
+		}
+	}
+	const auth = c.auth;
+	if (auth !== null && typeof auth === "object" && !Array.isArray(auth)) {
+		const a = auth as Record<string, unknown>;
+		if (a.pat !== undefined) {
+			throw new TemplateBodyError(
+				"config.auth.pat: PAT credentials must not be stored in a template; the recipient re-supplies on use",
+				"config.auth.pat",
+			);
+		}
+		const ssh = a.ssh;
+		if (
+			ssh !== null &&
+			typeof ssh === "object" &&
+			(ssh as { privateKey?: unknown }).privateKey !== undefined
+		) {
+			throw new TemplateBodyError(
+				"config.auth.ssh.privateKey: SSH key material must not be stored in a template; the recipient re-supplies on use",
+				"config.auth.ssh.privateKey",
+			);
+		}
 	}
 }
 

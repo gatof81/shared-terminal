@@ -676,9 +676,23 @@ export function validateSessionConfig(
 		 * container with), so the standard call site stays strict.
 		 */
 		allowSecretSlots?: boolean;
+		/**
+		 * When true, the repo↔auth cross-field check tolerates a
+		 * `repo.auth: "pat"` / `"ssh"` declaration without the
+		 * matching `auth.pat` / `auth.ssh` credential. Templates
+		 * need this: a save-as-template flow strips PAT / SSH key
+		 * material before persist, but preserves the *intent*
+		 * ("this template wants PAT auth") so the `Use template`
+		 * UI can re-prompt. Without this, every saved template
+		 * with a private repo would 400 on the cross-field rule.
+		 * Default `false` — `POST /api/sessions` MUST require the
+		 * credential (the clone runner needs it).
+		 */
+		allowMissingAuth?: boolean;
 	},
 ): SessionConfig | undefined {
 	const allowSecretSlots = opts?.allowSecretSlots === true;
+	const allowMissingAuth = opts?.allowMissingAuth === true;
 	if (raw === undefined || raw === null) return undefined;
 	const result = SessionConfigSchema.safeParse(raw);
 	if (!result.success) {
@@ -815,7 +829,7 @@ export function validateSessionConfig(
 					"config.repo.url: PAT auth requires an https:// URL",
 				);
 			}
-			if (authBlob.pat === undefined) {
+			if (authBlob.pat === undefined && !allowMissingAuth) {
 				throw new SessionConfigValidationError(
 					"config.auth.pat",
 					"config.auth.pat: required when config.repo.auth is 'pat'",
@@ -839,7 +853,7 @@ export function validateSessionConfig(
 					"config.repo.url: SSH auth requires a git@host:path URL",
 				);
 			}
-			if (authBlob.ssh === undefined) {
+			if (authBlob.ssh === undefined && !allowMissingAuth) {
 				throw new SessionConfigValidationError(
 					"config.auth.ssh",
 					"config.auth.ssh: required when config.repo.auth is 'ssh'",
