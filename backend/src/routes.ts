@@ -497,16 +497,25 @@ export function buildRouter(
 			// a no-op when `repo` is absent, so this widening is safe
 			// for the postCreate-only path and lets repo-only sessions
 			// (no hook, just a clone) get their async-bootstrap modal.
-			if (validatedConfig?.postCreateCmd || validatedConfig?.repo) {
+			// Fire async bootstrap when ANY config-driven stage or hook
+			// is set. #191 PR 191b widened from `repo || postCreateCmd`
+			// to also include the three new lifecycle-hook fields.
+			const hasBootstrapConfig =
+				(validatedConfig?.repo !== null && validatedConfig?.repo !== undefined) ||
+				(validatedConfig?.gitIdentity !== null && validatedConfig?.gitIdentity !== undefined) ||
+				(validatedConfig?.dotfiles !== null && validatedConfig?.dotfiles !== undefined) ||
+				(validatedConfig?.agentSeed !== null && validatedConfig?.agentSeed !== undefined);
+			if (validatedConfig?.postCreateCmd || hasBootstrapConfig) {
 				const cfg = {
-					postCreateCmd: validatedConfig.postCreateCmd,
-					postStartCmd: validatedConfig.postStartCmd,
-					// `hasRepo` lets the runner skip the `getSessionConfig`
-					// D1 fetch on postCreate-only sessions (PR #214 round 2
-					// NIT). The route already knows whether a repo was
-					// configured — passing the bit through avoids the
-					// runner having to fetch just to learn the answer.
-					hasRepo: validatedConfig.repo !== null && validatedConfig.repo !== undefined,
+					postCreateCmd: validatedConfig?.postCreateCmd,
+					postStartCmd: validatedConfig?.postStartCmd,
+					// `hasBootstrapConfig` gates the runner's
+					// `getSessionConfig` D1 fetch — skip the round-trip
+					// for postCreate-only sessions (PR #214 round 2 NIT,
+					// generalised in #191 PR 191b to cover all four
+					// config-driven stages: repo / gitIdentity / dotfiles
+					// / agentSeed).
+					hasBootstrapConfig,
 				};
 				// Fire-and-forget; the runner internally catches every
 				// throw it can and translates them into broadcaster

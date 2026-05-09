@@ -28,6 +28,23 @@ const cloneStubs = vi.hoisted(() => ({
 }));
 vi.mock("./bootstrap/cloneRepo.js", () => cloneStubs);
 
+// #191 PR 191b — three new bootstrap stages. Same default-success
+// shape as runCloneRepo so existing tests don't have to opt out.
+const gitIdentityStubs = vi.hoisted(() => ({
+	runGitIdentity: vi.fn(async () => ({ exitCode: 0 })),
+}));
+vi.mock("./bootstrap/gitIdentity.js", () => gitIdentityStubs);
+
+const dotfilesStubs = vi.hoisted(() => ({
+	runDotfiles: vi.fn(async () => ({ exitCode: 0 })),
+}));
+vi.mock("./bootstrap/dotfiles.js", () => dotfilesStubs);
+
+const agentSeedStubs = vi.hoisted(() => ({
+	runAgentSeed: vi.fn(async () => ({ exitCode: 0 })),
+}));
+vi.mock("./bootstrap/agentSeed.js", () => agentSeedStubs);
+
 import {
 	BootstrapBroadcaster,
 	type BootstrapMessage,
@@ -43,6 +60,12 @@ beforeEach(() => {
 	sessionConfigStubs.getSessionConfig.mockImplementation(async () => null);
 	cloneStubs.runCloneRepo.mockReset();
 	cloneStubs.runCloneRepo.mockImplementation(async () => ({ exitCode: 0 }));
+	gitIdentityStubs.runGitIdentity.mockReset();
+	gitIdentityStubs.runGitIdentity.mockImplementation(async () => ({ exitCode: 0 }));
+	dotfilesStubs.runDotfiles.mockReset();
+	dotfilesStubs.runDotfiles.mockImplementation(async () => ({ exitCode: 0 }));
+	agentSeedStubs.runAgentSeed.mockReset();
+	agentSeedStubs.runAgentSeed.mockImplementation(async () => ({ exitCode: 0 }));
 });
 
 describe("markBootstrapped", () => {
@@ -341,7 +364,7 @@ describe("runAsyncBootstrap", () => {
 
 		await runAsyncBootstrap(
 			"sess-1",
-			{ postCreateCmd: "npm install", hasRepo: true },
+			{ postCreateCmd: "npm install", hasBootstrapConfig: true },
 			{ sessions, docker, broadcaster },
 		);
 		await settle();
@@ -349,17 +372,17 @@ describe("runAsyncBootstrap", () => {
 		expect(order).toEqual(["clone", "postCreate"]);
 	});
 
-	// PR #214 round 2 NIT: `hasRepo: false` (or omitted) gates the
+	// PR #214 round 2 NIT: `hasBootstrapConfig: false` (or omitted) gates the
 	// `getSessionConfig` D1 fetch. The pre-188c steady-state is
 	// postCreate-only; that path must not pay for a repo D1 round-trip
 	// every session create.
-	it("hasRepo=false skips the getSessionConfig D1 fetch (no extra round-trip)", async () => {
+	it("hasBootstrapConfig=false skips the getSessionConfig D1 fetch (no extra round-trip)", async () => {
 		const { sessions, docker, broadcaster, spies } = makeFakes();
 		spies.runPostCreate.mockImplementation(async () => ({ exitCode: 0 }));
 
 		await runAsyncBootstrap(
 			"sess-1",
-			{ postCreateCmd: "npm install" /* hasRepo omitted = false */ },
+			{ postCreateCmd: "npm install" /* hasBootstrapConfig omitted = false */ },
 			{ sessions, docker, broadcaster },
 		);
 		await settle();
@@ -391,7 +414,7 @@ describe("runAsyncBootstrap", () => {
 
 		await runAsyncBootstrap(
 			"sess-1",
-			{ postCreateCmd: "npm install", hasRepo: true },
+			{ postCreateCmd: "npm install", hasBootstrapConfig: true },
 			{ sessions, docker, broadcaster },
 		);
 		await settle();
@@ -414,7 +437,7 @@ describe("runAsyncBootstrap", () => {
 
 		await runAsyncBootstrap(
 			"sess-1",
-			{ postCreateCmd: "npm install", hasRepo: true },
+			{ postCreateCmd: "npm install", hasBootstrapConfig: true },
 			{ sessions, docker, broadcaster },
 		);
 		await settle();
@@ -443,7 +466,7 @@ describe("runAsyncBootstrap", () => {
 
 		await runAsyncBootstrap(
 			"sess-1",
-			{ postStartCmd: "npm run dev", hasRepo: true },
+			{ postStartCmd: "npm run dev", hasBootstrapConfig: true },
 			{ sessions, docker, broadcaster },
 		);
 		await settle();
@@ -452,5 +475,131 @@ describe("runAsyncBootstrap", () => {
 		expect(spies.runPostCreate).not.toHaveBeenCalled();
 		expect(spies.runPostStart).toHaveBeenCalledWith("sess-1", "npm run dev");
 		expect(final).toEqual([{ type: "done", success: true }]);
+	});
+
+	// ── #191 PR 191b — full stage pipeline + 10-min cap ────────────────────
+
+	// Issue spec order: gitIdentity → repo → dotfiles → agentSeed →
+	// postCreate. A swap would break the documented contract (e.g.
+	// dotfiles install scripts that need git config to commit).
+	it("runs stages in declared order (gitIdentity → clone → dotfiles → agentSeed → postCreate)", async () => {
+		const { sessions, docker, broadcaster, spies } = makeFakes();
+		const order: string[] = [];
+		sessionConfigStubs.getSessionConfig.mockResolvedValueOnce({
+			sessionId: "sess-1",
+			repo: { url: "https://example.com/r", auth: "none" },
+			gitIdentity: { name: "X", email: "x@y.com" },
+			dotfiles: { url: "https://example.com/d.git" },
+			agentSeed: { claudeMd: "# x" },
+			bootstrappedAt: null,
+		} as never);
+		gitIdentityStubs.runGitIdentity.mockImplementation(async () => {
+			order.push("gitIdentity");
+			return { exitCode: 0 };
+		});
+		cloneStubs.runCloneRepo.mockImplementation(async () => {
+			order.push("clone");
+			return { exitCode: 0 };
+		});
+		dotfilesStubs.runDotfiles.mockImplementation(async () => {
+			order.push("dotfiles");
+			return { exitCode: 0 };
+		});
+		agentSeedStubs.runAgentSeed.mockImplementation(async () => {
+			order.push("agentSeed");
+			return { exitCode: 0 };
+		});
+		spies.runPostCreate.mockImplementation(async () => {
+			order.push("postCreate");
+			return { exitCode: 0 };
+		});
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ postCreateCmd: "npm install", hasBootstrapConfig: true },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		expect(order).toEqual(["gitIdentity", "clone", "dotfiles", "agentSeed", "postCreate"]);
+	});
+
+	// Each stage's non-zero exit must hard-fail via the same status-
+	// flip-before-kill teardown postCreate already used. Pin one stage
+	// (dotfiles) as the canonical example; the same code path serves
+	// all stages via the runStage helper.
+	it("dotfiles non-zero exit flips status, kills, broadcasts fail (later stages skipped)", async () => {
+		const { sessions, docker, broadcaster, final, spies } = makeFakes();
+		sessionConfigStubs.getSessionConfig.mockResolvedValueOnce({
+			sessionId: "sess-1",
+			dotfiles: { url: "https://example.com/d.git" },
+			bootstrappedAt: null,
+		} as never);
+		dotfilesStubs.runDotfiles.mockImplementationOnce(async () => ({ exitCode: 7 }));
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ postCreateCmd: "npm install", hasBootstrapConfig: true },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		expect(spies.updateStatus).toHaveBeenCalledWith("sess-1", "failed");
+		expect(spies.kill).toHaveBeenCalledWith("sess-1");
+		expect(agentSeedStubs.runAgentSeed).not.toHaveBeenCalled();
+		expect(spies.runPostCreate).not.toHaveBeenCalled();
+		expect(final).toEqual([{ type: "fail", exitCode: 7 }]);
+	});
+
+	// 10-minute wall-clock cap. A stage that hangs past the cap is
+	// aborted (the AbortError surfaces from streamExec via the
+	// stream-destroy mechanism), and the runner emits a clear
+	// "bootstrap timeout" message before the terminal fail.
+	it("aborts the in-flight stage and broadcasts a timeout message when the wall-clock cap fires", async () => {
+		vi.useFakeTimers();
+		try {
+			const { sessions, docker, broadcaster, final, spies } = makeFakes();
+			sessionConfigStubs.getSessionConfig.mockResolvedValueOnce({
+				sessionId: "sess-1",
+				dotfiles: { url: "https://example.com/d.git" },
+				bootstrappedAt: null,
+			} as never);
+			// dotfiles "stage" never resolves on its own — it'll only
+			// settle when the abort signal fires its `error` listener.
+			// Simulate by listening for abort and rejecting with an
+			// AbortError (matching what streamExec does in production).
+			dotfilesStubs.runDotfiles.mockImplementationOnce(async (args) => {
+				return new Promise((_resolve, reject) => {
+					args.signal?.addEventListener("abort", () => {
+						reject(new DOMException("aborted", "AbortError"));
+					});
+				});
+			});
+
+			const runPromise = runAsyncBootstrap(
+				"sess-1",
+				{ postCreateCmd: "npm install", hasBootstrapConfig: true },
+				{ sessions, docker, broadcaster },
+			);
+			// Advance past the 10-min cap — timer fires, abort
+			// propagates, dotfiles rejects, runner enters timeout
+			// handler.
+			await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 100);
+			await runPromise;
+
+			expect(spies.updateStatus).toHaveBeenCalledWith("sess-1", "failed");
+			expect(spies.kill).toHaveBeenCalledWith("sess-1");
+			expect(spies.runPostCreate).not.toHaveBeenCalled();
+			// Final terminal message is `fail` with the timeout error
+			// string surfaced via the broadcaster.
+			const failMsg = final.find((m) => m.type === "fail");
+			expect(failMsg).toMatchObject({
+				type: "fail",
+				exitCode: -1,
+			});
+			expect((failMsg as { error: string }).error).toMatch(/bootstrap timeout/);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
