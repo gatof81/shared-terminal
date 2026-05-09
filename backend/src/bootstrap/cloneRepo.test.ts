@@ -1,13 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// Set the encryption key BEFORE importing the module — `decryptStoredAuth`
+// (called transitively from runCloneRepo) imports `secrets.js` at module-
+// load time, and that module reads SECRETS_ENCRYPTION_KEY from env.
+process.env.SECRETS_ENCRYPTION_KEY = Buffer.alloc(32, 0x42).toString("base64");
+
 import type { DockerManager } from "../dockerManager.js";
-import type { SessionConfigRecord } from "../sessionConfig.js";
+import { encryptAuthCredentials, type SessionConfigRecord } from "../sessionConfig.js";
 import {
 	buildCloneArgv,
-	CloneAuthNotImplementedError,
+	CloneCredentialMissingError,
+	PAT_CLONE_SCRIPT,
+	patEnv,
 	resolveTargetAbsPath,
 	runCloneRepo,
+	SSH_CLONE_SCRIPT,
+	sshEnv,
 } from "./cloneRepo.js";
+import { KNOWN_HOSTS_DEFAULT_BUNDLE } from "./knownHosts.js";
 
 // ── buildCloneArgv ───────────────────────────────────────────────────────
 
@@ -209,34 +219,250 @@ describe("runCloneRepo", () => {
 		expect(opts.cmd[opts.cmd.length - 1]).toBe("/home/developer/workspace");
 	});
 
-	// PAT/SSH paths land in 188d. Throwing rather than silently running
-	// an anonymous clone means a deploy that lands 188b+188c without
-	// 188d won't quietly fall back to anonymous against a private URL
-	// (which would 404 with no signal that the credential was ignored).
-	it("throws CloneAuthNotImplementedError for repo.auth='pat'", async () => {
+	// ── #188 PR 188d — PAT auth path ───────────────────────────────────────
+
+	// PAT must NEVER appear in the bash command argv (process listings)
+	// or in the resulting `.git/config`. The runner uses a `GIT_ASKPASS`
+	// shim that reads the token from an env var; the env block is the
+	// ONLY place the plaintext is allowed.
+	it("PAT auth: token lands in env, never in argv", async () => {
+		const stored = encryptAuthCredentials({ pat: "ghp_test_TOKEN_DEADBEEF" });
+		await runCloneRepo({
+			sessionId: "sess-1",
+			config: makeConfig({
+				repo: { url: "https://example.com/r", auth: "pat" },
+				auth: stored,
+			}),
+			docker: docker as unknown as DockerManager,
+		});
+		expect(docker.streamExec).toHaveBeenCalledTimes(1);
+		const [, opts] = docker.streamExec.mock.calls[0]!;
+		// PAT must NOT appear in argv anywhere — argv is what shows up in
+		// host-side `ps` output via dockerd's exec subprocess.
+		const argvJoined = (opts.cmd as string[]).join(" ");
+		expect(argvJoined).not.toContain("ghp_test_TOKEN_DEADBEEF");
+		// PAT lives in env (visible to operators with `docker inspect`,
+		// not to host `ps`). This is the documented trade-off.
+		expect(opts.env).toMatchObject({ ST_PAT: "ghp_test_TOKEN_DEADBEEF" });
+	});
+
+	// argv shape: bash + script. The runner's PAT path is shell-mode
+	// (multi-step setup) but every user-controlled value reaches the
+	// shell via env var, NOT via shell-interpolation, so shell-meta
+	// in any of them is inert.
+	it("PAT auth: invokes bash with the canonical PAT_CLONE_SCRIPT", async () => {
+		const stored = encryptAuthCredentials({ pat: "ghp_x" });
+		await runCloneRepo({
+			sessionId: "sess-1",
+			config: makeConfig({
+				repo: { url: "https://example.com/r", auth: "pat" },
+				auth: stored,
+			}),
+			docker: docker as unknown as DockerManager,
+		});
+		const [, opts] = docker.streamExec.mock.calls[0]!;
+		expect(opts.cmd[0]).toBe("bash");
+		expect(opts.cmd[1]).toBe("-c");
+		expect(opts.cmd[2]).toBe(PAT_CLONE_SCRIPT);
+	});
+
+	// User values reach the bash script via env. The script reads each
+	// with `"$ST_*"` double-quoted, so even if a value contained shell
+	// meta the shell would treat it as a single argument.
+	it("PAT auth: env block contains all user values + target absolute path", async () => {
+		const stored = encryptAuthCredentials({ pat: "ghp_x" });
+		await runCloneRepo({
+			sessionId: "sess-1",
+			config: makeConfig({
+				repo: {
+					url: "https://example.com/r",
+					ref: "main",
+					depth: 1,
+					target: "frontend",
+					auth: "pat",
+				},
+				auth: stored,
+			}),
+			docker: docker as unknown as DockerManager,
+		});
+		const [, opts] = docker.streamExec.mock.calls[0]!;
+		expect(opts.env).toEqual({
+			ST_PAT: "ghp_x",
+			ST_URL: "https://example.com/r",
+			ST_REF: "main",
+			ST_DEPTH: "1",
+			ST_TARGET_ABS: "/home/developer/workspace/frontend",
+		});
+	});
+
+	// Defence-in-depth: a config where `repo.auth: "pat"` was persisted
+	// but `auth.pat` is missing (e.g. direct D1 write that bypassed the
+	// route's cross-field check) must throw rather than silently fall
+	// back to anonymous.
+	it("PAT auth: throws CloneCredentialMissingError when auth.pat absent", async () => {
 		await expect(
 			runCloneRepo({
 				sessionId: "sess-1",
 				config: makeConfig({
 					repo: { url: "https://example.com/r", auth: "pat" },
+					auth: undefined,
 				}),
 				docker: docker as unknown as DockerManager,
 			}),
-		).rejects.toBeInstanceOf(CloneAuthNotImplementedError);
+		).rejects.toBeInstanceOf(CloneCredentialMissingError);
 		expect(docker.streamExec).not.toHaveBeenCalled();
 	});
 
-	it("throws CloneAuthNotImplementedError for repo.auth='ssh'", async () => {
+	// Script integrity check: the PAT script must include the cleanup
+	// trap that shreds the askpass file on exit. Pinning the marker so a
+	// future edit that drops it (and lets the PAT-printing shim survive
+	// past the clone) trips this assertion immediately.
+	it("PAT_CLONE_SCRIPT contains the askpass-cleanup trap", () => {
+		expect(PAT_CLONE_SCRIPT).toContain("trap cleanup EXIT");
+		expect(PAT_CLONE_SCRIPT).toContain('rm -f "$ASKPASS_PATH"');
+		// `GIT_TERMINAL_PROMPT=0` so a remote that rejects the PAT can't
+		// hang the bootstrap on a stdin prompt. Pinning so the PR
+		// doesn't accidentally remove the env it sets.
+		expect(PAT_CLONE_SCRIPT).toContain("GIT_TERMINAL_PROMPT=0");
+	});
+
+	// ── #188 PR 188d — SSH auth path ───────────────────────────────────────
+
+	it("SSH auth: invokes bash with the canonical SSH_CLONE_SCRIPT", async () => {
+		const stored = encryptAuthCredentials({
+			ssh: { privateKey: "KEYDATA", knownHosts: "default" },
+		});
+		await runCloneRepo({
+			sessionId: "sess-1",
+			config: makeConfig({
+				repo: { url: "git@github.com:o/p", auth: "ssh" },
+				auth: stored,
+			}),
+			docker: docker as unknown as DockerManager,
+		});
+		const [, opts] = docker.streamExec.mock.calls[0]!;
+		expect(opts.cmd[0]).toBe("bash");
+		expect(opts.cmd[1]).toBe("-c");
+		expect(opts.cmd[2]).toBe(SSH_CLONE_SCRIPT);
+	});
+
+	// `knownHosts === "default"` → resolve to the bundled github/gitlab/
+	// bitbucket fingerprints. Any other string is a custom paste, used
+	// verbatim. The user's choice between these is captured in the
+	// schema; the runner just resolves the sentinel.
+	it("SSH auth: knownHosts='default' resolves to the bundled fingerprints", async () => {
+		const stored = encryptAuthCredentials({
+			ssh: { privateKey: "KEYDATA", knownHosts: "default" },
+		});
+		await runCloneRepo({
+			sessionId: "sess-1",
+			config: makeConfig({
+				repo: { url: "git@github.com:o/p", auth: "ssh" },
+				auth: stored,
+			}),
+			docker: docker as unknown as DockerManager,
+		});
+		const [, opts] = docker.streamExec.mock.calls[0]!;
+		expect(opts.env).toMatchObject({ ST_KNOWN_HOSTS: KNOWN_HOSTS_DEFAULT_BUNDLE });
+	});
+
+	it("SSH auth: knownHosts custom-paste is passed through verbatim", async () => {
+		const customHosts = "intranet.example.com ssh-ed25519 AAAA…";
+		const stored = encryptAuthCredentials({
+			ssh: { privateKey: "KEYDATA", knownHosts: customHosts },
+		});
+		await runCloneRepo({
+			sessionId: "sess-1",
+			config: makeConfig({
+				repo: { url: "git@intranet.example.com:o/p", auth: "ssh" },
+				auth: stored,
+			}),
+			docker: docker as unknown as DockerManager,
+		});
+		const [, opts] = docker.streamExec.mock.calls[0]!;
+		expect(opts.env).toMatchObject({ ST_KNOWN_HOSTS: customHosts });
+	});
+
+	// SSH key + known_hosts must NEVER appear in argv — same shape as
+	// the PAT defence. Both are env-only.
+	it("SSH auth: privateKey and knownHosts land in env, never in argv", async () => {
+		const stored = encryptAuthCredentials({
+			ssh: {
+				privateKey: "-----BEGIN OPENSSH KEY-----\nSECRETBYTES",
+				knownHosts: "github.com ssh-ed25519 PUBLICKEY",
+			},
+		});
+		await runCloneRepo({
+			sessionId: "sess-1",
+			config: makeConfig({
+				repo: { url: "git@github.com:o/p", auth: "ssh" },
+				auth: stored,
+			}),
+			docker: docker as unknown as DockerManager,
+		});
+		const [, opts] = docker.streamExec.mock.calls[0]!;
+		const argvJoined = (opts.cmd as string[]).join(" ");
+		expect(argvJoined).not.toContain("SECRETBYTES");
+		expect(argvJoined).not.toContain("PUBLICKEY");
+	});
+
+	it("SSH auth: throws CloneCredentialMissingError when auth.ssh absent", async () => {
 		await expect(
 			runCloneRepo({
 				sessionId: "sess-1",
 				config: makeConfig({
 					repo: { url: "git@github.com:o/p", auth: "ssh" },
+					auth: undefined,
 				}),
 				docker: docker as unknown as DockerManager,
 			}),
-		).rejects.toBeInstanceOf(CloneAuthNotImplementedError);
+		).rejects.toBeInstanceOf(CloneCredentialMissingError);
 		expect(docker.streamExec).not.toHaveBeenCalled();
+	});
+
+	// Script integrity check: the SSH script must chmod 600 the key file
+	// (ssh refuses keys with looser perms) and write known_hosts to the
+	// canonical path so subsequent `git pull` / `git push` work without
+	// further setup.
+	it("SSH_CLONE_SCRIPT chmods the key 600 and persists to canonical paths", () => {
+		expect(SSH_CLONE_SCRIPT).toContain("chmod 600 ~/.ssh/id_ed25519");
+		expect(SSH_CLONE_SCRIPT).toContain("~/.ssh/known_hosts");
+		// `unset` the secret env vars after the on-disk write so a
+		// child process started by git doesn't inherit them.
+		expect(SSH_CLONE_SCRIPT).toContain("unset ST_SSH_KEY ST_KNOWN_HOSTS");
+	});
+
+	// ── env helpers (PR 188d) ──────────────────────────────────────────────
+
+	// `patEnv` and `sshEnv` produce strings (not numbers / undefined)
+	// for every field — Docker's exec API only accepts string-valued
+	// env. The empty-string convention is what the bash script's
+	// `[ -n ]` guards check; a literal "undefined" would pass the
+	// guard and produce `git clone --branch undefined`.
+	it("patEnv produces string-only values, with empty strings for absent ref/depth", () => {
+		const env = patEnv("ghp_x", { url: "https://example.com/r" });
+		for (const v of Object.values(env)) {
+			expect(typeof v).toBe("string");
+		}
+		expect(env.ST_REF).toBe("");
+		expect(env.ST_DEPTH).toBe("");
+		expect(env.ST_TARGET_ABS).toBe("/home/developer/workspace");
+	});
+
+	it("sshEnv produces string-only values and resolves target", () => {
+		const env = sshEnv("KEYDATA", "HOSTSDATA", {
+			url: "git@github.com:o/p",
+			depth: 5,
+			target: "sub",
+		});
+		expect(env).toEqual({
+			ST_SSH_KEY: "KEYDATA",
+			ST_KNOWN_HOSTS: "HOSTSDATA",
+			ST_URL: "git@github.com:o/p",
+			ST_REF: "",
+			ST_DEPTH: "5",
+			ST_TARGET_ABS: "/home/developer/workspace/sub",
+		});
 	});
 
 	// Output streaming — the runner just forwards the callback. Pin the
