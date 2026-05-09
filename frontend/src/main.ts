@@ -1916,6 +1916,10 @@ function openSaveTemplateModal() {
 function closeSaveTemplateModal() {
 	saveTemplateModal.classList.remove("open");
 	saveTemplateModal.setAttribute("aria-hidden", "true");
+	// Return focus to the trigger button so keyboard users don't lose
+	// their tab-order position. Same shape as `closeInvitesModal` /
+	// `closePasteModal`. PR #229 round 1 NIT.
+	saveTemplateBtn.focus();
 }
 
 saveTemplateBtn.addEventListener("click", () => {
@@ -2565,7 +2569,17 @@ invitesModal.addEventListener("click", (e) => {
 
 document.addEventListener("keydown", (e) => {
 	if (e.key !== "Escape") return;
-	if (newSessionModal.classList.contains("open")) {
+	// Topmost-first: WAI-ARIA 1.2 §6.2 says Escape dismisses the
+	// dialog the user is currently focused on, not the parent it
+	// floats above. The save-template dialog opens ON TOP of the
+	// create-session modal; without this priority, Escape would
+	// close the parent and leave the save-template dialog
+	// orphaned (and the parent's reset would wipe the form
+	// underneath, so confirming the save would persist a stripped
+	// template from default values). PR #229 round 1 SHOULD-FIX.
+	if (saveTemplateModal.classList.contains("open")) {
+		closeSaveTemplateModal();
+	} else if (newSessionModal.classList.contains("open")) {
 		closeNewSessionModal();
 	} else if (invitesModal.classList.contains("open")) {
 		closeInvitesModal();
