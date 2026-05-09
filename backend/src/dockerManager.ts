@@ -14,10 +14,20 @@ import { StringDecoder } from "node:string_decoder";
 import Dockerode from "dockerode";
 import { d1Query } from "./db.js";
 import { logger } from "./logger.js";
+import { getSessionConfig, type SessionConfigRecord } from "./sessionConfig.js";
 import type { SessionManager } from "./sessionManager.js";
 
 const SESSION_IMAGE = process.env.SESSION_IMAGE ?? "shared-terminal-session";
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
+
+// Resource defaults applied at `docker run` when no per-session override
+// is set in `session_configs`. Match the values that have shipped in
+// production since #15. Caps the operator (and #194 in the future) can
+// override per session by writing `cpu_limit` / `mem_limit` on the
+// session_configs row. Hardcoding the floor here so a missing config
+// row doesn't change behaviour from today's deployment.
+const DEFAULT_MEMORY_BYTES = 2 * 1024 * 1024 * 1024;
+const DEFAULT_NANO_CPUS = 2_000_000_000;
 
 // Owner applied to freshly-created workspace directories. Must match the
 // `developer` user inside session-image/Dockerfile (uid/gid 1000 by default).
@@ -136,11 +146,42 @@ export class DockerManager {
 		return `${sessionId}:${tabId}`;
 	}
 
+	/**
+	 * Read the typed session config row for `sessionId`, used by `spawn`
+	 * to apply env vars / resource caps at `docker run` time.
+	 *
+	 * Returns null when no row exists (legitimate "no config supplied"
+	 * state — bare-create sessions). On a D1 transient (network blip,
+	 * Cloudflare API hiccup), logs a warning and returns null so we
+	 * fall back to defaults: a config-row read failure is an availability
+	 * concern, not a correctness one. The caps just reset to today's
+	 * defaults until the next spawn picks the row back up. Failing the
+	 * spawn here would gate every session creation on D1 being healthy,
+	 * which is a worse trade than briefly running with default caps.
+	 */
+	private async loadConfigForSpawn(sessionId: string): Promise<SessionConfigRecord | null> {
+		try {
+			return await getSessionConfig(sessionId);
+		} catch (err) {
+			logger.warn(
+				`[docker] session_configs read failed for ${sessionId}, falling back to defaults: ${(err as Error).message}`,
+			);
+			return null;
+		}
+	}
+
 	// ── Container lifecycle ─────────────────────────────────────────────────
 
 	async spawn(sessionId: string): Promise<string> {
 		const meta = await this.sessions.getOrThrow(sessionId);
-		const envArray = Object.entries(meta.envVars).map(([k, v]) => `${k}=${v}`);
+		// Read the typed session config (#185 / epic #184). When no row
+		// exists, `loadConfigForSpawn` returns null and we fall back to
+		// today's defaults — bare-create sessions stay byte-identical to
+		// pre-185 behaviour. Any D1 transient is downgraded to a warning
+		// inside the helper rather than failing the spawn; the alternative
+		// would gate every session creation on D1 health.
+		const config = await this.loadConfigForSpawn(sessionId);
+		const envArray = mergeEnvForSpawn(meta.envVars, config?.envVars);
 
 		// Pre-create the bind-mount target so Docker doesn't auto-create it
 		// as root. See `ensureWorkspaceOwnership` for the full story and the
@@ -171,20 +212,30 @@ export class DockerManager {
 			Image: SESSION_IMAGE,
 			name: meta.containerName,
 			Hostname: hostname,
-			Env: [
-				`SESSION_ID=${sessionId}`,
-				`SESSION_NAME=${meta.name}`,
-				`TERM=xterm-256color`,
-				`COLORTERM=truecolor`,
-				...envArray,
-			],
+			// `buildContainerEnv` returns a deduplicated `KEY=VALUE[]` array
+			// so the precedence is unambiguous regardless of which reader
+			// resolves the var inside the container. Duplicates in
+			// Docker's `Env` are surprisingly hostile: glibc's `getenv(3)`
+			// is FIRST-wins (scans `environ` from index 0), bash's startup
+			// parser is LAST-wins (each `bind_variable` overwrites), and
+			// programs the user runs may use either. Emitting a single
+			// entry per name closes that ambiguity. See `buildContainerEnv`
+			// for the precedence rules.
+			Env: buildContainerEnv(sessionId, meta.name, envArray),
 			HostConfig: {
 				Binds: [
 					`${WORKSPACE_ROOT}/${sessionId}:/home/developer/workspace`,
 					`${uploadsHostDir}:/home/developer/workspace/uploads:ro`,
 				],
-				Memory: 2 * 1024 * 1024 * 1024,
-				NanoCpus: 2_000_000_000,
+				// `mem_limit` / `cpu_limit` from session_configs override the
+				// hardcoded defaults. Docker pins HostConfig at create time,
+				// so a later config-row UPDATE wouldn't take effect on an
+				// existing container — `startContainer`'s "respawn on stale
+				// id" path picks up new caps when the user fully recycles
+				// (DELETE + POST /start). #194 owns operator-tunable bounds
+				// and per-deployment caps; this PR just wires the consumer.
+				Memory: config?.memLimit ?? DEFAULT_MEMORY_BYTES,
+				NanoCpus: config?.cpuLimit ?? DEFAULT_NANO_CPUS,
 				RestartPolicy: { Name: "unless-stopped" },
 				// Defense-in-depth (issue #15): the image already runs as
 				// unprivileged UID 1000 with no sudo, but we still strip
@@ -1399,6 +1450,80 @@ export function sanitiseHostname(name: string, sessionId: string): string {
 			.slice(0, 63)
 			.replace(/^-+|-+$/g, "") || `session-${sessionId.slice(0, 8)}`
 	);
+}
+
+// Merge per-session env vars with config-supplied env vars for a fresh
+// `docker run`. Two stores coexist (see routes.ts comment): `body.envVars`
+// → `sessions.env_vars` (legacy) and `body.config.envVars` →
+// `session_configs.env_vars_json` (new). Union with config-wins on key
+// collision is the explicit choice — a user who typed an override into
+// the new modal expects it to beat whatever was set via the legacy POST
+// path. Both inputs are already validated through `validateEnvVars` at
+// ingest, so no extra sanitisation needed here. Returns the
+// `KEY=VALUE` array Docker's createContainer.Env wants.
+//
+// Exported for the test suite; not part of the public DockerManager API.
+export function mergeEnvForSpawn(
+	sessionEnv: Record<string, string>,
+	configEnv: Record<string, string> | undefined,
+): string[] {
+	const merged: Record<string, string> = { ...sessionEnv };
+	if (configEnv) {
+		for (const [k, v] of Object.entries(configEnv)) merged[k] = v;
+	}
+	return Object.entries(merged).map(([k, v]) => `${k}=${v}`);
+}
+
+/**
+ * Build the deduplicated `Env` array Docker hands to the container.
+ *
+ * Precedence (highest → lowest), applied as a Map merge so each name
+ * appears exactly once in the result:
+ *
+ *   1. **SESSION_ID / SESSION_NAME** — backend infrastructure identity.
+ *      These cannot appear in `userEnv` because `validateEnvVars`
+ *      denylists them at ingest (#206). Set last so they overwrite any
+ *      pathological value that somehow slipped past the denylist (e.g.
+ *      via direct D1 write).
+ *   2. **userEnv** — the merged session+config user env. Beats the
+ *      defaults in (3).
+ *   3. **TERM / COLORTERM** — terminal driver hints. Deliberately
+ *      user-overridable (e.g. `TERM=tmux-256color` for nested-tmux
+ *      workflows), so they sit at the lowest precedence: applied first,
+ *      then user env can replace them.
+ *
+ * Why dedupe at all: passing duplicates through to Docker's `Env` is
+ * surprisingly hostile. glibc's `getenv(3)` returns the FIRST match;
+ * bash's startup parser uses the LAST (each `bind_variable_value`
+ * overwrites); programs the user runs inside the container may call
+ * either. A single entry per name closes that ambiguity entirely.
+ *
+ * Exported for the test suite.
+ */
+export function buildContainerEnv(
+	sessionId: string,
+	sessionName: string,
+	userEnv: string[],
+): string[] {
+	const out = new Map<string, string>();
+	// (3) Lowest-precedence defaults first.
+	out.set("TERM", "xterm-256color");
+	out.set("COLORTERM", "truecolor");
+	// (2) User entries override the defaults above. `userEnv` is the
+	// already-merged session+config array — itself dedup'd by
+	// `mergeEnvForSpawn`. Defensive guard: skip malformed entries
+	// missing `=` rather than crash; the validators upstream already
+	// reject these shapes, but a future caller bypassing them would
+	// otherwise corrupt the map.
+	for (const entry of userEnv) {
+		const eq = entry.indexOf("=");
+		if (eq <= 0) continue;
+		out.set(entry.slice(0, eq), entry.slice(eq + 1));
+	}
+	// (1) Highest-precedence infra identity. Overwrites anything else.
+	out.set("SESSION_ID", sessionId);
+	out.set("SESSION_NAME", sessionName);
+	return Array.from(out, ([k, v]) => `${k}=${v}`);
 }
 
 // Sanitise an uploaded file's original name into a safe basename that's

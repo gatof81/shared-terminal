@@ -400,17 +400,17 @@ export function buildRouter(
 			}
 			throw err;
 		}
-		// Two env-var stores coexist after #185 lands:
-		//   - `body.envVars` →  `sessions.env_vars`            (legacy)
+		// Two env-var stores coexist after #185:
+		//   - `body.envVars` →  `sessions.env_vars`               (legacy)
 		//   - `body.config.envVars` → `session_configs.env_vars_json`
-		// A single POST can populate both. Today only the legacy store is
-		// applied at `docker run` time (see DockerManager.spawn). PR 185b
-		// (the runner) owns the merge-order decision: union semantics with
-		// config taking precedence on key collisions is the obvious choice,
-		// but it must be the *explicit* choice — accidental "first one
-		// wins by implementation order" would surprise users who expected
-		// the override they typed in the modal to win. Don't add merge
-		// logic here without that decision in 185b.
+		// Both are applied at `docker run` time by `mergeEnvForSpawn` in
+		// DockerManager.spawn — union with config-wins on key collisions
+		// (see PR #206). Both inputs flow through `validateEnvVars` here
+		// so the denylist (PATH, LD_*, SESSION_ID, …) and shape rules
+		// apply identically to either path. The dual-store split exists
+		// because #186 will swap `config.envVars` for typed entries with
+		// AES-GCM-encrypted secrets — the legacy column stays as the
+		// plain-string fast path for callers that don't need secrets.
 		// `body.config` is the new typed config object (#185 / epic #184).
 		// All sub-fields are optional, so an undefined / empty object is
 		// the bare-POST path and behaves exactly like before. A failed
