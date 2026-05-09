@@ -31,9 +31,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import httpProxy from "http-proxy";
-import { verifyJwt } from "./auth.js";
+import { isAllowedWsOrigin, verifyJwt } from "./auth.js";
 import { logger } from "./logger.js";
 import { lookupDispatchTarget } from "./portMappings.js";
+import { endUpgradeSocketWithReply } from "./wsHandler.js";
 
 /**
  * Result of parsing the inbound Host header. `null` means the request
@@ -174,6 +175,22 @@ function buildProxy(): httpProxy {
 export interface DispatcherDeps {
 	/** Parsed `PORT_PROXY_BASE_DOMAIN`. `null` disables the dispatcher. */
 	baseDomain: string | null;
+	/**
+	 * CORS_ORIGINS allowlist used by the WS upgrade path's CSWSH check.
+	 * Same source-of-truth as the existing /ws/sessions WS auth — see
+	 * `isAllowedWsOrigin` in auth.ts. Browsers attach `SameSite=None`
+	 * cookies on cross-site WS upgrades in production, so without an
+	 * origin allowlist a page at `evil.com` could open a WebSocket to
+	 * `wss://p3000-<sid>.tunnel.example.com/`, the dispatcher would
+	 * see the victim's cookie, and the proxy would happily bridge an
+	 * authenticated bidirectional channel into the victim's container.
+	 * `isAllowedWsOrigin` allows missing-Origin (non-browser callers
+	 * like webhooks) and exact / single-label-glob matches against
+	 * this list. PR #223 round 2 SHOULD-FIX.
+	 */
+	corsOrigins: readonly string[];
+	/** Process NODE_ENV — drives `isAllowedWsOrigin`'s wildcard policy. */
+	nodeEnv?: string;
 	/** Test seam: pure host-header parser. Defaults to `makeHostParser`. */
 	parseHost?: (host: string | undefined) => ParsedHost | null;
 	/** Test seam: target lookup. Defaults to D1-backed `lookupDispatchTarget`. */
@@ -278,6 +295,25 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 	function handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): boolean {
 		const parsed = parseHost(req.headers.host);
 		if (!parsed) return false;
+		// CSWSH defence — applies to ALL dispatcher upgrades, not just
+		// private ports. In production the JWT cookie is
+		// `SameSite=None; Secure`, meaning browsers attach it on
+		// cross-site WS handshakes; without an origin allowlist a
+		// page at `evil.com` could open a WebSocket to
+		// `wss://p3000-<sid>.tunnel.example.com/`, the dispatcher
+		// would auth the cookie, and the proxy would bridge an
+		// authenticated channel into the victim's container.
+		// `isAllowedWsOrigin` allows missing-Origin (non-browser
+		// callers like webhook senders, OAuth-callback servers — the
+		// legitimate "public port" use case the issue calls out)
+		// and rejects browser origins not in CORS_ORIGINS. Runs
+		// BEFORE `authorize()` so even a valid cookie can't unlock a
+		// cross-site upgrade. Same defence the /ws/* path applies in
+		// `index.ts`. PR #223 round 2 SHOULD-FIX.
+		if (!isAllowedWsOrigin(req.headers.origin, deps.corsOrigins, deps.nodeEnv)) {
+			endUpgradeSocketWithReply(socket, "HTTP/1.1 403 Forbidden\r\n\r\n");
+			return true;
+		}
 		void authorize(parsed, req.headers.cookie)
 			.then((result) => {
 				if (result.status !== 200) {
@@ -287,22 +323,25 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 					// emitting an HTTP/1.1 status line on the raw
 					// socket lets curl/wscat/the browser see the
 					// reason instead of an unexplained ECONNRESET.
+					// `endUpgradeSocketWithReply` does the half-close-
+					// safe drain (PR #223 round 2 NIT) — `socket.write`
+					// + `socket.destroy()` doesn't guarantee the status
+					// line flushes before teardown when the peer
+					// doesn't FIN.
 					const reason =
 						result.status === 401
 							? "Unauthorized"
 							: result.status === 403
 								? "Forbidden"
 								: "Not Found";
-					socket.write(`HTTP/1.1 ${result.status} ${reason}\r\n\r\n`);
-					socket.destroy();
+					endUpgradeSocketWithReply(socket, `HTTP/1.1 ${result.status} ${reason}\r\n\r\n`);
 					return;
 				}
 				proxy.ws(req, socket, head, { target: `http://127.0.0.1:${result.hostPort}` });
 			})
 			.catch((err) => {
 				logger.error(`[port-dispatcher] WS dispatch failed: ${(err as Error).message}`);
-				socket.write("HTTP/1.1 502 Bad Gateway\r\n\r\n");
-				socket.destroy();
+				endUpgradeSocketWithReply(socket, "HTTP/1.1 502 Bad Gateway\r\n\r\n");
 			});
 		return true;
 	}

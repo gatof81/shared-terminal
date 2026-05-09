@@ -177,11 +177,12 @@ function makeRes(): MockRes {
 	return res;
 }
 
-function makeReq(host: string | undefined, cookie?: string): IncomingMessage {
+function makeReq(host: string | undefined, cookie?: string, origin?: string): IncomingMessage {
 	return {
 		headers: {
 			...(host !== undefined ? { host } : {}),
 			...(cookie ? { cookie } : {}),
+			...(origin ? { origin } : {}),
 		},
 		method: "GET",
 		url: "/",
@@ -190,14 +191,17 @@ function makeReq(host: string | undefined, cookie?: string): IncomingMessage {
 
 describe("createPortDispatcher (HTTP middleware)", () => {
 	it("falls through (calls next) when baseDomain is null", () => {
-		const { middleware } = createPortDispatcher({ baseDomain: null });
+		const { middleware } = createPortDispatcher({ baseDomain: null, corsOrigins: [] });
 		const next = vi.fn();
 		middleware(makeReq("api.example.com"), makeRes() as unknown as ServerResponse, next);
 		expect(next).toHaveBeenCalledTimes(1);
 	});
 
 	it("falls through when host doesn't match the dispatcher pattern", () => {
-		const { middleware } = createPortDispatcher({ baseDomain: "tunnel.example.com" });
+		const { middleware } = createPortDispatcher({
+			baseDomain: "tunnel.example.com",
+			corsOrigins: [],
+		});
 		const next = vi.fn();
 		middleware(makeReq("api.example.com"), makeRes() as unknown as ServerResponse, next);
 		expect(next).toHaveBeenCalledTimes(1);
@@ -218,6 +222,7 @@ describe("createPortDispatcher (HTTP middleware)", () => {
 		} as unknown as Parameters<typeof createPortDispatcher>[0]["proxy"];
 		const dispatcher = createPortDispatcher({
 			baseDomain: "tunnel.example.com",
+			corsOrigins: ["https://app.example.com"],
 			lookupTarget: vi.fn(async () => opts.target),
 			verifyToken: vi.fn(() =>
 				opts.token === undefined || opts.token === null ? null : { sub: opts.token },
@@ -313,6 +318,7 @@ describe("createPortDispatcher (HTTP middleware)", () => {
 	it("502s on an unexpected error in lookup or verify", async () => {
 		const dispatcher = createPortDispatcher({
 			baseDomain: "tunnel.example.com",
+			corsOrigins: [],
 			lookupTarget: vi.fn(async () => {
 				throw new Error("D1 unreachable");
 			}),
@@ -338,9 +344,17 @@ describe("createPortDispatcher (WS upgrade)", () => {
 	function makeSocket(): { socket: Duplex; written: string[]; destroyed: boolean } {
 		const written: string[] = [];
 		let destroyed = false;
+		// `endUpgradeSocketWithReply` calls `.end(reply)` then later
+		// `.destroy()`; the original direct path used `.write()`.
+		// Capture both forms into `written` so tests that assert "the
+		// dispatcher emitted a status line" don't have to care which
+		// helper produced it.
 		const socket = {
 			write(s: string) {
 				written.push(s);
+			},
+			end(s?: string) {
+				if (typeof s === "string") written.push(s);
 			},
 			destroy() {
 				destroyed = true;
@@ -364,6 +378,7 @@ describe("createPortDispatcher (WS upgrade)", () => {
 					ownerUserId: string;
 				} | null,
 		token?: string | null,
+		opts?: { corsOrigins?: readonly string[]; nodeEnv?: string },
 	): {
 		handleUpgrade: ReturnType<typeof createPortDispatcher>["handleUpgrade"];
 		wsSpy: ReturnType<typeof vi.fn>;
@@ -371,6 +386,8 @@ describe("createPortDispatcher (WS upgrade)", () => {
 		const wsSpy = vi.fn();
 		const dispatcher = createPortDispatcher({
 			baseDomain: "tunnel.example.com",
+			corsOrigins: opts?.corsOrigins ?? ["https://app.example.com"],
+			nodeEnv: opts?.nodeEnv,
 			lookupTarget: vi.fn(async () => target),
 			verifyToken: vi.fn(() => (token === undefined || token === null ? null : { sub: token })),
 			proxy: { web: vi.fn(), ws: wsSpy, on: vi.fn() } as unknown as Parameters<
@@ -437,5 +454,84 @@ describe("createPortDispatcher (WS upgrade)", () => {
 		await new Promise((r) => setImmediate(r));
 		expect(written.some((line) => line.includes("404"))).toBe(true);
 		expect(wsSpy).not.toHaveBeenCalled();
+	});
+
+	// PR #223 round 2 SHOULD-FIX. CSWSH defence on the WS upgrade
+	// path. SameSite=None cookies travel cross-site on WS upgrades
+	// in production; without an origin allowlist a page at
+	// `evil.com` could open a WebSocket to the dispatcher, the
+	// browser would attach the victim's cookie, and the proxy
+	// would bridge an authenticated channel into the victim's
+	// container. These tests pin the gate firmly BEFORE authorize()
+	// runs (no cookie validation, no D1 round-trip on a rejected
+	// origin).
+	it("rejects a cross-origin browser WS even when the cookie would auth", async () => {
+		const lookup = vi.fn(async () => ({
+			hostPort: 32768,
+			isPublic: false,
+			ownerUserId: "u-owner",
+		}));
+		const verify = vi.fn(() => ({ sub: "u-owner" }));
+		const wsSpy = vi.fn();
+		const dispatcher = createPortDispatcher({
+			baseDomain: "tunnel.example.com",
+			corsOrigins: ["https://app.example.com"],
+			lookupTarget: lookup,
+			verifyToken: verify,
+			proxy: { web: vi.fn(), ws: wsSpy, on: vi.fn() } as unknown as Parameters<
+				typeof createPortDispatcher
+			>[0]["proxy"],
+		});
+		const { socket, written } = makeSocket();
+		dispatcher.handleUpgrade(
+			makeReq(`p3000-${SID}.tunnel.example.com`, "st_token=jwt", "https://evil.com"),
+			socket,
+			Buffer.alloc(0),
+		);
+		await new Promise((r) => setImmediate(r));
+		expect(written.some((line) => line.includes("403"))).toBe(true);
+		expect(wsSpy).not.toHaveBeenCalled();
+		// Critical: the gate runs BEFORE lookup/verify, so even a
+		// malicious origin with a valid cookie never reaches the
+		// authorize() codepath.
+		expect(lookup).not.toHaveBeenCalled();
+		expect(verify).not.toHaveBeenCalled();
+	});
+
+	it("allows a same-origin browser WS that's in the allowlist", async () => {
+		const { handleUpgrade, wsSpy } = makeDispatcherWith(
+			{ hostPort: 32768, isPublic: false, ownerUserId: "u-owner" },
+			"u-owner",
+			{ corsOrigins: ["https://app.example.com"] },
+		);
+		const { socket } = makeSocket();
+		handleUpgrade(
+			makeReq(`p3000-${SID}.tunnel.example.com`, "st_token=jwt", "https://app.example.com"),
+			socket,
+			Buffer.alloc(0),
+		);
+		await new Promise((r) => setImmediate(r));
+		expect(wsSpy).toHaveBeenCalledTimes(1);
+	});
+
+	// Webhook / OAuth callback shape: no Origin header. The issue
+	// calls these out as the legitimate `public: true` use case;
+	// `isAllowedWsOrigin` returns true on missing Origin (Branch 1)
+	// so a server-side caller without a browser still works.
+	it("allows a missing-Origin upgrade (webhook / OAuth callback shape)", async () => {
+		const { handleUpgrade, wsSpy } = makeDispatcherWith(
+			{ hostPort: 32768, isPublic: true, ownerUserId: "u1" },
+			null,
+			{ corsOrigins: ["https://app.example.com"] },
+		);
+		const { socket } = makeSocket();
+		handleUpgrade(
+			// No origin arg → no Origin header on the request.
+			makeReq(`p3000-${SID}.tunnel.example.com`),
+			socket,
+			Buffer.alloc(0),
+		);
+		await new Promise((r) => setImmediate(r));
+		expect(wsSpy).toHaveBeenCalledTimes(1);
 	});
 });

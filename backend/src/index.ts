@@ -107,7 +107,15 @@ if (PORT_PROXY_BASE_DOMAIN) {
 		"[server] PORT_PROXY_BASE_DOMAIN unset — port-exposure dispatcher disabled (set to *.<base> to enable)",
 	);
 }
-const portDispatcher = createPortDispatcher({ baseDomain: PORT_PROXY_BASE_DOMAIN });
+const portDispatcher = createPortDispatcher({
+	baseDomain: PORT_PROXY_BASE_DOMAIN,
+	// CSWSH defence on the WS upgrade path mirrors what the
+	// /ws/sessions handler below does — same allowlist, same
+	// `isAllowedWsOrigin` policy. See `handleUpgrade` in
+	// portDispatcher.ts for the rationale.
+	corsOrigins: CORS_ORIGINS,
+	nodeEnv: process.env.NODE_ENV,
+});
 
 // ── Express app ───────────────────────────────────────────────────────────────
 
