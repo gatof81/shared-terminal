@@ -440,9 +440,11 @@ export async function revokeInvite(codeHash: string): Promise<void> {
 // ── File uploads ────────────────────────────────────────────────────────────
 
 /**
- * Upload one or more files to a session's workspace. The backend writes
- * them under `<workspace>/uploads/` and returns the in-container paths
- * the user can pass to Claude CLI.
+ * Upload one or more files to a session. The backend writes them
+ * under `~/uploads/` (in-container path, sibling of the workspace —
+ * #188 PR 188a moved it out of the workspace tree so a clone at the
+ * workspace root has a clean target) and returns the in-container
+ * paths the user can pass to Claude CLI.
  */
 export async function uploadSessionFiles(
 	sessionId: string,
