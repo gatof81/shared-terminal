@@ -29,11 +29,11 @@ docker build -t shared-terminal-session ./session-image
 docker compose up -d --build
 ```
 
-Backend has a vitest suite — `cd backend && npm test` (also runs in CI). No frontend tests yet, and no linter is wired up. CI (`.github/workflows/ci.yml`) runs `tsc` and (backend) `vitest` on every PR, so typos and broken tests will block merge. Beyond that, verify by running `npm run build` in both workspaces and exercising the feature in a browser.
+Both workspaces have vitest suites and a Biome linter — `npm test` and `npm run lint` in each. CI (`.github/workflows/ci.yml`) runs Biome + `tsc` + vitest on every PR, in both workspaces, so a lint or test failure in either side blocks merge. Don't rely on `npm run build` alone — that's tsc, not Biome. Beyond that, verify by exercising the feature in a browser.
 
 ## Required environment
 
-Backend refuses to start without `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, and `D1_DATABASE_ID` (see `validateD1Config` in `backend/src/db.ts`). `JWT_SECRET` should also be set for anything past local experimentation. `.env.example` is the source of truth.
+Backend refuses to start without `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `D1_DATABASE_ID` (see `validateD1Config` in `backend/src/db.ts`), or `SECRETS_ENCRYPTION_KEY` (a base64-encoded 32-byte key validated by `validateSecretsKey` in `secrets.ts` — it AES-256-GCM-encrypts `secret`-typed env entries before D1, so changing it strands every existing secret with no rotation tooling in v1). `JWT_SECRET` should also be set for anything past local experimentation. `.env.example` is the source of truth.
 
 `WORKSPACE_ROOT` (default `/var/shared-terminal/workspaces`) must exist on the host and be writable by the backend — each session gets a `<WORKSPACE_ROOT>/<sessionId>` bind mount.
 
@@ -60,9 +60,13 @@ Multiple browser tabs attaching to the same session share the same tmux exec (ea
 
 ### Persistence model
 
-- **Container state is ephemeral** — killed by `stopContainer` / `kill`. The bind-mounted workspace at `/home/developer/workspace` inside the container is what survives.
-- **D1 is the source of truth** for session metadata (`session_id`, `container_id`, `status`, `env_vars`, `cols/rows`).
+- **Container state is ephemeral** — killed by `stopContainer` / `kill`. The bind-mounted workspace at `/home/developer/workspace` inside the container is what survives. Uploaded files live on a separate read-only bind mount at `/home/developer/uploads` (host path: `<WORKSPACE_ROOT>/.uploads/<sessionId>`) — kept out of the workspace so a repo-clone "replace workspace" can land cleanly at the workspace root. See the comment block in `dockerManager.ts` near the bind setup for the TOCTOU rationale.
+- **D1 is the source of truth** for session metadata (`session_id`, `container_id`, `status`, `env_vars`, `cols/rows`) and for the `session_configs` row that holds typed env entries (with `secret`-typed values AES-GCM-encrypted at rest), repo + auth config, lifecycle hook commands, dotfiles + agent-seed config, and resource caps. Config is bound at create time — there is no "edit config of a running session" flow.
 - **`DockerManager.reconcile()`** runs on startup and flips the D1 `status` to `stopped` for any session whose container is missing or not running — handles the case where the host rebooted but D1 still thinks sessions are live.
+
+### Bootstrap (lifecycle hooks)
+
+`POST /api/sessions` returns 201 immediately and runs the bootstrap pipeline asynchronously: git identity → repo clone → dotfiles → agent seed → `postCreate` command. The clone-before-dotfiles ordering is load-bearing: dotfiles may reference repo-specific config, and the agent seed is intentionally last so a cloned project's `CLAUDE.md` is on disk before the seed fires. `postCreate` is gated by an atomic `session_configs.bootstrapped_at` flip so it runs **exactly once** per session even under concurrent retries (see `bootstrap.ts`). `postStart` re-runs on every container start (intended for daemons). Total wall-clock cap is 10 minutes — `streamExec` is destroyed past that and the session hard-fails. Live output streams over `/ws/bootstrap/<sessionId>` (auth identical to terminal attach but routed to `BootstrapBroadcaster`'s per-session listener set, not `docker.attach`).
 
 ### Delete semantics
 
@@ -74,6 +78,7 @@ Multiple browser tabs attaching to the same session share the same tmux exec (ea
 - REST: `requireAuth` middleware reads `req.cookies.st_token` (cookie-parser populated) with a raw-`Cookie`-header fallback for tests bypassing middleware. First visit shows `needsSetup: true` from `/api/auth/status`, which also returns `authenticated` so the frontend can route between login and app on first load without a separate round-trip.
 - WebSocket: `verifyWsToken` reads the cookie from the upgrade request's `Cookie` header — browsers send cookies on the WS handshake to the cookie's domain automatically. CSWSH protection is independent: `isAllowedWsOrigin` rejects unlisted origins before `wss.handleUpgrade` runs. There is no subprotocol or query-string auth fallback.
 - `sessions.assertOwnership(sessionId, userId)` is the single choke point for authorization on REST and WebSocket paths.
+- Two-tier user model: the bootstrap account is created with `is_admin=1`; invite-redeeming users default to non-admin. Invite mint/revoke is admin-gated (#50). Add new admin-only routes through the same `is_admin` check, not a parallel mechanism.
 
 ### Notes on D1
 
