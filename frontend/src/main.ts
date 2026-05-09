@@ -1510,8 +1510,16 @@ export function collectAdvancedForSubmit(): {
 		out.dotfiles = dot;
 	}
 
-	const settings = agentSeedSettings.value;
-	const claudeMd = agentSeedClaudeMd.value;
+	// Trim BOTH fields before the empty check (PR #219 round 1
+	// SHOULD-FIX). A whitespace-only `settings` would otherwise pass
+	// the empty-check and reach the backend, where `JSON.parse("  ")`
+	// throws and Zod returns a 400 with no inline-error indication.
+	// Trimming JSON is safe — leading/trailing whitespace is
+	// insignificant per the spec. Trimming `claudeMd` is also fine
+	// here because the backend's bootstrap stage skips writing the
+	// file when the value is empty after the runner's own check.
+	const settings = agentSeedSettings.value.trim();
+	const claudeMd = agentSeedClaudeMd.value.trim();
 	if (settings !== "" || claudeMd !== "") {
 		const seed: NonNullable<SessionConfigPayload["agentSeed"]> = {};
 		if (settings !== "") seed.settings = settings;
