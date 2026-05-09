@@ -124,6 +124,18 @@ describe("validateSessionConfig", () => {
 		);
 	});
 
+	// Empty hook commands are indistinguishable from "no hook configured"
+	// once stored — refuse them at ingest so the bootstrap runner in PR
+	// 185b can use a presence-only check instead of a truthy check.
+	it("rejects an empty postCreateCmd / postStartCmd", () => {
+		expect(() => validateSessionConfig({ postCreateCmd: "" })).toThrowError(
+			SessionConfigValidationError,
+		);
+		expect(() => validateSessionConfig({ postStartCmd: "" })).toThrowError(
+			SessionConfigValidationError,
+		);
+	});
+
 	// Repo URL scheme allowlist — closes the file:// / ssh:// hole the
 	// review bot flagged. PR 188 will read these values straight into a
 	// git-clone consumer, so refusing them at ingest is the only place

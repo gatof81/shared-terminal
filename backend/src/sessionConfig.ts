@@ -91,9 +91,14 @@ export const SessionConfigSchema = z
 		cpuLimit: z.number().int().positive().max(MAX_CPU_NANO).optional(),
 		memLimit: z.number().int().positive().max(MAX_MEM_BYTES).optional(),
 		idleTtlSeconds: z.number().int().positive().max(MAX_IDLE_TTL_S).optional(),
-		// #191 — populated by the hooks form
-		postCreateCmd: z.string().max(MAX_HOOK_LEN).optional(),
-		postStartCmd: z.string().max(MAX_HOOK_LEN).optional(),
+		// #191 — populated by the hooks form. `.min(1)` so a stored
+		// empty string can never be confused with "no hook configured":
+		// the bootstrap runner in PR 185b can use `post_create_cmd IS
+		// NOT NULL` (or the reverse-mapped `postCreateCmd !== undefined`)
+		// as the canonical "should this hook run?" predicate without
+		// having to also defend against `""`.
+		postCreateCmd: z.string().min(1).max(MAX_HOOK_LEN).optional(),
+		postStartCmd: z.string().min(1).max(MAX_HOOK_LEN).optional(),
 		// #190 — populated by the ports form
 		ports: z.array(PortSpec).max(MAX_PORTS).optional(),
 		// #186 — populated by the env/secrets form. Loose Record-of-strings
