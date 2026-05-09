@@ -108,6 +108,17 @@ const DENIED_ENV_VAR_NAMES = new Set([
 	// extends @INC.
 	"PERL5OPT",
 	"PERL5LIB",
+
+	// Backend-set infrastructure identifiers. DockerManager.spawn writes
+	// these into the container Env so #191's hooks (and any future per-
+	// session tooling) can read them as the authoritative session
+	// identity. Letting a user override them via session config would
+	// silently misdirect a hook that does `if [ "$SESSION_ID" = … ]`,
+	// which becomes load-bearing once PR 185b2 lands the postCreate /
+	// postStart runner. There is no legitimate user reason to set these
+	// — both are derived from the row the backend just inserted.
+	"SESSION_ID",
+	"SESSION_NAME",
 ]);
 
 // Prefix matches for categories that grow over time (new LD_* / DYLD_*

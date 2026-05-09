@@ -178,6 +178,15 @@ describe("validateEnvVars", () => {
 		expect(() => validateEnvVars({ SHELL: "/bin/sh" })).toThrow(/reserved/);
 	});
 
+	// PR 206 review: SESSION_ID / SESSION_NAME are written by
+	// DockerManager.spawn from the authoritative D1 row. A user override
+	// would silently misdirect #191's hooks that read `$SESSION_ID` to
+	// identify their context.
+	it("rejects backend infrastructure identifiers SESSION_ID / SESSION_NAME", () => {
+		expect(() => validateEnvVars({ SESSION_ID: "../other" })).toThrow(/reserved/);
+		expect(() => validateEnvVars({ SESSION_NAME: "spoof" })).toThrow(/reserved/);
+	});
+
 	it("rejects all LD_* dynamic-linker variables (prefix match)", () => {
 		// LD_PRELOAD and friends are the obvious ones; the prefix
 		// match also catches less-well-known vectors (LD_AUDIT,
