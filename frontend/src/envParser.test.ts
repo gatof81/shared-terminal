@@ -124,6 +124,31 @@ BAZ=qux
 		]);
 	});
 
+	// PR #211 round 1: `MSG='it's alive'` — `indexOf` finds the
+	// first `'` at position 3 (the apostrophe in "it's"), not the
+	// real close at the end. Without the tail-validation guard the
+	// parser silently returns `MSG=it`. Pin the skip path so the
+	// "no silent drops" contract holds.
+	it("skips quoted lines whose closing quote is followed by non-comment text (embedded same-quote)", () => {
+		const r = parseDotEnv(`MSG='it's alive'\nOK=ok\n`);
+		expect(r.parsed).toEqual([{ name: "OK", value: "ok" }]);
+		expect(r.skipped).toEqual([
+			{
+				line: 1,
+				reason: "embedded single-quote in value (use the other quote char or remove the quote)",
+			},
+		]);
+	});
+
+	it("skips quoted lines with a stray non-comment tail after closing quote", () => {
+		// `FOO="bar" baz` — closing quote is correct but `baz` after
+		// is neither whitespace nor `# comment`; ambiguous, skip.
+		const r = parseDotEnv(`FOO="bar" baz\n`);
+		expect(r.parsed).toEqual([]);
+		expect(r.skipped).toHaveLength(1);
+		expect(r.skipped[0]?.reason).toMatch(/embedded double-quote/);
+	});
+
 	it("returns counts of parsed + skipped so the modal can summarise", () => {
 		// "Imported 2, skipped 1 (line 2: missing =)" UX shape.
 		const r = parseDotEnv("FOO=bar\ngarbage\nBAZ=qux\n");

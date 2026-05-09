@@ -125,7 +125,21 @@ function stripQuotes(
 		});
 		return null;
 	}
-	// Anything after the closing quote we tolerate as a comment-or-
-	// whitespace tail. We don't validate it; the user pasted it.
+	// Validate the tail after `closeIdx`: anything that's whitespace
+	// (often before a `# trailing comment`) or a `#` directly is fine
+	// — those are tolerated as comment-or-whitespace tails. Anything
+	// else implies the `closeIdx` we found was actually an embedded
+	// quote in the middle of the value (e.g. `MSG='it's alive'`),
+	// which `indexOf` greedily matches before the real close. The
+	// module's "no silent drops" guarantee says we must skip + log,
+	// not return a truncated value (#211 round 1).
+	const tail = trimmed.slice(closeIdx + 1).trimStart();
+	if (tail !== "" && !tail.startsWith("#")) {
+		skipped.push({
+			line: lineNo,
+			reason: `embedded ${firstCh === '"' ? "double" : "single"}-quote in value (use the other quote char or remove the quote)`,
+		});
+		return null;
+	}
 	return trimmed.slice(1, closeIdx);
 }

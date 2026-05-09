@@ -143,15 +143,6 @@ export interface SessionInfo {
 // ── Session API ─────────────────────────────────────────────────────────────
 
 /**
- * Typed session configuration sent under POST /sessions `body.config`.
- *
- * Mirrors `SessionConfigSchema` in the backend (`backend/src/sessionConfig.ts`).
- * Every sub-field is optional; today the new-session modal only fills in the
- * `name` (Basics tab) and leaves `config` undefined — children of epic #184
- * (#186, #188, #190, #191, #194) flesh out their respective fields as they
- * ship. Keep this in sync with the backend Zod schema or the call will 400.
- */
-/**
  * Typed env-var entry on the wire (#186 / PR 186c). Mirrors the
  * backend `EnvVarEntryInput` discriminated union from
  * `backend/src/sessionConfig.ts`. Both `plain` and `secret` carry
@@ -164,6 +155,16 @@ export type EnvVarEntryInput =
 	| { name: string; type: "secret"; value: string }
 	| { name: string; type: "secret-slot" };
 
+/**
+ * Typed session configuration sent under POST /sessions `body.config`.
+ *
+ * Mirrors `SessionConfigSchema` in the backend (`backend/src/sessionConfig.ts`).
+ * Every sub-field is optional; today the new-session modal only fills in the
+ * `name` (Basics tab) and `envVars` (Env tab) and leaves the rest undefined
+ * — children of epic #184 (#188, #190, #191, #194) flesh out their respective
+ * fields as they ship. Keep this in sync with the backend Zod schema or the
+ * call will 400.
+ */
 export interface SessionConfigPayload {
 	workspaceStrategy?: "preserve" | "clone";
 	cpuLimit?: number;

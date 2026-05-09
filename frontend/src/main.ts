@@ -1344,7 +1344,14 @@ function syncEnvRowsFromDom() {
 		if (!row) continue;
 		const nameInput = tr.querySelector<HTMLInputElement>('[data-field="name"]');
 		const valueInput = tr.querySelector<HTMLInputElement>('[data-field="value"]');
-		if (nameInput) row.name = nameInput.value;
+		// Uppercase at the read site (#211 round 1). The Env-table CSS
+		// applies `text-transform: uppercase` for visual consistency,
+		// but DOM `.value` returns raw keystrokes — a desktop user
+		// typing `foo` sees `FOO` rendered and then hits the backend's
+		// `^[A-Z_][A-Z0-9_]*$` regex with the lowercase value on
+		// submit. `.toUpperCase()` here keeps state aligned with the
+		// rendering. `autocapitalize` already handled mobile.
+		if (nameInput) row.name = nameInput.value.toUpperCase();
 		if (valueInput) row.value = valueInput.value;
 	}
 }
