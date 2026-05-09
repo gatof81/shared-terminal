@@ -383,7 +383,16 @@ export function encryptSecretEntries(entries: EnvVarEntryInput[]): EnvVarEntrySt
  * a container with a missing or wrong-valued env var.
  */
 export function decryptStoredEntries(entries: EnvVarEntryStored[]): Record<string, string> {
-	const out: Record<string, string> = {};
+	// `Object.create(null)` so a write-capable D1 attacker can't smuggle
+	// a `__proto__` / `constructor` / `prototype` named entry past
+	// `parseEnvVarsColumn` and trip the JS engine's Object.prototype
+	// setter when we assign by name. Concrete risk is low (the polluted
+	// key wouldn't survive the downstream `Object.entries` iteration in
+	// `mergeEnvForSpawn` either), but the WIRE-path denylist in
+	// `checkEnvVarSafety` doesn't fire on the rehydration path; this
+	// closes the defence-in-depth gap at the layer closest to D1.
+	// PR #210 round 5 review.
+	const out = Object.create(null) as Record<string, string>;
 	for (const entry of entries) {
 		if (entry.type === "plain") {
 			out[entry.name] = entry.value;
