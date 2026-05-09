@@ -1996,13 +1996,17 @@ export function collectPortsForSubmit(): {
 	const out: NonNullable<SessionConfigPayload["ports"]> = [];
 	for (const row of portRows) {
 		if (row.container === "") continue;
-		// `parseInt(_, 10)` + `Number.isInteger` matches the rest of the
-		// file's integer-parsing idiom and catches the corner where
-		// `Number("3000.9")` would silently truncate to `3000` —
-		// `type="number"` mostly prevents that at the browser layer,
-		// but the value can still arrive non-integer via paste or a
-		// browser without strict step-validation. PR #224 round 1 NIT.
-		const parsed = Number.parseInt(row.container, 10);
+		// `Number()` + `Number.isInteger` REJECTS decimal-like input
+		// instead of silently truncating it. `Number("3000.9")` is
+		// `3000.9` → not an integer → row dropped, the user retypes a
+		// real port. `parseInt("3000.9", 10)` would return `3000`,
+		// which is exactly the truncation we want to avoid (a user
+		// who typed `3000.9` clearly didn't mean port 3000).
+		// `type="number"` step=1 mostly prevents this at the browser
+		// layer, but pasted text or a non-strict browser can still
+		// surface it. PR #224 round 2 NIT (corrects round 1, which
+		// inadvertently used `parseInt` and silently truncated).
+		const parsed = Number(row.container);
 		if (!Number.isInteger(parsed)) continue;
 		out.push({ container: parsed, public: row.public });
 	}
