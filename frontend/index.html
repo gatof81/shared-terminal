@@ -434,24 +434,151 @@
             aria-labelledby="session-tab-advanced-tab"
             hidden
           >
-            <p class="session-placeholder">
-              Lifecycle hooks (post-create / post-start commands), dotfiles,
-              git identity, agent config seed, and per-session resource caps
-              live here. Wired up in
-              <a
-                href="https://github.com/gatof81/shared-terminal/issues/191"
-                target="_blank"
-                rel="noopener"
-                >#191</a
-              >
-              and
-              <a
-                href="https://github.com/gatof81/shared-terminal/issues/194"
-                target="_blank"
-                rel="noopener"
-                >#194</a
-              >.
+            <p class="modal-hint">
+              These run during session bootstrap. Total wall-clock time
+              across all stages is capped at 10 minutes.
             </p>
+
+            <fieldset class="advanced-section">
+              <legend>Git identity</legend>
+              <p class="modal-hint">
+                Sets <code>user.name</code> /
+                <code>user.email</code> globally inside the session
+                container so commits land with the right identity.
+              </p>
+              <div class="repo-fields-row">
+                <label class="modal-field">
+                  <span>Name</span>
+                  <input
+                    type="text"
+                    id="git-identity-name"
+                    placeholder="Ada Lovelace"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                </label>
+                <label class="modal-field">
+                  <span>Email</span>
+                  <input
+                    type="email"
+                    id="git-identity-email"
+                    placeholder="ada@example.com"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                </label>
+              </div>
+            </fieldset>
+
+            <fieldset class="advanced-section">
+              <legend>Dotfiles</legend>
+              <p class="modal-hint">
+                Cloned into <code>~/dotfiles</code> before the
+                <code>postCreate</code> hook. Uses the same auth
+                credentials as the main repo above (PAT or SSH).
+                Optional install script runs from inside the cloned
+                tree on success.
+              </p>
+              <label class="modal-field">
+                <span>Repository URL</span>
+                <input
+                  type="text"
+                  id="dotfiles-url"
+                  placeholder="https://github.com/owner/dotfiles  or  git@github.com:owner/dotfiles"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </label>
+              <div class="repo-fields-row">
+                <label class="modal-field">
+                  <span>Ref (optional)</span>
+                  <input
+                    type="text"
+                    id="dotfiles-ref"
+                    placeholder="main (empty = remote HEAD)"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                </label>
+                <label class="modal-field">
+                  <span>Install script (optional)</span>
+                  <input
+                    type="text"
+                    id="dotfiles-install-script"
+                    placeholder="install.sh"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                </label>
+              </div>
+            </fieldset>
+
+            <fieldset class="advanced-section">
+              <legend>Agent config seed</legend>
+              <p class="modal-hint">
+                Both files are written verbatim into
+                <code>~/.claude/</code> so the Claude CLI starts
+                pre-configured. Settings must be valid JSON.
+              </p>
+              <label class="modal-field">
+                <span>~/.claude/settings.json</span>
+                <textarea
+                  id="agent-seed-settings"
+                  rows="6"
+                  placeholder='{"theme":"dark","editor":{"tabSize":2}}'
+                  autocomplete="off"
+                  spellcheck="false"
+                ></textarea>
+                <span
+                  id="agent-seed-settings-error"
+                  class="modal-field-error"
+                  aria-live="polite"
+                ></span>
+              </label>
+              <label class="modal-field">
+                <span>~/.claude/CLAUDE.md</span>
+                <textarea
+                  id="agent-seed-claude-md"
+                  rows="6"
+                  placeholder="# Project notes&#10;- Use TS strict mode."
+                  autocomplete="off"
+                  spellcheck="false"
+                ></textarea>
+              </label>
+            </fieldset>
+
+            <fieldset class="advanced-section">
+              <legend>Lifecycle commands</legend>
+              <label class="modal-field">
+                <span>postCreate command</span>
+                <textarea
+                  id="post-create-cmd"
+                  rows="3"
+                  placeholder="npm install"
+                  autocomplete="off"
+                  spellcheck="false"
+                ></textarea>
+                <span class="modal-hint-inline">
+                  Runs once on first creation, after clone + dotfiles +
+                  agent seed. Failure aborts session creation.
+                </span>
+              </label>
+              <label class="modal-field">
+                <span>postStart command</span>
+                <textarea
+                  id="post-start-cmd"
+                  rows="3"
+                  placeholder="npm run dev"
+                  autocomplete="off"
+                  spellcheck="false"
+                ></textarea>
+                <span class="modal-hint-inline">
+                  Runs every container start in tmux window
+                  <code>bootstrap</code>. For long-running daemons
+                  (e.g. <code>code tunnel</code>, <code>npm run dev</code>).
+                </span>
+              </label>
+            </fieldset>
           </div>
           <div class="session-modal-actions">
             <button type="button" data-close-modal>Cancel</button>

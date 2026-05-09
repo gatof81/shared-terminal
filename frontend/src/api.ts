@@ -186,6 +186,21 @@ export interface SessionConfigPayload {
 		pat?: string;
 		ssh?: { privateKey: string; knownHosts: string };
 	};
+	// #191 — git identity / dotfiles / agent config seed. All three
+	// are independent and skippable; the backend's bootstrap runner
+	// walks each stage in declared order and runs only the configured
+	// ones. `null` is the wire-shape signal for "explicitly not
+	// configured" (treated identically to omission).
+	gitIdentity?: { name: string; email: string } | null;
+	dotfiles?: {
+		url: string;
+		ref?: string | null;
+		installScript?: string | null;
+	} | null;
+	agentSeed?: {
+		settings?: string | null;
+		claudeMd?: string | null;
+	} | null;
 	ports?: Array<{ port: number; protocol?: "http" | "tcp" }>;
 	envVars?: EnvVarEntryInput[];
 }

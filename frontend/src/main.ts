@@ -1224,6 +1224,9 @@ function closeNewSessionModal() {
 	// credential fields (PAT, SSH key) — leaving them mounted would
 	// risk leaking a stale credential into the next session create.
 	resetRepoTab();
+	// Reset Advanced-tab state on close (#191 PR 191c). Same
+	// rationale plus the agent-seed bodies can be substantial.
+	resetAdvancedTab();
 	(newSessionOpener ?? newSessionBtn).focus();
 	newSessionOpener = null;
 }
@@ -1385,6 +1388,143 @@ export function collectRepoForSubmit(): {
 	// knownHosts.ts). Custom mode passes the textarea content verbatim.
 	const knownHosts = knownHostsMode === "custom" ? repoAuthSshKnownHostsCustom.value : "default";
 	return { repo, auth: { ssh: { privateKey, knownHosts } } };
+}
+
+// ── Advanced tab (#191 / PR 191c) ───────────────────────────────────────────
+//
+// Four sections: Git identity, Dotfiles, Agent config seed, and the
+// existing postCreate / postStart lifecycle commands. State is read
+// directly from the DOM at submit time (`collectAdvancedForSubmit`)
+// — same pattern as the Repo tab, no in-memory mirror needed.
+//
+// `resetAdvancedTab()` runs on modal close. Critical for the agent-
+// seed textareas in particular: those bodies can be substantial
+// (settings.json, CLAUDE.md), and leaving them mounted between
+// closes risks the next session-create operator submitting stale
+// content from a previous attempt.
+//
+// `validateAgentSeedSettings()` runs on blur of the settings.json
+// textarea: client-side JSON parse → red error message inline. The
+// backend's Zod refine is the source of truth (catches the same
+// case with a 400), but immediate feedback is much friendlier than
+// waiting for submit.
+
+const gitIdentityName = document.getElementById("git-identity-name") as HTMLInputElement;
+const gitIdentityEmail = document.getElementById("git-identity-email") as HTMLInputElement;
+const dotfilesUrl = document.getElementById("dotfiles-url") as HTMLInputElement;
+const dotfilesRef = document.getElementById("dotfiles-ref") as HTMLInputElement;
+const dotfilesInstallScript = document.getElementById(
+	"dotfiles-install-script",
+) as HTMLInputElement;
+const agentSeedSettings = document.getElementById("agent-seed-settings") as HTMLTextAreaElement;
+const agentSeedSettingsError = document.getElementById(
+	"agent-seed-settings-error",
+) as HTMLSpanElement;
+const agentSeedClaudeMd = document.getElementById("agent-seed-claude-md") as HTMLTextAreaElement;
+const postCreateCmd = document.getElementById("post-create-cmd") as HTMLTextAreaElement;
+const postStartCmd = document.getElementById("post-start-cmd") as HTMLTextAreaElement;
+
+/**
+ * Validate `~/.claude/settings.json` content client-side. Backend's
+ * Zod refine catches the same case with a precise 400, but inline
+ * feedback on blur is much friendlier than a server round-trip.
+ *
+ * Returns true when valid (or empty — empty is "don't write the
+ * file" per the schema). Sets the inline error message as a side
+ * effect.
+ */
+function validateAgentSeedSettings(): boolean {
+	const value = agentSeedSettings.value;
+	if (value.trim() === "") {
+		agentSeedSettingsError.textContent = "";
+		return true;
+	}
+	try {
+		JSON.parse(value);
+		agentSeedSettingsError.textContent = "";
+		return true;
+	} catch (err) {
+		agentSeedSettingsError.textContent = `Invalid JSON: ${(err as Error).message}`;
+		return false;
+	}
+}
+
+agentSeedSettings.addEventListener("blur", validateAgentSeedSettings);
+
+/** Wipe Advanced-tab state on modal close. Important for the agent-
+ *  seed textareas — leaving 256 KiB of pasted content mounted between
+ *  modal closes is bad UX (and a potential leak if the next operator
+ *  is a different user, though that's not the typical case here). */
+function resetAdvancedTab(): void {
+	gitIdentityName.value = "";
+	gitIdentityEmail.value = "";
+	dotfilesUrl.value = "";
+	dotfilesRef.value = "";
+	dotfilesInstallScript.value = "";
+	agentSeedSettings.value = "";
+	agentSeedClaudeMd.value = "";
+	postCreateCmd.value = "";
+	postStartCmd.value = "";
+	agentSeedSettingsError.textContent = "";
+}
+
+/**
+ * Read the Advanced tab into the wire shape the backend accepts under
+ * `body.config`. Returns the four optional fields plus the two cmd
+ * strings; `undefined` for any field whose inputs are empty.
+ *
+ * Trims trimmable values; keeps newlines in agent-seed bodies and the
+ * cmd textareas (those are content, not formatting). The backend's
+ * Zod schema is the single source of truth for shape validation —
+ * client-side mirroring would just be one more place to keep in
+ * sync. The user gets a 400 with a precise field path on submit.
+ *
+ * Exported so a future test file can pin the wire shape; matches the
+ * `collectRepoForSubmit` precedent.
+ */
+export function collectAdvancedForSubmit(): {
+	gitIdentity?: SessionConfigPayload["gitIdentity"];
+	dotfiles?: SessionConfigPayload["dotfiles"];
+	agentSeed?: SessionConfigPayload["agentSeed"];
+	postCreateCmd?: string;
+	postStartCmd?: string;
+} {
+	const out: ReturnType<typeof collectAdvancedForSubmit> = {};
+
+	const name = gitIdentityName.value.trim();
+	const email = gitIdentityEmail.value.trim();
+	if (name !== "" || email !== "") {
+		// Both required when either is set; backend cross-validates.
+		// We send what we have and let the 400 surface the missing
+		// half — same precedent as the Repo tab's PAT/SSH cases.
+		out.gitIdentity = { name, email };
+	}
+
+	const dotUrl = dotfilesUrl.value.trim();
+	if (dotUrl !== "") {
+		const dot: NonNullable<SessionConfigPayload["dotfiles"]> = { url: dotUrl };
+		const ref = dotfilesRef.value.trim();
+		const install = dotfilesInstallScript.value.trim();
+		if (ref !== "") dot.ref = ref;
+		if (install !== "") dot.installScript = install;
+		out.dotfiles = dot;
+	}
+
+	const settings = agentSeedSettings.value;
+	const claudeMd = agentSeedClaudeMd.value;
+	if (settings !== "" || claudeMd !== "") {
+		const seed: NonNullable<SessionConfigPayload["agentSeed"]> = {};
+		if (settings !== "") seed.settings = settings;
+		if (claudeMd !== "") seed.claudeMd = claudeMd;
+		out.agentSeed = seed;
+	}
+
+	const pc = postCreateCmd.value.trim();
+	const ps = postStartCmd.value.trim();
+	if (pc !== "") out.postCreateCmd = pc;
+	if (ps !== "") out.postStartCmd = ps;
+
+	return out;
 }
 
 // ── Env tab (#186 / PR 186c) ────────────────────────────────────────────────
@@ -1630,15 +1770,23 @@ newSessionForm.addEventListener("submit", async (e) => {
 		showToast("Creating session…");
 		const envVars = collectEnvVarsForSubmit();
 		const { repo, auth } = collectRepoForSubmit();
+		const advanced = collectAdvancedForSubmit();
 		// Build the config payload only when something is actually
 		// configured. A bare `POST /sessions` (no config field) stays
 		// the steady-state for users not exercising any of the tabs.
+		const advancedHasContent =
+			advanced.gitIdentity !== undefined ||
+			advanced.dotfiles !== undefined ||
+			advanced.agentSeed !== undefined ||
+			advanced.postCreateCmd !== undefined ||
+			advanced.postStartCmd !== undefined;
 		const config: SessionConfigPayload | undefined =
-			envVars || repo
+			envVars || repo || advancedHasContent
 				? {
 						...(envVars ? { envVars } : {}),
 						...(repo ? { repo } : {}),
 						...(auth ? { auth } : {}),
+						...advanced,
 					}
 				: undefined;
 		const session = await createSession(name, undefined, config);
