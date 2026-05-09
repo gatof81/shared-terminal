@@ -1117,7 +1117,9 @@ function openNewSessionModal(opener: HTMLElement) {
 	newSessionInput.value = "";
 	newSessionSubmitBtn.disabled = false;
 	clearBootstrapError();
-	resetEnvTab();
+	// `resetEnvTab` no longer fires here — `closeNewSessionModal`
+	// already wiped state on the previous close, and the initial
+	// declaration of `envRows = []` covers the very first open.
 	newSessionModal.classList.add("open");
 	newSessionModal.setAttribute("aria-hidden", "false");
 	// Defer focus to the next paint so the input is reliably focusable
@@ -1217,6 +1219,11 @@ function closeNewSessionModal() {
 	// reaches `running` (or see the failure in the row's status if it
 	// flipped to `failed`).
 	teardownBootstrapTail();
+	// Reset Env-tab state on close (#211 round 2) so the in-memory
+	// `envRows` doesn't drift from the now-hidden DOM between close
+	// and re-open. The redundant reset on `openNewSessionModal` is
+	// gone — closing always leaves the array empty.
+	resetEnvTab();
 	(newSessionOpener ?? newSessionBtn).focus();
 	newSessionOpener = null;
 }

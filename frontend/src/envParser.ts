@@ -72,9 +72,15 @@ export function parseDotEnv(text: string): EnvParseResult {
 		const rawValue = stripped.slice(eqIdx + 1);
 
 		if (!ENV_NAME_PATTERN.test(name)) {
+			// Truncate the name in the skip-reason so a 50 KB
+			// "garbage paste" line doesn't blow out the modal's
+			// status bar with one unreadable string. textContent
+			// is the rendering path so there's no injection risk;
+			// this is purely visual hygiene (#211 round 2).
+			const displayName = name.length > 40 ? `${name.slice(0, 40)}…` : name;
 			skipped.push({
 				line: lineNo,
-				reason: `name '${name}' must match ${ENV_NAME_PATTERN.source}`,
+				reason: `name '${displayName}' must match ${ENV_NAME_PATTERN.source}`,
 			});
 			continue;
 		}
