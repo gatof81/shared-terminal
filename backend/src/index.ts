@@ -22,6 +22,7 @@ import {
 import { BootstrapBroadcaster } from "./bootstrap.js";
 import { migrateDb, validateD1Config } from "./db.js";
 import { DockerManager } from "./dockerManager.js";
+import { IdleSweeper, listRunningSessionIds } from "./idleSweeper.js";
 import { logger } from "./logger.js";
 import { createPortDispatcher, validatePortProxyBaseDomain } from "./portDispatcher.js";
 import { buildRouter } from "./routes.js";
@@ -95,6 +96,19 @@ const docker = new DockerManager(sessions);
 // than the one running the hook; that's documented as a single-replica
 // constraint of the hook runner, same as the terminal-attach path.
 const bootstrapBroadcaster = new BootstrapBroadcaster();
+
+// Idle-auto-stop sweeper. Bumped by every WS byte / resize and every
+// /api/sessions/:id REST hit; sweeps every 60 s and soft-stops sessions
+// whose `idle_ttl_seconds` has elapsed. In-memory state only — the
+// boot path seeds `now()` for each currently-running session below
+// so the first sweep doesn't reap a session whose users haven't
+// reconnected yet (the previous backend's bumps are gone). Process-
+// local — a load-balanced multi-backend deploy would lose the
+// activity signal when traffic lands on a different replica; that's
+// the same single-replica constraint the BootstrapBroadcaster has.
+const idleSweeper = new IdleSweeper({
+	stopContainer: (sessionId) => docker.stopContainer(sessionId),
+});
 
 // #190 PR 190c — port-exposure dispatcher. Resolves Host:
 // `p<container>-<sessionId>.<base>` to the runtime mapping in
@@ -265,7 +279,7 @@ app.use((_req, res, next) => {
 // (not optional) on buildRouter so a future caller that omits it
 // surfaces as a TypeScript error rather than a silently-dropped
 // postCreate hook (PR #208 round 1 review).
-app.use("/api", buildRouter(sessions, docker, bootstrapBroadcaster));
+app.use("/api", buildRouter(sessions, docker, bootstrapBroadcaster, undefined, idleSweeper));
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // ── HTTP + WebSocket server ───────────────────────────────────────────────────
@@ -382,7 +396,7 @@ server.on("upgrade", (req, socket, head) => {
 const stopHeartbeat = startWsHeartbeat(wss, 30_000);
 
 wss.on("connection", (ws, req) => {
-	handleWsConnection(ws, req, sessions, docker, bootstrapBroadcaster);
+	handleWsConnection(ws, req, sessions, docker, bootstrapBroadcaster, idleSweeper);
 });
 
 // ── Startup ───────────────────────────────────────────────────────────────────
@@ -397,6 +411,21 @@ async function start() {
 	// login (which short-circuits the dummy path) — exactly the
 	// timing leak the dummy is supposed to prevent.
 	await ensureAuthReady();
+
+	// Seed the idle sweeper with every running session so the first
+	// sweep doesn't reap sessions whose users haven't reconnected yet
+	// (the prior backend's bumps are gone). Failure here is non-fatal:
+	// log and continue; bumps will lazy-init the map on the next /api
+	// or WS hit, and the sweep's `last === undefined` branch seeds and
+	// skips.
+	try {
+		const ids = await listRunningSessionIds();
+		idleSweeper.init(ids);
+		logger.info(`[server] idle sweeper seeded ${ids.length} running session(s)`);
+	} catch (err) {
+		logger.warn(`[server] idle sweeper init failed: ${(err as Error).message}`);
+	}
+	idleSweeper.start();
 
 	server.listen(PORT, () => {
 		logger.info(`[server] listening on http://localhost:${PORT}`);
@@ -429,6 +458,11 @@ function shutdown() {
 	// Stop the heartbeat first so it doesn't try to ping a half-closed
 	// client during teardown (would race with the close calls below).
 	stopHeartbeat();
+	// Stop the idle sweeper so its 60-s timer doesn't fire mid-teardown
+	// and try to soft-stop a session via a Docker socket the shutdown
+	// path is about to close. Idempotent — `stop()` is safe to call
+	// even if `start()` never ran.
+	idleSweeper.stop();
 
 	// Actively close live WS clients. `wss.close()` alone only stops accepting
 	// new upgrades — existing connections stay open, which keeps `server.close()`

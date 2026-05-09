@@ -58,6 +58,13 @@ export function buildRouter(
 	docker: DockerManager,
 	broadcaster: BootstrapBroadcaster,
 	rateLimitConfig: RateLimitConfig = DEFAULT_RATE_LIMIT_CONFIG,
+	// Optional so existing tests that build a router without a sweeper
+	// keep working. Production wires the singleton from index.ts; the
+	// absent-sweeper case is the pre-#194 behaviour. `bump` is the hot
+	// path (every authed /sessions/:id hit); `forget` runs on stop /
+	// kill / hard-delete so the activity Map doesn't grow unboundedly
+	// across the backend's lifetime.
+	idleSweeper?: { bump: (sessionId: string) => void; forget: (sessionId: string) => void },
 ): Router {
 	const router = Router();
 
@@ -283,6 +290,39 @@ export function buildRouter(
 
 	router.use("/invites", requireAuth);
 	router.use("/sessions", requireAuth);
+
+	// Idle-sweeper bumper. Mounted AFTER `requireAuth` so unauth
+	// requests don't reset the activity timer. The `:id` capture is
+	// what the sweeper needs; static collection routes like
+	// `GET /sessions` (no id) are excluded by the pattern.
+	//
+	// Bump is hooked on `res.on("finish")` and gated on a successful
+	// status (< 400) so a foreign-session probe (`GET /sessions/<not-mine>`)
+	// gets its 403 from the handler's `assertOwnership` BEFORE the
+	// bump fires — without this, any authed user could keep someone
+	// else's session alive indefinitely by hitting their session id
+	// in a loop, defeating the idle-TTL contract for the real owner.
+	// Status check covers the whole 4xx/5xx range (auth, ownership,
+	// rate-limit, 404, internal errors) so anything other than a
+	// healthy interaction stays out of the activity signal.
+	if (idleSweeper) {
+		router.use("/sessions/:id", (req, res, next) => {
+			res.on("finish", () => {
+				// `res.locals.skipIdleBump` is the opt-out for routes
+				// that explicitly tore down the entry (DELETE / stop /
+				// hard-delete). Without this gate, the `finish`
+				// listener fires AFTER the handler's `res.send()` /
+				// `res.json()`, which means a `forget()` called inside
+				// the handler runs first, then the bump re-adds the
+				// entry milliseconds later — undoing the prune.
+				const skip = (res.locals as { skipIdleBump?: boolean }).skipIdleBump === true;
+				if (!skip && res.statusCode < 400) {
+					idleSweeper.bump(req.params.id);
+				}
+			});
+			next();
+		});
+	}
 
 	// ── Invite routes ───────────────────────────────────────────────────────
 	// All three routes are gated by `requireAdmin` (#50). Non-admins
@@ -655,6 +695,17 @@ export function buildRouter(
 			if (meta.status !== "terminated") {
 				await docker.kill(req.params.id);
 				await sessions.terminate(req.params.id);
+				// Drop the idle-sweeper's lastActivity entry — without
+				// this the Map grows unboundedly across the backend's
+				// lifetime as soft-deleted sessions accumulate. The
+				// `skipIdleBump` flag suppresses the bump middleware's
+				// `finish` listener; without it, the success-status
+				// bump fires AFTER `forget` on the same response and
+				// re-adds the entry, making the prune a no-op. Bump
+				// already needed an authed user; forget needs the same
+				// gate, which the assertOwnership above provides.
+				res.locals.skipIdleBump = true;
+				idleSweeper?.forget(req.params.id);
 			}
 
 			if (hard) {
@@ -668,6 +719,12 @@ export function buildRouter(
 					// Fall through — we still want to remove the row.
 				}
 				await sessions.deleteRow(req.params.id);
+				// Hard-delete also drops the activity entry — covers
+				// the path where a user goes straight to ?hard=true on
+				// an already-terminated session. Same `skipIdleBump`
+				// flag rationale as the soft-delete branch above.
+				res.locals.skipIdleBump = true;
+				idleSweeper?.forget(req.params.id);
 			}
 
 			res.status(204).send();
@@ -681,6 +738,13 @@ export function buildRouter(
 		try {
 			await sessions.assertOwnership(req.params.id, userId);
 			await docker.stopContainer(req.params.id);
+			// Same `forget` rationale as DELETE above: a stopped
+			// session shouldn't sit in the activity map collecting
+			// stale bumps. `skipIdleBump` blocks the bump middleware's
+			// success-status listener from re-adding the entry on
+			// the same response. The next /start re-seeds.
+			res.locals.skipIdleBump = true;
+			idleSweeper?.forget(req.params.id);
 			const updated = await sessions.get(req.params.id);
 			if (!updated) {
 				// Race: the session was deleted between assertOwnership
