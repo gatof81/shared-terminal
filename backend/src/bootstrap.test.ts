@@ -551,6 +551,64 @@ describe("runAsyncBootstrap", () => {
 		expect(final).toEqual([{ type: "fail", exitCode: 7 }]);
 	});
 
+	// PR #218 round 1 NIT: a stage that throws SYNCHRONOUSLY (before
+	// any await) AFTER the timer has fired must surface its OWN error
+	// message, not "bootstrap timeout". The discriminator now requires
+	// the error itself to be AbortError/TimeoutError — `signal.aborted`
+	// alone is not enough, since it stays true after the timer fires
+	// regardless of what later throws.
+	it("preserves stage-specific error message when timer fires before a sync throw", async () => {
+		vi.useFakeTimers();
+		try {
+			const { sessions, docker, broadcaster, final } = makeFakes();
+			sessionConfigStubs.getSessionConfig.mockResolvedValueOnce({
+				sessionId: "sess-1",
+				dotfiles: { url: "git@example.com:o/p.git" },
+				bootstrappedAt: null,
+			} as never);
+
+			// cloneRepo blocks on a manual resolver so the test can
+			// advance time externally between clone and dotfiles.
+			let cloneFinish: () => void = () => {};
+			cloneStubs.runCloneRepo.mockImplementationOnce(
+				() =>
+					new Promise<{ exitCode: number }>((resolve) => {
+						cloneFinish = () => resolve({ exitCode: 0 });
+					}),
+			);
+			// dotfiles throws SYNCHRONOUSLY (before any await) with a
+			// stage-specific error.
+			dotfilesStubs.runDotfiles.mockImplementationOnce(async () => {
+				throw new Error("dotfiles: SSH credential missing");
+			});
+
+			const runPromise = runAsyncBootstrap(
+				"sess-1",
+				{ postCreateCmd: "npm install", hasBootstrapConfig: true },
+				{ sessions, docker, broadcaster },
+			);
+			// Let the runner enter cloneRepo (which is now blocked on
+			// our manual resolver).
+			await Promise.resolve();
+			await Promise.resolve();
+			// Advance past the cap — timer fires, abortController
+			// aborts, signal.aborted flips true.
+			await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 100);
+			// Now release cloneRepo. Runner proceeds to dotfiles, which
+			// throws sync. The catch handler sees signal.aborted=true
+			// but the error name is "Error", NOT AbortError/TimeoutError.
+			cloneFinish();
+			await runPromise;
+
+			const failMsg = final.find((m) => m.type === "fail");
+			expect(failMsg).toMatchObject({ type: "fail", exitCode: -1 });
+			expect((failMsg as { error: string }).error).toBe("dotfiles: SSH credential missing");
+			expect((failMsg as { error: string }).error).not.toMatch(/bootstrap timeout/);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	// 10-minute wall-clock cap. A stage that hangs past the cap is
 	// aborted (the AbortError surfaces from streamExec via the
 	// stream-destroy mechanism), and the runner emits a clear

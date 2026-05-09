@@ -370,8 +370,21 @@ export async function runAsyncBootstrap(
 			// AbortError from the 10-min cap surfaces here. Distinguish
 			// the timeout failure from any other throw so the modal's
 			// rendered error tells the user the right thing.
+			//
+			// PR #218 round 1 NIT: the discriminator must check that
+			// the thrown error itself came FROM the abort path
+			// (`AbortError` from streamExec, `TimeoutError` from the
+			// timer's `abort(reason)` call) — NOT just `signal.aborted`.
+			// Otherwise a stage that throws synchronously *after* the
+			// timer has already fired (e.g. `DotfilesAuthMismatchError`
+			// raised before the first await in `runDotfiles`) would be
+			// misreported as "bootstrap timeout" and the user would
+			// never see the actionable config error. `signal.aborted`
+			// is kept as a sanity guard so an unrelated future
+			// AbortError can't silently mark itself as a cap-fired
+			// timeout.
 			const e = err as Error;
-			const isTimeout = e.name === "TimeoutError" || signal.aborted;
+			const isTimeout = signal.aborted && (e.name === "AbortError" || e.name === "TimeoutError");
 			const message = isTimeout
 				? `bootstrap timeout: cumulative wall time exceeded ${BOOTSTRAP_WALL_CLOCK_CAP_MS / 1000}s during '${label}'`
 				: e.message;
