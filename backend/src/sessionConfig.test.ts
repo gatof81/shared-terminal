@@ -391,6 +391,176 @@ describe("validateSessionConfig", () => {
 		).toBeDefined();
 	});
 
+	// ── #191 — gitIdentity / dotfiles / agentSeed ────────────────────────
+
+	it("accepts gitIdentity with name + email", () => {
+		expect(
+			validateSessionConfig({
+				gitIdentity: { name: "Ada Lovelace", email: "ada@example.com" },
+			}),
+		).toBeDefined();
+	});
+
+	it("rejects gitIdentity with malformed email", () => {
+		for (const email of ["", "notanemail", "user@", "@host", "spaces in@email.com"]) {
+			expect(() =>
+				validateSessionConfig({
+					gitIdentity: { name: "X", email },
+				}),
+			).toThrowError(SessionConfigValidationError);
+		}
+	});
+
+	it("rejects gitIdentity with empty name", () => {
+		expect(() =>
+			validateSessionConfig({
+				gitIdentity: { name: "", email: "a@b.com" },
+			}),
+		).toThrowError(SessionConfigValidationError);
+	});
+
+	// PR #217 round 1 SHOULD-FIX: a `\n` in `name` would corrupt
+	// `~/.gitconfig` (INI format, newline-delimited records) when the
+	// 191b stage runs `git config --global user.name "<name>"`. Reject
+	// at the schema boundary so the runner doesn't need to defend at
+	// the write site.
+	it("rejects gitIdentity.name containing control characters", () => {
+		for (const name of ["Ada\nuser.email = evil@evil.com", "X\rY", "X\tY", "X Y", "XY"]) {
+			expect(() =>
+				validateSessionConfig({
+					gitIdentity: { name, email: "a@b.com" },
+				}),
+			).toThrowError(SessionConfigValidationError);
+		}
+	});
+
+	// Defence: regular space (0x20) and printable Unicode are NOT
+	// control chars. Names like "Ada Lovelace" or "François" must
+	// keep working past the new control-char regex.
+	it("accepts gitIdentity.name with spaces and printable Unicode", () => {
+		for (const name of ["Ada Lovelace", "François", "李雷"]) {
+			expect(
+				validateSessionConfig({
+					gitIdentity: { name, email: "a@b.com" },
+				}),
+			).toBeDefined();
+		}
+	});
+
+	it("accepts dotfiles with bare URL (clone-only, no install script)", () => {
+		expect(
+			validateSessionConfig({
+				dotfiles: { url: "https://github.com/user/dotfiles.git" },
+			}),
+		).toBeDefined();
+	});
+
+	it("accepts dotfiles with git@ URL + ref + installScript", () => {
+		expect(
+			validateSessionConfig({
+				dotfiles: {
+					url: "git@github.com:user/dotfiles.git",
+					ref: "main",
+					installScript: "install.sh",
+				},
+			}),
+		).toBeDefined();
+	});
+
+	it("rejects dotfiles URL with disallowed scheme", () => {
+		for (const url of ["http://example.com/r", "file:///etc", "ssh://attacker/r"]) {
+			expect(() => validateSessionConfig({ dotfiles: { url } })).toThrowError(
+				SessionConfigValidationError,
+			);
+		}
+	});
+
+	it("rejects dotfiles URL with embedded credentials (defends encryption boundary)", () => {
+		expect(() =>
+			validateSessionConfig({
+				dotfiles: { url: "https://user:token@github.com/user/dotfiles" },
+			}),
+		).toThrowError(SessionConfigValidationError);
+	});
+
+	// Same path-traversal defence as `repo.target`. installScript ends
+	// up as `/home/developer/dotfiles/<installScript>` inside the
+	// container; `..` would let it escape the dotfiles tree.
+	it("rejects dotfiles installScript with '..' / leading '/' / '//'", () => {
+		for (const installScript of ["../escape", "/abs/path", "a//b", "../"]) {
+			expect(() =>
+				validateSessionConfig({
+					dotfiles: { url: "https://example.com/r", installScript },
+				}),
+			).toThrowError(SessionConfigValidationError);
+		}
+	});
+
+	it("accepts agentSeed with valid JSON settings + markdown CLAUDE.md", () => {
+		expect(
+			validateSessionConfig({
+				agentSeed: {
+					settings: '{"theme":"dark","editor":{"tabSize":2}}',
+					claudeMd: "# Project notes\n- Use TS strict mode.\n",
+				},
+			}),
+		).toBeDefined();
+	});
+
+	it("rejects agentSeed.settings that is not valid JSON", () => {
+		expect(() =>
+			validateSessionConfig({
+				agentSeed: { settings: "{not json" },
+			}),
+		).toThrowError(SessionConfigValidationError);
+	});
+
+	it("accepts agentSeed.settings that is an empty string (no file written)", () => {
+		// Empty string = wire-shape signal for "leave the file alone".
+		// The bootstrap stage's `if (settings)` guard skips the write.
+		expect(
+			validateSessionConfig({
+				agentSeed: { settings: "" },
+			}),
+		).toBeDefined();
+	});
+
+	it("rejects agentSeed bodies above the 256 KiB cap", () => {
+		const big = "x".repeat(257 * 1024);
+		expect(() => validateSessionConfig({ agentSeed: { settings: big } })).toThrowError(
+			SessionConfigValidationError,
+		);
+		expect(() => validateSessionConfig({ agentSeed: { claudeMd: big } })).toThrowError(
+			SessionConfigValidationError,
+		);
+	});
+
+	// PR #217 round 1 SHOULD-FIX: Zod's `.max()` counts UTF-16 code
+	// units, NOT UTF-8 bytes. A 4-byte-per-char string of 100 K
+	// codepoints (e.g. 💥) is 400 K UTF-8 bytes (over the 256 KiB
+	// cap) but only 200 K UTF-16 code units (under any naive
+	// char-count cap). The Buffer.byteLength refine catches this
+	// where `.max()` would have let it through.
+	it("rejects agentSeed bodies whose UTF-8 byte size exceeds the cap (4-byte chars)", () => {
+		const bigEmoji = "💥".repeat(100 * 1024); // 400 KiB UTF-8 bytes
+		expect(() => validateSessionConfig({ agentSeed: { claudeMd: bigEmoji } })).toThrowError(
+			SessionConfigValidationError,
+		);
+		expect(() => validateSessionConfig({ agentSeed: { settings: bigEmoji } })).toThrowError(
+			SessionConfigValidationError,
+		);
+	});
+
+	it("accepts null for gitIdentity / dotfiles / agentSeed (explicit-not-configured)", () => {
+		expect(
+			validateSessionConfig({
+				gitIdentity: null,
+				dotfiles: null,
+				agentSeed: null,
+			}),
+		).toBeDefined();
+	});
+
 	// Depth bounds — out of [1, 10000]. A missing `depth` is allowed
 	// (full history), so the lower bound has to fire on `0` and `-1`.
 	it("rejects repo.depth out of bounds", () => {
@@ -578,6 +748,9 @@ describe("persistSessionConfig", () => {
 			null, // ports_json
 			null, // env_vars_json
 			null, // auth_json
+			null, // git_identity_json
+			null, // dotfiles_json
+			null, // agent_seed_json
 		]);
 	});
 
@@ -593,8 +766,9 @@ describe("persistSessionConfig", () => {
 		// Defensive cross-check: the params length must match the column
 		// count, so a future caller adding bootstrapped_at to either side
 		// without updating the other trips this assertion immediately.
-		// 11 = sessionId + 10 column values (incl. auth_json added in 188b).
-		expect((params as unknown[]).length).toBe(11);
+		// 14 = sessionId + 13 column values (incl. git_identity_json /
+		// dotfiles_json / agent_seed_json added in 191a).
+		expect((params as unknown[]).length).toBe(14);
 	});
 
 	it("collapses empty array sub-records to NULL (no D1 row bloat)", async () => {
@@ -642,6 +816,38 @@ describe("persistSessionConfig", () => {
 		// re-introduces plaintext would trip this.
 		expect(envJson[1]).not.toHaveProperty("value");
 	});
+
+	// PR #217 round 1 NIT: pin the wire shape of the three new
+	// 191a columns. Without this, a future rename of a TS field
+	// (`gitIdentity` → `identity`) would produce `jsonOrNull(undefined)
+	// → null` — silent data loss while every existing test passes
+	// because they all use null fixtures.
+	it("serialises gitIdentity / dotfiles / agentSeed JSON columns (191a)", async () => {
+		await persistSessionConfig("sess-191a", {
+			gitIdentity: { name: "Ada Lovelace", email: "ada@example.com" },
+			dotfiles: {
+				url: "https://github.com/u/dotfiles.git",
+				ref: "main",
+				installScript: "install.sh",
+			},
+			agentSeed: { settings: '{"theme":"dark"}', claudeMd: "# notes" },
+		});
+		const [, params] = dbStubs.d1Query.mock.calls[0]!;
+		// git_identity_json is param[11], dotfiles_json [12], agent_seed_json [13].
+		expect(JSON.parse(params?.[11] as string)).toEqual({
+			name: "Ada Lovelace",
+			email: "ada@example.com",
+		});
+		expect(JSON.parse(params?.[12] as string)).toEqual({
+			url: "https://github.com/u/dotfiles.git",
+			ref: "main",
+			installScript: "install.sh",
+		});
+		expect(JSON.parse(params?.[13] as string)).toEqual({
+			settings: '{"theme":"dark"}',
+			claudeMd: "# notes",
+		});
+	});
 });
 
 describe("getSessionConfig", () => {
@@ -672,6 +878,9 @@ describe("getSessionConfig", () => {
 					ports_json: null,
 					env_vars_json: JSON.stringify([{ name: "FOO", type: "plain", value: "bar" }]),
 					auth_json: null,
+					git_identity_json: null,
+					dotfiles_json: null,
+					agent_seed_json: null,
 					bootstrapped_at: "2026-05-08 12:00:00",
 				},
 			],
@@ -712,6 +921,9 @@ describe("getSessionConfig", () => {
 					ports_json: null,
 					env_vars_json: null,
 					auth_json: null,
+					git_identity_json: null,
+					dotfiles_json: null,
+					agent_seed_json: null,
 					bootstrapped_at: null,
 				},
 			],
@@ -750,6 +962,9 @@ describe("getSessionConfig", () => {
 					ports_json: null,
 					env_vars_json: null,
 					auth_json: null,
+					git_identity_json: null,
+					dotfiles_json: null,
+					agent_seed_json: null,
 					bootstrapped_at: null,
 				},
 			],
@@ -825,6 +1040,57 @@ describe("getSessionConfig", () => {
 		}));
 		const got = await getSessionConfig("sess-auth-bad");
 		expect(got?.auth).toBeUndefined();
+	});
+
+	// PR 191a — gitIdentity / dotfiles / agentSeed rehydrate via the
+	// generic `parseJsonColumn` (no special-case shim like repos_json
+	// / env_vars_json have). Pin the round-trip so a future column
+	// rename or schema-shape change can't silently drop them.
+	it("rehydrates gitIdentity / dotfiles / agentSeed JSON blobs", async () => {
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [
+				{
+					session_id: "sess-191",
+					workspace_strategy: null,
+					cpu_limit: null,
+					mem_limit: null,
+					idle_ttl_seconds: null,
+					post_create_cmd: null,
+					post_start_cmd: null,
+					repos_json: null,
+					ports_json: null,
+					env_vars_json: null,
+					auth_json: null,
+					git_identity_json: JSON.stringify({
+						name: "Ada Lovelace",
+						email: "ada@example.com",
+					}),
+					dotfiles_json: JSON.stringify({
+						url: "https://github.com/u/dotfiles.git",
+						ref: "main",
+						installScript: "install.sh",
+					}),
+					agent_seed_json: JSON.stringify({
+						settings: '{"theme":"dark"}',
+						claudeMd: "# notes\n",
+					}),
+					bootstrapped_at: null,
+				},
+			],
+			success: true as const,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		const got = await getSessionConfig("sess-191");
+		expect(got?.gitIdentity).toEqual({ name: "Ada Lovelace", email: "ada@example.com" });
+		expect(got?.dotfiles).toEqual({
+			url: "https://github.com/u/dotfiles.git",
+			ref: "main",
+			installScript: "install.sh",
+		});
+		expect(got?.agentSeed).toEqual({
+			settings: '{"theme":"dark"}',
+			claudeMd: "# notes\n",
+		});
 	});
 
 	// PR #210 round 2 fix: `session_configs.env_vars_json` had a
@@ -988,6 +1254,9 @@ describe("getSessionConfig", () => {
 					ports_json: null,
 					env_vars_json: null,
 					auth_json: null,
+					git_identity_json: null,
+					dotfiles_json: null,
+					agent_seed_json: null,
 					bootstrapped_at: null,
 				},
 			],
