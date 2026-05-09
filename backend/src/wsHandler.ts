@@ -7,6 +7,7 @@ import type { Duplex } from "node:stream";
 import { v4 as uuidv4 } from "uuid";
 import { WebSocket, type WebSocketServer } from "ws";
 import { verifyWsToken } from "./auth.js";
+import type { BootstrapBroadcaster, BootstrapMessage } from "./bootstrap.js";
 import type { DockerManager } from "./dockerManager.js";
 import { logger } from "./logger.js";
 import { TERMINAL_DIM_MAX } from "./routes.js";
@@ -49,6 +50,7 @@ export function handleWsConnection(
 	req: IncomingMessage,
 	sessions: SessionManager,
 	docker: DockerManager,
+	broadcaster: BootstrapBroadcaster,
 ): void {
 	// Synchronous safety net registered BEFORE any await or sync ws.close().
 	// Node's EventEmitter routes an 'error' emission with no listener to
@@ -86,6 +88,27 @@ export function handleWsConnection(
 		return;
 	}
 	const userId = payload.sub;
+
+	// PR 185b2b: `/ws/bootstrap/<sessionId>` is the live-tail channel
+	// for the postCreate hook. Authed identically to the terminal-attach
+	// path, but routes to the broadcaster's per-session listener set
+	// instead of `docker.attach`. Owns its own auth-and-subscribe block
+	// below so terminal-attach logic doesn't have to special-case the
+	// bootstrap shape.
+	const bootstrapMatch = url.match(/\/ws\/bootstrap\/([^/?#]+)/);
+	if (bootstrapMatch) {
+		if (!broadcaster) {
+			// Defensive: server boot wires the broadcaster in, so this
+			// branch is unreachable in production. If we land here a
+			// future caller forgot to thread it through; loudly close.
+			sendError(ws, "Bootstrap channel not configured");
+			ws.close(1011, "Bootstrap channel not configured");
+			return;
+		}
+		const bootstrapSessionId = bootstrapMatch[1]!;
+		void handleBootstrapWs(ws, bootstrapSessionId, userId, sessions, broadcaster);
+		return;
+	}
 
 	const match = url.match(/\/ws\/sessions\/([^/?#]+)/);
 	if (!match) {
@@ -317,4 +340,60 @@ function sendMsg(ws: WebSocket, msg: WsServerMessage): void {
 
 function sendError(ws: WebSocket, message: string): void {
 	sendMsg(ws, { type: "error", message });
+}
+
+/**
+ * Bootstrap-channel attach (PR 185b2b). Subscribes the WS to the
+ * broadcaster's per-session listener set so the modal's live-tail
+ * panel sees output as it streams from `runPostCreate`. Auth +
+ * ownership match the terminal-attach path; on close (whether the
+ * client navigated away or the broadcaster sent a terminal message
+ * and we hung up) the listener is unsubscribed so the broadcaster's
+ * Set doesn't leak.
+ */
+async function handleBootstrapWs(
+	ws: WebSocket,
+	sessionId: string,
+	userId: string,
+	sessions: SessionManager,
+	broadcaster: BootstrapBroadcaster,
+): Promise<void> {
+	try {
+		await sessions.assertOwnership(sessionId, userId);
+	} catch (err) {
+		if (err instanceof NotFoundError) {
+			sendError(ws, "Session not found");
+			ws.close(1008, "Not found");
+			return;
+		}
+		if (err instanceof ForbiddenError) {
+			sendError(ws, "Forbidden");
+			ws.close(1008, "Forbidden");
+			return;
+		}
+		logger.error(`[ws] bootstrap auth failed for ${sessionId}: ${(err as Error).message}`);
+		ws.close(1011, "Internal error");
+		return;
+	}
+
+	const listener = (msg: BootstrapMessage) => {
+		if (ws.readyState !== WebSocket.OPEN) return;
+		try {
+			ws.send(JSON.stringify(msg));
+		} catch (sendErr) {
+			logger.warn(`[ws] bootstrap send failed for ${sessionId}: ${(sendErr as Error).message}`);
+		}
+		// Close the WS after a terminal message lands. Letting the
+		// connection idle would mean every browser tab leaks an
+		// open WS forever after the hook completes; explicit close
+		// also signals the client to clean up its modal handlers.
+		if (msg.type === "done" || msg.type === "fail") {
+			ws.close(1000, "Bootstrap complete");
+		}
+	};
+
+	const unsubscribe = broadcaster.subscribe(sessionId, listener);
+	ws.on("close", () => unsubscribe());
+	ws.on("error", () => unsubscribe());
+	logger.info(`[ws] user=${userId} subscribed to bootstrap channel for session=${sessionId}`);
 }

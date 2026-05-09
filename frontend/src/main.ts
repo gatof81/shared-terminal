@@ -11,7 +11,6 @@
 import "./main.css";
 
 import {
-	BootstrapFailedError,
 	checkAuthStatus,
 	createInvite,
 	createSession,
@@ -27,6 +26,7 @@ import {
 	listTabs,
 	login,
 	logout,
+	openBootstrapWs,
 	register,
 	revokeInvite,
 	SESSION_EXPIRED_EVENT,
@@ -1129,33 +1129,80 @@ function openNewSessionModal(opener: HTMLElement) {
 }
 
 /**
- * Render a postCreate-hook failure inline in the modal — the user sees
- * the captured stdout/stderr without losing the form they were filling
- * out. Clears on next open / next submit. PR 185b2b will replace the
- * static `<pre>` with a live-tail panel that shows output as it
- * streams.
+ * PR 185b2b live-tail state. While a bootstrap WS is open we hold onto
+ * the close thunk + the rendered `<pre>` so:
+ *   - cancelling the modal (Esc, X, backdrop) closes the WS and the
+ *     hook keeps running server-side; the user can re-open the
+ *     session later from the sidebar to attach to its terminal.
+ *   - submitting again while a previous WS is still draining
+ *     (shouldn't happen, modal disables the button, but defensive)
+ *     tears the old one down first.
  */
-function renderBootstrapError(err: BootstrapFailedError) {
+let activeBootstrap: { close: () => void } | null = null;
+
+function startBootstrapLiveTail(session: SessionInfo, name: string) {
 	clearBootstrapError();
 	const panel = document.createElement("div");
-	panel.className = "bootstrap-error";
-	panel.id = "bootstrap-error-panel";
+	panel.className = "bootstrap-tail";
+	panel.id = "bootstrap-error-panel"; // reused id so clearBootstrapError() removes either kind
 	const heading = document.createElement("strong");
-	heading.textContent = `postCreate hook failed (exit ${err.exitCode})`;
+	heading.textContent = "Bootstrapping session…";
 	panel.appendChild(heading);
 	const hint = document.createElement("p");
 	hint.className = "bootstrap-error-hint";
-	hint.textContent =
-		"The session was created but the bootstrap command exited non-zero, " +
-		"so the container was killed and the session marked failed. " +
-		"Captured output below — fix the command and create a new session.";
+	hint.textContent = "Live output from your postCreate hook. The modal will close on success.";
 	panel.appendChild(hint);
 	const pre = document.createElement("pre");
 	pre.className = "bootstrap-error-output";
-	pre.textContent = err.output || "(no output captured)";
+	pre.textContent = "";
 	panel.appendChild(pre);
-	const basicsPanel = document.getElementById("session-tab-basics");
-	basicsPanel?.appendChild(panel);
+	document.getElementById("session-tab-basics")?.appendChild(panel);
+
+	activeBootstrap = openBootstrapWs(session.sessionId, {
+		onOutput: (chunk) => {
+			pre.textContent += chunk;
+			// Auto-scroll to the bottom so the latest line is visible
+			// — `npm install`-style hooks emit hundreds of lines and
+			// the user expects the tail, not the head.
+			pre.scrollTop = pre.scrollHeight;
+		},
+		onDone: (success, exitCode, error) => {
+			activeBootstrap = null;
+			if (success) {
+				closeNewSessionModal();
+				void openSession(session.sessionId);
+				showToast(`Session "${name}" created`);
+				return;
+			}
+			// Hard fail: server already flipped row to `failed` and
+			// killed the container. Switch panel into the error
+			// styling, refresh sidebar so the failed row appears,
+			// re-enable the submit button so the user can fix the
+			// hook + try again.
+			panel.classList.add("bootstrap-error");
+			heading.textContent = error
+				? `postCreate hook failed (${error})`
+				: `postCreate hook failed (exit ${exitCode ?? "?"})`;
+			hint.textContent =
+				"The bootstrap command exited non-zero, so the container was killed and the session marked failed. " +
+				"Captured output above — fix the command and create a new session.";
+			void refreshSessions();
+			newSessionSubmitBtn.disabled = false;
+		},
+	});
+}
+
+function teardownBootstrapTail() {
+	if (activeBootstrap) {
+		activeBootstrap.close();
+		activeBootstrap = null;
+	}
+	// Clear any rendered tail / error panel too. Without this, a
+	// cancelled-mid-bootstrap close left the error-styled panel in
+	// the DOM; the next time the modal opened it briefly flashed a
+	// "postCreate hook failed" message that didn't apply to the new
+	// session (PR #208 round 3).
+	clearBootstrapError();
 }
 
 function clearBootstrapError() {
@@ -1165,6 +1212,13 @@ function clearBootstrapError() {
 function closeNewSessionModal() {
 	newSessionModal.classList.remove("open");
 	newSessionModal.setAttribute("aria-hidden", "true");
+	// PR 185b2b: closing the modal mid-bootstrap MUST cancel the WS
+	// subscription. The hook itself keeps running server-side (the
+	// async runner is fire-and-forget); we just stop tailing it. The
+	// user can re-attach to the session from the sidebar once it
+	// reaches `running` (or see the failure in the row's status if it
+	// flipped to `failed`).
+	teardownBootstrapTail();
 	(newSessionOpener ?? newSessionBtn).focus();
 	newSessionOpener = null;
 }
@@ -1190,26 +1244,25 @@ newSessionForm.addEventListener("submit", async (e) => {
 	// sessions and burn quota silently).
 	newSessionSubmitBtn.disabled = true;
 	clearBootstrapError();
+	teardownBootstrapTail();
 	try {
 		showToast("Creating session…");
 		const session = await createSession(name);
 		sessions.unshift(session);
 		renderSessionList();
+		if (session.bootstrapping) {
+			// PR 185b2b: postCreate is running asynchronously on the
+			// server. Switch the modal into live-tail mode and wait
+			// for the WS terminal message before either closing
+			// (success) or rendering an error panel (failure).
+			startBootstrapLiveTail(session, name);
+			return;
+		}
 		closeNewSessionModal();
 		void openSession(session.sessionId);
 		showToast(`Session "${name}" created`);
 	} catch (err) {
-		if (err instanceof BootstrapFailedError) {
-			// postCreate hook hard-failed (#185). Server already killed
-			// the container and flipped status=failed. Refresh the
-			// sidebar so the failed row shows up, and surface the hook's
-			// captured stdout/stderr inline in the modal so the user can
-			// see what went wrong without leaving the form.
-			void refreshSessions();
-			renderBootstrapError(err);
-		} else {
-			showToast((err as Error).message, true);
-		}
+		showToast((err as Error).message, true);
 		newSessionSubmitBtn.disabled = false;
 	}
 });

@@ -625,6 +625,27 @@ main:not([data-sidebar-ready]) #sidebar {
   cursor: progress;
 }
 
+/* postCreate live-tail panel (#185 / PR 185b2b). The same DOM node
+   gets the `bootstrap-error` class added on top when the WS sends a
+   terminal `fail` message — `bootstrap-error` selectors below win
+   via specificity to recolor the border + heading. Don't merge them
+   into a single class set; the staged styling makes the user-visible
+   transition (running → failed) immediate without re-rendering. */
+.bootstrap-tail {
+  margin-top: 0.85rem;
+  background: rgba(88, 166, 255, 0.06);
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 0.75rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.bootstrap-tail strong {
+  color: #58a6ff;
+  font-size: 0.85rem;
+}
+
 /* postCreate hard-fail panel inside the new-session modal (#185). */
 .bootstrap-error {
   margin-top: 0.85rem;

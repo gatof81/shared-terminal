@@ -6,6 +6,10 @@
 // e.g. https://api.terminal.yourdomain.com
 const BACKEND_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
 const API_BASE = `${BACKEND_URL}/api`;
+// http(s) → ws(s) for the same host. Used by the bootstrap live-tail
+// channel (PR 185b2b) and could be reused by the terminal-attach WS
+// helper if it ever moves into this module.
+const WS_BASE = BACKEND_URL.replace(/^http/, "ws");
 
 // ── Auth state (#18, #50) ───────────────────────────────────────────────────
 //
@@ -159,59 +163,117 @@ export interface SessionConfigPayload {
 	envVars?: Record<string, string>;
 }
 
-/**
- * Thrown when the create succeeded up to the point of running the
- * `postCreate` hook (#185), but the hook itself exited non-zero. The
- * server has already killed the container and flipped the session
- * status to `failed`; the row stays so the user can read the captured
- * output (carried on this error). The new-session modal surfaces
- * `bootstrapOutput` inline so the user sees what their hook printed
- * before it died.
- */
-export class BootstrapFailedError extends Error {
-	readonly sessionId: string;
-	readonly exitCode: number;
-	readonly output: string;
+// ── Bootstrap live-tail WS (#185 / PR 185b2b) ───────────────────────────────
 
-	constructor(sessionId: string, exitCode: number, output: string, message: string) {
-		super(message);
-		this.name = "BootstrapFailedError";
-		this.sessionId = sessionId;
-		this.exitCode = exitCode;
-		this.output = output;
-	}
+/** Server → client message shape on `/ws/bootstrap/<sessionId>`. */
+export type BootstrapServerMessage =
+	| { type: "output"; data: string }
+	| { type: "done"; success: true }
+	| { type: "fail"; exitCode: number; error?: string }
+	| { type: "error"; message: string };
+
+export interface BootstrapHandlers {
+	onOutput(chunk: string): void;
+	onDone(success: boolean, exitCode: number | null, error?: string): void;
+}
+
+/**
+ * Open the bootstrap live-tail WS for a session. Returns a `close()`
+ * thunk so the modal can tear it down on cancel. Auth is via the
+ * httpOnly JWT cookie — the browser auto-attaches it on the WS
+ * upgrade. The server handles late subscribers by replaying buffered
+ * output + the terminal message, so a slow connect doesn't lose log
+ * lines.
+ *
+ * Failure modes:
+ *   - WS close before any message: the server dropped us (auth fail,
+ *     ownership fail). Surface as a synthetic `fail` so the modal
+ *     doesn't sit on a stuck spinner.
+ *   - JSON parse error on a frame: log + skip; the next frame can
+ *     still recover.
+ */
+export function openBootstrapWs(
+	sessionId: string,
+	handlers: BootstrapHandlers,
+): { close: () => void } {
+	const ws = new WebSocket(`${WS_BASE}/ws/bootstrap/${encodeURIComponent(sessionId)}`);
+	let terminal = false;
+
+	ws.addEventListener("message", (e) => {
+		let msg: BootstrapServerMessage;
+		try {
+			msg = JSON.parse(e.data as string) as BootstrapServerMessage;
+		} catch {
+			console.warn("[bootstrap] dropped malformed frame");
+			return;
+		}
+		if (msg.type === "output") {
+			handlers.onOutput(msg.data);
+		} else if (msg.type === "done") {
+			terminal = true;
+			handlers.onDone(true, 0);
+		} else if (msg.type === "fail") {
+			terminal = true;
+			handlers.onDone(false, msg.exitCode, msg.error);
+		} else if (msg.type === "error") {
+			// Server-side auth/path failure — don't get a `fail`
+			// message after this, just a close. Hand a synthetic
+			// terminal up to the modal so it doesn't hang.
+			terminal = true;
+			handlers.onDone(false, null, msg.message);
+		}
+	});
+
+	ws.addEventListener("close", () => {
+		if (terminal) return;
+		// Server dropped us before sending a terminal. Most likely
+		// the session vanished or the broadcaster GC'd the entry.
+		// Synthetic fail so the modal can render an error instead
+		// of waiting indefinitely.
+		handlers.onDone(false, null, "Bootstrap channel closed unexpectedly");
+	});
+
+	return {
+		close: () => {
+			// Mark `terminal` BEFORE the close so the asynchronous
+			// `close` event handler's guard short-circuits and we
+			// don't synthesize a fake `fail` message for an
+			// intentional cancel (PR #208 round 3). Without this the
+			// modal would render "Bootstrap channel closed unexpectedly"
+			// every time the user closed the new-session modal during
+			// a hook, even though they explicitly chose to cancel.
+			terminal = true;
+			try {
+				ws.close(1000, "client cancelled");
+			} catch {
+				/* already closed */
+			}
+		},
+	};
+}
+
+/**
+ * Response shape for `POST /sessions`. The optional `bootstrapping`
+ * flag is set by the backend when a `postCreateCmd` was configured
+ * and the hook is running asynchronously — the modal subscribes to
+ * `/ws/bootstrap/<sessionId>` to tail output and waits for the
+ * terminal `done` / `fail` message before closing.
+ */
+export interface CreateSessionResponse extends SessionInfo {
+	bootstrapping?: boolean;
 }
 
 export async function createSession(
 	name: string,
 	envVars?: Record<string, string>,
 	config?: SessionConfigPayload,
-): Promise<SessionInfo> {
+): Promise<CreateSessionResponse> {
 	const res = await apiFetch("/sessions", {
 		method: "POST",
 		body: JSON.stringify({ name, envVars, config }),
 	});
 	if (!res.ok) {
-		const body = (await res.json().catch(() => ({}))) as {
-			error?: string;
-			sessionId?: string;
-			bootstrapOutput?: string;
-			bootstrapExitCode?: number;
-		};
-		// Distinguish hook-failed from generic create errors so the modal
-		// can surface the captured output instead of just a one-liner.
-		// The 500 carries `bootstrapOutput` only when the hook actually
-		// ran; a missing field means a different failure shape (D1
-		// transient, docker spawn EACCES, etc.) and the generic Error
-		// path is right.
-		if (body.bootstrapOutput !== undefined && body.sessionId !== undefined) {
-			throw new BootstrapFailedError(
-				body.sessionId,
-				body.bootstrapExitCode ?? -1,
-				body.bootstrapOutput,
-				body.error ?? "postCreate hook failed",
-			);
-		}
+		const body = (await res.json().catch(() => ({}))) as { error?: string };
 		throw new Error(body.error ?? "Failed to create session");
 	}
 	return res.json();
