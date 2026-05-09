@@ -171,6 +171,22 @@ describe("DockerManager.spawn config-applied", () => {
 		expect(hc.NanoCpus).toBe(4_000_000_000);
 	});
 
+	// Backend-injected fixed entries (SESSION_ID, SESSION_NAME, TERM,
+	// COLORTERM) must survive the merge — SESSION_ID in particular is
+	// load-bearing for #191 hook self-identification. The denylist
+	// already prevents users from setting SESSION_ID/SESSION_NAME in
+	// config; this test guards against an accidental refactor that
+	// drops the hardcoded entries entirely.
+	it("preserves backend-injected SESSION_ID / SESSION_NAME / TERM / COLORTERM in the final Env", async () => {
+		const { dm, captured } = makeDmWithCreateCapture();
+		await dm.spawn("sess-1");
+		const env = captured.opts.Env as string[];
+		expect(env).toContain("SESSION_ID=sess-1");
+		expect(env).toContain("SESSION_NAME=test");
+		expect(env).toContain("TERM=xterm-256color");
+		expect(env).toContain("COLORTERM=truecolor");
+	});
+
 	it("merges config.envVars into the docker-run Env (config-wins on collision)", async () => {
 		dbStubs.d1Query.mockResolvedValueOnce({
 			results: [
@@ -199,6 +215,37 @@ describe("DockerManager.spawn config-applied", () => {
 		// must NOT appear; only the config "wins" value.
 		expect(env).toContain("LEGACY_KEY=wins");
 		expect(env).not.toContain("LEGACY_KEY=legacy");
+	});
+
+	// One field set, the other null: the unset field must fall back to
+	// its respective default, NOT to 0 (which would be the value of a
+	// `?? 0` typo). Pinning the half-and-half case stops a refactor that
+	// loses one of the `?? DEFAULT_*` fallbacks from passing CI.
+	it("falls back to default for any cap that is null on the row", async () => {
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [
+				{
+					session_id: "sess-1",
+					workspace_strategy: null,
+					cpu_limit: 4_000_000_000,
+					mem_limit: null,
+					idle_ttl_seconds: null,
+					post_create_cmd: null,
+					post_start_cmd: null,
+					repos_json: null,
+					ports_json: null,
+					env_vars_json: null,
+					bootstrapped_at: null,
+				},
+			],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		const { dm, captured } = makeDmWithCreateCapture();
+		await dm.spawn("sess-1");
+		const hc = captured.opts.HostConfig as { Memory: number; NanoCpus: number };
+		expect(hc.NanoCpus).toBe(4_000_000_000);
+		expect(hc.Memory).toBe(2 * 1024 * 1024 * 1024); // default, not 0
 	});
 
 	// Availability over correctness for config reads: a transient D1
