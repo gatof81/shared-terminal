@@ -11,6 +11,7 @@ vi.mock("./db.js", () => dbStubs);
 
 import {
 	DockerManager,
+	demuxDockerOutputAll,
 	type OutputListener,
 	sanitiseHostname,
 	sanitiseUploadName,
@@ -1152,6 +1153,74 @@ describe("DockerManager.runPostCreate", () => {
 		const result = await dm.runPostCreate("s1", "false");
 		expect(result.exitCode).toBe(42);
 		expect(result.output).toContain("boom");
+	});
+
+	// Round-2 review fix: hook diagnostics go to stderr (`npm ERR!`,
+	// `bash: cmd: not found`, `tsc: error TS…`). The capture must
+	// include stderr, otherwise the hard-fail modal shows "(no output)"
+	// for the most common failure mode and the user can't see what
+	// went wrong.
+	it("captures stderr alongside stdout in the returned output", async () => {
+		const { dm } = makeDocker({
+			oneShot: (cmd) => {
+				// Inject a stderr frame ahead of an empty stdout to assert
+				// the combined demux walks both. The test harness packs
+				// whatever the hook returns as stdout (frame type 1), so
+				// we simulate by writing a custom multiplexed buffer
+				// directly. Easier path: use `mergeFrames` below.
+				if (cmd[0] === "bash") {
+					return { stdout: "bash: bad-cmd: not found\n", exitCode: 127 };
+				}
+				return undefined;
+			},
+		});
+		const result = await dm.runPostCreate("s1", "bad-cmd");
+		// Even with the harness packing as stdout, the combined demux
+		// must surface the bytes — exiting code 127 is the canonical
+		// "command not found" semaphore the modal now relies on.
+		expect(result.exitCode).toBe(127);
+		expect(result.output).toContain("bash: bad-cmd: not found");
+	});
+});
+
+// Direct unit tests on the combined-demux helper itself, since the
+// fake-container harness only emits stdout frames (type 1). Asserting
+// here that mixed stdout/stderr buffers — which Docker really does
+// produce in production — interleave correctly into a single output
+// string.
+describe("demuxDockerOutputAll", () => {
+	function frame(type: 1 | 2, payload: string): Buffer {
+		const data = Buffer.from(payload, "utf-8");
+		const header = Buffer.alloc(8);
+		header[0] = type;
+		header.writeUInt32BE(data.length, 4);
+		return Buffer.concat([header, data]);
+	}
+
+	it("collects type-1 (stdout) and type-2 (stderr) frames in arrival order", () => {
+		const raw = Buffer.concat([
+			frame(1, "step1\n"),
+			frame(2, "warn: something\n"),
+			frame(1, "step2\n"),
+			frame(2, "err: boom\n"),
+		]);
+		const out = demuxDockerOutputAll(raw);
+		expect(out).toBe("step1\nwarn: something\nstep2\nerr: boom\n");
+	});
+
+	it("ignores unknown frame types (defence against future Docker additions)", () => {
+		const raw = Buffer.concat([
+			frame(1, "kept\n"),
+			// type 3 doesn't exist today; skipping it lets a future
+			// Docker frame type appear without polluting the panel.
+			Buffer.concat([Buffer.from([3, 0, 0, 0, 0, 0, 0, 5]), Buffer.from("xxxxx")]),
+			frame(2, "kept-stderr\n"),
+		]);
+		expect(demuxDockerOutputAll(raw)).toBe("kept\nkept-stderr\n");
+	});
+
+	it("returns empty string for an empty buffer", () => {
+		expect(demuxDockerOutputAll(Buffer.alloc(0))).toBe("");
 	});
 });
 

@@ -776,7 +776,14 @@ export class DockerManager {
 		sessionId: string,
 		cmd: string,
 	): Promise<{ exitCode: number; output: string }> {
-		const result = await this.execOneShot(sessionId, ["bash", "-c", cmd]);
+		// `combineStreams: true` so the captured output includes stderr
+		// (#207 round 2 review): npm/tsc/bash diagnostic messages all go
+		// to stderr by default, and a hook-failure modal that only
+		// displays stdout would render "(no output)" for the most common
+		// failure mode (`bash: <cmd>: command not found`).
+		const result = await this.execOneShot(sessionId, ["bash", "-c", cmd], {
+			combineStreams: true,
+		});
 		return { exitCode: result.exitCode, output: result.stdout };
 	}
 
@@ -1405,6 +1412,7 @@ export class DockerManager {
 	private async execOneShot(
 		sessionId: string,
 		cmd: string[],
+		opts: { combineStreams?: boolean } = {},
 	): Promise<{ stdout: string; exitCode: number }> {
 		const meta = await this.sessions.getOrThrow(sessionId);
 		if (!meta.containerId) throw new Error("No container for this session");
@@ -1429,8 +1437,18 @@ export class DockerManager {
 			stream.on("error", reject);
 		});
 		const info = await exec.inspect();
+		// `combineStreams: true` is the bootstrap-hook caller (#207
+		// review): npm/tsc/bash diagnostics go to stderr, and a hook
+		// failure modal that only shows stdout would render
+		// "(no output captured)" for the common "command not found"
+		// path. The combined demux preserves frame-arrival order, so a
+		// shell snippet like `echo step1; bad-command` still reads as
+		// "step1\nbash: bad-command: not found\n" rather than the two
+		// streams separated.
 		return {
-			stdout: demuxDockerOutput(Buffer.concat(chunks), 1),
+			stdout: opts.combineStreams
+				? demuxDockerOutputAll(Buffer.concat(chunks))
+				: demuxDockerOutput(Buffer.concat(chunks), 1),
 			exitCode: info.ExitCode ?? 0,
 		};
 	}
@@ -1661,6 +1679,30 @@ function demuxDockerOutput(raw: Buffer, type: 1 | 2): string {
 		off += 8;
 		if (off + size > raw.length) break;
 		if (frameType === type) chunks.push(raw.subarray(off, off + size));
+		off += size;
+	}
+	return Buffer.concat(chunks).toString("utf-8");
+}
+
+// Same parser as `demuxDockerOutput` but collects BOTH stdout (type 1)
+// and stderr (type 2) in frame-arrival order. Used by the postCreate
+// hook runner (#207 review) so a `bash -c "echo step1; bad-cmd"`
+// failure renders as "step1\nbash: bad-cmd: not found\n" in the modal,
+// rather than just "step1\n" (stdout-only) or worse, "(no output)" if
+// the entire failure went to stderr. Frame-order interleaving is
+// approximate at the byte level — Docker only delivers complete
+// frames, and within a frame the ordering vs. the OTHER stream's
+// preceding bytes is whatever the writer happened to flush first —
+// but it's good enough for a log panel. Exported for tests.
+export function demuxDockerOutputAll(raw: Buffer): string {
+	const chunks: Buffer[] = [];
+	let off = 0;
+	while (off + 8 <= raw.length) {
+		const frameType = raw[off]!;
+		const size = raw.readUInt32BE(off + 4);
+		off += 8;
+		if (off + size > raw.length) break;
+		if (frameType === 1 || frameType === 2) chunks.push(raw.subarray(off, off + size));
 		off += size;
 	}
 	return Buffer.concat(chunks).toString("utf-8");
