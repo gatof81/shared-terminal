@@ -265,7 +265,111 @@
             role="tabpanel"
             aria-labelledby="session-tab-repo-tab"
             hidden
-          ></div>
+          >
+            <p class="modal-hint">
+              Clone a repo into the workspace before your postCreate
+              hook runs. Leave Target empty to clone into the workspace
+              root (replace mode). PAT and SSH credentials are
+              AES-GCM-encrypted at rest and never echoed back.
+            </p>
+            <label class="modal-field">
+              <span>Repository URL</span>
+              <input
+                type="text"
+                id="repo-url"
+                placeholder="https://github.com/owner/repo  or  git@github.com:owner/repo"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </label>
+            <div class="repo-fields-row">
+              <label class="modal-field">
+                <span>Ref (branch / tag / SHA)</span>
+                <input
+                  type="text"
+                  id="repo-ref"
+                  placeholder="main (empty = remote HEAD)"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </label>
+              <label class="modal-field">
+                <span>Target (workspace-relative)</span>
+                <input
+                  type="text"
+                  id="repo-target"
+                  placeholder="(empty = workspace root)"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </label>
+              <label class="modal-field">
+                <span>Shallow depth</span>
+                <input
+                  type="number"
+                  id="repo-depth"
+                  placeholder="(empty = full)"
+                  min="1"
+                  max="10000"
+                />
+              </label>
+            </div>
+            <label class="modal-field">
+              <span>Auth</span>
+              <select id="repo-auth">
+                <option value="none">None (public repo)</option>
+                <option value="pat">HTTPS Personal Access Token</option>
+                <option value="ssh">SSH key</option>
+              </select>
+            </label>
+            <div id="repo-auth-pat-panel" class="repo-auth-panel" hidden>
+              <label class="modal-field">
+                <span>Personal access token</span>
+                <input
+                  type="password"
+                  id="repo-auth-pat-token"
+                  placeholder="ghp_…"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </label>
+            </div>
+            <div id="repo-auth-ssh-panel" class="repo-auth-panel" hidden>
+              <label class="modal-field">
+                <span>Private key (OpenSSH format)</span>
+                <textarea
+                  id="repo-auth-ssh-key"
+                  rows="6"
+                  placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;…"
+                  autocomplete="off"
+                  spellcheck="false"
+                ></textarea>
+              </label>
+              <label class="modal-field">
+                <span>Known hosts</span>
+                <select id="repo-auth-ssh-known-hosts-mode">
+                  <option value="default">
+                    Bundled (github.com / gitlab.com / bitbucket.org)
+                  </option>
+                  <option value="custom">Custom paste</option>
+                </select>
+              </label>
+              <label
+                class="modal-field"
+                id="repo-auth-ssh-known-hosts-custom-wrap"
+                hidden
+              >
+                <span>Custom known_hosts</span>
+                <textarea
+                  id="repo-auth-ssh-known-hosts-custom"
+                  rows="4"
+                  placeholder="intranet.example.com ssh-ed25519 AAAA…"
+                  autocomplete="off"
+                  spellcheck="false"
+                ></textarea>
+              </label>
+            </div>
+          </div>
           <div
             class="session-tab-panel"
             id="session-tab-env"

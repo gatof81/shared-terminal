@@ -571,6 +571,65 @@ main:not([data-sidebar-ready]) #sidebar {
 .session-field input[type="text"]:focus {
   border-color: #58a6ff;
 }
+/* #188 PR 188e — Repo tab. `modal-field` is the new field-shape
+ * class introduced in this PR; the Basics tab's session-name input
+ * still uses the older `session-field` family, which is left
+ * unchanged. We add a flex row for the ref/target/depth triple so
+ * the three short fields fit on one line on a typical desktop
+ * viewport. The credential subpanels lift their inputs into a
+ * slightly tinted background so the user can see at a glance that
+ * they're entering secrets. */
+.modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.82rem;
+  color: #8b949e;
+}
+.modal-field > span {
+  font-size: 0.78rem;
+}
+.modal-field input[type="text"],
+.modal-field input[type="password"],
+.modal-field input[type="number"],
+.modal-field select,
+.modal-field textarea {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.85rem;
+  color: #e6edf3;
+  outline: none;
+  font-family: inherit;
+}
+.modal-field input:focus,
+.modal-field select:focus,
+.modal-field textarea:focus {
+  border-color: #58a6ff;
+}
+.modal-field textarea {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  resize: vertical;
+}
+.repo-fields-row {
+  display: flex;
+  gap: 0.65rem;
+}
+.repo-fields-row .modal-field {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.repo-auth-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  background: rgba(88, 166, 255, 0.04);
+  border: 1px solid #21262d;
+  border-radius: 8px;
+  padding: 0.75rem;
+}
+
 .session-placeholder {
   font-size: 0.82rem;
   color: #8b949e;
