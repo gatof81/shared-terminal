@@ -329,6 +329,90 @@ export async function createSession(
 	return res.json();
 }
 
+// ── Templates (#195) ────────────────────────────────────────────────────────
+
+/**
+ * Strip a SessionConfigPayload down to a template-safe shape:
+ *   - `secret`-typed envVars collapse to `secret-slot` (no value);
+ *   - `auth.pat` is dropped entirely (PAT material must not land in
+ *     the unencrypted `templates.config` column);
+ *   - `auth.ssh.privateKey` is dropped, but `knownHosts` (public
+ *     fingerprints) stays — the recipient re-supplies the key on
+ *     `Use template`.
+ *
+ * Pure function, exported so `main.ts` can call it before the API
+ * request and a test can pin the contract. The backend's
+ * `assertTemplateConfigShape` is the regression guard if a
+ * misbehaving client tries to skip this strip — it 400s a config
+ * with live credentials. Same shape the issue spec calls out.
+ */
+export function stripConfigForTemplate(config: SessionConfigPayload): SessionConfigPayload {
+	const out: SessionConfigPayload = { ...config };
+	if (config.envVars) {
+		out.envVars = config.envVars.map((entry) =>
+			entry.type === "secret" ? ({ name: entry.name, type: "secret-slot" } as const) : entry,
+		);
+	}
+	if (config.auth) {
+		const stripped: NonNullable<SessionConfigPayload["auth"]> = {};
+		// `auth.pat` is the entire PAT credential — drop it. The
+		// `repo.auth: "pat"` declaration on `config.repo` stays
+		// (preserves intent for the Use-template re-prompt). The
+		// schema's `allowMissingAuth: true` flag in 195a tolerates
+		// the missing credential.
+		if (config.auth.ssh) {
+			// SSH: keep knownHosts (public), drop privateKey.
+			if (config.auth.ssh.knownHosts) {
+				stripped.ssh = { knownHosts: config.auth.ssh.knownHosts } as {
+					privateKey: string;
+					knownHosts: string;
+				};
+				// Type cheat: the wire type's `ssh.privateKey` is
+				// declared required, but the backend accepts the
+				// shape with `privateKey` absent under
+				// `allowMissingAuth: true`. The cast keeps us
+				// honest about the runtime shape we're sending.
+				delete (stripped.ssh as { privateKey?: string }).privateKey;
+			}
+		}
+		// Only attach `auth` if there's anything left after stripping.
+		if (Object.keys(stripped).length > 0) {
+			out.auth = stripped;
+		} else {
+			delete out.auth;
+		}
+	}
+	return out;
+}
+
+export interface TemplateSummary {
+	id: string;
+	name: string;
+	description: string | null;
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface Template extends TemplateSummary {
+	config: SessionConfigPayload;
+}
+
+export async function createTemplate(input: {
+	name: string;
+	description?: string;
+	config: SessionConfigPayload;
+}): Promise<Template> {
+	const res = await apiFetch("/templates", {
+		method: "POST",
+		body: JSON.stringify(input),
+	});
+	if (!res.ok) {
+		const body = (await res.json().catch(() => ({}))) as { error?: string; path?: string };
+		throw new Error(body.error ?? `Failed to create template (${res.status})`);
+	}
+	return res.json();
+}
+
 export async function listSessions(includeTerminated = false): Promise<SessionInfo[]> {
 	const path = includeTerminated ? "/sessions?all=true" : "/sessions";
 	const res = await apiFetch(path);

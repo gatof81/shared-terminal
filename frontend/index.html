@@ -688,6 +688,9 @@
           </div>
           <div class="session-modal-actions">
             <button type="button" data-close-modal>Cancel</button>
+            <button type="button" id="save-as-template-btn" class="modal-secondary-action">
+              Save as template…
+            </button>
             <button type="submit" id="new-session-submit">Create session</button>
           </div>
         </form>
@@ -722,6 +725,65 @@
           + Generate new invite
         </button>
         <div id="invite-list" class="invite-list"></div>
+      </div>
+    </div>
+
+    <!-- Save-as-template dialog (#195 PR 195b). Surfaces from the
+         create-session modal's "Save as template…" button. The
+         create-session modal stays open underneath; submitting this
+         dialog just POSTs to /api/templates and toasts on success. -->
+    <div id="save-template-modal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close-modal></div>
+      <div
+        class="modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="save-template-modal-title"
+      >
+        <div class="modal-header">
+          <h2 id="save-template-modal-title">Save as template</h2>
+          <button
+            class="modal-close"
+            type="button"
+            aria-label="Close"
+            data-close-modal
+          >
+            ×
+          </button>
+        </div>
+        <p class="modal-hint">
+          Saves the current form as a reusable preset. Secret values
+          (env vars marked secret, PAT, SSH private key) are stripped
+          before storage; the recipient re-supplies them when using
+          the template.
+        </p>
+        <form id="save-template-form" novalidate>
+          <label class="modal-field">
+            <span>Template name</span>
+            <input
+              id="save-template-name"
+              type="text"
+              placeholder="my-stack"
+              maxlength="64"
+              autocomplete="off"
+              required
+            />
+          </label>
+          <label class="modal-field">
+            <span>Description (optional)</span>
+            <input
+              id="save-template-description"
+              type="text"
+              placeholder="What this template configures"
+              maxlength="512"
+              autocomplete="off"
+            />
+          </label>
+          <div class="session-modal-actions">
+            <button type="button" data-close-modal>Cancel</button>
+            <button type="submit" id="save-template-submit">Save template</button>
+          </div>
+        </form>
       </div>
     </div>
 
