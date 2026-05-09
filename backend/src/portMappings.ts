@@ -27,13 +27,13 @@ export interface PortMapping {
 }
 
 /**
- * Replace all mappings for `sessionId` with `mappings` atomically (within
- * a single D1 round-trip per statement; D1 has no multi-statement
- * transaction primitive on the HTTP API, so we sequence DELETE then INSERTs
- * and accept that a backend crash mid-rewrite leaves the table partially
- * populated. The next spawn / reconcile rewrites it cleanly, and the
- * dispatcher's "session must be running" gate stops a torn read from
- * proxying to a stale host port).
+ * Replace all mappings for `sessionId` with `mappings`. D1 has no
+ * multi-statement transaction primitive on the HTTP API, so this
+ * sequences DELETE then per-row INSERT — emphatically NOT atomic. A
+ * backend crash mid-sequence can leave the table empty (DELETE
+ * succeeded, INSERTs didn't); the next spawn / reconcile rewrites it
+ * cleanly, and the dispatcher's "session must be running" gate stops
+ * a torn read from proxying to a stale host port in the meantime.
  */
 export async function setPortMappings(sessionId: string, mappings: PortMapping[]): Promise<void> {
 	await d1Query("DELETE FROM sessions_port_mappings WHERE session_id = ?", [sessionId]);

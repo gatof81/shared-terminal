@@ -1866,17 +1866,16 @@ export class DockerManager {
 					}
 				} else {
 					// #190 PR 190b — re-discover the host-port mappings
-					// for a still-running container after a backend
-					// restart. The kernel-bound host ports survive the
-					// backend dying (the container itself owns them),
-					// but the in-memory `sessions_port_mappings` row was
-					// just rewritten to an authoritative state on the
-					// last spawn — actually no, it's a D1 row, so it
-					// survives. Still, re-reading from inspect() guards
-					// against drift if a future code path ever wrote
-					// the table partially. Best-effort: a failure here
-					// logs and lets the rest of reconcile finish; the
-					// next /start writes a fresh row.
+					// for a still-running container. The kernel-bound
+					// host ports survive a backend restart (the
+					// container itself owns them) and the D1 row
+					// written by the last spawn / startContainer
+					// survives too — but re-reading from inspect()
+					// guards against drift if a prior `setPortMappings`
+					// crashed mid-sequence (DELETE without follow-up
+					// INSERTs is the practical worst case). Best-effort:
+					// a failure here logs and lets the rest of reconcile
+					// finish; the next /start writes a fresh row.
 					try {
 						const mappings = parseInspectPorts(info.NetworkSettings?.Ports);
 						if (mappings.length > 0) {
