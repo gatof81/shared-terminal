@@ -1425,6 +1425,17 @@ const agentSeedSettingsError = document.getElementById(
 const agentSeedClaudeMd = document.getElementById("agent-seed-claude-md") as HTMLTextAreaElement;
 const postCreateCmd = document.getElementById("post-create-cmd") as HTMLTextAreaElement;
 const postStartCmd = document.getElementById("post-start-cmd") as HTMLTextAreaElement;
+// Resources sub-section. CPU is in cores → translated to nano-CPUs on
+// submit (Docker's HostConfig unit; matches the backend's wire shape).
+// Memory is amount + GiB/MiB → translated to bytes. Idle is amount +
+// minutes/hours → translated to seconds, OR omitted (undefined) for
+// "Never" — the schema is `.optional()` not `.nullable()`, so sending
+// `null` returns 400.
+const resourcesCpuCores = document.getElementById("resources-cpu-cores") as HTMLInputElement;
+const resourcesMemAmount = document.getElementById("resources-mem-amount") as HTMLInputElement;
+const resourcesMemUnit = document.getElementById("resources-mem-unit") as HTMLSelectElement;
+const resourcesIdleAmount = document.getElementById("resources-idle-amount") as HTMLInputElement;
+const resourcesIdleUnit = document.getElementById("resources-idle-unit") as HTMLSelectElement;
 
 /**
  * Validate `~/.claude/settings.json` content client-side. Backend's
@@ -1468,6 +1479,11 @@ function resetAdvancedTab(): void {
 	postCreateCmd.value = "";
 	postStartCmd.value = "";
 	agentSeedSettingsError.textContent = "";
+	resourcesCpuCores.value = "";
+	resourcesMemAmount.value = "";
+	resourcesMemUnit.value = "GiB";
+	resourcesIdleAmount.value = "";
+	resourcesIdleUnit.value = "minutes";
 }
 
 /**
@@ -1490,6 +1506,9 @@ export function collectAdvancedForSubmit(): {
 	agentSeed?: SessionConfigPayload["agentSeed"];
 	postCreateCmd?: string;
 	postStartCmd?: string;
+	cpuLimit?: number;
+	memLimit?: number;
+	idleTtlSeconds?: number;
 } {
 	const out: ReturnType<typeof collectAdvancedForSubmit> = {};
 
@@ -1533,6 +1552,44 @@ export function collectAdvancedForSubmit(): {
 	const ps = postStartCmd.value.trim();
 	if (pc !== "") out.postCreateCmd = pc;
 	if (ps !== "") out.postStartCmd = ps;
+
+	// Resources sub-section. Each field is optional and only emitted
+	// when it parses to a finite positive number — the backend's
+	// schema enforces the actual bounds (CPU 0.25–8 cores, memory
+	// 256 MiB–16 GiB, idle TTL 60 s–24 h), so a value at-or-near the
+	// edge gets a precise 400 with the field path. Empty / "Never" /
+	// non-numeric inputs drop through and the field is omitted —
+	// `.optional()` in the schema means an absent field falls back
+	// to the spawn-time default.
+	const cpuRaw = resourcesCpuCores.value.trim();
+	if (cpuRaw !== "") {
+		const cores = Number(cpuRaw);
+		// `Number.isFinite` (not `isInteger`) — the spec accepts
+		// fractional cores like 0.25 and 0.5; nano-CPU integer math
+		// happens at the multiplication step. Backend re-validates
+		// the integer result.
+		if (Number.isFinite(cores) && cores > 0) {
+			out.cpuLimit = Math.round(cores * 1_000_000_000);
+		}
+	}
+
+	const memRaw = resourcesMemAmount.value.trim();
+	if (memRaw !== "") {
+		const amount = Number(memRaw);
+		if (Number.isFinite(amount) && amount > 0) {
+			const unitFactor = resourcesMemUnit.value === "GiB" ? 1024 ** 3 : 1024 ** 2;
+			out.memLimit = Math.round(amount * unitFactor);
+		}
+	}
+
+	const idleRaw = resourcesIdleAmount.value.trim();
+	if (idleRaw !== "") {
+		const amount = Number(idleRaw);
+		if (Number.isFinite(amount) && amount > 0) {
+			const unitSeconds = resourcesIdleUnit.value === "hours" ? 3600 : 60;
+			out.idleTtlSeconds = Math.round(amount * unitSeconds);
+		}
+	}
 
 	return out;
 }
@@ -1790,7 +1847,10 @@ newSessionForm.addEventListener("submit", async (e) => {
 			advanced.dotfiles !== undefined ||
 			advanced.agentSeed !== undefined ||
 			advanced.postCreateCmd !== undefined ||
-			advanced.postStartCmd !== undefined;
+			advanced.postStartCmd !== undefined ||
+			advanced.cpuLimit !== undefined ||
+			advanced.memLimit !== undefined ||
+			advanced.idleTtlSeconds !== undefined;
 		const portsHasContent = ports !== undefined || allowPrivilegedPorts === true;
 		const config: SessionConfigPayload | undefined =
 			envVars || repo || advancedHasContent || portsHasContent
