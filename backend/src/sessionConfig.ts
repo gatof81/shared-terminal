@@ -47,23 +47,27 @@ const MAX_PORTS = 20;
 // Auth method, replace-workspace flag, etc. land with the repo-clone child.
 //
 // URL scheme allowlist is enforced at INGEST so a stored value can never
-// reach the #188 git-clone consumer with a `file://` (clone from arbitrary
-// host paths including the bind-mounted workspace), `ssh://attacker/`
-// (SSRF / host-key confusion), or `git://attacker:9418/` (the unauth-
-// enticated git protocol — same SSRF shape as ssh, GitHub deprecated and
-// removed support in 2021, so legitimate use is essentially zero). The
-// schema is the right enforcement point — once a row is in D1, the child
-// issue has no obvious place to re-validate without a duplicate codebase.
-// `git+...` variants stay out pending a real reason to need them.
-//
-// `http://` (cleartext) is admitted today so air-gapped / local mirrors
-// without TLS still work. PR #188 should revisit when wiring the actual
-// `git clone`: a man-in-the-middle on the path between the container
-// and the public mirror could inject arbitrary repo content, which
-// becomes user-impact only at clone time. Two reasonable options for
-// #188: refuse `http://` outright (safest), or surface a confirm prompt
-// in the form's Repo tab so the user has to opt in.
-const REPO_URL_SCHEME = /^https?:\/\//;
+// reach the #188 git-clone consumer with a problematic scheme:
+//   - `file://`              clone from arbitrary host paths (incl. the
+//                            bind-mounted workspace)
+//   - `ssh://attacker/`      SSRF / host-key confusion
+//   - `git://attacker:9418/` unauthenticated git protocol; same SSRF
+//                            shape as ssh, GitHub deprecated/removed
+//                            support in 2021
+//   - `http://`              cleartext: a MITM (corporate proxy, captive
+//                            portal, hostile WiFi) can inject repo
+//                            content which then executes inside the
+//                            container as postCreate/postStart hooks.
+//                            Blast radius is the session container, not
+//                            the host, but the product runs the Claude
+//                            CLI inside these containers — material risk.
+// The schema is the right enforcement point: once a row is in D1, the
+// child issue has no obvious place to re-validate without a duplicate
+// codebase. `git+...` variants stay out pending a real reason to need
+// them. If a future deployment needs cleartext intranet mirrors, #188
+// can add an opt-in form affordance with a UI warning instead of
+// silently storing the URL.
+const REPO_URL_SCHEME = /^https:\/\//;
 const RepoSpec = z
 	.object({
 		url: z
@@ -71,7 +75,7 @@ const RepoSpec = z
 			.min(1)
 			.max(500)
 			.refine((u) => REPO_URL_SCHEME.test(u), {
-				message: "url must use https:// or http:// scheme",
+				message: "url must use https:// scheme",
 			}),
 		// `.min(1)` matches the postCreateCmd/postStartCmd rule: a stored
 		// empty string is indistinguishable from "no ref supplied" once

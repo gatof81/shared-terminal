@@ -149,13 +149,14 @@ describe("validateSessionConfig", () => {
 	// review bot flagged. PR 188 will read these values straight into a
 	// git-clone consumer, so refusing them at ingest is the only place
 	// this can be blocked without a duplicate validator downstream.
-	it("rejects repo URLs with file:// / ssh:// / git:// schemes", () => {
-		// git:// is on the rejected list alongside file:// and ssh://:
-		// the unauthenticated git protocol has the same SSRF shape as
-		// ssh:// (TCP probe to attacker-supplied host:port from inside
-		// the container) and GitHub deprecated/removed support in 2021,
-		// so legitimate use is essentially zero.
+	it("rejects repo URLs with non-https schemes", () => {
+		// Allowlist is https:// only. http:// is rejected because a MITM
+		// on the path between the container and the public mirror can
+		// inject content which then runs as postCreate/postStart inside
+		// the container. ssh:// / git:// / file:// are rejected for the
+		// SSRF / arbitrary-path reasons documented on the regex.
 		for (const url of [
+			"http://example.com/r",
 			"file:///etc/passwd",
 			"ssh://attacker.example/r",
 			"git://attacker.example:9418/r",
@@ -173,10 +174,10 @@ describe("validateSessionConfig", () => {
 		);
 	});
 
-	it("accepts https / http scheme repo URLs", () => {
+	it("accepts https:// repo URLs", () => {
 		expect(
 			validateSessionConfig({
-				repos: [{ url: "https://example.com/r" }, { url: "http://example.com/r" }],
+				repos: [{ url: "https://example.com/r" }, { url: "https://github.com/o/p" }],
 			}),
 		).toBeDefined();
 	});
