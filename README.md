@@ -412,7 +412,7 @@ Auth is via the httpOnly cookie `st_token` set by `POST /api/auth/login` and `PO
 | ------ | ------------------- | ------------------------------------------------------------ |
 | POST   | /api/invites        | Mint a single-use invite code                                |
 | GET    | /api/invites        | List invite codes (admin sees all rows, not just their own)  |
-| DELETE | /api/invites/:code  | Revoke an unused invite code                                 |
+| DELETE | /api/invites/:hash  | Revoke an unused invite code (`:hash` is the 64-char hex SHA-256 digest returned by `GET /api/invites`, not the plaintext token) |
 
 ### WebSocket
 
