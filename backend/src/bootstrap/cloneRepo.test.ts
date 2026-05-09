@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Set the encryption key BEFORE importing the module — `decryptStoredAuth`
@@ -430,6 +431,39 @@ describe("runCloneRepo", () => {
 		// `unset` the secret env vars after the on-disk write so a
 		// child process started by git doesn't inherit them.
 		expect(SSH_CLONE_SCRIPT).toContain("unset ST_SSH_KEY ST_KNOWN_HOSTS");
+	});
+
+	// PR #215 round 1 SHOULD-FIX: the JSDoc claimed StrictHostKeyChecking=yes
+	// but the script body lacked the GIT_SSH_COMMAND that enforces it. Pin
+	// the explicit setting so a future edit can't silently revert to the
+	// 'ask' default and accept a swapped-in attacker host key.
+	it("SSH_CLONE_SCRIPT enforces StrictHostKeyChecking=yes via GIT_SSH_COMMAND", () => {
+		expect(SSH_CLONE_SCRIPT).toContain('export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=yes"');
+	});
+
+	// ── Bash syntax checks (PR #215 round 1 NIT) ───────────────────────────
+
+	// `bash -n` (parse-only) catches broken quoting, malformed heredoc
+	// delimiters, mismatched braces — exactly the class of breakage the
+	// string-presence tests above don't notice. `streamExec` is mocked
+	// in these tests, so a syntactically broken script body would
+	// otherwise reach production unblocked.
+	it("PAT_CLONE_SCRIPT parses cleanly under bash -n", () => {
+		const r = spawnSync("bash", ["-n"], {
+			input: PAT_CLONE_SCRIPT,
+			encoding: "utf8",
+		});
+		expect(r.status).toBe(0);
+		expect(r.stderr).toBe("");
+	});
+
+	it("SSH_CLONE_SCRIPT parses cleanly under bash -n", () => {
+		const r = spawnSync("bash", ["-n"], {
+			input: SSH_CLONE_SCRIPT,
+			encoding: "utf8",
+		});
+		expect(r.status).toBe(0);
+		expect(r.stderr).toBe("");
 	});
 
 	// ── env helpers (PR 188d) ──────────────────────────────────────────────

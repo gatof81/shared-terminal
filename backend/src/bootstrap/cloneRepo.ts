@@ -283,6 +283,17 @@ chmod 644 ~/.ssh/known_hosts
 # can't unset that, but we can keep them out of the post-write
 # scope.)
 unset ST_SSH_KEY ST_KNOWN_HOSTS
+# Enforce strict host-key checking explicitly. Without this, OpenSSH
+# falls back to its 'ask' default — which behaves like rejection in a
+# non-TTY context (\`Tty: false\` on the docker exec) but prompts in a
+# TTY. The bot review of PR #215 round 1 caught this: the SSH JSDoc
+# block claimed the protection without code-enforcing it. With the
+# known_hosts file populated above, \`StrictHostKeyChecking=yes\` means
+# "verify the server's host key against known_hosts; refuse on
+# mismatch or absence". That's exactly the protection we want — a
+# hostile DNS / network can't substitute its own host key during
+# the clone.
+export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=yes"
 ARGS=("git" "clone")
 [ -n "$ST_REF" ] && ARGS+=("--branch" "$ST_REF")
 [ -n "$ST_DEPTH" ] && ARGS+=("--depth" "$ST_DEPTH")

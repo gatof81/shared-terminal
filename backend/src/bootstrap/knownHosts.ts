@@ -7,8 +7,12 @@
  * stored verbatim. The runner writes whichever string lands here
  * to `~/.ssh/known_hosts` inside the container BEFORE calling
  * `git clone`, so SSH's host-key check has something to compare
- * against — `StrictHostKeyChecking=yes` would otherwise refuse the
- * clone with "Host key verification failed."
+ * against. Without a populated known_hosts entry for the remote,
+ * the script's `StrictHostKeyChecking=yes` would refuse the clone
+ * with "Host key verification failed"; with matching fingerprints
+ * `yes` verifies the server and proceeds — which is exactly the
+ * protection we want against a hostile network swapping in an
+ * attacker's host key.
  *
  * The set is the three providers most users will clone from. Public
  * fingerprints, no secrets. Each line is a self-contained
