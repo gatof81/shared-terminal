@@ -101,7 +101,24 @@ const MAX_ENV_NAME_LEN = 256;
 // auth↔scheme pairing — a `git@…` URL with `auth: "none"` would clone
 // over a missing identity and fail mysteriously inside the container;
 // we reject it at the route boundary instead.
-const REPO_URL_HTTPS = /^https:\/\/[^\s]+$/;
+//
+// `[^@\s]` in REPO_URL_HTTPS is the round-1 SHOULD-FIX. Without it the
+// regex accepted `https://user:ghp_TOKEN@github.com/o/p`, which would
+// store the PAT verbatim in `repos_json` (the whole point of
+// `auth_json` / `encryptAuthCredentials` is that secrets never land
+// in plaintext anywhere on disk). The form forces credentials through
+// `auth.pat` instead, where the route encrypts before persist. The
+// SSH form's regex deliberately starts with the `git@` user prefix
+// — that's the canonical SSH-clone shape, not a credential — and
+// the host/path char class on the other side excludes `@` already.
+//
+// `..` in either side is rejected by the explicit `.includes("..")`
+// check below; the regex alone allows it because `.` and `/` are
+// valid path chars. The runner in 188c will pass the URL to `git
+// clone` via argv (no shell), but blocking `..` here keeps the
+// invariant uniform across `repo.url` / `repo.ref` / `repo.target`
+// so the 188c author doesn't trip over an asymmetric foot-gun.
+const REPO_URL_HTTPS = /^https:\/\/[^@\s]+$/;
 const REPO_URL_SSH = /^git@[A-Za-z0-9.-]+:[A-Za-z0-9._/-]+$/;
 // Refnames: branches, tags, raw SHAs. Allow the standard refname
 // charset (per `git check-ref-format`) plus `/` for nested branches.
@@ -123,6 +140,16 @@ const RepoSpec = z
 			.max(500)
 			.refine((u) => REPO_URL_HTTPS.test(u) || REPO_URL_SSH.test(u), {
 				message: "url must be https://… or git@host:path form",
+			})
+			// Belt-and-suspenders against `..` in either URL form. The
+			// HTTPS regex blocks `@` (creds-in-URL); the SSH path char
+			// class allows `.` and `/` (so `git@host:org/../etc` would
+			// otherwise pass shape validation). Argv-only invocation by
+			// the runner means this isn't a local RCE concern, but the
+			// uniform `..` rejection across url/ref/target keeps the
+			// invariant readable for the 188c author.
+			.refine((u) => !u.includes(".."), {
+				message: "url must not contain '..'",
 			}),
 		// Empty `""` = remote HEAD (no `--branch` flag). Non-empty is
 		// validated against the refname allowlist below. Stored as the
@@ -672,7 +699,14 @@ export function redactStoredAuth(stored: AuthStored | undefined): AuthPublic | u
 	if (stored.ssh !== undefined) {
 		out.ssh = { isSet: true, knownHosts: stored.ssh.knownHosts };
 	}
-	return out;
+	// Mirror `parseAuthColumn`: an `AuthStored` with neither field set
+	// collapses to undefined so listing-endpoint callers can rely on
+	// `auth !== undefined` as the "are credentials configured?"
+	// predicate (PR #213 round 1 NIT). `parseAuthColumn` already drops
+	// rows that come back as `{}`, but a future code path that
+	// constructs an `AuthStored` directly (e.g. a partial-edit endpoint)
+	// would otherwise leak `{}` here.
+	return out.pat === undefined && out.ssh === undefined ? undefined : out;
 }
 
 /**

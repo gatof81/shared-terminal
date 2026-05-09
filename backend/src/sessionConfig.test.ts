@@ -196,6 +196,38 @@ describe("validateSessionConfig", () => {
 		).toThrowError(SessionConfigValidationError);
 	});
 
+	// PR #213 round 1 SHOULD-FIX: a URL like
+	// `https://user:ghp_xxxx@github.com/o/p` would otherwise store the
+	// PAT verbatim in `repos_json`, bypassing the AES-GCM encrypt-on-
+	// persist that `auth_json` enforces. Reject `@` in HTTPS URLs at
+	// the regex layer; users must put credentials through `auth.pat`.
+	it("rejects HTTPS URLs with embedded user:password credentials", () => {
+		for (const url of [
+			"https://user:ghp_token@github.com/o/p",
+			"https://user@github.com/o/p",
+			"https://:secret@github.com/o/p",
+		]) {
+			for (const auth of ["none", "pat"] as const) {
+				const config: { repo: { url: string; auth: "none" | "pat" }; auth?: object } = {
+					repo: { url, auth },
+				};
+				if (auth === "pat") config.auth = { pat: "ghp_orphan" };
+				expect(() => validateSessionConfig(config)).toThrowError(SessionConfigValidationError);
+			}
+		}
+	});
+
+	// PR #213 round 1 NIT: SSH URL path component allowed `..`
+	// (`git@github.com:o/../etc`) — same uniform rejection as ref/target.
+	it("rejects SSH URLs containing '..'", () => {
+		expect(() =>
+			validateSessionConfig({
+				repo: { url: "git@github.com:o/../etc", auth: "ssh" },
+				auth: { ssh: { privateKey: "k", knownHosts: "default" } },
+			}),
+		).toThrowError(SessionConfigValidationError);
+	});
+
 	it("accepts https:// repo URLs", () => {
 		expect(
 			validateSessionConfig({
@@ -1006,5 +1038,13 @@ describe("encryptAuthCredentials / decryptStoredAuth / redactStoredAuth", () => 
 
 	it("redactStoredAuth returns undefined for undefined input", () => {
 		expect(redactStoredAuth(undefined)).toBeUndefined();
+	});
+
+	// PR #213 round 1 NIT: parity with `parseAuthColumn`. An `AuthStored`
+	// with neither `pat` nor `ssh` set must collapse to undefined so a
+	// future GET-config endpoint can use `auth !== undefined` as the
+	// "credentials configured?" predicate.
+	it("redactStoredAuth collapses an empty AuthStored to undefined", () => {
+		expect(redactStoredAuth({})).toBeUndefined();
 	});
 });
