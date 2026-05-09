@@ -554,9 +554,17 @@ export const SessionConfigSchema = z
 					path: ["ports", i, "container"],
 					message: `duplicate container port ${port.container} (also at index ${prior})`,
 				});
-			} else {
-				seenContainers.set(port.container, i);
+				// `continue` so we don't also fire the privileged-port
+				// issue against an index that's already rejected for a
+				// different reason. Today's `safeParse` consumers only
+				// surface `issues[0]` so the doubling has no UX effect,
+				// but a future caller iterating all issues would see
+				// two messages pointing at the same row — confusing, and
+				// obscures the duplicate as the root cause. PR #221
+				// round 1 NIT.
+				continue;
 			}
+			seenContainers.set(port.container, i);
 			if (port.container < 1024 && data.allowPrivilegedPorts !== true) {
 				ctx.addIssue({
 					code: z.ZodIssueCode.custom,

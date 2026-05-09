@@ -201,7 +201,15 @@ export interface SessionConfigPayload {
 		settings?: string | null;
 		claudeMd?: string | null;
 	} | null;
-	ports?: Array<{ port: number; protocol?: "http" | "tcp" }>;
+	// #190 PR 190a — typed `{ container, public }` shape. `protocol` is
+	// intentionally absent in v1 (every port goes through the HTTP/WS
+	// dispatcher in 190c). 190d wires the form against this type.
+	ports?: Array<{ container: number; public: boolean }>;
+	// #190 PR 190a — session-level toggle that re-grants
+	// CAP_NET_BIND_SERVICE on `docker run` so the in-container process
+	// can bind to ports < 1024. Required when any `ports[].container` is
+	// privileged (the backend's superRefine rejects the config otherwise).
+	allowPrivilegedPorts?: boolean;
 	envVars?: EnvVarEntryInput[];
 }
 
