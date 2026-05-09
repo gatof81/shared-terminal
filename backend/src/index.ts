@@ -22,6 +22,7 @@ import { migrateDb, validateD1Config } from "./db.js";
 import { DockerManager } from "./dockerManager.js";
 import { logger } from "./logger.js";
 import { buildRouter } from "./routes.js";
+import { validateSecretsKey } from "./secrets.js";
 import { SessionManager } from "./sessionManager.js";
 import { parseTrustProxy, TrustProxyError, warnIfProductionMisconfigured } from "./trustProxy.js";
 import { endUpgradeSocketWithReply, handleWsConnection, startWsHeartbeat } from "./wsHandler.js";
@@ -45,6 +46,13 @@ const TRUST_PROXY_RAW = process.env.TRUST_PROXY;
 
 validateD1Config();
 validateJwtSecret();
+// Refuse to start without SECRETS_ENCRYPTION_KEY (#186). Mirrors the
+// validateD1Config / validateJwtSecret pattern: better to crash on
+// boot with a clear error than to start, accept a `secret`-typed env
+// var via POST /sessions, fail to encrypt at persist time, and either
+// store the plaintext (data leak) or 500 the create. Operator runbook
+// for key generation + rotation lives in #204.
+validateSecretsKey();
 
 // Warn early if NODE_ENV=production but TRUST_PROXY is unset — a likely
 // misconfig where per-IP rate limits collapse into a single bucket. Runs
