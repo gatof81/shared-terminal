@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseD1Utc } from "./d1Time";
+import { parseD1Utc } from "./d1Time.js";
 
 describe("parseD1Utc", () => {
 	it("treats suffix-less D1 timestamp as UTC, not local time", () => {
