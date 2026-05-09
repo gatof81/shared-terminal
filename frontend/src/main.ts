@@ -1281,6 +1281,12 @@ function closeNewSessionModal() {
 	// configured ports + the allowPrivilegedPorts toggle so a stale
 	// 80/443 row from an earlier modal session doesn't carry over.
 	resetPortsTab();
+	// Reset edit-template mode (#231). Mirrors the resetXTab pattern
+	// above — every modal-close path must leave the module in a clean
+	// default state, otherwise a future caller that shows the modal
+	// without going through `openNewSessionModal` would silently
+	// enter edit mode with a stale `editingTemplateId`.
+	setNewSessionModalMode(null);
 	(newSessionOpener ?? newSessionBtn).focus();
 	newSessionOpener = null;
 }
