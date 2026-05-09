@@ -30,12 +30,29 @@ import { decryptSecret, encryptSecret } from "./secrets.js";
 // (postCreate / postStart) without becoming a vector for ballooning the
 // session_configs row. #191 is free to lower this when the form lands.
 const MAX_HOOK_LEN = 8 * 1024;
-// Absolute upper bounds on resource caps — only here to refuse obviously-
-// bogus input (negative, NaN, TB-class memory). #194 introduces the real
-// per-deployment bounds tied to operator config.
-const MAX_CPU_NANO = 64_000_000_000; // 64 vCPU equivalent
-const MAX_MEM_BYTES = 1024 * 1024 * 1024 * 1024; // 1 TiB
-const MAX_IDLE_TTL_S = 30 * 24 * 60 * 60; // 30 days
+// Per-session resource bounds:
+//   - CPU: 0.25 → 8 cores. Stored as nano-CPUs (Docker's HostConfig
+//     unit) to keep the wire shape integer-only and avoid the
+//     float-precision foot-gun JSON Number has at the high end.
+//   - Memory: 256 MiB → 16 GiB.
+//   - Idle TTL: 60 s → 24 h. OMIT the field (undefined) to disable
+//     auto-stop; `null` is NOT accepted — the schema is `.optional()`,
+//     not `.nullable()`, so sending `null` returns 400.
+//
+// `dockerManager.ts`'s `DEFAULT_NANO_CPUS` (2 cores) and
+// `DEFAULT_MEMORY_BYTES` (2 GiB) both fall comfortably INSIDE these
+// bands — a session created without explicit caps spawns with a
+// resource allocation that's still a legal "user-supplied" entry,
+// keeping the schema and the spawn defaults coherent. The defaults
+// are not AT the lower bounds — the 0.25-core / 256-MiB floors are
+// 8× below them — so a future operator-override layer should not
+// anchor its caps to the defaults.
+const CPU_NANO_MIN = 250_000_000; // 0.25 cores
+const CPU_NANO_MAX = 8_000_000_000; // 8 cores
+const MEM_BYTES_MIN = 256 * 1024 * 1024; // 256 MiB
+const MEM_BYTES_MAX = 16 * 1024 * 1024 * 1024; // 16 GiB
+const IDLE_TTL_S_MIN = 60; // 1 minute
+const IDLE_TTL_S_MAX = 24 * 60 * 60; // 24 hours
 // Cap repeating sub-records so a single create can't write a multi-MB
 // JSON blob into D1. Children may lower these when their forms cap by
 // product UX.
@@ -487,9 +504,9 @@ export const SessionConfigSchema = z
 		// plaintext is in scope only inside the request handler.
 		auth: WireAuthSpec.optional(),
 		// #194 — populated by the resources form
-		cpuLimit: z.number().int().positive().max(MAX_CPU_NANO).optional(),
-		memLimit: z.number().int().positive().max(MAX_MEM_BYTES).optional(),
-		idleTtlSeconds: z.number().int().positive().max(MAX_IDLE_TTL_S).optional(),
+		cpuLimit: z.number().int().min(CPU_NANO_MIN).max(CPU_NANO_MAX).optional(),
+		memLimit: z.number().int().min(MEM_BYTES_MIN).max(MEM_BYTES_MAX).optional(),
+		idleTtlSeconds: z.number().int().min(IDLE_TTL_S_MIN).max(IDLE_TTL_S_MAX).optional(),
 		// #191 — populated by the hooks form. `.min(1)` so a stored
 		// empty string can never be confused with "no hook configured":
 		// the bootstrap runner in PR 185b can use `post_create_cmd IS
