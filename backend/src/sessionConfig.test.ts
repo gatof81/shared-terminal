@@ -351,6 +351,19 @@ describe("validateSessionConfig", () => {
 		);
 	});
 
+	// PR #213 round 4 NIT: `repo: null` (explicit) and `repo` omitted
+	// are semantically distinct on the wire, but the cross-field guard's
+	// `if (result.data.repo)` predicate is falsy for both. Pin the
+	// behaviour with a separate test so a future edit that swaps the
+	// predicate for `if (result.data.repo !== undefined)` doesn't
+	// silently start persisting orphan credentials when the client
+	// sends `null` explicitly.
+	it("rejects explicit repo:null with credentials", () => {
+		expect(() => validateSessionConfig({ repo: null, auth: { pat: "ghp_x" } })).toThrowError(
+			SessionConfigValidationError,
+		);
+	});
+
 	it("accepts repo.auth='ssh' with matching git@ URL and ssh creds", () => {
 		expect(
 			validateSessionConfig({

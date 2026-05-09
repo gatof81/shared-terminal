@@ -943,6 +943,17 @@ function parseEnvVarsColumn(
  * already passed validation at that time. A future schema tightening
  * that invalidates an old row should ride a migration, not a silent
  * read-side reject.
+ *
+ * The `auth` presence check below is the only structural guard. It is
+ * deliberately MINIMAL — sufficient for 188c's branching to find a
+ * valid enum value, NOT sufficient to vouch for `url` / `target` /
+ * `ref` having survived the wire-path schema (a row injected by a
+ * direct D1 write or a partial-edit code path could carry e.g. a
+ * `file://` URL that the route would have rejected). Treat the shape
+ * returned here as "well-typed enough for the runner's switch
+ * statement"; do not pass `repo.url` to `git clone` without
+ * re-validating against `RepoSpec` if you are touching this on a path
+ * that bypasses `validateSessionConfig`. PR #213 round 4 NIT.
  */
 function parseRepoColumn(sessionId: string, raw: string | null): SessionConfig["repo"] | undefined {
 	const parsed = parseJsonColumn<unknown>(sessionId, "repos_json", raw);
