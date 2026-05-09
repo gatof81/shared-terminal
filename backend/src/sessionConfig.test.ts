@@ -228,6 +228,20 @@ describe("validateSessionConfig", () => {
 		).toThrowError(SessionConfigValidationError);
 	});
 
+	// PR #213 round 3 NIT: `git@host:/abs/path` is an absolute-path
+	// SSH clone target. Against a self-hosted intranet Git server
+	// reachable from the container network, this is an SSRF widener
+	// the regex previously accepted. Standard SCP-form URLs use a
+	// relative path after the colon.
+	it("rejects SSH URLs with leading '/' in the path component", () => {
+		expect(() =>
+			validateSessionConfig({
+				repo: { url: "git@github.com:/etc/passwd", auth: "ssh" },
+				auth: { ssh: { privateKey: "k", knownHosts: "default" } },
+			}),
+		).toThrowError(SessionConfigValidationError);
+	});
+
 	it("accepts https:// repo URLs", () => {
 		expect(
 			validateSessionConfig({
@@ -299,6 +313,34 @@ describe("validateSessionConfig", () => {
 			validateSessionConfig({
 				repo: { url: "https://example.com/r", auth: "none" },
 				auth: { pat: "ghp_orphan" },
+			}),
+		).toThrowError(SessionConfigValidationError);
+	});
+
+	// PR #213 round 3 NIT: `repo.auth='pat'` with a co-present
+	// `auth.ssh` (or vice versa) would persist a stale credential
+	// the runner never uses. Reject so the operator gets a clear
+	// error instead of an undiagnosable encrypted blob.
+	it("rejects co-present auth.ssh when repo.auth='pat'", () => {
+		expect(() =>
+			validateSessionConfig({
+				repo: { url: "https://example.com/r", auth: "pat" },
+				auth: {
+					pat: "ghp_x",
+					ssh: { privateKey: "k", knownHosts: "default" },
+				},
+			}),
+		).toThrowError(SessionConfigValidationError);
+	});
+
+	it("rejects co-present auth.pat when repo.auth='ssh'", () => {
+		expect(() =>
+			validateSessionConfig({
+				repo: { url: "git@github.com:o/p", auth: "ssh" },
+				auth: {
+					pat: "ghp_x",
+					ssh: { privateKey: "k", knownHosts: "default" },
+				},
 			}),
 		).toThrowError(SessionConfigValidationError);
 	});
@@ -657,6 +699,39 @@ describe("getSessionConfig", () => {
 		// no auth field, and the runtime invariant on `RepoSpec` requires
 		// it to be set (PR #213 round 2 NIT).
 		expect(got?.repo).toEqual({ url: "https://example.com/r", ref: "main", auth: "none" });
+	});
+
+	// PR #213 round 3 NIT: `parseRepoColumn` blind-cast a single-object
+	// row even when it lacked the now-required `auth` field. Direct D1
+	// writes (e.g. incident response) are the realistic source of such
+	// rows. The runner would read `repo.auth: undefined` and silently
+	// fall through every credential branch. Drop with a logger.warn.
+	it("drops single-object repos_json missing the required 'auth' field", async () => {
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [
+				{
+					session_id: "sess-repo-noauth",
+					workspace_strategy: null,
+					cpu_limit: null,
+					mem_limit: null,
+					idle_ttl_seconds: null,
+					post_create_cmd: null,
+					post_start_cmd: null,
+					// Single-object shape but missing `auth` — could
+					// happen via direct D1 write or a partial-edit code
+					// path that doesn't go through validateSessionConfig.
+					repos_json: JSON.stringify({ url: "https://example.com/r" }),
+					ports_json: null,
+					env_vars_json: null,
+					auth_json: null,
+					bootstrapped_at: null,
+				},
+			],
+			success: true as const,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		const got = await getSessionConfig("sess-repo-noauth");
+		expect(got?.repo).toBeUndefined();
 	});
 
 	it("rehydrates auth_json with encrypted blobs intact", async () => {

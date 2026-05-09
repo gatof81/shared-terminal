@@ -119,7 +119,13 @@ const MAX_ENV_NAME_LEN = 256;
 // invariant uniform across `repo.url` / `repo.ref` / `repo.target`
 // so the 188c author doesn't trip over an asymmetric foot-gun.
 const REPO_URL_HTTPS = /^https:\/\/[^@\s]+$/;
-const REPO_URL_SSH = /^git@[A-Za-z0-9.-]+:[A-Za-z0-9._/-]+$/;
+// First path char must be alphanumeric / `.` / `_` so `git@host:/etc/passwd`
+// (an absolute-path SSH clone target) doesn't slip through. Standard SCP-form
+// SSH URLs use a relative path after the colon — `git@github.com:owner/repo`
+// — and a leading `/` widens the SSRF surface against self-hosted intranet
+// Git servers reachable from the container network. Mirrors the
+// alphanumeric-leading rule already on `REPO_TARGET_PATTERN`. PR #213 round 3.
+const REPO_URL_SSH = /^git@[A-Za-z0-9.-]+:[A-Za-z0-9._][A-Za-z0-9._/-]*$/;
 // Refnames: branches, tags, raw SHAs. Allow the standard refname
 // charset (per `git check-ref-format`) plus `/` for nested branches.
 // Reject `..` and leading `-` so the value can never be misinterpreted
@@ -537,6 +543,17 @@ export function validateSessionConfig(raw: unknown): SessionConfig | undefined {
 					"config.auth.pat: required when config.repo.auth is 'pat'",
 				);
 			}
+			// Reject a co-present SSH credential. Without this, the
+			// route encrypts and persists the SSH key into `auth_json`
+			// even though the runner ignores it, leaving a stale blob
+			// no operator can reason about post-rotation (PR #213
+			// round 3 NIT).
+			if (authBlob.ssh !== undefined) {
+				throw new SessionConfigValidationError(
+					"config.auth.ssh",
+					"config.auth.ssh: not valid when config.repo.auth is 'pat'",
+				);
+			}
 		} else if (repo.auth === "ssh") {
 			if (!isSsh) {
 				throw new SessionConfigValidationError(
@@ -548,6 +565,15 @@ export function validateSessionConfig(raw: unknown): SessionConfig | undefined {
 				throw new SessionConfigValidationError(
 					"config.auth.ssh",
 					"config.auth.ssh: required when config.repo.auth is 'ssh'",
+				);
+			}
+			// Mirror the `pat` branch: stale unused-credential blobs
+			// in D1 are credential confusion, not a security issue,
+			// but expensive to diagnose later (PR #213 round 3 NIT).
+			if (authBlob.pat !== undefined) {
+				throw new SessionConfigValidationError(
+					"config.auth.pat",
+					"config.auth.pat: not valid when config.repo.auth is 'ssh'",
 				);
 			}
 		}
@@ -943,6 +969,19 @@ function parseRepoColumn(sessionId: string, raw: string | null): SessionConfig["
 		return undefined;
 	}
 	if (typeof parsed === "object") {
+		// Defence-in-depth against a row written outside `persistSessionConfig`
+		// (direct D1 write during incident response, future code path that
+		// constructs the object partially). The legacy-array branch above
+		// already drops malformed rows with a `logger.warn`; the post-#188
+		// single-object branch should hold the same line. `auth` is the
+		// only field required by the new schema, so its presence is the
+		// minimal structural check (PR #213 round 3 NIT).
+		if (!("auth" in (parsed as object))) {
+			logger.warn(
+				`[sessionConfig] repos_json for session ${sessionId} missing required 'auth' field; dropping`,
+			);
+			return undefined;
+		}
 		return parsed as SessionConfig["repo"];
 	}
 	logger.warn(
