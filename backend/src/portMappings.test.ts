@@ -12,6 +12,7 @@ vi.mock("./db.js", () => dbStubs);
 import {
 	clearPortMappings,
 	getPortMappings,
+	lookupDispatchTarget,
 	type PortMapping,
 	parseInspectPorts,
 	setPortMappings,
@@ -100,8 +101,8 @@ describe("parseInspectPorts", () => {
 describe("setPortMappings", () => {
 	it("issues DELETE-then-INSERT in order, one INSERT per mapping", async () => {
 		const mappings: PortMapping[] = [
-			{ containerPort: 3000, hostPort: 32768 },
-			{ containerPort: 5500, hostPort: 32769 },
+			{ containerPort: 3000, hostPort: 32768, isPublic: false },
+			{ containerPort: 5500, hostPort: 32769, isPublic: true },
 		];
 		await setPortMappings("sess-1", mappings);
 
@@ -111,8 +112,11 @@ describe("setPortMappings", () => {
 		);
 		expect(dbStubs.d1Query.mock.calls[0]?.[1]).toEqual(["sess-1"]);
 		expect(dbStubs.d1Query.mock.calls[1]?.[0]).toMatch(/INSERT INTO sessions_port_mappings/);
-		expect(dbStubs.d1Query.mock.calls[1]?.[1]).toEqual(["sess-1", 3000, 32768]);
-		expect(dbStubs.d1Query.mock.calls[2]?.[1]).toEqual(["sess-1", 5500, 32769]);
+		// Trailing 0/1 is the SQLite-boolean idiom for `is_public`
+		// (#190 PR 190c). The dispatcher reads this column to decide
+		// whether to require auth before proxying.
+		expect(dbStubs.d1Query.mock.calls[1]?.[1]).toEqual(["sess-1", 3000, 32768, 0]);
+		expect(dbStubs.d1Query.mock.calls[2]?.[1]).toEqual(["sess-1", 5500, 32769, 1]);
 	});
 
 	it("issues only the DELETE when the mapping list is empty", async () => {
@@ -140,15 +144,15 @@ describe("getPortMappings", () => {
 	it("rehydrates D1 rows into the typed shape", async () => {
 		dbStubs.d1Query.mockImplementationOnce(async () => ({
 			results: [
-				{ container_port: 3000, host_port: 32768 },
-				{ container_port: 5500, host_port: 32769 },
+				{ container_port: 3000, host_port: 32768, is_public: 0 },
+				{ container_port: 5500, host_port: 32769, is_public: 1 },
 			],
 			success: true,
 			meta: { changes: 0, duration: 0, last_row_id: 0 },
 		}));
 		await expect(getPortMappings("sess-y")).resolves.toEqual([
-			{ containerPort: 3000, hostPort: 32768 },
-			{ containerPort: 5500, hostPort: 32769 },
+			{ containerPort: 3000, hostPort: 32768, isPublic: false },
+			{ containerPort: 5500, hostPort: 32769, isPublic: true },
 		]);
 	});
 });
@@ -162,5 +166,84 @@ describe("clearPortMappings", () => {
 		const [sql, params] = dbStubs.d1Query.mock.calls[0]!;
 		expect(sql).toMatch(/DELETE FROM sessions_port_mappings WHERE session_id/);
 		expect(params).toEqual(["sess-z"]);
+	});
+});
+
+// ── lookupDispatchTarget ─────────────────────────────────────────────────
+
+// PR #223 round 3 SHOULD-FIX. lookupDispatchTarget is the single
+// security gate the dispatcher relies on for every auth decision —
+// the JOIN's `s.status = 'running'` filter is what stops the
+// dispatcher from proxying to a stopped/soft-deleted session.
+// Without these tests a regression on the JOIN shape, the param order,
+// or the `is_public === 1` coercion would have no downstream safety
+// net (dispatcher tests mock this function out entirely).
+
+describe("lookupDispatchTarget", () => {
+	it("returns null when the JOIN finds no row (no mapping OR session not running)", async () => {
+		// Both states collapse to "no row in the JOIN result", which is
+		// the contract — collapsing both 404s in the dispatcher
+		// prevents probe-time enumeration of recently-stopped sessions.
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		await expect(lookupDispatchTarget("sess-x", 3000)).resolves.toBeNull();
+	});
+
+	it("returns the typed target when the session is running and the mapping exists", async () => {
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [{ host_port: 32768, is_public: 0, user_id: "u-owner" }],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		await expect(lookupDispatchTarget("sess-y", 3000)).resolves.toEqual({
+			hostPort: 32768,
+			isPublic: false,
+			ownerUserId: "u-owner",
+		});
+	});
+
+	it("coerces is_public: 1 → true (the public-port branch)", async () => {
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [{ host_port: 32769, is_public: 1, user_id: "u-owner" }],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		const got = await lookupDispatchTarget("sess-pub", 3000);
+		expect(got?.isPublic).toBe(true);
+	});
+
+	it("coerces non-1 is_public values to false (defence-in-depth)", async () => {
+		// Stored 0 must rehydrate to false; any other unexpected
+		// value (a future migration that wrote 2, a NULL that
+		// slipped past NOT NULL, a string from a hand-edit) must
+		// also rehydrate to false — never accidentally true.
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [{ host_port: 32770, is_public: 0, user_id: "u-owner" }],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		expect((await lookupDispatchTarget("sess-zero", 3000))?.isPublic).toBe(false);
+
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [{ host_port: 32771, is_public: 2, user_id: "u-owner" }],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		expect((await lookupDispatchTarget("sess-weird", 3000))?.isPublic).toBe(false);
+	});
+
+	it("issues the JOIN with the running-status filter and bound params", async () => {
+		// Locks the SQL shape so a rename of the status column or a
+		// dropped filter is caught immediately. The `running` literal
+		// in the SQL is the security gate — losing it would let the
+		// dispatcher proxy stopped/terminated sessions.
+		await lookupDispatchTarget("sess-1", 3000);
+		const [sql, params] = dbStubs.d1Query.mock.calls[0]!;
+		expect(sql).toMatch(/JOIN\s+sessions\s+s\s+ON\s+s\.session_id\s*=\s*spm\.session_id/i);
+		expect(sql).toMatch(/s\.status\s*=\s*'running'/);
+		expect(params).toEqual(["sess-1", 3000]);
 	});
 });

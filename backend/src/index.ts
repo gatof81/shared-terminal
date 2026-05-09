@@ -8,12 +8,14 @@
 import http from "node:http";
 import cookieParser from "cookie-parser";
 import express from "express";
+import rateLimit from "express-rate-limit";
 import { WebSocketServer } from "ws";
 import {
 	ensureAuthReady,
 	isAllowedWsOrigin,
 	originMatches,
 	parseCorsOrigins,
+	resolveCookieDomain,
 	validateJwtSecret,
 	warnIfWildcardCorsInProduction,
 } from "./auth.js";
@@ -21,11 +23,13 @@ import { BootstrapBroadcaster } from "./bootstrap.js";
 import { migrateDb, validateD1Config } from "./db.js";
 import { DockerManager } from "./dockerManager.js";
 import { logger } from "./logger.js";
+import { createPortDispatcher, validatePortProxyBaseDomain } from "./portDispatcher.js";
 import { buildRouter } from "./routes.js";
 import { validateSecretsKey } from "./secrets.js";
 import { SessionManager } from "./sessionManager.js";
 import { parseTrustProxy, TrustProxyError, warnIfProductionMisconfigured } from "./trustProxy.js";
 import { endUpgradeSocketWithReply, handleWsConnection, startWsHeartbeat } from "./wsHandler.js";
+import { createWsUpgradeRateLimiter, resolveClientIp } from "./wsUpgradeRateLimit.js";
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -92,6 +96,70 @@ const docker = new DockerManager(sessions);
 // constraint of the hook runner, same as the terminal-attach path.
 const bootstrapBroadcaster = new BootstrapBroadcaster();
 
+// #190 PR 190c — port-exposure dispatcher. Resolves Host:
+// `p<container>-<sessionId>.<base>` to the runtime mapping in
+// `sessions_port_mappings` and reverse-proxies to 127.0.0.1:<host_port>.
+// Unset PORT_PROXY_BASE_DOMAIN → dispatcher is a no-op middleware so
+// dev/local without a Tunnel keeps working. Logged once here so the
+// unset case is visible at boot.
+const PORT_PROXY_BASE_DOMAIN = validatePortProxyBaseDomain(process.env.PORT_PROXY_BASE_DOMAIN);
+if (PORT_PROXY_BASE_DOMAIN) {
+	logger.info(`[server] port dispatcher enabled at *.${PORT_PROXY_BASE_DOMAIN}`);
+	// PR #223 round 6 SHOULD-FIX. With port exposure on, the JWT
+	// cookie must traverse from the API's hostname to the per-
+	// session subdomains; without `COOKIE_DOMAIN` set to a shared
+	// parent, RFC 6265 §5.3 host-only scoping makes private-port
+	// auth structurally non-functional. Warn (not refuse) because
+	// some deployments may share a hostname with the dispatcher
+	// (the only topology the cookie's default scoping covers) and
+	// don't need this knob.
+	//
+	// Three states to distinguish so the operator gets actionable
+	// signal instead of silent failure (PR #223 round 7 SHOULD-FIX):
+	//   - Unset / empty   → "set it" warning.
+	//   - Non-empty, malformed (typo) → "your value failed validation"
+	//                                   warning, with the offending
+	//                                   value echoed back.
+	//   - Non-empty, valid → silent (logged via the success path).
+	const rawCookieDomain = process.env.COOKIE_DOMAIN?.trim();
+	if (!rawCookieDomain) {
+		logger.warn(
+			"[server] PORT_PROXY_BASE_DOMAIN is set but COOKIE_DOMAIN is unset — private-port auth will fail in any deployment where the API and dispatcher live on different hostnames (host-only cookie won't reach the dispatcher's subdomains). See .env.example.",
+		);
+	} else if (resolveCookieDomain(rawCookieDomain) === null) {
+		logger.warn(
+			`[server] COOKIE_DOMAIN=${JSON.stringify(rawCookieDomain)} failed validation — cookie will be set host-only and private-port auth will fail. Expected a parent domain like 'terminal.example.com'. See .env.example.`,
+		);
+	}
+} else {
+	logger.info(
+		"[server] PORT_PROXY_BASE_DOMAIN unset — port-exposure dispatcher disabled (set to *.<base> to enable)",
+	);
+}
+const portDispatcher = createPortDispatcher({
+	baseDomain: PORT_PROXY_BASE_DOMAIN,
+	// CSWSH defence on the WS upgrade path mirrors what the
+	// /ws/sessions handler below does — same allowlist, same
+	// `isAllowedWsOrigin` policy. See `handleUpgrade` in
+	// portDispatcher.ts for the rationale.
+	corsOrigins: CORS_ORIGINS,
+	nodeEnv: process.env.NODE_ENV,
+});
+
+// #190 PR 190c — per-IP upgrade rate limiter for the dispatcher's
+// WS path. Express's `dispatcherLimiter` only sees HTTP requests;
+// upgrade events bypass the middleware chain entirely. Without
+// this, a bot sending upgrade frames with no Origin header (which
+// `isAllowedWsOrigin` allows for non-browser callers like webhook
+// senders) reaches `lookupDispatchTarget` per attempt — uncapped
+// D1 budget burn. 60/min/IP is tighter than the HTTP 300/min
+// because each upgrade is more expensive and legitimate clients
+// open far fewer. PR #223 round 4 SHOULD-FIX.
+const dispatcherWsUpgradeLimiter = createWsUpgradeRateLimiter({
+	windowMs: 60 * 1000,
+	max: 60,
+});
+
 // ── Express app ───────────────────────────────────────────────────────────────
 
 const app = express();
@@ -104,6 +172,42 @@ if (trustProxyValue !== undefined) {
 } else {
 	logger.info("[server] trust proxy = unset (req.ip will be the socket address)");
 }
+// #190 PR 190c — in-process rate limit on the dispatcher namespace.
+// The dispatcher costs at minimum one D1 round-trip per request
+// (lookupDispatchTarget) and `public: true` ports are intentionally
+// unauthenticated — without a backstop, an attacker who learns the
+// host shape can flood D1 indefinitely (and hammer the container app
+// behind a public port). Cloudflare Tunnel can supply WAF rules at
+// the edge, but this is the in-process belt-and-braces for any
+// deployment without that layer configured. `skip` short-circuits
+// every non-dispatcher request so /api / /health are unaffected;
+// `isDispatcherHost` shares the same parser the dispatch decision
+// uses so the limiter and the dispatcher stay in lockstep. WS
+// upgrades bypass Express middleware entirely (handled in the
+// `server.on('upgrade')` event below), so this limiter applies only
+// to HTTP — WS rate-limit is a future follow-up if it bites. Mounted
+// BEFORE the dispatcher so a 429 short-circuits before any D1 call.
+// PR #223 round 3 SHOULD-FIX.
+const dispatcherLimiter = rateLimit({
+	windowMs: 60 * 1000,
+	limit: 300,
+	standardHeaders: "draft-7",
+	legacyHeaders: false,
+	skip: (req) => !portDispatcher.isDispatcherHost(req.headers.host),
+	message: {
+		error: "Too many requests to port dispatcher, please slow down.",
+		scope: "dispatcher",
+	},
+});
+app.use(dispatcherLimiter);
+// #190 PR 190c — dispatcher mounts BEFORE json/cookieParser/CORS so a
+// proxied container request reaches `proxy.web()` with its body stream
+// intact (express.json would otherwise consume it) and without an
+// `Access-Control-Allow-Origin: <our origin>` header overlaying whatever
+// CORS the container app wants to set. The dispatcher reads the raw
+// `Cookie` header itself for auth gating on `public: false` ports —
+// see `extractAuthToken` in portDispatcher.ts.
+app.use((req, res, next) => portDispatcher.middleware(req, res, next));
 app.use(express.json());
 // Populates `req.cookies` from the Cookie header. requireAuth reads the
 // JWT from `req.cookies.st_token` (#18). No `secret` is passed because we
@@ -173,6 +277,54 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
+	// #190 PR 190c — rate-limit dispatcher upgrades before any D1 work
+	// or `proxy.ws()` allocation. `isDispatcherHost` uses the same host
+	// parser the dispatch decision uses, so the limiter and the dispatch
+	// gate stay in lockstep. `socket.remoteAddress` is the bucket key
+	// (X-Forwarded-For parsing happens later at the auth layer; here we
+	// want a cheap pre-D1 cap, and remote address is what's available
+	// without paying for trust-proxy resolution per upgrade frame).
+	// Failing open on missing remoteAddress (extremely unusual) is
+	// preferable to dropping a legitimate connection. PR #223 round 4
+	// SHOULD-FIX.
+	if (portDispatcher.isDispatcherHost(req.headers.host)) {
+		// `socket` is typed as `Duplex` in the upgrade event but at
+		// runtime is always a `net.Socket` (or TLSSocket, which
+		// extends it). `remoteAddress` lives on net.Socket; cast
+		// once to read it. `resolveClientIp` mirrors proxy-addr's
+		// numeric-trust algorithm: peel `trustProxyValue` entries
+		// from the right of `[...XFF, remoteAddress]` so behind a
+		// Cloudflare Tunnel we key on the original client appended
+		// by the trusted proxy, NOT the Tunnel's shared egress IP
+		// (which would collapse every user into one bucket) and NOT
+		// the leftmost XFF entry (which would let an attacker pin
+		// the rate-limit bucket on a victim's IP). The algorithm
+		// matches what Express's req.ip computes under our
+		// `app.set('trust proxy', N)` setting, so the WS limiter
+		// and the HTTP `dispatcherLimiter` agree. PR #223 round 6
+		// SHOULD-FIX.
+		const remote = (socket as { remoteAddress?: string }).remoteAddress;
+		const clientIp = resolveClientIp(req.headers["x-forwarded-for"], remote, trustProxyValue);
+		const allowed = dispatcherWsUpgradeLimiter.attempt(clientIp);
+		if (!allowed) {
+			// `Retry-After: 60` matches the limiter's window so a
+			// compliant browser backs off automatically instead of
+			// burning the next window's budget on immediate reconnect.
+			// `Content-Length: 0` keeps the response framed so curl /
+			// wscat report 429 cleanly. PR #223 round 5 SHOULD-FIX.
+			endUpgradeSocketWithReply(
+				socket,
+				"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\nContent-Length: 0\r\n\r\n",
+			);
+			return;
+		}
+	}
+	// #190 PR 190c — let the port dispatcher claim this upgrade first
+	// when the Host header parses as `p<container>-<sessionId>.<base>`.
+	// `handleUpgrade` returns true iff the dispatcher took the request;
+	// in that case it's already running auth + proxy.ws() and the
+	// existing /ws/* path mustn't also run.
+	if (portDispatcher.handleUpgrade(req, socket, head)) return;
 	const url = req.url ?? "";
 	if (!url.startsWith("/ws/sessions/") && !url.startsWith("/ws/bootstrap/")) {
 		// socket.end() drains the write buffer before closing, so the

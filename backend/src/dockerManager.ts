@@ -14,7 +14,12 @@ import { StringDecoder } from "node:string_decoder";
 import Dockerode from "dockerode";
 import { d1Query } from "./db.js";
 import { logger } from "./logger.js";
-import { clearPortMappings, parseInspectPorts, setPortMappings } from "./portMappings.js";
+import {
+	annotateWithPublic,
+	clearPortMappings,
+	parseInspectPorts,
+	setPortMappings,
+} from "./portMappings.js";
 import {
 	decryptStoredEntries,
 	getSessionConfig,
@@ -358,11 +363,16 @@ export class DockerManager {
 		if (declaredPorts.length > 0) {
 			try {
 				const info = await container.inspect();
-				const mappings = parseInspectPorts(info.NetworkSettings?.Ports);
-				await setPortMappings(sessionId, mappings);
-				if (mappings.length !== declaredPorts.length) {
+				const raw = parseInspectPorts(info.NetworkSettings?.Ports);
+				// Fold the configured `public` flag onto the runtime
+				// mapping row so the dispatcher (190c) doesn't need a
+				// second D1 round-trip to `session_configs.ports_json`
+				// + JSON parse on every proxied request.
+				const publicByContainer = new Map(declaredPorts.map((p) => [p.container, p.public]));
+				await setPortMappings(sessionId, annotateWithPublic(raw, publicByContainer));
+				if (raw.length !== declaredPorts.length) {
 					logger.warn(
-						`[docker] inspect returned ${mappings.length} mapping(s) for session ${sessionId}, ` +
+						`[docker] inspect returned ${raw.length} mapping(s) for session ${sessionId}, ` +
 							`expected ${declaredPorts.length}; dispatcher will 404 the missing ports`,
 					);
 				}
@@ -835,9 +845,26 @@ export class DockerManager {
 				// container keep running.
 				try {
 					const fresh = await this.docker.getContainer(meta.containerId).inspect();
-					const mappings = parseInspectPorts(fresh.NetworkSettings?.Ports);
-					if (mappings.length > 0) {
-						await setPortMappings(sessionId, mappings);
+					const raw = parseInspectPorts(fresh.NetworkSettings?.Ports);
+					if (raw.length > 0) {
+						// Re-load config to recover the per-port
+						// `public` flag — `stopContainer()` cleared
+						// the mapping rows that previously carried
+						// it, so config (the user's declarative
+						// intent at create time) is the authoritative
+						// source. Best-effort: a config-load failure
+						// here logs and falls back to "all private"
+						// (the safe default in `annotateWithPublic`).
+						let publicByContainer = new Map<number, boolean>();
+						try {
+							const cfg = await this.loadConfigForSpawn(sessionId);
+							publicByContainer = new Map((cfg?.ports ?? []).map((p) => [p.container, p.public]));
+						} catch (err) {
+							logger.warn(
+								`[docker] config reload for port-mapping refresh failed for ${sessionId}: ${(err as Error).message}`,
+							);
+						}
+						await setPortMappings(sessionId, annotateWithPublic(raw, publicByContainer));
 					}
 				} catch (err) {
 					logger.warn(
@@ -1877,9 +1904,22 @@ export class DockerManager {
 					// a failure here logs and lets the rest of reconcile
 					// finish; the next /start writes a fresh row.
 					try {
-						const mappings = parseInspectPorts(info.NetworkSettings?.Ports);
-						if (mappings.length > 0) {
-							await setPortMappings(row.session_id, mappings);
+						const raw = parseInspectPorts(info.NetworkSettings?.Ports);
+						if (raw.length > 0) {
+							// Same source-of-truth-is-config rule as
+							// startContainer Case 2 / spawn — the
+							// per-port `public` flag is whatever the
+							// user declared at create time.
+							let publicByContainer = new Map<number, boolean>();
+							try {
+								const cfg = await this.loadConfigForSpawn(row.session_id);
+								publicByContainer = new Map((cfg?.ports ?? []).map((p) => [p.container, p.public]));
+							} catch (err) {
+								logger.warn(
+									`[docker] reconcile config reload failed for ${row.session_id}: ${(err as Error).message}`,
+								);
+							}
+							await setPortMappings(row.session_id, annotateWithPublic(raw, publicByContainer));
 						} else {
 							// No published ports — clear any stale rows.
 							await clearPortMappings(row.session_id);

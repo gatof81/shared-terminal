@@ -536,8 +536,11 @@ describe("DockerManager.spawn config-applied", () => {
 		);
 		expect(deleteIdx).toBeGreaterThanOrEqual(0);
 		expect(calls[deleteIdx + 1]?.[0]).toMatch(/INSERT INTO sessions_port_mappings/);
-		expect(calls[deleteIdx + 1]?.[1]).toEqual(["sess-1", 3000, 32768]);
-		expect(calls[deleteIdx + 2]?.[1]).toEqual(["sess-1", 5500, 32769]);
+		// 4th arg is `is_public` (SQLite boolean idiom): 0 for the
+		// private port, 1 for the public one — folded onto the row by
+		// `annotateWithPublic` from `config.ports[i].public`.
+		expect(calls[deleteIdx + 1]?.[1]).toEqual(["sess-1", 3000, 32768, 0]);
+		expect(calls[deleteIdx + 2]?.[1]).toEqual(["sess-1", 5500, 32769, 1]);
 	});
 
 	it("does not call setPortMappings when no ports are declared (no DELETE on a clean spawn)", async () => {

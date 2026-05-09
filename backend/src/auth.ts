@@ -482,6 +482,47 @@ export const AUTH_COOKIE_NAME = "st_token";
 const isProduction = (): boolean => process.env.NODE_ENV === "production";
 const cookieSameSite = (): "strict" | "none" => (isProduction() ? "none" : "strict");
 
+// #190 PR 190c — optional shared cookie domain so the JWT cookie set
+// at the API hostname (e.g. `api.terminal.example.com`) traverses to
+// the port dispatcher's per-session subdomains
+// (`p<port>-<sid>.tunnel.example.com`). RFC 6265 §5.3: a cookie
+// without `Domain` is HOST-ONLY (the exact origin that issued it),
+// so without this attribute the dispatcher's `extractAuthToken` reads
+// `null` for every browser request and private-port auth structurally
+// fails in any deployment where API and dispatcher live on different
+// hostnames. Set this to a parent domain shared by both — e.g.
+// `.terminal.example.com`.
+//
+// Unset → omit the Domain attribute (host-only). Local dev and
+// single-hostname deployments don't need it. Validation rules mirror
+// `validatePortProxyBaseDomain`: non-empty, dot-separated labels,
+// optional leading dot allowed (legacy form some operators paste).
+// PR #223 round 6 SHOULD-FIX.
+// Exported for the boot-time warning in `index.ts` — without it the
+// `index.ts` guard can only catch the unset / empty case, leaving a
+// non-empty-but-malformed `COOKIE_DOMAIN` (operator typo like
+// `tunnel-.example.com`) silently host-only with no log evidence.
+// Returns the normalized domain on success or `null` on validation
+// failure; callers that just need "is it set?" (the cookie helpers
+// below) can ?? `undefined`. PR #223 round 7 SHOULD-FIX.
+export function resolveCookieDomain(raw: string | undefined): string | null {
+	const trimmed = raw?.trim().toLowerCase();
+	if (!trimmed) return null;
+	// Strip the legacy leading dot (RFC 2109 form). Modern browsers
+	// treat `.example.com` and `example.com` as the same host-pattern
+	// match, but Express's cookie lib emits whatever string we hand
+	// it and some intermediaries fail to normalise. Keep the wire
+	// shape clean.
+	const v = trimmed.startsWith(".") ? trimmed.slice(1) : trimmed;
+	if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(v)) {
+		return null;
+	}
+	return v;
+}
+
+const cookieDomain = (): string | undefined =>
+	resolveCookieDomain(process.env.COOKIE_DOMAIN) ?? undefined;
+
 /**
  * Set the JWT as an httpOnly cookie. `maxAge` is derived from the JWT's
  * own `exp` claim so the cookie expires exactly when the token does —
@@ -497,24 +538,28 @@ export function setAuthCookie(res: Response, token: string): void {
 	const decoded = jwt.decode(token) as { exp?: number } | null;
 	const expSec = decoded?.exp;
 	const maxAge = expSec ? Math.max(0, expSec * 1000 - Date.now()) : 0;
+	const domain = cookieDomain();
 	res.cookie(AUTH_COOKIE_NAME, token, {
 		httpOnly: true,
 		secure: isProduction(),
 		sameSite: cookieSameSite(),
 		path: "/",
 		maxAge,
+		...(domain ? { domain } : {}),
 	});
 }
 
 export function clearAuthCookie(res: Response): void {
 	// Clearing has to mirror the same cookie attributes (path, sameSite,
-	// secure) the browser used to scope the cookie, otherwise it picks a
-	// different stored cookie and the live one survives.
+	// secure, domain) the browser used to scope the cookie, otherwise it
+	// picks a different stored cookie and the live one survives.
+	const domain = cookieDomain();
 	res.clearCookie(AUTH_COOKIE_NAME, {
 		httpOnly: true,
 		secure: isProduction(),
 		sameSite: cookieSameSite(),
 		path: "/",
+		...(domain ? { domain } : {}),
 	});
 }
 

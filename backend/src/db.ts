@@ -208,6 +208,7 @@ export async function migrateDb(): Promise<void> {
                         session_id      TEXT NOT NULL,
                         container_port  INTEGER NOT NULL,
                         host_port       INTEGER NOT NULL,
+                        is_public       INTEGER NOT NULL DEFAULT 0,
                         PRIMARY KEY (session_id, container_port),
                         FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
                 )`,
@@ -277,6 +278,22 @@ export async function migrateDb(): Promise<void> {
 			if (!/duplicate column name|already exists/i.test((err as Error).message)) {
 				throw err;
 			}
+		}
+	}
+	// #190 PR 190c: `is_public` column on `sessions_port_mappings` —
+	// the dispatcher's auth gate. Stored per-row (rather than re-derived
+	// from `session_configs.ports_json` on every request) so the
+	// dispatcher's hot path is one indexed point read instead of an
+	// extra D1 round-trip + JSON parse. Pre-existing rows from PR 190b
+	// default to `0` (auth required) — the safest fallback if a row
+	// was written before this column existed.
+	try {
+		await d1Query(
+			"ALTER TABLE sessions_port_mappings ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0",
+		);
+	} catch (err) {
+		if (!/duplicate column name|already exists/i.test((err as Error).message)) {
+			throw err;
 		}
 	}
 	// #190 PR 190a: `allow_privileged_ports` column on `session_configs`
