@@ -447,15 +447,17 @@ export class DockerManager {
 		// Architectural TOCTOU fix: the uploads directory lives at
 		// <WORKSPACE_ROOT>/.uploads/<sessionId>/ — OUTSIDE the
 		// container's bind-mount tree. spawn() bind-mounts this dir
-		// read-only into the container at /home/developer/workspace/
-		// uploads/, so:
-		//   1. The container CANNOT remove or replace /home/developer/
-		//      workspace/uploads (it's a mount point — kernel rejects
-		//      modification from the mount user's namespace).
+		// read-only into the container at /home/developer/uploads/
+		// (#188 PR 188a moved this out of the workspace tree so the
+		// repo-clone replace-workspace mode has a clean root), so:
+		//   1. The container CANNOT remove or replace
+		//      /home/developer/uploads (it's a mount point — kernel
+		//      rejects modification from the mount user's namespace).
 		//   2. The container CANNOT write into uploads/ (read-only mount).
 		//   3. The container's bind mount on /home/developer/workspace/
-		//      doesn't reach .uploads/ on the host, so nothing inside
-		//      the container can plant symlinks at the upload destination.
+		//      doesn't reach .uploads/ on the host (now in a sibling
+		//      mount under /home/developer/), so nothing inside the
+		//      container can plant symlinks at the upload destination.
 		// The earlier in-workspace layout needed a stack of defences
 		// (realpath, O_DIRECTORY|O_NOFOLLOW, pre+post inode sentinels)
 		// because the container could replace uploads/ with a symlink
