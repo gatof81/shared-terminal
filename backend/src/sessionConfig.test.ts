@@ -653,7 +653,10 @@ describe("getSessionConfig", () => {
 		const got = await getSessionConfig("sess-legacy-repo");
 		// First element wins; second is silently dropped (was a
 		// placeholder shape that never populated in production).
-		expect(got?.repo).toEqual({ url: "https://example.com/r", ref: "main" });
+		// `auth: "none"` is defaulted on promotion — pre-#188 rows had
+		// no auth field, and the runtime invariant on `RepoSpec` requires
+		// it to be set (PR #213 round 2 NIT).
+		expect(got?.repo).toEqual({ url: "https://example.com/r", ref: "main", auth: "none" });
 	});
 
 	it("rehydrates auth_json with encrypted blobs intact", async () => {

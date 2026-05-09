@@ -927,7 +927,15 @@ function parseRepoColumn(sessionId: string, raw: string | null): SessionConfig["
 		// or drop. Defensive: a non-object element should not crash.
 		const first = parsed[0];
 		if (first && typeof first === "object") {
-			return first as SessionConfig["repo"];
+			// Default `auth: "none"` so the post-#188 RepoSpec invariant
+			// (auth is required) holds at runtime, not just at the
+			// type-checker layer. The legacy placeholder predates the
+			// auth field; the only URL form the old allowlist accepted
+			// was `https://` with no credentials, so `"none"` is the
+			// semantically correct default. Spread order lets a future
+			// migration that backfills `auth` win without further code
+			// changes (PR #213 round 2 NIT).
+			return { auth: "none", ...first } as SessionConfig["repo"];
 		}
 		logger.warn(
 			`[sessionConfig] legacy repos_json array for session ${sessionId} has no usable first element; dropping`,
