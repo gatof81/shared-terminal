@@ -46,6 +46,7 @@ import {
 	TabNotFoundError,
 	type Template,
 	type TemplateSummary,
+	updateTemplate,
 	uploadSessionFiles,
 } from "./api.js";
 import { parseDotEnv } from "./envParser.js";
@@ -77,7 +78,13 @@ const newSessionBtn = document.getElementById("new-session-btn") as HTMLButtonEl
 const newSessionModal = document.getElementById("new-session-modal")!;
 const newSessionForm = document.getElementById("new-session-form") as HTMLFormElement;
 const newSessionInput = document.getElementById("new-session-input") as HTMLInputElement;
+const newSessionInputLabel = document.getElementById("new-session-input-label")!;
 const newSessionSubmitBtn = document.getElementById("new-session-submit") as HTMLButtonElement;
+const newSessionModalTitle = document.getElementById("new-session-modal-title")!;
+const editTemplateDescriptionField = document.getElementById("edit-template-description-field")!;
+const editTemplateDescriptionInput = document.getElementById(
+	"edit-template-description-input",
+) as HTMLInputElement;
 const showTerminatedToggle = document.getElementById("show-terminated-toggle") as HTMLInputElement;
 const mainEl = document.querySelector("main")!;
 const sidebarEl = document.getElementById("sidebar")!;
@@ -1113,6 +1120,38 @@ function setActiveSessionTab(key: string) {
 	}
 }
 
+// Edit-template state (#231). When non-null the create-session modal
+// is in "edit template" mode: submit calls `PUT /api/templates/:id`
+// instead of `POST /api/sessions`, the session-name input is reused
+// as the template name, and a description field appears below it.
+// `setNewSessionModalMode` flips all the user-visible chrome so a
+// stale label or button text from a previous open can't leak into
+// the wrong mode.
+let editingTemplateId: string | null = null;
+
+function setNewSessionModalMode(template: Template | null): void {
+	editingTemplateId = template ? template.id : null;
+	if (template) {
+		newSessionModalTitle.textContent = "Edit template";
+		newSessionInputLabel.textContent = "Template name";
+		newSessionSubmitBtn.textContent = "Save changes";
+		// Hide the save-as-template-from-edit path entirely. Nesting
+		// "save as template" inside an edit form is a UX trap (does it
+		// fork the template? overwrite? open a second modal?) the
+		// issue body explicitly says to skip.
+		saveTemplateBtn.hidden = true;
+		editTemplateDescriptionField.hidden = false;
+		editTemplateDescriptionInput.value = template.description ?? "";
+	} else {
+		newSessionModalTitle.textContent = "New session";
+		newSessionInputLabel.textContent = "Session name";
+		newSessionSubmitBtn.textContent = "Create session";
+		saveTemplateBtn.hidden = false;
+		editTemplateDescriptionField.hidden = true;
+		editTemplateDescriptionInput.value = "";
+	}
+}
+
 function openNewSessionModal(opener: HTMLElement) {
 	newSessionOpener = opener;
 	renderSessionTabPlaceholders();
@@ -1120,6 +1159,10 @@ function openNewSessionModal(opener: HTMLElement) {
 	newSessionInput.value = "";
 	newSessionSubmitBtn.disabled = false;
 	clearBootstrapError();
+	// Default every open to create-mode. Edit-mode is opted into by
+	// `editTemplate(id)` after the modal is open and the form has been
+	// populated via `applyTemplateToForm`.
+	setNewSessionModalMode(null);
 	// `resetEnvTab` no longer fires here — `closeNewSessionModal`
 	// already wiped state on the previous close, and the initial
 	// declaration of `envRows = []` covers the very first open.
@@ -1838,40 +1881,43 @@ newSessionForm.addEventListener("submit", async (e) => {
 	}
 	// Disable the submit button for the duration of the request so a
 	// double-click doesn't fire two POSTs (which would create two
-	// sessions and burn quota silently).
+	// sessions and burn quota silently — or two PUTs in edit mode).
 	newSessionSubmitBtn.disabled = true;
 	clearBootstrapError();
 	teardownBootstrapTail();
+
+	// Edit-template branch (#231). Build the same SessionConfigPayload
+	// the create flow would, then strip secret values and PUT to the
+	// templates endpoint. The strip is the same one save-as-template
+	// uses — so a template that's been edited can be `Use template`d
+	// without any "stale credential leaked" surprise.
+	if (editingTemplateId !== null) {
+		try {
+			const config = stripConfigForTemplate(buildSessionConfigPayload() ?? {});
+			const description = editTemplateDescriptionInput.value.trim();
+			await updateTemplate(editingTemplateId, {
+				name,
+				description: description.length > 0 ? description : null,
+				config,
+			});
+			showToast(`Template "${name}" saved`);
+			closeNewSessionModal();
+			// Re-open the templates modal so the user lands back on the
+			// list (with the freshly-saved row at the top via D1's
+			// `ORDER BY updated_at DESC`). `openTemplatesModal` already
+			// kicks off `refreshTemplatesList` so no separate fetch
+			// is needed here.
+			openTemplatesModal(sidebarTemplatesBtn);
+		} catch (err) {
+			showToast((err as Error).message, true);
+			newSessionSubmitBtn.disabled = false;
+		}
+		return;
+	}
+
 	try {
 		showToast("Creating session…");
-		const envVars = collectEnvVarsForSubmit();
-		const { repo, auth } = collectRepoForSubmit();
-		const advanced = collectAdvancedForSubmit();
-		const { ports, allowPrivilegedPorts } = collectPortsForSubmit();
-		// Build the config payload only when something is actually
-		// configured. A bare `POST /sessions` (no config field) stays
-		// the steady-state for users not exercising any of the tabs.
-		const advancedHasContent =
-			advanced.gitIdentity !== undefined ||
-			advanced.dotfiles !== undefined ||
-			advanced.agentSeed !== undefined ||
-			advanced.postCreateCmd !== undefined ||
-			advanced.postStartCmd !== undefined ||
-			advanced.cpuLimit !== undefined ||
-			advanced.memLimit !== undefined ||
-			advanced.idleTtlSeconds !== undefined;
-		const portsHasContent = ports !== undefined || allowPrivilegedPorts === true;
-		const config: SessionConfigPayload | undefined =
-			envVars || repo || advancedHasContent || portsHasContent
-				? {
-						...(envVars ? { envVars } : {}),
-						...(repo ? { repo } : {}),
-						...(auth ? { auth } : {}),
-						...advanced,
-						...(ports ? { ports } : {}),
-						...(allowPrivilegedPorts ? { allowPrivilegedPorts } : {}),
-					}
-				: undefined;
+		const config = buildSessionConfigPayload();
 		const session = await createSession(name, undefined, config);
 		sessions.unshift(session);
 		renderSessionList();
@@ -1891,6 +1937,41 @@ newSessionForm.addEventListener("submit", async (e) => {
 		newSessionSubmitBtn.disabled = false;
 	}
 });
+
+/**
+ * Collects the current modal state into a `SessionConfigPayload`.
+ * Returns `undefined` when nothing has been configured (the bare
+ * `POST /sessions` shape) so callers can omit `body.config`.
+ *
+ * Extracted from the submit handler so the edit-template path can
+ * reuse it (#231) — without this, the edit branch would have to
+ * duplicate the whole "is anything configured" check.
+ */
+function buildSessionConfigPayload(): SessionConfigPayload | undefined {
+	const envVars = collectEnvVarsForSubmit();
+	const { repo, auth } = collectRepoForSubmit();
+	const advanced = collectAdvancedForSubmit();
+	const { ports, allowPrivilegedPorts } = collectPortsForSubmit();
+	const advancedHasContent =
+		advanced.gitIdentity !== undefined ||
+		advanced.dotfiles !== undefined ||
+		advanced.agentSeed !== undefined ||
+		advanced.postCreateCmd !== undefined ||
+		advanced.postStartCmd !== undefined ||
+		advanced.cpuLimit !== undefined ||
+		advanced.memLimit !== undefined ||
+		advanced.idleTtlSeconds !== undefined;
+	const portsHasContent = ports !== undefined || allowPrivilegedPorts === true;
+	if (!envVars && !repo && !advancedHasContent && !portsHasContent) return undefined;
+	return {
+		...(envVars ? { envVars } : {}),
+		...(repo ? { repo } : {}),
+		...(auth ? { auth } : {}),
+		...advanced,
+		...(ports ? { ports } : {}),
+		...(allowPrivilegedPorts ? { allowPrivilegedPorts } : {}),
+	};
+}
 
 // ── Save-as-template flow (#195 / PR 195b) ──────────────────────────────────
 //
@@ -2061,12 +2142,17 @@ function renderTemplateCard(t: TemplateSummary): HTMLElement {
 	useBtn.type = "button";
 	useBtn.textContent = "Use";
 	useBtn.dataset.action = "use";
+	const editBtn = document.createElement("button");
+	editBtn.type = "button";
+	editBtn.textContent = "Edit";
+	editBtn.dataset.action = "edit";
 	const delBtn = document.createElement("button");
 	delBtn.type = "button";
 	delBtn.textContent = "Delete";
 	delBtn.dataset.action = "delete";
 	delBtn.className = "template-card-delete";
 	actions.appendChild(useBtn);
+	actions.appendChild(editBtn);
 	actions.appendChild(delBtn);
 	card.appendChild(actions);
 
@@ -2076,11 +2162,11 @@ function renderTemplateCard(t: TemplateSummary): HTMLElement {
 templatesList.addEventListener("click", (e) => {
 	const target = e.target as HTMLElement;
 	const action = target.dataset.action;
-	if (action !== "use" && action !== "delete") return;
+	if (action !== "use" && action !== "edit" && action !== "delete") return;
 	const card = target.closest<HTMLDivElement>(".template-card");
 	const id = card?.dataset.templateId;
 	if (!id) return;
-	if (action === "use") {
+	if (action === "use" || action === "edit") {
 		// Disable the button before the in-flight `getTemplate` so a
 		// double-click can't fire two concurrent fetches that both
 		// race to apply config + close-and-open modals. Mirrors the
@@ -2088,7 +2174,8 @@ templatesList.addEventListener("click", (e) => {
 		// flow. PR #230 round 2 NIT.
 		const btn = target as HTMLButtonElement;
 		btn.disabled = true;
-		void useTemplate(id).finally(() => {
+		const op = action === "use" ? useTemplate(id) : editTemplate(id);
+		void op.finally(() => {
 			btn.disabled = false;
 		});
 	} else {
@@ -2127,6 +2214,30 @@ async function useTemplate(id: string) {
 		openNewSessionModal(sidebarTemplatesBtn);
 		applyTemplateToForm(t);
 		showToast(`Loaded template "${t.name}". Fill in any required secrets, then Create.`);
+	} catch (err) {
+		showToast((err as Error).message, true);
+	}
+}
+
+/**
+ * Edit template (#231): reuses the create-session modal as the editor.
+ * The flow is `useTemplate`'s shape — load, close templates modal,
+ * open session modal, apply config — plus a `setNewSessionModalMode`
+ * call after the form is populated so the chrome reflects edit mode.
+ *
+ * The mode flip happens AFTER `applyTemplateToForm` because the
+ * latter resets `newSessionInput.value` to the template name (which
+ * is what we want as the editable name field), and the mode setter's
+ * extra work (description population, button labels) needs to run
+ * after the input value is in place.
+ */
+async function editTemplate(id: string) {
+	try {
+		const t = await getTemplate(id);
+		closeTemplatesModal();
+		openNewSessionModal(sidebarTemplatesBtn);
+		applyTemplateToForm(t);
+		setNewSessionModalMode(t);
 	} catch (err) {
 		showToast((err as Error).message, true);
 	}

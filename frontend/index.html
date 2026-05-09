@@ -245,7 +245,7 @@
             aria-labelledby="session-tab-basics-tab"
           >
             <label class="session-field">
-              <span class="session-field-label">Session name</span>
+              <span class="session-field-label" id="new-session-input-label">Session name</span>
               <input
                 id="new-session-input"
                 type="text"
@@ -253,6 +253,16 @@
                 maxlength="64"
                 autocomplete="off"
                 required
+              />
+            </label>
+            <label class="session-field" id="edit-template-description-field" hidden>
+              <span class="session-field-label">Description (optional)</span>
+              <input
+                id="edit-template-description-input"
+                type="text"
+                placeholder="What's this template for?"
+                maxlength="512"
+                autocomplete="off"
               />
             </label>
             <p class="modal-hint">
