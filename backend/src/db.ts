@@ -198,6 +198,7 @@ export async function migrateDb(): Promise<void> {
                         repos_json          TEXT,
                         ports_json          TEXT,
                         env_vars_json       TEXT,
+                        auth_json           TEXT,
                         bootstrapped_at     TEXT,
                         created_at          TEXT NOT NULL DEFAULT (datetime('now')),
                         FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
@@ -218,6 +219,18 @@ export async function migrateDb(): Promise<void> {
 	// #50: same shape — add `users.is_admin` to pre-existing tables.
 	try {
 		await d1Query("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0");
+	} catch (err) {
+		if (!/duplicate column name|already exists/i.test((err as Error).message)) {
+			throw err;
+		}
+	}
+	// #188 PR 188b: `auth_json` column on `session_configs` — encrypted
+	// repo-clone credentials (PAT / SSH key + known_hosts). Same idiom
+	// as the columns above: ADD COLUMN unguarded, swallow the duplicate
+	// error so re-running migrations on a fresh-deploy DB (where the
+	// CREATE TABLE above already declared the column) is a no-op.
+	try {
+		await d1Query("ALTER TABLE session_configs ADD COLUMN auth_json TEXT");
 	} catch (err) {
 		if (!/duplicate column name|already exists/i.test((err as Error).message)) {
 			throw err;

@@ -39,8 +39,19 @@ const MAX_IDLE_TTL_S = 30 * 24 * 60 * 60; // 30 days
 // Cap repeating sub-records so a single create can't write a multi-MB
 // JSON blob into D1. Children may lower these when their forms cap by
 // product UX.
-const MAX_REPOS = 10;
 const MAX_PORTS = 20;
+// #188 — repo + auth bounds. Refs are git refnames (branch, tag, or
+// raw SHA). 200 chars covers any realistic name (Git itself imposes a
+// 255-byte filename cap on packed refs). Target is a workspace-
+// relative path; 256 chars matches the env-var name cap shape.
+// known_hosts is bundled-or-paste; 32 KiB lets a paranoid operator
+// drop in a corp-wide trust list without becoming a DoS surface.
+const MAX_REPO_REF_LEN = 200;
+const MAX_REPO_TARGET_LEN = 256;
+const MAX_REPO_DEPTH = 10_000;
+const MAX_PAT_LEN = 4 * 1024;
+const MAX_SSH_KEY_LEN = 16 * 1024;
+const MAX_KNOWN_HOSTS_LEN = 32 * 1024;
 // #186 env-var entry caps. Per-entry value at 16 KiB matches the
 // spec; aggregate budget below caps the whole serialised list so a
 // caller can't blow past D1-friendly sizes by stuffing 64 entries at
@@ -58,17 +69,17 @@ const MAX_ENV_NAME_LEN = 256;
 
 // ── Zod schemas ─────────────────────────────────────────────────────────────
 
-// Minimal placeholder for #188. Just shape today: the URL / ref pair.
-// Auth method, replace-workspace flag, etc. land with the repo-clone child.
-//
-// URL scheme allowlist is enforced at INGEST so a stored value can never
-// reach the #188 git-clone consumer with a problematic scheme:
+// #188 — repo specification. URL scheme allowlist is enforced at INGEST
+// so a stored value can never reach the git-clone consumer with a
+// problematic scheme:
 //   - `file://`              clone from arbitrary host paths (incl. the
-//                            bind-mounted workspace)
-//   - `ssh://attacker/`      SSRF / host-key confusion
+//                            bind-mounted workspace).
+//   - `ssh://attacker/`      SSRF / host-key confusion. The SSH auth
+//                            path uses the conventional `git@host:path`
+//                            URL form instead, NOT `ssh://`.
 //   - `git://attacker:9418/` unauthenticated git protocol; same SSRF
 //                            shape as ssh, GitHub deprecated/removed
-//                            support in 2021
+//                            support in 2021.
 //   - `http://`              cleartext: a MITM (corporate proxy, captive
 //                            portal, hostile WiFi) can inject repo
 //                            content which then executes inside the
@@ -82,22 +93,137 @@ const MAX_ENV_NAME_LEN = 256;
 // them. If a future deployment needs cleartext intranet mirrors, #188
 // can add an opt-in form affordance with a UI warning instead of
 // silently storing the URL.
-const REPO_URL_SCHEME = /^https:\/\//;
+//
+// Two URL forms are allowed:
+//   - `https://host/owner/repo[.git]`        — for `auth: "none"|"pat"`
+//   - `git@host:owner/repo[.git]`            — for `auth: "ssh"`
+// Cross-field validation in `validateSessionConfig` enforces the
+// auth↔scheme pairing — a `git@…` URL with `auth: "none"` would clone
+// over a missing identity and fail mysteriously inside the container;
+// we reject it at the route boundary instead.
+//
+// `[^@\s]` in REPO_URL_HTTPS is the round-1 SHOULD-FIX. Without it the
+// regex accepted `https://user:ghp_TOKEN@github.com/o/p`, which would
+// store the PAT verbatim in `repos_json` (the whole point of
+// `auth_json` / `encryptAuthCredentials` is that secrets never land
+// in plaintext anywhere on disk). The form forces credentials through
+// `auth.pat` instead, where the route encrypts before persist. The
+// SSH form's regex deliberately starts with the `git@` user prefix
+// — that's the canonical SSH-clone shape, not a credential — and
+// the host/path char class on the other side excludes `@` already.
+//
+// `..` in either side is rejected by the explicit `.includes("..")`
+// check below; the regex alone allows it because `.` and `/` are
+// valid path chars. The runner in 188c will pass the URL to `git
+// clone` via argv (no shell), but blocking `..` here keeps the
+// invariant uniform across `repo.url` / `repo.ref` / `repo.target`
+// so the 188c author doesn't trip over an asymmetric foot-gun.
+const REPO_URL_HTTPS = /^https:\/\/[^@\s]+$/;
+// First path char must be alphanumeric / `.` / `_` so `git@host:/etc/passwd`
+// (an absolute-path SSH clone target) doesn't slip through. Standard SCP-form
+// SSH URLs use a relative path after the colon — `git@github.com:owner/repo`
+// — and a leading `/` widens the SSRF surface against self-hosted intranet
+// Git servers reachable from the container network. Mirrors the
+// alphanumeric-leading rule already on `REPO_TARGET_PATTERN`. PR #213 round 3.
+const REPO_URL_SSH = /^git@[A-Za-z0-9.-]+:[A-Za-z0-9._][A-Za-z0-9._/-]*$/;
+// Refnames: branches, tags, raw SHAs. Allow the standard refname
+// charset (per `git check-ref-format`) plus `/` for nested branches.
+// Reject `..` and leading `-` so the value can never be misinterpreted
+// as a `git clone` flag (e.g. `--upload-pack=…`) when the runner in
+// 188c shells out. The runner will pass `--branch <ref>` via argv (no
+// shell), but this is the cheap, declarative belt-and-suspenders.
+const REPO_REF_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9._/+@-]*$/;
+// Target: workspace-relative path. Empty string = workspace root
+// (signals replace-workspace mode for 188c). Non-empty must be a
+// relative path with no `..` traversal segments and no leading `/`.
+// Same conservative charset as refnames, no spaces.
+const REPO_TARGET_PATTERN = /^(|[A-Za-z0-9_][A-Za-z0-9._/-]*)$/;
 const RepoSpec = z
 	.object({
 		url: z
 			.string()
 			.min(1)
 			.max(500)
-			.refine((u) => REPO_URL_SCHEME.test(u), {
-				message: "url must use https:// scheme",
+			.refine((u) => REPO_URL_HTTPS.test(u) || REPO_URL_SSH.test(u), {
+				message: "url must be https://… or git@host:path form",
+			})
+			// Belt-and-suspenders against `..` in either URL form. The
+			// HTTPS regex blocks `@` (creds-in-URL); the SSH path char
+			// class allows `.` and `/` (so `git@host:org/../etc` would
+			// otherwise pass shape validation). Argv-only invocation by
+			// the runner means this isn't a local RCE concern, but the
+			// uniform `..` rejection across url/ref/target keeps the
+			// invariant readable for the 188c author.
+			.refine((u) => !u.includes(".."), {
+				message: "url must not contain '..'",
 			}),
-		// `.min(1)` matches the postCreateCmd/postStartCmd rule: a stored
-		// empty string is indistinguishable from "no ref supplied" once
-		// it lands in D1, so refusing it at ingest lets the #188 git-
-		// clone consumer use a presence-only check instead of also
-		// defending against `git clone --branch ""`.
-		ref: z.string().min(1).max(200).optional(),
+		// Empty `""` = remote HEAD (no `--branch` flag). Non-empty is
+		// validated against the refname allowlist below. Stored as the
+		// literal user input; the runner decides whether to pass
+		// `--branch`.
+		ref: z
+			.string()
+			.max(MAX_REPO_REF_LEN)
+			.refine((r) => r === "" || (REPO_REF_PATTERN.test(r) && !r.includes("..")), {
+				message: "ref must match refname rules and not contain '..'",
+			})
+			.optional(),
+		// Empty `""` = workspace root (replace-workspace mode). Non-empty
+		// is a relative subpath validated below.
+		target: z
+			.string()
+			.max(MAX_REPO_TARGET_LEN)
+			.refine(
+				(t) =>
+					REPO_TARGET_PATTERN.test(t) &&
+					!t.includes("..") &&
+					!t.includes("//") &&
+					!t.startsWith("/"),
+				{
+					message:
+						"target must be empty or a workspace-relative path (no '..', no leading '/', no '//')",
+				},
+			)
+			.optional(),
+		// `"none"` = anonymous clone (must be https://). `"pat"` = HTTPS
+		// with a personal access token from `auth.pat`. `"ssh"` = SSH
+		// with private key + known_hosts from `auth.ssh`. Cross-field
+		// requirements enforced in `validateSessionConfig`.
+		auth: z.enum(["none", "pat", "ssh"]),
+		// Shallow clone depth. `null`/omitted = full history. Capped at
+		// MAX_REPO_DEPTH so a typo can't request a depth value that
+		// becomes effectively infinite in the runner.
+		depth: z.number().int().min(1).max(MAX_REPO_DEPTH).nullable().optional(),
+	})
+	.strict();
+// #188 — credential blob. Wire shape carries plaintext from the form;
+// the route encrypts before persistence (same boundary as envVars).
+// Fields are independently optional — a config with `auth.pat` set
+// but no `auth.ssh` (and vice-versa) is valid and common. The
+// cross-field check in `validateSessionConfig` requires the right
+// blob to be present given `repo.auth`.
+const KNOWN_HOSTS_DEFAULT_SENTINEL = "default";
+const WireAuthSpec = z
+	.object({
+		// PAT plaintext. AES-256-GCM encrypted before the row hits D1;
+		// the storage shape replaces this string with `{ ciphertext, iv,
+		// tag }` (see `encryptAuthCredentials`). 4 KiB ceiling is
+		// generous: GitHub fine-grained PATs are ~93 chars, classic ~40,
+		// GitLab/Bitbucket similar.
+		pat: z.string().min(1).max(MAX_PAT_LEN).optional(),
+		// SSH credentials: private key (encrypted at persistence) +
+		// known_hosts. `knownHosts === "default"` is a sentinel that
+		// 188d's runner will resolve to the bundled github/gitlab/
+		// bitbucket fingerprints; any other value is treated as a
+		// custom paste and stored verbatim (it's public information,
+		// no need to encrypt).
+		ssh: z
+			.object({
+				privateKey: z.string().min(1).max(MAX_SSH_KEY_LEN),
+				knownHosts: z.string().min(1).max(MAX_KNOWN_HOSTS_LEN),
+			})
+			.strict()
+			.optional(),
 	})
 	.strict();
 
@@ -183,9 +309,16 @@ export type EnvVarEntryPublic =
  */
 export const SessionConfigSchema = z
 	.object({
-		// #188 — populated by the repo-clone form
+		// #188 — populated by the repo-clone form. Single-repo today
+		// (multi-repo is deferred to #197). `repo: null` is wire-
+		// compatible with omitting the field entirely; both rehydrate
+		// to `undefined` and the bootstrap runner skips the clone step.
 		workspaceStrategy: z.enum(["preserve", "clone"]).optional(),
-		repos: z.array(RepoSpec).max(MAX_REPOS).optional(),
+		repo: RepoSpec.nullable().optional(),
+		// Credential blob for `repo.auth` ∈ {pat, ssh}. Omitted entirely
+		// for `auth: "none"`. The route encrypts before persistence —
+		// plaintext is in scope only inside the request handler.
+		auth: WireAuthSpec.optional(),
 		// #194 — populated by the resources form
 		cpuLimit: z.number().int().positive().max(MAX_CPU_NANO).optional(),
 		memLimit: z.number().int().positive().max(MAX_MEM_BYTES).optional(),
@@ -209,6 +342,32 @@ export const SessionConfigSchema = z
 	.strict();
 
 export type SessionConfig = z.infer<typeof SessionConfigSchema>;
+export type RepoSpecInput = z.infer<typeof RepoSpec>;
+export type AuthInput = z.infer<typeof WireAuthSpec>;
+
+/** Storage shape for the `auth` blob — same `{ ciphertext, iv, tag }`
+ *  envelope as encrypted env-var entries. Mirrors the wire shape's
+ *  optional fields exactly: `pat` is replaced by an envelope; `ssh`'s
+ *  private key is replaced by an envelope but `knownHosts` (public
+ *  information) stays plaintext. */
+export type AuthStored = {
+	pat?: { ciphertext: string; iv: string; tag: string };
+	ssh?: {
+		privateKey: { ciphertext: string; iv: string; tag: string };
+		knownHosts: string;
+	};
+};
+/** Public/redacted `auth` for listing endpoints — collapses any
+ *  encrypted credential to `{ isSet: true }`. `knownHosts` stays
+ *  visible (it's public). */
+export type AuthPublic = {
+	pat?: { isSet: true };
+	ssh?: { isSet: true; knownHosts: string };
+};
+/** Sentinel known_hosts value resolved by 188d's runner to the
+ *  bundled fingerprints. Exported so the runner and the frontend can
+ *  agree without copying the literal string. */
+export const KNOWN_HOSTS_DEFAULT = KNOWN_HOSTS_DEFAULT_SENTINEL;
 
 /**
  * Domain shape returned by `getSessionConfig`. Mirrors the schema above
@@ -216,13 +375,17 @@ export type SessionConfig = z.infer<typeof SessionConfigSchema>;
  * (PR 185b) writes once postCreate has succeeded — exposed here so the
  * runner can read it without going back through `d1Query` directly.
  */
-export interface SessionConfigRecord extends Omit<SessionConfig, "envVars"> {
+export interface SessionConfigRecord extends Omit<SessionConfig, "envVars" | "auth"> {
 	sessionId: string;
 	bootstrappedAt: Date | null;
 	// Storage-shape env vars: `secret` rows carry ciphertext + iv +
 	// tag (no plaintext value). DockerManager.spawn decrypts via
 	// `decryptStoredEntries` before handing them to `docker run`.
 	envVars?: EnvVarEntryStored[];
+	// Storage-shape auth credentials: `pat` and `ssh.privateKey` are
+	// encrypted envelopes. The 188c+ clone runner decrypts at use
+	// site via `decryptStoredAuth`.
+	auth?: AuthStored;
 }
 
 // ── Validation helper ──────────────────────────────────────────────────────
@@ -335,6 +498,97 @@ export function validateSessionConfig(raw: unknown): SessionConfig | undefined {
 			);
 		}
 	}
+	// #188 — repo↔auth cross-field consistency. Zod can't express these
+	// in a clean way (the `auth` blob is a sibling of `repo`, not nested
+	// inside it), so they're enforced here:
+	//   - `repo.auth: "pat"` ⇒ url MUST be https://, `auth.pat` MUST be set.
+	//     A `git@…` URL with PAT auth would fail mysteriously inside the
+	//     container; reject at the route boundary instead.
+	//   - `repo.auth: "ssh"` ⇒ url MUST be the `git@host:path` form,
+	//     `auth.ssh` MUST be set. The runner relies on the URL form to
+	//     pick the right `git clone` invocation.
+	//   - `repo.auth: "none"` ⇒ url MUST be https://. No credentials
+	//     allowed in `auth` for an anonymous clone — silently dropping
+	//     orphan credentials would leave the operator confused about
+	//     where their token "went".
+	// `repo === null` / undefined: skip — empty `auth` already meaningless.
+	if (result.data.repo) {
+		const repo = result.data.repo;
+		const authBlob = result.data.auth ?? {};
+		const isHttps = REPO_URL_HTTPS.test(repo.url);
+		const isSsh = REPO_URL_SSH.test(repo.url);
+		if (repo.auth === "none") {
+			if (!isHttps) {
+				throw new SessionConfigValidationError(
+					"config.repo.url",
+					"config.repo.url: anonymous clone requires an https:// URL",
+				);
+			}
+			if (authBlob.pat !== undefined || authBlob.ssh !== undefined) {
+				throw new SessionConfigValidationError(
+					"config.auth",
+					"config.auth: credentials must not be set when config.repo.auth is 'none'",
+				);
+			}
+		} else if (repo.auth === "pat") {
+			if (!isHttps) {
+				throw new SessionConfigValidationError(
+					"config.repo.url",
+					"config.repo.url: PAT auth requires an https:// URL",
+				);
+			}
+			if (authBlob.pat === undefined) {
+				throw new SessionConfigValidationError(
+					"config.auth.pat",
+					"config.auth.pat: required when config.repo.auth is 'pat'",
+				);
+			}
+			// Reject a co-present SSH credential. Without this, the
+			// route encrypts and persists the SSH key into `auth_json`
+			// even though the runner ignores it, leaving a stale blob
+			// no operator can reason about post-rotation (PR #213
+			// round 3 NIT).
+			if (authBlob.ssh !== undefined) {
+				throw new SessionConfigValidationError(
+					"config.auth.ssh",
+					"config.auth.ssh: not valid when config.repo.auth is 'pat'",
+				);
+			}
+		} else if (repo.auth === "ssh") {
+			if (!isSsh) {
+				throw new SessionConfigValidationError(
+					"config.repo.url",
+					"config.repo.url: SSH auth requires a git@host:path URL",
+				);
+			}
+			if (authBlob.ssh === undefined) {
+				throw new SessionConfigValidationError(
+					"config.auth.ssh",
+					"config.auth.ssh: required when config.repo.auth is 'ssh'",
+				);
+			}
+			// Mirror the `pat` branch: stale unused-credential blobs
+			// in D1 are credential confusion, not a security issue,
+			// but expensive to diagnose later (PR #213 round 3 NIT).
+			if (authBlob.pat !== undefined) {
+				throw new SessionConfigValidationError(
+					"config.auth.pat",
+					"config.auth.pat: not valid when config.repo.auth is 'ssh'",
+				);
+			}
+		}
+	} else if (result.data.auth !== undefined) {
+		// Orphan `auth` block with no `repo`. Same disposition as the
+		// `auth: "none"` + creds case — refuse rather than silently
+		// drop, so the operator gets a clear error message.
+		const a = result.data.auth;
+		if (a.pat !== undefined || a.ssh !== undefined) {
+			throw new SessionConfigValidationError(
+				"config.auth",
+				"config.auth: credentials require config.repo to be set",
+			);
+		}
+	}
 	return result.data;
 }
 
@@ -408,6 +662,80 @@ export function decryptStoredEntries(entries: EnvVarEntryStored[]): Record<strin
 }
 
 /**
+ * Encrypt the wire-shape `auth` blob into the storage shape the
+ * `session_configs.auth_json` column persists. Mirrors the env-vars
+ * pattern: plaintext credentials are in scope only inside the request
+ * handler. Returns `undefined` when the input has no credentials at
+ * all so the column collapses to NULL via `jsonOrNull`.
+ *
+ * `ssh.knownHosts` is NOT encrypted — known_hosts entries are public
+ * keys (the bundled-or-pasted equivalent of a published TLS root cert);
+ * encrypting them would be wasted CPU and would force the runner to
+ * decrypt before it knows whether to use the bundled defaults.
+ */
+export function encryptAuthCredentials(auth: AuthInput | undefined): AuthStored | undefined {
+	if (auth === undefined) return undefined;
+	if (auth.pat === undefined && auth.ssh === undefined) return undefined;
+	const out: AuthStored = {};
+	if (auth.pat !== undefined) {
+		out.pat = encryptSecret(auth.pat);
+	}
+	if (auth.ssh !== undefined) {
+		const keyBlob = encryptSecret(auth.ssh.privateKey);
+		out.ssh = {
+			privateKey: keyBlob,
+			knownHosts: auth.ssh.knownHosts,
+		};
+	}
+	return out;
+}
+
+/**
+ * Decrypt a stored auth blob into a wire-shape value the 188c+ clone
+ * runner can hand to `git clone`. `decryptSecret` throws on tag
+ * mismatch (tampered ciphertext, wrong key after rotation, D1
+ * corruption) — clone fails loudly rather than running with an empty
+ * credential string, which would silently fall back to anonymous and
+ * either leak the URL or 404 on a private repo.
+ */
+export function decryptStoredAuth(stored: AuthStored): AuthInput {
+	const out: AuthInput = {};
+	if (stored.pat !== undefined) {
+		out.pat = decryptSecret(stored.pat);
+	}
+	if (stored.ssh !== undefined) {
+		out.ssh = {
+			privateKey: decryptSecret(stored.ssh.privateKey),
+			knownHosts: stored.ssh.knownHosts,
+		};
+	}
+	return out;
+}
+
+/**
+ * Redact stored auth credentials for listing endpoints. Encrypted
+ * blobs collapse to `{ isSet: true }`; `knownHosts` (public) stays
+ * visible so a client showing the Repo tab can still display "using
+ * default known_hosts" vs "custom paste".
+ */
+export function redactStoredAuth(stored: AuthStored | undefined): AuthPublic | undefined {
+	if (stored === undefined) return undefined;
+	const out: AuthPublic = {};
+	if (stored.pat !== undefined) out.pat = { isSet: true };
+	if (stored.ssh !== undefined) {
+		out.ssh = { isSet: true, knownHosts: stored.ssh.knownHosts };
+	}
+	// Mirror `parseAuthColumn`: an `AuthStored` with neither field set
+	// collapses to undefined so listing-endpoint callers can rely on
+	// `auth !== undefined` as the "are credentials configured?"
+	// predicate (PR #213 round 1 NIT). `parseAuthColumn` already drops
+	// rows that come back as `{}`, but a future code path that
+	// constructs an `AuthStored` directly (e.g. a partial-edit endpoint)
+	// would otherwise leak `{}` here.
+	return out.pat === undefined && out.ssh === undefined ? undefined : out;
+}
+
+/**
  * Redact stored entries for listing endpoints. Plain entries pass
  * through; secret entries collapse to `{ name, type, isSet: true }`
  * so neither plaintext nor ciphertext leaks via `GET /api/sessions/:id`
@@ -435,6 +763,7 @@ interface SessionConfigRow {
 	repos_json: string | null;
 	ports_json: string | null;
 	env_vars_json: string | null;
+	auth_json: string | null;
 	bootstrapped_at: string | null;
 }
 
@@ -450,9 +779,10 @@ function rowToRecord(row: SessionConfigRow): SessionConfigRecord {
 		idleTtlSeconds: row.idle_ttl_seconds ?? undefined,
 		postCreateCmd: row.post_create_cmd ?? undefined,
 		postStartCmd: row.post_start_cmd ?? undefined,
-		repos: parseJsonColumn<SessionConfig["repos"]>(row.session_id, "repos_json", row.repos_json),
+		repo: parseRepoColumn(row.session_id, row.repos_json),
 		ports: parseJsonColumn<SessionConfig["ports"]>(row.session_id, "ports_json", row.ports_json),
 		envVars: parseEnvVarsColumn(row.session_id, row.env_vars_json),
+		auth: parseAuthColumn(row.session_id, row.auth_json),
 		bootstrappedAt: row.bootstrapped_at ? parseD1Utc(row.bootstrapped_at) : null,
 	};
 }
@@ -469,8 +799,17 @@ function rowToRecord(row: SessionConfigRow): SessionConfigRecord {
  * broken"). Degrade to `undefined` + a loud `logger.warn` so the rest of the
  * row stays usable and the operator sees the inconsistency.
  */
-function parseJsonColumn<T>(sessionId: string, column: string, raw: string | null): T | undefined {
-	if (raw === null) return undefined;
+function parseJsonColumn<T>(
+	sessionId: string,
+	column: string,
+	raw: string | null | undefined,
+): T | undefined {
+	// `undefined` shows up in tests whose mock rows omit a newly-added
+	// column (e.g. pre-#188 fixtures that don't set `auth_json`). Treat
+	// it the same as null — "column is absent" — rather than crashing
+	// the read with a `JSON.parse(undefined)` SyntaxError. Production
+	// rows always have the column after the ALTER TABLE migration runs.
+	if (raw === null || raw === undefined) return undefined;
 	try {
 		return JSON.parse(raw) as T;
 	} catch (err) {
@@ -585,6 +924,135 @@ function parseEnvVarsColumn(
 	return undefined;
 }
 
+/**
+ * Backward-compat repo-column rehydrator. The `repos_json` column was
+ * introduced in PR #205 (185a) for an array shape `[{url, ref?}, …]`
+ * but never populated by any frontend (no Repo tab UI shipped). #188
+ * narrows the data model to a single repo (multi-repo deferred to
+ * #197). Three shapes can be in the column at read time:
+ *
+ *   - `null`                          — no repo configured (common).
+ *   - `{url, ref?, target?, …}`       — current single-object shape.
+ *   - `[{url, ref?}, …]`              — legacy array placeholder. Take
+ *                                       the first element if it
+ *                                       conforms; otherwise drop.
+ *
+ * The single-object shape is NOT re-validated by Zod here — the row
+ * was written by `persistSessionConfig` after the route ran
+ * `validateSessionConfig`, so any object that landed in the column
+ * already passed validation at that time. A future schema tightening
+ * that invalidates an old row should ride a migration, not a silent
+ * read-side reject.
+ *
+ * The `auth` presence check below is the only structural guard. It is
+ * deliberately MINIMAL — sufficient for 188c's branching to find a
+ * valid enum value, NOT sufficient to vouch for `url` / `target` /
+ * `ref` having survived the wire-path schema (a row injected by a
+ * direct D1 write or a partial-edit code path could carry e.g. a
+ * `file://` URL that the route would have rejected). Treat the shape
+ * returned here as "well-typed enough for the runner's switch
+ * statement"; do not pass `repo.url` to `git clone` without
+ * re-validating against `RepoSpec` if you are touching this on a path
+ * that bypasses `validateSessionConfig`. PR #213 round 4 NIT.
+ */
+function parseRepoColumn(sessionId: string, raw: string | null): SessionConfig["repo"] | undefined {
+	const parsed = parseJsonColumn<unknown>(sessionId, "repos_json", raw);
+	if (parsed === undefined || parsed === null) return undefined;
+	if (Array.isArray(parsed)) {
+		// Legacy array shape. The placeholder allowed multiple repos
+		// but no production data exercises it; promote first element
+		// or drop. Defensive: a non-object element should not crash.
+		const first = parsed[0];
+		if (first && typeof first === "object") {
+			// Default `auth: "none"` so the post-#188 RepoSpec invariant
+			// (auth is required) holds at runtime, not just at the
+			// type-checker layer. The legacy placeholder predates the
+			// auth field; the only URL form the old allowlist accepted
+			// was `https://` with no credentials, so `"none"` is the
+			// semantically correct default. Spread order lets a future
+			// migration that backfills `auth` win without further code
+			// changes (PR #213 round 2 NIT).
+			return { auth: "none", ...first } as SessionConfig["repo"];
+		}
+		logger.warn(
+			`[sessionConfig] legacy repos_json array for session ${sessionId} has no usable first element; dropping`,
+		);
+		return undefined;
+	}
+	if (typeof parsed === "object") {
+		// Defence-in-depth against a row written outside `persistSessionConfig`
+		// (direct D1 write during incident response, future code path that
+		// constructs the object partially). The legacy-array branch above
+		// already drops malformed rows with a `logger.warn`; the post-#188
+		// single-object branch should hold the same line. `auth` is the
+		// only field required by the new schema, so its presence is the
+		// minimal structural check (PR #213 round 3 NIT).
+		if (!("auth" in (parsed as object))) {
+			logger.warn(
+				`[sessionConfig] repos_json for session ${sessionId} missing required 'auth' field; dropping`,
+			);
+			return undefined;
+		}
+		return parsed as SessionConfig["repo"];
+	}
+	logger.warn(
+		`[sessionConfig] repos_json for session ${sessionId} parsed to non-array, non-object value; skipping`,
+	);
+	return undefined;
+}
+
+/**
+ * Rehydrator for `auth_json`. Same defensive structural validation as
+ * `parseEnvVarsColumn`: a write-capable D1 attacker who could tamper
+ * with this column otherwise feeds garbage straight into
+ * `decryptSecret`, which would throw on every spawn (effective DoS for
+ * the session). Drop malformed entries with a logger warning instead.
+ */
+function parseAuthColumn(sessionId: string, raw: string | null): AuthStored | undefined {
+	const parsed = parseJsonColumn<unknown>(sessionId, "auth_json", raw);
+	if (parsed === undefined || parsed === null) return undefined;
+	if (typeof parsed !== "object") {
+		logger.warn(`[sessionConfig] auth_json for session ${sessionId} is not an object; skipping`);
+		return undefined;
+	}
+	const obj = parsed as { pat?: unknown; ssh?: unknown };
+	const out: AuthStored = {};
+	if (obj.pat !== undefined) {
+		if (isEncryptedBlob(obj.pat)) {
+			out.pat = obj.pat;
+		} else {
+			logger.warn(
+				`[sessionConfig] auth_json.pat for session ${sessionId} has wrong shape; dropping`,
+			);
+		}
+	}
+	if (obj.ssh !== undefined) {
+		const ssh = obj.ssh as { privateKey?: unknown; knownHosts?: unknown };
+		if (
+			ssh !== null &&
+			typeof ssh === "object" &&
+			isEncryptedBlob(ssh.privateKey) &&
+			typeof ssh.knownHosts === "string"
+		) {
+			out.ssh = {
+				privateKey: ssh.privateKey,
+				knownHosts: ssh.knownHosts,
+			};
+		} else {
+			logger.warn(
+				`[sessionConfig] auth_json.ssh for session ${sessionId} has wrong shape; dropping`,
+			);
+		}
+	}
+	return out.pat === undefined && out.ssh === undefined ? undefined : out;
+}
+
+function isEncryptedBlob(v: unknown): v is { ciphertext: string; iv: string; tag: string } {
+	if (v === null || typeof v !== "object") return false;
+	const o = v as { ciphertext?: unknown; iv?: unknown; tag?: unknown };
+	return typeof o.ciphertext === "string" && typeof o.iv === "string" && typeof o.tag === "string";
+}
+
 // Mirrors sessionManager.parseD1UtcTimestamp — D1's `datetime('now')` lacks
 // any timezone suffix and Node's Date treats suffix-less ISO strings as
 // LOCAL time. Append 'Z' unless the value already carries one (a future
@@ -604,8 +1072,9 @@ function parseD1Utc(raw: string): Date {
  * is the only place plaintext lives. Callers MUST run `validateSessionConfig`
  * + `encryptSecretEntries` first; this module's serializer trusts both.
  */
-export type PersistableSessionConfig = Omit<SessionConfig, "envVars"> & {
+export type PersistableSessionConfig = Omit<SessionConfig, "envVars" | "auth"> & {
 	envVars?: EnvVarEntryStored[];
+	auth?: AuthStored;
 };
 
 /**
@@ -628,8 +1097,8 @@ export async function persistSessionConfig(
 		`INSERT INTO session_configs
                         (session_id, workspace_strategy, cpu_limit, mem_limit,
                          idle_ttl_seconds, post_create_cmd, post_start_cmd,
-                         repos_json, ports_json, env_vars_json)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         repos_json, ports_json, env_vars_json, auth_json)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(session_id) DO UPDATE SET
                         workspace_strategy = excluded.workspace_strategy,
                         cpu_limit          = excluded.cpu_limit,
@@ -639,7 +1108,8 @@ export async function persistSessionConfig(
                         post_start_cmd     = excluded.post_start_cmd,
                         repos_json         = excluded.repos_json,
                         ports_json         = excluded.ports_json,
-                        env_vars_json      = excluded.env_vars_json`,
+                        env_vars_json      = excluded.env_vars_json,
+                        auth_json          = excluded.auth_json`,
 		[
 			sessionId,
 			config.workspaceStrategy ?? null,
@@ -653,9 +1123,14 @@ export async function persistSessionConfig(
 			// rehydrate them as undefined anyway, and PR 185b's runner
 			// uses `IS NOT NULL` semantics on these columns to decide
 			// whether the corresponding feature was configured.
-			jsonOrNull(config.repos),
+			//
+			// `repo` lands in the `repos_json` column (singular value in
+			// a column whose name pre-dates #188's data-model narrowing
+			// from array to single — column kept to avoid a migration).
+			jsonOrNull(config.repo),
 			jsonOrNull(config.ports),
 			jsonOrNull(config.envVars),
+			jsonOrNull(config.auth),
 		],
 	);
 }

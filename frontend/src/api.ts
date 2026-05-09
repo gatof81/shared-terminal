@@ -172,7 +172,20 @@ export interface SessionConfigPayload {
 	idleTtlSeconds?: number;
 	postCreateCmd?: string;
 	postStartCmd?: string;
-	repos?: Array<{ url: string; ref?: string }>;
+	// #188: single-repo today; multi-repo deferred to #197.
+	repo?: {
+		url: string;
+		ref?: string;
+		target?: string;
+		auth: "none" | "pat" | "ssh";
+		depth?: number | null;
+	} | null;
+	// Credential blob for `repo.auth` ∈ {pat, ssh}. Plaintext on the
+	// wire — the backend encrypts before persistence (#188 PR 188b).
+	auth?: {
+		pat?: string;
+		ssh?: { privateKey: string; knownHosts: string };
+	};
 	ports?: Array<{ port: number; protocol?: "http" | "tcp" }>;
 	envVars?: EnvVarEntryInput[];
 }
