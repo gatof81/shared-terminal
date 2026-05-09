@@ -28,6 +28,7 @@ import { validateSecretsKey } from "./secrets.js";
 import { SessionManager } from "./sessionManager.js";
 import { parseTrustProxy, TrustProxyError, warnIfProductionMisconfigured } from "./trustProxy.js";
 import { endUpgradeSocketWithReply, handleWsConnection, startWsHeartbeat } from "./wsHandler.js";
+import { createWsUpgradeRateLimiter } from "./wsUpgradeRateLimit.js";
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -116,6 +117,20 @@ const portDispatcher = createPortDispatcher({
 	// portDispatcher.ts for the rationale.
 	corsOrigins: CORS_ORIGINS,
 	nodeEnv: process.env.NODE_ENV,
+});
+
+// #190 PR 190c — per-IP upgrade rate limiter for the dispatcher's
+// WS path. Express's `dispatcherLimiter` only sees HTTP requests;
+// upgrade events bypass the middleware chain entirely. Without
+// this, a bot sending upgrade frames with no Origin header (which
+// `isAllowedWsOrigin` allows for non-browser callers like webhook
+// senders) reaches `lookupDispatchTarget` per attempt — uncapped
+// D1 budget burn. 60/min/IP is tighter than the HTTP 300/min
+// because each upgrade is more expensive and legitimate clients
+// open far fewer. PR #223 round 4 SHOULD-FIX.
+const dispatcherWsUpgradeLimiter = createWsUpgradeRateLimiter({
+	windowMs: 60 * 1000,
+	max: 60,
 });
 
 // ── Express app ───────────────────────────────────────────────────────────────
@@ -235,6 +250,30 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
+	// #190 PR 190c — rate-limit dispatcher upgrades before any D1 work
+	// or `proxy.ws()` allocation. `isDispatcherHost` uses the same host
+	// parser the dispatch decision uses, so the limiter and the dispatch
+	// gate stay in lockstep. `socket.remoteAddress` is the bucket key
+	// (X-Forwarded-For parsing happens later at the auth layer; here we
+	// want a cheap pre-D1 cap, and remote address is what's available
+	// without paying for trust-proxy resolution per upgrade frame).
+	// Failing open on missing remoteAddress (extremely unusual) is
+	// preferable to dropping a legitimate connection. PR #223 round 4
+	// SHOULD-FIX.
+	if (portDispatcher.isDispatcherHost(req.headers.host)) {
+		// `socket` is typed as `Duplex` in the upgrade event but at
+		// runtime is always a `net.Socket` (or TLSSocket, which
+		// extends it). `remoteAddress` lives on net.Socket; cast
+		// once to read it. Falls back to undefined for the
+		// theoretical case where the socket was destroyed before
+		// reaching here, which the limiter treats as fail-open.
+		const remote = (socket as { remoteAddress?: string }).remoteAddress;
+		const allowed = dispatcherWsUpgradeLimiter.attempt(remote);
+		if (!allowed) {
+			endUpgradeSocketWithReply(socket, "HTTP/1.1 429 Too Many Requests\r\n\r\n");
+			return;
+		}
+	}
 	// #190 PR 190c — let the port dispatcher claim this upgrade first
 	// when the Host header parses as `p<container>-<sessionId>.<base>`.
 	// `handleUpgrade` returns true iff the dispatcher took the request;
