@@ -187,6 +187,32 @@ export async function migrateDb(): Promise<void> {
 		// from its INSERT column list to preserve the NULL-on-create
 		// invariant; `sessionConfig.test.ts` locks this with an explicit
 		// SQL-shape assertion.
+		// #190 PR 190b — runtime port mappings, distinct from the
+		// declarative `session_configs.ports_json` config. The kernel
+		// hands Docker a random ephemeral host port at `container.start()`
+		// (we pass `-p 0:<container>`); we read it back via `inspect`
+		// and persist it here so the dispatcher (190c) can answer
+		// `Host: p<container>-<sessionId>.<base>` requests without
+		// re-inspecting on every hit.
+		//
+		// Rebuilt on every container start (including reconcile() after
+		// a backend restart — the host port is still bound by the
+		// running container, we just need to re-discover the mapping).
+		// ON DELETE CASCADE on the FK keeps the table garbage-free
+		// when a hard-delete drops the parent. Composite primary key
+		// (session_id, container_port) catches a duplicate container_port
+		// at the DB layer if validation ever lets one through (the
+		// schema's `superRefine` already rejects it at ingest, but
+		// defence-in-depth is cheap here).
+		`CREATE TABLE IF NOT EXISTS sessions_port_mappings (
+                        session_id      TEXT NOT NULL,
+                        container_port  INTEGER NOT NULL,
+                        host_port       INTEGER NOT NULL,
+                        PRIMARY KEY (session_id, container_port),
+                        FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                )`,
+		`CREATE INDEX IF NOT EXISTS idx_port_mappings_session
+                        ON sessions_port_mappings(session_id)`,
 		`CREATE TABLE IF NOT EXISTS session_configs (
                         session_id              TEXT PRIMARY KEY,
                         workspace_strategy      TEXT,

@@ -880,6 +880,120 @@ describe("DockerManager.reconcile", () => {
 		expect(warnSpy).not.toHaveBeenCalled();
 		warnSpy.mockRestore();
 	});
+
+	// ── #190 PR 190b — port-mapping resync ─────────────────────────────
+
+	function makeDockerWithInspectAndPorts(info: {
+		State: { Running: boolean };
+		HostConfig: { CapDrop?: string[]; SecurityOpt?: string[] };
+		NetworkSettings?: {
+			Ports?: Record<string, Array<{ HostPort: string }> | null>;
+		};
+	}): { dm: DockerManager; sessions: SessionManager } {
+		const sessions = makeFakeSessions();
+		const dm = new DockerManager(sessions);
+		(dm as unknown as { docker: unknown }).docker = {
+			getContainer: vi.fn(() => ({
+				inspect: vi.fn(async () => info),
+			})),
+		};
+		return { dm, sessions };
+	}
+
+	it("rewrites sessions_port_mappings from inspect on a still-running container", async () => {
+		const { dm } = makeDockerWithInspectAndPorts({
+			State: { Running: true },
+			HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"] },
+			NetworkSettings: {
+				Ports: {
+					"3000/tcp": [{ HostPort: "32768" }],
+					"5500/tcp": [{ HostPort: "32769" }],
+				},
+			},
+		});
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [{ session_id: "s-running", container_id: "container-running" }],
+			meta: { changes: 0 },
+		});
+
+		await dm.reconcile();
+
+		// The reconcile path issues setPortMappings → DELETE + 2 INSERTs
+		// against sessions_port_mappings.
+		const portCalls = dbStubs.d1Query.mock.calls.filter((c) =>
+			(c[0] as string).match(/sessions_port_mappings/),
+		);
+		const deleteCall = portCalls.find((c) =>
+			(c[0] as string).match(/^DELETE FROM sessions_port_mappings/),
+		);
+		const insertCalls = portCalls.filter((c) =>
+			(c[0] as string).match(/^INSERT INTO sessions_port_mappings/),
+		);
+		expect(deleteCall?.[1]).toEqual(["s-running"]);
+		expect(insertCalls).toHaveLength(2);
+		expect(insertCalls[0]?.[1]).toEqual(["s-running", 3000, 32768]);
+		expect(insertCalls[1]?.[1]).toEqual(["s-running", 5500, 32769]);
+	});
+
+	it("clears port mappings when reconcile finds the container stopped", async () => {
+		const { dm, sessions } = makeDockerWithInspectAndPorts({
+			State: { Running: false },
+			HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"] },
+			NetworkSettings: { Ports: {} },
+		});
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [{ session_id: "s-stopped", container_id: "container-stopped" }],
+			meta: { changes: 0 },
+		});
+
+		await dm.reconcile();
+
+		expect(sessions.updateStatus).toHaveBeenCalledWith("s-stopped", "stopped");
+		const deleteCall = dbStubs.d1Query.mock.calls.find(
+			(c) =>
+				(c[0] as string).match(/^DELETE FROM sessions_port_mappings/) &&
+				(c[1] as unknown[])?.[0] === "s-stopped",
+		);
+		expect(deleteCall).toBeDefined();
+	});
+
+	it("clears port mappings on the no-container_id branch", async () => {
+		const sessions = makeFakeSessions();
+		const dm = new DockerManager(sessions);
+		(dm as unknown as { docker: unknown }).docker = { getContainer: vi.fn() };
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [{ session_id: "s-noid", container_id: null }],
+			meta: { changes: 0 },
+		});
+
+		await dm.reconcile();
+
+		expect(sessions.updateStatus).toHaveBeenCalledWith("s-noid", "stopped");
+		const deleteCall = dbStubs.d1Query.mock.calls.find(
+			(c) =>
+				(c[0] as string).match(/^DELETE FROM sessions_port_mappings/) &&
+				(c[1] as unknown[])?.[0] === "s-noid",
+		);
+		expect(deleteCall).toBeDefined();
+	});
+
+	it("clears port mappings on the 404-container-gone branch", async () => {
+		const err = Object.assign(new Error("No such container"), { statusCode: 404 });
+		const { dm } = makeDockerWithInspectError(err);
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [{ session_id: "s-gone", container_id: "container-dead" }],
+			meta: { changes: 0 },
+		});
+
+		await dm.reconcile();
+
+		const deleteCall = dbStubs.d1Query.mock.calls.find(
+			(c) =>
+				(c[0] as string).match(/^DELETE FROM sessions_port_mappings/) &&
+				(c[1] as unknown[])?.[0] === "s-gone",
+		);
+		expect(deleteCall).toBeDefined();
+	});
 });
 
 describe("DockerManager.startContainer", () => {
