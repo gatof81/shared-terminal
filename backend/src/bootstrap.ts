@@ -19,9 +19,11 @@
  * the hook continues in the background.
  */
 
+import { runCloneRepo } from "./bootstrap/cloneRepo.js";
 import { d1Query } from "./db.js";
 import type { DockerManager } from "./dockerManager.js";
 import { logger } from "./logger.js";
+import { getSessionConfig } from "./sessionConfig.js";
 import type { SessionManager } from "./sessionManager.js";
 
 /**
@@ -266,28 +268,35 @@ export class BootstrapBroadcaster {
 // ── Async runner (PR 185b2b) ──────────────────────────────────────────────
 
 /**
- * Run postCreate (and on success, postStart) for a session out-of-band,
- * streaming output to the broadcaster as it arrives. Called from
- * `POST /api/sessions` AFTER the response has been sent (fire-and-forget),
- * so a long-running hook can't tie up the HTTP request and the modal
- * can subscribe to `/ws/bootstrap/<sessionId>` to see live output.
+ * Run repo-clone (#188) and postCreate (#185, on success postStart) for
+ * a session out-of-band, streaming output to the broadcaster as it
+ * arrives. Called from `POST /api/sessions` AFTER the response has
+ * been sent (fire-and-forget), so a long-running step can't tie up
+ * the HTTP request and the modal can subscribe to
+ * `/ws/bootstrap/<sessionId>` to see live output.
+ *
+ * Step order (188c): clone → postCreate → markBootstrapped → postStart.
+ * Clone runs FIRST so a configured repo is in place by the time the
+ * user's postCreate hook (or first interactive command) runs. A
+ * non-zero exit from any blocking step (clone, postCreate) hard-fails
+ * the session.
  *
  * Failure semantics match the synchronous flow that PR 185b2a shipped:
- *   - non-zero `postCreate` exit → flip status to `failed` BEFORE
- *     killing the container (so reconcile never sees a half-state row),
- *     then kill, then broadcast `{type: "fail"}` so the modal renders
- *     its inline error panel.
- *   - any unexpected throw inside the runner is logged + treated as a
- *     hard failure (same status flip + kill + broadcast).
+ *   - non-zero clone or postCreate exit → flip status to `failed`
+ *     BEFORE killing the container (so reconcile never sees a
+ *     half-state row), then kill, then broadcast `{type: "fail"}`
+ *     so the modal renders its inline error panel.
+ *   - any unexpected throw inside the runner is logged + treated as
+ *     a hard failure (same status flip + kill + broadcast).
  *
- * Caller: only invoke this if `postCreateCmd` is set. The
- * markBootstrapped gate is single-use, and the route already checks
- * `bootstrapped_at IS NULL` semantics by virtue of being on the
- * create path.
+ * Caller: only invoke this if SOMETHING is configured (postCreateCmd
+ * or repo). The markBootstrapped gate is single-use, and the route
+ * already checks `bootstrapped_at IS NULL` semantics by virtue of
+ * being on the create path.
  */
 export async function runAsyncBootstrap(
 	sessionId: string,
-	cfg: { postCreateCmd: string; postStartCmd?: string },
+	cfg: { postCreateCmd?: string; postStartCmd?: string },
 	deps: {
 		sessions: SessionManager;
 		docker: DockerManager;
@@ -297,14 +306,23 @@ export async function runAsyncBootstrap(
 	const { sessions, docker, broadcaster } = deps;
 	const onOutput = (chunk: string) => broadcaster.broadcast(sessionId, chunk);
 
-	let exitCode: number;
+	// Step 1: repo clone. `runCloneRepo` is a no-op + exitCode=0 when
+	// no `repo` is configured, so this branch is free for sessions
+	// that only use postCreate. Load the full config here (one D1
+	// round-trip) — the route already persisted it before `spawn()`,
+	// so the row is guaranteed to exist when there's anything to
+	// clone or hook on.
+	let cloneExit: number;
 	try {
-		const result = await docker.runPostCreate(sessionId, cfg.postCreateCmd, onOutput);
-		exitCode = result.exitCode;
+		const config = await getSessionConfig(sessionId);
+		if (config) {
+			const result = await runCloneRepo({ sessionId, config, docker, onOutput });
+			cloneExit = result.exitCode;
+		} else {
+			cloneExit = 0;
+		}
 	} catch (err) {
-		logger.error(
-			`[bootstrap] postCreate threw for session ${sessionId}: ${(err as Error).message}`,
-		);
+		logger.error(`[bootstrap] clone threw for session ${sessionId}: ${(err as Error).message}`);
 		await failSession(sessionId, sessions, docker);
 		broadcaster.finish(sessionId, {
 			type: "fail",
@@ -312,6 +330,35 @@ export async function runAsyncBootstrap(
 			error: (err as Error).message,
 		});
 		return;
+	}
+	if (cloneExit !== 0) {
+		await failSession(sessionId, sessions, docker);
+		broadcaster.finish(sessionId, { type: "fail", exitCode: cloneExit });
+		return;
+	}
+
+	// Step 2: postCreate. May be unset when only the repo step is
+	// configured — in that case skip straight to markBootstrapped +
+	// postStart. The bootstrap is still considered complete.
+	let exitCode: number;
+	if (cfg.postCreateCmd) {
+		try {
+			const result = await docker.runPostCreate(sessionId, cfg.postCreateCmd, onOutput);
+			exitCode = result.exitCode;
+		} catch (err) {
+			logger.error(
+				`[bootstrap] postCreate threw for session ${sessionId}: ${(err as Error).message}`,
+			);
+			await failSession(sessionId, sessions, docker);
+			broadcaster.finish(sessionId, {
+				type: "fail",
+				exitCode: -1,
+				error: (err as Error).message,
+			});
+			return;
+		}
+	} else {
+		exitCode = 0;
 	}
 
 	if (exitCode !== 0) {

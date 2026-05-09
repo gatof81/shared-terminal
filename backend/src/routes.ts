@@ -489,9 +489,15 @@ export function buildRouter(
 			//
 			// postStart fires inside the runner on the success branch
 			// (after markBootstrapped). For sessions with postStart but
-			// NO postCreate, fire it directly here — the async runner
-			// only kicks off when there's a postCreateCmd to wait on.
-			if (validatedConfig?.postCreateCmd) {
+			// NO postCreate / repo, fire it directly here — the async
+			// runner only kicks off when there's something to block on.
+			//
+			// #188 PR 188c: the trigger now fires when EITHER a repo or
+			// a postCreateCmd is configured. The runner's clone step is
+			// a no-op when `repo` is absent, so this widening is safe
+			// for the postCreate-only path and lets repo-only sessions
+			// (no hook, just a clone) get their async-bootstrap modal.
+			if (validatedConfig?.postCreateCmd || validatedConfig?.repo) {
 				const cfg = {
 					postCreateCmd: validatedConfig.postCreateCmd,
 					postStartCmd: validatedConfig.postStartCmd,

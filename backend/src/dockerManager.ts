@@ -816,6 +816,41 @@ export class DockerManager {
 		cmd: string,
 		onOutput?: (chunk: string) => void,
 	): Promise<{ exitCode: number }> {
+		// Thin shim over `streamExec` — postCreate is shell-typed (the
+		// user wrote `npm install && npm test` etc.) so we wrap the
+		// command in `bash -c`. The clone runner (#188 PR 188c) calls
+		// `streamExec` directly with argv to avoid the shell layer.
+		return this.streamExec(
+			sessionId,
+			{
+				cmd: ["bash", "-c", cmd],
+				workingDir: "/home/developer/workspace",
+			},
+			onOutput,
+		);
+	}
+
+	/**
+	 * Run a one-off exec inside the session's container, streaming
+	 * stdout+stderr to `onOutput` as bytes arrive. Returns the exec's
+	 * exit code; throws if Docker can't determine it (indeterminate
+	 * outcome ≠ success — see the `info.ExitCode === null` branch
+	 * below).
+	 *
+	 * Exposed publicly for #188's clone runner, which needs argv-mode
+	 * invocation (not shell) so a malformed `repo.url` / `repo.ref`
+	 * can never become shell meta. `runPostCreate` is now a thin
+	 * shell-mode shim over this primitive.
+	 */
+	async streamExec(
+		sessionId: string,
+		opts: {
+			cmd: string[];
+			env?: Record<string, string>;
+			workingDir?: string;
+		},
+		onOutput?: (chunk: string) => void,
+	): Promise<{ exitCode: number }> {
 		const meta = await this.sessions.getOrThrow(sessionId);
 		if (!meta.containerId) throw new Error("No container for this session");
 		const container = this.docker.getContainer(meta.containerId);
@@ -826,12 +861,13 @@ export class DockerManager {
 		// the wire (Tty:false, multiplexed frames, WorkingDir pinned to
 		// the workspace) as #207 round 7 settled.
 		const exec = await container.exec({
-			Cmd: ["bash", "-c", cmd],
+			Cmd: opts.cmd,
+			Env: opts.env ? Object.entries(opts.env).map(([k, v]) => `${k}=${v}`) : undefined,
 			AttachStdin: false,
 			AttachStdout: true,
 			AttachStderr: true,
 			Tty: false,
-			WorkingDir: "/home/developer/workspace",
+			WorkingDir: opts.workingDir ?? "/home/developer/workspace",
 		});
 		const stream = await exec.start({ hijack: false, stdin: false });
 
