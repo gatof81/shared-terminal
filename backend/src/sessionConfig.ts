@@ -52,6 +52,16 @@ const MAX_REPO_DEPTH = 10_000;
 const MAX_PAT_LEN = 4 * 1024;
 const MAX_SSH_KEY_LEN = 16 * 1024;
 const MAX_KNOWN_HOSTS_LEN = 32 * 1024;
+// #191 lifecycle-hook bounds. Names + emails fit in 256 chars (RFC
+// 5321 caps the localpart at 64 + domain at 255 — 256 is comfortably
+// over the realistic max). Dotfiles install-script paths use the same
+// shape as repo target. Agent-seed file bodies are user-generated
+// content (settings.json, CLAUDE.md) — 256 KiB matches the env-vars
+// total cap so a single create can't push a multi-MB row to D1.
+const MAX_GIT_NAME_LEN = 256;
+const MAX_GIT_EMAIL_LEN = 256;
+const MAX_DOTFILES_INSTALL_SCRIPT_LEN = 256;
+const MAX_AGENT_SEED_BYTES = 256 * 1024;
 // #186 env-var entry caps. Per-entry value at 16 KiB matches the
 // spec; aggregate budget below caps the whole serialised list so a
 // caller can't blow past D1-friendly sizes by stuffing 64 entries at
@@ -227,6 +237,110 @@ const WireAuthSpec = z
 	})
 	.strict();
 
+// #191 — git identity. Used by the bootstrap stage to run
+// `git config --global user.{name,email}` inside the container BEFORE
+// any commit-producing operation (clone with rebase, dotfiles install
+// running git, postCreate scripts that auto-commit). Both fields
+// required when the block is set — a half-configured identity would
+// produce a less-helpful `git config` error at the wrong layer.
+//
+// Email validation is deliberately permissive: a single `@` with at
+// least one char on each side. RFC 5322's full grammar is overkill —
+// the bootstrap stage just hands the string to `git config`; git
+// itself accepts anything. The regex catches obvious typos
+// ("user@", "@example.com", whitespace-only) without the false
+// negatives a strict spec would produce.
+const GIT_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+$/;
+const GitIdentitySpec = z
+	.object({
+		name: z.string().min(1).max(MAX_GIT_NAME_LEN),
+		email: z
+			.string()
+			.min(1)
+			.max(MAX_GIT_EMAIL_LEN)
+			.refine((e) => GIT_EMAIL_PATTERN.test(e), {
+				message: "email must be of the form local@domain",
+			}),
+	})
+	.strict();
+
+// #191 — dotfiles repo. Same URL allowlist as the main repo (#188)
+// so the auth↔scheme pairing rules from `RepoSpec` carry over. Auth
+// is shared with the main repo by design (issue spec): the user has
+// one PAT / SSH identity per session; a per-repo identity is a
+// follow-up (#189). `installScript` is a path INSIDE the cloned
+// dotfiles repo; same path-traversal defence as `repo.target`.
+const DOTFILES_INSTALL_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9._/-]*$/;
+const DotfilesSpec = z
+	.object({
+		url: z
+			.string()
+			.min(1)
+			.max(500)
+			.refine((u) => REPO_URL_HTTPS.test(u) || REPO_URL_SSH.test(u), {
+				message: "url must be https://… or git@host:path form",
+			})
+			.refine((u) => !u.includes(".."), {
+				message: "url must not contain '..'",
+			}),
+		// Empty/null = remote HEAD; same shape as `RepoSpec.ref`.
+		ref: z
+			.string()
+			.max(MAX_REPO_REF_LEN)
+			.refine((r) => r === "" || (REPO_REF_PATTERN.test(r) && !r.includes("..")), {
+				message: "ref must match refname rules and not contain '..'",
+			})
+			.nullable()
+			.optional(),
+		// Path inside the cloned dotfiles repo, e.g. "install.sh" or
+		// "scripts/setup". `null`/omitted = clone-only (no install
+		// script run). The pattern enforces no leading `/`, no `..`,
+		// and the leading-alnum/`_` rule from the target pattern so a
+		// future field never mis-resolves to "../etc/passwd".
+		installScript: z
+			.string()
+			.max(MAX_DOTFILES_INSTALL_SCRIPT_LEN)
+			.refine(
+				(s) =>
+					s === "" || (DOTFILES_INSTALL_PATTERN.test(s) && !s.includes("..") && !s.includes("//")),
+				{
+					message: "installScript must be a relative path with no '..', no leading '/', no '//'",
+				},
+			)
+			.nullable()
+			.optional(),
+	})
+	.strict();
+
+// #191 — agent config seed. Two optional file bodies that the
+// bootstrap stage writes verbatim into `~/.claude/`. Validation
+// is shape-only here: `settings`, when set, must parse as JSON
+// (Zod refine), since writing invalid JSON to settings.json would
+// crash the agent on next start with no signal that the operator
+// pasted invalid content. `claudeMd` is free markdown.
+const AgentSeedSpec = z
+	.object({
+		settings: z
+			.string()
+			.max(MAX_AGENT_SEED_BYTES)
+			.refine(
+				(s) => {
+					if (s === "") return true; // empty = "don't write the file"
+					try {
+						JSON.parse(s);
+						return true;
+					} catch {
+						return false;
+					}
+				},
+				{ message: "settings must be valid JSON" },
+			)
+			.nullable()
+			.optional(),
+		claudeMd: z.string().max(MAX_AGENT_SEED_BYTES).nullable().optional(),
+	})
+	.strict();
+
 // Minimal placeholder for #190. Topology (subdomain vs path, auth gate)
 // lands with the port-exposure child.
 const PortSpec = z
@@ -331,6 +445,15 @@ export const SessionConfigSchema = z
 		// having to also defend against `""`.
 		postCreateCmd: z.string().min(1).max(MAX_HOOK_LEN).optional(),
 		postStartCmd: z.string().min(1).max(MAX_HOOK_LEN).optional(),
+		// #191 — git identity / dotfiles / agent config seed. All three
+		// are independent and skippable; the bootstrap runner walks each
+		// stage in declared order and runs only the configured ones.
+		// `null` is the wire-shape signal for "explicitly not configured"
+		// and is treated identically to omission on persistence (both
+		// rehydrate to `undefined`).
+		gitIdentity: GitIdentitySpec.nullable().optional(),
+		dotfiles: DotfilesSpec.nullable().optional(),
+		agentSeed: AgentSeedSpec.nullable().optional(),
 		// #190 — populated by the ports form
 		ports: z.array(PortSpec).max(MAX_PORTS).optional(),
 		// #186 — typed entry list. `plain` values stored verbatim;
@@ -344,6 +467,9 @@ export const SessionConfigSchema = z
 export type SessionConfig = z.infer<typeof SessionConfigSchema>;
 export type RepoSpecInput = z.infer<typeof RepoSpec>;
 export type AuthInput = z.infer<typeof WireAuthSpec>;
+export type GitIdentityInput = z.infer<typeof GitIdentitySpec>;
+export type DotfilesInput = z.infer<typeof DotfilesSpec>;
+export type AgentSeedInput = z.infer<typeof AgentSeedSpec>;
 
 /** Storage shape for the `auth` blob — same `{ ciphertext, iv, tag }`
  *  envelope as encrypted env-var entries. Mirrors the wire shape's
@@ -764,6 +890,9 @@ interface SessionConfigRow {
 	ports_json: string | null;
 	env_vars_json: string | null;
 	auth_json: string | null;
+	git_identity_json: string | null;
+	dotfiles_json: string | null;
+	agent_seed_json: string | null;
 	bootstrapped_at: string | null;
 }
 
@@ -783,6 +912,21 @@ function rowToRecord(row: SessionConfigRow): SessionConfigRecord {
 		ports: parseJsonColumn<SessionConfig["ports"]>(row.session_id, "ports_json", row.ports_json),
 		envVars: parseEnvVarsColumn(row.session_id, row.env_vars_json),
 		auth: parseAuthColumn(row.session_id, row.auth_json),
+		gitIdentity: parseJsonColumn<SessionConfig["gitIdentity"]>(
+			row.session_id,
+			"git_identity_json",
+			row.git_identity_json,
+		),
+		dotfiles: parseJsonColumn<SessionConfig["dotfiles"]>(
+			row.session_id,
+			"dotfiles_json",
+			row.dotfiles_json,
+		),
+		agentSeed: parseJsonColumn<SessionConfig["agentSeed"]>(
+			row.session_id,
+			"agent_seed_json",
+			row.agent_seed_json,
+		),
 		bootstrappedAt: row.bootstrapped_at ? parseD1Utc(row.bootstrapped_at) : null,
 	};
 }
@@ -1097,8 +1241,9 @@ export async function persistSessionConfig(
 		`INSERT INTO session_configs
                         (session_id, workspace_strategy, cpu_limit, mem_limit,
                          idle_ttl_seconds, post_create_cmd, post_start_cmd,
-                         repos_json, ports_json, env_vars_json, auth_json)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         repos_json, ports_json, env_vars_json, auth_json,
+                         git_identity_json, dotfiles_json, agent_seed_json)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(session_id) DO UPDATE SET
                         workspace_strategy = excluded.workspace_strategy,
                         cpu_limit          = excluded.cpu_limit,
@@ -1109,7 +1254,10 @@ export async function persistSessionConfig(
                         repos_json         = excluded.repos_json,
                         ports_json         = excluded.ports_json,
                         env_vars_json      = excluded.env_vars_json,
-                        auth_json          = excluded.auth_json`,
+                        auth_json          = excluded.auth_json,
+                        git_identity_json  = excluded.git_identity_json,
+                        dotfiles_json      = excluded.dotfiles_json,
+                        agent_seed_json    = excluded.agent_seed_json`,
 		[
 			sessionId,
 			config.workspaceStrategy ?? null,
@@ -1131,6 +1279,9 @@ export async function persistSessionConfig(
 			jsonOrNull(config.ports),
 			jsonOrNull(config.envVars),
 			jsonOrNull(config.auth),
+			jsonOrNull(config.gitIdentity),
+			jsonOrNull(config.dotfiles),
+			jsonOrNull(config.agentSeed),
 		],
 	);
 }

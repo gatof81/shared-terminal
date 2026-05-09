@@ -199,6 +199,9 @@ export async function migrateDb(): Promise<void> {
                         ports_json          TEXT,
                         env_vars_json       TEXT,
                         auth_json           TEXT,
+                        git_identity_json   TEXT,
+                        dotfiles_json       TEXT,
+                        agent_seed_json     TEXT,
                         bootstrapped_at     TEXT,
                         created_at          TEXT NOT NULL DEFAULT (datetime('now')),
                         FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
@@ -234,6 +237,19 @@ export async function migrateDb(): Promise<void> {
 	} catch (err) {
 		if (!/duplicate column name|already exists/i.test((err as Error).message)) {
 			throw err;
+		}
+	}
+	// #191 PR 191a: lifecycle-hook columns on `session_configs` —
+	// gitIdentity / dotfiles / agentSeed JSON blobs. Same idiom as
+	// auth_json above. The bootstrap stages that consume these land
+	// in 191b; this PR only adds the schema + storage.
+	for (const column of ["git_identity_json", "dotfiles_json", "agent_seed_json"] as const) {
+		try {
+			await d1Query(`ALTER TABLE session_configs ADD COLUMN ${column} TEXT`);
+		} catch (err) {
+			if (!/duplicate column name|already exists/i.test((err as Error).message)) {
+				throw err;
+			}
 		}
 	}
 	// Auto-promote the earliest-created user when no admin exists yet.
