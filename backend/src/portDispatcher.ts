@@ -334,7 +334,19 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 					res.end(bodies[result.status]);
 					return;
 				}
-				proxy.web(req, res, { target: `http://127.0.0.1:${result.hostPort}` });
+				// `changeOrigin: true` rewrites the outbound `Host`
+				// header to `127.0.0.1:<host_port>` so the container
+				// app receives a hostname that matches its bound
+				// address. Vite dev server's `allowedHosts` (and
+				// similar host-based routers) reject the original
+				// `p<port>-<sid>.tunnel.example.com` value with
+				// "Invalid Host header" otherwise, breaking the
+				// most common public-port use case (running a dev
+				// server inside the session). PR #223 round 9 NIT.
+				proxy.web(req, res, {
+					target: `http://127.0.0.1:${result.hostPort}`,
+					changeOrigin: true,
+				});
 			})
 			.catch((err) => {
 				logger.error(`[port-dispatcher] dispatch failed: ${(err as Error).message}`);
@@ -401,7 +413,13 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 					endUpgradeSocketWithReply(socket, `HTTP/1.1 ${result.status} ${reason}\r\n\r\n`);
 					return;
 				}
-				proxy.ws(req, socket, head, { target: `http://127.0.0.1:${result.hostPort}` });
+				// Same Host-rewrite rationale as the HTTP path above —
+				// container WS handlers (Vite HMR, etc.) host-check
+				// the upgrade request and reject mismatches.
+				proxy.ws(req, socket, head, {
+					target: `http://127.0.0.1:${result.hostPort}`,
+					changeOrigin: true,
+				});
 			})
 			.catch((err) => {
 				logger.error(`[port-dispatcher] WS dispatch failed: ${(err as Error).message}`);
@@ -440,9 +458,15 @@ export function validatePortProxyBaseDomain(raw: string | undefined): string | n
 	// `-tunnel.example.com`, which a Tunnel ingress would silently fail
 	// to match — operator sees a dispatcher that never fires instead of
 	// a startup warning. Tightened per PR #223 round 3 NIT.
+	//
+	// Note: the regex's required `[a-z0-9]` first character already
+	// excludes a leading dot AND makes `..` impossible (any dot must
+	// be followed by another alphanumeric). The earlier additional
+	// `!v.includes("..") && !v.startsWith(".")` guards were redundant
+	// dead-code; dropped per PR #223 round 9 NIT.
 	const labelStrict = /[a-z0-9]([a-z0-9-]*[a-z0-9])?/.source;
 	const domainStrict = new RegExp(`^${labelStrict}(\\.${labelStrict})+$`);
-	const ok = domainStrict.test(v) && !v.includes("..") && !v.startsWith(".");
+	const ok = domainStrict.test(v);
 	if (!ok) {
 		logger.warn(
 			`[port-dispatcher] PORT_PROXY_BASE_DOMAIN=${JSON.stringify(raw)} is malformed; ` +

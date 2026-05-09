@@ -151,6 +151,16 @@ export function createWsUpgradeRateLimiter(cfg: WsUpgradeRateLimitConfig): WsUpg
 			const currentTime = now();
 			const bucket = buckets.get(key);
 			if (!bucket || bucket.resetAt <= currentTime) {
+				// `Map.set` on an existing key preserves its original
+				// insertion position — `enforceCap` walks `keys()` in
+				// insertion order, so a long-stale-but-just-reset
+				// bucket would otherwise be evicted as if it were
+				// still the oldest. Delete-then-set restores recency
+				// so the eviction queue reflects actual freshness.
+				// Functionally harmless either way (eviction would
+				// just trigger another reset), but the ordering
+				// matches its stated intent. PR #223 round 9 NIT.
+				if (bucket) buckets.delete(key);
 				buckets.set(key, { count: 1, resetAt: currentTime + cfg.windowMs });
 				enforceCap(currentTime);
 				return true;

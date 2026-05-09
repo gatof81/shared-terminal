@@ -280,7 +280,13 @@ describe("createPortDispatcher (HTTP middleware)", () => {
 		);
 		await new Promise((r) => setImmediate(r));
 		expect(webSpy).toHaveBeenCalledTimes(1);
-		expect(webSpy.mock.calls[0]?.[2]).toEqual({ target: "http://127.0.0.1:32768" });
+		expect(webSpy.mock.calls[0]?.[2]).toEqual({
+			target: "http://127.0.0.1:32768",
+			// `changeOrigin: true` rewrites the outbound Host header
+			// so Vite-style host-checked container apps don't reject
+			// the request. PR #223 round 9 NIT.
+			changeOrigin: true,
+		});
 	});
 
 	it("401s a private port with no cookie", async () => {
@@ -330,7 +336,13 @@ describe("createPortDispatcher (HTTP middleware)", () => {
 		);
 		await new Promise((r) => setImmediate(r));
 		expect(webSpy).toHaveBeenCalledTimes(1);
-		expect(webSpy.mock.calls[0]?.[2]).toEqual({ target: "http://127.0.0.1:32768" });
+		expect(webSpy.mock.calls[0]?.[2]).toEqual({
+			target: "http://127.0.0.1:32768",
+			// `changeOrigin: true` rewrites the outbound Host header
+			// so Vite-style host-checked container apps don't reject
+			// the request. PR #223 round 9 NIT.
+			changeOrigin: true,
+		});
 		expect(res.statusCode).toBe(200);
 	});
 
@@ -465,7 +477,10 @@ describe("createPortDispatcher (WS upgrade)", () => {
 		);
 		await new Promise((r) => setImmediate(r));
 		expect(wsSpy).toHaveBeenCalledTimes(1);
-		expect(wsSpy.mock.calls[0]?.[3]).toEqual({ target: "http://127.0.0.1:32768" });
+		expect(wsSpy.mock.calls[0]?.[3]).toEqual({
+			target: "http://127.0.0.1:32768",
+			changeOrigin: true,
+		});
 	});
 
 	it("404s a missing target on WS too", async () => {
