@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
 	createPortDispatcher,
 	extractAuthToken,
+	handleProxyError,
 	makeHostParser,
 	type ParsedHost,
 	validatePortProxyBaseDomain,
@@ -628,5 +629,76 @@ describe("createPortDispatcher (WS upgrade)", () => {
 		// so the limiter's `skip` is always true.
 		const disabled = createPortDispatcher({ baseDomain: null, corsOrigins: [] });
 		expect(disabled.isDispatcherHost(`p3000-${SID}.tunnel.example.com`)).toBe(false);
+	});
+});
+
+// ── handleProxyError ─────────────────────────────────────────────────────
+
+// PR #223 round 5 NIT: the http-proxy `error` handler had no direct
+// coverage. The dispatcher tests stubbed out the proxy entirely, so
+// the headersSent guard / WS-vs-HTTP shape detection / body shape
+// were all untested. A future refactor that dropped the guard would
+// pass every existing test.
+
+describe("handleProxyError", () => {
+	function fakeReq(): IncomingMessage {
+		return { headers: {}, method: "GET", url: "/" } as unknown as IncomingMessage;
+	}
+
+	it("emits 502 + body on a fresh ServerResponse (headersSent=false)", () => {
+		const calls: { writeHead?: [number, object]; end?: string; destroyed?: boolean } = {};
+		const res = {
+			headersSent: false,
+			writeHead(status: number, headers: object) {
+				calls.writeHead = [status, headers];
+			},
+			end(body: string) {
+				calls.end = body;
+			},
+			destroy() {
+				calls.destroyed = true;
+			},
+		} as unknown as ServerResponse;
+		handleProxyError(new Error("boom"), fakeReq(), res);
+		expect(calls.writeHead?.[0]).toBe(502);
+		expect(calls.end).toBe("Bad Gateway: target unreachable");
+		expect(calls.destroyed).toBeUndefined();
+	});
+
+	it("destroys when headers are already sent (mid-stream proxy failure)", () => {
+		const calls: { writeHead?: number; end?: string; destroyed?: boolean } = {};
+		const res = {
+			headersSent: true,
+			writeHead(status: number) {
+				calls.writeHead = status;
+			},
+			end(body: string) {
+				calls.end = body;
+			},
+			destroy() {
+				calls.destroyed = true;
+			},
+		} as unknown as ServerResponse;
+		handleProxyError(new Error("boom"), fakeReq(), res);
+		// Mid-stream: don't double-write a status line, don't append
+		// "Bad Gateway: …" after the legitimate body. Just terminate
+		// the partial response.
+		expect(calls.writeHead).toBeUndefined();
+		expect(calls.end).toBeUndefined();
+		expect(calls.destroyed).toBe(true);
+	});
+
+	it("destroys a raw socket on WS failure (no writeHead, just teardown)", () => {
+		// http-proxy's `error` event hands a Duplex socket (not a
+		// ServerResponse) when the failure happened on a `proxy.ws()`
+		// call. Branch on `writeHead` shape detection.
+		const calls: { destroyed?: boolean } = {};
+		const socket = {
+			destroy() {
+				calls.destroyed = true;
+			},
+		} as unknown as Duplex;
+		handleProxyError(new Error("ws boom"), fakeReq(), socket);
+		expect(calls.destroyed).toBe(true);
 	});
 });

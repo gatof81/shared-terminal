@@ -28,7 +28,7 @@ import { validateSecretsKey } from "./secrets.js";
 import { SessionManager } from "./sessionManager.js";
 import { parseTrustProxy, TrustProxyError, warnIfProductionMisconfigured } from "./trustProxy.js";
 import { endUpgradeSocketWithReply, handleWsConnection, startWsHeartbeat } from "./wsHandler.js";
-import { createWsUpgradeRateLimiter } from "./wsUpgradeRateLimit.js";
+import { createWsUpgradeRateLimiter, resolveClientIp } from "./wsUpgradeRateLimit.js";
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -264,13 +264,26 @@ server.on("upgrade", (req, socket, head) => {
 		// `socket` is typed as `Duplex` in the upgrade event but at
 		// runtime is always a `net.Socket` (or TLSSocket, which
 		// extends it). `remoteAddress` lives on net.Socket; cast
-		// once to read it. Falls back to undefined for the
-		// theoretical case where the socket was destroyed before
-		// reaching here, which the limiter treats as fail-open.
+		// once to read it. `resolveClientIp` mirrors Express's `req.ip`
+		// resolution under `trust proxy` so behind a Cloudflare Tunnel
+		// we key on the original client (X-Forwarded-For[0]) instead
+		// of the Tunnel's shared egress IP — without this the per-IP
+		// budget collapses to a single shared bucket and one user's
+		// reconnect storm locks everyone out. PR #223 round 5
+		// SHOULD-FIX.
 		const remote = (socket as { remoteAddress?: string }).remoteAddress;
-		const allowed = dispatcherWsUpgradeLimiter.attempt(remote);
+		const clientIp = resolveClientIp(req.headers["x-forwarded-for"], remote, trustProxyValue);
+		const allowed = dispatcherWsUpgradeLimiter.attempt(clientIp);
 		if (!allowed) {
-			endUpgradeSocketWithReply(socket, "HTTP/1.1 429 Too Many Requests\r\n\r\n");
+			// `Retry-After: 60` matches the limiter's window so a
+			// compliant browser backs off automatically instead of
+			// burning the next window's budget on immediate reconnect.
+			// `Content-Length: 0` keeps the response framed so curl /
+			// wscat report 429 cleanly. PR #223 round 5 SHOULD-FIX.
+			endUpgradeSocketWithReply(
+				socket,
+				"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\nContent-Length: 0\r\n\r\n",
+			);
 			return;
 		}
 	}

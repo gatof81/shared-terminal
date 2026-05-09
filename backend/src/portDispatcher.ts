@@ -123,6 +123,43 @@ export function extractAuthToken(cookieHeader: string | undefined): string | nul
  * mid-request, refused connection on the host port) returns 502 to the
  * client instead of crashing the backend with an unhandled error event.
  */
+/**
+ * `proxy.on("error")` handler. Extracted (and exported) so unit tests
+ * can exercise the `headersSent` branches and the WS-vs-HTTP shape
+ * detection directly — the in-flight `proxy.web()` path is awkward to
+ * fault-inject without binding real sockets. PR #223 round 5 NIT.
+ *
+ * `res` is typed loosely (the http-proxy `error` event hands either a
+ * ServerResponse or a Duplex socket depending on whether the failure
+ * was on a `web()` or a `ws()` call). Branch on `writeHead` to pick
+ * the right teardown shape.
+ */
+export function handleProxyError(
+	err: Error,
+	_req: IncomingMessage,
+	res: ServerResponse | Duplex,
+): void {
+	const isHttpRes = typeof (res as ServerResponse).writeHead === "function";
+	logger.warn(`[port-dispatcher] proxy error: ${err.message}`);
+	if (isHttpRes) {
+		const httpRes = res as ServerResponse;
+		// `end()` lives inside the headersSent guard for symmetry
+		// with `writeHead`. After bytes have already been streamed
+		// to the client a follow-up `end("Bad Gateway: …")` would
+		// emit the error string after the legitimate body —
+		// truncating the proxy stream is the right call (just
+		// destroy). PR #223 round 1 NIT.
+		if (!httpRes.headersSent) {
+			httpRes.writeHead(502, { "Content-Type": "text/plain" });
+			httpRes.end("Bad Gateway: target unreachable");
+		} else {
+			httpRes.destroy();
+		}
+	} else {
+		(res as Duplex).destroy();
+	}
+}
+
 function buildProxy(): httpProxy {
 	const proxy = httpProxy.createProxyServer({
 		// `xfwd: true` adds X-Forwarded-{For,Host,Proto,Port} headers
@@ -146,30 +183,7 @@ function buildProxy(): httpProxy {
 		// socket lifetime).
 		proxyTimeout: 30_000,
 	});
-	proxy.on("error", (err, _req, res) => {
-		// res can be either a ServerResponse or a Socket (for WS).
-		// ServerResponse has `headersSent` + `writeHead`; a raw socket
-		// has `destroy`. Branch on shape to emit the right thing.
-		const isHttpRes = typeof (res as ServerResponse).writeHead === "function";
-		logger.warn(`[port-dispatcher] proxy error: ${(err as Error).message}`);
-		if (isHttpRes) {
-			const httpRes = res as ServerResponse;
-			// `end()` lives inside the headersSent guard for symmetry
-			// with `writeHead`. After bytes have already been streamed
-			// to the client a follow-up `end("Bad Gateway: …")` would
-			// emit the error string after the legitimate body —
-			// truncating the proxy stream is the right call (just
-			// destroy). PR #223 round 1 NIT.
-			if (!httpRes.headersSent) {
-				httpRes.writeHead(502, { "Content-Type": "text/plain" });
-				httpRes.end("Bad Gateway: target unreachable");
-			} else {
-				httpRes.destroy();
-			}
-		} else {
-			(res as Duplex).destroy();
-		}
-	});
+	proxy.on("error", handleProxyError);
 	return proxy;
 }
 

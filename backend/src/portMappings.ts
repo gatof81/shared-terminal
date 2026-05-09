@@ -68,7 +68,17 @@ export async function setPortMappings(sessionId: string, mappings: PortMapping[]
 	}
 }
 
-/** Read all mappings for `sessionId`. Empty array when no row exists. */
+/**
+ * Read all mappings for `sessionId`. Empty array when no row exists.
+ *
+ * Currently exercised only by the test suite — the dispatcher's hot
+ * path uses `lookupDispatchTarget` (single-row JOIN). 190d will wire
+ * a `GET /api/sessions/:id/ports` endpoint that calls this so the
+ * frontend can render the per-port URL + copy-to-clipboard list on
+ * the session detail view (per the issue spec). Kept exported now to
+ * avoid the back-and-forth of un-exporting and re-exporting in the
+ * adjacent PR. PR #223 round 5 NIT.
+ */
 export async function getPortMappings(sessionId: string): Promise<PortMapping[]> {
 	const result = await d1Query<{ container_port: number; host_port: number; is_public: number }>(
 		"SELECT container_port, host_port, is_public FROM sessions_port_mappings WHERE session_id = ? ORDER BY container_port",

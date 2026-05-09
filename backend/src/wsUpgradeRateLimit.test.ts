@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createWsUpgradeRateLimiter } from "./wsUpgradeRateLimit.js";
+import { createWsUpgradeRateLimiter, resolveClientIp } from "./wsUpgradeRateLimit.js";
 
 describe("createWsUpgradeRateLimiter", () => {
 	function makeLimiter(opts?: { windowMs?: number; max?: number; startTime?: number }) {
@@ -66,35 +66,91 @@ describe("createWsUpgradeRateLimiter", () => {
 		expect(limiter.attempt(undefined)).toBe(true);
 	});
 
-	// At ~1024 buckets the limiter prunes expired entries. Test that
-	// the prune doesn't drop in-window buckets — only expired ones.
-	it("prune at the threshold preserves in-window buckets", () => {
+	it("expired-bucket prune at the threshold avoids eviction (cheap path wins)", () => {
+		// PR #223 round 5: the cap-eviction path is the fallback;
+		// when buckets ARE expired, plain prune handles it without
+		// touching in-window data. This pins that ordering — the
+		// `enforceCap` cheap path mustn't accidentally evict
+		// in-window buckets when a prune would suffice.
 		const { limiter, advance } = makeLimiter({ max: 1, windowMs: 60_000 });
-		// Seed with 1024 distinct IPs at t=0; their buckets all
-		// expire at t=60_000.
-		for (let i = 0; i < 1024; i++) {
-			limiter.attempt(`10.0.${Math.floor(i / 256)}.${i % 256}`);
-		}
-		// Half the window passes — original buckets are still in
-		// flight. A 1025th distinct IP triggers prune; the new
-		// bucket survives, the old ones do too (resetAt > now).
-		advance(30_000);
-		expect(limiter.attempt("99.99.99.99")).toBe(true);
-		// The original IP should still be at-budget (not reset).
-		expect(limiter.attempt("10.0.0.0")).toBe(false);
-	});
-
-	it("prune at the threshold drops expired buckets", () => {
-		const { limiter, advance } = makeLimiter({ max: 1, windowMs: 60_000 });
-		// Seed 1024 IPs at t=0.
+		// Seed 1024 IPs at t=0 (these all expire at t=60_000).
 		for (let i = 0; i < 1024; i++) {
 			limiter.attempt(`10.0.${Math.floor(i / 256)}.${i % 256}`);
 		}
 		// Advance past the window — every original bucket has
-		// expired. The 1025th attempt triggers prune, which clears
-		// them, and the original IP gets a fresh budget.
+		// expired. The 1025th attempt should trigger prune (which
+		// clears them) NOT eviction.
 		advance(60_001);
 		expect(limiter.attempt("99.99.99.99")).toBe(true);
+		// All 1024 originals are gone and the cap is well below
+		// the threshold again. A cycled-back IP gets a fresh
+		// budget — same as if the limiter had never seen it.
 		expect(limiter.attempt("10.0.0.0")).toBe(true);
+	});
+
+	// PR #223 round 5 SHOULD-FIX: many-distinct-IP flood within a
+	// single window. Every bucket is in-window so prune() does
+	// nothing — the cap-eviction path drops the oldest 25 % of
+	// entries to keep memory bounded.
+	it("evicts the oldest 25% when the map is over-cap and no buckets are expired", () => {
+		const { limiter } = makeLimiter({ max: 1, windowMs: 60_000 });
+		// Fill exactly to MAX_BUCKETS (1024). The 1025th attempt
+		// trips eviction.
+		for (let i = 0; i < 1024; i++) {
+			limiter.attempt(`10.0.${Math.floor(i / 256)}.${i % 256}`);
+		}
+		// All buckets at-budget; the next attempt for any of these
+		// IPs returns false.
+		expect(limiter.attempt("10.0.0.0")).toBe(false);
+		// Now flood with another 1024 distinct IPs — each triggers
+		// `enforceCap`, which evicts the oldest. After ~256 new
+		// arrivals, the original "10.0.0.0" bucket should be
+		// evicted (oldest insertion-order). A subsequent attempt
+		// for "10.0.0.0" gets a fresh budget back.
+		for (let i = 0; i < 256; i++) {
+			limiter.attempt(`192.168.${Math.floor(i / 256)}.${i % 256}`);
+		}
+		// "10.0.0.0" was evicted in the first 25% drop and
+		// re-allocated when its key reappeared, so it now has a
+		// fresh budget.
+		expect(limiter.attempt("10.0.0.0")).toBe(true);
+	});
+});
+
+// ── resolveClientIp ──────────────────────────────────────────────────────
+
+describe("resolveClientIp", () => {
+	it("uses remoteAddress when trust proxy is unset", () => {
+		expect(resolveClientIp("203.0.113.5", "1.2.3.4", undefined)).toBe("1.2.3.4");
+	});
+
+	it("uses remoteAddress when trust proxy is 0 / false / '0'", () => {
+		expect(resolveClientIp("203.0.113.5", "1.2.3.4", 0)).toBe("1.2.3.4");
+		expect(resolveClientIp("203.0.113.5", "1.2.3.4", false)).toBe("1.2.3.4");
+		expect(resolveClientIp("203.0.113.5", "1.2.3.4", "0")).toBe("1.2.3.4");
+	});
+
+	it("uses XFF[0] when trust proxy is enabled (Cloudflare Tunnel shape)", () => {
+		expect(resolveClientIp("203.0.113.5", "1.2.3.4", 1)).toBe("203.0.113.5");
+		expect(resolveClientIp("203.0.113.5, 198.51.100.7", "1.2.3.4", 1)).toBe("203.0.113.5");
+	});
+
+	it("trims whitespace from the parsed XFF entry", () => {
+		expect(resolveClientIp("  203.0.113.5  , 198.51.100.7", "1.2.3.4", 1)).toBe("203.0.113.5");
+	});
+
+	it("falls back to remoteAddress when XFF is empty / whitespace", () => {
+		expect(resolveClientIp("", "1.2.3.4", 1)).toBe("1.2.3.4");
+		expect(resolveClientIp("   ", "1.2.3.4", 1)).toBe("1.2.3.4");
+		expect(resolveClientIp(undefined, "1.2.3.4", 1)).toBe("1.2.3.4");
+	});
+
+	it("handles array-shaped XFF (rare but Node sometimes emits one)", () => {
+		expect(resolveClientIp(["203.0.113.5", "ignored"], "1.2.3.4", 1)).toBe("203.0.113.5");
+	});
+
+	it("returns undefined when both XFF and remoteAddress are absent", () => {
+		expect(resolveClientIp(undefined, undefined, 1)).toBeUndefined();
+		expect(resolveClientIp(undefined, undefined, undefined)).toBeUndefined();
 	});
 });
