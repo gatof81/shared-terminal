@@ -37,6 +37,10 @@ Backend refuses to start without `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`
 
 `WORKSPACE_ROOT` (default `/var/shared-terminal/workspaces`) must exist on the host and be writable by the backend — each session gets a `<WORKSPACE_ROOT>/<sessionId>` bind mount.
 
+`TRUST_PROXY` should be set to the integer hop count behind the front-most proxy (typically `1` for Cloudflare Tunnel). Refuses `true` because Express in that mode takes the leftmost (attacker-controlled) `X-Forwarded-For` entry, defeating per-IP rate limiting. Unset is fine for local dev (req.ip = socket address).
+
+`PORT_PROXY_BASE_DOMAIN` is the optional base for the per-session-port reverse proxy (#190). When set, hosts of the form `p<container>-<sessionId>.<base>` are diverted to the dispatcher; when unset, port exposure is silently disabled (so dev/local without a Tunnel keeps working). Pair with `COOKIE_DOMAIN` set to a parent shared by the API hostname and the dispatcher base, otherwise the JWT cookie is host-only and private-port auth structurally fails. Boot logs warn loudly when one is set without the other.
+
 The frontend needs `VITE_API_URL` at build time (Cloudflare Pages env var) so `vite.config.ts` can rewrite the CSP meta tag to allow connections back to the backend.
 
 ## Architecture
@@ -71,6 +75,32 @@ Multiple browser tabs attaching to the same session share the same tmux exec (ea
 ### Delete semantics
 
 `DELETE /api/sessions/:id` is a **soft delete** by default: container is killed, row flips to `status=terminated`, workspace files are preserved so the user can later `POST /start` to respawn. Pass `?hard=true` to also purge the workspace dir and drop the row. `purgeWorkspace` refuses any path that does not resolve under `WORKSPACE_ROOT`.
+
+### Port-exposure dispatcher (#190)
+
+Sessions can declare ports under `config.ports[]`. `DockerManager.spawn()` passes `-p 0:<container>` per declared port, reads the kernel-assigned host port back via `inspect()`, and persists it to `sessions_port_mappings` (`{ session_id, container_port, host_port, is_public }`). `allowPrivilegedPorts: true` re-grants exactly `CAP_NET_BIND_SERVICE` (and only that capability) on `docker run`. The mapping table is rewritten on every container start (spawn, startContainer Case-2, reconcile) and cleared on stop / kill / hard-delete via the `skipIdleBump`-style `forget` callback path.
+
+`portDispatcher.ts` is an Express middleware + WS-upgrade handler that intercepts requests whose Host header parses as `p<port>-<sessionId>.<PORT_PROXY_BASE_DOMAIN>`, looks up the runtime mapping via `lookupDispatchTarget` (single JOIN of `sessions_port_mappings` ⋈ `sessions WHERE status='running'`), and reverse-proxies to `127.0.0.1:<host_port>` via `http-proxy`. Auth gate: `public: false` requires the same `st_token` cookie + ownership the rest of the app uses; `public: true` skips auth (webhook / OAuth-callback shape). Both HTTP and WS paths run an `isAllowedWsOrigin` CSWSH/CSRF check before `authorize()` so a cross-origin browser request from `evil.com` can't ride the user's `SameSite=None` cookie. The dispatcher mounts BEFORE `express.json` / `cookieParser` / CORS so the proxied body stream isn't consumed and CORS isn't overlaid on the proxied app's response.
+
+Defence-in-depth around the proxy: `proxyTimeout: 30_000` (no fd-leak from a stuck container), explicit `followRedirects: false` (a 3xx from the container app must not be chased from the backend's network perspective), `changeOrigin: true` (rewrites the outbound Host so Vite-style `allowedHosts`-checked apps don't 400), and a per-IP rate limiter on both HTTP (`express-rate-limit`, 300/min) and WS upgrades (custom in-memory fixed-window limiter, 60/min, `wsUpgradeRateLimit.ts`). The WS limiter keys on `resolveClientIp(xff, remoteAddr, trustProxyValue)` which mirrors proxy-addr's numeric-trust algorithm — peel `trustProxy` entries from the right of `[...XFF, remoteAddress]` — so behind a Tunnel the limiter keys on the original client, not the Tunnel's shared egress IP.
+
+### Idle auto-stop sweeper (#194)
+
+`idleSweeper.ts` is a process-local in-memory `Map<sessionId, lastActivityAt>` swept every 60 s. For each session whose status is `running` and whose `session_configs.idle_ttl_seconds` is non-null, sessions whose last bump exceeds the TTL get a soft-stop (same code path as `POST /stop`). The boot path (`index.ts`) seeds `now()` for every running session via `init(...)` so the first sweep doesn't reap a session whose users haven't reconnected yet (the previous backend's bumps are gone).
+
+Activity sources: every WS byte (the `outputListener` closure, the input message handler, resize events) and every authed REST hit under `/api/sessions/:id`. The REST bump is hooked on `res.on("finish")` and gated on `res.statusCode < 400` so a foreign-session probe (`GET /sessions/<not-mine>`) gets its 403 from `assertOwnership` BEFORE the bump fires — without that gate, any authed user could keep someone else's session alive by hitting their id in a loop. Stop / kill / hard-delete handlers set `res.locals.skipIdleBump = true` and call `idleSweeper.forget(sessionId)`; the bump-middleware's `finish` listener checks the flag and skips, otherwise the bump would fire AFTER the synchronous `forget` and silently re-add the entry.
+
+The TTL boundary is inclusive (`idle <= ttl` stays alive) so a session whose idle exactly matches the TTL gets one more window. Per-row stop failures are isolated (one stuck container doesn't stall the sweep), and sweep errors are log-and-continue at both layers so a transient D1 hiccup doesn't kill the timer.
+
+### Templates (#195)
+
+Per-user reusable session-config presets. `templates` D1 table (`id, owner_user_id, name, description, config JSON, created_at, updated_at`) with a per-user count cap (`MAX_TEMPLATES_PER_USER = 100`). The `config` column stores raw JSON in the same shape as `session_configs` MINUS secret values: `secret`-typed env entries collapse to `secret-slot` markers, and `auth.pat` / `auth.ssh.privateKey` are dropped (only the auth-method declaration is preserved so the `Use template` flow knows to re-prompt).
+
+The route layer enforces this in two passes: `validateSessionConfig(body.config, { allowSecretSlots: true, allowMissingAuth: true })` accepts the template-shape config (slots are allowed, the `repo.auth: "pat"` declaration without a co-present `auth.pat` is allowed), then `assertTemplateConfigShape` rejects any live credential a misbehaving client tried to smuggle (`type: "secret"` envVars, `auth.pat`, `auth.ssh.privateKey`). The two-pass shape exists because the schema-level flag relaxes constraints in one direction (accept slots) while the route-level guard tightens in the other (reject plaintext) — neither direction alone would land the right wire-shape.
+
+Auth model: `getOwned(id, userId)` collapses missing + foreign-owned into a single `NotFoundError` (probe-attacker enumeration via status-code timing); `assertOwnership(id, userId)` distinguishes 404 from 403 for destructive paths (DELETE / PUT). The `update` SQL pins `WHERE id = ? AND owner_user_id = ?` as defence-in-depth even though `assertOwnership` is the gate. The list endpoint returns a `TemplateSummary` (no `config`) — full configs are fetched on demand via `GET /:id` to keep the templates-page list response small.
+
+Frontend strip + apply helpers (`api.ts`): `stripConfigForTemplate(config)` is the pure, non-destructive client-side scrub before save; `applyTemplateToForm` reverse-maps a stored config back into the form's in-memory state on `Use template`, with secret-slot rows collapsing to `type:"secret"` with empty values for the user to fill in. Resource units are converted via `memBytesToFormUnit` and `idleSecondsToFormUnit` so the user sees the same GiB / hours values they would have typed.
 
 ### Auth
 

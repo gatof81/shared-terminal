@@ -22,10 +22,10 @@ A self-hosted web-based terminal that runs on an always-on Linux server at home.
 - **Docker-isolated sessions** — each session runs in its own container with dev tools pre-installed
 - **Persistent sessions** — tmux inside each container keeps your terminal alive across disconnects
 - **Persistent workspaces** — each session gets a bind-mounted host directory at `/home/developer/workspace`
-- **JWT authentication** — secure login with bcrypt-hashed passwords
-- **Per-session environment variables** — configure API keys, secrets per project
+- **Configurable session creation** — per-session env vars (with `secret`-typed AES-256-GCM-encrypted entries), git repo clone (HTTPS / SSH, PAT / private-key auth, "replace workspace" mode), exposed ports (per-session subdomains via the dispatcher), lifecycle hooks (`postCreate`, `postStart`, dotfiles repo, agent-config seed, git identity), resource caps (CPU 0.25–8 cores, memory 256 MiB–16 GiB), idle auto-stop, and reusable named templates
+- **JWT auth via httpOnly cookie** — `Secure`+`SameSite=None` in production, no JS-readable token; bcrypt password hashing, invite-code-only registration after the bootstrap account, two-tier admin model
 - **Real terminal emulation** — xterm.js in the browser with 256-color support, mouse, resize
-- **Reconnect replay** — ring buffer replays recent output when you reconnect
+- **Reconnect replay** — `tmux capture-pane` snapshot is replayed on reconnect (color + cursor position preserved); a deterministic flush re-orders live bytes that arrived during the attach window so the on-the-wire sequence is `[replay][live]` with no interleave
 - **Cloudflare D1 storage** — serverless SQLite on Cloudflare; session metadata survives server restarts and is accessible from anywhere
 - **Docker Compose deployment** — one command to build and run the backend
 
@@ -366,38 +366,70 @@ Caveats:
 
 ## API Reference
 
+Auth is via the httpOnly cookie `st_token` set by `POST /api/auth/login` and `POST /api/auth/register`. JS cannot read the token. CSRF for state-changing JSON routes is handled by the CORS preflight + `Content-Type: application/json` requirement.
+
 ### Auth (public)
 
-| Method | Path               | Description           |
-| ------ | ------------------ | --------------------- |
-| GET    | /api/auth/status   | Check if setup needed |
-| POST   | /api/auth/register | Create account        |
-| POST   | /api/auth/login    | Get JWT token         |
+| Method | Path               | Description                                              |
+| ------ | ------------------ | -------------------------------------------------------- |
+| GET    | /api/auth/status   | First-visit setup probe + current auth + admin status    |
+| POST   | /api/auth/register | Create account (invite code required after first user)   |
+| POST   | /api/auth/login    | Set the auth cookie                                      |
+| POST   | /api/auth/logout   | Clear the auth cookie                                    |
 
-### Sessions (require `Authorization: Bearer <token>`)
+### Sessions (cookie-authed)
 
-| Method | Path                        | Description                                                     |
-| ------ | --------------------------- | --------------------------------------------------------------- |
-| POST   | /api/sessions               | Create session + Docker container                               |
-| GET    | /api/sessions               | List active sessions (append `?all=true` to include terminated) |
-| GET    | /api/sessions/:id           | Get session details                                             |
-| DELETE | /api/sessions/:id           | Soft delete (container killed, workspace kept, row→terminated)  |
-| DELETE | /api/sessions/:id?hard=true | Hard delete (also purge workspace dir + drop the D1 row)        |
-| POST   | /api/sessions/:id/stop      | Stop container (preservable)                                    |
-| POST   | /api/sessions/:id/start     | Restart or respawn stopped container                            |
-| PATCH  | /api/sessions/:id/env       | Update environment variables                                    |
+| Method | Path                          | Description                                                     |
+| ------ | ----------------------------- | --------------------------------------------------------------- |
+| POST   | /api/sessions                 | Create session + container; accepts `body.config` (see below)   |
+| GET    | /api/sessions                 | List sessions (append `?all=true` to include terminated)        |
+| GET    | /api/sessions/:id             | Get session details                                             |
+| DELETE | /api/sessions/:id             | Soft delete (container killed, workspace kept, row→terminated)  |
+| DELETE | /api/sessions/:id?hard=true   | Hard delete (also purge workspace dir + drop the D1 row)        |
+| POST   | /api/sessions/:id/stop        | Stop container (workspace preserved)                            |
+| POST   | /api/sessions/:id/start       | Restart or respawn stopped container                            |
+| PATCH  | /api/sessions/:id/env         | Update environment variables                                    |
+| GET    | /api/sessions/:id/tabs        | List tmux tabs for a session                                    |
+| POST   | /api/sessions/:id/tabs        | Create a tab                                                    |
+| DELETE | /api/sessions/:id/tabs/:tabId | Delete a tab                                                    |
+| POST   | /api/sessions/:id/files       | Multipart file upload into the per-session uploads dir          |
+
+`POST /api/sessions` accepts a typed `body.config` mirroring `SessionConfigSchema` in `backend/src/sessionConfig.ts`: `envVars` (typed entries with `plain` / `secret` discriminator), `repo` + `auth`, `ports[]` + `allowPrivilegedPorts`, `gitIdentity`, `dotfiles`, `agentSeed`, `postCreateCmd`, `postStartCmd`, `cpuLimit`, `memLimit`, `idleTtlSeconds`. Every field is optional; a bare `POST` (no `config`) creates a default session.
+
+### Templates (cookie-authed)
+
+| Method | Path                | Description                                                  |
+| ------ | ------------------- | ------------------------------------------------------------ |
+| POST   | /api/templates      | Create a template (config must be secret-stripped — see CLAUDE.md) |
+| GET    | /api/templates      | List the user's templates (summary shape, no config)         |
+| GET    | /api/templates/:id  | Get a template (full config)                                 |
+| PUT    | /api/templates/:id  | Update name / description / config (owner-gated)             |
+| DELETE | /api/templates/:id  | Delete a template (owner-gated)                              |
+
+### Invites (admin)
+
+| Method | Path                | Description                                                  |
+| ------ | ------------------- | ------------------------------------------------------------ |
+| POST   | /api/invites        | Mint a single-use invite code                                |
+| GET    | /api/invites        | List invite codes (admin sees all rows, not just their own)  |
+| DELETE | /api/invites/:code  | Revoke an unused invite code                                 |
 
 ### WebSocket
 
+Two channels, both cookie-authed (browser sends `st_token` automatically on the upgrade handshake to the cookie's domain). CSWSH defence is independent: `isAllowedWsOrigin` rejects unlisted origins before the handshake completes.
+
 ```
-ws://host/ws/sessions/:id
-Sec-WebSocket-Protocol: auth.bearer.<jwt>
+wss://host/ws/sessions/<sessionId>?tab=<tabId>     # terminal attach
+wss://host/ws/bootstrap/<sessionId>                # bootstrap pipeline live-tail
 ```
 
-The token may also be passed as `?token=<jwt>` as a fallback for proxies that strip the `Sec-WebSocket-Protocol` header.
+**Terminal — Client → Server:** `input`, `resize`
+**Terminal — Server → Client:** `output`, `status`, `error`
+**Bootstrap — Server → Client:** `output`, `done`, `fail`, `error`
 
-**Client → Server:** `input`, `resize`, `ping`
-**Server → Client:** `output`, `status`, `pong`, `error`
+### Port-exposure dispatcher
+
+When `PORT_PROXY_BASE_DOMAIN` is set, requests to `https://p<containerPort>-<sessionId>.<base>` are diverted from the API/WS routes to the per-session reverse proxy (see CLAUDE.md → "Port-exposure dispatcher"). Auth gate: `public: false` ports require the `st_token` cookie owned by the session's owner; `public: true` ports skip auth (webhook / OAuth-callback shape).
 
 ## Session Container
 
@@ -411,7 +443,7 @@ Each session runs in a Docker container based on `session-image/Dockerfile`:
 - **Terminal:** tmux with a session named `main`, 50k scrollback, mouse support
 - **User:** `developer` (UID 1000, unprivileged — no sudo, all Linux capabilities dropped, `no-new-privileges` set)
 - **Workspace:** `/home/developer/workspace` (bind-mounted from `<WORKSPACE_ROOT>/<sessionId>` on the host)
-- **Resources:** 2 GB RAM, 2 CPUs per container (configurable in `dockerManager.ts`)
+- **Resources:** Per-session caps come from `session_configs` (`cpu_limit` 0.25–8 cores, `mem_limit` 256 MiB–16 GiB, `idle_ttl_seconds` 60s–24h). Sessions created without explicit caps fall back to the `DEFAULT_NANO_CPUS` (2 cores) / `DEFAULT_MEMORY_BYTES` (2 GiB) constants in `dockerManager.ts`. Idle auto-stop is opt-in (omit `idleTtlSeconds` to disable).
 
 ## Connecting from VS Code
 
