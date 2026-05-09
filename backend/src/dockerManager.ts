@@ -848,9 +848,26 @@ export class DockerManager {
 			cmd: string[];
 			env?: Record<string, string>;
 			workingDir?: string;
+			/** Abort the in-flight exec by destroying the upstream
+			 *  stream. Used by #191 PR 191b's 10-min bootstrap cap.
+			 *  When the signal fires, the returned promise rejects
+			 *  with an `AbortError` so the runner routes the
+			 *  failure through its existing throw-path catch.
+			 *  Note: destroying the stream does NOT kill the
+			 *  in-container process — Docker has no "kill exec"
+			 *  API. The caller must kill the container itself in
+			 *  the timeout-failure path; the stream destroy here
+			 *  just lets the streamExec promise unblock quickly. */
+			signal?: AbortSignal;
 		},
 		onOutput?: (chunk: string) => void,
 	): Promise<{ exitCode: number }> {
+		// Pre-check: if already aborted, fail fast without burning a
+		// docker round-trip. Standard AbortSignal contract.
+		if (opts.signal?.aborted) {
+			throw new DOMException("aborted", "AbortError");
+		}
+
 		const meta = await this.sessions.getOrThrow(sessionId);
 		if (!meta.containerId) throw new Error("No container for this session");
 		const container = this.docker.getContainer(meta.containerId);
@@ -870,6 +887,16 @@ export class DockerManager {
 			WorkingDir: opts.workingDir ?? "/home/developer/workspace",
 		});
 		const stream = await exec.start({ hijack: false, stdin: false });
+
+		// Wire the abort signal: destroy the upstream stream when the
+		// signal fires so the resolve-on-end Promise below settles
+		// quickly. The stream emits `error` when destroyed, which
+		// rejects the promise; we then re-throw an AbortError so the
+		// caller's catch sees the standard contract.
+		const abortHandler = () => {
+			stream.destroy(new DOMException("aborted", "AbortError"));
+		};
+		opts.signal?.addEventListener("abort", abortHandler, { once: true });
 
 		// Demux frames as they arrive so `onOutput` fires per-chunk.
 		// `pending` accumulates across `data` events when a frame
@@ -901,11 +928,26 @@ export class DockerManager {
 		// `end` then `close`, but Dockerode streams can emit `close`
 		// without `end` on a dropped daemon connection. Promise spec
 		// silently drops the second resolve.
-		await new Promise<void>((resolve, reject) => {
-			stream.on("end", () => resolve());
-			stream.on("close", () => resolve());
-			stream.on("error", reject);
-		});
+		try {
+			await new Promise<void>((resolve, reject) => {
+				stream.on("end", () => resolve());
+				stream.on("close", () => resolve());
+				stream.on("error", reject);
+			});
+		} finally {
+			// Whether we resolved cleanly or threw, drop the abort
+			// listener so a late-firing signal doesn't try to destroy
+			// an already-closed stream.
+			opts.signal?.removeEventListener("abort", abortHandler);
+		}
+		// If the signal aborted mid-stream, surface AbortError up to
+		// the caller — don't pretend the exit code is meaningful.
+		// `info.ExitCode` would still be null here (process killed
+		// before docker recorded an exit) but the AbortError is the
+		// intent-carrying signal the runner needs.
+		if (opts.signal?.aborted) {
+			throw new DOMException("aborted", "AbortError");
+		}
 		const info = await exec.inspect();
 		// `info.ExitCode === null` is Docker's "the daemon hasn't
 		// recorded the process exit yet" state — a narrow window

@@ -214,11 +214,42 @@ describe("POST /sessions — async bootstrap dispatch (PR 185b2b)", () => {
 		expect(bootstrapStubs.runAsyncBootstrap.mock.calls[0]?.[1]).toEqual({
 			postCreateCmd: "npm install",
 			postStartCmd: "npm run dev",
-			// `hasRepo` lets the runner skip the getSessionConfig D1
-			// fetch on postCreate-only sessions (PR #214 round 2 NIT).
-			hasRepo: false,
+			// `hasBootstrapConfig` gates the getSessionConfig D1 fetch
+			// on postCreate-only sessions (PR #214 round 2 NIT,
+			// generalised in #191 PR 191b to cover all four
+			// config-driven stages).
+			hasBootstrapConfig: false,
 		});
 		expect(spies.runPostStart).not.toHaveBeenCalled();
+	});
+
+	// PR #218 round 2 NIT: pin `hasBootstrapConfig: true` for each of
+	// the new config-driven fields so a future route refactor (e.g. a
+	// `??` normalisation that maps undefined→null) can't silently
+	// break the gate.
+	it.each([
+		["repo", { url: "https://github.com/o/r", auth: "none" as const }],
+		["gitIdentity", { name: "Ada", email: "a@b.com" }],
+		["dotfiles", { url: "https://github.com/u/d.git" }],
+		["agentSeed", { claudeMd: "# notes" }],
+	])("computes hasBootstrapConfig=true when only %s is set", async (field, value) => {
+		const { sessions, docker } = makeFakes();
+		await spinUp(sessions, docker);
+
+		const res = await fetch(`${baseUrl}/api/sessions`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				name: "test",
+				config: { [field]: value },
+			}),
+		});
+		expect(res.status).toBe(201);
+		expect(bootstrapStubs.runAsyncBootstrap).toHaveBeenCalledTimes(1);
+		const cfgArg = bootstrapStubs.runAsyncBootstrap.mock.calls[0]?.[1] as {
+			hasBootstrapConfig?: boolean;
+		};
+		expect(cfgArg.hasBootstrapConfig).toBe(true);
 	});
 
 	it("returns 201 without bootstrapping flag and runs postStart inline when only postStartCmd is set", async () => {

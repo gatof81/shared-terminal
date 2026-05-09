@@ -19,12 +19,30 @@
  * the hook continues in the background.
  */
 
+import { runAgentSeed } from "./bootstrap/agentSeed.js";
 import { runCloneRepo } from "./bootstrap/cloneRepo.js";
+import { runDotfiles } from "./bootstrap/dotfiles.js";
+import { runGitIdentity } from "./bootstrap/gitIdentity.js";
 import { d1Query } from "./db.js";
 import type { DockerManager } from "./dockerManager.js";
 import { logger } from "./logger.js";
 import { getSessionConfig } from "./sessionConfig.js";
 import type { SessionManager } from "./sessionManager.js";
+
+/**
+ * Total bootstrap wall-clock cap. Beyond this, the in-flight stage
+ * is aborted (the stream destroy in `streamExec` unblocks the
+ * promise) and the session is hard-failed with a "bootstrap
+ * timeout" message in the WS stream. Sized per the issue spec
+ * (#191): generous enough for a chunky `npm install` plus dotfiles
+ * + repo clone, tight enough that a session stuck on a non-
+ * responsive remote doesn't pin a quota slot indefinitely.
+ *
+ * Note: aborting the streamExec only closes the host-side stream;
+ * the in-container process continues until `failSession` kills the
+ * container itself. Both happen on the timeout path, in that order.
+ */
+const BOOTSTRAP_WALL_CLOCK_CAP_MS = 10 * 60 * 1000;
 
 /**
  * Atomically mark `session_configs.bootstrapped_at` as set, but only
@@ -296,7 +314,16 @@ export class BootstrapBroadcaster {
  */
 export async function runAsyncBootstrap(
 	sessionId: string,
-	cfg: { postCreateCmd?: string; postStartCmd?: string; hasRepo?: boolean },
+	cfg: {
+		postCreateCmd?: string;
+		postStartCmd?: string;
+		/** True iff any of {repo, gitIdentity, dotfiles, agentSeed} is
+		 *  configured — the hint that gates the `getSessionConfig` D1
+		 *  fetch. Renamed from the older `hasRepo` (#214 round 2)
+		 *  because 191b adds three more stages that all need the
+		 *  config row. The route computes this from `validatedConfig`. */
+		hasBootstrapConfig?: boolean;
+	},
 	deps: {
 		sessions: SessionManager;
 		docker: DockerManager;
@@ -306,80 +333,177 @@ export async function runAsyncBootstrap(
 	const { sessions, docker, broadcaster } = deps;
 	const onOutput = (chunk: string) => broadcaster.broadcast(sessionId, chunk);
 
-	// Step 1: repo clone. Skipped entirely when `cfg.hasRepo === false`
-	// — that's the steady-state for the existing postCreate-only
-	// population (everyone before #188's repo-clone landed). The hint
-	// is set by the route from `validatedConfig.repo`; gating on it
-	// avoids one D1 round-trip per session create on the hot path.
-	// CLAUDE.md flags D1 round-trip counts as performance-relevant,
-	// and a transient D1 failure on this fetch would also hard-fail
-	// the session before postCreate had a chance to run — we only
-	// take that risk when there's something to clone (PR #214 round 2).
-	let cloneExit: number;
-	try {
-		if (cfg.hasRepo) {
-			const config = await getSessionConfig(sessionId);
-			if (config) {
-				const result = await runCloneRepo({ sessionId, config, docker, onOutput });
-				cloneExit = result.exitCode;
-			} else {
-				// Defensive: route guarantees the row exists when
-				// `hasRepo` is set, but a missing row shouldn't crash
-				// the runner. Treat as a no-op clone — markBootstrapped
-				// later will UPDATE 0 rows and log without failing.
-				logger.warn(
-					`[bootstrap] hasRepo=true but no session_configs row for ${sessionId}; skipping clone`,
-				);
-				cloneExit = 0;
-			}
-		} else {
-			cloneExit = 0;
-		}
-	} catch (err) {
-		logger.error(`[bootstrap] clone threw for session ${sessionId}: ${(err as Error).message}`);
-		await failSession(sessionId, sessions, docker);
-		broadcaster.finish(sessionId, {
-			type: "fail",
-			exitCode: -1,
-			error: (err as Error).message,
-		});
-		return;
-	}
-	if (cloneExit !== 0) {
-		await failSession(sessionId, sessions, docker);
-		broadcaster.finish(sessionId, { type: "fail", exitCode: cloneExit });
-		return;
-	}
+	// 10-min wall-clock cap (#191 PR 191b). The controller is aborted
+	// either by the timer or by a stage that wants to short-circuit
+	// the rest of the pipeline. `unref()` so the Node process can
+	// shut down cleanly even if a runaway timer is still pending.
+	const abortController = new AbortController();
+	const timer = setTimeout(() => {
+		abortController.abort(new DOMException("bootstrap timeout", "TimeoutError"));
+	}, BOOTSTRAP_WALL_CLOCK_CAP_MS);
+	timer.unref();
+	const signal = abortController.signal;
 
-	// Step 2: postCreate. May be unset when only the repo step is
-	// configured — in that case skip straight to markBootstrapped +
-	// postStart. The bootstrap is still considered complete.
-	let exitCode: number;
-	if (cfg.postCreateCmd) {
+	const finishWithFail = async (msg: BootstrapMessage): Promise<void> => {
+		clearTimeout(timer);
+		await failSession(sessionId, sessions, docker);
+		broadcaster.finish(sessionId, msg);
+	};
+
+	// Helper: run a stage and route any throw / non-zero exit through
+	// the same status-flip-before-kill teardown. Returns true on
+	// success (caller continues), false when the pipeline is done
+	// (caller returns). Centralised so adding a future stage doesn't
+	// require duplicating the four-line teardown block.
+	const runStage = async (
+		label: string,
+		run: () => Promise<{ exitCode: number }>,
+	): Promise<boolean> => {
 		try {
-			const result = await docker.runPostCreate(sessionId, cfg.postCreateCmd, onOutput);
-			exitCode = result.exitCode;
+			const { exitCode } = await run();
+			if (exitCode !== 0) {
+				await finishWithFail({ type: "fail", exitCode });
+				return false;
+			}
+			return true;
 		} catch (err) {
-			logger.error(
-				`[bootstrap] postCreate threw for session ${sessionId}: ${(err as Error).message}`,
-			);
-			await failSession(sessionId, sessions, docker);
-			broadcaster.finish(sessionId, {
+			// AbortError from the 10-min cap surfaces here. Distinguish
+			// the timeout failure from any other throw so the modal's
+			// rendered error tells the user the right thing.
+			//
+			// PR #218 round 1 NIT: the discriminator must check that
+			// the thrown error itself came FROM the abort path
+			// (`AbortError` from streamExec, `TimeoutError` from the
+			// timer's `abort(reason)` call) — NOT just `signal.aborted`.
+			// Otherwise a stage that throws synchronously *after* the
+			// timer has already fired (e.g. `DotfilesAuthMismatchError`
+			// raised before the first await in `runDotfiles`) would be
+			// misreported as "bootstrap timeout" and the user would
+			// never see the actionable config error. `signal.aborted`
+			// is kept as a sanity guard so an unrelated future
+			// AbortError can't silently mark itself as a cap-fired
+			// timeout.
+			const e = err as Error;
+			const isTimeout = signal.aborted && (e.name === "AbortError" || e.name === "TimeoutError");
+			const message = isTimeout
+				? `bootstrap timeout: cumulative wall time exceeded ${BOOTSTRAP_WALL_CLOCK_CAP_MS / 1000}s during '${label}'`
+				: e.message;
+			logger.error(`[bootstrap] ${label} threw for session ${sessionId}: ${message}`);
+			// Surface the timeout reason in-stream so the user sees
+			// the cap, not just a generic fail. Goes through the
+			// broadcaster as a regular `output` chunk first; the
+			// terminal `fail` message has the exit code.
+			if (isTimeout) {
+				broadcaster.broadcast(sessionId, `\n${message}\n`);
+			}
+			await finishWithFail({
+				type: "fail",
+				exitCode: -1,
+				error: message,
+			});
+			return false;
+		}
+	};
+
+	// Load config once if any stage needs it. The hint gates this so
+	// postCreate-only sessions (the pre-#188 steady-state) don't pay
+	// for the D1 round-trip; it's only "free" for sessions that
+	// genuinely have config-driven bootstrap stages to run.
+	let config: Awaited<ReturnType<typeof getSessionConfig>> = null;
+	if (cfg.hasBootstrapConfig) {
+		try {
+			config = await getSessionConfig(sessionId);
+		} catch (err) {
+			await finishWithFail({
 				type: "fail",
 				exitCode: -1,
 				error: (err as Error).message,
 			});
 			return;
 		}
-	} else {
-		exitCode = 0;
+		if (!config) {
+			// Defensive: route guarantees the row exists when
+			// `hasBootstrapConfig` is set, but a missing row shouldn't
+			// crash the runner. Skip the config-driven stages and run
+			// only the cmd-driven postCreate/postStart.
+			logger.warn(
+				`[bootstrap] hasBootstrapConfig=true but no session_configs row for ${sessionId}; skipping config-driven stages`,
+			);
+		}
 	}
 
-	if (exitCode !== 0) {
-		await failSession(sessionId, sessions, docker);
-		broadcaster.finish(sessionId, { type: "fail", exitCode });
-		return;
+	// Stage order per #191 issue spec:
+	//   1. git identity (cheap; needed if later stages commit)
+	//   2. repo clone (#188)
+	//   3. dotfiles
+	//   4. agent seed (last so a cloned project's CLAUDE.md is in place first)
+	//   5. postCreate cmd
+	if (config) {
+		if (
+			!(await runStage("gitIdentity", () =>
+				runGitIdentity({
+					sessionId,
+					identity: config?.gitIdentity ?? null,
+					docker,
+					onOutput,
+					signal,
+				}),
+			))
+		)
+			return;
+		if (
+			!(await runStage("clone", () =>
+				runCloneRepo({ sessionId, config: config!, docker, onOutput, signal }),
+			))
+		)
+			return;
+		if (
+			!(await runStage("dotfiles", () =>
+				runDotfiles({
+					sessionId,
+					dotfiles: config?.dotfiles ?? null,
+					storedAuth: config?.auth ?? null,
+					docker,
+					onOutput,
+					signal,
+				}),
+			))
+		)
+			return;
+		if (
+			!(await runStage("agentSeed", () =>
+				runAgentSeed({
+					sessionId,
+					agentSeed: config?.agentSeed ?? null,
+					docker,
+					onOutput,
+					signal,
+				}),
+			))
+		)
+			return;
 	}
+
+	// postCreate. May be unset when only config-driven stages were
+	// configured (e.g. clone + agentSeed without a hook). The cap is
+	// still in force for postCreate; runPostCreate doesn't currently
+	// take a signal, but the timer can still abort the in-flight
+	// exec via the same destroy-the-stream mechanism if we extend
+	// the call. For now, postCreate's existing behaviour (no signal)
+	// means a runaway hook isn't aborted by the cap — same shape as
+	// before this PR.
+	if (cfg.postCreateCmd) {
+		const ok = await runStage("postCreate", () =>
+			docker.runPostCreate(sessionId, cfg.postCreateCmd!, onOutput),
+		);
+		if (!ok) return;
+	}
+
+	// All blocking stages succeeded — clear the wall-clock cap timer
+	// before markBootstrapped + postStart since those run after the
+	// success broadcast and can take their own time without the cap
+	// applying.
+	clearTimeout(timer);
 
 	// postCreate succeeded — mark the gate, then run postStart (if
 	// configured). markBootstrapped failure is logged but doesn't

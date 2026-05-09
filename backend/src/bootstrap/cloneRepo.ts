@@ -70,6 +70,10 @@ interface RunCloneRepoArgs {
 	config: SessionConfigRecord;
 	docker: DockerManager;
 	onOutput?: (chunk: string) => void;
+	/** Abort signal threaded from the bootstrap runner's 10-min cap
+	 *  (#191 PR 191b). Forwarded to streamExec; an in-flight clone
+	 *  unblocks promptly when the timeout fires. */
+	signal?: AbortSignal;
 }
 
 /**
@@ -77,7 +81,7 @@ interface RunCloneRepoArgs {
  * Returns `{ exitCode: 0 }` and a no-op when no `repo` is configured.
  */
 export async function runCloneRepo(args: RunCloneRepoArgs): Promise<{ exitCode: number }> {
-	const { config, sessionId, docker, onOutput } = args;
+	const { config, sessionId, docker, onOutput, signal } = args;
 	const repo = config.repo;
 	if (!repo) return { exitCode: 0 };
 
@@ -95,7 +99,7 @@ export async function runCloneRepo(args: RunCloneRepoArgs): Promise<{ exitCode: 
 		// positional args, never as shell tokens.
 		return docker.streamExec(
 			sessionId,
-			{ cmd: cloneArgv, workingDir: CONTAINER_WORKSPACE },
+			{ cmd: cloneArgv, workingDir: CONTAINER_WORKSPACE, signal },
 			onOutput,
 		);
 	}
@@ -117,6 +121,7 @@ export async function runCloneRepo(args: RunCloneRepoArgs): Promise<{ exitCode: 
 				cmd: ["bash", "-c", PAT_CLONE_SCRIPT],
 				env,
 				workingDir: CONTAINER_WORKSPACE,
+				signal,
 			},
 			onOutput,
 		);
@@ -137,6 +142,7 @@ export async function runCloneRepo(args: RunCloneRepoArgs): Promise<{ exitCode: 
 			cmd: ["bash", "-c", SSH_CLONE_SCRIPT],
 			env,
 			workingDir: CONTAINER_WORKSPACE,
+			signal,
 		},
 		onOutput,
 	);
@@ -256,6 +262,12 @@ ARGS=("git" "clone")
 [ -n "$ST_DEPTH" ] && ARGS+=("--depth" "$ST_DEPTH")
 ARGS+=("--" "$ST_URL" "$ST_TARGET_ABS")
 "\${ARGS[@]}"
+# Defensive unset AFTER the clone (NOT before — git invokes the
+# askpass shim as a child process which reads $ST_PAT from its
+# inherited env; unsetting before would break auth). PR #218 round
+# 2 NIT — symmetry with SSH script's pre-clone unset (which is safe
+# there because the key is already on disk by that point).
+unset ST_PAT
 `;
 
 /**
