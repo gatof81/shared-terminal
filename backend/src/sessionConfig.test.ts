@@ -65,7 +65,7 @@ describe("validateSessionConfig", () => {
 				auth: "none",
 				depth: 1,
 			},
-			ports: [{ port: 3000, protocol: "http" }],
+			ports: [{ container: 3000, public: false }],
 			envVars: [{ name: "FOO", type: "plain", value: "bar" }],
 		};
 		const got = validateSessionConfig(raw);
@@ -109,12 +109,68 @@ describe("validateSessionConfig", () => {
 	});
 
 	it("rejects out-of-range port numbers", () => {
-		expect(() => validateSessionConfig({ ports: [{ port: 0 }] })).toThrowError(
+		expect(() => validateSessionConfig({ ports: [{ container: 0, public: false }] })).toThrowError(
 			SessionConfigValidationError,
 		);
-		expect(() => validateSessionConfig({ ports: [{ port: 70000 }] })).toThrowError(
+		expect(() =>
+			validateSessionConfig({ ports: [{ container: 70000, public: false }] }),
+		).toThrowError(SessionConfigValidationError);
+	});
+
+	it("rejects port entries missing the public flag (no implicit default)", () => {
+		expect(() => validateSessionConfig({ ports: [{ container: 3000 }] })).toThrowError(
 			SessionConfigValidationError,
 		);
+	});
+
+	it("rejects duplicate container ports with a precise per-element path", () => {
+		try {
+			validateSessionConfig({
+				ports: [
+					{ container: 3000, public: false },
+					{ container: 3000, public: true },
+				],
+			});
+			expect.fail("expected duplicate-container-port rejection");
+		} catch (err) {
+			expect(err).toBeInstanceOf(SessionConfigValidationError);
+			// Path points at the duplicate index (1), not the original (0),
+			// so the form can highlight the offending row.
+			expect((err as SessionConfigValidationError).path).toBe("config.ports.1.container");
+		}
+	});
+
+	it("rejects privileged ports without allowPrivilegedPorts: true", () => {
+		expect(() => validateSessionConfig({ ports: [{ container: 80, public: false }] })).toThrowError(
+			/privileged|allowPrivilegedPorts/,
+		);
+		expect(() =>
+			validateSessionConfig({
+				ports: [{ container: 80, public: false }],
+				allowPrivilegedPorts: false,
+			}),
+		).toThrowError(/privileged|allowPrivilegedPorts/);
+	});
+
+	it("accepts privileged ports when allowPrivilegedPorts: true", () => {
+		const got = validateSessionConfig({
+			ports: [{ container: 80, public: true }],
+			allowPrivilegedPorts: true,
+		});
+		expect(got?.ports).toEqual([{ container: 80, public: true }]);
+		expect(got?.allowPrivilegedPorts).toBe(true);
+	});
+
+	it("allowPrivilegedPorts: true does not retroactively permit out-of-range ports", () => {
+		// The toggle relaxes the < 1024 floor only. The 1-65535 range
+		// stays enforced — a stray 0 / 70000 still fails on the field
+		// validator before the cross-field refine is reached.
+		expect(() =>
+			validateSessionConfig({
+				ports: [{ container: 70000, public: false }],
+				allowPrivilegedPorts: true,
+			}),
+		).toThrowError(SessionConfigValidationError);
 	});
 
 	it("rejects unknown enum values for workspaceStrategy", () => {
@@ -124,7 +180,10 @@ describe("validateSessionConfig", () => {
 	});
 
 	it("caps the number of ports", () => {
-		const tooManyPorts = Array.from({ length: 21 }, (_, i) => ({ port: 3000 + i }));
+		const tooManyPorts = Array.from({ length: 21 }, (_, i) => ({
+			container: 3000 + i,
+			public: false,
+		}));
 		expect(() => validateSessionConfig({ ports: tooManyPorts })).toThrowError(
 			SessionConfigValidationError,
 		);
@@ -746,6 +805,7 @@ describe("persistSessionConfig", () => {
 			null, // post_start_cmd
 			JSON.stringify({ url: "https://example.com/r", auth: "none" }),
 			null, // ports_json
+			null, // allow_privileged_ports (#190 PR 190a)
 			null, // env_vars_json
 			null, // auth_json
 			null, // git_identity_json
@@ -766,9 +826,10 @@ describe("persistSessionConfig", () => {
 		// Defensive cross-check: the params length must match the column
 		// count, so a future caller adding bootstrapped_at to either side
 		// without updating the other trips this assertion immediately.
-		// 14 = sessionId + 13 column values (incl. git_identity_json /
-		// dotfiles_json / agent_seed_json added in 191a).
-		expect((params as unknown[]).length).toBe(14);
+		// 15 = sessionId + 14 column values (allow_privileged_ports
+		// added in #190 PR 190a; git_identity_json / dotfiles_json /
+		// agent_seed_json added in 191a).
+		expect((params as unknown[]).length).toBe(15);
 	});
 
 	it("collapses empty array sub-records to NULL (no D1 row bloat)", async () => {
@@ -777,17 +838,19 @@ describe("persistSessionConfig", () => {
 			envVars: [],
 		});
 		const [, params] = dbStubs.d1Query.mock.calls[0]!;
-		// repos_json (param[7]), ports_json (param[8]), env_vars_json (param[9]),
-		// auth_json (param[10])
+		// Position layout (post-#190 PR 190a):
+		//   [7] repos_json, [8] ports_json, [9] allow_privileged_ports,
+		//   [10] env_vars_json, [11] auth_json
 		expect(params?.[7]).toBeNull();
 		expect(params?.[8]).toBeNull();
 		expect(params?.[9]).toBeNull();
 		expect(params?.[10]).toBeNull();
+		expect(params?.[11]).toBeNull();
 	});
 
 	it("serialises envVars + ports JSON columns (storage shape)", async () => {
 		await persistSessionConfig("sess-2", {
-			ports: [{ port: 3000, protocol: "http" }],
+			ports: [{ container: 3000, public: false }],
 			// Already-encrypted storage shape — the route encrypts
 			// before calling persistSessionConfig.
 			envVars: [
@@ -802,8 +865,8 @@ describe("persistSessionConfig", () => {
 			],
 		});
 		const [, params] = dbStubs.d1Query.mock.calls[0]!;
-		expect(params?.[8]).toBe(JSON.stringify([{ port: 3000, protocol: "http" }]));
-		const envJson = JSON.parse(params?.[9] as string) as unknown[];
+		expect(params?.[8]).toBe(JSON.stringify([{ container: 3000, public: false }]));
+		const envJson = JSON.parse(params?.[10] as string) as unknown[];
 		expect(envJson).toHaveLength(2);
 		expect(envJson[0]).toMatchObject({ name: "FOO", type: "plain", value: "bar" });
 		expect(envJson[1]).toMatchObject({
@@ -833,20 +896,47 @@ describe("persistSessionConfig", () => {
 			agentSeed: { settings: '{"theme":"dark"}', claudeMd: "# notes" },
 		});
 		const [, params] = dbStubs.d1Query.mock.calls[0]!;
-		// git_identity_json is param[11], dotfiles_json [12], agent_seed_json [13].
-		expect(JSON.parse(params?.[11] as string)).toEqual({
+		// Post-#190 PR 190a positions:
+		//   git_identity_json [12], dotfiles_json [13], agent_seed_json [14]
+		// (allow_privileged_ports inserted at [9] shifts these by 1).
+		expect(JSON.parse(params?.[12] as string)).toEqual({
 			name: "Ada Lovelace",
 			email: "ada@example.com",
 		});
-		expect(JSON.parse(params?.[12] as string)).toEqual({
+		expect(JSON.parse(params?.[13] as string)).toEqual({
 			url: "https://github.com/u/dotfiles.git",
 			ref: "main",
 			installScript: "install.sh",
 		});
-		expect(JSON.parse(params?.[13] as string)).toEqual({
+		expect(JSON.parse(params?.[14] as string)).toEqual({
 			settings: '{"theme":"dark"}',
 			claudeMd: "# notes",
 		});
+	});
+
+	// #190 PR 190a — pin the column position + 0/1 storage idiom for
+	// `allow_privileged_ports` so a future column reordering or a sloppy
+	// `Boolean(...)` (which would emit `false` and write 0 instead of
+	// NULL) trips this.
+	it("persists allowPrivilegedPorts as 1 only when explicitly true", async () => {
+		await persistSessionConfig("sess-priv-on", {
+			ports: [{ container: 80, public: true }],
+			allowPrivilegedPorts: true,
+		});
+		expect(dbStubs.d1Query.mock.calls[0]?.[1]?.[9]).toBe(1);
+
+		dbStubs.d1Query.mockClear();
+		await persistSessionConfig("sess-priv-off", {
+			ports: [{ container: 3000, public: false }],
+			allowPrivilegedPorts: false,
+		});
+		expect(dbStubs.d1Query.mock.calls[0]?.[1]?.[9]).toBeNull();
+
+		dbStubs.d1Query.mockClear();
+		await persistSessionConfig("sess-priv-omitted", {
+			ports: [{ container: 3000, public: false }],
+		});
+		expect(dbStubs.d1Query.mock.calls[0]?.[1]?.[9]).toBeNull();
 	});
 });
 
@@ -1265,6 +1355,99 @@ describe("getSessionConfig", () => {
 		}));
 		const got = await getSessionConfig("sess-4");
 		expect(got?.workspaceStrategy).toBeUndefined();
+	});
+
+	// #190 PR 190a — round-trip allow_privileged_ports through D1.
+	// Stored 1 → rehydrates as `true`; stored 0 (a possible value if a
+	// future operator runs `UPDATE … SET allow_privileged_ports = 0`)
+	// or NULL both rehydrate as `undefined` so consumers can rely on
+	// `=== true` checks.
+	it("rehydrates allow_privileged_ports: 1 to allowPrivilegedPorts: true", async () => {
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [
+				{
+					session_id: "sess-priv",
+					workspace_strategy: null,
+					cpu_limit: null,
+					mem_limit: null,
+					idle_ttl_seconds: null,
+					post_create_cmd: null,
+					post_start_cmd: null,
+					repos_json: null,
+					ports_json: JSON.stringify([{ container: 80, public: true }]),
+					allow_privileged_ports: 1,
+					env_vars_json: null,
+					auth_json: null,
+					git_identity_json: null,
+					dotfiles_json: null,
+					agent_seed_json: null,
+					bootstrapped_at: null,
+				},
+			],
+			success: true as const,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		const got = await getSessionConfig("sess-priv");
+		expect(got?.allowPrivilegedPorts).toBe(true);
+		expect(got?.ports).toEqual([{ container: 80, public: true }]);
+	});
+
+	it("rehydrates allow_privileged_ports: null to undefined", async () => {
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [
+				{
+					session_id: "sess-priv-null",
+					workspace_strategy: null,
+					cpu_limit: null,
+					mem_limit: null,
+					idle_ttl_seconds: null,
+					post_create_cmd: null,
+					post_start_cmd: null,
+					repos_json: null,
+					ports_json: null,
+					allow_privileged_ports: null,
+					env_vars_json: null,
+					auth_json: null,
+					git_identity_json: null,
+					dotfiles_json: null,
+					agent_seed_json: null,
+					bootstrapped_at: null,
+				},
+			],
+			success: true as const,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		const got = await getSessionConfig("sess-priv-null");
+		expect(got?.allowPrivilegedPorts).toBeUndefined();
+	});
+
+	it("rehydrates allow_privileged_ports: 0 to undefined (=== true safety)", async () => {
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [
+				{
+					session_id: "sess-priv-zero",
+					workspace_strategy: null,
+					cpu_limit: null,
+					mem_limit: null,
+					idle_ttl_seconds: null,
+					post_create_cmd: null,
+					post_start_cmd: null,
+					repos_json: null,
+					ports_json: null,
+					allow_privileged_ports: 0,
+					env_vars_json: null,
+					auth_json: null,
+					git_identity_json: null,
+					dotfiles_json: null,
+					agent_seed_json: null,
+					bootstrapped_at: null,
+				},
+			],
+			success: true as const,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		const got = await getSessionConfig("sess-priv-zero");
+		expect(got?.allowPrivilegedPorts).toBeUndefined();
 	});
 });
 
