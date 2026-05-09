@@ -313,6 +313,31 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 			next();
 			return;
 		}
+		// CSRF defence — applies to ALL dispatcher HTTP requests,
+		// symmetric with the WS `handleUpgrade` path. In production
+		// the JWT cookie is `SameSite=None; Secure` (the Pages→Tunnel
+		// topology requires it), so the browser attaches it on
+		// cross-origin requests. The /api routes are protected by
+		// the CORS-preflight-via-`Content-Type: application/json`
+		// shape, but the dispatcher proxies arbitrary container
+		// apps that may not require that content type — a page at
+		// `evil.com` could otherwise emit a cross-origin GET / form
+		// POST to `https://p<port>-<sid>.tunnel.example.com/`, the
+		// browser would auto-attach the victim's cookie, and the
+		// container app would execute the request with the
+		// victim's credentials (response body is CORS-blocked, but
+		// state changes happen). `isAllowedWsOrigin` reuses the
+		// same allowlist + missing-Origin-allowed policy the WS
+		// path uses (webhook senders / curl with no Origin still
+		// pass). Runs BEFORE `authorize()` so cookie validation
+		// can't unlock a cross-site request. PR #223 round 10
+		// SHOULD-FIX.
+		if (!isAllowedWsOrigin(req.headers.origin, deps.corsOrigins, deps.nodeEnv)) {
+			res.statusCode = 403;
+			res.setHeader("Content-Type", "text/plain");
+			res.end("Forbidden");
+			return;
+		}
 		// Authorize then proxy. Wrapping in a self-contained promise
 		// chain (no async middleware) keeps Express's error path off
 		// the table — a thrown `lookup`/`verify` lands in `.catch()`
@@ -387,7 +412,10 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 		// cross-site upgrade. Same defence the /ws/* path applies in
 		// `index.ts`. PR #223 round 2 SHOULD-FIX.
 		if (!isAllowedWsOrigin(req.headers.origin, deps.corsOrigins, deps.nodeEnv)) {
-			endUpgradeSocketWithReply(socket, "HTTP/1.1 403 Forbidden\r\n\r\n");
+			// `Content-Length: 0` keeps the response framed so curl /
+			// wscat report the reason phrase cleanly. Aligns with the
+			// 429 in index.ts. PR #223 round 10 NIT.
+			endUpgradeSocketWithReply(socket, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
 			return true;
 		}
 		void authorize(parsed, req.headers.cookie)
@@ -410,7 +438,10 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 							: result.status === 403
 								? "Forbidden"
 								: "Not Found";
-					endUpgradeSocketWithReply(socket, `HTTP/1.1 ${result.status} ${reason}\r\n\r\n`);
+					endUpgradeSocketWithReply(
+						socket,
+						`HTTP/1.1 ${result.status} ${reason}\r\nContent-Length: 0\r\n\r\n`,
+					);
 					return;
 				}
 				// Same Host-rewrite rationale as the HTTP path above —
@@ -423,7 +454,7 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 			})
 			.catch((err) => {
 				logger.error(`[port-dispatcher] WS dispatch failed: ${(err as Error).message}`);
-				endUpgradeSocketWithReply(socket, "HTTP/1.1 502 Bad Gateway\r\n\r\n");
+				endUpgradeSocketWithReply(socket, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
 			});
 		return true;
 	}

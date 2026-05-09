@@ -346,6 +346,79 @@ describe("createPortDispatcher (HTTP middleware)", () => {
 		expect(res.statusCode).toBe(200);
 	});
 
+	// PR #223 round 10 SHOULD-FIX. Symmetric with the WS path's
+	// CSWSH defence: an HTTP request from a browser at an
+	// unallowlisted origin must be rejected BEFORE `authorize()`
+	// runs (so a valid cookie can't unlock a cross-site request to
+	// a private port's container app).
+	it("403s a private-port HTTP request from a non-allowlisted browser origin", async () => {
+		const lookup = vi.fn(async () => ({
+			hostPort: 32768,
+			isPublic: false,
+			ownerUserId: "u-owner",
+		}));
+		const verify = vi.fn(() => ({ sub: "u-owner", username: "owner" }));
+		const webSpy = vi.fn();
+		const dispatcher = createPortDispatcher({
+			baseDomain: "tunnel.example.com",
+			corsOrigins: ["https://app.example.com"],
+			lookupTarget: lookup,
+			verifyToken: verify,
+			proxy: { web: webSpy, ws: vi.fn(), on: vi.fn() } as unknown as Parameters<
+				typeof createPortDispatcher
+			>[0]["proxy"],
+		});
+		const res = makeRes();
+		dispatcher.middleware(
+			makeReq(`p3000-${SID}.tunnel.example.com`, "st_token=jwt", "https://evil.com"),
+			res as unknown as ServerResponse,
+			() => {},
+		);
+		await new Promise((r) => setImmediate(r));
+		expect(res.statusCode).toBe(403);
+		expect(res.body).toBe("Forbidden");
+		// Critical: the gate runs BEFORE lookup/verify, so even a
+		// cookie that would auth on a same-origin request never
+		// reaches the authorize() codepath.
+		expect(lookup).not.toHaveBeenCalled();
+		expect(verify).not.toHaveBeenCalled();
+		expect(webSpy).not.toHaveBeenCalled();
+	});
+
+	it("allows a same-origin HTTP request from an allowlisted browser", async () => {
+		const { middleware, webSpy } = makeDispatcherWith({
+			target: { hostPort: 32768, isPublic: false, ownerUserId: "u-owner" },
+			token: "u-owner",
+		});
+		const res = makeRes();
+		middleware(
+			makeReq(`p3000-${SID}.tunnel.example.com`, "st_token=jwt", "https://app.example.com"),
+			res as unknown as ServerResponse,
+			() => {},
+		);
+		await new Promise((r) => setImmediate(r));
+		expect(webSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("allows a missing-Origin HTTP request (server-to-server / curl shape)", async () => {
+		// Same `isAllowedWsOrigin` policy the WS path uses — Branch 1
+		// (no Origin) lets non-browser callers (webhooks, CLI tools)
+		// through. Without this, `public: true` ports would lose the
+		// "anyone with the URL" semantics the issue spec calls out.
+		const { middleware, webSpy } = makeDispatcherWith({
+			target: { hostPort: 32768, isPublic: true, ownerUserId: "u1" },
+		});
+		const res = makeRes();
+		middleware(
+			// No origin arg → no Origin header on the request.
+			makeReq(`p3000-${SID}.tunnel.example.com`),
+			res as unknown as ServerResponse,
+			() => {},
+		);
+		await new Promise((r) => setImmediate(r));
+		expect(webSpy).toHaveBeenCalledTimes(1);
+	});
+
 	it("502s on an unexpected error in lookup or verify", async () => {
 		const dispatcher = createPortDispatcher({
 			baseDomain: "tunnel.example.com",
