@@ -934,6 +934,52 @@ main:not([data-sidebar-ready]) #sidebar {
 .resources-mem-row select {
   flex: 0 0 auto;
 }
+/* #195 PR 195c — Templates page (sidebar entry → modal listing
+   the user's own templates with Use / Delete actions). */
+.template-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid #21262d;
+  border-radius: 8px;
+  margin-bottom: 0.5rem;
+  background: #0d1117;
+}
+.template-card-header strong {
+  font-size: 0.95rem;
+  color: #e6edf3;
+}
+.template-card-description {
+  font-size: 0.8rem;
+  color: #8b949e;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.template-card-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+.template-card-actions button {
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 0.25rem 0.7rem;
+  color: #e6edf3;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.template-card-actions button:hover {
+  background: #30363d;
+}
+.template-card-delete:hover {
+  background: rgba(248, 81, 73, 0.12);
+  border-color: rgba(248, 81, 73, 0.45);
+  color: #ff8682;
+}
+
 .modal-field-checkbox {
   flex-direction: row;
   align-items: center;

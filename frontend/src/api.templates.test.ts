@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { type SessionConfigPayload, stripConfigForTemplate } from "./api.js";
+import {
+	idleSecondsToFormUnit,
+	memBytesToFormUnit,
+	type SessionConfigPayload,
+	stripConfigForTemplate,
+} from "./api.js";
 
 // `stripConfigForTemplate` is the client-side gate that prevents
 // plaintext secrets from reaching the unencrypted `templates.config`
@@ -98,5 +103,62 @@ describe("stripConfigForTemplate", () => {
 		const out = stripConfigForTemplate(input);
 		expect(out).toEqual(input);
 		expect(out.auth).toBeUndefined();
+	});
+});
+
+// `memBytesToFormUnit` and `idleSecondsToFormUnit` are the reverse-
+// direction helpers the use-template flow's pre-fill calls (the
+// inverse of what `collectAdvancedForSubmit` does). The boundary
+// branches (GiB vs MiB, hours vs minutes) are deterministic pure
+// math; pinning them here so a future regression in the divisibility
+// check trips a test rather than silently mis-populating a form.
+
+describe("memBytesToFormUnit", () => {
+	it("returns null for undefined / 0 / negative (form blank state)", () => {
+		expect(memBytesToFormUnit(undefined)).toBeNull();
+		expect(memBytesToFormUnit(0)).toBeNull();
+		expect(memBytesToFormUnit(-1)).toBeNull();
+	});
+
+	it("returns GiB when the byte count is an integer multiple of 1 GiB", () => {
+		expect(memBytesToFormUnit(1024 ** 3)).toEqual({ amount: 1, unit: "GiB" });
+		expect(memBytesToFormUnit(2 * 1024 ** 3)).toEqual({ amount: 2, unit: "GiB" });
+		expect(memBytesToFormUnit(16 * 1024 ** 3)).toEqual({ amount: 16, unit: "GiB" });
+	});
+
+	it("falls back to MiB when bytes don't divide evenly into GiB", () => {
+		// 1.5 GiB → 1536 MiB
+		expect(memBytesToFormUnit(1.5 * 1024 ** 3)).toEqual({ amount: 1536, unit: "MiB" });
+		// 256 MiB at the floor — under 1 GiB so the GiB branch is
+		// skipped (the `gib >= 1` guard).
+		expect(memBytesToFormUnit(256 * 1024 ** 2)).toEqual({ amount: 256, unit: "MiB" });
+	});
+
+	it("MiB rounds the boundary halfway case", () => {
+		// 1.5 MiB → 2 (Math.round rounds ties to even / up depending
+		// on the engine; pin that the round-up shape holds)
+		expect(memBytesToFormUnit(1.5 * 1024 ** 2)).toEqual({ amount: 2, unit: "MiB" });
+	});
+});
+
+describe("idleSecondsToFormUnit", () => {
+	it("returns null for undefined / 0 / negative (form blank state)", () => {
+		expect(idleSecondsToFormUnit(undefined)).toBeNull();
+		expect(idleSecondsToFormUnit(0)).toBeNull();
+		expect(idleSecondsToFormUnit(-60)).toBeNull();
+	});
+
+	it("returns hours when seconds divide evenly by 3600", () => {
+		expect(idleSecondsToFormUnit(3600)).toEqual({ amount: 1, unit: "hours" });
+		expect(idleSecondsToFormUnit(2 * 3600)).toEqual({ amount: 2, unit: "hours" });
+		expect(idleSecondsToFormUnit(24 * 3600)).toEqual({ amount: 24, unit: "hours" });
+	});
+
+	it("falls back to minutes when seconds don't divide evenly by 3600", () => {
+		expect(idleSecondsToFormUnit(60)).toEqual({ amount: 1, unit: "minutes" });
+		expect(idleSecondsToFormUnit(90)).toEqual({ amount: 2, unit: "minutes" }); // rounds
+		expect(idleSecondsToFormUnit(1800)).toEqual({ amount: 30, unit: "minutes" });
+		// 90 minutes (5400 seconds) — not divisible by 3600 → minutes
+		expect(idleSecondsToFormUnit(5400)).toEqual({ amount: 90, unit: "minutes" });
 	});
 });
