@@ -493,10 +493,26 @@ export function buildRouter(
 				// `no-floating-promises`; explicitly catching at the
 				// top level satisfies the linter and gives us a final
 				// safety net for anything the runner missed.
-				runAsyncBootstrap(meta.sessionId, cfg, { sessions, docker, broadcaster }).catch((err) => {
+				const startedSessionId = meta.sessionId;
+				runAsyncBootstrap(startedSessionId, cfg, { sessions, docker, broadcaster }).catch((err) => {
 					logger.error(
-						`[routes] async bootstrap escaped its own error handling for ${meta?.sessionId}: ${(err as Error).message}`,
+						`[routes] async bootstrap escaped its own error handling for ${startedSessionId}: ${(err as Error).message}`,
 					);
+					// Push a synthetic terminal so the modal's WS
+					// subscriber doesn't sit on "Bootstrapping…"
+					// forever (PR #208 round 2). runAsyncBootstrap
+					// is very defensive so this branch is unlikely,
+					// but a future edit that breaks its internal
+					// try/catch would otherwise leave the user
+					// with a hung modal and the row at status=running
+					// with no further flip path. broadcaster.finish
+					// lazy-creates the session entry, so it's safe
+					// even if the runner threw before any broadcast.
+					broadcaster.finish(startedSessionId, {
+						type: "fail",
+						exitCode: -1,
+						error: (err as Error).message,
+					});
 				});
 				res.status(201).json({ ...serializeMeta(updated), bootstrapping: true });
 				return;

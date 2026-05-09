@@ -50,7 +50,7 @@ export function handleWsConnection(
 	req: IncomingMessage,
 	sessions: SessionManager,
 	docker: DockerManager,
-	broadcaster?: BootstrapBroadcaster,
+	broadcaster: BootstrapBroadcaster,
 ): void {
 	// Synchronous safety net registered BEFORE any await or sync ws.close().
 	// Node's EventEmitter routes an 'error' emission with no listener to
