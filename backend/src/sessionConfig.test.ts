@@ -108,14 +108,14 @@ describe("validateSessionConfig", () => {
 		);
 	});
 
-	// #194 PR 194a — pin the per-deployment bounds. Edges checked
-	// from BOTH sides so a future relaxation can't silently widen the
-	// range without trip-wiring at least one assertion.
+	// Pin the per-deployment resource bounds at both edges so a
+	// future relaxation can't silently widen the range without
+	// trip-wiring at least one assertion.
 
 	it("rejects cpuLimit below the 0.25-core floor", () => {
-		// 250M-1 nano-CPUs = just under 0.25 cores. The form (194c)
-		// will quantise to integer cores before submit, but the schema
-		// stays the source of truth.
+		// 250M-1 nano-CPUs = just under 0.25 cores. Schema is the
+		// source of truth even if a form later quantises to integer
+		// cores before submit.
 		expect(() => validateSessionConfig({ cpuLimit: 249_999_999 })).toThrowError(
 			SessionConfigValidationError,
 		);
@@ -1527,7 +1527,7 @@ describe("SessionConfigSchema export", () => {
 		// Smoke check: parsing through the bare schema (skipping the
 		// validateSessionConfig wrapper) yields the same data shape.
 		// 1_000_000_000 nano-CPUs = 1 core, comfortably inside the
-		// 0.25 → 8 cores band #194 PR 194a tightened the bounds to.
+		// 0.25 → 8 cores band the schema enforces.
 		const r = SessionConfigSchema.safeParse({ cpuLimit: 1_000_000_000 });
 		expect(r.success).toBe(true);
 	});

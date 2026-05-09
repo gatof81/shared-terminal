@@ -30,27 +30,23 @@ import { decryptSecret, encryptSecret } from "./secrets.js";
 // (postCreate / postStart) without becoming a vector for ballooning the
 // session_configs row. #191 is free to lower this when the form lands.
 const MAX_HOOK_LEN = 8 * 1024;
-// #194 PR 194a — per-session resource bounds. The 185-era schema had
-// loose "absurd-upper-bound" guards (1 TiB / 30 days / 64 vCPU); now
-// that the consumer wiring is in place and the form lands in 194c,
-// tighten to the operator-tunable range the issue spec calls out:
+// Per-session resource bounds:
 //   - CPU: 0.25 → 8 cores. Stored as nano-CPUs (Docker's HostConfig
-//     unit) to keep the wire shape integer-only and avoid the float-
-//     precision foot-gun JSON Number has at the high end.
+//     unit) to keep the wire shape integer-only and avoid the
+//     float-precision foot-gun JSON Number has at the high end.
 //   - Memory: 256 MiB → 16 GiB.
 //   - Idle TTL: 60 s → 24 h. OMIT the field (undefined) to disable
-//     auto-stop; `null` is NOT accepted (the schema is `.optional()`,
-//     not `.nullable()` — sending `null` returns 400).
+//     auto-stop; `null` is NOT accepted — the schema is `.optional()`,
+//     not `.nullable()`, so sending `null` returns 400.
 //
-// These are HARDCODED for v1; #200 introduces operator overrides via
-// env. `dockerManager.ts`'s `DEFAULT_NANO_CPUS` (2 cores) and
+// `dockerManager.ts`'s `DEFAULT_NANO_CPUS` (2 cores) and
 // `DEFAULT_MEMORY_BYTES` (2 GiB) both fall comfortably INSIDE these
 // bands — a session created without explicit caps spawns with a
 // resource allocation that's still a legal "user-supplied" entry,
-// keeping the schema and the spawn defaults coherent. (The defaults
-// are not AT the lower bounds — the floor of 0.25 cores / 256 MiB is
-// 8× below them; #200 should not anchor operator overrides to the
-// defaults.)
+// keeping the schema and the spawn defaults coherent. The defaults
+// are not AT the lower bounds — the 0.25-core / 256-MiB floors are
+// 8× below them — so a future operator-override layer should not
+// anchor its caps to the defaults.
 const CPU_NANO_MIN = 250_000_000; // 0.25 cores
 const CPU_NANO_MAX = 8_000_000_000; // 8 cores
 const MEM_BYTES_MIN = 256 * 1024 * 1024; // 256 MiB
