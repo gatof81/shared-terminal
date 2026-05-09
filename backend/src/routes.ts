@@ -40,6 +40,7 @@ import {
 	UsernameRateLimiter,
 } from "./rateLimit.js";
 import {
+	encryptAuthCredentials,
 	encryptSecretEntries,
 	isEmptyConfig,
 	type PersistableSessionConfig,
@@ -459,6 +460,11 @@ export function buildRouter(
 					envVars: validatedConfig.envVars
 						? encryptSecretEntries(validatedConfig.envVars)
 						: undefined,
+					// #188 PR 188b: encrypt PAT / SSH credentials at the
+					// route boundary, same shape as envVars secrets. The
+					// helper returns undefined for an empty/absent blob
+					// so `jsonOrNull` collapses the column to NULL.
+					auth: encryptAuthCredentials(validatedConfig.auth),
 				};
 				await persistSessionConfig(meta.sessionId, persistable);
 			}

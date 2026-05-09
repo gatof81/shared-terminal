@@ -12,11 +12,15 @@ const dbStubs = vi.hoisted(() => ({
 vi.mock("./db.js", () => dbStubs);
 
 import {
+	type AuthStored,
+	decryptStoredAuth,
 	decryptStoredEntries,
+	encryptAuthCredentials,
 	encryptSecretEntries,
 	getSessionConfig,
 	isEmptyConfig,
 	persistSessionConfig,
+	redactStoredAuth,
 	redactStoredEntries,
 	type SessionConfig,
 	SessionConfigSchema,
@@ -54,7 +58,13 @@ describe("validateSessionConfig", () => {
 			idleTtlSeconds: 3600,
 			postCreateCmd: "npm install",
 			postStartCmd: "npm run dev",
-			repos: [{ url: "https://github.com/example/repo", ref: "main" }],
+			repo: {
+				url: "https://github.com/example/repo",
+				ref: "main",
+				target: "frontend",
+				auth: "none",
+				depth: 1,
+			},
 			ports: [{ port: 3000, protocol: "http" }],
 			envVars: [{ name: "FOO", type: "plain", value: "bar" }],
 		};
@@ -113,13 +123,7 @@ describe("validateSessionConfig", () => {
 		);
 	});
 
-	it("caps the number of repos / ports", () => {
-		const tooManyRepos = Array.from({ length: 11 }, (_, i) => ({
-			url: `https://example.com/r${i}`,
-		}));
-		expect(() => validateSessionConfig({ repos: tooManyRepos })).toThrowError(
-			SessionConfigValidationError,
-		);
+	it("caps the number of ports", () => {
 		const tooManyPorts = Array.from({ length: 21 }, (_, i) => ({ port: 3000 + i }));
 		expect(() => validateSessionConfig({ ports: tooManyPorts })).toThrowError(
 			SessionConfigValidationError,
@@ -144,25 +148,35 @@ describe("validateSessionConfig", () => {
 		);
 	});
 
-	// Same reasoning as the empty-hook rule — stored "" ref would be
-	// indistinguishable from "no ref" and would push `git clone --branch ""`
-	// into PR 188's consumer.
-	it("rejects an empty repo ref", () => {
-		expect(() =>
-			validateSessionConfig({ repos: [{ url: "https://example.com/r", ref: "" }] }),
-		).toThrowError(SessionConfigValidationError);
+	// Empty `""` ref is now meaningful (= remote HEAD, no `--branch` flag).
+	// The clone runner uses presence + non-empty as the predicate for
+	// passing `--branch`, so an empty ref is a valid declarative value.
+	it("accepts an empty repo ref (= remote HEAD)", () => {
+		expect(
+			validateSessionConfig({
+				repo: { url: "https://example.com/r", ref: "", auth: "none" },
+			}),
+		).toBeDefined();
 	});
 
-	// Repo URL scheme allowlist — closes the file:// / ssh:// hole the
-	// review bot flagged. PR 188 will read these values straight into a
-	// git-clone consumer, so refusing them at ingest is the only place
-	// this can be blocked without a duplicate validator downstream.
-	it("rejects repo URLs with non-https schemes", () => {
-		// Allowlist is https:// only. http:// is rejected because a MITM
-		// on the path between the container and the public mirror can
-		// inject content which then runs as postCreate/postStart inside
-		// the container. ssh:// / git:// / file:// are rejected for the
-		// SSRF / arbitrary-path reasons documented on the regex.
+	// Refnames that fail `git check-ref-format` (or look like a CLI flag
+	// the runner could mis-interpret) are rejected — defence-in-depth
+	// alongside the runner's argv-only invocation.
+	it("rejects refs with traversal '..' or leading '-'", () => {
+		for (const ref of ["..", "main/..", "-fexec", "--upload-pack=evil"]) {
+			expect(() =>
+				validateSessionConfig({
+					repo: { url: "https://example.com/r", ref, auth: "none" },
+				}),
+			).toThrowError(SessionConfigValidationError);
+		}
+	});
+
+	// Repo URL scheme allowlist — closes the file:// / ssh://-scheme hole.
+	// The runner will hand these straight to `git clone`, so refusing them
+	// at ingest is the only place this can be blocked without a duplicate
+	// validator downstream.
+	it("rejects repo URLs with disallowed schemes", () => {
 		for (const url of [
 			"http://example.com/r",
 			"file:///etc/passwd",
@@ -170,24 +184,123 @@ describe("validateSessionConfig", () => {
 			"git://attacker.example:9418/r",
 			"javascript:alert(1)",
 		]) {
-			expect(() => validateSessionConfig({ repos: [{ url }] })).toThrowError(
+			expect(() => validateSessionConfig({ repo: { url, auth: "none" } })).toThrowError(
 				SessionConfigValidationError,
 			);
 		}
 	});
 
 	it("rejects repo URLs that are not URLs at all", () => {
-		expect(() => validateSessionConfig({ repos: [{ url: "just-a-name" }] })).toThrowError(
-			SessionConfigValidationError,
-		);
+		expect(() =>
+			validateSessionConfig({ repo: { url: "just-a-name", auth: "none" } }),
+		).toThrowError(SessionConfigValidationError);
 	});
 
 	it("accepts https:// repo URLs", () => {
 		expect(
 			validateSessionConfig({
-				repos: [{ url: "https://example.com/r" }, { url: "https://github.com/o/p" }],
+				repo: { url: "https://github.com/o/p", auth: "none" },
 			}),
 		).toBeDefined();
+	});
+
+	// #188: target validation — workspace-relative paths only. `..` and
+	// leading `/` would let a clone target escape the bind-mounted
+	// workspace; `//` is rejected as a defence-in-depth against a runner
+	// that doesn't normalise.
+	it("rejects target paths with '..' / leading '/' / '//'", () => {
+		for (const target of ["../escape", "/abs", "a//b", "../"]) {
+			expect(() =>
+				validateSessionConfig({
+					repo: { url: "https://example.com/r", target, auth: "none" },
+				}),
+			).toThrowError(SessionConfigValidationError);
+		}
+	});
+
+	it("accepts an empty target (= workspace root) and a clean subpath", () => {
+		for (const target of ["", "frontend", "services/api", "a/b/c.x"]) {
+			expect(
+				validateSessionConfig({
+					repo: { url: "https://example.com/r", target, auth: "none" },
+				}),
+			).toBeDefined();
+		}
+	});
+
+	// Cross-field repo↔auth consistency. The route reads these decisions
+	// directly: a `git@…` URL with `auth: "none"` would fail mysteriously
+	// inside the container, and PAT/SSH credentials with no matching
+	// `repo` block would silently never be used.
+	it("rejects repo.auth='pat' without auth.pat or with non-https URL", () => {
+		expect(() =>
+			validateSessionConfig({
+				repo: { url: "https://example.com/r", auth: "pat" },
+				// missing auth.pat
+			}),
+		).toThrowError(SessionConfigValidationError);
+		expect(() =>
+			validateSessionConfig({
+				repo: { url: "git@github.com:o/p", auth: "pat" },
+				auth: { pat: "ghp_xxx" },
+			}),
+		).toThrowError(SessionConfigValidationError);
+	});
+
+	it("rejects repo.auth='ssh' without auth.ssh or with non-git@ URL", () => {
+		expect(() =>
+			validateSessionConfig({
+				repo: { url: "git@github.com:o/p", auth: "ssh" },
+				// missing auth.ssh
+			}),
+		).toThrowError(SessionConfigValidationError);
+		expect(() =>
+			validateSessionConfig({
+				repo: { url: "https://example.com/r", auth: "ssh" },
+				auth: { ssh: { privateKey: "k", knownHosts: "default" } },
+			}),
+		).toThrowError(SessionConfigValidationError);
+	});
+
+	it("rejects credentials present when repo.auth='none'", () => {
+		expect(() =>
+			validateSessionConfig({
+				repo: { url: "https://example.com/r", auth: "none" },
+				auth: { pat: "ghp_orphan" },
+			}),
+		).toThrowError(SessionConfigValidationError);
+	});
+
+	it("rejects orphan credentials with no repo block", () => {
+		expect(() => validateSessionConfig({ auth: { pat: "ghp_orphan" } })).toThrowError(
+			SessionConfigValidationError,
+		);
+	});
+
+	it("accepts repo.auth='ssh' with matching git@ URL and ssh creds", () => {
+		expect(
+			validateSessionConfig({
+				repo: { url: "git@github.com:o/p", auth: "ssh", target: "" },
+				auth: {
+					ssh: {
+						privateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\n…",
+						knownHosts: "default",
+					},
+				},
+			}),
+		).toBeDefined();
+	});
+
+	// Depth bounds — out of [1, 10000]. A missing `depth` is allowed
+	// (full history), so the lower bound has to fire on `0` and `-1`.
+	it("rejects repo.depth out of bounds", () => {
+		for (const depth of [0, -1, 10_001]) {
+			expect(() =>
+				validateSessionConfig({
+					repo: { url: "https://example.com/r", auth: "none", depth },
+				}),
+			).toThrowError(SessionConfigValidationError);
+		}
 	});
 
 	// envVars contents flow through validateEnvVars per-entry — POSIX
@@ -343,7 +456,7 @@ describe("persistSessionConfig", () => {
 		const config: SessionConfig = {
 			cpuLimit: 1_000_000_000,
 			postCreateCmd: "echo hi",
-			repos: [{ url: "https://example.com/r" }],
+			repo: { url: "https://example.com/r", auth: "none" },
 		};
 		await persistSessionConfig("sess-1", config);
 		expect(dbStubs.d1Query).toHaveBeenCalledTimes(1);
@@ -361,9 +474,10 @@ describe("persistSessionConfig", () => {
 			null, // idle_ttl_seconds
 			"echo hi", // post_create_cmd
 			null, // post_start_cmd
-			JSON.stringify([{ url: "https://example.com/r" }]),
+			JSON.stringify({ url: "https://example.com/r", auth: "none" }),
 			null, // ports_json
 			null, // env_vars_json
+			null, // auth_json
 		]);
 	});
 
@@ -379,20 +493,22 @@ describe("persistSessionConfig", () => {
 		// Defensive cross-check: the params length must match the column
 		// count, so a future caller adding bootstrapped_at to either side
 		// without updating the other trips this assertion immediately.
-		expect((params as unknown[]).length).toBe(10);
+		// 11 = sessionId + 10 column values (incl. auth_json added in 188b).
+		expect((params as unknown[]).length).toBe(11);
 	});
 
 	it("collapses empty array sub-records to NULL (no D1 row bloat)", async () => {
 		await persistSessionConfig("sess-empty", {
-			repos: [],
 			ports: [],
 			envVars: [],
 		});
 		const [, params] = dbStubs.d1Query.mock.calls[0]!;
-		// repos_json (param[7]), ports_json (param[8]), env_vars_json (param[9])
+		// repos_json (param[7]), ports_json (param[8]), env_vars_json (param[9]),
+		// auth_json (param[10])
 		expect(params?.[7]).toBeNull();
 		expect(params?.[8]).toBeNull();
 		expect(params?.[9]).toBeNull();
+		expect(params?.[10]).toBeNull();
 	});
 
 	it("serialises envVars + ports JSON columns (storage shape)", async () => {
@@ -449,9 +565,13 @@ describe("getSessionConfig", () => {
 					idle_ttl_seconds: null,
 					post_create_cmd: "npm i",
 					post_start_cmd: null,
-					repos_json: JSON.stringify([{ url: "https://example.com/r" }]),
+					repos_json: JSON.stringify({
+						url: "https://example.com/r",
+						auth: "none",
+					}),
 					ports_json: null,
 					env_vars_json: JSON.stringify([{ name: "FOO", type: "plain", value: "bar" }]),
+					auth_json: null,
 					bootstrapped_at: "2026-05-08 12:00:00",
 				},
 			],
@@ -462,10 +582,113 @@ describe("getSessionConfig", () => {
 		expect(got).not.toBeNull();
 		expect(got?.workspaceStrategy).toBe("preserve");
 		expect(got?.cpuLimit).toBe(2_000_000_000);
-		expect(got?.repos).toEqual([{ url: "https://example.com/r" }]);
+		expect(got?.repo).toEqual({ url: "https://example.com/r", auth: "none" });
 		expect(got?.envVars).toEqual([{ name: "FOO", type: "plain", value: "bar" }]);
+		expect(got?.auth).toBeUndefined();
 		// D1 returns suffix-less UTC; getter must not interpret as local.
 		expect(got?.bootstrappedAt?.toISOString()).toBe("2026-05-08T12:00:00.000Z");
+	});
+
+	// #188 PR 188b — backward compat. The pre-188 `repos_json` column
+	// stored an array placeholder; no production data uses it (no Repo
+	// tab UI ever shipped before #188), but the rehydrator promotes a
+	// legacy array to a single repo object so any pre-existing row from
+	// a dev DB stays usable.
+	it("promotes a legacy repos_json array to a single repo object", async () => {
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [
+				{
+					session_id: "sess-legacy-repo",
+					workspace_strategy: null,
+					cpu_limit: null,
+					mem_limit: null,
+					idle_ttl_seconds: null,
+					post_create_cmd: null,
+					post_start_cmd: null,
+					repos_json: JSON.stringify([
+						{ url: "https://example.com/r", ref: "main" },
+						{ url: "https://example.com/second" },
+					]),
+					ports_json: null,
+					env_vars_json: null,
+					auth_json: null,
+					bootstrapped_at: null,
+				},
+			],
+			success: true as const,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		const got = await getSessionConfig("sess-legacy-repo");
+		// First element wins; second is silently dropped (was a
+		// placeholder shape that never populated in production).
+		expect(got?.repo).toEqual({ url: "https://example.com/r", ref: "main" });
+	});
+
+	it("rehydrates auth_json with encrypted blobs intact", async () => {
+		const encrypted: AuthStored = {
+			pat: { ciphertext: "Y3Q=", iv: "MTIzNDU2Nzg5MDEy", tag: "MTIzNDU2Nzg5MDEyMzQ1Ng==" },
+			ssh: {
+				privateKey: {
+					ciphertext: "a2V5",
+					iv: "MTIzNDU2Nzg5MDEy",
+					tag: "MTIzNDU2Nzg5MDEyMzQ1Ng==",
+				},
+				knownHosts: "default",
+			},
+		};
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [
+				{
+					session_id: "sess-auth",
+					workspace_strategy: null,
+					cpu_limit: null,
+					mem_limit: null,
+					idle_ttl_seconds: null,
+					post_create_cmd: null,
+					post_start_cmd: null,
+					repos_json: null,
+					ports_json: null,
+					env_vars_json: null,
+					auth_json: JSON.stringify(encrypted),
+					bootstrapped_at: null,
+				},
+			],
+			success: true as const,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		const got = await getSessionConfig("sess-auth");
+		expect(got?.auth).toEqual(encrypted);
+	});
+
+	// Defence-in-depth: a hand-edited D1 row that drops one of
+	// ciphertext/iv/tag must NOT reach the decrypt path — that would be
+	// an effective DoS for the session (every spawn throws). Drop the
+	// malformed credential with a logger warn instead.
+	it("drops auth_json entries with missing iv/tag fields", async () => {
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [
+				{
+					session_id: "sess-auth-bad",
+					workspace_strategy: null,
+					cpu_limit: null,
+					mem_limit: null,
+					idle_ttl_seconds: null,
+					post_create_cmd: null,
+					post_start_cmd: null,
+					repos_json: null,
+					ports_json: null,
+					env_vars_json: null,
+					auth_json: JSON.stringify({
+						pat: { ciphertext: "Y3Q=" /* missing iv + tag */ },
+					}),
+					bootstrapped_at: null,
+				},
+			],
+			success: true as const,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		const got = await getSessionConfig("sess-auth-bad");
+		expect(got?.auth).toBeUndefined();
 	});
 
 	// PR #210 round 2 fix: `session_configs.env_vars_json` had a
@@ -593,12 +816,13 @@ describe("getSessionConfig", () => {
 					idle_ttl_seconds: null,
 					post_create_cmd: null,
 					post_start_cmd: null,
-					// All three JSON columns deliberately broken — a direct
+					// All four JSON columns deliberately broken — a direct
 					// SQL write or migration corruption is the only way to
 					// reach this state, and the row should still be readable.
 					repos_json: "{not json",
 					ports_json: "[oh no",
 					env_vars_json: "definitely not",
+					auth_json: "}also broken",
 					bootstrapped_at: null,
 				},
 			],
@@ -607,9 +831,10 @@ describe("getSessionConfig", () => {
 		}));
 		const got = await getSessionConfig("sess-bad-json");
 		expect(got).not.toBeNull();
-		expect(got?.repos).toBeUndefined();
+		expect(got?.repo).toBeUndefined();
 		expect(got?.ports).toBeUndefined();
 		expect(got?.envVars).toBeUndefined();
+		expect(got?.auth).toBeUndefined();
 	});
 
 	it("treats unknown workspace_strategy values as undefined (defence-in-depth)", async () => {
@@ -626,6 +851,7 @@ describe("getSessionConfig", () => {
 					repos_json: null,
 					ports_json: null,
 					env_vars_json: null,
+					auth_json: null,
 					bootstrapped_at: null,
 				},
 			],
@@ -707,5 +933,78 @@ describe("encryptSecretEntries / decryptStoredEntries / redactStoredEntries", ()
 			return { ...e, tag: tagBytes.toString("base64") };
 		});
 		expect(() => decryptStoredEntries(tampered)).toThrow();
+	});
+});
+
+// ── Auth-blob encrypt / decrypt / redact round-trip (#188 PR 188b) ───────
+
+describe("encryptAuthCredentials / decryptStoredAuth / redactStoredAuth", () => {
+	it("returns undefined for an empty / absent input (column collapses to NULL)", () => {
+		expect(encryptAuthCredentials(undefined)).toBeUndefined();
+		expect(encryptAuthCredentials({})).toBeUndefined();
+	});
+
+	it("round-trips a PAT credential via real AES-GCM", () => {
+		const stored = encryptAuthCredentials({ pat: "ghp_secrettoken_1234567890" });
+		expect(stored).toBeDefined();
+		expect(stored?.pat).toBeDefined();
+		// Storage shape: only ciphertext + iv + tag — no plaintext.
+		expect(stored?.pat).not.toHaveProperty("value");
+		expect(stored?.pat?.ciphertext).toBeTruthy();
+		expect(stored?.pat?.iv).toBeTruthy();
+		expect(stored?.pat?.tag).toBeTruthy();
+		// Round-trip recovers the original plaintext.
+		const back = decryptStoredAuth(stored!);
+		expect(back.pat).toBe("ghp_secrettoken_1234567890");
+		expect(back.ssh).toBeUndefined();
+	});
+
+	it("round-trips an SSH credential and preserves knownHosts verbatim", () => {
+		const privateKey = "-----BEGIN OPENSSH PRIVATE KEY-----\nbase64bytes\n-----END\n";
+		const knownHosts = "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5...";
+		const stored = encryptAuthCredentials({
+			ssh: { privateKey, knownHosts },
+		});
+		expect(stored?.ssh).toBeDefined();
+		// knownHosts is public — stored verbatim, NOT encrypted.
+		expect(stored?.ssh?.knownHosts).toBe(knownHosts);
+		// privateKey is encrypted: ciphertext envelope, no plaintext.
+		expect(stored?.ssh?.privateKey).toMatchObject({
+			ciphertext: expect.any(String),
+			iv: expect.any(String),
+			tag: expect.any(String),
+		});
+		const back = decryptStoredAuth(stored!);
+		expect(back.ssh?.privateKey).toBe(privateKey);
+		expect(back.ssh?.knownHosts).toBe(knownHosts);
+	});
+
+	it("decryptStoredAuth throws on a tampered ciphertext (GCM auth tag)", () => {
+		const stored = encryptAuthCredentials({ pat: "ghp_token" });
+		// Flip the last byte of the tag — auth check fails.
+		const tagBytes = Buffer.from(stored!.pat!.tag, "base64");
+		tagBytes[tagBytes.length - 1] ^= 0x01;
+		const tampered: AuthStored = {
+			pat: { ...stored!.pat!, tag: tagBytes.toString("base64") },
+		};
+		expect(() => decryptStoredAuth(tampered)).toThrow();
+	});
+
+	it("redactStoredAuth collapses pat / ssh.privateKey to { isSet: true } and keeps knownHosts visible", () => {
+		const stored = encryptAuthCredentials({
+			pat: "ghp_token",
+			ssh: { privateKey: "secretkey", knownHosts: "default" },
+		});
+		const redacted = redactStoredAuth(stored);
+		expect(redacted).toEqual({
+			pat: { isSet: true },
+			ssh: { isSet: true, knownHosts: "default" },
+		});
+		// Defensive: no encrypted material survives the redact.
+		expect(JSON.stringify(redacted)).not.toMatch(/ciphertext|iv|tag|secretkey/);
+	});
+
+	it("redactStoredAuth returns undefined for undefined input", () => {
+		expect(redactStoredAuth(undefined)).toBeUndefined();
 	});
 });
