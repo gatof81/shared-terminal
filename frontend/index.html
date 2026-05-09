@@ -129,6 +129,7 @@
           <div id="session-list"></div>
           <div id="sidebar-footer">
             <span id="sidebar-user-display" aria-hidden="true"></span>
+            <button id="sidebar-templates-btn" type="button">Templates</button>
             <button id="sidebar-invites-btn" type="button">Invites</button>
             <button id="sidebar-logout-btn" type="button">Logout</button>
           </div>
@@ -725,6 +726,42 @@
           + Generate new invite
         </button>
         <div id="invite-list" class="invite-list"></div>
+      </div>
+    </div>
+
+    <!-- Templates page (#195 PR 195c). Lists the user's own
+         templates with Use / Delete actions. Click Use → closes
+         this modal and opens the create-session modal pre-filled
+         with the template's config. Click Delete → confirms then
+         removes the row. Edit + save-from-running-session are
+         deferred to follow-ups. -->
+    <div id="templates-modal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close-modal></div>
+      <div
+        class="modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="templates-modal-title"
+      >
+        <div class="modal-header">
+          <h2 id="templates-modal-title">Templates</h2>
+          <button
+            class="modal-close"
+            type="button"
+            aria-label="Close"
+            data-close-modal
+          >
+            ×
+          </button>
+        </div>
+        <p class="modal-hint">
+          Reusable session-config presets. Use to pre-fill a new
+          session; secret values are stripped on save and re-prompted
+          on use.
+        </p>
+        <div id="templates-list">
+          <p class="modal-hint" id="templates-empty-hint">Loading templates…</p>
+        </div>
       </div>
     </div>
 

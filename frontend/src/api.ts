@@ -413,6 +413,31 @@ export async function createTemplate(input: {
 	return res.json();
 }
 
+export async function listTemplates(): Promise<TemplateSummary[]> {
+	const res = await apiFetch("/templates");
+	if (!res.ok) {
+		throw new Error(`Failed to list templates (${res.status})`);
+	}
+	return res.json();
+}
+
+export async function getTemplate(id: string): Promise<Template> {
+	const res = await apiFetch(`/templates/${encodeURIComponent(id)}`);
+	if (!res.ok) {
+		throw new Error(`Failed to load template (${res.status})`);
+	}
+	return res.json();
+}
+
+export async function deleteTemplate(id: string): Promise<void> {
+	const res = await apiFetch(`/templates/${encodeURIComponent(id)}`, {
+		method: "DELETE",
+	});
+	if (!res.ok && res.status !== 204) {
+		throw new Error(`Failed to delete template (${res.status})`);
+	}
+}
+
 export async function listSessions(includeTerminated = false): Promise<SessionInfo[]> {
 	const path = includeTerminated ? "/sessions?all=true" : "/sessions";
 	const res = await apiFetch(path);

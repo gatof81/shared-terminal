@@ -18,7 +18,9 @@ import {
 	createTemplate,
 	deleteSession,
 	deleteTab,
+	deleteTemplate,
 	type EnvVarEntryInput,
+	getTemplate,
 	type Invite,
 	InviteRequiredError,
 	isAdmin,
@@ -26,6 +28,7 @@ import {
 	listInvites,
 	listSessions,
 	listTabs,
+	listTemplates,
 	login,
 	logout,
 	openBootstrapWs,
@@ -39,6 +42,8 @@ import {
 	stripConfigForTemplate,
 	type Tab,
 	TabNotFoundError,
+	type Template,
+	type TemplateSummary,
 	uploadSessionFiles,
 } from "./api.js";
 import { parseDotEnv } from "./envParser.js";
@@ -1978,6 +1983,254 @@ saveTemplateForm.addEventListener("submit", async (e) => {
 	}
 });
 
+// ── Templates page (#195 / PR 195c) ─────────────────────────────────────────
+//
+// Sidebar entry → modal listing the user's own templates with Use /
+// Delete actions. Use opens the create-session modal pre-filled with
+// the template's config; secret-slot env entries collapse back to
+// type:"secret" with empty values so the user has to fill them in
+// before submit. Edit is deferred to a follow-up.
+
+const sidebarTemplatesBtn = document.getElementById("sidebar-templates-btn") as HTMLButtonElement;
+const templatesModal = document.getElementById("templates-modal")!;
+const templatesList = document.getElementById("templates-list") as HTMLDivElement;
+const templatesEmptyHint = document.getElementById("templates-empty-hint") as HTMLParagraphElement;
+
+let templatesOpener: HTMLElement | null = null;
+
+function openTemplatesModal(opener: HTMLElement) {
+	templatesOpener = opener;
+	templatesModal.classList.add("open");
+	templatesModal.setAttribute("aria-hidden", "false");
+	void refreshTemplatesList();
+}
+
+function closeTemplatesModal() {
+	templatesModal.classList.remove("open");
+	templatesModal.setAttribute("aria-hidden", "true");
+	(templatesOpener ?? sidebarTemplatesBtn).focus();
+	templatesOpener = null;
+}
+
+async function refreshTemplatesList() {
+	templatesList.textContent = "";
+	templatesEmptyHint.textContent = "Loading templates…";
+	templatesList.appendChild(templatesEmptyHint);
+	try {
+		const list = await listTemplates();
+		templatesList.textContent = "";
+		if (list.length === 0) {
+			templatesEmptyHint.textContent =
+				'No templates yet. Use "Save as template…" on the new-session modal to create one.';
+			templatesList.appendChild(templatesEmptyHint);
+			return;
+		}
+		for (const t of list) {
+			templatesList.appendChild(renderTemplateCard(t));
+		}
+	} catch (err) {
+		templatesEmptyHint.textContent = `Failed to load: ${(err as Error).message}`;
+		templatesList.appendChild(templatesEmptyHint);
+	}
+}
+
+function renderTemplateCard(t: TemplateSummary): HTMLElement {
+	const card = document.createElement("div");
+	card.className = "template-card";
+	card.dataset.templateId = t.id;
+
+	const header = document.createElement("div");
+	header.className = "template-card-header";
+	const nameEl = document.createElement("strong");
+	nameEl.textContent = t.name;
+	header.appendChild(nameEl);
+	card.appendChild(header);
+
+	if (t.description) {
+		const desc = document.createElement("p");
+		desc.className = "template-card-description";
+		desc.textContent = t.description;
+		card.appendChild(desc);
+	}
+
+	const actions = document.createElement("div");
+	actions.className = "template-card-actions";
+	const useBtn = document.createElement("button");
+	useBtn.type = "button";
+	useBtn.textContent = "Use";
+	useBtn.dataset.action = "use";
+	const delBtn = document.createElement("button");
+	delBtn.type = "button";
+	delBtn.textContent = "Delete";
+	delBtn.dataset.action = "delete";
+	delBtn.className = "template-card-delete";
+	actions.appendChild(useBtn);
+	actions.appendChild(delBtn);
+	card.appendChild(actions);
+
+	return card;
+}
+
+templatesList.addEventListener("click", (e) => {
+	const target = e.target as HTMLElement;
+	const action = target.dataset.action;
+	if (action !== "use" && action !== "delete") return;
+	const card = target.closest<HTMLDivElement>(".template-card");
+	const id = card?.dataset.templateId;
+	if (!id) return;
+	if (action === "use") {
+		void useTemplate(id);
+	} else {
+		void deleteTemplateConfirmed(id, card!);
+	}
+});
+
+templatesModal.addEventListener("click", (e) => {
+	const target = e.target as HTMLElement;
+	if (target.hasAttribute("data-close-modal")) closeTemplatesModal();
+});
+
+sidebarTemplatesBtn.addEventListener("click", () => openTemplatesModal(sidebarTemplatesBtn));
+
+async function deleteTemplateConfirmed(id: string, card: HTMLDivElement) {
+	const name = card.querySelector("strong")?.textContent ?? "this template";
+	if (!confirm(`Delete template "${name}"? This cannot be undone.`)) return;
+	try {
+		await deleteTemplate(id);
+		showToast(`Template "${name}" deleted`);
+		void refreshTemplatesList();
+	} catch (err) {
+		showToast((err as Error).message, true);
+	}
+}
+
+/**
+ * Use template: closes the templates modal, opens the create-session
+ * modal, and pre-fills the form from the template's config. Secret
+ * values are placeholders the user fills in before submit.
+ */
+async function useTemplate(id: string) {
+	try {
+		const t = await getTemplate(id);
+		closeTemplatesModal();
+		openNewSessionModal(sidebarTemplatesBtn);
+		applyTemplateToForm(t);
+		showToast(`Loaded template "${t.name}". Fill in any required secrets, then Create.`);
+	} catch (err) {
+		showToast((err as Error).message, true);
+	}
+}
+
+/**
+ * Apply a template's stored config to the create-session form's
+ * in-memory state. Mirrors the collectors' field shapes in reverse —
+ * so a save-then-use round-trip ends up at the same form state the
+ * user originally typed (modulo stripped secrets).
+ *
+ * Secret-slot env entries collapse to `secret`-typed rows with empty
+ * values; the user has to type each one before submit. PAT / SSH
+ * "intent without credential" cases (config.repo.auth = pat/ssh with
+ * no auth.pat / auth.ssh) leave the credential fields empty for the
+ * user to fill in.
+ */
+function applyTemplateToForm(t: Template): void {
+	const cfg = t.config;
+	// Pre-fill the session name from the template name. The user
+	// can rename before submit; sessions and templates have
+	// independent name spaces (no uniqueness collision).
+	newSessionInput.value = t.name;
+
+	// Env vars — secret-slot becomes a `secret` row with empty
+	// value the user must fill in. Plain rows pass through.
+	envRows = (cfg.envVars ?? []).map((entry) => {
+		if (entry.type === "secret-slot") {
+			return { id: newEnvRowId(), name: entry.name, value: "", type: "secret" };
+		}
+		return {
+			id: newEnvRowId(),
+			name: entry.name,
+			value: entry.value,
+			type: entry.type,
+		};
+	});
+	renderEnvRows();
+
+	// Repo + auth. The credential fields stay empty if the
+	// template only carried the auth declaration (the strip
+	// helper drops auth.pat / auth.ssh.privateKey but keeps
+	// auth.ssh.knownHosts and the repo.auth flag).
+	if (cfg.repo) {
+		repoUrl.value = cfg.repo.url;
+		repoRef.value = cfg.repo.ref ?? "";
+		repoTarget.value = cfg.repo.target ?? "";
+		repoAuth.value = cfg.repo.auth;
+		repoDepth.value = cfg.repo.depth ? String(cfg.repo.depth) : "";
+		// Trigger the auth panel's render so PAT/SSH fields show
+		// or hide per the auth selector.
+		repoAuth.dispatchEvent(new Event("change"));
+		repoAuthPatToken.value = cfg.auth?.pat ?? "";
+		repoAuthSshKey.value = cfg.auth?.ssh?.privateKey ?? "";
+		// Leave the known-hosts mode/custom selector in its default
+		// state — known_hosts is a niche secondary field with its
+		// own mode-selector UX, and the strip helper preserves the
+		// public fingerprints anyway. Users who need a custom
+		// known_hosts after applying a template re-enter via the
+		// existing Repo-tab UI.
+	}
+
+	// Advanced — all the optional sub-sections.
+	gitIdentityName.value = cfg.gitIdentity?.name ?? "";
+	gitIdentityEmail.value = cfg.gitIdentity?.email ?? "";
+	dotfilesUrl.value = cfg.dotfiles?.url ?? "";
+	dotfilesRef.value = cfg.dotfiles?.ref ?? "";
+	dotfilesInstallScript.value = cfg.dotfiles?.installScript ?? "";
+	agentSeedSettings.value = cfg.agentSeed?.settings ?? "";
+	agentSeedClaudeMd.value = cfg.agentSeed?.claudeMd ?? "";
+	postCreateCmd.value = cfg.postCreateCmd ?? "";
+	postStartCmd.value = cfg.postStartCmd ?? "";
+
+	// Resources (cpu nano-CPUs → cores, mem bytes → GiB/MiB,
+	// idleTtl seconds → minutes/hours). Pick the most natural
+	// unit per field so the user sees the same values they would
+	// have typed.
+	resourcesCpuCores.value = cfg.cpuLimit ? String(cfg.cpuLimit / 1_000_000_000) : "";
+	if (cfg.memLimit) {
+		const gib = cfg.memLimit / 1024 ** 3;
+		if (Number.isInteger(gib) && gib >= 1) {
+			resourcesMemAmount.value = String(gib);
+			resourcesMemUnit.value = "GiB";
+		} else {
+			resourcesMemAmount.value = String(Math.round(cfg.memLimit / 1024 ** 2));
+			resourcesMemUnit.value = "MiB";
+		}
+	} else {
+		resourcesMemAmount.value = "";
+		resourcesMemUnit.value = "GiB";
+	}
+	if (cfg.idleTtlSeconds) {
+		if (cfg.idleTtlSeconds % 3600 === 0) {
+			resourcesIdleAmount.value = String(cfg.idleTtlSeconds / 3600);
+			resourcesIdleUnit.value = "hours";
+		} else {
+			resourcesIdleAmount.value = String(Math.round(cfg.idleTtlSeconds / 60));
+			resourcesIdleUnit.value = "minutes";
+		}
+	} else {
+		resourcesIdleAmount.value = "";
+		resourcesIdleUnit.value = "minutes";
+	}
+
+	// Ports — round-trip from the wire shape's `{container,public}`
+	// back to `PortRow` shape (string container for the input).
+	portRows = (cfg.ports ?? []).map((p) => ({
+		id: newPortRowId(),
+		container: String(p.container),
+		public: p.public,
+	}));
+	renderPortRows();
+	allowPrivilegedPortsCheckbox.checked = cfg.allowPrivilegedPorts === true;
+}
+
 // ── Ports tab (#190 / PR 190d) ──────────────────────────────────────────────
 //
 // Mirror of the env-tab pattern. Rows hold `{ container, public }` plus a
@@ -2581,6 +2834,8 @@ document.addEventListener("keydown", (e) => {
 		closeSaveTemplateModal();
 	} else if (newSessionModal.classList.contains("open")) {
 		closeNewSessionModal();
+	} else if (templatesModal.classList.contains("open")) {
+		closeTemplatesModal();
 	} else if (invitesModal.classList.contains("open")) {
 		closeInvitesModal();
 	} else if (pasteModal.classList.contains("open")) {
