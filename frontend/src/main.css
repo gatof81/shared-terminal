@@ -922,6 +922,18 @@ main:not([data-sidebar-ready]) #sidebar {
   font-family: -apple-system, sans-serif;
   white-space: nowrap;
 }
+.resources-mem-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.resources-mem-row input[type="number"] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.resources-mem-row select {
+  flex: 0 0 auto;
+}
 .modal-field-checkbox {
   flex-direction: row;
   align-items: center;

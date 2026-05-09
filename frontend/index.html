@@ -601,6 +601,73 @@
             </fieldset>
 
             <fieldset class="advanced-section">
+              <legend>Resources</legend>
+              <p class="modal-hint">
+                Per-session limits. Empty fields fall back to the
+                deployment defaults (2 cores / 2 GiB / no auto-stop).
+                Bounds: CPU 0.25–8 cores, memory 256 MiB–16 GiB,
+                idle TTL 1 minute–24 hours.
+              </p>
+              <div class="repo-fields-row">
+                <label class="modal-field">
+                  <span>CPU (cores)</span>
+                  <input
+                    type="number"
+                    id="resources-cpu-cores"
+                    inputmode="decimal"
+                    step="0.25"
+                    min="0.25"
+                    max="8"
+                    placeholder="2"
+                    autocomplete="off"
+                  />
+                </label>
+                <label class="modal-field">
+                  <span>Memory</span>
+                  <span class="resources-mem-row">
+                    <input
+                      type="number"
+                      id="resources-mem-amount"
+                      inputmode="numeric"
+                      step="1"
+                      min="1"
+                      placeholder="2"
+                      autocomplete="off"
+                    />
+                    <select id="resources-mem-unit">
+                      <option value="GiB" selected>GiB</option>
+                      <option value="MiB">MiB</option>
+                    </select>
+                  </span>
+                </label>
+              </div>
+              <p class="modal-hint">
+                Stops the container after N of inactivity. Workspace
+                files are preserved; opening a tab restarts it.
+              </p>
+              <div class="repo-fields-row">
+                <label class="modal-field">
+                  <span>Idle auto-stop</span>
+                  <span class="resources-mem-row">
+                    <input
+                      type="number"
+                      id="resources-idle-amount"
+                      inputmode="numeric"
+                      step="1"
+                      min="1"
+                      placeholder="Never"
+                      autocomplete="off"
+                    />
+                    <select id="resources-idle-unit">
+                      <option value="minutes" selected>minutes</option>
+                      <option value="hours">hours</option>
+                    </select>
+                  </span>
+                </label>
+              </div>
+            </fieldset>
+
+            <fieldset class="advanced-section">
               <legend>Privileged ports</legend>
               <p class="modal-hint">
                 Container processes can't bind to ports below 1024
