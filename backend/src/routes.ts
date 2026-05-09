@@ -1130,7 +1130,11 @@ export function buildRouter(
 		const body = req.body as { name?: unknown; description?: unknown; config?: unknown };
 		try {
 			const { name, description } = parseTemplateBody(body);
-			validateSessionConfig(body.config);
+			// Same `allowSecretSlots` rationale as POST: a template
+			// PUT must accept the same shapes the POST did, otherwise
+			// renaming a template that has secret-slot env vars would
+			// 400 on every save. PR #228 round 2 SHOULD-FIX.
+			validateSessionConfig(body.config, { allowSecretSlots: true });
 			const t = await templates.update(req.params.id, userId, {
 				name,
 				description,
@@ -1204,7 +1208,12 @@ function parseTemplateBody(body: { name?: unknown; description?: unknown; config
 	if (body.config === undefined || body.config === null) {
 		throw new TemplateBodyError("config is required", "config");
 	}
-	if (typeof body.config !== "object") {
+	// `typeof []` is `"object"` in JS, so a bare array would slip
+	// past `typeof !== "object"` and reach `validateSessionConfig`,
+	// where Zod surfaces a raw schema error instead of the cleaner
+	// `TemplateBodyError` path. The Array guard keeps the boundary
+	// error path consistent. PR #228 round 2 NIT.
+	if (typeof body.config !== "object" || Array.isArray(body.config)) {
 		throw new TemplateBodyError("config must be an object", "config");
 	}
 	return { name: body.name.trim(), description };
