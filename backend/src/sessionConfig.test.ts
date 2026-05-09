@@ -762,6 +762,78 @@ describe("validateSessionConfig", () => {
 		).toThrowError(/secret-slot/);
 	});
 
+	it("accepts 'secret-slot' entries when allowSecretSlots: true (templates path)", () => {
+		// PR #228 round 1 BLOCKER: the templates flow saves a config
+		// with secrets stripped to slots, so the validator MUST accept
+		// slots when called with the flag flipped on. Without this
+		// branch, every save-as-template would 400 the moment the user
+		// had any secret env vars.
+		const got = validateSessionConfig(
+			{ envVars: [{ name: "FOO", type: "secret-slot" }] },
+			{ allowSecretSlots: true },
+		);
+		expect(got?.envVars).toEqual([{ name: "FOO", type: "secret-slot" }]);
+	});
+
+	it("with allowSecretSlots: true, still rejects mixed secret-slot + duplicate name", () => {
+		// The duplicate-name dedup runs BEFORE the slot decision in the
+		// loop, so the flag relaxes only the slot rejection — every
+		// other invariant on the env-var list still fires for templates.
+		expect(() =>
+			validateSessionConfig(
+				{
+					envVars: [
+						{ name: "FOO", type: "secret-slot" },
+						{ name: "FOO", type: "plain", value: "x" },
+					],
+				},
+				{ allowSecretSlots: true },
+			),
+		).toThrowError(/duplicate entry name/);
+	});
+
+	// `allowMissingAuth` is the parallel flag for the repo↔auth
+	// cross-field check: templates that originate from a private-
+	// repo session declare the auth method ("pat" / "ssh") to
+	// preserve intent for the `Use template` flow, but the actual
+	// credential is stripped before persist. Without these
+	// pinning tests, a future refactor that inverts the
+	// `&& !allowMissingAuth` short-circuit would silently break
+	// every save-as-template for private-repo configs.
+
+	it("accepts repo.auth: 'pat' without auth.pat when allowMissingAuth: true", () => {
+		const got = validateSessionConfig(
+			{ repo: { url: "https://github.com/u/r", auth: "pat" } },
+			{ allowMissingAuth: true },
+		);
+		expect(got?.repo?.auth).toBe("pat");
+	});
+
+	it("accepts repo.auth: 'ssh' without auth.ssh when allowMissingAuth: true", () => {
+		const got = validateSessionConfig(
+			{ repo: { url: "git@github.com:u/r", auth: "ssh" } },
+			{ allowMissingAuth: true },
+		);
+		expect(got?.repo?.auth).toBe("ssh");
+	});
+
+	it("STILL rejects repo.auth: 'pat' without auth.pat when allowMissingAuth is omitted", () => {
+		// Default behaviour (POST /sessions) — credential required.
+		expect(() =>
+			validateSessionConfig({
+				repo: { url: "https://github.com/u/r", auth: "pat" },
+			}),
+		).toThrowError(/auth.pat: required/);
+	});
+
+	it("STILL rejects repo.auth: 'ssh' without auth.ssh when allowMissingAuth is omitted", () => {
+		expect(() =>
+			validateSessionConfig({
+				repo: { url: "git@github.com:u/r", auth: "ssh" },
+			}),
+		).toThrowError(/auth.ssh: required/);
+	});
+
 	it("rejects an empty secret value", () => {
 		// Plain values can be empty (POSIX `KEY=`); secret values must
 		// have content — an "empty secret" is meaningless and was

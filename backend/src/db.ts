@@ -214,6 +214,34 @@ export async function migrateDb(): Promise<void> {
                 )`,
 		`CREATE INDEX IF NOT EXISTS idx_port_mappings_session
                         ON sessions_port_mappings(session_id)`,
+		// Templates: per-user reusable session-config presets. The
+		// `config` column is a JSON blob with the same shape as
+		// `session_configs` minus secret values — `secret`-typed env
+		// entries collapse to `secret-slot` markers, and `auth.pat` /
+		// `auth.ssh.privateKey` ciphertexts are dropped (only the
+		// "isSet" intent is preserved). `Use template` flow re-prompts
+		// for those values; the schema's existing `secret-slot`
+		// rejection on `POST /sessions` (added in #186) is the
+		// regression guard if a client misbehaves and submits a
+		// template-shape config directly.
+		//
+		// `owner_user_id` has no FK to `users` because cross-table
+		// joins on D1 are HTTP round-trips and the listing endpoint
+		// already filters on `owner_user_id`. A future user-deletion
+		// path will need to drop owned templates explicitly (same
+		// shape as `session_configs.session_id`'s lack-of-CASCADE in
+		// the early sessions table).
+		`CREATE TABLE IF NOT EXISTS templates (
+                        id              TEXT PRIMARY KEY,
+                        owner_user_id   TEXT NOT NULL,
+                        name            TEXT NOT NULL,
+                        description     TEXT,
+                        config          TEXT NOT NULL,
+                        created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+                        updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+                )`,
+		`CREATE INDEX IF NOT EXISTS idx_templates_owner
+                        ON templates(owner_user_id)`,
 		`CREATE TABLE IF NOT EXISTS session_configs (
                         session_id              TEXT PRIMARY KEY,
                         workspace_strategy      TEXT,
