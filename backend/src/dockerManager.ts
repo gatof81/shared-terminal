@@ -157,11 +157,21 @@ export class DockerManager {
 	 * Returns null when no row exists (legitimate "no config supplied"
 	 * state — bare-create sessions). On a D1 transient (network blip,
 	 * Cloudflare API hiccup), logs a warning and returns null so we
-	 * fall back to defaults: a config-row read failure is an availability
-	 * concern, not a correctness one. The caps just reset to today's
-	 * defaults until the next spawn picks the row back up. Failing the
-	 * spawn here would gate every session creation on D1 being healthy,
-	 * which is a worse trade than briefly running with default caps.
+	 * fall back to defaults — availability over correctness.
+	 *
+	 * **Concrete trade-off** (PR #210 round 4): null from a transient
+	 * means the spawned container loses NOT JUST the cpu/mem caps but
+	 * also every config-supplied env var — both `plain` and `secret`
+	 * entries from `session_configs.env_vars_json`. A session whose
+	 * postCreate or app process expects `DATABASE_URL` / `OPENAI_KEY`
+	 * to be present will start, fail to find the var, and either
+	 * crash or misbehave with no error surfaced to the user beyond
+	 * this warn-level log. Failing the spawn instead would gate every
+	 * session creation on D1 health — worse trade — so we accept the
+	 * correctness gap and rely on the operator catching the warn.
+	 * Future work: a getSessionConfig that distinguishes "no row" from
+	 * "D1 error" could throw on the latter for sessions that have
+	 * envVars and fall back to defaults on the former.
 	 */
 	private async loadConfigForSpawn(sessionId: string): Promise<SessionConfigRecord | null> {
 		try {

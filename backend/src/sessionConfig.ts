@@ -316,13 +316,17 @@ export function validateSessionConfig(raw: unknown): SessionConfig | undefined {
 		//
 		// NOTE: this measures the WIRE shape (secret rows still carry
 		// `value`); the post-encryption STORAGE shape replaces `value`
-		// with `{ ciphertext, iv, tag }`, where ciphertext+iv+tag
-		// base64 encoding adds ~37% overhead per secret row. So a
-		// payload right at the 256 KiB cap can land at ~350 KiB in
-		// `env_vars_json` after encryption. Bounded by the per-entry +
-		// count caps (still well under 1 MiB worst case), so this
-		// approximation is acceptable; moving the check post-encrypt
-		// would tie validation to the route's encryption step.
+		// with `{ ciphertext, iv, tag }`, where AES-GCM ciphertext is
+		// the same byte-length as plaintext, base64 encoding adds
+		// ~33%, and IV (12 B → 16 chars b64) + tag (16 B → 24 chars
+		// b64) add ~40 chars per secret entry. So 64 secret entries
+		// each at the 16 KiB per-entry cap could yield roughly
+		// 64 × ~22 KiB ≈ 1.4 MiB stored — still inside D1 row limits
+		// but larger than the wire-shape cap. The approximation is
+		// acceptable: the per-entry + count caps cap absolute size,
+		// and moving this check post-encrypt would tie validation to
+		// the route's encryption step. PR #210 round 4 review noted
+		// the earlier ~350 KiB estimate was wrong arithmetic.
 		const serialisedBytes = Buffer.byteLength(JSON.stringify(result.data.envVars), "utf-8");
 		if (serialisedBytes > MAX_ENV_VARS_TOTAL_BYTES) {
 			throw new SessionConfigValidationError(

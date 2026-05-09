@@ -12,9 +12,12 @@ const dbStubs = vi.hoisted(() => ({
 vi.mock("./db.js", () => dbStubs);
 
 import {
+	decryptStoredEntries,
+	encryptSecretEntries,
 	getSessionConfig,
 	isEmptyConfig,
 	persistSessionConfig,
+	redactStoredEntries,
 	type SessionConfig,
 	SessionConfigSchema,
 	SessionConfigValidationError,
@@ -29,6 +32,11 @@ beforeEach(() => {
 		meta: { changes: 0, duration: 0, last_row_id: 0 },
 	}));
 });
+
+// Set the encryption key so encrypt/decrypt helpers exercise the real
+// AES-GCM primitive in the round-trip tests below. 32 bytes of `0x42`
+// is the same deterministic key the secrets.test.ts suite uses.
+process.env.SECRETS_ENCRYPTION_KEY = Buffer.alloc(32, 0x42).toString("base64");
 
 // ── Schema validation ─────────────────────────────────────────────────────
 
@@ -637,5 +645,67 @@ describe("SessionConfigSchema export", () => {
 		// validateSessionConfig wrapper) yields the same data shape.
 		const r = SessionConfigSchema.safeParse({ cpuLimit: 1 });
 		expect(r.success).toBe(true);
+	});
+});
+
+// ── Encrypt / decrypt / redact round-trip (PR #210 round 4) ──────────────
+
+describe("encryptSecretEntries / decryptStoredEntries / redactStoredEntries", () => {
+	it("round-trips secret values via real AES-GCM (no hardcoded ciphertext)", () => {
+		// The secrets.test.ts suite covers the raw AES-GCM primitive;
+		// this test pins the wiring — encryptSecretEntries produces a
+		// shape decryptStoredEntries can rehydrate, and the recovered
+		// plaintext matches.
+		const stored = encryptSecretEntries([
+			{ name: "FOO", type: "plain", value: "bar" },
+			{ name: "API_KEY", type: "secret", value: "sk-test-1234" },
+			{ name: "DB_PASSWORD", type: "secret", value: "p@ssw0rd!" },
+		]);
+		expect(stored).toHaveLength(3);
+		// Plain pass-through.
+		expect(stored[0]).toEqual({ name: "FOO", type: "plain", value: "bar" });
+		// Secret rows: no `value`, all three crypto fields populated.
+		expect(stored[1]).toMatchObject({ name: "API_KEY", type: "secret" });
+		expect(stored[1]).not.toHaveProperty("value");
+		expect((stored[1] as { ciphertext?: string }).ciphertext).toBeTruthy();
+		expect((stored[1] as { iv?: string }).iv).toBeTruthy();
+		expect((stored[1] as { tag?: string }).tag).toBeTruthy();
+		// Round-trip: recovered plaintext map matches the original
+		// inputs across both plain and secret rows.
+		const decrypted = decryptStoredEntries(stored);
+		expect(decrypted).toEqual({
+			FOO: "bar",
+			API_KEY: "sk-test-1234",
+			DB_PASSWORD: "p@ssw0rd!",
+		});
+	});
+
+	it("redactStoredEntries collapses secret rows to { name, type, isSet: true }", () => {
+		const stored = encryptSecretEntries([
+			{ name: "FOO", type: "plain", value: "bar" },
+			{ name: "API_KEY", type: "secret", value: "sk-test-1234" },
+		]);
+		const publicShape = redactStoredEntries(stored);
+		expect(publicShape).toHaveLength(2);
+		// Plain entry passes through verbatim.
+		expect(publicShape[0]).toEqual({ name: "FOO", type: "plain", value: "bar" });
+		// Secret entry: NO ciphertext, iv, or tag in the public shape.
+		expect(publicShape[1]).toEqual({ name: "API_KEY", type: "secret", isSet: true });
+		expect(publicShape[1]).not.toHaveProperty("ciphertext");
+		expect(publicShape[1]).not.toHaveProperty("iv");
+		expect(publicShape[1]).not.toHaveProperty("tag");
+		expect(publicShape[1]).not.toHaveProperty("value");
+	});
+
+	it("decryptStoredEntries throws on a tampered secret entry (GCM auth tag)", () => {
+		const stored = encryptSecretEntries([{ name: "K", type: "secret", value: "v" }]);
+		const tampered = stored.map((e) => {
+			if (e.type !== "secret") return e;
+			// Flip the last byte of the tag — auth check fails.
+			const tagBytes = Buffer.from(e.tag, "base64");
+			tagBytes[tagBytes.length - 1] ^= 0x01;
+			return { ...e, tag: tagBytes.toString("base64") };
+		});
+		expect(() => decryptStoredEntries(tampered)).toThrow();
 	});
 });
