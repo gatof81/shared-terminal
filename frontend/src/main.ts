@@ -1318,10 +1318,10 @@ function resetRepoTab(): void {
  * `undefined` when no URL is set — that's the "no repo configured"
  * signal the bootstrap runner reads as a no-op.
  *
- * Trims input strings; empty `ref` / `target` are passed through as
- * empty strings (the backend interprets `ref: ""` as "remote HEAD"
- * and `target: ""` as "workspace root"). `depth` is parsed as int
- * if non-empty.
+ * Trims input strings; empty `ref` / `target` are omitted entirely
+ * from the payload (the backend's `.optional()` fields treat omission
+ * identically to `""` — "remote HEAD" and "workspace root"
+ * respectively). `depth` is parsed as int if non-empty.
  *
  * The collected shape is the `{ repo, auth }` pair the backend's
  * `validateSessionConfig` cross-field check expects. We do NOT
