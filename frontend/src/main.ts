@@ -1996,9 +1996,15 @@ export function collectPortsForSubmit(): {
 	const out: NonNullable<SessionConfigPayload["ports"]> = [];
 	for (const row of portRows) {
 		if (row.container === "") continue;
-		const parsed = Number(row.container);
-		if (!Number.isFinite(parsed)) continue;
-		out.push({ container: Math.trunc(parsed), public: row.public });
+		// `parseInt(_, 10)` + `Number.isInteger` matches the rest of the
+		// file's integer-parsing idiom and catches the corner where
+		// `Number("3000.9")` would silently truncate to `3000` —
+		// `type="number"` mostly prevents that at the browser layer,
+		// but the value can still arrive non-integer via paste or a
+		// browser without strict step-validation. PR #224 round 1 NIT.
+		const parsed = Number.parseInt(row.container, 10);
+		if (!Number.isInteger(parsed)) continue;
+		out.push({ container: parsed, public: row.public });
 	}
 	const result: ReturnType<typeof collectPortsForSubmit> = {};
 	if (out.length > 0) result.ports = out;
