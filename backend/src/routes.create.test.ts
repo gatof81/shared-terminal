@@ -238,11 +238,17 @@ describe("POST /sessions — postCreate hard-fail path", () => {
 		expect(bootstrapStubs.markBootstrapped).not.toHaveBeenCalled();
 	});
 
-	it("preserves the failed row even when D1 transient breaks updateStatus", async () => {
-		// PR #207 round 3 fix: a thrown updateStatus must not propagate
-		// to the outer catch (which would deleteRow). The user-visible
-		// 500 with bootstrapOutput is what matters — operator picks up
-		// the CRITICAL log and flips the row manually.
+	it("rolls back the row + kills the container if updateStatus throws on hard-fail", async () => {
+		// PR #207 round 5 fix (replaces round 3): a thrown updateStatus
+		// must propagate so the outer catch tears the half-state row
+		// down. The previous behaviour swallowed the throw, leaving the
+		// row at (running, null) — which reconcile() would silently
+		// promote to (stopped, null), letting /start respawn an
+		// unbootstrapped container. Trade-off accepted: on this rare
+		// D1-hiccup path the user loses bootstrapOutput in the 500
+		// body (the response never reaches `res.json` because the
+		// exception jumped out earlier), but they don't get a
+		// respawnable orphan. CRITICAL operator log + general 500.
 		const { sessions, docker, spies } = makeFakes({
 			postCreateExit: 1,
 			postCreateOutput: "boom",
@@ -260,11 +266,45 @@ describe("POST /sessions — postCreate hard-fail path", () => {
 		});
 		expect(res.status).toBe(500);
 		const body = (await res.json()) as { bootstrapOutput?: string };
-		// The captured output still rides out in the response — that's
-		// the user-visible escape hatch.
-		expect(body.bootstrapOutput).toBe("boom");
-		// Row was NOT deleted by the outer catch.
-		expect(spies.deleteRow).not.toHaveBeenCalled();
+		// Generic 500 — the bootstrapOutput field is GONE from the
+		// response (we never reached the json call inside the if).
+		expect(body.bootstrapOutput).toBeUndefined();
+		// Outer catch ran: row deleted, container killed (no orphan,
+		// no respawnable row).
+		expect(spies.deleteRow).toHaveBeenCalledWith("sess-1");
+		expect(spies.kill).toHaveBeenCalledWith("sess-1");
+	});
+
+	it("returns 201 + calls markBootstrapped + runPostStart on the success path", async () => {
+		// Round-5 NIT: every other test in this file covers a failure
+		// shape. Pinning the happy path ensures a future refactor that
+		// drops `markBootstrapped` (single-use gate that prevents
+		// postCreate re-runs) or that fires `runPostStart` before
+		// `markBootstrapped` (would re-run a fresh hook every restart
+		// in the wrong order) trips an obvious test.
+		const { sessions, docker, spies } = makeFakes({
+			postCreateExit: 0,
+			postCreateOutput: "installed\n",
+		});
+		await spinUp(sessions, docker);
+
+		const res = await fetch(`${baseUrl}/api/sessions`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				name: "test",
+				config: {
+					postCreateCmd: "npm install",
+					postStartCmd: "npm run dev",
+				},
+			}),
+		});
+		expect(res.status).toBe(201);
+		expect(spies.runPostCreate).toHaveBeenCalledWith("sess-1", "npm install");
+		expect(bootstrapStubs.markBootstrapped).toHaveBeenCalledWith("sess-1");
+		expect(spies.runPostStart).toHaveBeenCalledWith("sess-1", "npm run dev");
+		expect(spies.kill).not.toHaveBeenCalled();
+		expect(spies.updateStatus).not.toHaveBeenCalled();
 	});
 
 	it("kills the container in the outer catch even on a post-spawn / post-runPostCreate failure", async () => {

@@ -465,26 +465,36 @@ export function buildRouter(
 					validatedConfig.postCreateCmd,
 				);
 				if (exitCode !== 0) {
+					// Status flip MUST land BEFORE the docker.kill, NOT
+					// after (round-5 review). If we flipped after, a D1
+					// transient on the flip would leave the row at
+					// `(running, null)` (kill nulled container_id), and
+					// reconcile() on the next backend boot would promote
+					// it to `stopped` — a state the /start 409 guard
+					// happily allows, silently respawning an
+					// unbootstrapped container.
+					//
+					// We deliberately do NOT swallow this UPDATE's error.
+					// If it throws, the exception propagates to the outer
+					// catch which tears down the row + container as a
+					// generic create failure. Trade-off: on a D1 hiccup
+					// the user loses the captured `bootstrapOutput` from
+					// the 500 body (we never reach the json call) and
+					// the sidebar never shows the failure row. That's
+					// strictly better than the alternative, which is a
+					// row that reconcile silently promotes to stopped
+					// and the user respawns into.
+					await sessions.updateStatus(meta.sessionId, "failed");
+					// Kill is best-effort. If it fails, we have an orphan
+					// container with status=failed — a leak, not a
+					// security issue: reconcile selects only `running`
+					// rows so it skips this one, the /start 409 guard
+					// refuses the row, and manual `docker rm` resolves
+					// the leak. CRITICAL log surfaces it for operators.
 					await docker.kill(meta.sessionId).catch((e) => {
 						logger.error(
-							`[routes] kill after failed postCreate ${meta?.sessionId} threw: ${(e as Error).message}`,
-						);
-					});
-					// Swallow D1 transients here on purpose: a thrown
-					// `updateStatus` would propagate to the outer catch,
-					// which would then call `sessions.deleteRow` — wiping
-					// the very row the `failed` status is meant to
-					// preserve for audit (the captured output already
-					// went into the response below, but the sidebar
-					// would never show the failure). Loud log so an
-					// operator can manually flip the row from `running`
-					// to `failed` after the fact; the user still sees
-					// the captured `bootstrapOutput` in this response.
-					await sessions.updateStatus(meta.sessionId, "failed").catch((e) => {
-						logger.error(
-							`[routes] CRITICAL: could not flip session ${meta?.sessionId} to failed: ${(e as Error).message}. ` +
-								"Container is killed; row likely still shows status=running. " +
-								"Operator must update D1 manually to reflect the failure.",
+							`[routes] CRITICAL: kill after failed postCreate ${meta?.sessionId} threw: ${(e as Error).message}. ` +
+								"Row already flipped to failed; container may need manual `docker rm`.",
 						);
 					});
 					res.status(500).json({
