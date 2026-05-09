@@ -101,6 +101,19 @@ describe("extractAuthToken", () => {
 	it("decodes percent-encoded values", () => {
 		expect(extractAuthToken("st_token=ab%2Bc%3Dd")).toBe("ab+c=d");
 	});
+
+	// PR #223 round 1 SHOULD-FIX. A malformed percent sequence
+	// (`%ZZ`, lone `%`, `%G1`) would throw URIError out of
+	// decodeURIComponent and propagate to the dispatcher's `.catch`
+	// path — emitting a 502 with a confusing "dispatch failed" log
+	// when the right answer is "fall back to raw value, let the JWT
+	// verifier reject it as 401". Mirrors `extractTokenFromCookieHeader`
+	// in auth.ts.
+	it("falls back to the raw value when percent-decode throws", () => {
+		expect(extractAuthToken("st_token=%ZZ")).toBe("%ZZ");
+		expect(extractAuthToken("st_token=ab%")).toBe("ab%");
+		expect(extractAuthToken("st_token=%G1")).toBe("%G1");
+	});
 });
 
 // ── PORT_PROXY_BASE_DOMAIN validation ────────────────────────────────────

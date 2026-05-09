@@ -98,7 +98,20 @@ const TOKEN_COOKIE_REGEX = /(?:^|;\s*)st_token=([^;]+)/;
 export function extractAuthToken(cookieHeader: string | undefined): string | null {
 	if (!cookieHeader) return null;
 	const m = cookieHeader.match(TOKEN_COOKIE_REGEX);
-	return m ? decodeURIComponent(m[1]!) : null;
+	if (!m) return null;
+	// `decodeURIComponent` throws URIError on a malformed percent
+	// sequence (e.g. `st_token=%ZZ`). Without the catch, the throw
+	// propagates through `authorize()` to the `middleware` `.catch()`
+	// and emits a 502 with a confusing "dispatch failed" log line —
+	// when the right answer is "treat as raw value, let the JWT
+	// verifier reject it as a 401". Mirrors the same pattern in
+	// `extractTokenFromCookieHeader` in auth.ts (PR #223 round 1
+	// SHOULD-FIX).
+	try {
+		return decodeURIComponent(m[1]!);
+	} catch {
+		return m[1]!;
+	}
 }
 
 /**
@@ -119,6 +132,17 @@ function buildProxy(): httpProxy {
 		// `ws: false` here — the dispatcher hand-routes WS upgrades
 		// via proxy.ws() in `dispatchUpgrade` below, not auto.
 		ws: false,
+		// 30 s upstream-response cap. Without this, a stuck container
+		// (infinite loop, deadlock, slow I/O) holds the inbound client
+		// socket AND the upstream socket open until the container is
+		// killed — accumulating open fds against the server's limit in
+		// proportion to the number of stalled in-flight requests. With
+		// the timeout, http-proxy fires `error` on expiry and our
+		// handler below closes the response with 502. PR #223 round 1
+		// SHOULD-FIX. Long-lived WS connections are unaffected
+		// (proxyTimeout applies to HTTP responses, not the upgraded
+		// socket lifetime).
+		proxyTimeout: 30_000,
 	});
 	proxy.on("error", (err, _req, res) => {
 		// res can be either a ServerResponse or a Socket (for WS).
@@ -128,10 +152,18 @@ function buildProxy(): httpProxy {
 		logger.warn(`[port-dispatcher] proxy error: ${(err as Error).message}`);
 		if (isHttpRes) {
 			const httpRes = res as ServerResponse;
+			// `end()` lives inside the headersSent guard for symmetry
+			// with `writeHead`. After bytes have already been streamed
+			// to the client a follow-up `end("Bad Gateway: …")` would
+			// emit the error string after the legitimate body —
+			// truncating the proxy stream is the right call (just
+			// destroy). PR #223 round 1 NIT.
 			if (!httpRes.headersSent) {
 				httpRes.writeHead(502, { "Content-Type": "text/plain" });
+				httpRes.end("Bad Gateway: target unreachable");
+			} else {
+				httpRes.destroy();
 			}
-			httpRes.end("Bad Gateway: target unreachable");
 		} else {
 			(res as Duplex).destroy();
 		}
@@ -225,11 +257,21 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 			})
 			.catch((err) => {
 				logger.error(`[port-dispatcher] dispatch failed: ${(err as Error).message}`);
+				// Same guard intent as the proxy `error` handler: the
+				// 502 + body is only emitted when nothing has reached
+				// the client yet. In the realistic execution path
+				// `authorize()` throws before `proxy.web()` runs so
+				// `headersSent` is always false here, but keeping the
+				// guard around `end()` matches the contract in case a
+				// future refactor reorders things. PR #223 round 1
+				// NIT.
 				if (!res.headersSent) {
 					res.statusCode = 502;
 					res.setHeader("Content-Type", "text/plain");
+					res.end("Bad Gateway");
+				} else {
+					res.destroy();
 				}
-				res.end("Bad Gateway");
 			});
 	}
 
