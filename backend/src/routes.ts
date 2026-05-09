@@ -38,6 +38,13 @@ import {
 	DEFAULT_RATE_LIMIT_CONFIG,
 	UsernameRateLimiter,
 } from "./rateLimit.js";
+import {
+	isEmptyConfig,
+	persistSessionConfig,
+	type SessionConfig,
+	SessionConfigValidationError,
+	validateSessionConfig,
+} from "./sessionConfig.js";
 import type { SessionManager } from "./sessionManager.js";
 import { ForbiddenError, NotFoundError, SessionQuotaExceededError } from "./sessionManager.js";
 import type { SessionMeta } from "./types.js";
@@ -344,11 +351,12 @@ export function buildRouter(
 
 	router.post("/sessions", async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
-		const { name, cols, rows, envVars } = req.body as {
+		const { name, cols, rows, envVars, config } = req.body as {
 			name?: string;
 			cols?: number;
 			rows?: number;
 			envVars?: unknown;
+			config?: unknown;
 		};
 		if (!name || typeof name !== "string") {
 			res.status(400).json({ error: "body.name is required" });
@@ -392,6 +400,33 @@ export function buildRouter(
 			}
 			throw err;
 		}
+		// Two env-var stores coexist after #185 lands:
+		//   - `body.envVars` →  `sessions.env_vars`            (legacy)
+		//   - `body.config.envVars` → `session_configs.env_vars_json`
+		// A single POST can populate both. Today only the legacy store is
+		// applied at `docker run` time (see DockerManager.spawn). PR 185b
+		// (the runner) owns the merge-order decision: union semantics with
+		// config taking precedence on key collisions is the obvious choice,
+		// but it must be the *explicit* choice — accidental "first one
+		// wins by implementation order" would surprise users who expected
+		// the override they typed in the modal to win. Don't add merge
+		// logic here without that decision in 185b.
+		// `body.config` is the new typed config object (#185 / epic #184).
+		// All sub-fields are optional, so an undefined / empty object is
+		// the bare-POST path and behaves exactly like before. A failed
+		// validation surfaces the first offending field's path
+		// (e.g. "config.cpuLimit") in the 400 message so the client can
+		// fix the input without trial-and-error.
+		let validatedConfig: SessionConfig | undefined;
+		try {
+			validatedConfig = validateSessionConfig(config);
+		} catch (err) {
+			if (err instanceof SessionConfigValidationError) {
+				res.status(400).json({ error: err.message });
+				return;
+			}
+			throw err;
+		}
 		// `sessions.create` writes a D1 row BEFORE `docker.spawn` runs, so a
 		// spawn failure (missing image, docker daemon down, name collision on
 		// the 12-char container-name prefix, workspace chown EACCES) would
@@ -402,6 +437,17 @@ export function buildRouter(
 		let meta: Awaited<ReturnType<SessionManager["create"]>> | null = null;
 		try {
 			meta = await sessions.create({ userId, name, cols, rows, envVars: validatedEnvVars });
+			// Persist the typed config BEFORE spawning the container. If
+			// docker.spawn fails the rollback in the catch below deletes
+			// the sessions row and ON DELETE CASCADE on session_configs
+			// drops the config row atomically — no orphan config rows.
+			// Skip the INSERT for an empty `{}` config so we don't bloat
+			// D1 with no-op rows; isEmptyConfig handles the bare-POST
+			// case (validatedConfig === undefined) implicitly via the
+			// outer guard.
+			if (validatedConfig && !isEmptyConfig(validatedConfig)) {
+				await persistSessionConfig(meta.sessionId, validatedConfig);
+			}
 			await docker.spawn(meta.sessionId);
 			const updated = await sessions.get(meta.sessionId);
 			if (!updated) {

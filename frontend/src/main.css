@@ -485,37 +485,144 @@ main:not([data-sidebar-ready]) #sidebar {
   accent-color: #58a6ff;
   cursor: pointer;
 }
-#new-session-form {
-  padding: 0.75rem 1rem;
-  border-bottom: 1px solid #30363d;
-  display: flex;
-  gap: 0.5rem;
-}
-#new-session-form input {
-  flex: 1;
-  background: #0d1117;
-  border: 1px solid #30363d;
-  border-radius: 6px;
-  padding: 0.35rem 0.6rem;
-  font-size: 0.8rem;
-  color: #e6edf3;
-  outline: none;
-}
-#new-session-form input:focus {
-  border-color: #58a6ff;
-}
-#new-session-form button {
+#new-session-btn {
+  margin: 0.75rem 1rem;
   background: #238636;
   border: none;
   border-radius: 6px;
-  padding: 0.35rem 0.65rem;
+  padding: 0.5rem 0.75rem;
   color: #fff;
-  font-size: 0.8rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+}
+#new-session-btn:hover {
+  background: #2ea043;
+}
+#new-session-btn:focus-visible {
+  outline: 2px solid #58a6ff;
+  outline-offset: 2px;
+}
+
+/* Tabbed new-session modal — see issue #185 / epic #184. */
+.session-modal-card {
+  width: 540px;
+}
+.session-tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid #30363d;
+  margin-bottom: 0.85rem;
+  /* Allow horizontal scroll on narrow viewports — five tabs in
+     ~340px would otherwise wrap and break the role=tablist row. */
+  overflow-x: auto;
+}
+.session-tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #8b949e;
+  padding: 0.45rem 0.75rem;
+  font-size: 0.82rem;
   cursor: pointer;
   white-space: nowrap;
+  border-radius: 4px 4px 0 0;
 }
-#new-session-form button:hover {
+.session-tab:hover {
+  color: #e6edf3;
+  background: rgba(255, 255, 255, 0.04);
+}
+.session-tab.is-active {
+  color: #e6edf3;
+  border-bottom-color: #58a6ff;
+}
+.session-tab:focus-visible {
+  outline: 2px solid #58a6ff;
+  outline-offset: -2px;
+}
+.session-tab-panel {
+  display: none;
+  flex-direction: column;
+  gap: 0.65rem;
+  min-height: 6rem;
+}
+.session-tab-panel.is-active {
+  display: flex;
+}
+.session-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.session-field-label {
+  font-size: 0.78rem;
+  color: #8b949e;
+}
+.session-field input[type="text"] {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.85rem;
+  color: #e6edf3;
+  outline: none;
+}
+.session-field input[type="text"]:focus {
+  border-color: #58a6ff;
+}
+.session-placeholder {
+  font-size: 0.82rem;
+  color: #8b949e;
+  line-height: 1.55;
+  background: rgba(88, 166, 255, 0.06);
+  border: 1px dashed #30363d;
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+}
+.session-placeholder strong {
+  color: #e6edf3;
+  display: inline-block;
+  margin-bottom: 0.35rem;
+}
+.session-placeholder a {
+  color: #58a6ff;
+  text-decoration: none;
+}
+.session-placeholder a:hover {
+  text-decoration: underline;
+}
+.session-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  border-top: 1px solid #21262d;
+  padding-top: 0.85rem;
+}
+.session-modal-actions button {
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 0.45rem 0.85rem;
+  color: #e6edf3;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.session-modal-actions button:hover {
+  background: #30363d;
+}
+.session-modal-actions button[type="submit"] {
+  background: #238636;
+  border-color: #2ea043;
+  color: #fff;
+}
+.session-modal-actions button[type="submit"]:hover {
   background: #2ea043;
+}
+.session-modal-actions button[type="submit"]:disabled {
+  opacity: 0.6;
+  cursor: progress;
 }
 #session-list {
   flex: 1;
