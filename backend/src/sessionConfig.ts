@@ -73,7 +73,12 @@ const RepoSpec = z
 			.refine((u) => REPO_URL_SCHEME.test(u), {
 				message: "url must use https:// or http:// scheme",
 			}),
-		ref: z.string().max(200).optional(),
+		// `.min(1)` matches the postCreateCmd/postStartCmd rule: a stored
+		// empty string is indistinguishable from "no ref supplied" once
+		// it lands in D1, so refusing it at ingest lets the #188 git-
+		// clone consumer use a presence-only check instead of also
+		// defending against `git clone --branch ""`.
+		ref: z.string().min(1).max(200).optional(),
 	})
 	.strict();
 

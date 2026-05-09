@@ -136,6 +136,15 @@ describe("validateSessionConfig", () => {
 		);
 	});
 
+	// Same reasoning as the empty-hook rule — stored "" ref would be
+	// indistinguishable from "no ref" and would push `git clone --branch ""`
+	// into PR 188's consumer.
+	it("rejects an empty repo ref", () => {
+		expect(() =>
+			validateSessionConfig({ repos: [{ url: "https://example.com/r", ref: "" }] }),
+		).toThrowError(SessionConfigValidationError);
+	});
+
 	// Repo URL scheme allowlist — closes the file:// / ssh:// hole the
 	// review bot flagged. PR 188 will read these values straight into a
 	// git-clone consumer, so refusing them at ingest is the only place
