@@ -1264,10 +1264,20 @@ function parseTemplateBody(body: { name?: unknown; description?: unknown; config
 	name: string;
 	description: string | null;
 } {
-	if (typeof body.name !== "string" || body.name.trim() === "") {
+	if (typeof body.name !== "string") {
 		throw new TemplateBodyError("name is required", "name");
 	}
-	if (body.name.length > MAX_TEMPLATE_NAME_LEN) {
+	// Trim BEFORE the length check + emptiness check so the API
+	// contract ("names up to N characters are accepted") matches
+	// the actual stored value. Without trim-first ordering, a
+	// 65-char input that's mostly leading whitespace would be
+	// rejected even though its trimmed form fits comfortably under
+	// the cap.
+	const name = body.name.trim();
+	if (name === "") {
+		throw new TemplateBodyError("name is required", "name");
+	}
+	if (name.length > MAX_TEMPLATE_NAME_LEN) {
 		throw new TemplateBodyError(`name exceeds ${MAX_TEMPLATE_NAME_LEN} characters`, "name");
 	}
 	let description: string | null = null;
@@ -1275,13 +1285,18 @@ function parseTemplateBody(body: { name?: unknown; description?: unknown; config
 		if (typeof body.description !== "string") {
 			throw new TemplateBodyError("description must be a string", "description");
 		}
-		if (body.description.length > MAX_TEMPLATE_DESCRIPTION_LEN) {
+		// Trim then collapse-empty-to-null. A `"   "` description
+		// would otherwise persist with its whitespace and render
+		// blank-looking in the UI while the column reports non-null
+		// — a UX trap when the user thinks they cleared the field.
+		const trimmed = body.description.trim();
+		if (trimmed.length > MAX_TEMPLATE_DESCRIPTION_LEN) {
 			throw new TemplateBodyError(
 				`description exceeds ${MAX_TEMPLATE_DESCRIPTION_LEN} characters`,
 				"description",
 			);
 		}
-		description = body.description;
+		description = trimmed === "" ? null : trimmed;
 	}
 	if (body.config === undefined || body.config === null) {
 		throw new TemplateBodyError("config is required", "config");
@@ -1294,7 +1309,7 @@ function parseTemplateBody(body: { name?: unknown; description?: unknown; config
 	if (typeof body.config !== "object" || Array.isArray(body.config)) {
 		throw new TemplateBodyError("config must be an object", "config");
 	}
-	return { name: body.name.trim(), description };
+	return { name, description };
 }
 
 function serializeTemplate(t: templates.Template): {

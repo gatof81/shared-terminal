@@ -59,12 +59,26 @@ export interface TemplateInput {
 const TEMPLATE_NOT_FOUND = "Template not found";
 
 function rowToTemplate(row: TemplateRow): Template {
+	let config: unknown;
+	try {
+		config = JSON.parse(row.config);
+	} catch (err) {
+		// A corrupt row would otherwise propagate a raw `SyntaxError`
+		// out of `.map(rowToTemplate)` in `listForUser`, aborting the
+		// whole list and surfacing only "Internal server error" with
+		// no template id. Throwing a meaningful Error keeps the
+		// behaviour observable in logs (the route's catch-all logs
+		// the message before returning 500). Doesn't change the
+		// HTTP status, but the operator can grep the log for the
+		// row id and fix the data.
+		throw new Error(`templates: corrupt config JSON in row ${row.id}: ${(err as Error).message}`);
+	}
 	return {
 		id: row.id,
 		ownerUserId: row.owner_user_id,
 		name: row.name,
 		description: row.description,
-		config: JSON.parse(row.config),
+		config,
 		// `datetime('now')` produces SQLite's `YYYY-MM-DD HH:MM:SS`
 		// (UTC, no timezone suffix). `new Date()` interprets that as
 		// LOCAL time on most engines — the same trap `sessionConfig`
@@ -108,10 +122,15 @@ export class TemplateQuotaExceededError extends Error {
  *  already owns the maximum allowed templates. */
 export async function create(userId: string, input: TemplateInput): Promise<Template> {
 	// Pre-insert count check. Not atomic with the INSERT (D1's HTTP
-	// API has no transaction primitive), so a tight create-create
-	// race could land the user one row over the cap — acceptable
-	// vs the cost of a per-user lock or a SQL constraint we don't
-	// have on D1. The session-quota path uses the same shape.
+	// API has no multi-statement transaction), so a tight
+	// create-create race could land the user one row over the cap —
+	// acceptable vs the cost of a per-user lock or a SQL constraint
+	// we don't have on D1. The session-quota path in
+	// `sessionManager.ts` uses a stricter `INSERT … SELECT … WHERE
+	// (COUNT(*) < cap)` shape that's race-free; templates accepts
+	// the one-over-cap risk because the ceiling is soft (no spawn,
+	// no resource impact) and the savings of a single round-trip
+	// vs the more complex shape weren't worth chasing here.
 	const countResult = await d1Query<{ n: number }>(
 		"SELECT COUNT(*) AS n FROM templates WHERE owner_user_id = ?",
 		[userId],
