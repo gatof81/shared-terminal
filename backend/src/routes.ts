@@ -27,7 +27,7 @@ import {
 	UsernameTakenError,
 	verifyJwt,
 } from "./auth.js";
-import { markBootstrapped } from "./bootstrap.js";
+import { type BootstrapBroadcaster, runAsyncBootstrap } from "./bootstrap.js";
 import { d1Query } from "./db.js";
 import type { DockerManager } from "./dockerManager.js";
 import { UploadQuotaExceededError } from "./dockerManager.js";
@@ -54,6 +54,7 @@ export function buildRouter(
 	sessions: SessionManager,
 	docker: DockerManager,
 	rateLimitConfig: RateLimitConfig = DEFAULT_RATE_LIMIT_CONFIG,
+	broadcaster?: BootstrapBroadcaster,
 ): Router {
 	const router = Router();
 
@@ -459,80 +460,6 @@ export function buildRouter(
 			// return 500 with the captured output. The row stays so the
 			// user can read what the hook printed (and so a recreate
 			// doesn't collide with leftover state on the same name).
-			if (validatedConfig?.postCreateCmd) {
-				const { exitCode, output } = await docker.runPostCreate(
-					meta.sessionId,
-					validatedConfig.postCreateCmd,
-				);
-				if (exitCode !== 0) {
-					// Status flip MUST land BEFORE the docker.kill, NOT
-					// after (round-5 review). If we flipped after, a D1
-					// transient on the flip would leave the row at
-					// `(running, null)` (kill nulled container_id), and
-					// reconcile() on the next backend boot would promote
-					// it to `stopped` — a state the /start 409 guard
-					// happily allows, silently respawning an
-					// unbootstrapped container.
-					//
-					// We deliberately do NOT swallow this UPDATE's error.
-					// If it throws, the exception propagates to the outer
-					// catch which tears down the row + container as a
-					// generic create failure. Trade-off: on a D1 hiccup
-					// the user loses the captured `bootstrapOutput` from
-					// the 500 body (we never reach the json call) and
-					// the sidebar never shows the failure row. That's
-					// strictly better than the alternative, which is a
-					// row that reconcile silently promotes to stopped
-					// and the user respawns into.
-					await sessions.updateStatus(meta.sessionId, "failed");
-					// Kill is best-effort. If it fails, we have an orphan
-					// container with status=failed — a leak, not a
-					// security issue: reconcile selects only `running`
-					// rows so it skips this one, the /start 409 guard
-					// refuses the row, and manual `docker rm` resolves
-					// the leak. CRITICAL log surfaces it for operators.
-					await docker.kill(meta.sessionId).catch((e) => {
-						logger.error(
-							`[routes] CRITICAL: kill after failed postCreate ${meta?.sessionId} threw: ${(e as Error).message}. ` +
-								"Row already flipped to failed; container may need manual `docker rm`.",
-						);
-					});
-					res.status(500).json({
-						error: `postCreate hook failed (exit ${exitCode})`,
-						sessionId: meta.sessionId,
-						bootstrapOutput: output,
-						bootstrapExitCode: exitCode,
-					});
-					return;
-				}
-				// Atomic UPDATE … WHERE bootstrapped_at IS NULL — the only
-				// place in the codebase that sets this column. A retry
-				// race (e.g. two concurrent retries of the same create
-				// after a partial network failure) sees changes === 0 on
-				// the loser and we just skip the no-op. Returns true if
-				// THIS caller won; we ignore the boolean here because the
-				// route is single-shot per session — the gate exists for
-				// the runner's own sanity in 185b2b's async flow.
-				await markBootstrapped(meta.sessionId);
-			}
-			// postStart hook fires from `docker.spawn` -> nope, spawn doesn't
-			// call it; only `startContainer`. The first start happens here
-			// inside spawn (via container.start), so trigger postStart for
-			// the create path explicitly. Subsequent /start calls go
-			// through `startContainer` which already runs postStart.
-			if (validatedConfig?.postStartCmd) {
-				try {
-					await docker.runPostStart(meta.sessionId, validatedConfig.postStartCmd);
-				} catch (err) {
-					// Like the runPostStartIfConfigured wrapper, don't fail the
-					// create on a postStart launch error — the container is
-					// up, postCreate succeeded, the user can still use the
-					// session.
-					logger.warn(
-						`[routes] postStart launch failed for ${meta.sessionId}: ${(err as Error).message}`,
-					);
-				}
-			}
 			const updated = await sessions.get(meta.sessionId);
 			if (!updated) {
 				// Shouldn't happen: sessions.create above just inserted this row,
@@ -541,6 +468,53 @@ export function buildRouter(
 				// runs the spawn rollback and returns 500 — correct disposition
 				// for a server-side invariant violation.
 				throw new Error(`session ${meta.sessionId} missing from D1 after create`);
+			}
+			// PR 185b2b: postCreate runs ASYNCHRONOUSLY when configured.
+			// The route returns 201 immediately so the modal can subscribe
+			// to `/ws/bootstrap/<sessionId>` and tail output live; the
+			// runner inside `runAsyncBootstrap` flips status to `failed`
+			// + kills the container on hard-fail, then broadcasts a
+			// terminal `{type:"fail"}` for the modal to render. The
+			// `bootstrapping: true` flag tells the client to open the WS
+			// instead of treating the create as immediately complete.
+			//
+			// postStart fires inside the runner on the success branch
+			// (after markBootstrapped). For sessions with postStart but
+			// NO postCreate, fire it directly here — the async runner
+			// only kicks off when there's a postCreateCmd to wait on.
+			if (validatedConfig?.postCreateCmd && broadcaster) {
+				const cfg = {
+					postCreateCmd: validatedConfig.postCreateCmd,
+					postStartCmd: validatedConfig.postStartCmd,
+				};
+				// Fire-and-forget; the runner internally catches every
+				// throw it can and translates them into broadcaster
+				// `fail` messages. A bare `void`-prefix triggers
+				// `no-floating-promises`; explicitly catching at the
+				// top level satisfies the linter and gives us a final
+				// safety net for anything the runner missed.
+				runAsyncBootstrap(meta.sessionId, cfg, { sessions, docker, broadcaster }).catch((err) => {
+					logger.error(
+						`[routes] async bootstrap escaped its own error handling for ${meta?.sessionId}: ${(err as Error).message}`,
+					);
+				});
+				res.status(201).json({ ...serializeMeta(updated), bootstrapping: true });
+				return;
+			}
+			// No postCreate (bare-create or only postStart configured).
+			// postStart fires synchronously here for the create path —
+			// `runPostStart` only kicks off a detached tmux session, so
+			// it returns quickly even though the daemon keeps running.
+			if (validatedConfig?.postStartCmd) {
+				try {
+					await docker.runPostStart(meta.sessionId, validatedConfig.postStartCmd);
+				} catch (err) {
+					// Don't fail create on a postStart launch error —
+					// the container is up and the user can still use it.
+					logger.warn(
+						`[routes] postStart launch failed for ${meta.sessionId}: ${(err as Error).message}`,
+					);
+				}
 			}
 			res.status(201).json(serializeMeta(updated));
 		} catch (err) {

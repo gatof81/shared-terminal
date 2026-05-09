@@ -1125,7 +1125,12 @@ describe("sanitiseHostname", () => {
 // ── Bootstrap hooks (#185) ─────────────────────────────────────────────────
 
 describe("DockerManager.runPostCreate", () => {
-	it("runs the cmd via `bash -c` and returns exit code + stdout", async () => {
+	// PR 185b2b switched runPostCreate to streaming: bytes flow via
+	// the optional `onOutput` callback as Docker emits them, and the
+	// return value is just `{exitCode}`. Older tests that asserted on
+	// a returned `output` string are gone — the buffering moved into
+	// `BootstrapBroadcaster` upstream.
+	it("runs the cmd via `bash -c`, streams output via onOutput, returns exitCode", async () => {
 		const { dm, container } = makeDocker({
 			oneShot: (cmd) => {
 				if (cmd[0] === "bash" && cmd[1] === "-c") {
@@ -1134,9 +1139,10 @@ describe("DockerManager.runPostCreate", () => {
 				return undefined;
 			},
 		});
-		const result = await dm.runPostCreate("s1", "npm install");
+		const chunks: string[] = [];
+		const result = await dm.runPostCreate("s1", "npm install", (c) => chunks.push(c));
 		expect(result.exitCode).toBe(0);
-		expect(result.output).toContain("installed");
+		expect(chunks.join("")).toContain("installed");
 		// Cmd shape: bash -c <user-script>. Argv form means tmux/exec
 		// gets the script as a single argument, no shell-quoting hazard.
 		const exec = mustFind(
@@ -1147,16 +1153,25 @@ describe("DockerManager.runPostCreate", () => {
 		expect(exec._cmd).toEqual(["bash", "-c", "npm install"]);
 	});
 
-	it("propagates a non-zero exit code so the route can hard-fail", async () => {
+	it("propagates a non-zero exit code so the runner can hard-fail", async () => {
 		const { dm } = makeDocker({
 			oneShot: (cmd) => {
 				if (cmd[0] === "bash") return { stdout: "boom\n", exitCode: 42 };
 				return undefined;
 			},
 		});
-		const result = await dm.runPostCreate("s1", "false");
+		const chunks: string[] = [];
+		const result = await dm.runPostCreate("s1", "false", (c) => chunks.push(c));
 		expect(result.exitCode).toBe(42);
-		expect(result.output).toContain("boom");
+		expect(chunks.join("")).toContain("boom");
+	});
+
+	it("works without an onOutput callback (streaming is opt-in)", async () => {
+		const { dm } = makeDocker({
+			oneShot: () => ({ stdout: "ok\n", exitCode: 0 }),
+		});
+		const result = await dm.runPostCreate("s1", "true");
+		expect(result.exitCode).toBe(0);
 	});
 
 	// Round-7 review fix: hooks must run from the workspace, not from
@@ -1174,33 +1189,6 @@ describe("DockerManager.runPostCreate", () => {
 			"bash -c exec for runPostCreate",
 		);
 		expect(exec._workingDir).toBe("/home/developer/workspace");
-	});
-
-	// Round-2 review fix: hook diagnostics go to stderr (`npm ERR!`,
-	// `bash: cmd: not found`, `tsc: error TS…`). The capture must
-	// include stderr, otherwise the hard-fail modal shows "(no output)"
-	// for the most common failure mode and the user can't see what
-	// went wrong.
-	it("captures stderr alongside stdout in the returned output", async () => {
-		const { dm } = makeDocker({
-			oneShot: (cmd) => {
-				// Inject a stderr frame ahead of an empty stdout to assert
-				// the combined demux walks both. The test harness packs
-				// whatever the hook returns as stdout (frame type 1), so
-				// we simulate by writing a custom multiplexed buffer
-				// directly. Easier path: use `mergeFrames` below.
-				if (cmd[0] === "bash") {
-					return { stdout: "bash: bad-cmd: not found\n", exitCode: 127 };
-				}
-				return undefined;
-			},
-		});
-		const result = await dm.runPostCreate("s1", "bad-cmd");
-		// Even with the harness packing as stdout, the combined demux
-		// must surface the bytes — exiting code 127 is the canonical
-		// "command not found" semaphore the modal now relies on.
-		expect(result.exitCode).toBe(127);
-		expect(result.output).toContain("bash: bad-cmd: not found");
 	});
 });
 

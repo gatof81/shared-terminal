@@ -763,38 +763,70 @@ export class DockerManager {
 	 * 1000); cwd is the workspace bind mount, so the hook lands in the
 	 * same place a freshly-attached terminal would.
 	 *
-	 * Output cap: `execOneShot` collects the whole stream into a Buffer
-	 * before returning. A runaway hook that streams MB of output could
-	 * push memory pressure on the backend. Acceptable for the foundation
-	 * because the user controls the command, the per-session disk quota
-	 * already bounds workspace bloat, and 185b2b's streaming runner will
-	 * forward bytes onward instead of buffering. Documented as a known
-	 * trade-off here so the streaming PR has a concrete reason to drop
-	 * the buffering.
+	 * Streaming: when `onOutput` is supplied, every demuxed chunk
+	 * (stdout + stderr, frame-arrival order) is delivered as soon as
+	 * Docker hands it to us — no full-buffer accumulation. The async
+	 * runner in `bootstrap.ts` uses this to fan output to WS subscribers
+	 * live, so a long hook (npm install, multi-stage build) doesn't
+	 * make the user stare at a blank modal for minutes.
 	 */
 	async runPostCreate(
 		sessionId: string,
 		cmd: string,
-	): Promise<{ exitCode: number; output: string }> {
-		// `combineStreams: true` so the captured output includes stderr
-		// (#207 round 2 review): npm/tsc/bash diagnostic messages all go
-		// to stderr by default, and a hook-failure modal that only
-		// displays stdout would render "(no output)" for the most common
-		// failure mode (`bash: <cmd>: command not found`).
-		//
-		// `cwd: /home/developer/workspace` so the hook lands in the same
-		// place a freshly-attached terminal would (#207 round 7 review).
-		// Without it, Docker uses the image's WORKDIR
-		// (`/home/developer`) and `npm install` / `pip install -r ...` /
-		// `cargo build` would all fail with ENOENT looking for project
-		// files in the wrong directory. `runPostStart`'s tmux-session
-		// path already gets this right via `tmux new-session -c …`;
-		// this brings the exec path in line.
-		const result = await this.execOneShot(sessionId, ["bash", "-c", cmd], {
-			combineStreams: true,
-			cwd: "/home/developer/workspace",
+		onOutput?: (chunk: string) => void,
+	): Promise<{ exitCode: number }> {
+		const meta = await this.sessions.getOrThrow(sessionId);
+		if (!meta.containerId) throw new Error("No container for this session");
+		const container = this.docker.getContainer(meta.containerId);
+
+		// Build the exec directly rather than going through `execOneShot`
+		// — we want to stream chunks via `onOutput` as they arrive, not
+		// buffer the whole stream and return at the end. Same shape on
+		// the wire (Tty:false, multiplexed frames, WorkingDir pinned to
+		// the workspace) as #207 round 7 settled.
+		const exec = await container.exec({
+			Cmd: ["bash", "-c", cmd],
+			AttachStdin: false,
+			AttachStdout: true,
+			AttachStderr: true,
+			Tty: false,
+			WorkingDir: "/home/developer/workspace",
 		});
-		return { exitCode: result.exitCode, output: result.stdout };
+		const stream = await exec.start({ hijack: false, stdin: false });
+
+		// Demux frames as they arrive so `onOutput` fires per-chunk.
+		// `pending` accumulates across `data` events when a frame
+		// header lands split across reads.
+		let pending: Buffer = Buffer.alloc(0);
+		stream.on("data", (chunk: Buffer) => {
+			pending = (pending.length === 0 ? chunk : Buffer.concat([pending, chunk])) as Buffer;
+			let off = 0;
+			while (off + 8 <= pending.length) {
+				const frameType = pending[off]!;
+				const size = pending.readUInt32BE(off + 4);
+				if (off + 8 + size > pending.length) break; // partial frame; wait for next chunk
+				const payload = pending.subarray(off + 8, off + 8 + size);
+				// Combine stdout (1) + stderr (2) into one stream — npm
+				// errors etc. live on stderr and the modal needs them.
+				if ((frameType === 1 || frameType === 2) && onOutput) {
+					try {
+						onOutput(payload.toString("utf-8"));
+					} catch (err) {
+						logger.warn(`[docker] postCreate onOutput threw: ${(err as Error).message}`);
+					}
+				}
+				off += 8 + size;
+			}
+			pending = off === pending.length ? Buffer.alloc(0) : pending.subarray(off);
+		});
+
+		await new Promise<void>((resolve, reject) => {
+			stream.on("end", () => resolve());
+			stream.on("close", () => resolve());
+			stream.on("error", reject);
+		});
+		const info = await exec.inspect();
+		return { exitCode: info.ExitCode ?? 0 };
 	}
 
 	/**

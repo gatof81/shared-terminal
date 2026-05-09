@@ -17,6 +17,7 @@ import {
 	validateJwtSecret,
 	warnIfWildcardCorsInProduction,
 } from "./auth.js";
+import { BootstrapBroadcaster } from "./bootstrap.js";
 import { migrateDb, validateD1Config } from "./db.js";
 import { DockerManager } from "./dockerManager.js";
 import { logger } from "./logger.js";
@@ -74,6 +75,14 @@ try {
 
 const sessions = new SessionManager();
 const docker = new DockerManager(sessions);
+// Single shared bootstrap broadcaster (PR 185b2b). Owned at the server
+// scope so the route's runAsyncBootstrap and the WS handler's
+// /ws/bootstrap subscriber see the same per-session listener sets and
+// buffered output. Process-local — a load-balanced multi-backend deploy
+// would lose live-tail bytes when the WS lands on a different replica
+// than the one running the hook; that's documented as a single-replica
+// constraint of the hook runner, same as the terminal-attach path.
+const bootstrapBroadcaster = new BootstrapBroadcaster();
 
 // ── Express app ───────────────────────────────────────────────────────────────
 
@@ -139,7 +148,13 @@ app.use((_req, res, next) => {
 	next();
 });
 
-app.use("/api", buildRouter(sessions, docker));
+app.use(
+	"/api",
+	// `undefined` for rateLimitConfig — buildRouter falls back to
+	// DEFAULT_RATE_LIMIT_CONFIG. Threading the broadcaster through is
+	// the only reason this call moved off the one-liner.
+	buildRouter(sessions, docker, undefined, bootstrapBroadcaster),
+);
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // ── HTTP + WebSocket server ───────────────────────────────────────────────────
@@ -152,7 +167,7 @@ const wss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
 	const url = req.url ?? "";
-	if (!url.startsWith("/ws/sessions/")) {
+	if (!url.startsWith("/ws/sessions/") && !url.startsWith("/ws/bootstrap/")) {
 		// socket.end() drains the write buffer before closing, so the
 		// 404 line actually reaches the client. socket.write() +
 		// socket.destroy() (the previous form) issues immediate
@@ -208,7 +223,7 @@ server.on("upgrade", (req, socket, head) => {
 const stopHeartbeat = startWsHeartbeat(wss, 30_000);
 
 wss.on("connection", (ws, req) => {
-	handleWsConnection(ws, req, sessions, docker);
+	handleWsConnection(ws, req, sessions, docker, bootstrapBroadcaster);
 });
 
 // ── Startup ───────────────────────────────────────────────────────────────────
