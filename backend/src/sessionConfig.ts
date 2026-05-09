@@ -288,17 +288,23 @@ export function validateSessionConfig(raw: unknown): SessionConfig | undefined {
 					"config.envVars",
 					`config.envVars[${entry.name}]: 'secret-slot' is template-load only; provide a 'secret' or 'plain' entry instead`,
 				);
-			}
-			try {
-				checkEnvVarSafety(entry.name, entry.value);
-			} catch (err) {
-				if (err instanceof EnvVarValidationError) {
-					throw new SessionConfigValidationError(
-						"config.envVars",
-						`config.envVars[${entry.name}]: ${err.message}`,
-					);
+			} else {
+				// Explicit `else` so TS narrows via the structural
+				// branch rather than relying on the throw above —
+				// future refactors that change `throw` to `continue`
+				// would otherwise hand `entry.value: undefined` to
+				// `checkEnvVarSafety`. PR #210 round 3 review.
+				try {
+					checkEnvVarSafety(entry.name, entry.value);
+				} catch (err) {
+					if (err instanceof EnvVarValidationError) {
+						throw new SessionConfigValidationError(
+							"config.envVars",
+							`config.envVars[${entry.name}]: ${err.message}`,
+						);
+					}
+					throw err;
 				}
-				throw err;
 			}
 		}
 		// Aggregate-bytes guard. 64 × 16 KiB worst case is ~1 MiB,
@@ -306,8 +312,17 @@ export function validateSessionConfig(raw: unknown): SessionConfig | undefined {
 		// a row that didn't need to be that large. 256 KiB ceiling
 		// covers any realistic config without letting a hostile
 		// caller pin the column at MB scale. Buffer.byteLength counts
-		// multi-byte UTF-8 correctly; JSON.stringify mirrors the
-		// shape that lands in `env_vars_json`.
+		// multi-byte UTF-8 correctly.
+		//
+		// NOTE: this measures the WIRE shape (secret rows still carry
+		// `value`); the post-encryption STORAGE shape replaces `value`
+		// with `{ ciphertext, iv, tag }`, where ciphertext+iv+tag
+		// base64 encoding adds ~37% overhead per secret row. So a
+		// payload right at the 256 KiB cap can land at ~350 KiB in
+		// `env_vars_json` after encryption. Bounded by the per-entry +
+		// count caps (still well under 1 MiB worst case), so this
+		// approximation is acceptable; moving the check post-encrypt
+		// would tie validation to the route's encryption step.
 		const serialisedBytes = Buffer.byteLength(JSON.stringify(result.data.envVars), "utf-8");
 		if (serialisedBytes > MAX_ENV_VARS_TOTAL_BYTES) {
 			throw new SessionConfigValidationError(
@@ -501,7 +516,52 @@ function parseEnvVarsColumn(
 ): EnvVarEntryStored[] | undefined {
 	const parsed = parseJsonColumn<unknown>(sessionId, "env_vars_json", raw);
 	if (parsed === undefined) return undefined;
-	if (Array.isArray(parsed)) return parsed as EnvVarEntryStored[];
+	if (Array.isArray(parsed)) {
+		// Structurally validate each element rather than blanket-cast
+		// (PR #210 round 3 review). A D1 row hand-edited to carry a
+		// `secret-slot` row, or a `secret` row missing one of
+		// ciphertext/iv/tag, would otherwise reach `decryptSecret` and
+		// throw on every spawn — an effective DoS for that session
+		// from a write-capable D1 attacker. Per-element filter logs +
+		// drops anything off-shape; the rest of the row stays usable.
+		const out: EnvVarEntryStored[] = [];
+		for (const e of parsed) {
+			if (e === null || typeof e !== "object") {
+				logger.warn(
+					`[sessionConfig] env_vars_json entry for session ${sessionId} is not an object; skipping`,
+				);
+				continue;
+			}
+			const entry = e as { name?: unknown; type?: unknown; [k: string]: unknown };
+			if (typeof entry.name !== "string") {
+				logger.warn(
+					`[sessionConfig] env_vars_json entry for session ${sessionId} missing/typed-wrong name; skipping`,
+				);
+				continue;
+			}
+			if (entry.type === "plain" && typeof entry.value === "string") {
+				out.push({ name: entry.name, type: "plain", value: entry.value });
+			} else if (
+				entry.type === "secret" &&
+				typeof entry.ciphertext === "string" &&
+				typeof entry.iv === "string" &&
+				typeof entry.tag === "string"
+			) {
+				out.push({
+					name: entry.name,
+					type: "secret",
+					ciphertext: entry.ciphertext,
+					iv: entry.iv,
+					tag: entry.tag,
+				});
+			} else {
+				logger.warn(
+					`[sessionConfig] env_vars_json entry '${entry.name}' for session ${sessionId} has unknown / incomplete shape (type=${String(entry.type)}); skipping`,
+				);
+			}
+		}
+		return out;
+	}
 	if (parsed !== null && typeof parsed === "object") {
 		// Legacy Record<string,string> shape; promote to typed plain.
 		// Defensive: skip non-string values rather than throw — a

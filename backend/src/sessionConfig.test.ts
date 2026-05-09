@@ -466,6 +466,59 @@ describe("getSessionConfig", () => {
 	// EnvVarEntryStored[] and dropped every env var because objects
 	// have no `.length`. Backward-compat shim promotes legacy Records
 	// to typed `plain` entries on the fly.
+	// PR #210 round 3 fix: a hand-crafted D1 row that snuck a
+	// `secret-slot` entry into storage, or a `secret` entry missing
+	// ciphertext/iv/tag, must NOT reach the decrypt path — that
+	// would let a write-capable D1 attacker DoS the session by
+	// causing every spawn to throw. Filter at rehydration; log +
+	// drop the bad entry; keep the good ones.
+	it("filters out structurally-invalid array entries (defence against crafted D1 rows)", async () => {
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [
+				{
+					session_id: "sess-bad-array",
+					workspace_strategy: null,
+					cpu_limit: null,
+					mem_limit: null,
+					idle_ttl_seconds: null,
+					post_create_cmd: null,
+					post_start_cmd: null,
+					repos_json: null,
+					ports_json: null,
+					env_vars_json: JSON.stringify([
+						// Valid plain — kept.
+						{ name: "FOO", type: "plain", value: "bar" },
+						// Valid secret — kept.
+						{
+							name: "API_KEY",
+							type: "secret",
+							ciphertext: "Y3Q=",
+							iv: "MTIzNDU2Nzg5MDEy",
+							tag: "MTIzNDU2Nzg5MDEyMzQ1Ng==",
+						},
+						// secret-slot in storage — must be dropped (the
+						// decryptor would crash on the missing fields).
+						{ name: "STRAY_SLOT", type: "secret-slot" },
+						// Secret missing tag — must be dropped (the GCM
+						// auth check would throw on every spawn).
+						{ name: "BROKEN_SECRET", type: "secret", ciphertext: "Y3Q=", iv: "x" },
+						// Plain missing value — must be dropped.
+						{ name: "BROKEN_PLAIN", type: "plain" },
+						// Wrong shape (no name) — dropped.
+						{ type: "plain", value: "x" },
+					]),
+					bootstrapped_at: null,
+				},
+			],
+			success: true as const,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		const got = await getSessionConfig("sess-bad-array");
+		expect(got?.envVars).toHaveLength(2);
+		expect(got?.envVars?.[0]).toMatchObject({ name: "FOO", type: "plain", value: "bar" });
+		expect(got?.envVars?.[1]).toMatchObject({ name: "API_KEY", type: "secret" });
+	});
+
 	it("rehydrates legacy Record<string,string> env_vars_json into typed plain entries", async () => {
 		dbStubs.d1Query.mockImplementationOnce(async () => ({
 			results: [
