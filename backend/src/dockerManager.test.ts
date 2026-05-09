@@ -62,6 +62,9 @@ interface FakeExec {
 	_resizes: Array<{ h: number; w: number }>;
 	_stream: PassThrough;
 	_cmd: string[];
+	// `WorkingDir` is captured for #207 round 7 — runPostCreate now
+	// pins cwd to the workspace and tests assert it.
+	_workingDir: string | undefined;
 }
 
 interface FakeContainer {
@@ -79,7 +82,7 @@ function makeFakeContainer(oneShot?: OneShotHook): FakeContainer {
 	const execs: FakeExec[] = [];
 
 	const container = {
-		exec: vi.fn(async (opts: { Cmd: string[]; Tty?: boolean }) => {
+		exec: vi.fn(async (opts: { Cmd: string[]; Tty?: boolean; WorkingDir?: string }) => {
 			const stream = new PassThrough();
 			const resizes: Array<{ h: number; w: number }> = [];
 			streams.push(stream);
@@ -132,6 +135,7 @@ function makeFakeContainer(oneShot?: OneShotHook): FakeContainer {
 				_resizes: resizes,
 				_stream: stream,
 				_cmd: opts.Cmd,
+				_workingDir: opts.WorkingDir,
 			};
 			execs.push(exec);
 			return exec;
@@ -1153,6 +1157,23 @@ describe("DockerManager.runPostCreate", () => {
 		const result = await dm.runPostCreate("s1", "false");
 		expect(result.exitCode).toBe(42);
 		expect(result.output).toContain("boom");
+	});
+
+	// Round-7 review fix: hooks must run from the workspace, not from
+	// the image's WORKDIR. Without WorkingDir on the exec, `npm install`
+	// would look for package.json in `/home/developer` and silently
+	// fail with ENOENT.
+	it("pins WorkingDir to the workspace so hooks run alongside the user's project files", async () => {
+		const { dm, container } = makeDocker({
+			oneShot: () => ({ stdout: "", exitCode: 0 }),
+		});
+		await dm.runPostCreate("s1", "npm install");
+		const exec = mustFind(
+			container._execs,
+			(e) => e._cmd[0] === "bash" && e._cmd[1] === "-c",
+			"bash -c exec for runPostCreate",
+		);
+		expect(exec._workingDir).toBe("/home/developer/workspace");
 	});
 
 	// Round-2 review fix: hook diagnostics go to stderr (`npm ERR!`,

@@ -781,8 +781,18 @@ export class DockerManager {
 		// to stderr by default, and a hook-failure modal that only
 		// displays stdout would render "(no output)" for the most common
 		// failure mode (`bash: <cmd>: command not found`).
+		//
+		// `cwd: /home/developer/workspace` so the hook lands in the same
+		// place a freshly-attached terminal would (#207 round 7 review).
+		// Without it, Docker uses the image's WORKDIR
+		// (`/home/developer`) and `npm install` / `pip install -r ...` /
+		// `cargo build` would all fail with ENOENT looking for project
+		// files in the wrong directory. `runPostStart`'s tmux-session
+		// path already gets this right via `tmux new-session -c …`;
+		// this brings the exec path in line.
 		const result = await this.execOneShot(sessionId, ["bash", "-c", cmd], {
 			combineStreams: true,
+			cwd: "/home/developer/workspace",
 		});
 		return { exitCode: result.exitCode, output: result.stdout };
 	}
@@ -1412,7 +1422,7 @@ export class DockerManager {
 	private async execOneShot(
 		sessionId: string,
 		cmd: string[],
-		opts: { combineStreams?: boolean } = {},
+		opts: { combineStreams?: boolean; cwd?: string } = {},
 	): Promise<{ stdout: string; exitCode: number }> {
 		const meta = await this.sessions.getOrThrow(sessionId);
 		if (!meta.containerId) throw new Error("No container for this session");
@@ -1420,6 +1430,15 @@ export class DockerManager {
 
 		const exec = await container.exec({
 			Cmd: cmd,
+			// `WorkingDir: undefined` preserves Docker's image-WORKDIR
+			// default for callers that don't pass `cwd` (every tmux
+			// one-shot — `-c` on `new-session` controls the tmux
+			// session's cwd, not the exec's, and tmux runs without
+			// caring about its own cwd anyway). The bootstrap-runner
+			// caller (#207 round 7 review) sets cwd to the workspace
+			// so hooks like `npm install` find the user's
+			// package.json instead of looking in `/home/developer`.
+			WorkingDir: opts.cwd,
 			AttachStdin: false,
 			AttachStdout: true,
 			AttachStderr: true,
