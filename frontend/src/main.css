@@ -625,6 +625,172 @@ main:not([data-sidebar-ready]) #sidebar {
   cursor: progress;
 }
 
+/* Env tab — typed entry table + .env paste panel (#186 / PR 186c). */
+.env-paste-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.4rem;
+}
+.env-paste-toggle {
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 0.35rem 0.7rem;
+  color: #e6edf3;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.env-paste-toggle:hover {
+  background: #30363d;
+}
+.env-paste-status {
+  font-size: 0.75rem;
+  color: #8b949e;
+  flex: 1;
+}
+.env-paste-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+  padding: 0.6rem;
+  background: rgba(88, 166, 255, 0.04);
+  border: 1px dashed #30363d;
+  border-radius: 6px;
+}
+.env-paste-panel textarea {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+  color: #e6edf3;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.78rem;
+  outline: none;
+  resize: vertical;
+  min-height: 80px;
+}
+.env-paste-panel textarea:focus {
+  border-color: #58a6ff;
+}
+.env-paste-actions {
+  display: flex;
+  gap: 0.4rem;
+  justify-content: flex-end;
+}
+.env-paste-actions button {
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 0.35rem 0.65rem;
+  color: #e6edf3;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.env-paste-actions button:hover {
+  background: #30363d;
+}
+#env-paste-import {
+  background: #238636;
+  border-color: #2ea043;
+  color: #fff;
+}
+#env-paste-import:hover {
+  background: #2ea043;
+}
+.env-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  margin-bottom: 0.5rem;
+}
+.env-table thead th {
+  text-align: left;
+  font-weight: 500;
+  color: #8b949e;
+  padding: 0.3rem 0.4rem;
+  border-bottom: 1px solid #21262d;
+}
+.env-table tbody td {
+  padding: 0.25rem 0.4rem;
+  vertical-align: middle;
+}
+.env-row .env-input {
+  width: 100%;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+  color: #e6edf3;
+  font-size: 0.8rem;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  outline: none;
+}
+.env-row .env-input:focus {
+  border-color: #58a6ff;
+}
+.env-input-name {
+  text-transform: uppercase;
+}
+.env-type-toggle {
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 0.25rem 0.55rem;
+  color: #e6edf3;
+  font-size: 0.75rem;
+  cursor: pointer;
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+.env-type-toggle:hover {
+  background: #30363d;
+}
+.env-type-toggle.env-type-secret {
+  background: rgba(248, 81, 73, 0.12);
+  border-color: rgba(248, 81, 73, 0.45);
+  color: #ff8682;
+}
+.env-row-remove {
+  background: transparent;
+  border: none;
+  color: #8b949e;
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 0 0.3rem;
+  border-radius: 4px;
+}
+.env-row-remove:hover {
+  color: #f85149;
+  background: rgba(248, 81, 73, 0.08);
+}
+.env-add-row {
+  background: transparent;
+  border: 1px dashed #30363d;
+  border-radius: 6px;
+  padding: 0.4rem 0.7rem;
+  color: #8b949e;
+  font-size: 0.8rem;
+  cursor: pointer;
+  align-self: flex-start;
+}
+.env-add-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: #e6edf3;
+  border-style: solid;
+}
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  clip: rect(0 0 0 0);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
 /* postCreate live-tail panel (#185 / PR 185b2b). The same DOM node
    gets the `bootstrap-error` class added on top when the WS sends a
    terminal `fail` message — `bootstrap-error` selectors below win
