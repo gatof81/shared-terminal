@@ -364,8 +364,14 @@ describe("validateSessionConfig", () => {
 		);
 	});
 
-	it("accepts repo.auth='ssh' with matching git@ URL and ssh creds", () => {
-		expect(
+	// #188 PR 188c: PAT/SSH wire shapes are accepted by Zod (188b shipped
+	// the schema) but the clone runner only implements `auth: "none"`
+	// until 188d. The route-level guard rejects a structurally-valid
+	// SSH config so we don't burn a quota slot on a guaranteed-fail
+	// session. 188d removes this guard and the assertion flips back
+	// to `.toBeDefined()`.
+	it("rejects repo.auth='ssh' as not-yet-implemented (188c temporary guard)", () => {
+		expect(() =>
 			validateSessionConfig({
 				repo: { url: "git@github.com:o/p", auth: "ssh", target: "" },
 				auth: {
@@ -375,7 +381,16 @@ describe("validateSessionConfig", () => {
 					},
 				},
 			}),
-		).toBeDefined();
+		).toThrowError(/only 'none'.*supported in this version/);
+	});
+
+	it("rejects repo.auth='pat' with otherwise-valid config as not-yet-implemented (188c temporary guard)", () => {
+		expect(() =>
+			validateSessionConfig({
+				repo: { url: "https://example.com/r", auth: "pat" },
+				auth: { pat: "ghp_validtoken" },
+			}),
+		).toThrowError(/only 'none'.*supported in this version/);
 	});
 
 	// Depth bounds — out of [1, 10000]. A missing `depth` is allowed
