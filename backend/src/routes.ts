@@ -51,6 +51,7 @@ import {
 } from "./sessionConfig.js";
 import type { SessionManager } from "./sessionManager.js";
 import { ForbiddenError, NotFoundError, SessionQuotaExceededError } from "./sessionManager.js";
+import * as templates from "./templates.js";
 import type { SessionMeta } from "./types.js";
 
 export function buildRouter(
@@ -290,6 +291,7 @@ export function buildRouter(
 
 	router.use("/invites", requireAuth);
 	router.use("/sessions", requireAuth);
+	router.use("/templates", requireAuth);
 
 	// Idle-sweeper bumper. Mounted AFTER `requireAuth` so unauth
 	// requests don't reset the activity timer. The `:id` capture is
@@ -1063,7 +1065,185 @@ export function buildRouter(
 		},
 	);
 
+	// ── Templates ──────────────────────────────────────────────────────────
+	//
+	// Per-user reusable session-config presets. The list/read/update/
+	// delete code paths all flow through `templates.assertOwnership`
+	// (or `templates.getOwned`, which collapses missing + forbidden
+	// into a single 404 to avoid status-code-timing enumeration of
+	// "your template" vs "someone else's"). The save-as-template
+	// flow that strips secret values lands in the next sub-PR; this
+	// PR exposes the storage and CRUD surface only.
+	//
+	// `config` is JSON-stringified by the caller before the route
+	// hands it to `templates.create`/`update` so the templates module
+	// stays ignorant of the SessionConfig schema. Validation happens
+	// at the route boundary, before persist.
+
+	router.post("/templates", async (req: Request, res: Response) => {
+		const { userId } = req as AuthedRequest;
+		const body = req.body as { name?: unknown; description?: unknown; config?: unknown };
+		try {
+			const { name, description } = parseTemplateBody(body);
+			// Validate the config shape via the same `SessionConfigSchema`
+			// the create-session route uses. The template flow accepts
+			// `secret-slot` entries (the schema's third env-var variant)
+			// which `POST /sessions` rejects — that's the entire point
+			// of templates: capture intent without persisting secrets.
+			validateSessionConfig(body.config);
+			const t = await templates.create(userId, {
+				name,
+				description,
+				config: JSON.stringify(body.config),
+			});
+			res.status(201).json(serializeTemplate(t));
+		} catch (err) {
+			handleTemplateError(err, res);
+		}
+	});
+
+	router.get("/templates", async (req: Request, res: Response) => {
+		const { userId } = req as AuthedRequest;
+		try {
+			const list = await templates.listForUser(userId);
+			res.json(list.map(serializeTemplate));
+		} catch (err) {
+			handleTemplateError(err, res);
+		}
+	});
+
+	router.get("/templates/:id", async (req: Request, res: Response) => {
+		const { userId } = req as AuthedRequest;
+		try {
+			const t = await templates.getOwned(req.params.id, userId);
+			res.json(serializeTemplate(t));
+		} catch (err) {
+			handleTemplateError(err, res);
+		}
+	});
+
+	router.put("/templates/:id", async (req: Request, res: Response) => {
+		const { userId } = req as AuthedRequest;
+		const body = req.body as { name?: unknown; description?: unknown; config?: unknown };
+		try {
+			const { name, description } = parseTemplateBody(body);
+			validateSessionConfig(body.config);
+			const t = await templates.update(req.params.id, userId, {
+				name,
+				description,
+				config: JSON.stringify(body.config),
+			});
+			res.json(serializeTemplate(t));
+		} catch (err) {
+			handleTemplateError(err, res);
+		}
+	});
+
+	router.delete("/templates/:id", async (req: Request, res: Response) => {
+		const { userId } = req as AuthedRequest;
+		try {
+			await templates.deleteTemplate(req.params.id, userId);
+			res.status(204).send();
+		} catch (err) {
+			handleTemplateError(err, res);
+		}
+	});
+
 	return router;
+}
+
+// ── Templates: shared helpers ────────────────────────────────────────────
+
+/**
+ * Bound caps for template metadata. `name` is shown in the sidebar
+ * list and reused as the placeholder session name when "Use template"
+ * fires; 64 chars matches the existing session-name cap so the same
+ * UX assumption holds end-to-end. `description` is a free-form
+ * tooltip-shape help string — 512 chars is generous without becoming
+ * a row-bloat vector when many templates accumulate.
+ */
+const MAX_TEMPLATE_NAME_LEN = 64;
+const MAX_TEMPLATE_DESCRIPTION_LEN = 512;
+
+class TemplateBodyError extends Error {
+	constructor(
+		message: string,
+		public readonly path: string,
+	) {
+		super(message);
+		this.name = "TemplateBodyError";
+	}
+}
+
+function parseTemplateBody(body: { name?: unknown; description?: unknown; config?: unknown }): {
+	name: string;
+	description: string | null;
+} {
+	if (typeof body.name !== "string" || body.name.trim() === "") {
+		throw new TemplateBodyError("name is required", "name");
+	}
+	if (body.name.length > MAX_TEMPLATE_NAME_LEN) {
+		throw new TemplateBodyError(`name exceeds ${MAX_TEMPLATE_NAME_LEN} characters`, "name");
+	}
+	let description: string | null = null;
+	if (body.description !== undefined && body.description !== null) {
+		if (typeof body.description !== "string") {
+			throw new TemplateBodyError("description must be a string", "description");
+		}
+		if (body.description.length > MAX_TEMPLATE_DESCRIPTION_LEN) {
+			throw new TemplateBodyError(
+				`description exceeds ${MAX_TEMPLATE_DESCRIPTION_LEN} characters`,
+				"description",
+			);
+		}
+		description = body.description;
+	}
+	if (body.config === undefined || body.config === null) {
+		throw new TemplateBodyError("config is required", "config");
+	}
+	if (typeof body.config !== "object") {
+		throw new TemplateBodyError("config must be an object", "config");
+	}
+	return { name: body.name.trim(), description };
+}
+
+function serializeTemplate(t: templates.Template): {
+	id: string;
+	name: string;
+	description: string | null;
+	config: unknown;
+	createdAt: string;
+	updatedAt: string;
+} {
+	return {
+		id: t.id,
+		name: t.name,
+		description: t.description,
+		config: t.config,
+		createdAt: t.createdAt.toISOString(),
+		updatedAt: t.updatedAt.toISOString(),
+	};
+}
+
+function handleTemplateError(err: unknown, res: Response): void {
+	if (err instanceof NotFoundError) {
+		res.status(404).json({ error: "Template not found" });
+		return;
+	}
+	if (err instanceof ForbiddenError) {
+		res.status(403).json({ error: "Forbidden" });
+		return;
+	}
+	if (err instanceof TemplateBodyError) {
+		res.status(400).json({ error: err.message, path: err.path });
+		return;
+	}
+	if (err instanceof SessionConfigValidationError) {
+		res.status(400).json({ error: err.message, path: err.path });
+		return;
+	}
+	logger.error(`[routes] template error: ${(err as Error).message}`);
+	res.status(500).json({ error: "Internal server error" });
 }
 
 // POST /sessions input caps. Bound user-controlled fields at the
