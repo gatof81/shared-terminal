@@ -24,6 +24,29 @@ import { d1Query } from "./db.js";
 export interface PortMapping {
 	containerPort: number;
 	hostPort: number;
+	// #190 PR 190c — per-port auth gate stored on the mapping row so
+	// the dispatcher's hot path is one indexed point read. `false` =
+	// `requireAuth` + `assertOwnership` before proxying; `true` =
+	// open to anyone with the URL (webhook / OAuth callback shape).
+	isPublic: boolean;
+}
+
+/**
+ * Subset of the join `sessions_port_mappings` ⋈ `sessions` the dispatcher
+ * needs at request time. Returned by `lookupDispatchTarget` so the
+ * dispatcher can authorize and forward in one query: host_port + is_public
+ * + the owning user_id (for the `assertOwnership` check on private ports).
+ *
+ * `null` means "no row, OR session is not running" — the dispatcher's
+ * 404 response collapses both cases. We deliberately do NOT distinguish
+ * to keep the response shape identical for "session never existed" and
+ * "session was stopped 200 ms ago", so a probe attacker can't enumerate
+ * recently-active sessions.
+ */
+export interface DispatchTarget {
+	hostPort: number;
+	isPublic: boolean;
+	ownerUserId: string;
 }
 
 /**
@@ -39,24 +62,83 @@ export async function setPortMappings(sessionId: string, mappings: PortMapping[]
 	await d1Query("DELETE FROM sessions_port_mappings WHERE session_id = ?", [sessionId]);
 	for (const m of mappings) {
 		await d1Query(
-			"INSERT INTO sessions_port_mappings (session_id, container_port, host_port) VALUES (?, ?, ?)",
-			[sessionId, m.containerPort, m.hostPort],
+			"INSERT INTO sessions_port_mappings (session_id, container_port, host_port, is_public) VALUES (?, ?, ?, ?)",
+			[sessionId, m.containerPort, m.hostPort, m.isPublic ? 1 : 0],
 		);
 	}
 }
 
 /** Read all mappings for `sessionId`. Empty array when no row exists. */
 export async function getPortMappings(sessionId: string): Promise<PortMapping[]> {
-	const result = await d1Query<{ container_port: number; host_port: number }>(
-		"SELECT container_port, host_port FROM sessions_port_mappings WHERE session_id = ? ORDER BY container_port",
+	const result = await d1Query<{ container_port: number; host_port: number; is_public: number }>(
+		"SELECT container_port, host_port, is_public FROM sessions_port_mappings WHERE session_id = ? ORDER BY container_port",
 		[sessionId],
 	);
-	return result.results.map((r) => ({ containerPort: r.container_port, hostPort: r.host_port }));
+	return result.results.map((r) => ({
+		containerPort: r.container_port,
+		hostPort: r.host_port,
+		isPublic: r.is_public === 1,
+	}));
 }
 
 /** Drop all mappings for `sessionId`. Idempotent — no-op if none exist. */
 export async function clearPortMappings(sessionId: string): Promise<void> {
 	await d1Query("DELETE FROM sessions_port_mappings WHERE session_id = ?", [sessionId]);
+}
+
+/**
+ * Single-query JOIN that resolves a `Host: p<container>-<sessionId>.<base>`
+ * lookup to the host_port + auth-gate + owning user the dispatcher needs
+ * to authorize and forward. Returns `null` when:
+ *   - no mapping row exists for `(sessionId, containerPort)`, OR
+ *   - the session row's status is not `running`.
+ *
+ * Both states collapse to `null` (and the dispatcher to 404) so a probe
+ * attacker can't enumerate recently-active sessions by status-code timing.
+ *
+ * INNER JOIN on `sessions` because the FK CASCADE means every mapping
+ * row implies a parent session row; the join filters on status without
+ * a second round-trip.
+ */
+export async function lookupDispatchTarget(
+	sessionId: string,
+	containerPort: number,
+): Promise<DispatchTarget | null> {
+	const result = await d1Query<{
+		host_port: number;
+		is_public: number;
+		user_id: string;
+	}>(
+		`SELECT spm.host_port, spm.is_public, s.user_id
+		 FROM sessions_port_mappings spm
+		 JOIN sessions s ON s.session_id = spm.session_id
+		 WHERE spm.session_id = ? AND spm.container_port = ? AND s.status = 'running'`,
+		[sessionId, containerPort],
+	);
+	const row = result.results[0];
+	if (!row) return null;
+	return {
+		hostPort: row.host_port,
+		isPublic: row.is_public === 1,
+		ownerUserId: row.user_id,
+	};
+}
+
+/**
+ * Annotate raw inspect-output mappings with the configured `public` flag
+ * looked up by container port. Container ports absent from the lookup
+ * default to `false` (auth required) — the safest fallback when the
+ * caller's source-of-truth (config or the prior mapping row) doesn't
+ * know about a particular port. Pure helper, no D1.
+ */
+export function annotateWithPublic(
+	raw: Array<{ containerPort: number; hostPort: number }>,
+	publicByContainer: Map<number, boolean>,
+): PortMapping[] {
+	return raw.map((m) => ({
+		...m,
+		isPublic: publicByContainer.get(m.containerPort) ?? false,
+	}));
 }
 
 /**
@@ -86,9 +168,9 @@ export async function clearPortMappings(sessionId: string): Promise<void> {
  */
 export function parseInspectPorts(
 	ports: Record<string, Array<{ HostPort: string; HostIp?: string }> | null> | undefined | null,
-): PortMapping[] {
+): Array<{ containerPort: number; hostPort: number }> {
 	if (!ports) return [];
-	const out: PortMapping[] = [];
+	const out: Array<{ containerPort: number; hostPort: number }> = [];
 	for (const [key, bindings] of Object.entries(ports)) {
 		if (!bindings || bindings.length === 0) continue;
 		// Match `<port>` or `<port>/<proto>`. The proto half is informational

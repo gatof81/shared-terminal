@@ -100,8 +100,8 @@ describe("parseInspectPorts", () => {
 describe("setPortMappings", () => {
 	it("issues DELETE-then-INSERT in order, one INSERT per mapping", async () => {
 		const mappings: PortMapping[] = [
-			{ containerPort: 3000, hostPort: 32768 },
-			{ containerPort: 5500, hostPort: 32769 },
+			{ containerPort: 3000, hostPort: 32768, isPublic: false },
+			{ containerPort: 5500, hostPort: 32769, isPublic: true },
 		];
 		await setPortMappings("sess-1", mappings);
 
@@ -111,8 +111,11 @@ describe("setPortMappings", () => {
 		);
 		expect(dbStubs.d1Query.mock.calls[0]?.[1]).toEqual(["sess-1"]);
 		expect(dbStubs.d1Query.mock.calls[1]?.[0]).toMatch(/INSERT INTO sessions_port_mappings/);
-		expect(dbStubs.d1Query.mock.calls[1]?.[1]).toEqual(["sess-1", 3000, 32768]);
-		expect(dbStubs.d1Query.mock.calls[2]?.[1]).toEqual(["sess-1", 5500, 32769]);
+		// Trailing 0/1 is the SQLite-boolean idiom for `is_public`
+		// (#190 PR 190c). The dispatcher reads this column to decide
+		// whether to require auth before proxying.
+		expect(dbStubs.d1Query.mock.calls[1]?.[1]).toEqual(["sess-1", 3000, 32768, 0]);
+		expect(dbStubs.d1Query.mock.calls[2]?.[1]).toEqual(["sess-1", 5500, 32769, 1]);
 	});
 
 	it("issues only the DELETE when the mapping list is empty", async () => {
@@ -140,15 +143,15 @@ describe("getPortMappings", () => {
 	it("rehydrates D1 rows into the typed shape", async () => {
 		dbStubs.d1Query.mockImplementationOnce(async () => ({
 			results: [
-				{ container_port: 3000, host_port: 32768 },
-				{ container_port: 5500, host_port: 32769 },
+				{ container_port: 3000, host_port: 32768, is_public: 0 },
+				{ container_port: 5500, host_port: 32769, is_public: 1 },
 			],
 			success: true,
 			meta: { changes: 0, duration: 0, last_row_id: 0 },
 		}));
 		await expect(getPortMappings("sess-y")).resolves.toEqual([
-			{ containerPort: 3000, hostPort: 32768 },
-			{ containerPort: 5500, hostPort: 32769 },
+			{ containerPort: 3000, hostPort: 32768, isPublic: false },
+			{ containerPort: 5500, hostPort: 32769, isPublic: true },
 		]);
 	});
 });

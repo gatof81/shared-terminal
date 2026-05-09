@@ -21,6 +21,7 @@ import { BootstrapBroadcaster } from "./bootstrap.js";
 import { migrateDb, validateD1Config } from "./db.js";
 import { DockerManager } from "./dockerManager.js";
 import { logger } from "./logger.js";
+import { createPortDispatcher, validatePortProxyBaseDomain } from "./portDispatcher.js";
 import { buildRouter } from "./routes.js";
 import { validateSecretsKey } from "./secrets.js";
 import { SessionManager } from "./sessionManager.js";
@@ -92,6 +93,22 @@ const docker = new DockerManager(sessions);
 // constraint of the hook runner, same as the terminal-attach path.
 const bootstrapBroadcaster = new BootstrapBroadcaster();
 
+// #190 PR 190c — port-exposure dispatcher. Resolves Host:
+// `p<container>-<sessionId>.<base>` to the runtime mapping in
+// `sessions_port_mappings` and reverse-proxies to 127.0.0.1:<host_port>.
+// Unset PORT_PROXY_BASE_DOMAIN → dispatcher is a no-op middleware so
+// dev/local without a Tunnel keeps working. Logged once here so the
+// unset case is visible at boot.
+const PORT_PROXY_BASE_DOMAIN = validatePortProxyBaseDomain(process.env.PORT_PROXY_BASE_DOMAIN);
+if (PORT_PROXY_BASE_DOMAIN) {
+	logger.info(`[server] port dispatcher enabled at *.${PORT_PROXY_BASE_DOMAIN}`);
+} else {
+	logger.info(
+		"[server] PORT_PROXY_BASE_DOMAIN unset — port-exposure dispatcher disabled (set to *.<base> to enable)",
+	);
+}
+const portDispatcher = createPortDispatcher({ baseDomain: PORT_PROXY_BASE_DOMAIN });
+
 // ── Express app ───────────────────────────────────────────────────────────────
 
 const app = express();
@@ -104,6 +121,14 @@ if (trustProxyValue !== undefined) {
 } else {
 	logger.info("[server] trust proxy = unset (req.ip will be the socket address)");
 }
+// #190 PR 190c — dispatcher mounts BEFORE json/cookieParser/CORS so a
+// proxied container request reaches `proxy.web()` with its body stream
+// intact (express.json would otherwise consume it) and without an
+// `Access-Control-Allow-Origin: <our origin>` header overlaying whatever
+// CORS the container app wants to set. The dispatcher reads the raw
+// `Cookie` header itself for auth gating on `public: false` ports —
+// see `extractAuthToken` in portDispatcher.ts.
+app.use((req, res, next) => portDispatcher.middleware(req, res, next));
 app.use(express.json());
 // Populates `req.cookies` from the Cookie header. requireAuth reads the
 // JWT from `req.cookies.st_token` (#18). No `secret` is passed because we
@@ -173,6 +198,12 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
+	// #190 PR 190c — let the port dispatcher claim this upgrade first
+	// when the Host header parses as `p<container>-<sessionId>.<base>`.
+	// `handleUpgrade` returns true iff the dispatcher took the request;
+	// in that case it's already running auth + proxy.ws() and the
+	// existing /ws/* path mustn't also run.
+	if (portDispatcher.handleUpgrade(req, socket, head)) return;
 	const url = req.url ?? "";
 	if (!url.startsWith("/ws/sessions/") && !url.startsWith("/ws/bootstrap/")) {
 		// socket.end() drains the write buffer before closing, so the

@@ -931,8 +931,11 @@ describe("DockerManager.reconcile", () => {
 		);
 		expect(deleteCall?.[1]).toEqual(["s-running"]);
 		expect(insertCalls).toHaveLength(2);
-		expect(insertCalls[0]?.[1]).toEqual(["s-running", 3000, 32768]);
-		expect(insertCalls[1]?.[1]).toEqual(["s-running", 5500, 32769]);
+		// 4th arg is is_public (#190 PR 190c). reconcile reloads
+		// session config to recover the per-port `public` flag — the
+		// stub config (no row) defaults all ports to private (0).
+		expect(insertCalls[0]?.[1]).toEqual(["s-running", 3000, 32768, 0]);
+		expect(insertCalls[1]?.[1]).toEqual(["s-running", 5500, 32769, 0]);
 	});
 
 	it("clears port mappings when reconcile finds the container stopped", async () => {
@@ -1077,7 +1080,8 @@ describe("DockerManager.startContainer", () => {
 		const insertCall = dbStubs.d1Query.mock.calls.find((c) =>
 			(c[0] as string).match(/^INSERT INTO sessions_port_mappings/),
 		);
-		expect(insertCall?.[1]).toEqual(["s1", 3000, 32999]);
+		// 4th arg is is_public; the no-config-row case defaults to 0.
+		expect(insertCall?.[1]).toEqual(["s1", 3000, 32999, 0]);
 	});
 
 	// Sub-branch: container was already running (e.g. operator did
