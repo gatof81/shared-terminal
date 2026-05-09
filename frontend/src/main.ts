@@ -386,8 +386,16 @@ function renderSessionList() {
 	sessionList.innerHTML = "";
 	for (const s of sessions) {
 		const item = document.createElement("div");
-		const terminatedCls = s.status === "terminated" ? " terminated" : "";
-		item.className = `session-item${s.sessionId === activeSessionId ? " active" : ""}${terminatedCls}`;
+		// Status class on the wrapper mirrors the session-dot rules so
+		// future CSS can target failed/terminated items uniformly (dim
+		// them, cross them out, etc.) without re-deriving the status
+		// from a child element. Today only `terminated` has a wrapper
+		// rule (.session-item.terminated dims the row); failed shows
+		// up via the dot only — adding the class now means a follow-up
+		// styling tweak doesn't have to touch this line.
+		const statusCls =
+			s.status === "terminated" || s.status === "failed" ? ` ${s.status}` : "";
+		item.className = `session-item${s.sessionId === activeSessionId ? " active" : ""}${statusCls}`;
 
 		const dot = document.createElement("span");
 		dot.className = `session-dot ${s.status}`;
