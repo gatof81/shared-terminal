@@ -1357,7 +1357,14 @@ export function collectRepoForSubmit(): {
 		return { repo, auth: undefined };
 	}
 	if (auth === "pat") {
-		const token = repoAuthPatToken.value;
+		// Trim the PAT — clipboard sources (1Password, GitHub copy
+		// button) often append a trailing newline. A `\n`-suffixed
+		// token would pass Zod's `.min(1)` check, encrypt fine, and
+		// then fail with a cryptic git-auth error at clone time
+		// rather than a clean message here (PR #216 round 1 NIT).
+		// SSH keys below are deliberately NOT trimmed — they have
+		// load-bearing newlines.
+		const token = repoAuthPatToken.value.trim();
 		// Plaintext token flows into the payload — sent over HTTPS,
 		// encrypted server-side at the route boundary before D1 write.
 		// Empty token is allowed through here; the backend will 400 on
