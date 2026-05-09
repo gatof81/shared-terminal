@@ -17,6 +17,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { parseD1Utc } from "./d1Time.js";
 import { d1Query } from "./db.js";
 import { ForbiddenError, NotFoundError } from "./sessionManager.js";
 
@@ -100,23 +101,9 @@ function rowToTemplate(row: TemplateRow): Template {
 		name: row.name,
 		description: row.description,
 		config,
-		// `datetime('now')` produces SQLite's `YYYY-MM-DD HH:MM:SS`
-		// (UTC, no timezone suffix). `new Date()` interprets that as
-		// LOCAL time on most engines — the same trap `sessionConfig`
-		// works around with `parseD1Utc`. Mirror the fix here so
-		// timestamps stay UTC end-to-end.
-		createdAt: parseD1Utc(row.created_at),
-		updatedAt: parseD1Utc(row.updated_at),
+		createdAt: parseD1Utc(row.created_at, "templates"),
+		updatedAt: parseD1Utc(row.updated_at, "templates"),
 	};
-}
-
-function parseD1Utc(raw: string): Date {
-	const hasSuffix = /[zZ]$/.test(raw) || /[+-]\d{2}:?\d{2}$/.test(raw);
-	const d = new Date(hasSuffix ? raw : `${raw}Z`);
-	if (Number.isNaN(d.getTime())) {
-		throw new Error(`templates: unparseable timestamp ${raw}`);
-	}
-	return d;
 }
 
 /**
@@ -199,8 +186,8 @@ export async function listForUser(userId: string): Promise<TemplateSummary[]> {
 		ownerUserId: row.owner_user_id,
 		name: row.name,
 		description: row.description,
-		createdAt: parseD1Utc(row.created_at),
-		updatedAt: parseD1Utc(row.updated_at),
+		createdAt: parseD1Utc(row.created_at, "templates"),
+		updatedAt: parseD1Utc(row.updated_at, "templates"),
 	}));
 }
 
