@@ -23,6 +23,7 @@ import {
 	getTemplate,
 	type Invite,
 	InviteRequiredError,
+	idleSecondsToFormUnit,
 	isAdmin,
 	isLoggedIn,
 	listInvites,
@@ -31,6 +32,7 @@ import {
 	listTemplates,
 	login,
 	logout,
+	memBytesToFormUnit,
 	openBootstrapWs,
 	register,
 	revokeInvite,
@@ -2079,7 +2081,16 @@ templatesList.addEventListener("click", (e) => {
 	const id = card?.dataset.templateId;
 	if (!id) return;
 	if (action === "use") {
-		void useTemplate(id);
+		// Disable the button before the in-flight `getTemplate` so a
+		// double-click can't fire two concurrent fetches that both
+		// race to apply config + close-and-open modals. Mirrors the
+		// `saveTemplateSubmit.disabled = true` shape on the save
+		// flow. PR #230 round 2 NIT.
+		const btn = target as HTMLButtonElement;
+		btn.disabled = true;
+		void useTemplate(id).finally(() => {
+			btn.disabled = false;
+		});
 	} else {
 		void deleteTemplateConfirmed(id, card!);
 	}
@@ -2194,27 +2205,18 @@ function applyTemplateToForm(t: Template): void {
 	// unit per field so the user sees the same values they would
 	// have typed.
 	resourcesCpuCores.value = cfg.cpuLimit ? String(cfg.cpuLimit / 1_000_000_000) : "";
-	if (cfg.memLimit) {
-		const gib = cfg.memLimit / 1024 ** 3;
-		if (Number.isInteger(gib) && gib >= 1) {
-			resourcesMemAmount.value = String(gib);
-			resourcesMemUnit.value = "GiB";
-		} else {
-			resourcesMemAmount.value = String(Math.round(cfg.memLimit / 1024 ** 2));
-			resourcesMemUnit.value = "MiB";
-		}
+	const mem = memBytesToFormUnit(cfg.memLimit);
+	if (mem) {
+		resourcesMemAmount.value = String(mem.amount);
+		resourcesMemUnit.value = mem.unit;
 	} else {
 		resourcesMemAmount.value = "";
 		resourcesMemUnit.value = "GiB";
 	}
-	if (cfg.idleTtlSeconds) {
-		if (cfg.idleTtlSeconds % 3600 === 0) {
-			resourcesIdleAmount.value = String(cfg.idleTtlSeconds / 3600);
-			resourcesIdleUnit.value = "hours";
-		} else {
-			resourcesIdleAmount.value = String(Math.round(cfg.idleTtlSeconds / 60));
-			resourcesIdleUnit.value = "minutes";
-		}
+	const idle = idleSecondsToFormUnit(cfg.idleTtlSeconds);
+	if (idle) {
+		resourcesIdleAmount.value = String(idle.amount);
+		resourcesIdleUnit.value = idle.unit;
 	} else {
 		resourcesIdleAmount.value = "";
 		resourcesIdleUnit.value = "minutes";

@@ -413,6 +413,38 @@ export async function createTemplate(input: {
 	return res.json();
 }
 
+/**
+ * Pure helpers for the use-template flow's reverse unit conversion
+ * (nano-CPUs → cores, bytes → GiB-or-MiB, seconds → hours-or-minutes).
+ * Extracted so the boundary cases the templates-page form pre-fill
+ * relies on can be unit-tested directly — `applyTemplateToForm` in
+ * `main.ts` is DOM-heavy and not easily exercised in jsdom.
+ *
+ * Each helper returns either a `{ amount, unit }` pair or `null`
+ * when the input is undefined / 0 / negative (the form's "leave
+ * the field blank" state). Picks the most natural unit for the
+ * common cases — integer GiB / divisible-by-3600 seconds — and
+ * falls back to MiB / minutes otherwise.
+ */
+export function memBytesToFormUnit(bytes: number | undefined): {
+	amount: number;
+	unit: "GiB" | "MiB";
+} | null {
+	if (bytes === undefined || bytes <= 0) return null;
+	const gib = bytes / 1024 ** 3;
+	if (Number.isInteger(gib) && gib >= 1) return { amount: gib, unit: "GiB" };
+	return { amount: Math.round(bytes / 1024 ** 2), unit: "MiB" };
+}
+
+export function idleSecondsToFormUnit(seconds: number | undefined): {
+	amount: number;
+	unit: "hours" | "minutes";
+} | null {
+	if (seconds === undefined || seconds <= 0) return null;
+	if (seconds % 3600 === 0) return { amount: seconds / 3600, unit: "hours" };
+	return { amount: Math.round(seconds / 60), unit: "minutes" };
+}
+
 export async function listTemplates(): Promise<TemplateSummary[]> {
 	const res = await apiFetch("/templates");
 	if (!res.ok) {
@@ -458,7 +490,10 @@ export async function getSession(id: string): Promise<SessionInfo> {
 export async function deleteSession(id: string, hard = false): Promise<void> {
 	const qs = hard ? "?hard=true" : "";
 	const res = await apiFetch(`/sessions/${id}${qs}`, { method: "DELETE" });
-	if (!res.ok && res.status !== 204) {
+	// 204 falls inside `res.ok`; the `&& res.status !== 204` clause
+	// the previous form had was dead code (mirrors the cleanup in
+	// `deleteTemplate` above).
+	if (!res.ok) {
 		throw new Error("Failed to delete session");
 	}
 }
