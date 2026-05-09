@@ -262,6 +262,12 @@ ARGS=("git" "clone")
 [ -n "$ST_DEPTH" ] && ARGS+=("--depth" "$ST_DEPTH")
 ARGS+=("--" "$ST_URL" "$ST_TARGET_ABS")
 "\${ARGS[@]}"
+# Defensive unset AFTER the clone (NOT before — git invokes the
+# askpass shim as a child process which reads $ST_PAT from its
+# inherited env; unsetting before would break auth). PR #218 round
+# 2 NIT — symmetry with SSH script's pre-clone unset (which is safe
+# there because the key is already on disk by that point).
+unset ST_PAT
 `;
 
 /**

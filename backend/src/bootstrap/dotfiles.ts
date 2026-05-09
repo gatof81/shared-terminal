@@ -145,7 +145,19 @@ ARGS+=("--" "$ST_URL" "$ST_TARGET_DIR")
 "\${ARGS[@]}"
 `;
 
-/** PAT-https clone via GIT_ASKPASS shim. Mirrors cloneRepo.PAT_CLONE_SCRIPT. */
+/** PAT-https clone via GIT_ASKPASS shim. Mirrors cloneRepo.PAT_CLONE_SCRIPT.
+ *
+ *  `unset ST_PAT` runs AFTER the clone, NOT before it. The askpass
+ *  shim is invoked as a child process by git and reads `$ST_PAT`
+ *  from its inherited environment; unsetting it before the clone
+ *  would make the shim print an empty token and break auth.
+ *  Placing the unset after clears the var from the bash process
+ *  for any subsequent operation in the same exec context (none in
+ *  this script today; defensive against a future edit that adds
+ *  one). PR #218 round 2 NIT flagged the inconsistency with
+ *  DOTFILES_SSH_SCRIPT (which can unset BEFORE git because the
+ *  key has already been written to disk by then and git reads
+ *  from the file, not the env). */
 export const DOTFILES_PAT_SCRIPT = `set -e
 ASKPASS_PATH=$(mktemp /tmp/git-askpass-XXXXXXXX)
 cleanup() { rm -f "$ASKPASS_PATH"; }
@@ -164,6 +176,7 @@ ARGS=("git" "clone")
 [ -n "$ST_REF" ] && ARGS+=("--branch" "$ST_REF")
 ARGS+=("--" "$ST_URL" "$ST_TARGET_DIR")
 "\${ARGS[@]}"
+unset ST_PAT
 `;
 
 /** SSH clone. Reuses ~/.ssh/id_ed25519 and ~/.ssh/known_hosts the
