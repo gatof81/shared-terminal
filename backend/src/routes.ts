@@ -555,6 +555,13 @@ export function buildRouter(
 			}
 			logger.error(`[routes] session create failed: ${(err as Error).message}`);
 			if (meta) {
+				// Capture the id once so the closures below don't have to
+				// reach back through the outer mutable `let meta` (TS
+				// can't narrow `meta` through a closure even though we're
+				// already inside `if (meta)`). One const, no optional
+				// chains, no ambiguity for future readers about whether
+				// meta could ever be null on these lines.
+				const rollbackId = meta.sessionId;
 				// Best-effort rollback. If deleteRow itself fails (D1 blip),
 				// the reconciler will eventually flip status to stopped but
 				// the row remains — we log loudly so an operator can clean
@@ -568,23 +575,23 @@ export function buildRouter(
 				// reach it through — `reconcile()` queries
 				// `WHERE status='running'`, so a deleted row means the
 				// container survives until the next host reboot. The
-				// non-zero-exit path inside the try/ catch already kills
+				// non-zero-exit path inside the try/catch already kills
 				// the container before throwing; this guard covers every
 				// other post-spawn failure shape (markBootstrapped,
 				// runPostStart, sessions.get, the synthetic invariant
 				// throw above). Idempotent: the failure-branch
 				// `docker.kill` already ran on hard-fail, and `kill`
 				// swallows "no such container" internally.
-				await docker.kill(meta.sessionId).catch((killErr) => {
+				await docker.kill(rollbackId).catch((killErr) => {
 					logger.error(
-						`[routes] CRITICAL: kill during create rollback for session ${meta?.sessionId} failed: ${(killErr as Error).message}`,
+						`[routes] CRITICAL: kill during create rollback for session ${rollbackId} failed: ${(killErr as Error).message}`,
 					);
 				});
 				try {
-					await sessions.deleteRow(meta.sessionId);
+					await sessions.deleteRow(rollbackId);
 				} catch (cleanupErr) {
 					logger.error(
-						`[routes] CRITICAL: spawn rollback failed for session ${meta.sessionId}: ${(cleanupErr as Error).message}`,
+						`[routes] CRITICAL: spawn rollback failed for session ${rollbackId}: ${(cleanupErr as Error).message}`,
 					);
 				}
 			}

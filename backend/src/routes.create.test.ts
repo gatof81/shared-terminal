@@ -275,6 +275,38 @@ describe("POST /sessions — postCreate hard-fail path", () => {
 		expect(spies.kill).toHaveBeenCalledWith("sess-1");
 	});
 
+	// Round-6 review concern: `sessions.create()` itself throwing (D1
+	// transient before any row exists) means `meta` is still null in
+	// the outer catch. The rollback block must NOT call
+	// `meta.sessionId` outside the `if (meta)` guard. Locking the case
+	// so the rollback never crashes with TypeError on this path.
+	it("does not crash the rollback when sessions.create itself throws (meta is null)", async () => {
+		const { sessions, docker, spies } = makeFakes({
+			postCreateExit: 0,
+			postCreateOutput: "",
+		});
+		spies.create.mockRejectedValueOnce(new Error("D1 down"));
+		await spinUp(sessions, docker);
+
+		const res = await fetch(`${baseUrl}/api/sessions`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ name: "test" }),
+		});
+		expect(res.status).toBe(500);
+		const body = (await res.json()) as { error: string };
+		// The original D1 error is what surfaces — NOT a TypeError on
+		// `meta.sessionId`. If the rollback crashed, Express would
+		// return a different error or the test would observe a stale
+		// connection.
+		expect(body.error).toBe("D1 down");
+		// No spawn / kill / deleteRow — `meta` was null, the rollback
+		// block was skipped entirely.
+		expect(spies.spawn).not.toHaveBeenCalled();
+		expect(spies.kill).not.toHaveBeenCalled();
+		expect(spies.deleteRow).not.toHaveBeenCalled();
+	});
+
 	it("returns 201 + calls markBootstrapped + runPostStart on the success path", async () => {
 		// Round-5 NIT: every other test in this file covers a failure
 		// shape. Pinning the happy path ensures a future refactor that
