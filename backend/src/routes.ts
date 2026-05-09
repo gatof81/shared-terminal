@@ -1122,7 +1122,11 @@ export function buildRouter(
 		const { userId } = req as AuthedRequest;
 		try {
 			const list = await templates.listForUser(userId);
-			res.json(list.map(serializeTemplate));
+			// Summary shape — no `config`. The full template body is
+			// fetched on demand via GET /:id when the user clicks
+			// `Use template`. Keeps the list response small even with
+			// a quota of 100 templates carrying ~256 KiB configs.
+			res.json(list.map(serializeTemplateSummary));
 		} catch (err) {
 			handleTemplateError(err, res);
 		}
@@ -1329,6 +1333,22 @@ function serializeTemplate(t: templates.Template): {
 		name: t.name,
 		description: t.description,
 		config: t.config,
+		createdAt: t.createdAt.toISOString(),
+		updatedAt: t.updatedAt.toISOString(),
+	};
+}
+
+function serializeTemplateSummary(t: templates.TemplateSummary): {
+	id: string;
+	name: string;
+	description: string | null;
+	createdAt: string;
+	updatedAt: string;
+} {
+	return {
+		id: t.id,
+		name: t.name,
+		description: t.description,
 		createdAt: t.createdAt.toISOString(),
 		updatedAt: t.updatedAt.toISOString(),
 	};

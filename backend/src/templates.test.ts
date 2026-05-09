@@ -168,6 +168,31 @@ describe("templates.listForUser", () => {
 		expect(list[0]?.name).toBe("Newer");
 	});
 
+	it("returns the summary shape — no `config` field", () => {
+		// Pin the metadata-only contract: the templates-page UI
+		// shouldn't be paying ~256 KiB-per-template in JSON parsing
+		// + transfer just to render the row chrome. Full config is
+		// fetched on demand via GET /:id when the user opens a
+		// template.
+		mockOnceRows([row({ id: "t-1", name: "A", config: '{"cpuLimit":1000000000}' })]);
+		return templates.listForUser("u1").then((list) => {
+			expect(list[0]).not.toHaveProperty("config");
+			expect(list[0]?.name).toBe("A");
+		});
+	});
+
+	it("uses a column-pinned SELECT (not SELECT *)", () => {
+		// Pinned so a future column addition to `templates` doesn't
+		// silently widen the list response with a heavy / sensitive
+		// new field.
+		mockOnceRows([]);
+		return templates.listForUser("u1").then(() => {
+			const [sql] = dbStubs.d1Query.mock.calls[0]!;
+			expect(sql).not.toMatch(/SELECT \*/);
+			expect(sql).toMatch(/SELECT id, owner_user_id, name, description, created_at, updated_at/);
+		});
+	});
+
 	it("returns [] when user owns no templates", async () => {
 		mockOnceRows([]);
 		await expect(templates.listForUser("u1")).resolves.toEqual([]);
@@ -259,7 +284,12 @@ describe("templates.update", () => {
 		const updateCall = dbStubs.d1Query.mock.calls[1]!;
 		expect(updateCall[0]).toMatch(/UPDATE templates/);
 		expect(updateCall[0]).toMatch(/updated_at = datetime\('now'\)/);
-		expect(updateCall[1]).toEqual(["new", null, '{"memLimit":1}', "t-1"]);
+		// Defence-in-depth: WHERE clause MUST include both id AND
+		// owner_user_id. Without the owner gate, a future refactor
+		// dropping `assertOwnership` could let a caller mutate
+		// another user's template via the SQL layer.
+		expect(updateCall[0]).toMatch(/WHERE id = \? AND owner_user_id = \?/);
+		expect(updateCall[1]).toEqual(["new", null, '{"memLimit":1}', "t-1", "u1"]);
 		expect(t.name).toBe("new");
 	});
 

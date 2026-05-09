@@ -31,10 +31,11 @@ interface TemplateRow {
 }
 
 /**
- * Domain shape returned by every method. `config` is parsed JSON;
- * callers re-validate with `validateSessionConfig` before reuse.
- * `description` is normalised to `string | null` (DB shape) — the
- * route serializer can collapse `null` to omitted on the wire.
+ * Domain shape returned by single-row reads / writes. `config` is
+ * parsed JSON; callers re-validate with `validateSessionConfig`
+ * before reuse. `description` is normalised to `string | null` (DB
+ * shape) — the route serializer can collapse `null` to omitted on
+ * the wire.
  */
 export interface Template {
 	id: string;
@@ -42,6 +43,26 @@ export interface Template {
 	name: string;
 	description: string | null;
 	config: unknown;
+	createdAt: Date;
+	updatedAt: Date;
+}
+
+/**
+ * Summary shape returned by `listForUser`. Omits `config` because
+ * the list endpoint serves the templates-page UI which only needs
+ * metadata for the row chrome (name + description + updatedAt for
+ * sort / display). The full config lives behind `GET /:id` and is
+ * fetched only when the user clicks `Use template`. With a 100-
+ * template per-user cap and configs that can run to ~256 KiB
+ * each, returning the full payload on every list call is up to
+ * ~25 MiB in the worst case — server-side D1 read cost the user
+ * inflicts on themselves on every page load.
+ */
+export interface TemplateSummary {
+	id: string;
+	ownerUserId: string;
+	name: string;
+	description: string | null;
 	createdAt: Date;
 	updatedAt: Date;
 }
@@ -150,13 +171,37 @@ export async function create(userId: string, input: TemplateInput): Promise<Temp
 	return rowToTemplate(row);
 }
 
-/** List every template owned by `userId`. Newest-first. */
-export async function listForUser(userId: string): Promise<Template[]> {
-	const result = await d1Query<TemplateRow>(
-		"SELECT * FROM templates WHERE owner_user_id = ? ORDER BY updated_at DESC",
+/**
+ * List every template owned by `userId`. Newest-first.
+ *
+ * Returns the metadata-only summary shape (no `config`) — the
+ * templates-page UI only needs name / description / updatedAt for
+ * the row chrome. The full config is fetched on `Use template` via
+ * GET /:id. SELECT is column-pinned (not `SELECT *`) so a future
+ * column addition to `templates` doesn't accidentally widen the
+ * list response.
+ */
+export async function listForUser(userId: string): Promise<TemplateSummary[]> {
+	const result = await d1Query<{
+		id: string;
+		owner_user_id: string;
+		name: string;
+		description: string | null;
+		created_at: string;
+		updated_at: string;
+	}>(
+		"SELECT id, owner_user_id, name, description, created_at, updated_at " +
+			"FROM templates WHERE owner_user_id = ? ORDER BY updated_at DESC",
 		[userId],
 	);
-	return result.results.map(rowToTemplate);
+	return result.results.map((row) => ({
+		id: row.id,
+		ownerUserId: row.owner_user_id,
+		name: row.name,
+		description: row.description,
+		createdAt: parseD1Utc(row.created_at),
+		updatedAt: parseD1Utc(row.updated_at),
+	}));
 }
 
 /**
@@ -203,10 +248,16 @@ export async function update(
 	// status-code timing). Running it first keeps the UPDATE
 	// off the wire when ownership fails.
 	await assertOwnership(templateId, userId);
+	// Defence-in-depth: `WHERE id = ? AND owner_user_id = ?` keeps
+	// the UPDATE scoped to rows the caller owns even if a future
+	// refactor drops the `assertOwnership` pre-check or wraps
+	// `update()` without it. `owner_user_id` is never mutated by
+	// this module so the WHERE is a hard upper bound — never a
+	// false negative on a legitimate update.
 	await d1Query(
 		"UPDATE templates SET name = ?, description = ?, config = ?, updated_at = datetime('now') " +
-			"WHERE id = ?",
-		[input.name, input.description ?? null, input.config, templateId],
+			"WHERE id = ? AND owner_user_id = ?",
+		[input.name, input.description ?? null, input.config, templateId, userId],
 	);
 	const row = await fetchRow(templateId);
 	// Race window: a sibling DELETE between the assertOwnership SELECT
