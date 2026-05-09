@@ -212,6 +212,19 @@ export class DockerManager {
 			Image: SESSION_IMAGE,
 			name: meta.containerName,
 			Hostname: hostname,
+			// Env order is intentional: hardcoded entries first, then user
+			// envArray. Linux execve is last-duplicate-wins, so:
+			//   - SESSION_ID / SESSION_NAME — protected by the
+			//     envVarValidation denylist (#206), so they CANNOT appear
+			//     in envArray; the placement here is for tidiness, not
+			//     defence. Hooks introduced in #191 read SESSION_ID as the
+			//     authoritative session identity.
+			//   - TERM / COLORTERM — deliberately user-overridable (e.g.
+			//     `TERM=tmux-256color` for nested-tmux workflows). Putting
+			//     them before envArray IS the mechanism that lets a user
+			//     opt out of the defaults; reordering would silently break
+			//     that affordance, so don't move `...envArray` above the
+			//     hardcoded entries without a replacement design.
 			Env: [
 				`SESSION_ID=${sessionId}`,
 				`SESSION_NAME=${meta.name}`,

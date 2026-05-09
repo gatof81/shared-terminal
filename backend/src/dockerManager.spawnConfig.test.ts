@@ -129,11 +129,9 @@ describe("mergeEnvForSpawn", () => {
 
 describe("DockerManager.spawn config-applied", () => {
 	it("falls back to default Memory/NanoCpus when no session_configs row exists", async () => {
-		dbStubs.d1Query.mockResolvedValueOnce({
-			results: [],
-			success: true,
-			meta: { changes: 0, duration: 0, last_row_id: 0 },
-		});
+		// `beforeEach` already resets d1Query to return `results: []`, so
+		// this test exercises the no-row path without needing a per-test
+		// mock override.
 		const { dm, captured } = makeDmWithCreateCapture();
 		await dm.spawn("sess-1");
 		const hc = captured.opts.HostConfig as { Memory: number; NanoCpus: number };
