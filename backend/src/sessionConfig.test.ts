@@ -140,8 +140,18 @@ describe("validateSessionConfig", () => {
 	// review bot flagged. PR 188 will read these values straight into a
 	// git-clone consumer, so refusing them at ingest is the only place
 	// this can be blocked without a duplicate validator downstream.
-	it("rejects repo URLs with file:// or ssh:// schemes", () => {
-		for (const url of ["file:///etc/passwd", "ssh://attacker.example/r", "javascript:alert(1)"]) {
+	it("rejects repo URLs with file:// / ssh:// / git:// schemes", () => {
+		// git:// is on the rejected list alongside file:// and ssh://:
+		// the unauthenticated git protocol has the same SSRF shape as
+		// ssh:// (TCP probe to attacker-supplied host:port from inside
+		// the container) and GitHub deprecated/removed support in 2021,
+		// so legitimate use is essentially zero.
+		for (const url of [
+			"file:///etc/passwd",
+			"ssh://attacker.example/r",
+			"git://attacker.example:9418/r",
+			"javascript:alert(1)",
+		]) {
 			expect(() => validateSessionConfig({ repos: [{ url }] })).toThrowError(
 				SessionConfigValidationError,
 			);
@@ -154,14 +164,10 @@ describe("validateSessionConfig", () => {
 		);
 	});
 
-	it("accepts https / http / git scheme repo URLs", () => {
+	it("accepts https / http scheme repo URLs", () => {
 		expect(
 			validateSessionConfig({
-				repos: [
-					{ url: "https://example.com/r" },
-					{ url: "http://example.com/r" },
-					{ url: "git://example.com/r" },
-				],
+				repos: [{ url: "https://example.com/r" }, { url: "http://example.com/r" }],
 			}),
 		).toBeDefined();
 	});

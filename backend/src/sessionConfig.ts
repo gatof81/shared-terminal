@@ -48,12 +48,14 @@ const MAX_PORTS = 20;
 //
 // URL scheme allowlist is enforced at INGEST so a stored value can never
 // reach the #188 git-clone consumer with a `file://` (clone from arbitrary
-// host paths including the bind-mounted workspace) or `ssh://attacker/`
-// (SSRF / host-key confusion) URL. The schema is the right enforcement
-// point — once a row is in D1, the child issue has no obvious place to
-// re-validate without a duplicate codebase. `git+...` variants stay out
-// pending a real reason to need them.
-const REPO_URL_SCHEME = /^(?:https?|git):\/\//;
+// host paths including the bind-mounted workspace), `ssh://attacker/`
+// (SSRF / host-key confusion), or `git://attacker:9418/` (the unauth-
+// enticated git protocol — same SSRF shape as ssh, GitHub deprecated and
+// removed support in 2021, so legitimate use is essentially zero). The
+// schema is the right enforcement point — once a row is in D1, the child
+// issue has no obvious place to re-validate without a duplicate codebase.
+// `git+...` variants stay out pending a real reason to need them.
+const REPO_URL_SCHEME = /^https?:\/\//;
 const RepoSpec = z
 	.object({
 		url: z
@@ -61,7 +63,7 @@ const RepoSpec = z
 			.min(1)
 			.max(500)
 			.refine((u) => REPO_URL_SCHEME.test(u), {
-				message: "url must use https://, http://, or git:// scheme",
+				message: "url must use https:// or http:// scheme",
 			}),
 		ref: z.string().max(200).optional(),
 	})
