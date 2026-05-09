@@ -14,6 +14,7 @@ import { StringDecoder } from "node:string_decoder";
 import Dockerode from "dockerode";
 import { d1Query } from "./db.js";
 import { logger } from "./logger.js";
+import { clearPortMappings, parseInspectPorts, setPortMappings } from "./portMappings.js";
 import {
 	decryptStoredEntries,
 	getSessionConfig,
@@ -247,10 +248,35 @@ export class DockerManager {
 		// reads via the read-only mount; no need for it to own anything.
 
 		const hostname = sanitiseHostname(meta.name, sessionId);
+		// #190 PR 190b — `-p 0:<container>` per declared port. Docker
+		// resolves `HostPort: ""` (or `"0"`) to a kernel-assigned ephemeral
+		// host port, which we read back from `inspect()` after `start()`
+		// and persist to `sessions_port_mappings`. The dispatcher (190c)
+		// looks the host port up there to answer `Host: p<container>-
+		// <sessionId>.<base>` requests. The dual `ExposedPorts` shape is
+		// Docker-API-mandated: it documents the listening side of the
+		// container, separate from the host-binding side; createContainer
+		// rejects `PortBindings` for an undeclared `ExposedPorts` entry.
+		// v1 publishes TCP only — every port goes through the HTTP/WS
+		// dispatcher in 190c via http-proxy. UDP would need a different
+		// topology and is out of scope.
+		const exposedPorts: Record<string, Record<string, never>> = {};
+		const portBindings: Record<string, Array<{ HostPort: string }>> = {};
+		for (const p of config?.ports ?? []) {
+			const key = `${p.container}/tcp`;
+			exposedPorts[key] = {};
+			portBindings[key] = [{ HostPort: "0" }];
+		}
 		const container = await this.docker.createContainer({
 			Image: SESSION_IMAGE,
 			name: meta.containerName,
 			Hostname: hostname,
+			// `ExposedPorts` is on the top-level (Image-config layer);
+			// `PortBindings` is on `HostConfig` (host-binding layer).
+			// Both must be present together for createContainer to
+			// publish the port, even though the spawn path only ever
+			// sets the bindings to ephemeral.
+			ExposedPorts: exposedPorts,
 			// `buildContainerEnv` returns a deduplicated `KEY=VALUE[]` array
 			// so the precedence is unambiguous regardless of which reader
 			// resolves the var inside the container. Duplicates in
@@ -266,6 +292,7 @@ export class DockerManager {
 					`${WORKSPACE_ROOT}/${sessionId}:/home/developer/workspace`,
 					`${uploadsHostDir}:/home/developer/uploads:ro`,
 				],
+				PortBindings: portBindings,
 				// `mem_limit` / `cpu_limit` from session_configs override the
 				// hardcoded defaults. Docker pins HostConfig at create time,
 				// so a later config-row UPDATE wouldn't take effect on an
@@ -292,6 +319,21 @@ export class DockerManager {
 				// reintroduces a setuid binary it cannot raise
 				// effective UID/caps at exec time.
 				CapDrop: ["ALL"],
+				// #190 PR 190b — `allowPrivilegedPorts: true` re-grants
+				// exactly `CAP_NET_BIND_SERVICE` on the container so the
+				// in-container process can bind to ports < 1024. Nothing
+				// else from the default capability bag is restored —
+				// CAP_NET_RAW (raw sockets / ICMP), CAP_AUDIT_WRITE,
+				// CAP_MKNOD etc. stay dropped. The toggle is gated at the
+				// schema level: privileged ports without it are rejected
+				// at ingest, so a session reaching here with the toggle
+				// off has no privileged ports to bind regardless. We add
+				// the cap whenever the toggle is on (independent of
+				// whether any specific port is < 1024) — the user opted
+				// in at the form, and a future port edit shouldn't have
+				// to recycle the container to take effect (config is
+				// bound at create time per the umbrella non-goal).
+				CapAdd: config?.allowPrivilegedPorts === true ? ["NET_BIND_SERVICE"] : undefined,
 				SecurityOpt: ["no-new-privileges:true"],
 			},
 			OpenStdin: true,
@@ -301,6 +343,35 @@ export class DockerManager {
 		await container.start();
 		const containerId = container.id;
 		await this.sessions.setContainerId(sessionId, containerId);
+
+		// #190 PR 190b — read the kernel-assigned host ports back from
+		// inspect() and persist the mapping so the dispatcher (190c) can
+		// route inbound requests without re-inspecting on every hit.
+		// Best-effort: a failure here logs and lets the container run —
+		// reconcile() will resync on the next backend boot, and the
+		// dispatcher returns 404 for an unknown port until then. We do
+		// NOT roll back the spawn over a mapping-write failure: the
+		// container is up and the workspace is mounted, killing it now
+		// would lose the bootstrap pipeline's progress for what is
+		// likely a transient D1 hiccup.
+		const declaredPorts = config?.ports ?? [];
+		if (declaredPorts.length > 0) {
+			try {
+				const info = await container.inspect();
+				const mappings = parseInspectPorts(info.NetworkSettings?.Ports);
+				await setPortMappings(sessionId, mappings);
+				if (mappings.length !== declaredPorts.length) {
+					logger.warn(
+						`[docker] inspect returned ${mappings.length} mapping(s) for session ${sessionId}, ` +
+							`expected ${declaredPorts.length}; dispatcher will 404 the missing ports`,
+					);
+				}
+			} catch (err) {
+				logger.error(
+					`[docker] failed to persist port mappings for session ${sessionId}: ${(err as Error).message}`,
+				);
+			}
+		}
 
 		logger.info(
 			`[docker] spawned container ${meta.containerName} (${containerId.slice(0, 12)}) for session ${sessionId}`,
@@ -627,6 +698,19 @@ export class DockerManager {
 					`[docker] failed to null container_id for session ${sessionId}: ${(err as Error).message}`,
 				);
 			}
+			// #190 PR 190b — drop runtime port mappings: the host ports
+			// are about to be recycled by the kernel, and the dispatcher
+			// (190c) must NOT proxy a request to a port that's bound to
+			// some other tenant's container in the next moment. Best-
+			// effort because the container is already gone — failing to
+			// clear is a stale-row leak the next spawn / reconcile fixes.
+			try {
+				await clearPortMappings(sessionId);
+			} catch (err) {
+				logger.error(
+					`[docker] failed to clear port mappings for session ${sessionId}: ${(err as Error).message}`,
+				);
+			}
 		}
 
 		// Destroy any shared exec and per-attach routing for this session.
@@ -735,7 +819,35 @@ export class DockerManager {
 			this.warnIfPreHardened(sessionId, meta.containerId, info.HostConfig);
 			if (!info.State.Running) {
 				await this.docker.getContainer(meta.containerId).start();
+				// #190 PR 190b round 1 SHOULD-FIX — refresh port
+				// mappings after we restart a stopped container.
+				// `stopContainer()` clears the mapping table, and
+				// Docker assigns a fresh ephemeral host port at every
+				// start (the kernel pool isn't sticky), so the D1 row
+				// written by the original spawn is gone and the
+				// pre-start `info.NetworkSettings.Ports` snapshot is
+				// either empty or stale. Without re-inspecting here,
+				// the dispatcher (190c) would 404 every proxied port
+				// request on this session until the next reconcile()
+				// — which is the most common lifecycle path for any
+				// session with declared ports. Mirror spawn()'s
+				// best-effort pattern: a failure logs and lets the
+				// container keep running.
+				try {
+					const fresh = await this.docker.getContainer(meta.containerId).inspect();
+					const mappings = parseInspectPorts(fresh.NetworkSettings?.Ports);
+					if (mappings.length > 0) {
+						await setPortMappings(sessionId, mappings);
+					}
+				} catch (err) {
+					logger.warn(
+						`[docker] failed to refresh port mappings for session ${sessionId} after restart: ${(err as Error).message}`,
+					);
+				}
 			}
+			// When `info.State.Running` was already true (container was
+			// running before this call), the D1 row written by spawn()
+			// or the last reconcile() is still valid — no re-inspect.
 			await this.sessions.updateStatus(sessionId, "running");
 			logger.info(`[docker] restarted container for session ${sessionId}`);
 		} catch {
@@ -1021,6 +1133,19 @@ export class DockerManager {
 			/* already stopped */
 		}
 		await this.sessions.updateStatus(sessionId, "stopped");
+		// #190 PR 190b — clear port mappings: a stopped container's host
+		// port no longer reaches anything, and Docker may rebind the
+		// same ephemeral port to a different container on the next
+		// `start()`. Without this, the dispatcher would happily proxy a
+		// request to the previous tenant. Same best-effort logging
+		// shape as `kill()`.
+		try {
+			await clearPortMappings(sessionId);
+		} catch (err) {
+			logger.error(
+				`[docker] failed to clear port mappings for session ${sessionId}: ${(err as Error).message}`,
+			);
+		}
 		logger.info(`[docker] stopped container for session ${sessionId}`);
 	}
 
@@ -1704,6 +1829,16 @@ export class DockerManager {
 		for (const row of result.results) {
 			if (!row.container_id) {
 				await this.sessions.updateStatus(row.session_id, "stopped");
+				// Drop any leftover port mappings for the no-container
+				// case — same defensive intent as the running-but-
+				// stopped branch below.
+				try {
+					await clearPortMappings(row.session_id);
+				} catch (err) {
+					logger.warn(
+						`[docker] reconcile clearPortMappings failed for ${row.session_id}: ${(err as Error).message}`,
+					);
+				}
 				continue;
 			}
 			try {
@@ -1718,6 +1853,42 @@ export class DockerManager {
 				this.warnIfPreHardened(row.session_id, row.container_id, info.HostConfig);
 				if (!info.State.Running) {
 					await this.sessions.updateStatus(row.session_id, "stopped");
+					// Same rationale as `stopContainer()`: a container
+					// Docker reports as not-running has its host ports
+					// detached (or about to be), so the mapping table
+					// must not leave the dispatcher pointing at it.
+					try {
+						await clearPortMappings(row.session_id);
+					} catch (err) {
+						logger.warn(
+							`[docker] reconcile clearPortMappings failed for ${row.session_id}: ${(err as Error).message}`,
+						);
+					}
+				} else {
+					// #190 PR 190b — re-discover the host-port mappings
+					// for a still-running container. The kernel-bound
+					// host ports survive a backend restart (the
+					// container itself owns them) and the D1 row
+					// written by the last spawn / startContainer
+					// survives too — but re-reading from inspect()
+					// guards against drift if a prior `setPortMappings`
+					// crashed mid-sequence (DELETE without follow-up
+					// INSERTs is the practical worst case). Best-effort:
+					// a failure here logs and lets the rest of reconcile
+					// finish; the next /start writes a fresh row.
+					try {
+						const mappings = parseInspectPorts(info.NetworkSettings?.Ports);
+						if (mappings.length > 0) {
+							await setPortMappings(row.session_id, mappings);
+						} else {
+							// No published ports — clear any stale rows.
+							await clearPortMappings(row.session_id);
+						}
+					} catch (err) {
+						logger.warn(
+							`[docker] reconcile port-mapping resync failed for ${row.session_id}: ${(err as Error).message}`,
+						);
+					}
 				}
 			} catch (err) {
 				// Only 404 means container is actually gone (atomic null+stopped).
@@ -1726,11 +1897,31 @@ export class DockerManager {
 				const statusCode = (err as { statusCode?: number }).statusCode;
 				if (statusCode === 404) {
 					await this.sessions.recordContainerGone(row.session_id);
+					// Container is genuinely gone — its host ports are
+					// freed; the dispatcher must not retain mappings.
+					try {
+						await clearPortMappings(row.session_id);
+					} catch (clearErr) {
+						logger.warn(
+							`[docker] reconcile clearPortMappings (404 branch) failed for ${row.session_id}: ${(clearErr as Error).message}`,
+						);
+					}
 				} else {
 					logger.warn(
 						`[docker] reconcile inspect failed for session ${row.session_id}: ${(err as Error).message}`,
 					);
 					await this.sessions.updateStatus(row.session_id, "stopped");
+					// Daemon is unreachable, so we can't be sure of the
+					// container's state — the safe move is to drop the
+					// mappings (dispatcher 404s are recoverable; routing
+					// requests to a wrong tenant is not).
+					try {
+						await clearPortMappings(row.session_id);
+					} catch (clearErr) {
+						logger.warn(
+							`[docker] reconcile clearPortMappings (transient branch) failed for ${row.session_id}: ${(clearErr as Error).message}`,
+						);
+					}
 				}
 			}
 		}

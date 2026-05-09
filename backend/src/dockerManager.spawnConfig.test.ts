@@ -70,7 +70,16 @@ interface CapturedCreate {
 	opts: Record<string, unknown>;
 }
 
-function makeDmWithCreateCapture(): { dm: DockerManager; captured: CapturedCreate } {
+function makeDmWithCreateCapture(
+	// #190 PR 190b — optional `inspectPorts` lets a test seed Docker's
+	// post-start `NetworkSettings.Ports` shape so we can assert that
+	// `setPortMappings` runs with the kernel-assigned host ports.
+	// Default is `{}` (no published ports), which matches today's
+	// non-port tests — they exercise the no-config / cpu+mem-only paths
+	// where `config?.ports` is undefined and the post-start inspect
+	// branch is short-circuited entirely.
+	inspectPorts?: Record<string, Array<{ HostIp?: string; HostPort: string }> | null>,
+): { dm: DockerManager; captured: CapturedCreate } {
 	const captured: CapturedCreate = { opts: {} };
 	const dm = new DockerManager(fakeSessions());
 	const fakeContainer = {
@@ -78,6 +87,9 @@ function makeDmWithCreateCapture(): { dm: DockerManager; captured: CapturedCreat
 		start: vi.fn(async () => {
 			/* noop */
 		}),
+		inspect: vi.fn(async () => ({
+			NetworkSettings: { Ports: inspectPorts ?? {} },
+		})),
 	};
 	const fakeDocker = {
 		createContainer: vi.fn(async (opts: Record<string, unknown>) => {
@@ -273,6 +285,7 @@ describe("DockerManager.spawn config-applied", () => {
 					post_start_cmd: null,
 					repos_json: null,
 					ports_json: null,
+					allow_privileged_ports: null,
 					// Storage shape (#186): typed entry list, plain rows have
 					// `{ name, type: "plain", value }`. The route encrypts
 					// secret entries before they land here.
@@ -322,6 +335,7 @@ describe("DockerManager.spawn config-applied", () => {
 					post_start_cmd: null,
 					repos_json: null,
 					ports_json: null,
+					allow_privileged_ports: null,
 					env_vars_json: JSON.stringify([
 						{
 							name: "API_KEY",
@@ -388,5 +402,173 @@ describe("DockerManager.spawn config-applied", () => {
 		const hc = captured.opts.HostConfig as { Memory: number; NanoCpus: number };
 		expect(hc.Memory).toBe(2 * 1024 * 1024 * 1024);
 		expect(hc.NanoCpus).toBe(2_000_000_000);
+	});
+
+	// ── #190 PR 190b — port wiring ──────────────────────────────────────
+
+	// Helper builds a session_configs row mock with ports + the
+	// privileged-toggle in one call so the per-test mocks stay short.
+	function mockConfigRow(opts: {
+		ports?: Array<{ container: number; public: boolean }>;
+		allowPrivilegedPorts?: boolean;
+	}): void {
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [
+				{
+					session_id: "sess-1",
+					workspace_strategy: null,
+					cpu_limit: null,
+					mem_limit: null,
+					idle_ttl_seconds: null,
+					post_create_cmd: null,
+					post_start_cmd: null,
+					repos_json: null,
+					ports_json: opts.ports ? JSON.stringify(opts.ports) : null,
+					allow_privileged_ports: opts.allowPrivilegedPorts ? 1 : null,
+					env_vars_json: null,
+					bootstrapped_at: null,
+				},
+			],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+	}
+
+	it("emits ExposedPorts and PortBindings (HostPort=0) for each declared port", async () => {
+		mockConfigRow({
+			ports: [
+				{ container: 3000, public: false },
+				{ container: 5500, public: true },
+			],
+		});
+		const { dm, captured } = makeDmWithCreateCapture({
+			"3000/tcp": [{ HostIp: "0.0.0.0", HostPort: "32768" }],
+			"5500/tcp": [{ HostIp: "0.0.0.0", HostPort: "32769" }],
+		});
+		await dm.spawn("sess-1");
+		expect(captured.opts.ExposedPorts).toEqual({
+			"3000/tcp": {},
+			"5500/tcp": {},
+		});
+		const hc = captured.opts.HostConfig as {
+			PortBindings: Record<string, Array<{ HostPort: string }>>;
+		};
+		// HostPort: "0" tells Docker to pick a kernel-assigned ephemeral
+		// port at start time. The actual bound port comes back via
+		// inspect() and lands in `sessions_port_mappings`.
+		expect(hc.PortBindings).toEqual({
+			"3000/tcp": [{ HostPort: "0" }],
+			"5500/tcp": [{ HostPort: "0" }],
+		});
+	});
+
+	it("omits ExposedPorts/PortBindings entries when no ports are declared", async () => {
+		// Bare-create path (no config row): ExposedPorts and PortBindings
+		// must be empty objects, not undefined — Docker's createContainer
+		// rejects PortBindings if ExposedPorts is missing for any key,
+		// but accepts an empty pair.
+		const { dm, captured } = makeDmWithCreateCapture();
+		await dm.spawn("sess-1");
+		expect(captured.opts.ExposedPorts).toEqual({});
+		expect((captured.opts.HostConfig as { PortBindings: object }).PortBindings).toEqual({});
+	});
+
+	it("adds CAP_NET_BIND_SERVICE only when allowPrivilegedPorts is true", async () => {
+		mockConfigRow({
+			ports: [{ container: 80, public: true }],
+			allowPrivilegedPorts: true,
+		});
+		const { dm, captured } = makeDmWithCreateCapture({
+			"80/tcp": [{ HostPort: "32768" }],
+		});
+		await dm.spawn("sess-1");
+		const hc = captured.opts.HostConfig as { CapAdd: string[] | undefined };
+		expect(hc.CapAdd).toEqual(["NET_BIND_SERVICE"]);
+	});
+
+	it("leaves CapAdd undefined when allowPrivilegedPorts is omitted", async () => {
+		mockConfigRow({ ports: [{ container: 3000, public: false }] });
+		const { dm, captured } = makeDmWithCreateCapture({
+			"3000/tcp": [{ HostPort: "32768" }],
+		});
+		await dm.spawn("sess-1");
+		const hc = captured.opts.HostConfig as { CapAdd: string[] | undefined };
+		expect(hc.CapAdd).toBeUndefined();
+	});
+
+	// CAP_NET_BIND_SERVICE is the ONLY capability we re-grant. A
+	// future refactor that accidentally widens CapAdd would defeat
+	// the whole point of `CapDrop: ["ALL"]`.
+	it("never adds any capability other than NET_BIND_SERVICE", async () => {
+		mockConfigRow({
+			ports: [{ container: 22, public: false }],
+			allowPrivilegedPorts: true,
+		});
+		const { dm, captured } = makeDmWithCreateCapture({
+			"22/tcp": [{ HostPort: "32768" }],
+		});
+		await dm.spawn("sess-1");
+		const hc = captured.opts.HostConfig as { CapAdd: string[] | undefined };
+		expect(hc.CapAdd).toEqual(["NET_BIND_SERVICE"]);
+		expect(hc.CapAdd?.length).toBe(1);
+	});
+
+	it("persists kernel-assigned host ports via setPortMappings after start", async () => {
+		mockConfigRow({
+			ports: [
+				{ container: 3000, public: false },
+				{ container: 5500, public: true },
+			],
+		});
+		const { dm } = makeDmWithCreateCapture({
+			"3000/tcp": [{ HostIp: "0.0.0.0", HostPort: "32768" }],
+			"5500/tcp": [{ HostIp: "0.0.0.0", HostPort: "32769" }],
+		});
+		await dm.spawn("sess-1");
+		// `setPortMappings` issues DELETE then one INSERT per mapping.
+		// Mock call sequence after the config-read at index 0:
+		//   [1] DELETE FROM sessions_port_mappings WHERE session_id = ?
+		//   [2] INSERT INTO sessions_port_mappings (..., 3000, 32768)
+		//   [3] INSERT INTO sessions_port_mappings (..., 5500, 32769)
+		const calls = dbStubs.d1Query.mock.calls;
+		const deleteIdx = calls.findIndex((c) =>
+			(c[0] as string).match(/DELETE FROM sessions_port_mappings/),
+		);
+		expect(deleteIdx).toBeGreaterThanOrEqual(0);
+		expect(calls[deleteIdx + 1]?.[0]).toMatch(/INSERT INTO sessions_port_mappings/);
+		expect(calls[deleteIdx + 1]?.[1]).toEqual(["sess-1", 3000, 32768]);
+		expect(calls[deleteIdx + 2]?.[1]).toEqual(["sess-1", 5500, 32769]);
+	});
+
+	it("does not call setPortMappings when no ports are declared (no DELETE on a clean spawn)", async () => {
+		// `config?.ports` is undefined here (no config row at all). The
+		// spawn path should skip the inspect+persist branch entirely so
+		// a session that never declares ports doesn't even touch the
+		// port-mappings table — no row writes, no D1 round-trips.
+		const { dm } = makeDmWithCreateCapture();
+		await dm.spawn("sess-1");
+		const portMappingCalls = dbStubs.d1Query.mock.calls.filter((c) =>
+			(c[0] as string).match(/sessions_port_mappings/),
+		);
+		expect(portMappingCalls).toEqual([]);
+	});
+
+	it("logs and continues when inspect() throws after start", async () => {
+		mockConfigRow({ ports: [{ container: 3000, public: false }] });
+		const { dm } = makeDmWithCreateCapture();
+		// Override inspect to throw, simulating a transient daemon
+		// hiccup right after start. The container itself is up, so
+		// killing it now would cost the user the bootstrap pipeline's
+		// progress over a recoverable error. Reconcile() resyncs on
+		// the next backend boot.
+		const docker = (dm as unknown as { docker: { getContainer: () => unknown } }).docker;
+		const fakeContainer = docker.getContainer() as {
+			start: ReturnType<typeof vi.fn>;
+			inspect: ReturnType<typeof vi.fn>;
+		};
+		fakeContainer.inspect = vi.fn(async () => {
+			throw new Error("daemon unreachable");
+		});
+		await expect(dm.spawn("sess-1")).resolves.toBeDefined();
 	});
 });
