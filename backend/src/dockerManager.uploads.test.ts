@@ -74,7 +74,9 @@ describe("writeUploads", () => {
 	// actually moves files to. Lives at <WORKSPACE_ROOT>/.uploads/
 	// <sessionId>/ — out-of-workspace by design (TOCTOU isolation,
 	// see writeUploadsImpl). spawn() bind-mounts this dir read-only
-	// into the container at /home/developer/workspace/uploads/, but
+	// into the container at /home/developer/uploads/ (#188 PR 188a
+	// moved it out of /home/developer/workspace/ so the workspace
+	// stays clean for #188's repo-clone replace-workspace mode), but
 	// these tests never construct containers — they only exercise
 	// host-side state.
 	const uploadsHostDir = (sid: string) => path.join(WORKSPACE_ROOT, ".uploads", sid);
@@ -88,7 +90,7 @@ describe("writeUploads", () => {
 
 		expect(result).toHaveLength(2);
 		for (const p of result) {
-			expect(p.startsWith("/home/developer/workspace/uploads/")).toBe(true);
+			expect(p.startsWith("/home/developer/uploads/")).toBe(true);
 		}
 		// The container paths' filenames map directly onto the
 		// host-side basenames — useful guarantee for tests that want
