@@ -158,6 +158,21 @@ export function handleWsConnection(
 			ws.close(1008, "Session terminated");
 			return;
 		}
+		// `failed` (#185) means the postCreate hook exited non-zero, the
+		// container was killed, and the user can no longer /start the
+		// session (REST returns 409). Without this short-circuit
+		// `docker.attach` would try `getContainer(meta.containerId)` on
+		// a null id, throw "No container for this session", and close
+		// the socket with 1011 Internal Error — a misleading code that
+		// also pollutes server logs with a spurious error for an
+		// avoidable path. 1008 ("policy violation") is the same code
+		// `terminated` uses; matching it gives the client a single
+		// "session is in a non-attachable state" signal to handle.
+		if (session.status === "failed") {
+			sendError(ws, "Session failed during postCreate; recreate it to retry.");
+			ws.close(1008, "Session failed");
+			return;
+		}
 
 		// Attach to Docker container
 		const attachId = `${sessionId}:${uuidv4().slice(0, 8)}`;

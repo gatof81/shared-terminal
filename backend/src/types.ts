@@ -4,7 +4,12 @@
 
 // ── Session ─────────────────────────────────────────────────────────────────
 
-export type SessionStatus = "running" | "stopped" | "terminated";
+// `failed` (#185) is set when a postCreate hook exits non-zero. The row
+// stays so operators can audit, but the container is killed and the
+// session can't be /start-ed (the runner refuses to retry — the user
+// has to recreate). `terminated` is hard-delete; `stopped` is the
+// normal "container off, will respawn on /start" state.
+export type SessionStatus = "running" | "stopped" | "terminated" | "failed";
 
 export interface SessionMeta {
 	sessionId: string;

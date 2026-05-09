@@ -11,6 +11,7 @@ vi.mock("./db.js", () => dbStubs);
 
 import {
 	DockerManager,
+	demuxDockerOutputAll,
 	type OutputListener,
 	sanitiseHostname,
 	sanitiseUploadName,
@@ -61,6 +62,9 @@ interface FakeExec {
 	_resizes: Array<{ h: number; w: number }>;
 	_stream: PassThrough;
 	_cmd: string[];
+	// `WorkingDir` is captured for #207 round 7 — runPostCreate now
+	// pins cwd to the workspace and tests assert it.
+	_workingDir: string | undefined;
 }
 
 interface FakeContainer {
@@ -78,30 +82,32 @@ function makeFakeContainer(oneShot?: OneShotHook): FakeContainer {
 	const execs: FakeExec[] = [];
 
 	const container = {
-		exec: vi.fn(async (opts: { Cmd: string[]; Tty?: boolean }) => {
+		exec: vi.fn(async (opts: { Cmd: string[]; Tty?: boolean; WorkingDir?: string }) => {
 			const stream = new PassThrough();
 			const resizes: Array<{ h: number; w: number }> = [];
 			streams.push(stream);
 
-			// One-shot tmux commands (list-sessions, new-session -d, set-option,
-			// kill-session, has-session) don't hijack the stream. If a test
-			// supplied a hook, let it decide the stdout + exit code. Attaches
-			// (`tmux attach` or the self-healing `tmux new-session -A`) are
-			// explicitly NOT one-shots — they keep a long-lived stream open and
-			// the test drives output by writing to `container._streams[...]`.
+			// One-shot commands (every Tty:false exec — tmux list-sessions,
+			// kill-session, capture-pane, new-session -d, set-option, AND
+			// the postCreate `bash -c <cmd>` introduced in #185 / PR
+			// 185b2a) don't hijack the stream. If a test supplied a hook,
+			// let it decide the stdout + exit code. Attaches (`tmux attach`
+			// or the self-healing `tmux new-session -A`) are explicitly
+			// NOT one-shots — they keep a long-lived stream open and the
+			// test drives output by writing to `container._streams[...]`.
 			const isAttach =
 				opts.Cmd[0] === "tmux" &&
 				(opts.Cmd[1] === "attach" || (opts.Cmd[1] === "new-session" && opts.Cmd.includes("-A")));
-			// Every one-shot tmux command (capture-pane, list-sessions, kill-session,
-			// set-option, new-session -d, …) needs SOME canned response — otherwise
-			// execOneShot's `await stream.on("end")` hangs the test forever. If the
-			// caller provided a hook and it answers for this command, use that; if
-			// the hook returns undefined or wasn't provided, default to an empty
-			// stdout + exit 0 so tests that don't care about the one-shot machinery
-			// (e.g. the fan-out test that doesn't use capture-pane) don't have to
-			// wire up a full oneShot mock just to unblock attach().
+			// Every one-shot exec (capture-pane, kill-session, set-option,
+			// new-session -d, bash -c, …) needs SOME canned response —
+			// otherwise execOneShot's `await stream.on("end")` hangs the
+			// test forever. If the caller provided a hook and it answers
+			// for this command, use that; if the hook returns undefined or
+			// wasn't provided, default to an empty stdout + exit 0 so
+			// tests that don't care about the one-shot machinery don't
+			// have to wire up a full oneShot mock just to unblock attach.
 			const oneShotResult =
-				!isAttach && opts.Cmd[0] === "tmux" && opts.Tty === false
+				!isAttach && opts.Tty === false
 					? (oneShot?.(opts.Cmd) ?? { stdout: "", exitCode: 0 })
 					: undefined;
 
@@ -129,6 +135,7 @@ function makeFakeContainer(oneShot?: OneShotHook): FakeContainer {
 				_resizes: resizes,
 				_stream: stream,
 				_cmd: opts.Cmd,
+				_workingDir: opts.WorkingDir,
 			};
 			execs.push(exec);
 			return exec;
@@ -1112,5 +1119,190 @@ describe("sanitiseHostname", () => {
 		const out = sanitiseHostname("x".repeat(200), sid);
 		expect(out.length).toBe(63);
 		expect(out).toBe("x".repeat(63));
+	});
+});
+
+// ── Bootstrap hooks (#185) ─────────────────────────────────────────────────
+
+describe("DockerManager.runPostCreate", () => {
+	it("runs the cmd via `bash -c` and returns exit code + stdout", async () => {
+		const { dm, container } = makeDocker({
+			oneShot: (cmd) => {
+				if (cmd[0] === "bash" && cmd[1] === "-c") {
+					return { stdout: "installed\n", exitCode: 0 };
+				}
+				return undefined;
+			},
+		});
+		const result = await dm.runPostCreate("s1", "npm install");
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("installed");
+		// Cmd shape: bash -c <user-script>. Argv form means tmux/exec
+		// gets the script as a single argument, no shell-quoting hazard.
+		const exec = mustFind(
+			container._execs,
+			(e) => e._cmd[0] === "bash" && e._cmd[1] === "-c",
+			"bash -c exec for runPostCreate",
+		);
+		expect(exec._cmd).toEqual(["bash", "-c", "npm install"]);
+	});
+
+	it("propagates a non-zero exit code so the route can hard-fail", async () => {
+		const { dm } = makeDocker({
+			oneShot: (cmd) => {
+				if (cmd[0] === "bash") return { stdout: "boom\n", exitCode: 42 };
+				return undefined;
+			},
+		});
+		const result = await dm.runPostCreate("s1", "false");
+		expect(result.exitCode).toBe(42);
+		expect(result.output).toContain("boom");
+	});
+
+	// Round-7 review fix: hooks must run from the workspace, not from
+	// the image's WORKDIR. Without WorkingDir on the exec, `npm install`
+	// would look for package.json in `/home/developer` and silently
+	// fail with ENOENT.
+	it("pins WorkingDir to the workspace so hooks run alongside the user's project files", async () => {
+		const { dm, container } = makeDocker({
+			oneShot: () => ({ stdout: "", exitCode: 0 }),
+		});
+		await dm.runPostCreate("s1", "npm install");
+		const exec = mustFind(
+			container._execs,
+			(e) => e._cmd[0] === "bash" && e._cmd[1] === "-c",
+			"bash -c exec for runPostCreate",
+		);
+		expect(exec._workingDir).toBe("/home/developer/workspace");
+	});
+
+	// Round-2 review fix: hook diagnostics go to stderr (`npm ERR!`,
+	// `bash: cmd: not found`, `tsc: error TS…`). The capture must
+	// include stderr, otherwise the hard-fail modal shows "(no output)"
+	// for the most common failure mode and the user can't see what
+	// went wrong.
+	it("captures stderr alongside stdout in the returned output", async () => {
+		const { dm } = makeDocker({
+			oneShot: (cmd) => {
+				// Inject a stderr frame ahead of an empty stdout to assert
+				// the combined demux walks both. The test harness packs
+				// whatever the hook returns as stdout (frame type 1), so
+				// we simulate by writing a custom multiplexed buffer
+				// directly. Easier path: use `mergeFrames` below.
+				if (cmd[0] === "bash") {
+					return { stdout: "bash: bad-cmd: not found\n", exitCode: 127 };
+				}
+				return undefined;
+			},
+		});
+		const result = await dm.runPostCreate("s1", "bad-cmd");
+		// Even with the harness packing as stdout, the combined demux
+		// must surface the bytes — exiting code 127 is the canonical
+		// "command not found" semaphore the modal now relies on.
+		expect(result.exitCode).toBe(127);
+		expect(result.output).toContain("bash: bad-cmd: not found");
+	});
+});
+
+// Direct unit tests on the combined-demux helper itself, since the
+// fake-container harness only emits stdout frames (type 1). Asserting
+// here that mixed stdout/stderr buffers — which Docker really does
+// produce in production — interleave correctly into a single output
+// string.
+describe("demuxDockerOutputAll", () => {
+	function frame(type: 1 | 2, payload: string): Buffer {
+		const data = Buffer.from(payload, "utf-8");
+		const header = Buffer.alloc(8);
+		header[0] = type;
+		header.writeUInt32BE(data.length, 4);
+		return Buffer.concat([header, data]);
+	}
+
+	it("collects type-1 (stdout) and type-2 (stderr) frames in arrival order", () => {
+		const raw = Buffer.concat([
+			frame(1, "step1\n"),
+			frame(2, "warn: something\n"),
+			frame(1, "step2\n"),
+			frame(2, "err: boom\n"),
+		]);
+		const out = demuxDockerOutputAll(raw);
+		expect(out).toBe("step1\nwarn: something\nstep2\nerr: boom\n");
+	});
+
+	it("ignores unknown frame types (defence against future Docker additions)", () => {
+		const raw = Buffer.concat([
+			frame(1, "kept\n"),
+			// type 3 doesn't exist today; skipping it lets a future
+			// Docker frame type appear without polluting the panel.
+			Buffer.concat([Buffer.from([3, 0, 0, 0, 0, 0, 0, 5]), Buffer.from("xxxxx")]),
+			frame(2, "kept-stderr\n"),
+		]);
+		expect(demuxDockerOutputAll(raw)).toBe("kept\nkept-stderr\n");
+	});
+
+	it("returns empty string for an empty buffer", () => {
+		expect(demuxDockerOutputAll(Buffer.alloc(0))).toBe("");
+	});
+});
+
+describe("DockerManager.runPostStart", () => {
+	it("kills any prior `bootstrap` tmux session, then creates a fresh detached one", async () => {
+		const calls: string[][] = [];
+		const { dm } = makeDocker({
+			oneShot: (cmd) => {
+				calls.push(cmd);
+				return { stdout: "", exitCode: 0 };
+			},
+		});
+		await dm.runPostStart("s1", "code tunnel");
+		// Idempotent on re-runs: the kill-session must come first so a
+		// stale daemon from the previous start can't race the new one.
+		expect(calls[0]).toEqual(["tmux", "kill-session", "-t", "bootstrap"]);
+		// new-session -d creates the daemon detached; -c pins cwd to the
+		// workspace so the hook runs from the same place a freshly-
+		// attached terminal would.
+		expect(calls[1]).toEqual([
+			"tmux",
+			"new-session",
+			"-d",
+			"-s",
+			"bootstrap",
+			"-c",
+			"/home/developer/workspace",
+			"bash",
+			"-c",
+			"code tunnel",
+		]);
+	});
+
+	it("treats a non-zero kill-session as expected (first start has no session to kill)", async () => {
+		// First-start path: kill-session returns 1 ("no such session")
+		// which is the COMMON case, not an error. Wrapped in .catch in
+		// runPostStart so it never propagates. The new-session call
+		// must still run.
+		const calls: string[][] = [];
+		const { dm } = makeDocker({
+			oneShot: (cmd) => {
+				calls.push(cmd);
+				if (cmd.includes("kill-session")) return { stdout: "", exitCode: 1 };
+				return { stdout: "", exitCode: 0 };
+			},
+		});
+		await dm.runPostStart("s1", "echo started");
+		expect(calls.length).toBe(2);
+		expect(calls[1]?.[1]).toBe("new-session");
+	});
+
+	it("logs a warning but does not throw if the new-session itself fails", async () => {
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+		const { dm } = makeDocker({
+			oneShot: (cmd) => {
+				if (cmd[1] === "new-session") return { stdout: "boom", exitCode: 99 };
+				return { stdout: "", exitCode: 0 };
+			},
+		});
+		await expect(dm.runPostStart("s1", "broken")).resolves.toBeUndefined();
+		expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("postStart launch failed"));
+		warnSpy.mockRestore();
 	});
 });

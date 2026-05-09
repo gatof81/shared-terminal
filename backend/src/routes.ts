@@ -27,6 +27,7 @@ import {
 	UsernameTakenError,
 	verifyJwt,
 } from "./auth.js";
+import { markBootstrapped } from "./bootstrap.js";
 import { d1Query } from "./db.js";
 import type { DockerManager } from "./dockerManager.js";
 import { UploadQuotaExceededError } from "./dockerManager.js";
@@ -449,6 +450,89 @@ export function buildRouter(
 				await persistSessionConfig(meta.sessionId, validatedConfig);
 			}
 			await docker.spawn(meta.sessionId);
+			// postCreate hook (#185): one-shot bootstrap that runs once
+			// per session. Synchronous wait here means the modal stays
+			// open until the hook exits; PR 185b2b will layer a streaming
+			// WS channel so the user sees output live instead of waiting
+			// blind on the HTTP request. Hard-fail semantics from #185:
+			// non-zero exit → kill the container, flip status to `failed`,
+			// return 500 with the captured output. The row stays so the
+			// user can read what the hook printed (and so a recreate
+			// doesn't collide with leftover state on the same name).
+			if (validatedConfig?.postCreateCmd) {
+				const { exitCode, output } = await docker.runPostCreate(
+					meta.sessionId,
+					validatedConfig.postCreateCmd,
+				);
+				if (exitCode !== 0) {
+					// Status flip MUST land BEFORE the docker.kill, NOT
+					// after (round-5 review). If we flipped after, a D1
+					// transient on the flip would leave the row at
+					// `(running, null)` (kill nulled container_id), and
+					// reconcile() on the next backend boot would promote
+					// it to `stopped` — a state the /start 409 guard
+					// happily allows, silently respawning an
+					// unbootstrapped container.
+					//
+					// We deliberately do NOT swallow this UPDATE's error.
+					// If it throws, the exception propagates to the outer
+					// catch which tears down the row + container as a
+					// generic create failure. Trade-off: on a D1 hiccup
+					// the user loses the captured `bootstrapOutput` from
+					// the 500 body (we never reach the json call) and
+					// the sidebar never shows the failure row. That's
+					// strictly better than the alternative, which is a
+					// row that reconcile silently promotes to stopped
+					// and the user respawns into.
+					await sessions.updateStatus(meta.sessionId, "failed");
+					// Kill is best-effort. If it fails, we have an orphan
+					// container with status=failed — a leak, not a
+					// security issue: reconcile selects only `running`
+					// rows so it skips this one, the /start 409 guard
+					// refuses the row, and manual `docker rm` resolves
+					// the leak. CRITICAL log surfaces it for operators.
+					await docker.kill(meta.sessionId).catch((e) => {
+						logger.error(
+							`[routes] CRITICAL: kill after failed postCreate ${meta?.sessionId} threw: ${(e as Error).message}. ` +
+								"Row already flipped to failed; container may need manual `docker rm`.",
+						);
+					});
+					res.status(500).json({
+						error: `postCreate hook failed (exit ${exitCode})`,
+						sessionId: meta.sessionId,
+						bootstrapOutput: output,
+						bootstrapExitCode: exitCode,
+					});
+					return;
+				}
+				// Atomic UPDATE … WHERE bootstrapped_at IS NULL — the only
+				// place in the codebase that sets this column. A retry
+				// race (e.g. two concurrent retries of the same create
+				// after a partial network failure) sees changes === 0 on
+				// the loser and we just skip the no-op. Returns true if
+				// THIS caller won; we ignore the boolean here because the
+				// route is single-shot per session — the gate exists for
+				// the runner's own sanity in 185b2b's async flow.
+				await markBootstrapped(meta.sessionId);
+			}
+			// postStart hook fires from `docker.spawn` -> nope, spawn doesn't
+			// call it; only `startContainer`. The first start happens here
+			// inside spawn (via container.start), so trigger postStart for
+			// the create path explicitly. Subsequent /start calls go
+			// through `startContainer` which already runs postStart.
+			if (validatedConfig?.postStartCmd) {
+				try {
+					await docker.runPostStart(meta.sessionId, validatedConfig.postStartCmd);
+				} catch (err) {
+					// Like the runPostStartIfConfigured wrapper, don't fail the
+					// create on a postStart launch error — the container is
+					// up, postCreate succeeded, the user can still use the
+					// session.
+					logger.warn(
+						`[routes] postStart launch failed for ${meta.sessionId}: ${(err as Error).message}`,
+					);
+				}
+			}
 			const updated = await sessions.get(meta.sessionId);
 			if (!updated) {
 				// Shouldn't happen: sessions.create above just inserted this row,
@@ -471,15 +555,43 @@ export function buildRouter(
 			}
 			logger.error(`[routes] session create failed: ${(err as Error).message}`);
 			if (meta) {
+				// Capture the id once so the closures below don't have to
+				// reach back through the outer mutable `let meta` (TS
+				// can't narrow `meta` through a closure even though we're
+				// already inside `if (meta)`). One const, no optional
+				// chains, no ambiguity for future readers about whether
+				// meta could ever be null on these lines.
+				const rollbackId = meta.sessionId;
 				// Best-effort rollback. If deleteRow itself fails (D1 blip),
 				// the reconciler will eventually flip status to stopped but
 				// the row remains — we log loudly so an operator can clean
 				// it up manually.
+				//
+				// Kill any running container BEFORE deleting the D1 row.
+				// Without this, the post-spawn failure paths (e.g.
+				// `markBootstrapped` throws on a D1 transient AFTER
+				// `docker.spawn` succeeded and `runPostCreate` exited
+				// cleanly) would orphan a live container with no row to
+				// reach it through — `reconcile()` queries
+				// `WHERE status='running'`, so a deleted row means the
+				// container survives until the next host reboot. The
+				// non-zero-exit path inside the try/catch already kills
+				// the container before throwing; this guard covers every
+				// other post-spawn failure shape (markBootstrapped,
+				// runPostStart, sessions.get, the synthetic invariant
+				// throw above). Idempotent: the failure-branch
+				// `docker.kill` already ran on hard-fail, and `kill`
+				// swallows "no such container" internally.
+				await docker.kill(rollbackId).catch((killErr) => {
+					logger.error(
+						`[routes] CRITICAL: kill during create rollback for session ${rollbackId} failed: ${(killErr as Error).message}`,
+					);
+				});
 				try {
-					await sessions.deleteRow(meta.sessionId);
+					await sessions.deleteRow(rollbackId);
 				} catch (cleanupErr) {
 					logger.error(
-						`[routes] CRITICAL: spawn rollback failed for session ${meta.sessionId}: ${(cleanupErr as Error).message}`,
+						`[routes] CRITICAL: spawn rollback failed for session ${rollbackId}: ${(cleanupErr as Error).message}`,
 					);
 				}
 			}
@@ -566,7 +678,24 @@ export function buildRouter(
 	router.post("/sessions/:id/start", async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
 		try {
-			await sessions.assertOwnership(req.params.id, userId);
+			const meta = await sessions.assertOwnership(req.params.id, userId);
+			// `failed` (#185) means the create-time postCreate hook
+			// exited non-zero. Refuse the restart explicitly — letting it
+			// through would spawn a fresh container without re-running
+			// postCreate (the gate is single-use), leaving the user with
+			// what looks like a healthy "running" session whose
+			// environment was never bootstrapped. The session can carry
+			// partial workspace artefacts from the failed attempt; the
+			// safe path is `recreate it to retry`. 409 Conflict reflects
+			// "valid request, current state forbids it" — not 400 (the
+			// payload is fine) and not 403 (it's not an auth issue).
+			if (meta.status === "failed") {
+				res.status(409).json({
+					error:
+						"Session failed during postCreate; recreate it to retry. The original output is still in the failed-row history.",
+				});
+				return;
+			}
 			await docker.startContainer(req.params.id);
 			const updated = await sessions.get(req.params.id);
 			if (!updated) {

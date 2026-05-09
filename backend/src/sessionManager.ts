@@ -148,16 +148,23 @@ export class SessionManager {
 		// race loser observes `meta.changes === 0` and raises a typed error
 		// the route can map to 429.
 		//
-		// The count filter matches `listForUser`, which is what the UI shows —
-		// so "active" here means the same thing the user sees in their sidebar.
-		// Terminated rows don't count against the cap; they'll be garbage-
-		// collected by the hard-delete path or left as history.
+		// `terminated` rows don't count (the user soft-deleted them — slot
+		// frees immediately so they can recycle).
+		// `failed` rows ALSO don't count (PR #207 review): a postCreate
+		// hook that exits non-zero leaves the row in `failed` to preserve
+		// the captured output for the user to read, but the user can NO
+		// LONGER /start it (we 409 on that), so the only valid next step
+		// is "fix the hook and create a fresh session". Counting failed
+		// rows would mean N typo'd hooks would lock the user out at the
+		// quota cap with no recourse short of deleting their failure
+		// history, which we want them to keep so they can audit what
+		// went wrong.
 		const insert = await d1Query(
 			`INSERT INTO sessions (session_id, user_id, name, container_name, cols, rows, env_vars)
                          SELECT ?, ?, ?, ?, ?, ?, ?
                          WHERE (
                                  SELECT COUNT(*) FROM sessions
-                                 WHERE user_id = ? AND status != 'terminated'
+                                 WHERE user_id = ? AND status NOT IN ('terminated', 'failed')
                          ) < ?`,
 			[
 				sessionId,

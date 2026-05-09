@@ -682,6 +682,7 @@ export class DockerManager {
 			await this.spawn(sessionId);
 			await this.sessions.updateStatus(sessionId, "running");
 			logger.info(`[docker] respawned container for session ${sessionId}`);
+			await this.runPostStartIfConfigured(sessionId);
 			return;
 		}
 
@@ -701,6 +702,26 @@ export class DockerManager {
 			await this.sessions.setContainerId(sessionId, null);
 			await this.spawn(sessionId);
 			await this.sessions.updateStatus(sessionId, "running");
+		}
+		await this.runPostStartIfConfigured(sessionId);
+	}
+
+	/**
+	 * Look up `session_configs.post_start_cmd` and run it if present.
+	 * Wrapper that keeps `startContainer` readable and centralises the
+	 * config-read + warn-on-D1-transient pattern, mirroring
+	 * `loadConfigForSpawn`. Doesn't throw — a failed postStart is
+	 * logged inside `runPostStart` and the container stays usable.
+	 */
+	private async runPostStartIfConfigured(sessionId: string): Promise<void> {
+		const config = await this.loadConfigForSpawn(sessionId);
+		if (!config?.postStartCmd) return;
+		try {
+			await this.runPostStart(sessionId, config.postStartCmd);
+		} catch (err) {
+			logger.warn(
+				`[docker] postStart hook threw for session ${sessionId}: ${(err as Error).message}`,
+			);
 		}
 	}
 
@@ -727,6 +748,99 @@ export class DockerManager {
 				`SecurityOpt=${JSON.stringify(securityOpt)}). ` +
 				`Recycle via DELETE /api/sessions/${sessionId} then POST /start to apply current HostConfig.`,
 		);
+	}
+
+	// ── Bootstrap hooks (#185) ─────────────────────────────────────────────
+
+	/**
+	 * Run the postCreate hook synchronously and return its exit code +
+	 * combined output. PR 185b2a uses this from `POST /api/sessions`
+	 * inline; PR 185b2b layers a streaming WS channel on top so the
+	 * client doesn't have to wait on the HTTP request for output.
+	 *
+	 * `bash -c` so the user's command can use shell features
+	 * (`npm i && tsc`). User is the unprivileged container user (uid
+	 * 1000); cwd is the workspace bind mount, so the hook lands in the
+	 * same place a freshly-attached terminal would.
+	 *
+	 * Output cap: `execOneShot` collects the whole stream into a Buffer
+	 * before returning. A runaway hook that streams MB of output could
+	 * push memory pressure on the backend. Acceptable for the foundation
+	 * because the user controls the command, the per-session disk quota
+	 * already bounds workspace bloat, and 185b2b's streaming runner will
+	 * forward bytes onward instead of buffering. Documented as a known
+	 * trade-off here so the streaming PR has a concrete reason to drop
+	 * the buffering.
+	 */
+	async runPostCreate(
+		sessionId: string,
+		cmd: string,
+	): Promise<{ exitCode: number; output: string }> {
+		// `combineStreams: true` so the captured output includes stderr
+		// (#207 round 2 review): npm/tsc/bash diagnostic messages all go
+		// to stderr by default, and a hook-failure modal that only
+		// displays stdout would render "(no output)" for the most common
+		// failure mode (`bash: <cmd>: command not found`).
+		//
+		// `cwd: /home/developer/workspace` so the hook lands in the same
+		// place a freshly-attached terminal would (#207 round 7 review).
+		// Without it, Docker uses the image's WORKDIR
+		// (`/home/developer`) and `npm install` / `pip install -r ...` /
+		// `cargo build` would all fail with ENOENT looking for project
+		// files in the wrong directory. `runPostStart`'s tmux-session
+		// path already gets this right via `tmux new-session -c …`;
+		// this brings the exec path in line.
+		const result = await this.execOneShot(sessionId, ["bash", "-c", cmd], {
+			combineStreams: true,
+			cwd: "/home/developer/workspace",
+		});
+		return { exitCode: result.exitCode, output: result.stdout };
+	}
+
+	/**
+	 * Run the postStart hook detached in a tmux session named `bootstrap`
+	 * inside the container. Returns once the session is created, NOT
+	 * when the command exits — by design, the hook runs asynchronously
+	 * for the whole life of the container so `npm run dev` / `code
+	 * tunnel`-style daemons stay alive in the background. Visible to
+	 * the user via the regular tab list (the session shows up next to
+	 * user-created tabs); dies with the container because tmux
+	 * server is per-PID-namespace.
+	 *
+	 * Idempotent on re-runs: a second `start()` on the same container
+	 * is the most common case (user stopped + restarted). Killing any
+	 * existing `bootstrap` session first avoids a stale daemon racing
+	 * the new one.
+	 */
+	async runPostStart(sessionId: string, cmd: string): Promise<void> {
+		// kill-session is idempotent — exits non-zero if no such
+		// session exists, which is the expected state on the very first
+		// start. Swallow the non-zero so we don't log a spurious warning
+		// for the common path.
+		await this.execOneShot(sessionId, ["tmux", "kill-session", "-t", "bootstrap"]).catch(() => {
+			/* may not exist yet */
+		});
+		const create = await this.execOneShot(sessionId, [
+			"tmux",
+			"new-session",
+			"-d",
+			"-s",
+			"bootstrap",
+			"-c",
+			"/home/developer/workspace",
+			"bash",
+			"-c",
+			cmd,
+		]);
+		if (create.exitCode !== 0) {
+			// Don't fail the whole start path on a postStart launch
+			// error — the container is up, the user can still use it.
+			// Surface in logs so an operator notices the daemon never
+			// came up.
+			logger.warn(
+				`[docker] postStart launch failed for session ${sessionId} (exit ${create.exitCode}): ${create.stdout}`,
+			);
+		}
 	}
 
 	async stopContainer(sessionId: string): Promise<void> {
@@ -1308,6 +1422,7 @@ export class DockerManager {
 	private async execOneShot(
 		sessionId: string,
 		cmd: string[],
+		opts: { combineStreams?: boolean; cwd?: string } = {},
 	): Promise<{ stdout: string; exitCode: number }> {
 		const meta = await this.sessions.getOrThrow(sessionId);
 		if (!meta.containerId) throw new Error("No container for this session");
@@ -1315,6 +1430,15 @@ export class DockerManager {
 
 		const exec = await container.exec({
 			Cmd: cmd,
+			// `WorkingDir: undefined` preserves Docker's image-WORKDIR
+			// default for callers that don't pass `cwd` (every tmux
+			// one-shot — `-c` on `new-session` controls the tmux
+			// session's cwd, not the exec's, and tmux runs without
+			// caring about its own cwd anyway). The bootstrap-runner
+			// caller (#207 round 7 review) sets cwd to the workspace
+			// so hooks like `npm install` find the user's
+			// package.json instead of looking in `/home/developer`.
+			WorkingDir: opts.cwd,
 			AttachStdin: false,
 			AttachStdout: true,
 			AttachStderr: true,
@@ -1332,8 +1456,18 @@ export class DockerManager {
 			stream.on("error", reject);
 		});
 		const info = await exec.inspect();
+		// `combineStreams: true` is the bootstrap-hook caller (#207
+		// review): npm/tsc/bash diagnostics go to stderr, and a hook
+		// failure modal that only shows stdout would render
+		// "(no output captured)" for the common "command not found"
+		// path. The combined demux preserves frame-arrival order, so a
+		// shell snippet like `echo step1; bad-command` still reads as
+		// "step1\nbash: bad-command: not found\n" rather than the two
+		// streams separated.
 		return {
-			stdout: demuxDockerOutput(Buffer.concat(chunks), 1),
+			stdout: opts.combineStreams
+				? demuxDockerOutputAll(Buffer.concat(chunks))
+				: demuxDockerOutput(Buffer.concat(chunks), 1),
 			exitCode: info.ExitCode ?? 0,
 		};
 	}
@@ -1564,6 +1698,30 @@ function demuxDockerOutput(raw: Buffer, type: 1 | 2): string {
 		off += 8;
 		if (off + size > raw.length) break;
 		if (frameType === type) chunks.push(raw.subarray(off, off + size));
+		off += size;
+	}
+	return Buffer.concat(chunks).toString("utf-8");
+}
+
+// Same parser as `demuxDockerOutput` but collects BOTH stdout (type 1)
+// and stderr (type 2) in frame-arrival order. Used by the postCreate
+// hook runner (#207 review) so a `bash -c "echo step1; bad-cmd"`
+// failure renders as "step1\nbash: bad-cmd: not found\n" in the modal,
+// rather than just "step1\n" (stdout-only) or worse, "(no output)" if
+// the entire failure went to stderr. Frame-order interleaving is
+// approximate at the byte level — Docker only delivers complete
+// frames, and within a frame the ordering vs. the OTHER stream's
+// preceding bytes is whatever the writer happened to flush first —
+// but it's good enough for a log panel. Exported for tests.
+export function demuxDockerOutputAll(raw: Buffer): string {
+	const chunks: Buffer[] = [];
+	let off = 0;
+	while (off + 8 <= raw.length) {
+		const frameType = raw[off]!;
+		const size = raw.readUInt32BE(off + 4);
+		off += 8;
+		if (off + size > raw.length) break;
+		if (frameType === 1 || frameType === 2) chunks.push(raw.subarray(off, off + size));
 		off += size;
 	}
 	return Buffer.concat(chunks).toString("utf-8");
