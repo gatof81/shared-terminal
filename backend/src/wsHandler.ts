@@ -51,6 +51,12 @@ export function handleWsConnection(
 	sessions: SessionManager,
 	docker: DockerManager,
 	broadcaster: BootstrapBroadcaster,
+	// Optional so the existing test suite (which constructs WS handlers
+	// without the sweeper) keeps working unchanged. Production wires
+	// the singleton from index.ts; the absent-sweeper case just means
+	// auto-stop never fires for that handler invocation, which is the
+	// pre-#194 behaviour.
+	idleSweeper?: { bump: (sessionId: string) => void },
 ): void {
 	// Synchronous safety net registered BEFORE any await or sync ws.close().
 	// Node's EventEmitter routes an 'error' emission with no listener to
@@ -200,6 +206,13 @@ export function handleWsConnection(
 		// Attach to Docker container
 		const attachId = `${sessionId}:${uuidv4().slice(0, 8)}`;
 		const outputListener = (data: string) => {
+			// Bump the idle-sweeper on every byte from tmux. Cheap
+			// (single Map.set) so it's safe on the hot path. Pairs
+			// with the input/resize bumps in the message handler so
+			// "user is watching the terminal" counts as activity even
+			// when they're not typing — common case for a build that
+			// takes minutes and the user just wants to watch the log.
+			idleSweeper?.bump(sessionId);
 			sendMsg(ws, { type: "output", data });
 		};
 
@@ -243,10 +256,12 @@ export function handleWsConnection(
 
 			switch (msg.type) {
 				case "input":
+					idleSweeper?.bump(sessionId);
 					docker.write(attachId, msg.data);
 					break;
 				case "resize":
 					if (msg.cols > 0 && msg.rows > 0) {
+						idleSweeper?.bump(sessionId);
 						docker.resize(attachId, msg.cols, msg.rows).catch(() => {});
 					}
 					break;

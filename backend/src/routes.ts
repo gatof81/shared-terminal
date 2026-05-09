@@ -58,6 +58,10 @@ export function buildRouter(
 	docker: DockerManager,
 	broadcaster: BootstrapBroadcaster,
 	rateLimitConfig: RateLimitConfig = DEFAULT_RATE_LIMIT_CONFIG,
+	// Optional so existing tests that build a router without a sweeper
+	// keep working. Production wires the singleton from index.ts; the
+	// absent-sweeper case is the pre-#194 behaviour.
+	idleSweeper?: { bump: (sessionId: string) => void },
 ): Router {
 	const router = Router();
 
@@ -283,6 +287,22 @@ export function buildRouter(
 
 	router.use("/invites", requireAuth);
 	router.use("/sessions", requireAuth);
+
+	// Idle-sweeper bumper. Mounted AFTER `requireAuth` so unauth
+	// requests don't reset the activity timer (an unauthenticated
+	// probe to /api/sessions/:id 401s without ever bumping). The
+	// `:id` capture is what the sweeper needs; static collection
+	// routes like `GET /sessions` (no id) are excluded by the
+	// pattern. Excluded by intent: nothing under /sessions today
+	// is a "health probe" or a `reconcile` read — `assertOwnership`
+	// gates user-driven traffic only, so every authed hit is a
+	// legitimate activity signal.
+	if (idleSweeper) {
+		router.use("/sessions/:id", (req, _res, next) => {
+			idleSweeper.bump(req.params.id);
+			next();
+		});
+	}
 
 	// ── Invite routes ───────────────────────────────────────────────────────
 	// All three routes are gated by `requireAdmin` (#50). Non-admins
