@@ -214,6 +214,9 @@ describe("POST /sessions — async bootstrap dispatch (PR 185b2b)", () => {
 		expect(bootstrapStubs.runAsyncBootstrap.mock.calls[0]?.[1]).toEqual({
 			postCreateCmd: "npm install",
 			postStartCmd: "npm run dev",
+			// `hasRepo` lets the runner skip the getSessionConfig D1
+			// fetch on postCreate-only sessions (PR #214 round 2 NIT).
+			hasRepo: false,
 		});
 		expect(spies.runPostStart).not.toHaveBeenCalled();
 	});

@@ -501,6 +501,12 @@ export function buildRouter(
 				const cfg = {
 					postCreateCmd: validatedConfig.postCreateCmd,
 					postStartCmd: validatedConfig.postStartCmd,
+					// `hasRepo` lets the runner skip the `getSessionConfig`
+					// D1 fetch on postCreate-only sessions (PR #214 round 2
+					// NIT). The route already knows whether a repo was
+					// configured — passing the bit through avoids the
+					// runner having to fetch just to learn the answer.
+					hasRepo: validatedConfig.repo !== null && validatedConfig.repo !== undefined,
 				};
 				// Fire-and-forget; the runner internally catches every
 				// throw it can and translates them into broadcaster

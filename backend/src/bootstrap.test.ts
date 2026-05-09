@@ -341,12 +341,32 @@ describe("runAsyncBootstrap", () => {
 
 		await runAsyncBootstrap(
 			"sess-1",
-			{ postCreateCmd: "npm install" },
+			{ postCreateCmd: "npm install", hasRepo: true },
 			{ sessions, docker, broadcaster },
 		);
 		await settle();
 
 		expect(order).toEqual(["clone", "postCreate"]);
+	});
+
+	// PR #214 round 2 NIT: `hasRepo: false` (or omitted) gates the
+	// `getSessionConfig` D1 fetch. The pre-188c steady-state is
+	// postCreate-only; that path must not pay for a repo D1 round-trip
+	// every session create.
+	it("hasRepo=false skips the getSessionConfig D1 fetch (no extra round-trip)", async () => {
+		const { sessions, docker, broadcaster, spies } = makeFakes();
+		spies.runPostCreate.mockImplementation(async () => ({ exitCode: 0 }));
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ postCreateCmd: "npm install" /* hasRepo omitted = false */ },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		expect(sessionConfigStubs.getSessionConfig).not.toHaveBeenCalled();
+		expect(cloneStubs.runCloneRepo).not.toHaveBeenCalled();
+		expect(spies.runPostCreate).toHaveBeenCalledWith("sess-1", "npm install", expect.any(Function));
 	});
 
 	// A non-zero clone exit must hard-fail the session via the SAME
@@ -371,7 +391,7 @@ describe("runAsyncBootstrap", () => {
 
 		await runAsyncBootstrap(
 			"sess-1",
-			{ postCreateCmd: "npm install" },
+			{ postCreateCmd: "npm install", hasRepo: true },
 			{ sessions, docker, broadcaster },
 		);
 		await settle();
@@ -394,7 +414,7 @@ describe("runAsyncBootstrap", () => {
 
 		await runAsyncBootstrap(
 			"sess-1",
-			{ postCreateCmd: "npm install" },
+			{ postCreateCmd: "npm install", hasRepo: true },
 			{ sessions, docker, broadcaster },
 		);
 		await settle();
@@ -423,7 +443,7 @@ describe("runAsyncBootstrap", () => {
 
 		await runAsyncBootstrap(
 			"sess-1",
-			{ postStartCmd: "npm run dev" },
+			{ postStartCmd: "npm run dev", hasRepo: true },
 			{ sessions, docker, broadcaster },
 		);
 		await settle();

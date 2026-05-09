@@ -296,7 +296,7 @@ export class BootstrapBroadcaster {
  */
 export async function runAsyncBootstrap(
 	sessionId: string,
-	cfg: { postCreateCmd?: string; postStartCmd?: string },
+	cfg: { postCreateCmd?: string; postStartCmd?: string; hasRepo?: boolean },
 	deps: {
 		sessions: SessionManager;
 		docker: DockerManager;
@@ -306,18 +306,32 @@ export async function runAsyncBootstrap(
 	const { sessions, docker, broadcaster } = deps;
 	const onOutput = (chunk: string) => broadcaster.broadcast(sessionId, chunk);
 
-	// Step 1: repo clone. `runCloneRepo` is a no-op + exitCode=0 when
-	// no `repo` is configured, so this branch is free for sessions
-	// that only use postCreate. Load the full config here (one D1
-	// round-trip) — the route already persisted it before `spawn()`,
-	// so the row is guaranteed to exist when there's anything to
-	// clone or hook on.
+	// Step 1: repo clone. Skipped entirely when `cfg.hasRepo === false`
+	// — that's the steady-state for the existing postCreate-only
+	// population (everyone before #188's repo-clone landed). The hint
+	// is set by the route from `validatedConfig.repo`; gating on it
+	// avoids one D1 round-trip per session create on the hot path.
+	// CLAUDE.md flags D1 round-trip counts as performance-relevant,
+	// and a transient D1 failure on this fetch would also hard-fail
+	// the session before postCreate had a chance to run — we only
+	// take that risk when there's something to clone (PR #214 round 2).
 	let cloneExit: number;
 	try {
-		const config = await getSessionConfig(sessionId);
-		if (config) {
-			const result = await runCloneRepo({ sessionId, config, docker, onOutput });
-			cloneExit = result.exitCode;
+		if (cfg.hasRepo) {
+			const config = await getSessionConfig(sessionId);
+			if (config) {
+				const result = await runCloneRepo({ sessionId, config, docker, onOutput });
+				cloneExit = result.exitCode;
+			} else {
+				// Defensive: route guarantees the row exists when
+				// `hasRepo` is set, but a missing row shouldn't crash
+				// the runner. Treat as a no-op clone — markBootstrapped
+				// later will UPDATE 0 rows and log without failing.
+				logger.warn(
+					`[bootstrap] hasRepo=true but no session_configs row for ${sessionId}; skipping clone`,
+				);
+				cloneExit = 0;
+			}
 		} else {
 			cloneExit = 0;
 		}
