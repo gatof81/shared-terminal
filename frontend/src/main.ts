@@ -393,8 +393,7 @@ function renderSessionList() {
 		// rule (.session-item.terminated dims the row); failed shows
 		// up via the dot only — adding the class now means a follow-up
 		// styling tweak doesn't have to touch this line.
-		const statusCls =
-			s.status === "terminated" || s.status === "failed" ? ` ${s.status}` : "";
+		const statusCls = s.status === "terminated" || s.status === "failed" ? ` ${s.status}` : "";
 		item.className = `session-item${s.sessionId === activeSessionId ? " active" : ""}${statusCls}`;
 
 		const dot = document.createElement("span");
