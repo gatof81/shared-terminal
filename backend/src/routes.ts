@@ -53,8 +53,8 @@ import type { SessionMeta } from "./types.js";
 export function buildRouter(
 	sessions: SessionManager,
 	docker: DockerManager,
+	broadcaster: BootstrapBroadcaster,
 	rateLimitConfig: RateLimitConfig = DEFAULT_RATE_LIMIT_CONFIG,
-	broadcaster?: BootstrapBroadcaster,
 ): Router {
 	const router = Router();
 
@@ -482,7 +482,7 @@ export function buildRouter(
 			// (after markBootstrapped). For sessions with postStart but
 			// NO postCreate, fire it directly here — the async runner
 			// only kicks off when there's a postCreateCmd to wait on.
-			if (validatedConfig?.postCreateCmd && broadcaster) {
+			if (validatedConfig?.postCreateCmd) {
 				const cfg = {
 					postCreateCmd: validatedConfig.postCreateCmd,
 					postStartCmd: validatedConfig.postStartCmd,

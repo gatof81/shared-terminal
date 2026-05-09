@@ -163,29 +163,6 @@ export interface SessionConfigPayload {
 	envVars?: Record<string, string>;
 }
 
-/**
- * Thrown when the create succeeded up to the point of running the
- * `postCreate` hook (#185), but the hook itself exited non-zero. The
- * server has already killed the container and flipped the session
- * status to `failed`; the row stays so the user can read the captured
- * output (carried on this error). The new-session modal surfaces
- * `bootstrapOutput` inline so the user sees what their hook printed
- * before it died.
- */
-export class BootstrapFailedError extends Error {
-	readonly sessionId: string;
-	readonly exitCode: number;
-	readonly output: string;
-
-	constructor(sessionId: string, exitCode: number, output: string, message: string) {
-		super(message);
-		this.name = "BootstrapFailedError";
-		this.sessionId = sessionId;
-		this.exitCode = exitCode;
-		this.output = output;
-	}
-}
-
 // ── Bootstrap live-tail WS (#185 / PR 185b2b) ───────────────────────────────
 
 /** Server → client message shape on `/ws/bootstrap/<sessionId>`. */

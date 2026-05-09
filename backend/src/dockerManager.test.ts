@@ -1174,6 +1174,37 @@ describe("DockerManager.runPostCreate", () => {
 		expect(result.exitCode).toBe(0);
 	});
 
+	// PR #208 round 1: `info.ExitCode === null` is Docker's "haven't
+	// recorded the exit yet" state. Falling back to 0 there would let
+	// the runner present an indeterminate outcome as success and
+	// permanently consume the markBootstrapped gate. Must throw
+	// instead so runAsyncBootstrap routes into its catch + fails the
+	// session.
+	it("throws when docker exec inspect returns null ExitCode (indeterminate is not success)", async () => {
+		const { dm } = makeDocker({
+			oneShot: () => ({ stdout: "", exitCode: 0 }),
+		});
+		// Force the inspect call to return null — overrides the
+		// harness's default ExitCode: 0.
+		const fakeDocker = (dm as unknown as { docker: { getContainer: () => unknown } }).docker;
+		const original = fakeDocker.getContainer;
+		fakeDocker.getContainer = () => {
+			const container = (original as () => { exec: (opts: unknown) => Promise<unknown> }).call(
+				fakeDocker,
+			);
+			const origExec = container.exec;
+			container.exec = async (opts: unknown) => {
+				const exec = (await origExec.call(container, opts)) as {
+					inspect: () => Promise<{ ExitCode: number | null }>;
+				};
+				exec.inspect = async () => ({ ExitCode: null });
+				return exec;
+			};
+			return container;
+		};
+		await expect(dm.runPostCreate("s1", "true")).rejects.toThrow(/null ExitCode/);
+	});
+
 	// Round-7 review fix: hooks must run from the workspace, not from
 	// the image's WORKDIR. Without WorkingDir on the exec, `npm install`
 	// would look for package.json in `/home/developer` and silently

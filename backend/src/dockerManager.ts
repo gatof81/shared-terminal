@@ -826,7 +826,21 @@ export class DockerManager {
 			stream.on("error", reject);
 		});
 		const info = await exec.inspect();
-		return { exitCode: info.ExitCode ?? 0 };
+		// `info.ExitCode === null` is Docker's "the daemon hasn't
+		// recorded the process exit yet" state — a narrow window
+		// between stream-end and the daemon committing the exit
+		// status. Treat it as an unknown failure rather than success
+		// (PR #208 round 1): a `?? 0` fallback here would let
+		// runAsyncBootstrap call markBootstrapped + runPostStart on a
+		// hook whose actual outcome we don't know, presenting a
+		// possibly-broken environment as ready. Throwing routes into
+		// the runner's catch which broadcasts `{type:"fail",
+		// exitCode:-1}` — correct disposition for an indeterminate
+		// outcome. `ExitCode: undefined` covers the type's nullability.
+		if (info.ExitCode === null || info.ExitCode === undefined) {
+			throw new Error("docker exec inspect returned null ExitCode after stream end");
+		}
+		return { exitCode: info.ExitCode };
 	}
 
 	/**

@@ -71,6 +71,7 @@ const dbStubs = vi.hoisted(() => ({
 }));
 vi.mock("./db.js", () => dbStubs);
 
+import type { BootstrapBroadcaster } from "./bootstrap.js";
 import type { DockerManager } from "./dockerManager.js";
 import { buildRouter } from "./routes.js";
 import type { SessionManager } from "./sessionManager.js";
@@ -126,7 +127,11 @@ afterEach(async () => {
 });
 
 async function spinUp(sessions: SessionManager, docker: DockerManager) {
-	const router = buildRouter(sessions, docker, {
+	// /start route doesn't touch the broadcaster — empty stub object
+	// satisfies the now-required parameter without dragging the
+	// real implementation in.
+	const broadcaster = {} as BootstrapBroadcaster;
+	const router = buildRouter(sessions, docker, broadcaster, {
 		login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
 		register: { ipMax: 1000, ipWindowMs: 60_000 },
 		invitesCreate: { ipMax: 1000, ipWindowMs: 60_000 },

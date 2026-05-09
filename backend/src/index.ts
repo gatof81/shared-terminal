@@ -148,13 +148,12 @@ app.use((_req, res, next) => {
 	next();
 });
 
-app.use(
-	"/api",
-	// `undefined` for rateLimitConfig — buildRouter falls back to
-	// DEFAULT_RATE_LIMIT_CONFIG. Threading the broadcaster through is
-	// the only reason this call moved off the one-liner.
-	buildRouter(sessions, docker, undefined, bootstrapBroadcaster),
-);
+// Threading the broadcaster through as the third positional arg —
+// rateLimitConfig defaults to DEFAULT_RATE_LIMIT_CONFIG. Required
+// (not optional) on buildRouter so a future caller that omits it
+// surfaces as a TypeScript error rather than a silently-dropped
+// postCreate hook (PR #208 round 1 review).
+app.use("/api", buildRouter(sessions, docker, bootstrapBroadcaster));
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // ── HTTP + WebSocket server ───────────────────────────────────────────────────

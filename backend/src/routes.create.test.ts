@@ -160,21 +160,16 @@ afterEach(async () => {
 });
 
 async function spinUp(sessions: SessionManager, docker: DockerManager) {
-	const router = buildRouter(
-		sessions,
-		docker,
-		{
-			login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
-			register: { ipMax: 1000, ipWindowMs: 60_000 },
-			invitesCreate: { ipMax: 1000, ipWindowMs: 60_000 },
-			invitesList: { ipMax: 1000, ipWindowMs: 60_000 },
-			invitesRevoke: { ipMax: 1000, ipWindowMs: 60_000 },
-			fileUpload: { ipMax: 1000, ipWindowMs: 60_000 },
-			logout: { ipMax: 1000, ipWindowMs: 60_000 },
-			authStatus: { ipMax: 1000, ipWindowMs: 60_000 },
-		},
-		broadcaster,
-	);
+	const router = buildRouter(sessions, docker, broadcaster, {
+		login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
+		register: { ipMax: 1000, ipWindowMs: 60_000 },
+		invitesCreate: { ipMax: 1000, ipWindowMs: 60_000 },
+		invitesList: { ipMax: 1000, ipWindowMs: 60_000 },
+		invitesRevoke: { ipMax: 1000, ipWindowMs: 60_000 },
+		fileUpload: { ipMax: 1000, ipWindowMs: 60_000 },
+		logout: { ipMax: 1000, ipWindowMs: 60_000 },
+		authStatus: { ipMax: 1000, ipWindowMs: 60_000 },
+	});
 	const app = express();
 	app.use(express.json());
 	app.use("/api", router);

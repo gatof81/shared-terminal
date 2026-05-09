@@ -437,7 +437,9 @@ describe("auth route rate limiting", () => {
 			authStatus: { ipMax: 1000, ipWindowMs: 60_000 },
 			...cfg,
 		};
-		const router = buildRouter(fakeSessions, fakeDocker, fullCfg);
+		// rate-limit tests don't touch the bootstrap broadcaster — empty
+		// stub object satisfies the now-required parameter (PR #208).
+		const router = buildRouter(fakeSessions, fakeDocker, {} as never, fullCfg);
 		const app = express();
 		app.use(express.json());
 		app.use("/api", router);
