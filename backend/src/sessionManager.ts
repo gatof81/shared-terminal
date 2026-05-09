@@ -5,6 +5,7 @@
  */
 
 import { v4 as uuidv4 } from "uuid";
+import { parseD1Utc } from "./d1Time.js";
 import { d1Query } from "./db.js";
 import { logger } from "./logger.js";
 import type { CreateSessionOpts, SessionMeta, SessionStatus } from "./types.js";
@@ -97,24 +98,6 @@ interface SessionRow {
 	last_connected_at: string | null;
 }
 
-// D1's `datetime('now')` returns SQLite's canonical UTC format — no 'Z' or
-// other timezone suffix. Node's Date parses that as LOCAL time, which is
-// wrong: a row written at 2024-01-01T10:00:00 (UTC, from D1) becomes a Date
-// 3h off on a UTC-3 machine. We append 'Z' to force UTC interpretation.
-// Guard the append in case D1 (or a future migration) ever returns a suffix
-// already — double-Z is an invalid date and silently NaNs. Also catch full
-// ISO 8601 offsets like `+00:00`.
-function parseD1UtcTimestamp(raw: string): Date {
-	const hasSuffix = /[zZ]$/.test(raw) || /[+-]\d{2}:?\d{2}$/.test(raw);
-	const d = new Date(hasSuffix ? raw : `${raw}Z`);
-	if (Number.isNaN(d.getTime())) {
-		// Better to crash loudly here than return "Invalid Date" that
-		// would later serialize to null in JSON.
-		throw new Error(`D1 returned unparseable timestamp: ${raw}`);
-	}
-	return d;
-}
-
 function rowToMeta(row: SessionRow): SessionMeta {
 	return {
 		sessionId: row.session_id,
@@ -126,8 +109,8 @@ function rowToMeta(row: SessionRow): SessionMeta {
 		cols: row.cols,
 		rows: row.rows,
 		envVars: JSON.parse(row.env_vars),
-		createdAt: parseD1UtcTimestamp(row.created_at),
-		lastConnectedAt: row.last_connected_at ? parseD1UtcTimestamp(row.last_connected_at) : null,
+		createdAt: parseD1Utc(row.created_at, "sessions"),
+		lastConnectedAt: row.last_connected_at ? parseD1Utc(row.last_connected_at, "sessions") : null,
 	};
 }
 

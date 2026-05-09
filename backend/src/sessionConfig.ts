@@ -19,6 +19,7 @@
  */
 
 import { z } from "zod";
+import { parseD1Utc } from "./d1Time.js";
 import { d1Query } from "./db.js";
 import { checkEnvVarSafety, EnvVarValidationError } from "./envVarValidation.js";
 import { logger } from "./logger.js";
@@ -1106,7 +1107,7 @@ function rowToRecord(row: SessionConfigRow): SessionConfigRecord {
 			"agent_seed_json",
 			row.agent_seed_json,
 		),
-		bootstrappedAt: row.bootstrapped_at ? parseD1Utc(row.bootstrapped_at) : null,
+		bootstrappedAt: row.bootstrapped_at ? parseD1Utc(row.bootstrapped_at, "session_configs") : null,
 	};
 }
 
@@ -1374,19 +1375,6 @@ function isEncryptedBlob(v: unknown): v is { ciphertext: string; iv: string; tag
 	if (v === null || typeof v !== "object") return false;
 	const o = v as { ciphertext?: unknown; iv?: unknown; tag?: unknown };
 	return typeof o.ciphertext === "string" && typeof o.iv === "string" && typeof o.tag === "string";
-}
-
-// Mirrors sessionManager.parseD1UtcTimestamp — D1's `datetime('now')` lacks
-// any timezone suffix and Node's Date treats suffix-less ISO strings as
-// LOCAL time. Append 'Z' unless the value already carries one (a future
-// migration could add it explicitly).
-function parseD1Utc(raw: string): Date {
-	const hasSuffix = /[zZ]$/.test(raw) || /[+-]\d{2}:?\d{2}$/.test(raw);
-	const d = new Date(hasSuffix ? raw : `${raw}Z`);
-	if (Number.isNaN(d.getTime())) {
-		throw new Error(`session_configs returned unparseable timestamp: ${raw}`);
-	}
-	return d;
 }
 
 /**
