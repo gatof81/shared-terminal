@@ -297,7 +297,12 @@ describe("templates.deleteTemplate", () => {
 		await expect(templates.deleteTemplate("t-1", "u1")).rejects.toBeInstanceOf(ForbiddenError);
 	});
 
-	it("404s when the id doesn't exist (idempotent re-delete)", async () => {
+	it("throws NotFoundError (404) when template was already deleted", async () => {
+		// Deletion is NOT idempotent in the response shape: the first
+		// call returns 204; a second call returns 404. Clients that
+		// retry on a partial network failure must tolerate the 404
+		// themselves. (The test name previously said "idempotent
+		// re-delete", which contradicted the deleteTemplate JSDoc.)
 		mockOnceRows([]);
 		await expect(templates.deleteTemplate("t-x", "u1")).rejects.toBeInstanceOf(NotFoundError);
 	});

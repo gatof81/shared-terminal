@@ -1260,7 +1260,11 @@ export function assertTemplateConfigShape(config: unknown): void {
 	}
 }
 
-function parseTemplateBody(body: { name?: unknown; description?: unknown; config?: unknown }): {
+export function parseTemplateBody(body: {
+	name?: unknown;
+	description?: unknown;
+	config?: unknown;
+}): {
 	name: string;
 	description: string | null;
 } {

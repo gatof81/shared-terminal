@@ -9,7 +9,7 @@ const dbStubs = vi.hoisted(() => ({
 }));
 vi.mock("./db.js", () => dbStubs);
 
-import { assertTemplateConfigShape, TemplateBodyError } from "./routes.js";
+import { assertTemplateConfigShape, parseTemplateBody, TemplateBodyError } from "./routes.js";
 
 // `assertTemplateConfigShape` is the route-boundary belt-and-suspenders
 // guard that prevents plaintext secrets / live credentials from landing
@@ -114,5 +114,112 @@ describe("assertTemplateConfigShape", () => {
 
 	it("ignores envVars that aren't an array (handled by Zod upstream)", () => {
 		expect(() => assertTemplateConfigShape({ envVars: "not an array" } as unknown)).not.toThrow();
+	});
+});
+
+// `parseTemplateBody` runs at the route boundary on every POST/PUT
+// /api/templates request. The validation invariants (name required,
+// name + description length caps, config-must-be-object) protect
+// the storage layer from malformed inputs and surface precise 400s
+// to the client. Direct unit coverage so a silent regression on
+// either constant or any of the type checks fails this suite.
+describe("parseTemplateBody", () => {
+	const goodConfig = { cpuLimit: 1_000_000_000 };
+
+	it("accepts the canonical shape and trims the name", () => {
+		const got = parseTemplateBody({
+			name: "  my template  ",
+			description: "a tooltip",
+			config: goodConfig,
+		});
+		expect(got.name).toBe("my template");
+		expect(got.description).toBe("a tooltip");
+	});
+
+	it("collapses a missing description to null", () => {
+		const got = parseTemplateBody({ name: "T", config: goodConfig });
+		expect(got.description).toBeNull();
+	});
+
+	it("collapses a whitespace-only description to null (UX trap fix)", () => {
+		const got = parseTemplateBody({ name: "T", description: "   ", config: goodConfig });
+		expect(got.description).toBeNull();
+	});
+
+	it("requires a name (missing / non-string / empty / whitespace-only)", () => {
+		expect(() => parseTemplateBody({ config: goodConfig })).toThrowError(/name is required/);
+		expect(() => parseTemplateBody({ name: 123 as unknown, config: goodConfig })).toThrowError(
+			/name is required/,
+		);
+		expect(() => parseTemplateBody({ name: "", config: goodConfig })).toThrowError(
+			/name is required/,
+		);
+		expect(() => parseTemplateBody({ name: "   ", config: goodConfig })).toThrowError(
+			/name is required/,
+		);
+	});
+
+	it("rejects names over 64 characters (post-trim)", () => {
+		// Exactly 64 chars passes (boundary pin).
+		const exact = "a".repeat(64);
+		expect(parseTemplateBody({ name: exact, config: goodConfig }).name).toBe(exact);
+		// 65 fails.
+		expect(() => parseTemplateBody({ name: "a".repeat(65), config: goodConfig })).toThrowError(
+			/name exceeds 64 characters/,
+		);
+		// Mostly-whitespace 65 chars passes (trim-first ordering — the
+		// post-trim length is what counts).
+		const padded = `   ${"a".repeat(60)}   `;
+		expect(parseTemplateBody({ name: padded, config: goodConfig }).name).toBe("a".repeat(60));
+	});
+
+	it("rejects descriptions that aren't strings", () => {
+		expect(() =>
+			parseTemplateBody({ name: "T", description: 42 as unknown, config: goodConfig }),
+		).toThrowError(/description must be a string/);
+	});
+
+	it("rejects descriptions over 512 characters (post-trim)", () => {
+		// Exactly 512 chars passes (boundary pin).
+		const exact = "a".repeat(512);
+		expect(
+			parseTemplateBody({ name: "T", description: exact, config: goodConfig }).description,
+		).toBe(exact);
+		// 513 fails.
+		expect(() =>
+			parseTemplateBody({ name: "T", description: "a".repeat(513), config: goodConfig }),
+		).toThrowError(/description exceeds 512 characters/);
+	});
+
+	it("rejects missing / null / non-object configs", () => {
+		expect(() => parseTemplateBody({ name: "T" })).toThrowError(/config is required/);
+		expect(() => parseTemplateBody({ name: "T", config: null })).toThrowError(/config is required/);
+		expect(() => parseTemplateBody({ name: "T", config: "string" as unknown })).toThrowError(
+			/config must be an object/,
+		);
+		// Array guard: `typeof [] === "object"` so without the
+		// Array.isArray short-circuit a bare array would slip past.
+		expect(() => parseTemplateBody({ name: "T", config: [1, 2, 3] as unknown })).toThrowError(
+			/config must be an object/,
+		);
+	});
+
+	it("path attribution: TemplateBodyError carries the right `.path`", () => {
+		// Locks the path values the route uses to build the 400 body.
+		try {
+			parseTemplateBody({ config: goodConfig });
+		} catch (err) {
+			expect((err as TemplateBodyError).path).toBe("name");
+		}
+		try {
+			parseTemplateBody({ name: "T", description: 42 as unknown, config: goodConfig });
+		} catch (err) {
+			expect((err as TemplateBodyError).path).toBe("description");
+		}
+		try {
+			parseTemplateBody({ name: "T" });
+		} catch (err) {
+			expect((err as TemplateBodyError).path).toBe("config");
+		}
 	});
 });
