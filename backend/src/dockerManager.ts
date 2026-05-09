@@ -819,7 +819,35 @@ export class DockerManager {
 			this.warnIfPreHardened(sessionId, meta.containerId, info.HostConfig);
 			if (!info.State.Running) {
 				await this.docker.getContainer(meta.containerId).start();
+				// #190 PR 190b round 1 SHOULD-FIX — refresh port
+				// mappings after we restart a stopped container.
+				// `stopContainer()` clears the mapping table, and
+				// Docker assigns a fresh ephemeral host port at every
+				// start (the kernel pool isn't sticky), so the D1 row
+				// written by the original spawn is gone and the
+				// pre-start `info.NetworkSettings.Ports` snapshot is
+				// either empty or stale. Without re-inspecting here,
+				// the dispatcher (190c) would 404 every proxied port
+				// request on this session until the next reconcile()
+				// — which is the most common lifecycle path for any
+				// session with declared ports. Mirror spawn()'s
+				// best-effort pattern: a failure logs and lets the
+				// container keep running.
+				try {
+					const fresh = await this.docker.getContainer(meta.containerId).inspect();
+					const mappings = parseInspectPorts(fresh.NetworkSettings?.Ports);
+					if (mappings.length > 0) {
+						await setPortMappings(sessionId, mappings);
+					}
+				} catch (err) {
+					logger.warn(
+						`[docker] failed to refresh port mappings for session ${sessionId} after restart: ${(err as Error).message}`,
+					);
+				}
 			}
+			// When `info.State.Running` was already true (container was
+			// running before this call), the D1 row written by spawn()
+			// or the last reconcile() is still valid — no re-inspect.
 			await this.sessions.updateStatus(sessionId, "running");
 			logger.info(`[docker] restarted container for session ${sessionId}`);
 		} catch {

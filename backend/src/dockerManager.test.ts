@@ -1025,6 +1025,94 @@ describe("DockerManager.startContainer", () => {
 		expect(sessions.updateStatus).toHaveBeenCalledWith("s1", "running");
 		warnSpy.mockRestore();
 	});
+
+	// #190 PR 190b round 1 SHOULD-FIX. The Case-2 path restarts a stopped
+	// container, and Docker assigns a fresh ephemeral host port at every
+	// `start()`. `stopContainer` already cleared the mapping table, so
+	// without a post-start re-inspect the dispatcher (190c) would 404
+	// every proxied port until reconcile() runs — the most common
+	// lifecycle path for a session with declared ports.
+	it("refreshes sessions_port_mappings after restarting a stopped Case-2 container", async () => {
+		const sessions = makeFakeSessions();
+		const dm = new DockerManager(sessions);
+		// Two distinct inspect responses: (1) the pre-start snapshot
+		// reports State.Running=false with no Ports yet; (2) the
+		// post-start snapshot returns the freshly-bound host ports.
+		// Track call count so we can hand back the second shape only
+		// after start() has been invoked.
+		let inspectCalls = 0;
+		const inspect = vi.fn(async () => {
+			inspectCalls += 1;
+			if (inspectCalls === 1) {
+				return {
+					State: { Running: false },
+					HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"] },
+					NetworkSettings: { Ports: {} },
+				};
+			}
+			return {
+				State: { Running: true },
+				HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"] },
+				NetworkSettings: {
+					Ports: {
+						"3000/tcp": [{ HostPort: "32999" }],
+					},
+				},
+			};
+		});
+		const start = vi.fn(async () => {
+			/* started */
+		});
+		(dm as unknown as { docker: unknown }).docker = {
+			getContainer: vi.fn(() => ({ inspect, start })),
+		};
+
+		await dm.startContainer("s1");
+
+		expect(start).toHaveBeenCalledTimes(1);
+		expect(inspect).toHaveBeenCalledTimes(2);
+		// setPortMappings → DELETE then INSERT. The INSERT must hold
+		// the *post-start* host port (32999), not the empty pre-start
+		// snapshot.
+		const insertCall = dbStubs.d1Query.mock.calls.find((c) =>
+			(c[0] as string).match(/^INSERT INTO sessions_port_mappings/),
+		);
+		expect(insertCall?.[1]).toEqual(["s1", 3000, 32999]);
+	});
+
+	// Sub-branch: container was already running (e.g. operator did
+	// `docker start` out-of-band before the user clicked Start). The D1
+	// row from the original spawn / last reconcile is still valid;
+	// re-inspecting would be a wasted round-trip.
+	it("does NOT re-inspect when the Case-2 container was already running", async () => {
+		const sessions = makeFakeSessions();
+		const dm = new DockerManager(sessions);
+		const inspect = vi.fn(async () => ({
+			State: { Running: true },
+			HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"] },
+			NetworkSettings: { Ports: {} },
+		}));
+		const start = vi.fn(async () => {
+			/* unused */
+		});
+		(dm as unknown as { docker: unknown }).docker = {
+			getContainer: vi.fn(() => ({ inspect, start })),
+		};
+
+		// Reset d1Query mock so any leftover reconcile-test calls don't
+		// poison the "no port-mapping calls for s1" assertion below.
+		dbStubs.d1Query.mockClear();
+
+		await dm.startContainer("s1");
+
+		expect(start).not.toHaveBeenCalled();
+		expect(inspect).toHaveBeenCalledTimes(1);
+		// No setPortMappings call — the existing D1 row stands.
+		const portMappingCalls = dbStubs.d1Query.mock.calls.filter((c) =>
+			(c[0] as string).match(/sessions_port_mappings/),
+		);
+		expect(portMappingCalls).toEqual([]);
+	});
 });
 
 describe("DockerManager constructor", () => {
