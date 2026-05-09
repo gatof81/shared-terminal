@@ -378,12 +378,28 @@ const AgentSeedSpec = z
 	})
 	.strict();
 
-// Minimal placeholder for #190. Topology (subdomain vs path, auth gate)
-// lands with the port-exposure child.
+// #190 PR 190a — typed port-exposure entries. `container` is the in-
+// container listening port; `public` decides whether the dispatcher
+// (190c) requires the `st_token` cookie before reverse-proxying to the
+// container. Privileged ports (< 1024) are rejected at the schema
+// level unless the session-level `allowPrivilegedPorts` toggle below
+// is on — see the `superRefine` on `SessionConfigSchema` for the
+// cross-field check, anchored there because the per-port refine has
+// no access to siblings on the parent object.
+//
+// `protocol` is intentionally absent in v1: every port goes through the
+// HTTP/WS dispatcher in 190c (`http-proxy` handles upgrades). Raw-TCP
+// exposure would need a different topology (no Tunnel ingress, no
+// per-host-header dispatch) and is out of scope for the umbrella.
 const PortSpec = z
 	.object({
-		port: z.number().int().min(1).max(65535),
-		protocol: z.enum(["http", "tcp"]).optional(),
+		container: z.number().int().min(1).max(65535),
+		// `public: false` is the default in the issue spec, but Zod's
+		// boolean has no default and we want the wire shape to be
+		// explicit — clients must say which side of the auth gate they
+		// want, no implicit fallthrough. Form code in 190d sets `false`
+		// for fresh rows.
+		public: z.boolean(),
 	})
 	.strict();
 
@@ -493,13 +509,63 @@ export const SessionConfigSchema = z
 		agentSeed: AgentSeedSpec.nullable().optional(),
 		// #190 — populated by the ports form
 		ports: z.array(PortSpec).max(MAX_PORTS).optional(),
+		// #190 — session-level toggle that re-grants
+		// `CAP_NET_BIND_SERVICE` (and only that capability) on `docker
+		// run` so the in-container process can bind to ports < 1024.
+		// 190b owns the cap-add wiring; 190a only validates the toggle
+		// shape and gates the privileged-port rejection on it. The
+		// frontend (190d) marks this as advanced because it loosens
+		// the container's default capability set.
+		allowPrivilegedPorts: z.boolean().optional(),
 		// #186 — typed entry list. `plain` values stored verbatim;
 		// `secret` values encrypted before D1 write (see
 		// `encryptSecretEntries`) and redacted in listing endpoints.
 		// `secret-slot` is template-load-only and rejected on POST.
 		envVars: z.array(EnvVarEntry).max(MAX_ENV_ENTRIES).optional(),
 	})
-	.strict();
+	.strict()
+	// #190 — cross-field invariants on `ports` / `allowPrivilegedPorts`
+	// that the per-field refines can't express:
+	//   1. `ports[].container` must be unique. Duplicates would either
+	//      collide at the Docker `-p` step (the second `-p 0:N` silently
+	//      replaces the first under some Docker versions) or land two
+	//      rows in `sessions_port_mappings` with the same container
+	//      port — neither is a valid state. Catch at ingest with a
+	//      precise per-element path so the form can highlight the
+	//      duplicate row directly.
+	//   2. Privileged ports (< 1024) require the session-level
+	//      `allowPrivilegedPorts: true` toggle. Done as a cross-field
+	//      refine because the per-PortSpec refine has no access to its
+	//      sibling `allowPrivilegedPorts` field. The container's
+	//      bounding capability set is dropped to nothing by default in
+	//      `dockerManager.ts`; without the toggle, the in-container
+	//      process literally cannot bind to a privileged port even if
+	//      we let the config through, so failing here is more useful
+	//      than a confusing runtime EACCES inside the container.
+	.superRefine((data, ctx) => {
+		if (!data.ports) return;
+		const seenContainers = new Map<number, number>(); // container -> first index
+		for (let i = 0; i < data.ports.length; i++) {
+			const port = data.ports[i]!;
+			const prior = seenContainers.get(port.container);
+			if (prior !== undefined) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: ["ports", i, "container"],
+					message: `duplicate container port ${port.container} (also at index ${prior})`,
+				});
+			} else {
+				seenContainers.set(port.container, i);
+			}
+			if (port.container < 1024 && data.allowPrivilegedPorts !== true) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: ["ports", i, "container"],
+					message: `port ${port.container} is privileged (< 1024); set allowPrivilegedPorts: true to permit`,
+				});
+			}
+		}
+	});
 
 export type SessionConfig = z.infer<typeof SessionConfigSchema>;
 export type RepoSpecInput = z.infer<typeof RepoSpec>;
@@ -925,6 +991,11 @@ interface SessionConfigRow {
 	post_start_cmd: string | null;
 	repos_json: string | null;
 	ports_json: string | null;
+	// #190 PR 190a — INTEGER 0/1 (SQLite has no boolean type). Null
+	// rehydrates to undefined so the schema's optional shape round-trips
+	// (a row predating the column reads as null and behaves identically
+	// to "no toggle ever set").
+	allow_privileged_ports: number | null;
 	env_vars_json: string | null;
 	auth_json: string | null;
 	git_identity_json: string | null;
@@ -947,6 +1018,14 @@ function rowToRecord(row: SessionConfigRow): SessionConfigRecord {
 		postStartCmd: row.post_start_cmd ?? undefined,
 		repo: parseRepoColumn(row.session_id, row.repos_json),
 		ports: parseJsonColumn<SessionConfig["ports"]>(row.session_id, "ports_json", row.ports_json),
+		// SQLite boolean idiom: 1 → true, anything else (including 0
+		// and NULL) → undefined. We don't return `false` for stored 0
+		// because the schema's `.optional()` shape means absent /
+		// unset and explicit-false rehydrate to the same downstream
+		// behaviour, and keeping the rehydrated record's shape narrow
+		// (only `true | undefined`) lets the dispatcher and cap-add
+		// consumers do `=== true` checks without thinking about 0/false.
+		allowPrivilegedPorts: row.allow_privileged_ports === 1 ? true : undefined,
 		envVars: parseEnvVarsColumn(row.session_id, row.env_vars_json),
 		auth: parseAuthColumn(row.session_id, row.auth_json),
 		gitIdentity: parseJsonColumn<SessionConfig["gitIdentity"]>(
@@ -1278,23 +1357,25 @@ export async function persistSessionConfig(
 		`INSERT INTO session_configs
                         (session_id, workspace_strategy, cpu_limit, mem_limit,
                          idle_ttl_seconds, post_create_cmd, post_start_cmd,
-                         repos_json, ports_json, env_vars_json, auth_json,
+                         repos_json, ports_json, allow_privileged_ports,
+                         env_vars_json, auth_json,
                          git_identity_json, dotfiles_json, agent_seed_json)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(session_id) DO UPDATE SET
-                        workspace_strategy = excluded.workspace_strategy,
-                        cpu_limit          = excluded.cpu_limit,
-                        mem_limit          = excluded.mem_limit,
-                        idle_ttl_seconds   = excluded.idle_ttl_seconds,
-                        post_create_cmd    = excluded.post_create_cmd,
-                        post_start_cmd     = excluded.post_start_cmd,
-                        repos_json         = excluded.repos_json,
-                        ports_json         = excluded.ports_json,
-                        env_vars_json      = excluded.env_vars_json,
-                        auth_json          = excluded.auth_json,
-                        git_identity_json  = excluded.git_identity_json,
-                        dotfiles_json      = excluded.dotfiles_json,
-                        agent_seed_json    = excluded.agent_seed_json`,
+                        workspace_strategy     = excluded.workspace_strategy,
+                        cpu_limit              = excluded.cpu_limit,
+                        mem_limit              = excluded.mem_limit,
+                        idle_ttl_seconds       = excluded.idle_ttl_seconds,
+                        post_create_cmd        = excluded.post_create_cmd,
+                        post_start_cmd         = excluded.post_start_cmd,
+                        repos_json             = excluded.repos_json,
+                        ports_json             = excluded.ports_json,
+                        allow_privileged_ports = excluded.allow_privileged_ports,
+                        env_vars_json          = excluded.env_vars_json,
+                        auth_json              = excluded.auth_json,
+                        git_identity_json      = excluded.git_identity_json,
+                        dotfiles_json          = excluded.dotfiles_json,
+                        agent_seed_json        = excluded.agent_seed_json`,
 		[
 			sessionId,
 			config.workspaceStrategy ?? null,
@@ -1314,6 +1395,13 @@ export async function persistSessionConfig(
 			// from array to single — column kept to avoid a migration).
 			jsonOrNull(config.repo),
 			jsonOrNull(config.ports),
+			// Only persist the toggle when explicitly set to true;
+			// `false` and `undefined` both store NULL so we don't grow
+			// the row with a column that defaults to "off everywhere"
+			// for the 99 % of sessions that never expose privileged
+			// ports. Mirrors the `=== 1 ? true : undefined` round-trip
+			// in `rowToRecord`.
+			config.allowPrivilegedPorts === true ? 1 : null,
 			jsonOrNull(config.envVars),
 			jsonOrNull(config.auth),
 			jsonOrNull(config.gitIdentity),

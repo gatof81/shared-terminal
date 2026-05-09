@@ -188,22 +188,23 @@ export async function migrateDb(): Promise<void> {
 		// invariant; `sessionConfig.test.ts` locks this with an explicit
 		// SQL-shape assertion.
 		`CREATE TABLE IF NOT EXISTS session_configs (
-                        session_id          TEXT PRIMARY KEY,
-                        workspace_strategy  TEXT,
-                        cpu_limit           INTEGER,
-                        mem_limit           INTEGER,
-                        idle_ttl_seconds    INTEGER,
-                        post_create_cmd     TEXT,
-                        post_start_cmd      TEXT,
-                        repos_json          TEXT,
-                        ports_json          TEXT,
-                        env_vars_json       TEXT,
-                        auth_json           TEXT,
-                        git_identity_json   TEXT,
-                        dotfiles_json       TEXT,
-                        agent_seed_json     TEXT,
-                        bootstrapped_at     TEXT,
-                        created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+                        session_id              TEXT PRIMARY KEY,
+                        workspace_strategy      TEXT,
+                        cpu_limit               INTEGER,
+                        mem_limit               INTEGER,
+                        idle_ttl_seconds        INTEGER,
+                        post_create_cmd         TEXT,
+                        post_start_cmd          TEXT,
+                        repos_json              TEXT,
+                        ports_json              TEXT,
+                        allow_privileged_ports  INTEGER,
+                        env_vars_json           TEXT,
+                        auth_json               TEXT,
+                        git_identity_json       TEXT,
+                        dotfiles_json           TEXT,
+                        agent_seed_json         TEXT,
+                        bootstrapped_at         TEXT,
+                        created_at              TEXT NOT NULL DEFAULT (datetime('now')),
                         FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
                 )`,
 	]);
@@ -250,6 +251,20 @@ export async function migrateDb(): Promise<void> {
 			if (!/duplicate column name|already exists/i.test((err as Error).message)) {
 				throw err;
 			}
+		}
+	}
+	// #190 PR 190a: `allow_privileged_ports` column on `session_configs`
+	// — INTEGER 0/1 toggle that 190b reads to decide whether to add
+	// `CAP_NET_BIND_SERVICE` on `docker run`. Same ADD COLUMN idiom as
+	// auth_json / lifecycle-hook columns above; CREATE TABLE already
+	// declares it for fresh deploys. NULL on pre-existing rows
+	// rehydrates to undefined (no toggle ever set), which is identical
+	// to the post-migration "off" state.
+	try {
+		await d1Query("ALTER TABLE session_configs ADD COLUMN allow_privileged_ports INTEGER");
+	} catch (err) {
+		if (!/duplicate column name|already exists/i.test((err as Error).message)) {
+			throw err;
 		}
 	}
 	// Auto-promote the earliest-created user when no admin exists yet.
