@@ -762,6 +762,36 @@ describe("validateSessionConfig", () => {
 		).toThrowError(/secret-slot/);
 	});
 
+	it("accepts 'secret-slot' entries when allowSecretSlots: true (templates path)", () => {
+		// PR #228 round 1 BLOCKER: the templates flow saves a config
+		// with secrets stripped to slots, so the validator MUST accept
+		// slots when called with the flag flipped on. Without this
+		// branch, every save-as-template would 400 the moment the user
+		// had any secret env vars.
+		const got = validateSessionConfig(
+			{ envVars: [{ name: "FOO", type: "secret-slot" }] },
+			{ allowSecretSlots: true },
+		);
+		expect(got?.envVars).toEqual([{ name: "FOO", type: "secret-slot" }]);
+	});
+
+	it("with allowSecretSlots: true, still rejects mixed secret-slot + duplicate name", () => {
+		// The duplicate-name dedup runs BEFORE the slot decision in the
+		// loop, so the flag relaxes only the slot rejection — every
+		// other invariant on the env-var list still fires for templates.
+		expect(() =>
+			validateSessionConfig(
+				{
+					envVars: [
+						{ name: "FOO", type: "secret-slot" },
+						{ name: "FOO", type: "plain", value: "x" },
+					],
+				},
+				{ allowSecretSlots: true },
+			),
+		).toThrowError(/duplicate entry name/);
+	});
+
 	it("rejects an empty secret value", () => {
 		// Plain values can be empty (POSIX `KEY=`); secret values must
 		// have content — an "empty secret" is meaningless and was

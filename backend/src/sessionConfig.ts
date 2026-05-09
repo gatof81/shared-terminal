@@ -662,7 +662,23 @@ export class SessionConfigValidationError extends Error {
  * Zod issue's path/message on failure so the route can return a precise
  * 400 telling the client exactly which field is wrong.
  */
-export function validateSessionConfig(raw: unknown): SessionConfig | undefined {
+export function validateSessionConfig(
+	raw: unknown,
+	opts?: {
+		/**
+		 * When true, `secret-slot` env-var entries (the third variant
+		 * of `EnvVarEntry`) pass validation instead of being rejected
+		 * with the "template-load only" error. The templates flow
+		 * (#195) needs this: saving a config as a template strips
+		 * `secret`-typed values down to slots so the secret never
+		 * lands in `templates.config`. Default `false` — `POST
+		 * /api/sessions` MUST reject slots (no value to spawn the
+		 * container with), so the standard call site stays strict.
+		 */
+		allowSecretSlots?: boolean;
+	},
+): SessionConfig | undefined {
+	const allowSecretSlots = opts?.allowSecretSlots === true;
 	if (raw === undefined || raw === null) return undefined;
 	const result = SessionConfigSchema.safeParse(raw);
 	if (!result.success) {
@@ -701,6 +717,14 @@ export function validateSessionConfig(raw: unknown): SessionConfig | undefined {
 			}
 			seen.add(entry.name);
 			if (entry.type === "secret-slot") {
+				if (allowSecretSlots) {
+					// Template path: slot is a placeholder for a value
+					// the recipient will fill in via the `Use template`
+					// flow. `checkEnvVarSafety` doesn't apply — there's
+					// no value to scan; the dedup check above is the
+					// only invariant that fires for slots.
+					continue;
+				}
 				throw new SessionConfigValidationError(
 					"config.envVars",
 					`config.envVars[${entry.name}]: 'secret-slot' is template-load only; provide a 'secret' or 'plain' entry instead`,

@@ -1086,11 +1086,14 @@ export function buildRouter(
 		try {
 			const { name, description } = parseTemplateBody(body);
 			// Validate the config shape via the same `SessionConfigSchema`
-			// the create-session route uses. The template flow accepts
-			// `secret-slot` entries (the schema's third env-var variant)
-			// which `POST /sessions` rejects — that's the entire point
-			// of templates: capture intent without persisting secrets.
-			validateSessionConfig(body.config);
+			// the create-session route uses, with `allowSecretSlots: true`
+			// flipping the env-var variant gate. `POST /sessions` rejects
+			// `secret-slot` entries (no value to spawn with); the template
+			// flow needs them — they're placeholders the `Use template`
+			// flow re-prompts for. Without the flag, every save-as-template
+			// 400s as soon as the user has any secret env entries
+			// (PR #228 round 1 BLOCKER).
+			validateSessionConfig(body.config, { allowSecretSlots: true });
 			const t = await templates.create(userId, {
 				name,
 				description,
