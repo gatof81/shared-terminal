@@ -271,6 +271,19 @@ describe("persistSessionConfig", () => {
 		expect((params as unknown[]).length).toBe(10);
 	});
 
+	it("collapses empty array / empty object sub-records to NULL (no D1 row bloat)", async () => {
+		await persistSessionConfig("sess-empty", {
+			repos: [],
+			ports: [],
+			envVars: {},
+		});
+		const [, params] = dbStubs.d1Query.mock.calls[0]!;
+		// repos_json (param[7]), ports_json (param[8]), env_vars_json (param[9])
+		expect(params?.[7]).toBeNull();
+		expect(params?.[8]).toBeNull();
+		expect(params?.[9]).toBeNull();
+	});
+
 	it("serialises envVars + ports JSON columns", async () => {
 		await persistSessionConfig("sess-2", {
 			ports: [{ port: 3000, protocol: "http" }],

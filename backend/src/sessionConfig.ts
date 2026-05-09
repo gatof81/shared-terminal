@@ -55,6 +55,14 @@ const MAX_PORTS = 20;
 // schema is the right enforcement point — once a row is in D1, the child
 // issue has no obvious place to re-validate without a duplicate codebase.
 // `git+...` variants stay out pending a real reason to need them.
+//
+// `http://` (cleartext) is admitted today so air-gapped / local mirrors
+// without TLS still work. PR #188 should revisit when wiring the actual
+// `git clone`: a man-in-the-middle on the path between the container
+// and the public mirror could inject arbitrary repo content, which
+// becomes user-impact only at clone time. Two reasonable options for
+// #188: refuse `http://` outright (safest), or surface a confirm prompt
+// in the form's Repo tab so the user has to opt in.
 const REPO_URL_SCHEME = /^https?:\/\//;
 const RepoSpec = z
 	.object({
@@ -290,11 +298,29 @@ export async function persistSessionConfig(
 			config.idleTtlSeconds ?? null,
 			config.postCreateCmd ?? null,
 			config.postStartCmd ?? null,
-			config.repos ? JSON.stringify(config.repos) : null,
-			config.ports ? JSON.stringify(config.ports) : null,
-			config.envVars ? JSON.stringify(config.envVars) : null,
+			// Empty containers (`[]`, `{}`) collapse to NULL so the row
+			// doesn't carry no-op JSON literals — `getSessionConfig` would
+			// rehydrate them as undefined anyway, and PR 185b's runner
+			// uses `IS NOT NULL` semantics on these columns to decide
+			// whether the corresponding feature was configured.
+			jsonOrNull(config.repos),
+			jsonOrNull(config.ports),
+			jsonOrNull(config.envVars),
 		],
 	);
+}
+
+/**
+ * Serialise a sub-record column for D1 insertion. Returns null for
+ * undefined and for empty containers (`[]`, `{}`); JSON-stringifies
+ * everything else. The bare-truthy form would write `"{}"` for an empty
+ * envVars object, which is row bloat with no semantic difference.
+ */
+function jsonOrNull(value: unknown): string | null {
+	if (value === undefined || value === null) return null;
+	if (Array.isArray(value) && value.length === 0) return null;
+	if (typeof value === "object" && Object.keys(value as object).length === 0) return null;
+	return JSON.stringify(value);
 }
 
 /** Read the config row for `sessionId`, or `null` if no row exists. */
