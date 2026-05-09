@@ -188,7 +188,30 @@ function buildProxy(): httpProxy {
 		// (proxyTimeout applies to HTTP responses, not the upgraded
 		// socket lifetime).
 		proxyTimeout: 30_000,
-	});
+		// Pin the safe default explicitly so a future http-proxy
+		// version that flips it can't silently regress. With
+		// `followRedirects: true`, http-proxy swaps the native
+		// `http`/`https` modules for the `follow-redirects` package
+		// — a 3xx from the container app would then be chased
+		// FROM THE BACKEND'S NETWORK PERSPECTIVE before the
+		// response is returned to the caller. For `is_public: true`
+		// ports (no auth) that means an unauthenticated caller
+		// could reach any service the backend host can hit on
+		// localhost (the API itself on :3001, instance metadata
+		// at 169.254.169.254, etc.) by serving a redirect from
+		// the container app — net-new capability beyond what the
+		// container's own network namespace allows. Native
+		// `http`/`https` (the default) never chase redirects, so
+		// a 3xx flows through to the client and the browser's
+		// own redirect logic + same-origin policy handle it.
+		// PR #223 round 8: bot's "needs verification" SSRF concern
+		// — verified at backend/node_modules/http-proxy/lib/
+		// http-proxy/passes/web-incoming.js:105 (the
+		// `options.followRedirects ? followRedirects : nativeAgents`
+		// branch). Explicit `false` documents the audit and pins
+		// the choice.
+		followRedirects: false,
+	} as Parameters<typeof httpProxy.createProxyServer>[0] & { followRedirects: boolean });
 	proxy.on("error", handleProxyError);
 	return proxy;
 }
