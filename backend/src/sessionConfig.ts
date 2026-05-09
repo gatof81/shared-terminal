@@ -20,7 +20,7 @@
 
 import { z } from "zod";
 import { d1Query } from "./db.js";
-import { EnvVarValidationError, validateEnvVars } from "./envVarValidation.js";
+import { checkEnvVarSafety, EnvVarValidationError } from "./envVarValidation.js";
 import { logger } from "./logger.js";
 import { decryptSecret, type EncryptedSecret, encryptSecret } from "./secrets.js";
 
@@ -41,13 +41,18 @@ const MAX_IDLE_TTL_S = 30 * 24 * 60 * 60; // 30 days
 // product UX.
 const MAX_REPOS = 10;
 const MAX_PORTS = 20;
-// #186 env-var entry caps. Hard-line the per-entry value at 16 KiB as
-// the issue spec requires; total list capped via array max so the
-// row's env_vars_json column can't blow past D1-friendly sizes even
-// with all values at the per-entry cap (64 × 16 KiB ≈ 1 MiB worst case
-// on size, smaller in practice because the JSON envelope dominates).
+// #186 env-var entry caps. Per-entry value at 16 KiB matches the
+// spec; aggregate budget below caps the whole serialised list so a
+// caller can't blow past D1-friendly sizes by stuffing 64 entries at
+// the per-entry max. Worst-case JSON envelope under 1 MiB, well
+// inside D1 row limits.
 const MAX_ENV_ENTRIES = 64;
 const MAX_ENV_VALUE_BYTES = 16 * 1024;
+// Aggregate cap on the serialised typed-entry list. 256 KiB lets a
+// realistic config (a few dozen plain entries + a handful of
+// secrets) breathe while still bounding the row size and the bytes
+// echoed on every list response.
+const MAX_ENV_VARS_TOTAL_BYTES = 256 * 1024;
 const ENV_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 const MAX_ENV_NAME_LEN = 256;
 
@@ -254,14 +259,20 @@ export function validateSessionConfig(raw: unknown): SessionConfig | undefined {
 		const path = ["config", ...issue.path.map(String)].join(".");
 		throw new SessionConfigValidationError(path, `${path}: ${issue.message}`);
 	}
-	// Apply the existing envVarValidation content rules (denylist of
-	// PATH/LD_*/SESSION_ID/etc., NUL-byte rejection) to each entry's
-	// name+value pair. Zod handled shape (POSIX-name regex, length
-	// caps, discriminated-union variant); envVarValidation handles
-	// content (denylist matches, NUL bytes, exact name+value rules).
-	// `secret-slot` is rejected outright — it's a template wire shape
-	// only, never a valid POST input. Dedup by name fires here too;
-	// two entries with the same name are an unambiguous client bug.
+	// Apply the denylist + NUL-byte rules from envVarValidation per
+	// entry. Zod already handled shape (Zod regex on the typed
+	// EnvVarEntry name, byte cap on value via .refine, discriminated-
+	// union variant). The legacy `validateEnvVars` bundles its own
+	// length/count caps that DO NOT match the typed-path spec
+	// (#186 requires 256-char name + 16 KiB value vs the legacy
+	// 128/4096) — calling the full function silently overrode the
+	// caps Zod advertised. Round-1 review caught this. Going through
+	// the targeted `checkEnvVarSafety` helper instead so the new
+	// path's caps are the only ones in force.
+	//
+	// `secret-slot` is rejected outright — template-load wire shape
+	// only, never valid on POST. Dedup by name + aggregate-byte guard
+	// fire here too; the per-entry helper can't see either.
 	if (result.data.envVars !== undefined) {
 		const seen = new Set<string>();
 		for (const entry of result.data.envVars) {
@@ -278,12 +289,8 @@ export function validateSessionConfig(raw: unknown): SessionConfig | undefined {
 					`config.envVars[${entry.name}]: 'secret-slot' is template-load only; provide a 'secret' or 'plain' entry instead`,
 				);
 			}
-			// `validateEnvVars` reuse: hand it a one-key map and let
-			// the existing denylist + NUL-check fire. Errors are
-			// re-thrown with the SessionConfigValidationError shape so
-			// the route returns the same precise 400.
 			try {
-				validateEnvVars({ [entry.name]: entry.value });
+				checkEnvVarSafety(entry.name, entry.value);
 			} catch (err) {
 				if (err instanceof EnvVarValidationError) {
 					throw new SessionConfigValidationError(
@@ -293,6 +300,20 @@ export function validateSessionConfig(raw: unknown): SessionConfig | undefined {
 				}
 				throw err;
 			}
+		}
+		// Aggregate-bytes guard. 64 × 16 KiB worst case is ~1 MiB,
+		// which D1 handles but bloats every list response and ties up
+		// a row that didn't need to be that large. 256 KiB ceiling
+		// covers any realistic config without letting a hostile
+		// caller pin the column at MB scale. Buffer.byteLength counts
+		// multi-byte UTF-8 correctly; JSON.stringify mirrors the
+		// shape that lands in `env_vars_json`.
+		const serialisedBytes = Buffer.byteLength(JSON.stringify(result.data.envVars), "utf-8");
+		if (serialisedBytes > MAX_ENV_VARS_TOTAL_BYTES) {
+			throw new SessionConfigValidationError(
+				"config.envVars",
+				`config.envVars total size (${serialisedBytes} bytes) exceeds ${MAX_ENV_VARS_TOTAL_BYTES} bytes`,
+			);
 		}
 	}
 	return result.data;

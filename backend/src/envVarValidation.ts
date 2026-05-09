@@ -148,6 +148,34 @@ const DENIED_ENV_VAR_PREFIXES = ["LD_", "DYLD_"];
 // for defensiveness — they're never legitimate env var names.
 const PROTOTYPE_POLLUTION_NAMES = new Set(["__proto__", "constructor", "prototype"]);
 
+/**
+ * Run only the denylist + prototype-pollution + NUL-byte checks
+ * against a single name/value pair. The full `validateEnvVars`
+ * routine bundles these with length / count / total-size caps that
+ * the caller may not want — the typed-entry path in #186 has its
+ * own (different) length caps enforced by Zod, and reusing the full
+ * function silently overrode them.
+ *
+ * Throws `EnvVarValidationError` on any violation so the caller can
+ * map it to a 400 with the same shape as the legacy path.
+ */
+export function checkEnvVarSafety(name: string, value: string): void {
+	if (PROTOTYPE_POLLUTION_NAMES.has(name)) {
+		throw new EnvVarValidationError(
+			`envVars key '${name}' is reserved (conflicts with JS object semantics)`,
+		);
+	}
+	if (DENIED_ENV_VAR_NAMES.has(name) || DENIED_ENV_VAR_PREFIXES.some((p) => name.startsWith(p))) {
+		throw new EnvVarValidationError(
+			`envVars key '${name}' is reserved and cannot be set via session config. ` +
+				"Set it inside the shell if needed.",
+		);
+	}
+	if (value.includes("\0")) {
+		throw new EnvVarValidationError(`envVars['${name}'] contains a NUL byte`);
+	}
+}
+
 export class EnvVarValidationError extends Error {
 	constructor(message: string) {
 		super(message);

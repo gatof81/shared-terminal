@@ -262,6 +262,45 @@ describe("validateSessionConfig", () => {
 		throw new Error("expected throw");
 	});
 
+	// PR #210 round 1: legacy validateEnvVars enforces 128-char name
+	// and 4096-char value caps; the typed path advertises 256 / 16 KiB
+	// per the #186 spec. Pin that the typed caps actually take effect
+	// (i.e. the targeted checkEnvVarSafety helper isn't re-applying
+	// the legacy length limits).
+	it("accepts entry names up to 256 chars (typed path cap, not legacy 128)", () => {
+		const longName = "A".repeat(256);
+		expect(
+			validateSessionConfig({
+				envVars: [{ name: longName, type: "plain", value: "x" }],
+			}),
+		).toBeDefined();
+	});
+
+	it("accepts entry values up to 16 KiB (typed path cap, not legacy 4096)", () => {
+		// 5000 ASCII chars exceeds the legacy 4096 char cap but is
+		// well under the typed-path 16 KiB byte cap. Validation must
+		// accept; if validateEnvVars's length cap leaks into the
+		// typed path again, this trips immediately.
+		const fiveK = "x".repeat(5000);
+		expect(
+			validateSessionConfig({
+				envVars: [{ name: "FOO", type: "plain", value: fiveK }],
+			}),
+		).toBeDefined();
+	});
+
+	it("rejects an entry list that exceeds the 256 KiB aggregate ceiling", () => {
+		// Each entry: name ~3 chars + ~16 KiB value = ~16 KiB. 17
+		// entries lands at ~272 KiB, over the cap. Lower-numbered
+		// names so the regex passes (`E0`–`E9`, `EA`–`EG`).
+		const entries = Array.from({ length: 17 }, (_, i) => ({
+			name: `E${String.fromCharCode(0x41 + i)}`,
+			type: "plain" as const,
+			value: "x".repeat(16 * 1024),
+		}));
+		expect(() => validateSessionConfig({ envVars: entries })).toThrowError(/total size .+ exceeds/);
+	});
+
 	it("accepts a mixed plain + secret entry list", () => {
 		const got = validateSessionConfig({
 			envVars: [
