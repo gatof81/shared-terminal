@@ -2501,7 +2501,13 @@ document.addEventListener("keydown", (e) => {
 		invitesModal.classList.contains("open") ||
 		pasteModal.classList.contains("open") ||
 		actionsMenu.classList.contains("open") ||
-		newSessionModal.classList.contains("open")
+		newSessionModal.classList.contains("open") ||
+		// Both templates modals (the listing page and the
+		// save-as-template dialog) need the same guard or pressing
+		// Escape with one of them open AND the sidebar visible
+		// would close both at once. PR #230 round 1 NIT.
+		templatesModal.classList.contains("open") ||
+		saveTemplateModal.classList.contains("open")
 	)
 		return;
 	if (!mainEl.classList.contains("sidebar-open")) return;

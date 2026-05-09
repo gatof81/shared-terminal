@@ -433,7 +433,10 @@ export async function deleteTemplate(id: string): Promise<void> {
 	const res = await apiFetch(`/templates/${encodeURIComponent(id)}`, {
 		method: "DELETE",
 	});
-	if (!res.ok && res.status !== 204) {
+	// 204 is in the 2xx range, so `res.ok` is already true. Earlier
+	// shape had a redundant `&& res.status !== 204` clause; dropped
+	// per PR #230 round 1 NIT.
+	if (!res.ok) {
 		throw new Error(`Failed to delete template (${res.status})`);
 	}
 }
