@@ -300,8 +300,11 @@ export async function getSessionConfig(sessionId: string): Promise<SessionConfig
 }
 
 /**
- * Test helper — returns true iff every member of `config` is undefined.
- * Used by the route to skip a no-op INSERT when `config: {}` arrives.
+ * Returns true iff every member of `config` is undefined.
+ *
+ * Used by `POST /sessions` to skip a no-op `session_configs` INSERT when
+ * the client sends `config: {}` — it's a production guard, not a test
+ * helper. Tests reuse it for the same shape check.
  */
 export function isEmptyConfig(config: SessionConfig): boolean {
 	return Object.values(config).every((v) => v === undefined);
