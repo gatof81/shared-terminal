@@ -217,6 +217,76 @@ describe("IdleSweeper.start / stop", () => {
 	});
 });
 
+// ── getStats (#241b) ────────────────────────────────────────────────────
+
+describe("IdleSweeper.getStats", () => {
+	it("returns initial state: lastSweepAt=null, sweptSinceBoot=0, currentMapSize=0", () => {
+		const { sweeper } = makeSweeper();
+		expect(sweeper.getStats()).toEqual({
+			lastSweepAt: null,
+			sweptSinceBoot: 0,
+			currentMapSize: 0,
+		});
+	});
+
+	it("currentMapSize tracks the live activity Map", () => {
+		const { sweeper } = makeSweeper();
+		sweeper.bump("a");
+		sweeper.bump("b");
+		expect(sweeper.getStats().currentMapSize).toBe(2);
+		sweeper.forget("a");
+		expect(sweeper.getStats().currentMapSize).toBe(1);
+	});
+
+	it("lastSweepAt is stamped at the start of runSweep, before the await", async () => {
+		// Stamping BEFORE the await means a sweep that fails halfway
+		// still leaves the operator-visible "last attempted" signal
+		// updated. Pin that ordering.
+		const { sweeper } = makeSweeper({ startTime: 12345 });
+		mockRunningWithTtl([]);
+		await sweeper.runSweep();
+		expect(sweeper.getStats().lastSweepAt).toBe(12345);
+	});
+
+	it("sweptSinceBoot increments only on successful auto-stops", async () => {
+		// `s-bad` throws on stop — must NOT bump the counter. `s-good`
+		// stops cleanly — bumps. Total: 1 reaped.
+		const stops: string[] = [];
+		const { sweeper, advance } = makeSweeper({
+			startTime: 0,
+			stopContainer: async (id) => {
+				stops.push(id);
+				if (id === "s-bad") throw new Error("docker daemon down");
+			},
+		});
+		sweeper.bump("s-bad");
+		sweeper.bump("s-good");
+		advance(120_000);
+		mockRunningWithTtl([
+			{ session_id: "s-bad", idle_ttl_seconds: 60 },
+			{ session_id: "s-good", idle_ttl_seconds: 60 },
+		]);
+		await sweeper.runSweep();
+		expect(stops).toEqual(["s-bad", "s-good"]);
+		expect(sweeper.getStats().sweptSinceBoot).toBe(1);
+	});
+
+	it("sweptSinceBoot accumulates across sweeps", async () => {
+		const { sweeper, advance } = makeSweeper({ startTime: 0 });
+		sweeper.bump("s1");
+		advance(120_000);
+		mockRunningWithTtl([{ session_id: "s1", idle_ttl_seconds: 60 }]);
+		await sweeper.runSweep();
+		expect(sweeper.getStats().sweptSinceBoot).toBe(1);
+
+		sweeper.bump("s2");
+		advance(120_000);
+		mockRunningWithTtl([{ session_id: "s2", idle_ttl_seconds: 60 }]);
+		await sweeper.runSweep();
+		expect(sweeper.getStats().sweptSinceBoot).toBe(2);
+	});
+});
+
 // ── listRunningSessionIds (boot helper) ─────────────────────────────────
 
 describe("listRunningSessionIds", () => {

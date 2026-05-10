@@ -63,6 +63,11 @@ const dbStubs = vi.hoisted(() => ({
 		success: true as const,
 		meta: { changes: 0, duration: 0, last_row_id: 0 },
 	})),
+	// Counter accessor added in #241b. Constant zero is fine — this
+	// test pins JSON shape, not specific counter values; per-call
+	// counter behaviour is exercised in `db.test.ts`.
+	getD1CallsSinceBoot: vi.fn(() => 0),
+	__resetD1CallsForTests: vi.fn(),
 }));
 vi.mock("./db.js", () => dbStubs);
 
@@ -99,6 +104,14 @@ async function spinUp(countByStatus: ReturnType<typeof vi.fn>) {
 	} as unknown as SessionManager;
 	const docker = {
 		getUploadTmpDir: () => "/tmp/shared-terminal-test-uploads",
+		// Reconcile counters added in #241b. Constant test stub —
+		// individual cases that care about specific values can
+		// override via the `as unknown as DockerManager` cast.
+		getReconcileStats: () => ({
+			lastRunAt: null,
+			sessionsCheckedSinceBoot: 0,
+			errorsSinceBoot: 0,
+		}),
 	} as unknown as DockerManager;
 	const broadcaster = {} as BootstrapBroadcaster;
 	const router = buildRouter(sessions, docker, broadcaster, {
@@ -127,7 +140,7 @@ describe("GET /api/admin/stats (#241a)", () => {
 		dbStubs.d1Query.mockReset();
 	});
 
-	it("returns the typed stats shape with bootedAt / uptimeSeconds / sessions.byStatus", async () => {
+	it("returns the typed stats shape with bootedAt / uptimeSeconds / sessions.byStatus + subsystem counters (#241b)", async () => {
 		const countByStatus = vi.fn(async () => ({
 			running: 3,
 			stopped: 2,
@@ -142,6 +155,13 @@ describe("GET /api/admin/stats (#241a)", () => {
 			bootedAt: string;
 			uptimeSeconds: number;
 			sessions: { byStatus: Record<string, number> };
+			idleSweeper: unknown;
+			reconcile: {
+				lastRunAt: number | null;
+				sessionsCheckedSinceBoot: number;
+				errorsSinceBoot: number;
+			};
+			d1: { callsSinceBoot: number };
 		};
 		// `bootedAt` is derived from process.uptime() — must be a parseable
 		// ISO string. The exact value depends on test-run timing, so we
@@ -159,6 +179,16 @@ describe("GET /api/admin/stats (#241a)", () => {
 			failed: 0,
 		});
 		expect(countByStatus).toHaveBeenCalledTimes(1);
+		// #241b: subsystem counters present on the wire. `idleSweeper` is
+		// null because spinUp's stub doesn't pass a sweeper — the route
+		// must serialise null rather than crash on the optional accessor.
+		expect(body.idleSweeper).toBeNull();
+		expect(body.reconcile).toEqual({
+			lastRunAt: null,
+			sessionsCheckedSinceBoot: 0,
+			errorsSinceBoot: 0,
+		});
+		expect(body.d1).toEqual({ callsSinceBoot: 0 });
 	});
 
 	it("returns 403 when requireAdmin denies the request (non-admin user)", async () => {

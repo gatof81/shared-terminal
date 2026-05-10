@@ -28,7 +28,7 @@ import {
 	verifyJwt,
 } from "./auth.js";
 import { type BootstrapBroadcaster, runAsyncBootstrap } from "./bootstrap.js";
-import { d1Query } from "./db.js";
+import { d1Query, getD1CallsSinceBoot } from "./db.js";
 import type { DockerManager } from "./dockerManager.js";
 import { UploadQuotaExceededError } from "./dockerManager.js";
 import { EnvVarValidationError, validateEnvVars } from "./envVarValidation.js";
@@ -65,7 +65,19 @@ export function buildRouter(
 	// path (every authed /sessions/:id hit); `forget` runs on stop /
 	// kill / hard-delete so the activity Map doesn't grow unboundedly
 	// across the backend's lifetime.
-	idleSweeper?: { bump: (sessionId: string) => void; forget: (sessionId: string) => void },
+	idleSweeper?: {
+		bump: (sessionId: string) => void;
+		forget: (sessionId: string) => void;
+		// `getStats` is optional so the test scaffold can build a
+		// stripped-down stub without wiring all three methods. Real
+		// production paths from index.ts always pass the full
+		// IdleSweeper instance.
+		getStats?: () => {
+			lastSweepAt: number | null;
+			sweptSinceBoot: number;
+			currentMapSize: number;
+		};
+	},
 ): Router {
 	const router = Router();
 
@@ -425,10 +437,20 @@ export function buildRouter(
 			// disagree by up to 500 ms.
 			const uptimeSeconds = Math.round(process.uptime());
 			const bootedAt = new Date(Date.now() - uptimeSeconds * 1000).toISOString();
+			// Subsystem counters added in #241b. All counters are
+			// in-memory / process-local; reset on every backend
+			// restart. `idleSweeper` is null when the sweeper isn't
+			// wired (tests, pre-#194 deployments) — the frontend
+			// should treat that as "not available" rather than zero.
+			const idleSweeperStats = idleSweeper?.getStats?.() ?? null;
+			const reconcileStats = docker.getReconcileStats();
 			res.json({
 				bootedAt,
 				uptimeSeconds,
 				sessions: { byStatus },
+				idleSweeper: idleSweeperStats,
+				reconcile: reconcileStats,
+				d1: { callsSinceBoot: getD1CallsSinceBoot() },
 			});
 		} catch (err) {
 			logger.error(`[admin] stats failed: ${(err as Error).message}`);

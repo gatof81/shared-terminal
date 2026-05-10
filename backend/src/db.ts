@@ -28,6 +28,29 @@ interface D1ApiResponse<T = Record<string, unknown>> {
 	errors: Array<{ code: number; message: string }>;
 }
 
+// Process-local counter of every `d1Query` call, surfaced via
+// `GET /api/admin/stats` (#241). Resets on every backend restart.
+// CLAUDE.md flags D1 round-trips as the expensive thing on hot
+// paths — exposing the count gives operators a way to spot a
+// runaway D1-spammer (e.g. an in-flight request loop) without
+// SSHing the host.
+//
+// Bumped at the top of `d1Query` so retried/failed calls are
+// counted too — a 500 from D1 still consumed quota, and that's
+// what the operator wants to see.
+let d1CallsSinceBoot = 0;
+
+/** Read-only counter accessor for the admin stats endpoint. */
+export function getD1CallsSinceBoot(): number {
+	return d1CallsSinceBoot;
+}
+
+/** Test seam: reset the counter so cases don't bleed into each
+ *  other. Production code never calls this. */
+export function __resetD1CallsForTests(): void {
+	d1CallsSinceBoot = 0;
+}
+
 /**
  * Execute a single SQL statement against D1.
  * Returns the results array for SELECT, or meta for INSERT/UPDATE/DELETE.
@@ -36,6 +59,7 @@ export async function d1Query<T = Record<string, unknown>>(
 	sql: string,
 	params?: unknown[],
 ): Promise<D1QueryResult<T>> {
+	d1CallsSinceBoot++;
 	const url = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/d1/database/${DATABASE_ID}/query`;
 
 	const res = await fetch(url, {
