@@ -738,7 +738,7 @@ export function buildRouter(
 	router.post("/sessions/:id/stop", async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
 		try {
-			await sessions.assertOwnership(req.params.id, userId);
+			await sessions.assertOwnedBy(req.params.id, userId);
 			await docker.stopContainer(req.params.id);
 			// Same `forget` rationale as DELETE above: a stopped
 			// session shouldn't sit in the activity map collecting
@@ -817,7 +817,7 @@ export function buildRouter(
 			throw err;
 		}
 		try {
-			await sessions.assertOwnership(req.params.id, userId);
+			await sessions.assertOwnedBy(req.params.id, userId);
 			await sessions.updateEnvVars(req.params.id, validatedEnvVars);
 			const updated = await sessions.get(req.params.id);
 			if (!updated) {
@@ -840,7 +840,7 @@ export function buildRouter(
 	router.get("/sessions/:id/tabs", async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
 		try {
-			await sessions.assertOwnership(req.params.id, userId);
+			await sessions.assertOwnedBy(req.params.id, userId);
 			const tabs = await docker.listTabs(req.params.id);
 			res.json(tabs);
 		} catch (err) {
@@ -862,7 +862,7 @@ export function buildRouter(
 			return;
 		}
 		try {
-			await sessions.assertOwnership(req.params.id, userId);
+			await sessions.assertOwnedBy(req.params.id, userId);
 			const tab = await docker.createTab(req.params.id, label as string | undefined);
 			res.status(201).json(tab);
 		} catch (err) {
@@ -874,7 +874,7 @@ export function buildRouter(
 		const { userId } = req as AuthedRequest;
 		const { id, tabId } = req.params;
 		try {
-			await sessions.assertOwnership(id, userId);
+			await sessions.assertOwnedBy(id, userId);
 
 			// Closing all tabs is allowed — the container lifecycle is
 			// independent of tmux now, so a session with zero tabs is a
@@ -1018,7 +1018,7 @@ export function buildRouter(
 		next: NextFunction,
 	): Promise<void> => {
 		try {
-			await sessions.assertOwnership(req.params.id, (req as AuthedRequest).userId);
+			await sessions.assertOwnedBy(req.params.id, (req as AuthedRequest).userId);
 			next();
 		} catch (err) {
 			handleSessionError(err, res);

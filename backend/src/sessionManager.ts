@@ -114,6 +114,50 @@ function rowToMeta(row: SessionRow): SessionMeta {
 	};
 }
 
+// ── Ownership cache (#239) ──────────────────────────────────────────────────
+//
+// `assertOwnership` and its void-return sibling `assertOwnedBy` are called
+// on every authed REST hit under `/api/sessions/:id` and on every WS attach.
+// CLAUDE.md is explicit: every `d1Query` is an HTTP round-trip to Cloudflare,
+// so this is the hottest auth-check path in the app and the natural target
+// for caching after the dispatcher cache (#238) shipped.
+//
+// What we cache: `(sessionId → ownerUserId)` only. The full SessionMeta
+// has mutable fields (status, container_id, last_connected_at, env_vars),
+// and broadening the cache to those would mean wiring an invalidation hook
+// into every UPDATE in this class — high blast radius for a small win.
+// Ownership, by contrast, is immutable in v1: there is no transfer flow,
+// no admin-takeover, no merge. The only way `user_id` can change is a
+// future feature, so the only invalidation we need today is `deleteRow`
+// dropping the entry on hard delete.
+//
+// What we don't cache: negative results (no row, foreign user). A miss
+// hits D1; the caller gets `NotFoundError` / `ForbiddenError`. Caching
+// negative results would amplify the "session is starting" race window
+// (a session that just spawned would 404 from cache for the TTL), and
+// the per-IP rate limit on the auth-bearing routes is the throttle for
+// probe traffic.
+//
+// Bounded at OWNERSHIP_CACHE_MAX entries with insertion-order eviction
+// (delete-then-insert refreshes a hot session's position so it doesn't
+// roll out under cap pressure). 1-hour TTL is the safety net — if a
+// future feature lands a transfer/admin-takeover path WITHOUT updating
+// the invalidation point here, the staleness window is bounded at the
+// TTL rather than the lifetime of the backend process.
+
+/** Exported for the test suite — pin TTL behaviour against the constant
+ *  rather than a magic literal that wouldn't surface a future change. */
+export const OWNERSHIP_CACHE_TTL_MS = 60 * 60 * 1000;
+/** Exported for the test suite — same shape as TTL. The default is
+ *  conservative: with a `users.MAX_ACTIVE_SESSIONS_PER_USER = 20` cap
+ *  and 500 users this caps memory at ~10k entries × ~80 bytes each. */
+export const OWNERSHIP_CACHE_MAX = 10_000;
+
+interface OwnershipCacheEntry {
+	ownerUserId: string;
+	expiresAt: number;
+}
+
 // ── SessionManager ──────────────────────────────────────────────────────────
 
 export class SessionManager {
@@ -190,10 +234,77 @@ export class SessionManager {
 		return meta;
 	}
 
-	async assertOwnership(sessionId: string, userId: string): Promise<SessionMeta> {
+	private readonly ownershipCache = new Map<string, OwnershipCacheEntry>();
+
+	/**
+	 * Auth-only check that doesn't return SessionMeta. Use this at every
+	 * call site that discards the return value of `assertOwnership` — the
+	 * cache short-circuits the D1 round-trip on a hit, where
+	 * `assertOwnership` always has to fetch fresh meta for the caller.
+	 *
+	 * Throws `NotFoundError` if the session row is gone, `ForbiddenError`
+	 * if the row exists but `user_id` doesn't match.
+	 */
+	async assertOwnedBy(sessionId: string, userId: string): Promise<void> {
+		const cached = this.ownershipCache.get(sessionId);
+		const now = Date.now();
+		if (cached && cached.expiresAt > now) {
+			if (cached.ownerUserId !== userId) throw new ForbiddenError();
+			return;
+		}
+		if (cached) {
+			// Expired entry — drop before the await so an empty D1 result
+			// (session hard-deleted) leaves a clean map. Without this,
+			// `getOrThrow` throws NotFoundError without ever touching
+			// the cache, and the stale expired entry would linger forever
+			// for any session whose `deleteRow` invalidation was missed.
+			this.ownershipCache.delete(sessionId);
+		}
 		const meta = await this.getOrThrow(sessionId);
+		this.cacheOwnership(sessionId, meta.userId);
+		if (meta.userId !== userId) throw new ForbiddenError();
+	}
+
+	async assertOwnership(sessionId: string, userId: string): Promise<SessionMeta> {
+		// Negative-result fast path: a cached owner that doesn't match the
+		// requested user → 403 without a D1 round-trip. The positive case
+		// CAN'T short-circuit here because the caller may use the returned
+		// SessionMeta (status, last_connected_at, container_id, env_vars all
+		// mutate). Callers that don't need the meta should call
+		// `assertOwnedBy` instead — that one short-circuits both directions.
+		const cached = this.ownershipCache.get(sessionId);
+		const now = Date.now();
+		if (cached && cached.expiresAt > now && cached.ownerUserId !== userId) {
+			throw new ForbiddenError();
+		}
+		const meta = await this.getOrThrow(sessionId);
+		this.cacheOwnership(sessionId, meta.userId);
 		if (meta.userId !== userId) throw new ForbiddenError();
 		return meta;
+	}
+
+	private cacheOwnership(sessionId: string, ownerUserId: string): void {
+		// Delete-then-insert refreshes Map insertion order so frequently-
+		// asserted sessions stay near the back and don't get evicted under
+		// cap pressure. JS Map preserves insertion order; deleting the
+		// first key (`keys().next().value`) is the LRU-by-access
+		// approximation a Map gives us without an explicit doubly-linked-
+		// list — adequate for the bounded-cache use case here.
+		this.ownershipCache.delete(sessionId);
+		if (this.ownershipCache.size >= OWNERSHIP_CACHE_MAX) {
+			const oldestKey = this.ownershipCache.keys().next().value;
+			if (oldestKey !== undefined) this.ownershipCache.delete(oldestKey);
+		}
+		this.ownershipCache.set(sessionId, {
+			ownerUserId,
+			expiresAt: Date.now() + OWNERSHIP_CACHE_TTL_MS,
+		});
+	}
+
+	/** Test seam: drop every cached entry. Production code never calls
+	 *  this — invalidation runs through `deleteRow`. */
+	__resetOwnershipCacheForTests(): void {
+		this.ownershipCache.clear();
 	}
 
 	async listForUser(userId: string): Promise<SessionMeta[]> {
@@ -259,6 +370,13 @@ export class SessionManager {
 	 * workspace data on disk.
 	 */
 	async deleteRow(sessionId: string): Promise<void> {
+		// Invalidate before AND after to defend against a concurrent
+		// assertOwnership landing between the cache delete and the D1
+		// DELETE. Pre-delete prevents a stale cache hit from succeeding
+		// while the row is being torn down; post-delete clears any cache
+		// state a concurrent assert populated during the await window.
+		this.ownershipCache.delete(sessionId);
 		await d1Query("DELETE FROM sessions WHERE session_id = ?", [sessionId]);
+		this.ownershipCache.delete(sessionId);
 	}
 }
