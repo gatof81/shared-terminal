@@ -33,6 +33,7 @@ A self-hosted web-based terminal that runs on an always-on Linux server at home.
 
 - **[docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md)** — local dev setup, D1 provisioning, production deployment, Cloudflare Tunnel, and what's inside each session container.
 - **[docs/SECURITY.md](./docs/SECURITY.md)** — threat model, recommended posture, and the optional `docker-socket-proxy` blast-radius reduction. **Read this before exposing the backend to the public internet.**
+- **[docs/SECRETS_ENCRYPTION_KEY.md](./docs/SECRETS_ENCRYPTION_KEY.md)** — operator runbook for the AES-256-GCM key that protects every `secret` env var / PAT / SSH key in D1: generation, backup, rotation (none in v1), loss-impact recovery.
 - **[docs/API.md](./docs/API.md)** — REST endpoints, WebSocket channels, and the per-session port-exposure dispatcher.
 - **[docs/REMOTE-EDITING.md](./docs/REMOTE-EDITING.md)** — connecting from VS Code (Remote – Tunnels).
 - **[CONTRIBUTING.md](./CONTRIBUTING.md)** — contributor workflow, branch policy, code style, commit conventions.
