@@ -150,13 +150,19 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 	// sustained — well above any realistic UI cadence (the frontend
 	// hits this once on first load), well below sustained abuse rates.
 	// See #148.
-	adminStats: {
-		ipMax: 120,
-		ipWindowMs: 60 * 60 * 1000,
-	},
 	authStatus: {
 		ipMax: 60,
 		ipWindowMs: 60 * 1000,
+	},
+	// 120/h per IP for /api/admin/stats. Sized like `invitesList`
+	// (the closest precedent — admin-only read endpoint that the
+	// UI may legitimately poll while a dashboard view is open).
+	// `requireAdmin` already gates by role, but a compromised admin
+	// browser tab in a polling loop should not be able to hammer
+	// the GROUP BY work the route does. See #241.
+	adminStats: {
+		ipMax: 120,
+		ipWindowMs: 60 * 60 * 1000,
 	},
 };
 
