@@ -887,13 +887,17 @@ describe("dispatcher counters (#241c)", () => {
 	it("counts a successful proxy response under responses2xxSinceBoot", async () => {
 		// 2xx is the most common runtime case (the public dev-server port
 		// returning HTML / JSON to a browser). Stub the proxy so it
-		// synchronously assigns a 200 to the response — the real
-		// `http-proxy` would do this asynchronously after the upstream
-		// responded, but the dispatcher's hookpoint reads `res.statusCode`
-		// at close, which is the same value either way.
+		// synchronously assigns a 204 — DELIBERATELY different from
+		// MockRes's default `statusCode: 200` so a regression in which
+		// the close-listener reads the stale default instead of the
+		// proxy-written value is caught. Real `http-proxy` writes the
+		// upstream's status code asynchronously after the response
+		// arrives; the dispatcher's hookpoint reads `res.statusCode` at
+		// close so the timing doesn't matter — only that it sees the
+		// last-written value.
 		const proxyStub = {
 			web: vi.fn((_req, res: ServerResponse) => {
-				res.statusCode = 200;
+				res.statusCode = 204;
 			}),
 		} as unknown as Parameters<typeof createPortDispatcher>[0]["proxy"];
 		const dispatcher = createPortDispatcher({
@@ -972,6 +976,62 @@ describe("dispatcher counters (#241c)", () => {
 		const s = getDispatcherStats();
 		expect(s.requestsSinceBoot).toBe(1);
 		expect(s.responses5xxSinceBoot).toBe(1);
+	});
+
+	it("end-to-end: mid-stream proxy failure registers as 5xx (handleProxyError → close)", async () => {
+		// Pins the integration between handleProxyError's mid-stream
+		// `statusCode = 502` write and the close-listener's
+		// classification. A regression that drops the statusCode rewrite
+		// in handleProxyError would silently re-classify mid-stream
+		// aborts as 2xx (whatever the proxy started with). The
+		// per-function tests at portDispatcher.test.ts:773 (statusCode
+		// rewrite) and dispatcher-counters > 5xx (authorize-throw path)
+		// each catch half the regression; this combines them.
+		const proxyStub = {
+			web: vi.fn((_req, res: ServerResponse) => {
+				// Simulate a mid-stream proxy error: the proxy started
+				// successfully (statusCode = 200, headersSent = true),
+				// then the upstream died and `proxy.error` fires
+				// `handleProxyError`.
+				res.statusCode = 200;
+				(res as unknown as { headersSent: boolean }).headersSent = true;
+				handleProxyError(new Error("upstream died mid-body"), {} as IncomingMessage, res);
+			}),
+		} as unknown as Parameters<typeof createPortDispatcher>[0]["proxy"];
+		const dispatcher = createPortDispatcher({
+			baseDomain: VALID_BASE,
+			corsOrigins: [],
+			lookupTarget: vi.fn(async () => ({
+				hostPort: 32768,
+				isPublic: true,
+				ownerUserId: "u-owner",
+			})),
+			verifyToken: vi.fn(() => null),
+			parseHost: makeHostParser(VALID_BASE),
+			proxy: proxyStub,
+		});
+		const req = makeReq(VALID_HOST);
+		const res = makeRes();
+		// `handleProxyError` branches on `typeof res.writeHead ===
+		// "function"` to distinguish ServerResponse from a raw socket
+		// (the WS path). The base MockRes doesn't supply writeHead
+		// (the other counter tests don't need it); add a stub so the
+		// branch evaluates correctly and the headersSent: true path
+		// runs. Without this, handleProxyError takes the Duplex
+		// branch and never rewrites statusCode.
+		(res as unknown as { writeHead: () => void; destroy: () => void }).writeHead = () => {};
+		(res as unknown as { destroy: () => void }).destroy = () => {};
+		dispatcher.middleware(req, res, () => {});
+		await new Promise((r) => setTimeout(r, 0));
+		res.__fireClose();
+		const s = getDispatcherStats();
+		expect(s.requestsSinceBoot).toBe(1);
+		// The proxy starts at 200 then handleProxyError rewrites to 502;
+		// the close-listener reads the final value, so the request
+		// classifies as 5xx, NOT the 2xx the proxy would otherwise leave
+		// behind.
+		expect(s.responses5xxSinceBoot).toBe(1);
+		expect(s.responses2xxSinceBoot).toBe(0);
 	});
 
 	it("hooks res.on('close') (not 'finish') so an aborted request still counts", async () => {
