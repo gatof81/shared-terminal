@@ -219,6 +219,17 @@ export function handleProxyError(
 			httpRes.writeHead(502, { "Content-Type": "text/plain" });
 			httpRes.end("Bad Gateway: target unreachable");
 		} else {
+			// Mid-stream failure: bytes already left the headersSent
+			// gate, so we can't legally rewrite the wire status — but
+			// we DO want the dispatcher's #241c counter close-listener
+			// to classify this as 5xx instead of inheriting whatever
+			// 2xx the proxy started with. Setting `statusCode` after
+			// `headersSent: true` is a documented no-op for the wire
+			// (the value never reaches the client) AND a legitimate
+			// in-process write that the close-listener reads. The
+			// admin dashboard shows the failure correctly; the client
+			// gets the truncated stream as before.
+			httpRes.statusCode = 502;
 			httpRes.destroy();
 		}
 	} else {

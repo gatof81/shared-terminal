@@ -774,6 +774,7 @@ describe("handleProxyError", () => {
 		const calls: { writeHead?: number; end?: string; destroyed?: boolean } = {};
 		const res = {
 			headersSent: true,
+			statusCode: 200,
 			writeHead(status: number) {
 				calls.writeHead = status;
 			},
@@ -783,7 +784,7 @@ describe("handleProxyError", () => {
 			destroy() {
 				calls.destroyed = true;
 			},
-		} as unknown as ServerResponse;
+		} as unknown as ServerResponse & { statusCode: number };
 		handleProxyError(new Error("boom"), fakeReq(), res);
 		// Mid-stream: don't double-write a status line, don't append
 		// "Bad Gateway: …" after the legitimate body. Just terminate
@@ -791,6 +792,12 @@ describe("handleProxyError", () => {
 		expect(calls.writeHead).toBeUndefined();
 		expect(calls.end).toBeUndefined();
 		expect(calls.destroyed).toBe(true);
+		// PR #249 round 3 NIT: statusCode is rewritten to 502 even
+		// though it never reaches the wire (headersSent: true makes
+		// the value an in-process no-op). The dispatcher's #241c
+		// close-listener reads this so a mid-stream-aborted request
+		// classifies as 5xx on the dashboard, not the inherited 200.
+		expect((res as unknown as { statusCode: number }).statusCode).toBe(502);
 	});
 
 	it("destroys a raw socket on WS failure (no writeHead, just teardown)", () => {
