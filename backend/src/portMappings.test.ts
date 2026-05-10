@@ -10,6 +10,8 @@ const dbStubs = vi.hoisted(() => ({
 vi.mock("./db.js", () => dbStubs);
 
 import {
+	__resetDispatchCacheForTests,
+	CACHE_TTL_MS,
 	clearPortMappings,
 	getPortMappings,
 	lookupDispatchTarget,
@@ -25,6 +27,7 @@ beforeEach(() => {
 		success: true,
 		meta: { changes: 0, duration: 0, last_row_id: 0 },
 	}));
+	__resetDispatchCacheForTests();
 });
 
 // ── parseInspectPorts ────────────────────────────────────────────────────
@@ -194,7 +197,7 @@ describe("lookupDispatchTarget", () => {
 
 	it("returns the typed target when the session is running and the mapping exists", async () => {
 		dbStubs.d1Query.mockImplementationOnce(async () => ({
-			results: [{ host_port: 32768, is_public: 0, user_id: "u-owner" }],
+			results: [{ container_port: 3000, host_port: 32768, is_public: 0, user_id: "u-owner" }],
 			success: true,
 			meta: { changes: 0, duration: 0, last_row_id: 0 },
 		}));
@@ -207,7 +210,7 @@ describe("lookupDispatchTarget", () => {
 
 	it("coerces is_public: 1 → true (the public-port branch)", async () => {
 		dbStubs.d1Query.mockImplementationOnce(async () => ({
-			results: [{ host_port: 32769, is_public: 1, user_id: "u-owner" }],
+			results: [{ container_port: 3000, host_port: 32769, is_public: 1, user_id: "u-owner" }],
 			success: true,
 			meta: { changes: 0, duration: 0, last_row_id: 0 },
 		}));
@@ -221,29 +224,180 @@ describe("lookupDispatchTarget", () => {
 		// slipped past NOT NULL, a string from a hand-edit) must
 		// also rehydrate to false — never accidentally true.
 		dbStubs.d1Query.mockImplementationOnce(async () => ({
-			results: [{ host_port: 32770, is_public: 0, user_id: "u-owner" }],
+			results: [{ container_port: 3000, host_port: 32770, is_public: 0, user_id: "u-owner" }],
 			success: true,
 			meta: { changes: 0, duration: 0, last_row_id: 0 },
 		}));
 		expect((await lookupDispatchTarget("sess-zero", 3000))?.isPublic).toBe(false);
 
 		dbStubs.d1Query.mockImplementationOnce(async () => ({
-			results: [{ host_port: 32771, is_public: 2, user_id: "u-owner" }],
+			results: [{ container_port: 3000, host_port: 32771, is_public: 2, user_id: "u-owner" }],
 			success: true,
 			meta: { changes: 0, duration: 0, last_row_id: 0 },
 		}));
 		expect((await lookupDispatchTarget("sess-weird", 3000))?.isPublic).toBe(false);
 	});
 
-	it("issues the JOIN with the running-status filter and bound params", async () => {
+	it("issues the JOIN with the running-status filter, keyed on session only", async () => {
 		// Locks the SQL shape so a rename of the status column or a
 		// dropped filter is caught immediately. The `running` literal
 		// in the SQL is the security gate — losing it would let the
 		// dispatcher proxy stopped/terminated sessions.
+		//
+		// Per-port WHERE was REMOVED in #238 — the cache populates the
+		// full session-scoped set in one round-trip and serves
+		// subsequent per-port lookups from memory. The bound params
+		// list is now session-only.
 		await lookupDispatchTarget("sess-1", 3000);
 		const [sql, params] = dbStubs.d1Query.mock.calls[0]!;
 		expect(sql).toMatch(/JOIN\s+sessions\s+s\s+ON\s+s\.session_id\s*=\s*spm\.session_id/i);
 		expect(sql).toMatch(/s\.status\s*=\s*'running'/);
-		expect(params).toEqual(["sess-1", 3000]);
+		expect(params).toEqual(["sess-1"]);
+	});
+});
+
+// ── Dispatch cache (#238) ────────────────────────────────────────────────
+//
+// The cache layer is hot-path-critical: a wrong invalidation lets a
+// stopped session keep proxying (security regression) and a missed
+// invalidation lets a stale host_port keep flowing (correctness
+// regression). These tests pin the contract.
+
+describe("lookupDispatchTarget cache (#238)", () => {
+	const sessionRow = (containerPort: number, hostPort: number, isPublic = 0) => ({
+		container_port: containerPort,
+		host_port: hostPort,
+		is_public: isPublic,
+		user_id: "u-owner",
+	});
+
+	it("repeated lookups against the same session hit D1 exactly once", async () => {
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [sessionRow(3000, 32768)],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		for (let i = 0; i < 100; i++) {
+			await lookupDispatchTarget("sess-hot", 3000);
+		}
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(1);
+	});
+
+	it("different ports for the same session share one D1 round-trip", async () => {
+		// The whole point of populating the full session set on first
+		// miss: a typical dev session has app + WS + asset proxy on
+		// distinct ports, all hit in close succession.
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [sessionRow(3000, 32768), sessionRow(5173, 32769), sessionRow(8080, 32770)],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		const a = await lookupDispatchTarget("sess-multi", 3000);
+		const b = await lookupDispatchTarget("sess-multi", 5173);
+		const c = await lookupDispatchTarget("sess-multi", 8080);
+		expect(a?.hostPort).toBe(32768);
+		expect(b?.hostPort).toBe(32769);
+		expect(c?.hostPort).toBe(32770);
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(1);
+	});
+
+	it("returns null for a port that doesn't exist in the cached set without re-querying", async () => {
+		// Negative result for an unknown port on a session that's
+		// otherwise live must not invalidate the cache — the cache
+		// captures the FULL set, so a port that isn't in it truly
+		// doesn't exist for that session at this moment.
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [sessionRow(3000, 32768)],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		await lookupDispatchTarget("sess-partial", 3000);
+		const missing = await lookupDispatchTarget("sess-partial", 9999);
+		expect(missing).toBeNull();
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(1);
+	});
+
+	it("does NOT cache an empty result (session not running / no mapping)", async () => {
+		// Caching the miss would extend the "session is starting"
+		// race window into a 30-second 404 wall — see header comment.
+		dbStubs.d1Query.mockImplementation(async () => ({
+			results: [],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		await lookupDispatchTarget("sess-empty", 3000);
+		await lookupDispatchTarget("sess-empty", 3000);
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(2);
+	});
+
+	it("setPortMappings invalidates the cache so the next lookup re-fetches", async () => {
+		// First lookup populates cache.
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [sessionRow(3000, 32768)],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		await lookupDispatchTarget("sess-w", 3000);
+		// setPortMappings: 1 DELETE + 1 INSERT. Then the next lookup
+		// should miss cache and re-query.
+		dbStubs.d1Query.mockImplementation(async () => ({
+			results: [],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		await setPortMappings("sess-w", [{ containerPort: 3000, hostPort: 32999, isPublic: false }]);
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [sessionRow(3000, 32999)],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		const got = await lookupDispatchTarget("sess-w", 3000);
+		expect(got?.hostPort).toBe(32999);
+	});
+
+	it("expired entry triggers a fresh D1 call and re-populates the cache", async () => {
+		// PR #242 round 2 SHOULD-FIX. Without this test the TTL-expiry
+		// branch was unreached: a regression that flipped `>` to `>=`
+		// or moved the pre-delete after the await would leave entries
+		// either never expiring or lingering as stale forever, and
+		// nothing would have caught it.
+		vi.useFakeTimers();
+		try {
+			dbStubs.d1Query.mockImplementation(async () => ({
+				results: [sessionRow(3000, 32768)],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			}));
+			await lookupDispatchTarget("sess-ttl", 3000);
+			expect(dbStubs.d1Query).toHaveBeenCalledTimes(1);
+
+			// Advance past TTL — same shape `setTimeout` users would see.
+			vi.advanceTimersByTime(CACHE_TTL_MS + 1);
+
+			await lookupDispatchTarget("sess-ttl", 3000);
+			expect(dbStubs.d1Query).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("clearPortMappings invalidates so the next lookup re-fetches and returns null", async () => {
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [sessionRow(3000, 32768)],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		await lookupDispatchTarget("sess-cl", 3000);
+		// Drop mappings: 1 DELETE.
+		await clearPortMappings("sess-cl");
+		// Subsequent D1 returns no rows (mappings gone, or session no
+		// longer running — either collapses to null per the contract).
+		dbStubs.d1Query.mockImplementation(async () => ({
+			results: [],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		const got = await lookupDispatchTarget("sess-cl", 3000);
+		expect(got).toBeNull();
 	});
 });

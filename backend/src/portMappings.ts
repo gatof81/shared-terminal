@@ -21,6 +21,68 @@
 
 import { d1Query } from "./db.js";
 
+// ── Dispatch-target cache (#238) ────────────────────────────────────────────
+//
+// The dispatcher's hot path is `lookupDispatchTarget(sessionId, port)` —
+// called per request to `https://p<port>-<sessionId>.<base>`. CLAUDE.md is
+// explicit that every `d1Query` is an HTTP round-trip to Cloudflare; without
+// a cache, hot-reload spam against a Vite dev server (~one request per file
+// edit, plus all the asset follow-ups) burns one D1 round-trip per asset
+// even though the row hasn't changed.
+//
+// Cache shape: `Map<sessionId, { byContainerPort, expiresAt }>` where
+// `byContainerPort` is the FULL set of dispatch targets for the running
+// session. We populate the whole set on first miss because:
+//   - the SELECT cost of `WHERE session_id = ?` (no port filter) is the
+//     same one round-trip as the per-port shape, and
+//   - typical dev-loop traffic hits 2–3 ports for the same session in
+//     close succession (app + WS + asset proxy), so per-port caching
+//     would still incur 2–3 D1 hits where per-session caching incurs 1.
+//
+// Invalidation is event-driven: `setPortMappings` and `clearPortMappings`
+// (the only writers, called from spawn / startContainer / reconcile / kill
+// / stopContainer) call `invalidateCache` before AND after their D1 work.
+// Before-and-after is belt-and-suspenders: a concurrent lookup that lands
+// between the DELETE and the first INSERT in `setPortMappings` would
+// otherwise re-populate the cache from the half-updated table; the
+// post-write invalidate clears that.
+//
+// TTL is the safety net for the unusual case where someone mutates the
+// table out-of-band (e.g. a manual SQL edit during debugging) — bounded
+// at 30 s so an operator running an experiment doesn't have to restart
+// the backend to see their change.
+//
+// Negative results (no row, or session not running) are NOT cached —
+// the dispatcher's per-IP rate limit is the throttle for probe traffic,
+// and a session that just spawned could land in the table milliseconds
+// after a "miss". Caching the miss would amplify "session is starting"
+// race windows into a 30-second 404 wall.
+
+/** Exported for the test suite — the TTL-expiry test pins behaviour
+ *  against this value rather than a magic 30_001 literal that would
+ *  silently coast through a future TTL change. */
+export const CACHE_TTL_MS = 30_000;
+
+interface CacheEntry {
+	byContainerPort: Map<number, DispatchTarget>;
+	expiresAt: number;
+}
+
+const cache = new Map<string, CacheEntry>();
+
+function invalidateCache(sessionId: string): void {
+	cache.delete(sessionId);
+}
+
+/** Test seam: drop every cached entry. The dispatcher tests that swap
+ *  `lookupDispatchTarget` with a stub never go through the cache, but
+ *  unit tests that exercise the cache directly need a clean slate per
+ *  case. Not exported into the public API surface — only re-exported
+ *  via the named import path the test file uses. */
+export function __resetDispatchCacheForTests(): void {
+	cache.clear();
+}
+
 export interface PortMapping {
 	containerPort: number;
 	hostPort: number;
@@ -59,6 +121,9 @@ export interface DispatchTarget {
  * a torn read from proxying to a stale host port in the meantime.
  */
 export async function setPortMappings(sessionId: string, mappings: PortMapping[]): Promise<void> {
+	// Invalidate before AND after the D1 work — see the cache header
+	// comment for the concurrent-lookup race this defends against.
+	invalidateCache(sessionId);
 	await d1Query("DELETE FROM sessions_port_mappings WHERE session_id = ?", [sessionId]);
 	for (const m of mappings) {
 		await d1Query(
@@ -66,6 +131,7 @@ export async function setPortMappings(sessionId: string, mappings: PortMapping[]
 			[sessionId, m.containerPort, m.hostPort, m.isPublic ? 1 : 0],
 		);
 	}
+	invalidateCache(sessionId);
 }
 
 /**
@@ -93,7 +159,9 @@ export async function getPortMappings(sessionId: string): Promise<PortMapping[]>
 
 /** Drop all mappings for `sessionId`. Idempotent — no-op if none exist. */
 export async function clearPortMappings(sessionId: string): Promise<void> {
+	invalidateCache(sessionId);
 	await d1Query("DELETE FROM sessions_port_mappings WHERE session_id = ?", [sessionId]);
+	invalidateCache(sessionId);
 }
 
 /**
@@ -114,24 +182,54 @@ export async function lookupDispatchTarget(
 	sessionId: string,
 	containerPort: number,
 ): Promise<DispatchTarget | null> {
+	const now = Date.now();
+	const cached = cache.get(sessionId);
+	if (cached && cached.expiresAt > now) {
+		return cached.byContainerPort.get(containerPort) ?? null;
+	}
+	if (cached) {
+		// Expired entry — drop before the await so an empty D1 result
+		// (session stopped, no mappings) leaves a clean map. Without
+		// this, the empty-result branch below returns null without
+		// touching the cache, and the stale expired entry would
+		// linger forever for any session that's been stopped without
+		// a paired `clearPortMappings` invalidation having fired.
+		cache.delete(sessionId);
+	}
+	// Fetch the FULL set of dispatch targets for this session in one
+	// round-trip. Same JOIN as before, minus the per-port WHERE clause —
+	// the per-port lookup is satisfied from the populated map below. This
+	// shape means a follow-up `lookupDispatchTarget(sessionId, otherPort)`
+	// hits the cache instead of issuing a second D1 call.
 	const result = await d1Query<{
+		container_port: number;
 		host_port: number;
 		is_public: number;
 		user_id: string;
 	}>(
-		`SELECT spm.host_port, spm.is_public, s.user_id
+		`SELECT spm.container_port, spm.host_port, spm.is_public, s.user_id
 		 FROM sessions_port_mappings spm
 		 JOIN sessions s ON s.session_id = spm.session_id
-		 WHERE spm.session_id = ? AND spm.container_port = ? AND s.status = 'running'`,
-		[sessionId, containerPort],
+		 WHERE spm.session_id = ? AND s.status = 'running'`,
+		[sessionId],
 	);
-	const row = result.results[0];
-	if (!row) return null;
-	return {
-		hostPort: row.host_port,
-		isPublic: row.is_public === 1,
-		ownerUserId: row.user_id,
-	};
+	if (result.results.length === 0) {
+		// Not cached — see header comment. A session that just spawned
+		// could land in the table milliseconds later; caching the miss
+		// would extend the "session is starting" race window into a
+		// 30-second wall.
+		return null;
+	}
+	const byContainerPort = new Map<number, DispatchTarget>();
+	for (const row of result.results) {
+		byContainerPort.set(row.container_port, {
+			hostPort: row.host_port,
+			isPublic: row.is_public === 1,
+			ownerUserId: row.user_id,
+		});
+	}
+	cache.set(sessionId, { byContainerPort, expiresAt: now + CACHE_TTL_MS });
+	return byContainerPort.get(containerPort) ?? null;
 }
 
 /**
