@@ -1184,7 +1184,7 @@ describe("DockerManager constructor", () => {
 		process.env.DOCKER_HOST = "tcp://docker-socket-proxy:2375";
 		const dm = new DockerManager(makeFakeSessions());
 		const modem = (dm as unknown as { docker: { modem: { socketPath?: string } } }).docker.modem;
-		// The proxy overlay in README "Security model" depends on this
+		// The proxy overlay in docs/SECURITY.md depends on this
 		// branch: with socketPath undefined, docker-modem reads
 		// DOCKER_HOST and routes to the proxy. If a refactor reinstates a
 		// hardcoded socketPath, this assertion fails and CI catches it
