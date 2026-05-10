@@ -416,11 +416,18 @@ export function buildRouter(
 			// `Date.now()` at module load, so a long-running backend
 			// reports the actual boot wallclock even after monotonic
 			// clock skew has had time to drift from real time.
-			const uptimeSeconds = process.uptime();
+			//
+			// Round ONCE and reuse the same value for both fields so a
+			// client reconstructing `Date.now()` as
+			// `new Date(bootedAt).getTime() + uptimeSeconds * 1000`
+			// gets the same answer the server sees. Otherwise the
+			// rounded `uptimeSeconds` and the float-derived `bootedAt`
+			// disagree by up to 500 ms.
+			const uptimeSeconds = Math.round(process.uptime());
 			const bootedAt = new Date(Date.now() - uptimeSeconds * 1000).toISOString();
 			res.json({
 				bootedAt,
-				uptimeSeconds: Math.round(uptimeSeconds),
+				uptimeSeconds,
 				sessions: { byStatus },
 			});
 		} catch (err) {
