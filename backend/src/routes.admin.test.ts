@@ -73,6 +73,7 @@ vi.mock("./db.js", () => dbStubs);
 
 import type { BootstrapBroadcaster } from "./bootstrap.js";
 import type { DockerManager } from "./dockerManager.js";
+import { __resetDispatcherStatsForTests } from "./portDispatcher.js";
 import { buildRouter } from "./routes.js";
 import type { SessionManager } from "./sessionManager.js";
 
@@ -138,6 +139,11 @@ async function spinUp(countByStatus: ReturnType<typeof vi.fn>) {
 describe("GET /api/admin/stats (#241a)", () => {
 	beforeEach(() => {
 		dbStubs.d1Query.mockReset();
+		// Dispatcher counters live as module-level state in
+		// `portDispatcher.ts`; reset between cases so a count
+		// from a previous test (or another file in the same
+		// vitest run) doesn't leak into the wire-shape assertion.
+		__resetDispatcherStatsForTests();
 	});
 
 	it("returns the typed stats shape with bootedAt / uptimeSeconds / sessions.byStatus + subsystem counters (#241b)", async () => {
@@ -160,6 +166,13 @@ describe("GET /api/admin/stats (#241a)", () => {
 				lastRunAt: number | null;
 				sessionsCheckedSinceBoot: number;
 				errorsSinceBoot: number;
+			};
+			dispatcher: {
+				requestsSinceBoot: number;
+				responses2xxSinceBoot: number;
+				responses3xxSinceBoot: number;
+				responses4xxSinceBoot: number;
+				responses5xxSinceBoot: number;
 			};
 			d1: { callsSinceBoot: number };
 		};
@@ -187,6 +200,17 @@ describe("GET /api/admin/stats (#241a)", () => {
 			lastRunAt: null,
 			sessionsCheckedSinceBoot: 0,
 			errorsSinceBoot: 0,
+		});
+		// #241c: dispatcher counters present on the wire. All zero
+		// because this test fixture doesn't exercise the dispatcher
+		// middleware (the router is built but no request flows
+		// through it during `/admin/stats` handling).
+		expect(body.dispatcher).toEqual({
+			requestsSinceBoot: 0,
+			responses2xxSinceBoot: 0,
+			responses3xxSinceBoot: 0,
+			responses4xxSinceBoot: 0,
+			responses5xxSinceBoot: 0,
 		});
 		expect(body.d1).toEqual({ callsSinceBoot: 0 });
 	});

@@ -1,9 +1,11 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	__resetDispatcherStatsForTests,
 	createPortDispatcher,
 	extractAuthToken,
+	getDispatcherStats,
 	handleProxyError,
 	makeHostParser,
 	type ParsedHost,
@@ -173,8 +175,15 @@ interface MockRes {
 	headers: Record<string, string>;
 	body: string;
 	headersSent: boolean;
+	closeListeners: Array<() => void>;
 	setHeader: (k: string, v: string) => void;
 	end: (b?: string) => void;
+	on: (event: string, listener: () => void) => MockRes;
+	/** Test helper: invoke every `close` listener so the dispatcher
+	 *  counter (`#241c) sees its hookpoint fire. Production-like
+	 *  surface — `res.on("close")` is the standard ServerResponse
+	 *  shape. */
+	__fireClose: () => void;
 }
 
 function makeRes(): MockRes {
@@ -183,12 +192,20 @@ function makeRes(): MockRes {
 		headers: {},
 		body: "",
 		headersSent: false,
+		closeListeners: [],
 		setHeader(k, v) {
 			res.headers[k.toLowerCase()] = v;
 		},
 		end(b) {
 			res.headersSent = true;
 			res.body = b ?? "";
+		},
+		on(event, listener) {
+			if (event === "close") res.closeListeners.push(listener);
+			return res;
+		},
+		__fireClose() {
+			for (const l of res.closeListeners) l();
 		},
 	};
 	return res;
@@ -788,5 +805,111 @@ describe("handleProxyError", () => {
 		} as unknown as Duplex;
 		handleProxyError(new Error("ws boom"), fakeReq(), socket);
 		expect(calls.destroyed).toBe(true);
+	});
+});
+
+// ── Dispatcher counters (#241c) ──────────────────────────────────────────
+
+describe("dispatcher counters (#241c)", () => {
+	const VALID_BASE = "tunnel.example.com";
+	const VALID_HOST = `p3000-${SID}.${VALID_BASE}`;
+
+	beforeEach(() => {
+		__resetDispatcherStatsForTests();
+	});
+
+	function makeDispatcher() {
+		return createPortDispatcher({
+			baseDomain: VALID_BASE,
+			corsOrigins: [],
+			lookupTarget: vi.fn(async () => null), // 404 path — simplest
+			verifyToken: vi.fn(() => null),
+			parseHost: makeHostParser(VALID_BASE),
+		});
+	}
+
+	it("starts with every counter at zero", () => {
+		expect(getDispatcherStats()).toEqual({
+			requestsSinceBoot: 0,
+			responses2xxSinceBoot: 0,
+			responses3xxSinceBoot: 0,
+			responses4xxSinceBoot: 0,
+			responses5xxSinceBoot: 0,
+		});
+	});
+
+	it("does NOT bump on requests the dispatcher doesn't claim (host outside base domain)", () => {
+		const { middleware } = makeDispatcher();
+		const req = makeReq("api.example.com"); // wrong host — falls through
+		const res = makeRes();
+		middleware(req, res, () => {});
+		// The close-listener was never attached because parseHost returned
+		// null and the middleware called next() directly. The counter must
+		// stay at zero.
+		res.__fireClose();
+		expect(getDispatcherStats().requestsSinceBoot).toBe(0);
+	});
+
+	it("counts 4xx responses (CSRF gate / auth failures) under responses4xxSinceBoot", async () => {
+		const { middleware } = makeDispatcher();
+		// Cross-origin request from a non-allowlisted origin → 403 from
+		// the CSRF gate at the top of the middleware, before authorize().
+		const req = makeReq(VALID_HOST, undefined, "https://evil.com");
+		const res = makeRes();
+		middleware(req, res, () => {});
+		res.__fireClose();
+		const s = getDispatcherStats();
+		expect(s.requestsSinceBoot).toBe(1);
+		expect(s.responses4xxSinceBoot).toBe(1);
+		expect(s.responses2xxSinceBoot).toBe(0);
+	});
+
+	it("counts the 404 lookup-miss path under responses4xxSinceBoot", async () => {
+		const { middleware } = makeDispatcher();
+		const req = makeReq(VALID_HOST);
+		const res = makeRes();
+		middleware(req, res, () => {});
+		// Allow the authorize() promise chain to settle.
+		await new Promise((r) => setTimeout(r, 0));
+		res.__fireClose();
+		const s = getDispatcherStats();
+		expect(s.requestsSinceBoot).toBe(1);
+		expect(s.responses4xxSinceBoot).toBe(1);
+	});
+
+	it("counts a 502 (proxy/lookup error) under responses5xxSinceBoot", async () => {
+		// authorize throws via the lookup stub → middleware emits 502.
+		const dispatcher = createPortDispatcher({
+			baseDomain: VALID_BASE,
+			corsOrigins: [],
+			lookupTarget: vi.fn(async () => {
+				throw new Error("D1 boom");
+			}),
+			verifyToken: vi.fn(() => null),
+			parseHost: makeHostParser(VALID_BASE),
+		});
+		const req = makeReq(VALID_HOST);
+		const res = makeRes();
+		dispatcher.middleware(req, res, () => {});
+		await new Promise((r) => setTimeout(r, 0));
+		res.__fireClose();
+		const s = getDispatcherStats();
+		expect(s.requestsSinceBoot).toBe(1);
+		expect(s.responses5xxSinceBoot).toBe(1);
+	});
+
+	it("hooks res.on('close') (not 'finish') so an aborted request still counts", async () => {
+		// `close` fires on both successful flush AND client disconnect
+		// mid-flush; `finish` only on successful flush. Pinning the
+		// hookpoint here means a regression that swaps `close` for
+		// `finish` — which would silently miss aborts on the dashboard
+		// — gets caught.
+		const { middleware } = makeDispatcher();
+		const req = makeReq(VALID_HOST, undefined, "https://evil.com");
+		const res = makeRes();
+		middleware(req, res, () => {});
+		// Production code attaches exactly one `close` listener — confirm
+		// the listener landed on the right event.
+		expect(res.closeListeners.length).toBe(1);
 	});
 });

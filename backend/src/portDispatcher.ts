@@ -46,6 +46,77 @@ export interface ParsedHost {
 	sessionId: string;
 }
 
+// ── Observability counters (#241c) ─────────────────────────────────────────
+//
+// Process-local counters surfaced via `GET /api/admin/stats`. Reset on
+// every backend restart. Durable metrics belong in a separate Prometheus/
+// OTel follow-up; this is the same shape as the IdleSweeper / reconcile /
+// d1 counters that landed in 241b.
+//
+// Scope: HTTP requests only. WS upgrade counters are deferred to a future
+// follow-up because the upgrade-success / upgrade-fail signal is a
+// connection event, not a request event, and lumping them in with HTTP
+// 2xx/3xx/4xx/5xx blurs both signals. The HTTP counters cover the
+// regular browser traffic to dev-server / app ports — the dominant use
+// case the dashboard needs to surface.
+
+let requestsSinceBoot = 0;
+let responses2xxSinceBoot = 0;
+let responses3xxSinceBoot = 0;
+let responses4xxSinceBoot = 0;
+let responses5xxSinceBoot = 0;
+
+export interface DispatcherStats {
+	requestsSinceBoot: number;
+	responses2xxSinceBoot: number;
+	responses3xxSinceBoot: number;
+	responses4xxSinceBoot: number;
+	responses5xxSinceBoot: number;
+}
+
+/** Read-only snapshot for the admin stats endpoint. Cheap (no I/O,
+ *  no async). */
+export function getDispatcherStats(): DispatcherStats {
+	return {
+		requestsSinceBoot,
+		responses2xxSinceBoot,
+		responses3xxSinceBoot,
+		responses4xxSinceBoot,
+		responses5xxSinceBoot,
+	};
+}
+
+/** Test seam: zero every counter so cases don't bleed. Production code
+ *  never calls this. */
+export function __resetDispatcherStatsForTests(): void {
+	requestsSinceBoot = 0;
+	responses2xxSinceBoot = 0;
+	responses3xxSinceBoot = 0;
+	responses4xxSinceBoot = 0;
+	responses5xxSinceBoot = 0;
+}
+
+/**
+ * Record one finalised dispatcher response. Called from a `res.on("close")`
+ * listener (fires on both successful flush and abort), so EVERY request
+ * that the dispatcher claimed contributes exactly one increment to
+ * `requestsSinceBoot` and at most one to a status-class counter.
+ *
+ * Status 0 / undefined means the response never got a status code (rare:
+ * client disconnected before any header was sent, or the dispatcher's
+ * 502 emit failed). Counted in `requestsSinceBoot` but NOT in any
+ * status-class bucket — operators reading the dashboard see the gap and
+ * can correlate to sum-mismatch.
+ */
+function bumpDispatchResponse(statusCode: number | undefined): void {
+	requestsSinceBoot++;
+	if (!statusCode) return;
+	if (statusCode >= 200 && statusCode < 300) responses2xxSinceBoot++;
+	else if (statusCode >= 300 && statusCode < 400) responses3xxSinceBoot++;
+	else if (statusCode >= 400 && statusCode < 500) responses4xxSinceBoot++;
+	else if (statusCode >= 500 && statusCode < 600) responses5xxSinceBoot++;
+}
+
 /**
  * Build the host-header parser bound to a fixed base domain. Returns
  * null for any host that doesn't match `p<int>-<sessionId>.<base>`.
@@ -313,6 +384,13 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 			next();
 			return;
 		}
+		// Counter hookpoint (#241c). Hooked on `close` (fires on both
+		// successful flush AND client disconnect mid-flush) so EVERY
+		// claimed request contributes exactly one increment. `finish`
+		// alone would miss aborts. The listener is attached BEFORE any
+		// possible early-return below so a 403 from the CSRF gate also
+		// counts.
+		res.on("close", () => bumpDispatchResponse(res.statusCode));
 		// CSRF defence — applies to ALL dispatcher HTTP requests,
 		// symmetric with the WS `handleUpgrade` path. In production
 		// the JWT cookie is `SameSite=None; Secure` (the Pages→Tunnel
