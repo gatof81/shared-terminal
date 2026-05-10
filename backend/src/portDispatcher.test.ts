@@ -913,6 +913,39 @@ describe("dispatcher counters (#241c)", () => {
 		expect(s.responses5xxSinceBoot).toBe(0);
 	});
 
+	it("counts a 3xx redirect response under responses3xxSinceBoot", async () => {
+		// 3xx is a real production case (a container app returning a
+		// redirect — auth-callback shape, OAuth dance, app-internal
+		// redirect). Stub the proxy to set statusCode = 301 the same
+		// way the 2xx test sets 200.
+		const proxyStub = {
+			web: vi.fn((_req, res: ServerResponse) => {
+				res.statusCode = 301;
+			}),
+		} as unknown as Parameters<typeof createPortDispatcher>[0]["proxy"];
+		const dispatcher = createPortDispatcher({
+			baseDomain: VALID_BASE,
+			corsOrigins: [],
+			lookupTarget: vi.fn(async () => ({
+				hostPort: 32768,
+				isPublic: true,
+				ownerUserId: "u-owner",
+			})),
+			verifyToken: vi.fn(() => null),
+			parseHost: makeHostParser(VALID_BASE),
+			proxy: proxyStub,
+		});
+		const req = makeReq(VALID_HOST);
+		const res = makeRes();
+		dispatcher.middleware(req, res, () => {});
+		await new Promise((r) => setTimeout(r, 0));
+		res.__fireClose();
+		const s = getDispatcherStats();
+		expect(s.requestsSinceBoot).toBe(1);
+		expect(s.responses3xxSinceBoot).toBe(1);
+		expect(s.responses2xxSinceBoot).toBe(0);
+	});
+
 	it("counts a 502 (proxy/lookup error) under responses5xxSinceBoot", async () => {
 		// authorize throws via the lookup stub → middleware emits 502.
 		const dispatcher = createPortDispatcher({

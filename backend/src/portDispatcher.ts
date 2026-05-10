@@ -102,11 +102,13 @@ export function __resetDispatcherStatsForTests(): void {
  * that the dispatcher claimed contributes exactly one increment to
  * `requestsSinceBoot` and at most one to a status-class counter.
  *
- * Status 0 / undefined means the response never got a status code (rare:
- * client disconnected before any header was sent, or the dispatcher's
- * 502 emit failed). Counted in `requestsSinceBoot` but NOT in any
- * status-class bucket — operators reading the dashboard see the gap and
- * can correlate to sum-mismatch.
+ * The `!statusCode` early-return is a TypeScript safety net for the
+ * `undefined` branch of the parameter union — `http.ServerResponse`
+ * defaults `statusCode` to `200` and never assigns `0` at runtime,
+ * so this branch is unreachable in production. Kept anyway so a
+ * future caller passing through a partially-mocked response object
+ * (or a different response shape) doesn't NaN the counters via
+ * `>= undefined` comparisons.
  */
 function bumpDispatchResponse(statusCode: number | undefined): void {
 	requestsSinceBoot++;
