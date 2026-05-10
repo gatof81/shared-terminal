@@ -135,7 +135,7 @@ cloudflared tunnel route dns shared-terminal api.terminal.yourdomain.com
 cloudflared tunnel --url http://localhost:3001 run shared-terminal
 ```
 
-For port-exposure subdomains (`p<port>-<sessionId>.<base>.your-tunnel.com`), set `PORT_PROXY_BASE_DOMAIN` in `.env` to the apex you've routed and add a wildcard DNS rule on the tunnel: `cloudflared tunnel route dns shared-terminal *.<base>.your-tunnel.com`. See [API.md → Port-exposure dispatcher](./API.md#port-exposure-dispatcher) for the wire shape.
+For port-exposure subdomains (`p<port>-<sessionId>.<base>.your-tunnel.com`), set `PORT_PROXY_BASE_DOMAIN` in `.env` to the apex you've routed and add a wildcard DNS rule on the tunnel: `cloudflared tunnel route dns shared-terminal *.<base>.your-tunnel.com`. Also set `COOKIE_DOMAIN` to the parent domain shared by the API hostname and the dispatcher base; without it the `st_token` cookie is host-only and private-port auth structurally fails. See [API.md → Port-exposure dispatcher](./API.md#port-exposure-dispatcher) for the wire shape.
 
 ## What's inside each session
 
