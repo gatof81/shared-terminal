@@ -374,7 +374,7 @@ async function handleBootstrapWs(
 	broadcaster: BootstrapBroadcaster,
 ): Promise<void> {
 	try {
-		await sessions.assertOwnership(sessionId, userId);
+		await sessions.assertOwnedBy(sessionId, userId);
 	} catch (err) {
 		if (err instanceof NotFoundError) {
 			sendError(ws, "Session not found");
