@@ -1124,7 +1124,7 @@ describe("DockerManager constructor", () => {
 	// run/docker.sock' }` when DOCKER_HOST is unset, and `undefined` when it
 	// IS set so docker-modem reads the URL from the env — is trivial in
 	// shape but load-bearing for the optional docker-socket-proxy
-	// deployment posture documented in the README. A future refactor that
+	// deployment posture documented in docs/SECURITY.md. A future refactor that
 	// reinstates the always-socketPath default would silently break proxy
 	// deployments and only surface at deploy time, so pin both branches.
 	//
@@ -1184,7 +1184,7 @@ describe("DockerManager constructor", () => {
 		process.env.DOCKER_HOST = "tcp://docker-socket-proxy:2375";
 		const dm = new DockerManager(makeFakeSessions());
 		const modem = (dm as unknown as { docker: { modem: { socketPath?: string } } }).docker.modem;
-		// The proxy overlay in README "Security model" depends on this
+		// The proxy overlay in docs/SECURITY.md depends on this
 		// branch: with socketPath undefined, docker-modem reads
 		// DOCKER_HOST and routes to the proxy. If a refactor reinstates a
 		// hardcoded socketPath, this assertion fails and CI catches it

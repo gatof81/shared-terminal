@@ -215,7 +215,7 @@ fi
 # ~/.config/gh/{hosts,state}.yml. That path lives in the container layer,
 # so without this redirection every `POST /start` (which respawns the
 # container, see Architecture in CLAUDE.md) would force the user back
-# through the device-code flow. README's "auth once" line implicitly
+# through the device-code flow. docs/DEPLOYMENT.md's "auth once" line implicitly
 # assumes the redirection is in place.
 #
 # Auth lifetime intentionally tied to the *workspace*, not the *image*:
