@@ -132,14 +132,16 @@ export class DockerManager {
 	private uploadLocks = new Map<string /*sessionId*/, Promise<void>>();
 
 	// Reconcile observability counters (#241). Process-local; reset
-	// on backend restart. `lastRunAt` is null until the first
-	// reconcile() call completes its main loop. `sessionsCheckedSinceBoot`
-	// counts every row read from the running-sessions SELECT, including
-	// the no-container-id branch and the inspect-error branches.
-	// `errorsSinceBoot` counts inspect failures only — clearPortMappings
-	// failures are diagnostic noise inside the larger reconcile path
-	// and don't represent the operator-visible "did reconcile work"
-	// signal the dashboard wants.
+	// on backend restart. `lastRunAt` is stamped at `reconcile()`
+	// entry (matches the IdleSweeper `lastSweepAt` semantics — "last
+	// attempted", not "last completed"); null until the first call
+	// fires. `sessionsCheckedSinceBoot` counts every row read from
+	// the running-sessions SELECT, including the no-container-id
+	// branch and the inspect-error branches. `errorsSinceBoot` counts
+	// transient inspect failures only — clearPortMappings failures
+	// are diagnostic noise inside the larger reconcile path, and 404
+	// is the expected "container is genuinely gone" path for soft-
+	// deleted sessions, not an error.
 	private reconcileLastRunAt: number | null = null;
 	private reconcileSessionsCheckedSinceBoot = 0;
 	private reconcileErrorsSinceBoot = 0;

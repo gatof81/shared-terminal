@@ -1016,11 +1016,10 @@ describe("DockerManager.reconcile", () => {
 		// to a different time source (`performance.now()`, a stale
 		// captured value) is caught. Note: this does NOT pin the stamp
 		// ordering relative to the await — both Date.now() before and
-		// after the await return the same frozen value. The bot called
-		// this out as a real asymmetry vs the sweeper, but the sweeper
-		// test has the same limitation; "ordering" pin would require a
-		// time source that advances between calls (which neither test
-		// implements today).
+		// after the await return the same frozen value. Pinning the
+		// before/after ordering would require a time source that
+		// advances between synchronous calls, which neither subsystem
+		// implements today.
 		vi.useFakeTimers();
 		try {
 			const frozen = 1_700_000_000_000;

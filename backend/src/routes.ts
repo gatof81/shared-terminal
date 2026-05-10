@@ -32,6 +32,7 @@ import { d1Query, getD1CallsSinceBoot } from "./db.js";
 import type { DockerManager } from "./dockerManager.js";
 import { UploadQuotaExceededError } from "./dockerManager.js";
 import { EnvVarValidationError, validateEnvVars } from "./envVarValidation.js";
+import type { IdleSweeperStats } from "./idleSweeper.js";
 import { logger } from "./logger.js";
 import type { RateLimitConfig } from "./rateLimit.js";
 import {
@@ -71,12 +72,10 @@ export function buildRouter(
 		// `getStats` is optional so the test scaffold can build a
 		// stripped-down stub without wiring all three methods. Real
 		// production paths from index.ts always pass the full
-		// IdleSweeper instance.
-		getStats?: () => {
-			lastSweepAt: number | null;
-			sweptSinceBoot: number;
-			currentMapSize: number;
-		};
+		// IdleSweeper instance. Imported from the source module so a
+		// future field added to `IdleSweeperStats` propagates here
+		// without a paired edit.
+		getStats?: () => IdleSweeperStats;
 	},
 ): Router {
 	const router = Router();
