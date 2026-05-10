@@ -277,6 +277,14 @@ export class SessionManager {
 		if (cached && cached.expiresAt > now && cached.ownerUserId !== userId) {
 			throw new ForbiddenError();
 		}
+		if (cached && cached.expiresAt <= now) {
+			// Mirror the `assertOwnedBy` cleanup: drop expired entries
+			// before the await so a `getOrThrow` that throws NotFoundError
+			// (session hard-deleted) leaves a clean map. Without this, a
+			// missed `deleteRow` invalidation would let a stale entry
+			// linger for the full eviction-cap rollover.
+			this.ownershipCache.delete(sessionId);
+		}
 		const meta = await this.getOrThrow(sessionId);
 		this.cacheOwnership(sessionId, meta.userId);
 		if (meta.userId !== userId) throw new ForbiddenError();
@@ -299,12 +307,6 @@ export class SessionManager {
 			ownerUserId,
 			expiresAt: Date.now() + OWNERSHIP_CACHE_TTL_MS,
 		});
-	}
-
-	/** Test seam: drop every cached entry. Production code never calls
-	 *  this — invalidation runs through `deleteRow`. */
-	__resetOwnershipCacheForTests(): void {
-		this.ownershipCache.clear();
 	}
 
 	async listForUser(userId: string): Promise<SessionMeta[]> {
