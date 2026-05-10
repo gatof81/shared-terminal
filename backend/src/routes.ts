@@ -34,6 +34,7 @@ import { UploadQuotaExceededError } from "./dockerManager.js";
 import { EnvVarValidationError, validateEnvVars } from "./envVarValidation.js";
 import type { IdleSweeperStats } from "./idleSweeper.js";
 import { logger } from "./logger.js";
+import { getDispatcherStats } from "./portDispatcher.js";
 import type { RateLimitConfig } from "./rateLimit.js";
 import {
 	createAuthRateLimiters,
@@ -449,6 +450,7 @@ export function buildRouter(
 				sessions: { byStatus },
 				idleSweeper: idleSweeperStats,
 				reconcile: reconcileStats,
+				dispatcher: getDispatcherStats(),
 				d1: { callsSinceBoot: getD1CallsSinceBoot() },
 			});
 		} catch (err) {

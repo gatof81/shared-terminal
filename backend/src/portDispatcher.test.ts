@@ -1,9 +1,11 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	__resetDispatcherStatsForTests,
 	createPortDispatcher,
 	extractAuthToken,
+	getDispatcherStats,
 	handleProxyError,
 	makeHostParser,
 	type ParsedHost,
@@ -173,8 +175,15 @@ interface MockRes {
 	headers: Record<string, string>;
 	body: string;
 	headersSent: boolean;
+	closeListeners: Array<() => void>;
 	setHeader: (k: string, v: string) => void;
 	end: (b?: string) => void;
+	on: (event: string, listener: () => void) => MockRes;
+	/** Test helper: invoke every `close` listener so the dispatcher
+	 *  counter (`#241c) sees its hookpoint fire. Production-like
+	 *  surface — `res.on("close")` is the standard ServerResponse
+	 *  shape. */
+	__fireClose: () => void;
 }
 
 function makeRes(): MockRes {
@@ -183,12 +192,20 @@ function makeRes(): MockRes {
 		headers: {},
 		body: "",
 		headersSent: false,
+		closeListeners: [],
 		setHeader(k, v) {
 			res.headers[k.toLowerCase()] = v;
 		},
 		end(b) {
 			res.headersSent = true;
 			res.body = b ?? "";
+		},
+		on(event, listener) {
+			if (event === "close") res.closeListeners.push(listener);
+			return res;
+		},
+		__fireClose() {
+			for (const l of res.closeListeners) l();
 		},
 	};
 	return res;
@@ -757,6 +774,7 @@ describe("handleProxyError", () => {
 		const calls: { writeHead?: number; end?: string; destroyed?: boolean } = {};
 		const res = {
 			headersSent: true,
+			statusCode: 200,
 			writeHead(status: number) {
 				calls.writeHead = status;
 			},
@@ -766,7 +784,7 @@ describe("handleProxyError", () => {
 			destroy() {
 				calls.destroyed = true;
 			},
-		} as unknown as ServerResponse;
+		} as unknown as ServerResponse & { statusCode: number };
 		handleProxyError(new Error("boom"), fakeReq(), res);
 		// Mid-stream: don't double-write a status line, don't append
 		// "Bad Gateway: …" after the legitimate body. Just terminate
@@ -774,6 +792,12 @@ describe("handleProxyError", () => {
 		expect(calls.writeHead).toBeUndefined();
 		expect(calls.end).toBeUndefined();
 		expect(calls.destroyed).toBe(true);
+		// PR #249 round 3 NIT: statusCode is rewritten to 502 even
+		// though it never reaches the wire (headersSent: true makes
+		// the value an in-process no-op). The dispatcher's #241c
+		// close-listener reads this so a mid-stream-aborted request
+		// classifies as 5xx on the dashboard, not the inherited 200.
+		expect((res as unknown as { statusCode: number }).statusCode).toBe(502);
 	});
 
 	it("destroys a raw socket on WS failure (no writeHead, just teardown)", () => {
@@ -788,5 +812,240 @@ describe("handleProxyError", () => {
 		} as unknown as Duplex;
 		handleProxyError(new Error("ws boom"), fakeReq(), socket);
 		expect(calls.destroyed).toBe(true);
+	});
+});
+
+// ── Dispatcher counters (#241c) ──────────────────────────────────────────
+
+describe("dispatcher counters (#241c)", () => {
+	const VALID_BASE = "tunnel.example.com";
+	const VALID_HOST = `p3000-${SID}.${VALID_BASE}`;
+
+	beforeEach(() => {
+		__resetDispatcherStatsForTests();
+	});
+
+	function makeDispatcher() {
+		return createPortDispatcher({
+			baseDomain: VALID_BASE,
+			corsOrigins: [],
+			lookupTarget: vi.fn(async () => null), // 404 path — simplest
+			verifyToken: vi.fn(() => null),
+			parseHost: makeHostParser(VALID_BASE),
+		});
+	}
+
+	it("starts with every counter at zero", () => {
+		expect(getDispatcherStats()).toEqual({
+			requestsSinceBoot: 0,
+			responses2xxSinceBoot: 0,
+			responses3xxSinceBoot: 0,
+			responses4xxSinceBoot: 0,
+			responses5xxSinceBoot: 0,
+		});
+	});
+
+	it("does NOT bump on requests the dispatcher doesn't claim (host outside base domain)", () => {
+		const { middleware } = makeDispatcher();
+		const req = makeReq("api.example.com"); // wrong host — falls through
+		const res = makeRes();
+		middleware(req, res, () => {});
+		// The close-listener was never attached because parseHost returned
+		// null and the middleware called next() directly. The counter must
+		// stay at zero.
+		res.__fireClose();
+		expect(getDispatcherStats().requestsSinceBoot).toBe(0);
+	});
+
+	it("counts 4xx responses (CSRF gate / auth failures) under responses4xxSinceBoot", async () => {
+		const { middleware } = makeDispatcher();
+		// Cross-origin request from a non-allowlisted origin → 403 from
+		// the CSRF gate at the top of the middleware, before authorize().
+		const req = makeReq(VALID_HOST, undefined, "https://evil.com");
+		const res = makeRes();
+		middleware(req, res, () => {});
+		res.__fireClose();
+		const s = getDispatcherStats();
+		expect(s.requestsSinceBoot).toBe(1);
+		expect(s.responses4xxSinceBoot).toBe(1);
+		expect(s.responses2xxSinceBoot).toBe(0);
+	});
+
+	it("counts the 404 lookup-miss path under responses4xxSinceBoot", async () => {
+		const { middleware } = makeDispatcher();
+		const req = makeReq(VALID_HOST);
+		const res = makeRes();
+		middleware(req, res, () => {});
+		// Allow the authorize() promise chain to settle.
+		await new Promise((r) => setTimeout(r, 0));
+		res.__fireClose();
+		const s = getDispatcherStats();
+		expect(s.requestsSinceBoot).toBe(1);
+		expect(s.responses4xxSinceBoot).toBe(1);
+	});
+
+	it("counts a successful proxy response under responses2xxSinceBoot", async () => {
+		// 2xx is the most common runtime case (the public dev-server port
+		// returning HTML / JSON to a browser). Stub the proxy so it
+		// synchronously assigns a 204 — DELIBERATELY different from
+		// MockRes's default `statusCode: 200` so a regression in which
+		// the close-listener reads the stale default instead of the
+		// proxy-written value is caught. Real `http-proxy` writes the
+		// upstream's status code asynchronously after the response
+		// arrives; the dispatcher's hookpoint reads `res.statusCode` at
+		// close so the timing doesn't matter — only that it sees the
+		// last-written value.
+		const proxyStub = {
+			web: vi.fn((_req, res: ServerResponse) => {
+				res.statusCode = 204;
+			}),
+		} as unknown as Parameters<typeof createPortDispatcher>[0]["proxy"];
+		const dispatcher = createPortDispatcher({
+			baseDomain: VALID_BASE,
+			corsOrigins: [],
+			lookupTarget: vi.fn(async () => ({
+				hostPort: 32768,
+				isPublic: true, // public — skip auth
+				ownerUserId: "u-owner",
+			})),
+			verifyToken: vi.fn(() => null),
+			parseHost: makeHostParser(VALID_BASE),
+			proxy: proxyStub,
+		});
+		const req = makeReq(VALID_HOST);
+		const res = makeRes();
+		dispatcher.middleware(req, res, () => {});
+		await new Promise((r) => setTimeout(r, 0));
+		res.__fireClose();
+		const s = getDispatcherStats();
+		expect(s.requestsSinceBoot).toBe(1);
+		expect(s.responses2xxSinceBoot).toBe(1);
+		expect(s.responses4xxSinceBoot).toBe(0);
+		expect(s.responses5xxSinceBoot).toBe(0);
+	});
+
+	it("counts a 3xx redirect response under responses3xxSinceBoot", async () => {
+		// 3xx is a real production case (a container app returning a
+		// redirect — auth-callback shape, OAuth dance, app-internal
+		// redirect). Stub the proxy to set statusCode = 301 the same
+		// way the 2xx test sets 200.
+		const proxyStub = {
+			web: vi.fn((_req, res: ServerResponse) => {
+				res.statusCode = 301;
+			}),
+		} as unknown as Parameters<typeof createPortDispatcher>[0]["proxy"];
+		const dispatcher = createPortDispatcher({
+			baseDomain: VALID_BASE,
+			corsOrigins: [],
+			lookupTarget: vi.fn(async () => ({
+				hostPort: 32768,
+				isPublic: true,
+				ownerUserId: "u-owner",
+			})),
+			verifyToken: vi.fn(() => null),
+			parseHost: makeHostParser(VALID_BASE),
+			proxy: proxyStub,
+		});
+		const req = makeReq(VALID_HOST);
+		const res = makeRes();
+		dispatcher.middleware(req, res, () => {});
+		await new Promise((r) => setTimeout(r, 0));
+		res.__fireClose();
+		const s = getDispatcherStats();
+		expect(s.requestsSinceBoot).toBe(1);
+		expect(s.responses3xxSinceBoot).toBe(1);
+		expect(s.responses2xxSinceBoot).toBe(0);
+	});
+
+	it("counts a 502 (proxy/lookup error) under responses5xxSinceBoot", async () => {
+		// authorize throws via the lookup stub → middleware emits 502.
+		const dispatcher = createPortDispatcher({
+			baseDomain: VALID_BASE,
+			corsOrigins: [],
+			lookupTarget: vi.fn(async () => {
+				throw new Error("D1 boom");
+			}),
+			verifyToken: vi.fn(() => null),
+			parseHost: makeHostParser(VALID_BASE),
+		});
+		const req = makeReq(VALID_HOST);
+		const res = makeRes();
+		dispatcher.middleware(req, res, () => {});
+		await new Promise((r) => setTimeout(r, 0));
+		res.__fireClose();
+		const s = getDispatcherStats();
+		expect(s.requestsSinceBoot).toBe(1);
+		expect(s.responses5xxSinceBoot).toBe(1);
+	});
+
+	it("end-to-end: mid-stream proxy failure registers as 5xx (handleProxyError → close)", async () => {
+		// Pins the integration between handleProxyError's mid-stream
+		// `statusCode = 502` write and the close-listener's
+		// classification. A regression that drops the statusCode rewrite
+		// in handleProxyError would silently re-classify mid-stream
+		// aborts as 2xx (whatever the proxy started with). The
+		// per-function tests at portDispatcher.test.ts:773 (statusCode
+		// rewrite) and dispatcher-counters > 5xx (authorize-throw path)
+		// each catch half the regression; this combines them.
+		const proxyStub = {
+			web: vi.fn((_req, res: ServerResponse) => {
+				// Simulate a mid-stream proxy error: the proxy started
+				// successfully (statusCode = 200, headersSent = true),
+				// then the upstream died and `proxy.error` fires
+				// `handleProxyError`.
+				res.statusCode = 200;
+				(res as unknown as { headersSent: boolean }).headersSent = true;
+				handleProxyError(new Error("upstream died mid-body"), {} as IncomingMessage, res);
+			}),
+		} as unknown as Parameters<typeof createPortDispatcher>[0]["proxy"];
+		const dispatcher = createPortDispatcher({
+			baseDomain: VALID_BASE,
+			corsOrigins: [],
+			lookupTarget: vi.fn(async () => ({
+				hostPort: 32768,
+				isPublic: true,
+				ownerUserId: "u-owner",
+			})),
+			verifyToken: vi.fn(() => null),
+			parseHost: makeHostParser(VALID_BASE),
+			proxy: proxyStub,
+		});
+		const req = makeReq(VALID_HOST);
+		const res = makeRes();
+		// `handleProxyError` branches on `typeof res.writeHead ===
+		// "function"` to distinguish ServerResponse from a raw socket
+		// (the WS path). The base MockRes doesn't supply writeHead
+		// (the other counter tests don't need it); add a stub so the
+		// branch evaluates correctly and the headersSent: true path
+		// runs. Without this, handleProxyError takes the Duplex
+		// branch and never rewrites statusCode.
+		(res as unknown as { writeHead: () => void; destroy: () => void }).writeHead = () => {};
+		(res as unknown as { destroy: () => void }).destroy = () => {};
+		dispatcher.middleware(req, res, () => {});
+		await new Promise((r) => setTimeout(r, 0));
+		res.__fireClose();
+		const s = getDispatcherStats();
+		expect(s.requestsSinceBoot).toBe(1);
+		// The proxy starts at 200 then handleProxyError rewrites to 502;
+		// the close-listener reads the final value, so the request
+		// classifies as 5xx, NOT the 2xx the proxy would otherwise leave
+		// behind.
+		expect(s.responses5xxSinceBoot).toBe(1);
+		expect(s.responses2xxSinceBoot).toBe(0);
+	});
+
+	it("hooks res.on('close') (not 'finish') so an aborted request still counts", async () => {
+		// `close` fires on both successful flush AND client disconnect
+		// mid-flush; `finish` only on successful flush. Pinning the
+		// hookpoint here means a regression that swaps `close` for
+		// `finish` — which would silently miss aborts on the dashboard
+		// — gets caught.
+		const { middleware } = makeDispatcher();
+		const req = makeReq(VALID_HOST, undefined, "https://evil.com");
+		const res = makeRes();
+		middleware(req, res, () => {});
+		// Production code attaches exactly one `close` listener — confirm
+		// the listener landed on the right event.
+		expect(res.closeListeners.length).toBe(1);
 	});
 });
