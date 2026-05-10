@@ -50,6 +50,23 @@ interface RunningWithTtlRow {
  */
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 
+/**
+ * Snapshot the admin stats endpoint reads via `getStats()` (#241).
+ *
+ * `lastSweepAt` is null until the first sweep completes (the timer
+ * hasn't fired or `runSweep()` hasn't been called yet). `sweptSinceBoot`
+ * counts only successful auto-stops; per-row stop failures don't bump
+ * it, so the count reflects "sessions actually reaped" rather than
+ * "sessions the sweeper tried to reap". `currentMapSize` is the live
+ * activity Map size — useful for spotting Map growth past the
+ * reasonable per-deployment ceiling.
+ */
+export interface IdleSweeperStats {
+	lastSweepAt: number | null;
+	sweptSinceBoot: number;
+	currentMapSize: number;
+}
+
 export class IdleSweeper {
 	private readonly stopContainer: (sessionId: string) => Promise<void>;
 	private readonly now: () => number;
@@ -57,6 +74,12 @@ export class IdleSweeper {
 
 	private readonly lastActivity = new Map<string, number>();
 	private timer: ReturnType<typeof setInterval> | null = null;
+
+	// Observability counters surfaced via getStats() / GET /api/admin/stats.
+	// Process-local — reset to initial values on every backend restart.
+	// Durable metrics belong in a separate Prometheus/OTel follow-up.
+	private lastSweepAt: number | null = null;
+	private sweptSinceBoot = 0;
 
 	constructor(deps: IdleSweeperDeps) {
 		this.stopContainer = deps.stopContainer;
@@ -130,6 +153,11 @@ export class IdleSweeper {
 	 * synchronously without waiting on real timers.
 	 */
 	async runSweep(): Promise<void> {
+		// Stamp `lastSweepAt` BEFORE the await so a sweep that fails
+		// halfway still leaves the timestamp updated — the operator
+		// dashboard's "is the sweeper alive" signal is more useful as
+		// "last attempted" than "last successfully completed".
+		this.lastSweepAt = this.now();
 		const result = await d1Query<RunningWithTtlRow>(
 			"SELECT s.session_id AS session_id, sc.idle_ttl_seconds AS idle_ttl_seconds " +
 				"FROM sessions s " +
@@ -156,14 +184,31 @@ export class IdleSweeper {
 				await this.stopContainer(row.session_id);
 				// Drop the entry; the next `/start` flow will re-seed.
 				this.lastActivity.delete(row.session_id);
+				this.sweptSinceBoot++;
 			} catch (err) {
 				// Per-row failure is isolated — log and keep iterating
 				// so one stuck container doesn't stall the whole sweep.
+				// The reap counter is NOT bumped on the failure path so
+				// the admin stats reflect "actually reaped" rather than
+				// "tried to reap".
 				logger.warn(
 					`[idle-sweeper] stop failed for session ${row.session_id}: ${(err as Error).message}`,
 				);
 			}
 		}
+	}
+
+	/**
+	 * Read-only snapshot for the admin stats endpoint (#241). Cheap
+	 * (no D1, no async) so the route can call it on the request hot
+	 * path without batching.
+	 */
+	getStats(): IdleSweeperStats {
+		return {
+			lastSweepAt: this.lastSweepAt,
+			sweptSinceBoot: this.sweptSinceBoot,
+			currentMapSize: this.lastActivity.size,
+		};
 	}
 
 	/**

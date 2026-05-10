@@ -131,6 +131,21 @@ export class DockerManager {
 	// self-clean when the chain head finishes.
 	private uploadLocks = new Map<string /*sessionId*/, Promise<void>>();
 
+	// Reconcile observability counters (#241). Process-local; reset
+	// on backend restart. `lastRunAt` is stamped at `reconcile()`
+	// entry (matches the IdleSweeper `lastSweepAt` semantics — "last
+	// attempted", not "last completed"); null until the first call
+	// fires. `sessionsCheckedSinceBoot` counts every row read from
+	// the running-sessions SELECT, including the no-container-id
+	// branch and the inspect-error branches. `errorsSinceBoot` counts
+	// transient inspect failures only — clearPortMappings failures
+	// are diagnostic noise inside the larger reconcile path, and 404
+	// is the expected "container is genuinely gone" path for soft-
+	// deleted sessions, not an error.
+	private reconcileLastRunAt: number | null = null;
+	private reconcileSessionsCheckedSinceBoot = 0;
+	private reconcileErrorsSinceBoot = 0;
+
 	constructor(sessions: SessionManager, dockerOpts?: Dockerode.DockerOptions) {
 		// docker-modem reads DOCKER_HOST from the environment ONLY when the
 		// caller passes no connection options at all. The previous default
@@ -1848,12 +1863,14 @@ export class DockerManager {
 
 	async reconcile(): Promise<void> {
 		logger.info("[docker] reconciling session state with Docker…");
+		this.reconcileLastRunAt = Date.now();
 		await this.sweepUploadTmp();
 		const result = await d1Query<{ session_id: string; container_id: string | null }>(
 			"SELECT session_id, container_id FROM sessions WHERE status = 'running'",
 		);
 
 		for (const row of result.results) {
+			this.reconcileSessionsCheckedSinceBoot++;
 			if (!row.container_id) {
 				await this.sessions.updateStatus(row.session_id, "stopped");
 				// Drop any leftover port mappings for the no-container
@@ -1947,6 +1964,14 @@ export class DockerManager {
 						);
 					}
 				} else {
+					// Transient inspect failure (daemon unreachable mid-
+					// reconcile, network hiccup, etc.). Bump the error
+					// counter so the admin dashboard surfaces a flaky
+					// daemon without the operator having to grep logs.
+					// 404 branch above is intentionally NOT counted —
+					// "container is genuinely gone" is the expected,
+					// non-error path for soft-deleted sessions.
+					this.reconcileErrorsSinceBoot++;
 					logger.warn(
 						`[docker] reconcile inspect failed for session ${row.session_id}: ${(err as Error).message}`,
 					);
@@ -1966,6 +1991,23 @@ export class DockerManager {
 			}
 		}
 		logger.info("[docker] reconciliation complete");
+	}
+
+	/**
+	 * Read-only snapshot of reconcile counters for the admin stats
+	 * endpoint (#241). Cheap (no D1, no async). Counts are
+	 * process-local — reset on every backend restart.
+	 */
+	getReconcileStats(): {
+		lastRunAt: number | null;
+		sessionsCheckedSinceBoot: number;
+		errorsSinceBoot: number;
+	} {
+		return {
+			lastRunAt: this.reconcileLastRunAt,
+			sessionsCheckedSinceBoot: this.reconcileSessionsCheckedSinceBoot,
+			errorsSinceBoot: this.reconcileErrorsSinceBoot,
+		};
 	}
 }
 

@@ -997,6 +997,112 @@ describe("DockerManager.reconcile", () => {
 		);
 		expect(deleteCall).toBeDefined();
 	});
+
+	// ── reconcile counters (#241b) ─────────────────────────────────────
+
+	it("getReconcileStats returns initial state before any reconcile call", () => {
+		const sessions = makeFakeSessions();
+		const dm = new DockerManager(sessions);
+		expect(dm.getReconcileStats()).toEqual({
+			lastRunAt: null,
+			sessionsCheckedSinceBoot: 0,
+			errorsSinceBoot: 0,
+		});
+	});
+
+	it("reconcile stamps lastRunAt to Date.now() and bumps sessionsCheckedSinceBoot for each row", async () => {
+		// Match the IdleSweeper.getStats lastSweepAt test shape (frozen
+		// clock, exact equality) so a regression that wires the stamp
+		// to a different time source (`performance.now()`, a stale
+		// captured value) is caught. Note: this does NOT pin the stamp
+		// ordering relative to the await — both Date.now() before and
+		// after the await return the same frozen value. Pinning the
+		// before/after ordering would require a time source that
+		// advances between synchronous calls, which neither subsystem
+		// implements today.
+		vi.useFakeTimers();
+		try {
+			const frozen = 1_700_000_000_000;
+			vi.setSystemTime(frozen);
+			const sessions = makeFakeSessions();
+			const dm = new DockerManager(sessions);
+			(dm as unknown as { docker: unknown }).docker = { getContainer: vi.fn() };
+			dbStubs.d1Query.mockResolvedValueOnce({
+				results: [
+					{ session_id: "s1", container_id: null },
+					{ session_id: "s2", container_id: null },
+					{ session_id: "s3", container_id: null },
+				],
+				meta: { changes: 0 },
+			});
+
+			await dm.reconcile();
+
+			const stats = dm.getReconcileStats();
+			expect(stats.sessionsCheckedSinceBoot).toBe(3);
+			expect(stats.lastRunAt).toBe(frozen);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("errorsSinceBoot increments on transient inspect failures, NOT on 404s", async () => {
+		// 404 = "container is genuinely gone" = expected path for soft-deleted
+		// sessions, NOT an error. Transient (no statusCode) = real error.
+		const transient = new Error("ECONNREFUSED");
+		const fourOhFour = Object.assign(new Error("No such container"), { statusCode: 404 });
+		const sessions = makeFakeSessions();
+		const dm = new DockerManager(sessions);
+		let firstCall = true;
+		(dm as unknown as { docker: unknown }).docker = {
+			getContainer: vi.fn(() => ({
+				inspect: vi.fn(async () => {
+					if (firstCall) {
+						firstCall = false;
+						throw transient;
+					}
+					throw fourOhFour;
+				}),
+			})),
+		};
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [
+				{ session_id: "s-transient", container_id: "container-1" },
+				{ session_id: "s-gone", container_id: "container-2" },
+			],
+			meta: { changes: 0 },
+		});
+
+		await dm.reconcile();
+
+		// 1 transient → counter == 1. 404 path stays out of the count.
+		expect(dm.getReconcileStats().errorsSinceBoot).toBe(1);
+		expect(dm.getReconcileStats().sessionsCheckedSinceBoot).toBe(2);
+	});
+
+	it("counters accumulate across multiple reconcile calls", async () => {
+		const sessions = makeFakeSessions();
+		const dm = new DockerManager(sessions);
+		(dm as unknown as { docker: unknown }).docker = { getContainer: vi.fn() };
+		// First reconcile: 2 sessions.
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [
+				{ session_id: "s1", container_id: null },
+				{ session_id: "s2", container_id: null },
+			],
+			meta: { changes: 0 },
+		});
+		await dm.reconcile();
+		expect(dm.getReconcileStats().sessionsCheckedSinceBoot).toBe(2);
+
+		// Second reconcile: 1 session. Counter should be 3 total, not reset.
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [{ session_id: "s3", container_id: null }],
+			meta: { changes: 0 },
+		});
+		await dm.reconcile();
+		expect(dm.getReconcileStats().sessionsCheckedSinceBoot).toBe(3);
+	});
 });
 
 describe("DockerManager.startContainer", () => {
