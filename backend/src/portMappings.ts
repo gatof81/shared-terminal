@@ -185,8 +185,12 @@ export async function lookupDispatchTarget(
 		return cached.byContainerPort.get(containerPort) ?? null;
 	}
 	if (cached) {
-		// Expired entry — drop before re-fetch so a concurrent invalidate
-		// from `setPortMappings` doesn't race against our re-population.
+		// Expired entry — drop before the await so an empty D1 result
+		// (session stopped, no mappings) leaves a clean map. Without
+		// this, the empty-result branch below returns null without
+		// touching the cache, and the stale expired entry would
+		// linger forever for any session that's been stopped without
+		// a paired `clearPortMappings` invalidation having fired.
 		cache.delete(sessionId);
 	}
 	// Fetch the FULL set of dispatch targets for this session in one
