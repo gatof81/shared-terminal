@@ -11,6 +11,7 @@ vi.mock("./db.js", () => dbStubs);
 
 import {
 	__resetDispatchCacheForTests,
+	CACHE_TTL_MS,
 	clearPortMappings,
 	getPortMappings,
 	lookupDispatchTarget,
@@ -352,6 +353,32 @@ describe("lookupDispatchTarget cache (#238)", () => {
 		}));
 		const got = await lookupDispatchTarget("sess-w", 3000);
 		expect(got?.hostPort).toBe(32999);
+	});
+
+	it("expired entry triggers a fresh D1 call and re-populates the cache", async () => {
+		// PR #242 round 2 SHOULD-FIX. Without this test the TTL-expiry
+		// branch was unreached: a regression that flipped `>` to `>=`
+		// or moved the pre-delete after the await would leave entries
+		// either never expiring or lingering as stale forever, and
+		// nothing would have caught it.
+		vi.useFakeTimers();
+		try {
+			dbStubs.d1Query.mockImplementation(async () => ({
+				results: [sessionRow(3000, 32768)],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			}));
+			await lookupDispatchTarget("sess-ttl", 3000);
+			expect(dbStubs.d1Query).toHaveBeenCalledTimes(1);
+
+			// Advance past TTL — same shape `setTimeout` users would see.
+			vi.advanceTimersByTime(CACHE_TTL_MS + 1);
+
+			await lookupDispatchTarget("sess-ttl", 3000);
+			expect(dbStubs.d1Query).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("clearPortMappings invalidates so the next lookup re-fetches and returns null", async () => {

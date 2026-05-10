@@ -58,7 +58,10 @@ import { d1Query } from "./db.js";
 // after a "miss". Caching the miss would amplify "session is starting"
 // race windows into a 30-second 404 wall.
 
-const CACHE_TTL_MS = 30_000;
+/** Exported for the test suite — the TTL-expiry test pins behaviour
+ *  against this value rather than a magic 30_001 literal that would
+ *  silently coast through a future TTL change. */
+export const CACHE_TTL_MS = 30_000;
 
 interface CacheEntry {
 	byContainerPort: Map<number, DispatchTarget>;
