@@ -80,6 +80,7 @@ export function buildRouter(
 		fileUploadIp,
 		logoutIp,
 		authStatusIp,
+		adminStatsIp,
 	} = createAuthRateLimiters(rateLimitConfig);
 	const usernameLimiter = new UsernameRateLimiter(
 		rateLimitConfig.login.usernameMax,
@@ -292,6 +293,7 @@ export function buildRouter(
 	router.use("/invites", requireAuth);
 	router.use("/sessions", requireAuth);
 	router.use("/templates", requireAuth);
+	router.use("/admin", requireAuth);
 
 	// Idle-sweeper bumper. Mounted AFTER `requireAuth` so unauth
 	// requests don't reset the activity timer. The `:id` capture is
@@ -393,6 +395,39 @@ export function buildRouter(
 			}
 		},
 	);
+
+	// ── Admin routes (#241) ────────────────────────────────────────────────
+	// Cross-user observability for operators. Gated by `requireAdmin`
+	// (mirrors the invite-mint pattern from #50). `requireAuth` is
+	// provided by `router.use("/admin", requireAuth)` above —
+	// `requireAdmin` reads `req.userId` populated there.
+	//
+	// Counters reported here are in-memory / process-local: this PR
+	// surfaces only `sessions.byStatus` (a single GROUP BY against
+	// the `sessions` table, no boot-time counter wiring). Subsystem
+	// counters (idle sweeper, dispatcher, reconcile, D1 call rate)
+	// land in follow-up PRs so each one can ship independently.
+
+	router.get("/admin/stats", adminStatsIp, requireAdmin, async (_req: Request, res: Response) => {
+		try {
+			const byStatus = await sessions.countByStatus();
+			// `process.uptime()` returns seconds since process start
+			// — derive `bootedAt` from that rather than capturing
+			// `Date.now()` at module load, so a long-running backend
+			// reports the actual boot wallclock even after monotonic
+			// clock skew has had time to drift from real time.
+			const uptimeSeconds = process.uptime();
+			const bootedAt = new Date(Date.now() - uptimeSeconds * 1000).toISOString();
+			res.json({
+				bootedAt,
+				uptimeSeconds: Math.round(uptimeSeconds),
+				sessions: { byStatus },
+			});
+		} catch (err) {
+			logger.error(`[admin] stats failed: ${(err as Error).message}`);
+			res.status(500).json({ error: "Internal server error" });
+		}
+	});
 
 	// ── Session routes ──────────────────────────────────────────────────────
 

@@ -165,6 +165,7 @@ async function spinUp(sessions: SessionManager, docker: DockerManager) {
 		register: { ipMax: 1000, ipWindowMs: 60_000 },
 		invitesCreate: { ipMax: 1000, ipWindowMs: 60_000 },
 		invitesList: { ipMax: 1000, ipWindowMs: 60_000 },
+		adminStats: { ipMax: 1000, ipWindowMs: 60_000 },
 		invitesRevoke: { ipMax: 1000, ipWindowMs: 60_000 },
 		fileUpload: { ipMax: 1000, ipWindowMs: 60_000 },
 		logout: { ipMax: 1000, ipWindowMs: 60_000 },

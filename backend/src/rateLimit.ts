@@ -86,6 +86,17 @@ export interface RateLimitConfig {
 		ipMax: number;
 		ipWindowMs: number;
 	};
+	// Caps how often a single IP can hit the admin stats / cross-user
+	// endpoints (#241). Even though `requireAdmin` already gates by
+	// user role, an admin operator's compromised browser tab in a
+	// polling loop should not be able to hammer the GROUP BY +
+	// counter-readout work that the stats endpoint does. Sized like
+	// `invitesList` (the closest precedent — admin-only read endpoint
+	// the UI may legitimately poll while a modal is open).
+	adminStats: {
+		ipMax: number;
+		ipWindowMs: number;
+	};
 }
 
 // Defaults match issue #10: login 10/15min, register 5/1h, per-username 10/15min.
@@ -139,6 +150,10 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 	// sustained — well above any realistic UI cadence (the frontend
 	// hits this once on first load), well below sustained abuse rates.
 	// See #148.
+	adminStats: {
+		ipMax: 120,
+		ipWindowMs: 60 * 60 * 1000,
+	},
 	authStatus: {
 		ipMax: 60,
 		ipWindowMs: 60 * 1000,
@@ -156,6 +171,7 @@ export interface AuthRateLimiters {
 	fileUploadIp: RateLimitRequestHandler;
 	logoutIp: RateLimitRequestHandler;
 	authStatusIp: RateLimitRequestHandler;
+	adminStatsIp: RateLimitRequestHandler;
 }
 
 export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
@@ -228,6 +244,13 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		legacyHeaders: false,
 		message: { error: "Too many auth-status requests from this IP, try again later", scope: "ip" },
 	});
+	const adminStatsIp = rateLimit({
+		windowMs: cfg.adminStats.ipWindowMs,
+		limit: cfg.adminStats.ipMax,
+		standardHeaders: "draft-7",
+		legacyHeaders: false,
+		message: { error: "Too many admin-stats requests from this IP, try again later", scope: "ip" },
+	});
 	return {
 		loginIp,
 		registerIp,
@@ -237,6 +260,7 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		fileUploadIp,
 		logoutIp,
 		authStatusIp,
+		adminStatsIp,
 	};
 }
 

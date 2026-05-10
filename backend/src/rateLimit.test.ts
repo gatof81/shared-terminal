@@ -435,6 +435,7 @@ describe("auth route rate limiting", () => {
 			fileUpload: { ipMax: 1000, ipWindowMs: 60_000 },
 			logout: { ipMax: 1000, ipWindowMs: 60_000 },
 			authStatus: { ipMax: 1000, ipWindowMs: 60_000 },
+			adminStats: { ipMax: 1000, ipWindowMs: 60_000 },
 			...cfg,
 		};
 		// rate-limit tests don't touch the bootstrap broadcaster — empty

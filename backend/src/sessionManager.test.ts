@@ -94,6 +94,75 @@ describe("SessionManager.create — quota filter", () => {
 	});
 });
 
+// ── countByStatus (#241) ───────────────────────────────────────────────────
+
+describe("SessionManager.countByStatus", () => {
+	it("issues a single GROUP BY query with no parameters", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		await mgr.countByStatus();
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(1);
+		const [sql, params] = dbStubs.d1Query.mock.calls[0]!;
+		expect(sql).toMatch(
+			/SELECT\s+status,\s+COUNT\(\*\)\s+AS\s+n\s+FROM\s+sessions\s+GROUP\s+BY\s+status/i,
+		);
+		// No bound params — admin-gated cross-user aggregate, no per-user filter.
+		expect(params).toBeUndefined();
+	});
+
+	it("returns zeros for every status the table has no rows for", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		const counts = await mgr.countByStatus();
+		expect(counts).toEqual({ running: 0, stopped: 0, terminated: 0, failed: 0 });
+	});
+
+	it("rehydrates D1 rows into a fully-populated record", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [
+				{ status: "running", n: 12 },
+				{ status: "stopped", n: 4 },
+				// `terminated` and `failed` are absent — must default to 0.
+			],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		expect(await mgr.countByStatus()).toEqual({
+			running: 12,
+			stopped: 4,
+			terminated: 0,
+			failed: 0,
+		});
+	});
+
+	it("silently drops rows with statuses outside the typed set (forward compat)", async () => {
+		// A future migration may add a status the type doesn't know about.
+		// Don't crash the admin dashboard — silently drop, route layer
+		// surfaces the typed shape.
+		const mgr = new SessionManager();
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [
+				{ status: "running", n: 5 },
+				{ status: "creating", n: 2 }, // hypothetical future status
+			],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		const counts = await mgr.countByStatus();
+		expect(counts.running).toBe(5);
+		expect("creating" in counts).toBe(false);
+	});
+});
+
 // ── Ownership cache (#239) ─────────────────────────────────────────────────
 
 describe("SessionManager.assertOwnedBy / assertOwnership cache", () => {
