@@ -243,6 +243,16 @@ main.chrome-open #chrome-toggle-icon {
   display: flex;
   flex-direction: column;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  /* Scroll containment for the modal's children — without this,
+     content that exceeds max-height (a dense Advanced tab on a
+     short viewport, the new-session modal in particular) clips
+     past the rounded border invisibly with no scrollbar to recover
+     it. The actual scroll container is one of the modal's children
+     (e.g. `.session-tab-panel.is-active` for the new-session modal,
+     `.invite-list` for the invites modal) so the modal chrome —
+     header, tabs, action bar — stays anchored while the body
+     scrolls. See issue #247. */
+  overflow: hidden;
 }
 .modal-header {
   display: flex;
@@ -509,6 +519,18 @@ main:not([data-sidebar-ready]) #sidebar {
 .session-modal-card {
   width: 540px;
 }
+/* The form fills the remaining space below the header + tabs, then
+   delegates scroll to the active tab panel inside it. `min-height: 0`
+   is load-bearing on flex children: without it the form would refuse
+   to shrink below its content size and the inner scroll never
+   engages. See issue #247. */
+#new-session-form {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
 .session-tabs {
   display: flex;
   gap: 0.25rem;
@@ -545,10 +567,16 @@ main:not([data-sidebar-ready]) #sidebar {
   display: none;
   flex-direction: column;
   gap: 0.65rem;
-  min-height: 6rem;
 }
 .session-tab-panel.is-active {
   display: flex;
+  /* Active panel is the scroll container — content past the
+     available height scrolls inside the panel rather than clipping
+     past the modal border. `min-height: 0` here mirrors the
+     `#new-session-form` rationale (see above). Issue #247. */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 .session-field {
   display: flex;
@@ -689,6 +717,11 @@ main:not([data-sidebar-ready]) #sidebar {
   margin-top: 1rem;
   border-top: 1px solid #21262d;
   padding-top: 0.85rem;
+  /* Action bar is the second flex child of `#new-session-form`
+     (alongside the active tab panel). Without `flex-shrink: 0`,
+     a tall panel could push the buttons off the bottom of the
+     modal — same shape of bug as the panel-overflow case. */
+  flex-shrink: 0;
 }
 .session-modal-actions button {
   background: #21262d;
@@ -936,6 +969,15 @@ main:not([data-sidebar-ready]) #sidebar {
 }
 /* #195 PR 195c — Templates page (sidebar entry → modal listing
    the user's own templates with Use / Delete actions). */
+/* The list scrolls inside the modal so a user with the maximum
+   100 templates can reach every card on a short viewport — same
+   inner-scroll shape as `.session-tab-panel.is-active` and
+   `.invite-list`. Issue #247. */
+#templates-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
 .template-card {
   display: flex;
   flex-direction: column;
