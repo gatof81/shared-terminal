@@ -424,10 +424,11 @@ describe("auth route rate limiting", () => {
 		fileUpload?: { ipMax: number; ipWindowMs: number };
 		logout?: { ipMax: number; ipWindowMs: number };
 		authStatus?: { ipMax: number; ipWindowMs: number };
+		adminStats?: { ipMax: number; ipWindowMs: number };
 	}): Promise<void> {
-		// Invite + upload + logout + authStatus limiters were added later;
-		// default each to a permissive setting so tests that only exercise
-		// login/register don't trip them.
+		// Invite + upload + logout + authStatus + adminStats limiters were
+		// added later; default each to a permissive setting so tests that
+		// only exercise login/register don't trip them.
 		const fullCfg = {
 			invitesCreate: { ipMax: 1000, ipWindowMs: 60_000 },
 			invitesList: { ipMax: 1000, ipWindowMs: 60_000 },
@@ -435,6 +436,7 @@ describe("auth route rate limiting", () => {
 			fileUpload: { ipMax: 1000, ipWindowMs: 60_000 },
 			logout: { ipMax: 1000, ipWindowMs: 60_000 },
 			authStatus: { ipMax: 1000, ipWindowMs: 60_000 },
+			adminStats: { ipMax: 1000, ipWindowMs: 60_000 },
 			...cfg,
 		};
 		// rate-limit tests don't touch the bootstrap broadcaster — empty

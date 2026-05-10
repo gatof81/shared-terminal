@@ -309,6 +309,36 @@ export class SessionManager {
 		});
 	}
 
+	/**
+	 * Counts of sessions across the whole table, grouped by status.
+	 * Surfaced via `GET /api/admin/stats` (#241). Cross-user aggregate
+	 * — admin-gated at the route layer; do NOT call this from any
+	 * non-admin code path.
+	 *
+	 * Returns a record keyed by every valid `SessionStatus` so callers
+	 * can render zero-counts without per-key existence checks. Statuses
+	 * the database doesn't know about (a future migration adds one,
+	 * GROUP BY emits it before the type is updated) are silently
+	 * dropped — the route's serializer handles the typed surface.
+	 */
+	async countByStatus(): Promise<Record<SessionStatus, number>> {
+		const result = await d1Query<{ status: string; n: number }>(
+			"SELECT status, COUNT(*) AS n FROM sessions GROUP BY status",
+		);
+		const out: Record<SessionStatus, number> = {
+			running: 0,
+			stopped: 0,
+			terminated: 0,
+			failed: 0,
+		};
+		for (const row of result.results) {
+			if (row.status in out) {
+				out[row.status as SessionStatus] = row.n;
+			}
+		}
+		return out;
+	}
+
 	async listForUser(userId: string): Promise<SessionMeta[]> {
 		const result = await d1Query<SessionRow>(
 			"SELECT * FROM sessions WHERE user_id = ? AND status != 'terminated' ORDER BY created_at DESC",
