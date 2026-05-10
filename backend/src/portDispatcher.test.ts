@@ -877,6 +877,42 @@ describe("dispatcher counters (#241c)", () => {
 		expect(s.responses4xxSinceBoot).toBe(1);
 	});
 
+	it("counts a successful proxy response under responses2xxSinceBoot", async () => {
+		// 2xx is the most common runtime case (the public dev-server port
+		// returning HTML / JSON to a browser). Stub the proxy so it
+		// synchronously assigns a 200 to the response — the real
+		// `http-proxy` would do this asynchronously after the upstream
+		// responded, but the dispatcher's hookpoint reads `res.statusCode`
+		// at close, which is the same value either way.
+		const proxyStub = {
+			web: vi.fn((_req, res: ServerResponse) => {
+				res.statusCode = 200;
+			}),
+		} as unknown as Parameters<typeof createPortDispatcher>[0]["proxy"];
+		const dispatcher = createPortDispatcher({
+			baseDomain: VALID_BASE,
+			corsOrigins: [],
+			lookupTarget: vi.fn(async () => ({
+				hostPort: 32768,
+				isPublic: true, // public — skip auth
+				ownerUserId: "u-owner",
+			})),
+			verifyToken: vi.fn(() => null),
+			parseHost: makeHostParser(VALID_BASE),
+			proxy: proxyStub,
+		});
+		const req = makeReq(VALID_HOST);
+		const res = makeRes();
+		dispatcher.middleware(req, res, () => {});
+		await new Promise((r) => setTimeout(r, 0));
+		res.__fireClose();
+		const s = getDispatcherStats();
+		expect(s.requestsSinceBoot).toBe(1);
+		expect(s.responses2xxSinceBoot).toBe(1);
+		expect(s.responses4xxSinceBoot).toBe(0);
+		expect(s.responses5xxSinceBoot).toBe(0);
+	});
+
 	it("counts a 502 (proxy/lookup error) under responses5xxSinceBoot", async () => {
 		// authorize throws via the lookup stub → middleware emits 502.
 		const dispatcher = createPortDispatcher({
