@@ -59,6 +59,16 @@ export interface ParsedHost {
 // 2xx/3xx/4xx/5xx blurs both signals. The HTTP counters cover the
 // regular browser traffic to dev-server / app ports — the dominant use
 // case the dashboard needs to surface.
+//
+// Exclusion: rate-limited 429s never reach this module's `middleware()`
+// because `dispatcherLimiter` mounts BEFORE the dispatcher in
+// `index.ts`. A request the per-IP limiter rejects is therefore NOT in
+// `requestsSinceBoot` — operators reading "dispatcher quiet but
+// `dispatcherLimiter` 429-firing" should consult the limiter's own
+// `RateLimit-*` response headers (or the limiter's express-rate-limit
+// internals) for that signal. Defensible: a request that never reached
+// the dispatcher is arguably not a dispatcher request, and including
+// 429s here would conflate the two layers' health signals.
 
 let requestsSinceBoot = 0;
 let responses2xxSinceBoot = 0;
