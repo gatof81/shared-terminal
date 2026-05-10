@@ -1010,29 +1010,41 @@ describe("DockerManager.reconcile", () => {
 		});
 	});
 
-	it("reconcile stamps lastRunAt and bumps sessionsCheckedSinceBoot for each row", async () => {
-		const sessions = makeFakeSessions();
-		const dm = new DockerManager(sessions);
-		(dm as unknown as { docker: unknown }).docker = { getContainer: vi.fn() };
-		dbStubs.d1Query.mockResolvedValueOnce({
-			results: [
-				{ session_id: "s1", container_id: null },
-				{ session_id: "s2", container_id: null },
-				{ session_id: "s3", container_id: null },
-			],
-			meta: { changes: 0 },
-		});
+	it("reconcile stamps lastRunAt to Date.now() and bumps sessionsCheckedSinceBoot for each row", async () => {
+		// Match the IdleSweeper.getStats lastSweepAt test shape (frozen
+		// clock, exact equality) so a regression that wires the stamp
+		// to a different time source (`performance.now()`, a stale
+		// captured value) is caught. Note: this does NOT pin the stamp
+		// ordering relative to the await — both Date.now() before and
+		// after the await return the same frozen value. The bot called
+		// this out as a real asymmetry vs the sweeper, but the sweeper
+		// test has the same limitation; "ordering" pin would require a
+		// time source that advances between calls (which neither test
+		// implements today).
+		vi.useFakeTimers();
+		try {
+			const frozen = 1_700_000_000_000;
+			vi.setSystemTime(frozen);
+			const sessions = makeFakeSessions();
+			const dm = new DockerManager(sessions);
+			(dm as unknown as { docker: unknown }).docker = { getContainer: vi.fn() };
+			dbStubs.d1Query.mockResolvedValueOnce({
+				results: [
+					{ session_id: "s1", container_id: null },
+					{ session_id: "s2", container_id: null },
+					{ session_id: "s3", container_id: null },
+				],
+				meta: { changes: 0 },
+			});
 
-		const before = Date.now();
-		await dm.reconcile();
-		const after = Date.now();
+			await dm.reconcile();
 
-		const stats = dm.getReconcileStats();
-		expect(stats.sessionsCheckedSinceBoot).toBe(3);
-		expect(stats.lastRunAt).not.toBeNull();
-		// Stamped via Date.now() — must fall in the test's wallclock window.
-		expect(stats.lastRunAt).toBeGreaterThanOrEqual(before);
-		expect(stats.lastRunAt).toBeLessThanOrEqual(after);
+			const stats = dm.getReconcileStats();
+			expect(stats.sessionsCheckedSinceBoot).toBe(3);
+			expect(stats.lastRunAt).toBe(frozen);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("errorsSinceBoot increments on transient inspect failures, NOT on 404s", async () => {

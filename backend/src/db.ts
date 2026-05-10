@@ -38,6 +38,12 @@ interface D1ApiResponse<T = Record<string, unknown>> {
 // Bumped at the top of `d1Query` so retried/failed calls are
 // counted too — a 500 from D1 still consumed quota, and that's
 // what the operator wants to see.
+//
+// Non-zero baseline is EXPECTED on a fresh boot: `migrateDb()`
+// issues a batch of DDL statements (each one a `d1Query` call)
+// before the first operator request lands. A counter reading of
+// ~15–20 immediately after restart is the migration baseline,
+// not unexpected activity.
 let d1CallsSinceBoot = 0;
 
 /** Read-only counter accessor for the admin stats endpoint. */
