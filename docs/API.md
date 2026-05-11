@@ -48,6 +48,18 @@ Auth is via the httpOnly cookie `st_token` set by `POST /api/auth/login` and `PO
 | GET    | /api/invites        | List invite codes (admin sees all rows, not just their own)  |
 | DELETE | /api/invites/:hash  | Revoke an unused invite code (`:hash` is the 64-char hex SHA-256 digest returned by `GET /api/invites`, not the plaintext token) |
 
+## Admin (admin)
+
+Cross-user observability + force-actions surfaced to the admin dashboard. All routes are `requireAuth` + `requireAdmin`; see `CLAUDE.md` → "Admin endpoints" for the data shape.
+
+| Method | Path                            | Description                                                                                  |
+| ------ | ------------------------------- | -------------------------------------------------------------------------------------------- |
+| GET    | /api/admin/stats                | Boot time, uptime, sessions by status, idle-sweeper / reconcile / dispatcher / D1 counters   |
+| GET    | /api/admin/sessions             | Cross-user session list (capped at 500 rows, includes `userId` + `ownerUsername`)            |
+| POST   | /api/admin/sessions/:id/stop    | Force-stop any session (no ownership gate). Returns 204                                      |
+| DELETE | /api/admin/sessions/:id         | Force soft-delete any session                                                                |
+| DELETE | /api/admin/sessions/:id?hard=true | Force hard-delete (also purges workspace + drops the D1 row)                               |
+
 ## WebSocket
 
 Two channels, both cookie-authed (browser sends `st_token` automatically on the upgrade handshake to the cookie's domain). CSWSH defence is independent: `isAllowedWsOrigin` rejects unlisted origins before the handshake completes.
