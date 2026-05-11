@@ -11,6 +11,10 @@
 import "./main.css";
 
 import {
+	type AdminSession,
+	type AdminStats,
+	adminForceDelete,
+	adminForceStop,
 	checkAuthStatus,
 	createInvite,
 	createSession,
@@ -20,6 +24,8 @@ import {
 	deleteTab,
 	deleteTemplate,
 	type EnvVarEntryInput,
+	fetchAdminSessions,
+	fetchAdminStats,
 	getTemplate,
 	type Invite,
 	InviteRequiredError,
@@ -91,6 +97,12 @@ const sidebarEl = document.getElementById("sidebar")!;
 const sidebarToggleBtn = document.getElementById("sidebar-toggle") as HTMLButtonElement;
 const sidebarBackdrop = document.getElementById("sidebar-backdrop")!;
 const sidebarInvitesBtn = document.getElementById("sidebar-invites-btn") as HTMLButtonElement;
+const sidebarAdminBtn = document.getElementById("sidebar-admin-btn") as HTMLButtonElement;
+const adminModal = document.getElementById("admin-modal")!;
+const adminStatsEl = document.getElementById("admin-stats")!;
+const adminSessionsListEl = document.getElementById("admin-sessions-list")!;
+const adminRefreshBtn = document.getElementById("admin-refresh-btn") as HTMLButtonElement;
+const adminUptimeEl = document.getElementById("admin-uptime")!;
 const sidebarLogoutBtn = document.getElementById("sidebar-logout-btn") as HTMLButtonElement;
 const chromeToggleBtn = document.getElementById("chrome-toggle") as HTMLButtonElement;
 const chromeToggleLabel = document.getElementById("chrome-toggle-label")!;
@@ -236,6 +248,7 @@ function applyAdminVisibility() {
 	const admin = isAdmin();
 	invitesBtn.classList.toggle("hidden", !admin);
 	sidebarInvitesBtn.classList.toggle("hidden", !admin);
+	sidebarAdminBtn.classList.toggle("hidden", !admin);
 }
 
 function updateAuthUI() {
@@ -3291,6 +3304,236 @@ fileInput.addEventListener("change", async () => {
 		attachInFlight = false;
 	}
 });
+
+// ── Admin dashboard (#241e) ─────────────────────────────────────────────────
+//
+// Visible only to is_admin=1 users via `applyAdminVisibility()`. Pulls
+// `/api/admin/stats` and `/api/admin/sessions` on open + on refresh.
+// No auto-polling — keeps the shared `adminStatsIp` (240/h) bucket
+// available for operator-initiated refreshes and pairs naturally with
+// the dashboard's "did my force-action take effect" mental model
+// (refresh, see new state, act, refresh).
+
+let adminOpener: HTMLButtonElement | null = null;
+
+function openAdminModal(opener: HTMLButtonElement) {
+	adminOpener = opener;
+	adminModal.classList.add("open");
+	adminModal.setAttribute("aria-hidden", "false");
+	adminRefreshBtn.focus();
+	void refreshAdmin();
+}
+
+function closeAdminModal() {
+	adminModal.classList.remove("open");
+	adminModal.setAttribute("aria-hidden", "true");
+	(adminOpener ?? sidebarAdminBtn).focus();
+	adminOpener = null;
+}
+
+adminModal.addEventListener("click", (e) => {
+	const target = e.target as HTMLElement;
+	if (target.hasAttribute("data-close-modal")) closeAdminModal();
+});
+
+sidebarAdminBtn.addEventListener("click", () => openAdminModal(sidebarAdminBtn));
+
+adminRefreshBtn.addEventListener("click", () => {
+	void refreshAdmin();
+});
+
+async function refreshAdmin(): Promise<void> {
+	// Fetch both endpoints in parallel — they're independent reads
+	// gated by the same admin token, and a sequential await would
+	// double the dashboard latency without any safety upside.
+	adminRefreshBtn.disabled = true;
+	try {
+		const [stats, sessions] = await Promise.all([fetchAdminStats(), fetchAdminSessions()]);
+		renderAdminStats(stats);
+		renderAdminSessions(sessions);
+	} catch (err) {
+		// Per-endpoint failure surfaces via the toast; the panels keep
+		// their previous state rather than wiping to a half-rendered
+		// shell.
+		showToast((err as Error).message, true);
+	} finally {
+		adminRefreshBtn.disabled = false;
+	}
+}
+
+function formatRelativeTime(ts: number | null): string {
+	if (ts === null) return "never";
+	const ageSec = Math.round((Date.now() - ts) / 1000);
+	if (ageSec < 60) return `${ageSec}s ago`;
+	if (ageSec < 3600) return `${Math.round(ageSec / 60)}m ago`;
+	return `${Math.round(ageSec / 3600)}h ago`;
+}
+
+function formatUptime(seconds: number): string {
+	if (seconds < 60) return `${seconds}s`;
+	if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+	if (seconds < 86_400) return `${Math.round(seconds / 3600)}h`;
+	return `${Math.round(seconds / 86_400)}d`;
+}
+
+function renderAdminStats(stats: AdminStats): void {
+	adminUptimeEl.textContent = `Uptime ${formatUptime(stats.uptimeSeconds)} · booted ${new Date(stats.bootedAt).toLocaleString()}`;
+	adminStatsEl.textContent = "";
+
+	const panel = (title: string, rows: Array<[string, string]>) => {
+		const card = document.createElement("div");
+		card.className = "admin-stat-card";
+		const h = document.createElement("h4");
+		h.textContent = title;
+		card.appendChild(h);
+		for (const [k, v] of rows) {
+			const row = document.createElement("div");
+			row.className = "admin-stat-row";
+			const ks = document.createElement("span");
+			ks.className = "admin-stat-key";
+			ks.textContent = k;
+			const vs = document.createElement("span");
+			vs.className = "admin-stat-value";
+			vs.textContent = v;
+			row.appendChild(ks);
+			row.appendChild(vs);
+			card.appendChild(row);
+		}
+		adminStatsEl.appendChild(card);
+	};
+
+	const s = stats.sessions.byStatus;
+	panel("Sessions", [
+		["Running", String(s.running)],
+		["Stopped", String(s.stopped)],
+		["Terminated", String(s.terminated)],
+		["Failed", String(s.failed)],
+	]);
+
+	const sw = stats.idleSweeper;
+	panel("Idle sweeper", [
+		["Last sweep", formatRelativeTime(sw?.lastSweepAt ?? null)],
+		["Reaped since boot", String(sw?.sweptSinceBoot ?? 0)],
+		["Tracked sessions", String(sw?.currentMapSize ?? 0)],
+	]);
+
+	const r = stats.reconcile;
+	panel("Reconcile", [
+		["Last run", formatRelativeTime(r.lastRunAt)],
+		["Sessions checked", String(r.sessionsCheckedSinceBoot)],
+		["Errors", String(r.errorsSinceBoot)],
+	]);
+
+	const d = stats.dispatcher;
+	panel("Dispatcher", [
+		["Requests", String(d.requestsSinceBoot)],
+		["2xx", String(d.responses2xxSinceBoot)],
+		["3xx", String(d.responses3xxSinceBoot)],
+		["4xx", String(d.responses4xxSinceBoot)],
+		["5xx", String(d.responses5xxSinceBoot)],
+	]);
+
+	panel("D1", [["Calls since boot", String(stats.d1.callsSinceBoot)]]);
+}
+
+function renderAdminSessions(sessions: AdminSession[]): void {
+	adminSessionsListEl.textContent = "";
+	if (sessions.length === 0) {
+		const empty = document.createElement("p");
+		empty.className = "modal-hint";
+		empty.textContent = "No sessions.";
+		adminSessionsListEl.appendChild(empty);
+		return;
+	}
+	for (const s of sessions) {
+		const row = document.createElement("div");
+		row.className = "admin-session-row";
+
+		const meta = document.createElement("div");
+		meta.className = "admin-session-meta";
+		const name = document.createElement("strong");
+		name.textContent = s.name;
+		const sub = document.createElement("span");
+		sub.className = "admin-session-sub";
+		sub.textContent = `${s.ownerUsername} · ${s.status} · ${new Date(s.createdAt).toLocaleString()}`;
+		meta.appendChild(name);
+		meta.appendChild(sub);
+
+		const actions = document.createElement("div");
+		actions.className = "admin-session-actions";
+
+		// Force-stop only enabled for running sessions — the backend
+		// returns 204 on a no-op stop, but the button label would be
+		// misleading on a stopped/terminated session.
+		const stopBtn = document.createElement("button");
+		stopBtn.type = "button";
+		stopBtn.textContent = "Stop";
+		stopBtn.disabled = s.status !== "running";
+		stopBtn.addEventListener("click", () =>
+			confirmAndAct(`Force-stop "${s.name}" (${s.ownerUsername})?`, stopBtn, async () => {
+				await adminForceStop(s.sessionId);
+				showToast(`Stopped ${s.name}`);
+			}),
+		);
+
+		const deleteBtn = document.createElement("button");
+		deleteBtn.type = "button";
+		deleteBtn.textContent = "Delete";
+		deleteBtn.className = "admin-session-delete";
+		deleteBtn.addEventListener("click", () =>
+			confirmAndAct(
+				`Force-delete "${s.name}" (${s.ownerUsername})?\n\nClick OK for soft-delete (workspace preserved), Cancel to skip.`,
+				deleteBtn,
+				async () => {
+					await adminForceDelete(s.sessionId, false);
+					showToast(`Soft-deleted ${s.name}`);
+				},
+			),
+		);
+
+		const hardBtn = document.createElement("button");
+		hardBtn.type = "button";
+		hardBtn.textContent = "Hard-delete";
+		hardBtn.className = "admin-session-delete";
+		hardBtn.addEventListener("click", () =>
+			confirmAndAct(
+				`HARD-DELETE "${s.name}" (${s.ownerUsername})?\n\nThis purges the workspace directory AND drops the D1 row. Unrecoverable.`,
+				hardBtn,
+				async () => {
+					await adminForceDelete(s.sessionId, true);
+					showToast(`Hard-deleted ${s.name}`);
+				},
+			),
+		);
+
+		actions.appendChild(stopBtn);
+		actions.appendChild(deleteBtn);
+		actions.appendChild(hardBtn);
+		row.appendChild(meta);
+		row.appendChild(actions);
+		adminSessionsListEl.appendChild(row);
+	}
+}
+
+/** Confirm + run an admin action. Disables the trigger button across
+ *  the in-flight window so a double-click can't fire two destructive
+ *  requests; refreshes the dashboard on success so the row reflects
+ *  the new state without the operator clicking Refresh. */
+async function confirmAndAct(
+	prompt: string,
+	btn: HTMLButtonElement,
+	action: () => Promise<void>,
+): Promise<void> {
+	if (!confirm(prompt)) return;
+	btn.disabled = true;
+	try {
+		await action();
+		await refreshAdmin();
+	} catch (err) {
+		showToast((err as Error).message, true);
+		btn.disabled = false;
+	}
+}
 
 // ── Auto-refresh ────────────────────────────────────────────────────────────
 

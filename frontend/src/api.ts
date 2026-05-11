@@ -639,6 +639,81 @@ export async function revokeInvite(codeHash: string): Promise<void> {
 	}
 }
 
+// ── Admin (#241) ────────────────────────────────────────────────────────────
+//
+// Shapes mirror the backend's `routes.ts` admin endpoints. All admin
+// surface is gated server-side by `requireAdmin` + `requireAuth`; the
+// client just calls and surfaces errors.
+
+export interface AdminStats {
+	bootedAt: string;
+	uptimeSeconds: number;
+	sessions: {
+		byStatus: { running: number; stopped: number; terminated: number; failed: number };
+	};
+	idleSweeper: {
+		lastSweepAt: number | null;
+		sweptSinceBoot: number;
+		currentMapSize: number;
+	} | null;
+	reconcile: {
+		lastRunAt: number | null;
+		sessionsCheckedSinceBoot: number;
+		errorsSinceBoot: number;
+	};
+	dispatcher: {
+		requestsSinceBoot: number;
+		responses2xxSinceBoot: number;
+		responses3xxSinceBoot: number;
+		responses4xxSinceBoot: number;
+		responses5xxSinceBoot: number;
+	};
+	d1: { callsSinceBoot: number };
+}
+
+/** Admin-visible session row — extends `SessionInfo` with the
+ *  cross-user identifiers the dashboard needs to attribute and
+ *  act on each row. */
+export interface AdminSession extends SessionInfo {
+	userId: string;
+	ownerUsername: string;
+}
+
+export async function fetchAdminStats(): Promise<AdminStats> {
+	const res = await apiFetch("/admin/stats");
+	if (!res.ok) throw new Error(`Failed to load admin stats (${res.status})`);
+	return res.json();
+}
+
+export async function fetchAdminSessions(): Promise<AdminSession[]> {
+	const res = await apiFetch("/admin/sessions");
+	if (!res.ok) throw new Error(`Failed to load admin sessions (${res.status})`);
+	return res.json();
+}
+
+export async function adminForceStop(sessionId: string): Promise<void> {
+	const res = await apiFetch(`/admin/sessions/${encodeURIComponent(sessionId)}/stop`, {
+		method: "POST",
+	});
+	if (res.status === 404) return; // race: session removed between list + action
+	if (!res.ok) {
+		const body = (await res.json().catch(() => ({}))) as { error?: string };
+		throw new Error(body.error ?? `Failed to force-stop session (${res.status})`);
+	}
+}
+
+export async function adminForceDelete(sessionId: string, hard: boolean): Promise<void> {
+	const path = hard
+		? `/admin/sessions/${encodeURIComponent(sessionId)}?hard=true`
+		: `/admin/sessions/${encodeURIComponent(sessionId)}`;
+	const res = await apiFetch(path, { method: "DELETE" });
+	if (res.status === 404) return;
+	if (!res.ok) {
+		const body = (await res.json().catch(() => ({}))) as { error?: string };
+		throw new Error(body.error ?? `Failed to force-delete session (${res.status})`);
+	}
+}
+
 // ── File uploads ────────────────────────────────────────────────────────────
 
 /**
