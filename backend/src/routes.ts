@@ -421,6 +421,9 @@ export function buildRouter(
 	// counters (idle sweeper, dispatcher, reconcile, D1 call rate)
 	// land in follow-up PRs so each one can ship independently.
 
+	// SHARES `adminStatsIp` (keyed per-IP) with `GET /admin/sessions`
+	// — see the comment on that route below + `RateLimitConfig.adminStats`
+	// for the budget rationale.
 	router.get("/admin/stats", adminStatsIp, requireAdmin, async (_req: Request, res: Response) => {
 		try {
 			const byStatus = await sessions.countByStatus();

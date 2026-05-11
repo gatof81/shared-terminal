@@ -406,6 +406,23 @@ describe("POST /api/admin/sessions/:id/stop (#241d)", () => {
 		expect(get).not.toHaveBeenCalled();
 		expect(stopContainer).not.toHaveBeenCalled();
 	});
+
+	it("returns 500 with a generic body when stopContainer throws", async () => {
+		const get = vi.fn(async () => meta());
+		const stopContainer = vi.fn(async () => {
+			throw new Error("docker daemon unreachable");
+		});
+		await spinUp(vi.fn(), {
+			sessions: { get } as unknown as Partial<SessionManager>,
+			docker: { stopContainer } as unknown as Partial<DockerManager>,
+		});
+
+		const res = await fetch(`${baseUrl}/api/admin/sessions/s-any/stop`, { method: "POST" });
+		expect(res.status).toBe(500);
+		const body = (await res.json()) as { error: string };
+		expect(body.error).toBe("Internal server error");
+		expect(body.error).not.toContain("docker daemon");
+	});
 });
 
 describe("DELETE /api/admin/sessions/:id (#241d)", () => {
@@ -522,5 +539,27 @@ describe("DELETE /api/admin/sessions/:id (#241d)", () => {
 		expect(res.status).toBe(403);
 		expect(get).not.toHaveBeenCalled();
 		expect(kill).not.toHaveBeenCalled();
+	});
+
+	it("returns 500 with a generic body when kill throws", async () => {
+		// purgeWorkspace's own failure is logged-and-swallowed inside the
+		// handler (the row removal still happens), so the failure path
+		// we surface here is the kill() throw — pre-terminate, pre-row-
+		// drop, the part the catch block actually owns.
+		const get = vi.fn(async () => meta());
+		const kill = vi.fn(async () => {
+			throw new Error("docker daemon unreachable");
+		});
+		const terminate = vi.fn(async () => undefined);
+		await spinUp(vi.fn(), {
+			sessions: { get, terminate } as unknown as Partial<SessionManager>,
+			docker: { kill } as unknown as Partial<DockerManager>,
+		});
+
+		const res = await fetch(`${baseUrl}/api/admin/sessions/s-any`, { method: "DELETE" });
+		expect(res.status).toBe(500);
+		const body = (await res.json()) as { error: string };
+		expect(body.error).toBe("Internal server error");
+		expect(body.error).not.toContain("docker daemon");
 	});
 });
