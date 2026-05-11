@@ -11,6 +11,7 @@ import { encryptAuthCredentials, type SessionConfigRecord } from "../sessionConf
 import {
 	buildCloneArgv,
 	CloneCredentialMissingError,
+	NOAUTH_CLONE_SCRIPT,
 	PAT_CLONE_SCRIPT,
 	patEnv,
 	resolveTargetAbsPath,
@@ -143,7 +144,7 @@ describe("runCloneRepo", () => {
 		expect(docker.streamExec).not.toHaveBeenCalled();
 	});
 
-	it("invokes streamExec with the cloning argv for repo.auth='none'", async () => {
+	it("invokes streamExec with the no-auth clone bash script and env-encoded values (#254)", async () => {
 		await runCloneRepo({
 			sessionId: "sess-1",
 			config: makeConfig({
@@ -154,27 +155,30 @@ describe("runCloneRepo", () => {
 		expect(docker.streamExec).toHaveBeenCalledTimes(1);
 		const [sessionId, opts] = docker.streamExec.mock.calls[0]!;
 		expect(sessionId).toBe("sess-1");
-		expect(opts.cmd).toEqual([
-			"git",
-			"clone",
-			"--branch",
-			"main",
-			"--depth",
-			"1",
-			"--",
-			"https://example.com/r",
-			"/home/developer/workspace",
-		]);
+		// Shell-mode (#254): no-auth now uses `bash -c <NOAUTH_CLONE_SCRIPT>`
+		// so the clone-into-temp + move-into-target flow works even when the
+		// workspace is non-empty (entrypoint.sh seeds .npm-global before
+		// bootstrap runs).
+		expect(opts.cmd[0]).toBe("bash");
+		expect(opts.cmd[1]).toBe("-c");
+		// User values reach git via env vars, NOT via shell-interpolated
+		// argv strings — same security model as PAT/SSH. A schema regex
+		// already blocks `;` in URLs (#213), but env-encoding is the
+		// load-bearing layer for any value that slips past the regex.
+		expect(opts.env).toEqual({
+			ST_URL: "https://example.com/r",
+			ST_REF: "main",
+			ST_DEPTH: "1",
+			ST_TARGET_ABS: "/home/developer/workspace",
+		});
 		expect(opts.workingDir).toBe("/home/developer/workspace");
 	});
 
-	// The runner is argv-mode (no `bash -c`) so a hostile-but-schema-
-	// passing URL like one containing a literal `;` would reach git as a
-	// single positional argument, NOT as a shell command separator. The
-	// schema regex blocks `;` in URLs as of #213, but the argv-only
-	// invocation is the load-bearing layer that defangs values that slip
-	// past the regex.
-	it("never wraps the command in a shell layer", async () => {
+	it("env-encodes user values (no shell-interpolation in argv)", async () => {
+		// Switched to shell-mode (#254) but the security model is the same:
+		// user values land in env, the script references them double-quoted,
+		// so shell-meta is inert. argv contains only `bash -c <script>` —
+		// no user-controlled strings.
 		await runCloneRepo({
 			sessionId: "sess-1",
 			config: makeConfig({
@@ -183,13 +187,17 @@ describe("runCloneRepo", () => {
 			docker: docker as unknown as DockerManager,
 		});
 		const [, opts] = docker.streamExec.mock.calls[0]!;
-		// argv[0] must be `git`, not `bash` or `sh`.
-		expect(opts.cmd[0]).toBe("git");
-		expect(opts.cmd).not.toContain("bash");
-		expect(opts.cmd).not.toContain("-c");
+		// argv has exactly 3 entries — bash, -c, the static script body.
+		// Anything else would indicate a regression that re-introduced
+		// shell-interpolated argv.
+		expect(opts.cmd).toHaveLength(3);
+		expect(opts.cmd[0]).toBe("bash");
+		expect(opts.cmd[1]).toBe("-c");
+		expect(opts.cmd[2]).not.toContain("https://example.com/r");
+		expect(opts.env?.ST_URL).toBe("https://example.com/r");
 	});
 
-	it("clones into a subdir when target is set", async () => {
+	it("env-encodes the target as a subdir when target is set", async () => {
 		await runCloneRepo({
 			sessionId: "sess-1",
 			config: makeConfig({
@@ -202,13 +210,13 @@ describe("runCloneRepo", () => {
 			docker: docker as unknown as DockerManager,
 		});
 		const [, opts] = docker.streamExec.mock.calls[0]!;
-		expect(opts.cmd[opts.cmd.length - 1]).toBe("/home/developer/workspace/services/api");
+		expect(opts.env?.ST_TARGET_ABS).toBe("/home/developer/workspace/services/api");
 	});
 
-	// Empty target → workspace root. Documented as the replace-workspace
-	// mode signal. Test pins the resolution rather than the side-effects
-	// of git cloning into a non-empty workspace, which is git's job.
-	it("clones into the workspace root when target is empty", async () => {
+	// Empty target → workspace root. The clone-then-move script (#254)
+	// makes this case work even though the workspace is non-empty due to
+	// the entrypoint-seeded .npm-global directory.
+	it("env-encodes the target as the workspace root when target is empty", async () => {
 		await runCloneRepo({
 			sessionId: "sess-1",
 			config: makeConfig({
@@ -217,7 +225,7 @@ describe("runCloneRepo", () => {
 			docker: docker as unknown as DockerManager,
 		});
 		const [, opts] = docker.streamExec.mock.calls[0]!;
-		expect(opts.cmd[opts.cmd.length - 1]).toBe("/home/developer/workspace");
+		expect(opts.env?.ST_TARGET_ABS).toBe("/home/developer/workspace");
 	});
 
 	// ── #188 PR 188d — PAT auth path ───────────────────────────────────────
@@ -325,6 +333,42 @@ describe("runCloneRepo", () => {
 		// hang the bootstrap on a stdin prompt. Pinning so the PR
 		// doesn't accidentally remove the env it sets.
 		expect(PAT_CLONE_SCRIPT).toContain("GIT_TERMINAL_PROMPT=0");
+	});
+
+	// ── #254 — clone-and-move shape on all three scripts ───────────────────
+	//
+	// The temp-clone + mv-into-target flow is what makes a clone-into-
+	// workspace-root succeed when entrypoint.sh has already seeded
+	// .npm-global. Pin the marker fragments so a future edit that drops
+	// the temp redirection (and re-introduces `git clone <url> $TARGET`
+	// against a non-empty workspace) trips this assertion immediately.
+
+	it("all three clone scripts use temp+move into target (#254)", () => {
+		for (const script of [NOAUTH_CLONE_SCRIPT, PAT_CLONE_SCRIPT, SSH_CLONE_SCRIPT]) {
+			// Clone destination is the temp dir, NOT the target — git
+			// can't refuse the temp because we just created it.
+			expect(script).toContain('"$TMP_CLONE/repo"');
+			// `mv` into the target rather than letting `git clone`
+			// write directly there.
+			expect(script).toContain('mv "$f" "$ST_TARGET_ABS/"');
+			// Skip-on-conflict so the entrypoint-seeded .npm-global
+			// survives. A regression that overwrote silently would
+			// drop this branch.
+			expect(script).toMatch(/already exists in target/);
+			// dotglob so .git, .gitignore, etc. are part of the move.
+			expect(script).toContain("shopt -s dotglob nullglob");
+		}
+	});
+
+	it("NOAUTH_CLONE_SCRIPT is the minimal temp+move shape (no auth setup)", () => {
+		// No askpass, no SSH key write — just temp + clone + move.
+		expect(NOAUTH_CLONE_SCRIPT).not.toContain("ASKPASS_PATH");
+		expect(NOAUTH_CLONE_SCRIPT).not.toContain("GIT_SSH_COMMAND");
+		expect(NOAUTH_CLONE_SCRIPT).not.toContain("ST_PAT");
+		expect(NOAUTH_CLONE_SCRIPT).not.toContain("ST_SSH_KEY");
+		// `set -e` so any step in the move loop hard-fails the bootstrap
+		// rather than silently producing a half-populated workspace.
+		expect(NOAUTH_CLONE_SCRIPT).toMatch(/^set -e/);
 	});
 
 	// ── #188 PR 188d — SSH auth path ───────────────────────────────────────

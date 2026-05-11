@@ -94,12 +94,23 @@ export async function runCloneRepo(args: RunCloneRepoArgs): Promise<{ exitCode: 
 	);
 
 	if (repo.auth === "none") {
-		const cloneArgv = buildCloneArgv(repo.url, repo.ref, repo.depth, targetAbs);
-		// argv-mode (no shell) — user-controlled values reach `git` as
-		// positional args, never as shell tokens.
+		// Switched from argv-mode to shell-mode (#254) so the clone path
+		// can do "clone to temp, then move into target" — required when
+		// the target is the workspace root, because entrypoint.sh
+		// pre-seeds `/home/developer/workspace/.npm-global/` and
+		// `git clone <url> /home/developer/workspace` refuses non-empty
+		// targets. User values are env-encoded (`ST_URL`, `ST_REF`,
+		// etc.) and the script references them quoted, so shell-meta
+		// in any of them is inert — same security model as PAT/SSH.
+		const env = noAuthEnv(repo);
 		return docker.streamExec(
 			sessionId,
-			{ cmd: cloneArgv, workingDir: CONTAINER_WORKSPACE, signal },
+			{
+				cmd: ["bash", "-c", NOAUTH_CLONE_SCRIPT],
+				env,
+				workingDir: CONTAINER_WORKSPACE,
+				signal,
+			},
 			onOutput,
 		);
 	}
@@ -159,6 +170,11 @@ export function resolveTargetAbsPath(target: string | undefined): string {
 
 /**
  * Build the argv array for an `auth: "none"` clone.
+ *
+ * No longer used by the runtime clone path (#254 switched no-auth to
+ * shell-mode for the temp+move flow); kept for the unit-test that
+ * pins the argv shape in case a future change adds an argv-mode
+ * entry point or rolls back the shell move.
  */
 export function buildCloneArgv(
 	url: string,
@@ -175,6 +191,26 @@ export function buildCloneArgv(
 	}
 	argv.push("--", url, targetAbs);
 	return argv;
+}
+
+/**
+ * Env block for the no-auth clone (#254). Mirrors `patEnv` / `sshEnv`
+ * minus the credential field — same env-encoded shape so a future
+ * edit to the shared `CLONE_AND_MOVE_TAIL` script template doesn't
+ * have to branch per auth mode.
+ */
+export function noAuthEnv(repo: {
+	url: string;
+	ref?: string;
+	depth?: number | null;
+	target?: string;
+}): Record<string, string> {
+	return {
+		ST_URL: repo.url,
+		ST_REF: repo.ref ?? "",
+		ST_DEPTH: repo.depth != null ? String(repo.depth) : "",
+		ST_TARGET_ABS: resolveTargetAbsPath(repo.target),
+	};
 }
 
 /**
@@ -238,11 +274,55 @@ export function sshEnv(
  * future edit doesn't accidentally drop the `set -e`, the cleanup
  * trap, or the `--` separator.
  */
+/**
+ * Shared bash fragment that performs the clone-into-temp + move-into-target
+ * step (#254). All three modes (no-auth / PAT / SSH) append this AFTER
+ * their auth-setup bytes. `mv`-into-target (not `git clone <target>`)
+ * because the entrypoint.sh pre-seeds .npm-global into the workspace,
+ * which makes the workspace non-empty, which makes git refuse to clone
+ * into it. Skip-on-conflict so any pre-existing entry (e.g. .npm-global)
+ * survives untouched — a future workspace-side file collision yields a
+ * warning + skipped move, not a hard fail.
+ *
+ * Caller MUST have already exported / set:
+ *   ST_URL, ST_REF, ST_DEPTH, ST_TARGET_ABS, TMP_CLONE
+ * and any auth-related env vars (GIT_ASKPASS, GIT_SSH_COMMAND, ...).
+ * Caller is also responsible for installing the EXIT trap that cleans
+ * up TMP_CLONE (and any auth temp files).
+ */
+const CLONE_AND_MOVE_TAIL = `ARGS=("git" "clone")
+[ -n "$ST_REF" ] && ARGS+=("--branch" "$ST_REF")
+[ -n "$ST_DEPTH" ] && ARGS+=("--depth" "$ST_DEPTH")
+ARGS+=("--" "$ST_URL" "$TMP_CLONE/repo")
+"\${ARGS[@]}"
+mkdir -p "$ST_TARGET_ABS"
+# dotglob picks up dotfiles (e.g. .git, .gitignore) so the cloned
+# repo is complete inside the target. nullglob makes an empty
+# repo (no entries at all) a no-op instead of expanding to the
+# literal pattern.
+shopt -s dotglob nullglob
+for f in "$TMP_CLONE/repo"/*; do
+  name="$(basename "$f")"
+  if [ -e "$ST_TARGET_ABS/$name" ]; then
+    # Skip rather than overwrite. The workspace already has the
+    # entry (entrypoint-seeded .npm-global, or a future case where
+    # a user pre-populated something) and silently clobbering would
+    # destroy that data. Warn so the user sees it in the bootstrap
+    # log.
+    printf 'warning: skipping cloned entry %s — already exists in target\\n' "$name" >&2
+  else
+    mv "$f" "$ST_TARGET_ABS/"
+  fi
+done
+`;
+
 export const PAT_CLONE_SCRIPT = `set -e
 # Cleanup runs on EXIT (success or fail) so the askpass file never
-# survives the clone — the PAT it would print is gone with it.
+# survives the clone — the PAT it would print is gone with it. Same
+# cleanup also drops the temp-clone dir (#254).
 ASKPASS_PATH=$(mktemp /tmp/git-askpass-XXXXXXXX)
-cleanup() { rm -f "$ASKPASS_PATH"; }
+TMP_CLONE=$(mktemp -d /tmp/clone-XXXXXXXX)
+cleanup() { rm -f "$ASKPASS_PATH"; rm -rf "$TMP_CLONE"; }
 trap cleanup EXIT
 cat > "$ASKPASS_PATH" <<'ASKPASS_EOF'
 #!/bin/sh
@@ -257,12 +337,7 @@ export GIT_ASKPASS="$ASKPASS_PATH"
 # remote that doesn't accept the PAT would block the bootstrap on
 # stdin. We want a clean non-zero exit code instead.
 export GIT_TERMINAL_PROMPT=0
-ARGS=("git" "clone")
-[ -n "$ST_REF" ] && ARGS+=("--branch" "$ST_REF")
-[ -n "$ST_DEPTH" ] && ARGS+=("--depth" "$ST_DEPTH")
-ARGS+=("--" "$ST_URL" "$ST_TARGET_ABS")
-"\${ARGS[@]}"
-# Defensive unset AFTER the clone (NOT before — git invokes the
+${CLONE_AND_MOVE_TAIL}# Defensive unset AFTER the clone (NOT before — git invokes the
 # askpass shim as a child process which reads $ST_PAT from its
 # inherited env; unsetting before would break auth). PR #218 round
 # 2 NIT — symmetry with SSH script's pre-clone unset (which is safe
@@ -280,6 +355,8 @@ unset ST_PAT
  * Also exported for the unit-test that pins the script shape.
  */
 export const SSH_CLONE_SCRIPT = `set -e
+TMP_CLONE=$(mktemp -d /tmp/clone-XXXXXXXX)
+trap 'rm -rf "$TMP_CLONE"' EXIT
 mkdir -p ~/.ssh
 chmod 700 ~/.ssh
 # printf '%s' (no trailing \\n) so a key that already ends in \\n
@@ -306,9 +383,16 @@ unset ST_SSH_KEY ST_KNOWN_HOSTS
 # hostile DNS / network can't substitute its own host key during
 # the clone.
 export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=yes"
-ARGS=("git" "clone")
-[ -n "$ST_REF" ] && ARGS+=("--branch" "$ST_REF")
-[ -n "$ST_DEPTH" ] && ARGS+=("--depth" "$ST_DEPTH")
-ARGS+=("--" "$ST_URL" "$ST_TARGET_ABS")
-"\${ARGS[@]}"
-`;
+${CLONE_AND_MOVE_TAIL}`;
+
+/**
+ * Bash script for the no-auth (public-repo) clone (#254). Same
+ * temp+move shape as PAT/SSH — uses the shared CLONE_AND_MOVE_TAIL
+ * so a future edit to the move logic propagates everywhere.
+ *
+ * Exported for the unit-test that pins the script shape.
+ */
+export const NOAUTH_CLONE_SCRIPT = `set -e
+TMP_CLONE=$(mktemp -d /tmp/clone-XXXXXXXX)
+trap 'rm -rf "$TMP_CLONE"' EXIT
+${CLONE_AND_MOVE_TAIL}`;
