@@ -677,8 +677,7 @@ export function buildRouter(
 		// wire. See #262 round 1 NIT.
 		return {
 			name: body.name.trim(),
-			description:
-				typeof body.description === "string" ? body.description.trim() || null : null,
+			description: typeof body.description === "string" ? body.description.trim() || null : null,
 			leadUserId: body.leadUserId,
 		};
 	};
