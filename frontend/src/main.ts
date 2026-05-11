@@ -2145,12 +2145,12 @@ function openTemplatesModal(opener: HTMLElement) {
 function closeTemplatesModal() {
 	templatesModal.classList.remove("open");
 	templatesModal.setAttribute("aria-hidden", "true");
-	// Fall back to the desktop button if the opener is missing (legacy
-	// path or a future caller that forgot to set it). Matches the
-	// Invites convention — on mobile the desktop button is hidden, so a
-	// missing opener still drops focus, but that's a regression to flag
-	// in code review, not something to silently paper over here.
-	(templatesOpener ?? templatesBtn).focus();
+	// Fall back to whichever button is rendered for the current
+	// viewport if the opener is missing (legacy path or a future
+	// caller that forgot to set it). The resolver covers both
+	// desktop and mobile — `templatesBtn` is `display:none` on
+	// mobile and would silently drop focus there otherwise.
+	(templatesOpener ?? resolveTemplatesOpener()).focus();
 	templatesOpener = null;
 }
 
@@ -3364,6 +3364,15 @@ fileInput.addEventListener("change", async () => {
 
 let adminOpener: HTMLButtonElement | null = null;
 
+/** Symmetric with `resolveTemplatesOpener` — see that helper for the
+ *  rationale. Admin is opened from a single click site per surface,
+ *  so the resolver is currently only consumed by the close fallback,
+ *  but keeping it parallel to Templates makes the pattern uniform if
+ *  a future caller opens the admin modal from a third place. */
+function resolveAdminOpener(): HTMLButtonElement {
+	return adminBtn.offsetParent !== null ? adminBtn : sidebarAdminBtn;
+}
+
 function openAdminModal(opener: HTMLButtonElement) {
 	adminOpener = opener;
 	adminModal.classList.add("open");
@@ -3375,9 +3384,9 @@ function openAdminModal(opener: HTMLButtonElement) {
 function closeAdminModal() {
 	adminModal.classList.remove("open");
 	adminModal.setAttribute("aria-hidden", "true");
-	// Fall back to the desktop button if the opener is missing — same
-	// rationale as closeTemplatesModal / closeInvitesModal.
-	(adminOpener ?? adminBtn).focus();
+	// Fall back to the viewport-rendered button if the opener is
+	// missing — same rationale as closeTemplatesModal.
+	(adminOpener ?? resolveAdminOpener()).focus();
 	adminOpener = null;
 }
 
