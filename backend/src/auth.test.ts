@@ -17,6 +17,7 @@ import {
 	AUTH_COOKIE_NAME,
 	extractTokenFromCookieHeader,
 	isAllowedWsOrigin,
+	isUserAdmin,
 	originMatches,
 	parseCorsOrigins,
 	requireAdmin,
@@ -701,6 +702,45 @@ describe("requireAdmin", () => {
 		expect(json).toHaveBeenCalledWith({ error: "Internal server error" });
 		expect(next).not.toHaveBeenCalled();
 		errSpy.mockRestore();
+	});
+});
+
+// ── isUserAdmin (#201b) ────────────────────────────────────────────────────
+// The boolean predicate extracted from requireAdmin so non-middleware
+// contexts (SessionManager.assertCanObserve) can ask the same question.
+// Critical contract: throws on D1 failure rather than silently returning
+// false — `assertCanObserve` relies on this to surface a 500 instead of
+// silently denying an admin observer when the lookup blips.
+
+describe("isUserAdmin", () => {
+	beforeEach(() => {
+		dbStubs.d1Query.mockReset();
+	});
+
+	it("returns true when the row has is_admin = 1", async () => {
+		dbStubs.d1Query.mockResolvedValueOnce({ results: [{ is_admin: 1 }], meta: { changes: 0 } });
+		expect(await isUserAdmin("u-admin")).toBe(true);
+	});
+
+	it("returns false when the row has is_admin = 0", async () => {
+		dbStubs.d1Query.mockResolvedValueOnce({ results: [{ is_admin: 0 }], meta: { changes: 0 } });
+		expect(await isUserAdmin("u-regular")).toBe(false);
+	});
+
+	it("returns false when no row exists (user deleted mid-session)", async () => {
+		dbStubs.d1Query.mockResolvedValueOnce({ results: [], meta: { changes: 0 } });
+		expect(await isUserAdmin("u-ghost")).toBe(false);
+	});
+
+	it("propagates D1 failures rather than silently returning false", async () => {
+		// Pinning contract — if a future refactor wraps the lookup in
+		// try/catch and returns false on failure, `assertCanObserve`'s
+		// admin tier would silently regress from "D1 down → 500" to
+		// "D1 down → 403" for admin observers. The middleware-level
+		// test above pins requireAdmin's 500, but only this case pins
+		// the throw at the helper level. See #263 round 2 NIT.
+		dbStubs.d1Query.mockRejectedValueOnce(new Error("D1 down"));
+		await expect(isUserAdmin("u-admin")).rejects.toThrow("D1 down");
 	});
 });
 
