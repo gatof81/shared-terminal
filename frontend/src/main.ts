@@ -2639,7 +2639,12 @@ document.addEventListener("keydown", (e) => {
 		// Escape with one of them open AND the sidebar visible
 		// would close both at once. PR #230 round 1 NIT.
 		templatesModal.classList.contains("open") ||
-		saveTemplateModal.classList.contains("open")
+		saveTemplateModal.classList.contains("open") ||
+		// adminModal joined the modal lineup in #241e; without this
+		// guard, Escape with the admin dashboard open AND the
+		// sidebar drawer visible would close the sidebar instead
+		// of the dialog.
+		adminModal.classList.contains("open")
 	)
 		return;
 	if (!mainEl.classList.contains("sidebar-open")) return;
@@ -2974,6 +2979,8 @@ document.addEventListener("keydown", (e) => {
 		closeNewSessionModal();
 	} else if (templatesModal.classList.contains("open")) {
 		closeTemplatesModal();
+	} else if (adminModal.classList.contains("open")) {
+		closeAdminModal();
 	} else if (invitesModal.classList.contains("open")) {
 		closeInvitesModal();
 	} else if (pasteModal.classList.contains("open")) {
@@ -3531,6 +3538,15 @@ async function confirmAndAct(
 		await refreshAdmin();
 	} catch (err) {
 		showToast((err as Error).message, true);
+	} finally {
+		// `refreshAdmin` swallows its own errors and toasts, so this
+		// `catch` only fires on `action()` itself throwing. If the
+		// action succeeded but refresh failed AFTER, the DOM hasn't
+		// been rebuilt and the original `btn` is still mounted —
+		// re-enable it unconditionally here so the operator isn't
+		// stuck with a permanently-disabled button until the next
+		// manual Refresh. (When refresh DID rebuild the rows, this
+		// runs on an orphaned button object — a harmless no-op.)
 		btn.disabled = false;
 	}
 }
