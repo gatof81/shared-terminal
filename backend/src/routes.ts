@@ -675,10 +675,17 @@ export function buildRouter(
 		// the admin UI while the column reports non-null, which is
 		// indistinguishable from an intentionally-set description on the
 		// wire. See #262 round 1 NIT.
+		//
+		// Trim `leadUserId` too — a whitespace-padded value slips past
+		// the `length === 0` check, then `assertUserExists` runs an
+		// exact-string `SELECT id FROM users WHERE id = ?` against
+		// the padded string and returns 404 even when the user exists.
+		// Same shape as the `body.userId` trim in the addMember route
+		// below. See #262 round 2 NIT.
 		return {
 			name: body.name.trim(),
 			description: typeof body.description === "string" ? body.description.trim() || null : null,
-			leadUserId: body.leadUserId,
+			leadUserId: body.leadUserId.trim(),
 		};
 	};
 
@@ -785,12 +792,17 @@ export function buildRouter(
 		requireAdmin,
 		async (req: Request, res: Response) => {
 			const body = req.body as { userId?: unknown };
-			if (typeof body.userId !== "string" || body.userId.length === 0) {
+			if (typeof body.userId !== "string" || body.userId.trim().length === 0) {
 				res.status(400).json({ error: "body.userId is required (non-empty string)" });
 				return;
 			}
+			// Trim before persistence — a whitespace-padded id slips past
+			// the length check above but `assertUserExists` does an exact-
+			// string match against `users.id`, so the padded value 404s
+			// even when the user genuinely exists. See #262 round 2 NIT.
+			const userId = body.userId.trim();
 			try {
-				await groups.addMember(req.params.id, body.userId);
+				await groups.addMember(req.params.id, userId);
 				res.status(204).send();
 			} catch (err) {
 				handleGroupError(err, res, "groups addMember");
