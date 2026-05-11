@@ -644,49 +644,58 @@ export function buildRouter(
 			description?: unknown;
 			leadUserId?: unknown;
 		};
-		if (typeof body.name !== "string" || body.name.trim().length === 0) {
+		// Trim-first, then check empty + cap. Mirrors the template route
+		// convention (`routes.ts` template handler) and closes two foot-
+		// guns the earlier pre-trim shape had:
+		//   1. `leadUserId: "   "` slipped past `length === 0`, got
+		//      trimmed to "", and `assertUserExists("")` returned a
+		//      confusing `404 User  not found` (double-space message).
+		//      See #262 round 5 SHOULD-FIX.
+		//   2. Length caps fired against the pre-trim string, so
+		//      `"a"+" ".repeat(100)` got rejected at 100 chars even
+		//      though only 1 char would actually persist — inconsistent
+		//      with how the template route handles the same shape.
+		if (typeof body.name !== "string") {
+			res.status(400).json({ error: "body.name is required (non-empty string)" });
+			return null;
+		}
+		const name = body.name.trim();
+		if (name.length === 0) {
 			res.status(400).json({ error: "body.name is required (non-empty string)" });
 			return null;
 		}
 		// Cap consistent with other user-controlled strings — same shape
 		// as session-name / template-name caps elsewhere in the codebase.
-		if (body.name.length > 100) {
+		if (name.length > 100) {
 			res.status(400).json({ error: "body.name must be at most 100 characters" });
 			return null;
 		}
-		if (
-			body.description !== undefined &&
-			body.description !== null &&
-			typeof body.description !== "string"
-		) {
-			res.status(400).json({ error: "body.description must be a string, null, or omitted" });
-			return null;
+		let description: string | null = null;
+		if (body.description !== undefined && body.description !== null) {
+			if (typeof body.description !== "string") {
+				res.status(400).json({ error: "body.description must be a string, null, or omitted" });
+				return null;
+			}
+			const trimmed = body.description.trim();
+			if (trimmed.length > 500) {
+				res.status(400).json({ error: "body.description must be at most 500 characters" });
+				return null;
+			}
+			// Collapse whitespace-only to null so a `"   "` payload
+			// doesn't render visually blank while the column reports
+			// non-null. Same shape as the template description handling.
+			description = trimmed || null;
 		}
-		if (typeof body.description === "string" && body.description.length > 500) {
-			res.status(400).json({ error: "body.description must be at most 500 characters" });
-			return null;
-		}
-		if (typeof body.leadUserId !== "string" || body.leadUserId.length === 0) {
+		if (typeof body.leadUserId !== "string") {
 			res.status(400).json({ error: "body.leadUserId is required (non-empty string)" });
 			return null;
 		}
-		// Trim + collapse-empty mirrors the template description handling.
-		// A `"   "` value passed verbatim would render visually blank in
-		// the admin UI while the column reports non-null, which is
-		// indistinguishable from an intentionally-set description on the
-		// wire. See #262 round 1 NIT.
-		//
-		// Trim `leadUserId` too — a whitespace-padded value slips past
-		// the `length === 0` check, then `assertUserExists` runs an
-		// exact-string `SELECT id FROM users WHERE id = ?` against
-		// the padded string and returns 404 even when the user exists.
-		// Same shape as the `body.userId` trim in the addMember route
-		// below. See #262 round 2 NIT.
-		return {
-			name: body.name.trim(),
-			description: typeof body.description === "string" ? body.description.trim() || null : null,
-			leadUserId: body.leadUserId.trim(),
-		};
+		const leadUserId = body.leadUserId.trim();
+		if (leadUserId.length === 0) {
+			res.status(400).json({ error: "body.leadUserId is required (non-empty string)" });
+			return null;
+		}
+		return { name, description, leadUserId };
 	};
 
 	// Single serializer keeps the wire shape consistent across list / get /

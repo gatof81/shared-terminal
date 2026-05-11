@@ -301,6 +301,38 @@ describe("POST /api/admin/groups", () => {
 		expect(res.status).toBe(400);
 	});
 
+	it("rejects a whitespace-only leadUserId with 400 (not a confusing 404)", async () => {
+		// Pins #262 round-5 SHOULD-FIX: a whitespace-only leadUserId
+		// pre-fix passed the length-zero gate (length 3), got trimmed
+		// to "", then assertUserExists("") returned a misleading
+		// `404 User  not found` (double-space message). The trim-first
+		// shape catches this at the boundary as a 400.
+		await spinUp();
+		const res = await post({ name: "X", leadUserId: "   " });
+		expect(res.status).toBe(400);
+		expect(groupsStubs.create).not.toHaveBeenCalled();
+	});
+
+	it("rejects a whitespace-only name with 400", async () => {
+		await spinUp();
+		const res = await post({ name: "   ", leadUserId: "u-lead" });
+		expect(res.status).toBe(400);
+		expect(groupsStubs.create).not.toHaveBeenCalled();
+	});
+
+	it("accepts a name padded with whitespace and stores it trimmed", async () => {
+		// Pre-trim length caps would have rejected "a" + " ".repeat(100)
+		// as too long (101 chars) even though only 1 char persists.
+		// Trim-first cap matches the template route convention.
+		await spinUp();
+		const padded = `${"x".repeat(50)}${" ".repeat(50)}`; // 100 raw, 50 trimmed
+		const res = await post({ name: padded, leadUserId: "u-lead" });
+		expect(res.status).toBe(201);
+		expect(groupsStubs.create).toHaveBeenCalledWith(
+			expect.objectContaining({ name: "x".repeat(50) }),
+		);
+	});
+
 	it("creates and returns 201 with the serialised group", async () => {
 		await spinUp();
 		const res = await post({ name: "Frontend", leadUserId: "u-lead" });
