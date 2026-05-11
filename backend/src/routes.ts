@@ -720,13 +720,21 @@ export function buildRouter(
 		requireAdmin,
 		async (req: Request, res: Response) => {
 			try {
-				// Parallelise the two reads — `listMembers` does its own
-				// existence guard via `getById`, so the serial shape
-				// `await getById; await listMembers` stalled on the
-				// network for a check `listMembers` will redo anyway.
-				// `Promise.all` rejects on the first error, so a
+				// Parallelise the two reads so the outer `getById` fires
+				// concurrently with `listMembers` (which issues its own
+				// internal `getById` for the existence guard + the
+				// member query). D1 call count is the same — three —
+				// but the wallclock drops from three serial hops to two
+				// (the outer getById and listMembers' inner getById
+				// finish together, then the member query runs alone).
+				// `Promise.all` rejects on the first error so a
 				// missing-group still 404s cleanly via the
-				// `handleGroupError` catch below. See #262 round 1 NIT.
+				// `handleGroupError` catch below. Eliminating the
+				// duplicate guard entirely would mean dropping the
+				// existence check inside `listMembers`, which the v1
+				// API contract relies on (it 404s an unknown groupId
+				// instead of silently returning []). See #262 rounds
+				// 1 + 4 NITs.
 				const [group, members] = await Promise.all([
 					groups.getById(req.params.id),
 					groups.listMembers(req.params.id),
