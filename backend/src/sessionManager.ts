@@ -8,12 +8,17 @@ import { v4 as uuidv4 } from "uuid";
 import { isUserAdmin } from "./auth.js";
 import { parseD1Utc } from "./d1Time.js";
 import { d1Query } from "./db.js";
-// Static import is safe despite groups.ts → sessionManager.ts importing
-// `ForbiddenError`/`NotFoundError` — ESM live bindings resolve at use
-// time (inside function bodies) rather than module-init time, and
-// neither module references the other at top level. See the
-// `assertCanObserve` block below for why this primitive lives in
-// `groups.ts` rather than being inlined here.
+// CJS-safe circular dep: the project compiles to CommonJS, where
+// TypeScript emits named imports as property accesses on a captured
+// module-exports reference (e.g. `groups_js_1.isLeadOfUserViaGroup`)
+// rather than destructured variables. The reference is captured early
+// when both modules first load, but the actual property access is
+// deferred to call time — by which point both modules have completed
+// their top-level evaluation and every export is present. The
+// reciprocal import in `groups.ts`
+// (`import { ForbiddenError, NotFoundError } from "./sessionManager.js"`)
+// is safe for the same reason. ESM live bindings give the same
+// behaviour but the load-bearing mechanism here is the CJS shape.
 import { isLeadOfUserViaGroup } from "./groups.js";
 import { logger } from "./logger.js";
 import type { CreateSessionOpts, SessionMeta, SessionStatus } from "./types.js";
