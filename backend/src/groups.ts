@@ -321,29 +321,37 @@ export async function create(input: GroupInput): Promise<Group> {
  * see what they're doing.
  */
 export async function update(groupId: string, input: GroupUpdateInput): Promise<Group> {
-	// Read first so a missing group returns 404 rather than a
-	// silent "0 rows updated" that the route would otherwise have
-	// to translate manually. Cheap — one D1 round-trip we'd need
-	// anyway to return the fresh row.
-	await getById(groupId);
+	// Read first so a missing group returns 404 rather than a silent
+	// "0 rows updated" that the route would otherwise have to translate
+	// manually. The current row is also used to skip the member-INSERT
+	// below when the lead is unchanged (avoiding a wasted D1 call +
+	// swallowed UNIQUE error on every rename-only PUT).
+	const current = await getById(groupId);
 	await assertUserExists(input.leadUserId);
 	await d1Query(
 		"UPDATE user_groups SET name = ?, description = ?, lead_user_id = ?, " +
 			"updated_at = datetime('now') WHERE id = ?",
 		[input.name, input.description ?? null, input.leadUserId, groupId],
 	);
-	// Mirror create's behaviour: the new lead becomes an implicit
-	// member if not already one. Duplicate-INSERT is the expected
-	// path when the lead is already a member; swallow the unique
-	// constraint error.
-	try {
-		await d1Query("INSERT INTO user_group_members (group_id, user_id) VALUES (?, ?)", [
-			groupId,
-			input.leadUserId,
-		]);
-	} catch (err) {
-		if (!/UNIQUE constraint failed|already exists/i.test((err as Error).message)) {
-			throw err;
+	// Only re-insert the lead-as-member when the lead actually changed.
+	// On a rename-only PUT (lead unchanged), the lead is already in the
+	// member table from `create` (or a previous lead-reassignment), so
+	// running the INSERT just to swallow a UNIQUE error is one wasted
+	// D1 call per call. See #262 round 3 NIT.
+	if (input.leadUserId !== current.leadUserId) {
+		try {
+			await d1Query("INSERT INTO user_group_members (group_id, user_id) VALUES (?, ?)", [
+				groupId,
+				input.leadUserId,
+			]);
+		} catch (err) {
+			// The new lead might already be a regular member from a
+			// prior `addMember` — that's the legitimate path the
+			// unique-constraint catch handles. Anything else
+			// propagates.
+			if (!/UNIQUE constraint failed|already exists/i.test((err as Error).message)) {
+				throw err;
+			}
 		}
 	}
 	const row = await fetchRow(groupId);

@@ -247,6 +247,22 @@ describe("groups.update", () => {
 		const g = await groups.update("g-1", { name: "X", leadUserId: "u-new-lead" });
 		expect(g.leadUserId).toBe("u-new-lead");
 	});
+
+	it("skips the lead-as-member INSERT when the lead is unchanged (rename-only PUT)", async () => {
+		// Pins #262 round-3 NIT: a rename-only PUT (same lead) should
+		// NOT re-INSERT the lead-as-member. Pre-fix this issued a
+		// 5th D1 call that always hit a swallowed UNIQUE error.
+		mockNextRows([groupRow({ leadUserId: "u-lead" })]); // getById
+		mockNextRows([{ id: "u-lead" }]); // user-exists (same lead)
+		mockNextRows([], 1); // UPDATE
+		mockNextRows([groupRow({ leadUserId: "u-lead", name: "Renamed" })]); // re-read
+		const g = await groups.update("g-1", { name: "Renamed", leadUserId: "u-lead" });
+		expect(g.name).toBe("Renamed");
+		expect(g.leadUserId).toBe("u-lead");
+		// Exactly 4 D1 calls — getById, user-exists, UPDATE, re-read.
+		// No member INSERT.
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(4);
+	});
 });
 
 // ── deleteGroup ─────────────────────────────────────────────────────────────
