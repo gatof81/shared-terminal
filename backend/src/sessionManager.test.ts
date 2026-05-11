@@ -94,6 +94,55 @@ describe("SessionManager.create — quota filter", () => {
 	});
 });
 
+// ── listAll (#241d) ────────────────────────────────────────────────────────
+
+describe("SessionManager.listAll", () => {
+	it("issues a single JOIN with the users table, newest-first, capped by ADMIN_LIST_LIMIT", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		await mgr.listAll();
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(1);
+		const [sql, params] = dbStubs.d1Query.mock.calls[0]!;
+		// JOIN shape: every session row → owner row via FK.
+		expect(sql).toMatch(/FROM\s+sessions\s+s\s+JOIN\s+users\s+u\s+ON\s+u\.id\s*=\s*s\.user_id/i);
+		// Newest-first ordering for the dashboard.
+		expect(sql).toMatch(/ORDER\s+BY\s+s\.created_at\s+DESC/i);
+		// LIMIT is present so a runaway deployment doesn't return a
+		// multi-megabyte blob.
+		expect(sql).toMatch(/LIMIT\s+\d+/i);
+		// No bound params — cross-user aggregate, no per-user filter.
+		expect(params).toBeUndefined();
+	});
+
+	it("rehydrates rows into SessionMeta + ownerUsername", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [{ ...fakeSessionRow("s1", "u1"), username: "alice" }],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		const list = await mgr.listAll();
+		expect(list).toHaveLength(1);
+		expect(list[0]?.sessionId).toBe("s1");
+		expect(list[0]?.userId).toBe("u1");
+		expect(list[0]?.ownerUsername).toBe("alice");
+	});
+
+	it("returns [] when no sessions exist", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		await expect(mgr.listAll()).resolves.toEqual([]);
+	});
+});
+
 // ── countByStatus (#241) ───────────────────────────────────────────────────
 
 describe("SessionManager.countByStatus", () => {
