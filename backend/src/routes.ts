@@ -465,11 +465,14 @@ export function buildRouter(
 	// paired with the owner's username. Reads-only — destructive actions
 	// live on the /admin/sessions/:id endpoints below.
 	//
-	// SHARES `adminStatsIp` with `GET /admin/stats` — see the comment
-	// on `RateLimitConfig.adminStats` for the budget rationale. A
-	// dashboard polling both pairs of endpoints drains the bucket 2×
-	// faster than a single endpoint would, which is why the default is
-	// sized for the pair, not the individual route.
+	// SHARES `adminStatsIp` (keyed per-IP, not per-admin) with
+	// `GET /admin/stats` — see the comment on `RateLimitConfig.adminStats`
+	// for the budget rationale. A dashboard polling both pairs of
+	// endpoints drains the bucket 2× faster than a single endpoint
+	// would, which is why the default is sized for the pair, not the
+	// individual route. Per-IP keying means two admins behind the same
+	// NAT/office IP share the bucket — same tradeoff every other IP
+	// limiter in the app makes.
 	router.get(
 		"/admin/sessions",
 		adminStatsIp,
@@ -504,6 +507,14 @@ export function buildRouter(
 	// the swept session doesn't sit in the activity map collecting
 	// stale bumps from a future race (e.g. the owner reconnects between
 	// stop and the next `/start`). 204 on success, 500 on docker error.
+	//
+	// Response shape DIVERGES from the user-facing route: the user
+	// path re-reads and returns the updated SessionMeta so the
+	// caller can update its UI without a second fetch; the admin
+	// path returns 204 because the admin dashboard (#241e) always
+	// re-fetches the full session list after an action (operators
+	// see all sessions, not just the one they touched). Saves a D1
+	// round-trip per action.
 	router.post(
 		"/admin/sessions/:id/stop",
 		adminActionIp,
