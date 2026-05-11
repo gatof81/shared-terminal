@@ -266,7 +266,14 @@ export function openBootstrapWs(
 			handlers.onOutput(msg.data);
 		} else if (msg.type === "done") {
 			terminal = true;
-			handlers.onDone(true, 0);
+			// Server's `done` message has no exitCode field — postCreate
+			// exited zero by definition (otherwise we'd be in `fail`).
+			// Pass null to match the `exitCode: number | null` type's
+			// "not explicitly carried on the wire" semantic, rather than
+			// hardcoding 0 which a future caller reading `exitCode` on
+			// the success path would mistake for an explicit known
+			// value. See #208 round 1 NIT.
+			handlers.onDone(true, null);
 		} else if (msg.type === "fail") {
 			terminal = true;
 			handlers.onDone(false, msg.exitCode, msg.error, msg.stage);

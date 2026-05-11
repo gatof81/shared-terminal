@@ -386,7 +386,13 @@ async function handleBootstrapWs(
 			ws.close(1008, "Forbidden");
 			return;
 		}
+		// Symmetric with the NotFoundError / ForbiddenError branches above:
+		// send an inspectable `error` frame before the close so the client
+		// surfaces the actual failure shape rather than the generic
+		// "Bootstrap channel closed unexpectedly" string the openBootstrapWs
+		// path synthesises on bare-close. See #208 round 1 NIT.
 		logger.error(`[ws] bootstrap auth failed for ${sessionId}: ${(err as Error).message}`);
+		sendError(ws, "Internal error");
 		ws.close(1011, "Internal error");
 		return;
 	}
