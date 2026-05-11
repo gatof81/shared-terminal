@@ -98,6 +98,8 @@ const sidebarToggleBtn = document.getElementById("sidebar-toggle") as HTMLButton
 const sidebarBackdrop = document.getElementById("sidebar-backdrop")!;
 const sidebarInvitesBtn = document.getElementById("sidebar-invites-btn") as HTMLButtonElement;
 const sidebarAdminBtn = document.getElementById("sidebar-admin-btn") as HTMLButtonElement;
+const templatesBtn = document.getElementById("templates-btn") as HTMLButtonElement;
+const adminBtn = document.getElementById("admin-btn") as HTMLButtonElement;
 const adminModal = document.getElementById("admin-modal")!;
 const adminStatsEl = document.getElementById("admin-stats")!;
 const adminSessionsListEl = document.getElementById("admin-sessions-list")!;
@@ -248,6 +250,7 @@ function applyAdminVisibility() {
 	const admin = isAdmin();
 	invitesBtn.classList.toggle("hidden", !admin);
 	sidebarInvitesBtn.classList.toggle("hidden", !admin);
+	adminBtn.classList.toggle("hidden", !admin);
 	sidebarAdminBtn.classList.toggle("hidden", !admin);
 }
 
@@ -1940,7 +1943,7 @@ newSessionForm.addEventListener("submit", async (e) => {
 			// `ORDER BY updated_at DESC`). `openTemplatesModal` already
 			// kicks off `refreshTemplatesList` so no separate fetch
 			// is needed here.
-			openTemplatesModal(sidebarTemplatesBtn);
+			openTemplatesModal(resolveTemplatesOpener());
 		} catch (err) {
 			showToast((err as Error).message, true);
 			newSessionSubmitBtn.disabled = false;
@@ -2114,6 +2117,24 @@ const templatesEmptyHint = document.getElementById("templates-empty-hint") as HT
 
 let templatesOpener: HTMLElement | null = null;
 
+/**
+ * Pick the Templates button that's actually rendered for the current
+ * viewport — `templatesBtn` on desktop, `sidebarTemplatesBtn` on mobile.
+ * `offsetParent === null` is the standard "is this element rendered"
+ * test (returns null for `display:none` ancestors), and the header /
+ * sidebar split is exactly the case it was designed for.
+ *
+ * Used by callers that open the templates modal from a third place
+ * (e.g. the save-template flow re-opening templates after a save) —
+ * those callers don't know which button the user clicked first, so
+ * they must resolve the contextually-correct opener themselves.
+ * Without this, focus restoration on close would land on a hidden
+ * element and silently drop to `document.body`. See PR #257 review.
+ */
+function resolveTemplatesOpener(): HTMLButtonElement {
+	return templatesBtn.offsetParent !== null ? templatesBtn : sidebarTemplatesBtn;
+}
+
 function openTemplatesModal(opener: HTMLElement) {
 	templatesOpener = opener;
 	templatesModal.classList.add("open");
@@ -2124,7 +2145,12 @@ function openTemplatesModal(opener: HTMLElement) {
 function closeTemplatesModal() {
 	templatesModal.classList.remove("open");
 	templatesModal.setAttribute("aria-hidden", "true");
-	(templatesOpener ?? sidebarTemplatesBtn).focus();
+	// Fall back to whichever button is rendered for the current
+	// viewport if the opener is missing (legacy path or a future
+	// caller that forgot to set it). The resolver covers both
+	// desktop and mobile — `templatesBtn` is `display:none` on
+	// mobile and would silently drop focus there otherwise.
+	(templatesOpener ?? resolveTemplatesOpener()).focus();
 	templatesOpener = null;
 }
 
@@ -2221,6 +2247,7 @@ templatesModal.addEventListener("click", (e) => {
 	if (target.hasAttribute("data-close-modal")) closeTemplatesModal();
 });
 
+templatesBtn.addEventListener("click", () => openTemplatesModal(templatesBtn));
 sidebarTemplatesBtn.addEventListener("click", () => openTemplatesModal(sidebarTemplatesBtn));
 
 async function deleteTemplateConfirmed(id: string, card: HTMLDivElement) {
@@ -2244,7 +2271,7 @@ async function useTemplate(id: string) {
 	try {
 		const t = await getTemplate(id);
 		closeTemplatesModal();
-		openNewSessionModal(sidebarTemplatesBtn);
+		openNewSessionModal(resolveTemplatesOpener());
 		applyTemplateToForm(t);
 		showToast(`Loaded template "${t.name}". Fill in any required secrets, then Create.`);
 	} catch (err) {
@@ -2268,7 +2295,7 @@ async function editTemplate(id: string) {
 	try {
 		const t = await getTemplate(id);
 		closeTemplatesModal();
-		openNewSessionModal(sidebarTemplatesBtn);
+		openNewSessionModal(resolveTemplatesOpener());
 		applyTemplateToForm(t);
 		setNewSessionModalMode(t);
 	} catch (err) {
@@ -3337,6 +3364,15 @@ fileInput.addEventListener("change", async () => {
 
 let adminOpener: HTMLButtonElement | null = null;
 
+/** Symmetric with `resolveTemplatesOpener` — see that helper for the
+ *  rationale. Admin is opened from a single click site per surface,
+ *  so the resolver is currently only consumed by the close fallback,
+ *  but keeping it parallel to Templates makes the pattern uniform if
+ *  a future caller opens the admin modal from a third place. */
+function resolveAdminOpener(): HTMLButtonElement {
+	return adminBtn.offsetParent !== null ? adminBtn : sidebarAdminBtn;
+}
+
 function openAdminModal(opener: HTMLButtonElement) {
 	adminOpener = opener;
 	adminModal.classList.add("open");
@@ -3348,7 +3384,9 @@ function openAdminModal(opener: HTMLButtonElement) {
 function closeAdminModal() {
 	adminModal.classList.remove("open");
 	adminModal.setAttribute("aria-hidden", "true");
-	(adminOpener ?? sidebarAdminBtn).focus();
+	// Fall back to the viewport-rendered button if the opener is
+	// missing — same rationale as closeTemplatesModal.
+	(adminOpener ?? resolveAdminOpener()).focus();
 	adminOpener = null;
 }
 
@@ -3357,6 +3395,7 @@ adminModal.addEventListener("click", (e) => {
 	if (target.hasAttribute("data-close-modal")) closeAdminModal();
 });
 
+adminBtn.addEventListener("click", () => openAdminModal(adminBtn));
 sidebarAdminBtn.addEventListener("click", () => openAdminModal(sidebarAdminBtn));
 
 adminRefreshBtn.addEventListener("click", () => {
