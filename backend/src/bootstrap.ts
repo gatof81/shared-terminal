@@ -78,7 +78,6 @@ export async function markBootstrapped(sessionId: string): Promise<boolean> {
 
 // ── Streaming broadcaster (PR 185b2b) ─────────────────────────────────────
 
-/** Server → client message shape on the bootstrap WS channel. */
 /**
  * Wire format for the `/ws/bootstrap/<sessionId>` channel. Note the
  * `stage?` field on the `fail` variant (#252): the runner walks five

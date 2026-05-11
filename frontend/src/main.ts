@@ -1247,7 +1247,11 @@ function startBootstrapLiveTail(session: SessionInfo, name: string) {
 			// failure was actually in clone or dotfiles AND who
 			// hadn't configured a postCreate at all.
 			panel.classList.add("bootstrap-error");
-			const stageLabel = stage ?? "postCreate";
+			// Fall back to "bootstrap" (the generic), NOT "postCreate" —
+			// the no-stage case (config-fetch failure before any stage
+			// runs) would otherwise recreate the exact misleading
+			// "postCreate hook failed" label this PR is fixing.
+			const stageLabel = stage ?? "bootstrap";
 			heading.textContent = error
 				? `Bootstrap stage '${stageLabel}' failed (${error})`
 				: `Bootstrap stage '${stageLabel}' failed (exit ${exitCode ?? "?"})`;
