@@ -35,3 +35,13 @@ REVIEW.md
 
 # Claude Code worktrees / local agent state — never commit
 .claude/
+
+# Local environment artifacts that leak into the workspace when the dev
+# sandbox runs with $HOME or $XDG_CONFIG_HOME resolving here. Neither
+# belongs in source — .config/gh holds the developer's GitHub auth
+# (`hosts.yml`), and .npm-global is a host-side `npm install -g`
+# leak. The workspace-bound .npm-global referenced in
+# session-image/entrypoint.sh is INSIDE a session container's
+# bind-mounted workspace, NOT this source repo.
+.config/
+.npm-global/
