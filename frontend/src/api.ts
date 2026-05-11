@@ -219,12 +219,17 @@ export interface SessionConfigPayload {
 export type BootstrapServerMessage =
 	| { type: "output"; data: string }
 	| { type: "done"; success: true }
-	| { type: "fail"; exitCode: number; error?: string }
+	| { type: "fail"; exitCode: number; error?: string; stage?: string }
 	| { type: "error"; message: string };
 
 export interface BootstrapHandlers {
 	onOutput(chunk: string): void;
-	onDone(success: boolean, exitCode: number | null, error?: string): void;
+	/** `stage` (#252) names the pipeline stage that failed
+	 *  (`gitIdentity` / `clone` / `dotfiles` / `agentSeed` /
+	 *  `postCreate`) so the UI can render an accurate error.
+	 *  Undefined for the synthetic-error path (auth fail before
+	 *  any stage runs) or success. */
+	onDone(success: boolean, exitCode: number | null, error?: string, stage?: string): void;
 }
 
 /**
@@ -264,7 +269,7 @@ export function openBootstrapWs(
 			handlers.onDone(true, 0);
 		} else if (msg.type === "fail") {
 			terminal = true;
-			handlers.onDone(false, msg.exitCode, msg.error);
+			handlers.onDone(false, msg.exitCode, msg.error, msg.stage);
 		} else if (msg.type === "error") {
 			// Server-side auth/path failure — don't get a `fail`
 			// message after this, just a close. Hand a synthetic

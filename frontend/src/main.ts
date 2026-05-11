@@ -1209,7 +1209,8 @@ function startBootstrapLiveTail(session: SessionInfo, name: string) {
 	panel.appendChild(heading);
 	const hint = document.createElement("p");
 	hint.className = "bootstrap-error-hint";
-	hint.textContent = "Live output from your postCreate hook. The modal will close on success.";
+	hint.textContent =
+		"Live output from session bootstrap (clone, dotfiles, agent seed, postCreate). The modal will close on success.";
 	panel.appendChild(hint);
 	const pre = document.createElement("pre");
 	pre.className = "bootstrap-error-output";
@@ -1225,7 +1226,7 @@ function startBootstrapLiveTail(session: SessionInfo, name: string) {
 			// the user expects the tail, not the head.
 			pre.scrollTop = pre.scrollHeight;
 		},
-		onDone: (success, exitCode, error) => {
+		onDone: (success, exitCode, error, stage) => {
 			activeBootstrap = null;
 			if (success) {
 				closeNewSessionModal();
@@ -1238,13 +1239,22 @@ function startBootstrapLiveTail(session: SessionInfo, name: string) {
 			// styling, refresh sidebar so the failed row appears,
 			// re-enable the submit button so the user can fix the
 			// hook + try again.
+			//
+			// `stage` (#252) names the pipeline step that failed
+			// (gitIdentity / clone / dotfiles / agentSeed /
+			// postCreate). Without it, this UI used to hardcode
+			// "postCreate hook failed" — confusing for a user whose
+			// failure was actually in clone or dotfiles AND who
+			// hadn't configured a postCreate at all.
 			panel.classList.add("bootstrap-error");
+			const stageLabel = stage ?? "postCreate";
 			heading.textContent = error
-				? `postCreate hook failed (${error})`
-				: `postCreate hook failed (exit ${exitCode ?? "?"})`;
+				? `Bootstrap stage '${stageLabel}' failed (${error})`
+				: `Bootstrap stage '${stageLabel}' failed (exit ${exitCode ?? "?"})`;
 			hint.textContent =
-				"The bootstrap command exited non-zero, so the container was killed and the session marked failed. " +
-				"Captured output above — fix the command and create a new session.";
+				stage === "postCreate"
+					? "The postCreate command exited non-zero, so the container was killed and the session marked failed. Captured output above — fix the command and create a new session."
+					: `The '${stageLabel}' bootstrap stage failed, so the container was killed and the session marked failed. Captured output above — fix the ${stageLabel} config and create a new session.`;
 			void refreshSessions();
 			newSessionSubmitBtn.disabled = false;
 		},

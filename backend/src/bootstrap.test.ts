@@ -297,7 +297,10 @@ describe("runAsyncBootstrap", () => {
 		// Ordering invariant — status flip lands BEFORE kill.
 		expect(order).toEqual(["updateStatus", "kill"]);
 		expect(spies.runPostStart).not.toHaveBeenCalled();
-		expect(final).toEqual([{ type: "fail", exitCode: 1 }]);
+		// #252: fail message includes the stage label so the frontend
+		// can render an accurate error (rather than the legacy hard-
+		// coded "postCreate hook failed").
+		expect(final).toEqual([{ type: "fail", exitCode: 1, stage: "postCreate" }]);
 	});
 
 	it("throw path: runPostCreate throws → still flip + kill + broadcast fail with error", async () => {
@@ -423,7 +426,7 @@ describe("runAsyncBootstrap", () => {
 		expect(spies.kill).toHaveBeenCalledWith("sess-1");
 		expect(order).toEqual(["updateStatus", "kill"]);
 		expect(spies.runPostCreate).not.toHaveBeenCalled();
-		expect(final).toEqual([{ type: "fail", exitCode: 128 }]);
+		expect(final).toEqual([{ type: "fail", exitCode: 128, stage: "clone" }]);
 	});
 
 	it("throw path: runCloneRepo throws → flip + kill + broadcast fail with error", async () => {
@@ -548,7 +551,7 @@ describe("runAsyncBootstrap", () => {
 		expect(spies.kill).toHaveBeenCalledWith("sess-1");
 		expect(agentSeedStubs.runAgentSeed).not.toHaveBeenCalled();
 		expect(spies.runPostCreate).not.toHaveBeenCalled();
-		expect(final).toEqual([{ type: "fail", exitCode: 7 }]);
+		expect(final).toEqual([{ type: "fail", exitCode: 7, stage: "dotfiles" }]);
 	});
 
 	// PR #218 round 1 NIT: a stage that throws SYNCHRONOUSLY (before
