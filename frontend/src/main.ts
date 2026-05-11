@@ -3489,7 +3489,7 @@ function renderAdminSessions(sessions: AdminSession[]): void {
 		deleteBtn.className = "admin-session-delete";
 		deleteBtn.addEventListener("click", () =>
 			confirmAndAct(
-				`Force-delete "${s.name}" (${s.ownerUsername})?\n\nClick OK for soft-delete (workspace preserved), Cancel to skip.`,
+				`Soft-delete "${s.name}" (${s.ownerUsername})?\n\nContainer will be stopped and the row terminated; workspace is preserved.`,
 				deleteBtn,
 				async () => {
 					await adminForceDelete(s.sessionId, false);
