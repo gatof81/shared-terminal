@@ -208,14 +208,32 @@ export class DockerManager {
 	// ── Container lifecycle ─────────────────────────────────────────────────
 
 	async spawn(sessionId: string): Promise<string> {
-		const meta = await this.sessions.getOrThrow(sessionId);
-		// Read the typed session config (#185 / epic #184). When no row
-		// exists, `loadConfigForSpawn` returns null and we fall back to
-		// today's defaults — bare-create sessions stay byte-identical to
-		// pre-185 behaviour. Any D1 transient is downgraded to a warning
-		// inside the helper rather than failing the spawn; the alternative
-		// would gate every session creation on D1 health.
+		// Standalone spawn callers (POST /api/sessions, tests) don't have
+		// a pre-loaded config — load it here. `startContainer`'s cold-
+		// start branches pre-load the config so they can pass it through
+		// to `runPostStartIfConfigured` without a second D1 hop, and
+		// they call `spawnWithConfig` directly. See #207 round 1 NIT.
 		const config = await this.loadConfigForSpawn(sessionId);
+		return this.spawnWithConfig(sessionId, config);
+	}
+
+	/**
+	 * Body of `spawn` parameterised on a pre-loaded session config so the
+	 * cold-start path through `startContainer` doesn't pay an extra D1
+	 * round-trip — `runPostStartIfConfigured` needs the same config row
+	 * and would otherwise re-fetch it. The public `spawn(sessionId)`
+	 * wrapper above handles callers that don't have the config in hand.
+	 *
+	 * When no row exists, `config === null` and we fall back to today's
+	 * defaults — bare-create sessions stay byte-identical to pre-185
+	 * behaviour. Any D1 transient was already downgraded to a warning
+	 * inside `loadConfigForSpawn` rather than failing the spawn.
+	 */
+	private async spawnWithConfig(
+		sessionId: string,
+		config: SessionConfigRecord | null,
+	): Promise<string> {
+		const meta = await this.sessions.getOrThrow(sessionId);
 		// #186 — decrypt `secret`-typed entries before merge. Plaintext
 		// is in memory only here, between decrypt and the
 		// `createContainer` Env field. Tag-mismatch in `decryptSecret`
@@ -825,14 +843,26 @@ export class DockerManager {
 	async startContainer(sessionId: string): Promise<void> {
 		const meta = await this.sessions.getOrThrow(sessionId);
 
+		// Load the typed session config once at the top and thread it through
+		// every downstream consumer in this function — `spawnWithConfig`,
+		// `runPostStartIfConfigured`, and the port-mapping-refresh path on
+		// container restart. Pre-#207, both the spawn cases (Case 1 cold-
+		// start, Case 2 stale catch) loaded the row inside `spawn()` AND
+		// inside `runPostStartIfConfigured`, plus the restart path loaded it
+		// again to recover the per-port `public` flag — three D1 round-trips
+		// for one logical operation. CLAUDE.md flags D1 query count as the
+		// hot-path concern, so collapse to one. The wrapper `spawn()` retains
+		// its standalone-load shape for tests + the POST /api/sessions caller.
+		const config = await this.loadConfigForSpawn(sessionId);
+
 		// Case 1: no container exists (terminated session, or one whose container
 		// was removed out-of-band). Spawn a fresh container reusing the existing
 		// container name + workspace bind mount.
 		if (!meta.containerId) {
-			await this.spawn(sessionId);
+			await this.spawnWithConfig(sessionId, config);
 			await this.sessions.updateStatus(sessionId, "running");
 			logger.info(`[docker] respawned container for session ${sessionId}`);
-			await this.runPostStartIfConfigured(sessionId);
+			await this.runPostStartIfConfigured(sessionId, config);
 			return;
 		}
 
@@ -862,23 +892,21 @@ export class DockerManager {
 					const fresh = await this.docker.getContainer(meta.containerId).inspect();
 					const raw = parseInspectPorts(fresh.NetworkSettings?.Ports);
 					if (raw.length > 0) {
-						// Re-load config to recover the per-port
+						// Use the config pre-loaded at the top of
+						// `startContainer` to recover the per-port
 						// `public` flag — `stopContainer()` cleared
 						// the mapping rows that previously carried
 						// it, so config (the user's declarative
 						// intent at create time) is the authoritative
-						// source. Best-effort: a config-load failure
-						// here logs and falls back to "all private"
-						// (the safe default in `annotateWithPublic`).
-						let publicByContainer = new Map<number, boolean>();
-						try {
-							const cfg = await this.loadConfigForSpawn(sessionId);
-							publicByContainer = new Map((cfg?.ports ?? []).map((p) => [p.container, p.public]));
-						} catch (err) {
-							logger.warn(
-								`[docker] config reload for port-mapping refresh failed for ${sessionId}: ${(err as Error).message}`,
-							);
-						}
+						// source. A `null` config (D1 transient or
+						// no row at create time) collapses to "all
+						// private" via the empty-array default —
+						// matches `annotateWithPublic`'s safe
+						// fallback. Pre-#207 this was a separate
+						// D1 load wrapped in its own try/catch.
+						const publicByContainer = new Map(
+							(config?.ports ?? []).map((p) => [p.container, p.public]),
+						);
 						await setPortMappings(sessionId, annotateWithPublic(raw, publicByContainer));
 					}
 				} catch (err) {
@@ -895,10 +923,10 @@ export class DockerManager {
 		} catch {
 			logger.info(`[docker] stale container_id for session ${sessionId}, respawning`);
 			await this.sessions.setContainerId(sessionId, null);
-			await this.spawn(sessionId);
+			await this.spawnWithConfig(sessionId, config);
 			await this.sessions.updateStatus(sessionId, "running");
 		}
-		await this.runPostStartIfConfigured(sessionId);
+		await this.runPostStartIfConfigured(sessionId, config);
 	}
 
 	/**
@@ -907,9 +935,18 @@ export class DockerManager {
 	 * config-read + warn-on-D1-transient pattern, mirroring
 	 * `loadConfigForSpawn`. Doesn't throw — a failed postStart is
 	 * logged inside `runPostStart` and the container stays usable.
+	 *
+	 * Accepts an optional pre-loaded `config` so `startContainer` can
+	 * thread its single top-of-function load through here without a
+	 * second D1 round-trip. When omitted (callers that don't have one
+	 * in hand), falls back to loading. See #207 round 1 NIT.
 	 */
-	private async runPostStartIfConfigured(sessionId: string): Promise<void> {
-		const config = await this.loadConfigForSpawn(sessionId);
+	private async runPostStartIfConfigured(
+		sessionId: string,
+		preLoadedConfig?: SessionConfigRecord | null,
+	): Promise<void> {
+		const config =
+			preLoadedConfig !== undefined ? preLoadedConfig : await this.loadConfigForSpawn(sessionId);
 		if (!config?.postStartCmd) return;
 		try {
 			await this.runPostStart(sessionId, config.postStartCmd);
