@@ -406,4 +406,11 @@ ${CLONE_AND_MOVE_TAIL}`;
 export const NOAUTH_CLONE_SCRIPT = `set -e
 TMP_CLONE=$(mktemp -d /tmp/clone-XXXXXXXX)
 trap 'rm -rf "$TMP_CLONE"' EXIT
+# Same rationale as the PAT path: some "public" remotes still
+# present a credential challenge (corporate git hosts, HTTP
+# redirectors that wrap a private repo behind a public URL).
+# Without GIT_TERMINAL_PROMPT=0, git would block on stdin
+# indefinitely; the 10-minute bootstrap cap would be the only
+# backstop. Refuse the prompt so we get a clean non-zero exit.
+export GIT_TERMINAL_PROMPT=0
 ${CLONE_AND_MOVE_TAIL}`;
