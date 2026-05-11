@@ -199,6 +199,29 @@ describe("groups.groupsLedBy", () => {
 	});
 });
 
+// ── isLeadOfUserViaGroup ────────────────────────────────────────────────────
+
+describe("groups.isLeadOfUserViaGroup", () => {
+	it("returns true when the LIMIT-1 JOIN finds a matching row", async () => {
+		mockNextRows([{ one: 1 }]);
+		expect(await groups.isLeadOfUserViaGroup("u-lead", "u-member")).toBe(true);
+	});
+
+	it("returns false when no row matches", async () => {
+		mockNextRows([]);
+		expect(await groups.isLeadOfUserViaGroup("u-not-lead", "u-some-user")).toBe(false);
+	});
+
+	it("uses both ids as parameters in the JOIN query", async () => {
+		mockNextRows([{ one: 1 }]);
+		await groups.isLeadOfUserViaGroup("u-lead", "u-member");
+		const call = dbStubs.d1Query.mock.calls[0]!;
+		expect(call[0]).toMatch(/JOIN user_group_members/);
+		expect(call[0]).toMatch(/LIMIT 1/);
+		expect(call[1]).toEqual(["u-lead", "u-member"]);
+	});
+});
+
 // ── update ──────────────────────────────────────────────────────────────────
 
 describe("groups.update", () => {

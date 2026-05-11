@@ -336,6 +336,32 @@ describe("SessionManager.assertOwnedBy / assertOwnership cache", () => {
 		}
 	});
 
+	it("expired entry on the observer fast path drops the stale cache entry before await", async () => {
+		const mgr = new SessionManager();
+		vi.useFakeTimers();
+		try {
+			dbStubs.d1Query.mockResolvedValueOnce({
+				results: [fakeSessionRow("s-1", "u-owner")],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			});
+			await mgr.assertOwnedBy("s-1", "u-owner");
+			vi.advanceTimersByTime(OWNERSHIP_CACHE_TTL_MS + 1);
+			// After TTL: assertCanObserveBy goes through expired-cleanup,
+			// fetches fresh meta, repopulates cache. Owner positive path.
+			dbStubs.d1Query.mockResolvedValueOnce({
+				results: [fakeSessionRow("s-1", "u-owner")],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			});
+			await mgr.assertCanObserveBy("s-1", "u-owner");
+			// Now the cache is fresh — next call hits cache, no D1.
+			await mgr.assertCanObserveBy("s-1", "u-owner");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("evicts oldest entry when cap is reached so memory is bounded", async () => {
 		// Fill cache to OWNERSHIP_CACHE_MAX, then add one more — first
 		// inserted must be evicted. We test the eviction by seeing the
@@ -367,5 +393,180 @@ describe("SessionManager.assertOwnedBy / assertOwnership cache", () => {
 		const callsBefore = dbStubs.d1Query.mock.calls.length;
 		await mgr.assertOwnedBy("s-first", "u-owner");
 		expect(dbStubs.d1Query.mock.calls.length).toBeGreaterThan(callsBefore);
+	});
+});
+
+// ── assertCanObserve (#201b) ────────────────────────────────────────────────
+
+describe("SessionManager.assertCanObserve", () => {
+	it("returns meta on the owner positive path with one D1 call", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [fakeSessionRow("s-1", "u-owner")],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		const meta = await mgr.assertCanObserve("s-1", "u-owner");
+		expect(meta.userId).toBe("u-owner");
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(1);
+	});
+
+	it("returns meta on the admin positive path (owner != observer, observer is_admin=1)", async () => {
+		const mgr = new SessionManager();
+		// Call 1: getOrThrow returns session owned by u-owner.
+		// Call 2: isUserAdmin(u-admin) → is_admin=1.
+		dbStubs.d1Query
+			.mockResolvedValueOnce({
+				results: [fakeSessionRow("s-1", "u-owner")],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			})
+			.mockResolvedValueOnce({
+				results: [{ is_admin: 1 }],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			});
+		const meta = await mgr.assertCanObserve("s-1", "u-admin");
+		expect(meta.userId).toBe("u-owner");
+		// isLeadOfUserViaGroup must NOT be called when admin already
+		// authorized — short-circuit ordering matters for D1 cost.
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(2);
+	});
+
+	it("returns meta on the tech-lead positive path (not owner, not admin, leads owner's group)", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query
+			.mockResolvedValueOnce({
+				results: [fakeSessionRow("s-1", "u-owner")],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			})
+			.mockResolvedValueOnce({
+				results: [{ is_admin: 0 }],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			})
+			.mockResolvedValueOnce({
+				results: [{ one: 1 }],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			});
+		const meta = await mgr.assertCanObserve("s-1", "u-lead");
+		expect(meta.userId).toBe("u-owner");
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(3);
+	});
+
+	it("throws ForbiddenError when observer is none of owner / admin / lead", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query
+			.mockResolvedValueOnce({
+				results: [fakeSessionRow("s-1", "u-owner")],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			})
+			.mockResolvedValueOnce({
+				results: [{ is_admin: 0 }],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			})
+			.mockResolvedValueOnce({
+				results: [],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			});
+		await expect(mgr.assertCanObserve("s-1", "u-stranger")).rejects.toBeInstanceOf(ForbiddenError);
+	});
+
+	it("throws NotFoundError when the session row is missing", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		await expect(mgr.assertCanObserve("s-nope", "u-any")).rejects.toBeInstanceOf(NotFoundError);
+	});
+
+	it("populates the ownership cache as a side effect on the owner path", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [fakeSessionRow("s-1", "u-owner")],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		await mgr.assertCanObserve("s-1", "u-owner");
+		// Owner-only assertOwnedBy must now hit cache, no extra D1.
+		await mgr.assertOwnedBy("s-1", "u-owner");
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(1);
+	});
+});
+
+// ── assertCanObserveBy (#201b void variant) ─────────────────────────────────
+
+describe("SessionManager.assertCanObserveBy", () => {
+	it("short-circuits the cached-owner positive path with zero D1 calls", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [fakeSessionRow("s-1", "u-owner")],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		// Prime the cache via assertOwnedBy.
+		await mgr.assertOwnedBy("s-1", "u-owner");
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(1);
+		// Observe by the cached owner — zero new D1 calls.
+		await mgr.assertCanObserveBy("s-1", "u-owner");
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(1);
+	});
+
+	it("falls through to admin/lead lookups when observer != cached_owner", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [fakeSessionRow("s-1", "u-owner")],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		// Prime cache as owner.
+		await mgr.assertOwnedBy("s-1", "u-owner");
+		// Observer is a different user — cache hit short-circuit doesn't
+		// apply. Fall through: getOrThrow (cached re-fetch happens since
+		// we don't have a meta-cache, just owner-cache) → isUserAdmin → isLead.
+		dbStubs.d1Query
+			.mockResolvedValueOnce({
+				results: [fakeSessionRow("s-1", "u-owner")],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			})
+			.mockResolvedValueOnce({
+				results: [{ is_admin: 1 }],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			});
+		await mgr.assertCanObserveBy("s-1", "u-admin");
+		// 1 (prime) + 2 (getOrThrow + isUserAdmin) = 3. isLead skipped.
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(3);
+	});
+
+	it("throws ForbiddenError when no positive arm matches and the observer is uncached", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query
+			.mockResolvedValueOnce({
+				results: [fakeSessionRow("s-1", "u-owner")],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			})
+			.mockResolvedValueOnce({
+				results: [{ is_admin: 0 }],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			})
+			.mockResolvedValueOnce({
+				results: [],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			});
+		await expect(mgr.assertCanObserveBy("s-1", "u-stranger")).rejects.toBeInstanceOf(
+			ForbiddenError,
+		);
 	});
 });

@@ -637,11 +637,33 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
 }
 
 /**
+ * Boolean predicate: is `userId` an admin? Fresh D1 lookup on every
+ * call — same rationale as the inline `SELECT` that used to live in
+ * `requireAdmin` (don't trust a JWT-embedded claim so admin grant /
+ * revoke takes effect without logout). Throws on D1 failure rather
+ * than silently returning false: an admin-gated path should NOT
+ * fall back to a non-admin view because the lookup transiently
+ * failed; the caller turns the throw into a 500.
+ *
+ * Extracted from `requireAdmin` (#201b) so the same predicate is
+ * reachable from non-middleware contexts — specifically the WS
+ * observe-mode auth path (`SessionManager.assertCanObserve`).
+ * Keep both consumers calling this single function so admin
+ * semantics stay in one place.
+ */
+export async function isUserAdmin(userId: string): Promise<boolean> {
+	const result = await d1Query<{ is_admin: number }>("SELECT is_admin FROM users WHERE id = ?", [
+		userId,
+	]);
+	return result.results[0]?.is_admin === 1;
+}
+
+/**
  * Gate a route on the caller having `is_admin = 1` in `users`. MUST chain
  * after `requireAuth` — reads `req.userId` from the AuthedRequest the
- * preceding middleware populated. Does its own D1 lookup rather than
- * trusting a JWT-embedded flag so that admin grant/revoke takes effect
- * without users needing to log out and back in.
+ * preceding middleware populated. Delegates to `isUserAdmin` so the
+ * D1 lookup + "don't trust JWT-embedded claim" rationale stays in one
+ * place; #201b extracted the helper.
  *
  * #50: gates GET, POST, and DELETE on /invites — list, mint, and
  * revoke are a single coherent admin surface. Earlier rounds of #146
@@ -658,11 +680,7 @@ export async function requireAdmin(req: Request, res: Response, next: NextFuncti
 		return;
 	}
 	try {
-		const result = await d1Query<{ is_admin: number }>("SELECT is_admin FROM users WHERE id = ?", [
-			userId,
-		]);
-		const row = result.results[0];
-		if (!row || row.is_admin !== 1) {
+		if (!(await isUserAdmin(userId))) {
 			res.status(403).json({ error: "Admin privileges required" });
 			return;
 		}

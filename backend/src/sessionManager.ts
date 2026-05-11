@@ -5,8 +5,21 @@
  */
 
 import { v4 as uuidv4 } from "uuid";
+import { isUserAdmin } from "./auth.js";
 import { parseD1Utc } from "./d1Time.js";
 import { d1Query } from "./db.js";
+// CJS-safe circular dep: the project compiles to CommonJS, where
+// TypeScript emits named imports as property accesses on a captured
+// module-exports reference (e.g. `groups_js_1.isLeadOfUserViaGroup`)
+// rather than destructured variables. The reference is captured early
+// when both modules first load, but the actual property access is
+// deferred to call time — by which point both modules have completed
+// their top-level evaluation and every export is present. The
+// reciprocal import in `groups.ts`
+// (`import { ForbiddenError, NotFoundError } from "./sessionManager.js"`)
+// is safe for the same reason. ESM live bindings give the same
+// behaviour but the load-bearing mechanism here is the CJS shape.
+import { isLeadOfUserViaGroup } from "./groups.js";
 import { logger } from "./logger.js";
 import type { CreateSessionOpts, SessionMeta, SessionStatus } from "./types.js";
 
@@ -317,6 +330,96 @@ export class SessionManager {
 			ownerUserId,
 			expiresAt: Date.now() + OWNERSHIP_CACHE_TTL_MS,
 		});
+	}
+
+	// ── Observe-access primitive (#201b) ────────────────────────────────────
+	//
+	// `assertCanObserve` is the auth choke point for the new tech-lead read
+	// paths landing in 201c (the lead's "My groups" cross-user session list)
+	// and 201d (observe-mode WS attach). It accepts a graded set of
+	// observers:
+	//
+	//   1. The session owner (cheapest path — covered by the ownership cache
+	//      from #239 so a repeated observe by the owner hits no D1).
+	//   2. Any user with `is_admin=1` (admins already see every session via
+	//      the admin dashboard; the observe path is just another way in).
+	//   3. The lead of ANY group containing the session owner (the actual
+	//      v1 new capability — gated by a single indexed point read via
+	//      `isLeadOfUserViaGroup`).
+	//
+	// All other callers throw `ForbiddenError` (route → 403). A missing
+	// session row throws `NotFoundError` (route → 404) — collapsing
+	// observe-of-missing into a generic 404 matches the existing
+	// `assertOwnership` shape and the dispatcher's no-status-leak posture.
+	//
+	// No write capability is granted by this method — destructive paths
+	// (stop / start / delete / env-update) still go through
+	// `assertOwnership`. The two checks are deliberately separate so a
+	// future feature that broadens observe (e.g. adding "any authed user
+	// in the same org") doesn't accidentally widen the write surface.
+	//
+	// Caching shape: the ownership cache short-circuits the owner-positive
+	// path (cache hit when observer === cached_owner). Admin lookups and
+	// lead-of-user JOIN are NOT cached — the observe path is rare relative
+	// to the owner-only path, and caching tech-lead access would mean
+	// invalidating on every `addMember` / `removeMember` / `update` (lead
+	// reassignment), which is a bigger surface than the saved round-trip
+	// justifies.
+
+	/**
+	 * Read-access check that returns the SessionMeta on success. Use this
+	 * at call sites that need the meta (the route serializer, the WS
+	 * attach handler). Throws `NotFoundError` if no session row exists,
+	 * `ForbiddenError` if the observer is none of: owner / admin / lead-
+	 * of-group-containing-owner.
+	 */
+	async assertCanObserve(sessionId: string, observerUserId: string): Promise<SessionMeta> {
+		// Owner positive path — leverages the ownership cache. Same
+		// `assertOwnership`-shaped flow that fetches fresh meta even on
+		// cache hit (callers may consume mutable fields).
+		const meta = await this.getOrThrow(sessionId);
+		this.cacheOwnership(sessionId, meta.userId);
+		if (meta.userId === observerUserId) return meta;
+		// Admin positive path. `isUserAdmin` throws on D1 failure rather
+		// than silently returning false — propagate so the route maps
+		// the transient error to 500 instead of falsely returning 403.
+		if (await isUserAdmin(observerUserId)) return meta;
+		// Tech-lead positive path: is the observer the lead of any
+		// group containing the owner? Single indexed JOIN with LIMIT 1
+		// inside `isLeadOfUserViaGroup`.
+		if (await isLeadOfUserViaGroup(observerUserId, meta.userId)) return meta;
+		throw new ForbiddenError();
+	}
+
+	/**
+	 * Void-return sibling of `assertCanObserve` for call sites that don't
+	 * need the SessionMeta (e.g. a future helper that just answers
+	 * "should this user see the observe button?"). Mirrors the
+	 * `assertOwnedBy` shape — short-circuits both positive AND negative
+	 * directions from the ownership cache before falling through to
+	 * admin / lead lookups.
+	 */
+	async assertCanObserveBy(sessionId: string, observerUserId: string): Promise<void> {
+		const cached = this.ownershipCache.get(sessionId);
+		const now = Date.now();
+		// Cache hit, observer is the cached owner — bypass D1 entirely.
+		// Negative-cache shape: observer != cached_owner means we still
+		// have to check admin / lead, so we don't short-circuit there
+		// (mirrors how `assertOwnedBy` only short-circuits the positive
+		// hit + immediate-forbid for owner-only checks).
+		if (cached && cached.expiresAt > now && cached.ownerUserId === observerUserId) return;
+		if (cached && cached.expiresAt <= now) {
+			// Mirror the assertOwnedBy cleanup: drop expired entries
+			// before the await so a `getOrThrow` that throws NotFoundError
+			// (session hard-deleted) leaves a clean map.
+			this.ownershipCache.delete(sessionId);
+		}
+		const meta = await this.getOrThrow(sessionId);
+		this.cacheOwnership(sessionId, meta.userId);
+		if (meta.userId === observerUserId) return;
+		if (await isUserAdmin(observerUserId)) return;
+		if (await isLeadOfUserViaGroup(observerUserId, meta.userId)) return;
+		throw new ForbiddenError();
 	}
 
 	/**
