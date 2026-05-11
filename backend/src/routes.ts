@@ -670,9 +670,15 @@ export function buildRouter(
 			res.status(400).json({ error: "body.leadUserId is required (non-empty string)" });
 			return null;
 		}
+		// Trim + collapse-empty mirrors the template description handling.
+		// A `"   "` value passed verbatim would render visually blank in
+		// the admin UI while the column reports non-null, which is
+		// indistinguishable from an intentionally-set description on the
+		// wire. See #262 round 1 NIT.
 		return {
 			name: body.name.trim(),
-			description: typeof body.description === "string" ? body.description : null,
+			description:
+				typeof body.description === "string" ? body.description.trim() || null : null,
 			leadUserId: body.leadUserId,
 		};
 	};
@@ -708,8 +714,17 @@ export function buildRouter(
 		requireAdmin,
 		async (req: Request, res: Response) => {
 			try {
-				const group = await groups.getById(req.params.id);
-				const members = await groups.listMembers(req.params.id);
+				// Parallelise the two reads — `listMembers` does its own
+				// existence guard via `getById`, so the serial shape
+				// `await getById; await listMembers` stalled on the
+				// network for a check `listMembers` will redo anyway.
+				// `Promise.all` rejects on the first error, so a
+				// missing-group still 404s cleanly via the
+				// `handleGroupError` catch below. See #262 round 1 NIT.
+				const [group, members] = await Promise.all([
+					groups.getById(req.params.id),
+					groups.listMembers(req.params.id),
+				]);
 				res.json({
 					...serializeGroup(group),
 					members: members.map((m) => ({
