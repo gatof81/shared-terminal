@@ -98,6 +98,8 @@ const sidebarToggleBtn = document.getElementById("sidebar-toggle") as HTMLButton
 const sidebarBackdrop = document.getElementById("sidebar-backdrop")!;
 const sidebarInvitesBtn = document.getElementById("sidebar-invites-btn") as HTMLButtonElement;
 const sidebarAdminBtn = document.getElementById("sidebar-admin-btn") as HTMLButtonElement;
+const templatesBtn = document.getElementById("templates-btn") as HTMLButtonElement;
+const adminBtn = document.getElementById("admin-btn") as HTMLButtonElement;
 const adminModal = document.getElementById("admin-modal")!;
 const adminStatsEl = document.getElementById("admin-stats")!;
 const adminSessionsListEl = document.getElementById("admin-sessions-list")!;
@@ -248,6 +250,7 @@ function applyAdminVisibility() {
 	const admin = isAdmin();
 	invitesBtn.classList.toggle("hidden", !admin);
 	sidebarInvitesBtn.classList.toggle("hidden", !admin);
+	adminBtn.classList.toggle("hidden", !admin);
 	sidebarAdminBtn.classList.toggle("hidden", !admin);
 }
 
@@ -2124,7 +2127,12 @@ function openTemplatesModal(opener: HTMLElement) {
 function closeTemplatesModal() {
 	templatesModal.classList.remove("open");
 	templatesModal.setAttribute("aria-hidden", "true");
-	(templatesOpener ?? sidebarTemplatesBtn).focus();
+	// Fall back to the desktop button if the opener is missing (legacy
+	// path or a future caller that forgot to set it). Matches the
+	// Invites convention — on mobile the desktop button is hidden, so a
+	// missing opener still drops focus, but that's a regression to flag
+	// in code review, not something to silently paper over here.
+	(templatesOpener ?? templatesBtn).focus();
 	templatesOpener = null;
 }
 
@@ -2221,6 +2229,7 @@ templatesModal.addEventListener("click", (e) => {
 	if (target.hasAttribute("data-close-modal")) closeTemplatesModal();
 });
 
+templatesBtn.addEventListener("click", () => openTemplatesModal(templatesBtn));
 sidebarTemplatesBtn.addEventListener("click", () => openTemplatesModal(sidebarTemplatesBtn));
 
 async function deleteTemplateConfirmed(id: string, card: HTMLDivElement) {
@@ -3348,7 +3357,9 @@ function openAdminModal(opener: HTMLButtonElement) {
 function closeAdminModal() {
 	adminModal.classList.remove("open");
 	adminModal.setAttribute("aria-hidden", "true");
-	(adminOpener ?? sidebarAdminBtn).focus();
+	// Fall back to the desktop button if the opener is missing — same
+	// rationale as closeTemplatesModal / closeInvitesModal.
+	(adminOpener ?? adminBtn).focus();
 	adminOpener = null;
 }
 
@@ -3357,6 +3368,7 @@ adminModal.addEventListener("click", (e) => {
 	if (target.hasAttribute("data-close-modal")) closeAdminModal();
 });
 
+adminBtn.addEventListener("click", () => openAdminModal(adminBtn));
 sidebarAdminBtn.addEventListener("click", () => openAdminModal(sidebarAdminBtn));
 
 adminRefreshBtn.addEventListener("click", () => {

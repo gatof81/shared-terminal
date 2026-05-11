@@ -200,7 +200,9 @@ main.chrome-open #chrome-toggle-icon {
   border-color: #f85149;
   color: #f85149;
 }
-#invites-btn {
+#templates-btn,
+#invites-btn,
+#admin-btn {
   background: transparent;
   border: 1px solid #30363d;
   border-radius: 6px;
@@ -209,7 +211,9 @@ main.chrome-open #chrome-toggle-icon {
   padding: 0.25rem 0.6rem;
   cursor: pointer;
 }
-#invites-btn:hover {
+#templates-btn:hover,
+#invites-btn:hover,
+#admin-btn:hover {
   border-color: #58a6ff;
   color: #58a6ff;
 }
@@ -1260,7 +1264,9 @@ main:not([data-sidebar-ready]) #sidebar {
   color: #3fb950;
   margin-right: auto;
 }
+#sidebar-templates-btn,
 #sidebar-invites-btn,
+#sidebar-admin-btn,
 #sidebar-logout-btn {
   background: transparent;
   border: 1px solid #30363d;
@@ -1270,7 +1276,9 @@ main:not([data-sidebar-ready]) #sidebar {
   padding: 0.35rem 0.7rem;
   cursor: pointer;
 }
-#sidebar-invites-btn:hover {
+#sidebar-templates-btn:hover,
+#sidebar-invites-btn:hover,
+#sidebar-admin-btn:hover {
   border-color: #58a6ff;
   color: #58a6ff;
 }
