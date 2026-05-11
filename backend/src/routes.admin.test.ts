@@ -94,14 +94,19 @@ afterEach(async () => {
 	});
 });
 
-async function spinUp(countByStatus: ReturnType<typeof vi.fn>) {
+interface AdminSpinUp {
+	sessions?: Partial<SessionManager>;
+	docker?: Partial<DockerManager>;
+}
+
+async function spinUp(countByStatus: ReturnType<typeof vi.fn>, overrides: AdminSpinUp = {}) {
 	const sessions = {
 		countByStatus,
 		// Guard: any other SessionManager method called by this route's
-		// path would be an unintended dependency. Throw so a future
-		// route addition that brings in `get` / `assertOwnership` /
-		// etc. fails the test loudly rather than silently passing
-		// undefined into the route handler.
+		// path that's not overridden is undefined — calling it surfaces
+		// as a 500 with a clear "is not a function" message rather than
+		// silent test pass.
+		...overrides.sessions,
 	} as unknown as SessionManager;
 	const docker = {
 		getUploadTmpDir: () => "/tmp/shared-terminal-test-uploads",
@@ -113,6 +118,7 @@ async function spinUp(countByStatus: ReturnType<typeof vi.fn>) {
 			sessionsCheckedSinceBoot: 0,
 			errorsSinceBoot: 0,
 		}),
+		...overrides.docker,
 	} as unknown as DockerManager;
 	const broadcaster = {} as BootstrapBroadcaster;
 	const router = buildRouter(sessions, docker, broadcaster, {
@@ -125,6 +131,7 @@ async function spinUp(countByStatus: ReturnType<typeof vi.fn>) {
 		logout: { ipMax: 1000, ipWindowMs: 60_000 },
 		authStatus: { ipMax: 1000, ipWindowMs: 60_000 },
 		adminStats: { ipMax: 1000, ipWindowMs: 60_000 },
+		adminAction: { ipMax: 1000, ipWindowMs: 60_000 },
 	});
 	const app = express();
 	app.use(express.json());
@@ -253,5 +260,267 @@ describe("GET /api/admin/stats (#241a)", () => {
 		const body = (await res.json()) as { error: string };
 		expect(body.error).toBe("Internal server error");
 		expect(body.error).not.toContain("D1 transient");
+	});
+});
+
+// ── Cross-user sessions list + force-actions (#241d) ─────────────────────
+
+describe("GET /api/admin/sessions (#241d)", () => {
+	beforeEach(() => {
+		dbStubs.d1Query.mockReset();
+		__resetDispatcherStatsForTests();
+	});
+
+	function fakeSession(sessionId: string, userId: string, ownerUsername: string) {
+		return {
+			sessionId,
+			userId,
+			name: sessionId,
+			status: "running" as const,
+			containerId: null,
+			containerName: `st-${sessionId}`,
+			cols: 80,
+			rows: 24,
+			envVars: {},
+			createdAt: new Date("2026-05-09T02:00:00Z"),
+			lastConnectedAt: null,
+			ownerUsername,
+		};
+	}
+
+	it("returns rows across users with ownerUsername attached", async () => {
+		const listAll = vi.fn(async () => [
+			fakeSession("s1", "u1", "alice"),
+			fakeSession("s2", "u2", "bob"),
+		]);
+		await spinUp(vi.fn(), { sessions: { listAll } as unknown as Partial<SessionManager> });
+
+		const res = await fetch(`${baseUrl}/api/admin/sessions`);
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as Array<{
+			sessionId: string;
+			userId: string;
+			ownerUsername: string;
+		}>;
+		expect(body).toHaveLength(2);
+		expect(body[0]?.ownerUsername).toBe("alice");
+		expect(body[1]?.userId).toBe("u2");
+		expect(listAll).toHaveBeenCalledTimes(1);
+	});
+
+	it("returns 403 when requireAdmin denies (non-admin user) without calling listAll", async () => {
+		authStubs.requireAdmin.mockImplementation((_req, res, _next) => {
+			(res as { status: (n: number) => { json: (b: unknown) => void } })
+				.status(403)
+				.json({ error: "Forbidden" });
+		});
+		const listAll = vi.fn(async () => [] as never[]);
+		await spinUp(vi.fn(), { sessions: { listAll } as unknown as Partial<SessionManager> });
+
+		const res = await fetch(`${baseUrl}/api/admin/sessions`);
+		expect(res.status).toBe(403);
+		// CRITICAL: a regression that ran the handler regardless of the
+		// admin gate would be a cross-user data leak.
+		expect(listAll).not.toHaveBeenCalled();
+	});
+
+	it("returns 500 with a generic body when listAll throws (no detail leak)", async () => {
+		const listAll = vi.fn(async () => {
+			throw new Error("D1 transient: connection reset");
+		});
+		await spinUp(vi.fn(), { sessions: { listAll } as unknown as Partial<SessionManager> });
+
+		const res = await fetch(`${baseUrl}/api/admin/sessions`);
+		expect(res.status).toBe(500);
+		const body = (await res.json()) as { error: string };
+		expect(body.error).toBe("Internal server error");
+		expect(body.error).not.toContain("D1 transient");
+	});
+});
+
+describe("POST /api/admin/sessions/:id/stop (#241d)", () => {
+	beforeEach(() => {
+		dbStubs.d1Query.mockReset();
+		__resetDispatcherStatsForTests();
+	});
+
+	function meta() {
+		return {
+			sessionId: "s-any",
+			userId: "u-foreign", // NOT the admin's id — proves no ownership check
+			name: "s-any",
+			status: "running" as const,
+			containerId: "c1",
+			containerName: "st-s-any",
+			cols: 80,
+			rows: 24,
+			envVars: {},
+			createdAt: new Date(),
+			lastConnectedAt: null,
+		};
+	}
+
+	it("force-stops any session (no ownership check) and returns 204", async () => {
+		const get = vi.fn(async () => meta());
+		const stopContainer = vi.fn(async () => undefined);
+		await spinUp(vi.fn(), {
+			sessions: { get } as unknown as Partial<SessionManager>,
+			docker: { stopContainer } as unknown as Partial<DockerManager>,
+		});
+
+		const res = await fetch(`${baseUrl}/api/admin/sessions/s-any/stop`, { method: "POST" });
+		expect(res.status).toBe(204);
+		expect(stopContainer).toHaveBeenCalledWith("s-any");
+	});
+
+	it("returns 404 when the session id doesn't exist", async () => {
+		const get = vi.fn(async () => null);
+		const stopContainer = vi.fn(async () => undefined);
+		await spinUp(vi.fn(), {
+			sessions: { get } as unknown as Partial<SessionManager>,
+			docker: { stopContainer } as unknown as Partial<DockerManager>,
+		});
+
+		const res = await fetch(`${baseUrl}/api/admin/sessions/missing/stop`, { method: "POST" });
+		expect(res.status).toBe(404);
+		// stopContainer must NOT fire for a missing session — otherwise
+		// Docker surfaces a confusing "no such container" 500.
+		expect(stopContainer).not.toHaveBeenCalled();
+	});
+
+	it("returns 403 when requireAdmin denies", async () => {
+		authStubs.requireAdmin.mockImplementation((_req, res, _next) => {
+			(res as { status: (n: number) => { json: (b: unknown) => void } })
+				.status(403)
+				.json({ error: "Forbidden" });
+		});
+		const get = vi.fn(async () => meta());
+		const stopContainer = vi.fn(async () => undefined);
+		await spinUp(vi.fn(), {
+			sessions: { get } as unknown as Partial<SessionManager>,
+			docker: { stopContainer } as unknown as Partial<DockerManager>,
+		});
+
+		const res = await fetch(`${baseUrl}/api/admin/sessions/s-any/stop`, { method: "POST" });
+		expect(res.status).toBe(403);
+		expect(get).not.toHaveBeenCalled();
+		expect(stopContainer).not.toHaveBeenCalled();
+	});
+});
+
+describe("DELETE /api/admin/sessions/:id (#241d)", () => {
+	beforeEach(() => {
+		dbStubs.d1Query.mockReset();
+		__resetDispatcherStatsForTests();
+	});
+
+	function meta(status: "running" | "terminated" = "running") {
+		return {
+			sessionId: "s-any",
+			userId: "u-foreign",
+			name: "s-any",
+			status,
+			containerId: "c1",
+			containerName: "st-s-any",
+			cols: 80,
+			rows: 24,
+			envVars: {},
+			createdAt: new Date(),
+			lastConnectedAt: null,
+		};
+	}
+
+	it("soft-deletes (kill + terminate, workspace preserved) by default", async () => {
+		const get = vi.fn(async () => meta());
+		const terminate = vi.fn(async () => undefined);
+		const deleteRow = vi.fn(async () => undefined);
+		const kill = vi.fn(async () => undefined);
+		const purgeWorkspace = vi.fn(async () => undefined);
+		await spinUp(vi.fn(), {
+			sessions: { get, terminate, deleteRow } as unknown as Partial<SessionManager>,
+			docker: { kill, purgeWorkspace } as unknown as Partial<DockerManager>,
+		});
+
+		const res = await fetch(`${baseUrl}/api/admin/sessions/s-any`, { method: "DELETE" });
+		expect(res.status).toBe(204);
+		expect(kill).toHaveBeenCalledWith("s-any");
+		expect(terminate).toHaveBeenCalledWith("s-any");
+		// Soft-delete does NOT purge workspace or drop the row.
+		expect(purgeWorkspace).not.toHaveBeenCalled();
+		expect(deleteRow).not.toHaveBeenCalled();
+	});
+
+	it("hard-deletes (kill + terminate + purgeWorkspace + deleteRow) when ?hard=true", async () => {
+		const get = vi.fn(async () => meta());
+		const terminate = vi.fn(async () => undefined);
+		const deleteRow = vi.fn(async () => undefined);
+		const kill = vi.fn(async () => undefined);
+		const purgeWorkspace = vi.fn(async () => undefined);
+		await spinUp(vi.fn(), {
+			sessions: { get, terminate, deleteRow } as unknown as Partial<SessionManager>,
+			docker: { kill, purgeWorkspace } as unknown as Partial<DockerManager>,
+		});
+
+		const res = await fetch(`${baseUrl}/api/admin/sessions/s-any?hard=true`, { method: "DELETE" });
+		expect(res.status).toBe(204);
+		expect(kill).toHaveBeenCalledWith("s-any");
+		expect(terminate).toHaveBeenCalledWith("s-any");
+		expect(purgeWorkspace).toHaveBeenCalledWith("s-any");
+		expect(deleteRow).toHaveBeenCalledWith("s-any");
+	});
+
+	it("hard-delete on an already-terminated session skips kill+terminate but still purges + drops the row", async () => {
+		// Idempotent shape: the soft-delete branch is the only one that
+		// invokes kill/terminate; the hard-delete branch is independent
+		// so an admin can hard-purge a soft-deleted session via
+		// ?hard=true even though the container is already gone.
+		const get = vi.fn(async () => meta("terminated"));
+		const terminate = vi.fn(async () => undefined);
+		const deleteRow = vi.fn(async () => undefined);
+		const kill = vi.fn(async () => undefined);
+		const purgeWorkspace = vi.fn(async () => undefined);
+		await spinUp(vi.fn(), {
+			sessions: { get, terminate, deleteRow } as unknown as Partial<SessionManager>,
+			docker: { kill, purgeWorkspace } as unknown as Partial<DockerManager>,
+		});
+
+		const res = await fetch(`${baseUrl}/api/admin/sessions/s-any?hard=true`, { method: "DELETE" });
+		expect(res.status).toBe(204);
+		expect(kill).not.toHaveBeenCalled();
+		expect(terminate).not.toHaveBeenCalled();
+		expect(purgeWorkspace).toHaveBeenCalledWith("s-any");
+		expect(deleteRow).toHaveBeenCalledWith("s-any");
+	});
+
+	it("returns 404 when the session id doesn't exist", async () => {
+		const get = vi.fn(async () => null);
+		const kill = vi.fn(async () => undefined);
+		await spinUp(vi.fn(), {
+			sessions: { get } as unknown as Partial<SessionManager>,
+			docker: { kill } as unknown as Partial<DockerManager>,
+		});
+
+		const res = await fetch(`${baseUrl}/api/admin/sessions/missing`, { method: "DELETE" });
+		expect(res.status).toBe(404);
+		expect(kill).not.toHaveBeenCalled();
+	});
+
+	it("returns 403 when requireAdmin denies (no force-delete bypass for non-admins)", async () => {
+		authStubs.requireAdmin.mockImplementation((_req, res, _next) => {
+			(res as { status: (n: number) => { json: (b: unknown) => void } })
+				.status(403)
+				.json({ error: "Forbidden" });
+		});
+		const get = vi.fn(async () => meta());
+		const kill = vi.fn(async () => undefined);
+		await spinUp(vi.fn(), {
+			sessions: { get } as unknown as Partial<SessionManager>,
+			docker: { kill } as unknown as Partial<DockerManager>,
+		});
+
+		const res = await fetch(`${baseUrl}/api/admin/sessions/s-any?hard=true`, { method: "DELETE" });
+		expect(res.status).toBe(403);
+		expect(get).not.toHaveBeenCalled();
+		expect(kill).not.toHaveBeenCalled();
 	});
 });

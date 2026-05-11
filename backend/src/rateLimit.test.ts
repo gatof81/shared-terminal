@@ -437,6 +437,7 @@ describe("auth route rate limiting", () => {
 			logout: { ipMax: 1000, ipWindowMs: 60_000 },
 			authStatus: { ipMax: 1000, ipWindowMs: 60_000 },
 			adminStats: { ipMax: 1000, ipWindowMs: 60_000 },
+			adminAction: { ipMax: 1000, ipWindowMs: 60_000 },
 			...cfg,
 		};
 		// rate-limit tests don't touch the bootstrap broadcaster — empty

@@ -93,6 +93,7 @@ export function buildRouter(
 		logoutIp,
 		authStatusIp,
 		adminStatsIp,
+		adminActionIp,
 	} = createAuthRateLimiters(rateLimitConfig);
 	const usernameLimiter = new UsernameRateLimiter(
 		rateLimitConfig.login.usernameMax,
@@ -458,6 +459,115 @@ export function buildRouter(
 			res.status(500).json({ error: "Internal server error" });
 		}
 	});
+
+	// Cross-user sessions list for the admin dashboard (#241d). Returns
+	// every session row across every user (capped at ADMIN_LIST_LIMIT),
+	// paired with the owner's username. Reads-only — destructive actions
+	// live on the /admin/sessions/:id endpoints below.
+	router.get(
+		"/admin/sessions",
+		adminStatsIp,
+		requireAdmin,
+		async (_req: Request, res: Response) => {
+			try {
+				const list = await sessions.listAll();
+				// Serialise via the same `serializeMeta` shape the user-facing
+				// `GET /sessions` returns + an `ownerUsername` field so the
+				// admin UI doesn't have to do a second lookup per row.
+				// Admin response includes `userId` (the regular
+				// `serializeMeta` deliberately omits it to avoid leaking
+				// internal IDs to non-admin users). Admins need the id
+				// to cross-reference logs and to drive the force-action
+				// endpoints by row.
+				res.json(
+					list.map((row) => ({
+						...serializeMeta(row),
+						userId: row.userId,
+						ownerUsername: row.ownerUsername,
+					})),
+				);
+			} catch (err) {
+				logger.error(`[admin] sessions list failed: ${(err as Error).message}`);
+				res.status(500).json({ error: "Internal server error" });
+			}
+		},
+	);
+
+	// Admin force-stop: same code path as `POST /sessions/:id/stop`
+	// minus the `assertOwnedBy` gate. `idleSweeper.forget` is called so
+	// the swept session doesn't sit in the activity map collecting
+	// stale bumps from a future race (e.g. the owner reconnects between
+	// stop and the next `/start`). 204 on success, 500 on docker error.
+	router.post(
+		"/admin/sessions/:id/stop",
+		adminActionIp,
+		requireAdmin,
+		async (req: Request, res: Response) => {
+			try {
+				// `get` first so a non-existent id returns 404 rather than
+				// surfacing a Docker "no such container" deep in
+				// stopContainer. Same shape the user path uses, just
+				// without ownership gating.
+				const meta = await sessions.get(req.params.id);
+				if (!meta) {
+					res.status(404).json({ error: "Session not found" });
+					return;
+				}
+				await docker.stopContainer(req.params.id);
+				idleSweeper?.forget(req.params.id);
+				res.status(204).send();
+			} catch (err) {
+				logger.error(`[admin] force-stop failed: ${(err as Error).message}`);
+				res.status(500).json({ error: "Internal server error" });
+			}
+		},
+	);
+
+	// Admin force-delete: mirrors the user-facing `DELETE /sessions/:id`
+	// minus `assertOwnedBy`. `?hard=true` purges workspace files and
+	// drops the D1 row; default is soft-delete (container killed, row
+	// flips to terminated, workspace preserved). The owner can still
+	// restore a soft-deleted session via `POST /sessions/:id/start` —
+	// admin force-delete is the same operation the owner could have
+	// done themselves, not a stronger semantic.
+	router.delete(
+		"/admin/sessions/:id",
+		adminActionIp,
+		requireAdmin,
+		async (req: Request, res: Response) => {
+			const hard = req.query.hard === "true" || req.query.hard === "1";
+			try {
+				const meta = await sessions.get(req.params.id);
+				if (!meta) {
+					res.status(404).json({ error: "Session not found" });
+					return;
+				}
+				// Idempotent soft branch — only kill + terminate if not
+				// already torn down.
+				if (meta.status !== "terminated") {
+					await docker.kill(req.params.id);
+					await sessions.terminate(req.params.id);
+					idleSweeper?.forget(req.params.id);
+				}
+				if (hard) {
+					try {
+						await docker.purgeWorkspace(req.params.id);
+					} catch (err) {
+						logger.error(
+							`[admin] force-delete purgeWorkspace failed for ${req.params.id}: ${(err as Error).message}`,
+						);
+						// Fall through — the D1 row removal still happens.
+					}
+					await sessions.deleteRow(req.params.id);
+					idleSweeper?.forget(req.params.id);
+				}
+				res.status(204).send();
+			} catch (err) {
+				logger.error(`[admin] force-delete failed: ${(err as Error).message}`);
+				res.status(500).json({ error: "Internal server error" });
+			}
+		},
+	);
 
 	// ── Session routes ──────────────────────────────────────────────────────
 

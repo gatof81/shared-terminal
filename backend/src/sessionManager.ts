@@ -153,6 +153,16 @@ export const OWNERSHIP_CACHE_TTL_MS = 60 * 60 * 1000;
  *  and 500 users this caps memory at ~10k entries × ~80 bytes each. */
 export const OWNERSHIP_CACHE_MAX = 10_000;
 
+/**
+ * Hard cap on rows returned by `listAll()` (#241d). Sized at 500
+ * because a typical operator dashboard refresh on a deployment with
+ * hundreds of sessions shouldn't return a multi-megabyte JSON blob.
+ * If a deployment grows past this, the dashboard will silently miss
+ * older terminated rows — pagination is a follow-up if anyone hits
+ * the cap in practice.
+ */
+export const ADMIN_LIST_LIMIT = 500;
+
 interface OwnershipCacheEntry {
 	ownerUserId: string;
 	expiresAt: number;
@@ -307,6 +317,34 @@ export class SessionManager {
 			ownerUserId,
 			expiresAt: Date.now() + OWNERSHIP_CACHE_TTL_MS,
 		});
+	}
+
+	/**
+	 * Cross-user session list for the admin dashboard (#241d). Returns
+	 * every session row across every user, paired with the owner's
+	 * username, newest-first. Hard-capped at `ADMIN_LIST_LIMIT` so a
+	 * deployment with 10k accumulated sessions doesn't return a
+	 * 10MB JSON blob on a routine dashboard refresh.
+	 *
+	 * Admin-gated at the route layer; do NOT call this from any
+	 * non-admin code path — it bypasses user-scoping.
+	 *
+	 * The JOIN to `users` is unconditional inner-join because the FK
+	 * means every session row has a parent user; if a row ever slips
+	 * past that (manual D1 edit), it's silently dropped from the
+	 * admin list, which is the safer fallback vs surfacing a null
+	 * username the UI would have to special-case.
+	 */
+	async listAll(): Promise<Array<SessionMeta & { ownerUsername: string }>> {
+		const result = await d1Query<SessionRow & { username: string }>(
+			"SELECT s.*, u.username AS username " +
+				"FROM sessions s JOIN users u ON u.id = s.user_id " +
+				`ORDER BY s.created_at DESC LIMIT ${ADMIN_LIST_LIMIT}`,
+		);
+		return result.results.map((row) => ({
+			...rowToMeta(row),
+			ownerUsername: row.username,
+		}));
 	}
 
 	/**

@@ -97,6 +97,17 @@ export interface RateLimitConfig {
 		ipMax: number;
 		ipWindowMs: number;
 	};
+	// Caps how often a single IP can hit destructive admin actions
+	// (force-stop, hard-delete on any session via /api/admin/sessions).
+	// Sized like `invitesRevoke` — admin operations the legitimate
+	// user may need in bursts (incident response: stop 20 sessions
+	// after spotting abuse), but well below sustained-loop budget.
+	// Separate from `adminStats` so a polling dashboard can't starve
+	// out the operator's ability to actually act in an incident.
+	adminAction: {
+		ipMax: number;
+		ipWindowMs: number;
+	};
 }
 
 // Defaults match issue #10: login 10/15min, register 5/1h, per-username 10/15min.
@@ -164,6 +175,10 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 		ipMax: 120,
 		ipWindowMs: 60 * 60 * 1000,
 	},
+	adminAction: {
+		ipMax: 60,
+		ipWindowMs: 60 * 60 * 1000,
+	},
 };
 
 // ── IP-based limiters (express-rate-limit) ─────────────────────────────────
@@ -178,6 +193,7 @@ export interface AuthRateLimiters {
 	logoutIp: RateLimitRequestHandler;
 	authStatusIp: RateLimitRequestHandler;
 	adminStatsIp: RateLimitRequestHandler;
+	adminActionIp: RateLimitRequestHandler;
 }
 
 export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
@@ -257,6 +273,16 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		legacyHeaders: false,
 		message: { error: "Too many admin-stats requests from this IP, try again later", scope: "ip" },
 	});
+	const adminActionIp = rateLimit({
+		windowMs: cfg.adminAction.ipWindowMs,
+		limit: cfg.adminAction.ipMax,
+		standardHeaders: "draft-7",
+		legacyHeaders: false,
+		message: {
+			error: "Too many admin-action requests from this IP, try again later",
+			scope: "ip",
+		},
+	});
 	return {
 		loginIp,
 		registerIp,
@@ -267,6 +293,7 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		logoutIp,
 		authStatusIp,
 		adminStatsIp,
+		adminActionIp,
 	};
 }
 
