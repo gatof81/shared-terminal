@@ -1038,7 +1038,18 @@ export function redactStoredAuth(stored: AuthStored | undefined): AuthPublic | u
  */
 export function redactStoredEntries(entries: EnvVarEntryStored[]): EnvVarEntryPublic[] {
 	return entries.map((entry) => {
-		if (entry.type === "plain") return entry;
+		// Copy plain entries rather than returning the stored object by
+		// reference. The two variant shapes are structurally identical,
+		// so TS accepts the by-reference return silently — but a future
+		// GET-endpoint caller that mutates an element of the public
+		// array (a reasonable thing to do before serialization) would
+		// also mutate the corresponding stored entry it came from. The
+		// secret branch already constructs a fresh object; mirror that
+		// shape here so both variants are defensive. See #210 round 1
+		// NIT.
+		if (entry.type === "plain") {
+			return { name: entry.name, type: "plain", value: entry.value };
+		}
 		return { name: entry.name, type: "secret", isSet: true };
 	});
 }
