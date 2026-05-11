@@ -78,11 +78,18 @@ export async function markBootstrapped(sessionId: string): Promise<boolean> {
 
 // ── Streaming broadcaster (PR 185b2b) ─────────────────────────────────────
 
-/** Server → client message shape on the bootstrap WS channel. */
+/**
+ * Wire format for the `/ws/bootstrap/<sessionId>` channel. Note the
+ * `stage?` field on the `fail` variant (#252): the runner walks five
+ * stages (gitIdentity / clone / dotfiles / agentSeed / postCreate)
+ * and the failure UI MUST be able to tell the user which one tripped.
+ * The default for stage on a synthetic fail (route catch-all) is
+ * omitted, which the frontend renders as a generic "bootstrap failed".
+ */
 export type BootstrapMessage =
 	| { type: "output"; data: string }
 	| { type: "done"; success: true }
-	| { type: "fail"; exitCode: number; error?: string };
+	| { type: "fail"; exitCode: number; error?: string; stage?: string };
 
 export type BootstrapListener = (msg: BootstrapMessage) => void;
 
@@ -362,7 +369,11 @@ export async function runAsyncBootstrap(
 		try {
 			const { exitCode } = await run();
 			if (exitCode !== 0) {
-				await finishWithFail({ type: "fail", exitCode });
+				// Include the stage label so the frontend can render
+				// `"Bootstrap stage 'clone' failed (exit N)"` instead
+				// of defaulting to the misleading "postCreate hook
+				// failed" (#252).
+				await finishWithFail({ type: "fail", exitCode, stage: label });
 				return false;
 			}
 			return true;
@@ -400,6 +411,7 @@ export async function runAsyncBootstrap(
 				type: "fail",
 				exitCode: -1,
 				error: message,
+				stage: label,
 			});
 			return false;
 		}
