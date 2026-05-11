@@ -1943,7 +1943,7 @@ newSessionForm.addEventListener("submit", async (e) => {
 			// `ORDER BY updated_at DESC`). `openTemplatesModal` already
 			// kicks off `refreshTemplatesList` so no separate fetch
 			// is needed here.
-			openTemplatesModal(sidebarTemplatesBtn);
+			openTemplatesModal(resolveTemplatesOpener());
 		} catch (err) {
 			showToast((err as Error).message, true);
 			newSessionSubmitBtn.disabled = false;
@@ -2117,6 +2117,24 @@ const templatesEmptyHint = document.getElementById("templates-empty-hint") as HT
 
 let templatesOpener: HTMLElement | null = null;
 
+/**
+ * Pick the Templates button that's actually rendered for the current
+ * viewport — `templatesBtn` on desktop, `sidebarTemplatesBtn` on mobile.
+ * `offsetParent === null` is the standard "is this element rendered"
+ * test (returns null for `display:none` ancestors), and the header /
+ * sidebar split is exactly the case it was designed for.
+ *
+ * Used by callers that open the templates modal from a third place
+ * (e.g. the save-template flow re-opening templates after a save) —
+ * those callers don't know which button the user clicked first, so
+ * they must resolve the contextually-correct opener themselves.
+ * Without this, focus restoration on close would land on a hidden
+ * element and silently drop to `document.body`. See PR #257 review.
+ */
+function resolveTemplatesOpener(): HTMLButtonElement {
+	return templatesBtn.offsetParent !== null ? templatesBtn : sidebarTemplatesBtn;
+}
+
 function openTemplatesModal(opener: HTMLElement) {
 	templatesOpener = opener;
 	templatesModal.classList.add("open");
@@ -2253,7 +2271,7 @@ async function useTemplate(id: string) {
 	try {
 		const t = await getTemplate(id);
 		closeTemplatesModal();
-		openNewSessionModal(sidebarTemplatesBtn);
+		openNewSessionModal(resolveTemplatesOpener());
 		applyTemplateToForm(t);
 		showToast(`Loaded template "${t.name}". Fill in any required secrets, then Create.`);
 	} catch (err) {
@@ -2277,7 +2295,7 @@ async function editTemplate(id: string) {
 	try {
 		const t = await getTemplate(id);
 		closeTemplatesModal();
-		openNewSessionModal(sidebarTemplatesBtn);
+		openNewSessionModal(resolveTemplatesOpener());
 		applyTemplateToForm(t);
 		setNewSessionModalMode(t);
 	} catch (err) {
