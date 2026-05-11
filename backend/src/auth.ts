@@ -637,19 +637,6 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
 }
 
 /**
- * Gate a route on the caller having `is_admin = 1` in `users`. MUST chain
- * after `requireAuth` — reads `req.userId` from the AuthedRequest the
- * preceding middleware populated. Does its own D1 lookup rather than
- * trusting a JWT-embedded flag so that admin grant/revoke takes effect
- * without users needing to log out and back in.
- *
- * #50: gates GET, POST, and DELETE on /invites — list, mint, and
- * revoke are a single coherent admin surface. Earlier rounds of #146
- * gated only POST/DELETE and let GET fall through on auth, but that
- * left pre-#50 codes minted by non-admins invisible (and so
- * unrevocable) to the admin tier this PR exists to centralise on.
- */
-/**
  * Boolean predicate: is `userId` an admin? Fresh D1 lookup on every
  * call — same rationale as the inline `SELECT` that used to live in
  * `requireAdmin` (don't trust a JWT-embedded claim so admin grant /
@@ -671,6 +658,19 @@ export async function isUserAdmin(userId: string): Promise<boolean> {
 	return result.results[0]?.is_admin === 1;
 }
 
+/**
+ * Gate a route on the caller having `is_admin = 1` in `users`. MUST chain
+ * after `requireAuth` — reads `req.userId` from the AuthedRequest the
+ * preceding middleware populated. Delegates to `isUserAdmin` so the
+ * D1 lookup + "don't trust JWT-embedded claim" rationale stays in one
+ * place; #201b extracted the helper.
+ *
+ * #50: gates GET, POST, and DELETE on /invites — list, mint, and
+ * revoke are a single coherent admin surface. Earlier rounds of #146
+ * gated only POST/DELETE and let GET fall through on auth, but that
+ * left pre-#50 codes minted by non-admins invisible (and so
+ * unrevocable) to the admin tier this PR exists to centralise on.
+ */
 export async function requireAdmin(req: Request, res: Response, next: NextFunction): Promise<void> {
 	const userId = (req as AuthedRequest).userId;
 	if (!userId) {
