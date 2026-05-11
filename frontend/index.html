@@ -131,6 +131,7 @@
             <span id="sidebar-user-display" aria-hidden="true"></span>
             <button id="sidebar-templates-btn" type="button">Templates</button>
             <button id="sidebar-invites-btn" type="button">Invites</button>
+            <button id="sidebar-admin-btn" type="button">Admin</button>
             <button id="sidebar-logout-btn" type="button">Logout</button>
           </div>
         </aside>
@@ -771,6 +772,52 @@
         </p>
         <div id="templates-list">
           <p class="modal-hint" id="templates-empty-hint">Loading templates…</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Admin dashboard (#241e). Visible only to is_admin=1 users via
+         applyAdminVisibility() — the sidebar button is .hidden for
+         non-admins, and every consumed endpoint is requireAdmin-gated
+         server-side so a leaked button reveal is harmless. -->
+    <div id="admin-modal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close-modal></div>
+      <div
+        class="modal-card admin-modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="admin-modal-title"
+      >
+        <div class="modal-header">
+          <h2 id="admin-modal-title">Admin dashboard</h2>
+          <button
+            class="modal-close"
+            type="button"
+            aria-label="Close"
+            data-close-modal
+          >
+            ×
+          </button>
+        </div>
+        <p class="modal-hint">
+          Process-local counters since the last backend restart. Refresh
+          manually after running force-actions — the dashboard doesn't
+          poll on its own (to keep the shared admin rate-limit headroom).
+        </p>
+        <div class="admin-controls">
+          <button id="admin-refresh-btn" type="button">Refresh</button>
+          <span id="admin-uptime" class="admin-uptime"></span>
+        </div>
+        <div id="admin-scroll-area">
+          <section class="admin-stats" id="admin-stats">
+            <p class="modal-hint">Loading stats…</p>
+          </section>
+          <section class="admin-sessions">
+            <h3 class="admin-section-title">Sessions (all users)</h3>
+            <div id="admin-sessions-list">
+              <p class="modal-hint">Loading sessions…</p>
+            </div>
+          </section>
         </div>
       </div>
     </div>
