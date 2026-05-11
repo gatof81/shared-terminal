@@ -6,10 +6,13 @@
  * the user's hook (or first interactive command) runs. Output streams
  * to the same WS broadcaster as postCreate.
  *
- * Three auth modes (188d wires PAT and SSH on top of 188c's "none"):
+ * Three auth modes (188d wires PAT and SSH on top of 188c's "none";
+ * #254 unified all three on a shared clone-then-move shape):
  *
- *   - `auth: "none"` — anonymous HTTPS clone. Pure argv invocation
- *     (no shell), single `streamExec` call.
+ *   - `auth: "none"` — anonymous HTTPS clone. Shell-mode (since
+ *     #254): values are env-encoded (`ST_URL`, etc.) and the script
+ *     references them double-quoted, so shell-meta in any value
+ *     is inert.
  *
  *   - `auth: "pat"` — HTTPS clone authenticated by a personal access
  *     token. The PAT NEVER appears in argv (process listings) or in
@@ -30,11 +33,19 @@
  *     the user can subsequently `git pull` / `git push` from the
  *     interactive shell without further setup.
  *
- * The PAT/SSH paths are bash-script-mode (multi-step setup before
- * the clone). User-supplied values (URL, ref, target, depth) reach
- * `git` as positional argv inside the script — populated via env
- * vars and expanded with bash double-quoting — so a value that
- * slipped past the schema's regex still cannot become shell meta.
+ * All three paths are bash-script-mode (multi-step setup + the
+ * shared clone-into-temp + mv-into-target tail). User-supplied
+ * values (URL, ref, target, depth) reach `git` as positional argv
+ * inside the script — populated via env vars and expanded with bash
+ * double-quoting — so a value that slipped past the schema's regex
+ * still cannot become shell meta.
+ *
+ * The clone-then-move tail (#254) exists because entrypoint.sh
+ * pre-seeds `/home/developer/workspace/.npm-global/` so the
+ * workspace is non-empty by the time bootstrap runs; `git clone`
+ * refuses non-empty targets directly. We clone into a fresh temp
+ * dir, then move each entry into the workspace skip-on-conflict so
+ * the entrypoint-seeded `.npm-global` survives.
  */
 
 import type { DockerManager } from "../dockerManager.js";
@@ -258,23 +269,6 @@ export function sshEnv(
 }
 
 /**
- * Bash script for PAT clone. All user-controlled values are read from
- * env vars and double-quoted at use, so shell-meta in any of them is
- * inert. The askpass file is shredded on exit (success OR fail) via
- * `trap … EXIT` so a process snooping `/tmp` doesn't find the PAT.
- *
- * Note the conditional `--branch` / `--depth` handling: the variables
- * are empty strings when the user didn't configure them; the bash
- * `[ -n ]` guards skip the corresponding flag when so. Empty
- * positional values would NOT be safe — `git clone --branch ""`
- * crashes — and the empty-string convention is what `patEnv`
- * produces.
- *
- * Also exported for the unit-test that pins the script shape so a
- * future edit doesn't accidentally drop the `set -e`, the cleanup
- * trap, or the `--` separator.
- */
-/**
  * Shared bash fragment that performs the clone-into-temp + move-into-target
  * step (#254). All three modes (no-auth / PAT / SSH) append this AFTER
  * their auth-setup bytes. `mv`-into-target (not `git clone <target>`)
@@ -316,6 +310,23 @@ for f in "$TMP_CLONE/repo"/*; do
 done
 `;
 
+/**
+ * Bash script for PAT clone. All user-controlled values are read from
+ * env vars and double-quoted at use, so shell-meta in any of them is
+ * inert. The askpass file is shredded on exit (success OR fail) via
+ * `trap … EXIT` so a process snooping `/tmp` doesn't find the PAT.
+ *
+ * Note the conditional `--branch` / `--depth` handling inside the
+ * shared `CLONE_AND_MOVE_TAIL`: the variables are empty strings when
+ * the user didn't configure them; the bash `[ -n ]` guards skip the
+ * corresponding flag. Empty positional values would NOT be safe —
+ * `git clone --branch ""` crashes — and the empty-string convention
+ * is what `patEnv` produces.
+ *
+ * Also exported for the unit-test that pins the script shape so a
+ * future edit doesn't accidentally drop the `set -e`, the cleanup
+ * trap, or the temp+move tail.
+ */
 export const PAT_CLONE_SCRIPT = `set -e
 # Cleanup runs on EXIT (success or fail) so the askpass file never
 # survives the clone — the PAT it would print is gone with it. Same

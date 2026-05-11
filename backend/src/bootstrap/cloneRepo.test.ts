@@ -510,6 +510,19 @@ describe("runCloneRepo", () => {
 		expect(r.stderr).toBe("");
 	});
 
+	it("NOAUTH_CLONE_SCRIPT parses cleanly under bash -n", () => {
+		// #254: the no-auth path is now shell-mode too. A future edit
+		// to CLONE_AND_MOVE_TAIL that breaks quoting would otherwise
+		// only surface for PAT/SSH; this test makes sure no-auth
+		// catches the same regression.
+		const r = spawnSync("bash", ["-n"], {
+			input: NOAUTH_CLONE_SCRIPT,
+			encoding: "utf8",
+		});
+		expect(r.status).toBe(0);
+		expect(r.stderr).toBe("");
+	});
+
 	// ── env helpers (PR 188d) ──────────────────────────────────────────────
 
 	// `patEnv` and `sshEnv` produce strings (not numbers / undefined)
