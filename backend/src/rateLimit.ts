@@ -86,13 +86,18 @@ export interface RateLimitConfig {
 		ipMax: number;
 		ipWindowMs: number;
 	};
-	// Caps how often a single IP can hit the admin stats / cross-user
-	// endpoints (#241). Even though `requireAdmin` already gates by
+	// Caps how often a single IP can hit the admin read endpoints
+	// (`GET /api/admin/stats` and `GET /api/admin/sessions`). SHARED
+	// across both — a polling dashboard typically fetches them in
+	// pairs, so a single bucket reflects total read-load on the
+	// admin namespace. Even though `requireAdmin` already gates by
 	// user role, an admin operator's compromised browser tab in a
 	// polling loop should not be able to hammer the GROUP BY +
-	// counter-readout work that the stats endpoint does. Sized like
-	// `invitesList` (the closest precedent — admin-only read endpoint
-	// the UI may legitimately poll while a modal is open).
+	// JOIN-against-users work the endpoints do. Sized at ~2× the
+	// `invitesList` precedent because the dashboard polls two
+	// endpoints concurrently — 240/h ≈ 4/min sustained, plenty for
+	// a 15-second refresh cadence (the smallest UI cadence we think
+	// makes sense) and well below sustained abuse rates.
 	adminStats: {
 		ipMax: number;
 		ipWindowMs: number;
@@ -172,7 +177,7 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 	// browser tab in a polling loop should not be able to hammer
 	// the GROUP BY work the route does. See #241.
 	adminStats: {
-		ipMax: 120,
+		ipMax: 240,
 		ipWindowMs: 60 * 60 * 1000,
 	},
 	adminAction: {

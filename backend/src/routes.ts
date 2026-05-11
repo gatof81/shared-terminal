@@ -464,6 +464,12 @@ export function buildRouter(
 	// every session row across every user (capped at ADMIN_LIST_LIMIT),
 	// paired with the owner's username. Reads-only — destructive actions
 	// live on the /admin/sessions/:id endpoints below.
+	//
+	// SHARES `adminStatsIp` with `GET /admin/stats` — see the comment
+	// on `RateLimitConfig.adminStats` for the budget rationale. A
+	// dashboard polling both pairs of endpoints drains the bucket 2×
+	// faster than a single endpoint would, which is why the default is
+	// sized for the pair, not the individual route.
 	router.get(
 		"/admin/sessions",
 		adminStatsIp,
