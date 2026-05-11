@@ -32,6 +32,7 @@ import { d1Query, getD1CallsSinceBoot } from "./db.js";
 import type { DockerManager } from "./dockerManager.js";
 import { UploadQuotaExceededError } from "./dockerManager.js";
 import { EnvVarValidationError, validateEnvVars } from "./envVarValidation.js";
+import * as groups from "./groups.js";
 import type { IdleSweeperStats } from "./idleSweeper.js";
 import { logger } from "./logger.js";
 import { getDispatcherStats } from "./portDispatcher.js";
@@ -585,6 +586,214 @@ export function buildRouter(
 			} catch (err) {
 				logger.error(`[admin] force-delete failed: ${(err as Error).message}`);
 				res.status(500).json({ error: "Internal server error" });
+			}
+		},
+	);
+
+	// ── Admin group-management routes (#201a) ─────────────────────────────────
+	// Six routes mounted under /admin/groups for managing user-groups + the
+	// tech-lead designation. Routes are gated by `requireAdmin` (via the
+	// `/admin` prefix's `requireAuth` + the explicit `requireAdmin` middleware
+	// chained on each one). Reads use the shared `adminStatsIp` limiter (high
+	// cap, same bucket dashboards poll); writes use `adminActionIp` (lower
+	// cap, destructive). Per the lock-in on issue #201 — group authoring is
+	// admin-only; the lead's view of their group lives on `/api/groups/mine`
+	// in 201c, which is NOT admin-gated.
+	//
+	// `handleGroupError` collapses every typed error this module raises into
+	// the right HTTP status + body shape. Anything else surfaces as 500 with
+	// a logged message, matching the rest of the admin-routes pattern.
+	const handleGroupError = (err: unknown, res: Response, context: string): void => {
+		if (err instanceof NotFoundError) {
+			res.status(404).json({ error: err.message });
+			return;
+		}
+		if (err instanceof groups.GroupUserNotFoundError) {
+			res.status(404).json({ error: err.message });
+			return;
+		}
+		if (err instanceof groups.GroupQuotaExceededError) {
+			res.status(429).json({ error: err.message });
+			return;
+		}
+		if (err instanceof groups.GroupMembersCapExceededError) {
+			res.status(429).json({ error: err.message });
+			return;
+		}
+		if (err instanceof groups.GroupMemberAlreadyExistsError) {
+			res.status(409).json({ error: err.message });
+			return;
+		}
+		if (err instanceof groups.GroupCannotRemoveLeadError) {
+			res.status(409).json({ error: err.message });
+			return;
+		}
+		logger.error(`[admin] ${context} failed: ${(err as Error).message}`);
+		res.status(500).json({ error: "Internal server error" });
+	};
+
+	// Shared body validator. Used by POST + PUT. Returns the parsed
+	// shape or null + writes a 400 response — caller `return`s when
+	// null.
+	const validateGroupBody = (
+		req: Request,
+		res: Response,
+	): { name: string; description: string | null; leadUserId: string } | null => {
+		const body = req.body as {
+			name?: unknown;
+			description?: unknown;
+			leadUserId?: unknown;
+		};
+		if (typeof body.name !== "string" || body.name.trim().length === 0) {
+			res.status(400).json({ error: "body.name is required (non-empty string)" });
+			return null;
+		}
+		// Cap consistent with other user-controlled strings — same shape
+		// as session-name / template-name caps elsewhere in the codebase.
+		if (body.name.length > 100) {
+			res.status(400).json({ error: "body.name must be at most 100 characters" });
+			return null;
+		}
+		if (
+			body.description !== undefined &&
+			body.description !== null &&
+			typeof body.description !== "string"
+		) {
+			res.status(400).json({ error: "body.description must be a string, null, or omitted" });
+			return null;
+		}
+		if (typeof body.description === "string" && body.description.length > 500) {
+			res.status(400).json({ error: "body.description must be at most 500 characters" });
+			return null;
+		}
+		if (typeof body.leadUserId !== "string" || body.leadUserId.length === 0) {
+			res.status(400).json({ error: "body.leadUserId is required (non-empty string)" });
+			return null;
+		}
+		return {
+			name: body.name.trim(),
+			description: typeof body.description === "string" ? body.description : null,
+			leadUserId: body.leadUserId,
+		};
+	};
+
+	// Single serializer keeps the wire shape consistent across list / get /
+	// create / update. Dates are emitted as ISO strings via toJSON.
+	const serializeGroup = (g: groups.Group) => ({
+		id: g.id,
+		name: g.name,
+		description: g.description,
+		leadUserId: g.leadUserId,
+		createdAt: g.createdAt.toISOString(),
+		updatedAt: g.updatedAt.toISOString(),
+	});
+	const serializeGroupSummary = (g: groups.GroupSummary) => ({
+		...serializeGroup(g),
+		leadUsername: g.leadUsername,
+		memberCount: g.memberCount,
+	});
+
+	router.get("/admin/groups", adminStatsIp, requireAdmin, async (_req: Request, res: Response) => {
+		try {
+			const list = await groups.listAll();
+			res.json(list.map(serializeGroupSummary));
+		} catch (err) {
+			handleGroupError(err, res, "groups list");
+		}
+	});
+
+	router.get(
+		"/admin/groups/:id",
+		adminStatsIp,
+		requireAdmin,
+		async (req: Request, res: Response) => {
+			try {
+				const group = await groups.getById(req.params.id);
+				const members = await groups.listMembers(req.params.id);
+				res.json({
+					...serializeGroup(group),
+					members: members.map((m) => ({
+						userId: m.userId,
+						username: m.username,
+						addedAt: m.addedAt.toISOString(),
+					})),
+				});
+			} catch (err) {
+				handleGroupError(err, res, "groups get");
+			}
+		},
+	);
+
+	router.post("/admin/groups", adminActionIp, requireAdmin, async (req: Request, res: Response) => {
+		const input = validateGroupBody(req, res);
+		if (!input) return;
+		try {
+			const group = await groups.create(input);
+			res.status(201).json(serializeGroup(group));
+		} catch (err) {
+			handleGroupError(err, res, "groups create");
+		}
+	});
+
+	router.put(
+		"/admin/groups/:id",
+		adminActionIp,
+		requireAdmin,
+		async (req: Request, res: Response) => {
+			const input = validateGroupBody(req, res);
+			if (!input) return;
+			try {
+				const group = await groups.update(req.params.id, input);
+				res.json(serializeGroup(group));
+			} catch (err) {
+				handleGroupError(err, res, "groups update");
+			}
+		},
+	);
+
+	router.delete(
+		"/admin/groups/:id",
+		adminActionIp,
+		requireAdmin,
+		async (req: Request, res: Response) => {
+			try {
+				await groups.deleteGroup(req.params.id);
+				res.status(204).send();
+			} catch (err) {
+				handleGroupError(err, res, "groups delete");
+			}
+		},
+	);
+
+	router.post(
+		"/admin/groups/:id/members",
+		adminActionIp,
+		requireAdmin,
+		async (req: Request, res: Response) => {
+			const body = req.body as { userId?: unknown };
+			if (typeof body.userId !== "string" || body.userId.length === 0) {
+				res.status(400).json({ error: "body.userId is required (non-empty string)" });
+				return;
+			}
+			try {
+				await groups.addMember(req.params.id, body.userId);
+				res.status(204).send();
+			} catch (err) {
+				handleGroupError(err, res, "groups addMember");
+			}
+		},
+	);
+
+	router.delete(
+		"/admin/groups/:id/members/:userId",
+		adminActionIp,
+		requireAdmin,
+		async (req: Request, res: Response) => {
+			try {
+				await groups.removeMember(req.params.id, req.params.userId);
+				res.status(204).send();
+			} catch (err) {
+				handleGroupError(err, res, "groups removeMember");
 			}
 		},
 	);

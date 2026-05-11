@@ -272,6 +272,52 @@ export async function migrateDb(): Promise<void> {
                 )`,
 		`CREATE INDEX IF NOT EXISTS idx_templates_owner
                         ON templates(owner_user_id)`,
+		// User groups for the tech-lead role (#201). A group is an admin-
+		// created collection of users with one designated "lead" who can
+		// observe (read-only) the sessions of every member. The lead is
+		// implicitly inserted into `user_group_members` on group create
+		// so "sessions visible to user X" reduces to "X's own ∪ sessions
+		// of any group where X is the lead" with a single JOIN.
+		//
+		// `lead_user_id` carries `ON DELETE RESTRICT` rather than
+		// CASCADE: deleting a user who's still leading a group should
+		// fail loudly at the DB layer so an admin has to reassign the
+		// lead before the user can be removed — silent CASCADE would
+		// leave the group leaderless (lead_user_id NULL would require
+		// a nullable column we don't want) or orphaned. v1 has no
+		// user-deletion API, so this is forward-looking defense.
+		//
+		// `user_group_members` rows CASCADE on either side: deleting a
+		// group nukes its membership rows; deleting a user removes them
+		// from every group they were in. Composite primary key catches
+		// duplicate (group, user) at the DB layer (defence-in-depth
+		// against a future racy add-member path).
+		//
+		// idx_group_members_user covers the lead-of-which-groups lookup
+		// — `WHERE user_id = ?` in `assertCanObserve` (#201b). Without
+		// it that becomes a table scan per auth check on the observe
+		// path; same shape as the other per-user indexes in this file.
+		`CREATE TABLE IF NOT EXISTS user_groups (
+                        id              TEXT PRIMARY KEY,
+                        name            TEXT NOT NULL,
+                        description     TEXT,
+                        lead_user_id    TEXT NOT NULL,
+                        created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+                        updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+                        FOREIGN KEY (lead_user_id) REFERENCES users(id) ON DELETE RESTRICT
+                )`,
+		`CREATE INDEX IF NOT EXISTS idx_user_groups_lead
+                        ON user_groups(lead_user_id)`,
+		`CREATE TABLE IF NOT EXISTS user_group_members (
+                        group_id        TEXT NOT NULL,
+                        user_id         TEXT NOT NULL,
+                        added_at        TEXT NOT NULL DEFAULT (datetime('now')),
+                        PRIMARY KEY (group_id, user_id),
+                        FOREIGN KEY (group_id) REFERENCES user_groups(id) ON DELETE CASCADE,
+                        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                )`,
+		`CREATE INDEX IF NOT EXISTS idx_group_members_user
+                        ON user_group_members(user_id)`,
 		`CREATE TABLE IF NOT EXISTS session_configs (
                         session_id              TEXT PRIMARY KEY,
                         workspace_strategy      TEXT,
