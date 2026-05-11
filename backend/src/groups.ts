@@ -236,13 +236,12 @@ export async function listMembers(groupId: string): Promise<GroupMember[]> {
 }
 
 /**
- * Forward-looking helper for 201b/c. Returns the ids of every group
- * the caller leads — the gate `assertCanObserve` uses to test
- * "can user X observe session S?" via `lead-of-any-group-containing
- * -ownerOfS`.
- *
- * Kept here (not in 201b) because the SQL belongs alongside the
- * other group reads. 201b wires the auth check that consumes it.
+ * Returns the ids of every group `userId` leads. Surfaced to the
+ * tech-lead "My groups" view in 201c. The SessionManager's
+ * `assertCanObserve` uses the narrower `isLeadOfUserViaGroup`
+ * predicate below instead — it answers the auth question with one
+ * indexed point read rather than fetching every group the lead
+ * owns and filtering client-side.
  */
 export async function groupsLedBy(userId: string): Promise<string[]> {
 	const result = await d1Query<{ id: string }>(
@@ -250,6 +249,41 @@ export async function groupsLedBy(userId: string): Promise<string[]> {
 		[userId],
 	);
 	return result.results.map((row) => row.id);
+}
+
+/**
+ * Auth predicate for `SessionManager.assertCanObserve` (#201b):
+ * is `leadUserId` the lead of ANY group whose membership contains
+ * `memberUserId`? Returns true iff yes.
+ *
+ * Single JOIN with `LIMIT 1` so the optimiser short-circuits as
+ * soon as a match is found. Both ids are indexed (`lead_user_id`
+ * via idx_user_groups_lead, `member.user_id` via the composite
+ * PK on user_group_members), so the query is a point read on
+ * normal volumes. No caching — the observe path is rare relative
+ * to the owner path that does most of the work.
+ *
+ * Edge: a user who leads a group and is also a member of that
+ * group (always true by invariant, since `create` and `update`
+ * insert the lead as a member) returns `true` for
+ * `isLeadOfUserViaGroup(leadId, leadId)`. The caller
+ * (`assertCanObserve`) short-circuits the self-case before
+ * reaching here, so the function staying honest doesn't matter
+ * for auth correctness — but it does mean the function is a
+ * pure relational predicate, not "is X the lead of someone
+ * else."
+ */
+export async function isLeadOfUserViaGroup(
+	leadUserId: string,
+	memberUserId: string,
+): Promise<boolean> {
+	const result = await d1Query<{ one: number }>(
+		"SELECT 1 AS one FROM user_groups g " +
+			"JOIN user_group_members m ON m.group_id = g.id " +
+			"WHERE g.lead_user_id = ? AND m.user_id = ? LIMIT 1",
+		[leadUserId, memberUserId],
+	);
+	return result.results.length > 0;
 }
 
 // ── Writes ──────────────────────────────────────────────────────────────────
