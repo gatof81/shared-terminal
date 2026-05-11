@@ -608,6 +608,15 @@ export function buildRouter(
 			res.status(404).json({ error: err.message });
 			return;
 		}
+		// Pre-wired for 201b — `assertCanObserve` will throw
+		// ForbiddenError when a non-lead tries to read a group's
+		// member sessions. Adding the arm now means 201b doesn't
+		// have to remember to extend this handler. See #262 round
+		// 6 NIT.
+		if (err instanceof ForbiddenError) {
+			res.status(403).json({ error: err.message });
+			return;
+		}
 		if (err instanceof groups.GroupUserNotFoundError) {
 			res.status(404).json({ error: err.message });
 			return;
@@ -693,6 +702,20 @@ export function buildRouter(
 		const leadUserId = body.leadUserId.trim();
 		if (leadUserId.length === 0) {
 			res.status(400).json({ error: "body.leadUserId is required (non-empty string)" });
+			return null;
+		}
+		// Cap at 128 — UUIDs are 36 chars, this allows headroom for any
+		// future ID format. Mirrors the boundary-validation convention
+		// for every other user-controlled string in this codebase
+		// (name=100, description=500, …). Without this cap, only the
+		// 100 KB `express.json` body limit bounds the value; in
+		// practice `assertUserExists` 404s immediately on a multi-KB
+		// string, but the cap is cheap defence-in-depth. See #262
+		// round 6 NIT.
+		if (leadUserId.length > USER_ID_MAX_LEN) {
+			res
+				.status(400)
+				.json({ error: `body.leadUserId must be at most ${USER_ID_MAX_LEN} characters` });
 			return null;
 		}
 		return { name, description, leadUserId };
@@ -818,6 +841,15 @@ export function buildRouter(
 			// string match against `users.id`, so the padded value 404s
 			// even when the user genuinely exists. See #262 round 2 NIT.
 			const userId = body.userId.trim();
+			// Mirror the boundary cap from `validateGroupBody`'s leadUserId
+			// — same #262 round 6 NIT rationale. The two caps must stay
+			// in lockstep; `USER_ID_MAX_LEN` is the single knob.
+			if (userId.length > USER_ID_MAX_LEN) {
+				res
+					.status(400)
+					.json({ error: `body.userId must be at most ${USER_ID_MAX_LEN} characters` });
+				return;
+			}
 			try {
 				await groups.addMember(req.params.id, userId);
 				res.status(204).send();
@@ -1839,6 +1871,13 @@ function handleTemplateError(err: unknown, res: Response): void {
 // (most clients stay under 500×200) and well below sizes that would
 // upset xterm/tmux. See #149.
 const SESSION_NAME_MAX_LEN = 64;
+// Upper bound for any `user_id` we accept at the request boundary
+// (group lead / group member). UUIDs are 36 chars; the 128 cap is
+// headroom for any future ID format while keeping the value bounded
+// well below `assertUserExists`'s D1 round-trip cost on malformed
+// input. Used by the admin-group routes; see the trim-first
+// validators there. #262 round 6 NIT.
+const USER_ID_MAX_LEN = 128;
 // Exported so wsHandler can apply the same upper bound when validating
 // cols/rows from the WS upgrade URL — keep both guards moving together.
 export const TERMINAL_DIM_MAX = 1024;
