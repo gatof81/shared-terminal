@@ -308,6 +308,12 @@ export function buildRouter(
 	router.use("/sessions", requireAuth);
 	router.use("/templates", requireAuth);
 	router.use("/admin", requireAuth);
+	// /groups is the lead-side surface (#201c) — auth-gated but NOT
+	// admin-gated. Admin-only group management lives under /admin/groups
+	// above; this prefix carries `GET /groups/mine[/sessions]` which any
+	// authed user may call (a non-lead just gets `[]` back). Adding the
+	// prefix here keeps the auth-mount block in one place.
+	router.use("/groups", requireAuth);
 
 	// Idle-sweeper bumper. Mounted AFTER `requireAuth` so unauth
 	// requests don't reset the activity timer. The `:id` capture is
@@ -872,6 +878,67 @@ export function buildRouter(
 			}
 		},
 	);
+
+	// ── Lead-side group routes (#201c) ────────────────────────────────────────
+	// Two `/groups/mine[/sessions]` reads. `requireAuth` is provided by the
+	// `/groups` prefix mount above; no admin gate — a non-lead caller just
+	// gets `[]` back (the SQL is user-scoped). Both routes 500 on D1 error
+	// rather than degrading silently to an empty list: the lead's "My
+	// groups" UI hides the entry-point when /groups/mine returns 0 rows,
+	// so silently swallowing a transient would make the UI disappear for
+	// the lead instead of surfacing the failure.
+
+	const serializeLeadGroup = (g: groups.LeadGroup) => ({
+		...serializeGroup(g),
+		members: g.members.map((m) => ({
+			userId: m.userId,
+			username: m.username,
+			addedAt: m.addedAt.toISOString(),
+		})),
+	});
+
+	// Lead-side session shape. Mirrors `serializeMeta` minus `envVars`
+	// and plus `ownerUserId` / `ownerUsername`. The lead's observability
+	// surface is intentionally narrower than admin's; the per-session
+	// lead GET (the #201 lock-in's redaction path) is a future PR.
+	const serializeObservableSession = (s: groups.ObservableSessionMeta) => ({
+		sessionId: s.sessionId,
+		ownerUserId: s.ownerUserId,
+		ownerUsername: s.ownerUsername,
+		name: s.name,
+		status: s.status,
+		// Match `serializeMeta`'s short-id slice so the wire shape is
+		// consistent across user / admin / lead views — clients that
+		// already render the short id don't need a per-endpoint switch.
+		containerId: s.containerId?.slice(0, 12) ?? null,
+		containerName: s.containerName,
+		cols: s.cols,
+		rows: s.rows,
+		createdAt: s.createdAt.toISOString(),
+		lastConnectedAt: s.lastConnectedAt?.toISOString() ?? null,
+	});
+
+	router.get("/groups/mine", async (req: Request, res: Response) => {
+		const { userId } = req as AuthedRequest;
+		try {
+			const list = await groups.listGroupsLedBy(userId);
+			res.json(list.map(serializeLeadGroup));
+		} catch (err) {
+			logger.error(`[groups] /mine failed: ${(err as Error).message}`);
+			res.status(500).json({ error: "Internal server error" });
+		}
+	});
+
+	router.get("/groups/mine/sessions", async (req: Request, res: Response) => {
+		const { userId } = req as AuthedRequest;
+		try {
+			const list = await groups.sessionsObservableBy(userId);
+			res.json(list.map(serializeObservableSession));
+		} catch (err) {
+			logger.error(`[groups] /mine/sessions failed: ${(err as Error).message}`);
+			res.status(500).json({ error: "Internal server error" });
+		}
+	});
 
 	// ── Session routes ──────────────────────────────────────────────────────
 

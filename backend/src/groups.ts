@@ -3,15 +3,19 @@
  *
  * A group is a named collection of users with one designated "lead"
  * who can observe (read-only) the sessions of every member. Schema
- * lives in `db.ts` (user_groups + user_group_members). All CRUD here
- * is admin-only at the route layer — this module has no per-user
- * ownership concept of its own (analogous to `invites` rather than
- * `templates`).
+ * lives in `db.ts` (user_groups + user_group_members). Group CRUD
+ * (create / update / delete / addMember / removeMember) is admin-
+ * only at the route layer; the lead-side READ surface is auth-only
+ * (any authed user can call `/api/groups/mine[/sessions]` and the
+ * SQL itself does the user-scoping).
  *
- * Forward-looking 201b/c hooks:
- *   - `groupsLedBy(userId)` powers the `assertCanObserve` extension.
- *   - `sessionsObservableBy(userId)` is the cross-user session list
- *     surface for the tech lead's "My group" view.
+ * Auth integration:
+ *   - `isLeadOfUserViaGroup(leadId, memberId)` is the indexed
+ *     point-read consumed by `SessionManager.assertCanObserve`
+ *     (#201b) for the observe-mode auth check.
+ *   - `listGroupsLedBy(userId)` and `sessionsObservableBy(userId)`
+ *     (#201c) are the lead-side reads behind `/api/groups/mine`
+ *     and `/api/groups/mine/sessions` respectively.
  *
  * The lead is implicitly inserted into `user_group_members` on
  * create / re-assigned-via-update, so "sessions visible to user X"
@@ -22,7 +26,8 @@
 import { randomUUID } from "node:crypto";
 import { parseD1Utc } from "./d1Time.js";
 import { d1Query } from "./db.js";
-import { ForbiddenError, NotFoundError } from "./sessionManager.js";
+import { ADMIN_LIST_LIMIT, ForbiddenError, NotFoundError } from "./sessionManager.js";
+import type { SessionStatus } from "./types.js";
 
 // ── Limits ──────────────────────────────────────────────────────────────────
 
@@ -82,6 +87,38 @@ export interface GroupMember {
 	userId: string;
 	username: string;
 	addedAt: Date;
+}
+
+/** Lead-side group shape returned by `listGroupsLedBy`. Extends
+ *  `Group` with the inlined member list so the `GET /api/groups/mine`
+ *  endpoint renders in one round-trip per lead, regardless of how
+ *  many groups they lead — the implementation does two D1 calls
+ *  total (groups + a single IN-clause member fetch) and zips the
+ *  result in JS. */
+export interface LeadGroup extends Group {
+	members: GroupMember[];
+}
+
+/** Cross-user session row returned by `sessionsObservableBy` — the
+ *  lead's read-only view of "every session a member of any group I
+ *  lead currently owns." Shape mirrors the admin cross-user list
+ *  (`sessionManager.listAll`) but excludes `envVars`: the lead's
+ *  observability surface is intentionally narrower than admin's,
+ *  and the list view doesn't need plaintext env. A future per-
+ *  session lead GET (the redaction-locked-in path from #201) can
+ *  surface env via `redactStoredEntries` once that endpoint ships. */
+export interface ObservableSessionMeta {
+	sessionId: string;
+	ownerUserId: string;
+	ownerUsername: string;
+	name: string;
+	status: SessionStatus;
+	containerId: string | null;
+	containerName: string;
+	cols: number;
+	rows: number;
+	createdAt: Date;
+	lastConnectedAt: Date | null;
 }
 
 export interface GroupInput {
@@ -284,6 +321,164 @@ export async function isLeadOfUserViaGroup(
 		[leadUserId, memberUserId],
 	);
 	return result.results.length > 0;
+}
+
+// ── Lead-side reads (#201c) ────────────────────────────────────────────────
+//
+// Two reads power the tech-lead's "My groups" UI without requiring
+// admin gating. Both are user-scoped — the lead can only see groups
+// they personally lead, and sessions whose owners are members of one
+// of those groups. Auth at the route layer is `requireAuth` only
+// (no admin); the SQL itself is the user-scoping. A non-lead caller
+// gets an empty array from both helpers, NOT a 403 — the auth
+// gradient surfaces "the user has lead privileges" via the
+// `listGroupsLedBy` result being non-empty, not via a separate
+// status code. This matches the "groups where I'm lead" / "any user"
+// audience in the issue lock-in.
+
+/**
+ * Return every group `userId` leads, newest-first, with each group's
+ * full member list inlined. Two D1 round-trips total regardless of
+ * how many groups the user leads:
+ *
+ *   1. Fetch all groups where `lead_user_id = userId`.
+ *   2. If any groups came back, fetch ALL their members in a single
+ *      IN-clause query joined to `users.username`.
+ *
+ * Then zip in JS. The IN-clause is built from the group ids the
+ * first query returned, so the parameter list is bounded by however
+ * many groups the lead leads — which is itself bounded by the
+ * deployment-wide `MAX_GROUPS_TOTAL` cap (1000 today). D1 runs
+ * SQLite 3.46+, where SQLITE_MAX_VARIABLE_NUMBER is 32 766; a
+ * worst-case "one lead leads every group in a maxed-out deployment"
+ * binds 1000 placeholders, well within bounds. Raise
+ * `MAX_GROUPS_TOTAL` with care if it ever approaches that ceiling
+ * (the older 999-default limit predates SQLite 3.32 / 2020 and is
+ * not the relevant number on D1).
+ *
+ * LEFT JOIN on member fetch is deliberate: a group with no members
+ * is impossible by invariant (the lead is implicitly inserted on
+ * create), but if a future bug ever left a group empty, returning
+ * the group with `members: []` is a better failure mode than
+ * silently dropping it from the lead's view.
+ */
+export async function listGroupsLedBy(userId: string): Promise<LeadGroup[]> {
+	const groupsResult = await d1Query<GroupRow>(
+		"SELECT * FROM user_groups WHERE lead_user_id = ? ORDER BY created_at DESC",
+		[userId],
+	);
+	if (groupsResult.results.length === 0) return [];
+	const groupRows = groupsResult.results;
+	const groupIds = groupRows.map((row) => row.id);
+	// Parameterised IN-clause. Build the placeholder list dynamically
+	// (D1's prepared-statement shape requires one `?` per value) but
+	// the values themselves are always bound — never interpolated —
+	// so the SQL injection surface is closed at the binding boundary.
+	const placeholders = groupIds.map(() => "?").join(",");
+	const memberRows = await d1Query<{
+		group_id: string;
+		user_id: string;
+		username: string;
+		added_at: string;
+	}>(
+		`SELECT m.group_id, m.user_id, u.username, m.added_at ` +
+			`FROM user_group_members m JOIN users u ON u.id = m.user_id ` +
+			`WHERE m.group_id IN (${placeholders}) ` +
+			`ORDER BY m.added_at ASC`,
+		groupIds,
+	);
+	// Bucket members by group_id. Initialise every bucket so a group
+	// with zero members (the bug-defence case above) still renders as
+	// `members: []` rather than `members: undefined`.
+	const membersByGroup = new Map<string, GroupMember[]>();
+	for (const id of groupIds) membersByGroup.set(id, []);
+	for (const row of memberRows.results) {
+		membersByGroup.get(row.group_id)?.push({
+			userId: row.user_id,
+			username: row.username,
+			addedAt: parseD1Utc(row.added_at, "groups"),
+		});
+	}
+	return groupRows.map((row) => ({
+		...rowToGroup(row),
+		members: membersByGroup.get(row.id) ?? [],
+	}));
+}
+
+/**
+ * Return every session owned by any user who is a member of any
+ * group `userId` leads, newest-first, hard-capped at
+ * `ADMIN_LIST_LIMIT`. The cap is shared with the admin path
+ * (`sessionManager.listAll`) — same rationale: a deployment with
+ * thousands of accumulated sessions across a lead's groups
+ * shouldn't blow a multi-megabyte JSON payload on a routine refresh.
+ *
+ * Excludes `terminated` sessions: they're soft-deleted by the owner
+ * and can't be observed (no container, nothing to attach to). Stays
+ * parallel to the owner's default-list shape from `listForUser`,
+ * which excludes the same status.
+ *
+ * Single JOIN-with-IN-subquery: the inner SELECT pulls every user
+ * id that's a member of any group led by `userId`; the outer
+ * SELECT picks every session of those users, joined to `users` for
+ * the owner username. Indexes hit on the inner side: `lead_user_id`
+ * via `idx_user_groups_lead`, then `m.group_id` via the leading
+ * column of the `user_group_members` composite PK `(group_id,
+ * user_id)`. Outer JOIN on `sessions.user_id` walks the existing
+ * sessions table. No extra index needed on `sessions(user_id)` at
+ * v1 scale — the session table is small and the JOIN is bounded
+ * by the inner subquery's small result set.
+ *
+ * Edge: a lead is implicitly a member of every group they lead, so
+ * the inner subquery includes the lead's own user_id. This means
+ * `sessionsObservableBy(leadUserId)` includes the lead's OWN
+ * sessions. That's the right v1 shape: the lead's "My group"
+ * dashboard surfaces every session they can observe, including
+ * their own — clients can filter or section client-side if they
+ * want a different render. Filtering server-side would mean a lead
+ * with no members but one of their own sessions sees nothing,
+ * which is a confusing UX for "you lead this group but it's
+ * empty."
+ */
+export async function sessionsObservableBy(userId: string): Promise<ObservableSessionMeta[]> {
+	const result = await d1Query<{
+		session_id: string;
+		user_id: string;
+		username: string;
+		name: string;
+		status: string;
+		container_id: string | null;
+		container_name: string;
+		cols: number;
+		rows: number;
+		created_at: string;
+		last_connected_at: string | null;
+	}>(
+		"SELECT s.session_id, s.user_id, u.username, s.name, s.status, " +
+			"s.container_id, s.container_name, s.cols, s.rows, " +
+			"s.created_at, s.last_connected_at " +
+			"FROM sessions s JOIN users u ON u.id = s.user_id " +
+			"WHERE s.user_id IN ( " +
+			"  SELECT m.user_id FROM user_group_members m " +
+			"  JOIN user_groups g ON g.id = m.group_id " +
+			"  WHERE g.lead_user_id = ? " +
+			") AND s.status != 'terminated' " +
+			`ORDER BY s.created_at DESC LIMIT ${ADMIN_LIST_LIMIT}`,
+		[userId],
+	);
+	return result.results.map((row) => ({
+		sessionId: row.session_id,
+		ownerUserId: row.user_id,
+		ownerUsername: row.username,
+		name: row.name,
+		status: row.status as SessionStatus,
+		containerId: row.container_id,
+		containerName: row.container_name,
+		cols: row.cols,
+		rows: row.rows,
+		createdAt: parseD1Utc(row.created_at, "sessions"),
+		lastConnectedAt: row.last_connected_at ? parseD1Utc(row.last_connected_at, "sessions") : null,
+	}));
 }
 
 // ── Writes ──────────────────────────────────────────────────────────────────
