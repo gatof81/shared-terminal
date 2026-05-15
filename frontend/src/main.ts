@@ -3767,7 +3767,13 @@ function renderMyGroups(groups: LeadGroup[], sessions: ObservableSession[]): voi
 				const btn = document.createElement("button");
 				btn.type = "button";
 				btn.textContent = `Observe "${s.name}"`;
-				btn.addEventListener("click", () => openObserveModal(s));
+				btn.addEventListener("click", () => {
+					// openObserveModal is async (it fetches the tab list
+					// before opening the WS). Fire-and-forget — it
+					// surfaces its own errors via showToast, so there's
+					// no caller-side rejection to handle.
+					void openObserveModal(s);
+				});
 				actions.appendChild(btn);
 			}
 			memberRow.appendChild(actions);
@@ -3777,26 +3783,55 @@ function renderMyGroups(groups: LeadGroup[], sessions: ObservableSession[]): voi
 	}
 }
 
-function openObserveModal(s: ObservableSession): void {
+async function openObserveModal(s: ObservableSession): Promise<void> {
 	// Tear down any prior observe attach before opening a new one —
 	// keeps the audit log honest (each Observe click maps to one
 	// open + one close UPDATE) and avoids stacking xterm DOM nodes
 	// in the modal host.
 	closeObserveModal();
+	// Fetch the session's tab list FIRST. The WS handler hard-rejects
+	// any attach without a `?tab=...` query (returns 1008 "Missing
+	// tab"), so we must pick a real tab id before opening the socket
+	// — the backend has no implicit "default tab." A first slice
+	// initially tried to pass no tabId and let the server "default to
+	// main"; the WS close fired immediately every time. Pinning the
+	// tab here is what makes observe-mode actually work end-to-end.
+	//
+	// `listTabs` was relaxed to `assertCanObserve` in the same review
+	// fix, so a lead can read the tab list of a session they don't
+	// own. Tab CREATE / DELETE stays owner-only.
+	let tabs: Tab[];
+	try {
+		tabs = await listTabs(s.sessionId);
+	} catch (err) {
+		showToast(`Couldn't load tabs for "${s.name}": ${(err as Error).message}`, true);
+		return;
+	}
+	if (tabs.length === 0) {
+		// The session has no open tmux tabs — no surface to observe.
+		// Owner needs to create one from their UI before the lead can
+		// attach. Surface a clear toast rather than opening an empty
+		// modal that would just disconnect immediately.
+		showToast(`"${s.name}" has no open tabs to observe`, true);
+		return;
+	}
+	// v1 picks the first tab — a session typically has one. A future
+	// slice can add a tab picker if multi-tab observability becomes a
+	// common need; for now, surfacing a count in the modal hint keeps
+	// the lead aware the session may have more.
+	const tab = tabs[0]!;
 	observeModalTitle.textContent = `Observing "${s.name}" (${s.ownerUsername})`;
 	observeModalHint.textContent =
-		"Read-only view. Input is disabled — every observe-attach is logged.";
+		tabs.length === 1
+			? `Read-only view of "${tab.label ?? tab.tabId}". Input is disabled — every observe-attach is logged.`
+			: `Read-only view of "${tab.label ?? tab.tabId}" (1 of ${tabs.length} tabs — first shown). Input is disabled — every observe-attach is logged.`;
 	observeModal.classList.add("open");
 	observeModal.setAttribute("aria-hidden", "false");
 	observeTerminalHost.textContent = "";
 	const term = openTerminalSession({
 		container: observeTerminalHost,
 		sessionId: s.sessionId,
-		// Observe-mode attaches without a tab id default to the
-		// session's `main` tmux session — same shape as a fresh attach
-		// without a saved tab. The lead doesn't get to pick a tab in
-		// v1 (the admin/lead modal lists sessions, not tabs); the
-		// observed terminal shows whatever's on the default tab.
+		tabId: tab.tabId,
 		fontSize: currentFontSize,
 		observe: true,
 		onStatus: (status) => {

@@ -1468,7 +1468,17 @@ export function buildRouter(
 	router.get("/sessions/:id/tabs", async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
 		try {
-			await sessions.assertOwnedBy(req.params.id, userId);
+			// `assertCanObserve` (#201d) instead of `assertOwnedBy`
+			// (#201e-1 review BLOCKER). Reading the tab list is a
+			// read-only operation observers MUST be able to do — without
+			// it the lead's "Observe" click can't pick a tab to attach
+			// to, and the WS would 1008-close on "Missing tab". The auth
+			// graduation is owner / admin / lead-of-group-containing-owner,
+			// matching what the observe-WS attach itself enforces.
+			// Tab CREATE / DELETE further down stay on `assertOwnedBy` —
+			// observability does NOT include the right to mutate tab
+			// state on someone else's session.
+			await sessions.assertCanObserve(req.params.id, userId);
 			const tabs = await docker.listTabs(req.params.id);
 			res.json(tabs);
 		} catch (err) {
