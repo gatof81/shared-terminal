@@ -3,15 +3,19 @@
  *
  * A group is a named collection of users with one designated "lead"
  * who can observe (read-only) the sessions of every member. Schema
- * lives in `db.ts` (user_groups + user_group_members). All CRUD here
- * is admin-only at the route layer — this module has no per-user
- * ownership concept of its own (analogous to `invites` rather than
- * `templates`).
+ * lives in `db.ts` (user_groups + user_group_members). Group CRUD
+ * (create / update / delete / addMember / removeMember) is admin-
+ * only at the route layer; the lead-side READ surface is auth-only
+ * (any authed user can call `/api/groups/mine[/sessions]` and the
+ * SQL itself does the user-scoping).
  *
- * Forward-looking 201b/c hooks:
- *   - `groupsLedBy(userId)` powers the `assertCanObserve` extension.
- *   - `sessionsObservableBy(userId)` is the cross-user session list
- *     surface for the tech lead's "My group" view.
+ * Auth integration:
+ *   - `isLeadOfUserViaGroup(leadId, memberId)` is the indexed
+ *     point-read consumed by `SessionManager.assertCanObserve`
+ *     (#201b) for the observe-mode auth check.
+ *   - `listGroupsLedBy(userId)` and `sessionsObservableBy(userId)`
+ *     (#201c) are the lead-side reads behind `/api/groups/mine`
+ *     and `/api/groups/mine/sessions` respectively.
  *
  * The lead is implicitly inserted into `user_group_members` on
  * create / re-assigned-via-update, so "sessions visible to user X"
@@ -344,9 +348,13 @@ export async function isLeadOfUserViaGroup(
  * Then zip in JS. The IN-clause is built from the group ids the
  * first query returned, so the parameter list is bounded by however
  * many groups the lead leads — which is itself bounded by the
- * deployment-wide `MAX_GROUPS_TOTAL` cap. SQLite's expression-tree
- * cap (typically 999 bound params) is well above any plausible
- * single-lead count, so no chunking needed at v1 scale.
+ * deployment-wide `MAX_GROUPS_TOTAL` cap (1000 today). D1 runs
+ * SQLite 3.46+, where SQLITE_MAX_VARIABLE_NUMBER is 32 766; a
+ * worst-case "one lead leads every group in a maxed-out deployment"
+ * binds 1000 placeholders, well within bounds. Raise
+ * `MAX_GROUPS_TOTAL` with care if it ever approaches that ceiling
+ * (the older 999-default limit predates SQLite 3.32 / 2020 and is
+ * not the relevant number on D1).
  *
  * LEFT JOIN on member fetch is deliberate: a group with no members
  * is impossible by invariant (the lead is implicitly inserted on
@@ -413,10 +421,13 @@ export async function listGroupsLedBy(userId: string): Promise<LeadGroup[]> {
  * Single JOIN-with-IN-subquery: the inner SELECT pulls every user
  * id that's a member of any group led by `userId`; the outer
  * SELECT picks every session of those users, joined to `users` for
- * the owner username. Both ids are indexed (group_id via PK,
- * member.user_id via composite PK), so the inner subquery is a
- * point read per group; the outer JOIN on `sessions.user_id` walks
- * the existing sessions index.
+ * the owner username. Indexes hit on the inner side: `lead_user_id`
+ * via `idx_user_groups_lead`, then `m.group_id` via the leading
+ * column of the `user_group_members` composite PK `(group_id,
+ * user_id)`. Outer JOIN on `sessions.user_id` walks the existing
+ * sessions table. No extra index needed on `sessions(user_id)` at
+ * v1 scale — the session table is small and the JOIN is bounded
+ * by the inner subquery's small result set.
  *
  * Edge: a lead is implicitly a member of every group they lead, so
  * the inner subquery includes the lead's own user_id. This means
