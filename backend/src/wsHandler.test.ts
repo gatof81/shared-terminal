@@ -1,5 +1,15 @@
 import jwt from "jsonwebtoken";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Mock observeLog at the module boundary so the observe-mode tests
+// below can assert on the audit-log call shape without driving D1.
+// Hoisted so the mock is in place before wsHandler.js loads it.
+const observeLogStubs = vi.hoisted(() => ({
+	recordObserveStart: vi.fn(async () => "log-uuid"),
+	recordObserveEnd: vi.fn(async () => undefined),
+}));
+vi.mock("./observeLog.js", () => observeLogStubs);
+
 import { __resetJwtSecretForTests, validateJwtSecret } from "./auth.js";
 import type { DockerManager } from "./dockerManager.js";
 import type { SessionManager } from "./sessionManager.js";
@@ -193,6 +203,10 @@ describe("handleWsConnection geometry from URL", () => {
 			expect(docker.attach).toHaveBeenCalled();
 		});
 
+		// 7th positional arg `observe` defaults to false for the
+		// owner-only path (#201d). Pin it explicitly so a future
+		// refactor that swaps the parameter order surfaces here
+		// rather than in the WS handler.
 		expect(docker.attach).toHaveBeenCalledWith(
 			"abc",
 			expect.any(String),
@@ -200,6 +214,7 @@ describe("handleWsConnection geometry from URL", () => {
 			60,
 			expect.any(Function),
 			"tab-1",
+			false,
 		);
 	});
 
@@ -223,6 +238,7 @@ describe("handleWsConnection geometry from URL", () => {
 			40,
 			expect.any(Function),
 			"tab-1",
+			false,
 		);
 	});
 
@@ -247,7 +263,214 @@ describe("handleWsConnection geometry from URL", () => {
 			40,
 			expect.any(Function),
 			"tab-1",
+			false,
 		);
+	});
+});
+
+// ── Observe-mode (#201d) ─────────────────────────────────────────────────
+// `?observe=true` opts into a read-only attach gated on `assertCanObserve`.
+// The WS handler must: switch the auth call, pass `observe: true` to
+// docker.attach (size-vote suppression at the docker layer), write an
+// audit row on attach success / UPDATE on close, and DROP input + resize
+// frames at the message layer. The audit log lives in observeLog.ts —
+// mocked at the module boundary above so these tests assert on the call
+// shape without driving D1.
+
+describe("handleWsConnection observe-mode (#201d)", () => {
+	function makeMocks(opts: { ownerId?: string } = {}) {
+		// assertCanObserve returns the SessionMeta-shaped result with
+		// `userId` so the wsHandler can compute `isObserverNotOwner =
+		// observe && session.userId !== userId`. Auth-mode wsHandler
+		// tests above set up assertOwnership; this block sets up
+		// assertCanObserve.
+		const sessions = {
+			assertCanObserve: vi.fn().mockResolvedValue({
+				status: "running",
+				userId: opts.ownerId ?? "owner-1",
+				cols: 80,
+				rows: 24,
+			}),
+			assertOwnership: vi.fn().mockResolvedValue({
+				status: "running",
+				userId: "user-1",
+				cols: 80,
+				rows: 24,
+			}),
+			updateConnected: vi.fn().mockResolvedValue(undefined),
+		} as unknown as SessionManager;
+		const docker = {
+			attach: vi.fn().mockResolvedValue({ replay: null, flushTail: () => {} }),
+			detach: vi.fn(),
+			write: vi.fn(),
+			resize: vi.fn().mockResolvedValue(undefined),
+		} as unknown as DockerManager;
+		return { sessions, docker };
+	}
+
+	beforeEach(() => {
+		observeLogStubs.recordObserveStart.mockReset();
+		observeLogStubs.recordObserveEnd.mockReset();
+		observeLogStubs.recordObserveStart.mockResolvedValue("log-uuid");
+		observeLogStubs.recordObserveEnd.mockResolvedValue(undefined);
+	});
+
+	it("routes auth via assertCanObserve (not assertOwnership) when ?observe=true", async () => {
+		const ws = makeFakeWs();
+		const { sessions, docker } = makeMocks({ ownerId: "owner-bob" });
+		const req = makeReq("/ws/sessions/s-1?tab=tab-1&observe=true", true);
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		handleWsConnection(ws as any, req as any, sessions, docker);
+		await vi.waitFor(() => {
+			expect(docker.attach).toHaveBeenCalled();
+		});
+		expect(sessions.assertCanObserve).toHaveBeenCalledWith("s-1", "user-1");
+		expect(sessions.assertOwnership).not.toHaveBeenCalled();
+	});
+
+	it("passes observe=true to docker.attach when observer differs from owner", async () => {
+		const ws = makeFakeWs();
+		const { sessions, docker } = makeMocks({ ownerId: "owner-bob" });
+		const req = makeReq("/ws/sessions/s-1?tab=tab-1&observe=true", true);
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		handleWsConnection(ws as any, req as any, sessions, docker);
+		await vi.waitFor(() => {
+			expect(docker.attach).toHaveBeenCalled();
+		});
+		// 7th positional arg is the observe flag.
+		const call = (docker.attach as ReturnType<typeof vi.fn>).mock.calls[0]!;
+		expect(call[6]).toBe(true);
+	});
+
+	it("passes observe=false to docker.attach when observer IS the owner (no-audit edge)", async () => {
+		// `?observe=true` from the owner is allowed (assertCanObserve
+		// accepts owner-self), but the audit log + read-only gate are
+		// behaviourally pointless. The wsHandler sets
+		// `isObserverNotOwner = observe && session.userId !== userId`
+		// so the docker layer attaches normally (size-vote contribution
+		// intact) and no audit row is written. Pin this so a future
+		// refactor of the discriminator doesn't accidentally log the
+		// owner as an observer of their own session.
+		const ws = makeFakeWs();
+		const { sessions, docker } = makeMocks({ ownerId: "user-1" });
+		const req = makeReq("/ws/sessions/s-1?tab=tab-1&observe=true", true);
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		handleWsConnection(ws as any, req as any, sessions, docker);
+		await vi.waitFor(() => {
+			expect(docker.attach).toHaveBeenCalled();
+		});
+		const call = (docker.attach as ReturnType<typeof vi.fn>).mock.calls[0]!;
+		expect(call[6]).toBe(false);
+		expect(observeLogStubs.recordObserveStart).not.toHaveBeenCalled();
+	});
+
+	it("INSERTs an audit row after attach success and UPDATEs on close", async () => {
+		const ws = makeFakeWs();
+		const { sessions, docker } = makeMocks({ ownerId: "owner-bob" });
+		const req = makeReq("/ws/sessions/s-1?tab=tab-1&observe=true", true);
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		handleWsConnection(ws as any, req as any, sessions, docker);
+		await vi.waitFor(() => {
+			expect(observeLogStubs.recordObserveStart).toHaveBeenCalled();
+		});
+		expect(observeLogStubs.recordObserveStart).toHaveBeenCalledWith(
+			"user-1", // observer
+			"s-1", // session
+			"owner-bob", // owner (denormalised at insert)
+		);
+		// Simulate WS close — handler is registered via ws.on("close", …).
+		// Find the close handler from the on() mock calls and invoke it.
+		const closeCall = ws.on.mock.calls.find((c) => c[0] === "close");
+		expect(closeCall).toBeDefined();
+		(closeCall![1] as () => void)();
+		// recordObserveEnd is fire-and-forget (the WS-close path doesn't
+		// await it; the SQL idempotency is the safety net). waitFor
+		// polls until the microtask the close handler scheduled lands.
+		await vi.waitFor(() => {
+			expect(observeLogStubs.recordObserveEnd).toHaveBeenCalledWith("log-uuid");
+		});
+	});
+
+	it("aborts the attach + closes the socket when the audit INSERT fails", async () => {
+		// The audit-trail invariant requires every observe to be logged.
+		// An INSERT failure must bubble out so the socket closes with
+		// 1011 — leaving the attach live and unaudited would defeat
+		// the trail's purpose.
+		observeLogStubs.recordObserveStart.mockRejectedValueOnce(new Error("D1 transient"));
+		const ws = makeFakeWs();
+		const { sessions, docker } = makeMocks({ ownerId: "owner-bob" });
+		const req = makeReq("/ws/sessions/s-1?tab=tab-1&observe=true", true);
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		handleWsConnection(ws as any, req as any, sessions, docker);
+		await vi.waitFor(() => {
+			expect(ws.close).toHaveBeenCalled();
+		});
+		// detach() must run to release the listener registered by
+		// docker.attach — otherwise the bufferedListener would pile
+		// live bytes forever after the audit failure tore everything
+		// else down.
+		expect(docker.detach).toHaveBeenCalled();
+		// Close with 1011 (internal error) is the catch-block's
+		// fall-through for non-NotFound/non-Forbidden throws.
+		const closeCodes = ws.close.mock.calls.map((c) => c[0] as number);
+		expect(closeCodes).toContain(1011);
+	});
+
+	it("drops input frames in observe-mode (does not call docker.write)", async () => {
+		const ws = makeFakeWs();
+		const { sessions, docker } = makeMocks({ ownerId: "owner-bob" });
+		const req = makeReq("/ws/sessions/s-1?tab=tab-1&observe=true", true);
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		handleWsConnection(ws as any, req as any, sessions, docker);
+		await vi.waitFor(() => {
+			expect(observeLogStubs.recordObserveStart).toHaveBeenCalled();
+		});
+		// Fish out the message handler and feed it an input frame.
+		const msgCall = ws.on.mock.calls.find((c) => c[0] === "message");
+		expect(msgCall).toBeDefined();
+		const onMessage = msgCall![1] as (raw: unknown) => void;
+		onMessage(JSON.stringify({ type: "input", data: "rm -rf /" }));
+		// The whole point: a write-to-someone's-shell is silently dropped.
+		expect(docker.write).not.toHaveBeenCalled();
+	});
+
+	it("drops resize frames in observe-mode (does not call docker.resize)", async () => {
+		// Defence-in-depth on top of the docker-layer clientSizes
+		// skip: dropping the frame here avoids the wasted D1 round-trip
+		// through `recomputeSize` and matches the input-drop posture.
+		const ws = makeFakeWs();
+		const { sessions, docker } = makeMocks({ ownerId: "owner-bob" });
+		const req = makeReq("/ws/sessions/s-1?tab=tab-1&observe=true", true);
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		handleWsConnection(ws as any, req as any, sessions, docker);
+		await vi.waitFor(() => {
+			expect(observeLogStubs.recordObserveStart).toHaveBeenCalled();
+		});
+		const msgCall = ws.on.mock.calls.find((c) => c[0] === "message");
+		const onMessage = msgCall![1] as (raw: unknown) => void;
+		onMessage(JSON.stringify({ type: "resize", cols: 40, rows: 12 }));
+		expect(docker.resize).not.toHaveBeenCalled();
+	});
+
+	it("non-observe attaches preserve input/resize forwarding (regression guard)", async () => {
+		// Pin that the observe-mode drop is conditional on
+		// `isObserverNotOwner` — without this guard a future refactor
+		// could accidentally hoist the early-return out of the
+		// observe branch and break every owner attach silently.
+		const ws = makeFakeWs();
+		const { sessions, docker } = makeMocks({ ownerId: "user-1" });
+		const req = makeReq("/ws/sessions/s-1?tab=tab-1", true);
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		handleWsConnection(ws as any, req as any, sessions, docker);
+		await vi.waitFor(() => {
+			expect(docker.attach).toHaveBeenCalled();
+		});
+		const msgCall = ws.on.mock.calls.find((c) => c[0] === "message");
+		const onMessage = msgCall![1] as (raw: unknown) => void;
+		onMessage(JSON.stringify({ type: "input", data: "ls\n" }));
+		onMessage(JSON.stringify({ type: "resize", cols: 100, rows: 30 }));
+		expect(docker.write).toHaveBeenCalledWith(expect.any(String), "ls\n");
+		expect(docker.resize).toHaveBeenCalledWith(expect.any(String), 100, 30);
 	});
 });
 

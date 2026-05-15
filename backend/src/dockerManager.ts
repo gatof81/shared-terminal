@@ -1237,6 +1237,18 @@ export class DockerManager {
 		rows: number,
 		onOutput: OutputListener,
 		tabId: string,
+		// Observe-mode (#201d): when true the attach is read-only — the
+		// listener is registered for output fanout but the attachId is
+		// NOT added to `s.clientSizes`, so observers' viewport
+		// dimensions don't influence tmux's min-of-all-clients pane
+		// size. An observer with a smaller terminal would otherwise
+		// shrink the owner's view. wsHandler ALSO drops `input` and
+		// `resize` frames at the message layer for observe-mode
+		// attaches — the dual gate is intentional: this flag is the
+		// defence-in-depth at the docker layer for the size-pollution
+		// half, the wsHandler drop is the auth invariant for the
+		// write-into-someone's-shell half.
+		observe = false,
 	): Promise<{ handle: ExecHandle; replay: string | null; flushTail: () => void }> {
 		const key = this.targetKey(sessionId, tabId);
 
@@ -1355,7 +1367,16 @@ export class DockerManager {
 		};
 
 		s.listeners.set(attachId, bufferedListener);
-		s.clientSizes.set(attachId, { cols, rows });
+		// Observe-mode (#201d): skip the clientSizes registration. tmux
+		// applies a min-of-all-attached-clients pane size via
+		// `recomputeSize`; an observer with a smaller terminal would
+		// otherwise shrink the owner's pane. Skipping the registration
+		// keeps the owner's view unaffected by observer geometry, at
+		// the cost of an observer with a smaller window seeing
+		// horizontal-scroll behaviour rather than a re-flowed pane.
+		// `resize()` and `detach()` already no-op on a missing
+		// `clientSizes` entry, so no other call sites change.
+		if (!observe) s.clientSizes.set(attachId, { cols, rows });
 		this.keyOf.set(attachId, key);
 
 		// Once the listener is in `s.listeners`, any throw before we return

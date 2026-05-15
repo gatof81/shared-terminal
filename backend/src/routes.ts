@@ -35,6 +35,7 @@ import { EnvVarValidationError, validateEnvVars } from "./envVarValidation.js";
 import * as groups from "./groups.js";
 import type { IdleSweeperStats } from "./idleSweeper.js";
 import { logger } from "./logger.js";
+import * as observeLog from "./observeLog.js";
 import { getDispatcherStats } from "./portDispatcher.js";
 import type { RateLimitConfig } from "./rateLimit.js";
 import {
@@ -591,6 +592,38 @@ export function buildRouter(
 				res.status(204).send();
 			} catch (err) {
 				logger.error(`[admin] force-delete failed: ${(err as Error).message}`);
+				res.status(500).json({ error: "Internal server error" });
+			}
+		},
+	);
+
+	// ── Admin observe-log (#201d) ────────────────────────────────────────────
+	// Cross-user view of "who watched whose session, when." Uses the
+	// `adminStatsIp` limiter — same bucket dashboards poll for sessions
+	// + stats; the budget assumes one operator dashboard polls multiple
+	// admin reads at once.
+
+	const serializeAdminObserveLogEntry = (e: observeLog.AdminObserveLogEntry) => ({
+		id: e.id,
+		observerUserId: e.observerUserId,
+		observerUsername: e.observerUsername,
+		sessionId: e.sessionId,
+		ownerUserId: e.ownerUserId,
+		ownerUsername: e.ownerUsername,
+		startedAt: e.startedAt.toISOString(),
+		endedAt: e.endedAt?.toISOString() ?? null,
+	});
+
+	router.get(
+		"/admin/observe-log",
+		adminStatsIp,
+		requireAdmin,
+		async (_req: Request, res: Response) => {
+			try {
+				const list = await observeLog.listAll();
+				res.json(list.map(serializeAdminObserveLogEntry));
+			} catch (err) {
+				logger.error(`[admin] observe-log list failed: ${(err as Error).message}`);
 				res.status(500).json({ error: "Internal server error" });
 			}
 		},
@@ -1221,6 +1254,41 @@ export function buildRouter(
 		try {
 			const meta = await sessions.assertOwnership(req.params.id, userId);
 			res.json(serializeMeta(meta));
+		} catch (err) {
+			handleSessionError(err, res);
+		}
+	});
+
+	// Per-session observe-log read (#201d). Returns the audit history
+	// for a single session — who watched, when, and whether they're
+	// still watching (`endedAt: null`). Gated by `assertCanObserve`:
+	// the owner, any admin, and any lead of a group containing the
+	// owner can read this view. A non-authorised caller gets 403/404
+	// from the assert (same shape the other session-scoped reads
+	// emit). The route lives next to `GET /sessions/:id` so the
+	// owner-facing audit view is co-located with the session detail.
+
+	const serializeObserveLogEntry = (e: observeLog.ObserveLogEntry) => ({
+		id: e.id,
+		observerUserId: e.observerUserId,
+		observerUsername: e.observerUsername,
+		sessionId: e.sessionId,
+		ownerUserId: e.ownerUserId,
+		startedAt: e.startedAt.toISOString(),
+		endedAt: e.endedAt?.toISOString() ?? null,
+	});
+
+	router.get("/sessions/:id/observe-log", async (req: Request, res: Response) => {
+		const { userId } = req as AuthedRequest;
+		try {
+			// `assertCanObserve` throws NotFoundError for a missing
+			// session and ForbiddenError for an unauthorised caller —
+			// both shapes flow into `handleSessionError`'s standard 404
+			// / 403 emission, so callers get the same status-code
+			// contract the rest of the /sessions/:id reads use.
+			await sessions.assertCanObserve(req.params.id, userId);
+			const list = await observeLog.listForSession(req.params.id);
+			res.json(list.map(serializeObserveLogEntry));
 		} catch (err) {
 			handleSessionError(err, res);
 		}
