@@ -2718,7 +2718,13 @@ document.addEventListener("keydown", (e) => {
 		// guard, Escape with the admin dashboard open AND the
 		// sidebar drawer visible would close the sidebar instead
 		// of the dialog.
-		adminModal.classList.contains("open")
+		adminModal.classList.contains("open") ||
+		// #201e — same guard for the two new lead-side modals.
+		// Without this, Escape on mobile while either is open
+		// would close the sidebar drawer instead of dismissing
+		// the dialog.
+		myGroupsModal.classList.contains("open") ||
+		observeModal.classList.contains("open")
 	)
 		return;
 	if (!mainEl.classList.contains("sidebar-open")) return;
@@ -3049,6 +3055,16 @@ document.addEventListener("keydown", (e) => {
 	// template from default values). PR #229 round 1 SHOULD-FIX.
 	if (saveTemplateModal.classList.contains("open")) {
 		closeSaveTemplateModal();
+	} else if (observeModal.classList.contains("open")) {
+		// #201e — checked BEFORE myGroupsModal so the observe modal
+		// (which opens on top of My groups when the lead clicks
+		// Observe without closing the parent) dismisses first. WAI-
+		// ARIA 1.2 §6.2: Escape closes the topmost dialog. The
+		// owner-side My groups list survives so the lead can pick
+		// another session without re-opening the parent.
+		closeObserveModal();
+	} else if (myGroupsModal.classList.contains("open")) {
+		closeMyGroupsModal();
 	} else if (newSessionModal.classList.contains("open")) {
 		closeNewSessionModal();
 	} else if (templatesModal.classList.contains("open")) {
