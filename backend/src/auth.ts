@@ -8,6 +8,13 @@ import type { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import { v4 as uuidv4 } from "uuid";
 import { d1Query } from "./db.js";
+// CJS-safe namespace import (#201e). The dependency cycle is:
+//   auth.ts → groups.ts → sessionManager.ts → auth.ts (isUserAdmin).
+// All three imports are accessed at call time, never at module
+// top-level evaluation, so CommonJS's deferred property-access shape
+// resolves cleanly once every module has finished loading. Same
+// rationale as sessionManager.ts's circular-dep block.
+import * as groups from "./groups.js";
 import { logger } from "./logger.js";
 import type { JwtPayload } from "./types.js";
 
@@ -100,6 +107,11 @@ export interface RegisterResult {
 	token: string;
 	/** Bootstrap user gets is_admin=1; everyone else defaults to 0 (#50). */
 	isAdmin: boolean;
+	/** Always false for a fresh registration (#201e): new accounts can't
+	 *  yet be in any group, so they can't lead one either. Surfaced for
+	 *  parity with the LoginResult shape so the api.ts client uses the
+	 *  same `data.isLead` field on both auth paths. */
+	isLead: boolean;
 }
 
 export async function registerUser(
@@ -134,7 +146,7 @@ export async function registerUser(
 			[userId, username, bootstrapHash],
 		);
 		if (insert.meta.changes === 1) {
-			return { userId, token: signToken(userId, username), isAdmin: true };
+			return { userId, token: signToken(userId, username), isAdmin: true, isLead: false };
 		}
 		// Race loser: a concurrent bootstrap got there first and we have
 		// no invite to fall back on. Match the steady-state response so
@@ -209,7 +221,10 @@ export async function registerUser(
 
 	// Steady-state register: invite-redeeming users default to non-admin
 	// (the column default in db.ts). Promotion happens manually post-bootstrap.
-	return { userId, token: signToken(userId, username), isAdmin: false };
+	// `isLead` is always false here — a brand-new user has just been
+	// inserted into `users`; no one's added them to a group yet, so by
+	// definition they can't lead one.
+	return { userId, token: signToken(userId, username), isAdmin: false, isLead: false };
 }
 
 // ── Invites ────────────────────────────────────────────────────────────────
@@ -430,6 +445,12 @@ export interface LoginResult {
 	token: string;
 	/** Pulled from the same row as the password hash — no extra D1 round-trip. */
 	isAdmin: boolean;
+	/** True iff `users.id` is the lead of at least one group (#201e).
+	 *  One extra D1 round-trip per login (parallel with the password
+	 *  compare's microtask cost is negligible). Saves the frontend a
+	 *  follow-up `/auth/status` round-trip after login to gate the
+	 *  "My groups" button. */
+	isLead: boolean;
 }
 
 export async function loginUser(username: string, password: string): Promise<LoginResult> {
@@ -452,7 +473,14 @@ export async function loginUser(username: string, password: string): Promise<Log
 	}
 
 	const token = signToken(row.id, username);
-	return { userId: row.id, token, isAdmin: row.is_admin === 1 };
+	// `isLead` is fetched after the credentials check rather than
+	// folded into the row SELECT above — it's a separate table and
+	// the JOIN would burn an index hit on every failed-credentials
+	// path too. Catch the error so a transient D1 failure on the
+	// lead lookup doesn't fail the whole login (the frontend can
+	// re-fetch via /auth/status if needed).
+	const isLead = await groups.isUserLead(row.id).catch(() => false);
+	return { userId: row.id, token, isAdmin: row.is_admin === 1, isLead };
 }
 
 function signToken(userId: string, username: string): string {

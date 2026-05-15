@@ -199,6 +199,32 @@ describe("groups.groupsLedBy", () => {
 	});
 });
 
+// ── isUserLead (#201e) ──────────────────────────────────────────────────────
+
+describe("groups.isUserLead", () => {
+	it("returns true when the LIMIT-1 SELECT finds a row", async () => {
+		mockNextRows([{ one: 1 }]);
+		expect(await groups.isUserLead("u-lead")).toBe(true);
+	});
+
+	it("returns false when no group has the user as lead", async () => {
+		mockNextRows([]);
+		expect(await groups.isUserLead("u-not-a-lead")).toBe(false);
+	});
+
+	it("uses the leader-id index via the lead_user_id WHERE clause", async () => {
+		mockNextRows([]);
+		await groups.isUserLead("u-lead");
+		const call = dbStubs.d1Query.mock.calls[0]!;
+		// Index hit on idx_user_groups_lead — the WHERE clause is the
+		// load-bearing line. LIMIT 1 lets the optimiser short-circuit
+		// as soon as a match is found, cheaper than COUNT(*).
+		expect(call[0]).toMatch(/WHERE lead_user_id = \?/);
+		expect(call[0]).toMatch(/LIMIT 1/);
+		expect(call[1]).toEqual(["u-lead"]);
+	});
+});
+
 // ── isLeadOfUserViaGroup ────────────────────────────────────────────────────
 
 describe("groups.isLeadOfUserViaGroup", () => {

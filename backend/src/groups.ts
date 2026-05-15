@@ -289,6 +289,22 @@ export async function groupsLedBy(userId: string): Promise<string[]> {
 }
 
 /**
+ * Boolean predicate: is `userId` the lead of at least one group?
+ * Powers the "show My groups button?" gate on the frontend (#201e),
+ * surfaced via `/auth/status` alongside `isAdmin`. Single indexed
+ * point read with `LIMIT 1` so the optimiser short-circuits as soon
+ * as a match exists — cheaper than `groupsLedBy(...).length > 0`,
+ * which would always pull every row.
+ */
+export async function isUserLead(userId: string): Promise<boolean> {
+	const result = await d1Query<{ one: number }>(
+		"SELECT 1 AS one FROM user_groups WHERE lead_user_id = ? LIMIT 1",
+		[userId],
+	);
+	return result.results.length > 0;
+}
+
+/**
  * Auth predicate for `SessionManager.assertCanObserve` (#201b):
  * is `leadUserId` the lead of ANY group whose membership contains
  * `memberUserId`? Returns true iff yes.

@@ -46,6 +46,27 @@ export function openTerminalSession(opts: {
 	onRendererFallback?: RendererNoticeCallback;
 	onCopy?: CopyCallback;
 	isActive?: ActivePredicate;
+	/**
+	 * Read-only observe-mode (#201e). When true:
+	 *   - the WS URL carries `&observe=true` so the backend routes
+	 *     auth via `assertCanObserve` instead of `assertOwnership`;
+	 *   - this client suppresses the `term.onData` input handler so
+	 *     xterm doesn't even attempt to send keystrokes (the server
+	 *     drops them anyway via the WS-layer input gate, but
+	 *     suppressing client-side avoids the wasted frames + the
+	 *     visual cursor-position glitch a stale local echo would
+	 *     produce in xterm before the server-dropped frame's
+	 *     non-response);
+	 *   - the touch-scroll-as-input path (mouse-tracking wheel
+	 *     sequences) is similarly skipped so a swipe on the observed
+	 *     view doesn't fire SGR sequences the server would silently
+	 *     drop.
+	 *
+	 * Output, replay, status, error, and clipboard-copy paths all
+	 * keep working — observe-mode is a write-suppression flag, not a
+	 * full read-only xterm wrapper.
+	 */
+	observe?: boolean;
 }): TerminalSession {
 	const {
 		container,
@@ -57,6 +78,7 @@ export function openTerminalSession(opts: {
 		onRendererFallback,
 		onCopy,
 		isActive,
+		observe = false,
 	} = opts;
 	// Fires the fallback notice at most once per tab, regardless of how
 	// many times the WebGL context flaps (#55). A flapping driver
@@ -384,7 +406,7 @@ export function openTerminalSession(opts: {
 	// from the server — see backend/src/index.ts heartbeat. Browsers
 	// auto-reply to server pings with no JS hook required, so there is
 	// no `ws.onopen` handler.
-	const wsUrl = buildWsUrl(sessionId, tabId, term.cols, term.rows);
+	const wsUrl = buildWsUrl(sessionId, tabId, term.cols, term.rows, observe);
 	const ws = new WebSocket(wsUrl);
 	let disposed = false;
 
@@ -463,9 +485,19 @@ export function openTerminalSession(opts: {
 	};
 
 	// ── Input: xterm → WS ──────────────────────────────────────────────────
-	const inputDisposable = term.onData((data) => {
-		send({ type: "input", data });
-	});
+	// In observe-mode (#201e) the backend drops every input frame at
+	// the WS handler before docker.write — but suppress the client-side
+	// handler too so xterm doesn't waste cycles on key events whose
+	// sole effect is server-side discard. `term.onData` returns an
+	// IDisposable; with the handler skipped, `inputDisposable.dispose()`
+	// in the cleanup path becomes a no-op via the dummy disposable
+	// below (matches the IDisposable contract without an `if (observe)`
+	// branch in the dispose path).
+	const inputDisposable: IDisposable = observe
+		? { dispose: () => {} }
+		: term.onData((data) => {
+				send({ type: "input", data });
+			});
 
 	// ── Touch scroll ────────────────────────────────────────────────────────
 	// On mobile there are no wheel events, and `mouse on` in tmux means
@@ -582,11 +614,20 @@ export function openTerminalSession(opts: {
 		touchIsScroll = false;
 	};
 
-	container.addEventListener("touchstart", onTouchStart, { passive: true });
-	// passive:false required so ev.preventDefault() can stop xterm's drag-selection
-	container.addEventListener("touchmove", onTouchMove, { passive: false });
-	container.addEventListener("touchend", onTouchEnd, { passive: true });
-	container.addEventListener("touchcancel", onTouchCancel, { passive: true });
+	// Skip touch-scroll-as-input wiring entirely in observe-mode (#201e):
+	// the only thing these handlers do that's user-visible is fire
+	// SGR mouse-tracking sequences as `input` frames, which the
+	// backend drops on observe attaches. Skipping the listeners keeps
+	// the event-loop cost off the lead's device too. The cleanup
+	// `removeEventListener` calls are a safe no-op for never-registered
+	// listeners, so dispose() doesn't need an `observe` branch.
+	if (!observe) {
+		container.addEventListener("touchstart", onTouchStart, { passive: true });
+		// passive:false required so ev.preventDefault() can stop xterm's drag-selection
+		container.addEventListener("touchmove", onTouchMove, { passive: false });
+		container.addEventListener("touchend", onTouchEnd, { passive: true });
+		container.addEventListener("touchcancel", onTouchCancel, { passive: true });
+	}
 
 	// ── Wheel scroll ────────────────────────────────────────────────────────
 	// xterm's default with `set -g mouse on` (session-image/tmux.conf) is
@@ -984,6 +1025,7 @@ function buildWsUrl(
 	tabId: string | undefined,
 	cols: number,
 	rows: number,
+	observe = false,
 ): string {
 	// Use VITE_API_URL to derive the WebSocket URL
 	const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
@@ -1001,6 +1043,12 @@ function buildWsUrl(
 	// or out-of-range value falls back to D1's stored session.cols/rows.
 	if (Number.isInteger(cols) && cols > 0) params.set("cols", String(cols));
 	if (Number.isInteger(rows) && rows > 0) params.set("rows", String(rows));
+	// Observe-mode flag (#201e). The backend's parse is strict-equals
+	// "true" (see wsHandler.ts), so send the literal string — any
+	// other value would silently fall back to owner-mode and the
+	// lead's attach would fail with 403 instead of routing to
+	// assertCanObserve.
+	if (observe) params.set("observe", "true");
 	const qs = params.toString();
 	return qs ? `${base}?${qs}` : base;
 }

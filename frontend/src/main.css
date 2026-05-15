@@ -982,6 +982,30 @@ main:not([data-sidebar-ready]) #sidebar {
   width: 720px;
   max-width: 96vw;
 }
+
+/* Observe-mode modal (#201e). Wider than the admin card so a
+   typical 120-col xterm fits without horizontal scroll, and tall
+   enough to render a usable terminal. The xterm host stretches to
+   fill the available space inside the modal card. */
+.observe-modal-card {
+  width: min(96vw, 1100px);
+  height: min(80vh, 720px);
+  display: flex;
+  flex-direction: column;
+}
+#observe-terminal-host {
+  flex: 1;
+  min-height: 0;
+  background: #0d1117;
+  border: 1px solid #21262d;
+  border-radius: 6px;
+  padding: 0.5rem;
+}
+/* xterm sets its own dimensions inside the host; ensure the
+   terminal canvas fills the host without overflowing. */
+#observe-terminal-host .xterm {
+  height: 100%;
+}
 .admin-controls {
   display: flex;
   align-items: center;
