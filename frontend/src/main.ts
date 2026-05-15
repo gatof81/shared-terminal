@@ -3969,6 +3969,15 @@ adminGroupAddMemberForm.addEventListener("submit", async (e) => {
 	}
 	if (membersGroupId === null) return;
 	const groupId = membersGroupId;
+	// Disable the submit button across the in-flight window so a
+	// double-click or fast second Enter doesn't fire a duplicate
+	// POST. The backend's composite PK on (group_id, user_id) would
+	// 409 the second call (caught + toasted), but keeping the noise
+	// out is cheaper than handling it. Same shape as
+	// `adminGroupSubmitBtn.disabled` on the create/edit handler.
+	const submitBtn =
+		adminGroupAddMemberForm.querySelector<HTMLButtonElement>("button[type='submit']");
+	if (submitBtn) submitBtn.disabled = true;
 	try {
 		await addAdminGroupMember(groupId, userId);
 		showToast("Member added");
@@ -3984,6 +3993,8 @@ adminGroupAddMemberForm.addEventListener("submit", async (e) => {
 		await refreshAdmin();
 	} catch (err) {
 		showToast((err as Error).message, true);
+	} finally {
+		if (submitBtn) submitBtn.disabled = false;
 	}
 });
 
