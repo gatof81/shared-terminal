@@ -381,6 +381,18 @@ authForm.addEventListener("submit", async (e) => {
 // the round-trip, and the server's POST /auth/logout response carries no
 // information we'd act on.
 function handleLogout(toastMessage?: string): void {
+	// Tear down the observe-mode WS BEFORE the logout fires (#201e
+	// review). Without this, an active observe attach survives both
+	// the explicit logout button and the SESSION_EXPIRED_EVENT path
+	// — `disposeAllCurrentTerminals` only walks `currentTerminals`
+	// (the owner-mode tab map), and `activeObserveTerm` is a
+	// separate module-level handle. The leak doesn't crash anything
+	// but leaves the audit row's `ended_at` unset until the backend
+	// WS heartbeat eventually kills the socket (minutes later) —
+	// observability gap during that window. `closeObserveModal` is
+	// idempotent when no observe is active, so calling it
+	// unconditionally needs no guard.
+	closeObserveModal();
 	void logout();
 	disposeAllCurrentTerminals();
 	activeSessionId = null;
