@@ -20,6 +20,7 @@ const WS_BASE = BACKEND_URL.replace(/^http/, "ws");
 
 let _loggedIn = false;
 let _isAdmin = false;
+let _isLead = false;
 
 export function isLoggedIn(): boolean {
 	return _loggedIn;
@@ -32,6 +33,15 @@ export function isAdmin(): boolean {
 	return _isAdmin;
 }
 
+/** True iff the user leads at least one group (#201e). Gates the
+ *  "My groups" button in main.ts. Same refresh shape as `isAdmin()`
+ *  — hydrated from /auth/status, login, register; cleared on logout
+ *  and on 401. An admin who happens to also lead a group sees both
+ *  buttons. */
+export function isLead(): boolean {
+	return _isLead;
+}
+
 /** Fired by `apiFetch` once per 401-burst after flipping `_loggedIn` to false —
  * main.ts listens to perform UI teardown. See apiFetch for the emit guard. */
 export const SESSION_EXPIRED_EVENT = "st:session-expired";
@@ -42,16 +52,22 @@ export interface AuthStatus {
 	needsSetup: boolean;
 	authenticated: boolean;
 	isAdmin: boolean;
+	/** Surfaced alongside isAdmin (#201e). Always present in fresh
+	 *  responses; older backends (pre-#201e) omit it — fall back to
+	 *  `false` defensively when the field is missing so a stale cached
+	 *  client + new server, or vice versa, doesn't surface undefined. */
+	isLead?: boolean;
 }
 
 export async function checkAuthStatus(): Promise<AuthStatus> {
 	const res = await apiFetch("/auth/status");
 	const data = (await res.json()) as AuthStatus;
 	// The server is the source of truth for cookie presence + admin
-	// status. Mirror both so isLoggedIn() / isAdmin() can answer
-	// instantly thereafter.
+	// + lead status. Mirror all three so isLoggedIn() / isAdmin() /
+	// isLead() can answer instantly thereafter.
 	_loggedIn = data.authenticated;
 	_isAdmin = data.isAdmin;
+	_isLead = data.isLead === true;
 	return data;
 }
 
@@ -65,6 +81,9 @@ export class InviteRequiredError extends Error {
 export interface AuthSuccess {
 	userId: string;
 	isAdmin: boolean;
+	/** Same defensive optionality as `AuthStatus.isLead` — older
+	 *  backends omit it, new accounts via /auth/register hardcode false. */
+	isLead?: boolean;
 }
 
 export async function register(
@@ -86,6 +105,7 @@ export async function register(
 	const data = (await res.json()) as AuthSuccess;
 	_loggedIn = true;
 	_isAdmin = data.isAdmin;
+	_isLead = data.isLead === true;
 	return data;
 }
 
@@ -101,6 +121,7 @@ export async function login(username: string, password: string): Promise<AuthSuc
 	const data = (await res.json()) as AuthSuccess;
 	_loggedIn = true;
 	_isAdmin = data.isAdmin;
+	_isLead = data.isLead === true;
 	return data;
 }
 
@@ -123,6 +144,7 @@ export async function logout(): Promise<void> {
 	}
 	_loggedIn = false;
 	_isAdmin = false;
+	_isLead = false;
 }
 
 // ── Session types ───────────────────────────────────────────────────────────
@@ -726,6 +748,69 @@ export async function adminForceDelete(sessionId: string, hard: boolean): Promis
 	}
 }
 
+// ── Groups (#201e — lead-side reads) ────────────────────────────────────────
+//
+// Wire-shape mirrors of the backend `LeadGroup` and `ObservableSessionMeta`
+// types from `backend/src/groups.ts`. Date columns arrive as ISO strings
+// (the route serializer calls `.toISOString()`); the UI parses with
+// `new Date(...)` only when a Date object is needed.
+
+export interface LeadGroupMember {
+	userId: string;
+	username: string;
+	addedAt: string;
+}
+
+export interface LeadGroup {
+	id: string;
+	name: string;
+	description: string | null;
+	leadUserId: string;
+	createdAt: string;
+	updatedAt: string;
+	members: LeadGroupMember[];
+}
+
+/**
+ * Cross-user session shape returned by `/api/groups/mine/sessions`.
+ * Mirrors `serializeObservableSession` on the backend — note it does
+ * NOT include `envVars` (the lead's observability surface is
+ * intentionally narrower than admin's). Adds `ownerUserId` /
+ * `ownerUsername` so the UI can render "alice's session" without a
+ * second lookup.
+ */
+export interface ObservableSession {
+	sessionId: string;
+	ownerUserId: string;
+	ownerUsername: string;
+	name: string;
+	status: "running" | "stopped" | "terminated" | "failed";
+	containerId: string | null;
+	containerName: string;
+	cols: number;
+	rows: number;
+	createdAt: string;
+	lastConnectedAt: string | null;
+}
+
+/** Fetch every group the current user leads, with each group's full
+ *  member list inlined. Returns `[]` for a non-lead caller (the
+ *  backend SQL is the user-scoping; no auth gate beyond requireAuth). */
+export async function fetchMyGroups(): Promise<LeadGroup[]> {
+	const res = await apiFetch("/groups/mine");
+	if (!res.ok) throw new Error(`Failed to load groups (${res.status})`);
+	return res.json();
+}
+
+/** Fetch every observable session — sessions of any user in any
+ *  group the caller leads, newest-first. Excludes terminated.
+ *  Returns `[]` for a non-lead caller. */
+export async function fetchMyObservableSessions(): Promise<ObservableSession[]> {
+	const res = await apiFetch("/groups/mine/sessions");
+	if (!res.ok) throw new Error(`Failed to load observable sessions (${res.status})`);
+	return res.json();
+}
+
 // ── File uploads ────────────────────────────────────────────────────────────
 
 /**
@@ -794,6 +879,7 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
 	if (sentAuth && res.status === 401 && _loggedIn) {
 		_loggedIn = false;
 		_isAdmin = false;
+		_isLead = false;
 		window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT));
 	}
 

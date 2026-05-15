@@ -124,9 +124,12 @@ export function buildRouter(
 		//
 		// `isAdmin` is fetched fresh from D1 (#50) rather than from a
 		// JWT-embedded claim so admin grant/revoke takes effect without
-		// requiring users to log out and back in. Falls back to false on
-		// lookup failure or unauthenticated callers — UI should treat
-		// the boolean as "show admin features" only when explicitly true.
+		// requiring users to log out and back in. `isLead` (#201e)
+		// follows the same shape — fetched fresh so an admin
+		// adding/removing the user as a group lead lands without a
+		// re-login. Both fall back to false on lookup failure or
+		// unauthenticated callers — UI should treat the booleans as
+		// "show admin/lead features" only when explicitly true.
 		const reqWithCookies = req as Request & {
 			cookies?: Record<string, string | undefined>;
 		};
@@ -136,21 +139,24 @@ export function buildRouter(
 			undefined;
 		const payload = verifyJwt(token);
 		const authenticated = payload !== null;
-		// Run the admin-lookup and hasAnyUsers in parallel — they have
-		// no data dependency, and CLAUDE.md flags D1 round-trips as the
-		// expensive thing on hot paths. The admin lookup catches its
-		// own error (surfaces as isAdmin=false); hasAnyUsers throwing
-		// is a real boot-state failure and propagates to the 500 handler.
-		const [adminLookup, anyUsers] = await Promise.all([
+		// Run all three lookups in parallel — they have no data
+		// dependency, and CLAUDE.md flags D1 round-trips as the
+		// expensive thing on hot paths. Admin + lead lookups catch
+		// their own errors (surface as false); hasAnyUsers throwing
+		// is a real boot-state failure and propagates to the 500
+		// handler.
+		const [adminLookup, leadLookup, anyUsers] = await Promise.all([
 			payload
 				? d1Query<{ is_admin: number }>("SELECT is_admin FROM users WHERE id = ?", [
 						payload.sub,
 					]).catch(() => null)
 				: Promise.resolve(null),
+			payload ? groups.isUserLead(payload.sub).catch(() => false) : Promise.resolve(false),
 			hasAnyUsers(),
 		]);
 		const isAdmin = adminLookup?.results[0]?.is_admin === 1;
-		res.json({ needsSetup: !anyUsers, authenticated, isAdmin });
+		const isLead = leadLookup === true;
+		res.json({ needsSetup: !anyUsers, authenticated, isAdmin, isLead });
 	});
 
 	router.post("/auth/register", registerIp, async (req: Request, res: Response) => {
@@ -201,7 +207,11 @@ export function buildRouter(
 			// keeps the userId for clients that want to address the new
 			// account, but never the raw token.
 			setAuthCookie(res, result.token);
-			res.status(201).json({ userId: result.userId, isAdmin: result.isAdmin });
+			res.status(201).json({
+				userId: result.userId,
+				isAdmin: result.isAdmin,
+				isLead: result.isLead,
+			});
 		} catch (err) {
 			if (err instanceof InviteRequiredError) {
 				// 403 — caller authenticated nothing yet, but the action is
@@ -257,7 +267,7 @@ export function buildRouter(
 			return;
 		}
 
-		let result: { userId: string; token: string; isAdmin: boolean };
+		let result: { userId: string; token: string; isAdmin: boolean; isLead: boolean };
 		try {
 			try {
 				result = await loginUser(username, password);
@@ -275,7 +285,11 @@ export function buildRouter(
 			}
 			usernameLimiter.reset(username);
 			setAuthCookie(res, result.token);
-			res.json({ userId: result.userId, isAdmin: result.isAdmin });
+			res.json({
+				userId: result.userId,
+				isAdmin: result.isAdmin,
+				isLead: result.isLead,
+			});
 		} finally {
 			// Always release the in-flight slot — success, invalid creds,
 			// or infra error alike. `reset()` above wipes the failure
@@ -1454,7 +1468,17 @@ export function buildRouter(
 	router.get("/sessions/:id/tabs", async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
 		try {
-			await sessions.assertOwnedBy(req.params.id, userId);
+			// `assertCanObserve` (#201d) instead of `assertOwnedBy`
+			// (#201e-1 review BLOCKER). Reading the tab list is a
+			// read-only operation observers MUST be able to do — without
+			// it the lead's "Observe" click can't pick a tab to attach
+			// to, and the WS would 1008-close on "Missing tab". The auth
+			// graduation is owner / admin / lead-of-group-containing-owner,
+			// matching what the observe-WS attach itself enforces.
+			// Tab CREATE / DELETE further down stay on `assertOwnedBy` —
+			// observability does NOT include the right to mutate tab
+			// state on someone else's session.
+			await sessions.assertCanObserve(req.params.id, userId);
 			const tabs = await docker.listTabs(req.params.id);
 			res.json(tabs);
 		} catch (err) {

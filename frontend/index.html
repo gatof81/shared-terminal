@@ -99,6 +99,7 @@
           <span id="user-display"></span>
           <button id="templates-btn" type="button" title="Session templates">Templates</button>
           <button id="invites-btn" type="button" title="Manage invite codes">Invites</button>
+          <button id="my-groups-btn" type="button" title="Groups you lead">My groups</button>
           <button id="admin-btn" type="button" title="Admin dashboard">Admin</button>
           <button id="logout-btn" type="button">Logout</button>
         </div>
@@ -133,6 +134,7 @@
             <span id="sidebar-user-display" aria-hidden="true"></span>
             <button id="sidebar-templates-btn" type="button">Templates</button>
             <button id="sidebar-invites-btn" type="button">Invites</button>
+            <button id="sidebar-my-groups-btn" type="button">My groups</button>
             <button id="sidebar-admin-btn" type="button">Admin</button>
             <button id="sidebar-logout-btn" type="button">Logout</button>
           </div>
@@ -822,6 +824,81 @@
             </div>
           </section>
         </div>
+      </div>
+    </div>
+
+    <!-- "My groups" modal (#201e). Lead-side observability surface.
+         Visibility gate (`my-groups-btn`/`sidebar-my-groups-btn`) is a
+         UX hint only — server-side `requireAuth` + the user-scoped SQL
+         is the actual auth, so a non-lead with the URL still gets [].
+         Refresh button mirrors the admin dashboard pattern; this modal
+         doesn't poll either. -->
+    <div id="my-groups-modal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close-modal></div>
+      <div
+        class="modal-card admin-modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="my-groups-modal-title"
+      >
+        <div class="modal-header">
+          <h2 id="my-groups-modal-title">My groups</h2>
+          <button
+            class="modal-close"
+            type="button"
+            aria-label="Close"
+            data-close-modal
+          >
+            ×
+          </button>
+        </div>
+        <p class="modal-hint">
+          Groups you lead. Click <strong>Observe</strong> on any
+          member's session to open a read-only view of their terminal
+          — input is disabled, every observe is recorded in the
+          session's audit log.
+        </p>
+        <div class="admin-controls">
+          <button id="my-groups-refresh-btn" type="button">Refresh</button>
+        </div>
+        <div id="admin-scroll-area">
+          <section id="my-groups-list">
+            <p class="modal-hint">Loading…</p>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <!-- Observe-mode terminal modal (#201e). Opened from "My groups"
+         when the lead clicks Observe on a session. Read-only: the WS
+         attach uses ?observe=true and `openTerminalSession({observe:
+         true, …})` suppresses xterm input + touch-scroll-as-input.
+         The header titles "Observing <name> · <owner>" so the lead
+         doesn't lose track of whose terminal they're looking at. -->
+    <div id="observe-modal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close-modal></div>
+      <div
+        class="modal-card observe-modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="observe-modal-title"
+      >
+        <div class="modal-header">
+          <h2 id="observe-modal-title">Observing</h2>
+          <button
+            class="modal-close"
+            type="button"
+            aria-label="Close"
+            data-close-modal
+          >
+            ×
+          </button>
+        </div>
+        <p class="modal-hint" id="observe-modal-hint">
+          Read-only view. Input is disabled — every observe-attach is
+          logged.
+        </p>
+        <div id="observe-terminal-host"></div>
       </div>
     </div>
 

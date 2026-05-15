@@ -26,12 +26,16 @@ import {
 	type EnvVarEntryInput,
 	fetchAdminSessions,
 	fetchAdminStats,
+	fetchMyGroups,
+	fetchMyObservableSessions,
 	getTemplate,
 	type Invite,
 	InviteRequiredError,
 	idleSecondsToFormUnit,
 	isAdmin,
+	isLead,
 	isLoggedIn,
+	type LeadGroup,
 	listInvites,
 	listSessions,
 	listTabs,
@@ -39,6 +43,7 @@ import {
 	login,
 	logout,
 	memBytesToFormUnit,
+	type ObservableSession,
 	openBootstrapWs,
 	register,
 	revokeInvite,
@@ -105,6 +110,18 @@ const adminStatsEl = document.getElementById("admin-stats")!;
 const adminSessionsListEl = document.getElementById("admin-sessions-list")!;
 const adminRefreshBtn = document.getElementById("admin-refresh-btn") as HTMLButtonElement;
 const adminUptimeEl = document.getElementById("admin-uptime")!;
+// #201e — lead-side "My groups" surface. Visibility flips on isLead()
+// from the api-layer mirror. Sidebar + header buttons are gated together
+// (same shape as the Admin pair above).
+const myGroupsBtn = document.getElementById("my-groups-btn") as HTMLButtonElement;
+const sidebarMyGroupsBtn = document.getElementById("sidebar-my-groups-btn") as HTMLButtonElement;
+const myGroupsModal = document.getElementById("my-groups-modal")!;
+const myGroupsListEl = document.getElementById("my-groups-list")!;
+const myGroupsRefreshBtn = document.getElementById("my-groups-refresh-btn") as HTMLButtonElement;
+const observeModal = document.getElementById("observe-modal")!;
+const observeModalTitle = document.getElementById("observe-modal-title")!;
+const observeModalHint = document.getElementById("observe-modal-hint")!;
+const observeTerminalHost = document.getElementById("observe-terminal-host")!;
 const sidebarLogoutBtn = document.getElementById("sidebar-logout-btn") as HTMLButtonElement;
 const chromeToggleBtn = document.getElementById("chrome-toggle") as HTMLButtonElement;
 const chromeToggleLabel = document.getElementById("chrome-toggle-label")!;
@@ -241,17 +258,21 @@ function showApp() {
 	refreshSessions();
 }
 
-// #50: gate invite-mint UI on the current session's admin status.
-// Both buttons (desktop top bar + mobile sidebar) flip together. Read
-// from the api-layer mirror, which is itself hydrated from /auth/status
-// and the login/register responses, so this just reflects the current
-// authoritative answer without needing its own round-trip.
+// #50 / #201e: gate role-conditional UI on the api-layer mirror.
+// Each button pair (header + sidebar) flips together. Hydrated from
+// /auth/status + login/register so this just reflects the current
+// authoritative answer without its own round-trip. Visibility is a
+// UX hint only — every gated endpoint is server-side requireAdmin /
+// requireAuth-gated, so a leaked button reveal is harmless.
 function applyAdminVisibility() {
 	const admin = isAdmin();
 	invitesBtn.classList.toggle("hidden", !admin);
 	sidebarInvitesBtn.classList.toggle("hidden", !admin);
 	adminBtn.classList.toggle("hidden", !admin);
 	sidebarAdminBtn.classList.toggle("hidden", !admin);
+	const lead = isLead();
+	myGroupsBtn.classList.toggle("hidden", !lead);
+	sidebarMyGroupsBtn.classList.toggle("hidden", !lead);
 }
 
 function updateAuthUI() {
@@ -360,6 +381,18 @@ authForm.addEventListener("submit", async (e) => {
 // the round-trip, and the server's POST /auth/logout response carries no
 // information we'd act on.
 function handleLogout(toastMessage?: string): void {
+	// Tear down the observe-mode WS BEFORE the logout fires (#201e
+	// review). Without this, an active observe attach survives both
+	// the explicit logout button and the SESSION_EXPIRED_EVENT path
+	// — `disposeAllCurrentTerminals` only walks `currentTerminals`
+	// (the owner-mode tab map), and `activeObserveTerm` is a
+	// separate module-level handle. The leak doesn't crash anything
+	// but leaves the audit row's `ended_at` unset until the backend
+	// WS heartbeat eventually kills the socket (minutes later) —
+	// observability gap during that window. `closeObserveModal` is
+	// idempotent when no observe is active, so calling it
+	// unconditionally needs no guard.
+	closeObserveModal();
 	void logout();
 	disposeAllCurrentTerminals();
 	activeSessionId = null;
@@ -2685,7 +2718,13 @@ document.addEventListener("keydown", (e) => {
 		// guard, Escape with the admin dashboard open AND the
 		// sidebar drawer visible would close the sidebar instead
 		// of the dialog.
-		adminModal.classList.contains("open")
+		adminModal.classList.contains("open") ||
+		// #201e — same guard for the two new lead-side modals.
+		// Without this, Escape on mobile while either is open
+		// would close the sidebar drawer instead of dismissing
+		// the dialog.
+		myGroupsModal.classList.contains("open") ||
+		observeModal.classList.contains("open")
 	)
 		return;
 	if (!mainEl.classList.contains("sidebar-open")) return;
@@ -3016,6 +3055,16 @@ document.addEventListener("keydown", (e) => {
 	// template from default values). PR #229 round 1 SHOULD-FIX.
 	if (saveTemplateModal.classList.contains("open")) {
 		closeSaveTemplateModal();
+	} else if (observeModal.classList.contains("open")) {
+		// #201e — checked BEFORE myGroupsModal so the observe modal
+		// (which opens on top of My groups when the lead clicks
+		// Observe without closing the parent) dismisses first. WAI-
+		// ARIA 1.2 §6.2: Escape closes the topmost dialog. The
+		// owner-side My groups list survives so the lead can pick
+		// another session without re-opening the parent.
+		closeObserveModal();
+	} else if (myGroupsModal.classList.contains("open")) {
+		closeMyGroupsModal();
 	} else if (newSessionModal.classList.contains("open")) {
 		closeNewSessionModal();
 	} else if (templatesModal.classList.contains("open")) {
@@ -3603,6 +3652,249 @@ async function confirmAndAct(
 		btn.disabled = false;
 	}
 }
+
+// ── My groups (#201e — lead-side observe surface) ──────────────────────────
+//
+// Visible only to users who lead at least one group via
+// `applyAdminVisibility()` (which also gates the lead button). Pulls
+// `/api/groups/mine` + `/api/groups/mine/sessions` on open + refresh —
+// no auto-polling, same rationale as the admin dashboard. The
+// observe modal opens read-only via `openTerminalSession({observe:
+// true})`; closing the modal disposes the WS attach and triggers the
+// server-side `recordObserveEnd()` UPDATE.
+
+let myGroupsOpener: HTMLButtonElement | null = null;
+// At most one observe-mode terminal at a time. Opening a second
+// observe (via clicking another row's Observe before closing the
+// current modal) tears down the prior one — same shape as the
+// existing single-terminal-per-modal pattern (paste, file-attach).
+let activeObserveTerm: TerminalSession | null = null;
+
+function resolveMyGroupsOpener(): HTMLButtonElement {
+	return myGroupsBtn.offsetParent !== null ? myGroupsBtn : sidebarMyGroupsBtn;
+}
+
+function openMyGroupsModal(opener: HTMLButtonElement) {
+	myGroupsOpener = opener;
+	myGroupsModal.classList.add("open");
+	myGroupsModal.setAttribute("aria-hidden", "false");
+	myGroupsRefreshBtn.focus();
+	void refreshMyGroups();
+}
+
+function closeMyGroupsModal() {
+	// Tear down any active observe attach before dismissing the
+	// parent modal (#201e review round 4 SHOULD-FIX). The observe
+	// modal opens on top of My groups without closing it; if the
+	// lead backdrop-clicks the My groups modal while observe is
+	// still visible, the parent dismisses but the observe WS
+	// keeps running with no UI affordance to close it. The
+	// audit row's `ended_at` would only land when the backend
+	// heartbeat eventually killed the socket — a gap the
+	// audit-trail invariant explicitly forbids. closeObserveModal
+	// is idempotent when no observe is active, same shape as the
+	// `handleLogout` call site.
+	closeObserveModal();
+	myGroupsModal.classList.remove("open");
+	myGroupsModal.setAttribute("aria-hidden", "true");
+	(myGroupsOpener ?? resolveMyGroupsOpener()).focus();
+	myGroupsOpener = null;
+}
+
+myGroupsModal.addEventListener("click", (e) => {
+	const target = e.target as HTMLElement;
+	if (target.hasAttribute("data-close-modal")) closeMyGroupsModal();
+});
+
+myGroupsBtn.addEventListener("click", () => openMyGroupsModal(myGroupsBtn));
+sidebarMyGroupsBtn.addEventListener("click", () => openMyGroupsModal(sidebarMyGroupsBtn));
+
+myGroupsRefreshBtn.addEventListener("click", () => {
+	void refreshMyGroups();
+});
+
+async function refreshMyGroups(): Promise<void> {
+	myGroupsRefreshBtn.disabled = true;
+	try {
+		// Fetch both endpoints in parallel — independent reads, both
+		// requireAuth-only. Sequentially awaiting would double the
+		// modal latency without a safety upside (same shape as
+		// `refreshAdmin`).
+		const [groups, observableSessions] = await Promise.all([
+			fetchMyGroups(),
+			fetchMyObservableSessions(),
+		]);
+		renderMyGroups(groups, observableSessions);
+	} catch (err) {
+		showToast((err as Error).message, true);
+	} finally {
+		myGroupsRefreshBtn.disabled = false;
+	}
+}
+
+function renderMyGroups(groups: LeadGroup[], sessions: ObservableSession[]): void {
+	myGroupsListEl.textContent = "";
+	if (groups.length === 0) {
+		const empty = document.createElement("p");
+		empty.className = "modal-hint";
+		empty.textContent = "You don't lead any groups yet.";
+		myGroupsListEl.appendChild(empty);
+		return;
+	}
+	// Bucket sessions by ownerUserId so each member-row can render its
+	// owner's running sessions inline. The cross-user list is already
+	// scoped to "members of any group I lead" by the SQL, so a single
+	// pass covers every group below.
+	const sessionsByOwner = new Map<string, ObservableSession[]>();
+	for (const s of sessions) {
+		const bucket = sessionsByOwner.get(s.ownerUserId);
+		if (bucket) bucket.push(s);
+		else sessionsByOwner.set(s.ownerUserId, [s]);
+	}
+	for (const g of groups) {
+		const card = document.createElement("section");
+		card.className = "admin-stat-card";
+		const h = document.createElement("h4");
+		h.textContent = g.description ? `${g.name} — ${g.description}` : g.name;
+		card.appendChild(h);
+		if (g.members.length === 0) {
+			const empty = document.createElement("p");
+			empty.className = "modal-hint";
+			empty.textContent = "No members yet.";
+			card.appendChild(empty);
+			myGroupsListEl.appendChild(card);
+			continue;
+		}
+		for (const m of g.members) {
+			const memberRow = document.createElement("div");
+			memberRow.className = "admin-session-row";
+			const meta = document.createElement("div");
+			meta.className = "admin-session-meta";
+			const name = document.createElement("strong");
+			name.textContent = m.username;
+			meta.appendChild(name);
+			const memberSessions = sessionsByOwner.get(m.userId) ?? [];
+			const sub = document.createElement("span");
+			sub.className = "admin-session-sub";
+			sub.textContent =
+				memberSessions.length === 0
+					? "no active sessions"
+					: `${memberSessions.length} session${memberSessions.length === 1 ? "" : "s"}`;
+			meta.appendChild(sub);
+			memberRow.appendChild(meta);
+
+			// Observe buttons — one per running session. Stopped/failed
+			// sessions surface in the count above but don't get an
+			// Observe button: the WS attach would 1008-close because
+			// `wsHandler` rejects non-running statuses, and a button
+			// that always errors is worse UX than no button.
+			const actions = document.createElement("div");
+			actions.className = "admin-session-actions";
+			for (const s of memberSessions) {
+				if (s.status !== "running") continue;
+				const btn = document.createElement("button");
+				btn.type = "button";
+				btn.textContent = `Observe "${s.name}"`;
+				btn.addEventListener("click", () => {
+					// openObserveModal is async (it fetches the tab list
+					// before opening the WS). Fire-and-forget — it
+					// surfaces its own errors via showToast, so there's
+					// no caller-side rejection to handle.
+					void openObserveModal(s);
+				});
+				actions.appendChild(btn);
+			}
+			memberRow.appendChild(actions);
+			card.appendChild(memberRow);
+		}
+		myGroupsListEl.appendChild(card);
+	}
+}
+
+async function openObserveModal(s: ObservableSession): Promise<void> {
+	// Tear down any prior observe attach before opening a new one —
+	// keeps the audit log honest (each Observe click maps to one
+	// open + one close UPDATE) and avoids stacking xterm DOM nodes
+	// in the modal host.
+	closeObserveModal();
+	// Fetch the session's tab list FIRST. The WS handler hard-rejects
+	// any attach without a `?tab=...` query (returns 1008 "Missing
+	// tab"), so we must pick a real tab id before opening the socket
+	// — the backend has no implicit "default tab." A first slice
+	// initially tried to pass no tabId and let the server "default to
+	// main"; the WS close fired immediately every time. Pinning the
+	// tab here is what makes observe-mode actually work end-to-end.
+	//
+	// `listTabs` was relaxed to `assertCanObserve` in the same review
+	// fix, so a lead can read the tab list of a session they don't
+	// own. Tab CREATE / DELETE stays owner-only.
+	let tabs: Tab[];
+	try {
+		tabs = await listTabs(s.sessionId);
+	} catch (err) {
+		showToast(`Couldn't load tabs for "${s.name}": ${(err as Error).message}`, true);
+		return;
+	}
+	if (tabs.length === 0) {
+		// The session has no open tmux tabs — no surface to observe.
+		// Owner needs to create one from their UI before the lead can
+		// attach. Surface a clear toast rather than opening an empty
+		// modal that would just disconnect immediately.
+		showToast(`"${s.name}" has no open tabs to observe`, true);
+		return;
+	}
+	// v1 picks the first tab — a session typically has one. A future
+	// slice can add a tab picker if multi-tab observability becomes a
+	// common need; for now, surfacing a count in the modal hint keeps
+	// the lead aware the session may have more.
+	const tab = tabs[0]!;
+	observeModalTitle.textContent = `Observing "${s.name}" (${s.ownerUsername})`;
+	observeModalHint.textContent =
+		tabs.length === 1
+			? `Read-only view of "${tab.label ?? tab.tabId}". Input is disabled — every observe-attach is logged.`
+			: `Read-only view of "${tab.label ?? tab.tabId}" (1 of ${tabs.length} tabs — first shown). Input is disabled — every observe-attach is logged.`;
+	observeModal.classList.add("open");
+	observeModal.setAttribute("aria-hidden", "false");
+	observeTerminalHost.textContent = "";
+	const term = openTerminalSession({
+		container: observeTerminalHost,
+		sessionId: s.sessionId,
+		tabId: tab.tabId,
+		fontSize: currentFontSize,
+		observe: true,
+		onStatus: (status) => {
+			// A status flip to "disconnected" means the underlying
+			// session terminated or the owner stopped it. The audit
+			// log row's `ended_at` is set by ws.on("close") on the
+			// server. Surface a toast so the lead knows why their
+			// view went dark.
+			if (status === "disconnected") {
+				showToast(`Observe attach to "${s.name}" disconnected`);
+			}
+		},
+		onError: (msg) => showToast(`Observe error: ${msg}`, true),
+	});
+	activeObserveTerm = term;
+}
+
+function closeObserveModal(): void {
+	if (activeObserveTerm) {
+		// dispose() closes the WS — the server's ws.on("close") then
+		// fires `recordObserveEnd()` which UPDATEs ended_at. The
+		// idempotency guard (WHERE ended_at IS NULL) makes this safe
+		// even if a duplicate close path also runs.
+		activeObserveTerm.dispose();
+		activeObserveTerm = null;
+	}
+	observeTerminalHost.textContent = "";
+	observeModal.classList.remove("open");
+	observeModal.setAttribute("aria-hidden", "true");
+}
+
+observeModal.addEventListener("click", (e) => {
+	const target = e.target as HTMLElement;
+	if (target.hasAttribute("data-close-modal")) closeObserveModal();
+});
 
 // ── Auto-refresh ────────────────────────────────────────────────────────────
 
