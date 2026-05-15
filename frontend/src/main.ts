@@ -3683,6 +3683,18 @@ function openMyGroupsModal(opener: HTMLButtonElement) {
 }
 
 function closeMyGroupsModal() {
+	// Tear down any active observe attach before dismissing the
+	// parent modal (#201e review round 4 SHOULD-FIX). The observe
+	// modal opens on top of My groups without closing it; if the
+	// lead backdrop-clicks the My groups modal while observe is
+	// still visible, the parent dismisses but the observe WS
+	// keeps running with no UI affordance to close it. The
+	// audit row's `ended_at` would only land when the backend
+	// heartbeat eventually killed the socket — a gap the
+	// audit-trail invariant explicitly forbids. closeObserveModal
+	// is idempotent when no observe is active, same shape as the
+	// `handleLogout` call site.
+	closeObserveModal();
 	myGroupsModal.classList.remove("open");
 	myGroupsModal.setAttribute("aria-hidden", "true");
 	(myGroupsOpener ?? resolveMyGroupsOpener()).focus();
