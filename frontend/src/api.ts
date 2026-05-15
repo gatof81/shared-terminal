@@ -748,6 +748,162 @@ export async function adminForceDelete(sessionId: string, hard: boolean): Promis
 	}
 }
 
+// ── Admin groups CRUD (#201e-2) ─────────────────────────────────────────────
+//
+// Wire-shape mirrors of the backend `Group` / `GroupSummary` /
+// `GroupMember` types from `backend/src/groups.ts`. All endpoints
+// here are admin-gated server-side; calling them as a non-admin
+// returns 403.
+
+export interface AdminGroupSummary {
+	id: string;
+	name: string;
+	description: string | null;
+	leadUserId: string;
+	leadUsername: string;
+	memberCount: number;
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface AdminGroupMember {
+	userId: string;
+	username: string;
+	addedAt: string;
+}
+
+export interface AdminGroupDetail {
+	id: string;
+	name: string;
+	description: string | null;
+	leadUserId: string;
+	createdAt: string;
+	updatedAt: string;
+	members: AdminGroupMember[];
+}
+
+export interface AdminGroupInput {
+	name: string;
+	description?: string | null;
+	leadUserId: string;
+}
+
+export async function fetchAdminGroups(): Promise<AdminGroupSummary[]> {
+	const res = await apiFetch("/admin/groups");
+	if (!res.ok) throw new Error(`Failed to load groups (${res.status})`);
+	return res.json();
+}
+
+export async function fetchAdminGroup(id: string): Promise<AdminGroupDetail> {
+	const res = await apiFetch(`/admin/groups/${encodeURIComponent(id)}`);
+	if (!res.ok) {
+		const body = (await res.json().catch(() => ({}))) as { error?: string };
+		throw new Error(body.error ?? `Failed to load group (${res.status})`);
+	}
+	return res.json();
+}
+
+export async function createAdminGroup(input: AdminGroupInput): Promise<AdminGroupSummary> {
+	const res = await apiFetch("/admin/groups", {
+		method: "POST",
+		body: JSON.stringify(input),
+	});
+	if (!res.ok) {
+		const body = (await res.json().catch(() => ({}))) as { error?: string };
+		throw new Error(body.error ?? `Failed to create group (${res.status})`);
+	}
+	return res.json();
+}
+
+export async function updateAdminGroup(
+	id: string,
+	input: AdminGroupInput,
+): Promise<AdminGroupSummary> {
+	const res = await apiFetch(`/admin/groups/${encodeURIComponent(id)}`, {
+		method: "PUT",
+		body: JSON.stringify(input),
+	});
+	if (!res.ok) {
+		const body = (await res.json().catch(() => ({}))) as { error?: string };
+		throw new Error(body.error ?? `Failed to update group (${res.status})`);
+	}
+	return res.json();
+}
+
+export async function deleteAdminGroup(id: string): Promise<void> {
+	const res = await apiFetch(`/admin/groups/${encodeURIComponent(id)}`, { method: "DELETE" });
+	if (res.status === 404) return; // race: deleted between list + action
+	if (!res.ok) {
+		const body = (await res.json().catch(() => ({}))) as { error?: string };
+		throw new Error(body.error ?? `Failed to delete group (${res.status})`);
+	}
+}
+
+export async function addAdminGroupMember(groupId: string, userId: string): Promise<void> {
+	const res = await apiFetch(`/admin/groups/${encodeURIComponent(groupId)}/members`, {
+		method: "POST",
+		body: JSON.stringify({ userId }),
+	});
+	if (!res.ok) {
+		const body = (await res.json().catch(() => ({}))) as { error?: string };
+		throw new Error(body.error ?? `Failed to add member (${res.status})`);
+	}
+}
+
+export async function removeAdminGroupMember(groupId: string, userId: string): Promise<void> {
+	const res = await apiFetch(
+		`/admin/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(userId)}`,
+		{ method: "DELETE" },
+	);
+	if (res.status === 404) return; // race: removed between list + action
+	if (!res.ok) {
+		const body = (await res.json().catch(() => ({}))) as { error?: string };
+		throw new Error(body.error ?? `Failed to remove member (${res.status})`);
+	}
+}
+
+// ── Observe-log (#201e-2) ──────────────────────────────────────────────────
+//
+// Owner / lead / admin can read a session's observe history;
+// admin only can read the cross-user log. Wire-shape mirrors of
+// the backend `ObserveLogEntry` / `AdminObserveLogEntry` types
+// from `backend/src/observeLog.ts`.
+
+export interface ObserveLogEntry {
+	id: string;
+	observerUserId: string;
+	observerUsername: string;
+	sessionId: string;
+	ownerUserId: string;
+	startedAt: string;
+	endedAt: string | null;
+}
+
+export interface AdminObserveLogEntry extends ObserveLogEntry {
+	ownerUsername: string;
+}
+
+/** Per-session observe history. Gated by `assertCanObserve`
+ *  server-side — owner / admin / lead-of-group-containing-owner
+ *  can read; everyone else gets 403. */
+export async function fetchSessionObserveLog(sessionId: string): Promise<ObserveLogEntry[]> {
+	const res = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}/observe-log`);
+	if (!res.ok) {
+		const body = (await res.json().catch(() => ({}))) as { error?: string };
+		throw new Error(body.error ?? `Failed to load observe log (${res.status})`);
+	}
+	return res.json();
+}
+
+/** Cross-user observe log for the admin dashboard. Hard-capped at
+ *  500 entries newest-first server-side; older entries are silently
+ *  dropped if the deployment ever hits the cap. */
+export async function fetchAdminObserveLog(): Promise<AdminObserveLogEntry[]> {
+	const res = await apiFetch("/admin/observe-log");
+	if (!res.ok) throw new Error(`Failed to load admin observe log (${res.status})`);
+	return res.json();
+}
+
 // ── Groups (#201e — lead-side reads) ────────────────────────────────────────
 //
 // Wire-shape mirrors of the backend `LeadGroup` and `ObservableSessionMeta`
