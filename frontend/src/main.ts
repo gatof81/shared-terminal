@@ -11,23 +11,33 @@
 import "./main.css";
 
 import {
+	type AdminGroupDetail,
+	type AdminGroupSummary,
+	type AdminObserveLogEntry,
 	type AdminSession,
 	type AdminStats,
+	addAdminGroupMember,
 	adminForceDelete,
 	adminForceStop,
 	checkAuthStatus,
+	createAdminGroup,
 	createInvite,
 	createSession,
 	createTab,
 	createTemplate,
+	deleteAdminGroup,
 	deleteSession,
 	deleteTab,
 	deleteTemplate,
 	type EnvVarEntryInput,
+	fetchAdminGroup,
+	fetchAdminGroups,
+	fetchAdminObserveLog,
 	fetchAdminSessions,
 	fetchAdminStats,
 	fetchMyGroups,
 	fetchMyObservableSessions,
+	fetchSessionObserveLog,
 	getTemplate,
 	type Invite,
 	InviteRequiredError,
@@ -44,8 +54,10 @@ import {
 	logout,
 	memBytesToFormUnit,
 	type ObservableSession,
+	type ObserveLogEntry,
 	openBootstrapWs,
 	register,
+	removeAdminGroupMember,
 	revokeInvite,
 	SESSION_EXPIRED_EVENT,
 	type SessionConfigPayload,
@@ -57,6 +69,7 @@ import {
 	TabNotFoundError,
 	type Template,
 	type TemplateSummary,
+	updateAdminGroup,
 	updateTemplate,
 	uploadSessionFiles,
 } from "./api.js";
@@ -110,6 +123,39 @@ const adminStatsEl = document.getElementById("admin-stats")!;
 const adminSessionsListEl = document.getElementById("admin-sessions-list")!;
 const adminRefreshBtn = document.getElementById("admin-refresh-btn") as HTMLButtonElement;
 const adminUptimeEl = document.getElementById("admin-uptime")!;
+// #201e-2 — admin Groups CRUD (in admin dashboard) + admin observe-log
+// + per-session Observers button. Visibility for the Groups + observe-log
+// sections is the parent admin modal (admin-only). Observers button is
+// shown for everyone; the backend returns 403 if the caller can't
+// observe the session.
+const adminGroupsListEl = document.getElementById("admin-groups-list")!;
+const adminGroupCreateBtn = document.getElementById("admin-group-create-btn") as HTMLButtonElement;
+const adminObserveLogEl = document.getElementById("admin-observe-log")!;
+const adminGroupModal = document.getElementById("admin-group-modal")!;
+const adminGroupModalTitle = document.getElementById("admin-group-modal-title")!;
+const adminGroupForm = document.getElementById("admin-group-form") as HTMLFormElement;
+const adminGroupNameInput = document.getElementById("admin-group-name") as HTMLInputElement;
+const adminGroupDescriptionInput = document.getElementById(
+	"admin-group-description",
+) as HTMLInputElement;
+const adminGroupLeadUserIdInput = document.getElementById(
+	"admin-group-lead-user-id",
+) as HTMLInputElement;
+const adminGroupSubmitBtn = document.getElementById("admin-group-submit-btn") as HTMLButtonElement;
+const adminGroupMembersModal = document.getElementById("admin-group-members-modal")!;
+const adminGroupMembersModalTitle = document.getElementById("admin-group-members-modal-title")!;
+const adminGroupMembersModalHint = document.getElementById("admin-group-members-modal-hint")!;
+const adminGroupAddMemberForm = document.getElementById(
+	"admin-group-add-member-form",
+) as HTMLFormElement;
+const adminGroupAddMemberInput = document.getElementById(
+	"admin-group-add-member-input",
+) as HTMLInputElement;
+const adminGroupMembersListEl = document.getElementById("admin-group-members-list")!;
+const observersBtn = document.getElementById("observers-btn") as HTMLButtonElement;
+const observersModal = document.getElementById("observers-modal")!;
+const observersModalListEl = document.getElementById("observers-modal-list")!;
+
 // #201e — lead-side "My groups" surface. Visibility flips on isLead()
 // from the api-layer mirror. Sidebar + header buttons are gated together
 // (same shape as the Admin pair above).
@@ -2724,7 +2770,12 @@ document.addEventListener("keydown", (e) => {
 		// would close the sidebar drawer instead of dismissing
 		// the dialog.
 		myGroupsModal.classList.contains("open") ||
-		observeModal.classList.contains("open")
+		observeModal.classList.contains("open") ||
+		// #201e-2 — admin Group dialogs + per-session Observers
+		// modal need the same guard.
+		adminGroupModal.classList.contains("open") ||
+		adminGroupMembersModal.classList.contains("open") ||
+		observersModal.classList.contains("open")
 	)
 		return;
 	if (!mainEl.classList.contains("sidebar-open")) return;
@@ -3065,6 +3116,19 @@ document.addEventListener("keydown", (e) => {
 		closeObserveModal();
 	} else if (myGroupsModal.classList.contains("open")) {
 		closeMyGroupsModal();
+	} else if (adminGroupMembersModal.classList.contains("open")) {
+		// #201e-2 — admin Groups dialogs open ON TOP of the parent
+		// admin dashboard. Same topmost-first ordering as
+		// observeModal above: members management nested-dialog →
+		// create/edit nested-dialog → admin parent → other modals.
+		closeAdminGroupMembersModal();
+	} else if (adminGroupModal.classList.contains("open")) {
+		closeAdminGroupModal();
+	} else if (observersModal.classList.contains("open")) {
+		// #201e-2 — Observers modal is opened from the per-session
+		// toolbar, not from inside another dialog, so it slots
+		// alongside the other top-level modals (admin/invites/etc).
+		closeObserversModal();
 	} else if (newSessionModal.classList.contains("open")) {
 		closeNewSessionModal();
 	} else if (templatesModal.classList.contains("open")) {
@@ -3452,19 +3516,28 @@ adminRefreshBtn.addEventListener("click", () => {
 });
 
 async function refreshAdmin(): Promise<void> {
-	// Fetch both endpoints in parallel — they're independent reads
-	// gated by the same admin token, and a sequential await would
-	// double the dashboard latency without any safety upside.
+	// Fetch all four endpoints in parallel — independent reads gated
+	// by the same admin token. Sequential awaits would multiply the
+	// dashboard latency without any safety upside. `Promise.allSettled`
+	// rather than `all` so a transient on one endpoint doesn't wipe
+	// the other three panels — each section renders or shows its own
+	// per-section error.
 	adminRefreshBtn.disabled = true;
 	try {
-		const [stats, sessions] = await Promise.all([fetchAdminStats(), fetchAdminSessions()]);
-		renderAdminStats(stats);
-		renderAdminSessions(sessions);
-	} catch (err) {
-		// Per-endpoint failure surfaces via the toast; the panels keep
-		// their previous state rather than wiping to a half-rendered
-		// shell.
-		showToast((err as Error).message, true);
+		const [statsR, sessionsR, groupsR, observeLogR] = await Promise.allSettled([
+			fetchAdminStats(),
+			fetchAdminSessions(),
+			fetchAdminGroups(),
+			fetchAdminObserveLog(),
+		]);
+		if (statsR.status === "fulfilled") renderAdminStats(statsR.value);
+		else showToast(`Stats: ${statsR.reason.message}`, true);
+		if (sessionsR.status === "fulfilled") renderAdminSessions(sessionsR.value);
+		else showToast(`Sessions: ${sessionsR.reason.message}`, true);
+		if (groupsR.status === "fulfilled") renderAdminGroups(groupsR.value);
+		else showToast(`Groups: ${groupsR.reason.message}`, true);
+		if (observeLogR.status === "fulfilled") renderAdminObserveLog(observeLogR.value);
+		else showToast(`Observe log: ${observeLogR.reason.message}`, true);
 	} finally {
 		adminRefreshBtn.disabled = false;
 	}
@@ -3652,6 +3725,378 @@ async function confirmAndAct(
 		btn.disabled = false;
 	}
 }
+
+// ── Admin Groups CRUD (#201e-2) ────────────────────────────────────────────
+//
+// New section in the admin dashboard. List + create + edit + delete
+// + add/remove members. Backend routes are gated by `requireAdmin`;
+// these handlers run only inside the admin modal which is itself
+// admin-gated. The create/edit dialog (`adminGroupModal`) and the
+// members-management dialog (`adminGroupMembersModal`) open ON TOP
+// of the admin dashboard — same nested-dialog pattern the
+// save-template dialog uses on top of the new-session modal.
+
+let editingGroupId: string | null = null;
+let membersGroupId: string | null = null;
+
+function renderAdminGroups(groups: AdminGroupSummary[]): void {
+	adminGroupsListEl.textContent = "";
+	if (groups.length === 0) {
+		const empty = document.createElement("p");
+		empty.className = "modal-hint";
+		empty.textContent = "No groups yet — create one with + New group.";
+		adminGroupsListEl.appendChild(empty);
+		return;
+	}
+	for (const g of groups) {
+		const row = document.createElement("div");
+		row.className = "admin-session-row";
+
+		const meta = document.createElement("div");
+		meta.className = "admin-session-meta";
+		const name = document.createElement("strong");
+		name.textContent = g.description ? `${g.name} — ${g.description}` : g.name;
+		const sub = document.createElement("span");
+		sub.className = "admin-session-sub";
+		sub.textContent = `lead: ${g.leadUsername} · ${g.memberCount} member${g.memberCount === 1 ? "" : "s"}`;
+		meta.appendChild(name);
+		meta.appendChild(sub);
+
+		const actions = document.createElement("div");
+		actions.className = "admin-session-actions";
+
+		const editBtn = document.createElement("button");
+		editBtn.type = "button";
+		editBtn.textContent = "Edit";
+		editBtn.addEventListener("click", () => {
+			void openAdminGroupModalForEdit(g);
+		});
+
+		const membersBtn = document.createElement("button");
+		membersBtn.type = "button";
+		membersBtn.textContent = "Members";
+		membersBtn.addEventListener("click", () => {
+			void openAdminGroupMembersModal(g);
+		});
+
+		const deleteBtn = document.createElement("button");
+		deleteBtn.type = "button";
+		deleteBtn.textContent = "Delete";
+		deleteBtn.className = "admin-session-delete";
+		deleteBtn.addEventListener("click", () =>
+			confirmAndAct(
+				`Delete group "${g.name}"?\n\nMembership rows cascade automatically. The lead user is NOT deleted.`,
+				deleteBtn,
+				async () => {
+					await deleteAdminGroup(g.id);
+					showToast(`Deleted ${g.name}`);
+				},
+			),
+		);
+
+		actions.appendChild(editBtn);
+		actions.appendChild(membersBtn);
+		actions.appendChild(deleteBtn);
+		row.appendChild(meta);
+		row.appendChild(actions);
+		adminGroupsListEl.appendChild(row);
+	}
+}
+
+function openAdminGroupModalForCreate(): void {
+	editingGroupId = null;
+	adminGroupModalTitle.textContent = "New group";
+	adminGroupNameInput.value = "";
+	adminGroupDescriptionInput.value = "";
+	adminGroupLeadUserIdInput.value = "";
+	adminGroupSubmitBtn.textContent = "Create";
+	adminGroupModal.classList.add("open");
+	adminGroupModal.setAttribute("aria-hidden", "false");
+	adminGroupNameInput.focus();
+}
+
+function openAdminGroupModalForEdit(g: AdminGroupSummary): void {
+	editingGroupId = g.id;
+	adminGroupModalTitle.textContent = `Edit group "${g.name}"`;
+	adminGroupNameInput.value = g.name;
+	adminGroupDescriptionInput.value = g.description ?? "";
+	adminGroupLeadUserIdInput.value = g.leadUserId;
+	adminGroupSubmitBtn.textContent = "Save";
+	adminGroupModal.classList.add("open");
+	adminGroupModal.setAttribute("aria-hidden", "false");
+	adminGroupNameInput.focus();
+}
+
+function closeAdminGroupModal(): void {
+	adminGroupModal.classList.remove("open");
+	adminGroupModal.setAttribute("aria-hidden", "true");
+	editingGroupId = null;
+}
+
+adminGroupModal.addEventListener("click", (e) => {
+	const target = e.target as HTMLElement;
+	if (target.hasAttribute("data-close-modal")) closeAdminGroupModal();
+});
+
+adminGroupCreateBtn.addEventListener("click", () => openAdminGroupModalForCreate());
+
+adminGroupForm.addEventListener("submit", async (e) => {
+	e.preventDefault();
+	const name = adminGroupNameInput.value.trim();
+	const description = adminGroupDescriptionInput.value.trim() || null;
+	const leadUserId = adminGroupLeadUserIdInput.value.trim();
+	if (!name) {
+		showToast("Name is required", true);
+		return;
+	}
+	if (!leadUserId) {
+		showToast("Lead user id is required", true);
+		return;
+	}
+	adminGroupSubmitBtn.disabled = true;
+	try {
+		if (editingGroupId === null) {
+			await createAdminGroup({ name, description, leadUserId });
+			showToast(`Created group "${name}"`);
+		} else {
+			await updateAdminGroup(editingGroupId, { name, description, leadUserId });
+			showToast(`Saved group "${name}"`);
+		}
+		closeAdminGroupModal();
+		await refreshAdmin();
+	} catch (err) {
+		showToast((err as Error).message, true);
+	} finally {
+		adminGroupSubmitBtn.disabled = false;
+	}
+});
+
+async function openAdminGroupMembersModal(g: AdminGroupSummary): Promise<void> {
+	membersGroupId = g.id;
+	adminGroupMembersModalTitle.textContent = `Members of "${g.name}"`;
+	adminGroupMembersModalHint.textContent = `Lead is "${g.leadUsername}" — cannot be removed (reassign via Edit first).`;
+	adminGroupAddMemberInput.value = "";
+	adminGroupMembersListEl.textContent = "";
+	const loading = document.createElement("p");
+	loading.className = "modal-hint";
+	loading.textContent = "Loading members…";
+	adminGroupMembersListEl.appendChild(loading);
+	adminGroupMembersModal.classList.add("open");
+	adminGroupMembersModal.setAttribute("aria-hidden", "false");
+	adminGroupAddMemberInput.focus();
+	await refreshAdminGroupMembers(g.id, g.leadUserId);
+}
+
+function closeAdminGroupMembersModal(): void {
+	adminGroupMembersModal.classList.remove("open");
+	adminGroupMembersModal.setAttribute("aria-hidden", "true");
+	membersGroupId = null;
+}
+
+adminGroupMembersModal.addEventListener("click", (e) => {
+	const target = e.target as HTMLElement;
+	if (target.hasAttribute("data-close-modal")) closeAdminGroupMembersModal();
+});
+
+async function refreshAdminGroupMembers(groupId: string, leadUserId: string): Promise<void> {
+	let detail: AdminGroupDetail;
+	try {
+		detail = await fetchAdminGroup(groupId);
+	} catch (err) {
+		showToast((err as Error).message, true);
+		return;
+	}
+	adminGroupMembersListEl.textContent = "";
+	if (detail.members.length === 0) {
+		const empty = document.createElement("p");
+		empty.className = "modal-hint";
+		empty.textContent = "No members.";
+		adminGroupMembersListEl.appendChild(empty);
+		return;
+	}
+	for (const m of detail.members) {
+		const row = document.createElement("div");
+		row.className = "admin-session-row";
+		const meta = document.createElement("div");
+		meta.className = "admin-session-meta";
+		const name = document.createElement("strong");
+		name.textContent = m.username;
+		meta.appendChild(name);
+		const sub = document.createElement("span");
+		sub.className = "admin-session-sub";
+		sub.textContent =
+			m.userId === leadUserId
+				? `lead · added ${new Date(m.addedAt).toLocaleString()}`
+				: `added ${new Date(m.addedAt).toLocaleString()}`;
+		meta.appendChild(sub);
+		row.appendChild(meta);
+
+		const actions = document.createElement("div");
+		actions.className = "admin-session-actions";
+		const removeBtn = document.createElement("button");
+		removeBtn.type = "button";
+		removeBtn.textContent = "Remove";
+		removeBtn.className = "admin-session-delete";
+		// Lead can't be removed without reassignment — disable the
+		// button rather than letting the click 409 from the backend.
+		// Same shape as `Stop` being disabled on a non-running session.
+		removeBtn.disabled = m.userId === leadUserId;
+		removeBtn.addEventListener("click", async () => {
+			if (!confirm(`Remove ${m.username} from this group?`)) return;
+			removeBtn.disabled = true;
+			try {
+				await removeAdminGroupMember(groupId, m.userId);
+				showToast(`Removed ${m.username}`);
+				await refreshAdminGroupMembers(groupId, leadUserId);
+				await refreshAdmin();
+			} catch (err) {
+				showToast((err as Error).message, true);
+				removeBtn.disabled = false;
+			}
+		});
+		actions.appendChild(removeBtn);
+		row.appendChild(actions);
+		adminGroupMembersListEl.appendChild(row);
+	}
+}
+
+adminGroupAddMemberForm.addEventListener("submit", async (e) => {
+	e.preventDefault();
+	const userId = adminGroupAddMemberInput.value.trim();
+	if (!userId) {
+		showToast("User id is required", true);
+		return;
+	}
+	if (membersGroupId === null) return;
+	const groupId = membersGroupId;
+	// Disable the submit button across the in-flight window so a
+	// double-click or fast second Enter doesn't fire a duplicate
+	// POST. The backend's composite PK on (group_id, user_id) would
+	// 409 the second call (caught + toasted), but keeping the noise
+	// out is cheaper than handling it. Same shape as
+	// `adminGroupSubmitBtn.disabled` on the create/edit handler.
+	const submitBtn =
+		adminGroupAddMemberForm.querySelector<HTMLButtonElement>("button[type='submit']");
+	if (submitBtn) submitBtn.disabled = true;
+	try {
+		await addAdminGroupMember(groupId, userId);
+		showToast("Member added");
+		adminGroupAddMemberInput.value = "";
+		// Refresh the members list — re-fetch the current group's
+		// detail to render the new row, and refresh the parent admin
+		// dashboard so the member-count chip on the row updates.
+		// `editingGroupId` is for the create/edit modal; this path
+		// keeps `membersGroupId` intact so subsequent operations on
+		// the same dialog still target the right group.
+		const meta = await fetchAdminGroup(groupId);
+		await refreshAdminGroupMembers(groupId, meta.leadUserId);
+		await refreshAdmin();
+	} catch (err) {
+		showToast((err as Error).message, true);
+	} finally {
+		if (submitBtn) submitBtn.disabled = false;
+	}
+});
+
+// ── Admin observe-log (#201e-2) ────────────────────────────────────────────
+
+function renderAdminObserveLog(entries: AdminObserveLogEntry[]): void {
+	adminObserveLogEl.textContent = "";
+	if (entries.length === 0) {
+		const empty = document.createElement("p");
+		empty.className = "modal-hint";
+		empty.textContent = "No observe events yet.";
+		adminObserveLogEl.appendChild(empty);
+		return;
+	}
+	for (const e of entries) {
+		const row = document.createElement("div");
+		row.className = "admin-session-row";
+		const meta = document.createElement("div");
+		meta.className = "admin-session-meta";
+		const name = document.createElement("strong");
+		name.textContent = `${e.observerUsername} → ${e.ownerUsername}`;
+		const sub = document.createElement("span");
+		sub.className = "admin-session-sub";
+		const started = new Date(e.startedAt).toLocaleString();
+		const ended = e.endedAt ? new Date(e.endedAt).toLocaleString() : "still watching";
+		sub.textContent = `session ${e.sessionId.slice(0, 8)}… · ${started} → ${ended}`;
+		meta.appendChild(name);
+		meta.appendChild(sub);
+		row.appendChild(meta);
+		adminObserveLogEl.appendChild(row);
+	}
+}
+
+// ── Per-session Observers button (#201e-2) ─────────────────────────────────
+// Surfaces the per-session observe history. Owner / admin / lead-of-
+// group-containing-owner can read; the backend `assertCanObserve`
+// gate handles auth and surfaces the right 403/404 to the toast on
+// fail. The button is shown for every authenticated user — gating it
+// on isLead/isAdmin would hide it from owners, who are the primary
+// audience ("who has been watching me?"). A non-authorised viewer
+// just sees a toast.
+
+function openObserversModal(): void {
+	if (!activeSessionId) return;
+	const sessionId = activeSessionId;
+	observersModalListEl.textContent = "";
+	const loading = document.createElement("p");
+	loading.className = "modal-hint";
+	loading.textContent = "Loading…";
+	observersModalListEl.appendChild(loading);
+	observersModal.classList.add("open");
+	observersModal.setAttribute("aria-hidden", "false");
+	void refreshObserversModal(sessionId);
+}
+
+function closeObserversModal(): void {
+	observersModal.classList.remove("open");
+	observersModal.setAttribute("aria-hidden", "true");
+}
+
+async function refreshObserversModal(sessionId: string): Promise<void> {
+	let entries: ObserveLogEntry[];
+	try {
+		entries = await fetchSessionObserveLog(sessionId);
+	} catch (err) {
+		showToast((err as Error).message, true);
+		closeObserversModal();
+		return;
+	}
+	observersModalListEl.textContent = "";
+	if (entries.length === 0) {
+		const empty = document.createElement("p");
+		empty.className = "modal-hint";
+		empty.textContent = "No observers yet.";
+		observersModalListEl.appendChild(empty);
+		return;
+	}
+	for (const e of entries) {
+		const row = document.createElement("div");
+		row.className = "admin-session-row";
+		const meta = document.createElement("div");
+		meta.className = "admin-session-meta";
+		const name = document.createElement("strong");
+		name.textContent = e.observerUsername;
+		const sub = document.createElement("span");
+		sub.className = "admin-session-sub";
+		const started = new Date(e.startedAt).toLocaleString();
+		const ended = e.endedAt ? new Date(e.endedAt).toLocaleString() : "still watching";
+		sub.textContent = `${started} → ${ended}`;
+		meta.appendChild(name);
+		meta.appendChild(sub);
+		row.appendChild(meta);
+		observersModalListEl.appendChild(row);
+	}
+}
+
+observersModal.addEventListener("click", (e) => {
+	const target = e.target as HTMLElement;
+	if (target.hasAttribute("data-close-modal")) closeObserversModal();
+});
+
+observersBtn.addEventListener("click", () => openObserversModal());
 
 // ── My groups (#201e — lead-side observe surface) ──────────────────────────
 //

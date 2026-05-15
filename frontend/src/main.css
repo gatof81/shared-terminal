@@ -1080,6 +1080,31 @@ main:not([data-sidebar-ready]) #sidebar {
   color: #e6edf3;
   margin-bottom: 0.5rem;
 }
+/* #201e-2: section header that hosts an inline action button (e.g.
+   "Groups" + "+ New group"). The h3 keeps its bottom margin removed
+   so the row aligns; the button sits flush to the right. */
+.admin-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-bottom: 0.5rem;
+}
+.admin-section-header .admin-section-title {
+  margin-bottom: 0;
+}
+.admin-section-header button {
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 0.3rem 0.65rem;
+  color: #e6edf3;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.admin-section-header button:hover {
+  background: #30363d;
+}
 .admin-session-row {
   display: flex;
   align-items: center;
