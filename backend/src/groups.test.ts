@@ -396,3 +396,128 @@ describe("groups.removeMember", () => {
 		// No throw — convention is post-condition over precondition.
 	});
 });
+
+// ── listGroupsLedBy (#201c) ────────────────────────────────────────────────
+
+describe("groups.listGroupsLedBy", () => {
+	it("returns an empty array and skips the members query when the user leads nothing", async () => {
+		mockNextRows([]); // groups query → 0 rows
+		const list = await groups.listGroupsLedBy("u-not-a-lead");
+		expect(list).toEqual([]);
+		// Critical: short-circuit BEFORE issuing the IN-clause member
+		// query, otherwise every non-lead user would burn a D1 round-trip
+		// per call against an empty IN list.
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(1);
+	});
+
+	it("zips groups with their members from the second IN-clause query", async () => {
+		mockNextRows([
+			groupRow({ id: "g-1", name: "Frontend", leadUserId: "u-lead" }),
+			groupRow({ id: "g-2", name: "Mobile", leadUserId: "u-lead" }),
+		]);
+		mockNextRows([
+			{ group_id: "g-1", user_id: "u-lead", username: "alice", added_at: "2026-05-11 12:00:00" },
+			{ group_id: "g-1", user_id: "u-2", username: "bob", added_at: "2026-05-11 12:00:01" },
+			{ group_id: "g-2", user_id: "u-lead", username: "alice", added_at: "2026-05-11 12:00:02" },
+		]);
+		const list = await groups.listGroupsLedBy("u-lead");
+		expect(list).toHaveLength(2);
+		expect(list[0]?.id).toBe("g-1");
+		expect(list[0]?.members.map((m) => m.username)).toEqual(["alice", "bob"]);
+		expect(list[1]?.id).toBe("g-2");
+		expect(list[1]?.members.map((m) => m.username)).toEqual(["alice"]);
+	});
+
+	it("renders an empty members array for a group whose member rows somehow vanished", async () => {
+		// Defensive: invariant says lead is always a member, but a future
+		// bug that left a group empty should still surface the group in
+		// the lead's view with members:[] rather than be silently dropped.
+		mockNextRows([groupRow({ id: "g-1", leadUserId: "u-lead" })]);
+		mockNextRows([]); // empty members fetch
+		const list = await groups.listGroupsLedBy("u-lead");
+		expect(list).toHaveLength(1);
+		expect(list[0]?.members).toEqual([]);
+	});
+
+	it("builds the IN-clause with one ? per group id and binds every id", async () => {
+		mockNextRows([
+			groupRow({ id: "g-a", leadUserId: "u-lead" }),
+			groupRow({ id: "g-b", leadUserId: "u-lead" }),
+			groupRow({ id: "g-c", leadUserId: "u-lead" }),
+		]);
+		mockNextRows([]);
+		await groups.listGroupsLedBy("u-lead");
+		const memberCall = dbStubs.d1Query.mock.calls[1]!;
+		// `IN (?,?,?)` — placeholders match the count, values are bound.
+		expect(memberCall[0]).toMatch(/IN \(\?,\?,\?\)/);
+		expect(memberCall[1]).toEqual(["g-a", "g-b", "g-c"]);
+	});
+});
+
+// ── sessionsObservableBy (#201c) ────────────────────────────────────────────
+
+describe("groups.sessionsObservableBy", () => {
+	it("returns the typed shape with ownerUsername inlined from the JOIN", async () => {
+		mockNextRows([
+			{
+				session_id: "s-1",
+				user_id: "u-member",
+				username: "bob",
+				name: "build-1",
+				status: "running",
+				container_id: "ct-1234567890abcdef",
+				container_name: "st-abc",
+				cols: 120,
+				rows: 36,
+				created_at: "2026-05-12 10:00:00",
+				last_connected_at: "2026-05-12 10:05:00",
+			},
+		]);
+		const list = await groups.sessionsObservableBy("u-lead");
+		expect(list).toHaveLength(1);
+		expect(list[0]?.sessionId).toBe("s-1");
+		expect(list[0]?.ownerUserId).toBe("u-member");
+		expect(list[0]?.ownerUsername).toBe("bob");
+		expect(list[0]?.status).toBe("running");
+		expect(list[0]?.lastConnectedAt).toBeInstanceOf(Date);
+	});
+
+	it("returns an empty array when the lead has no observable sessions", async () => {
+		mockNextRows([]);
+		expect(await groups.sessionsObservableBy("u-not-a-lead")).toEqual([]);
+	});
+
+	it("issues the IN-subquery scoped by lead_user_id and excludes terminated", async () => {
+		mockNextRows([]);
+		await groups.sessionsObservableBy("u-lead");
+		const call = dbStubs.d1Query.mock.calls[0]!;
+		// Inner subquery scopes by lead → members → users.
+		expect(call[0]).toMatch(/WHERE g\.lead_user_id = \?/);
+		// Terminated sessions are excluded — see helper-level comment.
+		expect(call[0]).toMatch(/s\.status != 'terminated'/);
+		// Newest-first.
+		expect(call[0]).toMatch(/ORDER BY s\.created_at DESC/);
+		expect(call[1]).toEqual(["u-lead"]);
+	});
+
+	it("emits null for a missing last_connected_at", async () => {
+		mockNextRows([
+			{
+				session_id: "s-1",
+				user_id: "u-member",
+				username: "bob",
+				name: "fresh",
+				status: "stopped",
+				container_id: null,
+				container_name: "st-abc",
+				cols: 120,
+				rows: 36,
+				created_at: "2026-05-12 10:00:00",
+				last_connected_at: null,
+			},
+		]);
+		const list = await groups.sessionsObservableBy("u-lead");
+		expect(list[0]?.lastConnectedAt).toBeNull();
+		expect(list[0]?.containerId).toBeNull();
+	});
+});
