@@ -10,6 +10,7 @@ import { verifyWsToken } from "./auth.js";
 import type { BootstrapBroadcaster, BootstrapMessage } from "./bootstrap.js";
 import type { DockerManager } from "./dockerManager.js";
 import { logger } from "./logger.js";
+import { recordObserveEnd, recordObserveStart } from "./observeLog.js";
 import { TERMINAL_DIM_MAX } from "./routes.js";
 import { ForbiddenError, NotFoundError, type SessionManager } from "./sessionManager.js";
 import type { WsClientMessage, WsServerMessage } from "./types.js";
@@ -177,10 +178,38 @@ export function handleWsConnection(
 	const urlCols = parseDim(/[?&]cols=(\d{1,4})/);
 	const urlRows = parseDim(/[?&]rows=(\d{1,4})/);
 
+	// Observe-mode (#201d): `?observe=true` opts the client into a
+	// read-only attach gated by `assertCanObserve` instead of
+	// `assertOwnership`. Anything other than the literal string "true"
+	// (including missing) falls back to the standard owner-only path,
+	// so a caller that types `?observe=1` doesn't accidentally land
+	// in observe mode with reduced expectations. The match is
+	// deliberately strict at the parse layer — auth is the safety net,
+	// not the typo-detection layer.
+	const observe = /[?&]observe=true(?:&|$)/.test(url);
+
 	// Async auth + attach flow
 	(async () => {
-		// Authorise
-		const session = await sessions.assertOwnership(sessionId, userId);
+		// Authorise. Observe-mode uses the graded `assertCanObserve`
+		// (owner OR admin OR lead-of-group-containing-owner, #201b);
+		// non-observe stays on the binary owner-only check. Returning
+		// the same `SessionMeta` shape from both paths means the rest
+		// of this function doesn't have to special-case the graded
+		// route — the observer-vs-owner distinction is captured by
+		// `isObserverNotOwner` below.
+		const session = observe
+			? await sessions.assertCanObserve(sessionId, userId)
+			: await sessions.assertOwnership(sessionId, userId);
+		// An owner who happens to call `?observe=true` (e.g. a UI bug
+		// or explicit "preview my own session in read-only mode")
+		// doesn't generate an audit row, can't shrink their own pane
+		// via dropped resize frames, and can't write — but the auth
+		// already passed, so the only behavioural changes are the
+		// no-write / no-size-vote / no-audit bits below. The
+		// `isObserverNotOwner` discriminator gates the audit + drop
+		// logic so we only pay those costs when an observer is genuinely
+		// looking at someone else's session.
+		const isObserverNotOwner = observe && session.userId !== userId;
 
 		if (session.status === "terminated") {
 			sendError(ws, "Session is terminated");
@@ -225,6 +254,11 @@ export function handleWsConnection(
 		// rationale. `sendMsg` is synchronous, so there is no await
 		// between the replay frame and flushTail() — a stream 'data'
 		// event cannot interleave.
+		//
+		// `observe=isObserverNotOwner` (#201d) is the docker-layer half
+		// of the read-only gate: it keeps the observer's viewport out
+		// of tmux's min-of-all-clients pane size. The WS-layer half
+		// (input/resize frame drop, below) is the auth invariant.
 		const { replay, flushTail } = await docker.attach(
 			sessionId,
 			attachId,
@@ -232,7 +266,34 @@ export function handleWsConnection(
 			urlRows ?? session.rows,
 			outputListener,
 			tabId,
+			isObserverNotOwner,
 		);
+
+		// Record the observe-attach in the audit log AFTER attach()
+		// succeeds. Order matters:
+		//   - If we INSERTed before attach() and attach() threw, the
+		//     row would be orphaned with `ended_at NULL` forever
+		//     (no close event to UPDATE it). Doing it after means a
+		//     failed attach has no audit row, which is the correct
+		//     "observation never happened" shape.
+		//   - If the INSERT itself fails, we abort the attach: the
+		//     audit-trail invariant is "every observe is logged",
+		//     and an unaudited observe would defeat the whole point
+		//     of the trail. detach() to release the listener +
+		//     re-throw so the catch block runs ws.close(1011).
+		let observeLogId: string | null = null;
+		if (isObserverNotOwner) {
+			try {
+				observeLogId = await recordObserveStart(userId, sessionId, session.userId);
+			} catch (err) {
+				docker.detach(attachId);
+				throw err;
+			}
+			logger.info(
+				`[ws] observe attach logged: observer=${userId} session=${sessionId} ` +
+					`owner=${session.userId} log=${observeLogId}`,
+			);
+		}
 
 		sendMsg(ws, { type: "status", status: "running" });
 		if (replay) {
@@ -241,7 +302,8 @@ export function handleWsConnection(
 		flushTail();
 
 		logger.info(
-			`[ws] user=${userId} attached to session=${sessionId} tab=${tabId} (exec=${attachId})`,
+			`[ws] user=${userId}${isObserverNotOwner ? " (observe)" : ""} ` +
+				`attached to session=${sessionId} tab=${tabId} (exec=${attachId})`,
 		);
 
 		// Message handler
@@ -256,10 +318,32 @@ export function handleWsConnection(
 
 			switch (msg.type) {
 				case "input":
+					// Observe-mode (#201d): drop input frames at the
+					// WS layer before `docker.write`. The locked-in
+					// invariant is "lead sees the user's terminal but
+					// can't type"; this is the load-bearing line that
+					// enforces it. A misbehaving client that sends an
+					// input frame on an observe attach gets a silent
+					// drop — surfacing an error would tell the client
+					// "you tried to write, you're not allowed", which
+					// it could enumerate, but the auth-layer
+					// `assertCanObserve` already filtered who's allowed
+					// to attach in the first place. Silent drop is
+					// fine; it's the same shape as a closed pty
+					// would have.
+					if (isObserverNotOwner) break;
 					idleSweeper?.bump(sessionId);
 					docker.write(attachId, msg.data);
 					break;
 				case "resize":
+					// Observe-mode (#201d): drop resize frames too.
+					// docker.attach skipped registering this observer
+					// in `s.clientSizes` so a resize would already
+					// no-op at the docker layer, but dropping it at
+					// the WS layer matches the input-drop posture and
+					// avoids the unnecessary D1 round-trip via
+					// `recomputeSize` for a no-op call.
+					if (isObserverNotOwner) break;
 					if (msg.cols > 0 && msg.rows > 0) {
 						idleSweeper?.bump(sessionId);
 						docker.resize(attachId, msg.cols, msg.rows).catch(() => {});
@@ -268,14 +352,33 @@ export function handleWsConnection(
 			}
 		});
 
-		ws.on("close", () => {
-			logger.info(`[ws] user=${userId} detached from session=${sessionId}`);
+		// Close + error both run the same teardown:
+		//   - detach() releases the docker-layer listener.
+		//   - For observe attaches, recordObserveEnd() flips the audit
+		//     row's `ended_at`. The UPDATE is idempotent (WHERE
+		//     ended_at IS NULL), so if both 'close' and 'error' fire
+		//     for the same socket — common during dirty teardowns —
+		//     the second call is a no-op. Errors during the D1 UPDATE
+		//     are logged and swallowed: a transient at close time
+		//     shouldn't crash the teardown or leak via
+		//     uncaughtException.
+		const teardown = (reason: "close" | "error", logCtx: string): void => {
 			docker.detach(attachId);
-		});
+			if (observeLogId !== null) {
+				recordObserveEnd(observeLogId).catch((err) => {
+					logger.warn(
+						`[ws] observe-log end failed on ${reason}: ${(err as Error).message} ` +
+							`(log=${observeLogId} session=${sessionId})`,
+					);
+				});
+			}
+			logger.info(`[ws] user=${userId} detached from session=${sessionId} (${logCtx})`);
+		};
 
+		ws.on("close", () => teardown("close", "close"));
 		ws.on("error", (err) => {
 			logger.error(`[ws] error on session=${sessionId}: ${err.message}`);
-			docker.detach(attachId);
+			teardown("error", `error: ${err.message}`);
 		});
 	})().catch((err) => {
 		if (err instanceof NotFoundError) {

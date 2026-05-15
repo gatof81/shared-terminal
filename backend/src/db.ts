@@ -318,6 +318,57 @@ export async function migrateDb(): Promise<void> {
                 )`,
 		`CREATE INDEX IF NOT EXISTS idx_group_members_user
                         ON user_group_members(user_id)`,
+		// Observe-mode audit log (#201d). One row per WS observe-attach:
+		// INSERT on attach open, UPDATE ended_at on close. The owner can
+		// see who watched their session, admins / leads can see their
+		// own observation history. Without this trail, the role would be
+		// the kind of design that gets called out a year later when an
+		// incident asks "who else was in this user's session?" Cost is
+		// two D1 calls per observe attach (INSERT open, UPDATE close)
+		// + the index reads behind the two list endpoints.
+		//
+		// `owner_user_id` is DENORMALISED at insert time — not a FK.
+		// Rationale: the owner is recoverable via `session_id → sessions.user_id`
+		// at read time, but storing it here preserves audit fidelity if
+		// the session row is later hard-deleted (CASCADE below) and
+		// preserves it for forensic queries that JOIN on observer + owner
+		// without re-resolving the session.
+		//
+		// `ON DELETE CASCADE` on `session_id` is the locked-in tradeoff
+		// from the issue: hard-deleting a session purges its observe log
+		// too. Favours operational tidiness over retention. If retention
+		// matters for compliance, switch to `ON DELETE SET NULL` and add
+		// a periodic purge; revisit only when a real requirement surfaces.
+		//
+		// `ON DELETE CASCADE` on `observer_user_id` is forward-looking
+		// (v1 has no user-delete API). When that lands, a deleted user's
+		// observation history vanishes with them — same shape as the
+		// session FK above. The owner-side denormalised column is
+		// deliberately unaffected: an observer who watched a session
+		// owned by a since-deleted user still has their own log entry
+		// preserved, with `owner_user_id` as a tombstone reference.
+		//
+		// Two indexes cover both list endpoints:
+		//   - `idx_observe_log_session` powers `GET /api/sessions/:id/observe-log`
+		//   - `idx_observe_log_observer` powers a forward-looking
+		//     "history of sessions I've observed" view per observer.
+		// `listAll` (admin cross-user) walks the table newest-first
+		// without an index hit — fine at v1 scale; revisit if the log
+		// grows past the hard cap.
+		`CREATE TABLE IF NOT EXISTS session_observe_log (
+                        id                TEXT PRIMARY KEY,
+                        observer_user_id  TEXT NOT NULL,
+                        session_id        TEXT NOT NULL,
+                        owner_user_id     TEXT NOT NULL,
+                        started_at        TEXT NOT NULL DEFAULT (datetime('now')),
+                        ended_at          TEXT,
+                        FOREIGN KEY (observer_user_id) REFERENCES users(id) ON DELETE CASCADE,
+                        FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                )`,
+		`CREATE INDEX IF NOT EXISTS idx_observe_log_session
+                        ON session_observe_log(session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_observe_log_observer
+                        ON session_observe_log(observer_user_id)`,
 		`CREATE TABLE IF NOT EXISTS session_configs (
                         session_id              TEXT PRIMARY KEY,
                         workspace_strategy      TEXT,
