@@ -138,9 +138,10 @@ describe("parseMaxSessionMem (#200)", () => {
 // cap can point users at it.
 
 describe("SessionConfigSchema resource-cap integration (#200)", () => {
-	it("the live module-load CPU cap matches the floor when env is unset", async () => {
-		// Sanity: in the test environment MAX_SESSION_CPU is unset, so
-		// the effective cap is the v1 ceiling.
+	it("the live module-load CPU cap matches the v1 ceiling when env is unset", async () => {
+		// In the test environment MAX_SESSION_CPU is unset, so the
+		// effective cap is the v1 ceiling (8 cores). Above rejects,
+		// at-cap accepts.
 		const { SessionConfigSchema } = await import("./sessionConfig.js");
 		const above = SessionConfigSchema.safeParse({ cpuLimit: 8_000_000_001 });
 		expect(above.success).toBe(false);

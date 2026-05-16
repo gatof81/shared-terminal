@@ -150,15 +150,19 @@ const MAX_HOOK_LEN = 8 * 1024;
 // resource allocation that's still a legal "user-supplied" entry,
 // keeping the schema and the spawn defaults coherent. The defaults
 // are not AT the lower bounds — the 0.25-core / 256-MiB floors are
-// 8× below them. CAVEAT: an operator setting MAX_SESSION_CPU below
-// 2 cores or MAX_SESSION_MEM below 2 GiB means the spawn defaults
-// will themselves exceed the new cap, so every session creation that
-// omits explicit limits will get DEFAULT_NANO_CPUS / Memory written
-// to its session_configs row by the route and then rejected by the
-// max here. This is the intended behavior — if an operator declares
-// "no session may exceed 1 core", the default 2-core spawn is the
-// thing they meant to cap. The route surfaces a clean 400 naming
-// the env var so the user knows to set an explicit lower limit.
+// 8× below them.
+//
+// TWO-PATH CAP ENFORCEMENT (#200): the Zod .max() below only fires
+// on EXPLICIT cpuLimit / memLimit values — `.optional()` means an
+// omitted field passes validation cleanly, persists as
+// `cpu_limit = NULL` on the session_configs row, and reaches
+// dockerManager with `config?.cpuLimit === undefined`. The omit-
+// path is handled by `Math.min(DEFAULT_NANO_CPUS, EFFECTIVE_*_MAX)`
+// in dockerManager.ts (using the EFFECTIVE_*_MAX exports below) so
+// the spawn default never exceeds the operator cap. Removing that
+// clamping would silently allow 2-core sessions when the operator
+// has capped below 2 cores, because no 400 is returned for an
+// omitted limit. Both paths are required.
 const CPU_NANO_MIN = CPU_NANO_FLOOR;
 const CPU_NANO_MAX = parseMaxSessionCpu(process.env.MAX_SESSION_CPU);
 const MEM_BYTES_MIN = MEM_BYTES_FLOOR;
