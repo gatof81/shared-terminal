@@ -38,6 +38,7 @@ import {
 	fetchMyGroups,
 	fetchMyObservableSessions,
 	fetchSessionObserveLog,
+	getResourceCaps,
 	getTemplate,
 	type Invite,
 	InviteRequiredError,
@@ -270,6 +271,11 @@ async function initAuth() {
 	// for "show app vs. login" and `needsSetup` for "show invite field".
 	try {
 		const { needsSetup, authenticated } = await checkAuthStatus();
+		// #200: caps now mirrored in the api module — apply to the form
+		// once on init so the very first modal open shows operator-
+		// lowered bounds. Re-applied on every modal open below to catch
+		// the rare case where caps change after initial paint.
+		applyResourceCapsToForm();
 		if (authenticated) {
 			showApp();
 			return;
@@ -1261,6 +1267,9 @@ function openNewSessionModal(opener: HTMLElement) {
 	// `resetEnvTab` no longer fires here — `closeNewSessionModal`
 	// already wiped state on the previous close, and the initial
 	// declaration of `envRows = []` covers the very first open.
+	// #200: re-apply caps in case checkAuthStatus refreshed them since
+	// initAuth ran (idempotent — same numbers if nothing changed).
+	applyResourceCapsToForm();
 	newSessionModal.classList.add("open");
 	newSessionModal.setAttribute("aria-hidden", "false");
 	// Defer focus to the next paint so the input is reliably focusable
@@ -1630,6 +1639,37 @@ function validateAgentSeedSettings(): boolean {
 }
 
 agentSeedSettings.addEventListener("blur", validateAgentSeedSettings);
+
+// #200 — DOM mirror of the operator-tunable per-session caps. The
+// HTML ships with the v1 defaults baked in (cpu max="8", hint says
+// "0.25–8 cores, 256 MiB–16 GiB") so that a pre-#200 backend / a
+// pre-checkAuthStatus paint shows the same numbers the form would
+// have shown before this PR. This function rewrites those two
+// surfaces (input `max`, bounds-hint text) once the API client has
+// the effective caps. Called from `initAuth` after checkAuthStatus
+// succeeds and from `openNewSessionModal` so an operator change
+// between auth-check and modal-open still surfaces correctly on the
+// next modal open. The `min` attribute is NOT changed — the floor is
+// fixed at 0.25c / 256 MiB regardless of operator policy.
+const resourcesBoundsHint = document.getElementById(
+	"resources-bounds-hint",
+) as HTMLParagraphElement;
+
+function applyResourceCapsToForm(): void {
+	const caps = getResourceCaps();
+	resourcesCpuCores.max = String(caps.cpuMaxCores);
+	// Memory hint: surface MiB exactly when the cap is below 1 GiB,
+	// otherwise express in GiB for readability. Same dual-unit shape
+	// the form's mem-unit dropdown uses.
+	const memMaxStr =
+		caps.memMaxMiB >= 1024 && caps.memMaxMiB % 1024 === 0
+			? `${caps.memMaxMiB / 1024} GiB`
+			: `${caps.memMaxMiB} MiB`;
+	resourcesBoundsHint.textContent =
+		`Per-session limits. Empty fields fall back to the deployment defaults ` +
+		`(2 cores / 2 GiB / no auto-stop). Bounds: CPU 0.25–${caps.cpuMaxCores} cores, ` +
+		`memory 256 MiB–${memMaxStr}, idle TTL 1 minute–24 hours.`;
+}
 
 /** Wipe Advanced-tab state on modal close. Important for the agent-
  *  seed textareas — leaving 256 KiB of pasted content mounted between

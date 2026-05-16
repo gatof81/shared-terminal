@@ -44,6 +44,8 @@ import {
 	UsernameRateLimiter,
 } from "./rateLimit.js";
 import {
+	EFFECTIVE_CPU_NANO_MAX,
+	EFFECTIVE_MEM_BYTES_MAX,
 	encryptAuthCredentials,
 	encryptSecretEntries,
 	isEmptyConfig,
@@ -156,7 +158,20 @@ export function buildRouter(
 		]);
 		const isAdmin = adminLookup?.results[0]?.is_admin === 1;
 		const isLead = leadLookup === true;
-		res.json({ needsSetup: !anyUsers, authenticated, isAdmin, isLead });
+		// #200: surface the effective per-session resource caps so the
+		// frontend's create-session form can advertise the operator-
+		// lowered max instead of the hardcoded v1 ceiling. Without
+		// this, a user on a deployment with MAX_SESSION_CPU=4 still
+		// sees "8 cores" in the hint and an input that accepts 6,
+		// then gets a 400 from the backend with a message that names
+		// an env var they have no power to read. Computed from the
+		// module-load values in sessionConfig.ts so the wire shape
+		// matches the form's units (cores + MiB) one-to-one.
+		const resourceCaps = {
+			cpuMaxCores: EFFECTIVE_CPU_NANO_MAX / 1_000_000_000,
+			memMaxMiB: EFFECTIVE_MEM_BYTES_MAX / (1024 * 1024),
+		};
+		res.json({ needsSetup: !anyUsers, authenticated, isAdmin, isLead, resourceCaps });
 	});
 
 	router.post("/auth/register", registerIp, async (req: Request, res: Response) => {
