@@ -25,6 +25,107 @@ import { checkEnvVarSafety, EnvVarValidationError } from "./envVarValidation.js"
 import { logger } from "./logger.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 
+// ── Resource-cap env overrides (#200) ──────────────────────────────────────
+//
+// Operators on small hosts (a developer laptop, a 4-core VM) can shrink the
+// v1 8-core / 16-GiB ceilings via env vars; on a fat host they can't go
+// past the v1 ceilings (env-var-to-raise is out of scope per #200). The
+// constants below are the effective max used by the Zod schema; the
+// _HARD_MAX names below are the absolute v1 ceilings the env can only
+// lower. Floors stay at CPU_NANO_MIN / MEM_BYTES_MIN regardless of the
+// env override — letting the operator set a cap below the floor would
+// make every session-create return 400 with no path to fix.
+//
+// Parsed at module load. Malformed / non-positive / non-finite values
+// fall back to the hard ceiling with a warn, mirroring
+// `MAX_ACTIVE_SESSIONS_PER_USER`'s pattern in sessionManager.ts. A
+// value above the hard ceiling is also clamped (with warn) instead of
+// being honoured — env-vars-can-only-lower is the explicit policy.
+//
+// NOTE: changing these does not affect already-spawned containers.
+// Docker resource limits are written into the cgroup at `docker run`
+// (see HostConfig.NanoCpus / Memory in dockerManager.ts); a lowered
+// cap only rejects future POST /api/sessions whose `config.cpuLimit`
+// / `memLimit` exceed it.
+const CPU_NANO_HARD_MAX = 8_000_000_000; // 8 cores — v1 ceiling
+const MEM_BYTES_HARD_MAX = 16 * 1024 * 1024 * 1024; // 16 GiB — v1 ceiling
+const CPU_NANO_FLOOR = 250_000_000; // 0.25 cores
+const MEM_BYTES_FLOOR = 256 * 1024 * 1024; // 256 MiB
+
+/**
+ * Convert MAX_SESSION_CPU (in cores, decimal allowed) to nano-CPUs,
+ * clamping to the v1 hard ceiling and the per-session floor. Exported
+ * for unit testing — the production call passes
+ * `process.env.MAX_SESSION_CPU`. #200.
+ */
+export function parseMaxSessionCpu(raw: string | undefined): number {
+	if (raw === undefined || raw.trim() === "") return CPU_NANO_HARD_MAX;
+	// Cores accept decimals (0.25, 1.5) to mirror the form's UX, but
+	// the underlying nano-CPU value must end up an integer. `Number`
+	// handles both — we just need to round-trip cleanly.
+	const cores = Number(raw);
+	if (!Number.isFinite(cores) || cores <= 0) {
+		logger.warn(
+			`[sessionConfig] MAX_SESSION_CPU=${JSON.stringify(raw)} is not a positive number; ` +
+				`falling back to ${CPU_NANO_HARD_MAX / 1_000_000_000} cores`,
+		);
+		return CPU_NANO_HARD_MAX;
+	}
+	const nano = Math.round(cores * 1_000_000_000);
+	if (nano < CPU_NANO_FLOOR) {
+		logger.warn(
+			`[sessionConfig] MAX_SESSION_CPU=${cores} cores is below the per-session floor ` +
+				`(${CPU_NANO_FLOOR / 1_000_000_000} cores); falling back to ` +
+				`${CPU_NANO_HARD_MAX / 1_000_000_000} cores`,
+		);
+		return CPU_NANO_HARD_MAX;
+	}
+	if (nano > CPU_NANO_HARD_MAX) {
+		logger.warn(
+			`[sessionConfig] MAX_SESSION_CPU=${cores} cores exceeds the v1 ceiling ` +
+				`(${CPU_NANO_HARD_MAX / 1_000_000_000} cores); clamping. The env var ` +
+				`can only LOWER the cap.`,
+		);
+		return CPU_NANO_HARD_MAX;
+	}
+	return nano;
+}
+
+/** Same shape as parseMaxSessionCpu but for memory (MiB → bytes). */
+export function parseMaxSessionMem(raw: string | undefined): number {
+	if (raw === undefined || raw.trim() === "") return MEM_BYTES_HARD_MAX;
+	// MiB is integer-only (the form's lowest exposed unit is MiB; the
+	// internal floor is 256 MiB exact). Reject non-integers explicitly
+	// rather than silently truncating — `MAX_SESSION_MEM=1024.5` is
+	// almost certainly an operator typo.
+	const mib = Number(raw);
+	if (!Number.isFinite(mib) || !Number.isInteger(mib) || mib <= 0) {
+		logger.warn(
+			`[sessionConfig] MAX_SESSION_MEM=${JSON.stringify(raw)} is not a positive integer (MiB); ` +
+				`falling back to ${MEM_BYTES_HARD_MAX / (1024 * 1024 * 1024)} GiB`,
+		);
+		return MEM_BYTES_HARD_MAX;
+	}
+	const bytes = mib * 1024 * 1024;
+	if (bytes < MEM_BYTES_FLOOR) {
+		logger.warn(
+			`[sessionConfig] MAX_SESSION_MEM=${mib} MiB is below the per-session floor ` +
+				`(${MEM_BYTES_FLOOR / (1024 * 1024)} MiB); falling back to ` +
+				`${MEM_BYTES_HARD_MAX / (1024 * 1024 * 1024)} GiB`,
+		);
+		return MEM_BYTES_HARD_MAX;
+	}
+	if (bytes > MEM_BYTES_HARD_MAX) {
+		logger.warn(
+			`[sessionConfig] MAX_SESSION_MEM=${mib} MiB exceeds the v1 ceiling ` +
+				`(${MEM_BYTES_HARD_MAX / (1024 * 1024)} MiB); clamping. The env var ` +
+				`can only LOWER the cap.`,
+		);
+		return MEM_BYTES_HARD_MAX;
+	}
+	return bytes;
+}
+
 // ── Bounds (shape-level only; children tighten) ─────────────────────────────
 
 // Hook command bodies. Generous enough for a multi-line shell script
@@ -32,10 +133,13 @@ import { decryptSecret, encryptSecret } from "./secrets.js";
 // session_configs row. #191 is free to lower this when the form lands.
 const MAX_HOOK_LEN = 8 * 1024;
 // Per-session resource bounds:
-//   - CPU: 0.25 → 8 cores. Stored as nano-CPUs (Docker's HostConfig
-//     unit) to keep the wire shape integer-only and avoid the
-//     float-precision foot-gun JSON Number has at the high end.
-//   - Memory: 256 MiB → 16 GiB.
+//   - CPU: 0.25 cores (floor) → operator-tunable MAX_SESSION_CPU
+//     (default 8 cores, can only LOWER below the v1 ceiling per
+//     #200). Stored as nano-CPUs (Docker's HostConfig unit) to keep
+//     the wire shape integer-only and avoid the float-precision
+//     foot-gun JSON Number has at the high end.
+//   - Memory: 256 MiB (floor) → operator-tunable MAX_SESSION_MEM
+//     (default 16 GiB, same lower-only policy).
 //   - Idle TTL: 60 s → 24 h. OMIT the field (undefined) to disable
 //     auto-stop; `null` is NOT accepted — the schema is `.optional()`,
 //     not `.nullable()`, so sending `null` returns 400.
@@ -46,12 +150,28 @@ const MAX_HOOK_LEN = 8 * 1024;
 // resource allocation that's still a legal "user-supplied" entry,
 // keeping the schema and the spawn defaults coherent. The defaults
 // are not AT the lower bounds — the 0.25-core / 256-MiB floors are
-// 8× below them — so a future operator-override layer should not
-// anchor its caps to the defaults.
-const CPU_NANO_MIN = 250_000_000; // 0.25 cores
-const CPU_NANO_MAX = 8_000_000_000; // 8 cores
-const MEM_BYTES_MIN = 256 * 1024 * 1024; // 256 MiB
-const MEM_BYTES_MAX = 16 * 1024 * 1024 * 1024; // 16 GiB
+// 8× below them. CAVEAT: an operator setting MAX_SESSION_CPU below
+// 2 cores or MAX_SESSION_MEM below 2 GiB means the spawn defaults
+// will themselves exceed the new cap, so every session creation that
+// omits explicit limits will get DEFAULT_NANO_CPUS / Memory written
+// to its session_configs row by the route and then rejected by the
+// max here. This is the intended behavior — if an operator declares
+// "no session may exceed 1 core", the default 2-core spawn is the
+// thing they meant to cap. The route surfaces a clean 400 naming
+// the env var so the user knows to set an explicit lower limit.
+const CPU_NANO_MIN = CPU_NANO_FLOOR;
+const CPU_NANO_MAX = parseMaxSessionCpu(process.env.MAX_SESSION_CPU);
+const MEM_BYTES_MIN = MEM_BYTES_FLOOR;
+const MEM_BYTES_MAX = parseMaxSessionMem(process.env.MAX_SESSION_MEM);
+// dockerManager.ts imports these to clamp DEFAULT_NANO_CPUS /
+// DEFAULT_MEMORY_BYTES at spawn — a session created without explicit
+// caps (config.cpuLimit / memLimit undefined) must still respect the
+// operator cap. Without this, an operator setting MAX_SESSION_CPU=1
+// would still see 2-core sessions spawn whenever the user omitted
+// the field, defeating the cap. The Zod max enforces it on explicit
+// values; this export carries the same number to the spawn path.
+export const EFFECTIVE_CPU_NANO_MAX = CPU_NANO_MAX;
+export const EFFECTIVE_MEM_BYTES_MAX = MEM_BYTES_MAX;
 const IDLE_TTL_S_MIN = 60; // 1 minute
 const IDLE_TTL_S_MAX = 24 * 60 * 60; // 24 hours
 // Cap repeating sub-records so a single create can't write a multi-MB
@@ -504,9 +624,30 @@ export const SessionConfigSchema = z
 		// for `auth: "none"`. The route encrypts before persistence —
 		// plaintext is in scope only inside the request handler.
 		auth: WireAuthSpec.optional(),
-		// #194 — populated by the resources form
-		cpuLimit: z.number().int().min(CPU_NANO_MIN).max(CPU_NANO_MAX).optional(),
-		memLimit: z.number().int().min(MEM_BYTES_MIN).max(MEM_BYTES_MAX).optional(),
+		// #194 — populated by the resources form. The .max message
+		// names the env var so an operator who lowered the cap can
+		// tell the user (in the 400) where the limit comes from
+		// without having to read the issue tracker. #200.
+		cpuLimit: z
+			.number()
+			.int()
+			.min(CPU_NANO_MIN)
+			.max(CPU_NANO_MAX, {
+				message:
+					`cpuLimit exceeds the per-session cap of ${CPU_NANO_MAX / 1_000_000_000} cores ` +
+					`(operator-tunable via MAX_SESSION_CPU)`,
+			})
+			.optional(),
+		memLimit: z
+			.number()
+			.int()
+			.min(MEM_BYTES_MIN)
+			.max(MEM_BYTES_MAX, {
+				message:
+					`memLimit exceeds the per-session cap of ${MEM_BYTES_MAX / (1024 * 1024)} MiB ` +
+					`(operator-tunable via MAX_SESSION_MEM)`,
+			})
+			.optional(),
 		idleTtlSeconds: z.number().int().min(IDLE_TTL_S_MIN).max(IDLE_TTL_S_MAX).optional(),
 		// #191 — populated by the hooks form. `.min(1)` so a stored
 		// empty string can never be confused with "no hook configured":

@@ -22,6 +22,8 @@ import {
 } from "./portMappings.js";
 import {
 	decryptStoredEntries,
+	EFFECTIVE_CPU_NANO_MAX,
+	EFFECTIVE_MEM_BYTES_MAX,
 	getSessionConfig,
 	type SessionConfigRecord,
 } from "./sessionConfig.js";
@@ -36,8 +38,16 @@ const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/works
 // override per session by writing `cpu_limit` / `mem_limit` on the
 // session_configs row. Hardcoding the floor here so a missing config
 // row doesn't change behaviour from today's deployment.
-const DEFAULT_MEMORY_BYTES = 2 * 1024 * 1024 * 1024;
-const DEFAULT_NANO_CPUS = 2_000_000_000;
+//
+// #200: when the operator lowered the per-session cap below the spawn
+// default (e.g. MAX_SESSION_CPU=1 with a 2-core default), the default
+// would otherwise exceed the cap and silently bypass it on every
+// session created without an explicit cpuLimit / memLimit. Clamp at
+// module load against EFFECTIVE_*_MAX so the default is always
+// per-session-cap-compliant. Math.min — never raise the default
+// against the cap, only lower it.
+const DEFAULT_MEMORY_BYTES = Math.min(2 * 1024 * 1024 * 1024, EFFECTIVE_MEM_BYTES_MAX);
+const DEFAULT_NANO_CPUS = Math.min(2_000_000_000, EFFECTIVE_CPU_NANO_MAX);
 
 // Owner applied to freshly-created workspace directories. Must match the
 // `developer` user inside session-image/Dockerfile (uid/gid 1000 by default).
