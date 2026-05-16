@@ -21,6 +21,15 @@ const WS_BASE = BACKEND_URL.replace(/^http/, "ws");
 let _loggedIn = false;
 let _isAdmin = false;
 let _isLead = false;
+// #200 — effective per-session resource caps mirrored from /auth/status
+// so the create-session form's CPU input `max` and the bounds hint can
+// reflect operator-lowered caps. Defaults match the v1 ceilings so a
+// pre-cap-aware backend (or a status fetch that hasn't completed yet)
+// surfaces the same numbers the form would have shown before #200.
+let _resourceCaps: { cpuMaxCores: number; memMaxMiB: number } = {
+	cpuMaxCores: 8,
+	memMaxMiB: 16 * 1024,
+};
 
 export function isLoggedIn(): boolean {
 	return _loggedIn;
@@ -42,6 +51,17 @@ export function isLead(): boolean {
 	return _isLead;
 }
 
+/** Effective per-session caps from the backend (#200). Mirrored on
+ *  every /auth/status call so an operator change picks up on the next
+ *  page reload. The create-session form reads these to set the CPU
+ *  input `max` and the bounds hint text — without this the form
+ *  would advertise the v1 ceiling and the user would hit a 400 with
+ *  an operator-named env var they can't act on. Returns a fresh
+ *  object so callers can't mutate the module state by reference. */
+export function getResourceCaps(): { cpuMaxCores: number; memMaxMiB: number } {
+	return { ..._resourceCaps };
+}
+
 /** Fired by `apiFetch` once per 401-burst after flipping `_loggedIn` to false —
  * main.ts listens to perform UI teardown. See apiFetch for the emit guard. */
 export const SESSION_EXPIRED_EVENT = "st:session-expired";
@@ -57,6 +77,11 @@ export interface AuthStatus {
 	 *  `false` defensively when the field is missing so a stale cached
 	 *  client + new server, or vice versa, doesn't surface undefined. */
 	isLead?: boolean;
+	/** Effective per-session resource caps (#200). Same backwards-
+	 *  compatible shape — pre-#200 backends omit the field and the
+	 *  client falls back to the hardcoded v1 ceilings. Units mirror
+	 *  the form: cores (decimal) and MiB (integer). */
+	resourceCaps?: { cpuMaxCores: number; memMaxMiB: number };
 }
 
 export async function checkAuthStatus(): Promise<AuthStatus> {
@@ -68,6 +93,19 @@ export async function checkAuthStatus(): Promise<AuthStatus> {
 	_loggedIn = data.authenticated;
 	_isAdmin = data.isAdmin;
 	_isLead = data.isLead === true;
+	// #200: mirror caps if present. A pre-#200 backend omits the field
+	// and leaves the v1 defaults in place — same hardcoded ceilings the
+	// form would have used before this PR.
+	if (
+		data.resourceCaps &&
+		Number.isFinite(data.resourceCaps.cpuMaxCores) &&
+		Number.isFinite(data.resourceCaps.memMaxMiB)
+	) {
+		_resourceCaps = {
+			cpuMaxCores: data.resourceCaps.cpuMaxCores,
+			memMaxMiB: data.resourceCaps.memMaxMiB,
+		};
+	}
 	return data;
 }
 

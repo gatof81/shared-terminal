@@ -10,6 +10,7 @@ interface Api {
 	isLoggedIn: typeof import("./api.js").isLoggedIn;
 	isAdmin: typeof import("./api.js").isAdmin;
 	checkAuthStatus: typeof import("./api.js").checkAuthStatus;
+	getResourceCaps: typeof import("./api.js").getResourceCaps;
 	register: typeof import("./api.js").register;
 	login: typeof import("./api.js").login;
 	logout: typeof import("./api.js").logout;
@@ -434,5 +435,66 @@ describe("admin state mirror", () => {
 
 		expect(api.isAdmin()).toBe(false);
 		expect(api.isLoggedIn()).toBe(false);
+	});
+});
+
+// ── Resource caps mirror (#200) ─────────────────────────────────────────────
+
+describe("resource caps mirror", () => {
+	it("getResourceCaps defaults to the v1 ceilings on a fresh load", async () => {
+		const api = await loadApi();
+		expect(api.getResourceCaps()).toEqual({ cpuMaxCores: 8, memMaxMiB: 16384 });
+	});
+
+	it("checkAuthStatus mirrors the server's resourceCaps into module state", async () => {
+		const api = await loadApi();
+		fetchSpy.mockResolvedValueOnce(
+			mockFetchResponse({
+				json: {
+					needsSetup: false,
+					authenticated: true,
+					isAdmin: false,
+					resourceCaps: { cpuMaxCores: 4, memMaxMiB: 8192 },
+				},
+			}),
+		);
+		await api.checkAuthStatus();
+		expect(api.getResourceCaps()).toEqual({ cpuMaxCores: 4, memMaxMiB: 8192 });
+	});
+
+	it("checkAuthStatus falls back to v1 defaults when resourceCaps is omitted (pre-#200 backend)", async () => {
+		const api = await loadApi();
+		fetchSpy.mockResolvedValueOnce(
+			mockFetchResponse({
+				json: { needsSetup: false, authenticated: true, isAdmin: false },
+			}),
+		);
+		await api.checkAuthStatus();
+		// Same shape as a fresh load — the field omission is treated as
+		// "no signal" rather than "no cap".
+		expect(api.getResourceCaps()).toEqual({ cpuMaxCores: 8, memMaxMiB: 16384 });
+	});
+
+	it("getResourceCaps returns a fresh object so callers can't mutate state by reference", async () => {
+		const api = await loadApi();
+		const caps = api.getResourceCaps();
+		caps.cpuMaxCores = 99;
+		expect(api.getResourceCaps().cpuMaxCores).toBe(8);
+	});
+
+	it("ignores non-finite caps from a malformed response (keeps v1 defaults)", async () => {
+		const api = await loadApi();
+		fetchSpy.mockResolvedValueOnce(
+			mockFetchResponse({
+				json: {
+					needsSetup: false,
+					authenticated: true,
+					isAdmin: false,
+					resourceCaps: { cpuMaxCores: Number.NaN, memMaxMiB: 8192 },
+				},
+			}),
+		);
+		await api.checkAuthStatus();
+		expect(api.getResourceCaps()).toEqual({ cpuMaxCores: 8, memMaxMiB: 16384 });
 	});
 });
