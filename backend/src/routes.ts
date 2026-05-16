@@ -28,9 +28,14 @@ import {
 	verifyJwt,
 } from "./auth.js";
 import { type BootstrapBroadcaster, runAsyncBootstrap } from "./bootstrap.js";
+import { invalidateStatsCache, type StatsBySession } from "./containerStats.js";
 import { d1Query, getD1CallsSinceBoot } from "./db.js";
 import type { DockerManager } from "./dockerManager.js";
-import { UploadQuotaExceededError } from "./dockerManager.js";
+import {
+	DEFAULT_MEMORY_BYTES,
+	DEFAULT_NANO_CPUS,
+	UploadQuotaExceededError,
+} from "./dockerManager.js";
 import { EnvVarValidationError, validateEnvVars } from "./envVarValidation.js";
 import * as groups from "./groups.js";
 import type { IdleSweeperStats } from "./idleSweeper.js";
@@ -45,14 +50,19 @@ import {
 } from "./rateLimit.js";
 import {
 	EFFECTIVE_CPU_NANO_MAX,
+	EFFECTIVE_CPU_NANO_MIN,
 	EFFECTIVE_MEM_BYTES_MAX,
+	EFFECTIVE_MEM_BYTES_MIN,
 	encryptAuthCredentials,
 	encryptSecretEntries,
 	isEmptyConfig,
+	listResourceCaps,
 	type PersistableSessionConfig,
 	persistSessionConfig,
+	ResourceCapsPatchSchema,
 	type SessionConfig,
 	SessionConfigValidationError,
+	updateResourceLimits,
 	validateSessionConfig,
 } from "./sessionConfig.js";
 import type { SessionManager } from "./sessionManager.js";
@@ -485,6 +495,18 @@ export function buildRouter(
 			// should treat that as "not available" rather than zero.
 			const idleSweeperStats = idleSweeper?.getStats?.() ?? null;
 			const reconcileStats = docker.getReconcileStats();
+			// #270 — aggregate resource usage across running sessions.
+			// `gatherStats` shares its TTL cache with `/admin/sessions`,
+			// so the dashboard's parallel fetch only hits the daemon
+			// once per container per ~2s — see containerStats.ts. We
+			// scope this to `status === "running"` and require a
+			// containerId; reconcile-pending or stopped rows have no
+			// live process to sample. The `limits` block hands the
+			// frontend the same EFFECTIVE_*_MAX / *_MIN constants the
+			// PATCH route validates against, so the "Edit caps" form
+			// can render with discoverable min/max attributes without
+			// hard-coding values.
+			const resourceSnapshot = await collectResourceSnapshot(sessions, docker);
 			res.json({
 				bootedAt,
 				uptimeSeconds,
@@ -493,6 +515,7 @@ export function buildRouter(
 				reconcile: reconcileStats,
 				dispatcher: getDispatcherStats(),
 				d1: { callsSinceBoot: getD1CallsSinceBoot() },
+				resources: resourceSnapshot,
 			});
 		} catch (err) {
 			logger.error(`[admin] stats failed: ${(err as Error).message}`);
@@ -520,23 +543,132 @@ export function buildRouter(
 		async (_req: Request, res: Response) => {
 			try {
 				const list = await sessions.listAll();
-				// Serialise via the same `serializeMeta` shape the user-facing
-				// `GET /sessions` returns + an `ownerUsername` field so the
-				// admin UI doesn't have to do a second lookup per row.
-				// Admin response includes `userId` (the regular
-				// `serializeMeta` deliberately omits it to avoid leaking
-				// internal IDs to non-admin users). Admins need the id
-				// to cross-reference logs and to drive the force-action
-				// endpoints by row.
+				// #270 — extra fields per row: configured caps from
+				// session_configs (NULL → uses spawn default) and live
+				// usage from `docker stats` for running rows. Batched
+				// in two parallel calls so non-running rows don't pay
+				// for the stats fetch and we issue exactly one D1 hit
+				// for ALL caps (no N+1). gatherStats returns null per
+				// row whose stats fetch failed; the wire shape exposes
+				// that as `usage: null` and the UI renders "—".
+				const ids = list.map((row) => row.sessionId);
+				const running = list.filter((row) => row.status === "running");
+				const [caps, stats] = await Promise.all([
+					listResourceCaps(ids),
+					docker.gatherStats(
+						running.map((row) => ({
+							sessionId: row.sessionId,
+							containerId: row.containerId,
+						})),
+					),
+				]);
 				res.json(
-					list.map((row) => ({
-						...serializeMeta(row),
-						userId: row.userId,
-						ownerUsername: row.ownerUsername,
-					})),
+					list.map((row) => {
+						const sCaps = caps.get(row.sessionId);
+						const usage = serializeUsage(stats.get(row.sessionId));
+						return {
+							...serializeMeta(row),
+							userId: row.userId,
+							ownerUsername: row.ownerUsername,
+							cpuLimit: sCaps?.cpuLimit ?? null,
+							memLimit: sCaps?.memLimit ?? null,
+							usage,
+						};
+					}),
 				);
 			} catch (err) {
 				logger.error(`[admin] sessions list failed: ${(err as Error).message}`);
+				res.status(500).json({ error: "Internal server error" });
+			}
+		},
+	);
+
+	// PATCH /admin/sessions/:id/resources (#270) — live-edit CPU/RAM caps.
+	// Persists the new values to `session_configs` AND applies them on
+	// the running container via `docker update`. Same auth gate as the
+	// other admin actions (`requireAdmin` + `adminActionIp`).
+	router.patch(
+		"/admin/sessions/:id/resources",
+		adminActionIp,
+		requireAdmin,
+		async (req: Request, res: Response) => {
+			// Parse + validate first — fast 400 path doesn't touch D1 or
+			// docker. `safeParse` instead of `parse`+try/catch so we
+			// don't allocate a ZodError just to read its first issue.
+			// Strict schema (set in ResourceCapsPatchSchema): unknown
+			// keys 400 rather than being silently dropped.
+			const parsed = ResourceCapsPatchSchema.safeParse(req.body);
+			if (!parsed.success) {
+				// Match the create-time pattern in validateSessionConfig:
+				// surface only the first issue (paths included so the
+				// client knows which field is wrong).
+				const issue = parsed.error.issues[0]!;
+				const path = issue.path.map(String).join(".");
+				res.status(400).json({ error: path ? `${path}: ${issue.message}` : issue.message });
+				return;
+			}
+			const patch = parsed.data;
+			if (patch.cpuLimit === undefined && patch.memLimit === undefined) {
+				res.status(400).json({ error: "At least one of cpuLimit or memLimit must be provided" });
+				return;
+			}
+			try {
+				const meta = await sessions.get(req.params.id);
+				if (!meta) {
+					res.status(404).json({ error: "Session not found" });
+					return;
+				}
+				// Persist first. If the docker call below fails, the row
+				// is already updated — the next session start will pick
+				// up the new caps regardless. Apply-then-persist would
+				// leave the daemon holding caps that disagree with the
+				// source of truth, which is the worse rollback shape.
+				await updateResourceLimits(req.params.id, patch);
+				// Only push to the daemon when the container is running
+				// AND we have its id. A stopped session's session_configs
+				// row is enough; `docker update` against a non-running
+				// container errors out with "container not running".
+				if (meta.status === "running" && meta.containerId !== null) {
+					try {
+						await docker.updateResources(meta.containerId, patch);
+						// Force-evict the stats cache so the next dashboard
+						// refresh re-samples against the new cgroup limit
+						// — the usage numerator may be unchanged but the
+						// memLimitBytes denominator just shifted.
+						invalidateStatsCache(meta.containerId);
+					} catch (err) {
+						// Docker rejects a Memory drop below current usage
+						// with several substring shapes across versions /
+						// cgroup modes; we match the broad set rather
+						// than pinning one. Hit any of these → 409
+						// ("conflict with current state") with a clear
+						// "free memory first" hint. Everything else falls
+						// through to 500 + log.
+						//   - cgroup-v1 daemon: "Minimum memory limit can
+						//     not be less than memory reservation limit"
+						//   - newer daemons:    "lower than current"
+						//   - kernel-side OOM:  "Out of memory"
+						//   - cgroup-v2 memcg:  "memory limit too low"
+						const message = (err as Error).message ?? "";
+						const cgroupReject =
+							/lower than current|less than (memory )?reservation|Minimum memory limit|memory limit too low|Out of memory/i.test(
+								message,
+							);
+						if (cgroupReject) {
+							res.status(409).json({
+								error:
+									"Cannot lower memory cap below current usage. Free memory inside the session first, then retry.",
+							});
+							return;
+						}
+						logger.error(`[admin] docker update failed for session ${req.params.id}: ${message}`);
+						res.status(500).json({ error: "Failed to apply caps to running container" });
+						return;
+					}
+				}
+				res.status(204).send();
+			} catch (err) {
+				logger.error(`[admin] resource-caps update failed: ${(err as Error).message}`);
 				res.status(500).json({ error: "Internal server error" });
 			}
 		},
@@ -2079,6 +2211,118 @@ function serializeMeta(m: SessionMeta) {
 		cols: m.cols,
 		rows: m.rows,
 		envVars: m.envVars,
+	};
+}
+
+// ── Admin per-session usage serializer (#270) ──────────────────────────────
+
+// Round to one decimal so a multi-session totals card doesn't drift
+// past visible precision (a wedged 0.0001% CPU sample × 100 sessions
+// shouldn't dominate the displayed total). Math.round/10 over the
+// dotted toFixed pattern so JSON serialises a `number`, not a string
+// the frontend would have to re-parse.
+function r1(n: number): number {
+	return Math.round(n * 10) / 10;
+}
+
+/** Wire serialiser for the per-session usage column (null when the
+ *  fetch failed or the session isn't running). Numbers are rounded to
+ *  1 decimal place — the cgroup samples are noisy enough that extra
+ *  precision is misleading. */
+function serializeUsage(stats: ReturnType<StatsBySession["get"]>) {
+	if (stats === null || stats === undefined) return null;
+	return {
+		cpuPercent: r1(stats.cpuPercent),
+		memBytes: stats.memBytes,
+		memLimitBytes: stats.memLimitBytes,
+		memPercent: r1(stats.memPercent),
+	};
+}
+
+// ── Admin resource-snapshot helper (#270) ──────────────────────────────────
+
+interface ResourceSnapshot {
+	runningCount: number;
+	statsAvailable: number;
+	totalCpuPercent: number;
+	totalMemBytes: number;
+	totalCpuLimitNanos: number;
+	totalMemLimitBytes: number;
+	limits: {
+		minCpuNanos: number;
+		maxCpuNanos: number;
+		minMemBytes: number;
+		maxMemBytes: number;
+		defaultCpuNanos: number;
+		defaultMemBytes: number;
+	};
+}
+
+/**
+ * Build the `resources` block for `GET /admin/stats`. Pulled into a
+ * helper because the wire shape lives at two layers (here and the
+ * `/admin/sessions` list, which reuses the same stats fetch) and the
+ * route handler should not balloon.
+ *
+ * Two D1 hits in the worst case: one `listAll` for the session table
+ * (also reused for the `/admin/sessions` route on the same dashboard
+ * refresh, which the TTL on `gatherStats` lets piggyback), one
+ * `listResourceCaps` batched read for cpu_limit/mem_limit. Stats
+ * fetches go to the local Docker socket — not D1.
+ *
+ * Failure modes (snapshot-wide):
+ *  - `listAll`/`listResourceCaps` errors bubble to the caller's
+ *    try/catch and surface as 500.
+ *  - Per-container stats failures collapse to `null` and DO NOT
+ *    propagate — admins see "X of Y reported" rather than a wedged
+ *    dashboard.
+ */
+async function collectResourceSnapshot(
+	sessions: SessionManager,
+	docker: DockerManager,
+): Promise<ResourceSnapshot> {
+	const all = await sessions.listAll();
+	const running = all.filter((s) => s.status === "running");
+	const caps = await listResourceCaps(running.map((s) => s.sessionId));
+	const stats = await docker.gatherStats(
+		running.map((s) => ({ sessionId: s.sessionId, containerId: s.containerId })),
+	);
+	let totalCpuPercent = 0;
+	let totalMemBytes = 0;
+	let totalCpuLimitNanos = 0;
+	let totalMemLimitBytes = 0;
+	let statsAvailable = 0;
+	for (const s of running) {
+		const sCaps = caps.get(s.sessionId);
+		// Effective cap = configured value when set, else the spawn
+		// default. We sum effective caps (not the raw NULL row's
+		// undefined) because the question the totals card answers is
+		// "how much have we allocated", which is what Docker actually
+		// wrote to cgroup — NULL means "spawn default", not zero.
+		totalCpuLimitNanos += sCaps?.cpuLimit ?? DEFAULT_NANO_CPUS;
+		totalMemLimitBytes += sCaps?.memLimit ?? DEFAULT_MEMORY_BYTES;
+		const live = stats.get(s.sessionId);
+		if (live !== null && live !== undefined) {
+			statsAvailable += 1;
+			totalCpuPercent += live.cpuPercent;
+			totalMemBytes += live.memBytes;
+		}
+	}
+	return {
+		runningCount: running.length,
+		statsAvailable,
+		totalCpuPercent: r1(totalCpuPercent),
+		totalMemBytes,
+		totalCpuLimitNanos,
+		totalMemLimitBytes,
+		limits: {
+			minCpuNanos: EFFECTIVE_CPU_NANO_MIN,
+			maxCpuNanos: EFFECTIVE_CPU_NANO_MAX,
+			minMemBytes: EFFECTIVE_MEM_BYTES_MIN,
+			maxMemBytes: EFFECTIVE_MEM_BYTES_MAX,
+			defaultCpuNanos: DEFAULT_NANO_CPUS,
+			defaultMemBytes: DEFAULT_MEMORY_BYTES,
+		},
 	};
 }
 

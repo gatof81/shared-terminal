@@ -575,3 +575,68 @@ describe("DockerManager.spawn config-applied", () => {
 		await expect(dm.spawn("sess-1")).resolves.toBeDefined();
 	});
 });
+
+// ── DockerManager.updateResources (#270) ────────────────────────────────────
+
+describe("DockerManager.updateResources", () => {
+	interface CapturedUpdate {
+		opts: Record<string, unknown>;
+	}
+
+	function makeDmWithUpdateCapture(): { dm: DockerManager; captured: CapturedUpdate } {
+		const captured: CapturedUpdate = { opts: {} };
+		const dm = new DockerManager(fakeSessions());
+		const fakeContainer = {
+			update: vi.fn(async (opts: Record<string, unknown>) => {
+				captured.opts = opts;
+				return undefined;
+			}),
+		};
+		const fakeDocker = {
+			getContainer: vi.fn(() => fakeContainer),
+		};
+		(dm as unknown as { docker: unknown }).docker = fakeDocker;
+		return { dm, captured };
+	}
+
+	it("forwards NanoCpus when only cpuLimit is set", async () => {
+		const { dm, captured } = makeDmWithUpdateCapture();
+		await dm.updateResources("c1", { cpuLimit: 1_500_000_000 });
+		expect(captured.opts).toEqual({ NanoCpus: 1_500_000_000 });
+	});
+
+	it("forwards Memory AND MemorySwap (swap-disabled) when only memLimit is set", async () => {
+		const { dm, captured } = makeDmWithUpdateCapture();
+		await dm.updateResources("c1", { memLimit: 1024 * 1024 * 1024 });
+		// MemorySwap === Memory disables swap (matches the spawn shape).
+		expect(captured.opts).toEqual({
+			Memory: 1024 * 1024 * 1024,
+			MemorySwap: 1024 * 1024 * 1024,
+		});
+	});
+
+	it("forwards both when both are set", async () => {
+		const { dm, captured } = makeDmWithUpdateCapture();
+		await dm.updateResources("c1", { cpuLimit: 2_000_000_000, memLimit: 4 * 1024 * 1024 * 1024 });
+		expect(captured.opts).toEqual({
+			NanoCpus: 2_000_000_000,
+			Memory: 4 * 1024 * 1024 * 1024,
+			MemorySwap: 4 * 1024 * 1024 * 1024,
+		});
+	});
+
+	it("propagates the underlying dockerode error so the route can pattern-match", async () => {
+		const dm = new DockerManager(fakeSessions());
+		const fakeContainer = {
+			update: vi.fn(async () => {
+				throw new Error("Minimum memory limit lower than current usage");
+			}),
+		};
+		(dm as unknown as { docker: { getContainer: () => unknown } }).docker = {
+			getContainer: () => fakeContainer,
+		};
+		await expect(dm.updateResources("c1", { memLimit: 1024 * 1024 * 1024 })).rejects.toThrow(
+			/lower than current/i,
+		);
+	});
+});

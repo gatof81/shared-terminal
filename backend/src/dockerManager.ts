@@ -12,6 +12,11 @@ import path from "node:path";
 import type { Duplex } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import Dockerode from "dockerode";
+import {
+	gatherStatsForRunning,
+	type RunningSessionForStats,
+	type StatsBySession,
+} from "./containerStats.js";
 import { d1Query } from "./db.js";
 import { logger } from "./logger.js";
 import {
@@ -46,8 +51,14 @@ const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/works
 // module load against EFFECTIVE_*_MAX so the default is always
 // per-session-cap-compliant. Math.min — never raise the default
 // against the cap, only lower it.
-const DEFAULT_MEMORY_BYTES = Math.min(2 * 1024 * 1024 * 1024, EFFECTIVE_MEM_BYTES_MAX);
-const DEFAULT_NANO_CPUS = Math.min(2_000_000_000, EFFECTIVE_CPU_NANO_MAX);
+// Exported (#270) so the admin resource-totals snapshot can compute
+// the "effective" cap for sessions whose `cpu_limit` / `mem_limit` is
+// NULL — the spawn fallback is what Docker actually wrote to cgroup.
+// Both EXPORTS pass through the same EFFECTIVE_*_MAX clamp so the
+// snapshot can never report an aggregate above the operator cap, even
+// if the original 2-core / 2-GiB constant ever drifted above it.
+export const DEFAULT_MEMORY_BYTES = Math.min(2 * 1024 * 1024 * 1024, EFFECTIVE_MEM_BYTES_MAX);
+export const DEFAULT_NANO_CPUS = Math.min(2_000_000_000, EFFECTIVE_CPU_NANO_MAX);
 
 // Owner applied to freshly-created workspace directories. Must match the
 // `developer` user inside session-image/Dockerfile (uid/gid 1000 by default).
@@ -1236,6 +1247,65 @@ export class DockerManager {
 			);
 		}
 		logger.info(`[docker] stopped container for session ${sessionId}`);
+	}
+
+	/**
+	 * Thin admin-facing wrapper around `gatherStatsForRunning` that
+	 * threads the private Dockerode instance to the helper without
+	 * exposing it on the class. Routes mock this method directly to
+	 * exercise the admin endpoints without spinning a real daemon.
+	 */
+	async gatherStats(sessionsToSample: RunningSessionForStats[]): Promise<StatsBySession> {
+		return gatherStatsForRunning(this.docker, sessionsToSample);
+	}
+
+	/**
+	 * Live update of `NanoCpus` / `Memory` on a running container — the
+	 * "Edit caps" admin path (#270). Wraps dockerode's `container.update()`
+	 * which proxies to `POST /containers/<id>/update`, the same API
+	 * `docker update --memory --cpus` uses.
+	 *
+	 * Why this is allowed when CLAUDE.md says "config is bound at create
+	 * time": resource caps are the one HostConfig field Docker exposes
+	 * as cgroup-tunable post-spawn. Env vars, mounts, hostnames, port
+	 * bindings are NOT — those still require recycling the container.
+	 * The admin route hands the user a clean live-edit only for this one
+	 * pair of fields and leaves the rest of the config bind-at-create.
+	 *
+	 * `MemorySwap` is intentionally set equal to `Memory` to disable
+	 * swap (matches today's spawn behaviour where `MemorySwap` is unset
+	 * and Docker defaults to `same-as-Memory`). Setting Memory without
+	 * MemorySwap on a cgroup-v1 host can change the effective swap
+	 * budget, which is a subtle regression — pin both.
+	 *
+	 * Failure modes the caller MUST handle:
+	 *
+	 *   - Cgroup-v2 rejects `Memory` below the container's current usage
+	 *     with a 500-ish error from the daemon. Dockerode wraps that as
+	 *     a thrown Error; the route surfaces it as 409 with a clear
+	 *     message ("free memory first") rather than 500.
+	 *   - Container has vanished between caller's `meta.get()` and this
+	 *     call (concurrent stop/delete). Dockerode throws with 404 in
+	 *     the message; the route surfaces 404.
+	 *
+	 * We bubble the original error so the route can pattern-match;
+	 * no swallowing here.
+	 */
+	async updateResources(
+		containerId: string,
+		caps: { cpuLimit?: number; memLimit?: number },
+	): Promise<void> {
+		const update: { NanoCpus?: number; Memory?: number; MemorySwap?: number } = {};
+		if (caps.cpuLimit !== undefined) {
+			update.NanoCpus = caps.cpuLimit;
+		}
+		if (caps.memLimit !== undefined) {
+			update.Memory = caps.memLimit;
+			// Disable swap by pinning MemorySwap === Memory. See block
+			// comment above for the rationale.
+			update.MemorySwap = caps.memLimit;
+		}
+		await this.docker.getContainer(containerId).update(update);
 	}
 
 	// ── Exec attach ────────────────────────────────────────────────────────

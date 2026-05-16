@@ -176,6 +176,14 @@ const MEM_BYTES_MAX = parseMaxSessionMem(process.env.MAX_SESSION_MEM);
 // values; this export carries the same number to the spawn path.
 export const EFFECTIVE_CPU_NANO_MAX = CPU_NANO_MAX;
 export const EFFECTIVE_MEM_BYTES_MAX = MEM_BYTES_MAX;
+// Per-session floors (admin-tunable: nope, these are the v1 floors).
+// Exported alongside the EFFECTIVE_*_MAX so the admin resource-caps
+// PATCH route can validate without redeclaring them, and the frontend's
+// "Edit caps" form can compute its `min`/`max` HTML attributes from the
+// `/admin/stats` response without hard-coding values that could drift
+// out of sync with the env-var cap.
+export const EFFECTIVE_CPU_NANO_MIN = CPU_NANO_MIN;
+export const EFFECTIVE_MEM_BYTES_MIN = MEM_BYTES_MIN;
 const IDLE_TTL_S_MIN = 60; // 1 minute
 const IDLE_TTL_S_MAX = 24 * 60 * 60; // 24 hours
 // Cap repeating sub-records so a single create can't write a multi-MB
@@ -1649,4 +1657,137 @@ export async function getSessionConfig(sessionId: string): Promise<SessionConfig
  */
 export function isEmptyConfig(config: SessionConfig | PersistableSessionConfig): boolean {
 	return Object.values(config).every((v) => v === undefined);
+}
+
+// ── Admin resource-caps PATCH support (#270) ────────────────────────────────
+
+/**
+ * Wire schema for `PATCH /admin/sessions/:id/resources`. Both fields
+ * optional; the route additionally requires at least one to be
+ * present, returning 400 otherwise — we can't express "at least one
+ * key" cleanly in zod without losing the per-field error messages, so
+ * the route owns that check.
+ *
+ * Bounds intentionally mirror the create-time schema fragment above
+ * (lines 635-654) so an admin edit can't smuggle a value past the
+ * operator cap that a fresh create would have rejected.
+ */
+export const ResourceCapsPatchSchema = z
+	.object({
+		cpuLimit: z
+			.number()
+			.int()
+			.min(CPU_NANO_MIN)
+			.max(CPU_NANO_MAX, {
+				message:
+					`cpuLimit exceeds the per-session cap of ${CPU_NANO_MAX / 1_000_000_000} cores ` +
+					`(operator-tunable via MAX_SESSION_CPU)`,
+			})
+			.optional(),
+		memLimit: z
+			.number()
+			.int()
+			.min(MEM_BYTES_MIN)
+			.max(MEM_BYTES_MAX, {
+				message:
+					`memLimit exceeds the per-session cap of ${MEM_BYTES_MAX / (1024 * 1024)} MiB ` +
+					`(operator-tunable via MAX_SESSION_MEM)`,
+			})
+			.optional(),
+	})
+	.strict();
+
+export type ResourceCapsPatch = z.infer<typeof ResourceCapsPatchSchema>;
+
+/**
+ * Batched read of the cpu_limit / mem_limit columns for an arbitrary
+ * set of session IDs, surfaced via the admin sessions list (#270).
+ *
+ * One query for the whole list — no N+1 against D1, which is otherwise
+ * the obvious mistake on a 500-row admin page. Sessions with no
+ * `session_configs` row (legit bare-create) are absent from the
+ * returned Map; the caller treats that as "both caps default".
+ *
+ * SQL-injection note: the SQL has a fixed shape but the `IN (...)`
+ * placeholder count varies with input. We generate `?` placeholders
+ * from the array length and bind values via the parameterised
+ * `d1Query` call — never string-interpolating the IDs. Empty input
+ * short-circuits to an empty Map so the SQL never sees `IN ()`,
+ * which SQLite rejects.
+ */
+export async function listResourceCaps(
+	sessionIds: readonly string[],
+): Promise<Map<string, { cpuLimit: number | null; memLimit: number | null }>> {
+	const out = new Map<string, { cpuLimit: number | null; memLimit: number | null }>();
+	if (sessionIds.length === 0) return out;
+	const placeholders = sessionIds.map(() => "?").join(",");
+	const result = await d1Query<{
+		session_id: string;
+		cpu_limit: number | null;
+		mem_limit: number | null;
+	}>(
+		`SELECT session_id, cpu_limit, mem_limit FROM session_configs WHERE session_id IN (${placeholders})`,
+		[...sessionIds],
+	);
+	for (const row of result.results) {
+		out.set(row.session_id, { cpuLimit: row.cpu_limit, memLimit: row.mem_limit });
+	}
+	return out;
+}
+
+/**
+ * Targeted update of just `cpu_limit` / `mem_limit` for a session.
+ * Used by the admin "Edit caps" PATCH route — independent of the big
+ * `persistSessionConfig` upsert because:
+ *
+ *   1. The row may not yet exist (a session created with `config: {}`
+ *      has no session_configs row at all — see `isEmptyConfig` short-
+ *      circuit on the create path). An UPDATE without a prior INSERT
+ *      silently no-ops `meta.changes = 0`. We materialise the row via
+ *      `INSERT … ON CONFLICT DO NOTHING` first, then UPDATE.
+ *
+ *   2. The big upsert overwrites every other column — env vars, repo,
+ *      hooks, ports. Trying to change only the caps via that path
+ *      would require the route to re-read and re-supply every other
+ *      field, which is exactly the kind of "almost-correct change
+ *      writes stale data" footgun this codebase has avoided
+ *      everywhere else.
+ *
+ * `patch` MUST have at least one defined field. The route validates
+ * that and returns 400; this helper assumes the validation has run
+ * (calling it with an empty object generates a SET clause with no
+ * assignments, which SQLite rejects).
+ */
+export async function updateResourceLimits(
+	sessionId: string,
+	patch: ResourceCapsPatch,
+): Promise<void> {
+	// Materialise an empty row if none exists. Other columns stay
+	// NULL → rehydrate as `undefined` in `getSessionConfig`, which is
+	// the same shape `persistSessionConfig` would produce for a config
+	// that only set the caps.
+	await d1Query(
+		`INSERT INTO session_configs (session_id) VALUES (?) ON CONFLICT(session_id) DO NOTHING`,
+		[sessionId],
+	);
+	const sets: string[] = [];
+	const params: Array<number> = [];
+	if (patch.cpuLimit !== undefined) {
+		sets.push("cpu_limit = ?");
+		params.push(patch.cpuLimit);
+	}
+	if (patch.memLimit !== undefined) {
+		sets.push("mem_limit = ?");
+		params.push(patch.memLimit);
+	}
+	if (sets.length === 0) {
+		// Defensive — `updateResourceLimits({})` is a programming bug
+		// (the route's "at least one field" check is upstream). Better
+		// to throw here than to issue a malformed SQL.
+		throw new Error("updateResourceLimits called with no fields to update");
+	}
+	await d1Query(`UPDATE session_configs SET ${sets.join(", ")} WHERE session_id = ?`, [
+		...params,
+		sessionId,
+	]);
 }
