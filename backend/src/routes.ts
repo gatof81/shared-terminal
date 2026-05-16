@@ -639,19 +639,20 @@ export function buildRouter(
 					} catch (err) {
 						// Docker rejects a Memory drop below current usage
 						// with several substring shapes across versions /
-						// cgroup modes; we match the broad set rather
-						// than pinning one. Hit any of these → 409
-						// ("conflict with current state") with a clear
-						// "free memory first" hint. Everything else falls
-						// through to 500 + log.
+						// cgroup modes; we match the narrow set the
+						// daemon's update_linux.go actually emits rather
+						// than fuzzy patterns like "Out of memory" that
+						// could collide with unrelated allocator errors.
+						// Hit any of these → 409 ("conflict with current
+						// state") with a clear "free memory first" hint.
+						// Everything else falls through to 500 + log.
 						//   - cgroup-v1 daemon: "Minimum memory limit can
 						//     not be less than memory reservation limit"
-						//   - newer daemons:    "lower than current"
-						//   - kernel-side OOM:  "Out of memory"
+						//   - newer daemons:    "lower than current memory"
 						//   - cgroup-v2 memcg:  "memory limit too low"
 						const message = (err as Error).message ?? "";
 						const cgroupReject =
-							/lower than current|less than (memory )?reservation|Minimum memory limit|memory limit too low|Out of memory/i.test(
+							/lower than current memory|less than (memory )?reservation|Minimum memory limit|memory limit too low/i.test(
 								message,
 							);
 						if (cgroupReject) {
