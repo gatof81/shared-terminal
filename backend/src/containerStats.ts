@@ -139,8 +139,12 @@ export async function getContainerStats(
 		}
 
 		const value = computeStats(raw);
-		// Evict oldest insertion when past the cap. Map iteration order
-		// is insertion order, so `keys().next().value` is the eldest.
+		// Delete-then-insert so a refreshed entry moves to the youngest
+		// insertion position — otherwise Map keeps it at its original
+		// slot and an active container could get evicted before an
+		// unused one. Same pattern the ownership cache uses
+		// (sessionManager.ts, see CLAUDE.md "Notes on D1" block).
+		cache.delete(containerId);
 		if (cache.size >= MAX_STATS_CACHE) {
 			const oldest = cache.keys().next().value;
 			if (oldest !== undefined) cache.delete(oldest);
@@ -215,12 +219,17 @@ export function computeStats(raw: RawDockerStats): ContainerStats {
 	const sysDelta = sysTotal - preSysTotal;
 	const onlineCpus =
 		raw.cpu_stats?.online_cpus ?? raw.cpu_stats?.cpu_usage?.percpu_usage?.length ?? 1;
-	// Degenerate-sample guard — both deltas must be positive. `stream:false`
-	// pre-fills precpu_stats with a ~1s-prior daemon sample, so the
-	// meaningful first call's deltas are non-zero. The check collapses
-	// to 0% only on the divide-by-zero path (same shape Docker CLI uses
-	// in `formatter_stats.go`).
-	const cpuPercent = sysDelta > 0 && cpuDelta > 0 ? (cpuDelta / sysDelta) * onlineCpus * 100 : 0;
+	// Divide-by-zero guard — `sysDelta > 0` only, matching the Docker
+	// CLI's `formatter_stats.go`. `cpuDelta` can be negative (rare:
+	// usage briefly regresses between the daemon's two internal
+	// samples); we clamp the negative-rate output to 0 with
+	// `Math.max(0, …)` rather than pre-guarding on `cpuDelta > 0`,
+	// which would mask the equally-rare-but-meaningful "CPU dropped"
+	// signal as a flat 0%. `stream:false` pre-fills precpu_stats with
+	// a ~1s-prior daemon sample, so the meaningful first call's
+	// sysDelta is non-zero — the guard fires only on the genuine
+	// "two samples in the same monotonic tick" path.
+	const cpuPercent = sysDelta > 0 ? Math.max(0, (cpuDelta / sysDelta) * onlineCpus * 100) : 0;
 
 	const memUsage = raw.memory_stats?.usage ?? 0;
 	const memCache = raw.memory_stats?.stats?.cache ?? 0;

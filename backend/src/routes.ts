@@ -2264,11 +2264,13 @@ interface ResourceSnapshot {
  * `/admin/sessions` list, which reuses the same stats fetch) and the
  * route handler should not balloon.
  *
- * Two D1 hits in the worst case: one `listAll` for the session table
- * (also reused for the `/admin/sessions` route on the same dashboard
- * refresh, which the TTL on `gatherStats` lets piggyback), one
- * `listResourceCaps` batched read for cpu_limit/mem_limit. Stats
- * fetches go to the local Docker socket — not D1.
+ * Two D1 hits per call: `listAll` + `listResourceCaps` (batched, so
+ * no N+1 over the cap reads). `GET /admin/sessions` fires its own
+ * `listAll` in parallel on the same dashboard refresh — the two are
+ * NOT deduplicated, which is fine at v1 scale but a future "share
+ * the snapshot across the two endpoints" optimisation is possible.
+ * The `gatherStats` TTL cache reduces Docker-stats round-trips but
+ * does not deduplicate D1 reads.
  *
  * Failure modes (snapshot-wide):
  *  - `listAll`/`listResourceCaps` errors bubble to the caller's

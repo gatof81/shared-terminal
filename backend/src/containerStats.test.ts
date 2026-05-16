@@ -68,6 +68,29 @@ describe("computeStats", () => {
 		expect(got.cpuPercent).toBe(0);
 	});
 
+	it("clamps a negative cpuDelta to 0% (usage briefly regressed between samples)", () => {
+		// Rare but real: cpu_stats.cpu_usage.total_usage can come back
+		// less than precpu_stats.cpu_usage.total_usage if the daemon
+		// re-samples in the middle of a counter reset. We clamp the
+		// negative-rate output to 0 rather than guarding on
+		// `cpuDelta > 0` (which would mask "CPU dropped" as 0% for
+		// the entire window). Pinning the clamp here protects against
+		// a regression that re-introduces the broader guard.
+		const got = computeStats({
+			cpu_stats: {
+				cpu_usage: { total_usage: 1_000_000 },
+				system_cpu_usage: 20_000_000,
+				online_cpus: 4,
+			},
+			precpu_stats: {
+				cpu_usage: { total_usage: 2_000_000 },
+				system_cpu_usage: 10_000_000,
+			},
+			memory_stats: { usage: 0, limit: 0 },
+		});
+		expect(got.cpuPercent).toBe(0);
+	});
+
 	it("falls back to percpu_usage.length when online_cpus is missing (legacy daemons)", () => {
 		const got = computeStats(
 			sample({
