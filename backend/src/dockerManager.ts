@@ -1285,8 +1285,10 @@ export class DockerManager {
 	 *     a thrown Error; the route surfaces it as 409 with a clear
 	 *     message ("free memory first") rather than 500.
 	 *   - Container has vanished between caller's `meta.get()` and this
-	 *     call (concurrent stop/delete). Dockerode throws with 404 in
-	 *     the message; the route surfaces 404.
+	 *     call (concurrent stop/delete). Dockerode throws; the route
+	 *     surfaces 500 with a generic "failed to apply caps" body. The
+	 *     D1 persist has already landed before this call, so the next
+	 *     session start picks up the new caps regardless.
 	 *
 	 * We bubble the original error so the route can pattern-match;
 	 * no swallowing here.
