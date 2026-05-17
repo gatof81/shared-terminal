@@ -1408,7 +1408,35 @@ export function buildRouter(
 		const list = includeTerminated
 			? await sessions.listAllForUser(userId)
 			: await sessions.listForUser(userId);
-		res.json(list.map(serializeMeta));
+		// #271 — surface configured caps + live usage so the user can
+		// see what their own session is doing without going through the
+		// admin dashboard. Same shape the admin /admin/sessions route
+		// returns (caps + usage); usage is null for non-running rows
+		// and rows whose stats fetch failed. Parallelised so the D1
+		// caps read overlaps with the (slower) Docker stats fan-out.
+		const ids = list.map((row) => row.sessionId);
+		const running = list.filter((row) => row.status === "running");
+		const [caps, stats] = await Promise.all([
+			listResourceCaps(ids),
+			docker.gatherStats(
+				running.map((row) => ({
+					sessionId: row.sessionId,
+					containerId: row.containerId,
+				})),
+			),
+		]);
+		res.json(
+			list.map((row) => {
+				const sCaps = caps.get(row.sessionId);
+				const usage = serializeUsage(stats.get(row.sessionId));
+				return {
+					...serializeMeta(row),
+					cpuLimit: sCaps?.cpuLimit ?? null,
+					memLimit: sCaps?.memLimit ?? null,
+					usage,
+				};
+			}),
+		);
 	});
 
 	router.get("/sessions/:id", async (req: Request, res: Response) => {

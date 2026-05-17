@@ -198,6 +198,19 @@ export interface SessionInfo {
 	cols: number;
 	rows: number;
 	envVars: Record<string, string>;
+	// #271 — surfaced to the user so the sidebar can show their own
+	// session's caps + live cgroup usage without going through the
+	// admin dashboard. `null` cap means the session uses the spawn
+	// default; `null` usage means the session isn't running OR the
+	// stats fetch failed (status disambiguates).
+	cpuLimit: number | null;
+	memLimit: number | null;
+	usage: {
+		cpuPercent: number;
+		memBytes: number;
+		memLimitBytes: number;
+		memPercent: number;
+	} | null;
 }
 
 // ── Session API ─────────────────────────────────────────────────────────────

@@ -112,6 +112,7 @@ const editTemplateDescriptionInput = document.getElementById(
 	"edit-template-description-input",
 ) as HTMLInputElement;
 const showTerminatedToggle = document.getElementById("show-terminated-toggle") as HTMLInputElement;
+const sidebarRefreshBtn = document.getElementById("sidebar-refresh-btn") as HTMLButtonElement;
 const mainEl = document.querySelector("main")!;
 const sidebarEl = document.getElementById("sidebar")!;
 const sidebarToggleBtn = document.getElementById("sidebar-toggle") as HTMLButtonElement;
@@ -521,10 +522,35 @@ function renderSessionList() {
 		dot.className = `session-dot ${s.status}`;
 		item.appendChild(dot);
 
+		// #271 — wrap the name (and the optional usage line) in a
+		// vertical column so the live-usage subtitle sits under the
+		// name without breaking the parent flex row's dot/name/actions
+		// alignment. Pre-#271 this was a single `.session-name` span
+		// appended directly to `item`; the column container preserves
+		// the same `.session-name` styling underneath.
+		const nameCol = document.createElement("span");
+		nameCol.className = "session-name-col";
+
 		const name = document.createElement("span");
 		name.className = "session-name";
 		name.textContent = s.name;
-		item.appendChild(name);
+		nameCol.appendChild(name);
+
+		// Live usage line. Render only for running sessions whose stats
+		// fetch succeeded — stopped/terminated/failed rows have no live
+		// data and "—" placeholder would be noise on what's usually
+		// most of an inactive list.
+		if (s.status === "running" && s.usage !== null) {
+			const usageEl = document.createElement("span");
+			usageEl.className = "session-usage";
+			const cpuCores = s.usage.cpuPercent / 100;
+			usageEl.textContent =
+				`${formatCpuCores(cpuCores)} cores (${formatCpuPercent(s.usage.cpuPercent)})` +
+				` · ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
+			nameCol.appendChild(usageEl);
+		}
+
+		item.appendChild(nameCol);
 
 		// Action buttons
 		const actions = document.createElement("span");
@@ -2741,6 +2767,18 @@ function showToast(message: string, isError = false) {
 showTerminatedToggle.addEventListener("change", () => {
 	console.debug(`[sessions] show-terminated toggled → ${showTerminatedToggle.checked}`);
 	refreshSessions();
+});
+
+// #271 — Manual sidebar refresh. We deliberately do NOT poll the
+// session list; refresh is user-driven so usage numbers don't burn
+// Docker-stats round-trips while a tab is idle in the background.
+sidebarRefreshBtn.addEventListener("click", async () => {
+	sidebarRefreshBtn.disabled = true;
+	try {
+		await refreshSessions();
+	} finally {
+		sidebarRefreshBtn.disabled = false;
+	}
 });
 
 // ── Sidebar toggle ──────────────────────────────────────────────────────────
