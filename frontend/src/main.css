@@ -1375,6 +1375,18 @@ main:not([data-sidebar-ready]) #sidebar {
   word-break: break-word;
   margin: 0;
 }
+/* #274 — Standalone bootstrap-log viewer (failed-row click → modal).
+   Wider than the default modal so a 64 KiB log doesn't word-wrap into
+   an unreadable column, and a taller scroll region than the inline
+   `.bootstrap-error-output` cap of 200px since the user came here
+   specifically to read it. */
+.bootstrap-log-card {
+  max-width: 900px;
+  width: 90vw;
+}
+.bootstrap-log-card .bootstrap-error-output {
+  max-height: 60vh;
+}
 #session-list {
   flex: 1;
   overflow-y: auto;

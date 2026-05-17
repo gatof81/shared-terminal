@@ -1463,6 +1463,23 @@ export function buildRouter(
 		}
 	});
 
+	// #274 — Bootstrap log read. Returns the captured output from the
+	// last bootstrap run (success or failure). Owner-gated via
+	// `assertOwnership`, same shape as the rest of /sessions/:id/*.
+	// Returns 200 with `{ log: string | null }`; null means no
+	// bootstrap ever ran for this session (bare-create with no hooks),
+	// or the row pre-dates the #274 migration and the column is NULL.
+	router.get("/sessions/:id/bootstrap-log", async (req: Request, res: Response) => {
+		const { userId } = req as AuthedRequest;
+		try {
+			await sessions.assertOwnership(req.params.id, userId);
+			const log = await sessions.getBootstrapLog(req.params.id);
+			res.json({ log });
+		} catch (err) {
+			handleSessionError(err, res);
+		}
+	});
+
 	// Per-session observe-log read (#201d). Returns the audit history
 	// for a single session — who watched, when, and whether they're
 	// still watching (`endedAt: null`). Gated by `assertCanObserve`:

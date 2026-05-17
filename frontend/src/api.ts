@@ -590,6 +590,20 @@ export async function getSession(id: string): Promise<SessionInfo> {
 	return res.json();
 }
 
+/** #274 — Read the captured bootstrap output (success or failure) for
+ *  a session. `log` is `null` when no bootstrap ever ran (bare-create
+ *  with no hooks). Used by the failed-row "View log" action so a user
+ *  can debug a postCreate/clone failure after the live modal closes. */
+export async function fetchBootstrapLog(id: string): Promise<string | null> {
+	const res = await apiFetch(`/sessions/${id}/bootstrap-log`);
+	if (!res.ok) {
+		const body = (await res.json().catch(() => ({}))) as { error?: string };
+		throw new Error(body.error ?? "Failed to load bootstrap log");
+	}
+	const data = (await res.json()) as { log: string | null };
+	return data.log;
+}
+
 /** Soft delete stops the container and keeps the workspace; `hard` also wipes files + row. */
 export async function deleteSession(id: string, hard = false): Promise<void> {
 	const qs = hard ? "?hard=true" : "";

@@ -533,6 +533,30 @@ export class SessionManager {
 		]);
 	}
 
+	/**
+	 * Persist the captured bootstrap output (success or failure) to D1
+	 * so a failed session's modal contents survive after the WS closes.
+	 * Surfaced via `GET /sessions/:id/bootstrap-log` (#274).
+	 *
+	 * Caller is responsible for tail-truncation — `BOOTSTRAP_LOG_MAX_BYTES`
+	 * inside `bootstrap.ts` keeps the row size bounded.
+	 */
+	async setBootstrapLog(sessionId: string, log: string): Promise<void> {
+		await d1Query("UPDATE sessions SET bootstrap_log = ? WHERE session_id = ?", [log, sessionId]);
+	}
+
+	/** Read just the bootstrap_log column. Returns null when the column
+	 *  is null (no bootstrap ever ran, or a session created before #274
+	 *  migrated). Separate from `get()` so a sidebar refresh doesn't
+	 *  pull a potentially-large 64 KiB blob on every poll. */
+	async getBootstrapLog(sessionId: string): Promise<string | null> {
+		const result = await d1Query<{ bootstrap_log: string | null }>(
+			"SELECT bootstrap_log FROM sessions WHERE session_id = ?",
+			[sessionId],
+		);
+		return result.results[0]?.bootstrap_log ?? null;
+	}
+
 	async terminate(sessionId: string): Promise<void> {
 		await this.updateStatus(sessionId, "terminated");
 	}
