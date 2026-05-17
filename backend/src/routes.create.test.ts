@@ -293,6 +293,44 @@ describe("POST /sessions — async bootstrap dispatch (PR 185b2b)", () => {
 		expect(bootstrapStubs.runAsyncBootstrap).not.toHaveBeenCalled();
 	});
 
+	// #273 regression — the POST /sessions 201 body MUST include the
+	// `cpuLimit/memLimit/usage` fields the frontend's `SessionInfo`
+	// shape now requires (added in #271 to the list response). Without
+	// them, `sessions.unshift(session)` after create lands an object
+	// with `usage: undefined`, and `renderSessionList`'s `s.usage !==
+	// null` guard passes through to `.cpuPercent` access — crashes the
+	// sidebar. All three fields are `null` on a brand-new create (no
+	// usage sample taken, caps not re-read here); the next sidebar
+	// auto-poll fills them in from the list endpoint.
+	it.each([
+		["bare", {}],
+		["postStart-only", { config: { postStartCmd: "code tunnel" } }],
+		["postCreate (bootstrapping)", { config: { postCreateCmd: "npm install" } }],
+	])("201 response includes cpuLimit/memLimit/usage (=null) — %s create path", async (_label, extra) => {
+		const { sessions, docker } = makeFakes();
+		await spinUp(sessions, docker);
+
+		const res = await fetch(`${baseUrl}/api/sessions`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ name: "test", ...extra }),
+		});
+		expect(res.status).toBe(201);
+		const body = (await res.json()) as {
+			sessionId: string;
+			cpuLimit: number | null;
+			memLimit: number | null;
+			usage: unknown;
+		};
+		// `null`, NOT `undefined`. The whole point of the regression is
+		// that the frontend's truthy-vs-strict-equal guard breaks when
+		// the field is absent; pin the present-but-null shape so a
+		// future refactor that drops the field surfaces here.
+		expect(body).toHaveProperty("cpuLimit", null);
+		expect(body).toHaveProperty("memLimit", null);
+		expect(body).toHaveProperty("usage", null);
+	});
+
 	// Unchanged from PR 185b2a round 6: sessions.create itself failing
 	// must NOT crash the rollback even though `meta` is still null.
 	it("does not crash the rollback when sessions.create itself throws (meta is null)", async () => {

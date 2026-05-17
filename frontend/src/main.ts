@@ -541,7 +541,13 @@ function renderSessionList() {
 		// sessions whose stats fetch succeeded — stopped/terminated/
 		// failed rows have no live data and a "—" placeholder would be
 		// noise on what's usually most of an inactive list.
-		if (s.status === "running" && s.usage !== null) {
+		// Truthy check (not `!== null`) so a SessionInfo with `usage`
+		// undefined — e.g. a POST /sessions response immediately after
+		// create, before the next auto-poll has refilled the list —
+		// doesn't slip past the guard. Pre-fix this crashed with
+		// "Cannot read properties of undefined (reading 'cpuPercent')"
+		// on the line below.
+		if (s.status === "running" && s.usage) {
 			const cpuCores = s.usage.cpuPercent / 100;
 			const cpuLine = document.createElement("span");
 			cpuLine.className = "session-usage";
@@ -3958,7 +3964,11 @@ function formatRowResources(s: AdminSession): string {
 	if (s.status !== "running") {
 		return `cap: ${cpuLabel} · ${memLabel}`;
 	}
-	if (s.usage === null) {
+	// Truthy check covers both null (intentional "no stats") and
+	// undefined (a SessionInfo that came back from a non-list endpoint
+	// before #271's serializeMeta defaults landed); without this the
+	// `.cpuPercent` access on the next line throws on undefined.
+	if (!s.usage) {
 		return `cap: ${cpuLabel} · ${memLabel} · usage: —`;
 	}
 	const cpuUsedCores = s.usage.cpuPercent / 100;
