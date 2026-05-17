@@ -36,6 +36,7 @@ import {
 	fetchAdminObserveLog,
 	fetchAdminSessions,
 	fetchAdminStats,
+	fetchBootstrapLog,
 	fetchMyGroups,
 	fetchMyObservableSessions,
 	fetchSessionObserveLog,
@@ -662,10 +663,11 @@ function renderSessionList() {
 				showToast("Start the session first", true);
 			} else if (s.status === "failed") {
 				// Failed sessions are unrecoverable via /start (the server
-				// 409s); clicking them used to silently no-op which left
-				// the user wondering if the click registered. Toast points
-				// them at the recovery path: recreate to retry.
-				showToast("Session failed during postCreate — recreate to retry", true);
+				// 409s). #274 lets the user inspect the captured bootstrap
+				// output (clone / postCreate stderr) so they can fix the
+				// config before recreating — pre-#274 the toast told them
+				// to recreate but offered no way to see WHY it failed.
+				void openBootstrapLogModal(s);
 			}
 		});
 
@@ -1408,6 +1410,121 @@ function teardownBootstrapTail() {
 
 function clearBootstrapError() {
 	document.getElementById("bootstrap-error-panel")?.remove();
+}
+
+/**
+ * #274 — Open a modal showing the persisted bootstrap output for a
+ * failed (or successful) session. Built programmatically rather than
+ * declared in index.html because it's a leaf utility used only when
+ * the user clicks a failed row; pulling the markup into HTML would
+ * add weight everyone else pays for. Reuses the global `.modal` /
+ * `.modal-backdrop` / `.modal-card` styles so the visual matches
+ * other modals.
+ */
+// #274 — single-modal invariant. A rapid double-click on a failed
+// row would otherwise register two `escHandler` closures on document
+// (the second open removes the stale DOM element but the prior
+// listener is still attached). Calling the prior `close()` first
+// unregisters its handler cleanly. Module-level so an in-flight
+// log fetch from the first open can still resolve into the closed
+// modal harmlessly — `pre.textContent =` on an orphaned node is a
+// no-op.
+let activeBootstrapLogClose: (() => void) | null = null;
+
+async function openBootstrapLogModal(session: SessionInfo): Promise<void> {
+	// Close any previous viewer cleanly (removes its escHandler) before
+	// stacking a new one. Falls through to a defensive DOM-remove for
+	// the case where activeBootstrapLogClose is null but a stale
+	// element somehow survived (shouldn't happen post-fix, but cheap).
+	activeBootstrapLogClose?.();
+	document.getElementById("bootstrap-log-modal")?.remove();
+
+	const modal = document.createElement("div");
+	modal.id = "bootstrap-log-modal";
+	modal.className = "modal open";
+	modal.setAttribute("aria-hidden", "false");
+
+	const backdrop = document.createElement("div");
+	backdrop.className = "modal-backdrop";
+	backdrop.setAttribute("data-close-modal", "");
+	modal.appendChild(backdrop);
+
+	const card = document.createElement("div");
+	card.className = "modal-card bootstrap-log-card";
+	card.setAttribute("role", "dialog");
+	card.setAttribute("aria-modal", "true");
+
+	const header = document.createElement("div");
+	header.className = "modal-header";
+	const h2 = document.createElement("h2");
+	h2.textContent = `Bootstrap log — ${session.name}`;
+	header.appendChild(h2);
+	const closeBtn = document.createElement("button");
+	closeBtn.className = "modal-close";
+	closeBtn.type = "button";
+	closeBtn.setAttribute("aria-label", "Close");
+	closeBtn.setAttribute("data-close-modal", "");
+	closeBtn.textContent = "×";
+	header.appendChild(closeBtn);
+	card.appendChild(header);
+
+	const hint = document.createElement("p");
+	hint.className = "modal-hint";
+	hint.textContent =
+		session.status === "failed"
+			? "Captured output from the failed bootstrap (clone / dotfiles / agentSeed / postCreate). Fix the cause and create a new session."
+			: "Captured output from the last bootstrap run.";
+	card.appendChild(hint);
+
+	const pre = document.createElement("pre");
+	pre.className = "bootstrap-error-output";
+	pre.textContent = "Loading…";
+	card.appendChild(pre);
+
+	modal.appendChild(card);
+	document.body.appendChild(modal);
+
+	// `escHandler` declared first so `close()` can unregister it on
+	// every close path (backdrop / × / Esc). Without this, the
+	// non-Esc close paths leak a listener on `document` each time
+	// the modal opens — they self-heal on the next Esc press but
+	// accumulate in between.
+	const escHandler = (e: KeyboardEvent) => {
+		if (e.key === "Escape") close();
+	};
+	const close = () => {
+		modal.remove();
+		document.removeEventListener("keydown", escHandler);
+		// Clear the module-level reference only if it still points at
+		// our close — a second-open before our close ran would have
+		// already swapped it. Avoids the second modal's `close` being
+		// silently nulled out by the first's tear-down.
+		if (activeBootstrapLogClose === close) activeBootstrapLogClose = null;
+	};
+	activeBootstrapLogClose = close;
+	// Close on backdrop / × / Esc — same affordances as the rest of
+	// the app's modals. The shared admin-modal click handler doesn't
+	// reach us (different element); wire ours explicitly.
+	modal.addEventListener("click", (e) => {
+		if ((e.target as HTMLElement).hasAttribute("data-close-modal")) close();
+	});
+	document.addEventListener("keydown", escHandler);
+
+	try {
+		const log = await fetchBootstrapLog(session.sessionId);
+		if (log === null || log === "") {
+			pre.textContent =
+				"(no captured output — session may pre-date the bootstrap-log feature, or no bootstrap ever ran)";
+		} else {
+			pre.textContent = log;
+			// Auto-scroll to the bottom so the user sees the tail —
+			// failure messages are at the END of the log, not the
+			// start.
+			pre.scrollTop = pre.scrollHeight;
+		}
+	} catch (err) {
+		pre.textContent = `Failed to load log: ${(err as Error).message}`;
+	}
 }
 
 function closeNewSessionModal() {

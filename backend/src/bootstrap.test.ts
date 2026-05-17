@@ -212,13 +212,17 @@ describe("runAsyncBootstrap", () => {
 			kill: ReturnType<typeof vi.fn>;
 			runPostCreate: ReturnType<typeof vi.fn>;
 			runPostStart: ReturnType<typeof vi.fn>;
+			setBootstrapLog: ReturnType<typeof vi.fn>;
 		};
 	} {
 		const updateStatus = vi.fn(async () => undefined);
 		const kill = vi.fn(async () => undefined);
 		const runPostCreate = vi.fn();
 		const runPostStart = vi.fn(async () => undefined);
-		const sessions = { updateStatus } as unknown as SessionManager;
+		// #274 — spy on bootstrap-log persistence so per-test assertions
+		// can read back what was written.
+		const setBootstrapLog = vi.fn(async () => undefined);
+		const sessions = { updateStatus, setBootstrapLog } as unknown as SessionManager;
 		const docker = { kill, runPostCreate, runPostStart } as unknown as DockerManager;
 		const broadcaster = new BootstrapBroadcaster();
 		const final: BootstrapMessage[] = [];
@@ -230,7 +234,7 @@ describe("runAsyncBootstrap", () => {
 			docker,
 			broadcaster,
 			final,
-			spies: { updateStatus, kill, runPostCreate, runPostStart },
+			spies: { updateStatus, kill, runPostCreate, runPostStart, setBootstrapLog },
 		};
 	}
 
@@ -659,8 +663,149 @@ describe("runAsyncBootstrap", () => {
 				exitCode: -1,
 			});
 			expect((failMsg as { error: string }).error).toMatch(/bootstrap timeout/);
+			// #274 NIT fix: the timeout message must also land in the
+			// persisted log (was bypassing `onOutput` and only going to
+			// the WS, so a "View log" modal opened after the timeout
+			// would show every other chunk but NOT the most useful
+			// line — the cap that fired).
+			expect(spies.setBootstrapLog).toHaveBeenCalledTimes(1);
+			const [_sid, log] = spies.setBootstrapLog.mock.calls[0]!;
+			expect(log).toMatch(/bootstrap timeout/);
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	// ── #274 — bootstrap-log persistence ──────────────────────────────────
+
+	it("persists captured output to bootstrap_log on success", async () => {
+		const { sessions, docker, broadcaster, spies } = makeFakes();
+		spies.runPostCreate.mockImplementation(
+			async (_id: string, _cmd: string, onOutput: (s: string) => void) => {
+				onOutput("npm install\n");
+				onOutput("added 142 packages in 3s\n");
+				return { exitCode: 0 };
+			},
+		);
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [],
+			success: true,
+			meta: { changes: 1, duration: 0, last_row_id: 0 },
+		});
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ postCreateCmd: "npm install" },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		expect(spies.setBootstrapLog).toHaveBeenCalledTimes(1);
+		const [_sid, log] = spies.setBootstrapLog.mock.calls[0]!;
+		expect(log).toContain("npm install");
+		expect(log).toContain("added 142 packages");
+	});
+
+	it("persists captured output to bootstrap_log on failure — and BEFORE failSession runs", async () => {
+		// The order matters: a fast subsequent GET /bootstrap-log
+		// against a session that just flipped to `failed` must see
+		// the populated log, not an empty string.
+		const { sessions, docker, broadcaster, spies } = makeFakes();
+		spies.runPostCreate.mockImplementation(
+			async (_id: string, _cmd: string, onOutput: (s: string) => void) => {
+				onOutput("error: missing .env file referenced by postCreate\n");
+				return { exitCode: 1 };
+			},
+		);
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ postCreateCmd: "node check-env.js" },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		expect(spies.setBootstrapLog).toHaveBeenCalledTimes(1);
+		const [_sid, log] = spies.setBootstrapLog.mock.calls[0]!;
+		expect(log).toContain("missing .env file");
+		// Failure path also flipped status — both writes are present.
+		expect(spies.updateStatus).toHaveBeenCalledWith("sess-1", "failed");
+		// Order is the load-bearing invariant: setBootstrapLog MUST
+		// land before updateStatus(failed) so a GET /bootstrap-log
+		// racing the flip sees populated content. Vitest's
+		// `invocationCallOrder` is monotonically increasing across all
+		// mocks in the test run, so a strict `<` comparison pins the
+		// relative order. A regression that reversed the awaits (or a
+		// future refactor that moved persistLog after failSession)
+		// would flip this comparison and fail the test loudly.
+		const setLogOrder = spies.setBootstrapLog.mock.invocationCallOrder[0]!;
+		const updateStatusOrder = spies.updateStatus.mock.invocationCallOrder[0]!;
+		expect(setLogOrder).toBeLessThan(updateStatusOrder);
+	});
+
+	it("survives a D1 hiccup on setBootstrapLog without crashing the runner (best-effort persistence)", async () => {
+		// Bootstrap output persistence is debug-only — if D1 fails to
+		// write the column we must NOT block the terminal broadcast.
+		// Without this guard a transient D1 error would leave the
+		// modal hung waiting for done/fail forever.
+		const { sessions, docker, broadcaster, final, spies } = makeFakes();
+		spies.setBootstrapLog.mockRejectedValue(new Error("D1 down"));
+		spies.runPostCreate.mockImplementation(
+			async (_id: string, _cmd: string, onOutput: (s: string) => void) => {
+				onOutput("ok\n");
+				return { exitCode: 0 };
+			},
+		);
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [],
+			success: true,
+			meta: { changes: 1, duration: 0, last_row_id: 0 },
+		});
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ postCreateCmd: "echo ok" },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		// Critical: terminal `done` broadcast fired despite the persist
+		// failure. The user's modal closes normally; only the post-
+		// failure debug surface (bootstrap-log endpoint) is degraded.
+		expect(final).toEqual([{ type: "done", success: true }]);
+	});
+
+	it("tail-truncates output past BOOTSTRAP_LOG_MAX_BYTES — keeps the END (failure messages live there)", async () => {
+		const { BOOTSTRAP_LOG_MAX_BYTES } = await import("./bootstrap.js");
+		const { sessions, docker, broadcaster, spies } = makeFakes();
+		// Emit one chunk of "noise" (early progress lines we expect
+		// to drop) then a chunk with the failure marker at the tail.
+		const noise = "x".repeat(BOOTSTRAP_LOG_MAX_BYTES);
+		const tail = "FATAL: this is the line the user actually needs\n";
+		spies.runPostCreate.mockImplementation(
+			async (_id: string, _cmd: string, onOutput: (s: string) => void) => {
+				onOutput(noise);
+				onOutput(tail);
+				return { exitCode: 1 };
+			},
+		);
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ postCreateCmd: "false" },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		const [_sid, log] = spies.setBootstrapLog.mock.calls[0]!;
+		// CRITICAL: the failure tail survived even though the total
+		// bytes emitted exceeded the cap. A head-trim that lost the
+		// tail would defeat the entire purpose of the feature.
+		expect(log).toContain("FATAL");
+		// The cap held — total length is at most cap + length of one
+		// final chunk (the front-trim drops whole chunks, so the
+		// stored size can briefly exceed the cap by up to one chunk's
+		// worth, but never by an order of magnitude).
+		expect((log as string).length).toBeLessThanOrEqual(BOOTSTRAP_LOG_MAX_BYTES + tail.length);
 	});
 });

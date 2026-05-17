@@ -45,6 +45,17 @@ import type { SessionManager } from "./sessionManager.js";
 const BOOTSTRAP_WALL_CLOCK_CAP_MS = 10 * 60 * 1000;
 
 /**
+ * Maximum bytes of captured bootstrap output to persist on the row
+ * (#274). A chatty postCreate (`npm install` produces ~30 KB of
+ * progress lines) shouldn't bloat the sessions table; we keep the
+ * LAST N bytes so the tail — where the failure message lives — is
+ * always present, and head-trim drops earlier noise once we go over.
+ * 64 KiB matches the typical 80×24×80 terminal scrollback the user
+ * sees in the live modal.
+ */
+export const BOOTSTRAP_LOG_MAX_BYTES = 64 * 1024;
+
+/**
  * Atomically mark `session_configs.bootstrapped_at` as set, but only
  * if it was still NULL. Returns true iff THIS caller won the race.
  *
@@ -338,7 +349,51 @@ export async function runAsyncBootstrap(
 	},
 ): Promise<void> {
 	const { sessions, docker, broadcaster } = deps;
-	const onOutput = (chunk: string) => broadcaster.broadcast(sessionId, chunk);
+	// #274 — accumulate every broadcast chunk into a bounded tail
+	// buffer so a failed session's captured output survives after the
+	// WS modal closes. Persisted to `sessions.bootstrap_log` on the
+	// terminal `done`/`fail` branch. `BOOTSTRAP_LOG_MAX_BYTES` is a
+	// soft cap; if the pipeline emits more we keep the LAST N bytes
+	// (postCreate errors are at the tail, which is the part the user
+	// actually needs to debug).
+	const logChunks: string[] = [];
+	let logBytes = 0;
+	const onOutput = (chunk: string) => {
+		broadcaster.broadcast(sessionId, chunk);
+		logChunks.push(chunk);
+		// `Buffer.byteLength(chunk, "utf-8")`, NOT `chunk.length`. The
+		// cap constant is named `BOOTSTRAP_LOG_MAX_BYTES` and the
+		// sibling BootstrapBroadcaster.broadcast measures UTF-8 bytes
+		// too — using `.length` (UTF-16 code units) would undercount
+		// CJK / emoji output by up to 4x and silently let the stored
+		// log exceed the cap. Matches the broadcaster's accounting.
+		const chunkBytes = Buffer.byteLength(chunk, "utf-8");
+		logBytes += chunkBytes;
+		// Cheap front-trim — only fires when we're over the cap, so
+		// the typical success path pays zero work. Drop whole chunks
+		// from the head until we're back under the limit; the user
+		// loses some early "Cloning into ..." noise but keeps the
+		// stage that actually failed.
+		while (logBytes > BOOTSTRAP_LOG_MAX_BYTES && logChunks.length > 1) {
+			const head = logChunks.shift();
+			if (head !== undefined) logBytes -= Buffer.byteLength(head, "utf-8");
+		}
+	};
+
+	// Persist the accumulated log on a terminal event (success or
+	// failure). Best-effort: if D1 hiccups, we log a warning and let
+	// the broadcaster's terminal message go out anyway — the WS modal
+	// shows everything regardless, and a missing log column is the
+	// pre-#274 behaviour.
+	const persistLog = async (): Promise<void> => {
+		try {
+			await sessions.setBootstrapLog(sessionId, logChunks.join(""));
+		} catch (err) {
+			logger.warn(
+				`[bootstrap] failed to persist log for session ${sessionId}: ${(err as Error).message}`,
+			);
+		}
+	};
 
 	// 10-min wall-clock cap (#191 PR 191b). The controller is aborted
 	// either by the timer or by a stage that wants to short-circuit
@@ -353,6 +408,11 @@ export async function runAsyncBootstrap(
 
 	const finishWithFail = async (msg: BootstrapMessage): Promise<void> => {
 		clearTimeout(timer);
+		// Persist BEFORE flipping status so a fast subsequent GET
+		// /sessions/:id/bootstrap-log races against a populated log,
+		// not an empty one. failSession itself does updateStatus +
+		// kill; the log column is unrelated to that flip.
+		await persistLog();
 		await failSession(sessionId, sessions, docker);
 		broadcaster.finish(sessionId, msg);
 	};
@@ -401,11 +461,14 @@ export async function runAsyncBootstrap(
 				: e.message;
 			logger.error(`[bootstrap] ${label} threw for session ${sessionId}: ${message}`);
 			// Surface the timeout reason in-stream so the user sees
-			// the cap, not just a generic fail. Goes through the
-			// broadcaster as a regular `output` chunk first; the
-			// terminal `fail` message has the exit code.
+			// the cap, not just a generic fail. Routed through
+			// `onOutput` (not `broadcaster.broadcast` directly) so the
+			// line lands in `logChunks` and survives in the persisted
+			// log — the timeout reason is the single most useful line
+			// for debugging a timed-out bootstrap, and a "View log"
+			// modal that's missing it defeats the feature's purpose.
 			if (isTimeout) {
-				broadcaster.broadcast(sessionId, `\n${message}\n`);
+				onOutput(`\n${message}\n`);
 			}
 			await finishWithFail({
 				type: "fail",
@@ -539,6 +602,12 @@ export async function runAsyncBootstrap(
 			);
 		}
 	}
+	// Persist the captured log on success too — a user who configured
+	// a postCreate and wants to see what `npm install` printed can
+	// inspect after the modal closes. Same best-effort shape as the
+	// failure branch (warn on D1 hiccup, don't gate the terminal
+	// broadcast on it).
+	await persistLog();
 	broadcaster.finish(sessionId, { type: "done", success: true });
 }
 

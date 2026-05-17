@@ -152,6 +152,7 @@ export async function migrateDb(): Promise<void> {
                         env_vars        TEXT NOT NULL DEFAULT '{}',
                         created_at      TEXT NOT NULL DEFAULT (datetime('now')),
                         last_connected_at TEXT,
+                        bootstrap_log   TEXT,
                         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                 )`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_user
@@ -460,6 +461,20 @@ export async function migrateDb(): Promise<void> {
 	// to the post-migration "off" state.
 	try {
 		await d1Query("ALTER TABLE session_configs ADD COLUMN allow_privileged_ports INTEGER");
+	} catch (err) {
+		if (!/duplicate column name|already exists/i.test((err as Error).message)) {
+			throw err;
+		}
+	}
+	// #274: `bootstrap_log` column on `sessions` — captures the last
+	// bootstrap pipeline output (success or failure) so the user can
+	// inspect what went wrong on a failed session after the WS modal
+	// closes. Truncated to a tail of `BOOTSTRAP_LOG_MAX_BYTES` so a
+	// chatty hook can't bloat the row. Lives on `sessions` (not
+	// `session_configs`) because bare-create sessions with no config
+	// row still benefit from capturing postCreate output.
+	try {
+		await d1Query("ALTER TABLE sessions ADD COLUMN bootstrap_log TEXT");
 	} catch (err) {
 		if (!/duplicate column name|already exists/i.test((err as Error).message)) {
 			throw err;
