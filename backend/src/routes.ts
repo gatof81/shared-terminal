@@ -1472,7 +1472,12 @@ export function buildRouter(
 	router.get("/sessions/:id/bootstrap-log", async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
 		try {
-			await sessions.assertOwnership(req.params.id, userId);
+			// `assertOwnedBy`, NOT `assertOwnership` — we don't use the
+			// returned meta and assertOwnership pays an unconditional
+			// D1 read on the positive path. Matches the convention the
+			// other read-only routes that discard meta use (stop / start
+			// / restore / observe-log read).
+			await sessions.assertOwnedBy(req.params.id, userId);
 			const log = await sessions.getBootstrapLog(req.params.id);
 			res.json({ log });
 		} catch (err) {

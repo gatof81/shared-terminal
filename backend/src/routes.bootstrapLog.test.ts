@@ -70,7 +70,7 @@ vi.mock("./db.js", () => dbStubs);
 import type { BootstrapBroadcaster } from "./bootstrap.js";
 import type { DockerManager } from "./dockerManager.js";
 import { buildRouter } from "./routes.js";
-import { NotFoundError, type SessionManager } from "./sessionManager.js";
+import { ForbiddenError, NotFoundError, type SessionManager } from "./sessionManager.js";
 
 let server: http.Server | null = null;
 let baseUrl = "";
@@ -85,11 +85,11 @@ afterEach(async () => {
 });
 
 async function spinUp(
-	assertOwnership: ReturnType<typeof vi.fn>,
+	assertOwnedBy: ReturnType<typeof vi.fn>,
 	getBootstrapLog: ReturnType<typeof vi.fn>,
 ) {
 	const sessions = {
-		assertOwnership,
+		assertOwnedBy,
 		getBootstrapLog,
 	} as unknown as SessionManager;
 	const docker = {
@@ -130,27 +130,27 @@ describe("GET /sessions/:id/bootstrap-log (#274)", () => {
 	});
 
 	it("returns 200 with { log: string } when a log was captured", async () => {
-		const assertOwnership = vi.fn(async () => ({}) as unknown);
+		const assertOwnedBy = vi.fn(async () => undefined);
 		const getBootstrapLog = vi.fn(async () => "Cloning into target...\nFATAL: clone failed\n");
-		await spinUp(assertOwnership, getBootstrapLog);
+		await spinUp(assertOwnedBy, getBootstrapLog);
 
 		const res = await fetch(`${baseUrl}/api/sessions/s1/bootstrap-log`);
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { log: string | null };
 		expect(body.log).toContain("FATAL");
-		// Owner-gated path: assertOwnership ran with the authed user
-		// id from the requireAuth stub. A regression that skipped this
+		// Owner-gated path: assertOwnedBy ran with the authed user id
+		// from the requireAuth stub. A regression that skipped this
 		// would be a cross-user data leak.
-		expect(assertOwnership).toHaveBeenCalledWith("s1", "u1");
+		expect(assertOwnedBy).toHaveBeenCalledWith("s1", "u1");
 	});
 
 	it("returns 200 with { log: null } when no bootstrap output is recorded", async () => {
 		// Pre-#274 sessions (column NULL) and bare-create sessions with
 		// no hooks both surface as null. Frontend renders a "no captured
 		// output" placeholder.
-		const assertOwnership = vi.fn(async () => ({}) as unknown);
+		const assertOwnedBy = vi.fn(async () => undefined);
 		const getBootstrapLog = vi.fn(async () => null);
-		await spinUp(assertOwnership, getBootstrapLog);
+		await spinUp(assertOwnedBy, getBootstrapLog);
 
 		const res = await fetch(`${baseUrl}/api/sessions/s1/bootstrap-log`);
 		expect(res.status).toBe(200);
@@ -158,22 +158,38 @@ describe("GET /sessions/:id/bootstrap-log (#274)", () => {
 		expect(body.log).toBeNull();
 	});
 
-	it("returns 404 when assertOwnership throws NotFoundError (foreign or missing session)", async () => {
-		// `assertOwnership` collapses missing + foreign-owned into 404
-		// (probe-attacker enumeration via status-code timing — same
-		// shape as templates / observeLog / the rest of the per-session
-		// reads). The bootstrap-log endpoint MUST inherit that gate.
-		const assertOwnership = vi.fn(async () => {
+	it("returns 404 when assertOwnedBy throws NotFoundError (missing session)", async () => {
+		// SessionManager distinguishes missing (NotFoundError → 404) from
+		// foreign-owned (ForbiddenError → 403); covered separately below.
+		const assertOwnedBy = vi.fn(async () => {
 			throw new NotFoundError("Session not found");
 		});
 		const getBootstrapLog = vi.fn(async () => null);
-		await spinUp(assertOwnership, getBootstrapLog);
+		await spinUp(assertOwnedBy, getBootstrapLog);
 
 		const res = await fetch(`${baseUrl}/api/sessions/missing/bootstrap-log`);
 		expect(res.status).toBe(404);
-		// CRITICAL: getBootstrapLog must NOT fire for a non-owned
-		// session id. A regression that reached the column read would
+		// CRITICAL: getBootstrapLog must NOT fire when the auth gate
+		// rejects. A regression that reached the column read would
 		// leak the foreign owner's log content via the response body.
+		expect(getBootstrapLog).not.toHaveBeenCalled();
+	});
+
+	it("returns 403 when assertOwnedBy throws ForbiddenError (foreign-owned session)", async () => {
+		// Foreign-owned (a session that exists but belongs to another
+		// user) gets 403, NOT 404 — sessions don't collapse the two the
+		// way templates does. The behaviour we MUST pin: getBootstrapLog
+		// never fires, so the foreign owner's log bytes never reach the
+		// response body regardless of how `handleSessionError` maps the
+		// error class.
+		const assertOwnedBy = vi.fn(async () => {
+			throw new ForbiddenError("Forbidden");
+		});
+		const getBootstrapLog = vi.fn(async () => null);
+		await spinUp(assertOwnedBy, getBootstrapLog);
+
+		const res = await fetch(`${baseUrl}/api/sessions/foreign/bootstrap-log`);
+		expect(res.status).toBe(403);
 		expect(getBootstrapLog).not.toHaveBeenCalled();
 	});
 });
