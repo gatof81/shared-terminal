@@ -2242,7 +2242,21 @@ function isValidTerminalDim(value: unknown): value is number {
 	);
 }
 
-function serializeMeta(m: SessionMeta) {
+function serializeMeta(m: SessionMeta): {
+	sessionId: string;
+	name: string;
+	status: SessionMeta["status"];
+	containerId: string | null;
+	containerName: string;
+	createdAt: string;
+	lastConnectedAt: string | null;
+	cols: number;
+	rows: number;
+	envVars: Record<string, string>;
+	cpuLimit: number | null;
+	memLimit: number | null;
+	usage: ReturnType<typeof serializeUsage>;
+} {
 	return {
 		sessionId: m.sessionId,
 		name: m.name,
@@ -2254,6 +2268,19 @@ function serializeMeta(m: SessionMeta) {
 		cols: m.cols,
 		rows: m.rows,
 		envVars: m.envVars,
+		// #270 / #271 added these to the /sessions list response. Every
+		// other single-session endpoint (POST /sessions, GET /:id,
+		// POST /:id/start, POST /:id/stop) returns serializeMeta
+		// directly — without these defaults the frontend's `SessionInfo`
+		// shape has `cpuLimit/memLimit/usage` missing, and
+		// `renderSessionList`'s `s.usage !== null` guard reads `undefined`
+		// (truthy on `!== null`), then `.cpuPercent` access throws on
+		// the newly-created session. Default to null here so every
+		// response is shape-consistent; the list route's `...spread`
+		// overrides with real values when it has them.
+		cpuLimit: null,
+		memLimit: null,
+		usage: null,
 	};
 }
 
