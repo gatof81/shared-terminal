@@ -741,6 +741,27 @@ export interface AdminStats {
 		responses5xxSinceBoot: number;
 	};
 	d1: { callsSinceBoot: number };
+	// #270: aggregate live CPU/RAM across running sessions + the bounds
+	// the "Edit caps" form needs to know about. `limits` carries the
+	// per-session min/max/default the backend will validate against, so
+	// the form's `min`/`max`/`step` attributes match the server cap and
+	// stay in sync with `MAX_SESSION_CPU` / `MAX_SESSION_MEM`.
+	resources: {
+		runningCount: number;
+		statsAvailable: number;
+		totalCpuPercent: number;
+		totalMemBytes: number;
+		totalCpuLimitNanos: number;
+		totalMemLimitBytes: number;
+		limits: {
+			minCpuNanos: number;
+			maxCpuNanos: number;
+			minMemBytes: number;
+			maxMemBytes: number;
+			defaultCpuNanos: number;
+			defaultMemBytes: number;
+		};
+	};
 }
 
 /** Admin-visible session row — extends `SessionInfo` with the
@@ -749,6 +770,17 @@ export interface AdminStats {
 export interface AdminSession extends SessionInfo {
 	userId: string;
 	ownerUsername: string;
+	// #270: per-row caps + live usage. cpuLimit/memLimit `null` means
+	// "no explicit cap was set — the session is running with the spawn
+	// default" (which the resources.limits block exposes for display).
+	cpuLimit: number | null;
+	memLimit: number | null;
+	usage: {
+		cpuPercent: number;
+		memBytes: number;
+		memLimitBytes: number;
+		memPercent: number;
+	} | null;
 }
 
 export async function fetchAdminStats(): Promise<AdminStats> {
@@ -784,6 +816,32 @@ export async function adminForceDelete(sessionId: string, hard: boolean): Promis
 		const body = (await res.json().catch(() => ({}))) as { error?: string };
 		throw new Error(body.error ?? `Failed to force-delete session (${res.status})`);
 	}
+}
+
+/** Live-edit CPU / RAM caps on a session via #270. Backend persists
+ *  the new values AND (when the session is running) calls
+ *  `docker update` to push them to cgroup. 409 → cgroup rejected the
+ *  memory drop because current usage exceeds the new cap; the caller
+ *  should surface a "free memory first" toast. */
+export async function adminUpdateResources(
+	sessionId: string,
+	caps: { cpuLimit?: number; memLimit?: number },
+): Promise<void> {
+	const res = await apiFetch(`/admin/sessions/${encodeURIComponent(sessionId)}/resources`, {
+		method: "PATCH",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(caps),
+	});
+	if (res.ok) return;
+	const body = (await res.json().catch(() => ({}))) as { error?: string };
+	// Throw a typed-enough error so the caller can distinguish 409
+	// (user-fixable: free memory) from a plain 500. The error message
+	// in the 409 branch comes verbatim from the backend.
+	const err = new Error(body.error ?? `Failed to update caps (${res.status})`) as Error & {
+		status?: number;
+	};
+	err.status = res.status;
+	throw err;
 }
 
 // ── Admin groups CRUD (#201e-2) ─────────────────────────────────────────────

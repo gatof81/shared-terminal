@@ -1161,6 +1161,71 @@ main:not([data-sidebar-ready]) #sidebar {
   color: #f85149;
 }
 
+/* #270 — per-row stacked layout so the inline edit form sits under
+   the header without breaking the original flex-row alignment. */
+.admin-session-row--stacked {
+  flex-direction: column;
+  align-items: stretch;
+}
+.admin-session-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  width: 100%;
+}
+.admin-session-resources {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.72rem;
+  color: #8b949e;
+}
+
+/* #270 — inline edit-caps form. Two number inputs + Save / Cancel.
+   The form is hidden by default (rendered on first click) and
+   toggles via the `hidden` attribute, NOT a `display: none` class —
+   simpler and matches the rest of this file's hidden-attribute use. */
+.admin-session-edit-caps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: end;
+  padding: 0.5rem 0;
+  margin-top: 0.4rem;
+  border-top: 1px dashed #21262d;
+}
+.admin-session-edit-caps label {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.72rem;
+  color: #8b949e;
+  gap: 0.2rem;
+}
+.admin-session-edit-caps input[type="number"] {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  color: #e6edf3;
+  font-size: 0.8rem;
+  padding: 0.25rem 0.4rem;
+  width: 7rem;
+}
+.admin-session-edit-caps button {
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.78rem;
+  color: #c9d1d9;
+  cursor: pointer;
+}
+.admin-session-edit-caps button[type="submit"]:hover {
+  border-color: #58a6ff;
+}
+.admin-session-edit-caps button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* The list scrolls inside the modal so a user with the maximum
    100 templates can reach every card on a short viewport — same
    inner-scroll shape as `.session-tab-panel.is-active` and

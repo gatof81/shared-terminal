@@ -100,8 +100,25 @@ interface AdminSpinUp {
 }
 
 async function spinUp(countByStatus: ReturnType<typeof vi.fn>, overrides: AdminSpinUp = {}) {
+	// Restore a benign default after the per-suite `mockReset()` so the
+	// `/admin/sessions` route's batched `listResourceCaps` D1 read (#270)
+	// always has SOMETHING to await — without this the call returns
+	// `undefined` and the route 500s on the `result.results` access.
+	// Tests that need specific D1 behaviour call `mockResolvedValueOnce`
+	// / `mockImplementation` AFTER spinUp to override, so this default
+	// only fires for tests that don't pin per-case behaviour.
+	dbStubs.d1Query.mockResolvedValue({
+		results: [],
+		success: true,
+		meta: { changes: 0, duration: 0, last_row_id: 0 },
+	});
 	const sessions = {
 		countByStatus,
+		// Resource-snapshot helper for `/admin/stats` (#270) calls listAll
+		// directly. Default to an empty list so tests that only care about
+		// the legacy stats shape don't have to wire it; cases that exercise
+		// the `resources` block override.
+		listAll: vi.fn(async () => []),
 		// Guard: any other SessionManager method called by this route's
 		// path that's not overridden is undefined — calling it surfaces
 		// as a 500 with a clear "is not a function" message rather than
@@ -118,6 +135,10 @@ async function spinUp(countByStatus: ReturnType<typeof vi.fn>, overrides: AdminS
 			sessionsCheckedSinceBoot: 0,
 			errorsSinceBoot: 0,
 		}),
+		// #270 — `/admin/stats` snapshot + `/admin/sessions` list both
+		// call gatherStats. Default to an empty Map so tests that don't
+		// care about live usage stay quiet; specific tests override.
+		gatherStats: vi.fn(async () => new Map()),
 		...overrides.docker,
 	} as unknown as DockerManager;
 	const broadcaster = {} as BootstrapBroadcaster;
@@ -182,6 +203,22 @@ describe("GET /api/admin/stats (#241a)", () => {
 				responses5xxSinceBoot: number;
 			};
 			d1: { callsSinceBoot: number };
+			resources: {
+				runningCount: number;
+				statsAvailable: number;
+				totalCpuPercent: number;
+				totalMemBytes: number;
+				totalCpuLimitNanos: number;
+				totalMemLimitBytes: number;
+				limits: {
+					minCpuNanos: number;
+					maxCpuNanos: number;
+					minMemBytes: number;
+					maxMemBytes: number;
+					defaultCpuNanos: number;
+					defaultMemBytes: number;
+				};
+			};
 		};
 		// `bootedAt` is derived from process.uptime() — must be a parseable
 		// ISO string. The exact value depends on test-run timing, so we
@@ -220,6 +257,17 @@ describe("GET /api/admin/stats (#241a)", () => {
 			responses5xxSinceBoot: 0,
 		});
 		expect(body.d1).toEqual({ callsSinceBoot: 0 });
+		// #270: resources block is always present. Empty list of running
+		// sessions → all totals zero, but the `limits` block still
+		// surfaces the per-session min/max/default the form needs.
+		expect(body.resources.runningCount).toBe(0);
+		expect(body.resources.statsAvailable).toBe(0);
+		expect(body.resources.totalCpuPercent).toBe(0);
+		expect(body.resources.totalMemBytes).toBe(0);
+		expect(body.resources.limits.maxCpuNanos).toBeGreaterThan(0);
+		expect(body.resources.limits.maxMemBytes).toBeGreaterThan(0);
+		expect(body.resources.limits.defaultCpuNanos).toBeGreaterThan(0);
+		expect(body.resources.limits.defaultMemBytes).toBeGreaterThan(0);
 	});
 
 	it("returns 403 when requireAdmin denies the request (non-admin user)", async () => {
@@ -561,5 +609,367 @@ describe("DELETE /api/admin/sessions/:id (#241d)", () => {
 		const body = (await res.json()) as { error: string };
 		expect(body.error).toBe("Internal server error");
 		expect(body.error).not.toContain("docker daemon");
+	});
+});
+
+// ── #270 resource snapshot + per-row caps + live edit ───────────────────────
+
+describe("GET /admin/stats resources aggregation (#270)", () => {
+	beforeEach(() => {
+		dbStubs.d1Query.mockReset();
+		__resetDispatcherStatsForTests();
+	});
+
+	function fakeRunning(sessionId: string, containerId: string | null, ownerUsername: string) {
+		return {
+			sessionId,
+			userId: "u1",
+			name: sessionId,
+			status: "running" as const,
+			containerId,
+			containerName: `st-${sessionId}`,
+			cols: 80,
+			rows: 24,
+			envVars: {},
+			createdAt: new Date("2026-05-09T02:00:00Z"),
+			lastConnectedAt: null,
+			ownerUsername,
+		};
+	}
+
+	it("sums effective caps (NULL row → spawn default) and aggregates usage across running sessions only", async () => {
+		// Three sessions: A running with explicit caps, B running with
+		// NULL caps (must contribute the spawn default), C stopped (must
+		// be excluded entirely). Stats fetch succeeds for A but fails
+		// for B — the snapshot must report 1 of 2 reported and aggregate
+		// only A's usage numbers.
+		const listAll = vi.fn(async () => [
+			fakeRunning("sA", "cA", "alice"),
+			fakeRunning("sB", "cB", "alice"),
+			{ ...fakeRunning("sC", "cC", "alice"), status: "stopped" as const },
+		]);
+		const gatherStats = vi.fn(
+			async () =>
+				new Map<
+					string,
+					{ cpuPercent: number; memBytes: number; memLimitBytes: number; memPercent: number } | null
+				>([
+					[
+						"sA",
+						{
+							cpuPercent: 50,
+							memBytes: 1024 * 1024 * 1024,
+							memLimitBytes: 4 * 1024 * 1024 * 1024,
+							memPercent: 25,
+						},
+					],
+					["sB", null],
+				]),
+		);
+		const countByStatus = vi.fn(async () => ({
+			running: 2,
+			stopped: 1,
+			terminated: 0,
+			failed: 0,
+		}));
+		await spinUp(countByStatus, {
+			sessions: { listAll } as unknown as Partial<SessionManager>,
+			docker: { gatherStats } as unknown as Partial<DockerManager>,
+		});
+		// listResourceCaps batched query — return only sA's caps; B has
+		// no session_configs row at all (typical bare-create shape).
+		// MUST be set AFTER spinUp; spinUp installs a benign empty-result
+		// default that would otherwise clobber this impl.
+		dbStubs.d1Query.mockImplementation(async (sql: string) => {
+			if (/FROM session_configs/i.test(sql)) {
+				return {
+					results: [
+						{ session_id: "sA", cpu_limit: 4_000_000_000, mem_limit: 4 * 1024 * 1024 * 1024 },
+					],
+					success: true,
+					meta: { changes: 0, duration: 0, last_row_id: 0 },
+				};
+			}
+			return {
+				results: [],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			};
+		});
+
+		const res = await fetch(`${baseUrl}/api/admin/stats`);
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as {
+			resources: {
+				runningCount: number;
+				statsAvailable: number;
+				totalCpuPercent: number;
+				totalMemBytes: number;
+				totalCpuLimitNanos: number;
+				totalMemLimitBytes: number;
+				limits: { defaultCpuNanos: number; defaultMemBytes: number };
+			};
+		};
+		// Two running sessions (sC excluded by status filter).
+		expect(body.resources.runningCount).toBe(2);
+		// Only sA reported usage; sB's stats fetch returned null.
+		expect(body.resources.statsAvailable).toBe(1);
+		expect(body.resources.totalCpuPercent).toBe(50);
+		expect(body.resources.totalMemBytes).toBe(1024 * 1024 * 1024);
+		// totalCpuLimitNanos = sA explicit (4e9) + sB spawn default.
+		// We don't know the test-env default literal, so cross-check
+		// against the limits block the response itself surfaces.
+		expect(body.resources.totalCpuLimitNanos).toBe(
+			4_000_000_000 + body.resources.limits.defaultCpuNanos,
+		);
+		expect(body.resources.totalMemLimitBytes).toBe(
+			4 * 1024 * 1024 * 1024 + body.resources.limits.defaultMemBytes,
+		);
+		// Critical: gatherStats called with the RUNNING sessions only
+		// (stopped sC excluded). A regression that passed the unfiltered
+		// list would double-bill the host and confuse the totals card.
+		expect(gatherStats).toHaveBeenCalledWith([
+			{ sessionId: "sA", containerId: "cA" },
+			{ sessionId: "sB", containerId: "cB" },
+		]);
+	});
+});
+
+describe("GET /admin/sessions per-row caps + usage (#270)", () => {
+	beforeEach(() => {
+		dbStubs.d1Query.mockReset();
+		__resetDispatcherStatsForTests();
+	});
+
+	function fakeSess(sessionId: string, status: "running" | "stopped", containerId: string | null) {
+		return {
+			sessionId,
+			userId: "u1",
+			name: sessionId,
+			status,
+			containerId,
+			containerName: `st-${sessionId}`,
+			cols: 80,
+			rows: 24,
+			envVars: {},
+			createdAt: new Date("2026-05-09T02:00:00Z"),
+			lastConnectedAt: null,
+			ownerUsername: "alice",
+		};
+	}
+
+	it("emits per-row cpuLimit/memLimit and usage (null for non-running rows)", async () => {
+		const listAll = vi.fn(async () => [
+			fakeSess("sA", "running", "cA"),
+			fakeSess("sB", "stopped", null),
+		]);
+		const gatherStats = vi.fn(
+			async () =>
+				new Map([
+					[
+						"sA",
+						{
+							cpuPercent: 12.345,
+							memBytes: 100,
+							memLimitBytes: 512 * 1024 * 1024,
+							memPercent: 0.5,
+						},
+					],
+				]),
+		);
+		await spinUp(vi.fn(), {
+			sessions: { listAll } as unknown as Partial<SessionManager>,
+			docker: { gatherStats } as unknown as Partial<DockerManager>,
+		});
+		// Per-test D1 impl AFTER spinUp — spinUp's default would clobber.
+		dbStubs.d1Query.mockImplementation(async (sql: string) => ({
+			results: /FROM session_configs/i.test(sql)
+				? [
+						{ session_id: "sA", cpu_limit: 1_000_000_000, mem_limit: 512 * 1024 * 1024 },
+						// sB has no session_configs row at all
+					]
+				: [],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+
+		const res = await fetch(`${baseUrl}/api/admin/sessions`);
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as Array<{
+			sessionId: string;
+			cpuLimit: number | null;
+			memLimit: number | null;
+			usage: { cpuPercent: number; memBytes: number; memPercent: number } | null;
+		}>;
+		const a = body.find((r) => r.sessionId === "sA");
+		const b = body.find((r) => r.sessionId === "sB");
+		expect(a?.cpuLimit).toBe(1_000_000_000);
+		expect(a?.memLimit).toBe(512 * 1024 * 1024);
+		// Rounded to 1 decimal place by serializeUsage — the cgroup
+		// samples are too noisy for finer precision to be honest.
+		expect(a?.usage?.cpuPercent).toBe(12.3);
+		expect(a?.usage?.memBytes).toBe(100);
+		// Non-running row: no caps configured, no live usage. Both null.
+		expect(b?.cpuLimit).toBeNull();
+		expect(b?.memLimit).toBeNull();
+		expect(b?.usage).toBeNull();
+		// gatherStats was called with the RUNNING subset only — sB
+		// (stopped) must not have been sampled.
+		expect(gatherStats).toHaveBeenCalledWith([{ sessionId: "sA", containerId: "cA" }]);
+	});
+});
+
+describe("PATCH /admin/sessions/:id/resources (#270)", () => {
+	beforeEach(() => {
+		dbStubs.d1Query.mockReset();
+		__resetDispatcherStatsForTests();
+	});
+
+	function meta(status: "running" | "stopped" = "running", containerId: string | null = "c1") {
+		return {
+			sessionId: "s-any",
+			userId: "u-foreign",
+			name: "s-any",
+			status,
+			containerId,
+			containerName: "st-s-any",
+			cols: 80,
+			rows: 24,
+			envVars: {},
+			createdAt: new Date(),
+			lastConnectedAt: null,
+		};
+	}
+
+	async function call(
+		body: unknown,
+	): Promise<{ status: number; json: () => Promise<unknown>; text: () => Promise<string> }> {
+		return fetch(`${baseUrl}/api/admin/sessions/s-any/resources`, {
+			method: "PATCH",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+		});
+	}
+
+	it("persists + applies live to the running container, returns 204", async () => {
+		const get = vi.fn(async () => meta());
+		const updateResources = vi.fn(async () => undefined);
+		dbStubs.d1Query.mockResolvedValue({
+			results: [],
+			success: true,
+			meta: { changes: 1, duration: 0, last_row_id: 0 },
+		});
+		await spinUp(vi.fn(), {
+			sessions: { get } as unknown as Partial<SessionManager>,
+			docker: { updateResources } as unknown as Partial<DockerManager>,
+		});
+
+		const res = await call({ cpuLimit: 1_000_000_000, memLimit: 1024 * 1024 * 1024 });
+		expect(res.status).toBe(204);
+		// Live update fires for a running container with both fields.
+		expect(updateResources).toHaveBeenCalledWith("c1", {
+			cpuLimit: 1_000_000_000,
+			memLimit: 1024 * 1024 * 1024,
+		});
+	});
+
+	it("does NOT call docker.updateResources for a stopped session (persist-only)", async () => {
+		const get = vi.fn(async () => meta("stopped", null));
+		const updateResources = vi.fn(async () => undefined);
+		dbStubs.d1Query.mockResolvedValue({
+			results: [],
+			success: true,
+			meta: { changes: 1, duration: 0, last_row_id: 0 },
+		});
+		await spinUp(vi.fn(), {
+			sessions: { get } as unknown as Partial<SessionManager>,
+			docker: { updateResources } as unknown as Partial<DockerManager>,
+		});
+
+		const res = await call({ cpuLimit: 1_000_000_000 });
+		expect(res.status).toBe(204);
+		// Critical: docker call must be skipped — a stopped session has
+		// no live cgroup to update, and the daemon would return
+		// "container not running" otherwise.
+		expect(updateResources).not.toHaveBeenCalled();
+	});
+
+	it("returns 400 with field path when validation fails (e.g. cpu below floor)", async () => {
+		await spinUp(vi.fn());
+		const res = await call({ cpuLimit: 1 });
+		expect(res.status).toBe(400);
+		const body = (await res.json()) as { error: string };
+		expect(body.error).toContain("cpuLimit");
+	});
+
+	it("returns 400 when the body has no fields (must specify at least one)", async () => {
+		await spinUp(vi.fn());
+		const res = await call({});
+		expect(res.status).toBe(400);
+		const body = (await res.json()) as { error: string };
+		expect(body.error).toMatch(/at least one/i);
+	});
+
+	it("returns 400 on unknown keys (strict schema)", async () => {
+		await spinUp(vi.fn());
+		const res = await call({ cpuLimit: 1_000_000_000, foo: "bar" });
+		expect(res.status).toBe(400);
+	});
+
+	it("returns 404 when the session does not exist", async () => {
+		const get = vi.fn(async () => null);
+		const updateResources = vi.fn(async () => undefined);
+		await spinUp(vi.fn(), {
+			sessions: { get } as unknown as Partial<SessionManager>,
+			docker: { updateResources } as unknown as Partial<DockerManager>,
+		});
+
+		const res = await call({ cpuLimit: 1_000_000_000 });
+		expect(res.status).toBe(404);
+		expect(updateResources).not.toHaveBeenCalled();
+	});
+
+	it("returns 409 when docker rejects the memory drop with 'lower than current usage'", async () => {
+		const get = vi.fn(async () => meta());
+		const updateResources = vi.fn(async () => {
+			// Docker daemon error string when memLimit < current
+			// memory.usage on cgroup-v2.
+			throw new Error(
+				"Minimum memory limit can not be less than memory reservation limit, see usage. cannot lower memory cap.",
+			);
+		});
+		dbStubs.d1Query.mockResolvedValue({
+			results: [],
+			success: true,
+			meta: { changes: 1, duration: 0, last_row_id: 0 },
+		});
+		await spinUp(vi.fn(), {
+			sessions: { get } as unknown as Partial<SessionManager>,
+			docker: { updateResources } as unknown as Partial<DockerManager>,
+		});
+
+		const res = await call({ memLimit: 256 * 1024 * 1024 });
+		expect(res.status).toBe(409);
+		const body = (await res.json()) as { error: string };
+		expect(body.error).toMatch(/free memory/i);
+	});
+
+	it("returns 403 when requireAdmin denies (no admin-only bypass for non-admins)", async () => {
+		authStubs.requireAdmin.mockImplementation((_req, res, _next) => {
+			(res as { status: (n: number) => { json: (b: unknown) => void } })
+				.status(403)
+				.json({ error: "Forbidden" });
+		});
+		const get = vi.fn(async () => meta());
+		const updateResources = vi.fn(async () => undefined);
+		await spinUp(vi.fn(), {
+			sessions: { get } as unknown as Partial<SessionManager>,
+			docker: { updateResources } as unknown as Partial<DockerManager>,
+		});
+
+		const res = await call({ cpuLimit: 1_000_000_000 });
+		expect(res.status).toBe(403);
+		expect(get).not.toHaveBeenCalled();
+		expect(updateResources).not.toHaveBeenCalled();
 	});
 });

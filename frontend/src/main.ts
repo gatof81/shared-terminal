@@ -19,6 +19,7 @@ import {
 	addAdminGroupMember,
 	adminForceDelete,
 	adminForceStop,
+	adminUpdateResources,
 	checkAuthStatus,
 	createAdminGroup,
 	createInvite,
@@ -3598,8 +3599,18 @@ function formatUptime(seconds: number): string {
 	return `${Math.round(seconds / 86_400)}d`;
 }
 
+// #270 — caching the limits block from the last `/admin/stats` so the
+// per-row "Edit caps" form has the live max/default/min to validate
+// against without a second round trip. `renderAdminStats` is always
+// called before `renderAdminSessions` inside `refreshAdmin` (the
+// Promise.allSettled fan-in below resolves stats first), so by the time
+// a row's edit button can be clicked the limits are populated. Falls
+// back to null when stats failed to load — the form disables itself.
+let adminResourceLimits: AdminStats["resources"]["limits"] | null = null;
+
 function renderAdminStats(stats: AdminStats): void {
 	adminUptimeEl.textContent = `Uptime ${formatUptime(stats.uptimeSeconds)} · booted ${new Date(stats.bootedAt).toLocaleString()}`;
+	adminResourceLimits = stats.resources.limits;
 	adminStatsEl.textContent = "";
 
 	const panel = (title: string, rows: Array<[string, string]>) => {
@@ -3656,6 +3667,61 @@ function renderAdminStats(stats: AdminStats): void {
 	]);
 
 	panel("D1", [["Calls since boot", String(stats.d1.callsSinceBoot)]]);
+
+	// #270 — host resource saturation card. Renders against running
+	// sessions only; if there are none, the row collapses to "no live
+	// sessions" so the dashboard doesn't show six zeros that look like
+	// stuck counters.
+	const r270 = stats.resources;
+	const totalCpuLimitCores = r270.totalCpuLimitNanos / 1_000_000_000;
+	const cpuUsePctOfAlloc =
+		r270.totalCpuLimitNanos > 0 ? (r270.totalCpuPercent / (totalCpuLimitCores * 100)) * 100 : 0;
+	const memUsePctOfAlloc =
+		r270.totalMemLimitBytes > 0 ? (r270.totalMemBytes / r270.totalMemLimitBytes) * 100 : 0;
+	panel("Resources (running)", [
+		[
+			"Sessions",
+			r270.runningCount === 0
+				? "0 (no live sessions)"
+				: `${r270.runningCount} (stats: ${r270.statsAvailable}/${r270.runningCount})`,
+		],
+		[
+			"CPU in use",
+			r270.runningCount === 0
+				? "—"
+				: `${formatCpuPercent(r270.totalCpuPercent)} / ${formatCpuCores(totalCpuLimitCores)} cores (${cpuUsePctOfAlloc.toFixed(0)}%)`,
+		],
+		[
+			"Memory in use",
+			r270.runningCount === 0
+				? "—"
+				: `${formatBytes(r270.totalMemBytes)} / ${formatBytes(r270.totalMemLimitBytes)} (${memUsePctOfAlloc.toFixed(0)}%)`,
+		],
+	]);
+}
+
+// #270 — formatters shared by the stats card and the per-row display.
+// `cpuPercent` is a Docker-style percentage where 100 = 1 fully busy
+// core; a 4-core saturated container reports ~400. The bare-number
+// shape would be confusing in a UI ("200%? Of what?"), so we hand
+// users "cores" as the human unit and translate at display time.
+function formatCpuPercent(pct: number): string {
+	// 1 decimal — same precision the backend rounds to (see r1() in
+	// routes.ts). Locks the two outputs to match.
+	return `${pct.toFixed(1)}%`;
+}
+
+function formatCpuCores(cores: number): string {
+	// `Number.parseFloat(toFixed(2))` drops trailing zeros: 2.00 → 2,
+	// 1.25 → 1.25. The UI is friendlier without "2.00 cores".
+	return String(Number.parseFloat(cores.toFixed(2)));
+}
+
+function formatBytes(b: number): string {
+	if (b < 1024) return `${b} B`;
+	if (b < 1024 * 1024) return `${(b / 1024).toFixed(0)} KiB`;
+	if (b < 1024 * 1024 * 1024) return `${(b / 1024 / 1024).toFixed(0)} MiB`;
+	return `${(b / 1024 / 1024 / 1024).toFixed(2)} GiB`;
 }
 
 function renderAdminSessions(sessions: AdminSession[]): void {
@@ -3668,8 +3734,15 @@ function renderAdminSessions(sessions: AdminSession[]): void {
 		return;
 	}
 	for (const s of sessions) {
+		// #270 — each row is now a wrapper that may contain the inline
+		// edit form below the header. The header keeps the original
+		// flex layout; the form appears underneath when the admin
+		// clicks "Edit caps".
 		const row = document.createElement("div");
-		row.className = "admin-session-row";
+		row.className = "admin-session-row admin-session-row--stacked";
+
+		const header = document.createElement("div");
+		header.className = "admin-session-header";
 
 		const meta = document.createElement("div");
 		meta.className = "admin-session-meta";
@@ -3680,6 +3753,17 @@ function renderAdminSessions(sessions: AdminSession[]): void {
 		sub.textContent = `${s.ownerUsername} · ${s.status} · ${new Date(s.createdAt).toLocaleString()}`;
 		meta.appendChild(name);
 		meta.appendChild(sub);
+
+		// #270 — per-row caps + live usage. Always render the caps
+		// (so admin can audit a stopped session's allocation); render
+		// usage only when running AND the stats fetch succeeded.
+		// Rendering an "—" placeholder on running-without-stats is the
+		// signal that a container is alive but its stats sample failed
+		// — different state from "stopped" (which has no usage line).
+		const resourcesLine = document.createElement("span");
+		resourcesLine.className = "admin-session-sub admin-session-resources";
+		resourcesLine.textContent = formatRowResources(s);
+		meta.appendChild(resourcesLine);
 
 		const actions = document.createElement("div");
 		actions.className = "admin-session-actions";
@@ -3697,6 +3781,14 @@ function renderAdminSessions(sessions: AdminSession[]): void {
 				showToast(`Stopped ${s.name}`);
 			}),
 		);
+
+		// #270 — Edit caps. Disabled when the limits haven't loaded
+		// (stats fetch failure) because we need them for input bounds.
+		// Toggles the inline edit form below the header.
+		const editBtn = document.createElement("button");
+		editBtn.type = "button";
+		editBtn.textContent = "Edit caps";
+		editBtn.disabled = adminResourceLimits === null;
 
 		const deleteBtn = document.createElement("button");
 		deleteBtn.type = "button";
@@ -3729,12 +3821,154 @@ function renderAdminSessions(sessions: AdminSession[]): void {
 		);
 
 		actions.appendChild(stopBtn);
+		actions.appendChild(editBtn);
 		actions.appendChild(deleteBtn);
 		actions.appendChild(hardBtn);
-		row.appendChild(meta);
-		row.appendChild(actions);
+		header.appendChild(meta);
+		header.appendChild(actions);
+		row.appendChild(header);
+
+		// Build the inline edit form lazily — only the first time the
+		// admin clicks Edit. Then toggle its visibility on subsequent
+		// clicks. This keeps the initial render cheap for a 500-row
+		// list where most rows will never have their caps edited.
+		let editForm: HTMLElement | null = null;
+		editBtn.addEventListener("click", () => {
+			if (adminResourceLimits === null) return;
+			if (editForm === null) {
+				editForm = buildEditCapsForm(s, adminResourceLimits);
+				row.appendChild(editForm);
+			} else {
+				editForm.hidden = !editForm.hidden;
+			}
+		});
+
 		adminSessionsListEl.appendChild(row);
 	}
+}
+
+/** Per-row resources line. Always shows the configured caps (or
+ *  "default" when null); appends live usage when the session is
+ *  running AND the stats fetch succeeded; renders "—" on running-
+ *  without-stats to signal "alive but sample missing" rather than
+ *  "stopped". */
+function formatRowResources(s: AdminSession): string {
+	const limits = adminResourceLimits;
+	// Effective cap shown to the user: configured value wins, else
+	// fall back to the spawn default (which we got from `limits`).
+	// Without `limits` (stats fetch failed), render "—" for the cap
+	// so the row doesn't pretend it knows the default.
+	const cpuNanos = s.cpuLimit ?? limits?.defaultCpuNanos ?? null;
+	const memBytes = s.memLimit ?? limits?.defaultMemBytes ?? null;
+	const cpuLabel =
+		cpuNanos === null
+			? "?"
+			: `${formatCpuCores(cpuNanos / 1_000_000_000)} cores${s.cpuLimit === null ? " (default)" : ""}`;
+	const memLabel =
+		memBytes === null ? "?" : `${formatBytes(memBytes)}${s.memLimit === null ? " (default)" : ""}`;
+	if (s.status !== "running") {
+		return `cap: ${cpuLabel} · ${memLabel}`;
+	}
+	if (s.usage === null) {
+		return `cap: ${cpuLabel} · ${memLabel} · usage: —`;
+	}
+	const cpuUsedCores = s.usage.cpuPercent / 100;
+	return (
+		`cap: ${cpuLabel} · ${memLabel}` +
+		` · cpu: ${formatCpuCores(cpuUsedCores)} cores (${formatCpuPercent(s.usage.cpuPercent)})` +
+		` · mem: ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`
+	);
+}
+
+/** Build the inline "Edit caps" form for one row. Two inputs (CPU
+ *  cores + memory MiB) with min/max wired from the server-supplied
+ *  limits. Save → PATCH → on 409, the cgroup-rejected branch surfaces
+ *  the backend's "free memory first" message. */
+function buildEditCapsForm(
+	s: AdminSession,
+	limits: AdminStats["resources"]["limits"],
+): HTMLElement {
+	const form = document.createElement("form");
+	form.className = "admin-session-edit-caps";
+
+	// Default the inputs to the CURRENT effective cap so a single-
+	// field edit is intuitive. If the field is null on the row (uses
+	// spawn default), prefill with that default so the admin sees
+	// what the form would submit if they just press Save.
+	const cpuCoresInitial = (s.cpuLimit ?? limits.defaultCpuNanos) / 1_000_000_000;
+	const memMibInitial = (s.memLimit ?? limits.defaultMemBytes) / (1024 * 1024);
+
+	const cpuLabel = document.createElement("label");
+	cpuLabel.textContent = "CPU (cores)";
+	const cpuInput = document.createElement("input");
+	cpuInput.type = "number";
+	cpuInput.step = "0.25";
+	cpuInput.min = String(limits.minCpuNanos / 1_000_000_000);
+	cpuInput.max = String(limits.maxCpuNanos / 1_000_000_000);
+	cpuInput.value = String(cpuCoresInitial);
+	cpuLabel.appendChild(cpuInput);
+
+	const memLabel = document.createElement("label");
+	memLabel.textContent = "Memory (MiB)";
+	const memInput = document.createElement("input");
+	memInput.type = "number";
+	memInput.step = "256";
+	memInput.min = String(limits.minMemBytes / (1024 * 1024));
+	memInput.max = String(limits.maxMemBytes / (1024 * 1024));
+	memInput.value = String(memMibInitial);
+	memLabel.appendChild(memInput);
+
+	const saveBtn = document.createElement("button");
+	saveBtn.type = "submit";
+	saveBtn.textContent = "Save";
+
+	const cancelBtn = document.createElement("button");
+	cancelBtn.type = "button";
+	cancelBtn.textContent = "Cancel";
+	cancelBtn.addEventListener("click", () => {
+		form.hidden = true;
+	});
+
+	form.appendChild(cpuLabel);
+	form.appendChild(memLabel);
+	form.appendChild(saveBtn);
+	form.appendChild(cancelBtn);
+
+	form.addEventListener("submit", async (e) => {
+		e.preventDefault();
+		const cores = Number(cpuInput.value);
+		const mib = Number(memInput.value);
+		if (!Number.isFinite(cores) || !Number.isFinite(mib)) {
+			showToast("Enter valid CPU / memory values", true);
+			return;
+		}
+		saveBtn.disabled = true;
+		cancelBtn.disabled = true;
+		try {
+			await adminUpdateResources(s.sessionId, {
+				// Send BOTH fields. The backend ignores no-op equality, so
+				// re-sending the current value of the unchanged field is
+				// cheap and matches the "Save submits everything in the
+				// form" mental model. Math.round on cores → integer
+				// nano-CPUs (zod will reject a float).
+				cpuLimit: Math.round(cores * 1_000_000_000),
+				memLimit: Math.round(mib) * 1024 * 1024,
+			});
+			showToast(`Updated caps for ${s.name}`);
+			await refreshAdmin();
+		} catch (err) {
+			// 409 from the cgroup-rejection branch surfaces a clear
+			// "free memory first" message verbatim from the backend; let
+			// the admin see it instead of "Update failed".
+			const message = (err as Error).message;
+			showToast(message, true);
+		} finally {
+			saveBtn.disabled = false;
+			cancelBtn.disabled = false;
+		}
+	});
+
+	return form;
 }
 
 /** Confirm + run an admin action. Disables the trigger button across
