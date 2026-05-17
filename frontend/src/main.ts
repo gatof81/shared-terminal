@@ -1471,8 +1471,17 @@ async function openBootstrapLogModal(session: SessionInfo): Promise<void> {
 	modal.appendChild(card);
 	document.body.appendChild(modal);
 
+	// `escHandler` declared first so `close()` can unregister it on
+	// every close path (backdrop / × / Esc). Without this, the
+	// non-Esc close paths leak a listener on `document` each time
+	// the modal opens — they self-heal on the next Esc press but
+	// accumulate in between.
+	const escHandler = (e: KeyboardEvent) => {
+		if (e.key === "Escape") close();
+	};
 	const close = () => {
 		modal.remove();
+		document.removeEventListener("keydown", escHandler);
 	};
 	// Close on backdrop / × / Esc — same affordances as the rest of
 	// the app's modals. The shared admin-modal click handler doesn't
@@ -1480,12 +1489,6 @@ async function openBootstrapLogModal(session: SessionInfo): Promise<void> {
 	modal.addEventListener("click", (e) => {
 		if ((e.target as HTMLElement).hasAttribute("data-close-modal")) close();
 	});
-	const escHandler = (e: KeyboardEvent) => {
-		if (e.key === "Escape") {
-			close();
-			document.removeEventListener("keydown", escHandler);
-		}
-	};
 	document.addEventListener("keydown", escHandler);
 
 	try {
