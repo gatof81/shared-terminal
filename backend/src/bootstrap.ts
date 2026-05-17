@@ -361,7 +361,14 @@ export async function runAsyncBootstrap(
 	const onOutput = (chunk: string) => {
 		broadcaster.broadcast(sessionId, chunk);
 		logChunks.push(chunk);
-		logBytes += chunk.length;
+		// `Buffer.byteLength(chunk, "utf-8")`, NOT `chunk.length`. The
+		// cap constant is named `BOOTSTRAP_LOG_MAX_BYTES` and the
+		// sibling BootstrapBroadcaster.broadcast measures UTF-8 bytes
+		// too — using `.length` (UTF-16 code units) would undercount
+		// CJK / emoji output by up to 4x and silently let the stored
+		// log exceed the cap. Matches the broadcaster's accounting.
+		const chunkBytes = Buffer.byteLength(chunk, "utf-8");
+		logBytes += chunkBytes;
 		// Cheap front-trim — only fires when we're over the cap, so
 		// the typical success path pays zero work. Drop whole chunks
 		// from the head until we're back under the limit; the user
@@ -369,7 +376,7 @@ export async function runAsyncBootstrap(
 		// stage that actually failed.
 		while (logBytes > BOOTSTRAP_LOG_MAX_BYTES && logChunks.length > 1) {
 			const head = logChunks.shift();
-			if (head !== undefined) logBytes -= head.length;
+			if (head !== undefined) logBytes -= Buffer.byteLength(head, "utf-8");
 		}
 	};
 
@@ -454,11 +461,14 @@ export async function runAsyncBootstrap(
 				: e.message;
 			logger.error(`[bootstrap] ${label} threw for session ${sessionId}: ${message}`);
 			// Surface the timeout reason in-stream so the user sees
-			// the cap, not just a generic fail. Goes through the
-			// broadcaster as a regular `output` chunk first; the
-			// terminal `fail` message has the exit code.
+			// the cap, not just a generic fail. Routed through
+			// `onOutput` (not `broadcaster.broadcast` directly) so the
+			// line lands in `logChunks` and survives in the persisted
+			// log — the timeout reason is the single most useful line
+			// for debugging a timed-out bootstrap, and a "View log"
+			// modal that's missing it defeats the feature's purpose.
 			if (isTimeout) {
-				broadcaster.broadcast(sessionId, `\n${message}\n`);
+				onOutput(`\n${message}\n`);
 			}
 			await finishWithFail({
 				type: "fail",

@@ -663,6 +663,14 @@ describe("runAsyncBootstrap", () => {
 				exitCode: -1,
 			});
 			expect((failMsg as { error: string }).error).toMatch(/bootstrap timeout/);
+			// #274 NIT fix: the timeout message must also land in the
+			// persisted log (was bypassing `onOutput` and only going to
+			// the WS, so a "View log" modal opened after the timeout
+			// would show every other chunk but NOT the most useful
+			// line — the cap that fired).
+			expect(spies.setBootstrapLog).toHaveBeenCalledTimes(1);
+			const [_sid, log] = spies.setBootstrapLog.mock.calls[0]!;
+			expect(log).toMatch(/bootstrap timeout/);
 		} finally {
 			vi.useRealTimers();
 		}
