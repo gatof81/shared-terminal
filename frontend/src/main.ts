@@ -536,18 +536,22 @@ function renderSessionList() {
 		name.textContent = s.name;
 		nameCol.appendChild(name);
 
-		// Live usage line. Render only for running sessions whose stats
-		// fetch succeeded — stopped/terminated/failed rows have no live
-		// data and "—" placeholder would be noise on what's usually
-		// most of an inactive list.
+		// Live usage lines (#272: stacked CPU + mem on separate rows so
+		// each metric is its own visual line). Render only for running
+		// sessions whose stats fetch succeeded — stopped/terminated/
+		// failed rows have no live data and a "—" placeholder would be
+		// noise on what's usually most of an inactive list.
 		if (s.status === "running" && s.usage !== null) {
-			const usageEl = document.createElement("span");
-			usageEl.className = "session-usage";
 			const cpuCores = s.usage.cpuPercent / 100;
-			usageEl.textContent =
-				`${formatCpuCores(cpuCores)} cores (${formatCpuPercent(s.usage.cpuPercent)})` +
-				` · ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
-			nameCol.appendChild(usageEl);
+			const cpuLine = document.createElement("span");
+			cpuLine.className = "session-usage";
+			cpuLine.textContent = `CPU ${formatCpuCores(cpuCores)} cores (${formatCpuPercent(s.usage.cpuPercent)})`;
+			nameCol.appendChild(cpuLine);
+
+			const memLine = document.createElement("span");
+			memLine.className = "session-usage";
+			memLine.textContent = `Mem ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
+			nameCol.appendChild(memLine);
 		}
 
 		item.appendChild(nameCol);
@@ -2769,9 +2773,9 @@ showTerminatedToggle.addEventListener("change", () => {
 	refreshSessions();
 });
 
-// #271 — Manual sidebar refresh. We deliberately do NOT poll the
-// session list; refresh is user-driven so usage numbers don't burn
-// Docker-stats round-trips while a tab is idle in the background.
+// #271 — Manual sidebar refresh. Also wired up to the auto-poll
+// below; both paths funnel through `refreshSessions()` so the live-
+// usage subtitle updates whether the user clicked or the timer fired.
 sidebarRefreshBtn.addEventListener("click", async () => {
 	sidebarRefreshBtn.disabled = true;
 	try {
@@ -2779,6 +2783,44 @@ sidebarRefreshBtn.addEventListener("click", async () => {
 	} finally {
 		sidebarRefreshBtn.disabled = false;
 	}
+});
+
+// #272 — Auto-poll for live usage. 5 s cadence matches the admin
+// dashboard's manual-refresh feel without becoming a battery drain.
+// We use Page Visibility API to pause the poll when the tab is
+// hidden — a background tab shouldn't fan out Docker stats calls
+// per-session every 5 s. The poll also skips while an in-flight
+// refresh is still pending so a slow Docker daemon doesn't pile up
+// overlapping requests; this also serves as a back-pressure signal
+// (if the previous refresh hasn't returned in 5 s, the next tick
+// no-ops rather than doubling the daemon load). The 2 s TTL cache
+// in containerStats.ts softens the case where the user clicks the
+// manual button right after a tick fired.
+const AUTO_POLL_INTERVAL_MS = 5_000;
+let autoPollInFlight = false;
+async function autoPollTick(): Promise<void> {
+	if (autoPollInFlight) return;
+	if (document.visibilityState !== "visible") return;
+	autoPollInFlight = true;
+	try {
+		await refreshSessions();
+	} catch {
+		// refreshSessions() already toasts on failure; swallow here so
+		// a transient error doesn't crash the timer.
+	} finally {
+		autoPollInFlight = false;
+	}
+}
+setInterval(() => {
+	void autoPollTick();
+}, AUTO_POLL_INTERVAL_MS);
+// Re-fire immediately when the tab regains focus so the user
+// doesn't have to wait up to 5 s for the first refresh after
+// switching back. Use `visibilitychange` rather than `focus`
+// because `focus` doesn't fire on programmatic tab switches in
+// some browsers.
+document.addEventListener("visibilitychange", () => {
+	if (document.visibilityState === "visible") void autoPollTick();
 });
 
 // ── Sidebar toggle ──────────────────────────────────────────────────────────
