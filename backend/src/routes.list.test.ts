@@ -231,4 +231,42 @@ describe("GET /api/sessions (#271 — per-row caps + live usage)", () => {
 		// scoping invariant.
 		expect(gatherStats).toHaveBeenCalledWith([]);
 	});
+
+	it("returns 500 with a generic body when listForUser throws (no detail leak)", async () => {
+		// Pre-#271 the body had no async work past listForUser and a
+		// missing try/catch was harmless. After #271 it has two more
+		// async legs that can throw, and the wrap MUST surface a
+		// structured 500 rather than letting Express forward the
+		// rejection (which surfaces as a closed connection / network
+		// error in the browser with no diagnostic).
+		const listForUser = vi.fn(async () => {
+			throw new Error("D1 transient: connection reset");
+		});
+		const gatherStats = vi.fn(async () => new Map());
+		await spinUp(listForUser, gatherStats);
+
+		const res = await fetch(`${baseUrl}/api/sessions`);
+		expect(res.status).toBe(500);
+		const body = (await res.json()) as { error: string };
+		expect(body.error).toBe("Internal server error");
+		// Detail does not leak — operator gets it via logger.error,
+		// browser gets the generic message.
+		expect(body.error).not.toContain("D1 transient");
+	});
+
+	it("returns 500 with a generic body when gatherStats throws", async () => {
+		// Docker socket can be unreachable transiently; the route must
+		// not 200 with half a response or close the connection.
+		const listForUser = vi.fn(async () => [fakeMeta()]);
+		const gatherStats = vi.fn(async () => {
+			throw new Error("dockerode: connect ENOENT /var/run/docker.sock");
+		});
+		await spinUp(listForUser, gatherStats);
+
+		const res = await fetch(`${baseUrl}/api/sessions`);
+		expect(res.status).toBe(500);
+		const body = (await res.json()) as { error: string };
+		expect(body.error).toBe("Internal server error");
+		expect(body.error).not.toContain("ENOENT");
+	});
 });

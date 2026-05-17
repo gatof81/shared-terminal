@@ -1405,38 +1405,52 @@ export function buildRouter(
 	router.get("/sessions", async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
 		const includeTerminated = req.query.all === "true";
-		const list = includeTerminated
-			? await sessions.listAllForUser(userId)
-			: await sessions.listForUser(userId);
-		// #271 — surface configured caps + live usage so the user can
-		// see what their own session is doing without going through the
-		// admin dashboard. Same shape the admin /admin/sessions route
-		// returns (caps + usage); usage is null for non-running rows
-		// and rows whose stats fetch failed. Parallelised so the D1
-		// caps read overlaps with the (slower) Docker stats fan-out.
-		const ids = list.map((row) => row.sessionId);
-		const running = list.filter((row) => row.status === "running");
-		const [caps, stats] = await Promise.all([
-			listResourceCaps(ids),
-			docker.gatherStats(
-				running.map((row) => ({
-					sessionId: row.sessionId,
-					containerId: row.containerId,
-				})),
-			),
-		]);
-		res.json(
-			list.map((row) => {
-				const sCaps = caps.get(row.sessionId);
-				const usage = serializeUsage(stats.get(row.sessionId));
-				return {
-					...serializeMeta(row),
-					cpuLimit: sCaps?.cpuLimit ?? null,
-					memLimit: sCaps?.memLimit ?? null,
-					usage,
-				};
-			}),
-		);
+		// Wrapped in try/catch because #271 added two new async legs
+		// (listResourceCaps + docker.gatherStats) that can throw on a
+		// transient D1 hiccup or Docker socket error. Without the
+		// wrap, Express forwards the rejection to its default handler
+		// and the browser sees a closed-connection / network error
+		// rather than a structured 500. Pre-#271 the body had no
+		// post-listForUser async work and the missing try/catch was
+		// harmless. Same shape the admin route uses.
+		try {
+			const list = includeTerminated
+				? await sessions.listAllForUser(userId)
+				: await sessions.listForUser(userId);
+			// #271 — surface configured caps + live usage so the user
+			// can see what their own session is doing without going
+			// through the admin dashboard. Same shape the admin
+			// /admin/sessions route returns (caps + usage); usage is
+			// null for non-running rows and rows whose stats fetch
+			// failed. Parallelised so the D1 caps read overlaps with
+			// the (slower) Docker stats fan-out.
+			const ids = list.map((row) => row.sessionId);
+			const running = list.filter((row) => row.status === "running");
+			const [caps, stats] = await Promise.all([
+				listResourceCaps(ids),
+				docker.gatherStats(
+					running.map((row) => ({
+						sessionId: row.sessionId,
+						containerId: row.containerId,
+					})),
+				),
+			]);
+			res.json(
+				list.map((row) => {
+					const sCaps = caps.get(row.sessionId);
+					const usage = serializeUsage(stats.get(row.sessionId));
+					return {
+						...serializeMeta(row),
+						cpuLimit: sCaps?.cpuLimit ?? null,
+						memLimit: sCaps?.memLimit ?? null,
+						usage,
+					};
+				}),
+			);
+		} catch (err) {
+			logger.error(`[routes] sessions list failed: ${(err as Error).message}`);
+			res.status(500).json({ error: "Internal server error" });
+		}
 	});
 
 	router.get("/sessions/:id", async (req: Request, res: Response) => {
