@@ -709,9 +709,7 @@ describe("runAsyncBootstrap", () => {
 	it("persists captured output to bootstrap_log on failure — and BEFORE failSession runs", async () => {
 		// The order matters: a fast subsequent GET /bootstrap-log
 		// against a session that just flipped to `failed` must see
-		// the populated log, not an empty string. We can't directly
-		// assert "before" in the test (both are awaited sequentially);
-		// instead we assert both happened and the log was non-empty.
+		// the populated log, not an empty string.
 		const { sessions, docker, broadcaster, spies } = makeFakes();
 		spies.runPostCreate.mockImplementation(
 			async (_id: string, _cmd: string, onOutput: (s: string) => void) => {
@@ -732,6 +730,17 @@ describe("runAsyncBootstrap", () => {
 		expect(log).toContain("missing .env file");
 		// Failure path also flipped status — both writes are present.
 		expect(spies.updateStatus).toHaveBeenCalledWith("sess-1", "failed");
+		// Order is the load-bearing invariant: setBootstrapLog MUST
+		// land before updateStatus(failed) so a GET /bootstrap-log
+		// racing the flip sees populated content. Vitest's
+		// `invocationCallOrder` is monotonically increasing across all
+		// mocks in the test run, so a strict `<` comparison pins the
+		// relative order. A regression that reversed the awaits (or a
+		// future refactor that moved persistLog after failSession)
+		// would flip this comparison and fail the test loudly.
+		const setLogOrder = spies.setBootstrapLog.mock.invocationCallOrder[0]!;
+		const updateStatusOrder = spies.updateStatus.mock.invocationCallOrder[0]!;
+		expect(setLogOrder).toBeLessThan(updateStatusOrder);
 	});
 
 	it("survives a D1 hiccup on setBootstrapLog without crashing the runner (best-effort persistence)", async () => {

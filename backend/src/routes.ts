@@ -1477,6 +1477,18 @@ export function buildRouter(
 			// D1 read on the positive path. Matches the convention the
 			// other read-only routes that discard meta use (stop / start
 			// / restore / observe-log read).
+			//
+			// Hard-delete race: if the row is deleted between
+			// `assertOwnedBy` (which can short-circuit via the
+			// ownership cache) and `getBootstrapLog`, the second call
+			// returns null and the route responds 200 { log: null } —
+			// indistinguishable from the legitimate "no bootstrap ever
+			// ran" state. This is intentional. The auth gate already
+			// passed and there is no log content to leak; collapsing
+			// the race into the no-op response is simpler than wiring
+			// `getBootstrapLog` to distinguish missing-row from
+			// present-but-null-column purely for this route's 404
+			// shape.
 			await sessions.assertOwnedBy(req.params.id, userId);
 			const log = await sessions.getBootstrapLog(req.params.id);
 			res.json({ log });

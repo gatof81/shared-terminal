@@ -1421,9 +1421,22 @@ function clearBootstrapError() {
  * `.modal-backdrop` / `.modal-card` styles so the visual matches
  * other modals.
  */
+// #274 — single-modal invariant. A rapid double-click on a failed
+// row would otherwise register two `escHandler` closures on document
+// (the second open removes the stale DOM element but the prior
+// listener is still attached). Calling the prior `close()` first
+// unregisters its handler cleanly. Module-level so an in-flight
+// log fetch from the first open can still resolve into the closed
+// modal harmlessly — `pre.textContent =` on an orphaned node is a
+// no-op.
+let activeBootstrapLogClose: (() => void) | null = null;
+
 async function openBootstrapLogModal(session: SessionInfo): Promise<void> {
-	// Remove a stale viewer first so a rapid second click doesn't
-	// stack modals on top of each other.
+	// Close any previous viewer cleanly (removes its escHandler) before
+	// stacking a new one. Falls through to a defensive DOM-remove for
+	// the case where activeBootstrapLogClose is null but a stale
+	// element somehow survived (shouldn't happen post-fix, but cheap).
+	activeBootstrapLogClose?.();
 	document.getElementById("bootstrap-log-modal")?.remove();
 
 	const modal = document.createElement("div");
@@ -1482,7 +1495,13 @@ async function openBootstrapLogModal(session: SessionInfo): Promise<void> {
 	const close = () => {
 		modal.remove();
 		document.removeEventListener("keydown", escHandler);
+		// Clear the module-level reference only if it still points at
+		// our close — a second-open before our close ran would have
+		// already swapped it. Avoids the second modal's `close` being
+		// silently nulled out by the first's tear-down.
+		if (activeBootstrapLogClose === close) activeBootstrapLogClose = null;
 	};
+	activeBootstrapLogClose = close;
 	// Close on backdrop / × / Esc — same affordances as the rest of
 	// the app's modals. The shared admin-modal click handler doesn't
 	// reach us (different element); wire ours explicitly.
