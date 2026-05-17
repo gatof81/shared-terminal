@@ -2801,6 +2801,12 @@ let autoPollInFlight = false;
 async function autoPollTick(): Promise<void> {
 	if (autoPollInFlight) return;
 	if (document.visibilityState !== "visible") return;
+	// Guard on auth — without this the poll keeps firing on the login
+	// screen and after logout/session-expiry, each tick toasting a red
+	// "Failed to list sessions" error (apiFetch returns 401, listSessions
+	// throws, refreshSessions toasts). Matches the pre-existing 15 s
+	// timer's gate that this poller replaces.
+	if (!isLoggedIn()) return;
 	autoPollInFlight = true;
 	try {
 		await refreshSessions();
@@ -2818,7 +2824,8 @@ setInterval(() => {
 // doesn't have to wait up to 5 s for the first refresh after
 // switching back. Use `visibilitychange` rather than `focus`
 // because `focus` doesn't fire on programmatic tab switches in
-// some browsers.
+// some browsers. `autoPollTick` itself re-checks the auth + in-
+// flight guards.
 document.addEventListener("visibilitychange", () => {
 	if (document.visibilityState === "visible") void autoPollTick();
 });
@@ -4695,11 +4702,8 @@ observeModal.addEventListener("click", (e) => {
 	if (target.hasAttribute("data-close-modal")) closeObserveModal();
 });
 
-// ── Auto-refresh ────────────────────────────────────────────────────────────
-
-setInterval(() => {
-	if (isLoggedIn()) refreshSessions();
-}, 15_000);
+// (Auto-refresh moved to `autoPollTick` higher in this file — the 5 s
+//  cadence subsumes the older 15 s timer that used to live here.)
 
 // ── Init ────────────────────────────────────────────────────────────────────
 
