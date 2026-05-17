@@ -2809,10 +2809,12 @@ async function autoPollTick(): Promise<void> {
 	if (!isLoggedIn()) return;
 	autoPollInFlight = true;
 	try {
+		// `refreshSessions` owns its own error path (catch → toast),
+		// so we don't need a catch here today. The try/finally exists
+		// solely to reset the in-flight latch; a future refactor that
+		// makes refreshSessions re-throw would surface as an
+		// unhandledRejection rather than being silently swallowed.
 		await refreshSessions();
-	} catch {
-		// refreshSessions() already toasts on failure; swallow here so
-		// a transient error doesn't crash the timer.
 	} finally {
 		autoPollInFlight = false;
 	}
