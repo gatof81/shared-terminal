@@ -233,6 +233,53 @@ describe("getContainerStats", () => {
 		expect(stats).toHaveBeenCalledTimes(2);
 	});
 
+	it("does not crash on a late rejection from a timed-out fetch", async () => {
+		// Simulate a daemon that wedges past the 3 s per-call timeout
+		// then eventually rejects (e.g. socket closed by daemon after
+		// we already returned null). Without the no-op .catch() on the
+		// abandoned promise, Node treats this as an unhandledRejection
+		// and — on default `--unhandled-rejections=throw` — kills the
+		// backend. The fix attaches `.catch(() => {})` before returning;
+		// this test pins that behaviour by ensuring NO unhandled
+		// rejection event fires before the test completes.
+		const seen: unknown[] = [];
+		const onRejection = (reason: unknown) => seen.push(reason);
+		process.on("unhandledRejection", onRejection);
+		try {
+			let rejectStats!: (err: Error) => void;
+			const stats = vi.fn(
+				() =>
+					new Promise((_resolve, reject) => {
+						rejectStats = reject;
+					}),
+			);
+			const docker = {
+				getContainer: vi.fn(() => ({ stats })),
+			} as unknown as Dockerode;
+			// Run the fetch with a tight injected timeout so the test
+			// completes in milliseconds instead of waiting on the real
+			// 3 s. We use vi's fake timers to advance past
+			// PER_CALL_TIMEOUT_MS without sleeping.
+			vi.useFakeTimers();
+			const fetchPromise = getContainerStats(docker, "c1");
+			await vi.advanceTimersByTimeAsync(3_500);
+			const result = await fetchPromise;
+			expect(result).toBeNull();
+			// NOW reject the floating promise — this is the moment a
+			// regression (no .catch attached) would surface as an
+			// unhandledRejection. The handler attached above would
+			// capture it; we assert it stayed empty.
+			rejectStats(new Error("daemon socket closed after timeout"));
+			// Let microtasks run so any rejection has a chance to fire.
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(seen).toEqual([]);
+		} finally {
+			vi.useRealTimers();
+			process.off("unhandledRejection", onRejection);
+		}
+	});
+
 	it("does NOT cache null results — a failed fetch is retried on the next call", async () => {
 		const stats = vi
 			.fn()

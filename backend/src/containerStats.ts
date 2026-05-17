@@ -106,32 +106,37 @@ export async function getContainerStats(
 	}
 
 	let timer: NodeJS.Timeout | undefined;
-	const ac = new AbortController();
 	const timeoutPromise = new Promise<null>((resolve) => {
-		timer = setTimeout(() => {
-			ac.abort();
-			resolve(null);
-		}, PER_CALL_TIMEOUT_MS);
+		timer = setTimeout(() => resolve(null), PER_CALL_TIMEOUT_MS);
 	});
 
 	try {
 		// dockerode's `stats({ stream: false })` returns a single object
-		// (NOT a stream). The `abortSignal` second arg is supported but
-		// not in older type defs — pass via `as` to keep tsc happy
-		// across versions. If the timeout fires before dockerode resolves,
-		// `Promise.race` returns null and we never read `statsPromise`.
+		// (NOT a stream). We don't pass an AbortSignal because dockerode
+		// 4.x doesn't consume one on this call — passing it via `as`
+		// would be type-safety theatre. Instead the timeoutPromise above
+		// is the only abort path, and we attach a no-op `.catch()` to
+		// the floating statsPromise below so a late daemon rejection
+		// (socket closed after our timeout fired) does NOT surface as
+		// an unhandledRejection and crash the backend.
 		const statsPromise = (
 			docker.getContainer(containerId).stats as unknown as (opts: {
 				stream: false;
-				abortSignal?: AbortSignal;
 			}) => Promise<RawDockerStats>
-		)({ stream: false, abortSignal: ac.signal });
+		)({ stream: false });
 
 		const raw = await Promise.race([statsPromise, timeoutPromise]);
 		if (raw === null) {
-			// Timeout branch — `statsPromise` is now rejected/abandoned;
-			// it would have logged its own warning when the next event
-			// loop tick handled the abort, but we own the surface here.
+			// Timeout branch — `statsPromise` is still in-flight. Without
+			// this catch, Node.js 15+ treats an eventual rejection (e.g.
+			// daemon closes the socket past the 3 s window) as an
+			// unhandledRejection and — depending on `process.on
+			// ('unhandledRejection')` config — crashes the backend.
+			// Every admin refresh on a slow daemon would be a crash
+			// vector. No-op handler is sufficient: the late value /
+			// rejection is no longer interesting; the cache will fetch
+			// fresh on the next call.
+			statsPromise.catch(() => {});
 			logger.warn(
 				`[containerStats] timed out after ${PER_CALL_TIMEOUT_MS}ms for container ${containerId}`,
 			);

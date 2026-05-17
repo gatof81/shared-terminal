@@ -2286,10 +2286,18 @@ async function collectResourceSnapshot(
 ): Promise<ResourceSnapshot> {
 	const all = await sessions.listAll();
 	const running = all.filter((s) => s.status === "running");
-	const caps = await listResourceCaps(running.map((s) => s.sessionId));
-	const stats = await docker.gatherStats(
-		running.map((s) => ({ sessionId: s.sessionId, containerId: s.containerId })),
-	);
+	// `caps` (D1 read) and `stats` (Docker socket call) are both
+	// derived from `running` but independent of each other — fire
+	// them in parallel. The stats leg is the dominant cost on hosts
+	// with many running sessions (each container's 3 s timeout inside
+	// gatherStats sums up); overlapping the cap read shaves the D1
+	// hop off the wall-clock for the dashboard's stats panel.
+	const [caps, stats] = await Promise.all([
+		listResourceCaps(running.map((s) => s.sessionId)),
+		docker.gatherStats(
+			running.map((s) => ({ sessionId: s.sessionId, containerId: s.containerId })),
+		),
+	]);
 	let totalCpuPercent = 0;
 	let totalMemBytes = 0;
 	let totalCpuLimitNanos = 0;
