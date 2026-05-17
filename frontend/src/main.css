@@ -486,6 +486,26 @@ main:not([data-sidebar-ready]) #sidebar {
   letter-spacing: 0.05em;
   color: #8b949e;
 }
+/* #271 — Manual refresh: re-pulls the session list (and live usage
+   per row). Deliberately no auto-poll, so the user controls when
+   Docker stats round-trips fire. */
+#sidebar-refresh-btn {
+  background: transparent;
+  border: none;
+  color: #8b949e;
+  font-size: 0.95rem;
+  cursor: pointer;
+  padding: 0 0.3rem;
+  margin-left: auto;
+  line-height: 1;
+}
+#sidebar-refresh-btn:hover {
+  color: #58a6ff;
+}
+#sidebar-refresh-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 #show-terminated-label {
   display: flex;
   align-items: center;
@@ -1444,12 +1464,33 @@ main:not([data-sidebar-ready]) #sidebar {
   background: #db6d28;
   box-shadow: 0 0 0 1px rgba(248, 81, 73, 0.45);
 }
-.session-name {
+.session-name-col {
+  /* #271 — vertical container that holds the session name + optional
+     live-usage subtitle. `min-width: 0` so the inner `text-overflow:
+     ellipsis` on the name actually triggers (flex children default
+     to `min-width: auto` which lets text overflow the row). */
+  display: flex;
+  flex-direction: column;
   flex: 1;
+  min-width: 0;
+  gap: 0.1rem;
+}
+.session-name {
   font-size: 0.82rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* #271 — live CPU + memory usage rendered under the session name in
+   the sidebar. Monospace so column-aligned numbers don't jitter as
+   they update; muted colour so the name stays the primary read. */
+.session-usage {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.66rem;
+  color: #8b949e;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .session-actions {
   display: flex;
