@@ -90,6 +90,10 @@ beforeEach(() => {
 	agentSeedStubs.runAgentSeed.mockImplementation(async () => ({ exitCode: 0 }));
 	writeEnvFileStubs.runWriteEnvFile.mockReset();
 	writeEnvFileStubs.runWriteEnvFile.mockImplementation(async () => ({ exitCode: 0 }));
+	// `decryptStoredEntries` is shared across tests asserting the
+	// decrypt-gating invariant; clear its call log so each test sees
+	// only its own invocations.
+	sessionConfigStubs.decryptStoredEntries.mockClear();
 });
 
 describe("markBootstrapped", () => {
@@ -637,6 +641,67 @@ describe("runAsyncBootstrap", () => {
 		};
 		expect(args.enabled).toBeUndefined();
 		expect(args.envVars).toBeUndefined();
+	});
+
+	// #277 — PR #278 review SHOULD-FIX regression guard. When the toggle
+	// is off, the runner must NOT call `decryptStoredEntries` even
+	// when secret envVars exist on the row. Without the gate, plaintext
+	// would live on the heap for the lifetime of the bootstrap pass
+	// (then get discarded by writeEnvFile's own early-return), which
+	// defeats the "plaintext in scope only at the single boundary"
+	// invariant the PR was written to uphold.
+	it("does NOT decrypt envVars when writeEnvFile toggle is off", async () => {
+		const { sessions, docker, broadcaster } = makeFakes();
+		sessionConfigStubs.getSessionConfig.mockResolvedValueOnce({
+			sessionId: "sess-1",
+			// Toggle omitted — secret entries should NOT be decrypted.
+			envVars: [
+				{ type: "plain", name: "PLAIN", value: "p" },
+				// Shape doesn't matter; the test asserts the mock is
+				// never called, so the ciphertext fields are never read.
+				{ type: "secret", name: "API_KEY", ciphertext: "c", iv: "i", tag: "t" },
+			],
+			bootstrappedAt: null,
+		} as never);
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ hasBootstrapConfig: true },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		expect(sessionConfigStubs.decryptStoredEntries).not.toHaveBeenCalled();
+		// writeEnvFile is still invoked (the per-stage no-op decision
+		// lives inside it), but with envVars=undefined.
+		expect(writeEnvFileStubs.runWriteEnvFile).toHaveBeenCalledTimes(1);
+		const args = writeEnvFileStubs.runWriteEnvFile.mock.calls[0]![0] as {
+			envVars: Record<string, string> | undefined;
+		};
+		expect(args.envVars).toBeUndefined();
+	});
+
+	// #277 — counterpart to the gating test: when the toggle IS on,
+	// decryptStoredEntries MUST run exactly once so the rendered file
+	// has the right plaintext. Pins both halves of the gate so a future
+	// edit that flips the condition's polarity trips one of them.
+	it("decrypts envVars exactly once when writeEnvFile toggle is on", async () => {
+		const { sessions, docker, broadcaster } = makeFakes();
+		sessionConfigStubs.getSessionConfig.mockResolvedValueOnce({
+			sessionId: "sess-1",
+			writeEnvFile: true,
+			envVars: [{ type: "plain", name: "FOO", value: "bar" }],
+			bootstrappedAt: null,
+		} as never);
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ hasBootstrapConfig: true },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		expect(sessionConfigStubs.decryptStoredEntries).toHaveBeenCalledTimes(1);
 	});
 
 	// #277 — failure-shape parity with the other stages: a non-zero exit

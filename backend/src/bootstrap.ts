@@ -569,15 +569,25 @@ export async function runAsyncBootstrap(
 		// mismatch in `decryptSecret` throws → runStage's catch turns it
 		// into a `fail` broadcast with stage="writeEnvFile", matching how
 		// every other config-driven stage surfaces decrypt failures.
+		//
+		// PR #278 review SHOULD-FIX: gate the decrypt on the toggle.
+		// Without this guard `decryptStoredEntries` runs for every
+		// session that has any `secret`-typed entry, even when the
+		// feature is off — leaving a plaintext `Record<string,string>`
+		// on the heap that `runWriteEnvFile` immediately discards. The
+		// "plaintext in scope only at the single boundary" invariant
+		// only holds if the decrypt itself is gated on the toggle, not
+		// just the consumer.
+		const decryptedEnvVars =
+			config?.writeEnvFile === true && config.envVars && config.envVars.length > 0
+				? decryptStoredEntries(config.envVars)
+				: undefined;
 		if (
 			!(await runStage("writeEnvFile", () =>
 				runWriteEnvFile({
 					sessionId,
 					enabled: config?.writeEnvFile,
-					envVars:
-						config?.envVars && config.envVars.length > 0
-							? decryptStoredEntries(config.envVars)
-							: undefined,
+					envVars: decryptedEnvVars,
 					docker,
 					onOutput,
 					signal,
