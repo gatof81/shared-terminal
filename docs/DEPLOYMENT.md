@@ -128,19 +128,21 @@ Follow Cloudflare's installer for your distro: https://developers.cloudflare.com
 ```bash
 cloudflared tunnel login                       # opens a browser, authorizes your zone
 cloudflared tunnel create shared-terminal      # prints the tunnel UUID — note it
-sudo cloudflared service install               # installs the systemd unit + creds file
 ```
+
+`sudo cloudflared service install` comes in Step 3 below, AFTER the config file exists. Installing the systemd unit before the config is in place gives you a service that has nothing to serve, exits immediately on first start, and looks like a crash loop in `journalctl` while you wonder why.
 
 #### 2. DNS records
 
-Add two records under your zone in the Cloudflare dashboard, both proxied (orange cloud):
+Add three records under your zone in the Cloudflare dashboard:
 
-| Type    | Name                          | Target                              | Notes                              |
-| ------- | ----------------------------- | ----------------------------------- | ---------------------------------- |
-| `CNAME` | `api.terminal`                | `<tunnel-uuid>.cfargotunnel.com`    | Backend API + WebSocket            |
-| `CNAME` | `*.terminal`                  | `<tunnel-uuid>.cfargotunnel.com`    | Wildcard for the port dispatcher   |
+| Type    | Name             | Target                              | Proxy  | Notes                              |
+| ------- | ---------------- | ----------------------------------- | ------ | ---------------------------------- |
+| `CNAME` | `api.terminal`   | `<tunnel-uuid>.cfargotunnel.com`    | Proxied | Backend API + WebSocket            |
+| `CNAME` | `app.terminal`   | `<your-project>.pages.dev`          | Proxied | Pages-hosted frontend (separate from the tunnel — must resolve directly to Pages, otherwise the wildcard below catches it) |
+| `CNAME` | `*.terminal`     | `<tunnel-uuid>.cfargotunnel.com`    | Proxied | Wildcard for the port dispatcher   |
 
-The explicit `api.terminal` record always wins over the wildcard, so the wildcard catches only the per-session `p<port>-<sessionId>.terminal.example.com` hosts, not your API.
+Cloudflare DNS resolves exact records before the wildcard, so the explicit `api.terminal` and `app.terminal` rows always win — the wildcard catches only the per-session `p<port>-<sessionId>.terminal.example.com` hosts. Skip the `app.terminal` row and the wildcard silently swallows your frontend hostname, routing it through the tunnel into the backend's 404 / auth surface instead of serving the SPA.
 
 If the wildcard slot is already taken by your registrar's parking record (e.g. Porkbun's `pixie.porkbun.com` placeholder), edit that record rather than trying to add a second — Cloudflare disallows two records with the same name+type. Parking records are virtually always safe to replace.
 
@@ -168,7 +170,7 @@ ingress:
   - service: http_status:404
 ```
 
-Validate before reloading. The `ingress rule` form is a dry-run router — useful for sanity-checking that a representative dispatcher host actually matches the wildcard:
+Validate the config before installing the service. The `ingress rule` form is a dry-run router — useful for sanity-checking that a representative dispatcher host actually matches the wildcard:
 
 ```bash
 cloudflared tunnel --config /etc/cloudflared/config.yml ingress validate
@@ -176,7 +178,14 @@ cloudflared tunnel --config /etc/cloudflared/config.yml ingress rule https://api
 cloudflared tunnel --config /etc/cloudflared/config.yml ingress rule https://p3000-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.terminal.example.com
 ```
 
-Reload with `sudo systemctl restart cloudflared`. The package-installed unit has no `ExecReload`, so `systemctl reload` / `SIGHUP` just terminates the process — relying on systemd's `Restart=` to bring it back is messier than a clean `restart`.
+Once the config validates, install the systemd unit and start it:
+
+```bash
+sudo cloudflared service install               # copies the current config into /etc/cloudflared/ and registers the systemd unit
+sudo systemctl status cloudflared              # should be active (running)
+```
+
+After any later config edit, reload with `sudo systemctl restart cloudflared`. The package-installed unit has no `ExecReload`, so `systemctl reload` / `SIGHUP` just terminates the process — relying on systemd's `Restart=` to bring it back is messier than a clean `restart`.
 
 #### 4. Backend `.env`
 
