@@ -181,7 +181,7 @@ cloudflared tunnel --config /etc/cloudflared/config.yml ingress rule https://p30
 Once the config validates, install the systemd unit and start it:
 
 ```bash
-sudo cloudflared service install               # copies the current config into /etc/cloudflared/ and registers the systemd unit
+sudo cloudflared service install               # registers the systemd unit (config is already at /etc/cloudflared/config.yml)
 sudo systemctl status cloudflared              # should be active (running)
 ```
 
