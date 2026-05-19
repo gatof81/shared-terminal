@@ -39,6 +39,18 @@ services:
       # Cloudflare Tunnel — otherwise the per-IP /auth rate limiter
       # collapses every request into the tunnel's shared IP bucket.
       - TRUST_PROXY=${TRUST_PROXY:-0}
+      # Per-session port dispatcher (#190). Pair: setting one
+      # without the other is a foot-gun the backend warns on at
+      # boot — `PORT_PROXY_BASE_DOMAIN` enables the dispatcher
+      # subdomain routing, `COOKIE_DOMAIN` widens the JWT cookie
+      # scope so the browser actually sends it to the per-session
+      # `p<port>-<sid>.<base>` URLs. With `COOKIE_DOMAIN` unset
+      # the cookie stays host-only and `public: false` ports
+      # 401 the authenticated owner. Both default to empty so a
+      # local dev `docker compose up` without `.env` entries
+      # keeps booting (dispatcher self-disables, logged once).
+      - PORT_PROXY_BASE_DOMAIN=${PORT_PROXY_BASE_DOMAIN:-}
+      - COOKIE_DOMAIN=${COOKIE_DOMAIN:-}
       - SESSION_IMAGE=${SESSION_IMAGE:-shared-terminal-session}
       - WORKSPACE_ROOT=/var/shared-terminal/workspaces
       - CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID}
