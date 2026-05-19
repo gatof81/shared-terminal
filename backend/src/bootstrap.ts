@@ -563,31 +563,34 @@ export async function runAsyncBootstrap(
 			))
 		)
 			return;
-		// #277 — `.env` materialisation. Decrypt at this single boundary
-		// (in-memory only; bytes hand off straight to streamExec's env
-		// block and are unset by the bash script after the write). Tag-
-		// mismatch in `decryptSecret` throws → runStage's catch turns it
-		// into a `fail` broadcast with stage="writeEnvFile", matching how
-		// every other config-driven stage surfaces decrypt failures.
+		// #277 — `.env` materialisation. Two invariants ride together
+		// on the shape below:
 		//
-		// PR #278 review SHOULD-FIX: gate the decrypt on the toggle.
-		// Without this guard `decryptStoredEntries` runs for every
-		// session that has any `secret`-typed entry, even when the
-		// feature is off — leaving a plaintext `Record<string,string>`
-		// on the heap that `runWriteEnvFile` immediately discards. The
-		// "plaintext in scope only at the single boundary" invariant
-		// only holds if the decrypt itself is gated on the toggle, not
-		// just the consumer.
-		const decryptedEnvVars =
-			config?.writeEnvFile === true && config.envVars && config.envVars.length > 0
-				? decryptStoredEntries(config.envVars)
-				: undefined;
+		//   1. Decrypt is gated on `writeEnvFile === true` so a session
+		//      with secret envVars but the toggle off does NOT
+		//      materialise plaintext on the heap (PR #278 round 1).
+		//
+		//   2. The decrypt call lives INSIDE `runStage`'s lambda, not
+		//      hoisted into a const above it. `decryptSecret` throws
+		//      on AES-GCM tag mismatch (tampered ciphertext, wrong
+		//      key after rotation, D1 corruption); the throw must be
+		//      caught by `runStage`'s try/catch so it lands as a
+		//      `fail` broadcast with stage="writeEnvFile" AND
+		//      `failSession` flips status to `failed` + kills the
+		//      container. A throw outside the lambda escapes to the
+		//      outer `.catch()` in routes.ts which only broadcasts
+		//      `fail` and leaves the row at status=running with the
+		//      container alive — a zombie the user sees as stuck
+		//      (PR #278 round 2).
 		if (
 			!(await runStage("writeEnvFile", () =>
 				runWriteEnvFile({
 					sessionId,
 					enabled: config?.writeEnvFile,
-					envVars: decryptedEnvVars,
+					envVars:
+						config?.writeEnvFile === true && config.envVars && config.envVars.length > 0
+							? decryptStoredEntries(config.envVars)
+							: undefined,
 					docker,
 					onOutput,
 					signal,

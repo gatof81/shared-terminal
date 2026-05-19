@@ -704,6 +704,45 @@ describe("runAsyncBootstrap", () => {
 		expect(sessionConfigStubs.decryptStoredEntries).toHaveBeenCalledTimes(1);
 	});
 
+	// #277 — PR #278 round 2 SHOULD-FIX regression guard. The decrypt
+	// call MUST live inside runStage's lambda so an AES-GCM
+	// tag-mismatch throw lands in runStage's try/catch and triggers
+	// `failSession` (status flip + container kill). If the decrypt
+	// is hoisted out to a `const` above the runStage call, the throw
+	// escapes runAsyncBootstrap entirely; the outer .catch() in
+	// routes.ts only broadcasts `fail` and leaves the row at
+	// status=running with the container alive — a zombie session.
+	it("decrypt throw inside writeEnvFile stage triggers failSession (no zombie)", async () => {
+		const { sessions, docker, broadcaster, final, spies } = makeFakes();
+		sessionConfigStubs.getSessionConfig.mockResolvedValueOnce({
+			sessionId: "sess-1",
+			writeEnvFile: true,
+			envVars: [{ type: "secret", name: "API_KEY", ciphertext: "c", iv: "i", tag: "t" }],
+			bootstrappedAt: null,
+		} as never);
+		sessionConfigStubs.decryptStoredEntries.mockImplementationOnce(() => {
+			throw new Error("decryptSecret: tag mismatch (key rotation?)");
+		});
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ postCreateCmd: "npm install", hasBootstrapConfig: true },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		// Status flipped to failed + container killed — these are the
+		// `failSession` calls; without them, the session is a zombie.
+		expect(spies.updateStatus).toHaveBeenCalledWith("sess-1", "failed");
+		expect(spies.kill).toHaveBeenCalledWith("sess-1");
+		// postCreate never runs because the pipeline short-circuits.
+		expect(spies.runPostCreate).not.toHaveBeenCalled();
+		// `fail` broadcast carries the stage label so the UI renders
+		// the right "Bootstrap stage 'writeEnvFile' failed" message,
+		// not a generic "bootstrap" fallback.
+		expect(final).toEqual([expect.objectContaining({ type: "fail", stage: "writeEnvFile" })]);
+	});
+
 	// #277 — failure-shape parity with the other stages: a non-zero exit
 	// from writeEnvFile flips status, kills the container, broadcasts
 	// `fail` with `stage: "writeEnvFile"`, and skips postCreate. Mirrors
