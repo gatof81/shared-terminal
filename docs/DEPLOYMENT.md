@@ -119,23 +119,102 @@ The frontend is a static Vite build. Deploy `frontend/dist` to Cloudflare Pages 
 
 ### With Cloudflare Tunnel
 
-To expose the backend from your home server without opening ports:
+To expose the backend from your home server without opening ports. The example below uses `terminal.example.com` as the **shared parent domain**, with the API at `api.terminal.example.com`, the Pages-hosted frontend at `app.terminal.example.com`, and the per-session port dispatcher (#190) on `*.terminal.example.com`. Substitute your own domain throughout.
+
+#### 1. Install cloudflared and create the tunnel
+
+Follow Cloudflare's installer for your distro: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/. Install the package version (the systemd-managed daemon) for production — the ad-hoc `cloudflared tunnel --url http://localhost:3001 run` form is fine for a first try but doesn't survive a reboot.
 
 ```bash
-# Install cloudflared
-# See: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
-
-# Create a tunnel
-cloudflared tunnel create shared-terminal
-
-# Route DNS
-cloudflared tunnel route dns shared-terminal api.terminal.yourdomain.com
-
-# Run the tunnel
-cloudflared tunnel --url http://localhost:3001 run shared-terminal
+cloudflared tunnel login                       # opens a browser, authorizes your zone
+cloudflared tunnel create shared-terminal      # prints the tunnel UUID — note it
+sudo cloudflared service install               # installs the systemd unit + creds file
 ```
 
-For port-exposure subdomains (`p<port>-<sessionId>.<base>.your-tunnel.com`), set `PORT_PROXY_BASE_DOMAIN` in `.env` to the apex you've routed and add a wildcard DNS rule on the tunnel: `cloudflared tunnel route dns shared-terminal *.<base>.your-tunnel.com`. Also set `COOKIE_DOMAIN` to the parent domain shared by the API hostname and the dispatcher base; without it the `st_token` cookie is host-only and private-port auth structurally fails. See [API.md → Port-exposure dispatcher](./API.md#port-exposure-dispatcher) for the wire shape.
+#### 2. DNS records
+
+Add two records under your zone in the Cloudflare dashboard, both proxied (orange cloud):
+
+| Type    | Name                          | Target                              | Notes                              |
+| ------- | ----------------------------- | ----------------------------------- | ---------------------------------- |
+| `CNAME` | `api.terminal`                | `<tunnel-uuid>.cfargotunnel.com`    | Backend API + WebSocket            |
+| `CNAME` | `*.terminal`                  | `<tunnel-uuid>.cfargotunnel.com`    | Wildcard for the port dispatcher   |
+
+The explicit `api.terminal` record always wins over the wildcard, so the wildcard catches only the per-session `p<port>-<sessionId>.terminal.example.com` hosts, not your API.
+
+If the wildcard slot is already taken by your registrar's parking record (e.g. Porkbun's `pixie.porkbun.com` placeholder), edit that record rather than trying to add a second — Cloudflare disallows two records with the same name+type. Parking records are virtually always safe to replace.
+
+> **Universal SSL footnote.** Cloudflare's free cert covers exactly one level of subdomain (`*.terminal.example.com` works). It does NOT cover two levels (`*.foo.terminal.example.com`). The port dispatcher only uses one level, so this is fine — but nesting deeper requires Advanced Certificate Manager.
+
+#### 3. cloudflared ingress (`/etc/cloudflared/config.yml`)
+
+Order matters: top-to-bottom matching, exact matches above the wildcard, catch-all at the end.
+
+```yaml
+tunnel: <tunnel-uuid>
+credentials-file: /etc/cloudflared/<tunnel-uuid>.json
+
+ingress:
+  - hostname: api.terminal.example.com
+    service: http://localhost:3001
+
+  # Per-session port dispatcher (#190) — hostnames of the form
+  # p<port>-<sessionId>.terminal.example.com are intercepted by
+  # portDispatcher.ts and reverse-proxied to the right container's
+  # kernel-assigned host port.
+  - hostname: "*.terminal.example.com"
+    service: http://localhost:3001
+
+  - service: http_status:404
+```
+
+Validate before reloading. The `ingress rule` form is a dry-run router — useful for sanity-checking that a representative dispatcher host actually matches the wildcard:
+
+```bash
+cloudflared tunnel --config /etc/cloudflared/config.yml ingress validate
+cloudflared tunnel --config /etc/cloudflared/config.yml ingress rule https://api.terminal.example.com
+cloudflared tunnel --config /etc/cloudflared/config.yml ingress rule https://p3000-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.terminal.example.com
+```
+
+Reload with `sudo systemctl restart cloudflared`. The package-installed unit has no `ExecReload`, so `systemctl reload` / `SIGHUP` just terminates the process — relying on systemd's `Restart=` to bring it back is messier than a clean `restart`.
+
+#### 4. Backend `.env`
+
+```env
+TRUST_PROXY=1
+PORT_PROXY_BASE_DOMAIN=terminal.example.com
+COOKIE_DOMAIN=terminal.example.com
+CORS_ORIGINS=https://app.terminal.example.com,https://<your-project>.pages.dev
+```
+
+- `TRUST_PROXY=1` is mandatory behind any Cloudflare Tunnel — without it, `req.ip` collapses to the tunnel's shared egress IP and per-IP rate limiting becomes useless.
+- `PORT_PROXY_BASE_DOMAIN` and `COOKIE_DOMAIN` are a pair: set both or neither. With `PORT_PROXY_BASE_DOMAIN` set but `COOKIE_DOMAIN` unset, the backend warns at boot and private-port auth structurally fails because the JWT cookie stays host-only.
+- `COOKIE_DOMAIN` must be a parent shared by the API hostname AND the dispatcher subdomains. In this example `terminal.example.com` covers both `api.terminal.example.com` and `p<port>-<sid>.terminal.example.com`.
+
+#### 5. Verify
+
+```bash
+# Confirms the dispatcher env reached the container:
+docker logs shared-terminal-app-1 --tail 50 | grep -i 'port dispatcher'
+# → "[server] port dispatcher enabled at *.terminal.example.com"
+
+# External smoke tests:
+curl -fsS -o /dev/null -w "%{http_code}\n" https://api.terminal.example.com/api/auth/status
+# → 200
+curl -fsS -o /dev/null -w "%{http_code}\n" https://random-unmapped.terminal.example.com/
+# → 404 (catch-all; didn't leak elsewhere)
+```
+
+End-to-end test of port exposure: create a session with `config.ports: [{ container: 3000, public: false }]`, run something on `:3000` inside it (binding to `0.0.0.0`), then open `https://p3000-<full-session-uuid>.terminal.example.com` in a browser where you're logged in.
+
+#### Operational footguns
+
+- **Cookie scope shift on cutover.** Switching `COOKIE_DOMAIN` from unset (host-only `api.terminal.example.com`) to set (`terminal.example.com`) means already-issued cookies coexist with new ones; some browsers prefer the stale host-only cookie until it expires (default `JWT_EXPIRES_IN=7d`). Existing users may need to clear cookies once after the cutover.
+- **Wildcard catches everything else.** With `*.terminal.example.com` pointing at the tunnel, every previously-unrouted subdomain under `terminal.example.com` now hits this backend and returns 404. If anything outside this stack was relying on a wildcard parking page or a LAN-side resolver, it stops working.
+- **WS upgrade rate limiter is per original-client IP.** Behind the tunnel that only holds because `TRUST_PROXY=1` lets the limiter peel the Cloudflare hop. With `TRUST_PROXY=0` every WS connection in the world would share one bucket.
+- **Public-port auth is bypass-by-design.** Sessions declaring `public: true` ports route through the dispatcher with no cookie check — anyone on the internet can hit them. Use only for webhooks / OAuth callbacks; warn users in the UI when they tick the box.
+
+See [API.md → Port-exposure dispatcher](./API.md#port-exposure-dispatcher) for the wire shape.
 
 ## What's inside each session
 
