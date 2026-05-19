@@ -23,10 +23,11 @@ import { runAgentSeed } from "./bootstrap/agentSeed.js";
 import { runCloneRepo } from "./bootstrap/cloneRepo.js";
 import { runDotfiles } from "./bootstrap/dotfiles.js";
 import { runGitIdentity } from "./bootstrap/gitIdentity.js";
+import { runWriteEnvFile } from "./bootstrap/writeEnvFile.js";
 import { d1Query } from "./db.js";
 import type { DockerManager } from "./dockerManager.js";
 import { logger } from "./logger.js";
-import { getSessionConfig } from "./sessionConfig.js";
+import { decryptStoredEntries, getSessionConfig } from "./sessionConfig.js";
 import type { SessionManager } from "./sessionManager.js";
 
 /**
@@ -507,12 +508,17 @@ export async function runAsyncBootstrap(
 		}
 	}
 
-	// Stage order per #191 issue spec:
+	// Stage order per #191 issue spec, extended by #277:
 	//   1. git identity (cheap; needed if later stages commit)
 	//   2. repo clone (#188)
 	//   3. dotfiles
-	//   4. agent seed (last so a cloned project's CLAUDE.md is in place first)
-	//   5. postCreate cmd
+	//   4. agent seed
+	//   5. writeEnvFile (#277 — must run AFTER clone so the `.env`
+	//      doesn't sit in a directory `git clone` is about to refuse
+	//      to populate; must run BEFORE postCreate so `npm install` /
+	//      `pnpm i` / a custom hook can `source .env` or rely on
+	//      `dotenv` finding a real file on disk)
+	//   6. postCreate cmd
 	if (config) {
 		if (
 			!(await runStage("gitIdentity", () =>
@@ -550,6 +556,28 @@ export async function runAsyncBootstrap(
 				runAgentSeed({
 					sessionId,
 					agentSeed: config?.agentSeed ?? null,
+					docker,
+					onOutput,
+					signal,
+				}),
+			))
+		)
+			return;
+		// #277 — `.env` materialisation. Decrypt at this single boundary
+		// (in-memory only; bytes hand off straight to streamExec's env
+		// block and are unset by the bash script after the write). Tag-
+		// mismatch in `decryptSecret` throws → runStage's catch turns it
+		// into a `fail` broadcast with stage="writeEnvFile", matching how
+		// every other config-driven stage surfaces decrypt failures.
+		if (
+			!(await runStage("writeEnvFile", () =>
+				runWriteEnvFile({
+					sessionId,
+					enabled: config?.writeEnvFile,
+					envVars:
+						config?.envVars && config.envVars.length > 0
+							? decryptStoredEntries(config.envVars)
+							: undefined,
 					docker,
 					onOutput,
 					signal,

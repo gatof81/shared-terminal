@@ -16,6 +16,21 @@ vi.mock("./db.js", () => dbStubs);
 // every existing test was implicitly relying on.
 const sessionConfigStubs = vi.hoisted(() => ({
 	getSessionConfig: vi.fn(async () => null),
+	// #277 — `bootstrap.ts` imports `decryptStoredEntries` to feed
+	// `writeEnvFile`. Stub it as a plain-only passthrough so tests
+	// using `type: "plain"` entries get the obvious `{ NAME: value }`
+	// shape without dragging the real AES-GCM key material into the
+	// test environment. Tests targeting the encryption boundary belong
+	// in sessionConfig.test.ts where the real impl is in scope.
+	decryptStoredEntries: vi.fn((entries: Array<{ type: string; name: string; value?: string }>) => {
+		const out: Record<string, string> = {};
+		for (const entry of entries) {
+			if (entry.type === "plain") {
+				out[entry.name] = entry.value ?? "";
+			}
+		}
+		return out;
+	}),
 }));
 vi.mock("./sessionConfig.js", () => sessionConfigStubs);
 
@@ -45,6 +60,13 @@ const agentSeedStubs = vi.hoisted(() => ({
 }));
 vi.mock("./bootstrap/agentSeed.js", () => agentSeedStubs);
 
+// #277 — writeEnvFile stage. Same default-success shape; the real
+// module's own unit tests pin its escaping / argv-no-leak / etc.
+const writeEnvFileStubs = vi.hoisted(() => ({
+	runWriteEnvFile: vi.fn(async () => ({ exitCode: 0 })),
+}));
+vi.mock("./bootstrap/writeEnvFile.js", () => writeEnvFileStubs);
+
 import {
 	BootstrapBroadcaster,
 	type BootstrapMessage,
@@ -66,6 +88,8 @@ beforeEach(() => {
 	dotfilesStubs.runDotfiles.mockImplementation(async () => ({ exitCode: 0 }));
 	agentSeedStubs.runAgentSeed.mockReset();
 	agentSeedStubs.runAgentSeed.mockImplementation(async () => ({ exitCode: 0 }));
+	writeEnvFileStubs.runWriteEnvFile.mockReset();
+	writeEnvFileStubs.runWriteEnvFile.mockImplementation(async () => ({ exitCode: 0 }));
 });
 
 describe("markBootstrapped", () => {
@@ -487,9 +511,11 @@ describe("runAsyncBootstrap", () => {
 	// ── #191 PR 191b — full stage pipeline + 10-min cap ────────────────────
 
 	// Issue spec order: gitIdentity → repo → dotfiles → agentSeed →
-	// postCreate. A swap would break the documented contract (e.g.
-	// dotfiles install scripts that need git config to commit).
-	it("runs stages in declared order (gitIdentity → clone → dotfiles → agentSeed → postCreate)", async () => {
+	// writeEnvFile → postCreate. A swap would break documented contracts:
+	// dotfiles install scripts may need git config to commit; the .env
+	// file must land AFTER clone (git refuses to populate a non-empty
+	// target dir) but BEFORE postCreate (so hooks can source it).
+	it("runs stages in declared order (gitIdentity → clone → dotfiles → agentSeed → writeEnvFile → postCreate)", async () => {
 		const { sessions, docker, broadcaster, spies } = makeFakes();
 		const order: string[] = [];
 		sessionConfigStubs.getSessionConfig.mockResolvedValueOnce({
@@ -498,6 +524,8 @@ describe("runAsyncBootstrap", () => {
 			gitIdentity: { name: "X", email: "x@y.com" },
 			dotfiles: { url: "https://example.com/d.git" },
 			agentSeed: { claudeMd: "# x" },
+			writeEnvFile: true,
+			envVars: [{ type: "plain", name: "FOO", value: "bar" }],
 			bootstrappedAt: null,
 		} as never);
 		gitIdentityStubs.runGitIdentity.mockImplementation(async () => {
@@ -516,6 +544,10 @@ describe("runAsyncBootstrap", () => {
 			order.push("agentSeed");
 			return { exitCode: 0 };
 		});
+		writeEnvFileStubs.runWriteEnvFile.mockImplementation(async () => {
+			order.push("writeEnvFile");
+			return { exitCode: 0 };
+		});
 		spies.runPostCreate.mockImplementation(async () => {
 			order.push("postCreate");
 			return { exitCode: 0 };
@@ -528,7 +560,112 @@ describe("runAsyncBootstrap", () => {
 		);
 		await settle();
 
-		expect(order).toEqual(["gitIdentity", "clone", "dotfiles", "agentSeed", "postCreate"]);
+		expect(order).toEqual([
+			"gitIdentity",
+			"clone",
+			"dotfiles",
+			"agentSeed",
+			"writeEnvFile",
+			"postCreate",
+		]);
+	});
+
+	// #277 — writeEnvFile stage wiring. The stage is invoked on every
+	// config-driven bootstrap (no top-level config gate), so the
+	// per-stage no-op decision lives inside runWriteEnvFile based on
+	// `enabled`. The runner's job is to forward the toggle + decrypted
+	// envVars correctly; the unit tests in writeEnvFile.test.ts pin
+	// what the stage does with those args.
+	it("invokes writeEnvFile with enabled=true and decrypted envVars when toggle on", async () => {
+		const { sessions, docker, broadcaster } = makeFakes();
+		sessionConfigStubs.getSessionConfig.mockResolvedValueOnce({
+			sessionId: "sess-1",
+			writeEnvFile: true,
+			// `plain` entries skip decryptSecret (no key material needed
+			// in the test env); decryptStoredEntries still runs and
+			// produces the `{ FOO: "bar", BAZ: "qux" }` shape the stage
+			// expects.
+			envVars: [
+				{ type: "plain", name: "FOO", value: "bar" },
+				{ type: "plain", name: "BAZ", value: "qux" },
+			],
+			bootstrappedAt: null,
+		} as never);
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ hasBootstrapConfig: true },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		expect(writeEnvFileStubs.runWriteEnvFile).toHaveBeenCalledTimes(1);
+		const args = writeEnvFileStubs.runWriteEnvFile.mock.calls[0]![0] as {
+			sessionId: string;
+			enabled: boolean | undefined;
+			envVars: Record<string, string> | undefined;
+		};
+		expect(args.sessionId).toBe("sess-1");
+		expect(args.enabled).toBe(true);
+		expect(args.envVars).toEqual({ FOO: "bar", BAZ: "qux" });
+	});
+
+	// #277 — toggle-off shape: the stage IS invoked (the runner doesn't
+	// gate at this layer), but with `enabled: undefined` so the stage's
+	// own early-return kicks in. envVars is also undefined when the
+	// config has no entries — preserves the no-clobber invariant when a
+	// future caller sets writeEnvFile=true with an empty envVars array.
+	it("forwards enabled=undefined and envVars=undefined when toggle omitted and no envVars", async () => {
+		const { sessions, docker, broadcaster } = makeFakes();
+		sessionConfigStubs.getSessionConfig.mockResolvedValueOnce({
+			sessionId: "sess-1",
+			gitIdentity: { name: "X", email: "x@y.com" },
+			bootstrappedAt: null,
+		} as never);
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ hasBootstrapConfig: true },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		expect(writeEnvFileStubs.runWriteEnvFile).toHaveBeenCalledTimes(1);
+		const args = writeEnvFileStubs.runWriteEnvFile.mock.calls[0]![0] as {
+			enabled: boolean | undefined;
+			envVars: Record<string, string> | undefined;
+		};
+		expect(args.enabled).toBeUndefined();
+		expect(args.envVars).toBeUndefined();
+	});
+
+	// #277 — failure-shape parity with the other stages: a non-zero exit
+	// from writeEnvFile flips status, kills the container, broadcasts
+	// `fail` with `stage: "writeEnvFile"`, and skips postCreate. Mirrors
+	// the dotfiles failure test above — pins the same runStage code path
+	// for the new stage so a future edit that special-cases writeEnvFile
+	// teardown trips this assertion.
+	it("writeEnvFile non-zero exit flips status, kills, broadcasts fail (postCreate skipped)", async () => {
+		const { sessions, docker, broadcaster, final, spies } = makeFakes();
+		sessionConfigStubs.getSessionConfig.mockResolvedValueOnce({
+			sessionId: "sess-1",
+			writeEnvFile: true,
+			envVars: [{ type: "plain", name: "FOO", value: "bar" }],
+			bootstrappedAt: null,
+		} as never);
+		writeEnvFileStubs.runWriteEnvFile.mockImplementationOnce(async () => ({ exitCode: 13 }));
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ postCreateCmd: "npm install", hasBootstrapConfig: true },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		expect(spies.updateStatus).toHaveBeenCalledWith("sess-1", "failed");
+		expect(spies.kill).toHaveBeenCalledWith("sess-1");
+		expect(spies.runPostCreate).not.toHaveBeenCalled();
+		expect(final).toEqual([{ type: "fail", exitCode: 13, stage: "writeEnvFile" }]);
 	});
 
 	// Each stage's non-zero exit must hard-fail via the same status-

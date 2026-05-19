@@ -1472,7 +1472,7 @@ async function openBootstrapLogModal(session: SessionInfo): Promise<void> {
 	hint.className = "modal-hint";
 	hint.textContent =
 		session.status === "failed"
-			? "Captured output from the failed bootstrap (clone / dotfiles / agentSeed / postCreate). Fix the cause and create a new session."
+			? "Captured output from the failed bootstrap (gitIdentity / clone / dotfiles / agentSeed / writeEnvFile / postCreate). Fix the cause and create a new session."
 			: "Captured output from the last bootstrap run.";
 	card.appendChild(hint);
 
@@ -1985,6 +1985,11 @@ const envPasteTextarea = document.getElementById("env-paste-textarea") as HTMLTe
 const envPasteCancel = document.getElementById("env-paste-cancel") as HTMLButtonElement;
 const envPasteImport = document.getElementById("env-paste-import") as HTMLButtonElement;
 const envPasteStatus = document.getElementById("env-paste-status") as HTMLSpanElement;
+// #277 — `.env` materialisation toggle. Lives in the Env tab so it
+// reads as "what happens to these entries on bootstrap" right under
+// the table. Off by default; flipped to true on `Use template` when
+// the source template had it on, cleared in `resetEnvTab`.
+const envWriteFileCheckbox = document.getElementById("env-write-file") as HTMLInputElement;
 
 function newEnvRowId(): string {
 	// Random per-row id stays stable across re-renders so input focus
@@ -2088,6 +2093,7 @@ function resetEnvTab() {
 	envPasteToggle.setAttribute("aria-expanded", "false");
 	envPasteTextarea.value = "";
 	envPasteStatus.textContent = "";
+	envWriteFileCheckbox.checked = false;
 }
 
 envAddRowBtn.addEventListener("click", () => {
@@ -2258,6 +2264,7 @@ newSessionForm.addEventListener("submit", async (e) => {
  */
 function buildSessionConfigPayload(): SessionConfigPayload | undefined {
 	const envVars = collectEnvVarsForSubmit();
+	const writeEnvFile = envWriteFileCheckbox.checked;
 	const { repo, auth } = collectRepoForSubmit();
 	const advanced = collectAdvancedForSubmit();
 	const { ports, allowPrivilegedPorts } = collectPortsForSubmit();
@@ -2271,9 +2278,16 @@ function buildSessionConfigPayload(): SessionConfigPayload | undefined {
 		advanced.memLimit !== undefined ||
 		advanced.idleTtlSeconds !== undefined;
 	const portsHasContent = ports !== undefined || allowPrivilegedPorts === true;
-	if (!envVars && !repo && !advancedHasContent && !portsHasContent) return undefined;
+	// #277 — `writeEnvFile` alone (without any envVars) still counts
+	// as "something configured" so the bare-POST short-circuit
+	// doesn't drop the toggle. The backend's stage no-ops when
+	// envVars is empty, so a toggle-on-but-no-vars submission costs
+	// only one extra config row and one no-op bootstrap step.
+	if (!envVars && !writeEnvFile && !repo && !advancedHasContent && !portsHasContent)
+		return undefined;
 	return {
 		...(envVars ? { envVars } : {}),
+		...(writeEnvFile ? { writeEnvFile: true } : {}),
 		...(repo ? { repo } : {}),
 		...(auth ? { auth } : {}),
 		...advanced,
@@ -2337,11 +2351,13 @@ saveTemplateModal.addEventListener("click", (e) => {
  */
 function buildTemplateConfigFromForm(): SessionConfigPayload {
 	const envVars = collectEnvVarsForSubmit();
+	const writeEnvFile = envWriteFileCheckbox.checked;
 	const { repo, auth } = collectRepoForSubmit();
 	const advanced = collectAdvancedForSubmit();
 	const { ports, allowPrivilegedPorts } = collectPortsForSubmit();
 	const config: SessionConfigPayload = {
 		...(envVars ? { envVars } : {}),
+		...(writeEnvFile ? { writeEnvFile: true } : {}),
 		...(repo ? { repo } : {}),
 		...(auth ? { auth } : {}),
 		...advanced,
@@ -2609,6 +2625,7 @@ function applyTemplateToForm(t: Template): void {
 		};
 	});
 	renderEnvRows();
+	envWriteFileCheckbox.checked = cfg.writeEnvFile === true;
 
 	// Repo + auth. The credential fields stay empty if the
 	// template only carried the auth declaration (the strip

@@ -459,6 +459,16 @@
               <tbody id="env-table-body"></tbody>
             </table>
             <button type="button" id="env-add-row" class="env-add-row">+ Add entry</button>
+            <label class="modal-field modal-field-checkbox env-write-file">
+              <input type="checkbox" id="env-write-file" />
+              <span>
+                Also write a <code>.env</code> file to the workspace
+                root during bootstrap (so <code>dotenv</code>-style
+                tooling, <code>docker compose --env-file</code>, or
+                <code>set -a; . .env</code> can pick the values up
+                from disk).
+              </span>
+            </label>
           </div>
           <div
             class="session-tab-panel"
