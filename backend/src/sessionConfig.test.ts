@@ -230,6 +230,26 @@ describe("validateSessionConfig", () => {
 		expect(got?.allowPrivilegedPorts).toBe(true);
 	});
 
+	// #275 — schema accepts the writeEnvFile boolean as an
+	// independent toggle. No cross-field invariant: the bootstrap
+	// stage no-ops on `envVars` absent, so a toggle-only config is
+	// valid wire-shape. A non-boolean is rejected by the
+	// discriminator (`.boolean()` doesn't coerce).
+	it("accepts writeEnvFile: true / false / omission", () => {
+		expect(validateSessionConfig({ writeEnvFile: true })?.writeEnvFile).toBe(true);
+		expect(validateSessionConfig({ writeEnvFile: false })?.writeEnvFile).toBe(false);
+		expect(validateSessionConfig({})?.writeEnvFile).toBeUndefined();
+	});
+
+	it("rejects writeEnvFile of non-boolean type", () => {
+		expect(() => validateSessionConfig({ writeEnvFile: "yes" })).toThrowError(
+			SessionConfigValidationError,
+		);
+		expect(() => validateSessionConfig({ writeEnvFile: 1 })).toThrowError(
+			SessionConfigValidationError,
+		);
+	});
+
 	it("allowPrivilegedPorts: true does not retroactively permit out-of-range ports", () => {
 		// The toggle relaxes the < 1024 floor only. The 1-65535 range
 		// stays enforced — a stray 0 / 70000 still fails on the field
@@ -952,6 +972,7 @@ describe("persistSessionConfig", () => {
 			null, // git_identity_json
 			null, // dotfiles_json
 			null, // agent_seed_json
+			null, // write_env_file (#275)
 		]);
 	});
 
@@ -967,10 +988,10 @@ describe("persistSessionConfig", () => {
 		// Defensive cross-check: the params length must match the column
 		// count, so a future caller adding bootstrapped_at to either side
 		// without updating the other trips this assertion immediately.
-		// 15 = sessionId + 14 column values (allow_privileged_ports
+		// 16 = sessionId + 15 column values (allow_privileged_ports
 		// added in #190 PR 190a; git_identity_json / dotfiles_json /
-		// agent_seed_json added in 191a).
-		expect((params as unknown[]).length).toBe(15);
+		// agent_seed_json added in 191a; write_env_file added in #275).
+		expect((params as unknown[]).length).toBe(16);
 	});
 
 	it("collapses empty array sub-records to NULL (no D1 row bloat)", async () => {
@@ -1078,6 +1099,24 @@ describe("persistSessionConfig", () => {
 			ports: [{ container: 3000, public: false }],
 		});
 		expect(dbStubs.d1Query.mock.calls[0]?.[1]?.[9]).toBeNull();
+	});
+
+	// #275 — mirrors the allowPrivilegedPorts shape: column [15] (last
+	// position), 1 only on explicit true, NULL on false / omission.
+	// Locks the 0/1 storage idiom so a future Boolean(...) coercion
+	// can't sneak in and write a 0 row that would re-trigger the
+	// bootstrap stage on a respawn.
+	it("persists writeEnvFile as 1 only when explicitly true", async () => {
+		await persistSessionConfig("sess-env-on", { writeEnvFile: true });
+		expect(dbStubs.d1Query.mock.calls[0]?.[1]?.[15]).toBe(1);
+
+		dbStubs.d1Query.mockClear();
+		await persistSessionConfig("sess-env-off", { writeEnvFile: false });
+		expect(dbStubs.d1Query.mock.calls[0]?.[1]?.[15]).toBeNull();
+
+		dbStubs.d1Query.mockClear();
+		await persistSessionConfig("sess-env-omitted", {});
+		expect(dbStubs.d1Query.mock.calls[0]?.[1]?.[15]).toBeNull();
 	});
 });
 
@@ -1322,6 +1361,53 @@ describe("getSessionConfig", () => {
 			settings: '{"theme":"dark"}',
 			claudeMd: "# notes\n",
 		});
+	});
+
+	// #275 — mirrors the allowPrivilegedPorts rehydration shape: the
+	// row stores INTEGER 0/1 (or NULL); the typed record collapses to
+	// `true | undefined` so downstream `=== true` checks don't have to
+	// also handle `0`/`false`. A future edit that switched to a
+	// `Boolean(row.write_env_file)` coercion would break the
+	// "NULL/0/false → undefined" contract that the bootstrap runner's
+	// gate depends on.
+	it("rehydrates write_env_file as true only when stored as 1", async () => {
+		const baseRow = {
+			workspace_strategy: null,
+			cpu_limit: null,
+			mem_limit: null,
+			idle_ttl_seconds: null,
+			post_create_cmd: null,
+			post_start_cmd: null,
+			repos_json: null,
+			ports_json: null,
+			allow_privileged_ports: null,
+			env_vars_json: null,
+			auth_json: null,
+			git_identity_json: null,
+			dotfiles_json: null,
+			agent_seed_json: null,
+			bootstrapped_at: null,
+		};
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [{ session_id: "sess-env-1", ...baseRow, write_env_file: 1 }],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		expect((await getSessionConfig("sess-env-1"))?.writeEnvFile).toBe(true);
+
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [{ session_id: "sess-env-0", ...baseRow, write_env_file: 0 }],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		expect((await getSessionConfig("sess-env-0"))?.writeEnvFile).toBeUndefined();
+
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [{ session_id: "sess-env-null", ...baseRow, write_env_file: null }],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		expect((await getSessionConfig("sess-env-null"))?.writeEnvFile).toBeUndefined();
 	});
 
 	// PR #210 round 2 fix: `session_configs.env_vars_json` had a

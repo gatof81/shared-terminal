@@ -1287,7 +1287,13 @@ export function buildRouter(
 				(validatedConfig?.repo !== null && validatedConfig?.repo !== undefined) ||
 				(validatedConfig?.gitIdentity !== null && validatedConfig?.gitIdentity !== undefined) ||
 				(validatedConfig?.dotfiles !== null && validatedConfig?.dotfiles !== undefined) ||
-				(validatedConfig?.agentSeed !== null && validatedConfig?.agentSeed !== undefined);
+				(validatedConfig?.agentSeed !== null && validatedConfig?.agentSeed !== undefined) ||
+				// #277 — writeEnvFile is another bootstrap stage that
+				// needs the config row fetched. Including it here
+				// triggers the async runner for "envVars-toggle-only"
+				// sessions and ensures the runner's `hasBootstrapConfig`
+				// gate doesn't skip the `getSessionConfig` D1 round-trip.
+				validatedConfig?.writeEnvFile === true;
 			if (validatedConfig?.postCreateCmd || hasBootstrapConfig) {
 				const cfg = {
 					postCreateCmd: validatedConfig?.postCreateCmd,

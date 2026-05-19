@@ -386,6 +386,7 @@ export async function migrateDb(): Promise<void> {
                         git_identity_json       TEXT,
                         dotfiles_json           TEXT,
                         agent_seed_json         TEXT,
+                        write_env_file          INTEGER,
                         bootstrapped_at         TEXT,
                         created_at              TEXT NOT NULL DEFAULT (datetime('now')),
                         FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
@@ -475,6 +476,19 @@ export async function migrateDb(): Promise<void> {
 	// row still benefit from capturing postCreate output.
 	try {
 		await d1Query("ALTER TABLE sessions ADD COLUMN bootstrap_log TEXT");
+	} catch (err) {
+		if (!/duplicate column name|already exists/i.test((err as Error).message)) {
+			throw err;
+		}
+	}
+	// #277: `write_env_file` INTEGER toggle on `session_configs`. When
+	// 1, the new bootstrap stage materialises a `.env` file in the
+	// container's workspace from `config.envVars` (typed entries, both
+	// plain + decrypted secret values). Default NULL = off, matching
+	// the rest of this file's "NULL rehydrates to undefined / off"
+	// convention.
+	try {
+		await d1Query("ALTER TABLE session_configs ADD COLUMN write_env_file INTEGER");
 	} catch (err) {
 		if (!/duplicate column name|already exists/i.test((err as Error).message)) {
 			throw err;

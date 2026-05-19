@@ -693,6 +693,13 @@ export const SessionConfigSchema = z
 		// `encryptSecretEntries`) and redacted in listing endpoints.
 		// `secret-slot` is template-load-only and rejected on POST.
 		envVars: z.array(EnvVarEntry).max(MAX_ENV_ENTRIES).optional(),
+		// #277 — when true, the bootstrap pipeline writes a `.env`
+		// file in the container's workspace root from `envVars`. Both
+		// `plain` and decrypted `secret` values land in the file as
+		// `KEY=VALUE` lines. Off by default; opt-in via the env-vars
+		// tab checkbox. NULL / undefined / false all mean "off" — only
+		// explicit `true` triggers the stage.
+		writeEnvFile: z.boolean().optional(),
 	})
 	.strict()
 	// #190 — cross-field invariants on `ports` / `allowPrivilegedPorts`
@@ -1229,6 +1236,8 @@ interface SessionConfigRow {
 	git_identity_json: string | null;
 	dotfiles_json: string | null;
 	agent_seed_json: string | null;
+	// #277 — same INTEGER 0/1 idiom as allow_privileged_ports.
+	write_env_file: number | null;
 	bootstrapped_at: string | null;
 }
 
@@ -1254,6 +1263,10 @@ function rowToRecord(row: SessionConfigRow): SessionConfigRecord {
 		// (only `true | undefined`) lets the dispatcher and cap-add
 		// consumers do `=== true` checks without thinking about 0/false.
 		allowPrivilegedPorts: row.allow_privileged_ports === 1 ? true : undefined,
+		// #277 — same true | undefined boolean idiom as
+		// allowPrivilegedPorts. Only the bootstrap stage cares;
+		// `=== true` checks downstream stay clean.
+		writeEnvFile: row.write_env_file === 1 ? true : undefined,
 		envVars: parseEnvVarsColumn(row.session_id, row.env_vars_json),
 		auth: parseAuthColumn(row.session_id, row.auth_json),
 		gitIdentity: parseJsonColumn<SessionConfig["gitIdentity"]>(
@@ -1574,8 +1587,9 @@ export async function persistSessionConfig(
                          idle_ttl_seconds, post_create_cmd, post_start_cmd,
                          repos_json, ports_json, allow_privileged_ports,
                          env_vars_json, auth_json,
-                         git_identity_json, dotfiles_json, agent_seed_json)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         git_identity_json, dotfiles_json, agent_seed_json,
+                         write_env_file)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(session_id) DO UPDATE SET
                         workspace_strategy     = excluded.workspace_strategy,
                         cpu_limit              = excluded.cpu_limit,
@@ -1590,7 +1604,8 @@ export async function persistSessionConfig(
                         auth_json              = excluded.auth_json,
                         git_identity_json      = excluded.git_identity_json,
                         dotfiles_json          = excluded.dotfiles_json,
-                        agent_seed_json        = excluded.agent_seed_json`,
+                        agent_seed_json        = excluded.agent_seed_json,
+                        write_env_file         = excluded.write_env_file`,
 		[
 			sessionId,
 			config.workspaceStrategy ?? null,
@@ -1622,6 +1637,8 @@ export async function persistSessionConfig(
 			jsonOrNull(config.gitIdentity),
 			jsonOrNull(config.dotfiles),
 			jsonOrNull(config.agentSeed),
+			// #277 — same true-only persistence as allowPrivilegedPorts.
+			config.writeEnvFile === true ? 1 : null,
 		],
 	);
 }

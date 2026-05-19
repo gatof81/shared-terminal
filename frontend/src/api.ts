@@ -284,6 +284,12 @@ export interface SessionConfigPayload {
 	// privileged (the backend's superRefine rejects the config otherwise).
 	allowPrivilegedPorts?: boolean;
 	envVars?: EnvVarEntryInput[];
+	// #277 — when true, the bootstrap pipeline writes a `.env` file
+	// at the workspace root from `envVars`. Off by default; the env-
+	// tab checkbox flips it on. Omission / `false` mean the file is
+	// not written (no clobber risk on a respawn into a workspace the
+	// user has been editing).
+	writeEnvFile?: boolean;
 }
 
 // ── Bootstrap live-tail WS (#185 / PR 185b2b) ───────────────────────────────
