@@ -51,3 +51,7 @@ A self-hosted web-based terminal that runs on an always-on Linux server at home.
 | Containers | Docker (dockerode), tmux                           |
 | Tunnel     | Cloudflare Tunnel                                  |
 | Hosting    | Cloudflare Pages (frontend), self-hosted (backend) |
+
+## License
+
+Released under the [MIT License](./LICENSE).
