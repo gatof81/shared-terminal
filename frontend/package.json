@@ -2,6 +2,7 @@
   "name": "shared-terminal-frontend",
   "version": "1.0.0",
   "description": "Shared terminal service frontend",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
