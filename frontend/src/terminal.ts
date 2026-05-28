@@ -228,7 +228,36 @@ export function openTerminalSession(opts: {
 	// finalisation). Centralised so the same notification path runs
 	// for both, keeping toast policy (failure-only by default) in
 	// main.ts rather than duplicated here.
+	//
+	// Two-stage write to maximise reliability across browsers:
+	//
+	//   1. Synchronous `document.execCommand("copy")` via a hidden
+	//      textarea. Deprecated but every shipping browser still
+	//      implements it, and it runs synchronously so when called
+	//      from inside a user gesture (mouseup, keydown) it stays
+	//      inside the transient-activation window. This is the
+	//      load-bearing path against Safari, which intermittently
+	//      rejects `navigator.clipboard.writeText` even from
+	//      legitimate gestures (#158 — reported as "select-to-copy
+	//      and Cmd-C both produce nothing on the clipboard").
+	//   2. Async `navigator.clipboard.writeText`. Modern path; works
+	//      in non-user-gesture contexts the legacy path can't reach
+	//      (e.g. the onSelectionChange-debounced fallback below
+	//      fires from a setTimeout, outside any user activation —
+	//      `execCommand` will fail there but `writeText` may still
+	//      land if the document has focus). Some sandboxed embed
+	//      contexts also strip `document.execCommand` and ship only
+	//      the async API.
+	//
+	// Either path succeeding → onCopy(true) and the returned promise
+	// resolves true. Both failing → onCopy(false). Promise return
+	// shape is preserved so existing call sites (which `.then` it)
+	// stay correct under the new sync-first path.
 	const copyToClipboard = (text: string): Promise<boolean> => {
+		if (tryExecCommandCopy(text)) {
+			onCopy?.(true);
+			return Promise.resolve(true);
+		}
 		return navigator.clipboard.writeText(text).then(
 			() => {
 				onCopy?.(true);
@@ -294,6 +323,64 @@ export function openTerminalSession(opts: {
 	// complete URL. No-op when the app already emits OSC 8 (xterm's native
 	// hyperlink handling takes precedence per-cell).
 	const linkProviderDisposable = term.registerLinkProvider(new MultilineUrlLinkProvider(term));
+
+	// ── Mouse-up immediate copy ─────────────────────────────────────────────
+	// The debounced onSelectionChange path below fires 100 ms after the
+	// selection settles — but that 100 ms is a different task than the
+	// user's mouseup gesture, and Safari's clipboard gating drops
+	// transient activation across task boundaries. Result: the async
+	// `writeText` from inside the debounced timer rejects with
+	// NotAllowedError even though the user's intent is unambiguous.
+	//
+	// Listening on `container.mouseup` lets us copy synchronously inside
+	// the gesture for the dominant case (mouse drag → release), where
+	// `tryExecCommandCopy` in `copyToClipboard` works reliably. The
+	// debounced path is kept for keyboard selection finalisation
+	// (shift-arrow / shift-end) — there is no mouseup terminator there,
+	// only the rate-of-change settle that the debounce was designed for.
+	//
+	// Listener is on `container`, not `window`: an out-of-container
+	// mouseup (user drag-selected past the terminal bounds) falls
+	// through to the 100 ms debounced path, which is the right shape
+	// for that case anyway (no gesture context to preserve there).
+	//
+	// Dedup against the debounced path via the shared
+	// `lastCopiedSelection` declared above — the order of effects is
+	// `mouseup-immediate copies + sets state` → `onSelectionChange fires`
+	// → `debounce 100 ms later reads === lastCopiedSelection and skips`.
+	// Without the shared state the user would see the copy land twice
+	// (and toast twice on failure).
+	const onContainerMouseUp = (ev: MouseEvent) => {
+		// Left-button only. Right-click (2) and middle-click (1) also
+		// fire mouseup, and a right-click on a live selection — the
+		// classic shape of "open the context menu to Paste over the
+		// selection" — would otherwise re-copy the selection an
+		// instant before the user pastes, silently clobbering whatever
+		// was on the clipboard. The dedup guard catches the common
+		// "same selection as last time" case but not a fresh selection
+		// the user made between two right-clicks via the keyboard.
+		if (ev.button !== 0) return;
+		const sel = term.getSelection();
+		if (!sel) return;
+		if (sel === lastCopiedSelection) return;
+		// Same active-tab gate as the debounced path: a stray mouseup
+		// inside a background pane (rare, but possible if a sibling
+		// session is rendered with `pane.classList.add('hidden')`
+		// rather than detached) must not clobber the foreground tab's
+		// clipboard.
+		if (isActive && !isActive()) return;
+		lastCopiedSelection = sel;
+		copyToClipboard(sel).then((ok) => {
+			if (!ok && lastCopiedSelection === sel) lastCopiedSelection = "";
+		});
+	};
+	// Registered unconditionally — copy-on-select is a clipboard write,
+	// not an input frame, so the `!observe` guard that gates the
+	// touch-scroll handlers further down DOES NOT apply here. Observers
+	// can (and should) be able to copy text they're reading off the
+	// shared session. A future reader noticing the asymmetry with the
+	// touch block should leave it as-is.
+	container.addEventListener("mouseup", onContainerMouseUp);
 
 	// ── Auto-copy on selection-finalise ─────────────────────────────────────
 	// xterm fires `onSelectionChange` continuously while the user drags to
@@ -833,6 +920,7 @@ export function openTerminalSession(opts: {
 		document.removeEventListener("visibilitychange", onVisibilityChange);
 		window.removeEventListener("focus", onWindowFocus);
 		container.removeEventListener("pointerdown", focusOnPointer);
+		container.removeEventListener("mouseup", onContainerMouseUp);
 		container.removeEventListener("touchstart", onTouchStart);
 		container.removeEventListener("touchmove", onTouchMove);
 		container.removeEventListener("touchend", onTouchEnd);
@@ -1015,6 +1103,110 @@ class MultilineUrlLinkProvider implements ILinkProvider {
 		}
 
 		this.dirty = false;
+	}
+}
+
+// ── Clipboard helpers ───────────────────────────────────────────────────────
+
+// Synchronous clipboard write via a transient off-screen textarea +
+// `document.execCommand("copy")`. Deprecated API but every shipping
+// browser still implements it, and it's synchronous, so callers
+// inside a user gesture (mouseup, keydown) stay within the
+// transient-activation window that gates the async clipboard API on
+// Safari. See the two-stage rationale on `copyToClipboard` for why
+// this runs first.
+//
+// Hidden via `opacity:0` + `position:fixed` rather than
+// `display:none`: a `display:none` element cannot be focused or
+// selected, so `select()` would silently no-op and `execCommand`
+// would return false. The current shape stays in the DOM long
+// enough for the copy to fire and is removed immediately.
+//
+// `readonly` keeps mobile soft-keyboards from popping up if this
+// somehow fires on a touch device (it won't — the touch flow has
+// its own copy path planned for #158 follow-up — but defence in
+// depth). `tabindex:-1` keeps the element out of tab navigation so
+// a between-copies tab traversal can't land on it.
+function tryExecCommandCopy(text: string): boolean {
+	// `ta` is declared outside the try so a throw between
+	// `appendChild` and `execCommand` — exactly the sandboxed-frame
+	// scenario flagged in the catch comment below — still hits the
+	// finally cleanup. Without that, every failed invocation would
+	// accumulate an unremovable opacity:0 textarea in document.body,
+	// measurable to the DOM tree and visible to assistive tech.
+	let ta: HTMLTextAreaElement | null = null;
+	// Capture the active element BEFORE `ta.select()` steals focus.
+	// Restoring it in `finally` is load-bearing: removing a focused
+	// element drops focus to document.body per the HTML spec, NOT to
+	// the prior focus owner. Without the restore, every successful
+	// execCommand copy (the dominant Safari path; common on Chrome
+	// too) silently moves focus out of xterm's helper-textarea — the
+	// user sees the inactive-cursor outline appear and their next
+	// keystrokes are eaten by document.body until they click. Generic
+	// activeElement capture (vs hard-coding `term.focus()`) keeps the
+	// helper standalone and correctly restores focus to wherever it
+	// actually was before the copy (sidebar input, modal, etc.), not
+	// just xterm.
+	const priorFocus = document.activeElement;
+	try {
+		ta = document.createElement("textarea");
+		ta.value = text;
+		ta.setAttribute("readonly", "");
+		ta.setAttribute("tabindex", "-1");
+		ta.style.position = "fixed";
+		ta.style.top = "0";
+		ta.style.left = "0";
+		// Explicit 1px box. Defaults are UA-stylesheet-dependent and a
+		// zero-width computed size has been observed to make `select()`
+		// silently no-op (execCommand then returns false even though
+		// the copy would otherwise have succeeded). 1px stays invisible
+		// at opacity:0 but guarantees a concrete layout box.
+		ta.style.width = "1px";
+		ta.style.height = "1px";
+		ta.style.opacity = "0";
+		ta.style.pointerEvents = "none";
+		document.body.appendChild(ta);
+		ta.select();
+		// `execCommand("copy")` return value is implementation-dependent
+		// per spec. Firefox (historically) and some Chromium builds in
+		// permission-constrained states return `false` even when the
+		// copy actually succeeded; we then fall through to
+		// `writeText`, which writes the SAME text again — harmless
+		// (idempotent for identical content) and never observed to
+		// reject in the same context where execCommand silently
+		// succeeded. The narrow path "execCommand silently succeeded
+		// AND writeText then rejects" would produce a false-negative
+		// failure toast; that's accepted as a known platform quirk
+		// not fixable at this layer. Don't "fix" by ignoring the
+		// boolean and unconditionally returning true — on browsers
+		// where the boolean IS reliable (modern Safari, current
+		// Chrome) that would skip the writeText fallback for genuine
+		// failures and the user gets no toast at all.
+		return document.execCommand("copy");
+	} catch (err) {
+		// queryCommandSupported / execCommand can throw in sandboxed
+		// frames; log so a field report has something to grep but
+		// don't surface to the user — the caller will fall back to
+		// the async path and decide what to toast based on that.
+		console.warn("[terminal] execCommand copy threw:", err);
+		return false;
+	} finally {
+		// Optional chain handles the pre-createElement-throw edge
+		// (vanishingly unlikely, but cheap); .remove() on a never-
+		// appended node is a safe no-op so the pre-appendChild-throw
+		// path also stays clean.
+		ta?.remove();
+		// Restore focus to whatever held it pre-copy. `.focus()` only
+		// lives on HTMLElement / SVGElement; the `in` check is the
+		// minimal runtime narrow that satisfies TS strict and also
+		// guards against the (vanishingly rare) case where
+		// activeElement was a plain Element. Skip when prior focus
+		// was already document.body or unset — calling .focus() on
+		// either is a no-op but the conditional avoids a spurious
+		// focus event listeners might observe.
+		if (priorFocus && priorFocus !== document.body && "focus" in priorFocus) {
+			(priorFocus as HTMLElement).focus();
+		}
 	}
 }
 
