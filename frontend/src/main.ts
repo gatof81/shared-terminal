@@ -986,9 +986,6 @@ function openTab(tabId: string) {
 					showToast(`${msg} Reload the tab to retry GPU rendering.`);
 				},
 				onCopy: (ok: boolean) => {
-					// Failure-only toast policy: silent on success matches
-					// the native Cmd-C feel and avoids flooding the user
-					// with chips on every selection-finalize (#158).
 					// Identity guards mirror onStatus / onError above:
 					// session match prevents stale toasts from a
 					// torn-down tab in a different session, and active-tab
@@ -997,7 +994,25 @@ function openTab(tabId: string) {
 					// currently looking at.
 					if (activeSessionId !== ownSessionId) return;
 					if (tabId !== currentActiveTabId) return;
-					if (!ok) showToast("Copy failed — clipboard permission denied?", true);
+					if (ok) {
+						// Success chip is intentionally brief (1.2s vs the
+						// 4s error toast) — auto-copy fires on every
+						// selection-finalise, and originally the design
+						// rationale for failure-only was "matches native
+						// Cmd-C feel". Field reports showed users with no
+						// signal that the copy happened didn't trust the
+						// mechanism — the short chip is the smallest
+						// addition that confirms without spamming. The
+						// chip is unconditional rather than first-time-
+						// only because the auto-copy path is genuinely
+						// invisible (no Cmd-C kinaesthetic feedback,
+						// selection stays highlighted as terminals do)
+						// and a one-time confirmation would leave power
+						// users wondering "did that one copy too?".
+						showCopySuccessToast();
+					} else {
+						showToast("Copy failed — clipboard permission denied?", true);
+					}
 				},
 				isActive: () => activeSessionId === ownSessionId && tabId === currentActiveTabId,
 			});
@@ -2905,6 +2920,26 @@ function showToast(message: string, isError = false) {
 		// a one-time secret like a freshly-minted invite code (#49).
 		toast.textContent = "";
 	}, 4000);
+}
+
+// Brief success indicator for the copy-on-select path. Kept short
+// (1.2s) and on its own helper rather than a `success` flag on
+// `showToast` because the auto-copy path fires on every selection-
+// finalise — a 4s toast that lingers across multiple selections
+// would feel intrusive, and reusing the failure toast's duration
+// would let a recent copy-success chip occlude a real error toast
+// that follows it. Reuses the same #toast element + textContent
+// clear-out for the same DOM-queryable-leftover reason as
+// `showToast`.
+const COPY_TOAST_DURATION_MS = 1200;
+function showCopySuccessToast() {
+	toast.textContent = "✓ Copied";
+	toast.className = "visible success";
+	if (toastTimer) clearTimeout(toastTimer);
+	toastTimer = setTimeout(() => {
+		toast.className = "";
+		toast.textContent = "";
+	}, COPY_TOAST_DURATION_MS);
 }
 
 // ── First-session selection hint ────────────────────────────────────────────
