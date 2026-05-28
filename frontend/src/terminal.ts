@@ -982,6 +982,9 @@ export function openTerminalSession(opts: {
 		// path readable as one rule and avoids poisoning the dedup state for
 		// a future off-active caller. Return true: a selection was present,
 		// the caller's question is answered; we just declined to write.
+		// No onCopy here — onCopy?.(false) would fire the "permission denied"
+		// error toast, which is wrong (this is a background-tab suppression,
+		// not a write failure); an off-active caller gets silence by design.
 		if (isActive && !isActive()) return true;
 		if (sel === lastCopiedSelection) {
 			// Already on the clipboard from the auto-copy/mouseup path.
@@ -998,6 +1001,11 @@ export function openTerminalSession(opts: {
 	}
 
 	function enterSelectMode() {
+		// Observe-mode never registers the touch handlers (see the `!observe`
+		// gate on the listeners), so all three selectMode clear sites are
+		// absent there — arming it would strand the flag true. Bail so the
+		// public method can't leave a read-only pane in a stuck state.
+		if (observe) return;
 		selectMode = true;
 	}
 
