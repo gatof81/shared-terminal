@@ -973,6 +973,16 @@ export function openTerminalSession(opts: {
 	function copySelection(): boolean {
 		const sel = term.getSelection();
 		if (!sel) return false;
+		// Same active-tab gate the mouseup + debounced auto-copy paths apply
+		// (see the rationale at the onSelectionChange write): never clobber
+		// the foreground clipboard with a background tab's selection. Today's
+		// sole caller is the actions-menu handler over getActiveTerminal(),
+		// so this can't trip — but it's a public method now, and placing the
+		// guard HERE (before touching lastCopiedSelection) keeps every copy
+		// path readable as one rule and avoids poisoning the dedup state for
+		// a future off-active caller. Return true: a selection was present,
+		// the caller's question is answered; we just declined to write.
+		if (isActive && !isActive()) return true;
 		if (sel === lastCopiedSelection) {
 			// Already on the clipboard from the auto-copy/mouseup path.
 			// Re-confirm to the user (their explicit tap deserves feedback)
