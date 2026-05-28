@@ -1894,6 +1894,14 @@ main:not([data-sidebar-ready]) #sidebar {
   border-color: #f85149;
   color: #f85149;
 }
+/* Success variant — used for the copy-on-select confirmation. Held to a
+ * shorter timeout in showCopySuccessToast() because the auto-copy path
+ * fires on every selection-finalise; a 4s lingering toast would be
+ * spammy. Green chip matches GitHub's success accent. */
+#toast.success {
+  border-color: #3fb950;
+  color: #3fb950;
+}
 
 /* ── Mobile ─────────────────────────────────────────────────── */
 /* Breakpoint mirrored in main.ts as MOBILE_BREAKPOINT_PX — keep in sync. */
