@@ -657,6 +657,11 @@ export function openTerminalSession(opts: {
 		if (ev.touches.length !== 1) {
 			lastTouchY = null;
 			touchIsScroll = false;
+			// Disarm select-mode on a multi-touch start too, keeping the
+			// three reset sites symmetric (here, onTouchEnd, onTouchCancel).
+			// A pinch isn't a selection gesture; clearing here means it
+			// can't carry an armed flag into its move phase.
+			selectMode = false;
 			return;
 		}
 		lastTouchY = ev.touches[0]!.clientY;
