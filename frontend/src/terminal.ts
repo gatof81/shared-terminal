@@ -440,18 +440,6 @@ export function openTerminalSession(opts: {
 				lastCopiedSelection = "";
 				return;
 			}
-			// A finalised non-empty selection ends touch select-mode: the
-			// gesture armed from the actions menu is complete, so the next
-			// finger drag should scroll again. Cleared HERE — inside the
-			// debounced finalise, not the raw onSelectionChange — because
-			// the raw event fires continuously *during* the drag; exiting
-			// mid-drag would flip onTouchMove back to scroll synthesis and
-			// abort the in-progress selection. Placed before the dedup
-			// early-return below so select-mode still clears when the
-			// mouseup-immediate path (compat mouseup on touch) already
-			// copied this selection. Harmless no-op on desktop, where
-			// selectMode is never armed.
-			selectMode = false;
 			if (sel === lastCopiedSelection) return;
 			// Don't clobber the clipboard for a background tab — user
 			// might have switched to another tab during the 100 ms
@@ -660,8 +648,8 @@ export function openTerminalSession(opts: {
 	// Touch select-mode (#286). When true, onTouchMove yields the gesture
 	// to xterm so a finger drag makes a text selection instead of scroll.
 	// Armed by enterSelectMode() (the actions-menu "Select & copy" entry);
-	// cleared by the onSelectionChange finalise path once a non-empty
-	// selection settles, so it lasts exactly one selection.
+	// disarmed on the next touchend/touchcancel, so it scopes to exactly
+	// one gesture whether or not that gesture produced a selection.
 	let selectMode = false;
 	const getCellHeight = () => (term.rows > 0 ? container.clientHeight / term.rows : 20);
 
@@ -682,9 +670,8 @@ export function openTerminalSession(opts: {
 		// for the touch because `touch-action: none` suppresses native
 		// panning) are exactly what xterm's SelectionService listens on to
 		// extend the selection. Calling preventDefault would cancel them
-		// and the selection would never grow. The onSelectionChange
-		// finalise path clears selectMode once the selection settles, so
-		// the *next* drag resumes scrolling.
+		// and the selection would never grow. onTouchEnd disarms selectMode
+		// when this gesture finishes, so the *next* drag resumes scrolling.
 		if (selectMode) return;
 		if (lastTouchY === null || ev.touches.length !== 1) {
 			// Defence-in-depth: clear lastTouchY whenever we see a non-
@@ -752,10 +739,22 @@ export function openTerminalSession(opts: {
 		if (!selectMode && !touchIsScroll && lastTouchY !== null) term.focus();
 		lastTouchY = null;
 		touchIsScroll = false;
+		// Disarm select-mode at the END of the gesture, not at
+		// selection-finalise. selectMode only needs to be true while
+		// onTouchMove fires (to suppress scroll synthesis); the xterm
+		// selection itself is built from compat mouse events independent
+		// of the touch flag, so clearing here can't truncate it. Clearing
+		// per-gesture (rather than only when a non-empty selection
+		// settles) is what prevents a drag that selects NOTHING — blank
+		// area, or a browser that doesn't stream compat mousemove — from
+		// leaving select-mode stuck on and silently killing touch-scroll
+		// until the next successful selection (#286).
+		selectMode = false;
 	};
 	const onTouchCancel = () => {
 		lastTouchY = null;
 		touchIsScroll = false;
+		selectMode = false;
 	};
 
 	// Skip touch-scroll-as-input wiring entirely in observe-mode (#201e):
