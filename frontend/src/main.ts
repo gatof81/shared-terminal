@@ -1003,6 +1003,7 @@ function openTab(tabId: string) {
 			});
 			entry = { pane, term };
 			currentTerminals.set(tabId, entry);
+			maybeInjectSelectionHint(pane);
 		} catch (err) {
 			pane.remove();
 			if (prevActiveTabId) {
@@ -2904,6 +2905,68 @@ function showToast(message: string, isError = false) {
 		// a one-time secret like a freshly-minted invite code (#49).
 		toast.textContent = "";
 	}, 4000);
+}
+
+// ── First-session selection hint ────────────────────────────────────────────
+// tmux mouse-on (session-image/tmux.conf:54) means a plain mouse drag in the
+// terminal is forwarded to tmux as SGR-1006 mouse-tracking, not interpreted
+// by xterm as a selection — so `term.getSelection()` stays empty and the
+// auto-copy / Cmd-C paths in terminal.ts correctly skip, producing the
+// silent dead end users hit ("I selected text but pasting gave nothing").
+//
+// xterm.js's `SelectionService.shouldForceSelection` is the override gate:
+// on Mac it requires Option + drag AND `macOptionClickForcesSelection: true`
+// (which terminal.ts now sets); on every other platform it's Shift + drag
+// unconditionally. The hint label below is platform-detected to match.
+// Dismissal flag is in localStorage; clicking ✕ on any open pane's badge
+// clears the flag and removes the badge from every currently-rendered
+// pane so a power user dismisses once globally and not per-tab.
+const SELECTION_HINT_STORAGE_KEY = "shared-terminal:selectionHintDismissed";
+function maybeInjectSelectionHint(pane: HTMLElement) {
+	try {
+		if (localStorage.getItem(SELECTION_HINT_STORAGE_KEY) === "1") return;
+	} catch {
+		// Private browsing / disabled storage — show nothing rather
+		// than show-and-never-dismiss.
+		return;
+	}
+	const hint = document.createElement("div");
+	hint.className = "select-hint";
+	const label = document.createElement("span");
+	// Platform-aware modifier label. xterm.js's
+	// SelectionService.shouldForceSelection hard-codes the modifier:
+	// Option on Mac (gated by `macOptionClickForcesSelection`, which
+	// we enable in terminal.ts), Shift everywhere else. We mirror
+	// the SAME `navigator.platform` check xterm.js uses internally
+	// (common/Platform.ts in xterm.js 5.5) so the two agree —
+	// otherwise a user-agent string change in some browser version
+	// would have us hinting one modifier while xterm honours the
+	// other. navigator.platform is deprecated but still works in
+	// every shipping browser and is what xterm.js itself reads.
+	const isMac = ["Macintosh", "MacIntel", "MacPPC", "Mac68K"].includes(navigator.platform);
+	// innerHTML is fine here: every string is a literal we control,
+	// no user input flows in. Using innerHTML rather than three
+	// createElements keeps the markup readable.
+	label.innerHTML = isMac
+		? "Hold <kbd>⌥ Option</kbd> + drag to select text"
+		: "Hold <kbd>Shift</kbd> + drag to select text";
+	const close = document.createElement("button");
+	close.type = "button";
+	close.setAttribute("aria-label", "Dismiss selection hint");
+	close.textContent = "×";
+	close.addEventListener("click", () => {
+		try {
+			localStorage.setItem(SELECTION_HINT_STORAGE_KEY, "1");
+		} catch {
+			/* see above — best effort */
+		}
+		// Sweep every visible badge, not just this one. Multiple
+		// panes (multi-tab sessions) each carry their own hint —
+		// the user is telling us "yes I know" once, globally.
+		for (const el of document.querySelectorAll(".select-hint")) el.remove();
+	});
+	hint.append(label, close);
+	pane.appendChild(hint);
 }
 
 // ── Show terminated toggle ──────────────────────────────────────────────────

@@ -119,6 +119,17 @@ export function openTerminalSession(opts: {
 		// claude, text jumps to the next row and stays one row off". Default
 		// false matches what Ink (and standard TUI conventions) expect.
 		allowProposedApi: true,
+		// On Mac, force selection when the Option key is held — the
+		// standard xterm convention there. Without this flag, xterm.js
+		// hard-codes `event.altKey && macOptionClickForcesSelection`
+		// in SelectionService.shouldForceSelection (xterm.js 5.5),
+		// which evaluates to `false` regardless of modifier on Mac and
+		// leaves Mac users with NO way to make a selection while tmux
+		// `mouse on` (session-image/tmux.conf:54) forwards every drag
+		// to tmux. Non-Mac platforms use Shift+drag unconditionally
+		// and don't need a config flag. See the hint badge in
+		// `main.ts` for the user-facing label that mirrors this.
+		macOptionClickForcesSelection: true,
 		// Apps like Claude Code emit OSC 8 hyperlink escapes. xterm renders
 		// them (underline + pointer cursor) but needs an explicit handler
 		// to actually open them on click.

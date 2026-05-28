@@ -1782,6 +1782,61 @@ main:not([data-sidebar-ready]) #sidebar {
 .tab-pane.active {
   display: block;
 }
+/* First-session hint that points users at the Shift+drag selection
+ * gesture. tmux mouse-on (session-image/tmux.conf:54) forwards plain
+ * mouse drags to tmux for pane/copy-mode handling, so without the
+ * Shift modifier xterm never registers a selection and the
+ * copy-on-select path (terminal.ts) has nothing to copy — silent
+ * dead end with no inline signal. One-time, persisted via
+ * localStorage; clicking ✕ on any pane's badge clears the flag and
+ * removes the badge from every currently-open pane (see
+ * `injectSelectionHint` in main.ts). */
+.select-hint {
+  position: absolute;
+  bottom: 8px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 4px 4px 10px;
+  background: rgba(22, 27, 34, 0.88);
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  color: #8b949e;
+  font-size: 12px;
+  font-family: inherit;
+  z-index: 10;
+  /* Don't let the badge body steal selection drags or text-select on
+   * the terminal beneath it — only the close button needs to swallow
+   * clicks. Browsers honour pointer-events:auto on the descendant
+   * even when the parent is pointer-events:none. */
+  pointer-events: none;
+  user-select: none;
+}
+.select-hint kbd {
+  background: #1c2128;
+  border: 1px solid #30363d;
+  border-radius: 3px;
+  padding: 0 5px;
+  font-family: inherit;
+  font-size: 11px;
+  color: #e6edf3;
+}
+.select-hint button {
+  pointer-events: auto;
+  background: transparent;
+  border: 0;
+  color: #8b949e;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+.select-hint button:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #e6edf3;
+}
 #terminal-container .xterm {
   height: 100%;
 }
