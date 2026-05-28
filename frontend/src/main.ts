@@ -3763,11 +3763,16 @@ actionsSelectBtn.addEventListener("click", () => {
 		showToast("No active session", true);
 		return;
 	}
-	// copySelection toasts via the onCopy callback when it copies, so only
-	// surface the drag hint when there was nothing to copy yet.
+	// When a selection already exists the user's intent is "copy this" —
+	// copySelection handles it (and toasts via onCopy). Only when there's
+	// nothing to copy do we arm select-mode for a fresh drag; arming it
+	// after a successful copy would make the user's next scroll gesture
+	// silently intercept as a selection attempt.
 	const copied = term.copySelection();
-	term.enterSelectMode();
-	if (!copied) showToast("Drag across the terminal to select — it copies automatically");
+	if (!copied) {
+		term.enterSelectMode();
+		showToast("Drag across the terminal to select — it copies automatically");
+	}
 });
 
 // ── File attachment flow ────────────────────────────────────────────────────
