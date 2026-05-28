@@ -13,6 +13,19 @@ export interface TerminalSession {
 	dispose(): void;
 	setFontSize(px: number): void;
 	paste(text: string): void;
+	/** Copy the current xterm selection to the clipboard if non-empty.
+	 *  Returns true iff a selection was present (copy attempted), false
+	 *  if nothing was selected. Routes through the same internal
+	 *  clipboard helper + `lastCopiedSelection` dedup the auto-copy path
+	 *  uses, so an explicit menu copy of an already-auto-copied selection
+	 *  re-toasts without issuing a redundant write (#286). */
+	copySelection(): boolean;
+	/** Arm touch select-mode: the next single-finger drag produces a real
+	 *  xterm text selection instead of being translated to scroll, and
+	 *  auto-copies when the selection settles. Mode clears itself after
+	 *  one finalised selection. No-op on desktop, where a mouse drag with
+	 *  the platform modifier already selects (#286). */
+	enterSelectMode(): void;
 }
 
 export type StatusCallback = (status: SessionStatus) => void;
@@ -427,6 +440,18 @@ export function openTerminalSession(opts: {
 				lastCopiedSelection = "";
 				return;
 			}
+			// A finalised non-empty selection ends touch select-mode: the
+			// gesture armed from the actions menu is complete, so the next
+			// finger drag should scroll again. Cleared HERE — inside the
+			// debounced finalise, not the raw onSelectionChange — because
+			// the raw event fires continuously *during* the drag; exiting
+			// mid-drag would flip onTouchMove back to scroll synthesis and
+			// abort the in-progress selection. Placed before the dedup
+			// early-return below so select-mode still clears when the
+			// mouseup-immediate path (compat mouseup on touch) already
+			// copied this selection. Harmless no-op on desktop, where
+			// selectMode is never armed.
+			selectMode = false;
 			if (sel === lastCopiedSelection) return;
 			// Don't clobber the clipboard for a background tab — user
 			// might have switched to another tab during the 100 ms
@@ -632,6 +657,12 @@ export function openTerminalSession(opts: {
 	// which is the wheel-down direction.
 	let lastTouchY: number | null = null;
 	let touchIsScroll = false; // true once the gesture has moved ≥1 cell
+	// Touch select-mode (#286). When true, onTouchMove yields the gesture
+	// to xterm so a finger drag makes a text selection instead of scroll.
+	// Armed by enterSelectMode() (the actions-menu "Select & copy" entry);
+	// cleared by the onSelectionChange finalise path once a non-empty
+	// selection settles, so it lasts exactly one selection.
+	let selectMode = false;
 	const getCellHeight = () => (term.rows > 0 ? container.clientHeight / term.rows : 20);
 
 	const onTouchStart = (ev: TouchEvent) => {
@@ -644,6 +675,17 @@ export function openTerminalSession(opts: {
 		touchIsScroll = false;
 	};
 	const onTouchMove = (ev: TouchEvent) => {
+		// Select-mode: let xterm own the gesture so a finger drag builds a
+		// text selection instead of being synthesised into scroll input.
+		// We deliberately do NOT preventDefault here — the browser's
+		// compatibility mouse events (mousedown/mousemove/mouseup, emitted
+		// for the touch because `touch-action: none` suppresses native
+		// panning) are exactly what xterm's SelectionService listens on to
+		// extend the selection. Calling preventDefault would cancel them
+		// and the selection would never grow. The onSelectionChange
+		// finalise path clears selectMode once the selection settles, so
+		// the *next* drag resumes scrolling.
+		if (selectMode) return;
 		if (lastTouchY === null || ev.touches.length !== 1) {
 			// Defence-in-depth: clear lastTouchY whenever we see a non-
 			// single-touch frame. onTouchStart already clears it when a
@@ -703,7 +745,11 @@ export function openTerminalSession(opts: {
 		// Guard on lastTouchY !== null: a multi-touch start (pinch) clears
 		// lastTouchY and resets touchIsScroll, so when one finger lifts we
 		// must not treat it as a tap and pop the keyboard.
-		if (!touchIsScroll && lastTouchY !== null) term.focus();
+		// Guard on !selectMode: a select-mode drag never sets touchIsScroll
+		// (onTouchMove returns early), so without this it would read as a
+		// tap and pop the soft keyboard right over the text the user is
+		// trying to select-and-copy (#286).
+		if (!selectMode && !touchIsScroll && lastTouchY !== null) term.focus();
 		lastTouchY = null;
 		touchIsScroll = false;
 	};
@@ -915,6 +961,32 @@ export function openTerminalSession(opts: {
 		term.paste(text);
 	}
 
+	// Explicit copy of the current selection (actions-menu "Select & copy"
+	// on touch, where there's no Cmd-C). Shares `lastCopiedSelection` with
+	// the auto-copy / mouseup paths so a desktop user who triggers both the
+	// menu entry and the drag-release auto-copy of the SAME selection
+	// doesn't get a double write (#286 acceptance: "no double-copy").
+	function copySelection(): boolean {
+		const sel = term.getSelection();
+		if (!sel) return false;
+		if (sel === lastCopiedSelection) {
+			// Already on the clipboard from the auto-copy/mouseup path.
+			// Re-confirm to the user (their explicit tap deserves feedback)
+			// but skip the redundant clipboard write.
+			onCopy?.(true);
+			return true;
+		}
+		lastCopiedSelection = sel;
+		copyToClipboard(sel).then((ok) => {
+			if (!ok && lastCopiedSelection === sel) lastCopiedSelection = "";
+		});
+		return true;
+	}
+
+	function enterSelectMode() {
+		selectMode = true;
+	}
+
 	// ── Dispose ─────────────────────────────────────────────────────────────
 	function dispose() {
 		disposed = true;
@@ -954,7 +1026,7 @@ export function openTerminalSession(opts: {
 		term.dispose();
 	}
 
-	return { dispose, setFontSize, paste };
+	return { dispose, setFontSize, paste, copySelection, enterSelectMode };
 }
 
 // ── Multiline URL link provider ─────────────────────────────────────────────
