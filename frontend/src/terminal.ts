@@ -994,6 +994,9 @@ export function openTerminalSession(opts: {
 			return true;
 		}
 		lastCopiedSelection = sel;
+		// copyToClipboard fires onCopy(true/false) itself — no explicit
+		// onCopy here, unlike the dedup-hit branch above which has no write
+		// to hang the callback off of.
 		copyToClipboard(sel).then((ok) => {
 			if (!ok && lastCopiedSelection === sel) lastCopiedSelection = "";
 		});
