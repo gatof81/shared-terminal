@@ -187,6 +187,7 @@ const actionsBtn = document.getElementById("actions-btn") as HTMLButtonElement;
 const actionsMenu = document.getElementById("actions-menu")!;
 const actionsPasteBtn = document.getElementById("actions-paste-btn") as HTMLButtonElement;
 const actionsAttachBtn = document.getElementById("actions-attach-btn") as HTMLButtonElement;
+const actionsSelectBtn = document.getElementById("actions-select-btn") as HTMLButtonElement;
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
 const pasteModal = document.getElementById("paste-modal")!;
 const pasteTextarea = document.getElementById("paste-textarea") as HTMLTextAreaElement;
@@ -3746,6 +3747,32 @@ actionsAttachBtn.addEventListener("click", () => {
 	// fires `change` (browsers no-op when value is unchanged).
 	fileInput.value = "";
 	fileInput.click();
+});
+
+// "Select & copy" (#286). On touch there's no Cmd-C and tmux `mouse on`
+// forwards finger drags as scroll, so the user has no way to make — let
+// alone copy — a selection. This entry copies an existing selection if
+// one's present, then arms select-mode so the *next* finger drag builds a
+// fresh selection that auto-copies on release (the auto-copy + toast path
+// from #158 fires it; select-mode self-clears after one selection). On
+// desktop `enterSelectMode` is a harmless no-op — only the copy runs.
+actionsSelectBtn.addEventListener("click", () => {
+	closeActionsMenu();
+	const term = getActiveTerminal();
+	if (!term) {
+		showToast("No active session", true);
+		return;
+	}
+	// When a selection already exists the user's intent is "copy this" —
+	// copySelection handles it (and toasts via onCopy). Only when there's
+	// nothing to copy do we arm select-mode for a fresh drag; arming it
+	// after a successful copy would make the user's next scroll gesture
+	// silently intercept as a selection attempt.
+	const copied = term.copySelection();
+	if (!copied) {
+		term.enterSelectMode();
+		showToast("Drag across the terminal to select — it copies automatically");
+	}
 });
 
 // ── File attachment flow ────────────────────────────────────────────────────
