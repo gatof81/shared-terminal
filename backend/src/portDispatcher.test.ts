@@ -242,7 +242,7 @@ describe("createPortDispatcher (HTTP middleware)", () => {
 	});
 
 	function makeDispatcherWith(opts: {
-		target: { hostPort: number; isPublic: boolean; ownerUserId: string } | null;
+		target: { containerName: string; isPublic: boolean; ownerUserId: string } | null;
 		token?: string | null;
 	}): {
 		middleware: (req: IncomingMessage, res: ServerResponse, next: () => void) => void;
@@ -283,7 +283,7 @@ describe("createPortDispatcher (HTTP middleware)", () => {
 
 	it("proxies a public port without checking the cookie", async () => {
 		const { middleware, webSpy } = makeDispatcherWith({
-			target: { hostPort: 32768, isPublic: true, ownerUserId: "u1" },
+			target: { containerName: "st-sess", isPublic: true, ownerUserId: "u1" },
 			// Note: no token set — the verify function would return
 			// null, but it must NOT be consulted on public ports.
 		});
@@ -298,7 +298,7 @@ describe("createPortDispatcher (HTTP middleware)", () => {
 		await new Promise((r) => setImmediate(r));
 		expect(webSpy).toHaveBeenCalledTimes(1);
 		expect(webSpy.mock.calls[0]?.[2]).toEqual({
-			target: "http://127.0.0.1:32768",
+			target: "http://st-sess:3000",
 			// `changeOrigin: true` rewrites the outbound Host header
 			// so Vite-style host-checked container apps don't reject
 			// the request. PR #223 round 9 NIT.
@@ -308,7 +308,7 @@ describe("createPortDispatcher (HTTP middleware)", () => {
 
 	it("401s a private port with no cookie", async () => {
 		const { middleware, webSpy } = makeDispatcherWith({
-			target: { hostPort: 32768, isPublic: false, ownerUserId: "u1" },
+			target: { containerName: "st-sess", isPublic: false, ownerUserId: "u1" },
 			token: null,
 		});
 		const res = makeRes();
@@ -325,7 +325,7 @@ describe("createPortDispatcher (HTTP middleware)", () => {
 
 	it("403s a private port owned by a different user", async () => {
 		const { middleware, webSpy } = makeDispatcherWith({
-			target: { hostPort: 32768, isPublic: false, ownerUserId: "u-owner" },
+			target: { containerName: "st-sess", isPublic: false, ownerUserId: "u-owner" },
 			token: "u-attacker",
 		});
 		const res = makeRes();
@@ -342,7 +342,7 @@ describe("createPortDispatcher (HTTP middleware)", () => {
 
 	it("proxies a private port owned by the cookie's user", async () => {
 		const { middleware, webSpy } = makeDispatcherWith({
-			target: { hostPort: 32768, isPublic: false, ownerUserId: "u-owner" },
+			target: { containerName: "st-sess", isPublic: false, ownerUserId: "u-owner" },
 			token: "u-owner",
 		});
 		const res = makeRes();
@@ -354,7 +354,7 @@ describe("createPortDispatcher (HTTP middleware)", () => {
 		await new Promise((r) => setImmediate(r));
 		expect(webSpy).toHaveBeenCalledTimes(1);
 		expect(webSpy.mock.calls[0]?.[2]).toEqual({
-			target: "http://127.0.0.1:32768",
+			target: "http://st-sess:3000",
 			// `changeOrigin: true` rewrites the outbound Host header
 			// so Vite-style host-checked container apps don't reject
 			// the request. PR #223 round 9 NIT.
@@ -370,7 +370,7 @@ describe("createPortDispatcher (HTTP middleware)", () => {
 	// a private port's container app).
 	it("403s a private-port HTTP request from a non-allowlisted browser origin", async () => {
 		const lookup = vi.fn(async () => ({
-			hostPort: 32768,
+			containerName: "st-sess",
 			isPublic: false,
 			ownerUserId: "u-owner",
 		}));
@@ -404,7 +404,7 @@ describe("createPortDispatcher (HTTP middleware)", () => {
 
 	it("allows a same-origin HTTP request from an allowlisted browser", async () => {
 		const { middleware, webSpy } = makeDispatcherWith({
-			target: { hostPort: 32768, isPublic: false, ownerUserId: "u-owner" },
+			target: { containerName: "st-sess", isPublic: false, ownerUserId: "u-owner" },
 			token: "u-owner",
 		});
 		const res = makeRes();
@@ -423,7 +423,7 @@ describe("createPortDispatcher (HTTP middleware)", () => {
 		// through. Without this, `public: true` ports would lose the
 		// "anyone with the URL" semantics the issue spec calls out.
 		const { middleware, webSpy } = makeDispatcherWith({
-			target: { hostPort: 32768, isPublic: true, ownerUserId: "u1" },
+			target: { containerName: "st-sess", isPublic: true, ownerUserId: "u1" },
 		});
 		const res = makeRes();
 		middleware(
@@ -494,7 +494,7 @@ describe("createPortDispatcher (WS upgrade)", () => {
 		target: ParsedHost extends never
 			? never
 			: {
-					hostPort: number;
+					containerName: string;
 					isPublic: boolean;
 					ownerUserId: string;
 				} | null,
@@ -522,7 +522,7 @@ describe("createPortDispatcher (WS upgrade)", () => {
 
 	it("returns false (let existing /ws/* handler take over) when host doesn't match", () => {
 		const { handleUpgrade } = makeDispatcherWith({
-			hostPort: 32768,
+			containerName: "st-sess",
 			isPublic: true,
 			ownerUserId: "u1",
 		});
@@ -532,7 +532,7 @@ describe("createPortDispatcher (WS upgrade)", () => {
 
 	it("claims the upgrade (returns true) when host matches", () => {
 		const { handleUpgrade } = makeDispatcherWith({
-			hostPort: 32768,
+			containerName: "st-sess",
 			isPublic: true,
 			ownerUserId: "u1",
 		});
@@ -544,7 +544,7 @@ describe("createPortDispatcher (WS upgrade)", () => {
 
 	it("destroys the socket with 401 when private port has no cookie", async () => {
 		const { handleUpgrade, wsSpy } = makeDispatcherWith(
-			{ hostPort: 32768, isPublic: false, ownerUserId: "u1" },
+			{ containerName: "st-sess", isPublic: false, ownerUserId: "u1" },
 			null,
 		);
 		const { socket, written } = makeSocket();
@@ -556,7 +556,7 @@ describe("createPortDispatcher (WS upgrade)", () => {
 
 	it("forwards a private-port upgrade when the cookie's user owns the session", async () => {
 		const { handleUpgrade, wsSpy } = makeDispatcherWith(
-			{ hostPort: 32768, isPublic: false, ownerUserId: "u-owner" },
+			{ containerName: "st-sess", isPublic: false, ownerUserId: "u-owner" },
 			"u-owner",
 		);
 		const { socket } = makeSocket();
@@ -568,7 +568,7 @@ describe("createPortDispatcher (WS upgrade)", () => {
 		await new Promise((r) => setImmediate(r));
 		expect(wsSpy).toHaveBeenCalledTimes(1);
 		expect(wsSpy.mock.calls[0]?.[3]).toEqual({
-			target: "http://127.0.0.1:32768",
+			target: "http://st-sess:3000",
 			changeOrigin: true,
 		});
 	});
@@ -593,7 +593,7 @@ describe("createPortDispatcher (WS upgrade)", () => {
 	// origin).
 	it("rejects a cross-origin browser WS even when the cookie would auth", async () => {
 		const lookup = vi.fn(async () => ({
-			hostPort: 32768,
+			containerName: "st-sess",
 			isPublic: false,
 			ownerUserId: "u-owner",
 		}));
@@ -626,7 +626,7 @@ describe("createPortDispatcher (WS upgrade)", () => {
 
 	it("allows a same-origin browser WS that's in the allowlist", async () => {
 		const { handleUpgrade, wsSpy } = makeDispatcherWith(
-			{ hostPort: 32768, isPublic: false, ownerUserId: "u-owner" },
+			{ containerName: "st-sess", isPublic: false, ownerUserId: "u-owner" },
 			"u-owner",
 			{ corsOrigins: ["https://app.example.com"] },
 		);
@@ -646,7 +646,7 @@ describe("createPortDispatcher (WS upgrade)", () => {
 	// so a server-side caller without a browser still works.
 	it("allows a missing-Origin upgrade (webhook / OAuth callback shape)", async () => {
 		const { handleUpgrade, wsSpy } = makeDispatcherWith(
-			{ hostPort: 32768, isPublic: true, ownerUserId: "u1" },
+			{ containerName: "st-sess", isPublic: true, ownerUserId: "u1" },
 			null,
 			{ corsOrigins: ["https://app.example.com"] },
 		);
@@ -667,7 +667,7 @@ describe("createPortDispatcher (WS upgrade)", () => {
 
 	it("403s a private-port WS upgrade owned by a different user", async () => {
 		const { handleUpgrade, wsSpy } = makeDispatcherWith(
-			{ hostPort: 32768, isPublic: false, ownerUserId: "u-owner" },
+			{ containerName: "st-sess", isPublic: false, ownerUserId: "u-owner" },
 			"u-attacker",
 		);
 		const { socket, written } = makeSocket();
@@ -904,7 +904,7 @@ describe("dispatcher counters (#241c)", () => {
 			baseDomain: VALID_BASE,
 			corsOrigins: [],
 			lookupTarget: vi.fn(async () => ({
-				hostPort: 32768,
+				containerName: "st-sess",
 				isPublic: true, // public — skip auth
 				ownerUserId: "u-owner",
 			})),
@@ -938,7 +938,7 @@ describe("dispatcher counters (#241c)", () => {
 			baseDomain: VALID_BASE,
 			corsOrigins: [],
 			lookupTarget: vi.fn(async () => ({
-				hostPort: 32768,
+				containerName: "st-sess",
 				isPublic: true,
 				ownerUserId: "u-owner",
 			})),
@@ -1002,7 +1002,7 @@ describe("dispatcher counters (#241c)", () => {
 			baseDomain: VALID_BASE,
 			corsOrigins: [],
 			lookupTarget: vi.fn(async () => ({
-				hostPort: 32768,
+				containerName: "st-sess",
 				isPublic: true,
 				ownerUserId: "u-owner",
 			})),

@@ -900,19 +900,31 @@ describe("DockerManager.reconcile", () => {
 		return { dm, sessions };
 	}
 
-	it("rewrites sessions_port_mappings from inspect on a still-running container", async () => {
+	it("rewrites sessions_port_mappings from config on a still-running container", async () => {
+		// Direct-proxy switch: reconcile resyncs the exposed set from the
+		// declarative config (source of truth), not from inspect's host
+		// ports. The container's NetworkSettings.Ports is irrelevant now.
 		const { dm } = makeDockerWithInspectAndPorts({
 			State: { Running: true },
 			HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"] },
-			NetworkSettings: {
-				Ports: {
-					"3000/tcp": [{ HostPort: "32768" }],
-					"5500/tcp": [{ HostPort: "32769" }],
-				},
-			},
 		});
 		dbStubs.d1Query.mockResolvedValueOnce({
 			results: [{ session_id: "s-running", container_id: "container-running" }],
+			meta: { changes: 0 },
+		});
+		// The running branch loads session config (loadConfigForSpawn) to
+		// get the declared ports + per-port public flag.
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [
+				{
+					session_id: "s-running",
+					ports_json: JSON.stringify([
+						{ container: 3000, public: false },
+						{ container: 5500, public: true },
+					]),
+					allow_privileged_ports: null,
+				},
+			],
 			meta: { changes: 0 },
 		});
 
@@ -931,11 +943,10 @@ describe("DockerManager.reconcile", () => {
 		);
 		expect(deleteCall?.[1]).toEqual(["s-running"]);
 		expect(insertCalls).toHaveLength(2);
-		// 4th arg is is_public (#190 PR 190c). reconcile reloads
-		// session config to recover the per-port `public` flag — the
-		// stub config (no row) defaults all ports to private (0).
-		expect(insertCalls[0]?.[1]).toEqual(["s-running", 3000, 32768, 0]);
-		expect(insertCalls[1]?.[1]).toEqual(["s-running", 5500, 32769, 0]);
+		// Args: session_id, container_port, host_port (vestigial = container
+		// port), is_public (folded from config: 0 private, 1 public).
+		expect(insertCalls[0]?.[1]).toEqual(["s-running", 3000, 3000, 0]);
+		expect(insertCalls[1]?.[1]).toEqual(["s-running", 5500, 5500, 1]);
 	});
 
 	it("clears port mappings when reconcile finds the container stopped", async () => {
@@ -1135,40 +1146,33 @@ describe("DockerManager.startContainer", () => {
 		warnSpy.mockRestore();
 	});
 
-	// #190 PR 190b round 1 SHOULD-FIX. The Case-2 path restarts a stopped
-	// container, and Docker assigns a fresh ephemeral host port at every
-	// `start()`. `stopContainer` already cleared the mapping table, so
-	// without a post-start re-inspect the dispatcher (190c) would 404
-	// every proxied port until reconcile() runs — the most common
-	// lifecycle path for a session with declared ports.
-	it("refreshes sessions_port_mappings after restarting a stopped Case-2 container", async () => {
+	// #190 (direct-proxy switch). The Case-2 path restarts a stopped
+	// container. `stopContainer` already cleared the mapping table, so
+	// without a post-start rewrite the dispatcher would 404 every proxied
+	// port until reconcile() runs — the most common lifecycle path for a
+	// session with declared ports. Mappings now come from config (the
+	// source of truth), so there is no post-start re-inspect.
+	it("refreshes sessions_port_mappings from config after restarting a stopped Case-2 container", async () => {
 		const sessions = makeFakeSessions();
 		const dm = new DockerManager(sessions);
-		// Two distinct inspect responses: (1) the pre-start snapshot
-		// reports State.Running=false with no Ports yet; (2) the
-		// post-start snapshot returns the freshly-bound host ports.
-		// Track call count so we can hand back the second shape only
-		// after start() has been invoked.
-		let inspectCalls = 0;
-		const inspect = vi.fn(async () => {
-			inspectCalls += 1;
-			if (inspectCalls === 1) {
-				return {
-					State: { Running: false },
-					HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"] },
-					NetworkSettings: { Ports: {} },
-				};
-			}
-			return {
-				State: { Running: true },
-				HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"] },
-				NetworkSettings: {
-					Ports: {
-						"3000/tcp": [{ HostPort: "32999" }],
-					},
+		// Config load (loadConfigForSpawn) is the first D1 call in
+		// startContainer — seed the declared ports.
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [
+				{
+					session_id: "s1",
+					ports_json: JSON.stringify([{ container: 3000, public: false }]),
+					allow_privileged_ports: null,
 				},
-			};
+			],
+			meta: { changes: 0 },
 		});
+		// A single inspect (the pre-start State check). Post-start no longer
+		// re-inspects — the exposed set is derived from config, not host ports.
+		const inspect = vi.fn(async () => ({
+			State: { Running: false },
+			HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"] },
+		}));
 		const start = vi.fn(async () => {
 			/* started */
 		});
@@ -1179,15 +1183,13 @@ describe("DockerManager.startContainer", () => {
 		await dm.startContainer("s1");
 
 		expect(start).toHaveBeenCalledTimes(1);
-		expect(inspect).toHaveBeenCalledTimes(2);
-		// setPortMappings → DELETE then INSERT. The INSERT must hold
-		// the *post-start* host port (32999), not the empty pre-start
-		// snapshot.
+		expect(inspect).toHaveBeenCalledTimes(1);
+		// setPortMappings → DELETE then INSERT. Args: session_id,
+		// container_port, host_port (vestigial = container port), is_public.
 		const insertCall = dbStubs.d1Query.mock.calls.find((c) =>
 			(c[0] as string).match(/^INSERT INTO sessions_port_mappings/),
 		);
-		// 4th arg is is_public; the no-config-row case defaults to 0.
-		expect(insertCall?.[1]).toEqual(["s1", 3000, 32999, 0]);
+		expect(insertCall?.[1]).toEqual(["s1", 3000, 3000, 0]);
 	});
 
 	// Sub-branch: container was already running (e.g. operator did

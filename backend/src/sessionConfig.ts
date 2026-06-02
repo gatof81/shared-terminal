@@ -1808,3 +1808,60 @@ export async function updateResourceLimits(
 		sessionId,
 	]);
 }
+
+/**
+ * Body schema for `PATCH /api/sessions/:id/ports` (live exposed-port edit).
+ *
+ * Validates the *intrinsic* invariants — container-port range (via `PortSpec`),
+ * count cap (`MAX_PORTS`), and uniqueness — but deliberately NOT the privileged-
+ * port rule. That rule depends on the session's stored `allowPrivilegedPorts`
+ * (a `<1024` port can only be bound if the container was created with
+ * `CAP_NET_BIND_SERVICE`, which is fixed at spawn and can't be added live), so
+ * the route enforces it against the persisted config. Mirrors the uniqueness
+ * `superRefine` on `SessionConfigSchema` so the form gets the same per-row error
+ * path it does at create time.
+ */
+export const PortsPatchSchema = z
+	.object({
+		ports: z.array(PortSpec).max(MAX_PORTS),
+	})
+	.strict()
+	.superRefine((data, ctx) => {
+		const seenContainers = new Map<number, number>(); // container -> first index
+		for (let i = 0; i < data.ports.length; i++) {
+			const port = data.ports[i]!;
+			const prior = seenContainers.get(port.container);
+			if (prior !== undefined) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: ["ports", i, "container"],
+					message: `duplicate container port ${port.container} (also at index ${prior})`,
+				});
+				continue;
+			}
+			seenContainers.set(port.container, i);
+		}
+	});
+
+export type PortsPatch = z.infer<typeof PortsPatchSchema>;
+
+/**
+ * Targeted update of just `ports_json` for a session — the live-edit
+ * counterpart to `updateResourceLimits`. Same independent-of-`persistSessionConfig`
+ * rationale: the row may not exist yet (bare `config: {}` create has no
+ * `session_configs` row), and the big upsert would clobber every other column.
+ *
+ * Always writes a concrete JSON array, so an empty `ports` (the user closed
+ * every port) persists as `'[]'` — distinct from a NULL "never configured"
+ * column, and `getSessionConfig` rehydrates it as `[]` either way.
+ */
+export async function updatePorts(sessionId: string, ports: PortsPatch["ports"]): Promise<void> {
+	await d1Query(
+		`INSERT INTO session_configs (session_id) VALUES (?) ON CONFLICT(session_id) DO NOTHING`,
+		[sessionId],
+	);
+	await d1Query(`UPDATE session_configs SET ports_json = ? WHERE session_id = ?`, [
+		JSON.stringify(ports),
+		sessionId,
+	]);
+}

@@ -102,11 +102,28 @@ nano .env
 docker compose build session-image
 # or equivalently: docker build -t shared-terminal-session ./session-image
 
+# Create the shared session network (first time only). The backend and every
+# session container join this network so the port dispatcher can reach a
+# session's exposed ports directly by container name. Its name must match
+# SESSIONS_NETWORK in .env (default `sessions-net`); the compose `networks:`
+# entry declares it `external`, so compose will NOT create it for you.
+docker network create sessions-net
+
 # Build and start the backend
 docker compose up -d --build
 ```
 
 The backend will be available at `http://localhost:3001`.
+
+> **Port exposure & the shared network.** Sessions expose ports (`config.ports[]`,
+> editable live from the terminal toolbar's **Ports** button) by being reachable
+> from the backend over the `sessions-net` network — the dispatcher proxies to
+> `http://<container_name>:<port>` rather than publishing a host port. Two
+> consequences: (1) `docker network create sessions-net` must exist before
+> `docker compose up`, and (2) **after upgrading to this version, any session
+> that was already running must be stopped and started once** so it re-joins the
+> new network — until then the dispatcher can't reach its ports. This is a
+> one-time cutover, the same shape as the `COOKIE_DOMAIN` cutover below.
 
 > **Note:** the `session-image` service lives behind a `build` compose profile so
 > it is only built on demand and never runs as a long-lived container. `app` does

@@ -112,7 +112,8 @@ const idleSweeper = new IdleSweeper({
 
 // #190 PR 190c — port-exposure dispatcher. Resolves Host:
 // `p<container>-<sessionId>.<base>` to the runtime mapping in
-// `sessions_port_mappings` and reverse-proxies to 127.0.0.1:<host_port>.
+// `sessions_port_mappings` and reverse-proxies to the container by name
+// (`http://<containerName>:<containerPort>`) over the shared network.
 // Unset PORT_PROXY_BASE_DOMAIN → dispatcher is a no-op middleware so
 // dev/local without a Tunnel keeps working. Logged once here so the
 // unset case is visible at boot.

@@ -959,6 +959,35 @@ main:not([data-sidebar-ready]) #sidebar {
 .ports-row .env-input:focus {
   border-color: #58a6ff;
 }
+/* #190 — per-session ports editor modal. Reuses the .ports-table layout;
+   the row inputs/remove button mirror the create-form ports styling. */
+.ports-modal-row .ports-modal-port-input {
+  width: 7rem;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+  color: #e6edf3;
+  font-size: 0.8rem;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  outline: none;
+}
+.ports-modal-row .ports-modal-port-input:focus {
+  border-color: #58a6ff;
+}
+.ports-modal-remove {
+  background: transparent;
+  border: none;
+  color: #8b949e;
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 0 0.3rem;
+  border-radius: 4px;
+}
+.ports-modal-remove:hover {
+  color: #f85149;
+  background: rgba(248, 81, 73, 0.08);
+}
 .ports-public-toggle {
   display: inline-flex;
   align-items: center;

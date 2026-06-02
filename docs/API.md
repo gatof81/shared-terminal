@@ -23,6 +23,8 @@ Auth is via the httpOnly cookie `st_token` set by `POST /api/auth/login` and `PO
 | POST   | /api/sessions/:id/stop        | Stop container (workspace preserved)                            |
 | POST   | /api/sessions/:id/start       | Restart or respawn stopped container                            |
 | PATCH  | /api/sessions/:id/env         | Update environment variables                                    |
+| GET    | /api/sessions/:id/ports       | Get the declared exposed-port set + `allowPrivilegedPorts`      |
+| PATCH  | /api/sessions/:id/ports       | Live-edit the exposed-port set (applied without a recycle)      |
 | GET    | /api/sessions/:id/tabs        | List tmux tabs for a session                                    |
 | POST   | /api/sessions/:id/tabs        | Create a tab                                                    |
 | DELETE | /api/sessions/:id/tabs/:tabId | Delete a tab                                                    |
@@ -76,3 +78,10 @@ wss://host/ws/bootstrap/<sessionId>                # bootstrap pipeline live-tai
 ## Port-exposure dispatcher
 
 When `PORT_PROXY_BASE_DOMAIN` is set, requests to `https://p<containerPort>-<sessionId>.<base>` are diverted from the API/WS routes to the per-session reverse proxy (see `CLAUDE.md` → "Port-exposure dispatcher"). Auth gate: `public: false` ports require the `st_token` cookie owned by the session's owner; `public: true` ports skip auth (webhook / OAuth-callback shape).
+
+The dispatcher reverse-proxies to `http://<container_name>:<containerPort>` over the shared `SESSIONS_NETWORK` (Docker embedded DNS) rather than a published host port, which is why opening/closing/re-scoping a port is a live edit with no container recycle.
+
+### Live-editing exposed ports
+
+- `GET /api/sessions/:id/ports` → `{ ports: [{ container, public }], allowPrivilegedPorts }`. Owner-gated. Reflects the **declared** config set, so a stopped session still returns its configured ports.
+- `PATCH /api/sessions/:id/ports` with body `{ ports: [{ container: number, public: boolean }] }` replaces the whole set. Owner-gated. Validates range (1–65535), uniqueness, and `MAX_PORTS`. A privileged port (`< 1024`) is rejected with **400** unless the session was **created** with `allowPrivilegedPorts: true` — the `CAP_NET_BIND_SERVICE` capability is fixed at create time and can't be added to a live container, so adding one requires recreating the session. On success returns the updated session meta; changes take effect immediately on a running session.
