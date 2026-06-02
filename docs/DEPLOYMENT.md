@@ -124,6 +124,9 @@ The backend will be available at `http://localhost:3001`.
 > that was already running must be stopped and started once** so it re-joins the
 > new network — until then the dispatcher can't reach its ports. This is a
 > one-time cutover, the same shape as the `COOKIE_DOMAIN` cutover below.
+>
+> End-to-end verification of the live proxy path against a real Docker daemon is
+> tracked in [#290](https://github.com/gatof81/shared-terminal/issues/290).
 
 > **Tenancy / isolation assumption.** All session containers share `sessions-net`,
 > a user-defined bridge with embedded DNS, so any container can resolve and
@@ -139,8 +142,9 @@ The backend will be available at `http://localhost:3001`.
 > self-hosted box for one person or a small trusted team). Do **not** run mutually
 > untrusted users' sessions on the same host without adding isolation first
 > (per-session Docker networks with backend-only peering, or daemon-level
-> `icc=false` plus a network policy). Tracking hardening for a multi-tenant story
-> is out of scope for this version.
+> `icc=false` plus a network policy). Hardening for a multi-tenant story is out
+> of scope for this version and tracked in
+> [#291](https://github.com/gatof81/shared-terminal/issues/291).
 
 > **Note:** the `session-image` service lives behind a `build` compose profile so
 > it is only built on demand and never runs as a long-lived container. `app` does
