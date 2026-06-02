@@ -39,6 +39,7 @@ vi.mock("node:fs", () => ({
 }));
 
 import { buildContainerEnv, DockerManager, mergeEnvForSpawn } from "./dockerManager.js";
+import { EFFECTIVE_CPU_NANO_MAX, EFFECTIVE_MEM_BYTES_MAX } from "./sessionConfig.js";
 import type { SessionManager } from "./sessionManager.js";
 
 // ── Fakes ────────────────────────────────────────────────────────────────
@@ -246,6 +247,40 @@ describe("DockerManager.spawn config-applied", () => {
 		const hc = captured.opts.HostConfig as { Memory: number; NanoCpus: number };
 		expect(hc.Memory).toBe(8 * 1024 * 1024 * 1024);
 		expect(hc.NanoCpus).toBe(4_000_000_000);
+	});
+
+	it("clamps stored caps that exceed the operator cap on respawn (not just at ingest)", async () => {
+		// Regression: config caps were validated against MAX_SESSION_MEM/CPU
+		// at create/PATCH time, but an operator can LOWER those env caps
+		// afterwards. The stored value then exceeds the new cap, and spawn
+		// must re-clamp it — otherwise the over-cap value lands on the cgroup
+		// on every respawn, silently bypassing the operator cap. Simulate the
+		// post-lowering state with stored caps above the effective max.
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [
+				{
+					session_id: "sess-1",
+					workspace_strategy: null,
+					cpu_limit: EFFECTIVE_CPU_NANO_MAX + 1_000_000_000,
+					mem_limit: EFFECTIVE_MEM_BYTES_MAX + 1024 * 1024 * 1024,
+					idle_ttl_seconds: null,
+					post_create_cmd: null,
+					post_start_cmd: null,
+					repos_json: null,
+					ports_json: null,
+					allow_privileged_ports: null,
+					env_vars_json: null,
+					bootstrapped_at: null,
+				},
+			],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		const { dm, captured } = makeDmWithCreateCapture();
+		await dm.spawn("sess-1");
+		const hc = captured.opts.HostConfig as { Memory: number; NanoCpus: number };
+		expect(hc.Memory).toBe(EFFECTIVE_MEM_BYTES_MAX);
+		expect(hc.NanoCpus).toBe(EFFECTIVE_CPU_NANO_MAX);
 	});
 
 	// Backend-injected fixed entries (SESSION_ID, SESSION_NAME, TERM,

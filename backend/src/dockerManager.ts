@@ -347,8 +347,18 @@ export class DockerManager {
 				// id" path picks up new caps when the user fully recycles
 				// (DELETE + POST /start). #194 owns operator-tunable bounds
 				// and per-deployment caps; this PR just wires the consumer.
-				Memory: config?.memLimit ?? DEFAULT_MEMORY_BYTES,
-				NanoCpus: config?.cpuLimit ?? DEFAULT_NANO_CPUS,
+				//
+				// Re-clamp the stored config caps to the operator cap HERE,
+				// not just at ingest. `config.mem_limit`/`cpu_limit` were
+				// validated against MAX_SESSION_MEM/CPU at create/PATCH time,
+				// but an operator can LOWER those env caps afterwards (e.g.
+				// right-sizing the host). On the next respawn the stale stored
+				// value would otherwise be written to the cgroup unclamped,
+				// silently bypassing the new operator cap on every start. The
+				// DEFAULT_* constants are already `Math.min`-clamped (see their
+				// definitions); this keeps the config path symmetric.
+				Memory: Math.min(config?.memLimit ?? DEFAULT_MEMORY_BYTES, EFFECTIVE_MEM_BYTES_MAX),
+				NanoCpus: Math.min(config?.cpuLimit ?? DEFAULT_NANO_CPUS, EFFECTIVE_CPU_NANO_MAX),
 				RestartPolicy: { Name: "unless-stopped" },
 				// Defense-in-depth (issue #15): the image already runs as
 				// unprivileged UID 1000 with no sudo, but we still strip
