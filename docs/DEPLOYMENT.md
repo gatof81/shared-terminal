@@ -125,6 +125,23 @@ The backend will be available at `http://localhost:3001`.
 > new network — until then the dispatcher can't reach its ports. This is a
 > one-time cutover, the same shape as the `COOKIE_DOMAIN` cutover below.
 
+> **Tenancy / isolation assumption.** All session containers share `sessions-net`,
+> a user-defined bridge with embedded DNS, so any container can resolve and
+> connect to another by its Docker name (`st-<sessionId[:12]>`) — including ports
+> the owner never declared public (those bypass the dispatcher's auth gate, which
+> only guards ingress from the Tunnel, not container-to-container traffic). This
+> is **not a new reachability vector**: Docker's default bridge (used before this
+> version) has inter-container communication enabled by default, so containers
+> could already reach each other by IP; the shared network adds name-based
+> *discoverability* (session IDs are UUIDs, so names are enumerable but not
+> trivially guessable). **shared-terminal assumes a single-tenant host** — every
+> session belongs to operators who trust each other (the design target: a
+> self-hosted box for one person or a small trusted team). Do **not** run mutually
+> untrusted users' sessions on the same host without adding isolation first
+> (per-session Docker networks with backend-only peering, or daemon-level
+> `icc=false` plus a network policy). Tracking hardening for a multi-tenant story
+> is out of scope for this version.
+
 > **Note:** the `session-image` service lives behind a `build` compose profile so
 > it is only built on demand and never runs as a long-lived container. `app` does
 > not depend on it at runtime — it just needs the `shared-terminal-session` image
