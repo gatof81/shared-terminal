@@ -42,11 +42,13 @@ import { decryptSecret, encryptSecret } from "./secrets.js";
 // value above the hard ceiling is also clamped (with warn) instead of
 // being honoured — env-vars-can-only-lower is the explicit policy.
 //
-// NOTE: changing these does not affect already-spawned containers.
+// NOTE: changing these does not affect an already-RUNNING container —
 // Docker resource limits are written into the cgroup at `docker run`
-// (see HostConfig.NanoCpus / Memory in dockerManager.ts); a lowered
-// cap only rejects future POST /api/sessions whose `config.cpuLimit`
-// / `memLimit` exceed it.
+// (see HostConfig.NanoCpus / Memory in dockerManager.ts). But a lowered
+// cap clamps the stored value on every respawn (`spawnWithConfig`
+// re-applies `Math.min(config cap, EFFECTIVE_*_MAX)`) AND rejects new
+// POST /api/sessions whose `config.cpuLimit` / `memLimit` exceed it, so a
+// session can't stay over-cap past its next stop→start.
 const CPU_NANO_HARD_MAX = 8_000_000_000; // 8 cores — v1 ceiling
 const MEM_BYTES_HARD_MAX = 16 * 1024 * 1024 * 1024; // 16 GiB — v1 ceiling
 const CPU_NANO_FLOOR = 250_000_000; // 0.25 cores
