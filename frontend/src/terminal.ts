@@ -1331,7 +1331,10 @@ function buildWsUrl(
 	const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
 	const url = new URL(apiUrl);
 	const wsProto = url.protocol === "https:" ? "wss:" : "ws:";
-	const base = `${wsProto}//${url.host}/ws/sessions/${sessionId}`;
+	// Encode the path segment for consistency with `api.ts` (sessionId is a
+	// server-issued UUID re-validated server-side, so this is defensive
+	// tidiness rather than a fix for a live injection).
+	const base = `${wsProto}//${url.host}/ws/sessions/${encodeURIComponent(sessionId)}`;
 	const params = new URLSearchParams();
 	// tabId is server-issued and re-validated on the backend before any
 	// `tmux attach -t` — see backend/src/wsHandler.ts (rawTab regex
