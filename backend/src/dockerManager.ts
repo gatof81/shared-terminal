@@ -19,12 +19,7 @@ import {
 } from "./containerStats.js";
 import { d1Query } from "./db.js";
 import { logger } from "./logger.js";
-import {
-	annotateWithPublic,
-	clearPortMappings,
-	parseInspectPorts,
-	setPortMappings,
-} from "./portMappings.js";
+import { clearPortMappings, mappingsFromConfig, setPortMappings } from "./portMappings.js";
 import {
 	decryptStoredEntries,
 	EFFECTIVE_CPU_NANO_MAX,
@@ -36,6 +31,13 @@ import type { SessionManager } from "./sessionManager.js";
 
 const SESSION_IMAGE = process.env.SESSION_IMAGE ?? "shared-terminal-session";
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
+// #190 (direct-proxy switch) — every session container joins this shared
+// user-defined Docker network so the backend can reach it by container name
+// over Docker's embedded DNS (the dispatcher proxies to
+// `http://<containerName>:<containerPort>`). Must match the network the
+// backend `app` service is attached to in docker-compose.yml; the operator
+// creates it once with `docker network create <name>`. Default `sessions-net`.
+const SESSIONS_NETWORK = process.env.SESSIONS_NETWORK ?? "sessions-net";
 
 // Resource defaults applied at `docker run` when no per-session override
 // is set in `session_configs`. Match the values that have shipped in
@@ -307,35 +309,16 @@ export class DockerManager {
 		// reads via the read-only mount; no need for it to own anything.
 
 		const hostname = sanitiseHostname(meta.name, sessionId);
-		// #190 PR 190b — `-p 0:<container>` per declared port. Docker
-		// resolves `HostPort: ""` (or `"0"`) to a kernel-assigned ephemeral
-		// host port, which we read back from `inspect()` after `start()`
-		// and persist to `sessions_port_mappings`. The dispatcher (190c)
-		// looks the host port up there to answer `Host: p<container>-
-		// <sessionId>.<base>` requests. The dual `ExposedPorts` shape is
-		// Docker-API-mandated: it documents the listening side of the
-		// container, separate from the host-binding side; createContainer
-		// rejects `PortBindings` for an undeclared `ExposedPorts` entry.
-		// v1 publishes TCP only — every port goes through the HTTP/WS
-		// dispatcher in 190c via http-proxy. UDP would need a different
-		// topology and is out of scope.
-		const exposedPorts: Record<string, Record<string, never>> = {};
-		const portBindings: Record<string, Array<{ HostPort: string }>> = {};
-		for (const p of config?.ports ?? []) {
-			const key = `${p.container}/tcp`;
-			exposedPorts[key] = {};
-			portBindings[key] = [{ HostPort: "0" }];
-		}
+		// #190 (direct-proxy switch) — we no longer publish per-port host
+		// ports (`-p 0:<container>`). The dispatcher reaches the container
+		// directly by name over `SESSIONS_NETWORK` (Docker embedded DNS), so
+		// the exposed set is pure metadata in `sessions_port_mappings`, written
+		// from config below. Dropping host publishing removes the host attack
+		// surface AND makes opening/closing a port a live edit (no recreate).
 		const container = await this.docker.createContainer({
 			Image: SESSION_IMAGE,
 			name: meta.containerName,
 			Hostname: hostname,
-			// `ExposedPorts` is on the top-level (Image-config layer);
-			// `PortBindings` is on `HostConfig` (host-binding layer).
-			// Both must be present together for createContainer to
-			// publish the port, even though the spawn path only ever
-			// sets the bindings to ephemeral.
-			ExposedPorts: exposedPorts,
 			// `buildContainerEnv` returns a deduplicated `KEY=VALUE[]` array
 			// so the precedence is unambiguous regardless of which reader
 			// resolves the var inside the container. Duplicates in
@@ -351,7 +334,12 @@ export class DockerManager {
 					`${WORKSPACE_ROOT}/${sessionId}:/home/developer/workspace`,
 					`${uploadsHostDir}:/home/developer/uploads:ro`,
 				],
-				PortBindings: portBindings,
+				// #190 (direct-proxy switch) — join the shared user-defined
+				// network so the backend can reach this container by name via
+				// Docker's embedded DNS. The default `bridge` network has NO
+				// embedded DNS and is a different network than the compose
+				// `app` service, so name resolution would fail there.
+				NetworkMode: SESSIONS_NETWORK,
 				// `mem_limit` / `cpu_limit` from session_configs override the
 				// hardcoded defaults. Docker pins HostConfig at create time,
 				// so a later config-row UPDATE wouldn't take effect on an
@@ -403,33 +391,18 @@ export class DockerManager {
 		const containerId = container.id;
 		await this.sessions.setContainerId(sessionId, containerId);
 
-		// #190 PR 190b — read the kernel-assigned host ports back from
-		// inspect() and persist the mapping so the dispatcher (190c) can
-		// route inbound requests without re-inspecting on every hit.
-		// Best-effort: a failure here logs and lets the container run —
-		// reconcile() will resync on the next backend boot, and the
-		// dispatcher returns 404 for an unknown port until then. We do
-		// NOT roll back the spawn over a mapping-write failure: the
-		// container is up and the workspace is mounted, killing it now
-		// would lose the bootstrap pipeline's progress for what is
-		// likely a transient D1 hiccup.
+		// #190 (direct-proxy switch) — persist the exposed-port set straight
+		// from config; the dispatcher resolves the container by name, so there
+		// is no host port to inspect. Best-effort: a failure here logs and lets
+		// the container run — reconcile() resyncs on the next backend boot, and
+		// the dispatcher 404s an un-persisted port until then. We do NOT roll
+		// back the spawn over a mapping-write failure: the container is up and
+		// the workspace is mounted, killing it now would lose the bootstrap
+		// pipeline's progress for what is likely a transient D1 hiccup.
 		const declaredPorts = config?.ports ?? [];
 		if (declaredPorts.length > 0) {
 			try {
-				const info = await container.inspect();
-				const raw = parseInspectPorts(info.NetworkSettings?.Ports);
-				// Fold the configured `public` flag onto the runtime
-				// mapping row so the dispatcher (190c) doesn't need a
-				// second D1 round-trip to `session_configs.ports_json`
-				// + JSON parse on every proxied request.
-				const publicByContainer = new Map(declaredPorts.map((p) => [p.container, p.public]));
-				await setPortMappings(sessionId, annotateWithPublic(raw, publicByContainer));
-				if (raw.length !== declaredPorts.length) {
-					logger.warn(
-						`[docker] inspect returned ${raw.length} mapping(s) for session ${sessionId}, ` +
-							`expected ${declaredPorts.length}; dispatcher will 404 the missing ports`,
-					);
-				}
+				await setPortMappings(sessionId, mappingsFromConfig(declaredPorts));
 			} catch (err) {
 				logger.error(
 					`[docker] failed to persist port mappings for session ${sessionId}: ${(err as Error).message}`,
@@ -895,40 +868,21 @@ export class DockerManager {
 			this.warnIfPreHardened(sessionId, meta.containerId, info.HostConfig);
 			if (!info.State.Running) {
 				await this.docker.getContainer(meta.containerId).start();
-				// #190 PR 190b round 1 SHOULD-FIX — refresh port
-				// mappings after we restart a stopped container.
-				// `stopContainer()` clears the mapping table, and
-				// Docker assigns a fresh ephemeral host port at every
-				// start (the kernel pool isn't sticky), so the D1 row
-				// written by the original spawn is gone and the
-				// pre-start `info.NetworkSettings.Ports` snapshot is
-				// either empty or stale. Without re-inspecting here,
-				// the dispatcher (190c) would 404 every proxied port
-				// request on this session until the next reconcile()
-				// — which is the most common lifecycle path for any
-				// session with declared ports. Mirror spawn()'s
-				// best-effort pattern: a failure logs and lets the
-				// container keep running.
+				// #190 (direct-proxy switch) — rewrite the exposed-port
+				// set from config after restart. `stopContainer()` cleared
+				// the mapping rows, so without this the dispatcher would
+				// 404 every proxied port on this session until the next
+				// reconcile() — the most common lifecycle path for any
+				// session with declared ports. Config is the source of
+				// truth (the user's declarative intent, kept current by
+				// `PATCH /ports`). Skip the write when there are no ports:
+				// `stopContainer()` already cleared the table, so there's
+				// nothing to rewrite. Mirror spawn()'s best-effort pattern:
+				// a failure logs and lets the container keep running.
+				const declaredPorts = config?.ports ?? [];
 				try {
-					const fresh = await this.docker.getContainer(meta.containerId).inspect();
-					const raw = parseInspectPorts(fresh.NetworkSettings?.Ports);
-					if (raw.length > 0) {
-						// Use the config pre-loaded at the top of
-						// `startContainer` to recover the per-port
-						// `public` flag — `stopContainer()` cleared
-						// the mapping rows that previously carried
-						// it, so config (the user's declarative
-						// intent at create time) is the authoritative
-						// source. A `null` config (D1 transient or
-						// no row at create time) collapses to "all
-						// private" via the empty-array default —
-						// matches `annotateWithPublic`'s safe
-						// fallback. Pre-#207 this was a separate
-						// D1 load wrapped in its own try/catch.
-						const publicByContainer = new Map(
-							(config?.ports ?? []).map((p) => [p.container, p.public]),
-						);
-						await setPortMappings(sessionId, annotateWithPublic(raw, publicByContainer));
+					if (declaredPorts.length > 0) {
+						await setPortMappings(sessionId, mappingsFromConfig(declaredPorts));
 					}
 				} catch (err) {
 					logger.warn(
@@ -2049,36 +2003,29 @@ export class DockerManager {
 						);
 					}
 				} else {
-					// #190 PR 190b — re-discover the host-port mappings
-					// for a still-running container. The kernel-bound
-					// host ports survive a backend restart (the
-					// container itself owns them) and the D1 row
-					// written by the last spawn / startContainer
-					// survives too — but re-reading from inspect()
-					// guards against drift if a prior `setPortMappings`
-					// crashed mid-sequence (DELETE without follow-up
-					// INSERTs is the practical worst case). Best-effort:
-					// a failure here logs and lets the rest of reconcile
-					// finish; the next /start writes a fresh row.
+					// #190 (direct-proxy switch) — resync the exposed-port
+					// set for a still-running container from config (the
+					// source of truth). The D1 mapping rows written by the
+					// last spawn / startContainer survive a backend restart,
+					// but rebuilding from config here guards against drift if
+					// a prior `setPortMappings` crashed mid-sequence (DELETE
+					// without follow-up INSERTs is the practical worst case).
+					// Best-effort: a failure here logs and lets the rest of
+					// reconcile finish; the next /start writes a fresh row.
 					try {
-						const raw = parseInspectPorts(info.NetworkSettings?.Ports);
-						if (raw.length > 0) {
-							// Same source-of-truth-is-config rule as
-							// startContainer Case 2 / spawn — the
-							// per-port `public` flag is whatever the
-							// user declared at create time.
-							let publicByContainer = new Map<number, boolean>();
-							try {
-								const cfg = await this.loadConfigForSpawn(row.session_id);
-								publicByContainer = new Map((cfg?.ports ?? []).map((p) => [p.container, p.public]));
-							} catch (err) {
-								logger.warn(
-									`[docker] reconcile config reload failed for ${row.session_id}: ${(err as Error).message}`,
-								);
-							}
-							await setPortMappings(row.session_id, annotateWithPublic(raw, publicByContainer));
+						let ports: ReadonlyArray<{ container: number; public: boolean }> = [];
+						try {
+							const cfg = await this.loadConfigForSpawn(row.session_id);
+							ports = cfg?.ports ?? [];
+						} catch (err) {
+							logger.warn(
+								`[docker] reconcile config reload failed for ${row.session_id}: ${(err as Error).message}`,
+							);
+						}
+						if (ports.length > 0) {
+							await setPortMappings(row.session_id, mappingsFromConfig(ports));
 						} else {
-							// No published ports — clear any stale rows.
+							// No declared ports — clear any stale rows.
 							await clearPortMappings(row.session_id);
 						}
 					} catch (err) {

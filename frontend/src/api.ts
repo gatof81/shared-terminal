@@ -646,6 +646,45 @@ export async function updateEnvVars(
 	return res.json();
 }
 
+// ── Exposed-port live edit (#190) ────────────────────────────────────────────
+
+export interface PortSpec {
+	container: number;
+	public: boolean;
+}
+
+export interface SessionPorts {
+	ports: PortSpec[];
+	// Whether the session was created with privileged ports enabled. The
+	// capability is fixed at create time, so the editor surfaces this as a
+	// read-only hint (a < 1024 port can't be added live without a recreate).
+	allowPrivilegedPorts: boolean;
+}
+
+/** The session's DECLARED exposed-port set (from config, source of truth). */
+export async function getSessionPorts(id: string): Promise<SessionPorts> {
+	const res = await apiFetch(`/sessions/${id}/ports`);
+	if (!res.ok) throw new Error("Failed to load ports");
+	return res.json();
+}
+
+/**
+ * Live-edit the exposed-port set. Takes effect immediately on a running
+ * session (no recreate). Throws the backend's error message so the caller
+ * can surface a 400 (e.g. the privileged-port rejection) inline.
+ */
+export async function updateSessionPorts(id: string, ports: PortSpec[]): Promise<SessionInfo> {
+	const res = await apiFetch(`/sessions/${id}/ports`, {
+		method: "PATCH",
+		body: JSON.stringify({ ports }),
+	});
+	if (!res.ok) {
+		const body = (await res.json().catch(() => null)) as { error?: string } | null;
+		throw new Error(body?.error ?? "Failed to update ports");
+	}
+	return res.json();
+}
+
 // ── Tabs API ────────────────────────────────────────────────────────────────
 
 export interface Tab {

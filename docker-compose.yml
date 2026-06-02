@@ -53,9 +53,18 @@ services:
       - COOKIE_DOMAIN=${COOKIE_DOMAIN:-}
       - SESSION_IMAGE=${SESSION_IMAGE:-shared-terminal-session}
       - WORKSPACE_ROOT=/var/shared-terminal/workspaces
+      # Shared network the dispatcher uses to reach session containers by
+      # name. Must equal the `sessions-net` network defined below; forwarded
+      # so DockerManager attaches spawned containers to the same network.
+      - SESSIONS_NETWORK=${SESSIONS_NETWORK:-sessions-net}
       - CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID}
       - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
       - D1_DATABASE_ID=${D1_DATABASE_ID}
+    # Join the shared session network so the backend can reach each session
+    # container directly at `http://<container_name>:<port>` (Docker embedded
+    # DNS). Session containers are spawned onto the same network by name.
+    networks:
+      - sessions-net
     restart: unless-stopped
 
   # Build-only helper — the session image needs to exist in Docker's image
@@ -77,3 +86,16 @@ services:
     build:
       context: ./session-image
     image: shared-terminal-session
+
+# Shared network for the backend ⋈ session containers. Declared `external` so
+# its real Docker name is exactly `sessions-net` (a compose-managed network
+# would be prefixed `<project>_sessions-net`, which wouldn't match the
+# `SESSIONS_NETWORK` value DockerManager passes as the spawned container's
+# NetworkMode). Create it once before `docker compose up`:
+#
+#     docker network create sessions-net
+#
+networks:
+  sessions-net:
+    external: true
+    name: ${SESSIONS_NETWORK:-sessions-net}

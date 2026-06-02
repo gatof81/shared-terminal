@@ -42,6 +42,7 @@ import type { IdleSweeperStats } from "./idleSweeper.js";
 import { logger } from "./logger.js";
 import * as observeLog from "./observeLog.js";
 import { getDispatcherStats } from "./portDispatcher.js";
+import { mappingsFromConfig, setPortMappings } from "./portMappings.js";
 import type { RateLimitConfig } from "./rateLimit.js";
 import {
 	createAuthRateLimiters,
@@ -55,13 +56,16 @@ import {
 	EFFECTIVE_MEM_BYTES_MIN,
 	encryptAuthCredentials,
 	encryptSecretEntries,
+	getSessionConfig,
 	isEmptyConfig,
 	listResourceCaps,
 	type PersistableSessionConfig,
+	PortsPatchSchema,
 	persistSessionConfig,
 	ResourceCapsPatchSchema,
 	type SessionConfig,
 	SessionConfigValidationError,
+	updatePorts,
 	updateResourceLimits,
 	validateSessionConfig,
 } from "./sessionConfig.js";
@@ -1677,6 +1681,87 @@ export function buildRouter(
 		try {
 			await sessions.assertOwnedBy(req.params.id, userId);
 			await sessions.updateEnvVars(req.params.id, validatedEnvVars);
+			const updated = await sessions.get(req.params.id);
+			if (!updated) {
+				// Race: deleted between assertOwnership and get. See
+				// stopContainer handler above for the full explanation.
+				res.status(404).json({ error: "Session not found" });
+				return;
+			}
+			res.json(serializeMeta(updated));
+		} catch (err) {
+			handleSessionError(err, res);
+		}
+	});
+
+	// GET /sessions/:id/ports — the session's DECLARED exposed-port set
+	// (from `session_configs`, the source of truth) so the frontend ports
+	// editor can populate. Reads config rather than `sessions_port_mappings`
+	// so a stopped session (whose runtime rows are cleared) still shows the
+	// ports the owner configured. `allowPrivilegedPorts` is returned so the
+	// UI can explain that a < 1024 port needs a recreate when it's off.
+	router.get("/sessions/:id/ports", async (req: Request, res: Response) => {
+		const { userId } = req as AuthedRequest;
+		try {
+			await sessions.assertOwnedBy(req.params.id, userId);
+			const config = await getSessionConfig(req.params.id);
+			res.json({
+				ports: config?.ports ?? [],
+				allowPrivilegedPorts: config?.allowPrivilegedPorts === true,
+			});
+		} catch (err) {
+			handleSessionError(err, res);
+		}
+	});
+
+	// PATCH /sessions/:id/ports — live-edit the exposed-port set (#190).
+	// Unlike create-time config, ports are now pure metadata: the dispatcher
+	// proxies to the container by name over the shared network, so there is
+	// no `docker` recreate. We persist `ports_json` then rewrite the runtime
+	// `sessions_port_mappings` rows; the dispatcher's `status='running'` gate
+	// means a stopped session simply stores the config (mappings get re-derived
+	// on its next start). Owner-gated, mirroring `PATCH /sessions/:id/env`.
+	router.patch("/sessions/:id/ports", async (req: Request, res: Response) => {
+		const { userId } = req as AuthedRequest;
+		// `safeParse` (strict schema): unknown keys / bad shape 400 without
+		// allocating a throw. Validates range, count cap, and uniqueness;
+		// the privileged-port rule is enforced below against stored config.
+		const parsed = PortsPatchSchema.safeParse(req.body);
+		if (!parsed.success) {
+			const issue = parsed.error.issues[0]!;
+			const path = issue.path.map(String).join(".");
+			res.status(400).json({ error: path ? `${path}: ${issue.message}` : issue.message });
+			return;
+		}
+		const { ports } = parsed.data;
+		try {
+			await sessions.assertOwnedBy(req.params.id, userId);
+			// Privileged-port gate: a port < 1024 needs CAP_NET_BIND_SERVICE,
+			// which is granted at spawn from `allowPrivilegedPorts` and can't
+			// be added to a live container. So a newly-requested privileged
+			// port is only allowed if the session was CREATED with the toggle
+			// on; otherwise the in-container process would hit EACCES binding
+			// it. Reject with a clear, actionable message rather than letting
+			// the dispatcher proxy to a port nothing can listen on.
+			const config = await getSessionConfig(req.params.id);
+			if (config?.allowPrivilegedPorts !== true) {
+				const privileged = ports.find((p) => p.container < 1024);
+				if (privileged) {
+					res.status(400).json({
+						error:
+							`port ${privileged.container} is privileged (< 1024) and this session was not ` +
+							`created with privileged ports enabled; recreate the session with ` +
+							`"allow privileged ports" to expose it`,
+					});
+					return;
+				}
+			}
+			// Persist first (source of truth), then rewrite the runtime rows.
+			// Persist-before-apply matches the #270 resources PATCH: if the
+			// mapping write below fails, the next container start re-derives
+			// mappings from the now-current config regardless.
+			await updatePorts(req.params.id, ports);
+			await setPortMappings(req.params.id, mappingsFromConfig(ports));
 			const updated = await sessions.get(req.params.id);
 			if (!updated) {
 				// Race: deleted between assertOwnership and get. See

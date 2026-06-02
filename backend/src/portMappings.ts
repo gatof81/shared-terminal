@@ -1,22 +1,28 @@
 /**
- * portMappings.ts — runtime container_port → host_port table for #190.
+ * portMappings.ts — runtime "which container ports are exposed" table for #190.
  *
  * The dispatcher (190c) parses an inbound `Host: p<container>-<sessionId>.<base>`
- * header and looks the host port up here to decide where to reverse-proxy.
- * Distinct from the *declarative* `session_configs.ports_json` (the user's
- * configured list of ports to expose) — this table holds what Docker
- * actually bound on the host after `container.start()` resolved the
- * `-p 0:<container>` request to a concrete kernel-assigned ephemeral port.
+ * header and looks the target up here to decide whether to reverse-proxy and
+ * with what auth gate. Since the direct-container-proxying switch the dispatcher
+ * forwards to `http://<containerName>:<containerPort>` over the shared
+ * user-defined network (`SESSIONS_NETWORK`) — there is no published host port
+ * anymore, so this table is now a denormalised copy of the *declarative*
+ * `session_configs.ports_json` (container_port + is_public) joined against the
+ * live session row. It exists so the dispatcher's hot path is one indexed point
+ * read instead of a JSON parse of the config blob on every proxied request.
  *
  * Lifecycle:
- *   - Written by `DockerManager.spawn()` after `container.start()` (and
- *     by `reconcile()` on backend restart — the running container's
- *     bindings are still live; we just re-discover them).
+ *   - Written from config by `DockerManager.spawn()` / `startContainer()` /
+ *     `reconcile()` (via `mappingsFromConfig`), and live-rewritten by
+ *     `PATCH /api/sessions/:id/ports` when an owner edits the exposed set.
  *   - Cleared by `DockerManager.kill()` and `stopContainer()` so a
- *     stopped/dead session doesn't leave the dispatcher pointing at
- *     a host port the kernel is about to recycle.
+ *     stopped/dead session can't be proxied to.
  *   - The FK ON DELETE CASCADE in `db.ts` cleans up automatically when
  *     a hard-delete drops the session row.
+ *
+ * NOTE: the `host_port` column is vestigial (kept `NOT NULL`, written = the
+ * container port). It is no longer read by the dispatcher; dropping it is a
+ * deferred table-rebuild ticket.
  */
 
 import { d1Query } from "./db.js";
@@ -96,8 +102,15 @@ export interface PortMapping {
 /**
  * Subset of the join `sessions_port_mappings` ⋈ `sessions` the dispatcher
  * needs at request time. Returned by `lookupDispatchTarget` so the
- * dispatcher can authorize and forward in one query: host_port + is_public
- * + the owning user_id (for the `assertOwnership` check on private ports).
+ * dispatcher can authorize and forward in one query: the target container's
+ * name + is_public + the owning user_id (for the `assertOwnership` check on
+ * private ports).
+ *
+ * `containerName` is the Docker `--name` (`st-<sid[:12]>`) — the dispatcher
+ * proxies to `http://<containerName>:<containerPort>` over the shared
+ * user-defined network (`SESSIONS_NETWORK`), resolved by Docker's embedded
+ * DNS. We no longer publish per-port host ports (`-p 0:<container>`), so the
+ * vestigial `sessions_port_mappings.host_port` column is not read here.
  *
  * `null` means "no row, OR session is not running" — the dispatcher's
  * 404 response collapses both cases. We deliberately do NOT distinguish
@@ -106,7 +119,7 @@ export interface PortMapping {
  * recently-active sessions.
  */
 export interface DispatchTarget {
-	hostPort: number;
+	containerName: string;
 	isPublic: boolean;
 	ownerUserId: string;
 }
@@ -203,11 +216,11 @@ export async function lookupDispatchTarget(
 	// hits the cache instead of issuing a second D1 call.
 	const result = await d1Query<{
 		container_port: number;
-		host_port: number;
+		container_name: string;
 		is_public: number;
 		user_id: string;
 	}>(
-		`SELECT spm.container_port, spm.host_port, spm.is_public, s.user_id
+		`SELECT spm.container_port, s.container_name, spm.is_public, s.user_id
 		 FROM sessions_port_mappings spm
 		 JOIN sessions s ON s.session_id = spm.session_id
 		 WHERE spm.session_id = ? AND s.status = 'running'`,
@@ -223,7 +236,7 @@ export async function lookupDispatchTarget(
 	const byContainerPort = new Map<number, DispatchTarget>();
 	for (const row of result.results) {
 		byContainerPort.set(row.container_port, {
-			hostPort: row.host_port,
+			containerName: row.container_name,
 			isPublic: row.is_public === 1,
 			ownerUserId: row.user_id,
 		});
@@ -233,72 +246,23 @@ export async function lookupDispatchTarget(
 }
 
 /**
- * Annotate raw inspect-output mappings with the configured `public` flag
- * looked up by container port. Container ports absent from the lookup
- * default to `false` (auth required) — the safest fallback when the
- * caller's source-of-truth (config or the prior mapping row) doesn't
- * know about a particular port. Pure helper, no D1.
+ * Build the runtime mapping rows directly from the session's declarative
+ * `config.ports[]` — the source of truth now that the dispatcher proxies to
+ * the container by name over the shared network instead of to a kernel-
+ * assigned host port. There is no `inspect()` round-trip and no ephemeral
+ * host port to discover: a declared port IS the mapping.
+ *
+ * `host_port` is vestigial (the column is kept `NOT NULL` to avoid a
+ * destructive table rebuild — see `db.ts`); we write the container port into
+ * it so the column stays populated and any legacy reader sees a sane value.
+ * Pure helper, no D1.
  */
-export function annotateWithPublic(
-	raw: Array<{ containerPort: number; hostPort: number }>,
-	publicByContainer: Map<number, boolean>,
+export function mappingsFromConfig(
+	ports: ReadonlyArray<{ container: number; public: boolean }>,
 ): PortMapping[] {
-	return raw.map((m) => ({
-		...m,
-		isPublic: publicByContainer.get(m.containerPort) ?? false,
+	return ports.map((p) => ({
+		containerPort: p.container,
+		hostPort: p.container,
+		isPublic: p.public,
 	}));
-}
-
-/**
- * Parse Docker's `NetworkSettings.Ports` shape (as returned by
- * `container.inspect()`) into the PortMapping[] this module persists.
- *
- * Docker shape (only the bits we care about):
- *
- *     {
- *       "3000/tcp": [{ "HostIp": "0.0.0.0", "HostPort": "32768" }, ...],
- *       "5500/tcp": null   // exposed but not bound (--publish-all=false)
- *     }
- *
- * We take the FIRST non-null binding per container port — Docker can list
- * multiple host bindings (IPv4 + IPv6 entries are common), and they
- * always share the same kernel-assigned port number, so taking [0] is
- * sufficient. `null` and empty arrays are filtered out (those container
- * ports are exposed but unpublished, which would only happen if a
- * future code path sets `ExposedPorts` without `PortBindings` — not the
- * spawn path here, but the parser stays robust against it).
- *
- * The container-port half is `"<num>/<proto>"`; we only emit the int.
- * v1 publishes TCP only (the dispatcher in 190c is HTTP/WS); a future
- * UDP feature would extend this parser, not break it.
- *
- * Exported for the test suite.
- */
-export function parseInspectPorts(
-	ports: Record<string, Array<{ HostPort: string; HostIp?: string }> | null> | undefined | null,
-): Array<{ containerPort: number; hostPort: number }> {
-	if (!ports) return [];
-	const out: Array<{ containerPort: number; hostPort: number }> = [];
-	for (const [key, bindings] of Object.entries(ports)) {
-		if (!bindings || bindings.length === 0) continue;
-		// Match `<port>` or `<port>/<proto>`. The proto half is informational
-		// only at this stage; we assume tcp.
-		const m = key.match(/^(\d+)(?:\/[a-z]+)?$/);
-		if (!m) continue;
-		const containerPort = Number(m[1]);
-		const hostPort = Number(bindings[0]!.HostPort);
-		// Defensive against a malformed inspect response: Docker's
-		// HostPort is always a stringified positive int, but a future
-		// API change shouldn't crash the spawn path.
-		if (
-			!Number.isInteger(containerPort) ||
-			containerPort <= 0 ||
-			!Number.isInteger(hostPort) ||
-			hostPort <= 0
-		) {
-			continue;
-		}
-		out.push({ containerPort, hostPort });
-	}
-	return out;
 }

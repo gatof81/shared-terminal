@@ -4,9 +4,10 @@
  * The Cloudflare Tunnel ingresses `*.<PORT_PROXY_BASE_DOMAIN>` to the
  * backend. This module parses the inbound `Host: p<container>-<sessionId>.<base>`
  * header, looks up the runtime mapping from `sessions_port_mappings`,
- * and reverse-proxies to `127.0.0.1:<host_port>` — gating private ports
- * (the `public: false` rows) on the same `st_token` cookie that protects
- * the rest of the app.
+ * and reverse-proxies to `http://<containerName>:<containerPort>` over the
+ * shared user-defined network (`SESSIONS_NETWORK`, resolved by Docker's
+ * embedded DNS) — gating private ports (the `public: false` rows) on the
+ * same `st_token` cookie that protects the rest of the app.
  *
  * Auth shape (matches issue #190 acceptance):
  *   - `public: false`, no cookie or invalid: 401
@@ -389,16 +390,16 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 	async function authorize(
 		parsed: ParsedHost,
 		cookieHeader: string | undefined,
-	): Promise<{ status: 200; hostPort: number } | { status: 401 | 403 | 404 }> {
+	): Promise<{ status: 200; containerName: string } | { status: 401 | 403 | 404 }> {
 		const target = await lookup(parsed.sessionId, parsed.containerPort);
 		if (!target) return { status: 404 };
-		if (target.isPublic) return { status: 200, hostPort: target.hostPort };
+		if (target.isPublic) return { status: 200, containerName: target.containerName };
 		// Private port: cookie required.
 		const token = extractAuthToken(cookieHeader);
 		const payload = verify(token ?? undefined);
 		if (!payload) return { status: 401 };
 		if (payload.sub !== target.ownerUserId) return { status: 403 };
-		return { status: 200, hostPort: target.hostPort };
+		return { status: 200, containerName: target.containerName };
 	}
 
 	function middleware(req: IncomingMessage, res: ServerResponse, next: () => void): void {
@@ -460,17 +461,20 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 					res.end(bodies[result.status]);
 					return;
 				}
-				// `changeOrigin: true` rewrites the outbound `Host`
-				// header to `127.0.0.1:<host_port>` so the container
-				// app receives a hostname that matches its bound
-				// address. Vite dev server's `allowedHosts` (and
-				// similar host-based routers) reject the original
-				// `p<port>-<sid>.tunnel.example.com` value with
-				// "Invalid Host header" otherwise, breaking the
-				// most common public-port use case (running a dev
-				// server inside the session). PR #223 round 9 NIT.
+				// Direct-proxy switch — forward to the container by name
+				// over the shared user-defined network (Docker embedded
+				// DNS), not a published host port. `changeOrigin: true`
+				// rewrites the outbound `Host` header to
+				// `<containerName>:<containerPort>` so the container app
+				// receives a hostname that matches its bound address. Vite
+				// dev server's `allowedHosts` (and similar host-based
+				// routers) reject the original
+				// `p<port>-<sid>.tunnel.example.com` value with "Invalid
+				// Host header" otherwise, breaking the most common
+				// public-port use case (running a dev server inside the
+				// session). PR #223 round 9 NIT.
 				proxy.web(req, res, {
-					target: `http://127.0.0.1:${result.hostPort}`,
+					target: `http://${result.containerName}:${parsed.containerPort}`,
 					changeOrigin: true,
 				});
 			})
@@ -545,11 +549,11 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 					);
 					return;
 				}
-				// Same Host-rewrite rationale as the HTTP path above —
-				// container WS handlers (Vite HMR, etc.) host-check
-				// the upgrade request and reject mismatches.
+				// Same direct-proxy + Host-rewrite rationale as the HTTP
+				// path above — container WS handlers (Vite HMR, etc.)
+				// host-check the upgrade request and reject mismatches.
 				proxy.ws(req, socket, head, {
-					target: `http://127.0.0.1:${result.hostPort}`,
+					target: `http://${result.containerName}:${parsed.containerPort}`,
 					changeOrigin: true,
 				});
 			})
