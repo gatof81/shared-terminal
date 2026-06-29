@@ -56,14 +56,14 @@ compromised D1 export hands an attacker only ciphertext."
 
 **Enabling per-session `.env` materialisation breaks that guarantee for
 the materialised values.** When a session sets `config.writeEnvFile`
-(#277), the bootstrap stage decrypts every `secret` entry and writes it
-as a plaintext `KEY=VALUE` line into `/home/developer/workspace/.env` —
-which is the bind-mounted workspace, host path
-`<WORKSPACE_ROOT>/<sessionId>/.env`. `chmod 600` limits reads inside the
-container, but the cleartext now lives on the host filesystem, not just
-in encrypted D1.
+(#277), the bootstrap stage writes ALL env var entries — `plain` values
+verbatim and `secret` values decrypted — as plaintext `KEY=VALUE` lines
+into `/home/developer/workspace/.env`, which is the bind-mounted
+workspace, host path `<WORKSPACE_ROOT>/<sessionId>/.env`. `chmod 600`
+limits reads inside the container, but the cleartext now lives on the
+host filesystem, not just in encrypted D1.
 
-Two consequences operators should weigh before enabling it:
+Three consequences operators should weigh before enabling it:
 
 - **At-rest encryption no longer covers those values.** Anyone with
   read access to `WORKSPACE_ROOT` on the host sees the secrets in the
@@ -74,6 +74,12 @@ Two consequences operators should weigh before enabling it:
   persist after the session is "deleted." Use `?hard=true` (which runs
   `purgeWorkspace`) to actually remove a session whose `.env` held
   secrets; a plain soft delete leaves them on disk.
+- **`PATCH /sessions/:id/env` does not rewrite the on-disk `.env`.** The
+  file is written once, at create-time bootstrap; the env-var editor
+  flow updates only the encrypted D1 row. Rotating a leaked secret that
+  way replaces the ciphertext in D1 but leaves the *old* cleartext value
+  sitting in the host `.env` indefinitely — hard delete (and recreating
+  the session) is the only path that removes it from disk.
 
 This is an explicit, opt-in feature (off by default). Leave
 `writeEnvFile` unset for sessions whose secrets must stay
