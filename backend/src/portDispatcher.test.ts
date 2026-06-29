@@ -681,6 +681,21 @@ describe("createPortDispatcher (WS upgrade)", () => {
 		expect(wsSpy).not.toHaveBeenCalled();
 	});
 
+	it("forwards a private-port WS upgrade with a non-cross-site Sec-Fetch-Site", async () => {
+		const { handleUpgrade, wsSpy } = makeDispatcherWith(
+			{ containerName: "st-sess", isPublic: false, ownerUserId: "u-owner" },
+			"u-owner",
+		);
+		const { socket } = makeSocket();
+		handleUpgrade(
+			makeReq(`p3000-${SID}.tunnel.example.com`, "st_token=jwt", undefined, "same-origin"),
+			socket,
+			Buffer.alloc(0),
+		);
+		await new Promise((r) => setImmediate(r));
+		expect(wsSpy).toHaveBeenCalledTimes(1);
+	});
+
 	// PR #223 round 2 SHOULD-FIX. CSWSH defence on the WS upgrade
 	// path. SameSite=None cookies travel cross-site on WS upgrades
 	// in production; without an origin allowlist a page at
