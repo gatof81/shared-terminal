@@ -87,7 +87,23 @@ export async function d1Query<T = Record<string, unknown>>(
 		throw new Error(`D1 query failed: ${data.errors.map((e) => e.message).join(", ")}`);
 	}
 
-	return data.result[0];
+	// Guard the empty/absent result array. D1's `/query` returns one
+	// `D1QueryResult` per statement, so a single-statement query always
+	// yields `result[0]`. But a malformed `success: true` response with an
+	// empty (or entirely absent) `result` would otherwise return `undefined`
+	// — or throw on the absent case — and every caller immediately reads
+	// `.results`, surfacing as an opaque `Cannot read properties of
+	// undefined (reading 'results')` in an unrelated module rather than at
+	// the source. The `?.` covers the absent-key case too. Fail loud and
+	// sourced.
+	// `=== undefined` rather than `!first`: `first` is `D1QueryResult | undefined`
+	// (always an object when present), so the precise absent-check reads right
+	// and won't widen the throw surface if the type ever gains a falsy member.
+	const first = data.result?.[0];
+	if (first === undefined) {
+		throw new Error(`D1 returned no result set for: ${sql}`);
+	}
+	return first;
 }
 
 /**
