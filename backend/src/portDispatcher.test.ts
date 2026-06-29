@@ -387,6 +387,7 @@ describe("createPortDispatcher (HTTP middleware)", () => {
 		);
 		await new Promise((r) => setImmediate(r));
 		expect(res.statusCode).toBe(403);
+		expect(res.body).toBe("Forbidden");
 		expect(webSpy).not.toHaveBeenCalled();
 	});
 
@@ -657,6 +658,26 @@ describe("createPortDispatcher (WS upgrade)", () => {
 		handleUpgrade(makeReq(`p3000-${SID}.tunnel.example.com`), socket, Buffer.alloc(0));
 		await new Promise((r) => setImmediate(r));
 		expect(written.some((line) => line.includes("404"))).toBe(true);
+		expect(wsSpy).not.toHaveBeenCalled();
+	});
+
+	// #302 — the Sec-Fetch-Site gate is shared (authorize()), so it fires on
+	// the WS path too. Origin already catches cross-site WS in production
+	// (browsers always send Origin on `new WebSocket(...)`), but pin the
+	// symmetry against a future refactor that reorders the checks.
+	it("403s a private-port WS upgrade with Sec-Fetch-Site: cross-site", async () => {
+		const { handleUpgrade, wsSpy } = makeDispatcherWith(
+			{ containerName: "st-sess", isPublic: false, ownerUserId: "u-owner" },
+			"u-owner",
+		);
+		const { socket, written } = makeSocket();
+		handleUpgrade(
+			makeReq(`p3000-${SID}.tunnel.example.com`, "st_token=jwt", undefined, "cross-site"),
+			socket,
+			Buffer.alloc(0),
+		);
+		await new Promise((r) => setImmediate(r));
+		expect(written.some((line) => line.includes("403"))).toBe(true);
 		expect(wsSpy).not.toHaveBeenCalled();
 	});
 

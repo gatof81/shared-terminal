@@ -10,6 +10,8 @@
  * same `st_token` cookie that protects the rest of the app.
  *
  * Auth shape (matches issue #190 acceptance):
+ *   - `public: false`, `Sec-Fetch-Site: cross-site`: 403 (CSRF gate, #302 —
+ *     fires before cookie extraction / any D1 round-trip)
  *   - `public: false`, no cookie or invalid: 401
  *   - `public: false`, cookie owned by someone else: 403
  *   - `public: false`, cookie owned by session owner: 200 (proxied)
