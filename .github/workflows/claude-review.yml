@@ -48,7 +48,7 @@ jobs:
           persist-credentials: false
 
       - name: Claude review
-        uses: anthropics/claude-code-action@30544b674398ee15c84819bd87caf8a87e8c7b55 # v1.0.154
+        uses: anthropics/claude-code-action@a92e7c70a4da9793dc164451d829089dc057a464 # v1.0.159
         with:
           # Claude Max / Pro subscription (OAuth). For pay-as-you-go API billing instead,
           # comment the line below and use: anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
