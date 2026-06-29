@@ -469,6 +469,54 @@ describe("auth route rate limiting", () => {
 		});
 	}
 
+	// #307: whitespace-only username is truthy, so `!username` doesn't catch
+	// it; trim-then-check rejects it and trimming is what gets stored / looked
+	// up so register and login agree on the identity.
+	it("register rejects a whitespace-only username with 400, never calls registerUser", async () => {
+		await spinUp({
+			login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
+			register: { ipMax: 1000, ipWindowMs: 60_000 },
+		});
+		const res = await postRegister({ username: "   ", password: "secret123" });
+		expect(res.status).toBe(400);
+		expect(authStubs.registerUser).not.toHaveBeenCalled();
+	});
+
+	it("register trims surrounding whitespace before persisting the username (#307)", async () => {
+		await spinUp({
+			login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
+			register: { ipMax: 1000, ipWindowMs: 60_000 },
+		});
+		const res = await postRegister({ username: "  alice  ", password: "secret123" });
+		expect(res.status).toBe(201);
+		expect(authStubs.registerUser).toHaveBeenCalledWith("alice", "secret123", undefined);
+	});
+
+	it("login trims the username so it matches the stored (trimmed) identity (#307)", async () => {
+		await spinUp({
+			login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
+			register: { ipMax: 1000, ipWindowMs: 60_000 },
+		});
+		authStubs.loginUser.mockImplementation(async () => ({
+			userId: "u1",
+			token: "tok",
+			isAdmin: false,
+		}));
+		const res = await postLogin({ username: "  alice  ", password: "secret123" });
+		expect(res.status).toBe(200);
+		expect(authStubs.loginUser).toHaveBeenCalledWith("alice", "secret123");
+	});
+
+	it("login rejects a whitespace-only username with 400, never calls loginUser", async () => {
+		await spinUp({
+			login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
+			register: { ipMax: 1000, ipWindowMs: 60_000 },
+		});
+		const res = await postLogin({ username: "   ", password: "secret123" });
+		expect(res.status).toBe(400);
+		expect(authStubs.loginUser).not.toHaveBeenCalled();
+	});
+
 	it("login returns 429 after ipMax from one IP — 4th request is blocked", async () => {
 		await spinUp({
 			login: { ipMax: 3, ipWindowMs: 60_000, usernameMax: 1_000, usernameWindowMs: 60_000 },

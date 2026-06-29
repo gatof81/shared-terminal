@@ -189,6 +189,31 @@ describe("POST /sessions — async bootstrap dispatch (PR 185b2b)", () => {
 		bootstrapStubs.runAsyncBootstrap.mockResolvedValue(undefined);
 	});
 
+	// #307: a whitespace-only name is truthy, so `!name` doesn't catch it.
+	it("rejects a whitespace-only name with 400 and does not create a session", async () => {
+		const { sessions, docker, spies } = makeFakes();
+		await spinUp(sessions, docker);
+		const res = await fetch(`${baseUrl}/api/sessions`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ name: "   " }),
+		});
+		expect(res.status).toBe(400);
+		expect(spies.create).not.toHaveBeenCalled();
+	});
+
+	it("trims surrounding whitespace before persisting the name (#307)", async () => {
+		const { sessions, docker, spies } = makeFakes();
+		await spinUp(sessions, docker);
+		const res = await fetch(`${baseUrl}/api/sessions`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ name: "  my session  " }),
+		});
+		expect(res.status).toBe(201);
+		expect(spies.create).toHaveBeenCalledWith(expect.objectContaining({ name: "my session" }));
+	});
+
 	it("returns 201 with bootstrapping=true and kicks off runAsyncBootstrap when postCreateCmd is set", async () => {
 		const { sessions, docker, spies } = makeFakes();
 		await spinUp(sessions, docker);
