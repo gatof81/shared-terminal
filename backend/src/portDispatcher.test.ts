@@ -211,12 +211,18 @@ function makeRes(): MockRes {
 	return res;
 }
 
-function makeReq(host: string | undefined, cookie?: string, origin?: string): IncomingMessage {
+function makeReq(
+	host: string | undefined,
+	cookie?: string,
+	origin?: string,
+	secFetchSite?: string,
+): IncomingMessage {
 	return {
 		headers: {
 			...(host !== undefined ? { host } : {}),
 			...(cookie ? { cookie } : {}),
 			...(origin ? { origin } : {}),
+			...(secFetchSite ? { "sec-fetch-site": secFetchSite } : {}),
 		},
 		method: "GET",
 		url: "/",
@@ -360,6 +366,78 @@ describe("createPortDispatcher (HTTP middleware)", () => {
 			// the request. PR #223 round 9 NIT.
 			changeOrigin: true,
 		});
+		expect(res.statusCode).toBe(200);
+	});
+
+	// #302 — Fetch-metadata CSRF defence on private ports. A cross-site
+	// `<img>`/`<script>`/link navigation omits `Origin` (so the existing
+	// allowlist passes it) but the SameSite=None cookie auto-attaches.
+	// Browsers tag those `Sec-Fetch-Site: cross-site`; reject them on
+	// private ports, while same-origin/same-site/none/absent still pass.
+	it("403s a private port for a cross-site request (Sec-Fetch-Site: cross-site)", async () => {
+		const { middleware, webSpy } = makeDispatcherWith({
+			target: { containerName: "st-sess", isPublic: false, ownerUserId: "u-owner" },
+			token: "u-owner",
+		});
+		const res = makeRes();
+		middleware(
+			makeReq(`p3000-${SID}.tunnel.example.com`, "st_token=jwt", undefined, "cross-site"),
+			res as unknown as ServerResponse,
+			() => {},
+		);
+		await new Promise((r) => setImmediate(r));
+		expect(res.statusCode).toBe(403);
+		expect(webSpy).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		"same-origin",
+		"same-site",
+		"none",
+	])("proxies a private port for a non-cross-site request (Sec-Fetch-Site: %s)", async (sfs) => {
+		const { middleware, webSpy } = makeDispatcherWith({
+			target: { containerName: "st-sess", isPublic: false, ownerUserId: "u-owner" },
+			token: "u-owner",
+		});
+		const res = makeRes();
+		middleware(
+			makeReq(`p3000-${SID}.tunnel.example.com`, "st_token=jwt", undefined, sfs),
+			res as unknown as ServerResponse,
+			() => {},
+		);
+		await new Promise((r) => setImmediate(r));
+		expect(webSpy).toHaveBeenCalledTimes(1);
+		expect(res.statusCode).toBe(200);
+	});
+
+	it("proxies a private port when Sec-Fetch-Site is absent (non-browser client)", async () => {
+		const { middleware, webSpy } = makeDispatcherWith({
+			target: { containerName: "st-sess", isPublic: false, ownerUserId: "u-owner" },
+			token: "u-owner",
+		});
+		const res = makeRes();
+		middleware(
+			makeReq(`p3000-${SID}.tunnel.example.com`, "st_token=jwt"),
+			res as unknown as ServerResponse,
+			() => {},
+		);
+		await new Promise((r) => setImmediate(r));
+		expect(webSpy).toHaveBeenCalledTimes(1);
+		expect(res.statusCode).toBe(200);
+	});
+
+	it("does NOT apply the cross-site gate to public ports (webhook/OAuth shape)", async () => {
+		const { middleware, webSpy } = makeDispatcherWith({
+			target: { containerName: "st-sess", isPublic: true, ownerUserId: "u1" },
+		});
+		const res = makeRes();
+		middleware(
+			makeReq(`p3000-${SID}.tunnel.example.com`, undefined, undefined, "cross-site"),
+			res as unknown as ServerResponse,
+			() => {},
+		);
+		await new Promise((r) => setImmediate(r));
+		expect(webSpy).toHaveBeenCalledTimes(1);
 		expect(res.statusCode).toBe(200);
 	});
 

@@ -390,16 +390,41 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 	async function authorize(
 		parsed: ParsedHost,
 		cookieHeader: string | undefined,
+		secFetchSite: string | undefined,
 	): Promise<{ status: 200; containerName: string } | { status: 401 | 403 | 404 }> {
 		const target = await lookup(parsed.sessionId, parsed.containerPort);
 		if (!target) return { status: 404 };
+		// Public ports skip auth entirely (webhook / OAuth-callback shape),
+		// which are cross-site by nature and carry no credential to steal —
+		// so the Fetch-metadata gate below would wrongly break them. Return
+		// before it.
 		if (target.isPublic) return { status: 200, containerName: target.containerName };
+		// Fetch-metadata CSRF defence (#302). The Origin allowlist in the
+		// callers allows a MISSING `Origin` (for legit non-browser callers),
+		// but a cross-site `<img>` / `<script>` / link-click navigation from
+		// `evil.com` also omits `Origin` while the `SameSite=None` cookie
+		// auto-attaches — so a state-changing GET against a private port
+		// would otherwise execute with the victim's credentials. Browsers
+		// label exactly those requests `Sec-Fetch-Site: cross-site`; reject
+		// them. `same-origin` (the app's own subresources), `same-site`
+		// (a link from the main app on the shared parent domain), and
+		// `none` (the user typing the URL / a bookmark / direct nav) all
+		// pass. A MISSING header (non-browser client, pre-2020 browser)
+		// falls through to the cookie+ownership check so curl / CLI access
+		// to one's own private port isn't broken.
+		if (secFetchSite === "cross-site") return { status: 403 };
 		// Private port: cookie required.
 		const token = extractAuthToken(cookieHeader);
 		const payload = verify(token ?? undefined);
 		if (!payload) return { status: 401 };
 		if (payload.sub !== target.ownerUserId) return { status: 403 };
 		return { status: 200, containerName: target.containerName };
+	}
+
+	// `Sec-Fetch-Site` is single-valued, but Node types header values as
+	// `string | string[]`; normalise so `=== "cross-site"` is reliable.
+	function headerValue(raw: string | string[] | undefined): string | undefined {
+		return Array.isArray(raw) ? raw[0] : raw;
 	}
 
 	function middleware(req: IncomingMessage, res: ServerResponse, next: () => void): void {
@@ -445,7 +470,7 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 		// the table — a thrown `lookup`/`verify` lands in `.catch()`
 		// and emits 502 directly, the same outcome as a target-side
 		// proxy error.
-		void authorize(parsed, req.headers.cookie)
+		void authorize(parsed, req.headers.cookie, headerValue(req.headers["sec-fetch-site"]))
 			.then((result) => {
 				if (result.status !== 200) {
 					res.statusCode = result.status;
@@ -523,7 +548,7 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 			endUpgradeSocketWithReply(socket, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
 			return true;
 		}
-		void authorize(parsed, req.headers.cookie)
+		void authorize(parsed, req.headers.cookie, headerValue(req.headers["sec-fetch-site"]))
 			.then((result) => {
 				if (result.status !== 200) {
 					// Mirror the HTTP status semantics on the upgrade
