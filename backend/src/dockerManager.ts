@@ -991,6 +991,11 @@ export class DockerManager {
 		sessionId: string,
 		cmd: string,
 		onOutput?: (chunk: string) => void,
+		// #301: forward the bootstrap cap's abort signal so a hung
+		// postCreate (e.g. `npm install` against a stalled registry) is
+		// unblocked by the 10-min wall-clock timer like every other stage,
+		// instead of running unbounded and pinning the quota slot.
+		signal?: AbortSignal,
 	): Promise<{ exitCode: number }> {
 		// Thin shim over `streamExec` — postCreate is shell-typed (the
 		// user wrote `npm install && npm test` etc.) so we wrap the
@@ -1001,6 +1006,7 @@ export class DockerManager {
 			{
 				cmd: ["bash", "-c", cmd],
 				workingDir: "/home/developer/workspace",
+				signal,
 			},
 			onOutput,
 		);

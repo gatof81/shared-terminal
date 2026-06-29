@@ -424,7 +424,14 @@ describe("runAsyncBootstrap", () => {
 
 		expect(sessionConfigStubs.getSessionConfig).not.toHaveBeenCalled();
 		expect(cloneStubs.runCloneRepo).not.toHaveBeenCalled();
-		expect(spies.runPostCreate).toHaveBeenCalledWith("sess-1", "npm install", expect.any(Function));
+		// #301: postCreate must receive the bootstrap cap's AbortSignal as
+		// its 4th arg so the 10-min wall-clock timer can abort a hung hook.
+		expect(spies.runPostCreate).toHaveBeenCalledWith(
+			"sess-1",
+			"npm install",
+			expect.any(Function),
+			expect.any(AbortSignal),
+		);
 	});
 
 	// A non-zero clone exit must hard-fail the session via the SAME

@@ -601,16 +601,16 @@ export async function runAsyncBootstrap(
 	}
 
 	// postCreate. May be unset when only config-driven stages were
-	// configured (e.g. clone + agentSeed without a hook). The cap is
-	// still in force for postCreate; runPostCreate doesn't currently
-	// take a signal, but the timer can still abort the in-flight
-	// exec via the same destroy-the-stream mechanism if we extend
-	// the call. For now, postCreate's existing behaviour (no signal)
-	// means a runaway hook isn't aborted by the cap — same shape as
-	// before this PR.
+	// configured (e.g. clone + agentSeed without a hook). The 10-min
+	// wall-clock cap applies here too (#301): the signal is forwarded so
+	// the timer destroys the in-flight exec stream — a hook hanging on a
+	// stalled `npm install` / registry is aborted instead of pinning the
+	// quota slot. As with every other stage, the stream destroy only
+	// unblocks the host-side promise; `failSession` kills the container to
+	// stop the in-container process.
 	if (cfg.postCreateCmd) {
 		const ok = await runStage("postCreate", () =>
-			docker.runPostCreate(sessionId, cfg.postCreateCmd!, onOutput),
+			docker.runPostCreate(sessionId, cfg.postCreateCmd!, onOutput, signal),
 		);
 		if (!ok) return;
 	}
