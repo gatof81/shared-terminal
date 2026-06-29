@@ -290,9 +290,20 @@ export async function gatherStatsForRunning(
 		}
 		const cid = s.containerId;
 		tasks.push(
-			getContainerStats(docker, cid).then((v) => {
-				out.set(s.sessionId, v);
-			}),
+			getContainerStats(docker, cid).then(
+				(v) => {
+					out.set(s.sessionId, v);
+				},
+				// Defensive: getContainerStats resolves `null` on every
+				// known error path today, so this never fires. But if a
+				// future edit lets it reject, allSettled would silently
+				// drop the row from the map — the admin view would omit the
+				// session entirely instead of rendering `usage: null`. Map
+				// the rejection to the same `null` the resolve path uses.
+				() => {
+					out.set(s.sessionId, null);
+				},
+			),
 		);
 	}
 	await Promise.allSettled(tasks);
