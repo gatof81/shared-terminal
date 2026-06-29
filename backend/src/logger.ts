@@ -82,10 +82,21 @@ export const REDACT_PATHS = [
 	"*.Cookie",
 	"*.authorization",
 	"*.Authorization",
+	// Only lowercase for the concrete `req.headers.*` paths: Node lowercases
+	// every incoming HTTP header name, so a capital-C `req.headers.Cookie`
+	// could never match a real request object. (The `*.Cookie` wildcards
+	// above still cover a manually-built object with a capital key.)
 	"req.headers.cookie",
-	"req.headers.Cookie",
 	"req.headers.authorization",
-	"req.headers.Authorization",
+	// The RESPONSE side carries the same JWT: `setAuthCookie` writes it as a
+	// `Set-Cookie` header, so `logger.warn({ headers: res.getHeaders() })`
+	// would leak it. The hyphen needs bracket notation in fast-redact. Node
+	// lowercases response header keys too, so lowercase is the real match;
+	// the capitalised variants guard manually-built objects.
+	'["set-cookie"]',
+	'["Set-Cookie"]',
+	'*["set-cookie"]',
+	'*["Set-Cookie"]',
 ];
 
 export const logger = pino({
