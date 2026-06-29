@@ -1833,3 +1833,23 @@ describe("encryptAuthCredentials / decryptStoredAuth / redactStoredAuth", () => 
 		expect(redactStoredAuth({})).toBeUndefined();
 	});
 });
+
+// #306: git identity validation. `name` already rejects control chars
+// (INI-corruption guard); `email` must too — they're both written into
+// INI-format ~/.gitconfig by `git config --global`.
+describe("GitIdentitySpec email control-char rejection (#306)", () => {
+	const withEmail = (email: string) => ({ gitIdentity: { name: "Ada", email } });
+
+	it("accepts a normal email", () => {
+		expect(SessionConfigSchema.safeParse(withEmail("ada@example.com")).success).toBe(true);
+	});
+
+	it("rejects an email containing a non-whitespace control byte", () => {
+		// \x01 is not in \s, so it would slip past `[^\s@]+` without the guard.
+		expect(SessionConfigSchema.safeParse(withEmail("a\x01b@example.com")).success).toBe(false);
+	});
+
+	it("rejects an email with a trailing newline (regex $ admits it without the guard)", () => {
+		expect(SessionConfigSchema.safeParse(withEmail("a@b.com\n")).success).toBe(false);
+	});
+});

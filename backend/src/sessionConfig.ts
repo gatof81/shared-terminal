@@ -427,7 +427,14 @@ const GitIdentitySpec = z
 			.string()
 			.min(1)
 			.max(MAX_GIT_EMAIL_LEN)
-			.refine((e) => GIT_EMAIL_PATTERN.test(e), {
+			// Same control-char guard as `name` (#306). `GIT_EMAIL_PATTERN`
+			// alone admits them: non-whitespace control bytes (\x01-\x08,
+			// \x0e-\x1f, \x7f) aren't in `\s` so they pass `[^\s@]+`, and
+			// without the `m` flag `$` matches before a single trailing `\n`,
+			// so `"a@b\n"` validates. `git config --global user.email` writes
+			// this into INI-format ~/.gitconfig, so close the same
+			// INI-corruption surface `name` already guards.
+			.refine((e) => GIT_EMAIL_PATTERN.test(e) && !CONTROL_CHAR_PATTERN.test(e), {
 				message: "email must be of the form local@domain",
 			}),
 	})
