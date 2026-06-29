@@ -48,6 +48,45 @@ the consequences need to be explicit:
   CVE-bearing surfaces, and an unpatched RCE there inherits the
   socket-access blast radius above.
 
+## Secrets at rest
+
+`secret`-typed env entries are AES-256-GCM encrypted before they are
+written to D1 (key: `SECRETS_ENCRYPTION_KEY`). The threat model is "a
+compromised D1 export hands an attacker only ciphertext."
+
+**Enabling per-session `.env` materialisation breaks that guarantee for
+the materialised values.** When a session sets `config.writeEnvFile`
+(#277), the bootstrap stage writes ALL env var entries — `plain` values
+verbatim and `secret` values decrypted — as plaintext `KEY=VALUE` lines
+into `/home/developer/workspace/.env`, which is the bind-mounted
+workspace, host path `<WORKSPACE_ROOT>/<sessionId>/.env`. `chmod 600`
+limits reads inside the container, but the cleartext now lives on the
+host filesystem, not just in encrypted D1.
+
+Three consequences operators should weigh before enabling it:
+
+- **At-rest encryption no longer covers those values.** Anyone with
+  read access to `WORKSPACE_ROOT` on the host sees the secrets in the
+  clear, independent of `SECRETS_ENCRYPTION_KEY`.
+- **The cleartext `.env` survives a soft delete.** `DELETE
+  /api/sessions/:id` (without `?hard=true`) preserves the workspace dir
+  so the session can be restored — so the `.env`, and the secrets in it,
+  persist after the session is "deleted." Use `?hard=true` (which runs
+  `purgeWorkspace`) to actually remove a session whose `.env` held
+  secrets; a plain soft delete leaves them on disk.
+- **No API rewrites the on-disk `.env` after create-time bootstrap.** The
+  file is written once, during the create-time bootstrap pipeline.
+  Editing env vars via `PATCH /sessions/:id/env` updates only the legacy
+  `sessions.env_vars` column — it touches neither the typed
+  `session_configs` store that `writeEnvFile` reads nor the file on disk.
+  So there is no rotate-in-place path: a leaked secret's old cleartext
+  stays in the host `.env` until the session is hard-deleted (and
+  recreated).
+
+This is an explicit, opt-in feature (off by default). Leave
+`writeEnvFile` unset for sessions whose secrets must stay
+encrypted-at-rest, and prefer hard delete for any session that used it.
+
 ## Optional: docker-socket-proxy
 
 For deployments that want to shrink the backend's daemon surface

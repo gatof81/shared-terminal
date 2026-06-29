@@ -27,6 +27,23 @@
  * the caller and the `docker.streamExec` Env block here; the bash
  * script unsets `$ST_ENV_CONTENT` after the write, mirroring
  * agentSeed's defensive `unset` pattern.
+ *
+ * SECURITY — at-rest tradeoff (#303). The written `.env` holds ALL
+ * entries (`plain` values verbatim, `secret` values decrypted) as
+ * cleartext on the host bind mount (`<WORKSPACE_ROOT>/<sessionId>/.env`),
+ * so `secrets.ts`'s "a D1 export yields only ciphertext" guarantee no
+ * longer covers the secret values once this stage is enabled. `chmod 600`
+ * (below) limits in-container reads but not host-side access. And because
+ * a soft `DELETE /api/sessions/:id` preserves the workspace dir, the
+ * cleartext `.env` SURVIVES soft delete — only `?hard=true`
+ * (purgeWorkspace) removes it. No API rewrites the file after this
+ * create-time run: `PATCH /sessions/:id/env` updates only the legacy
+ * `sessions.env_vars` column, not the typed `session_configs` store this
+ * stage reads, and never the file on disk — so there is no rotate-in-place
+ * path. That same write-once property is why we do NOT shred on soft
+ * delete (it would strand a restored session without its `.env`). This is
+ * the explicit, opt-in purpose of #277; the operator consequences are
+ * documented in docs/SECURITY.md → "Secrets at rest".
  */
 
 import type { DockerManager } from "../dockerManager.js";
