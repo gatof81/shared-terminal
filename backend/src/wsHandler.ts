@@ -245,6 +245,55 @@ export function handleWsConnection(
 			sendMsg(ws, { type: "output", data });
 		};
 
+		// `observeLogId` + `teardown` are declared before the attach()
+		// await so the close/error handlers registered below — which must
+		// be in place to catch a socket that closes DURING setup — can
+		// reference them. teardown is idempotent (the `tornDown` guard):
+		// 'close' and 'error' can both fire for one socket, and the
+		// post-setup readyState re-check can invoke it a third time.
+		//
+		// Close + error both run the same teardown:
+		//   - detach() releases the docker-layer listener.
+		//   - For observe attaches, recordObserveEnd() flips the audit
+		//     row's `ended_at`. The UPDATE is idempotent (WHERE
+		//     ended_at IS NULL), so a duplicate call is a no-op. Errors
+		//     during the D1 UPDATE are logged and swallowed: a transient
+		//     at close time shouldn't crash teardown or leak via
+		//     uncaughtException.
+		let observeLogId: string | null = null;
+		let tornDown = false;
+		const teardown = (reason: "close" | "error", logCtx: string): void => {
+			if (tornDown) return;
+			tornDown = true;
+			docker.detach(attachId);
+			if (observeLogId !== null) {
+				recordObserveEnd(observeLogId).catch((err) => {
+					logger.warn(
+						`[ws] observe-log end failed on ${reason}: ${(err as Error).message} ` +
+							`(log=${observeLogId} session=${sessionId})`,
+					);
+				});
+			}
+			logger.info(`[ws] user=${userId} detached from session=${sessionId} (${logCtx})`);
+		};
+
+		// The teardown handlers are registered only AFTER attach() resolves
+		// (below), because detach() before attach() has registered its
+		// bufferedListener would race the listener insert and re-leak it.
+		// But a socket can close DURING the attach()/recordObserveStart
+		// awaits — and Node's EventEmitter does not replay a 'close' that
+		// fired before its listener existed. So during setup we only RECORD
+		// that the socket went away; the real detach runs after attach()
+		// resolves via the closedDuringSetup/readyState check below. Without
+		// this, a close mid-attach orphaned the docker listener forever:
+		// the shared exec fd leaked and the leaked outputListener kept
+		// bumping the idle-sweeper, so the session could never be auto-stopped.
+		let closedDuringSetup = false;
+		const onSetupClose = () => {
+			closedDuringSetup = true;
+		};
+		ws.on("close", onSetupClose);
+
 		// attach() hands back `flushTail` — until we call it, the listener
 		// installed inside attach() piles incoming live bytes into a local
 		// array instead of forwarding them. This lets us guarantee the
@@ -281,18 +330,37 @@ export function handleWsConnection(
 		//     and an unaudited observe would defeat the whole point
 		//     of the trail. detach() to release the listener +
 		//     re-throw so the catch block runs ws.close(1011).
-		let observeLogId: string | null = null;
-		if (isObserverNotOwner) {
+		// Skip the audit-row INSERT if the socket already went away during
+		// attach() — no point recording an observe we'd immediately have to
+		// close, and it avoids a D1 round-trip on a dead connection.
+		if (isObserverNotOwner && !closedDuringSetup) {
 			try {
 				observeLogId = await recordObserveStart(userId, sessionId, session.userId);
 			} catch (err) {
-				docker.detach(attachId);
+				teardown("error", "observe-start failed");
 				throw err;
 			}
 			logger.info(
 				`[ws] observe attach logged: observer=${userId} session=${sessionId} ` +
 					`owner=${session.userId} log=${observeLogId}`,
 			);
+		}
+
+		// Setup is done: attach() has registered its listener and any
+		// observe row exists. Swap the record-only close handler for the
+		// real teardown, then settle the race — if the socket closed at any
+		// point during setup (flag) or is simply no longer OPEN, tear down
+		// now, because the freshly-registered 'close' handler will NOT fire
+		// for a 'close' event that already emitted.
+		ws.off("close", onSetupClose);
+		ws.on("close", () => teardown("close", "close"));
+		ws.on("error", (err) => {
+			logger.error(`[ws] error on session=${sessionId}: ${err.message}`);
+			teardown("error", `error: ${err.message}`);
+		});
+		if (closedDuringSetup || ws.readyState !== WebSocket.OPEN) {
+			teardown("close", "closed-during-setup");
+			return;
 		}
 
 		sendMsg(ws, { type: "status", status: "running" });
@@ -350,35 +418,6 @@ export function handleWsConnection(
 					}
 					break;
 			}
-		});
-
-		// Close + error both run the same teardown:
-		//   - detach() releases the docker-layer listener.
-		//   - For observe attaches, recordObserveEnd() flips the audit
-		//     row's `ended_at`. The UPDATE is idempotent (WHERE
-		//     ended_at IS NULL), so if both 'close' and 'error' fire
-		//     for the same socket — common during dirty teardowns —
-		//     the second call is a no-op. Errors during the D1 UPDATE
-		//     are logged and swallowed: a transient at close time
-		//     shouldn't crash the teardown or leak via
-		//     uncaughtException.
-		const teardown = (reason: "close" | "error", logCtx: string): void => {
-			docker.detach(attachId);
-			if (observeLogId !== null) {
-				recordObserveEnd(observeLogId).catch((err) => {
-					logger.warn(
-						`[ws] observe-log end failed on ${reason}: ${(err as Error).message} ` +
-							`(log=${observeLogId} session=${sessionId})`,
-					);
-				});
-			}
-			logger.info(`[ws] user=${userId} detached from session=${sessionId} (${logCtx})`);
-		};
-
-		ws.on("close", () => teardown("close", "close"));
-		ws.on("error", (err) => {
-			logger.error(`[ws] error on session=${sessionId}: ${err.message}`);
-			teardown("error", `error: ${err.message}`);
 		});
 	})().catch((err) => {
 		if (err instanceof NotFoundError) {
