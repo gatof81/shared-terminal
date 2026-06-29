@@ -33,6 +33,7 @@ afterAll(() => {
 interface FakeWs {
 	readyState: number;
 	on: ReturnType<typeof vi.fn>;
+	off: ReturnType<typeof vi.fn>;
 	close: ReturnType<typeof vi.fn>;
 	send: ReturnType<typeof vi.fn>;
 }
@@ -41,6 +42,9 @@ function makeFakeWs(): FakeWs {
 	return {
 		readyState: 1, // WebSocket.OPEN — sendMsg() gates on this
 		on: vi.fn(),
+		// `off` mirrors the real ws EventEmitter alias; the handler swaps
+		// its setup-phase 'close' listener for the steady-state teardown.
+		off: vi.fn(),
 		close: vi.fn(),
 		send: vi.fn(),
 	};
@@ -268,6 +272,58 @@ describe("handleWsConnection geometry from URL", () => {
 	});
 });
 
+// ── Close during the attach() window (#298) ──────────────────────────────
+// Regression guard: if the socket closes WHILE docker.attach() (or the
+// observe-row INSERT) is still awaiting, the teardown handlers aren't
+// registered yet and Node won't replay the already-emitted 'close'. The
+// handler must record the early close and run detach() once attach()
+// resolves — otherwise the shared exec fd and the idle-sweeper-bumping
+// outputListener leak forever.
+
+describe("handleWsConnection close-during-attach (#298)", () => {
+	it("detaches when the socket closes during the attach() await", async () => {
+		const ws = makeFakeWs();
+		const sessions = {
+			assertOwnership: vi.fn().mockResolvedValue({ status: "running", cols: 80, rows: 24 }),
+			updateConnected: vi.fn().mockResolvedValue(undefined),
+		} as unknown as SessionManager;
+		// Deferred attach: lets the test close the socket mid-await before
+		// resolving, reproducing the race window.
+		let resolveAttach!: (v: { replay: null; flushTail: () => void }) => void;
+		const docker = {
+			attach: vi.fn(
+				() =>
+					new Promise((r) => {
+						resolveAttach = r;
+					}),
+			),
+			detach: vi.fn(),
+		} as unknown as DockerManager;
+		const req = makeReq("/ws/sessions/s-1?tab=tab-1", true);
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		handleWsConnection(ws as any, req as any, sessions, docker);
+		await vi.waitFor(() => {
+			expect(docker.attach).toHaveBeenCalled();
+		});
+
+		// Socket closes mid-attach: invoke the only 'close' listener
+		// registered so far (the setup-phase flag-setter) and flip
+		// readyState as the real transport would.
+		const earlyClose = ws.on.mock.calls.find((c) => c[0] === "close");
+		expect(earlyClose).toBeDefined();
+		(earlyClose![1] as () => void)();
+		ws.readyState = 3; // WebSocket.CLOSED
+
+		resolveAttach({ replay: null, flushTail: () => {} });
+
+		await vi.waitFor(() => {
+			expect(docker.detach).toHaveBeenCalled();
+		});
+		// The message handler must never be wired up for a dead socket.
+		expect(ws.on.mock.calls.some((c) => c[0] === "message")).toBe(false);
+	});
+});
+
 // ── Observe-mode (#201d) ─────────────────────────────────────────────────
 // `?observe=true` opts into a read-only attach gated on `assertCanObserve`.
 // The WS handler must: switch the auth call, pass `observe: true` to
@@ -378,11 +434,13 @@ describe("handleWsConnection observe-mode (#201d)", () => {
 			"s-1", // session
 			"owner-bob", // owner (denormalised at insert)
 		);
-		// Simulate WS close — handler is registered via ws.on("close", …).
-		// Find the close handler from the on() mock calls and invoke it.
-		const closeCall = ws.on.mock.calls.find((c) => c[0] === "close");
-		expect(closeCall).toBeDefined();
-		(closeCall![1] as () => void)();
+		// Simulate WS close. Two "close" listeners are registered: the
+		// setup-phase flag-setter (swapped off after attach) and the
+		// steady-state teardown. Invoke the LAST one — the real teardown
+		// that flips the audit row.
+		const closeCalls = ws.on.mock.calls.filter((c) => c[0] === "close");
+		expect(closeCalls.length).toBeGreaterThan(0);
+		(closeCalls.at(-1)![1] as () => void)();
 		// recordObserveEnd is fire-and-forget (the WS-close path doesn't
 		// await it; the SQL idempotency is the safety net). waitFor
 		// polls until the microtask the close handler scheduled lands.
