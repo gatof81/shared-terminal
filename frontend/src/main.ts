@@ -1383,7 +1383,12 @@ function startBootstrapLiveTail(session: SessionInfo, name: string) {
 
 	activeBootstrap = openBootstrapWs(session.sessionId, {
 		onOutput: (chunk) => {
-			pre.textContent += chunk;
+			// Append a text node rather than `pre.textContent += chunk`
+			// (#308): the `+=` form re-reads and re-serialises the entire
+			// accumulated log on every frame, so a verbose hook (npm install
+			// can emit hundreds of KB over the 10-min bootstrap cap) makes
+			// the modal quadratic and janky. Appending a node is O(chunk).
+			pre.appendChild(document.createTextNode(chunk));
 			// Auto-scroll to the bottom so the latest line is visible
 			// — `npm install`-style hooks emit hundreds of lines and
 			// the user expects the tail, not the head.
