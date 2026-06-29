@@ -277,9 +277,11 @@ describe("GET /api/sessions/:id/observe-log", () => {
 		const res = await fetch(`${baseUrl}/api/sessions/s-1/observe-log`);
 		expect(res.status).toBe(200);
 		await res.text();
-		// Let the res.on("finish") bump listener settle, then assert it
-		// stayed quiet.
-		await new Promise((r) => setTimeout(r, 25));
+		// Deterministically flush past the queued res.on("finish") callback
+		// (a setImmediate yields after the current I/O callbacks) rather than
+		// a fixed delay, which could false-pass under CI load. If a broken
+		// impl bumped, it would have run by now.
+		await new Promise((r) => setImmediate(r));
 		expect(idleSweeperStub.bump).not.toHaveBeenCalled();
 	});
 
@@ -322,7 +324,9 @@ describe("GET /api/sessions/:id/tabs idle-bump (#300)", () => {
 		const res = await fetch(`${baseUrl}/api/sessions/s-1/tabs`);
 		expect(res.status).toBe(200);
 		await res.text();
-		await new Promise((r) => setTimeout(r, 25));
+		// Deterministic flush past the queued finish callback — see the
+		// observe-log non-owner case for why this beats a fixed delay.
+		await new Promise((r) => setImmediate(r));
 		expect(idleSweeperStub.bump).not.toHaveBeenCalled();
 	});
 
