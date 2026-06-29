@@ -1655,6 +1655,22 @@ describe("DockerManager.kill port-mapping cleanup (#309)", () => {
 			/DELETE FROM sessions_port_mappings/.test(c[0] as string),
 		);
 		expect(del).toBeDefined();
-		expect(del?.[1]).toEqual(["s1"]);
+		expect(del![1]).toEqual(["s1"]);
+	});
+
+	it("clears port mappings even when the session row is absent (get returns undefined)", async () => {
+		// The other branch the fix closes: reconcile already dropped the
+		// row, so `sessions.get()` resolves undefined and `meta?.containerId`
+		// is false. The clear must still fire.
+		const sessions = makeFakeSessions();
+		(sessions.get as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+		const { dm } = makeDocker({ sessions });
+		dbStubs.d1Query.mockClear();
+		await dm.kill("s1");
+		const del = dbStubs.d1Query.mock.calls.find((c) =>
+			/DELETE FROM sessions_port_mappings/.test(c[0] as string),
+		);
+		expect(del).toBeDefined();
+		expect(del![1]).toEqual(["s1"]);
 	});
 });
