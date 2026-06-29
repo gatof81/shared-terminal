@@ -745,19 +745,29 @@ export class DockerManager {
 					`[docker] failed to null container_id for session ${sessionId}: ${(err as Error).message}`,
 				);
 			}
-			// #190 PR 190b — drop runtime port mappings: the host ports
-			// are about to be recycled by the kernel, and the dispatcher
-			// (190c) must NOT proxy a request to a port that's bound to
-			// some other tenant's container in the next moment. Best-
-			// effort because the container is already gone — failing to
-			// clear is a stale-row leak the next spawn / reconcile fixes.
-			try {
-				await clearPortMappings(sessionId);
-			} catch (err) {
-				logger.error(
-					`[docker] failed to clear port mappings for session ${sessionId}: ${(err as Error).message}`,
-				);
-			}
+		}
+
+		// #190 PR 190b — drop runtime port mappings: the host ports are
+		// about to be recycled by the kernel, and the dispatcher (190c)
+		// must NOT proxy a request to a port that's bound to some other
+		// tenant's container in the next moment. Best-effort because the
+		// container is already gone — failing to clear is a stale-row leak
+		// the next spawn / reconcile fixes.
+		//
+		// #309: run this OUTSIDE the `meta?.containerId` guard. A session
+		// whose row already has container_id = null (a prior partial
+		// teardown / reconcile race) can still have lingering
+		// sessions_port_mappings rows; gating the clear on a live
+		// container_id leaked them until the next reconcile. Not a routing
+		// hazard (the dispatcher JOINs on status='running'), just a leak —
+		// but cheap to close here alongside the shared-exec teardown below,
+		// which already runs unconditionally.
+		try {
+			await clearPortMappings(sessionId);
+		} catch (err) {
+			logger.error(
+				`[docker] failed to clear port mappings for session ${sessionId}: ${(err as Error).message}`,
+			);
 		}
 
 		// Destroy any shared exec and per-attach routing for this session.
