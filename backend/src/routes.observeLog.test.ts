@@ -127,6 +127,9 @@ async function spinUp(): Promise<void> {
 			sessionsCheckedSinceBoot: 0,
 			errorsSinceBoot: 0,
 		}),
+		// GET /sessions/:id/tabs reads this; the #300 bump-skip tests below
+		// exercise the tabs route too.
+		listTabs: vi.fn(async () => [] as unknown[]),
 	} as unknown as DockerManager;
 	const broadcaster = {} as BootstrapBroadcaster;
 	const router = buildRouter(
@@ -290,6 +293,47 @@ describe("GET /api/sessions/:id/observe-log", () => {
 		});
 		await spinUp();
 		const res = await fetch(`${baseUrl}/api/sessions/s-1/observe-log`);
+		expect(res.status).toBe(200);
+		await res.text();
+		await vi.waitFor(() => {
+			expect(idleSweeperStub.bump).toHaveBeenCalledWith("s-1");
+		});
+	});
+});
+
+// ── GET /api/sessions/:id/tabs idle-bump (#300) ─────────────────────────────
+// The observe UI polls the tab list at the same cadence as the log, so the
+// same skipIdleBump guard applies to this route. Mirrors the observe-log
+// cases above so a regression on the tabs guard is caught independently.
+
+describe("GET /api/sessions/:id/tabs idle-bump (#300)", () => {
+	beforeEach(() => {
+		__resetDispatcherStatsForTests();
+	});
+
+	it("does NOT bump the idle sweeper when a non-owner reads the tab list", async () => {
+		// caller "u1" (requireAuth stub); owner "u-owner".
+		fakeAssertCanObserve.mockResolvedValueOnce({
+			sessionId: "s-1",
+			userId: "u-owner",
+			status: "running",
+		});
+		await spinUp();
+		const res = await fetch(`${baseUrl}/api/sessions/s-1/tabs`);
+		expect(res.status).toBe(200);
+		await res.text();
+		await new Promise((r) => setTimeout(r, 25));
+		expect(idleSweeperStub.bump).not.toHaveBeenCalled();
+	});
+
+	it("DOES bump the idle sweeper when the owner reads their own tab list", async () => {
+		fakeAssertCanObserve.mockResolvedValueOnce({
+			sessionId: "s-1",
+			userId: "u1",
+			status: "running",
+		});
+		await spinUp();
+		const res = await fetch(`${baseUrl}/api/sessions/s-1/tabs`);
 		expect(res.status).toBe(200);
 		await res.text();
 		await vi.waitFor(() => {
