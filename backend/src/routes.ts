@@ -198,7 +198,16 @@ export function buildRouter(
 			res.status(400).json({ error: "username and password (min 6 chars) required" });
 			return;
 		}
-		if (username.length > USERNAME_MAX_LEN) {
+		// Trim and reject whitespace-only (#307): a blank-looking username
+		// would otherwise be stored verbatim and render blank in the sidebar.
+		// Mirrors the trim-then-check convention used for session / group /
+		// template names. The trimmed value is what gets persisted.
+		const trimmedUsername = username.trim();
+		if (!trimmedUsername) {
+			res.status(400).json({ error: "username and password (min 6 chars) required" });
+			return;
+		}
+		if (trimmedUsername.length > USERNAME_MAX_LEN) {
 			res.status(400).json({ error: `username must be at most ${USERNAME_MAX_LEN} characters` });
 			return;
 		}
@@ -231,7 +240,7 @@ export function buildRouter(
 			trimmedInviteCode = inviteCode.trim();
 		}
 		try {
-			const result = await registerUser(username, password, trimmedInviteCode);
+			const result = await registerUser(trimmedUsername, password, trimmedInviteCode);
 			// JWT goes out as an httpOnly cookie (#18); the response body
 			// keeps the userId for clients that want to address the new
 			// account, but never the raw token.
@@ -265,7 +274,15 @@ export function buildRouter(
 			res.status(400).json({ error: "username and password required" });
 			return;
 		}
-		if (username.length > USERNAME_MAX_LEN) {
+		// Trim to match the stored (trimmed) username from register (#307),
+		// and reject whitespace-only. Used consistently below so the
+		// per-username limiter buckets the same identity register stored.
+		const trimmedUsername = username.trim();
+		if (!trimmedUsername) {
+			res.status(400).json({ error: "username and password required" });
+			return;
+		}
+		if (trimmedUsername.length > USERNAME_MAX_LEN) {
 			res.status(400).json({ error: `username must be at most ${USERNAME_MAX_LEN} characters` });
 			return;
 		}
@@ -280,7 +297,7 @@ export function buildRouter(
 		// the event loop). Without the reservation, a burst of N requests
 		// against the same username could all pass check() and all start
 		// bcrypt before any recordFailure lands, breaking the bound.
-		const check = usernameLimiter.beginAttempt(username);
+		const check = usernameLimiter.beginAttempt(trimmedUsername);
 		if (!check.allowed) {
 			const windowSeconds = Math.ceil(rateLimitConfig.login.usernameWindowMs / 1000);
 			res.setHeader("Retry-After", String(check.retryAfterSeconds));
@@ -299,11 +316,11 @@ export function buildRouter(
 		let result: { userId: string; token: string; isAdmin: boolean; isLead: boolean };
 		try {
 			try {
-				result = await loginUser(username, password);
+				result = await loginUser(trimmedUsername, password);
 			} catch (err) {
 				if (err instanceof InvalidCredentialsError) {
 					// Only bad creds count — infra errors must not lock real users out.
-					usernameLimiter.recordFailure(username);
+					usernameLimiter.recordFailure(trimmedUsername);
 					res.status(401).json({ error: err.message });
 					return;
 				}
@@ -312,7 +329,7 @@ export function buildRouter(
 				res.status(500).json({ error: "Internal server error" });
 				return;
 			}
-			usernameLimiter.reset(username);
+			usernameLimiter.reset(trimmedUsername);
 			setAuthCookie(res, result.token);
 			res.json({
 				userId: result.userId,
@@ -325,7 +342,7 @@ export function buildRouter(
 			// counter but not this slot; pairing it with endAttempt keeps
 			// the invariant that every beginAttempt has exactly one
 			// endAttempt.
-			usernameLimiter.endAttempt(username);
+			usernameLimiter.endAttempt(trimmedUsername);
 		}
 	});
 
@@ -1154,14 +1171,23 @@ export function buildRouter(
 			res.status(400).json({ error: "body.name is required" });
 			return;
 		}
+		// Trim and reject whitespace-only (#307): "   " is truthy so it slips
+		// past the guard above and would render blank in the sidebar. Mirrors
+		// the trim-then-check convention used for group / template names. The
+		// trimmed value is what gets persisted (see sessions.create below).
+		const trimmedName = name.trim();
+		if (!trimmedName) {
+			res.status(400).json({ error: "body.name is required" });
+			return;
+		}
 		// Cap session name at the request boundary. The 100KB express.json
 		// body limit is the only upstream bound otherwise — a 50KB name
 		// would land in D1 verbatim and ride out on every list response.
 		// 64 matches USERNAME_MAX_LEN and the tab-label cap; same shape of
 		// "user-controlled string with no other natural limit" → same cap.
-		// The empty-string case is already handled by the `!name` guard
-		// above; only the upper bound needs to be checked here. See #149.
-		if (name.length > SESSION_NAME_MAX_LEN) {
+		// The empty-string case is already handled by the trim guard above;
+		// only the upper bound needs to be checked here. See #149.
+		if (trimmedName.length > SESSION_NAME_MAX_LEN) {
 			res
 				.status(400)
 				.json({ error: `body.name must be at most ${SESSION_NAME_MAX_LEN} characters` });
@@ -1228,7 +1254,13 @@ export function buildRouter(
 		// the D1 row explicitly on any spawn failure.
 		let meta: Awaited<ReturnType<SessionManager["create"]>> | null = null;
 		try {
-			meta = await sessions.create({ userId, name, cols, rows, envVars: validatedEnvVars });
+			meta = await sessions.create({
+				userId,
+				name: trimmedName,
+				cols,
+				rows,
+				envVars: validatedEnvVars,
+			});
 			// Persist the typed config BEFORE spawning the container. If
 			// docker.spawn fails the rollback in the catch below deletes
 			// the sessions row and ON DELETE CASCADE on session_configs
