@@ -60,6 +60,22 @@ describe("logger redaction (#305)", () => {
 		const nested = captureLog({ headers: { "set-cookie": JWT } });
 		expect(nested).not.toMatch(/eyJhbGciOi/);
 		expect(nested).toMatch(/\[redacted\]/);
+		// Capital-case bracket paths get their own coverage so a syntax error
+		// in those entries can't survive the suite via a lowercase test value.
+		const topCap = captureLog({ "Set-Cookie": JWT });
+		expect(topCap).not.toMatch(/eyJhbGciOi/);
+		expect(topCap).toMatch(/\[redacted\]/);
+		const nestedCap = captureLog({ headers: { "Set-Cookie": JWT } });
+		expect(nestedCap).not.toMatch(/eyJhbGciOi/);
+		expect(nestedCap).toMatch(/\[redacted\]/);
+	});
+
+	it("redacts a two-level-nested res.headers set-cookie", () => {
+		// `logger.warn({ res: { headers: res.getHeaders() } })` nests
+		// set-cookie one level deeper than the `*[...]` wildcard reaches.
+		const out = captureLog({ res: { headers: { "set-cookie": JWT } } });
+		expect(out).not.toMatch(/eyJhbGciOi/);
+		expect(out).toMatch(/\[redacted\]/);
 	});
 
 	it("does not over-redact a benign numeric `code` field", () => {

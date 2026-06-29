@@ -97,6 +97,11 @@ export const REDACT_PATHS = [
 	'["Set-Cookie"]',
 	'*["set-cookie"]',
 	'*["Set-Cookie"]',
+	// Two-level concrete paths for the response side, mirroring
+	// `req.headers.cookie`: a caller logging `{ res: { headers: ... } }`
+	// nests set-cookie one level deeper than the `*[...]` wildcard reaches.
+	'res.headers["set-cookie"]',
+	'res.headers["Set-Cookie"]',
 ];
 
 export const logger = pino({
