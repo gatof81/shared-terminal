@@ -84,4 +84,14 @@ describe("d1Query empty-result guard (#304)", () => {
 			/no result set for: SELECT \* FROM widgets/,
 		);
 	});
+
+	it("throws the same sourced error when the result key is absent entirely", async () => {
+		const { d1Query } = await import("./db.js");
+		(globalThis as { fetch: unknown }).fetch = vi.fn(
+			async () => new Response(JSON.stringify({ success: true, errors: [] }), { status: 200 }),
+		);
+		await expect(d1Query("SELECT * FROM gadgets")).rejects.toThrow(
+			/no result set for: SELECT \* FROM gadgets/,
+		);
+	});
 });
