@@ -1639,3 +1639,22 @@ describe("DockerManager.runPostStart", () => {
 		warnSpy.mockRestore();
 	});
 });
+
+// #309: clearPortMappings must run on kill() even when the session row's
+// container_id is already null (a prior partial teardown / reconcile race).
+// Gating it on a live container_id leaked sessions_port_mappings rows until
+// the next reconcile.
+describe("DockerManager.kill port-mapping cleanup (#309)", () => {
+	it("clears port mappings even when container_id is already null", async () => {
+		const { dm } = makeDocker({ sessions: makeFakeSessions(null) });
+		dbStubs.d1Query.mockClear();
+		await dm.kill("s1");
+		// clearPortMappings issues a DELETE on sessions_port_mappings bound
+		// to the session id — it must fire despite the null container.
+		const del = dbStubs.d1Query.mock.calls.find((c) =>
+			/DELETE FROM sessions_port_mappings/.test(c[0] as string),
+		);
+		expect(del).toBeDefined();
+		expect(del?.[1]).toEqual(["s1"]);
+	});
+});
