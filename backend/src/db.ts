@@ -96,8 +96,11 @@ export async function d1Query<T = Record<string, unknown>>(
 	// undefined (reading 'results')` in an unrelated module rather than at
 	// the source. The `?.` covers the absent-key case too. Fail loud and
 	// sourced.
+	// `=== undefined` rather than `!first`: `first` is `D1QueryResult | undefined`
+	// (always an object when present), so the precise absent-check reads right
+	// and won't widen the throw surface if the type ever gains a falsy member.
 	const first = data.result?.[0];
-	if (!first) {
+	if (first === undefined) {
 		throw new Error(`D1 returned no result set for: ${sql}`);
 	}
 	return first;
