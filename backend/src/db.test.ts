@@ -69,3 +69,19 @@ describe("d1 call counter (#241b)", () => {
 		expect(getD1CallsSinceBoot()).toBe(1);
 	});
 });
+
+// #304: a `success: true` response with an empty `result` array must throw
+// a sourced error at d1Query, not return undefined and surface later as
+// `Cannot read properties of undefined (reading 'results')` in a caller.
+describe("d1Query empty-result guard (#304)", () => {
+	it("throws a sourced error when result[] is empty despite success:true", async () => {
+		const { d1Query } = await import("./db.js");
+		(globalThis as { fetch: unknown }).fetch = vi.fn(
+			async () =>
+				new Response(JSON.stringify({ result: [], success: true, errors: [] }), { status: 200 }),
+		);
+		await expect(d1Query("SELECT * FROM widgets")).rejects.toThrow(
+			/no result set for: SELECT \* FROM widgets/,
+		);
+	});
+});
