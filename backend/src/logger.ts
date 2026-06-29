@@ -44,36 +44,55 @@ const transport =
 
 const defaultLevel = isProduction ? "info" : isTest ? "silent" : "debug";
 
+// Redaction acts on field paths, not message-string substrings. Listed
+// here are the known carriers of secret material in this codebase — adding
+// a new auth path that lands a JWT or invite plaintext into a log object
+// should grow this list, not depend on every caller remembering to scrub.
+//
+// Field-name list, not substring match. Picked specifically so a future
+// caller logging `{ code: statusCode }` (HTTP status, error code,
+// anything-but-an-invite-secret) doesn't get silently redacted —
+// `inviteCode` / `invite_code` cover the actual plaintext-bearing fields,
+// and any new secret carrier should land here under its own specific key.
+//
+// Exported so the redaction behaviour can be unit-tested against a captured
+// stream without reaching into the live logger's transport.
+export const REDACT_PATHS = [
+	"password",
+	"passwordHash",
+	"password_hash",
+	"token",
+	"jwt",
+	"jwtSecret",
+	"JWT_SECRET",
+	"inviteCode",
+	"invite_code",
+	"authorization",
+	"Authorization",
+	"cookie",
+	"Cookie",
+	// Nested carriers (#305): pino matches redact paths exactly from the
+	// root, so the bare keys above only scrub a TOP-LEVEL field. A future
+	// caller logging a request/headers object — `logger.info({ req })` or
+	// `logger.warn({ headers })` — would otherwise leak the `st_token` JWT
+	// riding in the Cookie / Authorization header. `*` is a single-level
+	// wildcard, so cover the realistic one-level (`headers.cookie`) and
+	// two-level (`req.headers.cookie`) nestings for the JWT-bearing headers.
+	"*.cookie",
+	"*.Cookie",
+	"*.authorization",
+	"*.Authorization",
+	"req.headers.cookie",
+	"req.headers.Cookie",
+	"req.headers.authorization",
+	"req.headers.Authorization",
+];
+
 export const logger = pino({
 	level: process.env.LOG_LEVEL ?? defaultLevel,
 	transport,
-	// Redaction acts on field paths, not message-string substrings. Listed
-	// here are the known carriers of secret material in this codebase —
-	// adding a new auth path that lands a JWT or invite plaintext into a
-	// log object should grow this list, not depend on every caller
-	// remembering to scrub.
 	redact: {
-		// Field-name list, not substring match. Picked specifically so a
-		// future caller logging `{ code: statusCode }` (HTTP status, error
-		// code, anything-but-an-invite-secret) doesn't get silently
-		// redacted — `inviteCode` / `invite_code` cover the actual
-		// plaintext-bearing fields, and any new secret carrier should
-		// land here under its own specific key.
-		paths: [
-			"password",
-			"passwordHash",
-			"password_hash",
-			"token",
-			"jwt",
-			"jwtSecret",
-			"JWT_SECRET",
-			"inviteCode",
-			"invite_code",
-			"authorization",
-			"Authorization",
-			"cookie",
-			"Cookie",
-		],
+		paths: REDACT_PATHS,
 		censor: "[redacted]",
 	},
 });
