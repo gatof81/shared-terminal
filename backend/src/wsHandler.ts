@@ -337,6 +337,11 @@ export function handleWsConnection(
 			try {
 				observeLogId = await recordObserveStart(userId, sessionId, session.userId);
 			} catch (err) {
+				// Drop the setup-phase listener here too: the outer catch
+				// closes the socket and we never reach the swap below. (The
+				// swap can't simply move above this block — that would leave
+				// the recordObserveStart await with no close listener at all.)
+				ws.off("close", onSetupClose);
 				teardown("error", "observe-start failed");
 				throw err;
 			}
