@@ -370,4 +370,51 @@ describe("lookupDispatchTarget cache (#238)", () => {
 		const got = await lookupDispatchTarget("sess-cl", 3000);
 		expect(got).toBeNull();
 	});
+
+	it("does not cache rows read before a writer invalidated mid-SELECT (#299)", async () => {
+		// Reproduces the read-populate-after-invalidate race: lookup A's
+		// SELECT is in flight (and will return STALE public rows) when an
+		// owner flips the port public->private via setPortMappings. Without
+		// the writeEpoch guard, lookup A would cache.set the stale public
+		// row AFTER the writer's post-write invalidate, serving it as
+		// public/unauthenticated for up to the TTL.
+		let releaseSelect!: () => void;
+		const selectInFlight = new Promise<void>((r) => {
+			releaseSelect = r;
+		});
+		// Lookup A's SELECT: blocks until released, then returns is_public=1.
+		dbStubs.d1Query.mockImplementationOnce(async () => {
+			await selectInFlight;
+			return {
+				results: [sessionRow(3000, "st-stale", 1)],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			};
+		});
+		const lookupA = lookupDispatchTarget("sess-race", 3000);
+
+		// Writer lands while A's SELECT is in flight (DELETE + INSERT shape
+		// irrelevant here; the point is the invalidateCache → writeEpoch bump).
+		dbStubs.d1Query.mockImplementation(async () => ({
+			results: [],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		await setPortMappings("sess-race", [{ containerPort: 3000, hostPort: 3000, isPublic: false }]);
+
+		// Let A's SELECT resolve with the now-stale public row.
+		releaseSelect();
+		await lookupA;
+
+		// The stale row must NOT have been cached: the next lookup re-fetches
+		// and sees the fresh private value.
+		dbStubs.d1Query.mockImplementationOnce(async () => ({
+			results: [sessionRow(3000, "st-fresh", 0)],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+		const after = await lookupDispatchTarget("sess-race", 3000);
+		expect(after?.containerName).toBe("st-fresh");
+		expect(after?.isPublic).toBe(false);
+	});
 });

@@ -53,6 +53,15 @@ import { d1Query } from "./db.js";
 // otherwise re-populate the cache from the half-updated table; the
 // post-write invalidate clears that.
 //
+// (#299) Before-and-after still leaves one race: a lookup whose SELECT was
+// ALREADY IN FLIGHT (holding rows read before the write) can `cache.set`
+// those stale rows AFTER the writer's post-write invalidate — re-publishing
+// them for up to the TTL. The security-relevant case is a port the owner
+// just flipped `public:true -> false` via PATCH /ports staying cached as
+// public (unauthenticated) for 30 s. `invalidateCache` therefore also bumps
+// a monotonic `writeEpoch`; `lookupDispatchTarget` snapshots it before its
+// SELECT and skips the populate if it moved across the await.
+//
 // TTL is the safety net for the unusual case where someone mutates the
 // table out-of-band (e.g. a manual SQL edit during debugging) — bounded
 // at 30 s so an operator running an experiment doesn't have to restart
@@ -76,8 +85,18 @@ interface CacheEntry {
 
 const cache = new Map<string, CacheEntry>();
 
+// Monotonic write counter (#299) — see the cache header comment. A single
+// global counter, not per-session: an invalidate for an unrelated session
+// also makes an in-flight lookup skip its populate, but that only costs an
+// occasional extra D1 round-trip (the data wasn't actually stale), and
+// writes are session-lifecycle events (spawn / stop / kill / reconcile /
+// PATCH ports) — rare next to dispatch reads. The global counter keeps the
+// bookkeeping to one number with no per-session memory growth.
+let writeEpoch = 0;
+
 function invalidateCache(sessionId: string): void {
 	cache.delete(sessionId);
+	writeEpoch++;
 }
 
 /** Test seam: drop every cached entry. The dispatcher tests that swap
@@ -87,6 +106,9 @@ function invalidateCache(sessionId: string): void {
  *  via the named import path the test file uses. */
 export function __resetDispatchCacheForTests(): void {
 	cache.clear();
+	// Reset the write epoch too so each test gets a genuine clean slate —
+	// the seam's contract is "as if freshly loaded".
+	writeEpoch = 0;
 }
 
 export interface PortMapping {
@@ -209,6 +231,13 @@ export async function lookupDispatchTarget(
 		// a paired `clearPortMappings` invalidation having fired.
 		cache.delete(sessionId);
 	}
+	// Snapshot the write epoch BEFORE the await (#299). If any writer
+	// invalidates while the SELECT below is in flight, `writeEpoch` moves and
+	// we skip the cache populate — the rows we just read may already be
+	// superseded (e.g. a public->private flip that landed mid-SELECT). Read
+	// here, while still synchronous, so no writer can interleave before the
+	// snapshot.
+	const epochAtRead = writeEpoch;
 	// Fetch the FULL set of dispatch targets for this session in one
 	// round-trip. Same JOIN as before, minus the per-port WHERE clause —
 	// the per-port lookup is satisfied from the populated map below. This
@@ -241,7 +270,14 @@ export async function lookupDispatchTarget(
 			ownerUserId: row.user_id,
 		});
 	}
-	cache.set(sessionId, { byContainerPort, expiresAt: now + CACHE_TTL_MS });
+	// Only populate if no writer invalidated during the SELECT above. A moved
+	// epoch means a setPortMappings/clearPortMappings landed mid-flight and
+	// these rows may be stale; skipping the set just makes the next lookup
+	// re-fetch (the result we return to THIS caller is still served — it's
+	// at worst as fresh as a request that arrived a moment earlier).
+	if (writeEpoch === epochAtRead) {
+		cache.set(sessionId, { byContainerPort, expiresAt: now + CACHE_TTL_MS });
+	}
 	return byContainerPort.get(containerPort) ?? null;
 }
 
