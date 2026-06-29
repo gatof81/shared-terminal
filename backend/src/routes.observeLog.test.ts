@@ -91,6 +91,12 @@ let server: http.Server | null = null;
 let baseUrl = "";
 
 const fakeAssertCanObserve = vi.fn();
+// #300: the idle-bump middleware only mounts when an idleSweeper is wired,
+// so the bump-skip regression tests below need a stub to assert against.
+const idleSweeperStub = {
+	bump: vi.fn(),
+	forget: vi.fn(),
+};
 
 afterEach(async () => {
 	if (server) {
@@ -105,6 +111,8 @@ afterEach(async () => {
 		next();
 	});
 	fakeAssertCanObserve.mockReset();
+	idleSweeperStub.bump.mockReset();
+	idleSweeperStub.forget.mockReset();
 });
 
 async function spinUp(): Promise<void> {
@@ -119,20 +127,29 @@ async function spinUp(): Promise<void> {
 			sessionsCheckedSinceBoot: 0,
 			errorsSinceBoot: 0,
 		}),
+		// GET /sessions/:id/tabs reads this; the #300 bump-skip tests below
+		// exercise the tabs route too.
+		listTabs: vi.fn(async () => [] as unknown[]),
 	} as unknown as DockerManager;
 	const broadcaster = {} as BootstrapBroadcaster;
-	const router = buildRouter(sessions, docker, broadcaster, {
-		login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
-		register: { ipMax: 1000, ipWindowMs: 60_000 },
-		invitesCreate: { ipMax: 1000, ipWindowMs: 60_000 },
-		invitesList: { ipMax: 1000, ipWindowMs: 60_000 },
-		invitesRevoke: { ipMax: 1000, ipWindowMs: 60_000 },
-		fileUpload: { ipMax: 1000, ipWindowMs: 60_000 },
-		logout: { ipMax: 1000, ipWindowMs: 60_000 },
-		authStatus: { ipMax: 1000, ipWindowMs: 60_000 },
-		adminStats: { ipMax: 1000, ipWindowMs: 60_000 },
-		adminAction: { ipMax: 1000, ipWindowMs: 60_000 },
-	});
+	const router = buildRouter(
+		sessions,
+		docker,
+		broadcaster,
+		{
+			login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
+			register: { ipMax: 1000, ipWindowMs: 60_000 },
+			invitesCreate: { ipMax: 1000, ipWindowMs: 60_000 },
+			invitesList: { ipMax: 1000, ipWindowMs: 60_000 },
+			invitesRevoke: { ipMax: 1000, ipWindowMs: 60_000 },
+			fileUpload: { ipMax: 1000, ipWindowMs: 60_000 },
+			logout: { ipMax: 1000, ipWindowMs: 60_000 },
+			authStatus: { ipMax: 1000, ipWindowMs: 60_000 },
+			adminStats: { ipMax: 1000, ipWindowMs: 60_000 },
+			adminAction: { ipMax: 1000, ipWindowMs: 60_000 },
+		},
+		idleSweeperStub,
+	);
 	const app = express();
 	app.use(express.json());
 	app.use("/api", router);
@@ -244,6 +261,88 @@ describe("GET /api/sessions/:id/observe-log", () => {
 		const res = await fetch(`${baseUrl}/api/sessions/s-1/observe-log`);
 		expect(res.status).toBe(200);
 		expect(await res.json()).toEqual([]);
+	});
+
+	// #300 regression: a non-owner observer (admin / group-lead) gets a
+	// 200 here, which would otherwise trip the idle-bump middleware and
+	// keep the OWNER's session alive forever — defeating idle auto-stop.
+	it("does NOT bump the idle sweeper when a non-owner observes (#300)", async () => {
+		// caller is "u1" (requireAuth stub); owner is "u-owner".
+		fakeAssertCanObserve.mockResolvedValueOnce({
+			sessionId: "s-1",
+			userId: "u-owner",
+			status: "running",
+		});
+		await spinUp();
+		const res = await fetch(`${baseUrl}/api/sessions/s-1/observe-log`);
+		expect(res.status).toBe(200);
+		await res.text();
+		// Deterministically flush past the queued res.on("finish") callback
+		// (a setImmediate yields after the current I/O callbacks) rather than
+		// a fixed delay, which could false-pass under CI load. If a broken
+		// impl bumped, it would have run by now.
+		await new Promise((r) => setImmediate(r));
+		expect(idleSweeperStub.bump).not.toHaveBeenCalled();
+	});
+
+	it("DOES bump the idle sweeper when the owner reads their own observe-log (#300)", async () => {
+		// caller "u1" is also the owner — their activity legitimately
+		// keeps the session alive.
+		fakeAssertCanObserve.mockResolvedValueOnce({
+			sessionId: "s-1",
+			userId: "u1",
+			status: "running",
+		});
+		await spinUp();
+		const res = await fetch(`${baseUrl}/api/sessions/s-1/observe-log`);
+		expect(res.status).toBe(200);
+		await res.text();
+		await vi.waitFor(() => {
+			expect(idleSweeperStub.bump).toHaveBeenCalledWith("s-1");
+		});
+	});
+});
+
+// ── GET /api/sessions/:id/tabs idle-bump (#300) ─────────────────────────────
+// The observe UI polls the tab list at the same cadence as the log, so the
+// same skipIdleBump guard applies to this route. Mirrors the observe-log
+// cases above so a regression on the tabs guard is caught independently.
+
+describe("GET /api/sessions/:id/tabs idle-bump (#300)", () => {
+	beforeEach(() => {
+		__resetDispatcherStatsForTests();
+	});
+
+	it("does NOT bump the idle sweeper when a non-owner reads the tab list", async () => {
+		// caller "u1" (requireAuth stub); owner "u-owner".
+		fakeAssertCanObserve.mockResolvedValueOnce({
+			sessionId: "s-1",
+			userId: "u-owner",
+			status: "running",
+		});
+		await spinUp();
+		const res = await fetch(`${baseUrl}/api/sessions/s-1/tabs`);
+		expect(res.status).toBe(200);
+		await res.text();
+		// Deterministic flush past the queued finish callback — see the
+		// observe-log non-owner case for why this beats a fixed delay.
+		await new Promise((r) => setImmediate(r));
+		expect(idleSweeperStub.bump).not.toHaveBeenCalled();
+	});
+
+	it("DOES bump the idle sweeper when the owner reads their own tab list", async () => {
+		fakeAssertCanObserve.mockResolvedValueOnce({
+			sessionId: "s-1",
+			userId: "u1",
+			status: "running",
+		});
+		await spinUp();
+		const res = await fetch(`${baseUrl}/api/sessions/s-1/tabs`);
+		expect(res.status).toBe(200);
+		await res.text();
+		await vi.waitFor(() => {
+			expect(idleSweeperStub.bump).toHaveBeenCalledWith("s-1");
+		});
 	});
 });
 

@@ -1534,7 +1534,13 @@ export function buildRouter(
 			// both shapes flow into `handleSessionError`'s standard 404
 			// / 403 emission, so callers get the same status-code
 			// contract the rest of the /sessions/:id reads use.
-			await sessions.assertCanObserve(req.params.id, userId);
+			const meta = await sessions.assertCanObserve(req.params.id, userId);
+			// (#300) A non-owner observer (admin / group-lead) gets a 200
+			// here, which would otherwise trip the idle-bump middleware and
+			// keep the OWNER's session alive — defeating idle auto-stop
+			// (#194) for any session a lead polls. Skip the bump unless the
+			// caller is the owner, so only the owner's own activity counts.
+			if (meta.userId !== userId) res.locals.skipIdleBump = true;
 			const list = await observeLog.listForSession(req.params.id);
 			res.json(list.map(serializeObserveLogEntry));
 		} catch (err) {
@@ -1793,7 +1799,13 @@ export function buildRouter(
 			// Tab CREATE / DELETE further down stay on `assertOwnedBy` —
 			// observability does NOT include the right to mutate tab
 			// state on someone else's session.
-			await sessions.assertCanObserve(req.params.id, userId);
+			const meta = await sessions.assertCanObserve(req.params.id, userId);
+			// (#300) The observe UI polls this endpoint. A non-owner
+			// observer (admin / group-lead) gets a 200, which would trip
+			// the idle-bump middleware and keep the OWNER's session alive
+			// indefinitely, defeating idle auto-stop (#194). Only the
+			// owner's own polling should count as activity.
+			if (meta.userId !== userId) res.locals.skipIdleBump = true;
 			const tabs = await docker.listTabs(req.params.id);
 			res.json(tabs);
 		} catch (err) {
