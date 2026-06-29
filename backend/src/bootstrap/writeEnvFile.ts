@@ -36,13 +36,14 @@
  * (below) limits in-container reads but not host-side access. And because
  * a soft `DELETE /api/sessions/:id` preserves the workspace dir, the
  * cleartext `.env` SURVIVES soft delete — only `?hard=true`
- * (purgeWorkspace) removes it. Note `PATCH /sessions/:id/env` does NOT
- * rewrite the file (this stage runs once at create time and would NOT
- * re-run on a later `POST /start`), so rotating a secret there leaves the
- * old cleartext on disk — that same one-time property is also why we do
- * NOT shred on soft delete (it would strand a restored session without
- * its `.env`). This is the explicit, opt-in purpose of #277; the operator
- * consequences are documented in docs/SECURITY.md → "Secrets at rest".
+ * (purgeWorkspace) removes it. No API rewrites the file after this
+ * create-time run: `PATCH /sessions/:id/env` updates only the legacy
+ * `sessions.env_vars` column, not the typed `session_configs` store this
+ * stage reads, and never the file on disk — so there is no rotate-in-place
+ * path. That same write-once property is why we do NOT shred on soft
+ * delete (it would strand a restored session without its `.env`). This is
+ * the explicit, opt-in purpose of #277; the operator consequences are
+ * documented in docs/SECURITY.md → "Secrets at rest".
  */
 
 import type { DockerManager } from "../dockerManager.js";

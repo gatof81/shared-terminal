@@ -74,12 +74,14 @@ Three consequences operators should weigh before enabling it:
   persist after the session is "deleted." Use `?hard=true` (which runs
   `purgeWorkspace`) to actually remove a session whose `.env` held
   secrets; a plain soft delete leaves them on disk.
-- **`PATCH /sessions/:id/env` does not rewrite the on-disk `.env`.** The
-  file is written once, at create-time bootstrap; the env-var editor
-  flow updates only the encrypted D1 row. Rotating a leaked secret that
-  way replaces the ciphertext in D1 but leaves the *old* cleartext value
-  sitting in the host `.env` indefinitely — hard delete (and recreating
-  the session) is the only path that removes it from disk.
+- **No API rewrites the on-disk `.env` after create-time bootstrap.** The
+  file is written once, during the create-time bootstrap pipeline.
+  Editing env vars via `PATCH /sessions/:id/env` updates only the legacy
+  `sessions.env_vars` column — it touches neither the typed
+  `session_configs` store that `writeEnvFile` reads nor the file on disk.
+  So there is no rotate-in-place path: a leaked secret's old cleartext
+  stays in the host `.env` until the session is hard-deleted (and
+  recreated).
 
 This is an explicit, opt-in feature (off by default). Leave
 `writeEnvFile` unset for sessions whose secrets must stay
