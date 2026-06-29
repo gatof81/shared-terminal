@@ -106,6 +106,9 @@ function invalidateCache(sessionId: string): void {
  *  via the named import path the test file uses. */
 export function __resetDispatchCacheForTests(): void {
 	cache.clear();
+	// Reset the write epoch too so each test gets a genuine clean slate —
+	// the seam's contract is "as if freshly loaded".
+	writeEpoch = 0;
 }
 
 export interface PortMapping {
