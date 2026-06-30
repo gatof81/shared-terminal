@@ -40,6 +40,7 @@ import {
 	updateChromeToggle,
 } from "./main.js";
 import { openBootstrapLogModal } from "./newSession.js";
+import { openTerminalSession, type SessionStatus } from "./terminal.js";
 
 // ── DOM (re-queried locally) ─────────────────────────────────────────────
 const sessionList = document.getElementById("session-list")!;
@@ -50,8 +51,6 @@ const terminalStatusBadge = document.getElementById("terminal-status-badge")!;
 const terminalTabs = document.getElementById("terminal-tabs")!;
 const terminalContainer = document.getElementById("terminal-container")!;
 const emptyState = document.getElementById("empty-state")!;
-
-import { openTerminalSession, type SessionStatus } from "./terminal.js";
 
 // ── Session management ──────────────────────────────────────────────────────
 
