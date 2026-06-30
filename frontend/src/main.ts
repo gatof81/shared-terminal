@@ -181,7 +181,7 @@ export let currentFontSize = readFontSize();
 
 // ── State ───────────────────────────────────────────────────────────────────
 
-export let sessions: SessionInfo[] = [];
+let sessions: SessionInfo[] = [];
 export let activeSessionId: string | null = null;
 let isRegisterMode = false;
 

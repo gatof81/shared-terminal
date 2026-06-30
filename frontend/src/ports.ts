@@ -157,6 +157,11 @@ function openPortsModal(): void {
 			}));
 			renderPortsModalRows();
 		} catch (err) {
+			// Same stale-session guard as the success branch above: if the
+			// user already reopened Ports for a different session while this
+			// fetch was in flight, don't toast a stale error or close the
+			// now-current modal out from under them.
+			if (portsModalSessionId !== sessionId) return;
 			showToast((err as Error).message, true);
 			closePortsModal();
 		}
@@ -223,7 +228,6 @@ portsModalAddRowBtn.addEventListener("click", () => {
 	setPortsModalError(null);
 	portsModalRows.push({ id: newPortsModalRowId(), container: "", public: false });
 	renderPortsModalRows();
-	// Focus the freshly-added row's input.
 	const last = portsModalTableBody.querySelector<HTMLTableRowElement>(
 		".ports-modal-row:last-child",
 	);
