@@ -159,11 +159,16 @@ function openPortsModal(): void {
 		} catch (err) {
 			// Same stale-session guard as the success branch above: if the
 			// user already reopened Ports for a different session while this
-			// fetch was in flight, don't toast a stale error or close the
-			// now-current modal out from under them.
+			// fetch was in flight, don't touch the now-current modal.
 			if (portsModalSessionId !== sessionId) return;
-			showToast((err as Error).message, true);
-			closePortsModal();
+			// Keep the modal OPEN and surface the error inline (mirrors the
+			// admin dashboard) instead of closing. Closing made the dialog
+			// "vanish the instant it opened" on any transient GET /ports
+			// failure and hid the reason; an inline message stays readable
+			// and lets the user retry by reopening. Clear the "Loading…" row
+			// first so the table doesn't read as an empty port set.
+			portsModalTableBody.textContent = "";
+			setPortsModalError((err as Error).message);
 		}
 	})();
 }
