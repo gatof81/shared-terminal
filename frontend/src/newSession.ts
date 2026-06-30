@@ -29,7 +29,8 @@ import {
 	updateTemplate,
 } from "./api.js";
 import { parseDotEnv } from "./envParser.js";
-import { openSession, refreshSessions, renderSessionList, sessions, showToast } from "./main.js";
+import { sessions, showToast } from "./main.js";
+import { openSession, refreshSessions, renderSessionList } from "./sessionCore.js";
 
 // ── DOM (re-queried locally) — added below after tsc enumerates them ──────
 const newSessionBtn = document.getElementById("new-session-btn") as HTMLButtonElement;
