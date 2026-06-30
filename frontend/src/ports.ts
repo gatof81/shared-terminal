@@ -130,8 +130,17 @@ function openPortsModal(): void {
 	const sessionId = activeSessionId;
 	portsModalSessionId = sessionId;
 	portsModalRows = [];
+	// Reset the privileged flag too: a failed/aborted load must not leave a
+	// previous session's `allowPrivilegedPorts=true` in scope (the client-side
+	// privileged-port check reads it). The server still enforces the cap.
+	portsModalPrivilegedAllowed = false;
 	setPortsModalError(null);
 	portsModalPrivilegedHint.hidden = true;
+	// Re-enable the action buttons each open — the error path below disables
+	// them so an unloaded (empty-rows) modal can't be Saved, which would PATCH
+	// `ports: []` and wipe the session's configured ports.
+	portsModalSaveBtn.disabled = false;
+	portsModalAddRowBtn.disabled = false;
 	portsModalTableBody.textContent = "";
 	const loading = document.createElement("tr");
 	const loadingCell = document.createElement("td");
@@ -159,11 +168,23 @@ function openPortsModal(): void {
 		} catch (err) {
 			// Same stale-session guard as the success branch above: if the
 			// user already reopened Ports for a different session while this
-			// fetch was in flight, don't toast a stale error or close the
-			// now-current modal out from under them.
+			// fetch was in flight, don't touch the now-current modal.
 			if (portsModalSessionId !== sessionId) return;
-			showToast((err as Error).message, true);
-			closePortsModal();
+			// Keep the modal OPEN and surface the error inline (mirrors the
+			// admin dashboard) instead of closing. Closing made the dialog
+			// "vanish the instant it opened" on any transient GET /ports
+			// failure and hid the reason; an inline message stays readable
+			// and lets the user retry by reopening. Clear the "Loading…" row
+			// first so the table doesn't read as an empty port set.
+			//
+			// CRITICAL: disable Save + Add Row. The load failed, so
+			// `portsModalRows` is still []; a Save here would PATCH the whole
+			// set to [] and silently wipe every configured port. The buttons
+			// are re-enabled on the next openPortsModal().
+			portsModalTableBody.textContent = "";
+			setPortsModalError((err as Error).message);
+			portsModalSaveBtn.disabled = true;
+			portsModalAddRowBtn.disabled = true;
 		}
 	})();
 }
