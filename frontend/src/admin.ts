@@ -6,8 +6,10 @@
  * DOM elements are re-queried locally via getElementById (elements are
  * singletons by id) so this module has NO module-top dependency on
  * main.ts — that avoids the circular-import TDZ trap. The only main.ts
- * imports (showToast, applyAdminVisibility) are used inside functions, so
- * they resolve at call time after both modules have finished loading.
+ * imports (showToast, activeSessionId) are used inside functions, so they
+ * resolve at call time after both modules have finished loading. (The
+ * `activeSessionId` live binding is the one that would have TDZ exposure if
+ * read at module top — it isn't.)
  */
 
 import {
