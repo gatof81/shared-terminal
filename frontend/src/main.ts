@@ -3305,14 +3305,6 @@ document.addEventListener("keydown", (e) => {
 // Android Chrome and after iOS's first consent), and fall back to a
 // long-press-able textarea when the API is blocked or rejected.
 
-// Mirror of the textarea's HTML `maxlength` (frontend/index.html). The
-// silent clipboard path bypasses the textarea entirely, and `pasteTextarea
-// .value = clip` in the clipboard-fill handler isn't constrained by HTML
-// maxlength either (that attribute only gates user typing). A user with a
-// multi-megabyte clipboard pasted straight to the tmux exec stream would
-// freeze the pane long before the WS layer's default 100 MB limit fired —
-// cap explicitly so the toast is the worst they see.
-
 export function getActiveTerminal(): TerminalSession | null {
 	if (!currentActiveTabId) return null;
 	return currentTerminals.get(currentActiveTabId)?.term ?? null;

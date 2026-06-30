@@ -14,6 +14,13 @@ const pasteTextarea = document.getElementById("paste-textarea") as HTMLTextAreaE
 const pasteClipboardBtn = document.getElementById("paste-clipboard-btn") as HTMLButtonElement;
 const pasteSendBtn = document.getElementById("paste-send-btn") as HTMLButtonElement;
 
+// Mirror of the textarea's HTML `maxlength` (frontend/index.html). The
+// silent clipboard path bypasses the textarea entirely, and `pasteTextarea
+// .value = clip` in the clipboard-fill handler isn't constrained by HTML
+// maxlength either (that attribute only gates user typing). A user with a
+// multi-megabyte clipboard pasted straight to the tmux exec stream would
+// freeze the pane long before the WS layer's default 100 MB limit fired —
+// cap explicitly so the toast is the worst they see.
 const MAX_PASTE_CHARS = 65_536;
 let pasteOpener: HTMLButtonElement | null = null;
 
