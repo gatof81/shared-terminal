@@ -265,3 +265,18 @@ describe("PATCH /sessions/:id/ports", () => {
 		expect(calls.some((c) => /sessions_port_mappings/.test(c[0]))).toBe(false);
 	});
 });
+
+// Reachability of the GET editor endpoint (#190d) — this was previously
+// untested (only PATCH was), which is why a route-registration regression
+// could ship silently.
+describe("GET /sessions/:id/ports (reachability)", () => {
+	it("is reachable through the full buildRouter and returns 200 for the owner", async () => {
+		const { sessions } = makeFakeSessions();
+		await spinUp(sessions);
+		const res = await fetch(`${baseUrl}/api/sessions/sess-1/ports`);
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { ports: unknown[]; allowPrivilegedPorts: boolean };
+		expect(Array.isArray(body.ports)).toBe(true);
+		expect(typeof body.allowPrivilegedPorts).toBe("boolean");
+	});
+});
