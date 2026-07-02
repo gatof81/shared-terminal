@@ -102,6 +102,10 @@ const chromeToggleLabel = document.getElementById("chrome-toggle-label")!;
 const terminalTabs = document.getElementById("terminal-tabs")!;
 const terminalContainer = document.getElementById("terminal-container")!;
 const fontSizeBtn = document.getElementById("font-size-btn") as HTMLButtonElement;
+// Kept here (actions.ts re-queries its own copies) because the Escape
+// handler below needs these locally: it reads actionsMenu.classList and
+// calls actionsBtn.focus() after closeActionsMenu() — the exported
+// closeActionsMenu only flips ARIA/`.open` state, it doesn't restore focus.
 const actionsBtn = document.getElementById("actions-btn") as HTMLButtonElement;
 const actionsMenu = document.getElementById("actions-menu")!;
 const pasteModal = document.getElementById("paste-modal")!;
