@@ -257,6 +257,16 @@ async function openObserveModal(s: ObservableSession): Promise<void> {
 		// reload suffix here: the observe modal is transient, closing
 		// and reopening it re-attempts the full renderer chain anyway.
 		onRendererFallback: (msg) => showToast(msg),
+		// Auto-reconnect probe (#356), observe-flavoured: getSession is
+		// owner-scoped (404 for a lead), so re-derive "still running"
+		// from the lead-side observable list instead. Matters doubly
+		// here — every observe attach writes an audit row, so doomed
+		// retries against a stopped session would also pollute the
+		// observe log with phantom open→close cycles.
+		canReconnect: async () =>
+			(await fetchMyObservableSessions()).some(
+				(x) => x.sessionId === s.sessionId && x.status === "running",
+			),
 	});
 	activeObserveTerm = term;
 }

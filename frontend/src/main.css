@@ -1622,6 +1622,13 @@ main:not([data-sidebar-ready]) #sidebar {
   background: rgba(139, 148, 158, 0.2);
   color: #8b949e;
 }
+/* Synthetic frontend-only state while the WS auto-reconnect loop is
+   retrying (#356) — amber like `stopped` (transient, not an error),
+   distinct from the grey terminal `disconnected` state. */
+#terminal-status-badge.reconnecting {
+  background: rgba(227, 179, 65, 0.2);
+  color: #e3b341;
+}
 #font-size-btn {
   margin-left: auto;
   background: transparent;
