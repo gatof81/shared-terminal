@@ -95,3 +95,36 @@ describe("d1Query empty-result guard (#304)", () => {
 		);
 	});
 });
+
+// #343: every fetch must carry an abort signal (the 10 s ceiling), and a
+// fired timeout must surface as a sourced D1 error — not undici's generic
+// "The operation was aborted due to timeout", which names neither the
+// dependency nor the statement.
+describe("d1Query timeout (#343)", () => {
+	it("passes an AbortSignal to fetch", async () => {
+		const { d1Query } = await import("./db.js");
+		const fetchMock = mockFetch();
+		await d1Query("SELECT 1");
+		const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+		expect(init.signal).toBeInstanceOf(AbortSignal);
+	});
+
+	it("rewraps a fired timeout as a sourced error naming D1 and the query", async () => {
+		const { d1Query } = await import("./db.js");
+		// Simulate undici's rejection shape when AbortSignal.timeout fires.
+		(globalThis as { fetch: unknown }).fetch = vi.fn(async () => {
+			throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+		});
+		await expect(d1Query("SELECT * FROM sessions WHERE session_id = ?")).rejects.toThrow(
+			/D1 API timeout after 10000 ms for: SELECT \* FROM sessions/,
+		);
+	});
+
+	it("rethrows non-timeout fetch failures untouched", async () => {
+		const { d1Query } = await import("./db.js");
+		(globalThis as { fetch: unknown }).fetch = vi.fn(async () => {
+			throw new TypeError("fetch failed");
+		});
+		await expect(d1Query("SELECT 1")).rejects.toThrow(/fetch failed/);
+	});
+});
