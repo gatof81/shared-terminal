@@ -544,10 +544,12 @@ function openTab(tabId: string) {
 					// Show even for non-active tabs — a backgrounded tab
 					// that loses its WebGL context will surface the
 					// notice when it next becomes active or, in this
-					// flow, immediately. Toast is one-time per tab
-					// (gated inside terminal.ts) so a flapping driver
-					// can't spam it. Surfaced as a non-error toast
-					// because the terminal still works, just slower.
+					// flow, immediately. Toast is once per renderer tier
+					// (webgl→canvas, canvas→dom; gated inside
+					// terminal.ts) so a flapping driver can't spam it —
+					// worst case two toasts per tab. Surfaced as a
+					// non-error toast because the terminal still works,
+					// just slower.
 					showToast(`${msg} Reload the tab to retry GPU rendering.`);
 				},
 				onCopy: (ok: boolean) => {
