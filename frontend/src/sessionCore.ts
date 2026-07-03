@@ -13,6 +13,7 @@ import {
 	createTab,
 	deleteSession,
 	deleteTab,
+	getSession,
 	listSessions,
 	listTabs,
 	startSession,
@@ -469,6 +470,14 @@ function openTab(tabId: string) {
 				// bar is a global widget), so whichever tab receives the next
 				// keystroke consumes the same state the button displays.
 				transformInput: transformKeyInput,
+				// Auto-reconnect probe (#356): consulted before each retry so
+				// a session stopped from another device doesn't get hammered
+				// with doomed attach attempts (the backend has no "stopped"
+				// close code — the exec stream just ends). A thrown probe is
+				// treated as inconclusive by terminal.ts (keep retrying) —
+				// during a Tunnel blip REST is as dead as the WS, and only a
+				// definitive "not running" should abort the loop.
+				canReconnect: async () => (await getSession(ownSessionId)).status === "running",
 				onStatus: (status: SessionStatus) => {
 					if (activeSessionId !== ownSessionId) return;
 
@@ -527,6 +536,22 @@ function openTab(tabId: string) {
 							});
 						}
 						void refreshSessions();
+						return;
+					}
+
+					if (status === "reconnecting") {
+						// Synthetic frontend-only state like "disconnected"
+						// above: fired while terminal.ts retries a dropped WS
+						// with backoff (#356). Badge-only — it must never land
+						// in s.status (same out-of-type footgun documented on
+						// the disconnected branch), and the terminal for this
+						// tab is deliberately NOT torn down: the retry loop
+						// owns the socket, and a successful re-attach repaints
+						// in place. Only the active tab may repaint the shared
+						// badge (same rule as the backend-status path below).
+						if (tabId !== currentActiveTabId) return;
+						terminalStatusBadge.textContent = "reconnecting";
+						terminalStatusBadge.className = "reconnecting";
 						return;
 					}
 

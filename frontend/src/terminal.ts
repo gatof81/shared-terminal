@@ -8,8 +8,15 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { type IDisposable, type ILink, type ILinkProvider, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { type SpecialKey, specialKeySequence } from "./keys.js";
+import { isRetryableCloseCode, MAX_RECONNECT_ATTEMPTS, reconnectDelayMs } from "./reconnect.js";
 
-export type SessionStatus = "running" | "stopped" | "terminated" | "disconnected";
+/** "disconnected" and "reconnecting" are frontend-only synthetic states
+ *  (the backend only ever sends "running"): "reconnecting" while the
+ *  auto-reconnect loop (#356) is retrying a dropped socket, then
+ *  "disconnected" once it gives up (or immediately for non-retryable
+ *  closes). Consumers must never write either into a SessionInfo.status
+ *  — see the long rationale in sessionCore's onStatus handler. */
+export type SessionStatus = "running" | "stopped" | "terminated" | "disconnected" | "reconnecting";
 
 export interface TerminalSession {
 	dispose(): void;
@@ -87,6 +94,17 @@ export function openTerminalSession(opts: {
 	 */
 	transformInput?: (data: string) => string;
 	/**
+	 * Authoritative "is this session still worth reconnecting to?" probe
+	 * (#356), consulted before each auto-reconnect attempt. Wired by
+	 * sessionCore against GET /sessions/:id (status === "running").
+	 * Kept as a callback so terminal.ts stays free of api.ts imports.
+	 * Optional: when absent the retry loop runs unconditionally — still
+	 * bounded by MAX_RECONNECT_ATTEMPTS, so the worst case is a handful
+	 * of rejected attaches. A rejection (throw) counts as INCONCLUSIVE
+	 * (keep retrying), not as "stop" — see attemptReconnect.
+	 */
+	canReconnect?: () => Promise<boolean>;
+	/**
 	 * Read-only observe-mode (#201e). When true:
 	 *   - the WS URL carries `&observe=true` so the backend routes
 	 *     auth via `assertCanObserve` instead of `assertOwnership`;
@@ -119,6 +137,7 @@ export function openTerminalSession(opts: {
 		onCopy,
 		isActive,
 		transformInput,
+		canReconnect,
 		observe = false,
 	} = opts;
 	// Fires the fallback notice at most once per TIER, and only when
@@ -641,17 +660,43 @@ export function openTerminalSession(opts: {
 	//
 	// Liveness (post-open) is handled at the protocol layer (ws.ping/pong)
 	// from the server — see backend/src/index.ts heartbeat. Browsers
-	// auto-reply to server pings with no JS hook required, so there is
-	// no `ws.onopen` handler.
-	const wsUrl = buildWsUrl(sessionId, tabId, term.cols, term.rows, observe);
-	const ws = new WebSocket(wsUrl);
+	// auto-reply to server pings with no JS hook required.
+	//
+	// ── Auto-reconnect (#356) ──
+	// A dropped socket (phone lock, Tunnel idle timeout ≈100 s, backend
+	// restart) retries with backoff instead of stranding the tab on
+	// "disconnected" until the user re-clicks it. `ws` is therefore a
+	// reassignable binding: connect() builds a fresh socket per attempt,
+	// and every closure below (send, dispose, handlers) reads the current
+	// one. buildWsUrl runs per-attempt on purpose — term.cols/rows may
+	// have changed since the drop (rotation while offline), and the
+	// replay must be captured at the CURRENT geometry.
 	let disposed = false;
+	let ws: WebSocket;
+	let reconnectAttempts = 0;
+	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-	ws.onmessage = (ev) => {
+	const onWsOpen = () => {
+		if (disposed || reconnectAttempts === 0) return;
+		// Reconnect attach incoming: the backend ships a full capture-pane
+		// replay on every attach, and painting it over the stale pre-drop
+		// content would duplicate the screen. Reset only when a socket
+		// actually OPENS (not per attempt) so failed retries keep the last
+		// good content visible behind the "reconnecting" badge. A fresh
+		// Terminal is what the manual re-click path creates, so reset()
+		// (which also clears modes) matches the established semantics.
+		term.reset();
+	};
+
+	const onWsMessage = (ev: MessageEvent) => {
 		// disposed: post-close frames buffered by the browser or in flight
 		// from the server still fire here, and term.write() throws on a
 		// disposed xterm. Sibling of the onerror/onclose guards below (#93).
 		if (disposed) return;
+		// Any server frame proves the attach is live again — re-arm the
+		// full backoff budget for the NEXT drop. (Cheap assignment; not
+		// worth a first-frame-only flag.)
+		reconnectAttempts = 0;
 		type Msg =
 			| { type: "output"; data: string }
 			| { type: "status"; status: SessionStatus }
@@ -707,19 +752,76 @@ export function openTerminalSession(opts: {
 		}
 	};
 
-	ws.onerror = () => {
+	const onWsError = () => {
 		if (disposed) return;
-		onError("WebSocket connection error");
+		// Console-only. Per spec every `error` is followed by `close`, and
+		// the close handler owns the user-facing signal — historically this
+		// fired a toast too, so one network drop double-toasted ("WebSocket
+		// connection error" + "Connection closed (1006)"). With retries in
+		// the picture it would also toast once per failed attempt.
+		console.warn("[terminal] WebSocket error (close handler decides retry/notice)");
 	};
 
-	ws.onclose = (ev) => {
+	const onWsClose = (ev: CloseEvent) => {
 		// disposed: stale async close from a prior navigate-away — ignore
 		if (disposed) return;
+		if (isRetryableCloseCode(ev.code) && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+			reconnectAttempts++;
+			// Badge-only synthetic state; the error toast is deliberately
+			// suppressed while retries are in flight — a transient drop that
+			// heals in 1 s shouldn't cost the user a red toast.
+			onStatus("reconnecting");
+			reconnectTimer = setTimeout(() => {
+				reconnectTimer = null;
+				void attemptReconnect();
+			}, reconnectDelayMs(reconnectAttempts));
+			return;
+		}
 		if (ev.code !== 1000) {
 			onError(`Connection closed (${ev.code}): ${ev.reason || "unknown reason"}`);
 		}
 		onStatus("disconnected");
 	};
+
+	const connect = () => {
+		ws = new WebSocket(buildWsUrl(sessionId, tabId, term.cols, term.rows, observe));
+		ws.onopen = onWsOpen;
+		ws.onmessage = onWsMessage;
+		ws.onerror = onWsError;
+		ws.onclose = onWsClose;
+	};
+
+	// One retry attempt: consult the authoritative session status first
+	// (when the caller provided the probe) so we don't burn attach
+	// attempts against a session the owner stopped from another device —
+	// the backend has no "stopped" close code for that case (the exec
+	// stream just ends), so the close code alone can't tell us.
+	const attemptReconnect = async () => {
+		if (disposed) return;
+		if (canReconnect) {
+			// `true` on probe FAILURE is deliberate: during a Tunnel blip
+			// the REST probe is as dead as the WS, and "inconclusive" must
+			// keep the (bounded) retry loop alive. Only a definitive
+			// "session is not running" answer aborts.
+			let ok = true;
+			try {
+				ok = await canReconnect();
+			} catch {
+				/* inconclusive — keep trying */
+			}
+			if (disposed) return; // re-check across the await
+			if (!ok) {
+				// Not an error — the session is simply not running anymore.
+				// Finalize as a plain disconnect: sessionCore tears the pane
+				// down and refreshes the authoritative sidebar state.
+				onStatus("disconnected");
+				return;
+			}
+		}
+		connect();
+	};
+
+	connect();
 
 	// ── Input: xterm → WS ──────────────────────────────────────────────────
 	// In observe-mode (#201e) the backend drops every input frame at
@@ -1051,6 +1153,17 @@ export function openTerminalSession(opts: {
 	// row repaints.
 	const onVisibilityChange = () => {
 		if (document.hidden) return;
+		// Fast-forward a pending reconnect (#356): the dominant mobile flow
+		// is phone-lock → WS dies → user unlocks. iOS freezes JS while
+		// backgrounded, so the backoff timer only starts ticking on resume
+		// — skipping it here makes unlock-to-live-terminal immediate
+		// instead of up-to-10 s. The attempt still routes through
+		// attemptReconnect's canReconnect probe.
+		if (reconnectTimer !== null) {
+			clearTimeout(reconnectTimer);
+			reconnectTimer = null;
+			void attemptReconnect();
+		}
 		// scheduleFit's rAF will atlas-clear + refresh too, but only if the
 		// fit detects a dimension change. The synchronous pair below covers
 		// the no-change case — tab hidden then restored at the same size,
@@ -1161,6 +1274,15 @@ export function openTerminalSession(opts: {
 	// ── Dispose ─────────────────────────────────────────────────────────────
 	function dispose() {
 		disposed = true;
+		// Cancel any pending auto-reconnect first: past this point `ws`
+		// must stay the final socket (closed below with 1000, which the
+		// retry classifier treats as deliberate). The `disposed` guards in
+		// attemptReconnect/connect make a mid-flight probe harmless, but
+		// clearing here avoids holding the closure alive for up to 10 s.
+		if (reconnectTimer !== null) {
+			clearTimeout(reconnectTimer);
+			reconnectTimer = null;
+		}
 		// The resize send is debounced on a trailing 100 ms window; if the
 		// user navigates away inside that window the timer would fire after
 		// the socket closes. The `if (disposed) return` guard at the top of
