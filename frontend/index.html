@@ -2,7 +2,28 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover lets the app paint edge-to-edge on notched
+         iPhones (paired with env(safe-area-inset-*) padding in main.css
+         so content stays clear of the notch / home indicator).
+         interactive-widget=resizes-content asks Chrome/Android to shrink
+         the layout viewport when the soft keyboard opens — iOS ignores it
+         and is instead handled by the visualViewport → --app-vh mirror in
+         main.ts. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <meta name="theme-color" content="#0d1117" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
+    <!-- iOS home-screen install: standalone (no Safari chrome) with a
+         translucent status bar — the safe-area padding below the fold
+         keeps the header out from under it. -->
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Terminal" />
     <meta
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws://localhost:3001 wss://localhost:3001 http://localhost:3001;"

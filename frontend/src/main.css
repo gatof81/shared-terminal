@@ -17,6 +17,16 @@ body {
   height: var(--app-vh, 100dvh);
   display: flex;
   flex-direction: column;
+  /* viewport-fit=cover (index.html) paints the app edge-to-edge on
+     notched iPhones; these insets keep the header / drawer / terminal
+     clear of the notch, rounded corners, and home indicator. All four
+     resolve to 0 on desktop and non-notched devices, so this is a
+     no-op outside iOS/Android edge-to-edge. The body background fills
+     the padded strips, so the unsafe areas still paint in-theme. */
+  padding-top: env(safe-area-inset-top);
+  padding-right: env(safe-area-inset-right);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
 }
 
 /* ── Utilities ──────────────────────────────────────────────── */
@@ -243,7 +253,12 @@ main.chrome-open #chrome-toggle-icon {
   padding: 1.25rem 1.25rem 1rem;
   width: 480px;
   max-width: 92vw;
-  max-height: 80vh;
+  /* dvh, not vh: on iOS Safari `vh` is the LARGE viewport (URL bar
+     hidden), so an 80vh modal on a fresh page-load (URL bar visible)
+     can extend past the visible area and put its action buttons /
+     scroll region off-screen. dvh tracks the actual visible height.
+     Same rationale for the other dvh caps below. */
+  max-height: 80dvh;
   display: flex;
   flex-direction: column;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
@@ -380,7 +395,7 @@ main.chrome-open #chrome-toggle-icon {
   padding: 0.55rem 0.65rem;
   resize: vertical;
   min-height: 110px;
-  max-height: 50vh;
+  max-height: 50dvh;
   margin-bottom: 0.75rem;
   width: 100%;
   box-sizing: border-box;
@@ -1038,7 +1053,7 @@ main:not([data-sidebar-ready]) #sidebar {
    fill the available space inside the modal card. */
 .observe-modal-card {
   width: min(96vw, 1100px);
-  height: min(80vh, 720px);
+  height: min(80dvh, 720px);
   display: flex;
   flex-direction: column;
 }
@@ -1414,7 +1429,7 @@ main:not([data-sidebar-ready]) #sidebar {
   width: 90vw;
 }
 .bootstrap-log-card .bootstrap-error-output {
-  max-height: 60vh;
+  max-height: 60dvh;
 }
 #session-list {
   flex: 1;
@@ -1904,8 +1919,12 @@ main:not([data-sidebar-ready]) #sidebar {
 /* ── Toast ──────────────────────────────────────────────────── */
 #toast {
   position: fixed;
-  bottom: 1.5rem;
-  right: 1.5rem;
+  /* position: fixed ignores the body's safe-area padding, so the toast
+     adds its own insets — otherwise it sits under the home indicator
+     on notched iPhones (bottom) or the rounded corner in landscape
+     (right). calc() with a 0px env fallback is a no-op on desktop. */
+  bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
+  right: calc(1.5rem + env(safe-area-inset-right, 0px));
   background: #21262d;
   border: 1px solid #30363d;
   border-radius: 8px;
@@ -1935,6 +1954,31 @@ main:not([data-sidebar-ready]) #sidebar {
 /* ── Mobile ─────────────────────────────────────────────────── */
 /* Breakpoint mirrored in main.ts as MOBILE_BREAKPOINT_PX — keep in sync. */
 @media (max-width: 768px) {
+  /* iOS Safari auto-zooms the whole page when a focused text control's
+     computed font-size is below 16px — and does NOT zoom back out on
+     blur, leaving the layout cropped until the user pinches. Most form
+     controls in this sheet sit at 0.78–0.9rem (≈12.5–14.4px), so every
+     login field / env-var cell / modal input triggered the zoom on
+     phones. Forcing 16px on text-editing controls (only these trigger
+     the heuristic — buttons/labels don't) removes the zoom at the cost
+     of slightly larger mobile forms, which is the accessible fix;
+     maximum-scale=1 in the viewport meta would also work but disables
+     user pinch-zoom globally.
+     !important is load-bearing: the per-component rules this must beat
+     (.auth-card input, .modal-field input, .env-table input, …) all
+     carry class specificity, which a bare element selector loses to
+     regardless of the media query.
+     xterm's hidden .xterm-helper-textarea is deliberately INCLUDED:
+     it's the element that actually receives focus when the user taps
+     the terminal, so a small computed font-size there triggers the
+     same auto-zoom on every terminal tap. It's opacity:0 / width:0
+     (xterm.css), so the forced size changes nothing visually. */
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+
   /* Drop the grid column entirely on mobile — the sidebar floats
      over the terminal as a drawer instead of pushing it. */
   main,
