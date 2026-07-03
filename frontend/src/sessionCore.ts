@@ -550,7 +550,12 @@ function openTab(tabId: string) {
 					// worst case two toasts per tab. Surfaced as a
 					// non-error toast because the terminal still works,
 					// just slower.
-					showToast(`${msg} Reload the tab to retry GPU rendering.`);
+					// Suffix is tier-agnostic on purpose: for the webgl→canvas
+					// notice a reload genuinely retries GPU rendering, but for
+					// the canvas→dom notice (both tiers failing on this
+					// hardware) promising "GPU rendering" back would be
+					// over-selling what a reload can do.
+					showToast(`${msg} Reload the tab to try again.`);
 				},
 				onCopy: (ok: boolean) => {
 					// Identity guards mirror onStatus / onError above:

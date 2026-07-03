@@ -252,7 +252,11 @@ export function openTerminalSession(opts: {
 		const canvasBefore = canvas;
 		try {
 			webgl?.clearTextureAtlas();
-		} catch {
+		} catch (err) {
+			// Log the underlying throw — the toast only says the tier
+			// changed, and a field report of intermittent degradation
+			// needs the actual error in the console to be diagnosable.
+			console.warn("[terminal] WebGL atlas clear failed, degrading to canvas:", err);
 			webgl?.dispose();
 			webgl = null;
 			loadCanvasFallback("atlas clear failed");
@@ -260,10 +264,19 @@ export function openTerminalSession(opts: {
 		if (canvasBefore && canvas === canvasBefore) {
 			try {
 				canvasBefore.clearTextureAtlas();
-			} catch {
+			} catch (err) {
+				console.warn("[terminal] canvas atlas clear failed, reloading canvas tier:", err);
 				canvasBefore.dispose();
 				canvas = null;
-				noticeFallback("canvas atlas clear failed", "dom");
+				// Try a FRESH canvas addon before conceding to DOM — the
+				// throw may be transient (context reset mid-clear), and a
+				// permanent drop to the slowest tier over a recoverable
+				// hiccup is the wrong trade. loadCanvasFallback handles
+				// both outcomes: success keeps the canvas tier silently
+				// (the "canvas" notice gate is already set from the
+				// original WebGL degrade), failure fires the DOM toast
+				// with the composed reason via its own catch.
+				loadCanvasFallback("canvas atlas clear failed");
 			}
 		}
 	};
