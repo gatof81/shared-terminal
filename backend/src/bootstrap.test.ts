@@ -70,6 +70,7 @@ vi.mock("./bootstrap/writeEnvFile.js", () => writeEnvFileStubs);
 import {
 	BootstrapBroadcaster,
 	type BootstrapMessage,
+	drainInFlightBootstraps,
 	markBootstrapped,
 	runAsyncBootstrap,
 } from "./bootstrap.js";
@@ -1055,5 +1056,87 @@ describe("runAsyncBootstrap", () => {
 		// stored size can briefly exceed the cap by up to one chunk's
 		// worth, but never by an order of magnitude).
 		expect((log as string).length).toBeLessThanOrEqual(BOOTSTRAP_LOG_MAX_BYTES + tail.length);
+	});
+});
+
+// ── drainInFlightBootstraps (#348) ─────────────────────────────────────────
+// A SIGTERM mid-bootstrap must leave the session in the terminal `failed`
+// state via the same finishWithFail machinery the 10-min cap uses — not
+// stranded half-provisioned at status='running'. The drain aborts every
+// registered run and awaits its teardown (status flip + log persist + kill).
+describe("drainInFlightBootstraps (#348)", () => {
+	function makeFakes() {
+		const updateStatus = vi.fn(async () => undefined);
+		const kill = vi.fn(async () => undefined);
+		const runPostCreate = vi.fn();
+		const runPostStart = vi.fn(async () => undefined);
+		const setBootstrapLog = vi.fn(async () => undefined);
+		const sessions = { updateStatus, setBootstrapLog } as unknown as SessionManager;
+		const docker = { kill, runPostCreate, runPostStart } as unknown as DockerManager;
+		const broadcaster = new BootstrapBroadcaster();
+		const final: BootstrapMessage[] = [];
+		broadcaster.subscribe("sess-1", (m) => {
+			if (m.type === "done" || m.type === "fail") final.push(m);
+		});
+		return { sessions, docker, broadcaster, final, updateStatus, kill, setBootstrapLog };
+	}
+	const settle = () => new Promise<void>((r) => setImmediate(r));
+
+	it("resolves immediately when nothing is in flight", async () => {
+		await expect(drainInFlightBootstraps()).resolves.toBeUndefined();
+	});
+
+	it("aborts a hung stage: status→failed, kill, shutdown reason in broadcast AND persisted log", async () => {
+		const { sessions, docker, broadcaster, final, updateStatus, kill, setBootstrapLog } =
+			makeFakes();
+		// Stage that hangs until the run's signal aborts — the shape of a
+		// long `npm install` interrupted by a deploy.
+		(docker.runPostCreate as ReturnType<typeof vi.fn>).mockImplementation(
+			(_id: string, _cmd: string, _out: (s: string) => void, signal: AbortSignal) =>
+				new Promise((_resolve, reject) => {
+					signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+				}),
+		);
+
+		const run = runAsyncBootstrap(
+			"sess-1",
+			{ postCreateCmd: "npm install" },
+			{ sessions, docker, broadcaster },
+		);
+		await settle(); // let the pipeline reach the hung stage
+
+		await drainInFlightBootstraps();
+		await run;
+
+		expect(updateStatus).toHaveBeenCalledWith("sess-1", "failed");
+		expect(kill).toHaveBeenCalledWith("sess-1");
+		// The abort must be reported as a SHUTDOWN, not misattributed to
+		// the 10-min cap ("bootstrap timeout") — the discriminator keys
+		// on signal.reason.name.
+		expect(final).toEqual([
+			expect.objectContaining({
+				type: "fail",
+				stage: "postCreate",
+				error: expect.stringContaining("backend shut down"),
+			}),
+		]);
+		const [, log] = setBootstrapLog.mock.calls[0]!;
+		expect(log).toContain("backend shut down");
+	});
+
+	it("is a no-op for runs that already completed (registry cleaned up)", async () => {
+		const { sessions, docker, broadcaster, updateStatus } = makeFakes();
+		(docker.runPostCreate as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+			exitCode: 0,
+		}));
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [],
+			success: true,
+			meta: { changes: 1, duration: 0, last_row_id: 0 },
+		});
+		await runAsyncBootstrap("sess-1", { postCreateCmd: "true" }, { sessions, docker, broadcaster });
+		await drainInFlightBootstraps();
+		// No late abort machinery fired against the finished run.
+		expect(updateStatus).not.toHaveBeenCalled();
 	});
 });

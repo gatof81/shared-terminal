@@ -333,21 +333,83 @@ export class BootstrapBroadcaster {
  */
 export async function runAsyncBootstrap(
 	sessionId: string,
-	cfg: {
-		postCreateCmd?: string;
-		postStartCmd?: string;
-		/** True iff any of {repo, gitIdentity, dotfiles, agentSeed} is
-		 *  configured — the hint that gates the `getSessionConfig` D1
-		 *  fetch. Renamed from the older `hasRepo` (#214 round 2)
-		 *  because 191b adds three more stages that all need the
-		 *  config row. The route computes this from `validatedConfig`. */
-		hasBootstrapConfig?: boolean;
-	},
-	deps: {
-		sessions: SessionManager;
-		docker: DockerManager;
-		broadcaster: BootstrapBroadcaster;
-	},
+	cfg: BootstrapRunCfg,
+	deps: BootstrapRunDeps,
+): Promise<void> {
+	// #348 — register this run so the SIGTERM shutdown path can abort it
+	// and AWAIT its failure teardown (drainInFlightBootstraps below).
+	// The route invokes this at most once per session create, so a plain
+	// sessionId-keyed Map can't clobber a concurrent sibling.
+	const abortController = new AbortController();
+	let settle!: () => void;
+	const done = new Promise<void>((resolve) => {
+		settle = resolve;
+	});
+	inFlight.set(sessionId, { controller: abortController, done });
+	try {
+		await runBootstrapPipeline(sessionId, cfg, deps, abortController);
+	} finally {
+		settle();
+		inFlight.delete(sessionId);
+	}
+}
+
+interface BootstrapRunCfg {
+	postCreateCmd?: string;
+	postStartCmd?: string;
+	/** True iff any of {repo, gitIdentity, dotfiles, agentSeed} is
+	 *  configured — the hint that gates the `getSessionConfig` D1
+	 *  fetch. Renamed from the older `hasRepo` (#214 round 2)
+	 *  because 191b adds three more stages that all need the
+	 *  config row. The route computes this from `validatedConfig`. */
+	hasBootstrapConfig?: boolean;
+}
+
+interface BootstrapRunDeps {
+	sessions: SessionManager;
+	docker: DockerManager;
+	broadcaster: BootstrapBroadcaster;
+}
+
+// ── In-flight registry (#348) ──────────────────────────────────────────────
+// sessionId → this run's AbortController + a promise that settles once the
+// pipeline (INCLUDING its failure teardown) has finished. Exists so a
+// graceful shutdown can leave interrupted sessions in the terminal `failed`
+// state instead of stranding them half-provisioned at status='running'
+// with bootstrapped_at NULL — a state nothing ever resumes (the postCreate
+// gate only runs on the create path) and nothing reports.
+const inFlight = new Map<string, { controller: AbortController; done: Promise<void> }>();
+
+/**
+ * #348 — abort every in-flight bootstrap and wait for their failure
+ * teardown to complete (status flip to `failed`, log persisted with the
+ * abort reason, container killed — the same finishWithFail machinery the
+ * 10-min cap uses). Called from the SIGTERM/SIGINT shutdown path in
+ * index.ts, bounded there by the shutdown watchdog.
+ *
+ * Known gap, accepted: SIGKILL (or a host power cut) runs no drain, so
+ * those rows still strand at running/NULL. Closing that would need a
+ * reconcile()-side "requires bootstrap but never bootstrapped" probe that
+ * parses each running session's config — deferred until it bites.
+ */
+export async function drainInFlightBootstraps(): Promise<void> {
+	if (inFlight.size === 0) return;
+	logger.warn(`[bootstrap] shutdown: aborting ${inFlight.size} in-flight bootstrap run(s)`);
+	// Snapshot the settle promises BEFORE aborting — each run's finally
+	// deletes its own entry, so iterating inFlight after the aborts start
+	// resolving would race the deletions.
+	const settled = [...inFlight.values()].map((e) => e.done);
+	for (const { controller } of inFlight.values()) {
+		controller.abort(new DOMException("backend shutting down", "AbortError"));
+	}
+	await Promise.allSettled(settled);
+}
+
+async function runBootstrapPipeline(
+	sessionId: string,
+	cfg: BootstrapRunCfg,
+	deps: BootstrapRunDeps,
+	abortController: AbortController,
 ): Promise<void> {
 	const { sessions, docker, broadcaster } = deps;
 	// #274 — accumulate every broadcast chunk into a bounded tail
@@ -396,11 +458,12 @@ export async function runAsyncBootstrap(
 		}
 	};
 
-	// 10-min wall-clock cap (#191 PR 191b). The controller is aborted
-	// either by the timer or by a stage that wants to short-circuit
-	// the rest of the pipeline. `unref()` so the Node process can
-	// shut down cleanly even if a runaway timer is still pending.
-	const abortController = new AbortController();
+	// 10-min wall-clock cap (#191 PR 191b). The controller (owned by the
+	// runAsyncBootstrap wrapper since #348, so the shutdown drain can
+	// abort it too) is aborted either by this timer, by a stage that
+	// wants to short-circuit the rest of the pipeline, or by
+	// drainInFlightBootstraps. `unref()` so the Node process can shut
+	// down cleanly even if a runaway timer is still pending.
 	const timer = setTimeout(() => {
 		abortController.abort(new DOMException("bootstrap timeout", "TimeoutError"));
 	}, BOOTSTRAP_WALL_CLOCK_CAP_MS);
@@ -439,8 +502,11 @@ export async function runAsyncBootstrap(
 			}
 			return true;
 		} catch (err) {
-			// AbortError from the 10-min cap surfaces here. Distinguish
-			// the timeout failure from any other throw so the modal's
+			// An abort surfaces here from two sources: the 10-min cap
+			// timer, or the shutdown drain (#348). Distinguish them from
+			// each other (via `signal.reason` — the timer aborts with a
+			// DOMException named TimeoutError, the drain with one named
+			// AbortError) and from any other throw, so the modal's
 			// rendered error tells the user the right thing.
 			//
 			// PR #218 round 1 NIT: the discriminator must check that
@@ -448,27 +514,29 @@ export async function runAsyncBootstrap(
 			// (`AbortError` from streamExec, `TimeoutError` from the
 			// timer's `abort(reason)` call) — NOT just `signal.aborted`.
 			// Otherwise a stage that throws synchronously *after* the
-			// timer has already fired (e.g. `DotfilesAuthMismatchError`
+			// abort has already fired (e.g. `DotfilesAuthMismatchError`
 			// raised before the first await in `runDotfiles`) would be
-			// misreported as "bootstrap timeout" and the user would
+			// misreported as timeout/shutdown and the user would
 			// never see the actionable config error. `signal.aborted`
 			// is kept as a sanity guard so an unrelated future
-			// AbortError can't silently mark itself as a cap-fired
-			// timeout.
+			// AbortError can't silently mark itself as abort-sourced.
 			const e = err as Error;
-			const isTimeout = signal.aborted && (e.name === "AbortError" || e.name === "TimeoutError");
+			const isAborted = signal.aborted && (e.name === "AbortError" || e.name === "TimeoutError");
+			const isTimeout = isAborted && (signal.reason as Error | undefined)?.name === "TimeoutError";
 			const message = isTimeout
 				? `bootstrap timeout: cumulative wall time exceeded ${BOOTSTRAP_WALL_CLOCK_CAP_MS / 1000}s during '${label}'`
-				: e.message;
+				: isAborted
+					? `bootstrap aborted during '${label}': backend shut down mid-provision — recreate the session`
+					: e.message;
 			logger.error(`[bootstrap] ${label} threw for session ${sessionId}: ${message}`);
-			// Surface the timeout reason in-stream so the user sees
-			// the cap, not just a generic fail. Routed through
+			// Surface the abort reason in-stream so the user sees the
+			// cap / shutdown, not just a generic fail. Routed through
 			// `onOutput` (not `broadcaster.broadcast` directly) so the
 			// line lands in `logChunks` and survives in the persisted
-			// log — the timeout reason is the single most useful line
-			// for debugging a timed-out bootstrap, and a "View log"
+			// log — the abort reason is the single most useful line
+			// for debugging an interrupted bootstrap, and a "View log"
 			// modal that's missing it defeats the feature's purpose.
-			if (isTimeout) {
+			if (isAborted) {
 				onOutput(`\n${message}\n`);
 			}
 			await finishWithFail({

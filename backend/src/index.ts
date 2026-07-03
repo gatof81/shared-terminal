@@ -19,7 +19,7 @@ import {
 	validateJwtSecret,
 	warnIfWildcardCorsInProduction,
 } from "./auth.js";
-import { BootstrapBroadcaster } from "./bootstrap.js";
+import { BootstrapBroadcaster, drainInFlightBootstraps } from "./bootstrap.js";
 import { migrateDb, validateD1Config } from "./db.js";
 import { DockerManager } from "./dockerManager.js";
 import { IdleSweeper, listRunningSessionIds } from "./idleSweeper.js";
@@ -479,9 +479,21 @@ function shutdown() {
 	}
 	wss.close();
 
-	// Watchdog: if a client stalls its close handshake (or some other handle
-	// keeps the event loop alive), exit anyway after a grace period instead of
-	// hanging the orchestrator's stop timeout.
+	// #348 — abort in-flight bootstraps and await their failure teardown
+	// (status → failed, log persisted with the abort reason, container
+	// killed) before exiting. Without this, a SIGTERM landing mid-
+	// bootstrap — the normal deploy shape — stranded the session
+	// half-provisioned at status='running' with bootstrapped_at NULL,
+	// a state nothing ever resumes or reports. The drain is a couple of
+	// D1 writes plus a docker kill per run, bounded by the watchdog
+	// below. (SIGKILL still strands — no drain can run; documented on
+	// drainInFlightBootstraps.)
+	const bootstrapsDrained = drainInFlightBootstraps();
+
+	// Watchdog: if a client stalls its close handshake, the bootstrap
+	// drain wedges on Docker/D1, or some other handle keeps the event
+	// loop alive, exit anyway after a grace period instead of hanging
+	// the orchestrator's stop timeout.
 	const watchdog = setTimeout(() => {
 		logger.warn("[server] shutdown watchdog fired — forcing exit");
 		process.exit(1);
@@ -489,7 +501,14 @@ function shutdown() {
 	watchdog.unref();
 
 	server.close(() => {
-		clearTimeout(watchdog);
-		process.exit(0);
+		// Exit only after BOTH the HTTP server is closed AND the bootstrap
+		// drain has settled — server.close alone would exit(0) out from
+		// under the drain's in-flight D1 writes. `finally` (not `then`):
+		// drainInFlightBootstraps never rejects today (Promise.allSettled
+		// inside), but the exit must not hinge on that staying true.
+		void bootstrapsDrained.finally(() => {
+			clearTimeout(watchdog);
+			process.exit(0);
+		});
 	});
 }
