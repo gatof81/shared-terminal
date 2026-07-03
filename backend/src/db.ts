@@ -57,6 +57,21 @@ export function __resetD1CallsForTests(): void {
 	d1CallsSinceBoot = 0;
 }
 
+// Hard ceiling on every D1 round-trip (#343). Without a signal, a
+// hung-but-accepting endpoint (stalled CF edge, half-open TCP — distinct
+// from a fast connection-refused, which fails immediately) pins each call
+// to undici's default header timeout of ~300 s. Everything hot funnels
+// through d1Query — dispatcher lookups, login, ownership-cache misses,
+// the idle sweeper's SELECT — so during a D1 brown-out those requests
+// would hold sockets for minutes instead of failing fast into their
+// callers' existing catch/degrade paths. 10 s is ~2 orders of magnitude
+// above healthy D1 latency (tens of ms) yet short enough that a wedged
+// dependency surfaces as a burst of sourced errors, not a stalled server.
+// The signal also covers the response BODY reads below — undici ties the
+// whole request lifecycle to it, so a body that stalls mid-stream aborts
+// too.
+const D1_TIMEOUT_MS = 10_000;
+
 /**
  * Execute a single SQL statement against D1.
  * Returns the results array for SELECT, or meta for INSERT/UPDATE/DELETE.
@@ -68,21 +83,37 @@ export async function d1Query<T = Record<string, unknown>>(
 	d1CallsSinceBoot++;
 	const url = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/d1/database/${DATABASE_ID}/query`;
 
-	const res = await fetch(url, {
-		method: "POST",
-		headers: {
-			Authorization: `Bearer ${API_TOKEN}`,
-			"Content-Type": "application/json",
-		},
-		body: JSON.stringify({ sql, params: params ?? [] }),
-	});
+	let data: D1ApiResponse<T>;
+	try {
+		const res = await fetch(url, {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${API_TOKEN}`,
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ sql, params: params ?? [] }),
+			signal: AbortSignal.timeout(D1_TIMEOUT_MS),
+		});
 
-	if (!res.ok) {
-		const text = await res.text();
-		throw new Error(`D1 API error (${res.status}): ${text}`);
+		if (!res.ok) {
+			const text = await res.text();
+			throw new Error(`D1 API error (${res.status}): ${text}`);
+		}
+
+		data = (await res.json()) as D1ApiResponse<T>;
+	} catch (err) {
+		// Rewrap the abort as a sourced error: undici surfaces the fired
+		// timeout signal as a DOMException named "TimeoutError", whose
+		// message ("The operation was aborted due to timeout") says nothing
+		// about D1 or the statement. Callers log err.message, so name the
+		// dependency and the query. SQL text only — never params, which can
+		// carry decrypted secret values on the session_configs paths.
+		if (err instanceof DOMException && err.name === "TimeoutError") {
+			throw new Error(`D1 API timeout after ${D1_TIMEOUT_MS} ms for: ${sql.slice(0, 120)}`);
+		}
+		throw err;
 	}
 
-	const data = (await res.json()) as D1ApiResponse<T>;
 	if (!data.success) {
 		throw new Error(`D1 query failed: ${data.errors.map((e) => e.message).join(", ")}`);
 	}
