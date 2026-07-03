@@ -20,6 +20,7 @@ import {
 	TabNotFoundError,
 } from "./api.js";
 import { formatBytes, formatCpuCores, formatCpuPercent } from "./format.js";
+import { transformKeyInput } from "./keyBar.js";
 import {
 	activeSessionId,
 	closingTabs,
@@ -463,6 +464,11 @@ function openTab(tabId: string) {
 				container: pane,
 				sessionId: ownSessionId,
 				tabId,
+				// Sticky-Ctrl from the mobile key bar. One shared transform
+				// across every tab — the armed state lives in keyBar.ts (the
+				// bar is a global widget), so whichever tab receives the next
+				// keystroke consumes the same state the button displays.
+				transformInput: transformKeyInput,
 				onStatus: (status: SessionStatus) => {
 					if (activeSessionId !== ownSessionId) return;
 

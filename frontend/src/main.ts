@@ -31,6 +31,7 @@ import {
 	type Tab,
 } from "./api.js";
 import { closeInvitesModal } from "./invites.js";
+import { initKeyBar, updateKeyBarVisibility } from "./keyBar.js";
 import { closeMyGroupsModal, closeObserveModal } from "./myGroups.js";
 import {
 	applyResourceCapsToForm,
@@ -737,10 +738,12 @@ export function updateChromeToggle() {
 	if (!s) {
 		chromeToggleBtn.hidden = true;
 		actionsBtn.hidden = true;
+		updateKeyBarVisibility();
 		return;
 	}
 	chromeToggleBtn.hidden = false;
 	actionsBtn.hidden = false;
+	updateKeyBarVisibility();
 	const activeTab = currentTabs.find((t) => t.tabId === currentActiveTabId);
 	// Format: "session › tab". Falls back to just the session name when
 	// no tab is active yet (fresh session, between switches). Using a
@@ -876,5 +879,6 @@ export function getActiveTerminal(): TerminalSession | null {
 
 // ── Init ────────────────────────────────────────────────────────────────────
 
+initKeyBar();
 updateAuthUI();
 initAuth();
