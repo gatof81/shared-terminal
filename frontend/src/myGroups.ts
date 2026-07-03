@@ -250,6 +250,13 @@ async function openObserveModal(s: ObservableSession): Promise<void> {
 			}
 		},
 		onError: (msg) => showToast(`Observe error: ${msg}`, true),
+		// Same renderer-degrade notice the owner-side tabs get
+		// (sessionCore.openTab) — without it, a WebGL→canvas or
+		// canvas→DOM fallback in the observed view is silent and the
+		// lead has no explanation for the sudden performance drop. No
+		// reload suffix here: the observe modal is transient, closing
+		// and reopening it re-attempts the full renderer chain anyway.
+		onRendererFallback: (msg) => showToast(msg),
 	});
 	activeObserveTerm = term;
 }
