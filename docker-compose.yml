@@ -66,6 +66,16 @@ services:
     networks:
       - sessions-net
     restart: unless-stopped
+    # #345 — bound the json-file driver. Without a cap, backend logs
+    # accumulate in /var/lib/docker/containers/<id>/*-json.log until the
+    # host disk fills. Session containers aren't compose services, so this
+    # block can't cover them — they get the equivalent cap via LogConfig
+    # in DockerManager.spawn().
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
   # Build-only helper — the session image needs to exist in Docker's image
   # store before `app` can spawn session containers, but we don't want to

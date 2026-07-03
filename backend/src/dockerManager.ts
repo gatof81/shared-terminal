@@ -379,6 +379,17 @@ export class DockerManager {
 				// container can raise it back.
 				Ulimits: [{ Name: "nofile", Soft: 65536, Hard: 65536 }],
 				RestartPolicy: { Name: "unless-stopped" },
+				// #345 — bound the json-file log driver. Session containers are
+				// long-lived (they survive stop/start cycles) and their PID 1 /
+				// exec streams can be chatty (Claude TUI repaints, build logs
+				// leaking to the container log via postStart daemons), so an
+				// uncapped log grows in /var/lib/docker/containers/<id>/ until
+				// the host disk fills. 10m × 3 files ≈ 30 MiB worst-case per
+				// session — plenty for post-mortem tails while making the
+				// aggregate bound scale with session count, not with output
+				// volume. Mirrors the `logging:` block on the compose `app`
+				// service (which can't cover spawned containers).
+				LogConfig: { Type: "json-file", Config: { "max-size": "10m", "max-file": "3" } },
 				// Defense-in-depth (issue #15): the image already runs as
 				// unprivileged UID 1000 with no sudo, but we still strip
 				// every Linux capability from the bounding set Docker

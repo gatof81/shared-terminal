@@ -236,6 +236,21 @@ describe("DockerManager.spawn config-applied", () => {
 		expect(hc.Ulimits).toEqual([{ Name: "nofile", Soft: 65536, Hard: 65536 }]);
 	});
 
+	// #345 — pin the log-rotation cap so a HostConfig refactor can't
+	// silently drop it (unconditional, so the no-config-row spawn is a
+	// sufficient probe).
+	it("always sets a bounded json-file LogConfig (#345)", async () => {
+		const { dm, captured } = makeDmWithCreateCapture();
+		await dm.spawn("sess-1");
+		const hc = captured.opts.HostConfig as {
+			LogConfig: { Type: string; Config: Record<string, string> };
+		};
+		expect(hc.LogConfig).toEqual({
+			Type: "json-file",
+			Config: { "max-size": "10m", "max-file": "3" },
+		});
+	});
+
 	it("applies cpu_limit / mem_limit from the session_configs row", async () => {
 		dbStubs.d1Query.mockResolvedValueOnce({
 			results: [
