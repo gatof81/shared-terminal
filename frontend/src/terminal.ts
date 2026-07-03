@@ -210,7 +210,11 @@ export function openTerminalSession(opts: {
 		} catch (err) {
 			created?.dispose();
 			console.warn("[terminal] canvas renderer unavailable, falling back to DOM:", err);
-			noticeFallback(reason, "dom");
+			// `reason` describes why WEBGL failed; the canvas failure is its
+			// own event (details in the console.warn above). Compose both so
+			// the DOM-tier toast doesn't attribute the canvas failure to the
+			// WebGL reason.
+			noticeFallback(`${reason}; canvas init also failed`, "dom");
 		}
 	};
 	try {
@@ -235,10 +239,17 @@ export function openTerminalSession(opts: {
 	// tiers cache glyph textures, and a stale atlas after a DPR change or
 	// font-size cycle paints misaligned / ghost glyphs (#155). A throw
 	// means the renderer's context is unusable — degrade one tier rather
-	// than leave a wedged renderer live. When the webgl branch degrades,
-	// the canvas branch below then clears the freshly-loaded canvas
-	// addon's (empty) atlas — a harmless no-op, not a double-clear bug.
+	// than leave a wedged renderer live.
 	const clearRendererAtlas = () => {
+		// Snapshot BEFORE the webgl branch: if that branch degrades,
+		// loadCanvasFallback promotes a brand-new CanvasAddon, and the
+		// canvas branch below must not touch it — a freshly-loaded addon
+		// has nothing cached, and if its clearTextureAtlas() were to
+		// throw (a cascading GPU fault taking the 2D context down too),
+		// we'd dispose the tier we JUST promoted and ratchet the notice
+		// gate to "dom" permanently. Only an addon that predates this
+		// call can hold a stale atlas worth clearing.
+		const canvasBefore = canvas;
 		try {
 			webgl?.clearTextureAtlas();
 		} catch {
@@ -246,12 +257,14 @@ export function openTerminalSession(opts: {
 			webgl = null;
 			loadCanvasFallback("atlas clear failed");
 		}
-		try {
-			canvas?.clearTextureAtlas();
-		} catch {
-			canvas?.dispose();
-			canvas = null;
-			noticeFallback("atlas clear failed", "dom");
+		if (canvasBefore && canvas === canvasBefore) {
+			try {
+				canvasBefore.clearTextureAtlas();
+			} catch {
+				canvasBefore.dispose();
+				canvas = null;
+				noticeFallback("canvas atlas clear failed", "dom");
+			}
 		}
 	};
 
