@@ -262,6 +262,50 @@ describe("DockerManager shared-exec multiplexing", () => {
 		expect(a2).toHaveBeenCalledWith("hello");
 	});
 
+	// #347 — the LAST client detaching while a joiner's capture-pane is in
+	// flight tears down the shared exec the joiner already awaited. Without
+	// the post-capture re-check, the joiner registers its listener on that
+	// destroyed SharedExec: frozen terminal (no live bytes ever arrive), and
+	// write()/resize() silently no-op because the slot is gone from `shared`.
+	it("respawns when the last client detaches during a joiner's capture-pane (#347)", async () => {
+		const { dm, container } = makeDocker();
+		const received: string[] = [];
+
+		await attachAndFlush(
+			dm,
+			"s1",
+			"a1",
+			80,
+			24,
+			() => {
+				/* noop */
+			},
+			"tab-test",
+		);
+		expect(countAttachExecs(container)).toBe(1);
+
+		// Joiner: start the attach but DON'T await it yet — its capture-pane
+		// one-shots complete on macrotasks (setImmediate in the fake), while
+		// a1's detach teardown runs earlier on the microtask queue. That
+		// reproduces the race interleaving deterministically: the slot is
+		// destroyed while the joiner's capture-pane is still in flight.
+		const joining = dm.attach("s1", "a2", 80, 24, (d) => received.push(d), "tab-test");
+		dm.detach("a1");
+		const result = await joining;
+		result.flushTail();
+
+		// The re-check respawned a fresh shared exec…
+		expect(countAttachExecs(container)).toBe(2);
+		// …and the joiner is live on it: bytes written to the NEW attach
+		// stream reach its listener. Pre-fix this is where it froze — the
+		// listener sat on the destroyed stream and received nothing.
+		const attachExecs = container._execs.filter(isAttachExec);
+		const freshStream = attachExecs[attachExecs.length - 1]!._stream;
+		freshStream.write("post-respawn-bytes");
+		await tick();
+		expect(received.join("")).toContain("post-respawn-bytes");
+	});
+
 	it("serializes concurrent first-attach calls onto a single container.exec()", async () => {
 		const { dm, container } = makeDocker();
 

@@ -1341,6 +1341,9 @@ export class DockerManager {
 		// half, the wsHandler drop is the auth invariant for the
 		// write-into-someone's-shell half.
 		observe = false,
+		// Internal recursion counter for the #347 teardown re-check below —
+		// callers never pass it.
+		attempt = 0,
 	): Promise<{ handle: ExecHandle; replay: string | null; flushTail: () => void }> {
 		const key = this.targetKey(sessionId, tabId);
 
@@ -1443,6 +1446,38 @@ export class DockerManager {
 		// start), which is more machinery than the lost-bytes symptom
 		// warrants in a terminal product.
 		const snapshot = await this.capturePane(sessionId, tabId);
+
+		// #347 — teardown re-check. Between `await pending` above and the
+		// capture-pane round-trips completing, the LAST remaining client
+		// can detach: its teardown destroys the shared stream and deletes
+		// the slot. Registering on that dead SharedExec would hand this
+		// caller a frozen terminal — no live bytes ever arrive, and
+		// write()/resize() silently no-op because they resolve the attachId
+		// through `this.shared`, where the slot is gone. Detect the
+		// teardown (or a teardown+respawn by a third client — any slot
+		// change invalidates our `s`) and re-run the whole acquisition: a
+		// fresh attach finds the slot empty and respawns, and the stale `s`
+		// carried no listener of ours yet, so there is nothing to unwind.
+		// Bounded: each recursion requires its own detach-during-capture
+		// interleaving; three in a row means the tab is flapping faster
+		// than we can attach — fail loud (wsHandler closes 1011) and let
+		// the client's reconnect-with-backoff (#356) pace the retry.
+		//
+		// The OPPOSITE interleaving — detach's `.then` teardown firing just
+		// AFTER this check passes — is safe without further guarding:
+		// everything from here to `s.listeners.set(attachId, …)` below is
+		// synchronous, so by the time that teardown callback runs it sees
+		// `listeners.size >= 1` and takes the survivors branch instead of
+		// destroying the exec.
+		if (this.shared.get(key) !== pending) {
+			if (attempt >= 2) {
+				throw new Error(`shared exec for ${key} torn down repeatedly during attach`);
+			}
+			logger.info(
+				`[docker] shared exec for ${key} torn down during attach; retrying (attempt ${attempt + 1})`,
+			);
+			return this.attach(sessionId, attachId, cols, rows, onOutput, tabId, observe, attempt + 1);
+		}
 
 		const tail: string[] = [];
 		let armed = true;
