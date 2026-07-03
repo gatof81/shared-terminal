@@ -72,7 +72,10 @@ jobs:
               Node/Express backend on Proxmox behind a Cloudflare Tunnel.
             - Terminal-server product: each session spawns a Docker container,
               backend relays tmux over WebSocket to xterm.js in the browser.
-            - SQLite on the backend. JWT for auth. Invite-code onboarding.
+            - Persistence is Cloudflare D1: SQLite-flavored but REMOTE over
+              HTTP — every query is a network round-trip and there is no
+              local database file, so local-file/transaction assumptions
+              don't apply. JWT for auth. Invite-code onboarding.
             - Solo repo, no human reviewer — be direct. No praise. No emojis.
             - Threat model: (a) logged-in user trying to escape their container
               or reach another user's session; (b) unauthenticated attacker on
