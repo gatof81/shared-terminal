@@ -359,6 +359,25 @@ export class DockerManager {
 				// definitions); this keeps the config path symmetric.
 				Memory: Math.min(config?.memLimit ?? DEFAULT_MEMORY_BYTES, EFFECTIVE_MEM_BYTES_MAX),
 				NanoCpus: Math.min(config?.cpuLimit ?? DEFAULT_NANO_CPUS, EFFECTIVE_CPU_NANO_MAX),
+				// #344 — Memory/CPU caps don't bound PROCESS COUNT: a fork bomb
+				// inside a session starves the host's PID space and scheduler
+				// while staying under both cgroup caps. 1024 is far above any
+				// real dev workload in these containers (tmux + node + claude
+				// + a parallel build lands in the low hundreds) yet turns a
+				// fork bomb into an in-container EAGAIN instead of a host
+				// incident. Deliberately a cgroup pids limit and NOT an nproc
+				// ulimit: every session container runs as UID 1000, and
+				// RLIMIT_NPROC counts per-UID across the whole kernel — an
+				// nproc ulimit would let one session's process count exhaust
+				// a SIBLING session's budget. PidsLimit is per-cgroup, so
+				// sessions stay isolated from each other.
+				PidsLimit: 1024,
+				// Companion fd bound. 65536 is generous for dev servers and
+				// file watchers (Vite/watchman-style workloads sit well under
+				// it) while capping a leak well below the dockerd default of
+				// ~1M fds per container. Soft == hard so nothing inside the
+				// container can raise it back.
+				Ulimits: [{ Name: "nofile", Soft: 65536, Hard: 65536 }],
 				RestartPolicy: { Name: "unless-stopped" },
 				// Defense-in-depth (issue #15): the image already runs as
 				// unprivileged UID 1000 with no sudo, but we still strip
