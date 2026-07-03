@@ -1134,11 +1134,7 @@ describe("drainInFlightBootstraps (#348)", () => {
 			success: true,
 			meta: { changes: 1, duration: 0, last_row_id: 0 },
 		});
-		await runAsyncBootstrap(
-			"sess-1",
-			{ postCreateCmd: "true" },
-			{ sessions, docker, broadcaster },
-		);
+		await runAsyncBootstrap("sess-1", { postCreateCmd: "true" }, { sessions, docker, broadcaster });
 		await drainInFlightBootstraps();
 		// No late abort machinery fired against the finished run.
 		expect(updateStatus).not.toHaveBeenCalled();
