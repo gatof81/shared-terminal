@@ -76,6 +76,23 @@ services:
       options:
         max-size: 10m
         max-file: "3"
+    # #346 — `restart: unless-stopped` only fires on process EXIT; a
+    # wedged-but-alive Node (event-loop stall, stuck outbound calls)
+    # stayed "running" forever with no signal. /health is a static
+    # in-process JSON route (backend/src/index.ts), so this probes
+    # exactly the two things that wedge — the event loop and the HTTP
+    # stack — and deliberately NOT D1, which has its own timeout and
+    # whose brown-outs must not read as "backend unhealthy" (that would
+    # turn an upstream blip into restart churn if an auto-restarter is
+    # attached). Docker itself only FLAGS unhealthy (docker ps, events);
+    # pair with an autoheal sidecar or alerting if auto-recycle is
+    # wanted. node -e fetch avoids a curl/wget dependency in the image.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   # Build-only helper — the session image needs to exist in Docker's image
   # store before `app` can spawn session containers, but we don't want to
