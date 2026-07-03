@@ -600,18 +600,33 @@ export const MIGRATIONS: readonly Migration[] = [
 			const cols = await d1Query<{ name: string }>("PRAGMA table_info(invite_codes)");
 			const colNames = new Set(cols.results.map((r) => r.name));
 			const isOldShape = colNames.has("code") && !colNames.has("code_hash");
-			if (!isOldShape) return;
-			const rowCount = await d1Query<{ n: number }>("SELECT COUNT(*) AS n FROM invite_codes");
-			const n = rowCount.results[0]?.n ?? 0;
-			if (n > 0) {
-				throw new Error(
-					`invite_codes still has the pre-#49 schema with ${n} row(s). ` +
-						"Rebuild manually: dump the rows, hash each `code` to SHA-256 hex, " +
-						"and re-INSERT into the new (code_hash, code_prefix, …) shape.",
+			// Empty PRAGMA = the table doesn't exist AT ALL. Reachable when a
+			// prior run of this migration crashed between the DROP and the
+			// CREATE below (D1-over-HTTP has no transaction to make them
+			// atomic). Pre-ledger, the every-boot baseline replay recreated
+			// the table on the next boot; with the ledger, v1 never re-runs,
+			// so v11 itself must self-heal or invite_codes stays gone forever
+			// and every invite call fails with "no such table" (review
+			// round-1 BLOCKER).
+			const isMissing = colNames.size === 0;
+			if (!isOldShape && !isMissing) return;
+			if (isMissing) {
+				logger.warn(
+					"[db] invite_codes table missing (prior v11 crash between DROP and CREATE?) — recreating",
 				);
+			} else {
+				const rowCount = await d1Query<{ n: number }>("SELECT COUNT(*) AS n FROM invite_codes");
+				const n = rowCount.results[0]?.n ?? 0;
+				if (n > 0) {
+					throw new Error(
+						`invite_codes still has the pre-#49 schema with ${n} row(s). ` +
+							"Rebuild manually: dump the rows, hash each `code` to SHA-256 hex, " +
+							"and re-INSERT into the new (code_hash, code_prefix, …) shape.",
+					);
+				}
+				logger.warn("[db] migrating empty pre-#49 invite_codes table to hashed-at-rest shape");
 			}
-			logger.warn("[db] migrating empty pre-#49 invite_codes table to hashed-at-rest shape");
-			await d1Query("DROP TABLE invite_codes");
+			await d1Query("DROP TABLE IF EXISTS invite_codes");
 			await d1Query(
 				`CREATE TABLE invite_codes (
                                 code_hash   TEXT PRIMARY KEY,
@@ -654,7 +669,14 @@ export async function migrateDb(): Promise<void> {
 		if (applied.has(m.version)) continue;
 		logger.info(`[db] applying migration ${m.version}: ${m.description}`);
 		await m.apply();
-		await d1Query("INSERT INTO schema_migrations (version, description) VALUES (?, ?)", [
+		// INSERT OR IGNORE, not plain INSERT: two overlapping boots (rolling
+		// restart, `npm run db:migrate` racing the server, tsx-watch double
+		// start) both read the same ledger snapshot and both apply the
+		// pending set — harmless for the migrations themselves (idempotent,
+		// see rules above), but the second ledger write would hit the
+		// PRIMARY KEY and crash that process's startup. OR IGNORE turns the
+		// loser's write into a no-op (review round-1 SHOULD-FIX).
+		await d1Query("INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)", [
 			m.version,
 			m.description,
 		]);

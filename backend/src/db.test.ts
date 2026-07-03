@@ -160,11 +160,11 @@ describe("migrateDb ledger (#349)", () => {
 		const seen = mockFetchBySql((sql) => {
 			// Fresh DB: empty ledger; PRAGMA reports the NEW invite shape so
 			// the v11 rebuild no-ops (v1 just created the hashed table).
-			if (sql.startsWith("PRAGMA table_info")) return [{ name: "code_hash" }];
+			if (sql.startsWith("PRAGMA table_info(invite_codes)")) return [{ name: "code_hash" }];
 			return [];
 		});
 		await migrateDb();
-		const recorded = seen.filter((s) => s.startsWith("INSERT INTO schema_migrations"));
+		const recorded = seen.filter((s) => s.startsWith("INSERT OR IGNORE INTO schema_migrations"));
 		expect(recorded).toHaveLength(MIGRATIONS.length);
 		// Spot-check the baseline actually ran.
 		expect(seen.some((s) => s.includes("CREATE TABLE IF NOT EXISTS users"))).toBe(true);
@@ -183,7 +183,7 @@ describe("migrateDb ledger (#349)", () => {
 		// is the boot-cost win the refactor exists for.
 		expect(seen).toHaveLength(2);
 		expect(seen.some((s) => s.includes("CREATE TABLE IF NOT EXISTS users"))).toBe(false);
-		expect(seen.some((s) => s.startsWith("INSERT INTO schema_migrations"))).toBe(false);
+		expect(seen.some((s) => s.startsWith("INSERT OR IGNORE INTO schema_migrations"))).toBe(false);
 	});
 
 	it("applies only the pending suffix when partially recorded", async () => {
@@ -193,17 +193,40 @@ describe("migrateDb ledger (#349)", () => {
 				// Everything applied except the last migration.
 				return MIGRATIONS.slice(0, -1).map((m) => ({ version: m.version }));
 			}
-			if (sql.startsWith("PRAGMA table_info")) return [{ name: "code_hash" }];
+			if (sql.startsWith("PRAGMA table_info(invite_codes)")) return [{ name: "code_hash" }];
 			return [];
 		});
 		await migrateDb();
-		const recorded = seen.filter((s) => s.startsWith("INSERT INTO schema_migrations"));
+		const recorded = seen.filter((s) => s.startsWith("INSERT OR IGNORE INTO schema_migrations"));
 		expect(recorded).toHaveLength(1);
 		// The one recorded insert is for the pending (last) version — the
 		// PRAGMA probe proves v11's apply() ran rather than being skipped.
 		expect(seen.some((s) => s.startsWith("PRAGMA table_info"))).toBe(true);
 		// And no earlier migration re-ran.
 		expect(seen.some((s) => s.includes("CREATE TABLE IF NOT EXISTS users"))).toBe(false);
+	});
+
+	// Round-1 BLOCKER regression: a prior v11 crash between DROP and CREATE
+	// leaves invite_codes absent; the re-run must RECREATE it, not skip.
+	it("v11 recreates invite_codes when the table is missing entirely", async () => {
+		const { migrateDb, MIGRATIONS } = await import("./db.js");
+		const seen = mockFetchBySql((sql) => {
+			if (sql.startsWith("SELECT version FROM schema_migrations")) {
+				// Everything recorded except v11 — the crashed run's ledger
+				// INSERT never fired.
+				return MIGRATIONS.slice(0, -1).map((m) => ({ version: m.version }));
+			}
+			// Table gone: PRAGMA on a missing table returns zero rows.
+			if (sql.startsWith("PRAGMA table_info(invite_codes)")) return [];
+			return [];
+		});
+		await migrateDb();
+		expect(seen.some((s) => /CREATE TABLE invite_codes/.test(s))).toBe(true);
+		// And no COUNT probe — there is no table to count.
+		expect(seen.some((s) => s.includes("SELECT COUNT(*) AS n FROM invite_codes"))).toBe(false);
+		expect(
+			seen.filter((s) => s.startsWith("INSERT OR IGNORE INTO schema_migrations")),
+		).toHaveLength(1);
 	});
 
 	it("versions are unique and strictly ascending (append-only guard)", async () => {
