@@ -221,6 +221,21 @@ describe("DockerManager.spawn config-applied", () => {
 		expect(captured.opts.Env).toContain("LEGACY_KEY=legacy");
 	});
 
+	// #344 — Memory/CPU don't bound process count or fds; the claude-review
+	// checklist expects pids to be bounded. Pin the values so a HostConfig
+	// refactor can't silently drop them (they're unconditional, so the
+	// no-config-row spawn is a sufficient probe).
+	it("always sets PidsLimit and a nofile ulimit (fork-bomb / fd-exhaustion bound, #344)", async () => {
+		const { dm, captured } = makeDmWithCreateCapture();
+		await dm.spawn("sess-1");
+		const hc = captured.opts.HostConfig as {
+			PidsLimit: number;
+			Ulimits: Array<{ Name: string; Soft: number; Hard: number }>;
+		};
+		expect(hc.PidsLimit).toBe(1024);
+		expect(hc.Ulimits).toEqual([{ Name: "nofile", Soft: 65536, Hard: 65536 }]);
+	});
+
 	it("applies cpu_limit / mem_limit from the session_configs row", async () => {
 		dbStubs.d1Query.mockResolvedValueOnce({
 			results: [
