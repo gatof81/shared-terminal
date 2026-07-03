@@ -212,6 +212,32 @@
           </div>
           <div id="terminal-tabs"></div>
           <div id="terminal-container"></div>
+          <!-- Mobile extra-keys bar — the soft keyboard has no Esc/Tab/
+               Ctrl/arrows, which a terminal (vim, tmux, shell history,
+               interrupt) can't live without. Shown only on touch mobile
+               (CSS-gated) while a session is active (JS-gated, rides the
+               same lifecycle as the actions + button). Ctrl is a sticky
+               modifier: tap it, then the next key — bar key or soft-
+               keyboard letter — sends the Ctrl-chord. Wiring and the
+               focus-preservation rationale live in keyBar.ts. -->
+          <div id="key-bar" hidden>
+            <button type="button" data-key="esc">esc</button>
+            <button type="button" data-key="tab">tab</button>
+            <button
+              type="button"
+              data-key="ctrl"
+              id="key-bar-ctrl"
+              aria-pressed="false"
+              title="Sticky Ctrl — applies to the next key"
+            >
+              ctrl
+            </button>
+            <button type="button" data-key="ctrl-c" aria-label="Control C (interrupt)">^C</button>
+            <button type="button" data-key="up" data-repeat aria-label="Arrow up">↑</button>
+            <button type="button" data-key="down" data-repeat aria-label="Arrow down">↓</button>
+            <button type="button" data-key="left" data-repeat aria-label="Arrow left">←</button>
+            <button type="button" data-key="right" data-repeat aria-label="Arrow right">→</button>
+          </div>
         </section>
       </main>
     </div>

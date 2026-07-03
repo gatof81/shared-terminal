@@ -7,6 +7,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { type IDisposable, type ILink, type ILinkProvider, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import { type SpecialKey, specialKeySequence } from "./keys.js";
 
 export type SessionStatus = "running" | "stopped" | "terminated" | "disconnected";
 
@@ -27,6 +28,15 @@ export interface TerminalSession {
 	 *  one finalised selection. No-op on desktop, where a mouse drag with
 	 *  the platform modifier already selects (#286). */
 	enterSelectMode(): void;
+	/** Send a named special key (Esc / Tab / arrows / Ctrl-C) to the pty
+	 *  as the byte sequence a hardware keyboard would produce. Arrows
+	 *  honour the terminal's application-cursor-keys mode (DECCKM), which
+	 *  only this layer can see (`term.modes`) — that's why the encoding
+	 *  lives here and not in the key bar. `mods.ctrl` requests the
+	 *  Ctrl-modified variant where one exists (arrows → CSI 1;5x, e.g.
+	 *  word-jump in readline). No-op in observe-mode, matching the
+	 *  suppressed onData input path. */
+	sendSpecialKey(key: SpecialKey, mods?: { ctrl?: boolean }): void;
 }
 
 export type StatusCallback = (status: SessionStatus) => void;
@@ -64,6 +74,19 @@ export function openTerminalSession(opts: {
 	onCopy?: CopyCallback;
 	isActive?: ActivePredicate;
 	/**
+	 * Hook applied to every keyboard-originated input chunk (term.onData)
+	 * before it goes on the wire. The mobile key bar (keyBar.ts) uses
+	 * this for its sticky-Ctrl modifier: the transform lives OUTSIDE the session
+	 * (keyBar.ts owns the armed state) because the bar is a single global
+	 * widget while sessions are per-tab — keeping the state here would
+	 * desync the bar's pressed-Ctrl visual from whichever tab is active.
+	 * NOT applied to paste() (term.paste routes through onData too, but
+	 * bracketed-paste content must never be ctrl-mangled — see the guard
+	 * at the call site) nor to touch-scroll SGR synthesis (those aren't
+	 * keystrokes).
+	 */
+	transformInput?: (data: string) => string;
+	/**
 	 * Read-only observe-mode (#201e). When true:
 	 *   - the WS URL carries `&observe=true` so the backend routes
 	 *     auth via `assertCanObserve` instead of `assertOwnership`;
@@ -95,6 +118,7 @@ export function openTerminalSession(opts: {
 		onRendererFallback,
 		onCopy,
 		isActive,
+		transformInput,
 		observe = false,
 	} = opts;
 	// Fires the fallback notice at most once per TIER, and only when
@@ -706,10 +730,20 @@ export function openTerminalSession(opts: {
 	// in the cleanup path becomes a no-op via the dummy disposable
 	// below (matches the IDisposable contract without an `if (observe)`
 	// branch in the dispose path).
+	// `pasting` gates transformInput: term.paste() feeds the pasted bytes
+	// through this same onData handler (that's how bracketed-paste framing
+	// reaches the wire), and pasted CONTENT must never be ctrl-mangled by
+	// the key bar's sticky modifier — only real keystrokes. Synchronous
+	// flag is sufficient because xterm's paste → onData delivery is
+	// synchronous (coreService.triggerDataEvent inside term.paste).
+	let pasting = false;
 	const inputDisposable: IDisposable = observe
 		? { dispose: () => {} }
 		: term.onData((data) => {
-				send({ type: "input", data });
+				send({
+					type: "input",
+					data: transformInput && !pasting ? transformInput(data) : data,
+				});
 			});
 
 	// ── Touch scroll ────────────────────────────────────────────────────────
@@ -1054,7 +1088,27 @@ export function openTerminalSession(opts: {
 	// bash, zsh, and Claude CLI all do — so multi-line content arrives as
 	// one paste event instead of being executed line-by-line.
 	function paste(text: string) {
-		term.paste(text);
+		// See the `pasting` declaration above the onData handler: the flag
+		// exempts pasted content from the key bar's transformInput hook.
+		pasting = true;
+		try {
+			term.paste(text);
+		} finally {
+			pasting = false;
+		}
+	}
+
+	function sendSpecialKey(key: SpecialKey, mods?: { ctrl?: boolean }) {
+		// Mirrors the onData suppression in observe-mode — the server would
+		// drop the frame anyway; don't spend it.
+		if (observe) return;
+		send({
+			type: "input",
+			data: specialKeySequence(key, {
+				appCursor: term.modes.applicationCursorKeysMode,
+				ctrl: mods?.ctrl ?? false,
+			}),
+		});
 	}
 
 	// Explicit copy of the current selection (actions-menu "Select & copy"
@@ -1146,7 +1200,7 @@ export function openTerminalSession(opts: {
 		term.dispose();
 	}
 
-	return { dispose, setFontSize, paste, copySelection, enterSelectMode };
+	return { dispose, setFontSize, paste, copySelection, enterSelectMode, sendSpecialKey };
 }
 
 // ── Multiline URL link provider ─────────────────────────────────────────────
