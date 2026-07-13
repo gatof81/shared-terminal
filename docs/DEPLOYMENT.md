@@ -151,6 +151,19 @@ The backend will be available at `http://localhost:3001`.
 > not depend on it at runtime — it just needs the `shared-terminal-session` image
 > to exist in Docker's image store before creating sessions.
 
+> **Claude CLI state persistence (upgrade note).** The session image now
+> symlinks `~/.claude` and `~/.claude.json` into the workspace bind mount, so
+> Claude login, `--resume`/`--continue` transcripts, and agent-seeded
+> settings survive container recreation. Existing sessions adopt this on
+> their next **recreate** (`POST /sessions/:id/start` respawns from the
+> rebuilt image) — a plain container stop+start keeps running the old
+> entrypoint baked into the old image. Claude state that lived in the old
+> container's layer is lost in that one recreate (it always was — that's the
+> bug this fixes), so expect a one-time `claude` re-login per session after
+> the upgrade. Security implications of transcripts living on the host are
+> covered in [docs/SECURITY.md → Claude CLI state at
+> rest](./SECURITY.md#claude-cli-state-at-rest).
+
 ### Frontend (Cloudflare Pages)
 
 The frontend is a static Vite build. Deploy `frontend/dist` to Cloudflare Pages and set the `VITE_API_URL` env var in the Pages dashboard to your backend's public URL (e.g. `https://api.terminal.yourdomain.com`). `vite.config.ts` rewrites the CSP meta tag from that value so the browser allows connections back to your backend.
@@ -270,6 +283,7 @@ Each session runs in a Docker container based on `session-image/Dockerfile`:
 - **OS:** Ubuntu 24.04
 - **Dev tools:** git, curl, build-essential, python3, Node.js 22, vim, nano, htop, jq
 - **Claude CLI:** `@anthropic-ai/claude-code` (globally installed; aliased to `claude --dangerously-skip-permissions` in interactive shells. The container sandbox prevents host compromise / privilege escalation, but **does not protect workspace files from in-session destructive actions** — Claude can run `rm -rf ~/workspace/…` or overwrite a tracked file without asking. Bypass the alias with `\claude` or `command claude` for one call, `unalias claude` for the rest of the shell.)
+  - Login, transcripts (`--resume`/`--continue`), and settings persist in the workspace across container recreation — see [SECURITY.md → Claude CLI state at rest](./SECURITY.md#claude-cli-state-at-rest)
 - **VS Code CLI:** `code` (standalone) — see [REMOTE-EDITING.md](./REMOTE-EDITING.md)
 - **GitHub CLI:** `gh` (standalone) — auth once with `gh auth login`, then drive PRs / issues / `gh api …` from the session
 - **Terminal:** tmux, 50k scrollback, mouse support. No tmux session exists at container boot (PID 1 is a plain `tail -f /dev/null`) — each browser tab provisions its own tmux session on demand via `tmux new-session -A -s <tabId>` at WS attach

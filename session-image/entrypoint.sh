@@ -260,6 +260,93 @@ elif ! ln -sfn /home/developer/workspace/.config/gh /home/developer/.config/gh; 
              "gh auth state won't persist across restarts." >&2
 fi
 
+# Persist Claude CLI state across container replacement.
+#
+# `claude` keeps its state in two places, both in the container layer:
+#
+#   - ~/.claude/      — OAuth credentials (.credentials.json), the session
+#     transcripts under projects/ that `--resume` / `--continue` replay,
+#     and settings.json + CLAUDE.md (including what the bootstrap
+#     agentSeed stage writes there).
+#   - ~/.claude.json  — top-level config: onboarding state, per-project
+#     state, MCP server registrations.
+#
+# Losing them on a recreate (POST /sessions/:id/start, reconcile after a
+# host reboot) forces a re-login and orphans every conversation the user
+# expected --resume to find. Same lifetime contract as the three blocks
+# above: state rides the workspace, soft delete keeps it, hard delete
+# purges it. Transcripts are conversation *content* at rest on the host
+# — operator-facing consequences are documented in docs/SECURITY.md
+# ("Claude CLI state at rest").
+#
+# Why symlinks and not CLAUDE_CONFIG_DIR: the env var exists but is
+# undocumented (anthropics/claude-code#33430) and not honoured by every
+# surface — the VS Code extension ignores it
+# (anthropics/claude-code#30538), and `code tunnel` is a first-class
+# flow in this image, so relying on the var would split state between
+# two locations for tunnel-attached editors. Symlinked default paths
+# cover every consumer, documented or not.
+#
+# ~/.claude.json is a FILE symlink, which is only safe because the CLI
+# resolves the link before its atomic-rename config rewrite — the
+# rename lands on the resolved target, and a dangling link (fresh
+# workspace, no file yet) gets its target created through the link.
+# Both behaviours verified against the shipped CLI version. A future
+# CLI that renamed onto the path itself would silently replace the
+# symlink with a real file, so the session-image smoke test (#352)
+# must assert the symlink survives a config write on every version
+# bump.
+#
+# Unlike ~/.npm-global there is no build-time copy to preserve (the
+# image never runs `claude`, so ~/.claude doesn't exist in a fresh
+# layer) — no rename-then-restore dance needed. The pre-existing-real-
+# dir guards below cover the stop+start path where a prior boot's ln
+# failed and the CLI then wrote real state into the container layer.
+# That state includes unrecoverable conversation transcripts, so where
+# the gh/vscode blocks above just drop the real dir (tokens are
+# re-obtainable via a device flow), this block first seeds the
+# workspace copy from it — losing transcripts to a transient ln
+# failure is strictly worse than the one-time re-auth those blocks
+# accept.
+CLAUDE_STATE_HOME=/home/developer/.claude
+CLAUDE_STATE_WS=/home/developer/workspace/.claude
+CLAUDE_JSON_HOME=/home/developer/.claude.json
+CLAUDE_JSON_WS=/home/developer/workspace/.claude.json
+
+if [ -d "$CLAUDE_STATE_HOME" ] && [ ! -L "$CLAUDE_STATE_HOME" ]; then
+        if [ ! -d "$CLAUDE_STATE_WS" ]; then
+                cp -a "$CLAUDE_STATE_HOME" "$CLAUDE_STATE_WS" || \
+                        echo "[entrypoint] WARN: couldn't rescue container-layer ~/.claude into workspace; " \
+                             "existing Claude auth/transcripts will be lost on the symlink swap." >&2
+        fi
+        rm -rf "$CLAUDE_STATE_HOME" || true
+fi
+if [ -f "$CLAUDE_JSON_HOME" ] && [ ! -L "$CLAUDE_JSON_HOME" ]; then
+        if [ ! -f "$CLAUDE_JSON_WS" ]; then
+                cp -a "$CLAUDE_JSON_HOME" "$CLAUDE_JSON_WS" || \
+                        echo "[entrypoint] WARN: couldn't rescue container-layer ~/.claude.json into workspace." >&2
+        fi
+        rm -f "$CLAUDE_JSON_HOME" || true
+fi
+
+if ! mkdir -p "$CLAUDE_STATE_WS"; then
+        echo "[entrypoint] WARN: couldn't create workspace .claude dir " \
+             "(uid=$(id -u), workspace owner=$(stat -c '%u:%g' /home/developer/workspace 2>/dev/null || echo '?')). " \
+             "Claude auth and session transcripts won't persist across restarts." >&2
+elif ! ln -sfn "$CLAUDE_STATE_WS" "$CLAUDE_STATE_HOME"; then
+        echo "[entrypoint] WARN: couldn't symlink ~/.claude into workspace; " \
+             "Claude auth and session transcripts won't persist across restarts." >&2
+fi
+
+# Target intentionally NOT pre-created: the CLI creates it through the
+# dangling link on first write (verified), so a pre-seeded empty file
+# would only add a second content shape ("empty" vs "absent" vs "real
+# config") for the CLI and this script to reason about.
+if ! ln -sfn "$CLAUDE_JSON_WS" "$CLAUDE_JSON_HOME"; then
+        echo "[entrypoint] WARN: couldn't symlink ~/.claude.json into workspace; " \
+             "Claude onboarding/project state won't persist across restarts." >&2
+fi
+
 echo "[entrypoint] container ready — create a tab from the UI to begin"
 
 # Keep PID 1 alive independent of tmux. tmux-server now starts lazily on the

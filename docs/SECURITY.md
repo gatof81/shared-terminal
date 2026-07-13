@@ -87,6 +87,46 @@ This is an explicit, opt-in feature (off by default). Leave
 `writeEnvFile` unset for sessions whose secrets must stay
 encrypted-at-rest, and prefer hard delete for any session that used it.
 
+## Claude CLI state at rest
+
+The session image persists Claude CLI state in the bind-mounted
+workspace so it survives container recreation (`POST
+/sessions/:id/start`, reconcile after a host reboot): the entrypoint
+symlinks `~/.claude` and `~/.claude.json` to
+`<WORKSPACE_ROOT>/<sessionId>/.claude{,.json}` on the host. Without
+this, every recreate forced a re-login and orphaned the session
+transcripts `claude --resume` / `--continue` replay.
+
+That state includes material operators should be aware of:
+
+- **Conversation transcripts** (`.claude/projects/`) — the full content
+  of every Claude conversation run in the session, in cleartext JSONL.
+  Anything the user pasted into a conversation (including secrets) is
+  in there.
+- **OAuth credentials** (`.claude/.credentials.json`) — a live Anthropic
+  token, `chmod 600` but cleartext on the host filesystem.
+
+Same consequences as the `writeEnvFile` section above, for the same
+reason (the workspace bind mount is the persistence boundary):
+
+- **Anyone with read access to `WORKSPACE_ROOT` on the host sees
+  transcripts and the token in the clear.** Neither is covered by
+  `SECRETS_ENCRYPTION_KEY` — that only protects `secret`-typed env
+  entries in D1.
+- **The state survives a soft delete.** `DELETE /api/sessions/:id`
+  preserves the workspace dir so the session can be restored — the
+  transcripts and token persist after the session is "deleted." Use
+  `?hard=true` (which runs `purgeWorkspace`) for sessions whose
+  conversations or credentials must actually be destroyed.
+- **There is no rotate-in-place path.** Revoking the Anthropic token
+  requires `claude /logout` inside a running session (or revocation on
+  the Anthropic side); deleting transcripts requires removing
+  `.claude/projects/` in the workspace or a hard delete.
+
+Unlike `writeEnvFile` this is not opt-in — persistence is the point of
+the feature, and the alternative (state evaporating on every recreate)
+was a standing bug, not a privacy control anyone relied on.
+
 ## Optional: docker-socket-proxy
 
 For deployments that want to shrink the backend's daemon surface
