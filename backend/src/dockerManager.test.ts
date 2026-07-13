@@ -12,7 +12,10 @@ vi.mock("./db.js", () => dbStubs);
 import {
 	DockerManager,
 	demuxDockerOutputAll,
+	KILL_PROCESS_GROUP_SCRIPT,
 	type OutputListener,
+	PGID_SENTINEL,
+	PGID_WRAPPER_SCRIPT,
 	sanitiseHostname,
 	sanitiseUploadName,
 } from "./dockerManager.js";
@@ -75,7 +78,14 @@ interface FakeContainer {
 
 // Optional per-test hook that lets the test script one-shot `tmux …` calls.
 // The hook receives the cmd and returns the stdout to emit plus an exit code.
-type OneShotHook = (cmd: string[]) => { stdout: string; exitCode: number } | undefined;
+// `frames` (when present) wins over `stdout` and lets a test control frame
+// boundaries and stream types — the pgid-sentinel tests need a sentinel
+// split across stdout frames and stderr arriving ahead of stdout, which a
+// single canned stdout string can't express.
+type OneShotFrame = { type: 1 | 2; data: string };
+type OneShotHook = (
+	cmd: string[],
+) => { stdout?: string; frames?: OneShotFrame[]; exitCode: number } | undefined;
 
 function makeFakeContainer(oneShot?: OneShotHook): FakeContainer {
 	const streams: PassThrough[] = [];
@@ -115,12 +125,17 @@ function makeFakeContainer(oneShot?: OneShotHook): FakeContainer {
 				start: vi.fn(async () => {
 					if (oneShotResult) {
 						setImmediate(() => {
-							// Wrap in Docker multiplexed frame (type=1/stdout) to mirror Tty:false.
-							const payload = Buffer.from(oneShotResult.stdout, "utf-8");
-							const header = Buffer.alloc(8);
-							header[0] = 1; // stdout
-							header.writeUInt32BE(payload.length, 4);
-							stream.write(Buffer.concat([header, payload]));
+							// Wrap in Docker multiplexed frames to mirror Tty:false.
+							const frames = oneShotResult.frames ?? [
+								{ type: 1 as const, data: oneShotResult.stdout ?? "" },
+							];
+							for (const frame of frames) {
+								const payload = Buffer.from(frame.data, "utf-8");
+								const header = Buffer.alloc(8);
+								header[0] = frame.type;
+								header.writeUInt32BE(payload.length, 4);
+								stream.write(Buffer.concat([header, payload]));
+							}
 							stream.end();
 						});
 					}
@@ -1716,5 +1731,214 @@ describe("DockerManager.kill port-mapping cleanup (#309)", () => {
 		);
 		expect(del).toBeDefined();
 		expect(del![1]).toEqual(["s1"]);
+	});
+});
+
+// ── Cancellable exec: newProcessGroup + killExecProcessGroup (#F3) ──────────
+
+describe("DockerManager.streamExec newProcessGroup", () => {
+	const sentinelLine = (pgid: number) => `${PGID_SENTINEL} ${pgid}\n`;
+
+	it("wraps the command in setsid + the pgid wrapper, preserving argv verbatim", async () => {
+		const { dm, container } = makeDocker({
+			oneShot: (cmd) =>
+				cmd[0] === "setsid"
+					? { stdout: `${sentinelLine(4242)}real output\n`, exitCode: 0 }
+					: undefined,
+		});
+		const chunks: string[] = [];
+		const pgids: number[] = [];
+		const result = await dm.streamExec(
+			"s1",
+			{ cmd: ["sleep", "100"], newProcessGroup: true, onProcessGroup: (p) => pgids.push(p) },
+			(c) => chunks.push(c),
+		);
+		expect(result.exitCode).toBe(0);
+		const exec = mustFind(container._execs, (e) => e._cmd[0] === "setsid", "setsid-wrapped exec");
+		// Argv rides through positional params — any change to this shape
+		// risks reintroducing shell interpolation of caller input.
+		expect(exec._cmd).toEqual([
+			"setsid",
+			"bash",
+			"-c",
+			PGID_WRAPPER_SCRIPT,
+			"st-exec",
+			"sleep",
+			"100",
+		]);
+		expect(pgids).toEqual([4242]);
+		// The sentinel line is consumed, not forwarded.
+		expect(chunks.join("")).toBe("real output\n");
+	});
+
+	it("reports the pgid when the sentinel is split across stdout frames", async () => {
+		const line = sentinelLine(77);
+		const { dm } = makeDocker({
+			oneShot: (cmd) =>
+				cmd[0] === "setsid"
+					? {
+							frames: [
+								{ type: 1, data: line.slice(0, 5) },
+								{ type: 1, data: `${line.slice(5)}hel` },
+								{ type: 1, data: "lo\n" },
+							],
+							exitCode: 0,
+						}
+					: undefined,
+		});
+		const chunks: string[] = [];
+		const pgids: number[] = [];
+		await dm.streamExec(
+			"s1",
+			{ cmd: ["true"], newProcessGroup: true, onProcessGroup: (p) => pgids.push(p) },
+			(c) => chunks.push(c),
+		);
+		expect(pgids).toEqual([77]);
+		expect(chunks.join("")).toBe("hello\n");
+	});
+
+	it("passes stderr through while stdout is still awaiting the sentinel", async () => {
+		const { dm } = makeDocker({
+			oneShot: (cmd) =>
+				cmd[0] === "setsid"
+					? {
+							frames: [
+								{ type: 2, data: "early warning\n" },
+								{ type: 1, data: `${sentinelLine(9)}out\n` },
+							],
+							exitCode: 0,
+						}
+					: undefined,
+		});
+		const chunks: string[] = [];
+		const pgids: number[] = [];
+		await dm.streamExec(
+			"s1",
+			{ cmd: ["true"], newProcessGroup: true, onProcessGroup: (p) => pgids.push(p) },
+			(c) => chunks.push(c),
+		);
+		expect(pgids).toEqual([9]);
+		expect(chunks.join("")).toBe("early warning\nout\n");
+	});
+
+	it("fail-open: a non-sentinel first line is forwarded instead of eaten", async () => {
+		const { dm } = makeDocker({
+			oneShot: (cmd) =>
+				cmd[0] === "setsid" ? { stdout: "plain\nmore\n", exitCode: 0 } : undefined,
+		});
+		const chunks: string[] = [];
+		const pgids: number[] = [];
+		await dm.streamExec(
+			"s1",
+			{ cmd: ["true"], newProcessGroup: true, onProcessGroup: (p) => pgids.push(p) },
+			(c) => chunks.push(c),
+		);
+		expect(pgids).toEqual([]);
+		expect(chunks.join("")).toBe("plain\nmore\n");
+	});
+
+	it("flushes a buffered unterminated first line when the stream ends", async () => {
+		const { dm } = makeDocker({
+			oneShot: (cmd) => (cmd[0] === "setsid" ? { stdout: "no newline", exitCode: 0 } : undefined),
+		});
+		const chunks: string[] = [];
+		await dm.streamExec("s1", { cmd: ["true"], newProcessGroup: true }, (c) => chunks.push(c));
+		expect(chunks.join("")).toBe("no newline");
+	});
+
+	it("does not filter anything when newProcessGroup is unset", async () => {
+		const text = `${PGID_SENTINEL} 123\nnot a wrapper\n`;
+		const { dm } = makeDocker({
+			oneShot: (cmd) => (cmd[0] === "echo" ? { stdout: text, exitCode: 0 } : undefined),
+		});
+		const chunks: string[] = [];
+		await dm.streamExec("s1", { cmd: ["echo"] }, (c) => chunks.push(c));
+		expect(chunks.join("")).toBe(text);
+	});
+
+	// Shape pin, same convention as AGENT_SEED_SCRIPT: a future edit must
+	// not drop the no-fork `exec "$@"` (the reported pgid would stop being
+	// the command's own) or the sentinel prefix the stream filter matches.
+	it("wrapper script shape is pinned", () => {
+		expect(PGID_WRAPPER_SCRIPT).toBe(`printf '${PGID_SENTINEL} %d\\n' "$$"; exec "$@"`);
+	});
+});
+
+describe("DockerManager.killExecProcessGroup", () => {
+	function makeKillDocker(outcome: string) {
+		return makeDocker({
+			oneShot: (cmd) =>
+				cmd[0] === "bash" && cmd[2] === KILL_PROCESS_GROUP_SCRIPT
+					? { stdout: `${outcome}\n`, exitCode: 0 }
+					: undefined,
+		});
+	}
+
+	it("runs the kill script with pgid and poll count as positional args", async () => {
+		const { dm, container } = makeKillDocker("terminated");
+		const outcome = await dm.killExecProcessGroup("s1", 4242, 5000);
+		expect(outcome).toBe("terminated");
+		const exec = mustFind(
+			container._execs,
+			(e) => e._cmd[2] === KILL_PROCESS_GROUP_SCRIPT,
+			"kill-script exec",
+		);
+		// graceMs 5000 / 200ms poll interval → 25 polls.
+		expect(exec._cmd).toEqual([
+			"bash",
+			"-c",
+			KILL_PROCESS_GROUP_SCRIPT,
+			"st-kill-pg",
+			"4242",
+			"25",
+		]);
+	});
+
+	it("resolves (not throws) when the group already exited — tolerant no-op", async () => {
+		const { dm } = makeKillDocker("already-exited");
+		await expect(dm.killExecProcessGroup("s1", 4242)).resolves.toBe("already-exited");
+	});
+
+	it("reports killed when the grace expired", async () => {
+		const { dm } = makeKillDocker("killed");
+		await expect(dm.killExecProcessGroup("s1", 4242, 0)).resolves.toBe("killed");
+	});
+
+	it("rejects a pgid below 2 or non-integer before any docker call", async () => {
+		const { dm, container } = makeKillDocker("terminated");
+		// pgid 1 would become `kill -- -1` (signal everything) — PID 1 is
+		// the same UID and would die, taking the container with it.
+		for (const bad of [1, 0, -5, 3.5, Number.NaN]) {
+			await expect(dm.killExecProcessGroup("s1", bad)).rejects.toThrow(/invalid pgid/);
+		}
+		expect(
+			(container.exec as ReturnType<typeof vi.fn>).mock.calls.filter(
+				([opts]) => (opts as { Cmd: string[] }).Cmd[2] === KILL_PROCESS_GROUP_SCRIPT,
+			),
+		).toHaveLength(0);
+	});
+
+	it("rejects a negative or non-finite grace", async () => {
+		const { dm } = makeKillDocker("terminated");
+		await expect(dm.killExecProcessGroup("s1", 42, -1)).rejects.toThrow(/invalid graceMs/);
+		await expect(dm.killExecProcessGroup("s1", 42, Number.NaN)).rejects.toThrow(/invalid graceMs/);
+	});
+
+	it("throws on an unexpected outcome token instead of guessing", async () => {
+		const { dm } = makeKillDocker("bash: kill: garbage");
+		await expect(dm.killExecProcessGroup("s1", 42)).rejects.toThrow(/unexpected outcome/);
+	});
+
+	// Shape pin: TERM-first with the bash BUILTIN (procps' /bin/kill is not
+	// in the image), `--` before the negative pgid so it can't parse as a
+	// flag, existence-probe polling, KILL only after the grace.
+	it("kill script shape is pinned", () => {
+		expect(KILL_PROCESS_GROUP_SCRIPT).toContain('kill -TERM -- "-$pgid"');
+		expect(KILL_PROCESS_GROUP_SCRIPT).toContain('kill -0 -- "-$pgid"');
+		expect(KILL_PROCESS_GROUP_SCRIPT).toContain('kill -KILL -- "-$pgid"');
+		expect(KILL_PROCESS_GROUP_SCRIPT).toContain("sleep 0.2");
+		expect(KILL_PROCESS_GROUP_SCRIPT).toContain("echo already-exited");
+		expect(KILL_PROCESS_GROUP_SCRIPT).toContain("echo terminated");
+		expect(KILL_PROCESS_GROUP_SCRIPT).toContain("echo killed");
 	});
 });
