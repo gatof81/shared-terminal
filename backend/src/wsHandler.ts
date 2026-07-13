@@ -11,6 +11,7 @@ import type { BootstrapBroadcaster, BootstrapMessage } from "./bootstrap.js";
 import type { DockerManager } from "./dockerManager.js";
 import { logger } from "./logger.js";
 import { recordObserveEnd, recordObserveStart } from "./observeLog.js";
+import { getRequestId } from "./requestContext.js";
 import { TERMINAL_DIM_MAX } from "./routes.js";
 import { ForbiddenError, NotFoundError, type SessionManager } from "./sessionManager.js";
 import type { WsClientMessage, WsServerMessage } from "./types.js";
@@ -59,6 +60,15 @@ export function handleWsConnection(
 	// pre-#194 behaviour.
 	idleSweeper?: { bump: (sessionId: string) => void },
 ): void {
+	// #376 — capture the upgrade's correlation id into an explicit child
+	// logger. The ambient pino mixin can't cover a long-lived connection:
+	// socket-event callbacks ('close', 'error', 'message') run in the TCP
+	// socket's async context, not the upgrade's, so `getRequestId()` is
+	// undefined by the time they fire. Capturing here (still inside the
+	// upgrade's context) pins the id for the connection's whole lifetime.
+	const requestId = getRequestId();
+	const log = requestId === undefined ? logger : logger.child({ requestId });
+
 	// Synchronous safety net registered BEFORE any await or sync ws.close().
 	// Node's EventEmitter routes an 'error' emission with no listener to
 	// process.emit('uncaughtException') → the whole server process dies,
@@ -70,7 +80,7 @@ export function handleWsConnection(
 	// succeeds to also tear the exec down; `on` is additive, so both run.
 	// See issue #91 for the DoS reproduction path.
 	ws.on("error", (err) => {
-		logger.error(`[ws] socket error: ${err.message}`);
+		log.error(`[ws] socket error: ${err.message}`);
 		// Don't trust the transport to always emit 'close' after
 		// 'error'. Some failure modes (RSTd TCP mid-handshake, upgrade
 		// parse error before the WS protocol is fully up) leave the
@@ -268,13 +278,13 @@ export function handleWsConnection(
 			docker.detach(attachId);
 			if (observeLogId !== null) {
 				recordObserveEnd(observeLogId).catch((err) => {
-					logger.warn(
+					log.warn(
 						`[ws] observe-log end failed on ${reason}: ${(err as Error).message} ` +
 							`(log=${observeLogId} session=${sessionId})`,
 					);
 				});
 			}
-			logger.info(`[ws] user=${userId} detached from session=${sessionId} (${logCtx})`);
+			log.info(`[ws] user=${userId} detached from session=${sessionId} (${logCtx})`);
 		};
 
 		// The teardown handlers are registered only AFTER attach() resolves
@@ -340,7 +350,7 @@ export function handleWsConnection(
 				teardown("error", "observe-start failed");
 				throw err;
 			}
-			logger.info(
+			log.info(
 				`[ws] observe attach logged: observer=${userId} session=${sessionId} ` +
 					`owner=${session.userId} log=${observeLogId}`,
 			);
@@ -355,7 +365,7 @@ export function handleWsConnection(
 		ws.off("close", onSetupClose);
 		ws.on("close", () => teardown("close", "close"));
 		ws.on("error", (err) => {
-			logger.error(`[ws] error on session=${sessionId}: ${err.message}`);
+			log.error(`[ws] error on session=${sessionId}: ${err.message}`);
 			teardown("error", `error: ${err.message}`);
 		});
 		if (closedDuringSetup || ws.readyState !== WebSocket.OPEN) {
@@ -369,7 +379,7 @@ export function handleWsConnection(
 		}
 		flushTail();
 
-		logger.info(
+		log.info(
 			`[ws] user=${userId}${isObserverNotOwner ? " (observe)" : ""} ` +
 				`attached to session=${sessionId} tab=${tabId} (exec=${attachId})`,
 		);
@@ -427,7 +437,7 @@ export function handleWsConnection(
 			sendError(ws, "Access denied");
 			ws.close(1008, "Forbidden");
 		} else {
-			logger.error(`[ws] attach failed for session=${sessionId}: ${(err as Error).message}`);
+			log.error(`[ws] attach failed for session=${sessionId}: ${(err as Error).message}`);
 			sendError(ws, `Failed to attach: ${(err as Error).message}`);
 			ws.close(1011, "Attach failed");
 		}
@@ -515,6 +525,10 @@ async function handleBootstrapWs(
 	sessions: SessionManager,
 	broadcaster: BootstrapBroadcaster,
 ): Promise<void> {
+	// #376 — same eager capture as handleWsConnection: must run before the
+	// first await, while the upgrade's ALS context is still current.
+	const requestId = getRequestId();
+	const log = requestId === undefined ? logger : logger.child({ requestId });
 	try {
 		await sessions.assertOwnedBy(sessionId, userId);
 	} catch (err) {
@@ -533,7 +547,7 @@ async function handleBootstrapWs(
 		// surfaces the actual failure shape rather than the generic
 		// "Bootstrap channel closed unexpectedly" string the openBootstrapWs
 		// path synthesises on bare-close. See #208 round 1 NIT.
-		logger.error(`[ws] bootstrap auth failed for ${sessionId}: ${(err as Error).message}`);
+		log.error(`[ws] bootstrap auth failed for ${sessionId}: ${(err as Error).message}`);
 		sendError(ws, "Internal error");
 		ws.close(1011, "Internal error");
 		return;
@@ -544,7 +558,7 @@ async function handleBootstrapWs(
 		try {
 			ws.send(JSON.stringify(msg));
 		} catch (sendErr) {
-			logger.warn(`[ws] bootstrap send failed for ${sessionId}: ${(sendErr as Error).message}`);
+			log.warn(`[ws] bootstrap send failed for ${sessionId}: ${(sendErr as Error).message}`);
 		}
 		// Close the WS after a terminal message lands. Letting the
 		// connection idle would mean every browser tab leaks an
@@ -558,5 +572,5 @@ async function handleBootstrapWs(
 	const unsubscribe = broadcaster.subscribe(sessionId, listener);
 	ws.on("close", () => unsubscribe());
 	ws.on("error", () => unsubscribe());
-	logger.info(`[ws] user=${userId} subscribed to bootstrap channel for session=${sessionId}`);
+	log.info(`[ws] user=${userId} subscribed to bootstrap channel for session=${sessionId}`);
 }

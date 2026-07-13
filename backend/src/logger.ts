@@ -21,6 +21,7 @@
  */
 
 import { pino } from "pino";
+import { getRequestId } from "./requestContext.js";
 
 const NODE_ENV = process.env.NODE_ENV;
 const isProduction = NODE_ENV === "production";
@@ -104,9 +105,25 @@ export const REDACT_PATHS = [
 	'res.headers["Set-Cookie"]',
 ];
 
+/**
+ * Stamps the ambient request/correlation id (#376) onto every log line
+ * emitted inside a request or WS-upgrade context — see requestContext.ts
+ * for why the id is ambient rather than threaded through child loggers.
+ * Returns `{}` outside any context so boot/sweeper/reconcile lines don't
+ * grow a useless `requestId: undefined` field.
+ *
+ * Exported so the wiring can be unit-tested against a captured stream
+ * (same pattern as REDACT_PATHS above).
+ */
+export function requestIdMixin(): { requestId?: string } {
+	const requestId = getRequestId();
+	return requestId ? { requestId } : {};
+}
+
 export const logger = pino({
 	level: process.env.LOG_LEVEL ?? defaultLevel,
 	transport,
+	mixin: requestIdMixin,
 	redact: {
 		paths: REDACT_PATHS,
 		censor: "[redacted]",
