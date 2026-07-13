@@ -16,7 +16,12 @@
 #      same workspace;
 #   6. a process group launched via the backend's newProcessGroup wrapper
 #      dies cleanly under KILL_PROCESS_GROUP_SCRIPT — children included,
-#      tmux untouched, idempotent no-op on re-kill.
+#      tmux untouched, idempotent no-op on re-kill;
+#   7. a repo-shipped project-level .claude/ at the workspace root is
+#      left untouched and does not collide with the CLI state under
+#      .st/claude-state (#377) — including across a recreate;
+#   8. a workspace carrying the interim #371 state layout
+#      (workspace/.claude{,.json}) migrates to .st/ on boot.
 #
 # Phase 6 extracts the wrapper/kill scripts from backend/src/dockerManager.ts
 # via a tsx probe instead of keeping copies here: a copy would drift the day
@@ -34,17 +39,24 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SUFFIX="$$"
 C1="st-smoke-a-$SUFFIX"
 C2="st-smoke-b-$SUFFIX"
+C3="st-smoke-c-$SUFFIX"
+C4="st-smoke-d-$SUFFIX"
+C5="st-smoke-e-$SUFFIX"
 WS="$(mktemp -d)"
+WS2="$(mktemp -d)"
+WS3="$(mktemp -d)"
 FAILS=0
 
 cleanup() {
-	docker rm -f "$C1" "$C2" >/dev/null 2>&1
+	docker rm -f "$C1" "$C2" "$C3" "$C4" "$C5" >/dev/null 2>&1
 	# The workspace contents are uid-1000-owned (written from inside the
 	# containers), so the host user usually can't delete them directly —
-	# empty the dir from a throwaway container first, then drop the shell.
-	docker run --rm -v "$WS":/ws --entrypoint bash "$IMAGE" \
-		-c 'rm -rf /ws/* /ws/.[!.]* 2>/dev/null; true' >/dev/null 2>&1
-	rm -rf "$WS" 2>/dev/null
+	# empty each dir from a throwaway container first, then drop the shell.
+	for ws in "$WS" "$WS2" "$WS3"; do
+		docker run --rm -v "$ws":/ws --entrypoint bash "$IMAGE" \
+			-c 'rm -rf /ws/* /ws/.[!.]* 2>/dev/null; true' >/dev/null 2>&1
+		rm -rf "$ws" 2>/dev/null
+	done
 }
 trap cleanup EXIT
 
@@ -69,8 +81,8 @@ wait_ready() {
 }
 
 # The backend chowns each workspace to WORKSPACE_UID (1000); the test host's
-# runner user usually isn't 1000, so open the dir up instead.
-chmod 777 "$WS"
+# runner user usually isn't 1000, so open the dirs up instead.
+chmod 777 "$WS" "$WS2" "$WS3"
 
 # ── Phase 1: fresh boot, entrypoint clean ────────────────────────────────────
 phase "Phase 1: fresh boot"
@@ -92,8 +104,8 @@ phase "Phase 2: persistence symlinks"
 # and this script promises "any docker host" (macOS ships bash 3.2).
 # None of the paths contain a colon.
 for pair in \
-	"/home/developer/.claude:/home/developer/workspace/.claude" \
-	"/home/developer/.claude.json:/home/developer/workspace/.claude.json" \
+	"/home/developer/.claude:/home/developer/workspace/.st/claude-state" \
+	"/home/developer/.claude.json:/home/developer/workspace/.st/claude.json" \
 	"/home/developer/.npm-global:/home/developer/workspace/.npm-global" \
 	"/home/developer/.vscode-cli:/home/developer/workspace/.vscode-cli" \
 	"/home/developer/.config/gh:/home/developer/workspace/.config/gh"; do
@@ -103,6 +115,10 @@ for pair in \
 		fail "$link resolves to '$target' (want '$want')"
 	fi
 done
+GI=$(docker exec "$C1" cat /home/developer/workspace/.st/.gitignore 2>/dev/null)
+if [ "$GI" = "*" ]; then ok ".st/.gitignore self-ignores the state root"; else
+	fail ".st/.gitignore content is '$GI' (want '*') — Claude state is committable from a repo-checkout workspace"
+fi
 
 # ── Phase 3: Claude CLI version matches the Dockerfile pin ──────────────────
 phase "Phase 3: version pin"
@@ -122,8 +138,8 @@ if docker exec "$C1" bash -c '[ -L /home/developer/.claude.json ]'; then
 else
 	fail "the CLI replaced the ~/.claude.json symlink with a real file — the entrypoint's persistence invariant broke on this CLI version"
 fi
-if [ -s "$WS/.claude.json" ]; then ok "config landed in the workspace"; else
-	fail "workspace .claude.json missing/empty after CLI write"
+if [ -s "$WS/.st/claude.json" ]; then ok "config landed in the workspace"; else
+	fail "workspace .st/claude.json missing/empty after CLI write"
 fi
 
 # ── Phase 5: state survives container recreate ───────────────────────────────
@@ -193,6 +209,66 @@ else
 		[ "$REKILL" = "already-exited" ] && ok "re-kill is a tolerant no-op" \
 			|| fail "re-kill outcome '$REKILL' (want already-exited)"
 	fi
+fi
+
+# ── Phase 7: repo-level .claude/ does not collide with CLI state (#377) ──────
+phase "Phase 7: project-level .claude/ in the workspace root"
+# Seed a project-shaped .claude (settings, no CLI-state markers) from a
+# throwaway container so ownership matches the session uid — this is what
+# a cloned repo that ships Claude Code project config looks like.
+docker run --rm -v "$WS2":/ws --entrypoint bash "$IMAGE" \
+	-c 'mkdir -p /ws/.claude && printf project-settings > /ws/.claude/settings.json' >/dev/null 2>&1
+docker run -d --name "$C3" -v "$WS2":/home/developer/workspace "$IMAGE" >/dev/null
+wait_ready "$C3" || exit 1
+WARNS=$(docker logs "$C3" 2>&1 | grep -c "\[entrypoint\] WARN" || true)
+[ "$WARNS" -eq 0 ] && ok "boot with project .claude/ present, zero WARNs" \
+	|| fail "boot with project .claude/ produced $WARNS WARN(s)"
+if docker exec "$C3" bash -c '[ -d /home/developer/workspace/.claude ] && [ ! -L /home/developer/workspace/.claude ]'; then
+	ok "project .claude/ still a real directory"
+else
+	fail "project .claude/ was adopted/replaced by the entrypoint"
+fi
+got=$(docker exec "$C3" cat /home/developer/workspace/.claude/settings.json 2>/dev/null)
+[ "$got" = "project-settings" ] && ok "project settings.json intact" \
+	|| fail "project settings.json = '$got' (want 'project-settings')"
+target=$(docker exec "$C3" readlink /home/developer/.claude 2>/dev/null)
+[ "$target" = "/home/developer/workspace/.st/claude-state" ] && ok "CLI state symlink avoids the project dir" \
+	|| fail "~/.claude -> '$target' (want workspace/.st/claude-state)"
+# State written through the symlink must survive a recreate WITHOUT
+# touching the project dir — the exact interleave that lost state in #377.
+docker exec "$C3" bash -c 'printf smoke-cred-p7 > ~/.claude/.credentials.json'
+docker rm -f "$C3" >/dev/null
+docker run -d --name "$C4" -v "$WS2":/home/developer/workspace "$IMAGE" >/dev/null
+wait_ready "$C4" || exit 1
+WARNS=$(docker logs "$C4" 2>&1 | grep -c "\[entrypoint\] WARN" || true)
+[ "$WARNS" -eq 0 ] && ok "recreate with project .claude/ present, zero WARNs" \
+	|| fail "recreate with project .claude/ produced $WARNS WARN(s)"
+got=$(docker exec "$C4" cat /home/developer/.claude/.credentials.json 2>/dev/null)
+[ "$got" = "smoke-cred-p7" ] && ok "CLI state survived recreate alongside project dir" \
+	|| fail "~/.claude/.credentials.json = '$got' (want 'smoke-cred-p7')"
+got=$(docker exec "$C4" cat /home/developer/workspace/.claude/settings.json 2>/dev/null)
+[ "$got" = "project-settings" ] && ok "project settings.json intact after recreate" \
+	|| fail "project settings.json after recreate = '$got'"
+
+# ── Phase 8: interim #371 layout migrates to .st/ ────────────────────────────
+phase "Phase 8: legacy workspace/.claude{,.json} migration"
+# The merged shape from the wild: CLI-state markers AND a settings file
+# in the same dir (a #371-era workspace whose repo also ships .claude/).
+docker run --rm -v "$WS3":/ws --entrypoint bash "$IMAGE" \
+	-c 'mkdir -p /ws/.claude && printf legacy-cred > /ws/.claude/.credentials.json && printf legacy-settings > /ws/.claude/settings.json && printf legacy-json > /ws/.claude.json' >/dev/null 2>&1
+docker run -d --name "$C5" -v "$WS3":/home/developer/workspace "$IMAGE" >/dev/null
+wait_ready "$C5" || exit 1
+WARNS=$(docker logs "$C5" 2>&1 | grep -c "\[entrypoint\] WARN" || true)
+[ "$WARNS" -eq 0 ] && ok "migration boot, zero WARNs" || fail "migration boot produced $WARNS WARN(s)"
+for f in "claude-state/.credentials.json:legacy-cred" "claude-state/settings.json:legacy-settings" "claude.json:legacy-json"; do
+	name="${f%%:*}" want="${f##*:}"
+	got=$(docker exec "$C5" cat "/home/developer/workspace/.st/$name" 2>/dev/null)
+	[ "$got" = "$want" ] && ok ".st/$name migrated" || fail ".st/$name = '$got' (want '$want')"
+done
+if docker exec "$C5" bash -c '[ ! -e /home/developer/workspace/.claude ] && [ ! -e /home/developer/workspace/.claude.json ]'; then
+	ok "legacy paths removed (moved, not copied)"
+else
+	fail "legacy workspace/.claude{,.json} still present after migration"
 fi
 
 echo
