@@ -1952,7 +1952,12 @@ describe("DockerManager.killExecProcessGroup", () => {
 		expect(KILL_PROCESS_GROUP_SCRIPT).not.toContain("kill -0");
 		expect(KILL_PROCESS_GROUP_SCRIPT).toContain("/proc/[0-9]*/stat");
 		expect(KILL_PROCESS_GROUP_SCRIPT).toContain(`"\${rest##*) }"`);
-		expect(KILL_PROCESS_GROUP_SCRIPT).toContain('!= "Z"');
+		// Field indices matter, not just the mechanism: after the last-")"
+		// strip, state is field 1 and pgrp is field 3. A refactor reading
+		// pgrp from $4 or state from $2 would make alive() constant-true
+		// or constant-false with every other pin still passing.
+		expect(KILL_PROCESS_GROUP_SCRIPT).toContain(`[ "\${3:-}" = "$pgid" ]`);
+		expect(KILL_PROCESS_GROUP_SCRIPT).toContain(`[ "\${1:-}" != "Z" ]`);
 		// The already-exited gate must run BEFORE the TERM is sent — a
 		// TERM-first shape can't detect "already exited" at all, since
 		// signalling a zombie group succeeds.
