@@ -244,7 +244,34 @@ RUN mkdir -p /home/developer/.npm-global
 # persists by design). Image rebuilds reseed the workspace copy only on
 # first boot of a fresh workspace; existing workspaces keep their
 # self-updated version, since a user who chose v.X probably wants v.X.
-RUN npm install -g @anthropic-ai/claude-code
+#
+# Same pinning posture as the VS Code CLI / gh blocks above: an unpinned
+# install made every image build float to npm's `latest`, so two builds
+# of the same commit could bake different CLI versions — and entrypoint.sh
+# now depends on version-specific *empirical* behaviour (the ~/.claude.json
+# file symlink survives the CLI's atomic-rename config rewrite; verified
+# on the pinned version, not a documented contract).
+#
+# Bumping the pin: pick a version from
+# https://github.com/anthropics/claude-code/releases, update
+# CLAUDE_CODE_VERSION, rebuild, and re-verify the entrypoint's symlink
+# invariants (the session-image smoke test, #352, asserts a config write
+# through ~/.claude.json leaves the symlink in place). Operators can also
+# override on the command line for an emergency bump without touching the
+# file:
+#
+#     docker build --build-arg CLAUDE_CODE_VERSION=X.Y.Z ./session-image
+#
+# Two known limitations, both deliberate:
+#   - No SHA-256 verification like the curl-based installs above: there is
+#     no lockfile in a bare `npm install -g`, so integrity rests on the
+#     exact-version pin + npm registry TLS. Hash-verifying the tarball is
+#     out of scope here.
+#   - The pin governs only what the image bakes into a FRESH workspace.
+#     `claude --update` self-updates persisted in an existing workspace's
+#     .npm-global keep floating by design (see the paragraph above).
+ARG CLAUDE_CODE_VERSION=2.1.207
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
 # ── Default `claude` to --dangerously-skip-permissions in this image ────────
 # The session container is a hard sandbox against the *host*: no sudo
