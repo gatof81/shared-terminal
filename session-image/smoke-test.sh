@@ -240,6 +240,9 @@ docker exec "$C3" bash -c 'printf smoke-cred-p7 > ~/.claude/.credentials.json'
 docker rm -f "$C3" >/dev/null
 docker run -d --name "$C4" -v "$WS2":/home/developer/workspace "$IMAGE" >/dev/null
 wait_ready "$C4" || exit 1
+WARNS=$(docker logs "$C4" 2>&1 | grep -c "\[entrypoint\] WARN" || true)
+[ "$WARNS" -eq 0 ] && ok "recreate with project .claude/ present, zero WARNs" \
+	|| fail "recreate with project .claude/ produced $WARNS WARN(s)"
 got=$(docker exec "$C4" cat /home/developer/.claude/.credentials.json 2>/dev/null)
 [ "$got" = "smoke-cred-p7" ] && ok "CLI state survived recreate alongside project dir" \
 	|| fail "~/.claude/.credentials.json = '$got' (want 'smoke-cred-p7')"
