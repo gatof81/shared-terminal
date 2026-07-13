@@ -11,7 +11,8 @@
 import { Writable } from "node:stream";
 import { pino } from "pino";
 import { describe, expect, it } from "vitest";
-import { REDACT_PATHS } from "./logger.js";
+import { REDACT_PATHS, requestIdMixin } from "./logger.js";
+import { runWithRequestId } from "./requestContext.js";
 
 // Build a logger with the real production redact paths but pointed at a
 // capturing stream, so we assert on exactly what would be serialised.
@@ -84,5 +85,43 @@ describe("logger redaction (#305)", () => {
 		const out = captureLog({ code: 503 });
 		expect(out).toMatch(/503/);
 		expect(out).not.toMatch(/\[redacted\]/);
+	});
+});
+
+describe("requestIdMixin (#376)", () => {
+	// Same captured-stream pattern as the redaction tests: build a pino
+	// with the real mixin so the assertion covers the serialised line,
+	// not just the mixin's return value.
+	function captureLine(fn: (l: pino.Logger) => void): string {
+		let out = "";
+		const sink = new Writable({
+			write(chunk, _enc, cb) {
+				out += chunk.toString();
+				cb();
+			},
+		});
+		const l = pino({ level: "info", mixin: requestIdMixin }, sink);
+		fn(l);
+		return out;
+	}
+
+	it("stamps the ambient id onto a line logged inside a context", () => {
+		const out = captureLine((l) => runWithRequestId("cafe0123deadbeef", () => l.info("hi")));
+		expect(JSON.parse(out).requestId).toBe("cafe0123deadbeef");
+	});
+
+	it("adds no requestId field outside any context", () => {
+		// Boot/sweeper/reconcile lines must not grow `requestId: undefined`.
+		const out = captureLine((l) => l.info("hi"));
+		expect(JSON.parse(out)).not.toHaveProperty("requestId");
+	});
+
+	it("child loggers inherit the mixin — the wsHandler shape", () => {
+		// wsHandler captures the id eagerly via logger.child({requestId})
+		// because socket events fire outside the upgrade's context; a line
+		// from such a child must carry the captured id even with no
+		// ambient context active.
+		const out = captureLine((l) => l.child({ requestId: "feedface00000000" }).info("hi"));
+		expect(JSON.parse(out).requestId).toBe("feedface00000000");
 	});
 });

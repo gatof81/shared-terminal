@@ -25,6 +25,7 @@ import { DockerManager } from "./dockerManager.js";
 import { IdleSweeper, listRunningSessionIds } from "./idleSweeper.js";
 import { logger } from "./logger.js";
 import { createPortDispatcher, validatePortProxyBaseDomain } from "./portDispatcher.js";
+import { newRequestId, requestIdMiddleware, runWithRequestId } from "./requestContext.js";
 import { buildRouter } from "./routes.js";
 import { validateSecretsKey } from "./secrets.js";
 import { SessionManager } from "./sessionManager.js";
@@ -178,6 +179,11 @@ const dispatcherWsUpgradeLimiter = createWsUpgradeRateLimiter({
 // ── Express app ───────────────────────────────────────────────────────────────
 
 const app = express();
+// #376 — correlation id, mounted FIRST so every downstream log line
+// (dispatcher limiter 429s, proxy errors, route handlers, the detached
+// bootstrap chain a POST /sessions starts) carries the same requestId.
+// See requestContext.ts for the ALS + pino-mixin design.
+app.use(requestIdMiddleware);
 if (trustProxyValue !== undefined) {
 	app.set("trust proxy", trustProxyValue);
 	// Log the effective value so ops can spot a misconfigured prod
@@ -291,104 +297,110 @@ const server = http.createServer(app);
 // the `auth.bearer.<jwt>` subprotocol convention.
 const wss = new WebSocketServer({ noServer: true });
 
-server.on("upgrade", (req, socket, head) => {
-	// #190 PR 190c — rate-limit dispatcher upgrades before any D1 work
-	// or `proxy.ws()` allocation. `isDispatcherHost` uses the same host
-	// parser the dispatch decision uses, so the limiter and the dispatch
-	// gate stay in lockstep. `socket.remoteAddress` is the bucket key
-	// (X-Forwarded-For parsing happens later at the auth layer; here we
-	// want a cheap pre-D1 cap, and remote address is what's available
-	// without paying for trust-proxy resolution per upgrade frame).
-	// Failing open on missing remoteAddress (extremely unusual) is
-	// preferable to dropping a legitimate connection. PR #223 round 4
-	// SHOULD-FIX.
-	if (portDispatcher.isDispatcherHost(req.headers.host)) {
-		// `socket` is typed as `Duplex` in the upgrade event but at
-		// runtime is always a `net.Socket` (or TLSSocket, which
-		// extends it). `remoteAddress` lives on net.Socket; cast
-		// once to read it. `resolveClientIp` mirrors proxy-addr's
-		// numeric-trust algorithm: peel `trustProxyValue` entries
-		// from the right of `[...XFF, remoteAddress]` so behind a
-		// Cloudflare Tunnel we key on the original client appended
-		// by the trusted proxy, NOT the Tunnel's shared egress IP
-		// (which would collapse every user into one bucket) and NOT
-		// the leftmost XFF entry (which would let an attacker pin
-		// the rate-limit bucket on a victim's IP). The algorithm
-		// matches what Express's req.ip computes under our
-		// `app.set('trust proxy', N)` setting, so the WS limiter
-		// and the HTTP `dispatcherLimiter` agree. PR #223 round 6
+// #376 — WS upgrades bypass Express middleware entirely, so the
+// correlation id is entered here instead; everything the upgrade
+// spawns (dispatcher proxy, terminal attach, bootstrap subscribe)
+// inherits it through the async chain.
+server.on("upgrade", (req, socket, head) =>
+	runWithRequestId(newRequestId(), () => {
+		// #190 PR 190c — rate-limit dispatcher upgrades before any D1 work
+		// or `proxy.ws()` allocation. `isDispatcherHost` uses the same host
+		// parser the dispatch decision uses, so the limiter and the dispatch
+		// gate stay in lockstep. `socket.remoteAddress` is the bucket key
+		// (X-Forwarded-For parsing happens later at the auth layer; here we
+		// want a cheap pre-D1 cap, and remote address is what's available
+		// without paying for trust-proxy resolution per upgrade frame).
+		// Failing open on missing remoteAddress (extremely unusual) is
+		// preferable to dropping a legitimate connection. PR #223 round 4
 		// SHOULD-FIX.
-		const remote = (socket as { remoteAddress?: string }).remoteAddress;
-		const clientIp = resolveClientIp(req.headers["x-forwarded-for"], remote, trustProxyValue);
-		const allowed = dispatcherWsUpgradeLimiter.attempt(clientIp);
-		if (!allowed) {
-			// `Retry-After: 60` matches the limiter's window so a
-			// compliant browser backs off automatically instead of
-			// burning the next window's budget on immediate reconnect.
-			// `Content-Length: 0` keeps the response framed so curl /
-			// wscat report 429 cleanly. PR #223 round 5 SHOULD-FIX.
-			endUpgradeSocketWithReply(
-				socket,
-				"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\nContent-Length: 0\r\n\r\n",
-			);
+		if (portDispatcher.isDispatcherHost(req.headers.host)) {
+			// `socket` is typed as `Duplex` in the upgrade event but at
+			// runtime is always a `net.Socket` (or TLSSocket, which
+			// extends it). `remoteAddress` lives on net.Socket; cast
+			// once to read it. `resolveClientIp` mirrors proxy-addr's
+			// numeric-trust algorithm: peel `trustProxyValue` entries
+			// from the right of `[...XFF, remoteAddress]` so behind a
+			// Cloudflare Tunnel we key on the original client appended
+			// by the trusted proxy, NOT the Tunnel's shared egress IP
+			// (which would collapse every user into one bucket) and NOT
+			// the leftmost XFF entry (which would let an attacker pin
+			// the rate-limit bucket on a victim's IP). The algorithm
+			// matches what Express's req.ip computes under our
+			// `app.set('trust proxy', N)` setting, so the WS limiter
+			// and the HTTP `dispatcherLimiter` agree. PR #223 round 6
+			// SHOULD-FIX.
+			const remote = (socket as { remoteAddress?: string }).remoteAddress;
+			const clientIp = resolveClientIp(req.headers["x-forwarded-for"], remote, trustProxyValue);
+			const allowed = dispatcherWsUpgradeLimiter.attempt(clientIp);
+			if (!allowed) {
+				// `Retry-After: 60` matches the limiter's window so a
+				// compliant browser backs off automatically instead of
+				// burning the next window's budget on immediate reconnect.
+				// `Content-Length: 0` keeps the response framed so curl /
+				// wscat report 429 cleanly. PR #223 round 5 SHOULD-FIX.
+				endUpgradeSocketWithReply(
+					socket,
+					"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\nContent-Length: 0\r\n\r\n",
+				);
+				return;
+			}
+		}
+		// #190 PR 190c — let the port dispatcher claim this upgrade first
+		// when the Host header parses as `p<container>-<sessionId>.<base>`.
+		// `handleUpgrade` returns true iff the dispatcher took the request;
+		// in that case it's already running auth + proxy.ws() and the
+		// existing /ws/* path mustn't also run.
+		if (portDispatcher.handleUpgrade(req, socket, head)) return;
+		const url = req.url ?? "";
+		if (!url.startsWith("/ws/sessions/") && !url.startsWith("/ws/bootstrap/")) {
+			// socket.end() drains the write buffer before closing, so the
+			// 404 line actually reaches the client. socket.write() +
+			// socket.destroy() (the previous form) issues immediate
+			// teardown with no drain guarantee — the status line can be
+			// dropped, making "why did my WS fail" harder to debug.
+			// The bounded-destroy timer in endUpgradeSocketWithReply
+			// closes the CLOSE_WAIT window a half-close otherwise opens
+			// up against a peer that never FINs (#67).
+			endUpgradeSocketWithReply(socket, "HTTP/1.1 404 Not Found\r\n\r\n");
 			return;
 		}
-	}
-	// #190 PR 190c — let the port dispatcher claim this upgrade first
-	// when the Host header parses as `p<container>-<sessionId>.<base>`.
-	// `handleUpgrade` returns true iff the dispatcher took the request;
-	// in that case it's already running auth + proxy.ws() and the
-	// existing /ws/* path mustn't also run.
-	if (portDispatcher.handleUpgrade(req, socket, head)) return;
-	const url = req.url ?? "";
-	if (!url.startsWith("/ws/sessions/") && !url.startsWith("/ws/bootstrap/")) {
-		// socket.end() drains the write buffer before closing, so the
-		// 404 line actually reaches the client. socket.write() +
-		// socket.destroy() (the previous form) issues immediate
-		// teardown with no drain guarantee — the status line can be
-		// dropped, making "why did my WS fail" harder to debug.
-		// The bounded-destroy timer in endUpgradeSocketWithReply
-		// closes the CLOSE_WAIT window a half-close otherwise opens
-		// up against a peer that never FINs (#67).
-		endUpgradeSocketWithReply(socket, "HTTP/1.1 404 Not Found\r\n\r\n");
-		return;
-	}
 
-	// CSWSH defence: reject the upgrade BEFORE the handshake completes
-	// when the Origin header isn't allowed. Done here (not inside the
-	// `wss.on("connection")` handler) so a rejected origin never gets
-	// a WebSocket object, never runs verifyWsToken, and never appears
-	// in wss.clients — closes the window where a CSWSH'd socket could
-	// do anything observable before the server hung up.
-	//
-	// See isAllowedWsOrigin in auth.ts for the policy (in particular:
-	// missing Origin is allowed because it indicates non-browser
-	// clients, and "*" in CORS_ORIGINS is denied in production).
-	//
-	// No per-request log in PRODUCTION: an attacker can flood the
-	// upgrade handler with garbage Origin headers and drown out signal.
-	// The CORS_ORIGINS=* case is already covered by warnIfWildcard-
-	// CorsInProduction at startup; deliberate operator misconfiguration
-	// surfaces through the 403 status code + the boot warning, not
-	// through per-request log spam. In dev/staging we DO log (gated
-	// below) so an operator deploying a typo'd Origin can grep for it.
-	if (!isAllowedWsOrigin(req.headers.origin, CORS_ORIGINS, process.env.NODE_ENV)) {
-		// Dev/staging only: see the block comment above and issue #66.
-		if (process.env.NODE_ENV !== "production") {
-			logger.info(
-				"[ws] rejecting upgrade: Origin=%s not in allowlist %j",
-				req.headers.origin ?? "<absent>",
-				CORS_ORIGINS,
-			);
+		// CSWSH defence: reject the upgrade BEFORE the handshake completes
+		// when the Origin header isn't allowed. Done here (not inside the
+		// `wss.on("connection")` handler) so a rejected origin never gets
+		// a WebSocket object, never runs verifyWsToken, and never appears
+		// in wss.clients — closes the window where a CSWSH'd socket could
+		// do anything observable before the server hung up.
+		//
+		// See isAllowedWsOrigin in auth.ts for the policy (in particular:
+		// missing Origin is allowed because it indicates non-browser
+		// clients, and "*" in CORS_ORIGINS is denied in production).
+		//
+		// No per-request log in PRODUCTION: an attacker can flood the
+		// upgrade handler with garbage Origin headers and drown out signal.
+		// The CORS_ORIGINS=* case is already covered by warnIfWildcard-
+		// CorsInProduction at startup; deliberate operator misconfiguration
+		// surfaces through the 403 status code + the boot warning, not
+		// through per-request log spam. In dev/staging we DO log (gated
+		// below) so an operator deploying a typo'd Origin can grep for it.
+		if (!isAllowedWsOrigin(req.headers.origin, CORS_ORIGINS, process.env.NODE_ENV)) {
+			// Dev/staging only: see the block comment above and issue #66.
+			if (process.env.NODE_ENV !== "production") {
+				logger.info(
+					"[ws] rejecting upgrade: Origin=%s not in allowlist %j",
+					req.headers.origin ?? "<absent>",
+					CORS_ORIGINS,
+				);
+			}
+			endUpgradeSocketWithReply(socket, "HTTP/1.1 403 Forbidden\r\n\r\n");
+			return;
 		}
-		endUpgradeSocketWithReply(socket, "HTTP/1.1 403 Forbidden\r\n\r\n");
-		return;
-	}
 
-	wss.handleUpgrade(req, socket, head, (ws) => {
-		wss.emit("connection", ws, req);
-	});
-});
+		wss.handleUpgrade(req, socket, head, (ws) => {
+			wss.emit("connection", ws, req);
+		});
+	}),
+);
 
 // Liveness heartbeat (#79). The helper sets the per-connection `pong`
 // listener and runs the 30 s interval; we keep the cleanup so the
