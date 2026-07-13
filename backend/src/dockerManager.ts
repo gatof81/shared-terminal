@@ -162,27 +162,45 @@ export const PGID_WRAPPER_SCRIPT = `printf '${PGID_SENTINEL} %d\\n' "$$"; exec "
 
 // Signal the group with bash's `kill` BUILTIN, not /bin/kill — procps
 // isn't in the session image's package list, so the binary may not exist.
-// TERM first; poll `kill -0` (existence probe) every 200 ms up to the
-// caller's grace; KILL whatever survives. Every `kill` failure is treated
-// as "group already gone" — the tolerant-no-op contract for a command
-// that finished before (or while) being cancelled. Prints exactly one
-// outcome token so the caller can log what happened.
+// TERM first; poll for live members every 200 ms up to the caller's
+// grace; KILL whatever survives. Prints exactly one outcome token
+// ("already-exited" is the tolerant-no-op contract for a command that
+// finished before being cancelled).
 //
-// Known imprecision, accepted: orphaned grandchildren reparent to the
-// container's PID 1 (`tail -f`, which never reaps), so a fully-dead group
-// can linger as zombies that still satisfy `kill -0`. Worst case the loop
-// burns the full grace and sends a harmless KILL, reporting "killed" for
-// a group that was already dead — zombies hold no resources and ps-level
-// verification should filter state Z.
+// Liveness is probed by scanning /proc for non-zombie group members, NOT
+// with `kill -0`: dead group members linger as zombies (they reparent to
+// the container's PID 1, `tail -f`, which never reaps), and both `kill -0`
+// and `kill -TERM` SUCCEED against a zombie. The session-image smoke test
+// (#352) caught the kill -0 version burning the full grace on an
+// already-dead group and reporting "killed" — and, on re-kill, never
+// reaching "already-exited" at all. /proc/<pid>/stat's state (Z) and pgrp
+// fields give the truthful answer; the comm field can contain spaces and
+// parens, so the parse strips through the LAST ") " before word-splitting
+// (after which state is field 1 and pgrp is field 3). Zombies hold no
+// resources — a group whose only remnants are zombies IS exited for every
+// purpose a caller has.
 export const KILL_PROCESS_GROUP_SCRIPT = `pgid="$1"
 polls="$2"
-if ! kill -TERM -- "-$pgid" 2>/dev/null; then
+alive() {
+	local f rest
+	for f in /proc/[0-9]*/stat; do
+		rest="$(cat "$f" 2>/dev/null)" || continue
+		rest="\${rest##*) }"
+		set -- $rest
+		if [ "\${3:-}" = "$pgid" ] && [ "\${1:-}" != "Z" ]; then
+			return 0
+		fi
+	done
+	return 1
+}
+if ! alive; then
 	echo already-exited
 	exit 0
 fi
+kill -TERM -- "-$pgid" 2>/dev/null
 i=0
 while [ "$i" -lt "$polls" ]; do
-	if ! kill -0 -- "-$pgid" 2>/dev/null; then
+	if ! alive; then
 		echo terminated
 		exit 0
 	fi

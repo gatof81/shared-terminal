@@ -1931,14 +1931,38 @@ describe("DockerManager.killExecProcessGroup", () => {
 
 	// Shape pin: TERM-first with the bash BUILTIN (procps' /bin/kill is not
 	// in the image), `--` before the negative pgid so it can't parse as a
-	// flag, existence-probe polling, KILL only after the grace.
+	// flag, KILL only after the grace.
 	it("kill script shape is pinned", () => {
 		expect(KILL_PROCESS_GROUP_SCRIPT).toContain('kill -TERM -- "-$pgid"');
-		expect(KILL_PROCESS_GROUP_SCRIPT).toContain('kill -0 -- "-$pgid"');
 		expect(KILL_PROCESS_GROUP_SCRIPT).toContain('kill -KILL -- "-$pgid"');
 		expect(KILL_PROCESS_GROUP_SCRIPT).toContain("sleep 0.2");
 		expect(KILL_PROCESS_GROUP_SCRIPT).toContain("echo already-exited");
 		expect(KILL_PROCESS_GROUP_SCRIPT).toContain("echo terminated");
 		expect(KILL_PROCESS_GROUP_SCRIPT).toContain("echo killed");
+	});
+
+	// Liveness must come from /proc with zombies filtered, and NEVER from
+	// `kill -0`: dead group members reparent to PID 1 (`tail -f`, which
+	// doesn't reap) and linger as zombies that still satisfy kill -0 AND
+	// kill -TERM — the smoke test caught that version burning the full
+	// grace on a dead group ("killed") and never returning
+	// "already-exited" on re-kill. The parse must strip through the last
+	// ") " because /proc/<pid>/stat's comm field can contain spaces.
+	it("kill script probes /proc non-zombie members, not kill -0", () => {
+		expect(KILL_PROCESS_GROUP_SCRIPT).not.toContain("kill -0");
+		expect(KILL_PROCESS_GROUP_SCRIPT).toContain("/proc/[0-9]*/stat");
+		expect(KILL_PROCESS_GROUP_SCRIPT).toContain(`"\${rest##*) }"`);
+		// Field indices matter, not just the mechanism: after the last-")"
+		// strip, state is field 1 and pgrp is field 3. A refactor reading
+		// pgrp from $4 or state from $2 would make alive() constant-true
+		// or constant-false with every other pin still passing.
+		expect(KILL_PROCESS_GROUP_SCRIPT).toContain(`[ "\${3:-}" = "$pgid" ]`);
+		expect(KILL_PROCESS_GROUP_SCRIPT).toContain(`[ "\${1:-}" != "Z" ]`);
+		// The already-exited gate must run BEFORE the TERM is sent — a
+		// TERM-first shape can't detect "already exited" at all, since
+		// signalling a zombie group succeeds.
+		expect(KILL_PROCESS_GROUP_SCRIPT.indexOf("echo already-exited")).toBeLessThan(
+			KILL_PROCESS_GROUP_SCRIPT.indexOf("kill -TERM"),
+		);
 	});
 });
