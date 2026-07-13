@@ -1,0 +1,76 @@
+name: Session Image
+
+# Builds session-image/ and runs its docker-level smoke test (#352):
+# entrypoint persistence symlinks, the Claude CLI version pin, the
+# ~/.claude.json file-symlink-survives-config-write invariant, recreate
+# survival, and process-group cancellation with the backend's real
+# wrapper/kill scripts. See session-image/smoke-test.sh for the assertions.
+#
+# This workflow IS path-filtered, deliberately diverging from ci.yml's
+# no-filters stance. ci.yml avoids filters because its jobs have inputs
+# outside their own directories (shared-root edits — compose file, the
+# workflow itself — can break a workspace without touching it), so a
+# filter there risks false negatives. This job's input set is exactly the
+# filtered set: the image build consumes only session-image/, and the
+# smoke test additionally consumes the exec scripts it extracts from
+# backend/src/dockerManager.ts — which is why that one file is in the
+# filter. The cost side is also different: a docker build is ~5 min of
+# critical path, not the <1 min ci.yml accepts as noise.
+#
+# Consequence: this can NOT be a required check in branch protection — it
+# doesn't run on most PRs. It protects by running when its inputs change,
+# including on pushes to main.
+
+on:
+  pull_request:
+    paths:
+      - "session-image/**"
+      - "backend/src/dockerManager.ts"
+      - ".github/workflows/session-image.yml"
+  push:
+    branches: [main]
+    paths:
+      - "session-image/**"
+      - "backend/src/dockerManager.ts"
+      - ".github/workflows/session-image.yml"
+
+# Same shape as ci.yml: cancel superseded PR runs, never cancel main.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Build + docker smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # Node + backend deps are only needed for the smoke test's tsx probe
+      # that extracts PGID_WRAPPER_SCRIPT / KILL_PROCESS_GROUP_SCRIPT from
+      # backend source (copies here would drift).
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend deps (tsx probe)
+        working-directory: backend
+        run: npm ci
+
+      # Plain `docker build`, no buildx cache: the job only runs when the
+      # image's inputs changed, i.e. exactly when a cache would be cold.
+      - name: Build session image
+        run: docker build -t shared-terminal-session ./session-image
+
+      - name: Smoke test
+        run: ./session-image/smoke-test.sh shared-terminal-session
