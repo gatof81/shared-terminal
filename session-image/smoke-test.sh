@@ -39,7 +39,12 @@ FAILS=0
 
 cleanup() {
 	docker rm -f "$C1" "$C2" >/dev/null 2>&1
-	rm -rf "$WS"
+	# The workspace contents are uid-1000-owned (written from inside the
+	# containers), so the host user usually can't delete them directly —
+	# empty the dir from a throwaway container first, then drop the shell.
+	docker run --rm -v "$WS":/ws --entrypoint bash "$IMAGE" \
+		-c 'rm -rf /ws/* /ws/.[!.]* 2>/dev/null; true' >/dev/null 2>&1
+	rm -rf "$WS" 2>/dev/null
 }
 trap cleanup EXIT
 
@@ -161,20 +166,23 @@ else
 		fail "wrapper never reported a pgid"
 	else
 		ok "pgid reported: $PGID"
-		# No procps in the image — count live group members via /proc
-		# (stat field 5 = pgrp, field 3 = state; zombies are dead-but-
-		# unreaped and hold nothing, so they don't count as survivors).
+		# No procps in the image — count live group members via /proc.
+		# Same parse as the backend's alive() probe: strip through the
+		# last ") " (comm can contain spaces), then state is field 1 and
+		# pgrp is field 3; zombies (Z) are dead-but-unreaped and hold
+		# nothing, so they don't count as survivors.
 		live_members() {
-			docker exec "$C2" bash -c 'for f in /proc/[0-9]*/stat; do set -- $(cat "$f" 2>/dev/null); [ "${5:-}" = "'"$PGID"'" ] && [ "${3:-}" != "Z" ] && echo "$1 $2 $3"; done' 2>/dev/null
+			docker exec "$C2" bash -c 'for f in /proc/[0-9]*/stat; do rest="$(cat "$f" 2>/dev/null)" || continue; rest="${rest##*) }"; set -- $rest; [ "${3:-}" = "'"$PGID"'" ] && [ "${1:-}" != "Z" ] && echo "member state=$1 pgrp=$3"; done' 2>/dev/null
 		}
 		BEFORE=$(live_members | wc -l)
 		[ "$BEFORE" -ge 3 ] && ok "$BEFORE live group members before kill (leader + children)" \
 			|| fail "expected >=3 live group members before kill, saw $BEFORE"
+		# Strictly "terminated": sleep dies on TERM within one poll tick,
+		# so "killed" here means the early-exit probe regressed (e.g. back
+		# to kill -0, which zombies satisfy — the #374 first-run failure).
 		OUTCOME=$(docker exec "$C2" bash -c "$KILL" st-kill-pg "$PGID" 25)
-		case "$OUTCOME" in
-			terminated | killed) ok "kill outcome: $OUTCOME" ;;
-			*) fail "unexpected kill outcome '$OUTCOME'" ;;
-		esac
+		[ "$OUTCOME" = "terminated" ] && ok "kill outcome: terminated" \
+			|| fail "kill outcome '$OUTCOME' (want terminated — TERM-compliant group must not burn the grace)"
 		AFTER=$(live_members)
 		[ -z "$AFTER" ] && ok "no live group members remain" || fail "group survivors after kill: $AFTER"
 		docker exec "$C2" tmux has-session -t smoketab 2>/dev/null \
