@@ -143,6 +143,58 @@ interface SharedExec {
 	appliedSize: { cols: number; rows: number };
 }
 
+// ── Cancellable exec (process-group) plumbing ───────────────────────────────
+// Docker has no "kill exec" API: destroying the host-side stream leaves the
+// in-container process running, and until now the only remedy was killing
+// the whole container (the bootstrap-timeout path). `streamExec`'s
+// `newProcessGroup` option + `killExecProcessGroup` close that gap: the
+// command runs as the leader of its own process group, whose id is reported
+// back over the exec's own stdout, and a later one-shot exec signals the
+// whole group. Both scripts are exported so unit tests can pin their shape
+// (same convention as AGENT_SEED_SCRIPT).
+
+export const PGID_SENTINEL = "__ST_EXEC_PGID__";
+
+// Inside the setsid'd bash, $$ is the new session/group leader's pid ==
+// the pgid. `exec "$@"` replaces bash without forking, so the reported
+// pgid IS the real command's, and everything it spawns inherits it.
+export const PGID_WRAPPER_SCRIPT = `printf '${PGID_SENTINEL} %d\\n' "$$"; exec "$@"`;
+
+// Signal the group with bash's `kill` BUILTIN, not /bin/kill — procps
+// isn't in the session image's package list, so the binary may not exist.
+// TERM first; poll `kill -0` (existence probe) every 200 ms up to the
+// caller's grace; KILL whatever survives. Every `kill` failure is treated
+// as "group already gone" — the tolerant-no-op contract for a command
+// that finished before (or while) being cancelled. Prints exactly one
+// outcome token so the caller can log what happened.
+//
+// Known imprecision, accepted: orphaned grandchildren reparent to the
+// container's PID 1 (`tail -f`, which never reaps), so a fully-dead group
+// can linger as zombies that still satisfy `kill -0`. Worst case the loop
+// burns the full grace and sends a harmless KILL, reporting "killed" for
+// a group that was already dead — zombies hold no resources and ps-level
+// verification should filter state Z.
+export const KILL_PROCESS_GROUP_SCRIPT = `pgid="$1"
+polls="$2"
+if ! kill -TERM -- "-$pgid" 2>/dev/null; then
+	echo already-exited
+	exit 0
+fi
+i=0
+while [ "$i" -lt "$polls" ]; do
+	if ! kill -0 -- "-$pgid" 2>/dev/null; then
+		echo terminated
+		exit 0
+	fi
+	sleep 0.2
+	i=$((i+1))
+done
+kill -KILL -- "-$pgid" 2>/dev/null
+echo killed
+`;
+
+export type KillProcessGroupOutcome = "already-exited" | "terminated" | "killed";
+
 export class DockerManager {
 	private docker: Dockerode;
 	private sessions: SessionManager;
@@ -1079,8 +1131,24 @@ export class DockerManager {
 			 *  in-container process — Docker has no "kill exec"
 			 *  API. The caller must kill the container itself in
 			 *  the timeout-failure path; the stream destroy here
-			 *  just lets the streamExec promise unblock quickly. */
+			 *  just lets the streamExec promise unblock quickly.
+			 *  For granular cancellation without killing the
+			 *  container, opt into `newProcessGroup` and signal the
+			 *  group via `killExecProcessGroup`. */
 			signal?: AbortSignal;
+			/** Run the command as the leader of a NEW process group
+			 *  (`setsid`), so it — and everything it forks — can later
+			 *  be killed as a unit via `killExecProcessGroup` without
+			 *  touching tmux or the container. The pgid is reported
+			 *  through `onProcessGroup` as soon as the wrapper prints
+			 *  it (before any command output). Opt-in: existing
+			 *  callers (bootstrap hooks, clone runner) keep today's
+			 *  exact exec shape. */
+			newProcessGroup?: boolean;
+			/** Fires once with the process-group id when
+			 *  `newProcessGroup` is set. May never fire if the exec
+			 *  dies before the wrapper's first write. */
+			onProcessGroup?: (pgid: number) => void;
 		},
 		onOutput?: (chunk: string) => void,
 	): Promise<{ exitCode: number }> {
@@ -1094,13 +1162,25 @@ export class DockerManager {
 		if (!meta.containerId) throw new Error("No container for this session");
 		const container = this.docker.getContainer(meta.containerId);
 
+		// `setsid` makes the wrapper the leader of a fresh session AND
+		// process group, so pgid == the wrapper's $$ — and `exec "$@"`
+		// replaces the wrapper with the real command *without forking*,
+		// so the reported pgid is the command's own, and every child it
+		// forks inherits it. The original argv rides through bash's
+		// positional parameters ("$@" after the `st-exec` $0 slot), never
+		// through string interpolation — same no-shell-meta property the
+		// clone runner (#188) relies on this method for.
+		const cmd = opts.newProcessGroup
+			? ["setsid", "bash", "-c", PGID_WRAPPER_SCRIPT, "st-exec", ...opts.cmd]
+			: opts.cmd;
+
 		// Build the exec directly rather than going through `execOneShot`
 		// — we want to stream chunks via `onOutput` as they arrive, not
 		// buffer the whole stream and return at the end. Same shape on
 		// the wire (Tty:false, multiplexed frames, WorkingDir pinned to
 		// the workspace) as #207 round 7 settled.
 		const exec = await container.exec({
-			Cmd: opts.cmd,
+			Cmd: cmd,
 			Env: opts.env ? Object.entries(opts.env).map(([k, v]) => `${k}=${v}`) : undefined,
 			AttachStdin: false,
 			AttachStdout: true,
@@ -1120,6 +1200,62 @@ export class DockerManager {
 		};
 		opts.signal?.addEventListener("abort", abortHandler, { once: true });
 
+		const emit = (text: string) => {
+			if (!onOutput) return;
+			try {
+				onOutput(text);
+			} catch (err) {
+				logger.warn(`[docker] postCreate onOutput threw: ${(err as Error).message}`);
+			}
+		};
+
+		// Sentinel interception (newProcessGroup only). The wrapper's
+		// very first stdout write is `__ST_EXEC_PGID__ <pid>\n`, emitted
+		// before `exec "$@"` runs — riding the same stream as the
+		// command's output means there is no ordering race and no second
+		// docker round-trip to learn the pgid. The filter buffers stdout
+		// until that first newline (a frame boundary can split even a
+		// short printf), consumes the sentinel line without forwarding
+		// it to `onOutput`, and then gets out of the way. Only stdout
+		// (frame type 1) is filtered: the sentinel can't arrive on
+		// stderr, and holding stderr hostage to the buffer would delay
+		// early diagnostics. Fail-open: a first line that isn't the
+		// sentinel (or an implausibly long unterminated one) is
+		// forwarded verbatim — degraded to "no pgid reported" rather
+		// than silently eating command output.
+		let pgidBuf: string | null = opts.newProcessGroup ? "" : null;
+		const filterStdout = (text: string) => {
+			if (pgidBuf === null) {
+				emit(text);
+				return;
+			}
+			pgidBuf += text;
+			const nl = pgidBuf.indexOf("\n");
+			if (nl === -1) {
+				// Sentinel + space + pid is well under 64 bytes; past
+				// that something upstream isn't the wrapper — flush.
+				if (pgidBuf.length > 256) {
+					emit(pgidBuf);
+					pgidBuf = null;
+				}
+				return;
+			}
+			const line = pgidBuf.slice(0, nl);
+			const rest = pgidBuf.slice(nl + 1);
+			pgidBuf = null;
+			const match = /^__ST_EXEC_PGID__ (\d+)$/.exec(line);
+			if (match) {
+				try {
+					opts.onProcessGroup?.(Number.parseInt(match[1]!, 10));
+				} catch (err) {
+					logger.warn(`[docker] onProcessGroup threw: ${(err as Error).message}`);
+				}
+			} else {
+				emit(`${line}\n`);
+			}
+			if (rest !== "") emit(rest);
+		};
+
 		// Demux frames as they arrive so `onOutput` fires per-chunk.
 		// `pending` accumulates across `data` events when a frame
 		// header lands split across reads.
@@ -1134,12 +1270,10 @@ export class DockerManager {
 				const payload = pending.subarray(off + 8, off + 8 + size);
 				// Combine stdout (1) + stderr (2) into one stream — npm
 				// errors etc. live on stderr and the modal needs them.
-				if ((frameType === 1 || frameType === 2) && onOutput) {
-					try {
-						onOutput(payload.toString("utf-8"));
-					} catch (err) {
-						logger.warn(`[docker] postCreate onOutput threw: ${(err as Error).message}`);
-					}
+				if (frameType === 1) {
+					filterStdout(payload.toString("utf-8"));
+				} else if (frameType === 2) {
+					emit(payload.toString("utf-8"));
 				}
 				off += 8 + size;
 			}
@@ -1161,6 +1295,11 @@ export class DockerManager {
 			// listener so a late-firing signal doesn't try to destroy
 			// an already-closed stream.
 			opts.signal?.removeEventListener("abort", abortHandler);
+			// Stream is over: anything still parked in the sentinel
+			// buffer (first stdout line never got its newline) is
+			// command output, not a sentinel — hand it over instead
+			// of dropping it.
+			if (pgidBuf !== null && pgidBuf !== "") emit(pgidBuf);
 		}
 		// If the signal aborted mid-stream, surface AbortError up to
 		// the caller — don't pretend the exit code is meaningful.
@@ -1186,6 +1325,54 @@ export class DockerManager {
 			throw new Error("docker exec inspect returned null ExitCode after stream end");
 		}
 		return { exitCode: info.ExitCode };
+	}
+
+	/**
+	 * Kill the process group a `streamExec({ newProcessGroup: true })`
+	 * command reported via `onProcessGroup`: SIGTERM the group, wait up
+	 * to `graceMs` for it to exit, SIGKILL whatever survives. Runs as
+	 * the session user (UID 1000) inside the container, so it can only
+	 * signal that user's own processes — and because the target group
+	 * was created by `setsid`, tmux and the other tabs live in different
+	 * groups and are untouchable from here. Tolerant no-op if the group
+	 * already exited ("already-exited").
+	 */
+	async killExecProcessGroup(
+		sessionId: string,
+		pgid: number,
+		graceMs = 5000,
+	): Promise<KillProcessGroupOutcome> {
+		// Hard-validate before anything reaches a shell. Integer check
+		// kills injection; the `>= 2` floor is load-bearing on its own:
+		// the entrypoint runs as the same UID 1000, so PID 1 (`tail -f`)
+		// IS signallable — a pgid of 1 would become `kill -- -1`, which
+		// POSIX defines as "signal every process you're allowed to",
+		// taking down PID 1 and with it the whole container.
+		if (!Number.isInteger(pgid) || pgid < 2) {
+			throw new Error(`killExecProcessGroup: invalid pgid ${pgid}`);
+		}
+		if (!Number.isFinite(graceMs) || graceMs < 0) {
+			throw new Error(`killExecProcessGroup: invalid graceMs ${graceMs}`);
+		}
+		const polls = Math.ceil(graceMs / 200);
+		const { stdout } = await this.execOneShot(sessionId, [
+			"bash",
+			"-c",
+			KILL_PROCESS_GROUP_SCRIPT,
+			"st-kill-pg",
+			String(pgid),
+			String(polls),
+		]);
+		const outcome = stdout.trim();
+		if (outcome !== "already-exited" && outcome !== "terminated" && outcome !== "killed") {
+			// The script always exits 0 and prints exactly one token, so
+			// anything else means the exec itself misfired (bash missing,
+			// container half-dead). Don't guess — the caller needs to
+			// know the cancel is unconfirmed.
+			throw new Error(`killExecProcessGroup: unexpected outcome "${outcome}"`);
+		}
+		logger.info(`[docker] killExecProcessGroup session ${sessionId} pgid ${pgid}: ${outcome}`);
+		return outcome;
 	}
 
 	/**
