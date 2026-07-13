@@ -88,17 +88,19 @@ fi
 
 # ── Phase 2: persistence symlinks ────────────────────────────────────────────
 phase "Phase 2: persistence symlinks"
-declare -A LINKS=(
-	["/home/developer/.claude"]="/home/developer/workspace/.claude"
-	["/home/developer/.claude.json"]="/home/developer/workspace/.claude.json"
-	["/home/developer/.npm-global"]="/home/developer/workspace/.npm-global"
-	["/home/developer/.vscode-cli"]="/home/developer/workspace/.vscode-cli"
-	["/home/developer/.config/gh"]="/home/developer/workspace/.config/gh"
-)
-for link in "${!LINKS[@]}"; do
+# link:target pairs, not an associative array — `declare -A` is bash 4+
+# and this script promises "any docker host" (macOS ships bash 3.2).
+# None of the paths contain a colon.
+for pair in \
+	"/home/developer/.claude:/home/developer/workspace/.claude" \
+	"/home/developer/.claude.json:/home/developer/workspace/.claude.json" \
+	"/home/developer/.npm-global:/home/developer/workspace/.npm-global" \
+	"/home/developer/.vscode-cli:/home/developer/workspace/.vscode-cli" \
+	"/home/developer/.config/gh:/home/developer/workspace/.config/gh"; do
+	link="${pair%%:*}" want="${pair#*:}"
 	target=$(docker exec "$C1" readlink "$link" 2>/dev/null)
-	if [ "$target" = "${LINKS[$link]}" ]; then ok "$link -> $target"; else
-		fail "$link resolves to '$target' (want '${LINKS[$link]}')"
+	if [ "$target" = "$want" ]; then ok "$link -> $target"; else
+		fail "$link resolves to '$target' (want '$want')"
 	fi
 done
 
