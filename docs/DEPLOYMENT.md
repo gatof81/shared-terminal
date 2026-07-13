@@ -160,8 +160,13 @@ The backend will be available at `http://localhost:3001`.
 > entrypoint baked into the old image. Claude state that lived in the old
 > container's layer is lost in that one recreate (it always was — that's the
 > bug this fixes), so expect a one-time `claude` re-login per session after
-> the upgrade. Security implications of transcripts living on the host are
-> covered in [docs/SECURITY.md → Claude CLI state at
+> the upgrade. The state lives under `<workspace>/.st/` (a self-gitignored
+> dir) — the first image generation targeted `<workspace>/.claude{,.json}`
+> directly, which collided with a cloned repo's project-level `.claude/`
+> config dir (#377); workspaces that picked up that interim layout are
+> migrated to `.st/` automatically on their next recreate. Security
+> implications of transcripts living on the host are covered in
+> [docs/SECURITY.md → Claude CLI state at
 > rest](./SECURITY.md#claude-cli-state-at-rest).
 
 ### Frontend (Cloudflare Pages)

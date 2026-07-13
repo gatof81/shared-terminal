@@ -93,18 +93,26 @@ The session image persists Claude CLI state in the bind-mounted
 workspace so it survives container recreation (`POST
 /sessions/:id/start`, reconcile after a host reboot): the entrypoint
 symlinks `~/.claude` and `~/.claude.json` to
-`<WORKSPACE_ROOT>/<sessionId>/.claude{,.json}` on the host. Without
-this, every recreate forced a re-login and orphaned the session
-transcripts `claude --resume` / `--continue` replay.
+`<WORKSPACE_ROOT>/<sessionId>/.st/claude-state` and `.st/claude.json`
+on the host. Without this, every recreate forced a re-login and
+orphaned the session transcripts `claude --resume` / `--continue`
+replay. The `.st/` root carries a `*` self-.gitignore so that when the
+workspace is a repo checkout (the normal cloned-session case), a
+`git add -A` cannot commit the state into the user's repo — that
+protects the git surface only; everything below about host-side
+readers still applies. (#371 briefly targeted
+`<workspace>/.claude{,.json}` directly, which collided with a repo's
+project-level `.claude/` config dir — #377; the entrypoint migrates
+that layout to `.st/` on the next recreate.)
 
 That state includes material operators should be aware of:
 
-- **Conversation transcripts** (`.claude/projects/`) — the full content
-  of every Claude conversation run in the session, in cleartext JSONL.
-  Anything the user pasted into a conversation (including secrets) is
-  in there.
-- **OAuth credentials** (`.claude/.credentials.json`) — a live Anthropic
-  token, `chmod 600` but cleartext on the host filesystem.
+- **Conversation transcripts** (`.st/claude-state/projects/`) — the
+  full content of every Claude conversation run in the session, in
+  cleartext JSONL. Anything the user pasted into a conversation
+  (including secrets) is in there.
+- **OAuth credentials** (`.st/claude-state/.credentials.json`) — a live
+  Anthropic token, `chmod 600` but cleartext on the host filesystem.
 
 Same consequences as the `writeEnvFile` section above, for the same
 reason (the workspace bind mount is the persistence boundary):
@@ -121,7 +129,7 @@ reason (the workspace bind mount is the persistence boundary):
 - **There is no rotate-in-place path.** Revoking the Anthropic token
   requires `claude /logout` inside a running session (or revocation on
   the Anthropic side); deleting transcripts requires removing
-  `.claude/projects/` in the workspace or a hard delete.
+  `.st/claude-state/projects/` in the workspace or a hard delete.
 
 Unlike `writeEnvFile` this is not opt-in — persistence is the point of
 the feature, and the alternative (state evaporating on every recreate)

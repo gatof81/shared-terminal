@@ -287,6 +287,22 @@ fi
 # two locations for tunnel-attached editors. Symlinked default paths
 # cover every consumer, documented or not.
 #
+# Why the targets live under workspace/.st/ and not workspace/.claude
+# (#377): `.claude/` at a repo root is ALSO Claude Code's project-level
+# config dir, and the workspace root IS the repo root for cloned
+# sessions. Targeting workspace/.claude made the CLI's user state and
+# the repo's project config the same directory: the rescue guard below
+# mistook the repo's dir for an already-seeded workspace copy (and
+# dropped the container-layer state it exists to save), user-scope and
+# project-scope settings collapsed into one file, credentials +
+# transcripts landed in the user's git working tree, and the clone
+# step's skip-on-conflict move silently dropped the repo's own
+# `.claude/` because the entrypoint had already created one. `.st/` is
+# ours — no repo plausibly ships it — and it self-ignores via a `*`
+# .gitignore (the node_modules pattern) so a casual `git add -A` in a
+# workspace that is a repo checkout can't commit credentials or
+# transcripts.
+#
 # ~/.claude.json is a FILE symlink, which is only safe because the CLI
 # resolves the link before its atomic-rename config rewrite — the
 # rename lands on the resolved target, and a dangling link (fresh
@@ -309,9 +325,48 @@ fi
 # failure is strictly worse than the one-time re-auth those blocks
 # accept.
 CLAUDE_STATE_HOME=/home/developer/.claude
-CLAUDE_STATE_WS=/home/developer/workspace/.claude
 CLAUDE_JSON_HOME=/home/developer/.claude.json
-CLAUDE_JSON_WS=/home/developer/workspace/.claude.json
+ST_STATE_ROOT=/home/developer/workspace/.st
+CLAUDE_STATE_WS="$ST_STATE_ROOT/claude-state"
+CLAUDE_JSON_WS="$ST_STATE_ROOT/claude.json"
+# Exactly one image generation (#371) targeted these paths; migrated below.
+CLAUDE_STATE_WS_LEGACY=/home/developer/workspace/.claude
+CLAUDE_JSON_WS_LEGACY=/home/developer/workspace/.claude.json
+
+# The state root must exist before the migration/rescue copies below can
+# land inside it. No dedicated WARN on failure: the migration mv, the
+# rescue cp and the final mkdir -p all fail loudly on the same root
+# cause, with the kernel's errno visible in the logs.
+mkdir -p "$ST_STATE_ROOT" || true
+if [ -d "$ST_STATE_ROOT" ] && [ ! -e "$ST_STATE_ROOT/.gitignore" ]; then
+        printf '*\n' > "$ST_STATE_ROOT/.gitignore" || \
+                echo "[entrypoint] WARN: couldn't write workspace/.st/.gitignore; " \
+                     "Claude state is committable via 'git add -A' if the workspace is a repo checkout." >&2
+fi
+
+# Migrate the #371 layout. Only a dir carrying CLI-state markers moves —
+# a project-level .claude/ ships settings/agents but never credentials
+# (.credentials.json) or transcripts (projects/), so it stays untouched
+# where the repo put it. A #371-era dir that got hand-merged with a
+# repo's project config moves wholesale: the repo copies are restorable
+# via `git checkout -- .claude`, the credentials/transcripts riding
+# along are not restorable at all. mv (rename, not copy) so a partial
+# failure can't leave two divergent copies of the state.
+if [ -d "$CLAUDE_STATE_WS_LEGACY" ] && [ ! -L "$CLAUDE_STATE_WS_LEGACY" ] && \
+        { [ -f "$CLAUDE_STATE_WS_LEGACY/.credentials.json" ] || [ -d "$CLAUDE_STATE_WS_LEGACY/projects" ]; }; then
+        if [ ! -e "$CLAUDE_STATE_WS" ]; then
+                mv "$CLAUDE_STATE_WS_LEGACY" "$CLAUDE_STATE_WS" || \
+                        echo "[entrypoint] WARN: couldn't migrate legacy workspace/.claude state to .st/claude-state; " \
+                             "Claude will start from the empty new location." >&2
+        else
+                echo "[entrypoint] WARN: legacy workspace/.claude state present but .st/claude-state already exists; " \
+                     "leaving the legacy copy in place (unused)." >&2
+        fi
+fi
+if [ -f "$CLAUDE_JSON_WS_LEGACY" ] && [ ! -L "$CLAUDE_JSON_WS_LEGACY" ] && [ ! -e "$CLAUDE_JSON_WS" ]; then
+        mv "$CLAUDE_JSON_WS_LEGACY" "$CLAUDE_JSON_WS" || \
+                echo "[entrypoint] WARN: couldn't migrate legacy workspace/.claude.json to .st/claude.json." >&2
+fi
 
 if [ -d "$CLAUDE_STATE_HOME" ] && [ ! -L "$CLAUDE_STATE_HOME" ]; then
         if [ ! -d "$CLAUDE_STATE_WS" ]; then
@@ -330,7 +385,7 @@ if [ -f "$CLAUDE_JSON_HOME" ] && [ ! -L "$CLAUDE_JSON_HOME" ]; then
 fi
 
 if ! mkdir -p "$CLAUDE_STATE_WS"; then
-        echo "[entrypoint] WARN: couldn't create workspace .claude dir " \
+        echo "[entrypoint] WARN: couldn't create workspace .st/claude-state dir " \
              "(uid=$(id -u), workspace owner=$(stat -c '%u:%g' /home/developer/workspace 2>/dev/null || echo '?')). " \
              "Claude auth and session transcripts won't persist across restarts." >&2
 elif ! ln -sfn "$CLAUDE_STATE_WS" "$CLAUDE_STATE_HOME"; then
