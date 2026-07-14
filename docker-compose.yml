@@ -57,6 +57,14 @@ services:
       # name. Must equal the `sessions-net` network defined below; forwarded
       # so DockerManager attaches spawned containers to the same network.
       - SESSIONS_NETWORK=${SESSIONS_NETWORK:-sessions-net}
+      # Operator per-session resource ceilings (#194). Documented in
+      # .env.example but previously not forwarded here, so setting them
+      # in .env silently did nothing — the same trap PORT_PROXY_BASE_DOMAIN
+      # fell into. Empty string is treated as unset by parseMaxSessionCpu /
+      # parseMaxSessionMem (falls back to the v1 hard ceilings), so the
+      # `:-` defaults keep an .env-less dev boot byte-identical.
+      - MAX_SESSION_CPU=${MAX_SESSION_CPU:-}
+      - MAX_SESSION_MEM=${MAX_SESSION_MEM:-}
       - CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID}
       - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
       - D1_DATABASE_ID=${D1_DATABASE_ID}
