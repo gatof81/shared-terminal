@@ -18,10 +18,12 @@ import {
 	type AdminObserveLogEntry,
 	type AdminSession,
 	type AdminStats,
+	type AdminUser,
 	addAdminGroupMember,
 	adminForceDelete,
 	adminForceStop,
 	adminUpdateResources,
+	adminUpdateUserQuotas,
 	createAdminGroup,
 	deleteAdminGroup,
 	fetchAdminGroup,
@@ -29,6 +31,7 @@ import {
 	fetchAdminObserveLog,
 	fetchAdminSessions,
 	fetchAdminStats,
+	fetchAdminUsers,
 	fetchSessionObserveLog,
 	type ObserveLogEntry,
 	removeAdminGroupMember,
@@ -136,9 +139,10 @@ async function refreshAdmin(): Promise<void> {
 	// per-section error.
 	adminRefreshBtn.disabled = true;
 	try {
-		const [statsR, sessionsR, groupsR, observeLogR] = await Promise.allSettled([
+		const [statsR, sessionsR, usersR, groupsR, observeLogR] = await Promise.allSettled([
 			fetchAdminStats(),
 			fetchAdminSessions(),
+			fetchAdminUsers(),
 			fetchAdminGroups(),
 			fetchAdminObserveLog(),
 		]);
@@ -146,6 +150,8 @@ async function refreshAdmin(): Promise<void> {
 		else showToast(`Stats: ${statsR.reason.message}`, true);
 		if (sessionsR.status === "fulfilled") renderAdminSessions(sessionsR.value);
 		else showToast(`Sessions: ${sessionsR.reason.message}`, true);
+		if (usersR.status === "fulfilled") renderAdminUsers(usersR.value);
+		else showToast(`Users: ${usersR.reason.message}`, true);
 		if (groupsR.status === "fulfilled") renderAdminGroups(groupsR.value);
 		else showToast(`Groups: ${groupsR.reason.message}`, true);
 		if (observeLogR.status === "fulfilled") renderAdminObserveLog(observeLogR.value);
@@ -398,6 +404,183 @@ function renderAdminSessions(sessions: AdminSession[]): void {
 
 		adminSessionsListEl.appendChild(row);
 	}
+}
+
+// ── Users & quotas (#202) ────────────────────────────────────────────────
+
+const adminUsersListEl = document.getElementById("admin-users-list")!;
+
+/** "override" vs "default" is the load-bearing distinction for the
+ *  operator: an override survives env-var changes, a default follows
+ *  them. Budgets additionally have the null-effective = unlimited case. */
+function formatQuotaValue(
+	override: number | null,
+	effective: number | null,
+	fmt: (n: number) => string,
+): string {
+	if (override !== null) return fmt(override);
+	return effective === null ? "unlimited (default)" : `${fmt(effective)} (default)`;
+}
+
+function renderAdminUsers(users: AdminUser[]): void {
+	adminUsersListEl.textContent = "";
+	if (users.length === 0) {
+		const empty = document.createElement("p");
+		empty.className = "modal-hint";
+		empty.textContent = "No users.";
+		adminUsersListEl.appendChild(empty);
+		return;
+	}
+	for (const u of users) {
+		const row = document.createElement("div");
+		row.className = "admin-session-row admin-session-row--stacked";
+
+		const header = document.createElement("div");
+		header.className = "admin-session-header";
+
+		const meta = document.createElement("div");
+		meta.className = "admin-session-meta";
+		const name = document.createElement("strong");
+		name.textContent = u.isAdmin ? `${u.username} (admin)` : u.username;
+		const sub = document.createElement("span");
+		sub.className = "admin-session-sub";
+		sub.textContent = `joined ${new Date(u.createdAt).toLocaleDateString()}`;
+		const quotaLine = document.createElement("span");
+		quotaLine.className = "admin-session-sub admin-session-resources";
+		quotaLine.textContent =
+			`sessions: ${u.usage.activeSessions}/${u.effective.maxSessions}` +
+			` · cpu: ${formatCpuCores(u.usage.cpuNanos / 1e9)} of ${formatQuotaValue(
+				u.quotas.maxTotalCpu,
+				u.effective.maxTotalCpu,
+				(n) => `${formatCpuCores(n / 1e9)} cores`,
+			)}` +
+			` · mem: ${formatBytes(u.usage.memBytes)} of ${formatQuotaValue(
+				u.quotas.maxTotalMem,
+				u.effective.maxTotalMem,
+				formatBytes,
+			)}`;
+		meta.appendChild(name);
+		meta.appendChild(sub);
+		meta.appendChild(quotaLine);
+
+		const actions = document.createElement("div");
+		actions.className = "admin-session-actions";
+		const editBtn = document.createElement("button");
+		editBtn.type = "button";
+		editBtn.textContent = "Edit quotas";
+		actions.appendChild(editBtn);
+
+		header.appendChild(meta);
+		header.appendChild(actions);
+		row.appendChild(header);
+
+		// Lazy inline form, same pattern as the session rows' Edit caps.
+		let editForm: HTMLElement | null = null;
+		editBtn.addEventListener("click", () => {
+			if (editForm === null) {
+				editForm = buildEditQuotasForm(u);
+				row.appendChild(editForm);
+			} else {
+				editForm.hidden = !editForm.hidden;
+			}
+		});
+
+		adminUsersListEl.appendChild(row);
+	}
+}
+
+/** Inline quota editor. Empty input = "no override" (deployment
+ *  default) and is sent as null — clearing a field is a first-class
+ *  action, unlike the session caps form where a value always exists. */
+function buildEditQuotasForm(u: AdminUser): HTMLElement {
+	const form = document.createElement("form");
+	form.className = "admin-session-edit-caps";
+
+	const mkInput = (
+		labelText: string,
+		value: number | null,
+		step: string,
+		placeholder: string,
+	): { label: HTMLLabelElement; input: HTMLInputElement } => {
+		const label = document.createElement("label");
+		label.textContent = labelText;
+		const input = document.createElement("input");
+		input.type = "number";
+		input.step = step;
+		input.min = step; // floors: 1 session / 0.25 cores / 256 MiB
+		input.placeholder = placeholder;
+		if (value !== null) input.value = String(value);
+		label.appendChild(input);
+		return { label, input };
+	};
+
+	// Prefill with the OVERRIDE only — an empty field visibly means
+	// "following the deployment default", which is what Save preserves.
+	const sessionsField = mkInput("Max sessions", u.quotas.maxSessions, "1", "default");
+	const cpuField = mkInput(
+		"Total CPU (cores)",
+		u.quotas.maxTotalCpu === null ? null : u.quotas.maxTotalCpu / 1e9,
+		"0.25",
+		"default",
+	);
+	const memField = mkInput(
+		"Total memory (MiB)",
+		u.quotas.maxTotalMem === null ? null : u.quotas.maxTotalMem / (1024 * 1024),
+		"256",
+		"default",
+	);
+
+	const saveBtn = document.createElement("button");
+	saveBtn.type = "submit";
+	saveBtn.textContent = "Save";
+	const cancelBtn = document.createElement("button");
+	cancelBtn.type = "button";
+	cancelBtn.textContent = "Cancel";
+	cancelBtn.addEventListener("click", () => {
+		form.hidden = true;
+	});
+
+	form.appendChild(sessionsField.label);
+	form.appendChild(cpuField.label);
+	form.appendChild(memField.label);
+	form.appendChild(saveBtn);
+	form.appendChild(cancelBtn);
+
+	form.addEventListener("submit", async (e) => {
+		e.preventDefault();
+		// Empty string → null (clear the override). Anything else must
+		// parse; reject NaN early with a toast instead of a 400 round-trip.
+		const parse = (raw: string): number | null | undefined => {
+			if (raw.trim() === "") return null;
+			const n = Number(raw);
+			return Number.isFinite(n) ? n : undefined;
+		};
+		const sessionsV = parse(sessionsField.input.value);
+		const cpuV = parse(cpuField.input.value);
+		const memV = parse(memField.input.value);
+		if (sessionsV === undefined || cpuV === undefined || memV === undefined) {
+			showToast("Enter valid quota values (or leave empty for the default)", true);
+			return;
+		}
+		saveBtn.disabled = true;
+		cancelBtn.disabled = true;
+		try {
+			await adminUpdateUserQuotas(u.userId, {
+				maxSessions: sessionsV === null ? null : Math.round(sessionsV),
+				maxTotalCpu: cpuV === null ? null : Math.round(cpuV * 1e9),
+				maxTotalMem: memV === null ? null : Math.round(memV) * 1024 * 1024,
+			});
+			showToast(`Updated quotas for ${u.username}`);
+			await refreshAdmin();
+		} catch (err) {
+			showToast((err as Error).message, true);
+		} finally {
+			saveBtn.disabled = false;
+			cancelBtn.disabled = false;
+		}
+	});
+
+	return form;
 }
 
 /** Per-row resources line. Always shows the configured caps (or

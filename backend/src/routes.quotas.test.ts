@@ -233,6 +233,39 @@ describe("POST /sessions — per-user budgets", () => {
 	});
 });
 
+describe("GET /quotas (own headroom, 202b)", () => {
+	it("returns the caller's effective quotas and usage, reusing one session-list read", async () => {
+		const { sessions, docker } = makeFakes([
+			{ sessionId: "s1", status: "running" },
+			{ sessionId: "s2", status: "stopped" },
+			{ sessionId: "s3", status: "terminated" },
+		]);
+		mockD1({
+			quotaRow: { max_sessions: 5, max_total_cpu: 8_000_000_000, max_total_mem: null },
+			capsRows: [{ session_id: "s1", cpu_limit: 2_000_000_000, mem_limit: 2 ** 30 }],
+		});
+		await spinUp(sessions, docker);
+
+		const res = await fetch(`${baseUrl}/api/quotas`);
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as Record<string, unknown>;
+		expect(body).toMatchObject({
+			effective: { maxSessions: 5, maxTotalCpu: 8_000_000_000, maxTotalMem: null },
+			usage: {
+				activeSessions: 2, // running + stopped; terminated freed its slot
+				runningSessions: 1,
+				cpuNanos: 2_000_000_000,
+				memBytes: 2 ** 30,
+			},
+		});
+		// The preloaded-list optimisation: active count + budget sum share
+		// one listForUser round-trip.
+		expect(
+			(sessions as unknown as { listForUser: ReturnType<typeof vi.fn> }).listForUser,
+		).toHaveBeenCalledTimes(1);
+	});
+});
+
 describe("PATCH /admin/users/:id/quotas", () => {
 	function patchQuotas(userId: string, body: unknown): Promise<Response> {
 		return fetch(`${baseUrl}/api/admin/users/${userId}/quotas`, {

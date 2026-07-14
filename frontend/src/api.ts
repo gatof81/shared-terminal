@@ -916,6 +916,76 @@ export async function adminUpdateResources(
 	throw err;
 }
 
+// ── Per-user quotas (#202 / 202b) ───────────────────────────────────────────
+//
+// Wire-shape mirrors of GET /admin/users and PATCH /admin/users/:id/quotas.
+// Units are raw backend units (nano-CPUs / bytes); the UI converts to
+// cores / MiB at the form boundary, same convention as the #270 caps.
+
+export interface AdminUser {
+	userId: string;
+	username: string;
+	isAdmin: boolean;
+	createdAt: string;
+	/** Raw per-user overrides; null = deployment default. */
+	quotas: {
+		maxSessions: number | null;
+		maxTotalCpu: number | null;
+		maxTotalMem: number | null;
+	};
+	/** Resolved values the backend enforces; null budget = unlimited. */
+	effective: {
+		maxSessions: number;
+		maxTotalCpu: number | null;
+		maxTotalMem: number | null;
+	};
+	usage: {
+		activeSessions: number;
+		runningSessions: number;
+		cpuNanos: number;
+		memBytes: number;
+	};
+}
+
+export async function fetchAdminUsers(): Promise<AdminUser[]> {
+	const res = await apiFetch("/admin/users");
+	if (!res.ok) throw new Error(`Failed to load admin users (${res.status})`);
+	return res.json();
+}
+
+/** Per-user quota overrides. `null` clears a field back to the
+ *  deployment default; omitted fields are left untouched. */
+export async function adminUpdateUserQuotas(
+	userId: string,
+	patch: {
+		maxSessions?: number | null;
+		maxTotalCpu?: number | null;
+		maxTotalMem?: number | null;
+	},
+): Promise<void> {
+	const res = await apiFetch(`/admin/users/${encodeURIComponent(userId)}/quotas`, {
+		method: "PATCH",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(patch),
+	});
+	if (res.ok) return;
+	const body = (await res.json().catch(() => ({}))) as { error?: string };
+	throw new Error(body.error ?? `Failed to update quotas (${res.status})`);
+}
+
+/** The caller's own effective quotas + usage (GET /api/quotas) — powers
+ *  the create-form headroom hint. Same shape as AdminUser minus identity. */
+export interface MyQuotas {
+	effective: AdminUser["effective"];
+	usage: AdminUser["usage"];
+}
+
+export async function fetchMyQuotas(): Promise<MyQuotas> {
+	const res = await apiFetch("/quotas");
+	if (!res.ok) throw new Error(`Failed to load quotas (${res.status})`);
+	return res.json();
+}
+
 // ── Admin groups CRUD (#201e-2) ─────────────────────────────────────────────
 //
 // Wire-shape mirrors of the backend `Group` / `GroupSummary` /

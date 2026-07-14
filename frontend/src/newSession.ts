@@ -15,6 +15,7 @@ import {
 	deleteTemplate,
 	type EnvVarEntryInput,
 	fetchBootstrapLog,
+	fetchMyQuotas,
 	getResourceCaps,
 	getTemplate,
 	idleSecondsToFormUnit,
@@ -156,6 +157,9 @@ function openNewSessionModal(opener: HTMLElement) {
 	// #200: re-apply caps in case checkAuthStatus refreshed them since
 	// initAuth ran (idempotent — same numbers if nothing changed).
 	applyResourceCapsToForm();
+	// #202: headroom hint is fetched async so modal-open never blocks on
+	// it; the hint fills in when the response lands.
+	void refreshQuotaHeadroom();
 	newSessionModal.classList.add("open");
 	newSessionModal.setAttribute("aria-hidden", "false");
 	// Defer focus to the next paint so the input is reliably focusable
@@ -675,6 +679,34 @@ function applyResourceCapsToForm(): void {
 		`Per-session limits. Empty fields fall back to the deployment defaults ` +
 		`(2 cores / 2 GiB / no auto-stop). Bounds: CPU 0.25–${caps.cpuMaxCores} cores, ` +
 		`memory 256 MiB–${memMaxStr}, idle TTL 1 minute–24 hours.`;
+}
+
+// #202 — the caller's own quota headroom, shown under the bounds hint.
+// A create that would bust the account budget 429s server-side; this
+// hint lets the user see it coming instead of discovering it on submit.
+// Best-effort: a failed fetch just leaves the line empty (the server
+// still enforces).
+const quotaHeadroomHint = document.getElementById("quota-headroom-hint") as HTMLParagraphElement;
+
+async function refreshQuotaHeadroom(): Promise<void> {
+	quotaHeadroomHint.textContent = "";
+	try {
+		const q = await fetchMyQuotas();
+		const parts = [`Your account: ${q.usage.activeSessions}/${q.effective.maxSessions} sessions`];
+		if (q.effective.maxTotalCpu !== null) {
+			parts.push(
+				`${q.usage.cpuNanos / 1e9}/${q.effective.maxTotalCpu / 1e9} cores of CPU budget in use`,
+			);
+		}
+		if (q.effective.maxTotalMem !== null) {
+			parts.push(
+				`${Math.round(q.usage.memBytes / 2 ** 20)}/${Math.round(q.effective.maxTotalMem / 2 ** 20)} MiB of memory budget in use`,
+			);
+		}
+		quotaHeadroomHint.textContent = `${parts.join(" · ")}.`;
+	} catch {
+		// Non-fatal: the hint is advisory; the backend still enforces.
+	}
 }
 
 /** Wipe Advanced-tab state on modal close. Important for the agent-

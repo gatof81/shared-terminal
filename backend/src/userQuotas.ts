@@ -155,8 +155,12 @@ export function effectiveSessionAllocation(caps: {
 export async function computeRunningAllocations(
 	sessions: SessionManager,
 	userId: string,
+	// Callers that already hold the user's session list (GET /quotas
+	// needs it for the active count too) pass it in to skip the second
+	// identical D1 round-trip.
+	preloaded?: Array<{ sessionId: string; status: string }>,
 ): Promise<RunningAllocations> {
-	const all = await sessions.listForUser(userId);
+	const all = preloaded ?? (await sessions.listForUser(userId));
 	const running = all.filter((s) => s.status === "running");
 	if (running.length === 0) return { runningSessions: 0, cpuNanos: 0, memBytes: 0 };
 	const caps = await listResourceCaps(running.map((s) => s.sessionId));
