@@ -20,7 +20,7 @@
  * the initial migration to keep the diff readable).
  */
 
-import { pino } from "pino";
+import { type Logger, pino } from "pino";
 import { getRequestId } from "./requestContext.js";
 
 const NODE_ENV = process.env.NODE_ENV;
@@ -112,12 +112,26 @@ export const REDACT_PATHS = [
  * Returns `{}` outside any context so boot/sweeper/reconcile lines don't
  * grow a useless `requestId: undefined` field.
  *
+ * The bindings check exists because both correlation mechanisms can be
+ * live at once: wsHandler children bind requestId eagerly (socket events
+ * fire outside the ALS context), but their setup-time calls still run
+ * INSIDE the upgrade's context. pino concatenates child bindings and the
+ * mixin result without dedupe, so stamping there again emits the key
+ * twice in one JSON line — same value, but malformed enough to trip a
+ * strict log pipeline. Bindings win; the mixin only fills the gap.
+ *
  * Exported so the wiring can be unit-tested against a captured stream
  * (same pattern as REDACT_PATHS above).
  */
-export function requestIdMixin(): { requestId?: string } {
+export function requestIdMixin(
+	_mergeObject: object,
+	_level: number,
+	instance: Logger,
+): { requestId?: string } {
 	const requestId = getRequestId();
-	return requestId ? { requestId } : {};
+	if (requestId === undefined) return {};
+	const bound = (instance.bindings() as { requestId?: string }).requestId;
+	return bound === undefined ? { requestId } : {};
 }
 
 export const logger = pino({
