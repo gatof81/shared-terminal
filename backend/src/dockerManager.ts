@@ -456,6 +456,23 @@ export class DockerManager {
 				// a SIBLING session's budget. PidsLimit is per-cgroup, so
 				// sessions stay isolated from each other.
 				PidsLimit: 1024,
+				// docker-init (tini) as PID 1. The entrypoint's PID 1 is
+				// `exec tail -f /dev/null`, which never wait()s — any
+				// orphaned child reparented to it stays a zombie FOREVER,
+				// and each zombie holds a PidsLimit slot. The exec API
+				// (#381) makes orphaning routine: killExecProcessGroup
+				// reaps the group leader but grandchildren that outlive
+				// (or predecease) their parent reparent to PID 1.
+				// Verified live on the session image: a group whose
+				// parent exits leaves 3 permanent Z-state entries without
+				// init, 0 with it (smoke-test.sh Phase 9 pins both legs).
+				// Side-effect worth knowing: docker-init forwards SIGTERM
+				// to the entrypoint, so `docker stop` now terminates
+				// cleanly instead of waiting out the 10 s grace for
+				// SIGKILL. Containers created before this flag keep their
+				// old HostConfig until recycled — warnIfPreHardened flags
+				// them on start/reconcile.
+				Init: true,
 				// Companion fd bound. 65536 is generous for dev servers and
 				// file watchers (Vite/watchman-style workloads sit well under
 				// it) while capping a leak well below the dockerd default of
@@ -1078,15 +1095,22 @@ export class DockerManager {
 	private warnIfPreHardened(
 		sessionId: string,
 		containerId: string,
-		hostConfig: { CapDrop?: string[] | null; SecurityOpt?: string[] | null } | undefined,
+		hostConfig:
+			| { CapDrop?: string[] | null; SecurityOpt?: string[] | null; Init?: boolean | null }
+			| undefined,
 	): void {
 		const capDrop = hostConfig?.CapDrop ?? [];
 		const securityOpt = hostConfig?.SecurityOpt ?? [];
-		if (capDrop.includes("ALL") && securityOpt.includes("no-new-privileges:true")) return;
+		// Init joined the hardening set with the zombie-reaper fix: a
+		// pre-Init container accumulates permanent zombies against its
+		// PidsLimit under exec-API kills (see the Init: true comment in
+		// spawn), so it deserves the same recycle nudge.
+		const init = hostConfig?.Init === true;
+		if (capDrop.includes("ALL") && securityOpt.includes("no-new-privileges:true") && init) return;
 		logger.warn(
 			`[docker] session ${sessionId} container ${containerId.slice(0, 12)} ` +
-				`predates issue-#15 hardening (CapDrop=${JSON.stringify(capDrop)}, ` +
-				`SecurityOpt=${JSON.stringify(securityOpt)}). ` +
+				`predates current hardening (CapDrop=${JSON.stringify(capDrop)}, ` +
+				`SecurityOpt=${JSON.stringify(securityOpt)}, Init=${init}). ` +
 				`Recycle via DELETE /api/sessions/${sessionId} then POST /start to apply current HostConfig.`,
 		);
 	}

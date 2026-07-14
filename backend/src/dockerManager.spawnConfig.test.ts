@@ -236,6 +236,18 @@ describe("DockerManager.spawn config-applied", () => {
 		expect(hc.Ulimits).toEqual([{ Name: "nofile", Soft: 65536, Hard: 65536 }]);
 	});
 
+	// Companion to PidsLimit: the entrypoint's PID 1 (`tail -f /dev/null`)
+	// never wait()s, so orphaned zombies would hold PidsLimit slots
+	// forever — routine under exec-API group kills. docker-init reaps
+	// them; smoke-test.sh Phase 9 proves the behaviour on a real daemon,
+	// this pin keeps a HostConfig refactor from silently dropping the flag.
+	it("always sets Init so orphaned zombies are reaped (exec API follow-up)", async () => {
+		const { dm, captured } = makeDmWithCreateCapture();
+		await dm.spawn("sess-1");
+		const hc = captured.opts.HostConfig as { Init: boolean };
+		expect(hc.Init).toBe(true);
+	});
+
 	// #345 — pin the log-rotation cap so a HostConfig refactor can't
 	// silently drop it (unconditional, so the no-config-row spawn is a
 	// sufficient probe).

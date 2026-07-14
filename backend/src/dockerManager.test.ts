@@ -890,7 +890,7 @@ describe("DockerManager.reconcile", () => {
 		await dm.reconcile();
 
 		expect(warnSpy).toHaveBeenCalledTimes(1);
-		expect(warnSpy.mock.calls[0]?.[0]).toMatch(/predates issue-#15 hardening/);
+		expect(warnSpy.mock.calls[0]?.[0]).toMatch(/predates current hardening/);
 		expect(warnSpy.mock.calls[0]?.[0]).toMatch(/session s1/);
 		// Running container — reconcile shouldn't flip status.
 		expect(sessions.updateStatus).not.toHaveBeenCalled();
@@ -927,7 +927,7 @@ describe("DockerManager.reconcile", () => {
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const { dm } = makeDockerWithInspectResult({
 			State: { Running: true },
-			HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"] },
+			HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"], Init: true },
 		});
 		dbStubs.d1Query.mockResolvedValueOnce({
 			results: [{ session_id: "s3", container_id: "container-new" }],
@@ -965,7 +965,7 @@ describe("DockerManager.reconcile", () => {
 		// ports. The container's NetworkSettings.Ports is irrelevant now.
 		const { dm } = makeDockerWithInspectAndPorts({
 			State: { Running: true },
-			HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"] },
+			HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"], Init: true },
 		});
 		dbStubs.d1Query.mockResolvedValueOnce({
 			results: [{ session_id: "s-running", container_id: "container-running" }],
@@ -1011,7 +1011,7 @@ describe("DockerManager.reconcile", () => {
 	it("clears port mappings when reconcile finds the container stopped", async () => {
 		const { dm, sessions } = makeDockerWithInspectAndPorts({
 			State: { Running: false },
-			HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"] },
+			HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"], Init: true },
 			NetworkSettings: { Ports: {} },
 		});
 		dbStubs.d1Query.mockResolvedValueOnce({
@@ -1199,7 +1199,7 @@ describe("DockerManager.startContainer", () => {
 		await dm.startContainer("s1");
 
 		expect(warnSpy).toHaveBeenCalledTimes(1);
-		expect(warnSpy.mock.calls[0]?.[0]).toMatch(/predates issue-#15 hardening/);
+		expect(warnSpy.mock.calls[0]?.[0]).toMatch(/predates current hardening/);
 		expect(warnSpy.mock.calls[0]?.[0]).toMatch(/session s1/);
 		expect(sessions.updateStatus).toHaveBeenCalledWith("s1", "running");
 		warnSpy.mockRestore();
@@ -1230,7 +1230,7 @@ describe("DockerManager.startContainer", () => {
 		// re-inspects — the exposed set is derived from config, not host ports.
 		const inspect = vi.fn(async () => ({
 			State: { Running: false },
-			HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"] },
+			HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"], Init: true },
 		}));
 		const start = vi.fn(async () => {
 			/* started */
@@ -1260,7 +1260,7 @@ describe("DockerManager.startContainer", () => {
 		const dm = new DockerManager(sessions);
 		const inspect = vi.fn(async () => ({
 			State: { Running: true },
-			HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"] },
+			HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"], Init: true },
 			NetworkSettings: { Ports: {} },
 		}));
 		const start = vi.fn(async () => {
