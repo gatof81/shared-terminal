@@ -171,6 +171,7 @@ async function spinUp(sessions: SessionManager, docker: DockerManager) {
 		authStatus: { ipMax: 1000, ipWindowMs: 60_000 },
 		adminStats: { ipMax: 1000, ipWindowMs: 60_000 },
 		adminAction: { ipMax: 1000, ipWindowMs: 60_000 },
+		exec: { ipMax: 1000, ipWindowMs: 60_000 },
 	});
 	const app = express();
 	app.use(express.json());

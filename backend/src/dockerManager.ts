@@ -1167,8 +1167,14 @@ export class DockerManager {
 			 *  `newProcessGroup` is set. May never fire if the exec
 			 *  dies before the wrapper's first write. */
 			onProcessGroup?: (pgid: number) => void;
+			/** Fires once with pause/resume controls for the underlying
+			 *  hijacked stream, as soon as it exists. The HTTP exec API
+			 *  (#381) uses this for flow control: when its NDJSON
+			 *  response backpressures, it pauses the Docker stream
+			 *  instead of buffering unboundedly in process memory. */
+			onStreamHandle?: (handle: { pause: () => void; resume: () => void }) => void;
 		},
-		onOutput?: (chunk: string) => void,
+		onOutput?: (chunk: string, stream: "stdout" | "stderr") => void,
 	): Promise<{ exitCode: number }> {
 		// Pre-check: if already aborted, fail fast without burning a
 		// docker round-trip. Standard AbortSignal contract.
@@ -1207,6 +1213,7 @@ export class DockerManager {
 			WorkingDir: opts.workingDir ?? "/home/developer/workspace",
 		});
 		const stream = await exec.start({ hijack: false, stdin: false });
+		opts.onStreamHandle?.({ pause: () => stream.pause(), resume: () => stream.resume() });
 
 		// Wire the abort signal: destroy the upstream stream when the
 		// signal fires so the resolve-on-end Promise below settles
@@ -1218,10 +1225,10 @@ export class DockerManager {
 		};
 		opts.signal?.addEventListener("abort", abortHandler, { once: true });
 
-		const emit = (text: string) => {
+		const emit = (text: string, source: "stdout" | "stderr") => {
 			if (!onOutput) return;
 			try {
-				onOutput(text);
+				onOutput(text, source);
 			} catch (err) {
 				logger.warn(`[docker] postCreate onOutput threw: ${(err as Error).message}`);
 			}
@@ -1244,7 +1251,7 @@ export class DockerManager {
 		let pgidBuf: string | null = opts.newProcessGroup ? "" : null;
 		const filterStdout = (text: string) => {
 			if (pgidBuf === null) {
-				emit(text);
+				emit(text, "stdout");
 				return;
 			}
 			pgidBuf += text;
@@ -1253,7 +1260,7 @@ export class DockerManager {
 				// Sentinel + space + pid is well under 64 bytes; past
 				// that something upstream isn't the wrapper — flush.
 				if (pgidBuf.length > 256) {
-					emit(pgidBuf);
+					emit(pgidBuf, "stdout");
 					pgidBuf = null;
 				}
 				return;
@@ -1269,9 +1276,9 @@ export class DockerManager {
 					logger.warn(`[docker] onProcessGroup threw: ${(err as Error).message}`);
 				}
 			} else {
-				emit(`${line}\n`);
+				emit(`${line}\n`, "stdout");
 			}
-			if (rest !== "") emit(rest);
+			if (rest !== "") emit(rest, "stdout");
 		};
 
 		// Demux frames as they arrive so `onOutput` fires per-chunk.
@@ -1291,7 +1298,7 @@ export class DockerManager {
 				if (frameType === 1) {
 					filterStdout(payload.toString("utf-8"));
 				} else if (frameType === 2) {
-					emit(payload.toString("utf-8"));
+					emit(payload.toString("utf-8"), "stderr");
 				}
 				off += 8 + size;
 			}
@@ -1317,7 +1324,7 @@ export class DockerManager {
 			// buffer (first stdout line never got its newline) is
 			// command output, not a sentinel — hand it over instead
 			// of dropping it.
-			if (pgidBuf !== null && pgidBuf !== "") emit(pgidBuf);
+			if (pgidBuf !== null && pgidBuf !== "") emit(pgidBuf, "stdout");
 		}
 		// If the signal aborted mid-stream, surface AbortError up to
 		// the caller — don't pretend the exit code is meaningful.

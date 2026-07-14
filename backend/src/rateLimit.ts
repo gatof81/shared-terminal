@@ -113,6 +113,17 @@ export interface RateLimitConfig {
 		ipMax: number;
 		ipWindowMs: number;
 	};
+	// Caps exec-API starts + kills per IP (#381). The per-session
+	// concurrency cap (MAX_CONCURRENT_EXECS_PER_SESSION) bounds the
+	// container-side load; this bounds the docker-exec churn a single
+	// automation client can generate across sessions. Status reads are
+	// deliberately NOT behind it — they're an in-memory map lookup, and
+	// throttling recovery polling would punish exactly the reconnecting
+	// consumer the endpoint exists for.
+	exec: {
+		ipMax: number;
+		ipWindowMs: number;
+	};
 }
 
 // Defaults match issue #10: login 10/15min, register 5/1h, per-username 10/15min.
@@ -184,6 +195,13 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 		ipMax: 60,
 		ipWindowMs: 60 * 60 * 1000,
 	},
+	// 120/min ≈ 2 starts/sec sustained — generous for an agent runner
+	// firing one exec per turn (the expected consumer cadence), far
+	// under what it takes to hurt the daemon given the concurrency cap.
+	exec: {
+		ipMax: 120,
+		ipWindowMs: 60 * 1000,
+	},
 };
 
 // ── IP-based limiters (express-rate-limit) ─────────────────────────────────
@@ -199,6 +217,7 @@ export interface AuthRateLimiters {
 	authStatusIp: RateLimitRequestHandler;
 	adminStatsIp: RateLimitRequestHandler;
 	adminActionIp: RateLimitRequestHandler;
+	execIp: RateLimitRequestHandler;
 }
 
 export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
@@ -288,6 +307,13 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 			scope: "ip",
 		},
 	});
+	const execIp = rateLimit({
+		windowMs: cfg.exec.ipWindowMs,
+		limit: cfg.exec.ipMax,
+		standardHeaders: "draft-7",
+		legacyHeaders: false,
+		message: { error: "Too many exec requests from this IP, try again later", scope: "ip" },
+	});
 	return {
 		loginIp,
 		registerIp,
@@ -299,6 +325,7 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		authStatusIp,
 		adminStatsIp,
 		adminActionIp,
+		execIp,
 	};
 }
 
