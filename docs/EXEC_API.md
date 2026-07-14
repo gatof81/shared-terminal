@@ -66,6 +66,7 @@ JSON object per line:
 | `output` | `stream` (`"stdout"` \| `"stderr"`), `data` | UTF-8 chunk, not necessarily line-aligned; the consumer reassembles lines. `Tty:false` multiplexed frames preserve the stream distinction |
 | `exit` | `exitCode`, `reason` (`"exited"` \| `"killed"` \| `"timeout"`), `ts` | Terminal; the response ends after it |
 | `error` | `code`, `message` | Terminal, for mid-stream failures (container died, docker error) |
+| `dropped` | `scope` (`"pre-start"`), `bytes` | Non-terminal. The pre-`started` hold buffer (256 KiB) overflowed and `bytes` of raw output were discarded — emitted immediately after the buffer flush so truncation is distinguishable from "the process wrote nothing" |
 
 All events carry `v` (schema version, currently `1`). Consumers must
 ignore unknown fields and unknown event types; the `v` bump is reserved
@@ -112,6 +113,15 @@ After a successful kill, the exec's stream (if still attached) emits
 `exit` with `reason: "killed"`. If the kill outcome is `already-exited`,
 the exit stays attributed `"exited"` (the process beat the signal — that
 was a natural exit, not a kill).
+
+**Known attribution race (v1):** if a natural exit lands in the
+milliseconds while a kill request is in flight, the stream may have
+already emitted `exit` with `reason: "killed"` before the kill's
+`already-exited` outcome can walk the attribution back. When the two
+disagree, **the kill endpoint's `outcome` is authoritative** — consumers
+that branch on `reason` should reconcile against it rather than retry.
+Closing this window would require deferring `reason` resolution past the
+kill round-trip; deliberately out of scope for v1.
 
 ## Error semantics (non-stream)
 

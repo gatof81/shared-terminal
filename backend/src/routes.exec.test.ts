@@ -232,6 +232,26 @@ describe("POST /sessions/:id/exec", () => {
 		expect(events[3]).toMatchObject({ exitCode: 2 });
 	});
 
+	it("signals pre-sentinel buffer overflow with a `dropped` event instead of a silent gap", async () => {
+		// Two 200 KiB stderr chunks before the sentinel: the first fits the
+		// 256 KiB hold buffer, the second overflows and must be reported.
+		const big = "x".repeat(200 * 1024);
+		const { docker } = makeFakeDocker(async (_sid, opts, onOutput) => {
+			onOutput?.(big, "stderr");
+			onOutput?.(big, "stderr");
+			opts.onProcessGroup?.(31);
+			return { exitCode: 0 };
+		});
+		await spinUp(makeFakeSessions(), docker);
+
+		const events = await readAllEvents(await startExec({ cmd: ["x"] }));
+		expect(events.map((e) => e.type)).toEqual(["started", "output", "dropped", "exit"]);
+		// The surviving buffered chunk flushes intact; the dropped event
+		// reports raw output bytes so the consumer can size the gap.
+		expect((events[1]?.data as string).length).toBe(big.length);
+		expect(events[2]).toMatchObject({ v: 1, scope: "pre-start", bytes: big.length });
+	});
+
 	it("passes cmd/env/workingDir through and always requests a fresh process group", async () => {
 		let seen: StreamExecOpts | undefined;
 		const { docker } = makeFakeDocker(async (_sid, opts) => {

@@ -122,6 +122,7 @@ export function registerExecRoutes(router: Router, ctx: RouteContext): void {
 			let streamHandle: { pause: () => void; resume: () => void } | undefined;
 			const preStart: string[] = [];
 			let preStartBytes = 0;
+			let preStartDroppedBytes = 0;
 
 			// Client disconnect does NOT kill the process (Docker has no
 			// kill-exec; the exec stays addressable via status/kill). But a
@@ -160,6 +161,16 @@ export function registerExecRoutes(router: Router, ctx: RouteContext): void {
 					if (preStartBytes + line.length <= PRESTART_BUF_MAX_BYTES) {
 						preStart.push(line);
 						preStartBytes += line.length;
+					} else {
+						// Past the cap the bytes are gone — but never silently:
+						// a gap the consumer can't tell from "the process wrote
+						// nothing" is worse than the gap itself. Counted here,
+						// surfaced as a `dropped` event right after the buffer
+						// flush (additive under v:1 — consumers ignore unknown
+						// event types) plus a substrate-side warn. Counts raw
+						// output bytes, not serialized-event bytes — that's the
+						// quantity a consumer can reason about.
+						preStartDroppedBytes += Buffer.byteLength(chunk, "utf-8");
 					}
 					return;
 				}
@@ -179,6 +190,17 @@ export function registerExecRoutes(router: Router, ctx: RouteContext): void {
 				startedSent = true;
 				for (const line of preStart) writeLine(line);
 				preStart.length = 0;
+				if (preStartDroppedBytes > 0) {
+					logger.warn(
+						`[exec] ${entry.execId} dropped ${preStartDroppedBytes} pre-sentinel output bytes (buffer cap ${PRESTART_BUF_MAX_BYTES})`,
+					);
+					writeEvent({
+						v: 1,
+						type: "dropped",
+						scope: "pre-start",
+						bytes: preStartDroppedBytes,
+					});
+				}
 			};
 
 			// The timer marks intent BEFORE killing so the exit event that
@@ -337,6 +359,14 @@ export function registerExecRoutes(router: Router, ctx: RouteContext): void {
 			}
 			execRegistry.markKillIntent(entry.execId, "killed");
 			const outcome = await docker.killExecProcessGroup(req.params.id, entry.pgid, graceMs);
+			// Walkback is best-effort: if the natural exit settled DURING the
+			// await above, markExited already consumed the intent and the
+			// stream said `reason:"killed"` — this clear is then a no-op and
+			// the two surfaces disagree for that one exec. Documented in
+			// docs/EXEC_API.md (§kill, "Known attribution race"): the kill
+			// outcome is the authoritative signal. Closing the window means
+			// deferring reason resolution past this round-trip — not worth
+			// the machinery at v1.
 			if (outcome === "already-exited") execRegistry.clearKillIntent(entry.execId);
 			res.json({ outcome });
 		} catch (err) {
