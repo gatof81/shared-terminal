@@ -13,6 +13,7 @@ import { Router } from "express";
 import { requireAuth } from "./auth.js";
 import type { BootstrapBroadcaster } from "./bootstrap.js";
 import type { DockerManager } from "./dockerManager.js";
+import { ExecRegistry } from "./execRegistry.js";
 import type { RateLimitConfig } from "./rateLimit.js";
 import {
 	createAuthRateLimiters,
@@ -21,6 +22,7 @@ import {
 } from "./rateLimit.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerAuthRoutes } from "./routes/auth.js";
+import { registerExecRoutes } from "./routes/exec.js";
 import { registerGroupRoutes } from "./routes/groups.js";
 import { registerInviteRoutes } from "./routes/invites.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
@@ -57,6 +59,7 @@ export function buildRouter(
 		rateLimitConfig,
 		limiters,
 		usernameLimiter,
+		execRegistry: new ExecRegistry(),
 	};
 
 	// ── Auth routes (public) ────────────────────────────────────────────────
@@ -115,6 +118,7 @@ export function buildRouter(
 	registerAdminRoutes(router, ctx);
 	registerGroupRoutes(router, ctx);
 	registerSessionRoutes(router, ctx);
+	registerExecRoutes(router, ctx);
 	registerTemplateRoutes(router, ctx);
 
 	return router;

@@ -10,6 +10,7 @@ import type { BootstrapBroadcaster } from "../bootstrap.js";
 import type { StatsBySession } from "../containerStats.js";
 import type { DockerManager } from "../dockerManager.js";
 import { UploadQuotaExceededError } from "../dockerManager.js";
+import type { ExecRegistry } from "../execRegistry.js";
 import type { IdleSweeperStats } from "../idleSweeper.js";
 import { logger } from "../logger.js";
 import type { createAuthRateLimiters, RateLimitConfig, UsernameRateLimiter } from "../rateLimit.js";
@@ -40,6 +41,9 @@ export interface RouteContext {
 	rateLimitConfig: RateLimitConfig;
 	limiters: ReturnType<typeof createAuthRateLimiters>;
 	usernameLimiter: UsernameRateLimiter;
+	// #381 — per-router so tests get isolation for free; production has
+	// exactly one router, so this is effectively the process singleton.
+	execRegistry: ExecRegistry;
 }
 
 // Exported so wsHandler can apply the same upper bound when validating

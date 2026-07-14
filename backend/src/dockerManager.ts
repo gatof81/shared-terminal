@@ -83,6 +83,20 @@ const UPLOAD_QUOTA_BYTES = (() => {
 	return Number.isFinite(n) && n > 0 ? n : 1024 * 1024 * 1024;
 })();
 
+/**
+ * Thrown when an operation needs a live container but the session's
+ * `container_id` is null (stopped / torn down between the caller's
+ * pre-check and the docker call). Typed so route-layer TOCTOU handlers
+ * can `instanceof`-match instead of string-matching the message — a
+ * reworded message must not silently degrade a 409 into a 500.
+ */
+export class ContainerNotFoundError extends Error {
+	constructor() {
+		super("No container for this session");
+		this.name = "ContainerNotFoundError";
+	}
+}
+
 export class UploadQuotaExceededError extends Error {
 	readonly quota: number;
 	readonly used: number;
@@ -1167,8 +1181,14 @@ export class DockerManager {
 			 *  `newProcessGroup` is set. May never fire if the exec
 			 *  dies before the wrapper's first write. */
 			onProcessGroup?: (pgid: number) => void;
+			/** Fires once with pause/resume controls for the underlying
+			 *  hijacked stream, as soon as it exists. The HTTP exec API
+			 *  (#381) uses this for flow control: when its NDJSON
+			 *  response backpressures, it pauses the Docker stream
+			 *  instead of buffering unboundedly in process memory. */
+			onStreamHandle?: (handle: { pause: () => void; resume: () => void }) => void;
 		},
-		onOutput?: (chunk: string) => void,
+		onOutput?: (chunk: string, stream: "stdout" | "stderr") => void,
 	): Promise<{ exitCode: number }> {
 		// Pre-check: if already aborted, fail fast without burning a
 		// docker round-trip. Standard AbortSignal contract.
@@ -1177,7 +1197,7 @@ export class DockerManager {
 		}
 
 		const meta = await this.sessions.getOrThrow(sessionId);
-		if (!meta.containerId) throw new Error("No container for this session");
+		if (!meta.containerId) throw new ContainerNotFoundError();
 		const container = this.docker.getContainer(meta.containerId);
 
 		// `setsid` makes the wrapper the leader of a fresh session AND
@@ -1207,6 +1227,7 @@ export class DockerManager {
 			WorkingDir: opts.workingDir ?? "/home/developer/workspace",
 		});
 		const stream = await exec.start({ hijack: false, stdin: false });
+		opts.onStreamHandle?.({ pause: () => stream.pause(), resume: () => stream.resume() });
 
 		// Wire the abort signal: destroy the upstream stream when the
 		// signal fires so the resolve-on-end Promise below settles
@@ -1218,10 +1239,10 @@ export class DockerManager {
 		};
 		opts.signal?.addEventListener("abort", abortHandler, { once: true });
 
-		const emit = (text: string) => {
+		const emit = (text: string, source: "stdout" | "stderr") => {
 			if (!onOutput) return;
 			try {
-				onOutput(text);
+				onOutput(text, source);
 			} catch (err) {
 				logger.warn(`[docker] postCreate onOutput threw: ${(err as Error).message}`);
 			}
@@ -1244,7 +1265,7 @@ export class DockerManager {
 		let pgidBuf: string | null = opts.newProcessGroup ? "" : null;
 		const filterStdout = (text: string) => {
 			if (pgidBuf === null) {
-				emit(text);
+				emit(text, "stdout");
 				return;
 			}
 			pgidBuf += text;
@@ -1253,7 +1274,7 @@ export class DockerManager {
 				// Sentinel + space + pid is well under 64 bytes; past
 				// that something upstream isn't the wrapper — flush.
 				if (pgidBuf.length > 256) {
-					emit(pgidBuf);
+					emit(pgidBuf, "stdout");
 					pgidBuf = null;
 				}
 				return;
@@ -1269,9 +1290,9 @@ export class DockerManager {
 					logger.warn(`[docker] onProcessGroup threw: ${(err as Error).message}`);
 				}
 			} else {
-				emit(`${line}\n`);
+				emit(`${line}\n`, "stdout");
 			}
-			if (rest !== "") emit(rest);
+			if (rest !== "") emit(rest, "stdout");
 		};
 
 		// Demux frames as they arrive so `onOutput` fires per-chunk.
@@ -1291,7 +1312,7 @@ export class DockerManager {
 				if (frameType === 1) {
 					filterStdout(payload.toString("utf-8"));
 				} else if (frameType === 2) {
-					emit(payload.toString("utf-8"));
+					emit(payload.toString("utf-8"), "stderr");
 				}
 				off += 8 + size;
 			}
@@ -1317,7 +1338,7 @@ export class DockerManager {
 			// buffer (first stdout line never got its newline) is
 			// command output, not a sentinel — hand it over instead
 			// of dropping it.
-			if (pgidBuf !== null && pgidBuf !== "") emit(pgidBuf);
+			if (pgidBuf !== null && pgidBuf !== "") emit(pgidBuf, "stdout");
 		}
 		// If the signal aborted mid-stream, surface AbortError up to
 		// the caller — don't pretend the exit code is meaningful.
@@ -1914,7 +1935,7 @@ export class DockerManager {
 		tabId: string,
 	): Promise<SharedExec> {
 		const meta = await this.sessions.getOrThrow(sessionId);
-		if (!meta.containerId) throw new Error("No container for this session");
+		if (!meta.containerId) throw new ContainerNotFoundError();
 
 		const container = this.docker.getContainer(meta.containerId);
 		// `new-session -A` attaches if the tmux session exists, creates it
@@ -2151,7 +2172,7 @@ export class DockerManager {
 		opts: { combineStreams?: boolean; cwd?: string } = {},
 	): Promise<{ stdout: string; exitCode: number }> {
 		const meta = await this.sessions.getOrThrow(sessionId);
-		if (!meta.containerId) throw new Error("No container for this session");
+		if (!meta.containerId) throw new ContainerNotFoundError();
 		const container = this.docker.getContainer(meta.containerId);
 
 		const exec = await container.exec({

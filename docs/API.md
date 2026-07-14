@@ -29,6 +29,9 @@ Auth is via the httpOnly cookie `st_token` set by `POST /api/auth/login` and `PO
 | POST   | /api/sessions/:id/tabs        | Create a tab                                                    |
 | DELETE | /api/sessions/:id/tabs/:tabId | Delete a tab                                                    |
 | POST   | /api/sessions/:id/files       | Multipart file upload into the per-session uploads dir          |
+| POST   | /api/sessions/:id/exec        | Run a command, stream NDJSON output ([docs/EXEC_API.md](./EXEC_API.md)) |
+| GET    | /api/sessions/:id/exec/:execId | Exec status: `running` / `exited` / `unknown`                  |
+| POST   | /api/sessions/:id/exec/:execId/kill | Kill the exec's process group (race-free, idempotent)     |
 
 `POST /api/sessions` accepts a typed `body.config` mirroring `SessionConfigSchema` in `backend/src/sessionConfig.ts`: `envVars` (typed entries with `plain` / `secret` discriminator), `repo` + `auth`, `ports[]` + `allowPrivilegedPorts`, `gitIdentity`, `dotfiles`, `agentSeed`, `postCreateCmd`, `postStartCmd`, `cpuLimit`, `memLimit`, `idleTtlSeconds`. Every field is optional; a bare `POST` (no `config`) creates a default session.
 
