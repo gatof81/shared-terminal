@@ -383,6 +383,38 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 		}
 	});
 
+	// GET /quotas (#202 / 202b) — the caller's OWN effective quotas +
+	// current usage, powering the create-form headroom hint. Outside the
+	// /sessions auth prefix, hence the explicit requireAuth (same
+	// rationale as /sessions/:id/files below). Admin sees everyone via
+	// GET /admin/users; this returns only the caller's numbers.
+	router.get("/quotas", requireAuth, async (req: Request, res: Response) => {
+		const { userId } = req as AuthedRequest;
+		try {
+			const effective = resolveEffectiveQuotas(await getUserQuotaRow(userId));
+			const all = await sessions.listForUser(userId);
+			// Mirrors the create-time INSERT guard's predicate for the
+			// count and the budget check's running-only scope.
+			const active = all.filter((s) => s.status !== "terminated" && s.status !== "failed");
+			const current = await computeRunningAllocations(sessions, userId, all);
+			res.json({
+				effective: {
+					maxSessions: effective.maxSessions,
+					maxTotalCpu: effective.maxTotalCpuNanos,
+					maxTotalMem: effective.maxTotalMemBytes,
+				},
+				usage: {
+					activeSessions: active.length,
+					runningSessions: current.runningSessions,
+					cpuNanos: current.cpuNanos,
+					memBytes: current.memBytes,
+				},
+			});
+		} catch (err) {
+			handleSessionError(err, res);
+		}
+	});
+
 	router.get("/sessions", async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
 		const includeTerminated = req.query.all === "true";

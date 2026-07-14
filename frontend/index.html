@@ -717,6 +717,10 @@
                 Bounds: CPU 0.25–8 cores, memory 256 MiB–16 GiB,
                 idle TTL 1 minute–24 hours.
               </p>
+              <!-- #202: account-level headroom (own quotas + usage),
+                   filled async by refreshQuotaHeadroom on modal open.
+                   Advisory only — the backend enforces on create. -->
+              <p class="modal-hint" id="quota-headroom-hint"></p>
               <div class="repo-fields-row">
                 <label class="modal-field">
                   <span>CPU (cores)</span>
@@ -913,6 +917,15 @@
             <h3 class="admin-section-title">Sessions (all users)</h3>
             <div id="admin-sessions-list">
               <p class="modal-hint">Loading sessions…</p>
+            </div>
+          </section>
+          <!-- #202: per-user quotas panel. Overrides + effective values
+               + current usage, with an inline editor per row. Endpoints
+               are requireAdmin-gated server-side. -->
+          <section class="admin-sessions">
+            <h3 class="admin-section-title">Users &amp; quotas</h3>
+            <div id="admin-users-list">
+              <p class="modal-hint">Loading users…</p>
             </div>
           </section>
           <!-- #201e-2: admin Groups CRUD section. List + create + edit
