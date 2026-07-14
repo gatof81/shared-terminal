@@ -653,9 +653,24 @@ export const MIGRATIONS: readonly Migration[] = [
 		version: 12,
 		description: "per-user quota override columns on users (#202)",
 		apply: async () => {
-			await d1Query("ALTER TABLE users ADD COLUMN max_sessions INTEGER");
-			await d1Query("ALTER TABLE users ADD COLUMN max_total_cpu INTEGER");
-			await d1Query("ALTER TABLE users ADD COLUMN max_total_mem INTEGER");
+			// PRAGMA-guarded like v11: the three ALTERs are independent D1
+			// round-trips with no transaction, so a transient between them
+			// leaves the version unrecorded with SOME columns present. An
+			// unguarded re-run would then fail forever on "duplicate
+			// column" — bricking startup until someone hand-repairs the
+			// schema. Skipping the already-present columns makes the
+			// re-run converge instead.
+			const info = await d1Query<{ name: string }>("PRAGMA table_info(users)");
+			const cols = new Set(info.results.map((c) => c.name));
+			if (!cols.has("max_sessions")) {
+				await d1Query("ALTER TABLE users ADD COLUMN max_sessions INTEGER");
+			}
+			if (!cols.has("max_total_cpu")) {
+				await d1Query("ALTER TABLE users ADD COLUMN max_total_cpu INTEGER");
+			}
+			if (!cols.has("max_total_mem")) {
+				await d1Query("ALTER TABLE users ADD COLUMN max_total_mem INTEGER");
+			}
 		},
 	},
 ];

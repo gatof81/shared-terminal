@@ -234,6 +234,34 @@ describe("migrateDb ledger (#349)", () => {
 		).toHaveLength(1);
 	});
 
+	// v12's three ALTERs are separate D1 round-trips; a transient between
+	// them leaves the ledger unrecorded with SOME columns present. The
+	// re-run must skip the existing ones and add only the missing ones —
+	// an unguarded re-run dies on "duplicate column" forever.
+	it("v12 re-run after a partial application adds only the missing columns", async () => {
+		const { migrateDb, MIGRATIONS } = await import("./db.js");
+		const seen = mockFetchBySql((sql) => {
+			if (sql.startsWith("SELECT version FROM schema_migrations")) {
+				// Everything recorded except v12 (the crashed run).
+				return MIGRATIONS.filter((m) => m.version !== 12).map((m) => ({ version: m.version }));
+			}
+			if (sql.startsWith("PRAGMA table_info(users)")) {
+				// The crashed run got the first ALTER in before dying.
+				return [{ name: "id" }, { name: "username" }, { name: "max_sessions" }];
+			}
+			return [];
+		});
+		await migrateDb();
+		const alters = seen.filter((s) => s.startsWith("ALTER TABLE users ADD COLUMN"));
+		expect(alters).toEqual([
+			"ALTER TABLE users ADD COLUMN max_total_cpu INTEGER",
+			"ALTER TABLE users ADD COLUMN max_total_mem INTEGER",
+		]);
+		expect(
+			seen.filter((s) => s.startsWith("INSERT OR IGNORE INTO schema_migrations")),
+		).toHaveLength(1);
+	});
+
 	it("versions are unique and strictly ascending (append-only guard)", async () => {
 		const { MIGRATIONS } = await import("./db.js");
 		const versions = MIGRATIONS.map((m) => m.version);
