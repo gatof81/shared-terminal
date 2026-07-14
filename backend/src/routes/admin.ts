@@ -1,6 +1,7 @@
 import type { Request, Response, Router } from "express";
 import { requireAdmin } from "../auth.js";
 import { invalidateStatsCache } from "../containerStats.js";
+import { parseD1Utc } from "../d1Time.js";
 import { getD1CallsSinceBoot } from "../db.js";
 import type { DockerManager } from "../dockerManager.js";
 import { DEFAULT_MEMORY_BYTES, DEFAULT_NANO_CPUS } from "../dockerManager.js";
@@ -410,7 +411,10 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 						userId: u.id,
 						username: u.username,
 						isAdmin: u.is_admin === 1,
-						createdAt: u.created_at,
+						// parseD1Utc, not the raw column: D1's datetime('now') is
+						// suffix-less SQLite UTC and Node would re-parse it as
+						// LOCAL time on the consumer side (see d1Time.ts).
+						createdAt: parseD1Utc(u.created_at, "users.created_at").toISOString(),
 						quotas: {
 							maxSessions: u.max_sessions,
 							maxTotalCpu: u.max_total_cpu,
