@@ -124,4 +124,31 @@ describe("requestIdMixin (#376)", () => {
 		const out = captureLine((l) => l.child({ requestId: "feedface00000000" }).info("hi"));
 		expect(JSON.parse(out).requestId).toBe("feedface00000000");
 	});
+
+	it("does not emit the key twice when a bound child logs inside a context", () => {
+		// A wsHandler child's setup-time calls run INSIDE the upgrade's
+		// context, so bindings and mixin are both live — pino concatenates
+		// them without dedupe. Assert on the RAW line: JSON.parse silently
+		// collapses duplicate keys, so it can't catch this regression.
+		const out = captureLine((l) =>
+			runWithRequestId("cafe0123deadbeef", () =>
+				l.child({ requestId: "cafe0123deadbeef" }).info("hi"),
+			),
+		);
+		expect(out.match(/"requestId"/g)).toHaveLength(1);
+	});
+
+	it("the bound id wins over a different ambient id", () => {
+		// The child pinned the connection's id at upgrade time; a log call
+		// that happens to run inside some OTHER request's context (e.g. a
+		// broadcaster fan-out triggered by another user's attach) must keep
+		// the connection's id, not inherit the bystander's.
+		const out = captureLine((l) =>
+			runWithRequestId("aaaaaaaaaaaaaaaa", () =>
+				l.child({ requestId: "bbbbbbbbbbbbbbbb" }).info("hi"),
+			),
+		);
+		expect(out.match(/"requestId"/g)).toHaveLength(1);
+		expect(JSON.parse(out).requestId).toBe("bbbbbbbbbbbbbbbb");
+	});
 });
