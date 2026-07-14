@@ -241,10 +241,26 @@ export async function runRestore(inDir: string, opts: { force?: boolean } = {}):
 
 	// Replay in FK order. INSERT OR REPLACE so a --force re-run over a
 	// partially-restored target converges instead of dying on PK dupes.
+	//
+	// Column names come from the DUMP (Object.keys of parsed JSONL) and
+	// are interpolated into the SQL — values ride parameters, names
+	// can't. The same tampered-backup adversary the tarball allowlist
+	// defends against could otherwise smuggle SQL through a key like
+	// `id) SELECT ... --`, firing at the INSERT layer AFTER both the
+	// --force and key guards have passed. Every legitimate column in
+	// this schema is \w+; anything else in a dump is malformed, full stop.
+	const SAFE_COL = /^\w+$/;
 	for (const t of TABLES) {
 		const rows = await readJsonl(inDir, t.name);
 		for (const row of rows) {
 			const cols = Object.keys(row);
+			for (const col of cols) {
+				if (!SAFE_COL.test(col)) {
+					throw new Error(
+						`unsafe column name in backup JSONL for ${t.name}: ${JSON.stringify(col)} — refusing`,
+					);
+				}
+			}
 			const placeholders = cols.map(() => "?").join(", ");
 			await d1Query(
 				`INSERT OR REPLACE INTO ${t.name} (${cols.join(", ")}) VALUES (${placeholders})`,

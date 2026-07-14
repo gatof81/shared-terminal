@@ -226,6 +226,20 @@ describe("runRestore", () => {
 		expect(dbState.inserts.length).toBeGreaterThan(0);
 	});
 
+	it("rejects a tampered JSONL row whose column name smuggles SQL", async () => {
+		await makeBackup();
+		// Values are parameterized; column NAMES are interpolated — a key
+		// like this would otherwise become `INSERT INTO users (id) SELECT
+		// ... --) VALUES (?)`, valid SQLite that fires after both the
+		// --force and key guards have passed.
+		await fs.writeFile(
+			path.join(outDir, "users.jsonl"),
+			`${JSON.stringify({ "id) SELECT password_hash FROM users--": "x" })}\n`,
+		);
+		await expect(runRestore(outDir)).rejects.toThrow(/unsafe column name/);
+		expect(dbState.inserts).toHaveLength(0);
+	});
+
 	it("rejects a tampered workspace tarball with out-of-scope paths", async () => {
 		await makeBackup();
 		// Craft a tarball whose entries escape the sid prefix.
