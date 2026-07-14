@@ -17,6 +17,7 @@
 import type { Request, Response, Router } from "express";
 import { z } from "zod";
 import type { AuthedRequest } from "../auth.js";
+import { ContainerNotFoundError } from "../dockerManager.js";
 import { EnvVarValidationError, validateEnvVars } from "../envVarValidation.js";
 import type { ExecRegistry } from "../execRegistry.js";
 import { logger } from "../logger.js";
@@ -157,10 +158,13 @@ export function registerExecRoutes(router: Router, ctx: RouteContext): void {
 				const line = `${JSON.stringify({ v: 1, type: "output", stream: source, data: chunk })}\n`;
 				if (!startedSent) {
 					// Contract: `started` precedes any output event, but early
-					// stderr can beat the stdout pgid sentinel — hold it.
-					if (preStartBytes + line.length <= PRESTART_BUF_MAX_BYTES) {
+					// stderr can beat the stdout pgid sentinel — hold it. The
+					// cap counts UTF-8 bytes (not UTF-16 code units) so the
+					// documented 256 KiB bound holds for non-ASCII output too.
+					const lineBytes = Buffer.byteLength(line, "utf-8");
+					if (preStartBytes + lineBytes <= PRESTART_BUF_MAX_BYTES) {
 						preStart.push(line);
-						preStartBytes += line.length;
+						preStartBytes += lineBytes;
 					} else {
 						// Past the cap the bytes are gone — but never silently:
 						// a gap the consumer can't tell from "the process wrote
@@ -267,7 +271,7 @@ export function registerExecRoutes(router: Router, ctx: RouteContext): void {
 					// arrive as a terminal `error` event.
 					writeEvent({ v: 1, type: "error", code: "exec-failed", message: (err as Error).message });
 					res.end();
-				} else if ((err as Error).message === "No container for this session") {
+				} else if (err instanceof ContainerNotFoundError) {
 					// Session flipped to stopped between the meta check and
 					// the exec — same 409 the pre-check would have returned.
 					res.status(409).json({ error: "container-not-running" });

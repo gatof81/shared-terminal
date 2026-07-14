@@ -83,6 +83,20 @@ const UPLOAD_QUOTA_BYTES = (() => {
 	return Number.isFinite(n) && n > 0 ? n : 1024 * 1024 * 1024;
 })();
 
+/**
+ * Thrown when an operation needs a live container but the session's
+ * `container_id` is null (stopped / torn down between the caller's
+ * pre-check and the docker call). Typed so route-layer TOCTOU handlers
+ * can `instanceof`-match instead of string-matching the message — a
+ * reworded message must not silently degrade a 409 into a 500.
+ */
+export class ContainerNotFoundError extends Error {
+	constructor() {
+		super("No container for this session");
+		this.name = "ContainerNotFoundError";
+	}
+}
+
 export class UploadQuotaExceededError extends Error {
 	readonly quota: number;
 	readonly used: number;
@@ -1183,7 +1197,7 @@ export class DockerManager {
 		}
 
 		const meta = await this.sessions.getOrThrow(sessionId);
-		if (!meta.containerId) throw new Error("No container for this session");
+		if (!meta.containerId) throw new ContainerNotFoundError();
 		const container = this.docker.getContainer(meta.containerId);
 
 		// `setsid` makes the wrapper the leader of a fresh session AND
@@ -1921,7 +1935,7 @@ export class DockerManager {
 		tabId: string,
 	): Promise<SharedExec> {
 		const meta = await this.sessions.getOrThrow(sessionId);
-		if (!meta.containerId) throw new Error("No container for this session");
+		if (!meta.containerId) throw new ContainerNotFoundError();
 
 		const container = this.docker.getContainer(meta.containerId);
 		// `new-session -A` attaches if the tmux session exists, creates it
@@ -2158,7 +2172,7 @@ export class DockerManager {
 		opts: { combineStreams?: boolean; cwd?: string } = {},
 	): Promise<{ stdout: string; exitCode: number }> {
 		const meta = await this.sessions.getOrThrow(sessionId);
-		if (!meta.containerId) throw new Error("No container for this session");
+		if (!meta.containerId) throw new ContainerNotFoundError();
 		const container = this.docker.getContainer(meta.containerId);
 
 		const exec = await container.exec({
