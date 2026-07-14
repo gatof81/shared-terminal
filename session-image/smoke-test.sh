@@ -42,17 +42,19 @@ C2="st-smoke-b-$SUFFIX"
 C3="st-smoke-c-$SUFFIX"
 C4="st-smoke-d-$SUFFIX"
 C5="st-smoke-e-$SUFFIX"
+C6="st-smoke-f-$SUFFIX"
 WS="$(mktemp -d)"
 WS2="$(mktemp -d)"
 WS3="$(mktemp -d)"
+WS4="$(mktemp -d)"
 FAILS=0
 
 cleanup() {
-	docker rm -f "$C1" "$C2" "$C3" "$C4" "$C5" >/dev/null 2>&1
+	docker rm -f "$C1" "$C2" "$C3" "$C4" "$C5" "$C6" >/dev/null 2>&1
 	# The workspace contents are uid-1000-owned (written from inside the
 	# containers), so the host user usually can't delete them directly —
 	# empty each dir from a throwaway container first, then drop the shell.
-	for ws in "$WS" "$WS2" "$WS3"; do
+	for ws in "$WS" "$WS2" "$WS3" "$WS4"; do
 		docker run --rm -v "$ws":/ws --entrypoint bash "$IMAGE" \
 			-c 'rm -rf /ws/* /ws/.[!.]* 2>/dev/null; true' >/dev/null 2>&1
 		rm -rf "$ws" 2>/dev/null
@@ -82,7 +84,7 @@ wait_ready() {
 
 # The backend chowns each workspace to WORKSPACE_UID (1000); the test host's
 # runner user usually isn't 1000, so open the dirs up instead.
-chmod 777 "$WS" "$WS2" "$WS3"
+chmod 777 "$WS" "$WS2" "$WS3" "$WS4"
 
 # ── Phase 1: fresh boot, entrypoint clean ────────────────────────────────────
 phase "Phase 1: fresh boot"
@@ -270,6 +272,47 @@ if docker exec "$C5" bash -c '[ ! -e /home/developer/workspace/.claude ] && [ ! 
 else
 	fail "legacy workspace/.claude{,.json} still present after migration"
 fi
+
+# ── Phase 9: orphaned zombies are reaped under Init (exec-API follow-up) ─────
+phase "Phase 9: zombie reaping with --init"
+# The recipe: a setsid'd bash backgrounds two short sleeps, then execs a
+# longer sleep. The short sleeps die with no one wait()ing (exec replaced
+# their parent's image), and when the long sleep exits the whole set
+# reparents to PID 1.
+#
+# Leg A runs it against the RAW image, where PID 1 is the entrypoint's
+# `tail -f /dev/null` — which never reaps — and asserts zombies DO leak.
+# This leg exists to keep leg B honest: if a future entrypoint/image
+# change makes the recipe stop producing zombies, leg A fails loudly
+# instead of leg B passing vacuously.
+docker run -d --name "$C6" -v "$WS4":/home/developer/workspace "$IMAGE" >/dev/null
+wait_ready "$C6" || exit 1
+docker exec "$C6" bash -c 'setsid -w bash -c "sleep 0.2 & sleep 0.2 & exec sleep 1" >/dev/null 2>&1 &'
+sleep 3
+Z=$(docker exec "$C6" bash -c 'ps -eo stat= | grep -c "^Z"' || true)
+if [ "${Z:-0}" -ge 1 ]; then
+	ok "raw image leaks $Z zombie(s) — repro recipe is valid"
+else
+	fail "repro recipe produced no zombies on the raw image; leg B would be vacuous"
+fi
+docker rm -f "$C6" >/dev/null 2>&1
+
+# Leg B: identical recipe under --init — the CLI equivalent of the
+# HostConfig.Init the backend sets in DockerManager.spawn(). docker-init
+# is PID 1 and must reap the orphans, or every exec-API group kill
+# leaks a PidsLimit slot for the container's lifetime.
+docker run -d --init --name "$C6" -v "$WS4":/home/developer/workspace "$IMAGE" >/dev/null
+wait_ready "$C6" || exit 1
+docker exec "$C6" bash -c 'setsid -w bash -c "sleep 0.2 & sleep 0.2 & exec sleep 1" >/dev/null 2>&1 &'
+sleep 3
+Z=$(docker exec "$C6" bash -c 'ps -eo stat= | grep -c "^Z"' || true)
+if [ "${Z:-0}" -eq 0 ]; then
+	ok "--init reaps orphaned zombies (Z=0)"
+else
+	fail "--init left ${Z} zombie(s) unreaped"
+fi
+PID1=$(docker exec "$C6" ps -o comm= -p 1)
+[ "$PID1" = "docker-init" ] && ok "PID 1 is docker-init" || fail "PID 1 is '$PID1' (want docker-init)"
 
 echo
 if [ "$FAILS" -eq 0 ]; then
