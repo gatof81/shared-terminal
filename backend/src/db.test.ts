@@ -188,6 +188,8 @@ describe("migrateDb ledger (#349)", () => {
 
 	it("applies only the pending suffix when partially recorded", async () => {
 		const { MIGRATIONS, migrateDb } = await import("./db.js");
+		const last = MIGRATIONS[MIGRATIONS.length - 1]!;
+		const lastApplied = vi.spyOn(last, "apply");
 		const seen = mockFetchBySql((sql) => {
 			if (sql.startsWith("SELECT version FROM schema_migrations")) {
 				// Everything applied except the last migration.
@@ -199,9 +201,10 @@ describe("migrateDb ledger (#349)", () => {
 		await migrateDb();
 		const recorded = seen.filter((s) => s.startsWith("INSERT OR IGNORE INTO schema_migrations"));
 		expect(recorded).toHaveLength(1);
-		// The one recorded insert is for the pending (last) version — the
-		// PRAGMA probe proves v11's apply() ran rather than being skipped.
-		expect(seen.some((s) => s.startsWith("PRAGMA table_info"))).toBe(true);
+		// The one recorded insert is for the pending (last) version, whose
+		// apply() actually ran rather than being skipped.
+		expect(lastApplied).toHaveBeenCalledTimes(1);
+		lastApplied.mockRestore();
 		// And no earlier migration re-ran.
 		expect(seen.some((s) => s.includes("CREATE TABLE IF NOT EXISTS users"))).toBe(false);
 	});
@@ -213,8 +216,10 @@ describe("migrateDb ledger (#349)", () => {
 		const seen = mockFetchBySql((sql) => {
 			if (sql.startsWith("SELECT version FROM schema_migrations")) {
 				// Everything recorded except v11 — the crashed run's ledger
-				// INSERT never fired.
-				return MIGRATIONS.slice(0, -1).map((m) => ({ version: m.version }));
+				// INSERT never fired. Filter by version (not "all but the
+				// last") so appending future migrations can't silently
+				// repoint this test at a different migration's apply().
+				return MIGRATIONS.filter((m) => m.version !== 11).map((m) => ({ version: m.version }));
 			}
 			// Table gone: PRAGMA on a missing table returns zero rows.
 			if (sql.startsWith("PRAGMA table_info(invite_codes)")) return [];

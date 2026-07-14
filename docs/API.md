@@ -64,6 +64,8 @@ Cross-user observability + force-actions surfaced to the admin dashboard. All ro
 | POST   | /api/admin/sessions/:id/stop    | Force-stop any session (no ownership gate). Returns 204                                      |
 | DELETE | /api/admin/sessions/:id         | Force soft-delete any session                                                                |
 | DELETE | /api/admin/sessions/:id?hard=true | Force hard-delete (also purges workspace + drops the D1 row)                               |
+| GET    | /api/admin/users                | Users list with quota overrides, effective quotas, and current usage (#202)                  |
+| PATCH  | /api/admin/users/:id/quotas     | Set per-user quota overrides; `null` clears back to the deployment default (#202)            |
 
 ## WebSocket
 

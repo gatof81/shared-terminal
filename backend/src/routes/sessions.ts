@@ -31,6 +31,14 @@ import {
 import type { SessionManager } from "../sessionManager.js";
 import { SessionQuotaExceededError } from "../sessionManager.js";
 import {
+	assertBudgetAllows,
+	computeRunningAllocations,
+	effectiveSessionAllocation,
+	getUserQuotaRow,
+	resolveEffectiveQuotas,
+	UserQuotaExceededError,
+} from "../userQuotas.js";
+import {
 	handleSessionError,
 	type RouteContext,
 	serializeMeta,
@@ -140,6 +148,41 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			}
 			throw err;
 		}
+		// #202 — per-user quotas. The CPU/RAM budget check runs here
+		// (read-then-insert; racy under concurrent creates by the same
+		// user, accepted for v1 — see userQuotas.ts header). The session-
+		// COUNT cap stays atomic inside sessions.create's INSERT guard;
+		// this block only resolves the per-user override to fold into it.
+		// Budget math uses the same clamp formula spawn() applies, so a
+		// stored 8-core cap on a 4-core-max deployment burns 4, not 8.
+		//
+		// D1 transients fail OPEN (warn + deployment defaults, budgets
+		// unenforced for this one request): gating every create on the
+		// quota read would turn a D1 blip into a create outage, and the
+		// count cap still holds — its check lives inside the INSERT
+		// itself. Same availability-over-correctness call as
+		// loadConfigForSpawn.
+		let effectiveMaxSessions: number | undefined;
+		try {
+			const quotas = resolveEffectiveQuotas(await getUserQuotaRow(userId));
+			effectiveMaxSessions = quotas.maxSessions;
+			if (quotas.maxTotalCpuNanos !== null || quotas.maxTotalMemBytes !== null) {
+				const current = await computeRunningAllocations(sessions, userId);
+				const requested = effectiveSessionAllocation({
+					cpuLimit: validatedConfig?.cpuLimit ?? null,
+					memLimit: validatedConfig?.memLimit ?? null,
+				});
+				assertBudgetAllows(quotas, current, requested);
+			}
+		} catch (err) {
+			if (err instanceof UserQuotaExceededError) {
+				res.status(429).json({ error: err.message, cap: err.cap });
+				return;
+			}
+			logger.warn(
+				`[routes] quota check failed for user ${userId}, proceeding with defaults: ${(err as Error).message}`,
+			);
+		}
 		// `sessions.create` writes a D1 row BEFORE `docker.spawn` runs, so a
 		// spawn failure (missing image, docker daemon down, name collision on
 		// the 12-char container-name prefix, workspace chown EACCES) would
@@ -155,6 +198,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				cols,
 				rows,
 				envVars: validatedEnvVars,
+				maxActiveSessions: effectiveMaxSessions,
 			});
 			// Persist the typed config BEFORE spawning the container. If
 			// docker.spawn fails the rollback in the catch below deletes

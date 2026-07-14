@@ -643,6 +643,21 @@ export const MIGRATIONS: readonly Migration[] = [
 			);
 		},
 	},
+	{
+		// #202 — per-user quota overrides. NULL means "use the deployment
+		// default" (MAX_ACTIVE_SESSIONS_PER_USER for the count; the
+		// USER_MAX_TOTAL_CPU / USER_MAX_TOTAL_MEM env vars for the
+		// budgets, unlimited when those are unset). Units mirror the
+		// session_configs columns: nano-CPUs and bytes, so the admin
+		// PATCH and the create-time check never unit-convert.
+		version: 12,
+		description: "per-user quota override columns on users (#202)",
+		apply: async () => {
+			await d1Query("ALTER TABLE users ADD COLUMN max_sessions INTEGER");
+			await d1Query("ALTER TABLE users ADD COLUMN max_total_cpu INTEGER");
+			await d1Query("ALTER TABLE users ADD COLUMN max_total_mem INTEGER");
+		},
+	},
 ];
 
 /**
