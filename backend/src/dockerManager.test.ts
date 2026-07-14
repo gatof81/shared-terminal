@@ -1759,6 +1759,11 @@ describe("DockerManager.streamExec newProcessGroup", () => {
 		// risks reintroducing shell interpolation of caller input.
 		expect(exec._cmd).toEqual([
 			"setsid",
+			// -w: without it a forked setsid parent exits 0 immediately and
+			// Docker records THAT as the exec's ExitCode — every
+			// newProcessGroup exec would report success regardless of the
+			// command's real status.
+			"-w",
 			"bash",
 			"-c",
 			PGID_WRAPPER_SCRIPT,

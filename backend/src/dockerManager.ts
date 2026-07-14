@@ -1208,8 +1208,19 @@ export class DockerManager {
 		// positional parameters ("$@" after the `st-exec` $0 slot), never
 		// through string interpolation — same no-shell-meta property the
 		// clone runner (#188) relies on this method for.
+		//
+		// `-w` is load-bearing for the exit code: when docker exec's
+		// process is already a group leader, setsid(1) must fork — and
+		// without -w the PARENT exits 0 immediately, which is the status
+		// Docker records as the exec's ExitCode. Every newProcessGroup
+		// exec then reports exitCode 0 regardless of what the command
+		// returned (found live: `bash -c "exit 7"` streamed back
+		// `exitCode: 0`). With -w setsid waits and re-exports the
+		// child's status; a group-kill lands as the conventional
+		// 128+signal. Output was never affected either way — the child
+		// holds the pipe until it exits.
 		const cmd = opts.newProcessGroup
-			? ["setsid", "bash", "-c", PGID_WRAPPER_SCRIPT, "st-exec", ...opts.cmd]
+			? ["setsid", "-w", "bash", "-c", PGID_WRAPPER_SCRIPT, "st-exec", ...opts.cmd]
 			: opts.cmd;
 
 		// Build the exec directly rather than going through `execOneShot`
