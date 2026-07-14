@@ -295,3 +295,46 @@ Each session runs in a Docker container based on `session-image/Dockerfile`:
 - **User:** `developer` (UID 1000, unprivileged — no sudo, all Linux capabilities dropped, `no-new-privileges` set)
 - **Workspace:** `/home/developer/workspace` (bind-mounted from `<WORKSPACE_ROOT>/<sessionId>` on the host)
 - **Resources:** Per-session caps come from `session_configs` (`cpu_limit` 0.25–8 cores, `mem_limit` 256 MiB–16 GiB, `idle_ttl_seconds` 60s–24h). Sessions created without explicit caps fall back to the `DEFAULT_NANO_CPUS` (2 cores) / `DEFAULT_MEMORY_BYTES` (2 GiB) constants in `dockerManager.ts`. Idle auto-stop is opt-in (omit `idleTtlSeconds` to disable).
+
+## Backup & restore (#240)
+
+Operator-level, host-shell only (deliberately not API surface — a dump
+carries every credential hash and secret ciphertext). Both run inside the
+backend container so they see the same env (D1 credentials,
+`WORKSPACE_ROOT`, `SECRETS_ENCRYPTION_KEY`) the server runs with:
+
+```bash
+# Backup → <WORKSPACE_ROOT>/.backups/<timestamp>/ (default), or name a dir:
+docker compose exec app npm run backup
+docker compose exec app npm run backup -- /var/shared-terminal/workspaces/.backups/pre-migration
+
+# Restore into the CURRENT env's D1 + WORKSPACE_ROOT:
+docker compose exec app npm run restore -- <backupDir>
+docker compose exec app npm run restore -- <backupDir> --force   # non-empty target
+```
+
+A backup dir holds one `<table>.jsonl` per table (deterministic order —
+two backups of identical data are diffable), `workspaces/<sid>.tar.gz`
+(workspace + uploads dir, gzip because the image already ships it), and
+`manifest.json` written last — restore refuses a dir without it, so an
+interrupted backup can't be replayed by accident.
+
+Restore guards:
+
+- **Non-empty target** (any `users`/`sessions` rows) refuses without
+  `--force`. Replays use `INSERT OR REPLACE`, so a `--force` re-run over a
+  partial restore converges.
+- **`SECRETS_ENCRYPTION_KEY` mismatch aborts before any write** and has
+  NO `--force` override — a wrong key silently corrupts every secret with
+  no rotation path (see docs/SECRETS_ENCRYPTION_KEY.md). The check is one
+  decrypt round-trip on a sample blob from the dump; the key must travel
+  to the destination separately from the backup itself.
+- Workspace tarballs are entry-checked before extraction (paths must stay
+  under `<sid>/` or `.uploads/<sid>/` — no traversal).
+
+Previously-`running` sessions land as `stopped` with a NULL container id
+— the destination host has none of the source's containers, matching what
+`reconcile()` would conclude. Start them from the UI after restore.
+Running sessions are not quiesced during backup; for a coherent snapshot
+of an active deployment, stop sessions first (workspaces of stopped
+sessions are always consistent).
