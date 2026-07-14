@@ -32,6 +32,11 @@ export interface CreateSessionOpts {
 	cols?: number;
 	rows?: number;
 	envVars?: Record<string, string>;
+	/** #202 — per-user override of the active-session cap folded into the
+	 *  atomic INSERT guard. Omitted → the deployment-wide
+	 *  MAX_ACTIVE_SESSIONS_PER_USER. The route resolves it from the
+	 *  users row so the manager stays ignorant of quota policy. */
+	maxActiveSessions?: number;
 }
 
 // ── Auth ────────────────────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 import type { Request, Response, Router } from "express";
 import { requireAdmin } from "../auth.js";
 import { invalidateStatsCache } from "../containerStats.js";
+import { parseD1Utc } from "../d1Time.js";
 import { getD1CallsSinceBoot } from "../db.js";
 import type { DockerManager } from "../dockerManager.js";
 import { DEFAULT_MEMORY_BYTES, DEFAULT_NANO_CPUS } from "../dockerManager.js";
@@ -17,6 +18,13 @@ import {
 	updateResourceLimits,
 } from "../sessionConfig.js";
 import type { SessionManager } from "../sessionManager.js";
+import {
+	effectiveSessionAllocation,
+	listUsersWithQuotas,
+	resolveEffectiveQuotas,
+	UserQuotasPatchSchema,
+	updateUserQuotas,
+} from "../userQuotas.js";
 import { type RouteContext, r1, serializeMeta, serializeUsage } from "./shared.js";
 
 export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
@@ -352,6 +360,122 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 				res.json(list.map(serializeAdminObserveLogEntry));
 			} catch (err) {
 				logger.error(`[admin] observe-log list failed: ${(err as Error).message}`);
+				res.status(500).json({ error: "Internal server error" });
+			}
+		},
+	);
+
+	// ── Per-user quotas (#202) ───────────────────────────────────────────────
+
+	// GET /admin/users — the users panel's data source: raw overrides
+	// (null = deployment default), the resolved effective quotas, and
+	// current usage so the operator can see headroom at a glance. Three
+	// D1 reads total regardless of user count (users list + cross-user
+	// session list + one batched caps read) — same no-N+1 posture as
+	// the admin sessions list.
+	router.get("/admin/users", adminStatsIp, requireAdmin, async (_req: Request, res: Response) => {
+		try {
+			const [users, allSessions] = await Promise.all([listUsersWithQuotas(), sessions.listAll()]);
+			const runningIds = allSessions.filter((s) => s.status === "running").map((s) => s.sessionId);
+			const caps = runningIds.length > 0 ? await listResourceCaps(runningIds) : new Map();
+			const byUser = new Map<
+				string,
+				{ active: number; running: number; cpuNanos: number; memBytes: number }
+			>();
+			for (const s of allSessions) {
+				const agg = byUser.get(s.userId) ?? { active: 0, running: 0, cpuNanos: 0, memBytes: 0 };
+				// `active` mirrors the create-time INSERT guard's predicate
+				// (terminated/failed don't hold a slot); the budget axes
+				// count RUNNING sessions only, like the create-time check.
+				if (s.status !== "terminated" && s.status !== "failed") agg.active++;
+				if (s.status === "running") {
+					const alloc = effectiveSessionAllocation(
+						caps.get(s.sessionId) ?? { cpuLimit: null, memLimit: null },
+					);
+					agg.running++;
+					agg.cpuNanos += alloc.cpuNanos;
+					agg.memBytes += alloc.memBytes;
+				}
+				byUser.set(s.userId, agg);
+			}
+			res.json(
+				users.map((u) => {
+					const quotas = {
+						max_sessions: u.max_sessions,
+						max_total_cpu: u.max_total_cpu,
+						max_total_mem: u.max_total_mem,
+					};
+					const effective = resolveEffectiveQuotas(quotas);
+					const usage = byUser.get(u.id) ?? { active: 0, running: 0, cpuNanos: 0, memBytes: 0 };
+					return {
+						userId: u.id,
+						username: u.username,
+						isAdmin: u.is_admin === 1,
+						// parseD1Utc, not the raw column: D1's datetime('now') is
+						// suffix-less SQLite UTC and Node would re-parse it as
+						// LOCAL time on the consumer side (see d1Time.ts).
+						createdAt: parseD1Utc(u.created_at, "users.created_at").toISOString(),
+						quotas: {
+							maxSessions: u.max_sessions,
+							maxTotalCpu: u.max_total_cpu,
+							maxTotalMem: u.max_total_mem,
+						},
+						effective: {
+							maxSessions: effective.maxSessions,
+							maxTotalCpu: effective.maxTotalCpuNanos,
+							maxTotalMem: effective.maxTotalMemBytes,
+						},
+						usage: {
+							activeSessions: usage.active,
+							runningSessions: usage.running,
+							cpuNanos: usage.cpuNanos,
+							memBytes: usage.memBytes,
+						},
+					};
+				}),
+			);
+		} catch (err) {
+			logger.error(`[admin] users list failed: ${(err as Error).message}`);
+			res.status(500).json({ error: "Internal server error" });
+		}
+	});
+
+	// PATCH /admin/users/:id/quotas — mirrors PATCH /admin/sessions/:id/
+	// resources: at least one field, bounds enforced by the schema,
+	// `null` clears the override back to the deployment default. Pure
+	// D1 write — quotas are evaluated at create time, so there is no
+	// running container to poke. 204 because the dashboard re-fetches
+	// the users list after every action anyway.
+	router.patch(
+		"/admin/users/:id/quotas",
+		adminActionIp,
+		requireAdmin,
+		async (req: Request, res: Response) => {
+			try {
+				const parsed = UserQuotasPatchSchema.safeParse(req.body);
+				if (!parsed.success) {
+					res.status(400).json({ error: parsed.error.issues[0]?.message ?? "invalid body" });
+					return;
+				}
+				const patch = parsed.data;
+				if (
+					patch.maxSessions === undefined &&
+					patch.maxTotalCpu === undefined &&
+					patch.maxTotalMem === undefined
+				) {
+					res.status(400).json({
+						error: "at least one of maxSessions / maxTotalCpu / maxTotalMem is required",
+					});
+					return;
+				}
+				const updated = await updateUserQuotas(req.params.id, patch);
+				if (!updated) {
+					res.status(404).json({ error: "User not found" });
+					return;
+				}
+				res.status(204).send();
+			} catch (err) {
+				logger.error(`[admin] user quotas patch failed: ${(err as Error).message}`);
 				res.status(500).json({ error: "Internal server error" });
 			}
 		},

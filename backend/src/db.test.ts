@@ -188,6 +188,8 @@ describe("migrateDb ledger (#349)", () => {
 
 	it("applies only the pending suffix when partially recorded", async () => {
 		const { MIGRATIONS, migrateDb } = await import("./db.js");
+		const last = MIGRATIONS[MIGRATIONS.length - 1]!;
+		const lastApplied = vi.spyOn(last, "apply");
 		const seen = mockFetchBySql((sql) => {
 			if (sql.startsWith("SELECT version FROM schema_migrations")) {
 				// Everything applied except the last migration.
@@ -199,9 +201,10 @@ describe("migrateDb ledger (#349)", () => {
 		await migrateDb();
 		const recorded = seen.filter((s) => s.startsWith("INSERT OR IGNORE INTO schema_migrations"));
 		expect(recorded).toHaveLength(1);
-		// The one recorded insert is for the pending (last) version — the
-		// PRAGMA probe proves v11's apply() ran rather than being skipped.
-		expect(seen.some((s) => s.startsWith("PRAGMA table_info"))).toBe(true);
+		// The one recorded insert is for the pending (last) version, whose
+		// apply() actually ran rather than being skipped.
+		expect(lastApplied).toHaveBeenCalledTimes(1);
+		lastApplied.mockRestore();
 		// And no earlier migration re-ran.
 		expect(seen.some((s) => s.includes("CREATE TABLE IF NOT EXISTS users"))).toBe(false);
 	});
@@ -213,8 +216,10 @@ describe("migrateDb ledger (#349)", () => {
 		const seen = mockFetchBySql((sql) => {
 			if (sql.startsWith("SELECT version FROM schema_migrations")) {
 				// Everything recorded except v11 — the crashed run's ledger
-				// INSERT never fired.
-				return MIGRATIONS.slice(0, -1).map((m) => ({ version: m.version }));
+				// INSERT never fired. Filter by version (not "all but the
+				// last") so appending future migrations can't silently
+				// repoint this test at a different migration's apply().
+				return MIGRATIONS.filter((m) => m.version !== 11).map((m) => ({ version: m.version }));
 			}
 			// Table gone: PRAGMA on a missing table returns zero rows.
 			if (sql.startsWith("PRAGMA table_info(invite_codes)")) return [];
@@ -224,6 +229,34 @@ describe("migrateDb ledger (#349)", () => {
 		expect(seen.some((s) => /CREATE TABLE invite_codes/.test(s))).toBe(true);
 		// And no COUNT probe — there is no table to count.
 		expect(seen.some((s) => s.includes("SELECT COUNT(*) AS n FROM invite_codes"))).toBe(false);
+		expect(
+			seen.filter((s) => s.startsWith("INSERT OR IGNORE INTO schema_migrations")),
+		).toHaveLength(1);
+	});
+
+	// v12's three ALTERs are separate D1 round-trips; a transient between
+	// them leaves the ledger unrecorded with SOME columns present. The
+	// re-run must skip the existing ones and add only the missing ones —
+	// an unguarded re-run dies on "duplicate column" forever.
+	it("v12 re-run after a partial application adds only the missing columns", async () => {
+		const { migrateDb, MIGRATIONS } = await import("./db.js");
+		const seen = mockFetchBySql((sql) => {
+			if (sql.startsWith("SELECT version FROM schema_migrations")) {
+				// Everything recorded except v12 (the crashed run).
+				return MIGRATIONS.filter((m) => m.version !== 12).map((m) => ({ version: m.version }));
+			}
+			if (sql.startsWith("PRAGMA table_info(users)")) {
+				// The crashed run got the first ALTER in before dying.
+				return [{ name: "id" }, { name: "username" }, { name: "max_sessions" }];
+			}
+			return [];
+		});
+		await migrateDb();
+		const alters = seen.filter((s) => s.startsWith("ALTER TABLE users ADD COLUMN"));
+		expect(alters).toEqual([
+			"ALTER TABLE users ADD COLUMN max_total_cpu INTEGER",
+			"ALTER TABLE users ADD COLUMN max_total_mem INTEGER",
+		]);
 		expect(
 			seen.filter((s) => s.startsWith("INSERT OR IGNORE INTO schema_migrations")),
 		).toHaveLength(1);

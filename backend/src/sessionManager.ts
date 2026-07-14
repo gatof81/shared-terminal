@@ -55,7 +55,9 @@ export class ForbiddenError extends Error {
 // with a trailing non-ASCII character would ship the wrong cap with no
 // ops-visible signal.
 const DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER = 20;
-const MAX_ACTIVE_SESSIONS_PER_USER = ((): number => {
+// Exported for #202: userQuotas.ts resolves a user's effective session
+// cap as `users.max_sessions ?? this deployment default`.
+export const MAX_ACTIVE_SESSIONS_PER_USER = ((): number => {
 	const raw = process.env.MAX_ACTIVE_SESSIONS_PER_USER;
 	if (raw === undefined || raw.trim() === "") return DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER;
 	const n = Number(raw);
@@ -225,11 +227,11 @@ export class SessionManager {
 				rows,
 				JSON.stringify(envVars),
 				opts.userId,
-				MAX_ACTIVE_SESSIONS_PER_USER,
+				opts.maxActiveSessions ?? MAX_ACTIVE_SESSIONS_PER_USER,
 			],
 		);
 		if (insert.meta.changes !== 1) {
-			throw new SessionQuotaExceededError(MAX_ACTIVE_SESSIONS_PER_USER);
+			throw new SessionQuotaExceededError(opts.maxActiveSessions ?? MAX_ACTIVE_SESSIONS_PER_USER);
 		}
 
 		const meta = await this.get(sessionId);
