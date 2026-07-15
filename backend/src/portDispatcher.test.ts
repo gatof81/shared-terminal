@@ -7,6 +7,7 @@ import {
 	extractAuthToken,
 	getDispatcherStats,
 	handleProxyError,
+	isSameOriginRequest,
 	makeHostParser,
 	type ParsedHost,
 	validatePortProxyBaseDomain,
@@ -228,6 +229,39 @@ function makeReq(
 		url: "/",
 	} as unknown as IncomingMessage;
 }
+
+// ── Same-origin check (#391) ─────────────────────────────────────────────
+
+describe("isSameOriginRequest", () => {
+	const host = `p3000-${SID}.tunnel.example.com`;
+
+	it("matches when the Origin host equals the request Host", () => {
+		expect(isSameOriginRequest(`https://${host}`, host)).toBe(true);
+	});
+
+	it("is case-insensitive and strips :port from both sides", () => {
+		expect(isSameOriginRequest(`https://${host.toUpperCase()}`, `${host}:443`)).toBe(true);
+	});
+
+	it("rejects a different host (evil.com and sibling port subdomains)", () => {
+		expect(isSameOriginRequest("https://evil.com", host)).toBe(false);
+		expect(
+			isSameOriginRequest(
+				`https://p4000-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee.tunnel.example.com`,
+				host,
+			),
+		).toBe(false);
+	});
+
+	it("rejects missing / malformed / opaque Origins", () => {
+		expect(isSameOriginRequest(undefined, host)).toBe(false);
+		// `Origin: null` (sandboxed iframe, some redirects) is an opaque
+		// origin, not the page's own host — must fall to the allowlist.
+		expect(isSameOriginRequest("null", host)).toBe(false);
+		expect(isSameOriginRequest("not a url", host)).toBe(false);
+		expect(isSameOriginRequest(`https://${host}`, undefined)).toBe(false);
+	});
+});
 
 describe("createPortDispatcher (HTTP middleware)", () => {
 	it("falls through (calls next) when baseDomain is null", () => {
@@ -496,6 +530,78 @@ describe("createPortDispatcher (HTTP middleware)", () => {
 		expect(webSpy).toHaveBeenCalledTimes(1);
 	});
 
+	// #391 — a page the dispatcher serves necessarily has the dynamic
+	// `p<port>-<sid>.<base>` hostname as its own origin, which can never
+	// be enumerated in CORS_ORIGINS. Vite builds emit `crossorigin`
+	// module scripts, and every same-origin fetch POST carries this
+	// Origin — without the same-origin short-circuit, private ports
+	// blank-page any built SPA.
+	it("allows an HTTP request whose Origin is the dispatcher host itself (#391)", async () => {
+		const { middleware, webSpy } = makeDispatcherWith({
+			target: { containerName: "st-sess", isPublic: false, ownerUserId: "u-owner" },
+			token: "u-owner",
+		});
+		const res = makeRes();
+		middleware(
+			makeReq(
+				`p3000-${SID}.tunnel.example.com`,
+				"st_token=jwt",
+				`https://p3000-${SID}.tunnel.example.com`,
+				"same-origin",
+			),
+			res as unknown as ServerResponse,
+			() => {},
+		);
+		await new Promise((r) => setImmediate(r));
+		expect(webSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("still gates cookie+ownership after the same-origin short-circuit (#391)", async () => {
+		// The Origin gate passing must NOT bypass authorize(): a
+		// same-origin request without a valid cookie still 401s.
+		const { middleware, webSpy } = makeDispatcherWith({
+			target: { containerName: "st-sess", isPublic: false, ownerUserId: "u-owner" },
+			token: null,
+		});
+		const res = makeRes();
+		middleware(
+			makeReq(
+				`p3000-${SID}.tunnel.example.com`,
+				undefined,
+				`https://p3000-${SID}.tunnel.example.com`,
+			),
+			res as unknown as ServerResponse,
+			() => {},
+		);
+		await new Promise((r) => setImmediate(r));
+		expect(res.statusCode).toBe(401);
+		expect(webSpy).not.toHaveBeenCalled();
+	});
+
+	it("does NOT treat another session's port subdomain as same-origin (#391)", async () => {
+		// A page served from one user's container must not get a free
+		// pass into another user's private port — a different
+		// dispatcher subdomain still goes through the allowlist.
+		const otherSid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+		const { middleware, webSpy } = makeDispatcherWith({
+			target: { containerName: "st-sess", isPublic: false, ownerUserId: "u-owner" },
+			token: "u-owner",
+		});
+		const res = makeRes();
+		middleware(
+			makeReq(
+				`p3000-${SID}.tunnel.example.com`,
+				"st_token=jwt",
+				`https://p4000-${otherSid}.tunnel.example.com`,
+			),
+			res as unknown as ServerResponse,
+			() => {},
+		);
+		await new Promise((r) => setImmediate(r));
+		expect(res.statusCode).toBe(403);
+		expect(webSpy).not.toHaveBeenCalled();
+	});
+
 	it("allows a missing-Origin HTTP request (server-to-server / curl shape)", async () => {
 		// Same `isAllowedWsOrigin` policy the WS path uses — Branch 1
 		// (no Origin) lets non-browser callers (webhooks, CLI tools)
@@ -747,6 +853,31 @@ describe("createPortDispatcher (WS upgrade)", () => {
 		const { socket } = makeSocket();
 		handleUpgrade(
 			makeReq(`p3000-${SID}.tunnel.example.com`, "st_token=jwt", "https://app.example.com"),
+			socket,
+			Buffer.alloc(0),
+		);
+		await new Promise((r) => setImmediate(r));
+		expect(wsSpy).toHaveBeenCalledTimes(1);
+	});
+
+	// #391 — Vite HMR shape: a page served from a private port opens a
+	// WebSocket back to its own host. That Origin can never be in
+	// CORS_ORIGINS (dynamic per-session hostname), so the same-origin
+	// short-circuit must fire here too, mirroring the HTTP gate.
+	it("allows a WS upgrade whose Origin is the dispatcher host itself (#391)", async () => {
+		const { handleUpgrade, wsSpy } = makeDispatcherWith(
+			{ containerName: "st-sess", isPublic: false, ownerUserId: "u-owner" },
+			"u-owner",
+			{ corsOrigins: ["https://app.example.com"] },
+		);
+		const { socket } = makeSocket();
+		handleUpgrade(
+			makeReq(
+				`p3000-${SID}.tunnel.example.com`,
+				"st_token=jwt",
+				`https://p3000-${SID}.tunnel.example.com`,
+				"same-origin",
+			),
 			socket,
 			Buffer.alloc(0),
 		);
