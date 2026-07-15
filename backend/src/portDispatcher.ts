@@ -175,6 +175,43 @@ export function makeHostParser(
 	};
 }
 
+/**
+ * Same-origin check for the dispatcher's Origin gates (#391). The
+ * dispatcher's per-session hostnames (`p<port>-<sid>.<base>`) are
+ * dynamic, so they can never be enumerated in `CORS_ORIGINS` — yet
+ * every page the dispatcher itself serves necessarily uses one of
+ * them as its own origin. A built SPA (Vite emits `crossorigin`
+ * module scripts/stylesheets by default) and any same-origin `fetch`
+ * POST both send `Origin: https://p<port>-<sid>.<base>`, which the
+ * allowlist-only gate structurally 403'd, blanking the page.
+ *
+ * Same-origin cannot be CSRF: if the Origin's host equals the
+ * request's own Host, the initiator IS a page this dispatcher already
+ * served on that exact hostname — for a private port, one that
+ * already passed the cookie+ownership check in `authorize()` (which
+ * still runs after this gate; nothing is bypassed). Hostnames are
+ * compared port-stripped on both sides: the base domain resolves to
+ * the Tunnel, so any scheme/port on that hostname terminates at this
+ * same dispatcher — there is no other server an attacker could serve
+ * a page from under it. A DIFFERENT session/port subdomain is NOT
+ * same-origin and still goes through the allowlist (a page served
+ * from one user's container must not get a free pass into another
+ * user's private port).
+ */
+export function isSameOriginRequest(
+	origin: string | string[] | undefined,
+	host: string | undefined,
+): boolean {
+	if (typeof origin !== "string" || !host) return false;
+	try {
+		return new URL(origin).hostname.toLowerCase() === host.split(":", 1)[0]!.toLowerCase();
+	} catch {
+		// Malformed Origin (e.g. `null`, garbage) — not same-origin;
+		// let the allowlist gate decide.
+		return false;
+	}
+}
+
 const TOKEN_COOKIE_REGEX = /(?:^|;\s*)st_token=([^;]+)/;
 
 /**
@@ -461,8 +498,14 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 		// path uses (webhook senders / curl with no Origin still
 		// pass). Runs BEFORE `authorize()` so cookie validation
 		// can't unlock a cross-site request. PR #223 round 10
-		// SHOULD-FIX.
-		if (!isAllowedWsOrigin(req.headers.origin, deps.corsOrigins, deps.nodeEnv)) {
+		// SHOULD-FIX. Same-origin requests (Origin host == own Host)
+		// short-circuit the allowlist — the dispatcher's dynamic
+		// per-session hostnames can never be allowlisted, see
+		// `isSameOriginRequest` (#391).
+		if (
+			!isSameOriginRequest(req.headers.origin, req.headers.host) &&
+			!isAllowedWsOrigin(req.headers.origin, deps.corsOrigins, deps.nodeEnv)
+		) {
 			res.statusCode = 403;
 			res.setHeader("Content-Type", "text/plain");
 			res.end("Forbidden");
@@ -543,8 +586,14 @@ export function createPortDispatcher(deps: DispatcherDeps): {
 		// and rejects browser origins not in CORS_ORIGINS. Runs
 		// BEFORE `authorize()` so even a valid cookie can't unlock a
 		// cross-site upgrade. Same defence the /ws/* path applies in
-		// `index.ts`. PR #223 round 2 SHOULD-FIX.
-		if (!isAllowedWsOrigin(req.headers.origin, deps.corsOrigins, deps.nodeEnv)) {
+		// `index.ts`. PR #223 round 2 SHOULD-FIX. Same-origin
+		// upgrades (a proxied page opening a WS to its own host —
+		// Vite HMR shape) short-circuit the allowlist, mirroring the
+		// HTTP gate above — see `isSameOriginRequest` (#391).
+		if (
+			!isSameOriginRequest(req.headers.origin, req.headers.host) &&
+			!isAllowedWsOrigin(req.headers.origin, deps.corsOrigins, deps.nodeEnv)
+		) {
 			// `Content-Length: 0` keeps the response framed so curl /
 			// wscat report the reason phrase cleanly. Aligns with the
 			// 429 in index.ts. PR #223 round 10 NIT.
