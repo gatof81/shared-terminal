@@ -405,6 +405,13 @@ function handleLogout(toastMessage?: string): void {
 	disposeAllCurrentTerminals();
 	activeSessionId = null;
 	sessions = [];
+	// Direct `sessions = []` bypasses setSessions(), so reset the
+	// loaded-once flag here too — otherwise a re-login in the same tab
+	// (including the SESSION_EXPIRED_EVENT → re-auth path) starts with
+	// the flag stuck true and the #394 observables dedupe re-races the
+	// initial fetches, flashing own sessions as read-only rows. PR #397
+	// review SHOULD-FIX.
+	sessionsLoadedOnce = false;
 	showAuth();
 	// Symmetry with showApp(): keep the admin-button visibility in
 	// lockstep with the api-layer's _isAdmin flag, which logout() and
