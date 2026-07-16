@@ -1226,7 +1226,20 @@ async function streamWorkspaceFile(sessionId: string, rel: string, res: Response
 		}
 		throw err;
 	}
-	const st = await handle.stat();
+	// Guard the fstat: if it throws (EBADF/ENOMEM under OS pressure) the
+	// exception would otherwise propagate with the fd still open — a
+	// root-held descriptor Node's GC finaliser closes eventually, but
+	// "eventually" can lose a race against fd-table exhaustion under
+	// sustained load. The pipeline path below doesn't need this (the
+	// read stream's autoClose owns the fd from there on). PR #403
+	// review SHOULD-FIX.
+	let st: Awaited<ReturnType<typeof handle.stat>>;
+	try {
+		st = await handle.stat();
+	} catch (err) {
+		await handle.close().catch(() => {});
+		throw err;
+	}
 	if (!st.isFile()) {
 		await handle.close();
 		res.status(400).json({ error: "path is not a regular file" });
