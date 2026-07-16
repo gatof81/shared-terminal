@@ -19,6 +19,7 @@ import {
 	encryptSecretEntries,
 	getSessionConfig,
 	isEmptyConfig,
+	PortsPatchSchema,
 	persistSessionConfig,
 	redactStoredAuth,
 	redactStoredEntries,
@@ -1851,5 +1852,63 @@ describe("GitIdentitySpec email control-char rejection (#306)", () => {
 
 	it("rejects an email with a trailing newline (regex $ admits it without the guard)", () => {
 		expect(SessionConfigSchema.safeParse(withEmail("a@b.com\n")).success).toBe(false);
+	});
+});
+
+// ── Port readiness (#198) ───────────────────────────────────────────────────
+
+describe("PortSpec readiness (#198)", () => {
+	const port = (readiness?: unknown) => ({
+		ports: [{ container: 3000, public: false, ...(readiness !== undefined ? { readiness } : {}) }],
+	});
+
+	it("accepts a readiness block and round-trips it through the typed shape", () => {
+		const cfg = validateSessionConfig(port({ path: "/health", timeoutSec: 30 }));
+		expect(cfg?.ports?.[0]?.readiness).toEqual({ path: "/health", timeoutSec: 30 });
+	});
+
+	it("leaves ports without readiness unchanged (field absent)", () => {
+		const cfg = validateSessionConfig(port());
+		expect(cfg?.ports?.[0]).toEqual({ container: 3000, public: false });
+	});
+
+	it.each([
+		["no leading slash", "health"],
+		["whitespace", "/health check"],
+		["a control character", "/health\ncheck"],
+		["empty string", ""],
+		["length > 512", `/${"a".repeat(512)}`],
+	])("rejects a readiness path with %s", (_label, path) => {
+		expect(() => validateSessionConfig(port({ path, timeoutSec: 30 }))).toThrow(
+			SessionConfigValidationError,
+		);
+	});
+
+	it.each([[0], [601], [1.5], [-5]])("rejects timeoutSec %s (int 1–600)", (timeoutSec) => {
+		expect(() => validateSessionConfig(port({ path: "/health", timeoutSec }))).toThrow(
+			SessionConfigValidationError,
+		);
+	});
+
+	it("accepts the timeoutSec bounds inclusively", () => {
+		expect(validateSessionConfig(port({ path: "/", timeoutSec: 1 }))).toBeDefined();
+		expect(validateSessionConfig(port({ path: "/", timeoutSec: 600 }))).toBeDefined();
+	});
+
+	it("rejects unknown keys inside readiness (.strict())", () => {
+		expect(() =>
+			validateSessionConfig(port({ path: "/health", timeoutSec: 30, retries: 3 })),
+		).toThrow(SessionConfigValidationError);
+	});
+
+	// PATCH /sessions/:id/ports rides `z.array(PortSpec)` inside
+	// PortsPatchSchema — pin that a live edit can persist readiness so
+	// a future divergence between the create-time and patch-time port
+	// shapes can't silently drop the field.
+	it("PortsPatchSchema accepts readiness so live edits persist it", () => {
+		const parsed = PortsPatchSchema.safeParse({
+			ports: [{ container: 3000, public: false, readiness: { path: "/health", timeoutSec: 30 } }],
+		});
+		expect(parsed.success).toBe(true);
 	});
 });

@@ -550,6 +550,21 @@ const AgentSeedSpec = z
 // HTTP/WS dispatcher in 190c (`http-proxy` handles upgrades). Raw-TCP
 // exposure would need a different topology (no Tunnel ingress, no
 // per-host-header dispatch) and is out of scope for the umbrella.
+//
+// #198 — `readiness` is an optional per-port HTTP probe the bootstrap
+// pipeline polls after all blocking stages succeed (see
+// bootstrap/portReadiness.ts). Purely advisory: a timeout never fails
+// the session. The path pattern requires a leading `/` and rejects
+// whitespace + control chars — the value is concatenated into
+// `http://<containerName>:<port><path>` by the probe runner, and a
+// CR/LF or space there would corrupt the request line. Query strings
+// and fragments are fine; only bytes that can't appear in a URL path
+// verbatim are blocked.
+const MAX_READINESS_PATH_LEN = 512;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: deliberate — control bytes in the probe path would corrupt the HTTP request line the runner builds from it.
+const READINESS_PATH_PATTERN = /^\/[^\s\x00-\x1f]*$/;
+const READINESS_TIMEOUT_S_MIN = 1;
+const READINESS_TIMEOUT_S_MAX = 600;
 const PortSpec = z
 	.object({
 		container: z.number().int().min(1).max(65535),
@@ -559,8 +574,21 @@ const PortSpec = z
 		// want, no implicit fallthrough. Form code in 190d sets `false`
 		// for fresh rows.
 		public: z.boolean(),
+		readiness: z
+			.object({
+				path: z.string().min(1).max(MAX_READINESS_PATH_LEN).regex(READINESS_PATH_PATTERN, {
+					message: 'path must start with "/" and contain no whitespace or control characters',
+				}),
+				timeoutSec: z.number().int().min(READINESS_TIMEOUT_S_MIN).max(READINESS_TIMEOUT_S_MAX),
+			})
+			.strict()
+			.optional(),
 	})
 	.strict();
+/** Wire/storage shape of a single `config.ports[]` entry. Exported for
+ *  the port-readiness probe runner (#198), which needs the `readiness`
+ *  sub-shape without re-deriving it from `SessionConfig["ports"]`. */
+export type PortEntry = z.infer<typeof PortSpec>;
 
 // #186 — typed env-var entries replace the loose Record<string,string>
 // shape. Three variants:

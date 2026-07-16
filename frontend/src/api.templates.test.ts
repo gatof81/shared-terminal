@@ -23,6 +23,18 @@ describe("stripConfigForTemplate", () => {
 		expect(stripConfigForTemplate(input)).toEqual(input);
 	});
 
+	// #198 — readiness is not a secret; the strip must pass it through
+	// verbatim so a template-created session keeps its probe config.
+	it("preserves ports readiness blocks (not credential material)", () => {
+		const input: SessionConfigPayload = {
+			ports: [
+				{ container: 3000, public: false, readiness: { path: "/health", timeoutSec: 30 } },
+				{ container: 8080, public: true },
+			],
+		};
+		expect(stripConfigForTemplate(input).ports).toEqual(input.ports);
+	});
+
 	it("collapses secret envVars to secret-slot (no value)", () => {
 		const input: SessionConfigPayload = {
 			envVars: [

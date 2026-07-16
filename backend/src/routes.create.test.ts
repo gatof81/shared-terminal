@@ -260,6 +260,9 @@ describe("POST /sessions — async bootstrap dispatch (PR 185b2b)", () => {
 		["gitIdentity", { name: "Ada", email: "a@b.com" }],
 		["dotfiles", { url: "https://github.com/u/d.git" }],
 		["agentSeed", { claudeMd: "# notes" }],
+		// #198 — a readiness-annotated port is a bootstrap stage too
+		// (the probe runner needs the config row + the async pipeline).
+		["ports", [{ container: 3000, public: false, readiness: { path: "/health", timeoutSec: 30 } }]],
 	])("computes hasBootstrapConfig=true when only %s is set", async (field, value) => {
 		const { sessions, docker } = makeFakes();
 		await spinUp(sessions, docker);
@@ -278,6 +281,27 @@ describe("POST /sessions — async bootstrap dispatch (PR 185b2b)", () => {
 			hasBootstrapConfig?: boolean;
 		};
 		expect(cfgArg.hasBootstrapConfig).toBe(true);
+	});
+
+	// #198 counterpart: ports WITHOUT readiness are pure dispatcher
+	// metadata — they must NOT drag every ports-only session through the
+	// async-bootstrap runner (and its getSessionConfig round-trip).
+	it("does not set hasBootstrapConfig for ports without readiness", async () => {
+		const { sessions, docker } = makeFakes();
+		await spinUp(sessions, docker);
+
+		const res = await fetch(`${baseUrl}/api/sessions`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				name: "test",
+				config: { ports: [{ container: 3000, public: false }] },
+			}),
+		});
+		expect(res.status).toBe(201);
+		const body = (await res.json()) as { bootstrapping?: boolean };
+		expect(body.bootstrapping).toBeUndefined();
+		expect(bootstrapStubs.runAsyncBootstrap).not.toHaveBeenCalled();
 	});
 
 	it("returns 201 without bootstrapping flag and runs postStart inline when only postStartCmd is set", async () => {

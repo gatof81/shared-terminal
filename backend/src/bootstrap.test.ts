@@ -67,6 +67,14 @@ const writeEnvFileStubs = vi.hoisted(() => ({
 }));
 vi.mock("./bootstrap/writeEnvFile.js", () => writeEnvFileStubs);
 
+// #198 — port-readiness probes. Advisory post-success stage; default
+// resolves so existing tests are unaffected (it's only invoked when the
+// config carries a readiness-annotated port anyway).
+const portReadinessStubs = vi.hoisted(() => ({
+	runPortReadinessProbes: vi.fn(async () => undefined),
+}));
+vi.mock("./bootstrap/portReadiness.js", () => portReadinessStubs);
+
 import {
 	BootstrapBroadcaster,
 	type BootstrapMessage,
@@ -94,6 +102,8 @@ beforeEach(() => {
 	agentSeedStubs.runAgentSeed.mockImplementation(async () => ({ exitCode: 0 }));
 	writeEnvFileStubs.runWriteEnvFile.mockReset();
 	writeEnvFileStubs.runWriteEnvFile.mockImplementation(async () => ({ exitCode: 0 }));
+	portReadinessStubs.runPortReadinessProbes.mockReset();
+	portReadinessStubs.runPortReadinessProbes.mockImplementation(async () => undefined);
 	// `decryptStoredEntries` is shared across tests asserting the
 	// decrypt-gating invariant; clear its call log so each test sees
 	// only its own invocations.
@@ -254,7 +264,10 @@ describe("runAsyncBootstrap", () => {
 		// #274 — spy on bootstrap-log persistence so per-test assertions
 		// can read back what was written.
 		const setBootstrapLog = vi.fn(async () => undefined);
-		const sessions = { updateStatus, setBootstrapLog } as unknown as SessionManager;
+		// #198 — the readiness stage resolves the container name via
+		// getOrThrow; a fixed fake keeps every test deterministic.
+		const getOrThrow = vi.fn(async () => ({ containerName: "st-sess1" }));
+		const sessions = { updateStatus, setBootstrapLog, getOrThrow } as unknown as SessionManager;
 		const docker = { kill, runPostCreate, runPostStart } as unknown as DockerManager;
 		const broadcaster = new BootstrapBroadcaster();
 		const final: BootstrapMessage[] = [];
@@ -754,6 +767,90 @@ describe("runAsyncBootstrap", () => {
 		expect(final).toEqual([expect.objectContaining({ type: "fail", stage: "writeEnvFile" })]);
 	});
 
+	// #198 — port-readiness probe wiring. The stage runs AFTER postStart
+	// (the daemon that answers the probe is usually what postStart
+	// launches) and BEFORE broadcaster.finish (broadcast-after-terminal
+	// is dropped, so the probe lines would never reach the modal).
+	it("runs port-readiness probes with the container name when a port has readiness", async () => {
+		const { sessions, docker, broadcaster, final, spies } = makeFakes();
+		sessionConfigStubs.getSessionConfig.mockResolvedValueOnce({
+			sessionId: "sess-1",
+			ports: [
+				{ container: 3000, public: false, readiness: { path: "/health", timeoutSec: 30 } },
+				{ container: 8080, public: true },
+			],
+			bootstrappedAt: null,
+		} as never);
+		const order: string[] = [];
+		spies.runPostStart.mockImplementation(async () => {
+			order.push("postStart");
+		});
+		portReadinessStubs.runPortReadinessProbes.mockImplementation(async () => {
+			order.push("probes");
+		});
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ postStartCmd: "npm run dev", hasBootstrapConfig: true },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		expect(portReadinessStubs.runPortReadinessProbes).toHaveBeenCalledTimes(1);
+		const args = portReadinessStubs.runPortReadinessProbes.mock.calls[0]![0] as {
+			containerName: string;
+			ports: unknown[];
+		};
+		expect(args.containerName).toBe("st-sess1");
+		expect(args.ports).toHaveLength(2);
+		expect(order).toEqual(["postStart", "probes"]);
+		expect(final).toEqual([{ type: "done", success: true }]);
+	});
+
+	it("skips the probe stage entirely when no port carries readiness", async () => {
+		const { sessions, docker, broadcaster, final } = makeFakes();
+		sessionConfigStubs.getSessionConfig.mockResolvedValueOnce({
+			sessionId: "sess-1",
+			gitIdentity: { name: "X", email: "x@y.com" },
+			ports: [{ container: 8080, public: true }],
+			bootstrappedAt: null,
+		} as never);
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ hasBootstrapConfig: true },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		expect(portReadinessStubs.runPortReadinessProbes).not.toHaveBeenCalled();
+		expect(final).toEqual([{ type: "done", success: true }]);
+	});
+
+	// Advisory contract: a throwing probe stage (getOrThrow race with a
+	// concurrent delete, a runner bug) is logged and swallowed — the
+	// session still lands at done/success, never failed.
+	it("a throwing probe stage does not fail the session", async () => {
+		const { sessions, docker, broadcaster, final, spies } = makeFakes();
+		sessionConfigStubs.getSessionConfig.mockResolvedValueOnce({
+			sessionId: "sess-1",
+			ports: [{ container: 3000, public: false, readiness: { path: "/", timeoutSec: 5 } }],
+			bootstrappedAt: null,
+		} as never);
+		portReadinessStubs.runPortReadinessProbes.mockRejectedValueOnce(new Error("boom"));
+
+		await runAsyncBootstrap(
+			"sess-1",
+			{ hasBootstrapConfig: true },
+			{ sessions, docker, broadcaster },
+		);
+		await settle();
+
+		expect(spies.updateStatus).not.toHaveBeenCalled();
+		expect(spies.kill).not.toHaveBeenCalled();
+		expect(final).toEqual([{ type: "done", success: true }]);
+	});
+
 	// #277 — failure-shape parity with the other stages: a non-zero exit
 	// from writeEnvFile flips status, kills the container, broadcasts
 	// `fail` with `stage: "writeEnvFile"`, and skips postCreate. Mirrors
@@ -1074,7 +1171,10 @@ describe("drainInFlightBootstraps (#348)", () => {
 		const runPostCreate = vi.fn();
 		const runPostStart = vi.fn(async () => undefined);
 		const setBootstrapLog = vi.fn(async () => undefined);
-		const sessions = { updateStatus, setBootstrapLog } as unknown as SessionManager;
+		// #198 — the readiness stage resolves the container name via
+		// getOrThrow; a fixed fake keeps every test deterministic.
+		const getOrThrow = vi.fn(async () => ({ containerName: "st-sess1" }));
+		const sessions = { updateStatus, setBootstrapLog, getOrThrow } as unknown as SessionManager;
 		const docker = { kill, runPostCreate, runPostStart } as unknown as DockerManager;
 		const broadcaster = new BootstrapBroadcaster();
 		const final: BootstrapMessage[] = [];
