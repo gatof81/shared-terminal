@@ -7,7 +7,7 @@
  * one main.ts caller.
  */
 
-import { uploadSessionFiles } from "./api.js";
+import { downloadSessionFile, uploadSessionFiles } from "./api.js";
 import { activeSessionId, getActiveTerminal, showToast } from "./main.js";
 import { runPasteFlow } from "./paste.js";
 
@@ -17,6 +17,7 @@ const actionsMenu = document.getElementById("actions-menu")!;
 const actionsPasteBtn = document.getElementById("actions-paste-btn") as HTMLButtonElement;
 const actionsAttachBtn = document.getElementById("actions-attach-btn") as HTMLButtonElement;
 const actionsSelectBtn = document.getElementById("actions-select-btn") as HTMLButtonElement;
+const actionsDownloadBtn = document.getElementById("actions-download-btn") as HTMLButtonElement;
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
 
 // ── Actions (+) menu ────────────────────────────────────────────────────────
@@ -92,6 +93,54 @@ actionsSelectBtn.addEventListener("click", () => {
 	if (!copied) {
 		term.enterSelectMode();
 		showToast("Drag across the terminal to select — it copies automatically");
+	}
+});
+
+// ── File download flow (#358) ───────────────────────────────────────────────
+// v1 UX is a prompt() for the workspace-relative path — no file browser
+// yet. The blob → object-URL → synthetic <a download> dance is what makes
+// the browser treat the credentialed fetch result as a "save file" gesture;
+// see downloadSessionFile in api.ts for why fetch+blob beats a plain <a>
+// navigation to the API origin.
+
+let downloadInFlight = false;
+
+actionsDownloadBtn.addEventListener("click", async () => {
+	closeActionsMenu();
+	if (downloadInFlight) {
+		showToast("Download in progress, try again shortly", true);
+		return;
+	}
+	if (!activeSessionId) {
+		showToast("No active session", true);
+		return;
+	}
+	// Snapshot before the prompt/await — same session-switch guard as the
+	// attach flow above.
+	const sessionId = activeSessionId;
+	const raw = prompt("Workspace-relative path to download (e.g. dist/report.pdf):");
+	const relPath = raw?.trim();
+	if (!relPath) return;
+	downloadInFlight = true;
+	try {
+		showToast(`Downloading ${relPath}…`);
+		const { blob, filename } = await downloadSessionFile(sessionId, relPath);
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement("a");
+		a.href = url;
+		a.download = filename;
+		document.body.appendChild(a);
+		a.click();
+		a.remove();
+		// Revoke on a delay, not immediately — the click only ENQUEUES the
+		// save; revoking synchronously races the browser's read of the
+		// object URL and can yield an empty download on slower devices.
+		setTimeout(() => URL.revokeObjectURL(url), 30_000);
+		showToast(`Downloaded ${filename}`);
+	} catch (err) {
+		showToast(`Download failed: ${(err as Error).message}`, true);
+	} finally {
+		downloadInFlight = false;
 	}
 });
 

@@ -1231,6 +1231,32 @@ export async function uploadSessionFiles(
 	return res.json() as Promise<{ paths: string[] }>;
 }
 
+/**
+ * Download one workspace file (#358). fetch+blob rather than a plain
+ * `<a href>` navigation to the API origin: apiFetch's
+ * `credentials: "include"` definitely carries the cross-site cookie, and
+ * a 4xx surfaces as a throwable JSON error the caller can toast instead
+ * of navigating the tab to a raw error body. Holding the blob in memory
+ * is fine — the backend caps downloads at 512 MiB.
+ *
+ * The filename comes from the request path's basename, not the response's
+ * Content-Disposition: that header isn't CORS-exposed (the backend sends
+ * no Access-Control-Expose-Headers), and the server derives its filename
+ * from the same basename anyway.
+ */
+export async function downloadSessionFile(
+	sessionId: string,
+	relPath: string,
+): Promise<{ blob: Blob; filename: string }> {
+	const res = await apiFetch(`/sessions/${sessionId}/files?path=${encodeURIComponent(relPath)}`);
+	if (!res.ok) {
+		const body = await res.json().catch(() => ({}));
+		throw new Error(body.error ?? `Download failed (${res.status})`);
+	}
+	const filename = relPath.split("/").filter(Boolean).pop() ?? "download";
+	return { blob: await res.blob(), filename };
+}
+
 // ── Fetch wrapper ───────────────────────────────────────────────────────────
 
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {

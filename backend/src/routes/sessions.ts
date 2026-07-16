@@ -4,7 +4,10 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { promises as fs, constants as fsConstants } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
+import nodePath from "node:path";
+import { pipeline } from "node:stream/promises";
 import type { NextFunction, Request, Response, Router } from "express";
 import multer from "multer";
 import type { AuthedRequest } from "../auth.js";
@@ -1052,6 +1055,237 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			}
 		},
 	);
+
+	// ── File download (#358) ────────────────────────────────────────────────
+	// Stream a single file out of the session workspace from the HOST bind
+	// mount (`<WORKSPACE_ROOT>/<sessionId>`) — no docker exec involved, so
+	// downloads work on stopped sessions too (the workspace outlives the
+	// container).
+
+	router.get(
+		"/sessions/:id/files",
+		// Explicit requireAuth for the same reason as the upload route
+		// above: don't silently inherit the gate from the /sessions
+		// prefix mount.
+		requireAuth,
+		// Shares the upload limiter deliberately — same "bulk file
+		// transfer" surface, and a JWT holder shouldn't be able to loop
+		// 512 MiB download streams faster than they could loop uploads.
+		fileUploadIp,
+		async (req: Request, res: Response) => {
+			const { userId } = req as AuthedRequest;
+			const rel = req.query.path;
+			// `req.query.path` is string | string[] | ParsedQs — the typeof
+			// check rejects the repeated-param array shape along with the
+			// missing case.
+			if (typeof rel !== "string" || rel.length === 0) {
+				res.status(400).json({ error: "query param 'path' is required" });
+				return;
+			}
+			if (rel.length > DOWNLOAD_PATH_MAX_LEN) {
+				res.status(400).json({
+					error: `path must be at most ${DOWNLOAD_PATH_MAX_LEN} characters`,
+				});
+				return;
+			}
+			// NUL would truncate the path at the syscall boundary, making
+			// the string we containment-check differ from the path the
+			// kernel resolves — reject alongside absolute paths.
+			if (nodePath.isAbsolute(rel) || rel.includes("\0")) {
+				res.status(400).json({ error: "path must be workspace-relative" });
+				return;
+			}
+			try {
+				// Ownership BEFORE any filesystem access, mirroring the
+				// upload route: a foreign-session probe gets its 404
+				// without learning anything about that workspace's
+				// contents (not even file-exists timing).
+				await sessions.assertOwnedBy(req.params.id, userId);
+				await streamWorkspaceFile(req.params.id, rel, res);
+			} catch (err) {
+				handleSessionError(err, res);
+			}
+		},
+	);
+}
+
+// Host-side workspace root. Same env read as dockerManager.ts / backup.ts —
+// each module reads it at load rather than sharing an export, so route
+// tests can point it at a tmp dir without dragging the docker socket in.
+const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
+
+// Download size cap. 512 MiB comfortably covers build artefacts / archives
+// a session realistically produces while bounding what one request can
+// pull through the backend (and what the frontend's fetch+blob flow has
+// to hold in browser memory). Bigger payloads should leave via git or the
+// user's own tooling inside the container.
+const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
+
+// Linux PATH_MAX — anything longer can't name a real file on the host
+// filesystem anyway, so reject it before path.resolve chews on it.
+const DOWNLOAD_PATH_MAX_LEN = 4096;
+
+/**
+ * Containment-check `rel` against the session's workspace root and stream
+ * the file to `res`. Follows the purgeWorkspace discipline (lexical
+ * resolve + strict-prefix check) and adds the symlink hardening a READ
+ * path needs that a recursive-rm path doesn't: `fs.rm` never follows
+ * symlinks out of the tree, but a read here happily would.
+ *
+ * Error shape: writes the 4xx/413 response itself; throws only on
+ * unexpected filesystem errors (caller maps those via handleSessionError).
+ */
+async function streamWorkspaceFile(sessionId: string, rel: string, res: Response): Promise<void> {
+	const sessionRoot = nodePath.resolve(WORKSPACE_ROOT, sessionId);
+	// `path.resolve` collapses `../` segments lexically, so a traversal
+	// either lands outside the root (caught by the strict-prefix check)
+	// or is harmlessly normalised back inside.
+	const joined = nodePath.resolve(sessionRoot, rel);
+	if (!joined.startsWith(sessionRoot + nodePath.sep)) {
+		res.status(400).json({ error: "path escapes the session workspace" });
+		return;
+	}
+
+	// The lexical check above says nothing about symlinked PARENTS
+	// (`ln -s /etc workspace/link` + path=link/passwd passes it). realpath
+	// the containing directory and re-verify against the realpath'd root —
+	// both sides canonicalised so a legitimately-symlinked WORKSPACE_ROOT
+	// (e.g. /var → /private/var) doesn't false-positive every download.
+	let realRoot: string;
+	let realDir: string;
+	try {
+		realRoot = await fs.realpath(sessionRoot);
+		realDir = await fs.realpath(nodePath.dirname(joined));
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+			res.status(404).json({ error: "File not found" });
+			return;
+		}
+		throw err;
+	}
+	if (realDir !== realRoot && !realDir.startsWith(realRoot + nodePath.sep)) {
+		// 404, not 400: a symlink pointing out of the workspace was
+		// planted by code running in the container — don't hand a
+		// probing client confirmation that its link took effect.
+		res.status(404).json({ error: "File not found" });
+		return;
+	}
+
+	const leaf = nodePath.join(realDir, nodePath.basename(joined));
+	let lst: Awaited<ReturnType<typeof fs.lstat>>;
+	try {
+		// lstat (not stat) so a symlink LEAF is visible as such instead
+		// of being transparently followed to wherever it points.
+		lst = await fs.lstat(leaf);
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+			res.status(404).json({ error: "File not found" });
+			return;
+		}
+		throw err;
+	}
+	if (lst.isSymbolicLink()) {
+		// Same no-disclosure 404 as the parent-escape branch — even a
+		// symlink that resolves INSIDE the workspace is refused rather
+		// than followed; the user can download the target directly.
+		res.status(404).json({ error: "File not found" });
+		return;
+	}
+	if (lst.isDirectory()) {
+		res.status(400).json({ error: "path is a directory, not a file" });
+		return;
+	}
+	if (!lst.isFile()) {
+		// Sockets, FIFOs, device nodes — nothing streamable lives here.
+		res.status(400).json({ error: "path is not a regular file" });
+		return;
+	}
+	if (lst.size > MAX_DOWNLOAD_BYTES) {
+		res.status(413).json({
+			error: `file exceeds the ${MAX_DOWNLOAD_BYTES / (1024 * 1024)} MiB download cap`,
+		});
+		return;
+	}
+
+	// O_NOFOLLOW closes the lstat→open TOCTOU: code running INSIDE the
+	// container can swap the checked file for a symlink between the lstat
+	// above and this open, and the backend (typically root on the host)
+	// would follow it anywhere. With O_NOFOLLOW the kernel answers ELOOP
+	// instead; the fstat re-check below covers the same race for
+	// type/size. (A racing parent-DIRECTORY swap remains theoretically
+	// open — openat-chain hardening isn't worth it for an owner-only
+	// endpoint reading the owner's own workspace.)
+	let handle: FileHandle;
+	try {
+		handle = await fs.open(leaf, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		if (code === "ENOENT" || code === "ELOOP") {
+			res.status(404).json({ error: "File not found" });
+			return;
+		}
+		throw err;
+	}
+	const st = await handle.stat();
+	if (!st.isFile()) {
+		await handle.close();
+		res.status(400).json({ error: "path is not a regular file" });
+		return;
+	}
+	if (st.size > MAX_DOWNLOAD_BYTES) {
+		await handle.close();
+		res.status(413).json({
+			error: `file exceeds the ${MAX_DOWNLOAD_BYTES / (1024 * 1024)} MiB download cap`,
+		});
+		return;
+	}
+
+	res.setHeader("Content-Type", "application/octet-stream");
+	// From the fstat, not the earlier lstat — the fd's answer is the one
+	// that matches the bytes we're about to stream.
+	res.setHeader("Content-Length", String(st.size));
+	res.setHeader(
+		"Content-Disposition",
+		`attachment; filename="${contentDispositionFilename(nodePath.basename(joined))}"`,
+	);
+	try {
+		// pipeline (not .pipe): on EITHER side failing — read error, or
+		// the client going away mid-download — both streams are destroyed,
+		// which closes the fd via the read stream's autoClose. Bare .pipe
+		// leaks the fd on client abort.
+		await pipeline(handle.createReadStream(), res);
+	} catch (err) {
+		if (!res.headersSent) {
+			// Nothing flushed yet — a structured 500 is still possible.
+			// Drop the download headers first so the JSON error doesn't
+			// go out with an attachment disposition and a stale length.
+			res.removeHeader("Content-Length");
+			res.removeHeader("Content-Disposition");
+			res.status(500).json({ error: "Internal server error" });
+		} else {
+			// Bytes already went out under a 200 — the only honest signal
+			// left is killing the socket so the client sees a truncated
+			// transfer (Content-Length mismatch), not a clean short EOF.
+			res.destroy();
+		}
+		logger.warn(`[routes] download aborted for session ${sessionId}: ${(err as Error).message}`);
+	}
+}
+
+/**
+ * Content-Disposition filename as an RFC 6266 quoted-string. Header
+ * injection is neutralised by replacing everything outside printable
+ * ASCII (CR/LF are what matter; Node would throw on them, but a 500 for
+ * a weird filename is the wrong answer), then `"` and `\` are
+ * backslash-escaped so the quoted-string can't be broken out of.
+ * Multi-byte names degrade to underscores — losing the pretty name beats
+ * emitting a header clients mis-parse; the RFC 5987 `filename*` dance
+ * isn't worth it for v1.
+ */
+function contentDispositionFilename(name: string): string {
+	const printable = name.replace(/[^\x20-\x7e]/g, "_");
+	const escaped = printable.replace(/[\\"]/g, "\\$&");
+	return escaped.trim().length > 0 ? escaped : "download";
 }
 
 // Type-guard for the cols/rows numeric inputs on POST /sessions.
