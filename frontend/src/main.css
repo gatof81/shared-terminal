@@ -1692,6 +1692,36 @@ main:not([data-sidebar-ready]) #sidebar {
   border-color: #58a6ff;
   color: #58a6ff;
 }
+/* #357 — toolbar history-search widget. The magnifier button borrows the
+   Aa button's quiet style; the input only occupies toolbar space while
+   toggled open (the [hidden] attribute removes it entirely). */
+#terminal-search-btn {
+  background: transparent;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #8b949e;
+  font-size: 0.85rem;
+  padding: 0.14rem 0.5rem;
+  cursor: pointer;
+  line-height: 1;
+}
+#terminal-search-btn:hover {
+  border-color: #58a6ff;
+  color: #58a6ff;
+}
+#terminal-search-input {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #e6edf3;
+  font-size: 0.75rem;
+  padding: 0.2rem 0.5rem;
+  width: 11rem;
+}
+#terminal-search-input:focus {
+  border-color: #58a6ff;
+  outline: none;
+}
 /* Actions button (+ menu) lives in the header on every viewport. The
    menu hosts both the paste flow (mobile-essential, desktop-handy as a
    text-paste fallback) and the file-attach flow (useful everywhere).

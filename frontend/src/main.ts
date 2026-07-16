@@ -46,6 +46,7 @@ import {
 } from "./newSession.js";
 import { closePasteModal } from "./paste.js";
 import { closePortsModal } from "./ports.js";
+import { initTerminalSearch } from "./searchBar.js";
 import { refreshSessions } from "./sessionCore.js";
 import { clearAllBadges } from "./tabActivity.js";
 import type { TerminalSession } from "./terminal.js";
@@ -926,5 +927,6 @@ export function getActiveTerminal(): TerminalSession | null {
 // ── Init ────────────────────────────────────────────────────────────────────
 
 initKeyBar();
+initTerminalSearch();
 updateAuthUI();
 initAuth();
