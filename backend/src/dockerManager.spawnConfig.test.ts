@@ -19,6 +19,18 @@ const dbStubs = vi.hoisted(() => ({
 }));
 vi.mock("./db.js", () => dbStubs);
 
+// #384 — spawn clamps NanoCpus against os.cpus().length. Pin the fake
+// host at 64 cores by default so the pre-existing operator-cap tests
+// (which assert the 8-core EFFECTIVE_CPU_NANO_MAX ceiling) don't start
+// failing on CI runners with fewer than 8 cores; host-clamp tests dial
+// `osStubs.cpuCount` down per-case.
+const osStubs = vi.hoisted(() => ({ cpuCount: 64 }));
+vi.mock("node:os", async (importOriginal) => {
+	const real = await importOriginal<typeof import("node:os")>();
+	const cpus = () => new Array(osStubs.cpuCount).fill(real.cpus()[0] ?? {});
+	return { ...real, cpus, default: { ...real, cpus } };
+});
+
 // Stub the fs ops spawn() touches: mkdir creates the bind-mount target,
 // chown applies WORKSPACE_UID/GID. In tests the bind-mount path under
 // `/var/shared-terminal/workspaces/...` is unwritable; we don't actually
@@ -96,6 +108,7 @@ function makeDmWithCreateCapture(): { dm: DockerManager; captured: CapturedCreat
 }
 
 beforeEach(() => {
+	osStubs.cpuCount = 64;
 	dbStubs.d1Query.mockReset();
 	dbStubs.d1Query.mockResolvedValue({
 		results: [],
@@ -671,6 +684,18 @@ describe("DockerManager.updateResources", () => {
 		});
 	});
 
+	it("clamps NanoCpus to the host's core count on live edit too (#384)", async () => {
+		// The admin schema validates against the static 8-core ceiling,
+		// so on a downsized host an in-bounds value can still exceed the
+		// host; dockerd would reject the update with a message the admin
+		// route's error-mapping doesn't recognise. Memory is untouched —
+		// Docker accepts over-provisioned Memory.
+		osStubs.cpuCount = 4;
+		const { dm, captured } = makeDmWithUpdateCapture();
+		await dm.updateResources("c1", { cpuLimit: 7_000_000_000 });
+		expect(captured.opts).toEqual({ NanoCpus: 4_000_000_000 });
+	});
+
 	it("propagates the underlying dockerode error so the route can pattern-match", async () => {
 		const dm = new DockerManager(fakeSessions());
 		const fakeContainer = {
@@ -684,5 +709,187 @@ describe("DockerManager.updateResources", () => {
 		await expect(dm.updateResources("c1", { memLimit: 1024 * 1024 * 1024 })).rejects.toThrow(
 			/lower than current/i,
 		);
+	});
+});
+
+// ── Host CPU clamp (#384) ───────────────────────────────────────────────────
+
+describe("host CPU clamp (#384)", () => {
+	const configRow = (cpuNanos: number) => ({
+		results: [
+			{
+				session_id: "sess-1",
+				workspace_strategy: null,
+				cpu_limit: cpuNanos,
+				mem_limit: null,
+				idle_ttl_seconds: null,
+				post_create_cmd: null,
+				post_start_cmd: null,
+				repos_json: null,
+				ports_json: null,
+				allow_privileged_ports: null,
+				env_vars_json: null,
+				bootstrapped_at: null,
+			},
+		],
+		success: true as const,
+		meta: { changes: 0, duration: 0, last_row_id: 0 },
+	});
+
+	it("clamps a stored cap above the host's core count (downsized-host regression)", async () => {
+		// The 2026-07-14 production shape: cap stored on a bigger host,
+		// host later resized below it. dockerd would 400 the create.
+		osStubs.cpuCount = 4;
+		dbStubs.d1Query.mockResolvedValueOnce(configRow(8_000_000_000));
+		const { dm, captured } = makeDmWithCreateCapture();
+		await dm.spawn("sess-1");
+		const hc = captured.opts.HostConfig as { NanoCpus: number };
+		expect(hc.NanoCpus).toBe(4_000_000_000);
+	});
+
+	it("leaves a cap at the host's core count untouched", async () => {
+		osStubs.cpuCount = 4;
+		dbStubs.d1Query.mockResolvedValueOnce(configRow(4_000_000_000));
+		const { dm, captured } = makeDmWithCreateCapture();
+		await dm.spawn("sess-1");
+		const hc = captured.opts.HostConfig as { NanoCpus: number };
+		expect(hc.NanoCpus).toBe(4_000_000_000);
+	});
+
+	it("skips the host clamp when os.cpus() reports no cores (exotic environments)", async () => {
+		osStubs.cpuCount = 0;
+		dbStubs.d1Query.mockResolvedValueOnce(configRow(4_000_000_000));
+		const { dm, captured } = makeDmWithCreateCapture();
+		await dm.spawn("sess-1");
+		const hc = captured.opts.HostConfig as { NanoCpus: number };
+		expect(hc.NanoCpus).toBe(4_000_000_000);
+	});
+});
+
+// ── Stale-name 409 reclaim (#384 secondary) ─────────────────────────────────
+
+describe("stale-name 409 reclaim (#384)", () => {
+	function makeDmForConflict(opts: {
+		staleRunning: boolean;
+		inspectThrows?: boolean;
+		createErrorStatus?: number;
+	}): {
+		dm: DockerManager;
+		createSpy: ReturnType<typeof vi.fn>;
+		removeSpy: ReturnType<typeof vi.fn>;
+	} {
+		const dm = new DockerManager(fakeSessions());
+		const goodContainer = {
+			id: "container-new",
+			start: vi.fn(async () => {}),
+			inspect: vi.fn(async () => ({ NetworkSettings: { Ports: {} } })),
+		};
+		const removeSpy = vi.fn(async () => {});
+		let createCalls = 0;
+		const createSpy = vi.fn(async () => {
+			createCalls++;
+			if (createCalls === 1) {
+				const e = new Error("Conflict. The container name is already in use") as Error & {
+					statusCode: number;
+				};
+				e.statusCode = opts.createErrorStatus ?? 409;
+				throw e;
+			}
+			return goodContainer;
+		});
+		const staleContainer = {
+			inspect: opts.inspectThrows
+				? vi.fn(async () => {
+						throw new Error("no such container");
+					})
+				: vi.fn(async () => ({ State: { Running: opts.staleRunning } })),
+			remove: removeSpy,
+		};
+		const fakeDocker = {
+			createContainer: createSpy,
+			getContainer: vi.fn(() => staleContainer),
+		};
+		(dm as unknown as { docker: unknown }).docker = fakeDocker;
+		return { dm, createSpy, removeSpy };
+	}
+
+	it("removes a stale exited container holding the name and retries once", async () => {
+		const { dm, createSpy, removeSpy } = makeDmForConflict({ staleRunning: false });
+		await dm.spawn("sess-1");
+		expect(removeSpy).toHaveBeenCalledTimes(1);
+		expect(createSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it("rethrows when the conflicting container is RUNNING (never force-removes a live session)", async () => {
+		const { dm, removeSpy } = makeDmForConflict({ staleRunning: true });
+		await expect(dm.spawn("sess-1")).rejects.toMatchObject({ statusCode: 409 });
+		expect(removeSpy).not.toHaveBeenCalled();
+	});
+
+	it("rethrows the original 409 when the stale name can't be inspected", async () => {
+		const { dm, removeSpy } = makeDmForConflict({ staleRunning: false, inspectThrows: true });
+		await expect(dm.spawn("sess-1")).rejects.toMatchObject({ statusCode: 409 });
+		expect(removeSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not intercept non-409 create errors", async () => {
+		const { dm, createSpy, removeSpy } = makeDmForConflict({
+			staleRunning: false,
+			createErrorStatus: 500,
+		});
+		await expect(dm.spawn("sess-1")).rejects.toMatchObject({ statusCode: 500 });
+		expect(createSpy).toHaveBeenCalledTimes(1);
+		expect(removeSpy).not.toHaveBeenCalled();
+	});
+});
+
+// ── Reclaim remove() race (#384, PR #400 round 2) ───────────────────────────
+
+describe("stale-name reclaim remove() race (#384)", () => {
+	function makeDmWithRemoveError(removeStatusCode: number): {
+		dm: DockerManager;
+		createSpy: ReturnType<typeof vi.fn>;
+	} {
+		const dm = new DockerManager(fakeSessions());
+		const goodContainer = {
+			id: "container-new",
+			start: vi.fn(async () => {}),
+			inspect: vi.fn(async () => ({ NetworkSettings: { Ports: {} } })),
+		};
+		let createCalls = 0;
+		const createSpy = vi.fn(async () => {
+			createCalls++;
+			if (createCalls === 1) {
+				const e = new Error("Conflict") as Error & { statusCode: number };
+				e.statusCode = 409;
+				throw e;
+			}
+			return goodContainer;
+		});
+		const staleContainer = {
+			inspect: vi.fn(async () => ({ State: { Running: false } })),
+			remove: vi.fn(async () => {
+				const e = new Error("remove failed") as Error & { statusCode: number };
+				e.statusCode = removeStatusCode;
+				throw e;
+			}),
+		};
+		(dm as unknown as { docker: unknown }).docker = {
+			createContainer: createSpy,
+			getContainer: vi.fn(() => staleContainer),
+		};
+		return { dm, createSpy };
+	}
+
+	it("still retries when remove() 404s (stale container vanished in the inspect→remove window)", async () => {
+		const { dm, createSpy } = makeDmWithRemoveError(404);
+		await dm.spawn("sess-1");
+		expect(createSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it("propagates a non-404 remove() failure (e.g. 409: container started in the window)", async () => {
+		const { dm, createSpy } = makeDmWithRemoveError(409);
+		await expect(dm.spawn("sess-1")).rejects.toMatchObject({ statusCode: 409 });
+		expect(createSpy).toHaveBeenCalledTimes(1);
 	});
 });
