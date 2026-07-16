@@ -271,7 +271,14 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				// triggers the async runner for "envVars-toggle-only"
 				// sessions and ensures the runner's `hasBootstrapConfig`
 				// gate doesn't skip the `getSessionConfig` D1 round-trip.
-				validatedConfig?.writeEnvFile === true;
+				validatedConfig?.writeEnvFile === true ||
+				// #198 — same shape as the writeEnvFile precedent above:
+				// a session whose ONLY bootstrap-relevant config is a
+				// readiness-annotated port must still trigger the async
+				// runner (and its config load), or the probe stage would
+				// silently never run. Plain ports (no readiness) stay
+				// outside the gate — they're pure dispatcher metadata.
+				(validatedConfig?.ports ?? []).some((p) => p.readiness !== undefined);
 			if (validatedConfig?.postCreateCmd || hasBootstrapConfig) {
 				const cfg = {
 					postCreateCmd: validatedConfig?.postCreateCmd,

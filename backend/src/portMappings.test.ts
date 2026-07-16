@@ -50,6 +50,21 @@ describe("mappingsFromConfig", () => {
 			{ containerPort: 80, hostPort: 80, isPublic: true },
 		]);
 	});
+
+	// #198 — readiness is a bootstrap-only concern; the dispatcher's
+	// runtime rows must not grow a copy of it (the helper reads its
+	// fields explicitly, so extra config keys are dropped by shape).
+	it("ignores the readiness field on a config port entry", () => {
+		// Via a const so TS's excess-property check on literals doesn't
+		// fire — runtime callers pass `config.ports`, which post-#198
+		// carries `readiness` structurally.
+		const ports = [
+			{ container: 3000, public: false, readiness: { path: "/health", timeoutSec: 30 } },
+		];
+		expect(mappingsFromConfig(ports)).toEqual([
+			{ containerPort: 3000, hostPort: 3000, isPublic: false },
+		]);
+	});
 });
 
 // ── setPortMappings ──────────────────────────────────────────────────────

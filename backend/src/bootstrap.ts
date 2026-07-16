@@ -23,6 +23,7 @@ import { runAgentSeed } from "./bootstrap/agentSeed.js";
 import { runCloneRepo } from "./bootstrap/cloneRepo.js";
 import { runDotfiles } from "./bootstrap/dotfiles.js";
 import { runGitIdentity } from "./bootstrap/gitIdentity.js";
+import { runPortReadinessProbes } from "./bootstrap/portReadiness.js";
 import { runWriteEnvFile } from "./bootstrap/writeEnvFile.js";
 import { d1Query } from "./db.js";
 import type { DockerManager } from "./dockerManager.js";
@@ -782,6 +783,40 @@ async function runBootstrapPipeline(
 		} catch (err) {
 			logger.warn(
 				`[bootstrap] postStart launch failed for session ${sessionId}: ${(err as Error).message}`,
+			);
+		}
+	}
+	// #198 — port-readiness probes, deliberately positioned here:
+	//
+	//   - AFTER postStart, because the daemon that will answer the probe
+	//     (`npm run dev` & co) is typically what postStart launches —
+	//     probing before it would burn the budget against a closed port.
+	//   - BEFORE `broadcaster.finish` below, because the broadcaster
+	//     drops every `broadcast` that arrives after the terminal
+	//     message lands (see BootstrapBroadcaster.broadcast's
+	//     `if (s.terminal) return`) — probe lines emitted post-finish
+	//     would never reach the create modal, the feature's only
+	//     streaming surface. Routing through `onOutput` (before
+	//     persistLog) also lands them in the persisted log.
+	//
+	// Advisory by contract: a probe timeout emits a WARN line and the
+	// session still lands at `done, success:true` — hence the bare
+	// try/catch → warn instead of runStage's fail teardown. Known v1
+	// gap: `POST /start`'s postStart re-run does NOT re-probe — there
+	// is no streaming surface on that path to show the lines on, so
+	// re-probing is deferred until one exists (follow-up to #198).
+	if (config?.ports?.some((p) => p.readiness !== undefined)) {
+		try {
+			const meta = await sessions.getOrThrow(sessionId);
+			await runPortReadinessProbes({
+				containerName: meta.containerName,
+				ports: config.ports,
+				onOutput,
+				signal,
+			});
+		} catch (err) {
+			logger.warn(
+				`[bootstrap] port-readiness probes failed for session ${sessionId}: ${(err as Error).message}`,
 			);
 		}
 	}

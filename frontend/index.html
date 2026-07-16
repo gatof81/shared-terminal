@@ -1094,13 +1094,17 @@
           Expose a port your session is listening on. Changes take effect
           immediately — no need to restart the session. Public ports skip
           authentication (anyone with the URL can reach them); use only for
-          webhooks / OAuth callbacks.
+          webhooks / OAuth callbacks. Readiness path (optional) is probed
+          during session bootstrap to report when the port answers — it is
+          advisory and never fails the session.
         </p>
         <table class="ports-table" id="ports-modal-table">
           <thead>
             <tr>
               <th scope="col">Container port</th>
               <th scope="col">Public</th>
+              <th scope="col">Readiness path</th>
+              <th scope="col">Timeout (s)</th>
               <th scope="col" aria-label="Remove"></th>
             </tr>
           </thead>

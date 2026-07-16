@@ -277,7 +277,9 @@ export interface SessionConfigPayload {
 	// #190 PR 190a — typed `{ container, public }` shape. `protocol` is
 	// intentionally absent in v1 (every port goes through the HTTP/WS
 	// dispatcher in 190c). 190d wires the form against this type.
-	ports?: Array<{ container: number; public: boolean }>;
+	// #198 — optional advisory `readiness` probe polled during bootstrap;
+	// omit the field entirely for "no probe" (never send an empty path).
+	ports?: Array<{ container: number; public: boolean; readiness?: PortReadiness }>;
 	// #190 PR 190a — session-level toggle that re-grants
 	// CAP_NET_BIND_SERVICE on `docker run` so the in-container process
 	// can bind to ports < 1024. Required when any `ports[].container` is
@@ -648,9 +650,20 @@ export async function updateEnvVars(
 
 // ── Exposed-port live edit (#190) ────────────────────────────────────────────
 
+/** #198 — advisory HTTP readiness probe run once during bootstrap.
+ *  `path` must start with "/" (no whitespace / control chars, ≤ 512
+ *  chars); `timeoutSec` is an integer 1–600. */
+export interface PortReadiness {
+	path: string;
+	timeoutSec: number;
+}
+
 export interface PortSpec {
 	container: number;
 	public: boolean;
+	// Absent = no probe. Callers must OMIT the field rather than send
+	// `readiness: { path: "" }` — the backend rejects an empty path.
+	readiness?: PortReadiness;
 }
 
 export interface SessionPorts {

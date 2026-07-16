@@ -990,6 +990,29 @@ main:not([data-sidebar-ready]) #sidebar {
 .ports-modal-row .ports-modal-port-input:focus {
   border-color: #58a6ff;
 }
+/* #198 — readiness probe inputs. Same field styling as the port input,
+   narrower so the five-column row still fits the modal card. */
+.ports-modal-row .ports-modal-readiness-path-input,
+.ports-modal-row .ports-modal-readiness-timeout-input {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+  color: #e6edf3;
+  font-size: 0.8rem;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  outline: none;
+}
+.ports-modal-row .ports-modal-readiness-path-input {
+  width: 7rem;
+}
+.ports-modal-row .ports-modal-readiness-timeout-input {
+  width: 4rem;
+}
+.ports-modal-row .ports-modal-readiness-path-input:focus,
+.ports-modal-row .ports-modal-readiness-timeout-input:focus {
+  border-color: #58a6ff;
+}
 .ports-modal-remove {
   background: transparent;
   border: none;

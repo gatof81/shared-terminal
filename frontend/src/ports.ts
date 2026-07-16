@@ -36,7 +36,15 @@ interface PortsModalRow {
 	id: string;
 	container: string; // raw input value; parsed on save
 	public: boolean;
+	// #198 — raw readiness inputs. Empty path = no readiness (the field
+	// is omitted entirely on save; an empty path is never sent).
+	readinessPath: string;
+	readinessTimeout: string;
 }
+
+// Default probe budget when a path is set but the timeout input is left
+// blank (mirrors the input's placeholder so what-you-see-is-what-you-get).
+const READINESS_TIMEOUT_DEFAULT_S = 60;
 
 let portsModalRows: PortsModalRow[] = [];
 let portsModalSessionId: string | null = null;
@@ -69,8 +77,12 @@ function syncPortsModalRowsFromDom(): void {
 		if (!row) continue;
 		const input = tr.querySelector<HTMLInputElement>(".ports-modal-port-input");
 		const checkbox = tr.querySelector<HTMLInputElement>(".ports-modal-public-input");
+		const pathInput = tr.querySelector<HTMLInputElement>(".ports-modal-readiness-path-input");
+		const timeoutInput = tr.querySelector<HTMLInputElement>(".ports-modal-readiness-timeout-input");
 		if (input) row.container = input.value;
 		if (checkbox) row.public = checkbox.checked;
+		if (pathInput) row.readinessPath = pathInput.value;
+		if (timeoutInput) row.readinessTimeout = timeoutInput.value;
 	}
 }
 
@@ -79,7 +91,7 @@ function renderPortsModalRows(): void {
 	if (portsModalRows.length === 0) {
 		const tr = document.createElement("tr");
 		const td = document.createElement("td");
-		td.colSpan = 3;
+		td.colSpan = 5;
 		td.className = "modal-hint";
 		td.textContent = "No ports exposed. Add one to make it reachable.";
 		tr.appendChild(td);
@@ -109,6 +121,30 @@ function renderPortsModalRows(): void {
 		checkbox.setAttribute("aria-label", "Public (no authentication)");
 		publicTd.appendChild(checkbox);
 
+		// #198 — optional readiness probe inputs. Compact widths (see
+		// main.css) so the row still fits the modal card.
+		const readinessPathTd = document.createElement("td");
+		const pathInput = document.createElement("input");
+		pathInput.type = "text";
+		pathInput.placeholder = "/health";
+		pathInput.spellcheck = false;
+		pathInput.autocomplete = "off";
+		pathInput.className = "ports-modal-readiness-path-input";
+		pathInput.value = row.readinessPath;
+		pathInput.setAttribute("aria-label", "Readiness path (optional)");
+		readinessPathTd.appendChild(pathInput);
+
+		const readinessTimeoutTd = document.createElement("td");
+		const timeoutInput = document.createElement("input");
+		timeoutInput.type = "number";
+		timeoutInput.min = "1";
+		timeoutInput.max = "600";
+		timeoutInput.placeholder = String(READINESS_TIMEOUT_DEFAULT_S);
+		timeoutInput.className = "ports-modal-readiness-timeout-input";
+		timeoutInput.value = row.readinessTimeout;
+		timeoutInput.setAttribute("aria-label", "Readiness timeout in seconds");
+		readinessTimeoutTd.appendChild(timeoutInput);
+
 		const removeTd = document.createElement("td");
 		const removeBtn = document.createElement("button");
 		removeBtn.type = "button";
@@ -120,6 +156,8 @@ function renderPortsModalRows(): void {
 
 		tr.appendChild(portTd);
 		tr.appendChild(publicTd);
+		tr.appendChild(readinessPathTd);
+		tr.appendChild(readinessTimeoutTd);
 		tr.appendChild(removeTd);
 		portsModalTableBody.appendChild(tr);
 	}
@@ -144,7 +182,7 @@ function openPortsModal(): void {
 	portsModalTableBody.textContent = "";
 	const loading = document.createElement("tr");
 	const loadingCell = document.createElement("td");
-	loadingCell.colSpan = 3;
+	loadingCell.colSpan = 5;
 	loadingCell.className = "modal-hint";
 	loadingCell.textContent = "Loading…";
 	loading.appendChild(loadingCell);
@@ -163,6 +201,8 @@ function openPortsModal(): void {
 				id: newPortsModalRowId(),
 				container: String(p.container),
 				public: p.public,
+				readinessPath: p.readiness?.path ?? "",
+				readinessTimeout: p.readiness ? String(p.readiness.timeoutSec) : "",
 			}));
 			renderPortsModalRows();
 		} catch (err) {
@@ -225,8 +265,40 @@ async function savePortsModal(): Promise<void> {
 			);
 			return;
 		}
+		// #198 — readiness. Empty path = no probe: the field is OMITTED
+		// from the wire entry entirely (the backend rejects an empty
+		// path, and `readiness: undefined` would fail `.strict()` if
+		// serialised — JSON.stringify drops undefined properties, so
+		// spreading conditionally keeps the wire shape clean).
+		const path = row.readinessPath.trim();
+		let readiness: { path: string; timeoutSec: number } | undefined;
+		if (path !== "") {
+			// Mirror the backend pattern (leading "/", no whitespace /
+			// control chars, ≤ 512) so typos get an instant message.
+			// biome-ignore lint/suspicious/noControlCharactersInRegex: mirrors the backend schema — control bytes would corrupt the probe request line.
+			if (path.length > 512 || !/^\/[^\s\x00-\x1f]*$/.test(path)) {
+				setPortsModalError(
+					`Readiness path for port ${n} must start with "/" and contain no spaces (max 512 chars).`,
+				);
+				return;
+			}
+			const rawTimeout = row.readinessTimeout.trim();
+			const timeoutSec = rawTimeout === "" ? READINESS_TIMEOUT_DEFAULT_S : Number(rawTimeout);
+			if (!Number.isInteger(timeoutSec) || timeoutSec < 1 || timeoutSec > 600) {
+				setPortsModalError(
+					`Readiness timeout for port ${n} must be a whole number of seconds (1–600).`,
+				);
+				return;
+			}
+			readiness = { path, timeoutSec };
+		} else if (row.readinessTimeout.trim() !== "") {
+			setPortsModalError(
+				`Port ${n} has a readiness timeout but no path. Add a path (e.g. /health) or clear the timeout.`,
+			);
+			return;
+		}
 		seen.add(n);
-		ports.push({ container: n, public: row.public });
+		ports.push({ container: n, public: row.public, ...(readiness ? { readiness } : {}) });
 	}
 
 	const sessionId = portsModalSessionId;
@@ -247,7 +319,13 @@ async function savePortsModal(): Promise<void> {
 portsModalAddRowBtn.addEventListener("click", () => {
 	syncPortsModalRowsFromDom();
 	setPortsModalError(null);
-	portsModalRows.push({ id: newPortsModalRowId(), container: "", public: false });
+	portsModalRows.push({
+		id: newPortsModalRowId(),
+		container: "",
+		public: false,
+		readinessPath: "",
+		readinessTimeout: "",
+	});
 	renderPortsModalRows();
 	const last = portsModalTableBody.querySelector<HTMLTableRowElement>(
 		".ports-modal-row:last-child",
