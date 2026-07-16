@@ -470,7 +470,27 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 		const { userId } = req as AuthedRequest;
 		try {
 			const meta = await sessions.assertOwnership(req.params.id, userId);
-			res.json(serializeMeta(meta));
+			// Runtime-readiness signal (#393): true once the entrypoint has
+			// finished provisioning (docker exec can resolve image binaries),
+			// false while it's still running (or the container predates the
+			// sentinel — recycle to fix), null when not probed: session not
+			// running, or the probe itself errored (container mid-teardown /
+			// daemon hiccup — "unknown" is more honest than a hard 500 for a
+			// status-shaped field). Single-session GET only: the list
+			// endpoint would fan out one docker exec per row on the sidebar's
+			// 5 s poll. The probe is cheap after first success (positive
+			// per-container cache in DockerManager).
+			let runtimeReady: boolean | null = null;
+			if (meta.status === "running") {
+				try {
+					// Pass the row assertOwnership just fetched so the probe
+					// doesn't re-read it from D1 (PR #399 review SHOULD-FIX).
+					runtimeReady = await docker.isRuntimeReady(req.params.id, meta);
+				} catch {
+					runtimeReady = null;
+				}
+			}
+			res.json({ ...serializeMeta(meta), runtimeReady });
 		} catch (err) {
 			handleSessionError(err, res);
 		}

@@ -136,6 +136,29 @@ kill round-trip; deliberately out of scope for v1.
 Once the NDJSON stream has started, failures arrive as terminal `error`
 events, not status codes.
 
+## Runtime readiness (#393)
+
+`container.start()` returns when the entrypoint **process** starts, not
+when the script completes — so a session can report `status: "running"`
+(and even `bootstrapped`) while the entrypoint is still mid-provision.
+Concretely, the entrypoint replaces `~/.npm-global` with a workspace
+symlink, and until that swap finishes an exec'd `claude` (or anything
+else installed there) fails with `command not found`.
+
+Poll `GET /api/sessions/:id` and read the `runtimeReady` field:
+
+| Value | Meaning |
+| --- | --- |
+| `true` | entrypoint finished — an exec can resolve binaries installed in the image. This is the ordering guarantee. |
+| `false` | still provisioning — keep polling. Also the permanent answer for a container created from a pre-sentinel image (recycle the session to fix). |
+| `null` | not determinable: session not running, or the probe errored transiently. |
+
+The signal is backed by a sentinel file the entrypoint touches as its
+last step; probes are on-demand and cached per container after the
+first success, so polling this endpoint is cheap. The bootstrap
+pipeline waits on the same signal internally, so lifecycle hooks
+(`postCreate`/`postStart`) don't race the window either.
+
 ## Non-goals (v1)
 
 - Event replay / resume (`?after=seq`) — additive if needed.
