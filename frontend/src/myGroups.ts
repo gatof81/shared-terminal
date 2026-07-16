@@ -17,7 +17,7 @@ import {
 	type ObservableSession,
 	type Tab,
 } from "./api.js";
-import { currentFontSize, sessions, showToast } from "./main.js";
+import { currentFontSize, sessions, sessionsLoadedOnce, showToast } from "./main.js";
 import { openTerminalSession, type TerminalSession } from "./terminal.js";
 
 // ── DOM (re-queried locally; see header) ─────────────────────────────────
@@ -334,6 +334,15 @@ export async function refreshSidebarObservables(): Promise<void> {
 }
 
 export function renderSidebarObservables(): void {
+	// Hold the section back until the own-session list has loaded once:
+	// on a fresh page load the observables fetch can win the race and a
+	// render here would flash the user's own sessions as "read-only"
+	// rows (dedupe against a not-yet-loaded list filters nothing).
+	// renderSessionList() re-invokes this after every list render, so
+	// the section appears as soon as both datasets exist — no polling
+	// cycle to wait out. A user with genuinely zero sessions still
+	// renders fine: setSessions([]) flips the flag.
+	if (!sessionsLoadedOnce) return;
 	// Own sessions already render in the list above — showing them
 	// again as "observable" would read as a duplicate-row bug. The
 	// modal deliberately keeps them (observing your own session in

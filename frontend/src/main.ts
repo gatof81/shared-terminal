@@ -168,7 +168,16 @@ export const closingTabs = new Set<string>();
 // logic lives in sessionCore.ts; ESM forbids it reassigning these imported
 // bindings, so writes go through these setters (reads use the live bindings
 // directly). main.ts and feature modules also read the bindings directly.
+// Flips true on the first setSessions() and stays true. The sidebar
+// observables dedupe (#394) needs to distinguish "own list not loaded
+// yet" (must NOT render — own sessions would flash as read-only rows)
+// from "user genuinely has zero sessions" (rendering unfiltered is
+// correct — there's nothing to dedupe). `sessions.length === 0` alone
+// can't tell those apart.
+export let sessionsLoadedOnce = false;
+
 export function setSessions(v: SessionInfo[]): void {
+	sessionsLoadedOnce = true;
 	sessions = v;
 }
 export function setActiveSessionId(v: string | null): void {
