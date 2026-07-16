@@ -1436,6 +1436,31 @@ main:not([data-sidebar-ready]) #sidebar {
   overflow-y: auto;
   padding: 0.5rem;
 }
+/* Lead-side observable sessions surfaced in the sidebar below the
+   user's own list (#394). Sibling of #session-list (not inside it —
+   renderSessionList() clears that container wholesale), with its own
+   capped scroll region so a lead of a busy group can't have their own
+   sessions squeezed out of view. Hidden unless the user leads a group
+   with at least one running member session. */
+#observable-section {
+  flex-shrink: 0;
+  max-height: 40%;
+  overflow-y: auto;
+  border-top: 1px solid #30363d;
+  padding: 0.25rem 0.5rem 0.5rem;
+}
+#observable-section-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #8b949e;
+  padding: 0.4rem 0.6rem 0.3rem;
+}
+.observable-owner {
+  font-size: 0.68rem;
+  color: #8b949e;
+}
 /* Mobile-only menu inside the sidebar drawer. On desktop the same
    actions live in the header; on mobile we surface them here so the
    header can stay slim. Hidden by default — the mobile media query

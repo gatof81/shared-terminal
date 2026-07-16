@@ -11,12 +11,13 @@
 import {
 	fetchMyGroups,
 	fetchMyObservableSessions,
+	isLead,
 	type LeadGroup,
 	listTabs,
 	type ObservableSession,
 	type Tab,
 } from "./api.js";
-import { currentFontSize, showToast } from "./main.js";
+import { currentFontSize, sessions, showToast } from "./main.js";
 import { openTerminalSession, type TerminalSession } from "./terminal.js";
 
 // ── DOM (re-queried locally; see header) ─────────────────────────────────
@@ -29,6 +30,8 @@ const observeModal = document.getElementById("observe-modal")!;
 const observeModalTitle = document.getElementById("observe-modal-title")!;
 const observeModalHint = document.getElementById("observe-modal-hint")!;
 const observeTerminalHost = document.getElementById("observe-terminal-host")!;
+const observableSection = document.getElementById("observable-section")!;
+const observableListEl = document.getElementById("observable-list")!;
 
 // ── My groups (#201e — lead-side observe surface) ──────────────────────────
 //
@@ -102,6 +105,11 @@ async function refreshMyGroups(): Promise<void> {
 			fetchMyObservableSessions(),
 		]);
 		renderMyGroups(groups, observableSessions);
+		// Feed the sidebar section (#394) from the same fetch — a lead
+		// who just acted on the modal shouldn't see the sidebar lag
+		// behind until its slower poll cycle catches up.
+		cachedObservables = observableSessions;
+		renderSidebarObservables();
 	} catch (err) {
 		showToast((err as Error).message, true);
 	} finally {
@@ -292,5 +300,78 @@ observeModal.addEventListener("click", (e) => {
 
 // (Auto-refresh moved to `autoPollTick` higher in this file — the 5 s
 //  cadence subsumes the older 15 s timer that used to live here.)
+
+// ── Sidebar observables (#394) ──────────────────────────────────────────────
+//
+// The same lead-side observable list, surfaced as a sidebar section
+// below the user's own sessions so a lead doesn't have to open the
+// My groups modal for every observe. Fetch and render are split:
+// `refreshSidebarObservables` does the D1-backed round-trip and is
+// called on lead-status hydration, on the manual sidebar refresh, and
+// on a slow multiple of the auto-poll; `renderSidebarObservables`
+// re-renders from the cached fetch and runs on every 5 s tick — the
+// dedupe against the user's own `sessions` list depends on state that
+// refreshes faster than the observables themselves.
+
+let cachedObservables: ObservableSession[] = [];
+
+export async function refreshSidebarObservables(): Promise<void> {
+	if (!isLead()) {
+		cachedObservables = [];
+		renderSidebarObservables();
+		return;
+	}
+	try {
+		cachedObservables = await fetchMyObservableSessions();
+	} catch {
+		// Silent: the sidebar is a secondary surface polled in the
+		// background — a transient fetch failure here would otherwise
+		// toast every lead on every network blip. The My groups modal
+		// (user-initiated) keeps its loud error path.
+		return;
+	}
+	renderSidebarObservables();
+}
+
+export function renderSidebarObservables(): void {
+	// Own sessions already render in the list above — showing them
+	// again as "observable" would read as a duplicate-row bug. The
+	// modal deliberately keeps them (observing your own session in
+	// read-only is a legitimate niche); the sidebar is for the
+	// cross-user case.
+	const own = new Set(sessions.map((s) => s.sessionId));
+	const rows = cachedObservables.filter((s) => s.status === "running" && !own.has(s.sessionId));
+	observableListEl.textContent = "";
+	if (rows.length === 0) {
+		observableSection.classList.add("hidden");
+		return;
+	}
+	observableSection.classList.remove("hidden");
+	for (const s of rows) {
+		const item = document.createElement("div");
+		item.className = "session-item";
+
+		const dot = document.createElement("span");
+		dot.className = `session-dot ${s.status}`;
+		item.appendChild(dot);
+
+		const nameCol = document.createElement("span");
+		nameCol.className = "session-name-col";
+		const name = document.createElement("span");
+		name.className = "session-name";
+		name.textContent = s.name;
+		nameCol.appendChild(name);
+		const owner = document.createElement("span");
+		owner.className = "observable-owner";
+		owner.textContent = `${s.ownerUsername} — read-only`;
+		nameCol.appendChild(owner);
+		item.appendChild(nameCol);
+
+		item.addEventListener("click", () => {
+			void openObserveModal(s);
+		});
+		observableListEl.appendChild(item);
+	}
+}
 
 export { closeMyGroupsModal, closeObserveModal };

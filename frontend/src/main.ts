@@ -32,7 +32,12 @@ import {
 } from "./api.js";
 import { closeInvitesModal } from "./invites.js";
 import { initKeyBar, updateKeyBarVisibility } from "./keyBar.js";
-import { closeMyGroupsModal, closeObserveModal } from "./myGroups.js";
+import {
+	closeMyGroupsModal,
+	closeObserveModal,
+	refreshSidebarObservables,
+	renderSidebarObservables,
+} from "./myGroups.js";
 import {
 	applyResourceCapsToForm,
 	closeNewSessionModal,
@@ -263,6 +268,10 @@ export function applyAdminVisibility() {
 	const lead = isLead();
 	myGroupsBtn.classList.toggle("hidden", !lead);
 	sidebarMyGroupsBtn.classList.toggle("hidden", !lead);
+	// Sidebar observables section (#394): hydrate whenever lead status
+	// (re)resolves. The function self-hides the section for non-leads,
+	// so calling unconditionally keeps login/logout symmetric.
+	void refreshSidebarObservables();
 }
 
 function updateAuthUI() {
@@ -536,7 +545,9 @@ showTerminatedToggle.addEventListener("change", () => {
 sidebarRefreshBtn.addEventListener("click", async () => {
 	sidebarRefreshBtn.disabled = true;
 	try {
-		await refreshSessions();
+		// Observables (#394) ride the manual refresh too — same "user
+		// controls when round-trips fire" contract as the session list.
+		await Promise.all([refreshSessions(), refreshSidebarObservables()]);
 	} finally {
 		sidebarRefreshBtn.disabled = false;
 	}
@@ -554,6 +565,14 @@ sidebarRefreshBtn.addEventListener("click", async () => {
 // in containerStats.ts softens the case where the user clicks the
 // manual button right after a tick fired.
 const AUTO_POLL_INTERVAL_MS = 5_000;
+// Observables (#394) refresh on every 6th tick (30 s): group membership
+// and member-session churn is far slower than per-container usage
+// stats, and each fetch is an extra D1 JOIN — keep it off the 5 s hot
+// path. The in-between ticks still re-RENDER from cache below, because
+// the dedupe against the user's own session list consumes state the
+// 5 s poll just refreshed.
+const OBSERVABLES_POLL_EVERY_N_TICKS = 6;
+let autoPollTickCount = 0;
 let autoPollInFlight = false;
 async function autoPollTick(): Promise<void> {
 	if (autoPollInFlight) return;
@@ -572,6 +591,12 @@ async function autoPollTick(): Promise<void> {
 		// makes refreshSessions re-throw would surface as an
 		// unhandledRejection rather than being silently swallowed.
 		await refreshSessions();
+		autoPollTickCount++;
+		if (autoPollTickCount % OBSERVABLES_POLL_EVERY_N_TICKS === 0) {
+			await refreshSidebarObservables();
+		} else {
+			renderSidebarObservables();
+		}
 	} finally {
 		autoPollInFlight = false;
 	}
