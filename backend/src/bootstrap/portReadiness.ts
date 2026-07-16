@@ -118,8 +118,12 @@ async function probePort(port: PortEntry, args: RunPortReadinessProbesArgs): Pro
 			// abort is picked up by the loop-top check on the next pass.
 		}
 		if (Date.now() >= deadline) {
+			// Actual elapsed, not the stated budget: the deadline check
+			// fires after a request completes, so a slow target can
+			// overshoot timeoutSec by up to the per-request cap — mirror
+			// the success line's accounting.
 			args.onOutput(
-				`[readiness] WARN: port ${port.container} not ready after ${timeoutSec}s — continuing (readiness is advisory)\n`,
+				`[readiness] WARN: port ${port.container} not ready after ${((Date.now() - startedAt) / 1000).toFixed(1)}s — continuing (readiness is advisory)\n`,
 			);
 			return;
 		}

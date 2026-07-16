@@ -89,8 +89,10 @@ describe("runPortReadinessProbes", () => {
 				pollIntervalMs: 5,
 			}),
 		).resolves.toBeUndefined();
-		expect(lines.at(-1)).toBe(
-			"[readiness] WARN: port 3000 not ready after 1s — continuing (readiness is advisory)\n",
+		// Elapsed is real time, not the stated budget (PR #404 NIT) —
+		// match the shape, not an exact figure.
+		expect(lines.at(-1)).toMatch(
+			/^\[readiness\] WARN: port 3000 not ready after \d+\.\d+s — continuing \(readiness is advisory\)\n$/,
 		);
 	}, 10_000);
 
@@ -171,7 +173,7 @@ describe("runPortReadinessProbes", () => {
 		).resolves.toBeUndefined();
 		// Sync throws land in the same not-ready-yet bucket as rejections,
 		// so the budget still runs out into the advisory WARN.
-		expect(lines.at(-1)).toMatch(/WARN: port 3000 not ready after 1s/);
+		expect(lines.at(-1)).toMatch(/WARN: port 3000 not ready after \d+\.\d+s/);
 	}, 10_000);
 
 	it("discards the response body so the poll loop can't leak sockets", async () => {
