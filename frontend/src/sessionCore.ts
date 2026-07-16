@@ -43,6 +43,7 @@ import {
 } from "./main.js";
 import { renderSidebarObservables } from "./myGroups.js";
 import { openBootstrapLogModal } from "./newSession.js";
+import { badgeFor, clearBadge, recordOutput } from "./tabActivity.js";
 import { openTerminalSession, type SessionStatus } from "./terminal.js";
 
 // ── DOM (re-queried locally) ─────────────────────────────────────────────
@@ -377,7 +378,8 @@ export function renderTabBar() {
 
 	for (const tab of currentTabs) {
 		const chip = document.createElement("div");
-		chip.className = `tab-chip${tab.tabId === currentActiveTabId ? " active" : ""}`;
+		const badge = badgeFor(tab.tabId);
+		chip.className = `tab-chip${tab.tabId === currentActiveTabId ? " active" : ""}${badge ? ` activity-${badge}` : ""}`;
 		chip.dataset.tabId = tab.tabId;
 		chip.title = tab.label;
 
@@ -421,6 +423,17 @@ export function renderTabBar() {
 	// sync without having to thread updateChromeToggle() through every
 	// caller of openTab/addTab/closeTab.
 	updateChromeToggle();
+}
+
+// Targeted repaint of one chip's activity badge (#359) — output streams
+// per-chunk, so rebuilding the whole bar on every state flip would churn
+// DOM for nothing when only a class pair changes.
+function updateChipBadge(tabId: string) {
+	const chip = terminalTabs.querySelector(`.tab-chip[data-tab-id="${CSS.escape(tabId)}"]`);
+	if (!chip) return;
+	const badge = badgeFor(tabId);
+	chip.classList.toggle("activity-output", badge === "output");
+	chip.classList.toggle("activity-bell", badge === "bell");
 }
 
 function openTab(tabId: string) {
@@ -487,6 +500,15 @@ function openTab(tabId: string) {
 				// during a Tunnel blip REST is as dead as the WS, and only a
 				// definitive "not running" should abort the loop.
 				canReconnect: async () => (await getSession(ownSessionId)).status === "running",
+				onOutput: (data: string) => {
+					// Session guard mirrors onStatus/onError: a chunk draining
+					// from a torn-down tab after a session switch must not
+					// badge whatever chip happens to hold this tabId now.
+					if (activeSessionId !== ownSessionId) return;
+					if (recordOutput(tabId, data, tabId === currentActiveTabId)) {
+						updateChipBadge(tabId);
+					}
+				},
 				onStatus: (status: SessionStatus) => {
 					if (activeSessionId !== ownSessionId) return;
 
@@ -649,6 +671,10 @@ function openTab(tabId: string) {
 	entry.pane.classList.add("active");
 	terminalContainer.style.display = "block";
 	setCurrentActiveTabId(tabId);
+	// Activation acknowledges the pending activity — the user is now
+	// looking at whatever rang/streamed. renderTabBar() below repaints
+	// the chip from the cleared state.
+	clearBadge(tabId);
 	renderTabBar();
 }
 
@@ -783,6 +809,7 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
 		currentTerminals.delete(tabId);
 	}
 	setCurrentTabs(currentTabs.filter((t) => t.tabId !== tabId));
+	clearBadge(tabId);
 
 	// Closing the last tab on mobile leaves the chrome drawer collapsed
 	// (default state), and the CSS hides #terminal-tabs entirely while

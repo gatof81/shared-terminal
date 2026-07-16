@@ -1822,6 +1822,35 @@ main:not([data-sidebar-ready]) #sidebar {
   cursor: not-allowed;
   opacity: 0.2 !important;
 }
+/* Background-tab activity badge (#359). Absolutely positioned in the
+   chip's top-right corner so appearing/disappearing never shifts the
+   chip row (the alternative — an inline dot — would nudge the label and
+   × on every state flip). Only non-active chips ever carry the class
+   (activation clears the state), so the `position: relative` here can't
+   fight .tab-chip.active's own relative+top offset. */
+.tab-chip.activity-output,
+.tab-chip.activity-bell {
+  position: relative;
+}
+.tab-chip.activity-output::after,
+.tab-chip.activity-bell::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #3fb950;
+}
+/* Bell (BEL 0x07 seen in the stream — e.g. Claude asking for input):
+   accent-colored with a soft ring so it reads stronger than plain
+   output at a glance. Same footprint, so output→bell upgrades don't
+   move anything either. */
+.tab-chip.activity-bell::after {
+  background: #58a6ff;
+  box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.25);
+}
 #tab-add {
   background: transparent;
   border: 1px dashed #30363d;
