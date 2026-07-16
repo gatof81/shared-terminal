@@ -41,6 +41,7 @@ import {
 	showToast,
 	updateChromeToggle,
 } from "./main.js";
+import { renderSidebarObservables } from "./myGroups.js";
 import { openBootstrapLogModal } from "./newSession.js";
 import { openTerminalSession, type SessionStatus } from "./terminal.js";
 
@@ -240,6 +241,14 @@ export function renderSessionList() {
 
 		sessionList.appendChild(item);
 	}
+	// Sidebar observables (#394) dedupe against THIS list, so re-render
+	// them whenever it changes. Without this, the initial-load race —
+	// observables fetch resolving before the first listSessions() — shows
+	// the user's own sessions as "read-only" rows for up to one poll
+	// cycle. Hooking here (not just the 5 s tick) makes the dedupe
+	// deterministic: whichever fetch lands last re-renders with both
+	// datasets present.
+	renderSidebarObservables();
 }
 
 export async function openSession(sessionId: string) {
