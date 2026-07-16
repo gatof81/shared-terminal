@@ -1994,6 +1994,22 @@ describe("isRuntimeReady (#393)", () => {
 		expect(container._execs.length).toBe(execsAfterFlip);
 	});
 
+	it("skips its own getOrThrow when the caller passes prefetched meta (PR #399 SHOULD-FIX)", async () => {
+		const sessions = makeFakeSessions();
+		const { dm } = makeDocker({
+			sessions,
+			oneShot: (cmd) => (cmd[0] === "test" ? { stdout: "", exitCode: 0 } : undefined),
+		});
+		const prefetched = { containerId: "container-123", status: "running" as const };
+		await dm.isRuntimeReady("s1", prefetched);
+		// Exactly one D1 read: execOneShot's own (pre-existing). Without
+		// prefetched meta this would be two.
+		expect(sessions.getOrThrow).toHaveBeenCalledTimes(1);
+		// Cached positive: zero further reads.
+		await dm.isRuntimeReady("s1", prefetched);
+		expect(sessions.getOrThrow).toHaveBeenCalledTimes(1);
+	});
+
 	it("returns false without probing when the session has no container id", async () => {
 		const { dm, container } = makeDocker({ sessions: makeFakeSessions(null) });
 		expect(await dm.isRuntimeReady("s1")).toBe(false);

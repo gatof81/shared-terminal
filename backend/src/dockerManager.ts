@@ -28,6 +28,7 @@ import {
 	type SessionConfigRecord,
 } from "./sessionConfig.js";
 import type { SessionManager } from "./sessionManager.js";
+import type { SessionMeta } from "./types.js";
 
 const SESSION_IMAGE = process.env.SESSION_IMAGE ?? "shared-terminal-session";
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
@@ -2109,9 +2110,19 @@ export class DockerManager {
 	 * warning in reconcile(). Probes are on-demand (no background
 	 * polling): one `docker exec test -f` per call until the first
 	 * success, then answered from the positive cache.
+	 *
+	 * `prefetched` lets a caller that already holds the session row
+	 * (the GET /sessions/:id route, straight after assertOwnership)
+	 * skip this method's own getOrThrow — the endpoint is polled by
+	 * readiness-gating clients, and CLAUDE.md's "keep D1 query counts
+	 * low on hot paths" applies squarely. Callers without meta in
+	 * hand (the bootstrap gate) omit it. PR #399 review SHOULD-FIX.
 	 */
-	async isRuntimeReady(sessionId: string): Promise<boolean> {
-		const meta = await this.sessions.getOrThrow(sessionId);
+	async isRuntimeReady(
+		sessionId: string,
+		prefetched?: Pick<SessionMeta, "containerId" | "status">,
+	): Promise<boolean> {
+		const meta = prefetched ?? (await this.sessions.getOrThrow(sessionId));
 		if (!meta.containerId || meta.status !== "running") return false;
 		if (this.runtimeReadyContainers.has(meta.containerId)) return true;
 		const { exitCode } = await this.execOneShot(sessionId, ["test", "-f", RUNTIME_READY_SENTINEL]);

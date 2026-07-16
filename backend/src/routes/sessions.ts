@@ -483,7 +483,9 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			let runtimeReady: boolean | null = null;
 			if (meta.status === "running") {
 				try {
-					runtimeReady = await docker.isRuntimeReady(req.params.id);
+					// Pass the row assertOwnership just fetched so the probe
+					// doesn't re-read it from D1 (PR #399 review SHOULD-FIX).
+					runtimeReady = await docker.isRuntimeReady(req.params.id, meta);
 				} catch {
 					runtimeReady = null;
 				}

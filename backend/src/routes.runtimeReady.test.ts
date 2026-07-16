@@ -143,7 +143,9 @@ describe("GET /sessions/:id runtimeReady (#393)", () => {
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { runtimeReady: boolean | null };
 		expect(body.runtimeReady).toBe(true);
-		expect(probeSpy).toHaveBeenCalledWith("sess-1");
+		// The route passes the meta assertOwnership already fetched so the
+		// probe skips its own D1 read (PR #399 review SHOULD-FIX).
+		expect(probeSpy).toHaveBeenCalledWith("sess-1", expect.objectContaining({ status: "running" }));
 	});
 
 	it("reports false while the sentinel hasn't appeared yet", async () => {
