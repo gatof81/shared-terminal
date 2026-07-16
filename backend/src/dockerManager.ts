@@ -1677,7 +1677,24 @@ export class DockerManager {
 	): Promise<void> {
 		const update: { NanoCpus?: number; Memory?: number; MemorySwap?: number } = {};
 		if (caps.cpuLimit !== undefined) {
-			update.NanoCpus = caps.cpuLimit;
+			// #384 — same host clamp as spawn, same rationale: the admin
+			// schema validates against the static 8-core ceiling, so on a
+			// downsized host an in-bounds cpuLimit can still exceed the
+			// host and dockerd rejects the live update with a message the
+			// admin route's error-mapping doesn't recognise (generic 500).
+			// D1 keeps what the admin typed (persist-before-apply is the
+			// chosen rollback shape); the host clamps only what actually
+			// lands on the cgroup — consistent with what the next spawn
+			// would do anyway.
+			const hostCap = hostCpuNanoCap();
+			update.NanoCpus = Math.min(caps.cpuLimit, hostCap);
+			if (update.NanoCpus < caps.cpuLimit) {
+				logger.warn(
+					`[docker] container ${containerId.slice(0, 12)}: requested CPU cap ` +
+						`${caps.cpuLimit / 1_000_000_000} cores exceeds this host's ` +
+						`${hostCap / 1_000_000_000}; applying the host value`,
+				);
+			}
 		}
 		if (caps.memLimit !== undefined) {
 			update.Memory = caps.memLimit;

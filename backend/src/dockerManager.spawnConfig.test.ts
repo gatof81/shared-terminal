@@ -684,6 +684,18 @@ describe("DockerManager.updateResources", () => {
 		});
 	});
 
+	it("clamps NanoCpus to the host's core count on live edit too (#384)", async () => {
+		// The admin schema validates against the static 8-core ceiling,
+		// so on a downsized host an in-bounds value can still exceed the
+		// host; dockerd would reject the update with a message the admin
+		// route's error-mapping doesn't recognise. Memory is untouched —
+		// Docker accepts over-provisioned Memory.
+		osStubs.cpuCount = 4;
+		const { dm, captured } = makeDmWithUpdateCapture();
+		await dm.updateResources("c1", { cpuLimit: 7_000_000_000 });
+		expect(captured.opts).toEqual({ NanoCpus: 4_000_000_000 });
+	});
+
 	it("propagates the underlying dockerode error so the route can pattern-match", async () => {
 		const dm = new DockerManager(fakeSessions());
 		const fakeContainer = {
