@@ -16,6 +16,7 @@ import {
 	type OutputListener,
 	PGID_SENTINEL,
 	PGID_WRAPPER_SCRIPT,
+	RUNTIME_READY_SENTINEL,
 	sanitiseHostname,
 	sanitiseUploadName,
 } from "./dockerManager.js";
@@ -1969,5 +1970,53 @@ describe("DockerManager.killExecProcessGroup", () => {
 		expect(KILL_PROCESS_GROUP_SCRIPT.indexOf("echo already-exited")).toBeLessThan(
 			KILL_PROCESS_GROUP_SCRIPT.indexOf("kill -TERM"),
 		);
+	});
+});
+
+// ── Runtime readiness (#393) ────────────────────────────────────────────────
+
+describe("isRuntimeReady (#393)", () => {
+	it("reports false while the sentinel is absent, true once present, then answers from cache", async () => {
+		let sentinelPresent = false;
+		const { dm, container } = makeDocker({
+			oneShot: (cmd) =>
+				cmd[0] === "test" && cmd[1] === "-f" && cmd[2] === RUNTIME_READY_SENTINEL
+					? { stdout: "", exitCode: sentinelPresent ? 0 : 1 }
+					: undefined,
+		});
+		expect(await dm.isRuntimeReady("s1")).toBe(false);
+		// Negative results are not cached — the next probe sees the flip.
+		sentinelPresent = true;
+		expect(await dm.isRuntimeReady("s1")).toBe(true);
+		// Positive result IS cached: no further exec fires.
+		const execsAfterFlip = container._execs.length;
+		expect(await dm.isRuntimeReady("s1")).toBe(true);
+		expect(container._execs.length).toBe(execsAfterFlip);
+	});
+
+	it("returns false without probing when the session has no container id", async () => {
+		const { dm, container } = makeDocker({ sessions: makeFakeSessions(null) });
+		expect(await dm.isRuntimeReady("s1")).toBe(false);
+		expect(container._execs.length).toBe(0);
+	});
+
+	it("returns false without probing when the session is not running", async () => {
+		const meta = {
+			sessionId: "s1",
+			userId: "u1",
+			name: "test",
+			status: "stopped" as const,
+			containerId: "container-123",
+			containerName: "st-test",
+			cols: 80,
+			rows: 24,
+			envVars: {},
+			createdAt: new Date(),
+			lastConnectedAt: null,
+		};
+		const sessions = { getOrThrow: vi.fn(async () => meta) } as unknown as SessionManager;
+		const { dm, container } = makeDocker({ sessions });
+		expect(await dm.isRuntimeReady("s1")).toBe(false);
+		expect(container._execs.length).toBe(0);
 	});
 });

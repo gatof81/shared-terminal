@@ -157,6 +157,15 @@ interface SharedExec {
 	appliedSize: { cols: number; rows: number };
 }
 
+// ── Runtime readiness (#393) ─────────────────────────────────────────────────
+// The entrypoint touches this file as its LAST provisioning step (and
+// rm -f's it as its first, against manual in-place restarts). Its
+// presence is the `runtimeReady` contract: docker exec can resolve
+// binaries installed in the image. Keep in sync with the two sites in
+// session-image/entrypoint.sh.
+export const RUNTIME_READY_SENTINEL = "/tmp/.st-ready";
+const RUNTIME_READY_CACHE_MAX = 10_000;
+
 // ── Cancellable exec (process-group) plumbing ───────────────────────────────
 // Docker has no "kill exec" API: destroying the host-side stream leaves the
 // in-container process running, and until now the only remedy was killing
@@ -252,6 +261,18 @@ export class DockerManager {
 	private reconcileLastRunAt: number | null = null;
 	private reconcileSessionsCheckedSinceBoot = 0;
 	private reconcileErrorsSinceBoot = 0;
+
+	// Runtime-readiness positive cache (#393): container ids whose
+	// sentinel probe already succeeded. Readiness is monotonic within
+	// one container lifetime (the entrypoint clears the sentinel at
+	// script start and the backend never restarts a container in
+	// place — stop kills, /start spawns fresh with a new id), so a
+	// positive result never needs re-probing and negative results are
+	// deliberately NOT cached (the poll loop's whole point is to see
+	// the flip). Bounded with insertion-order eviction like the
+	// ownership cache — stale ids of long-gone containers are the
+	// only thing ever evicted.
+	private readonly runtimeReadyContainers = new Set<string>();
 
 	constructor(sessions: SessionManager, dockerOpts?: Dockerode.DockerOptions) {
 		// docker-modem reads DOCKER_HOST from the environment ONLY when the
@@ -2067,6 +2088,43 @@ export class DockerManager {
 
 		logger.info(`[docker] spawned shared exec for ${key}`);
 		return s;
+	}
+
+	// ── Runtime readiness (#393) ───────────────────────────────────────────
+
+	/**
+	 * True once the container's entrypoint has finished provisioning —
+	 * concretely, once `docker exec` can resolve binaries installed in
+	 * the image. `container.start()` returns when Docker starts the
+	 * entrypoint PROCESS, not when the script completes; the script then
+	 * replaces `~/.npm-global` with a workspace symlink, and between the
+	 * `mv` and the `ln` every PATH lookup of `claude` fails (seconds on
+	 * a first boot, when a `cp -a` of the CLI install precedes the
+	 * swap). The sentinel is touched as the entrypoint's last step, so
+	 * its presence closes that window.
+	 *
+	 * Containers created from a pre-#393 image never write the sentinel
+	 * and stay `false` for their whole lifetime — recycle (stop/start)
+	 * to pick up the rebuilt image, same cutover shape as the hardening
+	 * warning in reconcile(). Probes are on-demand (no background
+	 * polling): one `docker exec test -f` per call until the first
+	 * success, then answered from the positive cache.
+	 */
+	async isRuntimeReady(sessionId: string): Promise<boolean> {
+		const meta = await this.sessions.getOrThrow(sessionId);
+		if (!meta.containerId || meta.status !== "running") return false;
+		if (this.runtimeReadyContainers.has(meta.containerId)) return true;
+		const { exitCode } = await this.execOneShot(sessionId, ["test", "-f", RUNTIME_READY_SENTINEL]);
+		if (exitCode !== 0) return false;
+		this.runtimeReadyContainers.add(meta.containerId);
+		// Delete-then-insert insertion-order eviction, same shape as the
+		// ownership cache (#239). 10k container ids ≈ a deployment's
+		// worth of respawns between backend restarts.
+		if (this.runtimeReadyContainers.size > RUNTIME_READY_CACHE_MAX) {
+			const oldest = this.runtimeReadyContainers.values().next().value;
+			if (oldest !== undefined) this.runtimeReadyContainers.delete(oldest);
+		}
+		return true;
 	}
 
 	// ── Tabs (tmux session per tab) ────────────────────────────────────────

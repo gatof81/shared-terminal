@@ -9,6 +9,16 @@
 # ──────────────────────────────────────────────────────────────────────────────
 set -e
 
+# Runtime-readiness sentinel (#393), part 1 of 2: clear any stale copy
+# BEFORE provisioning starts. The backend never restarts a container
+# in place (stop → kill, /start → fresh container), but a manual
+# `docker restart` re-runs this script with /tmp intact — without the
+# rm, the sentinel from the previous boot would report ready while the
+# ~/.npm-global swap below is mid-flight, which is exactly the window
+# the sentinel exists to close. Path must match RUNTIME_READY_SENTINEL
+# in backend/src/dockerManager.ts.
+rm -f /tmp/.st-ready
+
 cd /home/developer/workspace
 
 # Persist the user-level npm global prefix across container replacement.
@@ -401,6 +411,13 @@ if ! ln -sfn "$CLAUDE_JSON_WS" "$CLAUDE_JSON_HOME"; then
         echo "[entrypoint] WARN: couldn't symlink ~/.claude.json into workspace; " \
              "Claude onboarding/project state won't persist across restarts." >&2
 fi
+
+# Runtime-readiness sentinel (#393), part 2 of 2: touched as the LAST
+# provisioning step — after the ~/.npm-global swap and every symlink
+# above — so its presence is the contract the API's `runtimeReady`
+# field exposes: "docker exec can resolve binaries installed in the
+# image". Anything added to this script later must go ABOVE this line.
+touch /tmp/.st-ready
 
 echo "[entrypoint] container ready — create a tab from the UI to begin"
 

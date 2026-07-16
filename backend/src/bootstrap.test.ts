@@ -72,7 +72,10 @@ import {
 	type BootstrapMessage,
 	drainInFlightBootstraps,
 	markBootstrapped,
+	RUNTIME_READY_POLL_INTERVAL_MS,
+	RUNTIME_READY_WAIT_CAP_MS,
 	runAsyncBootstrap,
+	waitForRuntimeReady,
 } from "./bootstrap.js";
 import type { DockerManager } from "./dockerManager.js";
 import type { SessionManager } from "./sessionManager.js";
@@ -1138,5 +1141,68 @@ describe("drainInFlightBootstraps (#348)", () => {
 		await drainInFlightBootstraps();
 		// No late abort machinery fired against the finished run.
 		expect(updateStatus).not.toHaveBeenCalled();
+	});
+});
+
+// ── waitForRuntimeReady (#393) ──────────────────────────────────────────────
+
+describe("waitForRuntimeReady (#393)", () => {
+	const makeDockerStub = (impl: () => Promise<boolean>) =>
+		({ isRuntimeReady: vi.fn(impl) }) as unknown as DockerManager;
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("returns silently when the first probe is already ready", async () => {
+		const docker = makeDockerStub(async () => true);
+		const onOutput = vi.fn();
+		await waitForRuntimeReady("s1", docker, onOutput, new AbortController().signal);
+		// The common case (respawn onto a warm image) must not spam the
+		// bootstrap log with a waiting/ready pair for a 0-ms wait.
+		expect(onOutput).not.toHaveBeenCalled();
+	});
+
+	it("polls until the sentinel appears, announcing the wait once", async () => {
+		vi.useFakeTimers();
+		let probes = 0;
+		const docker = makeDockerStub(async () => ++probes >= 3);
+		const onOutput = vi.fn();
+		const wait = waitForRuntimeReady("s1", docker, onOutput, new AbortController().signal);
+		await vi.advanceTimersByTimeAsync(RUNTIME_READY_POLL_INTERVAL_MS * 3);
+		await wait;
+		expect(probes).toBe(3);
+		expect(onOutput).toHaveBeenCalledTimes(2);
+		expect(onOutput.mock.calls[0]?.[0]).toContain("waiting for container runtime");
+		expect(onOutput.mock.calls[1]?.[0]).toContain("runtime ready after");
+	});
+
+	it("proceeds with a WARN after the cap (pre-sentinel image)", async () => {
+		vi.useFakeTimers();
+		const docker = makeDockerStub(async () => false);
+		const onOutput = vi.fn();
+		const wait = waitForRuntimeReady("s1", docker, onOutput, new AbortController().signal);
+		await vi.advanceTimersByTimeAsync(RUNTIME_READY_WAIT_CAP_MS + RUNTIME_READY_POLL_INTERVAL_MS);
+		await wait;
+		expect(onOutput).toHaveBeenLastCalledWith(expect.stringContaining("WARN"));
+	});
+
+	it("proceeds (never throws) when the probe errors — container torn down mid-wait", async () => {
+		const docker = makeDockerStub(async () => {
+			throw new Error("no such container");
+		});
+		const onOutput = vi.fn();
+		await expect(
+			waitForRuntimeReady("s1", docker, onOutput, new AbortController().signal),
+		).resolves.toBeUndefined();
+	});
+
+	it("returns without probing when the signal is already aborted", async () => {
+		const ac = new AbortController();
+		ac.abort();
+		const docker = makeDockerStub(async () => true);
+		const onOutput = vi.fn();
+		await waitForRuntimeReady("s1", docker, onOutput, ac.signal);
+		expect(docker.isRuntimeReady).not.toHaveBeenCalled();
 	});
 });

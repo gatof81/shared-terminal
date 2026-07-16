@@ -371,6 +371,67 @@ interface BootstrapRunDeps {
 	broadcaster: BootstrapBroadcaster;
 }
 
+// ── Runtime-readiness gate (#393) ───────────────────────────────────────────
+
+/** Cap on how long the pipeline waits for the entrypoint's readiness
+ *  sentinel before proceeding anyway. Generous relative to the ~1-5 s
+ *  a first boot's `cp -a` of the CLI install takes, because the only
+ *  cost of waiting is bootstrap latency — while proceeding too early
+ *  reintroduces the `claude: command not found` race the gate exists
+ *  to close. Pre-sentinel images (no file, ever) pay this once per
+ *  bootstrap until recycled onto the rebuilt image. */
+export const RUNTIME_READY_WAIT_CAP_MS = 60_000;
+export const RUNTIME_READY_POLL_INTERVAL_MS = 500;
+
+/** Poll `docker.isRuntimeReady` until true / timeout / abort. Never
+ *  throws and never fails the session: a probe error means the
+ *  container is being torn down under us (or the daemon hiccuped) and
+ *  the first real stage will surface that through runStage's proper
+ *  teardown; a timeout means a pre-sentinel image, which must keep
+ *  working. Exported for tests. */
+export async function waitForRuntimeReady(
+	sessionId: string,
+	docker: DockerManager,
+	onOutput: (chunk: string) => void,
+	signal: AbortSignal,
+): Promise<void> {
+	const startedAt = Date.now();
+	let announced = false;
+	while (!signal.aborted) {
+		try {
+			if (await docker.isRuntimeReady(sessionId)) {
+				if (announced) {
+					onOutput(
+						`[bootstrap] runtime ready after ${((Date.now() - startedAt) / 1000).toFixed(1)}s\n`,
+					);
+				}
+				return;
+			}
+		} catch (err) {
+			logger.warn(
+				`[bootstrap] runtime-readiness probe failed for session ${sessionId}: ${(err as Error).message}; proceeding`,
+			);
+			return;
+		}
+		if (!announced) {
+			announced = true;
+			onOutput("[bootstrap] waiting for container runtime to finish provisioning…\n");
+		}
+		if (Date.now() - startedAt >= RUNTIME_READY_WAIT_CAP_MS) {
+			logger.warn(
+				`[bootstrap] runtime-readiness sentinel never appeared for session ${sessionId} ` +
+					`after ${RUNTIME_READY_WAIT_CAP_MS / 1000}s (pre-#393 image?); proceeding`,
+			);
+			onOutput(
+				"[bootstrap] WARN: runtime readiness not confirmed — container may be from a " +
+					"pre-upgrade image; proceeding\n",
+			);
+			return;
+		}
+		await new Promise((r) => setTimeout(r, RUNTIME_READY_POLL_INTERVAL_MS));
+	}
+}
+
 // ── In-flight registry (#348) ──────────────────────────────────────────────
 // sessionId → this run's AbortController + a promise that settles once the
 // pipeline (INCLUDING its failure teardown) has finished. Exists so a
@@ -548,6 +609,19 @@ async function runBootstrapPipeline(
 			return false;
 		}
 	};
+
+	// Runtime-readiness gate (#393). container.start() returns when the
+	// entrypoint PROCESS starts, not when the script completes — so
+	// every stage below (and any postCreate hook that invokes a binary
+	// from ~/.npm-global, e.g. `claude`) races the entrypoint's
+	// symlink-swap window without this wait. Best-effort by design:
+	// on timeout we WARN and proceed rather than fail, because a
+	// container from a pre-sentinel image never writes the file and
+	// hard-failing would brick every not-yet-recycled session on
+	// upgrade. An abort (10-min cap / shutdown drain) just falls
+	// through — the first real stage routes it through the proper
+	// teardown messaging in runStage.
+	await waitForRuntimeReady(sessionId, docker, onOutput, signal);
 
 	// Load config once if any stage needs it. The hint gates this so
 	// postCreate-only sessions (the pre-#188 steady-state) don't pay
