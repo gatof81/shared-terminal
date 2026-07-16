@@ -21,6 +21,7 @@ interface Api {
 	listInvites: typeof import("./api.js").listInvites;
 	revokeInvite: typeof import("./api.js").revokeInvite;
 	uploadSessionFiles: typeof import("./api.js").uploadSessionFiles;
+	downloadSessionFile: typeof import("./api.js").downloadSessionFile;
 	InviteRequiredError: typeof import("./api.js").InviteRequiredError;
 	TabNotFoundError: typeof import("./api.js").TabNotFoundError;
 	SESSION_EXPIRED_EVENT: typeof import("./api.js").SESSION_EXPIRED_EVENT;
@@ -496,5 +497,39 @@ describe("resource caps mirror", () => {
 		);
 		await api.checkAuthStatus();
 		expect(api.getResourceCaps()).toEqual({ cpuMaxCores: 8, memMaxMiB: 16384 });
+	});
+});
+
+// ── Workspace file download (#358) ──────────────────────────────────────────
+
+describe("downloadSessionFile", () => {
+	it("URL-encodes the path, sends credentials, derives the filename from the basename", async () => {
+		const api = await loadApi();
+		const blob = new Blob(["file bytes"]);
+		fetchSpy.mockResolvedValueOnce({
+			status: 200,
+			ok: true,
+			blob: vi.fn(async () => blob),
+		} as unknown as Response);
+
+		const result = await api.downloadSessionFile("session-1", "sub dir/report.pdf");
+
+		const [url, init] = fetchSpy.mock.calls[0];
+		expect(url).toBe(
+			"http://localhost:3001/api/sessions/session-1/files?path=sub%20dir%2Freport.pdf",
+		);
+		expect(init.credentials).toBe("include");
+		expect(result.filename).toBe("report.pdf");
+		expect(result.blob).toBe(blob);
+	});
+
+	it("surfaces the server's JSON error message on a 4xx instead of returning a body", async () => {
+		const api = await loadApi();
+		fetchSpy.mockResolvedValueOnce(
+			mockFetchResponse({ status: 404, json: { error: "File not found" } }),
+		);
+		await expect(api.downloadSessionFile("session-1", "nope.txt")).rejects.toThrow(
+			"File not found",
+		);
 	});
 });
