@@ -842,3 +842,54 @@ describe("stale-name 409 reclaim (#384)", () => {
 		expect(removeSpy).not.toHaveBeenCalled();
 	});
 });
+
+// ── Reclaim remove() race (#384, PR #400 round 2) ───────────────────────────
+
+describe("stale-name reclaim remove() race (#384)", () => {
+	function makeDmWithRemoveError(removeStatusCode: number): {
+		dm: DockerManager;
+		createSpy: ReturnType<typeof vi.fn>;
+	} {
+		const dm = new DockerManager(fakeSessions());
+		const goodContainer = {
+			id: "container-new",
+			start: vi.fn(async () => {}),
+			inspect: vi.fn(async () => ({ NetworkSettings: { Ports: {} } })),
+		};
+		let createCalls = 0;
+		const createSpy = vi.fn(async () => {
+			createCalls++;
+			if (createCalls === 1) {
+				const e = new Error("Conflict") as Error & { statusCode: number };
+				e.statusCode = 409;
+				throw e;
+			}
+			return goodContainer;
+		});
+		const staleContainer = {
+			inspect: vi.fn(async () => ({ State: { Running: false } })),
+			remove: vi.fn(async () => {
+				const e = new Error("remove failed") as Error & { statusCode: number };
+				e.statusCode = removeStatusCode;
+				throw e;
+			}),
+		};
+		(dm as unknown as { docker: unknown }).docker = {
+			createContainer: createSpy,
+			getContainer: vi.fn(() => staleContainer),
+		};
+		return { dm, createSpy };
+	}
+
+	it("still retries when remove() 404s (stale container vanished in the inspect→remove window)", async () => {
+		const { dm, createSpy } = makeDmWithRemoveError(404);
+		await dm.spawn("sess-1");
+		expect(createSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it("propagates a non-404 remove() failure (e.g. 409: container started in the window)", async () => {
+		const { dm, createSpy } = makeDmWithRemoveError(409);
+		await expect(dm.spawn("sess-1")).rejects.toMatchObject({ statusCode: 409 });
+		expect(createSpy).toHaveBeenCalledTimes(1);
+	});
+});

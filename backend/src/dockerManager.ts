@@ -659,7 +659,19 @@ export class DockerManager {
 				`[docker] session ${sessionId}: removing stale exited container holding name ` +
 					`${containerName} and retrying create (workspace is a bind mount — loss-free)`,
 			);
-			await this.docker.getContainer(containerName).remove();
+			try {
+				await this.docker.getContainer(containerName).remove();
+			} catch (removeErr) {
+				// 404 = removed externally in the inspect→remove window (a
+				// concurrent hard-delete / manual `docker rm` finishing the
+				// job) — the name slot is free, which is all the retry
+				// needs; proceed. Anything else propagates, including the
+				// 409 dockerd returns for a container that STARTED in the
+				// window (`remove()` without force refuses running
+				// containers, preserving the never-kill-a-live-session
+				// invariant). PR #400 review round 2 SHOULD-FIX.
+				if ((removeErr as { statusCode?: number }).statusCode !== 404) throw removeErr;
+			}
 			return await create();
 		}
 	}
