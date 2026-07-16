@@ -67,7 +67,13 @@ const TAB_SEARCH_QUERY_MAX_LEN = 256;
 
 export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 	const { sessions, docker, broadcaster, idleSweeper } = ctx;
-	const { fileUploadIp } = ctx.limiters;
+	// `execIp` covers the tab-search route too (#357): search and exec
+	// are the same abuse surface — an authed caller driving docker execs
+	// into a container (each search = 1-2 tmux execs + a D1 ownership
+	// read) — so they deliberately share one per-IP budget instead of
+	// threading a new limiter key through every config site. PR #405
+	// review SHOULD-FIX.
+	const { execIp, fileUploadIp } = ctx.limiters;
 	// ── Session routes ──────────────────────────────────────────────────────
 
 	router.post("/sessions", async (req: Request, res: Response) => {
@@ -900,7 +906,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 	// across the tab's full history (#357). The 50k-line scrollback lives
 	// in tmux, not xterm, so search happens server-side; the visual result
 	// is tmux's own copy-mode UI streamed through the existing pane fanout.
-	router.post("/sessions/:id/tabs/:tabId/search", async (req: Request, res: Response) => {
+	router.post("/sessions/:id/tabs/:tabId/search", execIp, async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
 		const { id, tabId } = req.params;
 		// Same allowlist the WS attach applies to ?tab= (wsHandler.ts).

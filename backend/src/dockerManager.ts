@@ -2460,11 +2460,21 @@ export class DockerManager {
 		);
 		if (result.exitCode !== 0) {
 			if (/can't find|no server|no such/i.test(result.stdout)) throw new TabNotFoundError();
-			// Remaining failure shape is "not in a mode": the user left
+			// "not in a mode" is the one benign failure: the user left
 			// copy-mode from the terminal itself (q / Enter) between
 			// searches, or hit next/exit before any search ran. There is
-			// nothing to step or cancel — a benign no-op, not an error the
-			// UI should toast about.
+			// nothing to step or cancel — a no-op, not an error the UI
+			// should toast about. Anything ELSE (tmux version mismatch,
+			// OOM-killed exec, unexpected diagnostic) must throw: a
+			// swallowed error here 204s the route, the search bar's
+			// last-submitted state advances as if the step worked, and
+			// the user keeps stepping a dead search with zero feedback.
+			// PR #405 review SHOULD-FIX.
+			if (!/not in a mode/i.test(result.stdout)) {
+				throw new Error(
+					`tmux ${copyModeCommand} failed: ${result.stdout.trim() || `exit ${result.exitCode}`}`,
+				);
+			}
 		}
 	}
 

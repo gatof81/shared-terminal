@@ -875,6 +875,20 @@ describe("DockerManager.searchTabHistory (#357)", () => {
 		await expect(dm.searchTabHistory("s1", "tab-x", "exit")).resolves.toBeUndefined();
 	});
 
+	it("next/prev/exit: any OTHER non-zero tmux failure throws instead of silently 204ing (PR #405 SHOULD-FIX)", async () => {
+		// A swallowed unexpected error would let the route 204, the
+		// search bar advance its last-submitted state, and the user keep
+		// stepping a dead search with zero feedback.
+		const { dm } = makeCapturingDocker(() => ({
+			stdout: "server version mismatch\n",
+			exitCode: 1,
+		}));
+		await expect(dm.searchTabHistory("s1", "tab-x", "next")).rejects.toThrow(
+			/tmux search-again failed: server version mismatch/,
+		);
+		await expect(dm.searchTabHistory("s1", "tab-x", "exit")).rejects.toThrow(/tmux cancel failed/);
+	});
+
 	it("search: a send-keys failure after successful copy-mode surfaces as a plain error", async () => {
 		const { dm } = makeCapturingDocker((cmd) =>
 			cmd[1] === "send-keys"
