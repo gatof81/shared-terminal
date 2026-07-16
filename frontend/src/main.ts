@@ -47,6 +47,7 @@ import {
 import { closePasteModal } from "./paste.js";
 import { closePortsModal } from "./ports.js";
 import { refreshSessions } from "./sessionCore.js";
+import { clearAllBadges } from "./tabActivity.js";
 import type { TerminalSession } from "./terminal.js";
 
 // ── DOM refs ────────────────────────────────────────────────────────────────
@@ -199,6 +200,10 @@ export function disposeAllCurrentTerminals() {
 	currentTabs = [];
 	currentActiveTabId = null;
 	closingTabs.clear();
+	// Badge state is keyed by tabId and only meaningful for the tab set
+	// we just tore down — wipe it wholesale so a future session whose
+	// listTabs returns a recycled tabId doesn't inherit a stale dot.
+	clearAllBadges();
 	terminalTabs.innerHTML = "";
 	terminalTabs.style.display = "none";
 	terminalContainer.style.display = "none";

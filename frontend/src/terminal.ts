@@ -61,6 +61,15 @@ export type RendererNoticeCallback = (message: string) => void;
  *  on failure only — a per-event success toast would be too chatty
  *  given the auto-copy path fires on every finalised selection (#158). */
 export type CopyCallback = (ok: boolean) => void;
+/** Fired for every `output` frame with the raw chunk BEFORE it is written
+ *  to xterm. sessionCore uses it to drive the background-tab activity
+ *  badge (#359) — including BEL (0x07) detection, which only the raw
+ *  stream can see (xterm swallows BEL during parsing). Note this also
+ *  fires for the capture-pane replay a (re)attach ships, so a background
+ *  tab whose socket auto-reconnects lights a plain dot even though no
+ *  new output happened — accepted: the replay is indistinguishable from
+ *  live output at this layer, and a spurious dot is a one-click cost. */
+export type OutputCallback = (data: string) => void;
 /** Predicate the session calls before writing to the system clipboard
  *  on the auto-copy path. Returns true iff this session's tab is the
  *  one the user is currently looking at — selections in a background
@@ -79,6 +88,7 @@ export function openTerminalSession(opts: {
 	onError: ErrorCallback;
 	onRendererFallback?: RendererNoticeCallback;
 	onCopy?: CopyCallback;
+	onOutput?: OutputCallback;
 	isActive?: ActivePredicate;
 	/**
 	 * Hook applied to every keyboard-originated input chunk (term.onData)
@@ -135,6 +145,7 @@ export function openTerminalSession(opts: {
 		onError,
 		onRendererFallback,
 		onCopy,
+		onOutput,
 		isActive,
 		transformInput,
 		canReconnect,
@@ -711,6 +722,7 @@ export function openTerminalSession(opts: {
 
 		switch (msg.type) {
 			case "output": {
+				onOutput?.(msg.data);
 				// Fast path when the user is at the bottom with no selection:
 				// no callback, no closure allocation, identical to the prior
 				// behaviour for the common case (user typing at the prompt).
