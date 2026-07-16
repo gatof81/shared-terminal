@@ -8,6 +8,7 @@
 import { randomBytes } from "node:crypto";
 import type { Dirent } from "node:fs";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { Duplex } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
@@ -166,6 +167,19 @@ interface SharedExec {
 // session-image/entrypoint.sh.
 export const RUNTIME_READY_SENTINEL = "/tmp/.st-ready";
 const RUNTIME_READY_CACHE_MAX = 10_000;
+
+// #384 — host-derived CPU ceiling for the spawn-time clamp. dockerd
+// rejects NanoCpus above the host's core count outright (400 "range of
+// CPUs is from 0.01 to N.00"), so unlike Memory — which Docker accepts
+// over-provisioned — a stale stored CPU cap is start-BLOCKING after a
+// host downsize. Read per-spawn, not cached at module load: the value
+// is one syscall-ish call and hot-plug/VM-resize would otherwise need
+// a backend restart to notice. `os.cpus()` can return [] in exotic
+// environments (documented Node behaviour) — no host info, no clamp.
+function hostCpuNanoCap(): number {
+	const cores = os.cpus().length;
+	return cores > 0 ? cores * 1_000_000_000 : Number.POSITIVE_INFINITY;
+}
 
 // ── Cancellable exec (process-group) plumbing ───────────────────────────────
 // Docker has no "kill exec" API: destroying the host-side stream leaves the
@@ -415,140 +429,166 @@ export class DockerManager {
 		// reads via the read-only mount; no need for it to own anything.
 
 		const hostname = sanitiseHostname(meta.name, sessionId);
+		// #384 — clamp CPU against the HOST too, not just the operator
+		// ceiling. EFFECTIVE_CPU_NANO_MAX is a static v1 ceiling (8
+		// cores); a stored cap that was valid at create time becomes
+		// start-blocking if the host is later downsized (dockerd 400s
+		// the create, which surfaced as an opaque 500 on POST /start —
+		// real occurrence 2026-07-14 on a ≥8→6 vCPU resize). Memory is
+		// deliberately NOT host-clamped: Docker accepts over-provisioned
+		// Memory limits, so CPU is the only start-blocking axis. The
+		// warn tells the operator which stored cap is stale.
+		const requestedNanoCpus = Math.min(
+			config?.cpuLimit ?? DEFAULT_NANO_CPUS,
+			EFFECTIVE_CPU_NANO_MAX,
+		);
+		const nanoCpus = Math.min(requestedNanoCpus, hostCpuNanoCap());
+		if (nanoCpus < requestedNanoCpus) {
+			logger.warn(
+				`[docker] session ${sessionId}: stored CPU cap ${requestedNanoCpus / 1_000_000_000} ` +
+					`cores exceeds this host's ${nanoCpus / 1_000_000_000}; clamping for this start. ` +
+					"Lower the session's cap (admin panel → Edit caps) to persist the fix.",
+			);
+		}
 		// #190 (direct-proxy switch) — we no longer publish per-port host
 		// ports (`-p 0:<container>`). The dispatcher reaches the container
 		// directly by name over `SESSIONS_NETWORK` (Docker embedded DNS), so
 		// the exposed set is pure metadata in `sessions_port_mappings`, written
 		// from config below. Dropping host publishing removes the host attack
 		// surface AND makes opening/closing a port a live edit (no recreate).
-		const container = await this.docker.createContainer({
-			Image: SESSION_IMAGE,
-			name: meta.containerName,
-			Hostname: hostname,
-			// `buildContainerEnv` returns a deduplicated `KEY=VALUE[]` array
-			// so the precedence is unambiguous regardless of which reader
-			// resolves the var inside the container. Duplicates in
-			// Docker's `Env` are surprisingly hostile: glibc's `getenv(3)`
-			// is FIRST-wins (scans `environ` from index 0), bash's startup
-			// parser is LAST-wins (each `bind_variable` overwrites), and
-			// programs the user runs may use either. Emitting a single
-			// entry per name closes that ambiguity. See `buildContainerEnv`
-			// for the precedence rules.
-			Env: buildContainerEnv(sessionId, meta.name, envArray),
-			HostConfig: {
-				Binds: [
-					`${WORKSPACE_ROOT}/${sessionId}:/home/developer/workspace`,
-					`${uploadsHostDir}:/home/developer/uploads:ro`,
-				],
-				// #190 (direct-proxy switch) — join the shared user-defined
-				// network so the backend can reach this container by name via
-				// Docker's embedded DNS. The default `bridge` network has NO
-				// embedded DNS and is a different network than the compose
-				// `app` service, so name resolution would fail there.
-				NetworkMode: SESSIONS_NETWORK,
-				// `mem_limit` / `cpu_limit` from session_configs override the
-				// hardcoded defaults. Docker pins HostConfig at create time,
-				// so a later config-row UPDATE wouldn't take effect on an
-				// existing container — `startContainer`'s "respawn on stale
-				// id" path picks up new caps when the user fully recycles
-				// (DELETE + POST /start). #194 owns operator-tunable bounds
-				// and per-deployment caps; this PR just wires the consumer.
-				//
-				// Re-clamp the stored config caps to the operator cap HERE,
-				// not just at ingest. `config.mem_limit`/`cpu_limit` were
-				// validated against MAX_SESSION_MEM/CPU at create/PATCH time,
-				// but an operator can LOWER those env caps afterwards (e.g.
-				// right-sizing the host). On the next respawn the stale stored
-				// value would otherwise be written to the cgroup unclamped,
-				// silently bypassing the new operator cap on every start. The
-				// DEFAULT_* constants are already `Math.min`-clamped (see their
-				// definitions); this keeps the config path symmetric.
-				Memory: Math.min(config?.memLimit ?? DEFAULT_MEMORY_BYTES, EFFECTIVE_MEM_BYTES_MAX),
-				NanoCpus: Math.min(config?.cpuLimit ?? DEFAULT_NANO_CPUS, EFFECTIVE_CPU_NANO_MAX),
-				// #344 — Memory/CPU caps don't bound PROCESS COUNT: a fork bomb
-				// inside a session starves the host's PID space and scheduler
-				// while staying under both cgroup caps. 1024 is far above any
-				// real dev workload in these containers (tmux + node + claude
-				// + a parallel build lands in the low hundreds) yet turns a
-				// fork bomb into an in-container EAGAIN instead of a host
-				// incident. Deliberately a cgroup pids limit and NOT an nproc
-				// ulimit: every session container runs as UID 1000, and
-				// RLIMIT_NPROC counts per-UID across the whole kernel — an
-				// nproc ulimit would let one session's process count exhaust
-				// a SIBLING session's budget. PidsLimit is per-cgroup, so
-				// sessions stay isolated from each other.
-				PidsLimit: 1024,
-				// docker-init (tini) as PID 1. The entrypoint's PID 1 is
-				// `exec tail -f /dev/null`, which never wait()s — any
-				// orphaned child reparented to it stays a zombie FOREVER,
-				// and each zombie holds a PidsLimit slot. The exec API
-				// (#381) makes orphaning routine: killExecProcessGroup
-				// reaps the group leader but grandchildren that outlive
-				// (or predecease) their parent reparent to PID 1.
-				// Verified live on the session image: a group whose
-				// parent exits leaves 3 permanent Z-state entries without
-				// init, 0 with it (smoke-test.sh Phase 9 pins both legs).
-				// Side-effect worth knowing: docker-init forwards SIGTERM
-				// to the entrypoint, so `docker stop` now terminates
-				// cleanly instead of waiting out the 10 s grace for
-				// SIGKILL. Containers created before this flag keep their
-				// old HostConfig until recycled — warnIfPreHardened flags
-				// them on start/reconcile.
-				Init: true,
-				// Companion fd bound. 65536 is generous for dev servers and
-				// file watchers (Vite/watchman-style workloads sit well under
-				// it) while capping a leak well below the dockerd default of
-				// ~1M fds per container. Soft == hard so nothing inside the
-				// container can raise it back.
-				Ulimits: [{ Name: "nofile", Soft: 65536, Hard: 65536 }],
-				RestartPolicy: { Name: "unless-stopped" },
-				// #345 — bound the json-file log driver. Session containers are
-				// long-lived (they survive stop/start cycles) and their PID 1 /
-				// exec streams can be chatty (Claude TUI repaints, build logs
-				// leaking to the container log via postStart daemons), so an
-				// uncapped log grows in /var/lib/docker/containers/<id>/ until
-				// the host disk fills. 10m × 3 files ≈ 30 MiB worst-case per
-				// session — plenty for post-mortem tails while making the
-				// aggregate bound scale with session count, not with output
-				// volume. Mirrors the `logging:` block on the compose `app`
-				// service (which can't cover spawned containers).
-				LogConfig: { Type: "json-file", Config: { "max-size": "10m", "max-file": "3" } },
-				// Defense-in-depth (issue #15): the image already runs as
-				// unprivileged UID 1000 with no sudo, but we still strip
-				// every Linux capability from the bounding set Docker
-				// hands the container. None of tmux, node, git,
-				// claude-code, or `code tunnel` need any of the default
-				// bag (e.g. CAP_NET_RAW for raw sockets / ICMP,
-				// CAP_NET_BIND_SERVICE for ports < 1024, CAP_AUDIT_WRITE,
-				// CAP_MKNOD), so dropping ALL is the tightest baseline.
-				// Note: this is about the *container's* bounding set,
-				// not the backend host process — host-side chowns in
-				// ensureWorkspaceOwnership rely on the backend's own
-				// CAP_CHOWN and are unaffected. Pair with
-				// no-new-privileges so even if a future image change
-				// reintroduces a setuid binary it cannot raise
-				// effective UID/caps at exec time.
-				CapDrop: ["ALL"],
-				// #190 PR 190b — `allowPrivilegedPorts: true` re-grants
-				// exactly `CAP_NET_BIND_SERVICE` on the container so the
-				// in-container process can bind to ports < 1024. Nothing
-				// else from the default capability bag is restored —
-				// CAP_NET_RAW (raw sockets / ICMP), CAP_AUDIT_WRITE,
-				// CAP_MKNOD etc. stay dropped. The toggle is gated at the
-				// schema level: privileged ports without it are rejected
-				// at ingest, so a session reaching here with the toggle
-				// off has no privileged ports to bind regardless. We add
-				// the cap whenever the toggle is on (independent of
-				// whether any specific port is < 1024) — the user opted
-				// in at the form, and a future port edit shouldn't have
-				// to recycle the container to take effect (config is
-				// bound at create time per the umbrella non-goal).
-				CapAdd: config?.allowPrivilegedPorts === true ? ["NET_BIND_SERVICE"] : undefined,
-				SecurityOpt: ["no-new-privileges:true"],
-			},
-			OpenStdin: true,
-			Tty: true,
-		});
+		const container = await this.createContainerReclaimingStaleName(
+			sessionId,
+			meta.containerName,
+			() =>
+				this.docker.createContainer({
+					Image: SESSION_IMAGE,
+					name: meta.containerName,
+					Hostname: hostname,
+					// `buildContainerEnv` returns a deduplicated `KEY=VALUE[]` array
+					// so the precedence is unambiguous regardless of which reader
+					// resolves the var inside the container. Duplicates in
+					// Docker's `Env` are surprisingly hostile: glibc's `getenv(3)`
+					// is FIRST-wins (scans `environ` from index 0), bash's startup
+					// parser is LAST-wins (each `bind_variable` overwrites), and
+					// programs the user runs may use either. Emitting a single
+					// entry per name closes that ambiguity. See `buildContainerEnv`
+					// for the precedence rules.
+					Env: buildContainerEnv(sessionId, meta.name, envArray),
+					HostConfig: {
+						Binds: [
+							`${WORKSPACE_ROOT}/${sessionId}:/home/developer/workspace`,
+							`${uploadsHostDir}:/home/developer/uploads:ro`,
+						],
+						// #190 (direct-proxy switch) — join the shared user-defined
+						// network so the backend can reach this container by name via
+						// Docker's embedded DNS. The default `bridge` network has NO
+						// embedded DNS and is a different network than the compose
+						// `app` service, so name resolution would fail there.
+						NetworkMode: SESSIONS_NETWORK,
+						// `mem_limit` / `cpu_limit` from session_configs override the
+						// hardcoded defaults. Docker pins HostConfig at create time,
+						// so a later config-row UPDATE wouldn't take effect on an
+						// existing container — `startContainer`'s "respawn on stale
+						// id" path picks up new caps when the user fully recycles
+						// (DELETE + POST /start). #194 owns operator-tunable bounds
+						// and per-deployment caps; this PR just wires the consumer.
+						//
+						// Re-clamp the stored config caps to the operator cap HERE,
+						// not just at ingest. `config.mem_limit`/`cpu_limit` were
+						// validated against MAX_SESSION_MEM/CPU at create/PATCH time,
+						// but an operator can LOWER those env caps afterwards (e.g.
+						// right-sizing the host). On the next respawn the stale stored
+						// value would otherwise be written to the cgroup unclamped,
+						// silently bypassing the new operator cap on every start. The
+						// DEFAULT_* constants are already `Math.min`-clamped (see their
+						// definitions); this keeps the config path symmetric.
+						Memory: Math.min(config?.memLimit ?? DEFAULT_MEMORY_BYTES, EFFECTIVE_MEM_BYTES_MAX),
+						NanoCpus: nanoCpus,
+						// #344 — Memory/CPU caps don't bound PROCESS COUNT: a fork bomb
+						// inside a session starves the host's PID space and scheduler
+						// while staying under both cgroup caps. 1024 is far above any
+						// real dev workload in these containers (tmux + node + claude
+						// + a parallel build lands in the low hundreds) yet turns a
+						// fork bomb into an in-container EAGAIN instead of a host
+						// incident. Deliberately a cgroup pids limit and NOT an nproc
+						// ulimit: every session container runs as UID 1000, and
+						// RLIMIT_NPROC counts per-UID across the whole kernel — an
+						// nproc ulimit would let one session's process count exhaust
+						// a SIBLING session's budget. PidsLimit is per-cgroup, so
+						// sessions stay isolated from each other.
+						PidsLimit: 1024,
+						// docker-init (tini) as PID 1. The entrypoint's PID 1 is
+						// `exec tail -f /dev/null`, which never wait()s — any
+						// orphaned child reparented to it stays a zombie FOREVER,
+						// and each zombie holds a PidsLimit slot. The exec API
+						// (#381) makes orphaning routine: killExecProcessGroup
+						// reaps the group leader but grandchildren that outlive
+						// (or predecease) their parent reparent to PID 1.
+						// Verified live on the session image: a group whose
+						// parent exits leaves 3 permanent Z-state entries without
+						// init, 0 with it (smoke-test.sh Phase 9 pins both legs).
+						// Side-effect worth knowing: docker-init forwards SIGTERM
+						// to the entrypoint, so `docker stop` now terminates
+						// cleanly instead of waiting out the 10 s grace for
+						// SIGKILL. Containers created before this flag keep their
+						// old HostConfig until recycled — warnIfPreHardened flags
+						// them on start/reconcile.
+						Init: true,
+						// Companion fd bound. 65536 is generous for dev servers and
+						// file watchers (Vite/watchman-style workloads sit well under
+						// it) while capping a leak well below the dockerd default of
+						// ~1M fds per container. Soft == hard so nothing inside the
+						// container can raise it back.
+						Ulimits: [{ Name: "nofile", Soft: 65536, Hard: 65536 }],
+						RestartPolicy: { Name: "unless-stopped" },
+						// #345 — bound the json-file log driver. Session containers are
+						// long-lived (they survive stop/start cycles) and their PID 1 /
+						// exec streams can be chatty (Claude TUI repaints, build logs
+						// leaking to the container log via postStart daemons), so an
+						// uncapped log grows in /var/lib/docker/containers/<id>/ until
+						// the host disk fills. 10m × 3 files ≈ 30 MiB worst-case per
+						// session — plenty for post-mortem tails while making the
+						// aggregate bound scale with session count, not with output
+						// volume. Mirrors the `logging:` block on the compose `app`
+						// service (which can't cover spawned containers).
+						LogConfig: { Type: "json-file", Config: { "max-size": "10m", "max-file": "3" } },
+						// Defense-in-depth (issue #15): the image already runs as
+						// unprivileged UID 1000 with no sudo, but we still strip
+						// every Linux capability from the bounding set Docker
+						// hands the container. None of tmux, node, git,
+						// claude-code, or `code tunnel` need any of the default
+						// bag (e.g. CAP_NET_RAW for raw sockets / ICMP,
+						// CAP_NET_BIND_SERVICE for ports < 1024, CAP_AUDIT_WRITE,
+						// CAP_MKNOD), so dropping ALL is the tightest baseline.
+						// Note: this is about the *container's* bounding set,
+						// not the backend host process — host-side chowns in
+						// ensureWorkspaceOwnership rely on the backend's own
+						// CAP_CHOWN and are unaffected. Pair with
+						// no-new-privileges so even if a future image change
+						// reintroduces a setuid binary it cannot raise
+						// effective UID/caps at exec time.
+						CapDrop: ["ALL"],
+						// #190 PR 190b — `allowPrivilegedPorts: true` re-grants
+						// exactly `CAP_NET_BIND_SERVICE` on the container so the
+						// in-container process can bind to ports < 1024. Nothing
+						// else from the default capability bag is restored —
+						// CAP_NET_RAW (raw sockets / ICMP), CAP_AUDIT_WRITE,
+						// CAP_MKNOD etc. stay dropped. The toggle is gated at the
+						// schema level: privileged ports without it are rejected
+						// at ingest, so a session reaching here with the toggle
+						// off has no privileged ports to bind regardless. We add
+						// the cap whenever the toggle is on (independent of
+						// whether any specific port is < 1024) — the user opted
+						// in at the form, and a future port edit shouldn't have
+						// to recycle the container to take effect (config is
+						// bound at create time per the umbrella non-goal).
+						CapAdd: config?.allowPrivilegedPorts === true ? ["NET_BIND_SERVICE"] : undefined,
+						SecurityOpt: ["no-new-privileges:true"],
+					},
+					OpenStdin: true,
+					Tty: true,
+				}),
+		);
 
 		await container.start();
 		const containerId = container.id;
@@ -577,6 +617,51 @@ export class DockerManager {
 			`[docker] spawned container ${meta.containerName} (${containerId.slice(0, 12)}) for session ${sessionId}`,
 		);
 		return containerId;
+	}
+
+	/**
+	 * Run `create` (a `docker.createContainer` thunk), recovering from a
+	 * 409 name conflict caused by a stale NON-running container still
+	 * holding the session's `st-<sid>` name (#384 secondary). This
+	 * happens when a previous teardown removed the D1 container_id but
+	 * the daemon-side remove failed or was interrupted — the workspace
+	 * is a host bind mount, so removing the dead container is loss-free
+	 * and retrying is strictly better than bubbling an opaque 500 the
+	 * operator has to resolve with a manual `docker rm`.
+	 *
+	 * Only the exited case is reclaimed: if the conflicting container is
+	 * RUNNING the 409 is a genuine conflict (two spawns racing, or state
+	 * drift reconcile hasn't seen yet) and force-removing it would kill
+	 * a live session — rethrow the original error instead. One retry,
+	 * no loop: a second 409 means something is actively recreating the
+	 * name and deserves the error.
+	 */
+	private async createContainerReclaimingStaleName(
+		sessionId: string,
+		containerName: string,
+		create: () => Promise<Dockerode.Container>,
+	): Promise<Dockerode.Container> {
+		try {
+			return await create();
+		} catch (err) {
+			if ((err as { statusCode?: number }).statusCode !== 409) throw err;
+			let staleIsRunning: boolean;
+			try {
+				const info = await this.docker.getContainer(containerName).inspect();
+				staleIsRunning = info.State?.Running === true;
+			} catch {
+				// 409 but the name can't be inspected (removed in the
+				// window, daemon hiccup) — surface the original error.
+				throw err;
+			}
+			if (staleIsRunning) throw err;
+			logger.warn(
+				`[docker] session ${sessionId}: removing stale exited container holding name ` +
+					`${containerName} and retrying create (workspace is a bind mount — loss-free)`,
+			);
+			await this.docker.getContainer(containerName).remove();
+			return await create();
+		}
 	}
 
 	/**
