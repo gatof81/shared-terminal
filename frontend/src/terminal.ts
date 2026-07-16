@@ -44,6 +44,10 @@ export interface TerminalSession {
 	 *  word-jump in readline). No-op in observe-mode, matching the
 	 *  suppressed onData input path. */
 	sendSpecialKey(key: SpecialKey, mods?: { ctrl?: boolean }): void;
+	/** Give keyboard focus to the xterm textarea. Used by the toolbar
+	 *  search box (#357) to hand focus back on Escape so copy-mode keys
+	 *  (n/N/q) work immediately after a search. */
+	focus(): void;
 }
 
 export type StatusCallback = (status: SessionStatus) => void;
@@ -1334,7 +1338,12 @@ export function openTerminalSession(opts: {
 		term.dispose();
 	}
 
-	return { dispose, setFontSize, paste, copySelection, enterSelectMode, sendSpecialKey };
+	// #357 — the toolbar search box steals keyboard focus while typing a
+	// query; Escape hands it back here so the user can keep driving
+	// tmux's copy-mode result (n/N/q) without a mouse round-trip.
+	const focus = () => term.focus();
+
+	return { dispose, setFontSize, paste, copySelection, enterSelectMode, sendSpecialKey, focus };
 }
 
 // ── Multiline URL link provider ─────────────────────────────────────────────

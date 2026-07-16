@@ -59,6 +59,12 @@ import {
 // upset xterm/tmux. See #149.
 const SESSION_NAME_MAX_LEN = 64;
 
+// Cap for the copy-mode search query (#357). 256 comfortably covers any
+// realistic search term while bounding what gets handed to `tmux
+// send-keys` argv; same "user-controlled string with no natural limit"
+// shape as the name/label caps above.
+const TAB_SEARCH_QUERY_MAX_LEN = 256;
+
 export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 	const { sessions, docker, broadcaster, idleSweeper } = ctx;
 	const { fileUploadIp } = ctx.limiters;
@@ -884,6 +890,62 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			}
 
 			await docker.deleteTab(id, tabId);
+			res.status(204).send();
+		} catch (err) {
+			handleSessionError(err, res);
+		}
+	});
+
+	// POST /sessions/:id/tabs/:tabId/search — drive tmux copy-mode search
+	// across the tab's full history (#357). The 50k-line scrollback lives
+	// in tmux, not xterm, so search happens server-side; the visual result
+	// is tmux's own copy-mode UI streamed through the existing pane fanout.
+	router.post("/sessions/:id/tabs/:tabId/search", async (req: Request, res: Response) => {
+		const { userId } = req as AuthedRequest;
+		const { id, tabId } = req.params;
+		// Same allowlist the WS attach applies to ?tab= (wsHandler.ts).
+		// docker exec takes argv (no shell), but the defensive charset
+		// keeps surprising tmux targets like "main:1" out of `-t`.
+		if (!/^[a-zA-Z0-9._-]{1,64}$/.test(tabId)) {
+			res.status(400).json({ error: "invalid tab id" });
+			return;
+		}
+		const { action, query } = (req.body ?? {}) as { action?: unknown; query?: unknown };
+		if (action !== "search" && action !== "next" && action !== "prev" && action !== "exit") {
+			res.status(400).json({
+				error: 'body.action must be one of "search" | "next" | "prev" | "exit"',
+			});
+			return;
+		}
+		let validatedQuery: string | undefined;
+		if (action === "search") {
+			if (
+				typeof query !== "string" ||
+				query.length === 0 ||
+				query.length > TAB_SEARCH_QUERY_MAX_LEN
+			) {
+				res.status(400).json({
+					error: `body.query must be a string of 1..${TAB_SEARCH_QUERY_MAX_LEN} characters`,
+				});
+				return;
+			}
+			// Control bytes can never match pane text, and \r\n would read
+			// as key presses inside copy-mode's search prompt — reject the
+			// whole 0x00–0x1F, 0x7F block like the tab-label validator.
+			// biome-ignore lint/suspicious/noControlCharactersInRegex: matching control chars IS the rejection criterion
+			if (/[\x00-\x1f\x7f]/.test(query)) {
+				res.status(400).json({ error: "body.query must not contain control characters" });
+				return;
+			}
+			validatedQuery = query;
+		}
+		try {
+			// `assertOwnedBy`, NOT `assertCanObserve`: search steers the
+			// shared tmux pane (copy-mode UI repaints for every attached
+			// client), so observers must not drive someone else's session.
+			// Same graduation as tab create/delete above.
+			await sessions.assertOwnedBy(id, userId);
+			await docker.searchTabHistory(id, tabId, action, validatedQuery);
 			res.status(204).send();
 		} catch (err) {
 			handleSessionError(err, res);

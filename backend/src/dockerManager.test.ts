@@ -19,6 +19,7 @@ import {
 	RUNTIME_READY_SENTINEL,
 	sanitiseHostname,
 	sanitiseUploadName,
+	TabNotFoundError,
 } from "./dockerManager.js";
 import { logger } from "./logger.js";
 import type { SessionManager } from "./sessionManager.js";
@@ -798,6 +799,91 @@ describe("DockerManager tabs", () => {
 		expect((dm as unknown as { shared: Map<string, unknown> }).shared.has(bufKey)).toBe(false);
 		// keyOf mapping for the detached attach is cleared.
 		expect((dm as unknown as { keyOf: Map<string, string> }).keyOf.has("a1")).toBe(false);
+	});
+});
+
+describe("DockerManager.searchTabHistory (#357)", () => {
+	function makeCapturingDocker(hook?: (cmd: string[]) => { stdout: string; exitCode: number }) {
+		const calls: string[][] = [];
+		const { dm } = makeDocker({
+			oneShot: (cmd) => {
+				calls.push(cmd);
+				return hook?.(cmd) ?? { stdout: "", exitCode: 0 };
+			},
+		});
+		return { dm, calls };
+	}
+
+	it("search: enters copy-mode then sends search-backward, as separate argv calls", async () => {
+		const { dm, calls } = makeCapturingDocker();
+
+		// A query starting with "-" pins the `--` option terminator: without
+		// it, tmux would parse the query as send-keys flags.
+		await dm.searchTabHistory("s1", "tab-x", "search", "-error: foo");
+
+		expect(calls).toEqual([
+			["tmux", "copy-mode", "-t", "tab-x"],
+			["tmux", "send-keys", "-t", "tab-x", "-X", "search-backward", "--", "-error: foo"],
+		]);
+	});
+
+	it("next: sends search-again", async () => {
+		const { dm, calls } = makeCapturingDocker();
+		await dm.searchTabHistory("s1", "tab-x", "next");
+		expect(calls).toEqual([["tmux", "send-keys", "-t", "tab-x", "-X", "search-again"]]);
+	});
+
+	it("prev: sends search-reverse", async () => {
+		const { dm, calls } = makeCapturingDocker();
+		await dm.searchTabHistory("s1", "tab-x", "prev");
+		expect(calls).toEqual([["tmux", "send-keys", "-t", "tab-x", "-X", "search-reverse"]]);
+	});
+
+	it("exit: sends cancel", async () => {
+		const { dm, calls } = makeCapturingDocker();
+		await dm.searchTabHistory("s1", "tab-x", "exit");
+		expect(calls).toEqual([["tmux", "send-keys", "-t", "tab-x", "-X", "cancel"]]);
+	});
+
+	it("search: throws TabNotFoundError when copy-mode can't find the tmux session", async () => {
+		const { dm, calls } = makeCapturingDocker(() => ({
+			stdout: "can't find session: tab-x\n",
+			exitCode: 1,
+		}));
+		await expect(dm.searchTabHistory("s1", "tab-x", "search", "foo")).rejects.toBeInstanceOf(
+			TabNotFoundError,
+		);
+		// The failed copy-mode must short-circuit — no search-backward after.
+		expect(calls).toEqual([["tmux", "copy-mode", "-t", "tab-x"]]);
+	});
+
+	it("next: throws TabNotFoundError when the tmux session is gone", async () => {
+		const { dm } = makeCapturingDocker(() => ({
+			stdout: "can't find session: tab-x\n",
+			exitCode: 1,
+		}));
+		await expect(dm.searchTabHistory("s1", "tab-x", "next")).rejects.toBeInstanceOf(
+			TabNotFoundError,
+		);
+	});
+
+	it("next/exit: treats a 'not in a mode' failure as a benign no-op", async () => {
+		// The user left copy-mode from the terminal itself (q / Enter)
+		// between searches — nothing to step or cancel, not an error.
+		const { dm } = makeCapturingDocker(() => ({ stdout: "not in a mode\n", exitCode: 1 }));
+		await expect(dm.searchTabHistory("s1", "tab-x", "next")).resolves.toBeUndefined();
+		await expect(dm.searchTabHistory("s1", "tab-x", "exit")).resolves.toBeUndefined();
+	});
+
+	it("search: a send-keys failure after successful copy-mode surfaces as a plain error", async () => {
+		const { dm } = makeCapturingDocker((cmd) =>
+			cmd[1] === "send-keys"
+				? { stdout: "unknown command\n", exitCode: 1 }
+				: { stdout: "", exitCode: 0 },
+		);
+		await expect(dm.searchTabHistory("s1", "tab-x", "search", "foo")).rejects.toThrow(
+			/tmux search failed/,
+		);
 	});
 });
 

@@ -213,6 +213,29 @@
             >
               Ports
             </button>
+            <!-- #357 — search the tab's full tmux history. The input is
+                 toggled by the magnifier button (or Ctrl+Shift+F) and
+                 drives tmux copy-mode search server-side; the result UI
+                 is tmux's own, streamed through the terminal itself.
+                 Wiring + key handling in searchBar.ts. -->
+            <input
+              id="terminal-search-input"
+              type="text"
+              placeholder="Search history"
+              maxlength="256"
+              spellcheck="false"
+              autocomplete="off"
+              aria-label="Search terminal history"
+              hidden
+            />
+            <button
+              id="terminal-search-btn"
+              type="button"
+              title="Search terminal history (Ctrl+Shift+F)"
+              aria-label="Search terminal history"
+            >
+              ⌕
+            </button>
           </div>
           <div id="terminal-tabs"></div>
           <div id="terminal-container"></div>

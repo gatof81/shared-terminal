@@ -747,6 +747,29 @@ export class TabNotFoundError extends Error {
 	}
 }
 
+// ── Terminal history search (#357) ──────────────────────────────────────────
+
+export type TabSearchAction = "search" | "next" | "prev" | "exit";
+
+/** Drive tmux copy-mode search on a tab. `query` is required for
+ *  `action: "search"` and ignored otherwise. The visual result is tmux's
+ *  copy-mode UI, which streams back through the terminal WS like any
+ *  other pane output — this call only steers it. */
+export async function searchTabHistory(
+	sessionId: string,
+	tabId: string,
+	body: { action: TabSearchAction; query?: string },
+): Promise<void> {
+	const res = await apiFetch(`/sessions/${sessionId}/tabs/${tabId}/search`, {
+		method: "POST",
+		body: JSON.stringify(body),
+	});
+	if (!res.ok) {
+		const parsed = (await res.json().catch(() => ({}))) as { error?: string };
+		throw new Error(parsed.error ?? "Search failed");
+	}
+}
+
 // ── Invites API ─────────────────────────────────────────────────────────────
 
 // Codes are hashed at rest (#49). `codeHash` is the public id (used for

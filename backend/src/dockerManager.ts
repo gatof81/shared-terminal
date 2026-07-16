@@ -28,7 +28,7 @@ import {
 	getSessionConfig,
 	type SessionConfigRecord,
 } from "./sessionConfig.js";
-import type { SessionManager } from "./sessionManager.js";
+import { NotFoundError, type SessionManager } from "./sessionManager.js";
 import type { SessionMeta } from "./types.js";
 
 const SESSION_IMAGE = process.env.SESSION_IMAGE ?? "shared-terminal-session";
@@ -96,6 +96,20 @@ export class ContainerNotFoundError extends Error {
 	constructor() {
 		super("No container for this session");
 		this.name = "ContainerNotFoundError";
+	}
+}
+
+/**
+ * Thrown when a tmux one-shot targets a tab whose tmux session is gone —
+ * closed under us, or the container's tmux server died taking every tab
+ * with it. Extends the session-layer `NotFoundError` so
+ * `handleSessionError` maps it to a 404 without every route growing its
+ * own instanceof arm.
+ */
+export class TabNotFoundError extends NotFoundError {
+	constructor() {
+		super("tab not found");
+		this.name = "TabNotFoundError";
 	}
 }
 
@@ -2382,6 +2396,76 @@ export class DockerManager {
 			logger.warn(`[docker] kill-session ${tabId} exited ${exitCode}`);
 		}
 		logger.info(`[docker] deleted tab ${tabId} from session ${sessionId}`);
+	}
+
+	/**
+	 * Drive tmux copy-mode search on a tab (#357). The full history lives
+	 * in tmux — xterm's local scrollback stays effectively empty with
+	 * tmux-managed panes (see the #171–#181 saga in frontend terminal.ts)
+	 * — so search runs server-side and the visual result IS tmux's
+	 * copy-mode UI, streamed to every attached client through the
+	 * existing pane fanout. No new streaming code.
+	 *
+	 * Everything is separate argv arrays through `execOneShot`, never a
+	 * shell string — same no-shell-meta invariant as the clone runner. The
+	 * `--` before the query terminates tmux's option parsing (tmux's args
+	 * parser honours the getopt convention) so a query starting with "-"
+	 * isn't read as a send-keys flag.
+	 *
+	 * `combineStreams` on every call because tmux's diagnostics go to
+	 * stderr and the exit code alone can't distinguish "tab gone" (404)
+	 * from "pane not in copy-mode" (benign) below.
+	 */
+	async searchTabHistory(
+		sessionId: string,
+		tabId: string,
+		action: "search" | "next" | "prev" | "exit",
+		query?: string,
+	): Promise<void> {
+		if (action === "search") {
+			if (query === undefined) throw new Error("query is required for action=search");
+			// `copy-mode` without -u: entering is a no-op when the pane is
+			// already in copy-mode (no scroll jump), and -u would page up —
+			// the search itself positions the cursor.
+			const enter = await this.execOneShot(sessionId, ["tmux", "copy-mode", "-t", tabId], {
+				combineStreams: true,
+			});
+			if (enter.exitCode !== 0) {
+				// The realistic failures are "can't find session" (tab closed
+				// under us) and "no server running" (container's tmux died) —
+				// either way the tab is unusable, same shape the DELETE-tab
+				// route reports: 404.
+				throw new TabNotFoundError();
+			}
+			const send = await this.execOneShot(
+				sessionId,
+				["tmux", "send-keys", "-t", tabId, "-X", "search-backward", "--", query],
+				{ combineStreams: true },
+			);
+			if (send.exitCode !== 0) {
+				// copy-mode just succeeded, so the pane IS in a mode — any
+				// failure here is unexpected; let the generic 500 handler
+				// surface it rather than mislabelling it "tab not found".
+				throw new Error(`tmux search failed (exit ${send.exitCode}): ${send.stdout}`);
+			}
+			return;
+		}
+
+		const copyModeCommand =
+			action === "next" ? "search-again" : action === "prev" ? "search-reverse" : "cancel";
+		const result = await this.execOneShot(
+			sessionId,
+			["tmux", "send-keys", "-t", tabId, "-X", copyModeCommand],
+			{ combineStreams: true },
+		);
+		if (result.exitCode !== 0) {
+			if (/can't find|no server|no such/i.test(result.stdout)) throw new TabNotFoundError();
+			// Remaining failure shape is "not in a mode": the user left
+			// copy-mode from the terminal itself (q / Enter) between
+			// searches, or hit next/exit before any search ran. There is
+			// nothing to step or cancel — a benign no-op, not an error the
+			// UI should toast about.
+		}
 	}
 
 	private async execOneShot(
