@@ -1080,6 +1080,64 @@ main:not([data-sidebar-ready]) #sidebar {
   display: flex;
   flex-direction: column;
 }
+/* Right-side cluster in the observe modal header: the admin-only
+   Take control button sits left of the close ×. */
+.observe-modal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.observe-take-control-btn {
+  background: #21262d;
+  border: 1px solid #30363d;
+  color: #e6edf3;
+  border-radius: 6px;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.observe-take-control-btn:hover {
+  background: #30363d;
+}
+/* While operating, the button becomes the accented "Release control"
+   affordance — the escalated state is loud so it's never ambiguous
+   that keystrokes are landing in someone else's session. */
+.observe-take-control-btn--active {
+  background: #9e6a03;
+  border-color: #bb8009;
+  color: #fff;
+}
+.observe-take-control-btn--active:hover {
+  background: #bb8009;
+}
+/* Observe-log rows: name + mode pill share one line. */
+.admin-observe-name-line {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+.observe-mode-pill {
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1;
+  padding: 0.2rem 0.45rem;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+/* Neutral for a passive watch, accent for an admin who drove the
+   session — matches the take-control button's escalated colour so the
+   two "operate" signals read as the same thing. */
+.observe-mode-pill--observe {
+  background: #21262d;
+  border: 1px solid #30363d;
+  color: #8b949e;
+}
+.observe-mode-pill--operate {
+  background: rgba(158, 106, 3, 0.2);
+  border: 1px solid #9e6a03;
+  color: #e3a008;
+}
 #observe-terminal-host {
   flex: 1;
   min-height: 0;
