@@ -46,8 +46,15 @@ import {
 } from "./newSession.js";
 import { closePasteModal } from "./paste.js";
 import { closePortsModal } from "./ports.js";
+import {
+	disablePush,
+	enablePush,
+	getPushToggleState,
+	type PushToggleState,
+	registerServiceWorker,
+} from "./push.js";
 import { initTerminalSearch } from "./searchBar.js";
-import { refreshSessions } from "./sessionCore.js";
+import { openSession, refreshSessions } from "./sessionCore.js";
 import { clearAllBadges } from "./tabActivity.js";
 import type { TerminalSession } from "./terminal.js";
 
@@ -104,6 +111,14 @@ const sidebarMyGroupsBtn = document.getElementById("sidebar-my-groups-btn") as H
 const myGroupsModal = document.getElementById("my-groups-modal")!;
 const observeModal = document.getElementById("observe-modal")!;
 const sidebarLogoutBtn = document.getElementById("sidebar-logout-btn") as HTMLButtonElement;
+// #355 — Web Push toggle. Header (desktop) + sidebar-footer (mobile drawer)
+// pair, mirroring the Admin/Invites button pairs. State is read from the
+// browser subscription + server status via getPushToggleState(); nothing is
+// persisted locally.
+const notificationsBtn = document.getElementById("notifications-btn") as HTMLButtonElement;
+const sidebarNotificationsBtn = document.getElementById(
+	"sidebar-notifications-btn",
+) as HTMLButtonElement;
 const chromeToggleBtn = document.getElementById("chrome-toggle") as HTMLButtonElement;
 const chromeToggleLabel = document.getElementById("chrome-toggle-label")!;
 
@@ -265,7 +280,11 @@ function showApp() {
 	// a single line.
 	sidebarUserDisplay.textContent = userDisplay.textContent;
 	applyAdminVisibility();
+	void refreshNotificationsToggle();
 	refreshSessions();
+	// If the app was cold-started from a notification tap, jump to the
+	// referenced session once we're authenticated and showing the app.
+	openSessionFromHash();
 }
 
 // #50 / #201e: gate role-conditional UI on the api-layer mirror.
@@ -287,6 +306,112 @@ export function applyAdminVisibility() {
 	// (re)resolves. The function self-hides the section for non-leads,
 	// so calling unconditionally keeps login/logout symmetric.
 	void refreshSidebarObservables();
+}
+
+// ── Notifications toggle (#355) ───────────────────────────────────────────────
+//
+// Web Push opt-in. The source of truth is the browser subscription + server
+// status, never localStorage; the button re-reads that state via
+// getPushToggleState() on every app-show and after each click. Both the
+// header (desktop) and sidebar-footer (mobile) buttons render identically.
+
+let pushToggleBusy = false;
+
+function renderNotificationsToggle(state: PushToggleState) {
+	const btns = [notificationsBtn, sidebarNotificationsBtn];
+	// "unsupported" folds together "browser can't push" and "server push not
+	// configured" — in both cases there is nothing to offer, so hide entirely.
+	const hidden = state === "unsupported";
+	for (const btn of btns) {
+		btn.hidden = hidden;
+		btn.classList.toggle("enabled", state === "on");
+		btn.disabled = state === "blocked" || pushToggleBusy;
+		if (state === "on") {
+			btn.textContent = "Notifications on";
+			btn.title = "Disable browser notifications for this device";
+		} else if (state === "off") {
+			btn.textContent = "Enable notifications";
+			btn.title = "Get notified when a session needs attention";
+		} else if (state === "blocked") {
+			btn.textContent = "Notifications blocked";
+			btn.title = "Notifications are blocked in your browser settings";
+		} else if (state === "ios-needs-install") {
+			btn.textContent = "Install to enable notifications";
+			btn.title = "Add this app to your home screen to enable notifications";
+		}
+	}
+}
+
+async function refreshNotificationsToggle() {
+	try {
+		renderNotificationsToggle(await getPushToggleState());
+	} catch {
+		// Never let a toggle-state read break app render — hide on failure.
+		renderNotificationsToggle("unsupported");
+	}
+}
+
+async function onNotificationsClick() {
+	if (pushToggleBusy) return;
+	// Claim the busy latch BEFORE the first await: getPushToggleState() does a
+	// GET /push/status round-trip, and a second click in that window would
+	// otherwise still see busy=false and run enable/disable concurrently.
+	pushToggleBusy = true;
+	try {
+		const current = await getPushToggleState();
+		// iOS-not-installed is a hint, not an action: clicking can't install
+		// the PWA, so surface the guidance and bail before touching the push API.
+		if (current === "ios-needs-install") {
+			showToast("Add this app to your home screen to enable notifications");
+			return;
+		}
+		renderNotificationsToggle(current);
+		if (current === "on") {
+			await disablePush();
+			showToast("Notifications disabled");
+		} else {
+			await enablePush();
+			showToast("Notifications enabled");
+		}
+	} catch (err) {
+		showToast((err as Error).message, true);
+	} finally {
+		pushToggleBusy = false;
+		await refreshNotificationsToggle();
+	}
+}
+
+notificationsBtn.addEventListener("click", () => void onNotificationsClick());
+sidebarNotificationsBtn.addEventListener("click", () => void onNotificationsClick());
+
+// Register the service worker as early as possible so a later enable-push
+// click finds an active registration. Idempotent + no-op where unsupported.
+// Swallow a boot-time registration failure (transient /sw.js 503, etc.): it's
+// non-fatal, the memo self-clears on rejection, and a later enablePush() retry
+// re-registers and surfaces the error to the user then.
+registerServiceWorker()?.catch(() => {});
+
+// The SW posts { type:"open-session", sessionId } after focusing the window on
+// a notification tap; jump straight to that session. (openWindow's #session
+// hash covers the cold-start case where no window was open — handled below.)
+if ("serviceWorker" in navigator) {
+	navigator.serviceWorker.addEventListener("message", (event) => {
+		const data = event.data;
+		if (data && data.type === "open-session" && typeof data.sessionId === "string") {
+			void openSession(data.sessionId);
+		}
+	});
+}
+
+// Cold-start auto-open: the SW's openWindow("/#session=<id>") lands here with
+// no live window to postMessage. Consume the hash once the app is up.
+function openSessionFromHash() {
+	const match = /^#session=(.+)$/.exec(window.location.hash);
+	if (!match) return;
+	const sessionId = decodeURIComponent(match[1]);
+	// Clear the hash so a manual reload doesn't re-trigger the jump.
+	history.replaceState(null, "", window.location.pathname + window.location.search);
+	void openSession(sessionId);
 }
 
 function updateAuthUI() {

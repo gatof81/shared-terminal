@@ -819,6 +819,84 @@ export async function revokeInvite(codeHash: string): Promise<void> {
 	}
 }
 
+// ── Web Push (#355) ─────────────────────────────────────────────────────────
+//
+// Thin wrappers over the backend's /push routes. The push subscription
+// lifecycle (permission → subscribe → POST) lives in push.ts; this module
+// only owns the wire calls and their error-shape mapping.
+
+export interface PushStatus {
+	/** Server-side push is configured (VAPID keys present). When false the
+	 *  UI hides the toggle entirely — there's nothing to subscribe to. */
+	enabled: boolean;
+	/** This browser's endpoint is currently in the server's subscription set. */
+	subscribed: boolean;
+}
+
+/** Typed failure for POST /push/subscribe so push.ts / the toggle UI can
+ *  surface the cap-hit and disabled cases with distinct copy rather than a
+ *  generic "request failed". */
+export class PushSubscribeError extends Error {
+	reason: "cap" | "disabled" | "bad-request" | "unknown";
+	constructor(reason: "cap" | "disabled" | "bad-request" | "unknown", message: string) {
+		super(message);
+		this.name = "PushSubscribeError";
+		this.reason = reason;
+	}
+}
+
+export async function fetchVapidKey(): Promise<string> {
+	const res = await apiFetch("/push/vapid-key");
+	if (!res.ok) throw new Error(`Failed to fetch VAPID key (${res.status})`);
+	const body = await res.json();
+	return body.key as string;
+}
+
+export async function getPushStatus(): Promise<PushStatus> {
+	const res = await apiFetch("/push/status");
+	if (!res.ok) throw new Error(`Failed to fetch push status (${res.status})`);
+	return res.json();
+}
+
+export async function subscribePush(sub: PushSubscriptionJSON): Promise<void> {
+	const res = await apiFetch("/push/subscribe", {
+		method: "POST",
+		body: JSON.stringify(sub),
+	});
+	if (res.ok) return;
+	// Distinct status codes carry distinct, actionable user copy — 429 (over
+	// the per-user device cap) and 404 (push not configured server-side) are
+	// both states the user can reason about, unlike a bare 5xx.
+	if (res.status === 429) {
+		throw new PushSubscribeError(
+			"cap",
+			"Too many devices subscribed — disable notifications on another device first.",
+		);
+	}
+	if (res.status === 404) {
+		throw new PushSubscribeError("disabled", "Push notifications aren't enabled on this server.");
+	}
+	if (res.status === 400) {
+		throw new PushSubscribeError(
+			"bad-request",
+			"The browser produced an invalid push subscription.",
+		);
+	}
+	throw new PushSubscribeError("unknown", `Failed to subscribe to notifications (${res.status})`);
+}
+
+export async function unsubscribePush(endpoint: string): Promise<void> {
+	const res = await apiFetch("/push/subscribe", {
+		method: "DELETE",
+		body: JSON.stringify({ endpoint }),
+	});
+	// 404 = the server already dropped this endpoint (pruned after a 410 from
+	// the push service, or a concurrent unsubscribe). The user-visible outcome
+	// is identical to a 204, so swallow it rather than toasting an error.
+	if (res.status === 404) return;
+	if (!res.ok) throw new Error(`Failed to unsubscribe from notifications (${res.status})`);
+}
+
 // ── Admin (#241) ────────────────────────────────────────────────────────────
 //
 // Shapes mirror the backend's `routes.ts` admin endpoints. All admin

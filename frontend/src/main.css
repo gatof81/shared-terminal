@@ -212,7 +212,8 @@ main.chrome-open #chrome-toggle-icon {
 }
 #templates-btn,
 #invites-btn,
-#admin-btn {
+#admin-btn,
+#notifications-btn {
   background: transparent;
   border: 1px solid #30363d;
   border-radius: 6px;
@@ -223,9 +224,23 @@ main.chrome-open #chrome-toggle-icon {
 }
 #templates-btn:hover,
 #invites-btn:hover,
-#admin-btn:hover {
+#admin-btn:hover,
+#notifications-btn:hover:not(:disabled) {
   border-color: #58a6ff;
   color: #58a6ff;
+}
+/* "on" — subscribed on this device. */
+#notifications-btn.enabled,
+#sidebar-notifications-btn.enabled {
+  border-color: #3fb950;
+  color: #3fb950;
+}
+/* "blocked" — permission denied at the browser level; the click can't
+   recover it, so render it inert with an explanatory tooltip/label. */
+#notifications-btn:disabled,
+#sidebar-notifications-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 /* ── Modal (invites) ────────────────────────────────────────── */
@@ -1563,6 +1578,7 @@ main:not([data-sidebar-ready]) #sidebar {
 #sidebar-templates-btn,
 #sidebar-invites-btn,
 #sidebar-admin-btn,
+#sidebar-notifications-btn,
 #sidebar-logout-btn {
   background: transparent;
   border: 1px solid #30363d;
@@ -1574,7 +1590,8 @@ main:not([data-sidebar-ready]) #sidebar {
 }
 #sidebar-templates-btn:hover,
 #sidebar-invites-btn:hover,
-#sidebar-admin-btn:hover {
+#sidebar-admin-btn:hover,
+#sidebar-notifications-btn:hover:not(:disabled) {
   border-color: #58a6ff;
   color: #58a6ff;
 }
