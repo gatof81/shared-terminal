@@ -32,7 +32,7 @@
  * Logged once at startup so the unset case is visible.
  */
 
-import type { IncomingMessage, ServerResponse } from "node:http";
+import type { ClientRequest, IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import httpProxy from "http-proxy";
 import { isAllowedWsOrigin, verifyJwt } from "./auth.js";
@@ -335,6 +335,47 @@ export function handleProxyRes(proxyRes: IncomingMessage): void {
 }
 
 /**
+ * `proxy.on("proxyReq")` handler — terminates the CLIENT response when
+ * `proxyTimeout` reaps the upstream AFTER the response has already started
+ * (#427). Exported for direct unit coverage.
+ *
+ * http-proxy implements `proxyTimeout` as `proxyReq.setTimeout(ms, () =>
+ * proxyReq.abort())`. What that abort does to the client depends on timing:
+ *
+ *   - abort BEFORE any upstream response (`!res.headersSent`) → http-proxy
+ *     emits `error`, `handleProxyError` writes a prompt 502. The fd-leak
+ *     case (a container that accepts then never responds) is covered.
+ *   - abort AFTER the response started (`res.headersSent`) → the abort is
+ *     SILENT: no `error` event fires (verified against http-proxy 1.18.1 on
+ *     Node 22), so `handleProxyError` never runs and the client is left
+ *     hanging on a truncated, never-closed body until the browser / edge
+ *     times it out.
+ *
+ * We close that second gap by attaching our own one-shot `timeout` listener:
+ * on a mid-stream reap we destroy the client socket, turning the hang into a
+ * clean connection drop — the honest signal that the upstream died mid-body,
+ * matching `handleProxyError`'s own mid-stream branch. The `!res.headersSent`
+ * case is deliberately NOT handled here — the existing `error` path already
+ * emits the 502, and destroying the socket would race that cleaner response.
+ *
+ * Composition with #408: `handleProxyRes` clears the idle timeout for
+ * `text/event-stream`, so `timeout` never fires for a healthy SSE stream and
+ * this listener is a no-op for it.
+ */
+export function handleProxyReqTimeout(proxyReq: ClientRequest, res: ServerResponse): void {
+	proxyReq.on("timeout", () => {
+		if (res.headersSent) {
+			// Post-headersSent the wire status can't be rewritten, but the
+			// #241c close-listener reads `statusCode` — set 502 so a
+			// mid-stream reap classifies as 5xx on the admin dashboard
+			// instead of inheriting the upstream's 2xx.
+			res.statusCode = 502;
+			res.destroy();
+		}
+	});
+}
+
+/**
  * Singleton proxy. http-proxy keeps a per-target socket pool internally;
  * one proxy instance is enough for the whole dispatcher. The `error`
  * event is wired to `handleProxyError` so a target-side failure
@@ -365,8 +406,11 @@ function buildProxy(): httpProxy {
 		// socket AND the upstream socket open until the container is
 		// killed — accumulating open fds against the server's limit in
 		// proportion to the number of stalled in-flight requests. With
-		// the timeout, http-proxy fires `error` on expiry and our
-		// handler below closes the response with 502. PR #223 round 1
+		// the timeout, http-proxy fires `error` on expiry (only while the
+		// upstream hasn't responded yet) and `handleProxyError` closes the
+		// response with 502; a mid-stream reap after headers are sent is
+		// silent, so `handleProxyReqTimeout` terminates the client there
+		// (#427). PR #223 round 1
 		// SHOULD-FIX. Long-lived WS connections are unaffected
 		// (proxyTimeout applies to HTTP responses, not the upgraded
 		// socket lifetime). SSE / `text/event-stream` responses ARE
@@ -400,6 +444,9 @@ function buildProxy(): httpProxy {
 	} as Parameters<typeof httpProxy.createProxyServer>[0] & { followRedirects: boolean });
 	proxy.on("error", handleProxyError);
 	proxy.on("proxyRes", handleProxyRes);
+	// `proxyReq` event is `(proxyReq, req, res, options)` — we only need the
+	// request (to hook its timeout) and the client response (to terminate).
+	proxy.on("proxyReq", (proxyReq, _req, res) => handleProxyReqTimeout(proxyReq, res));
 	return proxy;
 }
 
