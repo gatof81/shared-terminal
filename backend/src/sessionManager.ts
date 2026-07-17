@@ -425,6 +425,57 @@ export class SessionManager {
 	}
 
 	/**
+	 * WRITE-capable authorization: owner OR admin. The deliberate
+	 * counterpart to `assertCanObserve` — that method grants READ to a
+	 * graded set (owner / admin / group-lead) and its docblock is
+	 * explicit that "No write capability is granted." Operating a
+	 * session (driving the terminal, editing env / ports, mutating
+	 * tabs) is a strictly narrower grant: the lead arm is intentionally
+	 * absent, because a tech-lead's role is read-only observation and
+	 * broadening it to write is a separate product decision, not an
+	 * extension of this primitive. Keeping the two methods separate is
+	 * what stops a future "widen observe" change from silently widening
+	 * the write surface too.
+	 *
+	 * Returns the fresh `SessionMeta` (callers consume mutable fields).
+	 * Throws `NotFoundError` if the row is gone, `ForbiddenError` if the
+	 * caller is neither owner nor admin. `ForbiddenError` (403), not a
+	 * collapsed 404: unlike the probe-attacker path in `getOwned`, an
+	 * operate caller reached this id through a legitimate surface (the
+	 * admin dashboard), so there's no enumeration vector to defend here.
+	 */
+	async assertCanOperate(sessionId: string, callerId: string): Promise<SessionMeta> {
+		const meta = await this.getOrThrow(sessionId);
+		this.cacheOwnership(sessionId, meta.userId);
+		if (meta.userId === callerId) return meta;
+		// `isUserAdmin` throws on D1 failure (propagates to a 500) rather
+		// than falsely returning 403 — same rationale as assertCanObserve.
+		if (await isUserAdmin(callerId)) return meta;
+		throw new ForbiddenError();
+	}
+
+	/**
+	 * Void-return sibling of `assertCanOperate` for call sites that don't
+	 * need the meta (tab mutate, ports PATCH, env PATCH). Mirrors the
+	 * `assertOwnedBy` / `assertCanObserveBy` cache shape: short-circuit a
+	 * positive owner hit from the ownership cache before any D1 read; a
+	 * cached non-owner still has to check admin, so it falls through.
+	 */
+	async assertCanOperateBy(sessionId: string, callerId: string): Promise<void> {
+		const cached = this.ownershipCache.get(sessionId);
+		const now = Date.now();
+		if (cached && cached.expiresAt > now && cached.ownerUserId === callerId) return;
+		if (cached && cached.expiresAt <= now) {
+			this.ownershipCache.delete(sessionId);
+		}
+		const meta = await this.getOrThrow(sessionId);
+		this.cacheOwnership(sessionId, meta.userId);
+		if (meta.userId === callerId) return;
+		if (await isUserAdmin(callerId)) return;
+		throw new ForbiddenError();
+	}
+
+	/**
 	 * Cross-user session list for the admin dashboard (#241d). Returns
 	 * every session row across every user, paired with the owner's
 	 * username, newest-first. Hard-capped at `ADMIN_LIST_LIMIT` so a
