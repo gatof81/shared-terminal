@@ -14,11 +14,17 @@ vi.mock("./pushSubscriptions.js", () => subStubs);
 
 import { configureWebPush, getVapidPublicKey, isPushEnabled, sendToUser } from "./webPush.js";
 
-const ENV = { pub: "VAPID_PUBLIC_KEY", priv: "VAPID_PRIVATE_KEY", subj: "VAPID_SUBJECT" };
+function setOrDelete(name: string, value?: string): void {
+	if (value === undefined) {
+		delete process.env[name];
+	} else {
+		process.env[name] = value;
+	}
+}
 function setEnv(pub?: string, priv?: string, subj?: string) {
-	pub === undefined ? delete process.env[ENV.pub] : (process.env[ENV.pub] = pub);
-	priv === undefined ? delete process.env[ENV.priv] : (process.env[ENV.priv] = priv);
-	subj === undefined ? delete process.env[ENV.subj] : (process.env[ENV.subj] = subj);
+	setOrDelete("VAPID_PUBLIC_KEY", pub);
+	setOrDelete("VAPID_PRIVATE_KEY", priv);
+	setOrDelete("VAPID_SUBJECT", subj);
 }
 
 beforeEach(() => {
