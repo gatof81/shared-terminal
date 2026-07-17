@@ -7,6 +7,7 @@ import {
 	extractAuthToken,
 	getDispatcherStats,
 	handleProxyError,
+	handleProxyReqTimeout,
 	handleProxyRes,
 	isSameOriginRequest,
 	makeHostParser,
@@ -1130,6 +1131,77 @@ describe("handleProxyRes", () => {
 			socket: null,
 		} as unknown as IncomingMessage;
 		expect(() => handleProxyRes(proxyRes)).not.toThrow();
+	});
+});
+
+// ── handleProxyReqTimeout (mid-stream stall termination, #427) ───────────
+
+// `proxyTimeout` aborts the upstream on expiry. Before any response that
+// surfaces as an `error` → 502. AFTER the response started the abort is
+// silent, so the client would hang; this listener destroys it instead.
+
+describe("handleProxyReqTimeout", () => {
+	// Minimal ClientRequest stand-in: just the one-shot `timeout` emitter.
+	function fakeProxyReq(): {
+		proxyReq: import("node:http").ClientRequest;
+		fireTimeout: () => void;
+	} {
+		let cb: (() => void) | undefined;
+		const proxyReq = {
+			on(event: string, listener: () => void) {
+				if (event === "timeout") cb = listener;
+				return this;
+			},
+		} as unknown as import("node:http").ClientRequest;
+		return { proxyReq, fireTimeout: () => cb?.() };
+	}
+
+	function fakeRes(headersSent: boolean): {
+		res: ServerResponse;
+		state: { statusCode: number; destroyed: boolean };
+	} {
+		const state = { statusCode: 200, destroyed: false };
+		const res = {
+			headersSent,
+			get statusCode() {
+				return state.statusCode;
+			},
+			set statusCode(v: number) {
+				state.statusCode = v;
+			},
+			destroy() {
+				state.destroyed = true;
+			},
+		} as unknown as ServerResponse;
+		return { res, state };
+	}
+
+	it("destroys the client + marks 502 on a mid-stream reap (headersSent=true)", () => {
+		const { proxyReq, fireTimeout } = fakeProxyReq();
+		const { res, state } = fakeRes(true);
+		handleProxyReqTimeout(proxyReq, res);
+		fireTimeout();
+		expect(state.destroyed).toBe(true);
+		// statusCode is a no-op on the wire post-headersSent, but the #241c
+		// close-listener reads it → the reap classifies as 5xx.
+		expect(state.statusCode).toBe(502);
+	});
+
+	it("is a no-op before the response starts (headersSent=false) — error path owns the 502", () => {
+		const { proxyReq, fireTimeout } = fakeProxyReq();
+		const { res, state } = fakeRes(false);
+		handleProxyReqTimeout(proxyReq, res);
+		fireTimeout();
+		expect(state.destroyed).toBe(false);
+		expect(state.statusCode).toBe(200);
+	});
+
+	it("does nothing until the timeout actually fires", () => {
+		const { proxyReq } = fakeProxyReq();
+		const { res, state } = fakeRes(true);
+		handleProxyReqTimeout(proxyReq, res);
+		// no fireTimeout() — listener attached but never triggered
+		expect(state.destroyed).toBe(false);
 	});
 });
 
