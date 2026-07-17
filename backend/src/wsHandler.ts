@@ -75,8 +75,9 @@ export function handleWsConnection(
 	// dropping every other attached session. The `ws` package emits
 	// 'error' on transport-level failures — RSTd TCP, malformed frames,
 	// invalid UTF-8 — any of which can land during the handshake/close
-	// dance or during the two awaits below (sessions.assertOwnership,
-	// docker.attach). A second ws.on('error', …) is added after attach()
+	// dance or during the two awaits below (the auth check —
+	// sessions.assertCanObserve / assertCanOperate — and docker.attach).
+	// A second ws.on('error', …) is added after attach()
 	// succeeds to also tear the exec down; `on` is additive, so both run.
 	// See issue #91 for the DoS reproduction path.
 	ws.on("error", (err) => {
