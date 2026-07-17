@@ -81,7 +81,8 @@ function makeMeta(status: SessionStatus): SessionMeta {
 function makeFakeSessions(status: SessionStatus): SessionManager {
 	const meta = makeMeta(status);
 	return {
-		assertOwnership: vi.fn(async () => meta),
+		// #admin-operate: GET /sessions/:id now gates on assertCanOperate.
+		assertCanOperate: vi.fn(async () => meta),
 	} as unknown as SessionManager;
 }
 
