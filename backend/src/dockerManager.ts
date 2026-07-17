@@ -2266,6 +2266,52 @@ export class DockerManager {
 		return true;
 	}
 
+	// ── Bell detection for Web Push (#355) ──────────────────────────────────
+
+	/**
+	 * True if any browser is currently attached to this session (any tab).
+	 * A shared-exec entry exists in `this.shared` only while ≥1 listener is
+	 * attached — `detach()` deletes it at `listeners.size === 0` — so key
+	 * presence is the cheap SYNCHRONOUS "the user is watching" signal the
+	 * bell sweeper needs to decide "away, safe to push" vs "present, don't".
+	 * The targetKey is `sessionId:tabId` and sessionId is a colon-free UUID,
+	 * so the prefix match can't collide across sessions.
+	 */
+	hasLiveListeners(sessionId: string): boolean {
+		const prefix = `${sessionId}:`;
+		for (const key of this.shared.keys()) {
+			if (key.startsWith(prefix)) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Whether any window in the session's container-wide tmux server has a
+	 * pending bell (#355). tmux sets `window_bell_flag` on a BEL (Claude
+	 * CLI rings it on completion / permission prompts) and keeps it set
+	 * until the window is VIEWED — which never happens while the user is
+	 * detached, so a set flag is the away-detection signal. `monitor-bell`
+	 * is on by default in tmux 3.4 (the session image), so no per-session
+	 * config is needed (verified live). `-a` covers every tab (each tab is
+	 * its own tmux session). Errors (no server / session gone / container
+	 * down) resolve to false so the sweeper treats them as "no bell".
+	 */
+	async readSessionBellFlag(sessionId: string): Promise<boolean> {
+		try {
+			const { stdout, exitCode } = await this.execOneShot(sessionId, [
+				"tmux",
+				"list-windows",
+				"-a",
+				"-F",
+				"#{window_bell_flag}",
+			]);
+			if (exitCode !== 0) return false;
+			return stdout.split("\n").some((line) => line.trim() === "1");
+		} catch {
+			return false;
+		}
+	}
+
 	// ── Tabs (tmux session per tab) ────────────────────────────────────────
 
 	async listTabs(sessionId: string): Promise<Tab[]> {

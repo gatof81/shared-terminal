@@ -19,6 +19,7 @@ import {
 	validateJwtSecret,
 	warnIfWildcardCorsInProduction,
 } from "./auth.js";
+import { BellSweeper } from "./bellSweeper.js";
 import { BootstrapBroadcaster, drainInFlightBootstraps } from "./bootstrap.js";
 import { migrateDb, validateD1Config } from "./db.js";
 import { DockerManager } from "./dockerManager.js";
@@ -30,7 +31,7 @@ import { buildRouter } from "./routes.js";
 import { validateSecretsKey } from "./secrets.js";
 import { SessionManager } from "./sessionManager.js";
 import { parseTrustProxy, TrustProxyError, warnIfProductionMisconfigured } from "./trustProxy.js";
-import { configureWebPush } from "./webPush.js";
+import { configureWebPush, isPushEnabled, sendToUser } from "./webPush.js";
 import { endUpgradeSocketWithReply, handleWsConnection, startWsHeartbeat } from "./wsHandler.js";
 import { createWsUpgradeRateLimiter, resolveClientIp } from "./wsUpgradeRateLimit.js";
 
@@ -111,6 +112,10 @@ const bootstrapBroadcaster = new BootstrapBroadcaster();
 const idleSweeper = new IdleSweeper({
 	stopContainer: (sessionId) => docker.stopContainer(sessionId),
 });
+
+// #355 — bell sweeper (Web Push). Module-scoped (like idleSweeper) so
+// shutdown() can stop it; assigned in start() only when push is enabled.
+let bellSweeper: BellSweeper | null = null;
 
 // #190 PR 190c — port-exposure dispatcher. Resolves Host:
 // `p<container>-<sessionId>.<base>` to the runtime mapping in
@@ -445,6 +450,19 @@ async function start() {
 	}
 	idleSweeper.start();
 
+	// #355 — bell-flag sweeper drives Web Push. Only started when push is
+	// configured, so a push-disabled deployment pays no per-session exec
+	// cost. Wires DockerManager's away/bell probes to webPush.sendToUser.
+	if (isPushEnabled()) {
+		bellSweeper = new BellSweeper({
+			hasLiveListeners: (id) => docker.hasLiveListeners(id),
+			readBellFlag: (id) => docker.readSessionBellFlag(id),
+			sendToUser,
+		});
+		bellSweeper.start();
+		logger.info("[server] bell sweeper started (Web Push notifications)");
+	}
+
 	server.listen(PORT, () => {
 		logger.info(`[server] listening on http://localhost:${PORT}`);
 		logger.info(`[server] WebSocket: ws://localhost:${PORT}/ws/sessions/:id`);
@@ -481,6 +499,10 @@ function shutdown() {
 	// path is about to close. Idempotent — `stop()` is safe to call
 	// even if `start()` never ran.
 	idleSweeper.stop();
+	// #355 — same reason: stop the bell sweeper so a sweep can't fire a
+	// docker exec / D1 query / push mid-teardown. Null when push disabled
+	// (never started). PR #417 review SHOULD-FIX.
+	bellSweeper?.stop();
 
 	// Actively close live WS clients. `wss.close()` alone only stops accepting
 	// new upgrades — existing connections stay open, which keeps `server.close()`
