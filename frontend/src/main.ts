@@ -353,16 +353,19 @@ async function refreshNotificationsToggle() {
 
 async function onNotificationsClick() {
 	if (pushToggleBusy) return;
-	// iOS-not-installed is a hint, not an action: clicking can't install the
-	// PWA, so surface the guidance and bail before touching the push API.
-	const current = await getPushToggleState();
-	if (current === "ios-needs-install") {
-		showToast("Add this app to your home screen to enable notifications");
-		return;
-	}
+	// Claim the busy latch BEFORE the first await: getPushToggleState() does a
+	// GET /push/status round-trip, and a second click in that window would
+	// otherwise still see busy=false and run enable/disable concurrently.
 	pushToggleBusy = true;
-	renderNotificationsToggle(current);
 	try {
+		const current = await getPushToggleState();
+		// iOS-not-installed is a hint, not an action: clicking can't install
+		// the PWA, so surface the guidance and bail before touching the push API.
+		if (current === "ios-needs-install") {
+			showToast("Add this app to your home screen to enable notifications");
+			return;
+		}
+		renderNotificationsToggle(current);
 		if (current === "on") {
 			await disablePush();
 			showToast("Notifications disabled");
