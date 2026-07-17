@@ -12,6 +12,21 @@ import { defineConfig, loadEnv } from "vite";
 
 export default defineConfig(({ mode }) => {
 	const env = loadEnv(mode, process.cwd(), "");
+	// Fail the build loud if VITE_API_URL is set but scheme-less (#407).
+	// The CSP + wsUrl derivation below assumes an `http(s)://` prefix:
+	// a bare host like `api.example.com` slips through, the `wsUrl`
+	// regex doesn't match so both connect-src tokens collapse to the
+	// bare host, and the app resolves `fetch("api.example.com/…")`
+	// RELATIVE to its own origin — landing on the SPA fallback with no
+	// error. That failure is invisible (CI green, page loads, just
+	// can't authenticate), so turn it into a red build here instead.
+	// Cloudflare Pages' Preview environment shipped exactly this.
+	if (env.VITE_API_URL && !/^https?:\/\//.test(env.VITE_API_URL)) {
+		throw new Error(
+			`VITE_API_URL must include an http(s):// scheme (got ${JSON.stringify(env.VITE_API_URL)}). ` +
+				"A scheme-less value produces a broken CSP and API base that fail silently at runtime.",
+		);
+	}
 	const apiUrl = env.VITE_API_URL || "http://localhost:3001";
 	const wsUrl = apiUrl.replace(/^http(s?):\/\//, "ws$1://");
 
