@@ -710,7 +710,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			await docker.startContainer(req.params.id);
 			const updated = await sessions.get(req.params.id);
 			if (!updated) {
-				// Race: deleted between assertCanOperate and get. See
+				// Race: deleted between assertOwnership and get. See
 				// stopContainer handler above for the full explanation.
 				res.status(404).json({ error: "Session not found" });
 				return;
