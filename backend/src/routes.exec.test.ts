@@ -56,9 +56,10 @@ vi.mock("./db.js", () => dbStubs);
 import type { BootstrapBroadcaster } from "./bootstrap.js";
 import type { DockerManager } from "./dockerManager.js";
 import { requestIdMiddleware } from "./requestContext.js";
+import type { RouteIdleSweeper } from "./routes/shared.js";
 import { buildRouter } from "./routes.js";
 import type { SessionManager } from "./sessionManager.js";
-import { NotFoundError } from "./sessionManager.js";
+import { ForbiddenError, NotFoundError } from "./sessionManager.js";
 import type { SessionMeta, SessionStatus } from "./types.js";
 
 type StreamExecOpts = {
@@ -93,11 +94,19 @@ function makeMeta(overrides: Partial<SessionMeta> = {}): SessionMeta {
 	};
 }
 
-function makeFakeSessions(status: SessionStatus = "running"): SessionManager {
-	const meta = makeMeta({ status, containerId: status === "running" ? "c1" : null });
+function makeFakeSessions(
+	status: SessionStatus = "running",
+	metaOverrides: Partial<SessionMeta> = {},
+): SessionManager {
+	const meta = makeMeta({
+		status,
+		containerId: status === "running" ? "c1" : null,
+		...metaOverrides,
+	});
+	// All three exec routes authorize operate-tier (#416): the meta-returning
+	// assertCanOperate is the only predicate they call.
 	return {
-		assertOwnership: vi.fn(async () => meta),
-		assertOwnedBy: vi.fn(async () => undefined),
+		assertCanOperate: vi.fn(async () => meta),
 	} as unknown as SessionManager;
 }
 
@@ -123,21 +132,31 @@ afterEach(async () => {
 	}
 });
 
-async function spinUp(sessions: SessionManager, docker: DockerManager) {
+async function spinUp(
+	sessions: SessionManager,
+	docker: DockerManager,
+	idleSweeper?: RouteIdleSweeper,
+) {
 	const broadcaster = {} as BootstrapBroadcaster;
-	const router = buildRouter(sessions, docker, broadcaster, {
-		login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
-		register: { ipMax: 1000, ipWindowMs: 60_000 },
-		invitesCreate: { ipMax: 1000, ipWindowMs: 60_000 },
-		invitesList: { ipMax: 1000, ipWindowMs: 60_000 },
-		invitesRevoke: { ipMax: 1000, ipWindowMs: 60_000 },
-		fileUpload: { ipMax: 1000, ipWindowMs: 60_000 },
-		logout: { ipMax: 1000, ipWindowMs: 60_000 },
-		authStatus: { ipMax: 1000, ipWindowMs: 60_000 },
-		adminStats: { ipMax: 1000, ipWindowMs: 60_000 },
-		adminAction: { ipMax: 1000, ipWindowMs: 60_000 },
-		exec: { ipMax: 1000, ipWindowMs: 60_000 },
-	});
+	const router = buildRouter(
+		sessions,
+		docker,
+		broadcaster,
+		{
+			login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
+			register: { ipMax: 1000, ipWindowMs: 60_000 },
+			invitesCreate: { ipMax: 1000, ipWindowMs: 60_000 },
+			invitesList: { ipMax: 1000, ipWindowMs: 60_000 },
+			invitesRevoke: { ipMax: 1000, ipWindowMs: 60_000 },
+			fileUpload: { ipMax: 1000, ipWindowMs: 60_000 },
+			logout: { ipMax: 1000, ipWindowMs: 60_000 },
+			authStatus: { ipMax: 1000, ipWindowMs: 60_000 },
+			adminStats: { ipMax: 1000, ipWindowMs: 60_000 },
+			adminAction: { ipMax: 1000, ipWindowMs: 60_000 },
+			exec: { ipMax: 1000, ipWindowMs: 60_000 },
+		},
+		idleSweeper,
+	);
 	const app = express();
 	// Real request-id middleware so the routes' X-Request-Id emission and
 	// the started event's requestId echo are exercised, not stubbed.
@@ -303,9 +322,9 @@ describe("POST /sessions/:id/exec", () => {
 		expect(docker.streamExec).not.toHaveBeenCalled();
 	});
 
-	it("404s a session the caller does not own", async () => {
+	it("404s a missing session", async () => {
 		const sessions = {
-			assertOwnership: vi.fn(async () => {
+			assertCanOperate: vi.fn(async () => {
 				throw new NotFoundError("Session not found");
 			}),
 		} as unknown as SessionManager;
@@ -487,5 +506,223 @@ describe("GET /sessions/:id/exec/:execId", () => {
 			await fetch(`${baseUrl}/api/sessions/sess-1/exec/e_0000000000000000`)
 		).json();
 		expect(unknown).toEqual({ execId: "e_0000000000000000", state: "unknown" });
+	});
+});
+
+// ── Operate-tier authorization + cross-user audit (#416) ────────────────────
+//
+// The auth stub pins the caller to "u1"; a FOREIGN session is simulated by
+// having assertCanOperate resolve meta with a different owner (the shape it
+// returns for an admin caller), and a denied caller by having it throw
+// ForbiddenError (the shape it returns for a non-admin non-owner).
+
+/** SQL fragments recorded against the mocked d1Query. */
+function observeLogCalls() {
+	return dbStubs.d1Query.mock.calls as unknown as [string, unknown[]][];
+}
+function auditInserts() {
+	return observeLogCalls().filter(([sql]) => sql.includes("INSERT INTO session_observe_log"));
+}
+function auditEnds() {
+	return observeLogCalls().filter(([sql]) => sql.includes("UPDATE session_observe_log"));
+}
+
+describe("exec operate-tier (#416)", () => {
+	const forbidden = () =>
+		({
+			assertCanOperate: vi.fn(async () => {
+				throw new ForbiddenError("Forbidden");
+			}),
+		}) as unknown as SessionManager;
+
+	it("admin exec into a foreign session streams normally and writes a start→end audit row", async () => {
+		dbStubs.d1Query.mockClear();
+		const { docker } = makeFakeDocker(async (_sid, opts, onOutput) => {
+			opts.onProcessGroup?.(21);
+			onOutput?.("out\n", "stdout");
+			return { exitCode: 0 };
+		});
+		await spinUp(makeFakeSessions("running", { userId: "owner-9" }), docker);
+
+		const res = await startExec({ cmd: ["echo"] });
+		expect(res.status).toBe(200);
+		const events = await readAllEvents(res);
+		expect(events.map((e) => e.type)).toEqual(["started", "output", "exit"]);
+
+		const inserts = auditInserts();
+		expect(inserts).toHaveLength(1);
+		// [id, observer_user_id, session_id, owner_user_id, mode]
+		expect(inserts[0]?.[1]?.slice(1)).toEqual(["u1", "sess-1", "owner-9", "operate"]);
+		// ended_at flip is fire-and-forget in the route's finally — poll for it.
+		await vi.waitFor(() => {
+			expect(auditEnds()).toHaveLength(1);
+		});
+		expect(auditEnds()[0]?.[1]?.[0]).toBe(inserts[0]?.[1]?.[0]);
+	});
+
+	it("owner exec writes no audit row", async () => {
+		dbStubs.d1Query.mockClear();
+		const { docker } = makeFakeDocker(async (_sid, opts) => {
+			opts.onProcessGroup?.(22);
+			return { exitCode: 0 };
+		});
+		await spinUp(makeFakeSessions(), docker);
+
+		await readAllEvents(await startExec({ cmd: ["echo"] }));
+		expect(auditInserts()).toHaveLength(0);
+	});
+
+	it("aborts the exec (500, no process started, slot released) when the audit INSERT fails", async () => {
+		dbStubs.d1Query.mockClear();
+		dbStubs.d1Query.mockRejectedValueOnce(new Error("d1 down"));
+		const { docker } = makeFakeDocker(async (_sid, opts) => {
+			opts.onProcessGroup?.(23);
+			return { exitCode: 0 };
+		});
+		await spinUp(makeFakeSessions("running", { userId: "owner-9" }), docker);
+
+		const res = await startExec({ cmd: ["echo"] });
+		expect(res.status).toBe(500);
+		expect(docker.streamExec).not.toHaveBeenCalled();
+		// The registered slot was released: 4 more execs fit under the cap.
+		for (let i = 0; i < 4; i++) {
+			const ok = await startExec({ cmd: ["echo"] });
+			expect(ok.status).toBe(200);
+			await ok.text();
+		}
+	});
+
+	it("403s a non-admin non-owner on start, status, and kill", async () => {
+		const { docker } = makeFakeDocker(async () => ({ exitCode: 0 }));
+		await spinUp(forbidden(), docker);
+
+		expect((await startExec({ cmd: ["x"] })).status).toBe(403);
+		expect((await fetch(`${baseUrl}/api/sessions/sess-1/exec/e_deadbeefdeadbeef`)).status).toBe(
+			403,
+		);
+		expect(
+			(
+				await fetch(`${baseUrl}/api/sessions/sess-1/exec/e_deadbeefdeadbeef/kill`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: "{}",
+				})
+			).status,
+		).toBe(403);
+		expect(docker.streamExec).not.toHaveBeenCalled();
+	});
+
+	it("admin status + kill on a foreign session's exec work as for the owner", async () => {
+		let resolveExec: ((v: { exitCode: number }) => void) | undefined;
+		const { docker, killSpy } = makeFakeDocker(async (_sid, opts) => {
+			opts.onProcessGroup?.(24);
+			return new Promise((resolve) => {
+				resolveExec = resolve;
+			});
+		});
+		killSpy.mockImplementation(async () => {
+			resolveExec?.({ exitCode: 137 });
+			return "killed";
+		});
+		await spinUp(makeFakeSessions("running", { userId: "owner-9" }), docker);
+
+		const res = await startExec({ cmd: ["sleep", "999"] });
+		const reader = ndjsonReader(res);
+		const started = await reader.next();
+		const execId = started?.execId as string;
+
+		const status = await (await fetch(`${baseUrl}/api/sessions/sess-1/exec/${execId}`)).json();
+		expect(status).toMatchObject({ execId, state: "running", pgid: 24 });
+
+		const kill = await fetch(`${baseUrl}/api/sessions/sess-1/exec/${execId}/kill`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: "{}",
+		});
+		expect(kill.status).toBe(200);
+		expect(await kill.json()).toEqual({ outcome: "killed" });
+		expect(killSpy).toHaveBeenCalledWith("sess-1", 24, 5000);
+		const exit = await reader.next();
+		expect(exit).toMatchObject({ type: "exit", reason: "killed" });
+	});
+
+	it("audits a cross-user kill with its own operate row, but not a 404'd kill", async () => {
+		// The start row alone doesn't attribute the kill: an owner-started
+		// exec has no start row at all, and even a cross-user-started one
+		// was attributed to the starter, not the killer (#422 review).
+		dbStubs.d1Query.mockClear();
+		let resolveExec: ((v: { exitCode: number }) => void) | undefined;
+		const { docker, killSpy } = makeFakeDocker(async (_sid, opts) => {
+			opts.onProcessGroup?.(27);
+			return new Promise((resolve) => {
+				resolveExec = resolve;
+			});
+		});
+		killSpy.mockImplementation(async () => {
+			resolveExec?.({ exitCode: 137 });
+			return "killed";
+		});
+		await spinUp(makeFakeSessions("running", { userId: "owner-9" }), docker);
+
+		const res = await startExec({ cmd: ["sleep", "999"] });
+		const reader = ndjsonReader(res);
+		const started = await reader.next();
+		const execId = started?.execId as string;
+		expect(auditInserts()).toHaveLength(1); // cross-user start row
+
+		// A kill the registry rejects (404) took no action — no audit row.
+		const notFound = await fetch(`${baseUrl}/api/sessions/sess-1/exec/e_0000000000000000/kill`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: "{}",
+		});
+		expect(notFound.status).toBe(404);
+		expect(auditInserts()).toHaveLength(1);
+
+		const kill = await fetch(`${baseUrl}/api/sessions/sess-1/exec/${execId}/kill`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: "{}",
+		});
+		expect(kill.status).toBe(200);
+		await reader.next(); // drain exit
+		// Kill row is fire-and-forget — poll. Both rows end up closed.
+		await vi.waitFor(() => {
+			expect(auditInserts()).toHaveLength(2);
+			expect(auditEnds()).toHaveLength(2);
+		});
+		expect(auditInserts()[1]?.[1]?.slice(1)).toEqual(["u1", "sess-1", "owner-9", "operate"]);
+	});
+
+	it("skips the idle bump for cross-user calls but keeps it for the owner", async () => {
+		// No-output execs so the only possible bump is the REST finish-bump.
+		const { docker } = makeFakeDocker(async (_sid, opts) => {
+			opts.onProcessGroup?.(25);
+			return { exitCode: 0 };
+		});
+		const bump = vi.fn();
+		const sweeper: RouteIdleSweeper = { bump, forget: vi.fn() };
+		await spinUp(makeFakeSessions("running", { userId: "owner-9" }), docker, sweeper);
+
+		await readAllEvents(await startExec({ cmd: ["true"] }));
+		const statusRes = await fetch(`${baseUrl}/api/sessions/sess-1/exec/e_0000000000000000`);
+		expect(statusRes.status).toBe(200);
+		// finish-bumps land on res 'finish' — settle the event loop.
+		await new Promise((r) => setImmediate(r));
+		expect(bump).not.toHaveBeenCalled();
+	});
+
+	it("owner exec still bumps the idle sweeper on finish", async () => {
+		const { docker } = makeFakeDocker(async (_sid, opts) => {
+			opts.onProcessGroup?.(26);
+			return { exitCode: 0 };
+		});
+		const bump = vi.fn();
+		const sweeper: RouteIdleSweeper = { bump, forget: vi.fn() };
+		await spinUp(makeFakeSessions(), docker, sweeper);
+
+		await readAllEvents(await startExec({ cmd: ["true"] }));
+		await new Promise((r) => setImmediate(r));
+		expect(bump).toHaveBeenCalledWith("sess-1");
 	});
 });

@@ -9,9 +9,13 @@
  *
  * Security note: this surface is arbitrary code execution in the session
  * container *by construction* — exactly as powerful as the terminal WS
- * already is for the same authenticated owner. It adds capability breadth
- * (automation), not a new trust level; ownership is the entire
- * authorization story, same as everywhere else.
+ * already is for the same authenticated caller. It adds capability breadth
+ * (automation), not a new trust level; authorization is operate-tier
+ * (owner OR admin, `assertCanOperate` — #416), the same tier that already
+ * drives the terminal WS with full write since the admin-operate series.
+ * A cross-user exec is audited with a `session_observe_log` row tagged
+ * `mode='operate'` spanning the exec's start→exit, mirroring the WS
+ * attach audit in wsHandler.ts.
  */
 
 import type { Request, Response, Router } from "express";
@@ -21,6 +25,7 @@ import { ContainerNotFoundError } from "../dockerManager.js";
 import { EnvVarValidationError, validateEnvVars } from "../envVarValidation.js";
 import type { ExecRegistry } from "../execRegistry.js";
 import { logger } from "../logger.js";
+import { recordObserveEnd, recordObserveStart } from "../observeLog.js";
 import { getRequestId } from "../requestContext.js";
 import { handleSessionError, type RouteContext } from "./shared.js";
 
@@ -83,9 +88,20 @@ export function registerExecRoutes(router: Router, ctx: RouteContext): void {
 		const sessionId = req.params.id;
 		const userId = (req as AuthedRequest).userId;
 		try {
-			// assertOwnership (not assertOwnedBy): the fresh meta is needed
-			// for the container-not-running check below.
-			const meta = await sessions.assertOwnership(sessionId, userId);
+			// assertCanOperate (not assertCanOperateBy): the fresh meta is
+			// needed for the container-not-running check below. Operate-tier
+			// (#416): owner OR admin — the #412 pattern applied to exec, so
+			// the Hub's admin-flagged execution identity can run structured
+			// turns in a foreign session. Non-admin non-owners still 403.
+			const meta = await sessions.assertCanOperate(sessionId, userId);
+			// An admin execing into a foreign session must not reset the
+			// owner's idle-auto-stop clock via the REST finish-bump (#300
+			// principle, same as the operate-tier routes in sessions.ts).
+			// The per-output bumps below stay unconditional: a RUNNING exec
+			// is real container activity that must not be idle-reaped
+			// mid-run, regardless of who started it.
+			const isForeignSession = meta.userId !== userId;
+			if (isForeignSession) res.locals.skipIdleBump = true;
 
 			const parsed = ExecBodySchema.safeParse(req.body);
 			if (!parsed.success) {
@@ -114,6 +130,35 @@ export function registerExecRoutes(router: Router, ctx: RouteContext): void {
 			}
 
 			const entry = execRegistry.register(sessionId);
+
+			// Audit a cross-user exec (#416) — one session_observe_log row
+			// tagged `mode='operate'`, start = exec start, end = exec exit
+			// (the finally block below flips ended_at). Same invariant as
+			// the WS attach audit in wsHandler.ts: an unaudited cross-user
+			// operate must not happen, so an INSERT failure aborts the exec
+			// before any process starts. The INSERT sits AFTER register()
+			// (the runningCount check → register window must stay free of
+			// awaits, or concurrent starts could all pass the cap check)
+			// and releases the slot via markExited on the abort path.
+			let observeLogId: string | null = null;
+			if (isForeignSession) {
+				try {
+					observeLogId = await recordObserveStart(userId, sessionId, meta.userId, "operate");
+				} catch (err) {
+					execRegistry.markExited(entry.execId, null);
+					logger.error(
+						`[exec] operate audit insert failed, aborting exec: ${(err as Error).message} ` +
+							`(caller=${userId} session=${sessionId})`,
+					);
+					res.status(500).json({ error: "Internal server error" });
+					return;
+				}
+				logger.info(
+					`[exec] operate exec logged: caller=${userId} session=${sessionId} ` +
+						`owner=${meta.userId} log=${observeLogId} exec=${entry.execId}`,
+				);
+			}
+
 			const requestId = setRequestIdHeader(res);
 			res.setHeader("Content-Type", "application/x-ndjson");
 			res.setHeader("Cache-Control", "no-store");
@@ -280,6 +325,17 @@ export function registerExecRoutes(router: Router, ctx: RouteContext): void {
 				}
 			} finally {
 				clearTimeout(timer);
+				if (observeLogId !== null) {
+					// Fire-and-forget like wsHandler's teardown: the UPDATE
+					// is idempotent (WHERE ended_at IS NULL) and a D1
+					// transient at exec end must not fail the response.
+					recordObserveEnd(observeLogId).catch((err) => {
+						logger.warn(
+							`[exec] operate audit end failed: ${(err as Error).message} ` +
+								`(log=${observeLogId} session=${sessionId})`,
+						);
+					});
+				}
 			}
 		} catch (err) {
 			if (err instanceof EnvVarValidationError) {
@@ -295,7 +351,14 @@ export function registerExecRoutes(router: Router, ctx: RouteContext): void {
 	router.get("/sessions/:id/exec/:execId", async (req: Request, res: Response) => {
 		const userId = (req as AuthedRequest).userId;
 		try {
-			await sessions.assertOwnedBy(req.params.id, userId);
+			// Operate-tier (#416). The meta-returning variant (not the
+			// cache-short-circuiting assertCanOperateBy) so a cross-user
+			// caller can be told apart and skip the idle bump — an admin
+			// polling a foreign exec's status must not keep the owner's
+			// session alive (#300). Costs one D1 read per poll; this is
+			// the rare recovery surface, not the streaming hot path.
+			const meta = await sessions.assertCanOperate(req.params.id, userId);
+			if (meta.userId !== userId) res.locals.skipIdleBump = true;
 			setRequestIdHeader(res);
 			const entry = execRegistry.get(req.params.execId);
 			// "Not in the registry" and "registry lost on restart" are
@@ -335,7 +398,11 @@ export function registerExecRoutes(router: Router, ctx: RouteContext): void {
 	router.post("/sessions/:id/exec/:execId/kill", execIp, async (req: Request, res: Response) => {
 		const userId = (req as AuthedRequest).userId;
 		try {
-			await sessions.assertOwnedBy(req.params.id, userId);
+			// Operate-tier + cross-user idle-bump skip, same shape as the
+			// status route above (#416).
+			const meta = await sessions.assertCanOperate(req.params.id, userId);
+			const isForeignCaller = meta.userId !== userId;
+			if (isForeignCaller) res.locals.skipIdleBump = true;
 			setRequestIdHeader(res);
 			const parsed = KillBodySchema.safeParse(req.body ?? {});
 			if (!parsed.success) {
@@ -362,6 +429,28 @@ export function registerExecRoutes(router: Router, ctx: RouteContext): void {
 				return;
 			}
 			execRegistry.markKillIntent(entry.execId, "killed");
+			// A cross-user kill gets its own point-in-time operate row
+			// (#422 review): the exec's start→exit audit row only exists
+			// when the exec itself was cross-user-STARTED, and kill
+			// attribution belongs to the killer, not the starter — without
+			// this, an admin killing an owner-started exec would leave no
+			// D1 trace at all. Recorded only once every check above passed
+			// and the signal is about to be dispatched: a 400/404/409 took
+			// no action on the session, matching observeLog's "denied
+			// attempts saw nothing" posture. Fire-and-forget, unlike the
+			// abort-on-failure start audit: kill is the safety valve for a
+			// runaway exec, and refusing it during a D1 transient would
+			// leave the process unkillable for up to the 1 h wall-clock cap.
+			if (isForeignCaller) {
+				recordObserveStart(userId, req.params.id, meta.userId, "operate")
+					.then((id) => recordObserveEnd(id))
+					.catch((err) => {
+						logger.warn(
+							`[exec] kill audit failed: ${(err as Error).message} ` +
+								`(caller=${userId} session=${req.params.id} exec=${entry.execId})`,
+						);
+					});
+			}
 			const outcome = await docker.killExecProcessGroup(req.params.id, entry.pgid, graceMs);
 			// Walkback is best-effort: if the natural exit settled DURING the
 			// await above, markExited already consumed the intent and the
