@@ -13,10 +13,14 @@ no new execution machinery. It is product-agnostic: no consumer concepts
 
 **Trust model:** these endpoints are arbitrary code execution in the
 session container *by construction* — exactly as powerful as the terminal
-WebSocket already is for the same authenticated owner. They add capability
+WebSocket already is for the same authenticated caller. They add capability
 breadth (automation), not a new trust level. Auth is the existing JWT
-cookie; the principal must own the session (403 otherwise). No new auth
-mechanism.
+cookie; authorization is operate-tier (#416): the principal must own the
+session **or** be an admin (403 otherwise) — the same tier that already
+drives the terminal WS with full write. Group leads are excluded (observe
+stays read-only). A cross-user exec writes a `session_observe_log` audit
+row tagged `mode='operate'` spanning the exec's start→exit. No new auth
+mechanism, no wire-shape change.
 
 ## Correlation
 
@@ -128,7 +132,7 @@ kill round-trip; deliberately out of scope for v1.
 | Status | When | Body |
 | --- | --- | --- |
 | `400` | malformed body, empty `cmd`, oversized `cmd` (> 32 KiB) or `env`, bad env name, `graceMs`/`maxDurationMs` out of range | `{ "error": "..." }` |
-| `401` / `403` | unauthenticated / session not owned | existing house shape |
+| `401` / `403` | unauthenticated / caller is neither the session owner nor an admin | existing house shape |
 | `404` | unknown session; kill on an execId the registry does not hold | `{ "error": "..." }` |
 | `409` | session container not running; kill on an exec whose pgid was never reported | `{ "error": "container-not-running" }` / `{ "error": "pgid-unavailable" }` |
 | `429` | per-session concurrency cap (4 running execs) or per-IP rate limit (120/min for start + kill) | `{ "error": "too-many-concurrent-execs" }` / limiter shape |
