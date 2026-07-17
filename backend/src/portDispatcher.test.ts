@@ -7,6 +7,7 @@ import {
 	extractAuthToken,
 	getDispatcherStats,
 	handleProxyError,
+	handleProxyRes,
 	isSameOriginRequest,
 	makeHostParser,
 	type ParsedHost,
@@ -1057,6 +1058,78 @@ describe("handleProxyError", () => {
 		} as unknown as Duplex;
 		handleProxyError(new Error("ws boom"), fakeReq(), socket);
 		expect(calls.destroyed).toBe(true);
+	});
+});
+
+// ── handleProxyRes (SSE idle-timeout release, #408) ──────────────────────
+
+// The `proxyTimeout` option arms an INACTIVITY timeout on the upstream
+// socket. A long-lived SSE stream sits idle between events and would be
+// reaped mid-flight (→ 502, EventSource reconnect loop). `handleProxyRes`
+// clears that timeout the moment the upstream declares an event-stream,
+// and leaves every other response's fd-leak protection intact.
+
+describe("handleProxyRes", () => {
+	function fakeProxyRes(contentType: string | string[] | undefined): {
+		proxyRes: IncomingMessage;
+		timeoutArg: number | undefined;
+		setTimeoutCalled: boolean;
+	} {
+		const state = { timeoutArg: undefined as number | undefined, setTimeoutCalled: false };
+		const proxyRes = {
+			headers: contentType === undefined ? {} : { "content-type": contentType },
+			socket: {
+				setTimeout(ms: number) {
+					state.setTimeoutCalled = true;
+					state.timeoutArg = ms;
+				},
+			},
+		} as unknown as IncomingMessage;
+		return {
+			proxyRes,
+			get timeoutArg() {
+				return state.timeoutArg;
+			},
+			get setTimeoutCalled() {
+				return state.setTimeoutCalled;
+			},
+		};
+	}
+
+	it("clears the idle timeout for a text/event-stream response", () => {
+		const f = fakeProxyRes("text/event-stream");
+		handleProxyRes(f.proxyRes);
+		expect(f.setTimeoutCalled).toBe(true);
+		// setTimeout(0) disables the pending idle timer.
+		expect(f.timeoutArg).toBe(0);
+	});
+
+	it("matches event-stream case-insensitively and with a charset suffix", () => {
+		const f = fakeProxyRes("Text/Event-Stream; charset=utf-8");
+		handleProxyRes(f.proxyRes);
+		expect(f.timeoutArg).toBe(0);
+	});
+
+	it("leaves the timeout in place for a normal (non-stream) response", () => {
+		const f = fakeProxyRes("application/json");
+		handleProxyRes(f.proxyRes);
+		// A stalled JSON/download response SHOULD still be reaped after
+		// the idle window — don't touch its socket timeout.
+		expect(f.setTimeoutCalled).toBe(false);
+	});
+
+	it("is a no-op when the upstream sends no Content-Type", () => {
+		const f = fakeProxyRes(undefined);
+		handleProxyRes(f.proxyRes);
+		expect(f.setTimeoutCalled).toBe(false);
+	});
+
+	it("does not throw when the socket is already gone (null)", () => {
+		const proxyRes = {
+			headers: { "content-type": "text/event-stream" },
+			socket: null,
+		} as unknown as IncomingMessage;
+		expect(() => handleProxyRes(proxyRes)).not.toThrow();
 	});
 });
 
