@@ -399,11 +399,10 @@ export function registerExecRoutes(router: Router, ctx: RouteContext): void {
 		const userId = (req as AuthedRequest).userId;
 		try {
 			// Operate-tier + cross-user idle-bump skip, same shape as the
-			// status route above (#416). No separate audit row for kill:
-			// the exec's own start→exit row covers its lifetime, and the
-			// kill is attributed there via the exit `reason`.
+			// status route above (#416).
 			const meta = await sessions.assertCanOperate(req.params.id, userId);
-			if (meta.userId !== userId) res.locals.skipIdleBump = true;
+			const isForeignCaller = meta.userId !== userId;
+			if (isForeignCaller) res.locals.skipIdleBump = true;
 			setRequestIdHeader(res);
 			const parsed = KillBodySchema.safeParse(req.body ?? {});
 			if (!parsed.success) {
@@ -430,6 +429,28 @@ export function registerExecRoutes(router: Router, ctx: RouteContext): void {
 				return;
 			}
 			execRegistry.markKillIntent(entry.execId, "killed");
+			// A cross-user kill gets its own point-in-time operate row
+			// (#422 review): the exec's start→exit audit row only exists
+			// when the exec itself was cross-user-STARTED, and kill
+			// attribution belongs to the killer, not the starter — without
+			// this, an admin killing an owner-started exec would leave no
+			// D1 trace at all. Recorded only once every check above passed
+			// and the signal is about to be dispatched: a 400/404/409 took
+			// no action on the session, matching observeLog's "denied
+			// attempts saw nothing" posture. Fire-and-forget, unlike the
+			// abort-on-failure start audit: kill is the safety valve for a
+			// runaway exec, and refusing it during a D1 transient would
+			// leave the process unkillable for up to the 1 h wall-clock cap.
+			if (isForeignCaller) {
+				recordObserveStart(userId, req.params.id, meta.userId, "operate")
+					.then((id) => recordObserveEnd(id))
+					.catch((err) => {
+						logger.warn(
+							`[exec] kill audit failed: ${(err as Error).message} ` +
+								`(caller=${userId} session=${req.params.id} exec=${entry.execId})`,
+						);
+					});
+			}
 			const outcome = await docker.killExecProcessGroup(req.params.id, entry.pgid, graceMs);
 			// Walkback is best-effort: if the natural exit settled DURING the
 			// await above, markExited already consumed the intent and the

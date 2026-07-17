@@ -646,6 +646,54 @@ describe("exec operate-tier (#416)", () => {
 		expect(exit).toMatchObject({ type: "exit", reason: "killed" });
 	});
 
+	it("audits a cross-user kill with its own operate row, but not a 404'd kill", async () => {
+		// The start row alone doesn't attribute the kill: an owner-started
+		// exec has no start row at all, and even a cross-user-started one
+		// was attributed to the starter, not the killer (#422 review).
+		dbStubs.d1Query.mockClear();
+		let resolveExec: ((v: { exitCode: number }) => void) | undefined;
+		const { docker, killSpy } = makeFakeDocker(async (_sid, opts) => {
+			opts.onProcessGroup?.(27);
+			return new Promise((resolve) => {
+				resolveExec = resolve;
+			});
+		});
+		killSpy.mockImplementation(async () => {
+			resolveExec?.({ exitCode: 137 });
+			return "killed";
+		});
+		await spinUp(makeFakeSessions("running", { userId: "owner-9" }), docker);
+
+		const res = await startExec({ cmd: ["sleep", "999"] });
+		const reader = ndjsonReader(res);
+		const started = await reader.next();
+		const execId = started?.execId as string;
+		expect(auditInserts()).toHaveLength(1); // cross-user start row
+
+		// A kill the registry rejects (404) took no action — no audit row.
+		const notFound = await fetch(`${baseUrl}/api/sessions/sess-1/exec/e_0000000000000000/kill`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: "{}",
+		});
+		expect(notFound.status).toBe(404);
+		expect(auditInserts()).toHaveLength(1);
+
+		const kill = await fetch(`${baseUrl}/api/sessions/sess-1/exec/${execId}/kill`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: "{}",
+		});
+		expect(kill.status).toBe(200);
+		await reader.next(); // drain exit
+		// Kill row is fire-and-forget — poll. Both rows end up closed.
+		await vi.waitFor(() => {
+			expect(auditInserts()).toHaveLength(2);
+			expect(auditEnds()).toHaveLength(2);
+		});
+		expect(auditInserts()[1]?.[1]?.slice(1)).toEqual(["u1", "sess-1", "owner-9", "operate"]);
+	});
+
 	it("skips the idle bump for cross-user calls but keeps it for the owner", async () => {
 		// No-output execs so the only possible bump is the REST finish-bump.
 		const { docker } = makeFakeDocker(async (_sid, opts) => {
