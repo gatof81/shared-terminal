@@ -25,6 +25,7 @@ import { registerAuthRoutes } from "./routes/auth.js";
 import { registerExecRoutes } from "./routes/exec.js";
 import { registerGroupRoutes } from "./routes/groups.js";
 import { registerInviteRoutes } from "./routes/invites.js";
+import { registerPushRoutes } from "./routes/push.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import type { RouteContext, RouteIdleSweeper } from "./routes/shared.js";
 import { registerTemplateRoutes } from "./routes/templates.js";
@@ -77,6 +78,8 @@ export function buildRouter(
 	// which any authed user may call (a non-lead just gets `[]` back).
 	// Adding the prefix here keeps the auth-mount block in one place.
 	router.use("/groups", requireAuth);
+	// Web Push subscription management (#355) — authed, per-user.
+	router.use("/push", requireAuth);
 
 	// Idle-sweeper bumper. Mounted AFTER `requireAuth` so unauth
 	// requests don't reset the activity timer. The `:id` capture is
@@ -115,6 +118,7 @@ export function buildRouter(
 	// matches in order; overlapping paths like `/sessions/:id` vs
 	// `/sessions/:id/tabs` rely on this sequence not changing).
 	registerInviteRoutes(router, ctx);
+	registerPushRoutes(router, ctx);
 	registerAdminRoutes(router, ctx);
 	registerGroupRoutes(router, ctx);
 	registerSessionRoutes(router, ctx);
