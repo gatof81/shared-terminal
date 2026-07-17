@@ -11,7 +11,7 @@ import { pipeline } from "node:stream/promises";
 import type { NextFunction, Request, Response, Router } from "express";
 import multer from "multer";
 import type { AuthedRequest } from "../auth.js";
-import { requireAuth } from "../auth.js";
+import { isUserAdmin, requireAuth } from "../auth.js";
 import { runAsyncBootstrap } from "../bootstrap.js";
 import { EnvVarValidationError, validateEnvVars } from "../envVarValidation.js";
 import { logger } from "../logger.js";
@@ -40,6 +40,7 @@ import {
 	getUserQuotaRow,
 	resolveEffectiveQuotas,
 	UserQuotaExceededError,
+	type UserQuotaRow,
 } from "../userQuotas.js";
 import {
 	handleSessionError,
@@ -98,13 +99,14 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 
 	router.post("/sessions", async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
-		const { name, cols, rows, envVars, config, externalRef } = req.body as {
+		const { name, cols, rows, envVars, config, externalRef, ownerUserId } = req.body as {
 			name?: string;
 			cols?: number;
 			rows?: number;
 			envVars?: unknown;
 			config?: unknown;
 			externalRef?: unknown;
+			ownerUserId?: unknown;
 		};
 		if (!name || typeof name !== "string") {
 			res.status(400).json({ error: "body.name is required" });
@@ -154,6 +156,47 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				res.status(400).json({ error: refErr });
 				return;
 			}
+		}
+		// #420 — admin-only create-on-behalf. The session lands owned by
+		// `ownerUserId` (visible/usable in that user's own account) while
+		// the caller is only the creating identity — the Hub's technical
+		// account creating project sessions for the human owner. Absent /
+		// null → exactly today's self-owned behavior.
+		let targetOwnerId = userId;
+		let targetQuotaRow: UserQuotaRow | null = null;
+		if (ownerUserId !== undefined && ownerUserId !== null) {
+			if (typeof ownerUserId !== "string" || ownerUserId.length === 0) {
+				res.status(400).json({ error: "body.ownerUserId must be a non-empty string" });
+				return;
+			}
+			try {
+				// Admin gate BEFORE the target-existence lookup, so a
+				// non-admin can't use this field to probe user ids: they
+				// get the same 403 whether the target exists or not.
+				// isUserAdmin throws on D1 failure (→ 500) rather than
+				// silently answering false — same rationale as the
+				// operate-tier predicates.
+				if (!(await isUserAdmin(userId))) {
+					res
+						.status(403)
+						.json({ error: "Only admins can create sessions on behalf of another user" });
+					return;
+				}
+				// Existence check, NOT fail-open like the quota read below:
+				// a typo'd target id should be a clean 400 here, not an FK
+				// failure surfacing as a generic 500 from sessions.create.
+				// The row doubles as the target's quota row so the budget
+				// check below doesn't re-read it.
+				targetQuotaRow = await getUserQuotaRow(ownerUserId);
+				if (targetQuotaRow === null) {
+					res.status(400).json({ error: "body.ownerUserId: no such user" });
+					return;
+				}
+			} catch (err) {
+				handleSessionError(err, res);
+				return;
+			}
+			targetOwnerId = ownerUserId;
 		}
 		let validatedEnvVars: Record<string, string>;
 		try {
@@ -208,10 +251,17 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 		// loadConfigForSpawn.
 		let effectiveMaxSessions: number | undefined;
 		try {
-			const quotas = resolveEffectiveQuotas(await getUserQuotaRow(userId));
+			// #420 — quotas run against the TARGET owner (the account the
+			// session will belong to), not the caller: an admin creating on
+			// behalf charges the owner's budget, and the owner's 429 shapes
+			// (#388/#389) apply unchanged. On-behalf reuses the row the
+			// existence check above already fetched.
+			const quotas = resolveEffectiveQuotas(
+				targetQuotaRow ?? (await getUserQuotaRow(targetOwnerId)),
+			);
 			effectiveMaxSessions = quotas.maxSessions;
 			if (quotas.maxTotalCpuNanos !== null || quotas.maxTotalMemBytes !== null) {
-				const current = await computeRunningAllocations(sessions, userId);
+				const current = await computeRunningAllocations(sessions, targetOwnerId);
 				const requested = effectiveSessionAllocation({
 					cpuLimit: validatedConfig?.cpuLimit ?? null,
 					memLimit: validatedConfig?.memLimit ?? null,
@@ -224,7 +274,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				return;
 			}
 			logger.warn(
-				`[routes] quota check failed for user ${userId}, proceeding with defaults: ${(err as Error).message}`,
+				`[routes] quota check failed for user ${targetOwnerId}, proceeding with defaults: ${(err as Error).message}`,
 			);
 		}
 		// `sessions.create` writes a D1 row BEFORE `docker.spawn` runs, so a
@@ -237,7 +287,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 		let meta: Awaited<ReturnType<SessionManager["create"]>> | null = null;
 		try {
 			meta = await sessions.create({
-				userId,
+				userId: targetOwnerId,
 				name: trimmedName,
 				cols,
 				rows,
@@ -247,6 +297,16 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				// manager's `?? null` lands NULL either way.
 				externalRef: typeof externalRef === "string" ? externalRef : undefined,
 			});
+			// #420 — audit every owner ≠ caller create. A log line (not a
+			// session_observe_log row): the observe-log models attach-shaped
+			// access with a start/end lifecycle, while creation is a
+			// point-in-time provenance fact that the row itself will
+			// outlive; the X-Request-Id-stamped line is the join point.
+			if (targetOwnerId !== userId) {
+				logger.info(
+					`[routes] create-on-behalf: caller=${userId} owner=${targetOwnerId} session=${meta.sessionId}`,
+				);
+			}
 			// Persist the typed config BEFORE spawning the container. If
 			// docker.spawn fails the rollback in the catch below deletes
 			// the sessions row and ON DELETE CASCADE on session_configs

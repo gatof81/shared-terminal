@@ -33,6 +33,9 @@ const authStubs = vi.hoisted(() => ({
 	clearAuthCookie: vi.fn(),
 	extractTokenFromCookieHeader: vi.fn(() => null),
 	verifyJwt: vi.fn(() => null),
+	// #420 — the create route's on-behalf admin gate. Default false
+	// (caller "u1" is a plain user); on-behalf tests flip it per case.
+	isUserAdmin: vi.fn(async () => false),
 	hasAnyUsers: vi.fn(async () => true),
 	registerUser: vi.fn(),
 	loginUser: vi.fn(),
@@ -97,6 +100,7 @@ import type { BootstrapBroadcaster } from "./bootstrap.js";
 import type { DockerManager } from "./dockerManager.js";
 import { buildRouter } from "./routes.js";
 import type { SessionManager } from "./sessionManager.js";
+import { SessionQuotaExceededError } from "./sessionManager.js";
 import type { SessionMeta } from "./types.js";
 
 function makeMeta(): SessionMeta {
@@ -440,5 +444,119 @@ describe("POST /sessions — async bootstrap dispatch (PR 185b2b)", () => {
 		expect(spies.kill).not.toHaveBeenCalled();
 		expect(spies.deleteRow).not.toHaveBeenCalled();
 		expect(bootstrapStubs.runAsyncBootstrap).not.toHaveBeenCalled();
+	});
+});
+
+// ── Admin-only create-on-behalf (#420) ──────────────────────────────────────
+//
+// The auth stub pins the caller to "u1"; `isUserAdmin` (default false)
+// is flipped per test. The users-table read (existence + quota row for
+// the target) rides the mocked d1Query.
+
+describe("POST /sessions — create-on-behalf (#420)", () => {
+	beforeEach(() => {
+		dbStubs.d1Query.mockReset();
+		authStubs.isUserAdmin.mockReset();
+		authStubs.isUserAdmin.mockResolvedValue(false);
+		bootstrapStubs.runAsyncBootstrap.mockReset();
+		bootstrapStubs.runAsyncBootstrap.mockResolvedValue(undefined);
+	});
+
+	/** users-row responder: target "u2" exists with no overrides. */
+	function stubUsersTable() {
+		dbStubs.d1Query.mockImplementation(async (sql: string, params?: unknown[]) => ({
+			results:
+				/FROM users/i.test(sql) && params?.[0] === "u2"
+					? [{ max_sessions: null, max_total_cpu: null, max_total_mem: null }]
+					: [],
+			success: true as const,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		}));
+	}
+
+	function postSession(body: unknown): Promise<Response> {
+		return fetch(`${baseUrl}/api/sessions`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+		});
+	}
+
+	it("admin + ownerUserId → session owned by the target user", async () => {
+		authStubs.isUserAdmin.mockResolvedValue(true);
+		stubUsersTable();
+		const { sessions, docker, spies } = makeFakes();
+		await spinUp(sessions, docker);
+
+		const res = await postSession({ name: "proj", ownerUserId: "u2" });
+		expect(res.status).toBe(201);
+		expect(spies.create).toHaveBeenCalledWith(expect.objectContaining({ userId: "u2" }));
+		expect(authStubs.isUserAdmin).toHaveBeenCalledWith("u1");
+	});
+
+	it("non-admin + ownerUserId → 403, no existence probe, no create", async () => {
+		stubUsersTable();
+		const { sessions, docker, spies } = makeFakes();
+		await spinUp(sessions, docker);
+
+		const res = await postSession({ name: "proj", ownerUserId: "u2" });
+		expect(res.status).toBe(403);
+		expect(spies.create).not.toHaveBeenCalled();
+		// The 403 fires BEFORE the users-table lookup — a non-admin must
+		// get the same answer whether the target exists or not.
+		const userReads = dbStubs.d1Query.mock.calls.filter(([sql]) =>
+			/FROM users/i.test(sql as string),
+		);
+		expect(userReads).toHaveLength(0);
+	});
+
+	it("admin + unknown target → 400, no create", async () => {
+		authStubs.isUserAdmin.mockResolvedValue(true);
+		stubUsersTable(); // only "u2" exists
+		const { sessions, docker, spies } = makeFakes();
+		await spinUp(sessions, docker);
+
+		const res = await postSession({ name: "proj", ownerUserId: "ghost" });
+		expect(res.status).toBe(400);
+		expect(spies.create).not.toHaveBeenCalled();
+	});
+
+	it("400s malformed ownerUserId shapes without touching the admin gate", async () => {
+		const { sessions, docker, spies } = makeFakes();
+		await spinUp(sessions, docker);
+
+		for (const ownerUserId of ["", 42, { id: "u2" }]) {
+			const res = await postSession({ name: "proj", ownerUserId });
+			expect(res.status).toBe(400);
+		}
+		expect(spies.create).not.toHaveBeenCalled();
+		expect(authStubs.isUserAdmin).not.toHaveBeenCalled();
+	});
+
+	it("absent field → self-owned create, admin gate never consulted", async () => {
+		const { sessions, docker, spies } = makeFakes();
+		await spinUp(sessions, docker);
+
+		const res = await postSession({ name: "proj" });
+		expect(res.status).toBe(201);
+		expect(spies.create).toHaveBeenCalledWith(expect.objectContaining({ userId: "u1" }));
+		expect(authStubs.isUserAdmin).not.toHaveBeenCalled();
+	});
+
+	it("target at quota → 429 with the owner's quota shape", async () => {
+		authStubs.isUserAdmin.mockResolvedValue(true);
+		stubUsersTable();
+		const { sessions, docker, spies } = makeFakes();
+		spies.create.mockRejectedValueOnce(new SessionQuotaExceededError(20));
+		await spinUp(sessions, docker);
+
+		const res = await postSession({ name: "proj", ownerUserId: "u2" });
+		expect(res.status).toBe(429);
+		const body = (await res.json()) as { quota: number };
+		expect(body.quota).toBe(20);
+		// Quota was resolved and charged against the TARGET, not the caller.
+		expect(spies.create).toHaveBeenCalledWith(
+			expect.objectContaining({ userId: "u2", maxActiveSessions: 20 }),
+		);
 	});
 });
