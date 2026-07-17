@@ -2,7 +2,6 @@
  * terminal.ts — xterm.js wrapper with WebSocket bridge to Docker exec.
  */
 
-import { CanvasAddon } from "@xterm/addon-canvas";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { type IDisposable, type ILink, type ILinkProvider, Terminal } from "@xterm/xterm";
@@ -52,12 +51,12 @@ export interface TerminalSession {
 
 export type StatusCallback = (status: SessionStatus) => void;
 export type ErrorCallback = (message: string) => void;
-/** Notice fired when the renderer degrades a tier on this tab:
- *  WebGL → canvas, or canvas → DOM. Fires at most once per tier and
- *  only when escalating downward, so the worst case is two toasts per
- *  terminal lifetime (GPU lost, then canvas also failed) — a flapping
- *  driver still can't spam (#55). Used by main.ts to surface a toast
- *  so the user knows why their session feels slower. */
+/** Notice fired when the renderer degrades on this tab: WebGL → DOM
+ *  (xterm 6.x removed the canvas addon, so the #340 three-tier chain
+ *  collapsed to two — see the renderer block below). Fires at most
+ *  once per terminal lifetime, so a flapping driver still can't spam
+ *  (#55). Used by main.ts to surface a toast so the user knows why
+ *  their session feels slower. */
 export type RendererNoticeCallback = (message: string) => void;
 /** Fired after a clipboard write attempt (Cmd-C or auto-copy on
  *  selection-finalize). `ok=true` on success, `false` on rejection
@@ -155,21 +154,17 @@ export function openTerminalSession(opts: {
 		canReconnect,
 		observe = false,
 	} = opts;
-	// Fires the fallback notice at most once per TIER, and only when
-	// escalating downward (webgl → canvas → dom), regardless of how many
-	// times the WebGL context flaps (#55). A flapping driver shouldn't
-	// toast on every cycle; a canvas tier that later also fails DOES
-	// deserve a second toast because the user's experience degrades
-	// again (DOM is markedly slower than canvas).
-	let noticedTier: "canvas" | "dom" | null = null;
-	const noticeFallback = (reason: string, tier: "canvas" | "dom") => {
-		if (noticedTier === "dom" || noticedTier === tier) return;
-		noticedTier = tier;
-		onRendererFallback?.(
-			tier === "canvas"
-				? `GPU rendering unavailable (${reason}) — using the canvas renderer instead.`
-				: `GPU and canvas rendering unavailable (${reason}) — falling back to the slower DOM renderer.`,
-		);
+	// Fires the fallback notice at most once per terminal lifetime,
+	// regardless of how many times the WebGL context flaps (#55). With
+	// the 6.x two-tier chain there is only one downward step (WebGL →
+	// DOM), so the old per-tier gate collapsed to a boolean. A later
+	// successful WebGL restore deliberately does NOT re-arm it: a
+	// flapping driver would otherwise toast on every loss cycle.
+	let noticedFallback = false;
+	const noticeFallback = (reason: string) => {
+		if (noticedFallback) return;
+		noticedFallback = true;
+		onRendererFallback?.(`GPU rendering unavailable (${reason}) — using the DOM renderer instead.`);
 	};
 
 	// ── xterm.js setup ──────────────────────────────────────────────────────
@@ -231,111 +226,63 @@ export function openTerminalSession(opts: {
 	// — our touch handler below routes them into terminal scroll instead.
 	container.style.touchAction = "none";
 
-	// ── Renderer chain: WebGL → canvas → DOM ────────────────────────────────
+	// ── Renderer chain: WebGL → DOM ─────────────────────────────────────────
 	// WebGL avoids the DOM renderer's visibility-loss glitches (rows written
 	// while a tab is hidden drop out of the paint) and is the fastest tier.
 	// Activate after open so the canvas element exists. When WebGL is
 	// unavailable (WebGL2 blocklisted/disabled — common on Macs with older
 	// Intel GPUs or Safari with reduced GPU features — or the driver revokes
-	// the context), fall back to the 2D-canvas renderer, which is still far
-	// faster than xterm's built-in DOM renderer. Only when BOTH GPU-adjacent
-	// tiers fail does xterm silently drop to DOM.
+	// the context), xterm renders with its built-in DOM renderer, which
+	// needs no addon: "falling back" is simply disposing the WebGL addon.
 	//
-	// Invariant: at most one renderer addon (webgl XOR canvas) is loaded at
-	// any time — each addon's activation swaps xterm's render service, so
-	// disposing an older addon after loading a newer one would tear down the
-	// newer renderer's state. Every path below disposes the outgoing addon
-	// before loading its replacement.
+	// History (#340 → #354): 5.x had a middle 2D-canvas tier here because
+	// its DOM renderer was markedly slower. xterm 6.x discontinued
+	// @xterm/addon-canvas outright and shipped a substantially faster DOM
+	// renderer, so the chain collapsed to two tiers. If the DOM tier proves
+	// too slow on real fallback hardware (older-Intel-GPU Macs are the
+	// known case), the alternative is pinning 5.5 — there is no third
+	// renderer to reach for in 6.x.
 	//
-	// Note for the xterm 6.x upgrade: @xterm/addon-canvas is discontinued
-	// there (DOM and WebGL are the only 6.x renderers), so this middle tier
-	// must be re-evaluated — either dropped against 6.x's faster DOM
-	// renderer or the upgrade held back until measured.
+	// Invariant: at most one renderer addon is loaded at any time — the
+	// addon's activation swaps xterm's render service, so the restore path
+	// below must never construct a second live addon.
 	let webgl: WebglAddon | null = null;
-	let canvas: CanvasAddon | null = null;
-	const loadCanvasFallback = (reason: string) => {
-		if (canvas) return; // already on the canvas tier
-		// Same partial-failure shape as the WebGL restore path below: keep a
-		// handle for disposing a constructed-but-not-loaded addon if
-		// term.loadAddon throws mid-activation.
-		let created: CanvasAddon | undefined;
-		try {
-			const addon = new CanvasAddon();
-			created = addon;
-			term.loadAddon(addon);
-			canvas = addon;
-			noticeFallback(reason, "canvas");
-		} catch (err) {
-			created?.dispose();
-			console.warn("[terminal] canvas renderer unavailable, falling back to DOM:", err);
-			// `reason` describes why WEBGL failed; the canvas failure is its
-			// own event (details in the console.warn above). Compose both so
-			// the DOM-tier toast doesn't attribute the canvas failure to the
-			// WebGL reason.
-			noticeFallback(`${reason}; canvas init also failed`, "dom");
-		}
+	const dropToDomFallback = (reason: string) => {
+		// Dispose-only: with no renderer addon loaded, xterm is already on
+		// the DOM renderer the moment the WebGL addon goes away.
+		webgl?.dispose();
+		webgl = null;
+		noticeFallback(reason);
 	};
 	try {
 		webgl = new WebglAddon();
 		webgl.onContextLoss(() => {
-			webgl?.dispose();
-			webgl = null;
-			loadCanvasFallback("context lost");
+			dropToDomFallback("context lost");
 		});
 		term.loadAddon(webgl);
 	} catch (err) {
 		// If the constructor threw, `webgl` is still null (no-op dispose);
 		// if loadAddon threw after construction, dispose the half-live addon
 		// so its GL context doesn't leak.
-		webgl?.dispose();
-		webgl = null;
 		console.warn("[terminal] WebGL renderer unavailable:", err);
-		loadCanvasFallback("addon init failed");
+		dropToDomFallback("addon init failed");
 	}
 
-	// Clear the active renderer's glyph texture atlas. Both GPU-adjacent
-	// tiers cache glyph textures, and a stale atlas after a DPR change or
-	// font-size cycle paints misaligned / ghost glyphs (#155). A throw
-	// means the renderer's context is unusable — degrade one tier rather
-	// than leave a wedged renderer live.
+	// Clear the WebGL renderer's glyph texture atlas. It caches glyph
+	// textures, and a stale atlas after a DPR change or font-size cycle
+	// paints misaligned / ghost glyphs (#155). A throw means the GL
+	// context is unusable — drop to DOM rather than leave a wedged
+	// renderer live. (The DOM renderer has no atlas, so post-fallback
+	// this is a no-op.)
 	const clearRendererAtlas = () => {
-		// Snapshot BEFORE the webgl branch: if that branch degrades,
-		// loadCanvasFallback promotes a brand-new CanvasAddon, and the
-		// canvas branch below must not touch it — a freshly-loaded addon
-		// has nothing cached, and if its clearTextureAtlas() were to
-		// throw (a cascading GPU fault taking the 2D context down too),
-		// we'd dispose the tier we JUST promoted and ratchet the notice
-		// gate to "dom" permanently. Only an addon that predates this
-		// call can hold a stale atlas worth clearing.
-		const canvasBefore = canvas;
 		try {
 			webgl?.clearTextureAtlas();
 		} catch (err) {
 			// Log the underlying throw — the toast only says the tier
 			// changed, and a field report of intermittent degradation
 			// needs the actual error in the console to be diagnosable.
-			console.warn("[terminal] WebGL atlas clear failed, degrading to canvas:", err);
-			webgl?.dispose();
-			webgl = null;
-			loadCanvasFallback("atlas clear failed");
-		}
-		if (canvasBefore && canvas === canvasBefore) {
-			try {
-				canvasBefore.clearTextureAtlas();
-			} catch (err) {
-				console.warn("[terminal] canvas atlas clear failed, reloading canvas tier:", err);
-				canvasBefore.dispose();
-				canvas = null;
-				// Try a FRESH canvas addon before conceding to DOM — the
-				// throw may be transient (context reset mid-clear), and a
-				// permanent drop to the slowest tier over a recoverable
-				// hiccup is the wrong trade. loadCanvasFallback handles
-				// both outcomes: success keeps the canvas tier silently
-				// (the "canvas" notice gate is already set from the
-				// original WebGL degrade), failure fires the DOM toast
-				// with the composed reason via its own catch.
-				loadCanvasFallback("canvas atlas clear failed");
-			}
+			console.warn("[terminal] WebGL atlas clear failed, degrading to DOM:", err);
+			dropToDomFallback("atlas clear failed");
 		}
 	};
 
@@ -346,13 +293,9 @@ export function openTerminalSession(opts: {
 		// Don't load a second addon while one is already live (prior loss handler nulls webgl).
 		if (webgl) return;
 		pendingRestoreCanvas = null;
-		// Leave the canvas tier BEFORE constructing the fresh WebglAddon —
-		// see the single-live-renderer invariant on the chain block above.
-		// If the WebGL re-init below fails, the catch re-enters
-		// loadCanvasFallback, so the worst case is a one-frame DOM flash
-		// between the dispose here and the fallback reload there.
-		canvas?.dispose();
-		canvas = null;
+		// We're on the addon-less DOM renderer here (the loss handler
+		// disposed the WebGL addon) — nothing to leave before loading the
+		// fresh addon; the single-live-renderer invariant holds trivially.
 		// The let/const split is deliberate. `restoredAddon` (let, outer) is
 		// the catch-block's only handle for disposing a partially-initialised
 		// addon if `term.loadAddon(addon)` throws after construction —
@@ -370,7 +313,10 @@ export function openTerminalSession(opts: {
 			addon.onContextLoss(() => {
 				addon.dispose();
 				webgl = null;
-				loadCanvasFallback("context lost");
+				// The notice gate already fired on the first loss, so a
+				// re-loss after a successful restore is silent — the user
+				// was told once; a flapping driver shouldn't toast per cycle.
+				noticeFallback("context lost");
 			});
 			term.loadAddon(addon);
 			webgl = addon;
@@ -378,12 +324,8 @@ export function openTerminalSession(opts: {
 		} catch (err) {
 			restoredAddon?.dispose();
 			console.warn("[terminal] WebGL restore failed:", err);
-			// Re-enter the canvas tier we left above. In the common
-			// loss → restore → restore-fail sequence the "context lost"
-			// notice already fired, so the reload is silent (per-tier
-			// notice gate); the call is load-bearing regardless because
-			// the canvas addon itself was just disposed.
-			loadCanvasFallback("restore failed");
+			// Already on DOM (loss handler disposed the addon); nothing to
+			// re-enter — the failed restore just leaves us there.
 		}
 	};
 	const onContextLost = (ev: Event) => {
@@ -1330,10 +1272,7 @@ export function openTerminalSession(opts: {
 		if (selectionDebounceTimer !== null) clearTimeout(selectionDebounceTimer);
 		pendingRestoreCanvas?.removeEventListener("webglcontextrestored", onContextRestored);
 		container.removeEventListener("webglcontextlost", onContextLost);
-		// At most one of these is live (single-live-renderer invariant);
-		// disposing both unconditionally keeps this path branch-free.
 		webgl?.dispose();
-		canvas?.dispose();
 		ws.close(1000, "User navigated away");
 		term.dispose();
 	}
