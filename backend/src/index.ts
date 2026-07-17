@@ -113,6 +113,10 @@ const idleSweeper = new IdleSweeper({
 	stopContainer: (sessionId) => docker.stopContainer(sessionId),
 });
 
+// #355 — bell sweeper (Web Push). Module-scoped (like idleSweeper) so
+// shutdown() can stop it; assigned in start() only when push is enabled.
+let bellSweeper: BellSweeper | null = null;
+
 // #190 PR 190c — port-exposure dispatcher. Resolves Host:
 // `p<container>-<sessionId>.<base>` to the runtime mapping in
 // `sessions_port_mappings` and reverse-proxies to the container by name
@@ -450,7 +454,7 @@ async function start() {
 	// configured, so a push-disabled deployment pays no per-session exec
 	// cost. Wires DockerManager's away/bell probes to webPush.sendToUser.
 	if (isPushEnabled()) {
-		const bellSweeper = new BellSweeper({
+		bellSweeper = new BellSweeper({
 			hasLiveListeners: (id) => docker.hasLiveListeners(id),
 			readBellFlag: (id) => docker.readSessionBellFlag(id),
 			sendToUser,
@@ -495,6 +499,10 @@ function shutdown() {
 	// path is about to close. Idempotent — `stop()` is safe to call
 	// even if `start()` never ran.
 	idleSweeper.stop();
+	// #355 — same reason: stop the bell sweeper so a sweep can't fire a
+	// docker exec / D1 query / push mid-teardown. Null when push disabled
+	// (never started). PR #417 review SHOULD-FIX.
+	bellSweeper?.stop();
 
 	// Actively close live WS clients. `wss.close()` alone only stops accepting
 	// new upgrades — existing connections stay open, which keeps `server.close()`
