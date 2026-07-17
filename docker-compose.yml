@@ -68,6 +68,13 @@ services:
       - CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID}
       - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
       - D1_DATABASE_ID=${D1_DATABASE_ID}
+      # Web Push (#355). All three unset → push is silently disabled (the
+      # backend logs one warn at boot and never sends). Public key is served
+      # to the frontend via GET /api/push/vapid-key so no frontend build-time
+      # env var is needed. `:-` defaults keep dev/local working without them.
+      - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
+      - VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY:-}
+      - VAPID_SUBJECT=${VAPID_SUBJECT:-}
     # Join the shared session network so the backend can reach each session
     # container directly at `http://<container_name>:<port>` (Docker embedded
     # DNS). Session containers are spawned onto the same network by name.

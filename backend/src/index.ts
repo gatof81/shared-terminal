@@ -30,6 +30,7 @@ import { buildRouter } from "./routes.js";
 import { validateSecretsKey } from "./secrets.js";
 import { SessionManager } from "./sessionManager.js";
 import { parseTrustProxy, TrustProxyError, warnIfProductionMisconfigured } from "./trustProxy.js";
+import { configureWebPush } from "./webPush.js";
 import { endUpgradeSocketWithReply, handleWsConnection, startWsHeartbeat } from "./wsHandler.js";
 import { createWsUpgradeRateLimiter, resolveClientIp } from "./wsUpgradeRateLimit.js";
 
@@ -416,6 +417,10 @@ wss.on("connection", (ws, req) => {
 
 async function start() {
 	await migrateDb();
+	// #355 — configure Web Push from VAPID env (or warn + disable). Must run
+	// AFTER migrateDb so the push_subscriptions table exists before any
+	// subscribe/send, and before the server accepts requests.
+	configureWebPush();
 	await docker.reconcile();
 	// Wait for the timing-parity dummy bcrypt hash to finish computing
 	// before accepting requests. Without this, the first unknown-user

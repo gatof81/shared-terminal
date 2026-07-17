@@ -693,6 +693,31 @@ export const MIGRATIONS: readonly Migration[] = [
 			}
 		},
 	},
+	{
+		version: 14,
+		description: "push_subscriptions — Web Push endpoints per user (#355)",
+		apply: async () => {
+			// One row per (user, browser endpoint). `endpoint` is UNIQUE so
+			// re-subscribing upserts (pushSubscriptions.upsertSubscription).
+			// No FK to users: a subscription outliving a user row is harmless
+			// (sends just find no user); the DELETE-on-410 prune keeps it
+			// clean. CREATE TABLE IF NOT EXISTS is idempotent, so a re-run
+			// after a transient is safe.
+			await d1Query(
+				`CREATE TABLE IF NOT EXISTS push_subscriptions (
+					id         TEXT PRIMARY KEY,
+					user_id    TEXT NOT NULL,
+					endpoint   TEXT NOT NULL UNIQUE,
+					p256dh     TEXT NOT NULL,
+					auth       TEXT NOT NULL,
+					created_at TEXT NOT NULL DEFAULT (datetime('now'))
+				)`,
+			);
+			await d1Query(
+				"CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions(user_id)",
+			);
+		},
+	},
 ];
 
 /**
