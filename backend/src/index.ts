@@ -19,6 +19,7 @@ import {
 	validateJwtSecret,
 	warnIfWildcardCorsInProduction,
 } from "./auth.js";
+import { BellSweeper } from "./bellSweeper.js";
 import { BootstrapBroadcaster, drainInFlightBootstraps } from "./bootstrap.js";
 import { migrateDb, validateD1Config } from "./db.js";
 import { DockerManager } from "./dockerManager.js";
@@ -30,7 +31,7 @@ import { buildRouter } from "./routes.js";
 import { validateSecretsKey } from "./secrets.js";
 import { SessionManager } from "./sessionManager.js";
 import { parseTrustProxy, TrustProxyError, warnIfProductionMisconfigured } from "./trustProxy.js";
-import { configureWebPush } from "./webPush.js";
+import { configureWebPush, isPushEnabled, sendToUser } from "./webPush.js";
 import { endUpgradeSocketWithReply, handleWsConnection, startWsHeartbeat } from "./wsHandler.js";
 import { createWsUpgradeRateLimiter, resolveClientIp } from "./wsUpgradeRateLimit.js";
 
@@ -444,6 +445,19 @@ async function start() {
 		logger.warn(`[server] idle sweeper init failed: ${(err as Error).message}`);
 	}
 	idleSweeper.start();
+
+	// #355 — bell-flag sweeper drives Web Push. Only started when push is
+	// configured, so a push-disabled deployment pays no per-session exec
+	// cost. Wires DockerManager's away/bell probes to webPush.sendToUser.
+	if (isPushEnabled()) {
+		const bellSweeper = new BellSweeper({
+			hasLiveListeners: (id) => docker.hasLiveListeners(id),
+			readBellFlag: (id) => docker.readSessionBellFlag(id),
+			sendToUser,
+		});
+		bellSweeper.start();
+		logger.info("[server] bell sweeper started (Web Push notifications)");
+	}
 
 	server.listen(PORT, () => {
 		logger.info(`[server] listening on http://localhost:${PORT}`);

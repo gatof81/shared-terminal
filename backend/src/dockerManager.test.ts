@@ -2136,3 +2136,60 @@ describe("isRuntimeReady (#393)", () => {
 		expect(container._execs.length).toBe(0);
 	});
 });
+
+// ── Bell detection for Web Push (#355) ──────────────────────────────────────
+
+describe("DockerManager.hasLiveListeners (#355)", () => {
+	it("is false with no shared exec, true once a session key is present", () => {
+		const { dm } = makeDocker();
+		expect(dm.hasLiveListeners("sess-1")).toBe(false);
+		// Poke the private `shared` map the way an attach would key it
+		// (targetKey = `${sessionId}:${tabId}`).
+		const shared = (dm as unknown as { shared: Map<string, unknown> }).shared;
+		shared.set("sess-1:tab-a", Promise.resolve({}));
+		expect(dm.hasLiveListeners("sess-1")).toBe(true);
+		// A different session's key must not match (prefix is `sess-1:`).
+		expect(dm.hasLiveListeners("sess-2")).toBe(false);
+	});
+});
+
+describe("DockerManager.readSessionBellFlag (#355)", () => {
+	it("returns true when any window's bell flag is 1", async () => {
+		const { dm } = makeDocker({
+			oneShot: (cmd) =>
+				cmd[0] === "tmux" && cmd[1] === "list-windows"
+					? { stdout: "0\n1\n0\n", exitCode: 0 }
+					: undefined,
+		});
+		expect(await dm.readSessionBellFlag("s1")).toBe(true);
+	});
+
+	it("returns false when no window has a pending bell", async () => {
+		const { dm } = makeDocker({
+			oneShot: (cmd) =>
+				cmd[0] === "tmux" && cmd[1] === "list-windows"
+					? { stdout: "0\n0\n", exitCode: 0 }
+					: undefined,
+		});
+		expect(await dm.readSessionBellFlag("s1")).toBe(false);
+	});
+
+	it("returns false when tmux exits non-zero (no server / session gone)", async () => {
+		const { dm } = makeDocker({
+			oneShot: (cmd) =>
+				cmd[0] === "tmux" && cmd[1] === "list-windows"
+					? { stdout: "no server running on ...", exitCode: 1 }
+					: undefined,
+		});
+		expect(await dm.readSessionBellFlag("s1")).toBe(false);
+	});
+
+	it("queries with -a and #{window_bell_flag}", async () => {
+		const { dm, container } = makeDocker({
+			oneShot: () => ({ stdout: "0\n", exitCode: 0 }),
+		});
+		await dm.readSessionBellFlag("s1");
+		const cmd = container._execs.at(-1)!._cmd;
+		expect(cmd).toEqual(["tmux", "list-windows", "-a", "-F", "#{window_bell_flag}"]);
+	});
+});
