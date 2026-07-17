@@ -39,6 +39,7 @@ import {
 } from "./api.js";
 import { formatBytes, formatCpuCores, formatCpuPercent } from "./format.js";
 import { activeSessionId, showToast } from "./main.js";
+import { openObserveModalFor } from "./observeModal.js";
 
 // ── DOM (re-queried locally; see header) ─────────────────────────────────
 const sidebarAdminBtn = document.getElementById("sidebar-admin-btn") as HTMLButtonElement;
@@ -283,6 +284,25 @@ function renderAdminStats(stats: AdminStats): void {
 // shape would be confusing in a UI ("200%? Of what?"), so we hand
 // users "cores" as the human unit and translate at display time.
 
+/** Open the shared observe modal for a foreign session, admin-flavoured
+ *  (#admin-operate 4/4): read-only observe first, with `canOperate` so
+ *  the modal offers a "Take control" escalation to full write (audited
+ *  as mode='operate'). The reconnect probe re-derives "still running?"
+ *  from the admin session list because getSession is owner-scoped (403
+ *  for an admin on a foreign session). */
+function openAdminObserve(s: AdminSession): void {
+	void openObserveModalFor({
+		sessionId: s.sessionId,
+		name: s.name,
+		ownerUsername: s.ownerUsername,
+		canOperate: true,
+		canReconnect: async () =>
+			(await fetchAdminSessions()).some(
+				(x) => x.sessionId === s.sessionId && x.status === "running",
+			),
+	});
+}
+
 function renderAdminSessions(sessions: AdminSession[]): void {
 	adminSessionsListEl.textContent = "";
 	if (sessions.length === 0) {
@@ -326,6 +346,18 @@ function renderAdminSessions(sessions: AdminSession[]): void {
 
 		const actions = document.createElement("div");
 		actions.className = "admin-session-actions";
+
+		// Open (observe → optional take-control) only for running
+		// sessions: the WS attach 1008-closes on a non-running status,
+		// so a button that always errors is worse UX than no button —
+		// same rationale as the lead-side Observe rows.
+		if (s.status === "running") {
+			const openBtn = document.createElement("button");
+			openBtn.type = "button";
+			openBtn.textContent = "Open";
+			openBtn.addEventListener("click", () => openAdminObserve(s));
+			actions.appendChild(openBtn);
+		}
 
 		// Force-stop only enabled for running sessions — the backend
 		// returns 204 on a no-op stop, but the button label would be
@@ -1014,6 +1046,16 @@ adminGroupAddMemberForm.addEventListener("submit", async (e) => {
 
 // ── Admin observe-log (#201e-2) ────────────────────────────────────────────
 
+/** Small pill distinguishing a read-only watch from an admin who
+ *  took control. `operate` is accented so an operator scanning the log
+ *  instantly sees who DROVE vs merely watched. */
+function observeModePill(mode: "observe" | "operate"): HTMLSpanElement {
+	const pill = document.createElement("span");
+	pill.className = `observe-mode-pill observe-mode-pill--${mode}`;
+	pill.textContent = mode === "operate" ? "operated" : "observed";
+	return pill;
+}
+
 function renderAdminObserveLog(entries: AdminObserveLogEntry[]): void {
 	adminObserveLogEl.textContent = "";
 	if (entries.length === 0) {
@@ -1030,12 +1072,16 @@ function renderAdminObserveLog(entries: AdminObserveLogEntry[]): void {
 		meta.className = "admin-session-meta";
 		const name = document.createElement("strong");
 		name.textContent = `${e.observerUsername} → ${e.ownerUsername}`;
+		const nameLine = document.createElement("div");
+		nameLine.className = "admin-observe-name-line";
+		nameLine.appendChild(name);
+		nameLine.appendChild(observeModePill(e.mode));
 		const sub = document.createElement("span");
 		sub.className = "admin-session-sub";
 		const started = new Date(e.startedAt).toLocaleString();
 		const ended = e.endedAt ? new Date(e.endedAt).toLocaleString() : "still watching";
 		sub.textContent = `session ${e.sessionId.slice(0, 8)}… · ${started} → ${ended}`;
-		meta.appendChild(name);
+		meta.appendChild(nameLine);
 		meta.appendChild(sub);
 		row.appendChild(meta);
 		adminObserveLogEl.appendChild(row);
@@ -1093,12 +1139,16 @@ async function refreshObserversModal(sessionId: string): Promise<void> {
 		meta.className = "admin-session-meta";
 		const name = document.createElement("strong");
 		name.textContent = e.observerUsername;
+		const nameLine = document.createElement("div");
+		nameLine.className = "admin-observe-name-line";
+		nameLine.appendChild(name);
+		nameLine.appendChild(observeModePill(e.mode));
 		const sub = document.createElement("span");
 		sub.className = "admin-session-sub";
 		const started = new Date(e.startedAt).toLocaleString();
 		const ended = e.endedAt ? new Date(e.endedAt).toLocaleString() : "still watching";
 		sub.textContent = `${started} → ${ended}`;
-		meta.appendChild(name);
+		meta.appendChild(nameLine);
 		meta.appendChild(sub);
 		row.appendChild(meta);
 		observersModalListEl.appendChild(row);

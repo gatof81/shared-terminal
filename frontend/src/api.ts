@@ -1151,6 +1151,10 @@ export interface ObserveLogEntry {
 	ownerUserId: string;
 	startedAt: string;
 	endedAt: string | null;
+	// 'observe' = read-only watch, 'operate' = admin drove the session
+	// (took control). Backed by `session_observe_log.mode` (migration
+	// v13); lets the log distinguish "watched" from "drove".
+	mode: "observe" | "operate";
 }
 
 export interface AdminObserveLogEntry extends ObserveLogEntry {
