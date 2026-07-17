@@ -46,14 +46,28 @@ describe("observeLog.recordObserveStart", () => {
 		const call = dbStubs.d1Query.mock.calls[0]!;
 		expect(call[0]).toMatch(/^INSERT INTO session_observe_log/);
 		const params = call[1] as string[];
-		expect(params).toHaveLength(4);
+		expect(params).toHaveLength(5);
 		expect(params[1]).toBe("u-lead");
 		expect(params[2]).toBe("s-1");
 		expect(params[3]).toBe("u-owner");
+		// #admin-operate: mode defaults to 'observe' when the 4th arg
+		// is omitted (every existing observe caller).
+		expect(params[4]).toBe("observe");
+		expect(call[0]).toMatch(/mode/);
 		// id is the first param and matches the returned value.
 		expect(params[0]).toBe(id);
 		// Standard uuid v4 shape.
 		expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+	});
+
+	it("inserts mode='operate' when passed, selecting the column in the INSERT (#admin-operate)", async () => {
+		mockNextRows([], 1);
+		await observeLog.recordObserveStart("u-admin", "s-1", "u-owner", "operate");
+		const call = dbStubs.d1Query.mock.calls[0]!;
+		expect(call[0]).toMatch(/INSERT INTO session_observe_log .*mode/);
+		const params = call[1] as string[];
+		expect(params).toHaveLength(5);
+		expect(params[4]).toBe("operate");
 	});
 
 	it("propagates a D1 INSERT failure so wsHandler can abort the attach", async () => {
@@ -145,6 +159,36 @@ describe("observeLog.listForSession", () => {
 		await observeLog.listForSession("s-1");
 		const call = dbStubs.d1Query.mock.calls[0]!;
 		expect(call[0]).toMatch(/ORDER BY l\.started_at DESC LIMIT 500/);
+	});
+
+	it("selects and maps the mode column, defaulting a legacy/unknown value to 'observe' (#admin-operate)", async () => {
+		mockNextRows([
+			{
+				id: "log-op",
+				observer_user_id: "u-admin",
+				session_id: "s-1",
+				owner_user_id: "u-owner",
+				started_at: "2026-05-12 10:00:00",
+				ended_at: null,
+				observer_username: "alice",
+				mode: "operate",
+			},
+			{
+				id: "log-legacy",
+				observer_user_id: "u-lead",
+				session_id: "s-1",
+				owner_user_id: "u-owner",
+				started_at: "2026-05-12 09:00:00",
+				ended_at: null,
+				observer_username: "bob",
+				mode: "weird-future-value",
+			},
+		]);
+		const list = await observeLog.listForSession("s-1");
+		expect(dbStubs.d1Query.mock.calls[0]![0]).toMatch(/l\.mode/);
+		expect(list[0]?.mode).toBe("operate");
+		// Anything that isn't exactly 'operate' reads as 'observe'.
+		expect(list[1]?.mode).toBe("observe");
 	});
 
 	it("returns an empty array for a session with no observe history", async () => {

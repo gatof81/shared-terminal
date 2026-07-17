@@ -31,6 +31,11 @@ import { d1Query } from "./db.js";
  */
 export const OBSERVE_LOG_LIMIT = 500;
 
+/** Distinguishes a read-only observe attach from an admin driving
+ *  (operating) a foreign session. Migration v13 added the column with
+ *  default 'observe'; every pre-migration row backfilled to that. */
+export type ObserveMode = "observe" | "operate";
+
 interface ObserveLogRow {
 	id: string;
 	observer_user_id: string;
@@ -38,6 +43,7 @@ interface ObserveLogRow {
 	owner_user_id: string;
 	started_at: string;
 	ended_at: string | null;
+	mode: string;
 }
 
 /** Per-session log entry — what `/api/sessions/:id/observe-log`
@@ -52,6 +58,8 @@ export interface ObserveLogEntry {
 	ownerUserId: string;
 	startedAt: Date;
 	endedAt: Date | null;
+	/** 'observe' (read-only) or 'operate' (admin drove the session). */
+	mode: ObserveMode;
 }
 
 /** Cross-user admin log entry — adds `ownerUsername` so the admin
@@ -85,12 +93,13 @@ export async function recordObserveStart(
 	observerUserId: string,
 	sessionId: string,
 	ownerUserId: string,
+	mode: ObserveMode = "observe",
 ): Promise<string> {
 	const id = randomUUID();
 	await d1Query(
-		"INSERT INTO session_observe_log (id, observer_user_id, session_id, owner_user_id) " +
-			"VALUES (?, ?, ?, ?)",
-		[id, observerUserId, sessionId, ownerUserId],
+		"INSERT INTO session_observe_log (id, observer_user_id, session_id, owner_user_id, mode) " +
+			"VALUES (?, ?, ?, ?, ?)",
+		[id, observerUserId, sessionId, ownerUserId, mode],
 	);
 	return id;
 }
@@ -139,7 +148,7 @@ export async function recordObserveEnd(id: string): Promise<void> {
 export async function listForSession(sessionId: string): Promise<ObserveLogEntry[]> {
 	const result = await d1Query<ObserveLogRow & { observer_username: string }>(
 		"SELECT l.id, l.observer_user_id, l.session_id, l.owner_user_id, " +
-			"l.started_at, l.ended_at, u.username AS observer_username " +
+			"l.started_at, l.ended_at, l.mode, u.username AS observer_username " +
 			"FROM session_observe_log l " +
 			"JOIN users u ON u.id = l.observer_user_id " +
 			"WHERE l.session_id = ? " +
@@ -166,7 +175,7 @@ export async function listAll(): Promise<AdminObserveLogEntry[]> {
 		ObserveLogRow & { observer_username: string | null; owner_username: string | null }
 	>(
 		"SELECT l.id, l.observer_user_id, l.session_id, l.owner_user_id, " +
-			"l.started_at, l.ended_at, " +
+			"l.started_at, l.ended_at, l.mode, " +
 			"obs.username AS observer_username, " +
 			"own.username AS owner_username " +
 			"FROM session_observe_log l " +
@@ -199,5 +208,9 @@ function rowToEntry(row: ObserveLogRow & { observer_username: string }): Observe
 		ownerUserId: row.owner_user_id,
 		startedAt: parseD1Utc(row.started_at, "observeLog"),
 		endedAt: row.ended_at ? parseD1Utc(row.ended_at, "observeLog") : null,
+		// Legacy/unknown values collapse to 'observe' — the column's
+		// default, and the safe read for any row a future writer didn't
+		// tag. Only the exact string 'operate' means admin-operate.
+		mode: row.mode === "operate" ? "operate" : "observe",
 	};
 }

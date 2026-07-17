@@ -29,6 +29,22 @@ the consequences need to be explicit:
   The socket exposure is a backend-trust property, not a session-
   trust property.
 
+### Admin privilege boundary
+
+An `is_admin=1` account is a **fully trusted operator**, not a
+scoped-up user. Beyond the cross-user dashboard (list, force-stop,
+force-delete, edit resource caps), an admin can **operate any user's
+session** — attach to the live terminal with full write, edit its env
+vars and exposed ports, and create/delete/search its tabs — via the
+same `is_admin` claim (`assertCanOperate`, owner-OR-admin). This is
+distinct from the read-only **tech-lead** role (`assertCanObserve`,
+group-scoped, no write). Every cross-user attach is recorded in
+`session_observe_log` with `mode='observe'|'operate'`, giving the
+owner and other admins an audit trail of who watched vs. who drove
+their session — a detective control, not a preventive one. Treat
+admin credential compromise as equivalent to compromise of every
+user's session data; scope admin accounts accordingly.
+
 ## Recommended deployment posture
 
 - **Do not expose port 3001 directly to the internet.** Treat the
