@@ -112,6 +112,15 @@ function attach(mode: ObserveMode): void {
 			// on ws close. Surface a toast so the viewer knows why it went dark.
 			if (status === "disconnected") {
 				showToast(`${verb} attach to "${target.name}" disconnected`);
+				// "disconnected" is TERMINAL (the #356 reconnect loop gave up or
+				// the close was non-retryable — transient drops emit "reconnecting"),
+				// so no live WS remains to mislead about: drop the operate chrome
+				// back to observe so the amber "Release control" button stops
+				// signalling live write access on a dead socket. PR #414 SHOULD-FIX.
+				if (current && current.mode === "operate") {
+					current.mode = "observe";
+					renderModeChrome();
+				}
 			}
 		},
 		onError: (msg) => showToast(`${verb} error: ${msg}`, true),
