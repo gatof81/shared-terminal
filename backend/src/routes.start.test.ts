@@ -283,4 +283,33 @@ describe("POST /sessions/:id/start", () => {
 		// Critical: the container is never spawned when the audit can't be written.
 		expect(startSpy).not.toHaveBeenCalled();
 	});
+
+	it("still starts (200) when only the audit END update fails — fire-and-forget close", async () => {
+		// PR #430 review SHOULD-FIX: recordObserveEnd is fire-and-forget per
+		// its contract. A D1 transient closing the row must NOT abort a start
+		// that already committed its audit INSERT — otherwise the route would
+		// 500 AND leave a permanently-open `ended_at = NULL` row for a start
+		// it aborted.
+		const sessions = makeFakeSessions("stopped", "owner-2");
+		const { docker, startSpy } = makeFakeDocker();
+		dbStubs.d1Query.mockImplementation(async (sql: string) => {
+			// INSERT (recordObserveStart) succeeds; UPDATE (recordObserveEnd) fails.
+			if (/update\s+session_observe_log/i.test(String(sql))) {
+				throw new Error("d1 transient on close");
+			}
+			return {
+				results: [],
+				success: true as const,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			};
+		});
+		await spinUp(sessions, docker);
+
+		const res = await fetch(`${baseUrl}/api/sessions/sess-1/start`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+		});
+		expect(res.status).toBe(200);
+		expect(startSpy).toHaveBeenCalledWith("sess-1");
+	});
 });

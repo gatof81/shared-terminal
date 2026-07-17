@@ -832,17 +832,22 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			// a denied/409'd attempt leaves no row (observeLog's "denied
 			// attempts saw nothing" posture).
 			if (isForeignCaller) {
+				// Only the INSERT is fail-closed (it's the security-critical
+				// half — no unaudited admin start). The END is fire-and-forget
+				// per `recordObserveEnd`'s contract: D1 transients on close are
+				// common and must NOT fail the caller. Awaiting it here (and
+				// aborting on its failure) would leave a committed row with
+				// `ended_at = NULL` — the observe-log UI would render a start
+				// that was in fact aborted as an admin operation that never
+				// ended. Same split as the exec-start audit (#416). PR #430
+				// review SHOULD-FIX.
+				let logId: string;
 				try {
-					const logId = await observeLog.recordObserveStart(
+					logId = await observeLog.recordObserveStart(
 						userId,
 						req.params.id,
 						meta.userId,
 						"operate",
-					);
-					await observeLog.recordObserveEnd(logId);
-					logger.info(
-						`[sessions] operate start logged: caller=${userId} session=${req.params.id} ` +
-							`owner=${meta.userId} log=${logId}`,
 					);
 				} catch (err) {
 					logger.error(
@@ -852,6 +857,16 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 					res.status(500).json({ error: "Internal server error" });
 					return;
 				}
+				observeLog.recordObserveEnd(logId).catch((err) => {
+					logger.warn(
+						`[sessions] operate start audit end failed: ${(err as Error).message} ` +
+							`(log=${logId} session=${req.params.id})`,
+					);
+				});
+				logger.info(
+					`[sessions] operate start logged: caller=${userId} session=${req.params.id} ` +
+						`owner=${meta.userId} log=${logId}`,
+				);
 			}
 			await docker.startContainer(req.params.id);
 			const updated = await sessions.get(req.params.id);
