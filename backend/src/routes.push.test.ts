@@ -56,6 +56,13 @@ const subStubs = vi.hoisted(() => ({
 	upsertSubscription: vi.fn(async () => undefined),
 	deleteSubscriptionByEndpoint: vi.fn(async () => true),
 	userHasSubscription: vi.fn(async () => false),
+	// Real error class so the route's `instanceof` check matches.
+	PushQuotaExceededError: class extends Error {
+		constructor() {
+			super("Push subscription limit (20) reached");
+			this.name = "PushQuotaExceededError";
+		}
+	},
 }));
 vi.mock("./pushSubscriptions.js", () => subStubs);
 
@@ -163,6 +170,17 @@ describe("POST /push/subscribe", () => {
 			p256dh: validSub.keys.p256dh,
 			auth: validSub.keys.auth,
 		});
+	});
+
+	it("429s when the per-user subscription cap is hit", async () => {
+		subStubs.upsertSubscription.mockRejectedValueOnce(new subStubs.PushQuotaExceededError());
+		await spinUp();
+		const res = await fetch(`${baseUrl}/api/push/subscribe`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(validSub),
+		});
+		expect(res.status).toBe(429);
 	});
 
 	it("404s (no store) when push is disabled server-side", async () => {

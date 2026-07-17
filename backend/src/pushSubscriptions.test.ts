@@ -12,21 +12,42 @@ vi.mock("./db.js", () => dbStubs);
 import {
 	deleteSubscriptionByEndpoint,
 	listSubscriptionsForUser,
+	MAX_PUSH_SUBSCRIPTIONS_PER_USER,
+	PushQuotaExceededError,
 	upsertSubscription,
 	userHasSubscription,
 } from "./pushSubscriptions.js";
 
 beforeEach(() => dbStubs.d1Query.mockReset());
 
+// Helper: queue the two cap-check reads (endpoint-exists, then count) that
+// precede the INSERT for a NEW endpoint.
+function queueCapChecks(endpointExists: boolean, count: number) {
+	dbStubs.d1Query.mockResolvedValueOnce({
+		results: endpointExists ? [{ one: 1 }] : [],
+		success: true,
+		meta: { changes: 0, duration: 0, last_row_id: 0 },
+	});
+	if (!endpointExists) {
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [{ n: count }],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+	}
+}
+
 describe("upsertSubscription", () => {
 	it("INSERTs with ON CONFLICT(endpoint) re-owning the row + refreshing keys", async () => {
+		queueCapChecks(false, 0);
 		dbStubs.d1Query.mockResolvedValueOnce({
 			results: [],
 			success: true,
 			meta: { changes: 1, duration: 0, last_row_id: 0 },
 		});
 		await upsertSubscription("u1", { endpoint: "https://a", p256dh: "k", auth: "a" });
-		const [sql, params] = dbStubs.d1Query.mock.calls[0]!;
+		// The INSERT is the 3rd call (after the two cap checks).
+		const [sql, params] = dbStubs.d1Query.mock.calls[2]!;
 		expect(sql).toMatch(/INSERT INTO push_subscriptions/);
 		// The conflict target is the endpoint, and the update re-points user_id
 		// (shared-device account switch) + refreshes both keys.
@@ -37,6 +58,29 @@ describe("upsertSubscription", () => {
 		// params: id, user_id, endpoint, p256dh, auth
 		expect((params as string[])[1]).toBe("u1");
 		expect((params as string[]).slice(2)).toEqual(["https://a", "k", "a"]);
+	});
+
+	it("throws PushQuotaExceededError when a NEW endpoint would exceed the cap", async () => {
+		queueCapChecks(false, MAX_PUSH_SUBSCRIPTIONS_PER_USER);
+		await expect(
+			upsertSubscription("u1", { endpoint: "https://new", p256dh: "k", auth: "a" }),
+		).rejects.toBeInstanceOf(PushQuotaExceededError);
+		// No INSERT fired — only the two cap-check reads ran.
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(2);
+	});
+
+	it("allows re-subscribing an EXISTING endpoint even at the cap (UPDATE path, no count check)", async () => {
+		// Endpoint already exists → skip the count read entirely and upsert.
+		queueCapChecks(true, 0);
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [],
+			success: true,
+			meta: { changes: 1, duration: 0, last_row_id: 0 },
+		});
+		await upsertSubscription("u1", { endpoint: "https://a", p256dh: "k2", auth: "a2" });
+		// exists-check (1) + INSERT (2), NO count read.
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(2);
+		expect(dbStubs.d1Query.mock.calls[1]![0]).toMatch(/INSERT INTO push_subscriptions/);
 	});
 });
 

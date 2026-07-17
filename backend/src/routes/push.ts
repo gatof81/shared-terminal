@@ -18,6 +18,7 @@ import type { AuthedRequest } from "../auth.js";
 import { logger } from "../logger.js";
 import {
 	deleteSubscriptionByEndpoint,
+	PushQuotaExceededError,
 	upsertSubscription,
 	userHasSubscription,
 } from "../pushSubscriptions.js";
@@ -92,6 +93,10 @@ export function registerPushRoutes(router: Router, _ctx: RouteContext): void {
 			await upsertSubscription(userId, { endpoint, p256dh, auth });
 			res.status(204).send();
 		} catch (err) {
+			if (err instanceof PushQuotaExceededError) {
+				res.status(429).json({ error: err.message });
+				return;
+			}
 			logger.error(`[push] subscribe failed for user ${userId}: ${(err as Error).message}`);
 			res.status(500).json({ error: "Internal server error" });
 		}
