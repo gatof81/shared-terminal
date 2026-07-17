@@ -2004,7 +2004,11 @@ main:not([data-sidebar-ready]) #sidebar {
    layers, not just the wrapping container. */
 #terminal-container .xterm,
 #terminal-container .xterm-viewport,
-#terminal-container .xterm-screen {
+#terminal-container .xterm-screen,
+/* xterm 6.x wraps the pane in a VS-Code scrollable element (#354) —
+   without touch-action:none on it too, iOS claims vertical drags for
+   its (empty) scroll surface before our touch handler sees them. */
+#terminal-container .xterm-scrollable-element {
   touch-action: none;
 }
 /* Hide xterm.js's built-in viewport scrollbar. xterm's local scrollback
@@ -2020,6 +2024,16 @@ main:not([data-sidebar-ready]) #sidebar {
    per the WheelUpPane binding), not xterm-viewport scroll. */
 #terminal-container .xterm-viewport {
   overflow-y: hidden !important;
+}
+/* xterm 6.x (#354) additionally renders a VS-Code-style OVERLAY
+   scrollbar (.xterm-scrollable-element > .scrollbar) on top of the
+   native viewport one the rule above hides. Same rationale: xterm's
+   local scrollback is structurally empty here, so any scrollbar it
+   draws reflects nothing scrollable. Hide the overlay too — without
+   this the fade-in thumb flashes over the pane on every wheel event
+   even though there is nowhere to scroll. */
+#terminal-container .xterm-scrollable-element > .scrollbar {
+  display: none !important;
 }
 #empty-state {
   display: flex;
