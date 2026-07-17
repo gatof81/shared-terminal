@@ -59,6 +59,26 @@ import {
 // upset xterm/tmux. See #149.
 const SESSION_NAME_MAX_LEN = 64;
 
+// #418 — opaque external reference (e.g. an Agent Hub project binding).
+// 128 (not 64) because refs are machine-composed ("hub:project:<uuid>"
+// runs ~50 chars before any qualifier); still bounded at the request
+// boundary like every other user-controlled string. Opaque means NO
+// trimming/normalisation — the consumer filters by exact match, and a
+// backend that "helpfully" rewrites the value would break round-tripping.
+const EXTERNAL_REF_MAX_LEN = 128;
+
+/** Returns an error message, or null when `value` is a valid external-ref
+ *  WRITE value (a non-empty bounded string, or null = clear). Shared by
+ *  the create route (where null/undefined both mean "unset") and the
+ *  PATCH route (where null means "clear"). */
+function externalRefError(value: unknown): string | null {
+	if (value === null) return null;
+	if (typeof value !== "string" || value.length === 0 || value.length > EXTERNAL_REF_MAX_LEN) {
+		return `body.externalRef must be null or a non-empty string of at most ${EXTERNAL_REF_MAX_LEN} characters`;
+	}
+	return null;
+}
+
 // Cap for the copy-mode search query (#357). 256 comfortably covers any
 // realistic search term while bounding what gets handed to `tmux
 // send-keys` argv; same "user-controlled string with no natural limit"
@@ -78,12 +98,13 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 
 	router.post("/sessions", async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
-		const { name, cols, rows, envVars, config } = req.body as {
+		const { name, cols, rows, envVars, config, externalRef } = req.body as {
 			name?: string;
 			cols?: number;
 			rows?: number;
 			envVars?: unknown;
 			config?: unknown;
+			externalRef?: unknown;
 		};
 		if (!name || typeof name !== "string") {
 			res.status(400).json({ error: "body.name is required" });
@@ -125,6 +146,14 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				error: `body.rows must be an integer in 1..${TERMINAL_DIM_MAX}`,
 			});
 			return;
+		}
+		// #418 — on create, null and undefined both mean "unset".
+		if (externalRef !== undefined) {
+			const refErr = externalRefError(externalRef);
+			if (refErr !== null) {
+				res.status(400).json({ error: refErr });
+				return;
+			}
 		}
 		let validatedEnvVars: Record<string, string>;
 		try {
@@ -214,6 +243,9 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				rows,
 				envVars: validatedEnvVars,
 				maxActiveSessions: effectiveMaxSessions,
+				// Validated above; null collapses to undefined so the
+				// manager's `?? null` lands NULL either way.
+				externalRef: typeof externalRef === "string" ? externalRef : undefined,
 			});
 			// Persist the typed config BEFORE spawning the container. If
 			// docker.spawn fails the rollback in the catch below deletes
@@ -440,6 +472,16 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 	router.get("/sessions", async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
 		const includeTerminated = req.query.all === "true";
+		// #418 — exact-match filter, applied in SQL by the list queries.
+		// A non-string shape (`?externalRef=a&externalRef=b` parses as an
+		// array) is a 400 rather than a silent ignore: the caller is a
+		// machine reconciling bindings, and "filter dropped" must not
+		// read as "every session matches".
+		const externalRefQ = req.query.externalRef;
+		if (externalRefQ !== undefined && typeof externalRefQ !== "string") {
+			res.status(400).json({ error: "query.externalRef must be a single string" });
+			return;
+		}
 		// Wrapped in try/catch because #271 added two new async legs
 		// (listResourceCaps + docker.gatherStats) that can throw on a
 		// transient D1 hiccup or Docker socket error. Without the
@@ -450,8 +492,8 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 		// harmless. Same shape the admin route uses.
 		try {
 			const list = includeTerminated
-				? await sessions.listAllForUser(userId)
-				: await sessions.listForUser(userId);
+				? await sessions.listAllForUser(userId, externalRefQ)
+				: await sessions.listForUser(userId, externalRefQ);
 			// #271 — surface configured caps + live usage so the user
 			// can see what their own session is doing without going
 			// through the admin dashboard. Same shape the admin
@@ -711,6 +753,49 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			const updated = await sessions.get(req.params.id);
 			if (!updated) {
 				// Race: deleted between assertOwnership and get. See
+				// stopContainer handler above for the full explanation.
+				res.status(404).json({ error: "Session not found" });
+				return;
+			}
+			res.json(serializeMeta(updated));
+		} catch (err) {
+			handleSessionError(err, res);
+		}
+	});
+
+	// PATCH /sessions/:id — mutable session metadata (#418). The only
+	// field today is `externalRef` (set with a string, clear with null);
+	// unknown keys 400 rather than silently no-op, so a client that
+	// PATCHes a field this route doesn't handle yet (e.g. `name`) learns
+	// immediately instead of concluding the write "succeeded".
+	router.patch("/sessions/:id", async (req: Request, res: Response) => {
+		const { userId } = req as AuthedRequest;
+		const body = (req.body ?? {}) as Record<string, unknown>;
+		if (!("externalRef" in body)) {
+			res.status(400).json({ error: "body.externalRef is required" });
+			return;
+		}
+		const unknownKey = Object.keys(body).find((k) => k !== "externalRef");
+		if (unknownKey !== undefined) {
+			res.status(400).json({ error: `body.${unknownKey} is not a patchable field` });
+			return;
+		}
+		const refErr = externalRefError(body.externalRef);
+		if (refErr !== null) {
+			res.status(400).json({ error: refErr });
+			return;
+		}
+		try {
+			// #admin-operate: writing metadata is the operate tier, same as
+			// PATCH /env below (the Hub's admin execution identity re-binds
+			// refs on sessions owned by the human admin account). Skip the
+			// idle bump when the caller isn't the owner (#300 principle).
+			const meta = await sessions.assertCanOperate(req.params.id, userId);
+			if (meta.userId !== userId) res.locals.skipIdleBump = true;
+			await sessions.updateExternalRef(req.params.id, body.externalRef as string | null);
+			const updated = await sessions.get(req.params.id);
+			if (!updated) {
+				// Race: deleted between assertCanOperate and get. See
 				// stopContainer handler above for the full explanation.
 				res.status(404).json({ error: "Session not found" });
 				return;

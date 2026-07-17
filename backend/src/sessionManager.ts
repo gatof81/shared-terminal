@@ -111,6 +111,7 @@ interface SessionRow {
 	env_vars: string;
 	created_at: string;
 	last_connected_at: string | null;
+	external_ref: string | null;
 }
 
 function rowToMeta(row: SessionRow): SessionMeta {
@@ -126,6 +127,9 @@ function rowToMeta(row: SessionRow): SessionMeta {
 		envVars: JSON.parse(row.env_vars),
 		createdAt: parseD1Utc(row.created_at, "sessions"),
 		lastConnectedAt: row.last_connected_at ? parseD1Utc(row.last_connected_at, "sessions") : null,
+		// `?? null` also covers pre-migration test fixtures that omit the
+		// column entirely (undefined would otherwise leak into the meta).
+		externalRef: row.external_ref ?? null,
 	};
 }
 
@@ -212,8 +216,8 @@ export class SessionManager {
 		// history, which we want them to keep so they can audit what
 		// went wrong.
 		const insert = await d1Query(
-			`INSERT INTO sessions (session_id, user_id, name, container_name, cols, rows, env_vars)
-                         SELECT ?, ?, ?, ?, ?, ?, ?
+			`INSERT INTO sessions (session_id, user_id, name, container_name, cols, rows, env_vars, external_ref)
+                         SELECT ?, ?, ?, ?, ?, ?, ?, ?
                          WHERE (
                                  SELECT COUNT(*) FROM sessions
                                  WHERE user_id = ? AND status NOT IN ('terminated', 'failed')
@@ -226,6 +230,7 @@ export class SessionManager {
 				cols,
 				rows,
 				JSON.stringify(envVars),
+				opts.externalRef ?? null,
 				opts.userId,
 				opts.maxActiveSessions ?? MAX_ACTIVE_SESSIONS_PER_USER,
 			],
@@ -491,11 +496,18 @@ export class SessionManager {
 	 * admin list, which is the safer fallback vs surfacing a null
 	 * username the UI would have to special-case.
 	 */
-	async listAll(): Promise<Array<SessionMeta & { ownerUsername: string }>> {
+	async listAll(externalRef?: string): Promise<Array<SessionMeta & { ownerUsername: string }>> {
+		// The #418 filter is a SQL WHERE (not a post-fetch array filter) so
+		// it applies BEFORE the LIMIT — an in-memory filter over the capped
+		// newest-500 would silently miss older matches on big deployments,
+		// which is exactly the restore-reconcile flow the field exists for.
+		const filter = externalRef !== undefined ? "WHERE s.external_ref = ? " : "";
 		const result = await d1Query<SessionRow & { username: string }>(
 			"SELECT s.*, u.username AS username " +
 				"FROM sessions s JOIN users u ON u.id = s.user_id " +
+				filter +
 				`ORDER BY s.created_at DESC LIMIT ${ADMIN_LIST_LIMIT}`,
+			externalRef !== undefined ? [externalRef] : undefined,
 		);
 		return result.results.map((row) => ({
 			...rowToMeta(row),
@@ -533,20 +545,32 @@ export class SessionManager {
 		return out;
 	}
 
-	async listForUser(userId: string): Promise<SessionMeta[]> {
+	async listForUser(userId: string, externalRef?: string): Promise<SessionMeta[]> {
+		const filter = externalRef !== undefined ? " AND external_ref = ?" : "";
 		const result = await d1Query<SessionRow>(
-			"SELECT * FROM sessions WHERE user_id = ? AND status != 'terminated' ORDER BY created_at DESC",
-			[userId],
+			`SELECT * FROM sessions WHERE user_id = ? AND status != 'terminated'${filter} ORDER BY created_at DESC`,
+			externalRef !== undefined ? [userId, externalRef] : [userId],
 		);
 		return result.results.map(rowToMeta);
 	}
 
-	async listAllForUser(userId: string): Promise<SessionMeta[]> {
+	async listAllForUser(userId: string, externalRef?: string): Promise<SessionMeta[]> {
+		const filter = externalRef !== undefined ? " AND external_ref = ?" : "";
 		const result = await d1Query<SessionRow>(
-			"SELECT * FROM sessions WHERE user_id = ? ORDER BY created_at DESC",
-			[userId],
+			`SELECT * FROM sessions WHERE user_id = ?${filter} ORDER BY created_at DESC`,
+			externalRef !== undefined ? [userId, externalRef] : [userId],
 		);
 		return result.results.map(rowToMeta);
+	}
+
+	/** #418 — set or clear (null) the opaque external reference. The value
+	 *  is validated at the route boundary (≤128 chars); the manager stores
+	 *  it verbatim. Ownership/operate authorization is the caller's job. */
+	async updateExternalRef(sessionId: string, externalRef: string | null): Promise<void> {
+		await d1Query("UPDATE sessions SET external_ref = ? WHERE session_id = ?", [
+			externalRef,
+			sessionId,
+		]);
 	}
 
 	async setContainerId(sessionId: string, containerId: string | null): Promise<void> {

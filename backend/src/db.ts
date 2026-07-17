@@ -718,6 +718,17 @@ export const MIGRATIONS: readonly Migration[] = [
 			);
 		},
 	},
+	{
+		// #418 — opaque external reference (e.g. an Agent Hub project
+		// binding). Client data, never interpreted by the backend; NULL =
+		// unset. No index: the exact-match list filter is a rare
+		// reconcile-shaped read over tables that are hundreds of rows at
+		// v1 scale, not a hot path. addColumnIfMissing's swallowed
+		// duplicate-column error makes a re-run after a transient converge.
+		version: 15,
+		description: "sessions.external_ref — opaque client metadata (#418)",
+		apply: () => addColumnIfMissing("sessions", "external_ref TEXT"),
+	},
 ];
 
 /**
