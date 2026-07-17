@@ -13,13 +13,16 @@ import {
 	createTab,
 	deleteSession,
 	deleteTab,
+	fetchAdminSessions,
 	getSession,
+	isAdmin,
 	listSessions,
 	listTabs,
 	startSession,
 	stopSession,
 	TabNotFoundError,
 } from "./api.js";
+import { parseSessionHash, reflectSessionInHash } from "./deepLink.js";
 import { formatBytes, formatCpuCores, formatCpuPercent } from "./format.js";
 import { transformKeyInput } from "./keyBar.js";
 import {
@@ -43,6 +46,7 @@ import {
 } from "./main.js";
 import { renderSidebarObservables } from "./myGroups.js";
 import { openBootstrapLogModal } from "./newSession.js";
+import { openObserveModalFor } from "./observeModal.js";
 import { badgeFor, clearBadge, recordOutput } from "./tabActivity.js";
 import { openTerminalSession, type SessionStatus } from "./terminal.js";
 
@@ -259,6 +263,10 @@ export async function openSession(sessionId: string) {
 	disposeAllCurrentTerminals();
 
 	setActiveSessionId(sessionId);
+	// #419 — every selection path (sidebar click, SW notification jump,
+	// deep-link consumption) funnels through here, so this single write
+	// keeps the address bar a shareable /#/sessions/<id> link.
+	reflectSessionInHash(sessionId);
 	renderSessionList();
 	updateToolbar();
 
@@ -275,6 +283,9 @@ export async function openSession(sessionId: string) {
 		// visible with no tabs.
 		if (activeSessionId === sessionId) {
 			setActiveSessionId(null);
+			// Un-reflect the failed selection so a reload doesn't replay
+			// the broken deep link (#419).
+			reflectSessionInHash(null);
 			setCurrentTabs([]);
 			renderSessionList();
 			updateToolbar();
@@ -338,6 +349,66 @@ export async function openSession(sessionId: string) {
 		}
 		showToast((err as Error).message, true);
 	}
+}
+
+/**
+ * Consume a /#/sessions/<id> deep link (#419). Called by main.ts after
+ * the own-session list has loaded (post-auth) and on every hashchange.
+ *
+ * Resolution order:
+ *   1. Own session → select it (same path as a sidebar click).
+ *   2. Not own + admin → resolve via the admin list and open the observe
+ *      modal (take-control available, exactly the dashboard's path).
+ *   3. Anything else → one "Session not found" toast.
+ *
+ * No-existence-leak invariant: for a NON-admin, foreign and nonexistent
+ * ids take the identical branch — the own-list check is client-side and
+ * no probe request is ever made, so the toast can't differ in timing or
+ * wording between the two. (For admins the distinction is fine: the
+ * admin list already shows every session.)
+ */
+export async function openSessionFromDeepLink(): Promise<void> {
+	const id = parseSessionHash(window.location.hash);
+	if (id === null) return;
+	// Already there (e.g. our own reflectSessionInHash write, or a
+	// re-fired hashchange) — nothing to do.
+	if (id === activeSessionId) return;
+	if (sessions.some((s) => s.sessionId === id)) {
+		await openSession(id);
+		return;
+	}
+	if (isAdmin()) {
+		try {
+			const rows = await fetchAdminSessions();
+			const s = rows.find((r) => r.sessionId === id);
+			if (s) {
+				if (s.status !== "running") {
+					// Mirrors the dashboard, which only offers Observe on
+					// running rows — the WS attach needs a live container.
+					showToast(`Session "${s.name}" is not running — nothing to observe`, true);
+					return;
+				}
+				// Same target shape as the dashboard's openAdminObserve
+				// (#admin-operate 4/4): observe first, take-control offered.
+				void openObserveModalFor({
+					sessionId: s.sessionId,
+					name: s.name,
+					ownerUsername: s.ownerUsername,
+					canOperate: true,
+					canReconnect: async () =>
+						(await fetchAdminSessions()).some(
+							(x) => x.sessionId === s.sessionId && x.status === "running",
+						),
+				});
+				return;
+			}
+		} catch {
+			// Admin-list fetch failed (transient) — fall through to the
+			// generic toast rather than surfacing a scarier error for
+			// what is just a navigation.
+		}
+	}
+	showToast("Session not found", true);
 }
 
 export function updateToolbar() {

@@ -54,7 +54,7 @@ import {
 	registerServiceWorker,
 } from "./push.js";
 import { initTerminalSearch } from "./searchBar.js";
-import { openSession, refreshSessions } from "./sessionCore.js";
+import { openSession, openSessionFromDeepLink, refreshSessions } from "./sessionCore.js";
 import { clearAllBadges } from "./tabActivity.js";
 import type { TerminalSession } from "./terminal.js";
 
@@ -281,10 +281,19 @@ function showApp() {
 	sidebarUserDisplay.textContent = userDisplay.textContent;
 	applyAdminVisibility();
 	void refreshNotificationsToggle();
-	refreshSessions();
-	// If the app was cold-started from a notification tap, jump to the
-	// referenced session once we're authenticated and showing the app.
-	openSessionFromHash();
+	// Route any hash AFTER the session list has loaded: the deep-link
+	// resolver (#419) decides own-vs-foreign from the in-memory list,
+	// and consuming it earlier would misclassify every own session as
+	// unknown. The SW's one-shot #session= jump doesn't need the list
+	// but has no reason to run earlier either.
+	void refreshSessions().then(() => {
+		// If the app was cold-started from a notification tap, jump to the
+		// referenced session once we're authenticated and showing the app.
+		openSessionFromHash();
+		// /#/sessions/<id> deep link (#419) — shareable, survives the
+		// login screen (the hash rides along untouched until here).
+		void openSessionFromDeepLink();
+	});
 }
 
 // #50 / #201e: gate role-conditional UI on the api-layer mirror.
@@ -413,6 +422,17 @@ function openSessionFromHash() {
 	history.replaceState(null, "", window.location.pathname + window.location.search);
 	void openSession(sessionId);
 }
+
+// Live hash edits (user pastes a link into the address bar of an open
+// tab, or a Hub "Open terminal" click retargets an existing tab) route
+// through the same resolver (#419). Our own selection-time writes use
+// history.replaceState, which does NOT fire hashchange — so this cannot
+// loop on itself. Pre-auth the hash just sits in the URL; showApp()'s
+// post-refresh consumption picks it up after login.
+window.addEventListener("hashchange", () => {
+	if (!isLoggedIn()) return;
+	void openSessionFromDeepLink();
+});
 
 function updateAuthUI() {
 	if (isRegisterMode) {
