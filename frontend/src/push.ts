@@ -104,7 +104,14 @@ let swRegistration: Promise<ServiceWorkerRegistration> | null = null;
 export function registerServiceWorker(): Promise<ServiceWorkerRegistration> | null {
 	if (!("serviceWorker" in navigator)) return null;
 	if (!swRegistration) {
-		swRegistration = navigator.serviceWorker.register("/sw.js", { scope: "/" });
+		swRegistration = navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch((err) => {
+			// Never memoise a REJECTED promise: a transient failure at boot
+			// (a 503 for /sw.js, a parse error) would otherwise permanently
+			// break the toggle — every later enablePush() would await the same
+			// dead promise and hang. Clear the cache so the next call retries.
+			swRegistration = null;
+			throw err;
+		});
 	}
 	return swRegistration;
 }
@@ -125,10 +132,16 @@ export async function enablePush(): Promise<void> {
 	}
 
 	const key = await fetchVapidKey();
-	// Ensure the SW is registered, then wait for it to become active — a
-	// freshly-registered worker isn't `ready` until it activates, and
-	// pushManager.subscribe needs an active registration.
-	registerServiceWorker();
+	// Ensure the SW is registered, AWAITING it so a registration failure
+	// throws a clear error here instead of hanging forever on
+	// `serviceWorker.ready` (which never resolves without a live
+	// registration). A rejection also clears the memo so a retry re-registers.
+	const reg = registerServiceWorker();
+	if (!reg) throw new Error("Push notifications aren't supported in this browser.");
+	await reg;
+	// Then wait for it to become active — a freshly-registered worker isn't
+	// `ready` until it activates, and pushManager.subscribe needs an active
+	// registration.
 	const registration = await navigator.serviceWorker.ready;
 	const sub = await registration.pushManager.subscribe({
 		userVisibleOnly: true,

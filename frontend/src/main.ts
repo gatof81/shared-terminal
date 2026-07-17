@@ -383,7 +383,10 @@ sidebarNotificationsBtn.addEventListener("click", () => void onNotificationsClic
 
 // Register the service worker as early as possible so a later enable-push
 // click finds an active registration. Idempotent + no-op where unsupported.
-registerServiceWorker();
+// Swallow a boot-time registration failure (transient /sw.js 503, etc.): it's
+// non-fatal, the memo self-clears on rejection, and a later enablePush() retry
+// re-registers and surfaces the error to the user then.
+registerServiceWorker()?.catch(() => {});
 
 // The SW posts { type:"open-session", sessionId } after focusing the window on
 // a notification tap; jump straight to that session. (openWindow's #session
