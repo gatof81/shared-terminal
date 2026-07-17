@@ -94,10 +94,16 @@ function makeMeta(overrides: Partial<SessionMeta> = {}): SessionMeta {
 	};
 }
 
-function makeFakeSessions(status: SessionStatus): SessionManager {
-	const meta = makeMeta({ status });
+// `ownerUserId` defaults to "u1" (the stubbed caller) — an owner start,
+// no audit. Pass a different id to model a cross-user (admin) operate:
+// `assertCanOperate` resolves (owner OR admin) but `meta.userId !== caller`,
+// so the route writes the #429 audit row.
+function makeFakeSessions(status: SessionStatus, ownerUserId = "u1"): SessionManager {
+	const meta = makeMeta({ status, userId: ownerUserId });
 	return {
-		assertOwnership: vi.fn(async () => meta),
+		// #429: the route authorizes via assertCanOperate now, not
+		// assertOwnership.
+		assertCanOperate: vi.fn(async () => meta),
 		get: vi.fn(async () => ({ ...meta, status: "running" as const })),
 	} as unknown as SessionManager;
 }
@@ -204,5 +210,77 @@ describe("POST /sessions/:id/start", () => {
 		});
 		expect(res.status).toBe(200);
 		expect(startSpy).toHaveBeenCalledWith("sess-1");
+	});
+
+	// ── #429: operate-tier start + cross-user audit ──────────────────────
+
+	const observeLogWrites = () =>
+		dbStubs.d1Query.mock.calls.filter((c) => /session_observe_log/i.test(String(c[0])));
+
+	it("owner start writes NO audit row (caller === owner)", async () => {
+		const sessions = makeFakeSessions("stopped", "u1"); // owner is the caller
+		const { docker, startSpy } = makeFakeDocker();
+		await spinUp(sessions, docker);
+
+		const res = await fetch(`${baseUrl}/api/sessions/sess-1/start`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+		});
+		expect(res.status).toBe(200);
+		expect(startSpy).toHaveBeenCalledWith("sess-1");
+		// No session_observe_log INSERT for an owner start.
+		expect(observeLogWrites()).toHaveLength(0);
+	});
+
+	it("cross-user (admin) start succeeds and writes an operate audit row", async () => {
+		// assertCanOperate resolves for an admin, but the session is owned by
+		// someone else → the route writes a `mode='operate'` audit row.
+		const sessions = makeFakeSessions("stopped", "owner-2");
+		const { docker, startSpy } = makeFakeDocker();
+		await spinUp(sessions, docker);
+
+		const res = await fetch(`${baseUrl}/api/sessions/sess-1/start`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+		});
+		expect(res.status).toBe(200);
+		expect(startSpy).toHaveBeenCalledWith("sess-1");
+		// A row was written (recordObserveStart INSERT, then recordObserveEnd
+		// UPDATE — both touch the observe-log table).
+		expect(observeLogWrites().length).toBeGreaterThanOrEqual(1);
+		const insert = dbStubs.d1Query.mock.calls.find((c) =>
+			/insert\s+into\s+session_observe_log/i.test(String(c[0])),
+		);
+		expect(insert).toBeDefined();
+		// The row carries the operate mode (last positional param in the
+		// INSERT is `mode`; see observeLog.recordObserveStart).
+		expect(JSON.stringify(insert?.[1])).toContain("operate");
+	});
+
+	it("aborts the start with 500 (never spawns) when the cross-user audit INSERT fails", async () => {
+		// The audit IS the security mitigation for widening admin power, so
+		// it's fail-closed: a D1 failure on the observe-log INSERT must abort
+		// BEFORE startContainer runs.
+		const sessions = makeFakeSessions("stopped", "owner-2");
+		const { docker, startSpy } = makeFakeDocker();
+		dbStubs.d1Query.mockImplementation(async (sql: string) => {
+			if (/insert\s+into\s+session_observe_log/i.test(String(sql))) {
+				throw new Error("d1 down");
+			}
+			return {
+				results: [],
+				success: true as const,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			};
+		});
+		await spinUp(sessions, docker);
+
+		const res = await fetch(`${baseUrl}/api/sessions/sess-1/start`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+		});
+		expect(res.status).toBe(500);
+		// Critical: the container is never spawned when the audit can't be written.
+		expect(startSpy).not.toHaveBeenCalled();
 	});
 });

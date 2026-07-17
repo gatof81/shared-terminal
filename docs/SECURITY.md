@@ -35,8 +35,10 @@ An `is_admin=1` account is a **fully trusted operator**, not a
 scoped-up user. Beyond the cross-user dashboard (list, force-stop,
 force-delete, edit resource caps), an admin can **operate any user's
 session** — attach to the live terminal with full write, edit its env
-vars and exposed ports, and create/delete/search its tabs — via the
-same `is_admin` claim (`assertCanOperate`, owner-OR-admin). This is
+vars and exposed ports, create/delete/search its tabs, run exec, and
+**start** a stopped session (#429) — via the same `is_admin` claim
+(`assertCanOperate`, owner-OR-admin). Stop and delete stay owner-driven
+(the owner and the idle sweeper own teardown). This is
 distinct from the read-only **tech-lead** role (`assertCanObserve`,
 group-scoped, no write). Every cross-user attach is recorded in
 `session_observe_log` with `mode='observe'|'operate'`, giving the

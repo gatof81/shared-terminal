@@ -791,7 +791,19 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 	router.post("/sessions/:id/start", async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
 		try {
-			const meta = await sessions.assertOwnership(req.params.id, userId);
+			// #429: operate-tier (owner OR admin) instead of owner-only, so
+			// Agent Hub's admin identity can start a specialist session it
+			// operates on the owner's behalf. Start is the last lifecycle
+			// verb widened to operate — terminal (#411), metadata (#412) and
+			// exec (#416) already are; stop/delete stay owner-driven (the
+			// owner and the idle sweeper own teardown). Group leads excluded:
+			// `assertCanOperate` has no lead arm (observe stays read-only).
+			const meta = await sessions.assertCanOperate(req.params.id, userId);
+			const isForeignCaller = meta.userId !== userId;
+			// Don't reset the owner's idle-auto-stop clock when an admin acts
+			// on their session (#300 principle, same as the other operate
+			// routes). The bump middleware checks this on `finish`.
+			if (isForeignCaller) res.locals.skipIdleBump = true;
 			// `failed` (#185) means the create-time postCreate hook
 			// exited non-zero. Refuse the restart explicitly — letting it
 			// through would spawn a fresh container without re-running
@@ -809,10 +821,42 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				});
 				return;
 			}
+			// Audit a cross-user start (#429) as a point-in-time
+			// `mode='operate'` row (start≈end — starting is instantaneous
+			// from the audit's view, unlike the exec span in #416). The
+			// audit IS the security mitigation for widening admin power by
+			// this verb, so it's fail-closed like the exec-start audit: an
+			// INSERT failure aborts BEFORE any container spawns, rather than
+			// fire-and-forget like the kill safety-valve. Recorded only once
+			// the auth + `failed` guards passed and the spawn is imminent, so
+			// a denied/409'd attempt leaves no row (observeLog's "denied
+			// attempts saw nothing" posture).
+			if (isForeignCaller) {
+				try {
+					const logId = await observeLog.recordObserveStart(
+						userId,
+						req.params.id,
+						meta.userId,
+						"operate",
+					);
+					await observeLog.recordObserveEnd(logId);
+					logger.info(
+						`[sessions] operate start logged: caller=${userId} session=${req.params.id} ` +
+							`owner=${meta.userId} log=${logId}`,
+					);
+				} catch (err) {
+					logger.error(
+						`[sessions] operate start audit insert failed, aborting start: ${(err as Error).message} ` +
+							`(caller=${userId} session=${req.params.id})`,
+					);
+					res.status(500).json({ error: "Internal server error" });
+					return;
+				}
+			}
 			await docker.startContainer(req.params.id);
 			const updated = await sessions.get(req.params.id);
 			if (!updated) {
-				// Race: deleted between assertOwnership and get. See
+				// Race: deleted between assertCanOperate and get. See
 				// stopContainer handler above for the full explanation.
 				res.status(404).json({ error: "Session not found" });
 				return;
