@@ -24,6 +24,9 @@ export interface SessionMeta {
 	rows: number;
 	/** Per-session environment variables (key=value pairs). */
 	envVars: Record<string, string>;
+	/** #418 — opaque client-provided reference (e.g. an external system's
+	 *  project id). Never interpreted by the backend; null = unset. */
+	externalRef: string | null;
 }
 
 export interface CreateSessionOpts {
@@ -37,6 +40,8 @@ export interface CreateSessionOpts {
 	 *  MAX_ACTIVE_SESSIONS_PER_USER. The route resolves it from the
 	 *  users row so the manager stays ignorant of quota policy. */
 	maxActiveSessions?: number;
+	/** #418 — opaque external reference; omitted → NULL. */
+	externalRef?: string;
 }
 
 // ── Auth ────────────────────────────────────────────────────────────────────

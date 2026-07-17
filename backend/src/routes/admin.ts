@@ -110,52 +110,55 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 	// individual route. Per-IP keying means two admins behind the same
 	// NAT/office IP share the bucket — same tradeoff every other IP
 	// limiter in the app makes.
-	router.get(
-		"/admin/sessions",
-		adminStatsIp,
-		requireAdmin,
-		async (_req: Request, res: Response) => {
-			try {
-				const list = await sessions.listAll();
-				// #270 — extra fields per row: configured caps from
-				// session_configs (NULL → uses spawn default) and live
-				// usage from `docker stats` for running rows. Batched
-				// in two parallel calls so non-running rows don't pay
-				// for the stats fetch and we issue exactly one D1 hit
-				// for ALL caps (no N+1). gatherStats returns null per
-				// row whose stats fetch failed; the wire shape exposes
-				// that as `usage: null` and the UI renders "—".
-				const ids = list.map((row) => row.sessionId);
-				const running = list.filter((row) => row.status === "running");
-				const [caps, stats] = await Promise.all([
-					listResourceCaps(ids),
-					docker.gatherStats(
-						running.map((row) => ({
-							sessionId: row.sessionId,
-							containerId: row.containerId,
-						})),
-					),
-				]);
-				res.json(
-					list.map((row) => {
-						const sCaps = caps.get(row.sessionId);
-						const usage = serializeUsage(stats.get(row.sessionId));
-						return {
-							...serializeMeta(row),
-							userId: row.userId,
-							ownerUsername: row.ownerUsername,
-							cpuLimit: sCaps?.cpuLimit ?? null,
-							memLimit: sCaps?.memLimit ?? null,
-							usage,
-						};
-					}),
-				);
-			} catch (err) {
-				logger.error(`[admin] sessions list failed: ${(err as Error).message}`);
-				res.status(500).json({ error: "Internal server error" });
-			}
-		},
-	);
+	router.get("/admin/sessions", adminStatsIp, requireAdmin, async (req: Request, res: Response) => {
+		// #418 — exact-match external-ref filter, same contract as the
+		// user-facing list. Applied in SQL before the 500-row cap so a
+		// match older than the newest 500 sessions is still found.
+		const externalRefQ = req.query.externalRef;
+		if (externalRefQ !== undefined && typeof externalRefQ !== "string") {
+			res.status(400).json({ error: "query.externalRef must be a single string" });
+			return;
+		}
+		try {
+			const list = await sessions.listAll(externalRefQ);
+			// #270 — extra fields per row: configured caps from
+			// session_configs (NULL → uses spawn default) and live
+			// usage from `docker stats` for running rows. Batched
+			// in two parallel calls so non-running rows don't pay
+			// for the stats fetch and we issue exactly one D1 hit
+			// for ALL caps (no N+1). gatherStats returns null per
+			// row whose stats fetch failed; the wire shape exposes
+			// that as `usage: null` and the UI renders "—".
+			const ids = list.map((row) => row.sessionId);
+			const running = list.filter((row) => row.status === "running");
+			const [caps, stats] = await Promise.all([
+				listResourceCaps(ids),
+				docker.gatherStats(
+					running.map((row) => ({
+						sessionId: row.sessionId,
+						containerId: row.containerId,
+					})),
+				),
+			]);
+			res.json(
+				list.map((row) => {
+					const sCaps = caps.get(row.sessionId);
+					const usage = serializeUsage(stats.get(row.sessionId));
+					return {
+						...serializeMeta(row),
+						userId: row.userId,
+						ownerUsername: row.ownerUsername,
+						cpuLimit: sCaps?.cpuLimit ?? null,
+						memLimit: sCaps?.memLimit ?? null,
+						usage,
+					};
+				}),
+			);
+		} catch (err) {
+			logger.error(`[admin] sessions list failed: ${(err as Error).message}`);
+			res.status(500).json({ error: "Internal server error" });
+		}
+	});
 
 	// PATCH /admin/sessions/:id/resources (#270) — live-edit CPU/RAM caps.
 	// Persists the new values to `session_configs` AND applies them on

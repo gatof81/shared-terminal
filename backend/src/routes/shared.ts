@@ -84,6 +84,7 @@ export function serializeMeta(m: SessionMeta): {
 	cols: number;
 	rows: number;
 	envVars: Record<string, string>;
+	externalRef: string | null;
 	cpuLimit: number | null;
 	memLimit: number | null;
 	usage: ReturnType<typeof serializeUsage>;
@@ -99,6 +100,7 @@ export function serializeMeta(m: SessionMeta): {
 		cols: m.cols,
 		rows: m.rows,
 		envVars: m.envVars,
+		externalRef: m.externalRef,
 		// #270 / #271 added these to the /sessions list response. Every
 		// other single-session endpoint (POST /sessions, GET /:id,
 		// POST /:id/start, POST /:id/stop) returns serializeMeta

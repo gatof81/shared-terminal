@@ -327,6 +327,46 @@ describe("POST /sessions — async bootstrap dispatch (PR 185b2b)", () => {
 		expect(bootstrapStubs.runAsyncBootstrap).not.toHaveBeenCalled();
 	});
 
+	// #418 — opaque external reference on create.
+	it("passes a valid externalRef through to sessions.create", async () => {
+		const { sessions, docker, spies } = makeFakes();
+		await spinUp(sessions, docker);
+
+		const res = await fetch(`${baseUrl}/api/sessions`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ name: "test", externalRef: "hub:project:42" }),
+		});
+		expect(res.status).toBe(201);
+		expect(spies.create).toHaveBeenCalledWith(
+			expect.objectContaining({ externalRef: "hub:project:42" }),
+		);
+	});
+
+	it("accepts externalRef: null as unset and 400s invalid shapes without creating", async () => {
+		const { sessions, docker, spies } = makeFakes();
+		await spinUp(sessions, docker);
+
+		const ok = await fetch(`${baseUrl}/api/sessions`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ name: "test", externalRef: null }),
+		});
+		expect(ok.status).toBe(201);
+		expect(spies.create).toHaveBeenCalledWith(expect.objectContaining({ externalRef: undefined }));
+
+		spies.create.mockClear();
+		for (const externalRef of ["", "x".repeat(129), 42, { ref: "x" }]) {
+			const res = await fetch(`${baseUrl}/api/sessions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ name: "test", externalRef }),
+			});
+			expect(res.status).toBe(400);
+		}
+		expect(spies.create).not.toHaveBeenCalled();
+	});
+
 	it("returns 201 normally for a bare-create session (no config)", async () => {
 		const { sessions, docker, spies } = makeFakes();
 		await spinUp(sessions, docker);
