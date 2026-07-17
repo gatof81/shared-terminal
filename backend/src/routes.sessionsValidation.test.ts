@@ -90,6 +90,7 @@ type SessionsStub = {
 	spies: {
 		assertOwnership: ReturnType<typeof vi.fn>;
 		assertOwnedBy: ReturnType<typeof vi.fn>;
+		assertCanOperate: ReturnType<typeof vi.fn>;
 		terminate: ReturnType<typeof vi.fn>;
 		deleteRow: ReturnType<typeof vi.fn>;
 		updateEnvVars: ReturnType<typeof vi.fn>;
@@ -101,6 +102,10 @@ function makeFakeSessions(status: SessionStatus = "running"): SessionsStub {
 	const spies = {
 		assertOwnership: vi.fn(async () => meta),
 		assertOwnedBy: vi.fn(async () => undefined),
+		// #admin-operate: env / tab routes now gate on assertCanOperate
+		// (returns meta). userId "u1" == the requireAuth-injected caller,
+		// so this is the owner path (no idle-skip).
+		assertCanOperate: vi.fn(async () => meta),
 		terminate: vi.fn(async () => undefined),
 		deleteRow: vi.fn(async () => undefined),
 		updateEnvVars: vi.fn(async () => undefined),
@@ -286,9 +291,9 @@ describe("PATCH /sessions/:id/env", () => {
 		expect(res.status).toBe(400);
 		const body = (await res.json()) as { error: string };
 		expect(body.error).toContain("PATH");
-		// Validation runs before assertOwnedBy — a malformed payload never
+		// Validation runs before the auth check — a malformed payload never
 		// costs a D1 round-trip.
-		expect(spies.assertOwnedBy).not.toHaveBeenCalled();
+		expect(spies.assertCanOperate).not.toHaveBeenCalled();
 		expect(spies.updateEnvVars).not.toHaveBeenCalled();
 	});
 
@@ -380,9 +385,9 @@ describe("DELETE /sessions/:id/tabs/:tabId", () => {
 		expect(dockerSpies.deleteTab).toHaveBeenCalledWith("sess-1", "tab-1");
 	});
 
-	it("maps NotFoundError from assertOwnedBy to 404 before listing tabs", async () => {
+	it("maps NotFoundError from assertCanOperate to 404 before listing tabs", async () => {
 		const { sessions, spies } = makeFakeSessions();
-		spies.assertOwnedBy.mockRejectedValue(new NotFoundError("Session not found"));
+		spies.assertCanOperate.mockRejectedValue(new NotFoundError("Session not found"));
 		const { docker, spies: dockerSpies } = makeFakeDocker();
 		await spinUp(sessions, docker);
 

@@ -57,13 +57,16 @@ import { buildRouter } from "./routes.js";
 import type { SessionManager } from "./sessionManager.js";
 import { ForbiddenError, NotFoundError } from "./sessionManager.js";
 
-function makeFakeSessions(opts: { assertOwnedBy?: () => Promise<void> } = {}): {
+function makeFakeSessions(opts: { assertFn?: () => Promise<{ userId: string }> } = {}): {
 	sessions: SessionManager;
 	assertSpy: ReturnType<typeof vi.fn>;
 } {
-	const assertSpy = vi.fn(opts.assertOwnedBy ?? (async () => undefined));
+	// #admin-operate: search gates on assertCanOperate (operate tier — it
+	// drives the shared pane). Returns meta; the route reads meta.userId for
+	// the idle-skip. Default userId "u1" == the injected caller (owner path).
+	const assertSpy = vi.fn(opts.assertFn ?? (async () => ({ userId: "u1" })));
 	const sessions = {
-		assertOwnedBy: assertSpy,
+		assertCanOperate: assertSpy,
 	} as unknown as SessionManager;
 	return { sessions, assertSpy };
 }
@@ -205,7 +208,7 @@ describe("POST /sessions/:id/tabs/:tabId/search — validation", () => {
 describe("POST /sessions/:id/tabs/:tabId/search — auth", () => {
 	it("returns 403 for a session the caller does not own, without touching docker", async () => {
 		const { sessions } = makeFakeSessions({
-			assertOwnedBy: async () => {
+			assertFn: async () => {
 				throw new ForbiddenError("not yours");
 			},
 		});
@@ -219,7 +222,7 @@ describe("POST /sessions/:id/tabs/:tabId/search — auth", () => {
 
 	it("returns 404 for a session that does not exist", async () => {
 		const { sessions } = makeFakeSessions({
-			assertOwnedBy: async () => {
+			assertFn: async () => {
 				throw new NotFoundError();
 			},
 		});

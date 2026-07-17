@@ -491,7 +491,15 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 	router.get("/sessions/:id", async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
 		try {
-			const meta = await sessions.assertOwnership(req.params.id, userId);
+			// #admin-operate: assertCanOperate (owner OR admin) instead of
+			// owner-only, so an admin can read a foreign session's full meta
+			// (incl. envVars) — the same shape they already get from
+			// GET /admin/sessions. When the caller isn't the owner, skip the
+			// idle bump: this is a pollable read, and an admin polling a
+			// foreign session shouldn't reset the OWNER's idle-auto-stop
+			// clock (the #300 principle applied to the operate tier).
+			const meta = await sessions.assertCanOperate(req.params.id, userId);
+			if (meta.userId !== userId) res.locals.skipIdleBump = true;
 			// Runtime-readiness signal (#393): true once the entrypoint has
 			// finished provisioning (docker exec can resolve image binaries),
 			// false while it's still running (or the container predates the
@@ -505,7 +513,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			let runtimeReady: boolean | null = null;
 			if (meta.status === "running") {
 				try {
-					// Pass the row assertOwnership just fetched so the probe
+					// Pass the row assertCanOperate just fetched so the probe
 					// doesn't re-read it from D1 (PR #399 review SHOULD-FIX).
 					runtimeReady = await docker.isRuntimeReady(req.params.id, meta);
 				} catch {
@@ -702,7 +710,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			await docker.startContainer(req.params.id);
 			const updated = await sessions.get(req.params.id);
 			if (!updated) {
-				// Race: deleted between assertOwnership and get. See
+				// Race: deleted between assertCanOperate and get. See
 				// stopContainer handler above for the full explanation.
 				res.status(404).json({ error: "Session not found" });
 				return;
@@ -734,11 +742,15 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			throw err;
 		}
 		try {
-			await sessions.assertOwnedBy(req.params.id, userId);
+			// #admin-operate: env is a write surface an admin can drive on
+			// a foreign session. assertCanOperate (owner OR admin); skip the
+			// idle bump when the caller isn't the owner.
+			const meta = await sessions.assertCanOperate(req.params.id, userId);
+			if (meta.userId !== userId) res.locals.skipIdleBump = true;
 			await sessions.updateEnvVars(req.params.id, validatedEnvVars);
 			const updated = await sessions.get(req.params.id);
 			if (!updated) {
-				// Race: deleted between assertOwnership and get. See
+				// Race: deleted between assertCanOperate and get. See
 				// stopContainer handler above for the full explanation.
 				res.status(404).json({ error: "Session not found" });
 				return;
@@ -758,7 +770,12 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 	router.get("/sessions/:id/ports", async (req: Request, res: Response) => {
 		const { userId } = req as AuthedRequest;
 		try {
-			await sessions.assertOwnedBy(req.params.id, userId);
+			// #admin-operate: READING the port set is the observe tier
+			// (owner / admin / lead can see it), matching GET /tabs. Editing
+			// (PATCH below) is the narrower operate tier. Skip the idle bump
+			// on a foreign read (pollable — same #300 principle).
+			const meta = await sessions.assertCanObserve(req.params.id, userId);
+			if (meta.userId !== userId) res.locals.skipIdleBump = true;
 			const config = await getSessionConfig(req.params.id);
 			res.json({
 				ports: config?.ports ?? [],
@@ -790,7 +807,10 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 		}
 		const { ports } = parsed.data;
 		try {
-			await sessions.assertOwnedBy(req.params.id, userId);
+			// #admin-operate: editing ports is the operate tier (owner OR
+			// admin); skip the idle bump on a foreign edit.
+			const meta = await sessions.assertCanOperate(req.params.id, userId);
+			if (meta.userId !== userId) res.locals.skipIdleBump = true;
 			// Privileged-port gate: a port < 1024 needs CAP_NET_BIND_SERVICE,
 			// which is granted at spawn from `allowPrivilegedPorts` and can't
 			// be added to a live container. So a newly-requested privileged
@@ -819,7 +839,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			await setPortMappings(req.params.id, mappingsFromConfig(ports));
 			const updated = await sessions.get(req.params.id);
 			if (!updated) {
-				// Race: deleted between assertOwnership and get. See
+				// Race: deleted between assertCanOperate and get. See
 				// stopContainer handler above for the full explanation.
 				res.status(404).json({ error: "Session not found" });
 				return;
@@ -845,9 +865,10 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			// to, and the WS would 1008-close on "Missing tab". The auth
 			// graduation is owner / admin / lead-of-group-containing-owner,
 			// matching what the observe-WS attach itself enforces.
-			// Tab CREATE / DELETE further down stay on `assertOwnedBy` —
-			// observability does NOT include the right to mutate tab
-			// state on someone else's session.
+			// Tab CREATE / DELETE / search further down use the operate tier
+			// (`assertCanOperate`, owner OR admin) — reading the tab list is
+			// observe (owner/admin/lead), but mutating tab state is a write
+			// an observer/lead must not do.
 			const meta = await sessions.assertCanObserve(req.params.id, userId);
 			// (#300) The observe UI polls this endpoint. A non-owner
 			// observer (admin / group-lead) gets a 200, which would trip
@@ -876,7 +897,10 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			return;
 		}
 		try {
-			await sessions.assertOwnedBy(req.params.id, userId);
+			// #admin-operate: creating a tab is part of driving the
+			// terminal — operate tier (owner OR admin), skip foreign bump.
+			const meta = await sessions.assertCanOperate(req.params.id, userId);
+			if (meta.userId !== userId) res.locals.skipIdleBump = true;
 			const tab = await docker.createTab(req.params.id, label as string | undefined);
 			res.status(201).json(tab);
 		} catch (err) {
@@ -888,7 +912,10 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 		const { userId } = req as AuthedRequest;
 		const { id, tabId } = req.params;
 		try {
-			await sessions.assertOwnedBy(id, userId);
+			// #admin-operate: deleting a tab is a terminal-mutation — operate
+			// tier (owner OR admin), skip the idle bump on a foreign delete.
+			const meta = await sessions.assertCanOperate(id, userId);
+			if (meta.userId !== userId) res.locals.skipIdleBump = true;
 
 			// Closing all tabs is allowed — the container lifecycle is
 			// independent of tmux now, so a session with zero tabs is a
@@ -950,11 +977,13 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			validatedQuery = query;
 		}
 		try {
-			// `assertOwnedBy`, NOT `assertCanObserve`: search steers the
-			// shared tmux pane (copy-mode UI repaints for every attached
-			// client), so observers must not drive someone else's session.
-			// Same graduation as tab create/delete above.
-			await sessions.assertOwnedBy(id, userId);
+			// operate tier (owner OR admin), NOT the observe tier: search
+			// steers the shared tmux pane (copy-mode UI repaints for every
+			// attached client), so a read-only observer/lead must not drive
+			// it — same graduation as tab create/delete above. Skip the idle
+			// bump on a foreign drive.
+			const meta = await sessions.assertCanOperate(id, userId);
+			if (meta.userId !== userId) res.locals.skipIdleBump = true;
 			await docker.searchTabHistory(id, tabId, action, validatedQuery);
 			res.status(204).send();
 		} catch (err) {

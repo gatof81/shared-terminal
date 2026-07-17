@@ -74,14 +74,19 @@ function makeMeta(overrides: Partial<SessionMeta> = {}): SessionMeta {
 	};
 }
 
-function makeFakeSessions(opts: { assertOwnedBy?: () => Promise<void> } = {}): {
+function makeFakeSessions(opts: { assertFn?: () => Promise<SessionMeta> } = {}): {
 	sessions: SessionManager;
 	assertSpy: ReturnType<typeof vi.fn>;
 } {
 	const meta = makeMeta();
-	const assertSpy = vi.fn(opts.assertOwnedBy ?? (async () => undefined));
+	// #admin-operate: GET /ports gates on assertCanObserve, PATCH /ports on
+	// assertCanOperate — both return meta. One spy stands in for whichever
+	// the route under test calls; default resolves to the owner meta, the
+	// 403 test overrides it to throw.
+	const assertSpy = vi.fn(opts.assertFn ?? (async () => meta));
 	const sessions = {
-		assertOwnedBy: assertSpy,
+		assertCanObserve: assertSpy,
+		assertCanOperate: assertSpy,
 		get: vi.fn(async () => meta),
 	} as unknown as SessionManager;
 	return { sessions, assertSpy };
@@ -254,7 +259,7 @@ describe("PATCH /sessions/:id/ports", () => {
 
 	it("returns 403 for a session the caller does not own, with no mapping writes", async () => {
 		const { sessions } = makeFakeSessions({
-			assertOwnedBy: async () => {
+			assertFn: async () => {
 				throw new ForbiddenError("not yours");
 			},
 		});
@@ -264,6 +269,21 @@ describe("PATCH /sessions/:id/ports", () => {
 		expect(res.status).toBe(403);
 		const calls = dbStubs.d1Query.mock.calls as Array<[string, unknown[]]>;
 		expect(calls.some((c) => /sessions_port_mappings/.test(c[0]))).toBe(false);
+	});
+
+	it("allows an admin to edit a FOREIGN session's ports (#admin-operate)", async () => {
+		// assertCanOperate resolves to a meta owned by someone else — the
+		// operate tier's admin grant. The route must proceed (200) and write
+		// the mappings, proving it honors owner-OR-admin, not owner-only.
+		const { sessions } = makeFakeSessions({
+			assertFn: async () => makeMeta({ userId: "someone-else" }),
+		});
+		await spinUp(sessions);
+
+		const res = await patchPorts({ ports: [{ container: 3000, public: false }] });
+		expect(res.status).toBe(200);
+		const calls = dbStubs.d1Query.mock.calls as Array<[string, unknown[]]>;
+		expect(calls.some((c) => /UPDATE session_configs SET ports_json/.test(c[0]))).toBe(true);
 	});
 });
 
