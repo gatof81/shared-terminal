@@ -182,9 +182,15 @@ describe("handleWsConnection auth-first ordering", () => {
 describe("handleWsConnection geometry from URL", () => {
 	function makeMocks(sessionCols = 80, sessionRows = 24) {
 		const sessions = {
-			assertOwnership: vi
-				.fn()
-				.mockResolvedValue({ status: "running", cols: sessionCols, rows: sessionRows }),
+			// Non-observe attaches authorize via assertCanOperate now
+			// (owner OR admin). userId matches the authed "user-1" so this
+			// is the owner path — isAdminOperating stays false, no audit.
+			assertCanOperate: vi.fn().mockResolvedValue({
+				status: "running",
+				userId: "user-1",
+				cols: sessionCols,
+				rows: sessionRows,
+			}),
 			updateConnected: vi.fn().mockResolvedValue(undefined),
 		} as unknown as SessionManager;
 		const docker = {
@@ -284,7 +290,9 @@ describe("handleWsConnection close-during-attach (#298)", () => {
 	it("detaches when the socket closes during the attach() await", async () => {
 		const ws = makeFakeWs();
 		const sessions = {
-			assertOwnership: vi.fn().mockResolvedValue({ status: "running", cols: 80, rows: 24 }),
+			assertCanOperate: vi
+				.fn()
+				.mockResolvedValue({ status: "running", userId: "user-1", cols: 80, rows: 24 }),
 			updateConnected: vi.fn().mockResolvedValue(undefined),
 		} as unknown as SessionManager;
 		// Deferred attach: lets the test close the socket mid-await before
@@ -347,9 +355,13 @@ describe("handleWsConnection observe-mode (#201d)", () => {
 				cols: 80,
 				rows: 24,
 			}),
-			assertOwnership: vi.fn().mockResolvedValue({
+			// Non-observe attaches route through assertCanOperate. Returns
+			// the same owner id so a test with ownerId="user-1" is the
+			// owner path and ownerId="owner-bob" is admin-operate (the
+			// authed caller is always "user-1").
+			assertCanOperate: vi.fn().mockResolvedValue({
 				status: "running",
-				userId: "user-1",
+				userId: opts.ownerId ?? "owner-1",
 				cols: 80,
 				rows: 24,
 			}),
@@ -381,7 +393,9 @@ describe("handleWsConnection observe-mode (#201d)", () => {
 			expect(docker.attach).toHaveBeenCalled();
 		});
 		expect(sessions.assertCanObserve).toHaveBeenCalledWith("s-1", "user-1");
-		expect(sessions.assertOwnership).not.toHaveBeenCalled();
+		// The operate gate (used by the non-observe path) must NOT fire
+		// when ?observe=true routes through the read-only path.
+		expect(sessions.assertCanOperate).not.toHaveBeenCalled();
 	});
 
 	it("passes observe=true to docker.attach when observer differs from owner", async () => {
@@ -433,6 +447,7 @@ describe("handleWsConnection observe-mode (#201d)", () => {
 			"user-1", // observer
 			"s-1", // session
 			"owner-bob", // owner (denormalised at insert)
+			"observe", // #admin-operate: read-only attach tagged 'observe'
 		);
 		// Simulate WS close. Two "close" listeners are registered: the
 		// setup-phase flag-setter (swapped off after attach) and the
@@ -529,6 +544,63 @@ describe("handleWsConnection observe-mode (#201d)", () => {
 		onMessage(JSON.stringify({ type: "resize", cols: 100, rows: 30 }));
 		expect(docker.write).toHaveBeenCalledWith(expect.any(String), "ls\n");
 		expect(docker.resize).toHaveBeenCalledWith(expect.any(String), 100, 30);
+	});
+
+	// ── Admin-operate (non-observe attach on a foreign session) ──────────────
+	// An admin attaching WITHOUT ?observe=true drives the session for real:
+	// authorized via assertCanOperate, writes NOT dropped, but audited with
+	// mode='operate' so the trail records who drove whose session.
+
+	it("routes a non-observe foreign attach via assertCanOperate and audits mode='operate'", async () => {
+		const ws = makeFakeWs();
+		const { sessions, docker } = makeMocks({ ownerId: "owner-bob" });
+		const req = makeReq("/ws/sessions/s-1?tab=tab-1", true); // no observe flag
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		handleWsConnection(ws as any, req as any, sessions, docker);
+		await vi.waitFor(() => {
+			expect(observeLogStubs.recordObserveStart).toHaveBeenCalled();
+		});
+		expect(sessions.assertCanOperate).toHaveBeenCalledWith("s-1", "user-1");
+		expect(observeLogStubs.recordObserveStart).toHaveBeenCalledWith(
+			"user-1", // admin caller
+			"s-1",
+			"owner-bob", // owner
+			"operate", // the discriminating tag
+		);
+		// docker.attach observe flag (7th arg) is FALSE — the admin's
+		// viewport contributes to size votes and the pane isn't read-only.
+		expect((docker.attach as ReturnType<typeof vi.fn>).mock.calls[0]![6]).toBe(false);
+	});
+
+	it("forwards input/resize for an admin-operate attach (writes NOT dropped)", async () => {
+		const ws = makeFakeWs();
+		const { sessions, docker } = makeMocks({ ownerId: "owner-bob" });
+		const req = makeReq("/ws/sessions/s-1?tab=tab-1", true);
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		handleWsConnection(ws as any, req as any, sessions, docker);
+		await vi.waitFor(() => {
+			expect(docker.attach).toHaveBeenCalled();
+		});
+		const onMessage = ws.on.mock.calls.find((c) => c[0] === "message")![1] as (
+			raw: unknown,
+		) => void;
+		onMessage(JSON.stringify({ type: "input", data: "whoami\n" }));
+		onMessage(JSON.stringify({ type: "resize", cols: 90, rows: 30 }));
+		// The whole point of operate vs observe: the admin CAN type.
+		expect(docker.write).toHaveBeenCalledWith(expect.any(String), "whoami\n");
+		expect(docker.resize).toHaveBeenCalledWith(expect.any(String), 90, 30);
+	});
+
+	it("does NOT audit when the owner attaches normally (owner-operate is not cross-user)", async () => {
+		const ws = makeFakeWs();
+		const { sessions, docker } = makeMocks({ ownerId: "user-1" }); // owner == caller
+		const req = makeReq("/ws/sessions/s-1?tab=tab-1", true);
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		handleWsConnection(ws as any, req as any, sessions, docker);
+		await vi.waitFor(() => {
+			expect(docker.attach).toHaveBeenCalled();
+		});
+		expect(observeLogStubs.recordObserveStart).not.toHaveBeenCalled();
 	});
 });
 

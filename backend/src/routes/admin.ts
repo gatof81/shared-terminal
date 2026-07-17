@@ -348,6 +348,10 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 		ownerUsername: e.ownerUsername,
 		startedAt: e.startedAt.toISOString(),
 		endedAt: e.endedAt?.toISOString() ?? null,
+		// #admin-operate: 'observe' (read-only) vs 'operate' (admin drove
+		// the session). Lets the dashboard show "alice OPERATED bob's
+		// session" distinctly from a passive watch.
+		mode: e.mode,
 	});
 
 	router.get(

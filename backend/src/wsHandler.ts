@@ -75,8 +75,9 @@ export function handleWsConnection(
 	// dropping every other attached session. The `ws` package emits
 	// 'error' on transport-level failures — RSTd TCP, malformed frames,
 	// invalid UTF-8 — any of which can land during the handshake/close
-	// dance or during the two awaits below (sessions.assertOwnership,
-	// docker.attach). A second ws.on('error', …) is added after attach()
+	// dance or during the two awaits below (the auth check —
+	// sessions.assertCanObserve / assertCanOperate — and docker.attach).
+	// A second ws.on('error', …) is added after attach()
 	// succeeds to also tear the exec down; `on` is additive, so both run.
 	// See issue #91 for the DoS reproduction path.
 	ws.on("error", (err) => {
@@ -207,19 +208,33 @@ export function handleWsConnection(
 		// of this function doesn't have to special-case the graded
 		// route — the observer-vs-owner distinction is captured by
 		// `isObserverNotOwner` below.
+		// Non-observe attaches now authorize with `assertCanOperate`
+		// (owner OR admin) instead of the binary owner-only check, so an
+		// admin can DRIVE a foreign session — full write, not the
+		// read-only observe path. `assertCanOperate` has no lead arm, so
+		// a non-admin non-owner still 403s here; observe stays on the
+		// graded `assertCanObserve` (owner/admin/lead, read-only).
 		const session = observe
 			? await sessions.assertCanObserve(sessionId, userId)
-			: await sessions.assertOwnership(sessionId, userId);
+			: await sessions.assertCanOperate(sessionId, userId);
 		// An owner who happens to call `?observe=true` (e.g. a UI bug
 		// or explicit "preview my own session in read-only mode")
 		// doesn't generate an audit row, can't shrink their own pane
 		// via dropped resize frames, and can't write — but the auth
 		// already passed, so the only behavioural changes are the
 		// no-write / no-size-vote / no-audit bits below. The
-		// `isObserverNotOwner` discriminator gates the audit + drop
+		// `isObserverNotOwner` discriminator gates the read-only + drop
 		// logic so we only pay those costs when an observer is genuinely
 		// looking at someone else's session.
 		const isObserverNotOwner = observe && session.userId !== userId;
+		// An admin driving someone else's session (non-observe attach
+		// where the caller isn't the owner — only an admin gets past
+		// `assertCanOperate` in that case). Writes for real (input/resize
+		// NOT dropped), but audited the same as observe so the trail
+		// records who touched whose session, tagged `mode='operate'`.
+		const isAdminOperating = !observe && session.userId !== userId;
+		// Either cross-user attach shape gets an audit row.
+		const isAudited = isObserverNotOwner || isAdminOperating;
 
 		if (session.status === "terminated") {
 			sendError(ws, "Session is terminated");
@@ -343,15 +358,16 @@ export function handleWsConnection(
 		// Skip the audit-row INSERT if the socket already went away during
 		// attach() — no point recording an observe we'd immediately have to
 		// close, and it avoids a D1 round-trip on a dead connection.
-		if (isObserverNotOwner && !closedDuringSetup) {
+		if (isAudited && !closedDuringSetup) {
+			const auditMode = isAdminOperating ? "operate" : "observe";
 			try {
-				observeLogId = await recordObserveStart(userId, sessionId, session.userId);
+				observeLogId = await recordObserveStart(userId, sessionId, session.userId, auditMode);
 			} catch (err) {
-				teardown("error", "observe-start failed");
+				teardown("error", `${auditMode}-start failed`);
 				throw err;
 			}
 			log.info(
-				`[ws] observe attach logged: observer=${userId} session=${sessionId} ` +
+				`[ws] ${auditMode} attach logged: caller=${userId} session=${sessionId} ` +
 					`owner=${session.userId} log=${observeLogId}`,
 			);
 		}
@@ -380,7 +396,7 @@ export function handleWsConnection(
 		flushTail();
 
 		log.info(
-			`[ws] user=${userId}${isObserverNotOwner ? " (observe)" : ""} ` +
+			`[ws] user=${userId}${isObserverNotOwner ? " (observe)" : isAdminOperating ? " (admin-operate)" : ""} ` +
 				`attached to session=${sessionId} tab=${tabId} (exec=${attachId})`,
 		);
 

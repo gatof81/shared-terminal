@@ -569,6 +569,10 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 		ownerUserId: e.ownerUserId,
 		startedAt: e.startedAt.toISOString(),
 		endedAt: e.endedAt?.toISOString() ?? null,
+		// #admin-operate: 'observe' vs 'operate' — the owner's own
+		// per-session log surfaces it too, so they can see an admin
+		// drove (not just watched) their session.
+		mode: e.mode,
 	});
 
 	router.get("/sessions/:id/observe-log", async (req: Request, res: Response) => {
