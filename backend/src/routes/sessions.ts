@@ -513,7 +513,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			let runtimeReady: boolean | null = null;
 			if (meta.status === "running") {
 				try {
-					// Pass the row assertOwnership just fetched so the probe
+					// Pass the row assertCanOperate just fetched so the probe
 					// doesn't re-read it from D1 (PR #399 review SHOULD-FIX).
 					runtimeReady = await docker.isRuntimeReady(req.params.id, meta);
 				} catch {
@@ -710,7 +710,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			await docker.startContainer(req.params.id);
 			const updated = await sessions.get(req.params.id);
 			if (!updated) {
-				// Race: deleted between assertOwnership and get. See
+				// Race: deleted between assertCanOperate and get. See
 				// stopContainer handler above for the full explanation.
 				res.status(404).json({ error: "Session not found" });
 				return;
@@ -750,7 +750,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			await sessions.updateEnvVars(req.params.id, validatedEnvVars);
 			const updated = await sessions.get(req.params.id);
 			if (!updated) {
-				// Race: deleted between assertOwnership and get. See
+				// Race: deleted between assertCanOperate and get. See
 				// stopContainer handler above for the full explanation.
 				res.status(404).json({ error: "Session not found" });
 				return;
@@ -839,7 +839,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			await setPortMappings(req.params.id, mappingsFromConfig(ports));
 			const updated = await sessions.get(req.params.id);
 			if (!updated) {
-				// Race: deleted between assertOwnership and get. See
+				// Race: deleted between assertCanOperate and get. See
 				// stopContainer handler above for the full explanation.
 				res.status(404).json({ error: "Session not found" });
 				return;
@@ -865,9 +865,10 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			// to, and the WS would 1008-close on "Missing tab". The auth
 			// graduation is owner / admin / lead-of-group-containing-owner,
 			// matching what the observe-WS attach itself enforces.
-			// Tab CREATE / DELETE further down stay on `assertOwnedBy` —
-			// observability does NOT include the right to mutate tab
-			// state on someone else's session.
+			// Tab CREATE / DELETE / search further down use the operate tier
+			// (`assertCanOperate`, owner OR admin) — reading the tab list is
+			// observe (owner/admin/lead), but mutating tab state is a write
+			// an observer/lead must not do.
 			const meta = await sessions.assertCanObserve(req.params.id, userId);
 			// (#300) The observe UI polls this endpoint. A non-owner
 			// observer (admin / group-lead) gets a 200, which would trip
