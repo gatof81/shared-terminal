@@ -570,3 +570,132 @@ describe("SessionManager.assertCanObserveBy", () => {
 		);
 	});
 });
+
+// ── assertCanOperate (admin-operate #1) ─────────────────────────────────────
+
+describe("SessionManager.assertCanOperate", () => {
+	it("returns meta on the owner positive path with one D1 call", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [fakeSessionRow("s-1", "u-owner")],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		const meta = await mgr.assertCanOperate("s-1", "u-owner");
+		expect(meta.userId).toBe("u-owner");
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(1);
+	});
+
+	it("returns meta on the admin positive path (owner != caller, caller is_admin=1)", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query
+			.mockResolvedValueOnce({
+				results: [fakeSessionRow("s-1", "u-owner")],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			})
+			.mockResolvedValueOnce({
+				results: [{ is_admin: 1 }],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			});
+		const meta = await mgr.assertCanOperate("s-1", "u-admin");
+		expect(meta.userId).toBe("u-owner");
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(2);
+	});
+
+	it("throws ForbiddenError for a non-admin stranger — NO lead arm (unlike assertCanObserve)", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query
+			.mockResolvedValueOnce({
+				results: [fakeSessionRow("s-1", "u-owner")],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			})
+			.mockResolvedValueOnce({
+				results: [{ is_admin: 0 }],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			});
+		// Exactly 2 D1 calls: getOrThrow + isUserAdmin. A group-lead check
+		// (the 3rd call assertCanObserve would make) must NOT happen —
+		// operate has no lead arm.
+		await expect(mgr.assertCanOperate("s-1", "u-lead")).rejects.toBeInstanceOf(ForbiddenError);
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(2);
+	});
+
+	it("throws NotFoundError when the session row is missing", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		await expect(mgr.assertCanOperate("s-nope", "u-any")).rejects.toBeInstanceOf(NotFoundError);
+	});
+
+	it("populates the ownership cache on the owner path (subsequent assertOwnedBy hits cache)", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [fakeSessionRow("s-1", "u-owner")],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		await mgr.assertCanOperate("s-1", "u-owner");
+		await mgr.assertOwnedBy("s-1", "u-owner");
+		// Second call served from cache — still just the one D1 read.
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(1);
+	});
+});
+
+// ── assertCanOperateBy (admin-operate #1, void variant) ─────────────────────
+
+describe("SessionManager.assertCanOperateBy", () => {
+	it("short-circuits a cached owner hit with zero D1 calls", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [fakeSessionRow("s-1", "u-owner")],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		// Prime the cache via assertCanOperate.
+		await mgr.assertCanOperate("s-1", "u-owner");
+		await mgr.assertCanOperateBy("s-1", "u-owner");
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(1);
+	});
+
+	it("authorizes an admin (owner != caller) via getOrThrow + isUserAdmin, no lead lookup", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query
+			.mockResolvedValueOnce({
+				results: [fakeSessionRow("s-1", "u-owner")],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			})
+			.mockResolvedValueOnce({
+				results: [{ is_admin: 1 }],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			});
+		await mgr.assertCanOperateBy("s-1", "u-admin");
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(2);
+	});
+
+	it("throws ForbiddenError for a non-admin stranger", async () => {
+		const mgr = new SessionManager();
+		dbStubs.d1Query
+			.mockResolvedValueOnce({
+				results: [fakeSessionRow("s-1", "u-owner")],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			})
+			.mockResolvedValueOnce({
+				results: [{ is_admin: 0 }],
+				success: true,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			});
+		await expect(mgr.assertCanOperateBy("s-1", "u-stranger")).rejects.toBeInstanceOf(
+			ForbiddenError,
+		);
+	});
+});

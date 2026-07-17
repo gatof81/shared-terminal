@@ -673,6 +673,26 @@ export const MIGRATIONS: readonly Migration[] = [
 			}
 		},
 	},
+	{
+		version: 13,
+		description:
+			"session_observe_log.mode — distinguish observe from admin-operate (#admin-operate)",
+		apply: async () => {
+			// The observe-log is now dual-purpose: read-only observation
+			// (mode='observe') AND an admin driving someone else's session
+			// (mode='operate'). Backfill existing rows to 'observe' — every
+			// row written before this migration was a read-only attach.
+			// PRAGMA-guarded so a re-run after a transient converges instead
+			// of failing forever on duplicate-column (same shape as v12).
+			const info = await d1Query<{ name: string }>("PRAGMA table_info(session_observe_log)");
+			const cols = new Set(info.results.map((c) => c.name));
+			if (!cols.has("mode")) {
+				await d1Query(
+					"ALTER TABLE session_observe_log ADD COLUMN mode TEXT NOT NULL DEFAULT 'observe'",
+				);
+			}
+		},
+	},
 ];
 
 /**
