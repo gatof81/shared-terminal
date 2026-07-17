@@ -289,12 +289,60 @@ export function handleProxyError(
 }
 
 /**
+ * `proxy.on("proxyRes")` handler — releases the upstream idle timeout for
+ * long-lived streaming responses (#408). Exported for direct unit coverage
+ * (the real `proxyRes` path needs a bound upstream socket to fault-inject).
+ *
+ * `proxyTimeout` (set in `buildProxy`) is implemented by http-proxy as
+ * `proxyReq.setTimeout(ms, () => proxyReq.abort())` — an INACTIVITY timeout
+ * on the dispatcher→container socket (verified at
+ * backend/node_modules/http-proxy/lib/http-proxy/passes/web-incoming.js:139).
+ * That is exactly right for a container that accepts the connection then
+ * goes silent (deadlock, infinite loop): no bytes for 30 s → abort → 502,
+ * no fd leak.
+ *
+ * But a Server-Sent Events stream is INDISTINGUISHABLE from "stuck" to an
+ * idle timer. After the initial `: connected`, a healthy stream can sit
+ * quiet for well over 30 s waiting for the next event (an agent thinking,
+ * a slow job) with no intervening heartbeat. The idle timeout then fires
+ * mid-stream, `proxyReq.abort()` kills the upstream, and because the client
+ * already received headers `handleProxyError` truncates the response — the
+ * browser's `EventSource` sees the drop and reconnects, only to be reaped
+ * again 30 s later. That is the "502 × 6 retries" in #408.
+ *
+ * Once the container has affirmatively declared `Content-Type:
+ * text/event-stream` we know this is a long-lived stream, not a stalled
+ * request, so we clear the idle timeout on the shared socket.
+ * `setTimeout(0)` cancels the pending timer; the one-shot `'timeout'`
+ * listener http-proxy attached simply never fires. proxyReq and proxyRes
+ * ride the SAME TCP socket, so clearing it via `proxyRes.socket` cancels
+ * the timer that `proxyReq.setTimeout` armed. Only the upstream socket is
+ * touched — the client-facing `res.socket` has no proxyTimeout on it.
+ *
+ * Scope is deliberately narrow — ONLY `text/event-stream`. A generic
+ * chunked response with no content-length is genuinely ambiguous ("slow
+ * but alive" vs "stalled mid-download"), and reaping a stalled transfer
+ * after 30 s idle is the intended behaviour, so those keep the timeout.
+ * The container-never-responds fd-leak case is likewise fully protected:
+ * the timeout fires BEFORE any `proxyRes` arrives, so this handler never
+ * runs for it.
+ */
+export function handleProxyRes(proxyRes: IncomingMessage): void {
+	const contentType = proxyRes.headers["content-type"];
+	if (typeof contentType === "string" && contentType.toLowerCase().includes("text/event-stream")) {
+		proxyRes.socket?.setTimeout(0);
+	}
+}
+
+/**
  * Singleton proxy. http-proxy keeps a per-target socket pool internally;
  * one proxy instance is enough for the whole dispatcher. The `error`
  * event is wired to `handleProxyError` so a target-side failure
  * (container died mid-request, refused connection on the host port,
  * proxyTimeout expiry) returns 502 to the client instead of crashing
- * the backend with an unhandled error event.
+ * the backend with an unhandled error event. The `proxyRes` event is
+ * wired to `handleProxyRes` so long-lived SSE streams aren't reaped by
+ * the idle timeout (#408).
  */
 function buildProxy(): httpProxy {
 	const proxy = httpProxy.createProxyServer({
@@ -321,7 +369,10 @@ function buildProxy(): httpProxy {
 		// handler below closes the response with 502. PR #223 round 1
 		// SHOULD-FIX. Long-lived WS connections are unaffected
 		// (proxyTimeout applies to HTTP responses, not the upgraded
-		// socket lifetime).
+		// socket lifetime). SSE / `text/event-stream` responses ARE
+		// affected — an idle stream would be reaped mid-flight — so
+		// `handleProxyRes` releases this timeout once the upstream
+		// declares an event-stream (#408).
 		proxyTimeout: 30_000,
 		// Pin the safe default explicitly so a future http-proxy
 		// version that flips it can't silently regress. With
@@ -348,6 +399,7 @@ function buildProxy(): httpProxy {
 		followRedirects: false,
 	} as Parameters<typeof httpProxy.createProxyServer>[0] & { followRedirects: boolean });
 	proxy.on("error", handleProxyError);
+	proxy.on("proxyRes", handleProxyRes);
 	return proxy;
 }
 
