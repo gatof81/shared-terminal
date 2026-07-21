@@ -131,6 +131,12 @@ That state includes material operators should be aware of:
   (including secrets) is in there.
 - **OAuth credentials** (`.st/claude-state/.credentials.json`) — a live
   Anthropic token, `chmod 600` but cleartext on the host filesystem.
+- **SSH private keys** (`.st/ssh/`) — the session's `~/.ssh` is
+  persisted here too, so any private keys the user generates or copies
+  in live cleartext on the host under `<WORKSPACE_ROOT>/<sessionId>`
+  (`chmod 600`, but not covered by `SECRETS_ENCRYPTION_KEY`). Backing up
+  or sharing a workspace dir now also copies whatever keys the session
+  can push with.
 
 Same consequences as the `writeEnvFile` section above, for the same
 reason (the workspace bind mount is the persistence boundary):
