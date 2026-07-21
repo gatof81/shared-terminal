@@ -6,7 +6,7 @@
 # unit suites can only pin as *shapes*:
 #
 #   1. entrypoint reaches "container ready" with zero WARN lines;
-#   2. all five persistence symlinks resolve into the workspace;
+#   2. all six persistence symlinks resolve into the workspace;
 #   3. `claude --version` matches the Dockerfile's CLAUDE_CODE_VERSION pin;
 #   4. the ~/.claude.json FILE symlink survives a real CLI config write —
 #      the empirical invariant the entrypoint's Claude block depends on,
@@ -110,7 +110,8 @@ for pair in \
 	"/home/developer/.claude.json:/home/developer/workspace/.st/claude.json" \
 	"/home/developer/.npm-global:/home/developer/workspace/.npm-global" \
 	"/home/developer/.vscode-cli:/home/developer/workspace/.vscode-cli" \
-	"/home/developer/.config/gh:/home/developer/workspace/.config/gh"; do
+	"/home/developer/.config/gh:/home/developer/workspace/.config/gh" \
+	"/home/developer/.ssh:/home/developer/workspace/.st/ssh"; do
 	link="${pair%%:*}" want="${pair#*:}"
 	target=$(docker exec "$C1" readlink "$link" 2>/dev/null)
 	if [ "$target" = "$want" ]; then ok "$link -> $target"; else

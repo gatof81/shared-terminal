@@ -412,6 +412,66 @@ if ! ln -sfn "$CLAUDE_JSON_WS" "$CLAUDE_JSON_HOME"; then
              "Claude onboarding/project state won't persist across restarts." >&2
 fi
 
+# Persist SSH client state across container replacement.
+#
+# ~/.ssh holds the user's private keys, known_hosts, and config. Like
+# every other path above it lives in the container layer, so without
+# this redirection every recreate (POST /sessions/:id/start, reconcile
+# after a host reboot) wipes the keys — forcing a full keypair rotation
+# on every host the session pushes to. Same lifetime contract as the
+# blocks above: state rides the workspace, soft delete keeps it, hard
+# delete purges it.
+#
+# Target is workspace/.st/ssh, NOT workspace/.ssh: the payload is private
+# key material and the workspace root IS the repo root for a cloned
+# session, so a plain workspace/.ssh would be one `git add -A` away from
+# committing keys. `.st/` is our repo-collision-safe state root (#377)
+# and self-ignores via its `*` .gitignore, which matters more here than
+# for any other persisted path.
+#
+# Rescue-then-symlink, like the ~/.claude block above and deliberately
+# NOT the rm-first shape of the gh/vscode blocks: a real ~/.ssh in the
+# container layer holds keys that are unrecoverable (unlike gh/vscode
+# tokens, which a device-code flow re-mints), so the workspace copy is
+# seeded from it BEFORE the real dir is dropped. A fresh image has no
+# ~/.ssh at all — nothing runs ssh at build time — so this rescue only
+# ever fires on the stop+start-after-failed-ln path, exactly like the
+# ~/.claude block; that's why there's no rename-then-restore dance.
+SSH_STATE_HOME=/home/developer/.ssh
+SSH_STATE_WS="$ST_STATE_ROOT/ssh"
+
+if [ -d "$SSH_STATE_HOME" ] && [ ! -L "$SSH_STATE_HOME" ]; then
+        if [ ! -d "$SSH_STATE_WS" ]; then
+                cp -a "$SSH_STATE_HOME" "$SSH_STATE_WS" || \
+                        echo "[entrypoint] WARN: couldn't rescue container-layer ~/.ssh into workspace; " \
+                             "existing SSH keys and known_hosts will be lost on the symlink swap." >&2
+        fi
+        rm -rf "$SSH_STATE_HOME" || true
+fi
+
+if ! mkdir -p "$SSH_STATE_WS"; then
+        echo "[entrypoint] WARN: couldn't create workspace .st/ssh dir " \
+             "(uid=$(id -u), workspace owner=$(stat -c '%u:%g' /home/developer/workspace 2>/dev/null || echo '?')). " \
+             "SSH keys and known_hosts won't persist across restarts." >&2
+elif ! ln -sfn "$SSH_STATE_WS" "$SSH_STATE_HOME"; then
+        echo "[entrypoint] WARN: couldn't symlink ~/.ssh into workspace; " \
+             "SSH keys and known_hosts won't persist across restarts." >&2
+fi
+
+# Pin permissions after seeding: 700 the dir, 600 its regular files. The
+# OpenSSH client stats through the symlink and REFUSES a private key it
+# considers group/world-readable ("UNPROTECTED PRIVATE KEY FILE"), so a
+# `cp -a` from a umask-loosened source — or a hand-seeded workspace copy
+# created under a permissive umask (the Home-Automation pre-seed case) —
+# would silently break SSH later. Re-applying on every boot is harmless
+# and defends the "existing workspace copy wins" path too. Best-effort:
+# a chmod failure only risks the permission-too-open path, not the
+# container.
+if [ -d "$SSH_STATE_WS" ]; then
+        chmod 700 "$SSH_STATE_WS" || true
+        find "$SSH_STATE_WS" -type f -exec chmod 600 {} + 2>/dev/null || true
+fi
+
 # Runtime-readiness sentinel (#393), part 2 of 2: touched as the LAST
 # provisioning step — after the ~/.npm-global swap and every symlink
 # above — so its presence is the contract the API's `runtimeReady`
