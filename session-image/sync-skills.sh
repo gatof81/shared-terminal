@@ -20,8 +20,12 @@
 #   ./session-image/sync-skills.sh [--pull] [--filter <name-prefix>] [--dry-run]
 #
 #   --pull            git pull this repo first so the canonical source is fresh
-#   --filter PREFIX   only containers whose name starts with PREFIX (default st-)
+#   --filter PREFIX   only containers whose name starts with PREFIX, a literal
+#                     name prefix — not a regex (default st-)
 #   --dry-run         list target containers and the skills, copy nothing
+#
+#   Note: containers whose name contains -smoke- are always excluded (they are
+#   the smoke test's throwaway containers), regardless of --filter.
 #
 # Runs on the Docker host. Requires: docker, tar (git only with --pull).
 # ──────────────────────────────────────────────────────────────────────────────
@@ -86,7 +90,11 @@ if ! ALL_NAMES="$(docker ps --format '{{.Names}}')"; then
 	echo "ERROR: 'docker ps' failed — is the Docker daemon running and reachable?" >&2
 	exit 1
 fi
-CONTAINERS="$(printf '%s\n' "$ALL_NAMES" | grep "^${FILTER}" | grep -v -- '-smoke-' || true)"
+# Treat --filter as the documented LITERAL name prefix, not a regex: escape BRE
+# metacharacters so e.g. a dot matches a literal dot, never any char (which would
+# silently widen the target set). The default `st-` has none, so it is untouched.
+FILTER_RE="$(printf '%s' "$FILTER" | sed 's/[][\.^$*]/\\&/g')"
+CONTAINERS="$(printf '%s\n' "$ALL_NAMES" | grep "^${FILTER_RE}" | grep -v -- '-smoke-' || true)"
 
 if [ -z "$CONTAINERS" ]; then
 	echo "no running session containers matched '${FILTER}*' — nothing to do"
