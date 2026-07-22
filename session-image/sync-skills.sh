@@ -37,7 +37,14 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 	--pull) DO_PULL=1 ;;
 	--filter)
-		FILTER="${2:-}"
+		# guard the value's presence here: a bare trailing --filter would
+		# otherwise leave the loop's end-of-body `shift` with nothing to shift,
+		# which aborts under `set -e` before the friendly check below runs
+		[ $# -ge 2 ] || {
+			echo "ERROR: --filter needs a value" >&2
+			exit 2
+		}
+		FILTER="$2"
 		shift
 		;;
 	--dry-run) DRY_RUN=1 ;;
@@ -78,7 +85,9 @@ if [ -z "$CONTAINERS" ]; then
 	exit 0
 fi
 
-SKILL_NAMES="$(cd "$SKILLS_SRC" && ls -d */ 2>/dev/null | tr -d / | tr '\n' ' ')"
+# `|| true` so a skills dir with no subdirectories (ls -d */ then fails under
+# pipefail) doesn't abort the whole run at this display-only line
+SKILL_NAMES="$(cd "$SKILLS_SRC" && ls -d */ 2>/dev/null | tr -d / | tr '\n' ' ' || true)"
 echo "skills:  ${SKILL_NAMES:-<none>}"
 echo "targets: $(echo "$CONTAINERS" | tr '\n' ' ')"
 
