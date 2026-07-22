@@ -319,8 +319,10 @@ RUN echo "alias claude='claude --dangerously-skip-permissions'" >> /home/develop
 # root-owned and read-only: `developer` reads them at boot but cannot tamper
 # with the canonical source (the persisted ~/.claude/skills copy is theirs to
 # override, and any skill they add under a different name is left untouched).
-# Add a default skill by dropping its folder under session-image/skills/ and
-# rebuilding.
+# Add or update a default skill by dropping its folder under
+# session-image/skills/. Fresh sessions pick it up on the next image build;
+# to push it into sessions that are ALREADY running without a rebuild or
+# restart, run session-image/sync-skills.sh on the Docker host.
 COPY skills/ /opt/session-skills/
 
 # ── tmux config (nice defaults) ──────────────────────────────────────────────
