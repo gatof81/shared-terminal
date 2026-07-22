@@ -78,7 +78,15 @@ fi
 # convention; exclude the smoke test's throwaway `*-smoke-*` containers. Names
 # carry no spaces, so plain word-splitting over the list is safe (and keeps this
 # portable to bash 3.2 — no mapfile).
-CONTAINERS="$(docker ps --format '{{.Names}}' | grep "^${FILTER}" | grep -v -- '-smoke-' || true)"
+#
+# Run `docker ps` on its own line first so its failure (daemon down, no
+# permission) is a hard error — folding it into the grep pipeline with `|| true`
+# would swallow the failure and misreport a broken Docker as "nothing to do".
+if ! ALL_NAMES="$(docker ps --format '{{.Names}}')"; then
+	echo "ERROR: 'docker ps' failed — is the Docker daemon running and reachable?" >&2
+	exit 1
+fi
+CONTAINERS="$(printf '%s\n' "$ALL_NAMES" | grep "^${FILTER}" | grep -v -- '-smoke-' || true)"
 
 if [ -z "$CONTAINERS" ]; then
 	echo "no running session containers matched '${FILTER}*' — nothing to do"
