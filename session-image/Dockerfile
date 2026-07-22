@@ -312,6 +312,17 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 # in explicitly.
 RUN echo "alias claude='claude --dangerously-skip-permissions'" >> /home/developer/.bashrc
 
+# ── Default Claude Code skills ───────────────────────────────────────────────
+# Operator-curated skills baked into the image and materialized by the
+# entrypoint into ~/.claude/skills on every boot (see entrypoint.sh) so every
+# session — every project — discovers them without per-session setup. Left
+# root-owned and read-only: `developer` reads them at boot but cannot tamper
+# with the canonical source (the persisted ~/.claude/skills copy is theirs to
+# override, and any skill they add under a different name is left untouched).
+# Add a default skill by dropping its folder under session-image/skills/ and
+# rebuilding.
+COPY skills/ /opt/session-skills/
+
 # ── tmux config (nice defaults) ──────────────────────────────────────────────
 COPY --chown=developer:developer tmux.conf /home/developer/.tmux.conf
 

@@ -21,7 +21,10 @@
 #      left untouched and does not collide with the CLI state under
 #      .st/claude-state (#377) — including across a recreate;
 #   8. a workspace carrying the interim #371 state layout
-#      (workspace/.claude{,.json}) migrates to .st/ on boot.
+#      (workspace/.claude{,.json}) migrates to .st/ on boot;
+#   9. the image's baked default skills are materialized into
+#      ~/.claude/skills on boot, and the re-seed is idempotent and
+#      leaves a user-added skill untouched (Phases 1 and 5).
 #
 # Phase 6 extracts the wrapper/kill scripts from backend/src/dockerManager.ts
 # via a tsx probe instead of keeping copies here: a copy would drift the day
@@ -99,6 +102,12 @@ if [ "$WARNS" -eq 0 ]; then ok "zero entrypoint WARNs"; else
 	fail "$WARNS entrypoint WARN line(s):"
 	docker logs "$C1" 2>&1 | grep "\[entrypoint\] WARN" >&2
 fi
+# The image's baked default skills are materialized into ~/.claude/skills.
+if docker exec "$C1" bash -c '[ -f /home/developer/.claude/skills/delegate-task/SKILL.md ]'; then
+	ok "default skill delegate-task seeded into ~/.claude/skills"
+else
+	fail "default skill delegate-task not materialized into ~/.claude/skills"
+fi
 
 # ── Phase 2: persistence symlinks ────────────────────────────────────────────
 phase "Phase 2: persistence symlinks"
@@ -147,7 +156,7 @@ fi
 
 # ── Phase 5: state survives container recreate ───────────────────────────────
 phase "Phase 5: recreate on the same workspace"
-docker exec "$C1" bash -c 'mkdir -p ~/.claude && printf smoke-seed > ~/.claude/settings.json && printf smoke-cred > ~/.claude/.credentials.json'
+docker exec "$C1" bash -c 'mkdir -p ~/.claude ~/.claude/skills/user-added && printf smoke-seed > ~/.claude/settings.json && printf smoke-cred > ~/.claude/.credentials.json && printf user-skill > ~/.claude/skills/user-added/SKILL.md'
 docker rm -f "$C1" >/dev/null
 docker run -d --name "$C2" -v "$WS":/home/developer/workspace "$IMAGE" >/dev/null
 wait_ready "$C2" || exit 1
@@ -158,6 +167,13 @@ for f in "settings.json:smoke-seed" ".credentials.json:smoke-cred"; do
 	got=$(docker exec "$C2" cat "/home/developer/.claude/$name" 2>/dev/null)
 	[ "$got" = "$want" ] && ok "~/.claude/$name survived the recreate" || fail "~/.claude/$name = '$got' (want '$want')"
 done
+# The default-skill re-seed is idempotent (default skill still present) and
+# non-clobbering (a skill the user dropped under a different name survives).
+docker exec "$C2" bash -c '[ -f /home/developer/.claude/skills/delegate-task/SKILL.md ]' \
+	&& ok "default skill re-seeded on recreate" || fail "default skill missing after recreate"
+got=$(docker exec "$C2" cat /home/developer/.claude/skills/user-added/SKILL.md 2>/dev/null)
+[ "$got" = "user-skill" ] && ok "user-added skill survived the re-seed (non-clobbering)" \
+	|| fail "user-added skill = '$got' (want 'user-skill') — the re-seed clobbered a user skill"
 
 # ── Phase 6: process-group cancellation (backend's real scripts) ─────────────
 phase "Phase 6: killExecProcessGroup"
