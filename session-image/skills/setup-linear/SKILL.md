@@ -16,6 +16,13 @@ APP_RUN        -> de package.json scripts / README (ej. "npm run dev"); "no apli
 ```
 Reporta al humano que detectaste (una linea por parametro) y pedi confirmacion solo de los ambiguos antes de escribir en Linear.
 
+**Quien escribe en Linear (division de roles):**
+- **Enrique (contenido)** -> **crea los tickets y su contenido**: estructura (labels/milestones/Overview) e issues Delivered y Abiertos con el detail completo. Es el autor principal en Linear — ante duda de contenido, decide Enrique.
+- **Claudia (QA)** -> tambien escribe en Linear, pero acotada a la **evidencia visual**: genera los **screenshots** y los **adjunta** a los issues Delivered/features (los que creo Enrique) y al Overview.
+- Ambos pueden escribir. Si falta alguno de los dos, el que este (o vos) cubre ambos roles.
+
+**Modo — nuevo vs. existente:** lo normal es que `LINEAR_PROJECT` **aun no exista** -> lo creas desde cero. Si el project **ya existe** -> **modo actualizacion**: NO lo recrees ni dupliques; reconcilia lo que haya y **completa/actualiza** lo que falte (labels, milestones, Overview, issues) para dejar el board al dia. En ambos casos rige la Regla de Oro 1 (list-first, idempotente).
+
 **Objetivo:** En el proyecto Linear `LINEAR_PROJECT` construir una base completa de `REPO` que **parezca que se uso Linear desde el dia uno y ahora se sigue trackeando el desarrollo**: historico de todo lo hecho *con el como* + backlog abierto de lo que falta, **reconciliando** lo existente, con **screenshots** de las features. Es un proyecto ya iniciado: tiene ADRs, plan, specs (tipicamente `docs/`) y probablemente issues en GitHub.
 
 **Fase 1 — Entendimiento profundo: cada uno de `ESPECIALISTAS` en su area; el architect sintetiza.**
@@ -25,12 +32,12 @@ Reporta al humano que detectaste (una linea por parametro) y pedi confirmacion s
 - **Otros** -> seguridad/data/infra/docs, cada uno en lo suyo.
 - Reglas: *nunca evalues lo que no abriste*; reconstrui el **git history** mapeando cada increment/fase/feature a sus **PRs y ADRs**; lista los **issues de GitHub** (abiertos y cerrados); **cada afirmacion cita evidencia** (doc seccion, `file:line`, PR#, issue#). **No inventes trabajo.**
 
-**Fase 2 — Estructura en Linear (QA):**
+**Fase 2 — Estructura en Linear (Enrique):**
 - **Labels** (crear si faltan): `type:feature, bug, test, security, ops, docs, review, roadmap`.
 - **Milestones = fases:** `Delivered` / `FASE_ACTUAL` / `Roadmap (Phase 2+)`.
 - **Overview del project:** descripcion retroactiva — que es, estado actual (entregado + deployado), que sigue, que viene, y como se trackea. Que se lea como si Linear se hubiera usado desde el inicio.
 
-**Fase 3 — Issues (con detail desarrollado) + screenshots:**
+**Fase 3 — Issues (con detail desarrollado) + screenshots. Enrique crea los issues y su contenido; Claudia adjunta los screenshots:**
 
 > **REGLA DE DETALLE — obligatoria para TODOS los issues (bug / feature / request / test / chore / delivered). Prohibido el issue de una linea.**
 >
@@ -48,9 +55,9 @@ Reporta al humano que detectaste (una linea por parametro) y pedi confirmacion s
 > - **Evidencia:** screenshot(s) de la feature + `file:line`/doc.
 > - Estado **Done**, milestone `Delivered`.
 
-- **Delivered (historico):** un issue por increment/fase/feature entregada, con la plantilla Delivered.
-- **QA genera screenshots:** con `APP_RUN` levantas la app y con un browser headless (Playwright/Puppeteer, o la tooling del repo) capturas **una pantalla por feature principal**. Guarda los PNG (ej. `docs/screenshots/`) y **adjuntalos al issue Delivered y al Overview**. Si el MCP de Linear no permite subir imagenes, commitea los PNG y linkea la URL.
-- **Abiertos:** un issue por pendiente (bug/test/security/docs/review/roadmap), con la plantilla Abierto.
+- **Delivered (historico) — Enrique:** un issue por increment/fase/feature entregada, con la plantilla Delivered.
+- **Claudia (QA) genera y adjunta screenshots:** con `APP_RUN` levanta la app y con un browser headless (Playwright/Puppeteer, o la tooling del repo) captura **una pantalla por feature principal**. Guarda los PNG (ej. `docs/screenshots/`) y **los adjunta al issue Delivered/feature (el que creo Enrique) y al Overview**. Si el MCP de Linear no permite subir imagenes, commitea los PNG y linkea la URL.
+- **Abiertos — Enrique:** un issue por pendiente (bug/test/security/docs/review/roadmap), con la plantilla Abierto.
 - **Reconciliar GitHub issues:** mapealos a Linear (o linkealos), sin duplicar.
 
 **REGLAS DE ORO (no negociables):**
@@ -64,7 +71,7 @@ Reporta al humano que detectaste (una linea por parametro) y pedi confirmacion s
 **Nota sobre "desde el principio":** el `createdAt` de Linear es de hoy y **no se puede backdatear**; no intentes falsear fechas. El efecto retroactivo se logra con **Delivered en Done + milestone `Delivered` + Overview + screenshots + detail completo**, no con timestamps.
 
 **Gotchas de acceso:**
-- **Linear headless:** las tools `mcp__linear__*` del QA deben estar **allowlisteadas** en su config (si no, se auto-deniegan sin aprobacion interactiva). **No extraigas tokens OAuth** para saltear permisos; sin allowlist, usa una API key personal (`lin_api_...`).
+- **Linear headless:** las tools `mcp__linear__*` de quien escribe en Linear (**Enrique** y **Claudia**) deben estar **allowlisteadas** en su config (si no, se auto-deniegan sin aprobacion interactiva). **No extraigas tokens OAuth** para saltear permisos; sin allowlist, usa una API key personal (`lin_api_...`).
 - **Screenshots:** requieren app levantable + browser headless; adjuntar a Linear puede necesitar file-upload en el MCP/API (si no, PNG al repo + link).
 
 **Entregable:** project con Overview + milestones(fases) + issues Delivered (Done, con el como, detail y screenshots) + backlog abierto reconciliado y con detail — mas un reporte de creado/reconciliado/salteado.
