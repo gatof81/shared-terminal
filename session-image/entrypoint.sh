@@ -412,6 +412,27 @@ if ! ln -sfn "$CLAUDE_JSON_WS" "$CLAUDE_JSON_HOME"; then
              "Claude onboarding/project state won't persist across restarts." >&2
 fi
 
+# Seed the image's baked default skills into the persisted ~/.claude/skills
+# (i.e. $CLAUDE_STATE_WS/skills, reached through the symlink just established)
+# so every session — every project — discovers the operator-curated skills
+# with no per-session setup. See the "Default Claude Code skills" block in the
+# Dockerfile for the source.
+#
+# Idempotent per boot: it refreshes the managed skills from the image and
+# leaves any OTHER skill untouched — one a user added, or the bootstrap
+# agentSeed wrote, under a different name, is not clobbered (cp merges, never
+# wipes the tree). `cp -r`, not `cp -a`: the source is root-owned and the
+# session runs as `developer`, so preserving ownership would fail; the copy
+# lands developer-owned (theirs to override) with default modes, which is what
+# we want. A WARN, not a hard failure — a session missing the default skills
+# still works; the operator just loses the shared helpers.
+if [ -d /opt/session-skills ]; then
+        if ! { mkdir -p "$CLAUDE_STATE_WS/skills" && cp -r /opt/session-skills/. "$CLAUDE_STATE_WS/skills/"; }; then
+                echo "[entrypoint] WARN: couldn't seed default skills into ~/.claude/skills; " \
+                     "sessions will start without the operator-curated skills." >&2
+        fi
+fi
+
 # Persist SSH client state across container replacement.
 #
 # ~/.ssh holds the user's private keys, known_hosts, and config. Like
