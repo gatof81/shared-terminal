@@ -14,6 +14,7 @@
 import { promises as fs, mkdtempSync } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import express from "express";
@@ -118,6 +119,7 @@ import {
 	IMAGE_PREVIEW_MAX_BYTES,
 	imageMimeFor,
 	MAX_DIR_ENTRIES,
+	PREVIEW_IN_FLIGHT_PER_USER,
 	RAW_IN_FLIGHT_PER_USER,
 	TEXT_PREVIEW_MAX_BYTES,
 } from "./routes/files.js";
@@ -752,37 +754,65 @@ describe("file names that collide with Object.prototype members", () => {
 // ── Concurrency ─────────────────────────────────────────────────────────
 
 describe("in-flight limits", () => {
-	it("429s image streams past the per-user cap and frees slots when clients go away", async () => {
-		// Near the 10 MiB cap so each response can't fit in socket buffers:
-		// a client that never reads keeps its stream (and slot) open.
-		const fh = await fs.open(path.join(SESSION_ROOT, "big.png"), "w");
-		await fh.truncate(IMAGE_PREVIEW_MAX_BYTES);
-		await fh.close();
+	/**
+	 * Open `n` requests whose responses are never drained, over raw TCP:
+	 * read only the first chunk (for the status line), then stop reading
+	 * for good. Unlike Node's http client — which keeps pulling data into
+	 * JS buffers, letting the kernel autotune its receive window up to
+	 * several MiB on loopback — a socket that's never read keeps a small
+	 * receive window, so the server's response stays queued and the slot
+	 * it holds stays taken.
+	 */
+	async function holdUnread(
+		n: number,
+		endpoint: "preview" | "raw",
+		file: string,
+	): Promise<{ statuses: number[]; held: net.Socket[] }> {
 		const { port } = new URL(baseUrl);
-		const held: http.ClientRequest[] = [];
-		const opened = await Promise.all(
+		const held: net.Socket[] = [];
+		const statuses = await Promise.all(
 			Array.from(
-				{ length: RAW_IN_FLIGHT_PER_USER },
+				{ length: n },
 				() =>
 					new Promise<number>((resolve, reject) => {
-						const req = http.get(
-							{
-								host: "127.0.0.1",
-								port,
-								path: `/api/sessions/${SESSION_ID}/fs/raw?path=big.png`,
-								headers: { "x-test-user": OWNER },
-							},
-							(res) => {
-								res.pause(); // never drain → backpressure holds the slot
-								resolve(res.statusCode ?? 0);
-							},
-						);
-						req.on("error", reject);
-						held.push(req);
+						const sock = net.connect(Number(port), "127.0.0.1", () => {
+							sock.write(
+								`GET /api/sessions/${SESSION_ID}/fs/${endpoint}?path=${file} HTTP/1.1\r\n` +
+									`Host: 127.0.0.1\r\nx-test-user: ${OWNER}\r\n\r\n`,
+							);
+						});
+						sock.once("data", (chunk) => {
+							sock.pause(); // never read again
+							resolve(Number(/^HTTP\/1\.1 (\d{3})/.exec(chunk.toString("latin1"))?.[1] ?? 0));
+						});
+						sock.on("error", reject);
+						held.push(sock);
 					}),
 			),
 		);
-		expect(opened).toEqual(Array(RAW_IN_FLIGHT_PER_USER).fill(200));
+		return { statuses, held };
+	}
+
+	/** Poll until `probe` stops answering 429 (slots freed). ~4 s ceiling:
+	 *  socket-close delivery can lag on a loaded CI runner. */
+	async function waitForSlot(probe: () => Promise<Response>): Promise<number> {
+		let status = 0;
+		for (let i = 0; i < 200 && (status === 0 || status === 429); i++) {
+			await new Promise((r) => setTimeout(r, 20));
+			const res = await probe();
+			status = res.status;
+			await res.arrayBuffer();
+		}
+		return status;
+	}
+
+	it("429s image streams past the per-user cap and frees slots when clients go away", async () => {
+		// Near the 10 MiB cap so each response can't fit in socket buffers.
+		const fh = await fs.open(path.join(SESSION_ROOT, "big.png"), "w");
+		await fh.truncate(IMAGE_PREVIEW_MAX_BYTES);
+		await fh.close();
+		const { statuses, held } = await holdUnread(RAW_IN_FLIGHT_PER_USER, "raw", "big.png");
+		expect(statuses).toEqual(Array(RAW_IN_FLIGHT_PER_USER).fill(200));
 
 		const busy = await call("raw", { path: "logo.png" });
 		expect(busy.status).toBe(429);
@@ -795,15 +825,39 @@ describe("in-flight limits", () => {
 		).toBe(200);
 
 		for (const req of held) req.destroy();
-		// Slots are released once the server notices the aborted sockets.
-		let status = 0;
-		for (let i = 0; i < 50 && status !== 200; i++) {
-			await new Promise((r) => setTimeout(r, 20));
-			const res = await call("raw", { path: "logo.png" });
-			status = res.status;
-			await res.arrayBuffer();
+		expect(await waitForSlot(() => call("raw", { path: "logo.png" }))).toBe(200);
+	});
+
+	it("holds text-preview slots until the response is actually sent, not just queued", async () => {
+		// 1 MiB of \x01: valid UTF-8 text with no NUL, so it previews as
+		// text — and JSON-escapes to "\u0001" (6 bytes each), a ~6 MiB body
+		// that can't fit in socket buffers. A non-draining client keeps it
+		// queued; the slot must stay taken the whole time.
+		await fs.writeFile(
+			path.join(SESSION_ROOT, "wide.txt"),
+			Buffer.alloc(TEXT_PREVIEW_MAX_BYTES, 1),
+		);
+		const { statuses, held } = await holdUnread(PREVIEW_IN_FLIGHT_PER_USER, "preview", "wide.txt");
+		expect(statuses).toEqual(Array(PREVIEW_IN_FLIGHT_PER_USER).fill(200));
+		// Give the handlers time to return: with the old `finally` release
+		// the slots would be free by now even though the bodies aren't sent.
+		await new Promise((r) => setTimeout(r, 100));
+
+		const busy = await call("preview", { path: "README.md" });
+		expect(busy.status).toBe(429);
+
+		for (const req of held) req.destroy();
+		expect(await waitForSlot(() => call("preview", { path: "README.md" }))).toBe(200);
+	});
+
+	it("releases the preview slot on error responses too", async () => {
+		// More error responses than slots: if any error path leaked its
+		// slot, a later request would 429.
+		for (let i = 0; i < PREVIEW_IN_FLIGHT_PER_USER * 3; i++) {
+			expect((await call("preview", { path: "missing.txt" })).status).toBe(404);
+			expect((await call("preview", { path: ".env" })).status).toBe(403);
 		}
-		expect(status).toBe(200);
+		expect((await call("preview", { path: "README.md" })).status).toBe(200);
 	});
 
 	it("streams images with an exact Content-Length", async () => {

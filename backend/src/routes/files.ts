@@ -134,6 +134,24 @@ export const PREVIEW_IN_FLIGHT_TOTAL = 16;
 export const RAW_IN_FLIGHT_PER_USER = 4;
 export const RAW_IN_FLIGHT_TOTAL = 32;
 
+/**
+ * Take a slot and hold it until the RESPONSE is done — `finish` (last byte
+ * handed to the OS) or `close` (client went away / socket destroyed),
+ * whichever fires; release is idempotent. Not until the handler returns:
+ * `res.json(body)` only queues a 1 MiB+ body, and a client that doesn't
+ * drain keeps it in memory long after the handler is gone, so releasing
+ * in a `finally` would let the same user stack up unbounded pending
+ * responses. Error paths (4xx/5xx JSON) also end in finish/close, so
+ * every early return is covered without a per-branch release.
+ */
+function holdSlotUntilResponseEnds(slots: InFlightLimiter, userId: string, res: Response): boolean {
+	const release = slots.tryAcquire(userId);
+	if (release === null) return false;
+	res.once("finish", release);
+	res.once("close", release);
+	return true;
+}
+
 function sendBusy(res: Response): void {
 	res.setHeader("Retry-After", "1");
 	res.status(429).json({ error: "Too many file previews in progress, try again shortly" });
@@ -196,11 +214,9 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 				sendFsError(res, rel);
 				return;
 			}
-			let release: (() => void) | null = null;
 			try {
 				await assertOwnedByOr404(sessions, req.params.id, userId);
-				release = previewSlots.tryAcquire(userId);
-				if (release === null) {
+				if (!holdSlotUntilResponseEnds(previewSlots, userId, res)) {
 					sendBusy(res);
 					return;
 				}
@@ -246,8 +262,6 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 				res.json(body);
 			} catch (err) {
 				handleSessionError(err, res);
-			} finally {
-				release?.();
 			}
 		},
 	);
@@ -265,7 +279,6 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 				sendFsError(res, rel);
 				return;
 			}
-			let release: (() => void) | null = null;
 			try {
 				await assertOwnedByOr404(sessions, req.params.id, userId);
 				const mime = imageMimeFor(rel);
@@ -274,8 +287,7 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 					return;
 				}
 				// Slot BEFORE the open so a burst can't even hold fds.
-				release = rawSlots.tryAcquire(userId);
-				if (release === null) {
+				if (!holdSlotUntilResponseEnds(rawSlots, userId, res)) {
 					sendBusy(res);
 					return;
 				}
@@ -334,8 +346,6 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 				}
 			} catch (err) {
 				handleSessionError(err, res);
-			} finally {
-				release?.();
 			}
 		},
 	);

@@ -202,6 +202,36 @@ describe("renderMarkdown — complexity", () => {
 		expect((root.textContent ?? "").length).toBeGreaterThan(0);
 	});
 
+	it("doesn't let a wide header × bare rows multiply into a DOM bomb (review repro)", () => {
+		// 30 KB of input that used to expand to ~100M cells.
+		const src = `${"|".repeat(10_000)}\n-\n${"|\n".repeat(10_000)}`;
+		const t = performance.now();
+		const root = renderMarkdown(src);
+		expect(performance.now() - t).toBeLessThan(1500);
+		expect(root.querySelectorAll("*").length).toBeLessThan(60_000);
+		// 10k columns is over MAX_TABLE_COLUMNS: not rendered as a table.
+		expect(root.querySelector("table")).toBeNull();
+	});
+
+	it("bounds rows of missing cells at the column cap too", () => {
+		const header = `|${"h|".repeat(64)}`;
+		const sep = `|${"-|".repeat(64)}`;
+		const src = `${header}\n${sep}\n${"|\n".repeat(40_000)}`;
+		const t = performance.now();
+		const root = renderMarkdown(src);
+		expect(performance.now() - t).toBeLessThan(1500);
+		expect(root.querySelectorAll("*").length).toBeLessThan(60_000);
+	});
+
+	it("still renders a legitimately dense table", () => {
+		const cols = 64;
+		const row = (c: string) => `|${Array.from({ length: cols }, () => c).join("|")}|`;
+		const src = [row("h"), row("-"), ...Array.from({ length: 100 }, () => row("a"))].join("\n");
+		const root = renderMarkdown(src);
+		expect(root.classList.contains("md-fallback")).toBe(false);
+		expect(root.querySelectorAll("td")).toHaveLength(cols * 100);
+	});
+
 	it("caps inline nesting depth and renders the rest as text", () => {
 		const root = render(`${"[".repeat(30)}x${"](y)".repeat(30)}`);
 		expect(root.querySelectorAll("a").length).toBeLessThanOrEqual(9);
@@ -232,6 +262,13 @@ describe("renderMarkdown — delimiter semantics after the linear rewrite", () =
 	])("%s", (src, selector, text) => {
 		const root = render(src);
 		expect(root.querySelector(selector)?.textContent).toContain(text);
+	});
+
+	it("renders a row's missing cells as one spanning cell", () => {
+		const root = render("| a | b | c |\n|---|---|---|\n| 1 |");
+		const tds = root.querySelectorAll<HTMLTableCellElement>("tbody td");
+		expect(tds).toHaveLength(2);
+		expect(tds[1]?.colSpan).toBe(2);
 	});
 
 	it("leaves unmatched delimiters as literal text", () => {

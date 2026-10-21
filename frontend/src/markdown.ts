@@ -77,11 +77,23 @@ export function slugify(text: string): string {
 
 // ── Inline ──────────────────────────────────────────────────────────────────
 
+// Every element the renderer creates goes through `el`, which is what
+// makes this cap complete: block structures (table rows/cells, list
+// items, quotes) count exactly like inline ones, so no construct can
+// multiply small input into unbounded DOM without hitting it. A real
+// 256 KiB document creates ~5k elements; past the cap the document falls
+// back to plain text.
+const MAX_ELEMENTS = 50_000;
+let docElements = 0;
+
 function el<K extends keyof HTMLElementTagNameMap>(
 	tag: K,
 	className?: string,
 	text?: string,
 ): HTMLElementTagNameMap[K] {
+	if (docBudget !== null && ++docElements > MAX_ELEMENTS) {
+		throw new MarkdownBudgetError("too many elements");
+	}
 	const node = document.createElement(tag);
 	if (className) node.className = className;
 	if (text !== undefined) node.textContent = text;
@@ -122,8 +134,6 @@ function spend(budget: Budget, n: number): void {
 // renders as literal text. Bounds both stack depth and the re-indexing
 // cost of nested runs (each level indexes its own slice once).
 const MAX_INLINE_DEPTH = 8;
-
-const ELEMENT_COST = 1000;
 
 interface InlineCtx {
 	opts: MarkdownOptions;
@@ -324,13 +334,26 @@ const AUTOLINK = /<((?:https?:\/\/|mailto:)[^\s<>]+)>/y;
 
 /** Inline Markdown → DOM nodes. Exported for tests. */
 export function renderInline(src: string, opts: MarkdownOptions = {}): Node[] {
-	return renderInlineCtx(src, { opts, budget: { left: inlineBudgetFor(src) }, depth: 0 });
+	return withDocBudget(src, () => inline(src, opts));
 }
 
-// Budget for the document being rendered by renderMarkdown (null outside
-// a render). Module-level because rendering is synchronous and the block
-// functions would otherwise all need it threaded through.
+// Work budget + element count for the render in progress (null / 0
+// outside one). Module-level because rendering is synchronous and every
+// block function would otherwise need them threaded through.
 let docBudget: Budget | null = null;
+
+/** Run `fn` with a fresh document budget unless one is already active. */
+function withDocBudget<T>(src: string, fn: () => T): T {
+	if (docBudget !== null) return fn();
+	docBudget = { left: inlineBudgetFor(src) };
+	docElements = 0;
+	try {
+		return fn();
+	} finally {
+		docBudget = null;
+		docElements = 0;
+	}
+}
 
 /** Inline render from block context: spends from the document budget. */
 function inline(src: string, opts: MarkdownOptions): Node[] {
@@ -363,12 +386,6 @@ function renderInlineCtx(src: string, ctx: InlineCtx): Node[] {
 		text = "";
 	};
 	const push = (node: Node) => {
-		// Elements are what's expensive downstream (layout, memory), so
-		// they cost far more than a character: a document that explodes
-		// into far more elements than its size warrants (deeply
-		// interleaved emphasis) exhausts the budget and falls back to
-		// plain text. A real 256 KiB doc creates ~5k; this allows ~25k.
-		spend(ctx.budget, ELEMENT_COST);
 		flush();
 		out.push(node);
 	};
@@ -620,6 +637,10 @@ function startsBlock(line: string): boolean {
 // stack; past this depth content renders as plain paragraphs.
 const MAX_NESTING = 12;
 
+// Wider "tables" render as paragraphs: nothing real has 65+ columns, and
+// the header width multiplies into every row's layout.
+const MAX_TABLE_COLUMNS = 64;
+
 function renderBlocks(lines: string[], opts: MarkdownOptions, depth: number, into: Node): void {
 	let i = 0;
 	while (i < lines.length) {
@@ -697,7 +718,12 @@ function renderBlocks(lines: string[], opts: MarkdownOptions, depth: number, int
 		}
 
 		const next = lines[i + 1];
-		if (line.includes("|") && next !== undefined && isTableSep(next)) {
+		if (
+			line.includes("|") &&
+			next !== undefined &&
+			isTableSep(next) &&
+			splitTableRow(line).length <= MAX_TABLE_COLUMNS
+		) {
 			i = renderTable(lines, i, opts, into);
 			continue;
 		}
@@ -867,11 +893,21 @@ function renderTable(lines: string[], start: number, opts: MarkdownOptions, into
 	while (i < lines.length && !isBlank(lines[i] as string) && (lines[i] as string).includes("|")) {
 		const cells = splitTableRow(lines[i] as string);
 		const tr = el("tr");
-		for (let idx = 0; idx < header.length; idx++) {
+		// Only cells the row actually has; the missing tail is ONE cell
+		// spanning it. Padding each row out to the header width made a
+		// wide header × many bare `|` lines a multiplicative DOM bomb
+		// (10k columns × 10k rows from 30 KB of input).
+		const present = Math.min(cells.length, header.length);
+		for (let idx = 0; idx < present; idx++) {
 			const td = el("td");
 			if (aligns[idx]) td.style.textAlign = aligns[idx] as string;
-			appendAll(td, inline(cells[idx] ?? "", opts));
+			appendAll(td, inline(cells[idx] as string, opts));
 			tr.appendChild(td);
+		}
+		if (present < header.length) {
+			const filler = el("td");
+			filler.colSpan = header.length - present;
+			tr.appendChild(filler);
 		}
 		tbody.appendChild(tr);
 		i++;
@@ -892,14 +928,14 @@ export function renderMarkdown(src: string, opts: MarkdownOptions = {}): HTMLEle
 		root.appendChild(renderCodeBlock(fm[1] as string, "yaml"));
 		body = body.slice(fm[0].length);
 	}
-	docBudget = { left: inlineBudgetFor(body) };
 	try {
-		renderBlocks(body.split("\n"), opts, 0, root);
+		withDocBudget(body, () => renderBlocks(body.split("\n"), opts, 0, root));
 	} catch (err) {
 		// RangeError = engine stack/size limit: same "too complex" answer.
 		if (!(err instanceof MarkdownBudgetError) && !(err instanceof RangeError)) throw err;
 		// Pathological input: show it as plain text instead of freezing
-		// the UI thread (and the terminal with it).
+		// the UI thread (and the terminal with it). withDocBudget has
+		// already cleared the budget, so these few elements aren't capped.
 		const fallback = el("div", "md-root md-fallback");
 		fallback.appendChild(
 			el("p", "md-fallback-note", "This document is too complex to render — showing plain text."),
@@ -908,8 +944,6 @@ export function renderMarkdown(src: string, opts: MarkdownOptions = {}): HTMLEle
 		pre.textContent = src;
 		fallback.appendChild(pre);
 		return fallback;
-	} finally {
-		docBudget = null;
 	}
 	return root;
 }
