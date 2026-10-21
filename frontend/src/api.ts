@@ -1375,6 +1375,87 @@ export async function downloadSessionFile(
 	return { blob: await res.blob(), filename };
 }
 
+// ── Workspace Explorer (read-only) ─────────────────────────────────────────
+
+export interface WorkspaceEntry {
+	name: string;
+	type: "dir" | "file" | "symlink" | "other";
+	size: number | null;
+	mtime: string | null;
+	/** Credential-bearing path the backend refuses to serve. */
+	restricted: boolean;
+}
+
+export interface WorkspaceListing {
+	path: string;
+	entries: WorkspaceEntry[];
+	truncated: boolean;
+}
+
+interface PreviewBase {
+	path: string;
+	name: string;
+	size: number;
+	mtime: string;
+}
+
+export type WorkspacePreview =
+	| (PreviewBase & { kind: "text"; content: string; truncated: boolean })
+	| (PreviewBase & { kind: "image"; mime: string })
+	| (PreviewBase & { kind: "binary"; reason: "binary" | "too-large" });
+
+/** Carries the HTTP status so the Explorer can render 403-restricted and
+ *  404-gone states differently from generic failures. */
+export class WorkspaceFsError extends Error {
+	constructor(
+		message: string,
+		readonly status: number,
+	) {
+		super(message);
+		this.name = "WorkspaceFsError";
+	}
+}
+
+async function workspaceFsFetch(
+	sessionId: string,
+	endpoint: string,
+	relPath: string,
+): Promise<Response> {
+	const res = await apiFetch(
+		`/sessions/${encodeURIComponent(sessionId)}/fs/${endpoint}?path=${encodeURIComponent(relPath)}`,
+	);
+	if (!res.ok) {
+		const body = await res.json().catch(() => ({}));
+		throw new WorkspaceFsError(body.error ?? `Request failed (${res.status})`, res.status);
+	}
+	return res;
+}
+
+export async function listWorkspaceDir(
+	sessionId: string,
+	relPath: string,
+): Promise<WorkspaceListing> {
+	return (await workspaceFsFetch(sessionId, "list", relPath)).json();
+}
+
+export async function previewWorkspaceFile(
+	sessionId: string,
+	relPath: string,
+): Promise<WorkspacePreview> {
+	return (await workspaceFsFetch(sessionId, "preview", relPath)).json();
+}
+
+/** Image bytes for an inline preview. The Blob is re-typed with the mime
+ *  the preview endpoint reported so `<img>` never has to sniff. */
+export async function fetchWorkspaceImage(
+	sessionId: string,
+	relPath: string,
+	mime: string,
+): Promise<Blob> {
+	const res = await workspaceFsFetch(sessionId, "raw", relPath);
+	return new Blob([await res.arrayBuffer()], { type: mime });
+}
+
 // ── Fetch wrapper ───────────────────────────────────────────────────────────
 
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {

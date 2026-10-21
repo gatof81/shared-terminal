@@ -10,6 +10,7 @@
 import { downloadSessionFile, uploadSessionFiles } from "./api.js";
 import { activeSessionId, getActiveTerminal, showToast } from "./main.js";
 import { runPasteFlow } from "./paste.js";
+import { saveBlob } from "./saveBlob.js";
 
 // ── DOM (re-queried locally; see header) ─────────────────────────────────
 const actionsBtn = document.getElementById("actions-btn") as HTMLButtonElement;
@@ -97,11 +98,8 @@ actionsSelectBtn.addEventListener("click", () => {
 });
 
 // ── File download flow (#358) ───────────────────────────────────────────────
-// v1 UX is a prompt() for the workspace-relative path — no file browser
-// yet. The blob → object-URL → synthetic <a download> dance is what makes
-// the browser treat the credentialed fetch result as a "save file" gesture;
-// see downloadSessionFile in api.ts for why fetch+blob beats a plain <a>
-// navigation to the API origin.
+// Quick prompt() for a workspace-relative path; the Files view (Workspace
+// Explorer) is the browse-and-click alternative. Both save via saveBlob.
 
 let downloadInFlight = false;
 
@@ -125,17 +123,7 @@ actionsDownloadBtn.addEventListener("click", async () => {
 	try {
 		showToast(`Downloading ${relPath}…`);
 		const { blob, filename } = await downloadSessionFile(sessionId, relPath);
-		const url = URL.createObjectURL(blob);
-		const a = document.createElement("a");
-		a.href = url;
-		a.download = filename;
-		document.body.appendChild(a);
-		a.click();
-		a.remove();
-		// Revoke on a delay, not immediately — the click only ENQUEUES the
-		// save; revoking synchronously races the browser's read of the
-		// object URL and can yield an empty download on slower devices.
-		setTimeout(() => URL.revokeObjectURL(url), 30_000);
+		saveBlob(blob, filename);
 		showToast(`Downloaded ${filename}`);
 	} catch (err) {
 		showToast(`Download failed: ${(err as Error).message}`, true);

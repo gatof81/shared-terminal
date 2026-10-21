@@ -23,6 +23,7 @@ import {
 	TabNotFoundError,
 } from "./api.js";
 import { parseSessionHash, reflectSessionInHash } from "./deepLink.js";
+import { showFilesOnly, syncFilesView } from "./filesView.js";
 import { formatBytes, formatCpuCores, formatCpuPercent } from "./format.js";
 import { transformKeyInput } from "./keyBar.js";
 import {
@@ -60,6 +61,11 @@ const terminalTabs = document.getElementById("terminal-tabs")!;
 const terminalContainer = document.getElementById("terminal-container")!;
 const emptyState = document.getElementById("empty-state")!;
 
+// Session currently open in Files-only mode (it wasn't running when
+// selected, so no tabs were listed and no terminal attached). Watched by
+// refreshSessions so a later start re-opens it with a live terminal.
+let filesOnlySessionId: string | null = null;
+
 // ── Session management ──────────────────────────────────────────────────────
 
 export async function refreshSessions() {
@@ -73,9 +79,22 @@ export async function refreshSessions() {
 			sessions.map((s) => ({ id: s.sessionId.slice(0, 8), name: s.name, status: s.status })),
 		);
 		renderSessionList();
+		reattachIfStarted();
 	} catch (err) {
 		showToast((err as Error).message, true);
 	}
+}
+
+/** A Files-only session that is now running gets a real open (tabs +
+ *  terminal attach). The Files view keeps its state — same session id. */
+function reattachIfStarted(): void {
+	if (filesOnlySessionId === null || filesOnlySessionId !== activeSessionId) return;
+	const s = sessions.find((x) => x.sessionId === filesOnlySessionId);
+	if (s?.status !== "running") return;
+	const id = filesOnlySessionId;
+	filesOnlySessionId = null;
+	setActiveSessionId(null);
+	void openSession(id);
 }
 
 export function renderSessionList() {
@@ -230,10 +249,10 @@ export function renderSessionList() {
 
 		// Click to open session
 		item.addEventListener("click", () => {
-			if (s.status === "running") {
+			if (s.status === "running" || s.status === "stopped" || s.status === "terminated") {
+				// Stopped / soft-deleted sessions still have their workspace
+				// on the host, so they open in Files-only mode (openSession).
 				void openSession(s.sessionId);
-			} else if (s.status === "stopped") {
-				showToast("Start the session first", true);
 			} else if (s.status === "failed") {
 				// Failed sessions are unrecoverable via /start (the server
 				// 409s). #274 lets the user inspect the captured bootstrap
@@ -269,6 +288,17 @@ export async function openSession(sessionId: string) {
 	reflectSessionInHash(sessionId);
 	renderSessionList();
 	updateToolbar();
+
+	// Not running → no tmux to list tabs from or attach to, but the
+	// workspace is on the host: open straight into the Files view.
+	// refreshSessions re-opens it properly once the session is started.
+	const meta = sessions.find((x) => x.sessionId === sessionId);
+	if (meta && meta.status !== "running") {
+		filesOnlySessionId = sessionId;
+		showFilesOnly();
+		return;
+	}
+	filesOnlySessionId = null;
 
 	// Capturing `sessionId` guards against a rapid second openSession call
 	// clobbering this one — each `await` re-checks identity.
@@ -419,6 +449,7 @@ export function updateToolbar() {
 		terminalContainer.style.display = "none";
 		emptyState.style.display = "flex";
 		updateChromeToggle();
+		syncFilesView();
 		return;
 	}
 	terminalToolbar.style.display = "flex";
@@ -432,6 +463,7 @@ export function updateToolbar() {
 	// Refresh the mobile header context pill — its label tracks the
 	// active session/tab, and visibility flips on/off here.
 	updateChromeToggle();
+	syncFilesView();
 }
 
 // ── Tabs within the active session ──────────────────────────────────────────

@@ -23,6 +23,7 @@ import {
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerExecRoutes } from "./routes/exec.js";
+import { registerFileRoutes } from "./routes/files.js";
 import { registerGroupRoutes } from "./routes/groups.js";
 import { registerInviteRoutes } from "./routes/invites.js";
 import { registerPushRoutes } from "./routes/push.js";
@@ -122,6 +123,7 @@ export function buildRouter(
 	registerAdminRoutes(router, ctx);
 	registerGroupRoutes(router, ctx);
 	registerSessionRoutes(router, ctx);
+	registerFileRoutes(router, ctx);
 	registerExecRoutes(router, ctx);
 	registerTemplateRoutes(router, ctx);
 

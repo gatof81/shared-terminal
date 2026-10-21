@@ -124,6 +124,17 @@ export interface RateLimitConfig {
 		ipMax: number;
 		ipWindowMs: number;
 	};
+	// Caps Workspace Explorer reads per IP (directory listings, previews,
+	// inline images). Separate from `fileUpload` (which also gates the
+	// full-file download): browsing a tree fires a request per expand /
+	// click, so it needs a much higher ceiling than bulk transfer, while
+	// still bounding how fast one JWT can walk a workspace. Optional so
+	// existing configs (and test fixtures) that predate the Explorer keep
+	// type-checking; absent → DEFAULT_RATE_LIMIT_CONFIG's value.
+	fileBrowse?: {
+		ipMax: number;
+		ipWindowMs: number;
+	};
 }
 
 // Defaults match issue #10: login 10/15min, register 5/1h, per-username 10/15min.
@@ -132,6 +143,13 @@ export interface RateLimitConfig {
 // generous default — 120/h ≈ 2/min sustained, plenty for a UI that
 // polls when the modal is open. Revoke is 6x mint to cover incident-response
 // bursts (panic-rotate after suspecting JWT theft).
+// 300/min ≈ 5/sec sustained: a user rapidly expanding folders and
+// arrowing through files stays well under it; every hit is an owner-
+// checked, size-bounded host read, so the ceiling is about abuse pacing,
+// not cost. Named so createAuthRateLimiters can fall back to it for
+// configs that omit the optional `fileBrowse` key.
+const DEFAULT_FILE_BROWSE_LIMIT = { ipMax: 300, ipWindowMs: 60 * 1000 };
+
 export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 	login: {
 		ipMax: 10,
@@ -202,6 +220,7 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 		ipMax: 120,
 		ipWindowMs: 60 * 1000,
 	},
+	fileBrowse: DEFAULT_FILE_BROWSE_LIMIT,
 };
 
 // ── IP-based limiters (express-rate-limit) ─────────────────────────────────
@@ -218,6 +237,7 @@ export interface AuthRateLimiters {
 	adminStatsIp: RateLimitRequestHandler;
 	adminActionIp: RateLimitRequestHandler;
 	execIp: RateLimitRequestHandler;
+	fileBrowseIp: RateLimitRequestHandler;
 }
 
 export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
@@ -314,6 +334,14 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		legacyHeaders: false,
 		message: { error: "Too many exec requests from this IP, try again later", scope: "ip" },
 	});
+	const fileBrowseCfg = cfg.fileBrowse ?? DEFAULT_FILE_BROWSE_LIMIT;
+	const fileBrowseIp = rateLimit({
+		windowMs: fileBrowseCfg.ipWindowMs,
+		limit: fileBrowseCfg.ipMax,
+		standardHeaders: "draft-7",
+		legacyHeaders: false,
+		message: { error: "Too many file-browse requests from this IP, try again later", scope: "ip" },
+	});
 	return {
 		loginIp,
 		registerIp,
@@ -326,6 +354,7 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		adminStatsIp,
 		adminActionIp,
 		execIp,
+		fileBrowseIp,
 	};
 }
 
