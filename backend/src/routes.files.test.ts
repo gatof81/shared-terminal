@@ -114,6 +114,7 @@ vi.mock("./db.js", () => dbStubs);
 
 import type { BootstrapBroadcaster } from "./bootstrap.js";
 import type { DockerManager } from "./dockerManager.js";
+import { InFlightLimiter } from "./inFlightLimiter.js";
 import {
 	decodePreview,
 	IMAGE_PREVIEW_MAX_BYTES,
@@ -848,6 +849,27 @@ describe("in-flight limits", () => {
 
 		for (const req of held) req.destroy();
 		expect(await waitForSlot(() => call("preview", { path: "README.md" }))).toBe(200);
+	});
+
+	it("routes list, preview and raw through a concurrency limiter (429 when full)", async () => {
+		// Deterministic wiring check: with every pool full, all three
+		// endpoints answer 429 before touching the filesystem. (A listing
+		// body is too small to reliably stall on loopback socket buffers,
+		// so hold-until-sent is unit-tested on holdSlotUntilResponseEnds.)
+		const spy = vi.spyOn(InFlightLimiter.prototype, "tryAcquire").mockReturnValue(null);
+		try {
+			for (const [endpoint, p] of [
+				["list", ""],
+				["preview", "README.md"],
+				["raw", "logo.png"],
+			] as const) {
+				const res = await call(endpoint, { path: p });
+				expect(res.status).toBe(429);
+				expect(res.headers.get("retry-after")).toBe("1");
+			}
+		} finally {
+			spy.mockRestore();
+		}
 	});
 
 	it("releases the preview slot on error responses too", async () => {

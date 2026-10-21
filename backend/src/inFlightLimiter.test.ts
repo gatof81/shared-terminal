@@ -1,5 +1,8 @@
+import { EventEmitter } from "node:events";
+import type { Response } from "express";
 import { describe, expect, it } from "vitest";
 import { InFlightLimiter } from "./inFlightLimiter.js";
+import { holdSlotUntilResponseEnds } from "./routes/files.js";
 
 describe("InFlightLimiter", () => {
 	it("caps per key and releases idempotently", () => {
@@ -25,5 +28,32 @@ describe("InFlightLimiter", () => {
 		c?.();
 		expect(l.tryAcquire("d")).not.toBeNull();
 		expect(l.inFlight()).toBe(3);
+	});
+});
+
+describe("holdSlotUntilResponseEnds", () => {
+	const fakeRes = () => new EventEmitter() as unknown as Response & EventEmitter;
+
+	it("holds the slot until the response finishes, not when the handler returns", () => {
+		const l = new InFlightLimiter(1, 10);
+		const res = fakeRes();
+		expect(holdSlotUntilResponseEnds(l, "u1", res)).toBe(true);
+		// Handler returned, body queued (res.json) — still held.
+		expect(l.inFlight("u1")).toBe(1);
+		expect(holdSlotUntilResponseEnds(l, "u1", fakeRes())).toBe(false);
+		res.emit("finish");
+		expect(l.inFlight("u1")).toBe(0);
+		// finish followed by close must not double-release.
+		res.emit("close");
+		expect(l.inFlight()).toBe(0);
+	});
+
+	it("releases when the client goes away before the body is sent", () => {
+		const l = new InFlightLimiter(1, 10);
+		const res = fakeRes();
+		holdSlotUntilResponseEnds(l, "u1", res);
+		res.emit("close");
+		expect(l.inFlight("u1")).toBe(0);
+		expect(holdSlotUntilResponseEnds(l, "u1", fakeRes())).toBe(true);
 	});
 });

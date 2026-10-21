@@ -133,6 +133,10 @@ export const PREVIEW_IN_FLIGHT_PER_USER = 4;
 export const PREVIEW_IN_FLIGHT_TOTAL = 16;
 export const RAW_IN_FLIGHT_PER_USER = 4;
 export const RAW_IN_FLIGHT_TOTAL = 32;
+// Listings: bodies are smaller (≤2000 entries, a few hundred KB) but the
+// tree fires one per expanded folder on refresh, so a bit more headroom.
+export const LIST_IN_FLIGHT_PER_USER = 6;
+export const LIST_IN_FLIGHT_TOTAL = 32;
 
 /**
  * Take a slot and hold it until the RESPONSE is done — `finish` (last byte
@@ -144,7 +148,11 @@ export const RAW_IN_FLIGHT_TOTAL = 32;
  * responses. Error paths (4xx/5xx JSON) also end in finish/close, so
  * every early return is covered without a per-branch release.
  */
-function holdSlotUntilResponseEnds(slots: InFlightLimiter, userId: string, res: Response): boolean {
+export function holdSlotUntilResponseEnds(
+	slots: InFlightLimiter,
+	userId: string,
+	res: Response,
+): boolean {
 	const release = slots.tryAcquire(userId);
 	if (release === null) return false;
 	res.once("finish", release);
@@ -154,7 +162,7 @@ function holdSlotUntilResponseEnds(slots: InFlightLimiter, userId: string, res: 
 
 function sendBusy(res: Response): void {
 	res.setHeader("Retry-After", "1");
-	res.status(429).json({ error: "Too many file previews in progress, try again shortly" });
+	res.status(429).json({ error: "Too many file requests in progress, try again shortly" });
 }
 
 export function registerFileRoutes(router: Router, ctx: RouteContext): void {
@@ -164,6 +172,7 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 	// production builds exactly one router.
 	const previewSlots = new InFlightLimiter(PREVIEW_IN_FLIGHT_PER_USER, PREVIEW_IN_FLIGHT_TOTAL);
 	const rawSlots = new InFlightLimiter(RAW_IN_FLIGHT_PER_USER, RAW_IN_FLIGHT_TOTAL);
+	const listSlots = new InFlightLimiter(LIST_IN_FLIGHT_PER_USER, LIST_IN_FLIGHT_TOTAL);
 
 	// Workspace contents are private and change under the user's feet —
 	// never let a shared cache or the browser's HTTP cache answer for them.
@@ -188,6 +197,13 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 				// missing (see assertOwnedByOr404): a probe learns nothing
 				// about another workspace, not even that the session exists.
 				await assertOwnedByOr404(sessions, req.params.id, userId);
+				// A listing is up to MAX_DIR_ENTRIES lstats plus a JSON body
+				// that, like a preview, sits in memory until the client
+				// drains it — same slot discipline, own pool.
+				if (!holdSlotUntilResponseEnds(listSlots, userId, res)) {
+					sendBusy(res);
+					return;
+				}
 				const result = await listWorkspaceDir(req.params.id, rel, {
 					maxEntries: MAX_DIR_ENTRIES,
 				});
@@ -281,11 +297,6 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 			}
 			try {
 				await assertOwnedByOr404(sessions, req.params.id, userId);
-				const mime = imageMimeFor(rel);
-				if (mime === null) {
-					res.status(415).json({ error: "only image files can be previewed inline" });
-					return;
-				}
 				// Slot BEFORE the open so a burst can't even hold fds.
 				if (!holdSlotUntilResponseEnds(rawSlots, userId, res)) {
 					sendBusy(res);
@@ -296,6 +307,14 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 				});
 				if (!opened.ok) {
 					sendFsError(res, opened);
+					return;
+				}
+				// Type from the resolved leaf name — the same string the
+				// preview route checks — not the raw `?path=`.
+				const mime = imageMimeFor(opened.name);
+				if (mime === null) {
+					await opened.handle.close().catch(() => {});
+					res.status(415).json({ error: "only image files can be previewed inline" });
 					return;
 				}
 				noStore(res);
