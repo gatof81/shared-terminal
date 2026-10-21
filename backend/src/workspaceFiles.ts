@@ -54,6 +54,8 @@ const RESTRICTED_DIR_NAMES = new Set([
 	".kube",
 	".docker",
 	".password-store",
+	// direnv's per-project cache (can hold evaluated env / layouts).
+	".direnv",
 	// `code tunnel` auth tokens (entrypoint symlinks ~/.vscode-cli here).
 	".vscode-cli",
 	// `.git/config` can carry credential-embedded remote URLs and
@@ -72,6 +74,8 @@ const RESTRICTED_DIR_PAIRS: ReadonlyArray<readonly [string, string]> = [
 
 const RESTRICTED_FILE_NAMES = new Set([
 	".env",
+	// direnv: `export API_KEY=…` lines, same secrets as a .env.
+	".envrc",
 	".netrc",
 	"_netrc",
 	".git-credentials",

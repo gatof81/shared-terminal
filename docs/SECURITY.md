@@ -182,7 +182,7 @@ privileges (typically root), so both go through one hardened opener
   even to the owner: `.st/` (Claude OAuth state, transcripts, SSH keys —
   see above), `.ssh/`, `.git/`, `.config/gh/`, `.vscode-cli/`,
   `.aws/`/`.kube/`/`.docker/`/`.gnupg/`, `.env` / `.env.*` (templates
-  like `.env.example` allowed), private-key and keystore extensions,
+  like `.env.example` allowed), `.envrc` / `.direnv/`, private-key and keystore extensions,
   `.netrc` / `.npmrc` / `.git-credentials` and similar. It's a denylist,
   so best-effort: it keeps secrets out of one-click browser
   copy/download/screenshots, it is **not** a sandbox — the owner can

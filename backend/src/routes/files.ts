@@ -147,17 +147,34 @@ export const LIST_IN_FLIGHT_TOTAL = 32;
  * in a `finally` would let the same user stack up unbounded pending
  * responses. Error paths (4xx/5xx JSON) also end in finish/close, so
  * every early return is covered without a per-branch release.
+ *
+ * Returns "gone" WITHOUT acquiring when the response is already over.
+ * Callers run this after awaiting authorization (a D1 round-trip); a
+ * client that disconnects during that await has already fired `close`,
+ * so a listener registered now would never run and the slot would leak
+ * for good — repeated cancels would pin the user (and the global pool)
+ * at 429. Checked synchronously right before acquiring, with no await in
+ * between, so nothing can close the response in the gap.
  */
 export function holdSlotUntilResponseEnds(
 	slots: InFlightLimiter,
 	userId: string,
 	res: Response,
-): boolean {
+): "held" | "busy" | "gone" {
+	if (res.destroyed || res.writableEnded || res.socket?.destroyed) return "gone";
 	const release = slots.tryAcquire(userId);
-	if (release === null) return false;
+	if (release === null) return "busy";
 	res.once("finish", release);
 	res.once("close", release);
-	return true;
+	return "held";
+}
+
+/** Acquire or answer: true = proceed; false = response already handled. */
+function takeSlot(slots: InFlightLimiter, userId: string, res: Response): boolean {
+	const outcome = holdSlotUntilResponseEnds(slots, userId, res);
+	// "gone": the client left — nobody to answer, and no work worth doing.
+	if (outcome === "busy") sendBusy(res);
+	return outcome === "held";
 }
 
 function sendBusy(res: Response): void {
@@ -200,10 +217,7 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 				// A listing is up to MAX_DIR_ENTRIES lstats plus a JSON body
 				// that, like a preview, sits in memory until the client
 				// drains it — same slot discipline, own pool.
-				if (!holdSlotUntilResponseEnds(listSlots, userId, res)) {
-					sendBusy(res);
-					return;
-				}
+				if (!takeSlot(listSlots, userId, res)) return;
 				const result = await listWorkspaceDir(req.params.id, rel, {
 					maxEntries: MAX_DIR_ENTRIES,
 				});
@@ -232,10 +246,7 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 			}
 			try {
 				await assertOwnedByOr404(sessions, req.params.id, userId);
-				if (!holdSlotUntilResponseEnds(previewSlots, userId, res)) {
-					sendBusy(res);
-					return;
-				}
+				if (!takeSlot(previewSlots, userId, res)) return;
 				const opened = await openWorkspaceFile(req.params.id, rel);
 				if (!opened.ok) {
 					sendFsError(res, opened);
@@ -298,10 +309,7 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 			try {
 				await assertOwnedByOr404(sessions, req.params.id, userId);
 				// Slot BEFORE the open so a burst can't even hold fds.
-				if (!holdSlotUntilResponseEnds(rawSlots, userId, res)) {
-					sendBusy(res);
-					return;
-				}
+				if (!takeSlot(rawSlots, userId, res)) return;
 				const opened = await openWorkspaceFile(req.params.id, rel, {
 					maxBytes: IMAGE_PREVIEW_MAX_BYTES,
 				});

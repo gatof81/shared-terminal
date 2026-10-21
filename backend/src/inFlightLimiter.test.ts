@@ -37,10 +37,10 @@ describe("holdSlotUntilResponseEnds", () => {
 	it("holds the slot until the response finishes, not when the handler returns", () => {
 		const l = new InFlightLimiter(1, 10);
 		const res = fakeRes();
-		expect(holdSlotUntilResponseEnds(l, "u1", res)).toBe(true);
+		expect(holdSlotUntilResponseEnds(l, "u1", res)).toBe("held");
 		// Handler returned, body queued (res.json) — still held.
 		expect(l.inFlight("u1")).toBe(1);
-		expect(holdSlotUntilResponseEnds(l, "u1", fakeRes())).toBe(false);
+		expect(holdSlotUntilResponseEnds(l, "u1", fakeRes())).toBe("busy");
 		res.emit("finish");
 		expect(l.inFlight("u1")).toBe(0);
 		// finish followed by close must not double-release.
@@ -54,6 +54,21 @@ describe("holdSlotUntilResponseEnds", () => {
 		holdSlotUntilResponseEnds(l, "u1", res);
 		res.emit("close");
 		expect(l.inFlight("u1")).toBe(0);
-		expect(holdSlotUntilResponseEnds(l, "u1", fakeRes())).toBe(true);
+		expect(holdSlotUntilResponseEnds(l, "u1", fakeRes())).toBe("held");
+	});
+
+	it("doesn't acquire for a response that is already closed (client left during auth)", () => {
+		const l = new InFlightLimiter(1, 10);
+		for (const flag of ["destroyed", "writableEnded"] as const) {
+			const res = fakeRes();
+			Object.assign(res, { [flag]: true });
+			expect(holdSlotUntilResponseEnds(l, "u1", res)).toBe("gone");
+		}
+		const res = fakeRes();
+		Object.assign(res, { socket: { destroyed: true } });
+		expect(holdSlotUntilResponseEnds(l, "u1", res)).toBe("gone");
+		expect(l.inFlight()).toBe(0);
+		// The pool is untouched: the next live request still gets its slot.
+		expect(holdSlotUntilResponseEnds(l, "u1", fakeRes())).toBe("held");
 	});
 });

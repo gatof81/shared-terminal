@@ -872,6 +872,54 @@ describe("in-flight limits", () => {
 		}
 	});
 
+	it.each([
+		"list",
+		"preview",
+		"raw",
+	] as const)("%s: a client that disconnects during authorization leaks no slot", async (endpoint) => {
+		const acquire = vi.spyOn(InFlightLimiter.prototype, "tryAcquire");
+		const { port } = new URL(baseUrl);
+		const file = endpoint === "list" ? "" : endpoint === "raw" ? "logo.png" : "README.md";
+		try {
+			// More cycles than the per-user cap of any pool: one leaked
+			// slot per cycle would pin the user at 429 below.
+			for (let cycle = 0; cycle < 8; cycle++) {
+				let releaseAuth!: () => void;
+				const authStarted = new Promise<void>((started) => {
+					ownedSpy.mockImplementationOnce(async () => {
+						started();
+						await new Promise<void>((r) => {
+							releaseAuth = r;
+						});
+					});
+				});
+				const sock = net.connect(Number(port), "127.0.0.1", () => {
+					sock.write(
+						`GET /api/sessions/${SESSION_ID}/fs/${endpoint}?path=${file} HTTP/1.1\r\n` +
+							`Host: 127.0.0.1\r\nx-test-user: ${OWNER}\r\n\r\n`,
+					);
+				});
+				sock.on("error", () => {});
+				await authStarted; // handler is parked inside the ownership await
+				sock.destroy();
+				// Wait until the server has actually seen the disconnect.
+				for (let i = 0; i < 200; i++) {
+					const open = await new Promise<number>((r) => server?.getConnections((_e, n) => r(n)));
+					if (open === 0) break;
+					await new Promise((r) => setTimeout(r, 5));
+				}
+				releaseAuth();
+				await new Promise((r) => setTimeout(r, 10));
+			}
+			// The handler bailed before acquiring, every time.
+			expect(acquire).not.toHaveBeenCalled();
+			// And the pool really is free.
+			expect((await call(endpoint, { path: file })).status).toBe(200);
+		} finally {
+			acquire.mockRestore();
+		}
+	});
+
 	it("releases the preview slot on error responses too", async () => {
 		// More error responses than slots: if any error path leaked its
 		// slot, a later request would 429.
