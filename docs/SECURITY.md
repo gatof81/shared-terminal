@@ -167,14 +167,17 @@ workspace straight from the host bind mount with the backend's
 privileges (typically root), so both go through one hardened opener
 (`backend/src/workspaceFiles.ts`):
 
-- **Owner-only.** `assertOwnedBy`, not the observe tier: group leads and
-  admins can't read workspace files through these routes (they'd be an
-  unaudited widening of what observe/operate grants).
+- **Owner-only.** Ownership is checked before any filesystem access, not
+  via the observe tier: group leads and admins can't read workspace files
+  through these routes (they'd be an unaudited widening of what
+  observe/operate grants). A foreign session answers the same 404 as a
+  missing one.
 - **Containment.** Lexical resolve + prefix check, realpath of the
   parent, `O_NOFOLLOW | O_NONBLOCK` open, then a re-check of what the
   fd *actually* points at via `/proc/self/fd/<n>` — so a symlink or
   directory swapped in by code inside the container between check and
-  open is still caught. Symlink leaves are never followed.
+  open is still caught (on Linux this check is mandatory; a failure to
+  read the link fails the request). Symlink leaves are never followed.
 - **Restricted paths.** Credential-bearing paths are refused with 403
   even to the owner: `.st/` (Claude OAuth state, transcripts, SSH keys —
   see above), `.ssh/`, `.git/`, `.config/gh/`, `.vscode-cli/`,
@@ -185,9 +188,11 @@ privileges (typically root), so both go through one hardened opener
   copy/download/screenshots, it is **not** a sandbox — the owner can
   still `cat` anything from their terminal.
 - **Bounded reads.** Previews read at most 1 MiB (never the whole file);
-  inline images are capped at 10 MiB and served from an extension
-  allowlist with `nosniff`, `Content-Disposition: attachment`, and a
-  `sandbox` CSP so an SVG can't run script on the API origin.
+  inline images are capped at 10 MiB, streamed with backpressure, and
+  served from an extension allowlist with `nosniff`,
+  `Content-Disposition: attachment`, and a `sandbox` CSP so an SVG can't
+  run script on the API origin. Concurrent previews are capped per user
+  and per process (429 when full), on top of the per-IP rate limits.
 
 ## Optional: docker-socket-proxy
 

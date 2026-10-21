@@ -46,6 +46,7 @@ import {
 	validateRelPathParam,
 } from "../workspaceFiles.js";
 import {
+	assertOwnedByOr404,
 	handleSessionError,
 	type RouteContext,
 	serializeMeta,
@@ -1399,7 +1400,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				// upload route: a foreign-session probe gets its 404
 				// without learning anything about that workspace's
 				// contents (not even file-exists timing).
-				await sessions.assertOwnedBy(req.params.id, userId);
+				await assertOwnedByOr404(sessions, req.params.id, userId);
 				await streamWorkspaceFile(req.params.id, rel, res);
 			} catch (err) {
 				handleSessionError(err, res);

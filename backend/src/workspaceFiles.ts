@@ -19,7 +19,7 @@
  * already run the ownership check for `sessionId`.
  */
 
-import { promises as fs, constants as fsConstants } from "node:fs";
+import { existsSync, promises as fs, constants as fsConstants } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import nodePath from "node:path";
 
@@ -233,20 +233,25 @@ function relUnder(realRoot: string, abs: string): string | null {
 		.join("/");
 }
 
+// Decided once at load: is the `/proc/self/fd` magic-link check available?
+// Deliberately NOT "try it and fall back on any error" — on a host where
+// /proc works, a readlink failure is an anomaly and must fail the request
+// rather than silently skip the last containment check. Only a platform
+// with no /proc at all (macOS dev boxes) runs without it.
+const PROC_FD_AVAILABLE = process.platform === "linux" && existsSync("/proc/self/fd");
+
 /**
  * Where the kernel says an open fd actually points. Linux exposes it as
  * the `/proc/self/fd/<n>` magic link, which is what closes the
  * check-then-open race: whatever symlink games happened on the way in,
- * this names the object we're holding. Returns null where /proc is
- * unavailable (macOS dev boxes) — callers then rely on their pre-open
- * realpath check alone, which is the pre-Explorer download behaviour.
+ * this names the object we're holding. Returns null only where /proc is
+ * unavailable — callers then rely on their pre-open realpath check alone,
+ * which is the pre-Explorer download behaviour. Throws if /proc exists
+ * but the readlink fails (caller closes the fd and answers 500).
  */
 async function fdRealPath(handle: FileHandle): Promise<string | null> {
-	try {
-		return await fs.readlink(`/proc/self/fd/${handle.fd}`);
-	} catch {
-		return null;
-	}
+	if (!PROC_FD_AVAILABLE) return null;
+	return fs.readlink(`/proc/self/fd/${handle.fd}`);
 }
 
 function isErrno(err: unknown, ...codes: string[]): boolean {
@@ -523,24 +528,34 @@ export async function listWorkspaceDir(
 			listedRel = actualRel;
 		}
 
-		const names: string[] = [];
+		// Collect names + dirent types (free: readdir's d_type, no extra
+		// syscall) for up to MAX_DIR_SCAN entries, sort, THEN cut to
+		// `maxEntries` — so a big folder shows its first entries in display
+		// order (dirs first, natural name order) rather than an arbitrary
+		// filesystem-order subset. Only the kept entries get an lstat.
+		// Directories past MAX_DIR_SCAN still see a scan-order subset;
+		// `truncated` is set either way.
+		const scanned: { name: string; isDir: boolean }[] = [];
 		let truncated = false;
 		const dir = await fs.opendir(ioPath);
 		try {
-			// opendir streams entries, so a 1M-entry node_modules/.cache
-			// dir costs `maxEntries` reads, not a full readdir array.
+			// opendir streams entries, so a 1M-entry cache dir costs
+			// MAX_DIR_SCAN reads, not a full readdir array.
 			for await (const dirent of dir) {
-				if (names.length >= opts.maxEntries) {
+				if (scanned.length >= MAX_DIR_SCAN) {
 					truncated = true;
 					break;
 				}
-				names.push(dirent.name);
+				scanned.push({ name: dirent.name, isDir: dirent.isDirectory() });
 			}
 		} finally {
 			// `break` out of for-await already closes the Dir; closing it
 			// again rejects with ERR_DIR_CLOSED, which is fine to drop.
 			await dir.close().catch(() => {});
 		}
+		scanned.sort((a, b) => compareNames(a.name, a.isDir, b.name, b.isDir));
+		if (scanned.length > opts.maxEntries) truncated = true;
+		const names = scanned.slice(0, opts.maxEntries).map((e) => e.name);
 
 		const entries = await Promise.all(
 			names.map(async (name): Promise<WorkspaceEntry> => {
@@ -586,11 +601,17 @@ export async function listWorkspaceDir(
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
+// Upper bound on names read from one directory before sorting. Names only
+// (no stat), so 20k is a few hundred KB of strings at most.
+const MAX_DIR_SCAN = 20_000;
+
+function compareNames(an: string, aDir: boolean, bn: string, bDir: boolean): number {
+	if (aDir !== bDir) return aDir ? -1 : 1;
+	return collator.compare(an, bn) || (an < bn ? -1 : an > bn ? 1 : 0);
+}
+
 function compareEntries(a: WorkspaceEntry, b: WorkspaceEntry): number {
-	const ad = a.type === "dir" ? 0 : 1;
-	const bd = b.type === "dir" ? 0 : 1;
-	if (ad !== bd) return ad - bd;
-	return collator.compare(a.name, b.name) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+	return compareNames(a.name, a.type === "dir", b.name, b.type === "dir");
 }
 
 // ── Response helpers ────────────────────────────────────────────────────────

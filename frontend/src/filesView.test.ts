@@ -90,13 +90,17 @@ beforeAll(async () => {
 	document.body.innerHTML = `
 		<section id="terminal-area">
 			<div id="terminal-toolbar">
+				<button id="font-size-btn"></button>
+				<input id="terminal-search-input" />
+				<button id="terminal-search-btn"></button>
 				<div id="view-switch" hidden>
 					<button id="view-terminal-btn"></button>
 					<button id="view-files-btn"></button>
 				</div>
 			</div>
 			<div id="terminal-tabs"></div>
-			<div id="terminal-container" style="display: block"><div class="tab-pane active" id="pane"></div></div>
+			<div id="terminal-container" style="display: block"><div class="tab-pane active" id="pane"><textarea id="xterm-input"></textarea></div></div>
+			<div id="key-bar"></div>
 			<div id="files-view" hidden>
 				<button id="files-to-terminal-btn"></button>
 				<nav id="files-breadcrumbs"></nav>
@@ -146,6 +150,49 @@ afterEach(() => {
 });
 
 describe("view switching", () => {
+	it("makes the covered terminal inert (not focusable) while Files is shown, and restores it", async () => {
+		selectSession("s1");
+		const covered = ["terminal-tabs", "terminal-container", "key-bar"];
+		const xtermInput = $("xterm-input") as HTMLTextAreaElement;
+		xtermInput.focus();
+		expect(document.activeElement).toBe(xtermInput);
+
+		$("view-files-btn").click();
+		await flush();
+		for (const id of covered) expect($(id).hasAttribute("inert")).toBe(true);
+		// Focus left the terminal; terminal-only toolbar controls are off.
+		expect(document.activeElement).not.toBe(xtermInput);
+		for (const id of ["font-size-btn", "terminal-search-btn", "terminal-search-input"]) {
+			expect(($(id) as HTMLButtonElement).disabled).toBe(true);
+		}
+		// Layout untouched: inert is an attribute, not a display change.
+		expect($("terminal-container").getAttribute("style")).toBe("display: block");
+
+		mainState.focus.mockClear();
+		$("view-terminal-btn").click();
+		for (const id of covered) expect($(id).hasAttribute("inert")).toBe(false);
+		for (const id of ["font-size-btn", "terminal-search-btn", "terminal-search-input"]) {
+			expect(($(id) as HTMLButtonElement).disabled).toBe(false);
+		}
+		// Focus is handed back to the terminal after inert is lifted.
+		expect(mainState.focus).toHaveBeenCalledTimes(1);
+	});
+
+	it("doesn't steal focus back to the terminal on mobile", async () => {
+		mainState.mobile = true;
+		try {
+			selectSession("s1");
+			$("view-files-btn").click();
+			await flush();
+			mainState.focus.mockClear();
+			$("view-terminal-btn").click();
+			expect(mainState.focus).not.toHaveBeenCalled();
+			expect(mainState.setChromeOpen).toHaveBeenCalledWith(false);
+		} finally {
+			mainState.mobile = false;
+		}
+	});
+
 	it("overlays Files without touching the terminal container or panes", async () => {
 		selectSession("s1");
 		const container = $("terminal-container");
@@ -353,6 +400,48 @@ describe("preview", () => {
 		await flush();
 		expect(api.downloadSessionFile).toHaveBeenCalledWith("s1", "blob.bin");
 		expect(saveBlob).toHaveBeenCalled();
+	});
+
+	it("aborts a superseded preview request", async () => {
+		const signals: AbortSignal[] = [];
+		api.previewWorkspaceFile.mockImplementation(
+			(_sid: string, _p: string, signal: AbortSignal) =>
+				new Promise((_resolve, reject) => {
+					signals.push(signal);
+					signal.addEventListener("abort", () => reject(new Error("aborted")));
+				}),
+		);
+		selectSession("s1");
+		$("view-files-btn").click();
+		await flush();
+		rowFor("README.md")?.click();
+		await flush();
+		rowFor("blob.bin")?.click();
+		await flush();
+		expect(signals).toHaveLength(2);
+		expect(signals[0]?.aborted).toBe(true);
+		expect(signals[1]?.aborted).toBe(false);
+		// Selecting a folder aborts the in-flight one too.
+		rowFor("src")?.click();
+		expect(signals[1]?.aborted).toBe(true);
+	});
+
+	it("shows very large Markdown as source instead of rendering it", async () => {
+		await openFile("README.md", {
+			kind: "text",
+			path: "README.md",
+			name: "README.md",
+			...meta,
+			content: `# Big\n\n${"word ".repeat(60_000)}`,
+			truncated: false,
+		});
+		const previewEl = $("files-preview");
+		expect(previewEl.querySelector("h1")).toBeNull();
+		expect(previewEl.textContent).toContain("Too large to render as Markdown");
+		expect([...previewEl.querySelectorAll("button")].some((b) => b.textContent === "Preview")).toBe(
+			false,
+		);
+		expect(previewEl.querySelector(".files-code-body")?.textContent).toContain("# Big");
 	});
 
 	it("explains a 403 from the server as restricted", async () => {

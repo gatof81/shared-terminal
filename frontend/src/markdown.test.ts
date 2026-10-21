@@ -170,3 +170,78 @@ describe("classifyHref / slugify", () => {
 		expect(slugify("API v2 (beta)")).toBe("api-v2-beta");
 	});
 });
+
+describe("renderMarkdown — complexity", () => {
+	// 200k chars: with the old rescan-per-delimiter parser these took tens
+	// of seconds (quadratic); now each is a few dozen ms. The 1.5 s bound
+	// is loose on purpose (slow CI) while still catching a quadratic
+	// regression by orders of magnitude.
+	const N = 200_000;
+	it.each<[string, string]>([
+		["unclosed brackets", "[".repeat(N)],
+		["unclosed brackets with text", "[a ".repeat(N / 3)],
+		["unclosed stars", "*a ".repeat(N / 3)],
+		["unclosed underscores", " _a".repeat(N / 3)],
+		["unclosed tildes", "~~a ".repeat(N / 4)],
+		["unclosed parens after links", "[a](".repeat(N / 4)],
+		[
+			"mixed backtick runs",
+			Array.from({ length: N / 10 }, (_, i) => `${"`".repeat((i % 7) + 1)}x `).join(""),
+		],
+		["deeply nested brackets", `${"[".repeat(N / 2)}${"]".repeat(N / 2)}`],
+		["interleaved emphasis", `${"*_".repeat(N / 4)}x${"_*".repeat(N / 4)}`],
+		["heading padded with spaces", `# ${" ".repeat(N)}x`],
+		["fence padded with spaces", `\`\`\`${" ".repeat(N)}\``],
+		["table separator padded with spaces", `a|b\n-${" ".repeat(N)}x`],
+	])("%s stays fast and loses no text", (_label, src) => {
+		const t = performance.now();
+		const root = renderMarkdown(src);
+		expect(performance.now() - t).toBeLessThan(1500);
+		// Whatever the rendering, the visible text never drops content
+		// characters (markup delimiters aside) — spot-check via length.
+		expect((root.textContent ?? "").length).toBeGreaterThan(0);
+	});
+
+	it("caps inline nesting depth and renders the rest as text", () => {
+		const root = render(`${"[".repeat(30)}x${"](y)".repeat(30)}`);
+		expect(root.querySelectorAll("a").length).toBeLessThanOrEqual(9);
+		expect(root.textContent).toContain("x");
+	});
+
+	it("falls back to plain text when a document explodes into elements", () => {
+		const src = `${"*_".repeat(60_000)}x${"_*".repeat(60_000)}`;
+		const root = renderMarkdown(src);
+		expect(root.classList.contains("md-fallback")).toBe(true);
+		expect(root.querySelector("pre")?.textContent).toBe(src);
+		expect(root.textContent).toContain("too complex");
+	});
+
+	it("doesn't overflow the stack appending huge inline runs", () => {
+		expect(() => renderMarkdown("`a` ".repeat(150_000))).not.toThrow();
+	});
+});
+
+describe("renderMarkdown — delimiter semantics after the linear rewrite", () => {
+	it.each<[string, string, string]>([
+		["**a *b* c**", "strong em", "b"],
+		["*a **b** c*", "em strong", "b"],
+		["***both***", "strong", "both"],
+		["[a `]` b](https://x.example)", "a code", "]"],
+		["`code with [link](x)`", "code", "code with [link](x)"],
+		["~~gone~~ ~single~", "del", "gone"],
+	])("%s", (src, selector, text) => {
+		const root = render(src);
+		expect(root.querySelector(selector)?.textContent).toContain(text);
+	});
+
+	it("leaves unmatched delimiters as literal text", () => {
+		const root = render("a * b [c ( `d ~~e _f");
+		expect(root.textContent).toBe("a * b [c ( `d ~~e _f");
+		expect(root.querySelector("em, strong, a, code, del")).toBeNull();
+	});
+
+	it("keeps headings with a trailing hash in the text (C#)", () => {
+		expect(render("# Learn C#").querySelector("h1")?.textContent).toBe("Learn C#");
+		expect(render("## Title ##").querySelector("h2")?.textContent).toBe("Title");
+	});
+});

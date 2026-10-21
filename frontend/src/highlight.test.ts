@@ -84,3 +84,36 @@ describe("language detection", () => {
 		expect(languageForFence("unknownlang")).toBe("plain");
 	});
 });
+
+describe("names that collide with Object.prototype members", () => {
+	it.each([
+		"a.constructor",
+		"a.__proto__",
+		"a.toString",
+		"a.hasOwnProperty",
+		"constructor",
+		"__proto__",
+	])("languageForFile(%j) is plain and highlights without throwing", (name) => {
+		const lang = languageForFile(name);
+		expect(lang).toBe("plain");
+		expect(() => highlightCode("x = 1", lang)).not.toThrow();
+	});
+
+	it.each([
+		"constructor",
+		"__proto__",
+		"toString",
+		"valueOf",
+	])("languageForFence(%j) is plain", (tag) => {
+		expect(languageForFence(tag)).toBe("plain");
+	});
+
+	it("degrades an unknown language to plain text instead of throwing", () => {
+		const host = document.createElement("div");
+		host.appendChild(
+			highlightCode("const x = 1;", "constructor" as Parameters<typeof highlightCode>[1]),
+		);
+		expect(host.textContent).toBe("const x = 1;");
+		expect(host.querySelector("span")).toBeNull();
+	});
+});

@@ -135,6 +135,15 @@ export interface RateLimitConfig {
 		ipMax: number;
 		ipWindowMs: number;
 	};
+	// Inline image previews (`/fs/raw`), budgeted separately from
+	// browsing so an image-heavy folder can't starve tree navigation (and
+	// vice versa). Concurrency is capped independently in routes/files.ts;
+	// this only paces the request rate. Optional for the same reason as
+	// `fileBrowse`.
+	fileRaw?: {
+		ipMax: number;
+		ipWindowMs: number;
+	};
 }
 
 // Defaults match issue #10: login 10/15min, register 5/1h, per-username 10/15min.
@@ -149,6 +158,9 @@ export interface RateLimitConfig {
 // not cost. Named so createAuthRateLimiters can fall back to it for
 // configs that omit the optional `fileBrowse` key.
 const DEFAULT_FILE_BROWSE_LIMIT = { ipMax: 300, ipWindowMs: 60 * 1000 };
+// 120/min: one per image opened, well above clicking through a folder of
+// screenshots. Peak memory is bounded by the concurrency cap, not this.
+const DEFAULT_FILE_RAW_LIMIT = { ipMax: 120, ipWindowMs: 60 * 1000 };
 
 export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 	login: {
@@ -221,6 +233,7 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 		ipWindowMs: 60 * 1000,
 	},
 	fileBrowse: DEFAULT_FILE_BROWSE_LIMIT,
+	fileRaw: DEFAULT_FILE_RAW_LIMIT,
 };
 
 // ── IP-based limiters (express-rate-limit) ─────────────────────────────────
@@ -238,6 +251,7 @@ export interface AuthRateLimiters {
 	adminActionIp: RateLimitRequestHandler;
 	execIp: RateLimitRequestHandler;
 	fileBrowseIp: RateLimitRequestHandler;
+	fileRawIp: RateLimitRequestHandler;
 }
 
 export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
@@ -342,6 +356,14 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		legacyHeaders: false,
 		message: { error: "Too many file-browse requests from this IP, try again later", scope: "ip" },
 	});
+	const fileRawCfg = cfg.fileRaw ?? DEFAULT_FILE_RAW_LIMIT;
+	const fileRawIp = rateLimit({
+		windowMs: fileRawCfg.ipWindowMs,
+		limit: fileRawCfg.ipMax,
+		standardHeaders: "draft-7",
+		legacyHeaders: false,
+		message: { error: "Too many image previews from this IP, try again later", scope: "ip" },
+	});
 	return {
 		loginIp,
 		registerIp,
@@ -355,6 +377,7 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		adminActionIp,
 		execIp,
 		fileBrowseIp,
+		fileRawIp,
 	};
 }
 

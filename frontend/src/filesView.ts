@@ -60,7 +60,17 @@ import {
 
 // ── DOM ─────────────────────────────────────────────────────────────────────
 const terminalToolbar = document.getElementById("terminal-toolbar")!;
+const terminalTabs = document.getElementById("terminal-tabs")!;
 const terminalContainer = document.getElementById("terminal-container")!;
+const keyBar = document.getElementById("key-bar");
+// Terminal-only toolbar controls, disabled while Files covers the terminal.
+const fontSizeBtn = document.getElementById("font-size-btn") as HTMLButtonElement | null;
+const terminalSearchBtn = document.getElementById(
+	"terminal-search-btn",
+) as HTMLButtonElement | null;
+const terminalSearchInput = document.getElementById(
+	"terminal-search-input",
+) as HTMLInputElement | null;
 const viewSwitch = document.getElementById("view-switch")!;
 const viewTerminalBtn = document.getElementById("view-terminal-btn") as HTMLButtonElement;
 const viewFilesBtn = document.getElementById("view-files-btn") as HTMLButtonElement;
@@ -111,11 +121,17 @@ type PreviewState =
 	  };
 let preview: PreviewState = { status: "none" };
 let previewToken = 0;
+// Aborts the superseded preview/image request when the user moves on, so
+// clicking quickly through files doesn't leave a queue of server-side
+// reads (each holding one of the backend's per-user preview slots).
+let previewAbort: AbortController | null = null;
 
 // Persisted per page-load across files: someone reading docs wants every
 // .md rendered; someone reviewing markup wants source for all of them.
 let markdownMode: "rendered" | "source" = "rendered";
 let jsonPretty = false;
+
+const MARKDOWN_RENDER_MAX_CHARS = 256 * 1024;
 // Mobile is single-pane: tree OR preview.
 let mobilePane: "tree" | "preview" = "tree";
 
@@ -142,17 +158,30 @@ function setView(next: View, opts: { forced?: boolean } = {}): void {
 	}
 	view = next;
 	filesView.hidden = next !== "files";
+	// Covering the terminal visually doesn't stop Tab / Shift+Tab, a
+	// click-through or assistive tech from reaching xterm's hidden
+	// textarea and typing into the session. `inert` removes the covered
+	// subtrees from focus, input and the accessibility tree WITHOUT
+	// touching layout — display/visibility would change the box and make
+	// xterm refit + resize tmux, which the overlay exists to avoid.
+	for (const el of [terminalTabs, terminalContainer, keyBar]) {
+		el?.toggleAttribute("inert", next === "files");
+	}
+	if (fontSizeBtn) fontSizeBtn.disabled = next === "files";
+	if (terminalSearchBtn) terminalSearchBtn.disabled = next === "files";
+	if (terminalSearchInput) terminalSearchInput.disabled = next === "files";
 	if (next === "files") {
-		// A focused xterm under the overlay would keep swallowing keys
-		// typed while the user is in Files (and on mobile keep the soft
-		// keyboard up). Blur only — the terminal itself is untouched.
+		// inert also blurs a focused descendant in browsers; the explicit
+		// blur covers engines that don't (and jsdom). Also drops the
+		// mobile soft keyboard. The terminal itself is untouched.
 		const active = document.activeElement;
 		if (active instanceof HTMLElement && terminalContainer.contains(active)) active.blur();
 		positionOverlay();
 		if (stateSessionId !== null && !dirs.has("")) void loadDir("");
 		renderAll();
 	} else if (!isMobile()) {
-		// Desktop: hand the keyboard straight back. Mobile skips this —
+		// Desktop: hand the keyboard straight back (inert is already off
+		// above, so the focus lands). Mobile skips this —
 		// focusing xterm pops the soft keyboard, which the user didn't ask
 		// for by tapping "Terminal".
 		getActiveTerminal()?.focus();
@@ -215,6 +244,8 @@ export function showFilesOnly(): void {
 
 function resetState(sessionId: string | null): void {
 	generation++;
+	previewAbort?.abort();
+	previewAbort = null;
 	stateSessionId = sessionId;
 	dirs.clear();
 	expanded.clear();
@@ -262,6 +293,8 @@ async function loadDir(path: string): Promise<void> {
 /** Drop the preview and invalidate any in-flight preview request. */
 function clearPreview(): void {
 	previewToken++;
+	previewAbort?.abort();
+	previewAbort = null;
 	setPreview({ status: "none" });
 }
 
@@ -276,12 +309,16 @@ async function openPreview(path: string): Promise<void> {
 	const sessionId = stateSessionId;
 	if (sessionId === null) return;
 	const token = ++previewToken;
+	previewAbort?.abort();
+	const abort = new AbortController();
+	previewAbort = abort;
+	const { signal } = abort;
 	const stale = () => token !== previewToken || sessionId !== stateSessionId;
 	setPreview({ status: "loading", path });
 	renderPreview();
 	let data: WorkspacePreview;
 	try {
-		data = await previewWorkspaceFile(sessionId, path);
+		data = await previewWorkspaceFile(sessionId, path, signal);
 	} catch (err) {
 		if (stale()) return;
 		const httpStatus = err instanceof WorkspaceFsError ? err.status : 0;
@@ -294,7 +331,7 @@ async function openPreview(path: string): Promise<void> {
 	renderPreview();
 	if (data.kind === "image") {
 		try {
-			const blob = await fetchWorkspaceImage(sessionId, path, data.mime);
+			const blob = await fetchWorkspaceImage(sessionId, path, data.mime, signal);
 			if (stale()) return;
 			setPreview({
 				status: "loaded",
@@ -817,9 +854,14 @@ function renderPreview(): void {
 	// Text.
 	const actions: HTMLElement[] = [];
 	const md = isMarkdown(name);
+	// Rendering builds DOM synchronously on the thread that also drives
+	// the terminal; past this size, show highlighted source instead (the
+	// renderer is linear and budgeted, but 1 MiB of prose is still a lot
+	// of layout for little benefit).
+	const mdRenderable = md && data.content.length <= MARKDOWN_RENDER_MAX_CHARS;
 	const pretty =
 		name.toLowerCase().endsWith(".json") && !data.truncated ? prettyJson(data.content) : null;
-	if (md) {
+	if (mdRenderable) {
 		const seg = el("div", "files-seg");
 		seg.setAttribute("role", "group");
 		seg.setAttribute("aria-label", "Markdown view");
@@ -872,12 +914,17 @@ function renderPreview(): void {
 			),
 		);
 	}
+	if (md && !mdRenderable) {
+		previewEl.appendChild(
+			el("div", "files-banner", "Too large to render as Markdown — showing the source."),
+		);
+	}
 	if (content.length === 0) {
 		previewEl.appendChild(stateBox("empty", "This file is empty."));
 		return;
 	}
 	const scroller = el("div", "files-preview-scroll");
-	if (md && markdownMode === "rendered") {
+	if (mdRenderable && markdownMode === "rendered") {
 		scroller.classList.add("markdown");
 		scroller.appendChild(
 			renderMarkdown(content, {

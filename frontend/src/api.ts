@@ -1420,9 +1420,11 @@ async function workspaceFsFetch(
 	sessionId: string,
 	endpoint: string,
 	relPath: string,
+	signal?: AbortSignal,
 ): Promise<Response> {
 	const res = await apiFetch(
 		`/sessions/${encodeURIComponent(sessionId)}/fs/${endpoint}?path=${encodeURIComponent(relPath)}`,
+		{ signal },
 	);
 	if (!res.ok) {
 		const body = await res.json().catch(() => ({}));
@@ -1441,8 +1443,9 @@ export async function listWorkspaceDir(
 export async function previewWorkspaceFile(
 	sessionId: string,
 	relPath: string,
+	signal?: AbortSignal,
 ): Promise<WorkspacePreview> {
-	return (await workspaceFsFetch(sessionId, "preview", relPath)).json();
+	return (await workspaceFsFetch(sessionId, "preview", relPath, signal)).json();
 }
 
 /** Image bytes for an inline preview. The Blob is re-typed with the mime
@@ -1451,8 +1454,9 @@ export async function fetchWorkspaceImage(
 	sessionId: string,
 	relPath: string,
 	mime: string,
+	signal?: AbortSignal,
 ): Promise<Blob> {
-	const res = await workspaceFsFetch(sessionId, "raw", relPath);
+	const res = await workspaceFsFetch(sessionId, "raw", relPath, signal);
 	return new Blob([await res.arrayBuffer()], { type: mime });
 }
 

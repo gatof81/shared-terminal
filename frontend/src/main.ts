@@ -940,7 +940,10 @@ export function updateChromeToggle() {
 		return;
 	}
 	chromeToggleBtn.hidden = false;
-	actionsBtn.hidden = false;
+	// The actions menu (paste / attach / select) writes into the terminal,
+	// which the Files view covers — hide it there; Files has its own
+	// download button.
+	actionsBtn.hidden = isFilesViewActive();
 	updateKeyBarVisibility();
 	const activeTab = currentTabs.find((t) => t.tabId === currentActiveTabId);
 	// Format: "session › tab". Falls back to just the session name when

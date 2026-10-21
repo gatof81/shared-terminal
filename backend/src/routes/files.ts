@@ -21,9 +21,12 @@
  * soft-deleted sessions (workspace preserved) are browsable too.
  */
 
+import { pipeline } from "node:stream/promises";
 import type { Request, Response, Router } from "express";
 import type { AuthedRequest } from "../auth.js";
 import { requireAuth } from "../auth.js";
+import { InFlightLimiter } from "../inFlightLimiter.js";
+import { logger } from "../logger.js";
 import {
 	contentDispositionFilename,
 	listWorkspaceDir,
@@ -32,7 +35,7 @@ import {
 	validateRelPathParam,
 	type WorkspaceFsError,
 } from "../workspaceFiles.js";
-import { handleSessionError, type RouteContext } from "./shared.js";
+import { assertOwnedByOr404, handleSessionError, type RouteContext } from "./shared.js";
 
 // Max entries returned for one directory level. Big enough for any
 // directory a human browses; a 100k-entry cache dir gets the first 2000
@@ -56,23 +59,26 @@ const BINARY_SNIFF_BYTES = 8000;
 
 // Inline-previewable image types, keyed by lowercase extension. An
 // allowlist — the `raw` route refuses anything else, so it can never be
-// coaxed into serving e.g. HTML with a renderable content type.
-const IMAGE_MIME_BY_EXT: Record<string, string> = {
-	png: "image/png",
-	jpg: "image/jpeg",
-	jpeg: "image/jpeg",
-	gif: "image/gif",
-	webp: "image/webp",
-	avif: "image/avif",
-	bmp: "image/bmp",
-	ico: "image/x-icon",
-	svg: "image/svg+xml",
-};
+// coaxed into serving e.g. HTML with a renderable content type. A Map,
+// not an object literal: the key comes from a user-controlled filename,
+// and `x.constructor` / `x.__proto__` must miss rather than resolve to
+// an inherited Object.prototype member.
+const IMAGE_MIME_BY_EXT = new Map<string, string>([
+	["png", "image/png"],
+	["jpg", "image/jpeg"],
+	["jpeg", "image/jpeg"],
+	["gif", "image/gif"],
+	["webp", "image/webp"],
+	["avif", "image/avif"],
+	["bmp", "image/bmp"],
+	["ico", "image/x-icon"],
+	["svg", "image/svg+xml"],
+]);
 
-function imageMimeFor(name: string): string | null {
+export function imageMimeFor(name: string): string | null {
 	const dot = name.lastIndexOf(".");
 	if (dot <= 0) return null;
-	return IMAGE_MIME_BY_EXT[name.slice(dot + 1).toLowerCase()] ?? null;
+	return IMAGE_MIME_BY_EXT.get(name.slice(dot + 1).toLowerCase()) ?? null;
 }
 
 export type PreviewResponse =
@@ -119,9 +125,27 @@ function sendFsError(res: Response, err: WorkspaceFsError): void {
 	res.status(err.status).json({ error: err.error });
 }
 
+// Concurrency caps (see inFlightLimiter.ts for why a per-minute rate limit
+// alone doesn't bound memory). Text previews buffer up to 1 MiB plus its
+// JSON encoding, so they get the tighter process-wide cap; image streams
+// hold only an fd and a stream highWaterMark each, so more may run.
+export const PREVIEW_IN_FLIGHT_PER_USER = 4;
+export const PREVIEW_IN_FLIGHT_TOTAL = 16;
+export const RAW_IN_FLIGHT_PER_USER = 4;
+export const RAW_IN_FLIGHT_TOTAL = 32;
+
+function sendBusy(res: Response): void {
+	res.setHeader("Retry-After", "1");
+	res.status(429).json({ error: "Too many file previews in progress, try again shortly" });
+}
+
 export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 	const { sessions } = ctx;
-	const { fileBrowseIp } = ctx.limiters;
+	const { fileBrowseIp, fileRawIp } = ctx.limiters;
+	// Per router (not module-level) so each test's router starts empty;
+	// production builds exactly one router.
+	const previewSlots = new InFlightLimiter(PREVIEW_IN_FLIGHT_PER_USER, PREVIEW_IN_FLIGHT_TOTAL);
+	const rawSlots = new InFlightLimiter(RAW_IN_FLIGHT_PER_USER, RAW_IN_FLIGHT_TOTAL);
 
 	// Workspace contents are private and change under the user's feet —
 	// never let a shared cache or the browser's HTTP cache answer for them.
@@ -142,10 +166,10 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 				return;
 			}
 			try {
-				// Ownership BEFORE any filesystem access: a foreign-session
-				// probe gets its 404 without learning anything about that
-				// workspace (not even path-exists timing).
-				await sessions.assertOwnedBy(req.params.id, userId);
+				// Ownership BEFORE any filesystem access, and foreign ==
+				// missing (see assertOwnedByOr404): a probe learns nothing
+				// about another workspace, not even that the session exists.
+				await assertOwnedByOr404(sessions, req.params.id, userId);
 				const result = await listWorkspaceDir(req.params.id, rel, {
 					maxEntries: MAX_DIR_ENTRIES,
 				});
@@ -172,8 +196,14 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 				sendFsError(res, rel);
 				return;
 			}
+			let release: (() => void) | null = null;
 			try {
-				await sessions.assertOwnedBy(req.params.id, userId);
+				await assertOwnedByOr404(sessions, req.params.id, userId);
+				release = previewSlots.tryAcquire(userId);
+				if (release === null) {
+					sendBusy(res);
+					return;
+				}
 				const opened = await openWorkspaceFile(req.params.id, rel);
 				if (!opened.ok) {
 					sendFsError(res, opened);
@@ -216,6 +246,8 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 				res.json(body);
 			} catch (err) {
 				handleSessionError(err, res);
+			} finally {
+				release?.();
 			}
 		},
 	);
@@ -223,7 +255,9 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 	router.get(
 		"/sessions/:id/fs/raw",
 		requireAuth,
-		fileBrowseIp,
+		// Own budget, separate from browsing: an image-heavy folder
+		// shouldn't starve tree navigation, and vice versa.
+		fileRawIp,
 		async (req: Request, res: Response) => {
 			const { userId } = req as AuthedRequest;
 			const rel = validateRelPathParam(req.query.path, { allowEmpty: false });
@@ -231,11 +265,18 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 				sendFsError(res, rel);
 				return;
 			}
+			let release: (() => void) | null = null;
 			try {
-				await sessions.assertOwnedBy(req.params.id, userId);
+				await assertOwnedByOr404(sessions, req.params.id, userId);
 				const mime = imageMimeFor(rel);
 				if (mime === null) {
 					res.status(415).json({ error: "only image files can be previewed inline" });
+					return;
+				}
+				// Slot BEFORE the open so a burst can't even hold fds.
+				release = rawSlots.tryAcquire(userId);
+				if (release === null) {
+					sendBusy(res);
 					return;
 				}
 				const opened = await openWorkspaceFile(req.params.id, rel, {
@@ -245,17 +286,9 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 					sendFsError(res, opened);
 					return;
 				}
-				let bytes: Buffer;
-				try {
-					// ≤ IMAGE_PREVIEW_MAX_BYTES (checked on the fstat), so a
-					// bounded buffered read is fine and lets a mid-read error
-					// still answer with a clean JSON 500.
-					({ bytes } = await readHead(opened.handle, IMAGE_PREVIEW_MAX_BYTES, opened.size));
-				} finally {
-					await opened.handle.close().catch(() => {});
-				}
 				noStore(res);
 				res.setHeader("Content-Type", mime);
+				res.setHeader("Content-Length", String(opened.size));
 				res.setHeader("X-Content-Type-Options", "nosniff");
 				// SVG is an active document when navigated to directly — and
 				// with the SameSite=None auth cookie, a link to this URL would
@@ -272,9 +305,37 @@ export function registerFileRoutes(router: Router, ctx: RouteContext): void {
 					"Content-Security-Policy",
 					"default-src 'none'; style-src 'unsafe-inline'; sandbox",
 				);
-				res.end(bytes);
+				if (opened.size === 0) {
+					await opened.handle.close().catch(() => {});
+					res.end();
+					return;
+				}
+				try {
+					// Streamed from the validated fd with backpressure: memory
+					// per request is one stream highWaterMark, not the image.
+					// `end` pins the body to the fstat size we advertised in
+					// Content-Length even if the file grows mid-stream.
+					// pipeline destroys both sides (closing the fd via
+					// autoClose) on read error or client abort.
+					await pipeline(opened.handle.createReadStream({ start: 0, end: opened.size - 1 }), res);
+				} catch (err) {
+					if (!res.headersSent) {
+						res.removeHeader("Content-Length");
+						res.removeHeader("Content-Disposition");
+						res.status(500).json({ error: "Internal server error" });
+					} else {
+						// Bytes already went out under a 200: kill the socket so
+						// the client sees a truncated transfer, not a short EOF.
+						res.destroy();
+					}
+					logger.warn(
+						`[routes] raw preview aborted for session ${req.params.id}: ${(err as Error).message}`,
+					);
+				}
 			} catch (err) {
 				handleSessionError(err, res);
+			} finally {
+				release?.();
 			}
 		},
 	);

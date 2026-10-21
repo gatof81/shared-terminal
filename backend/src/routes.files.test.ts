@@ -64,13 +64,51 @@ const authStubs = vi.hoisted(() => {
 });
 vi.mock("./auth.js", () => authStubs);
 
-const dbStubs = vi.hoisted(() => ({
-	d1Query: async () => ({
-		results: [],
-		success: true as const,
-		meta: { changes: 0, duration: 0, last_row_id: 0 },
-	}),
-}));
+// D1 stub backing the REAL SessionManager: answers its single-row
+// `SELECT * FROM sessions WHERE session_id = ?` from `sessionRows`, so the
+// ownership checks below run production code (cache, 403-vs-404 contract)
+// rather than a stub that could encode the wrong contract.
+const dbStubs = vi.hoisted(() => {
+	const sessionRows = new Map<string, Record<string, unknown>>();
+	const row = (session_id: string, user_id: string, status: string) => ({
+		session_id,
+		user_id,
+		name: session_id,
+		status,
+		container_id: null,
+		container_name: `st-${session_id}`,
+		cols: 80,
+		rows: 24,
+		env_vars: "{}",
+		created_at: "2026-01-01 00:00:00",
+		last_connected_at: null,
+		external_ref: null,
+	});
+	for (const [id, user, status] of [
+		["sess-1", "u1", "running"],
+		["sess-2", "u2", "running"],
+		["sess-stopped", "u1", "stopped"],
+		["sess-terminated", "u1", "terminated"],
+		// A row whose id would select a dot-dir under WORKSPACE_ROOT, to
+		// exercise the fs-layer defence-in-depth past a passing auth check.
+		[".uploads", "u1", "running"],
+	] as const) {
+		sessionRows.set(id, row(id, user, status));
+	}
+	return {
+		sessionRows,
+		d1Query: async (sql: string, params: unknown[] = []) => {
+			const hit = /FROM sessions WHERE session_id = \?/.test(sql)
+				? sessionRows.get(String(params[0]))
+				: undefined;
+			return {
+				results: hit ? [hit] : [],
+				success: true as const,
+				meta: { changes: 0, duration: 0, last_row_id: 0 },
+			};
+		},
+	};
+});
 vi.mock("./db.js", () => dbStubs);
 
 import type { BootstrapBroadcaster } from "./bootstrap.js";
@@ -78,12 +116,13 @@ import type { DockerManager } from "./dockerManager.js";
 import {
 	decodePreview,
 	IMAGE_PREVIEW_MAX_BYTES,
+	imageMimeFor,
 	MAX_DIR_ENTRIES,
+	RAW_IN_FLIGHT_PER_USER,
 	TEXT_PREVIEW_MAX_BYTES,
 } from "./routes/files.js";
 import { buildRouter } from "./routes.js";
-import type { SessionManager } from "./sessionManager.js";
-import { NotFoundError } from "./sessionManager.js";
+import { SessionManager } from "./sessionManager.js";
 
 const OWNER = "u1";
 const SESSION_ID = "sess-1";
@@ -93,26 +132,21 @@ const OTHER_SESSION_ID = "sess-2";
 const SESSION_ROOT = path.join(WORKSPACE_ROOT, SESSION_ID);
 const OTHER_ROOT = path.join(WORKSPACE_ROOT, OTHER_SESSION_ID);
 
-// Mirrors the real assertOwnedBy contract: missing AND foreign both
-// collapse to NotFoundError (no existence oracle).
-const ownedSpy = vi.fn(async (sessionId: string, userId: string) => {
-	if (sessionId === SESSION_ID && userId === OWNER) return OWNER;
-	if (sessionId === OTHER_SESSION_ID && userId === "u2") return "u2";
-	throw new NotFoundError("Session not found");
-});
-// The observe / operate tiers must never be consulted by these routes —
-// if a refactor swaps assertOwnedBy for assertCanObserve, a group lead
-// could read arbitrary workspace files. Spies that grant access loudly so
-// a regression shows up as a test failure, not a silent widening.
-const observeSpy = vi.fn(async () => ({ userId: OWNER }));
-const operateSpy = vi.fn(async () => ({ userId: OWNER }));
+// Real SessionManager, rebuilt per test (fresh ownership cache). The
+// observe / operate tiers are spied on and must never be consulted: if a
+// refactor swapped assertOwnedBy for assertCanObserve, a group lead could
+// read arbitrary workspace files.
+let sessions: SessionManager;
+let ownedSpy: ReturnType<typeof vi.spyOn>;
+let observeSpy: ReturnType<typeof vi.spyOn>;
+let operateSpy: ReturnType<typeof vi.spyOn>;
 
-function makeFakeSessions(): SessionManager {
-	return {
-		assertOwnedBy: ownedSpy,
-		assertCanObserve: observeSpy,
-		assertCanOperate: operateSpy,
-	} as unknown as SessionManager;
+function makeSessions(): SessionManager {
+	sessions = new SessionManager();
+	ownedSpy = vi.spyOn(sessions, "assertOwnedBy");
+	observeSpy = vi.spyOn(sessions, "assertCanObserve");
+	operateSpy = vi.spyOn(sessions, "assertCanOperate");
+	return sessions;
 }
 
 // No container methods at all: every call path here must work with the
@@ -127,7 +161,7 @@ let server: http.Server | null = null;
 let baseUrl = "";
 
 async function spinUp() {
-	const router = buildRouter(makeFakeSessions(), makeFakeDocker(), {} as BootstrapBroadcaster, {
+	const router = buildRouter(makeSessions(), makeFakeDocker(), {} as BootstrapBroadcaster, {
 		login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
 		register: { ipMax: 1000, ipWindowMs: 60_000 },
 		invitesCreate: { ipMax: 1000, ipWindowMs: 60_000 },
@@ -140,6 +174,7 @@ async function spinUp() {
 		adminAction: { ipMax: 1000, ipWindowMs: 60_000 },
 		exec: { ipMax: 1000, ipWindowMs: 60_000 },
 		fileBrowse: { ipMax: 1000, ipWindowMs: 60_000 },
+		fileRaw: { ipMax: 1000, ipWindowMs: 60_000 },
 	});
 	const app = express();
 	app.use(express.json());
@@ -185,9 +220,6 @@ const PNG_BYTES = Buffer.from(
 let outsideDir: string;
 
 beforeEach(async () => {
-	ownedSpy.mockClear();
-	observeSpy.mockClear();
-	operateSpy.mockClear();
 	outsideDir = mkdtempSync(path.join(os.tmpdir(), "st-files-outside-"));
 	await fs.writeFile(path.join(outsideDir, "secret.txt"), "host secret");
 	await fs.mkdir(path.join(outsideDir, "dir"), { recursive: true });
@@ -260,11 +292,39 @@ describe("authentication and authorization", () => {
 	])("%s: 404s (not 403) for another user's session, identical to a missing one", async (endpoint) => {
 		// u2 owns sess-2, not sess-1. The response must not differ from
 		// a nonexistent session id — no existence oracle.
-		const foreign = await call(endpoint, { path: "logo.png", user: "u2" });
-		const missing = await call(endpoint, { path: "logo.png", sessionId: "nope", user: "u2" });
-		expect(foreign.status).toBe(404);
-		expect(missing.status).toBe(404);
-		expect(await foreign.json()).toEqual(await missing.json());
+		// Runs the REAL assertOwnedBy, which throws ForbiddenError (403)
+		// for a foreign session — the route must collapse it. Probed twice
+		// so both the D1 path and the ownership-cache path are covered.
+		for (let i = 0; i < 2; i++) {
+			const foreign = await call(endpoint, { path: "logo.png", user: "u2" });
+			const missing = await call(endpoint, { path: "logo.png", sessionId: "nope", user: "u2" });
+			expect(foreign.status).toBe(404);
+			expect(missing.status).toBe(404);
+			expect(await foreign.json()).toEqual(await missing.json());
+		}
+	});
+
+	it("collapses foreign to 404 on the download route too", async () => {
+		const res = await fetch(
+			`${baseUrl}/api/sessions/${SESSION_ID}/files?path=${encodeURIComponent("README.md")}`,
+			{ headers: { "x-test-user": "u2" } },
+		);
+		expect(res.status).toBe(404);
+		expect(await res.text()).not.toContain("Hello");
+	});
+
+	it.each(["sess-stopped", "sess-terminated"])("serves the %s session's workspace", async (sid) => {
+		const root = path.join(WORKSPACE_ROOT, sid);
+		await fs.mkdir(root, { recursive: true });
+		await fs.writeFile(path.join(root, "notes.md"), "kept");
+		try {
+			const list = await (await call("list", { sessionId: sid })).json();
+			expect(list.entries.map((e: { name: string }) => e.name)).toEqual(["notes.md"]);
+			const prev = await (await call("preview", { sessionId: sid, path: "notes.md" })).json();
+			expect(prev.content).toBe("kept");
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
 	});
 
 	it("uses the owner-only check, never the observe/operate tiers", async () => {
@@ -346,9 +406,8 @@ describe("path validation and traversal", () => {
 	});
 
 	it("rejects a traversal-shaped session id that would select a dot dir", async () => {
-		// Ownership is stubbed to pass so this exercises the fs-layer
-		// defence-in-depth, not the auth check.
-		ownedSpy.mockResolvedValueOnce(OWNER);
+		// The D1 fixture has a `.uploads` row owned by u1, so ownership
+		// passes and this exercises the fs-layer defence-in-depth.
 		const res = await call("list", { sessionId: ".uploads" });
 		expect(res.status).toBe(404);
 	});
@@ -514,7 +573,7 @@ describe("GET /fs/list", () => {
 		expect((await call("list", { path: "README.md" })).status).toBe(400);
 	});
 
-	it("caps very large directories and flags truncation", async () => {
+	it("sorts BEFORE capping very large directories, and flags truncation", async () => {
 		const big = path.join(SESSION_ROOT, "big");
 		await fs.mkdir(big);
 		await Promise.all(
@@ -522,9 +581,16 @@ describe("GET /fs/list", () => {
 				fs.writeFile(path.join(big, `f${i}`), ""),
 			),
 		);
+		// A directory that sorts first by type but last by name — a
+		// cut-then-sort implementation would usually drop it.
+		await fs.mkdir(path.join(big, "zzz_dir"));
 		const body = await (await call("list", { path: "big" })).json();
 		expect(body.entries).toHaveLength(MAX_DIR_ENTRIES);
 		expect(body.truncated).toBe(true);
+		expect(body.entries[0].name).toBe("zzz_dir");
+		// The kept files are the first ones in natural order, f0…f1998.
+		expect(body.entries[1].name).toBe("f0");
+		expect(body.entries[MAX_DIR_ENTRIES - 1].name).toBe(`f${MAX_DIR_ENTRIES - 2}`);
 	});
 
 	it("works with no container at all (stopped session)", async () => {
@@ -662,5 +728,153 @@ describe("GET /fs/raw", () => {
 	it("403s restricted paths even with an image extension", async () => {
 		await fs.writeFile(path.join(SESSION_ROOT, ".st", "shot.png"), PNG_BYTES);
 		expect((await call("raw", { path: ".st/shot.png" })).status).toBe(403);
+	});
+});
+
+// ── Inherited-property names ────────────────────────────────────────────
+
+describe("file names that collide with Object.prototype members", () => {
+	it.each([
+		"x.constructor",
+		"x.__proto__",
+		"x.toString",
+		"x.hasOwnProperty",
+	])("treats %s as an ordinary file", async (name) => {
+		expect(imageMimeFor(name)).toBeNull();
+		await fs.writeFile(path.join(SESSION_ROOT, name), "plain text");
+		const prev = await call("preview", { path: name });
+		expect(prev.status).toBe(200);
+		expect(await prev.json()).toMatchObject({ kind: "text", content: "plain text" });
+		expect((await call("raw", { path: name })).status).toBe(415);
+	});
+});
+
+// ── Concurrency ─────────────────────────────────────────────────────────
+
+describe("in-flight limits", () => {
+	it("429s image streams past the per-user cap and frees slots when clients go away", async () => {
+		// Near the 10 MiB cap so each response can't fit in socket buffers:
+		// a client that never reads keeps its stream (and slot) open.
+		const fh = await fs.open(path.join(SESSION_ROOT, "big.png"), "w");
+		await fh.truncate(IMAGE_PREVIEW_MAX_BYTES);
+		await fh.close();
+		const { port } = new URL(baseUrl);
+		const held: http.ClientRequest[] = [];
+		const opened = await Promise.all(
+			Array.from(
+				{ length: RAW_IN_FLIGHT_PER_USER },
+				() =>
+					new Promise<number>((resolve, reject) => {
+						const req = http.get(
+							{
+								host: "127.0.0.1",
+								port,
+								path: `/api/sessions/${SESSION_ID}/fs/raw?path=big.png`,
+								headers: { "x-test-user": OWNER },
+							},
+							(res) => {
+								res.pause(); // never drain → backpressure holds the slot
+								resolve(res.statusCode ?? 0);
+							},
+						);
+						req.on("error", reject);
+						held.push(req);
+					}),
+			),
+		);
+		expect(opened).toEqual(Array(RAW_IN_FLIGHT_PER_USER).fill(200));
+
+		const busy = await call("raw", { path: "logo.png" });
+		expect(busy.status).toBe(429);
+		expect(busy.headers.get("retry-after")).toBe("1");
+		// Other users have their own per-user budget.
+		await fs.mkdir(OTHER_ROOT, { recursive: true });
+		await fs.writeFile(path.join(OTHER_ROOT, "o.png"), PNG_BYTES);
+		expect(
+			(await call("raw", { path: "o.png", sessionId: OTHER_SESSION_ID, user: "u2" })).status,
+		).toBe(200);
+
+		for (const req of held) req.destroy();
+		// Slots are released once the server notices the aborted sockets.
+		let status = 0;
+		for (let i = 0; i < 50 && status !== 200; i++) {
+			await new Promise((r) => setTimeout(r, 20));
+			const res = await call("raw", { path: "logo.png" });
+			status = res.status;
+			await res.arrayBuffer();
+		}
+		expect(status).toBe(200);
+	});
+
+	it("streams images with an exact Content-Length", async () => {
+		const res = await call("raw", { path: "logo.png" });
+		expect(res.headers.get("content-length")).toBe(String(PNG_BYTES.length));
+		expect(Buffer.from(await res.arrayBuffer()).equals(PNG_BYTES)).toBe(true);
+	});
+});
+
+// ── Adversarial races ───────────────────────────────────────────────────
+// Code inside the container can swap a REAL directory for a symlink
+// between the backend's realpath check and its open (the open uses the
+// realpath'd path, so swapping a symlink that was already resolved does
+// nothing — the attack is replacing a resolved component). A background
+// loop flips `target` between a real in-workspace dir and a symlink to an
+// outside dir holding same-named files, while probes run concurrently.
+// The property is one-sided — outside content must NEVER be served — so
+// the test can't go flaky by the race simply not being hit on some run.
+// (Verified to fail with the /proc/self/fd re-check disabled.)
+
+describe("directory-swap races", () => {
+	async function race(probe: () => Promise<string>): Promise<string[]> {
+		const target = path.join(SESSION_ROOT, "target");
+		const stash = path.join(SESSION_ROOT, "stash");
+		const link = path.join(SESSION_ROOT, "link-ready");
+		await fs.mkdir(target);
+		await fs.writeFile(path.join(target, "f.txt"), "inside");
+		await fs.writeFile(path.join(outsideDir, "f.txt"), "OUTSIDE-SECRET");
+		await fs.writeFile(path.join(outsideDir, "outside-only.txt"), "x");
+		await fs.symlink(outsideDir, link);
+		const hold = () => new Promise((r) => setTimeout(r, 1));
+		let stop = false;
+		const flipper = (async () => {
+			while (!stop) {
+				await hold(); // real dir
+				await fs.rename(target, stash);
+				await fs.rename(link, target);
+				await hold(); // symlink to outside
+				await fs.rename(target, link);
+				await fs.rename(stash, target);
+			}
+		})();
+		const bodies: string[] = [];
+		try {
+			// 4 concurrent = the per-user preview cap, so no probe is 429'd.
+			for (let round = 0; round < 80; round++) {
+				bodies.push(...(await Promise.all(Array.from({ length: 4 }, probe))));
+			}
+		} finally {
+			stop = true;
+			await flipper;
+		}
+		// Sanity: the race must actually have been exercised — some probes
+		// saw the real dir, some the swapped-in link.
+		expect(bodies.some((b) => b.includes("inside") || b.includes('"f.txt"'))).toBe(true);
+		expect(bodies.some((b) => b.includes("not found"))).toBe(true);
+		return bodies;
+	}
+
+	it("never serves outside content through preview", async () => {
+		const bodies = await race(async () => (await call("preview", { path: "target/f.txt" })).text());
+		expect(bodies.filter((b) => b.includes("OUTSIDE-SECRET"))).toEqual([]);
+	});
+
+	it("never lists an outside directory", async () => {
+		const bodies = await race(async () => (await call("list", { path: "target" })).text());
+		expect(bodies.filter((b) => b.includes("outside-only.txt"))).toEqual([]);
+	});
+
+	it("never serves outside content through download", async () => {
+		const bodies = await race(async () => (await download("target/f.txt")).text());
+		expect(bodies.filter((b) => b.includes("OUTSIDE-SECRET"))).toEqual([]);
 	});
 });

@@ -125,116 +125,122 @@ const SPECS: Record<Exclude<Language, "plain" | "markup" | "markdown">, Spec> = 
 	},
 };
 
-const EXT_LANG: Record<string, Language> = {
-	ts: "c-like",
-	tsx: "c-like",
-	mts: "c-like",
-	cts: "c-like",
-	js: "c-like",
-	jsx: "c-like",
-	mjs: "c-like",
-	cjs: "c-like",
-	java: "c-like",
-	kt: "c-like",
-	kts: "c-like",
-	scala: "c-like",
-	go: "c-like",
-	rs: "c-like",
-	c: "c-like",
-	h: "c-like",
-	cc: "c-like",
-	cpp: "c-like",
-	hpp: "c-like",
-	cs: "c-like",
-	swift: "c-like",
-	dart: "c-like",
-	php: "c-like",
-	proto: "c-like",
-	gradle: "c-like",
-	py: "python",
-	pyi: "python",
-	sh: "shell",
-	bash: "shell",
-	zsh: "shell",
-	fish: "shell",
-	rb: "ruby",
-	json: "json",
-	jsonc: "c-like",
-	json5: "c-like",
-	ipynb: "json",
-	lock: "plain",
-	yml: "yaml",
-	yaml: "yaml",
-	toml: "toml",
-	ini: "toml",
-	cfg: "toml",
-	conf: "shell",
-	css: "css",
-	scss: "css",
-	less: "css",
-	html: "markup",
-	htm: "markup",
-	xml: "markup",
-	svg: "markup",
-	vue: "markup",
-	svelte: "markup",
-	sql: "sql",
-	md: "markdown",
-	markdown: "markdown",
-	mdx: "markdown",
-};
+const SPEC_BY_LANG = new Map<Language, Spec>(Object.entries(SPECS) as [Language, Spec][]);
 
-const NAME_LANG: Record<string, Language> = {
-	dockerfile: "shell",
-	makefile: "shell",
-	gemfile: "ruby",
-	rakefile: "ruby",
-	".bashrc": "shell",
-	".zshrc": "shell",
-	".profile": "shell",
-	".gitignore": "shell",
-	".dockerignore": "shell",
-	".editorconfig": "toml",
-	".env.example": "shell",
-	".env.sample": "shell",
-	".env.template": "shell",
-};
+// Maps, not object literals: keys come from user-controlled file names and
+// fence info strings, and `x.constructor` / a ```__proto__ fence must miss rather
+// than resolve to an inherited Object.prototype member (which then
+// crashed highlightCode on `spec.blockComments`).
+const EXT_LANG = new Map<string, Language>([
+	["ts", "c-like"],
+	["tsx", "c-like"],
+	["mts", "c-like"],
+	["cts", "c-like"],
+	["js", "c-like"],
+	["jsx", "c-like"],
+	["mjs", "c-like"],
+	["cjs", "c-like"],
+	["java", "c-like"],
+	["kt", "c-like"],
+	["kts", "c-like"],
+	["scala", "c-like"],
+	["go", "c-like"],
+	["rs", "c-like"],
+	["c", "c-like"],
+	["h", "c-like"],
+	["cc", "c-like"],
+	["cpp", "c-like"],
+	["hpp", "c-like"],
+	["cs", "c-like"],
+	["swift", "c-like"],
+	["dart", "c-like"],
+	["php", "c-like"],
+	["proto", "c-like"],
+	["gradle", "c-like"],
+	["py", "python"],
+	["pyi", "python"],
+	["sh", "shell"],
+	["bash", "shell"],
+	["zsh", "shell"],
+	["fish", "shell"],
+	["rb", "ruby"],
+	["json", "json"],
+	["jsonc", "c-like"],
+	["json5", "c-like"],
+	["ipynb", "json"],
+	["lock", "plain"],
+	["yml", "yaml"],
+	["yaml", "yaml"],
+	["toml", "toml"],
+	["ini", "toml"],
+	["cfg", "toml"],
+	["conf", "shell"],
+	["css", "css"],
+	["scss", "css"],
+	["less", "css"],
+	["html", "markup"],
+	["htm", "markup"],
+	["xml", "markup"],
+	["svg", "markup"],
+	["vue", "markup"],
+	["svelte", "markup"],
+	["sql", "sql"],
+	["md", "markdown"],
+	["markdown", "markdown"],
+	["mdx", "markdown"],
+]);
+
+const NAME_LANG = new Map<string, Language>([
+	["dockerfile", "shell"],
+	["makefile", "shell"],
+	["gemfile", "ruby"],
+	["rakefile", "ruby"],
+	[".bashrc", "shell"],
+	[".zshrc", "shell"],
+	[".profile", "shell"],
+	[".gitignore", "shell"],
+	[".dockerignore", "shell"],
+	[".editorconfig", "toml"],
+	[".env.example", "shell"],
+	[".env.sample", "shell"],
+	[".env.template", "shell"],
+]);
 
 /** Language for a file name (extension, then well-known names). */
 export function languageForFile(name: string): Language {
 	const lower = name.toLowerCase();
-	const byName = NAME_LANG[lower];
+	const byName = NAME_LANG.get(lower);
 	if (byName) return byName;
 	if (lower.startsWith("dockerfile")) return "shell";
 	const dot = lower.lastIndexOf(".");
 	if (dot === -1) return "plain";
-	return EXT_LANG[lower.slice(dot + 1)] ?? "plain";
+	return EXT_LANG.get(lower.slice(dot + 1)) ?? "plain";
 }
 
-const FENCE_ALIASES: Record<string, Language> = {
-	typescript: "c-like",
-	javascript: "c-like",
-	rust: "c-like",
-	golang: "c-like",
-	kotlin: "c-like",
-	csharp: "c-like",
-	"c++": "c-like",
-	python: "python",
-	console: "shell",
-	shell: "shell",
-	sh: "shell",
-	ruby: "ruby",
-	html: "markup",
-	xml: "markup",
-	diff: "plain",
-	text: "plain",
-};
+const FENCE_ALIASES = new Map<string, Language>([
+	["typescript", "c-like"],
+	["javascript", "c-like"],
+	["rust", "c-like"],
+	["golang", "c-like"],
+	["kotlin", "c-like"],
+	["csharp", "c-like"],
+	["c++", "c-like"],
+	["python", "python"],
+	["console", "shell"],
+	["shell", "shell"],
+	["sh", "shell"],
+	["ruby", "ruby"],
+	["html", "markup"],
+	["xml", "markup"],
+	["diff", "plain"],
+	["text", "plain"],
+]);
 
 /** Language for a Markdown fence info string (```ts, ```bash …). */
 export function languageForFence(info: string): Language {
 	const tag = info.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
 	if (tag === "") return "plain";
-	return FENCE_ALIASES[tag] ?? EXT_LANG[tag] ?? "plain";
+	return FENCE_ALIASES.get(tag) ?? EXT_LANG.get(tag) ?? "plain";
 }
 
 function span(cls: string, text: string): HTMLSpanElement {
@@ -425,5 +431,9 @@ export function highlightCode(src: string, lang: Language): DocumentFragment {
 	}
 	if (lang === "markup") return highlightMarkup(src);
 	if (lang === "markdown") return highlightMarkdownSource(src);
-	return highlightWithSpec(src, SPECS[lang], lang);
+	// Map lookup, not SPECS[lang]: `lang` is typed, but if an unvalidated
+	// string ever reaches here it must miss, not hit Object.prototype.
+	const spec = SPEC_BY_LANG.get(lang);
+	if (!spec) return highlightCode(src, "plain");
+	return highlightWithSpec(src, spec, lang);
 }
