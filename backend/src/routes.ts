@@ -24,6 +24,7 @@ import { registerAdminRoutes } from "./routes/admin.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerExecRoutes } from "./routes/exec.js";
 import { registerFileRoutes } from "./routes/files.js";
+import { registerGitRoutes } from "./routes/git.js";
 import { registerGroupRoutes } from "./routes/groups.js";
 import { registerInviteRoutes } from "./routes/invites.js";
 import { registerPushRoutes } from "./routes/push.js";
@@ -124,6 +125,7 @@ export function buildRouter(
 	registerGroupRoutes(router, ctx);
 	registerSessionRoutes(router, ctx);
 	registerFileRoutes(router, ctx);
+	registerGitRoutes(router, ctx);
 	registerExecRoutes(router, ctx);
 	registerTemplateRoutes(router, ctx);
 

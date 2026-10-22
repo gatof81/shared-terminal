@@ -2524,6 +2524,159 @@ export class DockerManager {
 		}
 	}
 
+	/**
+	 * Run a fixed argv inside the session's container and capture BOTH
+	 * streams as raw bytes, bounded in size and time. The read-only git
+	 * viewer (`gitReadOnly.ts`) is the first caller: its parsers need
+	 * exact bytes (`-z` records, UTF-8 paths that must not be split at a
+	 * Docker frame boundary — `streamExec` decodes per frame), a hard
+	 * byte cap (a 200 MB diff must never land in this process's heap),
+	 * and a wall-clock bound.
+	 *
+	 * Bounds are enforced on BOTH sides. In the container, `timeout(1)`
+	 * leads the argv so the process itself is SIGTERM/SIGKILLed at
+	 * `timeoutMs` — Docker has no "kill exec" API and destroying our side
+	 * of the stream alone leaves the process running (see `streamExec`).
+	 * Host-side, the stream is destroyed once `maxBytes` has been read or
+	 * at `timeoutMs` + a grace (if the container's `timeout` binary is
+	 * missing or wedged), so the promise always settles and memory stays
+	 * at ~`maxBytes`. After a host-side destroy the exit code is unknown
+	 * (null): Docker may still be running the process, and `truncated` /
+	 * `timedOut` carry what the caller needs to know.
+	 *
+	 * `cmd` is argv, never a shell string. Callers compose it from fixed
+	 * literals plus validated operands — no shell parses it.
+	 */
+	async execCapture(
+		sessionId: string,
+		cmd: string[],
+		opts: {
+			/** Skip the D1 lookup when the caller already holds the session's container id. */
+			containerId?: string;
+			cwd?: string;
+			env?: Record<string, string>;
+			maxBytes: number;
+			timeoutMs: number;
+		},
+	): Promise<{
+		stdout: Buffer;
+		stderr: Buffer;
+		/** null when the outcome is unknown (host-side cut). */
+		exitCode: number | null;
+		/**
+		 * stdout exceeded `maxBytes`: only the first `maxBytes` are kept,
+		 * the rest was drained until the process ended (stderr is capped
+		 * too but never flagged).
+		 */
+		truncated: boolean;
+		timedOut: boolean;
+	}> {
+		const containerId = opts.containerId ?? (await this.sessions.getOrThrow(sessionId)).containerId;
+		if (!containerId) throw new ContainerNotFoundError();
+		const container = this.docker.getContainer(containerId);
+		const timeoutSec = Math.max(1, Math.ceil(opts.timeoutMs / 1000));
+
+		const exec = await container.exec({
+			// `-k 2`: SIGKILL two seconds after the SIGTERM if the process
+			// ignores it. Exit 124 (or 137) is how we learn it fired.
+			Cmd: ["timeout", "-k", "2", String(timeoutSec), ...cmd],
+			Env: opts.env ? Object.entries(opts.env).map(([k, v]) => `${k}=${v}`) : undefined,
+			AttachStdin: false,
+			AttachStdout: true,
+			AttachStderr: true,
+			// Tty:false — multiplexed frames keep stdout/stderr apart and
+			// never translate bytes (a PTY would turn \n into \r\n).
+			Tty: false,
+			WorkingDir: opts.cwd ?? "/home/developer/workspace",
+		});
+		const stream = await exec.start({ hijack: false, stdin: false });
+
+		const out: Buffer[] = [];
+		const err: Buffer[] = [];
+		let outLen = 0;
+		let errLen = 0;
+		let truncated = false;
+		let cut = false;
+		let pending: Buffer = Buffer.alloc(0);
+		// stderr is only ever a diagnostic line or two; bounding it
+		// separately keeps a chatty command from eating the stdout budget.
+		const STDERR_MAX = 64 * 1024;
+
+		const onData = (chunk: Buffer) => {
+			// Past the cap the output is DRAINED, not abandoned: a docker
+			// exec cannot be killed through the API, and destroying our end
+			// of the stream doesn't stop the process — it only hides it,
+			// and a caller holding a concurrency slot "until the command
+			// ends" would release it while git still runs. Reading to the
+			// end means this promise settles when the process has exited
+			// (the in-container `timeout` bounds how long that can take).
+			if (truncated) return;
+			pending = (pending.length === 0 ? chunk : Buffer.concat([pending, chunk])) as Buffer;
+			let off = 0;
+			while (off + 8 <= pending.length) {
+				const frameType = pending[off]!;
+				const size = pending.readUInt32BE(off + 4);
+				if (off + 8 + size > pending.length) break;
+				const payload = pending.subarray(off + 8, off + 8 + size);
+				off += 8 + size;
+				if (frameType === 1) {
+					const room = opts.maxBytes - outLen;
+					if (payload.length > room) {
+						if (room > 0) out.push(Buffer.from(payload.subarray(0, room)));
+						outLen = opts.maxBytes;
+						truncated = true;
+						pending = Buffer.alloc(0);
+						return;
+					}
+					out.push(Buffer.from(payload));
+					outLen += payload.length;
+				} else if (frameType === 2 && errLen < STDERR_MAX) {
+					const take = payload.subarray(0, STDERR_MAX - errLen);
+					err.push(Buffer.from(take));
+					errLen += take.length;
+				}
+			}
+			pending = off === pending.length ? Buffer.alloc(0) : Buffer.from(pending.subarray(off));
+		};
+		stream.on("data", onData);
+
+		// Host-side backstop at timeoutMs + grace: by then the container's
+		// `timeout` has fired and the stream has ended; if it hasn't, cut.
+		// This is the ONE place the stream is destroyed with the process
+		// possibly alive — the exit code is then reported as unknown.
+		let timedOut = false;
+		const guard = setTimeout(() => {
+			timedOut = true;
+			cut = true;
+			stream.destroy();
+		}, opts.timeoutMs + 5_000);
+
+		try {
+			await new Promise<void>((resolve, reject) => {
+				stream.on("end", () => resolve());
+				stream.on("close", () => resolve());
+				stream.on("error", (e: Error) => (cut ? resolve() : reject(e)));
+			});
+		} finally {
+			clearTimeout(guard);
+		}
+
+		let exitCode: number | null = null;
+		if (!cut) {
+			const info = await exec.inspect();
+			exitCode = info.ExitCode ?? null;
+			// coreutils timeout: 124 = deadline hit, 137 = it had to KILL.
+			if (exitCode === 124 || exitCode === 137) timedOut = true;
+		}
+		return {
+			stdout: Buffer.concat(out),
+			stderr: Buffer.concat(err),
+			exitCode,
+			truncated,
+			timedOut,
+		};
+	}
+
 	private async execOneShot(
 		sessionId: string,
 		cmd: string[],

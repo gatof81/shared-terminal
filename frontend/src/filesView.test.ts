@@ -58,7 +58,9 @@ const saveBlob = vi.hoisted(() => vi.fn());
 vi.mock("./saveBlob.js", () => ({ saveBlob }));
 
 type FilesView = typeof import("./filesView.js");
+type ViewSwitch = typeof import("./viewSwitch.js");
 let fv: FilesView;
+let vs: ViewSwitch;
 
 const flush = async () => {
 	for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
@@ -96,6 +98,7 @@ beforeAll(async () => {
 				<div id="view-switch" hidden>
 					<button id="view-terminal-btn"></button>
 					<button id="view-files-btn"></button>
+					<button id="view-git-btn"></button>
 				</div>
 			</div>
 			<div id="terminal-tabs"></div>
@@ -106,6 +109,12 @@ beforeAll(async () => {
 				<nav id="files-breadcrumbs"></nav>
 				<button id="files-refresh-btn"></button>
 				<div id="files-body"><div id="files-tree"></div><div id="files-preview"></div></div>
+			</div>
+			<div id="git-view" hidden>
+				<button id="git-to-terminal-btn"></button>
+				<div id="git-summary"></div>
+				<button id="git-refresh-btn"></button>
+				<div id="git-body"><div id="git-list"></div><div id="git-diff"></div></div>
 			</div>
 		</section>`;
 	// jsdom has no ResizeObserver; the module installs one at load.
@@ -120,6 +129,7 @@ beforeAll(async () => {
 		"URL",
 		Object.assign(URL, { createObjectURL: () => "blob:x", revokeObjectURL: () => {} }),
 	);
+	vs = await import("./viewSwitch.js");
 	fv = await import("./filesView.js");
 });
 
@@ -130,7 +140,7 @@ const rowFor = (path: string) =>
 function selectSession(id: string, status = "running") {
 	mainState.activeSessionId = id;
 	mainState.sessions = [{ sessionId: id, name: id, status }];
-	fv.syncFilesView();
+	vs.syncSessionViews();
 }
 
 beforeEach(() => {
@@ -146,7 +156,7 @@ afterEach(() => {
 	// Back to "no session" so every test starts from a clean view.
 	mainState.activeSessionId = null;
 	mainState.sessions = [];
-	fv.syncFilesView();
+	vs.syncSessionViews();
 });
 
 describe("view switching", () => {
@@ -229,7 +239,7 @@ describe("view switching", () => {
 
 		// Session started → terminal available again → snaps back.
 		mainState.sessions = [{ sessionId: "s1", name: "s1", status: "running" }];
-		fv.syncFilesView();
+		vs.syncSessionViews();
 		expect(($("view-terminal-btn") as HTMLButtonElement).disabled).toBe(false);
 		expect(fv.isFilesViewActive()).toBe(false);
 	});
@@ -238,7 +248,7 @@ describe("view switching", () => {
 		selectSession("s1");
 		$("view-files-btn").click();
 		await flush();
-		fv.syncFilesView();
+		vs.syncSessionViews();
 		expect(fv.isFilesViewActive()).toBe(true);
 	});
 });
@@ -325,7 +335,7 @@ describe("tree", () => {
 		await flush();
 		mainState.activeSessionId = null;
 		mainState.sessions = [];
-		fv.syncFilesView();
+		vs.syncSessionViews();
 		expect($("files-view").hidden).toBe(true);
 		// Re-entering for a new session refetches rather than reusing.
 		selectSession("s3");

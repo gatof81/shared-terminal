@@ -30,7 +30,10 @@ import {
 	type SessionInfo,
 	type Tab,
 } from "./api.js";
-import { isFilesViewActive, syncFilesView } from "./filesView.js";
+// Overlay views register themselves with viewSwitch on load; nothing
+// else imports them by name, so the side-effect imports keep them in.
+import "./filesView.js";
+import "./gitView.js";
 import { closeInvitesModal } from "./invites.js";
 import { initKeyBar, updateKeyBarVisibility } from "./keyBar.js";
 import {
@@ -58,6 +61,7 @@ import { initTerminalSearch } from "./searchBar.js";
 import { openSession, openSessionFromDeepLink, refreshSessions } from "./sessionCore.js";
 import { clearAllBadges } from "./tabActivity.js";
 import type { TerminalSession } from "./terminal.js";
+import { isOverlayActive, overlayLabel, syncSessionViews } from "./viewSwitch.js";
 
 // ── DOM refs ────────────────────────────────────────────────────────────────
 
@@ -568,7 +572,7 @@ function handleLogout(toastMessage?: string): void {
 	// above routes through updateToolbar(), so without this a Files view
 	// left open would still show the previous user's workspace after the
 	// next login in this tab.
-	syncFilesView();
+	syncSessionViews();
 	showAuth();
 	// Symmetry with showApp(): keep the admin-button visibility in
 	// lockstep with the api-layer's _isAdmin flag, which logout() and
@@ -941,19 +945,21 @@ export function updateChromeToggle() {
 	}
 	chromeToggleBtn.hidden = false;
 	// The actions menu (paste / attach / select) writes into the terminal,
-	// which the Files view covers — hide it there; Files has its own
-	// download button.
-	actionsBtn.hidden = isFilesViewActive();
+	// which the Files / Git overlays cover — hide it there; Files has its
+	// own download button.
+	actionsBtn.hidden = isOverlayActive();
 	updateKeyBarVisibility();
 	const activeTab = currentTabs.find((t) => t.tabId === currentActiveTabId);
 	// Format: "session › tab". Falls back to just the session name when
 	// no tab is active yet (fresh session, between switches). Using a
 	// thin space + chevron keeps it scannable on a 430-pt-wide screen.
-	chromeToggleLabel.textContent = isFilesViewActive()
-		? `${s.name} › Files`
-		: activeTab
-			? `${s.name} › ${activeTab.label}`
-			: s.name;
+	const overlay = overlayLabel();
+	chromeToggleLabel.textContent =
+		overlay !== null
+			? `${s.name} › ${overlay}`
+			: activeTab
+				? `${s.name} › ${activeTab.label}`
+				: s.name;
 }
 
 chromeToggleBtn.addEventListener("click", () => {

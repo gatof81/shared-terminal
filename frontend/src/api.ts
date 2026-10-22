@@ -1460,6 +1460,119 @@ export async function fetchWorkspaceImage(
 	return new Blob([await res.arrayBuffer()], { type: mime });
 }
 
+// ── Git Changes (read-only) ─────────────────────────────────────────────────
+
+export type GitArea = "staged" | "unstaged" | "untracked" | "conflict";
+
+export interface GitChange {
+	area: GitArea;
+	/** Porcelain letter: M A D R C T U ? */
+	status: string;
+	xy: string;
+	path: string;
+	oldPath: string | null;
+	additions: number | null;
+	deletions: number | null;
+	binary: boolean;
+	/** Credential-shaped path: listed, but the diff is refused (403). */
+	restricted: boolean;
+}
+
+export interface GitCommit {
+	hash: string;
+	shortHash: string;
+	author: string;
+	date: string;
+	subject: string;
+}
+
+export type GitStatus =
+	| { repo: false; candidates: string[] }
+	| {
+			repo: true;
+			/** Workspace-relative repo root ("" = workspace root). */
+			root: string;
+			truncated: boolean;
+			branch: string | null;
+			detached: boolean;
+			head: string | null;
+			upstream: string | null;
+			ahead: number | null;
+			behind: number | null;
+			changes: GitChange[];
+	  };
+
+export interface GitDiff {
+	path: string;
+	area: GitArea;
+	patch: string;
+	truncated: boolean;
+	binary: boolean;
+}
+
+/** Carries the HTTP status and the backend's error `code` so the Git view
+ *  can render not-running / timeout / restricted states distinctly. */
+export class GitApiError extends Error {
+	constructor(
+		message: string,
+		readonly status: number,
+		readonly code: string | null,
+	) {
+		super(message);
+		this.name = "GitApiError";
+	}
+}
+
+async function gitFetch(
+	sessionId: string,
+	endpoint: string,
+	params: Record<string, string>,
+	signal?: AbortSignal,
+): Promise<Response> {
+	const qs = new URLSearchParams(params).toString();
+	const res = await apiFetch(
+		`/sessions/${encodeURIComponent(sessionId)}/git/${endpoint}${qs ? `?${qs}` : ""}`,
+		{ signal },
+	);
+	if (!res.ok) {
+		const body = await res.json().catch(() => ({}));
+		throw new GitApiError(
+			body.error ?? `Request failed (${res.status})`,
+			res.status,
+			typeof body.code === "string" ? body.code : null,
+		);
+	}
+	return res;
+}
+
+export async function fetchGitStatus(
+	sessionId: string,
+	dir: string,
+	signal?: AbortSignal,
+): Promise<GitStatus> {
+	return (await gitFetch(sessionId, "status", dir ? { dir } : {}, signal)).json();
+}
+
+export async function fetchGitDiff(
+	sessionId: string,
+	req: { path: string; area: GitArea; oldPath: string | null; dir: string },
+	signal?: AbortSignal,
+): Promise<GitDiff> {
+	const params: Record<string, string> = { path: req.path, area: req.area };
+	if (req.oldPath !== null) params.oldPath = req.oldPath;
+	if (req.dir) params.dir = req.dir;
+	return (await gitFetch(sessionId, "diff", params, signal)).json();
+}
+
+export async function fetchGitLog(
+	sessionId: string,
+	dir: string,
+	signal?: AbortSignal,
+): Promise<GitCommit[]> {
+	const body = await (await gitFetch(sessionId, "log", dir ? { dir } : {}, signal)).json();
+	return body.commits;
+}
+
 // ── Fetch wrapper ───────────────────────────────────────────────────────────
 
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
