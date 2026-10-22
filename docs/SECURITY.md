@@ -268,9 +268,9 @@ and the same restricted-path denylist as the Explorer (a committed
   execs are awaited to completion even when one of them fails early
   (`allSettledOrThrow`), so a 403 decided by the location check is not
   sent — and the slot not returned — while the sibling git process is
-  still running. The frontend sequences its own requests (status+log,
-  then the open diff; a new diff or load waits for whatever is in
-  flight, nothing is aborted) to stay within its two slots. The UI stops rendering a
+  still running. The frontend runs its own requests through one FIFO
+  (a status+log batch or a diff at a time, the turn reserved before any
+  await; nothing is aborted) to stay within its two slots. The UI stops rendering a
   diff past 5000 lines on every rendering path.
 - **Diagnostics.** On failure only the first line of git's stderr (capped,
   URL credentials scrubbed) reaches the client.

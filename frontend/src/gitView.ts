@@ -85,18 +85,28 @@ type DiffState =
 	| { status: "error"; message: string; httpStatus: number; code: string | null };
 let diff: DiffState = { status: "none" };
 let diffToken = 0;
-let diffAbort: AbortController | null = null;
 
+// ── Request queue ───────────────────────────────────────────────────────────
+//
 // The backend allows two git requests in flight per user and holds each
-// slot until its git run has actually ENDED — aborting the fetch frees
-// nothing server-side (a docker exec can't be cancelled). So this view
-// never has more than two requests outstanding: a status+log load waits
-// for the diff in flight, a diff waits for the load and the previous
-// diff, and a superseded diff is simply not re-issued until the earlier
-// one settles (its result is dropped by token). Both settle (never
-// reject) — they exist only to be awaited.
-let loadInFlight: Promise<void> | null = null;
-let diffInFlight: Promise<void> | null = null;
+// slot until its git run has actually ENDED — aborting a fetch frees
+// nothing server-side (a docker exec can't be cancelled), so this view
+// never aborts anything. Instead every batch — one status+log load (two
+// requests) or one diff (one) — takes a turn on a single FIFO, and the
+// turn is reserved SYNCHRONOUSLY, before the first await, so two callers
+// released by the same earlier batch can't both start (that was the
+// 429). Stale work (a superseded click, a switched session) is dropped
+// by generation / token when its turn comes, without spending a request.
+let queue: Promise<void> = Promise.resolve();
+
+function enqueue(run: () => Promise<void>): Promise<void> {
+	const turn = queue.then(run, run);
+	queue = turn.then(
+		() => undefined,
+		() => undefined,
+	);
+	return turn;
+}
 
 let mobilePane: "list" | "diff" = "list";
 
@@ -146,8 +156,8 @@ onSessionSync(() => {
 
 function resetState(sessionId: string | null): void {
 	// No abort: the requests in flight keep their server-side slots
-	// until git ends anyway (see loadInFlight), so the next load WAITS
-	// for them; the generation bump just drops their results.
+	// until git ends anyway, so the next session's load takes its turn
+	// on the queue behind them; the generation bump drops their results.
 	generation++;
 	stateSessionId = sessionId;
 	dir = "";
@@ -168,54 +178,50 @@ async function load(): Promise<void> {
 	status = { status: "loading" };
 	log = { status: "loading" };
 	renderAll();
-	// Two requests are about to go out: wait for a load or a diff still
-	// in flight (see loadInFlight / diffInFlight above). A Refresh during
-	// the initial load, or a session switch mid-load, therefore waits for
-	// the earlier requests instead of racing them for the two slots.
-	await Promise.all([loadInFlight, diffInFlight]);
-	if (stale()) return;
-
-	// Status and log are independent reads: fire both, render each as it
-	// lands. A log failure on a non-repo is expected and never shown.
-	const statusDone = fetchGitStatus(sessionId, dir).then(
-		(data) => {
-			if (stale()) return;
-			status = { status: "loaded", data };
-			// Keep the open diff only if its file is still in the list;
-			// otherwise it describes a change that no longer exists.
-			if (selected !== null && !(data.repo && findChange(data, selected))) {
-				selected = null;
-				clearDiff();
-				mobilePane = "list";
-			}
-		},
-		(err: unknown) => {
-			if (stale()) return;
-			status = {
-				status: "error",
-				message: (err as Error).message,
-				httpStatus: err instanceof GitApiError ? err.status : 0,
-				code: err instanceof GitApiError ? err.code : null,
-			};
-		},
-	);
-	const logDone = fetchGitLog(sessionId, dir).then(
-		(commits) => {
-			if (stale()) return;
-			log = { status: "loaded", commits };
-		},
-		(err: unknown) => {
-			if (stale()) return;
-			log = { status: "error", message: (err as Error).message };
-		},
-	);
-	loadInFlight = Promise.all([statusDone, logDone]).then(() => undefined);
-	await statusDone;
-	if (stale()) return;
-	renderAll();
-	await logDone;
-	if (stale()) return;
-	renderList();
+	await enqueue(async () => {
+		if (stale()) return;
+		// Status and log are independent reads: fire both, render each as
+		// it lands. A log failure on a non-repo is expected and never shown.
+		// The turn ends only when BOTH have settled.
+		const statusDone = fetchGitStatus(sessionId, dir).then(
+			(data) => {
+				if (stale()) return;
+				status = { status: "loaded", data };
+				// Keep the open diff only if its file is still in the list;
+				// otherwise it describes a change that no longer exists.
+				if (selected !== null && !(data.repo && findChange(data, selected))) {
+					selected = null;
+					clearDiff();
+					mobilePane = "list";
+				}
+				renderAll();
+			},
+			(err: unknown) => {
+				if (stale()) return;
+				status = {
+					status: "error",
+					message: (err as Error).message,
+					httpStatus: err instanceof GitApiError ? err.status : 0,
+					code: err instanceof GitApiError ? err.code : null,
+				};
+				renderAll();
+			},
+		);
+		const logDone = fetchGitLog(sessionId, dir).then(
+			(commits) => {
+				if (stale()) return;
+				log = { status: "loaded", commits };
+				renderList();
+			},
+			(err: unknown) => {
+				if (stale()) return;
+				log = { status: "error", message: (err as Error).message };
+				renderList();
+			},
+		);
+		await statusDone;
+		await logDone;
+	});
 }
 
 function findChange(data: GitStatus, sel: Selected): GitChange | undefined {
@@ -225,8 +231,6 @@ function findChange(data: GitStatus, sel: Selected): GitChange | undefined {
 
 function clearDiff(): void {
 	diffToken++;
-	diffAbort?.abort();
-	diffAbort = null;
 	diff = { status: "none" };
 }
 
@@ -237,35 +241,29 @@ async function openDiff(sel: Selected): Promise<void> {
 	const stale = () => token !== diffToken || sessionId !== stateSessionId;
 	diff = { status: "loading" };
 	renderDiff();
-	// Queue behind the load and the previous diff (see diffInFlight). A
-	// click that was itself superseded while waiting never fetches.
-	await Promise.all([loadInFlight, diffInFlight]);
-	if (stale()) return;
-	const abort = new AbortController();
-	diffAbort = abort;
-	const request = fetchGitDiff(
-		sessionId,
-		{ path: sel.path, area: sel.area, oldPath: sel.oldPath, dir },
-		abort.signal,
-	);
-	diffInFlight = request.then(
-		() => undefined,
-		() => undefined,
-	);
-	try {
-		const data = await request;
+	await enqueue(async () => {
+		// A click superseded while it waited its turn never fetches.
 		if (stale()) return;
-		diff = { status: "loaded", data };
-	} catch (err) {
-		if (stale()) return;
-		diff = {
-			status: "error",
-			message: (err as Error).message,
-			httpStatus: err instanceof GitApiError ? err.status : 0,
-			code: err instanceof GitApiError ? err.code : null,
-		};
-	}
-	renderDiff();
+		try {
+			const data = await fetchGitDiff(sessionId, {
+				path: sel.path,
+				area: sel.area,
+				oldPath: sel.oldPath,
+				dir,
+			});
+			if (stale()) return;
+			diff = { status: "loaded", data };
+		} catch (err) {
+			if (stale()) return;
+			diff = {
+				status: "error",
+				message: (err as Error).message,
+				httpStatus: err instanceof GitApiError ? err.status : 0,
+				code: err instanceof GitApiError ? err.code : null,
+			};
+		}
+		renderDiff();
+	});
 }
 
 // ── Actions ─────────────────────────────────────────────────────────────────

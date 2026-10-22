@@ -404,11 +404,12 @@ describe("diff", () => {
 		expect($("git-diff").textContent).toContain("Select a changed file");
 		rowFor("unstaged:src/app.ts")?.click();
 		await flush();
-		expect(api.fetchGitDiff).toHaveBeenCalledWith(
-			"s1",
-			{ path: "src/app.ts", area: "unstaged", oldPath: null, dir: "" },
-			expect.any(AbortSignal),
-		);
+		expect(api.fetchGitDiff).toHaveBeenCalledWith("s1", {
+			path: "src/app.ts",
+			area: "unstaged",
+			oldPath: null,
+			dir: "",
+		});
 		expect(rowFor("unstaged:src/app.ts")?.classList.contains("selected")).toBe(true);
 		const rows = [...document.querySelectorAll<HTMLElement>(".git-diff-row")];
 		const kinds = rows.map((r) => r.className.replace("git-diff-row ", ""));
@@ -441,11 +442,12 @@ describe("diff", () => {
 		await flush();
 		rowFor("staged:docs/b.md")?.click();
 		await flush();
-		expect(api.fetchGitDiff).toHaveBeenCalledWith(
-			"s1",
-			{ path: "docs/b.md", area: "staged", oldPath: "docs/a.md", dir: "app" },
-			expect.any(AbortSignal),
-		);
+		expect(api.fetchGitDiff).toHaveBeenCalledWith("s1", {
+			path: "docs/b.md",
+			area: "staged",
+			oldPath: "docs/a.md",
+			dir: "app",
+		});
 	});
 
 	it("never requests a diff for a restricted entry", async () => {
@@ -587,11 +589,12 @@ describe("diff", () => {
 		finishLog(COMMITS);
 		await flush();
 		expect(api.fetchGitDiff).toHaveBeenCalledTimes(1);
-		expect(api.fetchGitDiff).toHaveBeenLastCalledWith(
-			"s1",
-			{ path: "src/app.ts", area: "unstaged", oldPath: null, dir: "" },
-			expect.any(AbortSignal),
-		);
+		expect(api.fetchGitDiff).toHaveBeenLastCalledWith("s1", {
+			path: "src/app.ts",
+			area: "unstaged",
+			oldPath: null,
+			dir: "",
+		});
 		expect(rowFor("unstaged:src/app.ts")?.classList.contains("selected")).toBe(true);
 	});
 
@@ -614,6 +617,78 @@ describe("diff", () => {
 		expect(api.fetchGitStatus).toHaveBeenCalledTimes(2);
 		expect(api.fetchGitLog).toHaveBeenCalledTimes(2);
 		expect($("git-list").textContent).toContain("Working tree clean");
+		expect($("git-list").textContent).not.toContain("Couldn't");
+	});
+
+	it("a session switch with a diff pending queues the new session's load behind it", async () => {
+		api.fetchGitStatus.mockResolvedValue(DIRTY);
+		await openGit();
+		let finishDiff: (v: unknown) => void = () => {};
+		api.fetchGitDiff.mockReturnValueOnce(new Promise((r) => (finishDiff = r)));
+		rowFor("unstaged:src/app.ts")?.click();
+		await flush();
+		expect(api.fetchGitDiff).toHaveBeenCalledTimes(1);
+		api.fetchGitStatus.mockResolvedValue(CLEAN);
+		selectSession("s2");
+		await flush();
+		// s1's diff still holds a server slot: s2's two requests wait.
+		expect(api.fetchGitStatus).toHaveBeenCalledTimes(1);
+		expect($("git-list").textContent).toContain("Reading git status");
+		finishDiff({
+			path: "src/app.ts",
+			area: "unstaged",
+			patch: PATCH,
+			truncated: false,
+			binary: false,
+		});
+		await flush();
+		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s2", "");
+		expect(api.fetchGitLog).toHaveBeenLastCalledWith("s2", "");
+		expect($("git-list").textContent).toContain("Working tree clean");
+		expect($("git-list").textContent).toContain("feat: thing");
+		// The old diff's result was dropped, not rendered into s2.
+		expect($("git-diff").textContent).toContain("Select a changed file");
+	});
+
+	it("a queued diff and a Refresh released by the same earlier diff run one after the other", async () => {
+		api.fetchGitStatus.mockResolvedValue(DIRTY);
+		await openGit();
+		const pending: { path: string; resolve: (v: unknown) => void }[] = [];
+		api.fetchGitDiff.mockImplementation(
+			(_s: string, req: { path: string }) =>
+				new Promise((resolve) => {
+					pending.push({ path: req.path, resolve });
+				}),
+		);
+		const done = (i: number) =>
+			pending[i]?.resolve({
+				path: pending[i]?.path,
+				area: "unstaged",
+				patch: PATCH,
+				truncated: false,
+				binary: false,
+			});
+		rowFor("unstaged:src/app.ts")?.click(); // A: on the wire
+		await flush();
+		rowFor("staged:src/new.ts")?.click(); // B: queued behind A
+		$("git-refresh-btn").click(); // status+log: queued behind B
+		await flush();
+		expect(pending.map((p) => p.path)).toEqual(["src/app.ts"]);
+		expect(api.fetchGitStatus).toHaveBeenCalledTimes(1);
+		done(0);
+		await flush();
+		// A ended → only B starts; the load keeps waiting (two slots max).
+		expect(pending.map((p) => p.path)).toEqual(["src/app.ts", "src/new.ts"]);
+		expect(api.fetchGitStatus).toHaveBeenCalledTimes(1);
+		done(1);
+		await flush();
+		// B ended → status+log go out, then the refresh re-opens B's diff.
+		expect(api.fetchGitStatus).toHaveBeenCalledTimes(2);
+		expect(api.fetchGitLog).toHaveBeenCalledTimes(2);
+		expect(pending.map((p) => p.path)).toEqual(["src/app.ts", "src/new.ts", "src/new.ts"]);
+		done(2);
+		await flush();
+		expect(rowFor("staged:src/new.ts")?.classList.contains("selected")).toBe(true);
 		expect($("git-list").textContent).not.toContain("Couldn't");
 	});
 
