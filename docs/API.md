@@ -29,6 +29,10 @@ Auth is via the httpOnly cookie `st_token` set by `POST /api/auth/login` and `PO
 | POST   | /api/sessions/:id/tabs        | Create a tab                                                    |
 | DELETE | /api/sessions/:id/tabs/:tabId | Delete a tab                                                    |
 | POST   | /api/sessions/:id/files       | Multipart file upload into the per-session uploads dir          |
+| GET    | /api/sessions/:id/files?path= | Download one workspace file (owner-only; restricted paths 403)  |
+| GET    | /api/sessions/:id/fs/list?path= | Workspace Explorer: list one directory level (owner-only)     |
+| GET    | /api/sessions/:id/fs/preview?path= | Workspace Explorer: bounded text preview / kind sniff (≤1 MiB) |
+| GET    | /api/sessions/:id/fs/raw?path= | Workspace Explorer: inline image bytes (allowlisted types, ≤10 MiB) |
 | POST   | /api/sessions/:id/exec        | Run a command, stream NDJSON output ([docs/EXEC_API.md](./EXEC_API.md)) |
 | GET    | /api/sessions/:id/exec/:execId | Exec status: `running` / `exited` / `unknown`                  |
 | POST   | /api/sessions/:id/exec/:execId/kill | Kill the exec's process group (race-free, idempotent)     |

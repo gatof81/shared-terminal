@@ -180,6 +180,15 @@
             <span>Session:</span>
             <span id="terminal-session-name"></span>
             <span id="terminal-status-badge"></span>
+            <!-- Workspace Explorer: Terminal ⇄ Files. Files is an overlay
+                 above the terminal panes (filesView.ts) so switching never
+                 resizes, detaches or disposes the terminal. -->
+            <div id="view-switch" role="group" aria-label="Session view" hidden>
+              <button id="view-terminal-btn" type="button" aria-pressed="true">Terminal</button>
+              <button id="view-files-btn" type="button" aria-pressed="false" title="Browse workspace files">
+                Files
+              </button>
+            </div>
             <button
               id="font-size-btn"
               type="button"
@@ -266,6 +275,30 @@
             <button type="button" data-key="down" data-repeat aria-label="Arrow down">↓</button>
             <button type="button" data-key="left" data-repeat aria-label="Arrow left">←</button>
             <button type="button" data-key="right" data-repeat aria-label="Arrow right">→</button>
+          </div>
+          <!-- Workspace Explorer (read-only). Absolutely positioned over
+               the tabs / terminal / key bar; `top` tracks the toolbar's
+               bottom edge (see filesView.ts). Content is built in TS. -->
+          <div id="files-view" hidden>
+            <div id="files-header">
+              <button id="files-to-terminal-btn" class="files-btn files-mobile-only" type="button">
+                ‹ Terminal
+              </button>
+              <nav id="files-breadcrumbs" aria-label="Current path"></nav>
+              <button
+                id="files-refresh-btn"
+                class="files-btn"
+                type="button"
+                title="Refresh"
+                aria-label="Refresh file tree and preview"
+              >
+                ↻
+              </button>
+            </div>
+            <div id="files-body">
+              <div id="files-tree" role="tree" aria-label="Workspace files"></div>
+              <div id="files-preview"></div>
+            </div>
           </div>
         </section>
       </main>

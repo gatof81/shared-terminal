@@ -30,6 +30,7 @@ import {
 	type SessionInfo,
 	type Tab,
 } from "./api.js";
+import { isFilesViewActive, syncFilesView } from "./filesView.js";
 import { closeInvitesModal } from "./invites.js";
 import { initKeyBar, updateKeyBarVisibility } from "./keyBar.js";
 import {
@@ -563,6 +564,11 @@ function handleLogout(toastMessage?: string): void {
 	// initial fetches, flashing own sessions as read-only rows. PR #397
 	// review SHOULD-FIX.
 	sessionsLoadedOnce = false;
+	// Drop the Files view's cached listings/preview and hide it. Nothing
+	// above routes through updateToolbar(), so without this a Files view
+	// left open would still show the previous user's workspace after the
+	// next login in this tab.
+	syncFilesView();
 	showAuth();
 	// Symmetry with showApp(): keep the admin-button visibility in
 	// lockstep with the api-layer's _isAdmin flag, which logout() and
@@ -934,13 +940,20 @@ export function updateChromeToggle() {
 		return;
 	}
 	chromeToggleBtn.hidden = false;
-	actionsBtn.hidden = false;
+	// The actions menu (paste / attach / select) writes into the terminal,
+	// which the Files view covers — hide it there; Files has its own
+	// download button.
+	actionsBtn.hidden = isFilesViewActive();
 	updateKeyBarVisibility();
 	const activeTab = currentTabs.find((t) => t.tabId === currentActiveTabId);
 	// Format: "session › tab". Falls back to just the session name when
 	// no tab is active yet (fresh session, between switches). Using a
 	// thin space + chevron keeps it scannable on a 430-pt-wide screen.
-	chromeToggleLabel.textContent = activeTab ? `${s.name} › ${activeTab.label}` : s.name;
+	chromeToggleLabel.textContent = isFilesViewActive()
+		? `${s.name} › Files`
+		: activeTab
+			? `${s.name} › ${activeTab.label}`
+			: s.name;
 }
 
 chromeToggleBtn.addEventListener("click", () => {

@@ -159,6 +159,41 @@ Unlike `writeEnvFile` this is not opt-in — persistence is the point of
 the feature, and the alternative (state evaporating on every recreate)
 was a standing bug, not a privacy control anyone relied on.
 
+## Browsing workspace files from the browser
+
+The Workspace Explorer (`GET /api/sessions/:id/fs/*`) and the file
+download route (`GET /api/sessions/:id/files`) read the session
+workspace straight from the host bind mount with the backend's
+privileges (typically root), so both go through one hardened opener
+(`backend/src/workspaceFiles.ts`):
+
+- **Owner-only.** Ownership is checked before any filesystem access, not
+  via the observe tier: group leads and admins can't read workspace files
+  through these routes (they'd be an unaudited widening of what
+  observe/operate grants). A foreign session answers the same 404 as a
+  missing one.
+- **Containment.** Lexical resolve + prefix check, realpath of the
+  parent, `O_NOFOLLOW | O_NONBLOCK` open, then a re-check of what the
+  fd *actually* points at via `/proc/self/fd/<n>` — so a symlink or
+  directory swapped in by code inside the container between check and
+  open is still caught (on Linux this check is mandatory; a failure to
+  read the link fails the request). Symlink leaves are never followed.
+- **Restricted paths.** Credential-bearing paths are refused with 403
+  even to the owner: `.st/` (Claude OAuth state, transcripts, SSH keys —
+  see above), `.ssh/`, `.git/`, `.config/gh/`, `.vscode-cli/`,
+  `.aws/`/`.kube/`/`.docker/`/`.gnupg/`, `.env` / `.env.*` (templates
+  like `.env.example` allowed), `.envrc` / `.direnv/`, private-key and keystore extensions,
+  `.netrc` / `.npmrc` / `.git-credentials` and similar. It's a denylist,
+  so best-effort: it keeps secrets out of one-click browser
+  copy/download/screenshots, it is **not** a sandbox — the owner can
+  still `cat` anything from their terminal.
+- **Bounded reads.** Previews read at most 1 MiB (never the whole file);
+  inline images are capped at 10 MiB, streamed with backpressure, and
+  served from an extension allowlist with `nosniff`,
+  `Content-Disposition: attachment`, and a `sandbox` CSP so an SVG can't
+  run script on the API origin. Concurrent previews are capped per user
+  and per process (429 when full), on top of the per-IP rate limits.
+
 ## Optional: docker-socket-proxy
 
 For deployments that want to shrink the backend's daemon surface

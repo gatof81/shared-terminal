@@ -117,6 +117,26 @@ export function serializeMeta(m: SessionMeta): {
 	};
 }
 
+/**
+ * `assertOwnedBy`, but a foreign session answers exactly like a missing
+ * one (NotFoundError → 404). `assertOwnedBy` itself distinguishes them
+ * (403 vs 404), which is right for lifecycle routes; the workspace-file
+ * routes use this instead so probing another user's session id can't
+ * confirm the session exists. Same collapse the templates surface makes.
+ */
+export async function assertOwnedByOr404(
+	sessions: SessionManager,
+	sessionId: string,
+	userId: string,
+): Promise<void> {
+	try {
+		await sessions.assertOwnedBy(sessionId, userId);
+	} catch (err) {
+		if (err instanceof ForbiddenError) throw new NotFoundError();
+		throw err;
+	}
+}
+
 export function handleSessionError(err: unknown, res: Response): void {
 	if (err instanceof NotFoundError) {
 		res.status(404).json({ error: err.message });
