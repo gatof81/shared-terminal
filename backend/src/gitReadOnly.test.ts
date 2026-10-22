@@ -7,7 +7,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
 	attachNumstat,
 	type CaptureResult,
+	checkRepoLocation,
 	classifyFailure,
+	countPatchSections,
 	GIT_DIFF_MAX_BYTES,
 	GIT_MAX_STATUS_FILES,
 	type GitRunner,
@@ -21,6 +23,7 @@ import {
 	parseLog,
 	parseNumstat,
 	parsePorcelainV2,
+	parseRawZ,
 	splitNulRecords,
 	trimToLastLine,
 	validateGitDir,
@@ -59,9 +62,17 @@ function scripted(answers: Record<string, CaptureResult | ((argv: string[]) => C
 			if (a === undefined) throw new Error(`unscripted command: ${argv.join(" ")}`);
 			return typeof a === "function" ? a(argv) : a;
 		}),
+		workspaceDir: WS,
 	};
 	return { runner, calls };
 }
+
+const WS = "/home/developer/workspace";
+/** `rev-parse --show-toplevel --show-prefix` answer for a repo rooted at `dir`, cwd `prefix` below it. */
+const at = (root: string, prefix = "") => ok(`${WS}${root === "" ? "" : `/${root}`}\n${prefix}\n`);
+const rawM = (path: string) => `:100644 100644 abc def M${Z}${path}${Z}`;
+const rawR = (oldPath: string, path: string) =>
+	`:100644 100644 abc def R100${Z}${oldPath}${Z}${path}${Z}`;
 
 function keyOf(argv: string[]): string {
 	if (argv[0] === "find") return "find";
@@ -70,8 +81,10 @@ function keyOf(argv: string[]): string {
 	while (argv[i] === "-C" || argv[i] === "-c") i += 2;
 	const sub = argv[i] as string;
 	if (sub === "diff") {
-		if (argv.includes("--cached")) return "diff --cached";
+		const raw = argv.includes("--raw") ? " --raw" : "";
+		if (argv.includes("--cached")) return `diff --cached${raw}`;
 		if (argv.includes("--no-index")) return "diff --no-index";
+		return `diff${raw}`;
 	}
 	return sub;
 }
@@ -292,7 +305,7 @@ describe("getGitStatus", () => {
 			status: ok(`${status}${Z}`),
 			"diff --cached": ok(""),
 			diff: ok(`2\t1\ta.ts${Z}`),
-			"rev-parse": ok("\n"),
+			"rev-parse": at(""),
 		});
 		const r = await getGitStatus(runner, "");
 		expect(r.repo).toBe(true);
@@ -322,7 +335,7 @@ describe("getGitStatus", () => {
 			status: ok(`# branch.head main${Z}`),
 			"diff --cached": ok(""),
 			diff: ok(""),
-			"rev-parse": ok("src/lib/\n"),
+			"rev-parse": at("proj", "src/lib/"),
 		});
 		const r = await getGitStatus(runner, "proj/src/lib");
 		expect(r).toMatchObject({ repo: true, root: "proj" });
@@ -368,14 +381,14 @@ describe("getGitStatus", () => {
 			status: fail("", 124, { timedOut: true }),
 			"diff --cached": ok(""),
 			diff: ok(""),
-			"rev-parse": ok(""),
+			"rev-parse": at(""),
 		});
 		await expect(getGitStatus(t.runner, "")).rejects.toMatchObject({ code: "timeout" });
 		const u = scripted({
 			status: fail("fatal: detected dubious ownership in repository at '/x'"),
 			"diff --cached": ok(""),
 			diff: ok(""),
-			"rev-parse": ok(""),
+			"rev-parse": at(""),
 		});
 		await expect(getGitStatus(u.runner, "")).rejects.toMatchObject({ code: "unsafe-repository" });
 	});
@@ -385,7 +398,7 @@ describe("getGitStatus", () => {
 			status: ok(`# branch.head main${Z}${many}${Z}`),
 			"diff --cached": ok(""),
 			diff: ok(""),
-			"rev-parse": ok(""),
+			"rev-parse": at(""),
 		});
 		const r = await getGitStatus(runner, "");
 		if (!r.repo) throw new Error("unreachable");
@@ -394,15 +407,106 @@ describe("getGitStatus", () => {
 	});
 });
 
+describe("repository location (G1: `dir` through a symlink / redirected worktree)", () => {
+	it("checkRepoLocation accepts the lexical location and rejects everything else", () => {
+		expect(checkRepoLocation(WS, "", `${WS}\n\n`)).toBe("");
+		expect(checkRepoLocation(WS, "proj", `${WS}/proj\n\n`)).toBe("");
+		expect(checkRepoLocation(WS, "proj/src", `${WS}/proj\nsrc/\n`)).toBe("src/");
+		const bad = (dir: string, out: string) =>
+			expect(() => checkRepoLocation(WS, dir, out)).toThrow(
+				expect.objectContaining({ code: "outside-workspace" }),
+			);
+		bad("alias", "/home/developer/.st\n\n"); // symlink out of the workspace
+		bad("link", `${WS}/proj\n\n`); // symlink to a sibling inside it
+		bad("proj/src", `${WS}/other\nsrc/\n`);
+		bad("", "/\nhome/developer/workspace/\n"); // core.worktree=/
+		bad("", "\n\n"); // nothing to verify
+	});
+	it("status refuses (and returns nothing) when the repo is not where dir says", async () => {
+		const { runner } = scripted({
+			status: ok(`# branch.head main${Z}1 .M N... 100644 100644 100644 a b notes.txt${Z}`),
+			"diff --cached": ok(""),
+			diff: ok(""),
+			"rev-parse": ok("/home/developer/.st\n\n"),
+		});
+		await expect(getGitStatus(runner, "alias")).rejects.toMatchObject({
+			code: "outside-workspace",
+		});
+	});
+	it("status treats a failing rev-parse as an error, not as root=dir", async () => {
+		const { runner } = scripted({
+			status: ok(`# branch.head main${Z}`),
+			"diff --cached": ok(""),
+			diff: ok(""),
+			"rev-parse": fail("fatal: this operation must be run in a work tree"),
+		});
+		await expect(getGitStatus(runner, "")).rejects.toMatchObject({ code: "git-failed" });
+	});
+	it("log and diff check the location before answering", async () => {
+		const { runner, calls } = scripted({
+			"rev-parse": ok("/home/developer/.st\n\n"),
+			log: ok(""),
+			"diff --raw": ok(rawM("a.ts")),
+			diff: ok("x"),
+		});
+		await expect(getGitLog(runner, "alias")).rejects.toMatchObject({ code: "outside-workspace" });
+		await expect(
+			getGitDiff(runner, "alias", { path: "a.ts", oldPath: null, area: "unstaged" }),
+		).rejects.toMatchObject({ code: "outside-workspace" });
+		expect(calls.filter((c) => keyOf(c) === "rev-parse")).toHaveLength(2);
+		// No patch was produced.
+		expect(calls.some((c) => keyOf(c) === "diff")).toBe(false);
+	});
+});
+
+describe("parseRawZ / countPatchSections", () => {
+	it("parses M / A / D, renames with two paths, and combined (conflict) records", () => {
+		const recs = splitNulRecords(
+			Buffer.from(
+				`${rawM("a b.ts")}:000000 100644 0 1 A${Z}new${Z}${rawR("old", "new name")}::100644 100644 100644 1 2 0 MM${Z}conf.txt${Z}`,
+			),
+			false,
+		);
+		expect(parseRawZ(recs)).toEqual([
+			{ status: "M", path: "a b.ts", oldPath: null },
+			{ status: "A", path: "new", oldPath: null },
+			{ status: "R", path: "new name", oldPath: "old" },
+			{ status: "M", path: "conf.txt", oldPath: null },
+		]);
+		expect(parseRawZ([])).toEqual([]);
+		// A cut record (header without its path) ends the parse.
+		expect(parseRawZ([":100644 100644 a b M"])).toEqual([]);
+	});
+	it("counts file sections only from header lines, never from content", () => {
+		expect(countPatchSections("")).toBe(0);
+		expect(countPatchSections("diff --git a/x b/x\n@@ -1 +1 @@\n-diff --git a/y b/y\n+x\n")).toBe(
+			1,
+		);
+		expect(countPatchSections("diff --cc f\n@@@ -1 -1 +1 @@@\n++x\n")).toBe(1);
+		expect(countPatchSections("diff --git a/x b/x\n+a\ndiff --git a/y b/y\n+b\n")).toBe(2);
+	});
+});
+
 describe("getGitDiff", () => {
-	it("staged / unstaged use literal top-level pathspecs after --", async () => {
-		const { runner, calls } = scripted({ diff: ok("patch\n"), "diff --cached": ok("cached\n") });
+	const located = { "rev-parse": at("") };
+	it("staged / unstaged use literal top-level pathspecs after --, after identifying the file", async () => {
+		const { runner, calls } = scripted({
+			...located,
+			"rev-parse": (argv) => (argv[1] === "-C" ? at("p") : at("")),
+			diff: ok("patch\n"),
+			"diff --cached": ok("cached\n"),
+			"diff --raw": ok(rawM("-rf")),
+			"diff --cached --raw": ok(rawR("old.ts", "new.ts")),
+		});
 		await getGitDiff(runner, "", { path: "-rf", oldPath: null, area: "unstaged" });
 		await getGitDiff(runner, "p", { path: "new.ts", oldPath: "old.ts", area: "staged" });
-		const unstaged = calls[0] as string[];
+		const unstaged = calls.find((c) => keyOf(c) === "diff") as string[];
 		expect(unstaged.slice(-2)).toEqual(["--", ":(top,literal)-rf"]);
 		expect(unstaged).not.toContain("--cached");
-		const staged = calls[1] as string[];
+		const identify = calls.find((c) => keyOf(c) === "diff --raw") as string[];
+		expect(identify).toContain("-z");
+		expect(identify.slice(-2)).toEqual(["--", ":(top,literal)-rf"]);
+		const staged = calls.find((c) => keyOf(c) === "diff --cached") as string[];
 		expect(staged.slice(0, 3)).toEqual(["git", "-C", "p"]);
 		expect(staged).toContain("--cached");
 		expect(staged.slice(-3)).toEqual(["--", ":(top,literal)old.ts", ":(top,literal)new.ts"]);
@@ -410,16 +514,116 @@ describe("getGitDiff", () => {
 		const dd = staged.indexOf("--");
 		expect(staged.slice(0, dd)).not.toContain("new.ts");
 	});
-	it("untracked diffs against /dev/null with --no-index and accepts exit 1", async () => {
+	it("an unmerged path (reported twice by --raw, U then M) still counts as one file", async () => {
 		const { runner, calls } = scripted({
+			...located,
+			"diff --raw": ok(`:000000 100644 0 0 U${Z}f.txt${Z}${rawM("f.txt")}`),
+			diff: ok("diff --cc f.txt\n@@@ -1,2 -1,2 +1,6 @@@\n++<<<<<<< HEAD\n"),
+		});
+		const r = await getGitDiff(runner, "", { path: "f.txt", oldPath: null, area: "conflict" });
+		expect(r.patch).toContain("diff --cc f.txt");
+		expect((calls.find((c) => keyOf(c) === "diff") as string[]).slice(-2)).toEqual([
+			"--",
+			":(top,literal)f.txt",
+		]);
+	});
+	it("the patch pathspecs are the names GIT reported, not the client's hint", async () => {
+		// Client says "renamed from old.ts"; git says it's a plain addition.
+		const { runner, calls } = scripted({
+			...located,
+			"diff --cached": ok(""),
+			"diff --cached --raw": ok(":000000 100644 0 1 A\0new.ts\0"),
+		});
+		await getGitDiff(runner, "", { path: "new.ts", oldPath: "old.ts", area: "staged" });
+		const patch = calls.find((c) => keyOf(c) === "diff --cached") as string[];
+		expect(patch.slice(-2)).toEqual(["--", ":(top,literal)new.ts"]);
+	});
+	it("refuses a pathspec that is not exactly one file (a directory, several entries, the wrong one)", async () => {
+		const cases = [rawM("src/.env") + rawM("src/app.ts"), rawM("src/.env"), ""];
+		const expected = ["not-a-single-file", "not-a-single-file", null];
+		for (let i = 0; i < cases.length; i++) {
+			const { runner, calls } = scripted({
+				...located,
+				"diff --raw": ok(cases[i] as string),
+				diff: ok("must not run"),
+			});
+			const p = getGitDiff(runner, "", { path: "src", oldPath: null, area: "unstaged" });
+			if (expected[i] === null) {
+				expect(await p).toMatchObject({ patch: "", truncated: false, binary: false });
+			} else {
+				await expect(p).rejects.toMatchObject({ code: expected[i] });
+			}
+			expect(calls.some((c) => keyOf(c) === "diff")).toBe(false);
+		}
+		// Identification output cut by the cap = certainly many files.
+		const { runner } = scripted({
+			...located,
+			"diff --raw": ok(rawM("src"), { truncated: true }),
+		});
+		await expect(
+			getGitDiff(runner, "", { path: "src", oldPath: null, area: "unstaged" }),
+		).rejects.toMatchObject({ code: "not-a-single-file" });
+	});
+	it("applies the denylist to the old side of a rename git reports", async () => {
+		const { runner, calls } = scripted({
+			...located,
+			"diff --cached --raw": ok(rawR(".env", "settings.txt")),
+			"diff --cached": ok("must not run"),
+		});
+		await expect(
+			getGitDiff(runner, "", { path: "settings.txt", oldPath: null, area: "staged" }),
+		).rejects.toMatchObject({ code: "restricted" });
+		expect(calls.some((c) => keyOf(c) === "diff --cached")).toBe(false);
+	});
+	it("refuses a patch that spans more than one file", async () => {
+		const { runner } = scripted({
+			...located,
+			"diff --raw": ok(rawM("src")),
+			diff: ok("diff --git a/src b/src\n+a\ndiff --git a/src/.env b/src/.env\n+S=1\n"),
+		});
+		await expect(
+			getGitDiff(runner, "", { path: "src", oldPath: null, area: "unstaged" }),
+		).rejects.toMatchObject({ code: "not-a-single-file" });
+	});
+	it("untracked diffs against /dev/null with --no-index and accepts exit 1 — after ls-files lists it", async () => {
+		const { runner, calls } = scripted({
+			...located,
+			"ls-files": ok(`n.txt${Z}`),
 			"diff --no-index": ok("diff --git a/n b/n\n+x\n", { exitCode: 1 }),
 		});
 		const r = await getGitDiff(runner, "", { path: "n.txt", oldPath: null, area: "untracked" });
 		expect(r.patch).toContain("+x");
-		expect((calls[0] as string[]).slice(-3)).toEqual(["--", "/dev/null", "n.txt"]);
+		const ls = calls.find((c) => keyOf(c) === "ls-files") as string[];
+		expect(ls).toEqual(
+			expect.arrayContaining(["--others", "--exclude-standard", "-z", "--", ":(top,literal)n.txt"]),
+		);
+		expect((calls.find((c) => keyOf(c) === "diff --no-index") as string[]).slice(-3)).toEqual([
+			"--",
+			"/dev/null",
+			"n.txt",
+		]);
+	});
+	it("untracked: not listed by git → empty, listed as a directory → refused, never read", async () => {
+		const hidden = scripted({ ...located, "ls-files": ok(""), "diff --no-index": ok("leak") });
+		expect(
+			await getGitDiff(hidden.runner, "", { path: "alias/x", oldPath: null, area: "untracked" }),
+		).toMatchObject({ patch: "" });
+		const dir = scripted({
+			...located,
+			"ls-files": ok(`d/a${Z}d/b${Z}`),
+			"diff --no-index": ok("leak"),
+		});
+		await expect(
+			getGitDiff(dir.runner, "", { path: "d", oldPath: null, area: "untracked" }),
+		).rejects.toMatchObject({ code: "not-a-single-file" });
+		for (const s of [hidden, dir]) {
+			expect(s.calls.some((c) => keyOf(c) === "diff --no-index")).toBe(false);
+		}
 	});
 	it("flags binary patches and trims a truncated patch to whole lines", async () => {
 		const { runner } = scripted({
+			...located,
+			"diff --raw": (argv) => ok(rawM((argv[argv.length - 1] as string).slice(14))),
 			diff: (argv) =>
 				argv.some((a) => a.endsWith("img.png"))
 					? ok("diff --git a/img.png b/img.png\nBinary files a/img.png and b/img.png differ\n")
@@ -432,8 +636,21 @@ describe("getGitDiff", () => {
 		expect(t.patch).toBe("@@ -1 +1 @@\n-a\n+b\n");
 		expect(GIT_DIFF_MAX_BYTES).toBeGreaterThan(0);
 	});
+	it("a truncated patch is the answer even when git was later killed by timeout", async () => {
+		const { runner } = scripted({
+			"rev-parse": at(""),
+			"diff --raw": ok(rawM("x")),
+			diff: ok("@@ -1 +1 @@\n+a\n+b", { truncated: true, timedOut: true, exitCode: 124 }),
+		});
+		const r = await getGitDiff(runner, "", { path: "x", oldPath: null, area: "unstaged" });
+		expect(r).toMatchObject({ truncated: true, patch: "@@ -1 +1 @@\n+a\n" });
+	});
 	it("maps a failing diff to GitError", async () => {
-		const { runner } = scripted({ diff: fail("fatal: bad revision") });
+		const { runner } = scripted({
+			"rev-parse": at(""),
+			"diff --raw": ok(rawM("x")),
+			diff: fail("fatal: bad revision"),
+		});
 		await expect(
 			getGitDiff(runner, "", { path: "x", oldPath: null, area: "unstaged" }),
 		).rejects.toMatchObject({ code: "git-failed" });
@@ -444,6 +661,7 @@ describe("getGitLog", () => {
 	it("parses -z records and treats an unborn HEAD as no commits", async () => {
 		const h = "b".repeat(40);
 		const { runner, calls } = scripted({
+			"rev-parse": at(""),
 			log: ok(`${h}\x1fbbbbbbb\x1fAda\x1f2026-01-01T00:00:00+00:00\x1fmsg${Z}`),
 		});
 		const commits = await getGitLog(runner, "");
@@ -456,12 +674,19 @@ describe("getGitLog", () => {
 				subject: "msg",
 			},
 		]);
-		expect(calls[0]).toContain("--no-show-signature");
+		expect(calls.find((c) => keyOf(c) === "log")).toContain("--no-show-signature");
 		const empty = scripted({
+			"rev-parse": at(""),
 			log: fail("fatal: your current branch 'main' does not have any commits yet"),
 		});
 		expect(await getGitLog(empty.runner, "")).toEqual([]);
-		const broken = scripted({ log: fail("fatal: something else") });
+		const broken = scripted({ "rev-parse": at(""), log: fail("fatal: something else") });
 		await expect(getGitLog(broken.runner, "")).rejects.toMatchObject({ code: "git-failed" });
+		// Not a repository at all: rev-parse and log both say so → not-a-repo.
+		const none = scripted({
+			"rev-parse": fail("fatal: not a git repository"),
+			log: fail("fatal: not a git repository (or any of the parent directories): .git"),
+		});
+		await expect(getGitLog(none.runner, "")).rejects.toMatchObject({ code: "not-a-repo" });
 	});
 });

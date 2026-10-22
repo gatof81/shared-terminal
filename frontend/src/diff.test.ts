@@ -68,6 +68,48 @@ describe("parseUnifiedDiff", () => {
 		expect(d.rows[6]?.text).toBe("weird");
 	});
 
+	it("parses git's combined diff for a conflicted file (@@@ hunks, one marker column per parent)", () => {
+		const combined = [
+			"diff --cc f.txt",
+			"index c529826,e9ffce5..0000000",
+			"--- a/f.txt",
+			"+++ b/f.txt",
+			"@@@ -1,4 -1,3 +1,8 @@@",
+			"  l1",
+			"++<<<<<<< HEAD",
+			" +OURS",
+			"++=======",
+			"+ THEIRS",
+			"++>>>>>>> other",
+			"  l3",
+			" +l4",
+			"- gone",
+			"",
+		].join("\n");
+		const d = parseUnifiedDiff(combined);
+		expect(d.hasHunks).toBe(true);
+		const brief = d.rows.map((r) => `${r.kind}:${r.oldNo ?? "-"}:${r.newNo ?? "-"}:${r.text}`);
+		expect(brief).toEqual([
+			"meta:-:-:diff --cc f.txt",
+			"meta:-:-:index c529826,e9ffce5..0000000",
+			"meta:-:-:--- a/f.txt",
+			"meta:-:-:+++ b/f.txt",
+			"hunk:-:-:@@@ -1,4 -1,3 +1,8 @@@",
+			"context:1:1:l1",
+			"add:-:2:<<<<<<< HEAD",
+			// In HEAD (first column blank) and in the result: numbered on both sides.
+			"add:2:3:OURS",
+			"add:-:4:=======",
+			"add:-:5:THEIRS",
+			"add:-:6:>>>>>>> other",
+			"context:3:7:l3",
+			"add:4:8:l4",
+			"del:5:-:gone",
+		]);
+		expect(d.additions).toBe(6);
+		expect(d.deletions).toBe(1);
+	});
+
 	it("is linear on adversarial input (long lines, many hunks)", () => {
 		const big = `@@ -1 +1 @@\n${"+".repeat(1)}${"x".repeat(100_000)}\n`.repeat(50);
 		const t0 = performance.now();

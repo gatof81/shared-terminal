@@ -101,21 +101,53 @@ describe("execCapture", () => {
 		).rejects.toBeInstanceOf(ContainerNotFoundError);
 	});
 
-	it("cuts stdout at maxBytes, flags truncated and reports an unknown exit code", async () => {
+	it("keeps the first maxBytes, DRAINS the rest until the process ends, and reports its real exit code", async () => {
 		const { dm, execCreate } = makeDocker({
 			chunks: [frame(1, "a".repeat(100)), frame(1, "b".repeat(100)), frame(1, "c".repeat(100))],
 			exitCode: 0,
-			hang: true,
 		});
 		const r = await dm.execCapture("s1", ["git", "diff"], { maxBytes: 150, timeoutMs: 20_000 });
 		expect(r.stdout.length).toBe(150);
 		expect(r.stdout.toString()).toBe(`${"a".repeat(100)}${"b".repeat(50)}`);
 		expect(r.truncated).toBe(true);
-		expect(r.exitCode).toBeNull();
-		// The stream was destroyed — nothing more is read, and inspect
-		// isn't consulted for a process whose output we abandoned.
+		// The stream was read to its end (not destroyed), so the exit code
+		// is known: the promise settled when the process did.
+		expect(r.exitCode).toBe(0);
+		expect(r.timedOut).toBe(false);
 		const exec = (await execCreate.mock.results[0]?.value) as { inspect: ReturnType<typeof vi.fn> };
-		expect(exec.inspect).not.toHaveBeenCalled();
+		expect(exec.inspect).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not settle a capped run while the process is still producing", async () => {
+		vi.useFakeTimers();
+		try {
+			const { dm, execCreate } = makeDocker({
+				chunks: [frame(1, "a".repeat(100))],
+				exitCode: 0,
+				hang: true,
+			});
+			let settled = false;
+			const p = dm
+				.execCapture("s1", ["git", "diff"], { maxBytes: 10, timeoutMs: 1_000 })
+				.then((r) => {
+					settled = true;
+					return r;
+				});
+			await vi.advanceTimersByTimeAsync(10);
+			expect(settled).toBe(false); // capped, but the producer is alive
+			// The producer keeps writing: still draining, still not settled.
+			const exec = (await execCreate.mock.results[0]?.value) as { _stream: PassThrough };
+			exec._stream.write(frame(1, "more"));
+			await vi.advanceTimersByTimeAsync(10);
+			expect(settled).toBe(false);
+			// It finally exits → settled, with the real exit code.
+			exec._stream.end();
+			const r = await p;
+			expect(r).toMatchObject({ truncated: true, exitCode: 0, timedOut: false });
+			expect(r.stdout.toString()).toBe("a".repeat(10));
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("reports timedOut when the in-container timeout fired (exit 124)", async () => {

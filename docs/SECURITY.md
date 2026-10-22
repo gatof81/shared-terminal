@@ -219,6 +219,31 @@ and the same restricted-path denylist as the Explorer (a committed
   glob. Diff output flags (`--no-ext-diff --no-textconv`) and
   per-invocation config (`core.fsmonitor=false`, `core.pager=cat`,
   `color.ui=never`) override anything the repo or user config sets.
+- **The denylist is enforced on what git resolves, not on what was
+  typed.** A clean-looking operand can still reach restricted content —
+  a pathspec naming a directory matches every file beneath it (`src` →
+  `src/.env`), `git diff --no-index` opens worktree paths through the OS
+  and so follows a symlinked parent (`alias → .st`), and `git -C <dir>`
+  follows symlinks too. So, before any content is produced: (1) every
+  request runs `git rev-parse --show-toplevel --show-prefix` and refuses
+  (403 `outside-workspace`) unless the repository's *real* top level is
+  exactly where `dir` lexically says inside the workspace — this also
+  catches a `core.worktree` pointing elsewhere; (2) a diff first asks git
+  which entries the pathspec matches (`git diff --raw -z`, or `git
+  ls-files --others` for untracked files — git's untracked walk never
+  descends into a symlink) and proceeds only when that is exactly the
+  one requested file; the names git reports — the old side of a rename
+  included, which the client can only hint at — must pass the
+  denylist (403 `restricted`), a directory or several matches is 400
+  `not-a-single-file`, and no match is an empty diff; (3) the patch git
+  then produces is refused if it spans more than one file. The window
+  between (2) and the patch is a race the session owner could only run
+  against themself inside their own container (these routes are
+  owner-only), and (3) closes the "file became a directory" variant of
+  it. The denylist stays name-based: a rename *away* from `.env` is
+  listed as restricted (so the UI never asks), but requested without the
+  old-name hint git reports an addition under the new, non-restricted
+  name — the same bytes the Files view would preview under that name.
 - **Read-only in deed.** Nothing here stages, commits or moves refs.
   `GIT_OPTIONAL_LOCKS=0` keeps `git status` from taking the index lock at
   all; `git diff` may still refresh the index's *stat cache* in place
@@ -232,8 +257,17 @@ and the same restricted-path denylist as the Explorer (a committed
   host-side backstop; stdout is capped (2 MiB status, 512 KiB diff, 256
   KiB log — `truncated` is reported, never silently cut); the change list
   is capped at 2000 entries and the log at 50 commits. Concurrent git
-  requests are capped per user and per process (429), on top of a per-IP
-  rate limit. The UI stops rendering a diff past 5000 lines.
+  requests are capped per user (2) and per process (8) with 429, on top
+  of a per-IP rate limit — and a slot is held until the git process has
+  actually *ended* and the response has been sent, not until the client
+  hangs up: a docker exec cannot be cancelled, so a disconnecting client
+  (or one that aborts a fetch) would otherwise turn the cap into no cap.
+  For the same reason output past the byte cap is drained rather than
+  the stream destroyed, so "finished" means the process exited (the
+  in-container `timeout` bounds the drain). The frontend sequences its
+  own requests (status+log, then the open diff; a new diff waits for the
+  previous one) to stay within its two slots. The UI stops rendering a
+  diff past 5000 lines on every rendering path.
 - **Diagnostics.** On failure only the first line of git's stderr (capped,
   URL credentials scrubbed) reaches the client.
 

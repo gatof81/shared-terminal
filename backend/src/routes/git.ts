@@ -35,13 +35,13 @@ import {
 import { InFlightLimiter } from "../inFlightLimiter.js";
 import { logger } from "../logger.js";
 import { isRestrictedPath, type WorkspaceFsError } from "../workspaceFiles.js";
-import { holdSlotUntilResponseEnds } from "./files.js";
 import { assertOwnedByOr404, handleSessionError, type RouteContext } from "./shared.js";
 
 // Concurrency: each request is 1–4 docker execs holding up to 2 MiB of
 // output apiece. Per user, one status refresh plus one diff in flight is
 // the interactive maximum; process-wide, 8 keeps a burst of users from
-// stacking dozens of git processes on the daemon.
+// stacking dozens of git processes on the daemon. The frontend
+// sequences its own requests to stay within the per-user cap.
 export const GIT_IN_FLIGHT_PER_USER = 2;
 export const GIT_IN_FLIGHT_TOTAL = 8;
 
@@ -49,13 +49,61 @@ function sendFsError(res: Response, err: WorkspaceFsError): void {
 	res.status(err.status).json({ error: err.error });
 }
 
-function sendGitError(res: Response, err: GitError): void {
+const GIT_ERROR_STATUS: Record<GitError["code"], number> = {
 	// 504 for a timeout (the container's git didn't answer in time), 409
 	// for a repo git refuses to touch, 502 for any other git failure —
 	// none of them are this server's fault, and the frontend keys its
 	// message off `code`, not the status.
-	const status = err.code === "timeout" ? 504 : err.code === "unsafe-repository" ? 409 : 502;
-	res.status(status).json({ error: err.message, code: err.code });
+	timeout: 504,
+	"unsafe-repository": 409,
+	"not-a-repo": 502,
+	"git-failed": 502,
+	// Request-shaped refusals from the identification step (gitReadOnly.ts).
+	"outside-workspace": 403,
+	restricted: 403,
+	"not-a-single-file": 400,
+};
+
+function sendGitError(res: Response, err: GitError): void {
+	res.status(GIT_ERROR_STATUS[err.code]).json({ error: err.message, code: err.code });
+}
+
+/**
+ * Take an in-flight slot and keep it until BOTH the handler's work has
+ * settled and the response has ended. Returning the slot on the
+ * response's `close` alone (the Files view's shape, right for a stream
+ * the client drains) would be wrong here: a client that disconnects
+ * leaves the git processes running in the container — there is no way
+ * to cancel a docker exec — so the limit must follow the work, or six
+ * aborted requests become six concurrent git runs for one user. The
+ * returned function is what the handler calls when its work is done
+ * (success or failure); release happens once the response has ended too.
+ */
+function holdSlotUntilWorkAndResponseEnd(
+	slots: InFlightLimiter,
+	userId: string,
+	res: Response,
+): (() => void) | "busy" | "gone" {
+	// Never acquire for a response that already closed: its `close` has
+	// fired and will not fire again, so nothing would release the slot.
+	if (res.destroyed || res.writableEnded || res.socket?.destroyed) return "gone";
+	const release = slots.tryAcquire(userId);
+	if (release === null) return "busy";
+	let workDone = false;
+	let responseDone = false;
+	const maybeRelease = () => {
+		if (workDone && responseDone) release();
+	};
+	const onResponseEnd = () => {
+		responseDone = true;
+		maybeRelease();
+	};
+	res.once("finish", onResponseEnd);
+	res.once("close", onResponseEnd);
+	return () => {
+		workDone = true;
+		maybeRelease();
+	};
 }
 
 function isDockerNotRunning(err: unknown): boolean {
@@ -73,13 +121,14 @@ export function registerGitRoutes(router: Router, ctx: RouteContext): void {
 
 	/**
 	 * Shared preamble: validate `dir`, authorize, require a running
-	 * container, take a slot. Returns the runner, or null when the
+	 * container, take a slot. Returns the runner plus the `done` callback
+	 * the handler MUST call once its work settled, or null when the
 	 * response has already been answered.
 	 */
 	async function prepare(
 		req: Request,
 		res: Response,
-	): Promise<{ runner: ReturnType<typeof makeGitRunner>; dir: string } | null> {
+	): Promise<{ runner: ReturnType<typeof makeGitRunner>; dir: string; done: () => void } | null> {
 		const { userId } = req as AuthedRequest;
 		const dir = validateGitDir(req.query.dir);
 		if (typeof dir !== "string") {
@@ -96,9 +145,9 @@ export function registerGitRoutes(router: Router, ctx: RouteContext): void {
 			});
 			return null;
 		}
-		const outcome = holdSlotUntilResponseEnds(slots, userId, res);
-		if (outcome === "gone") return null;
-		if (outcome === "busy") {
+		const done = holdSlotUntilWorkAndResponseEnd(slots, userId, res);
+		if (done === "gone") return null;
+		if (done === "busy") {
 			res.setHeader("Retry-After", "1");
 			res.status(429).json({ error: "Too many git requests in progress, try again shortly" });
 			return null;
@@ -106,7 +155,29 @@ export function registerGitRoutes(router: Router, ctx: RouteContext): void {
 		// Git output is a snapshot of a tree that changes under the user —
 		// never let any cache answer for it.
 		res.setHeader("Cache-Control", "no-store");
-		return { runner: makeGitRunner(docker, req.params.id, meta.containerId), dir };
+		return { runner: makeGitRunner(docker, req.params.id, meta.containerId), dir, done };
+	}
+
+	/** prepare → work → answer, with the slot held until the work settled. */
+	async function serve(
+		req: Request,
+		res: Response,
+		work: (runner: ReturnType<typeof makeGitRunner>, dir: string) => Promise<unknown>,
+	): Promise<void> {
+		let done: (() => void) | null = null;
+		try {
+			const prepared = await prepare(req, res);
+			if (!prepared) return;
+			done = prepared.done;
+			const body = await work(prepared.runner, prepared.dir);
+			// A client that left mid-work gets nothing written; the slot
+			// is still released only now, when git has actually finished.
+			if (!res.writableEnded && !res.destroyed) res.json(body);
+		} catch (err) {
+			handleError(err, res, req.params.id);
+		} finally {
+			done?.();
+		}
 	}
 
 	function handleError(err: unknown, res: Response, sessionId: string): void {
@@ -126,15 +197,9 @@ export function registerGitRoutes(router: Router, ctx: RouteContext): void {
 		handleSessionError(err, res);
 	}
 
-	router.get("/sessions/:id/git/status", requireAuth, gitIp, async (req, res) => {
-		try {
-			const prepared = await prepare(req, res);
-			if (!prepared) return;
-			res.json(await getGitStatus(prepared.runner, prepared.dir));
-		} catch (err) {
-			handleError(err, res, req.params.id);
-		}
-	});
+	router.get("/sessions/:id/git/status", requireAuth, gitIp, (req, res) =>
+		serve(req, res, (runner, dir) => getGitStatus(runner, dir)),
+	);
 
 	router.get("/sessions/:id/git/diff", requireAuth, gitIp, async (req, res) => {
 		const path = validateGitPath(req.query.path);
@@ -159,27 +224,18 @@ export function registerGitRoutes(router: Router, ctx: RouteContext): void {
 			oldPath = v;
 		}
 		// Same credential denylist as the Files view: a `.env` that someone
-		// committed is exactly the diff this surface must not show.
+		// committed is exactly the diff this surface must not show. This is
+		// the cheap early refusal; gitReadOnly.ts re-applies the list to
+		// the names GIT resolves (a directory pathspec, a rename's old
+		// side), which is the check that actually holds.
 		if (isRestrictedPath(path) || (oldPath !== null && isRestrictedPath(oldPath))) {
 			res.status(403).json({ error: "This path is restricted because it may contain credentials" });
 			return;
 		}
-		try {
-			const prepared = await prepare(req, res);
-			if (!prepared) return;
-			res.json(await getGitDiff(prepared.runner, prepared.dir, { path, oldPath, area }));
-		} catch (err) {
-			handleError(err, res, req.params.id);
-		}
+		await serve(req, res, (runner, dir) => getGitDiff(runner, dir, { path, oldPath, area }));
 	});
 
-	router.get("/sessions/:id/git/log", requireAuth, gitIp, async (req, res) => {
-		try {
-			const prepared = await prepare(req, res);
-			if (!prepared) return;
-			res.json({ commits: await getGitLog(prepared.runner, prepared.dir) });
-		} catch (err) {
-			handleError(err, res, req.params.id);
-		}
-	});
+	router.get("/sessions/:id/git/log", requireAuth, gitIp, (req, res) =>
+		serve(req, res, async (runner, dir) => ({ commits: await getGitLog(runner, dir) })),
+	);
 }

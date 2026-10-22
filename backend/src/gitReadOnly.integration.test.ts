@@ -12,12 +12,13 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { promises as fs, mkdtempSync } from "node:fs";
+import { promises as fs, mkdtempSync, realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
 	type CaptureResult,
+	countPatchSections,
 	GIT_ENV,
 	type GitRunner,
 	getGitDiff,
@@ -33,6 +34,7 @@ let workspace: string;
 // Mirrors execCapture: same env, cwd = the workspace, byte cap on stdout.
 function localRunner(): GitRunner {
 	return {
+		workspaceDir: realpathSync(workspace),
 		run: async (argv, maxBytes): Promise<CaptureResult> => {
 			const r = spawnSync(argv[0] as string, argv.slice(1), {
 				cwd: workspace,
@@ -98,6 +100,38 @@ beforeAll(async () => {
 	git(path.join(workspace, "sub"), "init", "-q");
 	// Not a repo at all.
 	await fs.mkdir(path.join(workspace, "plain"), { recursive: true });
+	// G1 fixtures: a restricted directory reachable through a symlinked
+	// parent, and an untracked symlink to a file outside the tree.
+	await fs.mkdir(path.join(workspace, ".st"), { recursive: true });
+	await w(".st/notes.txt", "token=abc\n");
+	await fs.symlink(".st", path.join(workspace, "alias"));
+	await fs.symlink("/etc/hostname", path.join(workspace, "linkfile"));
+	// A nested repo with an unresolved merge conflict (G4), and one with a
+	// staged rename away from a restricted name (G1).
+	const conf = path.join(workspace, "conf");
+	await fs.mkdir(conf, { recursive: true });
+	git(conf, "init", "-q", "-b", "main");
+	await fs.writeFile(path.join(conf, "f.txt"), "l1\nl2\nl3\n");
+	git(conf, "add", "f.txt");
+	git(conf, "commit", "-qm", "base");
+	git(conf, "checkout", "-qb", "other");
+	await fs.writeFile(path.join(conf, "f.txt"), "l1\nTHEIRS\nl3\n");
+	git(conf, "commit", "-qam", "theirs");
+	git(conf, "checkout", "-q", "main");
+	await fs.writeFile(path.join(conf, "f.txt"), "l1\nOURS\nl3\nl4\n");
+	git(conf, "commit", "-qam", "ours");
+	// Exits 1 on the conflict — that's the fixture.
+	spawnSync("git", ["-c", "user.name=T", "-c", "user.email=t@x", "merge", "other"], {
+		cwd: conf,
+		env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+	});
+	const ren = path.join(workspace, "ren");
+	await fs.mkdir(ren, { recursive: true });
+	git(ren, "init", "-q", "-b", "main");
+	await fs.writeFile(path.join(ren, ".env"), "TOKEN=hunter2\n");
+	git(ren, "add", "-A");
+	git(ren, "commit", "-qm", "init");
+	git(ren, "mv", ".env", "settings.txt");
 });
 
 afterAll(async () => {
@@ -153,6 +187,18 @@ d("against real git", () => {
 			expect(await getGitStatus(localRunner(), "")).toEqual({ repo: false, candidates: ["proj"] });
 			expect(await getGitStatus(localRunner(), "plain")).toEqual({ repo: false, candidates: [] });
 			expect(await getGitStatus(localRunner(), "proj")).toMatchObject({ repo: true, root: "proj" });
+			// G1: `-C linked` lands git in the OTHER workspace's repository;
+			// its real toplevel isn't <workspace>/linked, so nothing is served.
+			const outside = { code: "outside-workspace" };
+			await expect(getGitStatus(localRunner(), "linked")).rejects.toMatchObject(outside);
+			await expect(getGitLog(localRunner(), "linked")).rejects.toMatchObject(outside);
+			await expect(
+				getGitDiff(localRunner(), "linked", {
+					path: "src/app.ts",
+					oldPath: null,
+					area: "unstaged",
+				}),
+			).rejects.toMatchObject(outside);
 		} finally {
 			workspace = saved;
 			await fs.rm(noRepo, { recursive: true, force: true });
@@ -192,6 +238,96 @@ d("against real git", () => {
 		// diff is empty rather than matching src/*.ts.
 		const glob = await getGitDiff(run, "", { path: "*.ts", oldPath: null, area: "unstaged" });
 		expect(glob.patch).toBe("");
+	});
+
+	it("G1: a directory pathspec is refused, so src/.env is never diffed through `src`", async () => {
+		const run = localRunner();
+		// Unstaged: src/app.ts and src/.env are both modified under src/.
+		await expect(
+			getGitDiff(run, "", { path: "src", oldPath: null, area: "unstaged" }),
+		).rejects.toMatchObject({ code: "not-a-single-file" });
+		// Staged: src/added.ts and src/app.ts.
+		await expect(
+			getGitDiff(run, "", { path: "src", oldPath: null, area: "staged" }),
+		).rejects.toMatchObject({ code: "not-a-single-file" });
+		// An oldPath hint naming another changed file is not honoured.
+		await expect(
+			getGitDiff(run, "", { path: "src/app.ts", oldPath: "new name.md", area: "staged" }),
+		).rejects.toMatchObject({ code: "not-a-single-file" });
+		// Untracked directory: `newdir` holds files → refused as well.
+		await fs.mkdir(path.join(workspace, "newdir"), { recursive: true });
+		await fs.writeFile(path.join(workspace, "newdir", "f.txt"), "hi\n");
+		await expect(
+			getGitDiff(run, "", { path: "newdir", oldPath: null, area: "untracked" }),
+		).rejects.toMatchObject({ code: "not-a-single-file" });
+		// A deliberately-named restricted file under it is listed as such.
+		const st = await getGitStatus(run, "");
+		if (!st.repo) throw new Error("unreachable");
+		expect(st.changes.find((c) => c.path === "newdir/f.txt")).toMatchObject({ area: "untracked" });
+	});
+
+	it("G1: a path behind a symlinked directory is not read, and a symlink shows its target", async () => {
+		const run = localRunner();
+		// `git diff --no-index` alone WOULD follow alias → .st and print
+		// the token; the identification step (ls-files --others, which
+		// never descends into a symlink) sees no such untracked file.
+		const r = await getGitDiff(run, "", {
+			path: "alias/notes.txt",
+			oldPath: null,
+			area: "untracked",
+		});
+		expect(r.patch).toBe("");
+		// .st/notes.txt by its real name is listed but restricted.
+		const st = await getGitStatus(run, "");
+		if (!st.repo) throw new Error("unreachable");
+		expect(st.changes.find((c) => c.path === ".st/notes.txt")).toMatchObject({ restricted: true });
+		expect(st.changes.find((c) => c.path === "alias")).toMatchObject({ area: "untracked" });
+		// An untracked symlink's "content" is its target path, not the file.
+		const link = await getGitDiff(run, "", { path: "linkfile", oldPath: null, area: "untracked" });
+		expect(link.patch).toContain("new file mode 120000");
+		expect(link.patch).toContain("+/etc/hostname");
+	});
+
+	it("G1: a staged rename away from a restricted name is refused, and listed as restricted", async () => {
+		const run = localRunner();
+		const st = await getGitStatus(run, "ren");
+		if (!st.repo) throw new Error("unreachable");
+		expect(st.changes.find((c) => c.path === "settings.txt")).toMatchObject({
+			area: "staged",
+			status: "R",
+			oldPath: ".env",
+			restricted: true,
+		});
+		// With the hint git sees the rename, and its old side fails the
+		// denylist before any content is read.
+		await expect(
+			getGitDiff(run, "ren", { path: "settings.txt", oldPath: ".env", area: "staged" }),
+		).rejects.toMatchObject({ code: "restricted" });
+		// Without it, rename detection has only the new path to look at
+		// and reports an ADDITION under the new, non-restricted name — the
+		// same bytes the Files view would preview as `settings.txt`. The
+		// denylist is about names; the status entry (restricted: true) is
+		// what keeps the UI from asking.
+		const r = await getGitDiff(run, "ren", { path: "settings.txt", oldPath: null, area: "staged" });
+		expect(r.patch).toContain("new file mode");
+		expect(countPatchSections(r.patch)).toBe(1);
+	});
+
+	it("G4: an unresolved conflict yields git's combined diff with the markers", async () => {
+		const run = localRunner();
+		const st = await getGitStatus(run, "conf");
+		if (!st.repo) throw new Error("unreachable");
+		expect(st.changes.find((c) => c.area === "conflict")).toMatchObject({
+			path: "f.txt",
+			xy: "UU",
+		});
+		const d = await getGitDiff(run, "conf", { path: "f.txt", oldPath: null, area: "conflict" });
+		expect(d.patch).toMatch(/^diff --cc f\.txt\n/);
+		expect(d.patch).toMatch(/^@@@ -1,4 -1,3 \+1,8 @@@$/m);
+		expect(d.patch).toContain("++<<<<<<< HEAD\n");
+		expect(d.patch).toContain("++=======\n");
+		expect(d.patch).toContain("++>>>>>>> other\n");
+		expect(d.binary).toBe(false);
 	});
 
 	it("diff from a sub-directory cwd still resolves repo-root-relative paths", async () => {

@@ -27,7 +27,11 @@ export interface ParsedDiff {
 	hasHunks: boolean;
 }
 
-const HUNK_RE = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+// `@@ -1,4 +1,5 @@` (one parent) or, for a conflicted file, git's
+// combined format `@@@ -1,4 -1,3 +1,8 @@@` (one `-range` per parent; the
+// number of `@` is parents + 1). Group 1 = the `@` run, 2 = first old
+// start, 3 = any further old ranges, 4 = new start.
+const HUNK_RE = /^(@@+) -(\d+)(?:,\d+)?((?: -\d+(?:,\d+)?)*) \+(\d+)(?:,\d+)? @@+/;
 
 export function parseUnifiedDiff(patch: string): ParsedDiff {
 	const rows: DiffRow[] = [];
@@ -37,6 +41,7 @@ export function parseUnifiedDiff(patch: string): ParsedDiff {
 	let oldNo = 0;
 	let newNo = 0;
 	let inHunk = false;
+	let parents = 1;
 
 	const lines = patch.endsWith("\n") ? patch.slice(0, -1).split("\n") : patch.split("\n");
 	if (patch === "") return { rows, additions, deletions, hasHunks };
@@ -45,8 +50,9 @@ export function parseUnifiedDiff(patch: string): ParsedDiff {
 		if (hunk) {
 			hasHunks = true;
 			inHunk = true;
-			oldNo = Number.parseInt(hunk[1] as string, 10);
-			newNo = Number.parseInt(hunk[2] as string, 10);
+			parents = Math.max(1, (hunk[1] as string).length - 1);
+			oldNo = Number.parseInt(hunk[2] as string, 10);
+			newNo = Number.parseInt(hunk[4] as string, 10);
 			rows.push({ kind: "hunk", oldNo: null, newNo: null, text: line });
 			continue;
 		}
@@ -54,6 +60,30 @@ export function parseUnifiedDiff(patch: string): ParsedDiff {
 			// Everything before the first hunk (and between files): the
 			// `diff --git`, `index`, `---`/`+++`, mode / rename / binary lines.
 			rows.push({ kind: "meta", oldNo: null, newNo: null, text: line });
+			continue;
+		}
+		if (parents > 1 && !line.startsWith("\\") && !line.startsWith("diff ")) {
+			// Combined diff: one marker column per parent. A `-` in any
+			// column means the line is not in the result (removed from
+			// that parent); otherwise `+` means it is in the result but
+			// not in that parent. Line numbers follow the FIRST parent
+			// (HEAD, "ours") and the result (the working tree).
+			const marks = line.slice(0, parents);
+			if (marks.length === parents && /^[ +-]+$/.test(marks)) {
+				const removed = marks.includes("-");
+				const added = !removed && marks.includes("+");
+				const inOld = removed ? marks[0] === "-" : marks[0] === " ";
+				if (removed) deletions++;
+				else if (added) additions++;
+				rows.push({
+					kind: removed ? "del" : added ? "add" : "context",
+					oldNo: inOld ? oldNo++ : null,
+					newNo: removed ? null : newNo++,
+					text: line.slice(parents),
+				});
+			} else {
+				rows.push({ kind: "context", oldNo: oldNo++, newNo: newNo++, text: line });
+			}
 			continue;
 		}
 		const c = line[0];

@@ -2563,7 +2563,11 @@ export class DockerManager {
 		stderr: Buffer;
 		/** null when the outcome is unknown (host-side cut). */
 		exitCode: number | null;
-		/** stdout exceeded `maxBytes` and was cut (stderr is capped too but never flagged). */
+		/**
+		 * stdout exceeded `maxBytes`: only the first `maxBytes` are kept,
+		 * the rest was drained until the process ended (stderr is capped
+		 * too but never flagged).
+		 */
 		truncated: boolean;
 		timedOut: boolean;
 	}> {
@@ -2599,6 +2603,14 @@ export class DockerManager {
 		const STDERR_MAX = 64 * 1024;
 
 		const onData = (chunk: Buffer) => {
+			// Past the cap the output is DRAINED, not abandoned: a docker
+			// exec cannot be killed through the API, and destroying our end
+			// of the stream doesn't stop the process — it only hides it,
+			// and a caller holding a concurrency slot "until the command
+			// ends" would release it while git still runs. Reading to the
+			// end means this promise settles when the process has exited
+			// (the in-container `timeout` bounds how long that can take).
+			if (truncated) return;
 			pending = (pending.length === 0 ? chunk : Buffer.concat([pending, chunk])) as Buffer;
 			let off = 0;
 			while (off + 8 <= pending.length) {
@@ -2613,10 +2625,7 @@ export class DockerManager {
 						if (room > 0) out.push(Buffer.from(payload.subarray(0, room)));
 						outLen = opts.maxBytes;
 						truncated = true;
-						cut = true;
-						// Enough: stop reading. The in-container `timeout`
-						// still bounds the producer's lifetime.
-						stream.destroy();
+						pending = Buffer.alloc(0);
 						return;
 					}
 					out.push(Buffer.from(payload));
@@ -2633,6 +2642,8 @@ export class DockerManager {
 
 		// Host-side backstop at timeoutMs + grace: by then the container's
 		// `timeout` has fired and the stream has ended; if it hasn't, cut.
+		// This is the ONE place the stream is destroyed with the process
+		// possibly alive — the exit code is then reported as unknown.
 		let timedOut = false;
 		const guard = setTimeout(() => {
 			timedOut = true;

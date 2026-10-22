@@ -510,19 +510,47 @@ describe("diff", () => {
 		expect(document.querySelectorAll(".git-diff-row").length).toBeGreaterThan(0);
 	});
 
-	it("aborts a superseded diff request", async () => {
+	it("queues a superseded diff behind the one in flight and renders only the latest", async () => {
 		api.fetchGitStatus.mockResolvedValue(DIRTY);
 		await openGit();
-		const signals: AbortSignal[] = [];
-		api.fetchGitDiff.mockImplementation((_s: string, _r: unknown, signal: AbortSignal) => {
-			signals.push(signal);
-			return new Promise(() => {});
-		});
+		const pending: { req: { path: string }; resolve: (v: unknown) => void }[] = [];
+		api.fetchGitDiff.mockImplementation(
+			(_s: string, req: { path: string }) =>
+				new Promise((resolve) => {
+					pending.push({ req, resolve });
+				}),
+		);
 		rowFor("unstaged:src/app.ts")?.click();
-		rowFor("staged:src/new.ts")?.click();
 		await flush();
-		expect(signals[0]?.aborted).toBe(true);
-		expect(signals[1]?.aborted).toBe(false);
+		rowFor("staged:src/new.ts")?.click();
+		rowFor("staged:docs/b.md")?.click();
+		await flush();
+		// One request on the wire (the backend holds a slot until git
+		// ends, so a second one would race the per-user cap).
+		expect(pending.map((p) => p.req.path)).toEqual(["src/app.ts"]);
+		expect($("git-diff").textContent).toContain("Loading diff");
+		pending[0]?.resolve({
+			path: "src/app.ts",
+			area: "unstaged",
+			patch: PATCH,
+			truncated: false,
+			binary: false,
+		});
+		await flush();
+		// The first result is stale (selection moved on) and the LATEST
+		// click, not the intermediate one, goes out next.
+		expect(pending.map((p) => p.req.path)).toEqual(["src/app.ts", "docs/b.md"]);
+		expect($("git-diff").textContent).toContain("Loading diff");
+		pending[1]?.resolve({
+			path: "docs/b.md",
+			area: "staged",
+			patch: "diff --git a/docs/a.md b/docs/b.md\nsimilarity index 100%\n",
+			truncated: false,
+			binary: false,
+		});
+		await flush();
+		expect($("git-diff").textContent).toContain("No content changes");
+		expect($("git-diff").textContent).not.toContain("+more");
 	});
 
 	it("drops the open diff when a refresh no longer lists that file", async () => {
@@ -537,17 +565,113 @@ describe("diff", () => {
 		expect($("git-diff").textContent).toContain("Select a changed file");
 	});
 
-	it("refresh re-fetches status, log and the open diff", async () => {
+	it("refresh re-fetches status and log first, then the open diff — never three at once", async () => {
 		api.fetchGitStatus.mockResolvedValue(DIRTY);
 		await openGit();
 		rowFor("unstaged:src/app.ts")?.click();
 		await flush();
 		api.fetchGitDiff.mockClear();
+		let finishStatus: (v: unknown) => void = () => {};
+		let finishLog: (v: unknown) => void = () => {};
+		api.fetchGitStatus.mockReturnValueOnce(new Promise((r) => (finishStatus = r)));
+		api.fetchGitLog.mockReturnValueOnce(new Promise((r) => (finishLog = r)));
 		$("git-refresh-btn").click();
 		await flush();
 		expect(api.fetchGitStatus).toHaveBeenCalledTimes(2);
 		expect(api.fetchGitLog).toHaveBeenCalledTimes(2);
+		// Two in flight = the per-user budget; the diff waits.
+		expect(api.fetchGitDiff).not.toHaveBeenCalled();
+		finishStatus(DIRTY);
+		await flush();
+		expect(api.fetchGitDiff).not.toHaveBeenCalled();
+		finishLog(COMMITS);
+		await flush();
 		expect(api.fetchGitDiff).toHaveBeenCalledTimes(1);
+		expect(api.fetchGitDiff).toHaveBeenLastCalledWith(
+			"s1",
+			{ path: "src/app.ts", area: "unstaged", oldPath: null, dir: "" },
+			expect.any(AbortSignal),
+		);
+		expect(rowFor("unstaged:src/app.ts")?.classList.contains("selected")).toBe(true);
+	});
+
+	it("a refresh clicked while a diff is loading waits for that diff", async () => {
+		api.fetchGitStatus.mockResolvedValue(DIRTY);
+		await openGit();
+		let finishDiff: (v: unknown) => void = () => {};
+		api.fetchGitDiff.mockReturnValueOnce(new Promise((r) => (finishDiff = r)));
+		rowFor("unstaged:src/app.ts")?.click();
+		await flush();
+		$("git-refresh-btn").click();
+		await flush();
+		expect(api.fetchGitStatus).toHaveBeenCalledTimes(1);
+		finishDiff({
+			path: "src/app.ts",
+			area: "unstaged",
+			patch: PATCH,
+			truncated: false,
+			binary: false,
+		});
+		await flush();
+		expect(api.fetchGitStatus).toHaveBeenCalledTimes(2);
+		// …and the diff is re-fetched after the refresh, as usual.
+		expect(api.fetchGitDiff).toHaveBeenCalledTimes(2);
+	});
+
+	it("renders a conflict's combined diff with its markers, and caps rows on every branch", async () => {
+		api.fetchGitStatus.mockResolvedValue(DIRTY);
+		await openGit();
+		api.fetchGitDiff.mockResolvedValueOnce({
+			path: "merge.ts",
+			area: "conflict",
+			patch: [
+				"diff --cc merge.ts",
+				"--- a/merge.ts",
+				"+++ b/merge.ts",
+				"@@@ -1,2 -1,2 +1,6 @@@",
+				"  a",
+				"++<<<<<<< HEAD",
+				" +ours",
+				"++=======",
+				"+ theirs",
+				"++>>>>>>> other",
+				"",
+			].join("\n"),
+			truncated: false,
+			binary: false,
+		});
+		rowFor("conflict:merge.ts")?.click();
+		await flush();
+		const text = $("git-diff").textContent ?? "";
+		expect(text).not.toContain("No content changes");
+		expect(text).toContain("Unresolved conflict");
+		expect(text).toContain("<<<<<<< HEAD");
+		expect(text).toContain("+5");
+		expect(document.querySelectorAll(".git-diff-row.kind-add").length).toBe(5);
+		// A header-only patch with thousands of lines is capped like any other.
+		api.fetchGitDiff.mockResolvedValueOnce({
+			path: "docs/b.md",
+			area: "staged",
+			patch: `${"diff --git a/docs/a.md b/docs/b.md\n"}${"similarity index 100%\n".repeat(6000)}`,
+			truncated: false,
+			binary: false,
+		});
+		rowFor("staged:docs/b.md")?.click();
+		await flush();
+		expect(document.querySelectorAll(".git-diff-row").length).toBe(5000);
+		expect($("git-diff").textContent).toContain("Showing the first 5000 lines");
+	});
+
+	it("a nested repository (directory entry) explains itself instead of requesting a diff", async () => {
+		api.fetchGitStatus.mockResolvedValue({
+			...DIRTY,
+			changes: [...DIRTY.changes, change("untracked", "?", "vendor/lib/", { additions: null })],
+		});
+		await openGit();
+		rowFor("untracked:vendor/lib/")?.click();
+		await flush();
+		expect(api.fetchGitDiff).not.toHaveBeenCalled();
+		expect($("git-diff").textContent).toContain("directory");
 	});
 });
 

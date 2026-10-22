@@ -74,6 +74,8 @@ interface Selected {
 	area: GitArea;
 	oldPath: string | null;
 	restricted: boolean;
+	/** A directory entry (nested repository): git has no diff for it. */
+	directory: boolean;
 }
 let selected: Selected | null = null;
 
@@ -84,10 +86,18 @@ type DiffState =
 	| { status: "error"; message: string; httpStatus: number; code: string | null };
 let diff: DiffState = { status: "none" };
 let diffToken = 0;
-// Aborts the superseded diff request when the user moves on, so clicking
-// through files doesn't queue server-side git runs (each holding one of
-// the backend's per-user git slots).
 let diffAbort: AbortController | null = null;
+
+// The backend allows two git requests in flight per user and holds each
+// slot until its git run has actually ENDED — aborting the fetch frees
+// nothing server-side (a docker exec can't be cancelled). So this view
+// never has more than two requests outstanding: a status+log load waits
+// for the diff in flight, a diff waits for the load and the previous
+// diff, and a superseded diff is simply not re-issued until the earlier
+// one settles (its result is dropped by token). Both settle (never
+// reject) — they exist only to be awaited.
+let loadInFlight: Promise<void> | null = null;
+let diffInFlight: Promise<void> | null = null;
 
 let mobilePane: "list" | "diff" = "list";
 
@@ -162,6 +172,10 @@ async function load(): Promise<void> {
 	status = { status: "loading" };
 	log = { status: "loading" };
 	renderAll();
+	// Two requests are about to go out: wait for a diff still in flight
+	// (see loadInFlight / diffInFlight above).
+	if (diffInFlight !== null) await diffInFlight;
+	if (stale()) return;
 
 	// Status and log are independent reads: fire both, render each as it
 	// lands. A log failure on a non-repo is expected and never shown.
@@ -197,6 +211,7 @@ async function load(): Promise<void> {
 			log = { status: "error", message: (err as Error).message };
 		},
 	);
+	loadInFlight = Promise.all([statusDone, logDone]).then(() => undefined);
 	await statusDone;
 	if (stale()) return;
 	renderAll();
@@ -221,18 +236,26 @@ async function openDiff(sel: Selected): Promise<void> {
 	const sessionId = stateSessionId;
 	if (sessionId === null) return;
 	const token = ++diffToken;
-	diffAbort?.abort();
-	const abort = new AbortController();
-	diffAbort = abort;
 	const stale = () => token !== diffToken || sessionId !== stateSessionId;
 	diff = { status: "loading" };
 	renderDiff();
+	// Queue behind the load and the previous diff (see diffInFlight). A
+	// click that was itself superseded while waiting never fetches.
+	await Promise.all([loadInFlight, diffInFlight]);
+	if (stale()) return;
+	const abort = new AbortController();
+	diffAbort = abort;
+	const request = fetchGitDiff(
+		sessionId,
+		{ path: sel.path, area: sel.area, oldPath: sel.oldPath, dir },
+		abort.signal,
+	);
+	diffInFlight = request.then(
+		() => undefined,
+		() => undefined,
+	);
 	try {
-		const data = await fetchGitDiff(
-			sessionId,
-			{ path: sel.path, area: sel.area, oldPath: sel.oldPath, dir },
-			abort.signal,
-		);
+		const data = await request;
 		if (stale()) return;
 		diff = { status: "loaded", data };
 	} catch (err) {
@@ -250,9 +273,17 @@ async function openDiff(sel: Selected): Promise<void> {
 // ── Actions ─────────────────────────────────────────────────────────────────
 
 function selectChange(c: GitChange): void {
-	selected = { path: c.path, area: c.area, oldPath: c.oldPath, restricted: c.restricted };
-	if (c.restricted) {
-		// Never even ask: the server would 403, and the lock icon already
+	selected = {
+		path: c.path,
+		area: c.area,
+		oldPath: c.oldPath,
+		restricted: c.restricted,
+		// `git status` reports a nested repository as `dir/` — one entry,
+		// no contents, nothing a diff could show.
+		directory: c.path.endsWith("/"),
+	};
+	if (c.restricted || selected.directory) {
+		// Never even ask: the server would refuse, and the row already
 		// says why.
 		clearDiff();
 	} else {
@@ -275,9 +306,12 @@ async function refresh(): Promise<void> {
 	refreshBtn.classList.add("spinning");
 	refreshBtn.disabled = true;
 	try {
-		const loads = [load()];
-		if (selected !== null && !selected.restricted) loads.push(openDiff(selected));
-		await Promise.all(loads);
+		// Status + log first (that's the per-user budget), THEN the open
+		// diff — and only if the refreshed list still carries that entry
+		// (load() drops a selection that vanished).
+		await load();
+		const sel = selected;
+		if (sel !== null && !sel.restricted && !sel.directory) await openDiff(sel);
 	} finally {
 		refreshBtn.classList.remove("spinning");
 		refreshBtn.disabled = false;
@@ -616,6 +650,16 @@ function renderDiff(): void {
 		return;
 	}
 	const name = sel.path.slice(sel.path.lastIndexOf("/") + 1);
+	if (sel.directory) {
+		diffEl.appendChild(diffHeader(sel.path, "directory", []));
+		diffEl.appendChild(
+			stateBox(
+				"info",
+				"This entry is a directory — usually a nested repository, which git lists as one untracked item. Open it from the terminal.",
+			),
+		);
+		return;
+	}
 	if (sel.restricted) {
 		diffEl.appendChild(diffHeader(name, "restricted", []));
 		diffEl.appendChild(
@@ -683,9 +727,18 @@ function renderDiff(): void {
 		diffEl.appendChild(stateBox("info", "Binary file — no textual diff to show."));
 		return;
 	}
+	if (sel.area === "conflict" && parsed.hasHunks) {
+		diffEl.appendChild(
+			el(
+				"div",
+				"files-banner",
+				"Unresolved conflict — combined diff of the working tree against both sides; the conflict markers show as added lines.",
+			),
+		);
+	}
+	const scroller = el("div", "files-preview-scroll");
+	appendDiffRows(scroller, parsed.rows);
 	if (!parsed.hasHunks) {
-		const scroller = el("div", "files-preview-scroll");
-		if (parsed.rows.length > 0) scroller.appendChild(diffTable(parsed.rows));
 		scroller.appendChild(
 			stateBox(
 				"empty",
@@ -694,17 +747,22 @@ function renderDiff(): void {
 					: "No differences to show.",
 			),
 		);
-		diffEl.appendChild(scroller);
-		return;
 	}
-	const scroller = el("div", "files-preview-scroll");
-	scroller.appendChild(diffTable(parsed.rows.slice(0, MAX_DIFF_ROWS)));
-	if (parsed.rows.length > MAX_DIFF_ROWS) {
+	diffEl.appendChild(scroller);
+}
+
+/** The rows, capped at MAX_DIFF_ROWS on every path that renders them. */
+function appendDiffRows(
+	scroller: HTMLElement,
+	rows: ReturnType<typeof parseUnifiedDiff>["rows"],
+): void {
+	if (rows.length === 0) return;
+	scroller.appendChild(diffTable(rows.slice(0, MAX_DIFF_ROWS)));
+	if (rows.length > MAX_DIFF_ROWS) {
 		scroller.appendChild(
 			el("div", "files-tree-note", `Showing the first ${MAX_DIFF_ROWS} lines of this diff.`),
 		);
 	}
-	diffEl.appendChild(scroller);
 }
 
 function diffTable(rows: ReturnType<typeof parseUnifiedDiff>["rows"]): HTMLElement {

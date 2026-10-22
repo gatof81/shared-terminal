@@ -144,10 +144,20 @@ function subcommand(argv: string[]): string {
 	let i = 1;
 	while (argv[i] === "-C" || argv[i] === "-c") i += 2;
 	const sub = argv[i] as string;
-	if (sub === "diff" && argv.includes("--cached")) return "diff --cached";
-	if (sub === "diff" && argv.includes("--no-index")) return "diff --no-index";
+	if (sub === "diff") {
+		const raw = argv.includes("--raw") ? " --raw" : "";
+		if (argv.includes("--cached")) return `diff --cached${raw}`;
+		if (argv.includes("--no-index")) return "diff --no-index";
+		return `diff${raw}`;
+	}
 	return sub;
 }
+
+// `git diff --raw -z` record for one modified file / one rename.
+const rawM = (path: string) => `:100644 100644 abc def M${Z}${path}${Z}`;
+const rawR = (oldPath: string, path: string) =>
+	`:100644 100644 abc def R100${Z}${oldPath}${Z}${path}${Z}`;
+const WORKSPACE = "/home/developer/workspace";
 
 // A clean repo on `main` by default; tests override per subcommand.
 let answers: Record<string, Capture | ((argv: string[]) => Capture | Promise<Capture>)>;
@@ -204,6 +214,11 @@ async function spinUp() {
 
 type Endpoint = "status" | "diff" | "log";
 
+/** The requested path: the last `:(top,literal)` operand, prefix stripped. */
+function lastSpec(argv: string[]): string {
+	return (argv[argv.length - 1] as string).replace(/^:\(top,literal\)/, "");
+}
+
 function call(
 	endpoint: Endpoint,
 	opts: {
@@ -228,6 +243,14 @@ function call(
 
 const DIFF_Q = { path: "src/app.ts", area: "unstaged" };
 
+/** The exec that produced the patch (not the `--raw` / `ls-files` identification run). */
+function patchCall(): ExecCall | undefined {
+	return execCalls.find((c) => {
+		const k = subcommand(c.argv);
+		return k === "diff" || k === "diff --cached" || k === "diff --no-index";
+	});
+}
+
 beforeEach(async () => {
 	execCalls = [];
 	answers = {
@@ -236,7 +259,14 @@ beforeEach(async () => {
 		),
 		"diff --cached": ok(""),
 		diff: ok(""),
-		"rev-parse": ok("\n"),
+		// Identification (gitReadOnly.identifyChange): by default every
+		// pathspec resolves to exactly the requested file.
+		"diff --raw": (argv) => ok(rawM(lastSpec(argv))),
+		"diff --cached --raw": (argv) => ok(rawM(lastSpec(argv))),
+		"ls-files": (argv) => ok(`${lastSpec(argv)}${Z}`),
+		// `--show-toplevel --show-prefix`: at the workspace root (or at
+		// `-C <dir>` when given), prefix empty.
+		"rev-parse": (argv) => ok(`${WORKSPACE}${argv[1] === "-C" ? `/${argv[2]}` : ""}\n\n`),
 		log: ok(""),
 		find: ok(""),
 	};
@@ -500,8 +530,14 @@ describe("GET /git/diff", () => {
 			truncated: false,
 			binary: false,
 		});
-		const argv = execCalls[0]?.argv as string[];
+		const argv = patchCall()?.argv as string[];
 		expect(argv.slice(-2)).toEqual(["--", ":(top,literal)src/app.ts"]);
+		// Before the patch: the location check and the identification run.
+		expect(execCalls.map((c) => subcommand(c.argv)).sort()).toEqual([
+			"diff",
+			"diff --raw",
+			"rev-parse",
+		]);
 	});
 
 	it.each([
@@ -512,8 +548,8 @@ describe("GET /git/diff", () => {
 		answers.diff = ok("u");
 		const res = await call("diff", { query: { path: "x.ts", area } });
 		expect(res.status).toBe(200);
-		for (const f of expectFlags) expect(execCalls[0]?.argv).toContain(f);
-		if (area === "conflict") expect(execCalls[0]?.argv).not.toContain("--cached");
+		for (const f of expectFlags) expect(patchCall()?.argv).toContain(f);
+		if (area === "conflict") expect(patchCall()?.argv).not.toContain("--cached");
 	});
 
 	it("area=untracked diffs against /dev/null without touching the index", async () => {
@@ -521,13 +557,18 @@ describe("GET /git/diff", () => {
 		const res = await call("diff", { query: { path: "n.txt", area: "untracked" } });
 		expect(res.status).toBe(200);
 		expect((await res.json()).patch).toContain("+hello");
-		expect(execCalls[0]?.argv.slice(-3)).toEqual(["--", "/dev/null", "n.txt"]);
+		expect(patchCall()?.argv.slice(-3)).toEqual(["--", "/dev/null", "n.txt"]);
+		// The worktree read is gated on git's own untracked listing.
+		const ls = execCalls.find((c) => subcommand(c.argv) === "ls-files")?.argv as string[];
+		expect(ls).toContain("--others");
+		expect(ls.slice(-2)).toEqual(["--", ":(top,literal)n.txt"]);
 	});
 
 	it("renames carry oldPath as a second literal pathspec", async () => {
 		answers["diff --cached"] = ok("r");
+		answers["diff --cached --raw"] = ok(rawR("old.ts", "new.ts"));
 		await call("diff", { query: { path: "new.ts", area: "staged", oldPath: "old.ts" } });
-		expect(execCalls[0]?.argv.slice(-3)).toEqual([
+		expect(patchCall()?.argv.slice(-3)).toEqual([
 			"--",
 			":(top,literal)old.ts",
 			":(top,literal)new.ts",
@@ -549,12 +590,14 @@ describe("GET /git/diff", () => {
 			execCalls = [];
 			const res = await call("diff", { query: { path: p, area: "unstaged" } });
 			expect(res.status).toBe(200);
-			const argv = execCalls[0]?.argv as string[];
-			const dd = argv.indexOf("--");
-			expect(dd).toBeGreaterThan(0);
-			expect(argv.slice(dd + 1)).toEqual([`:(top,literal)${p}`]);
-			// Nothing before `--` came from the request.
-			expect(argv.slice(0, dd).join(" ")).not.toContain(p);
+			for (const key of ["diff --raw", "diff"]) {
+				const argv = execCalls.find((c) => subcommand(c.argv) === key)?.argv as string[];
+				const dd = argv.indexOf("--");
+				expect(dd).toBeGreaterThan(0);
+				expect(argv.slice(dd + 1)).toEqual([`:(top,literal)${p}`]);
+				// Nothing before `--` came from the request.
+				expect(argv.slice(0, dd).join(" ")).not.toContain(p);
+			}
 		}
 	});
 
@@ -585,6 +628,93 @@ describe("GET /git/diff", () => {
 		answers.diff = ok("diff --git a/i.png b/i.png\nBinary files a/i.png and b/i.png differ\n");
 		body = await (await call("diff", { query: { path: "i.png", area: "unstaged" } })).json();
 		expect(body.binary).toBe(true);
+	});
+
+	// ── G1: the denylist holds against what git RESOLVES, not what was typed ──
+
+	it("a directory pathspec (which would include src/.env) is refused before any patch", async () => {
+		answers["diff --raw"] = ok(`${rawM("src/.env")}${rawM("src/app.ts")}`);
+		answers.diff = () => {
+			throw new Error("patch must not run");
+		};
+		const res = await call("diff", { query: { path: "src", area: "unstaged" } });
+		expect(res.status).toBe(400);
+		expect(await res.json()).toMatchObject({ code: "not-a-single-file" });
+		expect(execCalls.some((c) => subcommand(c.argv) === "diff")).toBe(false);
+	});
+
+	it("a single match that is not the requested entry is refused too", async () => {
+		answers["diff --raw"] = ok(rawM("src/.env"));
+		const res = await call("diff", { query: { path: "src", area: "unstaged" } });
+		expect(res.status).toBe(400);
+	});
+
+	it("an oldPath hint that drags in other files is refused", async () => {
+		answers["diff --cached --raw"] = ok(`${rawM("src/other.ts")}${rawM("src/app.ts")}`);
+		const res = await call("diff", {
+			query: { path: "src/app.ts", area: "staged", oldPath: "src/other.ts" },
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it("a rename whose OLD side is restricted is refused even though the client hid it", async () => {
+		answers["diff --cached --raw"] = ok(rawR(".env", "config.txt"));
+		const res = await call("diff", { query: { path: "config.txt", area: "staged" } });
+		expect(res.status).toBe(403);
+		expect(await res.json()).toMatchObject({ code: "restricted" });
+		expect(execCalls.some((c) => subcommand(c.argv) === "diff --cached")).toBe(false);
+	});
+
+	it("untracked: a path git does not list (e.g. behind a symlinked dir) is never opened", async () => {
+		answers["ls-files"] = ok("");
+		answers["diff --no-index"] = () => {
+			throw new Error("--no-index must not run");
+		};
+		const res = await call("diff", { query: { path: "alias/notes.txt", area: "untracked" } });
+		expect(res.status).toBe(200);
+		expect(await res.json()).toMatchObject({ patch: "", truncated: false });
+		expect(execCalls.some((c) => subcommand(c.argv) === "diff --no-index")).toBe(false);
+	});
+
+	it("untracked: a directory (several listed files) is refused", async () => {
+		answers["ls-files"] = ok(`newdir/a.txt${Z}newdir/b.txt${Z}`);
+		const res = await call("diff", { query: { path: "newdir", area: "untracked" } });
+		expect(res.status).toBe(400);
+	});
+
+	it("a patch that grew a second file between identification and read is refused", async () => {
+		answers.diff = ok(
+			"diff --git a/src/app.ts b/src/app.ts\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/src/.env b/src/.env\n@@ -1 +1 @@\n-S=1\n+S=2\n",
+		);
+		const res = await call("diff", { query: DIFF_Q });
+		expect(res.status).toBe(400);
+		expect((await res.json()).error).not.toContain("S=2");
+	});
+
+	it.each([
+		"status",
+		"diff",
+		"log",
+	] as Endpoint[])("%s: a dir that resolves to a repository outside the workspace is 403", async (endpoint) => {
+		answers["rev-parse"] = ok("/home/developer/.st\n\n");
+		answers.status = ok(`# branch.head main${Z}1 .M N... 100644 100644 100644 a b notes.txt${Z}`);
+		answers.log = ok(
+			`${"a".repeat(40)}\x1faaaaaaa\x1fA\x1f2026-01-01T00:00:00+00:00\x1fsecret subject${Z}`,
+		);
+		answers.diff = ok("diff --git a/notes.txt b/notes.txt\n@@ -1 +1 @@\n-x\n+secret body\n");
+		const res = await call(endpoint, { query: { ...DIFF_Q, dir: "alias" } });
+		expect(res.status).toBe(403);
+		const body = JSON.stringify(await res.json());
+		expect(body).toContain("outside-workspace");
+		expect(body).not.toContain("secret");
+		expect(body).not.toContain("notes.txt");
+	});
+
+	it("a repository reached through a symlink INSIDE the workspace is refused as well", async () => {
+		// `link -> proj`: toplevel is the real path, not the lexical one.
+		answers["rev-parse"] = ok(`${WORKSPACE}/proj\n\n`);
+		const res = await call("status", { query: { dir: "link" } });
+		expect(res.status).toBe(403);
 	});
 });
 
@@ -618,6 +748,9 @@ describe("GET /git/log", () => {
 // ── Concurrency ─────────────────────────────────────────────────────────────
 
 describe("concurrency", () => {
+	// Each log request is a location check plus the log itself; count the latter.
+	const logExecs = () => execCalls.filter((c) => subcommand(c.argv) === "log").length;
+
 	it("answers 429 past the per-user in-flight cap and recovers once requests finish", async () => {
 		let release: () => void = () => {};
 		const gate = new Promise<void>((r) => {
@@ -629,7 +762,7 @@ describe("concurrency", () => {
 		};
 		const held = Array.from({ length: GIT_IN_FLIGHT_PER_USER }, () => call("log"));
 		// Let the held requests reach the exec before probing.
-		await vi.waitFor(() => expect(execCalls.length).toBe(GIT_IN_FLIGHT_PER_USER));
+		await vi.waitFor(() => expect(logExecs()).toBe(GIT_IN_FLIGHT_PER_USER));
 		const extra = await call("log");
 		expect(extra.status).toBe(429);
 		expect(extra.headers.get("retry-after")).toBe("1");
@@ -639,5 +772,43 @@ describe("concurrency", () => {
 		release();
 		for (const r of await Promise.all(held)) expect(r.status).toBe(200);
 		expect((await call("log")).status).toBe(200);
+	});
+
+	// ── G2: a slot follows the WORK, not the connection ──
+
+	it("disconnecting clients do not free slots while their git runs are still active", async () => {
+		let release: () => void = () => {};
+		const gate = new Promise<void>((r) => {
+			release = r;
+		});
+		answers.log = async () => {
+			await gate;
+			return ok("");
+		};
+		// Fill the budget, then hang up on every one of them.
+		const controllers = Array.from({ length: GIT_IN_FLIGHT_PER_USER }, () => new AbortController());
+		const held = controllers.map((c) =>
+			fetch(`${baseUrl}/api/sessions/${SESSION_ID}/git/log`, {
+				headers: { "x-test-user": OWNER },
+				signal: c.signal,
+			}).catch(() => null),
+		);
+		await vi.waitFor(() => expect(logExecs()).toBe(GIT_IN_FLIGHT_PER_USER));
+		for (const c of controllers) c.abort();
+		await Promise.all(held);
+		// The execs are still running: the budget is still spent.
+		const probe = await call("log");
+		expect(probe.status).toBe(429);
+		expect(logExecs()).toBe(GIT_IN_FLIGHT_PER_USER);
+		// Only once git actually finished does the budget come back.
+		release();
+		await vi.waitFor(async () => expect((await call("log")).status).toBe(200));
+	});
+
+	it("a request that fails inside git still returns its slot", async () => {
+		answers.log = fail("fatal: broken", 128);
+		for (let i = 0; i < GIT_IN_FLIGHT_PER_USER + 2; i++) {
+			expect((await call("log")).status).toBe(502);
+		}
 	});
 });

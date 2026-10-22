@@ -25,6 +25,22 @@
  * directory (`-C <dir>`) and validated repo-relative file paths passed
  * after `--` as `:(top,literal)` pathspecs. Output is bounded in bytes
  * and seconds by execCapture; parsers here tolerate a cut record.
+ *
+ * The credential denylist (`isRestrictedPath`) is enforced on what GIT
+ * resolves, not on what the client typed, because a syntactically clean
+ * operand can still reach restricted content:
+ *   - a pathspec naming a DIRECTORY matches every file beneath it
+ *     (`src` → `src/.env`), so a diff is only produced after `--raw`
+ *     (or `ls-files --others` for untracked) proves the pathspec matches
+ *     exactly the one requested file, and the names git reports — the
+ *     old side of a rename included — pass the denylist;
+ *   - `git diff --no-index` opens worktree paths through the OS, which
+ *     follows a symlinked parent directory (`alias → .st`), whereas
+ *     git's own untracked walk never descends into a symlink — so the
+ *     untracked path must first be listed by `ls-files --others`;
+ *   - `-C <dir>` follows symlinks too, so every request checks that the
+ *     repository git actually found (`rev-parse --show-toplevel`, a real
+ *     path) is where `<dir>` lexically says it is inside the workspace.
  */
 
 import type { DockerManager } from "./dockerManager.js";
@@ -104,6 +120,8 @@ export interface CaptureResult {
 /** One session container, one repo dir. Built per request by the route. */
 export interface GitRunner {
 	run(argv: string[], maxBytes: number): Promise<CaptureResult>;
+	/** Absolute, symlink-free path of the workspace as git sees it (the cwd of every run). */
+	workspaceDir: string;
 }
 
 // Git is told, through the environment, to never block, never write and
@@ -163,6 +181,7 @@ export function makeGitRunner(
 				maxBytes,
 				timeoutMs: GIT_TIMEOUT_MS,
 			}),
+		workspaceDir: WORKSPACE_DIR,
 	};
 }
 
@@ -173,7 +192,17 @@ export function gitArgv(dir: string, ...args: string[]): string[] {
 
 // ── Errors ──────────────────────────────────────────────────────────────────
 
-export type GitErrorCode = "not-a-repo" | "unsafe-repository" | "timeout" | "git-failed";
+export type GitErrorCode =
+	| "not-a-repo"
+	| "unsafe-repository"
+	| "timeout"
+	| "git-failed"
+	/** `dir` resolves (via a symlink) to a repository outside the workspace. */
+	| "outside-workspace"
+	/** The pathspec matched zero-or-many files, not exactly the requested one. */
+	| "not-a-single-file"
+	/** A path git reported for this diff is on the credential denylist. */
+	| "restricted";
 
 export class GitError extends Error {
 	constructor(
@@ -304,7 +333,9 @@ export function parsePorcelainV2(records: string[]): ParsedStatus {
 			additions: null,
 			deletions: null,
 			binary: false,
-			restricted: isRestrictedPath(path),
+			// A rename AWAY from a restricted name still diffs against the
+			// old blob — the whole entry is off limits, not just one side.
+			restricted: isRestrictedPath(path) || (oldPath !== null && isRestrictedPath(oldPath)),
 		});
 
 	for (let i = 0; i < records.length; i++) {
@@ -448,6 +479,81 @@ export function trimToLastLine(text: string): string {
 	return nl === -1 ? "" : text.slice(0, nl + 1);
 }
 
+export interface RawRecord {
+	/** First letter of the raw status (M A D R C T U …). */
+	status: string;
+	path: string;
+	oldPath: string | null;
+}
+
+/**
+ * `git diff --raw -z` records → the files the same pathspec would diff.
+ * `:<mode> <mode> <sha> <sha> <status>\0<path>\0`, with `R`/`C` carrying
+ * `\0<old>\0<new>\0`; a combined (conflict) record starts with `::`.
+ */
+export function parseRawZ(records: string[]): RawRecord[] {
+	const out: RawRecord[] = [];
+	for (let i = 0; i < records.length; i++) {
+		const rec = records[i] as string;
+		if (!rec.startsWith(":")) continue;
+		const fields = rec.split(" ");
+		const status = (fields[fields.length - 1] ?? "")[0] ?? "";
+		if (status === "R" || status === "C") {
+			const oldPath = records[i + 1];
+			const path = records[i + 2];
+			i += 2;
+			if (oldPath === undefined || path === undefined) break;
+			out.push({ status, path, oldPath });
+		} else {
+			const path = records[i + 1];
+			i += 1;
+			if (path === undefined) break;
+			out.push({ status, path, oldPath: null });
+		}
+	}
+	return out;
+}
+
+/**
+ * Number of per-file sections in a patch. Only header lines start with
+ * `diff ` — hunk lines carry a ` `/`+`/`-`/`\` marker — so this is an
+ * exact count, linear in the patch.
+ */
+export function countPatchSections(patch: string): number {
+	let n = 0;
+	for (const line of patch.split("\n")) {
+		if (
+			line.startsWith("diff --git ") ||
+			line.startsWith("diff --cc ") ||
+			line.startsWith("diff --combined ")
+		) {
+			n++;
+		}
+	}
+	return n;
+}
+
+/**
+ * `rev-parse --show-toplevel --show-prefix` output → the prefix, or a
+ * GitError when the repository git found is not where `dir` lexically
+ * says. `--show-toplevel` is a REAL path (symlinks resolved), so a `dir`
+ * that reaches a repository through a symlink — `alias → ~/.st`, or a
+ * `core.worktree` pointing elsewhere — fails the comparison even though
+ * every path segment looked fine.
+ */
+export function checkRepoLocation(workspaceDir: string, dir: string, stdout: string): string {
+	const [toplevel = "", prefix = ""] = stdout.split("\n");
+	const expected = dir === "" ? workspaceDir : `${workspaceDir}/${dir}`;
+	const actual = prefix === "" ? toplevel : `${toplevel}/${prefix.replace(/\/$/, "")}`;
+	if (toplevel === "" || actual !== expected) {
+		throw new GitError(
+			"outside-workspace",
+			"This directory resolves to a repository outside the workspace (through a symlink or a redirected worktree)",
+		);
+	}
+	return prefix;
+}
+
 /** `find -print0` output `./proj/.git` → `proj`, sorted, capped. */
 export function parseCandidates(records: string[]): string[] {
 	const out: string[] = [];
@@ -469,6 +575,10 @@ export type GitStatusResult =
 			truncated: boolean;
 	  } & ParsedStatus);
 
+// Real toplevel + cwd prefix: the location check every request runs.
+const REV_PARSE_LOCATION = (dir: string) =>
+	gitArgv(dir, "rev-parse", "--show-toplevel", "--show-prefix");
+
 /** Throws GitError on timeout / unexpected git failure. */
 export async function getGitStatus(runner: GitRunner, dir: string): Promise<GitStatusResult> {
 	// All four are independent reads; parallel keeps a refresh at one
@@ -486,7 +596,7 @@ export async function getGitStatus(runner: GitRunner, dir: string): Promise<GitS
 			gitArgv(dir, "diff", "--numstat", "-z", "-M", ...DIFF_SAFE_ARGS),
 			GIT_STATUS_MAX_BYTES,
 		),
-		runner.run(gitArgv(dir, "rev-parse", "--show-prefix"), 64 * 1024),
+		runner.run(REV_PARSE_LOCATION(dir), 64 * 1024),
 	]);
 	if (status.exitCode !== 0) {
 		const err = classifyFailure(status, "git status");
@@ -496,6 +606,11 @@ export async function getGitStatus(runner: GitRunner, dir: string): Promise<GitS
 		const candidates = dir === "" ? await findRepoCandidates(runner) : [];
 		return { repo: false, candidates };
 	}
+	// Nothing read above is returned until the repository is confirmed
+	// to be where `dir` says (see checkRepoLocation): a location we can't
+	// verify is an error, not a degraded answer.
+	if (prefix.exitCode !== 0) throw classifyFailure(prefix, "git rev-parse");
+	const prefixStr = checkRepoLocation(runner.workspaceDir, dir, prefix.stdout.toString("utf-8"));
 	const parsed = parsePorcelainV2(splitNulRecords(status.stdout, status.truncated));
 	// numstat failing (e.g. a corrupt index) degrades to "no counts"
 	// rather than failing the whole view.
@@ -514,12 +629,18 @@ export async function getGitStatus(runner: GitRunner, dir: string): Promise<GitS
 	// `--show-prefix` is "" at the repo root, "src/" inside it: the root
 	// is `dir` minus that suffix. Diff pathspecs are repo-root-relative
 	// (`:(top)`), so the client re-targets at `root` when they differ.
-	const prefixStr = prefix.exitCode === 0 ? prefix.stdout.toString("utf-8").replace(/\n$/, "") : "";
 	let root = dir;
 	if (prefixStr !== "" && `${dir}/`.endsWith(prefixStr)) {
 		root = dir.slice(0, dir.length + 1 - prefixStr.length).replace(/\/$/, "");
 	}
 	return { repo: true, root, truncated, ...parsed };
+}
+
+/** Fails unless `dir` is a repository (or inside one) located where it lexically claims. */
+async function assertRepoLocation(runner: GitRunner, dir: string): Promise<void> {
+	const res = await runner.run(REV_PARSE_LOCATION(dir), 64 * 1024);
+	if (res.exitCode !== 0) throw classifyFailure(res, "git rev-parse");
+	checkRepoLocation(runner.workspaceDir, dir, res.stdout.toString("utf-8"));
 }
 
 async function findRepoCandidates(runner: GitRunner): Promise<string[]> {
@@ -542,27 +663,102 @@ export interface GitDiffResult {
 	binary: boolean;
 }
 
+// `:(top,literal)`: repo-root-relative (not cwd-relative) and no glob
+// expansion — `*.ts` names the file literally called `*.ts`. A leading
+// `-` can't be an option after `--`, and `:` can't start pathspec
+// magic of the client's choosing because the magic prefix is ours.
+const spec = (p: string) => `:(top,literal)${p}`;
+
+// Identification output is one record per matched file; past this it is
+// certainly not "exactly one", whatever the rest says.
+const IDENTIFY_MAX_BYTES = 64 * 1024;
+
+/**
+ * Ask git which file(s) the diff pathspec would touch, BEFORE producing
+ * any content. Returns the single matched entry, or null when nothing
+ * matches (an empty diff). Throws `not-a-single-file` when the pathspec
+ * is a directory (or otherwise matches several entries, or an entry
+ * other than the requested one) and `restricted` when a name git reports
+ * — notably the OLD side of a rename, which the client only hinted at —
+ * is on the credential denylist.
+ */
+async function identifyChange(
+	runner: GitRunner,
+	dir: string,
+	req: { path: string; oldPath: string | null; area: GitArea },
+): Promise<RawRecord | null> {
+	let res: CaptureResult;
+	if (req.area === "untracked") {
+		// git's untracked walk lstat()s each directory entry and never
+		// descends into a symlink, so a path that only exists THROUGH a
+		// symlinked parent is simply not listed here — unlike the
+		// `--no-index` read that follows, which goes through the OS.
+		res = await runner.run(
+			gitArgv(dir, "ls-files", "-z", "--others", "--exclude-standard", "--", spec(req.path)),
+			IDENTIFY_MAX_BYTES,
+		);
+		if (res.exitCode !== 0) throw classifyFailure(res, "git ls-files");
+		const listed = splitNulRecords(res.stdout, res.truncated);
+		if (listed.length === 0 && !res.truncated) return null;
+		if (res.truncated || listed.length !== 1 || listed[0] !== req.path) throw notASingleFile();
+		return { status: "?", path: req.path, oldPath: null };
+	}
+	const specs = req.oldPath !== null ? [spec(req.oldPath), spec(req.path)] : [spec(req.path)];
+	res = await runner.run(
+		req.area === "staged"
+			? gitArgv(dir, "diff", "--cached", "-M", "--raw", "-z", ...DIFF_SAFE_ARGS, "--", ...specs)
+			: gitArgv(dir, "diff", "--raw", "-z", ...DIFF_SAFE_ARGS, "--", ...specs),
+		IDENTIFY_MAX_BYTES,
+	);
+	if (res.exitCode !== 0) throw classifyFailure(res, "git diff");
+	const records = parseRawZ(splitNulRecords(res.stdout, res.truncated));
+	if (records.length === 0 && !res.truncated) return null;
+	// Exactly one FILE — not one record: an unmerged path is reported
+	// twice (`U` then `M`) by `--raw`, both for the same name.
+	const paths = new Set(records.map((r) => r.path));
+	if (res.truncated || paths.size !== 1 || !paths.has(req.path)) throw notASingleFile();
+	const oldPath = records.find((r) => r.oldPath !== null)?.oldPath ?? null;
+	if (isRestrictedPath(req.path) || (oldPath !== null && isRestrictedPath(oldPath))) {
+		throw new GitError("restricted", "This path is restricted because it may contain credentials");
+	}
+	return { status: records[0]?.status ?? "", path: req.path, oldPath };
+}
+
+function notASingleFile(): GitError {
+	return new GitError(
+		"not-a-single-file",
+		"path must name exactly one changed file (not a directory)",
+	);
+}
+
 export async function getGitDiff(
 	runner: GitRunner,
 	dir: string,
 	req: { path: string; oldPath: string | null; area: GitArea },
 ): Promise<GitDiffResult> {
-	// `:(top,literal)`: repo-root-relative (not cwd-relative) and no glob
-	// expansion — `*.ts` names the file literally called `*.ts`. A leading
-	// `-` can't be an option after `--`, and `:` can't start pathspec
-	// magic of the client's choosing because the magic prefix is ours.
-	const spec = (p: string) => `:(top,literal)${p}`;
+	// Both are name-only reads, so they can overlap; no content is
+	// produced until both have passed.
+	const [, target] = await Promise.all([
+		assertRepoLocation(runner, dir),
+		identifyChange(runner, dir, req),
+	]);
+	const empty = { path: req.path, area: req.area, patch: "", truncated: false, binary: false };
+	if (target === null) return empty;
+
 	let argv: string[];
 	let okExit: number[];
 	if (req.area === "untracked") {
 		// Untracked files have no index side to diff against: compare the
 		// worktree file to /dev/null. `--no-index` takes plain paths
 		// relative to the cwd, which the route pins to the repo root.
-		argv = gitArgv(dir, "diff", "--no-index", ...DIFF_SAFE_ARGS, "--", "/dev/null", req.path);
+		argv = gitArgv(dir, "diff", "--no-index", ...DIFF_SAFE_ARGS, "--", "/dev/null", target.path);
 		// --no-index exits 1 when the sides differ — the expected answer.
 		okExit = [0, 1];
 	} else {
-		const specs = req.oldPath !== null ? [spec(req.oldPath), spec(req.path)] : [spec(req.path)];
+		// The pathspecs are the names GIT reported (old side included, so
+		// a rename is detected as one), not the client's hint.
+		const specs =
+			target.oldPath !== null ? [spec(target.oldPath), spec(target.path)] : [spec(target.path)];
 		argv =
 			req.area === "staged"
 				? gitArgv(dir, "diff", "--cached", "-M", ...DIFF_SAFE_ARGS, "--", ...specs)
@@ -571,15 +767,21 @@ export async function getGitDiff(
 	}
 	const res = await runner.run(argv, GIT_DIFF_MAX_BYTES);
 	if (res.exitCode === null || !okExit.includes(res.exitCode)) {
-		if (res.truncated && !res.timedOut) {
-			// Output cap hit: git was cut mid-write, so its exit status is
-			// meaningless — the head of the patch is still the answer.
+		if (res.truncated) {
+			// Output cap hit: git was still writing when we stopped
+			// keeping its output, so its exit status (possibly a kill by
+			// `timeout`) says nothing about the head we hold — which is
+			// the answer.
 		} else {
 			throw classifyFailure(res, "git diff");
 		}
 	}
 	let patch = res.stdout.toString("utf-8");
 	if (res.truncated) patch = trimToLastLine(patch);
+	// The tree can change between identification and this read (the
+	// requested file becoming a directory, say). Whatever git produced
+	// must still be ONE file's patch, or nothing is returned.
+	if (countPatchSections(patch) > 1) throw notASingleFile();
 	return {
 		path: req.path,
 		area: req.area,
@@ -590,19 +792,31 @@ export async function getGitDiff(
 }
 
 export async function getGitLog(runner: GitRunner, dir: string): Promise<GitCommit[]> {
-	const res = await runner.run(
-		gitArgv(
-			dir,
-			"log",
-			"-z",
-			"-n",
-			String(GIT_LOG_LIMIT),
-			`--format=${LOG_FORMAT}`,
-			"--no-decorate",
-			"--no-show-signature",
+	// Location first: a `dir` symlinked to a repository elsewhere must
+	// not have its history read (nothing from `log` is returned until
+	// the check passes; the two overlap only to save a round-trip).
+	const [, res] = await Promise.all([
+		assertRepoLocation(runner, dir).catch((err: unknown) => {
+			// A repo-less dir fails rev-parse with "not a git repository";
+			// let the log's own stderr classify that case (and the unborn
+			// branch one) so the route's answers stay as they were.
+			if (err instanceof GitError && err.code === "not-a-repo") return;
+			throw err;
+		}),
+		runner.run(
+			gitArgv(
+				dir,
+				"log",
+				"-z",
+				"-n",
+				String(GIT_LOG_LIMIT),
+				`--format=${LOG_FORMAT}`,
+				"--no-decorate",
+				"--no-show-signature",
+			),
+			GIT_LOG_MAX_BYTES,
 		),
-		GIT_LOG_MAX_BYTES,
-	);
+	]);
 	if (res.exitCode !== 0) {
 		const stderr = res.stderr.toString("utf-8");
 		// Fresh `git init`: no HEAD to walk yet. Not an error for the UI.
