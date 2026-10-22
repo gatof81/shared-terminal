@@ -1,6 +1,6 @@
 # Conversation & Agent Activity — contrato técnico (Fase 3)
 
-Estado: **v1.2 (3.0a, tras las rondas 1 y 2 de revisión Work), vinculante para los PRs 3.0b–3.4.** El
+Estado: **v1.3 (3.0a, tras las rondas 1 a 3 de revisión Work), vinculante para los PRs 3.0b–3.4.** El
 razonamiento está en [docs/design/phase3-conversation-activity.md](./design/phase3-conversation-activity.md);
 este archivo define lo que el código debe cumplir y lo que cada PR debe demostrar. Cambiar un
 contrato exige un PR de docs antes o junto con el código.
@@ -173,11 +173,20 @@ autorización de ingesta tiene **dos** fuentes y la revocación es un archivo qu
   `<WORKSPACE_ROOT>/.conversations/REVOKED_ALL`. (Este directorio no se monta en ningún
   contenedor de sesión.) Contenido: `{ "at": <ISO>, "by": "cli|api", "reason"? }`. Se escriben con
   `write` a temporal + `fsync` + `rename` (atómico).
-- **Receptor**: en cada evento, tras el hit de cache, hace `stat` de ambas marcas (coste de
-  microsegundos; el resultado negativo se cachea 1 s por sesión, el positivo nunca). Marca presente
-  ⇒ 204 `ingest_rejected{reason=revoked}`, entrada de cache eliminada, y el archivo
+- **Receptor**: en **cada** evento, como último paso de la autorización y antes de encolar, hace
+  `stat` de ambas marcas. **No hay cache del resultado, ni positivo ni negativo**: un resultado
+  negativo cacheado permitiría aceptar un evento después del `rename` (contraejemplo: stat a t=0,
+  rename a t=10 ms, evento aceptado por cache a t=20 ms). Coste: dos `stat` por evento aceptado
+  (microsegundos; a R1 máximo son 100 `stat`/s por sesión). Marca presente ⇒ 204
+  `ingest_rejected{reason=revoked}`, entrada de cache de tokens eliminada, y el archivo
   `conversation.json` de esa sesión se borra si existe (el receptor converge aunque el comando se
-  haya interrumpido antes del paso 3). Además la entrada de cache de tokens tiene TTL de 60 s.
+  haya interrumpido antes del paso 3). La cache de tokens tiene además TTL de 60 s.
+- **Eventos ya autorizados**: una autorización que terminó antes del `rename` pudo dejar un evento
+  en la cola por conversación (acotada por L6). Esos eventos **se persisten** (fueron emitidos
+  legítimamente antes del corte); al observar la marca por primera vez, el receptor añade un único
+  `gap{reason: revoked}` al final de cada cola afectada y la UI lo muestra como "captura revocada".
+  No se descartan, porque descartar perdería datos legítimos y no mejora la garantía, que trata
+  sobre aceptar, no sobre persistir.
 - **Comando** `conversation:disable`, orden estricto por sesión: (1) escribir la marca y `fsync`
   del directorio; (2) D1: `conversation_requested=0`, `ingest_token_hash=NULL`,
   `ingest_token_hash_suspended=NULL`; (3) borrar `conversation.json`. Imprime `revoked <sid>` solo
@@ -190,14 +199,19 @@ autorización de ingesta tiene **dos** fuentes y la revocación es un archivo qu
 - `reconcile` al arrancar: una marca presente fuerza `conversation_requested=0` y hash NULL en D1 si
   D1 dijera otra cosa (la marca gana), y borra el archivo de hooks.
 
-Garantía: **ningún evento es aceptado después de que `rename` de la marca retorne**, en cualquier
-proceso receptor de esa máquina, cache poblada o no.
+Garantía: **toda autorización que comience después de que el `rename` de la marca retorne
+rechaza el evento**, en cualquier proceso receptor de esa máquina, con cache de tokens poblada o
+no. Las autorizaciones que comenzaron antes pueden completarse y sus eventos persistirse según el
+punto anterior.
 
-Regresión obligatoria (3.0b): dos procesos reales (el receptor con su cache ya poblada por un
-evento aceptado, y el comando ejecutado con `child_process`), sin reiniciar el receptor: el evento
-inmediatamente posterior al retorno del comando es rechazado con `reason=revoked`; repetir con D1
-simulado caído: el comando sale ≠ 0, la marca queda, el evento sigue rechazado y `conversation.json`
-sigue presente hasta que el receptor lo borra al procesar el siguiente evento.
+Regresión obligatoria (3.0b): dos procesos reales (el receptor con su cache de tokens ya poblada
+por un evento aceptado, y el comando ejecutado con `child_process`), sin reiniciar el receptor: el
+evento enviado **inmediatamente** después del retorno del comando, sin esperar ningún intervalo,
+es rechazado con `reason=revoked`; el test se repite 100 veces para cubrir el intercalado. Variante
+con D1 simulado caído: el comando sale ≠ 0, la marca queda, el evento sigue rechazado y
+`conversation.json` sigue presente hasta que el receptor lo borra al procesar el siguiente evento.
+Variante con cola poblada: los eventos ya autorizados antes del `rename` aparecen persistidos,
+seguidos de exactamente un `gap revoked`.
 
 ---
 
@@ -358,7 +372,7 @@ Por eso **L5 ≥ 6 × L3 + 1 MiB de envoltura**.
 | **L8** | eventos montados en el DOM | 500 eventos **y** 8 MiB de texto | ventana por `seq`; los no montados son placeholders; "Copiar informe" pide el evento al servidor si no está montado |
 | **G1** | suma de colas en memoria de todas las conversaciones | 64 MiB | `gap backpressure{scope: global}` en la conversación cuya cola es mayor |
 | **G2** | cuerpos de ingesta > 1 MiB en vuelo simultáneos | 4 | 204 + `gap backpressure{scope: ingest}` |
-| **G3** | bytes en vuelo por socket WS (`bufferedAmount` + frame a enviar), comprobado **antes de cada frame**, no por lote | replay: ≤ 2 MiB, con una única excepción de un frame cuando el buffer está vacío (máx. en vuelo = 2 MiB + 1 frame ≤ L3 + envoltura); live: resync a 8 MiB (§6.1) | esperar `drain`, 1013 o `resync`; nada se pierde: el cliente re-suscribe desde su último `seq` |
+| **G3** | bytes en vuelo por socket WS (`bufferedAmount` + frame a enviar), comprobado **antes de cada frame**, no por lote | replay: ≤ 2 MiB, con una única excepción de un frame cuando el buffer está vacío (máx. en vuelo = 2 MiB + el **frame serializado** más grande; un contenido de L3 escapado puede serializar a ~6 MiB, así que la cota es ~8 MiB, no L3); live: resync a 8 MiB (§6.1) | esperar `drain`, 1013 o `resync`; nada se pierde: el cliente re-suscribe desde su último `seq` |
 | **G4** | índices (`index.json`) residentes en memoria | LRU de 64 conversaciones; cada índice ≤ 4 MiB (se resume por turnos, no por eventos) | desalojo; recarga desde disco al siguiente acceso |
 | **G5** | bytes por respuesta de `GET …/events` | 8 MiB | corta antes y devuelve `hasMore: true` |
 | **R1/R2** | tasa por sesión ST | §3.1 | `gap rate_limited` |
@@ -381,6 +395,7 @@ supere L3 en contenido se trunca de forma visible; un cuerpo que supere L5 se tr
 | `missing_prompt` | `turn_end` sin `user_prompt` para su `prompt_id` | "Prompt no capturado" antes del informe |
 | `backend_restart` | al reiniciar el backend, por conversación no terminada | "Posible actividad perdida entre HH:MM y HH:MM" |
 | `rotated` | L7 | "Historial anterior archivado" |
+| `revoked` | captura revocada mientras había eventos autorizados en cola (§2.5) | "Captura revocada a las HH:MM" |
 | `history_rotated` | cliente pide `after`/`before` anterior a `first_retained_seq` | "Eventos anteriores ya no disponibles (seq a–b)" |
 | `history_unavailable` | conversación conocida por `resume` sin eventos previos | "El historial anterior a la activación no está disponible" |
 
@@ -498,17 +513,20 @@ Servidor → cliente: `{type:"hello", conversations:[{cid,lastSeq,firstRetainedS
   serializado `f` y envía solo si `socket.bufferedAmount + f ≤ 2 MiB`. Si no cabe, espera `drain`
   hasta 30 s; si sigue sin caber, cierra con código **1013** y el cliente reintenta con backoff
   desde su último `seq` recibido. Única excepción: un frame con `f > 2 MiB` se envía cuando
-  `bufferedAmount == 0`, de modo que lo máximo en vuelo durante un replay es 2 MiB + un frame (un
-  frame nunca supera L3 más la envoltura). Sesenta informes de 1 MiB consecutivos producen, para un
-  cliente que no drena, como máximo ~3 MiB encolados y después 1013, nunca 60 MiB.
+  `bufferedAmount == 0`, de modo que lo máximo en vuelo durante un replay es **2 MiB + el frame
+  serializado más grande**. Ese frame no está acotado por L3: el escapado JSON multiplica el
+  contenido (un `last_assistant_message` de 1 MiB de `\u0001` serializa a ~6 MiB), así que la cota
+  real es ~8 MiB. Sesenta informes de 1 MiB consecutivos producen, para un cliente que no drena,
+  como máximo esa cota y después 1013, nunca 60 MiB.
 - Live: misma comprobación por frame contra 8 MiB; si no cabe, el servidor deja de reenviar
   eventos a esa suscripción, envía un único `resync{fromSeq: <último enviado>}` cuando el buffer
   baja de 2 MiB, y el cliente re-suscribe con `after = fromSeq`. Nada se pierde porque todo está
   persistido.
 - `bufferedAmount` es la cuenta de bytes pendientes de la librería `ws` (`socket.bufferedAmount`);
   el test de cliente lento (§10, 3.1) usa un socket cuyo lado receptor no lee, con 60 eventos de
-  1 MiB persistidos, y afirma que el máximo de `bufferedAmount` observado es ≤ 2 MiB + el frame más
-  grande y que el cierre es 1013.
+  1 MiB persistidos **de los cuales al menos uno es contenido de `\u0001` puro** (frame ~6 MiB), y
+  afirma que el máximo de `bufferedAmount` observado es ≤ 2 MiB + el frame serializado más grande
+  y que el cierre es 1013.
 - Máximo 8 suscripciones por socket; un socket por pestaña del navegador; máximo 4 sockets de
   conversación por usuario (el quinto recibe `error{code:"too-many-sockets"}` y 1008).
 
@@ -595,9 +613,11 @@ observado y decisión:
 - [ ] Tabla §2.4 completa como test de tabla (cada fila: estado inicial → acción → D1, archivo,
       respuesta), incluido el comando de emergencia con D1 caído (no borra archivos, sale ≠ 0) y la
       invalidación inmediata de la cache de tokens al deshabilitar por API.
-- [ ] Revocación entre procesos (§2.5): la regresión de dos procesos con cache poblada, en sus dos
-      variantes (D1 sano y D1 caído); `reconcile` con marca presente y D1 discordante; `PATCH
-      {enabled:true}` quita la marca por sesión y responde 409 con marca global.
+- [ ] Revocación entre procesos (§2.5): la regresión de dos procesos con cache poblada, en sus tres
+      variantes (D1 sano con envío inmediato ×100, D1 caído, cola poblada ⇒ persistidos + un `gap
+      revoked`); ausencia de cualquier cache del `stat` de marcas (test: marcar entre dos eventos
+      consecutivos sin pausa ⇒ el segundo rechazado); `reconcile` con marca presente y D1
+      discordante; `PATCH {enabled:true}` quita la marca por sesión y responde 409 con marca global.
 - [ ] Con la bandera activa y una sesión solicitada (dockerode mock): archivo generado byte a byte
       igual a §2.2 (con `PORT` real); bind ro; token de 64 hex y hash.
 - [ ] Ingesta: todas las filas de §3.1; §3.2 (`session_mismatch`); §3.3 (atribución del `gap` por
@@ -643,7 +663,8 @@ observado y decisión:
       `capture.effective=false` se muestra como aviso ("captura no activa").
 - [ ] Replay + live determinista (test del broadcaster); paginación hacia atrás; `firstRetainedSeq`
       y `gap history_rotated`; G3 con **eventos grandes**: cliente que no lee + 60 eventos de 1 MiB
-      ⇒ `bufferedAmount` máximo ≤ 2 MiB + frame mayor, cierre 1013, y al reconectar desde el último
+      (uno de ellos `\u0001` puro, frame ~6 MiB) ⇒ `bufferedAmount` máximo ≤ 2 MiB + frame
+      serializado mayor, cierre 1013, y al reconectar desde el último
       `seq` recibido no hay pérdida ni duplicado; en live, `resync` sin pérdida ni duplicado;
       20k eventos < 500 ms.
 - [ ] "Copiar informe" copia `last_assistant_message` sin alteraciones (desde el DOM o vía

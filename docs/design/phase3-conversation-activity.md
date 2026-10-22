@@ -1,7 +1,7 @@
 # Fase 3 — Conversation & Agent Activity: diseño
 
-Estado: **v1.2, arquitectura general aprobada el 2026-10-22** con los ajustes de la §9 (incluidas
-las rondas 1 y 2 de revisión Work). Este
+Estado: **v1.3, arquitectura general aprobada el 2026-10-22** con los ajustes de la §9 (incluidas
+las rondas 1 a 3 de revisión Work). Este
 documento es la base de la fase; el contrato técnico vinculante (endpoints, eventos, límites,
 criterios de aceptación) vive en [docs/CONVERSATION.md](../CONVERSATION.md). Ningún PR de esta
 fase implementa algo que contradiga este diseño sin actualizarlo primero.
@@ -366,8 +366,9 @@ Componentes:
    managed settings o, si la versión fijada no recarga, en el siguiente `POST /start`. Como el
    comando de emergencia corre en otro proceso y no puede invalidar la cache del receptor, escribe
    **antes de todo** una marca de revocación en disco (`.conversations/<sid>/REVOKED` o
-   `REVOKED_ALL`) que el receptor comprueba en cada evento aceptado por cache; el corte es efectivo
-   desde que esa marca existe, y el comando solo confirma éxito tras marca → D1 → archivos
+   `REVOKED_ALL`) que el receptor comprueba con `stat` en **cada** evento, sin cachear el resultado;
+   toda autorización que empiece después del `rename` rechaza, y los eventos ya autorizados en cola
+   se persisten seguidos de un `gap revoked`. El comando solo confirma éxito tras marca → D1 → archivos
    (CONVERSATION.md §2.5). Si D1 no responde, deja la marca y sale con error. Porque el env de
    un contenedor es inmutable, **habilitar una sesión que ya corre sin token no escribe el archivo**
    (sería tráfico sin receptor que lo acepte) y responde `effectiveAfterRestart: true`.
@@ -456,7 +457,9 @@ para que la secuencia visible sea determinista. Un WS por sesión ST cubre todas
 Contrapresión (G3): el presupuesto es de **bytes por frame**, no de eventos por lote: antes de
 enviar cada frame se comprueba `bufferedAmount + tamaño del frame ≤ 2 MiB`; si no cabe se espera
 `drain` (cierre 1013 si no drena en 30 s); un frame mayor que el presupuesto solo sale con el
-buffer vacío, así que lo máximo en vuelo es 2 MiB más un frame. En live, un cliente que acumula
+buffer vacío, así que lo máximo en vuelo es 2 MiB más el frame serializado más grande (hasta
+~6 MiB para un informe de L3 con escapado JSON máximo, es decir ~8 MiB en total). En live, un
+cliente que acumula
 más de 8 MiB deja de recibir y recibe un `resync{fromSeq}` cuando drena, tras lo cual re-suscribe
 desde ese `seq`. Nada se pierde porque la fuente es el archivo. Un cursor anterior al historial retenido (tras rotación L7) recibe
 un frame `gap history_rotated` y continúa desde `firstRetainedSeq`.
@@ -736,6 +739,16 @@ cifrado de eventos en reposo, Channels como canal de notificaciones, lectura adm
 - C5 (resto): el replay WS aplica un presupuesto de bytes por frame (no por lote), con una única
   excepción de un frame sobre buffer vacío, y test de cliente lento con 60 eventos de 1 MiB.
   (§4.3; CONVERSATION.md §4.4 G3, §6.1)
+
+**2026-10-22 — revisión Work, ronda 3, incorporada en CONVERSATION.md v1.3:**
+
+- C3: sin cache (ni negativa ni positiva) del `stat` de las marcas; garantía reformulada como
+  "toda autorización que comience después del `rename` rechaza"; tratamiento explícito de los
+  eventos ya autorizados (se persisten + `gap revoked`); regresión con envío inmediato tras el
+  rename, repetida 100 veces. (§4.1; CONVERSATION.md §2.5)
+- C5 (precisión): la cota en vuelo es 2 MiB + el frame **serializado** más grande (~6 MiB para L3
+  con escapado máximo), no L3 + envoltura; el test incluye un evento de `\u0001` puro. (§4.3;
+  CONVERSATION.md §4.4 G3, §6.1)
 
 ---
 
