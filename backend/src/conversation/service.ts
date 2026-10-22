@@ -27,7 +27,13 @@ import {
 	writeHooksFile,
 } from "./activation.js";
 import { DedupeTable, identityKey, payloadHash } from "./dedupe.js";
-import { RATE_LIMIT_GAP_WINDOW_MS, SESSION_END_GRACE_MS, TOKEN_CACHE_TTL_MS } from "./limits.js";
+import { isSafeStSessionId } from "./ids.js";
+import {
+	L2_MESSAGE_BYTES,
+	RATE_LIMIT_GAP_WINDOW_MS,
+	SESSION_END_GRACE_MS,
+	TOKEN_CACHE_TTL_MS,
+} from "./limits.js";
 import { type NormalizedEvent, normalizeHookInput } from "./normalize.js";
 import {
 	PROBE_ARGV,
@@ -44,9 +50,10 @@ import {
 	HeartbeatCoalescer,
 	listConversationRows,
 	listRunningCaptureSessions,
+	reserveConversationOwner,
 	revokeIngestTokens,
 	tokenMatchesHash,
-	upsertConversation,
+	updateConversation,
 } from "./registry.js";
 import { checkRevocation } from "./revocation.js";
 import { applyStateInput, type ConversationState, type StateInput } from "./state.js";
@@ -57,6 +64,7 @@ import type {
 	PendingEvent,
 	PersistedEvent,
 } from "./store.js";
+import { truncateUtf8, utf8Bytes } from "./text.js";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -71,7 +79,9 @@ export type RejectReason =
 	| "invalid_json"
 	| "rate_limited"
 	| "backpressure"
-	| "malformed";
+	| "malformed"
+	| "owner_unverified"
+	| "truncated";
 
 export interface IngestHeaders {
 	authorization?: string;
@@ -133,6 +143,17 @@ interface ConvRuntime {
 	rateDroppedBytes: number;
 }
 
+class OwnerMismatch extends Error {
+	constructor(readonly owner: string) {
+		super(`conversation belongs to ${owner}`);
+	}
+}
+class OwnerUnverified extends Error {
+	constructor() {
+		super("ownership could not be verified");
+	}
+}
+
 // ── Service ─────────────────────────────────────────────────────────────────
 
 export class ConversationService {
@@ -140,6 +161,8 @@ export class ConversationService {
 	/** Claude session_id → ST session id (one Claude session belongs to one ST session). */
 	private readonly owner = new Map<string, string>();
 	private readonly runtime = new Map<string, ConvRuntime>();
+	/** B2 — in-flight runtime creations, keyed by Claude session id. */
+	private readonly creating = new Map<string, Promise<ConvRuntime>>();
 	private readonly rate = new SessionRateLimiter();
 	readonly largeBodies = new LargeBodyGate();
 	private readonly heartbeat: HeartbeatCoalescer;
@@ -161,7 +184,7 @@ export class ConversationService {
 			const index = this.deps.store.getResidentIndex(st, cid);
 			if (!index) return;
 			this.stats.d1Writes++;
-			await upsertConversation(index);
+			await updateConversation(index);
 		});
 		deps.store.onEvent((st, cid, ev) => this.onPersisted(st, cid, ev));
 	}
@@ -196,7 +219,8 @@ export class ConversationService {
 	): Promise<{ ok: true; stSessionId: string } | IngestOutcome> {
 		const token = parseBearer(headers.authorization);
 		const stSessionId = headers.stSession?.trim();
-		if (!token || !stSessionId || stSessionId.length > 128) return this.reject("missing_auth");
+		// B1 — the ST session id is a path component too (`.conversations/<sid>/`).
+		if (!token || !isSafeStSessionId(stSessionId)) return this.reject("missing_auth");
 		if (!this.deps.enabled) return this.reject("disabled");
 		const entry = await this.lookupToken(stSessionId);
 		if (!entry) return this.reject("bad_token");
@@ -330,7 +354,14 @@ export class ConversationService {
 			return this.reject("revoked");
 		}
 
-		const rt = await this.ensureRuntime(stSessionId, cid);
+		let rt: ConvRuntime;
+		try {
+			rt = await this.ensureRuntime(stSessionId, cid);
+		} catch (err) {
+			if (err instanceof OwnerMismatch) return this.reject("session_mismatch");
+			if (err instanceof OwnerUnverified) return this.reject("owner_unverified");
+			throw err;
+		}
 		const hash = payloadHash(raw);
 		const identity = identityKey({
 			ev: event.ev,
@@ -346,6 +377,10 @@ export class ConversationService {
 		}
 
 		this.detectGaps(rt, event);
+		// B6 — accumulated L2 budget per message (never per delta).
+		if (event.ev === "assistant_delta" && this.applyMessageBudget(rt, event) === "drop") {
+			return this.reject("truncated");
+		}
 		this.applyMetadata(rt, event, pane);
 		const pending: PendingEvent = {
 			ev: event.ev,
@@ -372,17 +407,62 @@ export class ConversationService {
 	}
 
 	private async ensureRuntime(stSessionId: string, cid: string): Promise<ConvRuntime> {
-		let rt = this.runtime.get(cid);
-		if (rt) {
+		const existing = this.runtime.get(cid);
+		if (existing) {
+			// The runtime is keyed by Claude session id; a caller from another
+			// ST session must never be handed it (B5).
+			if (existing.stSessionId !== stSessionId) throw new OwnerMismatch(existing.stSessionId);
 			// Keep the index resident (refreshes LRU) in case it was evicted.
 			if (!this.deps.store.getResidentIndex(stSessionId, cid)) {
 				await this.deps.store.open(stSessionId, cid);
 			}
-			return rt;
+			return existing;
 		}
+		// B2 — single-flight: concurrent first events share one creation.
+		// The shared promise resolves to the FIRST caller's runtime, so a
+		// concurrent caller from a different ST session is a mismatch, not
+		// a co-owner.
+		const pending = this.creating.get(cid);
+		const rt = pending
+			? await pending
+			: await (() => {
+					const create = this.createRuntime(stSessionId, cid).finally(() =>
+						this.creating.delete(cid),
+					);
+					this.creating.set(cid, create);
+					return create;
+				})();
+		if (rt.stSessionId !== stSessionId) throw new OwnerMismatch(rt.stSessionId);
+		return rt;
+	}
+
+	private async createRuntime(stSessionId: string, cid: string): Promise<ConvRuntime> {
 		const index = await this.deps.store.open(stSessionId, cid);
-		this.owner.set(cid, stSessionId);
-		rt = {
+		// B5 — ownership is reserved atomically in D1 on first discovery in
+		// this process and cached for the process lifetime (it survives a
+		// stop; only a purge forgets it). Never per event.
+		if (this.owner.get(cid) !== stSessionId) {
+			let reserved: Awaited<ReturnType<typeof reserveConversationOwner>>;
+			try {
+				reserved = await reserveConversationOwner(index);
+				this.stats.d1Writes++;
+			} catch (err) {
+				logger.warn(
+					`[conversation] owner reservation failed for ${cid}: ${(err as Error).message}`,
+				);
+				await this.deps.store.close(stSessionId, cid);
+				throw new OwnerUnverified();
+			}
+			if (!reserved.ok) {
+				this.owner.set(cid, reserved.owner);
+				await this.deps.store.close(stSessionId, cid);
+				throw new OwnerMismatch(reserved.owner);
+			}
+			this.owner.set(cid, stSessionId);
+		}
+		const raced = this.runtime.get(cid);
+		if (raced) return raced;
+		const rt: ConvRuntime = {
 			stSessionId,
 			cid,
 			dedupe: new DedupeTable(),
@@ -392,11 +472,48 @@ export class ConversationService {
 			rateDroppedBytes: 0,
 		};
 		this.runtime.set(cid, rt);
-		if (index.eventsCount === 0 && index.lastSeq === 0) {
-			// Brand-new conversation: one registry write so it exists in D1.
-			void this.heartbeat.flushNow(`${stSessionId}/${cid}`);
-		}
 		return rt;
+	}
+
+	/**
+	 * B6 — L2 is an ACCUMULATED budget per `message_id`. The first delta
+	 * that crosses it is cut (UTF-8 safe) with a visible `truncated`; every
+	 * later delta of that message is dropped, except a `final` one, which is
+	 * persisted empty so the message is known to have ended. State lives in
+	 * the index (snapshotted, and rebuilt from the file on recovery).
+	 */
+	private applyMessageBudget(rt: ConvRuntime, event: NormalizedEvent): "persist" | "drop" {
+		const index = this.deps.store.getResidentIndex(rt.stSessionId, rt.cid);
+		if (!index) return "persist";
+		const id = event.identity.messageId ?? "";
+		const cur = index.messageBytes[id] ?? { bytes: 0, truncated: false };
+		const delta = String(event.data.delta ?? "");
+		const deltaBytes = utf8Bytes(delta);
+		const isFinal = event.data.final === true;
+		if (cur.truncated) {
+			if (!isFinal) return "drop";
+			event.data.delta = "";
+			event.data.truncated = true;
+			event.data.original_bytes = cur.bytes + deltaBytes;
+			this.recordMessageBytes(rt, id, cur.bytes + deltaBytes, true);
+			return "persist";
+		}
+		if (cur.bytes + deltaBytes > L2_MESSAGE_BYTES) {
+			const cut = truncateUtf8(delta, Math.max(0, L2_MESSAGE_BYTES - cur.bytes));
+			event.data.delta = cut.value;
+			event.data.truncated = true;
+			event.data.original_bytes = cur.bytes + deltaBytes;
+			this.recordMessageBytes(rt, id, cur.bytes + deltaBytes, true);
+			return "persist";
+		}
+		this.recordMessageBytes(rt, id, cur.bytes + deltaBytes, false);
+		return "persist";
+	}
+
+	private recordMessageBytes(rt: ConvRuntime, id: string, bytes: number, truncated: boolean): void {
+		this.deps.store.update(rt.stSessionId, rt.cid, (i) => {
+			i.messageBytes[id] = { bytes, truncated };
+		});
 	}
 
 	private latestRuntime(stSessionId: string): ConvRuntime | undefined {
@@ -677,14 +794,30 @@ export class ConversationService {
 			await this.heartbeat.flushNow(`${rt.stSessionId}/${rt.cid}`);
 			await this.deps.store.close(rt.stSessionId, rt.cid);
 			this.runtime.delete(rt.cid);
-			this.owner.delete(rt.cid);
+			// B5 — ownership survives a stop (the D1 row keeps it too); only
+			// a purge forgets it.
 		}
 	}
 
-	/** Hard delete: files and rows go; the session dir is purged by the caller's purgeWorkspace. */
+	/**
+	 * Hard delete (B4): stop the runtimes, forget their heartbeats so no
+	 * late timer re-upserts a row, remove `.conversations/<sid>` entirely
+	 * (events, indexes, rotations, markers), the managed dir and the D1
+	 * rows, and forget the ownership cache for the session's conversations.
+	 */
 	async onSessionPurged(stSessionId: string): Promise<void> {
-		await this.onSessionDown(stSessionId);
-		this.deps.store.forgetSession(stSessionId);
+		this.tokenCache.delete(stSessionId);
+		this.rate.forget(stSessionId);
+		for (const rt of Array.from(this.runtime.values())) {
+			if (rt.stSessionId !== stSessionId) continue;
+			if (rt.endTimer) clearTimeout(rt.endTimer);
+			this.heartbeat.forget(`${rt.stSessionId}/${rt.cid}`);
+			this.runtime.delete(rt.cid);
+		}
+		for (const [cid, owner] of Array.from(this.owner)) {
+			if (owner === stSessionId) this.owner.delete(cid);
+		}
+		await this.deps.store.purgeSession(stSessionId);
 		await purgeManagedDir(this.deps.workspaceRoot, stSessionId);
 		try {
 			await deleteConversationRows(stSessionId);

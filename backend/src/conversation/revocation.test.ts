@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const execFileP = promisify(execFile);
 
 const dbStubs = vi.hoisted(() => ({
+	owners: new Map<string, string>(),
 	row: {
 		status: "running",
 		conversation_requested: 1,
@@ -29,6 +30,15 @@ const dbStubs = vi.hoisted(() => ({
 	d1Query: vi.fn(async (sql: string, params: unknown[] = []) => {
 		if (/^SELECT .* FROM sessions WHERE session_id/.test(sql) && params[0] === "s1") {
 			return { results: [dbStubs.row], success: true, meta: {} };
+		}
+		if (/^INSERT OR IGNORE INTO claude_conversations/.test(sql)) {
+			if (!dbStubs.owners.has(String(params[0])))
+				dbStubs.owners.set(String(params[0]), String(params[1]));
+			return { results: [], success: true, meta: {} };
+		}
+		if (/^SELECT st_session_id FROM claude_conversations/.test(sql)) {
+			const owner = dbStubs.owners.get(String(params[0]));
+			return { results: owner ? [{ st_session_id: owner }] : [], success: true, meta: {} };
 		}
 		return { results: [], success: true, meta: {} };
 	}),

@@ -92,8 +92,8 @@ describe("normalizeHookInput — happy paths", () => {
 		expect(e.identity.toolUseId).toBe("tu1");
 		expect(JSON.stringify(e.data)).not.toContain("Bearer");
 		expect(e.data.summary).toEqual({
-			programs: ["curl"],
 			command_bytes: Buffer.byteLength("curl -H 'Authorization: Bearer S' https://x"),
+			programs_omitted: true,
 		});
 		expect(e.data.mcp_server).toEqual({ name: "srv", source: "user" });
 	});

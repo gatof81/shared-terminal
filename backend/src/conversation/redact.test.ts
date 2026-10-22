@@ -15,11 +15,15 @@ import {
 } from "./redact.js";
 
 describe("summarizeToolInput — §4.3.1 required examples", () => {
-	it("curl with an Authorization header → programs only", () => {
+	it("curl with a quoted Authorization header → quotes make the syntax ambiguous: programs omitted", () => {
 		const cmd = "curl -H 'Authorization: Bearer SECRETO' https://example.test";
 		expect(summarizeToolInput("Bash", { command: cmd })).toEqual({
-			programs: ["curl"],
 			command_bytes: Buffer.byteLength(cmd),
+			programs_omitted: true,
+		});
+		expect(summarizeToolInput("Bash", { command: "curl https://example.test" })).toEqual({
+			programs: ["curl"],
+			command_bytes: 25,
 		});
 	});
 	it("env assignment before aws, piped to head", () => {
@@ -36,11 +40,11 @@ describe("summarizeToolInput — §4.3.1 required examples", () => {
 			command_bytes: Buffer.byteLength(cmd),
 		});
 	});
-	it("echo $TOKEN | base64 -d > file", () => {
+	it("echo $TOKEN | base64 -d > file → `$` and `>` make it ambiguous: programs omitted", () => {
 		const cmd = "echo $TOKEN | base64 -d > /tmp/k";
 		expect(summarizeToolInput("Bash", { command: cmd })).toEqual({
-			programs: ["echo", "base64"],
 			command_bytes: Buffer.byteLength(cmd),
+			programs_omitted: true,
 		});
 	});
 	it("WebFetch keeps only the host (no query, no prompt)", () => {
@@ -78,12 +82,9 @@ describe("summarizeToolInput — per-tool table", () => {
 		// The program NAME is a structural identifier and is kept.
 		expect(JSON.parse(s).programs).toEqual(["deploy.sh"]);
 	});
-	it("Bash: sudo/env/time prefixes and subshells are skipped, max 8 programs", () => {
-		expect(bashPrograms("sudo env FOO=1 /usr/bin/python3 x.py; time make")).toEqual([
-			"python3",
-			"make",
-		]);
-		expect(bashPrograms("(cd a && ls); nohup node s.js &")).toEqual(["cd", "ls", "node"]);
+	it("Bash: prefix words skip their segment, subshells make it ambiguous, max 8 programs", () => {
+		expect(bashPrograms("sudo env FOO=1 /usr/bin/python3 x.py; make")).toEqual(["make"]);
+		expect(bashPrograms("(cd a && ls); nohup node s.js &")).toBeNull();
 		expect(bashPrograms("a|b|c|d|e|f|g|h|i|j")).toHaveLength(8);
 	});
 	it("Bash: run_in_background passes through as a boolean", () => {

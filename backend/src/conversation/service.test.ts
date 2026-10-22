@@ -37,17 +37,42 @@ const dbStubs = vi.hoisted(() => ({
 				}));
 			return { results: out, success: true, meta: {} };
 		}
-		if (/^INSERT OR REPLACE INTO claude_conversations/.test(sql)) {
-			dbStubs.conversations.set(String(params[0]), {
-				session_id: params[0],
-				st_session_id: params[1],
-				kind: params[2],
-				title: params[5],
-				status: params[8],
-				status_evidence: params[9],
-				status_at: params[10],
-				last_seq: params[16],
-			});
+		if (/^INSERT OR IGNORE INTO claude_conversations/.test(sql)) {
+			const cid = String(params[0]);
+			if (!dbStubs.conversations.has(cid)) {
+				dbStubs.conversations.set(cid, {
+					session_id: cid,
+					st_session_id: params[1],
+					kind: params[2],
+					title: params[5],
+					status: params[8],
+					status_evidence: params[9],
+					status_at: params[10],
+					last_seq: params[16],
+				});
+			}
+			return { results: [], success: true, meta: {} };
+		}
+		if (/^SELECT st_session_id FROM claude_conversations/.test(sql)) {
+			const row = dbStubs.conversations.get(String(params[0]));
+			return {
+				results: row ? [{ st_session_id: row.st_session_id }] : [],
+				success: true,
+				meta: {},
+			};
+		}
+		if (/^UPDATE claude_conversations SET/.test(sql)) {
+			const cid = String(params[params.length - 2]);
+			const owner = String(params[params.length - 1]);
+			const row = dbStubs.conversations.get(cid);
+			if (row && row.st_session_id === owner) {
+				row.kind = params[0];
+				row.title = params[3];
+				row.status = params[6];
+				row.status_evidence = params[7];
+				row.status_at = params[8];
+				row.last_seq = params[14];
+			}
 			return { results: [], success: true, meta: {} };
 		}
 		if (/^SELECT \* FROM claude_conversations WHERE st_session_id/.test(sql)) {

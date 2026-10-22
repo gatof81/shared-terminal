@@ -30,6 +30,7 @@
 import { promises as nodeFs } from "node:fs";
 import path from "node:path";
 import { logger } from "../logger.js";
+import { assertContained, assertSafeComponent } from "./ids.js";
 import {
 	G1_TOTAL_QUEUE_BYTES,
 	G4_INDEX_BYTES,
@@ -147,6 +148,8 @@ interface Resident {
 	/** Dropped events waiting to be reported as one `gap backpressure`. */
 	pendingDrop: { count: number; scope: "conversation" | "global" | "disk" } | null;
 	currentFileBytes: number;
+	/** True while `drain` runs — an append may be in flight with the queue empty (B2). */
+	busy: boolean;
 }
 
 const MESSAGE_TRACK_MAX = 64;
@@ -158,6 +161,10 @@ export class ConversationStore {
 	private readonly fs: StoreFs;
 	private readonly now: () => number;
 	private readonly resident = new Map<string, Resident>();
+	/** B2 — single-flight opens: concurrent first events share one load. */
+	private readonly opening = new Map<string, Promise<ConversationIndex>>();
+	/** B4 — sessions being purged: opens/appends for them are refused. */
+	private readonly purging = new Set<string>();
 	private readonly listeners = new Set<EventListener>();
 	private totalQueueBytes = 0;
 	private readonly lim: Required<NonNullable<StoreOptions["limits"]>>;
@@ -186,10 +193,16 @@ export class ConversationStore {
 		return sessionConversationsDir(this.opts.workspaceRoot, stSessionId);
 	}
 	eventsPath(stSessionId: string, cid: string): string {
-		return path.join(this.sessionDir(stSessionId), `${cid}.events.jsonl`);
+		return this.fileUnderSession(stSessionId, cid, ".events.jsonl");
 	}
 	indexPath(stSessionId: string, cid: string): string {
-		return path.join(this.sessionDir(stSessionId), `${cid}.index.json`);
+		return this.fileUnderSession(stSessionId, cid, ".index.json");
+	}
+	/** B1 — `cid` is attacker-influenced (hook body); validate and contain. */
+	private fileUnderSession(stSessionId: string, cid: string, suffix: string): string {
+		assertSafeComponent(cid, "conversation id");
+		const dir = this.sessionDir(stSessionId);
+		return assertContained(dir, path.join(dir, `${cid}${suffix}`), "conversation file");
 	}
 
 	onEvent(listener: EventListener): () => void {
@@ -208,6 +221,7 @@ export class ConversationStore {
 	 */
 	async open(stSessionId: string, cid: string): Promise<ConversationIndex> {
 		const key = `${stSessionId}/${cid}`;
+		if (this.purging.has(stSessionId)) throw new Error(`session ${stSessionId} is being purged`);
 		const existing = this.resident.get(key);
 		if (existing) {
 			// Refresh LRU order.
@@ -215,8 +229,29 @@ export class ConversationStore {
 			this.resident.set(key, existing);
 			return existing.index;
 		}
+		// B2 — two concurrent first events for the same conversation must
+		// share ONE load and ONE resident entry; a second entry would carry
+		// its own `lastSeq` and hand out duplicate seqs.
+		const inFlight = this.opening.get(key);
+		if (inFlight) return inFlight;
+		const load = this.loadAndRegister(stSessionId, cid, key).finally(() =>
+			this.opening.delete(key),
+		);
+		this.opening.set(key, load);
+		return load;
+	}
+
+	private async loadAndRegister(
+		stSessionId: string,
+		cid: string,
+		key: string,
+	): Promise<ConversationIndex> {
 		const index = await this.loadIndex(stSessionId, cid);
 		const fileBytes = await this.recoverFromFile(stSessionId, cid, index);
+		// A purge or a concurrent registration may have raced the awaits.
+		if (this.purging.has(stSessionId)) throw new Error(`session ${stSessionId} is being purged`);
+		const raced = this.resident.get(key);
+		if (raced) return raced.index;
 		const r: Resident = {
 			index,
 			queue: [],
@@ -227,6 +262,7 @@ export class ConversationStore {
 			dirty: false,
 			pendingDrop: null,
 			currentFileBytes: fileBytes,
+			busy: false,
 		};
 		this.resident.set(key, r);
 		await this.evictIfNeeded();
@@ -388,6 +424,19 @@ export class ConversationStore {
 			index.eventsBytes += Buffer.byteLength(line, "utf8") + 1;
 			if (ev.ev === "gap") index.gapsCount++;
 			if (ev.ts) index.lastEventAt = ev.ts;
+			if (ev.ev === "assistant_delta") {
+				// B6 — the L2 budget must survive a restart: lines past the
+				// snapshot's offset re-add their bytes to the message tally.
+				const id = String(ev.data?.message_id ?? "");
+				const delta = typeof ev.data?.delta === "string" ? ev.data.delta : "";
+				const cur = index.messageBytes[id] ?? { bytes: 0, truncated: false };
+				index.messageBytes[id] = {
+					bytes: cur.bytes + Buffer.byteLength(delta, "utf8"),
+					truncated: cur.truncated || ev.data?.truncated === true,
+				};
+				const idx = Number(ev.data?.index ?? 0);
+				index.messageIndex[id] = Math.max(idx, index.messageIndex[id] ?? -1);
+			}
 		}
 		if (index.firstRetainedSeq === 0) index.firstRetainedSeq = index.lastSeq + 1;
 		index.lastSeq = Math.max(index.lastSeq, scannedSeq);
@@ -407,6 +456,7 @@ export class ConversationStore {
 		cid: string,
 		pending: PendingEvent,
 	): "queued" | "dropped" | "not_open" {
+		if (this.purging.has(stSessionId)) return "not_open";
 		const r = this.resident.get(`${stSessionId}/${cid}`);
 		// Evicted by the G4 LRU between two calls: the caller reopens
 		// (async) and retries; never throw into a timer or a hook path.
@@ -452,6 +502,15 @@ export class ConversationStore {
 	}
 
 	private async drain(stSessionId: string, cid: string, r: Resident): Promise<void> {
+		r.busy = true;
+		try {
+			await this.drainQueue(stSessionId, cid, r);
+		} finally {
+			r.busy = false;
+		}
+	}
+
+	private async drainQueue(stSessionId: string, cid: string, r: Resident): Promise<void> {
 		while (r.queue.length > 0) {
 			// A pending drop report goes first so the gap sits where the
 			// loss happened, before whatever got through after it.
@@ -560,13 +619,18 @@ export class ConversationStore {
 			const a = index.agents[event.agent_id];
 			if (a) a.toolCount++;
 		} else if (event.ev === "assistant_delta") {
-			const id = String(event.data.message_id ?? "");
+			// Bound the per-message tracking tables (the service fills them
+			// synchronously at enqueue; this only sheds the oldest entries).
 			const keys = Object.keys(index.messageIndex);
-			if (!(id in index.messageIndex) && keys.length >= MESSAGE_TRACK_MAX) {
-				delete index.messageIndex[keys[0]];
-				delete index.messageBytes[keys[0]];
+			if (keys.length > MESSAGE_TRACK_MAX) {
+				const id = String(event.data.message_id ?? "");
+				for (const k of keys) {
+					if (k === id) continue;
+					delete index.messageIndex[k];
+					delete index.messageBytes[k];
+					if (Object.keys(index.messageIndex).length <= MESSAGE_TRACK_MAX) break;
+				}
 			}
-			index.messageIndex[id] = Number(event.data.index ?? 0);
 		}
 	}
 
@@ -689,14 +753,19 @@ export class ConversationStore {
 			if (oldestKey === undefined) return;
 			const r = this.resident.get(oldestKey);
 			if (!r) return;
-			if (r.queue.length > 0) {
-				// Never evict a conversation with work in flight; try the next.
+			if (r.queue.length > 0 || r.busy) {
+				// B2 — never evict a conversation with work in flight. `busy`
+				// covers the append that was already shifted off the queue
+				// (queue empty, I/O pending): evicting it would let a reopen
+				// create a second writer with a stale `lastSeq`.
 				this.resident.delete(oldestKey);
 				this.resident.set(oldestKey, r);
 				if (this.resident.size <= this.lim.residentIndexes) return;
 				// All resident entries busy: stop rather than spin.
 				let anyIdle = false;
-				for (const x of this.resident.values()) if (x.queue.length === 0) anyIdle = true;
+				for (const x of this.resident.values()) {
+					if (x.queue.length === 0 && !x.busy) anyIdle = true;
+				}
 				if (!anyIdle) return;
 				continue;
 			}
@@ -717,15 +786,37 @@ export class ConversationStore {
 		this.resident.delete(key);
 	}
 
-	/** Forget everything about a session (after a hard-delete purge). */
-	forgetSession(stSessionId: string): void {
-		for (const key of Array.from(this.resident.keys())) {
-			if (key.startsWith(`${stSessionId}/`)) {
-				const r = this.resident.get(key);
-				if (r?.flushTimer) clearTimeout(r.flushTimer);
-				this.totalQueueBytes -= r?.queueBytes ?? 0;
+	/**
+	 * B4 — hard delete. Refuses new opens/appends for the session, waits
+	 * for every in-flight append chain, drops the resident entries (and
+	 * their timers) WITHOUT writing snapshots, then removes the whole
+	 * `.conversations/<sid>` directory: events, indexes, `.1` rotations
+	 * and revocation markers. Nothing can recreate the directory while
+	 * `purging` holds the id, and no resident survives to do so after.
+	 */
+	async purgeSession(stSessionId: string): Promise<void> {
+		const dir = this.sessionDir(stSessionId);
+		this.purging.add(stSessionId);
+		try {
+			// A load that started before the purge registers only after
+			// its awaits; `loadAndRegister` re-checks `purging`, and any
+			// in-flight load's promise is awaited here so it has settled.
+			for (const [key, load] of Array.from(this.opening)) {
+				if (key.startsWith(`${stSessionId}/`)) await load.catch(() => undefined);
+			}
+			for (const [key, r] of Array.from(this.resident)) {
+				if (!key.startsWith(`${stSessionId}/`)) continue;
+				this.totalQueueBytes -= r.queueBytes;
+				r.queue.length = 0;
+				r.queueBytes = 0;
+				await r.chain;
+				if (r.flushTimer) clearTimeout(r.flushTimer);
+				r.dirty = false;
 				this.resident.delete(key);
 			}
+			await this.fs.rm(dir, { force: true, recursive: true });
+		} finally {
+			this.purging.delete(stSessionId);
 		}
 	}
 

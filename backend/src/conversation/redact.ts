@@ -38,7 +38,12 @@ function num(v: unknown): number | undefined {
 	return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
 
-/** Shell words that prefix a command without being "the program". */
+/**
+ * Shell words that prefix a command without being "the program". When a
+ * segment STARTS with one of these, where the real program begins depends
+ * on that word's own option grammar (`sudo -u app`, `env -i`), which we do
+ * not parse: the segment is skipped rather than guessed (B3).
+ */
 const BASH_PREFIX_WORDS = new Set([
 	"sudo",
 	"env",
@@ -47,8 +52,6 @@ const BASH_PREFIX_WORDS = new Set([
 	"exec",
 	"command",
 	"builtin",
-	// Assignment-leading builtins: `export A=1; ./run` must not report
-	// `export` as the program of that segment.
 	"export",
 	"declare",
 	"local",
@@ -58,32 +61,35 @@ const BASH_PREFIX_WORDS = new Set([
 ]);
 const BASH_SEGMENT_SPLIT = /\|\||&&|\||;|\n/;
 const BASH_PROGRAM_CHARS = /^[A-Za-z0-9._-]+$/;
+/**
+ * Anything that makes a naive split on `| ; && ||` unreliable: quotes
+ * (separators inside strings), escapes, command substitution, heredocs,
+ * subshells and braces. Rather than tokenising shell — which would
+ * eventually be wrong — the summary omits `programs` entirely for such
+ * commands and keeps only safe metadata (B3).
+ */
+const BASH_AMBIGUOUS = /["'`\\$(){}<>]/;
 
 /**
- * Program names of a shell pipeline: the first non-assignment, non-prefix
- * token of each `|`, `||`, `&&`, `;` or newline segment, basename'd. The
- * command text itself is never returned.
+ * Program names of a shell pipeline, or `null` when the command's syntax
+ * is ambiguous. Only the FIRST token of each segment is ever a candidate;
+ * arguments are never read, so an argument value can never surface as a
+ * "program name".
  */
-export function bashPrograms(command: string): string[] {
+export function bashPrograms(command: string): string[] | null {
+	if (BASH_AMBIGUOUS.test(command)) return null;
 	const out: string[] = [];
 	for (const rawSegment of command.split(BASH_SEGMENT_SPLIT)) {
 		if (out.length >= BASH_PROGRAMS_MAX) break;
 		const tokens = rawSegment.trim().split(/\s+/).filter(Boolean);
-		let program: string | undefined;
-		for (const tok of tokens) {
-			// `VAR=value` assignments and `sudo`/`env`-style prefixes are
-			// skipped; the next token is the program.
-			if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tok)) continue;
-			if (BASH_PREFIX_WORDS.has(tok)) continue;
-			// Flags of a skipped prefix (`sudo -u x`, `env -i`) are skipped too.
-			if (tok.startsWith("-")) continue;
-			program = tok;
-			break;
-		}
-		if (!program) continue;
-		// Strip quotes/parens/subshell noise and keep the basename only.
-		const cleaned = program.replace(/^[("'`{]+/, "").replace(/["'`)}]+$/, "");
-		const base = cleaned.split("/").pop() ?? "";
+		// Skip leading plain `VAR=value` assignments (quotes already excluded).
+		let i = 0;
+		while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=[^\s]*$/.test(tokens[i])) i++;
+		const first = tokens[i];
+		if (!first) continue;
+		// A prefix word or a flag in program position: unknowable, skip.
+		if (BASH_PREFIX_WORDS.has(first) || first.startsWith("-")) continue;
+		const base = first.split("/").pop() ?? "";
 		if (!base || !BASH_PROGRAM_CHARS.test(base)) continue;
 		out.push(utf8Bytes(base) > BASH_PROGRAM_BYTES ? base.slice(0, BASH_PROGRAM_BYTES) : base);
 	}
@@ -113,10 +119,10 @@ export function summarizeToolInput(toolName: string, toolInput: unknown): ToolSu
 	switch (toolName) {
 		case "Bash": {
 			const command = str(input.command) ?? "";
-			const out: ToolSummary = {
-				programs: bashPrograms(command),
-				command_bytes: utf8Bytes(command),
-			};
+			const programs = bashPrograms(command);
+			const out: ToolSummary = { command_bytes: utf8Bytes(command) };
+			if (programs === null) out.programs_omitted = true;
+			else out.programs = programs;
 			if (typeof input.run_in_background === "boolean") {
 				out.run_in_background = input.run_in_background;
 			}

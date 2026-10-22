@@ -11,7 +11,14 @@
  */
 
 import { z } from "zod";
-import { ERROR_TEXT_BYTES, L1_PROMPT_BYTES, L3_REPORT_BYTES, L4_AUX_BYTES } from "./limits.js";
+import { isSafeClaudeSessionId } from "./ids.js";
+import {
+	ERROR_TEXT_BYTES,
+	L1_PROMPT_BYTES,
+	L2_MESSAGE_BYTES,
+	L3_REPORT_BYTES,
+	L4_AUX_BYTES,
+} from "./limits.js";
 import {
 	filterArgvFlags,
 	redactNotification,
@@ -74,7 +81,9 @@ export type NormalizeResult =
 // default object behaviour and counted separately.
 const Common = z.object({
 	hook_event_name: z.string(),
-	session_id: z.string().min(1).max(128),
+	// B1 — the id becomes a file name under `.conversations/<sid>/`; a
+	// traversal-shaped value is `malformed`, never a path.
+	session_id: z.string().refine(isSafeClaudeSessionId, "unsafe session_id"),
 	transcript_path: z.string().optional(),
 	cwd: z.string().optional(),
 	prompt_id: z.string().optional(),
@@ -234,7 +243,7 @@ export function normalizeHookInput(raw: unknown): NormalizeResult {
 			reason: "malformed",
 			hookEventName: optStr(record.hook_event_name),
 			sessionId: optStr(record.session_id),
-			detail: "missing hook_event_name or session_id",
+			detail: "missing or unsafe hook_event_name/session_id",
 		};
 	}
 	const c: CommonT = common.data;
@@ -321,11 +330,13 @@ export function normalizeHookInput(raw: unknown): NormalizeResult {
 				return malformed("MessageDisplay missing message_id/index/final/delta");
 			}
 			const turnId = optStr(record.turn_id) ?? null;
-			const result = build(
-				"assistant_delta",
-				{ message_id: messageId, index, final, delta },
-				{ messageId, index },
-			);
+			const capped = truncateUtf8(delta, L2_MESSAGE_BYTES);
+			const data: EventData = { message_id: messageId, index, final, delta: capped.value };
+			if (capped.truncated) {
+				data.truncated = true;
+				data.original_bytes = capped.originalBytes;
+			}
+			const result = build("assistant_delta", data, { messageId, index });
 			if (result.ok) result.event.turnId = turnId;
 			return result;
 		}

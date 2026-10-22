@@ -22,6 +22,7 @@
 
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { assertContained, assertSafeComponent } from "./ids.js";
 
 export interface RevocationMarker {
 	at: string;
@@ -37,7 +38,11 @@ export function conversationsRoot(workspaceRoot: string): string {
 }
 
 export function sessionConversationsDir(workspaceRoot: string, stSessionId: string): string {
-	return path.join(conversationsRoot(workspaceRoot), stSessionId);
+	// B1 — two independent guards: the component itself, then containment
+	// of the resolved path under `.conversations/`.
+	assertSafeComponent(stSessionId, "session id");
+	const root = conversationsRoot(workspaceRoot);
+	return assertContained(root, path.join(root, stSessionId), "session conversations dir");
 }
 
 export function revokedPath(workspaceRoot: string, stSessionId: string): string {

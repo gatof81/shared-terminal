@@ -142,38 +142,74 @@ function iso(ms: number): string {
 	return new Date(ms).toISOString();
 }
 
-/** INSERT OR REPLACE from an index snapshot: one statement, idempotent. */
-export async function upsertConversation(index: ConversationIndex): Promise<void> {
+/**
+ * B5 — first discovery of a Claude session id: reserve the ownership row
+ * atomically. `INSERT OR IGNORE` never overwrites an existing row, and the
+ * follow-up SELECT tells the caller who owns it. Two D1 calls, once per
+ * conversation per process (the service caches the verified owner), never
+ * per event.
+ */
+export async function reserveConversationOwner(
+	index: ConversationIndex,
+): Promise<{ ok: true } | { ok: false; owner: string }> {
 	await d1Query(
-		`INSERT OR REPLACE INTO claude_conversations (
+		`INSERT OR IGNORE INTO claude_conversations (
 			session_id, st_session_id, kind, parent_session_id, parent_inferred, title,
 			tab_id, pane_id, status, status_evidence, status_at, started_at, ended_at, end_reason,
 			last_event_at, last_prompt_id, last_seq, claude_version, events_bytes, events_count, gaps_count
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		[
-			index.cid,
-			index.stSessionId,
-			index.kind,
-			index.parentSessionId,
-			index.parentInferred ? 1 : 0,
-			index.title,
-			index.tabId,
-			index.paneId,
-			index.state.status,
-			index.state.evidence,
-			iso(index.state.at || Date.now()),
-			index.startedAt,
-			index.endedAt,
-			index.endReason,
-			index.lastEventAt,
-			index.lastPromptId,
-			index.lastSeq,
-			index.claudeVersion,
-			index.eventsBytes,
-			index.eventsCount,
-			index.gapsCount,
-		],
+		rowParams(index),
 	);
+	const r = await d1Query<{ st_session_id: string }>(
+		"SELECT st_session_id FROM claude_conversations WHERE session_id = ?",
+		[index.cid],
+	);
+	const owner = r.results[0]?.st_session_id;
+	if (owner === undefined) throw new Error("ownership row vanished after reserve");
+	return owner === index.stSessionId ? { ok: true } : { ok: false, owner };
+}
+
+/**
+ * Counters/status refresh. `WHERE session_id = ? AND st_session_id = ?`
+ * pins the owner: a row can never be re-pointed at another ST session by
+ * a heartbeat (B5). Never INSERT OR REPLACE.
+ */
+export async function updateConversation(index: ConversationIndex): Promise<void> {
+	await d1Query(
+		`UPDATE claude_conversations SET
+			kind = ?, parent_session_id = ?, parent_inferred = ?, title = ?, tab_id = ?, pane_id = ?,
+			status = ?, status_evidence = ?, status_at = ?, started_at = ?, ended_at = ?, end_reason = ?,
+			last_event_at = ?, last_prompt_id = ?, last_seq = ?, claude_version = ?,
+			events_bytes = ?, events_count = ?, gaps_count = ?
+		WHERE session_id = ? AND st_session_id = ?`,
+		[...rowParams(index).slice(2), index.cid, index.stSessionId],
+	);
+}
+
+function rowParams(index: ConversationIndex): unknown[] {
+	return [
+		index.cid,
+		index.stSessionId,
+		index.kind,
+		index.parentSessionId,
+		index.parentInferred ? 1 : 0,
+		index.title,
+		index.tabId,
+		index.paneId,
+		index.state.status,
+		index.state.evidence,
+		iso(index.state.at || Date.now()),
+		index.startedAt,
+		index.endedAt,
+		index.endReason,
+		index.lastEventAt,
+		index.lastPromptId,
+		index.lastSeq,
+		index.claudeVersion,
+		index.eventsBytes,
+		index.eventsCount,
+		index.gapsCount,
+	];
 }
 
 export async function listConversationRows(stSessionId: string): Promise<ConversationRow[]> {

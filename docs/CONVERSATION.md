@@ -316,7 +316,7 @@ Función pura con tests de tabla:
 
 | Herramienta | `summary` persistido | Lo que **no** se persiste |
 | --- | --- | --- |
-| `Bash` | `programs`: nombre base del primer token de cada segmento separado por `\|`, `&&`, `\|\|`, `;` (máx. 8, cada uno ≤ 32 bytes, solo `[A-Za-z0-9._-]`), saltando asignaciones `VAR=…`, `sudo`, `env`, `nohup`, `time`; `command_bytes`; `run_in_background?` | `command` completo, `description`, cualquier argumento, URL, cabecera, variable |
+| `Bash` | `programs`: nombre base del **primer** token de cada segmento separado por `\|`, `&&`, `\|\|`, `;` (máx. 8, cada uno ≤ 32 bytes, solo `[A-Za-z0-9._-]`), saltando asignaciones simples `VAR=…`; un segmento que empieza por `sudo`, `env`, `nohup`, `time`, `exec`, `export`… o por una bandera se **omite** (no se adivina dónde empieza el programa). **Si el comando contiene comillas, backslash, `$`, `(`, `)`, `{`, `}`, `<` o `>`, la sintaxis es ambigua y `programs` se omite por completo (`programs_omitted: true`)** — nunca se tokeniza shell. `command_bytes`; `run_in_background?` | `command` completo, `description`, cualquier argumento, URL, cabecera, variable |
 | `Read`, `Edit`, `Write`, `MultiEdit`, `NotebookEdit` | `file_path` (≤ 512 bytes), `offset`/`limit` en Read | contenido, `old_string`/`new_string` |
 | `Grep`, `Glob` | `path` (≤ 512) y `pattern_bytes` | `pattern` (puede ser un valor buscado) |
 | `Agent` | `subagent_type`, `description` (≤ 128; es un rótulo de 3-5 palabras por contrato del tool) | `prompt` |
@@ -329,10 +329,12 @@ Ejemplos que *MUST* estar en el test (entrada → `summary`):
 
 | `tool_input` | `summary` |
 | --- | --- |
-| `{"command":"curl -H 'Authorization: Bearer SECRETO' https://example.test"}` | `{"programs":["curl"],"command_bytes":61}` |
+| `{"command":"curl -H 'Authorization: Bearer SECRETO' https://example.test"}` | `{"command_bytes":61,"programs_omitted":true}` (comillas ⇒ ambiguo) |
+| `{"command":"curl https://example.test"}` | `{"programs":["curl"],"command_bytes":25}` |
 | `{"command":"AWS_SECRET_ACCESS_KEY=abc aws s3 ls \| head"}` | `{"programs":["aws","head"],"command_bytes":45}` |
 | `{"command":"git clone https://user:tok3n@github.com/x/y.git && cd y"}` | `{"programs":["git","cd"],"command_bytes":57}` |
-| `{"command":"echo $TOKEN \| base64 -d > /tmp/k"}` | `{"programs":["echo","base64"],"command_bytes":35}` |
+| `{"command":"echo $TOKEN \| base64 -d > /tmp/k"}` | `{"command_bytes":33,"programs_omitted":true}` (`$`/`>` ⇒ ambiguo) |
+| `{"command":"curl -d \"user\|password123\" https://x"}` | `{"command_bytes":37,"programs_omitted":true}` (un separador dentro de comillas nunca produce un "programa") |
 | `{"url":"https://api.example.test/v1/users?api_key=XYZ","prompt":"…"}` | `{"host":"api.example.test"}` |
 | `{"pattern":"sk-live-[0-9a-z]+","path":"src"}` | `{"path":"src","pattern_bytes":17}` |
 | `{"server":"x","headers":{"Authorization":"Bearer Y"},"body":"…"}` (MCP) | `{"keys":["server","headers","body"]}` |
