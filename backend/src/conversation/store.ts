@@ -472,7 +472,10 @@ export class ConversationStore {
 					};
 					const idx = Number(ev.data?.index ?? 0);
 					index.messageIndex[id] = Math.max(idx, index.messageIndex[id] ?? -1);
+					// Same rules as live processing (B6 round 3): a final seals,
+					// otherwise the open set is capped by sealing its oldest.
 					if (ev.data?.final === true) sealMessage(index, id);
+					else capOpenMessages(index);
 				}
 			}
 		}

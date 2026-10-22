@@ -154,6 +154,9 @@ class SessionPurged extends Error {
 	}
 }
 
+/** Purged ST session ids remembered per process (B4 admission tombstones). */
+const TOMBSTONES_MAX = 10_000;
+
 class OwnerMismatch extends Error {
 	constructor(readonly owner: string) {
 		super(`conversation belongs to ${owner}`);
@@ -173,7 +176,7 @@ export class ConversationService {
 	private readonly owner = new Map<string, string>();
 	private readonly runtime = new Map<string, ConvRuntime>();
 	/** B2 — in-flight runtime creations, keyed by Claude session id. */
-	private readonly creating = new Map<string, Promise<ConvRuntime>>();
+	private readonly creating = new Map<string, { st: string; promise: Promise<ConvRuntime> }>();
 	/**
 	 * B4 — per-ST-session purge epoch. `onSessionPurged` bumps it FIRST;
 	 * every ingest/creation captures the epoch when it starts and re-checks
@@ -185,6 +188,37 @@ export class ConversationService {
 
 	private epochOf(stSessionId: string): number {
 		return this.purgeEpoch.get(stSessionId) ?? 0;
+	}
+	/**
+	 * B4 (round 3) — admission is closed for good once a purge starts. ST
+	 * session ids are never reused after a hard delete, so a permanent
+	 * per-process tombstone is correct: no new ingest can adopt the bumped
+	 * epoch and slip in behind the cleanup. Bounded LRU so a long-lived
+	 * process with many hard deletes doesn't grow without limit; an evicted
+	 * tombstone falls back to D1 (row gone ⇒ `bad_token`).
+	 */
+	private readonly tombstones = new Set<string>();
+	/** Ingests currently running per ST session; the purge awaits them. */
+	private readonly inFlight = new Map<string, Set<Promise<unknown>>>();
+
+	private isDead(stSessionId: string): boolean {
+		return this.tombstones.has(stSessionId);
+	}
+
+	private tombstone(stSessionId: string): void {
+		this.tombstones.delete(stSessionId);
+		this.tombstones.add(stSessionId);
+		while (this.tombstones.size > TOMBSTONES_MAX) {
+			const oldest = this.tombstones.values().next().value;
+			if (oldest === undefined) break;
+			this.tombstones.delete(oldest);
+		}
+	}
+
+	/** Heartbeat only for live sessions (B4: no late timer for a purged one). */
+	private markDirty(stSessionId: string, cid: string): void {
+		if (this.isDead(stSessionId)) return;
+		this.heartbeat.markDirty(`${stSessionId}/${cid}`);
 	}
 	private readonly rate = new SessionRateLimiter();
 	readonly largeBodies = new LargeBodyGate();
@@ -204,6 +238,7 @@ export class ConversationService {
 		this.now = deps.now ?? Date.now;
 		this.heartbeat = new HeartbeatCoalescer(async (key) => {
 			const [st, cid] = key.split("/");
+			if (this.isDead(st)) return;
 			const index = this.deps.store.getResidentIndex(st, cid);
 			if (!index) return;
 			this.stats.d1Writes++;
@@ -245,7 +280,9 @@ export class ConversationService {
 		// B1 — the ST session id is a path component too (`.conversations/<sid>/`).
 		if (!token || !isSafeStSessionId(stSessionId)) return this.reject("missing_auth");
 		if (!this.deps.enabled) return this.reject("disabled");
+		if (this.isDead(stSessionId)) return this.reject("not_running");
 		const entry = await this.lookupToken(stSessionId);
+		if (this.isDead(stSessionId)) return this.reject("not_running");
 		if (!entry) return this.reject("bad_token");
 		if (!entry.requested) return this.reject("disabled");
 		if (!entry.hash || !tokenMatchesHash(token, entry.hash)) return this.reject("bad_token");
@@ -342,6 +379,32 @@ export class ConversationService {
 		pane: string | undefined,
 		raw: unknown,
 	): Promise<IngestOutcome> {
+		// B4 — a body that arrives during or after the purge is refused
+		// before anything else; otherwise the ingest registers itself so a
+		// purge that starts now waits for it to settle.
+		if (this.isDead(stSessionId)) return this.reject("not_running");
+		const work = this.ingestInner(stSessionId, pane, raw);
+		let set = this.inFlight.get(stSessionId);
+		if (!set) {
+			set = new Set();
+			this.inFlight.set(stSessionId, set);
+		}
+		set.add(work);
+		try {
+			return await work;
+		} finally {
+			set.delete(work);
+			if (set.size === 0 && this.inFlight.get(stSessionId) === set) {
+				this.inFlight.delete(stSessionId);
+			}
+		}
+	}
+
+	private async ingestInner(
+		stSessionId: string,
+		pane: string | undefined,
+		raw: unknown,
+	): Promise<IngestOutcome> {
 		const normalized = normalizeHookInput(raw);
 		if (!normalized.ok) {
 			this.stats.rejected.malformed = (this.stats.rejected.malformed ?? 0) + 1;
@@ -370,7 +433,8 @@ export class ConversationService {
 
 		// §2.5 — last authorisation step, uncached, immediately before enqueue.
 		const revocation = await checkRevocation(this.deps.workspaceRoot, stSessionId);
-		if (this.epochOf(stSessionId) !== epoch) return this.reject("not_running");
+		if (this.isDead(stSessionId) || this.epochOf(stSessionId) !== epoch)
+			return this.reject("not_running");
 		if (revocation !== "none") {
 			this.tokenCache.delete(stSessionId);
 			// Converge even if the CLI was interrupted before its step 3.
@@ -388,7 +452,7 @@ export class ConversationService {
 			if (err instanceof SessionPurged) return this.reject("not_running");
 			throw err;
 		}
-		if (this.epochOf(stSessionId) !== epoch || rt.epoch !== epoch) {
+		if (this.isDead(stSessionId) || this.epochOf(stSessionId) !== epoch || rt.epoch !== epoch) {
 			return this.reject("not_running");
 		}
 		const hash = payloadHash(raw);
@@ -429,7 +493,8 @@ export class ConversationService {
 			} catch {
 				return this.reject("not_running");
 			}
-			if (this.epochOf(stSessionId) !== epoch) return this.reject("not_running");
+			if (this.isDead(stSessionId) || this.epochOf(stSessionId) !== epoch)
+				return this.reject("not_running");
 			outcome = this.deps.store.enqueue(stSessionId, cid, pending);
 		}
 		if (outcome === "dropped" || outcome === "not_open") {
@@ -459,12 +524,12 @@ export class ConversationService {
 		// a co-owner.
 		const pending = this.creating.get(cid);
 		const rt = pending
-			? await pending
+			? await pending.promise
 			: await (() => {
 					const create = this.createRuntime(stSessionId, cid).finally(() =>
 						this.creating.delete(cid),
 					);
-					this.creating.set(cid, create);
+					this.creating.set(cid, { st: stSessionId, promise: create });
 					return create;
 				})();
 		if (rt.stSessionId !== stSessionId) throw new OwnerMismatch(rt.stSessionId);
@@ -472,9 +537,10 @@ export class ConversationService {
 	}
 
 	private async createRuntime(stSessionId: string, cid: string): Promise<ConvRuntime> {
+		if (this.isDead(stSessionId)) throw new SessionPurged();
 		const epoch = this.epochOf(stSessionId);
 		const index = await this.deps.store.open(stSessionId, cid);
-		if (this.epochOf(stSessionId) !== epoch) {
+		if (this.isDead(stSessionId) || this.epochOf(stSessionId) !== epoch) {
 			await this.deps.store.close(stSessionId, cid).catch(() => undefined);
 			throw new SessionPurged();
 		}
@@ -500,7 +566,7 @@ export class ConversationService {
 			}
 			// B4 — the SELECT may have been answered after a purge started:
 			// do not record ownership or build a runtime for a dead session.
-			if (this.epochOf(stSessionId) !== epoch) {
+			if (this.isDead(stSessionId) || this.epochOf(stSessionId) !== epoch) {
 				await this.deps.store.close(stSessionId, cid).catch(() => undefined);
 				throw new SessionPurged();
 			}
@@ -652,7 +718,7 @@ export class ConversationService {
 				otherIndex.paneId = null;
 				otherIndex.tabId = null;
 				otherIndex.state = { status: "unknown", evidence: "binding_lost", at: this.now() };
-				this.heartbeat.markDirty(`${other.stSessionId}/${other.cid}`);
+				this.markDirty(other.stSessionId, other.cid);
 			}
 		}
 	}
@@ -699,11 +765,11 @@ export class ConversationService {
 	private enqueueOrOpen(rt: ConvRuntime, pending: PendingEvent): void {
 		const r = this.deps.store.enqueue(rt.stSessionId, rt.cid, pending);
 		if (r !== "not_open") return;
-		if (this.epochOf(rt.stSessionId) !== rt.epoch) return;
+		if (this.isDead(rt.stSessionId) || this.epochOf(rt.stSessionId) !== rt.epoch) return;
 		void this.deps.store
 			.open(rt.stSessionId, rt.cid)
 			.then(() => {
-				if (this.epochOf(rt.stSessionId) !== rt.epoch) return;
+				if (this.isDead(rt.stSessionId) || this.epochOf(rt.stSessionId) !== rt.epoch) return;
 				this.deps.store.enqueue(rt.stSessionId, rt.cid, pending);
 			})
 			.catch((err) =>
@@ -785,7 +851,7 @@ export class ConversationService {
 		});
 		// Status changes are worth a D1 write right away (coalesced per 30 s
 		// anyway: a flapping session cannot amplify writes).
-		this.heartbeat.markDirty(`${rt.stSessionId}/${rt.cid}`);
+		this.markDirty(rt.stSessionId, rt.cid);
 		return after;
 	}
 
@@ -810,7 +876,7 @@ export class ConversationService {
 	}
 
 	private onPersisted(stSessionId: string, cid: string, _event: PersistedEvent): void {
-		this.heartbeat.markDirty(`${stSessionId}/${cid}`);
+		this.markDirty(stSessionId, cid);
 	}
 
 	/** Revocation observed mid-stream: queued events persist, then one `gap revoked`. */
@@ -861,15 +927,22 @@ export class ConversationService {
 	async onSessionPurged(stSessionId: string): Promise<void> {
 		// B4 — first thing: every in-flight ingest/creation for this session
 		// now sees a stale epoch and abandons itself after its next await.
+		this.tombstone(stSessionId);
 		this.purgeEpoch.set(stSessionId, this.epochOf(stSessionId) + 1);
 		this.tokenCache.delete(stSessionId);
 		this.rate.forget(stSessionId);
-		// Let in-flight creations settle (they throw SessionPurged / clean
-		// up their store entry) so nothing registers behind the purge.
-		for (const [cid, pending] of Array.from(this.creating)) {
-			if (this.owner.get(cid) === stSessionId || !this.owner.has(cid)) {
-				await pending.catch(() => undefined);
-			}
+		// Admission is closed (tombstone), so the in-flight set can only
+		// shrink: wait until every ingest that was already running for this
+		// session has settled (each rejects at its next checkpoint), and
+		// every creation it may have started. Re-read the sets each round:
+		// a continuation can start a creation while we wait.
+		for (;;) {
+			const ingests = Array.from(this.inFlight.get(stSessionId) ?? []);
+			const creations = Array.from(this.creating.values())
+				.filter((c) => c.st === stSessionId)
+				.map((c) => c.promise);
+			if (ingests.length === 0 && creations.length === 0) break;
+			await Promise.allSettled([...ingests, ...creations]);
 		}
 		for (const rt of Array.from(this.runtime.values())) {
 			if (rt.stSessionId !== stSessionId) continue;
