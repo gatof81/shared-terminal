@@ -264,9 +264,13 @@ and the same restricted-path denylist as the Explorer (a committed
   (or one that aborts a fetch) would otherwise turn the cap into no cap.
   For the same reason output past the byte cap is drained rather than
   the stream destroyed, so "finished" means the process exited (the
-  in-container `timeout` bounds the drain). The frontend sequences its
-  own requests (status+log, then the open diff; a new diff waits for the
-  previous one) to stay within its two slots. The UI stops rendering a
+  in-container `timeout` bounds the drain). Within one request, parallel
+  execs are awaited to completion even when one of them fails early
+  (`allSettledOrThrow`), so a 403 decided by the location check is not
+  sent — and the slot not returned — while the sibling git process is
+  still running. The frontend sequences its own requests (status+log,
+  then the open diff; a new diff or load waits for whatever is in
+  flight, nothing is aborted) to stay within its two slots. The UI stops rendering a
   diff past 5000 lines on every rendering path.
 - **Diagnostics.** On failure only the first line of git's stderr (capped,
   URL credentials scrubbed) reaches the client.

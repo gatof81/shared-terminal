@@ -459,6 +459,69 @@ describe("repository location (G1: `dir` through a symlink / redirected worktree
 	});
 });
 
+describe("a rejected sibling never leaves another exec unawaited (G2)", () => {
+	function gated(answers: Parameters<typeof scripted>[0], key: string, answer = ok("")) {
+		let release: () => void = () => {};
+		const gate = new Promise<void>((r) => {
+			release = r;
+		});
+		const run = scripted({
+			...answers,
+			[key]: async () => {
+				await gate;
+				return answer;
+			},
+		});
+		return { ...run, release: () => release() };
+	}
+	async function settledYet(p: Promise<unknown>): Promise<boolean> {
+		let settled = false;
+		p.then(
+			() => (settled = true),
+			() => (settled = true),
+		);
+		for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+		return settled;
+	}
+	it("log: an outside-workspace rejection waits for the pending log run", async () => {
+		const { runner, release } = gated({ "rev-parse": ok("/home/developer/.st\n\n") }, "log");
+		const p = getGitLog(runner, "alias");
+		p.catch(() => {});
+		expect(await settledYet(p)).toBe(false);
+		release();
+		await expect(p).rejects.toMatchObject({ code: "outside-workspace" });
+	});
+	it("diff: a failed identification waits for the pending location check, and vice versa", async () => {
+		const a = gated({ "diff --raw": fail("fatal: bad") }, "rev-parse", at(""));
+		const pa = getGitDiff(a.runner, "", { path: "x", oldPath: null, area: "unstaged" });
+		pa.catch(() => {});
+		expect(await settledYet(pa)).toBe(false);
+		a.release();
+		await expect(pa).rejects.toMatchObject({ code: "git-failed" });
+		const b = gated({ "rev-parse": ok("/elsewhere\n\n") }, "diff --raw");
+		const pb = getGitDiff(b.runner, "", { path: "x", oldPath: null, area: "unstaged" });
+		pb.catch(() => {});
+		expect(await settledYet(pb)).toBe(false);
+		b.release();
+		await expect(pb).rejects.toMatchObject({ code: "outside-workspace" });
+	});
+	it("status: a timed-out status waits for the other three reads", async () => {
+		const { runner, release } = gated(
+			{
+				status: fail("", 124, { timedOut: true }),
+				"diff --cached": ok(""),
+				"rev-parse": at(""),
+			},
+			"diff",
+		);
+		const p = getGitStatus(runner, "");
+		p.catch(() => {});
+		expect(await settledYet(p)).toBe(false);
+		release();
+		await expect(p).rejects.toMatchObject({ code: "timeout" });
+	});
+});
+
 describe("parseRawZ / countPatchSections", () => {
 	it("parses M / A / D, renames with two paths, and combined (conflict) records", () => {
 		const recs = splitNulRecords(

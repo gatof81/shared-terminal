@@ -273,8 +273,8 @@ describe("view switching", () => {
 		expect(api.fetchGitStatus).not.toHaveBeenCalled();
 		$("view-git-btn").click();
 		await flush();
-		expect(api.fetchGitStatus).toHaveBeenCalledWith("s1", "", expect.any(AbortSignal));
-		expect(api.fetchGitLog).toHaveBeenCalledWith("s1", "", expect.any(AbortSignal));
+		expect(api.fetchGitStatus).toHaveBeenCalledWith("s1", "");
+		expect(api.fetchGitLog).toHaveBeenCalledWith("s1", "");
 	});
 
 	it("keeps a user-chosen Git view on a stopped session instead of forcing Files", async () => {
@@ -348,7 +348,7 @@ describe("status states", () => {
 		api.fetchGitStatus.mockResolvedValueOnce({ ...CLEAN, root: "app" });
 		buttonNamed($("git-list"), "app")?.click();
 		await flush();
-		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s1", "app", expect.any(AbortSignal));
+		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s1", "app");
 		expect($("git-summary").textContent).toContain("app");
 		expect($("git-list").textContent).toContain("Working tree clean");
 	});
@@ -595,6 +595,28 @@ describe("diff", () => {
 		expect(rowFor("unstaged:src/app.ts")?.classList.contains("selected")).toBe(true);
 	});
 
+	it("a Refresh during the initial load waits for it instead of aborting and re-racing the slots", async () => {
+		let finishStatus: (v: unknown) => void = () => {};
+		let finishLog: (v: unknown) => void = () => {};
+		api.fetchGitStatus.mockReturnValueOnce(new Promise((r) => (finishStatus = r)));
+		api.fetchGitLog.mockReturnValueOnce(new Promise((r) => (finishLog = r)));
+		await openGit();
+		expect($("git-list").textContent).toContain("Reading git status");
+		$("git-refresh-btn").click();
+		await flush();
+		// Nothing new went out: the first pair still holds the server's
+		// two slots (git keeps running whatever the browser does).
+		expect(api.fetchGitStatus).toHaveBeenCalledTimes(1);
+		expect(api.fetchGitLog).toHaveBeenCalledTimes(1);
+		finishStatus(DIRTY);
+		finishLog(COMMITS);
+		await flush();
+		expect(api.fetchGitStatus).toHaveBeenCalledTimes(2);
+		expect(api.fetchGitLog).toHaveBeenCalledTimes(2);
+		expect($("git-list").textContent).toContain("Working tree clean");
+		expect($("git-list").textContent).not.toContain("Couldn't");
+	});
+
 	it("a refresh clicked while a diff is loading waits for that diff", async () => {
 		api.fetchGitStatus.mockResolvedValue(DIRTY);
 		await openGit();
@@ -700,7 +722,7 @@ describe("sessions", () => {
 		api.fetchGitStatus.mockResolvedValue(CLEAN);
 		selectSession("s2");
 		await flush();
-		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s2", "", expect.any(AbortSignal));
+		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s2", "");
 		expect($("git-list").textContent).toContain("Working tree clean");
 		expect($("git-diff").textContent).toContain("Select a changed file");
 		expect(rowFor("unstaged:src/app.ts")).toBeUndefined();
@@ -729,7 +751,7 @@ describe("sessions", () => {
 		expect($("git-view").hidden).toBe(true);
 		expect(vs.getView()).toBe("terminal");
 		await openGit("s3");
-		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s3", "", expect.any(AbortSignal));
+		expect(api.fetchGitStatus).toHaveBeenLastCalledWith("s3", "");
 	});
 });
 

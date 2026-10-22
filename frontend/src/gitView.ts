@@ -67,7 +67,6 @@ type LogState =
 	| { status: "loaded"; commits: GitCommit[] }
 	| { status: "error"; message: string };
 let log: LogState = { status: "idle" };
-let loadAbort: AbortController | null = null;
 
 interface Selected {
 	path: string;
@@ -146,9 +145,10 @@ onSessionSync(() => {
 });
 
 function resetState(sessionId: string | null): void {
+	// No abort: the requests in flight keep their server-side slots
+	// until git ends anyway (see loadInFlight), so the next load WAITS
+	// for them; the generation bump just drops their results.
 	generation++;
-	loadAbort?.abort();
-	loadAbort = null;
 	stateSessionId = sessionId;
 	dir = "";
 	status = { status: "idle" };
@@ -164,22 +164,20 @@ async function load(): Promise<void> {
 	const sessionId = stateSessionId;
 	if (sessionId === null) return;
 	const gen = generation;
-	loadAbort?.abort();
-	const abort = new AbortController();
-	loadAbort = abort;
-	const { signal } = abort;
-	const stale = () => gen !== generation || signal.aborted;
+	const stale = () => gen !== generation;
 	status = { status: "loading" };
 	log = { status: "loading" };
 	renderAll();
-	// Two requests are about to go out: wait for a diff still in flight
-	// (see loadInFlight / diffInFlight above).
-	if (diffInFlight !== null) await diffInFlight;
+	// Two requests are about to go out: wait for a load or a diff still
+	// in flight (see loadInFlight / diffInFlight above). A Refresh during
+	// the initial load, or a session switch mid-load, therefore waits for
+	// the earlier requests instead of racing them for the two slots.
+	await Promise.all([loadInFlight, diffInFlight]);
 	if (stale()) return;
 
 	// Status and log are independent reads: fire both, render each as it
 	// lands. A log failure on a non-repo is expected and never shown.
-	const statusDone = fetchGitStatus(sessionId, dir, signal).then(
+	const statusDone = fetchGitStatus(sessionId, dir).then(
 		(data) => {
 			if (stale()) return;
 			status = { status: "loaded", data };
@@ -201,7 +199,7 @@ async function load(): Promise<void> {
 			};
 		},
 	);
-	const logDone = fetchGitLog(sessionId, dir, signal).then(
+	const logDone = fetchGitLog(sessionId, dir).then(
 		(commits) => {
 			if (stale()) return;
 			log = { status: "loaded", commits };

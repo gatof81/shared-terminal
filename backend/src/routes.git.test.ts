@@ -805,6 +805,35 @@ describe("concurrency", () => {
 		await vi.waitFor(async () => expect((await call("log")).status).toBe(200));
 	});
 
+	it("an early refusal (outside-workspace) does not answer — nor free the slot — while the sibling log run is pending", async () => {
+		let release: () => void = () => {};
+		const gate = new Promise<void>((r) => {
+			release = r;
+		});
+		answers["rev-parse"] = ok("/home/developer/.st\n\n");
+		answers.log = async () => {
+			await gate;
+			return ok("");
+		};
+		const held = Array.from({ length: GIT_IN_FLIGHT_PER_USER }, () =>
+			call("log", { query: { dir: "alias" } }),
+		);
+		await vi.waitFor(() => expect(logExecs()).toBe(GIT_IN_FLIGHT_PER_USER));
+		// The 403 is decided already, but its git process isn't done.
+		let answered = 0;
+		for (const h of held) h.then(() => answered++);
+		await new Promise((r) => setTimeout(r, 50));
+		expect(answered).toBe(0);
+		const extra = await call("log", { query: { dir: "alias" } });
+		expect(extra.status).toBe(429);
+		expect(logExecs()).toBe(GIT_IN_FLIGHT_PER_USER);
+		release();
+		for (const r of await Promise.all(held)) expect(r.status).toBe(403);
+		// Slots back: a well-located request now goes through.
+		answers["rev-parse"] = ok(`${WORKSPACE}\n\n`);
+		await vi.waitFor(async () => expect((await call("log")).status).toBe(200));
+	});
+
 	it("a request that fails inside git still returns its slot", async () => {
 		answers.log = fail("fatal: broken", 128);
 		for (let i = 0; i < GIT_IN_FLIGHT_PER_USER + 2; i++) {

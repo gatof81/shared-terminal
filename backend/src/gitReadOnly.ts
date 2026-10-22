@@ -566,6 +566,23 @@ export function parseCandidates(records: string[]): string[] {
 
 // ── High-level operations ───────────────────────────────────────────────────
 
+/**
+ * `Promise.all` that waits for EVERY input to settle before rejecting.
+ * The inputs are docker execs the caller's concurrency slot is meant to
+ * cover: with plain `Promise.all`, one rejecting sibling (a failed
+ * location check, say) would return control — and the slot — while the
+ * other git processes are still running in the container. The first
+ * rejection in input order wins, so the error is as deterministic as
+ * `Promise.all`'s would have been for the common case.
+ */
+async function allSettledOrThrow<T extends readonly unknown[]>(
+	promises: readonly [...{ [K in keyof T]: Promise<T[K]> }],
+): Promise<T> {
+	const results = await Promise.allSettled(promises);
+	for (const r of results) if (r.status === "rejected") throw r.reason;
+	return results.map((r) => (r as PromiseFulfilledResult<unknown>).value) as unknown as T;
+}
+
 export type GitStatusResult =
 	| { repo: false; candidates: string[] }
 	| ({
@@ -583,7 +600,7 @@ const REV_PARSE_LOCATION = (dir: string) =>
 export async function getGitStatus(runner: GitRunner, dir: string): Promise<GitStatusResult> {
 	// All four are independent reads; parallel keeps a refresh at one
 	// round-trip's latency instead of four.
-	const [status, cached, work, prefix] = await Promise.all([
+	const [status, cached, work, prefix] = await allSettledOrThrow([
 		runner.run(
 			gitArgv(dir, "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"),
 			GIT_STATUS_MAX_BYTES,
@@ -737,8 +754,9 @@ export async function getGitDiff(
 	req: { path: string; oldPath: string | null; area: GitArea },
 ): Promise<GitDiffResult> {
 	// Both are name-only reads, so they can overlap; no content is
-	// produced until both have passed.
-	const [, target] = await Promise.all([
+	// produced until both have passed (and neither is left running
+	// behind a rejection — see allSettledOrThrow).
+	const [, target] = await allSettledOrThrow([
 		assertRepoLocation(runner, dir),
 		identifyChange(runner, dir, req),
 	]);
@@ -794,8 +812,9 @@ export async function getGitDiff(
 export async function getGitLog(runner: GitRunner, dir: string): Promise<GitCommit[]> {
 	// Location first: a `dir` symlinked to a repository elsewhere must
 	// not have its history read (nothing from `log` is returned until
-	// the check passes; the two overlap only to save a round-trip).
-	const [, res] = await Promise.all([
+	// the check passes; the two overlap only to save a round-trip, and a
+	// failed check still waits for the log process to end).
+	const [, res] = await allSettledOrThrow([
 		assertRepoLocation(runner, dir).catch((err: unknown) => {
 			// A repo-less dir fails rev-parse with "not a git repository";
 			// let the log's own stderr classify that case (and the unborn
