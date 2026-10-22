@@ -2,19 +2,10 @@
  * filesView.ts — the Workspace Explorer: a read-only "Files" view of the
  * active session's persistent workspace, alongside the terminal.
  *
- * TERMINAL INVARIANT: switching to Files must not disconnect, resize or
- * dispose the terminal. The Files panel is therefore an absolutely-
- * positioned OVERLAY inside #terminal-area, stacked over the tab bar,
- * the xterm panes and the mobile key bar — those keep their exact layout
- * box underneath, so no ResizeObserver fires, xterm never refits, and no
- * `resize` reaches tmux (which would reflow the pane for every other
- * viewer of the session). Hiding the terminal with display:none instead
- * would zero its box and trip all of that.
- *
- * The overlay's top edge tracks the toolbar's bottom (ResizeObserver on
- * the toolbar), because the toolbar's height varies — it wraps on narrow
- * screens and is hidden entirely on mobile while the chrome drawer is
- * collapsed.
+ * The view is an OVERLAY over the terminal; the switching mechanics and
+ * the terminal invariant (never disconnect / resize / dispose the
+ * terminal) live in viewSwitch.ts, shared with the Git view. This module
+ * owns the explorer's data and rendering only.
  *
  * Files works for stopped / soft-deleted sessions too: the backend reads
  * the host bind mount, no container needed. sessionCore opens such
@@ -36,19 +27,11 @@ import {
 } from "./api.js";
 import { formatBytes } from "./format.js";
 import { highlightCode, languageForFile } from "./highlight.js";
-import {
-	activeSessionId,
-	currentTerminals,
-	getActiveTerminal,
-	isMobile,
-	sessions,
-	setChromeOpen,
-	showCopySuccessToast,
-	showToast,
-	updateChromeToggle,
-} from "./main.js";
+import { activeSessionId, isMobile, sessions, showCopySuccessToast, showToast } from "./main.js";
 import { renderMarkdown } from "./markdown.js";
 import { saveBlob } from "./saveBlob.js";
+import { button, el, stateBox } from "./ui.js";
+import { getView, onSessionSync, onViewChange } from "./viewSwitch.js";
 import {
 	ancestorsOf,
 	baseName,
@@ -59,23 +42,6 @@ import {
 } from "./workspacePaths.js";
 
 // ── DOM ─────────────────────────────────────────────────────────────────────
-const terminalToolbar = document.getElementById("terminal-toolbar")!;
-const terminalTabs = document.getElementById("terminal-tabs")!;
-const terminalContainer = document.getElementById("terminal-container")!;
-const keyBar = document.getElementById("key-bar");
-// Terminal-only toolbar controls, disabled while Files covers the terminal.
-const fontSizeBtn = document.getElementById("font-size-btn") as HTMLButtonElement | null;
-const terminalSearchBtn = document.getElementById(
-	"terminal-search-btn",
-) as HTMLButtonElement | null;
-const terminalSearchInput = document.getElementById(
-	"terminal-search-input",
-) as HTMLInputElement | null;
-const viewSwitch = document.getElementById("view-switch")!;
-const viewTerminalBtn = document.getElementById("view-terminal-btn") as HTMLButtonElement;
-const viewFilesBtn = document.getElementById("view-files-btn") as HTMLButtonElement;
-const filesView = document.getElementById("files-view")!;
-const filesToTerminalBtn = document.getElementById("files-to-terminal-btn") as HTMLButtonElement;
 const breadcrumbsEl = document.getElementById("files-breadcrumbs")!;
 const refreshBtn = document.getElementById("files-refresh-btn") as HTMLButtonElement;
 const filesBody = document.getElementById("files-body")!;
@@ -83,13 +49,6 @@ const treeEl = document.getElementById("files-tree")!;
 const previewEl = document.getElementById("files-preview")!;
 
 // ── State ───────────────────────────────────────────────────────────────────
-
-type View = "terminal" | "files";
-let view: View = "terminal";
-// True when Files was entered because the terminal was unavailable
-// (stopped session) rather than by the user — such a view snaps back to
-// Terminal once the session is running again.
-let forcedFiles = false;
 
 /** Session the cached explorer state below belongs to. */
 let stateSessionId: string | null = null;
@@ -138,108 +97,38 @@ let mobilePane: "tree" | "preview" = "tree";
 // ── View switching ──────────────────────────────────────────────────────────
 
 export function isFilesViewActive(): boolean {
-	return view === "files";
+	return getView() === "files";
 }
 
-function positionOverlay(): void {
-	// offsetTop/offsetHeight are relative to #terminal-area (the toolbar's
-	// offsetParent — it's position:relative) and both read 0 while the
-	// toolbar is display:none (mobile, chrome drawer collapsed).
-	const bottom = terminalToolbar.offsetTop + terminalToolbar.offsetHeight;
-	filesView.style.top = `${bottom}px`;
-}
-new ResizeObserver(positionOverlay).observe(terminalToolbar);
-
-function setView(next: View, opts: { forced?: boolean } = {}): void {
-	forcedFiles = next === "files" && opts.forced === true;
-	if (view === next) {
-		renderSwitch();
-		return;
-	}
-	view = next;
-	filesView.hidden = next !== "files";
-	// Covering the terminal visually doesn't stop Tab / Shift+Tab, a
-	// click-through or assistive tech from reaching xterm's hidden
-	// textarea and typing into the session. `inert` removes the covered
-	// subtrees from focus, input and the accessibility tree WITHOUT
-	// touching layout — display/visibility would change the box and make
-	// xterm refit + resize tmux, which the overlay exists to avoid.
-	for (const el of [terminalTabs, terminalContainer, keyBar]) {
-		el?.toggleAttribute("inert", next === "files");
-	}
-	if (fontSizeBtn) fontSizeBtn.disabled = next === "files";
-	if (terminalSearchBtn) terminalSearchBtn.disabled = next === "files";
-	if (terminalSearchInput) terminalSearchInput.disabled = next === "files";
-	if (next === "files") {
-		// inert also blurs a focused descendant in browsers; the explicit
-		// blur covers engines that don't (and jsdom). Also drops the
-		// mobile soft keyboard. The terminal itself is untouched.
-		const active = document.activeElement;
-		if (active instanceof HTMLElement && terminalContainer.contains(active)) active.blur();
-		positionOverlay();
-		if (stateSessionId !== null && !dirs.has("")) void loadDir("");
-		renderAll();
-	} else if (!isMobile()) {
-		// Desktop: hand the keyboard straight back (inert is already off
-		// above, so the focus lands). Mobile skips this —
-		// focusing xterm pops the soft keyboard, which the user didn't ask
-		// for by tapping "Terminal".
-		getActiveTerminal()?.focus();
-	}
-	renderSwitch();
-	updateChromeToggle();
-}
-
-function renderSwitch(): void {
-	viewTerminalBtn.setAttribute("aria-pressed", String(view === "terminal"));
-	viewFilesBtn.setAttribute("aria-pressed", String(view === "files"));
-}
-
-function terminalAvailable(): boolean {
-	const s = sessions.find((x) => x.sessionId === activeSessionId);
-	return s?.status === "running" || currentTerminals.size > 0;
-}
+onViewChange((next) => {
+	if (next !== "files") return;
+	if (stateSessionId !== null && !dirs.has("")) void loadDir("");
+	renderAll();
+});
 
 /**
- * Re-sync with the active session. Called from sessionCore's
- * updateToolbar(), which runs on every session selection / teardown.
+ * Re-sync with the active session. Runs on every `syncSessionViews()`
+ * (sessionCore's updateToolbar — every session selection / teardown —
+ * and logout), after viewSwitch has settled which view is up.
  */
-export function syncFilesView(): void {
+onSessionSync(syncFilesView);
+
+function syncFilesView(): void {
 	const s = sessions.find((x) => x.sessionId === activeSessionId);
 	if (!s) {
 		resetState(null);
-		viewSwitch.hidden = true;
-		setView("terminal");
 		return;
 	}
-	viewSwitch.hidden = false;
 	if (s.sessionId !== stateSessionId) {
 		resetState(s.sessionId);
-		if (view === "files") {
+		if (isFilesViewActive()) {
 			void loadDir("");
 			renderAll();
 		}
 	}
-	const canTerminal = terminalAvailable();
-	viewTerminalBtn.disabled = !canTerminal;
-	filesToTerminalBtn.disabled = !canTerminal;
-	const hint = canTerminal ? "" : "Start the session to use the terminal";
-	viewTerminalBtn.title = hint || "Show terminal";
-	filesToTerminalBtn.title = hint || "Back to terminal";
-	if (!canTerminal) {
-		if (view !== "files") setView("files", { forced: true });
-	} else if (forcedFiles) {
-		setView("terminal");
-	}
 	// No unconditional renderAll here: this runs on every session-list
 	// poll, and rebuilding the preview would reset its scroll position
 	// and drop the user's text selection every few seconds.
-}
-
-/** Open Files for a session that has no terminal (stopped/terminated). */
-export function showFilesOnly(): void {
-	setView("files", { forced: true });
-	if (isMobile()) setChromeOpen(false);
 }
 
 function resetState(sessionId: string | null): void {
@@ -254,15 +143,6 @@ function resetState(sessionId: string | null): void {
 	clearPreview();
 	mobilePane = "tree";
 }
-
-viewTerminalBtn.addEventListener("click", () => setView("terminal"));
-filesToTerminalBtn.addEventListener("click", () => setView("terminal"));
-viewFilesBtn.addEventListener("click", () => {
-	setView("files");
-	// Mobile: the toolbar lives in the chrome drawer — collapse it so the
-	// explorer gets the full height (its own header has a Terminal button).
-	if (isMobile()) setChromeOpen(false);
-});
 
 // ── Data loading ────────────────────────────────────────────────────────────
 
@@ -467,47 +347,8 @@ async function downloadSelected(path: string): Promise<void> {
 
 // ── Rendering ───────────────────────────────────────────────────────────────
 
-function el<K extends keyof HTMLElementTagNameMap>(
-	tag: K,
-	className?: string,
-	text?: string,
-): HTMLElementTagNameMap[K] {
-	const node = document.createElement(tag);
-	if (className) node.className = className;
-	if (text !== undefined) node.textContent = text;
-	return node;
-}
-
-function button(
-	label: string,
-	className: string,
-	onClick: () => void,
-	title?: string,
-): HTMLButtonElement {
-	const b = el("button", className, label);
-	b.type = "button";
-	if (title) {
-		b.title = title;
-		b.setAttribute("aria-label", title);
-	}
-	b.addEventListener("click", onClick);
-	return b;
-}
-
-function stateBox(
-	kind: "loading" | "empty" | "error" | "info",
-	message: string,
-	action?: HTMLElement,
-): HTMLElement {
-	const box = el("div", `files-state files-state-${kind}`);
-	box.setAttribute("role", kind === "error" ? "alert" : "status");
-	box.appendChild(el("p", undefined, message));
-	if (action) box.appendChild(action);
-	return box;
-}
-
 function renderAll(): void {
-	if (view !== "files") return;
+	if (!isFilesViewActive()) return;
 	renderBreadcrumbs();
 	renderTree();
 	renderPreview();
@@ -555,7 +396,7 @@ function entryIcon(entry: WorkspaceEntry, isOpen: boolean): string {
 }
 
 function renderTree(): void {
-	if (view !== "files") return;
+	if (!isFilesViewActive()) return;
 	const active = document.activeElement;
 	const focusedPath =
 		active instanceof HTMLElement && treeEl.contains(active) ? active.dataset.path : undefined;
@@ -745,7 +586,7 @@ function prettyJson(content: string): string | null {
 }
 
 function renderPreview(): void {
-	if (view !== "files") return;
+	if (!isFilesViewActive()) return;
 	previewEl.replaceChildren();
 
 	if (preview.status === "none") {
@@ -804,9 +645,9 @@ function renderPreview(): void {
 					: `Couldn't load the preview: ${preview.message}`;
 		const retry =
 			preview.httpStatus === 403
-				? undefined
-				: button("Retry", "files-btn", () => void openPreview(path));
-		previewEl.appendChild(stateBox(preview.httpStatus === 403 ? "info" : "error", msg, retry));
+				? []
+				: [button("Retry", "files-btn", () => void openPreview(path))];
+		previewEl.appendChild(stateBox(preview.httpStatus === 403 ? "info" : "error", msg, ...retry));
 		return;
 	}
 

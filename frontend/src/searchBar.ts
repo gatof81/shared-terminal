@@ -15,7 +15,7 @@
  */
 
 import { searchTabHistory } from "./api.js";
-import { isFilesViewActive } from "./filesView.js";
+import { isOverlayActive } from "./viewSwitch.js";
 import { activeSessionId, currentActiveTabId, getActiveTerminal, showToast } from "./main.js";
 import { decideSearchAction, type SubmittedSearch } from "./search.js";
 
@@ -106,9 +106,10 @@ export function initTerminalSearch(): void {
 		if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return;
 		if (e.key.toLowerCase() !== "f") return;
 		if (!activeSessionId || !currentActiveTabId) return;
-		// The Files view covers the terminal; don't drive tmux copy-mode
-		// in a pane the user can't see (and leave the chord to the browser).
-		if (isFilesViewActive()) return;
+		// The Files / Git overlays cover the terminal; don't drive tmux
+		// copy-mode in a pane the user can't see (and leave the chord to
+		// the browser).
+		if (isOverlayActive()) return;
 		e.preventDefault();
 		openSearchBox();
 	});

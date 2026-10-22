@@ -23,7 +23,6 @@ import {
 	TabNotFoundError,
 } from "./api.js";
 import { parseSessionHash, reflectSessionInHash } from "./deepLink.js";
-import { showFilesOnly, syncFilesView } from "./filesView.js";
 import { formatBytes, formatCpuCores, formatCpuPercent } from "./format.js";
 import { transformKeyInput } from "./keyBar.js";
 import {
@@ -50,6 +49,7 @@ import { openBootstrapLogModal } from "./newSession.js";
 import { openObserveModalFor } from "./observeModal.js";
 import { badgeFor, clearBadge, recordOutput } from "./tabActivity.js";
 import { openTerminalSession, type SessionStatus } from "./terminal.js";
+import { showFilesOnly, syncSessionViews } from "./viewSwitch.js";
 
 // ── DOM (re-queried locally) ─────────────────────────────────────────────
 const sessionList = document.getElementById("session-list")!;
@@ -449,7 +449,7 @@ export function updateToolbar() {
 		terminalContainer.style.display = "none";
 		emptyState.style.display = "flex";
 		updateChromeToggle();
-		syncFilesView();
+		syncSessionViews();
 		return;
 	}
 	terminalToolbar.style.display = "flex";
@@ -463,7 +463,7 @@ export function updateToolbar() {
 	// Refresh the mobile header context pill — its label tracks the
 	// active session/tab, and visibility flips on/off here.
 	updateChromeToggle();
-	syncFilesView();
+	syncSessionViews();
 }
 
 // ── Tabs within the active session ──────────────────────────────────────────

@@ -194,6 +194,55 @@ privileges (typically root), so both go through one hardened opener
   run script on the API origin. Concurrent previews are capped per user
   and per process (429 when full), on top of the per-IP rate limits.
 
+## Git Changes view
+
+`GET /api/sessions/:id/git/{status,diff,log}` show a repository's branch,
+changed files, one-file diffs and recent commits. Same owner-only gate
+and the same restricted-path denylist as the Explorer (a committed
+`.env`'s diff is refused with 403), plus:
+
+- **git runs inside the session container, never on the host.** A
+  repository is attacker-controlled input: `.git/config` can point
+  `core.fsmonitor`, `diff.external`, a textconv driver or
+  `core.sshCommand` at any command, and `core.worktree` / symlinks can
+  point the "worktree" anywhere. Running `git status` over such a tree as
+  root on the host would execute those; inside the container they run as
+  the same unprivileged `developer` user that already runs the session's
+  arbitrary code, so there is nothing to escalate to. The trade-off is
+  that the view needs the session running (409 otherwise) — the Files
+  view, which reads the host bind mount, does not.
+- **No client-built commands.** Every invocation is a fixed argv (no
+  shell): the only request-derived operands are a validated
+  workspace-relative directory (`git -C <dir>`) and validated
+  repo-relative paths passed after `--` as `:(top,literal)` pathspecs, so
+  a file called `-rf` or `*.ts` is an operand, never an option or a
+  glob. Diff output flags (`--no-ext-diff --no-textconv`) and
+  per-invocation config (`core.fsmonitor=false`, `core.pager=cat`,
+  `color.ui=never`) override anything the repo or user config sets.
+- **Read-only in deed.** Nothing here stages, commits or moves refs.
+  `GIT_OPTIONAL_LOCKS=0` keeps `git status` from taking the index lock at
+  all; `git diff` may still refresh the index's *stat cache* in place
+  (identical tracked content, through the normal `index.lock` protocol,
+  and it backs off silently if the user's own git holds the lock — both
+  pinned by `gitReadOnly.integration.test.ts` against real git).
+  `GIT_TERMINAL_PROMPT=0` prevents credential prompts from hanging a
+  request; `GIT_CEILING_DIRECTORIES=/home/developer` stops repository
+  discovery from walking above the workspace.
+- **Bounded.** Each command runs under coreutils `timeout` (20 s) with a
+  host-side backstop; stdout is capped (2 MiB status, 512 KiB diff, 256
+  KiB log — `truncated` is reported, never silently cut); the change list
+  is capped at 2000 entries and the log at 50 commits. Concurrent git
+  requests are capped per user and per process (429), on top of a per-IP
+  rate limit. The UI stops rendering a diff past 5000 lines.
+- **Diagnostics.** On failure only the first line of git's stderr (capped,
+  URL credentials scrubbed) reaches the client.
+
+Known limitation: a stopped session can't be inspected. Running git on
+the host in a throwaway, network-less sandbox container over a read-only
+mount of the workspace would close that gap and is the documented
+follow-up; it was left out of v1 to keep the trusted computing base of
+the first version small.
+
 ## Optional: docker-socket-proxy
 
 For deployments that want to shrink the backend's daemon surface

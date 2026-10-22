@@ -144,6 +144,15 @@ export interface RateLimitConfig {
 		ipMax: number;
 		ipWindowMs: number;
 	};
+	// Git Changes view (`/sessions/:id/git/*`). Every hit is a bounded
+	// `docker exec` of git inside the session container — heavier than a
+	// host-side file read, so a lower ceiling than `fileBrowse`; the
+	// concurrent-exec count is capped separately in routes/git.ts.
+	// Optional for the same reason as `fileBrowse`.
+	git?: {
+		ipMax: number;
+		ipWindowMs: number;
+	};
 }
 
 // Defaults match issue #10: login 10/15min, register 5/1h, per-username 10/15min.
@@ -161,6 +170,9 @@ const DEFAULT_FILE_BROWSE_LIMIT = { ipMax: 300, ipWindowMs: 60 * 1000 };
 // 120/min: one per image opened, well above clicking through a folder of
 // screenshots. Peak memory is bounded by the concurrency cap, not this.
 const DEFAULT_FILE_RAW_LIMIT = { ipMax: 120, ipWindowMs: 60 * 1000 };
+// 120/min: a status refresh is one request (four parallel git execs),
+// a file click is one more; nobody reviews two files a second for long.
+const DEFAULT_GIT_LIMIT = { ipMax: 120, ipWindowMs: 60 * 1000 };
 
 export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 	login: {
@@ -234,6 +246,7 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 	},
 	fileBrowse: DEFAULT_FILE_BROWSE_LIMIT,
 	fileRaw: DEFAULT_FILE_RAW_LIMIT,
+	git: DEFAULT_GIT_LIMIT,
 };
 
 // ── IP-based limiters (express-rate-limit) ─────────────────────────────────
@@ -252,6 +265,7 @@ export interface AuthRateLimiters {
 	execIp: RateLimitRequestHandler;
 	fileBrowseIp: RateLimitRequestHandler;
 	fileRawIp: RateLimitRequestHandler;
+	gitIp: RateLimitRequestHandler;
 }
 
 export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
@@ -364,6 +378,14 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		legacyHeaders: false,
 		message: { error: "Too many image previews from this IP, try again later", scope: "ip" },
 	});
+	const gitCfg = cfg.git ?? DEFAULT_GIT_LIMIT;
+	const gitIp = rateLimit({
+		windowMs: gitCfg.ipWindowMs,
+		limit: gitCfg.ipMax,
+		standardHeaders: "draft-7",
+		legacyHeaders: false,
+		message: { error: "Too many git requests from this IP, try again later", scope: "ip" },
+	});
 	return {
 		loginIp,
 		registerIp,
@@ -378,6 +400,7 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		execIp,
 		fileBrowseIp,
 		fileRawIp,
+		gitIp,
 	};
 }
 

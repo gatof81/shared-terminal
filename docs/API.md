@@ -33,11 +33,16 @@ Auth is via the httpOnly cookie `st_token` set by `POST /api/auth/login` and `PO
 | GET    | /api/sessions/:id/fs/list?path= | Workspace Explorer: list one directory level (owner-only)     |
 | GET    | /api/sessions/:id/fs/preview?path= | Workspace Explorer: bounded text preview / kind sniff (≤1 MiB) |
 | GET    | /api/sessions/:id/fs/raw?path= | Workspace Explorer: inline image bytes (allowlisted types, ≤10 MiB) |
+| GET    | /api/sessions/:id/git/status[?dir=] | Git Changes: branch, ahead/behind, changed files by area with line counts (owner-only, session must be running) |
+| GET    | /api/sessions/:id/git/diff?path=&area=[&oldPath=][&dir=] | Git Changes: one file's unified diff (≤512 KiB, `truncated` flag; restricted paths 403) |
+| GET    | /api/sessions/:id/git/log[?dir=] | Git Changes: last 50 commits (`hash`, `shortHash`, `author`, `date`, `subject`) |
 | POST   | /api/sessions/:id/exec        | Run a command, stream NDJSON output ([docs/EXEC_API.md](./EXEC_API.md)) |
 | GET    | /api/sessions/:id/exec/:execId | Exec status: `running` / `exited` / `unknown`                  |
 | POST   | /api/sessions/:id/exec/:execId/kill | Kill the exec's process group (race-free, idempotent)     |
 
 `POST /api/sessions` accepts a typed `body.config` mirroring `SessionConfigSchema` in `backend/src/sessionConfig.ts`: `envVars` (typed entries with `plain` / `secret` discriminator), `repo` + `auth`, `ports[]` + `allowPrivilegedPorts`, `gitIdentity`, `dotfiles`, `agentSeed`, `postCreateCmd`, `postStartCmd`, `cpuLimit`, `memLimit`, `idleTtlSeconds`. Every field is optional; a bare `POST` (no `config`) creates a default session.
+
+The Git routes are strictly read-only (no stage / commit / checkout / push exists) and run git **inside the session container**, so they answer `409 {code:"session-not-running"}` for a stopped session. `status` returns `{repo:false, candidates:[…]}` (top-level dirs holding a `.git`) when `dir` isn't a repository, otherwise `{repo:true, root, branch, detached, head, upstream, ahead, behind, changes[], truncated}` where each change is `{area: staged|unstaged|untracked|conflict, status, xy, path, oldPath, additions, deletions, binary, restricted}`. `area` on `diff` selects index-vs-HEAD (`staged`), worktree-vs-index (`unstaged`/`conflict`) or worktree-vs-`/dev/null` (`untracked`); `dir` must be the `root` reported by `status`. Errors carry `code`: `timeout` (504), `unsafe-repository` (409, git's `safe.directory` refusal), `git-failed` (502).
 
 ## Templates (cookie-authed)
 

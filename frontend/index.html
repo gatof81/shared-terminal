@@ -188,6 +188,9 @@
               <button id="view-files-btn" type="button" aria-pressed="false" title="Browse workspace files">
                 Files
               </button>
+              <button id="view-git-btn" type="button" aria-pressed="false" title="Git changes">
+                Git
+              </button>
             </div>
             <button
               id="font-size-btn"
@@ -298,6 +301,31 @@
             <div id="files-body">
               <div id="files-tree" role="tree" aria-label="Workspace files"></div>
               <div id="files-preview"></div>
+            </div>
+          </div>
+          <!-- Git Changes (read-only). Same overlay shape as Files; branch,
+               changed files and recent commits on the left, one file's
+               diff on the right (stacked on mobile). Content is built in
+               TS (gitView.ts). -->
+          <div id="git-view" hidden>
+            <div id="git-header">
+              <button id="git-to-terminal-btn" class="files-btn files-mobile-only" type="button">
+                ‹ Terminal
+              </button>
+              <div id="git-summary" aria-live="polite"></div>
+              <button
+                id="git-refresh-btn"
+                class="files-btn"
+                type="button"
+                title="Refresh"
+                aria-label="Refresh git status"
+              >
+                ↻
+              </button>
+            </div>
+            <div id="git-body">
+              <div id="git-list" aria-label="Changed files and recent commits"></div>
+              <div id="git-diff"></div>
             </div>
           </div>
         </section>
