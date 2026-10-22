@@ -1,12 +1,13 @@
 # Conversation & Agent Activity — contrato técnico (Fase 3)
 
-Estado: **v1 (3.0a), vinculante para los PRs 3.0b–3.4.** El razonamiento está en
-[docs/design/phase3-conversation-activity.md](./design/phase3-conversation-activity.md); este
-archivo define lo que el código debe cumplir y lo que cada PR debe demostrar. Cambiar un contrato
-exige un PR de docs antes o junto con el código.
+Estado: **v1.1 (3.0a, tras la ronda 1 de revisión Work), vinculante para los PRs 3.0b–3.4.** El
+razonamiento está en [docs/design/phase3-conversation-activity.md](./design/phase3-conversation-activity.md);
+este archivo define lo que el código debe cumplir y lo que cada PR debe demostrar. Cambiar un
+contrato exige un PR de docs antes o junto con el código.
 
 Convenciones: *MUST*/*MUST NOT* son requisitos verificados por test; *SHOULD* son requisitos
-verificados en revisión.
+verificados en revisión. "Bytes" significa siempre bytes UTF-8 del contenido, salvo donde se dice
+"bytes del cuerpo" (serialización JSON en el cable).
 
 ---
 
@@ -42,33 +43,27 @@ El código de Fase 3 *MUST NOT* leer ni escribir, en el camino caliente ni en te
 | --- | --- | --- |
 | Directorio managed vacío | `/etc/claude-code/managed-settings.d/` (imagen, root 0755) | Dockerfile |
 | Script de registro | `/opt/st/hooks/session-start.sh` (imagen, root 0755) | Dockerfile |
-| Archivo de hooks por sesión | host `<WORKSPACE_ROOT>/.claude-managed/<st_session_id>/conversation.json`, montado **ro** en `/etc/claude-code/managed-settings.d/` | backend, en `spawn`/`startContainer`, solo si la sesión está habilitada |
-| Token de ingesta | env `ST_INGEST_TOKEN` del contenedor (32 bytes aleatorios, hex) | backend, solo si la sesión está habilitada; hash SHA-256 en `sessions.ingest_token_hash` |
+| Archivo de hooks por sesión | host `<WORKSPACE_ROOT>/.claude-managed/<st_session_id>/conversation.json`, montado **ro** en `/etc/claude-code/managed-settings.d/` | backend, según la tabla §2.4 |
+| Token de ingesta | env `ST_INGEST_TOKEN` del contenedor (32 bytes aleatorios, hex) | backend, en `spawn`/`startContainer`, solo si la sesión está *solicitada* (§2.4) |
+| Estado solicitado | D1 `sessions.conversation_requested INTEGER NOT NULL DEFAULT 0` | API admin / allowlist / comando de emergencia |
+| Estado efectivo | derivado: `ingest_token_hash IS NOT NULL` ∧ archivo presente ∧ contenedor arrancado con el token | backend (`reconcile` lo recalcula) |
 
 Reglas:
 
-- El directorio host `.claude-managed/<sid>` *MUST* existir (vacío si la sesión no está habilitada)
-  antes de `container.start()`, igual que `.uploads/<sid>`; el bind es siempre `ro`.
-- Sesión no habilitada ⇒ *MUST NOT* existir `conversation.json` y *MUST NOT* inyectarse
-  `ST_INGEST_TOKEN`. Test: `docker inspect` del contenedor no contiene la variable y el directorio
-  montado está vacío.
-- `CONVERSATION_ENABLED=false` (default) ⇒ ninguna sesión está habilitada, el endpoint de ingesta
-  responde 204 y descarta, el comando/endpoint de habilitación responde 409 `conversation-disabled`.
-- Habilitación por sesión: `PATCH /api/admin/sessions/:id/conversation {enabled: boolean}` (3.0d).
-  Habilitar escribe el archivo; si el contenedor ya corre, el archivo aparece dentro del montaje ro
-  (mismo directorio host) y el CLI lo recarga en caliente; si no recarga, aplica en el siguiente
-  `POST /start`. Deshabilitar borra el archivo (mismo efecto).
-- `npm run conversation:disable -- <sid>|--all` (host, dentro del contenedor del backend, patrón de
-  `backup.ts`) borra los archivos sin pasar por la API: es el kill switch de emergencia.
+- El directorio host `.claude-managed/<sid>` *MUST* existir (vacío si no aplica) antes de
+  `container.start()`, igual que `.uploads/<sid>`; el bind es siempre `ro`.
 - La imagen *MUST* comportarse de forma idéntica a la actual cuando el directorio montado está
   vacío (smoke test: `claude -p hola` no produce ninguna petición saliente a `st-backend`).
+- `CONVERSATION_ENABLED=false` (default) ⇒ la ingesta rechaza todo (`disabled`), la habilitación
+  responde 409 `conversation-disabled`, y el `reconcile` de arranque **borra** cualquier
+  `conversation.json` existente (apagado global persistente aunque haya filas solicitadas).
 
 ### 2.2 Contenido de `conversation.json`
 
 ```json
 {
   "hooks": {
-    "SessionStart": [{ "hooks": [{ "type": "command", "command": "/opt/st/hooks/session-start.sh", "async": true, "timeout": 5 }] }],
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "/opt/st/hooks/session-start.sh", "async": true }] }],
     "UserPromptSubmit":   [{ "hooks": [HTTP] }],
     "MessageDisplay":     [{ "hooks": [HTTP] }],
     "PreToolUse":         [{ "matcher": "*", "hooks": [HTTP] }],
@@ -111,6 +106,9 @@ donde `HTTP` es exactamente:
   valor real.
 - `timeout: 1` es deliberado: un receptor presente pero colgado cuesta ≤ 1 s por evento; un receptor
   ausente falla en DNS sin esperar. *MUST NOT* subirse sin cambiar este documento.
+- El hook `SessionStart` es `async: true` y **no lleva `timeout`**: la documentación oficial dice
+  que `timeout` no se aplica a hooks de comando asíncronos, así que el script se acota a sí mismo
+  (§2.3).
 - Ningún hook de este archivo *MUST* devolver un cuerpo con `decision`, `permissionDecision`,
   `continue`, `updatedInput`, `additionalContext` ni `displayContent`: el receptor responde **204 sin
   cuerpo** en todos los casos (test).
@@ -119,39 +117,80 @@ donde `HTTP` es exactamente:
 
 Entrada: JSON de `SessionStart` por stdin. Comportamiento:
 
-1. Si `ST_INGEST_TOKEN` está vacío o no definido: exit 0 sin salida ni red.
-2. Construye el JSON de salida = entrada + `{ "st": { "claude_version": "<claude --version>",
-   "tmux_session": "<tmux display-message -p '#S' o null>", "pane": "$TMUX_PANE o null",
-   "argv": ["<argv del proceso padre, máx. 32 entradas, cada una recortada a 256 bytes>"] } }`.
-3. `curl --silent --max-time 2 -X POST -H 'Content-Type: application/json' -H "Authorization: Bearer
+1. Primera línea ejecutable: `exec timeout -k 1 5 /opt/st/hooks/session-start-body.sh "$@"` (o el
+   equivalente en un solo archivo con `[ -z "$ST_HOOK_WRAPPED" ] && ST_HOOK_WRAPPED=1 exec timeout
+   -k 1 5 "$0"`). **El script entero, con todos sus subprocesos, termina en ≤ 6 s pase lo que pase.**
+2. Si `ST_INGEST_TOKEN` está vacío o no definido: exit 0 sin salida ni red.
+3. Construye el JSON de salida = entrada + `{ "st": { "claude_version", "tmux_session", "pane",
+   "argv_flags" } }` donde:
+   - `claude_version` = `timeout 3 claude --version` (null si falla);
+   - `tmux_session` = `timeout 1 tmux display-message -p '#S'` (null si falla o no hay tmux);
+   - `pane` = `$TMUX_PANE` o null;
+   - `argv_flags` = **solo** las banderas del proceso padre que estén en la allowlist
+     `-p --print --bare --resume --continue --fork-session --agent --agent-name --agent-id
+     --teammate-mode --dangerously-skip-permissions --permission-mode`, sin valores salvo el de
+     `--agent-name`/`--agent-type`/`--teammate-mode`/`--permission-mode` (≤ 64 bytes cada uno).
+     Nunca se persiste el argv completo (puede llevar `--append-system-prompt`, rutas o secretos).
+4. `curl --silent --max-time 2 -X POST -H 'Content-Type: application/json' -H "Authorization: Bearer
    $ST_INGEST_TOKEN" -H "X-ST-Session: $SESSION_ID" -H "X-ST-Tmux-Pane: $TMUX_PANE" --data-binary
    @- http://st-backend:3001/ingest/claude/hook`. Cualquier fallo ⇒ exit 0.
-4. Nunca escribe en stdout (un JSON en stdout sería interpretado por el CLI). Errores a stderr solo
-   con `ST_HOOKS_DEBUG=1`.
+5. Nunca escribe en stdout. Errores a stderr solo con `ST_HOOKS_DEBUG=1`.
+
+### 2.4 Activación: estado solicitado frente a estado efectivo
+
+El env de un contenedor Docker es inmutable; el archivo montado y D1 no lo son. Por eso hay dos
+estados y una tabla de transiciones. *MUST* implementarse exactamente así y cubrirse con tests:
+
+| Acción | Contenedor | Token en env | `ingest_token_hash` | `conversation.json` | Resultado / respuesta |
+| --- | --- | --- | --- | --- | --- |
+| Habilitar (`requested=1`) | parado | se generará en `start` | NULL hasta `start` | se escribe en `start` | `{enabled:true, effective:false, effectiveAfterRestart:true}` |
+| Habilitar | corriendo **sin** token | ausente (inmutable) | NULL | **no se escribe** (hooks sin token solo generarían tráfico rechazado) | `{enabled:true, effective:false, effectiveAfterRestart:true}` |
+| Habilitar | corriendo **con** token (fue deshabilitada y rehabilitada sin reinicio) | presente | se **restaura** el hash guardado en `ingest_token_hash_suspended` | se reescribe | `{enabled:true, effective:true}`; el CLI recarga o aplica al siguiente start |
+| Deshabilitar (`requested=0`) | corriendo con token | presente (inmutable, inofensivo) | se mueve a `ingest_token_hash_suspended`, queda NULL ⇒ **la ingesta rechaza desde ya** | se borra ⇒ el CLI deja de emitir al recargar o en el siguiente start | `{enabled:false, effective:false, emissionStopsAfterRestart:<bool según recarga verificada>}` |
+| Deshabilitar | parado | — | NULL | se borra | `{enabled:false, effective:false}` |
+| Emergencia `npm run conversation:disable -- <sid>\|--all` | cualquiera | — | **NULL** en D1 y `conversation_requested=0` (persistente: el siguiente `start` no regenera nada) | borrado | salida por sesión; falla si D1 no responde (no deja solo los archivos borrados) |
+| `start` / `spawn` | — | nuevo si `requested=1` ∧ `CONVERSATION_ENABLED` | nuevo hash o NULL | escrito si `requested=1` ∧ `CONVERSATION_ENABLED`, si no borrado | — |
+| `reconcile` (arranque del backend) | cada sesión `running` | — | — | archivo presente ⇔ `requested=1` ∧ hash no NULL ∧ `CONVERSATION_ENABLED`; se corrigen desajustes (borrar huérfanos; nunca crear sin token) | log por corrección |
+
+Invariantes:
+
+- **La ingesta deja de aceptar en el momento del flip en D1**, con invalidación pre/post de la cache
+  de tokens (mismo patrón que la cache de ownership), independientemente de cuándo deje de emitir
+  el CLI.
+- Un archivo `conversation.json` *MUST NOT* existir si `ingest_token_hash IS NULL` para esa sesión.
+- "Efectivo" se informa en `GET /api/sessions/:id/conversations` como `capture: { requested,
+  effective, effectiveAfterRestart }`, para que la UI no prometa captura que no ocurre.
+- La recarga en caliente del CLI es *informativa*: el smoke test la mide y el campo
+  `emissionStopsAfterRestart` se fija según el resultado para la versión fijada. Hasta tener la
+  medición, se asume **false** (no recarga) y la documentación de operador lo dice.
 
 ---
 
 ## 3. Endpoint de ingesta
 
 `POST /ingest/claude/hook` — fuera de `/api`, montado antes de `express.json`, `cookieParser` y
-CORS, con parser JSON propio limitado a **L5**.
+CORS, con parser JSON propio limitado a **L5 bytes del cuerpo**.
 
 ### 3.1 Autenticación y respuesta
 
 | Condición | Respuesta | Efecto |
 | --- | --- | --- |
 | Falta `Authorization` o `X-ST-Session` | 204 | contador `ingest_rejected{reason=missing_auth}` |
-| Token no coincide con `ingest_token_hash` de esa sesión, o sesión no `running`, o sesión no habilitada | 204 | `ingest_rejected{reason=bad_token\|not_running\|disabled}` |
-| Cuerpo > L5 o JSON inválido | 204 | `ingest_rejected{reason=too_large\|invalid_json}` + `gap malformed` si se identificó `session_id` |
+| Sesión con `conversation_requested=0`, o `CONVERSATION_ENABLED=false` | 204 | `ingest_rejected{reason=disabled}` |
+| Token no coincide con `ingest_token_hash`, o sesión no `running` | 204 | `ingest_rejected{reason=bad_token\|not_running}` |
+| `Content-Length` ausente, > L5, o cuerpo que supera L5 al leerse, o JSON inválido | 204 | `ingest_rejected{reason=too_large\|invalid_json}` + `gap malformed` si se identificó la conversación (§3.3) |
+| Más de **G2** cuerpos grandes en vuelo | 204 | descartado + `gap backpressure{scope: ingest}` |
 | Evento válido | 204 | encolado; persistencia asíncrona |
 
 - *MUST* responder siempre 204 con cuerpo vacío en ≤ 50 ms p99 con el disco sano (la persistencia
   no está en el camino de la respuesta).
-- *MUST NOT* devolver 401/403/429 (el CLI mostraría errores de hook al usuario; la observabilidad
-  nunca produce ruido en el agente).
-- Rate limit por sesión ST: **R1 = 500 eventos / 10 s** y **R2 = 4 MiB / 10 s** (ventana fija).
-  Exceso ⇒ descartado + un único `gap{reason: rate_limited, dropped: n}` por ventana.
-- Cola por conversación acotada en **L6**; overflow ⇒ descartado + `gap{reason: backpressure}`.
+- *MUST NOT* devolver 401/403/429.
+- Rate limit por sesión ST, **token bucket**: R1 = 500 eventos de capacidad, recarga 50/s; R2 =
+  capacidad **24 MiB**, recarga 24 MiB/60 s, consumo = `Content-Length`. Con el bucket lleno, un solo
+  evento de L5 bytes siempre cabe (capacidad ≥ L5). Exceso ⇒ descartado + un único
+  `gap{reason: rate_limited, dropped: n, dropped_bytes}` por ventana de 10 s.
+- Cola por conversación acotada en **L6** y total del proceso en **G1**; overflow ⇒ descartado +
+  `gap{reason: backpressure, scope: conversation|global}`.
 
 ### 3.2 Headers de correlación
 
@@ -159,6 +198,14 @@ CORS, con parser JSON propio limitado a **L5**.
 | --- | --- | --- |
 | `X-ST-Session` | `$SESSION_ID` del contenedor | *MUST* existir en `sessions` y coincidir con el token. El `session_id` del cuerpo (Claude) se asocia a esta sesión ST; un `session_id` ya asociado a **otra** sesión ST ⇒ descartado (`ingest_rejected{reason=session_mismatch}`). |
 | `X-ST-Tmux-Pane` | `$TMUX_PANE` | `^%\d{1,6}$` o vacío (sin tmux: `-p` del exec API). |
+
+### 3.3 Cuerpos que no se pueden parsear
+
+Si el cuerpo excede L5 o no es JSON, el receptor no conoce el `session_id` de Claude. Para no
+perder la transición de estado en silencio, el `gap malformed` se escribe en la conversación
+**activa más reciente de esa sesión ST con el mismo `X-ST-Tmux-Pane`** (si hay exactamente una
+candidata); si no hay candidata única, se cuenta en `ingest_rejected` y en
+`sessions_conversation_stats.unattributed_gaps` para que el admin lo vea agregado.
 
 ---
 
@@ -181,77 +228,159 @@ CORS, con parser JSON propio limitado a **L5**.
 
 | `ev` | Hook origen | `data` (campos persistidos) | Límite |
 | --- | --- | --- | --- |
-| `session_start` | `SessionStart` (+`st` del script) | `source`, `agent_type?`, `model?`, `session_title?`, `claude_version?`, `tmux_session?`, `argv?`, `cwd`, `transcript_path` | — |
+| `session_start` | `SessionStart` (+`st` del script) | `source`, `agent_type?`, `model?`, `session_title?`, `claude_version?`, `tmux_session?`, `argv_flags?`, `cwd`, `transcript_path` | — |
 | `session_end` | `SessionEnd` | `reason` | — |
 | `user_prompt` | `UserPromptSubmit` | `prompt`, `source?`, `session_title?` | **L1** (truncado visible) |
 | `assistant_delta` | `MessageDisplay` | `message_id`, `index`, `final`, `delta` | acumulado por `message_id` ≤ **L2** |
 | `tool_start` | `PreToolUse` | `tool_use_id`, `tool_name`, `summary` (§4.3), `mcp_server?` | **L4** |
 | `tool_end` | `PostToolUse` | `tool_use_id`, `tool_name`, `ok: true`, `duration_ms?`, `response_bytes` | — |
-| `tool_failed` | `PostToolUseFailure` | `tool_use_id`, `tool_name`, `ok: false`, `error`, `is_interrupt?`, `duration_ms?` | `error` ≤ **L4** |
-| `turn_end` | `Stop` | `last_assistant_message`, `background_tasks[]` (solo `id`, `type`, `status`, `description` ≤ L4), `session_crons_count` | `last_assistant_message` ≤ **L3** (truncado visible) |
-| `turn_failed` | `StopFailure` | `error`, `error_details?` | L4 |
+| `tool_failed` | `PostToolUseFailure` | `tool_use_id`, `tool_name`, `ok: false`, `is_interrupt?`, `duration_ms?`, `error_bytes`, y `error` **solo** según §4.3.3 | L4 |
+| `turn_end` | `Stop` | `last_assistant_message`, `background_tasks[]` (solo `id`, `type`, `status`), `session_crons_count` | `last_assistant_message` ≤ **L3** (truncado visible) |
+| `turn_failed` | `StopFailure` | `error` (enum del CLI), `error_details?` | L4 |
 | `agent_start` | `SubagentStart` | `agent_id`, `agent_type` | — |
-| `agent_end` | `SubagentStop` | `agent_id`, `agent_type`, `last_assistant_message`, `agent_transcript_path`, `background_tasks[]` | **L3** |
-| `notification` | `Notification` | `notification_type`, `message`, `title?` | L4 |
-| `permission_request` | `PermissionRequest` | `tool_name`, `summary` | L4 |
+| `agent_end` | `SubagentStop` | `agent_id`, `agent_type`, `last_assistant_message`, `agent_transcript_path`, `background_tasks[]` (ídem) | **L3** |
+| `notification` | `Notification` | `notification_type`, y `message`/`title` **solo** según §4.3.3 | L4 |
+| `permission_request` | `PermissionRequest` | `tool_name`, `summary` (§4.3) | L4 |
 | `compact` | `PreCompact`/`PostCompact` | `phase: pre\|post`, `trigger` | (sin `compact_summary`) |
-| `task_created` / `task_completed` | `TaskCreated`/`TaskCompleted` | `task_id`, `task_subject`, `teammate_name?` | `task_subject` ≤ L4 |
+| `task_created` / `task_completed` | `TaskCreated`/`TaskCompleted` | `task_id`, `task_subject`, `teammate_name?` | `task_subject` ≤ L4 (sin `task_description`) |
 | `teammate_idle` | `TeammateIdle` | `teammate_name` | — |
-| `gap` | backend | `reason`, `dropped?`, `range?`, `detail?` | — |
+| `gap` | backend | `reason`, `scope?`, `dropped?`, `dropped_bytes?`, `range?`, `detail?` | — |
 | `probe` | backend | `status`, `waitingFor?`, `found: boolean` | — |
 | `composer_send` | backend (3.2) | `clientMessageId`, `result`, `prompt_id?` | — |
 
 Campos no listados *MUST NOT* persistirse (parser tolerante: se descartan y se cuentan en
-`ingest_fields_dropped`).
+`ingest_fields_dropped`). `prompt` y `last_assistant_message` son el contenido de la conversación:
+pueden contener lo que el usuario y el agente hayan escrito, con el mismo nivel de sensibilidad
+que el transcript del CLI; esa es la razón del owner-only y de la retención de §9.
 
-### 4.3 Resumen redactado de `tool_input` (`summary`)
+### 4.3 Política de redacción de entradas de herramientas
 
-Función pura `summarizeToolInput(tool_name, tool_input): string` con tests de tabla:
+**Principio (nivel 0, único nivel en 3.x): el resumen persistido solo contiene identificadores
+estructurales, nunca argumentos completos ni texto libre.** Una denylist de nombres de clave no
+elimina secretos embebidos en valores (`command`, URLs, cabeceras, asignaciones de entorno), así que
+no se usa como garantía: los valores libres directamente no se persisten.
 
-| Herramienta | `summary` |
+#### 4.3.1 `summarizeToolInput(tool_name, tool_input) → summary`
+
+Función pura con tests de tabla:
+
+| Herramienta | `summary` persistido | Lo que **no** se persiste |
+| --- | --- | --- |
+| `Bash` | `programs`: nombre base del primer token de cada segmento separado por `\|`, `&&`, `\|\|`, `;` (máx. 8, cada uno ≤ 32 bytes, solo `[A-Za-z0-9._-]`), saltando asignaciones `VAR=…`, `sudo`, `env`, `nohup`, `time`; `command_bytes`; `run_in_background?` | `command` completo, `description`, cualquier argumento, URL, cabecera, variable |
+| `Read`, `Edit`, `Write`, `MultiEdit`, `NotebookEdit` | `file_path` (≤ 512 bytes), `offset`/`limit` en Read | contenido, `old_string`/`new_string` |
+| `Grep`, `Glob` | `path` (≤ 512) y `pattern_bytes` | `pattern` (puede ser un valor buscado) |
+| `Agent` | `subagent_type`, `description` (≤ 128; es un rótulo de 3-5 palabras por contrato del tool) | `prompt` |
+| `WebFetch` | `host` (solo el host de `url`) | ruta, query, `prompt` |
+| `WebSearch` | `query_bytes` | `query` |
+| `TodoWrite`, `TaskCreate`… | `count` de ítems | textos |
+| `mcp__*` y desconocidas | lista de **nombres** de claves de primer nivel (≤ 16, ≤ 64 bytes cada uno) | cualquier valor |
+
+Ejemplos que *MUST* estar en el test (entrada → `summary`):
+
+| `tool_input` | `summary` |
 | --- | --- |
-| `Bash` | `command` recortado a L4; `description` si existe, antes |
-| `Read`, `Edit`, `Write`, `MultiEdit`, `NotebookEdit` | `file_path` (+ `offset/limit` en Read) |
-| `Grep`, `Glob` | `pattern` (+ `path`) |
-| `Agent` | `description` + `subagent_type` |
-| `WebFetch`, `WebSearch` | `url` / `query` con query string eliminado |
-| `mcp__*` y desconocidas | lista de **nombres** de claves de primer nivel, nunca valores |
+| `{"command":"curl -H 'Authorization: Bearer SECRETO' https://example.test"}` | `{"programs":["curl"],"command_bytes":61}` |
+| `{"command":"AWS_SECRET_ACCESS_KEY=abc aws s3 ls \| head"}` | `{"programs":["aws","head"],"command_bytes":45}` |
+| `{"command":"git clone https://user:tok3n@github.com/x/y.git && cd y"}` | `{"programs":["git","cd"],"command_bytes":57}` |
+| `{"command":"echo $TOKEN \| base64 -d > /tmp/k"}` | `{"programs":["echo","base64"],"command_bytes":35}` |
+| `{"url":"https://api.example.test/v1/users?api_key=XYZ","prompt":"…"}` | `{"host":"api.example.test"}` |
+| `{"pattern":"sk-live-[0-9a-z]+","path":"src"}` | `{"path":"src","pattern_bytes":17}` |
+| `{"server":"x","headers":{"Authorization":"Bearer Y"},"body":"…"}` (MCP) | `{"keys":["server","headers","body"]}` |
 
-Nunca, para ninguna herramienta, se persiste el valor de una clave cuyo nombre contenga (sin
-distinguir mayúsculas) `token`, `secret`, `password`, `passwd`, `key`, `authorization`, `cookie`,
-`credential`, `env`. `tool_response` *MUST NOT* persistirse en ningún caso en 3.x.
+#### 4.3.2 Lo que sí puede contener secretos y se persiste a sabiendas
+
+- `user_prompt.prompt` y `last_assistant_message` (contenido de la conversación).
+- `file_path` (una ruta puede ser reveladora; se acepta como identificador).
+- `Agent.description` (rótulo breve escrito por el modelo).
+
+Esto se documenta en SECURITY.md junto con la retención y el owner-only; no se afirma ninguna
+"eliminación de secretos".
+
+#### 4.3.3 Texto libre de errores y notificaciones
+
+| Campo | Regla |
+| --- | --- |
+| `tool_failed.error` | Se persiste (≤ 512 bytes) solo si `tool_name ∉ {Bash, mcp__*}`. Para Bash y MCP solo `error_bytes` y, si se puede extraer con `/exit code (\d+)/i`, `exit_code`. |
+| `notification.message`, `title` | Se persisten (≤ L4) solo para `notification_type ∈ {idle_prompt, agent_completed, agent_needs_input, auth_success, elicitation_complete, quota_*}`. Para `permission_prompt` y el resto solo `notification_type`. |
+| `turn_failed.error_details` | ≤ 512 bytes; el CLI ya lo produce sin contenido de usuario. |
 
 ### 4.4 Límites unificados
 
+Contenido (bytes UTF-8 del valor) frente a cuerpo (bytes del JSON serializado por el CLI). La
+serialización JSON puede multiplicar: `\n` ×2, caracteres de control `\u00XX` ×6, `"` y `\` ×2.
+Por eso **L5 ≥ 6 × L3 + 1 MiB de envoltura**.
+
 | Id | Qué | Valor | Al exceder |
 | --- | --- | --- | --- |
-| **L1** | `user_prompt.prompt` | 64 KiB | truncar + `truncated: true, original_bytes` |
-| **L2** | texto acumulado de un `message_id` | 1 MiB | descartar deltas siguientes + `truncated: true` en el último persistido |
-| **L3** | `last_assistant_message` (`turn_end`, `agent_end`) | **2 MiB** | truncar + `truncated: true, original_bytes`; la UI lo dice en el botón "Copiar informe" |
-| **L4** | strings auxiliares (`summary`, `error`, `message`, `task_subject`, …) | 2 KiB | truncar con marcador `…[+N chars]` |
-| **L5** | cuerpo HTTP de ingesta | **4 MiB** | 204 + `gap malformed{reason: too_large}` |
-| **L6** | cola en memoria por conversación | 256 eventos o 8 MiB | `gap backpressure` |
-| **L7** | archivo `events.jsonl` | 64 MiB | rotar a `.1` (una sola generación) + `gap{reason: rotated}` al inicio del nuevo |
-| **L8** | eventos montados en el DOM | 500 | ventana por `seq` |
+| **L1** | `user_prompt.prompt` (contenido) | 64 KiB | truncar + `truncated: true, original_bytes` |
+| **L2** | texto acumulado de un `message_id` (contenido) | 1 MiB | descartar deltas siguientes + `truncated: true` en el último persistido |
+| **L3** | `last_assistant_message` (`turn_end`, `agent_end`) (contenido) | **1 MiB** | truncar + `truncated: true, original_bytes`; la UI lo dice en "Copiar informe" |
+| **L4** | strings auxiliares (`summary`, `error`, `message`, `task_subject`, …) (contenido) | 2 KiB | truncar con marcador `…[+N chars]` |
+| **L5** | cuerpo HTTP de ingesta (bytes del cuerpo) | **8 MiB** | 204 + `gap malformed{reason: too_large}` según §3.3 |
+| **L6** | cola en memoria por conversación | 256 eventos o 8 MiB | `gap backpressure{scope: conversation}` |
+| **L7** | archivo `events.jsonl` | 64 MiB | rotar a `.1` (una sola generación; `.1` anterior se borra) + `gap{reason: rotated}` al inicio del nuevo; `first_retained_seq` en el índice |
+| **L8** | eventos montados en el DOM | 500 eventos **y** 8 MiB de texto | ventana por `seq`; los no montados son placeholders; "Copiar informe" pide el evento al servidor si no está montado |
+| **G1** | suma de colas en memoria de todas las conversaciones | 64 MiB | `gap backpressure{scope: global}` en la conversación cuya cola es mayor |
+| **G2** | cuerpos de ingesta > 1 MiB en vuelo simultáneos | 4 | 204 + `gap backpressure{scope: ingest}` |
+| **G3** | `bufferedAmount` por socket WS | pausa de replay a 2 MiB; resync a 8 MiB (§6.1) | nada se pierde: el cliente re-suscribe desde su último `seq` |
+| **G4** | índices (`index.json`) residentes en memoria | LRU de 64 conversaciones; cada índice ≤ 4 MiB (se resume por turnos, no por eventos) | desalojo; recarga desde disco al siguiente acceso |
+| **G5** | bytes por respuesta de `GET …/events` | 8 MiB | corta antes y devuelve `hasMore: true` |
+| **R1/R2** | tasa por sesión ST | §3.1 | `gap rate_limited` |
 
-L3 > L5 no es posible, de ahí L5 = 4 MiB: un informe de 2 MiB cabe con margen en el cuerpo del
-hook. **Ningún truncado es silencioso**: cada uno deja `truncated: true` en el evento y la UI lo
-muestra junto al contenido afectado.
+Garantía (test obligatorio): para cualquier `last_assistant_message` de ≤ L3 bytes formado por
+cualquiera de estos repertorios: `\n` puro, `\u0001` puro, `"`/`\` puro, emoji de 4 bytes, texto
+mixto, la serialización `JSON.stringify` del input completo del hook `Stop` (con `background_tasks`
+de 50 entradas y `transcript_path` de 512 bytes) **es ≤ L5** y **≤ capacidad de R2**. Un informe que
+supere L3 en contenido se trunca de forma visible; un cuerpo que supere L5 se trata según §3.3.
+**Ningún truncado es silencioso.**
 
 ### 4.5 `gap`: representación de pérdidas
 
 | `reason` | Cuándo | UI |
 | --- | --- | --- |
 | `rate_limited` | R1/R2 excedidos | "N eventos omitidos por volumen" |
-| `backpressure` | L6 lleno | "N eventos omitidos (backend saturado)" |
-| `malformed` | evento no reconocido / demasiado grande | "Evento no reconocido (versión del CLI)" |
+| `backpressure` (`scope: conversation\|global\|ingest`) | L6 / G1 / G2 | "N eventos omitidos (backend saturado)" |
+| `malformed` | evento no reconocido / demasiado grande | "Evento no reconocido o demasiado grande (versión del CLI)" |
 | `missing_delta` | `assistant_delta.index` no consecutivo | "[… fragmento perdido …]" en el mensaje |
 | `missing_prompt` | `turn_end` sin `user_prompt` para su `prompt_id` | "Prompt no capturado" antes del informe |
 | `backend_restart` | al reiniciar el backend, por conversación no terminada | "Posible actividad perdida entre HH:MM y HH:MM" |
 | `rotated` | L7 | "Historial anterior archivado" |
+| `history_rotated` | cliente pide `after`/`before` anterior a `first_retained_seq` | "Eventos anteriores ya no disponibles (seq a–b)" |
 | `history_unavailable` | conversación conocida por `resume` sin eventos previos | "El historial anterior a la activación no está disponible" |
 
 `claude_conversations.gaps_count` se incrementa por cada `gap` persistido.
+
+### 4.6 Identidad de eventos y deduplicación
+
+Compartir `prompt_id`, turno o pane **nunca** es criterio de duplicado. La deduplicación solo se
+aplica con la identidad de la tabla; donde no hay identidad natural se usa el *hash del payload
+completo* en una ventana corta, que colapsa reintentos idénticos sin tocar eventos distintos.
+
+| `ev` | Identidad (todas incluyen `session_id` de Claude) | Tratamiento del repetido |
+| --- | --- | --- |
+| `user_prompt` | `prompt_id` si está presente; si falta, hash del payload en ventana de 10 s | descartar, `dedupe_dropped++` |
+| `assistant_delta` | `agent_id?` + `message_id` + `index` | descartar |
+| `tool_start` / `tool_end` / `tool_failed` | `ev` + `tool_use_id` | descartar |
+| `agent_start` / `agent_end` | `ev` + `agent_id` | descartar |
+| `task_created` / `task_completed` | `ev` + `task_id` | descartar |
+| `turn_end` / `turn_failed` | **sin identidad natural** (`Stop` puede dispararse varias veces en un mismo `prompt_id` cuando un hook bloquea y el turno continúa): hash del payload en ventana de 10 s | solo se descarta si el payload es idéntico dentro de la ventana |
+| `teammate_idle` | `teammate_name` + hash del payload, ventana 10 s | idem |
+| `notification`, `permission_request`, `compact`, `session_start`, `session_end` | hash del payload en ventana de 10 s | idem |
+
+Hash = SHA-256 del JSON canónico del input del hook (claves ordenadas) **antes** de redactar.
+Ventana = 10 s desde la recepción del original; tamaño de la tabla por conversación ≤ 4096 entradas
+(LRU).
+
+Casos que *MUST* estar en el test:
+
+1. Dos `SubagentStop` del mismo `prompt_id` con `agent_id` distintos ⇒ **ambos persistidos**.
+2. Dos `TaskCreated` del mismo turno con `task_id` distintos ⇒ ambos.
+3. Dos `Notification{idle_prompt}` idénticas separadas 60 s ⇒ ambas; separadas 1 s ⇒ una.
+4. Dos `Stop` consecutivos del mismo `prompt_id` con `last_assistant_message` distinto ⇒ ambos;
+   idénticos en 1 s ⇒ uno.
+5. Dos `PostToolUse` con el mismo `tool_use_id` (reintento) ⇒ uno.
+6. `MessageDisplay` mismo `message_id`/`index` repetido ⇒ uno; `index` distinto ⇒ ambos.
+7. Dos subagentes emitiendo `PreToolUse` en paralelo con `tool_use_id` distintos ⇒ ambos.
 
 ---
 
@@ -260,8 +389,9 @@ muestra junto al contenido afectado.
 ### 5.1 Creación y enriquecimiento
 
 - Cualquier evento con `session_id` desconocido crea la fila (`kind: unknown`). `session_start`
-  fija `kind` (`interactive` por defecto; `headless` si `argv` contiene `-p`/`--print`; `teammate`
-  si contiene `--agent-name`/`--agent-id`), `claude_version`, `title` (`session_title`) y binding.
+  fija `kind` (`interactive` por defecto; `headless` si `argv_flags` contiene `-p`/`--print`;
+  `teammate` si contiene `--agent-name`/`--agent-id`), `claude_version`, `title` (`session_title`) y
+  binding.
 - `title` por defecto = primeros 80 caracteres del primer `user_prompt` con `source` ausente o
   `user`; `session_title` lo reemplaza cuando llega.
 - `user_prompt.source ∈ {system, loop_wakeup, schedule_wakeup, poll_event, sdk}` se persiste con
@@ -304,27 +434,37 @@ tener prioridad sobre un probe anterior. Se decide por `status_at`.
 ## 6. API y WS (3.1)
 
 Todas owner-only (`assertOwnedByOr404`), rate limit `conversationIp` (300/min), `InFlightLimiter`
-4 por usuario / 16 global para lecturas de archivo.
+4 por usuario / 16 global para lecturas de archivo, **G5** bytes por respuesta.
 
 | Método | Ruta | Respuesta |
 | --- | --- | --- |
-| GET | `/api/sessions/:id/conversations` | `{ conversations: [{ sessionId, kind, title, status, statusEvidence, statusAt, tabId, paneId, startedAt, endedAt, lastEventAt, lastSeq, eventsCount, gapsCount, claudeVersion, parentSessionId, parentInferred, canSendInput }] }` |
-| GET | `/api/sessions/:id/conversations/:cid/events?before=<seq>&limit=<n≤500>` | `{ events: [...], hasMore }` (orden ascendente por `seq`; `before` exclusivo) |
+| GET | `/api/sessions/:id/conversations` | `{ capture: { requested, effective, effectiveAfterRestart }, conversations: [{ sessionId, kind, title, status, statusEvidence, statusAt, tabId, paneId, startedAt, endedAt, lastEventAt, lastSeq, firstRetainedSeq, eventsCount, gapsCount, claudeVersion, parentSessionId, parentInferred, canSendInput }] }` |
+| GET | `/api/sessions/:id/conversations/:cid/events?before=<seq>&limit=<n≤500>` | `{ events: [...], hasMore, firstRetainedSeq }` (orden ascendente por `seq`; `before` exclusivo; `before ≤ firstRetainedSeq` ⇒ `events: []`, `hasMore: false`) |
+| GET | `/api/sessions/:id/conversations/:cid/events/:seq` | un evento (para "Copiar informe" de eventos no montados) |
 | GET | `/api/sessions/:id/conversations/:cid/agents` | `{ agents: [{ agentId, agentType, status, startedSeq, endedSeq?, toolCount, hasResult }] }` |
 | WS | `/ws/conversation/<id>` | ver §6.1 |
 
 `canSendInput` *MUST* ser `false` siempre mientras 3.2 no esté desplegado y activado.
 
-### 6.1 Protocolo WS
+### 6.1 Protocolo WS y contrapresión
 
 Cliente → servidor: `{type:"subscribe", conv:<cid>, after:<seq>}`, `{type:"unsubscribe", conv}`.
-Servidor → cliente: `{type:"hello", conversations:[{cid,lastSeq,status}]}`, `{type:"event", conv,
-event}`, `{type:"status", conv, status, evidence, at}`, `{type:"error", code}`.
+Servidor → cliente: `{type:"hello", conversations:[{cid,lastSeq,firstRetainedSeq,status}]}`,
+`{type:"event", conv, event}`, `{type:"gap", conv, reason:"history_rotated", from, to}`,
+`{type:"status", conv, status, evidence, at}`, `{type:"resync", conv, fromSeq}`, `{type:"error", code}`.
 
-- Tras `subscribe`, el servidor *MUST* enviar todos los eventos persistidos con `seq > after` en
-  orden y después los nuevos sin huecos ni duplicados (listener armado antes del replay, cola
-  drenada en orden; test idéntico en espíritu al de `flushTail` del terminal).
-- Máximo 8 suscripciones por socket; un socket por pestaña del navegador.
+- Tras `subscribe`, el servidor *MUST* enviar todos los eventos persistidos con `seq > after` y
+  `seq ≥ firstRetainedSeq` en orden y después los nuevos sin huecos ni duplicados (listener armado
+  antes del replay, cola drenada en orden). Si `after < firstRetainedSeq - 1`, antecede un frame
+  `gap history_rotated`.
+- Replay por lotes de 200 eventos; antes de cada lote, si `socket.bufferedAmount > 2 MiB` el
+  servidor espera (`drain`) hasta 30 s; si sigue por encima, cierra con código **1013** y el
+  cliente reintenta con backoff desde su último `seq`.
+- Live: si `bufferedAmount > 8 MiB` al intentar enviar, el servidor deja de reenviar eventos a esa
+  suscripción, envía un único `resync{fromSeq: <último enviado>}` cuando el buffer baja de 2 MiB, y
+  el cliente re-suscribe con `after = fromSeq`. Nada se pierde porque todo está persistido.
+- Máximo 8 suscripciones por socket; un socket por pestaña del navegador; máximo 4 sockets de
+  conversación por usuario (el quinto recibe `error{code:"too-many-sockets"}` y 1008).
 
 ---
 
@@ -332,10 +472,10 @@ event}`, `{type:"status", conv, status, evidence, at}`, `{type:"error", code}`.
 
 | Superficie | Auth | Efecto |
 | --- | --- | --- |
-| `PATCH /api/admin/sessions/:id/conversation {enabled}` | admin | escribe/borra `conversation.json`; si el contenedor corre y la función se habilita, genera y aplica token solo en el siguiente `start` (env inmutable) y responde `{ enabled, effectiveAfterRestart: boolean }` |
-| `CONVERSATION_ALLOW_USERS=<id,id>` | env | sesiones nuevas de esos usuarios nacen habilitadas |
-| `npm run conversation:disable -- <sid>|--all` | shell host | borra archivos; no toca D1 |
-| `GET /api/admin/stats` → `conversation` | admin | `{ enabledSessions, eventsSinceBoot, rejectedSinceBoot, gapsSinceBoot, bytesOnDisk, queueDepthMax }`; **sin** títulos ni ids de conversación |
+| `PATCH /api/admin/sessions/:id/conversation {enabled}` | admin | aplica la fila correspondiente de §2.4 y devuelve `{ enabled, effective, effectiveAfterRestart }` |
+| `CONVERSATION_ALLOW_USERS=<id,id>` | env | sesiones nuevas de esos usuarios nacen con `conversation_requested=1` |
+| `npm run conversation:disable -- <sid>\|--all` | shell host | fila "Emergencia" de §2.4: D1 primero, archivos después; si D1 falla, no borra archivos y sale ≠ 0 |
+| `GET /api/admin/stats` → `conversation` | admin | `{ enabledSessions, effectiveSessions, eventsSinceBoot, rejectedSinceBoot{byReason}, gapsSinceBoot, unattributedGaps, bytesOnDisk, queueBytesNow, queueBytesMax, wsResyncsSinceBoot }`; **sin** títulos ni ids de conversación |
 
 ---
 
@@ -391,8 +531,8 @@ observado y decisión:
 - `CONVERSATION_TTL_DAYS` (opcional, unset = sin TTL): conversaciones `ended` con
   `ended_at` más antiguo se purgan (archivo + fila) en un sweeper diario.
 - Backup (#240): `claude_conversations` entra en `TABLES`; `.conversations/` entra en el tarball por
-  sesión; `.claude-managed/` **no** (se regenera).
-- SECURITY.md recibe la sección "Conversation events at rest" con este contrato.
+  sesión; `.claude-managed/` **no** (se regenera desde D1 en `reconcile`).
+- SECURITY.md recibe la sección "Conversation events at rest" con este contrato, incluida §4.3.2.
 
 ---
 
@@ -400,48 +540,69 @@ observado y decisión:
 
 ### 3.0b backend (desactivado)
 
-- [ ] Migración v16; `ingest_token_hash` NULL para sesiones existentes.
+- [ ] Migración v16: `claude_conversations`; `sessions.ingest_token_hash`,
+      `sessions.ingest_token_hash_suspended`, `sessions.conversation_requested` (default 0).
 - [ ] Con `CONVERSATION_ENABLED=false`: `spawn` no escribe `conversation.json`, no inyecta token;
-      el endpoint responde 204 y `ingest_rejected{disabled}` crece; ningún archivo bajo
-      `.conversations/`.
-- [ ] Con la bandera activa y una sesión habilitada (test de integración con dockerode mock):
-      archivo generado byte a byte igual a §2.2 (con `PORT` real); bind ro; token de 64 hex y hash.
-- [ ] Ingesta: tests de §3.1 (todas las filas), §3.2 (`session_mismatch`), dedupe, L1–L6, R1/R2,
-      `summarizeToolInput` (tabla §4.3 + claves sensibles), `gap` de §4.5, `seq` monótono bajo
-      concurrencia, 204 antes de persistir (fallo de disco simulado ⇒ 204 + `gap backpressure`).
-- [ ] Máquina de estados: tabla §5.3 completa como test de tabla; prioridad hook/probe por `status_at`.
-- [ ] Reinicio: `last_seq` se recupera del archivo aunque D1 diga otra cosa; `gap backend_restart`.
+      el endpoint responde 204 y `ingest_rejected{disabled}` crece; `reconcile` borra archivos
+      huérfanos; ningún archivo bajo `.conversations/`.
+- [ ] Tabla §2.4 completa como test de tabla (cada fila: estado inicial → acción → D1, archivo,
+      respuesta), incluido el comando de emergencia con D1 caído (no borra archivos, sale ≠ 0) y la
+      invalidación inmediata de la cache de tokens al deshabilitar.
+- [ ] Con la bandera activa y una sesión solicitada (dockerode mock): archivo generado byte a byte
+      igual a §2.2 (con `PORT` real); bind ro; token de 64 hex y hash.
+- [ ] Ingesta: todas las filas de §3.1; §3.2 (`session_mismatch`); §3.3 (atribución del `gap` por
+      pane única / no única); token bucket R1/R2 con un evento de L5 bytes aceptado con bucket lleno;
+      G1/G2 con `gap backpressure{scope}`; L1–L7; `summarizeToolInput` (tablas §4.3.1 completas,
+      incluidos los siete ejemplos) y §4.3.3; `gap` de §4.5; `seq` monótono bajo concurrencia; 204
+      antes de persistir (fallo de disco simulado ⇒ 204 + `gap backpressure`).
+- [ ] Deduplicación: los siete casos de §4.6.
+- [ ] Serialización: la garantía de §4.4 (cinco repertorios × L3) con `JSON.stringify` del input
+      completo de `Stop` ≤ L5 y ≤ capacidad R2.
+- [ ] Máquina de estados: tabla §5.3 completa; prioridad hook/probe por `status_at`.
+- [ ] Reinicio: `last_seq` y `first_retained_seq` se recuperan del archivo aunque D1 diga otra cosa;
+      `gap backend_restart`; G4 (LRU de índices) medido con 100 conversaciones abiertas.
 - [ ] Sin llamadas D1 por evento (contador `getD1CallsSinceBoot` estable durante 1000 eventos).
 - [ ] Hard delete purga; soft delete conserva; `isRestrictedPath` sigue denegando `.st/`.
-- [ ] `docs/DEPLOYMENT.md`: alias `st-backend`, variables nuevas, kill switch, rotación = restart.
+- [ ] `docs/DEPLOYMENT.md`: alias `st-backend`, variables nuevas, kill switch (API y emergencia),
+      estado solicitado/efectivo, rotación = restart.
 
 ### 3.0c imagen
 
-- [ ] Directorio vacío + script presentes; pin 2.1.308; smoke test: sin archivo ⇒ cero peticiones a
-      un receptor local (servidor en el propio test); con archivo ⇒ `session_start`, `user_prompt`,
-      `assistant_delta{final}`, `turn_end`, `session_end` con los campos de §4.2; receptor cerrado ⇒
-      duración de `claude -p` ≤ base + 1 s × eventos; borrar el archivo ⇒ la siguiente sesión no
-      emite; (informativo) recarga en caliente.
+- [ ] Directorio vacío + script presentes; pin 2.1.308; el script termina en ≤ 6 s con
+      `st-backend` sin resolver, con un receptor que acepta y nunca responde, y con `claude --version`
+      colgado (simulado con un `claude` falso en PATH).
+- [ ] Smoke test: sin archivo ⇒ cero peticiones a un receptor local (servidor en el propio test);
+      con archivo ⇒ `session_start`, `user_prompt`, `assistant_delta{final}`, `turn_end`, `session_end`
+      con los campos de §4.2; receptor cerrado ⇒ duración de `claude -p` ≤ base + 1 s × eventos;
+      borrar el archivo ⇒ la siguiente sesión no emite; medición (informativa, registrada en el PR y
+      en §2.4) de si una sesión interactiva ya abierta deja de emitir al borrar el archivo.
 - [ ] README de la imagen: sección "Conversation hooks (managed settings)".
 
 ### 3.0d activación
 
-- [ ] Endpoint admin + allowlist + stats; habilitar/deshabilitar refleja el archivo en ≤ 1 s;
-      stats sin títulos/ids.
+- [ ] Endpoint admin + allowlist + stats según §7; habilitar/deshabilitar refleja D1 y archivo en
+      ≤ 1 s; respuesta con `effective`/`effectiveAfterRestart` correcta en cada fila de §2.4; stats
+      sin títulos/ids.
 - [ ] Prueba manual documentada en el PR: una sesión real habilitada produce eventos visibles en
-      `GET …/conversations` y en el archivo; deshabilitar para la emisión (o al siguiente start).
+      `GET …/conversations` y en el archivo; deshabilitar corta la ingesta de inmediato y la emisión
+      según lo medido en 3.0c.
 
 ### 3.1 vista
 
-- [ ] Overlay Chat con `viewSwitch`; owner-only en todas las rutas (403→404); `canSendInput=false`.
-- [ ] Replay + live determinista (test del broadcaster); paginación hacia atrás; 20k eventos < 500 ms.
-- [ ] "Copiar informe" copia `last_assistant_message` sin alteraciones; con `truncated` lo indica.
+- [ ] Overlay Chat con `viewSwitch`; owner-only en todas las rutas (403→404); `canSendInput=false`;
+      `capture.effective=false` se muestra como aviso ("captura no activa").
+- [ ] Replay + live determinista (test del broadcaster); paginación hacia atrás; `firstRetainedSeq`
+      y `gap history_rotated`; G3: cliente lento simulado ⇒ pausa, 1013 o `resync` sin pérdida ni
+      duplicado (test); 20k eventos < 500 ms.
+- [ ] "Copiar informe" copia `last_assistant_message` sin alteraciones (desde el DOM o vía
+      `GET …/events/:seq`); con `truncated` lo indica.
 - [ ] `gap` y `truncated` visibles; eventos `agent_id` fuera del hilo principal; estados con
-      evidencia y hora; móvil: una columna, sin scroll horizontal, composer deshabilitado con motivo.
+      evidencia y hora; móvil: una columna, sin scroll horizontal, composer deshabilitado con motivo;
+      L8 respetado con 20k eventos (memoria del tab medida en el PR).
 
 ### 3.2 composer (condicionado)
 
-- [ ] §8.1 completo; resultados de §8.2 en el PR; issue de clientes tmux cerrado.
+- [ ] §8.1 completo; resultados de §8.2 en el PR; issue #444 cerrado.
 
 ### 3.3 agentes y teams
 
