@@ -279,7 +279,11 @@ export class HeartbeatCoalescer {
 		this.lastWrite.delete(cid);
 	}
 
-	pending(): number {
-		return this.timers.size;
+	/** Timers still pending, optionally only those whose key starts with `prefix`. */
+	pending(prefix?: string): number {
+		if (prefix === undefined) return this.timers.size;
+		let n = 0;
+		for (const key of this.timers.keys()) if (key.startsWith(prefix)) n++;
+		return n;
 	}
 }

@@ -57,12 +57,14 @@ import {
 } from "./registry.js";
 import { checkRevocation } from "./revocation.js";
 import { applyStateInput, type ConversationState, type StateInput } from "./state.js";
-import type {
-	ConversationIndex,
-	ConversationKind,
-	ConversationStore,
-	PendingEvent,
-	PersistedEvent,
+import {
+	type ConversationIndex,
+	type ConversationKind,
+	type ConversationStore,
+	capOpenMessages,
+	type PendingEvent,
+	type PersistedEvent,
+	sealMessage,
 } from "./store.js";
 import { truncateUtf8, utf8Bytes } from "./text.js";
 
@@ -136,11 +138,20 @@ interface TokenCacheEntry {
 interface ConvRuntime {
 	stSessionId: string;
 	cid: string;
+	/** Purge epoch of the ST session when this runtime was created (B4). */
+	epoch: number;
 	dedupe: DedupeTable;
 	endTimer: NodeJS.Timeout | null;
 	lastRateGapAt: number;
 	rateDropped: number;
 	rateDroppedBytes: number;
+}
+
+/** The ST session was hard-deleted while this work was in flight (B4). */
+class SessionPurged extends Error {
+	constructor() {
+		super("session purged during ingest");
+	}
 }
 
 class OwnerMismatch extends Error {
@@ -163,6 +174,18 @@ export class ConversationService {
 	private readonly runtime = new Map<string, ConvRuntime>();
 	/** B2 — in-flight runtime creations, keyed by Claude session id. */
 	private readonly creating = new Map<string, Promise<ConvRuntime>>();
+	/**
+	 * B4 — per-ST-session purge epoch. `onSessionPurged` bumps it FIRST;
+	 * every ingest/creation captures the epoch when it starts and re-checks
+	 * it after each await, so a continuation that outlives the purge
+	 * (a delayed D1 ownership SELECT, a reopen) is abandoned instead of
+	 * recreating runtimes, files or heartbeats.
+	 */
+	private readonly purgeEpoch = new Map<string, number>();
+
+	private epochOf(stSessionId: string): number {
+		return this.purgeEpoch.get(stSessionId) ?? 0;
+	}
 	private readonly rate = new SessionRateLimiter();
 	readonly largeBodies = new LargeBodyGate();
 	private readonly heartbeat: HeartbeatCoalescer;
@@ -339,6 +362,7 @@ export class ConversationService {
 		const event = normalized.event;
 		this.stats.fieldsDropped += event.droppedFields;
 		const cid = event.sessionId;
+		const epoch = this.epochOf(stSessionId);
 
 		// §3.2 — a Claude session id belongs to exactly one ST session.
 		const knownOwner = this.owner.get(cid);
@@ -346,6 +370,7 @@ export class ConversationService {
 
 		// §2.5 — last authorisation step, uncached, immediately before enqueue.
 		const revocation = await checkRevocation(this.deps.workspaceRoot, stSessionId);
+		if (this.epochOf(stSessionId) !== epoch) return this.reject("not_running");
 		if (revocation !== "none") {
 			this.tokenCache.delete(stSessionId);
 			// Converge even if the CLI was interrupted before its step 3.
@@ -360,7 +385,11 @@ export class ConversationService {
 		} catch (err) {
 			if (err instanceof OwnerMismatch) return this.reject("session_mismatch");
 			if (err instanceof OwnerUnverified) return this.reject("owner_unverified");
+			if (err instanceof SessionPurged) return this.reject("not_running");
 			throw err;
+		}
+		if (this.epochOf(stSessionId) !== epoch || rt.epoch !== epoch) {
+			return this.reject("not_running");
 		}
 		const hash = payloadHash(raw);
 		const identity = identityKey({
@@ -394,7 +423,13 @@ export class ConversationService {
 		if (outcome === "not_open") {
 			// Evicted during the await above (another conversation opened);
 			// reopen inline — ingest is async, so this is cheap and ordered.
-			await this.deps.store.open(stSessionId, cid);
+			// A purge that lands in this window must win (B4).
+			try {
+				await this.deps.store.open(stSessionId, cid);
+			} catch {
+				return this.reject("not_running");
+			}
+			if (this.epochOf(stSessionId) !== epoch) return this.reject("not_running");
 			outcome = this.deps.store.enqueue(stSessionId, cid, pending);
 		}
 		if (outcome === "dropped" || outcome === "not_open") {
@@ -437,7 +472,12 @@ export class ConversationService {
 	}
 
 	private async createRuntime(stSessionId: string, cid: string): Promise<ConvRuntime> {
+		const epoch = this.epochOf(stSessionId);
 		const index = await this.deps.store.open(stSessionId, cid);
+		if (this.epochOf(stSessionId) !== epoch) {
+			await this.deps.store.close(stSessionId, cid).catch(() => undefined);
+			throw new SessionPurged();
+		}
 		// B5 — ownership is reserved atomically in D1 on first discovery in
 		// this process and cached for the process lifetime (it survives a
 		// stop; only a purge forgets it). Never per event.
@@ -458,6 +498,12 @@ export class ConversationService {
 				await this.deps.store.close(stSessionId, cid);
 				throw new OwnerMismatch(reserved.owner);
 			}
+			// B4 — the SELECT may have been answered after a purge started:
+			// do not record ownership or build a runtime for a dead session.
+			if (this.epochOf(stSessionId) !== epoch) {
+				await this.deps.store.close(stSessionId, cid).catch(() => undefined);
+				throw new SessionPurged();
+			}
 			this.owner.set(cid, stSessionId);
 		}
 		const raced = this.runtime.get(cid);
@@ -465,6 +511,7 @@ export class ConversationService {
 		const rt: ConvRuntime = {
 			stSessionId,
 			cid,
+			epoch,
 			dedupe: new DedupeTable(),
 			endTimer: null,
 			lastRateGapAt: 0,
@@ -486,34 +533,36 @@ export class ConversationService {
 		const index = this.deps.store.getResidentIndex(rt.stSessionId, rt.cid);
 		if (!index) return "persist";
 		const id = event.identity.messageId ?? "";
+		// B6 — a message that ended (`final`) or was sealed by the open-set
+		// cap never reopens its budget: any late delta is dropped.
+		if (index.sealedMessages.includes(id)) return "drop";
 		const cur = index.messageBytes[id] ?? { bytes: 0, truncated: false };
 		const delta = String(event.data.delta ?? "");
 		const deltaBytes = utf8Bytes(delta);
 		const isFinal = event.data.final === true;
+		let truncated = cur.truncated;
 		if (cur.truncated) {
 			if (!isFinal) return "drop";
 			event.data.delta = "";
 			event.data.truncated = true;
 			event.data.original_bytes = cur.bytes + deltaBytes;
-			this.recordMessageBytes(rt, id, cur.bytes + deltaBytes, true);
-			return "persist";
-		}
-		if (cur.bytes + deltaBytes > L2_MESSAGE_BYTES) {
+		} else if (cur.bytes + deltaBytes > L2_MESSAGE_BYTES) {
 			const cut = truncateUtf8(delta, Math.max(0, L2_MESSAGE_BYTES - cur.bytes));
 			event.data.delta = cut.value;
 			event.data.truncated = true;
 			event.data.original_bytes = cur.bytes + deltaBytes;
-			this.recordMessageBytes(rt, id, cur.bytes + deltaBytes, true);
-			return "persist";
+			truncated = true;
 		}
-		this.recordMessageBytes(rt, id, cur.bytes + deltaBytes, false);
-		return "persist";
-	}
-
-	private recordMessageBytes(rt: ConvRuntime, id: string, bytes: number, truncated: boolean): void {
+		const total = cur.bytes + deltaBytes;
 		this.deps.store.update(rt.stSessionId, rt.cid, (i) => {
-			i.messageBytes[id] = { bytes, truncated };
+			if (isFinal) {
+				sealMessage(i, id);
+			} else {
+				i.messageBytes[id] = { bytes: total, truncated };
+				capOpenMessages(i);
+			}
 		});
+		return "persist";
 	}
 
 	private latestRuntime(stSessionId: string): ConvRuntime | undefined {
@@ -650,9 +699,13 @@ export class ConversationService {
 	private enqueueOrOpen(rt: ConvRuntime, pending: PendingEvent): void {
 		const r = this.deps.store.enqueue(rt.stSessionId, rt.cid, pending);
 		if (r !== "not_open") return;
+		if (this.epochOf(rt.stSessionId) !== rt.epoch) return;
 		void this.deps.store
 			.open(rt.stSessionId, rt.cid)
-			.then(() => this.deps.store.enqueue(rt.stSessionId, rt.cid, pending))
+			.then(() => {
+				if (this.epochOf(rt.stSessionId) !== rt.epoch) return;
+				this.deps.store.enqueue(rt.stSessionId, rt.cid, pending);
+			})
 			.catch((err) =>
 				logger.warn(`[conversation] reopen failed for ${rt.cid}: ${(err as Error).message}`),
 			);
@@ -806,8 +859,18 @@ export class ConversationService {
 	 * rows, and forget the ownership cache for the session's conversations.
 	 */
 	async onSessionPurged(stSessionId: string): Promise<void> {
+		// B4 — first thing: every in-flight ingest/creation for this session
+		// now sees a stale epoch and abandons itself after its next await.
+		this.purgeEpoch.set(stSessionId, this.epochOf(stSessionId) + 1);
 		this.tokenCache.delete(stSessionId);
 		this.rate.forget(stSessionId);
+		// Let in-flight creations settle (they throw SessionPurged / clean
+		// up their store entry) so nothing registers behind the purge.
+		for (const [cid, pending] of Array.from(this.creating)) {
+			if (this.owner.get(cid) === stSessionId || !this.owner.has(cid)) {
+				await pending.catch(() => undefined);
+			}
+		}
 		for (const rt of Array.from(this.runtime.values())) {
 			if (rt.stSessionId !== stSessionId) continue;
 			if (rt.endTimer) clearTimeout(rt.endTimer);
@@ -980,6 +1043,11 @@ export class ConversationService {
 			await this.heartbeat.flushNow(`${rt.stSessionId}/${rt.cid}`);
 		}
 		await this.deps.store.flushAll();
+	}
+
+	/** Test/stat helper: heartbeat timers still pending. */
+	heartbeatPending(stSessionId?: string): number {
+		return this.heartbeat.pending(stSessionId === undefined ? undefined : `${stSessionId}/`);
 	}
 
 	/** Test/stat helper. */

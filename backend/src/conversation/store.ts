@@ -98,10 +98,21 @@ export interface ConversationIndex {
 	parentInferred: boolean;
 	state: ConversationState;
 	agents: Record<string, AgentSummary>;
-	/** Per-message accumulated bytes for L2; bounded, oldest dropped. */
+	/**
+	 * Per-message accumulated bytes for L2 (B6). Entries live while a
+	 * message is OPEN (no `final` seen); at most MESSAGE_OPEN_MAX are kept
+	 * and an overflow seals the oldest. Finalised or sealed ids move to
+	 * `sealedMessages`, so a tally is never silently restarted.
+	 */
 	messageBytes: Record<string, { bytes: number; truncated: boolean }>;
-	/** Last `assistant_delta.index` per message, for `missing_delta` gaps. */
+	/** Last `assistant_delta.index` per open message, for `missing_delta` gaps. */
 	messageIndex: Record<string, number>;
+	/**
+	 * Ids of messages that ended (`final`) or were sealed by the open-set
+	 * cap: any further delta for them is dropped. Bounded LRU
+	 * (MESSAGE_SEALED_MAX, oldest first) — ~150 KiB at the cap.
+	 */
+	sealedMessages: string[];
 	/** Set once a `gap revoked` was written for this conversation (§2.5). */
 	revokedNoted?: boolean;
 }
@@ -152,8 +163,30 @@ interface Resident {
 	busy: boolean;
 }
 
-const MESSAGE_TRACK_MAX = 64;
+/** Open (non-final) messages tracked for the L2 budget. */
+export const MESSAGE_OPEN_MAX = 256;
+/** Sealed message ids remembered so a late delta can't restart a budget. */
+export const MESSAGE_SEALED_MAX = 4096;
 const AGENTS_MAX = 256;
+
+/**
+ * B6 — end a message's L2 tally: forget its open-set entries and remember
+ * the id as sealed (bounded LRU). Also used when the open set overflows.
+ */
+export function sealMessage(index: ConversationIndex, id: string): void {
+	delete index.messageBytes[id];
+	delete index.messageIndex[id];
+	const pos = index.sealedMessages.indexOf(id);
+	if (pos !== -1) index.sealedMessages.splice(pos, 1);
+	index.sealedMessages.push(id);
+	while (index.sealedMessages.length > MESSAGE_SEALED_MAX) index.sealedMessages.shift();
+}
+
+/** Keep the open set bounded by sealing its oldest member. */
+export function capOpenMessages(index: ConversationIndex): void {
+	const ids = Object.keys(index.messageBytes);
+	for (let i = 0; ids.length - i > MESSAGE_OPEN_MAX; i++) sealMessage(index, ids[i]);
+}
 
 // ── Store ───────────────────────────────────────────────────────────────────
 
@@ -348,6 +381,7 @@ export class ConversationStore {
 			agents: {},
 			messageBytes: {},
 			messageIndex: {},
+			sealedMessages: [],
 		};
 		try {
 			const raw = await this.fs.readFile(this.indexPath(stSessionId, cid), "utf8");
@@ -359,6 +393,7 @@ export class ConversationStore {
 					agents: parsed.agents ?? {},
 					messageBytes: parsed.messageBytes ?? {},
 					messageIndex: parsed.messageIndex ?? {},
+					sealedMessages: parsed.sealedMessages ?? [],
 				};
 			}
 		} catch {
@@ -429,13 +464,16 @@ export class ConversationStore {
 				// snapshot's offset re-add their bytes to the message tally.
 				const id = String(ev.data?.message_id ?? "");
 				const delta = typeof ev.data?.delta === "string" ? ev.data.delta : "";
-				const cur = index.messageBytes[id] ?? { bytes: 0, truncated: false };
-				index.messageBytes[id] = {
-					bytes: cur.bytes + Buffer.byteLength(delta, "utf8"),
-					truncated: cur.truncated || ev.data?.truncated === true,
-				};
-				const idx = Number(ev.data?.index ?? 0);
-				index.messageIndex[id] = Math.max(idx, index.messageIndex[id] ?? -1);
+				if (!index.sealedMessages.includes(id)) {
+					const cur = index.messageBytes[id] ?? { bytes: 0, truncated: false };
+					index.messageBytes[id] = {
+						bytes: cur.bytes + Buffer.byteLength(delta, "utf8"),
+						truncated: cur.truncated || ev.data?.truncated === true,
+					};
+					const idx = Number(ev.data?.index ?? 0);
+					index.messageIndex[id] = Math.max(idx, index.messageIndex[id] ?? -1);
+					if (ev.data?.final === true) sealMessage(index, id);
+				}
 			}
 		}
 		if (index.firstRetainedSeq === 0) index.firstRetainedSeq = index.lastSeq + 1;
@@ -618,20 +656,9 @@ export class ConversationStore {
 		} else if (event.ev === "tool_start" && event.agent_id) {
 			const a = index.agents[event.agent_id];
 			if (a) a.toolCount++;
-		} else if (event.ev === "assistant_delta") {
-			// Bound the per-message tracking tables (the service fills them
-			// synchronously at enqueue; this only sheds the oldest entries).
-			const keys = Object.keys(index.messageIndex);
-			if (keys.length > MESSAGE_TRACK_MAX) {
-				const id = String(event.data.message_id ?? "");
-				for (const k of keys) {
-					if (k === id) continue;
-					delete index.messageIndex[k];
-					delete index.messageBytes[k];
-					if (Object.keys(index.messageIndex).length <= MESSAGE_TRACK_MAX) break;
-				}
-			}
 		}
+		// `assistant_delta`: the L2 tally is owned by the service (synchronous
+		// at enqueue) and by `sealMessage`; nothing is shed here (B6).
 	}
 
 	private scheduleFlush(r: Resident): void {
@@ -655,8 +682,9 @@ export class ConversationStore {
 		let body = JSON.stringify(r.index);
 		if (Buffer.byteLength(body, "utf8") > this.lim.indexBytes) {
 			// G4: shed the per-message tracking first, then agents.
-			r.index.messageBytes = {};
-			r.index.messageIndex = {};
+			// Open tallies are capped at MESSAGE_OPEN_MAX and sealed ids at
+			// MESSAGE_SEALED_MAX, so this branch is only reachable through
+			// `agents`; shed those first and keep the L2 state intact.
 			body = JSON.stringify(r.index);
 			if (Buffer.byteLength(body, "utf8") > this.lim.indexBytes) {
 				r.index.agents = {};

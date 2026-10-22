@@ -69,6 +69,17 @@ const BASH_PROGRAM_CHARS = /^[A-Za-z0-9._-]+$/;
  * commands and keeps only safe metadata (B3).
  */
 const BASH_AMBIGUOUS = /["'`\\$(){}<>]/;
+/**
+ * Round-2 tightening (B3): an ALLOWLIST rather than a denylist. A
+ * comment (`#`) hides a `;`/`|`/`&&`/newline from the shell but not
+ * from a naive split, so `echo ok # note; SECRET` must not yield
+ * `SECRET` as a "program"; the same goes for history expansion, globs,
+ * tildes and every other construct we do not parse. Only letters,
+ * digits, whitespace and the small punctuation set that plain pipelines,
+ * paths, URLs and `VAR=value` assignments need are admitted; anything
+ * else ⇒ `programs` omitted.
+ */
+const BASH_SUPPORTED = /^[A-Za-z0-9\s._/=:@,+|;&-]*$/;
 
 /**
  * Program names of a shell pipeline, or `null` when the command's syntax
@@ -77,7 +88,7 @@ const BASH_AMBIGUOUS = /["'`\\$(){}<>]/;
  * "program name".
  */
 export function bashPrograms(command: string): string[] | null {
-	if (BASH_AMBIGUOUS.test(command)) return null;
+	if (BASH_AMBIGUOUS.test(command) || !BASH_SUPPORTED.test(command)) return null;
 	const out: string[] = [];
 	for (const rawSegment of command.split(BASH_SEGMENT_SPLIT)) {
 		if (out.length >= BASH_PROGRAMS_MAX) break;
