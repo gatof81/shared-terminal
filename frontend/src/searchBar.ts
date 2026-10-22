@@ -15,9 +15,9 @@
  */
 
 import { searchTabHistory } from "./api.js";
-import { isOverlayActive } from "./viewSwitch.js";
 import { activeSessionId, currentActiveTabId, getActiveTerminal, showToast } from "./main.js";
 import { decideSearchAction, type SubmittedSearch } from "./search.js";
+import { isOverlayActive } from "./viewSwitch.js";
 
 // ── DOM (re-queried locally; see header) ─────────────────────────────────
 const searchBtn = document.getElementById("terminal-search-btn") as HTMLButtonElement;
