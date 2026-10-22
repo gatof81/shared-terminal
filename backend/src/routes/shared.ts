@@ -8,6 +8,7 @@
 import type { Response } from "express";
 import type { BootstrapBroadcaster } from "../bootstrap.js";
 import type { StatsBySession } from "../containerStats.js";
+import type { ConversationService } from "../conversation/service.js";
 import type { DockerManager } from "../dockerManager.js";
 import { UploadQuotaExceededError } from "../dockerManager.js";
 import type { ExecRegistry } from "../execRegistry.js";
@@ -44,6 +45,10 @@ export interface RouteContext {
 	// #381 — per-router so tests get isolation for free; production has
 	// exactly one router, so this is effectively the process singleton.
 	execRegistry: ExecRegistry;
+	// Phase 3 — absent when the subsystem isn't wired (older tests, a
+	// deployment that never constructs it); the list route then answers
+	// an honest "nothing captured" shape.
+	conversation?: ConversationService;
 }
 
 // Exported so wsHandler can apply the same upper bound when validating

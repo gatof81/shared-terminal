@@ -21,6 +21,22 @@ import {
 import { d1Query } from "./db.js";
 import { logger } from "./logger.js";
 import { clearPortMappings, mappingsFromConfig, setPortMappings } from "./portMappings.js";
+
+/**
+ * Phase 3 — what DockerManager needs from the conversation subsystem,
+ * kept as a narrow interface so dockerManager.ts never imports the
+ * service (and its D1-backed modules) directly.
+ */
+export interface SpawnCaptureResult {
+	env: string[];
+	binds: string[];
+}
+export interface ConversationLifecycleHooks {
+	prepareSpawn(sessionId: string): Promise<SpawnCaptureResult>;
+	onSessionDown(sessionId: string): Promise<void>;
+	onSessionPurged(sessionId: string): Promise<void>;
+}
+
 import {
 	decryptStoredEntries,
 	EFFECTIVE_CPU_NANO_MAX,
@@ -268,6 +284,10 @@ export type KillProcessGroupOutcome = "already-exited" | "terminated" | "killed"
 export class DockerManager {
 	private docker: Dockerode;
 	private sessions: SessionManager;
+	// Phase 3 — optional capture hooks (docs/CONVERSATION.md §2.4). Null
+	// until index.ts wires the ConversationService; every call site is
+	// best-effort so a capture failure never fails a session lifecycle op.
+	private conversation: ConversationLifecycleHooks | null = null;
 	private shared = new Map<string /*targetKey*/, Promise<SharedExec>>();
 	private keyOf = new Map<string /*attachId*/, string /*targetKey*/>();
 	// Serialises writeUploads calls per session so the quota check
@@ -302,6 +322,11 @@ export class DockerManager {
 	// ownership cache — stale ids of long-gone containers are the
 	// only thing ever evicted.
 	private readonly runtimeReadyContainers = new Set<string>();
+
+	/** Phase 3 — wire the conversation subsystem's lifecycle hooks. */
+	setConversationHooks(hooks: ConversationLifecycleHooks | null): void {
+		this.conversation = hooks;
+	}
 
 	constructor(sessions: SessionManager, dockerOpts?: Dockerode.DockerOptions) {
 		// docker-modem reads DOCKER_HOST from the environment ONLY when the
@@ -443,6 +468,20 @@ export class DockerManager {
 		// reads via the read-only mount; no need for it to own anything.
 
 		const hostname = sanitiseHostname(meta.name, sessionId);
+		// Phase 3 — the hooks file + ingest token exist only when capture
+		// is requested AND the backend flag is on (§2.4 "spawn" row). A
+		// failure here must not block the session: log and spawn without
+		// capture (the list endpoint will report `effective: false`).
+		let capture: SpawnCaptureResult = { env: [], binds: [] };
+		if (this.conversation) {
+			try {
+				capture = await this.conversation.prepareSpawn(sessionId);
+			} catch (err) {
+				logger.warn(
+					`[docker] conversation capture prepare failed for ${sessionId}: ${(err as Error).message}`,
+				);
+			}
+		}
 		// #384 — clamp CPU against the HOST too, not just the operator
 		// ceiling. EFFECTIVE_CPU_NANO_MAX is a static v1 ceiling (8
 		// cores); a stored cap that was valid at create time becomes
@@ -487,11 +526,15 @@ export class DockerManager {
 					// programs the user runs may use either. Emitting a single
 					// entry per name closes that ambiguity. See `buildContainerEnv`
 					// for the precedence rules.
-					Env: buildContainerEnv(sessionId, meta.name, envArray),
+					Env: buildContainerEnv(sessionId, meta.name, envArray, capture.env),
 					HostConfig: {
 						Binds: [
 							`${WORKSPACE_ROOT}/${sessionId}:/home/developer/workspace`,
 							`${uploadsHostDir}:/home/developer/uploads:ro`,
+							// Phase 3 — empty when capture is off for this
+							// deployment (behaviour-neutral); otherwise the
+							// per-session managed-settings dir, read-only.
+							...capture.binds,
 						],
 						// #190 (direct-proxy switch) — join the shared user-defined
 						// network so the backend can reach this container by name via
@@ -1034,6 +1077,10 @@ export class DockerManager {
 			);
 		}
 
+		// Phase 3 — every conversation of the session is `disconnected`
+		// once its container is gone. Best-effort, like the mapping clear.
+		await this.notifyConversationDown(sessionId);
+
 		// Destroy any shared exec and per-attach routing for this session.
 		// Match on equality or on `sessionId:…` prefix so this keeps working
 		// once per-tab targetKeys (sessionId:windowId) exist.
@@ -1104,6 +1151,19 @@ export class DockerManager {
 		} catch (err) {
 			logger.error(`[docker] failed to purge uploads ${uploadsAbs}: ${(err as Error).message}`);
 			throw err;
+		}
+		// Phase 3 — the event log and the managed-settings dir live next
+		// to `.uploads` (out of the workspace) and follow the same
+		// lifetime: soft delete keeps them, hard delete purges them.
+		if (this.conversation) {
+			try {
+				await this.conversation.onSessionPurged(sessionId);
+			} catch (err) {
+				logger.error(
+					`[docker] failed to purge conversation data for ${sessionId}: ${(err as Error).message}`,
+				);
+				throw err;
+			}
 		}
 	}
 
@@ -1650,7 +1710,19 @@ export class DockerManager {
 				`[docker] failed to clear port mappings for session ${sessionId}: ${(err as Error).message}`,
 			);
 		}
+		await this.notifyConversationDown(sessionId);
 		logger.info(`[docker] stopped container for session ${sessionId}`);
+	}
+
+	private async notifyConversationDown(sessionId: string): Promise<void> {
+		if (!this.conversation) return;
+		try {
+			await this.conversation.onSessionDown(sessionId);
+		} catch (err) {
+			logger.warn(
+				`[docker] conversation onSessionDown failed for ${sessionId}: ${(err as Error).message}`,
+			);
+		}
 	}
 
 	/**
@@ -2795,6 +2867,7 @@ export class DockerManager {
 			this.reconcileSessionsCheckedSinceBoot++;
 			if (!row.container_id) {
 				await this.sessions.updateStatus(row.session_id, "stopped");
+				await this.notifyConversationDown(row.session_id);
 				// Drop any leftover port mappings for the no-container
 				// case — same defensive intent as the running-but-
 				// stopped branch below.
@@ -2819,6 +2892,7 @@ export class DockerManager {
 				this.warnIfPreHardened(row.session_id, row.container_id, info.HostConfig);
 				if (!info.State.Running) {
 					await this.sessions.updateStatus(row.session_id, "stopped");
+					await this.notifyConversationDown(row.session_id);
 					// Same rationale as `stopContainer()`: a container
 					// Docker reports as not-running has its host ports
 					// detached (or about to be), so the mapping table
@@ -2869,6 +2943,7 @@ export class DockerManager {
 				const statusCode = (err as { statusCode?: number }).statusCode;
 				if (statusCode === 404) {
 					await this.sessions.recordContainerGone(row.session_id);
+					await this.notifyConversationDown(row.session_id);
 					// Container is genuinely gone — its host ports are
 					// freed; the dispatcher must not retain mappings.
 					try {
@@ -2995,6 +3070,10 @@ export function buildContainerEnv(
 	sessionId: string,
 	sessionName: string,
 	userEnv: string[],
+	// Phase 3 — infra entries at the same precedence as SESSION_ID (a
+	// user env var can't shadow `ST_INGEST_TOKEN`). Empty when capture
+	// is off.
+	infraEnv: string[] = [],
 ): string[] {
 	const out = new Map<string, string>();
 	// (3) Lowest-precedence defaults first.
@@ -3014,6 +3093,11 @@ export function buildContainerEnv(
 	// (1) Highest-precedence infra identity. Overwrites anything else.
 	out.set("SESSION_ID", sessionId);
 	out.set("SESSION_NAME", sessionName);
+	for (const entry of infraEnv) {
+		const eq = entry.indexOf("=");
+		if (eq <= 0) continue;
+		out.set(entry.slice(0, eq), entry.slice(eq + 1));
+	}
 	return Array.from(out, ([k, v]) => `${k}=${v}`);
 }
 

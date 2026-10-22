@@ -296,6 +296,60 @@ Each session runs in a Docker container based on `session-image/Dockerfile`:
 - **Workspace:** `/home/developer/workspace` (bind-mounted from `<WORKSPACE_ROOT>/<sessionId>` on the host)
 - **Resources:** Per-session caps come from `session_configs` (`cpu_limit` 0.25–8 cores, `mem_limit` 256 MiB–16 GiB, `idle_ttl_seconds` 60s–24h). Sessions created without explicit caps fall back to the `DEFAULT_NANO_CPUS` (2 cores) / `DEFAULT_MEMORY_BYTES` (2 GiB) constants in `dockerManager.ts`. Idle auto-stop is opt-in (omit `idleTtlSeconds` to disable).
 
+## Conversation capture (Phase 3, `docs/CONVERSATION.md`)
+
+The backend can receive Claude Code hook events from session containers
+and persist them as a per-conversation event log on the host
+(`<WORKSPACE_ROOT>/.conversations/<sessionId>/<claudeSessionId>.events.jsonl`).
+**3.0b ships the receiver only; nothing emits yet** — the session image
+gains its hooks support in 3.0c and the per-session activation surface in
+3.0d. Until then the subsystem is inert and this section is forward-looking.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `CONVERSATION_ENABLED` | unset (`false`) | Master switch. Off: `POST /ingest/claude/hook` answers 204 and discards (`ingest_rejected{disabled}`), no session gets a hooks file, an ingest token or the extra read-only bind mount, and boot `reconcile` deletes any stale `.claude-managed/*/conversation.json`. On: capture is still **per-session opt-in** (`sessions.conversation_requested`). |
+| `PORT` | `3001` | Baked into the generated hooks file URL (`http://st-backend:<PORT>/ingest/claude/hook`). |
+
+Host-side directories (both outside the workspace bind mount, next to
+`.uploads`):
+
+- `.conversations/<sessionId>/` — event logs, index snapshots and the
+  per-session revocation marker `REVOKED`; `.conversations/REVOKED_ALL` is
+  the global marker. Soft delete keeps them, `?hard=true` purges them,
+  `npm run backup` includes them in the per-session tarball.
+- `.claude-managed/<sessionId>/conversation.json` — the managed-settings
+  hooks file, mounted read-only at `/etc/claude-code/managed-settings.d/`
+  **only** when the session is requested and the flag is on. Not backed up:
+  `reconcile` regenerates it from D1.
+
+Requested vs effective (CONVERSATION.md §2.4): a container's env is
+immutable, so enabling a session that is already running takes effect at
+its next `POST /start` (a new `ST_INGEST_TOKEN` is generated every start;
+rotating a token = stop + start). `GET /api/sessions/:id/conversations`
+reports `capture.{requested,effective,effectiveAfterRestart}` so nobody
+is promised capture that is not happening.
+
+Kill switch without a rebuild — run inside the backend container, like
+`backup`:
+
+```bash
+npm run conversation:disable -- <sessionId>   # one session
+npm run conversation:disable -- --all         # every session (global marker)
+npm run conversation:enable-all               # remove the global marker only
+```
+
+Order is marker → D1 → hooks file; the command prints success only after
+all three. The receiver stats the markers on **every** event (no cache),
+so ingest is cut off from the moment the marker exists even though the
+command cannot touch the receiver's in-memory token cache. If D1 is down
+the command exits non-zero and leaves the marker in place: ingest stays
+cut, the hooks file stays until the receiver removes it on the next event,
+and nothing is regenerated at the next start.
+
+Network alias: the hooks file targets `st-backend` on `sessions-net`. The
+alias is added to `docker-compose.yml` in 3.0c together with the image
+changes; without it hooks fail DNS resolution instantly (no timeout).
+
 ## Backup & restore (#240)
 
 Operator-level, host-shell only (deliberately not API surface — a dump

@@ -729,6 +729,52 @@ export const MIGRATIONS: readonly Migration[] = [
 		description: "sessions.external_ref — opaque client metadata (#418)",
 		apply: () => addColumnIfMissing("sessions", "external_ref TEXT"),
 	},
+	{
+		// Phase 3 (docs/CONVERSATION.md §3.3, §2.4) — conversation metadata
+		// and the per-session capture columns. `claude_conversations` holds
+		// what the list endpoint and a cold backend need; the events file
+		// on the host is the source of truth and is never mirrored here.
+		// The three `sessions` columns carry the REQUESTED capture state
+		// and the ingest token hash (plus the suspended copy a hot
+		// disable keeps so a re-enable without restart can restore it).
+		// All statements idempotent (IF NOT EXISTS / addColumnIfMissing) so
+		// a crash between apply() and the ledger INSERT converges.
+		version: 16,
+		description: "claude_conversations + sessions capture columns (Phase 3 / 3.0b)",
+		apply: async () => {
+			await d1Query(
+				`CREATE TABLE IF NOT EXISTS claude_conversations (
+					session_id        TEXT PRIMARY KEY,
+					st_session_id     TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+					kind              TEXT NOT NULL,
+					parent_session_id TEXT,
+					parent_inferred   INTEGER NOT NULL DEFAULT 0,
+					title             TEXT,
+					tab_id            TEXT,
+					pane_id           TEXT,
+					status            TEXT NOT NULL,
+					status_evidence   TEXT NOT NULL,
+					status_at         TEXT NOT NULL,
+					started_at        TEXT NOT NULL,
+					ended_at          TEXT,
+					end_reason        TEXT,
+					last_event_at     TEXT NOT NULL,
+					last_prompt_id    TEXT,
+					last_seq          INTEGER NOT NULL DEFAULT 0,
+					claude_version    TEXT,
+					events_bytes      INTEGER NOT NULL DEFAULT 0,
+					events_count      INTEGER NOT NULL DEFAULT 0,
+					gaps_count        INTEGER NOT NULL DEFAULT 0
+				)`,
+			);
+			await d1Query(
+				"CREATE INDEX IF NOT EXISTS idx_claude_conv_st ON claude_conversations(st_session_id, last_event_at)",
+			);
+			await addColumnIfMissing("sessions", "ingest_token_hash TEXT");
+			await addColumnIfMissing("sessions", "ingest_token_hash_suspended TEXT");
+			await addColumnIfMissing("sessions", "conversation_requested INTEGER NOT NULL DEFAULT 0");
+		},
+	},
 ];
 
 /**
