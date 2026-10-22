@@ -469,6 +469,14 @@ export class ConversationService {
 			return this.reject("duplicate");
 		}
 
+		// B6 (round 4) — a delta for a SEALED message is refused before any
+		// side effect: no `missing_delta` gap and no `messageIndex` entry may
+		// be recreated for a message that already ended. Only this check
+		// moves ahead of detectGaps; a `final` still runs detectGaps first
+		// (its own index must be checked) and is sealed afterwards.
+		if (event.ev === "assistant_delta" && this.isSealed(rt, event.identity.messageId ?? "")) {
+			return this.reject("truncated");
+		}
 		this.detectGaps(rt, event);
 		// B6 — accumulated L2 budget per message (never per delta).
 		if (event.ev === "assistant_delta" && this.applyMessageBudget(rt, event) === "drop") {
@@ -595,6 +603,11 @@ export class ConversationService {
 	 * persisted empty so the message is known to have ended. State lives in
 	 * the index (snapshotted, and rebuilt from the file on recovery).
 	 */
+	private isSealed(rt: ConvRuntime, messageId: string): boolean {
+		const index = this.deps.store.getResidentIndex(rt.stSessionId, rt.cid);
+		return index?.sealedMessages.includes(messageId) ?? false;
+	}
+
 	private applyMessageBudget(rt: ConvRuntime, event: NormalizedEvent): "persist" | "drop" {
 		const index = this.deps.store.getResidentIndex(rt.stSessionId, rt.cid);
 		if (!index) return "persist";
