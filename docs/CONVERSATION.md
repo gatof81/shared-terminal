@@ -1,6 +1,6 @@
 # Conversation & Agent Activity — contrato técnico (Fase 3)
 
-Estado: **v1.1 (3.0a, tras la ronda 1 de revisión Work), vinculante para los PRs 3.0b–3.4.** El
+Estado: **v1.2 (3.0a, tras las rondas 1 y 2 de revisión Work), vinculante para los PRs 3.0b–3.4.** El
 razonamiento está en [docs/design/phase3-conversation-activity.md](./design/phase3-conversation-activity.md);
 este archivo define lo que el código debe cumplir y lo que cada PR debe demostrar. Cambiar un
 contrato exige un PR de docs antes o junto con el código.
@@ -148,21 +148,56 @@ estados y una tabla de transiciones. *MUST* implementarse exactamente así y cub
 | Habilitar | corriendo **con** token (fue deshabilitada y rehabilitada sin reinicio) | presente | se **restaura** el hash guardado en `ingest_token_hash_suspended` | se reescribe | `{enabled:true, effective:true}`; el CLI recarga o aplica al siguiente start |
 | Deshabilitar (`requested=0`) | corriendo con token | presente (inmutable, inofensivo) | se mueve a `ingest_token_hash_suspended`, queda NULL ⇒ **la ingesta rechaza desde ya** | se borra ⇒ el CLI deja de emitir al recargar o en el siguiente start | `{enabled:false, effective:false, emissionStopsAfterRestart:<bool según recarga verificada>}` |
 | Deshabilitar | parado | — | NULL | se borra | `{enabled:false, effective:false}` |
-| Emergencia `npm run conversation:disable -- <sid>\|--all` | cualquiera | — | **NULL** en D1 y `conversation_requested=0` (persistente: el siguiente `start` no regenera nada) | borrado | salida por sesión; falla si D1 no responde (no deja solo los archivos borrados) |
+| Emergencia `npm run conversation:disable -- <sid>\|--all` | cualquiera | — | **NULL** en D1 y `conversation_requested=0` (persistente: el siguiente `start` no regenera nada) | borrado | orden estricto §2.5: marca de revocación → D1 → archivos; confirma éxito solo al terminar los tres pasos; falla (≠ 0) si D1 no responde, dejando la marca puesta |
 | `start` / `spawn` | — | nuevo si `requested=1` ∧ `CONVERSATION_ENABLED` | nuevo hash o NULL | escrito si `requested=1` ∧ `CONVERSATION_ENABLED`, si no borrado | — |
 | `reconcile` (arranque del backend) | cada sesión `running` | — | — | archivo presente ⇔ `requested=1` ∧ hash no NULL ∧ `CONVERSATION_ENABLED`; se corrigen desajustes (borrar huérfanos; nunca crear sin token) | log por corrección |
 
 Invariantes:
 
-- **La ingesta deja de aceptar en el momento del flip en D1**, con invalidación pre/post de la cache
-  de tokens (mismo patrón que la cache de ownership), independientemente de cuándo deje de emitir
-  el CLI.
+- **La ingesta deja de aceptar antes de que el flip se confirme al operador**, tanto por la API
+  (invalidación pre/post en proceso) como por el comando de emergencia (marca de revocación §2.5),
+  independientemente de cuándo deje de emitir el CLI.
 - Un archivo `conversation.json` *MUST NOT* existir si `ingest_token_hash IS NULL` para esa sesión.
 - "Efectivo" se informa en `GET /api/sessions/:id/conversations` como `capture: { requested,
   effective, effectiveAfterRestart }`, para que la UI no prometa captura que no ocurre.
 - La recarga en caliente del CLI es *informativa*: el smoke test la mide y el campo
   `emissionStopsAfterRestart` se fija según el resultado para la versión fijada. Hasta tener la
   medición, se asume **false** (no recarga) y la documentación de operador lo dice.
+
+### 2.5 Revocación entre procesos (comando de emergencia)
+
+El comando corre en otro proceso y no puede invalidar la cache de tokens del receptor. Por eso la
+autorización de ingesta tiene **dos** fuentes y la revocación es un archivo que ambos procesos ven:
+
+- Marca por sesión: `<WORKSPACE_ROOT>/.conversations/<st_session_id>/REVOKED`. Marca global:
+  `<WORKSPACE_ROOT>/.conversations/REVOKED_ALL`. (Este directorio no se monta en ningún
+  contenedor de sesión.) Contenido: `{ "at": <ISO>, "by": "cli|api", "reason"? }`. Se escriben con
+  `write` a temporal + `fsync` + `rename` (atómico).
+- **Receptor**: en cada evento, tras el hit de cache, hace `stat` de ambas marcas (coste de
+  microsegundos; el resultado negativo se cachea 1 s por sesión, el positivo nunca). Marca presente
+  ⇒ 204 `ingest_rejected{reason=revoked}`, entrada de cache eliminada, y el archivo
+  `conversation.json` de esa sesión se borra si existe (el receptor converge aunque el comando se
+  haya interrumpido antes del paso 3). Además la entrada de cache de tokens tiene TTL de 60 s.
+- **Comando** `conversation:disable`, orden estricto por sesión: (1) escribir la marca y `fsync`
+  del directorio; (2) D1: `conversation_requested=0`, `ingest_token_hash=NULL`,
+  `ingest_token_hash_suspended=NULL`; (3) borrar `conversation.json`. Imprime `revoked <sid>` solo
+  tras (3). Si (2) falla: sale ≠ 0, deja la marca puesta (el corte sigue vigente) y lo dice; no
+  pasa a (3).
+- **API** (`PATCH … {enabled:false}`): mismos tres pasos, más la invalidación pre/post en proceso.
+  `{enabled:true}` es la única operación que **quita** la marca por sesión (tras actualizar D1); la
+  marca global solo la quita `npm run conversation:enable-all` explícito. Con marca global presente,
+  `PATCH {enabled:true}` responde 409 `revoked-globally`.
+- `reconcile` al arrancar: una marca presente fuerza `conversation_requested=0` y hash NULL en D1 si
+  D1 dijera otra cosa (la marca gana), y borra el archivo de hooks.
+
+Garantía: **ningún evento es aceptado después de que `rename` de la marca retorne**, en cualquier
+proceso receptor de esa máquina, cache poblada o no.
+
+Regresión obligatoria (3.0b): dos procesos reales (el receptor con su cache ya poblada por un
+evento aceptado, y el comando ejecutado con `child_process`), sin reiniciar el receptor: el evento
+inmediatamente posterior al retorno del comando es rechazado con `reason=revoked`; repetir con D1
+simulado caído: el comando sale ≠ 0, la marca queda, el evento sigue rechazado y `conversation.json`
+sigue presente hasta que el receptor lo borra al procesar el siguiente evento.
 
 ---
 
@@ -177,6 +212,7 @@ CORS, con parser JSON propio limitado a **L5 bytes del cuerpo**.
 | --- | --- | --- |
 | Falta `Authorization` o `X-ST-Session` | 204 | contador `ingest_rejected{reason=missing_auth}` |
 | Sesión con `conversation_requested=0`, o `CONVERSATION_ENABLED=false` | 204 | `ingest_rejected{reason=disabled}` |
+| Marca de revocación presente (§2.5) | 204 | `ingest_rejected{reason=revoked}`; entrada de cache eliminada; `conversation.json` borrado |
 | Token no coincide con `ingest_token_hash`, o sesión no `running` | 204 | `ingest_rejected{reason=bad_token\|not_running}` |
 | `Content-Length` ausente, > L5, o cuerpo que supera L5 al leerse, o JSON inválido | 204 | `ingest_rejected{reason=too_large\|invalid_json}` + `gap malformed` si se identificó la conversación (§3.3) |
 | Más de **G2** cuerpos grandes en vuelo | 204 | descartado + `gap backpressure{scope: ingest}` |
@@ -322,7 +358,7 @@ Por eso **L5 ≥ 6 × L3 + 1 MiB de envoltura**.
 | **L8** | eventos montados en el DOM | 500 eventos **y** 8 MiB de texto | ventana por `seq`; los no montados son placeholders; "Copiar informe" pide el evento al servidor si no está montado |
 | **G1** | suma de colas en memoria de todas las conversaciones | 64 MiB | `gap backpressure{scope: global}` en la conversación cuya cola es mayor |
 | **G2** | cuerpos de ingesta > 1 MiB en vuelo simultáneos | 4 | 204 + `gap backpressure{scope: ingest}` |
-| **G3** | `bufferedAmount` por socket WS | pausa de replay a 2 MiB; resync a 8 MiB (§6.1) | nada se pierde: el cliente re-suscribe desde su último `seq` |
+| **G3** | bytes en vuelo por socket WS (`bufferedAmount` + frame a enviar), comprobado **antes de cada frame**, no por lote | replay: ≤ 2 MiB, con una única excepción de un frame cuando el buffer está vacío (máx. en vuelo = 2 MiB + 1 frame ≤ L3 + envoltura); live: resync a 8 MiB (§6.1) | esperar `drain`, 1013 o `resync`; nada se pierde: el cliente re-suscribe desde su último `seq` |
 | **G4** | índices (`index.json`) residentes en memoria | LRU de 64 conversaciones; cada índice ≤ 4 MiB (se resume por turnos, no por eventos) | desalojo; recarga desde disco al siguiente acceso |
 | **G5** | bytes por respuesta de `GET …/events` | 8 MiB | corta antes y devuelve `hasMore: true` |
 | **R1/R2** | tasa por sesión ST | §3.1 | `gap rate_limited` |
@@ -457,12 +493,22 @@ Servidor → cliente: `{type:"hello", conversations:[{cid,lastSeq,firstRetainedS
   `seq ≥ firstRetainedSeq` en orden y después los nuevos sin huecos ni duplicados (listener armado
   antes del replay, cola drenada en orden). Si `after < firstRetainedSeq - 1`, antecede un frame
   `gap history_rotated`.
-- Replay por lotes de 200 eventos; antes de cada lote, si `socket.bufferedAmount > 2 MiB` el
-  servidor espera (`drain`) hasta 30 s; si sigue por encima, cierra con código **1013** y el
-  cliente reintenta con backoff desde su último `seq`.
-- Live: si `bufferedAmount > 8 MiB` al intentar enviar, el servidor deja de reenviar eventos a esa
-  suscripción, envía un único `resync{fromSeq: <último enviado>}` cuando el buffer baja de 2 MiB, y
-  el cliente re-suscribe con `after = fromSeq`. Nada se pierde porque todo está persistido.
+- Replay con **presupuesto de bytes por frame**, no por lote: el servidor lee el archivo en lotes
+  de 200 eventos solo como unidad de E/S, pero antes de enviar **cada** frame calcula su tamaño
+  serializado `f` y envía solo si `socket.bufferedAmount + f ≤ 2 MiB`. Si no cabe, espera `drain`
+  hasta 30 s; si sigue sin caber, cierra con código **1013** y el cliente reintenta con backoff
+  desde su último `seq` recibido. Única excepción: un frame con `f > 2 MiB` se envía cuando
+  `bufferedAmount == 0`, de modo que lo máximo en vuelo durante un replay es 2 MiB + un frame (un
+  frame nunca supera L3 más la envoltura). Sesenta informes de 1 MiB consecutivos producen, para un
+  cliente que no drena, como máximo ~3 MiB encolados y después 1013, nunca 60 MiB.
+- Live: misma comprobación por frame contra 8 MiB; si no cabe, el servidor deja de reenviar
+  eventos a esa suscripción, envía un único `resync{fromSeq: <último enviado>}` cuando el buffer
+  baja de 2 MiB, y el cliente re-suscribe con `after = fromSeq`. Nada se pierde porque todo está
+  persistido.
+- `bufferedAmount` es la cuenta de bytes pendientes de la librería `ws` (`socket.bufferedAmount`);
+  el test de cliente lento (§10, 3.1) usa un socket cuyo lado receptor no lee, con 60 eventos de
+  1 MiB persistidos, y afirma que el máximo de `bufferedAmount` observado es ≤ 2 MiB + el frame más
+  grande y que el cierre es 1013.
 - Máximo 8 suscripciones por socket; un socket por pestaña del navegador; máximo 4 sockets de
   conversación por usuario (el quinto recibe `error{code:"too-many-sockets"}` y 1008).
 
@@ -474,7 +520,8 @@ Servidor → cliente: `{type:"hello", conversations:[{cid,lastSeq,firstRetainedS
 | --- | --- | --- |
 | `PATCH /api/admin/sessions/:id/conversation {enabled}` | admin | aplica la fila correspondiente de §2.4 y devuelve `{ enabled, effective, effectiveAfterRestart }` |
 | `CONVERSATION_ALLOW_USERS=<id,id>` | env | sesiones nuevas de esos usuarios nacen con `conversation_requested=1` |
-| `npm run conversation:disable -- <sid>\|--all` | shell host | fila "Emergencia" de §2.4: D1 primero, archivos después; si D1 falla, no borra archivos y sale ≠ 0 |
+| `npm run conversation:disable -- <sid>\|--all` | shell host | fila "Emergencia" de §2.4 con el orden de §2.5: marca de revocación, D1, archivos; si D1 falla, deja la marca, no borra archivos y sale ≠ 0 |
+| `npm run conversation:enable-all` | shell host | quita `REVOKED_ALL`; no toca filas ni marcas por sesión |
 | `GET /api/admin/stats` → `conversation` | admin | `{ enabledSessions, effectiveSessions, eventsSinceBoot, rejectedSinceBoot{byReason}, gapsSinceBoot, unattributedGaps, bytesOnDisk, queueBytesNow, queueBytesMax, wsResyncsSinceBoot }`; **sin** títulos ni ids de conversación |
 
 ---
@@ -547,7 +594,10 @@ observado y decisión:
       huérfanos; ningún archivo bajo `.conversations/`.
 - [ ] Tabla §2.4 completa como test de tabla (cada fila: estado inicial → acción → D1, archivo,
       respuesta), incluido el comando de emergencia con D1 caído (no borra archivos, sale ≠ 0) y la
-      invalidación inmediata de la cache de tokens al deshabilitar.
+      invalidación inmediata de la cache de tokens al deshabilitar por API.
+- [ ] Revocación entre procesos (§2.5): la regresión de dos procesos con cache poblada, en sus dos
+      variantes (D1 sano y D1 caído); `reconcile` con marca presente y D1 discordante; `PATCH
+      {enabled:true}` quita la marca por sesión y responde 409 con marca global.
 - [ ] Con la bandera activa y una sesión solicitada (dockerode mock): archivo generado byte a byte
       igual a §2.2 (con `PORT` real); bind ro; token de 64 hex y hash.
 - [ ] Ingesta: todas las filas de §3.1; §3.2 (`session_mismatch`); §3.3 (atribución del `gap` por
@@ -592,8 +642,10 @@ observado y decisión:
 - [ ] Overlay Chat con `viewSwitch`; owner-only en todas las rutas (403→404); `canSendInput=false`;
       `capture.effective=false` se muestra como aviso ("captura no activa").
 - [ ] Replay + live determinista (test del broadcaster); paginación hacia atrás; `firstRetainedSeq`
-      y `gap history_rotated`; G3: cliente lento simulado ⇒ pausa, 1013 o `resync` sin pérdida ni
-      duplicado (test); 20k eventos < 500 ms.
+      y `gap history_rotated`; G3 con **eventos grandes**: cliente que no lee + 60 eventos de 1 MiB
+      ⇒ `bufferedAmount` máximo ≤ 2 MiB + frame mayor, cierre 1013, y al reconectar desde el último
+      `seq` recibido no hay pérdida ni duplicado; en live, `resync` sin pérdida ni duplicado;
+      20k eventos < 500 ms.
 - [ ] "Copiar informe" copia `last_assistant_message` sin alteraciones (desde el DOM o vía
       `GET …/events/:seq`); con `truncated` lo indica.
 - [ ] `gap` y `truncated` visibles; eventos `agent_id` fuera del hilo principal; estados con

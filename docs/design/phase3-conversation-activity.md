@@ -1,7 +1,7 @@
 # Fase 3 — Conversation & Agent Activity: diseño
 
-Estado: **v1.1, arquitectura general aprobada el 2026-10-22** con los ajustes de la §9 (incluida
-la ronda 1 de revisión Work). Este
+Estado: **v1.2, arquitectura general aprobada el 2026-10-22** con los ajustes de la §9 (incluidas
+las rondas 1 y 2 de revisión Work). Este
 documento es la base de la fase; el contrato técnico vinculante (endpoints, eventos, límites,
 criterios de aceptación) vive en [docs/CONVERSATION.md](../CONVERSATION.md). Ningún PR de esta
 fase implementa algo que contradiga este diseño sin actualizarlo primero.
@@ -363,8 +363,12 @@ Componentes:
    hace **dos** cosas en este orden: (a) en D1 pone `conversation_requested=0` y anula
    `ingest_token_hash`, con lo que la ingesta rechaza desde ese instante y el siguiente `start` no
    regenera nada; (b) borra `conversation.json`, con lo que el CLI deja de emitir cuando recargue los
-   managed settings o, si la versión fijada no recarga, en el siguiente `POST /start`. El comando de
-   emergencia falla si D1 no responde en lugar de dejar solo los archivos borrados. Porque el env de
+   managed settings o, si la versión fijada no recarga, en el siguiente `POST /start`. Como el
+   comando de emergencia corre en otro proceso y no puede invalidar la cache del receptor, escribe
+   **antes de todo** una marca de revocación en disco (`.conversations/<sid>/REVOKED` o
+   `REVOKED_ALL`) que el receptor comprueba en cada evento aceptado por cache; el corte es efectivo
+   desde que esa marca existe, y el comando solo confirma éxito tras marca → D1 → archivos
+   (CONVERSATION.md §2.5). Si D1 no responde, deja la marca y sale con error. Porque el env de
    un contenedor es inmutable, **habilitar una sesión que ya corre sin token no escribe el archivo**
    (sería tráfico sin receptor que lo acepte) y responde `effectiveAfterRestart: true`.
 4. **Orden de despliegue** (decisión 5): 3.0b backend con endpoint que responde 204 y descarta
@@ -449,10 +453,12 @@ atrás por `seq`; `InFlightLimiter` como Files).
 El cliente envía `{type:"subscribe", conv, after:<seq>}`; el servidor replay desde `after` y luego
 live, con la misma técnica del terminal (listener armado antes del replay, cola drenada en orden)
 para que la secuencia visible sea determinista. Un WS por sesión ST cubre todas sus conversaciones.
-Contrapresión (G3): el replay va por lotes y espera `drain` si el buffer del socket supera 2 MiB
-(cierre 1013 si no drena en 30 s); en live, un cliente que acumula más de 8 MiB deja de recibir y
-recibe un `resync{fromSeq}` cuando drena, tras lo cual re-suscribe desde ese `seq`. Nada se pierde
-porque la fuente es el archivo. Un cursor anterior al historial retenido (tras rotación L7) recibe
+Contrapresión (G3): el presupuesto es de **bytes por frame**, no de eventos por lote: antes de
+enviar cada frame se comprueba `bufferedAmount + tamaño del frame ≤ 2 MiB`; si no cabe se espera
+`drain` (cierre 1013 si no drena en 30 s); un frame mayor que el presupuesto solo sale con el
+buffer vacío, así que lo máximo en vuelo es 2 MiB más un frame. En live, un cliente que acumula
+más de 8 MiB deja de recibir y recibe un `resync{fromSeq}` cuando drena, tras lo cual re-suscribe
+desde ese `seq`. Nada se pierde porque la fuente es el archivo. Un cursor anterior al historial retenido (tras rotación L7) recibe
 un frame `gap history_rotated` y continúa desde `firstRetainedSeq`.
 
 ### 4.4 Probe y reconciliación
@@ -721,6 +727,15 @@ cifrado de eventos en reposo, Channels como canal de notificaciones, lectura adm
   §4.4, §6.1)
 - Menor: `timeout` no aplica a hooks `async`; el script se autoacota con `timeout -k 1 5` y acota
   cada subproceso. (§4.1; CONVERSATION.md §2.3)
+
+**2026-10-22 — revisión Work, ronda 2, incorporada en CONVERSATION.md v1.2:**
+
+- C3 (resto): marca de revocación en disco que el receptor comprueba por evento, orden marca → D1
+  → archivos en el comando de emergencia, garantía de corte desde el `rename` de la marca, y
+  regresión de dos procesos con cache poblada. (§4.1; CONVERSATION.md §2.5)
+- C5 (resto): el replay WS aplica un presupuesto de bytes por frame (no por lote), con una única
+  excepción de un frame sobre buffer vacío, y test de cliente lento con 60 eventos de 1 MiB.
+  (§4.3; CONVERSATION.md §4.4 G3, §6.1)
 
 ---
 
