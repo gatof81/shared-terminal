@@ -42,7 +42,9 @@ import {
 } from "./dockerManager.js";
 import type { SessionManager } from "./sessionManager.js";
 
-function fakeSessions() {
+function fakeSessions(
+	envVars: Record<string, string> = { ST_INGEST_TOKEN: "user-tries-to-shadow" },
+) {
 	const meta = {
 		sessionId: "sess-1",
 		userId: "u1",
@@ -52,7 +54,7 @@ function fakeSessions() {
 		containerName: "st-test",
 		cols: 80,
 		rows: 24,
-		envVars: { ST_INGEST_TOKEN: "user-tries-to-shadow" },
+		envVars,
 		createdAt: new Date(),
 		lastConnectedAt: null,
 		externalRef: null,
@@ -65,9 +67,9 @@ function fakeSessions() {
 	} as unknown as SessionManager;
 }
 
-function makeDm() {
+function makeDm(envVars?: Record<string, string>) {
 	const captured: { opts: Record<string, unknown> } = { opts: {} };
-	const dm = new DockerManager(fakeSessions());
+	const dm = new DockerManager(fakeSessions(envVars));
 	const fakeContainer = {
 		id: "container-abc",
 		start: vi.fn(async () => undefined),
@@ -131,6 +133,26 @@ describe("spawn with conversation hooks", () => {
 		]);
 		expect(hooks.prepareSpawn).toHaveBeenCalledWith("sess-1");
 	});
+	it("§2.6 a proxy in the session env gets 127.0.0.1 in NO_PROXY only when capture is on", async () => {
+		const proxied = { HTTPS_PROXY: "http://proxy:3128", NO_PROXY: "internal.example" };
+		const off = makeDm(proxied);
+		await off.dm.spawn("sess-1");
+		const offEnv = off.captured.opts.Env as string[];
+		expect(offEnv).toContain("NO_PROXY=internal.example");
+		expect(offEnv.some((e) => e.startsWith("no_proxy="))).toBe(false);
+
+		const on = makeDm(proxied);
+		on.dm.setConversationHooks({
+			prepareSpawn: vi.fn(async () => ({ env: ["ST_INGEST_TOKEN=deadbeef"], binds: [] })),
+			onSessionDown: vi.fn(async () => undefined),
+			onSessionPurged: vi.fn(async () => undefined),
+		});
+		await on.dm.spawn("sess-1");
+		const onEnv = on.captured.opts.Env as string[];
+		expect(onEnv).toContain("NO_PROXY=internal.example,127.0.0.1");
+		expect(onEnv.some((e) => e.startsWith("no_proxy="))).toBe(false);
+		expect(onEnv).toContain("HTTPS_PROXY=http://proxy:3128");
+	});
 	it("a failing prepare logs and spawns without capture", async () => {
 		const { dm, captured } = makeDm();
 		dm.setConversationHooks({
@@ -173,5 +195,63 @@ describe("buildContainerEnv infra entries", () => {
 		expect(env).not.toContain("ST_INGEST_TOKEN=user");
 		expect(env).toContain("SESSION_ID=sid");
 		expect(env.filter((e) => e.startsWith("ST_INGEST_TOKEN=")).length).toBe(1);
+	});
+});
+
+// docs/CONVERSATION.md §2.4 note (3.0c review R1): `startContainer` reuses a
+// container that still exists — same image, env and mounts. Only a missing
+// container (never had one, removed by kill/soft delete, or removed
+// out-of-band) is re-created through prepareSpawn. Enabling capture for a
+// session whose container exists therefore takes effect only once that
+// container is re-created; 3.0d must resolve that (entry requirement).
+describe("startContainer and capture (§2.4, 3.0c R1)", () => {
+	function withExisting(state: "stopped" | "gone") {
+		const { dm, captured } = makeDm();
+		const existing = {
+			id: "cid-1",
+			start: vi.fn(async () => undefined),
+			inspect: vi.fn(async () => {
+				if (state === "gone") throw new Error("No such container: cid-1");
+				return { State: { Running: false }, HostConfig: {} };
+			}),
+		};
+		const docker = (
+			dm as unknown as {
+				docker: { getContainer: unknown; createContainer: ReturnType<typeof vi.fn> };
+			}
+		).docker;
+		docker.getContainer = vi.fn(() => existing);
+		const hooks: ConversationLifecycleHooks = {
+			prepareSpawn: vi.fn(async () => ({
+				env: ["ST_INGEST_TOKEN=fresh", "ST_BACKEND_PORT=3001"],
+				binds: [
+					"/var/shared-terminal/workspaces/.claude-managed/sess-1:/etc/claude-code/managed-settings.d:ro",
+				],
+			})),
+			onSessionDown: vi.fn(async () => undefined),
+			onSessionPurged: vi.fn(async () => undefined),
+		};
+		dm.setConversationHooks(hooks);
+		return { dm, captured, existing, hooks, createContainer: docker.createContainer };
+	}
+
+	it("existing stopped container: plain start — no prepareSpawn, no new env, mounts or image", async () => {
+		const { dm, existing, hooks, createContainer } = withExisting("stopped");
+		await dm.startContainer("sess-1");
+		expect(existing.start).toHaveBeenCalledTimes(1);
+		expect(hooks.prepareSpawn).not.toHaveBeenCalled();
+		expect(createContainer).not.toHaveBeenCalled();
+	});
+
+	it("container removed (stale id): re-created with a fresh token and the managed mount", async () => {
+		const { dm, captured, existing, hooks, createContainer } = withExisting("gone");
+		await dm.startContainer("sess-1");
+		expect(existing.start).not.toHaveBeenCalled();
+		expect(hooks.prepareSpawn).toHaveBeenCalledWith("sess-1");
+		expect(createContainer).toHaveBeenCalledTimes(1);
+		expect(captured.opts.Env as string[]).toContain("ST_INGEST_TOKEN=fresh");
+		expect((captured.opts.HostConfig as { Binds: string[] }).Binds).toContain(
+			"/var/shared-terminal/workspaces/.claude-managed/sess-1:/etc/claude-code/managed-settings.d:ro",
+		);
 	});
 });

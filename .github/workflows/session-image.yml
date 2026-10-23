@@ -5,6 +5,9 @@ name: Session Image
 # ~/.claude.json file-symlink-survives-config-write invariant, recreate
 # survival, and process-group cancellation with the backend's real
 # wrapper/kill scripts. See session-image/smoke-test.sh for the assertions.
+# A second step runs session-image/conversation-smoke.sh (Phase 3.0c): the
+# image's real CLI firing the conversation hooks from managed settings at the
+# real 3.0b ingest stack over a `st-backend` network alias.
 #
 # This workflow IS path-filtered, deliberately diverging from ci.yml's
 # no-filters stance. ci.yml avoids filters because its jobs have inputs
@@ -12,9 +15,10 @@ name: Session Image
 # workflow itself — can break a workspace without touching it), so a
 # filter there risks false negatives. This job's input set is exactly the
 # filtered set: the image build consumes only session-image/, and the
-# smoke test additionally consumes the exec scripts it extracts from
-# backend/src/dockerManager.ts — which is why that one file is in the
-# filter. The cost side is also different: a docker build is ~5 min of
+# smoke tests additionally consume the exec scripts extracted from
+# backend/src/dockerManager.ts, the conversation receiver and hooks-file
+# builder under backend/src/conversation/, and the `st-backend` alias in
+# docker-compose.yml — which is why those are in the filter. The cost side is also different: a docker build is ~5 min of
 # critical path, not the <1 min ci.yml accepts as noise.
 #
 # Consequence: this can NOT be a required check in branch protection — it
@@ -26,12 +30,16 @@ on:
     paths:
       - "session-image/**"
       - "backend/src/dockerManager.ts"
+      - "backend/src/conversation/**"
+      - "docker-compose.yml"
       - ".github/workflows/session-image.yml"
   push:
     branches: [main]
     paths:
       - "session-image/**"
       - "backend/src/dockerManager.ts"
+      - "backend/src/conversation/**"
+      - "docker-compose.yml"
       - ".github/workflows/session-image.yml"
 
 # Same shape as ci.yml: cancel superseded PR runs, never cancel main.
@@ -46,7 +54,7 @@ jobs:
   smoke:
     name: Build + docker smoke test
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -74,3 +82,9 @@ jobs:
 
       - name: Smoke test
         run: ./session-image/smoke-test.sh shared-terminal-session
+
+      # The real CLI against a scripted model (no secrets, no egress to the
+      # API) and the real ingest stack; prints and step-summarises the
+      # timings the 3.0c PR reports.
+      - name: Conversation hooks smoke test
+        run: ./session-image/conversation-smoke.sh shared-terminal-session

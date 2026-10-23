@@ -91,6 +91,14 @@ export interface IngestHeaders {
 	tmuxPane?: string;
 }
 
+/** §3.2.1 — what the in-container relay could not deliver before this event. */
+export interface RelayReport {
+	dropped: number;
+	droppedBytes: number;
+	unattributed: number;
+	restarted: boolean;
+}
+
 export type IngestOutcome =
 	| { accepted: true; cid: string; dedupe?: false }
 	| { accepted: false; reason: RejectReason | "duplicate" };
@@ -232,6 +240,10 @@ export class ConversationService {
 		unattributedGaps: 0,
 		fieldsDropped: 0,
 		d1Writes: 0,
+		/** Events the session relays reported as undelivered (§2.6). */
+		relayDropped: 0,
+		relayDroppedUnattributed: 0,
+		relayRestarts: 0,
 	};
 
 	constructor(private readonly deps: ServiceDeps) {
@@ -378,12 +390,13 @@ export class ConversationService {
 		stSessionId: string,
 		pane: string | undefined,
 		raw: unknown,
+		relay?: RelayReport,
 	): Promise<IngestOutcome> {
 		// B4 — a body that arrives during or after the purge is refused
 		// before anything else; otherwise the ingest registers itself so a
 		// purge that starts now waits for it to settle.
 		if (this.isDead(stSessionId)) return this.reject("not_running");
-		const work = this.ingestInner(stSessionId, pane, raw);
+		const work = this.ingestInner(stSessionId, pane, raw, relay);
 		let set = this.inFlight.get(stSessionId);
 		if (!set) {
 			set = new Set();
@@ -404,6 +417,7 @@ export class ConversationService {
 		stSessionId: string,
 		pane: string | undefined,
 		raw: unknown,
+		relay: RelayReport | undefined,
 	): Promise<IngestOutcome> {
 		const normalized = normalizeHookInput(raw);
 		if (!normalized.ok) {
@@ -455,6 +469,9 @@ export class ConversationService {
 		if (this.isDead(stSessionId) || this.epochOf(stSessionId) !== epoch || rt.epoch !== epoch) {
 			return this.reject("not_running");
 		}
+		// §3.2.1 — before the carrying event (the losses precede it) and
+		// before dedupe: a duplicate still delivers the report.
+		if (relay) this.applyRelayReport(rt, relay);
 		const hash = payloadHash(raw);
 		const identity = identityKey({
 			ev: event.ev,
@@ -755,6 +772,27 @@ export class ConversationService {
 			if (index.lastPromptId !== event.promptId) {
 				this.writeGap(rt, { reason: "missing_prompt", prompt_id: event.promptId });
 			}
+		}
+	}
+
+	private applyRelayReport(rt: ConvRuntime, relay: RelayReport): void {
+		if (relay.unattributed > 0) {
+			this.stats.unattributedGaps++;
+			this.stats.relayDroppedUnattributed += relay.unattributed;
+		}
+		if (relay.restarted) {
+			this.stats.relayRestarts++;
+			// A conversation the relay starts with lost nothing to it.
+			const idx = this.deps.store.getResidentIndex(rt.stSessionId, rt.cid);
+			if (idx && idx.lastSeq > 0) this.writeGap(rt, { reason: "relay_restart" });
+		}
+		if (relay.dropped > 0) {
+			this.stats.relayDropped += relay.dropped;
+			this.writeGap(rt, {
+				reason: "relay_dropped",
+				dropped: relay.dropped,
+				dropped_bytes: relay.droppedBytes,
+			});
 		}
 	}
 

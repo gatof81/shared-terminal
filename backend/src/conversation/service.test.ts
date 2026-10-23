@@ -419,6 +419,55 @@ describe("ingest — a realistic turn", () => {
 		expect(store.getResidentIndex("s1", "c1")?.gapsCount).toBe(2);
 	});
 
+	it("§3.2.1 relay reports: relay_dropped before the carrying event, relay_restart only for a known conversation", async () => {
+		session("s1");
+		// Restart reported on the first event of a NEW conversation: nothing was lost to it.
+		await service.ingest("s1", "%0", hook("UserPromptSubmit", { prompt: "a", prompt_id: "p1" }), {
+			dropped: 0,
+			droppedBytes: 0,
+			unattributed: 0,
+			restarted: true,
+		});
+		await readEvents("s1", "c1");
+		// Same conversation, now known: restart + losses, then the event itself.
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("Stop", { prompt_id: "p1", stop_hook_active: false, last_assistant_message: "x" }),
+			{ dropped: 3, droppedBytes: 1200, unattributed: 2, restarted: true },
+		);
+		const events = await readEvents("s1", "c1");
+		expect(events.map((e) => [e.ev, e.data.reason ?? null])).toEqual([
+			["user_prompt", null],
+			["gap", "relay_restart"],
+			["gap", "relay_dropped"],
+			["turn_end", null],
+		]);
+		expect(events[2].data).toEqual({ reason: "relay_dropped", dropped: 3, dropped_bytes: 1200 });
+		expect(service.stats).toMatchObject({
+			relayDropped: 3,
+			relayDroppedUnattributed: 2,
+			relayRestarts: 2,
+			unattributedGaps: 1,
+		});
+	});
+
+	it("§3.2.1 a duplicate still delivers the relay report", async () => {
+		session("s1");
+		const prompt = hook("UserPromptSubmit", { prompt: "a", prompt_id: "p1" });
+		await service.ingest("s1", "%0", prompt);
+		expect(
+			await service.ingest("s1", "%0", prompt, {
+				dropped: 1,
+				droppedBytes: 10,
+				unattributed: 0,
+				restarted: false,
+			}),
+		).toEqual({ accepted: false, reason: "duplicate" });
+		const gaps = (await readEvents("s1", "c1")).filter((e) => e.ev === "gap").map((e) => e.data);
+		expect(gaps).toEqual([{ reason: "relay_dropped", dropped: 1, dropped_bytes: 10 }]);
+	});
+
 	it("a resume with no prior events records history_unavailable", async () => {
 		session("s1");
 		await service.ingest("s1", "%0", hook("SessionStart", { source: "resume" }));
@@ -625,7 +674,7 @@ describe("lifecycle, list, reconcile, probe", () => {
 			execCapture: exec,
 		});
 		await svc2.reconcile();
-		expect(await fs.readFile(hooksFilePath(root, "s1"), "utf8")).toContain("st-backend:3001");
+		expect(await fs.readFile(hooksFilePath(root, "s1"), "utf8")).toContain("127.0.0.1:47613");
 		await expect(fs.stat(hooksFilePath(root, "s2"))).rejects.toThrow();
 		expect(dbStubs.sessions.get("s3")).toMatchObject({
 			conversation_requested: 0,

@@ -210,6 +210,28 @@ RUN set -eux; \
 RUN userdel -r ubuntu || true \
     && useradd -m -s /bin/bash -u 1000 -U developer
 
+# ── Conversation hooks (docs/CONVERSATION.md §2.1–§2.3, §2.6) ───────────────
+# Inert on its own. The image only provides the fixed paths the hooks file
+# and the entrypoint refer to:
+#   - /etc/claude-code/managed-settings.d/, EMPTY here. When (and only when)
+#     the backend activates capture for a session it bind-mounts its
+#     per-session directory read-only over this one, with a conversation.json
+#     that adds the hooks. Nothing mounted (or an empty mount) ⇒ the CLI
+#     behaves exactly as without this block: no hook, no request.
+#   - /opt/st/hooks/session-start.sh, the SessionStart registration hook
+#     (the one event that can't use an http hook). It exits at once without
+#     a token in the environment, and bounds itself to ≤ 6 s otherwise.
+#   - /opt/st/hooks/relay.py, the loopback relay the hooks POST to (the CLI
+#     refuses HTTP hooks to private addresses such as st-backend's). The
+#     entrypoint starts it only when capture is effective; stdlib Python.
+# All are root-owned and not writable by `developer`, so the session user
+# can neither plant a managed-settings file nor swap the script a managed
+# hook runs. Created before `USER developer` below so they're root's.
+RUN install -d -o root -g root -m 0755 /etc/claude-code /etc/claude-code/managed-settings.d /opt/st /opt/st/hooks
+COPY hooks/session-start.sh hooks/relay.py /opt/st/hooks/
+RUN chown root:root /opt/st/hooks/session-start.sh /opt/st/hooks/relay.py \
+    && chmod 0755 /opt/st/hooks/session-start.sh /opt/st/hooks/relay.py
+
 
 USER developer
 WORKDIR /home/developer
@@ -270,7 +292,11 @@ RUN mkdir -p /home/developer/.npm-global
 #   - The pin governs only what the image bakes into a FRESH workspace.
 #     `claude --update` self-updates persisted in an existing workspace's
 #     .npm-global keep floating by design (see the paragraph above).
-ARG CLAUDE_CODE_VERSION=2.1.207
+# 2.1.308 is the floor docs/CONVERSATION.md §1 is written against (http
+# hooks with headers + allowedEnvVars, MessageDisplay, managed-settings.d,
+# `claude agents --json`); session-image/conversation-smoke.sh re-verifies
+# the hook contract against whatever version this pin names.
+ARG CLAUDE_CODE_VERSION=2.1.308
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
 # ── Default `claude` to --dangerously-skip-permissions in this image ────────

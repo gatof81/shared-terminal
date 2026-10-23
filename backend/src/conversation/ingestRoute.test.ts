@@ -84,10 +84,12 @@ describe("ingest route", () => {
 		});
 		expect(r).toEqual({ status: 204, text: "" });
 		await vi.waitFor(() => expect(svc.ingest).toHaveBeenCalledTimes(1));
-		expect(svc.ingest).toHaveBeenCalledWith("s1", "%3", {
-			hook_event_name: "Stop",
-			session_id: "c1",
-		});
+		expect(svc.ingest).toHaveBeenCalledWith(
+			"s1",
+			"%3",
+			{ hook_event_name: "Stop", session_id: "c1" },
+			undefined,
+		);
 		expect(svc.takeRate).toHaveBeenCalledWith(
 			"s1",
 			Buffer.byteLength('{"hook_event_name":"Stop","session_id":"c1"}'),
@@ -176,7 +178,7 @@ describe("ingest route", () => {
 			"x-st-session": "s1",
 			"x-st-tmux-pane": "evil; rm -rf",
 		});
-		await vi.waitFor(() => expect(svc.ingest).toHaveBeenCalledWith("s1", undefined, {}));
+		await vi.waitFor(() => expect(svc.ingest).toHaveBeenCalledWith("s1", undefined, {}, undefined));
 	});
 });
 
@@ -184,6 +186,25 @@ const AUTH = { authorization: "Bearer x", "x-st-session": "s1" };
 async function allSettled() {
 	return Promise.all(outcomes);
 }
+
+describe("ingest route — relay loss reports (§3.2.1)", () => {
+	it("passes valid X-ST-Relay-* values to ingest; ignores malformed ones; none ⇒ undefined", async () => {
+		await post("{}", {
+			"x-st-relay-dropped": "4",
+			"x-st-relay-dropped-bytes": "900",
+			"x-st-relay-unattributed": "x1",
+			"x-st-relay-restarted": "1",
+		});
+		await post("{}", { "x-st-relay-dropped": "-3", "x-st-relay-restarted": "yes" });
+		await post("{}", { "x-st-relay-dropped": "12345678901" });
+		await vi.waitFor(() => expect(svc.ingest).toHaveBeenCalledTimes(3));
+		expect(svc.ingest.mock.calls.map((c) => (c as unknown[])[3])).toEqual([
+			{ dropped: 4, droppedBytes: 900, unattributed: 0, restarted: true },
+			undefined,
+			undefined,
+		]);
+	});
+});
 
 describe("ingest route — pathname without the query string", () => {
 	it("POST with a query string → 204 empty through the same handler as without it", async () => {
@@ -197,10 +218,12 @@ describe("ingest route — pathname without the query string", () => {
 			tmuxPane: "%2",
 		});
 		expect(svc.takeRate).toHaveBeenCalledWith("s1", Buffer.byteLength(body));
-		expect(svc.ingest).toHaveBeenCalledWith("s1", "%2", {
-			hook_event_name: "Stop",
-			session_id: "c1",
-		});
+		expect(svc.ingest).toHaveBeenCalledWith(
+			"s1",
+			"%2",
+			{ hook_event_name: "Stop", session_id: "c1" },
+			undefined,
+		);
 	});
 	it("the query-string route applies the same validations: auth, L5 cap, JSON", async () => {
 		svc.authorize.mockResolvedValueOnce({ accepted: false, reason: "bad_token" } as never);

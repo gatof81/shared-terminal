@@ -50,9 +50,17 @@ export const HOOKS_FILE_NAME = "conversation.json";
 export const MANAGED_MOUNT_TARGET = "/etc/claude-code/managed-settings.d";
 export const INGEST_TOKEN_ENV = "ST_INGEST_TOKEN";
 export const INGEST_PATH = "/ingest/claude/hook";
-/** Network alias of the backend on sessions-net (added to compose in 3.0c). */
+/** Network alias of the backend on sessions-net: the relay's fixed upstream. */
 export const BACKEND_ALIAS = "st-backend";
 export const SESSION_START_SCRIPT = "/opt/st/hooks/session-start.sh";
+/**
+ * §2.6 — the in-container relay the hooks target. Loopback because CLI
+ * 2.1.308 refuses HTTP hooks to private addresses, which `st-backend`
+ * always resolves to; fixed port, shared with relay.py and the script.
+ */
+export const RELAY_URL = `http://127.0.0.1:47613${INGEST_PATH}`;
+/** Tells the relay the backend `PORT` (its upstream is `st-backend:<port>`). */
+export const BACKEND_PORT_ENV = "ST_BACKEND_PORT";
 
 export function managedRoot(workspaceRoot: string): string {
 	return path.resolve(workspaceRoot, ".claude-managed");
@@ -64,18 +72,18 @@ export function hooksFilePath(workspaceRoot: string, sessionId: string): string 
 	return path.join(managedDir(workspaceRoot, sessionId), HOOKS_FILE_NAME);
 }
 
-/** Exactly §2.2. Key order and the per-hook shape are part of the contract. */
-export function buildHooksSettings(port: number): string {
+/**
+ * Exactly §2.2. Key order and the per-hook shape are part of the contract.
+ * No token and no session header: the relay adds both from its own env, so
+ * the CLI never handles the credential.
+ */
+export function buildHooksSettings(): string {
 	const http = {
 		type: "http",
-		url: `http://${BACKEND_ALIAS}:${port}${INGEST_PATH}`,
+		url: RELAY_URL,
 		timeout: 1,
-		headers: {
-			Authorization: "Bearer $ST_INGEST_TOKEN",
-			"X-ST-Session": "$SESSION_ID",
-			"X-ST-Tmux-Pane": "$TMUX_PANE",
-		},
-		allowedEnvVars: ["ST_INGEST_TOKEN", "SESSION_ID", "TMUX_PANE"],
+		headers: { "X-ST-Tmux-Pane": "$TMUX_PANE" },
+		allowedEnvVars: ["TMUX_PANE"],
 	};
 	const plain = () => [{ hooks: [http] }];
 	const matched = () => [{ matcher: "*", hooks: [http] }];
@@ -141,7 +149,7 @@ export async function writeHooksFile(deps: ActivationDeps, sessionId: string): P
 	const dir = await ensureManagedDir(deps.workspaceRoot, sessionId);
 	const file = path.join(dir, HOOKS_FILE_NAME);
 	const tmp = `${file}.tmp.${process.pid}`;
-	await fs.writeFile(tmp, buildHooksSettings(deps.port), { mode: 0o644 });
+	await fs.writeFile(tmp, buildHooksSettings(), { mode: 0o644 });
 	await fs.rename(tmp, file);
 }
 
@@ -233,7 +241,11 @@ export async function prepareSpawnCapture(
 	await setIngestTokenHash(sessionId, hashIngestToken(token));
 	deps.invalidate?.(sessionId);
 	await writeHooksFile(deps, sessionId);
-	return { env: [`${INGEST_TOKEN_ENV}=${token}`], binds: [bind], effective: true };
+	return {
+		env: [`${INGEST_TOKEN_ENV}=${token}`, `${BACKEND_PORT_ENV}=${deps.port}`],
+		binds: [bind],
+		effective: true,
+	};
 }
 
 // ── Enable / disable (§2.4 rows) ────────────────────────────────────────────

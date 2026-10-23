@@ -493,6 +493,54 @@ if [ -d "$SSH_STATE_WS" ]; then
         find "$SSH_STATE_WS" -type f -exec chmod 600 {} + 2>/dev/null || true
 fi
 
+# Conversation capture relay (docs/CONVERSATION.md §2.6). Started only when
+# capture is EFFECTIVE for this container: the backend injected the ingest
+# token AND mounted the managed hooks file. Otherwise nothing runs and no
+# port is opened — capture off costs no process at all.
+#
+# Claude Code refuses HTTP hooks to private addresses (st-backend on
+# sessions-net is one), so the hooks target this relay on 127.0.0.1, which
+# forwards to the backend. It is supervised by this small loop: restarted
+# after 1 s, the wait doubling up to 60 s while it keeps dying young (a port
+# taken by the user must not become a busy loop); each restart bumps
+# ST_RELAY_GENERATION so the relay can report the discontinuity. Both die
+# with the container. Above the readiness sentinel so the first `claude`
+# exec already finds the relay listening.
+#
+# MALLOC_MMAP_THRESHOLD_: bodies are up to 8 MiB; with glibc's dynamic
+# threshold, after the first one is freed later ones come from per-thread
+# arenas that never return memory, so a single burst would pin its peak RSS
+# for the container's life. A fixed threshold keeps every large body in its
+# own mapping, released to the OS as soon as it is delivered or dropped.
+ST_MANAGED_HOOKS=/etc/claude-code/managed-settings.d/conversation.json
+if [ -n "${ST_INGEST_TOKEN:-}" ] && [ -f "$ST_MANAGED_HOOKS" ] && [ -f /opt/st/hooks/relay.py ]; then
+        relay_log=/dev/null
+        [ "${ST_HOOKS_DEBUG:-}" = 1 ] && relay_log=/tmp/st-relay.log
+        (
+                set +e
+                gen=0
+                delay=1
+                trap 'kill "$child" 2>/dev/null; exit 0' TERM INT
+                while :; do
+                        started=$SECONDS
+                        MALLOC_MMAP_THRESHOLD_=131072 ST_RELAY_GENERATION=$gen \
+                                python3 -IS /opt/st/hooks/relay.py </dev/null >>"$relay_log" 2>&1 &
+                        child=$!
+                        wait "$child"
+                        [ $((SECONDS - started)) -ge 60 ] && delay=1
+                        sleep "$delay"
+                        delay=$((delay * 2 > 60 ? 60 : delay * 2))
+                        gen=$((gen + 1))
+                done
+        ) </dev/null >/dev/null 2>&1 &
+        # Wait (≤ 2 s) for the listener, so a hook fired right after the
+        # sentinel doesn't meet a refused connection. Best-effort.
+        for _ in $(seq 20); do
+                (exec 3<>/dev/tcp/127.0.0.1/47613) 2>/dev/null && break
+                sleep 0.1
+        done
+fi
+
 # Runtime-readiness sentinel (#393), part 2 of 2: touched as the LAST
 # provisioning step — after the ~/.npm-global swap and every symlink
 # above — so its presence is the contract the API's `runtimeReady`
