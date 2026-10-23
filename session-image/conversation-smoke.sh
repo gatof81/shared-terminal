@@ -482,7 +482,13 @@ ODD=$(jq -cs '[.[] | select(.event == "PreToolUse" or .event == "PostToolUse" or
 	| group_by(.body.tool_use_id)
 	| map({id: .[0].body.tool_use_id, evs: map(.event), cmd: .[0].body.tool_input.command, sid: .[0].body.session_id})
 	| map(select(.evs != ["PreToolUse", "PostToolUse"] and .evs != ["PreToolUse", "PostToolUseFailure"]))' "$OUT/on.jsonl")
-check "every tool_use_id has exactly one start and one end (odd: $ODD)" [ "$ODD" = "[]" ]
+# Observed in 2.1.308 under bypass permissions: a failing Bash also fires
+# PostToolUse after PostToolUseFailure (same tool_use_id). Recorded, not
+# hidden — it is a contract difference reported in the 3.0c PR.
+BOTH=$(jq -c 'map(select(.evs == ["PreToolUse", "PostToolUseFailure", "PostToolUse"])) | length' <<<"$ODD")
+check "every tool_use_id has one start and one end, or the known failure+end pair (other: $(jq -c 'map(select(.evs != ["PreToolUse", "PostToolUseFailure", "PostToolUse"]))' <<<"$ODD"))" \
+	[ "$(jq 'length' <<<"$ODD")" = "$BOTH" ]
+[ "$BOTH" -gt 0 ] && note "CLI 2.1.308, failing Bash under --dangerously-skip-permissions: PreToolUse → PostToolUseFailure → PostToolUse for one tool_use_id ($BOTH case(s)); both tool_failed and tool_end get persisted"
 check "a failing tool is tool_failed" grep -q '"ev":"tool_failed"' <<<"$EVENTS"
 AGENT=$(jq -s '[.[] | select(.event == "SubagentStart" or .event == "SubagentStop") | .body.agent_id] | unique | length' "$OUT/on.jsonl")
 check "subagent: SubagentStart/Stop share one agent_id" [ "$AGENT" = 1 ]
