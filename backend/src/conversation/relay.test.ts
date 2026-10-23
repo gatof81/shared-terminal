@@ -256,6 +256,21 @@ describe("relay — activation and surface", () => {
 		blocker.close();
 	});
 
+	it("killed with connections open, a new relay binds the same port at once (TIME_WAIT)", async () => {
+		await startUpstream("ok");
+		const r = await startRelay();
+		for (let i = 0; i < 5; i++) await post(r.port, body(SID, "Stop", { i }));
+		await until(() => received.length === 5);
+		r.proc.kill("SIGKILL");
+		await r.exited;
+		const again = await startRelay({
+			ST_RELAY_LISTEN_PORT: String(r.port),
+			ST_RELAY_GENERATION: "1",
+		});
+		expect(again.stderr()).toContain(`listening on 127.0.0.1:${r.port} generation=1`);
+		expect((await post(r.port, body(SID, "Stop"))).status).toBe(204);
+	});
+
 	it("only POST to the exact path: anything else is an empty 404 and nothing is forwarded", async () => {
 		await startUpstream("ok");
 		const r = await startRelay();
@@ -390,6 +405,20 @@ describe("relay — losses are counted and reported (§3.2.1)", () => {
 		await post(r.port, body(SID, "SessionEnd", { again: true }));
 		await until(() => received.length === 3);
 		expect(received[2].headers["x-st-relay-dropped"]).toBeUndefined();
+	});
+
+	it("the session id is read whether or not the serialiser puts spaces around the colon", async () => {
+		await startUpstream("status500");
+		const r = await startRelay();
+		await post(r.port, `{ "session_id" : "${SID}", "hook_event_name": "Stop" }`);
+		await until(() => r.stats().dropped === 1);
+		await stopUpstream();
+		await startUpstream("ok", upstreamPort);
+		await new Promise((res) => setTimeout(res, 1100));
+		await post(r.port, body(SID, "Stop"));
+		await until(() => received.length >= 2);
+		expect(received.at(-1)?.headers["x-st-relay-dropped"]).toBe("1");
+		expect(received.at(-1)?.headers["x-st-relay-unattributed"]).toBeUndefined();
 	});
 
 	it("a failed report is kept for the next delivery", async () => {

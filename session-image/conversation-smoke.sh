@@ -433,7 +433,7 @@ ON_BASH=$(median3 "${runs[@]}")
 note "with hooks, backend up: -p hola $ON_HOLA ms (base $BASE_HOLA), -p with Bash $ON_BASH ms (base $BASE_BASH)"
 claude_p "ST_SCENARIO=agent"
 check "subagent run completes" [ "$LAST_RC" = 0 ]
-claude_p "ST_SCENARIO=bashfail"
+claude_p "ST_SCENARIO=bashfail" --dangerously-skip-permissions
 tab_start --dangerously-skip-permissions || exit 1
 tab_turn "ST_SCENARIO=slow:60:20"
 ON_SLOW=$LAST_MS
@@ -716,9 +716,11 @@ sleep 1
 SENT=$((4000 + 40 + 1))
 GOT=$(count sat "(.body.session_id // \"\") == \"$XSID\"")
 REPORTED=$(jq -s 'map(.relay.dropped // 0) | add' "$OUT/sat.jsonl")
+UNATTRIBUTED=$(jq -s 'map(.relay.unattributed // 0) | add' "$OUT/sat.jsonl")
 check "every small flood request answered 204 ($CODES)" [ "$(jq -r 'keys | join(",")' <<<"$CODES")" = 204 ]
 check "queue stayed within 1024 events (max $(relay_stat queue_max))" [ "$(relay_stat queue_max)" -le 1024 ]
-check "losses counted end to end: delivered $GOT + reported $REPORTED = sent $SENT" [ $((GOT + REPORTED)) = "$SENT" ]
+check "losses counted end to end: delivered $GOT + reported $REPORTED (+ unattributed $UNATTRIBUTED) = sent $SENT" [ $((GOT + REPORTED + UNATTRIBUTED)) = "$SENT" ]
+check "every loss attributed to its conversation" [ "$UNATTRIBUTED" = 0 ]
 check "relay peak memory ≤ 48 MiB with a full queue (VmHWM $HWM kB)" [ "$HWM" -le $((48 * 1024)) ]
 note "saturation: 4000 events in $FLOOD_MS ms against a backend taking 5 ms each, then 40 × 1 MiB ($CODES_BIG) ⇒ delivered $GOT, dropped $(relay_stat dropped) (queue_full $(relay_stat dropped_queue_full)), all reported; relay CPU $((cpu1 - cpu0)) ms; VmHWM $HWM kB (16 MiB queue bound + interpreter)"
 

@@ -63,7 +63,7 @@ STATS_INTERVAL = float(os.environ.get("ST_RELAY_STATS_INTERVAL") or 5)
 PANE_RE = re.compile(r"%\d{1,6}")
 # The CLI serialises the hook input with session_id as its first key. Only
 # these bytes are ever looked at; the rest of the body is opaque.
-SID_RE = re.compile(rb'\{"session_id":"([0-9a-fA-F-]{36})"')
+SID_RE = re.compile(rb'\{\s*"session_id"\s*:\s*"([0-9a-fA-F-]{36})"')
 DIGITS_RE = re.compile(r"[0-9]{1,10}")
 
 
@@ -475,6 +475,10 @@ def main():
     if not TOKEN or not SESSION:
         return 0
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # A restart right after a kill finds the port's old connections in
+    # TIME_WAIT; without this the bind fails for a minute. On Linux it
+    # never lets two processes listen on the same port.
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         listener.bind((LISTEN_HOST, LISTEN_PORT))
         listener.listen(64)

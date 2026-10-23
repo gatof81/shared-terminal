@@ -10,6 +10,11 @@
  *
  * Applied only when capture is effective for the spawn, and only when the
  * session env defines a proxy — otherwise the env is returned untouched.
+ * The host is appended to whichever of `NO_PROXY`/`no_proxy` exist; both
+ * are created only when neither does. Creating the missing spelling would
+ * change the user's own exemptions for clients that read the lowercase one
+ * first and ignore the other (Claude's API client among them, measured in
+ * the 3.0c smoke test).
  * Kept free of imports so dockerManager.ts can use it without pulling in
  * the D1-backed conversation modules.
  */
@@ -43,8 +48,8 @@ export function withRelayNoProxy(env: string[]): string[] {
 		}
 		return entry;
 	});
-	for (const k of ["NO_PROXY", "no_proxy"]) {
-		if (!value.has(k)) out.push(`${k}=${RELAY_HOST}`);
+	if (!value.has("NO_PROXY") && !value.has("no_proxy")) {
+		out.push(`NO_PROXY=${RELAY_HOST}`, `no_proxy=${RELAY_HOST}`);
 	}
 	return out;
 }

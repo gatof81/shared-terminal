@@ -150,7 +150,7 @@ describe("spawn with conversation hooks", () => {
 		await on.dm.spawn("sess-1");
 		const onEnv = on.captured.opts.Env as string[];
 		expect(onEnv).toContain("NO_PROXY=internal.example,127.0.0.1");
-		expect(onEnv).toContain("no_proxy=127.0.0.1");
+		expect(onEnv.some((e) => e.startsWith("no_proxy="))).toBe(false);
 		expect(onEnv).toContain("HTTPS_PROXY=http://proxy:3128");
 	});
 	it("a failing prepare logs and spawns without capture", async () => {

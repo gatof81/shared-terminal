@@ -20,14 +20,22 @@ describe("withRelayNoProxy (§2.6)", () => {
 		expect(withRelayNoProxy(["ALL_PROXY=socks5://p:1", "NO_PROXY=127.0.0.1"])).toEqual([
 			"ALL_PROXY=socks5://p:1",
 			"NO_PROXY=127.0.0.1",
-			"no_proxy=127.0.0.1",
 		]);
 	});
 	it("an empty NO_PROXY becomes the relay host", () => {
 		expect(withRelayNoProxy(["HTTP_PROXY=http://p:1", "NO_PROXY="])).toEqual([
 			"HTTP_PROXY=http://p:1",
 			"NO_PROXY=127.0.0.1",
-			"no_proxy=127.0.0.1",
+		]);
+	});
+	it("never creates the missing spelling next to the user's own: a lowercase-first client would lose their exemptions", () => {
+		expect(withRelayNoProxy(["HTTPS_PROXY=http://p:1", "NO_PROXY=mock-api"])).toEqual([
+			"HTTPS_PROXY=http://p:1",
+			"NO_PROXY=mock-api,127.0.0.1",
+		]);
+		expect(withRelayNoProxy(["https_proxy=http://p:1", "no_proxy=.corp"])).toEqual([
+			"https_proxy=http://p:1",
+			"no_proxy=.corp,127.0.0.1",
 		]);
 	});
 });

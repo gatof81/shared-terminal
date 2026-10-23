@@ -333,7 +333,9 @@ evento que el CLI nunca emitió.
   loopback). Un proxy no alcanza el loopback del contenedor, así que el evento se perdería.
 - Por eso, **solo** cuando la captura es efectiva **y** el env de la sesión define alguna de
   `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` (o sus minúsculas), el backend añade `127.0.0.1` a
-  `NO_PROXY` y a `no_proxy` (las crea si faltan, conserva lo que tengan, no toca `*`). Sin proxy en el
+  las de `NO_PROXY`/`no_proxy` que existan (conserva su contenido, no toca `*`); si no existe
+  ninguna, crea las dos. Nunca crea la que falta junto a la del usuario: un cliente que lee primero
+  la minúscula e ignora la otra (el de la API de Claude, medido en 3.0c) perdería sus excepciones. Sin proxy en el
   env de la sesión, el env no cambia. No afecta a ninguna otra conexión de Claude: ningún proxy puede
   servir el loopback del contenedor.
 - Un proxy exportado después (en `.bashrc` o a mano) sin `NO_PROXY` hace que los hooks vayan a ese
