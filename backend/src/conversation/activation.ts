@@ -254,7 +254,11 @@ export interface ActivationResult {
 	enabled: boolean;
 	effective: boolean;
 	effectiveAfterRestart: boolean;
-	/** Only on disable; false until the 3.0c smoke test measures hot reload. */
+	/**
+	 * Only on disable. Always true (owner decision, CONVERSATION.md §2.4):
+	 * the promise is "stops once the CLI restarts". 2.1.308 was measured to
+	 * hot-reload, but self-updating CLIs need not, so nothing relies on it.
+	 */
 	emissionStopsAfterRestart?: boolean;
 }
 

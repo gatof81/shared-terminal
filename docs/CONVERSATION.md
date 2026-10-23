@@ -1,7 +1,8 @@
 # Conversation & Agent Activity — contrato técnico (Fase 3)
 
-Estado: **v1.4 (3.0a, rondas 1 a 3 de revisión Work; en 3.0c, transporte por relay local §2.6, aprobado
-por el responsable el 2026-10-23), vinculante para los PRs 3.0b–3.4.** El
+Estado: **v1.5 (3.0a, rondas 1 a 3 de revisión Work; en 3.0c, transporte por relay local §2.6, aprobado
+por el responsable el 2026-10-23; decisiones de cierre de 3.0c sobre `emissionStopsAfterRestart` y el
+par `tool_failed`/`tool_end`, 2026-10-23), vinculante para los PRs 3.0b–3.4.** El
 razonamiento está en [docs/design/phase3-conversation-activity.md](./design/phase3-conversation-activity.md);
 este archivo define lo que el código debe cumplir y lo que cada PR debe demostrar. Cambiar un
 contrato exige un PR de docs antes o junto con el código.
@@ -175,7 +176,7 @@ estados y una tabla de transiciones. *MUST* implementarse exactamente así y cub
 | Habilitar (`requested=1`) | parado | se generará en `start` | NULL hasta `start` | se escribe en `start` | `{enabled:true, effective:false, effectiveAfterRestart:true}` |
 | Habilitar | corriendo **sin** token | ausente (inmutable) | NULL | **no se escribe** (hooks sin token solo generarían tráfico rechazado) | `{enabled:true, effective:false, effectiveAfterRestart:true}` |
 | Habilitar | corriendo **con** token (fue deshabilitada y rehabilitada sin reinicio) | presente | se **restaura** el hash guardado en `ingest_token_hash_suspended` | se reescribe | `{enabled:true, effective:true}`; el CLI recarga o aplica al siguiente start |
-| Deshabilitar (`requested=0`) | corriendo con token | presente (inmutable, inofensivo) | se mueve a `ingest_token_hash_suspended`, queda NULL ⇒ **la ingesta rechaza desde ya** | se borra ⇒ el CLI deja de emitir al recargar o en el siguiente start | `{enabled:false, effective:false, emissionStopsAfterRestart:<bool según recarga verificada>}` |
+| Deshabilitar (`requested=0`) | corriendo con token | presente (inmutable, inofensivo) | se mueve a `ingest_token_hash_suspended`, queda NULL ⇒ **la ingesta rechaza desde ya** | se borra ⇒ el CLI deja de emitir al recargar o en el siguiente start | `{enabled:false, effective:false, emissionStopsAfterRestart:true}` (decisión del responsable, ver abajo) |
 | Deshabilitar | parado | — | NULL | se borra | `{enabled:false, effective:false}` |
 | Emergencia `npm run conversation:disable -- <sid>\|--all` | cualquiera | — | **NULL** en D1 y `conversation_requested=0` (persistente: el siguiente `start` no regenera nada) | borrado | orden estricto §2.5: marca de revocación → D1 → archivos; confirma éxito solo al terminar los tres pasos; falla (≠ 0) si D1 no responde, dejando la marca puesta |
 | `spawn` (contenedor **creado**: sesión nueva, o `start` sin contenedor existente — §2.4.1) | — | nuevo si `requested=1` ∧ `CONVERSATION_ENABLED` | nuevo hash o NULL | escrito si `requested=1` ∧ `CONVERSATION_ENABLED`, si no borrado | — |
@@ -194,16 +195,15 @@ Invariantes:
   inmutable): queda inerte, porque el CLI deja de emitir al recargar y el backend rechaza lo que
   llegue. Desaparece cuando el contenedor se recrea (§2.4.1), que ya no inyecta el token; un
   stop + start del mismo contenedor no lo quita.
-- La recarga en caliente del CLI es *informativa*: el smoke test la mide y el campo
-  `emissionStopsAfterRestart` se fija según el resultado para la versión fijada. Hasta tener la
-  medición, se asume **false** (no recarga) y la documentación de operador lo dice.
-  **Medido en 3.0c** (CLI 2.1.308, smoke de Docker con el CLI real): al borrar `conversation.json`, una
-  sesión interactiva ya abierta **deja de emitir sin reiniciar** (0 peticiones en su turno siguiente),
-  y al reponerlo vuelve a emitir. Pendiente de decisión del responsable: el código actual
-  (`disableSession`) responde `emissionStopsAfterRestart: true`, lectura conservadora que este
-  párrafo contradecía; la medición vale para el pin, no para los CLIs autoactualizados de los
-  workspaces existentes. Propuesta de Work (revisión de 3.0c): mantener `true` como valor
-  conservador y documentar la recarga observada en 2.1.308.
+- La recarga en caliente del CLI es *informativa*, nunca una garantía. **Medido en 3.0c** (CLI
+  2.1.308, smoke de Docker con el CLI real): al borrar `conversation.json`, una sesión interactiva ya
+  abierta **deja de emitir sin reiniciar** (0 peticiones en su turno siguiente), y al reponerlo
+  vuelve a emitir. **Decisión del responsable (2026-10-23):** deshabilitar responde
+  `emissionStopsAfterRestart: true` como garantía conservadora: lo único que se promete es que la
+  emisión cesa cuando el CLI se reinicia. Nada (código, UI, documentación de operador ni pruebas de
+  aceptación) *MUST* depender de la recarga en caliente: vale para el pin 2.1.308, no para los CLIs
+  autoactualizados de los workspaces existentes, y la garantía de corte la da el backend, que
+  rechaza desde el flip (§2.5), no el CLI.
 
 #### 2.4.1 `start` reutiliza el contenedor existente (hallado en la revisión de 3.0c)
 
@@ -482,10 +482,12 @@ candidata); si no hay candidata única, se cuenta en `ingest_rejected` y en
 | `composer_send` | backend (3.2) | `clientMessageId`, `result`, `prompt_id?` | — |
 
 Nota 1 (observado en 3.0c, CLI 2.1.308): con `--dangerously-skip-permissions`, un Bash que falla
-dispara `PreToolUse → PostToolUseFailure → PostToolUse` con el mismo `tool_use_id`; hoy se
-persisten `tool_failed` **y** `tool_end`. Propuesta pendiente de decisión del responsable (Work,
-revisión de 3.0c): conservar ambos eventos y exigir en 3.1 que el fallo tenga precedencia y que las
-herramientas se cuenten por `tool_use_id`, no por evento.
+dispara `PreToolUse → PostToolUseFailure → PostToolUse` con el mismo `tool_use_id`. **Decisión del
+responsable (2026-10-23):** se persisten ambos eventos, `tool_failed` **y** `tool_end`, sin cambiar
+el normalizador ni la deduplicación (son tipos distintos, §4.6). La representación es obligación de
+3.1 (§10): un mismo `tool_use_id` se muestra como **una** herramienta, con el fallo con precedencia
+sobre el éxito en cualquier orden de llegada, y los contadores de herramientas cuentan
+`tool_use_id`s distintos, no eventos.
 
 Campos no listados *MUST NOT* persistirse (parser tolerante: se descartan y se cuentan en
 `ingest_fields_dropped`). `prompt` y `last_assistant_message` son el contenido de la conversación:
@@ -879,6 +881,9 @@ observado y decisión:
       serializado mayor, cierre 1013, y al reconectar desde el último
       `seq` recibido no hay pérdida ni duplicado; en live, `resync` sin pérdida ni duplicado;
       20k eventos < 500 ms.
+- [ ] Herramientas por `tool_use_id` (§4.2 nota 1): `tool_start` + `tool_failed` + `tool_end` del
+      mismo id se representan como una sola herramienta fallida, en cualquier orden de llegada;
+      los contadores cuentan ids distintos (test con la secuencia real de 2.1.308).
 - [ ] "Copiar informe" copia `last_assistant_message` sin alteraciones (desde el DOM o vía
       `GET …/events/:seq`); con `truncated` lo indica.
 - [ ] `gap` y `truncated` visibles; eventos `agent_id` fuera del hilo principal; estados con
