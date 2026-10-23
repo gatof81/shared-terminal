@@ -234,7 +234,11 @@ claude_p() {
 	LAST_RC=$?
 	LAST_MS=$(($(ms_now) - t0))
 }
-out_is() { [ "$(cat "$TMP/last.out")" = "$1" ]; }
+out_is() {
+	[ "$(cat "$TMP/last.out")" = "$1" ] && return 0
+	{ echo "    want: $(printf %q "$1")"; echo "    got:  $(printf %q "$(cat "$TMP/last.out")") (rc=$LAST_RC)"; sed 's/^/    stderr: /' "$TMP/last.err"; } >&2
+	return 1
+}
 HOLA_OUT=$'Hello from the mock.\nSecond line.'
 BASH_OUT=$'Tool finished.\nDone.'
 
@@ -242,7 +246,7 @@ BASH_OUT=$'Tool finished.\nDone.'
 # so the CLI gets TMUX_PANE and the container env).
 tab_start() { # tab_start <claude args…>
 	docker exec "$SESS" tmux kill-server >/dev/null 2>&1
-	docker exec "$SESS" tmux new-session -d -s tab1 -x 220 -y 50 "claude $*"
+	docker exec "$SESS" tmux new-session -d -s tab1 -x 220 -y 50 -c /home/developer/workspace "claude $*"
 	local i=0
 	until docker exec "$SESS" tmux capture-pane -p -t tab1 2>/dev/null | grep -qE "for shortcuts|bypass permissions on|for agents"; do
 		i=$((i + 1))
@@ -284,7 +288,7 @@ LAYOUT=$(docker run --rm --entrypoint bash "$IMAGE" -c '
 	stat -c "%U:%G %a" /etc/claude-code/managed-settings.d /opt/st/hooks/session-start.sh
 	ls -A /etc/claude-code/managed-settings.d | wc -l
 	touch /etc/claude-code/managed-settings.d/x.json 2>/dev/null && echo writable || echo not-writable
-	echo x >> /opt/st/hooks/session-start.sh 2>/dev/null && echo writable || echo not-writable
+	(echo x >> /opt/st/hooks/session-start.sh) 2>/dev/null && echo writable || echo not-writable
 	command claude --version')
 check "managed dir root:root 755" grep -qx "root:root 755" <<<"$(sed -n 1p <<<"$LAYOUT")"
 check "script root:root 755" grep -qx "root:root 755" <<<"$(sed -n 2p <<<"$LAYOUT")"
