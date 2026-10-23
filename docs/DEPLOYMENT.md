@@ -412,8 +412,9 @@ Rollback, fastest first:
 - **Cut ingest now**: `docker compose exec app npm run conversation:disable -- <sessionId>`
   (or `--all`). The receiver refuses from the marker on; the hooks file is
   removed, so new CLI sessions in that container stop emitting, and a
-  running one stops on its next settings reload or restart (measured in the
-  3.0c PR). The relay of a running container stays up, inert, until the
+  running one is only guaranteed to stop when it restarts (CLI 2.1.308 was
+  measured to stop on its own settings reload, but don't rely on it; the
+  receiver's refusal is the cut). The relay of a running container stays up, inert, until the
   container is re-created (a stop + start keeps it).
 - **Global off**: unset `CONVERSATION_ENABLED`, `docker compose up -d`.
   `reconcile` deletes every `conversation.json`; new starts get no token, no
