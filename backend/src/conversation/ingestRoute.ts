@@ -29,6 +29,9 @@ export interface IngestRouteOptions {
 
 type Req = IncomingMessage;
 type Res = ServerResponse;
+interface Slot {
+	release: (() => void) | null;
+}
 
 function header(req: Req, name: string): string | undefined {
 	const v = req.headers[name];
@@ -86,10 +89,31 @@ export function createIngestHandler(opts: IngestRouteOptions) {
 	const { service } = opts;
 
 	return async (req: Req, res: Res, next: () => void): Promise<void> => {
-		if (req.url !== INGEST_PATH || req.method !== "POST") {
+		if (pathname(req.url) !== INGEST_PATH || req.method !== "POST") {
 			next();
 			return;
 		}
+		// The G2 slot lives outside `handle` so the finally below returns it
+		// on every path, a rejection included.
+		const slot: Slot = { release: null };
+		// Everything below is the endpoint's own work, so nothing may escape:
+		// Express 4 does not catch a rejected async middleware, and an
+		// unhandled rejection terminates Node 22 — a single throwing
+		// `authorize` or `noteUnparseable` would take the backend down.
+		try {
+			await handle(req, res, slot);
+		} catch {
+			// Never let an unexpected failure reach the hook as an error.
+			// The body may still be unread (a failure before readBody), so
+			// discard it; after a full read this is a no-op.
+			drain(req);
+			end204(res);
+		} finally {
+			slot.release?.();
+		}
+	};
+
+	async function handle(req: Req, res: Res, slot: Slot): Promise<void> {
 		const pane = sanitizePane(header(req, "x-st-tmux-pane"));
 		const auth = await service.authorize({
 			authorization: header(req, "authorization"),
@@ -113,45 +137,50 @@ export function createIngestHandler(opts: IngestRouteOptions) {
 			await service.noteUnparseable(stSessionId, pane, "too_large");
 			return;
 		}
-		let release: (() => void) | null = null;
 		if (service.largeBodies.isLarge(declared)) {
-			release = service.largeBodies.acquire();
-			if (!release) {
+			slot.release = service.largeBodies.acquire();
+			if (!slot.release) {
 				drain(req);
 				end204(res);
 				service.noteBackpressure(stSessionId, pane, "ingest");
 				return;
 			}
 		}
-		try {
-			const rate = service.takeRate(stSessionId, declared);
-			if (!("ok" in rate)) {
-				drain(req);
-				end204(res);
-				return;
-			}
-			const body = await readBody(req, max);
-			// The hook is answered here: nothing below is on its clock.
+		const rate = service.takeRate(stSessionId, declared);
+		if (!("ok" in rate)) {
+			drain(req);
 			end204(res);
-			if (body === null) {
-				await service.noteUnparseable(stSessionId, pane, "too_large");
-				return;
-			}
-			let parsed: unknown;
-			try {
-				parsed = JSON.parse(body.toString("utf8"));
-			} catch {
-				await service.noteUnparseable(stSessionId, pane, "invalid_json");
-				return;
-			}
-			await service.ingest(stSessionId, pane, parsed);
-		} catch {
-			// Never let an unexpected failure reach the hook as an error.
-			end204(res);
-		} finally {
-			release?.();
+			return;
 		}
-	};
+		const body = await readBody(req, max);
+		// The hook is answered here: nothing below is on its clock.
+		end204(res);
+		if (body === null) {
+			await service.noteUnparseable(stSessionId, pane, "too_large");
+			return;
+		}
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(body.toString("utf8"));
+		} catch {
+			await service.noteUnparseable(stSessionId, pane, "invalid_json");
+			return;
+		}
+		await service.ingest(stSessionId, pane, parsed);
+	}
+}
+
+/**
+ * The request target without its query string. `req.url` carries the
+ * query, and comparing it raw would let `INGEST_PATH?x=1` fall through to
+ * `express.json` and a 404 — skipping the L5 reader, the rate buckets and
+ * the always-204 rule. The comparison against INGEST_PATH stays exact, so
+ * a different path is never accepted by prefix.
+ */
+function pathname(url: string | undefined): string {
+	if (!url) return "";
+	const q = url.indexOf("?");
+	return q === -1 ? url : url.slice(0, q);
 }
 
 /** `^%\d{1,6}$` or nothing (§3.2). */
