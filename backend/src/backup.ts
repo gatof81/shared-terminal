@@ -53,6 +53,10 @@ const TABLES: ReadonlyArray<{ name: string; orderBy: string }> = [
 	{ name: "user_group_members", orderBy: "group_id, user_id" },
 	{ name: "sessions", orderBy: "session_id" },
 	{ name: "session_configs", orderBy: "session_id" },
+	// Phase 3 — FK → sessions. The events files ride the per-session
+	// workspace tarball (`.conversations/<sid>` is added below);
+	// `.claude-managed/` is NOT backed up: reconcile regenerates it.
+	{ name: "claude_conversations", orderBy: "session_id" },
 	{ name: "sessions_port_mappings", orderBy: "session_id, container_port" },
 	{ name: "templates", orderBy: "id" },
 	{ name: "invite_codes", orderBy: "code_hash" },
@@ -108,7 +112,12 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 	);
 	for (const { session_id } of sessionRows.results) {
 		const members: string[] = [];
-		for (const rel of [session_id, path.join(".uploads", session_id)]) {
+		for (const rel of [
+			session_id,
+			path.join(".uploads", session_id),
+			// Phase 3 — the conversation event log (docs/CONVERSATION.md §9).
+			path.join(".conversations", session_id),
+		]) {
 			try {
 				await fs.access(path.join(WORKSPACE_ROOT, rel));
 				members.push(rel);
@@ -294,7 +303,9 @@ export async function runRestore(inDir: string, opts: { force?: boolean } = {}):
 				(e === sid ||
 					e.startsWith(`${sid}/`) ||
 					e.startsWith(`.uploads/${sid}/`) ||
-					e === `.uploads/${sid}`) &&
+					e === `.uploads/${sid}` ||
+					e.startsWith(`.conversations/${sid}/`) ||
+					e === `.conversations/${sid}`) &&
 				!e.includes(".."),
 		);
 		if (!ok) {

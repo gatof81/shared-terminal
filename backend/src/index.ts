@@ -21,6 +21,9 @@ import {
 } from "./auth.js";
 import { BellSweeper } from "./bellSweeper.js";
 import { BootstrapBroadcaster, drainInFlightBootstraps } from "./bootstrap.js";
+import { createIngestHandler } from "./conversation/ingestRoute.js";
+import { ConversationService } from "./conversation/service.js";
+import { ConversationStore } from "./conversation/store.js";
 import { migrateDb, validateD1Config } from "./db.js";
 import { DockerManager } from "./dockerManager.js";
 import { IdleSweeper, listRunningSessionIds } from "./idleSweeper.js";
@@ -91,6 +94,38 @@ try {
 
 const sessions = new SessionManager();
 const docker = new DockerManager(sessions);
+
+// Phase 3 (docs/CONVERSATION.md) — conversation capture. Constructed
+// unconditionally so the ingest endpoint always exists and answers 204
+// (a hook pointed at a backend without the receiver would otherwise
+// see a 404 and retry noise); with CONVERSATION_ENABLED unset/false the
+// service rejects everything as `disabled`, writes no file, injects no
+// token and mounts no bind — behaviour-neutral by construction.
+const CONVERSATION_ENABLED = process.env.CONVERSATION_ENABLED === "true";
+const WORKSPACE_ROOT_FOR_CONVERSATION =
+	process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
+const conversationStore = new ConversationStore({ workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION });
+const conversation = new ConversationService({
+	workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION,
+	enabled: CONVERSATION_ENABLED,
+	port: PORT,
+	store: conversationStore,
+	execCapture: (sid, cmd, opts) => docker.execCapture(sid, cmd, opts),
+});
+docker.setConversationHooks({
+	prepareSpawn: async (sid) => {
+		const { prepareSpawnCapture } = await import("./conversation/activation.js");
+		const r = await prepareSpawnCapture(conversation.activationDeps, sid);
+		return { env: r.env, binds: r.binds };
+	},
+	onSessionDown: (sid) => conversation.onSessionDown(sid),
+	onSessionPurged: (sid) => conversation.onSessionPurged(sid),
+});
+logger.info(
+	CONVERSATION_ENABLED
+		? "[server] conversation capture ENABLED (per-session opt-in)"
+		: "[server] conversation capture disabled (CONVERSATION_ENABLED unset)",
+);
 // Single shared bootstrap broadcaster (PR 185b2b). Owned at the server
 // scope so the route's runAsyncBootstrap and the WS handler's
 // /ws/bootstrap subscriber see the same per-session listener sets and
@@ -235,6 +270,10 @@ app.use(dispatcherLimiter);
 // `Cookie` header itself for auth gating on `public: false` ports —
 // see `extractAuthToken` in portDispatcher.ts.
 app.use((req, res, next) => portDispatcher.middleware(req, res, next));
+// Phase 3 — hook ingest BEFORE express.json/cookieParser/CORS: it has its
+// own L5-capped body reader, no cookies and no browser caller. It only
+// claims `POST /ingest/claude/hook`; everything else falls through.
+app.use(createIngestHandler({ service: conversation }));
 app.use(express.json());
 // Populates `req.cookies` from the Cookie header. requireAuth reads the
 // JWT from `req.cookies.st_token` (#18). No `secret` is passed because we
@@ -292,7 +331,10 @@ app.use((_req, res, next) => {
 // (not optional) on buildRouter so a future caller that omits it
 // surfaces as a TypeScript error rather than a silently-dropped
 // postCreate hook (PR #208 round 1 review).
-app.use("/api", buildRouter(sessions, docker, bootstrapBroadcaster, undefined, idleSweeper));
+app.use(
+	"/api",
+	buildRouter(sessions, docker, bootstrapBroadcaster, undefined, idleSweeper, conversation),
+);
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // ── HTTP + WebSocket server ───────────────────────────────────────────────────
@@ -427,6 +469,15 @@ async function start() {
 	// subscribe/send, and before the server accepts requests.
 	configureWebPush();
 	await docker.reconcile();
+	// Phase 3 — after docker.reconcile so session statuses are settled:
+	// hooks files ⇔ requested ∧ token, revocation markers win over D1,
+	// `gap backend_restart` per live conversation, one probe per session.
+	// Flag off: only removes stale hooks files. Never fatal.
+	try {
+		await conversation.reconcile();
+	} catch (err) {
+		logger.warn(`[server] conversation reconcile failed: ${(err as Error).message}`);
+	}
 	// Wait for the timing-parity dummy bcrypt hash to finish computing
 	// before accepting requests. Without this, the first unknown-user
 	// login would block on the ~2^BCRYPT_ROUNDS-ms hash computation,
@@ -528,6 +579,12 @@ function shutdown() {
 	// below. (SIGKILL still strands — no drain can run; documented on
 	// drainInFlightBootstraps.)
 	const bootstrapsDrained = drainInFlightBootstraps();
+	// Phase 3 — flush queued conversation events and index snapshots so
+	// a deploy restart loses nothing that was already acknowledged with
+	// a 204. Bounded by the same watchdog below.
+	const conversationDrained = conversation.shutdown().catch((err) => {
+		logger.warn(`[server] conversation shutdown failed: ${(err as Error).message}`);
+	});
 
 	// Watchdog: if a client stalls its close handshake, the bootstrap
 	// drain wedges on Docker/D1, or some other handle keeps the event
@@ -545,7 +602,7 @@ function shutdown() {
 		// under the drain's in-flight D1 writes. `finally` (not `then`):
 		// drainInFlightBootstraps never rejects today (Promise.allSettled
 		// inside), but the exit must not hinge on that staying true.
-		void bootstrapsDrained.finally(() => {
+		void Promise.allSettled([bootstrapsDrained, conversationDrained]).finally(() => {
 			clearTimeout(watchdog);
 			process.exit(0);
 		});

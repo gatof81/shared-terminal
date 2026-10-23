@@ -265,7 +265,7 @@ Qué se persiste por defecto:
 | Dato | Se guarda | Detalle |
 | --- | --- | --- |
 | Prompt del usuario (`UserPromptSubmit.prompt`) | sí, completo hasta el límite L1 | es contenido del usuario hacia el agente. |
-| Texto del asistente (`MessageDisplay.delta`) | sí, acumulado por `message_id` hasta L2 | lo que el usuario vio en pantalla. |
+| Texto del asistente (`MessageDisplay.delta`) | sí, acumulado por `message_id` hasta L2 (mensajes activos y últimos 4.096 sellados; ver CONVERSATION.md §4.4.1) | lo que el usuario vio en pantalla. |
 | Informe final (`Stop`/`SubagentStop.last_assistant_message`) | sí, completo hasta L3 | requisito de copia; truncado solo visible. |
 | Herramienta: `tool_name`, `tool_use_id`, duración, ok/fallo, `agent_id` | sí | operativo. |
 | Herramienta: `tool_input` | **solo identificadores estructurales** (L4) | `Bash` → nombres de los programas del pipeline y tamaño del comando (nunca el comando: `curl -H 'Authorization: Bearer X' …` se persiste como `programs: ["curl"]`); `Edit`/`Write`/`Read` → `file_path`; `Grep`/`Glob` → `path` y tamaño del patrón; `Agent` → `subagent_type` + `description`; `WebFetch` → host; `WebSearch` → tamaño; MCP/otras → solo nombres de claves. Tabla y ejemplos obligatorios en CONVERSATION.md §4.3.1. Una denylist de claves no protege valores libres, por eso no hay valores libres. |
@@ -763,3 +763,7 @@ cifrado de eventos en reposo, Channels como canal de notificaciones, lectura adm
   `permissions` ("What runs before you trust a folder"), `env-vars`, `sub-agents`, `agent-teams`,
   `sessions`, CHANGELOG (último 2.1.308).
 - Estado local: `~/.claude/sessions/<pid>.json`, `~/.claude/projects/<slug>/…`, `tmux list-clients`.
+
+**2026-10-22 — decisión del responsable sobre L2:** se acepta la ventana acotada de 4.096 ids
+sellados por conversación. L2 rige para mensajes activos y para esa ventana; un id expulsado que
+reaparezca puede iniciar otro presupuesto. Sin persistencia auxiliar. (CONVERSATION.md §4.4.1)

@@ -316,7 +316,7 @@ Función pura con tests de tabla:
 
 | Herramienta | `summary` persistido | Lo que **no** se persiste |
 | --- | --- | --- |
-| `Bash` | `programs`: nombre base del primer token de cada segmento separado por `\|`, `&&`, `\|\|`, `;` (máx. 8, cada uno ≤ 32 bytes, solo `[A-Za-z0-9._-]`), saltando asignaciones `VAR=…`, `sudo`, `env`, `nohup`, `time`; `command_bytes`; `run_in_background?` | `command` completo, `description`, cualquier argumento, URL, cabecera, variable |
+| `Bash` | `programs`: nombre base del **primer** token de cada segmento separado por `\|`, `&&`, `\|\|`, `;` (máx. 8, cada uno ≤ 32 bytes, solo `[A-Za-z0-9._-]`), saltando asignaciones simples `VAR=…`; un segmento que empieza por `sudo`, `env`, `nohup`, `time`, `exec`, `export`… o por una bandera se **omite** (no se adivina dónde empieza el programa). **Si el comando contiene comillas, backslash, `$`, `(`, `)`, `{`, `}`, `<` o `>`, la sintaxis es ambigua y `programs` se omite por completo (`programs_omitted: true`)** — nunca se tokeniza shell. `command_bytes`; `run_in_background?` | `command` completo, `description`, cualquier argumento, URL, cabecera, variable |
 | `Read`, `Edit`, `Write`, `MultiEdit`, `NotebookEdit` | `file_path` (≤ 512 bytes), `offset`/`limit` en Read | contenido, `old_string`/`new_string` |
 | `Grep`, `Glob` | `path` (≤ 512) y `pattern_bytes` | `pattern` (puede ser un valor buscado) |
 | `Agent` | `subagent_type`, `description` (≤ 128; es un rótulo de 3-5 palabras por contrato del tool) | `prompt` |
@@ -329,10 +329,12 @@ Ejemplos que *MUST* estar en el test (entrada → `summary`):
 
 | `tool_input` | `summary` |
 | --- | --- |
-| `{"command":"curl -H 'Authorization: Bearer SECRETO' https://example.test"}` | `{"programs":["curl"],"command_bytes":61}` |
+| `{"command":"curl -H 'Authorization: Bearer SECRETO' https://example.test"}` | `{"command_bytes":61,"programs_omitted":true}` (comillas ⇒ ambiguo) |
+| `{"command":"curl https://example.test"}` | `{"programs":["curl"],"command_bytes":25}` |
 | `{"command":"AWS_SECRET_ACCESS_KEY=abc aws s3 ls \| head"}` | `{"programs":["aws","head"],"command_bytes":45}` |
 | `{"command":"git clone https://user:tok3n@github.com/x/y.git && cd y"}` | `{"programs":["git","cd"],"command_bytes":57}` |
-| `{"command":"echo $TOKEN \| base64 -d > /tmp/k"}` | `{"programs":["echo","base64"],"command_bytes":35}` |
+| `{"command":"echo $TOKEN \| base64 -d > /tmp/k"}` | `{"command_bytes":33,"programs_omitted":true}` (`$`/`>` ⇒ ambiguo) |
+| `{"command":"curl -d \"user\|password123\" https://x"}` | `{"command_bytes":37,"programs_omitted":true}` (un separador dentro de comillas nunca produce un "programa") |
 | `{"url":"https://api.example.test/v1/users?api_key=XYZ","prompt":"…"}` | `{"host":"api.example.test"}` |
 | `{"pattern":"sk-live-[0-9a-z]+","path":"src"}` | `{"path":"src","pattern_bytes":17}` |
 | `{"server":"x","headers":{"Authorization":"Bearer Y"},"body":"…"}` (MCP) | `{"keys":["server","headers","body"]}` |
@@ -363,7 +365,7 @@ Por eso **L5 ≥ 6 × L3 + 1 MiB de envoltura**.
 | Id | Qué | Valor | Al exceder |
 | --- | --- | --- | --- |
 | **L1** | `user_prompt.prompt` (contenido) | 64 KiB | truncar + `truncated: true, original_bytes` |
-| **L2** | texto acumulado de un `message_id` (contenido) | 1 MiB | descartar deltas siguientes + `truncated: true` en el último persistido |
+| **L2** | texto acumulado de un `message_id` (contenido), con la ventana de §4.4.1 | 1 MiB | el delta que cruza se corta (UTF-8) con `truncated: true, original_bytes`; los siguientes se descartan, salvo un `final`, que se persiste vacío con el flag |
 | **L3** | `last_assistant_message` (`turn_end`, `agent_end`) (contenido) | **1 MiB** | truncar + `truncated: true, original_bytes`; la UI lo dice en "Copiar informe" |
 | **L4** | strings auxiliares (`summary`, `error`, `message`, `task_subject`, …) (contenido) | 2 KiB | truncar con marcador `…[+N chars]` |
 | **L5** | cuerpo HTTP de ingesta (bytes del cuerpo) | **8 MiB** | 204 + `gap malformed{reason: too_large}` según §3.3 |
@@ -383,6 +385,15 @@ mixto, la serialización `JSON.stringify` del input completo del hook `Stop` (co
 de 50 entradas y `transcript_path` de 512 bytes) **es ≤ L5** y **≤ capacidad de R2**. Un informe que
 supere L3 en contenido se trunca de forma visible; un cuerpo que supere L5 se trata según §3.3.
 **Ningún truncado es silencioso.**
+
+#### 4.4.1 Alcance de L2: mensajes activos y ventana de sellados
+
+L2 **no es una garantía histórica absoluta por `message_id`**. Se mantiene, por conversación:
+
+- para todo mensaje **activo** (sin `final` recibido), hasta `MESSAGE_OPEN_MAX` = 256 a la vez; si se supera, el activo más antiguo se **sella** (no se olvida);
+- para los **últimos 4.096 ids sellados** (`MESSAGE_SEALED_MAX`): un id sellado por `final` o por el cupo de activos descarta cualquier delta posterior.
+
+La ventana de sellados es FIFO y vive en el índice (snapshot + reconstrucción desde el archivo con las mismas reglas que en vivo). **Cuando un id sale de la ventana, una reaparición posterior de ese id inicia un presupuesto L2 nuevo.** Es una cota deliberada de memoria (≈150 KiB por conversación), aceptada por el responsable el 2026-10-22; no hay persistencia auxiliar. En la práctica el CLI no reutiliza `message_id`, así que el caso solo aparece con ids repetidos de forma anómala.
 
 ### 4.5 `gap`: representación de pérdidas
 
@@ -626,6 +637,7 @@ observado y decisión:
       incluidos los siete ejemplos) y §4.3.3; `gap` de §4.5; `seq` monótono bajo concurrencia; 204
       antes de persistir (fallo de disco simulado ⇒ 204 + `gap backpressure`).
 - [ ] Deduplicación: los siete casos de §4.6.
+- [ ] L2 (§4.4.1): presupuesto acumulado por mensaje activo, cupo de 256 activos, ventana de 4.096 sellados, y reapertura de presupuesto solo tras expulsar un id de la ventana; todo equivalente tras reinicio.
 - [ ] Serialización: la garantía de §4.4 (cinco repertorios × L3) con `JSON.stringify` del input
       completo de `Stop` ≤ L5 y ≤ capacidad R2.
 - [ ] Máquina de estados: tabla §5.3 completa; prioridad hook/probe por `status_at`.
