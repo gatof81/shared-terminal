@@ -131,6 +131,9 @@ function run(
 			stderr += c;
 		});
 		child.on("close", (code) => resolve({ code, stdout, stderr, ms: performance.now() - t0 }));
+		// The script may exit before reading its input (no token ⇒ exit 0 at
+		// once): the write then fails with EPIPE, which is the expected outcome.
+		child.stdin.on("error", () => undefined);
 		child.stdin.end(stdin);
 	});
 }
