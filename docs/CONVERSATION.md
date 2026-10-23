@@ -195,6 +195,12 @@ Invariantes:
 - La recarga en caliente del CLI es *informativa*: el smoke test la mide y el campo
   `emissionStopsAfterRestart` se fija según el resultado para la versión fijada. Hasta tener la
   medición, se asume **false** (no recarga) y la documentación de operador lo dice.
+  **Medido en 3.0c** (CLI 2.1.308, smoke de Docker con el CLI real): al borrar `conversation.json`, una
+  sesión interactiva ya abierta **deja de emitir sin reiniciar** (0 peticiones en su turno siguiente),
+  y al reponerlo vuelve a emitir. Pendiente de decisión del responsable: el código actual
+  (`disableSession`) responde `emissionStopsAfterRestart: true`, lectura conservadora que este
+  párrafo contradecía; la medición vale para el pin, no para los CLIs autoactualizados de los
+  workspaces existentes.
 
 ### 2.5 Revocación entre procesos (comando de emergencia)
 
