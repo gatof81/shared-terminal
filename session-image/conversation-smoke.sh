@@ -735,7 +735,49 @@ check "queue stayed within 1024 events (max $(relay_stat queue_max))" [ "$(relay
 check "losses counted end to end: delivered $GOT + reported $REPORTED (+ unattributed $UNATTRIBUTED) = sent $SENT" [ $((GOT + REPORTED + UNATTRIBUTED)) = "$SENT" ]
 check "every loss attributed to its conversation" [ "$UNATTRIBUTED" = 0 ]
 check "relay peak memory ≤ 48 MiB with a full queue (VmHWM $HWM kB)" [ "$HWM" -le $((48 * 1024)) ]
-note "saturation: 4000 events in $FLOOD_MS ms against a backend taking 5 ms each, then 40 × 1 MiB ($CODES_BIG) ⇒ delivered $GOT, dropped $(relay_stat dropped) (queue_full $(relay_stat dropped_queue_full)), all reported; relay CPU $((cpu1 - cpu0)) ms; VmHWM $HWM kB (16 MiB queue bound + interpreter)"
+note "saturation: 4000 events in $FLOOD_MS ms against a backend taking 5 ms each, then 40 × 1 MiB ($CODES_BIG) ⇒ delivered $GOT, dropped $(relay_stat dropped) (queue_full $(relay_stat dropped_queue_full)), all reported; relay CPU $((cpu1 - cpu0)) ms; peak VmHWM $HWM kB in this scenario"
+
+# L5-sized bodies (8 MiB each, 12 clients at once) in a fresh relay, so the
+# peak is this scenario's alone. Design bound for bodies: 16 MiB queued or
+# being read (one copy each) + the one in flight upstream (≤ L5). Measured
+# against the interpreter's own baseline; not a universal ceiling.
+receiver slow:300 sat-l5
+session yes file "${RELAY_DEBUG[@]}" || exit 1
+RELAY_PID=$(relay_pids | head -n 1)
+BASE_RSS=$(relay_proc "$RELAY_PID" VmRSS)
+L5_FLOOD='
+import http.client, sys, threading
+sid, n = sys.argv[1], int(sys.argv[2])
+L5 = 8 * 1024 * 1024
+prefix = ("{\"session_id\":\"%s\",\"hook_event_name\":\"Stop\",\"x\":\"" % sid).encode()
+body = prefix + b"y" * (L5 - len(prefix) - 2) + b"\"}"
+codes = []
+def one():
+    c = http.client.HTTPConnection("127.0.0.1", 47613, timeout=30)
+    try:
+        c.request("POST", "/ingest/claude/hook", body=body, headers={"Content-Type": "application/json"})
+        r = c.getresponse(); r.read(); codes.append(r.status)
+    except Exception as e:
+        codes.append(type(e).__name__)
+ts = [threading.Thread(target=one) for _ in range(n)]
+[t.start() for t in ts]; [t.join() for t in ts]
+print(",".join(sorted(set(map(str, codes)))))
+'
+LSID=22222222-2222-4222-8222-222222222222
+L5_CODES=$(docker exec "$SESS" python3 -IS -c "$L5_FLOOD" "$LSID" 12)
+i=0
+until [ $(($(relay_stat forwarded) + $(relay_stat dropped))) -ge 12 ]; do
+	i=$((i + 1))
+	[ "$i" -gt 150 ] && { fail "relay never settled the L5 flood"; break; }
+	sleep 0.2
+done
+L5_HWM=$(relay_proc "$RELAY_PID" VmHWM)
+L5_PEAK=$((L5_HWM - BASE_RSS))
+check "L5 flood: every request answered 204 ($L5_CODES)" [ "$L5_CODES" = 204 ]
+check "L5 flood: received = forwarded + dropped ($(relay_stat forwarded) + $(relay_stat dropped))" \
+	[ $(($(relay_stat forwarded) + $(relay_stat dropped))) = "$(relay_stat received)" ]
+check "L5 flood: peak above baseline $((L5_PEAK / 1024)) MiB ≤ 16 + 8 MiB of bodies + 8 MiB slack" [ "$L5_PEAK" -le $((32 * 1024)) ]
+note "L5 stress: 12 × 8 MiB at once against a backend taking 300 ms ⇒ forwarded $(relay_stat forwarded), dropped $(relay_stat dropped) (queue_full $(relay_stat dropped_queue_full)); relay RSS before $BASE_RSS kB, peak VmHWM $L5_HWM kB (+$((L5_PEAK / 1024)) MiB) — measured for this scenario, not a universal ceiling"
 
 # ── Phase 8 ─────────────────────────────────────────────────────────────────
 phase "Phase 8: HTTP_PROXY / NO_PROXY"

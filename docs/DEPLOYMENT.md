@@ -326,9 +326,13 @@ Host-side directories (both outside the workspace bind mount, next to
   `reconcile` regenerates it from D1.
 
 Requested vs effective (CONVERSATION.md §2.4): a container's env is
-immutable, so enabling a session that is already running takes effect at
-its next `POST /start` (a new `ST_INGEST_TOKEN` is generated every start;
-rotating a token = stop + start). `GET /api/sessions/:id/conversations`
+immutable, so capture (token, mount, relay) is decided when the container
+is **created**. `POST /start` and a stop + start **reuse** a container
+that still exists — same image, env and mounts (§2.4.1) — so they do not
+apply a newly requested capture, a new image or a token rotation; only a
+re-created container does (see [Recreating a session
+container](#recreating-a-session-container)). Making enable effective is
+an entry requirement of 3.0d. `GET /api/sessions/:id/conversations`
 reports `capture.{requested,effective,effectiveAfterRestart}` so nobody
 is promised capture that is not happening.
 
@@ -381,9 +385,10 @@ from step 4 on, for sessions explicitly requested.
    file is written anywhere, so the order against step 2 doesn't matter yet.
 2. **Session image**: tag the current one first so the rollback is a
    re-tag (`docker tag shared-terminal-session shared-terminal-session:pre-3.0c`),
-   then `docker build -t shared-terminal-session ./session-image`. Running
-   containers keep their image until their next `POST /start`. On a
-   started session: `ls -A /etc/claude-code/managed-settings.d` is empty,
+   then `docker build -t shared-terminal-session ./session-image`. Existing
+   containers keep their image — including across stop + start — until they
+   are re-created ([below](#recreating-a-session-container)); new sessions
+   get the new image. On a new or re-created session: `ls -A /etc/claude-code/managed-settings.d` is empty,
    no relay listens
    (`bash -c '(exec 3<>/dev/tcp/127.0.0.1/47613)'` fails) and `claude -p hola`
    behaves as before. The CLI pin seeds **fresh** workspaces only; an
@@ -393,10 +398,11 @@ from step 4 on, for sessions explicitly requested.
 3. **Flag on**, still no session requested: `CONVERSATION_ENABLED=true` in
    `.env`, `docker compose up -d`. Boot `reconcile` writes nothing (no row
    requested); every ingest stays `disabled`.
-4. **Pilot**: request capture for one session that runs the 3.0c image
-   (3.0d endpoint/allowlist), then stop + start it — the token, the mount and
-   therefore the relay only exist from that start (§2.4
-   "effectiveAfterRestart"). Verify inside it that the relay listens
+4. **Pilot**: request capture for one session (3.0d endpoint/allowlist),
+   then **re-create** its container ([below](#recreating-a-session-container)) —
+   a stop + start would reuse the old container, without token, mount or
+   relay, and possibly on the old image. The token, the mount and the relay
+   exist only in the re-created container. Verify inside it that the relay listens
    (`bash -c '(exec 3<>/dev/tcp/127.0.0.1/47613)' && echo up`), then events under
    `<WORKSPACE_ROOT>/.conversations/<sessionId>/` and `capture.effective: true`
    in `GET /api/sessions/:id/conversations`.
@@ -407,16 +413,20 @@ Rollback, fastest first:
   (or `--all`). The receiver refuses from the marker on; the hooks file is
   removed, so new CLI sessions in that container stop emitting, and a
   running one stops on its next settings reload or restart (measured in the
-  3.0c PR). The relay of a running container stays up, inert, until its
-  next start.
+  3.0c PR). The relay of a running container stays up, inert, until the
+  container is re-created (a stop + start keeps it).
 - **Global off**: unset `CONVERSATION_ENABLED`, `docker compose up -d`.
   `reconcile` deletes every `conversation.json`; new starts get no token, no
-  mount and no relay. Running containers keep an inert token (and relay)
-  until restarted.
+  mount and no relay. Existing containers keep an inert token (and relay)
+  until they are re-created.
 - **Image**: disable capture first (either bullet above), **then**
-  `docker tag shared-terminal-session:pre-3.0c shared-terminal-session`;
-  takes effect per session at its next start. An older image under an
-  active hooks file has no relay, so every hook fails visibly.
+  `docker tag shared-terminal-session:pre-3.0c shared-terminal-session`.
+  That changes what **new** containers get: new sessions, and sessions you
+  re-create ([below](#recreating-a-session-container)). Existing containers —
+  including those stopped and started again — keep the image they were
+  created from; re-create each one that must go back. An older image under
+  an active hooks file has no relay, so every hook would fail visibly:
+  never re-create onto `pre-3.0c` while capture is on for that session.
 - **Backend**: rolling the backend back to 3.0b while capture is on would
   write hooks files aimed straight at `st-backend`, which the CLI refuses;
   turn the flag off first.
@@ -424,6 +434,43 @@ Rollback, fastest first:
 
 Captured data stays under `.conversations/` until a hard delete (or manual
 removal) — rollback never deletes it.
+
+### Recreating a session container
+
+Needed whenever a session must pick up something fixed at container
+creation: a new or rolled-back image, capture enabled or disabled at the
+container level, a fresh ingest token. **Never use a hard delete** — it
+purges the workspace and the session row. This uses only existing
+behaviour: `POST /start` re-creates the container when the one on record
+no longer exists in Docker (the "stale container id" path of
+`startContainer`).
+
+1. **Stop** the session: `POST /api/sessions/<sessionId>/stop` (owner), or
+   `POST /api/admin/sessions/<sessionId>/stop` (admin). The container
+   stays; the workspace, uploads and `session_configs` are untouched.
+2. **Remove only the container**, on the host:
+   `docker rm st-<first 12 chars of sessionId>` (the name is `containerName`
+   in `GET /api/sessions/<sessionId>`). No `-v` needed (sessions have no
+   volumes; the workspace is a host bind mount).
+3. **Start** it: `POST /api/sessions/<sessionId>/start` (owner or admin).
+   The backend finds no container behind the stored id and spawns a new
+   one from the current image, with the session's stored config, env and
+   ports, and — if capture is requested and `CONVERSATION_ENABLED` — a new
+   token, the managed mount and therefore the relay. `postStart` runs;
+   `postCreate` does not (it is single-use).
+4. **Verify**: `docker inspect st-… --format '{{.Image}}'` is the new image
+   id, and, with capture, `GET /api/sessions/<sessionId>/conversations`
+   reports `capture.effective: true`.
+
+Kept: everything under the workspace (repo, `~/.claude` and the CLI's
+`~/.npm-global` through their workspace symlinks, `~/.ssh`, gh/VS Code
+state), uploads, the D1 row and config, conversation history. Lost: what
+lived only in the container layer (packages installed with `apt`/outside
+the workspace, `/tmp`, running processes and tmux tabs) — the same as any
+re-created container. A soft delete (`DELETE /api/sessions/:id` without
+`?hard=true`) followed by `POST /start` also re-creates the container while
+keeping the workspace, but passes through `terminated`; prefer the steps
+above.
 
 ## Backup & restore (#240)
 

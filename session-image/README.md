@@ -48,7 +48,8 @@ own it does nothing.
   never handles the token, and nothing the backend answers ever reaches the
   CLI, so a hook never decides anything: permission prompts still reach the
   user, and tool calls and turns run as they would without hooks.
-- **Bounded.** ≤ 16 inbound connections, a FIFO of ≤ 1024 events and 16 MiB,
+- **Bounded.** ≤ 16 inbound connections, a FIFO of ≤ 1024 events and 16 MiB
+  (queued + being read, one copy each) plus the one body in flight upstream,
   2 s socket timeouts, one upstream connection, a 1 s pause after an upstream
   failure. What it cannot deliver it counts and reports on the next delivered
   event of the same conversation (`X-ST-Relay-*` ⇒ `gap relay_dropped` /

@@ -197,3 +197,61 @@ describe("buildContainerEnv infra entries", () => {
 		expect(env.filter((e) => e.startsWith("ST_INGEST_TOKEN=")).length).toBe(1);
 	});
 });
+
+// docs/CONVERSATION.md §2.4 note (3.0c review R1): `startContainer` reuses a
+// container that still exists — same image, env and mounts. Only a missing
+// container (never had one, removed by kill/soft delete, or removed
+// out-of-band) is re-created through prepareSpawn. Enabling capture for a
+// session whose container exists therefore takes effect only once that
+// container is re-created; 3.0d must resolve that (entry requirement).
+describe("startContainer and capture (§2.4, 3.0c R1)", () => {
+	function withExisting(state: "stopped" | "gone") {
+		const { dm, captured } = makeDm();
+		const existing = {
+			id: "cid-1",
+			start: vi.fn(async () => undefined),
+			inspect: vi.fn(async () => {
+				if (state === "gone") throw new Error("No such container: cid-1");
+				return { State: { Running: false }, HostConfig: {} };
+			}),
+		};
+		const docker = (
+			dm as unknown as {
+				docker: { getContainer: unknown; createContainer: ReturnType<typeof vi.fn> };
+			}
+		).docker;
+		docker.getContainer = vi.fn(() => existing);
+		const hooks: ConversationLifecycleHooks = {
+			prepareSpawn: vi.fn(async () => ({
+				env: ["ST_INGEST_TOKEN=fresh", "ST_BACKEND_PORT=3001"],
+				binds: [
+					"/var/shared-terminal/workspaces/.claude-managed/sess-1:/etc/claude-code/managed-settings.d:ro",
+				],
+			})),
+			onSessionDown: vi.fn(async () => undefined),
+			onSessionPurged: vi.fn(async () => undefined),
+		};
+		dm.setConversationHooks(hooks);
+		return { dm, captured, existing, hooks, createContainer: docker.createContainer };
+	}
+
+	it("existing stopped container: plain start — no prepareSpawn, no new env, mounts or image", async () => {
+		const { dm, existing, hooks, createContainer } = withExisting("stopped");
+		await dm.startContainer("sess-1");
+		expect(existing.start).toHaveBeenCalledTimes(1);
+		expect(hooks.prepareSpawn).not.toHaveBeenCalled();
+		expect(createContainer).not.toHaveBeenCalled();
+	});
+
+	it("container removed (stale id): re-created with a fresh token and the managed mount", async () => {
+		const { dm, captured, existing, hooks, createContainer } = withExisting("gone");
+		await dm.startContainer("sess-1");
+		expect(existing.start).not.toHaveBeenCalled();
+		expect(hooks.prepareSpawn).toHaveBeenCalledWith("sess-1");
+		expect(createContainer).toHaveBeenCalledTimes(1);
+		expect(captured.opts.Env as string[]).toContain("ST_INGEST_TOKEN=fresh");
+		expect((captured.opts.HostConfig as { Binds: string[] }).Binds).toContain(
+			"/var/shared-terminal/workspaces/.claude-managed/sess-1:/etc/claude-code/managed-settings.d:ro",
+		);
+	});
+});

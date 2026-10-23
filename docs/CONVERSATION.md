@@ -178,7 +178,8 @@ estados y una tabla de transiciones. *MUST* implementarse exactamente así y cub
 | Deshabilitar (`requested=0`) | corriendo con token | presente (inmutable, inofensivo) | se mueve a `ingest_token_hash_suspended`, queda NULL ⇒ **la ingesta rechaza desde ya** | se borra ⇒ el CLI deja de emitir al recargar o en el siguiente start | `{enabled:false, effective:false, emissionStopsAfterRestart:<bool según recarga verificada>}` |
 | Deshabilitar | parado | — | NULL | se borra | `{enabled:false, effective:false}` |
 | Emergencia `npm run conversation:disable -- <sid>\|--all` | cualquiera | — | **NULL** en D1 y `conversation_requested=0` (persistente: el siguiente `start` no regenera nada) | borrado | orden estricto §2.5: marca de revocación → D1 → archivos; confirma éxito solo al terminar los tres pasos; falla (≠ 0) si D1 no responde, dejando la marca puesta |
-| `start` / `spawn` | — | nuevo si `requested=1` ∧ `CONVERSATION_ENABLED` | nuevo hash o NULL | escrito si `requested=1` ∧ `CONVERSATION_ENABLED`, si no borrado | — |
+| `spawn` (contenedor **creado**: sesión nueva, o `start` sin contenedor existente — §2.4.1) | — | nuevo si `requested=1` ∧ `CONVERSATION_ENABLED` | nuevo hash o NULL | escrito si `requested=1` ∧ `CONVERSATION_ENABLED`, si no borrado | — |
+| `start` de un contenedor **existente** (§2.4.1) | — | el que ya tenía (o ninguno) | sin cambio | sin cambio | — |
 | `reconcile` (arranque del backend) | cada sesión `running` | — | — | archivo presente ⇔ `requested=1` ∧ hash no NULL ∧ `CONVERSATION_ENABLED`; se corrigen desajustes (borrar huérfanos; nunca crear sin token) | log por corrección |
 
 Invariantes:
@@ -191,7 +192,8 @@ Invariantes:
   effective, effectiveAfterRestart }`, para que la UI no prometa captura que no ocurre.
 - Deshabilitar sin reiniciar deja el relay corriendo (su arranque depende del env, que es
   inmutable): queda inerte, porque el CLI deja de emitir al recargar y el backend rechaza lo que
-  llegue. Desaparece en el siguiente `start`, que ya no inyecta el token.
+  llegue. Desaparece cuando el contenedor se recrea (§2.4.1), que ya no inyecta el token; un
+  stop + start del mismo contenedor no lo quita.
 - La recarga en caliente del CLI es *informativa*: el smoke test la mide y el campo
   `emissionStopsAfterRestart` se fija según el resultado para la versión fijada. Hasta tener la
   medición, se asume **false** (no recarga) y la documentación de operador lo dice.
@@ -200,7 +202,31 @@ Invariantes:
   y al reponerlo vuelve a emitir. Pendiente de decisión del responsable: el código actual
   (`disableSession`) responde `emissionStopsAfterRestart: true`, lectura conservadora que este
   párrafo contradecía; la medición vale para el pin, no para los CLIs autoactualizados de los
-  workspaces existentes.
+  workspaces existentes. Propuesta de Work (revisión de 3.0c): mantener `true` como valor
+  conservador y documentar la recarga observada en 2.1.308.
+
+#### 2.4.1 `start` reutiliza el contenedor existente (hallado en la revisión de 3.0c)
+
+`POST /api/sessions/:id/start` (y el stop + start de un operador) **no recrea** el contenedor si
+todavía existe: `startContainer` hace `container.start()` sobre el mismo contenedor, con la misma
+imagen, el mismo env y los mismos montajes, y no llama a `prepareSpawn`. Solo se crea un
+contenedor nuevo, con token, montaje y la imagen vigente, cuando no hay contenedor: sesión nueva,
+`kill`/borrado soft (que lo eliminan) o un contenedor que ya no existe en Docker (id obsoleto).
+
+Consecuencias, sin cambio de ciclo de vida en 3.0c:
+
+- Una sesión que **ya captura** sigue capturando tras stop + start (mismo token, el hash sobrevive
+  a `onSessionDown`, el montaje sigue), y una que no capturaba sigue sin capturar.
+- "Habilitar" sobre un contenedor existente sin token **no** se vuelve efectivo con stop + start:
+  `effectiveAfterRestart: true` solo es cierto si el siguiente arranque crea el contenedor.
+- Una imagen nueva (o el rollback de imagen) llega a una sesión solo cuando su contenedor se recrea.
+- Procedimiento de recreación que conserva workspace y configuración: [DEPLOYMENT.md → Recrear el
+  contenedor de una sesión](./DEPLOYMENT.md#recreating-a-session-container). Nunca hard delete.
+
+**Requisito de entrada de 3.0d:** la activación debe resolver este caso (que habilitar llegue a ser
+efectivo, y que la respuesta no prometa un efecto que el siguiente `start` no produce). Cómo
+(recrear en `start` cuando cambia la captura, un endpoint de recreación, u otra vía) amplía el ciclo
+de vida y es decisión del responsable; 3.0c no lo cambia.
 
 ### 2.5 Revocación entre procesos (comando de emergencia)
 
@@ -291,7 +317,13 @@ contenedor con captura. Recibe los hooks del CLI y del script en loopback y los 
 
 - FIFO en memoria, acotada a **1024 eventos y 16 MiB** de cuerpos, incluidos los cuerpos que se
   están leyendo (se reserva el `Content-Length` antes de leer). Llena ⇒ el evento entrante se
-  descarta y se cuenta. La memoria del relay queda acotada por esa cota más el intérprete.
+  descarta y se cuenta (el cuerpo se lee y se tira, sin guardarlo).
+- Memoria de cuerpos, por diseño: **16 MiB** de cola + lecturas en curso (una sola copia por cuerpo:
+  se recibe directo en un búfer reservado), **más** el cuerpo que se está enviando al backend (≤ L5,
+  ya fuera de la cola; se envía sin concatenar, sin copia), más búferes de socket de ≤ 64 KiB por
+  conexión. Es decir, ≈ 24 MiB de cuerpos más el intérprete y el asignador. Los picos medidos
+  (3.0c: con cuerpos pequeños, con 1 MiB y con cuerpos de L5) se informan con su escenario; no son
+  una cota universal: el asignador y la versión de Python varían.
 - Un solo hilo de salida, **en orden**, con una conexión HTTP/1.1 persistente a
   `http://st-backend:$ST_BACKEND_PORT/ingest/claude/hook`, sin redirecciones (un 3xx es una respuesta
   inesperada) y **sin proxy**: ignora `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` y `NO_PROXY`
@@ -431,7 +463,7 @@ candidata); si no hay candidata única, se cuenta en `ingest_rejected` y en
 | `assistant_delta` | `MessageDisplay` | `message_id`, `index`, `final`, `delta` | acumulado por `message_id` ≤ **L2** |
 | `tool_start` | `PreToolUse` | `tool_use_id`, `tool_name`, `summary` (§4.3), `mcp_server?` | **L4** |
 | `tool_end` | `PostToolUse` | `tool_use_id`, `tool_name`, `ok: true`, `duration_ms?`, `response_bytes` | — |
-| `tool_failed` | `PostToolUseFailure` | `tool_use_id`, `tool_name`, `ok: false`, `is_interrupt?`, `duration_ms?`, `error_bytes`, y `error` **solo** según §4.3.3 | L4 |
+| `tool_failed` | `PostToolUseFailure` | `tool_use_id`, `tool_name`, `ok: false`, `is_interrupt?`, `duration_ms?`, `error_bytes`, y `error` **solo** según §4.3.3 (nota 1) | L4 |
 | `turn_end` | `Stop` | `last_assistant_message`, `background_tasks[]` (solo `id`, `type`, `status`), `session_crons_count` | `last_assistant_message` ≤ **L3** (truncado visible) |
 | `turn_failed` | `StopFailure` | `error` (enum del CLI), `error_details?` | L4 |
 | `agent_start` | `SubagentStart` | `agent_id`, `agent_type` | — |
@@ -444,6 +476,12 @@ candidata); si no hay candidata única, se cuenta en `ingest_rejected` y en
 | `gap` | backend | `reason`, `scope?`, `dropped?`, `dropped_bytes?`, `range?`, `detail?` | — |
 | `probe` | backend | `status`, `waitingFor?`, `found: boolean` | — |
 | `composer_send` | backend (3.2) | `clientMessageId`, `result`, `prompt_id?` | — |
+
+Nota 1 (observado en 3.0c, CLI 2.1.308): con `--dangerously-skip-permissions`, un Bash que falla
+dispara `PreToolUse → PostToolUseFailure → PostToolUse` con el mismo `tool_use_id`; hoy se
+persisten `tool_failed` **y** `tool_end`. Propuesta pendiente de decisión del responsable (Work,
+revisión de 3.0c): conservar ambos eventos y exigir en 3.1 que el fallo tenga precedencia y que las
+herramientas se cuenten por `tool_use_id`, no por evento.
 
 Campos no listados *MUST NOT* persistirse (parser tolerante: se descartan y se cuentan en
 `ingest_fields_dropped`). `prompt` y `last_assistant_message` son el contenido de la conversación:
@@ -817,6 +855,9 @@ observado y decisión:
 
 ### 3.0d activación
 
+- [ ] **Requisito de entrada (§2.4.1):** habilitar una sesión con contenedor existente llega a ser
+      efectivo por una vía decidida por el responsable, y `effectiveAfterRestart` es verdadero solo
+      si esa vía lo garantiza; test sobre `startContainer` con contenedor existente.
 - [ ] Endpoint admin + allowlist + stats según §7; habilitar/deshabilitar refleja D1 y archivo en
       ≤ 1 s; respuesta con `effective`/`effectiveAfterRestart` correcta en cada fila de §2.4; stats
       sin títulos/ids.

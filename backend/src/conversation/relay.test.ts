@@ -502,6 +502,39 @@ describe("relay — losses are counted and reported (§3.2.1)", () => {
 		expect(reported).toBe(s.dropped);
 	}, 60_000);
 
+	it("L5-sized bodies: one copy per body — the peak stays within queue+reading (16 MiB) + the body in flight (L5)", async () => {
+		const L5 = 8 * 1024 * 1024;
+		await startUpstream({ slowMs: 300 });
+		const r = await startRelay();
+		const status = async (k: string) =>
+			Number(
+				(await fs.readFile(`/proc/${r.proc.pid}/status`, "utf8")).match(
+					new RegExp(`^${k}:\\s+(\\d+)`, "m"),
+				)?.[1],
+			);
+		const baseline = await status("VmRSS");
+		const prefix = `{"session_id":"${SID}","hook_event_name":"Stop","x":"`;
+		const big = Buffer.alloc(L5, "y");
+		big.write(prefix, 0);
+		big.write('"}', L5 - 2);
+		const N = 12;
+		const replies = await Promise.all(Array.from({ length: N }, () => post(r.port, big)));
+		expect(replies.map((x) => x.status)).toEqual(Array(N).fill(204));
+		await until(() => (r.stats().forwarded ?? 0) + (r.stats().dropped ?? 0) === N, 20_000);
+		const peakKiB = (await status("VmHWM")) - baseline;
+		const s = r.stats();
+		expect(s.received).toBe(N);
+		expect(s.dropped_queue_full).toBeGreaterThan(0);
+		// Design bound for bodies: 16 MiB (queued + being read) + one L5 in
+		// flight upstream. 8 MiB of slack for allocator and socket buffers.
+		// Measured, not a universal ceiling: the interpreter's own growth and
+		// the allocator vary by platform.
+		expect(peakKiB).toBeLessThanOrEqual((16 + 8 + 8) * 1024);
+		console.log(
+			`relay L5 stress: ${N} × 8 MiB, peak above baseline ${Math.round(peakKiB / 1024)} MiB, stats ${JSON.stringify(s)}`,
+		);
+	}, 60_000);
+
 	it("more than 16 open connections: the 17th gets 204 without being read and is counted", async () => {
 		await startUpstream("ok");
 		const r = await startRelay();

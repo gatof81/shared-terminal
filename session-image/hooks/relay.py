@@ -14,8 +14,9 @@
 # and the managed hooks file present); otherwise it never runs.
 #
 # Bounded everywhere: ≤ 16 inbound connections, a FIFO of ≤ 1024 events and
-# 16 MiB (bodies being read included), 2 s socket timeouts both ways, one
-# in-order upstream connection. Plain sockets rather than http.server /
+# 16 MiB (bodies being read included, one copy each), plus the one body in
+# flight upstream (≤ 8 MiB, sent without a copy), 2 s socket timeouts both
+# ways, one in-order upstream connection. Plain sockets rather than http.server /
 # http.client: half the resident memory, and nothing it answers is generated
 # by a library (no error pages echoing the request). Whatever cannot be delivered is counted and
 # reported to the backend on the next delivered event of the same
@@ -226,20 +227,39 @@ def parse_headers(lines):
 
 
 def read_exact(sock, buf, n):
-    """(body, rest), or (None, b"") if the peer stops short or times out."""
-    parts = [buf[:n]]
-    have = len(parts[0])
+    """(body, rest), or (None, b"") if the peer stops short or times out.
+
+    The body is received straight into one preallocated buffer: a single
+    copy per body, which is what the queue's byte budget accounts for.
+    """
+    body = bytearray(n)
+    view = memoryview(body)
+    have = min(len(buf), n)
+    view[:have] = buf[:have]
     rest = buf[n:]
     while have < n:
         try:
-            chunk = sock.recv(min(65536, n - have))
+            got = sock.recv_into(view[have:], min(65536, n - have))
         except OSError:
             return None, b""
-        if not chunk:
+        if not got:
             return None, b""
-        parts.append(chunk)
-        have += len(chunk)
-    return b"".join(parts), rest
+        have += got
+    return body, rest
+
+
+def send_all(sock, *parts):
+    """sendall() of several buffers without joining them (no body copy)."""
+    views = [memoryview(p) for p in parts if p]
+    while views:
+        sent = sock.sendmsg(views)
+        while sent and views:
+            if sent >= len(views[0]):
+                sent -= len(views[0])
+                views.pop(0)
+            else:
+                views[0] = views[0][sent:]
+                sent = 0
 
 
 def discard(sock, buf, n):
@@ -382,7 +402,7 @@ class Upstream:
             try:
                 if not reused:
                     self.sock = socket.create_connection((UPSTREAM_HOST, UPSTREAM_PORT), timeout=SOCKET_TIMEOUT)
-                self.sock.sendall(request + body)
+                send_all(self.sock, request, body)
                 head, rest = read_head(self.sock, self.buf)
             except socket.timeout:
                 head, rest = None, "timeout"
