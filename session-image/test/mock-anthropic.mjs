@@ -39,16 +39,28 @@ function textOf(content) {
 }
 
 function plan(body) {
-	const messages = Array.isArray(body.messages) ? body.messages : [];
+	// The CLI interleaves `system`-role context messages (environment, token
+	// budget) with the conversation; only user/assistant turns matter here.
+	const messages = (Array.isArray(body.messages) ? body.messages : []).filter((m) => m?.role !== "system");
 	const last = messages[messages.length - 1];
 	const lastContent = Array.isArray(last?.content) ? last.content : [];
 	if (lastContent.some((b) => b?.type === "tool_result")) {
 		return { text: "Tool finished.\nDone.\n" };
 	}
-	// The scenario comes from the latest user prompt only, so a later plain
-	// prompt in the same interactive session gets a plain answer.
+	// The scenario comes from the current turn only (every user message after
+	// the last assistant one: the CLI may append context messages after the
+	// prompt), so a later plain prompt in the same interactive session gets a
+	// plain answer.
+	let lastAssistant = -1;
+	messages.forEach((m, i) => {
+		if (m.role === "assistant") lastAssistant = i;
+	});
 	const userTurns = messages.filter((m) => m.role === "user").map((m) => textOf(m.content));
-	const prompt = userTurns[userTurns.length - 1] ?? "";
+	const prompt = messages
+		.slice(lastAssistant + 1)
+		.filter((m) => m.role === "user")
+		.map((m) => textOf(m.content))
+		.join("\n");
 	const tools = new Set((body.tools ?? []).map((t) => t.name));
 	if (userTurns.some((t) => t.includes("ST_SUBAGENT"))) return { text: "Subagent reporting.\nAll good.\n" };
 	if (prompt.includes("ST_SCENARIO=bashwrite") && tools.has("Bash")) {
