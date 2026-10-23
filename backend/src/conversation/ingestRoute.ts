@@ -19,7 +19,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { INGEST_PATH } from "./activation.js";
 import { L5_BODY_BYTES } from "./limits.js";
-import type { ConversationService } from "./service.js";
+import type { ConversationService, RelayReport } from "./service.js";
 
 export interface IngestRouteOptions {
 	service: ConversationService;
@@ -166,8 +166,27 @@ export function createIngestHandler(opts: IngestRouteOptions) {
 			await service.noteUnparseable(stSessionId, pane, "invalid_json");
 			return;
 		}
-		await service.ingest(stSessionId, pane, parsed);
+		await service.ingest(stSessionId, pane, parsed, relayReport(req));
 	}
+}
+
+/**
+ * §3.2.1 — loss reports the in-container relay attaches to the next event
+ * it delivers. A malformed value is ignored, never a reason to drop the
+ * event that carries it.
+ */
+export function relayReport(req: Req): RelayReport | undefined {
+	const count = (name: string): number => {
+		const v = header(req, name)?.trim();
+		return v && /^[0-9]{1,10}$/.test(v) ? Number(v) : 0;
+	};
+	const report: RelayReport = {
+		dropped: count("x-st-relay-dropped"),
+		droppedBytes: count("x-st-relay-dropped-bytes"),
+		unattributed: count("x-st-relay-unattributed"),
+		restarted: header(req, "x-st-relay-restarted")?.trim() === "1",
+	};
+	return report.dropped || report.unattributed || report.restarted ? report : undefined;
 }
 
 /**

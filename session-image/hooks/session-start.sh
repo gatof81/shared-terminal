@@ -5,10 +5,10 @@
 # runs when the backend mounted a conversation.json into
 # /etc/claude-code/managed-settings.d/, which names it as the one `command`
 # hook (`async: true`); every other event goes out as a `type: "http"` hook
-# straight from the CLI, with no process of its own.
+# from the CLI itself to the container's loopback relay (§2.6).
 #
 # SessionStart is the one event that can't use an http hook, so this script
-# forwards its stdin JSON to the same ingest endpoint, adding an `st` block
+# posts its stdin JSON to the same relay, adding an `st` block
 # with what only the container knows: the CLI version, the tmux session and
 # pane, and an allowlisted subset of the parent CLI's flags.
 #
@@ -27,7 +27,7 @@
 if [ "${ST_HOOKS_DEBUG:-}" != "1" ]; then exec 2>/dev/null; fi
 exec >/dev/null
 
-INGEST_URL="http://st-backend:3001/ingest/claude/hook"
+INGEST_URL="http://127.0.0.1:47613/ingest/claude/hook"
 
 # The SessionStart input is a small JSON object; cap the read so a broken
 # producer can't make us buffer without bound.
@@ -111,13 +111,11 @@ body=$(
 		} }'
 ) || exit 0
 
-# The token goes in through a header file (process substitution), not argv:
-# argv is world-readable in /proc and shows up in `ps`. `-q` ignores any
-# ~/.curlrc and `--noproxy '*'` any *_proxy env, so neither can redirect the
-# request, or the token, anywhere but st-backend.
+# To the container's relay (docs/CONVERSATION.md §2.6), like every HTTP
+# hook, so session_start takes the same single ordered path to the backend.
+# No token here: the relay adds it. `-q` ignores any ~/.curlrc and
+# `--noproxy '*'` any *_proxy env, so neither can send the event elsewhere.
 printf '%s' "$body" | curl -q --silent --noproxy '*' --max-time 2 --output /dev/null \
-	-X POST -H 'Content-Type: application/json' \
-	-H @<(printf 'Authorization: Bearer %s\nX-ST-Session: %s\nX-ST-Tmux-Pane: %s\n' \
-		"$ST_INGEST_TOKEN" "${SESSION_ID:-}" "${TMUX_PANE:-}") \
+	-X POST -H 'Content-Type: application/json' -H "X-ST-Tmux-Pane: ${TMUX_PANE:-}" \
 	--data-binary @- "$INGEST_URL"
 exit 0

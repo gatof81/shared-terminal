@@ -80,13 +80,12 @@ services:
     # DNS). Session containers are spawned onto the same network by name.
     networks:
       sessions-net:
-        # Stable name the conversation hooks in session containers post to
-        # (http://st-backend:<PORT>/ingest/claude/hook, docs/CONVERSATION.md
-        # §2.2): the hook `url` can't interpolate variables, so it needs a
-        # name that doesn't depend on the compose project. Adds no exposure —
-        # session containers already resolve this service as `app` on this
-        # network. While the backend is down the name doesn't resolve and a
-        # hook fails at once instead of waiting for its timeout.
+        # Stable name the conversation relay in each capturing session
+        # container forwards to (http://st-backend:<PORT>/ingest/claude/hook,
+        # docs/CONVERSATION.md §2.6), independent of the compose project name.
+        # Adds no exposure — session containers already resolve this service
+        # as `app` on this network. While the backend is down the name
+        # doesn't resolve and the relay counts the loss at once.
         aliases:
           - st-backend
     restart: unless-stopped

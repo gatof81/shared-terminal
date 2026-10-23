@@ -18,6 +18,7 @@ import {
 	type RunningSessionForStats,
 	type StatsBySession,
 } from "./containerStats.js";
+import { withRelayNoProxy } from "./conversation/noProxy.js";
 import { d1Query } from "./db.js";
 import { logger } from "./logger.js";
 import { clearPortMappings, mappingsFromConfig, setPortMappings } from "./portMappings.js";
@@ -526,7 +527,13 @@ export class DockerManager {
 					// programs the user runs may use either. Emitting a single
 					// entry per name closes that ambiguity. See `buildContainerEnv`
 					// for the precedence rules.
-					Env: buildContainerEnv(sessionId, meta.name, envArray, capture.env),
+					// Phase 3 §2.6 — with capture effective (capture.env set),
+					// a proxy in the session env must not swallow the hooks to
+					// the loopback relay; without a proxy the env is untouched.
+					Env:
+						capture.env.length > 0
+							? withRelayNoProxy(buildContainerEnv(sessionId, meta.name, envArray, capture.env))
+							: buildContainerEnv(sessionId, meta.name, envArray, capture.env),
 					HostConfig: {
 						Binds: [
 							`${WORKSPACE_ROOT}/${sessionId}:/home/developer/workspace`,

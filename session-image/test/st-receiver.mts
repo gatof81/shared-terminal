@@ -44,7 +44,12 @@ const sessionRow = {
 	ingest_token_hash_suspended: null,
 	user_id: "smoke-user",
 };
-const owners = new Map<string, string>();
+// claude_conversations ownership survives a receiver restart, as the D1 row
+// would: the smoke test restarts the receiver mid-conversation.
+const ownersFile = `${workspaceRoot}/.st-receiver-owners.json`;
+const owners = new Map<string, string>(
+	fs.existsSync(ownersFile) ? (JSON.parse(fs.readFileSync(ownersFile, "utf8")) as [string, string][]) : [],
+);
 const ok = (results: unknown[] = []) =>
 	new Response(JSON.stringify({ success: true, errors: [], result: [{ results, success: true, meta: {} }] }), {
 		status: 200,
@@ -57,7 +62,10 @@ globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => {
 		return ok([{ session_id: stSession, conversation_requested: 1, ingest_token_hash: sessionRow.ingest_token_hash }]);
 	}
 	if (/^INSERT OR IGNORE INTO claude_conversations/.test(sql)) {
-		if (!owners.has(String(params[0]))) owners.set(String(params[0]), String(params[1]));
+		if (!owners.has(String(params[0]))) {
+			owners.set(String(params[0]), String(params[1]));
+			fs.writeFileSync(ownersFile, JSON.stringify([...owners]));
+		}
 		return ok();
 	}
 	if (/^SELECT st_session_id FROM claude_conversations/.test(sql)) {
@@ -106,6 +114,9 @@ const server = http.createServer((req, res) => {
 				authorization: req.headers.authorization ?? null,
 				session: req.headers["x-st-session"] ?? null,
 				pane: req.headers["x-st-tmux-pane"] ?? null,
+				relay: Object.fromEntries(
+					Object.entries(req.headers).filter(([k]) => k.startsWith("x-st-relay-")),
+				),
 				event: body?.hook_event_name ?? null,
 				body,
 			})}\n`,

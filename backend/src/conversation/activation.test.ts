@@ -99,17 +99,13 @@ afterEach(async () => {
 });
 
 describe("§2.2 hooks file", () => {
-	it("is byte-exact: the contract's shape, order and HTTP block with the real port", () => {
+	it("is byte-exact: the contract's shape, order and HTTP block (relay on loopback, no token)", () => {
 		const http = {
 			type: "http",
-			url: "http://st-backend:4242/ingest/claude/hook",
+			url: "http://127.0.0.1:47613/ingest/claude/hook",
 			timeout: 1,
-			headers: {
-				Authorization: "Bearer $ST_INGEST_TOKEN",
-				"X-ST-Session": "$SESSION_ID",
-				"X-ST-Tmux-Pane": "$TMUX_PANE",
-			},
-			allowedEnvVars: ["ST_INGEST_TOKEN", "SESSION_ID", "TMUX_PANE"],
+			headers: { "X-ST-Tmux-Pane": "$TMUX_PANE" },
+			allowedEnvVars: ["TMUX_PANE"],
 		};
 		const plain = [{ hooks: [http] }];
 		const matched = [{ matcher: "*", hooks: [http] }];
@@ -143,9 +139,11 @@ describe("§2.2 hooks file", () => {
 			null,
 			2,
 		)}\n`;
-		expect(buildHooksSettings(4242)).toBe(expected);
+		expect(buildHooksSettings()).toBe(expected);
 		// No hook may carry a decision field, and the async hook has no timeout.
 		expect(expected).not.toMatch(/decision|continue|additionalContext/);
+		// The credential never reaches the CLI's hook client (§2.2).
+		expect(expected).not.toMatch(/ST_INGEST_TOKEN|Authorization|SESSION_ID/);
 		expect(JSON.parse(expected).hooks.SessionStart[0].hooks[0]).not.toHaveProperty("timeout");
 	});
 });
@@ -168,15 +166,16 @@ describe("prepareSpawnCapture (§2.4 spawn row)", () => {
 		]);
 		expect(await fs.readdir(path.join(root, ".claude-managed", "s1"))).toEqual([]);
 	});
-	it("flag on, requested: 64-hex token in env, hash in D1 (written before the file), byte-exact file", async () => {
+	it("flag on, requested: 64-hex token + backend port in env, hash in D1 (written before the file), byte-exact file", async () => {
 		const row = session("s1", { conversation_requested: 1 });
 		const r = await prepareSpawnCapture(deps(), "s1");
 		expect(r.effective).toBe(true);
-		expect(r.env).toHaveLength(1);
+		expect(r.env).toHaveLength(2);
+		expect(r.env[1]).toBe("ST_BACKEND_PORT=3001");
 		const token = r.env[0].replace("ST_INGEST_TOKEN=", "");
 		expect(token).toMatch(/^[0-9a-f]{64}$/);
 		expect(row.ingest_token_hash).toBe(hashIngestToken(token));
-		expect(await fs.readFile(hooksFilePath(root, "s1"), "utf8")).toBe(buildHooksSettings(3001));
+		expect(await fs.readFile(hooksFilePath(root, "s1"), "utf8")).toBe(buildHooksSettings());
 		const hashCall = dbStubs.calls.findIndex((c) =>
 			c.sql.startsWith("UPDATE sessions SET ingest_token_hash = ?"),
 		);
@@ -228,7 +227,7 @@ describe("enable / disable (§2.4 table)", () => {
 		expect(row.ingest_token_hash).toBe("h1");
 		expect(row.ingest_token_hash_suspended).toBeNull();
 		expect(await checkRevocation(root, "s1")).toBe("none");
-		expect(await fs.readFile(hooksFilePath(root, "s1"), "utf8")).toBe(buildHooksSettings(3001));
+		expect(await fs.readFile(hooksFilePath(root, "s1"), "utf8")).toBe(buildHooksSettings());
 	});
 	it("emergency CLI disable with D1 down: marker stays, file stays, error propagates", async () => {
 		session("s1", { conversation_requested: 1, ingest_token_hash: "h1" });

@@ -42,7 +42,9 @@ import {
 } from "./dockerManager.js";
 import type { SessionManager } from "./sessionManager.js";
 
-function fakeSessions() {
+function fakeSessions(
+	envVars: Record<string, string> = { ST_INGEST_TOKEN: "user-tries-to-shadow" },
+) {
 	const meta = {
 		sessionId: "sess-1",
 		userId: "u1",
@@ -52,7 +54,7 @@ function fakeSessions() {
 		containerName: "st-test",
 		cols: 80,
 		rows: 24,
-		envVars: { ST_INGEST_TOKEN: "user-tries-to-shadow" },
+		envVars,
 		createdAt: new Date(),
 		lastConnectedAt: null,
 		externalRef: null,
@@ -65,9 +67,9 @@ function fakeSessions() {
 	} as unknown as SessionManager;
 }
 
-function makeDm() {
+function makeDm(envVars?: Record<string, string>) {
 	const captured: { opts: Record<string, unknown> } = { opts: {} };
-	const dm = new DockerManager(fakeSessions());
+	const dm = new DockerManager(fakeSessions(envVars));
 	const fakeContainer = {
 		id: "container-abc",
 		start: vi.fn(async () => undefined),
@@ -130,6 +132,26 @@ describe("spawn with conversation hooks", () => {
 			"ST_INGEST_TOKEN=deadbeef",
 		]);
 		expect(hooks.prepareSpawn).toHaveBeenCalledWith("sess-1");
+	});
+	it("§2.6 a proxy in the session env gets 127.0.0.1 in NO_PROXY only when capture is on", async () => {
+		const proxied = { HTTPS_PROXY: "http://proxy:3128", NO_PROXY: "internal.example" };
+		const off = makeDm(proxied);
+		await off.dm.spawn("sess-1");
+		const offEnv = off.captured.opts.Env as string[];
+		expect(offEnv).toContain("NO_PROXY=internal.example");
+		expect(offEnv.some((e) => e.startsWith("no_proxy="))).toBe(false);
+
+		const on = makeDm(proxied);
+		on.dm.setConversationHooks({
+			prepareSpawn: vi.fn(async () => ({ env: ["ST_INGEST_TOKEN=deadbeef"], binds: [] })),
+			onSessionDown: vi.fn(async () => undefined),
+			onSessionPurged: vi.fn(async () => undefined),
+		});
+		await on.dm.spawn("sess-1");
+		const onEnv = on.captured.opts.Env as string[];
+		expect(onEnv).toContain("NO_PROXY=internal.example,127.0.0.1");
+		expect(onEnv).toContain("no_proxy=127.0.0.1");
+		expect(onEnv).toContain("HTTPS_PROXY=http://proxy:3128");
 	});
 	it("a failing prepare logs and spawns without capture", async () => {
 		const { dm, captured } = makeDm();

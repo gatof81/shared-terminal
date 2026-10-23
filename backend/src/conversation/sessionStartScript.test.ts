@@ -5,11 +5,11 @@
  * receiver on PATH / localhost.
  *
  * `curl` is the real binary. Where the test needs the request to land on a
- * local server, a `curl` shim earlier on PATH rewrites the fixed
- * `http://st-backend:3001` to it and execs the real curl with every other
- * argument untouched, so the flags under test are the script's own. Without
- * the shim, `st-backend` does not resolve on a test host, which is exactly
- * the "backend absent" case.
+ * local server, a `curl` shim earlier on PATH rewrites the fixed relay URL
+ * `http://127.0.0.1:47613` (§2.6) to it and execs the real curl with every
+ * other argument untouched, so the flags under test are the script's own.
+ * Without the shim nothing listens on 47613 on a test host, which is exactly
+ * the "relay absent" case.
  *
  * The docker-level counterpart (managed settings, the real CLI firing the
  * hook) is session-image/conversation-smoke.sh.
@@ -78,7 +78,7 @@ async function curlShim(port: number | null) {
 		"curl",
 		`printf '%s\\n' "$@" >> ${curlLog}
 args=()
-for a in "$@"; do args+=("\${a//http:\\/\\/st-backend:3001/http://127.0.0.1:${port ?? 0}}"); done
+for a in "$@"; do args+=("\${a//http:\\/\\/127.0.0.1:47613/http://127.0.0.1:${port ?? 0}}"); done
 ${port === null ? `exec ${REAL_CURL} "$@"` : `exec ${REAL_CURL} "\${args[@]}"`}`,
 	);
 }
@@ -172,16 +172,19 @@ describe("session-start.sh — activation", () => {
 		expect(received).toHaveLength(0);
 	});
 
-	it("posts the input plus the st block with the correlation headers; never writes stdout", async () => {
+	it("posts the input plus the st block with the pane header, no credential; never writes stdout", async () => {
 		await curlShim(await listen("ok"));
 		const r = await run(withToken);
 		expect(r).toMatchObject({ code: 0, stdout: "", stderr: "" });
 		expect(received).toHaveLength(1);
 		const { headers, body } = received[0];
-		expect(headers.authorization).toBe(`Bearer ${TOKEN}`);
-		expect(headers["x-st-session"]).toBe(ST_SESSION);
+		// The relay adds the token and the session (§2.6); the script sends neither.
+		expect(headers.authorization).toBeUndefined();
+		expect(headers["x-st-session"]).toBeUndefined();
 		expect(headers["x-st-tmux-pane"]).toBe("%3");
 		expect(headers["content-type"]).toBe("application/json");
+		// session_id stays the first key: the relay reads it from there.
+		expect(body.startsWith(`{"session_id":"${INPUT.session_id}"`)).toBe(true);
 		expect(JSON.parse(body)).toEqual({
 			...INPUT,
 			st: {
@@ -269,7 +272,7 @@ describe("session-start.sh — activation", () => {
 });
 
 describe("session-start.sh — bounded in time (≤ 6 s whatever happens)", () => {
-	it("st-backend does not resolve: exit 0 quickly, nothing on stdout/stderr", async () => {
+	it("relay absent (connection refused): exit 0 quickly, nothing on stdout/stderr", async () => {
 		await curlShim(null); // real curl, real URL
 		const r = await run(withToken);
 		expect(r).toMatchObject({ code: 0, stdout: "", stderr: "" });
