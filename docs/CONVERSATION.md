@@ -1,6 +1,7 @@
 # Conversation & Agent Activity — contrato técnico (Fase 3)
 
-Estado: **v1.3 (3.0a, tras las rondas 1 a 3 de revisión Work), vinculante para los PRs 3.0b–3.4.** El
+Estado: **v1.4 (3.0a, rondas 1 a 3 de revisión Work; en 3.0c, transporte por relay local §2.6, aprobado
+por el responsable el 2026-10-23), vinculante para los PRs 3.0b–3.4.** El
 razonamiento está en [docs/design/phase3-conversation-activity.md](./design/phase3-conversation-activity.md);
 este archivo define lo que el código debe cumplir y lo que cada PR debe demostrar. Cambiar un
 contrato exige un PR de docs antes o junto con el código.
@@ -16,10 +17,21 @@ verificados en revisión. "Bytes" significa siempre bytes UTF-8 del contenido, s
 | Interfaz | Documentación oficial | Versión mínima | Uso |
 | --- | --- | --- | --- |
 | Hooks `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `MessageDisplay`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `Notification`, `PermissionRequest`, `PreCompact`, `PostCompact`, `TaskCreated`, `TaskCompleted`, `TeammateIdle` | code.claude.com/docs/en/hooks | 2.1.308 (pin de imagen) | Captura |
-| Hook `type: "http"` con `headers` + `allowedEnvVars` | idem | 2.1.308 | Transporte |
+| Hook `type: "http"` con `headers` + `allowedEnvVars` | idem | 2.1.308 | Transporte CLI → relay local (§2.6) |
+| Bloqueo de destinos privados de los hooks HTTP (`ERR_HTTP_HOOK_BLOCKED_ADDRESS`) | comportamiento del binario 2.1.308 | 2.1.308 | Restricción: ver nota |
+| `python3` de la imagen (solo biblioteca estándar) | docs.python.org/3/library | 3.12 (Ubuntu 24.04) | Relay §2.6 |
 | Managed settings en archivo: `/etc/claude-code/managed-settings.d/*.json` | code.claude.com/docs/en/managed-settings | 2.1.308 | Entrega de la configuración |
 | `claude agents --json` | code.claude.com/docs/en/agent-view | 2.1.308 | Probe de estado |
 | Variables `TMUX_PANE` (tmux) y `SESSION_ID` (Shared Terminal) | tmux(1); `buildContainerEnv` | — | Binding y auth |
+
+Nota (3.0c): antes de enviar un hook `http`, el CLI 2.1.308 resuelve el host y **rechaza** cualquier
+dirección de 0/8, 10/8, 100.64/10, 169.254/16, 172.16/12, 192.168/16, fc00::/7, fe80::/10 y `::`
+(mensaje `HTTP hook blocked: … resolves to … (private/link-local address). Loopback (127.0.0.1,
+::1) is allowed for local dev.`). Solo lo omite si la petición sale por un proxy; ningún setting ni
+variable lo desactiva. En `sessions-net`, `st-backend` siempre resuelve a una IP privada, así que
+el destino directo de v1.3 nunca funcionó con el CLI real. Es una protección deliberada del CLI:
+**no se esquiva** (ni cambiando la subred de `sessions-net` ni con un proxy); los hooks apuntan a
+loopback, a un relay dentro del propio contenedor (§2.6), que reenvía al backend.
 
 ### 1.1 Interfaces internas prohibidas
 
@@ -43,17 +55,19 @@ El código de Fase 3 *MUST NOT* leer ni escribir, en el camino caliente ni en te
 | --- | --- | --- |
 | Directorio managed vacío | `/etc/claude-code/managed-settings.d/` (imagen, root 0755) | Dockerfile |
 | Script de registro | `/opt/st/hooks/session-start.sh` (imagen, root 0755) | Dockerfile |
+| Relay local | `/opt/st/hooks/relay.py` (imagen, root 0755); proceso escuchando en `127.0.0.1:47613` | Dockerfile; lo arranca `entrypoint.sh` solo si la captura está configurada (§2.6) |
 | Archivo de hooks por sesión | host `<WORKSPACE_ROOT>/.claude-managed/<st_session_id>/conversation.json`, montado **ro** en `/etc/claude-code/managed-settings.d/` | backend, según la tabla §2.4 |
 | Token de ingesta | env `ST_INGEST_TOKEN` del contenedor (32 bytes aleatorios, hex) | backend, en `spawn`/`startContainer`, solo si la sesión está *solicitada* (§2.4) |
 | Estado solicitado | D1 `sessions.conversation_requested INTEGER NOT NULL DEFAULT 0` | API admin / allowlist / comando de emergencia |
-| Estado efectivo | derivado: `ingest_token_hash IS NOT NULL` ∧ archivo presente ∧ contenedor arrancado con el token | backend (`reconcile` lo recalcula) |
+| Estado efectivo | derivado: `ingest_token_hash IS NOT NULL` ∧ archivo presente ∧ contenedor arrancado con el token (el relay arranca exactamente en ese caso) | backend (`reconcile` lo recalcula) |
 
 Reglas:
 
 - El directorio host `.claude-managed/<sid>` *MUST* existir (vacío si no aplica) antes de
   `container.start()`, igual que `.uploads/<sid>`; el bind es siempre `ro`.
 - La imagen *MUST* comportarse de forma idéntica a la actual cuando el directorio montado está
-  vacío (smoke test: `claude -p hola` no produce ninguna petición saliente a `st-backend`).
+  vacío (smoke test: `claude -p hola` no produce ninguna petición saliente a `st-backend` ni al
+  puerto del relay, y no hay ningún proceso relay).
 - `CONVERSATION_ENABLED=false` (default) ⇒ la ingesta rechaza todo (`disabled`), la habilitación
   responde 409 `conversation-disabled`, y el `reconcile` de arranque **borra** cualquier
   `conversation.json` existente (apagado global persistente aunque haya filas solicitadas).
@@ -90,22 +104,25 @@ donde `HTTP` es exactamente:
 ```json
 {
   "type": "http",
-  "url": "http://st-backend:3001/ingest/claude/hook",
+  "url": "http://127.0.0.1:47613/ingest/claude/hook",
   "timeout": 1,
-  "headers": {
-    "Authorization": "Bearer $ST_INGEST_TOKEN",
-    "X-ST-Session": "$SESSION_ID",
-    "X-ST-Tmux-Pane": "$TMUX_PANE"
-  },
-  "allowedEnvVars": ["ST_INGEST_TOKEN", "SESSION_ID", "TMUX_PANE"]
+  "headers": { "X-ST-Tmux-Pane": "$TMUX_PANE" },
+  "allowedEnvVars": ["TMUX_PANE"]
 }
 ```
 
-- `st-backend` *MUST* ser un alias del servicio `app` en `sessions-net` (`docker-compose.yml`,
-  `networks.sessions-net.aliases`). El puerto es el `PORT` del backend; el archivo se genera con el
-  valor real.
-- `timeout: 1` es deliberado: un receptor presente pero colgado cuesta ≤ 1 s por evento; un receptor
-  ausente falla en DNS sin esperar. *MUST NOT* subirse sin cambiar este documento.
+- El destino es el relay del contenedor (§2.6), en loopback: el único destino que el CLI acepta
+  (nota de §1). El puerto `47613` es fijo y es parte del contrato (archivo, script y relay).
+- El CLI **no** recibe el token: no hay `Authorization` ni `X-ST-Session` en el archivo. Los añade el
+  relay al reenviar, desde su propio entorno. Así un setting de usuario `httpHookAllowedEnvVars` sin
+  el token ya no puede vaciarlo (solo puede vaciar el pane), y el token no pasa por el cliente HTTP
+  del CLI ni por un proxy de usuario.
+- `st-backend` *MUST* seguir siendo un alias del servicio `app` en `sessions-net`
+  (`docker-compose.yml`, `networks.sessions-net.aliases`): es el destino fijo del relay. El puerto es
+  el `PORT` del backend; el entrypoint se lo pasa al relay (`ST_BACKEND_PORT`, default 3001).
+- `timeout: 1` es deliberado: el relay responde tras leer el cuerpo y encolarlo (milisegundos); un
+  relay caído rechaza la conexión al instante; un relay detenido sin cerrar el puerto (SIGSTOP)
+  cuesta ≤ 1 s por evento bloqueante. *MUST NOT* subirse sin cambiar este documento.
 - El hook `SessionStart` es `async: true` y **no lleva `timeout`**: la documentación oficial dice
   que `timeout` no se aplica a hooks de comando asíncronos, así que el script se acota a sí mismo
   (§2.3).
@@ -115,26 +132,38 @@ donde `HTTP` es exactamente:
 
 ### 2.3 `session-start.sh`
 
-Entrada: JSON de `SessionStart` por stdin. Comportamiento:
+Entrada: JSON de `SessionStart` por stdin. Comportamiento (implementado en
+`session-image/hooks/session-start.sh`, 3.0c):
 
-1. Primera línea ejecutable: `exec timeout -k 1 5 /opt/st/hooks/session-start-body.sh "$@"` (o el
-   equivalente en un solo archivo con `[ -z "$ST_HOOK_WRAPPED" ] && ST_HOOK_WRAPPED=1 exec timeout
-   -k 1 5 "$0"`). **El script entero, con todos sus subprocesos, termina en ≤ 6 s pase lo que pase.**
+1. Primera línea ejecutable: `[ -z "$ST_HOOK_WRAPPED" ] && ST_HOOK_WRAPPED=1 exec timeout -k 1 5
+   /bin/bash "$0" "$@"`. **El script entero, con todos sus subprocesos, termina en ≤ 6 s pase lo que
+   pase** (`timeout` mata al grupo de procesos completo).
 2. Si `ST_INGEST_TOKEN` está vacío o no definido: exit 0 sin salida ni red.
-3. Construye el JSON de salida = entrada + `{ "st": { "claude_version", "tmux_session", "pane",
-   "argv_flags" } }` donde:
+3. Lee como máximo 64 KiB de stdin; si no es un objeto JSON, exit 0 sin red. Construye el JSON de
+   salida = entrada + `{ "st": { "claude_version", "tmux_session", "pane", "argv_flags" } }` donde:
    - `claude_version` = `timeout 3 claude --version` (null si falla);
-   - `tmux_session` = `timeout 1 tmux display-message -p '#S'` (null si falla o no hay tmux);
+   - `tmux_session` = `timeout 1 tmux display-message -p -t "$TMUX_PANE" '#S'`, solo si `$TMUX` y
+     `$TMUX_PANE` están definidos (null si no, o si falla): sin `$TMUX`, un `tmux` sin `-t` respondería
+     por el servidor que encuentre, no por el pane del hook;
    - `pane` = `$TMUX_PANE` o null;
-   - `argv_flags` = **solo** las banderas del proceso padre que estén en la allowlist
-     `-p --print --bare --resume --continue --fork-session --agent --agent-name --agent-id
-     --teammate-mode --dangerously-skip-permissions --permission-mode`, sin valores salvo el de
-     `--agent-name`/`--agent-type`/`--teammate-mode`/`--permission-mode` (≤ 64 bytes cada uno).
-     Nunca se persiste el argv completo (puede llevar `--append-system-prompt`, rutas o secretos).
-4. `curl --silent --max-time 2 -X POST -H 'Content-Type: application/json' -H "Authorization: Bearer
-   $ST_INGEST_TOKEN" -H "X-ST-Session: $SESSION_ID" -H "X-ST-Tmux-Pane: $TMUX_PANE" --data-binary
-   @- http://st-backend:3001/ingest/claude/hook`. Cualquier fallo ⇒ exit 0.
-5. Nunca escribe en stdout. Errores a stderr solo con `ST_HOOKS_DEBUG=1`.
+   - `argv_flags` = **solo** las banderas del proceso `claude` que disparó el hook que estén en la
+     allowlist `-p --print --bare --resume --continue --fork-session --agent --agent-name
+     --agent-type --agent-id --teammate-mode --dangerously-skip-permissions --permission-mode`, como
+     `--flag` o `--flag=valor`, sin valores salvo el de `--agent-name`/`--agent-type`/`--teammate-mode`
+     /`--permission-mode` (≤ 64 bytes; un valor más largo se omite y queda la bandera sola). Ese
+     `claude` se busca subiendo por `/proc` **solo a través de** `timeout`, `sh`, `bash` o `dash` (en
+     2.1.308 la cadena es script ← `timeout` ← `/bin/sh -c` ← `claude`); cualquier otro ancestro
+     corta la búsqueda (`argv_flags: []`), para no tomar las banderas de un `claude` no relacionado más
+     arriba. El backend vuelve a filtrar (`filterArgvFlags`). Nunca se persiste el argv completo (puede
+     llevar `--append-system-prompt`, rutas o secretos).
+4. `curl -q --silent --noproxy '*' --max-time 2 --output /dev/null -X POST -H 'Content-Type:
+   application/json' -H "X-ST-Tmux-Pane: $TMUX_PANE" --data-binary @-
+   http://127.0.0.1:47613/ingest/claude/hook`, es decir, al relay (§2.6), igual que los hooks HTTP:
+   un solo camino y un solo orden hacia el backend. El script no envía el token (lo añade el relay);
+   `-q` ignora `~/.curlrc` y `--noproxy '*'` las variables `*_proxy`, para que ninguna redirija la
+   petición. Cualquier fallo ⇒ exit 0.
+5. Nunca escribe en stdout (el stdout de un hook asíncrono vuelve al agente como contexto). Errores a
+   stderr solo con `ST_HOOKS_DEBUG=1`.
 
 ### 2.4 Activación: estado solicitado frente a estado efectivo
 
@@ -160,6 +189,9 @@ Invariantes:
 - Un archivo `conversation.json` *MUST NOT* existir si `ingest_token_hash IS NULL` para esa sesión.
 - "Efectivo" se informa en `GET /api/sessions/:id/conversations` como `capture: { requested,
   effective, effectiveAfterRestart }`, para que la UI no prometa captura que no ocurre.
+- Deshabilitar sin reiniciar deja el relay corriendo (su arranque depende del env, que es
+  inmutable): queda inerte, porque el CLI deja de emitir al recargar y el backend rechaza lo que
+  llegue. Desaparece en el siguiente `start`, que ya no inyecta el token.
 - La recarga en caliente del CLI es *informativa*: el smoke test la mide y el campo
   `emissionStopsAfterRestart` se fija según el resultado para la versión fijada. Hasta tener la
   medición, se asume **false** (no recarga) y la documentación de operador lo dice.
@@ -213,6 +245,100 @@ con D1 simulado caído: el comando sale ≠ 0, la marca queda, el evento sigue r
 Variante con cola poblada: los eventos ya autorizados antes del `rename` aparecen persistidos,
 seguidos de exactamente un `gap revoked`.
 
+### 2.6 Relay local (3.0c)
+
+`/opt/st/hooks/relay.py`, un único proceso Python 3 (solo biblioteca estándar, `python3 -I -S`) por
+contenedor con captura. Recibe los hooks del CLI y del script en loopback y los reenvía al backend.
+**No es un proxy:** tiene un único destino fijo y nunca devuelve al CLI nada que venga del backend.
+
+**Arranque y vida**
+
+- `entrypoint.sh` lo arranca **solo** si `ST_INGEST_TOKEN` no está vacío **y**
+  `/etc/claude-code/managed-settings.d/conversation.json` existe al arrancar el contenedor (estado
+  efectivo, §2.1). En otro caso no hay proceso, ni puerto abierto, ni tráfico.
+- Lo vigila un bucle de `bash` del entrypoint: si el relay termina, se relanza tras 1 s, duplicando
+  la espera hasta 60 s mientras siga cayendo antes de 60 s de vida (un puerto ocupado no consume CPU
+  en bucle). Cada relanzamiento informa `X-ST-Relay-Restarted` (§3.2.1). Ambos mueren con el
+  contenedor: no sobreviven a `stop`, y la cola en memoria se pierde con ellos.
+- Corre como el usuario de la sesión, que puede matarlo: solo corta su propia captura (los hooks
+  fallan al instante con conexión rechazada; Claude sigue igual).
+- `stdout`/`stderr` a `/dev/null`. Con `ST_HOOKS_DEBUG=1`, contadores (nunca cuerpos, cabeceras ni
+  tokens) a `/tmp/st-relay.log`.
+
+**Entrada**
+
+- *MUST* escuchar solo en `127.0.0.1:47613`. Si el puerto está ocupado, no arranca (bucle con
+  espera; captura inactiva en ese contenedor). Un programa del usuario no puede usar ese puerto
+  mientras el relay lo tiene.
+- Solo `POST /ingest/claude/hook` (ruta exacta, sin query) con `Content-Length` ≤ L5. Cualquier otro
+  método o ruta ⇒ 404 vacío y nada se reenvía. Sin `Content-Length`, o mayor que L5 ⇒ 204 sin leer el
+  cuerpo, conexión cerrada, contado como perdido.
+- Respuesta al CLI: **siempre 204 sin cuerpo**, enviada tras leer el cuerpo y encolarlo (o
+  descartarlo), nunca después de hablar con el backend. Lo que responda el backend no llega jamás al
+  CLI: un hook no puede decidir, bloquear ni alterar nada.
+- De la petición entrante solo se toma el cuerpo, intacto, y `X-ST-Tmux-Pane` si cumple
+  `^%\d{1,6}$`. Todo otro header se ignora.
+- Concurrencia de entrada: ≤ 16 conexiones en atención; la 17.ª recibe 204 sin leer el cuerpo y se
+  cierra, contada como perdida. Lectura con timeout de 2 s por operación de socket.
+
+**Cola y salida**
+
+- FIFO en memoria, acotada a **1024 eventos y 16 MiB** de cuerpos, incluidos los cuerpos que se
+  están leyendo (se reserva el `Content-Length` antes de leer). Llena ⇒ el evento entrante se
+  descarta y se cuenta. La memoria del relay queda acotada por esa cota más el intérprete.
+- Un solo hilo de salida, **en orden**, con una conexión HTTP/1.1 persistente a
+  `http://st-backend:$ST_BACKEND_PORT/ingest/claude/hook`, sin redirecciones (un 3xx es una respuesta
+  inesperada) y **sin proxy**: ignora `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` y `NO_PROXY`
+  (`http.client`, no `urllib`). Timeout de 2 s por operación (conexión, envío, respuesta). La
+  resolución DNS no tiene timeout propio: con `st-backend` sin resolver falla al instante (Docker
+  responde NXDOMAIN); un resolvedor colgado detiene la salida y la cola se llena y descarta.
+- Cabeceras de salida: `Content-Type: application/json`, `Content-Length`, `Authorization: Bearer
+  $ST_INGEST_TOKEN` y `X-ST-Session: $SESSION_ID` del entorno del relay, `X-ST-Tmux-Pane` validado, y
+  los `X-ST-Relay-*` de §3.2.1. Nada más.
+- Resultado: 2xx ⇒ entregado. Error de conexión, timeout, o estado distinto de 2xx ⇒ el evento se
+  cuenta como perdido y la salida entra en **pausa de 1 s**: los eventos que salen de la cola durante
+  la pausa se descartan y cuentan sin intentar enviarlos (un backend caído o colgado no deja una
+  cola de eventos viejos). Excepción única: una conexión persistente que el backend cerró por
+  inactividad se reintenta una vez con una conexión nueva. No hay más reintentos.
+- El cuerpo de la respuesta se lee (≤ 64 KiB) y se descarta.
+
+**Contabilidad de pérdidas**
+
+- Cada evento recibido termina en exactamente uno de: *reenviado* (2xx) o *perdido* (contado). Los
+  perdidos se agrupan por `session_id` de Claude, leído con una expresión fija sobre los primeros
+  128 bytes del cuerpo (`{"session_id":"<uuid>"`, la forma en que el CLI serializa), o, si no se
+  puede leer, por pane. Ninguna otra parte del cuerpo se interpreta.
+- El acumulado de un grupo viaja en `X-ST-Relay-Dropped`/`-Bytes` del **siguiente evento reenviado**
+  de esa conversación (o de ese pane), y se pone a cero solo si ese envío recibe 2xx. Más de 256
+  grupos abiertos ⇒ el excedente pasa a un contador sin atribuir (`X-ST-Relay-Unattributed`).
+- Lo perdido que no llega a informarse (el contenedor se detiene, el relay muere con la cola llena,
+  la conversación no vuelve a emitir) no produce `gap`. Tras un reinicio del relay, el primer evento
+  de cada conversación ya conocida lleva `X-ST-Relay-Restarted` y el backend escribe `relay_restart`.
+- Un evento "perdido" por timeout pudo haber llegado al backend: el número es una cota superior de
+  lo no confirmado, no un recuento exacto de lo no persistido.
+
+**Recepción local frente a persistencia**
+
+El 204 del relay solo significa *recibido en el contenedor*. **No** es entrega ni persistencia: no
+hay garantía de entrega, ni reintentos, ni almacenamiento en disco en el contenedor. "Persistido"
+sigue siendo solo lo de §4.1 (línea con `seq` en el archivo del host). Entre ambos, toda pérdida que
+el relay alcanza a ver se cuenta y, si la conversación vuelve a emitir, aparece como `gap`
+(`relay_dropped` o `relay_restart`); las que no, quedan como silencio en el registro, igual que un
+evento que el CLI nunca emitió.
+
+**Proxies de la sesión**
+
+- El CLI enruta un hook HTTP por el proxy de `HTTP_PROXY`/`HTTPS_PROXY` salvo que el host del URL
+  figure en `NO_PROXY`/`no_proxy` (coincidencia exacta de host, sin excepción implícita para
+  loopback). Un proxy no alcanza el loopback del contenedor, así que el evento se perdería.
+- Por eso, **solo** cuando la captura es efectiva **y** el env de la sesión define alguna de
+  `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` (o sus minúsculas), el backend añade `127.0.0.1` a
+  `NO_PROXY` y a `no_proxy` (las crea si faltan, conserva lo que tengan, no toca `*`). Sin proxy en el
+  env de la sesión, el env no cambia. No afecta a ninguna otra conexión de Claude: ningún proxy puede
+  servir el loopback del contenedor.
+- Un proxy exportado después (en `.bashrc` o a mano) sin `NO_PROXY` hace que los hooks vayan a ese
+  proxy y fallen; es configuración del propio usuario y solo afecta a su captura.
+
 ---
 
 ## 3. Endpoint de ingesta
@@ -248,6 +374,19 @@ CORS, con parser JSON propio limitado a **L5 bytes del cuerpo**.
 | --- | --- | --- |
 | `X-ST-Session` | `$SESSION_ID` del contenedor | *MUST* existir en `sessions` y coincidir con el token. El `session_id` del cuerpo (Claude) se asocia a esta sesión ST; un `session_id` ya asociado a **otra** sesión ST ⇒ descartado (`ingest_rejected{reason=session_mismatch}`). |
 | `X-ST-Tmux-Pane` | `$TMUX_PANE` | `^%\d{1,6}$` o vacío (sin tmux: `-p` del exec API). |
+
+### 3.2.1 Headers del relay (informes de pérdida)
+
+Los añade solo el relay (§2.6), al reenviar un evento. Valores decimales `^[0-9]{1,10}$`; cualquier
+otro valor se ignora (nunca rechaza el evento). Se procesan después de autorizar y de asociar el
+cuerpo a su conversación, **antes** de encolar el evento que los trae, y con independencia de que ese
+evento resulte duplicado:
+
+| Header | Efecto |
+| --- | --- |
+| `X-ST-Relay-Dropped: n` (+ `X-ST-Relay-Dropped-Bytes: b`) | n > 0 ⇒ un `gap{reason: relay_dropped, dropped: n, dropped_bytes: b}` en la conversación del evento |
+| `X-ST-Relay-Restarted: 1` | si la conversación ya tenía eventos persistidos ⇒ un `gap{reason: relay_restart}`; si es nueva, nada |
+| `X-ST-Relay-Unattributed: n` | n > 0 ⇒ `sessions_conversation_stats.unattributed_gaps` += 1 y el contador `relay_dropped_unattributed` += n (no hay conversación a la que atribuirlo) |
 
 ### 3.3 Cuerpos que no se pueden parsear
 
@@ -407,6 +546,8 @@ La ventana de sellados es FIFO y vive en el índice (snapshot + reconstrucción 
 | `backend_restart` | al reiniciar el backend, por conversación no terminada | "Posible actividad perdida entre HH:MM y HH:MM" |
 | `rotated` | L7 | "Historial anterior archivado" |
 | `revoked` | captura revocada mientras había eventos autorizados en cola (§2.5) | "Captura revocada a las HH:MM" |
+| `relay_dropped` | el relay del contenedor no pudo entregar n eventos (§2.6: cola llena, backend caído, colgado o con respuesta inesperada) | "N eventos no entregados por el contenedor" |
+| `relay_restart` | el relay se reinició; lo recibido por el anterior y no reenviado se perdió sin cuenta | "Posible actividad perdida (relay reiniciado)" |
 | `history_rotated` | cliente pide `after`/`before` anterior a `first_retained_seq` | "Eventos anteriores ya no disponibles (seq a–b)" |
 | `history_unavailable` | conversación conocida por `resume` sin eventos previos | "El historial anterior a la activación no está disponible" |
 
@@ -650,12 +791,18 @@ observado y decisión:
 
 ### 3.0c imagen
 
-- [ ] Directorio vacío + script presentes; pin 2.1.308; el script termina en ≤ 6 s con
-      `st-backend` sin resolver, con un receptor que acepta y nunca responde, y con `claude --version`
+- [ ] Directorio vacío + script + relay presentes; pin 2.1.308; el script termina en ≤ 6 s con
+      el relay ausente, con un relay que acepta y nunca responde, y con `claude --version`
       colgado (simulado con un `claude` falso en PATH).
-- [ ] Smoke test: sin archivo ⇒ cero peticiones a un receptor local (servidor en el propio test);
-      con archivo ⇒ `session_start`, `user_prompt`, `assistant_delta{final}`, `turn_end`, `session_end`
-      con los campos de §4.2; receptor cerrado ⇒ duración de `claude -p` ≤ base + 1 s × eventos;
+- [ ] Relay (§2.6), tests automáticos: solo `POST` a la ruta exacta; 204 vacío pase lo que pase el
+      backend; orden FIFO; cotas de cola, bytes y concurrencia; timeouts; conservación (recibidos =
+      reenviados + informados como perdidos); `X-ST-Relay-*`; ningún cuerpo ni token en sus logs.
+- [ ] Smoke test con el CLI real: sin archivo ⇒ cero peticiones y ningún relay; con archivo ⇒
+      `session_start`, `user_prompt`, `assistant_delta{final}`, `turn_end`, `session_end`, herramientas
+      y subagente con los campos de §4.2; backend caído, colgado o sin DNS ⇒ duración de `claude -p`
+      ≈ base y `gap relay_dropped` al volver; relay muerto y reiniciado ⇒ Claude sigue y
+      `gap relay_restart`; cola saturada ⇒ pérdidas contadas; `HTTP_PROXY` con y sin el `NO_PROXY`
+      del backend; RAM, CPU y latencia del relay medidas, incluido el streaming de MessageDisplay;
       borrar el archivo ⇒ la siguiente sesión no emite; medición (informativa, registrada en el PR y
       en §2.4) de si una sesión interactiva ya abierta deja de emitir al borrar el archivo.
 - [ ] README de la imagen: sección "Conversation hooks (managed settings)".
