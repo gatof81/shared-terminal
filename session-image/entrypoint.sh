@@ -506,6 +506,12 @@ fi
 # ST_RELAY_GENERATION so the relay can report the discontinuity. Both die
 # with the container. Above the readiness sentinel so the first `claude`
 # exec already finds the relay listening.
+#
+# MALLOC_MMAP_THRESHOLD_: bodies are up to 8 MiB; with glibc's dynamic
+# threshold, after the first one is freed later ones come from per-thread
+# arenas that never return memory, so a single burst would pin its peak RSS
+# for the container's life. A fixed threshold keeps every large body in its
+# own mapping, released to the OS as soon as it is delivered or dropped.
 ST_MANAGED_HOOKS=/etc/claude-code/managed-settings.d/conversation.json
 if [ -n "${ST_INGEST_TOKEN:-}" ] && [ -f "$ST_MANAGED_HOOKS" ] && [ -f /opt/st/hooks/relay.py ]; then
         relay_log=/dev/null
@@ -517,7 +523,8 @@ if [ -n "${ST_INGEST_TOKEN:-}" ] && [ -f "$ST_MANAGED_HOOKS" ] && [ -f /opt/st/h
                 trap 'kill "$child" 2>/dev/null; exit 0' TERM INT
                 while :; do
                         started=$SECONDS
-                        ST_RELAY_GENERATION=$gen python3 -IS /opt/st/hooks/relay.py </dev/null >>"$relay_log" 2>&1 &
+                        MALLOC_MMAP_THRESHOLD_=131072 ST_RELAY_GENERATION=$gen \
+                                python3 -IS /opt/st/hooks/relay.py </dev/null >>"$relay_log" 2>&1 &
                         child=$!
                         wait "$child"
                         [ $((SECONDS - started)) -ge 60 ] && delay=1

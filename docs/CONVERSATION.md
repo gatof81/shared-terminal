@@ -321,7 +321,11 @@ contenedor con captura. Recibe los hooks del CLI y del script en loopback y los 
 - Memoria de cuerpos, por diseño: **16 MiB** de cola + lecturas en curso (una sola copia por cuerpo:
   se recibe directo en un búfer reservado), **más** el cuerpo que se está enviando al backend (≤ L5,
   ya fuera de la cola; se envía sin concatenar, sin copia), más búferes de socket de ≤ 64 KiB por
-  conexión. Es decir, ≈ 24 MiB de cuerpos más el intérprete y el asignador. Los picos medidos
+  conexión. Es decir, ≈ 24 MiB de cuerpos más el intérprete y el asignador. Ningún cuerpo queda
+  retenido fuera de ese presupuesto: el handler suelta su referencia al pasarlo a la cola (antes de
+  esperar otra petición en una conexión keep-alive) y el hilo de salida la suelta al terminar cada
+  envío. El entrypoint arranca el relay con `MALLOC_MMAP_THRESHOLD_=131072` para que cada cuerpo
+  grande se devuelva al sistema al liberarse (sin eso, glibc retiene el pico de una ráfaga). Los picos medidos
   (3.0c: con cuerpos pequeños, con 1 MiB y con cuerpos de L5) se informan con su escenario; no son
   una cota universal: el asignador y la versión de Python varían.
 - Un solo hilo de salida, **en orden**, con una conexión HTTP/1.1 persistente a

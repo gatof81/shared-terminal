@@ -329,6 +329,10 @@ def serve_connection(sock):
                 drop("read_error", n, session_of(buf), pane)
                 return
             fifo.put(body, pane)
+            # The queue owns it now. Holding the local until the next
+            # request would keep a delivered body alive outside the queue's
+            # budget for as long as the client idles on a kept-alive socket.
+            del body
         else:
             # Queue full: the body is read and dropped rather than left
             # unread — closing on unread data resets the connection, which
@@ -455,6 +459,7 @@ def forward_loop():
         sid = session_of(body)
         if time.monotonic() < pause_until:
             drop("paused", len(body), sid, pane)
+            del body
             continue
         keys = [k for k in (group_key(sid, None), group_key(None, pane)) if k]
         n, b, unattributed, taken = losses.take(keys)
@@ -479,6 +484,8 @@ def forward_loop():
             losses.restore(taken, unattributed)
             drop("upstream", len(body), sid, pane)
             pause_until = time.monotonic() + PAUSE_AFTER_FAILURE
+        # Nor keep the last one sent while waiting for the next.
+        del body
 
 
 def stats_loop():

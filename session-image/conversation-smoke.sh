@@ -777,6 +777,9 @@ check "L5 flood: every request answered 204 ($L5_CODES)" [ "$L5_CODES" = 204 ]
 check "L5 flood: received = forwarded + dropped ($(relay_stat forwarded) + $(relay_stat dropped))" \
 	[ $(($(relay_stat forwarded) + $(relay_stat dropped))) = "$(relay_stat received)" ]
 check "L5 flood: peak above baseline $((L5_PEAK / 1024)) MiB ≤ 16 + 8 MiB of bodies + 8 MiB slack" [ "$L5_PEAK" -le $((32 * 1024)) ]
+sleep 2.5 # the flood's connections are closed; everything delivered or dropped
+L5_AFTER=$(($(relay_proc "$RELAY_PID" VmRSS) - BASE_RSS))
+check "after the L5 flood, no delivered body is retained (RSS +$((L5_AFTER / 1024)) MiB over baseline ≤ 8 MiB)" [ "$L5_AFTER" -le $((8 * 1024)) ]
 note "L5 stress: 12 × 8 MiB at once against a backend taking 300 ms ⇒ forwarded $(relay_stat forwarded), dropped $(relay_stat dropped) (queue_full $(relay_stat dropped_queue_full)); relay RSS before $BASE_RSS kB, peak VmHWM $L5_HWM kB (+$((L5_PEAK / 1024)) MiB) — measured for this scenario, not a universal ceiling"
 
 # ── Phase 8 ─────────────────────────────────────────────────────────────────

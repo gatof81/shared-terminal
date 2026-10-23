@@ -111,6 +111,9 @@ async function startRelay(env: Record<string, string> = {}): Promise<Relay> {
 			ST_RELAY_LISTEN_PORT: String(port),
 			ST_HOOKS_DEBUG: "1",
 			ST_RELAY_STATS_INTERVAL: "0.05",
+			// As entrypoint.sh starts it: large bodies in their own mappings,
+			// so RSS shows what is live rather than what glibc cached.
+			MALLOC_MMAP_THRESHOLD_: "131072",
 			...env,
 		},
 		stdio: ["ignore", "ignore", "pipe"],
@@ -532,6 +535,78 @@ describe("relay — losses are counted and reported (§3.2.1)", () => {
 		expect(peakKiB).toBeLessThanOrEqual((16 + 8 + 8) * 1024);
 		console.log(
 			`relay L5 stress: ${N} × 8 MiB, peak above baseline ${Math.round(peakKiB / 1024)} MiB, stats ${JSON.stringify(s)}`,
+		);
+	}, 60_000);
+
+	it("kept-alive connections don't retain delivered bodies; reused, they stay intact, ordered and 204", async () => {
+		const L5 = 8 * 1024 * 1024;
+		const K = 6;
+		await startUpstream("ok");
+		const r = await startRelay();
+		const rss = async () =>
+			Number(
+				(await fs.readFile(`/proc/${r.proc.pid}/status`, "utf8")).match(/^VmRSS:\s+(\d+)/m)?.[1],
+			);
+		const baseline = await rss();
+		const bigBody = (i: number) => {
+			const prefix = `{"session_id":"${SID}","hook_event_name":"MessageDisplay","index":${i},"x":"`;
+			const b = Buffer.alloc(L5 - 64, "y".charCodeAt(0) + (i % 20));
+			b.write(prefix, 0);
+			b.write('"}', b.length - 2);
+			return b;
+		};
+		// One raw keep-alive socket per client, so nothing but the relay can
+		// close them; a request is answered when its 204 head has arrived.
+		const conns = await Promise.all(
+			Array.from({ length: K }, async () => {
+				const sock = net.connect(r.port, "127.0.0.1");
+				await new Promise((res) => sock.once("connect", res));
+				let data = "";
+				sock.on("data", (c) => {
+					data += c.toString("latin1");
+				});
+				return {
+					sock,
+					send: async (b: Buffer) => {
+						const before = (data.match(/HTTP\/1\.1 /g) ?? []).length;
+						sock.write(
+							`POST ${PATH} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: ${b.length}\r\n\r\n`,
+						);
+						sock.write(b);
+						await until(() => (data.match(/HTTP\/1\.1 /g) ?? []).length > before, 5000);
+						return data.slice(data.lastIndexOf("HTTP/1.1 "));
+					},
+				};
+			}),
+		);
+		const sent: Buffer[] = [];
+		const round = async (offset: number) => {
+			for (let i = 0; i < K; i++) {
+				const b = bigBody(offset + i);
+				sent.push(b);
+				// Sequential and drained one at a time: the queue never refuses.
+				expect(await conns[i].send(b)).toBe("HTTP/1.1 204 No Content\r\n\r\n");
+				await until(() => received.length === sent.length, 5000);
+			}
+		};
+		await round(0);
+		// All delivered, queue empty, every connection still open and idle.
+		await until(() => (r.stats().forwarded ?? 0) === K, 5000);
+		const held = (await rss()) - baseline;
+		expect(conns.every((c) => !c.sock.destroyed)).toBe(true);
+		// Retained bodies would be K × ~8 MiB = 48 MiB here; the documented
+		// budget allows none outside the queue once delivered. 8 MiB slack.
+		expect(held).toBeLessThanOrEqual(8 * 1024);
+		// Reuse every connection (within the 2 s idle window): same answers,
+		// every body intact and in order.
+		await round(K);
+		await until(() => r.stats().forwarded === 2 * K, 5000);
+		expect(r.stats()).toMatchObject({ received: 2 * K, forwarded: 2 * K });
+		expect(r.stats().dropped ?? 0).toBe(0);
+		expect(received.map((x) => x.body)).toEqual(sent.map((b) => b.toString()));
+		for (const c of conns) c.sock.destroy();
+		console.log(
+			`relay keep-alive retention: ${K} × 8 MiB delivered, RSS above baseline with idle connections ${Math.round(held / 1024)} MiB`,
 		);
 	}, 60_000);
 
