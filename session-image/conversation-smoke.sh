@@ -476,8 +476,13 @@ check "session_start.claude_version = 2.1.308 (from the script, via the relay)" 
 check "session_start.argv_flags = [\"-p\"] (allowlist)" grep -q '"argv_flags":\["-p"\]' <<<"$SS"
 check "assistant_delta final=true carries the full text" \
 	grep -q '"final":true' <<<"$(conv_events "$HOLA_CID" | jq -c 'select(.ev == "assistant_delta") | .data')"
-PAIRS=$(jq -cs '[.[] | select(.event == "PreToolUse" or .event == "PostToolUse" or .event == "PostToolUseFailure") | .body.tool_use_id] | group_by(.) | map(length) | unique' "$OUT/on.jsonl")
-check "every tool_use_id has its start and its end ($PAIRS)" [ "$PAIRS" = "[2]" ]
+# Per tool_use_id: its Pre/Post events in arrival order; anything but one
+# start and one end is listed with its prompt so a failure says why.
+ODD=$(jq -cs '[.[] | select(.event == "PreToolUse" or .event == "PostToolUse" or .event == "PostToolUseFailure")]
+	| group_by(.body.tool_use_id)
+	| map({id: .[0].body.tool_use_id, evs: map(.event), cmd: .[0].body.tool_input.command, sid: .[0].body.session_id})
+	| map(select(.evs != ["PreToolUse", "PostToolUse"] and .evs != ["PreToolUse", "PostToolUseFailure"]))' "$OUT/on.jsonl")
+check "every tool_use_id has exactly one start and one end (odd: $ODD)" [ "$ODD" = "[]" ]
 check "a failing tool is tool_failed" grep -q '"ev":"tool_failed"' <<<"$EVENTS"
 AGENT=$(jq -s '[.[] | select(.event == "SubagentStart" or .event == "SubagentStop") | .body.agent_id] | unique | length' "$OUT/on.jsonl")
 check "subagent: SubagentStart/Stop share one agent_id" [ "$AGENT" = 1 ]
@@ -651,8 +656,10 @@ sleep 0.5
 tab_turn "after restart"
 sleep 1
 ORDER=$(conv_order "$CID")
-check "one gap relay_restart persisted after the kill ($ORDER)" \
-	bash -c 'grep -q "prompt:while it restarts.*relay_restart" <<<"$1" && [ "$(grep -o relay_restart <<<"$1" | wc -l)" = 1 ]' _ "$ORDER"
+# What hit the dead port (here the next prompt, at least) is lost without a
+# count — nobody was listening to count it; the restart itself is marked.
+check "one gap relay_restart persisted after the kill, before the next prompt ($ORDER)" \
+	bash -c 'grep -q "prompt:first turn .*relay_restart prompt:after restart" <<<"$1" && [ "$(grep -o relay_restart <<<"$1" | wc -l)" = 1 ]' _ "$ORDER"
 note "relay killed: restarted by its supervisor; conversation shows: $ORDER"
 # Relay and supervisor both gone: capture stops, Claude doesn't.
 SUP=$(docker exec "$SESS" awk '/^PPid:/ { print $2 }' "/proc/$NEW/status")
