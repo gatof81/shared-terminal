@@ -304,6 +304,15 @@ export interface CaptureAuthorityDeps {
 
 const TIMED_OUT = Symbol("timed-out");
 
+/**
+ * Positive identification made by a write procedure: WHICH container's
+ * relay answered, and when. Reusing it is only valid for that container.
+ */
+export interface RelayEvidence {
+	containerId: string;
+	at: number;
+}
+
 export type WriteOutcome = "written" | "not-authorized" | "relay-unavailable" | "revoked-meanwhile";
 
 export class CaptureAuthority {
@@ -391,12 +400,16 @@ export class CaptureAuthority {
 	}
 
 	/**
-	 * The `capture` block of §2.7.6, fresh. `identifiedAt` is for the one
+	 * The `capture` block of §2.7.6, fresh. `identified` is for the one
 	 * caller that has just identified the relay itself within the same
 	 * request (enable's write procedure): that probe IS this request's
-	 * probe, so D7 is met without a second exec.
+	 * probe, so D7 is met without a second exec — but only for the
+	 * container it identified.
 	 */
-	async capture(sessionId: string, opts: { identifiedAt?: number } = {}): Promise<CaptureBlock> {
+	async capture(
+		sessionId: string,
+		opts: { identified?: RelayEvidence } = {},
+	): Promise<CaptureBlock> {
 		let f: CaptureFacts;
 		try {
 			f = await this.facts(sessionId);
@@ -421,9 +434,15 @@ export class CaptureAuthority {
 		const containerId = f.row.container_id;
 		let identified: boolean;
 		let at: number;
-		if (opts.identifiedAt !== undefined) {
-			identified = true;
-			at = opts.identifiedAt;
+		if (opts.identified) {
+			// The facts above are read after the write procedure finished,
+			// and `candidate` re-checked authorization on them. What they
+			// can't show is whose relay answered: D1 may now name another
+			// container (with a valid correspondence of its own) than the
+			// one identified. Its relay was not identified in this request,
+			// and no second probe runs to make up for it.
+			identified = opts.identified.containerId === containerId;
+			at = opts.identified.at;
 		} else {
 			// `at` is when the probe answered, so a request that joined one
 			// already in flight reports the time of the evidence it got.
@@ -441,7 +460,7 @@ export class CaptureAuthority {
 		// The enable path's identification came from its own write procedure,
 		// which re-checked authorization and container after it; the facts
 		// above were read after that, so there is nothing newer to re-read.
-		if (opts.identifiedAt !== undefined) return { ...rest, effective: true, checkedAt };
+		if (opts.identified) return { ...rest, effective: true, checkedAt };
 		// V3: the probe took time. Before saying `effective:true`, the
 		// authorization, the configuration and the very container that was
 		// identified must still hold — re-read, without a second probe.
@@ -471,13 +490,13 @@ export class CaptureAuthority {
 
 	/**
 	 * `fresh`: facts the caller has just read for this decision (converge,
-	 * enable) — saves a second D1 read and Docker inspect. `identifiedAt`
-	 * is when the relay identified, for a caller that reports `capture`.
+	 * enable) — saves a second D1 read and Docker inspect. `identified` is
+	 * the identification evidence, for a caller that reports `capture`.
 	 */
 	async applyWriteDetailed(
 		sessionId: string,
 		fresh?: CaptureFacts,
-	): Promise<{ outcome: WriteOutcome; identifiedAt?: number }> {
+	): Promise<{ outcome: WriteOutcome; identified?: RelayEvidence }> {
 		const f = fresh ?? (await this.facts(sessionId));
 		if (!writeAuthorized(f) || !f.row?.container_id) return { outcome: "not-authorized" };
 		const containerId = f.row.container_id;
@@ -513,7 +532,7 @@ export class CaptureAuthority {
 				await this.withdraw(sessionId);
 				return { outcome: "revoked-meanwhile" };
 			}
-			return { outcome: "written", identifiedAt };
+			return { outcome: "written", identified: { containerId, at: identifiedAt } };
 		} catch (err) {
 			await this.withdraw(sessionId).catch(() => undefined);
 			throw err;

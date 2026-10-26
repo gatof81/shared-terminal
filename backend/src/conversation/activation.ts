@@ -36,6 +36,7 @@ import {
 	correspondenceOf,
 	ensureControlDir,
 	RELAY_IMAGE_LABEL,
+	type RelayEvidence,
 	removeAllRelayMarkers,
 	removeRelayEnabled,
 	retainAuthorized,
@@ -387,10 +388,10 @@ export async function enableSession(
 	deps.invalidate?.(sessionId);
 	const after = await authority.facts(sessionId);
 	const c = after.container;
-	let identifiedAt: number | undefined;
+	let identified: RelayEvidence | undefined;
 	if (c?.exists) {
 		if (c.running && writeAuthorized(after)) {
-			({ identifiedAt } = await authority.applyWriteDetailed(sessionId, after));
+			({ identified } = await authority.applyWriteDetailed(sessionId, after));
 		} else if (!retainAuthorized(after)) await authority.withdraw(sessionId);
 	} else {
 		// No container: the next spawn prepares everything from scratch, so
@@ -399,7 +400,7 @@ export async function enableSession(
 	}
 	// The write procedure's own identification is this request's probe
 	// (D7): reported as such instead of a second exec.
-	return { enabled: true, capture: await authority.capture(sessionId, { identifiedAt }) };
+	return { enabled: true, capture: await authority.capture(sessionId, { identified }) };
 }
 
 /**

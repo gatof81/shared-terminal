@@ -581,6 +581,46 @@ describe("capture(): state re-validated after the probe (V3)", () => {
 	});
 });
 
+describe("enable: the write procedure's evidence is bound to the container it identified (V3)", () => {
+	it("A identified, D1 switched to B (own valid correspondence) before the final capture ⇒ effective:false, no second probe", async () => {
+		const row = session("s1", { conversation_requested: 0, container_id: "cid-A" });
+		const m = make({});
+		const realCapture = m.authority.capture.bind(m.authority);
+		const capture = vi.spyOn(m.authority, "capture").mockImplementation(async (sid, opts) => {
+			// The write procedure (on A) has finished; D1 now names B before
+			// capture()'s final read of the facts.
+			row.container_id = "cid-B";
+			return realCapture(sid, opts);
+		});
+		const r = await enableSession(deps(), m.authority, "s1", async () => false);
+		expect(capture).toHaveBeenCalledTimes(1);
+		expect(capture.mock.calls[0]?.[1]?.identified?.containerId).toBe("cid-A");
+		expect(m.probe).toHaveBeenCalledTimes(1);
+		expect(m.probe.mock.calls[0]?.[1]).toBe("cid-A");
+		expect(m.inspect).toHaveBeenLastCalledWith("cid-B");
+		expect(r.capture.effective).toBe(false);
+		expect(r.capture.pendingReasons).toContain("relay-unavailable");
+	});
+	it("the same evidence through capture() directly: A's evidence never makes B effective", async () => {
+		const row = session("s1", { container_id: "cid-A" });
+		const m = make({});
+		const w = await m.authority.applyWriteDetailed("s1");
+		expect(w.outcome).toBe("written");
+		expect(w.identified?.containerId).toBe("cid-A");
+		row.container_id = "cid-B";
+		const c = await m.authority.capture("s1", { identified: w.identified });
+		expect(c.effective).toBe(false);
+		expect(m.probe).toHaveBeenCalledTimes(1);
+	});
+	it("A unchanged ⇒ one probe and effective:true", async () => {
+		session("s1", { conversation_requested: 0, container_id: "cid-A" });
+		const m = make({});
+		const r = await enableSession(deps(), m.authority, "s1", async () => false);
+		expect(r.capture.effective).toBe(true);
+		expect(m.probe).toHaveBeenCalledTimes(1);
+	});
+});
+
 describe("converge(): reconcile (§2.4 row, K2)", () => {
 	it("running + full authorization + something missing ⇒ written; complete ⇒ kept", async () => {
 		session("s1");
