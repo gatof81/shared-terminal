@@ -1,11 +1,19 @@
 # 3.0d — Activación progresiva: propuesta
 
-Estado: **propuesta v2 para revisión (Work + responsable), no implementada.** Base: `main` en
-`29645bd` (3.0c mergeado; `CONVERSATION_ENABLED` desactivado; backend no desplegado).
+Estado: **propuesta v3 para revisión (Work + responsable), no implementada.** Base: `main` en
+`a836434` (3.0c + #448 + #450 mergeados; `CONVERSATION_ENABLED` desactivado; backend no
+desplegado).
 
-La v1 recomendaba recrear el contenedor automáticamente en `start`. La v2 incorpora las
-decisiones D1–D6 del responsable, que siguen las recomendaciones de Work (§9), y corrige A1–A3
-(§10):
+La v1 recomendaba recrear el contenedor automáticamente en `start`. La v2 incorporó las
+decisiones D1–D6 del responsable, que siguen las recomendaciones de Work (§9). La v3 corrige los
+hallazgos de Work sobre la v2 (A2, A3 y A4). §10 mantiene la trazabilidad original:
+
+- A1 = pérdida de archivos;
+- A2 = rollback y estado compartido;
+- A3 = estado efectivo y `effectiveAfterRestart`;
+- A4 = arranque del relay.
+
+Las decisiones de base son:
 
 - La recreación pasa a ser **administrativa, explícita y protegida**.
 - Los datos de HOME y de la capa del contenedor se preservan de forma **estricta**: si algo se
@@ -24,11 +32,18 @@ un PR de docs **antes** del código.
 - **Esa acción se rechaza** si la sesión está en marcha. También se rechaza si recrear perdería
   cualquier dato que no se pueda reconstruir de forma exacta, o si la imagen no es apta. **No hay
   forzado.**
-- **La recreación tiene un punto de confirmación único:** el cambio de `container_id` en D1, con
-  compare-and-set. Antes de ese punto, cualquier fallo vuelve al contenedor anterior. Después, no
-  hay vuelta atrás automática, ni hace falta.
-- **`effectiveAfterRestart` solo es `true`** si el siguiente `start` *crea* el contenedor con
-  captura. Lo demás se informa con `requiresRecreate` y motivos explícitos.
+- **La recreación tiene un punto de confirmación único:** un compare-and-set en D1 que cambia
+  `container_id` **y** el hash del token en la misma sentencia.
+  - Antes de ese punto, `N` no escribe nada en el workspace que `O` no escribiría igual al
+    arrancar, y cualquier fallo vuelve exactamente al estado anterior.
+  - Después, no hay vuelta atrás automática, ni hace falta.
+- **El token del contenedor y el hash autorizado en D1 se comprueban siempre:** el `sha256` del
+  token que el contenedor tiene en su env debe ser el hash de D1. Sin correspondencia no hay
+  `effective:true` ni promesa tras un restart.
+- **El relay arranca cuando la captura se autoriza, no solo al arrancar el contenedor.**
+  Activarla en un contenedor en marcha no requiere otra recreación.
+- **`effectiveAfterRestart` solo es `true`** si el siguiente `start` deja la captura efectiva sin
+  recrear. Lo demás se informa con `requiresRecreate` y motivos explícitos.
 
 ## 1. Alcance
 
@@ -43,6 +58,13 @@ un PR de docs **antes** del código.
 - `CONVERSATION_ALLOW_USERS`.
 - Las estadísticas de `GET /api/admin/stats → conversation`.
 - La etiqueta de imagen y su verificación por ID.
+- **Cambios en la imagen (entrypoint) necesarios para A2 y A4:**
+  - siembra de skills diferible (§5.4);
+  - relay que arranca cuando aparece la marca de autorización (§5.8).
+
+  No alteran nada para un contenedor sin captura.
+- La comprobación de correspondencia token ↔ hash en todo cálculo de `capture` y antes de
+  escribir la marca o los hooks (§6.1).
 - La detección de recreaciones interrumpidas en `reconcile` (§5.6).
 - La semántica nueva de `capture` (§6).
 - El plan por etapas (§7).
@@ -54,7 +76,7 @@ un PR de docs **antes** del código.
 - #444.
 - La activación global.
 - Actualizar en masa la imagen de los contenedores existentes.
-- Cambios en `start`, `stop`, `kill` o el borrado.
+- Cambios de comportamiento en `start`, `stop`, `kill` o el borrado, aparte del lock.
 - Copiar datos de la capa del contenedor al contenedor nuevo (§11).
 - UI para el owner.
 
@@ -82,13 +104,28 @@ un PR de docs **antes** del código.
   - Es inocuo hoy, porque ese contenedor tampoco tiene el montaje.
   - Pero impide deducir "el contenedor tiene token" solo a partir de D1 (§6).
 - **`prepareSpawnCapture`** escribe hooks y token aunque la imagen no tenga relay.
+- **El entrypoint arranca el relay solo si al arrancar ya existen el token *y*
+  `conversation.json`** (`entrypoint.sh`, bloque del relay). Consecuencias:
+  - Escribir los hooks después de arrancar `N` dejaría hooks sin relay: "hook error" visible y
+    nada capturado (A4).
+  - Ya pasa en `main`, en la fila "habilitar con token" de CONVERSATION.md §2.4. Un contenedor que
+    arrancó con la captura deshabilitada (token presente, archivo borrado) responde
+    `effective:true` al rehabilitarse, sin relay. Es inalcanzable hoy (flag apagado, sin ruta de
+    activación) y se corrige con §5.8.
+- **El entrypoint escribe en el workspace compartido en cada arranque:**
+  - **Skills:** `cp -r /opt/session-skills/. ~/.claude/skills/` sobrescribe, con el contenido de
+    *esa* imagen, toda skill gestionada que el usuario haya personalizado bajo el mismo nombre.
+  - **`.npm-global`:** lo siembra desde la imagen si la copia del workspace falta.
+  - **Layout heredado:** migra `workspace/.claude` a `.st/claude-state`.
+
+  Las tres dependen de la imagen (A2, §5.4).
 - **El bootstrap** (gitIdentity → clone → dotfiles → agentSeed → postCreate) solo corre al crear la
   sesión.
   - `~/.gitconfig` y `~/dotfiles` viven en la **capa** del contenedor.
   - Cualquier recreación de hoy los pierde: id obsoleto, soft delete + start, o el procedimiento
     manual de DEPLOYMENT.md.
 
-## 3. Qué conserva y qué pierde una recreación
+## 3. Qué conserva y qué pierde una recreación (A1)
 
 | Estado | Dónde vive | Recreación |
 | --- | --- | --- |
@@ -141,15 +178,23 @@ atajo. Para el piloto (§7) se elige una sesión que pase.
    (`running`, `container-missing`).
 4. **Imagen:**
    - `inspect(SESSION_IMAGE)` → `imageId`, que debe ser igual a `expectImageId` (`image-changed`).
-   - La etiqueta `io.shared-terminal.conversation-relay="1"` debe estar **en ese ID**
-     (`image-without-relay`).
+   - La etiqueta `io.shared-terminal.conversation-relay="2"` debe estar **en ese ID**
+     (`image-without-relay`). El valor `2` declara un entrypoint con la siembra de skills
+     diferible (§5.4) y el relay que arranca con la marca de autorización (§5.8). La imagen de
+     3.0c no tiene la etiqueta, así que no sirve.
    - Desde aquí, todo usa `imageId`, nunca la etiqueta del tag.
 5. **Captura:** `CONVERSATION_ENABLED`, `conversation_requested=1`, sin marca de revocación
    (`flag-off`, `not-requested`, `revoked`).
    - Recrear sin captura pedida no es parte de 3.0d.
 6. **Capa del contenedor** (§5.2): sin pérdidas (`layer-*`).
+7. **Workspace** (§5.4), con `lstat` en el host, sin seguir symlinks:
+   - `workspace/.npm-global` es un directorio real (`workspace-cli-missing`);
+   - no hay layout heredado `workspace/.claude` pendiente de migrar (`workspace-legacy-layout`).
 
-### 5.2 Preservación estricta de la capa (D2, D3)
+   Si no se cumplen, el entrypoint de `N` escribiría en el workspace contenido de su imagen antes
+   de la confirmación.
+
+### 5.2 Preservación estricta de la capa (A1; D2, D3)
 
 `container.changes()` (`docker diff`) del contenedor detenido. Cada entrada se clasifica en una
 de estas dos clases.
@@ -186,42 +231,59 @@ en el log.
 **D3:** tras la recreación solo se rehace gitIdentity, cuando el archivo existía y pasó el chequeo.
 Los dotfiles nunca se rehacen: una sesión con dotfiles queda bloqueada por `layer-dotfiles`.
 
-### 5.3 Secuencia y punto de confirmación (A1)
+### 5.3 Secuencia y punto de confirmación (A2)
 
-Notación: `O` es el contenedor viejo y `N` el nuevo.
+Notación: `O` es el contenedor viejo, `N` el nuevo y `H` el hash del token nuevo.
 
 1. **Preparar sin efectos visibles.**
-   - Se genera el token.
+   - Se genera el token y su hash `H`.
    - Se crea `N` con un **nombre temporal** (`st-<12>-new-<ts>`), `Image: imageId` y la
-     configuración de spawn de siempre (env, binds, caps, red).
-   - Se añaden etiquetas `io.shared-terminal.session=<sid>` y `io.shared-terminal.recreate-of=<O>`.
-   - `N` no se arranca. D1 sigue en `O`, el archivo de hooks no existe y el hash no cambió.
+     configuración de spawn de siempre (env con el token, binds con el directorio gestionado, caps,
+     red).
+   - Se añaden las etiquetas `io.shared-terminal.session=<sid>` e
+     `io.shared-terminal.recreate-of=<O>`.
+   - Con `putArchive` se deja en la capa de `N` la marca `/tmp/.st-defer-skill-seed` (§5.4).
+   - `N` no se arranca. D1, el directorio gestionado y el workspace quedan intactos.
 2. **Renombrar.** `O` → `st-<12>-old-<ts>`, y `N` → `st-<12>` (el nombre canónico).
 3. **Recomprobar `O` y arrancar `N`.**
    - **Primero**, `inspect(O)`: `State.Running` debe seguir en `false`. Si no (por ejemplo un
      `docker start` manual entre los pasos 2 y 3), rollback sin arrancar `N`.
    - `start()` de `N`.
-   - El sentinel de readiness en ≤ 60 s, que ya existe.
-   - Que `N` siga en marcha.
-   - Hooks, token y postStart todavía no.
-4. **Confirmar en D1 (punto de no retorno), con compare-and-set:**
+   - El sentinel de readiness en ≤ 60 s y que `N` siga en marcha.
+   - El entrypoint de `N`:
+     - ve la marca y **no** siembra skills;
+     - el supervisor del relay ve el token, pero no la marca de autorización (§5.8), así que
+       espera sin arrancar el relay.
+   - No hay hooks, ni postStart, ni ninguna escritura que dependa de la imagen (§5.4).
+4. **Confirmar en D1 (punto de no retorno), en una sola sentencia:**
 
    ```sql
-   UPDATE sessions SET container_id = :N
+   UPDATE sessions
+   SET container_id = :N, ingest_token_hash = :H, ingest_token_hash_suspended = NULL
    WHERE session_id = :sid AND container_id = :O
+     AND conversation_requested = 1
    ```
 
-   - Si afecta 0 filas (alguien cambió la fila, por ejemplo un hard delete en curso): rollback.
-   - Si D1 no responde: rollback, porque D1 sigue en `O`.
-   - Un timeout ambiguo (la escritura pudo aplicarse) se resuelve releyendo la fila antes de
-     decidir; si la relectura también falla, se trata como §5.6.
-5. **Activar la captura** en `N`, en este orden:
-   1. hash del token a D1;
-   2. archivo de hooks.
+   - El contenedor y el hash autorizado cambian juntos: no existe ningún instante en que D1 apunte
+     a `N` con un hash que no sea el de su token (A3).
+   - 0 filas (alguien cambió la fila: un hard delete, o un disable que puso `requested=0`) ⇒
+     rollback.
+   - D1 no responde ⇒ rollback, porque la sentencia no se aplicó.
+   - Un timeout ambiguo se resuelve releyendo la fila: `container_id = N` significa que se aplicó.
+     Si la relectura también falla, se trata como §5.6.
+   - Con el tope vencido (§5.3.1) no se ejecuta.
+5. **Autorizar el relay y escribir los hooks** (§5.8), en este orden:
+   1. la marca `relay.enabled` en el directorio gestionado;
+   2. esperar a que el relay de `N` escuche: `execCapture` de un probe de `/dev/tcp/127.0.0.1/47613`,
+      ≤ 5 s;
+   3. `conversation.json`.
 
-   El relay de `N` arrancó en el paso 3 porque el env ya tiene el token, pero todavía no hay hooks
-   que le escriban. Esto mantiene el orden de 3.0b: "nunca emisor sin aceptor".
+   Si el relay no escucha en ese tiempo, se borra la marca y **no** se escribe el archivo:
+   `effective:false` con `relay-not-listening`. No hay hooks sin relay ni "hook error". El hash
+   sigue autorizado y corresponde al token. La reparación es `PATCH {enabled:true}` (§5.8), sin
+   recrear.
 6. **Completar.**
+   - Siembra de skills diferida, con el mismo script que usa el entrypoint (§5.4).
    - Mapeos de puertos desde la config.
    - `status=running`.
    - gitIdentity si aplica (§5.2).
@@ -236,30 +298,28 @@ el anterior falló:
 
 1. `stop` y `remove` de `N` si existe.
 2. `O` vuelve a su nombre canónico si fue renombrado.
-3. El hash y el archivo nunca se tocaron, porque el paso 5 viene después de la confirmación.
 
-Estado final: idéntico al previo. `O` está detenido, con D1 apuntándolo, sin cambios en la
-captura. Respuesta: 500 `recreate-failed` con `{ step }`.
+D1, el directorio gestionado y el workspace no necesitan restauración: antes del paso 4 no se
+escribió nada en ellos. Lo único que `N` pudo escribir en el workspace son los `mkdir -p` que `O`
+hace igual al arrancar (§5.4).
 
-**Fallos después del paso 5.** No se vuelve a `O`.
+Estado final: idéntico al previo. `O` está detenido, con D1 apuntándolo, y sin cambios en la
+captura ni en las skills. Respuesta: 500 `recreate-failed` con `{ step }`.
 
-Si el hash se escribió y el archivo no, hay token sin emisor. El estado es reparable sin recrear,
-porque el contenedor `N` ya tiene el token y el montaje; solo falta un archivo en el host:
+**Fallos después del paso 4.** No se vuelve a `O`. El hash ya corresponde a `N`, así que todo
+estado intermedio se repara sin recrear:
 
-1. el endpoint reintenta escribir el archivo una vez y, si vuelve a fallar, responde
-   `effective:false` con `pendingReasons: ["hooks-file-missing"]`;
-2. **reparación inmediata:** `PATCH …/conversation {enabled:true}` sobre la sesión en marcha. La
-   rama "ya efectiva" de `enableSession` (hash presente y contenedor en marcha) reescribe el
-   archivo. Ya existe en 3.0b;
-3. **reparación automática:** el `reconcile` de 3.0b, al arrancar el backend, escribe el archivo
-   para toda sesión `running` con `requested ∧ hash` sin archivo (`service.reconcile`:
-   `shouldHaveFile && !has`).
+- **Falta la marca o el archivo** (fallo de disco, caída entre 5.1 y 5.3):
+  `pendingReasons: ["hooks-file-missing"]` o `["relay-not-listening"]`. Se repara de dos formas:
+  - **inmediata:** `PATCH …/conversation {enabled:true}`. Si el token de `N` corresponde al hash
+    de D1 (§6.1), reescribe la marca, espera al relay y escribe el archivo;
+  - **automática:** el `reconcile` de 3.0b al arrancar el backend, ampliado con la marca y la
+    misma comprobación de correspondencia.
+- **Las skills no se sembraron** (paso 6): se siembran en el siguiente arranque de `N`, como
+  cualquier arranque.
 
-Esto nunca exige una segunda recreación, que §5.2 probablemente bloquearía, porque para entonces
-`N` ya tiene `~/.bash_history`. Si el hash **no** llegó a escribirse, el token de `N` ya no se
-conoce y la captura de `N` no se puede activar. La salida es la de cualquier sesión con
-`requiresRecreate` y la capa bloqueada: el owner resuelve los bloqueos de §5.2, o la captura se
-queda sin activar en esa sesión. No hay salida destructiva (D4).
+Nada de esto exige una segunda recreación, que §5.2 probablemente bloquearía, porque para entonces
+`N` ya tiene `~/.bash_history`.
 
 #### 5.3.1 Tope de tiempo
 
@@ -269,6 +329,8 @@ colgado retendría el lock hasta reiniciar el backend. Por eso hay dos topes:
 - **Recreación: `T_rec` = 5 min**, desde el lock hasta el final del paso 6. Incluye la espera de
   readiness (≤ 60 s). Cada llamada a Docker corre contra el tiempo que le queda.
   - Si el tope vence antes del paso 4, se aborta y se pasa al rollback.
+  - El tope no se aplica a la espera del paso 5.2, que tiene su propio tope de 5 s y no deshace
+    nada.
   - El paso 4 comprueba el tope **justo antes** del compare-and-set: con el tope vencido no
     confirma. Así una recreación abortada nunca cambia D1.
   - Si vence después del paso 4, no se deshace nada (§5.3). Lo que quede del paso 6 se registra.
@@ -295,17 +357,30 @@ colgado retendría el lock hasta reiniciar el backend. Por eso hay dos topes:
   - Lo que no pasa por el backend no lo protege el lock, por ejemplo un `docker start` manual. Por
     eso el paso 3 vuelve a comprobar que `O` sigue detenido justo antes de arrancar `N`. Si no lo
     está, hace rollback.
-- **Efectos de `N` en el workspace antes de la confirmación.** El entrypoint de `N` corre en el
-  paso 3, antes del punto de no retorno, y puede escribir en el workspace compartido:
-  - crea los directorios `.st/*` si faltan;
-  - repone el symlink `.npm-global` desde la imagen **solo** si la copia del workspace falta o está
-    rota;
-  - rescata un `~/.ssh` de la capa, que en `N` no existe.
+- **Efectos de `N` en el workspace antes de la confirmación.** Regla: antes del paso 4, `N` no
+  escribe en el workspace nada que `O` no escribiría **igual** al arrancar. Si no fuera así, un
+  rollback dejaría a `O` con contenido de otra imagen. Revisión exhaustiva de `entrypoint.sh`:
 
-  Las tres escrituras son idempotentes y son las mismas que hace cualquier arranque de `O`, así que
-  el rollback no las deshace: `O` funciona igual con ellas. postStart, que es arbitrario, y
-  gitIdentity corren **después** de la confirmación. Por eso no hay efectos del usuario que
-  deshacer.
+  | Escritura del entrypoint | Depende de la imagen | Antes del paso 4 |
+  | --- | --- | --- |
+  | `mkdir -p` de `.st`, `.st/claude-state`, `.st/ssh`, `.vscode-cli`, `.config/gh`; `.st/.gitignore` si falta; `chmod 700` de `.st/ssh` | No | Se permite: `O` hace lo mismo en cada arranque. Tras un rollback quedan como estaban o como `O` las dejaría |
+  | Rescate de `~/.claude`, `~/.claude.json` o `~/.ssh` de la capa al workspace | — | No ocurre: la capa de `N` es nueva |
+  | **Skills:** `cp -r /opt/session-skills/. ~/.claude/skills/` | **Sí** (sobrescribe las skills gestionadas personalizadas con el contenido de la imagen de `N`) | **Diferida.** El entrypoint omite la siembra si existe `/tmp/.st-defer-skill-seed`, que el backend pone en la capa de `N` en el paso 1 y el entrypoint borra al verla. Así los arranques siguientes siembran como siempre. El backend la ejecuta en el paso 6 con `execCapture` del mismo script (`/opt/st/seed-skills.sh`, extraído del entrypoint sin cambiar su semántica) |
+  | Siembra de `workspace/.npm-global` desde la imagen si falta | **Sí** | **No puede ocurrir:** la precondición 7 exige un directorio real |
+  | Migración del layout heredado `workspace/.claude` a `.st/claude-state` | **Sí** (la imagen de `O` puede ser anterior a la migración) | **No puede ocurrir:** la precondición 7 la bloquea |
+
+  Después del paso 4 la siembra de skills se comporta como cualquier arranque de hoy: sobrescribe
+  las skills **gestionadas** con el contenido de la imagen vigente y nunca toca las demás. No es
+  una pérdida que introduzca la recreación (`start` de `O` haría lo mismo con su imagen), y
+  cambiar esa semántica queda fuera de 3.0d. El preflight sí informa `managedSkillsDiffer: n`:
+  el número de skills gestionadas cuyo contenido en el workspace difiere del de la imagen.
+  La lectura pasa por el opener de `workspaceFiles.ts`, con la prueba
+  `/proc/self/fd`, nunca un `readFile` sobre una ruta del usuario. Comparar contenidos no expone
+  ninguna ruta. Así el admin ve, antes de confirmar, que la siembra
+  posterior a la confirmación las va a reemplazar.
+
+  postStart, que es arbitrario, y gitIdentity corren **después** del paso 4, así que tampoco dejan
+  efectos del usuario que deshacer.
 - **El CLI vive en el workspace, no en la imagen.** `N` usa el `claude` de `workspace/.npm-global`,
   que puede ser anterior a 2.1.308.
   - El paso 6 ejecuta `claude --version` en `N` y lo devuelve como `cliVersion`.
@@ -319,7 +394,7 @@ colgado retendría el lock hasta reiniciar el backend. Por eso hay dos topes:
   - El relay de `N` es un proceso nuevo (generación 0). Lo que el relay de `O` no entregó se perdió
     con el stop, como hoy.
 
-### 5.5 Consistencia de `container_id` en D1 (A3)
+### 5.5 Consistencia de `container_id` en D1 (A2)
 
 - **D1 apunta a `O` o a `N`, nunca a un contenedor inexistente:**
   - antes de la confirmación, `O` existe (renombrado o no);
@@ -355,7 +430,7 @@ Para cada sesión afectada, decide con D1:
 | D1 `container_id` | Estado encontrado | Acción |
 | --- | --- | --- |
 | `= O` (no se confirmó) | `N` existe | `stop` + `remove` de `N`; `O` vuelve a su nombre canónico. Es el mismo rollback de §5.3 |
-| `= N` (se confirmó) | `O` existe | `remove` de `O`; mapeos y `status` según el estado real de `N`, como en cualquier reconcile; postStart no. Si la caída fue antes de escribir el hash (paso 5), el token de `N` ya no se conoce: la captura queda no efectiva y `capture` informa `requiresRecreate`. Nunca se inventa un hash |
+| `= N` (se confirmó) | `O` existe | `remove` de `O`; mapeos y `status` según el estado real de `N`, como en cualquier reconcile; postStart no. El hash ya es el de `N` (paso 4, atómico), así que la marca y el archivo los converge el `reconcile` de captura (§5.8) si el token de `N` corresponde al hash (§6.1). La siembra de skills ocurre en el siguiente arranque de `N` |
 | ni `O` ni `N` | — | No tocar nada; log de error y contador `recreateOrphans` en stats; operador |
 
 Cada acción se registra en el log. Ninguna borra un contenedor que D1 apunte. Esto resuelve el
@@ -370,10 +445,32 @@ vería un contenedor renombrado.
 - Cada clase de `docker diff`, incluidas las formas incorrectas de los symlinks.
 - `~/.gitconfig` exacto, con una clave extra y con otro email.
 - Fallo inyectado en cada paso del 1 al 4 ⇒ estado final idéntico al previo: D1, nombres, hash,
-  archivo y mapeos.
+  archivo, marca, mapeos y skills.
 - Compare-and-set con 0 filas ⇒ rollback.
 - Timeout ambiguo de D1.
 - Fallo en el paso 5 ⇒ `N` se queda y converge.
+- **Regresión A2 (skills):**
+  1. una skill gestionada personalizada en el workspace;
+  2. una imagen con contenido distinto para esa skill;
+  3. un fallo inyectado antes del paso 4, en el 3 tras el readiness, y otro en el CAS.
+
+  ⇒ El contenido original de la skill sigue byte a byte, y `O` queda como estaba. Variante con
+  éxito: la siembra ocurre en el paso 6, nunca antes, y el preflight informó
+  `managedSkillsDiffer: 1`.
+- Precondición 7: `workspace/.npm-global` ausente o symlink, o layout heredado ⇒ bloqueado sin
+  efectos.
+- **Regresión A3 (correspondencia):** hash viejo en D1 y token nuevo en el contenedor, por
+  ejemplo un spawn con flag apagado. Con el contenedor en marcha y con el contenedor detenido:
+  - nunca `effective:true`;
+  - nunca `effectiveAfterRestart:true`;
+  - `token-mismatch` + `requiresRecreate:true`;
+  - `PATCH {enabled:true}` no escribe ni la marca ni el archivo y no copia la huella a D1.
+
+  Después de una recreación correcta, la correspondencia se cumple y es `effective:true`.
+  Variantes: el hash suspendido igual a la huella se restaura; los dos NULL tras una revocación de
+  emergencia nunca se vuelven a autorizar.
+- Paso 4 atómico: en ningún instante observable `container_id = N` con un hash distinto al de `N`.
+  Se prueba leyendo D1 entre cada llamada simulada.
 - `expectImageId` distinto ⇒ 409 sin efectos.
 - El tag se mueve entre el preflight y el POST ⇒ `image-changed`.
 - `start`, `stop`, `kill` y `DELETE ?hard=true` concurrentes durante cada paso de la
@@ -404,11 +501,72 @@ vería un contenedor renombrado.
    - relay escuchando, eventos en `.conversations/` y `capture.effective:true`;
    - `O` ya no existe.
 
+- **A4 (relay sin recreación adicional):**
+  1. un contenedor que arranca con token y **sin** archivo ni marca (deshabilitado por API antes
+     del arranque);
+  2. el relay no escucha;
+  3. `PATCH {enabled:true}` ⇒ marca → listener en ≤ 5 s → archivo.
+  4. Debe haber un prompt real en una pestaña ya abierta y una en una pestaña nueva, entregados al
+     receptor, con `capture.effective:true`, ningún "hook error" y el mismo `container_id` (sin
+     recreación).
+- El paso 5 de la recreación sigue el mismo camino. Con el relay de `N` impedido (puerto
+  ocupado), ⇒ `relay-not-listening`, sin archivo de hooks, sin "hook error", y se repara con
+  `PATCH`.
+- Medición: el CLI no lee `relay.enabled` como settings (§5.8).
+
 Variantes:
 
 - con `~/.bash_history` o un `apt-get install` ⇒ `recreatable:false` sin efectos;
 - matar el backend entre los pasos 2 y 4 ⇒ `reconcile` deja `O` intacto;
 - matarlo después del 4 ⇒ `reconcile` completa con `N`.
+
+### 5.8 Arranque del relay (A4)
+
+**Hoy** el entrypoint arranca el supervisor del relay solo si, en el momento del arranque, existen
+el token y `conversation.json`. Un archivo escrito después nunca tiene relay. Afecta a dos
+caminos:
+
+- el paso 5 de la recreación;
+- rehabilitar un contenedor que arrancó con la captura deshabilitada (§2).
+
+**Cambio en la imagen** (etiqueta `conversation-relay="2"`):
+
+- **Marca de autorización** `relay.enabled`, en el mismo directorio gestionado montado ro
+  (`/etc/claude-code/managed-settings.d/`), **sin extensión `.json`**. La escribe el backend
+  **solo** cuando el hash del token del contenedor está autorizado en D1.
+  - **A verificar en el smoke:** el CLI 2.1.308 no la lee como settings. Si la leyera, se usaría
+    un subdirectorio del mismo montaje. Que el CLI no recorre subdirectorios también hay que
+    medirlo. La implementación decide con esas mediciones.
+- **El supervisor arranca si hay token**, con o sin archivo, pero **no lanza el relay** hasta que
+  existe `relay.enabled` o `conversation.json`.
+  - Comprueba cada 0,5 s. Es un `[ -e ]` de bash, sin procesos nuevos.
+  - Que también valga `conversation.json` mantiene compatibles los contenedores que el backend de
+    3.0c creó con el archivo ya escrito.
+  - Una vez lanzado, el relay sigue como hoy: reinicio con backoff, generación, muere con el
+    contenedor.
+  - Que desaparezca la marca no lo detiene: queda inerte, como ya documenta §2.4 para
+    deshabilitar sin reiniciar.
+- La condición 2 del responsable para el relay ("arranca solo cuando la captura es efectiva") se
+  mantiene. El relay arranca cuando el backend autorizó el token, no por la mera presencia del
+  token.
+
+**Orden en el backend**, igual en el paso 5 de la recreación, en `PATCH {enabled:true}` con
+contenedor en marcha y en `reconcile`:
+
+1. el token del contenedor corresponde al hash de D1 (§6.1);
+2. escribir la marca;
+3. esperar el listener (probe por `execCapture`, ≤ 5 s);
+4. `conversation.json`.
+
+El archivo de hooks nunca existe sin un relay que escuche. Así ningún CLI ya abierto, que recarga
+los settings en caliente (medido en 3.0c), dispara hooks contra un puerto cerrado.
+
+**Spawn normal** (`prepareSpawn`, sesión nueva o `start` sin contenedor): escribe hash, marca y
+archivo antes de crear el contenedor, como hoy. El relay arranca en el boot, como en 3.0c.
+
+**Deshabilitar** no cambia: marca de revocación → D1 → borrado del archivo. La marca
+`relay.enabled` se borra después del archivo, para que la de autorización nunca sobreviva a la
+autorización. No hay recreación.
 
 ## 6. Semántica de `capture` (A3)
 
@@ -417,31 +575,61 @@ Variantes:
 ```
 capture: {
   requested, effective,
-  effectiveAfterRestart,       // el siguiente `start` CREA el contenedor con captura
-  requiresRecreate,            // hace falta POST …/recreate (y bastaría con que no haya blockers)
+  effectiveAfterRestart,       // el siguiente `start` deja la captura efectiva sin recrear
+  requiresRecreate,            // hace falta POST …/recreate (no promete que pase el preflight)
   pendingReasons: []           // flag-off | revoked | image-without-relay | running |
-                               // container-without-capture | hooks-file-missing |
+                               // container-without-capture | token-mismatch |
+                               // hooks-file-missing | relay-not-listening |
                                // cli-below-minimum (aviso)
 }
 ```
 
-**Reglas, calculadas con el `inspect` del contenedor de D1** (una llamada a Docker; no se deduce
-de D1, §2):
+### 6.1 Correspondencia token ↔ hash
 
-- **`effective`**: la regla actual (requested ∧ ¬revoked ∧ running ∧ hash ∧ archivo), más que el
-  contenedor tenga `ST_INGEST_TOKEN` en su env y el montaje gestionado.
-- **`effectiveAfterRestart = true`** solo si la sesión es `requested ∧ ¬revoked ∧ flag`, la imagen
-  actual lleva la etiqueta, y además ocurre una de estas:
-  - el contenedor **no existe**: `container_id` NULL o inspect 404. El siguiente start hace spawn.
-  - el contenedor existe, ya tiene token y montaje, y está detenido: restart = efectivo.
-- **En cualquier otro caso es `false`**, incluido un contenedor existente sin captura, en marcha o
-  detenido. Además, ahí `requiresRecreate:true`.
+**Huella del contenedor:** `sha256` de `ST_INGEST_TOKEN` tal como aparece en `Config.Env` del
+`inspect` del contenedor al que apunta D1.
+
+- Se calcula en memoria y se compara en tiempo constante con `ingest_token_hash`.
+- El token nunca se registra, nunca se devuelve y nunca se guarda.
+- El `inspect` ya trae el env completo en otros caminos (`startContainer`), así que no aparece
+  ningún dato nuevo en el proceso.
+- Funciona igual con contenedores creados por el backend de 3.0c, sin etiquetas nuevas.
+
+Estados:
+
+| Contenedor | D1 | Correspondencia |
+| --- | --- | --- |
+| Sin token en el env | — | `container-without-capture` |
+| Con token | `ingest_token_hash` = huella | **Sí** |
+| Con token | `ingest_token_hash` NULL y `…_suspended` = huella | Suspendida (deshabilitado por API): `PATCH {enabled:true}` la restaura, como hoy |
+| Con token | `ingest_token_hash` ≠ huella (hash viejo de otro contenedor, o un spawn con flag apagado que dejó el de antes, §2) | **`token-mismatch`** |
+| Con token | ambos NULL (revocado por el comando de emergencia) | `revoked` mientras haya marca. Sin marca, `token-mismatch`: el token del contenedor no se vuelve a autorizar nunca |
+
+Un `token-mismatch` **no** se repara copiando la huella a D1. Eso volvería a autorizar un token
+que alguien desautorizó, o que nunca se autorizó para este contenedor. Solo lo resuelve un
+contenedor nuevo: la recreación, o un spawn si el contenedor ya no existe.
+
+### 6.2 Reglas
+
+Se calculan con el `inspect` del contenedor de D1: una llamada a Docker, y nada se deduce solo de
+D1.
+
+- **`effective`**: requested ∧ ¬revoked ∧ `running` ∧ **correspondencia (§6.1)** ∧ marca
+  `relay.enabled` ∧ `conversation.json` ∧ montaje gestionado en el contenedor.
+- **`effectiveAfterRestart = true`** solo si se cumple `requested ∧ ¬revoked ∧ flag` y además una
+  de estas:
+  - el contenedor **no existe** (`container_id` NULL o inspect 404) y la imagen actual lleva
+    `conversation-relay="2"`. El siguiente start hace spawn con un token nuevo y su hash;
+  - el contenedor existe, está detenido, tiene montaje, **correspondencia**, y su propia imagen
+    lleva `conversation-relay="2"`, o ya tiene la marca y el archivo escritos para el arranque. Un
+    restart deja la captura efectiva.
+- **En cualquier otro caso es `false`**, en particular con `token-mismatch` o
+  `container-without-capture`. Ahí `requiresRecreate:true`.
 - **`requiresRecreate`** nunca promete que la recreación vaya a pasar: §5.2 solo se evalúa en el
   preflight (`GET …/recreate`), porque requiere `docker diff`.
-- **`PATCH {enabled:true}` ya no promete nada que un start no produzca:**
-  - Contenedor existente sin captura: responde `effective:false, effectiveAfterRestart:false,
-    requiresRecreate:true`.
-  - Contenedor con token suspendido: restaura, como hoy, y es efectivo ya.
+- **`PATCH {enabled:true}`** aplica §5.8 cuando hay correspondencia o una suspensión restaurable.
+  Si no, responde `effective:false, effectiveAfterRestart:false, requiresRecreate:true` con su
+  motivo. Nunca escribe la marca ni el archivo sin correspondencia.
 - **Deshabilitar** no cambia: `emissionStopsAfterRestart:true` (PR #448), y nunca recrea.
 
 ## 7. Activación progresiva
@@ -460,7 +648,13 @@ requiere autorización explícita del responsable.
 ## 8. Cambios de contrato y documentación (PR de docs previo al código)
 
 - **CONVERSATION.md:**
-  - §2.4: tabla con las filas nuevas ("Recrear (admin)" y las de §6).
+  - §2.4: tabla con las filas nuevas ("Recrear (admin)" y las de §6). Se corrige la fila
+    "Habilitar corriendo con token", que hoy promete `effective:true` sin relay (§5.8), y se añade
+    la correspondencia token ↔ hash como invariante (§6.1).
+  - §2.6: el relay arranca con la marca de autorización (`relay.enabled`) o con el archivo. El
+    backend escribe la marca, espera al listener y escribe el archivo (§5.8). Siembra de skills
+    diferible (§5.4).
+  - §2.1: `relay.enabled` en el directorio gestionado.
   - §2.4.1: el requisito se resuelve por la vía de §5.
   - §7: el endpoint, el preflight, `recreateOrphans` y los contadores.
   - §10 3.0d: las pruebas de §5.7.
@@ -469,6 +663,8 @@ requiere autorización explícita del responsable.
     `docker rm` queda como emergencia, con la advertencia de §3: hoy pierde la identidad git, los
     dotfiles y todo lo que haya en la capa.
   - "Rollout order": el paso 4 usa el endpoint.
+- **session-image/README.md:** la marca de autorización, `/opt/st/seed-skills.sh`, la marca
+  `/tmp/.st-defer-skill-seed` y la etiqueta `conversation-relay="2"`.
   - Las etapas de §7.
 - **Fuera de 3.0d, señalado:** DEPLOYMENT.md:124 (#190, "stopped and started once so it re-joins")
   tiene el mismo error que R1 de 3.0c. Va en un PR aparte.
@@ -484,28 +680,67 @@ requiere autorización explícita del responsable.
 | D5 | Nunca se recrea una sesión en marcha, ni automáticamente ni por el endpoint |
 | D6 | **ID inmutable de imagen**: el preflight lo muestra, el POST lo exige (`expectImageId`), la etiqueta se comprueba en ese ID y `createContainer` lo usa |
 
-## 10. Correcciones respecto de la v1
+## 10. Trazabilidad de los hallazgos de Work
 
-- **A1 — Rollback.** La v1 renombraba `O`, creaba `N` con `spawnWithConfig` y "volvía a `O`" si
-  algo fallaba. Pero `spawnWithConfig` arranca `N`, escribe el hash y el archivo **antes** de
-  saber si todo saldrá bien, y no tiene rollback. La v2:
-  - define un punto de no retorno único (el compare-and-set de D1, §5.3);
-  - deja la captura **después** de ese punto;
-  - hace cada paso de rollback idempotente;
-  - recupera las interrupciones en `reconcile` con reglas por estado (§5.6), que la v1 prometía
-    sin que existiera código que lo hiciera.
-- **A2 — Estado compartido del workspace.** La v1 no trataba que `O` y `N` montan el mismo
-  workspace. La v2 garantiza un solo escritor (lock + recomprobación) y acota lo que `N` escribe
-  antes de la confirmación a efectos idempotentes del entrypoint. postStart y gitIdentity pasan a
-  después. Además, hace explícito que el CLI vive en el workspace (`cliVersion`) (§5.4).
-- **A3 — `container_id` y `effectiveAfterRestart`.**
-  - La v1 dejaba que `spawnWithConfig` escribiera `container_id` después de `start()`, sin
-    compare-and-set. La v2 garantiza que D1 apunta siempre a un contenedor existente (§5.5).
-  - La v1 informaba `effectiveAfterRestart:true` con `requires-stop` aunque el siguiente start no
-    lo produjera; el bot de revisión también señaló el caso de la imagen sin relay. La v2 solo
-    responde `true` cuando el siguiente start **crea** el contenedor con captura, o ya la tiene.
-    Lo calcula con `inspect`, y no con un hash de D1 que puede ser obsoleto. Los demás casos van
-    en `requiresRecreate` y `pendingReasons` (§6).
+| | Hallazgo | Corregido en | Dónde |
+| --- | --- | --- | --- |
+| **A1** | Pérdida de archivos: la recreación perdía lo que vive en la capa del contenedor (`~/.gitconfig`, dotfiles, `~/.bash_history`, `apt`, …) | v2 | §3, §5.2: preservación estricta; cualquier pérdida bloquea; solo se reconstruye un `~/.gitconfig` verificado como exacto |
+| **A2** | Rollback y estado compartido | v2 + v3 | §5.3–§5.6 |
+| **A3** | Estado efectivo y `effectiveAfterRestart` | v2 + v3 | §6 |
+| **A4** | Arranque del relay con hooks escritos después de iniciar `N` | v3 | §5.8 |
+
+**A2 (v2).**
+
+- La v1 creaba `N` con `spawnWithConfig`, que arranca el contenedor y escribe hash y archivo sin
+  rollback. La v2 introdujo:
+  - un punto de no retorno único (compare-and-set de D1);
+  - un rollback idempotente;
+  - la recuperación por estado en `reconcile` (§5.6);
+  - topes de tiempo (§5.3.1);
+  - un solo escritor en el workspace (lock + recomprobación de `O`);
+  - postStart y gitIdentity después de la confirmación.
+
+**A2 (v3), sobre la v2 en `5803612`:**
+
+- **Skills.** El entrypoint de `N` sobrescribía las skills gestionadas personalizadas antes del
+  CAS, y el rollback no las restauraba. Ahora la siembra se difiere con una marca en la capa de
+  `N` y se ejecuta en el paso 6 (§5.4). Va con su regresión (§5.7).
+- **Revisión exhaustiva del entrypoint.** Las otras dos escrituras que dependen de la imagen
+  (sembrar `.npm-global` y migrar el layout heredado) se bloquean con la precondición 7.
+- **Hash atómico.** El hash del token pasa a cambiar en la **misma** sentencia que
+  `container_id` (§5.3 paso 4). Antes del CAS no se escribe nada en D1 ni en el directorio
+  gestionado.
+
+**A3 (v2).** `effectiveAfterRestart:true` solo cuando el siguiente start produce la captura, se
+calcula con `inspect` y se añaden `requiresRecreate` y `pendingReasons`.
+
+**A3 (v3).** Se exige la correspondencia entre el token del contenedor y el hash autorizado
+(§6.1):
+
+- es parte de `effective` y de `effectiveAfterRestart`;
+- es condición para escribir la marca o los hooks;
+- `token-mismatch` nunca se repara copiando la huella;
+- va con su regresión (hash viejo + token nuevo, §5.7).
+
+**A4 (v3).** El supervisor arranca con el token y lanza el relay cuando aparece la marca de
+autorización. El backend escribe la marca, espera al listener y solo entonces escribe
+`conversation.json`. Esto sirve en la recreación y en `PATCH` sobre un contenedor en marcha, sin
+recreación adicional. También corrige la fila de §2.4 que hoy promete `effective:true` sin relay.
+Smoke en §5.7.
+
+**Hallazgos del bot de revisión en GitHub** (no son de Work):
+
+- v1:
+  - la imagen sin relay en `requires-stop`;
+  - el `reconcile` de huérfanos.
+- v2:
+  - la recomprobación de `O` en el paso 3;
+  - la reparación tras la confirmación;
+  - el lock en el alcance;
+  - los topes de tiempo;
+  - los nombres reservados.
+
+Todos están incorporados.
 
 ## 11. Riesgos y preguntas abiertas
 
