@@ -8,6 +8,7 @@ import { DEFAULT_MEMORY_BYTES, DEFAULT_NANO_CPUS } from "../dockerManager.js";
 import { logger } from "../logger.js";
 import * as observeLog from "../observeLog.js";
 import { getDispatcherStats } from "../portDispatcher.js";
+import { RecreateUnresolvedError } from "../recreateAttempt.js";
 import {
 	EFFECTIVE_CPU_NANO_MAX,
 	EFFECTIVE_CPU_NANO_MIN,
@@ -291,6 +292,10 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 					res.status(409).json({ error: "busy" });
 					return;
 				}
+				if (err instanceof RecreateUnresolvedError) {
+					res.status(409).json({ error: "recreate-unresolved" });
+					return;
+				}
 				logger.error(`[admin] force-stop failed: ${(err as Error).message}`);
 				res.status(500).json({ error: "Internal server error" });
 			}
@@ -346,6 +351,10 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 			} catch (err) {
 				if (err instanceof SessionBusyError) {
 					res.status(409).json({ error: "busy" });
+					return;
+				}
+				if (err instanceof RecreateUnresolvedError) {
+					res.status(409).json({ error: "recreate-unresolved" });
 					return;
 				}
 				logger.error(`[admin] force-delete failed: ${(err as Error).message}`);

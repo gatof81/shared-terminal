@@ -134,6 +134,9 @@ export interface ServiceDeps extends ActivationDeps {
 		cmd: string[],
 		opts: { maxBytes: number; timeoutMs: number },
 	) => Promise<{ stdout: Buffer; exitCode: number | null; truncated: boolean; timedOut: boolean }>;
+	/** 3.0d (CONVERSATION.md §2.7.4): true while a recreation of the
+	 *  session is unresolved; `reconcile` then writes nothing for it. */
+	isRecreateUnresolved?: (stSessionId: string) => Promise<boolean>;
 }
 
 interface TokenCacheEntry {
@@ -1128,6 +1131,17 @@ export class ConversationService {
 		for (const s of sessions) {
 			const sid = s.session_id;
 			try {
+				// §2.7.4: while a recreation is unresolved nothing but its own
+				// resolution may write for this session — no hooks file, no
+				// marker, no gap. Fail-closed: a failing check counts as
+				// unresolved.
+				if (this.deps.isRecreateUnresolved) {
+					const unresolved = await this.deps.isRecreateUnresolved(sid).catch(() => true);
+					if (unresolved) {
+						logger.warn(`[conversation] reconcile: ${sid} skipped (recreate-unresolved)`);
+						continue;
+					}
+				}
 				const revocation = await checkRevocation(this.deps.workspaceRoot, sid);
 				if (revocation !== "none") {
 					if (s.conversation_requested === 1 || s.ingest_token_hash) {

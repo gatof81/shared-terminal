@@ -29,6 +29,7 @@ import { DockerManager } from "./dockerManager.js";
 import { IdleSweeper, listRunningSessionIds } from "./idleSweeper.js";
 import { logger } from "./logger.js";
 import { createPortDispatcher, validatePortProxyBaseDomain } from "./portDispatcher.js";
+import { RecreateAttemptStore } from "./recreateAttempt.js";
 import { newRequestId, requestIdMiddleware, runWithRequestId } from "./requestContext.js";
 import { buildRouter } from "./routes.js";
 import { validateSecretsKey } from "./secrets.js";
@@ -106,12 +107,25 @@ const CONVERSATION_ENABLED = process.env.CONVERSATION_ENABLED === "true";
 const WORKSPACE_ROOT_FOR_CONVERSATION =
 	process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
 const conversationStore = new ConversationStore({ workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION });
+// 3.0d — durable recreation records and the fail-closed
+// `recreate-unresolved` gate (CONVERSATION.md §2.7.4). Installed on the
+// lifecycle lock before the server accepts requests, so every lifecycle
+// verb checks it under the lock; reconcile passes skip such sessions.
+const recreateAttempts = new RecreateAttemptStore(WORKSPACE_ROOT_FOR_CONVERSATION);
+const isRecreateUnresolved = (sid: string) =>
+	recreateAttempts.assertResolved(sid).then(
+		() => false,
+		() => true,
+	);
+sessionLifecycleLock.setGuard((sid) => recreateAttempts.assertResolved(sid));
+docker.setRecreateUnresolvedCheck(isRecreateUnresolved);
 const conversation = new ConversationService({
 	workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION,
 	enabled: CONVERSATION_ENABLED,
 	port: PORT,
 	store: conversationStore,
 	execCapture: (sid, cmd, opts) => docker.execCapture(sid, cmd, opts),
+	isRecreateUnresolved,
 });
 docker.setConversationHooks({
 	prepareSpawn: async (sid) => {
@@ -476,6 +490,21 @@ async function start() {
 	// AFTER migrateDb so the push_subscriptions table exists before any
 	// subscribe/send, and before the server accepts requests.
 	configureWebPush();
+	// Before any reconcile: an `open` record left by the previous process
+	// becomes `uncertain` (persisted). Never resolves anything (D8). The
+	// gate already refuses such sessions even before this runs (an `open`
+	// record this process did not begin counts as unresolved); this only
+	// makes the state explicit and logs it. Not fatal.
+	try {
+		const recovered = await recreateAttempts.recoverOnBoot();
+		if (recovered.uncertain.length || recovered.unreadable.length) {
+			logger.warn(
+				`[server] recreate-unresolved sessions: ${recovered.uncertain.length} uncertain, ${recovered.unreadable.length} unreadable`,
+			);
+		}
+	} catch (err) {
+		logger.error(`[server] recreate attempt recovery failed: ${(err as Error).message}`);
+	}
 	await docker.reconcile();
 	// Phase 3 — after docker.reconcile so session statuses are settled:
 	// hooks files ⇔ requested ∧ token, revocation markers win over D1,
