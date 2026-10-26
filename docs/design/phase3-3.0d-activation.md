@@ -390,8 +390,8 @@ Nada de esto exige una segunda recreación, que §5.2 probablemente bloquearía,
 >   - `uncertain`: hay peticiones sin respuesta, o se encontró tras un reinicio del backend;
 >   - `resolved`.
 > - Tras un reinicio no hay evidencia de terminación, así que la sesión **queda en
->   `recreate-unresolved`**. Cualquier salida heurística es la decisión D8 del responsable, que no
->   se adopta.
+>   `recreate-unresolved`**. D8 (decidida): fail-closed, sin resolución automática heurística, y
+>   el piloto solo con una sesión descartable.
 > - Un sobrante solo es un contenedor con la etiqueta de un intento `resolved` cuyo id **no** es el
 >   vigente de D1. El `N` confirmado nunca se elimina.
 >
@@ -982,8 +982,8 @@ requiere autorización explícita del responsable.
 | --- | --- | --- |
 | 0 | Desplegar backend 3.0d + imagen con etiqueta `="2"`, **flag apagado**. Requisito previo: la validación de compatibilidad de las marcas (§5.8.1) pasó en el smoke | Sesiones existentes sin cambios; `POST /ingest` → 204 `disabled`; `GET …/recreate` responde `flag-off` |
 | 1 | `CONVERSATION_ENABLED=true`, nadie pedido | `reconcile` sin correcciones ni huérfanos |
-| 2 | **Piloto:** una sesión del responsable, detenida, preflight `recreatable:true`, `cliVersion` ≥ 2.1.308. PATCH → preflight → POST | 48 h: eventos visibles; `rejected` solo esperados; `relayDropped=0` fuera de pruebas; RSS del relay ≤ 20 MiB; sin "hook error"; checklist de §3 verificado a mano |
-| 3 | `CONVERSATION_ALLOW_USERS` = el responsable (sesiones **nuevas**, que no necesitan recrear) + 2–3 existentes que pasen el preflight | Una semana con los mismos criterios; disco de `.conversations` dentro de L7 |
+| 2 | **Piloto aislado (D8):** una sesión **nueva y descartable, sin datos importantes**, creada sin captura y detenida; preflight `recreatable:true`, `cliVersion` ≥ 2.1.308. PATCH → preflight → POST. Se acepta que pueda quedar bloqueada en `recreate-unresolved` | 48 h: eventos visibles; `rejected` solo esperados; `relayDropped=0` fuera de pruebas; RSS del relay ≤ 20 MiB; sin "hook error"; checklist de §3 verificado a mano |
+| 3 | `CONVERSATION_ALLOW_USERS` = el responsable: solo sesiones **nuevas**, que no necesitan recrear. Recrear sesiones existentes queda **bloqueado** hasta que exista y se valide el procedimiento de recuperación administrativa manual (D8) | Una semana con los mismos criterios; disco de `.conversations` dentro de L7 |
 | 4 | Ampliar la allowlist | Decisión aparte |
 
 ## 8. Cambios de contrato y documentación (PR de docs previo al código)
@@ -1018,7 +1018,7 @@ requiere autorización explícita del responsable.
 
 ## 9. Decisiones
 
-D1–D6 las cerró el responsable con las recomendaciones de Work. D7 lo cerró el 2026-10-26. D8 surgió en la revisión de consistencia del contrato y está pendiente.
+D1–D6 las cerró el responsable con las recomendaciones de Work. D7 lo cerró el 2026-10-26. D8 surgió en la revisión de consistencia del contrato y lo cerró el 2026-10-26 (fail-closed).
 
 | | Decisión |
 | --- | --- |
@@ -1029,7 +1029,7 @@ D1–D6 las cerró el responsable con las recomendaciones de Work. D7 lo cerró 
 | D5 | Nunca se recrea una sesión en marcha, ni automáticamente ni por el endpoint |
 | D6 | **ID inmutable de imagen**: el preflight lo muestra, el POST lo exige (`expectImageId`), la etiqueta se comprueba en ese ID y `createContainer` lo usa |
 | D7 | **Decidido (2026-10-26): probe fresco**, sin caché positiva; single-flight para consultas concurrentes, timeouts acotados y `checkedAt` (§6.2) |
-| D8 | **Pendiente, no adoptada.** Salida de `recreate-unresolved` tras un reinicio del backend sin evidencia de terminación de Docker, con una garantía explícitamente heurística (por ejemplo, una atestación del operador o un reinicio observado de dockerd). Mientras no se decida, la sesión queda bloqueada (contrato §2.7.4) |
+| D8 | **Decidido (2026-10-26): fail-closed.** Sin resolución automática de un intento `uncertain`, ni por tiempo, ni por quietud, ni por un reinicio de dockerd. El bloqueo indefinido se acepta solo en el piloto, con una sesión nueva y descartable. No se usa en sesiones reales hasta validar un procedimiento de recuperación administrativa manual (contrato §2.7.4) |
 
 ## 10. Trazabilidad de los hallazgos de Work
 
