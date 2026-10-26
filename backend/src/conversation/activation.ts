@@ -273,9 +273,20 @@ export async function prepareSpawnCapture(
 	const token = generateIngestToken();
 	await setIngestTokenHash(sessionId, hashIngestToken(token));
 	deps.invalidate?.(sessionId);
-	const control = await ensureControlDir(deps.workspaceRoot, sessionId);
-	await writeRelayEnabled(deps.workspaceRoot, sessionId);
-	await writeHooksFile(deps, sessionId);
+	let control: string;
+	try {
+		control = await ensureControlDir(deps.workspaceRoot, sessionId);
+		await writeRelayEnabled(deps.workspaceRoot, sessionId);
+		await writeHooksFile(deps, sessionId);
+	} catch (err) {
+		// The caller spawns without capture on a throw: leave no marker or
+		// file, and no hash for a token no container will carry.
+		await removeHooksFile(deps.workspaceRoot, sessionId).catch(() => undefined);
+		await removeRelayEnabled(deps.workspaceRoot, sessionId).catch(() => undefined);
+		await setIngestTokenHash(sessionId, null).catch(() => undefined);
+		deps.invalidate?.(sessionId);
+		throw err;
+	}
 	return {
 		env: [`${INGEST_TOKEN_ENV}=${token}`, `${BACKEND_PORT_ENV}=${deps.port}`],
 		binds: [bind, `${control}:${CONTROL_MOUNT_TARGET}:ro`],
@@ -345,6 +356,10 @@ export async function enableSession(
 		if (c.running && writeAuthorized(after)) {
 			({ identifiedAt } = await authority.applyWriteDetailed(sessionId, after));
 		} else if (!retainAuthorized(after)) await authority.withdraw(sessionId);
+	} else {
+		// No container: the next spawn prepares everything from scratch, so
+		// whatever a previous container left is retired now.
+		await authority.withdraw(sessionId);
 	}
 	// The write procedure's own identification is this request's probe
 	// (D7): reported as such instead of a second exec.

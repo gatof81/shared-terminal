@@ -135,6 +135,12 @@ export async function removeAllRelayMarkers(workspaceRoot: string): Promise<stri
 	}
 	const removed: string[] = [];
 	for (const sid of entries) {
+		// Same guard as controlDir(): never build a path from an odd entry.
+		try {
+			assertSafeComponent(sid, "session id");
+		} catch {
+			continue;
+		}
 		const file = path.join(root, sid, RELAY_ENABLED_FILE);
 		try {
 			await fs.lstat(file);
@@ -414,32 +420,40 @@ export class CaptureAuthority {
 		if (!writeAuthorized(f) || !f.row?.container_id) return { outcome: "not-authorized" };
 		const containerId = f.row.container_id;
 		await writeRelayEnabled(this.deps.workspaceRoot, sessionId);
-		if (!(await this.stillAllowed(sessionId))) {
-			await this.withdraw(sessionId);
-			return { outcome: "revoked-meanwhile" };
-		}
-		// ≤ 5 s in total: another probe is started only while a whole one
-		// still fits before the deadline (the first always does).
-		const deadline = this.now() + RELAY_IDENTIFY_WAIT_MS;
-		let identifiedAt: number | undefined;
-		for (;;) {
-			if (await this.probe(sessionId, containerId)) {
-				identifiedAt = this.now();
-				break;
+		// Any throw past this point (a recheck's D1 read, the probe, the
+		// hooks-file write) must not leave the marker behind: it would
+		// launch a relay no hooks file points at.
+		try {
+			if (!(await this.stillAllowed(sessionId))) {
+				await this.withdraw(sessionId);
+				return { outcome: "revoked-meanwhile" };
 			}
-			if (this.now() + IDENTIFY_POLL_MS + RELAY_PROBE_BUDGET_MS > deadline) break;
-			await this.sleep(IDENTIFY_POLL_MS);
+			// ≤ 5 s in total: another probe is started only while a whole one
+			// still fits before the deadline (the first always does).
+			const deadline = this.now() + RELAY_IDENTIFY_WAIT_MS;
+			let identifiedAt: number | undefined;
+			for (;;) {
+				if (await this.probe(sessionId, containerId)) {
+					identifiedAt = this.now();
+					break;
+				}
+				if (this.now() + IDENTIFY_POLL_MS + RELAY_PROBE_BUDGET_MS > deadline) break;
+				await this.sleep(IDENTIFY_POLL_MS);
+			}
+			if (identifiedAt === undefined) {
+				await removeRelayEnabled(this.deps.workspaceRoot, sessionId);
+				return { outcome: "relay-unavailable" };
+			}
+			await this.deps.writeHooksFile(sessionId);
+			if (!(await this.stillAllowed(sessionId))) {
+				await this.withdraw(sessionId);
+				return { outcome: "revoked-meanwhile" };
+			}
+			return { outcome: "written", identifiedAt };
+		} catch (err) {
+			await this.withdraw(sessionId).catch(() => undefined);
+			throw err;
 		}
-		if (identifiedAt === undefined) {
-			await removeRelayEnabled(this.deps.workspaceRoot, sessionId);
-			return { outcome: "relay-unavailable" };
-		}
-		await this.deps.writeHooksFile(sessionId);
-		if (!(await this.stillAllowed(sessionId))) {
-			await this.withdraw(sessionId);
-			return { outcome: "revoked-meanwhile" };
-		}
-		return { outcome: "written", identifiedAt };
 	}
 
 	/** Conditions 1–3 re-read: flag, requested, no revocation (§2.7.5). */
@@ -475,7 +489,9 @@ export class CaptureAuthority {
 			if (f.marker && f.hooksFile) return "kept";
 			return this.applyWrite(sessionId, f);
 		}
-		if (c?.exists && !c.running && retainAuthorized(f)) return "kept";
+		// Stopped: never written (start doesn't repair). Keep only a complete
+		// pair; a half (marker without file or the reverse) is retired.
+		if (c?.exists && !c.running && retainAuthorized(f) && f.marker && f.hooksFile) return "kept";
 		if (!f.marker && !f.hooksFile) return "nothing";
 		await this.withdraw(sessionId);
 		return "withdrawn";

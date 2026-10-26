@@ -423,6 +423,22 @@ describe("applyWrite(): §2.7.5 procedure and rechecks", () => {
 		expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
 		void realWrite;
 	});
+	it("the hooks-file write throws ⇒ the error propagates and no marker is left behind", async () => {
+		session("s1");
+		const realRename = fs.rename.bind(fs);
+		const spy = vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
+			if (String(to).endsWith("conversation.json"))
+				throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
+			return realRename(from, to);
+		});
+		try {
+			await expect(make({}).authority.applyWrite("s1")).rejects.toThrow("ENOSPC");
+		} finally {
+			spy.mockRestore();
+		}
+		expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
+		expect(await exists(hooksFilePath(root, "s1"))).toBe(false);
+	});
 	it("not authorized (stopped, mismatch, no control mount) ⇒ nothing written", async () => {
 		session("s1");
 		for (const container of [
@@ -529,6 +545,19 @@ describe("converge(): reconcile (§2.4 row, K2)", () => {
 			expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
 		});
 	}
+	it("stopped with retain authorization keeps only a complete pair; a half is retired", async () => {
+		session("s1", { status: "stopped" });
+		const stopped = { container: view({ running: false }) };
+		await writeRelayEnabled(root, "s1"); // marker without hooks file
+		expect(await make(stopped).authority.converge("s1")).toBe("withdrawn");
+		expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
+		await writeHooksFile(deps(), "s1"); // hooks file without marker
+		expect(await make(stopped).authority.converge("s1")).toBe("withdrawn");
+		expect(await exists(hooksFilePath(root, "s1"))).toBe(false);
+		expect(await make(stopped).authority.converge("s1")).toBe("nothing");
+		await configured("s1");
+		expect(await make(stopped).authority.converge("s1")).toBe("kept");
+	});
 	it('nothing on disk and nothing to keep ⇒ "nothing" (not reported as a withdrawal)', async () => {
 		session("s1", { conversation_requested: 0 });
 		expect(await make({}).authority.converge("s1")).toBe("nothing");
@@ -575,6 +604,13 @@ describe("control dir helpers", () => {
 		expect((await fs.stat(relayEnabledPath(root, "a"))).mode & 0o777).toBe(0o644);
 		expect((await removeAllRelayMarkers(root)).sort()).toEqual(["a", "b"]);
 		expect(await exists(relayEnabledPath(root, "a"))).toBe(false);
+	});
+	it("removeAllRelayMarkers ignores directory entries that aren't safe session ids", async () => {
+		const odd = path.join(root, ".st-control", ".hidden");
+		await fs.mkdir(odd, { recursive: true });
+		await fs.writeFile(path.join(odd, "relay.enabled"), "");
+		expect(await removeAllRelayMarkers(root)).toEqual([]);
+		expect(await exists(path.join(odd, "relay.enabled"))).toBe(true);
 	});
 	it("refuses unsafe session ids", () => {
 		for (const bad of ["../x", "a/b", ""]) expect(() => controlDir(root, bad)).toThrow();

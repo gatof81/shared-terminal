@@ -279,6 +279,13 @@ describe("prepareSpawnCapture (§2.4 spawn row, §2.7.5 spawn preparation)", () 
 		expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
 		expect(row.ingest_token_hash).toBeNull();
 	});
+	it("the hooks-file write fails: no marker, no file, no hash left; the error propagates (spawn goes on without capture)", async () => {
+		const row = session("s1", { conversation_requested: 1 });
+		await fs.mkdir(hooksFilePath(root, "s1"), { recursive: true }); // rename target is a dir
+		await expect(prepareSpawnCapture(deps(), "s1", IMG2)).rejects.toThrow();
+		expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
+		expect(row.ingest_token_hash).toBeNull();
+	});
 	it("an existing 0700 control dir is brought to 0755 (explicit chmod, §2.1)", async () => {
 		session("s1", { conversation_requested: 1 });
 		await fs.mkdir(controlDir(root, "s1"), { recursive: true, mode: 0o700 });
@@ -304,6 +311,13 @@ describe("enable / disable (§2.4 table, §2.7.5)", () => {
 		const r2 = await authority({ current: { imageId: "x", relay2: false } }).enable("s1");
 		expect(r2.capture.effectiveAfterRestart).toBe(false);
 		expect(r2.capture.pendingReasons).toContain("image-without-relay");
+	});
+	it("no container: residuals of a previous container are retired (the next spawn prepares from scratch)", async () => {
+		session("s1", { status: "stopped", container_id: null });
+		await plant("s1");
+		await authority({}).enable("s1");
+		expect(await exists(hooksFilePath(root, "s1"))).toBe(false);
+		expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
 	});
 	it("running container WITHOUT a token: nothing written, residuals removed, requiresRecreate", async () => {
 		session("s1");
