@@ -282,6 +282,15 @@ def discard(sock, buf, n):
 
 NO_CONTENT_CLOSE = b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"
 NOT_FOUND = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+STATUS_PATH = b"/st-relay/status"
+# Identification for the backend's probe (CONVERSATION.md §2.6, §2.7.6): a
+# user process holding the port would not answer this, which is the
+# difference between "something listens" and "the relay listens". Headers
+# only — no body, no token, no counter, nothing that came from a hook.
+STATUS = (
+    "HTTP/1.1 204 No Content\r\nX-ST-Relay: 1\r\n"
+    f"X-ST-Relay-Generation: {GENERATION}\r\nConnection: close\r\n\r\n"
+).encode("latin-1")
 BAD_REQUEST = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 CONTINUE = b"HTTP/1.1 100 Continue\r\n\r\n"
 
@@ -302,6 +311,9 @@ def serve_connection(sock):
         sock.sendall(BAD_REQUEST)
         return
     method, target, _ = parts
+    if method == b"GET" and target == STATUS_PATH:
+        sock.sendall(STATUS)
+        return
     headers = parse_headers(lines[1:])
     if method != b"POST" or target != PATH.encode():
         sock.sendall(NOT_FOUND)

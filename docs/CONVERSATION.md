@@ -76,6 +76,12 @@ Reglas:
   efectivo con 3.0d (§2.7.6).
 - El directorio de control se borra con la sesión en el hard delete (`onSessionPurged`), no entra
   en el backup, y `reconcile` lo regenera desde D1.
+- Permisos del directorio de control: `root:root 0755`, marcas `0644`, `recreate-attempt.json`
+  `0600`. El usuario de la sesión *MUST* poder consultar las marcas (buscar en el directorio) y
+  *MUST NOT* poder modificarlas (montaje ro, propiedad de root). La imagen trata un directorio
+  que no puede examinar como "marca presente" (fail-closed, §2.7.3), así que un `0700` bloquearía
+  la siembra para siempre. El backend fija el modo con un `chmod` explícito en cada escritura
+  (`RecreateAttemptStore`): `mkdir` no cambia los permisos de un directorio que ya existe.
 - La imagen *MUST* comportarse de forma idéntica a la actual cuando el directorio montado está
   vacío (smoke test: `claude -p hola` no produce ninguna petición saliente a `st-backend` ni al
   puerto del relay, y no hay ningún proceso relay).

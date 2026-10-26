@@ -474,7 +474,14 @@ export class RecreateAttemptStore {
 	 */
 	private async write(sessionId: string, record: AttemptRecord): Promise<void> {
 		const dir = this.controlDir(sessionId);
-		await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+		// This dir is also what gets mounted read-only at /etc/st-control:
+		// the session user must be able to SEARCH it to examine the markers,
+		// or seed-skills.sh refuses for good (fail-closed, CONVERSATION.md
+		// §2.1). root:root 0755, set with an explicit chmod every time:
+		// mkdir's mode only applies to a directory it creates, and an
+		// earlier build created these 0700. The record itself stays 0600.
+		await fs.mkdir(dir, { recursive: true, mode: 0o755 });
+		await fs.chmod(dir, 0o755);
 		const file = path.join(dir, RECORD_FILE);
 		const tmp = `${file}.tmp.${process.pid}.${randomBytes(6).toString("hex")}`;
 		const fh = await fs.open(tmp, "wx", 0o600);

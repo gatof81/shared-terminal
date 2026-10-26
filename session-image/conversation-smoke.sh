@@ -49,6 +49,11 @@
 #      token never lands in the workspace
 #   10 deactivation (file removed) and revocation (real CLI): ingest cut at
 #      once, next session silent; hot reload of a running session measured
+#   11 3.0d image: control dir layout and label; relay launched only on
+#      relay.enabled with a token, and never without one; GET /st-relay/status
+#      loopback-only and secret-free; the real CLI unchanged with the control
+#      dir mounted (empty, markers, settings-shaped JSON, unreadable); deferred
+#      skill seeding never overwrites the workspace, on boot, reboot or exec
 #
 # A markdown summary of every measurement is printed at the end and, in CI,
 # appended to $GITHUB_STEP_SUMMARY.
@@ -917,6 +922,191 @@ sleep 1
 check "after revocation a new session sends nothing" \
 	[ "$(jq -s 'map(select(.event == "UserPromptSubmit" and .body.prompt == "hola")) | length' "$OUT/revoke.jsonl")" = 0 ]
 docker exec "$SESS" tmux kill-server >/dev/null 2>&1
+
+# ── Phase 11 ────────────────────────────────────────────────────────────────
+# 3.0d image (CONVERSATION.md §2.1, §2.6, §2.7.3, §2.7.5): control dir mount,
+# relay launched on relay.enabled, GET /st-relay/status, deferred skill
+# seeding, the label — and that none of it changes a session without them.
+phase "Phase 11: 3.0d control dir, relay authorization, deferred seeding"
+CONTROL="$WR/.st-control/$SID"
+ctl() { as_root "install -d -m 0755 /wr/.st-control /wr/.st-control/$SID && $1"; }
+ctl_clear() { as_root "rm -rf /wr/.st-control/$SID && install -d -m 0755 /wr/.st-control /wr/.st-control/$SID"; }
+CTL_MOUNT=(-v "$CONTROL":/etc/st-control:ro)
+status_headers() { docker exec "$SESS" curl -q -s -D - -o /dev/null --noproxy "*" -m 2 "http://127.0.0.1:$RELAY_PORT/st-relay/status" | tr -d '\r'; }
+relay_identified() { status_headers | grep -qx 'X-ST-Relay: 1'; }
+wait_until() { # wait_until <tenths> <command…>
+	local n="$1" i=0
+	shift
+	until "$@"; do
+		i=$((i + 1))
+		[ "$i" -gt "$n" ] && return 1
+		sleep 0.1
+	done
+}
+
+# 11a — image layout.
+LAYOUT2=$(docker run --rm --entrypoint bash "$IMAGE" -c '
+	stat -c "%U:%G %a" /etc/st-control /opt/st/seed-skills.sh
+	ls -A /etc/st-control | wc -l
+	touch /etc/st-control/relay.enabled 2>/dev/null && echo writable || echo not-writable
+	(echo x >> /opt/st/seed-skills.sh) 2>/dev/null && echo writable || echo not-writable')
+check "control dir root:root 755" [ "$(sed -n 1p <<<"$LAYOUT2")" = "root:root 755" ]
+check "seed-skills.sh root:root 755" [ "$(sed -n 2p <<<"$LAYOUT2")" = "root:root 755" ]
+check "control dir empty in the image" [ "$(sed -n 3p <<<"$LAYOUT2")" = 0 ]
+check "developer can't plant relay.enabled" [ "$(sed -n 4p <<<"$LAYOUT2")" = not-writable ]
+check "developer can't modify seed-skills.sh" [ "$(sed -n 5p <<<"$LAYOUT2")" = not-writable ]
+check "image label io.shared-terminal.conversation-relay=2" \
+	[ "$(docker image inspect -f '{{ index .Config.Labels "io.shared-terminal.conversation-relay" }}' "$IMAGE")" = 2 ]
+
+# 11b — supervisor: token without authorization ⇒ no relay; marker ⇒ relay.
+receiver ok ctl-relay
+ctl_clear
+session yes none "${CTL_MOUNT[@]}" || exit 1
+sleep 2
+check "token, no relay.enabled, no hooks file ⇒ no relay process" [ "$(relay_count)" = 0 ]
+check "… and nothing listens on $RELAY_PORT" relay_closed
+ctl "touch /wr/.st-control/$SID/relay.enabled"
+t0=$(ms_now)
+check "relay.enabled written on the host ⇒ relay identifies itself within 3 s" wait_until 30 relay_identified
+note "relay launched $(($(ms_now) - t0)) ms after relay.enabled appeared (supervisor polls every 0.5 s)"
+HDRS=$(status_headers)
+check "status: 204, X-ST-Relay-Generation present" bash -c 'grep -q "^HTTP/1.1 204" <<<"$1" && grep -q "^X-ST-Relay-Generation: 0$" <<<"$1"' _ "$HDRS"
+check "status exposes no token, session id or body" bash -c '! grep -qF -e "$2" -e "$3" <<<"$1" && [ "$(grep -c . <<<"$1")" -le 4 ]' _ "$HDRS" "$TOKEN" "$SID"
+check "status is loopback only: unreachable from another container on the network" \
+	bash -c '! docker run --rm --network "$1" --entrypoint curl "$2" -q -s -m 3 "http://$3:$4/st-relay/status" >/dev/null 2>&1' _ "$NET" "$IMAGE" "$SESS" "$RELAY_PORT"
+ctl "rm -f /wr/.st-control/$SID/relay.enabled"
+sleep 1.5
+check "relay.enabled removed ⇒ the launched relay stays up, inert (contract §2.4: disabling without a restart)" relay_identified
+note "after relay.enabled was removed: $(relay_count) relay process(es) still running, as specified; the backend refuses whatever arrives and no hooks file points at it"
+
+# 11c — capture disabled: no token ⇒ no relay even with the marker present.
+ctl "touch /wr/.st-control/$SID/relay.enabled"
+session no none "${CTL_MOUNT[@]}" || exit 1
+sleep 2
+check "no token + relay.enabled ⇒ no relay process" [ "$(relay_count)" = 0 ]
+check "no token + relay.enabled ⇒ nothing listens" relay_closed
+claude_p hola
+check "no token + control dir mounted: claude -p answers normally" out_is "$HOLA_OUT"
+check "no token: zero requests to st-backend" [ "$(count ctl-relay)" = 0 ]
+
+# 11d — the real CLI with the control dir mounted, in every shape, behaves
+# exactly as without it (§2.7.5 compatibility validation).
+hook_seq() { jq -r '.event' "$OUT/$1.jsonl" 2>/dev/null | uniq | tr '\n' ' '; }
+# What the comparison uses: per event type, how many arrived — taken BEFORE
+# tmux is killed. MessageDisplay batch counts depend on stream timing and the
+# interactive session's SessionEnd races the kill, so neither is compared
+# (MessageDisplay must still be present). The raw sequence goes to the log.
+hook_profile() {
+	jq -sc 'map(.event) | group_by(.) | map({ (.[0]): (if .[0] == "MessageDisplay" then "present" else length end) }) | add // {}' \
+		"$OUT/$1.jsonl" 2>/dev/null
+}
+cli_variant() { # cli_variant <tag> [docker args…]
+	local tag="$1"
+	shift
+	receiver ok "$tag"
+	session yes file "$@" || return 1
+	tab_start --dangerously-skip-permissions && tab_turn "ST_SCENARIO=bash" || fail "[$tag] interactive turn"
+	claude_p hola
+	check "[$tag] claude -p answers normally" out_is "$HOLA_OUT"
+	check "[$tag] no settings warning or hook error on screen" \
+		bash -c '! grep -qiE "settings error|invalid settings|hook error" <<<"$1"' _ "$(tab_screen)"
+	sleep 1 # the -p run's last hooks reach the recorder
+	# Snapshot before the kill: the interactive session's SessionEnd races
+	# it and must not enter the comparison.
+	cp "$OUT/$tag.jsonl" "$OUT/$tag.snap.jsonl"
+	PROFILE[$tag]=$(hook_profile "$tag")
+	note "[$tag] hook sequence: $(hook_seq "$tag")"
+	docker exec "$SESS" tmux kill-server >/dev/null 2>&1
+}
+declare -A PROFILE
+write_hooks_file
+cli_variant ctl-base || exit 1
+ctl_clear
+cli_variant ctl-empty "${CTL_MOUNT[@]}"
+ctl "touch /wr/.st-control/$SID/relay.enabled /wr/.st-control/$SID/defer-skill-seed"
+cli_variant ctl-markers "${CTL_MOUNT[@]}"
+ctl "printf '{ not json' > /wr/.st-control/$SID/settings.json && printf '{\"hooks\":{\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"touch /tmp/st-control-was-read\"}]}]}}' > /wr/.st-control/$SID/managed.json"
+cli_variant ctl-json "${CTL_MOUNT[@]}"
+check "[ctl-json] a settings-shaped file in /etc/st-control is never applied" docker exec "$SESS" test ! -e /tmp/st-control-was-read
+ctl "chmod 000 /wr/.st-control/$SID"
+cli_variant ctl-unreadable "${CTL_MOUNT[@]}"
+ctl "chmod 755 /wr/.st-control/$SID"
+for tag in ctl-empty ctl-markers ctl-json ctl-unreadable; do
+	check "[$tag] same hook counts as without the control dir (${PROFILE[$tag]})" [ "${PROFILE[$tag]}" = "${PROFILE[ctl-base]}" ]
+	# Counts AND the order of the lifecycle hooks (MessageDisplay batching and
+	# the async SessionStart's position tolerated): session-image/test/hook-compare.mjs.
+	CMP=$(node "$REPO_ROOT/session-image/test/hook-compare.mjs" "$OUT/ctl-base.snap.jsonl" "$OUT/$tag.snap.jsonl")
+	check "[$tag] same lifecycle hook order as without the control dir ($CMP)" grep -q '"ok":true' <<<"$CMP"
+done
+check "the baseline profile has every hook of the turn" \
+	bash -c 'jq -e ".SessionStart >= 2 and .UserPromptSubmit == 2 and .PreToolUse == 1 and .PostToolUse == 1 and .Stop == 2 and .MessageDisplay == \"present\"" <<<"$1" >/dev/null' _ "${PROFILE[ctl-base]}"
+note "hook profile (count per event; MessageDisplay batches not counted) in every control-dir shape: ${PROFILE[ctl-base]}"
+
+# 11e — deferred seeding never overwrites what is in the workspace.
+SKILL_REL=.st/claude-state/skills/delegate-task/SKILL.md
+USER_REL=.st/claude-state/skills/my-own/SKILL.md
+skill_sums() { docker run --rm -v "$WS":/w --entrypoint bash "$IMAGE" -c "sha256sum /w/$SKILL_REL /w/$USER_REL 2>/dev/null | cut -c1-64 | tr '\n' ' '"; }
+docker run --rm -v "$WS":/w --entrypoint bash "$IMAGE" -c "
+	mkdir -p /w/.st/claude-state/skills/delegate-task /w/.st/claude-state/skills/my-own
+	printf 'customised by the user\n' > /w/$SKILL_REL
+	printf 'my own skill\n' > /w/$USER_REL
+	chmod -R a+rwX /w/.st"
+BEFORE=$(skill_sums)
+ctl_clear
+ctl "touch /wr/.st-control/$SID/defer-skill-seed"
+session no none "${CTL_MOUNT[@]}" || exit 1
+check "defer-skill-seed: the boot did not seed (managed and user skills byte-identical)" [ "$(skill_sums)" = "$BEFORE" ]
+docker exec "$SESS" /opt/st/seed-skills.sh >/dev/null 2>&1
+SEED_RC=$?
+check "defer-skill-seed: seed-skills.sh by exec refuses (exit 3) and changes nothing" \
+	bash -c '[ "$1" = 3 ] && [ "$2" = "$3" ]' _ "$SEED_RC" "$(skill_sums)" "$BEFORE"
+docker restart -t 2 "$SESS" >/dev/null
+# The first boot's "container ready" is still in the log: wait for a second one.
+wait_until 300 bash -c '[ "$(docker logs "$1" 2>&1 | grep -c "container ready")" -ge 2 ]' _ "$SESS" ||
+	fail "restarted container never became ready"
+check "defer-skill-seed: a second boot of the same container did not seed either" [ "$(skill_sums)" = "$BEFORE" ]
+ctl "rm -f /wr/.st-control/$SID/defer-skill-seed"
+docker exec "$SESS" /opt/st/seed-skills.sh
+AFTER=$(skill_sums)
+IMG_SUM=$(docker run --rm --entrypoint sha256sum "$IMAGE" /opt/session-skills/delegate-task/SKILL.md | cut -c1-64)
+check "marker removed ⇒ seeding refreshes the managed skill from the image" [ "${AFTER%% *}" = "$IMG_SUM" ]
+check "… and leaves the user's own skill byte-identical" [ "$(cut -d' ' -f2 <<<"$AFTER")" = "$(cut -d' ' -f2 <<<"$BEFORE")" ]
+
+# 11e' — fail-closed when the control dir can't be examined (Work I1). A
+# root:root 0700 dir is what RecreateAttemptStore creates today: developer
+# can't search it, so neither boot nor exec may seed — with or without the
+# marker. The session still boots.
+reset_skills() {
+	docker run --rm -v "$WS":/w --entrypoint bash "$IMAGE" -c "
+		printf 'customised by the user\n' > /w/$SKILL_REL && chmod -R a+rwX /w/.st"
+}
+for variant in "0700:marker" "0700:none" "0000:marker"; do
+	mode="${variant%%:*}"
+	reset_skills
+	BEFORE=$(skill_sums)
+	ctl_clear
+	[ "${variant##*:}" = marker ] && ctl "touch /wr/.st-control/$SID/defer-skill-seed"
+	ctl "chown root:root /wr/.st-control/$SID && chmod $mode /wr/.st-control/$SID"
+	session no none "${CTL_MOUNT[@]}" || exit 1
+	check "[ctl $variant] boot did not seed; the session is up" \
+		bash -c '[ "$1" = "$2" ] && docker exec "$3" test -e /tmp/.st-ready' _ "$(skill_sums)" "$BEFORE" "$SESS"
+	docker exec "$SESS" /opt/st/seed-skills.sh >/dev/null 2>&1
+	rc=$?
+	check "[ctl $variant] exec of seed-skills.sh refuses with 4 and writes nothing" \
+		bash -c '[ "$1" = 4 ] && [ "$2" = "$3" ]' _ "$rc" "$(skill_sums)" "$BEFORE"
+	docker restart -t 2 "$SESS" >/dev/null
+	wait_until 300 bash -c '[ "$(docker logs "$1" 2>&1 | grep -c "container ready")" -ge 2 ]' _ "$SESS" ||
+		fail "[ctl $variant] restarted container never became ready"
+	check "[ctl $variant] second boot did not seed either" [ "$(skill_sums)" = "$BEFORE" ]
+	check "[ctl $variant] the boot logged the fail-closed skip" \
+		bash -c 'docker logs "$1" 2>&1 | grep -q "skill seeding skipped: /etc/st-control can.t be examined"' _ "$SESS"
+done
+ctl "chmod 755 /wr/.st-control/$SID"
+
+# 11f — compatibility: without the control mount the boot seeds as before.
+docker run --rm -v "$WS":/w --entrypoint bash "$IMAGE" -c "printf 'stale\n' > /w/$SKILL_REL"
+session no none || exit 1
+check "no control mount: the boot seeds the managed skills as before" [ "$(skill_sums | cut -d' ' -f1)" = "$IMG_SUM" ]
 
 echo
 echo "── Summary ──"
