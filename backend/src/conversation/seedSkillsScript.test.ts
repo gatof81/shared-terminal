@@ -41,6 +41,7 @@ beforeEach(async () => {
 		.replace("SKILLS_DST=/home/developer/workspace/.st/claude-state/skills", `SKILLS_DST=${dst}`);
 	expect(text).toContain(`CONTROL_DIR=${control}`);
 	expect(text).toContain(`SKILLS_DST=${dst}`);
+	expect(text).toContain(`SKILLS_SRC=${src}`);
 	script = path.join(root, "seed-skills.sh");
 	await fs.writeFile(script, text, { mode: 0o755 });
 });
