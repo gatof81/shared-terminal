@@ -334,6 +334,10 @@ el anterior falló, salvo donde se indica:
    error inesperado: §5.6 lo completa cuando se resuelve el destino de `N`.
 4. **Solo si el paso 2 confirmó la eliminación**, se borra `defer-skill-seed`.
 
+> Contrato v1.6 (§2.7.3): el rollback **resuelto** exige además que no quede trabajo en vuelo, y
+> busca `N` también por la etiqueta `recreate-of`. Responde sin `unresolved`. Todo lo demás es
+> estado incierto, con `unresolved: true`.
+
 **Estado incierto.** Si `remove` falla o su resultado es ambiguo (timeout, daemon sin respuesta,
 `inspect(N)` sin respuesta o con `N` todavía presente), la marca **se conserva**.
 
@@ -371,6 +375,20 @@ Nada de esto exige una segunda recreación, que §5.2 probablemente bloquearía,
 `N` ya tiene `~/.bash_history`.
 
 #### 5.3.1 Tope de tiempo
+
+> **Precisado en el contrato v1.6 (§2.7.4, revisión de consistencia K1):**
+>
+> - Un timeout no significa que la operación haya terminado. Una llamada vencida sigue en vuelo
+>   hasta que su promesa se resuelve, y en D1 además durante `T_d1` = 60 s.
+> - Cada intento tiene una época, que se cierra al vencer el tope; ninguna continuación tardía
+>   hace efectos.
+> - Mientras quede trabajo sin resolver, la sesión rechaza las operaciones incompatibles
+>   (`recreate-unresolved`). Deshabilitar y el comando de emergencia siempre funcionan.
+> - Un CAS ambiguo no lleva a borrar `N`: se decide releyendo después de `T_d1`.
+> - El rollback resuelto (sin `unresolved`) y el no resuelto (`unresolved: true`) se distinguen
+>   en la respuesta y en los criterios.
+>
+> Donde este apartado diga otra cosa, manda el contrato.
 
 Una llamada a Docker sin tope (`create`, `start`, `inspect`, `changes`, `rename`) con el daemon
 colgado retendría el lock hasta reiniciar el backend. Por eso hay dos topes:
@@ -764,6 +782,17 @@ No hay respaldo silencioso en otra ruta.
 
 #### 5.8.3 Autorización completa antes de escribir `relay.enabled`
 
+> **Precisado en el contrato v1.6 (§2.7.5, K2/K3):** hay tres niveles.
+>
+> - La **autorización completa**, la de esta sección, sirve para **escribir** sobre un contenedor
+>   en marcha.
+> - La **autorización de conservación** (1–3, 5, 6, y el contenedor existente con ambos montajes,
+>   en marcha o detenido) **mantiene** marca y archivo durante un stop. `reconcile` no los retira
+>   ahí, de modo que stop + start sigue capturando sin `PATCH`.
+> - La **preparación del spawn** escribe antes de crear el contenedor.
+>
+> Sin ambos montajes, como en un contenedor creado por 3.0c, no hay reparación sin recrear.
+
 `relay.enabled` y `conversation.json` se escriben **solo** si, en ese momento, se cumple todo:
 
 1. `CONVERSATION_ENABLED`;
@@ -924,13 +953,13 @@ una garantía más débil ("identificado en los últimos 15 s").
   repara.
 - **`requiresRecreate`** distingue lo que se repara en el mismo contenedor de lo que solo
   resuelve un contenedor nuevo:
-  - **`false`** cuando hay correspondencia, o una suspensión restaurable, y solo falta
-    configuración o relay. El remedio es arrancar si hace falta y luego `PATCH {enabled:true}`.
+  - **`false`** cuando hay ambos montajes y correspondencia, o una suspensión restaurable, y solo
+    falta configuración o relay. El remedio es arrancar si hace falta y luego `PATCH {enabled:true}`.
     `pendingReasons` lo dice (`hooks-file-missing` + `stopped`). **No se exige una recreación
     innecesaria.**
   - **`true`** solo con `container-without-capture`, `token-mismatch`, o un contenedor sin el
-    directorio de control (creado por 3.0c) cuya imagen no lleva `="2"`. Ninguno se repara en el
-    mismo contenedor.
+    montaje de control (por ejemplo, creado por 3.0c), sea cual sea su imagen (contrato v1.6,
+    §2.7.5). Ninguno se repara en el mismo contenedor.
   - Nunca promete que la recreación vaya a pasar: §5.2 y la precondición 8 solo se evalúan en el
     preflight.
 - **`PATCH {enabled:true}`** aplica §5.8.3. Con el contenedor detenido no escribe nada y responde

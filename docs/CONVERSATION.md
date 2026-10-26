@@ -1,6 +1,6 @@
 # Conversation & Agent Activity — contrato técnico (Fase 3)
 
-Estado: **v1.5 (3.0a, rondas 1 a 3 de revisión Work; en 3.0c, transporte por relay local §2.6, aprobado
+Estado: **v1.6 (3.0a, rondas 1 a 3 de revisión Work; en 3.0c, transporte por relay local §2.6, aprobado
 por el responsable el 2026-10-23; decisiones de cierre de 3.0c sobre `emissionStopsAfterRestart` y el
 par `tool_failed`/`tool_end`, 2026-10-23; en 3.0d, recreación administrativa y activación
 progresiva §2.7, diseño aprobado por Work y el responsable el 2026-10-26), vinculante para los PRs
@@ -186,16 +186,18 @@ estados y una tabla de transiciones. *MUST* implementarse exactamente así y cub
 | Habilitar (`requested=1`) | **no existe** (`container_id` NULL o inspect 404) | se generará en el siguiente spawn | sin cambio hasta el spawn | se escribe en el spawn | `effective:false`; `effectiveAfterRestart` según §2.7.6, rama sin contenedor: `true` solo con `requested` ∧ flag ∧ sin revocación ∧ imagen actual `="2"` |
 | Habilitar | existe **sin** token (detenido o en marcha) | ausente (inmutable) | sin cambio | **no se escribe**, ni `relay.enabled` | `{effective:false, effectiveAfterRestart:false, requiresRecreate:true}`, `pendingReasons: [container-without-capture]`. Solo lo resuelve la recreación (§2.7) |
 | Habilitar | existe con token y `ingest_token_hash` ≠ huella del token (§2.7.6) | presente | **sin cambio**: la huella nunca se copia a D1 | **no se escribe**; marca y archivo residuales se retiran | `{effective:false, effectiveAfterRestart:false, requiresRecreate:true}`, `token-mismatch` |
-| Habilitar | en marcha, con token y `ingest_token_hash_suspended` = huella (deshabilitada por API sin recrear) | presente | se **restaura** desde `ingest_token_hash_suspended` | procedimiento de §2.7.5: `relay.enabled` → relay identificado → archivo | `effective:true` solo si el relay se identificó; si no, `relay-unavailable` sin archivo |
-| Habilitar | en marcha, con token y correspondencia, sin marca o sin archivo | presente | sin cambio | procedimiento de §2.7.5 | ídem |
-| Habilitar | detenido, con token y correspondencia (o suspendido = huella) | presente | se restaura si estaba suspendido | **no se escribe nada** con el contenedor detenido | `effectiveAfterRestart:true` solo si marca y archivo ya están (§2.7.6); si no, `false` con `requiresRecreate:false` y `pendingReasons: [stopped, hooks-file-missing]`: se arranca y se repite el `PATCH` |
+| Habilitar | creado por el backend de 3.0c: con token pero **sin montaje de control** (en marcha o detenido) | presente | sin cambio | **no se escribe nada**; `conversation.json` y `relay.enabled` residuales se retiran (`PATCH` y `reconcile`) | `{effective:false, effectiveAfterRestart:false, requiresRecreate:true}`; no hay reparación sin recrear (§2.7.5) |
+| Habilitar | en marcha, **con ambos montajes**, con token y `ingest_token_hash_suspended` = huella (deshabilitada por API sin recrear) | presente | se **restaura** desde `ingest_token_hash_suspended` | procedimiento de §2.7.5: `relay.enabled` → relay identificado → archivo | `effective:true` solo si el relay se identificó; si no, `relay-unavailable` sin archivo |
+| Habilitar | en marcha, **con ambos montajes**, con token y correspondencia, sin marca o sin archivo | presente | sin cambio | procedimiento de §2.7.5 | ídem |
+| Habilitar | detenido, **con ambos montajes**, con token y correspondencia (o suspendido = huella) | presente | se restaura si estaba suspendido | **no se escribe nada** con el contenedor detenido | `effectiveAfterRestart:true` solo si marca y archivo ya están (§2.7.6); si no, `false` con `requiresRecreate:false` y `pendingReasons: [stopped, hooks-file-missing]`: se arranca y se repite el `PATCH` |
 | Deshabilitar (`requested=0`) | corriendo con token | presente (inmutable, inofensivo) | se mueve a `ingest_token_hash_suspended`, queda NULL ⇒ **la ingesta rechaza desde ya** | se borra, y después `relay.enabled` ⇒ el CLI deja de emitir al recargar o en el siguiente start | `{enabled:false, effective:false, emissionStopsAfterRestart:true}` (decisión del responsable, ver abajo) |
 | Deshabilitar | parado | — | NULL | se borran archivo y marca | `{enabled:false, effective:false}` |
 | Emergencia `npm run conversation:disable -- <sid>\|--all` | cualquiera | — | **NULL** en D1 y `conversation_requested=0` (persistente: el siguiente `start` no regenera nada) | borrados, archivo y después `relay.enabled` | orden estricto §2.5: marca de revocación → D1 → archivos; confirma éxito solo al terminar los tres pasos; falla (≠ 0) si D1 no responde, dejando la marca puesta |
 | Recrear (admin, `POST /api/admin/sessions/:id/recreate`) | **detenido**, sin captura | nuevo, en `N` | cambia **en la misma sentencia** que `container_id` (§2.7.2, paso 4) | tras el CAS, procedimiento de §2.7.5 | §2.7 |
 | `spawn` (contenedor **creado**: sesión nueva, o `start` sin contenedor existente — §2.4.1) | — | nuevo si `requested=1` ∧ `CONVERSATION_ENABLED` ∧ sin revocación ∧ imagen `="2"` | nuevo hash o NULL | si hay token: hash → `relay.enabled` → archivo antes de crear el contenedor; si no, ambos borrados | — |
-| `start` de un contenedor **existente** (§2.4.1) | — | el que ya tenía (o ninguno) | sin cambio | sin cambio: `start` no escribe ni repara marcas ni archivos | — |
-| `reconcile` (arranque del backend) | cada sesión | — | — | marca y archivo presentes ⇔ autorización completa (§2.7.5) con el contenedor en marcha; se retiran los residuales (§2.7.5) y se resuelven las recreaciones interrumpidas (§2.7.4) | log por corrección |
+| `stop` | en marcha → detenido | sin cambio | sin cambio (el hash sobrevive a `onSessionDown`) | **se conservan** marca y archivo si había autorización de conservación (§2.7.5) | — |
+| `start` de un contenedor **existente** (§2.4.1) | — | el que ya tenía (o ninguno) | sin cambio | sin cambio: `start` no escribe, ni repara, ni retira marcas o archivos. Si se conservaron, el supervisor lanza el relay en el boot | — |
+| `reconcile` (arranque del backend) | cada sesión | — | — | contenedor **en marcha**: marca y archivo ⇔ autorización completa (escribe con el procedimiento de §2.7.5). Contenedor **detenido**: se conservan si hay autorización de conservación, nunca se escriben, y se retiran si falta. Sin contenedor: se retiran (el siguiente spawn los rehace). Se resuelven además las recreaciones interrumpidas (§2.7.4) | log por corrección |
 
 Invariantes:
 
@@ -504,6 +506,7 @@ acepta: bloquea.
    purga).
    - `recreate` no espera: si está ocupado, `busy`.
    - Las demás esperan ≤ `T_rec` + `T_rb` = 6 min (§2.7.4) y después responden `busy` sin efectos.
+   - Con la sesión sin resolver, todas responden `recreate-unresolved` (§2.7.4).
 2. La sesión existe, no está `failed` ni `terminated`, y tiene `container_id` (`no-container`).
 3. `O` existe y está detenido (`container-missing`, `running`).
 4. `inspect(SESSION_IMAGE).Id` = `expectImageId` (`image-changed`), y ese ID lleva
@@ -543,7 +546,9 @@ Si las marcas fueran incompatibles con el CLI (§2.7.5), responde `control-marke
    ```
 
    - 0 filas o error ⇒ rollback.
-   - Un timeout ambiguo se resuelve releyendo la fila; si la relectura falla, §2.7.4.
+   - **Timeout ambiguo** (la petición pudo aplicarse): no hay rollback que borre `N`. La sesión
+     pasa a **sin resolver** (§2.7.4), y la decisión se toma releyendo la fila solo cuando la
+     sentencia ya no puede aplicarse.
    - Con `T_rec` vencido no se ejecuta.
    - **`container_id` y el hash autorizado cambian juntos.**
 5. **Autorizar:** el procedimiento de §2.7.5 sobre `N`. Si el relay no se identifica, se queda en
@@ -563,6 +568,8 @@ Si las marcas fueran incompatibles con el CLI (§2.7.5), responde `control-marke
 **D1 apunta siempre a un contenedor que existe:**
 
 - antes del paso 4, a `O` (renombrado o no); después, a `N`;
+- con un CAS ambiguo, `N` no se borra hasta que la relectura posterior a `T_d1` decide, así que
+  D1 apunta a un contenedor existente aunque la sentencia se aplique tarde;
 - `O` se borra solo después del paso 4;
 - las lecturas concurrentes (attach, exec, git, files) resuelven por `container_id` y ven una
   sesión detenida hasta el paso 6;
@@ -581,19 +588,31 @@ Si las marcas fueran incompatibles con el CLI (§2.7.5), responde `control-marke
   - el entrypoint no la borra nunca y el usuario no puede tocarla, porque el montaje es ro;
   - la retira solo el backend: en el paso 6.1, en el rollback (con la eliminación de `N`
     confirmada), o en la convergencia de §2.7.4, incluso con `N` detenido.
-- **Rollback** (fallo en los pasos 1–4):
-  1. `stop` y `remove(N)`;
-  2. confirmar `inspect(N)` 404;
-  3. `O` a su nombre canónico;
-  4. **solo con el paso 2 confirmado**, retirar `defer-skill-seed`.
+- **Rollback** (fallo definitivo en los pasos 1–4, sin trabajo en vuelo, §2.7.4):
+  1. esperar a que se resuelva toda llamada en vuelo de esta recreación;
+  2. `stop` y `remove(N)`, buscando `N` por id y por la etiqueta `recreate-of`, por si un `create`
+     cuyo resultado no se conocía llegó a aplicarse;
+  3. confirmar que no existe ningún `N` (404 y ningún contenedor con esa etiqueta);
+  4. `O` a su nombre canónico;
+  5. **solo con el paso 3 confirmado**, retirar `defer-skill-seed`.
 
-  - Estado final: el previo, con D1 en `O`, sin cambios en captura ni skills. Responde 500
-    `recreate-failed {step}`.
-  - D1 y el workspace no necesitan restauración.
-- **Estado incierto:**
-  - **Cuándo:** `remove` falla o queda ambiguo, o `N` sigue presente.
-  - **Efectos:** la marca se conserva, la sesión queda "recreación interrumpida" y la respuesta
-    lleva `{unresolved: true}`.
+  - **Rollback resuelto:**
+    - estado final igual al previo: D1 en `O`, `O` con su nombre, sin `N` y sin la marca, sin
+      cambios en captura ni skills;
+    - responde 500 `recreate-failed {step}`, **sin** `unresolved`;
+    - D1 y el workspace no necesitan restauración.
+  - Si alguno de los pasos 1–3 no se puede confirmar, no es un rollback resuelto: pasa al estado
+    incierto.
+- **Estado incierto (`unresolved`):**
+  - **Cuándo:**
+    - queda trabajo en vuelo sin resolver (§2.7.4);
+    - `remove` falla o queda ambiguo;
+    - `N` sigue presente;
+    - el CAS es ambiguo.
+  - **Efectos:**
+    - la marca se conserva y la sesión queda **sin resolver** (§2.7.4);
+    - responde 500 `recreate-failed {step, unresolved: true}`;
+    - el preflight y `capture` informan `recreate-unresolved`.
   - **Rename de `O`:** si `N` todavía tiene el nombre canónico, el rename de `O` falla. Es el
     resultado esperado del estado incierto y no un error inesperado: lo completa §2.7.4.
   - **Resolución:** la marca se retira solo cuando §2.7.4 resuelve con D1 y Docker.
@@ -604,22 +623,67 @@ Si las marcas fueran incompatibles con el CLI (§2.7.5), responde `control-marke
     en su siguiente arranque;
   - si la siembra falla, siembra el siguiente arranque.
 
-#### 2.7.4 Topes de tiempo y recreación interrumpida
+#### 2.7.4 Topes de tiempo, trabajo en vuelo y recreación interrumpida
+
+**Un timeout no significa que la operación haya terminado.** Docker y D1 pueden aplicar una
+petición cuyo cliente ya se rindió. Reglas:
+
+- **En vuelo sin resolver.** Una llamada (Docker, `execCapture` o D1) cuyo tope venció sigue "en
+  vuelo" hasta que su promesa se resuelve. En D1, además, hasta que pasen **`T_d1` = 60 s** desde
+  que se envió, por encima del máximo de duración de una sentencia en D1 (30 s según Cloudflare;
+  la implementación lo verifica y fija `T_d1` en consecuencia). Hasta entonces su resultado se
+  desconoce y **nada se decide suponiéndolo**.
+- **Sin continuaciones tardías.** Cada intento de recreación tiene una **época**, que se cierra al
+  vencer `T_rec` o `T_rb`, o al pasar al rollback.
+  - Toda continuación (el código que sigue a una llamada que se resuelve tarde) comprueba la época
+    antes de cualquier efecto y, si está cerrada, no hace nada más.
+  - Así nunca escribe D1, ni renombra, ni crea, ni arranca, ni escribe marcas o archivos, ni
+    siembra.
+  - Ejemplos:
+    - un probe que responde positivo después del tope no escribe `conversation.json`;
+    - un `create` que termina tarde no lleva a arrancar `N`;
+    - un rename tardío no se da por hecho.
+- **Sin operaciones incompatibles mientras haya trabajo sin resolver.** Desde que se cierra la
+  época hasta que **todas** las llamadas en vuelo se resuelven y la tabla de abajo resuelve el
+  estado observado, la sesión está **sin resolver**:
+  - `start`, `stop`, `kill`, `delete` (soft y hard), `recreate` y `PATCH {enabled:true}` responden
+    409 `recreate-unresolved` sin efectos;
+  - `reconcile` no escribe nada para esa sesión, salvo la propia resolución;
+  - las lecturas responden `effective:false` con `recreate-unresolved`.
+- **Siempre permitidos:** `PATCH {enabled:false}` y el comando de emergencia. Solo escriben la
+  marca de revocación, D1 (que el CAS no puede pisar, porque exige `conversation_requested = 1`) y
+  borran archivos. La revocación nunca se bloquea.
+- **Resolución:**
+  - automática, en cuanto se resuelve la última llamada en vuelo (y pasa `T_d1` si había una de
+    D1);
+  - solo con estado observado: `inspect`, la lista por etiqueta y nombre, y la lectura de D1;
+  - con la tabla de abajo;
+  - si Docker no responde, la sesión sigue sin resolver y se reintenta.
+- **Tras un reinicio del backend** se pierden las promesas, pero no las peticiones que Docker o D1
+  todavía puedan aplicar. Por eso `reconcile` trata como **sin resolver** toda sesión con un
+  contenedor etiquetado `recreate-of` o con un nombre reservado, y la resuelve en una pasada
+  diferida, `T_d1` después del arranque.
+
 
 - **`T_rec` = 5 min**, desde el lock hasta el final del paso 6, **incluidos todos los pasos
   posteriores al CAS**. Cada llamada a Docker o `execCapture` (probe, siembra, gitIdentity) corre
   contra el presupuesto que queda. postStart corre contra `min(lo que queda de T_rec, el tope
   propio de streamExec)`.
-  - Vencido antes del paso 4: rollback.
-  - Vencido después: se abandona el resto del paso 6, se registra qué faltó, **se libera el lock**
-    y lo pendiente converge (§2.7.3). Un probe cortado cuenta como `relay-unavailable`, así que se
-    retira la marca sin escribir el archivo.
+  - Vencido antes del paso 4: se cierra la época y se pasa al rollback.
+  - Vencido después: se cierra la época, se abandona el resto del paso 6 y se registra qué faltó.
+    - Con trabajo en vuelo (un probe, un exec), la sesión queda sin resolver hasta que se resuelva:
+      un probe tardío no escribe nada y se retira la marca.
+    - Sin trabajo en vuelo, se libera el lock y lo pendiente converge (§2.7.3).
+    - postStart sigue en `N` como proceso de la sesión (`N` ya es la sesión). El backend no espera
+      su resultado ni actúa por él.
 
-  Así ninguna operación espera más de `T_rec` + `T_rb`.
+  Así ninguna operación **espera** más de `T_rec` + `T_rb`: después responde, aunque sea con
+  `recreate-unresolved`.
 - **`T_rb` = 60 s** para el rollback. Si vence:
-  - se libera el lock y la sesión queda "recreación interrumpida" en memoria;
-  - la siguiente operación de ciclo de vida resuelve primero con la tabla de abajo, y si Docker no
-    responde, contesta 503 `docker-unavailable` sin tocar D1 ni el workspace;
+  - se libera el lock y la sesión queda sin resolver;
+  - las operaciones incompatibles responden `recreate-unresolved` hasta la resolución;
+  - si al resolver Docker no responde, contesta 503 `docker-unavailable` sin tocar D1 ni el
+    workspace;
   - un `DELETE ?hard=true` nunca purga un workspace sobre el que `N` pudiera estar corriendo.
 - **`reconcile`, al arrancar el backend**, revisa:
   - `docker ps -a --filter label=io.shared-terminal.recreate-of`;
@@ -640,14 +704,42 @@ Ninguna acción borra un contenedor al que apunte D1.
 
 #### 2.7.5 Autorización del relay y marcas
 
-`relay.enabled` y `conversation.json` se escriben **solo** con la **autorización completa**:
+Hay tres niveles de autorización, para escribir, conservar y preparar.
+
+**Autorización completa**, para **escribir** `relay.enabled` y `conversation.json` sobre un
+contenedor existente:
 
 1. `CONVERSATION_ENABLED`;
 2. `conversation_requested = 1`;
 3. sin marca de revocación, por sesión ni global;
-4. el contenedor de D1 existe, está en marcha y tiene el montaje gestionado y el de control;
+4. el contenedor de D1 existe, está **en marcha** y tiene **ambos montajes** (gestionado y de
+   control);
 5. su imagen lleva `conversation-relay="2"`;
 6. correspondencia token ↔ hash (§2.7.6).
+
+**Autorización de conservación**, para **mantener** marca y archivo ya escritos mientras el
+contenedor está detenido: las mismas condiciones 1–3, 5 y 6, y en la 4 que el contenedor
+**exista** (en marcha o detenido) con ambos montajes.
+
+- `stop` no retira nada: así una sesión que captura sigue capturando tras stop + start sin
+  `PATCH` (§2.4.1).
+- `reconcile` conserva lo que cumple esta autorización, nunca escribe sobre un contenedor
+  detenido, y retira lo que no la cumple.
+
+**Preparación del spawn** (excepción aprobada): el contenedor todavía no existe.
+
+- Con 1–3 y la imagen vigente con `="2"`, `prepareSpawn` genera el token, escribe hash → marca →
+  archivo, y después crea el contenedor con ambos montajes. La correspondencia se cumple por
+  construcción.
+- Si la creación falla, el siguiente spawn sobrescribe, y `reconcile` retira lo que quede sin
+  contenedor.
+
+**Sin ambos montajes no hay reparación sin recrear.** Un contenedor creado por el backend de 3.0c
+tiene el montaje gestionado pero no el de control:
+
+- no se escribe nada;
+- `conversation.json` y `relay.enabled` residuales se retiran;
+- `requiresRecreate:true`.
 
 **Orden:** autorización → `relay.enabled` → recomprobación de 1–3 → probe de identificación
 (≤ 5 s) → `conversation.json` → recomprobación de 1–3.
@@ -655,9 +747,9 @@ Ninguna acción borra un contenedor al que apunte D1.
 - Si falla una recomprobación, se borran archivo y marca, en ese orden.
 - Si falla el probe, se borra la marca (`relay-unavailable`).
 
-**Lugares que lo aplican:** el paso 5 de §2.7.2, `PATCH {enabled:true}` con el contenedor en
-marcha y `reconcile`. El spawn aplica las condiciones 1–3 y 5 antes de crear el contenedor y
-escribe hash → marca → archivo. El relay arranca en el boot.
+**Lugares que aplican el orden de escritura:** el paso 5 de §2.7.2, `PATCH {enabled:true}` con el
+contenedor en marcha y `reconcile` con el contenedor en marcha. Ninguno actúa mientras la sesión
+está sin resolver (§2.7.4).
 
 **Marcas residuales:** sin autorización completa se retiran, y nunca cuentan para `effective`.
 
@@ -666,7 +758,8 @@ escribe hash → marca → archivo. El relay arranca en el boot.
 | Disable API y emergencia | Archivo y después marca (§2.5) |
 | Receptor que observa una revocación | Archivo y después marca (§2.5) |
 | Flag apagado | `reconcile` borra todos los archivos y todas las marcas |
-| `token-mismatch` o contenedor sin captura | `PATCH` y `reconcile` las borran y nunca las escriben |
+| `token-mismatch`, contenedor sin captura, o contenedor sin montaje de control (3.0c) | `PATCH` y `reconcile` las borran y nunca las escriben |
+| Sin contenedor (`kill`, borrado soft, id obsoleto) | `reconcile` las retira; el siguiente spawn las rehace |
 
 Un contenedor que arranca con una marca residual lanza un relay inocuo: el backend rechaza todo
 y, sin archivo, ningún hook le escribe.
@@ -689,7 +782,7 @@ capture: {
   requested, effective, effectiveAfterRestart, requiresRecreate,
   pendingReasons: [],   // flag-off | not-requested | revoked | image-without-relay | stopped |
                         // container-without-capture | token-mismatch | hooks-file-missing |
-                        // relay-unavailable | control-marker-incompatible |
+                        // relay-unavailable | control-marker-incompatible | recreate-unresolved |
                         // cli-below-minimum (aviso)
   checkedAt             // hora del probe del relay hecho en esta petición
 }
@@ -738,8 +831,11 @@ nuevo.
   contenedor sin el montaje de control: casos que solo resuelve un contenedor nuevo. No promete
   que el preflight vaya a pasar. Con correspondencia y solo configuración ausente es `false`, y se
   resuelve con start + `PATCH`, sin recrear.
-- **`PATCH {enabled:true}`** aplica §2.7.5 con el contenedor en marcha. Detenido, no escribe nada
-  y responde el cálculo anterior. Nunca escribe sin autorización completa.
+- **`PATCH {enabled:true}`** aplica §2.7.5 solo con el contenedor en marcha y con ambos montajes.
+  - Detenido, no escribe nada y responde el cálculo anterior.
+  - Sin montaje de control, no escribe, retira los residuales y responde `requiresRecreate:true`.
+  - Sin resolver, responde `recreate-unresolved`.
+  - Nunca escribe sin autorización completa.
 
 ## 3. Endpoint de ingesta
 
@@ -1239,9 +1335,33 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
       incorrectas de los symlinks. `~/.gitconfig` exacto, con una clave extra y con otro email.
 - [ ] `expectImageId` distinto ⇒ 409 sin efectos. Tag movido entre el preflight y el POST ⇒
       `image-changed`. `docker inspect N` ⇒ `.Image` = `imageId`.
-- [ ] Fallo inyectado en cada paso del 1 al 4 ⇒ estado idéntico al previo: D1, nombres, hash,
-      archivo, marcas, mapeos y skills. CAS con 0 filas ⇒ rollback. Timeout ambiguo de D1 ⇒
-      relectura.
+- [ ] **Rollback resuelto:** fallo definitivo en cada paso del 1 al 4, sin trabajo en vuelo ⇒
+      estado idéntico al previo (D1, nombres, hash, archivo, marcas, mapeos y skills), sin `N`,
+      sin `defer-skill-seed`, y 500 `recreate-failed {step}` **sin** `unresolved`. CAS con 0
+      filas ⇒ rollback resuelto.
+- [ ] **Rollback no resuelto (`unresolved:true`):** `remove(N)` falla o es ambiguo, `N` sigue
+      presente, una llamada en vuelo o un CAS ambiguo ⇒ 500 `{step, unresolved: true}`, marca
+      conservada, sesión sin resolver, `capture` y preflight con `recreate-unresolved`. Tras la
+      resolución automática, el mismo estado final que un rollback resuelto, o la convergencia
+      sobre `N` si el CAS se aplicó.
+- [ ] **Resoluciones tardías (K1):** cada una con la época ya cerrada.
+      - `createContainer` que termina después de su tope ⇒ `N` aparece por etiqueta, la
+        resolución lo elimina, y la marca se retira solo entonces;
+      - CAS que se aplica después del timeout del cliente ⇒ `N` no se borra; la relectura
+        posterior a `T_d1` ve `container_id = N` y converge sobre `N`, y D1 nunca apunta a un
+        contenedor inexistente;
+      - probe que responde positivo después de su tope ⇒ no se escribe `conversation.json` y se
+        retira la marca;
+      - rename que se aplica tarde ⇒ la resolución usa los nombres observados;
+      - postStart que sobrevive a `T_rec` ⇒ el backend no hace nada al terminar.
+
+      En ninguno hay escrituras de la recreación después del cierre de la época.
+- [ ] **Concurrencia sin resolver (K1):** con la sesión sin resolver, `start`, `stop`, `kill`,
+      `delete` soft y hard, `recreate`, `PATCH {enabled:true}` y las escrituras de `reconcile` ⇒
+      `recreate-unresolved` sin efectos, y nunca se purga el workspace. `PATCH {enabled:false}` y
+      `conversation:disable` sí funcionan, con un CAS tardío incluido (no pisa `requested = 0`).
+      Reinicio del backend con una recreación en vuelo ⇒ `reconcile` deja la sesión sin resolver
+      y la resuelve en la pasada diferida (`T_d1`).
 - [ ] Paso 4 atómico: en ningún instante observable `container_id = N` con un hash distinto del de
       `N`.
 - [ ] `docker start` manual de `O` entre los pasos 2 y 3 ⇒ rollback sin arrancar `N`.
@@ -1260,11 +1380,12 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
       a su nombre.
 - [ ] Precondición 7: `.npm-global` ausente o symlink, o layout heredado ⇒ bloqueo sin efectos.
 - [ ] Topes (§2.7.4), con Docker simulado que no responde:
-      - en el paso 3 ⇒ aborta y hace rollback;
-      - rollback colgado ⇒ el lock se libera a los `T_rec` + `T_rb` y la sesión queda marcada;
-      - después del CAS (probe, siembra, postStart colgados) ⇒ se abandona el resto, se libera el
-        lock dentro de `T_rec` y lo pendiente converge;
-      - un `DELETE ?hard=true` posterior resuelve primero o responde 503, y nunca purga.
+      - en el paso 3 ⇒ cierra la época; hay rollback cuando se resuelve lo que está en vuelo;
+      - rollback colgado ⇒ el lock se libera a los `T_rec` + `T_rb` y la sesión queda sin
+        resolver;
+      - después del CAS (probe, siembra o postStart colgados) ⇒ se abandona el resto y ninguna
+        operación espera más de `T_rec` + `T_rb`;
+      - un `DELETE ?hard=true` posterior responde `recreate-unresolved` o 503 y nunca purga.
 - [ ] Las cuatro filas de `reconcile` de §2.7.4. Los nombres que no encajan con el patrón
       reservado no se tocan. El rename de `O` con el nombre canónico ocupado por `N` se trata como
       estado incierto.
@@ -1275,6 +1396,19 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
       relay identificado en ≤ 5 s → archivo. Con el CLI real: un prompt en una pestaña ya abierta y
       otro en una nueva, entregados, `effective:true`, sin "hook error" y sin recreación. El paso 5
       de la recreación sigue el mismo camino.
+- [ ] **Conservación durante el stop (K2):** sesión con captura efectiva → `stop` → `reconcile`
+      (reinicio del backend) → `start` ⇒ marca y archivo siguen, el relay arranca en el boot y
+      `effective:true` sin `PATCH` ni recreación. Antes del start: `effectiveAfterRestart:true`.
+      Variantes con el contenedor detenido, cada una retira en `reconcile`: revocación, flag
+      apagado, `token-mismatch`. Sin contenedor (`kill`) ⇒ se retiran y el spawn las rehace.
+- [ ] **Preparación del spawn (K2):** sesión nueva y `start` sin contenedor ⇒ hash → marca →
+      archivo antes de crear el contenedor con ambos montajes, y efectivo tras el boot. Con la
+      creación fallida, `reconcile` retira lo que quedó sin contenedor.
+- [ ] **Contenedor de 3.0c sin montaje de control (K3):** en marcha y detenido, con token y
+      correspondencia, y con `conversation.json` residual ⇒ `PATCH {enabled:true}` no escribe
+      nada; `reconcile` y `PATCH` retiran archivo y marca; `effective:false`,
+      `effectiveAfterRestart:false`, `requiresRecreate:true`. Tras la recreación (§2.7) ⇒
+      efectivo.
 - [ ] Residuales, con marca y archivo presentes:
       - revocación por sesión y global ⇒ `effective:false` y retirada;
       - flag apagado ⇒ `reconcile` retira todas;
