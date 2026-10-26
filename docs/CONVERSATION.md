@@ -193,7 +193,7 @@ estados y una tabla de transiciones. *MUST* implementarse exactamente así y cub
 | Deshabilitar (`requested=0`) | corriendo con token | presente (inmutable, inofensivo) | se mueve a `ingest_token_hash_suspended`, queda NULL ⇒ **la ingesta rechaza desde ya** | se borra, y después `relay.enabled` ⇒ el CLI deja de emitir al recargar o en el siguiente start | `{enabled:false, effective:false, emissionStopsAfterRestart:true}` (decisión del responsable, ver abajo) |
 | Deshabilitar | parado | — | NULL | se borran archivo y marca | `{enabled:false, effective:false}` |
 | Emergencia `npm run conversation:disable -- <sid>\|--all` | cualquiera | — | **NULL** en D1 y `conversation_requested=0` (persistente: el siguiente `start` no regenera nada) | borrados, archivo y después `relay.enabled` | orden estricto §2.5: marca de revocación → D1 → archivos; confirma éxito solo al terminar los tres pasos; falla (≠ 0) si D1 no responde, dejando la marca puesta |
-| Recrear (admin, `POST /api/admin/sessions/:id/recreate`) | **detenido**, sin captura | nuevo, en `N` | cambia **en la misma sentencia** que `container_id` (§2.7.2, paso 4) | tras el CAS, procedimiento de §2.7.5 | §2.7 |
+| Recrear (admin, `POST /api/admin/sessions/:id/recreate`) | **detenido**, sin captura válida en 3.0d (sin token, `token-mismatch`, o creado por 3.0c sin montaje de control) | nuevo, en `N` | cambia **en la misma sentencia** que `container_id` (§2.7.2, paso 4) | tras el CAS, procedimiento de §2.7.5 | §2.7 |
 | `spawn` (contenedor **creado**: sesión nueva, o `start` sin contenedor existente — §2.4.1) | — | nuevo si `requested=1` ∧ `CONVERSATION_ENABLED` ∧ sin revocación ∧ imagen `="2"` | nuevo hash o NULL | si hay token: hash → `relay.enabled` → archivo antes de crear el contenedor; si no, ambos borrados | — |
 | `stop` | en marcha → detenido | sin cambio | sin cambio (el hash sobrevive a `onSessionDown`) | **se conservan** marca y archivo si había autorización de conservación (§2.7.5) | — |
 | `start` de un contenedor **existente** (§2.4.1) | — | el que ya tenía (o ninguno) | sin cambio | sin cambio: `start` no escribe, ni repara, ni retira marcas o archivos. Si se conservaron, el supervisor lanza el relay en el boot | — |
@@ -524,7 +524,9 @@ Si las marcas fueran incompatibles con el CLI (§2.7.5), responde `control-marke
 1. **Preparar sin efectos visibles.**
    - Se genera el token y `H`.
    - Se escribe `defer-skill-seed` y se borran `relay.enabled` y `conversation.json` residuales.
-     `O` no monta ninguno de los dos directorios.
+     - `O` no monta el directorio de control.
+     - El gestionado solo lo monta un `O` creado por 3.0c. Ese `O` está detenido todo el tiempo, y
+       §2.7.5 retira su archivo igualmente, así que el rollback no tiene que restaurarlo.
    - Se crea `N`:
      - con el nombre `st-<12>-new-<ts>` e `Image: <imageId>`;
      - con el env, binds (gestionado y control, ro), caps y red de siempre;
