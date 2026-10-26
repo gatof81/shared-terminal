@@ -29,6 +29,7 @@ import { d1Query } from "./db.js";
 import type { DockerManager } from "./dockerManager.js";
 import { logger } from "./logger.js";
 import { decryptStoredEntries, getSessionConfig } from "./sessionConfig.js";
+import { sessionLifecycleLock } from "./sessionLifecycleLock.js";
 import type { SessionManager } from "./sessionManager.js";
 
 /**
@@ -851,10 +852,12 @@ async function failSession(
 				"Container will still be killed below; row likely shows running. Manual D1 update needed.",
 		);
 	}
-	await docker.kill(sessionId).catch((err) => {
-		logger.error(
-			`[bootstrap] CRITICAL: kill after failed postCreate ${sessionId} threw: ${(err as Error).message}. ` +
-				"Container may need manual `docker rm`.",
-		);
-	});
+	await sessionLifecycleLock
+		.run(sessionId, "kill", () => docker.kill(sessionId))
+		.catch((err) => {
+			logger.error(
+				`[bootstrap] CRITICAL: kill after failed postCreate ${sessionId} threw: ${(err as Error).message}. ` +
+					"Container may need manual `docker rm`.",
+			);
+		});
 }

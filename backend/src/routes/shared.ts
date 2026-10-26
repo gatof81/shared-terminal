@@ -15,6 +15,7 @@ import type { ExecRegistry } from "../execRegistry.js";
 import type { IdleSweeperStats } from "../idleSweeper.js";
 import { logger } from "../logger.js";
 import type { createAuthRateLimiters, RateLimitConfig, UsernameRateLimiter } from "../rateLimit.js";
+import { SessionBusyError } from "../sessionLifecycleLock.js";
 import type { SessionManager } from "../sessionManager.js";
 import { ForbiddenError, NotFoundError } from "../sessionManager.js";
 import type { SessionMeta } from "../types.js";
@@ -147,6 +148,10 @@ export function handleSessionError(err: unknown, res: Response): void {
 		res.status(404).json({ error: err.message });
 	} else if (err instanceof ForbiddenError) {
 		res.status(403).json({ error: err.message });
+	} else if (err instanceof SessionBusyError) {
+		// Another lifecycle operation holds the session's lock and the wait
+		// cap ran out (or this verb never waits). Nothing was done.
+		res.status(409).json({ error: "busy" });
 	} else if (err instanceof UploadQuotaExceededError) {
 		// 413 Payload Too Large is the HTTP-spec answer for "request
 		// would push you past a server-enforced size cap".

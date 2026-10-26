@@ -32,6 +32,7 @@ import { createPortDispatcher, validatePortProxyBaseDomain } from "./portDispatc
 import { newRequestId, requestIdMiddleware, runWithRequestId } from "./requestContext.js";
 import { buildRouter } from "./routes.js";
 import { validateSecretsKey } from "./secrets.js";
+import { sessionLifecycleLock } from "./sessionLifecycleLock.js";
 import { SessionManager } from "./sessionManager.js";
 import { parseTrustProxy, TrustProxyError, warnIfProductionMisconfigured } from "./trustProxy.js";
 import { configureWebPush, isPushEnabled, sendToUser } from "./webPush.js";
@@ -145,7 +146,14 @@ const bootstrapBroadcaster = new BootstrapBroadcaster();
 // activity signal when traffic lands on a different replica; that's
 // the same single-replica constraint the BootstrapBroadcaster has.
 const idleSweeper = new IdleSweeper({
-	stopContainer: (sessionId) => docker.stopContainer(sessionId),
+	// Lifecycle lock (CONVERSATION.md §2.7.2) without waiting: a session
+	// someone else is starting, stopping or deleting is skipped and
+	// retried on the next sweep (its activity entry stays), instead of
+	// stalling the sweep for every other session behind it.
+	stopContainer: (sessionId) =>
+		sessionLifecycleLock.run(sessionId, "stop", () => docker.stopContainer(sessionId), {
+			mode: "fail",
+		}),
 });
 
 // #355 — bell sweeper (Web Push). Module-scoped (like idleSweeper) so

@@ -191,7 +191,7 @@ interface OwnershipCacheEntry {
 
 export class SessionManager {
 	async create(opts: CreateSessionOpts): Promise<SessionMeta> {
-		const sessionId = uuidv4();
+		const sessionId = opts.sessionId ?? uuidv4();
 		const containerName = `st-${sessionId.slice(0, 12)}`;
 		const cols = opts.cols ?? 120;
 		const rows = opts.rows ?? 36;
