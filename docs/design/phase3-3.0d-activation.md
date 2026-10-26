@@ -35,6 +35,10 @@ un PR de docs **antes** del código.
 **Dentro:**
 
 - El endpoint de recreación (§5).
+- **Un lock por sesión en `start`, `stop`, `kill` y `delete` (soft y hard)**, que hoy no tienen
+  ninguno. Sin él, el lock de `recreate` no protege de nada: un `DELETE ?hard=true` concurrente
+  podría purgar el workspace mientras `N` arranca sobre él. Es un cambio en rutas existentes y va
+  en el PR de implementación con sus tests de concurrencia (§5.7).
 - `PATCH /api/admin/sessions/:id/conversation`.
 - `CONVERSATION_ALLOW_USERS`.
 - Las estadísticas de `GET /api/admin/stats → conversation`.
@@ -127,7 +131,10 @@ atajo. Para el piloto (§7) se elige una sesión que pase.
 ### 5.1 Precondiciones (todas, en este orden; la primera que falla responde 409 con su código)
 
 1. **Lock por sesión** adquirido. Es un mapa en proceso; el backend es único. `start`, `stop`,
-   `kill`, `delete` y `recreate` toman el mismo lock. Si está ocupado, responde `busy`.
+   `kill`, `delete` (soft y hard, incluida la purga del workspace) y `recreate` toman el mismo
+   lock (§1). `recreate` no espera: si está ocupado, responde `busy`. Las otras cuatro esperan a
+   que termine, con el mismo tope de tiempo que la recreación, y después actúan sobre el estado
+   que esta dejó.
 2. La sesión existe, su `status` no es `failed` ni `terminated`, y tiene `container_id`
    (`no-container`: el siguiente start ya crea uno nuevo, así que no hay nada que recrear).
 3. `inspect(container_id)`: el contenedor existe y `State.Running === false`
@@ -190,8 +197,10 @@ Notación: `O` es el contenedor viejo y `N` el nuevo.
    - Se añaden etiquetas `io.shared-terminal.session=<sid>` y `io.shared-terminal.recreate-of=<O>`.
    - `N` no se arranca. D1 sigue en `O`, el archivo de hooks no existe y el hash no cambió.
 2. **Renombrar.** `O` → `st-<12>-old-<ts>`, y `N` → `st-<12>` (el nombre canónico).
-3. **Arrancar `N` y verificar.**
-   - `start()`.
+3. **Recomprobar `O` y arrancar `N`.**
+   - **Primero**, `inspect(O)`: `State.Running` debe seguir en `false`. Si no (por ejemplo un
+     `docker start` manual entre los pasos 2 y 3), rollback sin arrancar `N`.
+   - `start()` de `N`.
    - El sentinel de readiness en ≤ 60 s, que ya existe.
    - Que `N` siga en marcha.
    - Hooks, token y postStart todavía no.
@@ -232,11 +241,25 @@ el anterior falló:
 Estado final: idéntico al previo. `O` está detenido, con D1 apuntándolo, sin cambios en la
 captura. Respuesta: 500 `recreate-failed` con `{ step }`.
 
-**Fallos después del paso 5.**
+**Fallos después del paso 5.** No se vuelve a `O`.
 
-- Si el hash se escribió y el archivo no: hay token sin emisor. Se reintenta el archivo una vez;
-  si vuelve a fallar, se informa `effective:false` y `reconcile` lo converge.
-- No se vuelve a `O`.
+Si el hash se escribió y el archivo no, hay token sin emisor. El estado es reparable sin recrear,
+porque el contenedor `N` ya tiene el token y el montaje; solo falta un archivo en el host:
+
+1. el endpoint reintenta escribir el archivo una vez y, si vuelve a fallar, responde
+   `effective:false` con `pendingReasons: ["hooks-file-missing"]`;
+2. **reparación inmediata:** `PATCH …/conversation {enabled:true}` sobre la sesión en marcha. La
+   rama "ya efectiva" de `enableSession` (hash presente y contenedor en marcha) reescribe el
+   archivo. Ya existe en 3.0b;
+3. **reparación automática:** el `reconcile` de 3.0b, al arrancar el backend, escribe el archivo
+   para toda sesión `running` con `requested ∧ hash` sin archivo (`service.reconcile`:
+   `shouldHaveFile && !has`).
+
+Esto nunca exige una segunda recreación, que §5.2 probablemente bloquearía, porque para entonces
+`N` ya tiene `~/.bash_history`. Si el hash **no** llegó a escribirse, el token de `N` ya no se
+conoce y la captura de `N` no se puede activar. La salida es la de cualquier sesión con
+`requiresRecreate` y la capa bloqueada: el owner resuelve los bloqueos de §5.2, o la captura se
+queda sin activar en esa sesión. No hay salida destructiva (D4).
 
 ### 5.4 Estado compartido del workspace (A2)
 
@@ -322,7 +345,13 @@ vería un contenedor renombrado.
 - Fallo en el paso 5 ⇒ `N` se queda y converge.
 - `expectImageId` distinto ⇒ 409 sin efectos.
 - El tag se mueve entre el preflight y el POST ⇒ `image-changed`.
-- `start` concurrente durante la recreación ⇒ `busy`, o espera según el lock.
+- `start`, `stop`, `kill` y `DELETE ?hard=true` concurrentes durante cada paso de la
+  recreación ⇒ esperan el lock y actúan después sobre el estado final. Nunca se purga un
+  workspace con `N` arrancando.
+- `recreate` sobre una sesión con otra operación en curso ⇒ `busy`, sin efectos.
+- `docker start` manual de `O` entre los pasos 2 y 3 ⇒ rollback sin arrancar `N`.
+- Fallo al escribir el archivo tras la confirmación ⇒ `hooks-file-missing`; `PATCH
+  {enabled:true}` lo repara sin recrear; `reconcile` también.
 - Las tres filas de §5.6.
 
 **Smoke de Docker con el CLI real:**
@@ -354,7 +383,8 @@ capture: {
   effectiveAfterRestart,       // el siguiente `start` CREA el contenedor con captura
   requiresRecreate,            // hace falta POST …/recreate (y bastaría con que no haya blockers)
   pendingReasons: []           // flag-off | revoked | image-without-relay | running |
-                               // container-without-capture | cli-below-minimum (aviso)
+                               // container-without-capture | hooks-file-missing |
+                               // cli-below-minimum (aviso)
 }
 ```
 
