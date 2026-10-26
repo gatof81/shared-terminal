@@ -340,11 +340,15 @@ export async function enableSession(
 	deps.invalidate?.(sessionId);
 	const after = await authority.facts(sessionId);
 	const c = after.container;
+	let identifiedAt: number | undefined;
 	if (c?.exists) {
-		if (c.running && writeAuthorized(after)) await authority.applyWrite(sessionId);
-		else if (!retainAuthorized(after)) await authority.withdraw(sessionId);
+		if (c.running && writeAuthorized(after)) {
+			({ identifiedAt } = await authority.applyWriteDetailed(sessionId, after));
+		} else if (!retainAuthorized(after)) await authority.withdraw(sessionId);
 	}
-	return { enabled: true, capture: await authority.capture(sessionId) };
+	// The write procedure's own identification is this request's probe
+	// (D7): reported as such instead of a second exec.
+	return { enabled: true, capture: await authority.capture(sessionId, { identifiedAt }) };
 }
 
 /**

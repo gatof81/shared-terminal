@@ -44,6 +44,8 @@ export const RELAY_PROBE_TIMEOUT_MS = 2000;
 /** How long the write procedure waits for the relay to identify (§2.7.5). */
 export const RELAY_IDENTIFY_WAIT_MS = 5000;
 const IDENTIFY_POLL_MS = 250;
+/** Upper bound of one probe: curl's `-m` plus the exec timeout margin. */
+export const RELAY_PROBE_BUDGET_MS = 2500;
 
 // ── Docker view ─────────────────────────────────────────────────────────────
 
@@ -339,8 +341,13 @@ export class CaptureAuthority {
 		return p;
 	}
 
-	/** The `capture` block of §2.7.6, fresh. */
-	async capture(sessionId: string): Promise<CaptureBlock> {
+	/**
+	 * The `capture` block of §2.7.6, fresh. `identifiedAt` is for the one
+	 * caller that has just identified the relay itself within the same
+	 * request (enable's write procedure): that probe IS this request's
+	 * probe, so D7 is met without a second exec.
+	 */
+	async capture(sessionId: string, opts: { identifiedAt?: number } = {}): Promise<CaptureBlock> {
 		let f: CaptureFacts;
 		try {
 			f = await this.facts(sessionId);
@@ -362,8 +369,18 @@ export class CaptureAuthority {
 		if (!candidate || !f.container || !f.container.exists || !f.row?.container_id) {
 			return { ...rest, effective: false, checkedAt: null };
 		}
-		const checkedAt = new Date(this.now()).toISOString();
-		const identified = await this.probe(sessionId, f.row.container_id);
+		let identified: boolean;
+		let at: number;
+		if (opts.identifiedAt !== undefined) {
+			identified = true;
+			at = opts.identifiedAt;
+		} else {
+			identified = await this.probe(sessionId, f.row.container_id);
+			// When the probe settled, so a request that joined one already in
+			// flight reports the time of the evidence it actually got.
+			at = this.now();
+		}
+		const checkedAt = new Date(at).toISOString();
 		return {
 			...rest,
 			effective: identified,
@@ -380,32 +397,49 @@ export class CaptureAuthority {
 	 * hooks file → recheck 1–3. A failed recheck removes file then marker;
 	 * an unidentified relay removes the marker and never writes the file.
 	 */
-	async applyWrite(sessionId: string): Promise<WriteOutcome> {
-		const f = await this.facts(sessionId);
-		if (!writeAuthorized(f) || !f.row?.container_id) return "not-authorized";
+	async applyWrite(sessionId: string, fresh?: CaptureFacts): Promise<WriteOutcome> {
+		return (await this.applyWriteDetailed(sessionId, fresh)).outcome;
+	}
+
+	/**
+	 * `fresh`: facts the caller has just read for this decision (converge,
+	 * enable) — saves a second D1 read and Docker inspect. `identifiedAt`
+	 * is when the relay identified, for a caller that reports `capture`.
+	 */
+	async applyWriteDetailed(
+		sessionId: string,
+		fresh?: CaptureFacts,
+	): Promise<{ outcome: WriteOutcome; identifiedAt?: number }> {
+		const f = fresh ?? (await this.facts(sessionId));
+		if (!writeAuthorized(f) || !f.row?.container_id) return { outcome: "not-authorized" };
 		const containerId = f.row.container_id;
 		await writeRelayEnabled(this.deps.workspaceRoot, sessionId);
 		if (!(await this.stillAllowed(sessionId))) {
 			await this.withdraw(sessionId);
-			return "revoked-meanwhile";
+			return { outcome: "revoked-meanwhile" };
 		}
+		// ≤ 5 s in total: another probe is started only while a whole one
+		// still fits before the deadline (the first always does).
 		const deadline = this.now() + RELAY_IDENTIFY_WAIT_MS;
-		let identified = false;
+		let identifiedAt: number | undefined;
 		for (;;) {
-			identified = await this.probe(sessionId, containerId);
-			if (identified || this.now() >= deadline) break;
+			if (await this.probe(sessionId, containerId)) {
+				identifiedAt = this.now();
+				break;
+			}
+			if (this.now() + IDENTIFY_POLL_MS + RELAY_PROBE_BUDGET_MS > deadline) break;
 			await this.sleep(IDENTIFY_POLL_MS);
 		}
-		if (!identified) {
+		if (identifiedAt === undefined) {
 			await removeRelayEnabled(this.deps.workspaceRoot, sessionId);
-			return "relay-unavailable";
+			return { outcome: "relay-unavailable" };
 		}
 		await this.deps.writeHooksFile(sessionId);
 		if (!(await this.stillAllowed(sessionId))) {
 			await this.withdraw(sessionId);
-			return "revoked-meanwhile";
+			return { outcome: "revoked-meanwhile" };
 		}
-		return "written";
+		return { outcome: "written", identifiedAt };
 	}
 
 	/** Conditions 1–3 re-read: flag, requested, no revocation (§2.7.5). */
@@ -433,16 +467,17 @@ export class CaptureAuthority {
 	 */
 	async converge(
 		sessionId: string,
-	): Promise<"written" | "kept" | "withdrawn" | "skipped" | WriteOutcome> {
+	): Promise<"written" | "kept" | "withdrawn" | "nothing" | "skipped" | WriteOutcome> {
 		const f = await this.facts(sessionId);
 		if (f.unresolved) return "skipped";
 		const c = f.container;
 		if (c?.exists && c.running && writeAuthorized(f)) {
 			if (f.marker && f.hooksFile) return "kept";
-			return this.applyWrite(sessionId);
+			return this.applyWrite(sessionId, f);
 		}
 		if (c?.exists && !c.running && retainAuthorized(f)) return "kept";
-		if (f.marker || f.hooksFile) await this.withdraw(sessionId);
+		if (!f.marker && !f.hooksFile) return "nothing";
+		await this.withdraw(sessionId);
 		return "withdrawn";
 	}
 }

@@ -240,13 +240,14 @@ function make(opts: {
 	inspect?: CaptureDockerPort["inspectCapture"];
 	unresolved?: boolean;
 }) {
-	let clock = 0;
+	const clock = { t: 0 };
 	const probe = vi.fn(opts.probe ?? (async () => true));
+	const inspect = vi.fn(opts.inspect ?? (async () => opts.container ?? view()));
 	const authority = new CaptureAuthority({
 		workspaceRoot: root,
 		enabled: true,
 		docker: {
-			inspectCapture: opts.inspect ?? (async () => opts.container ?? view()),
+			inspectCapture: inspect,
 			currentImage: async () => ({ imageId: "sha256:i", relay2: true }),
 			probeRelay: probe,
 		},
@@ -256,12 +257,12 @@ function make(opts: {
 		writeHooksFile: (sid) => writeHooksFile(deps(), sid),
 		removeHooksFile: (sid) => removeHooksFile(root, sid),
 		hooksFileExists: (sid) => hooksFileExists(root, sid),
-		now: () => clock,
+		now: () => clock.t,
 		sleep: async (ms) => {
-			clock += ms;
+			clock.t += ms;
 		},
 	});
-	return { authority, probe };
+	return { authority, probe, inspect, clock };
 }
 
 async function configured(sid: string) {
@@ -436,6 +437,56 @@ describe("applyWrite(): §2.7.5 procedure and rechecks", () => {
 	});
 });
 
+describe("bounds and single reads (review bot on c9bee6f)", () => {
+	it("identification never runs past 5 s: no probe starts unless a whole one fits", async () => {
+		session("s1");
+		const box: { clock?: { t: number } } = {};
+		const m = make({
+			probe: async () => {
+				// each probe takes its full budget (2.5 s) and fails
+				if (box.clock) box.clock.t += 2500;
+				return false;
+			},
+		});
+		box.clock = m.clock;
+		expect(await m.authority.applyWrite("s1")).toBe("relay-unavailable");
+		expect(m.clock.t).toBeLessThanOrEqual(5000);
+		expect(m.probe).toHaveBeenCalledTimes(1);
+		// Fast failing probes: polled every 250 ms, never starting one after 2.25 s.
+		const fast = make({ probe: async () => false });
+		expect(await fast.authority.applyWrite("s1")).toBe("relay-unavailable");
+		expect(fast.clock.t + 2500).toBeLessThanOrEqual(5000 + 250);
+	});
+	it("checkedAt is when the probe settled (a joined probe reports the evidence's time)", async () => {
+		session("s1");
+		await configured("s1");
+		const box: { clock?: { t: number } } = {};
+		const m = make({
+			probe: async () => {
+				if (box.clock) box.clock.t += 1500;
+				return true;
+			},
+		});
+		box.clock = m.clock;
+		const c = await m.authority.capture("s1");
+		expect(c.checkedAt).toBe(new Date(1500).toISOString());
+	});
+	it("converge reads the facts once when it writes (one inspect, not two)", async () => {
+		session("s1");
+		const m = make({});
+		expect(await m.authority.converge("s1")).toBe("written");
+		expect(m.inspect).toHaveBeenCalledTimes(1);
+	});
+	it("enable's happy path probes once and reports that probe as this request's", async () => {
+		session("s1", { conversation_requested: 0 });
+		const m = make({});
+		const r = await enableSession(deps(), m.authority, "s1", async () => false);
+		expect(r.capture.effective).toBe(true);
+		expect(typeof r.capture.checkedAt).toBe("string");
+		expect(m.probe).toHaveBeenCalledTimes(1);
+	});
+});
+
 describe("converge(): reconcile (§2.4 row, K2)", () => {
 	it("running + full authorization + something missing ⇒ written; complete ⇒ kept", async () => {
 		session("s1");
@@ -478,6 +529,10 @@ describe("converge(): reconcile (§2.4 row, K2)", () => {
 			expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
 		});
 	}
+	it('nothing on disk and nothing to keep ⇒ "nothing" (not reported as a withdrawal)', async () => {
+		session("s1", { conversation_requested: 0 });
+		expect(await make({}).authority.converge("s1")).toBe("nothing");
+	});
 	it("unresolved recreation ⇒ skipped: nothing written or removed", async () => {
 		session("s1", { conversation_requested: 0 });
 		await configured("s1");
