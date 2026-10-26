@@ -126,12 +126,20 @@ const conversation = new ConversationService({
 	store: conversationStore,
 	execCapture: (sid, cmd, opts) => docker.execCapture(sid, cmd, opts),
 	isRecreateUnresolved,
+	captureDocker: {
+		inspectCapture: (cid) => docker.inspectCapture(cid),
+		currentImage: () => docker.currentSessionImage(),
+		probeRelay: (sid, cid) => docker.probeRelay(sid, cid),
+	},
 });
 docker.setConversationHooks({
 	prepareSpawn: async (sid) => {
 		const { prepareSpawnCapture } = await import("./conversation/activation.js");
-		const r = await prepareSpawnCapture(conversation.activationDeps, sid);
-		return { env: r.env, binds: r.binds };
+		// Fail-closed: an image that can't be inspected counts as one
+		// without the relay label ⇒ spawn without capture.
+		const image = await docker.currentSessionImage().catch(() => null);
+		const r = await prepareSpawnCapture(conversation.activationDeps, sid, image);
+		return { env: r.env, binds: r.binds, imageId: r.imageId };
 	},
 	onSessionDown: (sid) => conversation.onSessionDown(sid),
 	onSessionPurged: (sid) => conversation.onSessionPurged(sid),

@@ -31,6 +31,8 @@ import { clearPortMappings, mappingsFromConfig, setPortMappings } from "./portMa
 export interface SpawnCaptureResult {
 	env: string[];
 	binds: string[];
+	/** 3.0d (D6): create from exactly the image ID whose label was checked. */
+	imageId?: string;
 }
 export interface ConversationLifecycleHooks {
 	prepareSpawn(sessionId: string): Promise<SpawnCaptureResult>;
@@ -38,6 +40,15 @@ export interface ConversationLifecycleHooks {
 	onSessionPurged(sessionId: string): Promise<void>;
 }
 
+import { INGEST_TOKEN_ENV, MANAGED_MOUNT_TARGET } from "./conversation/activation.js";
+import {
+	CONTROL_MOUNT_TARGET,
+	type ContainerView,
+	RELAY_IMAGE_LABEL,
+	RELAY_IMAGE_LABEL_VALUE,
+	RELAY_PROBE_TIMEOUT_MS,
+	RELAY_STATUS_URL,
+} from "./conversation/captureAuth.js";
 import {
 	decryptStoredEntries,
 	EFFECTIVE_CPU_NANO_MAX,
@@ -523,7 +534,9 @@ export class DockerManager {
 			meta.containerName,
 			() =>
 				this.docker.createContainer({
-					Image: SESSION_IMAGE,
+					// With capture prepared, the exact image ID its relay label
+					// was checked on (D6): the tag could move in between.
+					Image: capture.imageId ?? SESSION_IMAGE,
 					name: meta.containerName,
 					Hostname: hostname,
 					// `buildContainerEnv` returns a deduplicated `KEY=VALUE[]` array
@@ -2651,6 +2664,91 @@ export class DockerManager {
 	 * `cmd` is argv, never a shell string. Callers compose it from fixed
 	 * literals plus validated operands — no shell parses it.
 	 */
+	// ── 3.0d capture authorization port (CONVERSATION.md §2.7.5–§2.7.6) ──
+
+	private readonly relayLabelByImageId = new Map<string, boolean>();
+
+	private async imageHasRelay2(imageId: string): Promise<boolean> {
+		// An image ID is immutable, so its labels are cacheable forever.
+		const cached = this.relayLabelByImageId.get(imageId);
+		if (cached !== undefined) return cached;
+		const info = await this.docker.getImage(imageId).inspect();
+		const ok = info.Config?.Labels?.[RELAY_IMAGE_LABEL] === RELAY_IMAGE_LABEL_VALUE;
+		this.relayLabelByImageId.set(imageId, ok);
+		return ok;
+	}
+
+	/**
+	 * What capture authorization needs from the D1 container: running,
+	 * the token in its env (kept in memory only; the caller hashes it and
+	 * drops it), both mounts, and its OWN image's relay label. A 404 is
+	 * `{exists:false}`; any other daemon error propagates (fail-closed).
+	 */
+	async inspectCapture(containerId: string): Promise<ContainerView> {
+		let info: Dockerode.ContainerInspectInfo;
+		try {
+			info = await this.docker.getContainer(containerId).inspect();
+		} catch (err) {
+			if ((err as { statusCode?: number }).statusCode === 404) return { exists: false };
+			throw err;
+		}
+		const env = info.Config?.Env ?? [];
+		const tokenEntry = env.find((e) => e.startsWith(`${INGEST_TOKEN_ENV}=`));
+		const token = tokenEntry ? tokenEntry.slice(INGEST_TOKEN_ENV.length + 1) || null : null;
+		const mounts = info.Mounts ?? [];
+		const mounted = (target: string) => mounts.some((m) => m.Destination === target);
+		return {
+			exists: true,
+			running: info.State?.Running === true,
+			token,
+			managedMount: mounted(MANAGED_MOUNT_TARGET),
+			controlMount: mounted(CONTROL_MOUNT_TARGET),
+			imageId: info.Image,
+			imageRelay2: await this.imageHasRelay2(info.Image),
+		};
+	}
+
+	/** The image a spawn would use now (by its immutable ID), or null if missing. */
+	async currentSessionImage(): Promise<{ imageId: string; relay2: boolean } | null> {
+		let id: string;
+		try {
+			id = (await this.docker.getImage(SESSION_IMAGE).inspect()).Id;
+		} catch (err) {
+			if ((err as { statusCode?: number }).statusCode === 404) return null;
+			throw err;
+		}
+		return { imageId: id, relay2: await this.imageHasRelay2(id) };
+	}
+
+	/**
+	 * One `GET /st-relay/status` from inside the container (D7): bounded
+	 * by curl's `-m` and the exec timeout; true only for a 204 carrying
+	 * `X-ST-Relay: 1` — "something listens" is not enough.
+	 */
+	async probeRelay(sessionId: string, containerId: string): Promise<boolean> {
+		const r = await this.execCapture(
+			sessionId,
+			[
+				"curl",
+				"-q",
+				"-s",
+				"-D",
+				"-",
+				"-o",
+				"/dev/null",
+				"--noproxy",
+				"*",
+				"-m",
+				String(RELAY_PROBE_TIMEOUT_MS / 1000),
+				RELAY_STATUS_URL,
+			],
+			{ containerId, maxBytes: 4096, timeoutMs: RELAY_PROBE_TIMEOUT_MS + 500 },
+		);
+		if (r.exitCode !== 0) return false;
+		const head = r.stdout.toString("latin1");
+		return /^HTTP\/1\.1 204\b/.test(head) && /^X-ST-Relay: 1\r?$/m.test(head);
+	}
+
 	async execCapture(
 		sessionId: string,
 		cmd: string[],

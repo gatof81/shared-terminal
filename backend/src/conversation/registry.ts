@@ -42,11 +42,13 @@ export interface SessionCaptureRow {
 	ingest_token_hash: string | null;
 	ingest_token_hash_suspended: string | null;
 	user_id: string;
+	/** 3.0d: the container whose token must correspond (§2.7.6). */
+	container_id: string | null;
 }
 
 export async function getSessionCapture(sessionId: string): Promise<SessionCaptureRow | null> {
 	const r = await d1Query<SessionCaptureRow>(
-		"SELECT status, conversation_requested, ingest_token_hash, ingest_token_hash_suspended, user_id FROM sessions WHERE session_id = ?",
+		"SELECT status, conversation_requested, ingest_token_hash, ingest_token_hash_suspended, user_id, container_id FROM sessions WHERE session_id = ?",
 		[sessionId],
 	);
 	return r.results[0] ?? null;

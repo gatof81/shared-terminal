@@ -126,6 +126,7 @@ function session(sid: string, patch: Record<string, unknown> = {}) {
 		ingest_token_hash: hashIngestToken(TOKEN),
 		ingest_token_hash_suspended: null,
 		user_id: "u1",
+		container_id: `cid-${sid}`,
 		...patch,
 	});
 }
@@ -563,6 +564,8 @@ describe("§2.5 revocation observed mid-stream", () => {
 		session("s1");
 		await fs.mkdir(path.dirname(hooksFilePath(root, "s1")), { recursive: true });
 		await fs.writeFile(hooksFilePath(root, "s1"), "x");
+		await fs.mkdir(path.join(root, ".st-control", "s1"), { recursive: true });
+		await fs.writeFile(path.join(root, ".st-control", "s1", "relay.enabled"), "");
 		await service.ingest("s1", "%0", hook("UserPromptSubmit", { prompt: "a", prompt_id: "p1" }));
 		await writeSessionRevocation(root, "s1", { at: "t", by: "cli" });
 		expect(
@@ -572,6 +575,8 @@ describe("§2.5 revocation observed mid-stream", () => {
 			await service.ingest("s1", "%0", hook("Stop", { prompt_id: "p1", stop_hook_active: true })),
 		).toEqual({ accepted: false, reason: "revoked" });
 		await expect(fs.stat(hooksFilePath(root, "s1"))).rejects.toThrow();
+		// 3.0d: the authorization marker goes with it (§2.5, §2.7.5).
+		await expect(fs.stat(path.join(root, ".st-control", "s1", "relay.enabled"))).rejects.toThrow();
 		const events = await readEvents("s1", "c1");
 		expect(events.filter((e) => e.ev === "gap" && e.data.reason === "revoked")).toHaveLength(1);
 		expect(events[0].ev).toBe("user_prompt");
@@ -603,10 +608,15 @@ describe("lifecycle, list, reconcile, probe", () => {
 			canSendInput: false,
 			title: "hello there",
 		});
+		// No Docker port wired in this harness: no container is ever seen
+		// and the current image is unknown, so nothing is promised (§2.7.6).
 		expect(listed.capture).toEqual({
 			requested: true,
 			effective: false,
-			effectiveAfterRestart: true,
+			effectiveAfterRestart: false,
+			requiresRecreate: false,
+			pendingReasons: ["image-without-relay"],
+			checkedAt: null,
 		});
 	});
 	it("onSessionPurged removes rows, files and managed dir", async () => {
@@ -641,13 +651,30 @@ describe("lifecycle, list, reconcile, probe", () => {
 			{ found: false },
 		]);
 	});
-	it("reconcile with the flag off only removes stale hooks files", async () => {
+	it("reconcile with the flag off only removes stale hooks files and relay markers", async () => {
 		const off = new ConversationService({ workspaceRoot: root, enabled: false, port: 3001, store });
 		await fs.mkdir(path.dirname(hooksFilePath(root, "s9")), { recursive: true });
 		await fs.writeFile(hooksFilePath(root, "s9"), "x");
+		await fs.mkdir(path.join(root, ".st-control", "s8"), { recursive: true });
+		await fs.writeFile(path.join(root, ".st-control", "s8", "relay.enabled"), "");
 		await off.reconcile();
 		await expect(fs.stat(hooksFilePath(root, "s9"))).rejects.toThrow();
+		await expect(fs.stat(path.join(root, ".st-control", "s8", "relay.enabled"))).rejects.toThrow();
 		expect(dbStubs.calls).toHaveLength(0);
+	});
+	it("reconcile retires the leftovers of a session that isn't running (stopped without retain, or deleted)", async () => {
+		session("s4", { status: "stopped", conversation_requested: 0, ingest_token_hash: null });
+		for (const sid of ["s4", "gone"]) {
+			await fs.mkdir(path.dirname(hooksFilePath(root, sid)), { recursive: true });
+			await fs.writeFile(hooksFilePath(root, sid), "x");
+			await fs.mkdir(path.join(root, ".st-control", sid), { recursive: true });
+			await fs.writeFile(path.join(root, ".st-control", sid, "relay.enabled"), "");
+		}
+		await service.reconcile();
+		for (const sid of ["s4", "gone"]) {
+			await expect(fs.stat(hooksFilePath(root, sid))).rejects.toThrow();
+			await expect(fs.stat(path.join(root, ".st-control", sid, "relay.enabled"))).rejects.toThrow();
+		}
 	});
 	it("reconcile writes and removes nothing for a session whose recreation is unresolved (§2.7.4), fail-closed on a failing check", async () => {
 		session("s1"); // requested + hash: would normally get a file
@@ -690,15 +717,33 @@ describe("lifecycle, list, reconcile, probe", () => {
 			truncated: false,
 			timedOut: false,
 		}));
+		// 3.0d: full write authorization needs a real container view — the
+		// running container with this session's token and both mounts.
 		const svc2 = new ConversationService({
 			workspaceRoot: root,
 			enabled: true,
 			port: 3001,
 			store: new ConversationStore({ workspaceRoot: root }),
 			execCapture: exec,
+			captureDocker: {
+				inspectCapture: async () => ({
+					exists: true,
+					running: true,
+					token: TOKEN,
+					managedMount: true,
+					controlMount: true,
+					imageId: "sha256:i",
+					imageRelay2: true,
+				}),
+				currentImage: async () => ({ imageId: "sha256:i", relay2: true }),
+				probeRelay: async () => true,
+			},
 		});
 		await svc2.reconcile();
 		expect(await fs.readFile(hooksFilePath(root, "s1"), "utf8")).toContain("127.0.0.1:47613");
+		expect(
+			await fs.stat(path.join(root, ".st-control", "s1", "relay.enabled")).then(() => true),
+		).toBe(true);
 		await expect(fs.stat(hooksFilePath(root, "s2"))).rejects.toThrow();
 		expect(dbStubs.sessions.get("s3")).toMatchObject({
 			conversation_requested: 0,
