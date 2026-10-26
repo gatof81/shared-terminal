@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	type AttemptIdentity,
 	AttemptTransitionError,
-	HISTORY_MAX,
 	RECORD_FILE,
 	RecreateAttemptStore,
 	RecreateUnresolvedError,
@@ -177,20 +176,151 @@ describe("RecreateAttemptStore — states and the gate", () => {
 		expect(r.kind === "ok" && r.record.attemptId).toBe("att-1");
 	});
 
-	it("resolved attempts move into a bounded history that still names them all for leftover checks", async () => {
+	it("history is kept until hard delete: every resolved attempt stays recognisable, past 33 attempts (U3)", async () => {
 		const store = new RecreateAttemptStore(root);
-		for (let i = 1; i <= HISTORY_MAX + 3; i++) {
+		const N = 40;
+		for (let i = 1; i <= N; i++) {
 			await store.begin(SID, identity(i));
 			await store.resolve(SID, `att-${i}`, { kind: "committed", nContainerId: `cid-n-${i}` }, "ok");
 		}
 		const r = await store.read(SID);
-		expect(r.kind === "ok" && r.record.history.length).toBe(HISTORY_MAX);
+		expect(r.kind === "ok" && r.record.history.length).toBe(N - 1);
 		const resolved = await store.resolvedAttempts(SID);
-		expect(resolved.get(`att-${HISTORY_MAX + 3}`)).toEqual({
-			kind: "committed",
-			nContainerId: `cid-n-${HISTORY_MAX + 3}`,
+		expect(resolved.size).toBe(N);
+		for (const i of [1, 2, 33, 34, N]) {
+			expect(resolved.get(`att-${i}`)).toEqual({ kind: "committed", nContainerId: `cid-n-${i}` });
+		}
+	});
+});
+
+describe("RecreateAttemptStore — ownership by this process run (U1)", () => {
+	for (const prior of ["open", "uncertain"] as const) {
+		it(`restart + failed orphanedAt write on an ${prior} record: the new process cannot resolve it and the gate blocks`, async () => {
+			const a = new RecreateAttemptStore(root);
+			await a.begin(SID, identity());
+			if (prior === "uncertain") await a.markUncertain(SID, "att-1", "docker request unanswered");
+			const b = new RecreateAttemptStore(root);
+			vi.spyOn(fs, "rename").mockRejectedValueOnce(
+				Object.assign(new Error("EIO"), { code: "EIO" }),
+			);
+			await b.recoverOnBoot();
+			const r = await b.read(SID);
+			// The marker did not make it to disk…
+			expect(r.kind === "ok" && r.record.orphanedAt).toBeUndefined();
+			expect(r.kind === "ok" && r.record.state).toBe(prior);
+			// …and still nothing in the new process can move the attempt.
+			for (const outcome of [
+				{ kind: "rolled-back" as const },
+				{ kind: "committed" as const, nContainerId: "n" },
+			]) {
+				await expect(b.resolve(SID, "att-1", outcome, "x")).rejects.toThrow(/not owned/);
+			}
+			await expect(b.markUncertain(SID, "att-1", "x")).rejects.toBeInstanceOf(
+				AttemptTransitionError,
+			);
+			expect(await gateError(b)).toBeInstanceOf(RecreateUnresolvedError);
 		});
-		expect(resolved.size).toBe(HISTORY_MAX + 1);
+	}
+
+	it("the original process keeps ownership through uncertain and resolves with evidence", async () => {
+		const s = new RecreateAttemptStore(root);
+		await s.begin(SID, identity());
+		await s.markUncertain(SID, "att-1", "probe unanswered");
+		expect((await gateError(s))?.detail).toBe("attempt uncertain");
+		await expect(
+			s.resolve(SID, "att-1", { kind: "rolled-back" }, "answered"),
+		).resolves.toMatchObject({
+			state: "resolved",
+		});
+		expect(await gateError(s)).toBeNull();
+	});
+
+	it("a failed transition keeps ownership: the live process can retry", async () => {
+		const s = new RecreateAttemptStore(root);
+		await s.begin(SID, identity());
+		vi.spyOn(fs, "rename").mockRejectedValueOnce(
+			Object.assign(new Error("ENOSPC"), { code: "ENOSPC" }),
+		);
+		await expect(s.markUncertain(SID, "att-1", "x")).rejects.toThrow("ENOSPC");
+		await expect(s.markUncertain(SID, "att-1", "x")).resolves.toMatchObject({ state: "uncertain" });
+		vi.spyOn(fs, "rename").mockRejectedValueOnce(
+			Object.assign(new Error("ENOSPC"), { code: "ENOSPC" }),
+		);
+		await expect(s.resolve(SID, "att-1", { kind: "rolled-back" }, "x")).rejects.toThrow("ENOSPC");
+		await expect(s.resolve(SID, "att-1", { kind: "rolled-back" }, "x")).resolves.toMatchObject({
+			state: "resolved",
+		});
+	});
+});
+
+describe("RecreateAttemptStore — directory fsync is mandatory (U2)", () => {
+	/** Make `fs.open(dir, "r")` fail with EIO for one directory path. */
+	function failDirSync(target: string) {
+		const real = fs.open.bind(fs);
+		return vi.spyOn(fs, "open").mockImplementation((async (
+			p: unknown,
+			flags?: unknown,
+			mode?: unknown,
+		) => {
+			if (flags === "r" && path.resolve(String(p)) === path.resolve(target)) {
+				throw Object.assign(new Error("EIO"), { code: "EIO" });
+			}
+			return real(p as string, flags as string, mode as number);
+		}) as typeof fs.open);
+	}
+
+	for (const [label, dir] of [
+		["the session dir", () => path.join(root, ".st-control", SID)],
+		["the freshly created .st-control", () => path.join(root, ".st-control")],
+		["the workspace root", () => root],
+	] as const) {
+		it(`EIO syncing ${label}: begin rejects and no simulated engine effect runs`, async () => {
+			const store = new RecreateAttemptStore(root);
+			const spy = failDirSync(dir());
+			const effect = vi.fn();
+			const engine = async () => {
+				await store.begin(SID, identity());
+				effect(); // e.g. createContainer — must never run
+			};
+			await expect(engine()).rejects.toThrow("EIO");
+			expect(effect).not.toHaveBeenCalled();
+			spy.mockRestore();
+			// The open record may be on disk without a durability guarantee:
+			// the gate blocks, and this live process (which did nothing) can
+			// resolve it as rolled back.
+			expect(await gateError(store)).toBeInstanceOf(RecreateUnresolvedError);
+			await expect(
+				store.resolve(SID, "att-1", { kind: "rolled-back" }, "begin failed"),
+			).resolves.toMatchObject({
+				state: "resolved",
+			});
+		});
+	}
+
+	it("EIO syncing after the rename of resolve: rejects, ownership kept, a retry with the same outcome re-syncs", async () => {
+		const store = new RecreateAttemptStore(root);
+		await store.begin(SID, identity());
+		const spy = failDirSync(path.join(root, ".st-control", SID));
+		await expect(store.resolve(SID, "att-1", { kind: "rolled-back" }, "x")).rejects.toThrow("EIO");
+		spy.mockRestore();
+		await expect(
+			store.resolve(SID, "att-1", { kind: "committed", nContainerId: "n" }, "x"),
+		).rejects.toThrow(/resolved differently/);
+		await expect(store.resolve(SID, "att-1", { kind: "rolled-back" }, "x")).resolves.toMatchObject({
+			state: "resolved",
+		});
+		// Ownership is released only after that durable success.
+		await expect(store.resolve(SID, "att-1", { kind: "rolled-back" }, "x")).rejects.toThrow(
+			/not owned/,
+		);
+	});
+
+	it("an existing directory chain is synced on every write too (a previous run may have died before syncing it)", async () => {
+		const store = new RecreateAttemptStore(root);
+		await store.begin(SID, identity());
+		const spy = failDirSync(path.join(root, ".st-control"));
+		await expect(store.markUncertain(SID, "att-1", "x")).rejects.toThrow("EIO");
+		spy.mockRestore();
 	});
 });
 
@@ -305,10 +435,12 @@ describe("RecreateAttemptStore — backend restart", () => {
 			const r = await b.read(sid);
 			expect(r.kind === "ok" && r.record.state).toBe("uncertain");
 			expect(r.kind === "ok" && typeof r.record.orphanedAt).toBe("string");
-			await expect(b.resolve(sid, att, { kind: "rolled-back" }, "x")).rejects.toThrow(/orphaned/);
+			await expect(b.resolve(sid, att, { kind: "rolled-back" }, "x")).rejects.toThrow(
+				/not owned|orphaned/,
+			);
 			await expect(
 				b.resolve(sid, att, { kind: "committed", nContainerId: "n" }, "x"),
-			).rejects.toThrow(/orphaned/);
+			).rejects.toThrow(/not owned|orphaned/);
 		}
 		// Recovery is idempotent: orphanedAt is set once and kept.
 		const first = await b.read(SID);

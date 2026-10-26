@@ -36,9 +36,6 @@ import { logger } from "./logger.js";
 
 export const CONTROL_DIR = ".st-control";
 export const RECORD_FILE = "recreate-attempt.json";
-/** Resolved attempts kept to recognise leftovers of aborted attempts
- *  (§2.7.4 "sobrantes"). Not a time bound, not a guarantee. */
-export const HISTORY_MAX = 32;
 
 export type AttemptState = "open" | "uncertain" | "resolved";
 
@@ -70,7 +67,11 @@ export interface AttemptRecord extends AttemptIdentity {
 	 *  3.0d may resolve it (D8). Only a future, explicitly approved manual
 	 *  recovery procedure could. */
 	orphanedAt?: string;
-	/** Earlier resolved attempts of this session, newest first. */
+	/** Every earlier resolved attempt of this session, newest first.
+	 *  Unbounded on purpose: the contract keeps the record until the hard
+	 *  delete so a leftover container of ANY aborted attempt can be
+	 *  recognised (§2.7.4 "sobrantes"). Attempts are admin-triggered and
+	 *  each entry is ~150 bytes, so growth is negligible. */
 	history: Array<{ attemptId: string; outcome: AttemptOutcome; resolvedAt: string }>;
 }
 
@@ -104,17 +105,14 @@ function nowIso(): string {
 }
 
 async function fsyncDir(dir: string): Promise<void> {
-	// Makes the rename durable. Same best-effort shape as revocation.ts:
-	// a platform that refuses to open directories still gets the rename.
+	// Not best-effort (unlike revocation.ts): a record whose rename may not
+	// survive a crash must not be reported as written, or the caller would
+	// act on a state the disk can still lose. Errors propagate.
+	const fh = await fs.open(dir, "r");
 	try {
-		const fh = await fs.open(dir, "r");
-		try {
-			await fh.sync();
-		} finally {
-			await fh.close();
-		}
-	} catch {
-		/* ignore */
+		await fh.sync();
+	} finally {
+		await fh.close();
 	}
 }
 
@@ -200,8 +198,10 @@ function parseRecord(raw: string, sessionId: string): AttemptRecord {
 }
 
 export class RecreateAttemptStore {
-	/** Attempt ids begun by THIS process and not yet closed. An `open`
-	 *  record whose id is not here was left by a process that died. */
+	/** Attempt ids begun by THIS process run and not yet resolved — kept
+	 *  through `uncertain`. Only an owner may move an attempt (U1): a new
+	 *  process can never resolve a record it did not begin, whatever the
+	 *  record says (even if boot recovery failed to write `orphanedAt`). */
 	private readonly active = new Set<string>();
 
 	constructor(private readonly workspaceRoot: string) {}
@@ -285,7 +285,7 @@ export class RecreateAttemptStore {
 							resolvedAt: prev.record.stateAt,
 						},
 						...prev.record.history,
-					].slice(0, HISTORY_MAX)
+					]
 				: [];
 		const at = nowIso();
 		const record: AttemptRecord = {
@@ -297,8 +297,13 @@ export class RecreateAttemptStore {
 			stateAt: at,
 			history,
 		};
-		await this.write(sessionId, record);
+		// Owned BEFORE the write: if the write fails after its rename (a
+		// directory fsync error), an `open` record may be on disk with no
+		// durability guarantee. This live process then still owns it and,
+		// having done nothing, can resolve it as rolled back. The caller
+		// must treat any throw from begin() as "do not proceed".
 		this.active.add(identity.attemptId);
+		await this.write(sessionId, record);
 		return record;
 	}
 
@@ -314,14 +319,10 @@ export class RecreateAttemptStore {
 				`cannot mark ${record.state} attempt ${attemptId} uncertain`,
 			);
 		}
-		// Drop ownership only once the new state is on disk: if the write
-		// fails the record still says `open`, and this live process must
-		// keep owning it — otherwise the gate (and, after a restart, boot
-		// recovery) would treat it as a dead process's attempt and orphan
-		// it for good (D8).
-		const next = await this.transition(sessionId, record, "uncertain", reason);
-		this.active.delete(attemptId);
-		return next;
+		this.assertOwned(attemptId);
+		// Ownership is kept: the live process is the only one that can
+		// still receive Docker's answers and resolve with evidence.
+		return this.transition(sessionId, record, "uncertain", reason);
 	}
 
 	/**
@@ -337,8 +338,14 @@ export class RecreateAttemptStore {
 	): Promise<AttemptRecord> {
 		if (!isOutcome(outcome)) throw new AttemptTransitionError("invalid outcome");
 		const record = await this.current(sessionId, attemptId);
+		this.assertOwned(attemptId);
 		if (record.state === "resolved") {
-			throw new AttemptTransitionError(`attempt ${attemptId} is already resolved`);
+			// Only reachable by the owner after a resolve whose write failed
+			// past the rename (fsync error): retrying the same outcome
+			// rewrites and re-syncs it. A different outcome is refused.
+			if (JSON.stringify(record.outcome) !== JSON.stringify(outcome)) {
+				throw new AttemptTransitionError(`attempt ${attemptId} is already resolved differently`);
+			}
 		}
 		if (record.orphanedAt) {
 			// D8 fail-closed: the process that held the evidence is gone.
@@ -346,7 +353,7 @@ export class RecreateAttemptStore {
 				`attempt ${attemptId} was orphaned by a backend restart; no automatic resolution (D8)`,
 			);
 		}
-		// Same ordering as markUncertain: ownership goes after the write.
+		// Ownership goes only after the write (incl. its fsyncs) succeeded.
 		const next = await this.transition(sessionId, record, "resolved", reason, outcome);
 		this.active.delete(attemptId);
 		return next;
@@ -422,6 +429,14 @@ export class RecreateAttemptStore {
 		return out;
 	}
 
+	private assertOwned(attemptId: string): void {
+		if (!this.active.has(attemptId)) {
+			throw new AttemptTransitionError(
+				`attempt ${attemptId} is not owned by this process run; no resolution without its evidence (D8)`,
+			);
+		}
+	}
+
 	private async current(sessionId: string, attemptId: string): Promise<AttemptRecord> {
 		const r = await this.read(sessionId);
 		if (r.kind !== "ok") throw new AttemptTransitionError(`no readable record for ${sessionId}`);
@@ -448,9 +463,14 @@ export class RecreateAttemptStore {
 	}
 
 	/**
-	 * Atomic replace: temp file in the same directory, fsync, rename,
-	 * fsync of the directory. A crash leaves either the old record or the
-	 * new one, never a torn file; a stray temp file is never read.
+	 * Atomic replace: temp file in the same directory, fsync, rename, then
+	 * fsync of every directory the record depends on — the session dir (the
+	 * rename), `.st-control` (the session dir's entry, possibly just
+	 * created) and the workspace root (`.st-control`'s entry). Always all
+	 * three, not only when this call created them: a previous run may have
+	 * created a directory and died before syncing its parent. A crash
+	 * leaves the old record or the new one, never a torn file; a stray temp
+	 * file is never read. Any fsync failure throws, so success = durable.
 	 */
 	private async write(sessionId: string, record: AttemptRecord): Promise<void> {
 		const dir = this.controlDir(sessionId);
@@ -471,5 +491,7 @@ export class RecreateAttemptStore {
 			throw err;
 		}
 		await fsyncDir(dir);
+		await fsyncDir(this.controlRoot());
+		await fsyncDir(path.resolve(this.workspaceRoot));
 	}
 }
