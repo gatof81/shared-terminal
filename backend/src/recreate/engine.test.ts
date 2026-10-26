@@ -177,6 +177,27 @@ describe("preconditions (§2.7.2): first failure ⇒ 409 with its code, no effec
 		expect(await recordOf(h)).toBeNull();
 	});
 
+	it("O vanishing between its inspect and a later read ⇒ container-missing (409), not a raw error", async () => {
+		for (const op of ["changes", "statPath", "readArchive"] as const) {
+			const h = await setup();
+			h.docker.hooks.set(op, () => {
+				h.docker.containers.delete(O_ID);
+				throw httpError(404);
+			});
+			expect(await h.engine.recreate(SID, IMG_N)).toMatchObject({
+				ok: false,
+				status: 409,
+				code: "container-missing",
+			});
+			expect(await h.engine.preflight(SID)).toMatchObject({
+				recreatable: false,
+				blockers: [{ code: "container-missing" }],
+			});
+			expect(h.docker.mutations()).toEqual([]);
+			expect(await recordOf(h)).toBeNull();
+		}
+	});
+
 	it("busy: another lifecycle op holds the lock ⇒ 409 busy without waiting or effects", async () => {
 		const h = await setup();
 		const hold = deferred();

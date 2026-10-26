@@ -183,6 +183,17 @@ class DockerUnavailableError extends Error {
 	}
 }
 
+/**
+ * A precondition read of O answered 404: O disappeared after it was first
+ * inspected. That is precondition 3 failing, not a Docker outage.
+ */
+class ContainerVanishedError extends Error {
+	constructor(label: string) {
+		super(`${label}: container gone`);
+		this.name = "ContainerVanishedError";
+	}
+}
+
 class StepFailure extends Error {
 	constructor(
 		readonly step: RecreateStep,
@@ -285,6 +296,15 @@ export class RecreationEngine {
 			};
 		} catch (err) {
 			if (err instanceof DockerUnavailableError) return { status: 503 };
+			if (err instanceof ContainerVanishedError) {
+				return {
+					recreatable: false,
+					blockers: [{ code: "container-missing" }],
+					imageId: null,
+					currentImageId: null,
+					captureAfter: false,
+				};
+			}
 			throw err;
 		}
 	}
@@ -326,6 +346,14 @@ export class RecreationEngine {
 		} catch (err) {
 			if (err instanceof DockerUnavailableError) {
 				return { ok: false, status: 503, code: "docker-unavailable" };
+			}
+			if (err instanceof ContainerVanishedError) {
+				return {
+					ok: false,
+					status: 409,
+					code: "container-missing",
+					blockers: [{ code: "container-missing" }],
+				};
 			}
 			throw err;
 		}
@@ -420,7 +448,7 @@ export class RecreationEngine {
 		try {
 			return await Promise.race([
 				p.catch((err) => {
-					if (isNotFound(err)) throw err;
+					if (isNotFound(err)) throw new ContainerVanishedError(label);
 					throw new DockerUnavailableError(`${label}: ${(err as Error).message}`);
 				}),
 				new Promise<never>((_, reject) => {

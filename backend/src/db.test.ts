@@ -9,7 +9,7 @@
  * forgets to bump) can't silently break the dashboard signal.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 // Stub fetch globally — the real d1Query hits the Cloudflare HTTP API.
 // Each test installs its own response shape via `mockFetch`.
@@ -275,6 +275,10 @@ describe("migrateDb ledger (#349)", () => {
 describe("D1StatementError (#3.0d CAS)", () => {
 	it("an answer with success:false is a D1StatementError; a non-2xx or a timeout is not", async () => {
 		const { d1Query, D1StatementError } = await import("./db.js");
+		const realFetch = globalThis.fetch;
+		onTestFinished(() => {
+			globalThis.fetch = realFetch;
+		});
 		(globalThis as { fetch: unknown }).fetch = vi.fn(
 			async () =>
 				new Response(

@@ -37,6 +37,7 @@ export type Op =
 	| "stop"
 	| "remove"
 	| "listByLabel"
+	| "listByName"
 	| "exec";
 
 /** Runs before the op applies; may await (late answer), throw (refused, nothing applied). */
@@ -196,7 +197,7 @@ export class FakeDocker implements RecreateDockerPort {
 			.map((c) => this.view(c));
 	}
 	async listByName(fragment: string) {
-		await this.gate("listByLabel", ["name", fragment]);
+		await this.gate("listByName", [fragment]);
 		return [...this.containers.values()]
 			.filter((c) => c.name.includes(fragment))
 			.map((c) => this.view(c));
