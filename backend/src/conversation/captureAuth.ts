@@ -290,8 +290,19 @@ export interface CaptureAuthorityDeps {
 	removeHooksFile: (sessionId: string) => Promise<void>;
 	hooksFileExists: (sessionId: string) => Promise<boolean>;
 	now?: () => number;
+	/** Pause between identification polls (tests advance a fake clock). */
 	sleep?: (ms: number) => Promise<void>;
+	/**
+	 * Real wall-clock bound for one probe. A Docker exec can hang in any
+	 * of its stages (create, start, the stream, inspect) and execCapture
+	 * bounds only some of them; the authority never waits longer than
+	 * this, whatever Docker does. Tests shrink it.
+	 */
+	probeBudgetMs?: number;
+	identifyWaitMs?: number;
 }
+
+const TIMED_OUT = Symbol("timed-out");
 
 export type WriteOutcome = "written" | "not-authorized" | "relay-unavailable" | "revoked-meanwhile";
 
@@ -333,11 +344,13 @@ export class CaptureAuthority {
 	}
 
 	/**
-	 * D7 single-flight: callers that arrive while a probe for this container
-	 * is in flight share it; once it settles the entry is gone, so the next
-	 * caller probes again. A failing probe is `false`.
+	 * D7 single-flight on the EXECUTION: callers that arrive while a probe
+	 * of this container is still running share it, even past their own
+	 * deadline — a hung Docker exec is never multiplied. Once it settles
+	 * the entry is gone and the next caller probes again. A failing probe
+	 * is `false`.
 	 */
-	probe(sessionId: string, containerId: string): Promise<boolean> {
+	private execution(sessionId: string, containerId: string): Promise<boolean> {
 		const running = this.inflight.get(containerId);
 		if (running) return running;
 		const p = this.deps.docker
@@ -348,6 +361,33 @@ export class CaptureAuthority {
 			});
 		this.inflight.set(containerId, p);
 		return p;
+	}
+
+	/**
+	 * One probe, bounded: answers by `deadline` (deps clock) and within the
+	 * real-time budget at the latest. A positive that arrives after the
+	 * deadline does not count. `at` is when the answer was taken.
+	 */
+	async probe(
+		sessionId: string,
+		containerId: string,
+		deadline = this.now() + (this.deps.probeBudgetMs ?? RELAY_PROBE_BUDGET_MS),
+	): Promise<{ identified: boolean; at: number }> {
+		const remaining = deadline - this.now();
+		if (remaining <= 0) return { identified: false, at: this.now() };
+		const budget = Math.min(remaining, this.deps.probeBudgetMs ?? RELAY_PROBE_BUDGET_MS);
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const timeout = new Promise<typeof TIMED_OUT>((r) => {
+			timer = setTimeout(() => r(TIMED_OUT), budget);
+		});
+		try {
+			const r = await Promise.race([this.execution(sessionId, containerId), timeout]);
+			const at = this.now();
+			if (r === TIMED_OUT) return { identified: false, at };
+			return { identified: r && at <= deadline, at };
+		} finally {
+			clearTimeout(timer);
+		}
 	}
 
 	/**
@@ -378,26 +418,45 @@ export class CaptureAuthority {
 		if (!candidate || !f.container || !f.container.exists || !f.row?.container_id) {
 			return { ...rest, effective: false, checkedAt: null };
 		}
+		const containerId = f.row.container_id;
 		let identified: boolean;
 		let at: number;
 		if (opts.identifiedAt !== undefined) {
 			identified = true;
 			at = opts.identifiedAt;
 		} else {
-			identified = await this.probe(sessionId, f.row.container_id);
-			// When the probe settled, so a request that joined one already in
-			// flight reports the time of the evidence it actually got.
-			at = this.now();
+			// `at` is when the probe answered, so a request that joined one
+			// already in flight reports the time of the evidence it got.
+			({ identified, at } = await this.probe(sessionId, containerId));
 		}
 		const checkedAt = new Date(at).toISOString();
-		return {
-			...rest,
-			effective: identified,
-			pendingReasons: identified
-				? rest.pendingReasons
-				: [...rest.pendingReasons, "relay-unavailable"],
-			checkedAt,
-		};
+		if (!identified) {
+			return {
+				...rest,
+				effective: false,
+				pendingReasons: [...rest.pendingReasons, "relay-unavailable"],
+				checkedAt,
+			};
+		}
+		// The enable path's identification came from its own write procedure,
+		// which re-checked authorization and container after it; the facts
+		// above were read after that, so there is nothing newer to re-read.
+		if (opts.identifiedAt !== undefined) return { ...rest, effective: true, checkedAt };
+		// V3: the probe took time. Before saying `effective:true`, the
+		// authorization, the configuration and the very container that was
+		// identified must still hold — re-read, without a second probe.
+		let g: CaptureFacts;
+		try {
+			g = await this.facts(sessionId);
+		} catch {
+			return { ...rest, effective: false, checkedAt };
+		}
+		const after = baseCapture(g);
+		const { candidate: still, ...afterRest } = after;
+		if (!still || g.row?.container_id !== containerId) {
+			return { ...afterRest, effective: false, checkedAt };
+		}
+		return { ...afterRest, effective: true, checkedAt };
 	}
 
 	/**
@@ -427,20 +486,22 @@ export class CaptureAuthority {
 		// hooks-file write) must not leave the marker behind: it would
 		// launch a relay no hooks file points at.
 		try {
-			if (!(await this.stillAllowed(sessionId))) {
+			if (!(await this.stillAllowed(sessionId, containerId))) {
 				await this.withdraw(sessionId);
 				return { outcome: "revoked-meanwhile" };
 			}
-			// ≤ 5 s in total: another probe is started only while a whole one
-			// still fits before the deadline (the first always does).
-			const deadline = this.now() + RELAY_IDENTIFY_WAIT_MS;
+			// ≤ 5 s in total, whatever Docker does: every probe is bounded by
+			// the overall deadline, and a positive arriving after it doesn't
+			// count — no hooks file is written on late evidence.
+			const deadline = this.now() + (this.deps.identifyWaitMs ?? RELAY_IDENTIFY_WAIT_MS);
 			let identifiedAt: number | undefined;
 			for (;;) {
-				if (await this.probe(sessionId, containerId)) {
-					identifiedAt = this.now();
+				const r = await this.probe(sessionId, containerId, deadline);
+				if (r.identified) {
+					identifiedAt = r.at;
 					break;
 				}
-				if (this.now() + IDENTIFY_POLL_MS + RELAY_PROBE_BUDGET_MS > deadline) break;
+				if (this.now() + IDENTIFY_POLL_MS >= deadline) break;
 				await this.sleep(IDENTIFY_POLL_MS);
 			}
 			if (identifiedAt === undefined) {
@@ -448,7 +509,7 @@ export class CaptureAuthority {
 				return { outcome: "relay-unavailable" };
 			}
 			await this.deps.writeHooksFile(sessionId);
-			if (!(await this.stillAllowed(sessionId))) {
+			if (!(await this.stillAllowed(sessionId, containerId))) {
 				await this.withdraw(sessionId);
 				return { outcome: "revoked-meanwhile" };
 			}
@@ -459,12 +520,20 @@ export class CaptureAuthority {
 		}
 	}
 
-	/** Conditions 1–3 re-read: flag, requested, no revocation (§2.7.5). */
-	private async stillAllowed(sessionId: string): Promise<boolean> {
+	/**
+	 * Conditions 1–3 re-read — flag, requested, no revocation (§2.7.5) —
+	 * plus the D1 container still being the one this write is about.
+	 */
+	private async stillAllowed(sessionId: string, containerId: string): Promise<boolean> {
 		try {
 			const row = await this.deps.getRow(sessionId);
 			const revocation = await this.deps.checkRevocation(sessionId);
-			return this.deps.enabled && row?.conversation_requested === 1 && revocation === "none";
+			return (
+				this.deps.enabled &&
+				row?.conversation_requested === 1 &&
+				row.container_id === containerId &&
+				revocation === "none"
+			);
 		} catch {
 			return false;
 		}

@@ -454,24 +454,41 @@ describe("applyWrite(): §2.7.5 procedure and rechecks", () => {
 });
 
 describe("bounds and single reads (review bot on c9bee6f)", () => {
-	it("identification never runs past 5 s: no probe starts unless a whole one fits", async () => {
+	it("identification never counts evidence past 5 s: a positive that arrives late writes no hooks file (V2)", async () => {
 		session("s1");
 		const box: { clock?: { t: number } } = {};
+		let calls = 0;
 		const m = make({
 			probe: async () => {
-				// each probe takes its full budget (2.5 s) and fails
+				// each probe takes 2.5 s; the second one is positive, at 5.25 s
 				if (box.clock) box.clock.t += 2500;
-				return false;
+				return ++calls === 2;
 			},
 		});
 		box.clock = m.clock;
 		expect(await m.authority.applyWrite("s1")).toBe("relay-unavailable");
-		expect(m.clock.t).toBeLessThanOrEqual(5000);
-		expect(m.probe).toHaveBeenCalledTimes(1);
-		// Fast failing probes: polled every 250 ms, never starting one after 2.25 s.
+		expect(m.probe).toHaveBeenCalledTimes(2);
+		expect(await exists(hooksFilePath(root, "s1"))).toBe(false);
+		expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
+		// Fast failing probes: polled every 250 ms, none taken at or after 5 s.
 		const fast = make({ probe: async () => false });
 		expect(await fast.authority.applyWrite("s1")).toBe("relay-unavailable");
-		expect(fast.clock.t + 2500).toBeLessThanOrEqual(5000 + 250);
+		expect(fast.clock.t).toBeLessThan(5000);
+	});
+	it("a positive capture() probe that settles after its own budget is not effective (V2)", async () => {
+		session("s1");
+		await configured("s1");
+		const box: { clock?: { t: number } } = {};
+		const m = make({
+			probe: async () => {
+				if (box.clock) box.clock.t += 2600;
+				return true;
+			},
+		});
+		box.clock = m.clock;
+		const c = await m.authority.capture("s1");
+		expect(c.effective).toBe(false);
+		expect(c.pendingReasons).toContain("relay-unavailable");
 	});
 	it("checkedAt is when the probe settled (a joined probe reports the evidence's time)", async () => {
 		session("s1");
@@ -500,6 +517,67 @@ describe("bounds and single reads (review bot on c9bee6f)", () => {
 		expect(r.capture.effective).toBe(true);
 		expect(typeof r.capture.checkedAt).toBe("string");
 		expect(m.probe).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("capture(): state re-validated after the probe (V3)", () => {
+	function gated() {
+		let release!: () => void;
+		let entered!: () => void;
+		const gate = new Promise<void>((r) => {
+			release = r;
+		});
+		const inProbe = new Promise<void>((r) => {
+			entered = r;
+		});
+		const probe = async () => {
+			entered();
+			await gate;
+			return true;
+		};
+		return { probe, release, inProbe };
+	}
+	for (const by of ["cli", "api"] as const) {
+		it(`probe pending → ${by} disable completes → positive: effective:false, no second probe`, async () => {
+			session("s1");
+			await configured("s1");
+			const g = gated();
+			const m = make({ probe: g.probe });
+			const pending = m.authority.capture("s1");
+			await g.inProbe;
+			await disableSession(deps(), "s1", by);
+			g.release();
+			const c = await pending;
+			expect(c.effective).toBe(false);
+			expect(c.requested).toBe(false);
+			expect(c.pendingReasons).not.toContain("relay-unavailable");
+			expect(m.probe).toHaveBeenCalledTimes(1);
+		});
+	}
+	it("container_id changes while the probe is pending ⇒ effective:false (the identified container is not the session's)", async () => {
+		const row = session("s1");
+		await configured("s1");
+		const g = gated();
+		const m = make({ probe: g.probe });
+		const pending = m.authority.capture("s1");
+		await g.inProbe;
+		row.container_id = "cid-other";
+		g.release();
+		const c = await pending;
+		expect(c.effective).toBe(false);
+		expect(m.probe).toHaveBeenCalledTimes(1);
+	});
+	it("applyWrite: container_id changes during identification ⇒ revoked-meanwhile, nothing left", async () => {
+		const row = session("s1");
+		const m = make({
+			probe: async () => {
+				row.container_id = "cid-other";
+				return true;
+			},
+		});
+		expect(await m.authority.applyWrite("s1")).toBe("revoked-meanwhile");
+		expect(await exists(hooksFilePath(root, "s1"))).toBe(false);
+		expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
 	});
 });
 

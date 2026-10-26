@@ -5,13 +5,23 @@
  * label), the current session image by ID, and the relay identification
  * probe — true only for a 204 carrying `X-ST-Relay: 1`.
  */
-import { describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { PassThrough } from "node:stream";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const dbStubs = vi.hoisted(() => ({
 	d1Query: vi.fn(async () => ({ results: [] as unknown[], meta: { changes: 0 } })),
 }));
 vi.mock("./db.js", () => dbStubs);
 
+import {
+	CaptureAuthority,
+	relayEnabledExists,
+	writeRelayEnabled,
+} from "./conversation/captureAuth.js";
 import { DockerManager } from "./dockerManager.js";
 import type { SessionManager } from "./sessionManager.js";
 
@@ -164,6 +174,129 @@ describe("probeRelay", () => {
 	] as const) {
 		it(`${label} ⇒ false`, async () => {
 			expect(await withExec({ stdout, exitCode }).m.probeRelay("s1", "cid")).toBe(false);
+		});
+	}
+});
+
+// ── V2: the authority bounds every stage of the real probe ─────────────────
+
+describe("probeRelay through CaptureAuthority: every Docker stage bounded (V2)", () => {
+	const OK = "HTTP/1.1 204 No Content\r\nX-ST-Relay: 1\r\n\r\n";
+	const frame = (s: string) => {
+		const body = Buffer.from(s, "latin1");
+		const head = Buffer.alloc(8);
+		head[0] = 1;
+		head.writeUInt32BE(body.length, 4);
+		return Buffer.concat([head, body]);
+	};
+	type Stage = "create" | "start" | "stream" | "inspect";
+	/** A Docker whose exec hangs at `stage` until `release()`; then answers 204 + X-ST-Relay: 1. */
+	function hangingDocker(stage: Stage) {
+		let release!: () => void;
+		const gate = new Promise<void>((r) => {
+			release = r;
+		});
+		const at = async (s: Stage) => {
+			if (s === stage) await gate;
+		};
+		const execCreate = vi.fn(async () => {
+			await at("create");
+			return {
+				start: async () => {
+					await at("start");
+					const stream = new PassThrough();
+					void at("stream").then(() => {
+						stream.write(frame(OK));
+						stream.end();
+					});
+					return stream;
+				},
+				inspect: async () => {
+					await at("inspect");
+					return { ExitCode: 0 };
+				},
+			};
+		});
+		const { m } = dm({});
+		(m as unknown as { docker: unknown }).docker = {
+			getContainer: () => ({ exec: execCreate }),
+		};
+		return { m, release, execCreate };
+	}
+
+	let root: string;
+	beforeEach(async () => {
+		root = await fs.mkdtemp(path.join(os.tmpdir(), "st-v2-"));
+		await writeRelayEnabled(root, "s1");
+	});
+	afterEach(async () => {
+		await fs.rm(root, { recursive: true, force: true });
+	});
+
+	function authority(m: DockerManager) {
+		const writeHooks = vi.fn(async () => undefined);
+		const a = new CaptureAuthority({
+			workspaceRoot: root,
+			enabled: true,
+			docker: {
+				inspectCapture: async () => ({
+					exists: true,
+					running: true,
+					token: TOKEN,
+					managedMount: true,
+					controlMount: true,
+					imageId: "sha256:aaa",
+					imageRelay2: true,
+				}),
+				currentImage: async () => ({ imageId: "sha256:aaa", relay2: true }),
+				probeRelay: (sid, cid) => m.probeRelay(sid, cid),
+			},
+			getRow: async () => ({
+				status: "running",
+				conversation_requested: 1,
+				ingest_token_hash: createHash("sha256").update(TOKEN).digest("hex"),
+				ingest_token_hash_suspended: null,
+				user_id: "u1",
+				container_id: "cid",
+			}),
+			checkRevocation: async () => "none",
+			isRecreateUnresolved: async () => false,
+			writeHooksFile: writeHooks,
+			removeHooksFile: async () => undefined,
+			hooksFileExists: async () => true,
+			probeBudgetMs: 100,
+			identifyWaitMs: 300,
+		});
+		return { a, writeHooks };
+	}
+
+	for (const stage of ["create", "start", "stream", "inspect"] as const) {
+		it(`exec ${stage} hangs: capture() answers effective:false within the budget, repeated queries don't start another exec, a late positive writes nothing`, async () => {
+			const { m, release, execCreate } = hangingDocker(stage);
+			const { a, writeHooks } = authority(m);
+			const t0 = Date.now();
+			const c = await a.capture("s1");
+			expect(Date.now() - t0).toBeLessThan(1000);
+			expect(c.effective).toBe(false);
+			expect(c.pendingReasons).toContain("relay-unavailable");
+			// Still hung: neither a new query nor a whole write procedure
+			// (several polls inside 300 ms) multiplies the exec.
+			expect((await a.capture("s1")).effective).toBe(false);
+			const t1 = Date.now();
+			expect(await a.applyWrite("s1")).toBe("relay-unavailable");
+			expect(Date.now() - t1).toBeLessThan(1000);
+			expect(execCreate).toHaveBeenCalledTimes(1);
+			expect(writeHooks).not.toHaveBeenCalled();
+			// relay-unavailable withdraws: no marker is left for a relay to start on.
+			expect(await relayEnabledExists(root, "s1")).toBe(false);
+			// The positive arrives late: nothing is written retroactively,
+			// and the next query is a fresh exec that identifies.
+			release();
+			await new Promise((r) => setTimeout(r, 20));
+			expect(writeHooks).not.toHaveBeenCalled();
+			await writeRelayEnabled(root, "s1"); // configured again for the fresh query
+			expect((await a.capture("s1")).effective).toBe(true);
+			expect(execCreate).toHaveBeenCalledTimes(2);
 		});
 	}
 });

@@ -277,10 +277,23 @@ export async function prepareSpawnCapture(
 	await setIngestTokenHash(sessionId, hashIngestToken(token));
 	deps.invalidate?.(sessionId);
 	let control: string;
+	// A disable (CLI or API) may complete while this runs: it removes the
+	// files it sees, and a marker or hooks file written after that would
+	// outlive it. So authorization is re-read after each write, and the
+	// last re-read comes after the hooks file is on disk — a disable that
+	// finished before it is seen, one that finishes after it removes it.
+	let lost = false;
 	try {
 		control = await ensureControlDir(deps.workspaceRoot, sessionId);
-		await writeRelayEnabled(deps.workspaceRoot, sessionId);
-		await writeHooksFile(deps, sessionId);
+		lost = !(await spawnStillAuthorized(deps, sessionId));
+		if (!lost) {
+			await writeRelayEnabled(deps.workspaceRoot, sessionId);
+			lost = !(await spawnStillAuthorized(deps, sessionId));
+		}
+		if (!lost) {
+			await writeHooksFile(deps, sessionId);
+			lost = !(await spawnStillAuthorized(deps, sessionId));
+		}
 	} catch (err) {
 		// The caller spawns without capture on a throw: leave no marker or
 		// file, and no hash for a token no container will carry.
@@ -290,12 +303,32 @@ export async function prepareSpawnCapture(
 		deps.invalidate?.(sessionId);
 		throw err;
 	}
+	if (lost) {
+		// Withdrawn in the order a disable uses (hooks file, then marker).
+		// D1 is the disable's: the hash just written matches no token, since
+		// this one is never handed to a container.
+		await removeHooksFile(deps.workspaceRoot, sessionId);
+		await removeRelayEnabled(deps.workspaceRoot, sessionId);
+		deps.invalidate?.(sessionId);
+		return { env: [], binds: [bind], effective: false };
+	}
 	return {
 		env: [`${INGEST_TOKEN_ENV}=${token}`, `${BACKEND_PORT_ENV}=${deps.port}`],
 		binds: [bind, `${control}:${CONTROL_MOUNT_TARGET}:ro`],
 		effective: true,
 		imageId: currentImage.imageId,
 	};
+}
+
+/** Conditions 1–2 re-read for a spawn: requested, no revocation. Errors ⇒ lost. */
+async function spawnStillAuthorized(deps: ActivationDeps, sessionId: string): Promise<boolean> {
+	try {
+		const row = await getSessionCapture(sessionId);
+		const revocation = await checkRevocation(deps.workspaceRoot, sessionId);
+		return deps.enabled && row?.conversation_requested === 1 && revocation === "none";
+	} catch {
+		return false;
+	}
 }
 
 // ── Enable / disable (§2.4 rows) ────────────────────────────────────────────

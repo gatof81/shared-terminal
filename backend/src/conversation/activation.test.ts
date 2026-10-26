@@ -286,6 +286,67 @@ describe("prepareSpawnCapture (§2.4 spawn row, §2.7.5 spawn preparation)", () 
 		expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
 		expect(row.ingest_token_hash).toBeNull();
 	});
+	for (const by of ["cli", "api"] as const) {
+		it(`V1: a ${by} disable completing while the hooks file is being written leaves no emitter and no token`, async () => {
+			session("s1", { conversation_requested: 1 });
+			const realRename = fs.rename.bind(fs);
+			let entered!: () => void;
+			const inRename = new Promise<void>((r) => {
+				entered = r;
+			});
+			let release!: () => void;
+			const gate = new Promise<void>((r) => {
+				release = r;
+			});
+			const spy = vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
+				if (String(to).endsWith("conversation.json")) {
+					entered();
+					await gate;
+				}
+				return realRename(from, to);
+			});
+			try {
+				const spawn = prepareSpawnCapture(deps(), "s1", IMG2);
+				await inRename;
+				// The marker is already on disk; the disable runs to completion
+				// while the hooks-file rename is held.
+				expect(await exists(relayEnabledPath(root, "s1"))).toBe(true);
+				await disableSession(deps(), "s1", by);
+				expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
+				release();
+				const r = await spawn;
+				expect(r.effective).toBe(false);
+				expect(r.env).toEqual([]);
+				expect(r.imageId).toBeUndefined();
+				expect(r.binds).toEqual([
+					`${path.join(root, ".claude-managed", "s1")}:${MANAGED_MOUNT_TARGET}:ro`,
+				]);
+			} finally {
+				spy.mockRestore();
+			}
+			expect(await exists(hooksFilePath(root, "s1"))).toBe(false);
+			expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
+		});
+	}
+	it("V1: a disable completing while the marker is being written: no marker, no hooks file, no token", async () => {
+		session("s1", { conversation_requested: 1 });
+		const realRename = fs.rename.bind(fs);
+		const spy = vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
+			if (String(to).endsWith("relay.enabled")) {
+				spy.mockImplementation((f, t) => realRename(f, t));
+				await disableSession(deps(), "s1", "cli");
+			}
+			return realRename(from, to);
+		});
+		try {
+			const r = await prepareSpawnCapture(deps(), "s1", IMG2);
+			expect(r).toMatchObject({ env: [], effective: false });
+		} finally {
+			spy.mockRestore();
+		}
+		expect(await exists(hooksFilePath(root, "s1"))).toBe(false);
+		expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
+	});
 	it("an existing 0700 control dir is brought to 0755 (explicit chmod, §2.1)", async () => {
 		session("s1", { conversation_requested: 1 });
 		await fs.mkdir(controlDir(root, "s1"), { recursive: true, mode: 0o700 });
