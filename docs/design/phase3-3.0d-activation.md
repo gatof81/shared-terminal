@@ -1,12 +1,12 @@
 # 3.0d — Activación progresiva: propuesta
 
-Estado: **propuesta v4 para revisión (Work + responsable), no implementada.** Base: `main` en
+Estado: **propuesta v5 para revisión (Work + responsable), no implementada.** Base: `main` en
 `a836434` (3.0c + #448 + #450 mergeados; `CONVERSATION_ENABLED` desactivado; backend no
 desplegado).
 
 La v1 recomendaba recrear el contenedor automáticamente en `start`. La v2 incorporó las
 decisiones D1–D6 del responsable, que siguen las recomendaciones de Work (§9). La v3 corrige los
-hallazgos de Work sobre la v2 (A2, A3 y A4), y la v4 los de Work sobre la v3 (`c9174d9`). §10
+hallazgos de Work sobre la v2 (A2, A3 y A4), la v4 los de Work sobre la v3 (`c9174d9`) y la v5 los de Work sobre la v4 (`870218e`). §10
 mantiene la trazabilidad original:
 
 - A1 = pérdida de archivos;
@@ -322,11 +322,26 @@ Notación:
    Un fallo aquí se registra y no deshace nada: `N` es la sesión.
 
 **Rollback (cualquier fallo en los pasos 1–4).** Cada paso es idempotente y se ejecuta incluso si
-el anterior falló:
+el anterior falló, salvo donde se indica:
 
 1. `stop` y `remove` de `N` si existe.
-2. `O` vuelve a su nombre canónico si fue renombrado.
-3. Se borra `defer-skill-seed`.
+2. **Confirmar que `N` ya no existe:** `inspect(N)` por id debe responder 404.
+3. `O` vuelve a su nombre canónico si fue renombrado.
+4. **Solo si el paso 2 confirmó la eliminación**, se borra `defer-skill-seed`.
+
+**Estado incierto.** Si `remove` falla o su resultado es ambiguo (timeout, daemon sin respuesta,
+`inspect(N)` sin respuesta o con `N` todavía presente), la marca **se conserva**.
+
+- Mientras exista `N`, cualquier arranque suyo seguirá sin sembrar. Puede ser un `docker start`
+  manual, una política de reinicio o el `start` de un operador sobre el contenedor equivocado.
+- La sesión queda marcada como "recreación interrumpida" (§5.3.1) y la marca solo se retira cuando
+  §5.6 resuelve con D1 y Docker:
+  - `N` confirmado inexistente y D1 = `O` ⇒ se retira;
+  - D1 = `N` (el CAS sí se aplicó) ⇒ convergencia sobre `N` (tabla de abajo);
+  - Docker sin respuesta ⇒ no se toca nada.
+
+Una marca que sobrevive no hace daño. `O` no monta el directorio de control y no la ve, así que
+`O` siembra como siempre.
 
 D1 y el workspace no necesitan restauración: antes del paso 4 no se escribió nada en ellos. En el
 directorio gestionado y en el de control solo se tocaron archivos que `O` no monta. Lo único que
@@ -334,7 +349,8 @@ directorio gestionado y en el de control solo se tocaron archivos que `O` no mon
 hace igual al arrancar (§5.4).
 
 Estado final: idéntico al previo. `O` está detenido, con D1 apuntándolo, y sin cambios en la
-captura ni en las skills. Respuesta: 500 `recreate-failed` con `{ step }`.
+captura ni en las skills. Respuesta: 500 `recreate-failed` con `{ step }`, más
+`{ unresolved: true }` cuando la marca se conservó por estado incierto.
 
 **Después del paso 4: convergencia sobre `N`, nunca reversión.** No se vuelve a `O` ni se promete
 revertir el workspace: lo que `N` haga a partir de aquí es lo que hace cualquier sesión en marcha.
@@ -476,7 +492,8 @@ Para cada sesión afectada, decide con D1:
 
 | D1 `container_id` | Estado encontrado | Acción |
 | --- | --- | --- |
-| `= O` (no se confirmó) | `N` existe | `stop` + `remove` de `N`; `O` vuelve a su nombre canónico. Es el mismo rollback de §5.3 |
+| `= O` (no se confirmó) | `N` existe | `stop` + `remove` de `N`, **confirmado** con `inspect(N)` 404; `O` vuelve a su nombre canónico; solo entonces se retira `defer-skill-seed`. Es el mismo rollback de §5.3. Si la eliminación no se confirma, la marca se conserva y se reintenta en el siguiente `reconcile` o en la siguiente operación de ciclo de vida |
+| `= O` | `N` no existe (404 confirmado) y `defer-skill-seed` presente | Se retira la marca; `O` vuelve a su nombre si hace falta |
 | `= N` (se confirmó) | `O` existe | `remove` de `O`; mapeos y `status` según el estado real de `N`, como en cualquier reconcile; postStart no. El hash ya es el de `N` (paso 4, atómico), así que la marca y el archivo los converge el `reconcile` de captura (§5.8) si el token de `N` corresponde al hash (§6.1). Si `defer-skill-seed` sigue, la retira y siembra (§5.3, tabla de convergencia) |
 | ni `O` ni `N` | — | No tocar nada; log de error y contador `recreateOrphans` en stats; operador |
 
@@ -525,7 +542,9 @@ vería un contenedor renombrado.
   - éxito: la marca se retira en 6.1 y la siembra ocurre en 6.2, una sola vez;
   - caída entre el CAS y 6.1: `reconcile` (D1 = `N`) retira la marca con `N` en marcha y siembra
     por exec, o con `N` detenido y siembra el siguiente arranque;
-  - en ningún caso queda una marca que impida la siembra para siempre;
+  - en ningún caso queda una marca que impida la siembra para siempre: toda marca conservada
+    tiene un `N` existente o un estado no resuelto, y `reconcile` la resuelve en cuanto Docker
+    responde;
   - fallo en 6.2: siembra el siguiente arranque de `N`.
 - Precondición 7: `workspace/.npm-global` ausente o symlink, o layout heredado ⇒ bloqueado sin
   efectos.
@@ -539,6 +558,26 @@ vería un contenedor renombrado.
   Después de una recreación correcta, la correspondencia se cumple y es `effective:true`.
   Variantes: el hash suspendido igual a la huella se restaura; los dos NULL tras una revocación de
   emergencia nunca se vuelven a autorizar.
+- **`effectiveAfterRestart` sin contenedor (A3/P2), un test por condición falsa** y las demás
+  verdaderas:
+  - `conversation_requested = 0`;
+  - flag apagado;
+  - marca de revocación por sesión;
+  - marca global;
+  - imagen actual sin `="2"`.
+
+  Cada uno ⇒ `effectiveAfterRestart:false`. Con todas verdaderas ⇒ `true`, y el `start`
+  siguiente deja la captura efectiva. Lo mismo para la rama del contenedor detenido, con cada
+  condición de su lista.
+- **Probe (disponibilidad):**
+  - positivo ⇒ `effective:true` con `checkedAt` de esa petición;
+  - relay caído o puerto ocupado sin identificación ⇒ `false`;
+  - consulta inmediatamente después de la caída ⇒ `false`, sin caché positiva;
+  - dos consultas concurrentes ⇒ un solo probe;
+  - una consulta posterior a un probe terminado ⇒ probe nuevo;
+  - cualquier otra condición falsa ⇒ `false` sin ejecutar el probe.
+
+  Con D7 aprobada se sustituyen por los tests de vencimiento e invalidación de la caché.
 - Paso 4 atómico: en ningún instante observable `container_id = N` con un hash distinto al de `N`.
   Se prueba leyendo D1 entre cada llamada simulada.
 - `expectImageId` distinto ⇒ 409 sin efectos.
@@ -571,6 +610,14 @@ vería un contenedor renombrado.
    - relay escuchando, eventos en `.conversations/` y `capture.effective:true`;
    - `O` ya no existe.
 
+- **Regresión A2/P2 (eliminación de `N` incierta):** `remove(N)` falla, y en otra variante queda
+  ambiguo (timeout con `N` todavía presente). Luego `N` arranca antes de cualquier CAS, por un
+  `docker start` manual.
+
+  ⇒ `defer-skill-seed` sigue presente, el arranque de `N` **no siembra**, la skill gestionada
+  sigue byte a byte, y D1 sigue en `O`. Cuando Docker confirma la eliminación (siguiente
+  `reconcile`), la marca se retira y `O` queda en su nombre. En ningún momento se sembró en el
+  workspace con la imagen de `N`.
 - **A4 (relay sin recreación adicional):**
   1. un contenedor que arranca con token y **sin** archivo ni marca (deshabilitado por API antes
      del arranque);
@@ -586,15 +633,44 @@ vería un contenedor renombrado.
   idénticos y no hay avisos de settings. Si falla, la activación queda bloqueada
   (`control-marker-incompatible`) y el smoke lo comprueba.
 
-**Estado efectivo (A3/P2), con el CLI real y la sesión en marcha.** Cada caso debe dar
-`effective:false`, con su motivo, sin hooks a un puerto cerrado y sin "hook error":
+**Estado efectivo (A3/P2), con el CLI real y la sesión en marcha.** Se distinguen dos situaciones
+que no prometen lo mismo.
 
-| Caso | Motivo |
+*(a) Activación con el relay no disponible.* El backend **no** activa los hooks: no hay
+`conversation.json`, así que ningún hook apunta a un puerto cerrado. Aquí **sí** se exige cero
+"hook error".
+
+| Caso | Resultado |
 | --- | --- |
-| Relay matado (el supervisor lo reinicia; durante la ventana) | `relay-unavailable` |
-| Puerto 47613 ocupado por otro proceso antes del boot (el relay no puede escuchar; el ocupante no se identifica) | `relay-unavailable` |
-| Marca o archivo borrados a mano en el host | `hooks-file-missing` |
-| Hash de D1 cambiado a otro valor | `token-mismatch` |
+| Puerto 47613 ocupado por otro proceso antes del boot (el relay no puede escuchar; el ocupante no se identifica) y `PATCH {enabled:true}` | `effective:false`, `relay-unavailable`, marca retirada, sin archivo, 0 "hook error" |
+| Relay impedido en la recreación (paso 5) | Ídem, y la sesión es `N` |
+| Marca o archivo borrados a mano en el host | `effective:false`, `hooks-file-missing`; si falta el archivo, ningún hook se dispara |
+| Hash de D1 cambiado a otro valor | `effective:false`, `token-mismatch`; ingest rechazado |
+
+*(b) Caída del relay después de la activación.* Los hooks ya están configurados. Mientras el relay
+no escucha, los hooks bloqueantes que dispare un CLI abierto fallan, y el CLI puede mostrar
+"hook error". **No se promete cero errores.** Se comprueban la detección y la recuperación, con
+límites explícitos:
+
+1. Se mata el relay (`kill -9`) con una pestaña abierta.
+2. **Detección:** la **primera** consulta de `capture` después del `kill` da `effective:false`,
+   `relay-unavailable` (probe fresco, D7 no aplicada).
+3. **Recuperación:** el supervisor relanza el relay en ≤ 1 s, el primer escalón de su backoff,
+   más el arranque. La primera consulta que encuentra el relay identificado da `effective:true`,
+   en ≤ 3 s desde el `kill`.
+4. **Impacto acotado:** el turno lanzado durante la ventana termina y Claude sigue. Los
+   "hook error" en pantalla son ≤ el número de hooks bloqueantes de ese turno, y 0 en el turno
+   siguiente, ya recuperado.
+5. **Pérdidas visibles:** lo perdido en la ventana aparece como `gap relay_restart` en la
+   conversación (contrato §4.5), y nada más se pierde.
+
+Además, el caso del probe en la misma petición, con un CLI y un relay reales:
+
+- probe positivo ⇒ `effective:true`;
+- `kill` del relay e **inmediatamente** otra consulta ⇒ `effective:false`, sin esperar ningún
+  intervalo;
+- con D7 aprobada, en su lugar: `true` hasta que vence la caché o la invalida una escritura, y
+  `false` en la primera consulta posterior.
 
 Con el contenedor detenido:
 
@@ -744,7 +820,7 @@ capture: {
                                // stopped | container-without-capture | token-mismatch |
                                // hooks-file-missing | relay-unavailable |
                                // control-marker-incompatible | cli-below-minimum (aviso)
-  checkedAt                    // cuándo se hizo el probe del relay (caché ≤ 15 s)
+  checkedAt                    // hora del probe del relay de esta petición (§6.2)
 }
 ```
 
@@ -776,8 +852,33 @@ contenedor nuevo: la recreación, o un spawn si el contenedor ya no existe.
 ### 6.2 Reglas
 
 Se calculan con el `inspect` del contenedor de D1, sin deducir nada solo de D1, y con el probe de
-identificación del relay (§5.8.2). El probe es un `execCapture` de ≤ 2 s con caché por contenedor
-de 15 s, y `capture.checkedAt` dice cuándo se hizo.
+identificación del relay (§5.8.2).
+
+**Disponibilidad (recomendado): probe fresco para afirmar `effective:true`.**
+
+- Cada cálculo que vaya a responder `effective:true` hace su propio probe, un `execCapture` de
+  ≤ 2 s. **No hay caché positiva.**
+- Peticiones concurrentes para el mismo contenedor comparten el probe que ya está en vuelo, pero
+  nunca reutilizan uno terminado.
+- Un resultado negativo no necesita probe: si falla cualquier otra condición, se responde `false`
+  sin ejecutarlo.
+- `capture.checkedAt` es la hora de ese probe.
+- **Garantía:** `effective:true` significa que el relay se identificó durante esa misma petición.
+  No promete nada sobre después: el relay puede caer un instante más tarde, y lo detecta la
+  siguiente consulta.
+- Coste: un `docker exec` por consulta positiva, en rutas owner-only y de admin, sin polling del
+  backend.
+
+**Decisión pendiente del responsable (D7), solo si se quiere ahorrar ese exec:** caché positiva
+por contenedor de **15 s**.
+
+- Garantía, más débil: `effective:true` = "identificado en los últimos 15 s".
+- `checkedAt` y un campo `cachedFor` lo dicen en la respuesta.
+- La caché se invalida en cada escritura del backend sobre ese contenedor: disable, revocación,
+  PATCH, stop, kill y recreate.
+- La regla y los tests de §5.7 cambian en consecuencia: se espera `true` hasta el vencimiento y
+  `false` en la primera consulta posterior.
+- No es la recomendación: si no se decide nada, se implementa el probe fresco.
 
 **Autorización completa** = los puntos 1–6 de §5.8.3.
 
@@ -798,10 +899,17 @@ de 15 s, y `capture.checkedAt` dice cuándo se hizo.
   | Contenedor detenido | `stopped` |
 
 - **`effectiveAfterRestart`**: lo que dejaría un `start` **sin reparar nada**. `start` no
-  escribe marcas ni archivos (no cambia, D1). Es `true` solo si:
-  - **no hay contenedor** (`container_id` NULL o inspect 404) y la imagen actual lleva
-    `conversation-relay="2"`. El siguiente start hace spawn completo, con token, hash, marca y
-    archivo; o
+  escribe marcas ni archivos (no cambia, D1). Es `true` solo si se cumple una de estas dos ramas,
+  cada una con **todas** sus condiciones:
+  - **no hay contenedor** (`container_id` NULL o inspect 404) **y**:
+    - `conversation_requested = 1`;
+    - `CONVERSATION_ENABLED`;
+    - sin marca de revocación, por sesión ni global;
+    - la imagen actual lleva `conversation-relay="2"`.
+
+    Son las mismas condiciones con las que `prepareSpawn` escribe token, hash, marca y archivo, así
+    que el siguiente start hace spawn completo. Si falta cualquiera, el spawn arrancaría sin
+    captura, y la rama da `false`; o
   - **el contenedor está detenido y su configuración ya está completa para el arranque**:
     - autorización completa salvo "en marcha";
     - montajes;
@@ -872,7 +980,9 @@ requiere autorización explícita del responsable.
 - **Fuera de 3.0d, señalado:** DEPLOYMENT.md:124 (#190, "stopped and started once so it re-joins")
   tiene el mismo error que R1 de 3.0c. Va en un PR aparte.
 
-## 9. Decisiones (cerradas por el responsable con las recomendaciones de Work)
+## 9. Decisiones
+
+D1–D6 las cerró el responsable con las recomendaciones de Work. D7 está pendiente.
 
 | | Decisión |
 | --- | --- |
@@ -882,6 +992,7 @@ requiere autorización explícita del responsable.
 | D4 | **Sin bypass destructivo**: no hay `force` ni `acknowledgeLayerLoss` |
 | D5 | Nunca se recrea una sesión en marcha, ni automáticamente ni por el endpoint |
 | D6 | **ID inmutable de imagen**: el preflight lo muestra, el POST lo exige (`expectImageId`), la etiqueta se comprueba en ese ID y `createContainer` lo usa |
+| D7 | **Pendiente.** Caché positiva de 15 s para el probe del relay. Recomendado: **no**, probe fresco para afirmar `effective:true` (§6.2) |
 
 ## 10. Trazabilidad de los hallazgos de Work
 
@@ -958,6 +1069,25 @@ Smoke en §5.7.
   - Validación con el CLI real; si falla, la activación se bloquea (`control-marker-incompatible`)
     (§5.8.1).
   - Tests de residuales con revocación, flag apagado y token no autorizado.
+
+**v5, sobre la v4 en `870218e`:**
+
+- **A2/P2.** El rollback retiraba `defer-skill-seed` aunque `remove(N)` hubiera fallado. Ahora:
+  - la marca solo se retira con la eliminación de `N` confirmada (`inspect` 404);
+  - con un estado incierto se conserva hasta que §5.6 resuelve con D1 y Docker.
+  - Regresión: `remove` falla o queda ambiguo, `N` arranca antes del CAS ⇒ no siembra y la skill
+    sigue intacta.
+- **A3/P2.**
+  - La rama "sin contenedor" de `effectiveAfterRestart` exige `requested`, flag activo y ausencia
+    de revocación, además de la imagen, con un test separado por cada condición falsa.
+  - Disponibilidad: probe fresco para afirmar `effective:true`, sin caché positiva.
+  - La caché de 15 s queda como decisión D7 del responsable, con su garantía y sus tests.
+  - Tests: probe positivo, caída del relay y consulta inmediata.
+- **Smoke.** Se separan:
+  - (a) no activar hooks contra un relay no disponible, con 0 "hook error" exigido;
+  - (b) una caída posterior a la activación, sin prometer 0 errores, comprobando detección en la
+    primera consulta, recuperación en ≤ 3 s, errores acotados al turno de la ventana y
+    `gap relay_restart`.
 
 **Hallazgos del bot de revisión en GitHub** (no son de Work):
 
