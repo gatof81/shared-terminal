@@ -73,6 +73,17 @@ export const ENTRYPOINT_SYMLINKS: ReadonlyMap<string, string> = new Map([
 ]);
 const ENTRYPOINT_DIRS: ReadonlySet<string> = new Set([`${HOME}/.config`]);
 const ENTRYPOINT_FILES: ReadonlySet<string> = new Set(["/tmp/.st-ready", "/tmp/st-relay.log"]);
+/**
+ * Mount points Docker itself creates for `--init` (every session runs with
+ * `Init: true`): docker-init is bind-mounted at /sbin/docker-init, which on
+ * the Ubuntu 24.04 image resolves through the /sbin → /usr/sbin symlink.
+ * `inspect().Mounts` does not list that bind, so it is named here. Seen on
+ * a real daemon by realDocker.smoke.ts.
+ */
+const DOCKER_INIT_FILES: ReadonlySet<string> = new Set([
+	"/sbin/docker-init",
+	"/usr/sbin/docker-init",
+]);
 const TMUX_DIR = `/tmp/tmux-${SESSION_UID}`;
 
 function isUnder(p: string, dir: string): boolean {
@@ -170,6 +181,7 @@ export async function classifyLayer(input: LayerInput): Promise<LayerVerdict> {
 		...ENTRYPOINT_SYMLINKS.keys(),
 		...ENTRYPOINT_DIRS,
 		...ENTRYPOINT_FILES,
+		...DOCKER_INIT_FILES,
 		TMUX_DIR,
 		GITCONFIG,
 		...mounts,
@@ -213,7 +225,7 @@ export async function classifyLayer(input: LayerInput): Promise<LayerVerdict> {
 			if (st?.kind !== "dir") block(category(p));
 			continue;
 		}
-		if (ENTRYPOINT_FILES.has(p)) {
+		if (ENTRYPOINT_FILES.has(p) || DOCKER_INIT_FILES.has(p)) {
 			if (st?.kind !== "file") block(category(p));
 			continue;
 		}

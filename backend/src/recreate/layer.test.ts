@@ -60,6 +60,30 @@ describe("classifyLayer (§2.7.1 precondition 6)", () => {
 		expect(await classifyLayer(input())).toEqual({ blockers: [], reapplyGitIdentity: false });
 	});
 
+	it("Docker's --init mount point (/usr/sbin/docker-init, as a real daemon shows it) is allowed only as a file", async () => {
+		const { changes, stats } = cleanBoot();
+		changes.push(
+			{ Path: "/usr", Kind: 0 },
+			{ Path: "/usr/sbin", Kind: 0 },
+			{ Path: "/usr/sbin/docker-init", Kind: 1 },
+		);
+		stats.set("/usr", { kind: "dir" });
+		stats.set("/usr/sbin", { kind: "dir" });
+		stats.set("/usr/sbin/docker-init", { kind: "file" });
+		expect((await classifyLayer(input({ changes, stats }))).blockers).toEqual([]);
+		stats.set("/usr/sbin/docker-init", { kind: "dir" });
+		expect((await classifyLayer(input({ changes, stats }))).blockers).toEqual([
+			{ code: "layer-system", count: 1 },
+		]);
+		// …and it does not open the rest of /usr.
+		const more = [...changes, { Path: "/usr/sbin/other", Kind: 1 }];
+		stats.set("/usr/sbin/docker-init", { kind: "file" });
+		stats.set("/usr/sbin/other", { kind: "file" });
+		expect((await classifyLayer(input({ changes: more, stats }))).blockers).toEqual([
+			{ code: "layer-system", count: 1 },
+		]);
+	});
+
 	it("what the bind mounts hold is never part of the layer", async () => {
 		const { changes } = cleanBoot();
 		changes.push({ Path: `${H}/workspace/anything`, Kind: 1 });

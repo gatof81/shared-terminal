@@ -80,13 +80,23 @@ async function waitReady(id: string): Promise<void> {
 	throw new Error("container never became ready");
 }
 
+/** Stop, tolerating "already stopped" (304) so one failed check doesn't abort the rest. */
+async function stopIfRunning(id: string): Promise<void> {
+	await docker
+		.getContainer(id)
+		.stop()
+		.catch((err: { statusCode?: number }) => {
+			if (err.statusCode !== 304) throw err;
+		});
+}
+
 async function withO<T>(oId: string, fn: () => Promise<T>): Promise<T> {
 	await docker.getContainer(oId).start();
 	await waitReady(oId);
 	try {
 		return await fn();
 	} finally {
-		await docker.getContainer(oId).stop();
+		await stopIfRunning(oId);
 	}
 }
 
@@ -351,7 +361,7 @@ async function main(): Promise<void> {
 		(await docker.getContainer(O).inspect()).Name === `/${CANONICAL}`,
 	);
 	check("no N left", (await real.listByLabel(LABEL_SESSION, SID)).length === 0);
-	await docker.getContainer(O).stop();
+	await stopIfRunning(O);
 	// O re-seeded on that start; make W absent so a seed is observable.
 	await withO(O, () => exec(O, "rm -rf ~/.claude/skills/delegate-task"));
 	check("W absent before the next attempts", !(await exists(SKILL)));
