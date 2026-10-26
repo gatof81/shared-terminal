@@ -131,7 +131,7 @@ async function cleanup(): Promise<void> {
 
 async function main(): Promise<void> {
 	// Imported after WORKSPACE_ROOT is set: these modules read it at load.
-	const { DockerManager } = await import("../dockerManager.js");
+	const { DockerManager, buildContainerEnv } = await import("../dockerManager.js");
 	const { RecreateAttemptStore } = await import("../recreateAttempt.js");
 	const { SessionLifecycleLock } = await import("../sessionLifecycleLock.js");
 	const { RecreationEngine } = await import("./engine.js");
@@ -227,6 +227,7 @@ async function main(): Promise<void> {
 				mayWrite: () => run.epochOpen,
 			});
 			const w = await authority.applyWriteDetailed(s);
+			console.log(`  · step 5 write procedure: ${w.outcome}`);
 			return authority.capture(s, { identified: w.identified });
 		},
 		converge: async () => undefined,
@@ -244,7 +245,9 @@ async function main(): Promise<void> {
 			Image: spec.imageId,
 			name: spec.name,
 			Labels: spec.labels,
-			Env: spec.env,
+			// The spawn's own env builder: SESSION_ID/SESSION_NAME plus the
+			// capture entries (the relay refuses to start without SESSION_ID).
+			Env: buildContainerEnv(SID, "recreate-smoke", [], spec.env),
 			HostConfig: {
 				Binds: [
 					`${WS}:/home/developer/workspace`,
