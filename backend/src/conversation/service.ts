@@ -297,6 +297,11 @@ export class ConversationService {
 		deps.store.onEvent((st, cid, ev) => this.onPersisted(st, cid, ev));
 	}
 
+	/** The Docker side capture authorization reads (3.0d recreation builds its own authority on it). */
+	get captureDocker(): CaptureDockerPort {
+		return this.deps.captureDocker ?? NO_DOCKER;
+	}
+
 	get activationDeps(): ActivationDeps {
 		return {
 			workspaceRoot: this.deps.workspaceRoot,

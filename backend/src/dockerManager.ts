@@ -49,6 +49,8 @@ import {
 	RELAY_PROBE_TIMEOUT_MS,
 	RELAY_STATUS_URL,
 } from "./conversation/captureAuth.js";
+import type { LayerChange, PathKind } from "./recreate/layer.js";
+import { isNotFound, type RecreateContainer, type RecreateDockerPort } from "./recreate/ports.js";
 import {
 	decryptStoredEntries,
 	EFFECTIVE_CPU_NANO_MAX,
@@ -487,7 +489,6 @@ export class DockerManager {
 		// No chown — backend (typically root) owns the dir, container
 		// reads via the read-only mount; no need for it to own anything.
 
-		const hostname = sanitiseHostname(meta.name, sessionId);
 		// Phase 3 — the hooks file + ingest token exist only when capture
 		// is requested AND the backend flag is on (§2.4 "spawn" row). A
 		// failure here must not block the session: log and spawn without
@@ -502,177 +503,21 @@ export class DockerManager {
 				);
 			}
 		}
-		// #384 — clamp CPU against the HOST too, not just the operator
-		// ceiling. EFFECTIVE_CPU_NANO_MAX is a static v1 ceiling (8
-		// cores); a stored cap that was valid at create time becomes
-		// start-blocking if the host is later downsized (dockerd 400s
-		// the create, which surfaced as an opaque 500 on POST /start —
-		// real occurrence 2026-07-14 on a ≥8→6 vCPU resize). Memory is
-		// deliberately NOT host-clamped: Docker accepts over-provisioned
-		// Memory limits, so CPU is the only start-blocking axis. The
-		// warn tells the operator which stored cap is stale.
-		const requestedNanoCpus = Math.min(
-			config?.cpuLimit ?? DEFAULT_NANO_CPUS,
-			EFFECTIVE_CPU_NANO_MAX,
-		);
-		const nanoCpus = Math.min(requestedNanoCpus, hostCpuNanoCap());
-		if (nanoCpus < requestedNanoCpus) {
-			logger.warn(
-				`[docker] session ${sessionId}: stored CPU cap ${requestedNanoCpus / 1_000_000_000} ` +
-					`cores exceeds this host's ${nanoCpus / 1_000_000_000}; clamping for this start. ` +
-					"Lower the session's cap (admin panel → Edit caps) to persist the fix.",
-			);
-		}
-		// #190 (direct-proxy switch) — we no longer publish per-port host
-		// ports (`-p 0:<container>`). The dispatcher reaches the container
-		// directly by name over `SESSIONS_NETWORK` (Docker embedded DNS), so
-		// the exposed set is pure metadata in `sessions_port_mappings`, written
-		// from config below. Dropping host publishing removes the host attack
-		// surface AND makes opening/closing a port a live edit (no recreate).
 		const container = await this.createContainerReclaimingStaleName(
 			sessionId,
 			meta.containerName,
 			() =>
-				this.docker.createContainer({
-					// With capture prepared, the exact image ID its relay label
-					// was checked on (D6): the tag could move in between.
-					Image: capture.imageId ?? SESSION_IMAGE,
-					name: meta.containerName,
-					Hostname: hostname,
-					// `buildContainerEnv` returns a deduplicated `KEY=VALUE[]` array
-					// so the precedence is unambiguous regardless of which reader
-					// resolves the var inside the container. Duplicates in
-					// Docker's `Env` are surprisingly hostile: glibc's `getenv(3)`
-					// is FIRST-wins (scans `environ` from index 0), bash's startup
-					// parser is LAST-wins (each `bind_variable` overwrites), and
-					// programs the user runs may use either. Emitting a single
-					// entry per name closes that ambiguity. See `buildContainerEnv`
-					// for the precedence rules.
-					// Phase 3 §2.6 — with capture effective (capture.env set),
-					// a proxy in the session env must not swallow the hooks to
-					// the loopback relay; without a proxy the env is untouched.
-					Env:
-						capture.env.length > 0
-							? withRelayNoProxy(buildContainerEnv(sessionId, meta.name, envArray, capture.env))
-							: buildContainerEnv(sessionId, meta.name, envArray, capture.env),
-					HostConfig: {
-						Binds: [
-							`${WORKSPACE_ROOT}/${sessionId}:/home/developer/workspace`,
-							`${uploadsHostDir}:/home/developer/uploads:ro`,
-							// Phase 3 — empty when capture is off for this
-							// deployment (behaviour-neutral); otherwise the
-							// per-session managed-settings dir, read-only.
-							...capture.binds,
-						],
-						// #190 (direct-proxy switch) — join the shared user-defined
-						// network so the backend can reach this container by name via
-						// Docker's embedded DNS. The default `bridge` network has NO
-						// embedded DNS and is a different network than the compose
-						// `app` service, so name resolution would fail there.
-						NetworkMode: SESSIONS_NETWORK,
-						// `mem_limit` / `cpu_limit` from session_configs override the
-						// hardcoded defaults. Docker pins HostConfig at create time,
-						// so a later config-row UPDATE wouldn't take effect on an
-						// existing container — `startContainer`'s "respawn on stale
-						// id" path picks up new caps when the user fully recycles
-						// (DELETE + POST /start). #194 owns operator-tunable bounds
-						// and per-deployment caps; this PR just wires the consumer.
-						//
-						// Re-clamp the stored config caps to the operator cap HERE,
-						// not just at ingest. `config.mem_limit`/`cpu_limit` were
-						// validated against MAX_SESSION_MEM/CPU at create/PATCH time,
-						// but an operator can LOWER those env caps afterwards (e.g.
-						// right-sizing the host). On the next respawn the stale stored
-						// value would otherwise be written to the cgroup unclamped,
-						// silently bypassing the new operator cap on every start. The
-						// DEFAULT_* constants are already `Math.min`-clamped (see their
-						// definitions); this keeps the config path symmetric.
-						Memory: Math.min(config?.memLimit ?? DEFAULT_MEMORY_BYTES, EFFECTIVE_MEM_BYTES_MAX),
-						NanoCpus: nanoCpus,
-						// #344 — Memory/CPU caps don't bound PROCESS COUNT: a fork bomb
-						// inside a session starves the host's PID space and scheduler
-						// while staying under both cgroup caps. 1024 is far above any
-						// real dev workload in these containers (tmux + node + claude
-						// + a parallel build lands in the low hundreds) yet turns a
-						// fork bomb into an in-container EAGAIN instead of a host
-						// incident. Deliberately a cgroup pids limit and NOT an nproc
-						// ulimit: every session container runs as UID 1000, and
-						// RLIMIT_NPROC counts per-UID across the whole kernel — an
-						// nproc ulimit would let one session's process count exhaust
-						// a SIBLING session's budget. PidsLimit is per-cgroup, so
-						// sessions stay isolated from each other.
-						PidsLimit: 1024,
-						// docker-init (tini) as PID 1. The entrypoint's PID 1 is
-						// `exec tail -f /dev/null`, which never wait()s — any
-						// orphaned child reparented to it stays a zombie FOREVER,
-						// and each zombie holds a PidsLimit slot. The exec API
-						// (#381) makes orphaning routine: killExecProcessGroup
-						// reaps the group leader but grandchildren that outlive
-						// (or predecease) their parent reparent to PID 1.
-						// Verified live on the session image: a group whose
-						// parent exits leaves 3 permanent Z-state entries without
-						// init, 0 with it (smoke-test.sh Phase 9 pins both legs).
-						// Side-effect worth knowing: docker-init forwards SIGTERM
-						// to the entrypoint, so `docker stop` now terminates
-						// cleanly instead of waiting out the 10 s grace for
-						// SIGKILL. Containers created before this flag keep their
-						// old HostConfig until recycled — warnIfPreHardened flags
-						// them on start/reconcile.
-						Init: true,
-						// Companion fd bound. 65536 is generous for dev servers and
-						// file watchers (Vite/watchman-style workloads sit well under
-						// it) while capping a leak well below the dockerd default of
-						// ~1M fds per container. Soft == hard so nothing inside the
-						// container can raise it back.
-						Ulimits: [{ Name: "nofile", Soft: 65536, Hard: 65536 }],
-						RestartPolicy: { Name: "unless-stopped" },
-						// #345 — bound the json-file log driver. Session containers are
-						// long-lived (they survive stop/start cycles) and their PID 1 /
-						// exec streams can be chatty (Claude TUI repaints, build logs
-						// leaking to the container log via postStart daemons), so an
-						// uncapped log grows in /var/lib/docker/containers/<id>/ until
-						// the host disk fills. 10m × 3 files ≈ 30 MiB worst-case per
-						// session — plenty for post-mortem tails while making the
-						// aggregate bound scale with session count, not with output
-						// volume. Mirrors the `logging:` block on the compose `app`
-						// service (which can't cover spawned containers).
-						LogConfig: { Type: "json-file", Config: { "max-size": "10m", "max-file": "3" } },
-						// Defense-in-depth (issue #15): the image already runs as
-						// unprivileged UID 1000 with no sudo, but we still strip
-						// every Linux capability from the bounding set Docker
-						// hands the container. None of tmux, node, git,
-						// claude-code, or `code tunnel` need any of the default
-						// bag (e.g. CAP_NET_RAW for raw sockets / ICMP,
-						// CAP_NET_BIND_SERVICE for ports < 1024, CAP_AUDIT_WRITE,
-						// CAP_MKNOD), so dropping ALL is the tightest baseline.
-						// Note: this is about the *container's* bounding set,
-						// not the backend host process — host-side chowns in
-						// ensureWorkspaceOwnership rely on the backend's own
-						// CAP_CHOWN and are unaffected. Pair with
-						// no-new-privileges so even if a future image change
-						// reintroduces a setuid binary it cannot raise
-						// effective UID/caps at exec time.
-						CapDrop: ["ALL"],
-						// #190 PR 190b — `allowPrivilegedPorts: true` re-grants
-						// exactly `CAP_NET_BIND_SERVICE` on the container so the
-						// in-container process can bind to ports < 1024. Nothing
-						// else from the default capability bag is restored —
-						// CAP_NET_RAW (raw sockets / ICMP), CAP_AUDIT_WRITE,
-						// CAP_MKNOD etc. stay dropped. The toggle is gated at the
-						// schema level: privileged ports without it are rejected
-						// at ingest, so a session reaching here with the toggle
-						// off has no privileged ports to bind regardless. We add
-						// the cap whenever the toggle is on (independent of
-						// whether any specific port is < 1024) — the user opted
-						// in at the form, and a future port edit shouldn't have
-						// to recycle the container to take effect (config is
-						// bound at create time per the umbrella non-goal).
-						CapAdd: config?.allowPrivilegedPorts === true ? ["NET_BIND_SERVICE"] : undefined,
-						SecurityOpt: ["no-new-privileges:true"],
-					},
-					OpenStdin: true,
-					Tty: true,
-				}),
+				this.docker.createContainer(
+					this.containerOptions(
+						sessionId,
+						meta,
+						config,
+						envArray,
+						capture,
+						uploadsHostDir,
+						meta.containerName,
+					),
+				),
 		);
 
 		await container.start();
@@ -702,6 +547,195 @@ export class DockerManager {
 			`[docker] spawned container ${meta.containerName} (${containerId.slice(0, 12)}) for session ${sessionId}`,
 		);
 		return containerId;
+	}
+
+	/**
+	 * The full create options of a session container: env, binds, limits,
+	 * caps, network. Shared by spawn and by recreation (CONVERSATION.md
+	 * §2.7.2 step 1: N is created "with the env, binds, caps and network of
+	 * always"), so the two can never drift apart.
+	 */
+	private containerOptions(
+		sessionId: string,
+		meta: SessionMeta,
+		config: SessionConfigRecord | null,
+		envArray: string[],
+		capture: SpawnCaptureResult,
+		uploadsHostDir: string,
+		name: string,
+		labels?: Record<string, string>,
+	): Dockerode.ContainerCreateOptions {
+		const hostname = sanitiseHostname(meta.name, sessionId);
+		// #384 — clamp CPU against the HOST too, not just the operator
+		// ceiling. EFFECTIVE_CPU_NANO_MAX is a static v1 ceiling (8
+		// cores); a stored cap that was valid at create time becomes
+		// start-blocking if the host is later downsized (dockerd 400s
+		// the create, which surfaced as an opaque 500 on POST /start —
+		// real occurrence 2026-07-14 on a ≥8→6 vCPU resize). Memory is
+		// deliberately NOT host-clamped: Docker accepts over-provisioned
+		// Memory limits, so CPU is the only start-blocking axis. The
+		// warn tells the operator which stored cap is stale.
+		const requestedNanoCpus = Math.min(
+			config?.cpuLimit ?? DEFAULT_NANO_CPUS,
+			EFFECTIVE_CPU_NANO_MAX,
+		);
+		const nanoCpus = Math.min(requestedNanoCpus, hostCpuNanoCap());
+		if (nanoCpus < requestedNanoCpus) {
+			logger.warn(
+				`[docker] session ${sessionId}: stored CPU cap ${requestedNanoCpus / 1_000_000_000} ` +
+					`cores exceeds this host's ${nanoCpus / 1_000_000_000}; clamping for this start. ` +
+					"Lower the session's cap (admin panel → Edit caps) to persist the fix.",
+			);
+		}
+		// #190 (direct-proxy switch) — we no longer publish per-port host
+		// ports (`-p 0:<container>`). The dispatcher reaches the container
+		// directly by name over `SESSIONS_NETWORK` (Docker embedded DNS), so
+		// the exposed set is pure metadata in `sessions_port_mappings`, written
+		// from config below. Dropping host publishing removes the host attack
+		// surface AND makes opening/closing a port a live edit (no recreate).
+		return {
+			// With capture prepared, the exact image ID its relay label
+			// was checked on (D6): the tag could move in between.
+			Image: capture.imageId ?? SESSION_IMAGE,
+			name,
+			// Recreation (3.0d) labels N with its session and attempt; a
+			// spawn has none.
+			Labels: labels,
+			Hostname: hostname,
+			// `buildContainerEnv` returns a deduplicated `KEY=VALUE[]` array
+			// so the precedence is unambiguous regardless of which reader
+			// resolves the var inside the container. Duplicates in
+			// Docker's `Env` are surprisingly hostile: glibc's `getenv(3)`
+			// is FIRST-wins (scans `environ` from index 0), bash's startup
+			// parser is LAST-wins (each `bind_variable` overwrites), and
+			// programs the user runs may use either. Emitting a single
+			// entry per name closes that ambiguity. See `buildContainerEnv`
+			// for the precedence rules.
+			// Phase 3 §2.6 — with capture effective (capture.env set),
+			// a proxy in the session env must not swallow the hooks to
+			// the loopback relay; without a proxy the env is untouched.
+			Env:
+				capture.env.length > 0
+					? withRelayNoProxy(buildContainerEnv(sessionId, meta.name, envArray, capture.env))
+					: buildContainerEnv(sessionId, meta.name, envArray, capture.env),
+			HostConfig: {
+				Binds: [
+					`${WORKSPACE_ROOT}/${sessionId}:/home/developer/workspace`,
+					`${uploadsHostDir}:/home/developer/uploads:ro`,
+					// Phase 3 — empty when capture is off for this
+					// deployment (behaviour-neutral); otherwise the
+					// per-session managed-settings dir, read-only.
+					...capture.binds,
+				],
+				// #190 (direct-proxy switch) — join the shared user-defined
+				// network so the backend can reach this container by name via
+				// Docker's embedded DNS. The default `bridge` network has NO
+				// embedded DNS and is a different network than the compose
+				// `app` service, so name resolution would fail there.
+				NetworkMode: SESSIONS_NETWORK,
+				// `mem_limit` / `cpu_limit` from session_configs override the
+				// hardcoded defaults. Docker pins HostConfig at create time,
+				// so a later config-row UPDATE wouldn't take effect on an
+				// existing container — `startContainer`'s "respawn on stale
+				// id" path picks up new caps when the user fully recycles
+				// (DELETE + POST /start). #194 owns operator-tunable bounds
+				// and per-deployment caps; this PR just wires the consumer.
+				//
+				// Re-clamp the stored config caps to the operator cap HERE,
+				// not just at ingest. `config.mem_limit`/`cpu_limit` were
+				// validated against MAX_SESSION_MEM/CPU at create/PATCH time,
+				// but an operator can LOWER those env caps afterwards (e.g.
+				// right-sizing the host). On the next respawn the stale stored
+				// value would otherwise be written to the cgroup unclamped,
+				// silently bypassing the new operator cap on every start. The
+				// DEFAULT_* constants are already `Math.min`-clamped (see their
+				// definitions); this keeps the config path symmetric.
+				Memory: Math.min(config?.memLimit ?? DEFAULT_MEMORY_BYTES, EFFECTIVE_MEM_BYTES_MAX),
+				NanoCpus: nanoCpus,
+				// #344 — Memory/CPU caps don't bound PROCESS COUNT: a fork bomb
+				// inside a session starves the host's PID space and scheduler
+				// while staying under both cgroup caps. 1024 is far above any
+				// real dev workload in these containers (tmux + node + claude
+				// + a parallel build lands in the low hundreds) yet turns a
+				// fork bomb into an in-container EAGAIN instead of a host
+				// incident. Deliberately a cgroup pids limit and NOT an nproc
+				// ulimit: every session container runs as UID 1000, and
+				// RLIMIT_NPROC counts per-UID across the whole kernel — an
+				// nproc ulimit would let one session's process count exhaust
+				// a SIBLING session's budget. PidsLimit is per-cgroup, so
+				// sessions stay isolated from each other.
+				PidsLimit: 1024,
+				// docker-init (tini) as PID 1. The entrypoint's PID 1 is
+				// `exec tail -f /dev/null`, which never wait()s — any
+				// orphaned child reparented to it stays a zombie FOREVER,
+				// and each zombie holds a PidsLimit slot. The exec API
+				// (#381) makes orphaning routine: killExecProcessGroup
+				// reaps the group leader but grandchildren that outlive
+				// (or predecease) their parent reparent to PID 1.
+				// Verified live on the session image: a group whose
+				// parent exits leaves 3 permanent Z-state entries without
+				// init, 0 with it (smoke-test.sh Phase 9 pins both legs).
+				// Side-effect worth knowing: docker-init forwards SIGTERM
+				// to the entrypoint, so `docker stop` now terminates
+				// cleanly instead of waiting out the 10 s grace for
+				// SIGKILL. Containers created before this flag keep their
+				// old HostConfig until recycled — warnIfPreHardened flags
+				// them on start/reconcile.
+				Init: true,
+				// Companion fd bound. 65536 is generous for dev servers and
+				// file watchers (Vite/watchman-style workloads sit well under
+				// it) while capping a leak well below the dockerd default of
+				// ~1M fds per container. Soft == hard so nothing inside the
+				// container can raise it back.
+				Ulimits: [{ Name: "nofile", Soft: 65536, Hard: 65536 }],
+				RestartPolicy: { Name: "unless-stopped" },
+				// #345 — bound the json-file log driver. Session containers are
+				// long-lived (they survive stop/start cycles) and their PID 1 /
+				// exec streams can be chatty (Claude TUI repaints, build logs
+				// leaking to the container log via postStart daemons), so an
+				// uncapped log grows in /var/lib/docker/containers/<id>/ until
+				// the host disk fills. 10m × 3 files ≈ 30 MiB worst-case per
+				// session — plenty for post-mortem tails while making the
+				// aggregate bound scale with session count, not with output
+				// volume. Mirrors the `logging:` block on the compose `app`
+				// service (which can't cover spawned containers).
+				LogConfig: { Type: "json-file", Config: { "max-size": "10m", "max-file": "3" } },
+				// Defense-in-depth (issue #15): the image already runs as
+				// unprivileged UID 1000 with no sudo, but we still strip
+				// every Linux capability from the bounding set Docker
+				// hands the container. None of tmux, node, git,
+				// claude-code, or `code tunnel` need any of the default
+				// bag (e.g. CAP_NET_RAW for raw sockets / ICMP,
+				// CAP_NET_BIND_SERVICE for ports < 1024, CAP_AUDIT_WRITE,
+				// CAP_MKNOD), so dropping ALL is the tightest baseline.
+				// Note: this is about the *container's* bounding set,
+				// not the backend host process — host-side chowns in
+				// ensureWorkspaceOwnership rely on the backend's own
+				// CAP_CHOWN and are unaffected. Pair with
+				// no-new-privileges so even if a future image change
+				// reintroduces a setuid binary it cannot raise
+				// effective UID/caps at exec time.
+				CapDrop: ["ALL"],
+				// #190 PR 190b — `allowPrivilegedPorts: true` re-grants
+				// exactly `CAP_NET_BIND_SERVICE` on the container so the
+				// in-container process can bind to ports < 1024. Nothing
+				// else from the default capability bag is restored —
+				// CAP_NET_RAW (raw sockets / ICMP), CAP_AUDIT_WRITE,
+				// CAP_MKNOD etc. stay dropped. The toggle is gated at the
+				// schema level: privileged ports without it are rejected
+				// at ingest, so a session reaching here with the toggle
+				// off has no privileged ports to bind regardless. We add
+				// the cap whenever the toggle is on (independent of
+				// whether any specific port is < 1024) — the user opted
+				// in at the form, and a future port edit shouldn't have
+				// to recycle the container to take effect (config is
+				// bound at create time per the umbrella non-goal).
+				CapAdd: config?.allowPrivilegedPorts === true ? ["NET_BIND_SERVICE"] : undefined,
+				SecurityOpt: ["no-new-privileges:true"],
+			},
+			OpenStdin: true,
+			Tty: true,
+		};
 	}
 
 	/**
@@ -2720,6 +2754,141 @@ export class DockerManager {
 		return { imageId: id, relay2: await this.imageHasRelay2(id) };
 	}
 
+	// ── Recreation port (3.0d, CONVERSATION.md §2.7) ───────────────────────
+
+	/**
+	 * The Docker side of `recreate/engine.ts`. No request here takes an
+	 * abort signal or a client timeout: the engine decides how long it
+	 * waits, and dockerd's answer, whenever it arrives, is the evidence of
+	 * how the request ended (§2.7.4).
+	 */
+	recreatePort(): RecreateDockerPort {
+		const d = this.docker;
+		return {
+			inspect: async (ref) => {
+				try {
+					return toRecreateContainer(await d.getContainer(ref).inspect());
+				} catch (err) {
+					if (isNotFound(err)) return null;
+					throw err;
+				}
+			},
+			changes: async (id) => ((await d.getContainer(id).changes()) as LayerChange[] | null) ?? [],
+			statPath: async (id, p) => {
+				let res: { headers?: Record<string, string>; resume?: () => void };
+				try {
+					res = await d.getContainer(id).infoArchive({ path: p });
+				} catch (err) {
+					if (isNotFound(err)) return null;
+					throw err;
+				}
+				res.resume?.();
+				const raw = res.headers?.["x-docker-container-path-stat"];
+				if (!raw) throw new Error("archive HEAD without a path stat");
+				const st = JSON.parse(Buffer.from(raw, "base64").toString("utf8")) as {
+					mode: number;
+					linkTarget?: string;
+				};
+				return { kind: goModeKind(st.mode), linkTarget: st.linkTarget || undefined };
+			},
+			readArchive: async (id, p, maxBytes) => {
+				let stream: NodeJS.ReadableStream;
+				try {
+					stream = await d.getContainer(id).getArchive({ path: p });
+				} catch (err) {
+					if (isNotFound(err)) return null;
+					throw err;
+				}
+				// Past the cap the rest is drained, not destroyed: the request
+				// ends when dockerd ends it, like every other one.
+				const chunks: Buffer[] = [];
+				let size = 0;
+				let over = false;
+				await new Promise<void>((resolve, reject) => {
+					stream.on("data", (c: Buffer) => {
+						if (over) return;
+						size += c.length;
+						if (size > maxBytes) over = true;
+						else chunks.push(c);
+					});
+					stream.on("end", () => resolve());
+					stream.on("error", reject);
+				});
+				if (over) throw new Error(`archive of ${p} exceeds ${maxBytes} bytes`);
+				return Buffer.concat(chunks);
+			},
+			currentImage: () => this.currentSessionImage(),
+			buildCreate: async (sessionId, spec) => {
+				const meta = await this.sessions.getOrThrow(sessionId);
+				// No `loadConfigForSpawn` fallback here: a D1 blip must fail
+				// the recreation, not create an N without the session's env
+				// and caps (strict preservation, D2).
+				const config = await getSessionConfig(sessionId);
+				const decrypted =
+					config?.envVars && config.envVars.length > 0
+						? decryptStoredEntries(config.envVars)
+						: undefined;
+				return this.containerOptions(
+					sessionId,
+					meta,
+					config,
+					mergeEnvForSpawn(meta.envVars, decrypted),
+					{ env: spec.env, binds: spec.binds, imageId: spec.imageId },
+					path.join(WORKSPACE_ROOT, ".uploads", sessionId),
+					spec.name,
+					spec.labels,
+				);
+			},
+			create: async (options) =>
+				(await d.createContainer(options as Dockerode.ContainerCreateOptions)).id,
+			rename: async (id, name) => {
+				await d.getContainer(id).rename({ name });
+			},
+			start: async (id) => {
+				await d.getContainer(id).start();
+			},
+			stop: async (id) => {
+				try {
+					await d.getContainer(id).stop();
+				} catch (err) {
+					if ((err as { statusCode?: number }).statusCode !== 304) throw err; // already stopped
+				}
+			},
+			remove: async (id) => {
+				await d.getContainer(id).remove();
+			},
+			listByLabel: async (key, value) => {
+				const list = await d.listContainers({
+					all: true,
+					filters: { label: [value === undefined ? key : `${key}=${value}`] },
+				});
+				return list.map((c) => ({
+					id: c.Id,
+					name: (c.Names?.[0] ?? "").replace(/^\//, ""),
+					running: c.State === "running",
+					imageId: c.ImageID,
+					labels: c.Labels ?? {},
+					mounts: (c.Mounts ?? []).map((m) => m.Destination),
+				}));
+			},
+			listByName: async (fragment) => {
+				const list = await d.listContainers({ all: true, filters: { name: [fragment] } });
+				return list.map((c) => ({
+					id: c.Id,
+					name: (c.Names?.[0] ?? "").replace(/^\//, ""),
+					running: c.State === "running",
+					imageId: c.ImageID,
+					labels: c.Labels ?? {},
+					mounts: (c.Mounts ?? []).map((m) => m.Destination),
+				}));
+			},
+			exec: async (containerId, cmd, timeoutMs) => {
+				const r = await this.execCapture("", cmd, { containerId, maxBytes: 64 * 1024, timeoutMs });
+				return { exitCode: r.exitCode, stdout: r.stdout.toString("utf8") };
+			},
+		};
+	}
+
 	/**
 	 * One `GET /st-relay/status` from inside the container (D7): bounded
 	 * by curl's `-m` and the exec timeout; true only for a 204 carrying
@@ -3307,4 +3476,28 @@ export function demuxDockerOutputAll(raw: Buffer): string {
 		off += size;
 	}
 	return Buffer.concat(chunks).toString("utf-8");
+}
+
+// ── Recreation port helpers ─────────────────────────────────────────────────
+
+function toRecreateContainer(info: Dockerode.ContainerInspectInfo): RecreateContainer {
+	return {
+		id: info.Id,
+		name: info.Name.replace(/^\//, ""),
+		running: info.State?.Running === true,
+		imageId: info.Image,
+		labels: info.Config?.Labels ?? {},
+		mounts: (info.Mounts ?? []).map((m) => m.Destination),
+	};
+}
+
+/** Go's os.FileMode type bits, as dockerd reports them in the archive path stat. */
+export function goModeKind(mode: number): PathKind {
+	const has = (bit: number) => Math.floor(mode / 2 ** bit) % 2 === 1;
+	if (has(31)) return "dir";
+	if (has(27)) return "symlink";
+	if (has(24)) return "socket";
+	// named pipe, device, char device, irregular
+	if (has(25) || has(26) || has(21) || has(19)) return "other";
+	return "file";
 }

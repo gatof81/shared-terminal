@@ -78,6 +78,20 @@ const D1_TIMEOUT_MS = 10_000;
  * Execute a single SQL statement against D1.
  * Returns the results array for SELECT, or meta for INSERT/UPDATE/DELETE.
  */
+/**
+ * D1 answered and said the statement failed: it was not applied. Every
+ * other error from `d1Query` (timeout, network, a non-2xx without that
+ * answer) leaves it unknown whether the statement ran — callers whose
+ * correctness depends on that distinction (the recreation CAS,
+ * CONVERSATION.md §2.7.2 step 4) must treat those as ambiguous.
+ */
+export class D1StatementError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "D1StatementError";
+	}
+}
+
 export async function d1Query<T = Record<string, unknown>>(
 	sql: string,
 	params?: unknown[],
@@ -117,7 +131,7 @@ export async function d1Query<T = Record<string, unknown>>(
 	}
 
 	if (!data.success) {
-		throw new Error(`D1 query failed: ${data.errors.map((e) => e.message).join(", ")}`);
+		throw new D1StatementError(`D1 query failed: ${data.errors.map((e) => e.message).join(", ")}`);
 	}
 
 	// Guard the empty/absent result array. D1's `/query` returns one

@@ -17,8 +17,10 @@ name: Session Image
 # filtered set: the image build consumes only session-image/, and the
 # smoke tests additionally consume the exec scripts extracted from
 # backend/src/dockerManager.ts, the conversation receiver and hooks-file
-# builder under backend/src/conversation/, and the `st-backend` alias in
-# docker-compose.yml — which is why those are in the filter. The cost side is also different: a docker build is ~5 min of
+# builder under backend/src/conversation/, the recreation engine under
+# backend/src/recreate/ (with the attempt record and lifecycle lock), and
+# the `st-backend` alias in docker-compose.yml — which is why those are in
+# the filter. The cost side is also different: a docker build is ~5 min of
 # critical path, not the <1 min ci.yml accepts as noise.
 #
 # Consequence: this can NOT be a required check in branch protection — it
@@ -31,6 +33,9 @@ on:
       - "session-image/**"
       - "backend/src/dockerManager.ts"
       - "backend/src/conversation/**"
+      - "backend/src/recreate/**"
+      - "backend/src/recreateAttempt.ts"
+      - "backend/src/sessionLifecycleLock.ts"
       - "docker-compose.yml"
       - ".github/workflows/session-image.yml"
   push:
@@ -39,6 +44,9 @@ on:
       - "session-image/**"
       - "backend/src/dockerManager.ts"
       - "backend/src/conversation/**"
+      - "backend/src/recreate/**"
+      - "backend/src/recreateAttempt.ts"
+      - "backend/src/sessionLifecycleLock.ts"
       - "docker-compose.yml"
       - ".github/workflows/session-image.yml"
 
@@ -88,3 +96,10 @@ jobs:
       # timings the 3.0c PR reports.
       - name: Conversation hooks smoke test
         run: ./session-image/conversation-smoke.sh shared-terminal-session
+
+      # 3.0d: the recreation engine against this real dockerd and image
+      # (docker diff, archives, renames, defer-skill-seed across N's boots,
+      # the relay identified on N). Disposable containers only, D1 in memory.
+      - name: Recreation smoke test (real Docker)
+        working-directory: backend
+        run: npx tsx src/recreate/realDocker.smoke.ts shared-terminal-session

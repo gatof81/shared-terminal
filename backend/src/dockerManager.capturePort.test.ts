@@ -22,7 +22,7 @@ import {
 	relayEnabledExists,
 	writeRelayEnabled,
 } from "./conversation/captureAuth.js";
-import { DockerManager } from "./dockerManager.js";
+import { DockerManager, goModeKind } from "./dockerManager.js";
 import type { SessionManager } from "./sessionManager.js";
 
 function dm(opts: {
@@ -299,4 +299,130 @@ describe("probeRelay through CaptureAuthority: every Docker stage bounded (V2)",
 			expect(execCreate).toHaveBeenCalledTimes(2);
 		});
 	}
+});
+
+// ── 3.0d recreation port: what the engine reads from Docker ────────────────
+
+describe("recreatePort (CONVERSATION.md §2.7)", () => {
+	function withDocker(docker: Record<string, unknown>) {
+		const { m } = dm({});
+		(m as unknown as { docker: unknown }).docker = docker;
+		return m.recreatePort();
+	}
+	const stat = (o: object) => ({
+		headers: { "x-docker-container-path-stat": Buffer.from(JSON.stringify(o)).toString("base64") },
+		resume: () => undefined,
+	});
+
+	it("Go FileMode type bits ⇒ kind", () => {
+		expect(goModeKind(2 ** 31 + 0o755)).toBe("dir");
+		expect(goModeKind(2 ** 27 + 0o777)).toBe("symlink");
+		expect(goModeKind(2 ** 24 + 0o755)).toBe("socket");
+		expect(goModeKind(2 ** 25 + 0o644)).toBe("other");
+		expect(goModeKind(0o644)).toBe("file");
+	});
+
+	it("statPath reads the archive path-stat header; 404 ⇒ null", async () => {
+		const infoArchive = vi
+			.fn()
+			.mockResolvedValueOnce(
+				stat({ mode: 2 ** 27 + 0o777, linkTarget: "/home/developer/workspace/.npm-global" }),
+			)
+			.mockRejectedValueOnce(Object.assign(new Error("nope"), { statusCode: 404 }));
+		const p = withDocker({ getContainer: () => ({ infoArchive }) });
+		expect(await p.statPath("o", "/home/developer/.npm-global")).toEqual({
+			kind: "symlink",
+			linkTarget: "/home/developer/workspace/.npm-global",
+		});
+		expect(await p.statPath("o", "/nope")).toBeNull();
+	});
+
+	it("readArchive: bytes under the cap; past it the stream is drained to its end, then refused", async () => {
+		const stream = (chunks: Buffer[]) => {
+			const s = new PassThrough();
+			for (const c of chunks) s.write(c);
+			s.end();
+			return s;
+		};
+		const ended = vi.fn();
+		const getArchive = vi
+			.fn()
+			.mockResolvedValueOnce(stream([Buffer.from("ab"), Buffer.from("cd")]))
+			.mockImplementationOnce(async () => {
+				const s = stream([Buffer.alloc(8), Buffer.alloc(8), Buffer.alloc(8)]);
+				s.on("end", ended);
+				return s;
+			})
+			.mockRejectedValueOnce(Object.assign(new Error("no path"), { statusCode: 404 }));
+		const p = withDocker({ getContainer: () => ({ getArchive }) });
+		expect((await p.readArchive("o", "/x", 10))?.toString()).toBe("abcd");
+		await expect(p.readArchive("o", "/x", 10)).rejects.toThrow(/exceeds/);
+		expect(ended).toHaveBeenCalled();
+		expect(await p.readArchive("o", "/x", 10)).toBeNull();
+	});
+
+	it("inspect/listByLabel map names (no leading /), state, image, labels, mounts; 404 ⇒ null", async () => {
+		const info = {
+			Id: "cid",
+			Name: "/st-abc",
+			State: { Running: false },
+			Image: "sha256:i",
+			Config: { Labels: { a: "1" } },
+			Mounts: [{ Destination: "/home/developer/workspace" }],
+		};
+		const listContainers = vi.fn(async () => [
+			{
+				Id: "n1",
+				Names: ["/st-abc-new-1"],
+				State: "exited",
+				ImageID: "sha256:i",
+				Labels: { k: "v" },
+				Mounts: [],
+			},
+		]);
+		const p = withDocker({
+			getContainer: (ref: string) => ({
+				inspect: async () => {
+					if (ref === "gone") throw Object.assign(new Error("x"), { statusCode: 404 });
+					return info;
+				},
+			}),
+			listContainers,
+		});
+		expect(await p.inspect("cid")).toEqual({
+			id: "cid",
+			name: "st-abc",
+			running: false,
+			imageId: "sha256:i",
+			labels: { a: "1" },
+			mounts: ["/home/developer/workspace"],
+		});
+		expect(await p.inspect("gone")).toBeNull();
+		expect(await p.listByLabel("k", "v")).toEqual([
+			{
+				id: "n1",
+				name: "st-abc-new-1",
+				running: false,
+				imageId: "sha256:i",
+				labels: { k: "v" },
+				mounts: [],
+			},
+		]);
+		expect(listContainers).toHaveBeenCalledWith({ all: true, filters: { label: ["k=v"] } });
+	});
+
+	it("stop treats 304 (already stopped) as done; remove is never forced", async () => {
+		const remove = vi.fn(async () => undefined);
+		const p = withDocker({
+			getContainer: () => ({
+				stop: async () => {
+					throw Object.assign(new Error("already"), { statusCode: 304 });
+				},
+				remove,
+			}),
+		});
+		await expect(p.stop("n")).resolves.toBeUndefined();
+		await p.remove("n");
+		expect(remove).toHaveBeenCalledWith();
+	});
 });

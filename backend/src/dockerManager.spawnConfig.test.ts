@@ -893,3 +893,45 @@ describe("stale-name reclaim remove() race (#384)", () => {
 		expect(createSpy).toHaveBeenCalledTimes(1);
 	});
 });
+
+// ── 3.0d recreation: N is created with the spawn's own options ──────────
+
+describe("recreatePort().buildCreate (CONVERSATION.md §2.7.2 step 1)", () => {
+	const spec = {
+		name: "st-test-new-1",
+		imageId: "sha256:checked",
+		env: ["ST_INGEST_TOKEN=tok", "ST_BACKEND_PORT=3001"],
+		binds: ["/m:/etc/claude-code/managed-settings.d:ro", "/c:/etc/st-control:ro"],
+		labels: { "io.shared-terminal.recreate-attempt": "a1" },
+	};
+
+	it("same env, binds, limits, caps and network as a spawn; plus N's name, image ID, labels and capture", async () => {
+		const { dm, captured } = makeDmWithCreateCapture();
+		await dm.spawn("sess-1");
+		const spawned = captured.opts as {
+			Env: string[];
+			HostConfig: { Binds: string[] } & Record<string, unknown>;
+		} & Record<string, unknown>;
+		const built = (await dm.recreatePort().buildCreate("sess-1", spec)) as typeof spawned;
+		const { Env: sEnv, HostConfig: sHost, name: _n, Image: _i, Labels: _l, ...sRest } = spawned;
+		const { Env: bEnv, HostConfig: bHost, name, Image, Labels, ...bRest } = built;
+		expect(bRest).toEqual(sRest);
+		expect({ ...bHost, Binds: undefined }).toEqual({ ...sHost, Binds: undefined });
+		expect(bHost.Binds).toEqual([...sHost.Binds, ...spec.binds]);
+		expect(bEnv).toEqual(
+			expect.arrayContaining([...sEnv.filter((e) => !e.startsWith("NO_PROXY")), ...spec.env]),
+		);
+		expect({ name, Image, Labels }).toEqual({
+			name: spec.name,
+			Image: spec.imageId,
+			Labels: spec.labels,
+		});
+		expect(spawned.Labels).toBeUndefined();
+	});
+
+	it("a D1 failure reading the config fails the build (no spawn-style fallback to defaults)", async () => {
+		const { dm } = makeDmWithCreateCapture();
+		dbStubs.d1Query.mockRejectedValue(new Error("D1 down"));
+		await expect(dm.recreatePort().buildCreate("sess-1", spec)).rejects.toThrow("D1 down");
+	});
+});

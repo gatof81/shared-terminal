@@ -29,6 +29,9 @@ import { DockerManager } from "./dockerManager.js";
 import { IdleSweeper, listRunningSessionIds } from "./idleSweeper.js";
 import { logger } from "./logger.js";
 import { createPortDispatcher, validatePortProxyBaseDomain } from "./portDispatcher.js";
+import { conversationRecreatePort } from "./recreate/capturePort.js";
+import { d1RecreatePort } from "./recreate/d1.js";
+import { RecreationEngine } from "./recreate/engine.js";
 import { RecreateAttemptStore } from "./recreateAttempt.js";
 import { newRequestId, requestIdMiddleware, runWithRequestId } from "./requestContext.js";
 import { buildRouter } from "./routes.js";
@@ -143,6 +146,18 @@ docker.setConversationHooks({
 	},
 	onSessionDown: (sid) => conversation.onSessionDown(sid),
 	onSessionPurged: (sid) => conversation.onSessionPurged(sid),
+});
+// 3.0d — the recreation engine (CONVERSATION.md §2.7). No route uses it
+// yet (the admin endpoints come with the next PR); at boot it only runs
+// its pass over leftovers of RESOLVED attempts, which cannot exist before
+// those endpoints do. Unresolved attempts are never resolved here (D8).
+const recreation = new RecreationEngine({
+	workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION,
+	docker: docker.recreatePort(),
+	d1: d1RecreatePort,
+	attempts: recreateAttempts,
+	lock: sessionLifecycleLock,
+	capture: conversationRecreatePort(conversation),
 });
 logger.info(
 	CONVERSATION_ENABLED
@@ -514,6 +529,11 @@ async function start() {
 		logger.error(`[server] recreate attempt recovery failed: ${(err as Error).message}`);
 	}
 	await docker.reconcile();
+	try {
+		await recreation.bootPass();
+	} catch (err) {
+		logger.warn(`[server] recreation boot pass failed: ${(err as Error).message}`);
+	}
 	// Phase 3 — after docker.reconcile so session statuses are settled:
 	// hooks files ⇔ requested ∧ token, revocation markers win over D1,
 	// `gap backend_restart` per live conversation, one probe per session.
@@ -595,6 +615,7 @@ function shutdown() {
 	// path is about to close. Idempotent — `stop()` is safe to call
 	// even if `start()` never ran.
 	idleSweeper.stop();
+	recreation.stop();
 	// #355 — same reason: stop the bell sweeper so a sweep can't fire a
 	// docker exec / D1 query / push mid-teardown. Null when push disabled
 	// (never started). PR #417 review SHOULD-FIX.
