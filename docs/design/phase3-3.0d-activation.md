@@ -243,7 +243,12 @@ Notación: `O` es el contenedor viejo, `N` el nuevo y `H` el hash del token nuev
    - Se añaden las etiquetas `io.shared-terminal.session=<sid>` e
      `io.shared-terminal.recreate-of=<O>`.
    - Con `putArchive` se deja en la capa de `N` la marca `/tmp/.st-defer-skill-seed` (§5.4).
-   - `N` no se arranca. D1, el directorio gestionado y el workspace quedan intactos.
+   - Del directorio gestionado se borran `conversation.json` y `relay.enabled` si quedara alguno.
+     Es posible: un hash viejo en D1 pudo hacer que `reconcile` de 3.0b escribiera el archivo.
+     `O` no monta ese directorio, porque no tiene captura (precondición), así que el borrado no
+     afecta a nadie ni hay que deshacerlo. Sin él, el supervisor de `N` arrancaría el relay antes
+     del CAS (§5.8 acepta el archivo por compatibilidad).
+   - `N` no se arranca. D1 y el workspace quedan intactos.
 2. **Renombrar.** `O` → `st-<12>-old-<ts>`, y `N` → `st-<12>` (el nombre canónico).
 3. **Recomprobar `O` y arrancar `N`.**
    - **Primero**, `inspect(O)`: `State.Running` debe seguir en `false`. Si no (por ejemplo un
@@ -299,8 +304,8 @@ el anterior falló:
 1. `stop` y `remove` de `N` si existe.
 2. `O` vuelve a su nombre canónico si fue renombrado.
 
-D1, el directorio gestionado y el workspace no necesitan restauración: antes del paso 4 no se
-escribió nada en ellos. Lo único que `N` pudo escribir en el workspace son los `mkdir -p` que `O`
+D1 y el workspace no necesitan restauración: antes del paso 4 no se escribió nada en ellos. En el
+directorio gestionado solo se borraron archivos que ningún contenedor monta. Lo único que `N` pudo escribir en el workspace son los `mkdir -p` que `O`
 hace igual al arrancar (§5.4).
 
 Estado final: idéntico al previo. `O` está detenido, con D1 apuntándolo, y sin cambios en la
@@ -314,7 +319,9 @@ estado intermedio se repara sin recrear:
   - **inmediata:** `PATCH …/conversation {enabled:true}`. Si el token de `N` corresponde al hash
     de D1 (§6.1), reescribe la marca, espera al relay y escribe el archivo;
   - **automática:** el `reconcile` de 3.0b al arrancar el backend, ampliado con la marca y la
-    misma comprobación de correspondencia.
+    misma comprobación de correspondencia. La regla de 3.0b "archivo ⇔ requested ∧ hash" pasa a
+    "marca y archivo ⇔ requested ∧ correspondencia (§6.1)". Así ya no escribe un archivo por un
+    hash que no es el del contenedor.
 - **Las skills no se sembraron** (paso 6): se siembran en el siguiente arranque de `N`, como
   cualquier arranque.
 
