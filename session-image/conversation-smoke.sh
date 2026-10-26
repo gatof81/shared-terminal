@@ -1052,6 +1052,37 @@ IMG_SUM=$(docker run --rm --entrypoint sha256sum "$IMAGE" /opt/session-skills/de
 check "marker removed ⇒ seeding refreshes the managed skill from the image" [ "${AFTER%% *}" = "$IMG_SUM" ]
 check "… and leaves the user's own skill byte-identical" [ "$(cut -d' ' -f2 <<<"$AFTER")" = "$(cut -d' ' -f2 <<<"$BEFORE")" ]
 
+# 11e' — fail-closed when the control dir can't be examined (Work I1). A
+# root:root 0700 dir is what RecreateAttemptStore creates today: developer
+# can't search it, so neither boot nor exec may seed — with or without the
+# marker. The session still boots.
+reset_skills() {
+	docker run --rm -v "$WS":/w --entrypoint bash "$IMAGE" -c "
+		printf 'customised by the user\n' > /w/$SKILL_REL && chmod -R a+rwX /w/.st"
+}
+for variant in "0700:marker" "0700:none" "0000:marker"; do
+	mode="${variant%%:*}"
+	reset_skills
+	BEFORE=$(skill_sums)
+	ctl_clear
+	[ "${variant##*:}" = marker ] && ctl "touch /wr/.st-control/$SID/defer-skill-seed"
+	ctl "chown root:root /wr/.st-control/$SID && chmod $mode /wr/.st-control/$SID"
+	session no none "${CTL_MOUNT[@]}" || exit 1
+	check "[ctl $variant] boot did not seed; the session is up" \
+		bash -c '[ "$1" = "$2" ] && docker exec "$3" test -e /tmp/.st-ready' _ "$(skill_sums)" "$BEFORE" "$SESS"
+	docker exec "$SESS" /opt/st/seed-skills.sh >/dev/null 2>&1
+	rc=$?
+	check "[ctl $variant] exec of seed-skills.sh refuses with 4 and writes nothing" \
+		bash -c '[ "$1" = 4 ] && [ "$2" = "$3" ]' _ "$rc" "$(skill_sums)" "$BEFORE"
+	docker restart -t 2 "$SESS" >/dev/null
+	wait_until 300 bash -c '[ "$(docker logs "$1" 2>&1 | grep -c "container ready")" -ge 2 ]' _ "$SESS" ||
+		fail "[ctl $variant] restarted container never became ready"
+	check "[ctl $variant] second boot did not seed either" [ "$(skill_sums)" = "$BEFORE" ]
+	check "[ctl $variant] the boot logged the fail-closed skip" \
+		bash -c 'docker logs "$1" 2>&1 | grep -q "skill seeding skipped: /etc/st-control can.t be examined"' _ "$SESS"
+done
+ctl "chmod 755 /wr/.st-control/$SID"
+
 # 11f — compatibility: without the control mount the boot seeds as before.
 docker run --rm -v "$WS":/w --entrypoint bash "$IMAGE" -c "printf 'stale\n' > /w/$SKILL_REL"
 session no none || exit 1

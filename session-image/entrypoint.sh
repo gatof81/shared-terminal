@@ -424,15 +424,21 @@ fi
 # control marker /etc/st-control/defer-skill-seed exists (CONVERSATION.md
 # §2.7.3): during a recreation the new container must not write its image's
 # skills into the shared workspace before the commit — on any boot, so the
-# entrypoint never removes the marker (it is a read-only mount anyway). A
+# entrypoint never removes the marker (it is a read-only mount anyway), and
+# a control dir it can't examine counts as deferred (fail-closed). A
 # WARN, not a hard failure — a session missing the default skills still
 # works; the operator just loses the shared helpers.
-if [ -e /etc/st-control/defer-skill-seed ]; then
-        echo "[entrypoint] skill seeding deferred by /etc/st-control/defer-skill-seed" >&2
-elif ! /opt/st/seed-skills.sh; then
-        echo "[entrypoint] WARN: couldn't seed default skills into ~/.claude/skills; " \
-             "sessions will start without the operator-curated skills." >&2
-fi
+# The script decides fail-closed (see its header): 3 = deferred, 4 = the
+# control dir or marker can't be examined, so it doesn't seed either.
+seed_rc=0
+/opt/st/seed-skills.sh || seed_rc=$?
+case "$seed_rc" in
+0) ;;
+3) echo "[entrypoint] skill seeding deferred by /etc/st-control/defer-skill-seed" >&2 ;;
+4) echo "[entrypoint] WARN: skill seeding skipped: /etc/st-control can't be examined (fail-closed)" >&2 ;;
+*) echo "[entrypoint] WARN: couldn't seed default skills into ~/.claude/skills; " \
+        "sessions will start without the operator-curated skills." >&2 ;;
+esac
 
 # Persist SSH client state across container replacement.
 #

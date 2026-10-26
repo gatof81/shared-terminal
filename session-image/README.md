@@ -27,7 +27,7 @@ own it does nothing.
 | `/opt/st/hooks/session-start.sh` | `root:root 0755` | the one `command` hook (`SessionStart`, `async`); every other event is a `type: "http"` hook sent by the CLI itself |
 | `/opt/st/hooks/relay.py` | `root:root 0755` | the loopback relay every hook posts to (§2.6), launched by the entrypoint's supervisor only when capture is authorized (below) |
 | `/etc/st-control/` (3.0d) | empty, `root:root 0755` | the backend bind-mounts `<WORKSPACE_ROOT>/.st-control/<sessionId>/` here **read-only** (§2.1), holding at most `relay.enabled` and `defer-skill-seed`. Nothing in it is a CLI setting; the smoke test runs the real CLI with it empty, with markers, with settings-shaped JSON and unreadable, and checks the hook sequence is unchanged |
-| `/opt/st/seed-skills.sh` (3.0d) | `root:root 0755` | the default-skills copy (`/opt/session-skills` → `~/.claude/skills`), run by the entrypoint on every boot and by the backend after a recreation commits; refuses (exit 3) while `defer-skill-seed` exists |
+| `/opt/st/seed-skills.sh` (3.0d) | `root:root 0755` | the default-skills copy (`/opt/session-skills` → `~/.claude/skills`), run by the entrypoint on every boot and by the backend after a recreation commits; refuses while `defer-skill-seed` exists (exit 3) or when the control dir can't be examined (exit 4, fail-closed) |
 
 The image carries `LABEL io.shared-terminal.conversation-relay="2"`: the
 backend checks it on the image ID before writing a control marker or
@@ -91,7 +91,11 @@ recreating a container onto it (§2.7.2).
 - **Deferred skill seeding (3.0d).** While `/etc/st-control/defer-skill-seed`
   exists (the backend writes it during a recreation, §2.7.3), no boot — first
   or later — and no `seed-skills.sh` exec writes the image's skills into the
-  workspace. Without the marker, seeding is exactly what it was.
+  workspace. Fail-closed: if `/etc/st-control` (or the marker) can't be
+  examined — a `0700`/`000` dir the session user can't search, an I/O error —
+  it doesn't seed either (exit 4), and the session still boots. So the backend
+  must mount it `root:root 0755` (CONVERSATION.md §2.1). Without the marker,
+  seeding is exactly what it was.
 - **Debugging.** `ST_HOOKS_DEBUG=1` in the session env makes the relay write
   counters (never bodies, headers or tokens) to `/tmp/st-relay.log`.
 
