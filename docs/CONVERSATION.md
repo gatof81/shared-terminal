@@ -2,8 +2,11 @@
 
 Estado: **v1.5 (3.0a, rondas 1 a 3 de revisión Work; en 3.0c, transporte por relay local §2.6, aprobado
 por el responsable el 2026-10-23; decisiones de cierre de 3.0c sobre `emissionStopsAfterRestart` y el
-par `tool_failed`/`tool_end`, 2026-10-23), vinculante para los PRs 3.0b–3.4.** El
-razonamiento está en [docs/design/phase3-conversation-activity.md](./design/phase3-conversation-activity.md);
+par `tool_failed`/`tool_end`, 2026-10-23; en 3.0d, recreación administrativa y activación
+progresiva §2.7, diseño aprobado por Work y el responsable el 2026-10-26), vinculante para los PRs
+3.0b–3.4.** El razonamiento está en [docs/design/phase3-conversation-activity.md](./design/phase3-conversation-activity.md)
+y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
+`ac1024d`); si los dos documentos difieren, manda este;
 este archivo define lo que el código debe cumplir y lo que cada PR debe demostrar. Cambiar un
 contrato exige un PR de docs antes o junto con el código.
 
@@ -56,16 +59,23 @@ El código de Fase 3 *MUST NOT* leer ni escribir, en el camino caliente ni en te
 | --- | --- | --- |
 | Directorio managed vacío | `/etc/claude-code/managed-settings.d/` (imagen, root 0755) | Dockerfile |
 | Script de registro | `/opt/st/hooks/session-start.sh` (imagen, root 0755) | Dockerfile |
-| Relay local | `/opt/st/hooks/relay.py` (imagen, root 0755); proceso escuchando en `127.0.0.1:47613` | Dockerfile; lo arranca `entrypoint.sh` solo si la captura está configurada (§2.6) |
+| Relay local | `/opt/st/hooks/relay.py` (imagen, root 0755); proceso escuchando en `127.0.0.1:47613` | Dockerfile; lo lanza el supervisor de `entrypoint.sh` solo con la captura autorizada (§2.6) |
+| Directorio de control (3.0d) | host `<WORKSPACE_ROOT>/.st-control/<st_session_id>/` (root, fuera del workspace y de `.claude-managed`), montado **ro** en `/etc/st-control`; contiene a lo sumo `relay.enabled` y `defer-skill-seed` | backend: `relay.enabled` según §2.7.5, `defer-skill-seed` según §2.7.3. Ningún archivo de este directorio es un setting del CLI |
+| Siembra de skills | `/opt/st/seed-skills.sh` (imagen, root 0755), la misma que ejecuta el entrypoint | Dockerfile; la ejecuta el entrypoint en cada arranque salvo con `defer-skill-seed` (§2.7.3) |
 | Archivo de hooks por sesión | host `<WORKSPACE_ROOT>/.claude-managed/<st_session_id>/conversation.json`, montado **ro** en `/etc/claude-code/managed-settings.d/` | backend, según la tabla §2.4 |
-| Token de ingesta | env `ST_INGEST_TOKEN` del contenedor (32 bytes aleatorios, hex) | backend, en `spawn`/`startContainer`, solo si la sesión está *solicitada* (§2.4) |
+| Token de ingesta | env `ST_INGEST_TOKEN` del contenedor (32 bytes aleatorios, hex) | backend, **solo al crear el contenedor** (`spawn`, o la recreación de §2.7) y solo si la sesión está *solicitada* (§2.4). `startContainer` sobre un contenedor existente no lo cambia (§2.4.1) |
 | Estado solicitado | D1 `sessions.conversation_requested INTEGER NOT NULL DEFAULT 0` | API admin / allowlist / comando de emergencia |
-| Estado efectivo | derivado: `ingest_token_hash IS NOT NULL` ∧ archivo presente ∧ contenedor arrancado con el token (el relay arranca exactamente en ese caso) | backend (`reconcile` lo recalcula) |
+| Estado efectivo | derivado, §2.7.6: autorización completa (§2.7.5) ∧ `relay.enabled` ∧ `conversation.json` ∧ relay identificado por un probe en la misma petición | backend; `reconcile` converge marca y archivo hacia ese estado |
 
 Reglas:
 
 - El directorio host `.claude-managed/<sid>` *MUST* existir (vacío si no aplica) antes de
-  `container.start()`, igual que `.uploads/<sid>`; el bind es siempre `ro`.
+  `container.start()`, igual que `.uploads/<sid>`; el bind es siempre `ro`. Lo mismo el directorio
+  de control `.st-control/<sid>` en todo contenedor creado con captura por un backend 3.0d, con
+  imagen `io.shared-terminal.conversation-relay="2"`. Un contenedor sin ese montaje nunca es
+  efectivo con 3.0d (§2.7.6).
+- El directorio de control se borra con la sesión en el hard delete (`onSessionPurged`), no entra
+  en el backup, y `reconcile` lo regenera desde D1.
 - La imagen *MUST* comportarse de forma idéntica a la actual cuando el directorio montado está
   vacío (smoke test: `claude -p hola` no produce ninguna petición saliente a `st-backend` ni al
   puerto del relay, y no hay ningún proceso relay).
@@ -173,24 +183,30 @@ estados y una tabla de transiciones. *MUST* implementarse exactamente así y cub
 
 | Acción | Contenedor | Token en env | `ingest_token_hash` | `conversation.json` | Resultado / respuesta |
 | --- | --- | --- | --- | --- | --- |
-| Habilitar (`requested=1`) | parado | se generará en `start` | NULL hasta `start` | se escribe en `start` | `{enabled:true, effective:false, effectiveAfterRestart:true}` |
-| Habilitar | corriendo **sin** token | ausente (inmutable) | NULL | **no se escribe** (hooks sin token solo generarían tráfico rechazado) | `{enabled:true, effective:false, effectiveAfterRestart:true}` |
-| Habilitar | corriendo **con** token (fue deshabilitada y rehabilitada sin reinicio) | presente | se **restaura** el hash guardado en `ingest_token_hash_suspended` | se reescribe | `{enabled:true, effective:true}`; el CLI recarga o aplica al siguiente start |
-| Deshabilitar (`requested=0`) | corriendo con token | presente (inmutable, inofensivo) | se mueve a `ingest_token_hash_suspended`, queda NULL ⇒ **la ingesta rechaza desde ya** | se borra ⇒ el CLI deja de emitir al recargar o en el siguiente start | `{enabled:false, effective:false, emissionStopsAfterRestart:true}` (decisión del responsable, ver abajo) |
-| Deshabilitar | parado | — | NULL | se borra | `{enabled:false, effective:false}` |
-| Emergencia `npm run conversation:disable -- <sid>\|--all` | cualquiera | — | **NULL** en D1 y `conversation_requested=0` (persistente: el siguiente `start` no regenera nada) | borrado | orden estricto §2.5: marca de revocación → D1 → archivos; confirma éxito solo al terminar los tres pasos; falla (≠ 0) si D1 no responde, dejando la marca puesta |
-| `spawn` (contenedor **creado**: sesión nueva, o `start` sin contenedor existente — §2.4.1) | — | nuevo si `requested=1` ∧ `CONVERSATION_ENABLED` | nuevo hash o NULL | escrito si `requested=1` ∧ `CONVERSATION_ENABLED`, si no borrado | — |
-| `start` de un contenedor **existente** (§2.4.1) | — | el que ya tenía (o ninguno) | sin cambio | sin cambio | — |
-| `reconcile` (arranque del backend) | cada sesión `running` | — | — | archivo presente ⇔ `requested=1` ∧ hash no NULL ∧ `CONVERSATION_ENABLED`; se corrigen desajustes (borrar huérfanos; nunca crear sin token) | log por corrección |
+| Habilitar (`requested=1`) | **no existe** (`container_id` NULL o inspect 404) | se generará en el siguiente spawn | sin cambio hasta el spawn | se escribe en el spawn | `effective:false`; `effectiveAfterRestart` según §2.7.6, rama sin contenedor: `true` solo con `requested` ∧ flag ∧ sin revocación ∧ imagen actual `="2"` |
+| Habilitar | existe **sin** token (detenido o en marcha) | ausente (inmutable) | sin cambio | **no se escribe**, ni `relay.enabled` | `{effective:false, effectiveAfterRestart:false, requiresRecreate:true}`, `pendingReasons: [container-without-capture]`. Solo lo resuelve la recreación (§2.7) |
+| Habilitar | existe con token y `ingest_token_hash` ≠ huella del token (§2.7.6) | presente | **sin cambio**: la huella nunca se copia a D1 | **no se escribe**; marca y archivo residuales se retiran | `{effective:false, effectiveAfterRestart:false, requiresRecreate:true}`, `token-mismatch` |
+| Habilitar | en marcha, con token y `ingest_token_hash_suspended` = huella (deshabilitada por API sin recrear) | presente | se **restaura** desde `ingest_token_hash_suspended` | procedimiento de §2.7.5: `relay.enabled` → relay identificado → archivo | `effective:true` solo si el relay se identificó; si no, `relay-unavailable` sin archivo |
+| Habilitar | en marcha, con token y correspondencia, sin marca o sin archivo | presente | sin cambio | procedimiento de §2.7.5 | ídem |
+| Habilitar | detenido, con token y correspondencia (o suspendido = huella) | presente | se restaura si estaba suspendido | **no se escribe nada** con el contenedor detenido | `effectiveAfterRestart:true` solo si marca y archivo ya están (§2.7.6); si no, `false` con `requiresRecreate:false` y `pendingReasons: [stopped, hooks-file-missing]`: se arranca y se repite el `PATCH` |
+| Deshabilitar (`requested=0`) | corriendo con token | presente (inmutable, inofensivo) | se mueve a `ingest_token_hash_suspended`, queda NULL ⇒ **la ingesta rechaza desde ya** | se borra, y después `relay.enabled` ⇒ el CLI deja de emitir al recargar o en el siguiente start | `{enabled:false, effective:false, emissionStopsAfterRestart:true}` (decisión del responsable, ver abajo) |
+| Deshabilitar | parado | — | NULL | se borran archivo y marca | `{enabled:false, effective:false}` |
+| Emergencia `npm run conversation:disable -- <sid>\|--all` | cualquiera | — | **NULL** en D1 y `conversation_requested=0` (persistente: el siguiente `start` no regenera nada) | borrados, archivo y después `relay.enabled` | orden estricto §2.5: marca de revocación → D1 → archivos; confirma éxito solo al terminar los tres pasos; falla (≠ 0) si D1 no responde, dejando la marca puesta |
+| Recrear (admin, `POST /api/admin/sessions/:id/recreate`) | **detenido**, sin captura | nuevo, en `N` | cambia **en la misma sentencia** que `container_id` (§2.7.2, paso 4) | tras el CAS, procedimiento de §2.7.5 | §2.7 |
+| `spawn` (contenedor **creado**: sesión nueva, o `start` sin contenedor existente — §2.4.1) | — | nuevo si `requested=1` ∧ `CONVERSATION_ENABLED` ∧ sin revocación ∧ imagen `="2"` | nuevo hash o NULL | si hay token: hash → `relay.enabled` → archivo antes de crear el contenedor; si no, ambos borrados | — |
+| `start` de un contenedor **existente** (§2.4.1) | — | el que ya tenía (o ninguno) | sin cambio | sin cambio: `start` no escribe ni repara marcas ni archivos | — |
+| `reconcile` (arranque del backend) | cada sesión | — | — | marca y archivo presentes ⇔ autorización completa (§2.7.5) con el contenedor en marcha; se retiran los residuales (§2.7.5) y se resuelven las recreaciones interrumpidas (§2.7.4) | log por corrección |
 
 Invariantes:
 
 - **La ingesta deja de aceptar antes de que el flip se confirme al operador**, tanto por la API
   (invalidación pre/post en proceso) como por el comando de emergencia (marca de revocación §2.5),
   independientemente de cuándo deje de emitir el CLI.
-- Un archivo `conversation.json` *MUST NOT* existir si `ingest_token_hash IS NULL` para esa sesión.
-- "Efectivo" se informa en `GET /api/sessions/:id/conversations` como `capture: { requested,
-  effective, effectiveAfterRestart }`, para que la UI no prometa captura que no ocurre.
+- `conversation.json` y `relay.enabled` *MUST NOT* existir sin la autorización completa de
+  §2.7.5, y `conversation.json` *MUST NOT* escribirse antes de que el relay se haya identificado.
+  Esto sustituye a la regla de 3.0b "archivo ⇒ hash no NULL".
+- "Efectivo" se informa en `GET /api/sessions/:id/conversations` y en el `PATCH` como el bloque
+  `capture` de §2.7.6, para que la UI no prometa captura que no ocurre.
 - Deshabilitar sin reiniciar deja el relay corriendo (su arranque depende del env, que es
   inmutable): queda inerte, porque el CLI deja de emitir al recargar y el backend rechaza lo que
   llegue. Desaparece cuando el contenedor se recrea (§2.4.1), que ya no inyecta el token; un
@@ -218,15 +234,16 @@ Consecuencias, sin cambio de ciclo de vida en 3.0c:
 - Una sesión que **ya captura** sigue capturando tras stop + start (mismo token, el hash sobrevive
   a `onSessionDown`, el montaje sigue), y una que no capturaba sigue sin capturar.
 - "Habilitar" sobre un contenedor existente sin token **no** se vuelve efectivo con stop + start:
-  `effectiveAfterRestart: true` solo es cierto si el siguiente arranque crea el contenedor.
+  `effectiveAfterRestart` sigue las reglas de §2.7.6.
 - Una imagen nueva (o el rollback de imagen) llega a una sesión solo cuando su contenedor se recrea.
 - Procedimiento de recreación que conserva workspace y configuración: [DEPLOYMENT.md → Recrear el
   contenedor de una sesión](./DEPLOYMENT.md#recreating-a-session-container). Nunca hard delete.
 
-**Requisito de entrada de 3.0d:** la activación debe resolver este caso (que habilitar llegue a ser
-efectivo, y que la respuesta no prometa un efecto que el siguiente `start` no produce). Cómo
-(recrear en `start` cuando cambia la captura, un endpoint de recreación, u otra vía) amplía el ciclo
-de vida y es decisión del responsable; 3.0c no lo cambia.
+**Resuelto en 3.0d:** `start` sigue sin cambiar y no recrea nunca. La vía es la **recreación
+administrativa explícita** de §2.7 (decisión D1 del responsable). Los demás casos de habilitar
+responden según §2.7.6, que nunca promete un efecto que el siguiente `start` no produce. El
+procedimiento manual de DEPLOYMENT.md (`docker rm` + `start`) queda solo como emergencia del
+operador: pierde la identidad git, los dotfiles y todo lo que haya en la capa (§2.7.1).
 
 ### 2.5 Revocación entre procesos (comando de emergencia)
 
@@ -243,7 +260,7 @@ autorización de ingesta tiene **dos** fuentes y la revocación es un archivo qu
   rename a t=10 ms, evento aceptado por cache a t=20 ms). Coste: dos `stat` por evento aceptado
   (microsegundos; a R1 máximo son 100 `stat`/s por sesión). Marca presente ⇒ 204
   `ingest_rejected{reason=revoked}`, entrada de cache de tokens eliminada, y el archivo
-  `conversation.json` de esa sesión se borra si existe (el receptor converge aunque el comando se
+  `conversation.json` de esa sesión se borra si existe, y después `relay.enabled` (3.0d) (el receptor converge aunque el comando se
   haya interrumpido antes del paso 3). La cache de tokens tiene además TTL de 60 s.
 - **Eventos ya autorizados**: una autorización que terminó antes del `rename` pudo dejar un evento
   en la cola por conversación (acotada por L6). Esos eventos **se persisten** (fueron emitidos
@@ -253,8 +270,8 @@ autorización de ingesta tiene **dos** fuentes y la revocación es un archivo qu
   sobre aceptar, no sobre persistir.
 - **Comando** `conversation:disable`, orden estricto por sesión: (1) escribir la marca y `fsync`
   del directorio; (2) D1: `conversation_requested=0`, `ingest_token_hash=NULL`,
-  `ingest_token_hash_suspended=NULL`; (3) borrar `conversation.json`. Imprime `revoked <sid>` solo
-  tras (3). Si (2) falla: sale ≠ 0, deja la marca puesta (el corte sigue vigente) y lo dice; no
+  `ingest_token_hash_suspended=NULL`; (3) borrar `conversation.json` y después `relay.enabled`
+  (3.0d). Imprime `revoked <sid>` solo tras (3). Si (2) falla: sale ≠ 0, deja la marca puesta (el corte sigue vigente) y lo dice; no
   pasa a (3).
 - **API** (`PATCH … {enabled:false}`): mismos tres pasos, más la invalidación pre/post en proceso.
   `{enabled:true}` es la única operación que **quita** la marca por sesión (tras actualizar D1); la
@@ -285,9 +302,17 @@ contenedor con captura. Recibe los hooks del CLI y del script en loopback y los 
 
 **Arranque y vida**
 
-- `entrypoint.sh` lo arranca **solo** si `ST_INGEST_TOKEN` no está vacío **y**
-  `/etc/claude-code/managed-settings.d/conversation.json` existe al arrancar el contenedor (estado
-  efectivo, §2.1). En otro caso no hay proceso, ni puerto abierto, ni tráfico.
+- **3.0d (imagen `conversation-relay="2"`):** el supervisor de `entrypoint.sh` arranca si
+  `ST_INGEST_TOKEN` no está vacío, pero **no lanza el relay** mientras no exista
+  `/etc/st-control/relay.enabled` o `/etc/claude-code/managed-settings.d/conversation.json`. Este
+  último solo cuenta como compatibilidad con contenedores creados por el backend de 3.0c.
+  - Comprueba cada 0,5 s con un `[ -e ]` de bash, sin procesos nuevos.
+  - Una vez lanzado, que la marca desaparezca no lo detiene: queda inerte (§2.4).
+  - Sin token no hay supervisor, ni proceso, ni puerto abierto, ni tráfico.
+  - La condición del responsable "arranca solo cuando la captura es efectiva" se cumple porque la
+    marca solo existe con la autorización completa (§2.7.5).
+- (3.0c, imagen sin la etiqueta) lo arranca solo si `ST_INGEST_TOKEN` no está vacío y
+  `conversation.json` existe al arrancar el contenedor.
 - Lo vigila un bucle de `bash` del entrypoint: si el relay termina, se relanza tras 1 s, duplicando
   la espera hasta 60 s mientras siga cayendo antes de 60 s de vida (un puerto ocupado no consume CPU
   en bucle). Cada relanzamiento informa `X-ST-Relay-Restarted` (§3.2.1). Ambos mueren con el
@@ -302,8 +327,11 @@ contenedor con captura. Recibe los hooks del CLI y del script en loopback y los 
 - *MUST* escuchar solo en `127.0.0.1:47613`. Si el puerto está ocupado, no arranca (bucle con
   espera; captura inactiva en ese contenedor). Un programa del usuario no puede usar ese puerto
   mientras el relay lo tiene.
-- Solo `POST /ingest/claude/hook` (ruta exacta, sin query) con `Content-Length` ≤ L5. Cualquier otro
-  método o ruta ⇒ 404 vacío y nada se reenvía. Sin `Content-Length`, o mayor que L5 ⇒ 204 sin leer el
+- Solo `POST /ingest/claude/hook` (ruta exacta, sin query) con `Content-Length` ≤ L5, y
+  `GET /st-relay/status` (3.0d, identificación §2.7.6).
+  - La identificación responde `204` con `X-ST-Relay: 1` y `X-ST-Relay-Generation: <n>`. No lleva
+    cuerpo, ni tokens, ni contadores de contenido, y no reenvía nada.
+  - Cualquier otro método o ruta ⇒ 404 vacío y nada se reenvía. Sin `Content-Length`, o mayor que L5 ⇒ 204 sin leer el
   cuerpo, conexión cerrada, contado como perdido.
 - Respuesta al CLI: **siempre 204 sin cuerpo**, enviada tras leer el cuerpo y encolarlo (o
   descartarlo), nunca después de hablar con el backend. Lo que responda el backend no llega jamás al
@@ -390,6 +418,328 @@ evento que el CLI nunca emitió.
   proxy y fallen; es configuración del propio usuario y solo afecta a su captura.
 
 ---
+
+### 2.7 Recreación administrativa y activación (3.0d)
+
+Diseño y razonamiento: [phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md), v5
+(`ac1024d`). Decisiones del responsable, con las recomendaciones de Work:
+
+- **D1:** recreación administrativa explícita; `start` no cambia.
+- **D2:** preservación estricta de HOME y de la capa.
+- **D3:** solo se reconstruye lo verificable como exacto.
+- **D4:** sin bypass destructivo.
+- **D5:** nunca una sesión en marcha.
+- **D6:** ID inmutable de imagen.
+- **D7:** probe fresco del relay, sin caché positiva.
+
+Notación: `O` es el contenedor existente, `N` el nuevo y `H` el hash del token de `N`.
+
+#### 2.7.1 Qué se conserva y qué bloquea
+
+Se conservan, porque son el mismo directorio o están fuera del contenedor:
+
+- el workspace, incluidos el estado y los transcripts del CLI (`--resume`), `~/.npm-global`, VS
+  Code CLI, `gh` y `~/.ssh` vía symlinks;
+- los uploads;
+- la fila de sesión y `session_configs`, con secretos, puertos, caps y hooks;
+- el historial de conversaciones.
+
+Las pestañas tmux ya se pierden con el stop.
+
+**Capa del contenedor:** se clasifica `container.changes()` de `O`, detenido.
+
+- **Se permite**, si coincide **exactamente** en tipo y destino, lo que produce el entrypoint:
+  - los symlinks `~/.npm-global`, `~/.vscode-cli`, `~/.config/gh`, `~/.claude`, `~/.claude.json` y
+    `~/.ssh` a su destino bajo el workspace;
+  - `~/.config`;
+  - `/tmp/.st-ready`;
+  - `/tmp/st-relay.log`;
+  - `/tmp/tmux-<uid>/`.
+- **`~/.gitconfig`:** se permite solo si contiene exactamente `user.name` y `user.email`, iguales a
+  `session_configs`. Se lee con `getArchive`, ≤ 4 KiB. Tras la recreación se reaplica
+  gitIdentity.
+- **Todo lo demás bloquea** con un código por categoría y su recuento, **nunca rutas**:
+  - `layer-home`, que incluye `~/.bash_history`;
+  - `layer-gitconfig-modified`;
+  - `layer-dotfiles`: toda sesión con dotfiles configurados;
+  - `layer-tmp`;
+  - `layer-system`.
+
+**Workspace** (`lstat` en el host, sin seguir symlinks):
+
+- `workspace/.npm-global` debe ser un directorio real (`workspace-cli-missing`);
+- no debe quedar layout heredado `workspace/.claude` (`workspace-legacy-layout`).
+
+**Skills gestionadas.** Para cada archivo de `/opt/session-skills/**` de la imagen de `N` se
+comparan tres versiones:
+
+- **W:** el workspace, leído con el opener de `workspaceFiles.ts` y la prueba `/proc/self/fd`;
+- **I_O:** la imagen de `O`, con `getArchive` sobre `O` detenido;
+- **I_N:** la imagen de `N`, con `getArchive` sobre `N` creado y sin arrancar.
+
+Resultados:
+
+- W ausente, W = I_N o W = I_O ⇒ se permite;
+- W distinta de I_O y de I_N ⇒ `managed-skills-customized`;
+- W existe en una ruta que no está en la imagen de `O` ⇒ `managed-skills-collision`.
+
+Los archivos que no son gestionados nunca se tocan. El falso positivo tras `sync-skills.sh` se
+acepta: bloquea.
+
+#### 2.7.2 Endpoint, precondiciones y secuencia
+
+- **`GET /api/admin/sessions/:id/recreate`**: preflight sin efectos. Devuelve
+  `{ recreatable, blockers[], imageId, currentImageId, captureAfter }`:
+  - evalúa todas las precondiciones posibles sin crear nada (las skills, contra I_O);
+  - `blockers` lleva códigos y recuentos.
+- **`POST /api/admin/sessions/:id/recreate {expectImageId}`**:
+  - requiere `requireAuth` + `requireAdmin` + `adminActionIp`;
+  - con un owner ajeno, la fila `operate` en `session_observe_log` va **antes** de cualquier
+    efecto y es fail-closed, como en #429;
+  - la primera precondición que falla responde 409 con su código.
+
+**Precondiciones**, en este orden:
+
+1. **Lock por sesión**, compartido con `start`, `stop`, `kill` y `delete` (soft y hard, incluida la
+   purga).
+   - `recreate` no espera: si está ocupado, `busy`.
+   - Las demás esperan ≤ `T_rec` + `T_rb` = 6 min (§2.7.4) y después responden `busy` sin efectos.
+2. La sesión existe, no está `failed` ni `terminated`, y tiene `container_id` (`no-container`).
+3. `O` existe y está detenido (`container-missing`, `running`).
+4. `inspect(SESSION_IMAGE).Id` = `expectImageId` (`image-changed`), y ese ID lleva
+   `io.shared-terminal.conversation-relay="2"` (`image-without-relay`). Desde aquí todo usa ese ID.
+5. `CONVERSATION_ENABLED`, `conversation_requested=1` y sin revocación (`flag-off`,
+   `not-requested`, `revoked`).
+6. La capa sin pérdidas (`layer-*`).
+7. El workspace (`workspace-cli-missing`, `workspace-legacy-layout`).
+8. Las skills (`managed-skills-customized`, `managed-skills-collision`).
+
+Si las marcas fueran incompatibles con el CLI (§2.7.5), responde `control-marker-incompatible`.
+
+**Secuencia:**
+
+1. **Preparar sin efectos visibles.**
+   - Se genera el token y `H`.
+   - Se escribe `defer-skill-seed` y se borran `relay.enabled` y `conversation.json` residuales.
+     `O` no monta ninguno de los dos directorios.
+   - Se crea `N`:
+     - con el nombre `st-<12>-new-<ts>` e `Image: <imageId>`;
+     - con el env, binds (gestionado y control, ro), caps y red de siempre;
+     - con las etiquetas `io.shared-terminal.session=<sid>` e `io.shared-terminal.recreate-of=<O>`.
+   - Se repite la precondición 8 contra I_N.
+   - `N` no se arranca.
+2. **Renombrar.** `O` → `st-<12>-old-<ts>` y `N` → `st-<12>`.
+3. **Recomprobar y arrancar.**
+   - `inspect(O)` debe seguir detenido; si no, rollback sin arrancar `N`.
+   - `start(N)`, readiness ≤ 60 s y `N` en marcha.
+   - Con `defer-skill-seed`, el entrypoint no siembra skills.
+   - Sin `relay.enabled`, el supervisor no lanza el relay.
+4. **Confirmar (punto de no retorno), en una sola sentencia:**
+
+   ```sql
+   UPDATE sessions
+   SET container_id = :N, ingest_token_hash = :H, ingest_token_hash_suspended = NULL
+   WHERE session_id = :sid AND container_id = :O AND conversation_requested = 1
+   ```
+
+   - 0 filas o error ⇒ rollback.
+   - Un timeout ambiguo se resuelve releyendo la fila; si la relectura falla, §2.7.4.
+   - Con `T_rec` vencido no se ejecuta.
+   - **`container_id` y el hash autorizado cambian juntos.**
+5. **Autorizar:** el procedimiento de §2.7.5 sobre `N`. Si el relay no se identifica, se queda en
+   `relay-unavailable`, sin archivo.
+6. **Completar**, convergencia sobre `N`:
+   1. borrar `defer-skill-seed`;
+   2. `seed-skills.sh` por `execCapture`;
+   3. mapeos de puertos;
+   4. `status=running`;
+   5. gitIdentity, si aplica;
+   6. postStart;
+   7. `cliVersion` (aviso `cli-below-minimum` si < 2.1.308);
+   8. `remove(O)`.
+
+   Un fallo se registra y no deshace nada.
+
+**D1 apunta siempre a un contenedor que existe:**
+
+- antes del paso 4, a `O` (renombrado o no); después, a `N`;
+- `O` se borra solo después del paso 4;
+- las lecturas concurrentes (attach, exec, git, files) resuelven por `container_id` y ven una
+  sesión detenida hasta el paso 6;
+- el dispatcher de puertos solo encamina sesiones `running`.
+
+#### 2.7.3 Workspace compartido, rollback y estado incierto
+
+- **Un solo escritor:** `O` está detenido desde la precondición 3 hasta su borrado, el lock
+  excluye otras operaciones, y el paso 3 vuelve a comprobar `O`.
+- **Antes del paso 4, `N` no escribe en el workspace nada que `O` no escribiría igual al
+  arrancar**, en cualquier número de arranques de `N`. Concretamente:
+  - solo los `mkdir -p` y `chmod` idempotentes del entrypoint;
+  - la siembra de skills queda diferida mientras exista `/etc/st-control/defer-skill-seed`;
+  - las siembras de `.npm-global` y la migración del layout las impide la precondición 7.
+- **`defer-skill-seed`:**
+  - el entrypoint no la borra nunca y el usuario no puede tocarla, porque el montaje es ro;
+  - la retira solo el backend: en el paso 6.1, en el rollback (con la eliminación de `N`
+    confirmada), o en la convergencia de §2.7.4, incluso con `N` detenido.
+- **Rollback** (fallo en los pasos 1–4):
+  1. `stop` y `remove(N)`;
+  2. confirmar `inspect(N)` 404;
+  3. `O` a su nombre canónico;
+  4. **solo con el paso 2 confirmado**, retirar `defer-skill-seed`.
+
+  - Estado final: el previo, con D1 en `O`, sin cambios en captura ni skills. Responde 500
+    `recreate-failed {step}`.
+  - D1 y el workspace no necesitan restauración.
+- **Estado incierto:**
+  - **Cuándo:** `remove` falla o queda ambiguo, o `N` sigue presente.
+  - **Efectos:** la marca se conserva, la sesión queda "recreación interrumpida" y la respuesta
+    lleva `{unresolved: true}`.
+  - **Rename de `O`:** si `N` todavía tiene el nombre canónico, el rename de `O` falla. Es el
+    resultado esperado del estado incierto y no un error inesperado: lo completa §2.7.4.
+  - **Resolución:** la marca se retira solo cuando §2.7.4 resuelve con D1 y Docker.
+- **Después del paso 4 no hay reversión**, ni de `O` ni del workspace. Todo lo que quede a medias
+  converge sobre `N` sin recrear:
+  - marca, archivo o relay se reparan con `PATCH {enabled:true}` o `reconcile` (§2.7.5);
+  - `defer-skill-seed` residual la retira `reconcile`: siembra por exec si `N` está en marcha, o
+    en su siguiente arranque;
+  - si la siembra falla, siembra el siguiente arranque.
+
+#### 2.7.4 Topes de tiempo y recreación interrumpida
+
+- **`T_rec` = 5 min**, desde el lock hasta el final del paso 6, **incluidos todos los pasos
+  posteriores al CAS**. Cada llamada a Docker o `execCapture` (probe, siembra, gitIdentity) corre
+  contra el presupuesto que queda. postStart corre contra `min(lo que queda de T_rec, el tope
+  propio de streamExec)`.
+  - Vencido antes del paso 4: rollback.
+  - Vencido después: se abandona el resto del paso 6, se registra qué faltó, **se libera el lock**
+    y lo pendiente converge (§2.7.3). Un probe cortado cuenta como `relay-unavailable`, así que se
+    retira la marca sin escribir el archivo.
+
+  Así ninguna operación espera más de `T_rec` + `T_rb`.
+- **`T_rb` = 60 s** para el rollback. Si vence:
+  - se libera el lock y la sesión queda "recreación interrumpida" en memoria;
+  - la siguiente operación de ciclo de vida resuelve primero con la tabla de abajo, y si Docker no
+    responde, contesta 503 `docker-unavailable` sin tocar D1 ni el workspace;
+  - un `DELETE ?hard=true` nunca purga un workspace sobre el que `N` pudiera estar corriendo.
+- **`reconcile`, al arrancar el backend**, revisa:
+  - `docker ps -a --filter label=io.shared-terminal.recreate-of`;
+  - los nombres que encajan **exactamente** con `^st-[0-9a-f]{12}-old-[0-9]+$` (o `-new-`) y cuyo
+    prefijo es una sesión de D1.
+
+  Los sufijos `-new-<ts>` y `-old-<ts>` están **reservados**, y un nombre que no encaja no se toca.
+  Con D1 decide:
+
+| D1 `container_id` | Encontrado | Acción |
+| --- | --- | --- |
+| `= O` | `N` existe | `stop` + `remove(N)` confirmado (404); `O` a su nombre; entonces se retira `defer-skill-seed`. Sin confirmación, la marca se conserva y se reintenta |
+| `= O` | `N` no existe (404) y la marca presente | Se retira la marca; `O` a su nombre si hace falta |
+| `= N` | `O` existe | `remove(O)`; estado según `N`; postStart no; marca y archivo según §2.7.5; `defer-skill-seed` residual según §2.7.3 |
+| ni `O` ni `N` | — | Nada; log y `recreateOrphans` en stats |
+
+Ninguna acción borra un contenedor al que apunte D1.
+
+#### 2.7.5 Autorización del relay y marcas
+
+`relay.enabled` y `conversation.json` se escriben **solo** con la **autorización completa**:
+
+1. `CONVERSATION_ENABLED`;
+2. `conversation_requested = 1`;
+3. sin marca de revocación, por sesión ni global;
+4. el contenedor de D1 existe, está en marcha y tiene el montaje gestionado y el de control;
+5. su imagen lleva `conversation-relay="2"`;
+6. correspondencia token ↔ hash (§2.7.6).
+
+**Orden:** autorización → `relay.enabled` → recomprobación de 1–3 → probe de identificación
+(≤ 5 s) → `conversation.json` → recomprobación de 1–3.
+
+- Si falla una recomprobación, se borran archivo y marca, en ese orden.
+- Si falla el probe, se borra la marca (`relay-unavailable`).
+
+**Lugares que lo aplican:** el paso 5 de §2.7.2, `PATCH {enabled:true}` con el contenedor en
+marcha y `reconcile`. El spawn aplica las condiciones 1–3 y 5 antes de crear el contenedor y
+escribe hash → marca → archivo. El relay arranca en el boot.
+
+**Marcas residuales:** sin autorización completa se retiran, y nunca cuentan para `effective`.
+
+| Camino | Retirada |
+| --- | --- |
+| Disable API y emergencia | Archivo y después marca (§2.5) |
+| Receptor que observa una revocación | Archivo y después marca (§2.5) |
+| Flag apagado | `reconcile` borra todos los archivos y todas las marcas |
+| `token-mismatch` o contenedor sin captura | `PATCH` y `reconcile` las borran y nunca las escriben |
+
+Un contenedor que arranca con una marca residual lanza un relay inocuo: el backend rechaza todo
+y, sin archivo, ningún hook le escribe.
+
+**Compatibilidad con el CLI**, validación obligatoria en el smoke con el CLI 2.1.308 y con el del
+workspace del piloto. Con `/etc/st-control` vacío, con marcas, ilegible, y con un `.json`
+inválido dentro:
+
+- la secuencia de hooks y los eventos son idénticos;
+- no aparece ningún aviso de settings.
+
+Si falla, la activación queda bloqueada (`control-marker-incompatible` en `PATCH {enabled:true}`
+y en `POST …/recreate`) y 3.0d no se publica hasta revisar otra ubicación. No hay respaldo
+silencioso.
+
+#### 2.7.6 Semántica de `capture`
+
+```
+capture: {
+  requested, effective, effectiveAfterRestart, requiresRecreate,
+  pendingReasons: [],   // flag-off | not-requested | revoked | image-without-relay | stopped |
+                        // container-without-capture | token-mismatch | hooks-file-missing |
+                        // relay-unavailable | control-marker-incompatible |
+                        // cli-below-minimum (aviso)
+  checkedAt             // hora del probe del relay hecho en esta petición
+}
+```
+
+**Correspondencia token ↔ hash.** La huella del contenedor es `sha256(ST_INGEST_TOKEN)` del
+`Config.Env` del `inspect` del contenedor de D1. Se calcula en memoria y se compara en tiempo
+constante. El token nunca se registra, devuelve ni guarda.
+
+| D1 | Estado |
+| --- | --- |
+| `ingest_token_hash` = huella | correspondencia |
+| hash NULL y `…_suspended` = huella | suspendido; `PATCH {enabled:true}` lo restaura |
+| distinto, o ambos NULL tras una emergencia sin marca | `token-mismatch` |
+| contenedor sin token | `container-without-capture` |
+
+Un `token-mismatch` **nunca** se repara copiando la huella a D1: solo lo resuelve un contenedor
+nuevo.
+
+**Disponibilidad (D7):** probe fresco, sin caché positiva.
+
+- Cada respuesta `effective:true` exige un probe `GET /st-relay/status` por `execCapture` (≤ 2 s)
+  **hecho durante esa petición**, que identifica al relay (`X-ST-Relay: 1`). No basta con que el
+  puerto acepte.
+- Single-flight: las peticiones concurrentes para el mismo contenedor comparten el probe en vuelo
+  y nunca reutilizan uno terminado.
+- Si cualquier otra condición es falsa, se responde `false` sin hacer el probe.
+- `checkedAt` es la hora de ese probe.
+- Garantía: el relay estaba identificado durante la petición. No promete nada sobre después.
+
+**Reglas:**
+
+- **`effective = true`** ⇔ autorización completa ∧ `relay.enabled` ∧ `conversation.json` ∧ probe
+  positivo. Si no, `false` con su motivo: relay caído o puerto ocupado ⇒ `relay-unavailable`;
+  falta configuración ⇒ `hooks-file-missing`; `token-mismatch`.
+- **`effectiveAfterRestart`** es lo que deja un `start` **sin reparar nada**. Es `true` solo en
+  una de estas ramas, cada una con todas sus condiciones:
+  - **Sin contenedor:** `requested` ∧ `CONVERSATION_ENABLED` ∧ sin revocación ∧ imagen actual
+    `="2"`.
+  - **Contenedor detenido:** `requested` ∧ flag ∧ sin revocación ∧ los dos montajes ∧
+    correspondencia ∧ su imagen `="2"` ∧ `relay.enabled` ∧ `conversation.json` presentes.
+
+  En cualquier otro caso es `false`. En particular, un contenedor detenido con correspondencia
+  pero sin marca o sin archivo da `false`.
+- **`requiresRecreate = true`** solo con `container-without-capture`, `token-mismatch` o un
+  contenedor sin el montaje de control: casos que solo resuelve un contenedor nuevo. No promete
+  que el preflight vaya a pasar. Con correspondencia y solo configuración ausente es `false`, y se
+  resuelve con start + `PATCH`, sin recrear.
+- **`PATCH {enabled:true}`** aplica §2.7.5 con el contenedor en marcha. Detenido, no escribe nada
+  y responde el cálculo anterior. Nunca escribe sin autorización completa.
 
 ## 3. Endpoint de ingesta
 
@@ -746,11 +1096,13 @@ Servidor → cliente: `{type:"hello", conversations:[{cid,lastSeq,firstRetainedS
 
 | Superficie | Auth | Efecto |
 | --- | --- | --- |
-| `PATCH /api/admin/sessions/:id/conversation {enabled}` | admin | aplica la fila correspondiente de §2.4 y devuelve `{ enabled, effective, effectiveAfterRestart }` |
+| `PATCH /api/admin/sessions/:id/conversation {enabled}` | admin (`adminActionIp`) | aplica la fila correspondiente de §2.4 y devuelve `{ enabled, capture }`, con `capture` según §2.7.6 |
+| `GET /api/admin/sessions/:id/recreate` | admin | preflight sin efectos (§2.7.2): `{ recreatable, blockers[], imageId, currentImageId, captureAfter }`; códigos y recuentos, nunca rutas |
+| `POST /api/admin/sessions/:id/recreate {expectImageId}` | admin (`adminActionIp`); fila `operate` fail-closed con owner ajeno | recreación de §2.7.2–§2.7.4; 409 con el código de la primera precondición que falla; 500 `recreate-failed {step, unresolved?}`; 503 `docker-unavailable` |
 | `CONVERSATION_ALLOW_USERS=<id,id>` | env | sesiones nuevas de esos usuarios nacen con `conversation_requested=1` |
 | `npm run conversation:disable -- <sid>\|--all` | shell host | fila "Emergencia" de §2.4 con el orden de §2.5: marca de revocación, D1, archivos; si D1 falla, deja la marca, no borra archivos y sale ≠ 0 |
 | `npm run conversation:enable-all` | shell host | quita `REVOKED_ALL`; no toca filas ni marcas por sesión |
-| `GET /api/admin/stats` → `conversation` | admin | `{ enabledSessions, effectiveSessions, eventsSinceBoot, rejectedSinceBoot{byReason}, gapsSinceBoot, unattributedGaps, bytesOnDisk, queueBytesNow, queueBytesMax, wsResyncsSinceBoot }`; **sin** títulos ni ids de conversación |
+| `GET /api/admin/stats` → `conversation` | admin | `{ enabledSessions, effectiveSessions, eventsSinceBoot, rejectedSinceBoot{byReason}, gapsSinceBoot, unattributedGaps, bytesOnDisk, queueBytesNow, queueBytesMax, wsResyncsSinceBoot, recreateOrphans }`; **sin** títulos ni ids de conversación. `effectiveSessions` cuenta según §2.7.6 sin probe por sesión: es una cota superior ("configurada"), y el valor con probe solo se da por sesión |
 
 ---
 
@@ -867,15 +1219,113 @@ observado y decisión:
 
 ### 3.0d activación
 
-- [ ] **Requisito de entrada (§2.4.1):** habilitar una sesión con contenedor existente llega a ser
-      efectivo por una vía decidida por el responsable, y `effectiveAfterRestart` es verdadero solo
-      si esa vía lo garantiza; test sobre `startContainer` con contenedor existente.
-- [ ] Endpoint admin + allowlist + stats según §7; habilitar/deshabilitar refleja D1 y archivo en
-      ≤ 1 s; respuesta con `effective`/`effectiveAfterRestart` correcta en cada fila de §2.4; stats
-      sin títulos/ids.
-- [ ] Prueba manual documentada en el PR: una sesión real habilitada produce eventos visibles en
-      `GET …/conversations` y en el archivo; deshabilitar corta la ingesta de inmediato y la emisión
-      según lo medido en 3.0c.
+Criterios del diseño aprobado ([§5.7](./design/phase3-3.0d-activation.md), v5). Cada uno *MUST*
+tener su test; si hay contradicción con el diseño, manda §2.7.
+
+**Superficie y ciclo de vida**
+
+- [ ] Endpoint admin, allowlist y stats según §7; deshabilitar refleja D1, el archivo y la marca
+      en ≤ 1 s; stats sin títulos ni ids.
+- [ ] Lock por sesión en `start`, `stop`, `kill`, `delete` (soft/hard) y `recreate`. Las
+      operaciones concurrentes durante cada paso esperan y actúan sobre el estado final, y nunca
+      se purga un workspace con `N` arrancando. `recreate` con otra operación en curso ⇒ `busy` sin
+      efectos. Las esperas vencidas ⇒ `busy`.
+- [ ] `start` de un contenedor existente sigue sin recrear ni escribir marcas ni archivos (test
+      sobre `startContainer`).
+
+**Recreación (§2.7.1–§2.7.4)**
+
+- [ ] Cada precondición con su código. Cada clase de `docker diff`, incluidas las formas
+      incorrectas de los symlinks. `~/.gitconfig` exacto, con una clave extra y con otro email.
+- [ ] `expectImageId` distinto ⇒ 409 sin efectos. Tag movido entre el preflight y el POST ⇒
+      `image-changed`. `docker inspect N` ⇒ `.Image` = `imageId`.
+- [ ] Fallo inyectado en cada paso del 1 al 4 ⇒ estado idéntico al previo: D1, nombres, hash,
+      archivo, marcas, mapeos y skills. CAS con 0 filas ⇒ rollback. Timeout ambiguo de D1 ⇒
+      relectura.
+- [ ] Paso 4 atómico: en ningún instante observable `container_id = N` con un hash distinto del de
+      `N`.
+- [ ] `docker start` manual de `O` entre los pasos 2 y 3 ⇒ rollback sin arrancar `N`.
+- [ ] **Skills personalizadas (A2/P1):** una gestionada personalizada ⇒ el preflight y el POST
+      bloquean `managed-skills-customized`, sin efectos, con todas las skills byte a byte. Sin
+      ella ⇒ la gestionada sin tocar pasa a I_N, la del usuario sigue igual byte a byte, y la
+      siembra ocurre solo en el paso 6.2. Una colisión que solo existe en la imagen de `N` ⇒
+      bloqueo en el paso 1 y rollback. `O` sin skills ⇒ toda W gestionada colisiona.
+- [ ] **Aplazamiento (A2/P2):** dos arranques de `N` antes del CAS (reinicio inyectado y
+      `docker restart`) + fallo ⇒ la skill queda intacta y no se siembra. Éxito ⇒ la marca se
+      retira en 6.1 y se siembra una sola vez. Caída entre el CAS y 6.1 ⇒ `reconcile` retira la
+      marca y siembra (`N` en marcha) o lo deja para el siguiente arranque (`N` detenido).
+- [ ] **Eliminación incierta (A2/P2):** `remove(N)` falla, o queda ambiguo, y `N` arranca antes de
+      cualquier CAS ⇒ la marca sigue, `N` no siembra, la skill sigue intacta y D1 sigue en `O`.
+      Con la eliminación confirmada en el siguiente `reconcile` ⇒ la marca se retira y `O` vuelve
+      a su nombre.
+- [ ] Precondición 7: `.npm-global` ausente o symlink, o layout heredado ⇒ bloqueo sin efectos.
+- [ ] Topes (§2.7.4), con Docker simulado que no responde:
+      - en el paso 3 ⇒ aborta y hace rollback;
+      - rollback colgado ⇒ el lock se libera a los `T_rec` + `T_rb` y la sesión queda marcada;
+      - después del CAS (probe, siembra, postStart colgados) ⇒ se abandona el resto, se libera el
+        lock dentro de `T_rec` y lo pendiente converge;
+      - un `DELETE ?hard=true` posterior resuelve primero o responde 503, y nunca purga.
+- [ ] Las cuatro filas de `reconcile` de §2.7.4. Los nombres que no encajan con el patrón
+      reservado no se tocan. El rename de `O` con el nombre canónico ocupado por `N` se trata como
+      estado incierto.
+
+**Autorización y marcas (§2.7.5, A4)**
+
+- [ ] Contenedor que arranca con token y sin archivo ni marca + `PATCH {enabled:true}` ⇒ marca →
+      relay identificado en ≤ 5 s → archivo. Con el CLI real: un prompt en una pestaña ya abierta y
+      otro en una nueva, entregados, `effective:true`, sin "hook error" y sin recreación. El paso 5
+      de la recreación sigue el mismo camino.
+- [ ] Residuales, con marca y archivo presentes:
+      - revocación por sesión y global ⇒ `effective:false` y retirada;
+      - flag apagado ⇒ `reconcile` retira todas;
+      - `token-mismatch` ⇒ nunca se reescriben;
+      - `conversation:disable` concurrente con `PATCH {enabled:true}` (100 repeticiones) ⇒ nunca
+        quedan marca ni archivo tras el comando, y nunca `effective:true`.
+- [ ] Compatibilidad de `/etc/st-control` con el CLI real (vacío, con marcas, ilegible, con un
+      `.json` inválido) ⇒ hooks y eventos idénticos y sin avisos. Si falla ⇒
+      `control-marker-incompatible` y la activación bloqueada.
+
+**Estado efectivo (§2.7.6, A3)**
+
+- [ ] Correspondencia: hash viejo en D1 y token nuevo, en marcha y detenido ⇒ nunca
+      `effective:true` ni `effectiveAfterRestart:true`; `token-mismatch` + `requiresRecreate`;
+      `PATCH` no escribe y no copia la huella. Variantes: el suspendido igual a la huella se
+      restaura; los dos NULL tras una emergencia nunca se vuelven a autorizar.
+- [ ] `effectiveAfterRestart` sin contenedor: un test por cada condición falsa (`requested=0`, flag
+      apagado, revocación por sesión, revocación global, imagen sin `="2"`) ⇒ `false`. Todas
+      verdaderas ⇒ `true` y efectivo tras el start. Lo mismo para la rama del contenedor detenido.
+      Detenido con correspondencia y sin marca o archivo ⇒ `false`, `requiresRecreate:false` y
+      efectivo tras start + `PATCH`, sin recrear.
+- [ ] Probe (D7):
+      - positivo ⇒ `effective:true` con `checkedAt` de la petición;
+      - relay caído o puerto ocupado ⇒ `false`;
+      - consulta inmediata tras la caída ⇒ `false`;
+      - dos consultas concurrentes ⇒ un probe;
+      - una consulta posterior ⇒ probe nuevo;
+      - otra condición falsa ⇒ sin probe.
+
+**Smoke de Docker con el CLI real**
+
+- [ ] Recreación correcta: workspace con hash idéntico, `claude --resume` encuentra la
+      conversación, `git config user.email` intacto, secreto y puerto presentes, relay
+      identificado, eventos en `.conversations/`, `capture.effective:true` y `O` borrado.
+      Variantes: `~/.bash_history` o `apt-get install` ⇒ `recreatable:false` sin efectos; el
+      backend muerto entre los pasos 2 y 4 ⇒ `O` intacto; muerto después del 4 ⇒ completa con `N`.
+- [ ] **(a) Activar con el relay no disponible** (puerto ocupado antes del boot, relay impedido en
+      el paso 5, marca o archivo borrados, hash cambiado) ⇒ `effective:false` con su motivo, sin
+      archivo de hooks y **0 "hook error"**.
+- [ ] **(b) Caída del relay tras activar** (`kill -9` con una pestaña abierta). No se promete
+      cero errores. Se exige:
+      - la primera consulta da `relay-unavailable`;
+      - `effective:true` de nuevo en ≤ 3 s;
+      - el turno de la ventana termina, con "hook error" ≤ el número de hooks bloqueantes de ese
+        turno, y 0 en el turno siguiente;
+      - `gap relay_restart` en la conversación.
+- [ ] Prueba manual documentada en el PR: una sesión real activada produce eventos en
+      `GET …/conversations` y en el archivo; deshabilitar corta la ingesta de inmediato.
+- [ ] El PR de implementación actualiza DEPLOYMENT.md ("Recreating a session container" sobre el
+      endpoint; el procedimiento manual como emergencia, con sus pérdidas) y session-image/README.md
+      (directorio de control, `seed-skills.sh`, `GET /st-relay/status`, etiqueta `="2"`).
 
 ### 3.1 vista
 
