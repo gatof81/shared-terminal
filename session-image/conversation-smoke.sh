@@ -1011,6 +1011,9 @@ cli_variant() { # cli_variant <tag> [docker args…]
 	check "[$tag] no settings warning or hook error on screen" \
 		bash -c '! grep -qiE "settings error|invalid settings|hook error" <<<"$1"' _ "$(tab_screen)"
 	sleep 1 # the -p run's last hooks reach the recorder
+	# Snapshot before the kill: the interactive session's SessionEnd races
+	# it and must not enter the comparison.
+	cp "$OUT/$tag.jsonl" "$OUT/$tag.snap.jsonl"
 	PROFILE[$tag]=$(hook_profile "$tag")
 	note "[$tag] hook sequence: $(hook_seq "$tag")"
 	docker exec "$SESS" tmux kill-server >/dev/null 2>&1
@@ -1029,7 +1032,11 @@ ctl "chmod 000 /wr/.st-control/$SID"
 cli_variant ctl-unreadable "${CTL_MOUNT[@]}"
 ctl "chmod 755 /wr/.st-control/$SID"
 for tag in ctl-empty ctl-markers ctl-json ctl-unreadable; do
-	check "[$tag] same hooks as without the control dir (${PROFILE[$tag]})" [ "${PROFILE[$tag]}" = "${PROFILE[ctl-base]}" ]
+	check "[$tag] same hook counts as without the control dir (${PROFILE[$tag]})" [ "${PROFILE[$tag]}" = "${PROFILE[ctl-base]}" ]
+	# Counts AND the order of the lifecycle hooks (MessageDisplay batching and
+	# the async SessionStart's position tolerated): session-image/test/hook-compare.mjs.
+	CMP=$(node "$REPO_ROOT/session-image/test/hook-compare.mjs" "$OUT/ctl-base.snap.jsonl" "$OUT/$tag.snap.jsonl")
+	check "[$tag] same lifecycle hook order as without the control dir ($CMP)" grep -q '"ok":true' <<<"$CMP"
 done
 check "the baseline profile has every hook of the turn" \
 	bash -c 'jq -e ".SessionStart >= 2 and .UserPromptSubmit == 2 and .PreToolUse == 1 and .PostToolUse == 1 and .Stop == 2 and .MessageDisplay == \"present\"" <<<"$1" >/dev/null' _ "${PROFILE[ctl-base]}"
