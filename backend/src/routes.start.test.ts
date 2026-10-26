@@ -104,7 +104,12 @@ function makeFakeSessions(status: SessionStatus, ownerUserId = "u1"): SessionMan
 		// #429: the route authorizes via assertCanOperate now, not
 		// assertOwnership.
 		assertCanOperate: vi.fn(async () => meta),
-		get: vi.fn(async () => ({ ...meta, status: "running" as const })),
+		// First read is the route's status re-check under the lifecycle
+		// lock (the stored status); later reads are the post-start reply.
+		get: vi
+			.fn()
+			.mockResolvedValueOnce(meta)
+			.mockResolvedValue({ ...meta, status: "running" as const }),
 	} as unknown as SessionManager;
 }
 

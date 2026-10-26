@@ -17,6 +17,7 @@ import {
 	ResourceCapsPatchSchema,
 	updateResourceLimits,
 } from "../sessionConfig.js";
+import { SessionBusyError, sessionLifecycleLock } from "../sessionLifecycleLock.js";
 import type { SessionManager } from "../sessionManager.js";
 import {
 	effectiveSessionAllocation,
@@ -280,10 +281,16 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 					res.status(404).json({ error: "Session not found" });
 					return;
 				}
-				await docker.stopContainer(req.params.id);
+				await sessionLifecycleLock.run(req.params.id, "stop", () =>
+					docker.stopContainer(req.params.id),
+				);
 				idleSweeper?.forget(req.params.id);
 				res.status(204).send();
 			} catch (err) {
+				if (err instanceof SessionBusyError) {
+					res.status(409).json({ error: "busy" });
+					return;
+				}
 				logger.error(`[admin] force-stop failed: ${(err as Error).message}`);
 				res.status(500).json({ error: "Internal server error" });
 			}
@@ -309,27 +316,38 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 					res.status(404).json({ error: "Session not found" });
 					return;
 				}
-				// Idempotent soft branch — only kill + terminate if not
-				// already torn down.
-				if (meta.status !== "terminated") {
-					await docker.kill(req.params.id);
-					await sessions.terminate(req.params.id);
-					idleSweeper?.forget(req.params.id);
-				}
-				if (hard) {
-					try {
-						await docker.purgeWorkspace(req.params.id);
-					} catch (err) {
-						logger.error(
-							`[admin] force-delete purgeWorkspace failed for ${req.params.id}: ${(err as Error).message}`,
-						);
-						// Fall through — the D1 row removal still happens.
+				// One lifecycle lock across the whole teardown, status
+				// re-read under it (CONVERSATION.md §2.7.2) — same as the
+				// owner's DELETE.
+				await sessionLifecycleLock.run(req.params.id, "delete", async () => {
+					const current = await sessions.get(req.params.id);
+					if (!current) return;
+					// Idempotent soft branch — only kill + terminate if not
+					// already torn down.
+					if (current.status !== "terminated") {
+						await docker.kill(req.params.id);
+						await sessions.terminate(req.params.id);
+						idleSweeper?.forget(req.params.id);
 					}
-					await sessions.deleteRow(req.params.id);
-					idleSweeper?.forget(req.params.id);
-				}
+					if (hard) {
+						try {
+							await docker.purgeWorkspace(req.params.id);
+						} catch (err) {
+							logger.error(
+								`[admin] force-delete purgeWorkspace failed for ${req.params.id}: ${(err as Error).message}`,
+							);
+							// Fall through — the D1 row removal still happens.
+						}
+						await sessions.deleteRow(req.params.id);
+						idleSweeper?.forget(req.params.id);
+					}
+				});
 				res.status(204).send();
 			} catch (err) {
+				if (err instanceof SessionBusyError) {
+					res.status(409).json({ error: "busy" });
+					return;
+				}
 				logger.error(`[admin] force-delete failed: ${(err as Error).message}`);
 				res.status(500).json({ error: "Internal server error" });
 			}

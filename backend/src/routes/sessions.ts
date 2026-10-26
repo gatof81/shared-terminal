@@ -29,8 +29,9 @@ import {
 	updatePorts,
 	validateSessionConfig,
 } from "../sessionConfig.js";
+import { sessionLifecycleLock } from "../sessionLifecycleLock.js";
 import type { SessionManager } from "../sessionManager.js";
-import { SessionQuotaExceededError } from "../sessionManager.js";
+import { NotFoundError, SessionQuotaExceededError } from "../sessionManager.js";
 import {
 	assertBudgetAllows,
 	computeRunningAllocations,
@@ -484,18 +485,26 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				// throw above). Idempotent: the failure-branch
 				// `docker.kill` already ran on hard-fail, and `kill`
 				// swallows "no such container" internally.
-				await docker.kill(rollbackId).catch((killErr) => {
-					logger.error(
-						`[routes] CRITICAL: kill during create rollback for session ${rollbackId} failed: ${(killErr as Error).message}`,
-					);
-				});
-				try {
-					await sessions.deleteRow(rollbackId);
-				} catch (cleanupErr) {
-					logger.error(
-						`[routes] CRITICAL: spawn rollback failed for session ${rollbackId}: ${(cleanupErr as Error).message}`,
-					);
-				}
+				await sessionLifecycleLock
+					.run(rollbackId, "delete", async () => {
+						await docker.kill(rollbackId).catch((killErr) => {
+							logger.error(
+								`[routes] CRITICAL: kill during create rollback for session ${rollbackId} failed: ${(killErr as Error).message}`,
+							);
+						});
+						try {
+							await sessions.deleteRow(rollbackId);
+						} catch (cleanupErr) {
+							logger.error(
+								`[routes] CRITICAL: spawn rollback failed for session ${rollbackId}: ${(cleanupErr as Error).message}`,
+							);
+						}
+					})
+					.catch((lockErr) => {
+						logger.error(
+							`[routes] CRITICAL: create rollback for session ${rollbackId} could not take the lifecycle lock: ${(lockErr as Error).message}`,
+						);
+					});
 			}
 			res.status(500).json({ error: (err as Error).message });
 		}
@@ -721,44 +730,54 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 		const hard = req.query.hard === "true" || req.query.hard === "1";
 
 		try {
-			const meta = await sessions.assertOwnership(req.params.id, userId);
+			await sessions.assertOwnership(req.params.id, userId);
+			// One lifecycle lock across kill + terminate + purge + row drop
+			// (CONVERSATION.md §2.7.2), so a concurrent start/stop/recreate
+			// can't interleave with the teardown — above all, nothing can
+			// be starting on the workspace while it is purged. The status
+			// is re-read under the lock: whoever held it before may have
+			// changed it.
+			await sessionLifecycleLock.run(req.params.id, "delete", async () => {
+				const meta = await sessions.get(req.params.id);
+				if (!meta) throw new NotFoundError("Session not found");
 
-			// Idempotent path: only tear down the container + flip to
-			// terminated the first time. Subsequent calls skip this.
-			if (meta.status !== "terminated") {
-				await docker.kill(req.params.id);
-				await sessions.terminate(req.params.id);
-				// Drop the idle-sweeper's lastActivity entry — without
-				// this the Map grows unboundedly across the backend's
-				// lifetime as soft-deleted sessions accumulate. The
-				// `skipIdleBump` flag suppresses the bump middleware's
-				// `finish` listener; without it, the success-status
-				// bump fires AFTER `forget` on the same response and
-				// re-adds the entry, making the prune a no-op. Bump
-				// already needed an authed user; forget needs the same
-				// gate, which the assertOwnership above provides.
-				res.locals.skipIdleBump = true;
-				idleSweeper?.forget(req.params.id);
-			}
-
-			if (hard) {
-				// Wipe workspace files and drop the row entirely.
-				try {
-					await docker.purgeWorkspace(req.params.id);
-				} catch (err) {
-					logger.error(
-						`[routes] purgeWorkspace failed for ${req.params.id}: ${(err as Error).message}`,
-					);
-					// Fall through — we still want to remove the row.
+				// Idempotent path: only tear down the container + flip to
+				// terminated the first time. Subsequent calls skip this.
+				if (meta.status !== "terminated") {
+					await docker.kill(req.params.id);
+					await sessions.terminate(req.params.id);
+					// Drop the idle-sweeper's lastActivity entry — without
+					// this the Map grows unboundedly across the backend's
+					// lifetime as soft-deleted sessions accumulate. The
+					// `skipIdleBump` flag suppresses the bump middleware's
+					// `finish` listener; without it, the success-status
+					// bump fires AFTER `forget` on the same response and
+					// re-adds the entry, making the prune a no-op. Bump
+					// already needed an authed user; forget needs the same
+					// gate, which the assertOwnership above provides.
+					res.locals.skipIdleBump = true;
+					idleSweeper?.forget(req.params.id);
 				}
-				await sessions.deleteRow(req.params.id);
-				// Hard-delete also drops the activity entry — covers
-				// the path where a user goes straight to ?hard=true on
-				// an already-terminated session. Same `skipIdleBump`
-				// flag rationale as the soft-delete branch above.
-				res.locals.skipIdleBump = true;
-				idleSweeper?.forget(req.params.id);
-			}
+
+				if (hard) {
+					// Wipe workspace files and drop the row entirely.
+					try {
+						await docker.purgeWorkspace(req.params.id);
+					} catch (err) {
+						logger.error(
+							`[routes] purgeWorkspace failed for ${req.params.id}: ${(err as Error).message}`,
+						);
+						// Fall through — we still want to remove the row.
+					}
+					await sessions.deleteRow(req.params.id);
+					// Hard-delete also drops the activity entry — covers
+					// the path where a user goes straight to ?hard=true on
+					// an already-terminated session. Same `skipIdleBump`
+					// flag rationale as the soft-delete branch above.
+					res.locals.skipIdleBump = true;
+					idleSweeper?.forget(req.params.id);
+				}
+			});
 
 			res.status(204).send();
 		} catch (err) {
@@ -770,7 +789,9 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 		const { userId } = req as AuthedRequest;
 		try {
 			await sessions.assertOwnedBy(req.params.id, userId);
-			await docker.stopContainer(req.params.id);
+			await sessionLifecycleLock.run(req.params.id, "stop", () =>
+				docker.stopContainer(req.params.id),
+			);
 			// Same `forget` rationale as DELETE above: a stopped
 			// session shouldn't sit in the activity map collecting
 			// stale bumps. `skipIdleBump` blocks the bump middleware's
@@ -818,61 +839,71 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			// safe path is `recreate it to retry`. 409 Conflict reflects
 			// "valid request, current state forbids it" — not 400 (the
 			// payload is fine) and not 403 (it's not an auth issue).
-			if (meta.status === "failed") {
-				res.status(409).json({
-					error:
-						"Session failed during postCreate; recreate it to retry. The original output is still in the failed-row history.",
-				});
-				return;
-			}
-			// Audit a cross-user start (#429) as a point-in-time
-			// `mode='operate'` row (start≈end — starting is instantaneous
-			// from the audit's view, unlike the exec span in #416). The
-			// audit IS the security mitigation for widening admin power by
-			// this verb, so it's fail-closed like the exec-start audit: an
-			// INSERT failure aborts BEFORE any container spawns, rather than
-			// fire-and-forget like the kill safety-valve. Recorded only once
-			// the auth + `failed` guards passed and the spawn is imminent, so
-			// a denied/409'd attempt leaves no row (observeLog's "denied
-			// attempts saw nothing" posture).
-			if (isForeignCaller) {
-				// Only the INSERT is fail-closed (it's the security-critical
-				// half — no unaudited admin start). The END is fire-and-forget
-				// per `recordObserveEnd`'s contract: D1 transients on close are
-				// common and must NOT fail the caller. Awaiting it here (and
-				// aborting on its failure) would leave a committed row with
-				// `ended_at = NULL` — the observe-log UI would render a start
-				// that was in fact aborted as an admin operation that never
-				// ended. Same split as the exec-start audit (#416). PR #430
-				// review SHOULD-FIX.
-				let logId: string;
-				try {
-					logId = await observeLog.recordObserveStart(
-						userId,
-						req.params.id,
-						meta.userId,
-						"operate",
-					);
-				} catch (err) {
-					logger.error(
-						`[sessions] operate start audit insert failed, aborting start: ${(err as Error).message} ` +
-							`(caller=${userId} session=${req.params.id})`,
-					);
-					res.status(500).json({ error: "Internal server error" });
-					return;
+			// Lifecycle lock (CONVERSATION.md §2.7.2): the status check, the
+			// audit row and the start run as one unit, and the status is
+			// re-read under the lock — a delete or stop that held it may have
+			// changed the session while we waited.
+			const started = await sessionLifecycleLock.run(req.params.id, "start", async () => {
+				const current = await sessions.get(req.params.id);
+				if (!current) throw new NotFoundError("Session not found");
+				if (current.status === "failed") {
+					res.status(409).json({
+						error:
+							"Session failed during postCreate; recreate it to retry. The original output is still in the failed-row history.",
+					});
+					return false;
 				}
-				observeLog.recordObserveEnd(logId).catch((err) => {
-					logger.warn(
-						`[sessions] operate start audit end failed: ${(err as Error).message} ` +
-							`(log=${logId} session=${req.params.id})`,
+				// Audit a cross-user start (#429) as a point-in-time
+				// `mode='operate'` row (start≈end — starting is instantaneous
+				// from the audit's view, unlike the exec span in #416). The
+				// audit IS the security mitigation for widening admin power by
+				// this verb, so it's fail-closed like the exec-start audit: an
+				// INSERT failure aborts BEFORE any container spawns, rather than
+				// fire-and-forget like the kill safety-valve. Recorded only once
+				// the auth + `failed` guards passed and the spawn is imminent, so
+				// a denied/409'd attempt leaves no row (observeLog's "denied
+				// attempts saw nothing" posture).
+				if (isForeignCaller) {
+					// Only the INSERT is fail-closed (it's the security-critical
+					// half — no unaudited admin start). The END is fire-and-forget
+					// per `recordObserveEnd`'s contract: D1 transients on close are
+					// common and must NOT fail the caller. Awaiting it here (and
+					// aborting on its failure) would leave a committed row with
+					// `ended_at = NULL` — the observe-log UI would render a start
+					// that was in fact aborted as an admin operation that never
+					// ended. Same split as the exec-start audit (#416). PR #430
+					// review SHOULD-FIX.
+					let logId: string;
+					try {
+						logId = await observeLog.recordObserveStart(
+							userId,
+							req.params.id,
+							meta.userId,
+							"operate",
+						);
+					} catch (err) {
+						logger.error(
+							`[sessions] operate start audit insert failed, aborting start: ${(err as Error).message} ` +
+								`(caller=${userId} session=${req.params.id})`,
+						);
+						res.status(500).json({ error: "Internal server error" });
+						return false;
+					}
+					observeLog.recordObserveEnd(logId).catch((err) => {
+						logger.warn(
+							`[sessions] operate start audit end failed: ${(err as Error).message} ` +
+								`(log=${logId} session=${req.params.id})`,
+						);
+					});
+					logger.info(
+						`[sessions] operate start logged: caller=${userId} session=${req.params.id} ` +
+							`owner=${meta.userId} log=${logId}`,
 					);
-				});
-				logger.info(
-					`[sessions] operate start logged: caller=${userId} session=${req.params.id} ` +
-						`owner=${meta.userId} log=${logId}`,
-				);
-			}
-			await docker.startContainer(req.params.id);
+				}
+				await docker.startContainer(req.params.id);
+				return true;
+			});
+			if (!started) return;
 			const updated = await sessions.get(req.params.id);
 			if (!updated) {
 				// Race: deleted between assertCanOperate and get. See
