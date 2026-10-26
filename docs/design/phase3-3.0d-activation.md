@@ -1,6 +1,8 @@
 # 3.0d — Activación progresiva: propuesta
 
-Estado: **propuesta v5 para revisión (Work + responsable), no implementada.** Base: `main` en
+Estado: **v5 aprobada (Work y el responsable, `ac1024d`, 2026-10-26), no implementada. D7
+decidido: probe fresco.** Lo vinculante está en [CONVERSATION.md §2.7](../CONVERSATION.md); este
+documento conserva el razonamiento, y si difieren, manda el contrato. Base: `main` en
 `a836434` (3.0c + #448 + #450 mergeados; `CONVERSATION_ENABLED` desactivado; backend no
 desplegado).
 
@@ -36,7 +38,8 @@ un PR de docs **antes** del código.
 - **La recreación tiene un punto de confirmación único:** un compare-and-set en D1 que cambia
   `container_id` **y** el hash del token en la misma sentencia.
   - Antes de ese punto, `N` no escribe nada en el workspace que `O` no escribiría igual al
-    arrancar, y cualquier fallo vuelve exactamente al estado anterior.
+    arrancar, y cualquier fallo vuelve exactamente al estado anterior. Si Docker no confirma la
+    eliminación de `N`, el estado queda incierto y lo resuelve §5.6.
   - Después, no hay vuelta atrás automática, ni hace falta.
 - **El token del contenedor y el hash autorizado en D1 se comprueban siempre:** el `sha256` del
   token que el contenedor tiene en su env debe ser el hash de D1. Sin correspondencia no hay
@@ -326,8 +329,14 @@ el anterior falló, salvo donde se indica:
 
 1. `stop` y `remove` de `N` si existe.
 2. **Confirmar que `N` ya no existe:** `inspect(N)` por id debe responder 404.
-3. `O` vuelve a su nombre canónico si fue renombrado.
+3. `O` vuelve a su nombre canónico si fue renombrado. Si `N` sigue teniendo ese nombre
+   (eliminación incierta), el rename falla. Es el resultado esperado del estado incierto y no un
+   error inesperado: §5.6 lo completa cuando se resuelve el destino de `N`.
 4. **Solo si el paso 2 confirmó la eliminación**, se borra `defer-skill-seed`.
+
+> Contrato v1.6 (§2.7.3): el rollback **resuelto** exige además que no quede trabajo en vuelo, y
+> busca `N` también por la etiqueta `recreate-of`. Responde sin `unresolved`. Todo lo demás es
+> estado incierto, con `unresolved: true`.
 
 **Estado incierto.** Si `remove` falla o su resultado es ambiguo (timeout, daemon sin respuesta,
 `inspect(N)` sin respuesta o con `N` todavía presente), la marca **se conserva**.
@@ -367,17 +376,42 @@ Nada de esto exige una segunda recreación, que §5.2 probablemente bloquearía,
 
 #### 5.3.1 Tope de tiempo
 
+> **Precisado en el contrato v1.6 (§2.7.4, revisión de consistencia K1):**
+>
+> - Un timeout no significa que la operación haya terminado. Una llamada vencida sigue en vuelo
+>   hasta que su promesa se resuelve.
+> - `T_d1` = 60 s vale **solo para D1**, que tiene una duración máxima por sentencia. Docker no
+>   tiene un límite equivalente.
+> - Las peticiones a Docker **no se abortan en el cliente**: los topes solo dejan de esperar, y
+>   la respuesta de dockerd es la evidencia de cómo terminó cada una.
+> - Un **registro durable del intento** (`recreate-attempt.json`, sin secretos) tiene tres
+>   estados:
+>   - `open`: el propio intento actúa bajo su lock, paso 5 incluido, sin bloqueo circular;
+>   - `uncertain`: hay peticiones sin respuesta, o se encontró tras un reinicio del backend;
+>   - `resolved`.
+> - Tras un reinicio no hay evidencia de terminación, así que la sesión **queda en
+>   `recreate-unresolved`**. Cualquier salida heurística es la decisión D8 del responsable, que no
+>   se adopta.
+> - Un sobrante solo es un contenedor con la etiqueta de un intento `resolved` cuyo id **no** es el
+>   vigente de D1. El `N` confirmado nunca se elimina.
+>
+> Donde este apartado diga otra cosa, manda el contrato.
+
 Una llamada a Docker sin tope (`create`, `start`, `inspect`, `changes`, `rename`) con el daemon
 colgado retendría el lock hasta reiniciar el backend. Por eso hay dos topes:
 
-- **Recreación: `T_rec` = 5 min**, desde el lock hasta el final del paso 6. Incluye la espera de
-  readiness (≤ 60 s). Cada llamada a Docker corre contra el tiempo que le queda.
+- **Recreación: `T_rec` = 5 min**, desde el lock hasta el final del paso 6, incluidos todos los
+  pasos posteriores al CAS. Incluye la espera de readiness (≤ 60 s). Cada llamada a Docker o
+  `execCapture` corre contra el tiempo que le queda, y postStart contra
+  `min(lo que queda, el tope propio de streamExec)`.
   - Si el tope vence antes del paso 4, se aborta y se pasa al rollback.
-  - El tope no se aplica a la espera del paso 5.2, que tiene su propio tope de 5 s y no deshace
-    nada.
+  - La espera del probe del paso 5 (≤ 5 s) también corre contra lo que queda. Un probe cortado
+    cuenta como `relay-unavailable`, y no deshace nada.
   - El paso 4 comprueba el tope **justo antes** del compare-and-set: con el tope vencido no
     confirma. Así una recreación abortada nunca cambia D1.
-  - Si vence después del paso 4, no se deshace nada (§5.3). Lo que quede del paso 6 se registra.
+  - Si vence después del paso 4, no se deshace nada (§5.3). Se abandona el resto del paso 6, se
+    registra qué faltó, se libera el lock, y lo pendiente converge (tabla de §5.3). Así ninguna
+    operación espera más de `T_rec` + `T_rb`.
 - **Rollback: `T_rb` = 60 s**, propio. Si tampoco termina (Docker sigue colgado), el lock se
   libera igual y la sesión queda marcada en memoria como "recreación interrumpida".
   - La siguiente operación de ciclo de vida sobre esa sesión (`start`, `stop`, `kill`, `delete`,
@@ -577,7 +611,7 @@ vería un contenedor renombrado.
   - una consulta posterior a un probe terminado ⇒ probe nuevo;
   - cualquier otra condición falsa ⇒ `false` sin ejecutar el probe.
 
-  Con D7 aprobada se sustituyen por los tests de vencimiento e invalidación de la caché.
+  (D7 se decidió por el probe fresco: no hay tests de caché.)
 - Paso 4 atómico: en ningún instante observable `container_id = N` con un hash distinto al de `N`.
   Se prueba leyendo D1 entre cada llamada simulada.
 - `expectImageId` distinto ⇒ 409 sin efectos.
@@ -654,7 +688,7 @@ límites explícitos:
 
 1. Se mata el relay (`kill -9`) con una pestaña abierta.
 2. **Detección:** la **primera** consulta de `capture` después del `kill` da `effective:false`,
-   `relay-unavailable` (probe fresco, D7 no aplicada).
+   `relay-unavailable` (probe fresco, D7).
 3. **Recuperación:** el supervisor relanza el relay en ≤ 1 s, el primer escalón de su backoff,
    más el arranque. La primera consulta que encuentra el relay identificado da `effective:true`,
    en ≤ 3 s desde el `kill`.
@@ -669,8 +703,7 @@ Además, el caso del probe en la misma petición, con un CLI y un relay reales:
 - probe positivo ⇒ `effective:true`;
 - `kill` del relay e **inmediatamente** otra consulta ⇒ `effective:false`, sin esperar ningún
   intervalo;
-- con D7 aprobada, en su lugar: `true` hasta que vence la caché o la invalida una escritura, y
-  `false` en la primera consulta posterior.
+- (D7: sin caché positiva, así que no hay variante con caché.)
 
 Con el contenedor detenido:
 
@@ -755,6 +788,17 @@ No hay respaldo silencioso en otra ruta.
     sigue siendo el token en el backend.
 
 #### 5.8.3 Autorización completa antes de escribir `relay.enabled`
+
+> **Precisado en el contrato v1.6 (§2.7.5, K2/K3):** hay tres niveles.
+>
+> - La **autorización completa**, la de esta sección, sirve para **escribir** sobre un contenedor
+>   en marcha.
+> - La **autorización de conservación** (1–3, 5, 6, y el contenedor existente con ambos montajes,
+>   en marcha o detenido) **mantiene** marca y archivo durante un stop. `reconcile` no los retira
+>   ahí, de modo que stop + start sigue capturando sin `PATCH`.
+> - La **preparación del spawn** escribe antes de crear el contenedor.
+>
+> Sin ambos montajes, como en un contenedor creado por 3.0c, no hay reparación sin recrear.
 
 `relay.enabled` y `conversation.json` se escriben **solo** si, en ese momento, se cumple todo:
 
@@ -869,16 +913,8 @@ identificación del relay (§5.8.2).
 - Coste: un `docker exec` por consulta positiva, en rutas owner-only y de admin, sin polling del
   backend.
 
-**Decisión pendiente del responsable (D7), solo si se quiere ahorrar ese exec:** caché positiva
-por contenedor de **15 s**.
-
-- Garantía, más débil: `effective:true` = "identificado en los últimos 15 s".
-- `checkedAt` y un campo `cachedFor` lo dicen en la respuesta.
-- La caché se invalida en cada escritura del backend sobre ese contenedor: disable, revocación,
-  PATCH, stop, kill y recreate.
-- La regla y los tests de §5.7 cambian en consecuencia: se espera `true` hasta el vencimiento y
-  `false` en la primera consulta posterior.
-- No es la recomendación: si no se decide nada, se implementa el probe fresco.
+**D7, decidido el 2026-10-26:** probe fresco. Se descartó la caché positiva de 15 s, que daba
+una garantía más débil ("identificado en los últimos 15 s").
 
 **Autorización completa** = los puntos 1–6 de §5.8.3.
 
@@ -924,13 +960,13 @@ por contenedor de **15 s**.
   repara.
 - **`requiresRecreate`** distingue lo que se repara en el mismo contenedor de lo que solo
   resuelve un contenedor nuevo:
-  - **`false`** cuando hay correspondencia, o una suspensión restaurable, y solo falta
-    configuración o relay. El remedio es arrancar si hace falta y luego `PATCH {enabled:true}`.
+  - **`false`** cuando hay ambos montajes y correspondencia, o una suspensión restaurable, y solo
+    falta configuración o relay. El remedio es arrancar si hace falta y luego `PATCH {enabled:true}`.
     `pendingReasons` lo dice (`hooks-file-missing` + `stopped`). **No se exige una recreación
     innecesaria.**
   - **`true`** solo con `container-without-capture`, `token-mismatch`, o un contenedor sin el
-    directorio de control (creado por 3.0c) cuya imagen no lleva `="2"`. Ninguno se repara en el
-    mismo contenedor.
+    montaje de control (por ejemplo, creado por 3.0c), sea cual sea su imagen (contrato v1.6,
+    §2.7.5). Ninguno se repara en el mismo contenedor.
   - Nunca promete que la recreación vaya a pasar: §5.2 y la precondición 8 solo se evalúan en el
     preflight.
 - **`PATCH {enabled:true}`** aplica §5.8.3. Con el contenedor detenido no escribe nada y responde
@@ -982,7 +1018,7 @@ requiere autorización explícita del responsable.
 
 ## 9. Decisiones
 
-D1–D6 las cerró el responsable con las recomendaciones de Work. D7 está pendiente.
+D1–D6 las cerró el responsable con las recomendaciones de Work. D7 lo cerró el 2026-10-26. D8 surgió en la revisión de consistencia del contrato y está pendiente.
 
 | | Decisión |
 | --- | --- |
@@ -992,7 +1028,8 @@ D1–D6 las cerró el responsable con las recomendaciones de Work. D7 está pend
 | D4 | **Sin bypass destructivo**: no hay `force` ni `acknowledgeLayerLoss` |
 | D5 | Nunca se recrea una sesión en marcha, ni automáticamente ni por el endpoint |
 | D6 | **ID inmutable de imagen**: el preflight lo muestra, el POST lo exige (`expectImageId`), la etiqueta se comprueba en ese ID y `createContainer` lo usa |
-| D7 | **Pendiente.** Caché positiva de 15 s para el probe del relay. Recomendado: **no**, probe fresco para afirmar `effective:true` (§6.2) |
+| D7 | **Decidido (2026-10-26): probe fresco**, sin caché positiva; single-flight para consultas concurrentes, timeouts acotados y `checkedAt` (§6.2) |
+| D8 | **Pendiente, no adoptada.** Salida de `recreate-unresolved` tras un reinicio del backend sin evidencia de terminación de Docker, con una garantía explícitamente heurística (por ejemplo, una atestación del operador o un reinicio observado de dockerd). Mientras no se decida, la sesión queda bloqueada (contrato §2.7.4) |
 
 ## 10. Trazabilidad de los hallazgos de Work
 
@@ -1081,7 +1118,7 @@ Smoke en §5.7.
   - La rama "sin contenedor" de `effectiveAfterRestart` exige `requested`, flag activo y ausencia
     de revocación, además de la imagen, con un test separado por cada condición falsa.
   - Disponibilidad: probe fresco para afirmar `effective:true`, sin caché positiva.
-  - La caché de 15 s queda como decisión D7 del responsable, con su garantía y sus tests.
+  - La caché de 15 s quedó como decisión D7 del responsable, que después eligió el probe fresco.
   - Tests: probe positivo, caída del relay y consulta inmediata.
 - **Smoke.** Se separan:
   - (a) no activar hooks contra un relay no disponible, con 0 "hook error" exigido;
