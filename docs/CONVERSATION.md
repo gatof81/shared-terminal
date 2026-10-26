@@ -691,10 +691,16 @@ petición después de que el cliente dejó de esperarla. Reglas:
   - El contrato no define ninguna resolución automática para este caso.
   - Consecuencia aceptada: la sesión no se puede arrancar ni recrear hasta que se decida. Siguen
     funcionando la lectura de archivos, deshabilitar y el comando de emergencia.
-  - **D8 (decisión pendiente del responsable, no adoptada).** Una vía para salir de este estado
-    sin evidencia directa, con una garantía explícitamente heurística. Opciones posibles: una
-    atestación del operador por CLI tras verificar Docker, o haber observado un reinicio de
-    dockerd posterior a la caída. Ninguna se adopta en v1.6.
+  - **D8 (decisión del responsable, 2026-10-26): fail-closed.**
+    - Un intento `uncertain` sin evidencia suficiente sigue en `recreate-unresolved`.
+    - **No hay resolución automática:** ni por tiempo, ni por quietud de Docker, ni por un reinicio
+      de dockerd.
+    - El bloqueo indefinido de la sesión es un riesgo aceptado **solo en el piloto aislado**, con
+      una sesión **nueva y descartable, sin datos importantes**.
+    - **Restricción operativa:** la recreación no se usa en sesiones de trabajo reales hasta que
+      exista, se documente y se valide un procedimiento seguro de recuperación administrativa
+      manual. Definirlo es trabajo posterior y no forma parte del contrato funcional de 3.0d.
+    - Esta decisión no añade ninguna superficie ni comportamiento a v1.6.
 
 **Sin continuaciones tardías.** Cada intento tiene una **época**, que se cierra al vencer `T_rec` o
 `T_rb`, o al pasar al rollback.
