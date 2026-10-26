@@ -574,7 +574,7 @@ Si las marcas fueran incompatibles con el CLI (§2.7.5), responde `control-marke
    8. `remove(O)`.
    9. El registro pasa a `resolved`: el intento terminó sin llamadas en vuelo ni desconocidas.
 
-   Un fallo se registra y no deshace nada. Si deja llamadas en vuelo, el registro queda `closed`
+   Un fallo se registra y no deshace nada. Si deja peticiones en vuelo, el registro queda `uncertain`
    y se aplica §2.7.4.
 
 **D1 apunta siempre a un contenedor que existe:**
@@ -608,8 +608,9 @@ Si las marcas fueran incompatibles con el CLI (§2.7.5), responde `control-marke
   4. `O` a su nombre canónico;
   5. **solo con el paso 3 confirmado**, retirar `defer-skill-seed`.
 
-  - **Rollback resuelto:** además de los pasos 1–5, hace falta el criterio de resolución de §2.7.4
-    (registro `resolved`).
+  - **Rollback resuelto:** además de los pasos 1–5, todas las peticiones del intento a Docker
+    tienen que haber respondido. Solo entonces el registro pasa a `resolved` con
+    `outcome: rolled-back` (§2.7.4).
     - estado final igual al previo: D1 en `O`, `O` con su nombre, sin `N` y sin la marca, sin
       cambios en captura ni skills;
     - responde 500 `recreate-failed {step}`, **sin** `unresolved`;
@@ -639,86 +640,92 @@ Si las marcas fueran incompatibles con el CLI (§2.7.5), responde `control-marke
 #### 2.7.4 Topes de tiempo, trabajo en vuelo y recreación interrumpida
 
 **Un timeout no significa que la operación haya terminado.** Docker y D1 pueden aplicar una
-petición cuyo cliente ya se rindió. Reglas:
+petición después de que el cliente dejó de esperarla. Reglas:
 
-- **En vuelo sin resolver.** Una llamada (Docker, `execCapture` o D1) cuyo tope venció sigue "en
-  vuelo" hasta que su promesa se resuelve. Hasta entonces su resultado se desconoce y **nada se
-  decide suponiéndolo**.
-- **`T_d1` solo vale para D1.** Una sentencia de D1 no puede aplicarse después de su duración
-  máxima en la plataforma (30 s según Cloudflare). Por eso, pasados **`T_d1` = 60 s** desde el
-  envío, la relectura de la fila es definitiva. La implementación verifica ese límite y fija
-  `T_d1` en consecuencia.
+**Evidencia de terminación**
 
-  **Docker no tiene un límite equivalente:** ningún plazo prueba que dockerd haya terminado una
-  petición, sobre todo una que envió un proceso que ya murió. Las peticiones a Docker se resuelven
-  solo con el criterio de evidencia de abajo, nunca por tiempo transcurrido.
-- **Sin continuaciones tardías.** Cada intento de recreación tiene una **época**, que se cierra al
-  vencer `T_rec` o `T_rb`, o al pasar al rollback.
-  - Toda continuación (el código que sigue a una llamada que se resuelve tarde) comprueba la época
-    antes de cualquier efecto y, si está cerrada, no hace nada más.
-  - Así nunca escribe D1, ni renombra, ni crea, ni arranca, ni escribe marcas o archivos, ni
-    siembra.
-  - Ejemplos:
-    - un probe que responde positivo después del tope no escribe `conversation.json`;
-    - un `create` que termina tarde no lleva a arrancar `N`;
-    - un rename tardío no se da por hecho.
-- **Sin operaciones incompatibles mientras haya trabajo sin resolver.** Desde que se cierra la
-  época hasta que **todas** las llamadas en vuelo se resuelven y la tabla de abajo resuelve el
-  estado observado, la sesión está **sin resolver**:
-  - `start`, `stop`, `kill`, `delete` (soft y hard), `recreate` y `PATCH {enabled:true}` responden
-    409 `recreate-unresolved` sin efectos;
-  - `reconcile` no escribe nada para esa sesión, salvo la propia resolución;
-  - las lecturas responden `effective:false` con `recreate-unresolved`.
-- **Siempre permitidos:** `PATCH {enabled:false}` y el comando de emergencia. Solo escriben la
-  marca de revocación, D1 (que el CAS no puede pisar, porque exige `conversation_requested = 1`) y
-  borran archivos. La revocación nunca se bloquea.
-- **Registro durable del intento.** Antes del primer efecto del paso 1 se escribe
-  `<WORKSPACE_ROOT>/.st-control/<sid>/recreate-attempt.json`, con escritura a temporal, `fsync` y
-  `rename`. Contiene:
-  - `attemptId`;
-  - el id y el nombre canónico de `O`;
-  - el nombre `-old-<ts>` previsto para `O`;
-  - el nombre `-new-<ts>` previsto para `N`;
-  - `startedAt`;
-  - `state`: `open`, `closed` o `resolved`, con su hora.
+- **Docker: las peticiones del intento no se abortan nunca en el cliente.**
+  - Los topes (`T_rec`, `T_rb`) solo dejan de *esperar*: cierran la época. La conexión con dockerd
+    sigue abierta hasta que responde.
+  - **La respuesta de dockerd, éxito o error, es la evidencia de cómo terminó** esa petición. Hasta
+    entonces está *en vuelo* y su resultado se desconoce.
+  - Ningún plazo sustituye a esa respuesta: un dockerd colgado deja la petición en vuelo
+    indefinidamente.
+- **D1: las peticiones sí se cortan** (tope de 10 s del cliente de D1). Una sentencia no puede
+  aplicarse después de su duración máxima en la plataforma (30 s según Cloudflare). Por eso, pasados
+  **`T_d1` = 60 s** desde el envío, la relectura de la fila es definitiva. `T_d1` vale **solo para
+  D1**; la implementación verifica el límite y fija `T_d1` en consecuencia.
+- **Si el backend muere**, se pierden las conexiones con dockerd y, con ellas, la única evidencia
+  de cómo terminaron sus peticiones a Docker. Ninguna observación posterior lo prueba: ni un plazo,
+  ni una ventana sin eventos, ni escaneos repetidos.
 
-  Nunca contiene el token ni su hash.
-  - `N` se crea además con la etiqueta `io.shared-terminal.recreate-attempt=<attemptId>`.
-  - El registro pasa a `closed` cuando se cierra la época y a `resolved` solo con el criterio de
-    abajo.
-  - **Mientras exista un registro que no está en `resolved`, la sesión está sin resolver**,
-    también después de reiniciar el backend: el registro sobrevive y las promesas no.
-  - `reconcile` busca por el registro, no solo por etiqueta y nombre. Así reconoce un intento cuyo
-    `N` todavía no es visible.
-- **Criterio para declarar resuelto.** Hacen falta todas estas condiciones:
-  1. **No quedan llamadas propias en vuelo.** Tras un reinicio, las del proceso anterior cuentan
-     como desconocidas y solo las cubre el punto 3.
-  2. **Las llamadas a D1 pendientes son definitivas**, porque pasó `T_d1` desde su envío, y D1 se
-     leyó después.
-  3. **Quietud observada de Docker.** Primero se abre una suscripción **en vivo** a los eventos de
-     Docker filtrada por el intento: la etiqueta `recreate-attempt`, el id de `O` y los nombres
-     `st-<12>`, `st-<12>-new-*` y `st-<12>-old-*`. Después se escanea. Luego tiene que pasar
-     **`T_quiet` = 120 s sin ningún evento** del filtro y sin cortes de la suscripción. Un corte o
-     un reinicio de dockerd vuelve a empezar la ventana. Por último, un segundo escaneo debe ser
-     idéntico al primero.
-     - Un `create` o un `rename` que se aplica dentro de la ventana emite un evento: la ventana
-       vuelve a empezar, y la resolución cuenta con él.
-  4. **El estado observado es uno de los finales de la tabla de abajo**, y la acción de esa fila
-     terminó y se volvió a observar.
+**Estados del intento**, en el registro durable
+`<WORKSPACE_ROOT>/.st-control/<sid>/recreate-attempt.json`:
 
-  Si falla cualquiera, la sesión **sigue en `recreate-unresolved`** y se reintenta. Mientras
-  Docker no responda, no hay resolución. Nada se declara resuelto por tiempo transcurrido.
-- **Defensas para después de resolver** (un `create` o un `rename` de un proceso muerto que se
-  aplicara aún más tarde). Al declarar `resolved`, el registro se conserva 7 días con su
-  `attemptId`, y mientras exista:
-  - todo contenedor con la etiqueta de un intento `resolved` se elimina sin arrancarlo nunca, en
-    `reconcile` y antes de cualquier operación de ciclo de vida de la sesión. No pudo escribir en
-    el workspace, porque nadie lo arrancó;
-  - toda operación de ciclo de vida comprueba primero que el contenedor de D1 tiene el nombre
-    canónico `st-<12>`, y lo devuelve si un rename tardío lo cambió, antes de actuar. Si no puede
-    comprobarlo, responde 503 `docker-unavailable`;
-  - el backend nunca arranca un contenedor con la etiqueta de un intento que no está `open`.
+- Se escribe a temporal, con `fsync` y `rename`, **antes del primer efecto**.
+- Contiene `attemptId`, el id y los nombres de `O`, el nombre `-new-<ts>` de `N`, `startedAt`, el
+  estado y `outcome`.
+- **Nunca** contiene el token ni su hash.
+- `N` lleva la etiqueta `io.shared-terminal.recreate-attempt=<attemptId>`.
 
+| Estado | Qué significa | Quién puede actuar |
+| --- | --- | --- |
+| `open` | Intento **activo**: un proceso vivo tiene el lock y una época válida | **El propio intento**, en todos sus pasos: la autorización del paso 5 y la convergencia del paso 6 también. Las demás operaciones las excluye el lock (§2.7.2, precondición 1), no este estado. No hay bloqueo circular |
+| `uncertain` | La época se cerró con peticiones a Docker en vuelo; o, tras un reinicio del backend, se encontró un registro `open` o `uncertain` | Nadie, salvo la resolución, `PATCH {enabled:false}` y el comando de emergencia. Todo lo demás responde 409 `recreate-unresolved` sin efectos |
+| `resolved` | Hay evidencia de terminación de todas las peticiones, y la acción final de la tabla se ejecutó y volvió a observarse | Ciclo normal |
+
+- `outcome` es `committed` con el id de `N` (D1 = `N`) o `rolled-back` (D1 = `O`). Se fija al
+  pasar a `resolved`.
+- El registro se conserva hasta el hard delete de la sesión, como dato para reconocer sobrantes.
+  No fija ningún límite de tiempo ni es una garantía.
+
+**Paso a `resolved`**
+
+- **Desde `open`, camino normal:** el intento termina el paso 6, o el rollback resuelto, y todas
+  sus peticiones a Docker han respondido. Las de D1 que se cortaron ya son definitivas (`T_d1`).
+- **Desde `uncertain`, con el proceso vivo:** en cuanto responde la última petición en vuelo
+  (evidencia), y las de D1 son definitivas, la resolución aplica la tabla de abajo sobre el estado
+  observado.
+- **Desde `uncertain` tras un reinicio del backend:** **no hay evidencia, así que la sesión sigue
+  en `recreate-unresolved`.**
+  - El contrato no define ninguna resolución automática para este caso.
+  - Consecuencia aceptada: la sesión no se puede arrancar ni recrear hasta que se decida. Siguen
+    funcionando la lectura de archivos, deshabilitar y el comando de emergencia.
+  - **D8 (decisión pendiente del responsable, no adoptada).** Una vía para salir de este estado
+    sin evidencia directa, con una garantía explícitamente heurística. Opciones posibles: una
+    atestación del operador por CLI tras verificar Docker, o haber observado un reinicio de
+    dockerd posterior a la caída. Ninguna se adopta en v1.6.
+
+**Sin continuaciones tardías.** Cada intento tiene una **época**, que se cierra al vencer `T_rec` o
+`T_rb`, o al pasar al rollback.
+
+- Toda continuación (el código que sigue a una petición que responde tarde) comprueba la época
+  antes de cualquier efecto. Si está cerrada, solo registra la respuesta como evidencia para la
+  resolución y no hace nada más: no escribe D1, no renombra, no crea, no arranca, no escribe
+  marcas ni archivos, no siembra.
+- Ejemplos:
+  - un probe que responde positivo después del tope no escribe `conversation.json`;
+  - un `create` que termina tarde no lleva a arrancar `N`;
+  - un rename tardío no se da por hecho.
+
+**Siempre permitidos**, en cualquier estado: `PATCH {enabled:false}` y el comando de emergencia.
+Solo escriben la marca de revocación y D1, y borran archivos. El CAS no puede pisarlos, porque exige
+`conversation_requested = 1`. La revocación nunca se bloquea.
+
+**Sobrantes de intentos abortados.** Un contenedor es sobrante solo si se cumplen las tres
+condiciones:
+
+- lleva `io.shared-terminal.recreate-attempt=<A>`;
+- el registro de `A` está en `resolved`;
+- **su id no es el `container_id` vigente de D1** ni el `N` confirmado de un `outcome: committed`.
+
+Reglas:
+
+- Un sobrante se elimina sin arrancarlo, porque no pudo escribir en el workspace sin arrancar.
+- **El contenedor vigente de D1 nunca se elimina por su etiqueta.** Un `N` confirmado sigue su
+  ciclo normal de stop y start indefinidamente.
+- Si aparece un contenedor con la etiqueta de un intento que **no** está `resolved`, no se toca:
+  es parte del estado incierto.
 
 - **`T_rec` = 5 min**, desde el lock hasta el final del paso 6, **incluidos todos los pasos
   posteriores al CAS**. Cada llamada a Docker o `execCapture` (probe, siembra, gitIdentity) corre
@@ -726,29 +733,31 @@ petición cuyo cliente ya se rindió. Reglas:
   propio de streamExec)`.
   - Vencido antes del paso 4: se cierra la época y se pasa al rollback.
   - Vencido después: se cierra la época, se abandona el resto del paso 6 y se registra qué faltó.
-    - Con trabajo en vuelo (un probe, un exec), la sesión queda sin resolver hasta que se resuelva:
-      un probe tardío no escribe nada y se retira la marca.
-    - Sin trabajo en vuelo, se libera el lock y lo pendiente converge (§2.7.3).
+    - Con peticiones a Docker en vuelo (un probe, un exec), el registro pasa a `uncertain` hasta
+      que respondan. Un probe tardío no escribe nada, y se retira la marca.
+    - Sin peticiones en vuelo, pasa a `resolved` (`committed`), se libera el lock y lo pendiente
+      converge (§2.7.3).
     - postStart sigue en `N` como proceso de la sesión (`N` ya es la sesión). El backend no espera
       su resultado ni actúa por él.
 
   Así ninguna operación **espera** más de `T_rec` + `T_rb`: después responde, aunque sea con
   `recreate-unresolved`.
 - **`T_rb` = 60 s** para el rollback. Si vence:
-  - se libera el lock y la sesión queda sin resolver;
+  - se libera el lock y el registro pasa a `uncertain`;
   - las operaciones incompatibles responden `recreate-unresolved` hasta la resolución;
   - si al resolver Docker no responde, contesta 503 `docker-unavailable` sin tocar D1 ni el
     workspace;
   - un `DELETE ?hard=true` nunca purga un workspace sobre el que `N` pudiera estar corriendo.
 - **`reconcile`, al arrancar el backend**, revisa:
-  - los registros `recreate-attempt.json` que no están en `resolved`: toda sesión con uno queda sin
-    resolver, sea cual sea lo visible en Docker;
+  - los registros `recreate-attempt.json` en `open` o `uncertain`: pasan a `uncertain`, y la sesión
+    queda en `recreate-unresolved` sea cual sea lo visible en Docker. No los resuelve (D8);
   - `docker ps -a --filter label=io.shared-terminal.recreate-of`;
   - los nombres que encajan **exactamente** con `^st-[0-9a-f]{12}-old-[0-9]+$` (o `-new-`) y cuyo
     prefijo es una sesión de D1.
 
   Los sufijos `-new-<ts>` y `-old-<ts>` están **reservados**, y un nombre que no encaja no se toca.
-  Con D1 decide:
+  Elimina los sobrantes. La tabla siguiente es la **resolución**: la aplica la resolución de un
+  intento `uncertain` con evidencia (proceso vivo), o la vía que decida D8. Con D1 decide:
 
 | D1 `container_id` | Encontrado | Acción |
 | --- | --- | --- |
@@ -1417,36 +1426,35 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
       - postStart que sobrevive a `T_rec` ⇒ el backend no hace nada al terminar.
 
       En ninguno hay escrituras de la recreación después del cierre de la época.
-- [ ] **Concurrencia sin resolver (K1):** con la sesión sin resolver, `start`, `stop`, `kill`,
-      `delete` soft y hard, `recreate`, `PATCH {enabled:true}` y las escrituras de `reconcile` ⇒
-      `recreate-unresolved` sin efectos, y nunca se purga el workspace. `PATCH {enabled:false}` y
-      `conversation:disable` sí funcionan, con un CAS tardío incluido (no pisa `requested = 0`).
-      Reinicio del backend con una recreación en vuelo ⇒ por el registro durable, la sesión sigue
-      sin resolver. Se resuelve solo con el criterio de evidencia (§2.7.4), nunca por tiempo.
-- [ ] **Reinicio con Docker todavía aplicando (K1):** el backend muere con peticiones del intento
-      enviadas a un dockerd simulado que las aplica tarde.
-      - un `create` de `N` que se aplica **después de `T_d1`** y **después del primer escaneo**
-        (invisible al escaneo inicial) ⇒ su evento reinicia la ventana de quietud, y la
-        resolución lo incluye: `N` eliminado, la marca se retira solo entonces;
-      - un `rename` de `O` a `-old-` aplicado después de `T_d1` ⇒ ídem, y `O` vuelve a su nombre;
-      - corte de la suscripción de eventos o reinicio de dockerd durante la ventana ⇒ la ventana
-        vuelve a empezar;
-      - Docker sin respuesta ⇒ `recreate-unresolved` indefinidamente, nunca `resolved` por tiempo.
-
-      En todos los casos D1 apunta a un contenedor existente, ninguna operación incompatible se
-      ejecuta y la skill sigue intacta.
-- [ ] **Defensas tras resolver (K1):**
-      - un `create` con la etiqueta de un intento `resolved` que aparece más tarde ⇒ se elimina
-        sin arrancarse, en `reconcile` y antes de la siguiente operación de la sesión;
-      - un `rename` tardío del contenedor de D1 ⇒ la siguiente operación de ciclo de vida
-        restaura el nombre canónico antes de actuar, o responde 503 si no puede comprobarlo;
-      - el backend nunca arranca un contenedor con la etiqueta de un intento que no está `open`.
-- [ ] **Registro del intento:**
-      - escrito antes del primer efecto, de forma atómica;
-      - sin token ni hash;
-      - `open` → `closed` → `resolved`;
-      - en el éxito pasa a `resolved` en el paso 6.9;
-      - conservado 7 días tras `resolved`.
+- [ ] **Concurrencia en `uncertain` (K1):** `start`, `stop`, `kill`, `delete` soft y hard,
+      `recreate`, `PATCH {enabled:true}` y las escrituras de `reconcile` ⇒ `recreate-unresolved`
+      sin efectos, y nunca se purga el workspace. `PATCH {enabled:false}` y `conversation:disable`
+      sí funcionan, con un CAS tardío incluido (no pisa `requested = 0`).
+- [ ] **Camino exitoso completo sin bloqueo circular (K1.3):** recreación con el registro en
+      `open` ⇒ el propio intento ejecuta el paso 5 (autorización, marca, probe, archivo) y el
+      paso 6 bajo su lock y época, sin `recreate-unresolved`. Mientras tanto, una operación ajena
+      espera el lock o responde `busy`, nunca actúa. Al terminar, el registro pasa a `resolved`
+      (`committed`) y `capture.effective:true`.
+- [ ] **El `N` confirmado nunca es sobrante (K1.1):** recreación exitosa → `reconcile` (reinicio
+      del backend) → `stop` → `start`, varias veces ⇒ `N` se conserva y arranca con su id, su
+      captura sigue efectiva, y ninguna eliminación le afecta aunque lleve la etiqueta de un
+      intento `resolved`. Un sobrante real (otro contenedor con esa etiqueta y otro id, nunca
+      arrancado) sí se elimina sin arrancarse.
+- [ ] **Evidencia y no tiempo (K1.2):**
+      - con el proceso vivo y dockerd que responde tarde a un `create` o un `rename` ⇒ el
+        registro sigue `uncertain` hasta esa respuesta, la continuación tardía no hace efectos,
+        y la resolución usa la respuesta y el estado observado;
+      - las peticiones a Docker del intento nunca se abortan en el cliente;
+      - dockerd sin respuesta ⇒ `uncertain` indefinidamente.
+- [ ] **Reinicio del backend con un intento `open` o `uncertain` (K1.2):** con el `create` de
+      `N` aplicado antes del reinicio, después de `T_d1`, o todavía invisible al escaneo inicial
+      ⇒ la sesión queda en `recreate-unresolved` y **no se resuelve automáticamente** por ningún
+      plazo ni escaneo (D8 pendiente). D1 apunta a un contenedor existente, ninguna operación
+      incompatible se ejecuta, la skill sigue intacta, y deshabilitar y el comando de emergencia
+      funcionan.
+- [ ] **Registro del intento:** escrito antes del primer efecto, de forma atómica, sin token ni
+      hash; estados `open` → `resolved` o `open` → `uncertain` → `resolved`; `outcome` fijado al
+      resolver; conservado hasta el hard delete, sin que eso sea un límite ni una garantía.
 - [ ] Paso 4 atómico: en ningún instante observable `container_id = N` con un hash distinto del de
       `N`.
 - [ ] `docker start` manual de `O` entre los pasos 2 y 3 ⇒ rollback sin arrancar `N`.

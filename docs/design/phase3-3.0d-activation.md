@@ -382,20 +382,18 @@ Nada de esto exige una segunda recreación, que §5.2 probablemente bloquearía,
 >   hasta que su promesa se resuelve.
 > - `T_d1` = 60 s vale **solo para D1**, que tiene una duración máxima por sentencia. Docker no
 >   tiene un límite equivalente.
-> - Un **registro durable del intento** (`recreate-attempt.json`, sin secretos) mantiene la sesión
->   sin resolver también tras reiniciar el backend.
-> - El intento se declara resuelto solo por **evidencia observada**: sin llamadas en vuelo, D1
->   definitivo, `T_quiet` sin eventos con una suscripción en vivo y dos escaneos idénticos. Nunca
->   por tiempo.
-> - Tras resolver hay defensas: los contenedores de un intento resuelto se eliminan sin
->   arrancarlos, y se comprueba el nombre canónico antes de cada operación.
-> - Cada intento tiene una época, que se cierra al vencer el tope; ninguna continuación tardía
->   hace efectos.
-> - Mientras quede trabajo sin resolver, la sesión rechaza las operaciones incompatibles
->   (`recreate-unresolved`). Deshabilitar y el comando de emergencia siempre funcionan.
-> - Un CAS ambiguo no lleva a borrar `N`: se decide releyendo después de `T_d1`.
-> - El rollback resuelto (sin `unresolved`) y el no resuelto (`unresolved: true`) se distinguen
->   en la respuesta y en los criterios.
+> - Las peticiones a Docker **no se abortan en el cliente**: los topes solo dejan de esperar, y
+>   la respuesta de dockerd es la evidencia de cómo terminó cada una.
+> - Un **registro durable del intento** (`recreate-attempt.json`, sin secretos) tiene tres
+>   estados:
+>   - `open`: el propio intento actúa bajo su lock, paso 5 incluido, sin bloqueo circular;
+>   - `uncertain`: hay peticiones sin respuesta, o se encontró tras un reinicio del backend;
+>   - `resolved`.
+> - Tras un reinicio no hay evidencia de terminación, así que la sesión **queda en
+>   `recreate-unresolved`**. Cualquier salida heurística es la decisión D8 del responsable, que no
+>   se adopta.
+> - Un sobrante solo es un contenedor con la etiqueta de un intento `resolved` cuyo id **no** es el
+>   vigente de D1. El `N` confirmado nunca se elimina.
 >
 > Donde este apartado diga otra cosa, manda el contrato.
 
@@ -1020,7 +1018,7 @@ requiere autorización explícita del responsable.
 
 ## 9. Decisiones
 
-D1–D6 las cerró el responsable con las recomendaciones de Work. D7 lo cerró el 2026-10-26.
+D1–D6 las cerró el responsable con las recomendaciones de Work. D7 lo cerró el 2026-10-26. D8 surgió en la revisión de consistencia del contrato y está pendiente.
 
 | | Decisión |
 | --- | --- |
@@ -1031,6 +1029,7 @@ D1–D6 las cerró el responsable con las recomendaciones de Work. D7 lo cerró 
 | D5 | Nunca se recrea una sesión en marcha, ni automáticamente ni por el endpoint |
 | D6 | **ID inmutable de imagen**: el preflight lo muestra, el POST lo exige (`expectImageId`), la etiqueta se comprueba en ese ID y `createContainer` lo usa |
 | D7 | **Decidido (2026-10-26): probe fresco**, sin caché positiva; single-flight para consultas concurrentes, timeouts acotados y `checkedAt` (§6.2) |
+| D8 | **Pendiente, no adoptada.** Salida de `recreate-unresolved` tras un reinicio del backend sin evidencia de terminación de Docker, con una garantía explícitamente heurística (por ejemplo, una atestación del operador o un reinicio observado de dockerd). Mientras no se decida, la sesión queda bloqueada (contrato §2.7.4) |
 
 ## 10. Trazabilidad de los hallazgos de Work
 
