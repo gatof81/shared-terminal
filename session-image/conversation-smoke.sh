@@ -992,6 +992,14 @@ check "no token: zero requests to st-backend" [ "$(count ctl-relay)" = 0 ]
 # 11d — the real CLI with the control dir mounted, in every shape, behaves
 # exactly as without it (§2.7.5 compatibility validation).
 hook_seq() { jq -r '.event' "$OUT/$1.jsonl" 2>/dev/null | uniq | tr '\n' ' '; }
+# What the comparison uses: per event type, how many arrived — taken BEFORE
+# tmux is killed. MessageDisplay batch counts depend on stream timing and the
+# interactive session's SessionEnd races the kill, so neither is compared
+# (MessageDisplay must still be present). The raw sequence goes to the log.
+hook_profile() {
+	jq -sc 'map(.event) | group_by(.) | map({ (.[0]): (if .[0] == "MessageDisplay" then "present" else length end) }) | add // {}' \
+		"$OUT/$1.jsonl" 2>/dev/null
+}
 cli_variant() { # cli_variant <tag> [docker args…]
 	local tag="$1"
 	shift
@@ -1002,11 +1010,14 @@ cli_variant() { # cli_variant <tag> [docker args…]
 	check "[$tag] claude -p answers normally" out_is "$HOLA_OUT"
 	check "[$tag] no settings warning or hook error on screen" \
 		bash -c '! grep -qiE "settings error|invalid settings|hook error" <<<"$1"' _ "$(tab_screen)"
+	sleep 1 # the -p run's last hooks reach the recorder
+	PROFILE[$tag]=$(hook_profile "$tag")
+	note "[$tag] hook sequence: $(hook_seq "$tag")"
 	docker exec "$SESS" tmux kill-server >/dev/null 2>&1
 }
+declare -A PROFILE
 write_hooks_file
 cli_variant ctl-base || exit 1
-BASE_SEQ=$(hook_seq ctl-base)
 ctl_clear
 cli_variant ctl-empty "${CTL_MOUNT[@]}"
 ctl "touch /wr/.st-control/$SID/relay.enabled /wr/.st-control/$SID/defer-skill-seed"
@@ -1018,9 +1029,11 @@ ctl "chmod 000 /wr/.st-control/$SID"
 cli_variant ctl-unreadable "${CTL_MOUNT[@]}"
 ctl "chmod 755 /wr/.st-control/$SID"
 for tag in ctl-empty ctl-markers ctl-json ctl-unreadable; do
-	check "[$tag] hook sequence identical to the run without the control dir" [ "$(hook_seq "$tag")" = "$BASE_SEQ" ]
+	check "[$tag] same hooks as without the control dir (${PROFILE[$tag]})" [ "${PROFILE[$tag]}" = "${PROFILE[ctl-base]}" ]
 done
-note "hook sequence (MessageDisplay batches collapsed) in every control-dir shape: $BASE_SEQ"
+check "the baseline profile has every hook of the turn" \
+	bash -c 'jq -e ".SessionStart >= 2 and .UserPromptSubmit == 2 and .PreToolUse == 1 and .PostToolUse == 1 and .Stop == 2 and .MessageDisplay == \"present\"" <<<"$1" >/dev/null' _ "${PROFILE[ctl-base]}"
+note "hook profile (count per event; MessageDisplay batches not counted) in every control-dir shape: ${PROFILE[ctl-base]}"
 
 # 11e — deferred seeding never overwrites what is in the workspace.
 SKILL_REL=.st/claude-state/skills/delegate-task/SKILL.md
