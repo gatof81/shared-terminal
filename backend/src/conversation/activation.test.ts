@@ -445,8 +445,11 @@ describe("enable / disable (§2.4 table, §2.7.5)", () => {
 	});
 	it("disable --all writes the global marker and removes every hooks file and relay marker; enable-all removes only the global marker", async () => {
 		for (const sid of ["a", "b"]) await plant(sid);
+		// "c" has only a marker left (crash between marker and hooks file).
+		await fs.mkdir(controlDir(root, "c"), { recursive: true });
+		await fs.writeFile(relayEnabledPath(root, "c"), "");
 		const removed = await disableAll(deps());
-		expect(removed.sort()).toEqual(["a", "b"]);
+		expect(removed.sort()).toEqual(["a", "b", "c"]);
 		for (const sid of ["a", "b"]) expect(await exists(relayEnabledPath(root, sid))).toBe(false);
 		expect(await exists(revokedAllPath(root))).toBe(true);
 		expect(

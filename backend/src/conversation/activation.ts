@@ -387,8 +387,9 @@ export async function disableAll(deps: ActivationDeps, reason?: string): Promise
 	});
 	await revokeAllIngestTokens();
 	const removed = await removeAllHooksFiles(deps.workspaceRoot);
-	await removeAllRelayMarkers(deps.workspaceRoot);
-	return removed;
+	const markers = await removeAllRelayMarkers(deps.workspaceRoot);
+	// A session may have only a marker left (crash between the two writes).
+	return [...new Set([...removed, ...markers])];
 }
 
 /** `conversation:enable-all`: removes only the global marker. */
