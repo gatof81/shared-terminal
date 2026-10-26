@@ -133,8 +133,8 @@ atajo. Para el piloto (§7) se elige una sesión que pase.
 1. **Lock por sesión** adquirido. Es un mapa en proceso; el backend es único. `start`, `stop`,
    `kill`, `delete` (soft y hard, incluida la purga del workspace) y `recreate` toman el mismo
    lock (§1). `recreate` no espera: si está ocupado, responde `busy`. Las otras cuatro esperan a
-   que termine, con el mismo tope de tiempo que la recreación, y después actúan sobre el estado
-   que esta dejó.
+   que termine, como mucho **T_rec + T_rb = 6 min** (§5.3.1). Pasado ese tiempo responden 409
+   `busy` y no hacen nada. Al obtener el lock actúan sobre el estado que dejó la recreación.
 2. La sesión existe, su `status` no es `failed` ni `terminated`, y tiene `container_id`
    (`no-container`: el siguiente start ya crea uno nuevo, así que no hay nada que recrear).
 3. `inspect(container_id)`: el contenedor existe y `State.Running === false`
@@ -261,6 +261,29 @@ conoce y la captura de `N` no se puede activar. La salida es la de cualquier ses
 `requiresRecreate` y la capa bloqueada: el owner resuelve los bloqueos de §5.2, o la captura se
 queda sin activar en esa sesión. No hay salida destructiva (D4).
 
+#### 5.3.1 Tope de tiempo
+
+Una llamada a Docker sin tope (`create`, `start`, `inspect`, `changes`, `rename`) con el daemon
+colgado retendría el lock hasta reiniciar el backend. Por eso hay dos topes:
+
+- **Recreación: `T_rec` = 5 min**, desde el lock hasta el final del paso 6. Incluye la espera de
+  readiness (≤ 60 s). Cada llamada a Docker corre contra el tiempo que le queda.
+  - Si el tope vence antes del paso 4, se aborta y se pasa al rollback.
+  - El paso 4 comprueba el tope **justo antes** del compare-and-set: con el tope vencido no
+    confirma. Así una recreación abortada nunca cambia D1.
+  - Si vence después del paso 4, no se deshace nada (§5.3). Lo que quede del paso 6 se registra.
+- **Rollback: `T_rb` = 60 s**, propio. Si tampoco termina (Docker sigue colgado), el lock se
+  libera igual y la sesión queda marcada en memoria como "recreación interrumpida".
+  - La siguiente operación de ciclo de vida sobre esa sesión (`start`, `stop`, `kill`, `delete`,
+    `recreate`) aplica primero, bajo el lock, la misma resolución por estado de §5.6 y después
+    actúa.
+  - Si la resolución tampoco puede hablar con Docker, la operación responde 503
+    `docker-unavailable` sin tocar D1 ni el workspace.
+  - Por eso un `DELETE ?hard=true` nunca purga un workspace sobre el que `N` pudiera estar
+    corriendo.
+  - Si el backend se reinicia, la marca en memoria se pierde, pero `reconcile` hace la misma
+    resolución al arrancar.
+
 ### 5.4 Estado compartido del workspace (A2)
 
 `O` y `N` montan **el mismo** directorio de workspace. El estado del CLI, `~/.ssh`, `gh` y
@@ -316,8 +339,16 @@ queda sin activar en esa sesión. No hay salida destructiva (D4).
 
 `reconcile`, al arrancar, añade una pasada nueva:
 
-1. `docker ps -a --filter label=io.shared-terminal.recreate-of`.
-2. `docker ps -a --filter name=-old-`.
+1. `docker ps -a --filter label=io.shared-terminal.recreate-of`: los `N`, que llevan las
+   etiquetas desde su creación.
+2. `docker ps -a --filter name=-old-`, y de ese resultado **solo** los nombres que encajan
+   exactamente con `^st-[0-9a-f]{12}-old-[0-9]+$` y cuyo prefijo de 12 caracteres corresponde a
+   una sesión de D1.
+   - `O` es un contenedor ya existente y no se le pueden añadir etiquetas; por eso se busca por
+     nombre.
+   - Los sufijos `-new-<ts>` y `-old-<ts>` sobre `st-<12>` quedan **reservados** para la
+     recreación. Se documenta junto a `containerName`, y un test fija el formato.
+   - Un nombre que no encaje no se toca nunca.
 
 Para cada sesión afectada, decide con D1:
 
@@ -353,6 +384,12 @@ vería un contenedor renombrado.
 - Fallo al escribir el archivo tras la confirmación ⇒ `hooks-file-missing`; `PATCH
   {enabled:true}` lo repara sin recrear; `reconcile` también.
 - Las tres filas de §5.6.
+- Tope (§5.3.1), con Docker simulado que no responde:
+  - en el paso 3 ⇒ aborta, no confirma, hace rollback;
+  - con el rollback colgado ⇒ el lock se libera a los `T_rec + T_rb` y la marca queda;
+  - el `DELETE ?hard=true` siguiente resuelve primero o responde 503, y nunca purga;
+  - las operaciones en espera responden `busy` al vencer.
+- Nombres que no encajan con el patrón reservado ⇒ no se tocan.
 
 **Smoke de Docker con el CLI real:**
 
@@ -476,7 +513,8 @@ requiere autorización explícita del responsable.
   avance, la vía sería una propuesta aparte de **traslado verificado** de rutas de HOME
   enumeradas, por ejemplo `~/.bash_history`, copiadas de `O` a `N` antes de la confirmación y
   comparadas byte a byte. No está en 3.0d.
-- **Tiempo de la recreación:** `docker diff`, create, start y readiness (≤ 60 s). Se mide en el
+- **Tiempo de la recreación:** `docker diff`, create, start y readiness (≤ 60 s), dentro de
+  `T_rec` (§5.3.1). Se mide en el
   smoke. Es una acción administrativa, no un camino caliente.
 - **Lock en proceso:** vale mientras haya un único backend, que es el despliegue actual. Varios
   backends exigirían un lock en D1.
