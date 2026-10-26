@@ -1455,7 +1455,7 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
 - [ ] **Reinicio del backend con un intento `open` o `uncertain` (K1.2):** con el `create` de
       `N` aplicado antes del reinicio, después de `T_d1`, o todavía invisible al escaneo inicial
       ⇒ la sesión queda en `recreate-unresolved` y **no se resuelve automáticamente** por ningún
-      plazo ni escaneo (D8 pendiente). D1 apunta a un contenedor existente, ninguna operación
+      plazo ni escaneo (D8: fail-closed). D1 apunta a un contenedor existente, ninguna operación
       incompatible se ejecuta, la skill sigue intacta, y deshabilitar y el comando de emergencia
       funcionan.
 - [ ] **Registro del intento:** escrito antes del primer efecto, de forma atómica, sin token ni

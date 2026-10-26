@@ -390,8 +390,8 @@ Nada de esto exige una segunda recreación, que §5.2 probablemente bloquearía,
 >   - `uncertain`: hay peticiones sin respuesta, o se encontró tras un reinicio del backend;
 >   - `resolved`.
 > - Tras un reinicio no hay evidencia de terminación, así que la sesión **queda en
->   `recreate-unresolved`**. Cualquier salida heurística es la decisión D8 del responsable, que no
->   se adopta.
+>   `recreate-unresolved`**. D8 (decidida): fail-closed, sin resolución automática heurística, y
+>   el piloto solo con una sesión descartable.
 > - Un sobrante solo es un contenedor con la etiqueta de un intento `resolved` cuyo id **no** es el
 >   vigente de D1. El `N` confirmado nunca se elimina.
 >
