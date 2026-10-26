@@ -311,10 +311,10 @@ def serve_connection(sock):
         sock.sendall(BAD_REQUEST)
         return
     method, target, _ = parts
-    headers = parse_headers(lines[1:])
     if method == b"GET" and target == STATUS_PATH:
         sock.sendall(STATUS)
         return
+    headers = parse_headers(lines[1:])
     if method != b"POST" or target != PATH.encode():
         sock.sendall(NOT_FOUND)
         return

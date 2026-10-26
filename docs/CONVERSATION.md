@@ -80,8 +80,8 @@ Reglas:
   `0600`. El usuario de la sesión *MUST* poder consultar las marcas (buscar en el directorio) y
   *MUST NOT* poder modificarlas (montaje ro, propiedad de root). La imagen trata un directorio
   que no puede examinar como "marca presente" (fail-closed, §2.7.3), así que un `0700` bloquearía
-  la siembra para siempre. El backend fija el modo con un `chmod` explícito: `mkdir` no cambia
-  los permisos de un directorio que ya existe.
+  la siembra para siempre. El backend fija el modo con un `chmod` explícito en cada escritura
+  (`RecreateAttemptStore`): `mkdir` no cambia los permisos de un directorio que ya existe.
 - La imagen *MUST* comportarse de forma idéntica a la actual cuando el directorio montado está
   vacío (smoke test: `claude -p hola` no produce ninguna petición saliente a `st-backend` ni al
   puerto del relay, y no hay ningún proceso relay).

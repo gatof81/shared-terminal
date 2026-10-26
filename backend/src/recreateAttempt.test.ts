@@ -48,11 +48,13 @@ describe("RecreateAttemptStore — persistence", () => {
 		expect(await gateError(store)).toBeNull();
 	});
 
-	it("begin writes the open record atomically, 0600 in a 0700 dir, with no secret and no temp left", async () => {
+	it("begin writes the open record atomically, 0600 in a 0755 dir, with no secret and no temp left", async () => {
 		const store = new RecreateAttemptStore(root);
 		await store.begin(SID, identity());
 		const dir = path.dirname(recordFile());
-		expect((await fs.stat(dir)).mode & 0o777).toBe(0o700);
+		// 0755: the session user must be able to search the mounted control
+		// dir to examine its markers (§2.1); the record itself is 0600.
+		expect((await fs.stat(dir)).mode & 0o777).toBe(0o755);
 		expect((await fs.stat(recordFile())).mode & 0o777).toBe(0o600);
 		const raw = await fs.readFile(recordFile(), "utf8");
 		const rec = JSON.parse(raw);
@@ -65,6 +67,15 @@ describe("RecreateAttemptStore — persistence", () => {
 		});
 		expect(raw).not.toMatch(/token|hash/i);
 		expect(await fs.readdir(dir)).toEqual([RECORD_FILE]);
+	});
+
+	it("an existing 0700 control dir (earlier build) is brought to 0755 by the next write", async () => {
+		const dir = path.dirname(recordFile());
+		await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+		await fs.chmod(dir, 0o700);
+		await new RecreateAttemptStore(root).begin(SID, identity());
+		expect((await fs.stat(dir)).mode & 0o777).toBe(0o755);
+		expect((await fs.stat(recordFile())).mode & 0o777).toBe(0o600);
 	});
 
 	it("a failed rename leaves the previous record intact and removes the temp file", async () => {
