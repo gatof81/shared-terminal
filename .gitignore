@@ -45,3 +45,7 @@ REVIEW.md
 # bind-mounted workspace, NOT this source repo.
 .config/
 .npm-global/
+
+# Python bytecode (session-image/hooks/relay.py)
+__pycache__/
+*.pyc

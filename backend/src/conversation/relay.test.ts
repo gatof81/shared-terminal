@@ -538,7 +538,44 @@ describe("relay — losses are counted and reported (§3.2.1)", () => {
 		);
 	}, 60_000);
 
-	it("kept-alive connections don't retain delivered bodies; reused, they stay intact, ordered and 204", async () => {
+	it("one request per connection: answered 204 and closed at once, so no client can hold a socket the relay will close", async () => {
+		await startUpstream("ok");
+		const r = await startRelay();
+		// A client that keeps its end open and tries to reuse the socket
+		// (what a pooling HTTP client does) gets the 204 with
+		// `Connection: close`, then the relay's FIN — immediately, not
+		// after an idle timeout that a later hook could race (§2.6).
+		const sock = net.connect(r.port, "127.0.0.1");
+		await new Promise((res) => sock.once("connect", res));
+		let data = "";
+		let ended = 0;
+		sock.on("data", (c) => {
+			data += c.toString("latin1");
+		});
+		sock.on("end", () => {
+			ended = performance.now();
+		});
+		const b = body(SID, "Stop");
+		const t0 = performance.now();
+		sock.write(
+			`POST ${PATH} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(b)}\r\n\r\n${b}`,
+		);
+		await until(() => ended > 0, 2000);
+		expect(data).toBe("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+		expect(ended - t0).toBeLessThan(500);
+		// Whatever the client writes after that is never read or forwarded.
+		sock.on("error", () => {});
+		sock.write(
+			`POST ${PATH} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(b)}\r\n\r\n${b}`,
+		);
+		await until(() => received.length === 1, 2000);
+		await new Promise((res) => setTimeout(res, 300));
+		expect(r.stats()).toMatchObject({ received: 1, forwarded: 1 });
+		expect(received).toHaveLength(1);
+		sock.destroy();
+	});
+
+	it("clients that keep their end open don't make the relay retain delivered bodies; later rounds stay intact, ordered and 204", async () => {
 		const L5 = 8 * 1024 * 1024;
 		const K = 6;
 		await startUpstream("ok");
@@ -555,58 +592,48 @@ describe("relay — losses are counted and reported (§3.2.1)", () => {
 			b.write('"}', b.length - 2);
 			return b;
 		};
-		// One raw keep-alive socket per client, so nothing but the relay can
-		// close them; a request is answered when its 204 head has arrived.
-		const conns = await Promise.all(
-			Array.from({ length: K }, async () => {
-				const sock = net.connect(r.port, "127.0.0.1");
-				await new Promise((res) => sock.once("connect", res));
-				let data = "";
-				sock.on("data", (c) => {
-					data += c.toString("latin1");
-				});
-				return {
-					sock,
-					send: async (b: Buffer) => {
-						const before = (data.match(/HTTP\/1\.1 /g) ?? []).length;
-						sock.write(
-							`POST ${PATH} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: ${b.length}\r\n\r\n`,
-						);
-						sock.write(b);
-						await until(() => (data.match(/HTTP\/1\.1 /g) ?? []).length > before, 5000);
-						return data.slice(data.lastIndexOf("HTTP/1.1 "));
-					},
-				};
-			}),
-		);
+		// Raw sockets the test never closes until the end: anything the
+		// relay held per connection would stay alive with them.
+		const open: net.Socket[] = [];
+		const send = async (b: Buffer) => {
+			const sock = net.connect(r.port, "127.0.0.1");
+			await new Promise((res) => sock.once("connect", res));
+			open.push(sock);
+			let data = "";
+			sock.on("data", (c) => {
+				data += c.toString("latin1");
+			});
+			sock.write(
+				`POST ${PATH} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: ${b.length}\r\n\r\n`,
+			);
+			sock.write(b);
+			await until(() => data.includes("\r\n\r\n"), 5000);
+			return data;
+		};
 		const sent: Buffer[] = [];
 		const round = async (offset: number) => {
 			for (let i = 0; i < K; i++) {
 				const b = bigBody(offset + i);
 				sent.push(b);
 				// Sequential and drained one at a time: the queue never refuses.
-				expect(await conns[i].send(b)).toBe("HTTP/1.1 204 No Content\r\n\r\n");
+				expect(await send(b)).toBe("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
 				await until(() => received.length === sent.length, 5000);
 			}
 		};
 		await round(0);
-		// All delivered, queue empty, every connection still open and idle.
 		await until(() => (r.stats().forwarded ?? 0) === K, 5000);
 		const held = (await rss()) - baseline;
-		expect(conns.every((c) => !c.sock.destroyed)).toBe(true);
 		// Retained bodies would be K × ~8 MiB = 48 MiB here; the documented
 		// budget allows none outside the queue once delivered. 8 MiB slack.
 		expect(held).toBeLessThanOrEqual(8 * 1024);
-		// Reuse every connection (within the 2 s idle window): same answers,
-		// every body intact and in order.
 		await round(K);
 		await until(() => r.stats().forwarded === 2 * K, 5000);
 		expect(r.stats()).toMatchObject({ received: 2 * K, forwarded: 2 * K });
 		expect(r.stats().dropped ?? 0).toBe(0);
 		expect(received.map((x) => x.body)).toEqual(sent.map((b) => b.toString()));
-		for (const c of conns) c.sock.destroy();
+		for (const s of open) s.destroy();
 		console.log(
-			`relay keep-alive retention: ${K} × 8 MiB delivered, RSS above baseline with idle connections ${Math.round(held / 1024)} MiB`,
+			`relay retention: ${K} × 8 MiB delivered, RSS above baseline with the clients' sockets open ${Math.round(held / 1024)} MiB`,
 		);
 	}, 60_000);
 

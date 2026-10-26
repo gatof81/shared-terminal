@@ -548,6 +548,21 @@ receiver text200 rx-tab
 tab_start --dangerously-skip-permissions && tab_turn "ST_SCENARIO=bash"
 check "interactive, backend answering non-JSON: no hook error on screen" [ "$(hook_errors)" = 0 ]
 check "nothing about hooks ever reaches the model" [ "$(grep -c -e 'st-backend' -e 'hook error' -e "$RELAY_PORT" "$OUT/model-requests.jsonl")" = 0 ]
+# Keep-alive race (§2.6): the CLI pools idle sockets for 5 s; a relay that
+# closed idle ones after its 2 s read timeout lost the hook sent at that
+# moment, shown as "hook error" (4/20 turns at a 1.97 s gap locally, and
+# once in CI). Turns spaced 1.80–2.20 s after the previous one, timed inside
+# the container so docker exec latency doesn't blur the gap.
+RACE=$(docker exec "$SESS" bash -c '
+	for gap in $(seq 1800 10 2200); do
+		: > /tmp/user-hooks.log
+		tmux send-keys -t tab1 "race $gap" Enter
+		i=0; until grep -q "^stop" /tmp/user-hooks.log; do sleep 0.01; i=$((i + 1)); [ "$i" -gt 3000 ] && echo timeout && exit; done
+		stop=$(awk "/^stop/{print \$2}" /tmp/user-hooks.log)
+		while [ $(( $(date +%s%3N) - stop )) -lt "$gap" ]; do sleep 0.002; done
+	done
+	tmux capture-pane -p -S -2000 -t tab1 | grep -c -i "hook error"')
+check "41 turns spaced 1.80–2.20 s apart: no hook error ($RACE)" [ "$RACE" = 0 ]
 docker exec "$SESS" tmux kill-server >/dev/null 2>&1
 
 # 4b — recovery: the relay's count of what it could not deliver comes back
@@ -690,9 +705,13 @@ LAT=$(docker exec "$SESS" bash -c 'for i in $(seq 200); do
 		http://127.0.0.1:47613/ingest/claude/hook
 done' | sort -n | awk '{ a[NR] = $1 * 1000 } END { printf "p50 %.2f ms, p99 %.2f ms, max %.2f ms", a[int(NR * 0.5)], a[int(NR * 0.99)], a[NR] }')
 note "relay answer time seen by a hook client (200 sequential POSTs, new connection each): $LAT"
+HDR=$(docker exec "$SESS" curl -q -s -D - -o /dev/null --noproxy "*" -X POST -H "Content-Type: application/json" \
+	--data-binary '{"hook_event_name":"Notification"}' http://127.0.0.1:47613/ingest/claude/hook | tr -d '\r')
+check "the relay closes every connection after its 204 (no idle socket to race)" grep -qix 'connection: close' <<<"$HDR"
 receiver slow:5 sat
-# Flood from inside the container: 4000 small events as fast as one
-# keep-alive client can send them, then 40 bodies of 1 MiB (byte bound).
+# Flood from inside the container: 4000 small events as fast as one client
+# can send them (http.client reconnects after each `Connection: close`), then
+# 40 bodies of 1 MiB (byte bound).
 FLOOD='
 import http.client, json, sys
 sid, n, size = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
