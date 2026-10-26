@@ -312,6 +312,13 @@ contenedor con captura. Recibe los hooks del CLI y del script en loopback y los 
   `^%\d{1,6}$`. Todo otro header se ignora.
 - Concurrencia de entrada: ≤ 16 conexiones en atención; la 17.ª recibe 204 sin leer el cuerpo y se
   cierra, contada como perdida. Lectura con timeout de 2 s por operación de socket.
+- **Una petición por conexión:** toda respuesta lleva `Connection: close` y el relay cierra al
+  enviarla. *MUST NOT* mantener conexiones keep-alive de entrada. Motivo (medido tras 3.0c, CLI
+  real): el CLI (Bun) conserva sockets inactivos 5 s; un relay que cierra los inactivos a los 2 s
+  compite con el hook siguiente, que llega a un socket cerrado y el CLI lo muestra como
+  "hook error" (4/20 turnos con 1,97 s de separación en local, una vez en CI). Ningún timeout de
+  inactividad del relay es seguro frente a un pool que no controlamos (el CLI se autoactualiza);
+  una conexión de loopback por hook cuesta décimas de milisegundo.
 
 **Cola y salida**
 
@@ -322,8 +329,7 @@ contenedor con captura. Recibe los hooks del CLI y del script en loopback y los 
   se recibe directo en un búfer reservado), **más** el cuerpo que se está enviando al backend (≤ L5,
   ya fuera de la cola; se envía sin concatenar, sin copia), más búferes de socket de ≤ 64 KiB por
   conexión. Es decir, ≈ 24 MiB de cuerpos más el intérprete y el asignador. Ningún cuerpo queda
-  retenido fuera de ese presupuesto: el handler suelta su referencia al pasarlo a la cola (antes de
-  esperar otra petición en una conexión keep-alive) y el hilo de salida la suelta al terminar cada
+  retenido fuera de ese presupuesto: el handler suelta su referencia al pasarlo a la cola y el hilo de salida la suelta al terminar cada
   envío. El entrypoint arranca el relay con `MALLOC_MMAP_THRESHOLD_=131072` para que cada cuerpo
   grande se devuelva al sistema al liberarse (sin eso, glibc retiene el pico de una ráfaga). Los picos medidos
   (3.0c: con cuerpos pequeños, con 1 MiB y con cuerpos de L5) se informan con su escenario; no son

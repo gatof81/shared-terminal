@@ -280,7 +280,6 @@ def discard(sock, buf, n):
     return first, rest
 
 
-NO_CONTENT = b"HTTP/1.1 204 No Content\r\n\r\n"
 NO_CONTENT_CLOSE = b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"
 NOT_FOUND = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 BAD_REQUEST = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -291,60 +290,61 @@ CONTINUE = b"HTTP/1.1 100 Continue\r\n\r\n"
 
 
 def serve_connection(sock):
-    """One client connection; keep-alive until it closes, idles 2 s or errs."""
+    """One request per connection: answered 204 and closed (see the end)."""
     sock.settimeout(SOCKET_TIMEOUT)
     buf = b""
-    while True:
-        head, buf = read_head(sock, buf)
-        if head is None:
+    head, buf = read_head(sock, buf)
+    if head is None:
+        return
+    lines = head.split(b"\r\n")
+    parts = lines[0].split(b" ")
+    if len(parts) != 3 or not parts[2].startswith(b"HTTP/1."):
+        sock.sendall(BAD_REQUEST)
+        return
+    method, target, _ = parts
+    headers = parse_headers(lines[1:])
+    if method != b"POST" or target != PATH.encode():
+        sock.sendall(NOT_FOUND)
+        return
+    stats.inc("received")
+    raw_pane = headers.get("x-st-tmux-pane", "")
+    pane = raw_pane if PANE_RE.fullmatch(raw_pane) else ""
+    declared = headers.get("content-length", "")
+    # Refused without reading the body: whatever of it arrived with the
+    # headers is enough to tell, usually, whose conversation it was.
+    if "transfer-encoding" in headers or not DIGITS_RE.fullmatch(declared) or int(declared) > MAX_BODY:
+        drop("too_large", 0, session_of(buf), pane)
+        sock.sendall(NO_CONTENT_CLOSE)
+        return
+    n = int(declared)
+    reserved = fifo.reserve(n)
+    if headers.get("expect", "").lower() == "100-continue":
+        sock.sendall(CONTINUE)
+    if reserved:
+        body, buf = read_exact(sock, buf, n)
+        if body is None:
+            fifo.cancel(n)
+            drop("read_error", n, session_of(buf), pane)
             return
-        lines = head.split(b"\r\n")
-        parts = lines[0].split(b" ")
-        if len(parts) != 3 or not parts[2].startswith(b"HTTP/1."):
-            sock.sendall(BAD_REQUEST)
+        fifo.put(body, pane)
+        # The queue owns it now; nothing outside its budget keeps it.
+        del body
+    else:
+        # Queue full: the body is read and dropped rather than left
+        # unread — closing on unread data resets the connection, which
+        # the CLI would show as a hook error.
+        first, buf = discard(sock, buf, n)
+        drop("queue_full", n, session_of(first or b""), pane)
+        if first is None:
             return
-        method, target, version = parts
-        headers = parse_headers(lines[1:])
-        if method != b"POST" or target != PATH.encode():
-            sock.sendall(NOT_FOUND)
-            return
-        stats.inc("received")
-        raw_pane = headers.get("x-st-tmux-pane", "")
-        pane = raw_pane if PANE_RE.fullmatch(raw_pane) else ""
-        declared = headers.get("content-length", "")
-        # Refused without reading the body: whatever of it arrived with the
-        # headers is enough to tell, usually, whose conversation it was.
-        if "transfer-encoding" in headers or not DIGITS_RE.fullmatch(declared) or int(declared) > MAX_BODY:
-            drop("too_large", 0, session_of(buf), pane)
-            sock.sendall(NO_CONTENT_CLOSE)
-            return
-        n = int(declared)
-        reserved = fifo.reserve(n)
-        if headers.get("expect", "").lower() == "100-continue":
-            sock.sendall(CONTINUE)
-        if reserved:
-            body, buf = read_exact(sock, buf, n)
-            if body is None:
-                fifo.cancel(n)
-                drop("read_error", n, session_of(buf), pane)
-                return
-            fifo.put(body, pane)
-            # The queue owns it now. Holding the local until the next
-            # request would keep a delivered body alive outside the queue's
-            # budget for as long as the client idles on a kept-alive socket.
-            del body
-        else:
-            # Queue full: the body is read and dropped rather than left
-            # unread — closing on unread data resets the connection, which
-            # the CLI would show as a hook error.
-            first, buf = discard(sock, buf, n)
-            drop("queue_full", n, session_of(first or b""), pane)
-            if first is None:
-                return
-        keep_alive = version == b"HTTP/1.1" and headers.get("connection", "").lower() != "close"
-        sock.sendall(NO_CONTENT if keep_alive else NO_CONTENT_CLOSE)
-        if not keep_alive:
-            return
+    # Never keep-alive. An idle socket the relay closes (2 s read
+    # timeout) races the client's next hook: the CLI (Bun) pools idle
+    # sockets for 5 s, so a hook sent as the relay closes lands on a
+    # dead socket and the CLI prints "hook error". Measured with the
+    # real CLI: 4/20 turns at a 1.97 s gap, 0 with this. No relay idle
+    # timeout is safe against a client pool we don't control (the CLI
+    # self-updates), and a new loopback connection per hook is cheap.
+    sock.sendall(NO_CONTENT_CLOSE)
 
 
 def accept_loop(listener):
