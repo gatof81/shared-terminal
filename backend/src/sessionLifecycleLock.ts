@@ -2,8 +2,9 @@
  * sessionLifecycleLock.ts — per-session lock for lifecycle operations
  * (CONVERSATION.md §2.7.2, precondition 1; 3.0d).
  *
- * `start`, `stop`, `kill`, `delete` (soft and hard, purge included) and,
- * from 3.0d on, `recreate` take the same lock, so two of them never run
+ * `start`, `stop`, `kill`, `delete` (soft and hard, purge included), the
+ * initial `create` (from before its row exists until 201 or rollback)
+ * and, from 3.0d on, `recreate` take the same lock, so two of them never run
  * on one session at once. Without it, the recreation's guarantees are
  * hollow: a `DELETE ?hard=true` racing a recreation could purge the
  * workspace while the new container is starting on it.
@@ -25,7 +26,7 @@
 /** T_rec (5 min) + T_rb (60 s), CONVERSATION.md §2.7.4. */
 export const LIFECYCLE_LOCK_MAX_WAIT_MS = 6 * 60 * 1000;
 
-export type LifecycleOp = "start" | "stop" | "kill" | "delete" | "recreate";
+export type LifecycleOp = "create" | "start" | "stop" | "kill" | "delete" | "recreate";
 
 export class SessionBusyError extends Error {
 	readonly code = "busy";

@@ -176,6 +176,142 @@ async function spinUp(sessions: SessionManager, docker: DockerManager) {
 	baseUrl = `http://127.0.0.1:${port}`;
 }
 
+/**
+ * A fake world for POST /sessions: `create` inserts the row with the id
+ * the route chose, `spawn` is gated and records when it would (re)create
+ * the workspace directory, delete-side effects are recorded in order.
+ */
+function makeCreateWorld(opts: { spawnFails?: boolean } = {}) {
+	const events: string[] = [];
+	let row: SessionMeta | null = null;
+	let createdId: string | null = null;
+	const spawnGate = deferred();
+	const sessions = {
+		create: vi.fn(async (o: { sessionId?: string; userId: string; name: string }) => {
+			createdId = o.sessionId ?? "unset";
+			row = makeMeta({ sessionId: createdId, userId: o.userId, name: o.name, status: "running" });
+			events.push("insert");
+			return row;
+		}),
+		assertOwnership: vi.fn(async () => {
+			if (!row) throw new Error("unexpected");
+			return row;
+		}),
+		get: vi.fn(async () => (row ? { ...row } : null)),
+		terminate: vi.fn(async () => {
+			events.push("terminate");
+			if (row) row = { ...row, status: "terminated" };
+		}),
+		deleteRow: vi.fn(async () => {
+			events.push("deleteRow");
+			row = null;
+		}),
+	} as unknown as SessionManager;
+	const docker = {
+		getUploadTmpDir: () => "/tmp/shared-terminal-test-uploads",
+		spawn: vi.fn(async () => {
+			events.push("spawn:begin");
+			await spawnGate.promise;
+			// spawnWithConfig mkdirs the workspace and creates the container
+			// at the end; after a purge this would recreate both.
+			events.push("workspace-mkdir");
+			if (opts.spawnFails) throw new Error("image missing");
+			events.push("container-created");
+		}),
+		kill: vi.fn(async () => {
+			events.push("kill");
+		}),
+		purgeWorkspace: vi.fn(async () => {
+			events.push("purge");
+		}),
+	} as unknown as DockerManager;
+	return { sessions, docker, events, spawnGate, id: () => createdId, rowOf: () => row };
+}
+
+describe("lifecycle lock on the initial create (POST /sessions)", () => {
+	for (const [who, path] of [
+		["owner", (id: string) => `/api/sessions/${id}?hard=true`],
+		["admin", (id: string) => `/api/admin/sessions/${id}?hard=true`],
+	] as const) {
+		it(`${who} hard delete during a pending spawn waits; nothing is recreated after the purge`, async () => {
+			const w = makeCreateWorld();
+			await spinUp(w.sessions, w.docker);
+
+			const create = fetch(`${baseUrl}/api/sessions`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ name: "s" }),
+			});
+			await until(() => w.events.includes("spawn:begin"));
+			const id = w.id() as string;
+			// The lock is held from before the row existed.
+			expect(sessionLifecycleLock.heldBy(id)).toBe("create");
+			const del = fetch(`${baseUrl}${path(id)}`, { method: "DELETE" });
+			await until(() => sessionLifecycleLock.queued(id) === 1);
+			expect(w.events).toEqual(["insert", "spawn:begin"]);
+
+			w.spawnGate.resolve();
+			expect((await create).status).toBe(201);
+			expect((await del).status).toBe(204);
+			expect(w.events).toEqual([
+				"insert",
+				"spawn:begin",
+				"workspace-mkdir",
+				"container-created",
+				"kill",
+				"terminate",
+				"purge",
+				"deleteRow",
+			]);
+			// Nothing after the purge recreates the workspace or a container.
+			const purgeAt = w.events.indexOf("purge");
+			expect(
+				w.events.slice(purgeAt).some((e) => e === "workspace-mkdir" || e === "container-created"),
+			).toBe(false);
+			expect(w.rowOf()).toBeNull();
+			expect(sessionLifecycleLock.heldBy(id)).toBeNull();
+		});
+	}
+
+	it("failed spawn: the rollback runs inside the create's hold (no deadlock), and a queued hard delete then finds nothing", async () => {
+		const w = makeCreateWorld({ spawnFails: true });
+		await spinUp(w.sessions, w.docker);
+
+		const create = fetch(`${baseUrl}/api/sessions`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ name: "s" }),
+		});
+		await until(() => w.events.includes("spawn:begin"));
+		const id = w.id() as string;
+		const del = fetch(`${baseUrl}/api/sessions/${id}?hard=true`, { method: "DELETE" });
+		await until(() => sessionLifecycleLock.queued(id) === 1);
+
+		w.spawnGate.resolve();
+		expect((await create).status).toBe(500);
+		expect((await del).status).toBe(404);
+		// Rollback = kill + row drop, serialised before the delete; the
+		// delete never purges a session that no longer exists.
+		expect(w.events).toEqual(["insert", "spawn:begin", "workspace-mkdir", "kill", "deleteRow"]);
+		expect(w.docker.purgeWorkspace).not.toHaveBeenCalled();
+		expect(sessionLifecycleLock.heldBy(id)).toBeNull();
+	});
+
+	it("the id passed to sessions.create is the one the lock was taken on", async () => {
+		const w = makeCreateWorld();
+		w.spawnGate.resolve();
+		await spinUp(w.sessions, w.docker);
+		const res = await fetch(`${baseUrl}/api/sessions`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ name: "s" }),
+		});
+		expect(res.status).toBe(201);
+		expect(((await res.json()) as { sessionId: string }).sessionId).toBe(w.id());
+		expect(w.id()).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+	});
+});
+
 describe("lifecycle lock on the REST routes", () => {
 	it("DELETE ?hard=true during a start waits, then purges only after the start has finished", async () => {
 		const w = makeWorld("stopped");

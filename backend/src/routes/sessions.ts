@@ -8,6 +8,7 @@ import { promises as fs } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import type { NextFunction, Request, Response, Router } from "express";
 import multer from "multer";
+import { v4 as uuidv4 } from "uuid";
 import type { AuthedRequest } from "../auth.js";
 import { isUserAdmin, requireAuth } from "../auth.js";
 import { runAsyncBootstrap } from "../bootstrap.js";
@@ -289,225 +290,236 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 		// reconcile() would later flip it to `stopped`, but the row stays
 		// forever and users see a zombie entry in their sidebar. Roll back
 		// the D1 row explicitly on any spawn failure.
-		let meta: Awaited<ReturnType<SessionManager["create"]>> | null = null;
-		try {
-			meta = await sessions.create({
-				userId: targetOwnerId,
-				name: trimmedName,
-				cols,
-				rows,
-				envVars: validatedEnvVars,
-				maxActiveSessions: effectiveMaxSessions,
-				// Validated above; null collapses to undefined so the
-				// manager's `?? null` lands NULL either way.
-				externalRef: typeof externalRef === "string" ? externalRef : undefined,
-			});
-			// #420 — audit every owner ≠ caller create. A log line (not a
-			// session_observe_log row): the observe-log models attach-shaped
-			// access with a start/end lifecycle, while creation is a
-			// point-in-time provenance fact that the row itself will
-			// outlive; the X-Request-Id-stamped line is the join point.
-			if (targetOwnerId !== userId) {
-				logger.info(
-					`[routes] create-on-behalf: caller=${userId} owner=${targetOwnerId} session=${meta.sessionId}`,
-				);
-			}
-			// Persist the typed config BEFORE spawning the container. If
-			// docker.spawn fails the rollback in the catch below deletes
-			// the sessions row and ON DELETE CASCADE on session_configs
-			// drops the config row atomically — no orphan config rows.
-			// Skip the INSERT for an empty `{}` config so we don't bloat
-			// D1 with no-op rows; isEmptyConfig handles the bare-POST
-			// case (validatedConfig === undefined) implicitly via the
-			// outer guard.
-			if (validatedConfig && !isEmptyConfig(validatedConfig)) {
-				// Encrypt `secret` env-var entries BEFORE the row hits
-				// D1 (#186). Plaintext is in scope only inside this
-				// handler; once `persistable` is built, the only thing
-				// that can leak is ciphertext.
-				const persistable: PersistableSessionConfig = {
-					...validatedConfig,
-					envVars: validatedConfig.envVars
-						? encryptSecretEntries(validatedConfig.envVars)
-						: undefined,
-					// #188 PR 188b: encrypt PAT / SSH credentials at the
-					// route boundary, same shape as envVars secrets. The
-					// helper returns undefined for an empty/absent blob
-					// so `jsonOrNull` collapses the column to NULL.
-					auth: encryptAuthCredentials(validatedConfig.auth),
-				};
-				await persistSessionConfig(meta.sessionId, persistable);
-			}
-			await docker.spawn(meta.sessionId);
-			const updated = await sessions.get(meta.sessionId);
-			if (!updated) {
-				// Shouldn't happen: sessions.create above just inserted this row,
-				// and nothing in this handler deletes it. Guard so serializeMeta
-				// doesn't get null. The throw falls into the catch below which
-				// runs the spawn rollback and returns 500 — correct disposition
-				// for a server-side invariant violation.
-				throw new Error(`session ${meta.sessionId} missing from D1 after create`);
-			}
-			// PR 185b2b: postCreate runs ASYNCHRONOUSLY when configured.
-			// The route returns 201 immediately so the modal can subscribe
-			// to `/ws/bootstrap/<sessionId>` and tail output live; the
-			// runner inside `runAsyncBootstrap` flips status to `failed`
-			// + kills the container on hard-fail, then broadcasts a
-			// terminal `{type:"fail"}` for the modal to render. The
-			// `bootstrapping: true` flag tells the client to open the WS
-			// instead of treating the create as immediately complete.
-			//
-			// postStart fires inside the runner on the success branch
-			// (after markBootstrapped). For sessions with postStart but
-			// NO postCreate / repo, fire it directly here — the async
-			// runner only kicks off when there's something to block on.
-			//
-			// #188 PR 188c: the trigger now fires when EITHER a repo or
-			// a postCreateCmd is configured. The runner's clone step is
-			// a no-op when `repo` is absent, so this widening is safe
-			// for the postCreate-only path and lets repo-only sessions
-			// (no hook, just a clone) get their async-bootstrap modal.
-			// Fire async bootstrap when ANY config-driven stage or hook
-			// is set. #191 PR 191b widened from `repo || postCreateCmd`
-			// to also include the three new lifecycle-hook fields.
-			const hasBootstrapConfig =
-				(validatedConfig?.repo !== null && validatedConfig?.repo !== undefined) ||
-				(validatedConfig?.gitIdentity !== null && validatedConfig?.gitIdentity !== undefined) ||
-				(validatedConfig?.dotfiles !== null && validatedConfig?.dotfiles !== undefined) ||
-				(validatedConfig?.agentSeed !== null && validatedConfig?.agentSeed !== undefined) ||
-				// #277 — writeEnvFile is another bootstrap stage that
-				// needs the config row fetched. Including it here
-				// triggers the async runner for "envVars-toggle-only"
-				// sessions and ensures the runner's `hasBootstrapConfig`
-				// gate doesn't skip the `getSessionConfig` D1 round-trip.
-				validatedConfig?.writeEnvFile === true ||
-				// #198 — same shape as the writeEnvFile precedent above:
-				// a session whose ONLY bootstrap-relevant config is a
-				// readiness-annotated port must still trigger the async
-				// runner (and its config load), or the probe stage would
-				// silently never run. Plain ports (no readiness) stay
-				// outside the gate — they're pure dispatcher metadata.
-				(validatedConfig?.ports ?? []).some((p) => p.readiness !== undefined);
-			if (validatedConfig?.postCreateCmd || hasBootstrapConfig) {
-				const cfg = {
-					postCreateCmd: validatedConfig?.postCreateCmd,
-					postStartCmd: validatedConfig?.postStartCmd,
-					// `hasBootstrapConfig` gates the runner's
-					// `getSessionConfig` D1 fetch — skip the round-trip
-					// for postCreate-only sessions (PR #214 round 2 NIT,
-					// generalised in #191 PR 191b to cover all four
-					// config-driven stages: repo / gitIdentity / dotfiles
-					// / agentSeed).
-					hasBootstrapConfig,
-				};
-				// Fire-and-forget; the runner internally catches every
-				// throw it can and translates them into broadcaster
-				// `fail` messages. A bare `void`-prefix triggers
-				// `no-floating-promises`; explicitly catching at the
-				// top level satisfies the linter and gives us a final
-				// safety net for anything the runner missed.
-				const startedSessionId = meta.sessionId;
-				runAsyncBootstrap(startedSessionId, cfg, { sessions, docker, broadcaster }).catch((err) => {
-					logger.error(
-						`[routes] async bootstrap escaped its own error handling for ${startedSessionId}: ${(err as Error).message}`,
-					);
-					// Push a synthetic terminal so the modal's WS
-					// subscriber doesn't sit on "Bootstrapping…"
-					// forever (PR #208 round 2). runAsyncBootstrap
-					// is very defensive so this branch is unlikely,
-					// but a future edit that breaks its internal
-					// try/catch would otherwise leave the user
-					// with a hung modal and the row at status=running
-					// with no further flip path. broadcaster.finish
-					// lazy-creates the session entry, so it's safe
-					// even if the runner threw before any broadcast.
-					broadcaster.finish(startedSessionId, {
-						type: "fail",
-						exitCode: -1,
-						error: (err as Error).message,
-					});
+		// 3.0d lifecycle lock (CONVERSATION.md §2.7.2): the id is chosen
+		// here so the lock is held from BEFORE the row exists until the
+		// create has either answered 201 or rolled back. Once the INSERT
+		// lands the id is visible (GET /sessions lists it), and without the
+		// lock a hard delete could purge the workspace while the spawn is
+		// still pending — and the spawn would then recreate the directory
+		// and leave an orphan container. Nobody else can hold a lock on a
+		// fresh UUID, so this never waits. The rollback below runs inside
+		// the same hold (no recursive acquisition); async bootstrap work
+		// started from here runs after the release and takes the lock
+		// itself where it tears down (failSession).
+		const newSessionId = uuidv4();
+		await sessionLifecycleLock.run(newSessionId, "create", async () => {
+			let meta: Awaited<ReturnType<SessionManager["create"]>> | null = null;
+			try {
+				meta = await sessions.create({
+					sessionId: newSessionId,
+					userId: targetOwnerId,
+					name: trimmedName,
+					cols,
+					rows,
+					envVars: validatedEnvVars,
+					maxActiveSessions: effectiveMaxSessions,
+					// Validated above; null collapses to undefined so the
+					// manager's `?? null` lands NULL either way.
+					externalRef: typeof externalRef === "string" ? externalRef : undefined,
 				});
-				res.status(201).json({ ...serializeMeta(updated), bootstrapping: true });
-				return;
-			}
-			// No postCreate (bare-create or only postStart configured).
-			// postStart fires synchronously here for the create path —
-			// `runPostStart` only kicks off a detached tmux session, so
-			// it returns quickly even though the daemon keeps running.
-			if (validatedConfig?.postStartCmd) {
-				try {
-					await docker.runPostStart(meta.sessionId, validatedConfig.postStartCmd);
-				} catch (err) {
-					// Don't fail create on a postStart launch error —
-					// the container is up and the user can still use it.
-					logger.warn(
-						`[routes] postStart launch failed for ${meta.sessionId}: ${(err as Error).message}`,
+				// #420 — audit every owner ≠ caller create. A log line (not a
+				// session_observe_log row): the observe-log models attach-shaped
+				// access with a start/end lifecycle, while creation is a
+				// point-in-time provenance fact that the row itself will
+				// outlive; the X-Request-Id-stamped line is the join point.
+				if (targetOwnerId !== userId) {
+					logger.info(
+						`[routes] create-on-behalf: caller=${userId} owner=${targetOwnerId} session=${meta.sessionId}`,
 					);
 				}
-			}
-			res.status(201).json(serializeMeta(updated));
-		} catch (err) {
-			// Quota errors come from sessions.create before any D1 row or
-			// container is written, so there's nothing to roll back — return
-			// 429 directly. Checking before the generic error log too, so a
-			// routine quota hit doesn't spam the logs as a "session create
-			// failed" line.
-			if (err instanceof SessionQuotaExceededError) {
-				res.status(429).json({ error: err.message, quota: err.quota });
-				return;
-			}
-			logger.error(`[routes] session create failed: ${(err as Error).message}`);
-			if (meta) {
-				// Capture the id once so the closures below don't have to
-				// reach back through the outer mutable `let meta` (TS
-				// can't narrow `meta` through a closure even though we're
-				// already inside `if (meta)`). One const, no optional
-				// chains, no ambiguity for future readers about whether
-				// meta could ever be null on these lines.
-				const rollbackId = meta.sessionId;
-				// Best-effort rollback. If deleteRow itself fails (D1 blip),
-				// the reconciler will eventually flip status to stopped but
-				// the row remains — we log loudly so an operator can clean
-				// it up manually.
+				// Persist the typed config BEFORE spawning the container. If
+				// docker.spawn fails the rollback in the catch below deletes
+				// the sessions row and ON DELETE CASCADE on session_configs
+				// drops the config row atomically — no orphan config rows.
+				// Skip the INSERT for an empty `{}` config so we don't bloat
+				// D1 with no-op rows; isEmptyConfig handles the bare-POST
+				// case (validatedConfig === undefined) implicitly via the
+				// outer guard.
+				if (validatedConfig && !isEmptyConfig(validatedConfig)) {
+					// Encrypt `secret` env-var entries BEFORE the row hits
+					// D1 (#186). Plaintext is in scope only inside this
+					// handler; once `persistable` is built, the only thing
+					// that can leak is ciphertext.
+					const persistable: PersistableSessionConfig = {
+						...validatedConfig,
+						envVars: validatedConfig.envVars
+							? encryptSecretEntries(validatedConfig.envVars)
+							: undefined,
+						// #188 PR 188b: encrypt PAT / SSH credentials at the
+						// route boundary, same shape as envVars secrets. The
+						// helper returns undefined for an empty/absent blob
+						// so `jsonOrNull` collapses the column to NULL.
+						auth: encryptAuthCredentials(validatedConfig.auth),
+					};
+					await persistSessionConfig(meta.sessionId, persistable);
+				}
+				await docker.spawn(meta.sessionId);
+				const updated = await sessions.get(meta.sessionId);
+				if (!updated) {
+					// Shouldn't happen: sessions.create above just inserted this row,
+					// and nothing in this handler deletes it. Guard so serializeMeta
+					// doesn't get null. The throw falls into the catch below which
+					// runs the spawn rollback and returns 500 — correct disposition
+					// for a server-side invariant violation.
+					throw new Error(`session ${meta.sessionId} missing from D1 after create`);
+				}
+				// PR 185b2b: postCreate runs ASYNCHRONOUSLY when configured.
+				// The route returns 201 immediately so the modal can subscribe
+				// to `/ws/bootstrap/<sessionId>` and tail output live; the
+				// runner inside `runAsyncBootstrap` flips status to `failed`
+				// + kills the container on hard-fail, then broadcasts a
+				// terminal `{type:"fail"}` for the modal to render. The
+				// `bootstrapping: true` flag tells the client to open the WS
+				// instead of treating the create as immediately complete.
 				//
-				// Kill any running container BEFORE deleting the D1 row.
-				// Without this, the post-spawn failure paths (e.g.
-				// `markBootstrapped` throws on a D1 transient AFTER
-				// `docker.spawn` succeeded and `runPostCreate` exited
-				// cleanly) would orphan a live container with no row to
-				// reach it through — `reconcile()` queries
-				// `WHERE status='running'`, so a deleted row means the
-				// container survives until the next host reboot. The
-				// non-zero-exit path inside the try/catch already kills
-				// the container before throwing; this guard covers every
-				// other post-spawn failure shape (markBootstrapped,
-				// runPostStart, sessions.get, the synthetic invariant
-				// throw above). Idempotent: the failure-branch
-				// `docker.kill` already ran on hard-fail, and `kill`
-				// swallows "no such container" internally.
-				await sessionLifecycleLock
-					.run(rollbackId, "delete", async () => {
-						await docker.kill(rollbackId).catch((killErr) => {
+				// postStart fires inside the runner on the success branch
+				// (after markBootstrapped). For sessions with postStart but
+				// NO postCreate / repo, fire it directly here — the async
+				// runner only kicks off when there's something to block on.
+				//
+				// #188 PR 188c: the trigger now fires when EITHER a repo or
+				// a postCreateCmd is configured. The runner's clone step is
+				// a no-op when `repo` is absent, so this widening is safe
+				// for the postCreate-only path and lets repo-only sessions
+				// (no hook, just a clone) get their async-bootstrap modal.
+				// Fire async bootstrap when ANY config-driven stage or hook
+				// is set. #191 PR 191b widened from `repo || postCreateCmd`
+				// to also include the three new lifecycle-hook fields.
+				const hasBootstrapConfig =
+					(validatedConfig?.repo !== null && validatedConfig?.repo !== undefined) ||
+					(validatedConfig?.gitIdentity !== null && validatedConfig?.gitIdentity !== undefined) ||
+					(validatedConfig?.dotfiles !== null && validatedConfig?.dotfiles !== undefined) ||
+					(validatedConfig?.agentSeed !== null && validatedConfig?.agentSeed !== undefined) ||
+					// #277 — writeEnvFile is another bootstrap stage that
+					// needs the config row fetched. Including it here
+					// triggers the async runner for "envVars-toggle-only"
+					// sessions and ensures the runner's `hasBootstrapConfig`
+					// gate doesn't skip the `getSessionConfig` D1 round-trip.
+					validatedConfig?.writeEnvFile === true ||
+					// #198 — same shape as the writeEnvFile precedent above:
+					// a session whose ONLY bootstrap-relevant config is a
+					// readiness-annotated port must still trigger the async
+					// runner (and its config load), or the probe stage would
+					// silently never run. Plain ports (no readiness) stay
+					// outside the gate — they're pure dispatcher metadata.
+					(validatedConfig?.ports ?? []).some((p) => p.readiness !== undefined);
+				if (validatedConfig?.postCreateCmd || hasBootstrapConfig) {
+					const cfg = {
+						postCreateCmd: validatedConfig?.postCreateCmd,
+						postStartCmd: validatedConfig?.postStartCmd,
+						// `hasBootstrapConfig` gates the runner's
+						// `getSessionConfig` D1 fetch — skip the round-trip
+						// for postCreate-only sessions (PR #214 round 2 NIT,
+						// generalised in #191 PR 191b to cover all four
+						// config-driven stages: repo / gitIdentity / dotfiles
+						// / agentSeed).
+						hasBootstrapConfig,
+					};
+					// Fire-and-forget; the runner internally catches every
+					// throw it can and translates them into broadcaster
+					// `fail` messages. A bare `void`-prefix triggers
+					// `no-floating-promises`; explicitly catching at the
+					// top level satisfies the linter and gives us a final
+					// safety net for anything the runner missed.
+					const startedSessionId = meta.sessionId;
+					runAsyncBootstrap(startedSessionId, cfg, { sessions, docker, broadcaster }).catch(
+						(err) => {
 							logger.error(
-								`[routes] CRITICAL: kill during create rollback for session ${rollbackId} failed: ${(killErr as Error).message}`,
+								`[routes] async bootstrap escaped its own error handling for ${startedSessionId}: ${(err as Error).message}`,
 							);
-						});
-						try {
-							await sessions.deleteRow(rollbackId);
-						} catch (cleanupErr) {
-							logger.error(
-								`[routes] CRITICAL: spawn rollback failed for session ${rollbackId}: ${(cleanupErr as Error).message}`,
-							);
-						}
-					})
-					.catch((lockErr) => {
+							// Push a synthetic terminal so the modal's WS
+							// subscriber doesn't sit on "Bootstrapping…"
+							// forever (PR #208 round 2). runAsyncBootstrap
+							// is very defensive so this branch is unlikely,
+							// but a future edit that breaks its internal
+							// try/catch would otherwise leave the user
+							// with a hung modal and the row at status=running
+							// with no further flip path. broadcaster.finish
+							// lazy-creates the session entry, so it's safe
+							// even if the runner threw before any broadcast.
+							broadcaster.finish(startedSessionId, {
+								type: "fail",
+								exitCode: -1,
+								error: (err as Error).message,
+							});
+						},
+					);
+					res.status(201).json({ ...serializeMeta(updated), bootstrapping: true });
+					return;
+				}
+				// No postCreate (bare-create or only postStart configured).
+				// postStart fires synchronously here for the create path —
+				// `runPostStart` only kicks off a detached tmux session, so
+				// it returns quickly even though the daemon keeps running.
+				if (validatedConfig?.postStartCmd) {
+					try {
+						await docker.runPostStart(meta.sessionId, validatedConfig.postStartCmd);
+					} catch (err) {
+						// Don't fail create on a postStart launch error —
+						// the container is up and the user can still use it.
+						logger.warn(
+							`[routes] postStart launch failed for ${meta.sessionId}: ${(err as Error).message}`,
+						);
+					}
+				}
+				res.status(201).json(serializeMeta(updated));
+			} catch (err) {
+				// Quota errors come from sessions.create before any D1 row or
+				// container is written, so there's nothing to roll back — return
+				// 429 directly. Checking before the generic error log too, so a
+				// routine quota hit doesn't spam the logs as a "session create
+				// failed" line.
+				if (err instanceof SessionQuotaExceededError) {
+					res.status(429).json({ error: err.message, quota: err.quota });
+					return;
+				}
+				logger.error(`[routes] session create failed: ${(err as Error).message}`);
+				if (meta) {
+					// Capture the id once so the closures below don't have to
+					// reach back through the outer mutable `let meta` (TS
+					// can't narrow `meta` through a closure even though we're
+					// already inside `if (meta)`). One const, no optional
+					// chains, no ambiguity for future readers about whether
+					// meta could ever be null on these lines.
+					const rollbackId = meta.sessionId;
+					// Best-effort rollback. If deleteRow itself fails (D1 blip),
+					// the reconciler will eventually flip status to stopped but
+					// the row remains — we log loudly so an operator can clean
+					// it up manually.
+					//
+					// Kill any running container BEFORE deleting the D1 row.
+					// Without this, the post-spawn failure paths (e.g.
+					// `markBootstrapped` throws on a D1 transient AFTER
+					// `docker.spawn` succeeded and `runPostCreate` exited
+					// cleanly) would orphan a live container with no row to
+					// reach it through — `reconcile()` queries
+					// `WHERE status='running'`, so a deleted row means the
+					// container survives until the next host reboot. The
+					// non-zero-exit path inside the try/catch already kills
+					// the container before throwing; this guard covers every
+					// other post-spawn failure shape (markBootstrapped,
+					// runPostStart, sessions.get, the synthetic invariant
+					// throw above). Idempotent: the failure-branch
+					// `docker.kill` already ran on hard-fail, and `kill`
+					// swallows "no such container" internally.
+					// Still inside the create's lifecycle hold: no other verb can
+					// run on this session until the rollback is done.
+					await docker.kill(rollbackId).catch((killErr) => {
 						logger.error(
-							`[routes] CRITICAL: create rollback for session ${rollbackId} could not take the lifecycle lock: ${(lockErr as Error).message}`,
+							`[routes] CRITICAL: kill during create rollback for session ${rollbackId} failed: ${(killErr as Error).message}`,
 						);
 					});
+					try {
+						await sessions.deleteRow(rollbackId);
+					} catch (cleanupErr) {
+						logger.error(
+							`[routes] CRITICAL: spawn rollback failed for session ${rollbackId}: ${(cleanupErr as Error).message}`,
+						);
+					}
+				}
+				res.status(500).json({ error: (err as Error).message });
 			}
-			res.status(500).json({ error: (err as Error).message });
-		}
+		});
 	});
 
 	// GET /quotas (#202 / 202b) — the caller's OWN effective quotas +

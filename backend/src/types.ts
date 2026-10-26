@@ -42,6 +42,10 @@ export interface CreateSessionOpts {
 	maxActiveSessions?: number;
 	/** #418 — opaque external reference; omitted → NULL. */
 	externalRef?: string;
+	/** 3.0d — caller-chosen id (a v4 UUID), so `POST /sessions` can take
+	 *  the session's lifecycle lock BEFORE the row exists. Omitted → a
+	 *  fresh v4 UUID. */
+	sessionId?: string;
 }
 
 // ── Auth ────────────────────────────────────────────────────────────────────
