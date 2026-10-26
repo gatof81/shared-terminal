@@ -325,6 +325,14 @@ export class DockerManager {
 	private readonly runtimeReadyContainers = new Set<string>();
 
 	/** Phase 3 — wire the conversation subsystem's lifecycle hooks. */
+	/** 3.0d (CONVERSATION.md §2.7.4): `reconcile` leaves a session alone
+	 *  while a recreation of it is unresolved. */
+	private recreateUnresolved: ((sessionId: string) => Promise<boolean>) | null = null;
+
+	setRecreateUnresolvedCheck(check: ((sessionId: string) => Promise<boolean>) | null): void {
+		this.recreateUnresolved = check;
+	}
+
 	setConversationHooks(hooks: ConversationLifecycleHooks | null): void {
 		this.conversation = hooks;
 	}
@@ -1157,6 +1165,23 @@ export class DockerManager {
 			logger.info(`[docker] purged uploads dir ${uploadsAbs}`);
 		} catch (err) {
 			logger.error(`[docker] failed to purge uploads ${uploadsAbs}: ${(err as Error).message}`);
+			throw err;
+		}
+		// 3.0d — the control dir (<WORKSPACE_ROOT>/.st-control/<sid>: the
+		// recreation record, later the relay markers) follows the same
+		// lifetime (CONVERSATION.md §2.1). Reaching this line means the
+		// lifecycle gate let the delete through, i.e. no recreation of
+		// this session is unresolved.
+		const controlAbs = path.resolve(path.join(WORKSPACE_ROOT, ".st-control", sessionId));
+		if (!controlAbs.startsWith(rootAbs + path.sep)) {
+			throw new Error(
+				`[docker] refusing to purge control dir outside root (root=${rootAbs}, target=${controlAbs})`,
+			);
+		}
+		try {
+			await fs.rm(controlAbs, { recursive: true, force: true });
+		} catch (err) {
+			logger.error(`[docker] failed to purge control dir ${controlAbs}: ${(err as Error).message}`);
 			throw err;
 		}
 		// Phase 3 — the event log and the managed-settings dir live next
@@ -2872,6 +2897,17 @@ export class DockerManager {
 
 		for (const row of result.results) {
 			this.reconcileSessionsCheckedSinceBoot++;
+			// §2.7.4: an unresolved recreation means D1 and Docker may be
+			// mid-change by requests nobody can see answered; flipping the
+			// status or rewriting port mappings now could act on a state
+			// that is about to change. Fail-closed on a failing check.
+			if (this.recreateUnresolved) {
+				const unresolved = await this.recreateUnresolved(row.session_id).catch(() => true);
+				if (unresolved) {
+					logger.warn(`[docker] reconcile: ${row.session_id} skipped (recreate-unresolved)`);
+					continue;
+				}
+			}
 			if (!row.container_id) {
 				await this.sessions.updateStatus(row.session_id, "stopped");
 				await this.notifyConversationDown(row.session_id);

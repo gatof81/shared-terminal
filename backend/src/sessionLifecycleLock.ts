@@ -56,8 +56,22 @@ export interface AcquireOptions {
 	maxWaitMs?: number;
 }
 
+/**
+ * Checked under the lock, before `fn`, for every op but `create` (a fresh
+ * id has no history). 3.0d installs the `recreate-unresolved` gate here
+ * (recreateAttempt.ts, CONVERSATION.md §2.7.4) so no lifecycle operation
+ * can run while a recreation of the session is unresolved — one choke
+ * point instead of a check per route.
+ */
+export type LifecycleGuard = (sessionId: string, op: LifecycleOp) => Promise<void>;
+
 export class SessionLifecycleLock {
 	private readonly entries = new Map<string, Entry>();
+	private guard: LifecycleGuard | null = null;
+
+	setGuard(guard: LifecycleGuard | null): void {
+		this.guard = guard;
+	}
 
 	/**
 	 * Run `fn` holding the session's lock. The lock is released when `fn`
@@ -72,6 +86,8 @@ export class SessionLifecycleLock {
 	): Promise<T> {
 		await this.acquire(sessionId, op, opts);
 		try {
+			// Inside the try: a refusing guard still releases the lock.
+			if (op !== "create" && this.guard) await this.guard(sessionId, op);
 			return await fn();
 		} finally {
 			this.release(sessionId);

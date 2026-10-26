@@ -649,6 +649,30 @@ describe("lifecycle, list, reconcile, probe", () => {
 		await expect(fs.stat(hooksFilePath(root, "s9"))).rejects.toThrow();
 		expect(dbStubs.calls).toHaveLength(0);
 	});
+	it("reconcile writes and removes nothing for a session whose recreation is unresolved (§2.7.4), fail-closed on a failing check", async () => {
+		session("s1"); // requested + hash: would normally get a file
+		session("s2", { conversation_requested: 0, ingest_token_hash: null }); // orphan file: would normally go
+		await fs.mkdir(path.dirname(hooksFilePath(root, "s2")), { recursive: true });
+		await fs.writeFile(hooksFilePath(root, "s2"), "x");
+		const exec = vi.fn();
+		const svc2 = new ConversationService({
+			workspaceRoot: root,
+			enabled: true,
+			port: 3001,
+			store: new ConversationStore({ workspaceRoot: root }),
+			execCapture: exec,
+			isRecreateUnresolved: async (sid) => {
+				if (sid === "s1") return true;
+				throw new Error("EIO");
+			},
+		});
+		await svc2.reconcile();
+		await expect(fs.stat(hooksFilePath(root, "s1"))).rejects.toThrow();
+		expect(await fs.readFile(hooksFilePath(root, "s2"), "utf8")).toBe("x");
+		expect(exec).not.toHaveBeenCalled();
+		await svc2.shutdown();
+	});
+
 	it("reconcile: marker wins over D1, files follow requested∧hash, restart gap + probe per session", async () => {
 		session("s1"); // requested + hash → should have a file
 		session("s2", { conversation_requested: 0, ingest_token_hash: null }); // orphan file to remove
