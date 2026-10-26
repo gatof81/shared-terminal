@@ -314,8 +314,14 @@ export class RecreateAttemptStore {
 				`cannot mark ${record.state} attempt ${attemptId} uncertain`,
 			);
 		}
+		// Drop ownership only once the new state is on disk: if the write
+		// fails the record still says `open`, and this live process must
+		// keep owning it — otherwise the gate (and, after a restart, boot
+		// recovery) would treat it as a dead process's attempt and orphan
+		// it for good (D8).
+		const next = await this.transition(sessionId, record, "uncertain", reason);
 		this.active.delete(attemptId);
-		return this.transition(sessionId, record, "uncertain", reason);
+		return next;
 	}
 
 	/**
@@ -340,8 +346,10 @@ export class RecreateAttemptStore {
 				`attempt ${attemptId} was orphaned by a backend restart; no automatic resolution (D8)`,
 			);
 		}
+		// Same ordering as markUncertain: ownership goes after the write.
+		const next = await this.transition(sessionId, record, "resolved", reason, outcome);
 		this.active.delete(attemptId);
-		return this.transition(sessionId, record, "resolved", reason, outcome);
+		return next;
 	}
 
 	/**
@@ -375,16 +383,25 @@ export class RecreateAttemptStore {
 			// receive Docker's answers is gone. Mark it orphaned, once.
 			if (!r.record.orphanedAt) {
 				const at = nowIso();
-				await this.write(sessionId, {
-					...r.record,
-					state: "uncertain",
-					stateAt: at,
-					reason:
-						r.record.state === "open"
-							? "backend restarted during the attempt"
-							: `backend restarted while uncertain (${r.record.reason ?? "no reason"})`,
-					orphanedAt: at,
-				});
+				try {
+					await this.write(sessionId, {
+						...r.record,
+						state: "uncertain",
+						stateAt: at,
+						reason:
+							r.record.state === "open"
+								? "backend restarted during the attempt"
+								: `backend restarted while uncertain (${r.record.reason ?? "no reason"})`,
+						orphanedAt: at,
+					});
+				} catch (err) {
+					// One session's disk error must not leave the rest
+					// unmarked. This one stays gated regardless: the gate
+					// refuses an `open` record no live process owns.
+					logger.error(
+						`[recreate] session ${sessionId}: could not mark the attempt orphaned: ${(err as Error).message}`,
+					);
+				}
 			}
 			out.uncertain.push(sessionId);
 			logger.warn(

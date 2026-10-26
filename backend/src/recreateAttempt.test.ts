@@ -78,6 +78,30 @@ describe("RecreateAttemptStore — persistence", () => {
 		expect(await fs.readdir(path.dirname(recordFile()))).toEqual([RECORD_FILE]);
 	});
 
+	it("a failed transition write keeps the attempt owned by the live process (no false orphan)", async () => {
+		const store = new RecreateAttemptStore(root);
+		await store.begin(SID, identity());
+		const fail = () =>
+			vi
+				.spyOn(fs, "rename")
+				.mockRejectedValueOnce(Object.assign(new Error("ENOSPC"), { code: "ENOSPC" }));
+		fail();
+		await expect(store.resolve(SID, "att-1", { kind: "rolled-back" }, "x")).rejects.toThrow(
+			"ENOSPC",
+		);
+		// Still this process's attempt, still open on disk.
+		expect((await gateError(store))?.detail).toBe("attempt in progress");
+		fail();
+		await expect(store.markUncertain(SID, "att-1", "x")).rejects.toThrow("ENOSPC");
+		expect((await gateError(store))?.detail).toBe("attempt in progress");
+		// Once the disk recovers, the live process can still resolve it.
+		await expect(
+			store.resolve(SID, "att-1", { kind: "rolled-back" }, "answered"),
+		).resolves.toMatchObject({
+			state: "resolved",
+		});
+	});
+
 	it("a crash between temp write and rename: the stray temp file is never read", async () => {
 		const store = new RecreateAttemptStore(root);
 		const dir = path.dirname(recordFile());
@@ -318,6 +342,30 @@ describe("RecreateAttemptStore — backend restart", () => {
 		const fresh = new RecreateAttemptStore(root);
 		expect(await fresh.recoverOnBoot()).toEqual({ uncertain: [], unreadable: [OTHER] });
 		expect(await gateError(fresh)).toBeNull();
+	});
+
+	it("a write failure on one session does not stop recovery of the others; the failed one stays gated", async () => {
+		const OTHER = "11111111-1111-4111-8111-111111111111";
+		const a = new RecreateAttemptStore(root);
+		await a.begin(SID, identity(1));
+		await a.begin(OTHER, identity(2));
+		const b = new RecreateAttemptStore(root);
+		vi.spyOn(fs, "rename").mockRejectedValueOnce(Object.assign(new Error("EIO"), { code: "EIO" }));
+		const out = await b.recoverOnBoot();
+		expect(out.uncertain.sort()).toEqual([SID, OTHER].sort());
+		const states = await Promise.all([SID, OTHER].map((sid) => b.read(sid)));
+		// Exactly one got its marker; the other is still `open` on disk —
+		// and refused by the gate either way.
+		const marked = states.filter((r) => r.kind === "ok" && r.record.orphanedAt).length;
+		expect(marked).toBe(1);
+		for (const sid of [SID, OTHER]) {
+			expect(
+				await b.assertResolved(sid).then(
+					() => null,
+					(e) => e,
+				),
+			).toBeInstanceOf(RecreateUnresolvedError);
+		}
 	});
 
 	it("no control dir at all ⇒ nothing to recover", async () => {
