@@ -26,6 +26,7 @@
  * write.
  */
 
+import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { logger } from "../logger.js";
@@ -101,7 +102,9 @@ export async function ensureControlDir(workspaceRoot: string, sessionId: string)
 export async function writeRelayEnabled(workspaceRoot: string, sessionId: string): Promise<void> {
 	const dir = await ensureControlDir(workspaceRoot, sessionId);
 	const file = path.join(dir, RELAY_ENABLED_FILE);
-	const tmp = `${file}.tmp.${process.pid}`;
+	// Unique per call: two writers of one session (an enable racing
+	// reconcile) must not consume each other's temp file.
+	const tmp = `${file}.tmp.${process.pid}.${randomBytes(6).toString("hex")}`;
 	await fs.writeFile(tmp, "", { mode: 0o644 });
 	await fs.chmod(tmp, 0o644);
 	await fs.rename(tmp, file);

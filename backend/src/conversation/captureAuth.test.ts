@@ -612,6 +612,20 @@ describe("control dir helpers", () => {
 		expect(await removeAllRelayMarkers(root)).toEqual([]);
 		expect(await exists(path.join(odd, "relay.enabled"))).toBe(true);
 	});
+	it("concurrent writers of one session never collide on the temp file (marker and hooks file)", async () => {
+		const writes = [];
+		for (let i = 0; i < 20; i++) {
+			writes.push(writeRelayEnabled(root, "s1"), writeHooksFile(deps(), "s1"));
+		}
+		await expect(Promise.all(writes)).resolves.toBeDefined();
+		expect(await exists(relayEnabledPath(root, "s1"))).toBe(true);
+		expect(await exists(hooksFilePath(root, "s1"))).toBe(true);
+		const left = [
+			...(await fs.readdir(controlDir(root, "s1"))),
+			...(await fs.readdir(path.dirname(hooksFilePath(root, "s1")))),
+		];
+		expect(left.filter((n) => n.includes(".tmp."))).toEqual([]);
+	});
 	it("refuses unsafe session ids", () => {
 		for (const bad of ["../x", "a/b", ""]) expect(() => controlDir(root, bad)).toThrow();
 	});

@@ -24,6 +24,7 @@
  * FIRST in every disable, before D1, before the file.
  */
 
+import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { logger } from "../logger.js";
@@ -162,7 +163,9 @@ async function ensureManagedDir(workspaceRoot: string, sessionId: string): Promi
 export async function writeHooksFile(deps: ActivationDeps, sessionId: string): Promise<void> {
 	const dir = await ensureManagedDir(deps.workspaceRoot, sessionId);
 	const file = path.join(dir, HOOKS_FILE_NAME);
-	const tmp = `${file}.tmp.${process.pid}`;
+	// Unique per call: concurrent writers of one session (enable racing
+	// reconcile) must not consume each other's temp file.
+	const tmp = `${file}.tmp.${process.pid}.${randomBytes(6).toString("hex")}`;
 	await fs.writeFile(tmp, buildHooksSettings(), { mode: 0o644 });
 	await fs.rename(tmp, file);
 }
