@@ -60,7 +60,7 @@ El código de Fase 3 *MUST NOT* leer ni escribir, en el camino caliente ni en te
 | Directorio managed vacío | `/etc/claude-code/managed-settings.d/` (imagen, root 0755) | Dockerfile |
 | Script de registro | `/opt/st/hooks/session-start.sh` (imagen, root 0755) | Dockerfile |
 | Relay local | `/opt/st/hooks/relay.py` (imagen, root 0755); proceso escuchando en `127.0.0.1:47613` | Dockerfile; lo lanza el supervisor de `entrypoint.sh` solo con la captura autorizada (§2.6) |
-| Directorio de control (3.0d) | host `<WORKSPACE_ROOT>/.st-control/<st_session_id>/` (root, fuera del workspace y de `.claude-managed`), montado **ro** en `/etc/st-control`; contiene a lo sumo `relay.enabled` y `defer-skill-seed` | backend: `relay.enabled` según §2.7.5, `defer-skill-seed` según §2.7.3. Ningún archivo de este directorio es un setting del CLI |
+| Directorio de control (3.0d) | host `<WORKSPACE_ROOT>/.st-control/<st_session_id>/` (root, fuera del workspace y de `.claude-managed`), montado **ro** en `/etc/st-control`; contiene a lo sumo `relay.enabled`, `defer-skill-seed` y `recreate-attempt.json` (sin secretos) | backend: `relay.enabled` según §2.7.5, `defer-skill-seed` según §2.7.3, el registro del intento según §2.7.4. Ningún archivo de este directorio es un setting del CLI |
 | Siembra de skills | `/opt/st/seed-skills.sh` (imagen, root 0755), la misma que ejecuta el entrypoint | Dockerfile; la ejecuta el entrypoint en cada arranque salvo con `defer-skill-seed` (§2.7.3) |
 | Archivo de hooks por sesión | host `<WORKSPACE_ROOT>/.claude-managed/<st_session_id>/conversation.json`, montado **ro** en `/etc/claude-code/managed-settings.d/` | backend, según la tabla §2.4 |
 | Token de ingesta | env `ST_INGEST_TOKEN` del contenedor (32 bytes aleatorios, hex) | backend, **solo al crear el contenedor** (`spawn`, o la recreación de §2.7) y solo si la sesión está *solicitada* (§2.4). `startContainer` sobre un contenedor existente no lo cambia (§2.4.1) |
@@ -204,9 +204,15 @@ Invariantes:
 - **La ingesta deja de aceptar antes de que el flip se confirme al operador**, tanto por la API
   (invalidación pre/post en proceso) como por el comando de emergencia (marca de revocación §2.5),
   independientemente de cuándo deje de emitir el CLI.
-- `conversation.json` y `relay.enabled` *MUST NOT* existir sin la autorización completa de
-  §2.7.5, y `conversation.json` *MUST NOT* escribirse antes de que el relay se haya identificado.
-  Esto sustituye a la regla de 3.0b "archivo ⇒ hash no NULL".
+- `conversation.json` y `relay.enabled` *MUST NOT* existir fuera de uno de los tres casos de
+  §2.7.5. Esto sustituye a la regla de 3.0b "archivo ⇒ hash no NULL".
+  - **Escrito en sitio** con la autorización completa (contenedor en marcha, ambos montajes). En
+    este caso `conversation.json` *MUST NOT* escribirse antes de que el relay se haya
+    identificado.
+  - **Conservado** con la autorización de conservación (contenedor existente, en marcha o
+    detenido, ambos montajes), lo que cubre el `stop`.
+  - **Preparado por el spawn** antes de crear el contenedor. Aquí no hay relay que identificar:
+    lo lanza el supervisor en el boot. Si la creación falla, `reconcile` lo retira.
 - "Efectivo" se informa en `GET /api/sessions/:id/conversations` y en el `PATCH` como el bloque
   `capture` de §2.7.6, para que la UI no prometa captura que no ocurre.
 - Deshabilitar sin reiniciar deja el relay corriendo (su arranque depende del env, que es
@@ -522,6 +528,7 @@ Si las marcas fueran incompatibles con el CLI (§2.7.5), responde `control-marke
 **Secuencia:**
 
 1. **Preparar sin efectos visibles.**
+   - Primero se escribe el registro durable del intento, con `state: open` (§2.7.4).
    - Se genera el token y `H`.
    - Se escribe `defer-skill-seed` y se borran `relay.enabled` y `conversation.json` residuales.
      - `O` no monta el directorio de control.
@@ -530,7 +537,8 @@ Si las marcas fueran incompatibles con el CLI (§2.7.5), responde `control-marke
    - Se crea `N`:
      - con el nombre `st-<12>-new-<ts>` e `Image: <imageId>`;
      - con el env, binds (gestionado y control, ro), caps y red de siempre;
-     - con las etiquetas `io.shared-terminal.session=<sid>` e `io.shared-terminal.recreate-of=<O>`.
+     - con las etiquetas `io.shared-terminal.session=<sid>`, `io.shared-terminal.recreate-of=<O>` e
+       `io.shared-terminal.recreate-attempt=<attemptId>`.
    - Se repite la precondición 8 contra I_N.
    - `N` no se arranca.
 2. **Renombrar.** `O` → `st-<12>-old-<ts>` y `N` → `st-<12>`.
@@ -564,8 +572,10 @@ Si las marcas fueran incompatibles con el CLI (§2.7.5), responde `control-marke
    6. postStart;
    7. `cliVersion` (aviso `cli-below-minimum` si < 2.1.308);
    8. `remove(O)`.
+   9. El registro pasa a `resolved`: el intento terminó sin llamadas en vuelo ni desconocidas.
 
-   Un fallo se registra y no deshace nada.
+   Un fallo se registra y no deshace nada. Si deja llamadas en vuelo, el registro queda `closed`
+   y se aplica §2.7.4.
 
 **D1 apunta siempre a un contenedor que existe:**
 
@@ -598,7 +608,8 @@ Si las marcas fueran incompatibles con el CLI (§2.7.5), responde `control-marke
   4. `O` a su nombre canónico;
   5. **solo con el paso 3 confirmado**, retirar `defer-skill-seed`.
 
-  - **Rollback resuelto:**
+  - **Rollback resuelto:** además de los pasos 1–5, hace falta el criterio de resolución de §2.7.4
+    (registro `resolved`).
     - estado final igual al previo: D1 en `O`, `O` con su nombre, sin `N` y sin la marca, sin
       cambios en captura ni skills;
     - responde 500 `recreate-failed {step}`, **sin** `unresolved`;
@@ -631,10 +642,16 @@ Si las marcas fueran incompatibles con el CLI (§2.7.5), responde `control-marke
 petición cuyo cliente ya se rindió. Reglas:
 
 - **En vuelo sin resolver.** Una llamada (Docker, `execCapture` o D1) cuyo tope venció sigue "en
-  vuelo" hasta que su promesa se resuelve. En D1, además, hasta que pasen **`T_d1` = 60 s** desde
-  que se envió, por encima del máximo de duración de una sentencia en D1 (30 s según Cloudflare;
-  la implementación lo verifica y fija `T_d1` en consecuencia). Hasta entonces su resultado se
-  desconoce y **nada se decide suponiéndolo**.
+  vuelo" hasta que su promesa se resuelve. Hasta entonces su resultado se desconoce y **nada se
+  decide suponiéndolo**.
+- **`T_d1` solo vale para D1.** Una sentencia de D1 no puede aplicarse después de su duración
+  máxima en la plataforma (30 s según Cloudflare). Por eso, pasados **`T_d1` = 60 s** desde el
+  envío, la relectura de la fila es definitiva. La implementación verifica ese límite y fija
+  `T_d1` en consecuencia.
+
+  **Docker no tiene un límite equivalente:** ningún plazo prueba que dockerd haya terminado una
+  petición, sobre todo una que envió un proceso que ya murió. Las peticiones a Docker se resuelven
+  solo con el criterio de evidencia de abajo, nunca por tiempo transcurrido.
 - **Sin continuaciones tardías.** Cada intento de recreación tiene una **época**, que se cierra al
   vencer `T_rec` o `T_rb`, o al pasar al rollback.
   - Toda continuación (el código que sigue a una llamada que se resuelve tarde) comprueba la época
@@ -655,16 +672,52 @@ petición cuyo cliente ya se rindió. Reglas:
 - **Siempre permitidos:** `PATCH {enabled:false}` y el comando de emergencia. Solo escriben la
   marca de revocación, D1 (que el CAS no puede pisar, porque exige `conversation_requested = 1`) y
   borran archivos. La revocación nunca se bloquea.
-- **Resolución:**
-  - automática, en cuanto se resuelve la última llamada en vuelo (y pasa `T_d1` si había una de
-    D1);
-  - solo con estado observado: `inspect`, la lista por etiqueta y nombre, y la lectura de D1;
-  - con la tabla de abajo;
-  - si Docker no responde, la sesión sigue sin resolver y se reintenta.
-- **Tras un reinicio del backend** se pierden las promesas, pero no las peticiones que Docker o D1
-  todavía puedan aplicar. Por eso `reconcile` trata como **sin resolver** toda sesión con un
-  contenedor etiquetado `recreate-of` o con un nombre reservado, y la resuelve en una pasada
-  diferida, `T_d1` después del arranque.
+- **Registro durable del intento.** Antes del primer efecto del paso 1 se escribe
+  `<WORKSPACE_ROOT>/.st-control/<sid>/recreate-attempt.json`, con escritura a temporal, `fsync` y
+  `rename`. Contiene:
+  - `attemptId`;
+  - el id y el nombre canónico de `O`;
+  - el nombre `-old-<ts>` previsto para `O`;
+  - el nombre `-new-<ts>` previsto para `N`;
+  - `startedAt`;
+  - `state`: `open`, `closed` o `resolved`, con su hora.
+
+  Nunca contiene el token ni su hash.
+  - `N` se crea además con la etiqueta `io.shared-terminal.recreate-attempt=<attemptId>`.
+  - El registro pasa a `closed` cuando se cierra la época y a `resolved` solo con el criterio de
+    abajo.
+  - **Mientras exista un registro que no está en `resolved`, la sesión está sin resolver**,
+    también después de reiniciar el backend: el registro sobrevive y las promesas no.
+  - `reconcile` busca por el registro, no solo por etiqueta y nombre. Así reconoce un intento cuyo
+    `N` todavía no es visible.
+- **Criterio para declarar resuelto.** Hacen falta todas estas condiciones:
+  1. **No quedan llamadas propias en vuelo.** Tras un reinicio, las del proceso anterior cuentan
+     como desconocidas y solo las cubre el punto 3.
+  2. **Las llamadas a D1 pendientes son definitivas**, porque pasó `T_d1` desde su envío, y D1 se
+     leyó después.
+  3. **Quietud observada de Docker.** Primero se abre una suscripción **en vivo** a los eventos de
+     Docker filtrada por el intento: la etiqueta `recreate-attempt`, el id de `O` y los nombres
+     `st-<12>`, `st-<12>-new-*` y `st-<12>-old-*`. Después se escanea. Luego tiene que pasar
+     **`T_quiet` = 120 s sin ningún evento** del filtro y sin cortes de la suscripción. Un corte o
+     un reinicio de dockerd vuelve a empezar la ventana. Por último, un segundo escaneo debe ser
+     idéntico al primero.
+     - Un `create` o un `rename` que se aplica dentro de la ventana emite un evento: la ventana
+       vuelve a empezar, y la resolución cuenta con él.
+  4. **El estado observado es uno de los finales de la tabla de abajo**, y la acción de esa fila
+     terminó y se volvió a observar.
+
+  Si falla cualquiera, la sesión **sigue en `recreate-unresolved`** y se reintenta. Mientras
+  Docker no responda, no hay resolución. Nada se declara resuelto por tiempo transcurrido.
+- **Defensas para después de resolver** (un `create` o un `rename` de un proceso muerto que se
+  aplicara aún más tarde). Al declarar `resolved`, el registro se conserva 7 días con su
+  `attemptId`, y mientras exista:
+  - todo contenedor con la etiqueta de un intento `resolved` se elimina sin arrancarlo nunca, en
+    `reconcile` y antes de cualquier operación de ciclo de vida de la sesión. No pudo escribir en
+    el workspace, porque nadie lo arrancó;
+  - toda operación de ciclo de vida comprueba primero que el contenedor de D1 tiene el nombre
+    canónico `st-<12>`, y lo devuelve si un rename tardío lo cambió, antes de actuar. Si no puede
+    comprobarlo, responde 503 `docker-unavailable`;
+  - el backend nunca arranca un contenedor con la etiqueta de un intento que no está `open`.
 
 
 - **`T_rec` = 5 min**, desde el lock hasta el final del paso 6, **incluidos todos los pasos
@@ -688,6 +741,8 @@ petición cuyo cliente ya se rindió. Reglas:
     workspace;
   - un `DELETE ?hard=true` nunca purga un workspace sobre el que `N` pudiera estar corriendo.
 - **`reconcile`, al arrancar el backend**, revisa:
+  - los registros `recreate-attempt.json` que no están en `resolved`: toda sesión con uno queda sin
+    resolver, sea cual sea lo visible en Docker;
   - `docker ps -a --filter label=io.shared-terminal.recreate-of`;
   - los nombres que encajan **exactamente** con `^st-[0-9a-f]{12}-old-[0-9]+$` (o `-new-`) y cuyo
     prefijo es una sesión de D1.
@@ -753,7 +808,11 @@ tiene el montaje gestionado pero no el de control:
 contenedor en marcha y `reconcile` con el contenedor en marcha. Ninguno actúa mientras la sesión
 está sin resolver (§2.7.4).
 
-**Marcas residuales:** sin autorización completa se retiran, y nunca cuentan para `effective`.
+**Marcas residuales:** son la marca o el archivo que no encajan en ninguno de los tres casos
+(escrito en sitio con la autorización completa, conservado con la de conservación, o preparado
+por un spawn en curso). Se retiran y nunca cuentan para `effective`. Un contenedor detenido con la
+autorización de conservación **no** tiene residuales. `effective` exige además la autorización
+completa y el probe (§2.7.6).
 
 | Camino | Retirada |
 | --- | --- |
@@ -1350,8 +1409,8 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
       - `createContainer` que termina después de su tope ⇒ `N` aparece por etiqueta, la
         resolución lo elimina, y la marca se retira solo entonces;
       - CAS que se aplica después del timeout del cliente ⇒ `N` no se borra; la relectura
-        posterior a `T_d1` ve `container_id = N` y converge sobre `N`, y D1 nunca apunta a un
-        contenedor inexistente;
+        posterior a `T_d1` (que solo vale para D1) ve `container_id = N` y converge sobre `N`, y D1
+        nunca apunta a un contenedor inexistente;
       - probe que responde positivo después de su tope ⇒ no se escribe `conversation.json` y se
         retira la marca;
       - rename que se aplica tarde ⇒ la resolución usa los nombres observados;
@@ -1362,8 +1421,32 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
       `delete` soft y hard, `recreate`, `PATCH {enabled:true}` y las escrituras de `reconcile` ⇒
       `recreate-unresolved` sin efectos, y nunca se purga el workspace. `PATCH {enabled:false}` y
       `conversation:disable` sí funcionan, con un CAS tardío incluido (no pisa `requested = 0`).
-      Reinicio del backend con una recreación en vuelo ⇒ `reconcile` deja la sesión sin resolver
-      y la resuelve en la pasada diferida (`T_d1`).
+      Reinicio del backend con una recreación en vuelo ⇒ por el registro durable, la sesión sigue
+      sin resolver. Se resuelve solo con el criterio de evidencia (§2.7.4), nunca por tiempo.
+- [ ] **Reinicio con Docker todavía aplicando (K1):** el backend muere con peticiones del intento
+      enviadas a un dockerd simulado que las aplica tarde.
+      - un `create` de `N` que se aplica **después de `T_d1`** y **después del primer escaneo**
+        (invisible al escaneo inicial) ⇒ su evento reinicia la ventana de quietud, y la
+        resolución lo incluye: `N` eliminado, la marca se retira solo entonces;
+      - un `rename` de `O` a `-old-` aplicado después de `T_d1` ⇒ ídem, y `O` vuelve a su nombre;
+      - corte de la suscripción de eventos o reinicio de dockerd durante la ventana ⇒ la ventana
+        vuelve a empezar;
+      - Docker sin respuesta ⇒ `recreate-unresolved` indefinidamente, nunca `resolved` por tiempo.
+
+      En todos los casos D1 apunta a un contenedor existente, ninguna operación incompatible se
+      ejecuta y la skill sigue intacta.
+- [ ] **Defensas tras resolver (K1):**
+      - un `create` con la etiqueta de un intento `resolved` que aparece más tarde ⇒ se elimina
+        sin arrancarse, en `reconcile` y antes de la siguiente operación de la sesión;
+      - un `rename` tardío del contenedor de D1 ⇒ la siguiente operación de ciclo de vida
+        restaura el nombre canónico antes de actuar, o responde 503 si no puede comprobarlo;
+      - el backend nunca arranca un contenedor con la etiqueta de un intento que no está `open`.
+- [ ] **Registro del intento:**
+      - escrito antes del primer efecto, de forma atómica;
+      - sin token ni hash;
+      - `open` → `closed` → `resolved`;
+      - en el éxito pasa a `resolved` en el paso 6.9;
+      - conservado 7 días tras `resolved`.
 - [ ] Paso 4 atómico: en ningún instante observable `container_id = N` con un hash distinto del de
       `N`.
 - [ ] `docker start` manual de `O` entre los pasos 2 y 3 ⇒ rollback sin arrancar `N`.

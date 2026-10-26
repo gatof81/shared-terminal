@@ -379,7 +379,16 @@ Nada de esto exige una segunda recreación, que §5.2 probablemente bloquearía,
 > **Precisado en el contrato v1.6 (§2.7.4, revisión de consistencia K1):**
 >
 > - Un timeout no significa que la operación haya terminado. Una llamada vencida sigue en vuelo
->   hasta que su promesa se resuelve, y en D1 además durante `T_d1` = 60 s.
+>   hasta que su promesa se resuelve.
+> - `T_d1` = 60 s vale **solo para D1**, que tiene una duración máxima por sentencia. Docker no
+>   tiene un límite equivalente.
+> - Un **registro durable del intento** (`recreate-attempt.json`, sin secretos) mantiene la sesión
+>   sin resolver también tras reiniciar el backend.
+> - El intento se declara resuelto solo por **evidencia observada**: sin llamadas en vuelo, D1
+>   definitivo, `T_quiet` sin eventos con una suscripción en vivo y dos escaneos idénticos. Nunca
+>   por tiempo.
+> - Tras resolver hay defensas: los contenedores de un intento resuelto se eliminan sin
+>   arrancarlos, y se comprueba el nombre canónico antes de cada operación.
 > - Cada intento tiene una época, que se cierra al vencer el tope; ninguna continuación tardía
 >   hace efectos.
 > - Mientras quede trabajo sin resolver, la sesión rechaza las operaciones incompatibles
