@@ -118,7 +118,14 @@ describe("GET /api/sessions/:id/conversations", () => {
 		const res = await fetch(`${base}/api/sessions/s1/conversations`);
 		expect(res.status).toBe(200);
 		expect(await res.json()).toEqual({
-			capture: { requested: false, effective: false, effectiveAfterRestart: false },
+			capture: {
+				requested: false,
+				effective: false,
+				effectiveAfterRestart: false,
+				requiresRecreate: false,
+				pendingReasons: ["flag-off"],
+				checkedAt: null,
+			},
 			conversations: [],
 		});
 	});

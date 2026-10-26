@@ -31,7 +31,14 @@ export function registerConversationRoutes(router: Router, ctx: RouteContext): v
 					// a stable, honest shape rather than a 404 the UI would
 					// confuse with "session missing".
 					res.json({
-						capture: { requested: false, effective: false, effectiveAfterRestart: false },
+						capture: {
+							requested: false,
+							effective: false,
+							effectiveAfterRestart: false,
+							requiresRecreate: false,
+							pendingReasons: ["flag-off"],
+							checkedAt: null,
+						},
 						conversations: [],
 					});
 					return;

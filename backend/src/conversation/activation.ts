@@ -27,6 +27,20 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { logger } from "../logger.js";
+import { RecreateUnresolvedError } from "../recreateAttempt.js";
+import {
+	type CaptureAuthority,
+	type CaptureBlock,
+	CONTROL_MOUNT_TARGET,
+	correspondenceOf,
+	ensureControlDir,
+	RELAY_IMAGE_LABEL,
+	removeAllRelayMarkers,
+	removeRelayEnabled,
+	retainAuthorized,
+	writeAuthorized,
+	writeRelayEnabled,
+} from "./captureAuth.js";
 import {
 	generateIngestToken,
 	getSessionCapture,
@@ -206,19 +220,32 @@ export interface SpawnCapture {
 	env: string[];
 	/** Extra bind mounts (`host:container:ro`). */
 	binds: string[];
-	/** True when a token was generated and the hooks file written. */
+	/** True when a token was generated and the marker + hooks file written. */
 	effective: boolean;
+	/**
+	 * The image ID the label was checked on; the container must be created
+	 * from exactly this ID (D6), not from the tag, which can move between
+	 * the check and the create.
+	 */
+	imageId?: string;
 }
 
 /**
- * Called by `DockerManager.spawnWithConfig` before `createContainer`.
+ * Called by `DockerManager.spawnWithConfig` before `createContainer` — the
+ * spawn-preparation authorization of §2.7.5: the container doesn't exist
+ * yet, so it needs flag ∧ requested ∧ no revocation ∧ the CURRENT image
+ * carrying `conversation-relay="2"`; correspondence holds by construction
+ * (a fresh token and its hash).
+ *
  * Flag off ⇒ nothing (no dir, no bind, no env): behaviour-neutral.
- * Flag on ⇒ the managed dir exists and is mounted ro; the hooks file
- * and the token exist only when the session is requested and not revoked.
+ * Flag on ⇒ the managed dir exists and is mounted ro; token, hash,
+ * `relay.enabled` and the hooks file — in that order — only when
+ * authorized, plus the control dir mounted ro at /etc/st-control.
  */
 export async function prepareSpawnCapture(
 	deps: ActivationDeps,
 	sessionId: string,
+	currentImage: { imageId: string; relay2: boolean } | null,
 ): Promise<SpawnCapture> {
 	if (!deps.enabled) return { env: [], binds: [], effective: false };
 	const dir = await ensureManagedDir(deps.workspaceRoot, sessionId);
@@ -226,8 +253,14 @@ export async function prepareSpawnCapture(
 	const row = await getSessionCapture(sessionId);
 	const requested = row?.conversation_requested === 1;
 	const revoked = (await checkRevocation(deps.workspaceRoot, sessionId)) !== "none";
-	if (!requested || revoked) {
+	if (!requested || revoked || !currentImage?.relay2) {
+		if (requested && !revoked) {
+			logger.warn(
+				`[conversation] spawn of ${sessionId} without capture: the session image lacks ${RELAY_IMAGE_LABEL}="2" (image-without-relay)`,
+			);
+		}
 		await removeHooksFile(deps.workspaceRoot, sessionId);
+		await removeRelayEnabled(deps.workspaceRoot, sessionId);
 		if (row?.ingest_token_hash || row?.ingest_token_hash_suspended) {
 			await revokeIngestTokens(sessionId);
 		}
@@ -235,83 +268,97 @@ export async function prepareSpawnCapture(
 		return { env: [], binds: [bind], effective: false };
 	}
 	// A new container means a new token: the old one (if any) died with
-	// the old env. Hash to D1 BEFORE the file so a crash between the two
-	// leaves "token but no emitter", never "emitter but no acceptor".
+	// the old env. Hash to D1 BEFORE the marker and the file so a crash in
+	// between leaves "token but no emitter", never "emitter but no acceptor".
 	const token = generateIngestToken();
 	await setIngestTokenHash(sessionId, hashIngestToken(token));
 	deps.invalidate?.(sessionId);
+	const control = await ensureControlDir(deps.workspaceRoot, sessionId);
+	await writeRelayEnabled(deps.workspaceRoot, sessionId);
 	await writeHooksFile(deps, sessionId);
 	return {
 		env: [`${INGEST_TOKEN_ENV}=${token}`, `${BACKEND_PORT_ENV}=${deps.port}`],
-		binds: [bind],
+		binds: [bind, `${control}:${CONTROL_MOUNT_TARGET}:ro`],
 		effective: true,
+		imageId: currentImage.imageId,
 	};
 }
 
 // ── Enable / disable (§2.4 rows) ────────────────────────────────────────────
 
-export interface ActivationResult {
-	enabled: boolean;
-	effective: boolean;
-	effectiveAfterRestart: boolean;
+export interface EnableResult {
+	enabled: true;
+	capture: CaptureBlock;
+}
+
+export interface DisableResult {
+	enabled: false;
 	/**
-	 * Only on disable. Always true (owner decision, CONVERSATION.md §2.4):
-	 * the promise is "stops once the CLI restarts". 2.1.308 was measured to
-	 * hot-reload, but self-updating CLIs need not, so nothing relies on it.
+	 * Always true (owner decision, CONVERSATION.md §2.4): the promise is
+	 * "stops once the CLI restarts". 2.1.308 was measured to hot-reload,
+	 * but self-updating CLIs need not, so nothing relies on it.
 	 */
-	emissionStopsAfterRestart?: boolean;
+	emissionStopsAfterRestart: true;
 }
 
 /**
- * `PATCH … {enabled:true}` semantics. Requires the flag on; refuses while
- * the global marker is present; clears the per-session marker.
+ * `PATCH … {enabled:true}` (§2.4 rows, §2.7.5). Requires the flag on;
+ * refuses under the global marker and while a recreation is unresolved;
+ * clears the per-session marker after D1.
+ *
+ * Writes only through the §2.7.5 procedure and only on a running container
+ * with full authorization. A stopped container is never written (its
+ * retained config, if any, is kept); a container that can't be made
+ * effective in place (no token, a mount missing — e.g. created by the 3.0c
+ * backend — or `token-mismatch`) gets its residual marker/file removed and
+ * answers `requiresRecreate`. A mismatch is never repaired by copying the
+ * container's fingerprint into D1.
  */
 export async function enableSession(
 	deps: ActivationDeps,
+	authority: CaptureAuthority,
 	sessionId: string,
-	containerRunning: boolean,
-): Promise<ActivationResult> {
+	isRecreateUnresolved: (sessionId: string) => Promise<boolean>,
+): Promise<EnableResult> {
 	if (!deps.enabled) throw new ConversationDisabledError();
 	const revocation = await checkRevocation(deps.workspaceRoot, sessionId);
 	if (revocation === "global") throw new RevokedGloballyError();
-	const row = await getSessionCapture(sessionId);
-	if (!row) throw new Error("session not found");
-	deps.invalidate?.(sessionId);
-	if (containerRunning && row.ingest_token_hash_suspended) {
-		// Disabled and re-enabled without a restart: the container still
-		// carries the token, so restoring the hash makes capture effective now.
-		await restoreIngestToken(sessionId);
-		await removeSessionRevocation(deps.workspaceRoot, sessionId);
-		await writeHooksFile(deps, sessionId);
-		deps.invalidate?.(sessionId);
-		return { enabled: true, effective: true, effectiveAfterRestart: false };
+	if (await isRecreateUnresolved(sessionId).catch(() => true)) {
+		throw new RecreateUnresolvedError(sessionId, "enable refused");
 	}
-	await setConversationRequested(sessionId, true);
+	const before = await authority.facts(sessionId);
+	if (!before.row) throw new Error("session not found");
+	deps.invalidate?.(sessionId);
+	if (correspondenceOf(before) === "suspended") {
+		// Disabled by API without a restart: the container still carries
+		// this very token, so the suspended hash is restored as is.
+		await restoreIngestToken(sessionId);
+	} else {
+		await setConversationRequested(sessionId, true);
+	}
 	await removeSessionRevocation(deps.workspaceRoot, sessionId);
 	deps.invalidate?.(sessionId);
-	if (containerRunning && row.ingest_token_hash) {
-		// Already effective (token live, file present or re-written).
-		await writeHooksFile(deps, sessionId);
-		return { enabled: true, effective: true, effectiveAfterRestart: false };
+	const after = await authority.facts(sessionId);
+	const c = after.container;
+	if (c?.exists) {
+		if (c.running && writeAuthorized(after)) await authority.applyWrite(sessionId);
+		else if (!retainAuthorized(after)) await authority.withdraw(sessionId);
 	}
-	// Stopped, or running without a token: nothing until the next start.
-	// Writing the file now would only make hooks fire without a token.
-	await removeHooksFile(deps.workspaceRoot, sessionId);
-	return { enabled: true, effective: false, effectiveAfterRestart: true };
+	return { enabled: true, capture: await authority.capture(sessionId) };
 }
 
 /**
  * `PATCH … {enabled:false}` and the emergency CLI share this order:
- * marker → D1 → file (§2.5). Success is reported only after all three.
- * A D1 failure leaves the marker in place (the cut stays in force) and
- * propagates, without touching the file.
+ * marker → D1 → hooks file → `relay.enabled` (§2.5). Success is reported
+ * only after all of them. A D1 failure leaves the revocation marker in
+ * place (the cut stays in force) and propagates, without touching files.
  */
 export async function disableSession(
 	deps: ActivationDeps,
 	sessionId: string,
 	by: "api" | "cli",
 	reason?: string,
-): Promise<ActivationResult> {
+): Promise<DisableResult> {
 	deps.invalidate?.(sessionId);
 	await writeSessionRevocation(deps.workspaceRoot, sessionId, {
 		at: new Date().toISOString(),
@@ -323,15 +370,11 @@ export async function disableSession(
 	else await revokeIngestTokens(sessionId);
 	deps.invalidate?.(sessionId);
 	await removeHooksFile(deps.workspaceRoot, sessionId);
-	return {
-		enabled: false,
-		effective: false,
-		effectiveAfterRestart: false,
-		emissionStopsAfterRestart: true,
-	};
+	await removeRelayEnabled(deps.workspaceRoot, sessionId);
+	return { enabled: false, emissionStopsAfterRestart: true };
 }
 
-/** Emergency `--all`: global marker, every row revoked, every file removed. */
+/** Emergency `--all`: global marker, every row revoked, every file and marker removed. */
 export async function disableAll(deps: ActivationDeps, reason?: string): Promise<string[]> {
 	await writeGlobalRevocation(deps.workspaceRoot, {
 		at: new Date().toISOString(),
@@ -339,29 +382,14 @@ export async function disableAll(deps: ActivationDeps, reason?: string): Promise
 		...(reason ? { reason } : {}),
 	});
 	await revokeAllIngestTokens();
-	return removeAllHooksFiles(deps.workspaceRoot);
+	const removed = await removeAllHooksFiles(deps.workspaceRoot);
+	await removeAllRelayMarkers(deps.workspaceRoot);
+	return removed;
 }
 
 /** `conversation:enable-all`: removes only the global marker. */
 export async function enableAll(deps: ActivationDeps): Promise<void> {
 	await removeGlobalRevocation(deps.workspaceRoot);
-}
-
-/** Capture status block for `GET …/conversations` (§6). */
-export async function captureStatus(
-	deps: ActivationDeps,
-	sessionId: string,
-): Promise<{ requested: boolean; effective: boolean; effectiveAfterRestart: boolean }> {
-	const row = await getSessionCapture(sessionId);
-	const requested = deps.enabled && row?.conversation_requested === 1;
-	const revoked = (await checkRevocation(deps.workspaceRoot, sessionId)) !== "none";
-	const effective =
-		requested &&
-		!revoked &&
-		row?.status === "running" &&
-		!!row.ingest_token_hash &&
-		(await hooksFileExists(deps.workspaceRoot, sessionId));
-	return { requested, effective, effectiveAfterRestart: requested && !effective };
 }
 
 export function logActivation(msg: string): void {

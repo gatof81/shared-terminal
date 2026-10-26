@@ -13,12 +13,14 @@
  * visible `gap`, never into a thrown error.
  */
 
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import { logger } from "../logger.js";
 import {
 	type ActivationDeps,
-	type ActivationResult,
-	captureStatus,
+	type DisableResult,
 	disableSession,
+	type EnableResult,
 	enableSession,
 	hooksFileExists,
 	purgeManagedDir,
@@ -26,6 +28,15 @@ import {
 	removeHooksFile,
 	writeHooksFile,
 } from "./activation.js";
+import {
+	CaptureAuthority,
+	type CaptureBlock,
+	type CaptureDockerPort,
+	CONTROL_DIR_NAME,
+	RELAY_ENABLED_FILE,
+	removeAllRelayMarkers,
+	removeRelayEnabled,
+} from "./captureAuth.js";
 import { DedupeTable, identityKey, payloadHash } from "./dedupe.js";
 import { isSafeStSessionId } from "./ids.js";
 import {
@@ -137,7 +148,16 @@ export interface ServiceDeps extends ActivationDeps {
 	/** 3.0d (CONVERSATION.md §2.7.4): true while a recreation of the
 	 *  session is unresolved; `reconcile` then writes nothing for it. */
 	isRecreateUnresolved?: (stSessionId: string) => Promise<boolean>;
+	/** 3.0d Docker view for capture authorization (§2.7.5–§2.7.6); absent
+	 *  in tests that don't exercise it — then no container is ever seen. */
+	captureDocker?: CaptureDockerPort;
 }
+
+const NO_DOCKER: CaptureDockerPort = {
+	inspectCapture: async () => ({ exists: false }),
+	currentImage: async () => null,
+	probeRelay: async () => false,
+};
 
 interface TokenCacheEntry {
 	status: string;
@@ -249,7 +269,22 @@ export class ConversationService {
 		relayRestarts: 0,
 	};
 
+	readonly authority: CaptureAuthority;
+
 	constructor(private readonly deps: ServiceDeps) {
+		this.authority = new CaptureAuthority({
+			workspaceRoot: deps.workspaceRoot,
+			enabled: deps.enabled,
+			docker: deps.captureDocker ?? NO_DOCKER,
+			getRow: (sid) => getSessionCapture(sid),
+			checkRevocation: (sid) => checkRevocation(deps.workspaceRoot, sid),
+			isRecreateUnresolved: (sid) =>
+				deps.isRecreateUnresolved ? deps.isRecreateUnresolved(sid) : Promise.resolve(false),
+			writeHooksFile: (sid) => writeHooksFile(this.activationDeps, sid),
+			removeHooksFile: (sid) => removeHooksFile(deps.workspaceRoot, sid),
+			hooksFileExists: (sid) => hooksFileExists(deps.workspaceRoot, sid),
+			now: deps.now,
+		});
 		this.now = deps.now ?? Date.now;
 		this.heartbeat = new HeartbeatCoalescer(async (key) => {
 			const [st, cid] = key.split("/");
@@ -456,6 +491,8 @@ export class ConversationService {
 			this.tokenCache.delete(stSessionId);
 			// Converge even if the CLI was interrupted before its step 3.
 			await removeHooksFile(this.deps.workspaceRoot, stSessionId).catch(() => undefined);
+			// 3.0d: the authorization marker never outlives the authorization.
+			await removeRelayEnabled(this.deps.workspaceRoot, stSessionId).catch(() => undefined);
 			await this.markRevoked(stSessionId);
 			return this.reject("revoked");
 		}
@@ -1016,11 +1053,13 @@ export class ConversationService {
 		}
 	}
 
-	async enable(stSessionId: string, containerRunning: boolean): Promise<ActivationResult> {
-		return enableSession(this.activationDeps, stSessionId, containerRunning);
+	async enable(stSessionId: string): Promise<EnableResult> {
+		return enableSession(this.activationDeps, this.authority, stSessionId, (sid) =>
+			this.deps.isRecreateUnresolved ? this.deps.isRecreateUnresolved(sid) : Promise.resolve(false),
+		);
 	}
 
-	async disable(stSessionId: string): Promise<ActivationResult> {
+	async disable(stSessionId: string): Promise<DisableResult> {
 		const r = await disableSession(this.activationDeps, stSessionId, "api");
 		await this.markRevoked(stSessionId);
 		return r;
@@ -1029,10 +1068,10 @@ export class ConversationService {
 	// ── Reads ────────────────────────────────────────────────────────────
 
 	async list(stSessionId: string): Promise<{
-		capture: { requested: boolean; effective: boolean; effectiveAfterRestart: boolean };
+		capture: CaptureBlock;
 		conversations: ConversationSummary[];
 	}> {
-		const capture = await captureStatus(this.activationDeps, stSessionId);
+		const capture = await this.authority.capture(stSessionId);
 		let rows: ConversationRow[] = [];
 		try {
 			rows = await listConversationRows(stSessionId);
@@ -1114,22 +1153,27 @@ export class ConversationService {
 	async reconcile(): Promise<void> {
 		if (!this.deps.enabled) {
 			const removed = await removeAllHooksFiles(this.deps.workspaceRoot);
-			if (removed.length > 0) {
+			const markers = await removeAllRelayMarkers(this.deps.workspaceRoot);
+			if (removed.length > 0 || markers.length > 0) {
 				logger.info(
-					`[conversation] capture disabled: removed ${removed.length} stale hooks file(s)`,
+					`[conversation] capture disabled: removed ${removed.length} stale hooks file(s) and ${markers.length} relay marker(s)`,
 				);
 			}
 			return;
 		}
-		let sessions: Awaited<ReturnType<typeof listRunningCaptureSessions>> = [];
+		let running: Awaited<ReturnType<typeof listRunningCaptureSessions>> = [];
 		try {
-			sessions = await listRunningCaptureSessions();
+			running = await listRunningCaptureSessions();
 		} catch (err) {
 			logger.warn(`[conversation] reconcile: D1 unavailable: ${(err as Error).message}`);
 			return;
 		}
-		for (const s of sessions) {
-			const sid = s.session_id;
+		// Every session that is running OR has a hooks file or marker on disk:
+		// a stopped or deleted session's leftovers must be retired too (§2.4
+		// reconcile row), not only the running ones' state converged.
+		const runningIds = new Set(running.map((r) => r.session_id));
+		const ids = new Set<string>([...runningIds, ...(await this.sessionsWithCaptureFiles())]);
+		for (const sid of ids) {
 			try {
 				// §2.7.4: while a recreation is unresolved nothing but its own
 				// resolution may write for this session — no hooks file, no
@@ -1144,18 +1188,19 @@ export class ConversationService {
 				}
 				const revocation = await checkRevocation(this.deps.workspaceRoot, sid);
 				if (revocation !== "none") {
-					if (s.conversation_requested === 1 || s.ingest_token_hash) {
+					const row = await getSessionCapture(sid);
+					if (row && (row.conversation_requested === 1 || row.ingest_token_hash)) {
 						await revokeIngestTokens(sid);
 						logger.info(`[conversation] reconcile: revocation marker wins over D1 for ${sid}`);
 					}
-					await removeHooksFile(this.deps.workspaceRoot, sid);
+					await this.authority.withdraw(sid);
 					continue;
 				}
-				const shouldHaveFile = s.conversation_requested === 1 && !!s.ingest_token_hash;
-				const has = await hooksFileExists(this.deps.workspaceRoot, sid);
-				if (shouldHaveFile && !has) await writeHooksFile(this.activationDeps, sid);
-				else if (!shouldHaveFile && has) await removeHooksFile(this.deps.workspaceRoot, sid);
-				if (!shouldHaveFile) continue;
+				// §2.7.5: running ⇒ converge to full authorization; stopped ⇒
+				// keep what retain authorization covers; anything else ⇒ withdraw.
+				const outcome = await this.authority.converge(sid);
+				if (outcome !== "written" && outcome !== "kept") continue;
+				if (!runningIds.has(sid)) continue;
 				// Reopen known conversations and mark the restart window.
 				for (const cid of await this.deps.store.listConversationIds(sid)) {
 					const rt = await this.ensureRuntime(sid, cid);
@@ -1173,6 +1218,32 @@ export class ConversationService {
 				logger.warn(`[conversation] reconcile failed for ${sid}: ${(err as Error).message}`);
 			}
 		}
+	}
+
+	/** Session ids with a hooks file under `.claude-managed` or a marker under `.st-control`. */
+	private async sessionsWithCaptureFiles(): Promise<string[]> {
+		const out: string[] = [];
+		for (const [dir, file] of [
+			[path.resolve(this.deps.workspaceRoot, ".claude-managed"), "conversation.json"],
+			[path.resolve(this.deps.workspaceRoot, CONTROL_DIR_NAME), RELAY_ENABLED_FILE],
+		] as const) {
+			let entries: string[] = [];
+			try {
+				entries = await fs.readdir(dir);
+			} catch {
+				continue;
+			}
+			for (const sid of entries) {
+				if (!isSafeStSessionId(sid)) continue;
+				try {
+					await fs.lstat(path.join(dir, sid, file));
+					out.push(sid);
+				} catch {
+					/* none */
+				}
+			}
+		}
+		return out;
 	}
 
 	async shutdown(): Promise<void> {

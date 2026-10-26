@@ -133,6 +133,23 @@ describe("spawn with conversation hooks", () => {
 		]);
 		expect(hooks.prepareSpawn).toHaveBeenCalledWith("sess-1");
 	});
+	it("3.0d (D6): with capture prepared the container is created from the checked image ID, not the tag", async () => {
+		const withCapture = makeDm();
+		withCapture.dm.setConversationHooks({
+			prepareSpawn: vi.fn(async () => ({
+				env: ["ST_INGEST_TOKEN=deadbeef"],
+				binds: [],
+				imageId: "sha256:checked",
+			})),
+			onSessionDown: vi.fn(async () => undefined),
+			onSessionPurged: vi.fn(async () => undefined),
+		});
+		await withCapture.dm.spawn("sess-1");
+		expect(withCapture.captured.opts.Image).toBe("sha256:checked");
+		const without = makeDm();
+		await without.dm.spawn("sess-1");
+		expect(without.captured.opts.Image).toBe("shared-terminal-session");
+	});
 	it("§2.6 a proxy in the session env gets 127.0.0.1 in NO_PROXY only when capture is on", async () => {
 		const proxied = { HTTPS_PROXY: "http://proxy:3128", NO_PROXY: "internal.example" };
 		const off = makeDm(proxied);

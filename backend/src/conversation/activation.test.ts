@@ -52,21 +52,31 @@ function applyUpdate(row: Record<string, unknown>, sql: string, params: unknown[
 }
 vi.mock("../db.js", () => dbStubs);
 
+import { RecreateUnresolvedError } from "../recreateAttempt.js";
 import {
 	buildHooksSettings,
 	ConversationDisabledError,
-	captureStatus,
 	disableAll,
 	disableSession,
 	enableAll,
 	enableSession,
+	hooksFileExists,
 	hooksFilePath,
 	MANAGED_MOUNT_TARGET,
 	prepareSpawnCapture,
 	purgeManagedDir,
 	RevokedGloballyError,
+	removeHooksFile,
+	writeHooksFile,
 } from "./activation.js";
-import { hashIngestToken } from "./registry.js";
+import {
+	CaptureAuthority,
+	CONTROL_MOUNT_TARGET,
+	type ContainerView,
+	controlDir,
+	relayEnabledPath,
+} from "./captureAuth.js";
+import { getSessionCapture, hashIngestToken } from "./registry.js";
 import { checkRevocation, revokedAllPath, revokedPath } from "./revocation.js";
 
 let root: string;
@@ -78,6 +88,7 @@ function session(sid: string, patch: Record<string, unknown> = {}) {
 		ingest_token_hash: null,
 		ingest_token_hash_suspended: null,
 		user_id: "u1",
+		container_id: "cid1",
 		...patch,
 	});
 	return dbStubs.rows.sessions.get(sid) as Record<string, unknown>;
@@ -97,6 +108,63 @@ beforeEach(async () => {
 afterEach(async () => {
 	await fs.rm(root, { recursive: true, force: true });
 });
+
+const IMG2 = { imageId: "sha256:img2", relay2: true };
+const TOKEN = "a".repeat(64);
+
+/** A container view as DockerManager.inspectCapture would report it. */
+function view(patch: Partial<Extract<ContainerView, { exists: true }>> = {}): ContainerView {
+	return {
+		exists: true,
+		running: true,
+		token: TOKEN,
+		managedMount: true,
+		controlMount: true,
+		imageId: "sha256:img2",
+		imageRelay2: true,
+		...patch,
+	};
+}
+
+/** The real authority over a fake Docker; real files, mocked D1. */
+function authority(opts: {
+	container?: ContainerView;
+	probe?: boolean;
+	current?: { imageId: string; relay2: boolean } | null;
+	unresolved?: boolean;
+}) {
+	const probe = vi.fn(async () => opts.probe ?? true);
+	let clock = 0;
+	const a = new CaptureAuthority({
+		workspaceRoot: root,
+		enabled: true,
+		docker: {
+			inspectCapture: async () => opts.container ?? { exists: false },
+			currentImage: async () => (opts.current === undefined ? IMG2 : opts.current),
+			probeRelay: probe,
+		},
+		getRow: (sid) => getSessionCapture(sid),
+		checkRevocation: (sid) => checkRevocation(root, sid),
+		isRecreateUnresolved: async () => opts.unresolved ?? false,
+		writeHooksFile: (sid) => writeHooksFile(deps(), sid),
+		removeHooksFile: (sid) => removeHooksFile(root, sid),
+		hooksFileExists: (sid) => hooksFileExists(root, sid),
+		now: () => clock,
+		sleep: async (ms) => {
+			clock += ms;
+		},
+	});
+	const enable = (sid: string) =>
+		enableSession(deps(), a, sid, async () => opts.unresolved ?? false);
+	return { a, probe, enable };
+}
+
+async function plant(sid: string) {
+	await fs.mkdir(path.dirname(hooksFilePath(root, sid)), { recursive: true });
+	await fs.writeFile(hooksFilePath(root, sid), "x");
+	await fs.mkdir(controlDir(root, sid), { recursive: true });
+	await fs.writeFile(relayEnabledPath(root, sid), "");
+}
 
 describe("§2.2 hooks file", () => {
 	it("is byte-exact: the contract's shape, order and HTTP block (relay on loopback, no token)", () => {
@@ -148,102 +216,223 @@ describe("§2.2 hooks file", () => {
 	});
 });
 
-describe("prepareSpawnCapture (§2.4 spawn row)", () => {
+describe("prepareSpawnCapture (§2.4 spawn row, §2.7.5 spawn preparation)", () => {
 	it("flag off: no dir, no bind, no env, no D1 call", async () => {
 		session("s1", { conversation_requested: 1 });
-		const r = await prepareSpawnCapture({ ...deps(), enabled: false }, "s1");
+		const r = await prepareSpawnCapture({ ...deps(), enabled: false }, "s1", IMG2);
 		expect(r).toEqual({ env: [], binds: [], effective: false });
 		expect(await exists(path.join(root, ".claude-managed"))).toBe(false);
 		expect(dbStubs.calls).toHaveLength(0);
 	});
-	it("flag on, not requested: empty managed dir mounted ro, no file, no token", async () => {
+	it("flag on, not requested: empty managed dir mounted ro, no file, no marker, no token, no control mount", async () => {
 		session("s1");
-		const r = await prepareSpawnCapture(deps(), "s1");
+		const r = await prepareSpawnCapture(deps(), "s1", IMG2);
 		expect(r.env).toEqual([]);
 		expect(r.effective).toBe(false);
 		expect(r.binds).toEqual([
 			`${path.join(root, ".claude-managed", "s1")}:${MANAGED_MOUNT_TARGET}:ro`,
 		]);
 		expect(await fs.readdir(path.join(root, ".claude-managed", "s1"))).toEqual([]);
+		expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
 	});
-	it("flag on, requested: 64-hex token + backend port in env, hash in D1 (written before the file), byte-exact file", async () => {
+	it("flag on, requested, image with the label: token + port in env, hash → marker → file, both mounts, image ID pinned", async () => {
 		const row = session("s1", { conversation_requested: 1 });
-		const r = await prepareSpawnCapture(deps(), "s1");
+		const r = await prepareSpawnCapture(deps(), "s1", IMG2);
 		expect(r.effective).toBe(true);
+		expect(r.imageId).toBe("sha256:img2");
 		expect(r.env).toHaveLength(2);
 		expect(r.env[1]).toBe("ST_BACKEND_PORT=3001");
 		const token = r.env[0].replace("ST_INGEST_TOKEN=", "");
 		expect(token).toMatch(/^[0-9a-f]{64}$/);
 		expect(row.ingest_token_hash).toBe(hashIngestToken(token));
 		expect(await fs.readFile(hooksFilePath(root, "s1"), "utf8")).toBe(buildHooksSettings());
-		const hashCall = dbStubs.calls.findIndex((c) =>
-			c.sql.startsWith("UPDATE sessions SET ingest_token_hash = ?"),
-		);
-		expect(hashCall).toBeGreaterThanOrEqual(0);
+		expect(await exists(relayEnabledPath(root, "s1"))).toBe(true);
+		expect((await fs.stat(controlDir(root, "s1"))).mode & 0o777).toBe(0o755);
+		expect((await fs.stat(relayEnabledPath(root, "s1"))).mode & 0o777).toBe(0o644);
+		expect(r.binds).toEqual([
+			`${path.join(root, ".claude-managed", "s1")}:${MANAGED_MOUNT_TARGET}:ro`,
+			`${controlDir(root, "s1")}:${CONTROL_MOUNT_TARGET}:ro`,
+		]);
 	});
-	it("flag on, requested but revoked: no file, tokens cleared", async () => {
+	for (const [label, image] of [
+		["without the relay label", { imageId: "sha256:old", relay2: false }],
+		["that cannot be found", null],
+	] as const) {
+		it(`flag on, requested, current image ${label}: no capture at all (image-without-relay), old tokens cleared`, async () => {
+			const row = session("s1", { conversation_requested: 1, ingest_token_hash: "old" });
+			await plant("s1");
+			const r = await prepareSpawnCapture(deps(), "s1", image);
+			expect(r).toMatchObject({ env: [], effective: false });
+			expect(r.imageId).toBeUndefined();
+			expect(await exists(hooksFilePath(root, "s1"))).toBe(false);
+			expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
+			expect(row.ingest_token_hash).toBeNull();
+		});
+	}
+	it("flag on, requested but revoked: no file, no marker, tokens cleared", async () => {
 		const row = session("s1", { conversation_requested: 1, ingest_token_hash: "old" });
 		await disableSession(deps(), "s1", "cli");
-		const r = await prepareSpawnCapture(deps(), "s1");
+		const r = await prepareSpawnCapture(deps(), "s1", IMG2);
 		expect(r.effective).toBe(false);
 		expect(r.env).toEqual([]);
 		expect(await exists(hooksFilePath(root, "s1"))).toBe(false);
+		expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
 		expect(row.ingest_token_hash).toBeNull();
+	});
+	it("an existing 0700 control dir is brought to 0755 (explicit chmod, §2.1)", async () => {
+		session("s1", { conversation_requested: 1 });
+		await fs.mkdir(controlDir(root, "s1"), { recursive: true, mode: 0o700 });
+		await fs.chmod(controlDir(root, "s1"), 0o700);
+		await prepareSpawnCapture(deps(), "s1", IMG2);
+		expect((await fs.stat(controlDir(root, "s1"))).mode & 0o777).toBe(0o755);
 	});
 });
 
-describe("enable / disable (§2.4 table)", () => {
-	it("enable on a stopped session: requested=1, nothing effective until start", async () => {
-		const row = session("s1", { status: "stopped" });
-		const r = await enableSession(deps(), "s1", false);
-		expect(r).toEqual({ enabled: true, effective: false, effectiveAfterRestart: true });
+describe("enable / disable (§2.4 table, §2.7.5)", () => {
+	it("no container: requested=1, nothing written; effectiveAfterRestart only with the current image's label", async () => {
+		const row = session("s1", { status: "stopped", container_id: null });
+		const { enable } = authority({});
+		const r = await enable("s1");
 		expect(row.conversation_requested).toBe(1);
+		expect(r.capture).toMatchObject({
+			effective: false,
+			effectiveAfterRestart: true,
+			requiresRecreate: false,
+		});
 		expect(await exists(hooksFilePath(root, "s1"))).toBe(false);
+		expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
+		const r2 = await authority({ current: { imageId: "x", relay2: false } }).enable("s1");
+		expect(r2.capture.effectiveAfterRestart).toBe(false);
+		expect(r2.capture.pendingReasons).toContain("image-without-relay");
 	});
-	it("enable on a running container WITHOUT a token: no file is written", async () => {
+	it("running container WITHOUT a token: nothing written, residuals removed, requiresRecreate", async () => {
 		session("s1");
-		const r = await enableSession(deps(), "s1", true);
-		expect(r.effective).toBe(false);
-		expect(r.effectiveAfterRestart).toBe(true);
+		await plant("s1");
+		const { enable, probe } = authority({ container: view({ token: null }) });
+		const r = await enable("s1");
+		expect(r.capture).toMatchObject({
+			effective: false,
+			effectiveAfterRestart: false,
+			requiresRecreate: true,
+		});
+		expect(r.capture.pendingReasons).toContain("container-without-capture");
 		expect(await exists(hooksFilePath(root, "s1"))).toBe(false);
+		expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
+		expect(probe).not.toHaveBeenCalled();
 	});
-	it("disable on a running container with a token: marker → D1 (hash suspended) → file removed; ingest cut immediately", async () => {
+	it("3.0c-created container (token, managed mount, NO control mount): no repair in place, residual file removed (K3)", async () => {
+		session("s1", { conversation_requested: 1, ingest_token_hash: hashIngestToken(TOKEN) });
+		await plant("s1");
+		for (const running of [true, false]) {
+			const { enable } = authority({ container: view({ controlMount: false, running }) });
+			const r = await enable("s1");
+			expect(r.capture).toMatchObject({
+				effective: false,
+				effectiveAfterRestart: false,
+				requiresRecreate: true,
+			});
+			expect(await exists(hooksFilePath(root, "s1"))).toBe(false);
+			expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
+		}
+	});
+	it("token-mismatch (old hash in D1, new token in the container): nothing written, the fingerprint is NOT copied (A3)", async () => {
+		const row = session("s1", { conversation_requested: 1, ingest_token_hash: "old-hash" });
+		for (const running of [true, false]) {
+			const { enable, probe } = authority({ container: view({ running }) });
+			const r = await enable("s1");
+			expect(r.capture).toMatchObject({
+				effective: false,
+				effectiveAfterRestart: false,
+				requiresRecreate: true,
+			});
+			expect(r.capture.pendingReasons).toContain("token-mismatch");
+			expect(row.ingest_token_hash).toBe("old-hash");
+			expect(await exists(hooksFilePath(root, "s1"))).toBe(false);
+			expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
+			expect(probe).not.toHaveBeenCalled();
+		}
+	});
+	it("disable on a running container: revocation marker → D1 (hash suspended) → hooks file → relay.enabled removed", async () => {
 		const row = session("s1", { conversation_requested: 1, ingest_token_hash: "h1" });
-		await fs.mkdir(path.dirname(hooksFilePath(root, "s1")), { recursive: true });
-		await fs.writeFile(hooksFilePath(root, "s1"), "x");
+		await plant("s1");
 		const r = await disableSession(deps(), "s1", "api");
-		expect(r.enabled).toBe(false);
+		expect(r).toEqual({ enabled: false, emissionStopsAfterRestart: true });
 		expect(row.ingest_token_hash).toBeNull();
 		expect(row.ingest_token_hash_suspended).toBe("h1");
 		expect(row.conversation_requested).toBe(0);
 		expect(await exists(hooksFilePath(root, "s1"))).toBe(false);
+		expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
 		expect(await checkRevocation(root, "s1")).toBe("session");
 	});
-	it("re-enable on the running container restores the suspended hash, removes the marker and rewrites the file", async () => {
-		const row = session("s1", { conversation_requested: 1, ingest_token_hash: "h1" });
+	it("re-enable on the running container: suspended hash restored, marker → relay identified → file; effective with checkedAt", async () => {
+		const row = session("s1", {
+			conversation_requested: 1,
+			ingest_token_hash: hashIngestToken(TOKEN),
+		});
 		await disableSession(deps(), "s1", "api");
-		const r = await enableSession(deps(), "s1", true);
-		expect(r).toEqual({ enabled: true, effective: true, effectiveAfterRestart: false });
-		expect(row.ingest_token_hash).toBe("h1");
+		const { enable, probe } = authority({ container: view() });
+		const r = await enable("s1");
+		expect(row.ingest_token_hash).toBe(hashIngestToken(TOKEN));
 		expect(row.ingest_token_hash_suspended).toBeNull();
 		expect(await checkRevocation(root, "s1")).toBe("none");
 		expect(await fs.readFile(hooksFilePath(root, "s1"), "utf8")).toBe(buildHooksSettings());
+		expect(await exists(relayEnabledPath(root, "s1"))).toBe(true);
+		expect(r.capture).toMatchObject({
+			requested: true,
+			effective: true,
+			requiresRecreate: false,
+			pendingReasons: [],
+		});
+		expect(typeof r.capture.checkedAt).toBe("string");
+		expect(probe).toHaveBeenCalled();
 	});
-	it("emergency CLI disable with D1 down: marker stays, file stays, error propagates", async () => {
+	it("relay that never identifies: marker removed, NO hooks file, relay-unavailable (no hooks against a closed port)", async () => {
+		session("s1", { conversation_requested: 1, ingest_token_hash: hashIngestToken(TOKEN) });
+		const { enable, probe } = authority({ container: view(), probe: false });
+		const r = await enable("s1");
+		expect(await exists(hooksFilePath(root, "s1"))).toBe(false);
+		expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
+		expect(r.capture.effective).toBe(false);
+		expect(r.capture.pendingReasons).toContain("hooks-file-missing");
+		// Polled until the 5 s deadline (fake clock), then gave up.
+		expect(probe.mock.calls.length).toBeGreaterThan(5);
+	});
+	it("stopped container with correspondence: nothing written; retained config kept; effectiveAfterRestart follows it", async () => {
+		session("s1", { conversation_requested: 1, ingest_token_hash: hashIngestToken(TOKEN) });
+		const { enable } = authority({ container: view({ running: false }) });
+		const r = await enable("s1");
+		expect(await exists(hooksFilePath(root, "s1"))).toBe(false);
+		expect(r.capture).toMatchObject({ effectiveAfterRestart: false, requiresRecreate: false });
+		expect(r.capture.pendingReasons).toEqual(
+			expect.arrayContaining(["stopped", "hooks-file-missing"]),
+		);
+		await plant("s1");
+		const r2 = await enable("s1");
+		expect(await exists(hooksFilePath(root, "s1"))).toBe(true);
+		expect(r2.capture).toMatchObject({ effective: false, effectiveAfterRestart: true });
+	});
+	it("an unresolved recreation refuses enable", async () => {
+		session("s1");
+		await expect(authority({ unresolved: true }).enable("s1")).rejects.toBeInstanceOf(
+			RecreateUnresolvedError,
+		);
+	});
+	it("emergency CLI disable with D1 down: marker stays, files stay, error propagates", async () => {
 		session("s1", { conversation_requested: 1, ingest_token_hash: "h1" });
-		await fs.mkdir(path.dirname(hooksFilePath(root, "s1")), { recursive: true });
-		await fs.writeFile(hooksFilePath(root, "s1"), "x");
+		await plant("s1");
 		dbStubs.fail = true;
 		await expect(disableSession(deps(), "s1", "cli")).rejects.toThrow("D1 down");
 		expect(await exists(revokedPath(root, "s1"))).toBe(true);
 		expect(await exists(hooksFilePath(root, "s1"))).toBe(true);
+		expect(await exists(relayEnabledPath(root, "s1"))).toBe(true);
 	});
-	it("emergency CLI disable (healthy) revokes both hashes and requested=0 persistently", async () => {
+	it("emergency CLI disable (healthy) revokes both hashes, requested=0, removes file and marker", async () => {
 		const row = session("s1", {
 			conversation_requested: 1,
 			ingest_token_hash: "h1",
 			ingest_token_hash_suspended: "h0",
 		});
+		await plant("s1");
 		await disableSession(deps(), "s1", "cli", "incident");
 		expect(row).toMatchObject({
 			conversation_requested: 0,
@@ -252,14 +441,13 @@ describe("enable / disable (§2.4 table)", () => {
 		});
 		const marker = JSON.parse(await fs.readFile(revokedPath(root, "s1"), "utf8"));
 		expect(marker).toMatchObject({ by: "cli", reason: "incident" });
+		expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
 	});
-	it("disable --all writes the global marker and removes every hooks file; enable-all removes only the marker", async () => {
-		for (const sid of ["a", "b"]) {
-			await fs.mkdir(path.dirname(hooksFilePath(root, sid)), { recursive: true });
-			await fs.writeFile(hooksFilePath(root, sid), "x");
-		}
+	it("disable --all writes the global marker and removes every hooks file and relay marker; enable-all removes only the global marker", async () => {
+		for (const sid of ["a", "b"]) await plant(sid);
 		const removed = await disableAll(deps());
 		expect(removed.sort()).toEqual(["a", "b"]);
+		for (const sid of ["a", "b"]) expect(await exists(relayEnabledPath(root, sid))).toBe(false);
 		expect(await exists(revokedAllPath(root))).toBe(true);
 		expect(
 			dbStubs.calls.some(
@@ -269,43 +457,25 @@ describe("enable / disable (§2.4 table)", () => {
 					) && c.params.length === 0,
 			),
 		).toBe(true);
-		session("a");
-		await expect(enableSession(deps(), "a", false)).rejects.toBeInstanceOf(RevokedGloballyError);
+		session("a", { container_id: null });
+		await expect(authority({}).enable("a")).rejects.toBeInstanceOf(RevokedGloballyError);
 		await enableAll(deps());
 		expect(await exists(revokedAllPath(root))).toBe(false);
-		await expect(enableSession(deps(), "a", false)).resolves.toMatchObject({ enabled: true });
+		await expect(authority({}).enable("a")).resolves.toMatchObject({ enabled: true });
 	});
 	it("enable with the flag off is refused", async () => {
 		session("s1");
-		await expect(enableSession({ ...deps(), enabled: false }, "s1", false)).rejects.toBeInstanceOf(
-			ConversationDisabledError,
-		);
+		const a = authority({}).a;
+		await expect(
+			enableSession({ ...deps(), enabled: false }, a, "s1", async () => false),
+		).rejects.toBeInstanceOf(ConversationDisabledError);
 	});
 });
 
-describe("captureStatus / purge", () => {
-	it("reports requested vs effective honestly", async () => {
-		session("s1", { conversation_requested: 1, ingest_token_hash: "h" });
-		expect(await captureStatus(deps(), "s1")).toEqual({
-			requested: true,
-			effective: false,
-			effectiveAfterRestart: true,
-		});
-		await prepareSpawnCapture(deps(), "s1");
-		expect(await captureStatus(deps(), "s1")).toEqual({
-			requested: true,
-			effective: true,
-			effectiveAfterRestart: false,
-		});
-		expect(await captureStatus({ ...deps(), enabled: false }, "s1")).toEqual({
-			requested: false,
-			effective: false,
-			effectiveAfterRestart: false,
-		});
-	});
+describe("purge", () => {
 	it("purgeManagedDir refuses anything outside .claude-managed", async () => {
 		session("s1", { conversation_requested: 1 });
-		await prepareSpawnCapture(deps(), "s1");
+		await prepareSpawnCapture(deps(), "s1", IMG2);
 		await purgeManagedDir(root, "s1");
 		expect(await exists(path.join(root, ".claude-managed", "s1"))).toBe(false);
 		await expect(purgeManagedDir(root, "../etc")).rejects.toThrow(/refusing/);
