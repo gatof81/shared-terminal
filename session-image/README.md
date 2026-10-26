@@ -18,14 +18,20 @@ Both smoke tests need docker, jq, and `npm ci` in `backend/`. CI runs them in
 ## Conversation hooks (managed settings)
 
 Phase 3 conversation capture ([docs/CONVERSATION.md](../docs/CONVERSATION.md))
-uses the CLI's official hooks. The image's part is three fixed paths. On its
+uses the CLI's official hooks. The image's part is a few fixed paths. On its
 own it does nothing.
 
 | Path | In the image | At runtime |
 | --- | --- | --- |
 | `/etc/claude-code/managed-settings.d/` | empty, `root:root 0755` | the backend bind-mounts `<WORKSPACE_ROOT>/.claude-managed/<sessionId>/` here **read-only**, holding `conversation.json`, only when capture is requested for the session and `CONVERSATION_ENABLED=true` |
 | `/opt/st/hooks/session-start.sh` | `root:root 0755` | the one `command` hook (`SessionStart`, `async`); every other event is a `type: "http"` hook sent by the CLI itself |
-| `/opt/st/hooks/relay.py` | `root:root 0755` | the loopback relay every hook posts to (§2.6), started by `entrypoint.sh` only when capture is effective |
+| `/opt/st/hooks/relay.py` | `root:root 0755` | the loopback relay every hook posts to (§2.6), launched by the entrypoint's supervisor only when capture is authorized (below) |
+| `/etc/st-control/` (3.0d) | empty, `root:root 0755` | the backend bind-mounts `<WORKSPACE_ROOT>/.st-control/<sessionId>/` here **read-only** (§2.1), holding at most `relay.enabled` and `defer-skill-seed`. Nothing in it is a CLI setting; the smoke test runs the real CLI with it empty, with markers, with settings-shaped JSON and unreadable, and checks the hook sequence is unchanged |
+| `/opt/st/seed-skills.sh` (3.0d) | `root:root 0755` | the default-skills copy (`/opt/session-skills` → `~/.claude/skills`), run by the entrypoint on every boot and by the backend after a recreation commits; refuses (exit 3) while `defer-skill-seed` exists |
+
+The image carries `LABEL io.shared-terminal.conversation-relay="2"`: the
+backend checks it on the image ID before writing a control marker or
+recreating a container onto it (§2.7.2).
 
 - **Why a relay.** Claude Code 2.1.308 refuses to send an HTTP hook to a host
   that resolves to a private or link-local address (`HTTP hook blocked: …
@@ -39,8 +45,16 @@ own it does nothing.
   no hooks and sends no requests, and the relay does not start: no process, no
   open port. A token in the environment without the file changes nothing
   either. The smoke test checks all three.
-- **On.** The entrypoint starts the relay (under a small restart loop) when
-  `ST_INGEST_TOKEN` is set **and** `conversation.json` is mounted. The CLI
+- **On.** With `ST_INGEST_TOKEN` set, the entrypoint starts a small
+  supervisor that launches the relay (and restarts it with backoff) once
+  capture is authorized: `/etc/st-control/relay.enabled` exists (3.0d) or
+  `conversation.json` is mounted (containers created by a 3.0c backend). It
+  checks every 0.5 s. Without a token there is no supervisor and no relay,
+  whatever is mounted. Once launched, a marker that disappears doesn't stop
+  it: it stays inert (§2.4). `GET /st-relay/status` answers `204` with
+  `X-ST-Relay: 1` and `X-ST-Relay-Generation` — headers only, no body, no
+  token — so the backend can tell its relay from another process on the
+  port; it is loopback-only like the rest of the relay. The CLI
   POSTs each hook event to the relay with `X-ST-Tmux-Pane: $TMUX_PANE` and
   `timeout: 1`; the relay answers **204 with an empty body** as soon as the
   body is queued and forwards in order, adding `Authorization: Bearer
@@ -74,6 +88,10 @@ own it does nothing.
 - **Proxies.** The relay never uses `*_PROXY`. The CLI would send the hooks to
   a proxy in the session env, so when capture is effective and the session env
   defines one, the backend adds `127.0.0.1` to `NO_PROXY`/`no_proxy`.
+- **Deferred skill seeding (3.0d).** While `/etc/st-control/defer-skill-seed`
+  exists (the backend writes it during a recreation, §2.7.3), no boot — first
+  or later — and no `seed-skills.sh` exec writes the image's skills into the
+  workspace. Without the marker, seeding is exactly what it was.
 - **Debugging.** `ST_HOOKS_DEBUG=1` in the session env makes the relay write
   counters (never bodies, headers or tokens) to `/tmp/st-relay.log`.
 

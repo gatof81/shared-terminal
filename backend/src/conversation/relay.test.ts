@@ -294,6 +294,48 @@ describe("relay — activation and surface", () => {
 	});
 });
 
+describe("relay — identification (GET /st-relay/status, 3.0d)", () => {
+	it("answers 204 with X-ST-Relay and its generation, no body, no secret, nothing forwarded or counted", async () => {
+		await startUpstream("ok");
+		const r = await startRelay({ ST_RELAY_GENERATION: "3" });
+		const res = await post(r.port, "", {}, { method: "GET", path: "/st-relay/status" });
+		expect(res.status).toBe(204);
+		expect(res.body).toBe("");
+		expect(res.headers["x-st-relay"]).toBe("1");
+		expect(res.headers["x-st-relay-generation"]).toBe("3");
+		expect(res.headers.connection).toBe("close");
+		// Only these headers (node adds none of its own on the client side).
+		expect(Object.keys(res.headers).sort()).toEqual([
+			"connection",
+			"x-st-relay",
+			"x-st-relay-generation",
+		]);
+		const raw = JSON.stringify(res.headers);
+		expect(raw).not.toContain(TOKEN);
+		expect(raw).not.toContain(ST_SESSION);
+		await new Promise((res) => setTimeout(res, 200));
+		expect(received).toHaveLength(0);
+		expect(r.stats().received ?? 0).toBe(0);
+	});
+
+	it("only the exact GET: other methods or path variants are the empty 404", async () => {
+		await startUpstream("ok");
+		const r = await startRelay();
+		for (const [method, p] of [
+			["POST", "/st-relay/status"],
+			["HEAD", "/st-relay/status"],
+			["GET", "/st-relay/status?x=1"],
+			["GET", "/st-relay/status/"],
+			["GET", "/st-relay"],
+		]) {
+			const res = await post(r.port, "", {}, { method, path: p });
+			expect([res.status, res.body], `${method} ${p}`).toEqual([404, ""]);
+		}
+		await new Promise((res) => setTimeout(res, 200));
+		expect(received).toHaveLength(0);
+	});
+});
+
 describe("relay — forwarding", () => {
 	it("forwards bodies byte-for-byte in order, with its own credentials and only the allowed headers", async () => {
 		await startUpstream("ok");
