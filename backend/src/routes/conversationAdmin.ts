@@ -72,7 +72,17 @@ export function registerConversationAdminRoutes(router: Router, ctx: RouteContex
 				// refuses from the marker on, before this answers.
 				const r = await conversation.disable(sessionId);
 				logger.info(`[admin] conversation disabled: session=${sessionId} caller=${userId}`);
-				res.json({ ...r, capture: await conversation.authority.capture(sessionId) });
+				// The disable is done: a failure READING the state afterwards must
+				// not turn it into a 500 the caller would take for "not disabled".
+				let capture: Awaited<ReturnType<typeof conversation.authority.capture>> | null = null;
+				try {
+					capture = await conversation.authority.capture(sessionId);
+				} catch (err) {
+					logger.warn(
+						`[admin] capture read after disable failed for ${sessionId}: ${(err as Error).message}`,
+					);
+				}
+				res.json({ ...r, capture });
 			} catch (err) {
 				if (err instanceof ConversationDisabledError) {
 					res.status(409).json({ error: "flag-off" });

@@ -494,6 +494,24 @@ describe("PATCH /admin/sessions/:id/conversation (§7, §2.4)", () => {
 		expect(await checkRevocation(root, SID)).toBe("none");
 	});
 
+	it("a failure reading the state after a done disable still answers 200 (capture: null), never 500", async () => {
+		await spinUp();
+		db.rows.set(
+			SID,
+			sessionRow({ conversation_requested: 1, ingest_token_hash: hashIngestToken(TOKEN) }),
+		);
+		vi.spyOn(service.authority, "capture").mockRejectedValueOnce(new Error("EIO"));
+		const res = await patch(SID, { enabled: false });
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({
+			enabled: false,
+			emissionStopsAfterRestart: true,
+			capture: null,
+		});
+		expect(db.rows.get(SID)?.conversation_requested).toBe(0);
+		expect(await checkRevocation(root, SID)).toBe("session");
+	});
+
 	it("without the conversation subsystem wired ⇒ 503, nothing done", async () => {
 		await spinUp({ withService: false });
 		db.rows.set(SID, sessionRow());
