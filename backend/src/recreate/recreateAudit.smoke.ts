@@ -194,6 +194,27 @@ function dockerCli(args: string[]): Promise<{ code: number; out: string }> {
 	);
 }
 
+/**
+ * A non-TTY container's log comes framed (8-byte header per chunk: stream,
+ * 0, 0, 0, big-endian length); a TTY one comes raw. Strip the frames.
+ */
+function demux(buf: Buffer): Buffer {
+	const parts: Buffer[] = [];
+	let i = 0;
+	while (
+		i + 8 <= buf.length &&
+		buf[i] <= 2 &&
+		buf[i + 1] === 0 &&
+		buf[i + 2] === 0 &&
+		buf[i + 3] === 0
+	) {
+		const n = buf.readUInt32BE(i + 4);
+		parts.push(buf.subarray(i + 8, i + 8 + n));
+		i += 8 + n;
+	}
+	return i === 0 ? buf : Buffer.concat([...parts, buf.subarray(i)]);
+}
+
 /** sha256 over the sorted (relative path, bytes) of every regular file under `dir`. */
 async function treeHash(dir: string): Promise<string> {
 	const out: string[] = [];
@@ -1303,7 +1324,7 @@ async function cleanup(): Promise<void> {
 				.getContainer(c.Id)
 				.logs({ stdout: true, stderr: true, tail: 300 })
 				.catch((err: Error) => Buffer.from(`(logs unavailable: ${err.message})`));
-			console.error(`\n── docker logs ${name} (${c.State}) ──\n${log.toString("utf8")}`);
+			console.error(`\n── docker logs ${name} (${c.State}) ──\n${demux(log).toString("utf8")}`);
 		}
 		await docker
 			.getContainer(c.Id)

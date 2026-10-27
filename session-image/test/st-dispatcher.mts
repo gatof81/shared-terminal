@@ -70,7 +70,12 @@ globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => {
 
 const { validateJwtSecret } = await import("../../backend/src/auth.ts");
 const { createPortDispatcher } = await import("../../backend/src/portDispatcher.ts");
-const jwt = (await import("jsonwebtoken")).default;
+// Resolved from backend/, whose node_modules this script runs against
+// (session-image/test has none).
+const { createRequire } = await import("node:module");
+const jwt = createRequire(new URL("../../backend/package.json", import.meta.url))(
+	"jsonwebtoken",
+) as typeof import("jsonwebtoken");
 validateJwtSecret();
 const sign = (sub: string) =>
 	jwt.sign({ sub, username: sub }, process.env.JWT_SECRET as string, { expiresIn: "1h" });
