@@ -30,7 +30,7 @@ import {
 import { type RouteContext, r1, serializeMeta, serializeUsage } from "./shared.js";
 
 export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
-	const { sessions, docker, idleSweeper } = ctx;
+	const { sessions, docker, idleSweeper, conversation, recreation } = ctx;
 	const { adminStatsIp, adminActionIp } = ctx.limiters;
 	// ── Admin routes (#241) ────────────────────────────────────────────────
 	// Cross-user observability for operators. Gated by `requireAdmin`
@@ -83,6 +83,21 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 			// can render with discoverable min/max attributes without
 			// hard-coding values.
 			const resourceSnapshot = await collectResourceSnapshot(sessions, docker);
+			// 3.0d (CONVERSATION.md §7): aggregates only — no titles, no ids,
+			// and no Docker call or probe (`effectiveSessions` is an upper
+			// bound; the probed value is per session). Its own failure is
+			// isolated: the rest of the dashboard still answers.
+			let conversationStats: Record<string, unknown> | null = null;
+			if (conversation) {
+				try {
+					conversationStats = {
+						...(await conversation.adminStats()),
+						recreateOrphans: recreation?.stats.recreateOrphans ?? 0,
+					};
+				} catch (err) {
+					logger.warn(`[admin] conversation stats failed: ${(err as Error).message}`);
+				}
+			}
 			res.json({
 				bootedAt,
 				uptimeSeconds,
@@ -92,6 +107,7 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 				dispatcher: getDispatcherStats(),
 				d1: { callsSinceBoot: getD1CallsSinceBoot() },
 				resources: resourceSnapshot,
+				conversation: conversationStats,
 			});
 		} catch (err) {
 			logger.error(`[admin] stats failed: ${(err as Error).message}`);

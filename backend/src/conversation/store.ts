@@ -27,7 +27,7 @@
  * and registry writes on top.
  */
 
-import { promises as nodeFs } from "node:fs";
+import { type Dirent, promises as nodeFs } from "node:fs";
 import path from "node:path";
 import { logger } from "../logger.js";
 import { assertContained, assertSafeComponent } from "./ids.js";
@@ -42,7 +42,7 @@ import {
 	L7_FILE_BYTES,
 } from "./limits.js";
 import type { EventData, EventName } from "./normalize.js";
-import { sessionConversationsDir } from "./revocation.js";
+import { conversationsRoot, sessionConversationsDir } from "./revocation.js";
 import type { ConversationState } from "./state.js";
 import { INITIAL_STATE } from "./state.js";
 
@@ -200,6 +200,8 @@ export class ConversationStore {
 	private readonly purging = new Set<string>();
 	private readonly listeners = new Set<EventListener>();
 	private totalQueueBytes = 0;
+	/** High-water mark of `totalQueueBytes` since boot (admin stats, §7). */
+	private maxTotalQueueBytes = 0;
 	private readonly lim: Required<NonNullable<StoreOptions["limits"]>>;
 	/** Counters for admin stats (3.0d exposes them). */
 	readonly stats = { persisted: 0, dropped: 0, appendFailures: 0, rotations: 0, evictions: 0 };
@@ -517,6 +519,8 @@ export class ConversationStore {
 		r.queue.push(pending);
 		r.queueBytes += bytes;
 		this.totalQueueBytes += bytes;
+		if (this.totalQueueBytes > this.maxTotalQueueBytes)
+			this.maxTotalQueueBytes = this.totalQueueBytes;
 		r.chain = r.chain.then(() => this.drain(stSessionId, cid, r)).catch(() => undefined);
 		return "queued";
 	}
@@ -853,5 +857,45 @@ export class ConversationStore {
 
 	totalQueuedBytes(): number {
 		return this.totalQueueBytes;
+	}
+
+	maxQueuedBytes(): number {
+		return this.maxTotalQueueBytes;
+	}
+
+	/**
+	 * Bytes of the regular files under `<WORKSPACE_ROOT>/.conversations`, two
+	 * levels deep (`<sid>/<file>`), measured with `lstat`: a symlink is never
+	 * followed out of the tree. A directory that vanishes mid-walk (a purge)
+	 * just counts as gone. The caller bounds how often this runs.
+	 */
+	async diskBytes(): Promise<number> {
+		const root = conversationsRoot(this.opts.workspaceRoot);
+		let sessions: Dirent[];
+		try {
+			sessions = await nodeFs.readdir(root, { withFileTypes: true });
+		} catch {
+			return 0;
+		}
+		let total = 0;
+		for (const d of sessions) {
+			if (!d.isDirectory()) continue;
+			const dir = path.join(root, d.name);
+			let files: Dirent[];
+			try {
+				files = await nodeFs.readdir(dir, { withFileTypes: true });
+			} catch {
+				continue;
+			}
+			for (const f of files) {
+				if (!f.isFile()) continue;
+				try {
+					total += (await nodeFs.lstat(path.join(dir, f.name))).size;
+				} catch {
+					// Rotated or purged meanwhile.
+				}
+			}
+		}
+		return total;
 	}
 }

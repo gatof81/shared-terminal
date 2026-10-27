@@ -402,7 +402,17 @@ export class RecreationEngine {
 
 	// ── Recreate (POST) ─────────────────────────────────────────────────────
 
-	async recreate(sessionId: string, expectImageId: string): Promise<RecreateResult> {
+	/**
+	 * `beforeEffects` runs under the lock once every precondition passed,
+	 * before the durable record — the first effect. The admin route's
+	 * cross-user `operate` audit row goes there (§2.7.2): fail-closed (a
+	 * throw aborts with nothing done), and a refused request leaves none.
+	 */
+	async recreate(
+		sessionId: string,
+		expectImageId: string,
+		opts: { beforeEffects?: () => Promise<void> } = {},
+	): Promise<RecreateResult> {
 		try {
 			const lease: Lease = { held: true };
 			return await this.deps.lock.run(
@@ -410,7 +420,13 @@ export class RecreationEngine {
 				"recreate",
 				async () => {
 					try {
-						return await this.recreateLocked(sessionId, expectImageId, this.now(), lease);
+						return await this.recreateLocked(
+							sessionId,
+							expectImageId,
+							this.now(),
+							lease,
+							opts.beforeEffects,
+						);
 					} finally {
 						// Before the lock is released: a pass still running on this
 						// lease stops before its next action.
@@ -433,6 +449,7 @@ export class RecreationEngine {
 		expectImageId: string,
 		lockedAt: number,
 		lease: Lease,
+		beforeEffects?: () => Promise<void>,
 	): Promise<RecreateResult> {
 		// ── Preconditions 2–8, first failure wins, no effects ──
 		let facts: Facts;
@@ -458,6 +475,9 @@ export class RecreationEngine {
 			}
 			throw err;
 		}
+
+		// Still nothing done: a throw here propagates with no record and no effect.
+		if (beforeEffects) await beforeEffects();
 
 		// ── The durable record, before the first effect ──
 		const attemptId = randomUUID();

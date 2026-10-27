@@ -34,6 +34,7 @@ import {
 	type CaptureDockerPort,
 	CONTROL_DIR_NAME,
 	RELAY_ENABLED_FILE,
+	relayEnabledExists,
 	removeAllRelayMarkers,
 	removeRelayEnabled,
 } from "./captureAuth.js";
@@ -60,6 +61,7 @@ import {
 	getSessionCapture,
 	HeartbeatCoalescer,
 	listConversationRows,
+	listRequestedSessions,
 	listRunningCaptureSessions,
 	reserveConversationOwner,
 	revokeIngestTokens,
@@ -135,6 +137,23 @@ export interface ConversationSummary {
 	parentInferred: boolean;
 	canSendInput: false;
 }
+
+/** `GET /api/admin/stats → conversation` (§7), minus the engine's `recreateOrphans`. */
+export interface ConversationAdminStats {
+	enabledSessions: number;
+	effectiveSessions: number;
+	eventsSinceBoot: number;
+	rejectedSinceBoot: { byReason: Record<string, number> };
+	gapsSinceBoot: number;
+	unattributedGaps: number;
+	bytesOnDisk: number;
+	queueBytesNow: number;
+	queueBytesMax: number;
+	wsResyncsSinceBoot: number;
+}
+
+/** How long one walk of `.conversations` serves the stats (dashboards poll). */
+export const DISK_BYTES_TTL_MS = 60_000;
 
 export interface ServiceDeps extends ActivationDeps {
 	store: ConversationStore;
@@ -1068,6 +1087,59 @@ export class ConversationService {
 		const r = await disableSession(this.activationDeps, stSessionId, "api");
 		await this.markRevoked(stSessionId);
 		return r;
+	}
+
+	// ── Admin stats (§7) ─────────────────────────────────────────────────
+
+	private diskBytes: { at: number; value: Promise<number> } | null = null;
+
+	/**
+	 * One D1 read and local file checks — no Docker call and no probe, per
+	 * §7. `effectiveSessions` is therefore the contract's upper bound
+	 * ("configured"): requested, flag on, running in D1 with an authorized
+	 * hash, no revocation, and both capture files on disk. Whether the
+	 * container's token corresponds and its relay answers is only known per
+	 * session, through `capture` and its probe (§2.7.6). No titles, no ids.
+	 */
+	async adminStats(): Promise<ConversationAdminStats> {
+		const rows = await listRequestedSessions();
+		let effective = 0;
+		if (this.deps.enabled) {
+			for (const row of rows) {
+				if (row.status !== "running" || row.authorized !== 1) continue;
+				const sid = row.session_id;
+				if (!isSafeStSessionId(sid)) continue;
+				if ((await checkRevocation(this.deps.workspaceRoot, sid)) !== "none") continue;
+				if (!(await relayEnabledExists(this.deps.workspaceRoot, sid))) continue;
+				if (!(await hooksFileExists(this.deps.workspaceRoot, sid))) continue;
+				effective++;
+			}
+		}
+		const now = this.now();
+		if (!this.diskBytes || now - this.diskBytes.at >= DISK_BYTES_TTL_MS) {
+			// Single flight: concurrent polls share one walk; a failed walk
+			// is not cached.
+			const value = this.deps.store.diskBytes();
+			this.diskBytes = { at: now, value };
+			value.catch(() => {
+				if (this.diskBytes?.value === value) this.diskBytes = null;
+			});
+		}
+		const disk = this.diskBytes.value;
+		return {
+			enabledSessions: rows.length,
+			effectiveSessions: effective,
+			eventsSinceBoot: this.stats.eventsSinceBoot,
+			rejectedSinceBoot: { byReason: { ...this.stats.rejected } },
+			gapsSinceBoot: this.stats.gaps,
+			unattributedGaps: this.stats.unattributedGaps,
+			bytesOnDisk: await disk,
+			queueBytesNow: this.deps.store.totalQueuedBytes(),
+			queueBytesMax: this.deps.store.maxQueuedBytes(),
+			// The Conversation WS is 3.1 and does not exist yet: nothing can
+			// resync. The field is in the contract's shape from now on.
+			wsResyncsSinceBoot: 0,
+		};
 	}
 
 	// ── Reads ────────────────────────────────────────────────────────────
