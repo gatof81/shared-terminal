@@ -993,6 +993,10 @@ export class RecreationEngine {
 					// waiting: the seed may be running. An unknown exit is pending
 					// evidence (execIn); a non-zero one is logged and the next start
 					// seeds (§2.7.3). Only a refused create puts it back.
+					// Only after `defer-skill-seed` is gone: with it still there the
+					// script defers and the exec is wasted; the resolution removes
+					// it and seeds then (the item above stays incomplete).
+					if (!a.seedPending) return;
 					const r = await this.execIn(a, "seed N", nId, [SEED_SCRIPT], execBudget(60_000), "call", {
 						issued: () => {
 							a.seedPending = false;

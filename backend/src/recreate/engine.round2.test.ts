@@ -214,3 +214,27 @@ describe("E5 — engine.stop() while the real convergence waits for its probe", 
 		expect(await recordOf(h)).toMatchObject({ state: "uncertain" });
 	});
 });
+
+// ── Review bot on 4aa7640: the seed follows the marker's removal ───────────
+
+describe("step 6 seeds only once `defer-skill-seed` is gone", () => {
+	it("a failed removal skips the seed; the resolution removes it and seeds exactly once", async () => {
+		const h = await setup();
+		const real = h.capture.removeDeferSeed.bind(h.capture);
+		let first = true;
+		h.capture.removeDeferSeed = async () => {
+			if (first) {
+				first = false;
+				throw new Error("EIO");
+			}
+			return real();
+		};
+		const r = await h.engine.recreate(SID, IMG_N);
+		expect(r).toMatchObject({ ok: true, outcome: "committed", unresolved: true });
+		await vi.waitFor(async () => expect(await recordOf(h)).toMatchObject({ state: "resolved" }), {
+			timeout: 2000,
+		});
+		expect(h.capture.deferSeed).toBe(false);
+		expect(h.docker.execs.filter((e) => e[1] === SEED)).toHaveLength(1);
+	});
+});
