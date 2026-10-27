@@ -17,8 +17,12 @@ corren en el runner aislado de CI (workflow `Session Image`). En este entorno no
 
 **Dictamen de Work (sobre `6bfd302`): CHANGES REQUIRED.** A1 confirmado como P1; A2 confirmado,
 con P1 recomendado por exposición involuntaria; A3 P2; C1–C3 a corregir; y un P2 nuevo en el
-runbook (§6.1). **A1, A2, A3 y C1–C3 están corregidos en #469**, pendiente de revisión. A4–A8 siguen
-separados de los bloqueantes, y #465–#467 son decisiones del responsable.
+runbook (§6.1).
+
+**Revisión de #469 en `d79e5e2`:** A2, A3, C1–C3 y el runbook, cerrados. Quedaban dos defectos de A1
+(A1.1 y A1.2, abajo), **corregidos en #469 `86ee413`, pendientes de revisión**. A4–A8 siguen
+separados de los bloqueantes, y #465–#467 son decisiones del responsable. La auditoría integral no se
+cierra ni se avanza al piloto hasta el dictamen de Work.
 
 ## 1. Defectos de implementación
 
@@ -50,6 +54,29 @@ separados de los bloqueantes, y #465–#467 son decisiones del responsable.
   - **Regresiones:** cinco ventanas × {CLI, API, `--all`} × {rehabilitar, primera vez}. Comprueban
     `requested`, los dos hashes, la revocación y el siguiente spawn, más una carrera ×100 con el
     mismo estado final.
+
+### A1.1 / P1 — retirar la marca dejaba la sesión sin revocación visible (hallado en #469, `d79e5e2`)
+
+- **Qué:** el retiro apartaba `REVOKED` con un nombre único antes de comparar. Si la marca era de
+  una emergencia más nueva, quedaba invisible para el receptor hasta el `link`. Con la caché de
+  autorización poblada, Work reprodujo que el servicio real aceptaba y persistía un evento.
+- **Corrección (#469 `86ee413`):**
+  - la marca se aparta con el nombre fijo `REVOKED.retiring`, que `checkRevocation` cuenta como
+    revocación, así que en todo instante existe uno de los dos nombres;
+  - un retiro interrumpido deja ese nombre (fail-closed), y el siguiente enable lo devuelve a
+    `REVOKED` antes de nada (`recoverRetiring`).
+- **Regresiones:** con el receptor real, la caché poblada y el CLI como otro proceso: pausa tras el
+  `rename` (directo y a través del enable), interrupción y recuperación.
+
+### A1.2 / P2 — reaplicar el disable de la API destruía el hash suspendido (hallado en #469, `d79e5e2`)
+
+- **Qué:** `suspendIngestToken` reemplazaba el hash suspendido por el activo, que ya era NULL. El
+  enable posterior respondía `token-mismatch` y pedía recrear.
+- **Corrección (#469 `86ee413`):** `COALESCE(ingest_token_hash, ingest_token_hash_suspended)`. La
+  suspensión es idempotente, y tras la emergencia o `--all` los dos hashes siguen NULL.
+- **Regresiones:** suspensión aplicada dos veces; carrera entre un re-enable y un disable de la API,
+  y después un enable efectivo sin recrear. Los casos API de las ventanas comprueban ahora el hash
+  suspendido.
 
 ### A2 / P1 (Work) — el paso 6 escribe los puertos leídos en las precondiciones y pisa un `PATCH /ports` concurrente
 
@@ -351,7 +378,8 @@ administrativa manual (D8).
 
 ## 8. Orden propuesto (pendiente de autorización)
 
-1. **PR de correcciones: #469** (A1, A2, A3 y C1–C3, con regresiones). A4–A8 van aparte.
+1. **PR de correcciones: #469** (A1, A1.1, A1.2, A2, A3 y C1–C3, con regresiones). A4–A8 van
+   aparte.
 2. **PR de smokes:** los huecos de §5 que se pueden probar en el runner aislado.
 3. **Dictamen integral de Work** sobre 1 y 2, y decisiones P-1 a P-3 del responsable.
 4. **Despliegue coordinado:** etapas 0 y 1 (§6), con autorización expresa.
