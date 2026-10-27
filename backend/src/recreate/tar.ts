@@ -85,10 +85,18 @@ function parsePax(data: Buffer): Map<string, string> {
 	return out;
 }
 
+/**
+ * Rejected here, not left to callers: the archive comes from a container,
+ * and an entry that names its way out of the archive root is malformed
+ * for every use, present or future.
+ */
 function normalise(p: string): string {
 	let s = p;
 	while (s.startsWith("./")) s = s.slice(2);
 	while (s.endsWith("/")) s = s.slice(0, -1);
+	if (s.startsWith("/") || s.split("/").some((seg) => seg === "..")) {
+		throw new TarFormatError(`path escapes the archive root: ${p}`);
+	}
 	return s;
 }
 
@@ -100,7 +108,13 @@ export function parseTar(buf: Buffer, limits: TarLimits): TarEntry[] {
 	let longLink: string | null = null;
 	while (off + BLOCK <= buf.length) {
 		const header = buf.subarray(off, off + BLOCK);
-		if (header.every((b) => b === 0)) return entries; // end of archive
+		if (header.every((b) => b === 0)) {
+			// End of archive is TWO zero blocks (POSIX): a lone one followed
+			// by anything else, or by nothing, is a damaged archive.
+			const next = buf.subarray(off + BLOCK, off + 2 * BLOCK);
+			if (next.length === BLOCK && next.every((b) => b === 0)) return entries;
+			throw new TarFormatError("archive not terminated");
+		}
 		if (!checksumOk(header)) throw new TarFormatError("bad header checksum");
 		const typeflag = String.fromCharCode(header[156]!) || "0";
 		let size = octal(header, 124, 12);

@@ -42,4 +42,21 @@ describe("parseTar", () => {
 			parseTar(buildTar([{ path: "a" }, { path: "b" }]), { maxEntries: 1, maxFileBytes: 10 }),
 		).toThrow(/too many/);
 	});
+	it("a path that escapes the archive root is malformed", () => {
+		for (const bad of ["../x", "a/../../x", "a/..", "/etc/passwd"]) {
+			expect(() => parseTar(buildTar([{ path: bad, data: "x" }]), LIMITS)).toThrow(
+				/escapes the archive root/,
+			);
+		}
+	});
+	it("end of archive needs two zero blocks", () => {
+		const good = buildTar([{ path: "f", data: "abc" }]);
+		const end = good.length - 1024;
+		// One zero block, then a stray non-zero block.
+		const stray = Buffer.concat([good.subarray(0, end + 512), Buffer.alloc(512, 1)]);
+		expect(() => parseTar(stray, LIMITS)).toThrow(/not terminated/);
+		// One zero block and nothing after it.
+		expect(() => parseTar(good.subarray(0, end + 512), LIMITS)).toThrow(/not terminated/);
+		expect(parseTar(good, LIMITS)).toHaveLength(1);
+	});
 });

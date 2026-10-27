@@ -100,6 +100,7 @@ export const DEFAULT_RECREATE_CONFIG: RecreateConfig = {
 
 export const CLI_MIN_VERSION = "2.1.308";
 const SEED_SCRIPT = "/opt/st/seed-skills.sh";
+const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const READY_SENTINEL = "/tmp/.st-ready";
 
 // ── Public shapes ───────────────────────────────────────────────────────────
@@ -1516,7 +1517,8 @@ export class RecreationEngine {
 		const root = this.deps.attempts.controlRoot();
 		let sids: string[];
 		try {
-			sids = await fs.readdir(root);
+			// Only session ids become path components below.
+			sids = (await fs.readdir(root)).filter((n) => SESSION_ID_RE.test(n));
 		} catch {
 			return;
 		}
