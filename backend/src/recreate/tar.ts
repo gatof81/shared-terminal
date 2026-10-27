@@ -93,10 +93,16 @@ function parsePax(data: Buffer): Map<string, string> {
 function normalise(p: string): string {
 	let s = p;
 	while (s.startsWith("./")) s = s.slice(2);
-	while (s.endsWith("/")) s = s.slice(0, -1);
-	// Inner `.` segments too: they would key an entry by a name that is
-	// not the one the same file has on disk.
-	if (s.startsWith("/") || s.split("/").some((seg) => seg === ".." || seg === ".")) {
+	// One trailing `/` marks a directory; a second one is an empty segment.
+	if (s.endsWith("/")) s = s.slice(0, -1);
+	// Inner `.` and empty (`a//b`) segments too: they would key an entry by
+	// a name that is not the one the same file has on disk. The leading `/`
+	// is checked on the raw name, before the trailing-slash strip turns "/"
+	// into "". Only a bare `./` (dockerd's archive root) normalises to "".
+	if (
+		p.startsWith("/") ||
+		(s !== "" && s.split("/").some((seg) => seg === ".." || seg === "." || seg === ""))
+	) {
 		throw new TarFormatError(`path escapes the archive root or is not canonical: ${p}`);
 	}
 	return s;

@@ -43,7 +43,7 @@ describe("parseTar", () => {
 		).toThrow(/too many/);
 	});
 	it("a path that escapes the archive root is malformed", () => {
-		for (const bad of ["../x", "a/../../x", "a/..", "/etc/passwd"]) {
+		for (const bad of ["../x", "a/../../x", "a/..", "/etc/passwd", "/", "//", "a//b", "a/b//"]) {
 			expect(() => parseTar(buildTar([{ path: bad, data: "x" }]), LIMITS)).toThrow(
 				/escapes the archive root/,
 			);
