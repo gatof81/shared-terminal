@@ -449,7 +449,10 @@ async function main(): Promise<void> {
 	phase("S4: relay killed (-9) after activation");
 	const pid = await relayPid(n1);
 	check("the relay runs in N", pid !== "", pid);
-	await sh(n1, `kill -KILL ${pid}`, "0");
+	// As developer, the relay's owner: with CapDrop ALL, root in the
+	// container has no CAP_KILL and its kill fails with EPERM.
+	const killed = await sh(n1, `kill -KILL ${pid}`);
+	check("kill -9 delivered", killed.code === 0, killed.code);
 	const firstAfter = await s1.authority().capture(s1.sid);
 	check(
 		"the first capture query after the kill: not effective, relay-unavailable",
@@ -604,8 +607,10 @@ async function main(): Promise<void> {
 				"resolved",
 	);
 	// The port becomes free: the resolution converges on its own.
-	// The bracket keeps pkill from matching this very `bash -c`.
-	await sh(n3, "pkill -f 'st-occupan[t]' || true", "0");
+	// As developer (the occupant's owner; root has no CAP_KILL here). The
+	// bracket keeps pkill from matching this very `bash -c`.
+	const freed = await sh(n3, "pkill -f 'st-occupan[t]'");
+	check("the occupant was killed", freed.code === 0, freed.code);
 	let resolved = false;
 	// The supervisor backs off while the relay keeps dying on the taken port
 	// (1, 2, 4 … 32 s), so the next launch can be half a minute away.
