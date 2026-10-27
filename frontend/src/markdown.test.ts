@@ -171,57 +171,199 @@ describe("classifyHref / slugify", () => {
 	});
 });
 
+// ── Complexity: growth, not wall-clock ──────────────────────────────────────
+//
+// These used to assert one render of 200k chars under 1.5 s of wall
+// time. That bound was close to what a slow CI runner takes for the
+// heaviest case (interleaved emphasis: ~0.4 s locally, 1.6 s seen on CI),
+// so it failed with no regression at all. What the tests are for is
+// catching a parser that went quadratic (the old rescan-per-delimiter one
+// took tens of seconds), and that shows in how the cost GROWS with the
+// input, which a slow machine does not change:
+//   - the cost is this process's CPU time (`process.cpuUsage`), not wall
+//     time: on a loaded runner wall time includes waiting for a core — a
+//     10 ms render measured ~100 ms, one scheduler slice, on every
+//     repetition — and no repetition removes that. Vitest runs each test
+//     file in its own process (the `forks` pool), so nothing else counts;
+//   - each input is rendered at 50k, 100k and 200k chars, after a warmup,
+//     keeping the best of 3 at each size: what noise remains (a GC burst,
+//     cache contention) only ever adds time, so the minimum is the estimate;
+//   - the growth exponent is the least-squares slope of log(time) over
+//     log(n) across all three sizes, never a single ratio; linear ≈ 1,
+//     quadratic ≈ 2, and the bound is 1.5;
+//   - below a noise floor at 200k the slope is not judged (a few ms is
+//     all jitter). No quadratic pass over 200k chars fits under it, and
+//     the viewer never renders more than 256 KiB as Markdown, so whatever
+//     hides there costs < 50 ms in the worst case;
+//   - one render over a generous absolute ceiling fails at once: a hang
+//     or an extreme regression does not get to run every repetition.
+
+const GROWTH_SIZES: readonly number[] = [50_000, 100_000, 200_000];
+const LARGEST = GROWTH_SIZES[GROWTH_SIZES.length - 1] as number;
+const GROWTH_REPS = 3;
+const MAX_GROWTH_EXPONENT = 1.5;
+const NOISE_FLOOR_MS = 25;
+const CEILING_MS = 10_000;
+
+/** Least-squares slope of log(t) over log(n). */
+function growthExponent(sizes: readonly number[], times: readonly number[]): number {
+	const xs = sizes.map(Math.log);
+	// A 0 ms reading (timer resolution) would be -Infinity.
+	const ys = times.map((t) => Math.log(Math.max(t, 0.01)));
+	const mx = xs.reduce((a, b) => a + b, 0) / xs.length;
+	const my = ys.reduce((a, b) => a + b, 0) / ys.length;
+	let num = 0;
+	let den = 0;
+	for (let i = 0; i < xs.length; i++) {
+		num += ((xs[i] as number) - mx) * ((ys[i] as number) - my);
+		den += ((xs[i] as number) - mx) ** 2;
+	}
+	return num / den;
+}
+
+/** The verdict on best-of times per size; null when it passes. */
+function growthProblem(sizes: readonly number[], times: readonly number[]): string | null {
+	const largest = times[times.length - 1] as number;
+	if (largest >= CEILING_MS) return `over the ${CEILING_MS} ms ceiling`;
+	if (largest < NOISE_FLOOR_MS) return null;
+	const k = growthExponent(sizes, times);
+	return k < MAX_GROWTH_EXPONENT ? null : `grows as n^${k.toFixed(2)}`;
+}
+
+// Vitest runs under Node; the frontend's tsconfig has no Node types (the
+// app never touches `process`), so only what this file reads is declared.
+declare const process: { cpuUsage(): { user: number; system: number } };
+
+function cpuMs(): number {
+	const u = process.cpuUsage();
+	return (u.user + u.system) / 1000;
+}
+
+/** Best-of CPU times of `run(n)` at each size; stops at the first render over the ceiling. */
+function measureGrowth(run: (n: number) => void): number[] {
+	run(GROWTH_SIZES[0] as number); // warmup: JIT and first-use costs out of the first size
+	const times: number[] = [];
+	for (const n of GROWTH_SIZES) {
+		let best = Number.POSITIVE_INFINITY;
+		for (let r = 0; r < GROWTH_REPS; r++) {
+			const t = cpuMs();
+			run(n);
+			const dt = cpuMs() - t;
+			best = Math.min(best, dt);
+			if (dt >= CEILING_MS) return [...times, dt];
+		}
+		times.push(best);
+	}
+	return times;
+}
+
+function expectNearLinear(run: (n: number) => void): void {
+	const times = measureGrowth(run);
+	const problem = growthProblem(GROWTH_SIZES.slice(0, times.length), times);
+	expect(problem, `times ${times.map((t) => t.toFixed(1)).join(" / ")} ms`).toBeNull();
+}
+
+// Worst case per test: a warmup plus 3 × 3 renders of the heaviest input
+// on a slow runner, well inside this; a hang is cut by the ceiling first.
+const GROWTH_TIMEOUT_MS = 120_000;
+
+describe("the growth check itself", () => {
+	const S = GROWTH_SIZES;
+	it("reads linear, sublinear (a cap or budget) and quadratic growth from best-of times", () => {
+		expect(growthExponent(S, [10, 20, 40])).toBeCloseTo(1, 5);
+		expect(growthExponent(S, [10, 40, 160])).toBeCloseTo(2, 5);
+		expect(growthProblem(S, [100, 200, 400])).toBeNull();
+		expect(growthProblem(S, [150, 280, 380])).toBeNull(); // interleaved emphasis, locally
+		expect(growthProblem(S, [150, 600, 2400])).toMatch(/grows as n\^2\.00/);
+		// Under 1.5 s at 200k, which the old absolute bound let through.
+		expect(growthProblem(S, [60, 240, 960])).toMatch(/grows as n\^2/);
+		// A noisy doubling alone does not decide: the fit spans all three sizes.
+		expect(growthProblem(S, [40, 41, 120])).toBeNull();
+	});
+
+	it("does not judge jitter below the floor, and fails anything over the ceiling", () => {
+		expect(growthProblem(S, [1, 6, 18])).toBeNull();
+		expect(growthProblem(S, [100, 800, CEILING_MS])).toMatch(/ceiling/);
+		expect(growthProblem([S[0] as number], [CEILING_MS + 1])).toMatch(/ceiling/);
+	});
+
+	it(
+		"fails a real quadratic workload whose single runs are short",
+		() => {
+			// Nested loops over n/16: ~10 ms at 50k, ~150 ms at 200k locally —
+			// each run far under the old 1.5 s bound, which would have passed it.
+			let sink = 0;
+			const quadratic = (n: number) => {
+				const m = n / 16;
+				for (let i = 0; i < m; i++) for (let j = 0; j < m; j++) sink += (i ^ j) & 1;
+			};
+			const times = measureGrowth(quadratic);
+			expect(sink).toBeGreaterThan(0);
+			expect(times[times.length - 1]).toBeGreaterThanOrEqual(NOISE_FLOOR_MS);
+			expect(growthProblem(GROWTH_SIZES, times)).toMatch(/grows as n\^/);
+		},
+		GROWTH_TIMEOUT_MS,
+	);
+});
+
 describe("renderMarkdown — complexity", () => {
-	// 200k chars: with the old rescan-per-delimiter parser these took tens
-	// of seconds (quadratic); now each is a few dozen ms. The 1.5 s bound
-	// is loose on purpose (slow CI) while still catching a quadratic
-	// regression by orders of magnitude.
-	const N = 200_000;
-	it.each<[string, string]>([
-		["unclosed brackets", "[".repeat(N)],
-		["unclosed brackets with text", "[a ".repeat(N / 3)],
-		["unclosed stars", "*a ".repeat(N / 3)],
-		["unclosed underscores", " _a".repeat(N / 3)],
-		["unclosed tildes", "~~a ".repeat(N / 4)],
-		["unclosed parens after links", "[a](".repeat(N / 4)],
+	it.each<[string, (n: number) => string]>([
+		["unclosed brackets", (n) => "[".repeat(n)],
+		["unclosed brackets with text", (n) => "[a ".repeat(n / 3)],
+		["unclosed stars", (n) => "*a ".repeat(n / 3)],
+		["unclosed underscores", (n) => " _a".repeat(n / 3)],
+		["unclosed tildes", (n) => "~~a ".repeat(n / 4)],
+		["unclosed parens after links", (n) => "[a](".repeat(n / 4)],
 		[
 			"mixed backtick runs",
-			Array.from({ length: N / 10 }, (_, i) => `${"`".repeat((i % 7) + 1)}x `).join(""),
+			(n) => Array.from({ length: n / 10 }, (_, i) => `${"`".repeat((i % 7) + 1)}x `).join(""),
 		],
-		["deeply nested brackets", `${"[".repeat(N / 2)}${"]".repeat(N / 2)}`],
-		["interleaved emphasis", `${"*_".repeat(N / 4)}x${"_*".repeat(N / 4)}`],
-		["heading padded with spaces", `# ${" ".repeat(N)}x`],
-		["fence padded with spaces", `\`\`\`${" ".repeat(N)}\``],
-		["table separator padded with spaces", `a|b\n-${" ".repeat(N)}x`],
-	])("%s stays fast and loses no text", (_label, src) => {
-		const t = performance.now();
-		const root = renderMarkdown(src);
-		expect(performance.now() - t).toBeLessThan(1500);
-		// Whatever the rendering, the visible text never drops content
-		// characters (markup delimiters aside) — spot-check via length.
-		expect((root.textContent ?? "").length).toBeGreaterThan(0);
-	});
+		["deeply nested brackets", (n) => `${"[".repeat(n / 2)}${"]".repeat(n / 2)}`],
+		["interleaved emphasis", (n) => `${"*_".repeat(n / 4)}x${"_*".repeat(n / 4)}`],
+		["heading padded with spaces", (n) => `# ${" ".repeat(n)}x`],
+		["fence padded with spaces", (n) => `\`\`\`${" ".repeat(n)}\``],
+		["table separator padded with spaces", (n) => `a|b\n-${" ".repeat(n)}x`],
+	])(
+		"%s grows near-linearly and loses no text",
+		(_label, make) => {
+			const inputs = new Map(GROWTH_SIZES.map((n) => [n, make(n)]));
+			expectNearLinear((n) => renderMarkdown(inputs.get(n) as string));
+			// Whatever the rendering, the visible text never drops content
+			// characters (markup delimiters aside) — spot-check via length.
+			const root = renderMarkdown(inputs.get(LARGEST) as string);
+			expect((root.textContent ?? "").length).toBeGreaterThan(0);
+		},
+		GROWTH_TIMEOUT_MS,
+	);
 
-	it("doesn't let a wide header × bare rows multiply into a DOM bomb (review repro)", () => {
-		// 30 KB of input that used to expand to ~100M cells.
-		const src = `${"|".repeat(10_000)}\n-\n${"|\n".repeat(10_000)}`;
-		const t = performance.now();
-		const root = renderMarkdown(src);
-		expect(performance.now() - t).toBeLessThan(1500);
-		expect(root.querySelectorAll("*").length).toBeLessThan(60_000);
-		// 10k columns is over MAX_TABLE_COLUMNS: not rendered as a table.
-		expect(root.querySelector("table")).toBeNull();
-	});
+	it(
+		"doesn't let a wide header × bare rows multiply into a DOM bomb (review repro)",
+		() => {
+			// At 200k: 10k columns × 10k bare rows, 30 KB that used to expand
+			// to ~100M cells.
+			const make = (n: number) => `${"|".repeat(n / 20)}\n-\n${"|\n".repeat(n / 20)}`;
+			expectNearLinear((n) => renderMarkdown(make(n)));
+			const root = renderMarkdown(make(LARGEST));
+			expect(root.querySelectorAll("*").length).toBeLessThan(60_000);
+			// 10k columns is over MAX_TABLE_COLUMNS: not rendered as a table.
+			expect(root.querySelector("table")).toBeNull();
+		},
+		GROWTH_TIMEOUT_MS,
+	);
 
-	it("bounds rows of missing cells at the column cap too", () => {
-		const header = `|${"h|".repeat(64)}`;
-		const sep = `|${"-|".repeat(64)}`;
-		const src = `${header}\n${sep}\n${"|\n".repeat(40_000)}`;
-		const t = performance.now();
-		const root = renderMarkdown(src);
-		expect(performance.now() - t).toBeLessThan(1500);
-		expect(root.querySelectorAll("*").length).toBeLessThan(60_000);
-	});
+	it(
+		"bounds rows of missing cells at the column cap too",
+		() => {
+			const header = `|${"h|".repeat(64)}`;
+			const sep = `|${"-|".repeat(64)}`;
+			// At 200k: 40k bare rows under a 64-column header.
+			const make = (n: number) => `${header}\n${sep}\n${"|\n".repeat(n / 5)}`;
+			expectNearLinear((n) => renderMarkdown(make(n)));
+			const root = renderMarkdown(make(LARGEST));
+			expect(root.querySelectorAll("*").length).toBeLessThan(60_000);
+		},
+		GROWTH_TIMEOUT_MS,
+	);
 
 	it("still renders a legitimately dense table", () => {
 		const cols = 64;
