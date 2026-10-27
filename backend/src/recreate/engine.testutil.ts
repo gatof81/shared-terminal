@@ -14,7 +14,12 @@ import { SessionLifecycleLock } from "../sessionLifecycleLock.js";
 import type { CasResult, RecreateD1Port, RecreateSessionConfig, RecreateSessionRow } from "./d1.js";
 import { type RecreateCapturePort, type RecreateConfig, RecreationEngine } from "./engine.js";
 import { ENTRYPOINT_SYMLINKS, type LayerChange, type PathStat } from "./layer.js";
-import type { RecreateContainer, RecreateCreateSpec, RecreateDockerPort } from "./ports.js";
+import type {
+	ExecResult,
+	RecreateContainer,
+	RecreateCreateSpec,
+	RecreateDockerPort,
+} from "./ports.js";
 import type { AttemptRun } from "./run.js";
 import { SKILLS_IMAGE_DIR, type WorkspaceSkill } from "./skills.js";
 import { buildTar } from "./tarBuilder.testutil.js";
@@ -38,7 +43,8 @@ export type Op =
 	| "remove"
 	| "listByLabel"
 	| "listByName"
-	| "exec";
+	| "exec"
+	| "execState";
 
 /** Runs before the op applies; may await (late answer), throw (refused, nothing applied). */
 export type Hook = (args: unknown[]) => Promise<void> | void;
@@ -203,13 +209,40 @@ export class FakeDocker implements RecreateDockerPort {
 			.map((c) => this.view(c));
 	}
 	readonly execs: string[][] = [];
-	async exec(containerId: string, cmd: string[]) {
+	/**
+	 * Per exec: what dockerd reports now. A test that makes an exec's exit
+	 * unknown (`unknownExit`) flips its entry to ended when it wants the
+	 * evidence to appear.
+	 */
+	readonly execStates = new Map<string, { running: boolean; exitCode: number | null }>();
+	/** Commands (first argv word, or "readiness" for `test -f`) whose exit is reported unknown. */
+	readonly unknownExit = new Set<string>();
+	private execSeq = 0;
+	async exec(containerId: string, cmd: string[], _timeoutMs?: number): Promise<ExecResult> {
 		await this.gate("exec", [containerId, cmd.join(" ")]);
 		this.execs.push([containerId, ...cmd]);
+		const execId = `exec-${++this.execSeq}`;
 		const c = this.byRef(containerId);
-		if (!c?.running) return { exitCode: 1, stdout: "" };
-		if (cmd[0] === "claude") return { exitCode: 0, stdout: "2.1.310 (Claude Code)\n" };
-		return { exitCode: 0, stdout: "" };
+		const key = cmd[0] === "test" ? "readiness" : (cmd[0] as string);
+		if (c?.running && this.unknownExit.has(key)) {
+			this.execStates.set(execId, { running: true, exitCode: null });
+			return { exitCode: null, stdout: "", execId };
+		}
+		const exitCode = c?.running ? 0 : 1;
+		this.execStates.set(execId, { running: false, exitCode });
+		if (!c?.running) return { exitCode: 1, stdout: "", execId };
+		if (cmd[0] === "claude") return { exitCode: 0, stdout: "2.1.310 (Claude Code)\n", execId };
+		return { exitCode: 0, stdout: "", execId };
+	}
+	async execState(execId: string) {
+		await this.gate("execState", [execId]);
+		return this.execStates.get(execId) ?? null;
+	}
+	/** Every exec whose exit was unknown now reports it ended. */
+	endUnknownExecs(exitCode = 0) {
+		for (const [id, st] of this.execStates) {
+			if (st.running) this.execStates.set(id, { running: false, exitCode });
+		}
 	}
 
 	/** Effectful requests (what a refused begin() must never reach). */
@@ -328,16 +361,26 @@ export class FakeCapture implements RecreateCapturePort {
 		return { marker: this.marker, hooksFile: this.hooksFile };
 	}
 	async restore(_sid: string, snap: { marker: boolean; hooksFile: boolean }) {
-		if (this.d1.row.conversation_requested !== 1 || this.revocation !== "none") return;
-		this.marker ||= snap.marker;
-		this.hooksFile ||= snap.hooksFile;
+		this.calls.push("restore");
+		if (!snap.marker || !snap.hooksFile) return "not-authorized";
+		if (this.d1.row.conversation_requested !== 1 || this.revocation !== "none") {
+			return "not-authorized";
+		}
+		this.marker = true;
+		this.hooksFile = true;
+		return "restored";
 	}
 	async authorize(_sid: string, run: AttemptRun) {
 		this.calls.push(`authorize(epochOpen=${run.epochOpen})`);
 		return this.authorizeImpl(run);
 	}
+	/** Runs inside converge (to hold it, or fail it). */
+	convergeImpl: () => Promise<string> = async () => "kept";
 	async converge() {
 		this.calls.push("converge");
+		const r = await this.convergeImpl();
+		this.calls.push("converge done");
+		return r;
 	}
 	async deferSeedExists() {
 		return this.deferSeed;
@@ -368,6 +411,8 @@ export async function harness(opts: { config?: Partial<RecreateConfig>; root?: s
 	const lock = new SessionLifecycleLock();
 	lock.setGuard((sid) => attempts.assertResolved(sid));
 	const workspaceSkills = new Map<string, WorkspaceSkill>();
+	/** The workspace CLI N would run (control-marker-incompatible). */
+	const cli: { version: string | null } = { version: "2.1.308" };
 	docker.onRemove = (id) => {
 		if (d1.row.container_id === id) throw new Error(`removed the container D1 points at (${id})`);
 	};
@@ -379,9 +424,10 @@ export async function harness(opts: { config?: Partial<RecreateConfig>; root?: s
 		lock,
 		capture,
 		readWorkspaceSkill: async (_sid, rel) => workspaceSkills.get(rel) ?? { kind: "absent" },
+		readCliVersion: async () => cli.version,
 		config: { ...FAST, ...opts.config },
 	});
-	return { root, docker, d1, capture, attempts, lock, engine, workspaceSkills };
+	return { root, docker, d1, capture, attempts, lock, engine, workspaceSkills, cli };
 }
 
 /** What "identical to the previous state" compares (§10: D1, names, hash, files, markers, ports). */

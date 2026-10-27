@@ -58,11 +58,25 @@ export interface RecreateDockerPort {
 	listByLabel(key: string, value?: string): Promise<RecreateContainer[]>;
 	/** Every container whose name contains `fragment` (Docker's name filter is a substring match). */
 	listByName(fragment: string): Promise<RecreateContainer[]>;
-	exec(
-		containerId: string,
-		cmd: string[],
-		timeoutMs: number,
-	): Promise<{ exitCode: number | null; stdout: string }>;
+	/**
+	 * Runs `cmd` under the in-container `timeout` and resolves when dockerd
+	 * reports how it ended. `exitCode: null` means the termination is
+	 * UNKNOWN (the stream broke, or the exec did not report an exit): the
+	 * process may still be running and may still write. It is never "it
+	 * failed". `execId` lets the caller ask later (`execState`). Errors
+	 * thrown here come only from before the process could have started
+	 * (the exec instance was not created).
+	 */
+	exec(containerId: string, cmd: string[], timeoutMs: number): Promise<ExecResult>;
+	/** An exec's state now; null when dockerd no longer knows it (404). */
+	execState(execId: string): Promise<{ running: boolean; exitCode: number | null } | null>;
+}
+
+export interface ExecResult {
+	/** null: termination unknown — see `exec`. */
+	exitCode: number | null;
+	stdout: string;
+	execId?: string;
 }
 
 export const LABEL_SESSION = "io.shared-terminal.session";

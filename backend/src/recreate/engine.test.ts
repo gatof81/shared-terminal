@@ -24,7 +24,7 @@ import { LABEL_ATTEMPT, LABEL_SESSION, RESERVED_NAME_RE } from "./ports.js";
 
 type H = Awaited<ReturnType<typeof harness>>;
 const roots: string[] = [];
-async function setup(config?: Parameters<typeof harness>[0]["config"]): Promise<H> {
+async function setup(config?: NonNullable<Parameters<typeof harness>[0]>["config"]): Promise<H> {
 	const h = await harness({ config });
 	roots.push(h.root);
 	return h;

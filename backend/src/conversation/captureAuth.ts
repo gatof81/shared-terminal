@@ -586,6 +586,48 @@ export class CaptureAuthority {
 	}
 
 	/**
+	 * Rollback of a recreation whose O was created by 3.0d (§2.7.3; owner
+	 * decision on #459 point 2): O's marker and hooks file go back — a
+	 * complete pair only, which is all `converge` keeps on a stopped
+	 * container — and only while RETAIN authorization holds for O, D1's
+	 * container. Same discipline as the write procedure: a recheck after
+	 * EACH write, and a failed one withdraws file first, then marker.
+	 *
+	 * Why the disable always wins: a disable (API or CLI) writes its
+	 * revocation marker first, then D1, then removes file and marker. If it
+	 * lands during either write here, the recheck that follows sees the
+	 * revocation and withdraws. If it lands after the last recheck, both
+	 * writes here are already on disk, before its removals — which take
+	 * them away.
+	 */
+	async restoreRetained(
+		sessionId: string,
+		containerId: string,
+	): Promise<"restored" | "not-authorized" | "revoked-meanwhile"> {
+		const f = await this.facts(sessionId);
+		const c = f.container;
+		if (f.row?.container_id !== containerId || !c?.exists || c.running || !retainAuthorized(f)) {
+			return "not-authorized";
+		}
+		try {
+			await writeRelayEnabled(this.deps.workspaceRoot, sessionId);
+			if (!(await this.stillAllowed(sessionId, containerId))) {
+				await this.withdraw(sessionId);
+				return "revoked-meanwhile";
+			}
+			await this.deps.writeHooksFile(sessionId);
+			if (!(await this.stillAllowed(sessionId, containerId))) {
+				await this.withdraw(sessionId);
+				return "revoked-meanwhile";
+			}
+			return "restored";
+		} catch (err) {
+			await this.withdraw(sessionId).catch(() => undefined);
+			throw err;
+		}
+	}
+
+	/**
 	 * Conditions 1–3 re-read — flag, requested, no revocation (§2.7.5) —
 	 * plus the D1 container still being the one this write is about.
 	 */

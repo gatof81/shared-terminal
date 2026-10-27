@@ -41,9 +41,11 @@ import {
 	RecreateUnresolvedError,
 } from "../recreateAttempt.js";
 import { SessionBusyError, type SessionLifecycleLock } from "../sessionLifecycleLock.js";
+import { CONTROL_MARKER_VALIDATED_CLI, readWorkspaceCliVersion } from "./cliCompat.js";
 import type { RecreateD1Port, RecreateSessionConfig, RecreateSessionRow } from "./d1.js";
 import { classifyLayer, GITCONFIG, GITCONFIG_MAX_BYTES, type LayerVerdict } from "./layer.js";
 import {
+	type ExecResult,
 	isNotFound,
 	LABEL_ATTEMPT,
 	LABEL_RECREATE_OF,
@@ -130,8 +132,14 @@ export type RecreateResult =
 			warnings: string[];
 			/** Step-6 items not done (failed, or abandoned when T_rec ran out). */
 			incomplete: string[];
-			/** Requests still in flight past T_rec: the record stays uncertain until they answer. */
+			/**
+			 * Not converged yet: requests still in flight, execs whose exit is
+			 * unknown, or step-6 convergence left to do. The record stays
+			 * uncertain until the resolution has done and checked it.
+			 */
 			unresolved?: true;
+			/** What the record is waiting on, by name. */
+			pending?: string[];
 	  }
 	| { ok: false; status: 404; code: "not-found" }
 	| { ok: false; status: 409; code: string; blockers?: Blocker[]; step?: RecreateStep }
@@ -151,12 +159,24 @@ export interface RecreateCapturePort {
 	prepare(sessionId: string): Promise<RecreateCapturePrep>;
 	/** Which capture files exist now (to restore them on a rollback). */
 	snapshot(sessionId: string): Promise<{ marker: boolean; hooksFile: boolean }>;
-	/** Put back what `snapshot` saw — only while capture is still requested and not revoked. */
-	restore(sessionId: string, snap: { marker: boolean; hooksFile: boolean }): Promise<void>;
+	/**
+	 * Rollback of an O created by 3.0d: put back the pair `snapshot` saw,
+	 * only while RETAIN authorization still holds for O, rechecking after
+	 * each write (a disable during either write wins).
+	 */
+	restore(
+		sessionId: string,
+		snap: { marker: boolean; hooksFile: boolean },
+		oContainerId: string,
+	): Promise<string>;
 	/** Step 5 on N, bound to the attempt's epoch; returns the `capture` block. */
 	authorize(sessionId: string, run: AttemptRun): Promise<CaptureBlock | null>;
-	/** The normal capture convergence (§2.7.5), once the attempt is resolved onto N. */
-	converge(sessionId: string): Promise<void>;
+	/**
+	 * The §2.7.5 convergence on N, on behalf of the attempt (the gate is
+	 * not consulted: it runs BEFORE the record is resolved, under the
+	 * session's lock). Throws when it could not be done.
+	 */
+	converge(sessionId: string): Promise<string>;
 	deferSeedExists(sessionId: string): Promise<boolean>;
 	removeDeferSeed(sessionId: string): Promise<void>;
 }
@@ -169,6 +189,8 @@ export interface RecreationDeps {
 	lock: SessionLifecycleLock;
 	capture: RecreateCapturePort;
 	readWorkspaceSkill?: (sessionId: string, rel: string) => Promise<WorkspaceSkill>;
+	/** The workspace CLI's version (cliCompat.ts); null when unreadable. */
+	readCliVersion?: (sessionId: string) => Promise<string | null>;
 	config?: Partial<RecreateConfig>;
 	now?: () => number;
 	sleep?: (ms: number) => Promise<void>;
@@ -206,6 +228,35 @@ class StepFailure extends Error {
 	}
 }
 
+/**
+ * Whether the code running now holds the session's lifecycle lock. A
+ * resolution pass started inside `recreate` holds it through the attempt's
+ * own lock; when T_rb lets that lock go the pass loses its lease and
+ * stops before its next action, and a later pass takes the lock itself
+ * (`recreate-resolve`). Every action of a pass checks it, so no lifecycle
+ * verb ever interleaves with the resolution's mutations.
+ */
+interface Lease {
+	held: boolean;
+}
+
+class LeaseLostError extends Error {
+	constructor() {
+		super("resolution no longer holds the session lock");
+		this.name = "LeaseLostError";
+	}
+}
+
+/** An exec whose termination is not known (E1): pending evidence. */
+interface UnknownExec {
+	label: string;
+	containerId: string;
+	execId?: string;
+}
+
+/** Step-6 items whose absence leaves the session not converged on N. */
+const CONVERGENCE_ITEMS = new Set(["authorize", "defer-skill-seed", "ports", "status", "remove O"]);
+
 interface Facts {
 	row: RecreateSessionRow;
 	o: RecreateContainer;
@@ -232,9 +283,20 @@ interface Attempt {
 	recordChain: Promise<unknown>;
 	resolving: Promise<"resolved" | "pending"> | null;
 	retryTimer: ReturnType<typeof setTimeout> | null;
+	/** The lock held by `recreate` itself; lost when it returns. */
+	lease: Lease;
+	unknownExecs: UnknownExec[];
+	/**
+	 * `defer-skill-seed` is gone but no seed exec was issued for N yet: the
+	 * resolution seeds (with the marker gone, `deferSeedExists` can't say).
+	 */
+	seedPending: boolean;
 }
 
 type ResolveStep = "resolved" | "retry" | "stuck";
+
+/** One action of a resolution pass (tracked, lease-checked). */
+type Act = <T>(label: string, fn: () => Promise<T>) => Promise<T>;
 
 function semverLess(a: string, b: string): boolean {
 	const pa = a.split(".").map(Number);
@@ -250,6 +312,7 @@ export class RecreationEngine {
 	private readonly now: () => number;
 	private readonly sleep: (ms: number) => Promise<void>;
 	private readonly readW: (sessionId: string, rel: string) => Promise<WorkspaceSkill>;
+	private readonly readCli: (sessionId: string) => Promise<string | null>;
 	/** Attempts of this process run that are not resolved yet. */
 	private readonly attempts = new Map<string, Attempt>();
 	private stopped = false;
@@ -260,6 +323,7 @@ export class RecreationEngine {
 		this.now = deps.now ?? Date.now;
 		this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
 		this.readW = deps.readWorkspaceSkill ?? readWorkspaceSkill;
+		this.readCli = deps.readCliVersion ?? readWorkspaceCliVersion;
 	}
 
 	/** Sessions whose attempt in this process is still unresolved. For stats and tests. */
@@ -267,10 +331,18 @@ export class RecreationEngine {
 		return [...this.attempts.keys()];
 	}
 
-	/** Shutdown: no further resolution acts or is scheduled. Records stay as they are. */
+	/**
+	 * Shutdown: no further resolution acts or is scheduled, and every open
+	 * epoch closes — an attempt mid-way does nothing more forward either
+	 * (the late answer of its pending request continues nothing). Records
+	 * stay as they are; the next process finds them unresolved (D8).
+	 */
 	stop(): void {
 		this.stopped = true;
-		for (const a of this.attempts.values()) if (a.retryTimer) clearTimeout(a.retryTimer);
+		for (const a of this.attempts.values()) {
+			a.run.close("shutdown");
+			if (a.retryTimer) clearTimeout(a.retryTimer);
+		}
 	}
 
 	// ── Preflight (GET) ─────────────────────────────────────────────────────
@@ -313,10 +385,19 @@ export class RecreationEngine {
 
 	async recreate(sessionId: string, expectImageId: string): Promise<RecreateResult> {
 		try {
+			const lease: Lease = { held: true };
 			return await this.deps.lock.run(
 				sessionId,
 				"recreate",
-				() => this.recreateLocked(sessionId, expectImageId, this.now()),
+				async () => {
+					try {
+						return await this.recreateLocked(sessionId, expectImageId, this.now(), lease);
+					} finally {
+						// Before the lock is released: a pass still running on this
+						// lease stops before its next action.
+						lease.held = false;
+					}
+				},
 				{ mode: "fail" },
 			);
 		} catch (err) {
@@ -332,6 +413,7 @@ export class RecreationEngine {
 		sessionId: string,
 		expectImageId: string,
 		lockedAt: number,
+		lease: Lease,
 	): Promise<RecreateResult> {
 		// ── Preconditions 2–8, first failure wins, no effects ──
 		let facts: Facts;
@@ -401,6 +483,9 @@ export class RecreationEngine {
 			recordChain: Promise.resolve(),
 			resolving: null,
 			retryTimer: null,
+			lease,
+			unknownExecs: [],
+			seedPending: false,
 		};
 		this.attempts.set(sessionId, a);
 		logger.info(
@@ -424,7 +509,10 @@ export class RecreationEngine {
 			return this.rollback(a, new StepFailure("commit", "T_rec expired before the commit"));
 		}
 		a.casSentAt = this.now();
-		a.cas = await this.deps.d1.cas(sessionId, a.oId, nId, hash);
+		// D1's own rule (§2.7.4): the client cuts the statement at 10 s and
+		// the outcome is classified, never waited on past that. Tracked so
+		// no resolution pass runs while it is out.
+		a.cas = await a.run.untimed("d1 commit", () => this.deps.d1.cas(sessionId, a.oId, nId, hash));
 		if (a.cas === "not-applied") {
 			return this.rollback(a, new StepFailure("commit", "CAS matched 0 rows"));
 		}
@@ -560,6 +648,13 @@ export class RecreationEngine {
 				this.readW(sessionId, rel),
 			)),
 		);
+		if (done()) return result();
+		// §2.7.5: N mounts /etc/st-control and runs the workspace's CLI. Only
+		// a version that directory was validated with may run it (cliCompat.ts).
+		const cli = await this.readCli(sessionId);
+		if (cli === null || !CONTROL_MARKER_VALIDATED_CLI.has(cli)) {
+			blockers.push({ code: "control-marker-incompatible" });
+		}
 		if (blockers.length > 0 || !image) return result();
 		return result({ row, o, image, config, layer, imageOSkills });
 	}
@@ -612,6 +707,66 @@ export class RecreationEngine {
 
 	// ── Steps 1–3 ───────────────────────────────────────────────────────────
 
+	/**
+	 * An exec of the attempt. `exitCode: null` is termination UNKNOWN (E1):
+	 * the process may still be running in N, so it is kept as pending
+	 * evidence and the attempt is never resolved until an exit is observed
+	 * (`execsEnded`). Recorded inside the tracked request, so a late answer
+	 * — whose continuation does nothing — is recorded all the same.
+	 */
+	private execIn(
+		a: Attempt,
+		label: string,
+		containerId: string,
+		cmd: string[],
+		timeoutMs: number,
+		via: "call" | "untimed",
+		/** `issued` runs when the request goes out; `refused` when Docker created no exec. */
+		on: { issued?: () => void; refused?: () => void } = {},
+	): Promise<ExecResult> {
+		const fn = () => {
+			on.issued?.();
+			return this.deps.docker.exec(containerId, cmd, timeoutMs).then(
+				(r) => {
+					if (r.exitCode === null) {
+						a.unknownExecs.push({ label, containerId, execId: r.execId });
+						logger.warn(`[recreate] ${a.sessionId}: ${label}: exit unknown; kept as pending`);
+					}
+					return r;
+				},
+				(err: unknown) => {
+					// The port throws only when no process could have started.
+					on.refused?.();
+					throw err;
+				},
+			);
+		};
+		return via === "call" ? a.run.call(label, fn) : a.run.untimed(label, fn);
+	}
+
+	/**
+	 * Each unknown exec ended? Evidence is the exec reporting it is no
+	 * longer running, or its container not running (no process outlives
+	 * its container's stop) or gone.
+	 */
+	private async execsEnded(a: Attempt, act: Act): Promise<boolean> {
+		const still: UnknownExec[] = [];
+		for (const e of a.unknownExecs) {
+			const c = await act("inspect (exec evidence)", () => this.deps.docker.inspect(e.containerId));
+			if (!c?.running) continue;
+			const st = e.execId
+				? await act("exec state", () => this.deps.docker.execState(e.execId as string))
+				: null;
+			if (st && !st.running) {
+				logger.info(`[recreate] ${a.sessionId}: ${e.label} ended (exit ${st.exitCode ?? "?"})`);
+				continue;
+			}
+			still.push(e);
+		}
+		a.unknownExecs = still;
+		return still.length === 0;
+	}
+
 	/** Step 1: N created, not started; precondition 8 again, against I_N. Returns H. */
 	private async prepare(a: Attempt, facts: Facts, nTempName: string): Promise<string> {
 		const { run, sessionId } = a;
@@ -620,23 +775,24 @@ export class RecreationEngine {
 			// dir (created by 3.0d): those files are part of its state. A
 			// 3.0c O never mounted it, and §2.7.5 retires its files anyway.
 			if (facts.o.mounts.includes(CONTROL_MOUNT_TARGET)) {
-				a.snapshot = await this.deps.capture.snapshot(sessionId);
+				a.snapshot = await run.call("capture snapshot", () =>
+					this.deps.capture.snapshot(sessionId),
+				);
 			}
-			const prep = await this.deps.capture.prepare(sessionId);
-			const options = await this.deps.docker.buildCreate(sessionId, {
-				name: nTempName,
-				imageId: facts.image.imageId,
-				env: prep.env,
-				binds: prep.binds,
-				labels: {
-					[LABEL_SESSION]: sessionId,
-					[LABEL_RECREATE_OF]: a.oId,
-					[LABEL_ATTEMPT]: a.attemptId,
-				},
-			});
-			if (!run.epochOpen || run.remaining() <= 0) {
-				throw new EpochClosedError("create N", run.closeReason ?? "T_rec");
-			}
+			const prep = await run.call("capture prepare", () => this.deps.capture.prepare(sessionId));
+			const options = await run.call("build N options", () =>
+				this.deps.docker.buildCreate(sessionId, {
+					name: nTempName,
+					imageId: facts.image.imageId,
+					env: prep.env,
+					binds: prep.binds,
+					labels: {
+						[LABEL_SESSION]: sessionId,
+						[LABEL_RECREATE_OF]: a.oId,
+						[LABEL_ATTEMPT]: a.attemptId,
+					},
+				}),
+			);
 			await run.call("create N", () =>
 				this.deps.docker.create(options).then((id) => {
 					// Kept whatever the epoch: the resolution must know N.
@@ -686,8 +842,13 @@ export class RecreationEngine {
 			await run.call("start N", () => this.deps.docker.start(nId));
 			const readyBy = this.now() + this.cfg.readinessMs;
 			for (;;) {
-				const r = await run.call("readiness N", () =>
-					this.deps.docker.exec(nId, ["test", "-f", READY_SENTINEL], 5_000),
+				const r = await this.execIn(
+					a,
+					"readiness N",
+					nId,
+					["test", "-f", READY_SENTINEL],
+					5_000,
+					"call",
 				);
 				if (r.exitCode === 0) break;
 				if (this.now() >= readyBy) throw new StepFailure("start", "N not ready in time");
@@ -715,8 +876,10 @@ export class RecreationEngine {
 	 * then the resolution waits for every request to answer and, with D1
 	 * still on O, removes N (confirmed), gives O its name back, and only
 	 * then retires `defer-skill-seed`. Within T_rb that is a resolved
-	 * rollback; otherwise the record goes `uncertain`, the lock is released
-	 * and the resolution finishes when the evidence arrives.
+	 * rollback, done under this attempt's own lock (its lease); otherwise
+	 * the record goes `uncertain`, the lock is released, the pass in
+	 * progress stops before its next action, and a later pass finishes
+	 * under the lock it takes itself.
 	 */
 	private async rollback(a: Attempt, err: unknown): Promise<RecreateResult> {
 		const failure = err instanceof StepFailure ? err : this.asStep("prepare", err);
@@ -724,7 +887,7 @@ export class RecreationEngine {
 		logger.warn(`[recreate] ${a.sessionId}: rolling back (${failure.message})`);
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const first = await Promise.race([
-			this.runResolution(a),
+			this.runResolution(a, a.lease),
 			new Promise<"T_rb">((r) => {
 				timer = setTimeout(() => r("T_rb"), this.cfg.tRbMs);
 			}),
@@ -742,6 +905,9 @@ export class RecreationEngine {
 				unresolved: true,
 			};
 		}
+		// Owner decision (#459 point 3): a precondition that failed against
+		// I_N answers with its own code — but only after a rollback that is
+		// resolved and confirmed (we are past the `unresolved` return).
 		if (failure.blockers) {
 			return {
 				ok: false,
@@ -756,6 +922,17 @@ export class RecreationEngine {
 
 	// ── Step 4 onwards: completion on N ─────────────────────────────────────
 
+	/**
+	 * Steps 5 and 6, all of it inside T_rec (E2): authorization, file
+	 * writes, D1 writes and execs are requests of the attempt, so when the
+	 * budget runs out the epoch closes, nothing further starts, a late
+	 * answer does nothing, and what is still out is named in the record.
+	 *
+	 * The record is resolved here only when everything converged and was
+	 * re-observed (E3). Otherwise it goes `uncertain` and the resolution —
+	 * which converges on N and checks it under the session's lock — is
+	 * what resolves it; until then every incompatible verb is refused.
+	 */
 	private async complete(a: Attempt, facts: Facts, nId: string): Promise<RecreateResult> {
 		const { run, sessionId } = a;
 		const warnings: string[] = [];
@@ -765,9 +942,13 @@ export class RecreationEngine {
 		// Step 5: the §2.7.5 procedure on N, inside this attempt's epoch.
 		let capture: CaptureBlock | null = null;
 		try {
-			capture = await this.deps.capture.authorize(sessionId, run);
+			capture = await run.call("authorize N", () => this.deps.capture.authorize(sessionId, run));
 		} catch (err) {
-			logger.warn(`[recreate] ${sessionId}: authorization on N failed: ${(err as Error).message}`);
+			if (!(err instanceof EpochClosedError)) {
+				logger.warn(
+					`[recreate] ${sessionId}: authorization on N failed: ${(err as Error).message}`,
+				);
+			}
 			incomplete.push("authorize");
 		}
 
@@ -775,18 +956,38 @@ export class RecreationEngine {
 		const execBudget = (cap: number) => Math.max(1_000, Math.min(cap, run.remaining()));
 		let cliVersion: string | null = null;
 		const items: Array<[string, () => Promise<void>]> = [
-			["defer-skill-seed", () => this.deps.capture.removeDeferSeed(sessionId)],
+			[
+				"defer-skill-seed",
+				() =>
+					run.call("remove defer-skill-seed", () =>
+						this.deps.capture.removeDeferSeed(sessionId).then(() => {
+							a.seedPending = true;
+						}),
+					),
+			],
 			[
 				"seed-skills",
 				async () => {
-					const r = await run.call("seed N", () =>
-						this.deps.docker.exec(nId, [SEED_SCRIPT], execBudget(60_000)),
-					);
-					if (r.exitCode !== 0) throw new Error(`seed-skills exit ${r.exitCode}`);
+					// Once issued, never re-issued blindly — even if T_rec stops the
+					// waiting: the seed may be running. An unknown exit is pending
+					// evidence (execIn); a non-zero one is logged and the next start
+					// seeds (§2.7.3). Only a refused create puts it back.
+					const r = await this.execIn(a, "seed N", nId, [SEED_SCRIPT], execBudget(60_000), "call", {
+						issued: () => {
+							a.seedPending = false;
+						},
+						refused: () => {
+							a.seedPending = true;
+						},
+					});
+					if (r.exitCode !== 0) throw new Error(`seed-skills exit ${r.exitCode ?? "unknown"}`);
 				},
 			],
-			["ports", () => this.deps.d1.setPorts(sessionId, facts.config.ports)],
-			["status", () => this.deps.d1.setStatus(sessionId, "running")],
+			[
+				"ports",
+				() => run.call("d1 ports", () => this.deps.d1.setPorts(sessionId, facts.config.ports)),
+			],
+			["status", () => run.call("d1 status", () => this.deps.d1.setStatus(sessionId, "running"))],
 			[
 				"gitIdentity",
 				async () => {
@@ -796,10 +997,16 @@ export class RecreationEngine {
 						["user.name", id.name],
 						["user.email", id.email],
 					] as const) {
-						const r = await run.call(`git config ${k}`, () =>
-							this.deps.docker.exec(nId, ["git", "config", "--global", k, v], execBudget(30_000)),
+						const r = await this.execIn(
+							a,
+							`git config ${k}`,
+							nId,
+							["git", "config", "--global", k, v],
+							execBudget(30_000),
+							"call",
 						);
-						if (r.exitCode !== 0) throw new Error(`git config ${k} exit ${r.exitCode}`);
+						if (r.exitCode !== 0)
+							throw new Error(`git config ${k} exit ${r.exitCode ?? "unknown"}`);
 					}
 				},
 			],
@@ -811,26 +1018,32 @@ export class RecreationEngine {
 					// Launched detached in tmux like every start's postStart: the
 					// command keeps running in N (N is the session); only the
 					// launch is waited for.
-					const r = await run.call("postStart N", () =>
-						this.deps.docker.exec(
-							nId,
-							[
-								"bash",
-								"-c",
-								'tmux kill-session -t bootstrap 2>/dev/null; exec tmux new-session -d -s bootstrap -c /home/developer/workspace bash -c "$0"',
-								cmd,
-							],
-							execBudget(30_000),
-						),
+					const r = await this.execIn(
+						a,
+						"postStart N",
+						nId,
+						[
+							"bash",
+							"-c",
+							'tmux kill-session -t bootstrap 2>/dev/null; exec tmux new-session -d -s bootstrap -c /home/developer/workspace bash -c "$0"',
+							cmd,
+						],
+						execBudget(30_000),
+						"call",
 					);
-					if (r.exitCode !== 0) throw new Error(`postStart launch exit ${r.exitCode}`);
+					if (r.exitCode !== 0) throw new Error(`postStart launch exit ${r.exitCode ?? "unknown"}`);
 				},
 			],
 			[
 				"cliVersion",
 				async () => {
-					const r = await run.call("claude --version", () =>
-						this.deps.docker.exec(nId, ["claude", "--version"], execBudget(15_000)),
+					const r = await this.execIn(
+						a,
+						"claude --version",
+						nId,
+						["claude", "--version"],
+						execBudget(15_000),
+						"call",
 					);
 					const v = /(\d+\.\d+\.\d+)/.exec(r.stdout)?.[1] ?? null;
 					cliVersion = v;
@@ -877,30 +1090,58 @@ export class RecreationEngine {
 			warnings,
 			incomplete,
 		};
-		if (run.inflightLabels().length > 0) {
-			// T_rec ran out with requests unanswered (a probe, an exec): the
-			// record waits for them. A late probe writes nothing (the epoch
-			// is closed), and the resolution converges on N.
-			run.close(run.closeReason ?? "T_rec");
-			await this.markUncertain(
-				a,
-				`post-commit requests in flight: ${run.inflightLabels().join(", ")}`,
-			);
+		const notConverged = incomplete.filter((i) => CONVERGENCE_ITEMS.has(i));
+		if (a.seedPending) notConverged.push("seed-skills");
+		const converged =
+			notConverged.length === 0 &&
+			run.inflightLabels().length === 0 &&
+			a.unknownExecs.length === 0 &&
+			(await this.convergedOnN(a, nId));
+		if (!converged) {
+			run.close(run.closeReason ?? "not converged");
+			const pending = [
+				...notConverged.map((i) => `${i} (not done)`),
+				...run.inflightLabels().map((l) => `${l} (no answer yet)`),
+				...a.unknownExecs.map((e) => `${e.label} (exit unknown)`),
+			];
+			if (pending.length === 0) pending.push("convergence check");
+			await this.markUncertain(a, `committed, not converged: ${pending.join(", ")}`);
 			void this.runResolution(a);
-			return { ...base, unresolved: true };
+			return { ...base, unresolved: true, pending };
 		}
 		run.close("completed");
 		const resolved = await this.resolveRecord(
 			a,
+			a.lease,
 			{ kind: "committed", nContainerId: nId },
 			incomplete.length ? `committed; pending: ${incomplete.join(", ")}` : "committed",
 		);
 		if (!resolved) {
 			// The record write failed: still owned, still gated; retried.
 			void this.runResolution(a);
-			return { ...base, unresolved: true };
+			return { ...base, unresolved: true, pending: ["record"] };
 		}
 		return base;
+	}
+
+	/**
+	 * Re-observed, inside the epoch: D1 on N and `running`, O gone, the
+	 * marker gone. What step 6 claimed done, seen again.
+	 */
+	private async convergedOnN(a: Attempt, nId: string): Promise<boolean> {
+		const { run, sessionId } = a;
+		try {
+			const row = await run.call("d1 re-read", () => this.deps.d1.getRow(sessionId));
+			if (row?.container_id !== nId || row.status !== "running") return false;
+			if (await run.call("confirm O gone", () => this.deps.docker.inspect(a.oId))) return false;
+			if (
+				await run.call("defer-skill-seed gone", () => this.deps.capture.deferSeedExists(sessionId))
+			)
+				return false;
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	// ── Record transitions (serialized per attempt) ─────────────────────────
@@ -928,13 +1169,16 @@ export class RecreationEngine {
 		});
 	}
 
+	/** Only under the session's lock: resolving is what lets the other verbs in. */
 	private async resolveRecord(
 		a: Attempt,
+		lease: Lease,
 		outcome: AttemptOutcome,
 		reason: string,
 	): Promise<boolean> {
 		return this.recordOp(a, async () => {
 			if (a.state === "resolved") return true;
+			if (!lease.held) throw new LeaseLostError();
 			try {
 				await this.deps.attempts.resolve(a.sessionId, a.attemptId, outcome, reason);
 			} catch (err) {
@@ -952,23 +1196,50 @@ export class RecreationEngine {
 	// ── Resolution (evidence only) ──────────────────────────────────────────
 
 	/**
-	 * Waits for every request of the attempt to answer, then applies the
-	 * resolution table with D1 deciding. Each pass either resolves, or
+	 * Waits for every request of the attempt to answer (and, after an
+	 * ambiguous CAS, for D1 to be final), then applies the resolution table
+	 * with D1 deciding — under the session's lock: the attempt's own
+	 * (`lease`, from inside `recreate`) or one it takes (`recreate-resolve`,
+	 * which the unresolved gate lets through). Each pass resolves, or
 	 * schedules a re-observation (something could not be confirmed yet), or
 	 * stops (neither O nor N: operator). Never on elapsed time alone.
 	 */
-	private runResolution(a: Attempt): Promise<"resolved" | "pending"> {
+	private runResolution(a: Attempt, lease?: Lease): Promise<"resolved" | "pending"> {
 		if (a.resolving) return a.resolving;
 		const p = (async (): Promise<"resolved" | "pending"> => {
 			await a.run.settled();
+			if (a.cas === "ambiguous" && a.casSentAt !== null) {
+				const wait = a.casSentAt + this.cfg.tD1Ms - this.now();
+				if (wait > 0) await this.sleep(wait);
+			}
 			// Shutting down: the process that could act on this evidence is
 			// going away; the next one finds the record and stays fail-closed.
 			if (this.stopped) return "pending";
 			let r: ResolveStep;
 			try {
-				r = await this.resolveOnce(a);
+				// A lease already lost (T_rb let the lock go while this pass
+				// waited for evidence) is not used: this pass takes the lock.
+				r = lease?.held
+					? await this.resolveOnce(a, lease)
+					: await this.deps.lock.run(
+							a.sessionId,
+							"recreate-resolve",
+							async () => {
+								const own: Lease = { held: true };
+								try {
+									return await this.resolveOnce(a, own);
+								} finally {
+									own.held = false;
+								}
+							},
+							{ mode: "wait" },
+						);
 			} catch (err) {
-				logger.warn(`[recreate] ${a.sessionId}: resolution pass failed: ${(err as Error).message}`);
+				if (!(err instanceof LeaseLostError)) {
+					logger.warn(
+						`[recreate] ${a.sessionId}: resolution pass failed: ${(err as Error).message}`,
+					);
+				}
 				r = "retry";
 			}
 			if (r === "resolved") return "resolved";
@@ -988,15 +1259,17 @@ export class RecreationEngine {
 		return p;
 	}
 
-	private async resolveOnce(a: Attempt): Promise<ResolveStep> {
-		if (a.cas === "ambiguous" && a.casSentAt !== null) {
-			const wait = a.casSentAt + this.cfg.tD1Ms - this.now();
-			if (wait > 0) await this.sleep(wait);
-		}
-		const row = await this.deps.d1.getRow(a.sessionId);
+	private async resolveOnce(a: Attempt, lease: Lease): Promise<ResolveStep> {
+		// Every action of the pass, reads included, goes through here: it is
+		// tracked as the attempt's evidence and refused once the lease is gone.
+		const act: Act = (label, fn) => {
+			if (!lease.held || this.stopped) throw new LeaseLostError();
+			return a.run.untimed(label, fn);
+		};
+		const row = await act("d1 read", () => this.deps.d1.getRow(a.sessionId));
 		const current = row?.container_id ?? null;
-		if (current === a.oId) return this.resolveToO(a);
-		if (a.nId !== null && current === a.nId) return this.resolveToN(a);
+		if (current === a.oId) return this.resolveToO(a, lease, act);
+		if (a.nId !== null && current === a.nId) return this.resolveToN(a, lease, act);
 		this.stats.recreateOrphans++;
 		logger.error(
 			`[recreate] ${a.sessionId}: attempt ${a.attemptId}: D1 names neither O nor N (${current ?? "null"}); left for the operator`,
@@ -1005,24 +1278,22 @@ export class RecreationEngine {
 	}
 
 	/** D1 = O: N must be confirmed gone before O gets its name back and the marker goes. */
-	private async resolveToO(a: Attempt): Promise<ResolveStep> {
-		const { run } = a;
+	private async resolveToO(a: Attempt, lease: Lease, act: Act): Promise<ResolveStep> {
 		const d = this.deps.docker;
 		const ids = new Set<string>();
 		if (a.nId) ids.add(a.nId);
-		for (const c of await run.untimed("list N by label", () =>
-			d.listByLabel(LABEL_ATTEMPT, a.attemptId),
-		)) {
+		for (const c of await act("list N by label", () => d.listByLabel(LABEL_ATTEMPT, a.attemptId))) {
 			ids.add(c.id);
 		}
 		for (const id of ids) {
 			if (id === a.oId) continue; // never O, whatever a label says
-			const c = await run.untimed("inspect N", () => d.inspect(id));
+			const c = await act("inspect N", () => d.inspect(id));
 			if (!c) continue;
 			try {
-				if (c.running) await run.untimed("stop N", () => d.stop(id));
-				await run.untimed("remove N", () => d.remove(id));
+				if (c.running) await act("stop N", () => d.stop(id));
+				await act("remove N", () => d.remove(id));
 			} catch (err) {
+				if (err instanceof LeaseLostError) throw err;
 				if (!isNotFound(err)) {
 					logger.warn(`[recreate] ${a.sessionId}: removing N failed: ${(err as Error).message}`);
 					return "retry";
@@ -1030,15 +1301,16 @@ export class RecreationEngine {
 			}
 		}
 		for (const id of ids) {
-			if (id !== a.oId && (await run.untimed("confirm N gone", () => d.inspect(id))))
-				return "retry";
+			if (id !== a.oId && (await act("confirm N gone", () => d.inspect(id)))) return "retry";
 		}
-		const labelled = await run.untimed("confirm no N by label", () =>
+		const labelled = await act("confirm no N by label", () =>
 			d.listByLabel(LABEL_ATTEMPT, a.attemptId),
 		);
 		if (labelled.some((c) => c.id !== a.oId)) return "retry";
+		// N gone ⇒ every exec in it ended.
+		if (!(await this.execsEnded(a, act))) return "retry";
 
-		const o = await run.untimed("inspect O", () => d.inspect(a.oId));
+		const o = await act("inspect O", () => d.inspect(a.oId));
 		if (!o) {
 			this.stats.recreateOrphans++;
 			logger.error(`[recreate] ${a.sessionId}: D1 names O but O is gone; left for the operator`);
@@ -1046,29 +1318,41 @@ export class RecreationEngine {
 		}
 		if (o.name !== a.canonical) {
 			try {
-				await run.untimed("rename O back", () => d.rename(a.oId, a.canonical));
+				await act("rename O back", () => d.rename(a.oId, a.canonical));
 			} catch (err) {
+				if (err instanceof LeaseLostError) throw err;
 				logger.warn(`[recreate] ${a.sessionId}: renaming O back failed: ${(err as Error).message}`);
 				return "retry";
 			}
-			const again = await run.untimed("confirm O name", () => d.inspect(a.oId));
+			const again = await act("confirm O name", () => d.inspect(a.oId));
 			if (again?.name !== a.canonical) return "retry";
 		}
 		// Only now, with N confirmed gone: nothing can start with the marker
 		// missing and seed over the workspace.
-		await this.deps.capture.removeDeferSeed(a.sessionId);
-		await this.deps.capture.restore(a.sessionId, a.snapshot);
-		return (await this.resolveRecord(a, { kind: "rolled-back" }, "rolled back"))
+		await act("remove defer-skill-seed", () => this.deps.capture.removeDeferSeed(a.sessionId));
+		if (await act("defer-skill-seed gone", () => this.deps.capture.deferSeedExists(a.sessionId))) {
+			return "retry";
+		}
+		const restored = await act("restore O capture", () =>
+			this.deps.capture.restore(a.sessionId, a.snapshot, a.oId),
+		);
+		if (a.snapshot.marker || a.snapshot.hooksFile) {
+			logger.info(`[recreate] ${a.sessionId}: O's capture files: ${restored}`);
+		}
+		return (await this.resolveRecord(a, lease, { kind: "rolled-back" }, "rolled back"))
 			? "resolved"
 			: "retry";
 	}
 
-	/** D1 = N (the commit applied): converge on N, never revert. */
-	private async resolveToN(a: Attempt): Promise<ResolveStep> {
-		const { run, sessionId } = a;
+	/**
+	 * D1 = N (the commit applied): converge on N, never revert — and check
+	 * it, before the record says `resolved` (E3).
+	 */
+	private async resolveToN(a: Attempt, lease: Lease, act: Act): Promise<ResolveStep> {
+		const { sessionId } = a;
 		const d = this.deps.docker;
 		const nId = a.nId as string;
-		const o = await run.untimed("inspect O", () => d.inspect(a.oId));
+		const o = await act("inspect O", () => d.inspect(a.oId));
 		if (o) {
 			if (o.running) {
 				// Someone started O by hand after the commit. It is not D1's
@@ -1080,37 +1364,70 @@ export class RecreationEngine {
 				return "retry";
 			}
 			try {
-				await run.untimed("remove O", () => d.remove(a.oId));
+				await act("remove O", () => d.remove(a.oId));
 			} catch (err) {
+				if (err instanceof LeaseLostError) throw err;
 				if (!isNotFound(err)) return "retry";
 			}
 		}
-		const n = await run.untimed("inspect N", () => d.inspect(nId));
+		const n = await act("inspect N", () => d.inspect(nId));
 		if (!n) {
 			this.stats.recreateOrphans++;
 			logger.error(`[recreate] ${sessionId}: D1 names N but N is gone; left for the operator`);
 			return "stuck";
 		}
-		await this.deps.d1.setStatus(sessionId, n.running ? "running" : "stopped");
-		const config = await this.deps.d1.getConfig(sessionId);
-		await this.deps.d1.setPorts(sessionId, n.running ? config.ports : []);
-		if (await this.deps.capture.deferSeedExists(sessionId)) {
-			await this.deps.capture.removeDeferSeed(sessionId);
+		const status = n.running ? "running" : "stopped";
+		await act("d1 status", () => this.deps.d1.setStatus(sessionId, status));
+		const config = await act("d1 config", () => this.deps.d1.getConfig(sessionId));
+		await act("d1 ports", () => this.deps.d1.setPorts(sessionId, n.running ? config.ports : []));
+		const marker = await act("defer-skill-seed exists", () =>
+			this.deps.capture.deferSeedExists(sessionId),
+		);
+		if (marker || a.seedPending) {
+			await act("remove defer-skill-seed", () => this.deps.capture.removeDeferSeed(sessionId));
+			a.seedPending = true;
 			if (n.running) {
-				const r = await run.untimed("seed N", () => d.exec(nId, [SEED_SCRIPT], 60_000));
-				if (r.exitCode !== 0) logger.warn(`[recreate] ${sessionId}: seed exit ${r.exitCode}`);
+				if (!lease.held || this.stopped) throw new LeaseLostError();
+				const r = await this.execIn(a, "seed N", nId, [SEED_SCRIPT], 60_000, "untimed", {
+					issued: () => {
+						a.seedPending = false;
+					},
+					refused: () => {
+						a.seedPending = true;
+					},
+				});
+				if (r.exitCode !== null && r.exitCode !== 0) {
+					logger.warn(`[recreate] ${sessionId}: seed exit ${r.exitCode}`);
+				}
+			} else {
+				// The next start seeds: the marker is gone (§2.7.3).
+				a.seedPending = false;
 			}
 		}
-		if (
-			!(await this.resolveRecord(a, { kind: "committed", nContainerId: nId }, "converged on N"))
-		) {
+		// The ordinary §2.7.5 convergence, as the attempt (the gate would
+		// skip it while the record is unresolved — that is the point).
+		const capture = await act("capture converge", () => this.deps.capture.converge(sessionId));
+		logger.info(`[recreate] ${sessionId}: capture on N: ${capture}`);
+
+		// Seen again before resolving: D1 on N with the status of N, O gone,
+		// the marker gone, and every exec of the attempt ended.
+		const again = await act("d1 re-read", () => this.deps.d1.getRow(sessionId));
+		if (again?.container_id !== nId || again.status !== status) return "retry";
+		const nNow = await act("inspect N again", () => d.inspect(nId));
+		if (!nNow || nNow.running !== n.running) return "retry";
+		if (await act("confirm O gone", () => d.inspect(a.oId))) return "retry";
+		if (await act("defer-skill-seed gone", () => this.deps.capture.deferSeedExists(sessionId))) {
 			return "retry";
 		}
-		// The ordinary §2.7.5 convergence, now that the gate lets it act.
-		await this.deps.capture.converge(sessionId).catch((err) => {
-			logger.warn(`[recreate] ${sessionId}: capture converge failed: ${(err as Error).message}`);
-		});
-		return "resolved";
+		if (!(await this.execsEnded(a, act))) return "retry";
+		return (await this.resolveRecord(
+			a,
+			lease,
+			{ kind: "committed", nContainerId: nId },
+			"converged on N",
+		))
+			? "resolved"
+			: "retry";
 	}
 
 	// ── Boot pass ───────────────────────────────────────────────────────────

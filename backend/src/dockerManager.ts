@@ -10,7 +10,7 @@ import type { Dirent } from "node:fs";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { Duplex } from "node:stream";
+import { type Duplex, Writable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import Dockerode from "dockerode";
 import {
@@ -50,7 +50,12 @@ import {
 	RELAY_STATUS_URL,
 } from "./conversation/captureAuth.js";
 import type { LayerChange, PathKind } from "./recreate/layer.js";
-import { isNotFound, type RecreateContainer, type RecreateDockerPort } from "./recreate/ports.js";
+import {
+	type ExecResult,
+	isNotFound,
+	type RecreateContainer,
+	type RecreateDockerPort,
+} from "./recreate/ports.js";
 import {
 	decryptStoredEntries,
 	EFFECTIVE_CPU_NANO_MAX,
@@ -2882,11 +2887,88 @@ export class DockerManager {
 					mounts: (c.Mounts ?? []).map((m) => m.Destination),
 				}));
 			},
-			exec: async (containerId, cmd, timeoutMs) => {
-				const r = await this.execCapture("", cmd, { containerId, maxBytes: 64 * 1024, timeoutMs });
-				return { exitCode: r.exitCode, stdout: r.stdout.toString("utf8") };
+			exec: (containerId, cmd, timeoutMs) => this.recreateExec(containerId, cmd, timeoutMs),
+			execState: async (execId) => {
+				try {
+					const i = await d.getExec(execId).inspect();
+					return {
+						running: !!i.Running,
+						exitCode: !i.Running && typeof i.ExitCode === "number" ? i.ExitCode : null,
+					};
+				} catch (err) {
+					if (isNotFound(err)) return null;
+					throw err;
+				}
 			},
 		};
+	}
+
+	/**
+	 * The recreation's exec (CONVERSATION.md §2.7.4). Not `execCapture`:
+	 * that one has a host-side backstop that destroys the stream and
+	 * reports the exit as unknown, which is what git's slot accounting
+	 * wants and must stay as it is. A recreation needs evidence instead:
+	 *   - nothing is cut on this side; the stream is read until dockerd
+	 *     ends it (the in-container `timeout -k` bounds the process);
+	 *   - the exit is taken ONLY from the exec's own inspect, after the
+	 *     stream is over. A broken stream, a failing inspect, `Running`
+	 *     still true or no numeric `ExitCode` is "termination unknown"
+	 *     (`exitCode: null`, with the exec id to ask again), never a
+	 *     failure — the process may still be running and writing.
+	 * Only a failure to create the exec instance throws: no process exists.
+	 */
+	private async recreateExec(
+		containerId: string,
+		cmd: string[],
+		timeoutMs: number,
+	): Promise<ExecResult> {
+		const timeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
+		const exec = await this.docker.getContainer(containerId).exec({
+			Cmd: ["timeout", "-k", "2", String(timeoutSec), ...cmd],
+			AttachStdin: false,
+			AttachStdout: true,
+			AttachStderr: true,
+			Tty: false,
+			WorkingDir: "/home/developer/workspace",
+		});
+		const MAX = 64 * 1024;
+		const chunks: Buffer[] = [];
+		let size = 0;
+		// Past the cap the output is drained, not cut: the stream must end
+		// on dockerd's side for the exit to be observable.
+		const stdout = new Writable({
+			write(c: Buffer, _e, cb) {
+				if (size < MAX) chunks.push(c.subarray(0, MAX - size));
+				size += c.length;
+				cb();
+			},
+		});
+		const stderr = new Writable({
+			write(_c, _e, cb) {
+				cb();
+			},
+		});
+		try {
+			const stream = await exec.start({ hijack: false, stdin: false });
+			await new Promise<void>((resolve) => {
+				this.docker.modem.demuxStream(stream, stdout, stderr);
+				stream.on("end", () => resolve());
+				stream.on("close", () => resolve());
+				stream.on("error", () => resolve());
+			});
+		} catch {
+			// The start may still have run the process: the inspect decides.
+		}
+		const out = Buffer.concat(chunks).toString("utf8");
+		try {
+			const info = await exec.inspect();
+			if (!info.Running && typeof info.ExitCode === "number") {
+				return { exitCode: info.ExitCode, stdout: out, execId: exec.id };
+			}
+		} catch {
+			// Unknown, below.
+		}
+		return { exitCode: null, stdout: out, execId: exec.id };
 	}
 
 	/**

@@ -25,7 +25,6 @@ import {
 	RELAY_IDENTIFY_WAIT_MS,
 	relayEnabledExists,
 	removeDeferSeed,
-	writeRelayEnabled,
 } from "../conversation/captureAuth.js";
 import { getSessionCapture } from "../conversation/registry.js";
 import { checkRevocation } from "../conversation/revocation.js";
@@ -35,6 +34,25 @@ import type { RecreateCapturePort } from "./engine.js";
 export function conversationRecreatePort(service: ConversationService): RecreateCapturePort {
 	const deps = service.activationDeps;
 	const root = deps.workspaceRoot;
+	/**
+	 * The authority the attempt itself acts through once it is resolving
+	 * (rollback restore, convergence on N): the gate is not consulted —
+	 * the record is unresolved precisely until this work is done and
+	 * checked, and the caller holds the session's lock (no other verb
+	 * interleaves). Every other rule of §2.7.5 applies unchanged.
+	 */
+	const ownerAuthority = () =>
+		new CaptureAuthority({
+			workspaceRoot: root,
+			enabled: deps.enabled,
+			docker: service.captureDocker,
+			getRow: (s) => getSessionCapture(s),
+			checkRevocation: (s) => checkRevocation(root, s),
+			isRecreateUnresolved: async () => false,
+			writeHooksFile: (s) => writeHooksFile(deps, s),
+			removeHooksFile: (s) => removeHooksFile(root, s),
+			hooksFileExists: (s) => hooksFileExists(root, s),
+		});
 	return {
 		enabled: deps.enabled,
 		checkRevocation: (sid) => checkRevocation(root, sid),
@@ -43,15 +61,11 @@ export function conversationRecreatePort(service: ConversationService): Recreate
 			marker: await relayEnabledExists(root, sid),
 			hooksFile: await hooksFileExists(root, sid),
 		}),
-		restore: async (sid, snap) => {
-			if (!snap.marker && !snap.hooksFile) return;
-			// A disable (always allowed, §2.7.4) may have run during the
-			// attempt: putting the files back must not undo it.
-			const row = await getSessionCapture(sid);
-			if (!deps.enabled || row?.conversation_requested !== 1) return;
-			if ((await checkRevocation(root, sid)) !== "none") return;
-			if (snap.marker) await writeRelayEnabled(root, sid);
-			if (snap.hooksFile) await writeHooksFile(deps, sid);
+		restore: async (sid, snap, oContainerId) => {
+			// Only a complete pair was ever kept on a stopped O; a half is
+			// what §2.7.5 would retire anyway.
+			if (!snap.marker || !snap.hooksFile) return "not-authorized";
+			return ownerAuthority().restoreRetained(sid, oContainerId);
 		},
 		authorize: async (sid, run) => {
 			const base = service.captureDocker;
@@ -87,9 +101,7 @@ export function conversationRecreatePort(service: ConversationService): Recreate
 			}
 			return authority.capture(sid, { identified: w.identified });
 		},
-		converge: async (sid) => {
-			await service.authority.converge(sid);
-		},
+		converge: (sid) => ownerAuthority().converge(sid),
 		deferSeedExists: (sid) => deferSeedExists(root, sid),
 		removeDeferSeed: (sid) => removeDeferSeed(root, sid),
 	};

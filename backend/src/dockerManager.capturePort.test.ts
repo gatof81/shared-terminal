@@ -314,6 +314,139 @@ describe("recreatePort (CONVERSATION.md §2.7)", () => {
 		resume: () => undefined,
 	});
 
+	/** A Docker exec whose stream and inspect the test drives. */
+	function execDocker(opts: {
+		inspect: () => Promise<unknown>;
+		start?: () => Promise<PassThrough>;
+		create?: () => Promise<unknown>;
+	}) {
+		const stream = new PassThrough();
+		const created: unknown[] = [];
+		const execObj = {
+			id: "exec-1",
+			start: opts.start ?? (async () => stream),
+			inspect: opts.inspect,
+		};
+		const docker = {
+			getContainer: () => ({
+				exec: async (o: unknown) => {
+					created.push(o);
+					if (opts.create) await opts.create();
+					return execObj;
+				},
+			}),
+			getExec: () => ({ inspect: opts.inspect }),
+			modem: {
+				demuxStream: (src: PassThrough, out: NodeJS.WritableStream) => {
+					src.on("data", (c: Buffer) => out.write(c));
+				},
+			},
+		};
+		return { port: withDocker(docker), stream, created };
+	}
+
+	describe("exec: the exit comes only from dockerd's exec inspect (E1)", () => {
+		it("stream over + inspect ended ⇒ that exit, the output and the exec id; run under the in-container timeout", async () => {
+			const { port, stream, created } = execDocker({
+				inspect: async () => ({ Running: false, ExitCode: 3 }),
+			});
+			const p = port.exec("c", ["seed"], 60_000);
+			await new Promise((r) => setImmediate(r));
+			stream.write("hello");
+			stream.end();
+			expect(await p).toEqual({ exitCode: 3, stdout: "hello", execId: "exec-1" });
+			expect(created[0]).toMatchObject({ Cmd: ["timeout", "-k", "2", "60", "seed"] });
+		});
+
+		const unknown: Array<[string, Parameters<typeof execDocker>[0], (s: PassThrough) => void]> = [
+			[
+				"broken stream, still running",
+				{ inspect: async () => ({ Running: true, ExitCode: null }) },
+				(s) => s.destroy(new Error("socket hang up")),
+			],
+			[
+				"stream over, inspect fails",
+				{
+					inspect: async () => {
+						throw new Error("dockerd unreachable");
+					},
+				},
+				(s) => s.end(),
+			],
+			[
+				"not running but no numeric exit",
+				{ inspect: async () => ({ Running: false, ExitCode: null }) },
+				(s) => s.end(),
+			],
+		];
+		for (const [label, opts, finish] of unknown) {
+			it(`${label} ⇒ exit unknown (null) with the exec id — never a failure code`, async () => {
+				const { port, stream } = execDocker(opts);
+				const p = port.exec("c", ["seed"], 1_000);
+				await new Promise((r) => setImmediate(r));
+				finish(stream);
+				expect(await p).toEqual({ exitCode: null, stdout: "", execId: "exec-1" });
+			});
+		}
+
+		it("a start that errors may still have run the process: the inspect decides", async () => {
+			const { port } = execDocker({
+				start: async () => {
+					throw new Error("hijack failed");
+				},
+				inspect: async () => ({ Running: false, ExitCode: 0 }),
+			});
+			expect(await port.exec("c", ["seed"], 1_000)).toMatchObject({ exitCode: 0 });
+		});
+
+		it("no host-side cut: past timeoutMs + any grace the request is still waiting for dockerd", async () => {
+			vi.useFakeTimers();
+			try {
+				const { port, stream } = execDocker({
+					inspect: async () => ({ Running: false, ExitCode: 0 }),
+				});
+				let settled = false;
+				const p = port.exec("c", ["seed"], 1_000).finally(() => {
+					settled = true;
+				});
+				await vi.advanceTimersByTimeAsync(10 * 60_000);
+				expect(settled).toBe(false);
+				expect(stream.destroyed).toBe(false);
+				stream.end();
+				await vi.advanceTimersByTimeAsync(0);
+				expect(await p).toMatchObject({ exitCode: 0 });
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("the exec instance not created ⇒ throws (no process exists)", async () => {
+			const { port } = execDocker({
+				create: async () => {
+					throw new Error("container not running");
+				},
+				inspect: async () => ({}),
+			});
+			await expect(port.exec("c", ["seed"], 1_000)).rejects.toThrow("container not running");
+		});
+
+		it("execState: running, ended with its exit, or null on 404", async () => {
+			const states: unknown[] = [
+				{ Running: true, ExitCode: 0 },
+				{ Running: false, ExitCode: 9 },
+			];
+			const inspect = vi.fn(async () => {
+				const st = states.shift();
+				if (!st) throw Object.assign(new Error("no such exec"), { statusCode: 404 });
+				return st;
+			});
+			const { port } = execDocker({ inspect });
+			expect(await port.execState("e")).toEqual({ running: true, exitCode: null });
+			expect(await port.execState("e")).toEqual({ running: false, exitCode: 9 });
+			expect(await port.execState("e")).toBeNull();
+		});
+	});
+
 	it("Go FileMode type bits ⇒ kind", () => {
 		expect(goModeKind(2 ** 31 + 0o755)).toBe("dir");
 		expect(goModeKind(2 ** 27 + 0o777)).toBe("symlink");

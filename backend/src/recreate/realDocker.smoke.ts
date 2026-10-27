@@ -203,12 +203,25 @@ async function main(): Promise<void> {
 		currentImage: () => dm.currentSessionImage(),
 		probeRelay: (s: string, cid: string) => dm.probeRelay(s, cid),
 	};
+	// The attempt's own authority for the resolution's convergence (gate
+	// not consulted, as in capturePort.ts).
+	const ownerAuthority = new cap.CaptureAuthority({
+		workspaceRoot: ROOT,
+		enabled: true,
+		docker: captureDocker,
+		getRow: async () => ({ ...row }),
+		checkRevocation: (x) => checkRevocation(ROOT, x),
+		isRecreateUnresolved: async () => false,
+		writeHooksFile: (x) => activation.writeHooksFile(deps, x),
+		removeHooksFile: (x) => activation.removeHooksFile(ROOT, x),
+		hooksFileExists: (x) => activation.hooksFileExists(ROOT, x),
+	});
 	const capture: RecreateCapturePort = {
 		enabled: true,
 		checkRevocation: (s) => checkRevocation(ROOT, s),
 		prepare: (s) => activation.prepareRecreateCapture(deps, s),
 		snapshot: async () => ({ marker: false, hooksFile: false }),
-		restore: async () => undefined,
+		restore: async () => "not-authorized",
 		authorize: async (s, run) => {
 			const authority = new cap.CaptureAuthority({
 				workspaceRoot: ROOT,
@@ -230,7 +243,7 @@ async function main(): Promise<void> {
 			console.log(`  · step 5 write procedure: ${w.outcome}`);
 			return authority.capture(s, { identified: w.identified });
 		},
-		converge: async () => undefined,
+		converge: (s) => ownerAuthority.converge(s),
 		deferSeedExists: (s) => cap.deferSeedExists(ROOT, s),
 		removeDeferSeed: (s) => cap.removeDeferSeed(ROOT, s),
 	};
@@ -427,6 +440,18 @@ async function main(): Promise<void> {
 	);
 	check("seeded in step 6.2 (W = I_N)", await exists(SKILL));
 	check("defer-skill-seed gone", !(await cap.deferSeedExists(ROOT, SID)));
+	check("record resolved committed", (await attempts.read(SID)).kind === "ok");
+
+	// ── The recreation's exec: the exit comes from dockerd, by exec id ───
+	phase("Exec termination evidence (real dockerd)");
+	const ex = await real.exec(nId, ["sh", "-c", "echo out; exit 7"], 5_000);
+	check("a finished exec reports its exit and id", ex.exitCode === 7 && !!ex.execId, ex);
+	check("its output", ex.stdout === "out\n", ex.stdout);
+	const st = await real.execState(ex.execId as string);
+	check("execState: ended, with the same exit", st?.running === false && st.exitCode === 7, st);
+	const to = await real.exec(nId, ["sleep", "30"], 1_000);
+	check("the in-container timeout fired: a known exit (124), not unknown", to.exitCode === 124, to);
+	check("an unknown exec id ⇒ null", (await real.execState("0".repeat(64))) === null);
 
 	// ── Boot passes and leftovers ────────────────────────────────────────
 	phase("The committed N is never a leftover; a real one is");

@@ -26,7 +26,14 @@
 /** T_rec (5 min) + T_rb (60 s), CONVERSATION.md §2.7.4. */
 export const LIFECYCLE_LOCK_MAX_WAIT_MS = 6 * 60 * 1000;
 
-export type LifecycleOp = "create" | "start" | "stop" | "kill" | "delete" | "recreate";
+export type LifecycleOp =
+	| "create"
+	| "start"
+	| "stop"
+	| "kill"
+	| "delete"
+	| "recreate"
+	| "recreate-resolve";
 
 export class SessionBusyError extends Error {
 	readonly code = "busy";
@@ -58,7 +65,11 @@ export interface AcquireOptions {
 
 /**
  * Checked under the lock, before `fn`, for every op but `create` (a fresh
- * id has no history). 3.0d installs the `recreate-unresolved` gate here
+ * id has no history) and `recreate-resolve` — the resolution of an
+ * unresolved attempt by the process run that owns it (recreate/engine.ts).
+ * That pass is what the gate is waiting for: gating it would be the
+ * attempt blocking itself, while it still needs the lock so no other
+ * lifecycle verb interleaves with its mutations. 3.0d installs the `recreate-unresolved` gate here
  * (recreateAttempt.ts, CONVERSATION.md §2.7.4) so no lifecycle operation
  * can run while a recreation of the session is unresolved — one choke
  * point instead of a check per route.
@@ -87,7 +98,9 @@ export class SessionLifecycleLock {
 		await this.acquire(sessionId, op, opts);
 		try {
 			// Inside the try: a refusing guard still releases the lock.
-			if (op !== "create" && this.guard) await this.guard(sessionId, op);
+			if (op !== "create" && op !== "recreate-resolve" && this.guard) {
+				await this.guard(sessionId, op);
+			}
 			return await fn();
 		} finally {
 			this.release(sessionId);

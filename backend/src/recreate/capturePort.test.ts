@@ -18,6 +18,14 @@ const dbStubs = vi.hoisted(() => ({
 			return { results: row ? [{ ...row }] : [], success: true, meta: {} };
 		}
 		dbStubs.writes.push(sql);
+		// The disable statements (registry.ts): requested goes to 0.
+		if (/^UPDATE sessions SET .*conversation_requested = 0 WHERE session_id/.test(sql)) {
+			const row = dbStubs.sessions.get(String(params[0]));
+			if (row) {
+				row.conversation_requested = 0;
+				row.ingest_token_hash = null;
+			}
+		}
 		return { results: [], success: true, meta: { changes: 0 } };
 	}),
 	D1StatementError: class extends Error {},
@@ -26,7 +34,12 @@ const dbStubs = vi.hoisted(() => ({
 }));
 vi.mock("../db.js", () => dbStubs);
 
-import { hooksFileExists, hooksFilePath, writeHooksFile } from "../conversation/activation.js";
+import {
+	disableSession,
+	hooksFileExists,
+	hooksFilePath,
+	writeHooksFile,
+} from "../conversation/activation.js";
 import {
 	type ContainerView,
 	deferSeedExists,
@@ -34,7 +47,7 @@ import {
 	writeRelayEnabled,
 } from "../conversation/captureAuth.js";
 import { hashIngestToken } from "../conversation/registry.js";
-import { writeSessionRevocation } from "../conversation/revocation.js";
+import { checkRevocation, writeSessionRevocation } from "../conversation/revocation.js";
 import type { ConversationService } from "../conversation/service.js";
 import { conversationRecreatePort } from "./capturePort.js";
 import { AttemptRun } from "./run.js";
@@ -44,11 +57,11 @@ const N = "n".repeat(64);
 let root: string;
 let token: string;
 
-function port(probe: () => Promise<boolean>) {
+function port(probe: () => Promise<boolean>, opts: { running?: boolean } = {}) {
 	const converge = vi.fn(async () => "kept");
 	const view = (): ContainerView => ({
 		exists: true,
-		running: true,
+		running: opts.running ?? true,
 		token,
 		managedMount: true,
 		controlMount: true,
@@ -161,19 +174,107 @@ describe("authorize (step 5) inside the attempt's epoch", () => {
 	});
 });
 
-describe("restore (rollback of an O created by 3.0d)", () => {
-	it("puts back exactly what the snapshot saw, unless a disable happened meanwhile", async () => {
-		committedRow();
-		const { p } = port(async () => true);
-		await p.restore(SID, { marker: true, hooksFile: true });
+const O = "o".repeat(64);
+
+/** D1 before the commit / after a rollback: O, stopped, with O's token hash. */
+function rowOnO() {
+	dbStubs.sessions.set(SID, {
+		status: "stopped",
+		conversation_requested: 1,
+		ingest_token_hash: hashIngestToken(token),
+		ingest_token_hash_suspended: null,
+		user_id: "u1",
+		container_id: O,
+	});
+}
+
+const PAIR = { marker: true, hooksFile: true };
+
+describe("restore (rollback of an O created by 3.0d; owner decision, point 2)", () => {
+	it("puts back the pair while RETAIN authorization holds for O", async () => {
+		rowOnO();
+		const { p } = port(async () => true, { running: false });
+		await p.restore(SID, PAIR, O);
 		expect(await relayEnabledExists(root, SID)).toBe(true);
 		expect(await fs.readFile(hooksFilePath(root, SID), "utf8")).toContain("hooks");
+	});
 
-		await fs.rm(path.join(root, ".st-control"), { recursive: true, force: true });
-		await fs.rm(hooksFilePath(root, SID), { force: true });
-		await writeSessionRevocation(root, SID, { at: "t", by: "cli" });
-		await p.restore(SID, { marker: true, hooksFile: true });
+	it("nothing without authorization: revoked, not requested, D1 not on O, O running, half a pair", async () => {
+		const { p } = port(async () => true, { running: false });
+		const cases: Array<[string, () => Promise<void>, typeof PAIR]> = [
+			["revoked", () => writeSessionRevocation(root, SID, { at: "t", by: "cli" }), PAIR],
+			[
+				"not requested",
+				async () => {
+					(dbStubs.sessions.get(SID) as Record<string, unknown>).conversation_requested = 0;
+				},
+				PAIR,
+			],
+			[
+				"D1 on another container",
+				async () => {
+					(dbStubs.sessions.get(SID) as Record<string, unknown>).container_id = N;
+				},
+				PAIR,
+			],
+			["half a pair", async () => undefined, { marker: true, hooksFile: false }],
+		];
+		for (const [label, setup, snap] of cases) {
+			await fs.rm(path.join(root, ".conversations"), { recursive: true, force: true });
+			await fs.rm(path.join(root, ".st-control"), { recursive: true, force: true });
+			rowOnO();
+			await setup();
+			await p.restore(SID, snap, O);
+			expect([label, await relayEnabledExists(root, SID)]).toEqual([label, false]);
+			expect([label, await hooksFileExists(root, SID)]).toEqual([label, false]);
+		}
+		rowOnO();
+		const running = port(async () => true, { running: true });
+		expect(await running.p.restore(SID, PAIR, O)).toBe("not-authorized");
 		expect(await relayEnabledExists(root, SID)).toBe(false);
-		expect(await hooksFileExists(root, SID)).toBe(false);
+	});
+
+	/**
+	 * E4: the disable runs to completion in the middle of one of the two
+	 * writes — after restore decided to write, before (or right after) its
+	 * file lands. Whatever the interleaving, the final state is revoked:
+	 * revocation marker present, no marker, no hooks file.
+	 */
+	describe("a disable during the writes always wins (E4)", () => {
+		const deps = () => ({ workspaceRoot: root, enabled: true, port: 3001 });
+		for (const by of ["api", "cli"] as const) {
+			for (const during of ["relay.enabled", "conversation.json"] as const) {
+				for (const when of ["before the write lands", "right after it lands"] as const) {
+					it(`${by} disable ${when}: ${during}`, async () => {
+						rowOnO();
+						const { p } = port(async () => true, { running: false });
+						const rename = fs.rename.bind(fs);
+						let fired = false;
+						const spy = vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
+							const hit = !fired && String(to).endsWith(`/${during}`);
+							if (hit && when === "before the write lands") {
+								fired = true;
+								await disableSession(deps(), SID, by);
+							}
+							await rename(from, to);
+							if (hit && when === "right after it lands") {
+								fired = true;
+								await disableSession(deps(), SID, by);
+							}
+						});
+						try {
+							await p.restore(SID, PAIR, O);
+						} finally {
+							spy.mockRestore();
+						}
+						expect(fired).toBe(true);
+						expect(await checkRevocation(root, SID)).toBe("session");
+						expect(await relayEnabledExists(root, SID)).toBe(false);
+						expect(await hooksFileExists(root, SID)).toBe(false);
+						expect(dbStubs.sessions.get(SID)?.conversation_requested).toBe(0);
+					});
+				}
+			}
+		}
 	});
 });
