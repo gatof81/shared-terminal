@@ -137,6 +137,7 @@ import { ConversationService } from "./conversation/service.js";
 import { ConversationStore } from "./conversation/store.js";
 import type { DockerManager } from "./dockerManager.js";
 import { deferred, harness, IMG_N, O_ID, SID, stateOf } from "./recreate/engine.testutil.js";
+import { RecreateUnresolvedError } from "./recreateAttempt.js";
 import { buildRouter } from "./routes.js";
 import { sessionLifecycleLock } from "./sessionLifecycleLock.js";
 import type { SessionManager } from "./sessionManager.js";
@@ -907,23 +908,80 @@ describe("POST /admin/sessions/:id/recreate", () => {
 		expect(markSpy).not.toHaveBeenCalled();
 	});
 
-	it("begin() failing during a shutdown ⇒ no durable 'resolved' written after stop() (E5)", async () => {
+	it("begin() failing during a shutdown ⇒ 500 {step:record, unresolved:true}; the open record gates the session; no Docker effect, no durable transition after stop()", async () => {
 		await spinUp();
 		const realBegin = h.attempts.begin.bind(h.attempts);
 		h.attempts.begin = async (sid, identity) => {
-			const r = await realBegin(sid, identity);
-			h.engine.stop();
-			void r;
-			throw new Error("fsync of the session dir failed");
+			await realBegin(sid, identity); // the record is on disk…
+			h.engine.stop(); // …the backend starts shutting down…
+			throw new Error("fsync of the session dir failed"); // …and begin() reports a failure
 		};
 		const resolveSpy = vi.spyOn(h.attempts, "resolve");
+		const markSpy = vi.spyOn(h.attempts, "markUncertain");
+		const res = await post(SID, { expectImageId: IMAGE_N });
+		expect([res.status, await res.json()]).toEqual([
+			500,
+			{ error: "recreate-failed", step: "record", unresolved: true },
+		]);
+		await new Promise((r) => setTimeout(r, 150));
+		expect(h.docker.mutations()).toEqual([]);
+		expect(resolveSpy).not.toHaveBeenCalled();
+		expect(markSpy).not.toHaveBeenCalled();
+		expect(await h.attempts.read(SID)).toMatchObject({ kind: "ok", record: { state: "open" } });
+		for (const op of ["start", "stop", "delete"] as const) {
+			await expect(sessionLifecycleLock.run(SID, op, async () => 1)).rejects.toBeInstanceOf(
+				RecreateUnresolvedError,
+			);
+		}
+	});
+
+	it("begin() failing with nothing on disk ⇒ 500 {step:record} without unresolved, no record", async () => {
+		await spinUp();
+		h.attempts.begin = async () => {
+			throw new Error("ENOSPC before the rename");
+		};
 		const res = await post(SID, { expectImageId: IMAGE_N });
 		expect([res.status, await res.json()]).toEqual([
 			500,
 			{ error: "recreate-failed", step: "record" },
 		]);
-		expect(resolveSpy).not.toHaveBeenCalled();
+		expect((await h.attempts.read(SID)).kind).toBe("none");
 		expect(h.docker.mutations()).toEqual([]);
+	});
+
+	it("begin() failing after its write, no shutdown ⇒ resolved as rolled back (no effects), 500 {step:record} without unresolved", async () => {
+		await spinUp();
+		const realBegin = h.attempts.begin.bind(h.attempts);
+		h.attempts.begin = async (sid, identity) => {
+			await realBegin(sid, identity);
+			throw new Error("fsync of the session dir failed");
+		};
+		const res = await post(SID, { expectImageId: IMAGE_N });
+		expect([res.status, await res.json()]).toEqual([
+			500,
+			{ error: "recreate-failed", step: "record" },
+		]);
+		expect(await h.attempts.read(SID)).toMatchObject({
+			kind: "ok",
+			record: { state: "resolved", outcome: { kind: "rolled-back" } },
+		});
+		expect(h.docker.mutations()).toEqual([]);
+		expect(await sessionLifecycleLock.run(SID, "start", async () => 1)).toBe(1);
+	});
+
+	it("begin() failing after its write, and the rolled-back resolution failing too ⇒ unresolved:true", async () => {
+		await spinUp();
+		const realBegin = h.attempts.begin.bind(h.attempts);
+		h.attempts.begin = async (sid, identity) => {
+			await realBegin(sid, identity);
+			throw new Error("fsync of the session dir failed");
+		};
+		vi.spyOn(h.attempts, "resolve").mockRejectedValue(new Error("EIO"));
+		const res = await post(SID, { expectImageId: IMAGE_N });
+		expect([res.status, await res.json()]).toEqual([
+			500,
+			{ error: "recreate-failed", step: "record", unresolved: true },
+		]);
 		expect(await h.attempts.read(SID)).toMatchObject({ kind: "ok", record: { state: "open" } });
 	});
 

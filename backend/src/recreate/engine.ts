@@ -513,15 +513,27 @@ export class RecreationEngine {
 			// the evidence that lets it be resolved as rolled back — unless
 			// the engine is shutting down: no durable transition starts after
 			// `stop()` (E5); the next process finds the record and D8 applies.
-			if (!(err instanceof RecreateUnresolvedError) && !this.stopped) {
+			logger.error(`[recreate] ${sessionId}: begin refused: ${(err as Error).message}`);
+			if (err instanceof RecreateUnresolvedError) {
+				return { ok: false, status: 409, code: "recreate-unresolved" };
+			}
+			if (!this.stopped) {
 				await this.deps.attempts
 					.resolve(sessionId, attemptId, { kind: "rolled-back" }, "begin failed; no effects")
 					.catch(() => undefined);
 			}
-			logger.error(`[recreate] ${sessionId}: begin refused: ${(err as Error).message}`);
-			return err instanceof RecreateUnresolvedError
-				? { ok: false, status: 409, code: "recreate-unresolved" }
-				: { ok: false, status: 500, code: "recreate-failed", step: "record" };
+			// The answer says `unresolved` unless it is CONFIRMED that this
+			// attempt left no record or that its record is resolved: an `open`
+			// one (always the case after a shutdown, which writes nothing more)
+			// gates the session like any unresolved attempt (#464 R2). Reading
+			// is not a transition, so it is allowed after `stop()` too.
+			const settled = await this.deps.attempts.read(sessionId).then(
+				(r) => r.kind === "none" || (r.kind === "ok" && r.record.state === "resolved"),
+				() => false,
+			);
+			return settled
+				? { ok: false, status: 500, code: "recreate-failed", step: "record" }
+				: { ok: false, status: 500, code: "recreate-failed", step: "record", unresolved: true };
 		}
 
 		const a: Attempt = {
