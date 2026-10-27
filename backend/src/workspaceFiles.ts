@@ -153,9 +153,17 @@ export interface WorkspaceFsError {
 	ok: false;
 	status: 400 | 403 | 404 | 413;
 	error: string;
+	/**
+	 * Set only on a 404 whose cause is ENOENT on the path itself or a
+	 * parent. Every other 404 (a symlink leaf, an escape) is a
+	 * no-disclosure 404 for clients; internal callers that must tell
+	 * "nothing there" from "something there we won't read" use this.
+	 */
+	absent?: true;
 }
 
 const NOT_FOUND: WorkspaceFsError = { ok: false, status: 404, error: "File not found" };
+const ABSENT: WorkspaceFsError = { ...NOT_FOUND, absent: true };
 const RESTRICTED: WorkspaceFsError = {
 	ok: false,
 	status: 403,
@@ -289,15 +297,24 @@ export interface OpenedWorkspaceFile {
 export async function openWorkspaceFile(
 	sessionId: string,
 	rawRel: string,
-	opts: { maxBytes?: number } = {},
+	opts: {
+		maxBytes?: number;
+		/**
+		 * Skip the credential denylist. Backend-internal reads only (the
+		 * recreation's managed-skills check reads `.st/claude-state/skills`);
+		 * never set from a request. Containment and the /proc proof still apply.
+		 */
+		allowRestricted?: boolean;
+	} = {},
 ): Promise<OpenedWorkspaceFile | WorkspaceFsError> {
+	const restricted = opts.allowRestricted ? () => false : isRestrictedPath;
 	const resolved = resolveLexically(sessionId, rawRel);
 	if ("ok" in resolved) return resolved;
 	const { sessionRoot, joined } = resolved;
 	if (resolved.rel === "") {
 		return { ok: false, status: 400, error: "path is a directory, not a file" };
 	}
-	if (isRestrictedPath(resolved.rel)) return RESTRICTED;
+	if (restricted(resolved.rel)) return RESTRICTED;
 
 	// The lexical check above says nothing about symlinked PARENTS
 	// (`ln -s /etc workspace/link` + path=link/passwd passes it). realpath
@@ -310,7 +327,8 @@ export async function openWorkspaceFile(
 		realRoot = await fs.realpath(sessionRoot);
 		realDir = await fs.realpath(nodePath.dirname(joined));
 	} catch (err) {
-		if (isErrno(err, "ENOENT", "ENOTDIR")) return NOT_FOUND;
+		if (isErrno(err, "ENOENT")) return ABSENT;
+		if (isErrno(err, "ENOTDIR")) return NOT_FOUND;
 		throw err;
 	}
 	const realDirRel = relUnder(realRoot, realDir);
@@ -324,7 +342,7 @@ export async function openWorkspaceFile(
 	// Re-check restriction against the REAL path: an in-workspace symlink
 	// `docs -> .st` makes `docs/claude-state/.credentials.json` look
 	// harmless lexically.
-	if (isRestrictedPath(realDirRel === "" ? leafName : `${realDirRel}/${leafName}`)) {
+	if (restricted(realDirRel === "" ? leafName : `${realDirRel}/${leafName}`)) {
 		return RESTRICTED;
 	}
 
@@ -335,7 +353,8 @@ export async function openWorkspaceFile(
 		// of being transparently followed to wherever it points.
 		lst = await fs.lstat(leaf);
 	} catch (err) {
-		if (isErrno(err, "ENOENT", "ENOTDIR")) return NOT_FOUND;
+		if (isErrno(err, "ENOENT")) return ABSENT;
+		if (isErrno(err, "ENOTDIR")) return NOT_FOUND;
 		throw err;
 	}
 	if (lst.isSymbolicLink()) {
@@ -388,7 +407,7 @@ export async function openWorkspaceFile(
 				await handle.close();
 				return NOT_FOUND;
 			}
-			if (isRestrictedPath(actualRel)) {
+			if (restricted(actualRel)) {
 				await handle.close();
 				return RESTRICTED;
 			}

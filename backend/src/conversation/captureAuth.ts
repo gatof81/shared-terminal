@@ -37,6 +37,13 @@ import type { RevocationState } from "./revocation.js";
 export const CONTROL_DIR_NAME = ".st-control";
 export const CONTROL_MOUNT_TARGET = "/etc/st-control";
 export const RELAY_ENABLED_FILE = "relay.enabled";
+/**
+ * While present, the entrypoint and `/opt/st/seed-skills.sh` never seed
+ * the managed skills (§2.7.3). Written by the recreation before N exists
+ * and removed only by the backend: in step 6.1, by a rollback whose
+ * removal of N was confirmed, or by the recreation's reconcile.
+ */
+export const DEFER_SEED_FILE = "defer-skill-seed";
 export const RELAY_IMAGE_LABEL = "io.shared-terminal.conversation-relay";
 export const RELAY_IMAGE_LABEL_VALUE = "2";
 export const RELAY_STATUS_URL = "http://127.0.0.1:47613/st-relay/status";
@@ -115,6 +122,35 @@ export async function removeRelayEnabled(workspaceRoot: string, sessionId: strin
 }
 
 /** Fail-closed for decisions that GRANT: an error reads as "absent". */
+export function deferSeedPath(workspaceRoot: string, sessionId: string): string {
+	return path.join(controlDir(workspaceRoot, sessionId), DEFER_SEED_FILE);
+}
+
+export async function writeDeferSeed(workspaceRoot: string, sessionId: string): Promise<void> {
+	const dir = await ensureControlDir(workspaceRoot, sessionId);
+	const file = path.join(dir, DEFER_SEED_FILE);
+	const tmp = `${file}.tmp.${process.pid}.${randomBytes(6).toString("hex")}`;
+	await fs.writeFile(tmp, "", { mode: 0o644 });
+	// Not redundant: writeFile's mode is masked by the process umask, and
+	// the entrypoint (uid 1000) must be able to read it through the ro mount.
+	await fs.chmod(tmp, 0o644);
+	await fs.rename(tmp, file);
+}
+
+export async function removeDeferSeed(workspaceRoot: string, sessionId: string): Promise<void> {
+	await fs.rm(deferSeedPath(workspaceRoot, sessionId), { force: true });
+}
+
+/** Fail-closed: anything but ENOENT counts as present (seeding stays deferred). */
+export async function deferSeedExists(workspaceRoot: string, sessionId: string): Promise<boolean> {
+	try {
+		await fs.lstat(deferSeedPath(workspaceRoot, sessionId));
+		return true;
+	} catch (err) {
+		return (err as NodeJS.ErrnoException).code !== "ENOENT";
+	}
+}
+
 export async function relayEnabledExists(
 	workspaceRoot: string,
 	sessionId: string,
@@ -300,6 +336,14 @@ export interface CaptureAuthorityDeps {
 	 */
 	probeBudgetMs?: number;
 	identifyWaitMs?: number;
+	/**
+	 * Checked right before the marker and the hooks file are written, and
+	 * by every recheck. The recreation passes whether the attempt may
+	 * still act — its epoch in step 5; its lease and the engine not shut
+	 * down during the resolution's restore and convergence — so once it
+	 * says no nothing more is written, and what was written is withdrawn.
+	 */
+	mayWrite?: () => boolean;
 }
 
 const TIMED_OUT = Symbol("timed-out");
@@ -500,6 +544,7 @@ export class CaptureAuthority {
 		const f = fresh ?? (await this.facts(sessionId));
 		if (!writeAuthorized(f) || !f.row?.container_id) return { outcome: "not-authorized" };
 		const containerId = f.row.container_id;
+		if (!this.mayWrite()) return { outcome: "not-authorized" };
 		await writeRelayEnabled(this.deps.workspaceRoot, sessionId);
 		// Any throw past this point (a recheck's D1 read, the probe, the
 		// hooks-file write) must not leave the marker behind: it would
@@ -527,6 +572,10 @@ export class CaptureAuthority {
 				await removeRelayEnabled(this.deps.workspaceRoot, sessionId);
 				return { outcome: "relay-unavailable" };
 			}
+			if (!this.mayWrite()) {
+				await this.withdraw(sessionId);
+				return { outcome: "revoked-meanwhile" };
+			}
 			await this.deps.writeHooksFile(sessionId);
 			if (!(await this.stillAllowed(sessionId, containerId))) {
 				await this.withdraw(sessionId);
@@ -540,14 +589,62 @@ export class CaptureAuthority {
 	}
 
 	/**
+	 * Rollback of a recreation whose O was created by 3.0d (§2.7.3; owner
+	 * decision on #459 point 2): O's marker and hooks file go back — a
+	 * complete pair only, which is all `converge` keeps on a stopped
+	 * container — and only while RETAIN authorization holds for O, D1's
+	 * container. Same discipline as the write procedure: a recheck after
+	 * EACH write, and a failed one withdraws file first, then marker.
+	 *
+	 * Why the disable always wins: a disable (API or CLI) writes its
+	 * revocation marker first, then D1, then removes file and marker. If it
+	 * lands during either write here, the recheck that follows sees the
+	 * revocation and withdraws. If it lands after the last recheck, both
+	 * writes here are already on disk, before its removals — which take
+	 * them away.
+	 */
+	async restoreRetained(
+		sessionId: string,
+		containerId: string,
+	): Promise<"restored" | "not-authorized" | "revoked-meanwhile"> {
+		const f = await this.facts(sessionId);
+		const c = f.container;
+		if (f.row?.container_id !== containerId || !c?.exists || c.running || !retainAuthorized(f)) {
+			return "not-authorized";
+		}
+		if (!this.mayWrite()) return "not-authorized";
+		try {
+			await writeRelayEnabled(this.deps.workspaceRoot, sessionId);
+			if (!(await this.stillAllowed(sessionId, containerId))) {
+				await this.withdraw(sessionId);
+				return "revoked-meanwhile";
+			}
+			await this.deps.writeHooksFile(sessionId);
+			if (!(await this.stillAllowed(sessionId, containerId))) {
+				await this.withdraw(sessionId);
+				return "revoked-meanwhile";
+			}
+			return "restored";
+		} catch (err) {
+			await this.withdraw(sessionId).catch(() => undefined);
+			throw err;
+		}
+	}
+
+	/**
 	 * Conditions 1–3 re-read — flag, requested, no revocation (§2.7.5) —
 	 * plus the D1 container still being the one this write is about.
 	 */
+	private mayWrite(): boolean {
+		return this.deps.mayWrite ? this.deps.mayWrite() : true;
+	}
+
 	private async stillAllowed(sessionId: string, containerId: string): Promise<boolean> {
 		try {
 			const row = await this.deps.getRow(sessionId);
 			const revocation = await this.deps.checkRevocation(sessionId);
 			return (
+				this.mayWrite() &&
 				this.deps.enabled &&
 				row?.conversation_requested === 1 &&
 				row.container_id === containerId &&

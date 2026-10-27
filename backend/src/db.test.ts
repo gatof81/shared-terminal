@@ -9,7 +9,7 @@
  * forgets to bump) can't silently break the dashboard signal.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 // Stub fetch globally — the real d1Query hits the Cloudflare HTTP API.
 // Each test installs its own response shape via `mockFetch`.
@@ -267,5 +267,31 @@ describe("migrateDb ledger (#349)", () => {
 		const versions = MIGRATIONS.map((m) => m.version);
 		expect(versions).toEqual([...versions].sort((a, b) => a - b));
 		expect(new Set(versions).size).toBe(versions.length);
+	});
+});
+
+// 3.0d: the recreation CAS must tell "D1 said the statement failed" (not
+// applied) from everything else (may have applied).
+describe("D1StatementError (#3.0d CAS)", () => {
+	it("an answer with success:false is a D1StatementError; a non-2xx or a timeout is not", async () => {
+		const { d1Query, D1StatementError } = await import("./db.js");
+		const realFetch = globalThis.fetch;
+		onTestFinished(() => {
+			globalThis.fetch = realFetch;
+		});
+		(globalThis as { fetch: unknown }).fetch = vi.fn(
+			async () =>
+				new Response(
+					JSON.stringify({ result: [], success: false, errors: [{ code: 1, message: "bad" }] }),
+					{ status: 200 },
+				),
+		);
+		await expect(d1Query("UPDATE x")).rejects.toBeInstanceOf(D1StatementError);
+		(globalThis as { fetch: unknown }).fetch = vi.fn(
+			async () => new Response("bad gateway", { status: 502 }),
+		);
+		const err = await d1Query("UPDATE x").catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(Error);
+		expect(err).not.toBeInstanceOf(D1StatementError);
 	});
 });

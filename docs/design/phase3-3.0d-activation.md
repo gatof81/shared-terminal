@@ -514,8 +514,8 @@ colgado retendría el lock hasta reiniciar el backend. Por eso hay dos topes:
 1. `docker ps -a --filter label=io.shared-terminal.recreate-of`: los `N`, que llevan las
    etiquetas desde su creación.
 2. `docker ps -a --filter name=-old-`, y de ese resultado **solo** los nombres que encajan
-   exactamente con `^st-[0-9a-f]{12}-old-[0-9]+$` y cuyo prefijo de 12 caracteres corresponde a
-   una sesión de D1.
+   exactamente con `^st-[0-9a-f]{8}-[0-9a-f]{3}-old-[0-9]+$` (corregido en el contrato tras la
+   revisión de #459) y cuyo prefijo de 12 caracteres corresponde a una sesión de D1.
    - `O` es un contenedor ya existente y no se le pueden añadir etiquetas; por eso se busca por
      nombre.
    - Los sufijos `-new-<ts>` y `-old-<ts>` sobre `st-<12>` quedan **reservados** para la

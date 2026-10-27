@@ -98,6 +98,31 @@ describe("setPortMappings", () => {
 		expect(dbStubs.d1Query).toHaveBeenCalledTimes(1);
 		expect(dbStubs.d1Query.mock.calls[0]?.[0]).toMatch(/DELETE/);
 	});
+
+	it("mayContinue is asked before each statement: once it says no, nothing further is issued (#459 E2)", async () => {
+		let allowed = true;
+		dbStubs.d1Query.mockImplementationOnce(async () => {
+			allowed = false; // the caller's epoch closes while the DELETE is out
+			return { results: [], success: true, meta: { changes: 0, duration: 0, last_row_id: 0 } };
+		});
+		await expect(
+			setPortMappings(
+				"sess-1",
+				[
+					{ containerPort: 3000, hostPort: 3000, isPublic: false },
+					{ containerPort: 5500, hostPort: 5500, isPublic: true },
+				],
+				() => allowed,
+			),
+		).rejects.toThrow(/stopped/);
+		expect(dbStubs.d1Query).toHaveBeenCalledTimes(1);
+		expect(dbStubs.d1Query.mock.calls[0]?.[0]).toMatch(/DELETE/);
+	});
+
+	it("mayContinue already false ⇒ not even the DELETE", async () => {
+		await expect(setPortMappings("sess-1", [], () => false)).rejects.toThrow(/stopped/);
+		expect(dbStubs.d1Query).not.toHaveBeenCalled();
+	});
 });
 
 // ── getPortMappings ──────────────────────────────────────────────────────

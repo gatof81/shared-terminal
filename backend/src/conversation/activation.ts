@@ -41,6 +41,7 @@ import {
 	removeRelayEnabled,
 	retainAuthorized,
 	writeAuthorized,
+	writeDeferSeed,
 	writeRelayEnabled,
 } from "./captureAuth.js";
 import {
@@ -318,6 +319,49 @@ export async function prepareSpawnCapture(
 		binds: [bind, `${control}:${CONTROL_MOUNT_TARGET}:ro`],
 		effective: true,
 		imageId: currentImage.imageId,
+	};
+}
+
+export interface RecreateCapturePrep {
+	env: string[];
+	binds: string[];
+	/** H, the hash of N's token. Only the recreation's CAS ever writes it to D1. */
+	hash: string;
+}
+
+/**
+ * The capture side of recreation step 1 (CONVERSATION.md §2.7.2): N's
+ * token and H, `defer-skill-seed`, and both mounts — and NOT the spawn's
+ * marker or hooks file. Leftover `relay.enabled` and `conversation.json`
+ * are removed, so N's supervisor starts without a relay and N's CLI (none
+ * runs before the commit anyway) has no hooks. Nothing goes to D1 here:
+ * H is authorized only by the CAS, together with `container_id`.
+ */
+export async function prepareRecreateCapture(
+	deps: ActivationDeps,
+	sessionId: string,
+	mayAct: () => boolean = () => true,
+): Promise<RecreateCapturePrep> {
+	// Asked before each effect: the attempt waits for this at most until
+	// its epoch closes, and a late continuation must not go on writing.
+	const proceed = (): void => {
+		if (!mayAct()) throw new Error("recreation capture prepare: stopped, the epoch closed");
+	};
+	proceed();
+	const managed = await ensureManagedDir(deps.workspaceRoot, sessionId);
+	proceed();
+	const control = await ensureControlDir(deps.workspaceRoot, sessionId);
+	proceed();
+	await writeDeferSeed(deps.workspaceRoot, sessionId);
+	proceed();
+	await removeRelayEnabled(deps.workspaceRoot, sessionId);
+	proceed();
+	await removeHooksFile(deps.workspaceRoot, sessionId);
+	const token = generateIngestToken();
+	return {
+		env: [`${INGEST_TOKEN_ENV}=${token}`, `${BACKEND_PORT_ENV}=${deps.port}`],
+		binds: [`${managed}:${MANAGED_MOUNT_TARGET}:ro`, `${control}:${CONTROL_MOUNT_TARGET}:ro`],
+		hash: hashIngestToken(token),
 	};
 }
 
