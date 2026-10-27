@@ -93,8 +93,9 @@ const dbStubs = vi.hoisted(() => ({
 				row.ingest_token_hash = null;
 				row.ingest_token_hash_suspended = null;
 				row.conversation_requested = 0;
-			} else if (row && sql.includes("ingest_token_hash_suspended = ingest_token_hash")) {
-				row.ingest_token_hash_suspended = row.ingest_token_hash;
+			} else if (row && sql.includes("ingest_token_hash_suspended = COALESCE")) {
+				// suspendIngestToken (idempotent, 3.0d audit A1.2)
+				row.ingest_token_hash_suspended = row.ingest_token_hash ?? row.ingest_token_hash_suspended;
 				row.ingest_token_hash = null;
 				row.conversation_requested = 0;
 			}

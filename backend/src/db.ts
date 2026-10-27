@@ -789,6 +789,16 @@ export const MIGRATIONS: readonly Migration[] = [
 			await addColumnIfMissing("sessions", "conversation_requested INTEGER NOT NULL DEFAULT 0");
 		},
 	},
+	{
+		// 3.0d audit A1: every revocation (API disable, emergency CLI, `--all`)
+		// increments it in the same statement, and `PATCH {enabled:true}`
+		// writes D1 only if it is still the value it read at its start — so
+		// a revocation that lands while an enable is in flight is never
+		// overwritten, across processes, without a lock.
+		version: 17,
+		description: "sessions.revocation_seq — revocations vs a concurrent enable (3.0d)",
+		apply: () => addColumnIfMissing("sessions", "revocation_seq INTEGER NOT NULL DEFAULT 0"),
+	},
 ];
 
 /**

@@ -325,8 +325,11 @@ export class FakeD1 implements RecreateD1Port {
 		this.writes.push(`status=${status}`);
 		this.row.status = status;
 	}
+	/** What the dispatcher would route by (`sessions_port_mappings`). */
+	mappings: RecreateSessionConfig["ports"] = [];
 	async setPorts(_sid: string, ports: RecreateSessionConfig["ports"]) {
 		this.writes.push(`ports=${ports.length}`);
+		this.mappings = ports.map((p) => ({ ...p }));
 	}
 }
 

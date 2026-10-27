@@ -48,17 +48,18 @@ import {
 	generateIngestToken,
 	getSessionCapture,
 	hashIngestToken,
-	restoreIngestToken,
+	restoreIngestTokenIfUnrevoked,
 	revokeAllIngestTokens,
 	revokeIngestTokens,
-	setConversationRequested,
 	setIngestTokenHash,
+	setRequestedIfUnrevoked,
 	suspendIngestToken,
 } from "./registry.js";
 import {
 	checkRevocation,
+	readSessionRevocation,
 	removeGlobalRevocation,
-	removeSessionRevocation,
+	retireSessionRevocation,
 	writeGlobalRevocation,
 	writeSessionRevocation,
 } from "./revocation.js";
@@ -413,6 +414,12 @@ export async function enableSession(
 	isRecreateUnresolved: (sessionId: string) => Promise<boolean>,
 ): Promise<EnableResult> {
 	if (!deps.enabled) throw new ConversationDisabledError();
+	// A disable or the emergency CLI (another process, never behind any
+	// lock) may run while this is in flight. It must win, in D1 and in the
+	// marker, so the cut stays persistent (§2.4, 3.0d audit A1). Read here
+	// in the order every revocation WRITES them — marker, then D1 — so a
+	// revocation is either fully visible to what follows or caught below.
+	const seenMarker = await readSessionRevocation(deps.workspaceRoot, sessionId);
 	const revocation = await checkRevocation(deps.workspaceRoot, sessionId);
 	if (revocation === "global") throw new RevokedGloballyError();
 	if (await isRecreateUnresolved(sessionId).catch(() => true)) {
@@ -420,15 +427,44 @@ export async function enableSession(
 	}
 	const before = await authority.facts(sessionId);
 	if (!before.row) throw new Error("session not found");
+	const seq = before.row.revocation_seq ?? 0;
 	deps.invalidate?.(sessionId);
-	if (correspondenceOf(before) === "suspended") {
-		// Disabled by API without a restart: the container still carries
-		// this very token, so the suspended hash is restored as is.
-		await restoreIngestToken(sessionId);
-	} else {
-		await setConversationRequested(sessionId, true);
+	// D1 changes only if no revocation landed since `seq` was read (each one
+	// bumps it in its own statement). Otherwise the revocation already won.
+	const applied =
+		correspondenceOf(before) === "suspended"
+			? // Disabled by API without a restart: the container still carries
+				// this very token, so the suspended hash is restored as is.
+				await restoreIngestTokenIfUnrevoked(sessionId, seq)
+			: await setRequestedIfUnrevoked(sessionId, seq);
+	if (!applied) {
+		deps.invalidate?.(sessionId);
+		throw new RevokedMeanwhileError(sessionId);
 	}
-	await removeSessionRevocation(deps.workspaceRoot, sessionId);
+	// A revocation whose marker landed after `seenMarker` but whose D1 write
+	// came before our read of `seq` is not caught by the guard above: its
+	// marker is. Re-apply its D1 transition (idempotent) and refuse.
+	if ((await checkRevocation(deps.workspaceRoot, sessionId)) === "global") {
+		await revokeIngestTokens(sessionId);
+		deps.invalidate?.(sessionId);
+		throw new RevokedGloballyError();
+	}
+	// Only the revocation that was in effect at the start is lifted; a newer
+	// one stays in effect (`retireSessionRevocation` publishes a lift naming
+	// exactly `seenMarker` and nothing is ever moved or deleted). If the lift
+	// cannot be published the revocation stays in effect, and D1 is put back
+	// in line with it before failing.
+	let retired: Awaited<ReturnType<typeof retireSessionRevocation>>;
+	try {
+		retired = await retireSessionRevocation(deps.workspaceRoot, sessionId, seenMarker);
+	} catch (err) {
+		await reapplyRevocation(deps, sessionId).catch(() => undefined);
+		throw err;
+	}
+	if (retired === "newer") {
+		await reapplyRevocation(deps, sessionId);
+		throw new RevokedMeanwhileError(sessionId);
+	}
 	deps.invalidate?.(sessionId);
 	const after = await authority.facts(sessionId);
 	const c = after.container;
@@ -445,6 +481,32 @@ export async function enableSession(
 	// The write procedure's own identification is this request's probe
 	// (D7): reported as such instead of a second exec.
 	return { enabled: true, capture: await authority.capture(sessionId, { identified }) };
+}
+
+/** A disable or the emergency landed while an enable was in flight: it won. */
+export class RevokedMeanwhileError extends Error {
+	constructor(readonly sessionId: string) {
+		super(`session ${sessionId} was revoked while being enabled`);
+		this.name = "RevokedMeanwhileError";
+	}
+}
+
+/**
+ * The D1 transition of the revocation whose marker is in place now, re-applied
+ * by an enable that found it newer than what it started from: `api` suspends,
+ * anything else (the CLI, an unreadable marker) revokes. Idempotent.
+ */
+async function reapplyRevocation(deps: ActivationDeps, sessionId: string): Promise<void> {
+	let by: string | undefined;
+	try {
+		const raw = await readSessionRevocation(deps.workspaceRoot, sessionId);
+		by = raw ? (JSON.parse(raw) as { by?: string }).by : undefined;
+	} catch {
+		by = undefined;
+	}
+	if (by === "api") await suspendIngestToken(sessionId);
+	else await revokeIngestTokens(sessionId);
+	deps.invalidate?.(sessionId);
 }
 
 /**
@@ -471,6 +533,17 @@ export async function disableSession(
 	deps.invalidate?.(sessionId);
 	await removeHooksFile(deps.workspaceRoot, sessionId);
 	await removeRelayEnabled(deps.workspaceRoot, sessionId);
+	// An enable in flight may have retired the marker this just wrote
+	// before seeing it was new (3.0d audit A1). The revocation wins: it is
+	// put back, so the receiver keeps refusing and the next spawn generates
+	// nothing.
+	if ((await readSessionRevocation(deps.workspaceRoot, sessionId)) === null) {
+		await writeSessionRevocation(deps.workspaceRoot, sessionId, {
+			at: new Date().toISOString(),
+			by,
+			...(reason ? { reason } : {}),
+		});
+	}
 	return { enabled: false, emissionStopsAfterRestart: true };
 }
 

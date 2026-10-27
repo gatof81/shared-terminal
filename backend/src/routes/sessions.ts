@@ -1067,32 +1067,48 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			// admin); skip the idle bump on a foreign edit.
 			const meta = await sessions.assertCanOperate(req.params.id, userId);
 			if (meta.userId !== userId) res.locals.skipIdleBump = true;
-			// Privileged-port gate: a port < 1024 needs CAP_NET_BIND_SERVICE,
-			// which is granted at spawn from `allowPrivilegedPorts` and can't
-			// be added to a live container. So a newly-requested privileged
-			// port is only allowed if the session was CREATED with the toggle
-			// on; otherwise the in-container process would hit EACCES binding
-			// it. Reject with a clear, actionable message rather than letting
-			// the dispatcher proxy to a port nothing can listen on.
-			const config = await getSessionConfig(req.params.id);
-			if (config?.allowPrivilegedPorts !== true) {
-				const privileged = ports.find((p) => p.container < 1024);
-				if (privileged) {
-					res.status(400).json({
-						error:
-							`port ${privileged.container} is privileged (< 1024) and this session was not ` +
-							`created with privileged ports enabled; recreate the session with ` +
-							`"allow privileged ports" to expose it`,
-					});
-					return;
+			// Under the session's lifecycle lock (3.0d audit A2): a recreation
+			// writes the mappings from the config it read under the same lock
+			// (step 6 and its resolution passes), so an edit must not land
+			// between that read and that write. Behind a recreation this waits
+			// (≤ 6 min, then 409 busy); with one unresolved the lock's guard
+			// answers 409 recreate-unresolved. Config and existence are read
+			// again once the lock is held.
+			const outcome = await sessionLifecycleLock.run(req.params.id, "ports", async () => {
+				if (!(await sessions.get(req.params.id))) return { gone: true } as const;
+				// Privileged-port gate: a port < 1024 needs CAP_NET_BIND_SERVICE,
+				// which is granted at spawn from `allowPrivilegedPorts` and can't
+				// be added to a live container. So a newly-requested privileged
+				// port is only allowed if the session was CREATED with the toggle
+				// on; otherwise the in-container process would hit EACCES binding
+				// it. Reject with a clear, actionable message rather than letting
+				// the dispatcher proxy to a port nothing can listen on.
+				const config = await getSessionConfig(req.params.id);
+				if (config?.allowPrivilegedPorts !== true) {
+					const privileged = ports.find((p) => p.container < 1024);
+					if (privileged) return { privileged: privileged.container } as const;
 				}
+				// Persist first (source of truth), then rewrite the runtime rows.
+				// Persist-before-apply matches the #270 resources PATCH: if the
+				// mapping write below fails, the next container start re-derives
+				// mappings from the now-current config regardless.
+				await updatePorts(req.params.id, ports);
+				await setPortMappings(req.params.id, mappingsFromConfig(ports));
+				return { done: true } as const;
+			});
+			if ("gone" in outcome) {
+				res.status(404).json({ error: "Session not found" });
+				return;
 			}
-			// Persist first (source of truth), then rewrite the runtime rows.
-			// Persist-before-apply matches the #270 resources PATCH: if the
-			// mapping write below fails, the next container start re-derives
-			// mappings from the now-current config regardless.
-			await updatePorts(req.params.id, ports);
-			await setPortMappings(req.params.id, mappingsFromConfig(ports));
+			if ("privileged" in outcome) {
+				res.status(400).json({
+					error:
+						`port ${outcome.privileged} is privileged (< 1024) and this session was not ` +
+						`created with privileged ports enabled; recreate the session with ` +
+						`"allow privileged ports" to expose it`,
+				});
+				return;
+			}
 			const updated = await sessions.get(req.params.id);
 			if (!updated) {
 				// Race: deleted between assertCanOperate and get. See

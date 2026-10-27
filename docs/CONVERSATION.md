@@ -295,6 +295,32 @@ autorización de ingesta tiene **dos** fuentes y la revocación es un archivo qu
   `{enabled:true}` es la única operación que **quita** la marca por sesión (tras actualizar D1); la
   marca global solo la quita `npm run conversation:enable-all` explícito. Con marca global presente,
   `PATCH {enabled:true}` responde 409 `revoked-globally`.
+- **Una habilitación en curso nunca anula una revocación** (auditoría de 3.0d, A1). La revocación
+  (API, comando o `--all`) no toma ningún lock y puede ocurrir en otro proceso mientras un
+  `PATCH {enabled:true}` está a medias; gana siempre, en D1, en la marca y en el siguiente spawn:
+  - cada revocación incrementa `sessions.revocation_seq` en su misma sentencia, y la escritura del
+    enable en D1 solo se aplica si sigue valiendo lo que leyó al empezar; si no, responde 409
+    `revoked` sin escribir;
+  - el enable lee la revocación por sesión en vigor **antes** que D1 (el orden en que las
+    revocaciones las escriben) y solo levanta esa misma. **`REVOKED` no se mueve ni se borra
+    nunca**: quien lo escribe solo lo reemplaza de forma atómica (temporal + `rename`), así que el
+    nombre no desaparece en ningún instante. Levantarla es publicar, también de forma atómica,
+    `LIFTED` con el sha256 de los bytes exactos de la marca que se levanta;
+  - una revocación por sesión está en vigor si existe `REVOKED` y no es la que nombra `LIFTED`.
+    Una revocación nueva (disable o emergencia) tiene otros bytes (cada escritura lleva un `id`
+    único), así que queda en vigor diga lo que diga `LIFTED`: no hay nada que restaurar ni nada que
+    pueda sobrescribirla;
+  - el receptor lee `LIFTED` y después `REVOKED`; en cualquier intercalado con un escritor obtiene
+    la marca nueva (en vigor) o un par anterior coherente. Si no puede leer alguno de los dos (salvo
+    porque no existe), responde revocado (fail-closed);
+  - tras publicar el levantamiento, el enable vuelve a leer: si sigue habiendo una revocación en
+    vigor, es más nueva; reaplica su transición en D1 y responde 409 `revoked` (o
+    `revoked-globally`). Si no puede publicarlo, la revocación sigue en vigor y D1 vuelve al estado
+    revocado;
+  - la suspensión de la API es idempotente: reaplicada, conserva el hash suspendido, así que
+    rehabilitar sigue sin necesitar recreación; tras la emergencia o `--all` los dos quedan NULL;
+  - al terminar, deshabilitar y el comando vuelven a escribir su marca si una habilitación
+    solapada la retiró.
 - `reconcile` al arrancar: una marca presente fuerza `conversation_requested=0` y hash NULL en D1 si
   D1 dijera otra cosa (la marca gana), y borra el archivo de hooks.
 
@@ -519,7 +545,10 @@ acepta: bloquea.
 **Precondiciones**, en este orden:
 
 1. **Lock por sesión**, compartido con `start`, `stop`, `kill` y `delete` (soft y hard, incluida la
-   purga).
+   purga), y con `PATCH {enabled:true}` y `PATCH /api/sessions/:id/ports`: los pasos 6 y la
+   resolución escriben los mapeos desde la configuración leída bajo este lock, así que una edición
+   de puertos no puede quedar pisada (auditoría de 3.0d, A2). Deshabilitar y el comando de
+   emergencia nunca lo toman.
    - `recreate` no espera: si está ocupado, `busy`.
    - Las demás esperan ≤ `T_rec` + `T_rb` = 6 min (§2.7.4) y después responden `busy` sin efectos.
    - Con la sesión sin resolver, todas responden `recreate-unresolved` (§2.7.4).
@@ -922,9 +951,11 @@ inválido dentro:
 - la secuencia de hooks y los eventos son idénticos;
 - no aparece ningún aviso de settings.
 
-Si falla, la activación queda bloqueada (`control-marker-incompatible` en `PATCH {enabled:true}`
-y en `POST …/recreate`) y 3.0d no se publica hasta revisar otra ubicación. No hay respaldo
-silencioso.
+Si esa validación fallara, la activación quedaría bloqueada (`control-marker-incompatible` en
+`PATCH {enabled:true}` y en `POST …/recreate`) y 3.0d no se publicaría hasta revisar otra
+ubicación. No hay respaldo silencioso. La validación pasó con 2.1.308; hoy la versión del CLI solo
+se comprueba en la recreación (allowlist, abajo). Aplicarla también a `PATCH {enabled:true}` es una
+decisión pendiente del responsable (#466) y no forma parte de este contrato.
 
 No se supone compatibilidad universal: `N` ejecuta el CLI del `.npm-global` del workspace, que
 puede no ser el de la imagen. La recreación lee su versión en el host, sin seguir symlinks, y
@@ -1569,8 +1600,9 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
       residual de un intento `resolved` (`committed`) con D1 en ese `N`.
 - [ ] **Eliminación incierta (A2/P2):** `remove(N)` falla, o queda ambiguo, y `N` arranca antes de
       cualquier CAS ⇒ la marca sigue, `N` no siembra, la skill sigue intacta y D1 sigue en `O`.
-      Con la eliminación confirmada en el siguiente `reconcile` ⇒ la marca se retira y `O` vuelve
-      a su nombre.
+      Con la eliminación confirmada en una pasada posterior de la resolución, en el mismo proceso
+      que inició el intento ⇒ la marca se retira y `O` vuelve a su nombre. Tras un reinicio nada la
+      confirma: la sesión queda en `recreate-unresolved` (D8).
 - [ ] Precondición 7: `.npm-global` ausente o symlink, o layout heredado ⇒ bloqueo sin efectos.
 - [ ] Topes (§2.7.4), con Docker simulado que no responde:
       - en el paso 3 ⇒ cierra la época; hay rollback cuando se resuelve lo que está en vuelo;
@@ -1665,7 +1697,10 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
       conversación, `git config user.email` intacto, secreto y puerto presentes, relay
       identificado, eventos en `.conversations/`, `capture.effective:true` y `O` borrado.
       Variantes: `~/.bash_history` o `apt-get install` ⇒ `recreatable:false` sin efectos; el
-      backend muerto entre los pasos 2 y 4 ⇒ `O` intacto; muerto después del 4 ⇒ completa con `N`.
+      backend muerto entre los pasos 2 y 4 ⇒ D1 sigue en `O` y el workspace intacto, y la sesión queda
+      en `recreate-unresolved` (D8; `O` puede seguir renombrado `-old-<ts>`, sin vuelta automática);
+      muerto después del 4 ⇒ D1 en `N` y la sesión en `recreate-unresolved` (D8). En ningún caso se
+      resuelve automáticamente tras el reinicio.
 - [ ] **(a) Activar con el relay no disponible** (puerto ocupado antes del boot, relay impedido en
       el paso 5, marca o archivo borrados, hash cambiado) ⇒ `effective:false` con su motivo, sin
       archivo de hooks y **0 "hook error"**.

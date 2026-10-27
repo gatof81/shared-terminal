@@ -54,6 +54,7 @@ type Row = {
 	ingest_token_hash_suspended: string | null;
 	user_id: string;
 	container_id: string | null;
+	revocation_seq?: number;
 };
 const db = vi.hoisted(() => ({
 	rows: new Map<string, Row>(),
@@ -87,12 +88,21 @@ vi.mock("./db.js", () => ({
 					})),
 			);
 		}
-		if (/^UPDATE sessions SET conversation_requested = \? WHERE/.test(sql) && row) {
-			row.conversation_requested = Number(params[0]);
+		// The enable writes apply only while `revocation_seq` is unchanged;
+		// every revocation bumps it (3.0d audit A1).
+		if (/WHERE revocation_seq = \? AND session_id = \?/.test(sql)) {
+			if (!row || (row.revocation_seq ?? 0) !== params[0]) return ok([], 0);
+		}
+		if (/revocation_seq = revocation_seq \+ 1/.test(sql) && row) {
+			row.revocation_seq = (row.revocation_seq ?? 0) + 1;
+		}
+		if (/^UPDATE sessions SET conversation_requested = 1 WHERE/.test(sql) && row) {
+			row.conversation_requested = 1;
 			return ok([], 1);
 		}
-		if (/^UPDATE sessions SET ingest_token_hash_suspended = ingest_token_hash/.test(sql) && row) {
-			row.ingest_token_hash_suspended = row.ingest_token_hash;
+		if (/^UPDATE sessions SET ingest_token_hash_suspended = COALESCE/.test(sql) && row) {
+			// suspendIngestToken (idempotent, 3.0d audit A1.2)
+			row.ingest_token_hash_suspended = row.ingest_token_hash ?? row.ingest_token_hash_suspended;
 			row.ingest_token_hash = null;
 			row.conversation_requested = 0;
 			return ok([], 1);
@@ -102,6 +112,18 @@ vi.mock("./db.js", () => ({
 			row.ingest_token_hash_suspended = null;
 			row.conversation_requested = 1;
 			return ok([], 1);
+		}
+		if (
+			/^UPDATE sessions SET ingest_token_hash = NULL, ingest_token_hash_suspended = NULL/.test(sql)
+		) {
+			const targets = sql.includes("WHERE") ? (row ? [row] : []) : [...db.rows.values()];
+			for (const r of targets) {
+				r.ingest_token_hash = null;
+				r.ingest_token_hash_suspended = null;
+				r.conversation_requested = 0;
+				if (!sql.includes("WHERE")) r.revocation_seq = (r.revocation_seq ?? 0) + 1;
+			}
+			return ok([], targets.length);
 		}
 		if (/^INSERT INTO session_observe_log/.test(sql)) {
 			await db.onObserveInsert?.();
