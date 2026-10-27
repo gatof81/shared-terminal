@@ -301,14 +301,22 @@ autorización de ingesta tiene **dos** fuentes y la revocación es un archivo qu
   - cada revocación incrementa `sessions.revocation_seq` en su misma sentencia, y la escritura del
     enable en D1 solo se aplica si sigue valiendo lo que leyó al empezar; si no, responde 409
     `revoked` sin escribir;
-  - el enable lee la marca por sesión **antes** que D1 (el orden en que las revocaciones los
-    escriben) y solo retira esa misma marca: la aparta con un `rename` atómico a
-    `REVOKED.retiring`, la compara y, si es otra más nueva, la devuelve con `link`, que nunca pisa
-    una escrita entretanto. **`REVOKED.retiring` es también una revocación para el receptor**: en
-    todo instante del retiro existe uno de los dos nombres, así que la ingesta nunca vuelve a
-    aceptar durante él. Si el retiro se interrumpe, ese nombre queda (fail-closed) y el siguiente
-    enable lo devuelve a `REVOKED` antes de nada. Si encuentra una revocación nueva, reaplica su
-    transición en D1 y responde 409 `revoked` (o `revoked-globally`);
+  - el enable lee la revocación por sesión en vigor **antes** que D1 (el orden en que las
+    revocaciones las escriben) y solo levanta esa misma. **`REVOKED` no se mueve ni se borra
+    nunca**: quien lo escribe solo lo reemplaza de forma atómica (temporal + `rename`), así que el
+    nombre no desaparece en ningún instante. Levantarla es publicar, también de forma atómica,
+    `LIFTED` con el sha256 de los bytes exactos de la marca que se levanta;
+  - una revocación por sesión está en vigor si existe `REVOKED` y no es la que nombra `LIFTED`.
+    Una revocación nueva (disable o emergencia) tiene otros bytes (cada escritura lleva un `id`
+    único), así que queda en vigor diga lo que diga `LIFTED`: no hay nada que restaurar ni nada que
+    pueda sobrescribirla;
+  - el receptor lee `LIFTED` y después `REVOKED`; en cualquier intercalado con un escritor obtiene
+    la marca nueva (en vigor) o un par anterior coherente. Si no puede leer alguno de los dos (salvo
+    porque no existe), responde revocado (fail-closed);
+  - tras publicar el levantamiento, el enable vuelve a leer: si sigue habiendo una revocación en
+    vigor, es más nueva; reaplica su transición en D1 y responde 409 `revoked` (o
+    `revoked-globally`). Si no puede publicarlo, la revocación sigue en vigor y D1 vuelve al estado
+    revocado;
   - la suspensión de la API es idempotente: reaplicada, conserva el hash suspendido, así que
     rehabilitar sigue sin necesitar recreación; tras la emergencia o `--all` los dos quedan NULL;
   - al terminar, deshabilitar y el comando vuelven a escribir su marca si una habilitación

@@ -838,13 +838,13 @@ describe("3.0d audit A1: a revocation landing during an enable wins, in D1, the 
 			},
 		],
 		[
-			"during the retirement, right after the marker was moved aside",
+			"during the lift, right after it was published",
 			(sid, revoke) => {
 				const real = nodeFs.promises.rename.bind(nodeFs.promises);
 				let armed = true;
 				const spy = vi.spyOn(nodeFs.promises, "rename").mockImplementation(async (from, to) => {
 					await real(from, to);
-					if (armed && String(to).endsWith("REVOKED.retiring")) {
+					if (armed && String(to).endsWith("/LIFTED")) {
 						armed = false;
 						await revoke(sid);
 					}
@@ -915,10 +915,9 @@ describe("3.0d audit A1: a revocation landing during an enable wins, in D1, the 
 			["emergency --all", all],
 		] as const) {
 			for (const [where, install] of windows) {
-				// Without a marker at the start there is nothing to retire, so
-				// that window does not exist (the enable never renames).
-				if (where.startsWith("during the retirement") && startLabel.startsWith("first enable"))
-					continue;
+				// Without a marker at the start there is nothing to lift, so
+				// that window does not exist (no lift is published).
+				if (where.startsWith("during the lift") && startLabel.startsWith("first enable")) continue;
 				it(`${startLabel}; ${by} ${where}`, async () => {
 					const sid = `a1-${n++}`;
 					await start(sid);

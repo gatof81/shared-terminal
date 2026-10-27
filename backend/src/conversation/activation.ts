@@ -58,7 +58,6 @@ import {
 import {
 	checkRevocation,
 	readSessionRevocation,
-	recoverRetiring,
 	removeGlobalRevocation,
 	retireSessionRevocation,
 	writeGlobalRevocation,
@@ -415,10 +414,6 @@ export async function enableSession(
 	isRecreateUnresolved: (sessionId: string) => Promise<boolean>,
 ): Promise<EnableResult> {
 	if (!deps.enabled) throw new ConversationDisabledError();
-	// A retirement this lock's previous holder could not finish left the
-	// marker under the retiring name — still a revocation. Back to REVOKED
-	// first, so it is what the steps below see and compare (A1.1).
-	await recoverRetiring(deps.workspaceRoot, sessionId);
 	// A disable or the emergency CLI (another process, never behind any
 	// lock) may run while this is in flight. It must win, in D1 and in the
 	// marker, so the cut stays persistent (§2.4, 3.0d audit A1). Read here
@@ -454,9 +449,19 @@ export async function enableSession(
 		deps.invalidate?.(sessionId);
 		throw new RevokedGloballyError();
 	}
-	// Only the marker that was there at the start is retired; a newer one
-	// stays (`retireSessionRevocation` moves it aside atomically to compare).
-	if ((await retireSessionRevocation(deps.workspaceRoot, sessionId, seenMarker)) === "newer") {
+	// Only the revocation that was in effect at the start is lifted; a newer
+	// one stays in effect (`retireSessionRevocation` publishes a lift naming
+	// exactly `seenMarker` and nothing is ever moved or deleted). If the lift
+	// cannot be published the revocation stays in effect, and D1 is put back
+	// in line with it before failing.
+	let retired: Awaited<ReturnType<typeof retireSessionRevocation>>;
+	try {
+		retired = await retireSessionRevocation(deps.workspaceRoot, sessionId, seenMarker);
+	} catch (err) {
+		await reapplyRevocation(deps, sessionId).catch(() => undefined);
+		throw err;
+	}
+	if (retired === "newer") {
 		await reapplyRevocation(deps, sessionId);
 		throw new RevokedMeanwhileError(sessionId);
 	}

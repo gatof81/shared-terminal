@@ -98,9 +98,7 @@ import * as revocationModule from "./revocation.js";
 import {
 	checkRevocation,
 	readSessionRevocation,
-	recoverRetiring,
 	retireSessionRevocation,
-	retiringPath,
 	revokedPath,
 } from "./revocation.js";
 import { ConversationService } from "./service.js";
@@ -178,133 +176,190 @@ async function persistedPrompts(): Promise<number> {
 	return content.split("\n").filter((l) => l.includes('"user_prompt"')).length;
 }
 
-/** Hold the retirement right after its `rename` of REVOKED → REVOKED.retiring. */
-function pauseAfterRetiringRename() {
-	const real = nodeFs.promises.rename.bind(nodeFs.promises);
-	let release!: () => void;
-	const paused = new Promise<void>((r) => {
-		release = r;
+function deferred() {
+	let resolve!: () => void;
+	const promise = new Promise<void>((r) => {
+		resolve = r;
 	});
-	let reached!: () => void;
-	const atPause = new Promise<void>((r) => {
-		reached = r;
-	});
-	vi.spyOn(nodeFs.promises, "rename").mockImplementation(async (from, to) => {
-		await real(from, to);
-		if (String(to).endsWith(revocationModule.RETIRING_FILE)) {
-			reached();
-			await paused;
-		}
-	});
-	return { atPause, release };
+	return { promise, resolve };
 }
 
-describe("A1.1 — a marker being retired never leaves the session looking unrevoked", () => {
-	it("cache populated, emergency done, retirement of an OLDER marker paused right after its rename ⇒ the receiver refuses, nothing persisted", async () => {
-		// Capture is live and the receiver has the token cached.
-		expect(await deliver()).toMatchObject({ accepted: true });
-		const before = await persistedPrompts();
-		// An older marker an enable started from (an API disable it read)…
-		await disableSession({ ...service.activationDeps }, SID, "api");
-		const older = await readSessionRevocation(root, SID);
-		// …the D1 side re-authorized in the meantime (what the enable's CAS did)
-		// and the cache repopulated with the live hash:
+/** The live state of the marker files (raw bytes), for the A1.1b checks. */
+async function markerBytes() {
+	return fs.readFile(revokedPath(root, SID), "utf8").catch(() => null);
+}
+
+/** Capture live, cache populated; then an API disable the enable will start from. */
+async function liveThenApiDisabled() {
+	expect(await deliver()).toMatchObject({ accepted: true });
+	await disableSession({ ...service.activationDeps }, SID, "api");
+	return readSessionRevocation(root, SID);
+}
+
+/**
+ * Deterministic interleaving with real file operations: while `during` runs,
+ * every fs call it makes is followed — before it may go on — by a real
+ * delivery (cached authorization + ingest) whose outcome is recorded. No
+ * timers: each probe is awaited inside the hook.
+ */
+async function probeAfterEveryFsStep(during: () => Promise<unknown>) {
+	const outcomes: Array<{ step: string; accepted: boolean }> = [];
+	let active = true;
+	let probing = false;
+	const ops = ["open", "rename", "readFile", "link", "rm"] as const;
+	for (const op of ops) {
+		const real = (nodeFs.promises[op] as (...a: unknown[]) => Promise<unknown>).bind(
+			nodeFs.promises,
+		);
+		vi.spyOn(nodeFs.promises, op).mockImplementation((async (...a: unknown[]) => {
+			const r = await real(...a);
+			if (active && !probing) {
+				probing = true;
+				try {
+					const out = (await deliver()) as { accepted?: boolean };
+					outcomes.push({
+						step: `${op} ${path.basename(String(a[a.length > 1 && op === "rename" ? 1 : 0]))}`,
+						accepted: !!out.accepted,
+					});
+				} finally {
+					probing = false;
+				}
+			}
+			return r;
+		}) as never);
+	}
+	let result: unknown;
+	let error: unknown;
+	try {
+		result = await during();
+	} catch (err) {
+		error = err;
+	} finally {
+		active = false;
+		vi.restoreAllMocks();
+	}
+	return { outcomes, result, error };
+}
+
+describe("A1.1a — a revocation in effect is never read as absent", () => {
+	it("retirement (lift) of an OLDER marker while a newer emergency is in effect: refused after every fs step, nothing persisted", async () => {
+		const older = await liveThenApiDisabled();
+		// The enable's D1 side re-authorized meanwhile, and the cache holds the hash.
 		Object.assign(dbStubs.sessions.get(SID) as object, {
 			conversation_requested: 1,
 			ingest_token_hash: HASH,
 			ingest_token_hash_suspended: null,
 		});
 		service.invalidateToken(SID);
-		expect(
-			await service.authorize({ authorization: `Bearer ${TOKEN}`, stSession: SID }),
-		).toMatchObject({
-			ok: true,
-		});
-		// The emergency CLI completes in another process: newer marker + D1 revoked.
-		await cli();
-		const { atPause, release } = pauseAfterRetiringRename();
-		const retiring = retireSessionRevocation(root, SID, older);
-		await atPause;
-		// The newer marker is aside: REVOKED is gone, REVOKED.retiring holds it.
-		expect(await readSessionRevocation(root, SID)).toBeNull();
+		await service.authorize({ authorization: `Bearer ${TOKEN}`, stSession: SID });
+		const before = await persistedPrompts();
+		await cli(); // newer marker; the other process can't touch this cache
+		const { outcomes, result } = await probeAfterEveryFsStep(() =>
+			retireSessionRevocation(root, SID, older),
+		);
+		expect(result).toBe("newer");
+		expect(outcomes.length).toBeGreaterThan(3); // open, rename, reads…
+		expect(outcomes.filter((o) => o.accepted)).toEqual([]);
 		expect(await checkRevocation(root, SID)).toBe("session");
-		const during = await deliver();
-		expect(during).toMatchObject({ accepted: false });
-		release();
-		expect(await retiring).toBe("newer");
-		expect(await checkRevocation(root, SID)).toBe("session");
-		expect(await deliver()).toMatchObject({ accepted: false });
 		expect(await persistedPrompts()).toBe(before);
 	});
 
-	it("through the enable: the emergency lands between its D1 write and the retirement, the retirement is paused after the rename ⇒ refused throughout, enable refused, nothing persisted", async () => {
-		expect(await deliver()).toMatchObject({ accepted: true });
-		const before = await persistedPrompts();
-		await disableSession({ ...service.activationDeps }, SID, "api");
-		const realRetire = revocationModule.retireSessionRevocation;
-		let atPause!: Promise<void>;
-		let release!: () => void;
-		vi.spyOn(revocationModule, "retireSessionRevocation").mockImplementation(async (r, s, e) => {
-			await cli();
-			({ atPause, release } = pauseAfterRetiringRename());
-			return realRetire(r, s, e);
+	for (const [direction, between] of [
+		[
+			"a newer emergency written between the reader's LIFTED read and its REVOKED read",
+			async () => cli(),
+		],
+		[
+			"a lift of the older marker published between the reader's two reads (newer emergency already in effect)",
+			async (older: string | null) => {
+				await cli();
+				await retireSessionRevocation(root, SID, older);
+			},
+		],
+	] as const) {
+		it(`reader race — ${direction}: ingest refused, nothing persisted`, async () => {
+			const older = await liveThenApiDisabled();
+			if (direction.startsWith("a newer emergency")) {
+				// The older marker was lifted before: capture is live again, cached.
+				await retireSessionRevocation(root, SID, older);
+				Object.assign(dbStubs.sessions.get(SID) as object, {
+					conversation_requested: 1,
+					ingest_token_hash: HASH,
+					ingest_token_hash_suspended: null,
+				});
+				service.invalidateToken(SID);
+				expect(await deliver()).toMatchObject({ accepted: true });
+			} else {
+				Object.assign(dbStubs.sessions.get(SID) as object, {
+					conversation_requested: 1,
+					ingest_token_hash: HASH,
+					ingest_token_hash_suspended: null,
+				});
+				service.invalidateToken(SID);
+				await service.authorize({ authorization: `Bearer ${TOKEN}`, stSession: SID });
+			}
+			const before = await persistedPrompts();
+			// Pause the ingest's reader right after its first marker read.
+			const liftedRead = deferred();
+			const resume = deferred();
+			const realRead = nodeFs.promises.readFile.bind(nodeFs.promises);
+			let reading = false;
+			let paused = false;
+			vi.spyOn(nodeFs.promises, "readFile").mockImplementation((async (p: unknown, o: unknown) => {
+				// Pause after the read whatever it answered (no LIFTED yet = ENOENT).
+				const r = await realRead(p as never, o as never).then(
+					(v) => ({ v }),
+					(e: unknown) => ({ e }),
+				);
+				// Between the reader's two reads, whichever it makes first.
+				const name = path.basename(String(p));
+				if (reading && !paused && (name === revocationModule.LIFTED_FILE || name === "REVOKED")) {
+					paused = true;
+					liftedRead.resolve();
+					await resume.promise;
+				}
+				if ("e" in r) throw r.e;
+				return r.v;
+			}) as never);
+			reading = true; // before the call: its first reads are issued synchronously
+			const ingesting = service.ingest(SID, "%0", prompt());
+			await liftedRead.promise;
+			reading = false;
+			await between(older);
+			resume.resolve();
+			expect(await ingesting).toMatchObject({ accepted: false, reason: "revoked" });
+			vi.restoreAllMocks();
+			expect(await persistedPrompts()).toBe(before);
+			expect(await checkRevocation(root, SID)).toBe("session");
 		});
-		const enabling = enableSession(
-			service.activationDeps,
-			service.authority,
-			SID,
-			async () => false,
-		);
-		await vi.waitFor(() => expect(atPause).toBeDefined());
-		await atPause;
+	}
+
+	it("a lift that cannot be published leaves the revocation in effect and D1 revoked again; a torn temp file counts for nothing", async () => {
+		await liveThenApiDisabled();
+		const realRename = nodeFs.promises.rename.bind(nodeFs.promises);
+		vi.spyOn(nodeFs.promises, "rename").mockImplementation((async (from: unknown, to: unknown) => {
+			if (String(to).endsWith(`/${revocationModule.LIFTED_FILE}`)) {
+				throw Object.assign(new Error("EIO"), { code: "EIO" });
+			}
+			return realRename(from as never, to as never);
+		}) as never);
+		await expect(
+			enableSession(service.activationDeps, service.authority, SID, async () => false),
+		).rejects.toThrow("EIO");
+		vi.restoreAllMocks();
 		expect(await checkRevocation(root, SID)).toBe("session");
-		expect(await deliver()).toMatchObject({ accepted: false });
-		release();
-		await expect(enabling).rejects.toThrow(/revoked/);
-		expect(await deliver()).toMatchObject({ accepted: false });
-		expect(await persistedPrompts()).toBe(before);
 		expect(dbStubs.sessions.get(SID)).toMatchObject({
 			conversation_requested: 0,
 			ingest_token_hash: null,
 		});
-	});
-
-	it("a retirement interrupted after its rename stays a revocation (fail-closed); the next enable puts the marker back first", async () => {
-		expect(await deliver()).toMatchObject({ accepted: true });
-		await disableSession({ ...service.activationDeps }, SID, "api");
-		const older = await readSessionRevocation(root, SID);
-		await cli(); // newer
-		const newer = await readSessionRevocation(root, SID);
-		// `link` fails after the rename (an I/O error, or the process dies there).
-		vi.spyOn(nodeFs.promises, "link").mockRejectedValueOnce(
-			Object.assign(new Error("EIO"), { code: "EIO" }),
-		);
-		await expect(retireSessionRevocation(root, SID, older)).rejects.toThrow("EIO");
-		expect(await readSessionRevocation(root, SID)).toBeNull();
-		await expect(fs.stat(retiringPath(root, SID))).resolves.toBeTruthy();
-		expect(await checkRevocation(root, SID)).toBe("session");
 		expect(await deliver()).toMatchObject({ accepted: false });
-		// Recovery (the first thing the next enable does) restores the newer marker.
-		await recoverRetiring(root, SID);
-		expect(await readSessionRevocation(root, SID)).toBe(newer);
-		await expect(fs.stat(retiringPath(root, SID))).rejects.toThrow();
+		// The publish's temp file (a crash before its rename) lifts nothing.
+		const dir = path.dirname(revokedPath(root, SID));
+		expect(
+			(await fs.readdir(dir)).some((f) => f.startsWith(`${revocationModule.LIFTED_FILE}.tmp`)),
+		).toBe(true);
 		expect(await checkRevocation(root, SID)).toBe("session");
-	});
-
-	it("interrupted while retiring its OWN expected marker: still revoked until a later enable recovers and retires it properly", async () => {
-		await disableSession({ ...service.activationDeps }, SID, "api");
-		const own = await readSessionRevocation(root, SID);
-		vi.spyOn(nodeFs.promises, "readFile").mockRejectedValueOnce(
-			Object.assign(new Error("EIO"), { code: "EIO" }),
-		);
-		// readFile of the aside fails ⇒ treated as "not expected" ⇒ link back.
-		expect(await retireSessionRevocation(root, SID, own)).toBe("newer");
-		expect(await readSessionRevocation(root, SID)).toBe(own);
-		vi.restoreAllMocks();
-		// Leave a crash's leftover by hand: only the retiring name.
-		await fs.rename(revokedPath(root, SID), retiringPath(root, SID));
-		expect(await checkRevocation(root, SID)).toBe("session");
-		// A plain enable later: recovers, then retires it and re-enables.
+		// No recovery step exists or is needed: a plain enable later works.
 		const r = await enableSession(
 			service.activationDeps,
 			service.authority,
@@ -313,6 +368,111 @@ describe("A1.1 — a marker being retired never leaves the session looking unrev
 		);
 		expect(r.capture.effective).toBe(true);
 		expect(await checkRevocation(root, SID)).toBe("none");
+	});
+
+	it("an unreadable LIFTED or REVOKED is fail-closed: absence that cannot be established is not absence", async () => {
+		await liveThenApiDisabled();
+		const realRead = nodeFs.promises.readFile.bind(nodeFs.promises);
+		for (const name of [revocationModule.LIFTED_FILE, "REVOKED"]) {
+			vi.spyOn(nodeFs.promises, "readFile").mockImplementation((async (p: unknown, o: unknown) => {
+				if (String(p).endsWith(`/${name}`))
+					throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+				return realRead(p as never, o as never);
+			}) as never);
+			expect([name, await checkRevocation(root, SID)]).toEqual([name, "session"]);
+			vi.restoreAllMocks();
+		}
+	});
+});
+
+describe("A1.1b — the emergency's marker always prevails over a concurrent enable", () => {
+	for (const [where, hookFile] of [
+		["before the lift is published", "open"],
+		["right after the lift is published, before the enable re-reads", "rename"],
+	] as const) {
+		it(`emergency ${where}: its marker (content and id) stays in effect; D1, seq, enable result, next spawn, no reopening`, async () => {
+			await liveThenApiDisabled();
+			const seqBefore = Number(dbStubs.sessions.get(SID)?.revocation_seq ?? 0);
+			let emergencyBytes: string | null = null;
+			const real = (nodeFs.promises[hookFile] as (...a: unknown[]) => Promise<unknown>).bind(
+				nodeFs.promises,
+			);
+			let armed = true;
+			vi.spyOn(nodeFs.promises, hookFile).mockImplementation((async (...a: unknown[]) => {
+				const isLift =
+					hookFile === "rename"
+						? String(a[1]).endsWith(`/${revocationModule.LIFTED_FILE}`)
+						: String(a[0]).includes(`${revocationModule.LIFTED_FILE}.tmp`);
+				if (armed && isLift && hookFile === "open") {
+					armed = false;
+					vi.restoreAllMocks();
+					await cli();
+					emergencyBytes = await markerBytes();
+					return real(...a);
+				}
+				const r = await real(...a);
+				if (armed && isLift) {
+					armed = false;
+					vi.restoreAllMocks();
+					await cli();
+					emergencyBytes = await markerBytes();
+				}
+				return r;
+			}) as never);
+			const outcome = await enableSession(
+				service.activationDeps,
+				service.authority,
+				SID,
+				async () => false,
+			).then(
+				(r) => (r.capture.effective ? "effective" : "not effective"),
+				(e: Error) => e.name,
+			);
+			vi.restoreAllMocks();
+			expect(emergencyBytes).not.toBeNull();
+			// The emergency's own marker, byte for byte (its id included), in effect.
+			expect(await markerBytes()).toBe(emergencyBytes);
+			expect(await readSessionRevocation(root, SID)).toBe(emergencyBytes);
+			expect(JSON.parse(emergencyBytes as unknown as string)).toMatchObject({
+				by: "cli",
+				id: expect.any(String),
+			});
+			expect(outcome).toBe("RevokedMeanwhileError");
+			const row = dbStubs.sessions.get(SID) as Record<string, unknown>;
+			expect(row).toMatchObject({
+				conversation_requested: 0,
+				ingest_token_hash: null,
+				ingest_token_hash_suspended: null,
+			});
+			// Each revocation statement bumped it: the CLI's and the re-application.
+			expect(Number(row.revocation_seq)).toBeGreaterThanOrEqual(seqBefore + 1);
+			expect(await deliver()).toMatchObject({ accepted: false });
+			const spawn = await import("./activation.js").then((m) =>
+				m.prepareSpawnCapture(service.activationDeps, SID, { imageId: "sha256:i", relay2: true }),
+			);
+			expect(spawn.env.some((e) => e.startsWith("ST_INGEST_TOKEN="))).toBe(false);
+		});
+	}
+
+	it("the whole enable racing a completed emergency: refused after every fs step of the enable, the emergency's marker kept", async () => {
+		await liveThenApiDisabled();
+		let emergencyBytes: string | null = null;
+		const realRetire = revocationModule.retireSessionRevocation;
+		vi.spyOn(revocationModule, "retireSessionRevocation").mockImplementationOnce(
+			async (r, s, e) => {
+				await cli();
+				emergencyBytes = await markerBytes();
+				return realRetire(r, s, e);
+			},
+		);
+		// Re-authorize the cache the enable's D1 write would make valid.
+		const { outcomes, error } = await probeAfterEveryFsStep(() =>
+			enableSession(service.activationDeps, service.authority, SID, async () => false),
+		);
+		expect((error as Error).name).toBe("RevokedMeanwhileError");
+		expect(outcomes.filter((o) => o.accepted)).toEqual([]);
+		expect(await markerBytes()).toBe(emergencyBytes);
+		expect(await checkRevocation(root, SID)).toBe("session");
 	});
 });
 

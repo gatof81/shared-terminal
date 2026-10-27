@@ -8,19 +8,19 @@
  *   <WORKSPACE_ROOT>/.conversations/<st_session_id>/REVOKED   per session
  *   <WORKSPACE_ROOT>/.conversations/REVOKED_ALL                global
  *
- * The receiver stats BOTH on every event, as the last authorisation step
+ * The receiver checks BOTH on every event, as the last authorisation step
  * before enqueue, and caches nothing — a cached negative would admit an
  * event after the rename (stat at t=0, rename at t=10 ms, event accepted
  * from cache at t=20 ms), which is exactly the review-round-3 counter-
- * example. Two stats per accepted event cost microseconds; at R1's
- * maximum that is 100 stats/s per session.
+ * example. A stat of the global marker plus two small reads per session
+ * (`LIFTED`, then `REVOKED`, 3.0d) per accepted event cost microseconds.
  *
  * Writes are atomic: temp file + fsync + rename, then fsync of the
  * directory, so the guarantee "no authorisation that starts after
  * `rename` returns admits the event" holds across processes and crashes.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { assertContained, assertSafeComponent } from "./ids.js";
@@ -38,15 +38,16 @@ export interface RevocationMarker {
 
 export const REVOKED_FILE = "REVOKED";
 /**
- * Where `retireSessionRevocation` moves the per-session marker while it
- * compares it (3.0d audit A1.1). A revocation in its own right: the
- * receiver stats it like `REVOKED`, so a marker being retired never leaves
- * the session looking unrevoked — not for an instant, and not after a crash
- * in the middle (the next enable puts it back first, `recoverRetiring`).
- * One fixed name is enough: only an enable retires, and enables of a
- * session are serialized by its lifecycle lock.
+ * Lifting a per-session revocation (3.0d audit A1.1a/b). `REVOKED` itself is
+ * NEVER moved or deleted once written — a writer only ever replaces it with
+ * temp + `rename`, so the name never disappears. An enable lifts the one it
+ * saw by publishing, the same atomic way, the sha256 of that marker's exact
+ * bytes here. A revocation is in effect when `REVOKED` exists and is not the
+ * one `LIFTED` names: a newer marker (disable, emergency CLI) has other
+ * bytes (each write carries a unique `id`), so it is in effect whatever
+ * `LIFTED` says, with nothing to restore and nothing anyone could overwrite.
  */
-export const RETIRING_FILE = "REVOKED.retiring";
+export const LIFTED_FILE = "LIFTED";
 export const REVOKED_ALL_FILE = "REVOKED_ALL";
 
 export function conversationsRoot(workspaceRoot: string): string {
@@ -65,8 +66,8 @@ export function revokedPath(workspaceRoot: string, stSessionId: string): string 
 	return path.join(sessionConversationsDir(workspaceRoot, stSessionId), REVOKED_FILE);
 }
 
-export function retiringPath(workspaceRoot: string, stSessionId: string): string {
-	return path.join(sessionConversationsDir(workspaceRoot, stSessionId), RETIRING_FILE);
+export function liftedPath(workspaceRoot: string, stSessionId: string): string {
+	return path.join(sessionConversationsDir(workspaceRoot, stSessionId), LIFTED_FILE);
 }
 
 export function revokedAllPath(workspaceRoot: string): string {
@@ -89,7 +90,7 @@ async function fsyncDir(dir: string): Promise<void> {
 	}
 }
 
-async function writeMarker(file: string, marker: RevocationMarker): Promise<void> {
+async function writeMarker(file: string, marker: object): Promise<void> {
 	const dir = path.dirname(file);
 	await fs.mkdir(dir, { recursive: true });
 	const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
@@ -119,13 +120,14 @@ export async function writeGlobalRevocation(
 	await writeMarker(revokedAllPath(workspaceRoot), { ...marker, id: randomUUID() });
 }
 
-/** The per-session marker's exact bytes, or null if there is none. Other errors throw. */
-export async function readSessionRevocation(
-	workspaceRoot: string,
-	stSessionId: string,
-): Promise<string | null> {
+function sha256(bytes: string): string {
+	return createHash("sha256").update(bytes, "utf8").digest("hex");
+}
+
+/** File contents, or null on ENOENT. Any other error throws. */
+async function readIfExists(file: string): Promise<string | null> {
 	try {
-		return await fs.readFile(revokedPath(workspaceRoot, stSessionId), "utf8");
+		return await fs.readFile(file, "utf8");
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
 		throw err;
@@ -133,76 +135,56 @@ export async function readSessionRevocation(
 }
 
 /**
- * Retire the per-session marker only if it is still `expected` — the bytes
- * an enable read when it started (3.0d audit A1). Not "compare, then
- * delete": the marker is moved with one atomic `rename` to `RETIRING_FILE`,
- * so what gets compared is exactly what was taken, and since the receiver
- * treats that name as a revocation too, at every instant one of the two
- * names exists (A1.1). If it was not `expected` — a disable or the emergency
- * CLI wrote a newer one — it goes back with `link`, which never overwrites a
- * marker written in between, and only then is the retiring name dropped. A
- * failure or a crash at any point leaves at least the retiring name, i.e.
- * fail-closed; `recoverRetiring` (run first by the next enable) restores it.
+ * The per-session revocation IN EFFECT: the exact bytes of `REVOKED` when
+ * it exists and is not the one `LIFTED` names; null when there is none or it
+ * was lifted. Errors throw (callers fail closed).
  *
- * "newer": a marker other than `expected` is (or was) there — the caller
- * must not proceed as if unrevoked.
+ * `LIFTED` is read BEFORE `REVOKED`. Each changes only by an atomic replace,
+ * so any interleaving with a writer gives one of: the newer `REVOKED` (bytes
+ * no lift names ⇒ in effect), or an older pair (the state before the write,
+ * which was itself a consistent answer). Read the other way round, a reader
+ * could combine an old `REVOKED` with a lift published after it and miss a
+ * newer marker written in between — that order is the one that matters.
+ */
+export async function readSessionRevocation(
+	workspaceRoot: string,
+	stSessionId: string,
+): Promise<string | null> {
+	const liftedRaw = await readIfExists(liftedPath(workspaceRoot, stSessionId));
+	const revoked = await readIfExists(revokedPath(workspaceRoot, stSessionId));
+	if (revoked === null) return null;
+	let lifts: unknown = null;
+	try {
+		lifts = liftedRaw ? (JSON.parse(liftedRaw) as { lifts?: unknown }).lifts : null;
+	} catch {
+		lifts = null; // an unreadable lift lifts nothing
+	}
+	return lifts === sha256(revoked) ? null : revoked;
+}
+
+/**
+ * Lift the per-session revocation only if the one in effect is still
+ * `expected` — the bytes an enable saw when it started (3.0d audit A1).
+ * Nothing is moved or deleted: the lift is published (temp + fsync +
+ * rename) naming `expected`'s hash, then the state is read again. A newer
+ * revocation written at any point — before, during or after the publish —
+ * has other bytes, so it stays in effect and the answer is "newer". A
+ * failure leaves the revocation in effect (fail-closed) and throws.
  */
 export async function retireSessionRevocation(
 	workspaceRoot: string,
 	stSessionId: string,
 	expected: string | null,
 ): Promise<"removed" | "absent" | "newer"> {
-	const file = revokedPath(workspaceRoot, stSessionId);
-	const aside = retiringPath(workspaceRoot, stSessionId);
-	if (expected === null) {
-		return (await exists(file)) || (await exists(aside)) ? "newer" : "absent";
+	if (expected !== null) {
+		await writeMarker(liftedPath(workspaceRoot, stSessionId), {
+			lifts: sha256(expected),
+			at: new Date().toISOString(),
+		});
 	}
-	try {
-		await fs.rename(file, aside);
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code === "ENOENT") return "absent";
-		throw err;
-	}
-	await fsyncDir(path.dirname(file));
-	let taken: string;
-	try {
-		taken = await fs.readFile(aside, "utf8");
-	} catch {
-		taken = "";
-	}
-	if (taken === expected) {
-		await fs.rm(aside, { force: true });
-		await fsyncDir(path.dirname(file));
-		return "removed";
-	}
-	try {
-		await fs.link(aside, file);
-	} catch (err) {
-		// EEXIST: an even newer marker is already in place — keep that one.
-		// Anything else: the retiring name stays (still revoked) and the
-		// next enable's `recoverRetiring` puts the marker back.
-		if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-	}
-	await fsyncDir(path.dirname(file));
-	await fs.rm(aside, { force: true });
-	await fsyncDir(path.dirname(file));
-	return "newer";
-}
-
-/**
- * A retirement interrupted after its `rename` (a crash, an I/O error) left
- * the marker under `RETIRING_FILE`, still a revocation for the receiver. Put
- * it back as `REVOKED` — a `rename`, so one of the two names exists
- * throughout — unless a `REVOKED` is already there, which is then the newer
- * revocation and the retiring copy is just dropped.
- */
-export async function recoverRetiring(workspaceRoot: string, stSessionId: string): Promise<void> {
-	const file = revokedPath(workspaceRoot, stSessionId);
-	const aside = retiringPath(workspaceRoot, stSessionId);
-	if (!(await exists(aside))) return;
-	if (await exists(file)) await fs.rm(aside, { force: true });
-	else await fs.rename(aside, file);
-	await fsyncDir(path.dirname(file));
+	const now = await readSessionRevocation(workspaceRoot, stSessionId);
+	if (now !== null) return "newer";
+	return expected === null ? "absent" : "removed";
 }
 
 export async function removeGlobalRevocation(workspaceRoot: string): Promise<void> {
@@ -212,21 +194,21 @@ export async function removeGlobalRevocation(workspaceRoot: string): Promise<voi
 export type RevocationState = "none" | "session" | "global";
 
 /**
- * Uncached: two `stat`s per call, by design (see the header). Returns
+ * Uncached, by design (see the header): a stat of the global marker and
+ * `readSessionRevocation`'s two reads. Returns
  * which marker is present; "global" wins when both are.
  */
 export async function checkRevocation(
 	workspaceRoot: string,
 	stSessionId: string,
 ): Promise<RevocationState> {
-	const [global, session, retiring] = await Promise.all([
-		exists(revokedAllPath(workspaceRoot)),
-		exists(revokedPath(workspaceRoot, stSessionId)),
-		exists(retiringPath(workspaceRoot, stSessionId)),
-	]);
-	if (global) return "global";
-	if (session || retiring) return "session";
-	return "none";
+	if (await exists(revokedAllPath(workspaceRoot))) return "global";
+	try {
+		return (await readSessionRevocation(workspaceRoot, stSessionId)) === null ? "none" : "session";
+	} catch {
+		// Absence that cannot be established is not absence (fail-closed).
+		return "session";
+	}
 }
 
 async function exists(file: string): Promise<boolean> {
