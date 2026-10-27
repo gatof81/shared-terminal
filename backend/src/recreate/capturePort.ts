@@ -40,8 +40,12 @@ export function conversationRecreatePort(service: ConversationService): Recreate
 	 * the record is unresolved precisely until this work is done and
 	 * checked, and the caller holds the session's lock (no other verb
 	 * interleaves). Every other rule of §2.7.5 applies unchanged.
+	 *
+	 * `mayAct` is the pass's lease and the engine not being shut down: a
+	 * convergence or restore already inside the authority when either
+	 * ends (a probe still out, say) writes nothing after it (E5).
 	 */
-	const ownerAuthority = () =>
+	const ownerAuthority = (mayAct: () => boolean) =>
 		new CaptureAuthority({
 			workspaceRoot: root,
 			enabled: deps.enabled,
@@ -52,20 +56,21 @@ export function conversationRecreatePort(service: ConversationService): Recreate
 			writeHooksFile: (s) => writeHooksFile(deps, s),
 			removeHooksFile: (s) => removeHooksFile(root, s),
 			hooksFileExists: (s) => hooksFileExists(root, s),
+			mayWrite: mayAct,
 		});
 	return {
 		enabled: deps.enabled,
 		checkRevocation: (sid) => checkRevocation(root, sid),
-		prepare: (sid) => prepareRecreateCapture(deps, sid),
+		prepare: (sid, mayAct) => prepareRecreateCapture(deps, sid, mayAct),
 		snapshot: async (sid) => ({
 			marker: await relayEnabledExists(root, sid),
 			hooksFile: await hooksFileExists(root, sid),
 		}),
-		restore: async (sid, snap, oContainerId) => {
+		restore: async (sid, snap, oContainerId, mayAct) => {
 			// Only a complete pair was ever kept on a stopped O; a half is
 			// what §2.7.5 would retire anyway.
 			if (!snap.marker || !snap.hooksFile) return "not-authorized";
-			return ownerAuthority().restoreRetained(sid, oContainerId);
+			return ownerAuthority(mayAct).restoreRetained(sid, oContainerId);
 		},
 		authorize: async (sid, run) => {
 			const base = service.captureDocker;
@@ -101,7 +106,7 @@ export function conversationRecreatePort(service: ConversationService): Recreate
 			}
 			return authority.capture(sid, { identified: w.identified });
 		},
-		converge: (sid) => ownerAuthority().converge(sid),
+		converge: (sid, mayAct) => ownerAuthority(mayAct).converge(sid),
 		deferSeedExists: (sid) => deferSeedExists(root, sid),
 		removeDeferSeed: (sid) => removeDeferSeed(root, sid),
 	};

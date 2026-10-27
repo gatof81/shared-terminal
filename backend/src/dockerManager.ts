@@ -2887,7 +2887,8 @@ export class DockerManager {
 					mounts: (c.Mounts ?? []).map((m) => m.Destination),
 				}));
 			},
-			exec: (containerId, cmd, timeoutMs) => this.recreateExec(containerId, cmd, timeoutMs),
+			exec: (containerId, cmd, timeoutMs, mayAct) =>
+				this.recreateExec(containerId, cmd, timeoutMs, mayAct),
 			execState: async (execId) => {
 				try {
 					const i = await d.getExec(execId).inspect();
@@ -2921,6 +2922,7 @@ export class DockerManager {
 		containerId: string,
 		cmd: string[],
 		timeoutMs: number,
+		mayAct: () => boolean = () => true,
 	): Promise<ExecResult> {
 		const timeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
 		const exec = await this.docker.getContainer(containerId).exec({
@@ -2931,6 +2933,9 @@ export class DockerManager {
 			Tty: false,
 			WorkingDir: "/home/developer/workspace",
 		});
+		// The create may answer after the caller stopped waiting (its epoch
+		// closed): a created exec that is never started runs nothing.
+		if (!mayAct()) throw new Error("recreation exec: not started, the caller may no longer act");
 		const MAX = 64 * 1024;
 		const chunks: Buffer[] = [];
 		let size = 0;

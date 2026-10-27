@@ -218,8 +218,15 @@ export class FakeDocker implements RecreateDockerPort {
 	/** Commands (first argv word, or "readiness" for `test -f`) whose exit is reported unknown. */
 	readonly unknownExit = new Set<string>();
 	private execSeq = 0;
-	async exec(containerId: string, cmd: string[], _timeoutMs?: number): Promise<ExecResult> {
+	async exec(
+		containerId: string,
+		cmd: string[],
+		_timeoutMs?: number,
+		mayAct?: () => boolean,
+	): Promise<ExecResult> {
 		await this.gate("exec", [containerId, cmd.join(" ")]);
+		// As the real port: a create answered too late starts nothing.
+		if (mayAct && !mayAct()) throw new Error("exec not started: the caller may no longer act");
 		this.execs.push([containerId, ...cmd]);
 		const execId = `exec-${++this.execSeq}`;
 		const c = this.byRef(containerId);
@@ -238,10 +245,13 @@ export class FakeDocker implements RecreateDockerPort {
 		await this.gate("execState", [execId]);
 		return this.execStates.get(execId) ?? null;
 	}
-	/** Every exec whose exit was unknown now reports it ended. */
-	endUnknownExecs(exitCode = 0) {
+	/**
+	 * Every exec whose exit was unknown now reports it ended — or, with
+	 * `null`, reports `Running: false` without an exit code (still unknown).
+	 */
+	endUnknownExecs(exitCode: number | null = 0) {
 		for (const [id, st] of this.execStates) {
-			if (st.running) this.execStates.set(id, { running: false, exitCode });
+			if (st.running || st.exitCode === null) this.execStates.set(id, { running: false, exitCode });
 		}
 	}
 

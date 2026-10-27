@@ -205,21 +205,23 @@ async function main(): Promise<void> {
 	};
 	// The attempt's own authority for the resolution's convergence (gate
 	// not consulted, as in capturePort.ts).
-	const ownerAuthority = new cap.CaptureAuthority({
-		workspaceRoot: ROOT,
-		enabled: true,
-		docker: captureDocker,
-		getRow: async () => ({ ...row }),
-		checkRevocation: (x) => checkRevocation(ROOT, x),
-		isRecreateUnresolved: async () => false,
-		writeHooksFile: (x) => activation.writeHooksFile(deps, x),
-		removeHooksFile: (x) => activation.removeHooksFile(ROOT, x),
-		hooksFileExists: (x) => activation.hooksFileExists(ROOT, x),
-	});
+	const ownerAuthority = (mayAct: () => boolean) =>
+		new cap.CaptureAuthority({
+			workspaceRoot: ROOT,
+			enabled: true,
+			docker: captureDocker,
+			getRow: async () => ({ ...row }),
+			checkRevocation: (x) => checkRevocation(ROOT, x),
+			isRecreateUnresolved: async () => false,
+			writeHooksFile: (x) => activation.writeHooksFile(deps, x),
+			removeHooksFile: (x) => activation.removeHooksFile(ROOT, x),
+			hooksFileExists: (x) => activation.hooksFileExists(ROOT, x),
+			mayWrite: mayAct,
+		});
 	const capture: RecreateCapturePort = {
 		enabled: true,
 		checkRevocation: (s) => checkRevocation(ROOT, s),
-		prepare: (s) => activation.prepareRecreateCapture(deps, s),
+		prepare: (s, mayAct) => activation.prepareRecreateCapture(deps, s, mayAct),
 		snapshot: async () => ({ marker: false, hooksFile: false }),
 		restore: async () => "not-authorized",
 		authorize: async (s, run) => {
@@ -243,7 +245,7 @@ async function main(): Promise<void> {
 			console.log(`  · step 5 write procedure: ${w.outcome}`);
 			return authority.capture(s, { identified: w.identified });
 		},
-		converge: (s) => ownerAuthority.converge(s),
+		converge: (s, mayAct) => ownerAuthority(mayAct).converge(s),
 		deferSeedExists: (s) => cap.deferSeedExists(ROOT, s),
 		removeDeferSeed: (s) => cap.removeDeferSeed(ROOT, s),
 	};

@@ -430,6 +430,20 @@ describe("recreatePort (CONVERSATION.md §2.7)", () => {
 			await expect(port.exec("c", ["seed"], 1_000)).rejects.toThrow("container not running");
 		});
 
+		it("a create answered after the caller may no longer act ⇒ never started, throws (#459 E2)", async () => {
+			let allowed = true;
+			const start = vi.fn(async () => new PassThrough());
+			const { port } = execDocker({
+				create: async () => {
+					allowed = false; // the epoch closes while the create is out
+				},
+				start,
+				inspect: async () => ({ Running: false, ExitCode: 0 }),
+			});
+			await expect(port.exec("c", ["seed"], 1_000, () => allowed)).rejects.toThrow(/not started/);
+			expect(start).not.toHaveBeenCalled();
+		});
+
 		it("execState: running, ended with its exit, or null on 404", async () => {
 			const states: unknown[] = [
 				{ Running: true, ExitCode: 0 },

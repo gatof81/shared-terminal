@@ -108,7 +108,7 @@ describe("prepare (step 1)", () => {
 		const { p } = port(async () => true);
 		await writeRelayEnabled(root, SID);
 		await writeHooksFile({ workspaceRoot: root, enabled: true, port: 3001 }, SID);
-		const prep = await p.prepare(SID);
+		const prep = await p.prepare(SID, () => true);
 		expect(await deferSeedExists(root, SID)).toBe(true);
 		expect(await relayEnabledExists(root, SID)).toBe(false);
 		expect(await hooksFileExists(root, SID)).toBe(false);
@@ -119,6 +119,17 @@ describe("prepare (step 1)", () => {
 			expect.stringMatching(/:\/etc\/st-control:ro$/),
 		]);
 		expect(dbStubs.writes).toEqual([]);
+	});
+
+	it("stops between effects once mayAct says no: a late continuation writes nothing more (#459 E2)", async () => {
+		const { p } = port(async () => true);
+		await writeHooksFile({ workspaceRoot: root, enabled: true, port: 3001 }, SID);
+		let calls = 0;
+		// Open for the two directory creations, closed from then on.
+		await expect(p.prepare(SID, () => ++calls <= 2)).rejects.toThrow(/stopped/);
+		expect(await deferSeedExists(root, SID)).toBe(false);
+		// Nothing past the stop: not even the leftover removal.
+		expect(await hooksFileExists(root, SID)).toBe(true);
 	});
 });
 
@@ -194,7 +205,7 @@ describe("restore (rollback of an O created by 3.0d; owner decision, point 2)", 
 	it("puts back the pair while RETAIN authorization holds for O", async () => {
 		rowOnO();
 		const { p } = port(async () => true, { running: false });
-		await p.restore(SID, PAIR, O);
+		await p.restore(SID, PAIR, O, () => true);
 		expect(await relayEnabledExists(root, SID)).toBe(true);
 		expect(await fs.readFile(hooksFilePath(root, SID), "utf8")).toContain("hooks");
 	});
@@ -224,13 +235,13 @@ describe("restore (rollback of an O created by 3.0d; owner decision, point 2)", 
 			await fs.rm(path.join(root, ".st-control"), { recursive: true, force: true });
 			rowOnO();
 			await setup();
-			await p.restore(SID, snap, O);
+			await p.restore(SID, snap, O, () => true);
 			expect([label, await relayEnabledExists(root, SID)]).toEqual([label, false]);
 			expect([label, await hooksFileExists(root, SID)]).toEqual([label, false]);
 		}
 		rowOnO();
 		const running = port(async () => true, { running: true });
-		expect(await running.p.restore(SID, PAIR, O)).toBe("not-authorized");
+		expect(await running.p.restore(SID, PAIR, O, () => true)).toBe("not-authorized");
 		expect(await relayEnabledExists(root, SID)).toBe(false);
 	});
 
@@ -263,7 +274,7 @@ describe("restore (rollback of an O created by 3.0d; owner decision, point 2)", 
 							}
 						});
 						try {
-							await p.restore(SID, PAIR, O);
+							await p.restore(SID, PAIR, O, () => true);
 						} finally {
 							spy.mockRestore();
 						}
@@ -278,3 +289,64 @@ describe("restore (rollback of an O created by 3.0d; owner decision, point 2)", 
 		}
 	});
 });
+
+/**
+ * E5 (#459, second review): the resolution's restore and convergence act
+ * through the owner authority with the pass's `mayAct` (its lease, the
+ * engine not shut down). Once it says no, nothing more is written, and
+ * what was written is withdrawn.
+ */
+describe("the owner authority stops when the pass may no longer act (E5)", () => {
+	it("restore: lease already gone ⇒ nothing written", async () => {
+		rowOnO();
+		const { p } = port(async () => true, { running: false });
+		expect(await p.restore(SID, PAIR, O, () => false)).toBe("not-authorized");
+		expect(await relayEnabledExists(root, SID)).toBe(false);
+		expect(await hooksFileExists(root, SID)).toBe(false);
+	});
+
+	it("restore: lease lost while the marker is written ⇒ no hooks file, marker withdrawn", async () => {
+		rowOnO();
+		const { p } = port(async () => true, { running: false });
+		let allowed = true;
+		const rename = fs.rename.bind(fs);
+		const spy = vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
+			await rename(from, to);
+			if (String(to).endsWith("/relay.enabled")) allowed = false;
+		});
+		try {
+			expect(await p.restore(SID, PAIR, O, () => allowed)).toBe("revoked-meanwhile");
+		} finally {
+			spy.mockRestore();
+		}
+		expect(await relayEnabledExists(root, SID)).toBe(false);
+		expect(await hooksFileExists(root, SID)).toBe(false);
+	});
+
+	it("converge: stopped while the probe is out ⇒ the late positive writes no hooks file", async () => {
+		committedRow();
+		const answer = deferred<boolean>();
+		const asked = deferred();
+		const { p } = port(() => {
+			asked.resolve();
+			return answer.promise;
+		});
+		let allowed = true;
+		const c = p.converge(SID, () => allowed);
+		await asked.promise;
+		expect(await relayEnabledExists(root, SID)).toBe(true);
+		allowed = false;
+		answer.resolve(true);
+		await c;
+		expect(await hooksFileExists(root, SID)).toBe(false);
+		expect(await relayEnabledExists(root, SID)).toBe(false);
+	});
+});
+
+function deferred<T = void>() {
+	let resolve!: (v: T) => void;
+	const promise = new Promise<T>((r) => {
+		resolve = r;
+	});
+	return { promise, resolve };
+}

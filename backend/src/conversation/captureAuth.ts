@@ -337,10 +337,11 @@ export interface CaptureAuthorityDeps {
 	probeBudgetMs?: number;
 	identifyWaitMs?: number;
 	/**
-	 * Checked right before the marker and the hooks file are written. The
-	 * recreation's own write procedure (§2.7.2 step 5) passes its epoch:
-	 * once the epoch is closed nothing is written, and what was written
-	 * is withdrawn.
+	 * Checked right before the marker and the hooks file are written, and
+	 * by every recheck. The recreation passes whether the attempt may
+	 * still act — its epoch in step 5; its lease and the engine not shut
+	 * down during the resolution's restore and convergence — so once it
+	 * says no nothing more is written, and what was written is withdrawn.
 	 */
 	mayWrite?: () => boolean;
 }
@@ -611,6 +612,7 @@ export class CaptureAuthority {
 		if (f.row?.container_id !== containerId || !c?.exists || c.running || !retainAuthorized(f)) {
 			return "not-authorized";
 		}
+		if (!this.mayWrite()) return "not-authorized";
 		try {
 			await writeRelayEnabled(this.deps.workspaceRoot, sessionId);
 			if (!(await this.stillAllowed(sessionId, containerId))) {

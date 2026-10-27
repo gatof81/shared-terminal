@@ -36,7 +36,12 @@ export interface RecreateD1Port {
 	cas(sessionId: string, oId: string, nId: string, hash: string): Promise<CasResult>;
 	getConfig(sessionId: string): Promise<RecreateSessionConfig>;
 	setStatus(sessionId: string, status: "running" | "stopped"): Promise<void>;
-	setPorts(sessionId: string, ports: RecreateSessionConfig["ports"]): Promise<void>;
+	/** Several statements: `mayAct` is asked before each, none is issued once it says no. */
+	setPorts(
+		sessionId: string,
+		ports: RecreateSessionConfig["ports"],
+		mayAct: () => boolean,
+	): Promise<void>;
 }
 
 export const d1RecreatePort: RecreateD1Port = {
@@ -79,7 +84,7 @@ export const d1RecreatePort: RecreateD1Port = {
 	async setStatus(sessionId, status) {
 		await d1Query("UPDATE sessions SET status = ? WHERE session_id = ?", [status, sessionId]);
 	},
-	async setPorts(sessionId, ports) {
-		await setPortMappings(sessionId, mappingsFromConfig(ports));
+	async setPorts(sessionId, ports, mayAct) {
+		await setPortMappings(sessionId, mappingsFromConfig(ports), mayAct);
 	},
 };

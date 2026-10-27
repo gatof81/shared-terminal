@@ -156,8 +156,15 @@ export type RecreateResult =
 export interface RecreateCapturePort {
 	enabled: boolean;
 	checkRevocation(sessionId: string): Promise<RevocationState>;
-	/** Step 1's capture side: token, H, defer-skill-seed, leftovers removed. */
-	prepare(sessionId: string): Promise<RecreateCapturePrep>;
+	/**
+	 * Every operation below with more than one effect takes `mayAct`: it is
+	 * asked before each effect, so a continuation that outlives the epoch
+	 * or the resolution's lease (or the engine's shutdown) starts nothing
+	 * new. What was already issued stays tracked by the caller.
+	 *
+	 * Step 1's capture side: token, H, defer-skill-seed, leftovers removed.
+	 */
+	prepare(sessionId: string, mayAct: () => boolean): Promise<RecreateCapturePrep>;
 	/** Which capture files exist now (to restore them on a rollback). */
 	snapshot(sessionId: string): Promise<{ marker: boolean; hooksFile: boolean }>;
 	/**
@@ -169,6 +176,7 @@ export interface RecreateCapturePort {
 		sessionId: string,
 		snap: { marker: boolean; hooksFile: boolean },
 		oContainerId: string,
+		mayAct: () => boolean,
 	): Promise<string>;
 	/** Step 5 on N, bound to the attempt's epoch; returns the `capture` block. */
 	authorize(sessionId: string, run: AttemptRun): Promise<CaptureBlock | null>;
@@ -177,7 +185,7 @@ export interface RecreateCapturePort {
 	 * not consulted: it runs BEFORE the record is resolved, under the
 	 * session's lock). Throws when it could not be done.
 	 */
-	converge(sessionId: string): Promise<string>;
+	converge(sessionId: string, mayAct: () => boolean): Promise<string>;
 	deferSeedExists(sessionId: string): Promise<boolean>;
 	removeDeferSeed(sessionId: string): Promise<void>;
 }
@@ -296,8 +304,11 @@ interface Attempt {
 
 type ResolveStep = "resolved" | "retry" | "stuck";
 
-/** One action of a resolution pass (tracked, lease-checked). */
-type Act = <T>(label: string, fn: () => Promise<T>) => Promise<T>;
+/**
+ * One action of a resolution pass (tracked, lease-checked). `mayAct` is the
+ * same check, for an action with several effects to ask between them.
+ */
+type Act = (<T>(label: string, fn: () => Promise<T>) => Promise<T>) & { mayAct: () => boolean };
 
 function semverLess(a: string, b: string): boolean {
 	const pa = a.split(".").map(Number);
@@ -722,12 +733,17 @@ export class RecreationEngine {
 		cmd: string[],
 		timeoutMs: number,
 		via: "call" | "untimed",
-		/** `issued` runs when the request goes out; `refused` when Docker created no exec. */
-		on: { issued?: () => void; refused?: () => void } = {},
+		/**
+		 * `issued` runs when the request goes out; `refused` when no process
+		 * was started. `mayAct` gates the start after the exec is created
+		 * (default: the epoch for "call", not shut down for "untimed").
+		 */
+		on: { issued?: () => void; refused?: () => void; mayAct?: () => boolean } = {},
 	): Promise<ExecResult> {
+		const mayAct = on.mayAct ?? (via === "call" ? () => a.run.epochOpen : () => !this.stopped);
 		const fn = () => {
 			on.issued?.();
-			return this.deps.docker.exec(containerId, cmd, timeoutMs).then(
+			return this.deps.docker.exec(containerId, cmd, timeoutMs, mayAct).then(
 				(r) => {
 					if (r.exitCode === null) {
 						a.unknownExecs.push({ label, containerId, execId: r.execId });
@@ -747,8 +763,10 @@ export class RecreationEngine {
 
 	/**
 	 * Each unknown exec ended? Evidence is the exec reporting it is no
-	 * longer running, or its container not running (no process outlives
-	 * its container's stop) or gone.
+	 * longer running WITH a numeric exit code, or its container not running
+	 * (no process outlives its container's stop) or gone. `Running: false`
+	 * without an exit code is the same "termination unknown" `recreateExec`
+	 * reports (E1): it keeps the exec pending.
 	 */
 	private async execsEnded(a: Attempt, act: Act): Promise<boolean> {
 		const still: UnknownExec[] = [];
@@ -758,8 +776,8 @@ export class RecreationEngine {
 			const st = e.execId
 				? await act("exec state", () => this.deps.docker.execState(e.execId as string))
 				: null;
-			if (st && !st.running) {
-				logger.info(`[recreate] ${a.sessionId}: ${e.label} ended (exit ${st.exitCode ?? "?"})`);
+			if (st && !st.running && typeof st.exitCode === "number") {
+				logger.info(`[recreate] ${a.sessionId}: ${e.label} ended (exit ${st.exitCode})`);
 				continue;
 			}
 			still.push(e);
@@ -780,7 +798,9 @@ export class RecreationEngine {
 					this.deps.capture.snapshot(sessionId),
 				);
 			}
-			const prep = await run.call("capture prepare", () => this.deps.capture.prepare(sessionId));
+			const prep = await run.call("capture prepare", () =>
+				this.deps.capture.prepare(sessionId, () => run.epochOpen),
+			);
 			const options = await run.call("build N options", () =>
 				this.deps.docker.buildCreate(sessionId, {
 					name: nTempName,
@@ -986,7 +1006,10 @@ export class RecreationEngine {
 			],
 			[
 				"ports",
-				() => run.call("d1 ports", () => this.deps.d1.setPorts(sessionId, facts.config.ports)),
+				() =>
+					run.call("d1 ports", () =>
+						this.deps.d1.setPorts(sessionId, facts.config.ports, () => run.epochOpen),
+					),
 			],
 			["status", () => run.call("d1 status", () => this.deps.d1.setStatus(sessionId, "running"))],
 			[
@@ -1263,10 +1286,14 @@ export class RecreationEngine {
 	private async resolveOnce(a: Attempt, lease: Lease): Promise<ResolveStep> {
 		// Every action of the pass, reads included, goes through here: it is
 		// tracked as the attempt's evidence and refused once the lease is gone.
-		const act: Act = (label, fn) => {
-			if (!lease.held || this.stopped) throw new LeaseLostError();
-			return a.run.untimed(label, fn);
-		};
+		const mayAct = () => lease.held && !this.stopped;
+		const act: Act = Object.assign(
+			<T>(label: string, fn: () => Promise<T>): Promise<T> => {
+				if (!mayAct()) throw new LeaseLostError();
+				return a.run.untimed(label, fn);
+			},
+			{ mayAct },
+		);
 		const row = await act("d1 read", () => this.deps.d1.getRow(a.sessionId));
 		const current = row?.container_id ?? null;
 		if (current === a.oId) return this.resolveToO(a, lease, act);
@@ -1335,7 +1362,7 @@ export class RecreationEngine {
 			return "retry";
 		}
 		const restored = await act("restore O capture", () =>
-			this.deps.capture.restore(a.sessionId, a.snapshot, a.oId),
+			this.deps.capture.restore(a.sessionId, a.snapshot, a.oId, act.mayAct),
 		);
 		if (a.snapshot.marker || a.snapshot.hooksFile) {
 			logger.info(`[recreate] ${a.sessionId}: O's capture files: ${restored}`);
@@ -1380,7 +1407,9 @@ export class RecreationEngine {
 		const status = n.running ? "running" : "stopped";
 		await act("d1 status", () => this.deps.d1.setStatus(sessionId, status));
 		const config = await act("d1 config", () => this.deps.d1.getConfig(sessionId));
-		await act("d1 ports", () => this.deps.d1.setPorts(sessionId, n.running ? config.ports : []));
+		await act("d1 ports", () =>
+			this.deps.d1.setPorts(sessionId, n.running ? config.ports : [], act.mayAct),
+		);
 		const marker = await act("defer-skill-seed exists", () =>
 			this.deps.capture.deferSeedExists(sessionId),
 		);
@@ -1390,6 +1419,7 @@ export class RecreationEngine {
 			if (n.running) {
 				if (!lease.held || this.stopped) throw new LeaseLostError();
 				const r = await this.execIn(a, "seed N", nId, [SEED_SCRIPT], 60_000, "untimed", {
+					mayAct: act.mayAct,
 					issued: () => {
 						a.seedPending = false;
 					},
@@ -1407,7 +1437,9 @@ export class RecreationEngine {
 		}
 		// The ordinary §2.7.5 convergence, as the attempt (the gate would
 		// skip it while the record is unresolved — that is the point).
-		const capture = await act("capture converge", () => this.deps.capture.converge(sessionId));
+		const capture = await act("capture converge", () =>
+			this.deps.capture.converge(sessionId, act.mayAct),
+		);
 		logger.info(`[recreate] ${sessionId}: capture on N: ${capture}`);
 
 		// Seen again before resolving: D1 on N with the status of N, O gone,

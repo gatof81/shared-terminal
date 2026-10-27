@@ -340,11 +340,22 @@ export interface RecreateCapturePrep {
 export async function prepareRecreateCapture(
 	deps: ActivationDeps,
 	sessionId: string,
+	mayAct: () => boolean = () => true,
 ): Promise<RecreateCapturePrep> {
+	// Asked before each effect: the attempt waits for this at most until
+	// its epoch closes, and a late continuation must not go on writing.
+	const proceed = (): void => {
+		if (!mayAct()) throw new Error("recreation capture prepare: stopped, the epoch closed");
+	};
+	proceed();
 	const managed = await ensureManagedDir(deps.workspaceRoot, sessionId);
+	proceed();
 	const control = await ensureControlDir(deps.workspaceRoot, sessionId);
+	proceed();
 	await writeDeferSeed(deps.workspaceRoot, sessionId);
+	proceed();
 	await removeRelayEnabled(deps.workspaceRoot, sessionId);
+	proceed();
 	await removeHooksFile(deps.workspaceRoot, sessionId);
 	const token = generateIngestToken();
 	return {

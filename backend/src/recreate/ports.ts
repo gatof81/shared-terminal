@@ -65,9 +65,16 @@ export interface RecreateDockerPort {
 	 * process may still be running and may still write. It is never "it
 	 * failed". `execId` lets the caller ask later (`execState`). Errors
 	 * thrown here come only from before the process could have started
-	 * (the exec instance was not created).
+	 * (the exec instance was not created, or `mayAct` said no between the
+	 * create and the start: a create answered after the epoch closed
+	 * starts nothing).
 	 */
-	exec(containerId: string, cmd: string[], timeoutMs: number): Promise<ExecResult>;
+	exec(
+		containerId: string,
+		cmd: string[],
+		timeoutMs: number,
+		mayAct?: () => boolean,
+	): Promise<ExecResult>;
 	/** An exec's state now; null when dockerd no longer knows it (404). */
 	execState(execId: string): Promise<{ running: boolean; exitCode: number | null } | null>;
 }
