@@ -171,11 +171,25 @@ describe("classifyHref / slugify", () => {
 	});
 });
 
+// 200k chars: with the old rescan-per-delimiter parser these took tens of
+// seconds (quadratic); now the heaviest takes ~0.4 s locally. The bound used
+// to be 1.5 s, and CI runners measured that heaviest case (interleaved
+// emphasis) at 1.57–1.66 s with no regression at all. 10 s of wall time
+// keeps a wide margin for slow runners and still catches a regression of
+// the historical kind, which takes tens of seconds per render. It does not
+// catch a mild quadratic (a few hundred ms at 200k); finer complexity
+// detection is separate work.
+const RENDER_BUDGET_MS = 10_000;
+
+// Above the budget, so that a render that finishes over it fails on the
+// budget assertion, with its time in the message. These tests are
+// synchronous: Vitest's timeout is a timer on the same thread, so it cannot
+// interrupt a render that never returns (and does not even fail a
+// synchronous test after the fact) — nothing in this file stops such a
+// hang; the CI job's own time limit does.
+const COMPLEXITY_TEST_TIMEOUT_MS = 30_000;
+
 describe("renderMarkdown — complexity", () => {
-	// 200k chars: with the old rescan-per-delimiter parser these took tens
-	// of seconds (quadratic); now each is a few dozen ms. The 1.5 s bound
-	// is loose on purpose (slow CI) while still catching a quadratic
-	// regression by orders of magnitude.
 	const N = 200_000;
 	it.each<[string, string]>([
 		["unclosed brackets", "[".repeat(N)],
@@ -193,35 +207,47 @@ describe("renderMarkdown — complexity", () => {
 		["heading padded with spaces", `# ${" ".repeat(N)}x`],
 		["fence padded with spaces", `\`\`\`${" ".repeat(N)}\``],
 		["table separator padded with spaces", `a|b\n-${" ".repeat(N)}x`],
-	])("%s stays fast and loses no text", (_label, src) => {
-		const t = performance.now();
-		const root = renderMarkdown(src);
-		expect(performance.now() - t).toBeLessThan(1500);
-		// Whatever the rendering, the visible text never drops content
-		// characters (markup delimiters aside) — spot-check via length.
-		expect((root.textContent ?? "").length).toBeGreaterThan(0);
-	});
+	])(
+		"%s stays fast and loses no text",
+		(_label, src) => {
+			const t = performance.now();
+			const root = renderMarkdown(src);
+			expect(performance.now() - t).toBeLessThan(RENDER_BUDGET_MS);
+			// Whatever the rendering, the visible text never drops content
+			// characters (markup delimiters aside) — spot-check via length.
+			expect((root.textContent ?? "").length).toBeGreaterThan(0);
+		},
+		COMPLEXITY_TEST_TIMEOUT_MS,
+	);
 
-	it("doesn't let a wide header × bare rows multiply into a DOM bomb (review repro)", () => {
-		// 30 KB of input that used to expand to ~100M cells.
-		const src = `${"|".repeat(10_000)}\n-\n${"|\n".repeat(10_000)}`;
-		const t = performance.now();
-		const root = renderMarkdown(src);
-		expect(performance.now() - t).toBeLessThan(1500);
-		expect(root.querySelectorAll("*").length).toBeLessThan(60_000);
-		// 10k columns is over MAX_TABLE_COLUMNS: not rendered as a table.
-		expect(root.querySelector("table")).toBeNull();
-	});
+	it(
+		"doesn't let a wide header × bare rows multiply into a DOM bomb (review repro)",
+		() => {
+			// 30 KB of input that used to expand to ~100M cells.
+			const src = `${"|".repeat(10_000)}\n-\n${"|\n".repeat(10_000)}`;
+			const t = performance.now();
+			const root = renderMarkdown(src);
+			expect(performance.now() - t).toBeLessThan(RENDER_BUDGET_MS);
+			expect(root.querySelectorAll("*").length).toBeLessThan(60_000);
+			// 10k columns is over MAX_TABLE_COLUMNS: not rendered as a table.
+			expect(root.querySelector("table")).toBeNull();
+		},
+		COMPLEXITY_TEST_TIMEOUT_MS,
+	);
 
-	it("bounds rows of missing cells at the column cap too", () => {
-		const header = `|${"h|".repeat(64)}`;
-		const sep = `|${"-|".repeat(64)}`;
-		const src = `${header}\n${sep}\n${"|\n".repeat(40_000)}`;
-		const t = performance.now();
-		const root = renderMarkdown(src);
-		expect(performance.now() - t).toBeLessThan(1500);
-		expect(root.querySelectorAll("*").length).toBeLessThan(60_000);
-	});
+	it(
+		"bounds rows of missing cells at the column cap too",
+		() => {
+			const header = `|${"h|".repeat(64)}`;
+			const sep = `|${"-|".repeat(64)}`;
+			const src = `${header}\n${sep}\n${"|\n".repeat(40_000)}`;
+			const t = performance.now();
+			const root = renderMarkdown(src);
+			expect(performance.now() - t).toBeLessThan(RENDER_BUDGET_MS);
+			expect(root.querySelectorAll("*").length).toBeLessThan(60_000);
+		},
+		COMPLEXITY_TEST_TIMEOUT_MS,
+	);
 
 	it("still renders a legitimately dense table", () => {
 		const cols = 64;
