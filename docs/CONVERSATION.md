@@ -302,10 +302,15 @@ autorización de ingesta tiene **dos** fuentes y la revocación es un archivo qu
     enable en D1 solo se aplica si sigue valiendo lo que leyó al empezar; si no, responde 409
     `revoked` sin escribir;
   - el enable lee la marca por sesión **antes** que D1 (el orden en que las revocaciones los
-    escriben) y solo retira esa misma marca: la aparta con un `rename` atómico, la compara y, si
-    es otra más nueva, la devuelve con `link`, que nunca pisa una escrita entretanto. Si encuentra
-    una revocación nueva, reaplica su transición en D1 y responde 409 `revoked` (o
-    `revoked-globally`);
+    escriben) y solo retira esa misma marca: la aparta con un `rename` atómico a
+    `REVOKED.retiring`, la compara y, si es otra más nueva, la devuelve con `link`, que nunca pisa
+    una escrita entretanto. **`REVOKED.retiring` es también una revocación para el receptor**: en
+    todo instante del retiro existe uno de los dos nombres, así que la ingesta nunca vuelve a
+    aceptar durante él. Si el retiro se interrumpe, ese nombre queda (fail-closed) y el siguiente
+    enable lo devuelve a `REVOKED` antes de nada. Si encuentra una revocación nueva, reaplica su
+    transición en D1 y responde 409 `revoked` (o `revoked-globally`);
+  - la suspensión de la API es idempotente: reaplicada, conserva el hash suspendido, así que
+    rehabilitar sigue sin necesitar recreación; tras la emergencia o `--all` los dos quedan NULL;
   - al terminar, deshabilitar y el comando vuelven a escribir su marca si una habilitación
     solapada la retiró.
 - `reconcile` al arrancar: una marca presente fuerza `conversation_requested=0` y hash NULL en D1 si

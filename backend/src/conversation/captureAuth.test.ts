@@ -50,8 +50,14 @@ const dbStubs = vi.hoisted(() => ({
 					row.conversation_requested = 1;
 				} else if (sql.includes("conversation_requested = ?"))
 					row.conversation_requested = params[0];
-				else if (sql.includes("ingest_token_hash_suspended = ingest_token_hash")) {
-					row.ingest_token_hash_suspended = row.ingest_token_hash;
+				else if (
+					sql.includes(
+						"ingest_token_hash_suspended = COALESCE(ingest_token_hash, ingest_token_hash_suspended)",
+					)
+				) {
+					// suspendIngestToken (idempotent, 3.0d audit A1.2)
+					row.ingest_token_hash_suspended =
+						row.ingest_token_hash ?? row.ingest_token_hash_suspended;
 					row.ingest_token_hash = null;
 					row.conversation_requested = 0;
 				} else if (sql.includes("COALESCE(ingest_token_hash, ingest_token_hash_suspended)")) {
@@ -838,7 +844,7 @@ describe("3.0d audit A1: a revocation landing during an enable wins, in D1, the 
 				let armed = true;
 				const spy = vi.spyOn(nodeFs.promises, "rename").mockImplementation(async (from, to) => {
 					await real(from, to);
-					if (armed && String(to).includes(".retiring.")) {
+					if (armed && String(to).endsWith("REVOKED.retiring")) {
 						armed = false;
 						await revoke(sid);
 					}
@@ -862,18 +868,27 @@ describe("3.0d audit A1: a revocation landing during an enable wins, in D1, the 
 		],
 	];
 
-	async function final(sid: string) {
-		const row = dbStubs.sessions.get(sid) as Record<string, unknown>;
-		const spawn = await prepareSpawnCapture(deps(), sid, { imageId: "sha256:i", relay2: true });
-		return {
+	/**
+	 * D1 and the files are read BEFORE simulating the next spawn: a spawn of
+	 * a revoked session retires both hashes itself (a new container means a
+	 * new token), which is right but would hide what the race left.
+	 */
+	async function final(sid: string, opts: { spawn?: boolean } = {}) {
+		const row = { ...(dbStubs.sessions.get(sid) as Record<string, unknown>) };
+		const state = {
 			requested: row.conversation_requested,
 			hash: row.ingest_token_hash,
 			suspended: row.ingest_token_hash_suspended,
 			revocation: await checkRevocation(root, sid),
-			nextSpawnHasToken: spawn.env.some((e) => e.startsWith("ST_INGEST_TOKEN=")),
 			hooksFile: await exists(hooksFilePath(root, sid)),
 			marker: await exists(relayEnabledPath(root, sid)),
+			nextSpawnHasToken: false,
 		};
+		if (opts.spawn !== false) {
+			const spawn = await prepareSpawnCapture(deps(), sid, { imageId: "sha256:i", relay2: true });
+			state.nextSpawnHasToken = spawn.env.some((e) => e.startsWith("ST_INGEST_TOKEN="));
+		}
+		return state;
 	}
 
 	const starts: Array<[string, (sid: string) => Promise<void>]> = [
@@ -931,7 +946,10 @@ describe("3.0d audit A1: a revocation landing during an enable wins, in D1, the 
 					} finally {
 						restore();
 					}
-					const f = await final(sid);
+					// The API re-enable case checks, instead of a spawn, that the
+					// suspended hash still allows a later enable without recreation.
+					const apiReEnable = by === "API disable" && startLabel.startsWith("re-enable");
+					const f = await final(sid, { spawn: !apiReEnable });
 					// Whatever the enable answered, the revocation is what holds.
 					expect([outcome, f.requested]).toEqual([outcome, 0]);
 					expect([outcome, f.hash]).toEqual([outcome, null]);
@@ -946,6 +964,17 @@ describe("3.0d audit A1: a revocation landing during an enable wins, in D1, the 
 						expect([outcome, f.suspended]).toEqual([outcome, null]);
 					}
 					expect(outcome).not.toBe("enabled, effective");
+					if (apiReEnable) {
+						// A1.2: the API disable keeps the suspended hash, whoever applied
+						// it last, so a later enable works again without recreation.
+						expect([outcome, f.suspended]).toEqual([outcome, HASH]);
+						const again = await enableSession(deps(), make({}).authority, sid, async () => false);
+						expect([outcome, again.capture.effective, again.capture.requiresRecreate]).toEqual([
+							outcome,
+							true,
+							false,
+						]);
+					}
 				});
 			}
 		}

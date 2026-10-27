@@ -100,8 +100,9 @@ vi.mock("./db.js", () => ({
 			row.conversation_requested = 1;
 			return ok([], 1);
 		}
-		if (/^UPDATE sessions SET ingest_token_hash_suspended = ingest_token_hash/.test(sql) && row) {
-			row.ingest_token_hash_suspended = row.ingest_token_hash;
+		if (/^UPDATE sessions SET ingest_token_hash_suspended = COALESCE/.test(sql) && row) {
+			// suspendIngestToken (idempotent, 3.0d audit A1.2)
+			row.ingest_token_hash_suspended = row.ingest_token_hash ?? row.ingest_token_hash_suspended;
 			row.ingest_token_hash = null;
 			row.conversation_requested = 0;
 			return ok([], 1);

@@ -50,8 +50,13 @@ function applyUpdate(row: Record<string, unknown>, sql: string, params: unknown[
 	} else if (sql.includes("conversation_requested = ?")) row.conversation_requested = params[0];
 	else if (sql.startsWith("UPDATE sessions SET ingest_token_hash = ? WHERE"))
 		row.ingest_token_hash = params[0];
-	else if (sql.includes("ingest_token_hash_suspended = ingest_token_hash")) {
-		row.ingest_token_hash_suspended = row.ingest_token_hash;
+	else if (
+		sql.includes(
+			"ingest_token_hash_suspended = COALESCE(ingest_token_hash, ingest_token_hash_suspended)",
+		)
+	) {
+		// suspendIngestToken (idempotent, 3.0d audit A1.2)
+		row.ingest_token_hash_suspended = row.ingest_token_hash ?? row.ingest_token_hash_suspended;
 		row.ingest_token_hash = null;
 		row.conversation_requested = 0;
 	} else if (sql.includes("COALESCE(ingest_token_hash, ingest_token_hash_suspended)")) {

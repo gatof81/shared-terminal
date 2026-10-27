@@ -58,6 +58,7 @@ import {
 import {
 	checkRevocation,
 	readSessionRevocation,
+	recoverRetiring,
 	removeGlobalRevocation,
 	retireSessionRevocation,
 	writeGlobalRevocation,
@@ -414,6 +415,10 @@ export async function enableSession(
 	isRecreateUnresolved: (sessionId: string) => Promise<boolean>,
 ): Promise<EnableResult> {
 	if (!deps.enabled) throw new ConversationDisabledError();
+	// A retirement this lock's previous holder could not finish left the
+	// marker under the retiring name — still a revocation. Back to REVOKED
+	// first, so it is what the steps below see and compare (A1.1).
+	await recoverRetiring(deps.workspaceRoot, sessionId);
 	// A disable or the emergency CLI (another process, never behind any
 	// lock) may run while this is in flight. It must win, in D1 and in the
 	// marker, so the cut stays persistent (§2.4, 3.0d audit A1). Read here

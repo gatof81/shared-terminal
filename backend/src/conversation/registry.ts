@@ -81,10 +81,16 @@ export async function setIngestTokenHash(sessionId: string, hash: string | null)
 // (which then matches 0 rows and refuses) or after it (and wins). Never
 // overwritten, and without a lock the emergency would have to wait for.
 
-/** Disable: move the live hash aside so a later enable can restore it (§2.4). */
+/**
+ * Disable: move the live hash aside so a later enable can restore it (§2.4).
+ * Idempotent (3.0d audit A1.2): applied again — an enable re-applying a
+ * disable it raced with — it keeps the suspended hash instead of replacing
+ * it with the now-NULL live one; after an emergency (both NULL) both stay
+ * NULL, so nothing is ever restored from it.
+ */
 export async function suspendIngestToken(sessionId: string): Promise<void> {
 	await d1Query(
-		"UPDATE sessions SET ingest_token_hash_suspended = ingest_token_hash, ingest_token_hash = NULL, conversation_requested = 0, revocation_seq = revocation_seq + 1 WHERE session_id = ?",
+		"UPDATE sessions SET ingest_token_hash_suspended = COALESCE(ingest_token_hash, ingest_token_hash_suspended), ingest_token_hash = NULL, conversation_requested = 0, revocation_seq = revocation_seq + 1 WHERE session_id = ?",
 		[sessionId],
 	);
 }

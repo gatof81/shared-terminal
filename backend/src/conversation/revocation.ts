@@ -37,6 +37,16 @@ export interface RevocationMarker {
 }
 
 export const REVOKED_FILE = "REVOKED";
+/**
+ * Where `retireSessionRevocation` moves the per-session marker while it
+ * compares it (3.0d audit A1.1). A revocation in its own right: the
+ * receiver stats it like `REVOKED`, so a marker being retired never leaves
+ * the session looking unrevoked — not for an instant, and not after a crash
+ * in the middle (the next enable puts it back first, `recoverRetiring`).
+ * One fixed name is enough: only an enable retires, and enables of a
+ * session are serialized by its lifecycle lock.
+ */
+export const RETIRING_FILE = "REVOKED.retiring";
 export const REVOKED_ALL_FILE = "REVOKED_ALL";
 
 export function conversationsRoot(workspaceRoot: string): string {
@@ -53,6 +63,10 @@ export function sessionConversationsDir(workspaceRoot: string, stSessionId: stri
 
 export function revokedPath(workspaceRoot: string, stSessionId: string): string {
 	return path.join(sessionConversationsDir(workspaceRoot, stSessionId), REVOKED_FILE);
+}
+
+export function retiringPath(workspaceRoot: string, stSessionId: string): string {
+	return path.join(sessionConversationsDir(workspaceRoot, stSessionId), RETIRING_FILE);
 }
 
 export function revokedAllPath(workspaceRoot: string): string {
@@ -121,13 +135,14 @@ export async function readSessionRevocation(
 /**
  * Retire the per-session marker only if it is still `expected` — the bytes
  * an enable read when it started (3.0d audit A1). Not "compare, then
- * delete": the marker is first moved aside with one atomic `rename`, so
- * what gets compared is exactly what was taken. If it is not `expected` (a
- * disable or the emergency CLI wrote a newer one), it goes back with `link`,
- * which never overwrites a marker written in between. Only that rare
- * mismatch leaves the name empty for the instant between the two calls;
- * the newer revocation's own D1 write and its final re-assertion
- * (`disableSession`) still hold.
+ * delete": the marker is moved with one atomic `rename` to `RETIRING_FILE`,
+ * so what gets compared is exactly what was taken, and since the receiver
+ * treats that name as a revocation too, at every instant one of the two
+ * names exists (A1.1). If it was not `expected` — a disable or the emergency
+ * CLI wrote a newer one — it goes back with `link`, which never overwrites a
+ * marker written in between, and only then is the retiring name dropped. A
+ * failure or a crash at any point leaves at least the retiring name, i.e.
+ * fail-closed; `recoverRetiring` (run first by the next enable) restores it.
  *
  * "newer": a marker other than `expected` is (or was) there — the caller
  * must not proceed as if unrevoked.
@@ -138,14 +153,17 @@ export async function retireSessionRevocation(
 	expected: string | null,
 ): Promise<"removed" | "absent" | "newer"> {
 	const file = revokedPath(workspaceRoot, stSessionId);
-	if (expected === null) return (await exists(file)) ? "newer" : "absent";
-	const aside = `${file}.retiring.${randomUUID()}`;
+	const aside = retiringPath(workspaceRoot, stSessionId);
+	if (expected === null) {
+		return (await exists(file)) || (await exists(aside)) ? "newer" : "absent";
+	}
 	try {
 		await fs.rename(file, aside);
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code === "ENOENT") return "absent";
 		throw err;
 	}
+	await fsyncDir(path.dirname(file));
 	let taken: string;
 	try {
 		taken = await fs.readFile(aside, "utf8");
@@ -161,22 +179,30 @@ export async function retireSessionRevocation(
 		await fs.link(aside, file);
 	} catch (err) {
 		// EEXIST: an even newer marker is already in place — keep that one.
-		if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
-			// Never leave the newer revocation only under the aside name.
-			await fs.rename(aside, file).catch(() => undefined);
-			throw err;
-		}
+		// Anything else: the retiring name stays (still revoked) and the
+		// next enable's `recoverRetiring` puts the marker back.
+		if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
 	}
+	await fsyncDir(path.dirname(file));
 	await fs.rm(aside, { force: true });
 	await fsyncDir(path.dirname(file));
 	return "newer";
 }
 
-export async function removeSessionRevocation(
-	workspaceRoot: string,
-	stSessionId: string,
-): Promise<void> {
-	await fs.rm(revokedPath(workspaceRoot, stSessionId), { force: true });
+/**
+ * A retirement interrupted after its `rename` (a crash, an I/O error) left
+ * the marker under `RETIRING_FILE`, still a revocation for the receiver. Put
+ * it back as `REVOKED` — a `rename`, so one of the two names exists
+ * throughout — unless a `REVOKED` is already there, which is then the newer
+ * revocation and the retiring copy is just dropped.
+ */
+export async function recoverRetiring(workspaceRoot: string, stSessionId: string): Promise<void> {
+	const file = revokedPath(workspaceRoot, stSessionId);
+	const aside = retiringPath(workspaceRoot, stSessionId);
+	if (!(await exists(aside))) return;
+	if (await exists(file)) await fs.rm(aside, { force: true });
+	else await fs.rename(aside, file);
+	await fsyncDir(path.dirname(file));
 }
 
 export async function removeGlobalRevocation(workspaceRoot: string): Promise<void> {
@@ -193,12 +219,13 @@ export async function checkRevocation(
 	workspaceRoot: string,
 	stSessionId: string,
 ): Promise<RevocationState> {
-	const [global, session] = await Promise.all([
+	const [global, session, retiring] = await Promise.all([
 		exists(revokedAllPath(workspaceRoot)),
 		exists(revokedPath(workspaceRoot, stSessionId)),
+		exists(retiringPath(workspaceRoot, stSessionId)),
 	]);
 	if (global) return "global";
-	if (session) return "session";
+	if (session || retiring) return "session";
 	return "none";
 }
 
