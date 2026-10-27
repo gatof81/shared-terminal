@@ -3,7 +3,9 @@
 Estado: **v1.6 (3.0a, rondas 1 a 3 de revisión Work; en 3.0c, transporte por relay local §2.6, aprobado
 por el responsable el 2026-10-23; decisiones de cierre de 3.0c sobre `emissionStopsAfterRestart` y el
 par `tool_failed`/`tool_end`, 2026-10-23; en 3.0d, recreación administrativa y activación
-progresiva §2.7, diseño aprobado por Work y el responsable el 2026-10-26), vinculante para los PRs
+progresiva §2.7, diseño aprobado por Work y el responsable el 2026-10-26; aclaraciones de la
+revisión Work de #459 —evidencia de exec, `T_rec` completo, resolución bajo el lock, restauración
+con revocación concurrente, puntos 2, 3 y 8 y patrón de nombres—, 2026-10-27), vinculante para los PRs
 3.0b–3.4.** El razonamiento está en [docs/design/phase3-conversation-activity.md](./design/phase3-conversation-activity.md)
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
 `ac1024d`); si los dos documentos difieren, manda este;
@@ -537,9 +539,15 @@ Si las marcas fueran incompatibles con el CLI (§2.7.5), responde `control-marke
    - Primero se escribe el registro durable del intento, con `state: open` (§2.7.4).
    - Se genera el token y `H`.
    - Se escribe `defer-skill-seed` y se borran `relay.enabled` y `conversation.json` residuales.
-     - `O` no monta el directorio de control.
-     - El gestionado solo lo monta un `O` creado por 3.0c. Ese `O` está detenido todo el tiempo, y
-       §2.7.5 retira su archivo igualmente, así que el rollback no tiene que restaurarlo.
+     - Un `O` creado por 3.0c no monta el directorio de control. Solo monta el gestionado, está
+       detenido todo el tiempo, y §2.7.5 retira su archivo igualmente, así que el rollback no tiene
+       que restaurarlo.
+     - **`O` creado por 3.0d** (monta `/etc/st-control`; decisión del responsable, revisión de
+       #459, punto 2): el rollback resuelto restaura su par marca + `conversation.json`, y solo si
+       la autorización de **conservar** (§2.7.5) sigue vigente para `O`. Cada escritura va seguida
+       de una recomprobación; si falla, se retira el archivo y luego la marca. Un disable (API o
+       CLI) que ocurre durante cualquiera de las dos escrituras prevalece: el estado final queda
+       revocado.
    - Se crea `N`:
      - con el nombre `st-<12>-new-<ts>` e `Image: <imageId>`;
      - con el env, binds (gestionado y control, ro), caps y red de siempre;
@@ -578,10 +586,15 @@ Si las marcas fueran incompatibles con el CLI (§2.7.5), responde `control-marke
    6. postStart;
    7. `cliVersion` (aviso `cli-below-minimum` si < 2.1.308);
    8. `remove(O)`.
-   9. El registro pasa a `resolved`: el intento terminó sin llamadas en vuelo ni desconocidas.
+   9. El registro pasa a `resolved`: el intento terminó sin llamadas en vuelo ni desconocidas, y la
+      convergencia está hecha y **re-observada** (D1 en `N` con `status=running`, `O` borrado,
+      `defer-skill-seed` retirada).
 
-   Un fallo se registra y no deshace nada. Si deja peticiones en vuelo, el registro queda `uncertain`
-   y se aplica §2.7.4.
+   Un fallo se registra y no deshace nada. Si deja peticiones en vuelo, un exec con terminación
+   desconocida o un elemento de convergencia sin hacer (autorización, 6.1, 6.2, 6.3, 6.4 o 6.8),
+   el registro queda `uncertain` y se aplica §2.7.4: la resolución converge sobre `N`, lo comprueba
+   y solo entonces pasa a `resolved`. gitIdentity, postStart y `cliVersion` que fallan solo se
+   registran.
 
 **D1 apunta siempre a un contenedor que existe:**
 
@@ -619,7 +632,10 @@ Si las marcas fueran incompatibles con el CLI (§2.7.5), responde `control-marke
     `outcome: rolled-back` (§2.7.4).
     - estado final igual al previo: D1 en `O`, `O` con su nombre, sin `N` y sin la marca, sin
       cambios en captura ni skills;
-    - responde 500 `recreate-failed {step}`, **sin** `unresolved`;
+    - responde 500 `recreate-failed {step}`, **sin** `unresolved`. Excepción (decisión del
+      responsable, revisión de #459, punto 3): si lo que falló es la precondición 8 repetida contra
+      I_N, responde 409 con el código de esa precondición. Solo tras un rollback resuelto y
+      confirmado; un rollback incierto o incompleto responde siempre 500 `{step, unresolved: true}`;
     - D1 y el workspace no necesitan restauración.
   - Si alguno de los pasos 1–3 no se puede confirmar, no es un rollback resuelto: pasa al estado
     incierto.
@@ -657,6 +673,14 @@ petición después de que el cliente dejó de esperarla. Reglas:
     entonces está *en vuelo* y su resultado se desconoce.
   - Ningún plazo sustituye a esa respuesta: un dockerd colgado deja la petición en vuelo
     indefinidamente.
+  - **Un exec termina solo con evidencia de terminación**: el inspect del propio exec, tomado
+    cuando dockerd cerró el stream, dice que no está en marcha y da un código de salida. Un stream
+    cortado, un inspect que falla, `Running` todavía verdadero o un `ExitCode` no numérico son
+    **terminación desconocida**: el proceso puede seguir corriendo y escribiendo. No es un fallo ni
+    un éxito. El intento no se resuelve mientras quede uno, hasta que el exec se observe terminado,
+    o su contenedor detenido o eliminado. El cliente no corta nunca el stream de un exec de la
+    recreación; el `timeout` dentro del contenedor acota el proceso, y su 124/137 sí es una
+    terminación conocida.
 - **D1: las peticiones sí se cortan** (tope de 10 s del cliente de D1). Una sentencia no puede
   aplicarse después de su duración máxima en la plataforma (30 s según Cloudflare). Por eso, pasados
   **`T_d1` = 60 s** desde el envío, la relectura de la fila es definitiva. `T_d1` vale **solo para
@@ -740,15 +764,20 @@ Reglas:
   es parte del estado incierto.
 
 - **`T_rec` = 5 min**, desde el lock hasta el final del paso 6, **incluidos todos los pasos
-  posteriores al CAS**. Cada llamada a Docker o `execCapture` (probe, siembra, gitIdentity) corre
-  contra el presupuesto que queda. postStart corre contra `min(lo que queda de T_rec, el tope
+  posteriores al CAS**. Cada llamada a Docker o exec (probe, siembra, gitIdentity), y también la
+  autorización del paso 5 entera, las escrituras de archivos y marcas y las escrituras de D1 del
+  paso 6, corre contra el presupuesto que queda como petición del intento: al vencer no se espera
+  más, no se abandona sin seguimiento (su respuesta se registra como evidencia) y su continuación
+  no hace nada. postStart corre contra `min(lo que queda de T_rec, el tope
   propio de streamExec)`.
   - Vencido antes del paso 4: se cierra la época y se pasa al rollback.
   - Vencido después: se cierra la época, se abandona el resto del paso 6 y se registra qué faltó.
     - Con peticiones a Docker en vuelo (un probe, un exec), el registro pasa a `uncertain` hasta
       que respondan. Un probe tardío no escribe nada, y se retira la marca.
-    - Sin peticiones en vuelo, pasa a `resolved` (`committed`), se libera el lock y lo pendiente
-      converge (§2.7.3).
+    - Lo pendiente de convergencia (autorización, `defer-skill-seed`, siembra, puertos, `status`,
+      `remove(O)`) deja el registro en `uncertain` hasta que la resolución lo hace y lo comprueba.
+      Sin nada en vuelo ni pendiente de convergencia, pasa a `resolved` (`committed`).
+    - El resultado nombra lo que queda pendiente o ambiguo (`pending`).
     - postStart sigue en `N` como proceso de la sesión (`N` ya es la sesión). El backend no espera
       su resultado ni actúa por él.
 
@@ -764,8 +793,10 @@ Reglas:
   - los registros `recreate-attempt.json` en `open` o `uncertain`: pasan a `uncertain`, y la sesión
     queda en `recreate-unresolved` sea cual sea lo visible en Docker. No los resuelve (D8);
   - `docker ps -a --filter label=io.shared-terminal.recreate-of`;
-  - los nombres que encajan **exactamente** con `^st-[0-9a-f]{12}-old-[0-9]+$` (o `-new-`) y cuyo
-    prefijo es una sesión de D1.
+  - los nombres que encajan **exactamente** con `^st-[0-9a-f]{8}-[0-9a-f]{3}-old-[0-9]+$` (o
+    `-new-`) y cuyo prefijo es una sesión de D1. El prefijo es `st-<sid[:12]>`, que conserva el
+    primer guion del UUID (`st-3f2a9c1b-4d5e`); el patrón anterior, `[0-9a-f]{12}`, no podía
+    encajar con ningún nombre real.
 
   Los sufijos `-new-<ts>` y `-old-<ts>` están **reservados**, y un nombre que no encaja no se toca.
   Elimina los sobrantes. La tabla siguiente es la **resolución**: la aplica la resolución de un
@@ -779,6 +810,14 @@ Reglas:
 | ni `O` ni `N` | — | Nada; log y `recreateOrphans` en stats |
 
 Ninguna acción borra un contenedor al que apunte D1.
+
+**La resolución se ejecuta bajo el lock de la sesión**: el del propio intento mientras `recreate` lo
+conserva, o uno que toma ella misma (el gate deja pasar solo esa resolución, del proceso dueño del
+intento: no se bloquea a sí misma). Una pasada que pierde el lock porque venció `T_rb` se detiene
+antes de su siguiente acción, y la termina otra pasada bajo el lock. `resolved` se persiste solo
+después de hacer y re-observar la acción de la fila (con D1 = `N`: estado, puertos, `defer-skill-seed`,
+siembra y la convergencia de captura de §2.7.5), de modo que `start`, `stop` o `delete` nunca se
+intercalan con ella.
 
 #### 2.7.5 Autorización del relay y marcas
 
@@ -856,6 +895,11 @@ inválido dentro:
 Si falla, la activación queda bloqueada (`control-marker-incompatible` en `PATCH {enabled:true}`
 y en `POST …/recreate`) y 3.0d no se publica hasta revisar otra ubicación. No hay respaldo
 silencioso.
+
+No se supone compatibilidad universal: `N` ejecuta el CLI del `.npm-global` del workspace, que
+puede no ser el de la imagen. La recreación lee su versión en el host, sin seguir symlinks, y
+solo acepta una versión con la que esta validación se haya hecho (hoy, 2.1.308). Cualquier otra,
+o una ilegible, responde `control-marker-incompatible` en el preflight y en el POST, sin efectos.
 
 #### 2.7.6 Semántica de `capture`
 
@@ -1477,8 +1521,9 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
       bloqueo en el paso 1 y rollback. `O` sin skills ⇒ toda W gestionada colisiona.
 - [ ] **Aplazamiento (A2/P2):** dos arranques de `N` antes del CAS (reinicio inyectado y
       `docker restart`) + fallo ⇒ la skill queda intacta y no se siembra. Éxito ⇒ la marca se
-      retira en 6.1 y se siembra una sola vez. Caída entre el CAS y 6.1 ⇒ `reconcile` retira la
-      marca y siembra (`N` en marcha) o lo deja para el siguiente arranque (`N` detenido).
+      retira en 6.1 y se siembra una sola vez. Caída entre el CAS y 6.1 ⇒ sin evidencia, la sesión
+      queda en `recreate-unresolved` (D8) y la marca se conserva; `reconcile` solo retira una marca
+      residual de un intento `resolved` (`committed`) con D1 en ese `N`.
 - [ ] **Eliminación incierta (A2/P2):** `remove(N)` falla, o queda ambiguo, y `N` arranca antes de
       cualquier CAS ⇒ la marca sigue, `N` no siembra, la skill sigue intacta y D1 sigue en `O`.
       Con la eliminación confirmada en el siguiente `reconcile` ⇒ la marca se retira y `O` vuelve
@@ -1491,6 +1536,17 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
       - después del CAS (probe, siembra o postStart colgados) ⇒ se abandona el resto y ninguna
         operación espera más de `T_rec` + `T_rb`;
       - un `DELETE ?hard=true` posterior responde `recreate-unresolved` o 503 y nunca purga.
+- [ ] **Revisión de #459 (E1–E4):**
+      - un exec con terminación desconocida (stream cortado, sin salida, `Running`), también
+        cuando responde tarde ⇒ el intento sigue `uncertain` y las operaciones incompatibles
+        responden `recreate-unresolved` hasta que el exec se observe terminado;
+      - autorización, escritura de `defer-skill-seed`, puertos o `status` colgados después del CAS
+        ⇒ respuesta a los `T_rec`, registro `uncertain` que los nombra, ninguna continuación
+        tardía, y convergencia y `resolved` cuando responden;
+      - `start`, `stop` o `delete` encolados mientras la resolución converge ⇒ esperan y corren
+        solo después de `resolved`; una convergencia que falla o no se mantiene no se resuelve;
+      - disable por API y por CLI durante la escritura de la marca o del archivo en la
+        restauración del rollback ⇒ estado final revocado, sin marca ni archivo.
 - [ ] Las cuatro filas de `reconcile` de §2.7.4. Los nombres que no encajan con el patrón
       reservado no se tocan. El rename de `O` con el nombre canónico ocupado por `N` se trata como
       estado incierto.
