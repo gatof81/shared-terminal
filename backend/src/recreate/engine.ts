@@ -1206,7 +1206,13 @@ export class RecreationEngine {
 	): Promise<boolean> {
 		return this.recordOp(a, async () => {
 			if (a.state === "resolved") return true;
-			if (!lease.held) throw new LeaseLostError();
+			// Checked here, inside the serialized record operation and right
+			// before the durable write: the pass may have waited for its last
+			// evidence across an `engine.stop()`, and a `resolved` written after
+			// the shutdown would be inherited by the next process, which D8
+			// says must find the attempt unresolved. A write already started
+			// before the stop is not cancelled.
+			if (!lease.held || this.stopped) throw new LeaseLostError();
 			try {
 				await this.deps.attempts.resolve(a.sessionId, a.attemptId, outcome, reason);
 			} catch (err) {

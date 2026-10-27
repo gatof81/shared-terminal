@@ -41,8 +41,8 @@ import { hooksFileExists } from "../conversation/activation.js";
 import { relayEnabledExists } from "../conversation/captureAuth.js";
 import { hashIngestToken } from "../conversation/registry.js";
 import type { ConversationService } from "../conversation/service.js";
-import { RecreateUnresolvedError } from "../recreateAttempt.js";
-import type { LifecycleOp } from "../sessionLifecycleLock.js";
+import { RecreateAttemptStore, RecreateUnresolvedError } from "../recreateAttempt.js";
+import { type LifecycleOp, SessionLifecycleLock } from "../sessionLifecycleLock.js";
 import { conversationRecreatePort } from "./capturePort.js";
 import { d1RecreatePort } from "./d1.js";
 import { deferred, harness, IMG_N, O_ID, SID } from "./engine.testutil.js";
@@ -236,5 +236,43 @@ describe("step 6 seeds only once `defer-skill-seed` is gone", () => {
 		});
 		expect(h.capture.deferSeed).toBe(false);
 		expect(h.docker.execs.filter((e) => e[1] === SEED)).toHaveLength(1);
+	});
+});
+
+// ── Work's third review (21eaff4): no durable `resolved` after stop() ──────
+
+describe("E5 — engine.stop() while the resolution waits for its last evidence", () => {
+	it("a late numeric exit after stop() writes no `resolved`; a new store's boot recovery keeps it blocked", async () => {
+		const h = await setup();
+		h.docker.unknownExit.add(SEED);
+		const r = await h.engine.recreate(SID, IMG_N);
+		expect(r).toMatchObject({ ok: true, outcome: "committed", unresolved: true });
+		// The next pass's exec-state read is held: that is its last evidence.
+		const answer = deferred();
+		const asked = deferred();
+		h.docker.hooks.set("execState", async () => {
+			asked.resolve();
+			await answer.promise;
+		});
+		await asked.promise;
+		h.engine.stop();
+		h.docker.endUnknownExecs(0); // the held read answers {running:false, exitCode:0}
+		answer.resolve();
+		await tick(150);
+		expect(await recordOf(h)).toMatchObject({ state: "uncertain" });
+
+		// The next process: boot recovery on a fresh store inherits the block (D8).
+		const attempts = new RecreateAttemptStore(h.root);
+		await attempts.recoverOnBoot();
+		const rec = await attempts.read(SID);
+		expect(rec).toMatchObject({ kind: "ok", record: { state: "uncertain" } });
+		expect((rec as { record: { orphanedAt?: string } }).record.orphanedAt).toBeTruthy();
+		const lock = new SessionLifecycleLock();
+		lock.setGuard((sid) => attempts.assertResolved(sid));
+		for (const op of INCOMPATIBLE) {
+			await expect(lock.run(SID, op, async () => 1)).rejects.toBeInstanceOf(
+				RecreateUnresolvedError,
+			);
+		}
 	});
 });

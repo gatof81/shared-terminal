@@ -832,7 +832,9 @@ La resolución sigue la misma regla de las operaciones compuestas: antes de cada
 cada efecto dentro de una (los puertos, la siembra, la restauración del rollback y la convergencia
 de §2.7.5 a través de la autoridad del intento), comprueba que la pasada conserva el lock y que el
 proceso no se está apagando. El apagado ordenado del backend cierra todas las épocas y detiene las
-pasadas antes de su siguiente efecto: una convergencia que esperaba un probe no escribe
+pasadas antes de su siguiente efecto, **incluida la escritura durable de `resolved`**, que se
+comprueba justo antes de iniciarse (una ya iniciada antes del apagado no se cancela); así el
+proceso siguiente hereda el intento sin resolver (D8). Una convergencia que esperaba un probe no escribe
 `conversation.json` con la respuesta tardía, retira la marca que había escrito, y el registro sigue
 sin resolver (D8). Lo ya enviado se conserva en seguimiento.
 
@@ -1571,6 +1573,8 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
         `INSERT` nuevo; solo la resolución reescribe los puertos;
       - convergencia real con el probe pendiente, `stop()`, positivo tardío ⇒ ningún
         `conversation.json` nuevo y registro sin resolver.
+      - exec desconocido, resolución esperando su última evidencia, `stop()`, salida numérica
+        tardía ⇒ el registro sigue sin resolver, también tras `recoverOnBoot()` de un store nuevo.
 - [ ] Las cuatro filas de `reconcile` de §2.7.4. Los nombres que no encajan con el patrón
       reservado no se tocan. El rename de `O` con el nombre canónico ocupado por `N` se trata como
       estado incierto.
