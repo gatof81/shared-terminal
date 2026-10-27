@@ -8,8 +8,10 @@
  * targets, `~/.config`, the readiness sentinel, the relay log and the
  * tmux socket dir. `~/.gitconfig` is allowed only when it holds exactly
  * the session's git identity (gitIdentity writes it; recreation re-runs
- * it). Everything else blocks with a category code and a count — never a
- * path: a user's `docker diff` is content.
+ * it). The runtime artifacts Claude Code 2.1.308 leaves under /tmp are
+ * allowed only in the exact shapes seen on a real daemon (`cliTmpArtifact`
+ * below). Everything else blocks with a category code and a count — never
+ * a path: a user's `docker diff` is content.
  */
 
 import path from "node:path";
@@ -32,6 +34,8 @@ export type PathKind = "dir" | "file" | "symlink" | "socket" | "other";
 export interface PathStat {
 	kind: PathKind;
 	linkTarget?: string;
+	/** Bytes, for a regular file (the archive stat's `size`). */
+	size?: number;
 }
 
 export interface LayerInput {
@@ -85,6 +89,67 @@ const DOCKER_INIT_FILES: ReadonlySet<string> = new Set([
 	"/usr/sbin/docker-init",
 ]);
 const TMUX_DIR = `/tmp/tmux-${SESSION_UID}`;
+
+// ── Claude Code's runtime artifacts under /tmp ─────────────────────────────
+//
+// Seen in a stopped session container's layer after real uses of the pinned
+// CLI 2.1.308 (`claude -p`, `--resume`, an interactive tab with Bash and a
+// subagent, a tab still running at the stop), by
+// session-image/test/cli-tmp-evidence.sh on CI's dockerd:
+//
+//   /tmp/cc-socks/                       dir
+//   /tmp/cc-socks/<pid>.sock             socket (a live CLI's endpoint; stale
+//                                        once the container stopped)
+//   /tmp/claude-1000/                    dir
+//   …/fswatch-probe-<6 alnum>/probe      dir + a 1-byte file: the CLI's own
+//                                        file-watch probe, one per run
+//   …/<cwd slug>/<session uuid>/tasks/   dirs
+//   …/tasks/a<16 hex>.output             symlink to that subagent's transcript
+//                                        `~/.claude/projects/<slug>/<uuid>/
+//                                        subagents/agent-a<16 hex>.jsonl`
+//
+// None of it is state a resumed conversation needs: sockets and probes are
+// per-process, and a task symlink only points at the transcript, which lives
+// in the workspace (~/.claude is a symlink into it) and is preserved. So
+// these are allowed — each with its exact type and name shape, a symlink only
+// with the one target its own path determines, a probe only at 1 byte.
+// Anything else under these dirs blocks as `layer-tmp`: notably a regular
+// file in `tasks/` (a background task's output is the user's content, and
+// nothing shows it is disposable), another target, another uid's dir.
+const CLI_SOCKS = "/tmp/cc-socks";
+const CLI_TMP = `/tmp/claude-${SESSION_UID}`;
+const CLI_SOCKET = /^\/tmp\/cc-socks\/\d{1,10}\.sock$/;
+const CLI_PROBE_DIR = /^\/tmp\/claude-1000\/fswatch-probe-[A-Za-z0-9]{6}$/;
+const CLI_PROBE = /^\/tmp\/claude-1000\/fswatch-probe-[A-Za-z0-9]{6}\/probe$/;
+/** The CLI's slug of a cwd: `/` (and any other non-alphanumeric) → `-`. Only cwds in the workspace. */
+const SLUG = "-home-developer-workspace(?:-[A-Za-z0-9-]+)?";
+const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+const CLI_PROJECT_DIRS = new RegExp(`^/tmp/claude-1000/(${SLUG})(?:/(${UUID})(?:/tasks)?)?$`);
+const CLI_TASK_LINK = new RegExp(
+	`^/tmp/claude-1000/(${SLUG})/(${UUID})/tasks/(a[0-9a-f]{16})\\.output$`,
+);
+
+/**
+ * True when `p` is one of the CLI's runtime artifacts above with exactly its
+ * expected type (and size or target). False for anything else under /tmp,
+ * which then blocks.
+ */
+function cliTmpArtifact(p: string, st: PathStat | null): boolean {
+	if (p === CLI_SOCKS || p === CLI_TMP || CLI_PROBE_DIR.test(p) || CLI_PROJECT_DIRS.test(p)) {
+		return st?.kind === "dir";
+	}
+	if (CLI_SOCKET.test(p)) return st?.kind === "socket";
+	if (CLI_PROBE.test(p)) return st?.kind === "file" && st.size === 1;
+	const link = CLI_TASK_LINK.exec(p);
+	if (link) {
+		const [, slug, uuid, id] = link;
+		return (
+			st?.kind === "symlink" &&
+			st.linkTarget === `${HOME}/.claude/projects/${slug}/${uuid}/subagents/agent-${id}.jsonl`
+		);
+	}
+	return false;
+}
 
 function isUnder(p: string, dir: string): boolean {
 	return p === dir || p.startsWith(`${dir}/`);
@@ -233,6 +298,7 @@ export async function classifyLayer(input: LayerInput): Promise<LayerVerdict> {
 			if (st?.kind !== "socket") block(category(p));
 			continue;
 		}
+		if (ch.Kind === 1 && isUnder(p, "/tmp") && cliTmpArtifact(p, st)) continue;
 		if (mounts.includes(p)) {
 			// A mount point Docker created because the image lacked it.
 			if (st?.kind !== "dir" && st?.kind !== "file") block(category(p));

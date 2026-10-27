@@ -2792,9 +2792,14 @@ export class DockerManager {
 				if (!raw) throw new Error("archive HEAD without a path stat");
 				const st = JSON.parse(Buffer.from(raw, "base64").toString("utf8")) as {
 					mode: number;
+					size?: number;
 					linkTarget?: string;
 				};
-				return { kind: goModeKind(st.mode), linkTarget: st.linkTarget || undefined };
+				return {
+					kind: goModeKind(st.mode),
+					linkTarget: st.linkTarget || undefined,
+					size: typeof st.size === "number" ? st.size : undefined,
+				};
 			},
 			readArchive: async (id, p, maxBytes) => {
 				let stream: NodeJS.ReadableStream;

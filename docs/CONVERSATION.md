@@ -7,7 +7,8 @@ progresiva §2.7, diseño aprobado por Work y el responsable el 2026-10-26; acla
 revisión Work de #459 —evidencia de exec, `T_rec` completo, resolución bajo el lock, restauración
 con revocación concurrente, puntos 2, 3 y 8 y patrón de nombres—, 2026-10-27; segunda revisión: código
 de salida obligatorio, efectos compuestos y apagado, 2026-10-27; decisión del responsable sobre la
-allowlist del CLI para el piloto, §2.7.5, 2026-10-27), vinculante para los PRs
+allowlist del CLI para el piloto, §2.7.5, 2026-10-27; decisión del responsable sobre los artefactos
+de runtime del CLI 2.1.308 en `/tmp` en la allowlist de la capa, §2.7.1, 2026-10-27), vinculante para los PRs
 3.0b–3.4.** El razonamiento está en [docs/design/phase3-conversation-activity.md](./design/phase3-conversation-activity.md)
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
 `ac1024d`); si los dos documentos difieren, manda este;
@@ -499,6 +500,30 @@ Las pestañas tmux ya se pierden con el stop.
   - `/tmp/.st-ready`;
   - `/tmp/st-relay.log`;
   - `/tmp/tmux-<uid>/`.
+- **Se permiten los artefactos de runtime de Claude Code 2.1.308 bajo `/tmp`**, solo con la forma
+  exacta observada en el `docker diff` real de CI (`session-image/test/cli-tmp-evidence.sh`: `claude
+  -p`, `--resume`, una pestaña interactiva con Bash y un subagente, y una pestaña viva al detener).
+  Cada entrada tiene que estar añadida en la capa (`A`) y tener su tipo exacto:
+  - `/tmp/cc-socks/` (directorio) y `/tmp/cc-socks/<pid>.sock` (socket; el endpoint de un CLI vivo,
+    huérfano una vez detenido el contenedor);
+  - `/tmp/claude-1000/` (directorio);
+  - `/tmp/claude-1000/fswatch-probe-<6 alfanuméricos>/` (directorio) con `probe`, archivo regular
+    de **1 byte** (la sonda de observación de archivos del propio CLI, una por ejecución);
+  - `/tmp/claude-1000/<slug>/`, `<slug>/<uuid>/` y `<slug>/<uuid>/tasks/` (directorios), con
+    `<slug>` = `-home-developer-workspace` o `-home-developer-workspace-<…>` (un cwd dentro del
+    workspace) y `<uuid>` un UUID en minúsculas;
+  - `…/<slug>/<uuid>/tasks/a<16 hex>.output`: **symlink** cuyo destino es exactamente
+    `/home/developer/.claude/projects/<slug>/<uuid>/subagents/agent-a<16 hex>.jsonl`, con el mismo
+    slug, uuid e id de su propia ruta.
+
+  Son descartables: sockets y sondas son de cada proceso, y el symlink solo apunta al transcript del
+  subagente, que vive en el workspace (`~/.claude` es un symlink a él) y se preserva; `claude
+  --resume` en `N` continúa la conversación. **Todo lo demás bajo esas rutas bloquea con
+  `layer-tmp`**: en particular un archivo regular en `tasks/` (la salida de una tarea en segundo
+  plano es contenido del usuario y nada muestra que sea descartable), otro destino o un destino
+  relativo, una sonda de otro tamaño o tipo, otros nombres, niveles o uid, y cualquier entrada
+  borrada o solo modificada. Una versión del CLI distinta de 2.1.308 queda fuera por la allowlist
+  de versiones (§2.7.5): sus artefactos no están validados.
 - **`~/.gitconfig`:** se permite solo si contiene exactamente `user.name` y `user.email`, iguales a
   `session_configs`. Se lee con `getArchive`, ≤ 4 KiB. Tras la recreación se reaplica
   gitIdentity.

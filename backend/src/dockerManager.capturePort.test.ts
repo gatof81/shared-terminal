@@ -484,6 +484,16 @@ describe("recreatePort (CONVERSATION.md §2.7)", () => {
 		expect(await p.statPath("o", "/nope")).toBeNull();
 	});
 
+	it("statPath carries a regular file's size (the CLI probe check needs it)", async () => {
+		const infoArchive = vi.fn().mockResolvedValueOnce(stat({ mode: 0o600, size: 1 }));
+		const p = withDocker({ getContainer: () => ({ infoArchive }) });
+		expect(await p.statPath("o", "/tmp/claude-1000/fswatch-probe-abcdef/probe")).toEqual({
+			kind: "file",
+			linkTarget: undefined,
+			size: 1,
+		});
+	});
+
 	it("readArchive: bytes under the cap; past it the stream is drained to its end, then refused", async () => {
 		const stream = (chunks: Buffer[]) => {
 			const s = new PassThrough();

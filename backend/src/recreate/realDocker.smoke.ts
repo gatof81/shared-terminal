@@ -23,10 +23,16 @@
  *   - the full path: N from the checked image ID, the relay identified and
  *     the hooks file written (effective:true), seeding exactly once;
  *   - the committed N survives boot passes and stop/start; a real leftover
- *     is removed without being started.
+ *     is removed without being started;
+ *   - O after real use of the CLI 2.1.308 (`claude -p`, an interactive tab
+ *     with a subagent, against the scripted model) stays recreatable; any
+ *     other shape under /tmp still blocks; N carries none of those runtime
+ *     artifacts, the transcripts keep their size and mtime (they are never
+ *     read, CONVERSATION.md §1.1), and `claude --resume` on N continues the
+ *     conversation O started.
  */
 
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -44,6 +50,19 @@ const CANONICAL = `st-${SID.slice(0, 12)}`;
 const WS = path.join(ROOT, SID);
 const UPLOADS = path.join(ROOT, ".uploads", SID);
 const SKILL = path.join(WS, ".st/claude-state/skills/delegate-task/SKILL.md");
+// The scripted model (session-image/test/mock-anthropic.mjs) on a private
+// network, so the real CLI runs in O and N without an API key or egress.
+const REPO = path.resolve(path.dirname(path.resolve(process.argv[1])), "../../..");
+const NET = `${CANONICAL}-net`;
+const OUT = path.join(ROOT, ".smoke-out");
+const API_KEY = `sk-ant-api03-smoke-${randomBytes(12).toString("hex")}`;
+const CLI_ENV = [
+	"ANTHROPIC_BASE_URL=http://mock-api:8080",
+	`ANTHROPIC_API_KEY=${API_KEY}`,
+	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+	"DISABLE_AUTOUPDATER=1",
+];
+const MOCK_REPLY = "Hello from the mock.\nSecond line.";
 let failures = 0;
 
 function check(what: string, ok: boolean, detail?: unknown): void {
@@ -70,6 +89,28 @@ async function exec(id: string, cmd: string): Promise<number> {
 		s.resume();
 	});
 	return (await e.inspect()).ExitCode ?? -1;
+}
+
+/** Exit code and stdout of `bash -c cmd` (as the image's user, developer). */
+async function execOut(id: string, cmd: string): Promise<{ code: number; out: string }> {
+	const e = await docker.getContainer(id).exec({
+		Cmd: ["bash", "-c", cmd],
+		AttachStdout: true,
+		AttachStderr: true,
+		WorkingDir: "/home/developer/workspace",
+	});
+	const s = await e.start({});
+	const out: Buffer[] = [];
+	await new Promise<void>((r) => {
+		docker.modem.demuxStream(
+			s,
+			{ write: (c: Buffer) => out.push(c) } as unknown as NodeJS.WritableStream,
+			{ write: () => true } as unknown as NodeJS.WritableStream,
+		);
+		s.on("end", () => r());
+		s.on("close", () => r());
+	});
+	return { code: (await e.inspect()).ExitCode ?? -1, out: Buffer.concat(out).toString("utf8") };
 }
 
 async function waitReady(id: string): Promise<void> {
@@ -118,6 +159,10 @@ async function cleanup(): Promise<void> {
 				.catch(() => undefined);
 		}
 	}
+	await docker
+		.getNetwork(NET)
+		.remove()
+		.catch(() => undefined);
 	// uid-1000 files from the containers: remove them from a root container.
 	await docker
 		.run(IMAGE, ["bash", "-c", "rm -rf /t/* /t/.[!.]* 2>/dev/null; true"], process.stdout, {
@@ -150,14 +195,29 @@ async function main(): Promise<void> {
 
 	// ── O: an ordinary pre-3.0d session container ─────────────────────────
 	phase("O: booted once, stopped");
+	await fs.mkdir(OUT, { recursive: true });
+	await fs.chmod(OUT, 0o777);
+	await docker.createNetwork({ Name: NET });
+	// Named under CANONICAL so cleanup() removes it with the session's containers.
+	const mock = await docker.createContainer({
+		Image: IMAGE,
+		name: `${CANONICAL}-mockapi`,
+		Entrypoint: ["node"],
+		Cmd: ["/t/mock-anthropic.mjs", "8080", "/out/model-requests.jsonl"],
+		HostConfig: { Binds: [`${REPO}/session-image/test:/t:ro`, `${OUT}:/out`], NetworkMode: NET },
+		NetworkingConfig: { EndpointsConfig: { [NET]: { Aliases: ["mock-api"] } } },
+	});
+	await mock.start();
 	const o = await docker.createContainer({
 		Image: IMAGE,
 		name: CANONICAL,
+		Env: [`SESSION_ID=${SID}`, ...CLI_ENV],
 		HostConfig: {
 			Binds: [`${WS}:/home/developer/workspace`, `${UPLOADS}:/home/developer/uploads:ro`],
 			Init: true,
 			CapDrop: ["ALL"],
 			SecurityOpt: ["no-new-privileges:true"],
+			NetworkMode: NET,
 		},
 		OpenStdin: true,
 		Tty: true,
@@ -269,7 +329,7 @@ async function main(): Promise<void> {
 			Labels: spec.labels,
 			// The spawn's own env builder: SESSION_ID/SESSION_NAME plus the
 			// capture entries (the relay refuses to start without SESSION_ID).
-			Env: buildContainerEnv(SID, "recreate-smoke", [], spec.env),
+			Env: buildContainerEnv(SID, "recreate-smoke", CLI_ENV, spec.env),
 			HostConfig: {
 				Binds: [
 					`${WS}:/home/developer/workspace`,
@@ -279,6 +339,7 @@ async function main(): Promise<void> {
 				Init: true,
 				CapDrop: ["ALL"],
 				SecurityOpt: ["no-new-privileges:true"],
+				NetworkMode: NET,
 			},
 			OpenStdin: true,
 			Tty: true,
@@ -366,6 +427,137 @@ async function main(): Promise<void> {
 	// O's next boot re-seeds W from its image.
 	await withO(O, async () => undefined);
 
+	// ── The real CLI's runtime artifacts in /tmp (CONVERSATION.md §2.7.1) ──
+	phase("Preflight: O after real use of the CLI 2.1.308");
+	let convId = "";
+	await withO(O, async () => {
+		const p = await execOut(
+			O,
+			"timeout 120 claude -p 'layer probe: first prompt' --output-format json </dev/null",
+		);
+		try {
+			convId =
+				(JSON.parse(p.out.trim().split("\n").pop() ?? "{}") as { session_id?: string })
+					.session_id ?? "";
+		} catch {}
+		check(
+			"claude -p in O answers with a conversation id",
+			p.code === 0 && /^[0-9a-f-]{36}$/.test(convId),
+			p.code,
+		);
+		// An interactive tab with a subagent turn: the shape that leaves a
+		// task link under /tmp/claude-1000 (cli-tmp-evidence.sh, case C).
+		await execOut(
+			O,
+			`f=~/.claude.json; [ -s "$f" ] || echo "{}" > "$f"
+jq --arg k "${API_KEY.slice(-20)}" '. + {hasCompletedOnboarding: true, theme: "dark",
+	customApiKeyResponses: {approved: [$k], rejected: []},
+	projects: {"/home/developer/workspace": {hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true}}}' "$f" > ~/workspace/.cj && cat ~/workspace/.cj > "$f" && rm -f ~/workspace/.cj
+mkdir -p ~/.claude && printf '{"skipDangerousModePermissionPrompt": true, "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo stop >> /home/developer/workspace/.turns"}]}]}}' > ~/.claude/settings.json`,
+		);
+		await execOut(
+			O,
+			'tmux new-session -d -s t -x 200 -y 50 -c /home/developer/workspace "claude --dangerously-skip-permissions"',
+		);
+		let ready = false;
+		for (let i = 0; i < 60 && !ready; i++) {
+			ready = /for shortcuts|bypass permissions on/.test(
+				(await execOut(O, "tmux capture-pane -p -t t")).out,
+			);
+			if (!ready) await new Promise((r) => setTimeout(r, 500));
+		}
+		check("interactive tab in O reached its prompt", ready);
+		await execOut(O, "tmux send-keys -t t 'ST_SCENARIO=agent' Enter");
+		let done = false;
+		for (let i = 0; i < 300 && !done; i++) {
+			done = (await execOut(O, "test -s ~/workspace/.turns")).code === 0;
+			if (!done) await new Promise((r) => setTimeout(r, 100));
+		}
+		check("the subagent turn finished", done);
+		await execOut(O, "tmux send-keys -t t '/exit' Enter; sleep 3; rm -f ~/workspace/.turns");
+	});
+	const tmpLayer = ((await docker.getContainer(O).changes()) as Array<{ Path: string }>)
+		.map((c) => c.Path)
+		.filter((p) => p.startsWith("/tmp/"));
+	console.log(`  · O's layer under /tmp: ${JSON.stringify(tmpLayer)}`);
+	check(
+		"the run left the observed shapes: fswatch probes and a subagent task link",
+		tmpLayer.some((p) => /\/fswatch-probe-[A-Za-z0-9]{6}\/probe$/.test(p)) &&
+			tmpLayer.some((p) => /\/tasks\/a[0-9a-f]{16}\.output$/.test(p)),
+		tmpLayer,
+	);
+	const afterCli = await engine.preflight(SID);
+	check(
+		"O after claude -p and an interactive tab with a subagent is recreatable",
+		(afterCli as { recreatable?: boolean }).recreatable === true,
+		afterCli,
+	);
+	const taskDir = "$(ls -d /tmp/claude-1000/-home-developer-workspace/*/tasks | head -n 1)";
+	for (const [label, plant] of [
+		[
+			"a regular file in tasks/ (a background task's output)",
+			`echo out > ${taskDir}/b0123456789abcdef.output`,
+		],
+		["a task link to /etc/passwd", `ln -s /etc/passwd ${taskDir}/a0123456789abcdef.output`],
+		[
+			"a 2-byte probe",
+			"mkdir /tmp/claude-1000/fswatch-probe-zzzzzz && printf 12 > /tmp/claude-1000/fswatch-probe-zzzzzz/probe",
+		],
+		["a user file in /tmp/claude-1000", "echo notes > /tmp/claude-1000/notes"],
+		["a regular file in /tmp/cc-socks", "echo x > /tmp/cc-socks/99.sock"],
+	] as const) {
+		const planted = await withO(O, () => execOut(O, plant));
+		const v = (await engine.preflight(SID)) as { blockers?: Array<{ code: string }> };
+		check(
+			`planted ${label} ⇒ layer-tmp`,
+			planted.code === 0 && v.blockers?.some((b) => b.code === "layer-tmp") === true,
+			{ planted: planted.code, v },
+		);
+		await withO(O, () =>
+			execOut(
+				O,
+				`rm -rf ${taskDir}/b0123456789abcdef.output ${taskDir}/a0123456789abcdef.output /tmp/claude-1000/fswatch-probe-zzzzzz /tmp/claude-1000/notes /tmp/cc-socks/99.sock`,
+			),
+		);
+	}
+	// A planted entry removed from O's layer is a deletion Docker still lists
+	// only if it existed in the image — these never did, so O is clean again.
+	check(
+		"with the planted entries removed, O is recreatable again",
+		((await engine.preflight(SID)) as { recreatable?: boolean }).recreatable === true,
+	);
+	// Transcript metadata only (path, size, mtime): never their content (§1.1).
+	const transcripts = async () =>
+		(
+			await new Promise<string>((resolve) => {
+				const chunks: Buffer[] = [];
+				docker
+					.run(
+						IMAGE,
+						[
+							"bash",
+							"-c",
+							"cd /w/.st/claude-state/projects && find . -type f -printf '%P %s %T@\\n' | sort",
+						],
+						{ write: (c: Buffer) => chunks.push(c) } as unknown as NodeJS.WritableStream,
+						{
+							User: "0",
+							Entrypoint: [],
+							Tty: true,
+							HostConfig: { Binds: [`${WS}:/w:ro`], AutoRemove: true },
+						},
+					)
+					.then(() => resolve(Buffer.concat(chunks).toString("utf8")))
+					.catch(() => resolve(""));
+			})
+		).trim();
+	const transcriptsBefore = await transcripts();
+	check(
+		"O's transcripts exist (the conversation and the subagent's)",
+		transcriptsBefore.includes(`${convId}.jsonl`) &&
+			/subagents\/agent-a[0-9a-f]{16}\.jsonl/.test(transcriptsBefore),
+	);
+
 	// ── A manual start of O between steps 2 and 3 ────────────────────────
 	phase("Manual `docker start` of O between steps 2 and 3");
 	hooks.afterRenameN = async () => {
@@ -450,6 +642,41 @@ async function main(): Promise<void> {
 	check("seeded in step 6.2 (W = I_N)", await exists(SKILL));
 	check("defer-skill-seed gone", !(await cap.deferSeedExists(ROOT, SID)));
 	check("record resolved committed", (await attempts.read(SID)).kind === "ok");
+
+	phase(
+		"N after O's real CLI use: no runtime artifacts carried, transcripts intact, --resume continues",
+	);
+	check(
+		"none of O's /tmp runtime artifacts is in N",
+		(await execOut(nId, "test ! -e /tmp/cc-socks && test ! -e /tmp/claude-1000")).code === 0,
+	);
+	check(
+		"the transcripts' paths, sizes and mtimes are unchanged",
+		(await transcripts()) === transcriptsBefore,
+	);
+	const resumed = await execOut(
+		nId,
+		`timeout 120 claude -p --resume ${convId} 'layer probe: after recreation' --output-format json </dev/null`,
+	);
+	let resumedJson: { result?: string; session_id?: string } = {};
+	try {
+		resumedJson = JSON.parse(resumed.out.trim().split("\n").pop() ?? "{}");
+	} catch {}
+	check(
+		"N: claude -p --resume answers in the same conversation",
+		resumed.code === 0 &&
+			resumedJson.result?.trim() === MOCK_REPLY &&
+			resumedJson.session_id === convId,
+		{ code: resumed.code, sameId: resumedJson.session_id === convId },
+	);
+	const modelSaw = (await fs.readFile(path.join(OUT, "model-requests.jsonl"), "utf8"))
+		.split("\n")
+		.filter((l) => l.includes("layer probe: after recreation"))
+		.pop();
+	check(
+		"the model was sent O's earlier turn with the resumed prompt",
+		!!modelSaw && modelSaw.includes("layer probe: first prompt"),
+	);
 
 	// ── The recreation's exec: the exit comes from dockerd, by exec id ───
 	phase("Exec termination evidence (real dockerd)");
