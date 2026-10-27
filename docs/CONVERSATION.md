@@ -786,6 +786,16 @@ Reglas:
       que respondan. Un probe tardío no escribe nada, y se retira la marca.
     - Lo pendiente de convergencia (autorización, `defer-skill-seed`, siembra, puertos, `status`,
       `remove(O)`) deja el registro en `uncertain` hasta que la resolución lo hace y lo comprueba.
+    - **La autorización está pendiente** si el paso 5 falló (el fallo llega al motor; lo escrito se
+      retira de forma best-effort) o si terminó sin completar la configuración mientras la captura
+      sigue autorizada, `relay-unavailable` incluido. Lo que se comprueba son los archivos, no la
+      respuesta de la operación: con autorización de escritura sobre un contenedor en marcha, la
+      marca y `conversation.json`; con autorización de conservación sobre uno detenido, los dos o
+      ninguno; sin autorización (deshabilitada, revocada, flag apagado), ninguno de los dos, visto
+      ausente (un archivo ilegible no cuenta como ausente). No se exige `effective:true` ni se
+      promete que el relay vaya a estar disponible: mientras siga autorizada e incompleta, el
+      registro sigue `uncertain`; una deshabilitación o revocación lo resuelve retirando ambos
+      archivos y comprobando su ausencia.
       Sin nada en vuelo ni pendiente de convergencia, pasa a `resolved` (`committed`).
     - El resultado nombra lo que queda pendiente o ambiguo (`pending`).
     - postStart sigue en `N` como proceso de la sesión (`N` ya es la sesión). El backend no espera
@@ -1589,6 +1599,14 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
         `conversation.json` nuevo y registro sin resolver.
       - exec desconocido, resolución esperando su última evidencia, `stop()`, salida numérica
         tardía ⇒ el registro sigue sin resolver, también tras `recoverOnBoot()` de un store nuevo.
+- [ ] **Revisión de #459, E6 (autorización incompleta):** con el puerto de captura real,
+      - falla la escritura de `conversation.json` ⇒ `uncertain` con `authorize` pendiente, sin media
+        pareja; la reparación posterior la completa y solo entonces `resolved`;
+      - falla además la retirada de la marca ⇒ la media pareja mantiene `uncertain` hasta repararse;
+      - relay no disponible ⇒ `uncertain` mientras siga autorizada, `resolved` cuando se identifica;
+      - deshabilitación por API o por CLI durante la reparación ⇒ ambos archivos retirados y vistos
+        ausentes, después `resolved`;
+      - en todos, una sola siembra.
 - [ ] Las cuatro filas de `reconcile` de §2.7.4. Los nombres que no encajan con el patrón
       reservado no se tocan. El rename de `O` con el nombre canónico ocupado por `N` se trata como
       estado incierto.

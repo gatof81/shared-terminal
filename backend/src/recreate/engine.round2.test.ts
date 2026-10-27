@@ -9,6 +9,7 @@
  */
 
 import { promises as fs } from "node:fs";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const db = vi.hoisted(() => ({
@@ -18,6 +19,8 @@ const db = vi.hoisted(() => ({
 	holdFirstDelete: null as Promise<void> | null,
 	/** The capture row the real authority reads (CONVERSATION.md §2.7.5). */
 	captureRow: null as (() => Record<string, unknown>) | null,
+	/** `conversation_requested` as the disable statements leave it. */
+	requested: 1,
 }));
 vi.mock("../db.js", () => ({
 	d1Query: vi.fn(async (sql: string) => {
@@ -27,6 +30,8 @@ vi.mock("../db.js", () => ({
 			db.holdFirstDelete = null;
 			await hold;
 		}
+		// The disable / emergency statements (registry.ts): requested goes to 0.
+		if (/^UPDATE sessions SET .*conversation_requested = 0/.test(sql)) db.requested = 0;
 		if (/^SELECT .* FROM sessions WHERE session_id/.test(sql) && db.captureRow) {
 			return { results: [db.captureRow()], success: true, meta: {} };
 		}
@@ -37,9 +42,11 @@ vi.mock("../db.js", () => ({
 	__resetD1CallsForTests: () => undefined,
 }));
 
-import { hooksFileExists } from "../conversation/activation.js";
+import * as activation from "../conversation/activation.js";
+import { disableSession, hooksFileExists } from "../conversation/activation.js";
 import { relayEnabledExists } from "../conversation/captureAuth.js";
 import { hashIngestToken } from "../conversation/registry.js";
+import { checkRevocation } from "../conversation/revocation.js";
 import type { ConversationService } from "../conversation/service.js";
 import { RecreateAttemptStore, RecreateUnresolvedError } from "../recreateAttempt.js";
 import { type LifecycleOp, SessionLifecycleLock } from "../sessionLifecycleLock.js";
@@ -48,17 +55,22 @@ import { d1RecreatePort } from "./d1.js";
 import { deferred, harness, IMG_N, O_ID, SID } from "./engine.testutil.js";
 
 type H = Awaited<ReturnType<typeof harness>>;
-const roots: string[] = [];
+const made: H[] = [];
 async function setup(config?: NonNullable<Parameters<typeof harness>[0]>["config"]): Promise<H> {
 	const h = await harness({ config });
-	roots.push(h.root);
+	made.push(h);
 	return h;
 }
 afterEach(async () => {
-	for (const r of roots.splice(0)) await fs.rm(r, { recursive: true, force: true });
+	for (const h of made.splice(0)) {
+		// A resolution still retrying would keep writing under the root.
+		h.engine.stop();
+		await fs.rm(h.root, { recursive: true, force: true, maxRetries: 3 });
+	}
 	db.sql.length = 0;
 	db.holdFirstDelete = null;
 	db.captureRow = null;
+	db.requested = 1;
 });
 
 const recordOf = async (h: H) => {
@@ -198,6 +210,7 @@ describe("E5 — engine.stop() while the real convergence waits for its probe", 
 		} as unknown as ConversationService;
 		const real = conversationRecreatePort(service);
 		h.capture.converge = (sid, mayAct) => real.converge(sid, mayAct);
+		h.capture.converged = (sid) => real.converged(sid);
 
 		const r = await h.engine.recreate(SID, IMG_N);
 		expect(r).toMatchObject({ ok: false, step: "commit", unresolved: true });
@@ -275,4 +288,168 @@ describe("E5 — engine.stop() while the resolution waits for its last evidence"
 			);
 		}
 	});
+});
+
+// ── Work's fourth review (7ca3871): E6, an incomplete authorization ────────
+
+/**
+ * The real capture port in the engine: step 5's write procedure, the
+ * resolution's convergence and the convergence check all act on the real
+ * files under `h.root`, against a running N whose token matches D1.
+ */
+function realCapture(h: H) {
+	const token = "t".repeat(64);
+	db.captureRow = () => ({
+		status: h.d1.row.status,
+		conversation_requested: db.requested,
+		ingest_token_hash: db.requested ? hashIngestToken(token) : null,
+		ingest_token_hash_suspended: null,
+		user_id: "u1",
+		container_id: h.d1.row.container_id,
+	});
+	const ctl = { probe: async (): Promise<boolean> => true };
+	const service = {
+		activationDeps: { workspaceRoot: h.root, enabled: true, port: 3001 },
+		captureDocker: {
+			inspectCapture: async () => ({
+				exists: true,
+				running: true,
+				token,
+				managedMount: true,
+				controlMount: true,
+				imageId: IMG_N,
+				imageRelay2: true,
+			}),
+			currentImage: async () => ({ imageId: IMG_N, relay2: true }),
+			probeRelay: () => ctl.probe(),
+		},
+	} as unknown as ConversationService;
+	const real = conversationRecreatePort(service);
+	h.capture.authorize = (sid, run) => real.authorize(sid, run);
+	h.capture.converge = (sid, mayAct) => real.converge(sid, mayAct);
+	h.capture.converged = (sid) => real.converged(sid);
+	const files = async () => ({
+		marker: await relayEnabledExists(h.root, SID),
+		hooksFile: await hooksFileExists(h.root, SID),
+	});
+	return { ctl, files };
+}
+
+const seeds = (h: H) => h.docker.execs.filter((e) => e[1] === SEED).length;
+
+describe("E6 — an authorization that did not complete is pending, never `resolved`", () => {
+	it("hooks file write fails ⇒ uncertain with `authorize` pending; the next pass repairs it and only then resolves", async () => {
+		const h = await setup();
+		const { files } = realCapture(h);
+		let failing = true;
+		const write = activation.writeHooksFile;
+		const spy = vi.spyOn(activation, "writeHooksFile").mockImplementation(async (deps, sid) => {
+			if (failing) throw new Error("ENOSPC");
+			return write(deps, sid);
+		});
+		try {
+			const r = await h.engine.recreate(SID, IMG_N);
+			expect(r).toMatchObject({ ok: true, outcome: "committed", unresolved: true });
+			expect((r as { pending: string[] }).pending).toContain("authorize (not done)");
+			expect(await files()).toEqual({ marker: false, hooksFile: false });
+			await tick(150); // several passes, every one failing the same write
+			expect(await recordOf(h)).toMatchObject({ state: "uncertain" });
+			await expectIncompatibleRefused(h);
+			failing = false;
+			await vi.waitFor(async () => expect(await recordOf(h)).toMatchObject({ state: "resolved" }), {
+				timeout: 2000,
+			});
+			expect(await files()).toEqual({ marker: true, hooksFile: true });
+			expect(seeds(h)).toBe(1);
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it("hooks write fails AND the marker cannot be removed ⇒ the half pair keeps it uncertain until it is repaired", async () => {
+		const h = await setup();
+		const { files } = realCapture(h);
+		const ctlDir = path.join(h.root, ".st-control", SID);
+		let failing = true;
+		const write = activation.writeHooksFile;
+		const spy = vi.spyOn(activation, "writeHooksFile").mockImplementation(async (deps, sid) => {
+			if (failing) {
+				await fs.chmod(ctlDir, 0o555); // relay.enabled can no longer be removed
+				throw new Error("ENOSPC");
+			}
+			return write(deps, sid);
+		});
+		try {
+			const r = await h.engine.recreate(SID, IMG_N);
+			expect(r).toMatchObject({ ok: true, outcome: "committed", unresolved: true });
+			expect((r as { pending: string[] }).pending).toContain("authorize (not done)");
+			expect(await files()).toEqual({ marker: true, hooksFile: false });
+			await tick(150);
+			expect(await recordOf(h)).toMatchObject({ state: "uncertain" });
+			await expectIncompatibleRefused(h);
+			// The disk recovers.
+			failing = false;
+			await fs.chmod(ctlDir, 0o755);
+			await vi.waitFor(async () => expect(await recordOf(h)).toMatchObject({ state: "resolved" }), {
+				timeout: 2000,
+			});
+			expect(await files()).toEqual({ marker: true, hooksFile: true });
+			expect(seeds(h)).toBe(1);
+		} finally {
+			spy.mockRestore();
+			await fs.chmod(ctlDir, 0o755).catch(() => undefined);
+		}
+	});
+
+	it("relay unavailable ⇒ still authorized but not configured: uncertain until it identifies itself, no availability promised", async () => {
+		const h = await setup();
+		const { ctl, files } = realCapture(h);
+		let identified = false;
+		ctl.probe = async () => identified;
+		const r = await h.engine.recreate(SID, IMG_N);
+		expect(r).toMatchObject({ ok: true, outcome: "committed", unresolved: true });
+		// Identification may use up what is left of T_rec, so step 5 may end
+		// on the epoch rather than with a capture block: pending either way.
+		expect((r as { pending: string[] }).pending).toContain("authorize (not done)");
+		expect(await files()).toEqual({ marker: false, hooksFile: false });
+		await tick(150);
+		expect(await recordOf(h)).toMatchObject({ state: "uncertain" });
+		await expectIncompatibleRefused(h);
+		identified = true;
+		await vi.waitFor(async () => expect(await recordOf(h)).toMatchObject({ state: "resolved" }), {
+			timeout: 15_000,
+		});
+		expect(await files()).toEqual({ marker: true, hooksFile: true });
+		expect(seeds(h)).toBe(1);
+	}, 30_000);
+
+	for (const by of ["api", "cli"] as const) {
+		it(`${by} disable during the repair ⇒ both files withdrawn and seen gone, then resolved (revoked)`, async () => {
+			const h = await setup();
+			const { ctl, files } = realCapture(h);
+			// Step 5 finds no relay; the resolution's repair then waits on its probe.
+			let phase: "forward" | "repair" = "forward";
+			const asked = deferred();
+			const answer = deferred<boolean>();
+			ctl.probe = async () => {
+				if (phase === "forward") return false;
+				asked.resolve();
+				return answer.promise;
+			};
+			const r = await h.engine.recreate(SID, IMG_N);
+			phase = "repair";
+			expect(r).toMatchObject({ ok: true, unresolved: true });
+			await asked.promise;
+			expect((await files()).marker).toBe(true); // the repair's marker is down
+			await disableSession({ workspaceRoot: h.root, enabled: true, port: 3001 }, SID, by);
+			answer.resolve(true); // a positive that arrives after the disable
+			await vi.waitFor(async () => expect(await recordOf(h)).toMatchObject({ state: "resolved" }), {
+				timeout: 2000,
+			});
+			expect(await files()).toEqual({ marker: false, hooksFile: false });
+			expect(await checkRevocation(h.root, SID)).toBe("session");
+			expect(db.requested).toBe(0);
+			expect(seeds(h)).toBe(1);
+		});
+	}
 });

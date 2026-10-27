@@ -246,8 +246,12 @@ describe("E3 — the resolution converges and checks before `resolved`, under th
 		it(`a ${op} queued while the resolution converges waits for it, and runs only after \`resolved\``, async () => {
 			const h = await setup();
 			h.d1.casMode = "ambiguous-applied";
-			const gate = deferred<string>();
-			h.capture.convergeImpl = () => gate.promise;
+			const gate = deferred();
+			const real = h.capture.convergeImpl;
+			h.capture.convergeImpl = async () => {
+				await gate.promise;
+				return real();
+			};
 			await h.engine.recreate(SID, IMG_N);
 			await vi.waitFor(() => expect(h.capture.calls).toContain("converge"), { timeout: 2000 });
 			// Converging: not resolved yet, and the lock is the resolution's.
@@ -264,7 +268,7 @@ describe("E3 — the resolution converges and checks before `resolved`, under th
 			);
 			await tick(100);
 			expect(events).toEqual([]);
-			gate.resolve("written");
+			gate.resolve();
 			await queued;
 			expect(events).toEqual([`${op} ran; converge done=true`]);
 			expect(await recordOf(h)).toMatchObject({ state: "resolved" });
@@ -276,10 +280,11 @@ describe("E3 — the resolution converges and checks before `resolved`, under th
 		h.d1.casMode = "ambiguous-applied";
 		let n = 0;
 		const second = deferred();
+		const real = h.capture.convergeImpl;
 		h.capture.convergeImpl = async () => {
 			if (++n === 1) throw new Error("hooks file write failed");
 			await second.promise;
-			return "written";
+			return real();
 		};
 		await h.engine.recreate(SID, IMG_N);
 		// The second pass is held inside its converge: the first pass's

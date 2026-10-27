@@ -137,6 +137,7 @@ async function main(): Promise<void> {
 	const { RecreationEngine } = await import("./engine.js");
 	const activation = await import("../conversation/activation.js");
 	const cap = await import("../conversation/captureAuth.js");
+	const { captureFilesConverged } = await import("./capturePort.js");
 	const { checkRevocation } = await import("../conversation/revocation.js");
 	const { LABEL_ATTEMPT, LABEL_SESSION } = await import("./ports.js");
 	type SessionManager = import("../sessionManager.js").SessionManager;
@@ -246,6 +247,12 @@ async function main(): Promise<void> {
 			return authority.capture(s, { identified: w.identified });
 		},
 		converge: (s, mayAct) => ownerAuthority(mayAct).converge(s),
+		converged: (s) =>
+			captureFilesConverged(
+				ownerAuthority(() => true),
+				ROOT,
+				s,
+			),
 		deferSeedExists: (s) => cap.deferSeedExists(ROOT, s),
 		removeDeferSeed: (s) => cap.removeDeferSeed(ROOT, s),
 	};

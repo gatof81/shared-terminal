@@ -186,6 +186,13 @@ export interface RecreateCapturePort {
 	 * session's lock). Throws when it could not be done.
 	 */
 	converge(sessionId: string, mayAct: () => boolean): Promise<string>;
+	/**
+	 * Whether the capture files match what authorization allows NOW: both
+	 * on a running container with write authorization, both or neither on
+	 * a stopped one with retain authorization, neither otherwise. Read-only;
+	 * checked before `resolved` (E6) — `converge`'s answer is not enough.
+	 */
+	converged(sessionId: string): Promise<boolean>;
 	deferSeedExists(sessionId: string): Promise<boolean>;
 	removeDeferSeed(sessionId: string): Promise<void>;
 }
@@ -964,6 +971,11 @@ export class RecreationEngine {
 		let capture: CaptureBlock | null = null;
 		try {
 			capture = await run.call("authorize N", () => this.deps.capture.authorize(sessionId, run));
+			// Answering is not completing: a relay that never identified
+			// itself leaves capture authorized with neither file (E6).
+			if (!(await run.call("capture converged", () => this.deps.capture.converged(sessionId)))) {
+				incomplete.push("authorize");
+			}
 		} catch (err) {
 			if (!(err instanceof EpochClosedError)) {
 				logger.warn(
@@ -1166,7 +1178,7 @@ export class RecreationEngine {
 				await run.call("defer-skill-seed gone", () => this.deps.capture.deferSeedExists(sessionId))
 			)
 				return false;
-			return true;
+			return await run.call("capture converged", () => this.deps.capture.converged(sessionId));
 		} catch {
 			return false;
 		}
@@ -1377,6 +1389,17 @@ export class RecreationEngine {
 		if (a.snapshot.marker || a.snapshot.hooksFile) {
 			logger.info(`[recreate] ${a.sessionId}: O's capture files: ${restored}`);
 		}
+		// O's files as authorization allows them now (E6). `restore` only
+		// ever writes; what it leaves behind — a half pair from a failed
+		// withdrawal, files whose authorization a disable took away — is
+		// converged here (O is stopped: keep a complete pair, else withdraw)
+		// and seen again before the record says `resolved`.
+		if (!(await act("capture converged", () => this.deps.capture.converged(a.sessionId)))) {
+			await act("capture converge", () => this.deps.capture.converge(a.sessionId, act.mayAct));
+			if (!(await act("capture converged", () => this.deps.capture.converged(a.sessionId)))) {
+				return "retry";
+			}
+		}
 		return (await this.resolveRecord(a, lease, { kind: "rolled-back" }, "rolled back"))
 			? "resolved"
 			: "retry";
@@ -1460,6 +1483,13 @@ export class RecreationEngine {
 		if (!nNow || nNow.running !== n.running) return "retry";
 		if (await act("confirm O gone", () => d.inspect(a.oId))) return "retry";
 		if (await act("defer-skill-seed gone", () => this.deps.capture.deferSeedExists(sessionId))) {
+			return "retry";
+		}
+		// What `converge` answered is not the evidence: the files are (E6).
+		// Still authorized but incomplete (a relay that did not identify
+		// itself, a write that failed) ⇒ the next pass converges again;
+		// authorization gone ⇒ both files must be seen gone.
+		if (!(await act("capture converged", () => this.deps.capture.converged(sessionId)))) {
 			return "retry";
 		}
 		if (!(await this.execsEnded(a, act))) return "retry";

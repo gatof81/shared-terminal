@@ -384,13 +384,44 @@ export class FakeCapture implements RecreateCapturePort {
 		this.calls.push(`authorize(epochOpen=${run.epochOpen})`);
 		return this.authorizeImpl(run);
 	}
-	/** Runs inside converge (to hold it, or fail it). */
-	convergeImpl: () => Promise<string> = async () => "kept";
+	/** Set by `harness`: whether D1's container runs decides what converging means. */
+	docker: FakeDocker | null = null;
+	/** The §2.7.5 level that applies now: write (running), retain (stopped) or none. */
+	authorization(): "write" | "retain" | "none" {
+		const ok =
+			this.enabled && this.d1.row.conversation_requested === 1 && this.revocation === "none";
+		const c = this.d1.row.container_id
+			? this.docker?.containers.get(this.d1.row.container_id)
+			: null;
+		if (!ok || !c) return "none";
+		return c.running ? "write" : "retain";
+	}
+	/** Runs inside converge (to hold it, or fail it). By default, the §2.7.5 rule. */
+	convergeImpl: () => Promise<string> = async () => {
+		const level = this.authorization();
+		if (level === "write") {
+			if (this.marker && this.hooksFile) return "kept";
+			this.marker = true;
+			this.hooksFile = true;
+			return "written";
+		}
+		if (level === "retain" && this.marker && this.hooksFile) return "kept";
+		if (!this.marker && !this.hooksFile) return "nothing";
+		this.marker = false;
+		this.hooksFile = false;
+		return "withdrawn";
+	};
 	async converge() {
 		this.calls.push("converge");
 		const r = await this.convergeImpl();
 		this.calls.push("converge done");
 		return r;
+	}
+	async converged() {
+		const level = this.authorization();
+		if (level === "write") return this.marker && this.hooksFile;
+		if (level === "retain") return this.marker === this.hooksFile;
+		return !this.marker && !this.hooksFile;
 	}
 	async deferSeedExists() {
 		return this.deferSeed;
@@ -417,6 +448,7 @@ export async function harness(opts: { config?: Partial<RecreateConfig>; root?: s
 	const docker = new FakeDocker();
 	const d1 = new FakeD1();
 	const capture = new FakeCapture(d1);
+	capture.docker = docker;
 	const attempts = new RecreateAttemptStore(root);
 	const lock = new SessionLifecycleLock();
 	lock.setGuard((sid) => attempts.assertResolved(sid));

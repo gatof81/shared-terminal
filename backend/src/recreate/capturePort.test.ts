@@ -50,7 +50,7 @@ import { hashIngestToken } from "../conversation/registry.js";
 import { checkRevocation, writeSessionRevocation } from "../conversation/revocation.js";
 import type { ConversationService } from "../conversation/service.js";
 import { conversationRecreatePort } from "./capturePort.js";
-import { AttemptRun } from "./run.js";
+import { AttemptRun, EpochClosedError } from "./run.js";
 
 const SID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
 const N = "n".repeat(64);
@@ -155,13 +155,12 @@ describe("authorize (step 5) inside the attempt's epoch", () => {
 		});
 	});
 
-	it("closed epoch: nothing written, effective:false", async () => {
+	it("closed epoch: nothing written, and the refusal reaches the engine (E6)", async () => {
 		committedRow();
 		const { p } = port(async () => true);
 		const run = new AttemptRun(Date.now() + 10_000);
 		run.close("T_rec");
-		const c = await p.authorize(SID, run);
-		expect(c?.effective).toBe(false);
+		await expect(p.authorize(SID, run)).rejects.toBeInstanceOf(EpochClosedError);
 		expect(await relayEnabledExists(root, SID)).toBe(false);
 		expect(await hooksFileExists(root, SID)).toBe(false);
 	});
