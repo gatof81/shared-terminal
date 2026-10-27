@@ -15,9 +15,10 @@ Los hallazgos de código los verificó después quien redacta: leyendo el códig
 reproduciéndolos con un test temporal que no queda en el repositorio. Los smokes con Docker real
 corren en el runner aislado de CI (workflow `Session Image`). En este entorno no hay daemon.
 
-**Propuesta de dictamen: CHANGES REQUIRED** por A1 y A2, más A3 en la documentación de despliegue.
-El resto son P3, inconsistencias del contrato y decisiones pendientes que no bloquean, salvo que
-Work o el responsable digan lo contrario.
+**Dictamen de Work (sobre `6bfd302`): CHANGES REQUIRED.** A1 confirmado como P1; A2 confirmado,
+con P1 recomendado por exposición involuntaria; A3 P2; C1–C3 a corregir; y un P2 nuevo en el
+runbook (§6.1). **A1, A2, A3 y C1–C3 están corregidos en #469**, pendiente de revisión. A4–A8 siguen
+separados de los bloqueantes, y #465–#467 son decisiones del responsable.
 
 ## 1. Defectos de implementación
 
@@ -38,13 +39,19 @@ Work o el responsable digan lo contrario.
   solo comprueba archivos y `effective`, no D1 ni la marca.
 - **Variante con `--all`:** la fila queda con `requested = 1` bajo la marca global. Tras
   `enable-all`, su siguiente spawn captura y las demás no.
-- **Corrección propuesta:** en `enableSession`, leer la marca por sesión al entrar y, tras la
-  escritura en D1, volver a comprobar la revocación (global y por sesión). Si apareció o cambió,
-  devolver D1 al estado revocado (el mismo `revokeIngestTokens` de la emergencia), no borrar la marca
-  y responder 409 `revoked`/`revoked-globally`. Ampliar el test de 100 repeticiones para que
-  compruebe también D1 y la marca al final.
+- **Corrección (#469).** La propuesta original ("comprobar y luego borrar") dejaba una carrera,
+  como señaló Work. Lo implementado, sin poner la revocación detrás de ningún lock:
+  - **D1:** `sessions.revocation_seq` (v17). Cada revocación lo incrementa en su sentencia, y la
+    escritura del enable es un CAS sobre el valor leído al empezar.
+  - **Marca:** el enable la lee antes que D1 y solo retira esa misma marca. La aparta con un
+    `rename` atómico y compara; si es una más nueva, la devuelve con `link`, que nunca pisa otra.
+    Una revocación nueva se reaplica en D1 y el enable responde 409.
+  - **Orden inverso:** deshabilitar y la emergencia reafirman su marca al terminar.
+  - **Regresiones:** cinco ventanas × {CLI, API, `--all`} × {rehabilitar, primera vez}. Comprueban
+    `requested`, los dos hashes, la revocación y el siguiente spawn, más una carrera ×100 con el
+    mismo estado final.
 
-### A2 / P2 — el paso 6 escribe los puertos leídos en las precondiciones y pisa un `PATCH /ports` concurrente
+### A2 / P1 (Work) — el paso 6 escribe los puertos leídos en las precondiciones y pisa un `PATCH /ports` concurrente
 
 - **Dónde:** `backend/src/recreate/engine.ts`, el elemento `ports` del paso 6
   (`setPorts(sessionId, facts.config.ports, …)`); `facts.config` se lee en `evaluate()`. El mismo
@@ -57,8 +64,12 @@ Work o el responsable digan lo contrario.
 - **Reproducido** por la revisión de fallos entre componentes (motor real con el harness: config
   cambiada durante `start(N)` ⇒ el paso 6 escribió la lista anterior, registro `resolved`).
   Verificado leyendo el código. La resolución (`resolveToN`) ya relee la configuración.
-- **Corrección propuesta:** releer `getConfig` en el paso 6, justo antes de `setPorts`, gitIdentity
-  y postStart, como hace `resolveToN`.
+- **Corrección (#469).** Releer no bastaba: el `PATCH` podía entrar entre la lectura y la
+  escritura. `PATCH /ports` toma ahora el lock de ciclo de vida (op `ports`, modo `wait`), y la
+  recreación y cada pasada de resolución lo tienen desde la lectura hasta la escritura de los
+  mapeos. Con el intento sin resolver, la puerta del lock lo rechaza. Hay regresiones de ruta y de
+  motor: retirado y público→privado, durante el arranque y entre la última lectura y la aplicación;
+  la configuración y el dispatcher coinciden al terminar.
 
 ### A3 / P2 (documentación) — DEPLOYMENT.md manda actualizar el CLI, y eso bloquea el piloto
 
@@ -66,8 +77,10 @@ Work o el responsable digan lo contrario.
   ≥ 2.1.308 … (`claude update` in the session)".
 - **Qué:** la allowlist aprobada es **exactamente** {2.1.308}. Seguir ese paso, o que el CLI se
   autoactualice al usarlo, deja la sesión piloto con `control-marker-incompatible`.
-- **Corrección:** exigir 2.1.308 exacta, no actualizar, comprobar justo antes del `POST` y
-  desaconsejar arrancar el CLI de la sesión piloto sin el autoupdater desactivado (§7).
+- **Corrección (#469):** 2.1.308 exacta, sin `claude update` y con `DISABLE_AUTOUPDATER=1` en la
+  sesión piloto. El smoke de la imagen comprueba **estáticamente** que el CLI fijado conoce la
+  variable. Que no haya actualización solo se observa con el tiempo, así que el piloto compara la
+  versión antes y después (§7).
 
 ### A4 / P3 — `PATH` con un directorio del usuario primero
 
@@ -120,7 +133,7 @@ Work o el responsable digan lo contrario.
 - El supervisor espera con `sleep 0.5` externo: un proceso cada 0,5 s mientras falte la marca,
   frente al "sin procesos nuevos" de §2.6. Corregir el bucle o la frase.
 
-## 2. Inconsistencias del contrato (redacción; se resuelven en CONVERSATION.md)
+## 2. Inconsistencias del contrato (redacción; corregidas en #469)
 
 - **C1:** §10, smoke "Recreación correcta": "el backend muerto … después del 4 ⇒ completa con `N`"
   contradice D8 y la fila A2/P2 del mismo §10 ("Caída entre el CAS y 6.1 ⇒ … `recreate-unresolved`").
@@ -242,12 +255,20 @@ shared-terminal-session`. Con el flag apagado no hay captura que retirar. Las se
 durante la etapa 0 conservan la imagen `="2"` hasta recrearse; sin token ni montajes son
 indistinguibles de las anteriores.
 
-**Límite del rollback de backend:** un backend anterior a 3.0d no conoce el registro de intento ni
+**Límite del rollback de backend.** Un backend anterior a 3.0d no conoce el registro de intento ni
 la puerta `recreate-unresolved`: con un intento sin resolver, `start`, `stop` y el borrado duro
-actuarían sobre la sesión piloto. **No se hace rollback de backend con un intento sin resolver**;
-primero se resuelve o se elimina (borrado duro) la sesión piloto con el backend 3.0d. Un rollback a
-3.0c y vuelta a 3.0d dejaría sin captura (sin montaje de control) a las sesiones creadas en medio con
-captura; hoy no existen, porque 3.0b/3.0c nunca se desplegaron con el flag encendido.
+actuarían sobre la sesión piloto.
+
+- **Con un intento sin resolver no se hace rollback de backend.** Tras un reinicio, D8 impide
+  resolverlo automáticamente, y el borrado duro también queda bloqueado (`recreate-unresolved`),
+  así que **no hay salida disponible**. Se detiene el procedimiento y se mantiene desplegado el
+  backend 3.0d, compatible con D8: la sesión queda bloqueada y el resto sigue funcionando.
+  Deshabilitar y el comando de emergencia siguen disponibles.
+- Se espera al procedimiento de recuperación administrativa manual, cuando exista y esté validado.
+  Ni el borrado duro ni la intervención a mano en Docker o D1 se presentan como salida.
+- Un rollback a 3.0c y vuelta a 3.0d dejaría sin captura (sin montaje de control) a las sesiones
+  creadas en medio con captura. Hoy no existen, porque 3.0b y 3.0c nunca se desplegaron con el flag
+  encendido.
 
 ### 6.2 Etapa 1 — flag encendido, nadie solicitado
 
@@ -284,10 +305,13 @@ para tener un transcript (una sesión interactiva corta) y se detiene.
 **Comprobaciones previas:**
 
 1. `claude --version` en la sesión = **exactamente 2.1.308** (allowlist; cualquier otra versión
-   bloquea con `control-marker-incompatible`). **No** ejecutar `claude update`, y evitar que el CLI
-   se autoactualice antes del `POST`: crear la sesión piloto con `DISABLE_AUTOUPDATER=1` en sus
-   variables de entorno (a verificar con la versión del CLI) y volver a comprobar la versión justo
-   antes del `POST`. Una sesión cuyo CLI se actualizó ya no es recreable hasta validar esa versión.
+   bloquea con `control-marker-incompatible`).
+   - **No** ejecutar `claude update`.
+   - Crear la sesión piloto con `DISABLE_AUTOUPDATER=1` en sus variables de entorno. El smoke de la
+     imagen comprueba estáticamente que 2.1.308 conoce la variable.
+   - Anotar la versión al crearla y volver a comprobarla justo antes del `POST`.
+   - Una sesión cuyo CLI se actualizó ya no es recreable hasta validar esa versión. El propio
+     entorno de desarrollo de esta auditoría pasó solo a 2.1.311: el riesgo es real.
 2. `PATCH /api/admin/sessions/<sid>/conversation {"enabled":true}` → `requested:true`,
    `effective:false`, `requiresRecreate:true` (`container-without-capture`).
 3. `GET …/recreate` → `recreatable:true`, `blockers:[]`, `captureAfter:true`; anotar
@@ -296,9 +320,12 @@ para tener un transcript (una sesión interactiva corta) y se detiene.
 **Recreación:** `POST …/recreate {"expectImageId":"<currentImageId>"}`.
 
 - Éxito esperado: `200 committed`, sin `unresolved`; `capture.effective:true`.
-- Si responde `unresolved:true` o 500 `{unresolved:true}`: **parar el piloto**, no reintentar ni
-  intervenir a mano; recoger logs (`[recreate]`) y el registro
-  `.st-control/<sid>/recreate-attempt.json` para Work. La sesión puede quedar bloqueada (D8).
+- Si responde `unresolved:true` o 500 `{unresolved:true}`: **parar el piloto**, sin reintentar y
+  sin intervenir a mano (tampoco con un borrado duro, que queda bloqueado).
+  - Recoger los logs (`[recreate]`) y el registro `.st-control/<sid>/recreate-attempt.json`
+    para Work.
+  - La sesión puede quedar bloqueada (D8) hasta que exista un procedimiento manual validado.
+  - No hacer rollback del backend (§6.1).
 
 **Verificación (checklist):**
 
@@ -324,11 +351,7 @@ administrativa manual (D8).
 
 ## 8. Orden propuesto (pendiente de autorización)
 
-1. **PR de correcciones:**
-   - A1 y A2, con regresiones;
-   - A3, A4, A5 (solo mover `failed` dentro del lock) y A6, si Work los acepta en el mismo PR;
-   - A7 y A8 en la documentación;
-   - C1–C3 en la redacción del contrato.
+1. **PR de correcciones: #469** (A1, A2, A3 y C1–C3, con regresiones). A4–A8 van aparte.
 2. **PR de smokes:** los huecos de §5 que se pueden probar en el runner aislado.
 3. **Dictamen integral de Work** sobre 1 y 2, y decisiones P-1 a P-3 del responsable.
 4. **Despliegue coordinado:** etapas 0 y 1 (§6), con autorización expresa.
