@@ -480,6 +480,18 @@ mkdir -p ~/.claude && printf '{"skipDangerousModePermissionPrompt": true, "hooks
 		.map((c) => c.Path)
 		.filter((p) => p.startsWith("/tmp/"));
 	console.log(`  · O's layer under /tmp: ${JSON.stringify(tmpLayer)}`);
+	const homeLayer = (
+		(await docker.getContainer(O).changes()) as Array<{ Path: string; Kind: number }>
+	)
+		.filter(
+			(c) =>
+				c.Path.startsWith("/home/developer/") && !c.Path.startsWith("/home/developer/workspace"),
+		)
+		.map((c) => `${c.Kind} ${c.Path}`);
+	console.log(`  · O's layer under HOME (Kind Path): ${JSON.stringify(homeLayer)}`);
+	for (const p of tmpLayer.filter((x) => x.endsWith(".output"))) {
+		console.log(`  · archive stat of ${p}: ${JSON.stringify(await real.statPath(O, p))}`);
+	}
 	check(
 		"the run left the observed shapes: fswatch probes and a subagent task link",
 		tmpLayer.some((p) => /\/fswatch-probe-[A-Za-z0-9]{6}\/probe$/.test(p)) &&

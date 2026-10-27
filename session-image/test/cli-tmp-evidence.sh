@@ -80,6 +80,13 @@ report() { # report <container> <label>: stop it, then what the preflight would 
 	echo "════ $2 ════"
 	echo "── docker diff (stopped), entries under /tmp ──"
 	docker diff "$1" | grep -E '^[ACD] /tmp(/|$)'
+	echo "── docker diff (stopped), entries under HOME outside the workspace ──"
+	docker diff "$1" | grep -E '^[ACD] /home/developer/' | grep -v -E ' /home/developer/workspace(/|$)'
+	echo "── tar -tv of those HOME entries (type, size, target; no content) ──"
+	local h
+	while IFS= read -r h; do
+		docker cp "$1":"$h" - 2>/dev/null | tar -tvf - 2>/dev/null | head -n 20
+	done < <(docker diff "$1" | awk '$1 == "A" && $2 ~ "^/home/developer/" && $2 !~ "^/home/developer/workspace" { print $2 }')
 	echo "── tar -tv of /tmp (type mode owner size … name [-> target]) ──"
 	docker cp "$1":/tmp - 2>/dev/null | tar -tvf - | grep -v -E ' tmp/(\.st-ready|st-relay\.log|tmux-1000.*)?$'
 	echo "── first bytes of regular files ≤ 4 KiB outside tmux/sentinel ──"
@@ -88,7 +95,7 @@ report() { # report <container> <label>: stop it, then what the preflight would 
 		echo "  [$f]"
 		docker cp "$1":"/$f" - 2>/dev/null | tar -xOf - 2>/dev/null | head -c 160 | od -An -c | head -n 3 | sed 's/^/    /'
 	done < <(docker cp "$1":/tmp - 2>/dev/null | tar -tvf - | awk '$1 ~ /^-/ && $3 <= 4096 { print $NF }' |
-		grep -v -E '^tmp/(\.st-ready|st-relay\.log)$')
+		grep -E '^tmp/(cc-socks|claude-1000)/')
 }
 
 S=$(session a)
