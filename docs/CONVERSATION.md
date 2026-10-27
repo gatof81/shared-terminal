@@ -5,7 +5,8 @@ por el responsable el 2026-10-23; decisiones de cierre de 3.0c sobre `emissionSt
 par `tool_failed`/`tool_end`, 2026-10-23; en 3.0d, recreación administrativa y activación
 progresiva §2.7, diseño aprobado por Work y el responsable el 2026-10-26; aclaraciones de la
 revisión Work de #459 —evidencia de exec, `T_rec` completo, resolución bajo el lock, restauración
-con revocación concurrente, puntos 2, 3 y 8 y patrón de nombres—, 2026-10-27), vinculante para los PRs
+con revocación concurrente, puntos 2, 3 y 8 y patrón de nombres—, 2026-10-27; segunda revisión: código
+de salida obligatorio, efectos compuestos y apagado, 2026-10-27), vinculante para los PRs
 3.0b–3.4.** El razonamiento está en [docs/design/phase3-conversation-activity.md](./design/phase3-conversation-activity.md)
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
 `ac1024d`); si los dos documentos difieren, manda este;
@@ -677,8 +678,9 @@ petición después de que el cliente dejó de esperarla. Reglas:
     cuando dockerd cerró el stream, dice que no está en marcha y da un código de salida. Un stream
     cortado, un inspect que falla, `Running` todavía verdadero o un `ExitCode` no numérico son
     **terminación desconocida**: el proceso puede seguir corriendo y escribiendo. No es un fallo ni
-    un éxito. El intento no se resuelve mientras quede uno, hasta que el exec se observe terminado,
-    o su contenedor detenido o eliminado. El cliente no corta nunca el stream de un exec de la
+    un éxito. El intento no se resuelve mientras quede uno, hasta que el exec se observe terminado
+    **con un código de salida numérico**, o su contenedor detenido o eliminado. `Running` falso sin
+    código de salida sigue siendo terminación desconocida. El cliente no corta nunca el stream de un exec de la
     recreación; el `timeout` dentro del contenedor acota el proceso, y su 124/137 sí es una
     terminación conocida.
 - **D1: las peticiones sí se cortan** (tope de 10 s del cliente de D1). Una sentencia no puede
@@ -739,10 +741,17 @@ petición después de que el cliente dejó de esperarla. Reglas:
   antes de cualquier efecto. Si está cerrada, solo registra la respuesta como evidencia para la
   resolución y no hace nada más: no escribe D1, no renombra, no crea, no arranca, no escribe
   marcas ni archivos, no siembra.
+- Una **operación compuesta** (varios efectos dentro de una misma petición del intento) comprueba
+  la época **antes de cada efecto**, no solo al empezar: con la época cerrada no inicia el
+  siguiente, y lo ya enviado sigue en seguimiento como evidencia. Son compuestas: el reemplazo de
+  puertos en D1 (un `DELETE` y un `INSERT` por puerto), la preparación de captura del paso 1, el
+  exec (crearlo y arrancarlo: un exec creado tarde no se arranca) y el procedimiento de escritura
+  de §2.7.5.
 - Ejemplos:
   - un probe que responde positivo después del tope no escribe `conversation.json`;
   - un `create` que termina tarde no lleva a arrancar `N`;
-  - un rename tardío no se da por hecho.
+  - un rename tardío no se da por hecho;
+  - un `DELETE` de puertos que responde tarde no lleva a ningún `INSERT`.
 
 **Siempre permitidos**, en cualquier estado: `PATCH {enabled:false}` y el comando de emergencia.
 Solo escriben la marca de revocación y D1, y borran archivos. El CAS no puede pisarlos, porque exige
@@ -818,6 +827,14 @@ antes de su siguiente acción, y la termina otra pasada bajo el lock. `resolved`
 después de hacer y re-observar la acción de la fila (con D1 = `N`: estado, puertos, `defer-skill-seed`,
 siembra y la convergencia de captura de §2.7.5), de modo que `start`, `stop` o `delete` nunca se
 intercalan con ella.
+
+La resolución sigue la misma regla de las operaciones compuestas: antes de cada acción, y antes de
+cada efecto dentro de una (los puertos, la siembra, la restauración del rollback y la convergencia
+de §2.7.5 a través de la autoridad del intento), comprueba que la pasada conserva el lock y que el
+proceso no se está apagando. El apagado ordenado del backend cierra todas las épocas y detiene las
+pasadas antes de su siguiente efecto: una convergencia que esperaba un probe no escribe
+`conversation.json` con la respuesta tardía, retira la marca que había escrito, y el registro sigue
+sin resolver (D8). Lo ya enviado se conserva en seguimiento.
 
 #### 2.7.5 Autorización del relay y marcas
 
@@ -1547,6 +1564,13 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
         solo después de `resolved`; una convergencia que falla o no se mantiene no se resuelve;
       - disable por API y por CLI durante la escritura de la marca o del archivo en la
         restauración del rollback ⇒ estado final revocado, sin marca ni archivo.
+- [ ] **Segunda revisión de #459 (E1, E2, E5):**
+      - un exec pendiente que se observa `{Running: false}` sin código de salida ⇒ sigue `uncertain`
+        y bloqueado; se resuelve con un código de salida o con su contenedor detenido o eliminado;
+      - con el `setPorts` real: `DELETE` pendiente, vence `T_rec`, respuesta tardía ⇒ ningún
+        `INSERT` nuevo; solo la resolución reescribe los puertos;
+      - convergencia real con el probe pendiente, `stop()`, positivo tardío ⇒ ningún
+        `conversation.json` nuevo y registro sin resolver.
 - [ ] Las cuatro filas de `reconcile` de §2.7.4. Los nombres que no encajan con el patrón
       reservado no se tocan. El rename de `O` con el nombre canónico ocupado por `N` se trata como
       estado incierto.
