@@ -37,7 +37,12 @@ export type LifecycleOp =
 	// `PATCH …/conversation {enabled:true}` (#464 R1): it writes the marker
 	// and the hooks file, so it must not interleave with a delete, a start
 	// or a recreation. Disable and the emergency CLI never take the lock.
-	| "enable";
+	| "enable"
+	// `PATCH /sessions/:id/ports` (3.0d audit A2): the recreation's step 6 and
+	// its resolution rewrite the port mappings from the config they read
+	// under this lock; a ports edit between that read and the write would be
+	// overwritten — a port made private or removed coming back public.
+	| "ports";
 
 export class SessionBusyError extends Error {
 	readonly code = "busy";

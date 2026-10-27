@@ -140,6 +140,18 @@ if [ -n "$PIN" ] && [[ "$GOT" == "$PIN"* ]]; then ok "claude --version = $GOT (p
 	fail "claude --version = '$GOT', Dockerfile pin = '$PIN'"
 fi
 
+# The 3.0d pilot keeps the workspace CLI at exactly the validated version by
+# starting it with DISABLE_AUTOUPDATER=1 (docs/DEPLOYMENT.md). Static
+# evidence that the pinned CLI reads that variable: its name is in the
+# installed package. That an update then really does not happen needs the
+# network and time, so the pilot also checks `claude --version` before and
+# after (docs/design/phase3-3.0d-audit.md §7).
+if docker exec "$C1" bash -c 'p=$(readlink -f "$(command -v claude)"); root=${p%/bin/*}; grep -aqr DISABLE_AUTOUPDATER "$root"'; then
+	ok "the pinned CLI knows DISABLE_AUTOUPDATER (static check)"
+else
+	fail "DISABLE_AUTOUPDATER not found in the pinned CLI package — the pilot's update guard is unverified"
+fi
+
 # ── Phase 4: file symlink survives a real CLI config write ──────────────────
 phase "Phase 4: ~/.claude.json symlink survives a config write"
 # Unauthenticated on purpose: the CLI prints "Not logged in" but still

@@ -44,11 +44,13 @@ export interface SessionCaptureRow {
 	user_id: string;
 	/** 3.0d: the container whose token must correspond (§2.7.6). */
 	container_id: string | null;
+	/** 3.0d audit A1: bumped by every revocation (migration v17). */
+	revocation_seq?: number;
 }
 
 export async function getSessionCapture(sessionId: string): Promise<SessionCaptureRow | null> {
 	const r = await d1Query<SessionCaptureRow>(
-		"SELECT status, conversation_requested, ingest_token_hash, ingest_token_hash_suspended, user_id, container_id FROM sessions WHERE session_id = ?",
+		"SELECT status, conversation_requested, ingest_token_hash, ingest_token_hash_suspended, user_id, container_id, revocation_seq FROM sessions WHERE session_id = ?",
 		[sessionId],
 	);
 	return r.results[0] ?? null;
@@ -71,33 +73,57 @@ export async function setIngestTokenHash(sessionId: string, hash: string | null)
 	]);
 }
 
+// Every revocation bumps `revocation_seq` in its own statement, and the
+// enable writes below apply only while it still holds the value the enable
+// read at its start (3.0d audit A1). D1 statements are atomic, so a
+// revocation that lands while an enable is in flight — from this process
+// or from the emergency CLI — either happens before the enable's write
+// (which then matches 0 rows and refuses) or after it (and wins). Never
+// overwritten, and without a lock the emergency would have to wait for.
+
 /** Disable: move the live hash aside so a later enable can restore it (§2.4). */
 export async function suspendIngestToken(sessionId: string): Promise<void> {
 	await d1Query(
-		"UPDATE sessions SET ingest_token_hash_suspended = ingest_token_hash, ingest_token_hash = NULL, conversation_requested = 0 WHERE session_id = ?",
+		"UPDATE sessions SET ingest_token_hash_suspended = ingest_token_hash, ingest_token_hash = NULL, conversation_requested = 0, revocation_seq = revocation_seq + 1 WHERE session_id = ?",
 		[sessionId],
 	);
 }
 
-/** Enable on a container that still carries its token: restore the hash. */
-export async function restoreIngestToken(sessionId: string): Promise<void> {
-	await d1Query(
-		"UPDATE sessions SET ingest_token_hash = COALESCE(ingest_token_hash, ingest_token_hash_suspended), ingest_token_hash_suspended = NULL, conversation_requested = 1 WHERE session_id = ?",
-		[sessionId],
+/**
+ * Enable on a container that still carries its token: restore the hash —
+ * only if no revocation happened since `seq` was read. True when applied.
+ */
+export async function restoreIngestTokenIfUnrevoked(
+	sessionId: string,
+	seq: number,
+): Promise<boolean> {
+	const r = await d1Query(
+		"UPDATE sessions SET ingest_token_hash = COALESCE(ingest_token_hash, ingest_token_hash_suspended), ingest_token_hash_suspended = NULL, conversation_requested = 1 WHERE revocation_seq = ? AND session_id = ?",
+		[seq, sessionId],
 	);
+	return r.meta.changes === 1;
+}
+
+/** Enable: `conversation_requested = 1`, only if no revocation since `seq`. True when applied. */
+export async function setRequestedIfUnrevoked(sessionId: string, seq: number): Promise<boolean> {
+	const r = await d1Query(
+		"UPDATE sessions SET conversation_requested = 1 WHERE revocation_seq = ? AND session_id = ?",
+		[seq, sessionId],
+	);
+	return r.meta.changes === 1;
 }
 
 /** Emergency / global off: everything to NULL and requested=0. */
 export async function revokeIngestTokens(sessionId: string): Promise<void> {
 	await d1Query(
-		"UPDATE sessions SET ingest_token_hash = NULL, ingest_token_hash_suspended = NULL, conversation_requested = 0 WHERE session_id = ?",
+		"UPDATE sessions SET ingest_token_hash = NULL, ingest_token_hash_suspended = NULL, conversation_requested = 0, revocation_seq = revocation_seq + 1 WHERE session_id = ?",
 		[sessionId],
 	);
 }
 
 export async function revokeAllIngestTokens(): Promise<void> {
 	await d1Query(
-		"UPDATE sessions SET ingest_token_hash = NULL, ingest_token_hash_suspended = NULL, conversation_requested = 0",
+		"UPDATE sessions SET ingest_token_hash = NULL, ingest_token_hash_suspended = NULL, conversation_requested = 0, revocation_seq = revocation_seq + 1",
 	);
 }
 

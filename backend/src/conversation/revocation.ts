@@ -20,6 +20,7 @@
  * `rename` returns admits the event" holds across processes and crashes.
  */
 
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { assertContained, assertSafeComponent } from "./ids.js";
@@ -28,6 +29,11 @@ export interface RevocationMarker {
 	at: string;
 	by: "cli" | "api";
 	reason?: string;
+	/**
+	 * Unique per write (3.0d audit A1): an enable retires only the marker it
+	 * saw when it started, never a newer one written meanwhile.
+	 */
+	id?: string;
 }
 
 export const REVOKED_FILE = "REVOKED";
@@ -89,14 +95,81 @@ export async function writeSessionRevocation(
 	stSessionId: string,
 	marker: RevocationMarker,
 ): Promise<void> {
-	await writeMarker(revokedPath(workspaceRoot, stSessionId), marker);
+	await writeMarker(revokedPath(workspaceRoot, stSessionId), { ...marker, id: randomUUID() });
 }
 
 export async function writeGlobalRevocation(
 	workspaceRoot: string,
 	marker: RevocationMarker,
 ): Promise<void> {
-	await writeMarker(revokedAllPath(workspaceRoot), marker);
+	await writeMarker(revokedAllPath(workspaceRoot), { ...marker, id: randomUUID() });
+}
+
+/** The per-session marker's exact bytes, or null if there is none. Other errors throw. */
+export async function readSessionRevocation(
+	workspaceRoot: string,
+	stSessionId: string,
+): Promise<string | null> {
+	try {
+		return await fs.readFile(revokedPath(workspaceRoot, stSessionId), "utf8");
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+		throw err;
+	}
+}
+
+/**
+ * Retire the per-session marker only if it is still `expected` — the bytes
+ * an enable read when it started (3.0d audit A1). Not "compare, then
+ * delete": the marker is first moved aside with one atomic `rename`, so
+ * what gets compared is exactly what was taken. If it is not `expected` (a
+ * disable or the emergency CLI wrote a newer one), it goes back with `link`,
+ * which never overwrites a marker written in between. Only that rare
+ * mismatch leaves the name empty for the instant between the two calls;
+ * the newer revocation's own D1 write and its final re-assertion
+ * (`disableSession`) still hold.
+ *
+ * "newer": a marker other than `expected` is (or was) there — the caller
+ * must not proceed as if unrevoked.
+ */
+export async function retireSessionRevocation(
+	workspaceRoot: string,
+	stSessionId: string,
+	expected: string | null,
+): Promise<"removed" | "absent" | "newer"> {
+	const file = revokedPath(workspaceRoot, stSessionId);
+	if (expected === null) return (await exists(file)) ? "newer" : "absent";
+	const aside = `${file}.retiring.${randomUUID()}`;
+	try {
+		await fs.rename(file, aside);
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") return "absent";
+		throw err;
+	}
+	let taken: string;
+	try {
+		taken = await fs.readFile(aside, "utf8");
+	} catch {
+		taken = "";
+	}
+	if (taken === expected) {
+		await fs.rm(aside, { force: true });
+		await fsyncDir(path.dirname(file));
+		return "removed";
+	}
+	try {
+		await fs.link(aside, file);
+	} catch (err) {
+		// EEXIST: an even newer marker is already in place — keep that one.
+		if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
+			// Never leave the newer revocation only under the aside name.
+			await fs.rename(aside, file).catch(() => undefined);
+			throw err;
+		}
+	}
+	await fs.rm(aside, { force: true });
+	await fsyncDir(path.dirname(file));
+	return "newer";
 }
 
 export async function removeSessionRevocation(

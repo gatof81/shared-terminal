@@ -424,9 +424,16 @@ from step 4 on, for sessions explicitly requested.
    no relay listens
    (`bash -c '(exec 3<>/dev/tcp/127.0.0.1/47613)'` fails) and `claude -p hola`
    behaves as before. The CLI pin seeds **fresh** workspaces only; an
-   existing workspace keeps its persisted (self-updating) CLI, so check
-   `claude --version` ≥ 2.1.308 before including a session in a pilot
-   (`claude update` in the session).
+   existing workspace keeps its persisted, **self-updating** CLI. Recreation
+   (3.0d) accepts only a workspace CLI of **exactly 2.1.308** (the validated
+   allowlist; anything else, newer included, is refused with
+   `control-marker-incompatible`). So for a pilot session: never run
+   `claude update`; create it with `DISABLE_AUTOUPDATER=1` among its env vars
+   so the CLI does not update itself (the session-image smoke checks that the
+   pinned 2.1.308 knows the variable; that no update then happens is only
+   observable over time, so compare `claude --version` before and after);
+   and check `claude --version` = 2.1.308 again right before the
+   recreation `POST`.
 3. **Flag on**, still no session requested: `CONVERSATION_ENABLED=true` in
    `.env`, `docker compose up -d`. Boot `reconcile` writes nothing (no row
    requested); every ingest stays `disabled`.

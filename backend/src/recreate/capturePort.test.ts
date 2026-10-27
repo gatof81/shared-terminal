@@ -19,7 +19,7 @@ const dbStubs = vi.hoisted(() => ({
 		}
 		dbStubs.writes.push(sql);
 		// The disable statements (registry.ts): requested goes to 0.
-		if (/^UPDATE sessions SET .*conversation_requested = 0 WHERE session_id/.test(sql)) {
+		if (/^UPDATE sessions SET .*conversation_requested = 0[^W]*WHERE session_id/.test(sql)) {
 			const row = dbStubs.sessions.get(String(params[0]));
 			if (row) {
 				row.conversation_requested = 0;

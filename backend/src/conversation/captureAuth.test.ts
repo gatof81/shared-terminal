@@ -7,6 +7,7 @@
  * mocked at the module boundary, Docker faked through the port.
  */
 
+import * as nodeFs from "node:fs";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -21,10 +22,34 @@ const dbStubs = vi.hoisted(() => ({
 			const row = dbStubs.sessions.get(String(params[0]));
 			return { results: row ? [{ ...row }] : [], success: true, meta: {} };
 		}
+		if (/^UPDATE sessions SET/.test(sql) && !sql.includes("WHERE")) {
+			// revokeAllIngestTokens (`--all`): every row, like the real statement.
+			for (const row of dbStubs.sessions.values()) {
+				row.ingest_token_hash = null;
+				row.ingest_token_hash_suspended = null;
+				row.conversation_requested = 0;
+				row.revocation_seq = Number(row.revocation_seq ?? 0) + 1;
+			}
+			return { results: [], success: true, meta: { changes: dbStubs.sessions.size } };
+		}
 		if (/^UPDATE sessions SET/.test(sql)) {
 			const row = dbStubs.sessions.get(String(params[params.length - 1]));
+			// The `revocation_seq` guard of the enable writes (3.0d audit A1).
+			if (
+				row &&
+				sql.includes("WHERE revocation_seq = ? AND") &&
+				(row.revocation_seq ?? 0) !== params[0]
+			) {
+				return { results: [], success: true, meta: { changes: 0 } };
+			}
+			if (row && sql.includes("revocation_seq = revocation_seq + 1")) {
+				row.revocation_seq = Number(row.revocation_seq ?? 0) + 1;
+			}
 			if (row) {
-				if (sql.includes("conversation_requested = ?")) row.conversation_requested = params[0];
+				if (sql.startsWith("UPDATE sessions SET conversation_requested = 1 WHERE")) {
+					row.conversation_requested = 1;
+				} else if (sql.includes("conversation_requested = ?"))
+					row.conversation_requested = params[0];
 				else if (sql.includes("ingest_token_hash_suspended = ingest_token_hash")) {
 					row.ingest_token_hash_suspended = row.ingest_token_hash;
 					row.ingest_token_hash = null;
@@ -39,6 +64,7 @@ const dbStubs = vi.hoisted(() => ({
 					row.conversation_requested = 0;
 				}
 			}
+			return { results: [], success: true, meta: { changes: row ? 1 : 0 } };
 		}
 		return { results: [], success: true, meta: {} };
 	}),
@@ -48,10 +74,13 @@ const dbStubs = vi.hoisted(() => ({
 vi.mock("../db.js", () => dbStubs);
 
 import {
+	disableAll,
 	disableSession,
 	enableSession,
 	hooksFileExists,
 	hooksFilePath,
+	prepareSpawnCapture,
+	RevokedMeanwhileError,
 	removeHooksFile,
 	writeHooksFile,
 } from "./activation.js";
@@ -70,6 +99,7 @@ import {
 	writeRelayEnabled,
 } from "./captureAuth.js";
 import { getSessionCapture, hashIngestToken } from "./registry.js";
+import * as revocationModule from "./revocation.js";
 import { checkRevocation, writeSessionRevocation } from "./revocation.js";
 
 const TOKEN = "b".repeat(64);
@@ -746,5 +776,236 @@ describe("control dir helpers", () => {
 	});
 	it("refuses unsafe session ids", () => {
 		for (const bad of ["../x", "a/b", ""]) expect(() => controlDir(root, bad)).toThrow();
+	});
+});
+
+// ── 3.0d audit A1: a revocation during an enable stays persistent ──────────
+
+/**
+ * The emergency CLI runs `disableSession(…, "cli")` / `disableAll` in ANOTHER
+ * process, with no lock. What makes these interleavings representative of
+ * that: everything the two sides share is a single D1 statement or a single
+ * `rename` / `link` / `stat` — atomic across processes — and the enable's
+ * reads and writes happen in the order the windows below cut between.
+ */
+describe("3.0d audit A1: a revocation landing during an enable wins, in D1, the marker and the next spawn", () => {
+	type Revoke = (sid: string) => Promise<unknown>;
+	const cli: Revoke = (sid) => disableSession(deps(), sid, "cli");
+	const api: Revoke = (sid) => disableSession(deps(), sid, "api");
+	const all: Revoke = () => disableAll(deps());
+
+	/** Where the revocation runs, relative to the enable's steps. */
+	const windows: Array<[string, (sid: string, revoke: Revoke) => () => void]> = [
+		[
+			"after the enable read the marker, before it read revocation_seq",
+			(_sid, revoke) => {
+				const real = revocationModule.readSessionRevocation;
+				let armed = true;
+				const spy = vi
+					.spyOn(revocationModule, "readSessionRevocation")
+					.mockImplementation(async (r, s) => {
+						const out = await real(r, s);
+						if (armed) {
+							armed = false;
+							await revoke(s);
+						}
+						return out;
+					});
+				return () => spy.mockRestore();
+			},
+		],
+		[
+			"between the read of revocation_seq and the D1 write",
+			() => () => undefined, // installed on the authority below
+		],
+		[
+			"between the D1 write and the marker's retirement",
+			(_sid, revoke) => {
+				const real = revocationModule.retireSessionRevocation;
+				const spy = vi
+					.spyOn(revocationModule, "retireSessionRevocation")
+					.mockImplementation(async (r, s, e) => {
+						await revoke(s);
+						return real(r, s, e);
+					});
+				return () => spy.mockRestore();
+			},
+		],
+		[
+			"during the retirement, right after the marker was moved aside",
+			(sid, revoke) => {
+				const real = nodeFs.promises.rename.bind(nodeFs.promises);
+				let armed = true;
+				const spy = vi.spyOn(nodeFs.promises, "rename").mockImplementation(async (from, to) => {
+					await real(from, to);
+					if (armed && String(to).includes(".retiring.")) {
+						armed = false;
+						await revoke(sid);
+					}
+				});
+				return () => spy.mockRestore();
+			},
+		],
+		[
+			"after the retirement, before the write procedure",
+			(_sid, revoke) => {
+				const real = revocationModule.retireSessionRevocation;
+				const spy = vi
+					.spyOn(revocationModule, "retireSessionRevocation")
+					.mockImplementation(async (r, s, e) => {
+						const out = await real(r, s, e);
+						await revoke(s);
+						return out;
+					});
+				return () => spy.mockRestore();
+			},
+		],
+	];
+
+	async function final(sid: string) {
+		const row = dbStubs.sessions.get(sid) as Record<string, unknown>;
+		const spawn = await prepareSpawnCapture(deps(), sid, { imageId: "sha256:i", relay2: true });
+		return {
+			requested: row.conversation_requested,
+			hash: row.ingest_token_hash,
+			suspended: row.ingest_token_hash_suspended,
+			revocation: await checkRevocation(root, sid),
+			nextSpawnHasToken: spawn.env.some((e) => e.startsWith("ST_INGEST_TOKEN=")),
+			hooksFile: await exists(hooksFilePath(root, sid)),
+			marker: await exists(relayEnabledPath(root, sid)),
+		};
+	}
+
+	const starts: Array<[string, (sid: string) => Promise<void>]> = [
+		[
+			"re-enable after an API disable",
+			async (sid) => {
+				session(sid);
+				await disableSession(deps(), sid, "api");
+			},
+		],
+		[
+			"first enable of a session never requested",
+			async (sid) => {
+				session(sid, { conversation_requested: 0, ingest_token_hash: null });
+			},
+		],
+	];
+
+	let n = 0;
+	for (const [startLabel, start] of starts) {
+		for (const [by, revoke] of [
+			["emergency CLI", cli],
+			["API disable", api],
+			["emergency --all", all],
+		] as const) {
+			for (const [where, install] of windows) {
+				// Without a marker at the start there is nothing to retire, so
+				// that window does not exist (the enable never renames).
+				if (where.startsWith("during the retirement") && startLabel.startsWith("first enable"))
+					continue;
+				it(`${startLabel}; ${by} ${where}`, async () => {
+					const sid = `a1-${n++}`;
+					await start(sid);
+					const { authority } = make({});
+					let restore = install(sid, revoke);
+					if (where.startsWith("between the read of revocation_seq")) {
+						const realFacts = authority.facts.bind(authority);
+						let armed = true;
+						authority.facts = async (s: string) => {
+							const f = await realFacts(s);
+							if (armed) {
+								armed = false;
+								await revoke(s);
+							}
+							return f;
+						};
+						restore = () => undefined;
+					}
+					let outcome: string;
+					try {
+						const r = await enableSession(deps(), authority, sid, async () => false);
+						outcome = r.capture.effective ? "enabled, effective" : "enabled, not effective";
+					} catch (err) {
+						outcome = (err as Error).name;
+					} finally {
+						restore();
+					}
+					const f = await final(sid);
+					// Whatever the enable answered, the revocation is what holds.
+					expect([outcome, f.requested]).toEqual([outcome, 0]);
+					expect([outcome, f.hash]).toEqual([outcome, null]);
+					expect([outcome, f.revocation]).toEqual([
+						outcome,
+						by === "emergency --all" ? "global" : "session",
+					]);
+					expect([outcome, f.nextSpawnHasToken]).toEqual([outcome, false]);
+					expect([outcome, f.hooksFile, f.marker]).toEqual([outcome, false, false]);
+					if (by === "emergency CLI" || by === "emergency --all") {
+						// The emergency nulls both: nothing a later enable could restore.
+						expect([outcome, f.suspended]).toEqual([outcome, null]);
+					}
+					expect(outcome).not.toBe("enabled, effective");
+				});
+			}
+		}
+	}
+
+	it("the enable is refused with RevokedMeanwhileError when it lost the D1 race", async () => {
+		const sid = "a1-refused";
+		session(sid, { conversation_requested: 0, ingest_token_hash: null });
+		const { authority } = make({});
+		const realFacts = authority.facts.bind(authority);
+		let armed = true;
+		authority.facts = async (s: string) => {
+			const f = await realFacts(s);
+			if (armed) {
+				armed = false;
+				await cli(s);
+			}
+			return f;
+		};
+		await expect(enableSession(deps(), authority, sid, async () => false)).rejects.toBeInstanceOf(
+			RevokedMeanwhileError,
+		);
+	});
+
+	it("without any concurrent revocation an enable still clears the marker it started from", async () => {
+		const sid = "a1-plain";
+		session(sid);
+		await disableSession(deps(), sid, "api");
+		const { authority } = make({});
+		const r = await enableSession(deps(), authority, sid, async () => false);
+		expect(r.capture.effective).toBe(true);
+		expect(await checkRevocation(root, sid)).toBe("none");
+		expect(dbStubs.sessions.get(sid)).toMatchObject({
+			conversation_requested: 1,
+			ingest_token_hash: HASH,
+		});
+	});
+
+	it("disable racing enable ×100 (random timing, enable first): after both settle the revocation holds in D1, the marker and the next spawn", async () => {
+		for (let i = 0; i < 100; i++) {
+			const sid = `a1-race${i}`;
+			session(sid, { conversation_requested: 0, ingest_token_hash: null });
+			const { authority } = make({
+				probe: async () => {
+					await new Promise((r) => setTimeout(r, i % 3));
+					return true;
+				},
+			});
+			const enable = enableSession(deps(), authority, sid, async () => false);
+			await new Promise((r) => setTimeout(r, i % 4));
+			const disable = cli(sid);
+			await Promise.allSettled([enable, disable]);
+			const f = await final(sid);
+			expect([i, f.requested, f.hash, f.revocation, f.nextSpawnHasToken]).toEqual([
+				i,
+				0,
+				null,
+				"session",
+				false,
+			]);
+		}
 	});
 });

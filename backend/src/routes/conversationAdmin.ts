@@ -16,7 +16,11 @@
 import type { Request, Response, Router } from "express";
 import type { AuthedRequest } from "../auth.js";
 import { requireAdmin } from "../auth.js";
-import { ConversationDisabledError, RevokedGloballyError } from "../conversation/activation.js";
+import {
+	ConversationDisabledError,
+	RevokedGloballyError,
+	RevokedMeanwhileError,
+} from "../conversation/activation.js";
 import { logger } from "../logger.js";
 import * as observeLog from "../observeLog.js";
 import { RecreateUnresolvedError } from "../recreateAttempt.js";
@@ -103,6 +107,12 @@ export function registerConversationAdminRoutes(router: Router, ctx: RouteContex
 			} catch (err) {
 				if (err instanceof ConversationDisabledError) {
 					res.status(409).json({ error: "flag-off" });
+					return;
+				}
+				if (err instanceof RevokedMeanwhileError) {
+					// A disable or the emergency CLI landed while enabling: it won
+					// (3.0d audit A1).
+					res.status(409).json({ error: "revoked" });
 					return;
 				}
 				if (err instanceof RevokedGloballyError) {

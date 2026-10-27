@@ -453,3 +453,70 @@ describe("E6 — an authorization that did not complete is pending, never `resol
 		});
 	}
 });
+
+// ── 3.0d audit A2: a ports edit during a recreation is never overwritten ───
+
+describe("A2 — a PATCH /ports during a recreation: config and dispatcher agree at the end", () => {
+	/** The route's body (routes/sessions.ts), under the same lifecycle lock. */
+	function patchPorts(h: H, ports: Array<{ container: number; public: boolean }>) {
+		return h.lock.run(SID, "ports", async () => {
+			h.d1.config = { ...h.d1.config, ports };
+			await h.d1.setPorts(SID, ports, () => true);
+		});
+	}
+	const PUBLIC = [{ container: 3000, public: true }];
+
+	for (const [label, edit] of [
+		["removed", [] as Array<{ container: number; public: boolean }>],
+		["public → private", [{ container: 3000, public: false }]],
+	] as const) {
+		it(`port ${label} while N starts ⇒ the edit waits and lands last`, async () => {
+			const h = await setup();
+			h.d1.config = { ...h.d1.config, ports: PUBLIC };
+			let edited: Promise<void> | null = null;
+			h.docker.hooks.set("start", (a) => {
+				if (a[0] !== O_ID && !edited) edited = patchPorts(h, edit);
+			});
+			const r = await h.engine.recreate(SID, IMG_N);
+			expect(r).toMatchObject({ ok: true, outcome: "committed" });
+			await edited;
+			expect(h.d1.config.ports).toEqual(edit);
+			expect(h.d1.mappings).toEqual(edit);
+		});
+
+		it(`port ${label} between the last config read and step 6's write ⇒ still the edit`, async () => {
+			const h = await setup();
+			h.d1.config = { ...h.d1.config, ports: PUBLIC };
+			const real = h.d1.setPorts.bind(h.d1);
+			let edited: Promise<void> | null = null;
+			h.d1.setPorts = async (sid, ports, mayAct) => {
+				// The recreation is about to apply what it read: the edit arrives now.
+				if (!edited) edited = patchPorts(h, edit);
+				await new Promise((r) => setTimeout(r, 30));
+				return real(sid, ports, mayAct);
+			};
+			const r = await h.engine.recreate(SID, IMG_N);
+			expect(r).toMatchObject({ ok: true, outcome: "committed" });
+			await edited;
+			expect(h.d1.config.ports).toEqual(edit);
+			expect(h.d1.mappings).toEqual(edit);
+		});
+	}
+
+	it("while the recreation is unresolved the edit is refused (recreate-unresolved) and the resolution converges config and mappings", async () => {
+		const h = await setup();
+		h.d1.config = { ...h.d1.config, ports: PUBLIC };
+		h.d1.casMode = "ambiguous-applied";
+		const r = await h.engine.recreate(SID, IMG_N);
+		expect(r).toMatchObject({ ok: false, step: "commit", unresolved: true });
+		await expect(patchPorts(h, [])).rejects.toBeInstanceOf(RecreateUnresolvedError);
+		await vi.waitFor(async () => expect(await recordOf(h)).toMatchObject({ state: "resolved" }), {
+			timeout: 2000,
+		});
+		expect(h.d1.config.ports).toEqual(PUBLIC);
+		expect(h.d1.mappings).toEqual(PUBLIC);
+		// Resolved: the same edit now goes through and both follow it.
+		await patchPorts(h, []);
+		expect(h.d1.mappings).toEqual([]);
+	});
+});

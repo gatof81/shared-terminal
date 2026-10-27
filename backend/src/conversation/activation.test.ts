@@ -24,16 +24,30 @@ const dbStubs = vi.hoisted(() => ({
 		if (/^UPDATE sessions SET/.test(sql)) {
 			const sid = String(params[params.length - 1]);
 			const row = dbStubs.rows.sessions.get(sid);
-			if (row) applyUpdate(row, sql, params);
-			return { results: [], success: true, meta: {} };
+			if (!sql.includes("WHERE")) {
+				// revokeAllIngestTokens: every row.
+				for (const r of dbStubs.rows.sessions.values()) applyUpdate(r, sql, params);
+				return { results: [], success: true, meta: { changes: dbStubs.rows.sessions.size } };
+			}
+			const changes = row ? applyUpdate(row, sql, params) : 0;
+			return { results: [], success: true, meta: { changes } };
 		}
 		return { results: [], success: true, meta: {} };
 	}),
 	getD1CallsSinceBoot: () => 0,
 	__resetD1CallsForTests: () => undefined,
 }));
-function applyUpdate(row: Record<string, unknown>, sql: string, params: unknown[]) {
-	if (sql.includes("conversation_requested = ?")) row.conversation_requested = params[0];
+/** The real statements' semantics, incl. the `revocation_seq` guard (3.0d audit A1). Returns changes. */
+function applyUpdate(row: Record<string, unknown>, sql: string, params: unknown[]): number {
+	if (sql.includes("WHERE revocation_seq = ? AND") && (row.revocation_seq ?? 0) !== params[0]) {
+		return 0;
+	}
+	if (sql.includes("revocation_seq = revocation_seq + 1")) {
+		row.revocation_seq = Number(row.revocation_seq ?? 0) + 1;
+	}
+	if (sql.startsWith("UPDATE sessions SET conversation_requested = 1 WHERE")) {
+		row.conversation_requested = 1;
+	} else if (sql.includes("conversation_requested = ?")) row.conversation_requested = params[0];
 	else if (sql.startsWith("UPDATE sessions SET ingest_token_hash = ? WHERE"))
 		row.ingest_token_hash = params[0];
 	else if (sql.includes("ingest_token_hash_suspended = ingest_token_hash")) {
@@ -49,6 +63,7 @@ function applyUpdate(row: Record<string, unknown>, sql: string, params: unknown[
 		row.ingest_token_hash_suspended = null;
 		row.conversation_requested = 0;
 	}
+	return 1;
 }
 vi.mock("../db.js", () => dbStubs);
 
