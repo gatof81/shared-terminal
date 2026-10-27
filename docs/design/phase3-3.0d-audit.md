@@ -134,12 +134,12 @@ Work o el responsable digan lo contrario.
 
 ## 3. Decisiones pendientes del responsable (no implementadas)
 
-- **P-1. Auditoría del `PATCH` sobre la sesión de otro usuario. (#465).** El contrato no la exige.
+- **P-1. Auditoría del `PATCH` sobre la sesión de otro usuario (#465).** El contrato no la exige.
   Recomendación de Work: auditar la habilitación ajena de forma fail-closed; para deshabilitar, un
   fallo de auditoría no debe impedir el corte.
-- **P-2. Allowlist del CLI aplicada al `PATCH {enabled:true}`. (#466).** La decisión aprobada limita la
+- **P-2. Allowlist del CLI aplicada al `PATCH {enabled:true}` (#466).** La decisión aprobada limita la
   recreación. Extenderla al `PATCH` requiere otra decisión explícita (Work no la exigiría).
-- **P-3 (nueva, de A5). (#467).** Si la recreación debe bloquear con un bootstrap en curso, con un código de
+- **P-3 (nueva, de A5, #467).** Si la recreación debe bloquear con un bootstrap en curso, con un código de
   precondición nuevo.
 
 ## 4. Restricciones operativas aceptadas
