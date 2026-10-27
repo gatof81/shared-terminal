@@ -36,6 +36,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import Dockerode from "dockerode";
 
 const IMAGE = process.argv[2] ?? "shared-terminal-session";
@@ -565,30 +566,30 @@ mkdir -p ~/.claude && printf '{"skipDangerousModePermissionPrompt": true, "hooks
 		((await engine.preflight(SID)) as { recreatable?: boolean }).recreatable === true,
 	);
 	// Transcript metadata only (path, size, mtime): never their content (§1.1).
-	const transcripts = async () =>
-		(
-			await new Promise<string>((resolve) => {
-				const chunks: Buffer[] = [];
-				docker
-					.run(
-						IMAGE,
-						[
-							"bash",
-							"-c",
-							"cd /w/.st/claude-state/projects && find . -type f -printf '%P %s %T@\\n' | sort",
-						],
-						{ write: (c: Buffer) => chunks.push(c) } as unknown as NodeJS.WritableStream,
-						{
-							User: "0",
-							Entrypoint: [],
-							Tty: true,
-							HostConfig: { Binds: [`${WS}:/w:ro`], AutoRemove: true },
-						},
-					)
-					.then(() => resolve(Buffer.concat(chunks).toString("utf8")))
-					.catch(() => resolve(""));
-			})
-		).trim();
+	const transcripts = async (): Promise<string> => {
+		const out = new PassThrough();
+		const chunks: Buffer[] = [];
+		out.on("data", (c: Buffer) => chunks.push(c));
+		const [res] = (await docker.run(
+			IMAGE,
+			[
+				"bash",
+				"-c",
+				"cd /w/.st/claude-state/projects && find . -type f -printf '%P %s %T@\\n' | sort",
+			],
+			out,
+			{
+				User: "0",
+				Entrypoint: [],
+				Tty: true,
+				HostConfig: { Binds: [`${WS}:/w:ro`], AutoRemove: true },
+			},
+		)) as [{ StatusCode: number }];
+		const text = Buffer.concat(chunks).toString("utf8").replace(/\r/g, "").trim();
+		if (res.StatusCode !== 0 || text === "")
+			throw new Error(`transcript listing failed (exit ${res.StatusCode})`);
+		return text;
+	};
 	const transcriptsBefore = await transcripts();
 	check(
 		"O's transcripts exist (the conversation and the subagent's)",
