@@ -106,7 +106,10 @@ const TMUX_DIR = `/tmp/tmux-${SESSION_UID}`;
 //   …/<cwd slug>/<session uuid>/tasks/   dirs
 //   …/tasks/a<16 hex>.output             symlink to that subagent's transcript
 //                                        `~/.claude/projects/<slug>/<uuid>/
-//                                        subagents/agent-a<16 hex>.jsonl`
+//                                        subagents/agent-a<16 hex>.jsonl`;
+//                                        the archive stat reports it resolved
+//                                        through the verified `~/.claude`
+//                                        symlink, so that is the form compared
 //
 // None of it is state a resumed conversation needs: sockets and probes are
 // per-process, and a task symlink only points at the transcript, which lives
@@ -145,7 +148,8 @@ function cliTmpArtifact(p: string, st: PathStat | null): boolean {
 		const [, slug, uuid, id] = link;
 		return (
 			st?.kind === "symlink" &&
-			st.linkTarget === `${HOME}/.claude/projects/${slug}/${uuid}/subagents/agent-${id}.jsonl`
+			st.linkTarget ===
+				`${WORKSPACE}/.st/claude-state/projects/${slug}/${uuid}/subagents/agent-${id}.jsonl`
 		);
 	}
 	return false;

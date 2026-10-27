@@ -232,7 +232,7 @@ describe("classifyLayer (§2.7.1 precondition 6)", () => {
 		const P = "/tmp/claude-1000/-home-developer-workspace";
 		const U = "94568d46-b069-4373-98b1-b1db0b70716c";
 		const AGENT = "a36654f4f7cfb543c";
-		const TARGET = `${H}/.claude/projects/-home-developer-workspace/${U}/subagents/agent-${AGENT}.jsonl`;
+		const TARGET = `${H}/workspace/.st/claude-state/projects/-home-developer-workspace/${U}/subagents/agent-${AGENT}.jsonl`;
 		/** The four shapes the evidence showed, all at once: -p probes, a tab's task link, a stale socket. */
 		function withCli(extra: Array<[string, PathStat | null]> = []) {
 			const { changes, stats } = cleanBoot();
@@ -273,7 +273,7 @@ describe("classifyLayer (§2.7.1 precondition 6)", () => {
 							`${d}/${U}/tasks/${AGENT}.output`,
 							{
 								kind: "symlink",
-								linkTarget: `${H}/.claude/projects/${slug}/${U}/subagents/agent-${AGENT}.jsonl`,
+								linkTarget: `${H}/workspace/.st/claude-state/projects/${slug}/${U}/subagents/agent-${AGENT}.jsonl`,
 							},
 						],
 					]),
@@ -298,7 +298,7 @@ describe("classifyLayer (§2.7.1 precondition 6)", () => {
 						`${T}/a0123456789abcdef.output`,
 						{
 							kind: "symlink",
-							linkTarget: `${H}/.claude/projects/-home-developer-workspace/00000000-0000-4000-8000-000000000000/subagents/agent-a0123456789abcdef.jsonl`,
+							linkTarget: `${H}/workspace/.st/claude-state/projects/-home-developer-workspace/00000000-0000-4000-8000-000000000000/subagents/agent-a0123456789abcdef.jsonl`,
 						},
 					],
 				],
@@ -310,6 +310,18 @@ describe("classifyLayer (§2.7.1 precondition 6)", () => {
 			[
 				"a task link with a relative target",
 				[[`${T}/a0123456789abcdef.output`, { kind: "symlink", linkTarget: "../../x" }]],
+			],
+			[
+				"a task link given unresolved, through ~/.claude (Docker reports it resolved)",
+				[
+					[
+						`${T}/a0123456789abcdef.output`,
+						{
+							kind: "symlink",
+							linkTarget: `${H}/.claude/projects/-home-developer-workspace/${U}/subagents/agent-a0123456789abcdef.jsonl`,
+						},
+					],
+				],
 			],
 			["a task entry that is a directory", [[`${T}/a0123456789abcdef.output`, { kind: "dir" }]]],
 			["a task name off the observed shape", [[`${T}/notes.txt`, { kind: "file", size: 3 }]]],

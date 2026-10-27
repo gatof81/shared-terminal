@@ -445,6 +445,14 @@ async function main(): Promise<void> {
 			p.code === 0 && /^[0-9a-f-]{36}$/.test(convId),
 			p.code,
 		);
+	});
+	const afterP = await engine.preflight(SID);
+	check(
+		"O after claude -p (cc-socks, claude-1000, fswatch probes) is recreatable",
+		(afterP as { recreatable?: boolean }).recreatable === true,
+		afterP,
+	);
+	await withO(O, async () => {
 		// An interactive tab with a subagent turn: the shape that leaves a
 		// task link under /tmp/claude-1000 (cli-tmp-evidence.sh, case C).
 		await execOut(
@@ -498,11 +506,29 @@ mkdir -p ~/.claude && printf '{"skipDangerousModePermissionPrompt": true, "hooks
 			tmpLayer.some((p) => /\/tasks\/a[0-9a-f]{16}\.output$/.test(p)),
 		tmpLayer,
 	);
-	const afterCli = await engine.preflight(SID);
+	const afterCli = (await engine.preflight(SID)) as {
+		recreatable?: boolean;
+		blockers?: Array<{ code: string }>;
+	};
 	check(
-		"O after claude -p and an interactive tab with a subagent is recreatable",
-		(afterCli as { recreatable?: boolean }).recreatable === true,
+		"after an interactive tab with a subagent: nothing under /tmp blocks (the task link included)",
+		!afterCli.blockers?.some((b) => b.code === "layer-tmp"),
 		afterCli,
+	);
+	// Owner decision pending: the interactive CLI also writes
+	// ~/.local/share/applications/claude-code-url-handler.desktop (HOME, outside
+	// the workspace), which this change must not allow. Kept red so it stays
+	// visible; the rest of the smoke then goes on with that file removed, which
+	// is test-only cleanup of exactly what the CLI added.
+	check(
+		"after an interactive tab with a subagent, O is recreatable (pending: ~/.local/share/applications)",
+		afterCli.recreatable === true,
+		afterCli,
+	);
+	await withO(O, () => execOut(O, "rm -rf ~/.local"));
+	check(
+		"with ~/.local removed, O is recreatable: it was the only blocker left",
+		((await engine.preflight(SID)) as { recreatable?: boolean }).recreatable === true,
 	);
 	const taskDir = "$(ls -d /tmp/claude-1000/-home-developer-workspace/*/tasks | head -n 1)";
 	for (const [label, plant] of [

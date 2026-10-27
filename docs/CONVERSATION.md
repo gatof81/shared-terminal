@@ -512,9 +512,11 @@ Las pestañas tmux ya se pierden con el stop.
   - `/tmp/claude-1000/<slug>/`, `<slug>/<uuid>/` y `<slug>/<uuid>/tasks/` (directorios), con
     `<slug>` = `-home-developer-workspace` o `-home-developer-workspace-<…>` (un cwd dentro del
     workspace) y `<uuid>` un UUID en minúsculas;
-  - `…/<slug>/<uuid>/tasks/a<16 hex>.output`: **symlink** cuyo destino es exactamente
-    `/home/developer/.claude/projects/<slug>/<uuid>/subagents/agent-a<16 hex>.jsonl`, con el mismo
-    slug, uuid e id de su propia ruta.
+  - `…/<slug>/<uuid>/tasks/a<16 hex>.output`: **symlink** al transcript de ese subagente,
+    `~/.claude/projects/<slug>/<uuid>/subagents/agent-a<16 hex>.jsonl`, con el mismo slug, uuid e id
+    de su propia ruta. El stat del archivo de Docker lo informa resuelto a través del symlink
+    verificado `~/.claude`, y esa forma exacta es la que se compara:
+    `/home/developer/workspace/.st/claude-state/projects/<slug>/<uuid>/subagents/agent-a<16 hex>.jsonl`.
 
   Son descartables: sockets y sondas son de cada proceso, y el symlink solo apunta al transcript del
   subagente, que vive en el workspace (`~/.claude` es un symlink a él) y se preserva; `claude
