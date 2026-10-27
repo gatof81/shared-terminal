@@ -20,8 +20,10 @@ con P1 recomendado por exposición involuntaria; A3 P2; C1–C3 a corregir; y un
 runbook (§6.1).
 
 **Revisión de #469 en `d79e5e2`:** A2, A3, C1–C3 y el runbook, cerrados. Quedaban dos defectos de A1
-(A1.1 y A1.2), corregidos en `86ee413`. **Revisión en `86ee413`:** quedan dos P1 residuales en esa
-corrección (A1.1a y A1.1b, abajo), **corregidos en #469 `79a3574`, pendientes de revisión**. A4–A8 siguen
+(A1.1 y A1.2), corregidos en `86ee413`. **Revisión en `86ee413`:** quedaban dos P1 residuales
+(A1.1a y A1.1b), corregidos en `79a3574`. **Work aprobó `79a3574`, y el responsable autorizó el
+merge: #469 está mergeado en `main` como `d5faa1a`** (el mismo árbol). Quedan cerrados A1, A1.1,
+A1.1a, A1.1b, A1.2, A2, A3 y C1–C3. Lo pendiente está clasificado en §9. A4–A8 siguen
 separados de los bloqueantes, y #465–#467 son decisiones del responsable. La auditoría integral no se
 cierra ni se avanza al piloto hasta el dictamen de Work.
 
@@ -374,7 +376,8 @@ para tener un transcript (una sesión interactiva corta) y se detiene.
 3. `GET …/recreate` → `recreatable:true`, `blockers:[]`, `captureAfter:true`; anotar
    `currentImageId`.
 
-**Recreación:** `POST …/recreate {"expectImageId":"<currentImageId>"}`.
+**Recreación:** `POST …/recreate {"expectImageId":"<currentImageId>"}`. Mientras dure, no se editan
+los límites de la sesión (`PATCH /admin/sessions/:id/resources`; A6).
 
 - Éxito esperado: `200 committed`, sin `unresolved`; `capture.effective:true`.
 - Si responde `unresolved:true` o 500 `{unresolved:true}`: **parar el piloto**, sin reintentar y
@@ -408,12 +411,79 @@ administrativa manual (D8).
 
 ## 8. Orden propuesto (pendiente de autorización)
 
-1. **PR de correcciones: #469** (A1, A1.1, A1.1a, A1.1b, A1.2, A2, A3 y C1–C3, con regresiones).
-   A4–A8 van aparte.
-2. **PR de smokes:** los huecos de §5 que se pueden probar en el runner aislado.
+1. **PR de correcciones: #469**, mergeado como `d5faa1a`. A4–A8 van aparte (§9).
+2. **PR de documentación de A7** y **PR de smokes** (§10), cada uno con revisión de Work.
 3. **Dictamen integral de Work** sobre 1 y 2, y decisiones P-1 a P-3 del responsable.
 4. **Despliegue coordinado:** etapas 0 y 1 (§6), con autorización expresa.
 5. **Piloto (etapa 2, §7),** con autorización expresa.
+
+## 9. Estado tras #469 y clasificación de lo pendiente
+
+Criterio: lo que puede afectar al piloto **tal como está aprobado** (§7: una sesión nueva y
+descartable, creada por el responsable, así que sin usuario ajeno; recreada una vez; CLI fijado en
+2.1.308) bloquea el piloto. Lo que solo aparece al ampliar (etapa 3, `CONVERSATION_ALLOW_USERS`,
+sesiones de otros usuarios, recrear sesiones existentes) es un seguimiento posterior, que se cierra
+antes de esa etapa. Ninguno se implementa sin revisión y autorización.
+
+| Pendiente | ¿Bloquea el piloto? | Por qué | Cuándo |
+| --- | --- | --- | --- |
+| A7 — DEPLOYMENT.md desactualizado (sección de conversación en términos de 3.0c, rollback solo hasta 3.0b, pérdidas del procedimiento de emergencia) | **Sí** | Es el documento que se sigue al desplegar; con texto obsoleto el operador podría actuar mal en las etapas 0 a 2 | Antes del despliegue, en un PR de documentación |
+| Ampliación de smokes (§10) | **Sí** | Work: los huecos de smoke se cierran con evidencia antes del piloto, y lo que corre en CI no espera al despliegue | Antes del despliegue |
+| A4 — `PATH` con el directorio del usuario primero | No | Solo afecta a la propia sesión del usuario; en el piloto, el usuario es el responsable, en una sesión descartable | Antes de la etapa 3 (sesiones de otros usuarios) |
+| A5 — `failSession` fuera del lock | No | En el piloto, la sesión se crea, se usa y se detiene antes de recrearla, así que su bootstrap ha terminado hace mucho | Antes de la etapa 3; mover la escritura dentro del lock es una corrección aislada |
+| A6 — `PATCH /resources` sin lock | No, con una restricción operativa: no editar límites durante la recreación del piloto | Solo actúa si un admin edita los límites mientras recrea | Antes de recrear fuera del piloto |
+| A8 — redacción (identificación del relay, `sleep` del supervisor) | No | Documentación y un proceso por cada 0,5 s sin marca; no afecta a la captura | Seguimiento |
+| #465 — auditar el `PATCH` sobre la sesión de otro usuario | No | En el piloto el admin es el dueño: no hay sesión ajena | Decisión del responsable antes de habilitar captura a otros usuarios |
+| #466 — allowlist del CLI en `PATCH {enabled:true}` | No, si el piloto mantiene el CLI en 2.1.308 (`DISABLE_AUTOUPDATER=1`, comprobado antes y después) | La recreación ya lo comprueba. Fuera del piloto, un CLI autoactualizado seguiría capturando por `PATCH` o por spawn (etapa 3) sin validar | Decisión del responsable antes de la etapa 3 |
+| #467 — bloquear la recreación con un bootstrap en curso | No | El mismo motivo que A5 | Decisión del responsable antes de recrear fuera del piloto |
+| #463 — fallo aislado de tests del motor (dos apariciones, sin reproducir) | No bloquea por sí mismo; se mantiene abierto | Sin diagnóstico, no se le atribuye causa. En cada nueva aparición se conservan stdout, stderr, el código de salida y el contexto completo (SHA, comando, número de ejecución, entorno) | Abierto |
+
+## 10. Ampliación de smokes (plan; no implementado)
+
+Se dividen por dónde pueden correr. Lo de CI corre en el runner aislado (workflow `Session Image`),
+sin tocar la VM.
+
+**En CI, con Docker real y el CLI real 2.1.308 con modelo simulado**, antes del despliegue:
+
+1. **Recreación completa con datos.** El hash del workspace es idéntico antes y después, y en `N`
+   están intactos `git config user.email` (con `gitIdentity`), un secreto (variable de entorno) y un
+   puerto declarado (el mapeo y la configuración coinciden). `claude --resume` sigue listando la
+   conversación previa.
+2. **Variantes que bloquean sin efectos:** `apt-get install` en la capa ⇒ `layer-system`, y un
+   `POST` sin efectos (estado idéntico), no solo el preflight.
+3. **Backend matado entre los pasos 2 y 4, y después del 4,** con el resultado de D8: la sesión
+   queda `recreate-unresolved`, D1 sigue en `O` (o pasa a `N`), y nada se resuelve tras el
+   reinicio.
+4. **Relay no disponible con el CLI real:** el puerto ocupado antes del boot, la marca o el archivo
+   retirados y el hash cambiado ⇒ `effective:false` con su motivo, sin archivo de hooks y con 0
+   "hook error" (hoy es una nota, no una comprobación).
+5. **`kill -9` del relay:** la primera consulta da `relay-unavailable`, `effective:true` vuelve en
+   ≤ 3 s, los "hook error" quedan acotados y hay 0 en el turno siguiente.
+6. **`PATCH {enabled:true}` sobre un contenedor en marcha con el CLI real:** un prompt en una pestaña
+   ya abierta y otro en una nueva, sin "hook error".
+7. **Revocación de extremo a extremo con el receptor real:** `conversation:disable` corta la
+   ingesta de un contenedor real y el siguiente start no regenera token.
+
+**En tests unitarios o de integración** (sin Docker), donde el anexo A marca huecos: la fila "ni `O`
+ni `N`" (`recreateOrphans`), postStart que sobrevive a `T_rec`, las variantes de reinicio ("aplicado
+antes del reinicio" y "después de `T_d1`"), y las skills comparadas byte a byte tras bloquear o
+recrear.
+
+**Solo en el piloto** (sesión y modelo reales): la prueba manual documentada (eventos reales en
+`GET …/conversations` y en el archivo, corte inmediato), la validación con el CLI del workspace del
+piloto, y los criterios de 48 h de §7.
+
+## 11. Criterios para cerrar la auditoría integral
+
+1. #469 mergeado, con E1–E6, A1–A3 y C1–C3 cerrados. **Hecho:** `d5faa1a`.
+2. A7 corregido (PR de documentación revisado por Work).
+3. Los smokes de §10 en CI, con evidencia verde y revisados por Work.
+4. Cada pendiente de §9 con decisión o plan aceptado por Work y el responsable, y las restricciones
+   operativas del piloto escritas en §7.
+5. Dictamen integral GO de Work sobre este documento.
+
+Con eso se podría pedir autorización para las etapas 0 y 1 (§6). El piloto (etapa 2) requiere
+además una autorización propia.
 
 ## Anexo A. Trazabilidad de §10 "3.0d activación"
 
