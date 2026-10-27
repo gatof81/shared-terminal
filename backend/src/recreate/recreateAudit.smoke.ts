@@ -688,11 +688,285 @@ EOF`,
 			.split("\n")
 			.includes(JSON.stringify(prompt));
 
+	// ── S2 ──────────────────────────────────────────────────────────────────
+	for (const cut of ["rename", "commit"] as const) {
+		scenario(
+			`S2-${cut}`,
+			`backend process killed ${cut === "rename" ? "between steps 2 and 4" : "right after the step 4 CAS applied"} (D8)`,
+			"a separate backend process SIGKILLed at the cut; a new process's recoverOnBoot + bootPass; dockerd, the durable attempt record, the lifecycle lock's guard",
+			"D1 (a file both processes read)",
+		);
+		const s = await createSession(`s2-${cut}`);
+		await bootOnce(s.O, () => seedUserData(s.O));
+		const skillBefore = await treeHash(path.join(s.ws, ".st/claude-state/skills"));
+		const userBefore = await userTree(s.ws);
+		const proc = spawn(
+			process.execPath,
+			["--import", "tsx", SELF, "--child", stateFile(s.sid), cut],
+			{
+				cwd: process.cwd(),
+				stdio: "inherit",
+				env: { ...process.env, ST_AUDIT_ROOT: ROOT, ST_AUDIT_IMAGE: IMAGE, ST_AUDIT_TAG: TAG },
+			},
+		);
+		const death = await Promise.race([
+			new Promise<{ code: number | null; signal: string | null }>((r) =>
+				proc.on("exit", (code, signal) => r({ code, signal })),
+			),
+			sleep(180_000).then(() => ({ code: null, signal: "timeout" })),
+		]);
+		check("the backend process died by SIGKILL at the cut", death.signal === "SIGKILL", death);
+		const next = s.make();
+		await next.attempts.recoverOnBoot();
+		await next.engine.bootPass();
+		await sleep(2_000); // longer than resolveRetryMs: nothing resolves it anyway
+		const rec2 = await next.attempts.read(s.sid);
+		check(
+			"record uncertain and orphaned after the restart",
+			rec2.kind === "ok" && rec2.record.state === "uncertain" && !!rec2.record.orphanedAt,
+			rec2,
+		);
+		for (const op of ["start", "stop", "delete"] as const) {
+			const refused = await next.lock
+				.run(s.sid, op, async () => "ran")
+				.then(
+					() => false,
+					(e) => e instanceof M.RecreateUnresolvedError,
+				);
+			check(`${op} refused (recreate-unresolved)`, refused);
+		}
+		const d1c = s.row().container_id as string;
+		check("D1 names a container that exists", (await inspectOrNull(d1c)) !== null, d1c);
+		check(
+			cut === "rename" ? "D1 still on O" : "D1 on N (the commit applied)",
+			cut === "rename" ? d1c === s.O : d1c !== s.O,
+		);
+		check("O was not removed", (await inspectOrNull(s.O)) !== null);
+		check("defer-skill-seed kept", await M.cap.deferSeedExists(ROOT, s.sid));
+		check(
+			"skills untouched",
+			(await treeHash(path.join(s.ws, ".st/claude-state/skills"))) === skillBefore,
+		);
+		check("workspace user data intact", (await userTree(s.ws)) === userBefore);
+		next.engine.stop();
+	}
+
+	// ── S3 ──────────────────────────────────────────────────────────────────
+	scenario(
+		"S3",
+		"relay unavailable during activation (its port taken when step 5 runs)",
+		"engine step 5 through the capture authority, relay + supervisor back-off, dockerd",
+		"D1 row",
+	);
+	const s3 = await createSession("s3");
+	await bootOnce(s3.O);
+	const occupant =
+		"setsid nohup python3 -c 'import socket,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind((\"127.0.0.1\",47613));s.listen();time.sleep(900)' st-occupant >/dev/null 2>&1 &";
+	s3.hooks.onReadiness = async (nId) => {
+		await waitReady(nId);
+		await sh(nId, occupant);
+	};
+	const e3 = s3.make();
+	const r3 = await e3.engine.recreate(s3.sid, imageId);
+	const n3 = (r3 as { nContainerId?: string }).nContainerId as string;
+	check(
+		"committed but unresolved, authorize pending",
+		(r3 as { ok?: boolean }).ok === true &&
+			(r3 as { unresolved?: boolean }).unresolved === true &&
+			((r3 as { pending?: string[] }).pending ?? []).some((p) => p.startsWith("authorize")),
+		r3,
+	);
+	const c3 = (r3 as { capture?: { effective: boolean; pendingReasons: string[] } }).capture;
+	check(
+		"capture not effective with its reason",
+		!!c3 && !c3.effective && c3.pendingReasons.length > 0,
+		c3,
+	);
+	check("no hooks file written", !(await M.activation.hooksFileExists(ROOT, s3.sid)));
+	check("no marker left", !(await M.cap.relayEnabledExists(ROOT, s3.sid)));
+	const rec3 = await e3.attempts.read(s3.sid);
+	check("the record is not resolved", rec3.kind === "ok" && rec3.record.state !== "resolved", rec3);
+	// As developer (the occupant's owner; root has no CAP_KILL here). The
+	// bracket keeps pkill from matching this very `bash -c`.
+	const freed = await sh(n3, "pkill -f 'st-occupan[t]'");
+	check("the occupant was killed", freed.code === 0, freed.code);
+	// The supervisor backs off while the relay keeps dying on the taken port
+	// (1, 2, 4 … 32 s), so the next launch can be half a minute away.
+	check(
+		"resolved once the relay could identify itself",
+		await waitFor(
+			"resolution",
+			async () => {
+				const r = await e3.attempts.read(s3.sid);
+				return r.kind === "ok" && r.record.state === "resolved";
+			},
+			90_000,
+			500,
+		),
+	);
+	check(
+		"then: marker and hooks file",
+		(await M.cap.relayEnabledExists(ROOT, s3.sid)) &&
+			(await M.activation.hooksFileExists(ROOT, s3.sid)),
+	);
+	check("then: capture effective", (await s3.authority().capture(s3.sid)).effective);
+	e3.engine.stop();
+
+	// ── S8 ──────────────────────────────────────────────────────────────────
+	scenario(
+		"S8",
+		"a package installed in O's layer blocks: preflight and POST, with no effect",
+		"real `apt-get install` in the container layer, the real `docker diff`, the engine's preconditions and POST, dockerd",
+		"D1 row (compared byte for byte before and after)",
+	);
+	const s8 = await createSession("s8");
+	await bootOnce(s8.O, async () => {
+		await seedUserData(s8.O);
+		check(
+			"bc not installed in the image",
+			(await sh(s8.O, "dpkg -s bc >/dev/null 2>&1")).code !== 0,
+		);
+		const apt = await sh(
+			s8.O,
+			"export DEBIAN_FRONTEND=noninteractive; apt-get -o APT::Sandbox::User=root update -qq && apt-get -o APT::Sandbox::User=root install -y -qq --no-install-recommends bc",
+			{ user: "0", privileged: true },
+		);
+		check(
+			"apt-get install bc in O's layer",
+			apt.code === 0 && (await sh(s8.O, "dpkg -s bc >/dev/null")).code === 0,
+			{
+				code: apt.code,
+				err: apt.err.slice(-600),
+			},
+		);
+	});
+	const snap = async () => ({
+		d1: readFileSync(d1File(s8.sid), "utf8"),
+		containers: await containersOf(s8.sid),
+		files: await fileState(s8.sid),
+		user: await userTree(s8.ws),
+	});
+	const before8 = await snap();
+	const e8 = s8.make();
+	const pre8 = (await e8.engine.preflight(s8.sid)) as {
+		recreatable?: boolean;
+		blockers?: Array<{ code: string }>;
+	};
+	check(
+		"preflight: layer-system",
+		pre8.recreatable === false && pre8.blockers?.some((b) => b.code === "layer-system") === true,
+		pre8,
+	);
+	let beforeEffectsRan = false;
+	const post8 = await e8.engine.recreate(s8.sid, imageId, {
+		beforeEffects: async () => {
+			beforeEffectsRan = true;
+		},
+	});
+	check(
+		"POST: 409 layer-system",
+		(post8 as { status?: number; code?: string }).status === 409 &&
+			(post8 as { code?: string }).code === "layer-system",
+		post8,
+	);
+	check(
+		"no audit hook, no attempt record",
+		!beforeEffectsRan && (await e8.attempts.read(s8.sid)).kind === "none",
+	);
+	const after8 = await snap();
+	check("D1 row byte-identical", after8.d1 === before8.d1);
+	check("same containers, same states", after8.containers === before8.containers, {
+		before: before8.containers,
+		after: after8.containers,
+	});
+	check("control, managed and conversation dirs unchanged", after8.files === before8.files, {
+		before: before8.files,
+		after: after8.files,
+	});
+	check("workspace user data unchanged", after8.user === before8.user);
+	check(
+		"the package is still in O (nothing was touched)",
+		((await docker.getContainer(s8.O).changes()) as Array<{ Path: string }>).some(
+			(c) => c.Path === "/usr/bin/bc",
+		),
+	);
+	e8.engine.stop();
+
+	// ── S1a ─────────────────────────────────────────────────────────────────
+	// The pilot's own shape (§7): the CLI used in O, then recreation and
+	// `claude --resume` on N. Expected to pass; with the exact layer allowlist
+	// of CONVERSATION.md §2.7.1 the CLI's runtime entries under /tmp block it
+	// (`layer-tmp`). Kept red on purpose until the owner decides: the smoke
+	// must not hide it. The transcript itself is never read (§1.1).
+	scenario(
+		"S1a",
+		"real CLI used in O, then recreation and `claude --resume` on N",
+		"dockerd, image, `docker diff`, the engine's preconditions, CLI 2.1.308 with the scripted model",
+		"D1 row",
+	);
+	const s1a = await createSession("s1a");
+	let convId = "";
+	await bootOnce(s1a.O, async () => {
+		const first = await claudeP(s1a.O, "'resume probe: first prompt'");
+		convId = first.json.session_id ?? "";
+		check(
+			"O: claude -p answers and reports its conversation id",
+			first.code === 0 &&
+				first.json.result?.trim() === MOCK_REPLY &&
+				/^[0-9a-f-]{36}$/.test(convId),
+			{ code: first.code, result: first.json.result, err: first.err.slice(-400) },
+		);
+	});
+	const e1a = s1a.make();
+	const pre1a = (await e1a.engine.preflight(s1a.sid)) as {
+		recreatable?: boolean;
+		blockers?: Array<{ code: string; count?: number }>;
+	};
+	const tmpEntries = ((await docker.getContainer(s1a.O).changes()) as Array<{ Path: string }>)
+		.map((c) => c.Path)
+		.filter((p) => p.startsWith("/tmp/"));
+	note(`O's layer under /tmp after the CLI ran: ${JSON.stringify(tmpEntries)}`);
+	check(
+		"after real CLI use, O is recreatable (needed for `claude --resume` across recreation)",
+		pre1a.recreatable === true,
+		pre1a,
+	);
+	if (pre1a.recreatable === true) {
+		const r = await e1a.engine.recreate(s1a.sid, imageId);
+		const n = (r as { nContainerId?: string }).nContainerId;
+		check("committed", (r as { ok?: boolean }).ok === true && !("unresolved" in r), r);
+		if (n) {
+			const resumed = await claudeP(n, `--resume ${convId} 'resume probe: second prompt'`);
+			check(
+				"N: claude -p --resume answers in the same conversation",
+				resumed.code === 0 &&
+					resumed.json.result?.trim() === MOCK_REPLY &&
+					resumed.json.session_id === convId,
+				{
+					code: resumed.code,
+					sameId: resumed.json.session_id === convId,
+					err: resumed.err.slice(-400),
+				},
+			);
+			const modelSaw = (await fs.readFile(path.join(OUT, "model-requests.jsonl"), "utf8"))
+				.split("\n")
+				.filter((l) => l.includes("resume probe: second prompt"))
+				.pop();
+			check(
+				"the model was sent the previous turn with the resumed prompt",
+				!!modelSaw && modelSaw.includes("resume probe: first prompt"),
+			);
+		}
+	} else {
+		note("`claude --resume` across recreation NOT exercised: blocked by the precondition above");
+	}
+	e1a.engine.stop();
+
 	// ── S1 ──────────────────────────────────────────────────────────────────
 	scenario(
 		"S1",
-		"full recreation with workspace, git, secret, ports and a resumable conversation",
-		"dockerd, image, engine, capture authority, relay; CLI 2.1.308 (`claude -p`, `--resume`) with the scripted model; dispatcher + http-proxy + Docker DNS; receiver ingest",
+		"full recreation with workspace, git, secret and ports (CLI not run in O)",
+		"dockerd, image, engine, capture authority, relay; CLI 2.1.308 in N with the scripted model; dispatcher + http-proxy + Docker DNS; receiver ingest",
 		"D1 row and the mapping table (a JSON file read by the real lookupDispatchTarget SQL)",
 	);
 	const secret = randomUUID();
@@ -704,37 +978,17 @@ EOF`,
 		],
 		secret,
 	});
-	let convId = "";
 	await bootOnce(s1.O, async () => {
 		await seedUserData(s1.O);
 		await sh(
 			s1.O,
 			"git config --global user.name Ada && git config --global user.email ada@example.test",
 		);
-		const first = await claudeP(s1.O, "'resume probe: first prompt'");
-		convId = first.json.session_id ?? "";
-		check(
-			"O: claude -p answers and reports its conversation id",
-			first.code === 0 && first.json.result === MOCK_REPLY && /^[0-9a-f-]{36}$/.test(convId),
-			{ code: first.code, result: first.json.result, err: first.err.slice(-400) },
-		);
 	});
-	const transcript = path.join(
-		s1.ws,
-		".st/claude-state/projects/-home-developer-workspace",
-		`${convId}.jsonl`,
-	);
 	const s1Before = await userTree(s1.ws);
-	const transcriptBefore = await fs.readFile(transcript).catch(() => null);
-	check(
-		"the conversation is persisted in the workspace",
-		transcriptBefore !== null && transcriptBefore.length > 0,
-	);
 	const e1 = s1.make();
-	const pre1 = (await e1.engine.preflight(s1.sid)) as { recreatable?: boolean; blockers?: unknown };
-	check("preflight after real CLI use in O: recreatable", pre1.recreatable === true, pre1);
-	if (pre1.recreatable !== true)
-		console.error(JSON.stringify(await docker.getContainer(s1.O).changes(), null, 1));
+	const pre1 = (await e1.engine.preflight(s1.sid)) as { recreatable?: boolean };
+	check("preflight: recreatable", pre1.recreatable === true, pre1);
 	const r1 = await e1.engine.recreate(s1.sid, imageId);
 	const n1 = (r1 as { nContainerId?: string }).nContainerId as string;
 	check(
@@ -742,6 +996,8 @@ EOF`,
 		(r1 as { ok?: boolean }).ok === true && !("unresolved" in r1),
 		r1,
 	);
+	// Everything below needs N; without it S4–S7 can't run either.
+	if (!n1) throw new Error("S1 produced no N; S1 and the scenarios on its N (S4–S7) are not run");
 	check(
 		"capture effective",
 		(r1 as { capture?: { effective?: boolean } }).capture?.effective === true,
@@ -762,11 +1018,6 @@ EOF`,
 		throw new Error("receiver did not start");
 	check("workspace user data byte-identical (repo, blob)", (await userTree(s1.ws)) === s1Before);
 	check(
-		"the transcript byte-identical before the resume",
-		transcriptBefore !== null &&
-			sha((await fs.readFile(transcript)) as Buffer) === sha(transcriptBefore),
-	);
-	check(
 		"git history intact in N",
 		(await sh(n1, "git -C ~/workspace/project log --oneline | wc -l")).out.trim() === "1",
 	);
@@ -780,48 +1031,18 @@ EOF`,
 			sha(secret),
 	);
 	check("O removed", (await inspectOrNull(s1.O)) === null);
-	// claude --resume on N, with the conversation O persisted.
-	const resumed = await claudeP(n1, `--resume ${convId} 'resume probe: second prompt'`);
+	const turn = await claudeP(n1, "'capture probe: first turn on N'");
+	check("N: claude -p answers", turn.code === 0 && turn.json.result?.trim() === MOCK_REPLY, {
+		code: turn.code,
+		err: turn.err.slice(-400),
+	});
 	check(
-		"N: claude -p --resume answers in the same conversation",
-		resumed.code === 0 && resumed.json.result === MOCK_REPLY && resumed.json.session_id === convId,
-		{
-			code: resumed.code,
-			result: resumed.json.result,
-			sameId: resumed.json.session_id === convId,
-			err: resumed.err.slice(-400),
-		},
-	);
-	const modelSaw = (await fs.readFile(path.join(OUT, "model-requests.jsonl"), "utf8"))
-		.split("\n")
-		.filter((l) => l.includes("resume probe: second prompt"))
-		.pop();
-	check(
-		"the model was sent the previous turn with the resumed prompt",
-		!!modelSaw && modelSaw.includes("resume probe: first prompt"),
-	);
-	check(
-		"the transcript now holds both turns",
-		(
-			await sh(
-				n1,
-				`grep -c 'resume probe: ' ~/.claude/projects/-home-developer-workspace/${convId}.jsonl`,
-			)
-		).out.trim() !== "0" &&
-			(
-				await sh(
-					n1,
-					`grep -q 'resume probe: second prompt' ~/.claude/projects/-home-developer-workspace/${convId}.jsonl`,
-				)
-			).code === 0,
-	);
-	check(
-		"the resumed turn was captured: received and persisted by the real ingest stack",
+		"N's turn captured: received and persisted by the real ingest stack",
 		(await waitFor(
-			"resumed prompt persisted",
-			() => persistedPrompt(s1.sid, "resume probe: second prompt"),
+			"N's prompt persisted",
+			() => persistedPrompt(s1.sid, "capture probe: first turn on N"),
 			10_000,
-		)) && (await promptsReceived("resume probe: second prompt")) >= 1,
+		)) && (await promptsReceived("capture probe: first turn on N")) >= 1,
 	);
 	// Declared ports through the real dispatcher, by N's canonical name.
 	check(
@@ -1080,7 +1301,8 @@ EOF`,
 	await sleep(1_500);
 	check(
 		"next start: claude -p works and sends nothing",
-		after.json.result === MOCK_REPLY && (await promptsReceived("revoke probe: after start")) === 0,
+		after.json.result?.trim() === MOCK_REPLY &&
+			(await promptsReceived("revoke probe: after start")) === 0,
 	);
 	await stopIfRunning(n1);
 	const pre7 = (await e1.engine.preflight(s1.sid)) as { blockers?: Array<{ code: string }> };
@@ -1098,210 +1320,6 @@ EOF`,
 	);
 	check("…and no container created", (await containersOf(s1.sid)) === before7);
 	e1.engine.stop();
-
-	// ── S2 ──────────────────────────────────────────────────────────────────
-	for (const cut of ["rename", "commit"] as const) {
-		scenario(
-			`S2-${cut}`,
-			`backend process killed ${cut === "rename" ? "between steps 2 and 4" : "right after the step 4 CAS applied"} (D8)`,
-			"a separate backend process SIGKILLed at the cut; a new process's recoverOnBoot + bootPass; dockerd, the durable attempt record, the lifecycle lock's guard",
-			"D1 (a file both processes read)",
-		);
-		const s = await createSession(`s2-${cut}`);
-		await bootOnce(s.O, () => seedUserData(s.O));
-		const skillBefore = await treeHash(path.join(s.ws, ".st/claude-state/skills"));
-		const userBefore = await userTree(s.ws);
-		const proc = spawn(
-			process.execPath,
-			["--import", "tsx", SELF, "--child", stateFile(s.sid), cut],
-			{
-				cwd: process.cwd(),
-				stdio: "inherit",
-				env: { ...process.env, ST_AUDIT_ROOT: ROOT, ST_AUDIT_IMAGE: IMAGE, ST_AUDIT_TAG: TAG },
-			},
-		);
-		const death = await Promise.race([
-			new Promise<{ code: number | null; signal: string | null }>((r) =>
-				proc.on("exit", (code, signal) => r({ code, signal })),
-			),
-			sleep(180_000).then(() => ({ code: null, signal: "timeout" })),
-		]);
-		check("the backend process died by SIGKILL at the cut", death.signal === "SIGKILL", death);
-		const next = s.make();
-		await next.attempts.recoverOnBoot();
-		await next.engine.bootPass();
-		await sleep(2_000); // longer than resolveRetryMs: nothing resolves it anyway
-		const rec2 = await next.attempts.read(s.sid);
-		check(
-			"record uncertain and orphaned after the restart",
-			rec2.kind === "ok" && rec2.record.state === "uncertain" && !!rec2.record.orphanedAt,
-			rec2,
-		);
-		for (const op of ["start", "stop", "delete"] as const) {
-			const refused = await next.lock
-				.run(s.sid, op, async () => "ran")
-				.then(
-					() => false,
-					(e) => e instanceof M.RecreateUnresolvedError,
-				);
-			check(`${op} refused (recreate-unresolved)`, refused);
-		}
-		const d1c = s.row().container_id as string;
-		check("D1 names a container that exists", (await inspectOrNull(d1c)) !== null, d1c);
-		check(
-			cut === "rename" ? "D1 still on O" : "D1 on N (the commit applied)",
-			cut === "rename" ? d1c === s.O : d1c !== s.O,
-		);
-		check("O was not removed", (await inspectOrNull(s.O)) !== null);
-		check("defer-skill-seed kept", await M.cap.deferSeedExists(ROOT, s.sid));
-		check(
-			"skills untouched",
-			(await treeHash(path.join(s.ws, ".st/claude-state/skills"))) === skillBefore,
-		);
-		check("workspace user data intact", (await userTree(s.ws)) === userBefore);
-		next.engine.stop();
-	}
-
-	// ── S3 ──────────────────────────────────────────────────────────────────
-	scenario(
-		"S3",
-		"relay unavailable during activation (its port taken when step 5 runs)",
-		"engine step 5 through the capture authority, relay + supervisor back-off, dockerd",
-		"D1 row",
-	);
-	const s3 = await createSession("s3");
-	await bootOnce(s3.O);
-	const occupant =
-		"setsid nohup python3 -c 'import socket,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind((\"127.0.0.1\",47613));s.listen();time.sleep(900)' st-occupant >/dev/null 2>&1 &";
-	s3.hooks.onReadiness = async (nId) => {
-		await waitReady(nId);
-		await sh(nId, occupant);
-	};
-	const e3 = s3.make();
-	const r3 = await e3.engine.recreate(s3.sid, imageId);
-	const n3 = (r3 as { nContainerId?: string }).nContainerId as string;
-	check(
-		"committed but unresolved, authorize pending",
-		(r3 as { ok?: boolean }).ok === true &&
-			(r3 as { unresolved?: boolean }).unresolved === true &&
-			((r3 as { pending?: string[] }).pending ?? []).some((p) => p.startsWith("authorize")),
-		r3,
-	);
-	const c3 = (r3 as { capture?: { effective: boolean; pendingReasons: string[] } }).capture;
-	check(
-		"capture not effective with its reason",
-		!!c3 && !c3.effective && c3.pendingReasons.length > 0,
-		c3,
-	);
-	check("no hooks file written", !(await M.activation.hooksFileExists(ROOT, s3.sid)));
-	check("no marker left", !(await M.cap.relayEnabledExists(ROOT, s3.sid)));
-	const rec3 = await e3.attempts.read(s3.sid);
-	check("the record is not resolved", rec3.kind === "ok" && rec3.record.state !== "resolved", rec3);
-	// As developer (the occupant's owner; root has no CAP_KILL here). The
-	// bracket keeps pkill from matching this very `bash -c`.
-	const freed = await sh(n3, "pkill -f 'st-occupan[t]'");
-	check("the occupant was killed", freed.code === 0, freed.code);
-	// The supervisor backs off while the relay keeps dying on the taken port
-	// (1, 2, 4 … 32 s), so the next launch can be half a minute away.
-	check(
-		"resolved once the relay could identify itself",
-		await waitFor(
-			"resolution",
-			async () => {
-				const r = await e3.attempts.read(s3.sid);
-				return r.kind === "ok" && r.record.state === "resolved";
-			},
-			90_000,
-			500,
-		),
-	);
-	check(
-		"then: marker and hooks file",
-		(await M.cap.relayEnabledExists(ROOT, s3.sid)) &&
-			(await M.activation.hooksFileExists(ROOT, s3.sid)),
-	);
-	check("then: capture effective", (await s3.authority().capture(s3.sid)).effective);
-	e3.engine.stop();
-
-	// ── S8 ──────────────────────────────────────────────────────────────────
-	scenario(
-		"S8",
-		"a package installed in O's layer blocks: preflight and POST, with no effect",
-		"real `apt-get install` in the container layer, the real `docker diff`, the engine's preconditions and POST, dockerd",
-		"D1 row (compared byte for byte before and after)",
-	);
-	const s8 = await createSession("s8");
-	await bootOnce(s8.O, async () => {
-		await seedUserData(s8.O);
-		check(
-			"bc not installed in the image",
-			(await sh(s8.O, "dpkg -s bc >/dev/null 2>&1")).code !== 0,
-		);
-		const apt = await sh(
-			s8.O,
-			"export DEBIAN_FRONTEND=noninteractive; apt-get -o APT::Sandbox::User=root update -qq && apt-get -o APT::Sandbox::User=root install -y -qq --no-install-recommends bc",
-			{ user: "0", privileged: true },
-		);
-		check(
-			"apt-get install bc in O's layer",
-			apt.code === 0 && (await sh(s8.O, "dpkg -s bc >/dev/null")).code === 0,
-			{
-				code: apt.code,
-				err: apt.err.slice(-600),
-			},
-		);
-	});
-	const snap = async () => ({
-		d1: readFileSync(d1File(s8.sid), "utf8"),
-		containers: await containersOf(s8.sid),
-		files: await fileState(s8.sid),
-		user: await userTree(s8.ws),
-	});
-	const before8 = await snap();
-	const e8 = s8.make();
-	const pre8 = (await e8.engine.preflight(s8.sid)) as {
-		recreatable?: boolean;
-		blockers?: Array<{ code: string }>;
-	};
-	check(
-		"preflight: layer-system",
-		pre8.recreatable === false && pre8.blockers?.some((b) => b.code === "layer-system") === true,
-		pre8,
-	);
-	let beforeEffectsRan = false;
-	const post8 = await e8.engine.recreate(s8.sid, imageId, {
-		beforeEffects: async () => {
-			beforeEffectsRan = true;
-		},
-	});
-	check(
-		"POST: 409 layer-system",
-		(post8 as { status?: number; code?: string }).status === 409 &&
-			(post8 as { code?: string }).code === "layer-system",
-		post8,
-	);
-	check(
-		"no audit hook, no attempt record",
-		!beforeEffectsRan && (await e8.attempts.read(s8.sid)).kind === "none",
-	);
-	const after8 = await snap();
-	check("D1 row byte-identical", after8.d1 === before8.d1);
-	check("same containers, same states", after8.containers === before8.containers, {
-		before: before8.containers,
-		after: after8.containers,
-	});
-	check("control, managed and conversation dirs unchanged", after8.files === before8.files, {
-		before: before8.files,
-		after: after8.files,
-	});
-	check("workspace user data unchanged", after8.user === before8.user);
-	check(
-		"the package is still in O (nothing was touched)",
-		((await docker.getContainer(s8.O).changes()) as Array<{ Path: string }>).some(
-			(c) => c.Path === "/usr/bin/bc",
-		),
-	);
-	e8.engine.stop();
 }
 
 // ── Cleanup and the coverage matrix ─────────────────────────────────────────
