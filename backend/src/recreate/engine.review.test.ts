@@ -275,14 +275,18 @@ describe("E3 — the resolution converges and checks before `resolved`, under th
 		const h = await setup();
 		h.d1.casMode = "ambiguous-applied";
 		let n = 0;
+		const second = deferred();
 		h.capture.convergeImpl = async () => {
 			if (++n === 1) throw new Error("hooks file write failed");
+			await second.promise;
 			return "written";
 		};
 		await h.engine.recreate(SID, IMG_N);
-		await vi.waitFor(() => expect(n).toBe(1), { timeout: 2000 });
-		await tick(10);
+		// The second pass is held inside its converge: the first pass's
+		// verdict is observable without racing the retry timer.
+		await vi.waitFor(() => expect(n).toBe(2), { timeout: 2000 });
 		expect(await recordOf(h)).toMatchObject({ state: "uncertain" });
+		second.resolve();
 		await vi.waitFor(async () => expect(await recordOf(h)).toMatchObject({ state: "resolved" }), {
 			timeout: 2000,
 		});
@@ -292,18 +296,22 @@ describe("E3 — the resolution converges and checks before `resolved`, under th
 	it("a status that does not stick is seen on the re-check: not resolved", async () => {
 		const h = await setup();
 		h.d1.casMode = "ambiguous-applied";
-		let lost = 1;
+		let calls = 0;
+		const second = deferred();
 		const real = h.d1.setStatus.bind(h.d1);
 		h.d1.setStatus = async (sid, st) => {
+			calls++;
+			// The second pass waits here, so the first pass's verdict is
+			// observable without racing the retry timer.
+			if (calls === 2) await second.promise;
 			await real(sid, st);
-			if (lost-- > 0) h.d1.row.status = "stopped"; // overwritten behind our back once
+			if (calls === 1) h.d1.row.status = "stopped"; // overwritten behind our back once
 		};
 		await h.engine.recreate(SID, IMG_N);
-		await vi.waitFor(() =>
-			expect(h.d1.writes.filter((w) => w.startsWith("status"))).toHaveLength(1),
-		);
-		await tick(10);
+		await vi.waitFor(() => expect(calls).toBe(2), { timeout: 2000 });
+		// The first pass saw the status not stick: it did not resolve.
 		expect(await recordOf(h)).toMatchObject({ state: "uncertain" });
+		second.resolve();
 		await vi.waitFor(async () => expect(await recordOf(h)).toMatchObject({ state: "resolved" }), {
 			timeout: 2000,
 		});
