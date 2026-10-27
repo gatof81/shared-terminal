@@ -21,6 +21,7 @@ import {
 } from "./auth.js";
 import { BellSweeper } from "./bellSweeper.js";
 import { BootstrapBroadcaster, drainInFlightBootstraps } from "./bootstrap.js";
+import { parseAllowUsers } from "./conversation/allowUsers.js";
 import { createIngestHandler } from "./conversation/ingestRoute.js";
 import { ConversationService } from "./conversation/service.js";
 import { ConversationStore } from "./conversation/store.js";
@@ -107,6 +108,8 @@ const docker = new DockerManager(sessions);
 // service rejects everything as `disabled`, writes no file, injects no
 // token and mounts no bind — behaviour-neutral by construction.
 const CONVERSATION_ENABLED = process.env.CONVERSATION_ENABLED === "true";
+// 3.0d (§7): owners whose NEW sessions are born with capture requested.
+const CONVERSATION_ALLOW_USERS = parseAllowUsers(process.env.CONVERSATION_ALLOW_USERS);
 const WORKSPACE_ROOT_FOR_CONVERSATION =
 	process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
 const conversationStore = new ConversationStore({ workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION });
@@ -147,10 +150,10 @@ docker.setConversationHooks({
 	onSessionDown: (sid) => conversation.onSessionDown(sid),
 	onSessionPurged: (sid) => conversation.onSessionPurged(sid),
 });
-// 3.0d — the recreation engine (CONVERSATION.md §2.7). No route uses it
-// yet (the admin endpoints come with the next PR); at boot it only runs
-// its pass over leftovers of RESOLVED attempts, which cannot exist before
-// those endpoints do. Unresolved attempts are never resolved here (D8).
+// 3.0d — the recreation engine (CONVERSATION.md §2.7), driven by the admin
+// `GET`/`POST /api/admin/sessions/:id/recreate`. At boot it only runs its
+// pass over leftovers of RESOLVED attempts; unresolved attempts are never
+// resolved after a restart (D8).
 const recreation = new RecreationEngine({
 	workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION,
 	docker: docker.recreatePort(),
@@ -378,7 +381,10 @@ app.use((_req, res, next) => {
 // postCreate hook (PR #208 round 1 review).
 app.use(
 	"/api",
-	buildRouter(sessions, docker, bootstrapBroadcaster, undefined, idleSweeper, conversation),
+	buildRouter(sessions, docker, bootstrapBroadcaster, undefined, idleSweeper, conversation, {
+		recreation,
+		conversationAllowUsers: CONVERSATION_ALLOW_USERS,
+	}),
 );
 app.get("/health", (_req, res) => res.json({ ok: true }));
 

@@ -316,6 +316,11 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 					// Validated above; null collapses to undefined so the
 					// manager's `?? null` lands NULL either way.
 					externalRef: typeof externalRef === "string" ? externalRef : undefined,
+					// CONVERSATION_ALLOW_USERS (CONVERSATION.md §7) names the
+					// OWNER whose new sessions are born requested — the target
+					// of an on-behalf create (#420), not the admin calling.
+					conversationRequested:
+						ctx.conversationAllowUsers?.has(targetOwnerId.toLowerCase()) ?? false,
 				});
 				// #420 — audit every owner ≠ caller create. A log line (not a
 				// session_observe_log row): the observe-log models attach-shaped

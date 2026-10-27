@@ -305,12 +305,17 @@ and persist them as a per-conversation event log on the host
 managed-settings directory, the SessionStart script, the loopback relay
 the hooks post to, the `st-backend` alias; see
 [session-image/README.md](../session-image/README.md#conversation-hooks-managed-settings)).
-The per-session activation surface is 3.0d. With `CONVERSATION_ENABLED`
+3.0d adds the per-session activation surface (admin only,
+[CONVERSATION.md §7](./CONVERSATION.md#7-comando-y-endpoint-de-activación-30d)):
+`PATCH /api/admin/sessions/:id/conversation {enabled}`, the recreation
+endpoints below, the `CONVERSATION_ALLOW_USERS` allowlist and a
+`conversation` block in `GET /api/admin/stats`. With `CONVERSATION_ENABLED`
 unset, nothing is mounted or injected and no session emits anything.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `CONVERSATION_ENABLED` | unset (`false`) | Master switch. Off: `POST /ingest/claude/hook` answers 204 and discards (`ingest_rejected{disabled}`), no session gets a hooks file, an ingest token or the extra read-only bind mount, and boot `reconcile` deletes any stale `.claude-managed/*/conversation.json`. On: capture is still **per-session opt-in** (`sessions.conversation_requested`). |
+| `CONVERSATION_ALLOW_USERS` | unset | Comma-separated user ids whose **new** sessions are born with capture requested (`conversation_requested=1`); the owner decides, also for an admin create on behalf of someone. Existing sessions are never touched. Requested is not effective: the flag, no revocation and an image with the relay still apply. Entries that are not user ids are ignored with a warning. |
 | `PORT` | `3001` | Passed to capturing session containers as `ST_BACKEND_PORT`: the relay forwards to `http://st-backend:<PORT>/ingest/claude/hook`. The hooks file itself always targets the relay, `http://127.0.0.1:47613/ingest/claude/hook`. |
 
 Host-side directories (both outside the workspace bind mount, next to
@@ -335,6 +340,33 @@ container](#recreating-a-session-container)). Making enable effective is
 an entry requirement of 3.0d. `GET /api/sessions/:id/conversations`
 reports `capture.{requested,effective,effectiveAfterRestart}` so nobody
 is promised capture that is not happening.
+
+Both variables are forwarded by `docker-compose.yml` with empty defaults
+(before 3.0d `CONVERSATION_ENABLED` was not, so setting it in `.env` did
+nothing under compose).
+
+Admin surface (`requireAdmin`; the writes also go through `adminActionIp`):
+
+- `PATCH /api/admin/sessions/:id/conversation {"enabled": true|false}` applies
+  the §2.4 row and answers `{ enabled, capture }` (`capture` as in
+  `GET …/conversations`). Enable writes only on a running container with
+  full authorization: the marker, then — once the relay identified itself
+  within 5 s — the hooks file; on a stopped one it writes nothing, and a container that can't
+  capture in place answers `requiresRecreate: true`. It runs under the
+  session's lifecycle lock, like start/stop/delete: behind one of those it
+  waits (up to 6 min, then 409 `busy`) and acts on the state they left.
+  Refused with 409 `flag-off`, `revoked-globally` (global marker),
+  `recreate-unresolved` or `busy`. Disable
+  answers `{ enabled: false, emissionStopsAfterRestart: true, capture }` and
+  always works, also while a recreation is unresolved: marker → D1 → hooks
+  file → `relay.enabled`, all done when it answers.
+- `GET /api/admin/stats` → `conversation`: `enabledSessions`,
+  `effectiveSessions`, `eventsSinceBoot`, `rejectedSinceBoot.byReason`,
+  `gapsSinceBoot`, `unattributedGaps`, `bytesOnDisk` (re-measured at most
+  once a minute), `queueBytesNow`, `queueBytesMax`, `wsResyncsSinceBoot`
+  (0 until the 3.1 Conversation WS exists) and `recreateOrphans`. No titles
+  or ids. `effectiveSessions` is computed without probing any relay, so it
+  is an upper bound ("configured"); the probed value is per session.
 
 Kill switch without a rebuild — run inside the backend container, like
 `backup`:
@@ -398,11 +430,14 @@ from step 4 on, for sessions explicitly requested.
 3. **Flag on**, still no session requested: `CONVERSATION_ENABLED=true` in
    `.env`, `docker compose up -d`. Boot `reconcile` writes nothing (no row
    requested); every ingest stays `disabled`.
-4. **Pilot**: request capture for one session (3.0d endpoint/allowlist),
-   then **re-create** its container ([below](#recreating-a-session-container)) —
-   a stop + start would reuse the old container, without token, mount or
-   relay, and possibly on the old image. The token, the mount and the relay
-   exist only in the re-created container. Verify inside it that the relay listens
+4. **Pilot** (D8: a **new, disposable** session with nothing important in
+   it, created without capture and stopped): `PATCH …/conversation
+   {"enabled":true}`, then the recreation preflight and `POST`
+   ([below](#recreating-a-session-container)) — a stop + start would reuse
+   the old container, without token, mount or relay, and possibly on the old
+   image. The token, the mount and the relay exist only in the re-created
+   container. Accept that the pilot may end up blocked in
+   `recreate-unresolved`. Verify inside it that the relay listens
    (`bash -c '(exec 3<>/dev/tcp/127.0.0.1/47613)' && echo up`), then events under
    `<WORKSPACE_ROOT>/.conversations/<sessionId>/` and `capture.effective: true`
    in `GET /api/sessions/:id/conversations`.
@@ -441,10 +476,62 @@ removal) — rollback never deletes it.
 Needed whenever a session must pick up something fixed at container
 creation: a new or rolled-back image, capture enabled or disabled at the
 container level, a fresh ingest token. **Never use a hard delete** — it
-purges the workspace and the session row. This uses only existing
-behaviour: `POST /start` re-creates the container when the one on record
-no longer exists in Docker (the "stale container id" path of
-`startContainer`).
+purges the workspace and the session row.
+
+**Restriction (owner decision D8):** recreation is only used on a **new,
+disposable pilot session**. Real working sessions are not recreated until a
+manual administrative recovery procedure exists and has been validated: an
+interrupted recreation stays `recreate-unresolved` (start, stop and delete
+refuse with 409) and nothing resolves it automatically after a backend
+restart. The workspace's Claude Code must be a version `/etc/st-control` was
+validated with (today **2.1.308**, owner decision for the pilot only); any
+other version blocks with `control-marker-incompatible`, including a newer
+one the CLI self-updated to.
+
+**The endpoint (3.0d, [CONVERSATION.md §2.7](./CONVERSATION.md#27-recreación-administrativa-y-activación-30d))**, admin only:
+
+1. **Stop** the session (owner `POST /api/sessions/<sessionId>/stop`, or admin
+   `POST /api/admin/sessions/<sessionId>/stop`). A running session is never
+   recreated.
+2. **Preflight**, no effects: `GET /api/admin/sessions/<sessionId>/recreate`
+   → `{ recreatable, blockers[], imageId, currentImageId, captureAfter }`.
+   `blockers` are codes with counts, never paths: anything in the container
+   layer that would be lost (`layer-*`), a workspace that isn't ready
+   (`workspace-*`), customised managed skills (`managed-skills-*`), capture
+   not requested or not allowed, the image, the CLI version, an unresolved
+   earlier attempt.
+3. **Recreate**: `POST /api/admin/sessions/<sessionId>/recreate
+   {"expectImageId": "<currentImageId from the preflight>"}`. A moved image
+   tag answers 409 `image-changed`; any other failing precondition answers
+   409 with its code and does nothing. For a session owned by someone else
+   an `operate` row goes into the observe log before anything is done (if it
+   can't be written, nothing is done). Results:
+   - `200 { outcome: "committed", nContainerId, capture, cliVersion,
+     warnings, incomplete }` — the session runs on the new container; with
+     `unresolved: true` and `pending[]` the convergence is still being
+     finished and the session stays gated until it is;
+   - `500 { error: "recreate-failed", step }` — rolled back, the previous
+     state intact;
+   - `500 { error: "recreate-failed", step, unresolved: true }` — not known
+     how it ended: the session stays `recreate-unresolved`;
+   - `409 busy` (another lifecycle operation in progress), `503
+     docker-unavailable`.
+4. **Verify**: `GET /api/sessions/<sessionId>/conversations` reports
+   `capture.effective: true`.
+
+Kept: everything in the workspace (repo, Claude CLI state and transcripts,
+`~/.npm-global`, `~/.ssh`, gh and VS Code state), uploads, the D1 row and
+config, conversation history; the preconditions refuse a container whose
+layer holds anything else.
+
+**Emergency only — the manual procedure.** It bypasses every check above
+(layer, skills, image, capture authorization) and loses what lived only in
+the container layer. Use it only when the endpoint cannot be used and the
+loss is acceptable. It relies on existing behaviour: `POST /start`
+re-creates the container when the one on record no longer exists in Docker
+(the "stale container id" path of `startContainer`). While a recreation of
+the session is unresolved its `stop` and `start` steps answer
+`recreate-unresolved`: don't work around that by hand.
 
 1. **Stop** the session: `POST /api/sessions/<sessionId>/stop` (owner), or
    `POST /api/admin/sessions/<sessionId>/stop` (admin). The container
@@ -463,7 +550,7 @@ no longer exists in Docker (the "stale container id" path of
    id, and, with capture, `GET /api/sessions/<sessionId>/conversations`
    reports `capture.effective: true`.
 
-Kept: everything under the workspace (repo, `~/.claude` and the CLI's
+Kept by the manual procedure: everything under the workspace (repo, `~/.claude` and the CLI's
 `~/.npm-global` through their workspace symlinks, `~/.ssh`, gh/VS Code
 state), uploads, the D1 row and config, conversation history. Lost: what
 lived only in the container layer (packages installed with `apt`/outside

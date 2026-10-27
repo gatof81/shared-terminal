@@ -94,6 +94,33 @@ describe("SessionManager.create — quota filter", () => {
 	});
 });
 
+describe("SessionManager.create — conversation_requested (3.0d, CONVERSATION.md §7)", () => {
+	async function insertParams(opts: { conversationRequested?: boolean }) {
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [],
+			success: true,
+			meta: { changes: 1, duration: 0, last_row_id: 0 },
+		});
+		dbStubs.d1Query.mockResolvedValueOnce({
+			results: [fakeSessionRow("sess-new", "u1")],
+			success: true,
+			meta: { changes: 0, duration: 0, last_row_id: 0 },
+		});
+		await new SessionManager().create({ userId: "u1", name: "test", ...opts });
+		const [sql, params] = dbStubs.d1Query.mock.calls[0]!;
+		return { sql: String(sql), params: params as unknown[] };
+	}
+
+	it("is set in the INSERT itself — the spawn that follows reads it — and defaults to 0", async () => {
+		const on = await insertParams({ conversationRequested: true });
+		expect(on.sql).toMatch(/INSERT INTO sessions \([^)]*conversation_requested\)/);
+		expect(on.params[8]).toBe(1);
+		dbStubs.d1Query.mockReset();
+		const off = await insertParams({});
+		expect(off.params[8]).toBe(0);
+	});
+});
+
 // ── listAll (#241d) ────────────────────────────────────────────────────────
 
 describe("SessionManager.listAll", () => {

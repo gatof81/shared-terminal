@@ -163,20 +163,32 @@ afterEach(async () => {
 	}
 });
 
-async function spinUp(sessions: SessionManager, docker: DockerManager) {
-	const router = buildRouter(sessions, docker, broadcaster, {
-		login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
-		register: { ipMax: 1000, ipWindowMs: 60_000 },
-		invitesCreate: { ipMax: 1000, ipWindowMs: 60_000 },
-		invitesList: { ipMax: 1000, ipWindowMs: 60_000 },
-		invitesRevoke: { ipMax: 1000, ipWindowMs: 60_000 },
-		fileUpload: { ipMax: 1000, ipWindowMs: 60_000 },
-		logout: { ipMax: 1000, ipWindowMs: 60_000 },
-		authStatus: { ipMax: 1000, ipWindowMs: 60_000 },
-		adminStats: { ipMax: 1000, ipWindowMs: 60_000 },
-		adminAction: { ipMax: 1000, ipWindowMs: 60_000 },
-		exec: { ipMax: 1000, ipWindowMs: 60_000 },
-	});
+async function spinUp(
+	sessions: SessionManager,
+	docker: DockerManager,
+	extras: Parameters<typeof buildRouter>[6] = {},
+) {
+	const router = buildRouter(
+		sessions,
+		docker,
+		broadcaster,
+		{
+			login: { ipMax: 1000, ipWindowMs: 60_000, usernameMax: 1000, usernameWindowMs: 60_000 },
+			register: { ipMax: 1000, ipWindowMs: 60_000 },
+			invitesCreate: { ipMax: 1000, ipWindowMs: 60_000 },
+			invitesList: { ipMax: 1000, ipWindowMs: 60_000 },
+			invitesRevoke: { ipMax: 1000, ipWindowMs: 60_000 },
+			fileUpload: { ipMax: 1000, ipWindowMs: 60_000 },
+			logout: { ipMax: 1000, ipWindowMs: 60_000 },
+			authStatus: { ipMax: 1000, ipWindowMs: 60_000 },
+			adminStats: { ipMax: 1000, ipWindowMs: 60_000 },
+			adminAction: { ipMax: 1000, ipWindowMs: 60_000 },
+			exec: { ipMax: 1000, ipWindowMs: 60_000 },
+		},
+		undefined,
+		undefined,
+		extras,
+	);
 	const app = express();
 	app.use(express.json());
 	app.use("/api", router);
@@ -492,6 +504,56 @@ describe("POST /sessions — create-on-behalf (#420)", () => {
 		expect(res.status).toBe(201);
 		expect(spies.create).toHaveBeenCalledWith(expect.objectContaining({ userId: "u2" }));
 		expect(authStubs.isUserAdmin).toHaveBeenCalledWith("u1");
+	});
+
+	// 3.0d — CONVERSATION_ALLOW_USERS (CONVERSATION.md §7) names the OWNER.
+	describe("CONVERSATION_ALLOW_USERS", () => {
+		it("an allowlisted owner's new session is created with capture requested", async () => {
+			stubUsersTable();
+			const { sessions, docker, spies } = makeFakes();
+			await spinUp(sessions, docker, { conversationAllowUsers: new Set(["u1"]) });
+			expect((await postSession({ name: "proj" })).status).toBe(201);
+			expect(spies.create).toHaveBeenCalledWith(
+				expect.objectContaining({ userId: "u1", conversationRequested: true }),
+			);
+		});
+
+		it("anyone else's is not, and without the list nobody's is", async () => {
+			stubUsersTable();
+			const a = makeFakes();
+			await spinUp(a.sessions, a.docker, { conversationAllowUsers: new Set(["u9"]) });
+			expect((await postSession({ name: "proj" })).status).toBe(201);
+			expect(a.spies.create).toHaveBeenCalledWith(
+				expect.objectContaining({ conversationRequested: false }),
+			);
+			await new Promise<void>((r) => server?.close(() => r()));
+			server = null;
+			const b = makeFakes();
+			await spinUp(b.sessions, b.docker);
+			expect((await postSession({ name: "proj" })).status).toBe(201);
+			expect(b.spies.create).toHaveBeenCalledWith(
+				expect.objectContaining({ conversationRequested: false }),
+			);
+		});
+
+		it("an admin creating on behalf of someone: the target owner decides, not the caller", async () => {
+			authStubs.isUserAdmin.mockResolvedValue(true);
+			stubUsersTable();
+			const a = makeFakes();
+			await spinUp(a.sessions, a.docker, { conversationAllowUsers: new Set(["u2"]) });
+			expect((await postSession({ name: "proj", ownerUserId: "u2" })).status).toBe(201);
+			expect(a.spies.create).toHaveBeenCalledWith(
+				expect.objectContaining({ userId: "u2", conversationRequested: true }),
+			);
+			await new Promise<void>((r) => server?.close(() => r()));
+			server = null;
+			const b = makeFakes();
+			await spinUp(b.sessions, b.docker, { conversationAllowUsers: new Set(["u1"]) });
+			expect((await postSession({ name: "proj", ownerUserId: "u2" })).status).toBe(201);
+			expect(b.spies.create).toHaveBeenCalledWith(
+				expect.objectContaining({ userId: "u2", conversationRequested: false }),
+			);
+		});
 	});
 
 	it("non-admin + ownerUserId → 403, no existence probe, no create", async () => {

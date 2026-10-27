@@ -15,6 +15,7 @@ import type { ExecRegistry } from "../execRegistry.js";
 import type { IdleSweeperStats } from "../idleSweeper.js";
 import { logger } from "../logger.js";
 import type { createAuthRateLimiters, RateLimitConfig, UsernameRateLimiter } from "../rateLimit.js";
+import type { RecreationEngine } from "../recreate/engine.js";
 import { RecreateUnresolvedError } from "../recreateAttempt.js";
 import { SessionBusyError } from "../sessionLifecycleLock.js";
 import type { SessionManager } from "../sessionManager.js";
@@ -51,6 +52,11 @@ export interface RouteContext {
 	// deployment that never constructs it); the list route then answers
 	// an honest "nothing captured" shape.
 	conversation?: ConversationService;
+	// 3.0d — the recreation engine behind `GET`/`POST /admin/sessions/:id/recreate`
+	// (CONVERSATION.md §2.7.2). Absent ⇒ those routes answer 503.
+	recreation?: RecreationEngine;
+	// 3.0d — `CONVERSATION_ALLOW_USERS` (§7), lowercase user ids. Absent ⇒ empty.
+	conversationAllowUsers?: ReadonlySet<string>;
 }
 
 // Exported so wsHandler can apply the same upper bound when validating

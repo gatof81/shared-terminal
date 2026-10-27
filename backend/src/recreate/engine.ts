@@ -402,7 +402,17 @@ export class RecreationEngine {
 
 	// ── Recreate (POST) ─────────────────────────────────────────────────────
 
-	async recreate(sessionId: string, expectImageId: string): Promise<RecreateResult> {
+	/**
+	 * `beforeEffects` runs under the lock once every precondition passed,
+	 * before the durable record — the first effect. The admin route's
+	 * cross-user `operate` audit row goes there (§2.7.2): fail-closed (a
+	 * throw aborts with nothing done), and a refused request leaves none.
+	 */
+	async recreate(
+		sessionId: string,
+		expectImageId: string,
+		opts: { beforeEffects?: () => Promise<void> } = {},
+	): Promise<RecreateResult> {
 		try {
 			const lease: Lease = { held: true };
 			return await this.deps.lock.run(
@@ -410,7 +420,13 @@ export class RecreationEngine {
 				"recreate",
 				async () => {
 					try {
-						return await this.recreateLocked(sessionId, expectImageId, this.now(), lease);
+						return await this.recreateLocked(
+							sessionId,
+							expectImageId,
+							this.now(),
+							lease,
+							opts.beforeEffects,
+						);
 					} finally {
 						// Before the lock is released: a pass still running on this
 						// lease stops before its next action.
@@ -433,6 +449,7 @@ export class RecreationEngine {
 		expectImageId: string,
 		lockedAt: number,
 		lease: Lease,
+		beforeEffects?: () => Promise<void>,
 	): Promise<RecreateResult> {
 		// ── Preconditions 2–8, first failure wins, no effects ──
 		let facts: Facts;
@@ -459,6 +476,23 @@ export class RecreationEngine {
 			throw err;
 		}
 
+		// Still nothing done: a throw here propagates with no record and no effect.
+		if (beforeEffects) await beforeEffects();
+		// The wait above (the route's audit row) is invisible to `stop()`: no
+		// attempt exists yet to close. A late answer must not start a
+		// recreation after a shutdown, past T_rec, or without the lock (#464 R2).
+		const notNow = this.stopped
+			? "shutting down"
+			: !lease.held
+				? "lock lost"
+				: this.now() >= lockedAt + this.cfg.tRecMs
+					? "T_rec expired"
+					: null;
+		if (notNow) {
+			logger.warn(`[recreate] ${sessionId}: not started (${notNow}); nothing done`);
+			return { ok: false, status: 500, code: "recreate-failed", step: "prepare" };
+		}
+
 		// ── The durable record, before the first effect ──
 		const attemptId = randomUUID();
 		const ts = String(this.now());
@@ -476,16 +510,30 @@ export class RecreationEngine {
 			// A refused begin() stops everything: not one effect has been
 			// issued. If the write failed after its rename, an `open` record
 			// owned by this process may be on disk; having done nothing is
-			// the evidence that lets it be resolved as rolled back.
-			if (!(err instanceof RecreateUnresolvedError)) {
+			// the evidence that lets it be resolved as rolled back — unless
+			// the engine is shutting down: no durable transition starts after
+			// `stop()` (E5); the next process finds the record and D8 applies.
+			logger.error(`[recreate] ${sessionId}: begin refused: ${(err as Error).message}`);
+			if (err instanceof RecreateUnresolvedError) {
+				return { ok: false, status: 409, code: "recreate-unresolved" };
+			}
+			if (!this.stopped) {
 				await this.deps.attempts
 					.resolve(sessionId, attemptId, { kind: "rolled-back" }, "begin failed; no effects")
 					.catch(() => undefined);
 			}
-			logger.error(`[recreate] ${sessionId}: begin refused: ${(err as Error).message}`);
-			return err instanceof RecreateUnresolvedError
-				? { ok: false, status: 409, code: "recreate-unresolved" }
-				: { ok: false, status: 500, code: "recreate-failed", step: "record" };
+			// The answer says `unresolved` unless it is CONFIRMED that this
+			// attempt left no record or that its record is resolved: an `open`
+			// one (always the case after a shutdown, which writes nothing more)
+			// gates the session like any unresolved attempt (#464 R2). Reading
+			// is not a transition, so it is allowed after `stop()` too.
+			const settled = await this.deps.attempts.read(sessionId).then(
+				(r) => r.kind === "none" || (r.kind === "ok" && r.record.state === "resolved"),
+				() => false,
+			);
+			return settled
+				? { ok: false, status: 500, code: "recreate-failed", step: "record" }
+				: { ok: false, status: 500, code: "recreate-failed", step: "record", unresolved: true };
 		}
 
 		const a: Attempt = {
@@ -510,6 +558,15 @@ export class RecreationEngine {
 		logger.info(
 			`[recreate] ${sessionId}: attempt ${attemptId} open (O ${facts.o.id.slice(0, 12)})`,
 		);
+		if (this.stopped) {
+			// `stop()` ran while the record was being written, so it could not
+			// close this epoch. Nothing is issued: no Docker request, and no
+			// further record write — the `open` record stays as the durable
+			// truth and the next process treats it as D8 says (fail-closed).
+			a.run.close("shutdown");
+			logger.warn(`[recreate] ${sessionId}: shut down while opening the attempt; nothing done`);
+			return { ok: false, status: 500, code: "recreate-failed", step: "prepare", unresolved: true };
+		}
 
 		// ── Steps 1–4; any failure before the commit rolls back ──
 		let hash: string;

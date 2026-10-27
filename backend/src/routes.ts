@@ -23,6 +23,7 @@ import {
 } from "./rateLimit.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerAuthRoutes } from "./routes/auth.js";
+import { registerConversationAdminRoutes } from "./routes/conversationAdmin.js";
 import { registerConversationRoutes } from "./routes/conversations.js";
 import { registerExecRoutes } from "./routes/exec.js";
 import { registerFileRoutes } from "./routes/files.js";
@@ -49,6 +50,9 @@ export function buildRouter(
 	idleSweeper?: RouteIdleSweeper,
 	// Phase 3 — optional for the same reason as `idleSweeper`.
 	conversation?: ConversationService,
+	// 3.0d — the recreation engine and `CONVERSATION_ALLOW_USERS`; optional
+	// for the same reason.
+	conversationExtras: Pick<RouteContext, "recreation" | "conversationAllowUsers"> = {},
 ): Router {
 	const router = Router();
 
@@ -68,6 +72,7 @@ export function buildRouter(
 		usernameLimiter,
 		execRegistry: new ExecRegistry(),
 		conversation,
+		...conversationExtras,
 	};
 
 	// ── Auth routes (public) ────────────────────────────────────────────────
@@ -132,6 +137,7 @@ export function buildRouter(
 	registerFileRoutes(router, ctx);
 	registerGitRoutes(router, ctx);
 	registerConversationRoutes(router, ctx);
+	registerConversationAdminRoutes(router, ctx);
 	registerExecRoutes(router, ctx);
 	registerTemplateRoutes(router, ctx);
 

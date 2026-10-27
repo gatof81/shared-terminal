@@ -46,6 +46,10 @@ export interface CreateSessionOpts {
 	 *  the session's lifecycle lock BEFORE the row exists. Omitted → a
 	 *  fresh v4 UUID. */
 	sessionId?: string;
+	/** 3.0d — born with `conversation_requested = 1` (`CONVERSATION_ALLOW_USERS`,
+	 *  CONVERSATION.md §7). Omitted → 0. Set in the INSERT itself: the spawn
+	 *  that follows reads it to decide the container's capture. */
+	conversationRequested?: boolean;
 }
 
 // ── Auth ────────────────────────────────────────────────────────────────────

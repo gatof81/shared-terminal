@@ -114,6 +114,21 @@ export async function listRunningCaptureSessions(): Promise<RunningCaptureSessio
 	return r.results;
 }
 
+export interface RequestedSession {
+	status: string;
+	/** 1 when `ingest_token_hash` is set: never the hash itself. */
+	authorized: number;
+	session_id: string;
+}
+
+/** Every session with capture requested (admin stats, §7): one read. */
+export async function listRequestedSessions(): Promise<RequestedSession[]> {
+	const r = await d1Query<RequestedSession>(
+		"SELECT session_id, status, (ingest_token_hash IS NOT NULL) AS authorized FROM sessions WHERE conversation_requested = 1",
+	);
+	return r.results;
+}
+
 // ── claude_conversations rows ──────────────────────────────────────────────
 
 export interface ConversationRow {

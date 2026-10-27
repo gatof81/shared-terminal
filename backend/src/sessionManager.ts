@@ -216,8 +216,8 @@ export class SessionManager {
 		// history, which we want them to keep so they can audit what
 		// went wrong.
 		const insert = await d1Query(
-			`INSERT INTO sessions (session_id, user_id, name, container_name, cols, rows, env_vars, external_ref)
-                         SELECT ?, ?, ?, ?, ?, ?, ?, ?
+			`INSERT INTO sessions (session_id, user_id, name, container_name, cols, rows, env_vars, external_ref, conversation_requested)
+                         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
                          WHERE (
                                  SELECT COUNT(*) FROM sessions
                                  WHERE user_id = ? AND status NOT IN ('terminated', 'failed')
@@ -231,6 +231,7 @@ export class SessionManager {
 				rows,
 				JSON.stringify(envVars),
 				opts.externalRef ?? null,
+				opts.conversationRequested ? 1 : 0,
 				opts.userId,
 				opts.maxActiveSessions ?? MAX_ACTIVE_SESSIONS_PER_USER,
 			],
