@@ -189,14 +189,19 @@ describe("classifyHref / slugify", () => {
 //     keeping the best of 3 at each size: what noise remains (a GC burst,
 //     cache contention) only ever adds time, so the minimum is the estimate;
 //   - the growth exponent is the least-squares slope of log(time) over
-//     log(n) across all three sizes, never a single ratio; linear ≈ 1,
-//     quadratic ≈ 2, and the bound is 1.5;
+//     log(n); linear ≈ 1, quadratic ≈ 2, and the bound is 1.5. With these
+//     geometric sizes the middle point cancels out of that slope — it is
+//     exactly log(t200k / t50k) / log 4 — so the verdict rests on the two
+//     ends of a 4× span, each a best-of-3. The middle time is only
+//     reported in the failure message;
 //   - below a noise floor at 200k the slope is not judged (a few ms is
 //     all jitter). No quadratic pass over 200k chars fits under it, and
 //     the viewer never renders more than 256 KiB as Markdown, so whatever
 //     hides there costs < 50 ms in the worst case;
-//   - one render over a generous absolute ceiling fails at once: a hang
-//     or an extreme regression does not get to run every repetition.
+//   - one render over a generous absolute ceiling fails without running
+//     the remaining repetitions. It is checked once a render RETURNS: a
+//     synchronous render cannot be interrupted from its own thread, so a
+//     render that never returns is stopped by the test timeout instead.
 
 const GROWTH_SIZES: readonly number[] = [50_000, 100_000, 200_000];
 const LARGEST = GROWTH_SIZES[GROWTH_SIZES.length - 1] as number;
@@ -264,7 +269,8 @@ function expectNearLinear(run: (n: number) => void): void {
 }
 
 // Worst case per test: a warmup plus 3 × 3 renders of the heaviest input
-// on a slow runner, well inside this; a hang is cut by the ceiling first.
+// on a slow runner, well inside this. A render that never returns is cut
+// here, not by the ceiling (which only sees renders that finished).
 const GROWTH_TIMEOUT_MS = 120_000;
 
 describe("the growth check itself", () => {
@@ -277,8 +283,9 @@ describe("the growth check itself", () => {
 		expect(growthProblem(S, [150, 600, 2400])).toMatch(/grows as n\^2\.00/);
 		// Under 1.5 s at 200k, which the old absolute bound let through.
 		expect(growthProblem(S, [60, 240, 960])).toMatch(/grows as n\^2/);
-		// A noisy doubling alone does not decide: the fit spans all three sizes.
-		expect(growthProblem(S, [40, 41, 120])).toBeNull();
+		// Only the ends of the span decide: the middle point cancels out of
+		// the least-squares slope for geometric sizes.
+		expect(growthExponent(S, [40, 41, 120])).toBeCloseTo(growthExponent(S, [40, 4000, 120]), 9);
 	});
 
 	it("does not judge jitter below the floor, and fails anything over the ceiling", () => {
