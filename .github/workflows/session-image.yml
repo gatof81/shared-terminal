@@ -109,3 +109,13 @@ jobs:
       - name: Recreation smoke test (real Docker)
         working-directory: backend
         run: npx tsx src/recreate/realDocker.smoke.ts shared-terminal-session
+
+      # 3.0d audit (#468 §10): full recreation with workspace, git, secret and
+      # port; the backend interrupted mid-recreation (D8); the relay
+      # unavailable during activation; the relay killed after it; marks and
+      # authorizations across stop/start. Disposable containers only, D1 in
+      # memory; secrets compared by hash, never printed. Output unfiltered —
+      # on failure the smoke also dumps each container's own log.
+      - name: Recreation audit smoke test (real Docker)
+        working-directory: backend
+        run: npx tsx src/recreate/recreateAudit.smoke.ts shared-terminal-session

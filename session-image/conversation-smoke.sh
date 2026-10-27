@@ -1108,6 +1108,79 @@ docker run --rm -v "$WS":/w --entrypoint bash "$IMAGE" -c "printf 'stale\n' > /w
 session no none || exit 1
 check "no control mount: the boot seeds the managed skills as before" [ "$(skill_sums | cut -d' ' -f1)" = "$IMG_SUM" ]
 
+# ── Phase 12 ────────────────────────────────────────────────────────────────
+# The CLI halves of the 3.0d audit smokes (docs/design/phase3-3.0d-audit.md
+# §10); the backend halves are backend/src/recreate/recreateAudit.smoke.ts.
+phase "Phase 12: relay unavailable during activation; relay killed after it"
+not() { ! "$@"; } # a negated shell function, for check
+
+# 12a — the relay can't identify itself while capture is being authorized:
+# the user holds 127.0.0.1:$RELAY_PORT. The backend's write procedure
+# (CaptureAuthority.applyWriteDetailed) writes relay.enabled, probes for
+# ≤ 5 s, and on no identification removes the marker and writes NO hooks
+# file. Replayed here step by step on the real image and CLI: the CLI must
+# see no hook at all — no error, no request.
+receiver ok unavail
+ctl_clear
+session yes empty "${CTL_MOUNT[@]}" || exit 1
+docker exec "$SESS" bash -c "setsid nohup python3 -c 'import socket,time
+s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind((\"127.0.0.1\",$RELAY_PORT));s.listen();time.sleep(900)' st-occupant >/dev/null 2>&1 &"
+wait_until 30 relay_listening || fail "the occupant never listened"
+ctl "touch /wr/.st-control/$SID/relay.enabled"
+sleep 5 # the backend's identification window
+check "port taken: the relay never identifies itself in the window" not relay_identified
+ctl "rm -f /wr/.st-control/$SID/relay.enabled" # relay-unavailable ⇒ marker withdrawn, no hooks file
+check "no hooks file was written" bash -c '[ -z "$(ls -A "$1")" ]' _ "$EMPTY"
+tab_start --dangerously-skip-permissions || exit 1
+tab_turn "ST_SCENARIO=bash"
+check "relay unavailable: the interactive turn completes ($LAST_MS ms)" [ "$LAST_MS" -ge 0 ]
+check "relay unavailable: zero 'hook error' on screen" [ "$(hook_errors)" = 0 ]
+docker exec "$SESS" tmux kill-server >/dev/null 2>&1
+claude_p hola
+check "relay unavailable: claude -p answers normally" out_is "$HOLA_OUT"
+check "relay unavailable: zero requests reached st-backend" [ "$(count unavail)" = 0 ]
+
+# 12b — kill -9 of a relay that was active. Detection: the status probe the
+# backend uses (`effective` needs it in each request, D7) fails at once.
+# Recovery: the supervisor relaunches after 1 s ⇒ identified again ≤ 3 s.
+# Loss bound: a turn run while it is down may show hook errors, but no more
+# than the hook requests of a whole normal turn; the next turn shows none.
+# Zero errors at the moment of the crash is NOT required.
+receiver ok killed
+ctl_clear
+write_hooks_file
+session yes file "${CTL_MOUNT[@]}" || exit 1
+wait_until 30 relay_identified || fail "relay never identified before the kill"
+tab_start --dangerously-skip-permissions || exit 1
+sleep 1
+C1=$(count killed)
+tab_turn "first turn"
+sleep 1
+PER_TURN=$(($(count killed) - C1))
+E0=$(hook_errors)
+check "a normal turn sends hook requests ($PER_TURN)" [ "$PER_TURN" -gt 0 ]
+check "active relay: a normal turn ($PER_TURN hook requests) shows no hook error" [ "$E0" = 0 ]
+docker exec "$SESS" kill -KILL "$(relay_pids | head -n 1)"
+check "killed: the status probe fails right away (detected)" not relay_identified
+t0=$(ms_now)
+check "killed: identified again within 3 s" wait_until 30 relay_identified
+note "relay identified again $(($(ms_now) - t0)) ms after the failed probe"
+# The supervisor now waits 2 s before the next relaunch: a turn sent right
+# after this kill runs with nobody on the port.
+docker exec "$SESS" kill -KILL "$(relay_pids | head -n 1)"
+tab_turn "while it is down"
+check "down: the turn still completes ($LAST_MS ms)" [ "$LAST_MS" -ge 0 ]
+E1=$(hook_errors)
+check "down: hook errors ($E1) bounded by one turn's hook requests ($PER_TURN)" [ "$E1" -le "$PER_TURN" ]
+check "down: identified again after the supervisor's back-off (≤ 6 s)" wait_until 60 relay_identified
+tab_turn "after recovery"
+sleep 1
+check "recovered: the next turn adds no hook error ($E1 → $(hook_errors))" [ "$(hook_errors)" = "$E1" ]
+check "recovered: its requests reach st-backend again" bash -c '[ "$(jq -s "map(select(.event == \"UserPromptSubmit\" and .body.prompt == \"after recovery\")) | length" "$1")" -ge 1 ]' _ "$OUT/killed.jsonl"
+note "relay killed: $E1 hook error line(s) during the down turn, bound $PER_TURN"
+docker exec "$SESS" tmux kill-server >/dev/null 2>&1
+
 echo
 echo "── Summary ──"
 cat "$SUMMARY"
