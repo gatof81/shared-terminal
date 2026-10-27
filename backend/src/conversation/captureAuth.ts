@@ -131,6 +131,8 @@ export async function writeDeferSeed(workspaceRoot: string, sessionId: string): 
 	const file = path.join(dir, DEFER_SEED_FILE);
 	const tmp = `${file}.tmp.${process.pid}.${randomBytes(6).toString("hex")}`;
 	await fs.writeFile(tmp, "", { mode: 0o644 });
+	// Not redundant: writeFile's mode is masked by the process umask, and
+	// the entrypoint (uid 1000) must be able to read it through the ro mount.
 	await fs.chmod(tmp, 0o644);
 	await fs.rename(tmp, file);
 }

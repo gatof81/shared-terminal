@@ -98,7 +98,8 @@ export class AttemptTransitionError extends Error {
 	}
 }
 
-const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** Lowercase, as `randomUUID()` emits; shared with the recreation's boot pass. */
+export const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function nowIso(): string {
 	return new Date().toISOString();

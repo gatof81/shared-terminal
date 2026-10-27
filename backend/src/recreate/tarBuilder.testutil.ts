@@ -13,6 +13,8 @@ export interface BuildEntry {
 	pax?: boolean;
 	/** Use a GNU `L` long-name entry instead of pax. */
 	gnuLong?: boolean;
+	/** The pax `path` value when it should differ from `path`. */
+	paxPath?: string;
 }
 
 function header(name: string, size: number, typeflag: string, linkname = ""): Buffer {
@@ -53,13 +55,15 @@ export function buildTar(entries: BuildEntry[]): Buffer {
 		const data = type === "file" ? Buffer.from(e.data ?? "") : Buffer.alloc(0);
 		const flag = { file: "0", dir: "5", symlink: "2", fifo: "6" }[type];
 		let name = e.path;
+		// `pax` + `gnuLong` together emits both (a malformed archive, for tests).
+		if (e.pax || (!e.gnuLong && Buffer.byteLength(e.path) > 100)) {
+			const rec = Buffer.from(paxRecord("path", e.paxPath ?? e.path));
+			parts.push(header("PaxHeader", rec.length, "x"), padded(rec));
+			name = e.path.slice(0, 100);
+		}
 		if (e.gnuLong) {
 			const ln = Buffer.from(`${e.path}\0`);
 			parts.push(header("././@LongLink", ln.length, "L"), padded(ln));
-			name = e.path.slice(0, 100);
-		} else if (e.pax || Buffer.byteLength(e.path) > 100) {
-			const rec = Buffer.from(paxRecord("path", e.path));
-			parts.push(header("PaxHeader", rec.length, "x"), padded(rec));
 			name = e.path.slice(0, 100);
 		}
 		parts.push(header(name, data.length, flag, e.linkname ?? ""));

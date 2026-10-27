@@ -39,6 +39,7 @@ import {
 	type AttemptOutcome,
 	type RecreateAttemptStore,
 	RecreateUnresolvedError,
+	SESSION_ID_RE,
 } from "../recreateAttempt.js";
 import { SessionBusyError, type SessionLifecycleLock } from "../sessionLifecycleLock.js";
 import { CONTROL_MARKER_VALIDATED_CLI, readWorkspaceCliVersion } from "./cliCompat.js";
@@ -100,7 +101,6 @@ export const DEFAULT_RECREATE_CONFIG: RecreateConfig = {
 
 export const CLI_MIN_VERSION = "2.1.308";
 const SEED_SCRIPT = "/opt/st/seed-skills.sh";
-const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const READY_SENTINEL = "/tmp/.st-ready";
 
 // ── Public shapes ───────────────────────────────────────────────────────────

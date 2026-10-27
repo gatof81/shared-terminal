@@ -59,4 +59,17 @@ describe("parseTar", () => {
 		expect(() => parseTar(good.subarray(0, end + 512), LIMITS)).toThrow(/not terminated/);
 		expect(parseTar(good, LIMITS)).toHaveLength(1);
 	});
+	it("two long-name mechanisms for one entry are malformed", () => {
+		const tar = buildTar([
+			{ path: "session-skills/a/SKILL.md", pax: true, paxPath: "x", gnuLong: true },
+		]);
+		expect(() => parseTar(tar, LIMITS)).toThrow(/conflicting long names/);
+	});
+	it("an inner `.` segment is malformed (it would key the entry by another name)", () => {
+		expect(() =>
+			parseTar(buildTar([{ path: "session-skills/./SKILL.md", data: "x" }]), LIMITS),
+		).toThrow(/escapes the archive root/);
+		// A leading `./` is just dockerd's form and stays accepted.
+		expect(parseTar(buildTar([{ path: "./f", data: "x" }]), LIMITS)[0]?.path).toBe("f");
+	});
 });

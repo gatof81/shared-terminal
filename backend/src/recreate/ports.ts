@@ -86,7 +86,7 @@ export const LABEL_ATTEMPT = "io.shared-terminal.recreate-attempt";
 /**
  * The suffixes `-old-<ts>` and `-new-<ts>` on a canonical `st-<sid[:12]>`
  * are reserved for recreation (§2.7.4). The 12-char prefix of a session
- * UUID keeps its first dash (`3f2a9c1b-4d5e`), so this is the pattern real
+ * UUID keeps its first dash (`3f2a9c1b-4d5`), so this is the pattern real
  * names follow; a name that does not match exactly is never touched.
  */
 export const RESERVED_NAME_RE = /^st-([0-9a-f]{8}-[0-9a-f]{3})-(old|new)-([0-9]+)$/;

@@ -795,7 +795,7 @@ Reglas:
   - `docker ps -a --filter label=io.shared-terminal.recreate-of`;
   - los nombres que encajan **exactamente** con `^st-[0-9a-f]{8}-[0-9a-f]{3}-old-[0-9]+$` (o
     `-new-`) y cuyo prefijo es una sesión de D1. El prefijo es `st-<sid[:12]>`, que conserva el
-    primer guion del UUID (`st-3f2a9c1b-4d5e`); el patrón anterior, `[0-9a-f]{12}`, no podía
+    primer guion del UUID (`st-3f2a9c1b-4d5`); el patrón anterior, `[0-9a-f]{12}`, no podía
     encajar con ningún nombre real.
 
   Los sufijos `-new-<ts>` y `-old-<ts>` están **reservados**, y un nombre que no encaja no se toca.

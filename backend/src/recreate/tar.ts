@@ -94,8 +94,10 @@ function normalise(p: string): string {
 	let s = p;
 	while (s.startsWith("./")) s = s.slice(2);
 	while (s.endsWith("/")) s = s.slice(0, -1);
-	if (s.startsWith("/") || s.split("/").some((seg) => seg === "..")) {
-		throw new TarFormatError(`path escapes the archive root: ${p}`);
+	// Inner `.` segments too: they would key an entry by a name that is
+	// not the one the same file has on disk.
+	if (s.startsWith("/") || s.split("/").some((seg) => seg === ".." || seg === ".")) {
+		throw new TarFormatError(`path escapes the archive root or is not canonical: ${p}`);
 	}
 	return s;
 }
@@ -146,6 +148,12 @@ export function parseTar(buf: Buffer, limits: TarLimits): TarEntry[] {
 		const prefix = magic.startsWith("ustar") ? cstr(header, 345, 155) : "";
 		let name = cstr(header, 0, 100);
 		if (prefix) name = `${prefix}/${name}`;
+		// Two long-name mechanisms for one entry (a pax `path` and a GNU
+		// `L`, or `linkpath` and `K`) is malformed: picking either would
+		// key the entry by a name the archive does not agree on.
+		if ((pax?.has("path") && longName !== null) || (pax?.has("linkpath") && longLink !== null)) {
+			throw new TarFormatError("conflicting long names for one entry");
+		}
 		name = pax?.get("path") ?? longName ?? name;
 		const linkname = pax?.get("linkpath") ?? longLink ?? cstr(header, 157, 100);
 		pax = null;
