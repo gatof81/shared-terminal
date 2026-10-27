@@ -33,7 +33,11 @@ export type LifecycleOp =
 	| "kill"
 	| "delete"
 	| "recreate"
-	| "recreate-resolve";
+	| "recreate-resolve"
+	// `PATCH …/conversation {enabled:true}` (#464 R1): it writes the marker
+	// and the hooks file, so it must not interleave with a delete, a start
+	// or a recreation. Disable and the emergency CLI never take the lock.
+	| "enable";
 
 export class SessionBusyError extends Error {
 	readonly code = "busy";

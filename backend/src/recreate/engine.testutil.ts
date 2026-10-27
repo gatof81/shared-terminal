@@ -442,7 +442,14 @@ export const FAST: Partial<RecreateConfig> = {
 	resolveRetryMs: 40,
 };
 
-export async function harness(opts: { config?: Partial<RecreateConfig>; root?: string } = {}) {
+export async function harness(
+	opts: {
+		config?: Partial<RecreateConfig>;
+		root?: string;
+		/** The lock to share with code outside the engine (route tests pass the singleton). */
+		lock?: SessionLifecycleLock;
+	} = {},
+) {
 	const root = opts.root ?? (await fs.mkdtemp(path.join(os.tmpdir(), "st-recreate-")));
 	await fs.mkdir(path.join(root, SID, ".npm-global"), { recursive: true });
 	const docker = new FakeDocker();
@@ -450,7 +457,7 @@ export async function harness(opts: { config?: Partial<RecreateConfig>; root?: s
 	const capture = new FakeCapture(d1);
 	capture.docker = docker;
 	const attempts = new RecreateAttemptStore(root);
-	const lock = new SessionLifecycleLock();
+	const lock = opts.lock ?? new SessionLifecycleLock();
 	lock.setGuard((sid) => attempts.assertResolved(sid));
 	const workspaceSkills = new Map<string, WorkspaceSkill>();
 	/** The workspace CLI N would run (control-marker-incompatible). */

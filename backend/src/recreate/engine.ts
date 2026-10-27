@@ -478,6 +478,20 @@ export class RecreationEngine {
 
 		// Still nothing done: a throw here propagates with no record and no effect.
 		if (beforeEffects) await beforeEffects();
+		// The wait above (the route's audit row) is invisible to `stop()`: no
+		// attempt exists yet to close. A late answer must not start a
+		// recreation after a shutdown, past T_rec, or without the lock (#464 R2).
+		const notNow = this.stopped
+			? "shutting down"
+			: !lease.held
+				? "lock lost"
+				: this.now() >= lockedAt + this.cfg.tRecMs
+					? "T_rec expired"
+					: null;
+		if (notNow) {
+			logger.warn(`[recreate] ${sessionId}: not started (${notNow}); nothing done`);
+			return { ok: false, status: 500, code: "recreate-failed", step: "prepare" };
+		}
 
 		// ── The durable record, before the first effect ──
 		const attemptId = randomUUID();
@@ -496,8 +510,10 @@ export class RecreationEngine {
 			// A refused begin() stops everything: not one effect has been
 			// issued. If the write failed after its rename, an `open` record
 			// owned by this process may be on disk; having done nothing is
-			// the evidence that lets it be resolved as rolled back.
-			if (!(err instanceof RecreateUnresolvedError)) {
+			// the evidence that lets it be resolved as rolled back — unless
+			// the engine is shutting down: no durable transition starts after
+			// `stop()` (E5); the next process finds the record and D8 applies.
+			if (!(err instanceof RecreateUnresolvedError) && !this.stopped) {
 				await this.deps.attempts
 					.resolve(sessionId, attemptId, { kind: "rolled-back" }, "begin failed; no effects")
 					.catch(() => undefined);
@@ -530,6 +546,15 @@ export class RecreationEngine {
 		logger.info(
 			`[recreate] ${sessionId}: attempt ${attemptId} open (O ${facts.o.id.slice(0, 12)})`,
 		);
+		if (this.stopped) {
+			// `stop()` ran while the record was being written, so it could not
+			// close this epoch. Nothing is issued: no Docker request, and no
+			// further record write — the `open` record stays as the durable
+			// truth and the next process treats it as D8 says (fail-closed).
+			a.run.close("shutdown");
+			logger.warn(`[recreate] ${sessionId}: shut down while opening the attempt; nothing done`);
+			return { ok: false, status: 500, code: "recreate-failed", step: "prepare", unresolved: true };
+		}
 
 		// ── Steps 1–4; any failure before the commit rolls back ──
 		let hash: string;

@@ -352,8 +352,11 @@ Admin surface (`requireAdmin`; the writes also go through `adminActionIp`):
   `GET …/conversations`). Enable writes only on a running container with
   full authorization: the marker, then — once the relay identified itself
   within 5 s — the hooks file; on a stopped one it writes nothing, and a container that can't
-  capture in place answers `requiresRecreate: true`. Refused with 409
-  `flag-off`, `revoked` (global marker) or `recreate-unresolved`. Disable
+  capture in place answers `requiresRecreate: true`. It runs under the
+  session's lifecycle lock, like start/stop/delete: behind one of those it
+  waits (up to 6 min, then 409 `busy`) and acts on the state they left.
+  Refused with 409 `flag-off`, `revoked-globally` (global marker),
+  `recreate-unresolved` or `busy`. Disable
   answers `{ enabled: false, emissionStopsAfterRestart: true, capture }` and
   always works, also while a recreation is unresolved: marker → D1 → hooks
   file → `relay.enabled`, all done when it answers.

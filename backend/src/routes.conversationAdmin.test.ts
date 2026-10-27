@@ -138,6 +138,7 @@ import { ConversationStore } from "./conversation/store.js";
 import type { DockerManager } from "./dockerManager.js";
 import { deferred, harness, IMG_N, O_ID, SID, stateOf } from "./recreate/engine.testutil.js";
 import { buildRouter } from "./routes.js";
+import { sessionLifecycleLock } from "./sessionLifecycleLock.js";
 import type { SessionManager } from "./sessionManager.js";
 
 const OWNER = "owner-1";
@@ -157,6 +158,26 @@ let view: ContainerView;
 const probe = vi.fn(async () => true);
 const inspectCapture = vi.fn(async () => view);
 let unresolved = false;
+/**
+ * Holds of the shared (singleton) lifecycle lock taken by a test. Released
+ * in afterEach even when an assertion failed first: a leaked hold would
+ * make every later test in the file see `busy`.
+ */
+const holds: Array<{ release: () => void; held: Promise<unknown> }> = [];
+function holdLock(op: "delete" | "start", whileHeld: () => Promise<void> = async () => {}) {
+	const gate = deferred();
+	const held = sessionLifecycleLock
+		.run(SID, op, async () => {
+			await gate.promise;
+			await whileHeld();
+		})
+		.catch(() => undefined);
+	const h = { release: () => gate.resolve(), held };
+	holds.push(h);
+	return h;
+}
+/** Sessions the stubbed manager no longer finds (a hard delete happened). */
+const gone = new Set<string>();
 
 function sessionRow(over: Partial<Row> = {}): Row {
 	return {
@@ -170,9 +191,17 @@ function sessionRow(over: Partial<Row> = {}): Row {
 	};
 }
 
-async function spinUp(opts: { flag?: boolean; withService?: boolean; owner?: string } = {}) {
+async function spinUp(
+	opts: {
+		flag?: boolean;
+		withService?: boolean;
+		owner?: string;
+		config?: NonNullable<Parameters<typeof harness>[0]>["config"];
+	} = {},
+) {
 	root = await fs.mkdtemp(path.join(os.tmpdir(), "st-convadmin-"));
-	h = await harness();
+	// The production wiring: the engine and the routes share one lock.
+	h = await harness({ lock: sessionLifecycleLock, config: opts.config });
 	// A real image ID: the route only accepts `sha256:<64 hex>` (D6).
 	h.docker.current = { imageId: IMAGE_N, relay2: true };
 	h.docker.skillsByImage.set(IMAGE_N, h.docker.skillsByImage.get(IMG_N) ?? null);
@@ -204,7 +233,7 @@ async function spinUp(opts: { flag?: boolean; withService?: boolean; owner?: str
 	});
 	const sessions = {
 		get: vi.fn(async (id: string) =>
-			db.rows.has(id) || id === SID
+			db.rows.has(id) || (id === SID && !gone.has(SID))
 				? { sessionId: id, userId: opts.owner ?? OWNER, status: "stopped" }
 				: null,
 		),
@@ -271,6 +300,7 @@ beforeEach(() => {
 	db.failObserveInsert = false;
 	db.onObserveInsert = null;
 	unresolved = false;
+	gone.clear();
 	probe.mockReset();
 	probe.mockImplementation(async () => true);
 	inspectCapture.mockClear();
@@ -282,11 +312,16 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+	for (const x of holds.splice(0)) {
+		x.release();
+		await x.held;
+	}
 	if (server) {
 		await new Promise<void>((resolve) => server?.close(() => resolve()));
 		server = null;
 	}
 	h?.engine.stop();
+	sessionLifecycleLock.setGuard(null);
 	if (root) await fs.rm(root, { recursive: true, force: true });
 	if (h) await fs.rm(h.root, { recursive: true, force: true });
 });
@@ -421,7 +456,7 @@ describe("PATCH /admin/sessions/:id/conversation (§7, §2.4)", () => {
 		db.rows.set(SID, sessionRow({ ingest_token_hash: hashIngestToken(TOKEN) }));
 		await writeGlobalRevocation(root, { at: "t", by: "cli" });
 		res = await patch(SID, { enabled: true });
-		expect([res.status, await res.json()]).toEqual([409, { error: "revoked" }]);
+		expect([res.status, await res.json()]).toEqual([409, { error: "revoked-globally" }]);
 		expect(db.rows.get(SID)?.conversation_requested).toBe(0);
 		expect(await files(SID)).toEqual({ marker: false, hooksFile: false });
 		await new Promise<void>((r) => server?.close(() => r()));
@@ -510,6 +545,110 @@ describe("PATCH /admin/sessions/:id/conversation (§7, §2.4)", () => {
 		});
 		expect(db.rows.get(SID)?.conversation_requested).toBe(0);
 		expect(await checkRevocation(root, SID)).toBe("session");
+	});
+
+	// ── #464 R1: enable is a lifecycle operation ──
+
+	const configuredRow = () => sessionRow({ ingest_token_hash: hashIngestToken(TOKEN) });
+
+	for (const op of ["delete", "start"] as const) {
+		it(`a ${op} holding the lock ⇒ enable waits, writes nothing meanwhile, then acts on the state it left`, async () => {
+			await spinUp();
+			db.rows.set(SID, configuredRow());
+			const lock = holdLock(op);
+			const pending = patch(SID, { enabled: true });
+			await new Promise((r) => setTimeout(r, 150));
+			expect(sessionLifecycleLock.queued(SID)).toBe(1);
+			expect(db.rows.get(SID)?.conversation_requested).toBe(0);
+			expect(await files(SID)).toEqual({ marker: false, hooksFile: false });
+			lock.release();
+			await lock.held;
+			const res = await pending;
+			expect(res.status).toBe(200);
+			expect(((await res.json()) as { capture: { effective: boolean } }).capture.effective).toBe(
+				true,
+			);
+			expect(await files(SID)).toEqual({ marker: true, hooksFile: true });
+		});
+	}
+
+	it("the session is deleted while enable waits ⇒ 404, nothing written", async () => {
+		await spinUp();
+		db.rows.set(SID, configuredRow());
+		const lock = holdLock("delete", async () => {
+			// The hard delete drops the row.
+			db.rows.delete(SID);
+			gone.add(SID);
+		});
+		const pending = patch(SID, { enabled: true });
+		await new Promise((r) => setTimeout(r, 100));
+		lock.release();
+		await lock.held;
+		const res = await pending;
+		expect([res.status, await res.json()]).toEqual([404, { error: "Session not found" }]);
+		expect(db.rows.has(SID)).toBe(false);
+		expect(await files(SID)).toEqual({ marker: false, hooksFile: false });
+		expect(db.sql.some((q) => /^UPDATE sessions SET conversation_requested/.test(q))).toBe(false);
+	});
+
+	it("a recreation holding the lock ⇒ enable waits for it and writes nothing until it is resolved", async () => {
+		await spinUp();
+		db.rows.set(SID, configuredRow());
+		const gate = deferred();
+		const started = deferred();
+		h.docker.hooks.set("start", async (a) => {
+			if (a[0] !== O_ID) {
+				started.resolve();
+				await gate.promise;
+			}
+		});
+		holds.push({ release: () => gate.resolve(), held: Promise.resolve() });
+		const recreating = call("POST", `/admin/sessions/${SID}/recreate`, { expectImageId: IMAGE_N });
+		await started.promise;
+		expect(sessionLifecycleLock.heldBy(SID)).toBe("recreate");
+		const pending = patch(SID, { enabled: true });
+		await new Promise((r) => setTimeout(r, 150));
+		expect(db.rows.get(SID)?.conversation_requested).toBe(0);
+		expect(await files(SID)).toEqual({ marker: false, hooksFile: false });
+		gate.resolve();
+		expect((await recreating).status).toBe(200);
+		expect(await h.attempts.read(SID)).toMatchObject({ record: { state: "resolved" } });
+		expect((await pending).status).toBe(200);
+	});
+
+	it("the wait runs out ⇒ 409 busy, nothing written", async () => {
+		await spinUp();
+		db.rows.set(SID, configuredRow());
+		const run = sessionLifecycleLock.run.bind(sessionLifecycleLock);
+		const spy = vi
+			.spyOn(sessionLifecycleLock, "run")
+			.mockImplementation((sid, op, fn, opts) =>
+				run(sid, op, fn, op === "enable" ? { ...opts, maxWaitMs: 50 } : opts),
+			);
+		holdLock("delete");
+		try {
+			const res = await patch(SID, { enabled: true });
+			expect([res.status, await res.json()]).toEqual([409, { error: "busy" }]);
+			expect(db.rows.get(SID)?.conversation_requested).toBe(0);
+			expect(await files(SID)).toEqual({ marker: false, hooksFile: false });
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it("disable never waits for the lock: it cuts while a delete holds it", async () => {
+		await spinUp();
+		db.rows.set(
+			SID,
+			sessionRow({ conversation_requested: 1, ingest_token_hash: hashIngestToken(TOKEN) }),
+		);
+		await writeRelayEnabled(root, SID);
+		holdLock("delete");
+		const res = await patch(SID, { enabled: false });
+		expect(res.status).toBe(200);
+		expect(sessionLifecycleLock.heldBy(SID)).toBe("delete");
+		expect(db.rows.get(SID)?.conversation_requested).toBe(0);
+		expect(await files(SID)).toEqual({ marker: false, hooksFile: false });
 	});
 
 	it("without the conversation subsystem wired ⇒ 503, nothing done", async () => {
@@ -632,12 +771,11 @@ describe("POST /admin/sessions/:id/recreate", () => {
 
 	it("another lifecycle operation in progress ⇒ 409 busy, no effects; unresolved ⇒ 409 recreate-unresolved", async () => {
 		await spinUp();
-		const hold = deferred();
-		const held = h.lock.run(SID, "stop", () => hold.promise, { mode: "wait" });
+		const lock = holdLock("start");
 		let res = await post(SID, { expectImageId: IMAGE_N });
 		expect([res.status, await res.json()]).toEqual([409, { error: "busy" }]);
-		hold.resolve();
-		await held;
+		lock.release();
+		await lock.held;
 		expect(h.docker.mutations()).toEqual([]);
 		await h.attempts.begin(SID, {
 			attemptId: "a1",
@@ -704,6 +842,89 @@ describe("POST /admin/sessions/:id/recreate", () => {
 		await spinUp({ owner: OWNER });
 		expect((await post(SID, { expectImageId: `sha256:${"b".repeat(64)}` })).status).toBe(409);
 		expect(db.observeLog).toEqual([]);
+	});
+
+	// ── #464 R2: nothing starts after a shutdown or past T_rec ──
+
+	it("audit pending → engine.stop() → late answer ⇒ no create, rename, start, exec or remove; no record", async () => {
+		await spinUp({ owner: OWNER });
+		const inserting = deferred();
+		const answer = deferred();
+		db.onObserveInsert = async () => {
+			inserting.resolve();
+			await answer.promise;
+		};
+		const pending = post(SID, { expectImageId: IMAGE_N });
+		await inserting.promise;
+		h.engine.stop();
+		answer.resolve();
+		const res = await pending;
+		expect([res.status, await res.json()]).toEqual([
+			500,
+			{ error: "recreate-failed", step: "prepare" },
+		]);
+		expect(h.docker.mutations()).toEqual([]);
+		expect((await h.attempts.read(SID)).kind).toBe("none");
+	});
+
+	it("an audit that answers after T_rec ⇒ nothing starts, no record", async () => {
+		await spinUp({ owner: OWNER, config: { tRecMs: 200, tRbMs: 100 } });
+		db.onObserveInsert = () => new Promise((r) => setTimeout(r, 300));
+		const res = await post(SID, { expectImageId: IMAGE_N });
+		expect([res.status, await res.json()]).toEqual([
+			500,
+			{ error: "recreate-failed", step: "prepare" },
+		]);
+		expect(h.docker.mutations()).toEqual([]);
+		expect((await h.attempts.read(SID)).kind).toBe("none");
+	});
+
+	it("shutdown while begin() writes the record ⇒ no Docker effect; the open record stays as written (D8), no further record write", async () => {
+		await spinUp();
+		const beginning = deferred();
+		const release = deferred();
+		const realBegin = h.attempts.begin.bind(h.attempts);
+		h.attempts.begin = async (sid, identity) => {
+			beginning.resolve();
+			await release.promise;
+			return realBegin(sid, identity);
+		};
+		const resolveSpy = vi.spyOn(h.attempts, "resolve");
+		const markSpy = vi.spyOn(h.attempts, "markUncertain");
+		const pending = post(SID, { expectImageId: IMAGE_N });
+		await beginning.promise;
+		h.engine.stop();
+		release.resolve();
+		const res = await pending;
+		expect([res.status, await res.json()]).toEqual([
+			500,
+			{ error: "recreate-failed", step: "prepare", unresolved: true },
+		]);
+		await new Promise((r) => setTimeout(r, 150));
+		expect(h.docker.mutations()).toEqual([]);
+		expect(await h.attempts.read(SID)).toMatchObject({ kind: "ok", record: { state: "open" } });
+		expect(resolveSpy).not.toHaveBeenCalled();
+		expect(markSpy).not.toHaveBeenCalled();
+	});
+
+	it("begin() failing during a shutdown ⇒ no durable 'resolved' written after stop() (E5)", async () => {
+		await spinUp();
+		const realBegin = h.attempts.begin.bind(h.attempts);
+		h.attempts.begin = async (sid, identity) => {
+			const r = await realBegin(sid, identity);
+			h.engine.stop();
+			void r;
+			throw new Error("fsync of the session dir failed");
+		};
+		const resolveSpy = vi.spyOn(h.attempts, "resolve");
+		const res = await post(SID, { expectImageId: IMAGE_N });
+		expect([res.status, await res.json()]).toEqual([
+			500,
+			{ error: "recreate-failed", step: "record" },
+		]);
+		expect(resolveSpy).not.toHaveBeenCalled();
+		expect(h.docker.mutations()).toEqual([]);
+		expect(await h.attempts.read(SID)).toMatchObject({ kind: "ok", record: { state: "open" } });
 	});
 
 	it("unknown session ⇒ 404 without touching the engine", async () => {

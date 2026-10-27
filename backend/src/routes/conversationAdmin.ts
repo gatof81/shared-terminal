@@ -20,6 +20,7 @@ import { ConversationDisabledError, RevokedGloballyError } from "../conversation
 import { logger } from "../logger.js";
 import * as observeLog from "../observeLog.js";
 import { RecreateUnresolvedError } from "../recreateAttempt.js";
+import { SessionBusyError, sessionLifecycleLock } from "../sessionLifecycleLock.js";
 import type { RouteContext } from "./shared.js";
 
 /** `expectImageId` is the immutable image ID the preflight showed (D6). */
@@ -60,7 +61,22 @@ export function registerConversationAdminRoutes(router: Router, ctx: RouteContex
 				}
 				res.setHeader("Cache-Control", "no-store");
 				if (enabled) {
-					const r = await conversation.enable(sessionId);
+					// Under the session's lifecycle lock (#464 R1), like start /
+					// stop / delete / recreate: the writes of the §2.7.5 procedure
+					// never interleave with an operation that removes or replaces
+					// the session's container or files. Existence and authorization
+					// are read again once the lock is held — `enable` reads its own
+					// facts there, and a delete that held the lock may have removed
+					// the session meanwhile. The lock's guard refuses an unresolved
+					// recreation (`recreate-unresolved`).
+					const r = await sessionLifecycleLock.run(sessionId, "enable", async () => {
+						if (!(await sessions.get(sessionId))) return null;
+						return conversation.enable(sessionId);
+					});
+					if (!r) {
+						res.status(404).json({ error: "Session not found" });
+						return;
+					}
 					logger.info(
 						`[admin] conversation enabled: session=${sessionId} caller=${userId} ` +
 							`effective=${r.capture.effective}`,
@@ -68,6 +84,7 @@ export function registerConversationAdminRoutes(router: Router, ctx: RouteContex
 					res.json(r);
 					return;
 				}
+				// Never behind the lock: disabling always works (§2.4, K1).
 				// marker → D1 → hooks file → relay.enabled (§2.5); the receiver
 				// refuses from the marker on, before this answers.
 				const r = await conversation.disable(sessionId);
@@ -89,7 +106,12 @@ export function registerConversationAdminRoutes(router: Router, ctx: RouteContex
 					return;
 				}
 				if (err instanceof RevokedGloballyError) {
-					res.status(409).json({ error: "revoked" });
+					// CONVERSATION.md §2.5: the global marker's own code.
+					res.status(409).json({ error: "revoked-globally" });
+					return;
+				}
+				if (err instanceof SessionBusyError) {
+					res.status(409).json({ error: "busy" });
 					return;
 				}
 				if (err instanceof RecreateUnresolvedError) {
