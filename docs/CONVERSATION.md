@@ -6,7 +6,8 @@ par `tool_failed`/`tool_end`, 2026-10-23; en 3.0d, recreación administrativa y 
 progresiva §2.7, diseño aprobado por Work y el responsable el 2026-10-26; aclaraciones de la
 revisión Work de #459 —evidencia de exec, `T_rec` completo, resolución bajo el lock, restauración
 con revocación concurrente, puntos 2, 3 y 8 y patrón de nombres—, 2026-10-27; segunda revisión: código
-de salida obligatorio, efectos compuestos y apagado, 2026-10-27), vinculante para los PRs
+de salida obligatorio, efectos compuestos y apagado, 2026-10-27; decisión del responsable sobre la
+allowlist del CLI para el piloto, §2.7.5, 2026-10-27), vinculante para los PRs
 3.0b–3.4.** El razonamiento está en [docs/design/phase3-conversation-activity.md](./design/phase3-conversation-activity.md)
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
 `ac1024d`); si los dos documentos difieren, manda este;
@@ -919,6 +920,19 @@ No se supone compatibilidad universal: `N` ejecuta el CLI del `.npm-global` del 
 puede no ser el de la imagen. La recreación lee su versión en el host, sin seguir symlinks, y
 solo acepta una versión con la que esta validación se haya hecho (hoy, 2.1.308). Cualquier otra,
 o una ilegible, responde `control-marker-incompatible` en el preflight y en el POST, sin efectos.
+
+- **Decisión del responsable (2026-10-27): allowlist exacta {2.1.308} aprobada, solo para el
+  piloto descartable.** Límites:
+  - cualquier versión de Claude Code no validada bloquea la recreación, también una posterior y
+    compatible; ampliar la lista exige repetir la validación de arriba con esa versión y una
+    revisión del cambio;
+  - no se supone que la versión instalada siga siendo la misma: el CLI del workspace se
+    autoactualiza, así que la versión se lee del disco, sin caché, en cada preflight y en cada
+    `POST` (este, bajo el lock de la sesión, justo antes de `begin()`);
+  - el coste operativo es aceptado: una autoactualización no validada deja la sesión sin poder
+    recrearse hasta validar esa versión;
+  - D8 (fail-closed) y todas las garantías de preservación de §2.7 siguen igual; esta decisión no
+    autoriza recrear sesiones reales.
 
 #### 2.7.6 Semántica de `capture`
 
