@@ -199,9 +199,12 @@ describe("classifyHref / slugify", () => {
 //     the viewer never renders more than 256 KiB as Markdown, so whatever
 //     hides there costs < 50 ms in the worst case;
 //   - one render over a generous absolute ceiling fails without running
-//     the remaining repetitions. It is checked once a render RETURNS: a
-//     synchronous render cannot be interrupted from its own thread, so a
-//     render that never returns is stopped by the test timeout instead.
+//     the remaining repetitions. It is checked once a render RETURNS.
+//     Nothing here interrupts a synchronous render that never returns:
+//     not the ceiling, and not Vitest's per-test timeout, which is a timer
+//     on the same blocked thread (it does not even fail a synchronous test
+//     that overran it). Such a hang blocks the worker until the CI job's
+//     own time limit.
 
 const GROWTH_SIZES: readonly number[] = [50_000, 100_000, 200_000];
 const LARGEST = GROWTH_SIZES[GROWTH_SIZES.length - 1] as number;
@@ -269,8 +272,8 @@ function expectNearLinear(run: (n: number) => void): void {
 }
 
 // Worst case per test: a warmup plus 3 × 3 renders of the heaviest input
-// on a slow runner, well inside this. A render that never returns is cut
-// here, not by the ceiling (which only sees renders that finished).
+// on a slow runner, well inside this. These tests are synchronous, so this
+// timeout bounds nothing while they run (see the ceiling above).
 const GROWTH_TIMEOUT_MS = 120_000;
 
 describe("the growth check itself", () => {
