@@ -20,7 +20,8 @@ con P1 recomendado por exposición involuntaria; A3 P2; C1–C3 a corregir; y un
 runbook (§6.1).
 
 **Revisión de #469 en `d79e5e2`:** A2, A3, C1–C3 y el runbook, cerrados. Quedaban dos defectos de A1
-(A1.1 y A1.2, abajo), **corregidos en #469 `86ee413`, pendientes de revisión**. A4–A8 siguen
+(A1.1 y A1.2), corregidos en `86ee413`. **Revisión en `86ee413`:** quedan dos P1 residuales en esa
+corrección (A1.1a y A1.1b, abajo), **corregidos en #469 `79a3574`, pendientes de revisión**. A4–A8 siguen
 separados de los bloqueantes, y #465–#467 son decisiones del responsable. La auditoría integral no se
 cierra ni se avanza al piloto hasta el dictamen de Work.
 
@@ -67,6 +68,32 @@ cierra ni se avanza al piloto hasta el dictamen de Work.
     `REVOKED` antes de nada (`recoverRetiring`).
 - **Regresiones:** con el receptor real, la caché poblada y el CLI como otro proceso: pausa tras el
   `rename` (directo y a través del enable), interrupción y recuperación.
+
+### A1.1a / P1 y A1.1b / P1 — residuales de la corrección de A1.1 (hallados en #469, `86ee413`)
+
+- **A1.1a:** el receptor comprobaba `REVOKED` y `REVOKED.retiring` con dos `stat` separados; un
+  `rename` entre ambos los hacía ver ausentes los dos, en cualquiera de los dos sentidos.
+- **A1.1b:** la recuperación hacía "comprobar y después renombrar", y podía sustituir la marca de
+  una emergencia concurrente por la anterior.
+- **Reproducidos en rojo sobre `86ee413`,** de forma determinista y con operaciones de archivo
+  reales: los dos sentidos de A1.1a (`accepted:true`, evento persistido) y A1.1b (la marca final
+  era la de la API, no la de la emergencia).
+- **Corrección (#469 `79a3574`):** se cambia el protocolo.
+  - `REVOKED` no se mueve ni se borra nunca, y no hay paso de recuperación.
+  - Levantar la revocación es publicar `LIFTED` con el sha256 de la marca exacta.
+  - Una revocación más nueva tiene otros bytes, así que sigue en vigor diga lo que diga `LIFTED`.
+  - El receptor lee `LIFTED` y después `REVOKED`, y responde revocado ante cualquier error de
+    lectura (fail-closed).
+- **Pruebas:**
+  - una entrega de sondeo tras cada operación de archivo del levantamiento y de un enable en
+    carrera;
+  - el lector pausado entre sus dos lecturas, en ambos sentidos;
+  - la emergencia antes y justo después de publicar `LIFTED`, comprobando el contenido y el `id`
+    de su marca, D1 y `revocation_seq`, el resultado del enable, el siguiente spawn y que la
+    ingesta no se reabre;
+  - el fallo al publicar, y la lectura ilegible.
+
+  Mutaciones: el orden de lectura invertido y la falta de relectura hacen fallar las pruebas.
 
 ### A1.2 / P2 — reaplicar el disable de la API destruía el hash suspendido (hallado en #469, `d79e5e2`)
 
@@ -311,6 +338,9 @@ actuarían sobre la sesión piloto.
 Ver §7. Requiere autorización explícita y se acepta que la sesión piloto pueda quedar bloqueada en
 `recreate-unresolved`.
 
+**Antes del piloto:** #469 tiene que estar aprobado y mergeado. Con él, el corte de la emergencia
+es persistente y continuamente observable: la marca no se mueve ni se borra (A1.1a/b).
+
 **Corte inmediato en cualquier momento:**
 `docker compose exec app npm run conversation:disable -- <sid>` (o `--all`). La ingesta se
 rechaza desde la marca; deshabilitar no necesita el lock y funciona con la recreación sin resolver.
@@ -378,8 +408,8 @@ administrativa manual (D8).
 
 ## 8. Orden propuesto (pendiente de autorización)
 
-1. **PR de correcciones: #469** (A1, A1.1, A1.2, A2, A3 y C1–C3, con regresiones). A4–A8 van
-   aparte.
+1. **PR de correcciones: #469** (A1, A1.1, A1.1a, A1.1b, A1.2, A2, A3 y C1–C3, con regresiones).
+   A4–A8 van aparte.
 2. **PR de smokes:** los huecos de §5 que se pueden probar en el runner aislado.
 3. **Dictamen integral de Work** sobre 1 y 2, y decisiones P-1 a P-3 del responsable.
 4. **Despliegue coordinado:** etapas 0 y 1 (§6), con autorización expresa.
