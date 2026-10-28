@@ -25,19 +25,25 @@
  *   - the committed N survives boot passes and stop/start; a real leftover
  *     is removed without being started;
  *   - O after real use of the CLI 2.1.308 (`claude -p`, an interactive tab
- *     with a subagent, against the scripted model) stays recreatable; any
- *     other shape under /tmp still blocks; N carries none of those runtime
- *     artifacts, the transcripts keep their size and mtime (they are never
- *     read, CONVERSATION.md §1.1), and `claude --resume` on N continues the
- *     conversation O started.
+ *     with a subagent, against the scripted model) stays recreatable, its
+ *     deep-link handler file in HOME holding exactly the pinned bytes; any
+ *     other shape under /tmp or ~/.local still blocks; N carries none of
+ *     those artifacts, the workspace, a Git repo, a secret, a key, the git
+ *     identity and the CLI state are preserved (fingerprints only), the
+ *     transcripts keep their size and mtime (they are never read,
+ *     CONVERSATION.md §1.1), `claude --resume` on N continues the
+ *     conversation O started, and N's own interactive start writes the
+ *     handler file again byte for byte.
  */
 
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import Dockerode from "dockerode";
+import { CLI_URL_HANDLER, CLI_URL_HANDLER_BYTES } from "./layer.js";
+import { parseTar } from "./tar.js";
 
 const IMAGE = process.argv[2] ?? "shared-terminal-session";
 const SID = randomUUID();
@@ -516,19 +522,71 @@ mkdir -p ~/.claude && printf '{"skipDangerousModePermissionPrompt": true, "hooks
 		!afterCli.blockers?.some((b) => b.code === "layer-tmp"),
 		afterCli,
 	);
-	// Owner decision pending: the interactive CLI also writes
-	// ~/.local/share/applications/claude-code-url-handler.desktop (HOME, outside
-	// the workspace), which this change must not allow. Kept red so it stays
-	// visible; the rest of the smoke then goes on with that file removed, which
-	// is test-only cleanup of exactly what the CLI added.
+	// The interactive CLI also writes its deep-link handler registration in
+	// HOME (layer.ts CLI_URL_HANDLER, owner decision 2026-10-28): allowed only
+	// with the pinned bytes, so the bytes this real CLI wrote are compared too.
 	check(
-		"after an interactive tab with a subagent, O is recreatable (pending: ~/.local/share/applications)",
+		"the interactive CLI wrote ~/.local/share/applications/claude-code-url-handler.desktop",
+		homeLayer.includes(`1 ${CLI_URL_HANDLER}`),
+		homeLayer,
+	);
+	const handlerTar = await real.readArchive(O, CLI_URL_HANDLER, 64 * 1024);
+	const handler = handlerTar ? parseTar(handlerTar, { maxEntries: 2, maxFileBytes: 4096 }) : [];
+	const handlerBytes = handler[0]?.data ?? Buffer.alloc(0);
+	console.log(
+		`  · ${CLI_URL_HANDLER}: ${handlerBytes.length} bytes, sha256 ${createHash("sha256").update(handlerBytes).digest("hex")}`,
+	);
+	check(
+		"its bytes are exactly the pinned ones (no user data, nothing dynamic)",
+		handler.length === 1 && handlerBytes.equals(CLI_URL_HANDLER_BYTES),
+		handlerBytes.toString("utf8"),
+	);
+	check(
+		"after claude -p and an interactive tab with a subagent, O is recreatable",
 		afterCli.recreatable === true,
 		afterCli,
 	);
-	await withO(O, () => execOut(O, "rm -rf ~/.local"));
+	// Any other shape under ~/.local still blocks. Each variant is undone from a
+	// copy kept in the workspace (the bind mount, not the layer).
+	const H = "~/.local/share/applications/claude-code-url-handler.desktop";
+	await withO(O, () => execOut(O, `cp ${H} ~/workspace/.handler.orig`));
+	for (const [label, plant, undo] of [
+		[
+			"the file modified, same size",
+			`sed -i 's/%u/%U/' ${H}`,
+			`cat ~/workspace/.handler.orig > ${H}`,
+		],
+		["the file with another size", `echo >> ${H}`, `cat ~/workspace/.handler.orig > ${H}`],
+		[
+			"the file replaced by a symlink",
+			`rm ${H} && ln -s /home/developer/workspace/.handler.orig ${H}`,
+			`rm ${H} && cp ~/workspace/.handler.orig ${H}`,
+		],
+		[
+			"another file next to it",
+			"echo x > ~/.local/share/applications/mimeapps.list",
+			"rm ~/.local/share/applications/mimeapps.list",
+		],
+		["a symlink under ~/.local", "ln -s /etc/passwd ~/.local/share/x", "rm ~/.local/share/x"],
+		["a user file in ~/.local", "echo notes > ~/.local/notes", "rm ~/.local/notes"],
+	] as const) {
+		const planted = await withO(O, () => execOut(O, plant));
+		const v = (await engine.preflight(SID)) as {
+			recreatable?: boolean;
+			blockers?: Array<{ code: string }>;
+		};
+		check(
+			`${label} ⇒ layer-home`,
+			planted.code === 0 &&
+				v.recreatable === false &&
+				v.blockers?.some((b) => b.code === "layer-home") === true,
+			{ planted: planted.code, v },
+		);
+		await withO(O, () => execOut(O, undo));
+	}
+	await withO(O, () => execOut(O, "rm -f ~/workspace/.handler.orig"));
 	check(
-		"with ~/.local removed, O is recreatable: it was the only blocker left",
+		"with every HOME variant undone, O is recreatable again",
 		((await engine.preflight(SID)) as { recreatable?: boolean }).recreatable === true,
 	);
 	const taskDir = "$(ls -d /tmp/claude-1000/-home-developer-workspace/*/tasks | head -n 1)";
@@ -565,36 +623,59 @@ mkdir -p ~/.claude && printf '{"skipDangerousModePermissionPrompt": true, "hooks
 		"with the planted entries removed, O is recreatable again",
 		((await engine.preflight(SID)) as { recreatable?: boolean }).recreatable === true,
 	);
-	// Transcript metadata only (path, size, mtime): never their content (§1.1).
-	const transcripts = async (): Promise<string> => {
+	// Read-only listings of the workspace from a root container (its files are
+	// uid 1000, some mode 0600); an empty or failed listing throws, so no
+	// comparison below can pass vacuously.
+	const inWorkspace = async (cmd: string): Promise<string> => {
 		const out = new PassThrough();
 		const chunks: Buffer[] = [];
 		out.on("data", (c: Buffer) => chunks.push(c));
-		const [res] = (await docker.run(
-			IMAGE,
-			[
-				"bash",
-				"-c",
-				"cd /w/.st/claude-state/projects && find . -type f -printf '%P %s %T@\\n' | sort",
-			],
-			out,
-			{
-				User: "0",
-				Entrypoint: [],
-				Tty: true,
-				HostConfig: { Binds: [`${WS}:/w:ro`], AutoRemove: true },
-			},
-		)) as [{ StatusCode: number }];
+		const [res] = (await docker.run(IMAGE, ["bash", "-c", cmd], out, {
+			User: "0",
+			Entrypoint: [],
+			Tty: true,
+			HostConfig: { Binds: [`${WS}:/w:ro`], AutoRemove: true },
+		})) as [{ StatusCode: number }];
 		const text = Buffer.concat(chunks).toString("utf8").replace(/\r/g, "").trim();
 		if (res.StatusCode !== 0 || text === "")
-			throw new Error(`transcript listing failed (exit ${res.StatusCode})`);
+			throw new Error(`workspace listing failed (exit ${res.StatusCode}): ${cmd}`);
 		return text;
 	};
+	// Transcript metadata only (path, size, mtime): never their content (§1.1).
+	const transcripts = () =>
+		inWorkspace("cd /w/.st/claude-state/projects && find . -type f -printf '%P %s %T@\\n' | sort");
 	const transcriptsBefore = await transcripts();
 	check(
 		"O's transcripts exist (the conversation and the subagent's)",
 		transcriptsBefore.includes(`${convId}.jsonl`) &&
 			/subagents\/agent-a[0-9a-f]{16}\.jsonl/.test(transcriptsBefore),
+	);
+	// Preservation: a Git repo with a commit, a secret (`.env`) and a key under
+	// ~/.ssh (both 0600), the git identity in ~/.gitconfig, and the CLI's own
+	// state (~/.claude.json, ~/.claude/settings.json). Fingerprints only —
+	// hashes, modes, the HEAD — so the secret is never printed.
+	gitIdentity = { name: "Ada", email: "ada@x" };
+	const seeded = await withO(O, () =>
+		execOut(
+			O,
+			`set -e
+git config --global user.name Ada && git config --global user.email ada@x
+mkdir -p ~/workspace/proj && cd ~/workspace/proj && git init -q && echo hi > a && git add a && git commit -qm init
+umask 077 && printf 'TOKEN=%s\\n' "$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \\n')" > ~/workspace/.env
+mkdir -p ~/.ssh && head -c 64 /dev/urandom | base64 > ~/.ssh/id_smoke && chmod 600 ~/.ssh/id_smoke`,
+		),
+	);
+	check("O: repo, secret, key and git identity in place", seeded.code === 0, seeded);
+	const preserved = () =>
+		inWorkspace(
+			`cd /w && sha256sum .env .st/ssh/id_smoke .st/claude.json .st/claude-state/settings.json proj/a &&
+stat -c '%n %a %u' .env .st/ssh/id_smoke &&
+git -c safe.directory='*' -C proj rev-parse HEAD && git -c safe.directory='*' -C proj status --porcelain`,
+		);
+	const preservedBefore = await preserved();
+	check(
+		"with them, O is still recreatable (~/.gitconfig = the identity)",
+		((await engine.preflight(SID)) as { recreatable?: boolean }).recreatable === true,
 	);
 
 	// ── A manual start of O between steps 2 and 3 ────────────────────────
@@ -693,6 +774,10 @@ mkdir -p ~/.claude && printf '{"skipDangerousModePermissionPrompt": true, "hooks
 		"the transcripts' paths, sizes and mtimes are unchanged",
 		(await transcripts()) === transcriptsBefore,
 	);
+	check(
+		"workspace, Git, secret, key and CLI state unchanged before any CLI runs in N (hashes, modes, HEAD)",
+		(await preserved()) === preservedBefore,
+	);
 	const resumed = await execOut(
 		nId,
 		`timeout 120 claude -p --resume ${convId} 'layer probe: after recreation' --output-format json </dev/null`,
@@ -715,6 +800,30 @@ mkdir -p ~/.claude && printf '{"skipDangerousModePermissionPrompt": true, "hooks
 	check(
 		"the model was sent O's earlier turn with the resumed prompt",
 		!!modelSaw && modelSaw.includes("layer probe: first prompt"),
+	);
+	check(
+		"N: the git identity re-applied",
+		(await execOut(nId, "git config --global user.email")).out.trim() === "ada@x",
+	);
+	check(
+		"N: O's ~/.local was not carried over",
+		(await execOut(nId, "test ! -e ~/.local")).code === 0,
+	);
+	// Reproducibility: N's own first interactive start writes the same file.
+	await execOut(
+		nId,
+		'tmux new-session -d -s t -x 200 -y 50 -c /home/developer/workspace "claude --dangerously-skip-permissions"',
+	);
+	let nHandler = "";
+	for (let i = 0; i < 60 && !nHandler; i++) {
+		nHandler = (await execOut(nId, `sha256sum < ${H} 2>/dev/null | cut -d' ' -f1`)).out.trim();
+		if (!nHandler) await new Promise((r) => setTimeout(r, 500));
+	}
+	await execOut(nId, "tmux send-keys -t t '/exit' Enter; sleep 3");
+	check(
+		"N: an interactive start writes the handler file again, byte for byte",
+		nHandler === createHash("sha256").update(CLI_URL_HANDLER_BYTES).digest("hex"),
+		nHandler,
 	);
 
 	// ── The recreation's exec: the exit comes from dockerd, by exec id ───

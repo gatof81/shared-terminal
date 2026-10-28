@@ -10,8 +10,10 @@
  * the session's git identity (gitIdentity writes it; recreation re-runs
  * it). The runtime artifacts Claude Code 2.1.308 leaves under /tmp are
  * allowed only in the exact shapes seen on a real daemon (`cliTmpArtifact`
- * below). Everything else blocks with a category code and a count — never
- * a path: a user's `docker diff` is content.
+ * below), and so is the one HOME file its interactive mode writes, the
+ * deep-link handler registration, byte for byte (`CLI_URL_HANDLER`).
+ * Everything else blocks with a category code and a count — never a path:
+ * a user's `docker diff` is content.
  */
 
 import path from "node:path";
@@ -49,6 +51,8 @@ export interface LayerInput {
 	 * "unreadable" when over GITCONFIG_MAX_BYTES or not a regular file.
 	 */
 	gitconfig: () => Promise<Buffer | null | "unreadable">;
+	/** `CLI_URL_HANDLER` as read from the container, same contract as `gitconfig`. */
+	urlHandler: () => Promise<Buffer | null | "unreadable">;
 	identity: { name: string; email: string } | null;
 	hasDotfiles: boolean;
 }
@@ -154,6 +158,38 @@ function cliTmpArtifact(p: string, st: PathStat | null): boolean {
 	}
 	return false;
 }
+
+// ── Claude Code's deep-link handler registration in HOME ───────────────────
+//
+// The interactive CLI 2.1.308 registers itself as the `claude-cli://` URL
+// handler for a desktop session by writing this file (and the three dirs
+// above it, none of which is in the image), on every interactive start.
+// Seen on CI's dockerd by cli-tmp-evidence.sh (cases C and D) and
+// realDocker.smoke.ts. Owner decision of 2026-10-28 (§2.7.1): allowed, and
+// only with exactly these bytes. They hold no user data and nothing
+// dynamic: fixed text plus `Exec`, the path the image's CLI runs from
+// (`~/.npm-global` is the entrypoint's verified symlink into the workspace,
+// resolved), so N's own first interactive start writes the same file again.
+// Nothing reads it inside a container (there is no desktop to dispatch a
+// URL), so losing it changes nothing in the session. Any other byte, size,
+// type, file or symlink under `~/.local` still blocks as `layer-home`; so
+// does this path if a later CLI writes something else there.
+export const CLI_URL_HANDLER = `${HOME}/.local/share/applications/claude-code-url-handler.desktop`;
+export const CLI_URL_HANDLER_BYTES = Buffer.from(
+	"[Desktop Entry]\n" +
+		"Name=Claude Code URL Handler\n" +
+		"Comment=Handle claude-cli:// deep links for Claude Code\n" +
+		`Exec="${WORKSPACE}/.npm-global/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe" --handle-uri %u\n` +
+		"Type=Application\n" +
+		"NoDisplay=true\n" +
+		"MimeType=x-scheme-handler/claude-cli;\n",
+	"utf8",
+);
+const CLI_URL_HANDLER_DIRS: ReadonlySet<string> = new Set([
+	`${HOME}/.local`,
+	`${HOME}/.local/share`,
+	`${HOME}/.local/share/applications`,
+]);
 
 function isUnder(p: string, dir: string): boolean {
 	return p === dir || p.startsWith(`${dir}/`);
@@ -303,6 +339,20 @@ export async function classifyLayer(input: LayerInput): Promise<LayerVerdict> {
 			continue;
 		}
 		if (ch.Kind === 1 && isUnder(p, "/tmp") && cliTmpArtifact(p, st)) continue;
+		if (CLI_URL_HANDLER_DIRS.has(p)) {
+			if (ch.Kind !== 1 || st?.kind !== "dir") block(category(p));
+			continue;
+		}
+		if (p === CLI_URL_HANDLER) {
+			// Size from the stat first, then the bytes from the archive: both
+			// must match (a read that is not exactly one regular file blocks).
+			const buf =
+				ch.Kind === 1 && st?.kind === "file" && st.size === CLI_URL_HANDLER_BYTES.length
+					? await input.urlHandler()
+					: null;
+			if (!Buffer.isBuffer(buf) || !buf.equals(CLI_URL_HANDLER_BYTES)) block(category(p));
+			continue;
+		}
 		if (mounts.includes(p)) {
 			// A mount point Docker created because the image lacked it.
 			if (st?.kind !== "dir" && st?.kind !== "file") block(category(p));

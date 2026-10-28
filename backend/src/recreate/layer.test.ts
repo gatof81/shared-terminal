@@ -1,5 +1,8 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+	CLI_URL_HANDLER,
+	CLI_URL_HANDLER_BYTES,
 	classifyLayer,
 	ENTRYPOINT_SYMLINKS,
 	type LayerChange,
@@ -50,6 +53,7 @@ function input(patch: Partial<LayerInput> & { stats?: Map<string, PathStat> } = 
 		stat: async (p) => stats.get(p) ?? null,
 		mounts: patch.mounts ?? [`${H}/workspace`, `${H}/uploads`],
 		gitconfig: patch.gitconfig ?? (async () => null),
+		urlHandler: patch.urlHandler ?? (async () => null),
 		identity: patch.identity === undefined ? ID : patch.identity,
 		hasDotfiles: patch.hasDotfiles ?? false,
 	};
@@ -415,6 +419,147 @@ describe("classifyLayer (§2.7.1 precondition 6)", () => {
 						[`${H}/.cache`, { kind: "dir" }],
 						["/usr/bin/bc", { kind: "file", size: 90_000 }],
 					]),
+				),
+			).toEqual([
+				{ code: "layer-home", count: 1 },
+				{ code: "layer-system", count: 1 },
+			]);
+		});
+	});
+	describe("Claude Code 2.1.308's deep-link handler registration in HOME (owner decision 2026-10-28)", () => {
+		const L = `${H}/.local`;
+		const DIRS = [L, `${L}/share`, `${L}/share/applications`];
+		/** The interactive CLI's four additions, as a real daemon shows them, plus `extra`. */
+		function withHandler(
+			extra: Array<[string, PathStat | null, number?]> = [],
+			read: LayerInput["urlHandler"] = async () => Buffer.from(CLI_URL_HANDLER_BYTES),
+		): LayerInput {
+			const { changes, stats } = cleanBoot();
+			for (const d of DIRS) {
+				changes.push({ Path: d, Kind: 1 });
+				stats.set(d, { kind: "dir" });
+			}
+			changes.push({ Path: CLI_URL_HANDLER, Kind: 1 });
+			stats.set(CLI_URL_HANDLER, { kind: "file", size: CLI_URL_HANDLER_BYTES.length });
+			for (const [p, st, kind] of extra) {
+				const at = changes.findIndex((c) => c.Path === p);
+				if (at >= 0) changes.splice(at, 1);
+				if (kind !== undefined) changes.push({ Path: p, Kind: kind });
+				else changes.push({ Path: p, Kind: 1 });
+				if (st) stats.set(p, st);
+				else stats.delete(p);
+			}
+			return input({ changes, stats, urlHandler: read });
+		}
+		const blockers = async (i: LayerInput) => (await classifyLayer(i)).blockers;
+
+		it("pins the exact bytes seen on CI (290 bytes; fixed text and the image CLI's resolved path)", () => {
+			expect(CLI_URL_HANDLER).toBe(
+				`${H}/.local/share/applications/claude-code-url-handler.desktop`,
+			);
+			expect(CLI_URL_HANDLER_BYTES.length).toBe(290);
+			expect(createHash("sha256").update(CLI_URL_HANDLER_BYTES).digest("hex")).toBe(
+				"b186d2bd091fd46d1b727246b2d6d0e91f694c0bcf6d004284d6b39c1e33a897",
+			);
+		});
+
+		it("the three dirs and the file with exactly those bytes don't block", async () => {
+			expect(await blockers(withHandler())).toEqual([]);
+		});
+
+		it("a file of the same size with one byte changed blocks", async () => {
+			const changed = Buffer.from(CLI_URL_HANDLER_BYTES);
+			changed[changed.indexOf("--handle-uri")] = "+".charCodeAt(0);
+			expect(await blockers(withHandler([], async () => changed))).toEqual([
+				{ code: "layer-home", count: 1 },
+			]);
+		});
+
+		it("another size blocks without the bytes being read", async () => {
+			let reads = 0;
+			const read = async () => {
+				reads++;
+				return Buffer.from(CLI_URL_HANDLER_BYTES);
+			};
+			for (const size of [289, 291, 0]) {
+				expect(
+					await blockers(withHandler([[CLI_URL_HANDLER, { kind: "file", size }]], read)),
+				).toEqual([{ code: "layer-home", count: 1 }]);
+			}
+			expect(await blockers(withHandler([[CLI_URL_HANDLER, { kind: "file" }]], read))).toEqual([
+				{ code: "layer-home", count: 1 },
+			]);
+			expect(reads).toBe(0);
+		});
+
+		it("the right size but other bytes, a longer read, or an unreadable/absent read blocks", async () => {
+			for (const read of [
+				async () => Buffer.concat([CLI_URL_HANDLER_BYTES, Buffer.from("\n")]),
+				async () => Buffer.alloc(290, 0x20),
+				async () => "unreadable" as const,
+				async () => null,
+			]) {
+				expect(await blockers(withHandler([], read))).toEqual([{ code: "layer-home", count: 1 }]);
+			}
+		});
+
+		it("the file or any of its dirs as a symlink, or with another type, blocks", async () => {
+			for (const [p, st] of [
+				[CLI_URL_HANDLER, { kind: "symlink", linkTarget: "/etc/passwd" }],
+				[CLI_URL_HANDLER, { kind: "dir" }],
+				[CLI_URL_HANDLER, { kind: "symlink", linkTarget: "/x", size: 290 }],
+				[CLI_URL_HANDLER, { kind: "other", size: 290 }],
+				[L, { kind: "symlink", linkTarget: `${H}/workspace` }],
+				[`${L}/share`, { kind: "file", size: 0 }],
+				[`${L}/share/applications`, { kind: "symlink", linkTarget: "/tmp" }],
+				[`${L}/share/applications`, null],
+			] as Array<[string, PathStat | null]>) {
+				expect(await blockers(withHandler([[p, st]]))).toEqual([{ code: "layer-home", count: 1 }]);
+			}
+		});
+
+		it("any other file, dir or symlink under ~/.local blocks", async () => {
+			for (const [p, st] of [
+				[`${L}/share/applications/other.desktop`, { kind: "file", size: 290 }],
+				[`${L}/share/applications/claude-code-url-handler.desktop~`, { kind: "file", size: 290 }],
+				[`${L}/share/applications/mimeapps.list`, { kind: "file", size: 40 }],
+				[`${L}/share/notes.txt`, { kind: "file", size: 5 }],
+				[`${L}/bin`, { kind: "dir" }],
+				[`${L}/bin/claude`, { kind: "symlink", linkTarget: "/usr/bin/true" }],
+				[`${L}/state`, { kind: "symlink", linkTarget: `${H}/workspace` }],
+				[`${L}/share/applications/x`, { kind: "socket" }],
+			] as Array<[string, PathStat]>) {
+				expect(await blockers(withHandler([[p, st]]))).toEqual([{ code: "layer-home", count: 1 }]);
+			}
+		});
+
+		it("only additions are covered: a modified or deleted entry blocks", async () => {
+			for (const p of [...DIRS, CLI_URL_HANDLER]) {
+				expect(
+					await blockers(
+						withHandler([
+							[p, p === CLI_URL_HANDLER ? { kind: "file", size: 290 } : { kind: "dir" }, 0],
+						]),
+					),
+				).toEqual([{ code: "layer-home", count: 1 }]);
+				expect(await blockers(withHandler([[p, null, 2]]))).toEqual([
+					{ code: "layer-home", count: 1 },
+				]);
+			}
+		});
+
+		it("the same name anywhere else is not covered", async () => {
+			const { changes, stats } = cleanBoot();
+			for (const p of [
+				`${H}/claude-code-url-handler.desktop`,
+				"/usr/share/applications/claude-code-url-handler.desktop",
+			]) {
+				changes.push({ Path: p, Kind: 1 });
+				stats.set(p, { kind: "file", size: 290 });
+			}
+			expect(
+				await blockers(
+					input({ changes, stats, urlHandler: async () => Buffer.from(CLI_URL_HANDLER_BYTES) }),
 				),
 			).toEqual([
 				{ code: "layer-home", count: 1 },

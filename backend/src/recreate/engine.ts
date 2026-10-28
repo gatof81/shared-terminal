@@ -44,7 +44,14 @@ import {
 import { SessionBusyError, type SessionLifecycleLock } from "../sessionLifecycleLock.js";
 import { CONTROL_MARKER_VALIDATED_CLI, readWorkspaceCliVersion } from "./cliCompat.js";
 import type { RecreateD1Port, RecreateSessionConfig, RecreateSessionRow } from "./d1.js";
-import { classifyLayer, GITCONFIG, GITCONFIG_MAX_BYTES, type LayerVerdict } from "./layer.js";
+import {
+	CLI_URL_HANDLER,
+	CLI_URL_HANDLER_BYTES,
+	classifyLayer,
+	GITCONFIG,
+	GITCONFIG_MAX_BYTES,
+	type LayerVerdict,
+} from "./layer.js";
 import {
 	type ExecResult,
 	isNotFound,
@@ -698,7 +705,15 @@ export class RecreationEngine {
 			changes,
 			stat: (p) => this.bounded("stat O", this.deps.docker.statPath(o.id, p)),
 			mounts: o.mounts,
-			gitconfig: () => this.readGitconfig(o.id),
+			gitconfig: () =>
+				this.readLayerFile("archive gitconfig", o.id, GITCONFIG, GITCONFIG_MAX_BYTES),
+			urlHandler: () =>
+				this.readLayerFile(
+					"archive url handler",
+					o.id,
+					CLI_URL_HANDLER,
+					CLI_URL_HANDLER_BYTES.length,
+				),
 			identity: config.gitIdentity,
 			hasDotfiles: config.hasDotfiles,
 		});
@@ -735,14 +750,17 @@ export class RecreationEngine {
 		return result({ row, o, image, config, layer, imageOSkills });
 	}
 
-	private async readGitconfig(oId: string): Promise<Buffer | null | "unreadable"> {
-		const tar = await this.bounded(
-			"archive gitconfig",
-			this.deps.docker.readArchive(oId, GITCONFIG, 64 * 1024),
-		);
+	/** One small regular file of O's layer; "unreadable" over `maxBytes` or not exactly one file. */
+	private async readLayerFile(
+		label: string,
+		oId: string,
+		file: string,
+		maxBytes: number,
+	): Promise<Buffer | null | "unreadable"> {
+		const tar = await this.bounded(label, this.deps.docker.readArchive(oId, file, 64 * 1024));
 		if (!tar) return null;
 		try {
-			const [entry, ...rest] = parseTar(tar, { maxEntries: 2, maxFileBytes: GITCONFIG_MAX_BYTES });
+			const [entry, ...rest] = parseTar(tar, { maxEntries: 2, maxFileBytes: maxBytes });
 			if (!entry || rest.length > 0 || entry.type !== "file" || !entry.data) return "unreadable";
 			return entry.data;
 		} catch {

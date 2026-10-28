@@ -87,6 +87,9 @@ report() { # report <container> <label>: stop it, then what the preflight would 
 	while IFS= read -r h; do
 		docker cp "$1":"$h" - 2>/dev/null | tar -tvf - 2>/dev/null | head -n 20
 	done < <(docker diff "$1" | awk '$1 == "A" && $2 ~ "^/home/developer/" && $2 !~ "^/home/developer/workspace" { print $2 }')
+	echo "── the CLI's deep-link handler file, if any: sha256 and full text (fixed CLI text, no secrets) ──"
+	docker cp "$1":/home/developer/.local/share/applications/claude-code-url-handler.desktop - 2>/dev/null |
+		tar -xOf - 2>/dev/null | tee >(sha256sum | sed 's/^/  sha256 /' >&2) | sed 's/^/    /'
 	echo "── tar -tv of /tmp (type mode owner size … name [-> target]) ──"
 	docker cp "$1":/tmp - 2>/dev/null | tar -tvf - | grep -v -E ' tmp/(\.st-ready|st-relay\.log|tmux-1000.*)?$'
 	echo "── first bytes of regular files ≤ 4 KiB outside tmux/sentinel ──"

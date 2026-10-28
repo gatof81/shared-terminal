@@ -8,7 +8,9 @@ revisión Work de #459 —evidencia de exec, `T_rec` completo, resolución bajo 
 con revocación concurrente, puntos 2, 3 y 8 y patrón de nombres—, 2026-10-27; segunda revisión: código
 de salida obligatorio, efectos compuestos y apagado, 2026-10-27; decisión del responsable sobre la
 allowlist del CLI para el piloto, §2.7.5, 2026-10-27; decisión del responsable sobre los artefactos
-de runtime del CLI 2.1.308 en `/tmp` en la allowlist de la capa, §2.7.1, 2026-10-27), vinculante para los PRs
+de runtime del CLI 2.1.308 en `/tmp` en la allowlist de la capa, §2.7.1, 2026-10-27; decisión del
+responsable sobre el registro del manejador de enlaces del CLI 2.1.308 en HOME, §2.7.1, 2026-10-28),
+vinculante para los PRs
 3.0b–3.4.** El razonamiento está en [docs/design/phase3-conversation-activity.md](./design/phase3-conversation-activity.md)
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
 `ac1024d`); si los dos documentos difieren, manda este;
@@ -526,6 +528,33 @@ Las pestañas tmux ya se pierden con el stop.
   relativo, una sonda de otro tamaño o tipo, otros nombres, niveles o uid, y cualquier entrada
   borrada o solo modificada. Una versión del CLI distinta de 2.1.308 queda fuera por la allowlist
   de versiones (§2.7.5): sus artefactos no están validados.
+- **Se permite el registro del manejador de enlaces `claude-cli://` del CLI 2.1.308 en HOME**
+  (decisión del responsable, 2026-10-28; levanta "no ampliar HOME" solo para estas cuatro rutas, D2
+  y D3 siguen vigentes para todo lo demás). La sesión interactiva lo escribe al arrancar (evidencia:
+  `cli-tmp-evidence.sh`, casos C y D, y `realDocker.smoke.ts`, que además comprueba que el primer
+  arranque interactivo de `N` lo vuelve a escribir idéntico). Cada entrada tiene que estar añadida
+  en la capa (`A`):
+  - `~/.local/`, `~/.local/share/` y `~/.local/share/applications/` (directorios);
+  - `~/.local/share/applications/claude-code-url-handler.desktop`: archivo regular de **290 bytes**,
+    leído con `getArchive` y comparado **byte a byte** (sha256
+    `b186d2bd091fd46d1b727246b2d6d0e91f694c0bcf6d004284d6b39c1e33a897`) con:
+
+        [Desktop Entry]
+        Name=Claude Code URL Handler
+        Comment=Handle claude-cli:// deep links for Claude Code
+        Exec="/home/developer/workspace/.npm-global/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe" --handle-uri %u
+        Type=Application
+        NoDisplay=true
+        MimeType=x-scheme-handler/claude-cli;
+
+  Justificación: no contiene datos del usuario ni valores dinámicos, solo texto fijo y en `Exec` la
+  ruta resuelta del CLI de la imagen (`~/.npm-global` es el symlink verificado al workspace), así que
+  es reproducible; dentro del contenedor nada lo lee (no hay escritorio que despache la URL), y
+  perderlo no cambia nada de la sesión. No se copia a `N` ni se toca el entrypoint, los montajes o la
+  persistencia de HOME. **Cualquier otro byte, tamaño o tipo, un symlink en cualquiera de esas rutas,
+  otro archivo, directorio o symlink bajo `~/.local`, o una entrada borrada o solo modificada bloquea
+  con `layer-home`**; también un contenido distinto escrito por otra versión del CLI, que además
+  queda fuera por la allowlist de versiones (§2.7.5).
 - **`~/.gitconfig`:** se permite solo si contiene exactamente `user.name` y `user.email`, iguales a
   `session_configs`. Se lee con `getArchive`, ≤ 4 KiB. Tras la recreación se reaplica
   gitIdentity.
