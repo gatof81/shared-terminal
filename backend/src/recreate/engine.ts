@@ -107,6 +107,15 @@ export const DEFAULT_RECREATE_CONFIG: RecreateConfig = {
 };
 
 export const CLI_MIN_VERSION = "2.1.308";
+// Blockers that end a preflight before the expensive checks (6–8): see
+// the comment at their use in evaluate(). recreate-unresolved is passed in
+// separately (the D8 gate is read before evaluate).
+const PREFLIGHT_TERMINAL_BLOCKERS: ReadonlySet<string> = new Set([
+	"no-container",
+	"running",
+	"flag-off",
+]);
+
 const SEED_SCRIPT = "/opt/st/seed-skills.sh";
 const READY_SENTINEL = "/tmp/.st-ready";
 
@@ -382,7 +391,7 @@ export class RecreationEngine {
 					if (err instanceof RecreateUnresolvedError) return true;
 					throw err;
 				});
-			const r = await this.evaluate(sessionId, null, "all");
+			const r = await this.evaluate(sessionId, null, "all", unresolved);
 			if (r === "not-found") return { status: 404 };
 			const blockers = unresolved ? [{ code: "recreate-unresolved" }, ...r.blockers] : r.blockers;
 			return {
@@ -638,6 +647,7 @@ export class RecreationEngine {
 		sessionId: string,
 		expectImageId: string | null,
 		mode: "first" | "all",
+		unresolved = false,
 	): Promise<
 		| "not-found"
 		| {
@@ -698,6 +708,20 @@ export class RecreationEngine {
 			captureAfter,
 		});
 		if (done()) return result();
+		// Preflight of a session that cannot become recreatable without an
+		// operator first changing something outside it (stop it, turn the
+		// flag on, resolve D8): the cheap blockers above are the answer, and
+		// 6–8 are skipped. They are what is slow on a RUNNING container — one
+		// sequential Docker stat per changed layer path, thousands with a
+		// live CLI — and the POST evaluates them anyway, in full, once these
+		// clear. Fixable blockers (not-requested, revoked, image-*) still get
+		// the full list, so a stopped candidate shows everything at once.
+		if (
+			mode === "all" &&
+			(unresolved || blockers.some((b) => PREFLIGHT_TERMINAL_BLOCKERS.has(b.code)))
+		) {
+			return result();
+		}
 		// 6. The layer.
 		const config = await this.deps.d1.getConfig(sessionId);
 		const changes = await this.bounded("changes O", this.deps.docker.changes(o.id));
