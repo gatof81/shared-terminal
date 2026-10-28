@@ -177,14 +177,24 @@ async function logsHave(id: string, text: string): Promise<boolean> {
 	const l = await docker.getContainer(id).logs({ stdout: true, stderr: true });
 	return l.toString("utf8").includes(text);
 }
-/** Ids and states of every container this run made for `sid`, by name. */
+/**
+ * Ids and states of every container this run made for `sid`, by name. The
+ * state comes from `inspect`, not from the list: dockerd's exit handler
+ * wakes the `stop` waiter (State.SetStopped) BEFORE it checkpoints the
+ * container into the replica `listContainers` reads (moby
+ * daemon/monitor.go handleContainerExit), so a list right after `stop`
+ * returned can still say `running` (run 40706623966, S8).
+ */
 async function containersOf(sid: string): Promise<string> {
 	const all = await docker.listContainers({ all: true });
-	return all
-		.filter((c) => (c.Names?.[0] ?? "").startsWith(`/st-${sid.slice(0, 12)}`))
-		.map((c) => `${c.Id}:${c.Names?.[0]}:${c.State}`)
-		.sort()
-		.join(",");
+	const mine = all.filter((c) => (c.Names?.[0] ?? "").startsWith(`/st-${sid.slice(0, 12)}`));
+	const rows = await Promise.all(
+		mine.map(async (c) => {
+			const i = await inspectOrNull(c.Id);
+			return `${c.Id}:${c.Names?.[0]}:${i ? i.State.Status : "gone"}`;
+		}),
+	);
+	return rows.sort().join(",");
 }
 function dockerCli(args: string[]): Promise<{ code: number; out: string }> {
 	return new Promise((r) =>
