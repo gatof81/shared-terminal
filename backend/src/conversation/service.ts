@@ -75,6 +75,7 @@ import {
 	type ConversationKind,
 	type ConversationStore,
 	capOpenMessages,
+	type EventListener,
 	type PendingEvent,
 	type PersistedEvent,
 	sealMessage,
@@ -225,6 +226,7 @@ export class ConversationService {
 	/** Claude session_id → ST session id (one Claude session belongs to one ST session). */
 	private readonly owner = new Map<string, string>();
 	private readonly runtime = new Map<string, ConvRuntime>();
+	private wsResyncs = 0;
 	/** B2 — in-flight runtime creations, keyed by Claude session id. */
 	private readonly creating = new Map<string, { st: string; promise: Promise<ConvRuntime> }>();
 	/**
@@ -1136,9 +1138,7 @@ export class ConversationService {
 			bytesOnDisk: await disk,
 			queueBytesNow: this.deps.store.totalQueuedBytes(),
 			queueBytesMax: this.deps.store.maxQueuedBytes(),
-			// The Conversation WS is 3.1 and does not exist yet: nothing can
-			// resync. The field is in the contract's shape from now on.
-			wsResyncsSinceBoot: 0,
+			wsResyncsSinceBoot: this.wsResyncs,
 		};
 	}
 
@@ -1149,6 +1149,15 @@ export class ConversationService {
 		conversations: ConversationSummary[];
 	}> {
 		const capture = await this.authority.capture(stSessionId);
+		return { capture, conversations: await this.summaries(stSessionId) };
+	}
+
+	/**
+	 * The conversation summaries without the capture block. The WS `hello`
+	 * uses this: `capture` needs a fresh relay probe (D7), which a socket
+	 * open must not pay for.
+	 */
+	async summaries(stSessionId: string): Promise<ConversationSummary[]> {
 		let rows: ConversationRow[] = [];
 		try {
 			rows = await listConversationRows(stSessionId);
@@ -1171,7 +1180,41 @@ export class ConversationService {
 		out.sort((a, b) =>
 			a.lastEventAt < b.lastEventAt ? 1 : a.lastEventAt > b.lastEventAt ? -1 : 0,
 		);
-		return { capture, conversations: out };
+		return out;
+	}
+
+	/**
+	 * What the 3.1 read surface needs to serve one conversation: its
+	 * snapshot and its events file. Null when the session has no such
+	 * conversation — including an id that is not a safe path component
+	 * (`cid` comes from the URL), which the store refuses.
+	 */
+	async conversationFile(
+		stSessionId: string,
+		cid: string,
+	): Promise<{ index: ConversationIndex; eventsFile: string } | null> {
+		try {
+			if (!(await this.deps.store.exists(stSessionId, cid))) return null;
+			const index = await this.deps.store.peekIndex(stSessionId, cid);
+			if (!index) return null;
+			return { index, eventsFile: this.deps.store.eventsPath(stSessionId, cid) };
+		} catch {
+			return null;
+		}
+	}
+
+	/** Live status of a resident conversation (WS `status` frames). */
+	residentState(stSessionId: string, cid: string): ConversationIndex["state"] | null {
+		return this.deps.store.getResidentIndex(stSessionId, cid)?.state ?? null;
+	}
+
+	/** Subscribe to persisted events (WS live path). Returns the unsubscribe. */
+	onPersistedEvent(listener: EventListener): () => void {
+		return this.deps.store.onEvent(listener);
+	}
+
+	noteWsResync(): void {
+		this.wsResyncs++;
 	}
 
 	// ── Probe & reconcile ────────────────────────────────────────────────

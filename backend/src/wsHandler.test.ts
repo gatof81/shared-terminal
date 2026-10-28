@@ -832,3 +832,82 @@ describe("startWsHeartbeat", () => {
 		expect(alive.isAlive).toBe(false);
 	});
 });
+
+// ── 3.1 conversation channel ────────────────────────────────────────────────
+
+describe("handleWsConnection /ws/conversation (3.1)", () => {
+	const flush = () => new Promise((r) => setTimeout(r, 0));
+	const sessionsFor = (outcome: "own" | "foreign" | "missing") =>
+		({
+			assertOwnedBy: vi.fn(async () => {
+				if (outcome === "foreign") {
+					const { ForbiddenError } = await import("./sessionManager.js");
+					throw new ForbiddenError();
+				}
+				if (outcome === "missing") {
+					const { NotFoundError } = await import("./sessionManager.js");
+					throw new NotFoundError();
+				}
+			}),
+		}) as unknown as SessionManager;
+
+	it("the owner is handed to the hub; nothing else runs (no docker attach)", async () => {
+		const ws = makeFakeWs();
+		const hub = { serve: vi.fn() };
+		const sessions = sessionsFor("own");
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		handleWsConnection(
+			ws as any,
+			makeReq("/ws/conversation/s1", true) as any,
+			sessions,
+			fakeDocker,
+			{} as never,
+			undefined,
+			hub as never,
+		);
+		await flush();
+		expect(sessions.assertOwnedBy).toHaveBeenCalledWith("s1", "user-1");
+		expect(hub.serve).toHaveBeenCalledWith(ws, "s1", "user-1");
+		expect(ws.close).not.toHaveBeenCalled();
+	});
+
+	it("a foreign session closes exactly like a missing one, without reaching the hub", async () => {
+		const results = [];
+		for (const outcome of ["foreign", "missing"] as const) {
+			const ws = makeFakeWs();
+			const hub = { serve: vi.fn() };
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			handleWsConnection(
+				ws as any,
+				makeReq("/ws/conversation/s1", true) as any,
+				sessionsFor(outcome),
+				fakeDocker,
+				{} as never,
+				undefined,
+				hub as never,
+			);
+			await flush();
+			expect(hub.serve).not.toHaveBeenCalled();
+			results.push({ close: ws.close.mock.calls, sent: ws.send.mock.calls });
+		}
+		expect(results[0]).toEqual(results[1]);
+		expect(results[0].close).toEqual([[1008, "Not found"]]);
+	});
+
+	it("unauthenticated: Unauthorized before any session lookup", () => {
+		const ws = makeFakeWs();
+		const sessions = sessionsFor("own");
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		handleWsConnection(
+			ws as any,
+			makeReq("/ws/conversation/s1", false) as any,
+			sessions,
+			fakeDocker,
+			{} as never,
+			undefined,
+			{ serve: vi.fn() } as never,
+		);
+		expect(ws.close).toHaveBeenCalledWith(1008, "Unauthorized");
+		expect(sessions.assertOwnedBy).not.toHaveBeenCalled();
+	});
+});

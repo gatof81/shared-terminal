@@ -8,6 +8,7 @@ import { v4 as uuidv4 } from "uuid";
 import { WebSocket, type WebSocketServer } from "ws";
 import { verifyWsToken } from "./auth.js";
 import type { BootstrapBroadcaster, BootstrapMessage } from "./bootstrap.js";
+import type { ConversationWsHub } from "./conversation/ws.js";
 import type { DockerManager } from "./dockerManager.js";
 import { logger } from "./logger.js";
 import { recordObserveEnd, recordObserveStart } from "./observeLog.js";
@@ -59,6 +60,8 @@ export function handleWsConnection(
 	// auto-stop never fires for that handler invocation, which is the
 	// pre-#194 behaviour.
 	idleSweeper?: { bump: (sessionId: string) => void },
+	// Phase 3.1 — `/ws/conversation/<sid>`; absent ⇒ that path is refused.
+	conversationWs?: ConversationWsHub,
 ): void {
 	// #376 — capture the upgrade's correlation id into an explicit child
 	// logger. The ambient pino mixin can't cover a long-lived connection:
@@ -125,6 +128,36 @@ export function handleWsConnection(
 		}
 		const bootstrapSessionId = bootstrapMatch[1]!;
 		void handleBootstrapWs(ws, bootstrapSessionId, userId, sessions, broadcaster);
+		return;
+	}
+
+	// 3.1 — `/ws/conversation/<sessionId>`: replay + live of the session's
+	// conversations (conversation/ws.ts). Owner-only with the foreign→missing
+	// collapse, like the REST reads: conversation content is the owner's.
+	const conversationMatch = url.match(/\/ws\/conversation\/([^/?#]+)/);
+	if (conversationMatch) {
+		const sid = conversationMatch[1]!;
+		if (!conversationWs) {
+			sendError(ws, "Conversation channel not configured");
+			ws.close(1011, "Conversation channel not configured");
+			return;
+		}
+		void sessions.assertOwnedBy(sid, userId).then(
+			() => {
+				if (ws.readyState !== WebSocket.OPEN) return;
+				conversationWs.serve(ws, sid, userId);
+			},
+			(err) => {
+				if (err instanceof NotFoundError || err instanceof ForbiddenError) {
+					sendError(ws, "Session not found");
+					ws.close(1008, "Not found");
+					return;
+				}
+				log.error(`[ws] conversation auth failed for ${sid}: ${(err as Error).message}`);
+				sendError(ws, "Internal error");
+				ws.close(1011, "Internal error");
+			},
+		);
 		return;
 	}
 
