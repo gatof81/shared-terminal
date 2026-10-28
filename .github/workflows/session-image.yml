@@ -100,6 +100,12 @@ jobs:
       # 3.0d: the recreation engine against this real dockerd and image
       # (docker diff, archives, renames, defer-skill-seed across N's boots,
       # the relay identified on N). Disposable containers only, D1 in memory.
+      # Evidence for the recreation layer allowlist: what the real CLI
+      # leaves under /tmp in a stopped session container (names, types,
+      # sizes). Prints only; the assertions are in realDocker.smoke.ts.
+      - name: CLI /tmp layer evidence (real CLI)
+        run: ./session-image/test/cli-tmp-evidence.sh shared-terminal-session
+
       - name: Recreation smoke test (real Docker)
         working-directory: backend
         run: npx tsx src/recreate/realDocker.smoke.ts shared-terminal-session

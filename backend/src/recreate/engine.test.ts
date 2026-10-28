@@ -11,6 +11,7 @@ import { RecreateAttemptStore, RecreateUnresolvedError } from "../recreateAttemp
 import { RecreationEngine } from "./engine.js";
 import {
 	CANONICAL,
+	cleanChanges,
 	deferred,
 	FAST,
 	harness,
@@ -20,6 +21,7 @@ import {
 	SID,
 	stateOf,
 } from "./engine.testutil.js";
+import { CLI_URL_HANDLER, CLI_URL_HANDLER_BYTES } from "./layer.js";
 import { LABEL_ATTEMPT, LABEL_SESSION, RESERVED_NAME_RE } from "./ports.js";
 
 type H = Awaited<ReturnType<typeof harness>>;
@@ -160,6 +162,45 @@ describe("preconditions (§2.7.2): first failure ⇒ 409 with its code, no effec
 			recreatable: true,
 			blockers: [],
 			captureAfter: true,
+		});
+	});
+
+	it("the CLI's deep-link handler file is read from O's archive and allowed only byte for byte", async () => {
+		const handler = async (bytes: Buffer) => {
+			const h = await setup();
+			const dirs = ["/.local", "/.local/share", "/.local/share/applications"].map(
+				(d) => `/home/developer${d}`,
+			);
+			h.docker.changesOf.set(O_ID, [
+				...cleanChanges(),
+				...[...dirs, CLI_URL_HANDLER].map((p) => ({ Path: p, Kind: 1 })),
+			]);
+			h.docker.statsOf.set(
+				O_ID,
+				new Map([
+					...dirs.map((d) => [d, { kind: "dir" as const }] as const),
+					[CLI_URL_HANDLER, { kind: "file" as const, size: bytes.length }],
+				]),
+			);
+			h.docker.filesOf.set(O_ID, new Map([[CLI_URL_HANDLER, bytes]]));
+			const read: unknown[] = [];
+			h.docker.hooks.set("readArchive", async (args) => {
+				read.push(args[1]);
+			});
+			const p = await h.engine.preflight(SID);
+			expect(read).toContain(CLI_URL_HANDLER);
+			expect(h.docker.mutations()).toEqual([]);
+			return p;
+		};
+		expect(await handler(Buffer.from(CLI_URL_HANDLER_BYTES))).toMatchObject({
+			recreatable: true,
+			blockers: [],
+		});
+		const other = Buffer.from(CLI_URL_HANDLER_BYTES);
+		other[other.length - 2] = 0x2c;
+		expect(await handler(other)).toMatchObject({
+			recreatable: false,
+			blockers: [{ code: "layer-home", count: 1 }],
 		});
 	});
 

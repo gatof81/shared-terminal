@@ -7,7 +7,10 @@ progresiva §2.7, diseño aprobado por Work y el responsable el 2026-10-26; acla
 revisión Work de #459 —evidencia de exec, `T_rec` completo, resolución bajo el lock, restauración
 con revocación concurrente, puntos 2, 3 y 8 y patrón de nombres—, 2026-10-27; segunda revisión: código
 de salida obligatorio, efectos compuestos y apagado, 2026-10-27; decisión del responsable sobre la
-allowlist del CLI para el piloto, §2.7.5, 2026-10-27), vinculante para los PRs
+allowlist del CLI para el piloto, §2.7.5, 2026-10-27; decisión del responsable sobre los artefactos
+de runtime del CLI 2.1.308 en `/tmp` en la allowlist de la capa, §2.7.1, 2026-10-27; decisión del
+responsable sobre el registro del manejador de enlaces del CLI 2.1.308 en HOME, §2.7.1, 2026-10-28),
+vinculante para los PRs
 3.0b–3.4.** El razonamiento está en [docs/design/phase3-conversation-activity.md](./design/phase3-conversation-activity.md)
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
 `ac1024d`); si los dos documentos difieren, manda este;
@@ -499,6 +502,60 @@ Las pestañas tmux ya se pierden con el stop.
   - `/tmp/.st-ready`;
   - `/tmp/st-relay.log`;
   - `/tmp/tmux-<uid>/`.
+- **Se permiten los artefactos de runtime de Claude Code 2.1.308 bajo `/tmp`**, solo con la forma
+  exacta observada en el `docker diff` real de CI (`session-image/test/cli-tmp-evidence.sh`: `claude
+  -p`, `--resume`, una pestaña interactiva con Bash y un subagente, y una pestaña viva al detener).
+  Cada entrada tiene que estar añadida en la capa (`A`) y tener su tipo exacto:
+  - `/tmp/cc-socks/` (directorio) y `/tmp/cc-socks/<pid>.sock` (socket; el endpoint de un CLI vivo,
+    huérfano una vez detenido el contenedor);
+  - `/tmp/claude-1000/` (directorio);
+  - `/tmp/claude-1000/fswatch-probe-<6 alfanuméricos>/` (directorio) con `probe`, archivo regular
+    de **1 byte** (la sonda de observación de archivos del propio CLI, una por ejecución);
+  - `/tmp/claude-1000/<slug>/`, `<slug>/<uuid>/` y `<slug>/<uuid>/tasks/` (directorios), con
+    `<slug>` = `-home-developer-workspace` o `-home-developer-workspace-<…>` (un cwd dentro del
+    workspace) y `<uuid>` un UUID en minúsculas;
+  - `…/<slug>/<uuid>/tasks/a<16 hex>.output`: **symlink** al transcript de ese subagente,
+    `~/.claude/projects/<slug>/<uuid>/subagents/agent-a<16 hex>.jsonl`, con el mismo slug, uuid e id
+    de su propia ruta. El stat del archivo de Docker lo informa resuelto a través del symlink
+    verificado `~/.claude`, y esa forma exacta es la que se compara:
+    `/home/developer/workspace/.st/claude-state/projects/<slug>/<uuid>/subagents/agent-a<16 hex>.jsonl`.
+
+  Son descartables: sockets y sondas son de cada proceso, y el symlink solo apunta al transcript del
+  subagente, que vive en el workspace (`~/.claude` es un symlink a él) y se preserva; `claude
+  --resume` en `N` continúa la conversación. **Todo lo demás bajo esas rutas bloquea con
+  `layer-tmp`**: en particular un archivo regular en `tasks/` (la salida de una tarea en segundo
+  plano es contenido del usuario y nada muestra que sea descartable), otro destino o un destino
+  relativo, una sonda de otro tamaño o tipo, otros nombres, niveles o uid, y cualquier entrada
+  borrada o solo modificada. Una versión del CLI distinta de 2.1.308 queda fuera por la allowlist
+  de versiones (§2.7.5): sus artefactos no están validados.
+- **Se permite el registro del manejador de enlaces `claude-cli://` del CLI 2.1.308 en HOME**
+  (decisión del responsable, 2026-10-28; levanta "no ampliar HOME" solo para estas cuatro rutas, D2
+  y D3 siguen vigentes para todo lo demás). La sesión interactiva lo escribe en su primer turno, no al
+  arrancar ni con `claude -p` (evidencia: `cli-tmp-evidence.sh`, casos A–F; en el caso F un
+  contenedor nuevo sobre el mismo workspace lo vuelve a escribir idéntico, y `realDocker.smoke.ts`
+  comprueba lo mismo en `N` tras la recreación). Cada entrada tiene que estar añadida
+  en la capa (`A`):
+  - `~/.local/`, `~/.local/share/` y `~/.local/share/applications/` (directorios);
+  - `~/.local/share/applications/claude-code-url-handler.desktop`: archivo regular de **290 bytes**,
+    leído con `getArchive` y comparado **byte a byte** (sha256
+    `b186d2bd091fd46d1b727246b2d6d0e91f694c0bcf6d004284d6b39c1e33a897`) con:
+
+        [Desktop Entry]
+        Name=Claude Code URL Handler
+        Comment=Handle claude-cli:// deep links for Claude Code
+        Exec="/home/developer/workspace/.npm-global/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe" --handle-uri %u
+        Type=Application
+        NoDisplay=true
+        MimeType=x-scheme-handler/claude-cli;
+
+  Justificación: no contiene datos del usuario ni valores dinámicos, solo texto fijo y en `Exec` la
+  ruta resuelta del CLI de la imagen (`~/.npm-global` es el symlink verificado al workspace), así que
+  es reproducible; dentro del contenedor nada lo lee (no hay escritorio que despache la URL), y
+  perderlo no cambia nada de la sesión. No se copia a `N` ni se toca el entrypoint, los montajes o la
+  persistencia de HOME. **Cualquier otro byte, tamaño o tipo, un symlink en cualquiera de esas rutas,
+  otro archivo, directorio o symlink bajo `~/.local`, o una entrada borrada o solo modificada bloquea
+  con `layer-home`**; también un contenido distinto escrito por otra versión del CLI, que además
+  queda fuera por la allowlist de versiones (§2.7.5).
 - **`~/.gitconfig`:** se permite solo si contiene exactamente `user.name` y `user.email`, iguales a
   `session_configs`. Se lee con `getArchive`, ≤ 4 KiB. Tras la recreación se reaplica
   gitIdentity.

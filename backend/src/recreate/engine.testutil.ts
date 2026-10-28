@@ -80,6 +80,9 @@ export class FakeDocker implements RecreateDockerPort {
 	]);
 	readonly gitconfig = new Map<string, string>();
 	readonly changesOf = new Map<string, LayerChange[]>();
+	/** Per container: extra stats and regular files of its layer, by path. */
+	readonly statsOf = new Map<string, Map<string, PathStat>>();
+	readonly filesOf = new Map<string, Map<string, Buffer>>();
 	private seq = 0;
 
 	constructor() {
@@ -122,7 +125,7 @@ export class FakeDocker implements RecreateDockerPort {
 	}
 	async statPath(id: string, p: string): Promise<PathStat | null> {
 		await this.gate("statPath", [id, p]);
-		return cleanStats().get(p) ?? null;
+		return this.statsOf.get(id)?.get(p) ?? cleanStats().get(p) ?? null;
 	}
 	async readArchive(id: string, p: string) {
 		await this.gate("readArchive", [id, p]);
@@ -136,6 +139,8 @@ export class FakeDocker implements RecreateDockerPort {
 				...Object.entries(skills).map(([rel, data]) => ({ path: `session-skills/${rel}`, data })),
 			]);
 		}
+		const f = this.filesOf.get(id)?.get(p);
+		if (f) return buildTar([{ path: p.split("/").pop() as string, data: f }]);
 		const g = this.gitconfig.get(id);
 		return g === undefined ? null : buildTar([{ path: ".gitconfig", data: g }]);
 	}

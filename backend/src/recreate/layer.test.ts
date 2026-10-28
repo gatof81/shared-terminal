@@ -1,5 +1,8 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+	CLI_URL_HANDLER,
+	CLI_URL_HANDLER_BYTES,
 	classifyLayer,
 	ENTRYPOINT_SYMLINKS,
 	type LayerChange,
@@ -50,6 +53,7 @@ function input(patch: Partial<LayerInput> & { stats?: Map<string, PathStat> } = 
 		stat: async (p) => stats.get(p) ?? null,
 		mounts: patch.mounts ?? [`${H}/workspace`, `${H}/uploads`],
 		gitconfig: patch.gitconfig ?? (async () => null),
+		urlHandler: patch.urlHandler ?? (async () => null),
 		identity: patch.identity === undefined ? ID : patch.identity,
 		hasDotfiles: patch.hasDotfiles ?? false,
 	};
@@ -226,5 +230,341 @@ describe("classifyLayer (§2.7.1 precondition 6)", () => {
 		expect((await classifyLayer(input({ hasDotfiles: true }))).blockers).toEqual([
 			{ code: "layer-dotfiles", count: 1 },
 		]);
+	});
+
+	describe("Claude Code 2.1.308's runtime artifacts under /tmp (CI evidence: cli-tmp-evidence.sh)", () => {
+		const P = "/tmp/claude-1000/-home-developer-workspace";
+		const U = "94568d46-b069-4373-98b1-b1db0b70716c";
+		const AGENT = "a36654f4f7cfb543c";
+		const TARGET = `${H}/workspace/.st/claude-state/projects/-home-developer-workspace/${U}/subagents/agent-${AGENT}.jsonl`;
+		/** The four shapes the evidence showed, all at once: -p probes, a tab's task link, a stale socket. */
+		function withCli(extra: Array<[string, PathStat | null]> = []) {
+			const { changes, stats } = cleanBoot();
+			const add = (p: string, st: PathStat | null) => {
+				changes.push({ Path: p, Kind: 1 });
+				if (st) stats.set(p, st);
+			};
+			add("/tmp/cc-socks", { kind: "dir" });
+			add("/tmp/cc-socks/61.sock", { kind: "socket" });
+			add("/tmp/claude-1000", { kind: "dir" });
+			for (const probe of ["iOewuG", "p3nAut"]) {
+				add(`/tmp/claude-1000/fswatch-probe-${probe}`, { kind: "dir" });
+				add(`/tmp/claude-1000/fswatch-probe-${probe}/probe`, { kind: "file", size: 1 });
+			}
+			add(P, { kind: "dir" });
+			add(`${P}/${U}`, { kind: "dir" });
+			add(`${P}/${U}/tasks`, { kind: "dir" });
+			add(`${P}/${U}/tasks/${AGENT}.output`, { kind: "symlink", linkTarget: TARGET });
+			for (const [p, st] of extra) add(p, st);
+			return input({ changes, stats });
+		}
+		const blockers = async (i: LayerInput) => (await classifyLayer(i)).blockers;
+
+		it("the shapes seen on a real daemon don't block", async () => {
+			expect(await blockers(withCli())).toEqual([]);
+		});
+
+		it("a slug of a cwd below the workspace, with its own transcript as target", async () => {
+			const slug = "-home-developer-workspace-project";
+			const d = `/tmp/claude-1000/${slug}`;
+			expect(
+				await blockers(
+					withCli([
+						[d, { kind: "dir" }],
+						[`${d}/${U}`, { kind: "dir" }],
+						[`${d}/${U}/tasks`, { kind: "dir" }],
+						[
+							`${d}/${U}/tasks/${AGENT}.output`,
+							{
+								kind: "symlink",
+								linkTarget: `${H}/workspace/.st/claude-state/projects/${slug}/${U}/subagents/agent-${AGENT}.jsonl`,
+							},
+						],
+					]),
+				),
+			).toEqual([]);
+		});
+
+		const T = `${P}/${U}/tasks`;
+		const cases: Array<[string, Array<[string, PathStat | null]>]> = [
+			[
+				"a regular file in tasks/ (a background task's output)",
+				[[`${T}/b1234567890abcdef.output`, { kind: "file", size: 40 }]],
+			],
+			[
+				"a task link with the right name but another target",
+				[[`${T}/a0123456789abcdef.output`, { kind: "symlink", linkTarget: "/etc/passwd" }]],
+			],
+			[
+				"a task link pointing at another session's transcript",
+				[
+					[
+						`${T}/a0123456789abcdef.output`,
+						{
+							kind: "symlink",
+							linkTarget: `${H}/workspace/.st/claude-state/projects/-home-developer-workspace/00000000-0000-4000-8000-000000000000/subagents/agent-a0123456789abcdef.jsonl`,
+						},
+					],
+				],
+			],
+			[
+				"a task link pointing at another agent's transcript",
+				[[`${T}/a0123456789abcdef.output`, { kind: "symlink", linkTarget: TARGET }]],
+			],
+			[
+				"a task link with a relative target",
+				[[`${T}/a0123456789abcdef.output`, { kind: "symlink", linkTarget: "../../x" }]],
+			],
+			[
+				"a task link given unresolved, through ~/.claude (Docker reports it resolved)",
+				[
+					[
+						`${T}/a0123456789abcdef.output`,
+						{
+							kind: "symlink",
+							linkTarget: `${H}/.claude/projects/-home-developer-workspace/${U}/subagents/agent-a0123456789abcdef.jsonl`,
+						},
+					],
+				],
+			],
+			["a task entry that is a directory", [[`${T}/a0123456789abcdef.output`, { kind: "dir" }]]],
+			["a task name off the observed shape", [[`${T}/notes.txt`, { kind: "file", size: 3 }]]],
+			[
+				"a probe of 2 bytes",
+				[
+					["/tmp/claude-1000/fswatch-probe-abcdef", { kind: "dir" }],
+					["/tmp/claude-1000/fswatch-probe-abcdef/probe", { kind: "file", size: 2 }],
+				],
+			],
+			[
+				"a probe that is a symlink",
+				[
+					["/tmp/claude-1000/fswatch-probe-abcdef", { kind: "dir" }],
+					[
+						"/tmp/claude-1000/fswatch-probe-abcdef/probe",
+						{ kind: "symlink", linkTarget: "/etc/shadow" },
+					],
+				],
+			],
+			[
+				"a probe without a known size",
+				[
+					["/tmp/claude-1000/fswatch-probe-abcdef", { kind: "dir" }],
+					["/tmp/claude-1000/fswatch-probe-abcdef/probe", { kind: "file" }],
+				],
+			],
+			[
+				"another file in a probe dir",
+				[["/tmp/claude-1000/fswatch-probe-iOewuG/data", { kind: "file", size: 1 }]],
+			],
+			[
+				"a probe dir name off the observed shape",
+				[["/tmp/claude-1000/fswatch-probe-toolong1", { kind: "dir" }]],
+			],
+			[
+				"a file directly in /tmp/claude-1000",
+				[["/tmp/claude-1000/notes", { kind: "file", size: 1 }]],
+			],
+			["a file in a project dir", [[`${P}/notes`, { kind: "file", size: 1 }]]],
+			["a file in a session dir", [[`${P}/${U}/notes`, { kind: "file", size: 1 }]]],
+			["a deeper dir under tasks/", [[`${T}/sub`, { kind: "dir" }]]],
+			["a slug outside the workspace", [["/tmp/claude-1000/-tmp", { kind: "dir" }]]],
+			["a session dir that is not a uuid", [[`${P}/scratchpad`, { kind: "dir" }]]],
+			["another uid's dir", [["/tmp/claude-0", { kind: "dir" }]]],
+			["a regular file in cc-socks", [["/tmp/cc-socks/62.sock", { kind: "file", size: 0 }]]],
+			["a socket name off the observed shape", [["/tmp/cc-socks/x.sock", { kind: "socket" }]]],
+			[
+				"a symlink as /tmp/claude-1000's sibling",
+				[["/tmp/cc-socks2", { kind: "symlink", linkTarget: "/home/developer/workspace" }]],
+			],
+			["an entry that vanished (no stat)", [[`${T}/a0123456789abcdee.output`, null]]],
+		];
+		for (const [label, extra] of cases) {
+			it(`${label} ⇒ layer-tmp`, async () => {
+				expect(await blockers(withCli(extra))).toEqual([{ code: "layer-tmp", count: 1 }]);
+			});
+		}
+
+		it("the allowed paths with the wrong type block too", async () => {
+			const { changes, stats } = cleanBoot();
+			for (const [p, st] of [
+				["/tmp/cc-socks", { kind: "symlink", linkTarget: "/home/developer/workspace" }],
+				["/tmp/claude-1000", { kind: "file", size: 1 }],
+				[P, { kind: "symlink", linkTarget: "/" }],
+				[`${P}/${U}/tasks`, { kind: "file", size: 0 }],
+			] as Array<[string, PathStat]>) {
+				changes.push({ Path: p, Kind: 1 });
+				stats.set(p, st);
+			}
+			expect(await blockers(input({ changes, stats }))).toEqual([{ code: "layer-tmp", count: 4 }]);
+		});
+
+		it("deleted or merely changed artifacts are not covered: they block", async () => {
+			const i = withCli();
+			const deleted = {
+				...i,
+				changes: [...i.changes, { Path: "/tmp/claude-1000/fswatch-probe-zzzzzz", Kind: 2 }],
+			};
+			expect(await blockers(deleted)).toEqual([{ code: "layer-tmp", count: 1 }]);
+			const { changes, stats } = cleanBoot();
+			changes.push({ Path: "/tmp/cc-socks", Kind: 0 });
+			stats.set("/tmp/cc-socks", { kind: "dir" });
+			expect(await blockers(input({ changes, stats }))).toEqual([{ code: "layer-tmp", count: 1 }]);
+		});
+
+		it("nothing else is widened: HOME, system and packages still block", async () => {
+			expect(
+				await blockers(
+					withCli([
+						[`${H}/.cache`, { kind: "dir" }],
+						["/usr/bin/bc", { kind: "file", size: 90_000 }],
+					]),
+				),
+			).toEqual([
+				{ code: "layer-home", count: 1 },
+				{ code: "layer-system", count: 1 },
+			]);
+		});
+	});
+	describe("Claude Code 2.1.308's deep-link handler registration in HOME (owner decision 2026-10-28)", () => {
+		const L = `${H}/.local`;
+		const DIRS = [L, `${L}/share`, `${L}/share/applications`];
+		/** The interactive CLI's four additions, as a real daemon shows them, plus `extra`. */
+		function withHandler(
+			extra: Array<[string, PathStat | null, number?]> = [],
+			read: LayerInput["urlHandler"] = async () => Buffer.from(CLI_URL_HANDLER_BYTES),
+		): LayerInput {
+			const { changes, stats } = cleanBoot();
+			for (const d of DIRS) {
+				changes.push({ Path: d, Kind: 1 });
+				stats.set(d, { kind: "dir" });
+			}
+			changes.push({ Path: CLI_URL_HANDLER, Kind: 1 });
+			stats.set(CLI_URL_HANDLER, { kind: "file", size: CLI_URL_HANDLER_BYTES.length });
+			for (const [p, st, kind] of extra) {
+				const at = changes.findIndex((c) => c.Path === p);
+				if (at >= 0) changes.splice(at, 1);
+				if (kind !== undefined) changes.push({ Path: p, Kind: kind });
+				else changes.push({ Path: p, Kind: 1 });
+				if (st) stats.set(p, st);
+				else stats.delete(p);
+			}
+			return input({ changes, stats, urlHandler: read });
+		}
+		const blockers = async (i: LayerInput) => (await classifyLayer(i)).blockers;
+
+		it("pins the exact bytes seen on CI (290 bytes; fixed text and the image CLI's resolved path)", () => {
+			expect(CLI_URL_HANDLER).toBe(
+				`${H}/.local/share/applications/claude-code-url-handler.desktop`,
+			);
+			expect(CLI_URL_HANDLER_BYTES.length).toBe(290);
+			expect(createHash("sha256").update(CLI_URL_HANDLER_BYTES).digest("hex")).toBe(
+				"b186d2bd091fd46d1b727246b2d6d0e91f694c0bcf6d004284d6b39c1e33a897",
+			);
+		});
+
+		it("the three dirs and the file with exactly those bytes don't block", async () => {
+			expect(await blockers(withHandler())).toEqual([]);
+		});
+
+		it("a file of the same size with one byte changed blocks", async () => {
+			const changed = Buffer.from(CLI_URL_HANDLER_BYTES);
+			changed[changed.indexOf("--handle-uri")] = "+".charCodeAt(0);
+			expect(await blockers(withHandler([], async () => changed))).toEqual([
+				{ code: "layer-home", count: 1 },
+			]);
+		});
+
+		it("another size blocks without the bytes being read", async () => {
+			let reads = 0;
+			const read = async () => {
+				reads++;
+				return Buffer.from(CLI_URL_HANDLER_BYTES);
+			};
+			for (const size of [289, 291, 0]) {
+				expect(
+					await blockers(withHandler([[CLI_URL_HANDLER, { kind: "file", size }]], read)),
+				).toEqual([{ code: "layer-home", count: 1 }]);
+			}
+			expect(await blockers(withHandler([[CLI_URL_HANDLER, { kind: "file" }]], read))).toEqual([
+				{ code: "layer-home", count: 1 },
+			]);
+			expect(reads).toBe(0);
+		});
+
+		it("the right size but other bytes, a longer read, or an unreadable/absent read blocks", async () => {
+			for (const read of [
+				async () => Buffer.concat([CLI_URL_HANDLER_BYTES, Buffer.from("\n")]),
+				async () => Buffer.alloc(290, 0x20),
+				async () => "unreadable" as const,
+				async () => null,
+			]) {
+				expect(await blockers(withHandler([], read))).toEqual([{ code: "layer-home", count: 1 }]);
+			}
+		});
+
+		it("the file or any of its dirs as a symlink, or with another type, blocks", async () => {
+			for (const [p, st] of [
+				[CLI_URL_HANDLER, { kind: "symlink", linkTarget: "/etc/passwd" }],
+				[CLI_URL_HANDLER, { kind: "dir" }],
+				[CLI_URL_HANDLER, { kind: "symlink", linkTarget: "/x", size: 290 }],
+				[CLI_URL_HANDLER, { kind: "other", size: 290 }],
+				[L, { kind: "symlink", linkTarget: `${H}/workspace` }],
+				[`${L}/share`, { kind: "file", size: 0 }],
+				[`${L}/share/applications`, { kind: "symlink", linkTarget: "/tmp" }],
+				[`${L}/share/applications`, null],
+			] as Array<[string, PathStat | null]>) {
+				expect(await blockers(withHandler([[p, st]]))).toEqual([{ code: "layer-home", count: 1 }]);
+			}
+		});
+
+		it("any other file, dir or symlink under ~/.local blocks", async () => {
+			for (const [p, st] of [
+				[`${L}/share/applications/other.desktop`, { kind: "file", size: 290 }],
+				[`${L}/share/applications/claude-code-url-handler.desktop~`, { kind: "file", size: 290 }],
+				[`${L}/share/applications/mimeapps.list`, { kind: "file", size: 40 }],
+				[`${L}/share/notes.txt`, { kind: "file", size: 5 }],
+				[`${L}/bin`, { kind: "dir" }],
+				[`${L}/bin/claude`, { kind: "symlink", linkTarget: "/usr/bin/true" }],
+				[`${L}/state`, { kind: "symlink", linkTarget: `${H}/workspace` }],
+				[`${L}/share/applications/x`, { kind: "socket" }],
+			] as Array<[string, PathStat]>) {
+				expect(await blockers(withHandler([[p, st]]))).toEqual([{ code: "layer-home", count: 1 }]);
+			}
+		});
+
+		it("only additions are covered: a modified or deleted entry blocks", async () => {
+			for (const p of [...DIRS, CLI_URL_HANDLER]) {
+				expect(
+					await blockers(
+						withHandler([
+							[p, p === CLI_URL_HANDLER ? { kind: "file", size: 290 } : { kind: "dir" }, 0],
+						]),
+					),
+				).toEqual([{ code: "layer-home", count: 1 }]);
+				expect(await blockers(withHandler([[p, null, 2]]))).toEqual([
+					{ code: "layer-home", count: 1 },
+				]);
+			}
+		});
+
+		it("the same name anywhere else is not covered", async () => {
+			const { changes, stats } = cleanBoot();
+			for (const p of [
+				`${H}/claude-code-url-handler.desktop`,
+				"/usr/share/applications/claude-code-url-handler.desktop",
+			]) {
+				changes.push({ Path: p, Kind: 1 });
+				stats.set(p, { kind: "file", size: 290 });
+			}
+			expect(
+				await blockers(
+					input({ changes, stats, urlHandler: async () => Buffer.from(CLI_URL_HANDLER_BYTES) }),
+				),
+			).toEqual([
+				{ code: "layer-home", count: 1 },
+				{ code: "layer-system", count: 1 },
+			]);
+		});
 	});
 });

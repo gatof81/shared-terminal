@@ -23,14 +23,27 @@
  *   - the full path: N from the checked image ID, the relay identified and
  *     the hooks file written (effective:true), seeding exactly once;
  *   - the committed N survives boot passes and stop/start; a real leftover
- *     is removed without being started.
+ *     is removed without being started;
+ *   - O after real use of the CLI 2.1.308 (`claude -p`, an interactive tab
+ *     with a subagent, against the scripted model) stays recreatable, its
+ *     deep-link handler file in HOME holding exactly the pinned bytes; any
+ *     other shape under /tmp or ~/.local still blocks; N carries none of
+ *     those artifacts, the workspace, a Git repo, a secret, a key, the git
+ *     identity and the CLI state are preserved (fingerprints only), the
+ *     transcripts keep their size and mtime (they are never read,
+ *     CONVERSATION.md §1.1), `claude --resume` on N continues the
+ *     conversation O started, and N's own first interactive turn writes the
+ *     handler file again byte for byte.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import Dockerode from "dockerode";
+import { CLI_URL_HANDLER, CLI_URL_HANDLER_BYTES } from "./layer.js";
+import { parseTar } from "./tar.js";
 
 const IMAGE = process.argv[2] ?? "shared-terminal-session";
 const SID = randomUUID();
@@ -44,6 +57,19 @@ const CANONICAL = `st-${SID.slice(0, 12)}`;
 const WS = path.join(ROOT, SID);
 const UPLOADS = path.join(ROOT, ".uploads", SID);
 const SKILL = path.join(WS, ".st/claude-state/skills/delegate-task/SKILL.md");
+// The scripted model (session-image/test/mock-anthropic.mjs) on a private
+// network, so the real CLI runs in O and N without an API key or egress.
+const REPO = path.resolve(path.dirname(path.resolve(process.argv[1])), "../../..");
+const NET = `${CANONICAL}-net`;
+const OUT = path.join(ROOT, ".smoke-out");
+const API_KEY = `sk-ant-api03-smoke-${randomBytes(12).toString("hex")}`;
+const CLI_ENV = [
+	"ANTHROPIC_BASE_URL=http://mock-api:8080",
+	`ANTHROPIC_API_KEY=${API_KEY}`,
+	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+	"DISABLE_AUTOUPDATER=1",
+];
+const MOCK_REPLY = "Hello from the mock.\nSecond line.";
 let failures = 0;
 
 function check(what: string, ok: boolean, detail?: unknown): void {
@@ -70,6 +96,28 @@ async function exec(id: string, cmd: string): Promise<number> {
 		s.resume();
 	});
 	return (await e.inspect()).ExitCode ?? -1;
+}
+
+/** Exit code and stdout of `bash -c cmd` (as the image's user, developer). */
+async function execOut(id: string, cmd: string): Promise<{ code: number; out: string }> {
+	const e = await docker.getContainer(id).exec({
+		Cmd: ["bash", "-c", cmd],
+		AttachStdout: true,
+		AttachStderr: true,
+		WorkingDir: "/home/developer/workspace",
+	});
+	const s = await e.start({});
+	const out: Buffer[] = [];
+	await new Promise<void>((r) => {
+		docker.modem.demuxStream(
+			s,
+			{ write: (c: Buffer) => out.push(c) } as unknown as NodeJS.WritableStream,
+			{ write: () => true } as unknown as NodeJS.WritableStream,
+		);
+		s.on("end", () => r());
+		s.on("close", () => r());
+	});
+	return { code: (await e.inspect()).ExitCode ?? -1, out: Buffer.concat(out).toString("utf8") };
 }
 
 async function waitReady(id: string): Promise<void> {
@@ -118,6 +166,10 @@ async function cleanup(): Promise<void> {
 				.catch(() => undefined);
 		}
 	}
+	await docker
+		.getNetwork(NET)
+		.remove()
+		.catch(() => undefined);
 	// uid-1000 files from the containers: remove them from a root container.
 	await docker
 		.run(IMAGE, ["bash", "-c", "rm -rf /t/* /t/.[!.]* 2>/dev/null; true"], process.stdout, {
@@ -150,14 +202,29 @@ async function main(): Promise<void> {
 
 	// ── O: an ordinary pre-3.0d session container ─────────────────────────
 	phase("O: booted once, stopped");
+	await fs.mkdir(OUT, { recursive: true });
+	await fs.chmod(OUT, 0o777);
+	await docker.createNetwork({ Name: NET });
+	// Named under CANONICAL so cleanup() removes it with the session's containers.
+	const mock = await docker.createContainer({
+		Image: IMAGE,
+		name: `${CANONICAL}-mockapi`,
+		Entrypoint: ["node"],
+		Cmd: ["/t/mock-anthropic.mjs", "8080", "/out/model-requests.jsonl"],
+		HostConfig: { Binds: [`${REPO}/session-image/test:/t:ro`, `${OUT}:/out`], NetworkMode: NET },
+		NetworkingConfig: { EndpointsConfig: { [NET]: { Aliases: ["mock-api"] } } },
+	});
+	await mock.start();
 	const o = await docker.createContainer({
 		Image: IMAGE,
 		name: CANONICAL,
+		Env: [`SESSION_ID=${SID}`, ...CLI_ENV],
 		HostConfig: {
 			Binds: [`${WS}:/home/developer/workspace`, `${UPLOADS}:/home/developer/uploads:ro`],
 			Init: true,
 			CapDrop: ["ALL"],
 			SecurityOpt: ["no-new-privileges:true"],
+			NetworkMode: NET,
 		},
 		OpenStdin: true,
 		Tty: true,
@@ -269,7 +336,7 @@ async function main(): Promise<void> {
 			Labels: spec.labels,
 			// The spawn's own env builder: SESSION_ID/SESSION_NAME plus the
 			// capture entries (the relay refuses to start without SESSION_ID).
-			Env: buildContainerEnv(SID, "recreate-smoke", [], spec.env),
+			Env: buildContainerEnv(SID, "recreate-smoke", CLI_ENV, spec.env),
 			HostConfig: {
 				Binds: [
 					`${WS}:/home/developer/workspace`,
@@ -279,6 +346,7 @@ async function main(): Promise<void> {
 				Init: true,
 				CapDrop: ["ALL"],
 				SecurityOpt: ["no-new-privileges:true"],
+				NetworkMode: NET,
 			},
 			OpenStdin: true,
 			Tty: true,
@@ -366,6 +434,250 @@ async function main(): Promise<void> {
 	// O's next boot re-seeds W from its image.
 	await withO(O, async () => undefined);
 
+	// ── The real CLI's runtime artifacts in /tmp (CONVERSATION.md §2.7.1) ──
+	phase("Preflight: O after real use of the CLI 2.1.308");
+	let convId = "";
+	await withO(O, async () => {
+		const p = await execOut(
+			O,
+			"timeout 120 claude -p 'layer probe: first prompt' --output-format json </dev/null",
+		);
+		try {
+			convId =
+				(JSON.parse(p.out.trim().split("\n").pop() ?? "{}") as { session_id?: string })
+					.session_id ?? "";
+		} catch {}
+		check(
+			"claude -p in O answers with a conversation id",
+			p.code === 0 && /^[0-9a-f-]{36}$/.test(convId),
+			p.code,
+		);
+	});
+	const afterP = await engine.preflight(SID);
+	check(
+		"O after claude -p (cc-socks, claude-1000, fswatch probes) is recreatable",
+		(afterP as { recreatable?: boolean }).recreatable === true,
+		afterP,
+	);
+	await withO(O, async () => {
+		// An interactive tab with a subagent turn: the shape that leaves a
+		// task link under /tmp/claude-1000 (cli-tmp-evidence.sh, case C).
+		await execOut(
+			O,
+			`f=~/.claude.json; [ -s "$f" ] || echo "{}" > "$f"
+jq --arg k "${API_KEY.slice(-20)}" '. + {hasCompletedOnboarding: true, theme: "dark",
+	customApiKeyResponses: {approved: [$k], rejected: []},
+	projects: {"/home/developer/workspace": {hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true}}}' "$f" > ~/workspace/.cj && cat ~/workspace/.cj > "$f" && rm -f ~/workspace/.cj
+mkdir -p ~/.claude && printf '{"skipDangerousModePermissionPrompt": true, "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo stop >> /home/developer/workspace/.turns"}]}]}}' > ~/.claude/settings.json`,
+		);
+		await execOut(
+			O,
+			'tmux new-session -d -s t -x 200 -y 50 -c /home/developer/workspace "claude --dangerously-skip-permissions"',
+		);
+		let ready = false;
+		for (let i = 0; i < 60 && !ready; i++) {
+			ready = /for shortcuts|bypass permissions on/.test(
+				(await execOut(O, "tmux capture-pane -p -t t")).out,
+			);
+			if (!ready) await new Promise((r) => setTimeout(r, 500));
+		}
+		check("interactive tab in O reached its prompt", ready);
+		await execOut(O, "tmux send-keys -t t 'ST_SCENARIO=agent' Enter");
+		let done = false;
+		for (let i = 0; i < 300 && !done; i++) {
+			done = (await execOut(O, "test -s ~/workspace/.turns")).code === 0;
+			if (!done) await new Promise((r) => setTimeout(r, 100));
+		}
+		check("the subagent turn finished", done);
+		await execOut(O, "tmux send-keys -t t '/exit' Enter; sleep 3; rm -f ~/workspace/.turns");
+	});
+	const tmpLayer = ((await docker.getContainer(O).changes()) as Array<{ Path: string }>)
+		.map((c) => c.Path)
+		.filter((p) => p.startsWith("/tmp/"));
+	console.log(`  · O's layer under /tmp: ${JSON.stringify(tmpLayer)}`);
+	const homeLayer = (
+		(await docker.getContainer(O).changes()) as Array<{ Path: string; Kind: number }>
+	)
+		.filter(
+			(c) =>
+				c.Path.startsWith("/home/developer/") && !c.Path.startsWith("/home/developer/workspace"),
+		)
+		.map((c) => `${c.Kind} ${c.Path}`);
+	console.log(`  · O's layer under HOME (Kind Path): ${JSON.stringify(homeLayer)}`);
+	for (const p of tmpLayer.filter((x) => x.endsWith(".output"))) {
+		console.log(`  · archive stat of ${p}: ${JSON.stringify(await real.statPath(O, p))}`);
+	}
+	check(
+		"the run left the observed shapes: fswatch probes and a subagent task link",
+		tmpLayer.some((p) => /\/fswatch-probe-[A-Za-z0-9]{6}\/probe$/.test(p)) &&
+			tmpLayer.some((p) => /\/tasks\/a[0-9a-f]{16}\.output$/.test(p)),
+		tmpLayer,
+	);
+	const afterCli = (await engine.preflight(SID)) as {
+		recreatable?: boolean;
+		blockers?: Array<{ code: string }>;
+	};
+	check(
+		"after an interactive tab with a subagent: nothing under /tmp blocks (the task link included)",
+		!afterCli.blockers?.some((b) => b.code === "layer-tmp"),
+		afterCli,
+	);
+	// The interactive CLI also writes its deep-link handler registration in
+	// HOME (layer.ts CLI_URL_HANDLER, owner decision 2026-10-28): allowed only
+	// with the pinned bytes, so the bytes this real CLI wrote are compared too.
+	check(
+		"the interactive CLI wrote ~/.local/share/applications/claude-code-url-handler.desktop",
+		homeLayer.includes(`1 ${CLI_URL_HANDLER}`),
+		homeLayer,
+	);
+	const handlerTar = await real.readArchive(O, CLI_URL_HANDLER, 64 * 1024);
+	const handler = handlerTar ? parseTar(handlerTar, { maxEntries: 2, maxFileBytes: 4096 }) : [];
+	const handlerBytes = handler[0]?.data ?? Buffer.alloc(0);
+	console.log(
+		`  · ${CLI_URL_HANDLER}: ${handlerBytes.length} bytes, sha256 ${createHash("sha256").update(handlerBytes).digest("hex")}`,
+	);
+	check(
+		"its bytes are exactly the pinned ones (no user data, nothing dynamic)",
+		handler.length === 1 && handlerBytes.equals(CLI_URL_HANDLER_BYTES),
+		handlerBytes.toString("utf8"),
+	);
+	check(
+		"after claude -p and an interactive tab with a subagent, O is recreatable",
+		afterCli.recreatable === true,
+		afterCli,
+	);
+	// Any other shape under ~/.local still blocks. Each variant is undone from a
+	// copy kept in the workspace (the bind mount, not the layer).
+	const H = "~/.local/share/applications/claude-code-url-handler.desktop";
+	await withO(O, () => execOut(O, `cp ${H} ~/workspace/.handler.orig`));
+	for (const [label, plant, undo] of [
+		[
+			"the file modified, same size",
+			`sed -i 's/%u/%U/' ${H}`,
+			`cat ~/workspace/.handler.orig > ${H}`,
+		],
+		["the file with another size", `echo >> ${H}`, `cat ~/workspace/.handler.orig > ${H}`],
+		[
+			"the file replaced by a symlink",
+			`rm ${H} && ln -s /home/developer/workspace/.handler.orig ${H}`,
+			`rm ${H} && cp ~/workspace/.handler.orig ${H}`,
+		],
+		[
+			"another file next to it",
+			"echo x > ~/.local/share/applications/mimeapps.list",
+			"rm ~/.local/share/applications/mimeapps.list",
+		],
+		["a symlink under ~/.local", "ln -s /etc/passwd ~/.local/share/x", "rm ~/.local/share/x"],
+		["a user file in ~/.local", "echo notes > ~/.local/notes", "rm ~/.local/notes"],
+	] as const) {
+		const planted = await withO(O, () => execOut(O, plant));
+		const v = (await engine.preflight(SID)) as {
+			recreatable?: boolean;
+			blockers?: Array<{ code: string }>;
+		};
+		check(
+			`${label} ⇒ layer-home`,
+			planted.code === 0 &&
+				v.recreatable === false &&
+				v.blockers?.some((b) => b.code === "layer-home") === true,
+			{ planted: planted.code, v },
+		);
+		await withO(O, () => execOut(O, undo));
+	}
+	await withO(O, () => execOut(O, "rm -f ~/workspace/.handler.orig"));
+	check(
+		"with every HOME variant undone, O is recreatable again",
+		((await engine.preflight(SID)) as { recreatable?: boolean }).recreatable === true,
+	);
+	const taskDir = "$(ls -d /tmp/claude-1000/-home-developer-workspace/*/tasks | head -n 1)";
+	for (const [label, plant] of [
+		[
+			"a regular file in tasks/ (a background task's output)",
+			`echo out > ${taskDir}/b0123456789abcdef.output`,
+		],
+		["a task link to /etc/passwd", `ln -s /etc/passwd ${taskDir}/a0123456789abcdef.output`],
+		[
+			"a 2-byte probe",
+			"mkdir /tmp/claude-1000/fswatch-probe-zzzzzz && printf 12 > /tmp/claude-1000/fswatch-probe-zzzzzz/probe",
+		],
+		["a user file in /tmp/claude-1000", "echo notes > /tmp/claude-1000/notes"],
+		["a regular file in /tmp/cc-socks", "echo x > /tmp/cc-socks/99.sock"],
+	] as const) {
+		const planted = await withO(O, () => execOut(O, plant));
+		const v = (await engine.preflight(SID)) as { blockers?: Array<{ code: string }> };
+		check(
+			`planted ${label} ⇒ layer-tmp`,
+			planted.code === 0 && v.blockers?.some((b) => b.code === "layer-tmp") === true,
+			{ planted: planted.code, v },
+		);
+		await withO(O, () =>
+			execOut(
+				O,
+				`rm -rf ${taskDir}/b0123456789abcdef.output ${taskDir}/a0123456789abcdef.output /tmp/claude-1000/fswatch-probe-zzzzzz /tmp/claude-1000/notes /tmp/cc-socks/99.sock`,
+			),
+		);
+	}
+	// A planted entry removed from O's layer is a deletion Docker still lists
+	// only if it existed in the image — these never did, so O is clean again.
+	check(
+		"with the planted entries removed, O is recreatable again",
+		((await engine.preflight(SID)) as { recreatable?: boolean }).recreatable === true,
+	);
+	// Read-only listings of the workspace from a root container (its files are
+	// uid 1000, some mode 0600); an empty or failed listing throws, so no
+	// comparison below can pass vacuously.
+	const inWorkspace = async (cmd: string): Promise<string> => {
+		const out = new PassThrough();
+		const chunks: Buffer[] = [];
+		out.on("data", (c: Buffer) => chunks.push(c));
+		const [res] = (await docker.run(IMAGE, ["bash", "-c", cmd], out, {
+			User: "0",
+			Entrypoint: [],
+			Tty: true,
+			HostConfig: { Binds: [`${WS}:/w:ro`], AutoRemove: true },
+		})) as [{ StatusCode: number }];
+		const text = Buffer.concat(chunks).toString("utf8").replace(/\r/g, "").trim();
+		if (res.StatusCode !== 0 || text === "")
+			throw new Error(`workspace listing failed (exit ${res.StatusCode}): ${cmd}`);
+		return text;
+	};
+	// Transcript metadata only (path, size, mtime): never their content (§1.1).
+	const transcripts = () =>
+		inWorkspace("cd /w/.st/claude-state/projects && find . -type f -printf '%P %s %T@\\n' | sort");
+	const transcriptsBefore = await transcripts();
+	check(
+		"O's transcripts exist (the conversation and the subagent's)",
+		transcriptsBefore.includes(`${convId}.jsonl`) &&
+			/subagents\/agent-a[0-9a-f]{16}\.jsonl/.test(transcriptsBefore),
+	);
+	// Preservation: a Git repo with a commit, a secret (`.env`) and a key under
+	// ~/.ssh (both 0600), the git identity in ~/.gitconfig, and the CLI's own
+	// state (~/.claude.json, ~/.claude/settings.json). Fingerprints only —
+	// hashes, modes, the HEAD — so the secret is never printed.
+	gitIdentity = { name: "Ada", email: "ada@x" };
+	const seeded = await withO(O, () =>
+		execOut(
+			O,
+			`set -e
+git config --global user.name Ada && git config --global user.email ada@x
+mkdir -p ~/workspace/proj && cd ~/workspace/proj && git init -q && echo hi > a && git add a && git commit -qm init
+umask 077 && printf 'TOKEN=%s\\n' "$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \\n')" > ~/workspace/.env
+mkdir -p ~/.ssh && head -c 64 /dev/urandom | base64 > ~/.ssh/id_smoke && chmod 600 ~/.ssh/id_smoke`,
+		),
+	);
+	check("O: repo, secret, key and git identity in place", seeded.code === 0, seeded);
+	const preserved = () =>
+		inWorkspace(
+			`cd /w && sha256sum .env .st/ssh/id_smoke .st/claude.json .st/claude-state/settings.json proj/a &&
+stat -c '%n %a %u' .env .st/ssh/id_smoke &&
+git -c safe.directory='*' -C proj rev-parse HEAD && git -c safe.directory='*' -C proj status --porcelain`,
+		);
+	const preservedBefore = await preserved();
+	check(
+		"with them, O is still recreatable (~/.gitconfig = the identity)",
+		((await engine.preflight(SID)) as { recreatable?: boolean }).recreatable === true,
+	);
+
 	// ── A manual start of O between steps 2 and 3 ────────────────────────
 	phase("Manual `docker start` of O between steps 2 and 3");
 	hooks.afterRenameN = async () => {
@@ -450,6 +762,87 @@ async function main(): Promise<void> {
 	check("seeded in step 6.2 (W = I_N)", await exists(SKILL));
 	check("defer-skill-seed gone", !(await cap.deferSeedExists(ROOT, SID)));
 	check("record resolved committed", (await attempts.read(SID)).kind === "ok");
+
+	phase(
+		"N after O's real CLI use: no runtime artifacts carried, transcripts intact, --resume continues",
+	);
+	check(
+		"none of O's /tmp runtime artifacts is in N",
+		(await execOut(nId, "test ! -e /tmp/cc-socks && test ! -e /tmp/claude-1000")).code === 0,
+	);
+	check(
+		"the transcripts' paths, sizes and mtimes are unchanged",
+		(await transcripts()) === transcriptsBefore,
+	);
+	check(
+		"workspace, Git, secret, key and CLI state unchanged before any CLI runs in N (hashes, modes, HEAD)",
+		(await preserved()) === preservedBefore,
+	);
+	const resumed = await execOut(
+		nId,
+		`timeout 120 claude -p --resume ${convId} 'layer probe: after recreation' --output-format json </dev/null`,
+	);
+	let resumedJson: { result?: string; session_id?: string } = {};
+	try {
+		resumedJson = JSON.parse(resumed.out.trim().split("\n").pop() ?? "{}");
+	} catch {}
+	check(
+		"N: claude -p --resume answers in the same conversation",
+		resumed.code === 0 &&
+			resumedJson.result?.trim() === MOCK_REPLY &&
+			resumedJson.session_id === convId,
+		{ code: resumed.code, sameId: resumedJson.session_id === convId },
+	);
+	const modelSaw = (await fs.readFile(path.join(OUT, "model-requests.jsonl"), "utf8"))
+		.split("\n")
+		.filter((l) => l.includes("layer probe: after recreation"))
+		.pop();
+	check(
+		"the model was sent O's earlier turn with the resumed prompt",
+		!!modelSaw && modelSaw.includes("layer probe: first prompt"),
+	);
+	check(
+		"N: the git identity re-applied",
+		(await execOut(nId, "git config --global user.email")).out.trim() === "ada@x",
+	);
+	check(
+		"N: O's ~/.local was not carried over",
+		(await execOut(nId, "test ! -e ~/.local")).code === 0,
+	);
+	// Reproducibility: N's own interactive CLI (prompt reached, one turn, exit)
+	// writes the same file again.
+	await execOut(
+		nId,
+		'rm -f ~/workspace/.turns; tmux new-session -d -s t -x 200 -y 50 -c /home/developer/workspace "claude --dangerously-skip-permissions"',
+	);
+	let nReady = false;
+	for (let i = 0; i < 60 && !nReady; i++) {
+		nReady = /for shortcuts|bypass permissions on/.test(
+			(await execOut(nId, "tmux capture-pane -p -t t")).out,
+		);
+		if (!nReady) await new Promise((r) => setTimeout(r, 500));
+	}
+	check("N: interactive tab reached its prompt", nReady);
+	const nHash = async () =>
+		(await execOut(nId, `sha256sum < ${H} 2>/dev/null | cut -d' ' -f1`)).out.trim();
+	let nHandler = "";
+	for (let i = 0; i < 20 && !nHandler; i++) {
+		nHandler = await nHash();
+		if (!nHandler) await new Promise((r) => setTimeout(r, 500));
+	}
+	console.log(`  · N's handler file at its prompt: ${nHandler || "absent"}`);
+	await execOut(nId, "tmux send-keys -t t 'layer probe: N tab' Enter");
+	for (let i = 0; i < 300; i++) {
+		if ((await execOut(nId, "test -s ~/workspace/.turns")).code === 0) break;
+		await new Promise((r) => setTimeout(r, 100));
+	}
+	await execOut(nId, "tmux send-keys -t t '/exit' Enter; sleep 3; rm -f ~/workspace/.turns");
+	nHandler = await nHash();
+	check(
+		"N: its interactive CLI writes the handler file again, byte for byte",
+		nHandler === createHash("sha256").update(CLI_URL_HANDLER_BYTES).digest("hex"),
+		nHandler || "absent",
+	);
 
 	// ── The recreation's exec: the exit comes from dockerd, by exec id ───
 	phase("Exec termination evidence (real dockerd)");
