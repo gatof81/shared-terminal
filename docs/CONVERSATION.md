@@ -591,8 +591,19 @@ acepta: bloquea.
 
 - **`GET /api/admin/sessions/:id/recreate`**: preflight sin efectos. Devuelve
   `{ recreatable, blockers[], imageId, currentImageId, captureAfter }`:
-  - evalúa todas las precondiciones posibles sin crear nada (las skills, contra I_O);
-  - `blockers` lleva códigos y recuentos.
+  - evalúa sin crear nada (las skills, contra I_O);
+  - `blockers` lleva códigos y recuentos;
+  - **preflight terminal abreviado:** si la sesión tiene un bloqueante que solo se levanta con una
+    acción del operador fuera de ella (`no-container`, `container-missing`, `running`, `flag-off`
+    o `recreate-unresolved`, D8), devuelve solo los bloqueantes baratos ya comprobados (2–5 y D8)
+    y **no** evalúa 6–8 ni la compatibilidad del CLI. En un contenedor en ejecución esas
+    comprobaciones son una llamada a Docker por cada ruta cambiada de la capa: con un CLI activo,
+    miles, y el GET no respondía. Una lista abreviada no significa que 6–8 pasen;
+  - **evaluación completa** para una sesión candidata (detenida, con el flag encendido, sin D8
+    pendiente): todas las precondiciones posibles a la vez, incluidas las corregibles
+    (`not-requested`, `revoked`, `image-*`) junto con 6–8 y el CLI;
+  - el POST no cambia: evalúa en orden y responde con la primera que falla, así que una recreación
+    nunca empieza sin haber pasado 6–8 y el CLI.
 - **`POST /api/admin/sessions/:id/recreate {expectImageId}`**:
   - requiere `requireAuth` + `requireAdmin` + `adminActionIp`;
   - con un owner ajeno, la fila `operate` en `session_observe_log` va **antes** de cualquier
