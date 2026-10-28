@@ -109,3 +109,15 @@ jobs:
       - name: Recreation smoke test (real Docker)
         working-directory: backend
         run: npx tsx src/recreate/realDocker.smoke.ts shared-terminal-session
+
+      # 3.0d audit (#468 §10): recreation with data and `claude --resume`,
+      # ports through the real dispatcher, the backend process SIGKILLed
+      # mid-recreation (D8), the relay unavailable and killed, PATCH with an
+      # open and a new CLI tab, end-to-end revocation, a package in the layer
+      # blocking without effect. Disposable containers and network only; D1
+      # is a file (stated per scenario in the printed coverage matrix).
+      # Secrets compared by hash, never printed; output unfiltered, and on
+      # failure each container's own log is dumped.
+      - name: Recreation audit smoke test (real Docker)
+        working-directory: backend
+        run: npx tsx src/recreate/recreateAudit.smoke.ts shared-terminal-session
