@@ -27,8 +27,11 @@
  *
  * Running sessions are NOT quiesced: rows exported mid-write and workspaces
  * tar'd under load are point-in-time-ish, same caveat every file-level
- * backup has. Restore lands every previously-`running` session as `stopped`
- * with container_id NULL — the destination host has none of the source's
+ * backup has. Files tar reports as changed/removed/shrunk while it read
+ * them are tolerated and listed per workspace in the manifest
+ * (`concurrentChanges`) — see createTarball for exactly what is accepted.
+ * Restore lands every previously-`running` session as `stopped` with
+ * container_id NULL — the destination host has none of the source's
  * containers, which is exactly what reconcile() would conclude at next boot.
  */
 
@@ -68,8 +71,25 @@ export interface BackupManifest {
 	createdAt: string;
 	schemaVersion: number;
 	tables: Record<string, number>;
-	workspaces: Record<string, { fileCount: number; tarBytes: number }>;
+	workspaces: Record<string, WorkspaceEntry>;
 }
+
+export interface WorkspaceEntry {
+	fileCount: number;
+	tarBytes: number;
+	/** Present only when tar reported files changing under it (a live
+	 *  session): the tarball is structurally valid and restorable, but
+	 *  the listed paths may hold a mix of old and new content, a
+	 *  zero-padded tail, or be missing. Absent ⇔ no change was reported. */
+	concurrentChanges?: {
+		count: number;
+		/** First CONCURRENT_PATHS_MAX entries, in tar's report order. */
+		paths: Array<{ path: string; kind: ConcurrentChangeKind }>;
+		truncated: boolean;
+	};
+}
+
+export type ConcurrentChangeKind = "changed" | "removed" | "shrank";
 
 // ── Backup ──────────────────────────────────────────────────────────────────
 
@@ -127,16 +147,24 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 		}
 		if (members.length === 0) continue;
 		const tarPath = path.join(outDir, "workspaces", `${session_id}.tar.gz`);
-		// -v lists one line per archived file on stdout — that IS the
-		// manifest's file count, no second pass over the tree.
-		const { stdout } = await execFileP(
-			"tar",
-			["-czvf", tarPath, "-C", WORKSPACE_ROOT, ...members],
-			{ maxBuffer: 64 * 1024 * 1024 },
-		);
-		const fileCount = stdout.split("\n").filter((l) => l.trim() !== "").length;
+		const changes = await createTarball(tarPath, members);
+		// Structural check of what was just written: gzip CRC + every tar
+		// header, end to end. The listing is also the manifest's count.
+		const fileCount = (await verifyTarball(tarPath)).length;
 		const tarBytes = (await fs.stat(tarPath)).size;
-		manifest.workspaces[session_id] = { fileCount, tarBytes };
+		const entry: WorkspaceEntry = { fileCount, tarBytes };
+		if (changes.length > 0) {
+			entry.concurrentChanges = {
+				count: changes.length,
+				paths: changes.slice(0, CONCURRENT_PATHS_MAX),
+				truncated: changes.length > CONCURRENT_PATHS_MAX,
+			};
+			logger.warn(
+				`[backup] workspace ${session_id}: ${changes.length} file(s) changed while being archived — ` +
+					"tarball is valid but not a consistent snapshot of them (see manifest concurrentChanges)",
+			);
+		}
+		manifest.workspaces[session_id] = entry;
 		logger.info(`[backup] workspace ${session_id}: ${fileCount} entries, ${tarBytes} bytes`);
 	}
 
@@ -148,6 +176,84 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 	);
 	logger.info(`[backup] complete → ${outDir}`);
 	return manifest;
+}
+
+// ── Tar ─────────────────────────────────────────────────────────────────────
+
+const CONCURRENT_PATHS_MAX = 100;
+
+// GNU tar's --create exit status: 0 = clean, 1 = "some files differ" (a
+// file changed, shrank or vanished while being read — the archive itself
+// is complete and well-formed), 2 = fatal (unreadable file, write error,
+// …). A live session (Claude Code rewriting ~/.claude) routinely produces
+// 1, so 1 is accepted — but ONLY when every stderr line is one of the
+// three concurrent-change diagnostics below. Anything else on stderr, any
+// other exit status, a signal, or a 1 with no recognised line fails the
+// backup: an unreadable file must never pass as "changed". LC_ALL=C pins
+// the message text these patterns match.
+const CONCURRENT_PATTERNS: ReadonlyArray<{ re: RegExp; kind: ConcurrentChangeKind }> = [
+	{ re: /^tar: (.+): file changed as we read it$/, kind: "changed" },
+	{ re: /^tar: (.+): File removed before we read it$/, kind: "removed" },
+	{ re: /^tar: (.+): File shrank by \d+ bytes; padding with zeros$/, kind: "shrank" },
+];
+
+/** Classify tar's stderr. `unknown` holds every line that is not a
+ *  concurrent-change diagnostic; the caller fails on any of them. */
+export function classifyTarStderr(stderr: string): {
+	changes: Array<{ path: string; kind: ConcurrentChangeKind }>;
+	unknown: string[];
+} {
+	const changes: Array<{ path: string; kind: ConcurrentChangeKind }> = [];
+	const unknown: string[] = [];
+	for (const line of stderr.split("\n")) {
+		if (line.trim() === "") continue;
+		const hit = CONCURRENT_PATTERNS.map((p) => ({ m: p.re.exec(line), kind: p.kind })).find(
+			(x) => x.m !== null,
+		);
+		if (hit?.m) changes.push({ path: hit.m[1]!, kind: hit.kind });
+		else unknown.push(line);
+	}
+	return { changes, unknown };
+}
+
+const tarEnv = (): NodeJS.ProcessEnv => ({ ...process.env, LC_ALL: "C" });
+const TAR_MAX_BUFFER = 64 * 1024 * 1024;
+
+async function createTarball(
+	tarPath: string,
+	members: string[],
+): Promise<Array<{ path: string; kind: ConcurrentChangeKind }>> {
+	try {
+		await execFileP("tar", ["-czf", tarPath, "-C", WORKSPACE_ROOT, ...members], {
+			env: tarEnv(),
+			maxBuffer: TAR_MAX_BUFFER,
+		});
+		return [];
+	} catch (err) {
+		const e = err as { code?: unknown; signal?: unknown; stderr?: unknown };
+		const stderr = typeof e.stderr === "string" ? e.stderr : "";
+		if (e.code === 1 && e.signal == null) {
+			const { changes, unknown } = classifyTarStderr(stderr);
+			if (unknown.length === 0 && changes.length > 0) return changes;
+		}
+		throw new Error(
+			`tar failed for ${path.basename(tarPath)} (exit ${String(e.code)}${e.signal ? `, signal ${String(e.signal)}` : ""}): ${stderr.trim() || (err as Error).message}`,
+		);
+	}
+}
+
+/** Full read of the tarball (decompression + every header). Throws on
+ *  any error; returns the entry list. */
+export async function verifyTarball(tarPath: string): Promise<string[]> {
+	const { stdout } = await execFileP("tar", ["-tzf", tarPath], {
+		env: tarEnv(),
+		maxBuffer: TAR_MAX_BUFFER,
+	}).catch((err: { stderr?: unknown; message?: string }) => {
+		throw new Error(
+			`tarball ${path.basename(tarPath)} failed verification: ${String(err.stderr ?? err.message).trim()}`,
+		);
+	});
+	return stdout.split("\n").filter((l) => l !== "");
 }
 
 // ── Restore ─────────────────────────────────────────────────────────────────
