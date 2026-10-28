@@ -50,7 +50,13 @@ const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/works
 // FK-dependency order — restore replays top to bottom. Each entry names
 // its deterministic ORDER BY so two backups of identical data are
 // byte-identical (diffable).
-const TABLES: ReadonlyArray<{ name: string; orderBy: string }> = [
+//
+// `sinceSchema` = the migration that creates the table. A backup taken
+// from a D1 older than that (the pre-deploy backup of an upgrade) skips
+// it instead of failing on "no such table"; at or past that version a
+// missing table still fails loudly. Restore reads a missing .jsonl as
+// zero rows, and its migrateDb() creates the table on the target.
+const TABLES: ReadonlyArray<{ name: string; orderBy: string; sinceSchema?: number }> = [
 	{ name: "users", orderBy: "id" },
 	{ name: "user_groups", orderBy: "id" },
 	{ name: "user_group_members", orderBy: "group_id, user_id" },
@@ -59,7 +65,7 @@ const TABLES: ReadonlyArray<{ name: string; orderBy: string }> = [
 	// Phase 3 — FK → sessions. The events files ride the per-session
 	// workspace tarball (`.conversations/<sid>` is added below);
 	// `.claude-managed/` is NOT backed up: reconcile regenerates it.
-	{ name: "claude_conversations", orderBy: "session_id" },
+	{ name: "claude_conversations", orderBy: "session_id", sinceSchema: 16 },
 	{ name: "sessions_port_mappings", orderBy: "session_id, container_port" },
 	{ name: "templates", orderBy: "id" },
 	{ name: "invite_codes", orderBy: "code_hash" },
@@ -114,6 +120,12 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 	};
 
 	for (const t of TABLES) {
+		if (t.sinceSchema !== undefined && schemaVersion < t.sinceSchema) {
+			logger.info(
+				`[backup] ${t.name}: skipped (source schema v${schemaVersion} predates v${t.sinceSchema})`,
+			);
+			continue;
+		}
 		const rows = await d1Query<Record<string, unknown>>(
 			`SELECT * FROM ${t.name} ORDER BY ${t.orderBy}`,
 		);

@@ -31,6 +31,9 @@ const dbState = vi.hoisted(() => ({
 	tables: new Map<string, Row[]>(),
 	inserts: [] as Array<{ sql: string; params: unknown[] }>,
 	updates: [] as string[],
+	schemaVersion: 12,
+	selected: [] as string[],
+	missingTables: new Set<string>(),
 }));
 
 vi.mock("./db.js", () => ({
@@ -38,10 +41,14 @@ vi.mock("./db.js", () => ({
 	d1Query: vi.fn(async (sql: string, params?: unknown[]) => {
 		const ok = { success: true as const, meta: { changes: 1, duration: 0, last_row_id: 0 } };
 		if (sql.startsWith("SELECT MAX(version)")) {
-			return { ...ok, results: [{ v: 12 }] };
+			return { ...ok, results: [{ v: dbState.schemaVersion }] };
 		}
 		const selectMatch = /^SELECT \* FROM (\w+) ORDER BY/.exec(sql);
 		if (selectMatch) {
+			dbState.selected.push(selectMatch[1]!);
+			if (dbState.missingTables.has(selectMatch[1]!)) {
+				throw new Error(`D1 query failed: no such table: ${selectMatch[1]}`);
+			}
 			return { ...ok, results: dbState.tables.get(selectMatch[1]!) ?? [] };
 		}
 		if (sql.startsWith("SELECT session_id FROM sessions")) {
@@ -83,6 +90,9 @@ beforeEach(async () => {
 	dbState.tables.clear();
 	dbState.inserts.length = 0;
 	dbState.updates.length = 0;
+	dbState.schemaVersion = 12;
+	dbState.selected.length = 0;
+	dbState.missingTables.clear();
 	outDir = mkdtempSync(path.join(os.tmpdir(), "st-backup-out-"));
 	// runBackup requires an EMPTY dir; mkdtemp gives us one, but it must
 	// not pre-create workspaces/ — runBackup does that itself.
@@ -138,6 +148,23 @@ describe("runBackup", () => {
 		// Manifest present = complete backup.
 		const m = JSON.parse(await fs.readFile(path.join(outDir, "manifest.json"), "utf-8"));
 		expect(m.version).toBe(1);
+	});
+
+	it("skips a table newer than the source schema, but fails on one the schema should have", async () => {
+		dbState.tables.set("users", [{ id: "u1", username: "diego" }]);
+		dbState.missingTables.add("claude_conversations");
+		// v12 (the mock default) predates v16 — skipped, never queried.
+		const manifest = await runBackup(outDir);
+		expect(dbState.selected).not.toContain("claude_conversations");
+		expect(manifest.tables.claude_conversations).toBeUndefined();
+		expect(manifest.tables.users).toBe(1);
+		await expect(fs.access(path.join(outDir, "claude_conversations.jsonl"))).rejects.toThrow();
+
+		// At v16 the table must exist: its absence fails, no manifest.
+		await fs.rm(outDir, { recursive: true });
+		dbState.schemaVersion = 16;
+		await expect(runBackup(outDir)).rejects.toThrow(/no such table: claude_conversations/);
+		await expect(fs.access(path.join(outDir, "manifest.json"))).rejects.toThrow();
 	});
 
 	it("refuses a non-empty output dir", async () => {

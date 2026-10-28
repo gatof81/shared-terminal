@@ -717,6 +717,11 @@ two backups of identical data are diffable), `workspaces/<sid>.tar.gz`
 `manifest.json` written last — restore refuses a dir without it, so an
 interrupted backup can't be replayed by accident.
 
+A table created by a migration newer than the source D1's schema (e.g.
+`claude_conversations`, v16, when backing up a pre-Phase-3 deployment
+before upgrading) is skipped and absent from `tables`; restore treats it
+as empty. At or past that version a missing table fails the backup.
+
 Restore guards:
 
 - **Non-empty target** (any `users`/`sessions` rows) refuses without
