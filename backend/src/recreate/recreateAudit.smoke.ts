@@ -893,49 +893,125 @@ EOF`,
 	e8.engine.stop();
 
 	// ── S1a ─────────────────────────────────────────────────────────────────
-	// The pilot's own shape (§7): the CLI used in O, then recreation and
-	// `claude --resume` on N. Expected to pass; with the exact layer allowlist
-	// of CONVERSATION.md §2.7.1 the CLI's runtime entries under /tmp block it
-	// (`layer-tmp`). Kept red on purpose until the owner decides: the smoke
-	// must not hide it. The transcript itself is never read (§1.1).
+	// The pilot's own shape (§7): the INTERACTIVE CLI used in O (a plain turn,
+	// a Bash tool turn, a subagent turn, then /exit), then recreation and
+	// `claude --resume` on N. Since #473 the CLI's verified runtime entries
+	// (/tmp and the HOME deep-link handler file, CONVERSATION.md §2.7.1) are
+	// allowed, so this must pass. Transcripts are checked by metadata only —
+	// names, sizes, mtimes — never read (§1.1).
 	scenario(
 		"S1a",
-		"real CLI used in O, then recreation and `claude --resume` on N",
-		"dockerd, image, `docker diff`, the engine's preconditions, CLI 2.1.308 with the scripted model",
+		"real interactive CLI used in O (plain, Bash, subagent), then recreation and `claude --resume` on N",
+		"dockerd, image, `docker diff` + archive reads, the engine (preconditions, steps 1–6), CLI 2.1.308 interactive in tmux and `-p --resume`, the scripted model",
 		"D1 row",
 	);
-	const s1a = await createSession("s1a");
-	let convId = "";
+	const s1a = await createSession("s1a", { gitIdentity: { name: "Ada", email: "ada@x" } });
+	const ws1a = `/wr/${s1a.sid}`;
 	await bootOnce(s1a.O, async () => {
-		const first = await claudeP(s1a.O, "'resume probe: first prompt'");
-		convId = first.json.session_id ?? "";
-		check(
-			"O: claude -p answers and reports its conversation id",
-			first.code === 0 &&
-				first.json.result?.trim() === MOCK_REPLY &&
-				/^[0-9a-f-]{36}$/.test(convId),
-			{ code: first.code, result: first.json.result, err: first.err.slice(-400) },
+		await seedClaudeState(s1a.O);
+		// Preservation: a Git repo with a commit, a secret (`.env`) and a key under
+		// ~/.ssh (both 0600), the git identity in ~/.gitconfig. Fingerprints only.
+		const seeded = await sh(
+			s1a.O,
+			`set -e
+git config --global user.name Ada && git config --global user.email ada@x
+mkdir -p ~/workspace/proj && cd ~/workspace/proj && git init -q && echo hi > a && git add a && git commit -qm init
+umask 077 && printf 'TOKEN=%s\\n' "$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \\n')" > ~/workspace/.env
+mkdir -p ~/.ssh && head -c 64 /dev/urandom | base64 > ~/.ssh/id_smoke && chmod 600 ~/.ssh/id_smoke`,
 		);
+		check("O: repo, secret, key and git identity in place", seeded.code === 0, seeded);
+		check("O: interactive tab reached its prompt", await tabStart(s1a.O, "t"));
+		check("O: plain turn completes", await tabTurn(s1a.O, "t", "resume probe: first prompt"));
+		check("O: Bash tool turn completes", await tabTurn(s1a.O, "t", "ST_SCENARIO=bash"));
+		check("O: subagent turn completes", await tabTurn(s1a.O, "t", "ST_SCENARIO=agent"));
+		await sh(s1a.O, "tmux send-keys -t t '/exit' Enter");
+		await sleep(3_000);
+		// This harness's own scratch files in /tmp (not the CLI's) would block
+		// the layer check by design; they go before the stop.
+		await sh(s1a.O, "rm -f /tmp/cj /tmp/user-hooks.log");
 	});
+	const layer1a = (
+		(await docker.getContainer(s1a.O).changes()) as Array<{ Path: string; Kind: number }>
+	).map((c) => `${c.Kind} ${c.Path}`);
+	note(
+		`O's layer under /tmp and HOME after the interactive CLI: ${JSON.stringify(
+			layer1a.filter((l) => / \/tmp\/| \/home\/developer\/(?!workspace)/.test(l)),
+		)}`,
+	);
+	check(
+		"O's layer has the CLI's runtime entries (cc-socks / claude-1000 and the handler file)",
+		layer1a.some((l) => / \/tmp\/(cc-socks|claude-1000)(\/|$)/.test(l)) &&
+			layer1a.includes(
+				"1 /home/developer/.local/share/applications/claude-code-url-handler.desktop",
+			),
+		layer1a,
+	);
+	// Transcript metadata only (path, size, mtime), from a root shell.
+	const transcripts1a = async () => {
+		const r = await asRoot(
+			`cd ${ws1a}/.st/claude-state/projects && find . -type f -printf '%P %s %T@\\n' | sort`,
+		);
+		if (r.code !== 0 || r.out.trim() === "") throw new Error("transcript listing failed");
+		return r.out.trim();
+	};
+	const preserved1a = async () => {
+		const r = await asRoot(
+			`cd ${ws1a} && sha256sum .env .st/ssh/id_smoke .st/claude.json .st/claude-state/settings.json proj/a &&
+stat -c '%n %a %u' .env .st/ssh/id_smoke &&
+git -c safe.directory='*' -C proj rev-parse HEAD && git -c safe.directory='*' -C proj status --porcelain`,
+		);
+		if (r.code !== 0 || r.out.trim() === "")
+			throw new Error(`preservation listing failed: ${r.code}`);
+		return r.out.trim();
+	};
+	const tBefore = await transcripts1a();
+	const top = tBefore
+		.split("\n")
+		.map((l) => l.split(" ")[0])
+		.filter((n) => /^-home-developer-workspace\/[0-9a-f-]{36}\.jsonl$/.test(n));
+	const convId = top.length === 1 ? (top[0].match(/([0-9a-f-]{36})\.jsonl$/)?.[1] ?? "") : "";
+	check(
+		"O's transcripts exist: one conversation and its subagent's (names only)",
+		convId !== "" && /\/subagents\/agent-a[0-9a-f]{16}\.jsonl /.test(tBefore),
+		tBefore.split("\n").map((l) => l.replace(/ .*/, "")),
+	);
+	const pBefore = await preserved1a();
 	const e1a = s1a.make();
 	const pre1a = (await e1a.engine.preflight(s1a.sid)) as {
 		recreatable?: boolean;
 		blockers?: Array<{ code: string; count?: number }>;
 	};
-	const tmpEntries = ((await docker.getContainer(s1a.O).changes()) as Array<{ Path: string }>)
-		.map((c) => c.Path)
-		.filter((p) => p.startsWith("/tmp/"));
-	note(`O's layer under /tmp after the CLI ran: ${JSON.stringify(tmpEntries)}`);
 	check(
-		"after real CLI use, O is recreatable (needed for `claude --resume` across recreation)",
+		"after real interactive CLI use, O is recreatable (stop ⇒ preflight)",
 		pre1a.recreatable === true,
 		pre1a,
 	);
 	if (pre1a.recreatable === true) {
 		const r = await e1a.engine.recreate(s1a.sid, imageId);
 		const n = (r as { nContainerId?: string }).nContainerId;
-		check("committed", (r as { ok?: boolean }).ok === true && !("unresolved" in r), r);
+		check(
+			"committed, resolved in the request",
+			(r as { ok?: boolean }).ok === true && !("unresolved" in r),
+			r,
+		);
 		if (n) {
+			check(
+				"N inherits none of O's /tmp runtime artifacts nor its ~/.local",
+				(await sh(n, "test ! -e /tmp/cc-socks && test ! -e /tmp/claude-1000 && test ! -e ~/.local"))
+					.code === 0,
+			);
+			check(
+				"transcripts (parent and subagent): paths, sizes, mtimes unchanged",
+				(await transcripts1a()) === tBefore,
+			);
+			check(
+				"workspace, Git, secret, key and CLI state unchanged before any CLI runs in N (hashes, modes, HEAD)",
+				(await preserved1a()) === pBefore,
+			);
+			check(
+				"N: git identity re-applied",
+				(await sh(n, "git config --global user.email")).out.trim() === "ada@x",
+			);
 			const resumed = await claudeP(n, `--resume ${convId} 'resume probe: second prompt'`);
 			check(
 				"N: claude -p --resume answers in the same conversation",
@@ -953,7 +1029,7 @@ EOF`,
 				.filter((l) => l.includes("resume probe: second prompt"))
 				.pop();
 			check(
-				"the model was sent the previous turn with the resumed prompt",
+				"the model was sent O's interactive turn with the resumed prompt (context continuity)",
 				!!modelSaw && modelSaw.includes("resume probe: first prompt"),
 			);
 		}
