@@ -11,7 +11,7 @@ import { execFileSync } from "node:child_process";
 import { promises as fs, mkdtempSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // No imported helpers inside vi.hoisted — it runs before every import in
 // this file is initialised (same trap dockerManager.uploads.test.ts
@@ -31,6 +31,9 @@ const dbState = vi.hoisted(() => ({
 	tables: new Map<string, Row[]>(),
 	inserts: [] as Array<{ sql: string; params: unknown[] }>,
 	updates: [] as string[],
+	schemaVersion: 12,
+	selected: [] as string[],
+	missingTables: new Set<string>(),
 }));
 
 vi.mock("./db.js", () => ({
@@ -38,10 +41,14 @@ vi.mock("./db.js", () => ({
 	d1Query: vi.fn(async (sql: string, params?: unknown[]) => {
 		const ok = { success: true as const, meta: { changes: 1, duration: 0, last_row_id: 0 } };
 		if (sql.startsWith("SELECT MAX(version)")) {
-			return { ...ok, results: [{ v: 12 }] };
+			return { ...ok, results: [{ v: dbState.schemaVersion }] };
 		}
 		const selectMatch = /^SELECT \* FROM (\w+) ORDER BY/.exec(sql);
 		if (selectMatch) {
+			dbState.selected.push(selectMatch[1]!);
+			if (dbState.missingTables.has(selectMatch[1]!)) {
+				throw new Error(`D1 query failed: no such table: ${selectMatch[1]}`);
+			}
 			return { ...ok, results: dbState.tables.get(selectMatch[1]!) ?? [] };
 		}
 		if (sql.startsWith("SELECT session_id FROM sessions")) {
@@ -70,7 +77,7 @@ vi.mock("./db.js", () => ({
 	}),
 }));
 
-import { findEncryptedBlob, runBackup, runRestore } from "./backup.js";
+import { classifyTarStderr, findEncryptedBlob, runBackup, runRestore } from "./backup.js";
 import { encryptSecret } from "./secrets.js";
 
 let outDir: string;
@@ -83,6 +90,9 @@ beforeEach(async () => {
 	dbState.tables.clear();
 	dbState.inserts.length = 0;
 	dbState.updates.length = 0;
+	dbState.schemaVersion = 12;
+	dbState.selected.length = 0;
+	dbState.missingTables.clear();
 	outDir = mkdtempSync(path.join(os.tmpdir(), "st-backup-out-"));
 	// runBackup requires an EMPTY dir; mkdtemp gives us one, but it must
 	// not pre-create workspaces/ — runBackup does that itself.
@@ -138,6 +148,23 @@ describe("runBackup", () => {
 		// Manifest present = complete backup.
 		const m = JSON.parse(await fs.readFile(path.join(outDir, "manifest.json"), "utf-8"));
 		expect(m.version).toBe(1);
+	});
+
+	it("skips a table newer than the source schema, but fails on one the schema should have", async () => {
+		dbState.tables.set("users", [{ id: "u1", username: "diego" }]);
+		dbState.missingTables.add("claude_conversations");
+		// v12 (the mock default) predates v16 — skipped, never queried.
+		const manifest = await runBackup(outDir);
+		expect(dbState.selected).not.toContain("claude_conversations");
+		expect(manifest.tables.claude_conversations).toBeUndefined();
+		expect(manifest.tables.users).toBe(1);
+		await expect(fs.access(path.join(outDir, "claude_conversations.jsonl"))).rejects.toThrow();
+
+		// At v16 the table must exist: its absence fails, no manifest.
+		await fs.rm(outDir, { recursive: true });
+		dbState.schemaVersion = 16;
+		await expect(runBackup(outDir)).rejects.toThrow(/no such table: claude_conversations/);
+		await expect(fs.access(path.join(outDir, "manifest.json"))).rejects.toThrow();
 	});
 
 	it("refuses a non-empty output dir", async () => {
@@ -255,6 +282,156 @@ describe("runRestore", () => {
 		]);
 		await expect(runRestore(outDir)).rejects.toThrow(/out-of-scope/);
 		await fs.rm(evilDir, { recursive: true, force: true });
+	});
+});
+
+// ── Live-session tar outcomes ──────────────────────────────────────────────
+//
+// GNU tar's concurrent-change diagnostics can't be produced on demand by a
+// real race without flakiness, so a `tar` shim on PATH runs the REAL tar
+// first (the archive is genuine) and then, for --create only, sources a
+// per-test control snippet that injects tar's stderr/exit status — or
+// damages the archive. Everything else (verification, restore) runs the
+// real tar untouched.
+describe("runBackup with a live workspace", () => {
+	let shimDir: string;
+	let ctlPath: string;
+	let savedPath: string | undefined;
+
+	beforeAll(async () => {
+		const realTar = execFileSync("sh", ["-c", "command -v tar"]).toString().trim();
+		shimDir = mkdtempSync(path.join(os.tmpdir(), "st-tar-shim-"));
+		ctlPath = path.join(shimDir, "ctl.sh");
+		await fs.writeFile(
+			path.join(shimDir, "tar"),
+			`#!/bin/sh\nif [ "$1" = "-czf" ] && [ -f "${ctlPath}" ]; then\n\t"${realTar}" "$@" || exit $?\n\t. "${ctlPath}"\nfi\nexec "${realTar}" "$@"\n`,
+			{ mode: 0o755 },
+		);
+		savedPath = process.env.PATH;
+		process.env.PATH = `${shimDir}:${savedPath ?? ""}`;
+	});
+
+	afterAll(async () => {
+		process.env.PATH = savedPath;
+		await fs.rm(shimDir, { recursive: true, force: true });
+	});
+
+	beforeEach(async () => {
+		await fs.rm(ctlPath, { force: true });
+		dbState.tables.set("users", [{ id: "u1", username: "diego" }]);
+		dbState.tables.set("sessions", [{ session_id: "s1", user_id: "u1", status: "running" }]);
+		await seedWorkspace("s1", {
+			"s1/hello.txt": "hola",
+			"s1/.claude/projects/p/log.jsonl": "{}\n",
+		});
+	});
+
+	const inject = (snippet: string): Promise<void> => fs.writeFile(ctlPath, snippet);
+	const hasManifest = (): Promise<boolean> =>
+		fs.access(path.join(outDir, "manifest.json")).then(
+			() => true,
+			() => false,
+		);
+
+	it("accepts exit 1 when every stderr line is a concurrent change, records it, and restores", async () => {
+		await inject(
+			"printf 'tar: s1/.claude/projects/p/log.jsonl: file changed as we read it\\n" +
+				"tar: s1/.claude/tmp1: File removed before we read it\\n" +
+				"tar: s1/big: File shrank by 4096 bytes; padding with zeros\\n' >&2; exit 1\n",
+		);
+
+		const manifest = await runBackup(outDir);
+
+		expect(await hasManifest()).toBe(true);
+		const ws = manifest.workspaces.s1;
+		expect(ws?.fileCount).toBeGreaterThanOrEqual(3);
+		expect(ws?.concurrentChanges).toEqual({
+			count: 3,
+			paths: [
+				{ path: "s1/.claude/projects/p/log.jsonl", kind: "changed" },
+				{ path: "s1/.claude/tmp1", kind: "removed" },
+				{ path: "s1/big", kind: "shrank" },
+			],
+			truncated: false,
+		});
+		// Restorable: the real tarball round-trips.
+		await fs.rm(path.join(WORKSPACE_ROOT, "s1"), { recursive: true });
+		dbState.tables.clear();
+		await runRestore(outDir);
+		expect(await fs.readFile(path.join(WORKSPACE_ROOT, "s1", "hello.txt"), "utf-8")).toBe("hola");
+	});
+
+	it("caps the recorded paths and marks the list truncated", async () => {
+		await inject(
+			'i=0; while [ $i -lt 150 ]; do echo "tar: s1/f$i: file changed as we read it" >&2; i=$((i+1)); done; exit 1\n',
+		);
+		const manifest = await runBackup(outDir);
+		const cc = manifest.workspaces.s1?.concurrentChanges;
+		expect(cc?.count).toBe(150);
+		expect(cc?.paths).toHaveLength(100);
+		expect(cc?.truncated).toBe(true);
+	});
+
+	it("a clean run records no concurrentChanges", async () => {
+		const manifest = await runBackup(outDir);
+		expect(manifest.workspaces.s1).toBeDefined();
+		expect(manifest.workspaces.s1?.concurrentChanges).toBeUndefined();
+	});
+
+	it.each([
+		[
+			"a read error mixed with a concurrent change",
+			"printf 'tar: s1/a: file changed as we read it\\ntar: s1/b: Cannot open: Permission denied\\n' >&2; exit 1\n",
+		],
+		["exit 1 with no diagnostic at all", "exit 1\n"],
+		[
+			"exit 2 even if every line looks like a concurrent change",
+			"printf 'tar: s1/a: file changed as we read it\\n' >&2; exit 2\n",
+		],
+		["a signal", "kill -TERM $$\n"],
+		[
+			"exit 1 + concurrent change but a damaged archive",
+			"truncate -s 100 \"$2\"; printf 'tar: s1/a: file changed as we read it\\n' >&2; exit 1\n",
+		],
+	])("fails without a manifest on %s", async (_label, snippet) => {
+		await inject(snippet);
+		await expect(runBackup(outDir)).rejects.toThrow();
+		expect(await hasManifest()).toBe(false);
+	});
+
+	// Real tar, real error: an unreadable file is exit 2 ("Cannot open"),
+	// never tolerated. Root reads mode-000 files, so the case is moot there.
+	it.skipIf(process.getuid?.() === 0)(
+		"fails without a manifest on an unreadable file",
+		async () => {
+			const p = path.join(WORKSPACE_ROOT, "s1", "locked.txt");
+			await fs.writeFile(p, "x");
+			await fs.chmod(p, 0o000);
+			try {
+				await expect(runBackup(outDir)).rejects.toThrow(/Cannot open: Permission denied/);
+				expect(await hasManifest()).toBe(false);
+			} finally {
+				await fs.chmod(p, 0o600);
+			}
+		},
+	);
+});
+
+describe("classifyTarStderr", () => {
+	it("recognises only the three concurrent-change diagnostics, whole-line", () => {
+		const { changes, unknown } = classifyTarStderr(
+			[
+				"tar: s1/a: file changed as we read it",
+				"tar: s1/b: File removed before we read it",
+				"tar: s1/c: File shrank by 12 bytes; padding with zeros",
+				"tar: s1/d: Cannot open: Permission denied",
+				"tar: s1/e: file changed as we read it (really)",
+				"tar: Exiting with failure status due to previous errors",
+				"",
+			].join("\n"),
+		);
+		expect(changes.map((c) => c.kind)).toEqual(["changed", "removed", "shrank"]);
+		expect(unknown).toHaveLength(3);
 	});
 });
 

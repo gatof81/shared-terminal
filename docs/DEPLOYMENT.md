@@ -717,6 +717,11 @@ two backups of identical data are diffable), `workspaces/<sid>.tar.gz`
 `manifest.json` written last — restore refuses a dir without it, so an
 interrupted backup can't be replayed by accident.
 
+A table created by a migration newer than the source D1's schema (e.g.
+`claude_conversations`, v16, when backing up a pre-Phase-3 deployment
+before upgrading) is skipped and absent from `tables`; restore treats it
+as empty. At or past that version a missing table fails the backup.
+
 Restore guards:
 
 - **Non-empty target** (any `users`/`sessions` rows) refuses without
@@ -736,3 +741,37 @@ Previously-`running` sessions land as `stopped` with a NULL container id
 Running sessions are not quiesced during backup; for a coherent snapshot
 of an active deployment, stop sessions first (workspaces of stopped
 sessions are always consistent).
+
+**Backing up with live sessions.** A running session (Claude Code rewriting
+`~/.claude/…`, a build writing files) makes tar report `file changed as we
+read it`, `File removed before we read it` or `File shrank by N bytes;
+padding with zeros` and exit 1. The backup tolerates exactly that, and
+nothing else:
+
+- tar exit 1 is accepted only when **every** stderr line is one of those
+  three diagnostics; any other line (e.g. `Cannot open: Permission
+  denied`), exit 2, a signal, or exit 1 with no recognised line fails the
+  run with no `manifest.json`;
+- every tarball is then read back end to end (`tar -tzf`: gzip CRC + all
+  headers) before the manifest is written — a damaged archive fails the
+  run;
+- the affected workspace gets `concurrentChanges: {count, paths, truncated}`
+  in `manifest.json` (first 100 paths, each `changed`/`removed`/`shrank`)
+  and the run logs a `[backup] workspace <sid>: N file(s) changed while
+  being archived` warning.
+
+What that backup is: a complete, restorable archive of every workspace, in
+which the listed files may hold a mix of old and new content, a
+zero-padded tail (`shrank`), or be missing (`removed`); files not listed
+are as of the moment tar read them, and different workspaces and the D1
+rows are not from the same instant. It is a recovery point, not a
+consistent snapshot. Check the manifest:
+
+```bash
+python3 -c 'import json,sys; m=json.load(open(sys.argv[1]));
+[print(s, w["concurrentChanges"]["count"]) for s,w in m["workspaces"].items() if "concurrentChanges" in w]' \
+  <backupDir>/manifest.json
+```
+
+If a listed path matters (a database file, a repo's `.git/index`), stop
+that session and take another backup.
