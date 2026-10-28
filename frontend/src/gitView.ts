@@ -31,6 +31,7 @@ import {
 	startSession,
 } from "./api.js";
 import { parseUnifiedDiff } from "./diff.js";
+import { relativeDate } from "./format.js";
 import { activeSessionId, isMobile, sessions, showToast } from "./main.js";
 import { refreshSessions } from "./sessionCore.js";
 import { button, el, stateBox } from "./ui.js";
@@ -549,21 +550,6 @@ function commitsSection(): HTMLElement {
 	return section;
 }
 
-/** "just now" / "5 min ago" / "3 h ago" / "2 d ago" / a date past a month. */
-export function relativeDate(iso: string, now = Date.now()): string {
-	const t = new Date(iso).getTime();
-	if (Number.isNaN(t)) return iso;
-	const s = Math.max(0, Math.round((now - t) / 1000));
-	if (s < 60) return "just now";
-	const m = Math.round(s / 60);
-	if (m < 60) return `${m} min ago`;
-	const h = Math.round(m / 60);
-	if (h < 24) return `${h} h ago`;
-	const d = Math.round(h / 24);
-	if (d < 31) return `${d} d ago`;
-	return new Date(t).toLocaleDateString();
-}
-
 function errorBox(err: { message: string; httpStatus: number; code: string | null }): HTMLElement {
 	if (err.code === "session-not-running") {
 		const s = sessions.find((x) => x.sessionId === stateSessionId);
@@ -782,3 +768,5 @@ function diffTable(rows: ReturnType<typeof parseUnifiedDiff>["rows"]): HTMLEleme
 	table.appendChild(frag);
 	return table;
 }
+
+export { relativeDate };

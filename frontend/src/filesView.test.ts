@@ -99,6 +99,7 @@ beforeAll(async () => {
 					<button id="view-terminal-btn"></button>
 					<button id="view-files-btn"></button>
 					<button id="view-git-btn"></button>
+					<button id="view-chat-btn"></button>
 				</div>
 			</div>
 			<div id="terminal-tabs"></div>
@@ -116,6 +117,7 @@ beforeAll(async () => {
 				<button id="git-refresh-btn"></button>
 				<div id="git-body"><div id="git-list"></div><div id="git-diff"></div></div>
 			</div>
+			<div id="chat-view" hidden><button id="chat-to-terminal-btn"></button></div>
 		</section>`;
 	// jsdom has no ResizeObserver; the module installs one at load.
 	vi.stubGlobal(

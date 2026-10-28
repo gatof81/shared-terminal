@@ -191,6 +191,9 @@
               <button id="view-git-btn" type="button" aria-pressed="false" title="Git changes">
                 Git
               </button>
+              <button id="view-chat-btn" type="button" aria-pressed="false" title="Claude conversations">
+                Chat
+              </button>
             </div>
             <button
               id="font-size-btn"
@@ -326,6 +329,31 @@
             <div id="git-body">
               <div id="git-list" aria-label="Changed files and recent commits"></div>
               <div id="git-diff"></div>
+            </div>
+          </div>
+          <!-- Chat (Phase 3.1, read-only): the session's captured Claude
+               conversations. List left / thread right on desktop, one
+               pane at a time on mobile. Built in TS (chatView.ts). -->
+          <div id="chat-view" hidden>
+            <div id="chat-header">
+              <button id="chat-to-terminal-btn" class="files-btn files-mobile-only" type="button">
+                ‹ Terminal
+              </button>
+              <button id="chat-back-btn" class="files-btn" type="button" hidden>‹ Conversations</button>
+              <div id="chat-summary" aria-live="polite"></div>
+              <button
+                id="chat-refresh-btn"
+                class="files-btn"
+                type="button"
+                title="Refresh"
+                aria-label="Refresh conversations"
+              >
+                ↻
+              </button>
+            </div>
+            <div id="chat-body">
+              <div id="chat-list" aria-label="Conversations"></div>
+              <div id="chat-thread"></div>
             </div>
           </div>
         </section>
