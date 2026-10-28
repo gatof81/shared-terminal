@@ -127,5 +127,43 @@ tab "$S"
 turn "$S" "evidence D1"
 turn "$S" "ST_SCENARIO=bash"
 report "$S" "D: interactive tab still running at stop"
+# When does the interactive CLI write its deep-link handler file? (layer.ts
+# CLI_URL_HANDLER). E: fresh workspace, a tab only reaching its prompt, the
+# file looked for every second for 30 s. F: a NEW container on C's workspace
+# (the recreation's shape: workspace kept, ~/.local not), a tab, a turn, exit.
+HF=/home/developer/.local/share/applications/claude-code-url-handler.desktop
+handler_poll() { # handler_poll <container> <label>
+	local t
+	for t in $(seq 30); do
+		docker exec "$1" test -f "$HF" && { echo "  $2: written after ~${t}s"; return 0; }
+		sleep 1
+	done
+	echo "  $2: not written within 30 s"
+}
+echo
+echo "════ E/F: when the handler file is written ════"
+S=$(session eeeee)
+seed "$S"
+tab "$S"
+handler_poll "$S" "E (fresh, tab at its prompt)"
+docker rm -f "$S" >/dev/null
+F="st-$TAG-ffffff"
+docker run -d --label "st-evidence=$TAG" --name "$F" --init --cap-drop ALL \
+	--security-opt no-new-privileges --network "$NET" \
+	-e SESSION_ID=00000000-0000-4000-8000-000000000003 -e SESSION_NAME=evidence \
+	-e ANTHROPIC_BASE_URL=http://mock-api:8080 -e ANTHROPIC_API_KEY="$KEY" \
+	-e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 -e DISABLE_AUTOUPDATER=1 \
+	-v "$WSROOT/ccc":/home/developer/workspace "$IMAGE" >/dev/null
+for _ in $(seq 120); do docker exec "$F" test -f /tmp/.st-ready 2>/dev/null && break; sleep 0.5; done
+docker exec "$F" test -e /home/developer/.local && echo "  F: ~/.local present before the tab" || echo "  F: no ~/.local before the tab"
+tab "$F"
+handler_poll "$F" "F (new container, C's workspace, tab at its prompt)"
+turn "$F" "evidence F1"
+docker exec "$F" test -f "$HF" && echo "  F: present after a turn" || echo "  F: absent after a turn"
+docker exec "$F" tmux send-keys -t t "/exit" Enter
+sleep 3
+docker exec "$F" test -f "$HF" && echo "  F: present after /exit" || echo "  F: absent after /exit"
+echo "── F: names of CLI state files in the workspace that changed in C's run (names only) ──"
+docker exec "$F" bash -c 'ls -la ~/workspace/.st/claude-state/ | awk "{print \$1, \$5, \$NF}"; jq -r "keys[]" ~/workspace/.st/claude.json | grep -iE "deep|link|url|regist|handler|desktop|protocol" || echo "  (no matching key in claude.json)"'
 echo
 echo "evidence: done"

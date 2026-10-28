@@ -809,21 +809,39 @@ git -c safe.directory='*' -C proj rev-parse HEAD && git -c safe.directory='*' -C
 		"N: O's ~/.local was not carried over",
 		(await execOut(nId, "test ! -e ~/.local")).code === 0,
 	);
-	// Reproducibility: N's own first interactive start writes the same file.
+	// Reproducibility: N's own interactive CLI (prompt reached, one turn, exit)
+	// writes the same file again.
 	await execOut(
 		nId,
-		'tmux new-session -d -s t -x 200 -y 50 -c /home/developer/workspace "claude --dangerously-skip-permissions"',
+		'rm -f ~/workspace/.turns; tmux new-session -d -s t -x 200 -y 50 -c /home/developer/workspace "claude --dangerously-skip-permissions"',
 	);
+	let nReady = false;
+	for (let i = 0; i < 60 && !nReady; i++) {
+		nReady = /for shortcuts|bypass permissions on/.test(
+			(await execOut(nId, "tmux capture-pane -p -t t")).out,
+		);
+		if (!nReady) await new Promise((r) => setTimeout(r, 500));
+	}
+	check("N: interactive tab reached its prompt", nReady);
+	const nHash = async () =>
+		(await execOut(nId, `sha256sum < ${H} 2>/dev/null | cut -d' ' -f1`)).out.trim();
 	let nHandler = "";
-	for (let i = 0; i < 60 && !nHandler; i++) {
-		nHandler = (await execOut(nId, `sha256sum < ${H} 2>/dev/null | cut -d' ' -f1`)).out.trim();
+	for (let i = 0; i < 20 && !nHandler; i++) {
+		nHandler = await nHash();
 		if (!nHandler) await new Promise((r) => setTimeout(r, 500));
 	}
-	await execOut(nId, "tmux send-keys -t t '/exit' Enter; sleep 3");
+	console.log(`  · N's handler file at its prompt: ${nHandler || "absent"}`);
+	await execOut(nId, "tmux send-keys -t t 'layer probe: N tab' Enter");
+	for (let i = 0; i < 300; i++) {
+		if ((await execOut(nId, "test -s ~/workspace/.turns")).code === 0) break;
+		await new Promise((r) => setTimeout(r, 100));
+	}
+	await execOut(nId, "tmux send-keys -t t '/exit' Enter; sleep 3; rm -f ~/workspace/.turns");
+	nHandler = await nHash();
 	check(
-		"N: an interactive start writes the handler file again, byte for byte",
+		"N: its interactive CLI writes the handler file again, byte for byte",
 		nHandler === createHash("sha256").update(CLI_URL_HANDLER_BYTES).digest("hex"),
-		nHandler,
+		nHandler || "absent",
 	);
 
 	// ── The recreation's exec: the exit comes from dockerd, by exec id ───
