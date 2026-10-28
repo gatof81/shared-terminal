@@ -13,6 +13,8 @@
 #   C  an interactive tab: a plain turn, a Bash tool turn, a subagent turn,
 #      then the CLI exits normally;
 #   D  an interactive tab still running when the container is stopped.
+#   E  a tab only reaching its prompt (is the HOME handler file written at start?);
+#   F  a NEW container on C's workspace: tab, one turn, exit (is it written again?).
 #
 # Prints names, types and sizes, and the first bytes of small regular files
 # (scripted-model data only; no secret exists in these containers).
@@ -29,7 +31,7 @@ WSROOT="$(mktemp -d)"
 cleanup() {
 	docker ps -aq --filter "label=st-evidence=$TAG" | xargs -r docker rm -f >/dev/null 2>&1
 	docker network rm "$NET" >/dev/null 2>&1
-	docker run --rm -v "$WSROOT":/w --entrypoint bash "$IMAGE" -c 'rm -rf /w/* /w/.[!.]*' >/dev/null 2>&1
+	docker run --rm -u 0 -v "$WSROOT":/w --entrypoint bash "$IMAGE" -c 'rm -rf /w/* /w/.[!.]*' >/dev/null 2>&1
 	rm -rf "$WSROOT"
 }
 trap cleanup EXIT

@@ -32,7 +32,7 @@
  *     identity and the CLI state are preserved (fingerprints only), the
  *     transcripts keep their size and mtime (they are never read,
  *     CONVERSATION.md §1.1), `claude --resume` on N continues the
- *     conversation O started, and N's own interactive start writes the
+ *     conversation O started, and N's own first interactive turn writes the
  *     handler file again byte for byte.
  */
 

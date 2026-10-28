@@ -163,13 +163,15 @@ function cliTmpArtifact(p: string, st: PathStat | null): boolean {
 //
 // The interactive CLI 2.1.308 registers itself as the `claude-cli://` URL
 // handler for a desktop session by writing this file (and the three dirs
-// above it, none of which is in the image), on every interactive start.
+// above it, none of which is in the image) on its first interactive turn —
+// not at start and not for `claude -p` (cli-tmp-evidence.sh, cases A–F).
 // Seen on CI's dockerd by cli-tmp-evidence.sh (cases C and D) and
 // realDocker.smoke.ts. Owner decision of 2026-10-28 (§2.7.1): allowed, and
 // only with exactly these bytes. They hold no user data and nothing
 // dynamic: fixed text plus `Exec`, the path the image's CLI runs from
 // (`~/.npm-global` is the entrypoint's verified symlink into the workspace,
-// resolved), so N's own first interactive start writes the same file again.
+// resolved), and a new container on the same workspace writes the same file
+// again on its first interactive turn (case F; realDocker.smoke.ts on N).
 // Nothing reads it inside a container (there is no desktop to dispatch a
 // URL), so losing it changes nothing in the session. Any other byte, size,
 // type, file or symlink under `~/.local` still blocks as `layer-home`; so

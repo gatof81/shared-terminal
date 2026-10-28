@@ -530,9 +530,10 @@ Las pestañas tmux ya se pierden con el stop.
   de versiones (§2.7.5): sus artefactos no están validados.
 - **Se permite el registro del manejador de enlaces `claude-cli://` del CLI 2.1.308 en HOME**
   (decisión del responsable, 2026-10-28; levanta "no ampliar HOME" solo para estas cuatro rutas, D2
-  y D3 siguen vigentes para todo lo demás). La sesión interactiva lo escribe al arrancar (evidencia:
-  `cli-tmp-evidence.sh`, casos C y D, y `realDocker.smoke.ts`, que además comprueba que el primer
-  arranque interactivo de `N` lo vuelve a escribir idéntico). Cada entrada tiene que estar añadida
+  y D3 siguen vigentes para todo lo demás). La sesión interactiva lo escribe en su primer turno, no al
+  arrancar ni con `claude -p` (evidencia: `cli-tmp-evidence.sh`, casos A–F; en el caso F un
+  contenedor nuevo sobre el mismo workspace lo vuelve a escribir idéntico, y `realDocker.smoke.ts`
+  comprueba lo mismo en `N` tras la recreación). Cada entrada tiene que estar añadida
   en la capa (`A`):
   - `~/.local/`, `~/.local/share/` y `~/.local/share/applications/` (directorios);
   - `~/.local/share/applications/claude-code-url-handler.desktop`: archivo regular de **290 bytes**,
