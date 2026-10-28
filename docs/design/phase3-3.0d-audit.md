@@ -30,8 +30,12 @@ cierra ni se avanza al piloto hasta el dictamen de Work.
 **Estado al 2026-10-28:** A7 corregido en #470 (`a81ecc0`). A9 (§1), hallado por el smoke S1a,
 corregido en #473 (`5d8bbff`, con GO de Work). La ampliación de smokes, #471, mergeada como
 `dd1b941` (GO de Work sobre `1077873`, el mismo árbol) con la matriz completa en verde (§10).
-**Se pide a Work el dictamen integral final (GO / CHANGES REQUIRED); el resumen para ese dictamen
-está en §12.**
+**Dictamen integral de Work sobre `f053932`: CHANGES REQUIRED documentales.** GO técnico para las
+etapas 0–1, condicionado al runbook (§6) y a una autorización posterior; **todavía no hay GO para
+el piloto**. Hallazgos: **F1/P2**, la evidencia de bootstrap (corregida en §7, comprobación 3); **F2/P2**,
+las garantías reales de D8 (corregidas en §12 y §4); e inconsistencias menores (migraciones hasta
+v17, anexo A frente a la matriz de #471, NV obsoletos), corregidas en esta revisión. Se pide a Work
+una revisión incremental de F1, F2 y la consistencia documental.
 
 ## 1. Defectos de implementación
 
@@ -266,7 +270,7 @@ Planteamiento original:
 ## 4. Restricciones operativas aceptadas
 
 - **D8 fail-closed.** Un intento interrumpido queda `recreate-unresolved` y nada lo resuelve tras
-  reiniciar. El piloto es solo una sesión nueva y descartable. No se recrean sesiones reales hasta
+  reiniciar: queda bloqueado indefinidamente, sin resolución heurística por espera (§12). El piloto es solo una sesión nueva y descartable. No se recrean sesiones reales hasta
   que exista y se valide un procedimiento de recuperación administrativa manual.
 - **Allowlist exacta {2.1.308}, solo para el piloto.** Una versión no validada, también una
   autoactualizada, bloquea la recreación.
@@ -308,20 +312,25 @@ Planteamiento original:
     mismos hooks y ningún aviso;
   - la siembra diferida y fail-closed;
   - el reinicio del relay produce `gap relay_restart`.
-- **Huecos** (detalle en el anexo A):
-  - casi todo el bloque "Smoke de Docker con el CLI real": `--resume` y hash del workspace tras
-    recrear, git email, secreto y puerto en `N`, `apt-get install`, backend muerto entre pasos
-    (con el resultado de D8), relay no disponible con 0 "hook error", y la cota de 3 s tras
-    `kill -9`;
-  - `PATCH` con el CLI real (pestaña abierta y nueva);
-  - la fila "ni `O` ni `N`" (`recreateOrphans`);
-  - postStart colgado más allá de `T_rec`;
-  - variantes de reinicio;
-  - "ambos hashes NULL tras la emergencia nunca se reautorizan" (relacionado con A1);
-  - skills byte a byte.
-- **Propuesta:** ampliar los smokes de CI (runner aislado, sin tocar la VM) con los huecos que no
-  dependen de un modelo real antes del despliegue. Dejar para el piloto solo lo que necesita una
-  sesión y un modelo reales (§7).
+- **Docker real + CLI real 2.1.308 con modelo simulado, ampliación de #471
+  (`recreateAudit.smoke.ts`, §10):** CLI interactivo en `O` y `--resume` en `N` (S1a); recreación
+  con workspace, Git, secreto, puertos y dispatcher real (S1); SIGKILL real del backend en los dos
+  cortes (S2); relay no disponible y `kill -9` con la cota de 3 s (S3, S4, Phase 12); stop/start
+  (S5); `PATCH` con pestaña abierta y nueva (S6); revocación con el CLI de emergencia (S7);
+  `apt-get install` sin efectos (S8). **D1 está simulado** en todos (un JSON por sesión), igual que el
+  modelo, el D1 del CLI de emergencia y la ruta `PATCH` con su lock.
+- **Huecos reales que quedan** (detalle en el anexo A; ninguno se declara cubierto):
+  - la fila "ni `O` ni `N`" (`recreateOrphans`) y "nombre canónico ocupado ⇒ incierto";
+  - postStart que sobrevive a `T_rec` o colgado;
+  - variantes de reinicio "aplicado antes del reinicio" y "después de `T_d1`", y deshabilitar o la
+    emergencia tras un reinicio;
+  - la ausencia de efectos tardíos tras un SIGKILL (§12: no demostrable);
+  - "ambos hashes NULL tras la emergencia nunca se reautorizan";
+  - skills byte a byte tras un POST bloqueado y tras una recreación correcta (tras una interrumpida
+    sí: S2);
+  - el receptor rechazando una petición real tras la emergencia (#475);
+  - con D1 real, el modelo real, la ruta HTTP real y el CLI del workspace del piloto: solo en el
+    piloto (PIL).
 
 ## 6. Despliegue coordinado (propuesta; no ejecutado)
 
@@ -345,7 +354,7 @@ toca. Cada etapa se puede detener y revertir; avanzar de etapa requiere autoriza
 2. `git pull` al SHA aprobado; `docker build -t shared-terminal-session ./session-image`;
    comprobar `docker image inspect … --format '{{index .Config.Labels "io.shared-terminal.conversation-relay"}}'` = `2`.
 3. `docker compose up -d --build`. Compose recrea solo `app` (con el alias `st-backend`); los
-   contenedores de sesión no se tocan. Las migraciones pendientes (hasta v16) son aditivas.
+   contenedores de sesión no se tocan. Las migraciones pendientes (hasta v17, `sessions.revocation_seq`) son aditivas.
 4. Verificar, sin crear ni recrear sesiones:
    - el arranque registra `conversation capture disabled`, sin errores de `reconcile` ni de
      `recoverOnBoot` (no hay registros de intento);
@@ -409,9 +418,10 @@ rechaza desde la marca; deshabilitar no necesita el lock y funciona con la recre
 
 ## 7. Plan de piloto (etapa 2)
 
-**Sesión:** nueva, creada para el piloto por el responsable, sin repositorio ni datos reales, sin
-dotfiles, **sin** estar en `CONVERSATION_ALLOW_USERS` (nace sin token ni montajes); se usa lo mínimo
-para tener un transcript (una sesión interactiva corta) y se detiene.
+**Sesión:** nueva, creada para el piloto por el responsable, sin repositorio ni datos reales,
+**sin ningún disparador de bootstrap** (comprobación 3), **sin** estar en `CONVERSATION_ALLOW_USERS`
+(nace sin token ni montajes); se usa lo mínimo para tener un transcript (una sesión interactiva corta)
+y se detiene.
 
 **Comprobaciones previas:**
 
@@ -425,28 +435,41 @@ para tener un transcript (una sesión interactiva corta) y se detiene.
      entorno de desarrollo de esta auditoría pasó solo a 2.1.311: el riesgo es real.
 2. `PATCH /api/admin/sessions/<sid>/conversation {"enabled":true}` → `requested:true`,
    `effective:false`, `requiresRecreate:true` (`container-without-capture`).
-3. **Bootstrap terminado antes de detener y recrear** (precondición verificable del operador; #467
-   la hará cumplir el motor). Antes del `stop`, con evidencia anotada:
-   - `GET /api/sessions/<sid>` → `status:"running"` (un bootstrap fallido deja `failed`) y
-     `runtimeReady:true`;
-   - `GET /api/sessions/<sid>/bootstrap-log`:
-     - sesión creada sin etapas de bootstrap (sin repo, identidad git, dotfiles, agent seed ni
-       `postCreate`, la forma prevista del piloto): `{"log": null}`. El bootstrap no corre para ella
-       (`routes/sessions.ts` solo lo lanza con `postCreateCmd` o alguna etapa configurada);
-     - con alguna etapa: un `log` no nulo. Se persiste solo al terminar (`persistLog` al final del
-       camino de éxito y en el de fallo), así que, junto con `status:"running"`, prueba que terminó
-       bien.
+3. **Sesión sin bootstrap** (precondición del piloto inicial; F1 de Work). El piloto inicial **no
+   admite ninguna sesión con bootstrap**: no hay hoy evidencia terminal positiva de que un bootstrap
+   terminó bien, así que el piloto exige que no exista ninguno.
+   - **Por qué `running` + `bootstrap-log` no prueban nada.** Contraejemplo de Work: con un
+     `postCreate` que falla, `finishWithFail` (`bootstrap.ts`) persiste el log **antes** de
+     `failSession`, que es quien marca `failed` y mata el contenedor. Entre una cosa y otra la sesión
+     muestra `status:"running"` con un `log` no nulo, y el teardown aún no terminó. Ni un log no nulo
+     ni `running` (ni los dos juntos) prueban que el bootstrap acabó, ni que acabó bien. Además
+     `persistLog` es best-effort: un `log: null` tampoco prueba que no hubo bootstrap.
+   - **Qué dispara el bootstrap** (`routes/sessions.ts`, `POST /api/sessions`, `hasBootstrapConfig`
+     y `postCreateCmd`): `repo`, `gitIdentity`, `dotfiles`, `agentSeed`, `writeEnvFile: true`, un
+     `ports[]` con `readiness`, o `postCreateCmd`. Cualquiera lanza `runAsyncBootstrap` y la respuesta
+     lleva `bootstrapping: true`. Fuera del bootstrap, `postStartCmd` lanza un daemon en cada arranque
+     del contenedor (también en `N`): tampoco se admite. El bootstrap solo se lanza en ese create; ni
+     `start` ni la recreación lo repiten.
+   - **Configuración del piloto:** el create lleva solo `name` y las variables de entorno simples que
+     necesita el piloto (`DISABLE_AUTOUPDATER=1`, de tipo no secreto); **ningún** campo de los
+     anteriores, ni `postStartCmd`, ni `writeEnvFile`, ni puertos con `readiness`.
+   - **Evidencia que se registra**, antes de usar la sesión:
+     - el cuerpo exacto del `POST /api/sessions` enviado;
+     - de la respuesta 201: `sessionId`, `createdAt`, y que **no** incluye `bootstrapping`
+       (`bootstrapping: true` ⇒ esa sesión no se usa para el piloto);
+     - la configuración efectiva en D1, por consulta de solo lectura:
+       `SELECT * FROM session_configs WHERE session_id = '<sid>'`. Con la configuración mínima de
+       arriba la fila no existe, o solo lleva `env_vars_json` y, si acaso, límites; `repos_json`,
+       `git_identity_json`, `dotfiles_json`, `agent_seed_json`, `post_create_cmd` y
+       `post_start_cmd` son NULL, `write_env_file` no es 1, `ports_json` no tiene ninguna entrada
+       con `readiness`, y `bootstrapped_at` es NULL. Se anota la fila completa (no lleva valores
+       secretos: no se configura ninguno);
+     - `GET /api/sessions/<sid>` → `status:"running"` y `runtimeReady:true` (estado de la sesión,
+       no prueba de bootstrap).
 
-   **La evidencia tiene que ser de la ejecución actual.** El bootstrap solo se lanza en
-   `POST /api/sessions` (`routes/sessions.ts`, `runAsyncBootstrap`): ni `start` ni la recreación lo
-   repiten, así que una sesión tiene a lo sumo una ejecución, y una sesión nueva del piloto no puede
-   mostrar el log de otra. Para no confundirla con un bootstrap anterior, se anotan juntos el
-   `sessionId` y el `createdAt` de la respuesta del create (con su `bootstrapping`), y el log se lee
-   de ese mismo `sessionId`. Como `persistLog` es best-effort, un `log: null` solo prueba "no hubo
-   bootstrap" si además la configuración no tiene etapas y el create no devolvió
-   `bootstrapping: true`; con etapas configuradas y `log: null`, no se recrea.
-
-   Sin esas evidencias no se detiene ni se recrea. Una sesión `failed` no se usa para el piloto.
+   Si falta cualquiera de esas evidencias, o alguna muestra un disparador, la sesión no se usa: se
+   crea otra. Una variante futura del piloto **con** bootstrap queda fuera de esta corrección y exigirá
+   evidencia terminal positiva del éxito de la ejecución actual (lo que #467 tendrá que definir).
 4. `GET …/recreate` → `recreatable:true`, `blockers:[]`, `captureAfter:true`; anotar
    `currentImageId`.
 
@@ -466,8 +489,8 @@ del responsable que se mantiene).
 
 1. `docker inspect st-<sid12> --format '{{.Image}}'` = `currentImageId`; `O` eliminado; etiquetas de
    intento en `N`.
-2. Workspace intacto: `claude --resume` encuentra la conversación previa; `git config user.email`
-   si había identidad.
+2. Workspace intacto: `claude --resume` encuentra la conversación previa. (En el piloto no hay
+   identidad git configurada: `gitIdentity` es una etapa de bootstrap, comprobación 3.)
 3. Relay identificado: `GET /api/sessions/<sid>/conversations` → `capture.effective:true`; eventos
    en `.conversations/<sid>/`.
 4. Un prompt en una pestaña ya abierta y otro en una nueva: entregados, sin "hook error".
@@ -507,12 +530,12 @@ antes de esa etapa. Ninguno se implementa sin revisión y autorización.
 | A7 — DEPLOYMENT.md desactualizado (sección de conversación en términos de 3.0c, rollback solo hasta 3.0b, pérdidas del procedimiento de emergencia) | **Sí** | Es el documento que se sigue al desplegar; con texto obsoleto el operador podría actuar mal en las etapas 0 a 2 | **Corregido:** #470 (`a81ecc0`) |
 | Ampliación de smokes (§10) | **Sí** | Work: los huecos de smoke se cierran con evidencia antes del piloto, y lo que corre en CI no espera al despliegue | **Cerrada:** #471 (`dd1b941`), matriz completa en verde (§10) |
 | A4 — `PATH` con el directorio del usuario primero | No | Solo afecta a la propia sesión del usuario; en el piloto, el usuario es el responsable, en una sesión descartable | Antes de la etapa 3 (sesiones de otros usuarios) |
-| A5 — `failSession` fuera del lock | No, con una precondición verificable del piloto: bootstrap terminado antes de detener y recrear (§7, comprobación 3) | En el piloto, la sesión se crea, se usa y se detiene antes de recrearla, y su bootstrap terminado se comprueba con evidencia | Antes de la etapa 3; mover la escritura dentro del lock es una corrección aislada |
+| A5 — `failSession` fuera del lock | No, con una precondición verificable del piloto: una sesión **sin ningún disparador de bootstrap** (§7, comprobación 3) | Sin bootstrap no hay `failSession` que pueda correr durante la recreación | Antes de la etapa 3; mover la escritura dentro del lock es una corrección aislada |
 | A6 — `PATCH /resources` sin lock | No, con una restricción operativa que se mantiene: prohibido editar recursos durante la recreación | Solo actúa si un admin edita los límites mientras recrea | Antes de recrear fuera del piloto |
 | A8 — redacción (identificación del relay, `sleep` del supervisor) | No | Documentación y un proceso por cada 0,5 s sin marca; no afecta a la captura | Seguimiento |
 | #465 — auditoría fail-closed del `PATCH` enable sobre la sesión de otro usuario (**aprobada**) | No | En el piloto el admin es el dueño: no hay sesión ajena | Implementación aparte, antes de la etapa 3 |
 | #466 — allowlist del CLI en `PATCH {enabled:true}` (**aprobada**) | No, si el piloto mantiene el CLI en 2.1.308 (`DISABLE_AUTOUPDATER=1`, comprobado antes y después) | La recreación ya lo comprueba. Fuera del piloto, un CLI autoactualizado seguiría capturando por `PATCH` o por spawn (etapa 3) sin validar | Implementación aparte, antes de la etapa 3 |
-| #467 — impedir la recreación con un bootstrap en vuelo, con evidencia positiva de fin (**aprobada**) | No, con la precondición verificable del piloto (§7, comprobación 3) | El mismo motivo que A5 | Implementación aparte, antes de la etapa 3 |
+| #467 — impedir la recreación con un bootstrap en vuelo, con evidencia positiva de fin (**aprobada**) | No, con la precondición verificable del piloto: sesión sin bootstrap (§7, comprobación 3) | El mismo motivo que A5. Un piloto **con** bootstrap queda excluido hasta #467 | Implementación aparte, antes de la etapa 3 |
 | #463 — fallo aislado de tests del motor (dos apariciones, sin reproducir) | No bloquea por sí mismo; se mantiene abierto | Sin diagnóstico, no se le atribuye causa. En cada nueva aparición se conservan stdout, stderr, el código de salida y el contexto completo (SHA, comando, número de ejecución, entorno) | Abierto |
 
 ## 10. Ampliación de smokes (implementada en #471, mergeada como `dd1b941`)
@@ -599,19 +622,25 @@ piloto, y los criterios de 48 h de §7.
 
 - **Bootstrap terminado (§7, comprobación 3):** verificar que el `bootstrap-log` corresponde a la
   ejecución actual de la sesión y que no puede confundirse con la evidencia de un bootstrap
-  anterior.
+  anterior. *Resultado (F1 de Work):* el `bootstrap-log` no sirve como prueba de fin; el piloto
+  inicial exige una sesión sin bootstrap (§7, comprobación 3).
 - **Muerte real del backend (smoke S2 de #471):** además de que el intento quede `uncertain` tras el
   reinicio, verificar que ningún proceso de la ejecución anterior sigue produciendo efectos que el
-  backend nuevo desconozca.
+  backend nuevo desconozca. *Resultado (F2 de Work):* no puede demostrarse; lo que sí garantiza D8 está
+  en §12.
 
 Con eso se podría pedir autorización para las etapas 0 y 1 (§6). El piloto (etapa 2) requiere
 además una autorización propia.
 
 ## 12. Resumen para el dictamen integral final
 
-Base: `main` en `dd1b941`. Lo que se pide a Work: **GO / CHANGES REQUIRED de 3.0d**, y en concreto si
+Base: `main` en `dd1b941`. Lo que se pidió a Work: **GO / CHANGES REQUIRED de 3.0d**, y en concreto si
 queda algún bloqueante para el **despliegue coordinado** (etapas 0 y 1, §6) y para el **piloto
-descartable** (etapa 2, §7). Nada de esto autoriza por sí mismo el despliegue ni el piloto.
+descartable** (etapa 2, §7). Dictamen sobre `f053932`: CHANGES REQUIRED documentales (F1, F2,
+consistencia); GO técnico para las etapas 0–1 condicionado al runbook y a autorización posterior; sin
+GO todavía para el piloto. Esta revisión corrige F1 (§7, comprobación 3), F2 (abajo y §4) y la
+consistencia (§5, §6.1, anexo A), sin cambios en el motor ni en los smokes, para revisión incremental
+de Work. Nada de esto autoriza por sí mismo el despliegue ni el piloto.
 
 **Cerrado.**
 
@@ -627,30 +656,42 @@ descartable** (etapa 2, §7). Nada de esto autoriza por sí mismo el despliegue 
 solo los cubren tests unitarios. Quedan para el piloto: D1 real, el modelo real, la ruta HTTP real
 y el CLI del workspace del piloto (anexo A, filas marcadas **PIL**).
 
-**D8 ante SIGKILL y efectos del proceso anterior** (comprobación de cierre del responsable):
+**D8 ante SIGKILL: qué garantiza y qué no** (comprobación de cierre del responsable; F2 de Work):
 
-- Probado en S2 (los dos cortes): el proceso backend muere por SIGKILL (se afirma la señal); el
-  proceso nuevo deja el intento `uncertain` + `orphanedAt`, la sesión rechaza start/stop/delete con
-  `recreate-unresolved`, la pasada de arranque deja el `-old-` tal cual, `O` no se elimina y nada se
-  resuelve.
-- **Por construcción, no por observación prolongada:** tras la muerte, la ejecución anterior solo
-  puede producir dos clases de efectos: (a) una petición a dockerd ya enviada, que dockerd termina
-  (p. ej. un rename o un create), y (b) un exec ya iniciado en el contenedor, acotado porque
-  `recreateExec` lo envuelve en `timeout -k 2 <s>` dentro del contenedor. Las escrituras de archivos
-  y de D1 las hace el propio proceso y mueren con él. Ninguno de esos efectos lo interpreta el
-  backend nuevo: la sesión queda congelada por D8 y la recuperación manual, que aún no existe, tendrá
-  que observar el estado después de esas cotas. S2 no comprueba con el tiempo que no aparezca un
-  efecto tardío; se pide a Work que valore si esa garantía por construcción es suficiente para el
-  piloto.
+- **Lo que prueba S2** (los dos cortes, con SIGKILL real de un proceso backend aparte): la muerte del
+  proceso (se afirma la señal) y el **bloqueo posterior**: el proceso nuevo deja el intento
+  `uncertain` + `orphanedAt`, la sesión rechaza start/stop/delete con `recreate-unresolved`, la pasada
+  de arranque deja el `-old-` tal cual, `O` no se elimina y nada se resuelve.
+- **Lo que S2 no prueba:** la **ausencia de efectos tardíos** en el tiempo. No hay observación
+  prolongada, y no se puede afirmar que ningún efecto de la ejecución anterior aparezca después.
+- **Por qué no puede afirmarse:**
+  - un SIGKILL del backend no cancela necesariamente las peticiones que **Docker o D1 ya
+    recibieron**: dockerd termina un create, un rename, un start o un remove ya enviado;
+  - una **sentencia enviada por HTTP a D1** (Cloudflare) puede completarse aunque el backend haya
+    muerto antes de leer la respuesta, incluido el CAS del paso 4;
+  - los **timeouts de exec** (`timeout -k 2 <s>` de `recreateExec` dentro del contenedor) acotan
+    el proceso del exec, pero **no prueban que todas las operaciones remotas hayan terminado**: no
+    cubren peticiones ya aceptadas por dockerd ni por D1, ni lo que el exec haya lanzado fuera de
+    su grupo.
+- **Lo que D8 garantiza:** la operación queda `unresolved` y la sesión **bloqueada indefinidamente**
+  para todo verbo del ciclo de vida, **sin resolución heurística por espera**: nada la resuelve tras
+  un reinicio, pase el tiempo que pase. Ningún efecto tardío lo interpreta el backend nuevo como
+  resolución. La deshabilitación y la emergencia siguen funcionando (no pasan por la puerta).
+- **Ante un resultado ambiguo** (`unresolved`, 500 `{unresolved:true}` o un reinicio del backend
+  durante el intento) **no está autorizado** reiniciar, recuperar a mano ni recrear sesiones reales
+  fuera del procedimiento aprobado: se para y se reporta (§7). El procedimiento de recuperación
+  manual no existe todavía; tendrá que observar el estado real de Docker y D1 y tiene su propia
+  autorización.
 
-**Bootstrap terminado** (comprobación de cierre del responsable): restricción del piloto en §7,
-comprobación 3, con evidencia de la ejecución actual (un único bootstrap por sesión, solo en el
-create; `sessionId` y `createdAt` anotados; `log: null` solo es prueba sin etapas configuradas).
+**Bootstrap** (comprobación de cierre del responsable; F1 de Work): el `bootstrap-log` y `running`
+no prueban que un bootstrap terminó (contraejemplo del `postCreate` fallido, §7 comprobación 3). El
+piloto inicial exige una sesión nueva **sin disparadores de bootstrap**, comprobada con el cuerpo del
+create, la respuesta sin `bootstrapping`, `sessionId` + `createdAt` y la fila de `session_configs`.
 
 **Restricciones operativas que se mantienen** (no bloquean el piloto tal como está aprobado, §9):
 
 - A4 (`PATH`): solo afecta a la propia sesión; el piloto es del responsable.
-- A5 (`failSession` fuera del lock): bootstrap terminado y verificado antes de detener y recrear.
+- A5 (`failSession` fuera del lock): el piloto inicial usa una sesión sin bootstrap.
 - A6 (`PATCH /resources` sin lock): prohibido editar recursos durante la recreación.
 - A8: redacción; seguimiento.
 - D8 fail-closed; CLI fijado en 2.1.308 (`DISABLE_AUTOUPDATER=1`, comprobado antes y después); un
@@ -691,6 +732,7 @@ Rutas relativas a `backend/src/`, salvo los smokes. Siglas de los archivos:
 - **RLL**: `routes.lifecycleLock.test.ts`
 - **RA**: `recreateAttempt.test.ts`
 - **SMK**: `recreate/realDocker.smoke.ts`
+- **AUD**: `recreate/recreateAudit.smoke.ts` (#471; escenarios S1a–S8, D1 simulado)
 - **CSM**: `session-image/conversation-smoke.sh`
 
 | # | Criterio | Estado | Evidencia principal / lo que falta |
@@ -707,11 +749,11 @@ Rutas relativas a `backend/src/`, salvo los smokes. Siglas de los archivos:
 | 10 | Camino exitoso sin bloqueo circular (K1.3) | V (U+RD) | E, CP, SMK |
 | 11 | El `N` confirmado nunca es sobrante (K1.1) | P (U+RD) | E, SMK. Falta: que la captura siga efectiva tras los ciclos |
 | 12 | Evidencia y no tiempo (K1.2) | V (U) | E, `recreate/run.test.ts`, `dockerManager.capturePort.test.ts` |
-| 13 | Reinicio con un intento `open`/`uncertain` (D8) | P (U) | E, ER, RA, RLL. Falta: las variantes "aplicado antes del reinicio" y "después de `T_d1`"; deshabilitar y emergencia tras el reinicio |
+| 13 | Reinicio con un intento `open`/`uncertain` (D8) | P (U+RD) | E, ER, RA, RLL; AUD S2 (SIGKILL real en los dos cortes: `uncertain`, bloqueo, nada se resuelve). Falta: las variantes "aplicado antes del reinicio" y "después de `T_d1`"; deshabilitar y emergencia tras el reinicio; la ausencia de efectos tardíos no es demostrable (§12) |
 | 14 | Registro del intento | V (U) | RA, E, RCA |
 | 15 | Paso 4 atómico | V (U) | `recreate/d1.test.ts` (forma de la sentencia) |
 | 16 | `docker start` manual de `O` | V (U+RD) | E, SMK |
-| 17 | Skills personalizadas (A2/P1) | P (U+RD+RC) | E, SMK, `skills.test.ts`, CSM. Falta: comparación byte a byte tras un POST bloqueado y tras recrear |
+| 17 | Skills personalizadas (A2/P1) | P (U+RD+RC) | E, SMK, `skills.test.ts`, CSM; AUD S2 (byte a byte tras una recreación interrumpida). Falta: byte a byte tras un POST bloqueado y tras recrear |
 | 18 | Aplazamiento (A2/P2) | V (RD+U+RC) | SMK, CSM, E, ER |
 | 19 | Eliminación incierta (A2/P2) | P (U) | E. Falta: que `N` no siembre y las skills byte a byte (y C2) |
 | 20 | Precondición 7 | P (U) | E. Falta: `.npm-global` como symlink; `.claude.json` heredado |
@@ -720,17 +762,17 @@ Rutas relativas a `backend/src/`, salvo los smokes. Siglas de los archivos:
 | 23 | Segunda revisión (E1, E2, E5) | V (U) | E2 |
 | 24 | E6 con el puerto real | V (U) | E2 |
 | 25 | Las cuatro filas de `reconcile`; nombres reservados; rename con el canónico ocupado | P (U) | E. **NV:** la fila "ni `O` ni `N`" (`recreateOrphans`); "nombre canónico ocupado ⇒ incierto" |
-| 26 | `PATCH {enabled:true}` ⇒ marca → relay ≤ 5 s → archivo; **con el CLI real**, prompts en pestaña abierta y nueva | P (U) | RCA, CA, ACT, CP. **NV:** la parte con el CLI real |
-| 27 | Conservación durante el stop (K2) | P (U) | CA, `service.test.ts`, ACT. Falta: la revocación con el contenedor detenido en `reconcile`; el relay al boot en un contenedor real |
+| 26 | `PATCH {enabled:true}` ⇒ marca → relay ≤ 5 s → archivo; **con el CLI real**, prompts en pestaña abierta y nueva | P (U+RC) | RCA, CA, ACT, CP; AUD S6 (CLI real, pestaña abierta y nueva, 0 "hook error"). Falta: la ruta HTTP y su lock con el CLI real (S6 llama a la autoridad; D1 simulado) |
+| 27 | Conservación durante el stop (K2) | P (U+RC) | CA, `service.test.ts`, ACT; AUD S5 (marca y archivo conservados, relay al boot en un contenedor real). Falta: la revocación con el contenedor detenido en `reconcile` |
 | 28 | Preparación del spawn (K2) | P (U) | ACT, `dockerManager.conversation.test.ts`. Falta: efectivo tras el boot; creación fallida + `reconcile` |
 | 29 | Contenedor de 3.0c sin montaje de control (K3) | V (U+RD) | ACT, RCA, CA, SMK |
 | 30 | Residuales; disable ×100 concurrente | V (U) | ACT, RCA, `service.test.ts`, CA. Desde #469 el ×100 comprueba D1 (`requested`, hash), la revocación y el siguiente spawn sin token; los archivos los comprueban las ventanas deterministas de A1 |
 | 31 | Compatibilidad de `/etc/st-control` con el CLI real | P (RC+U) | CSM con 2.1.308. **PIL:** el CLI del workspace del piloto |
 | 32 | Correspondencia; suspendido restaurado; ambos NULL tras la emergencia | P (U) | ACT, CA. Falta: "ambos NULL nunca se reautorizan" (A1) |
-| 33 | `effectiveAfterRestart` por condición | P (U) | CA, RCA, ACT. Falta: el "efectivo tras el start" de cada rama |
+| 33 | `effectiveAfterRestart` por condición | P (U+RC) | CA, RCA, ACT; AUD S5 (rama de conservación: efectivo tras el start). Falta: el "efectivo tras el start" de las demás ramas |
 | 34 | Probe D7 | V (U) | CA, `dockerManager.capturePort.test.ts` |
-| 35 | Smoke de recreación con el CLI real (hash, `--resume`, git, secreto, puerto, eventos; variantes) | P (RD) | SMK: relay, `effective`, `O` borrado, D1, `~/.bash_history`. **NV:** el resto (y C1) |
-| 36 | (a) Relay no disponible ⇒ `effective:false`, 0 "hook error" | P (U) | RCA, CA, E2, `conversation/relay.test.ts`. **NV:** la parte con el CLI real |
-| 37 | (b) Caída del relay | P | CA (U); CSM fase 6 (reinicio, `gap relay_restart`). Falta: la cota de 3 s; los "hook error" (hoy es una nota, no una comprobación) |
+| 35 | Smoke de recreación con el CLI real (hash, `--resume`, git, secreto, puerto, eventos; variantes) | V (RC), D1 simulado | SMK; AUD S1a (CLI interactivo, `--resume` con continuidad, transcripts por metadatos, preservación por huellas), S1 (hash, git, secreto, puertos, dispatcher, eventos), S2, S8 (variantes). C1 corregido en #469. **PIL:** con D1 real |
+| 36 | (a) Relay no disponible ⇒ `effective:false`, 0 "hook error" | V (U+RC) | RCA, CA, E2, `conversation/relay.test.ts`; AUD S3; CSM Phase 12a (0 "hook error", 0 peticiones) |
+| 37 | (b) Caída del relay | V (U+RC) | CA; CSM fase 6 y Phase 12b; AUD S4: cota de 3 s absoluta desde el kill (1274 ms) y "hook error" acotados, 0 en el turno siguiente |
 | 38 | Prueba manual documentada | PIL | — |
 | 39 | DEPLOYMENT.md y session-image/README.md actualizados | Hecho (docs) | Con las salvedades de A3 y A7 |
