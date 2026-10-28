@@ -28,9 +28,10 @@ separados de los bloqueantes, y #465–#467 son decisiones del responsable. La a
 cierra ni se avanza al piloto hasta el dictamen de Work.
 
 **Estado al 2026-10-28:** A7 corregido en #470 (`a81ecc0`). A9 (§1), hallado por el smoke S1a,
-corregido en #473 (`5d8bbff`, con GO de Work). La ampliación de smokes (#471) tiene la matriz
-completa en verde sobre `main` con #473 (§10) y espera el GO incremental de Work. Tras ese GO se pide
-a Work el dictamen integral final, con los bloqueos que queden para el piloto identificados.
+corregido en #473 (`5d8bbff`, con GO de Work). La ampliación de smokes, #471, mergeada como
+`dd1b941` (GO de Work sobre `1077873`, el mismo árbol) con la matriz completa en verde (§10).
+**Se pide a Work el dictamen integral final (GO / CHANGES REQUIRED); el resumen para ese dictamen
+está en §12.**
 
 ## 1. Defectos de implementación
 
@@ -436,6 +437,15 @@ para tener un transcript (una sesión interactiva corta) y se detiene.
        camino de éxito y en el de fallo), así que, junto con `status:"running"`, prueba que terminó
        bien.
 
+   **La evidencia tiene que ser de la ejecución actual.** El bootstrap solo se lanza en
+   `POST /api/sessions` (`routes/sessions.ts`, `runAsyncBootstrap`): ni `start` ni la recreación lo
+   repiten, así que una sesión tiene a lo sumo una ejecución, y una sesión nueva del piloto no puede
+   mostrar el log de otra. Para no confundirla con un bootstrap anterior, se anotan juntos el
+   `sessionId` y el `createdAt` de la respuesta del create (con su `bootstrapping`), y el log se lee
+   de ese mismo `sessionId`. Como `persistLog` es best-effort, un `log: null` solo prueba "no hubo
+   bootstrap" si además la configuración no tiene etapas y el create no devolvió
+   `bootstrapping: true`; con etapas configuradas y `log: null`, no se recrea.
+
    Sin esas evidencias no se detiene ni se recrea. Una sesión `failed` no se usa para el piloto.
 4. `GET …/recreate` → `recreatable:true`, `blockers:[]`, `captureAfter:true`; anotar
    `currentImageId`.
@@ -493,9 +503,9 @@ antes de esa etapa. Ninguno se implementa sin revisión y autorización.
 
 | Pendiente | ¿Bloquea el piloto? | Por qué | Cuándo |
 | --- | --- | --- | --- |
-| A9 — una sesión que usó el CLI no es recreable (`layer-tmp`, `layer-home`) | **Sí** | El piloto de §7 usa el CLI y recrea; sin la corrección, la recreación queda bloqueada | **Corregido:** #473 (`5d8bbff`); S1a de #471 en verde (run 40709156468). Pendiente: GO de Work sobre #471 |
+| A9 — una sesión que usó el CLI no es recreable (`layer-tmp`, `layer-home`) | **Sí** | El piloto de §7 usa el CLI y recrea; sin la corrección, la recreación queda bloqueada | **Corregido:** #473 (`5d8bbff`); S1a de #471 en verde (run 40709156468, `dd1b941`) |
 | A7 — DEPLOYMENT.md desactualizado (sección de conversación en términos de 3.0c, rollback solo hasta 3.0b, pérdidas del procedimiento de emergencia) | **Sí** | Es el documento que se sigue al desplegar; con texto obsoleto el operador podría actuar mal en las etapas 0 a 2 | **Corregido:** #470 (`a81ecc0`) |
-| Ampliación de smokes (§10) | **Sí** | Work: los huecos de smoke se cierran con evidencia antes del piloto, y lo que corre en CI no espera al despliegue | **Implementada:** #471, matriz completa en verde (§10). Pendiente: GO de Work |
+| Ampliación de smokes (§10) | **Sí** | Work: los huecos de smoke se cierran con evidencia antes del piloto, y lo que corre en CI no espera al despliegue | **Cerrada:** #471 (`dd1b941`), matriz completa en verde (§10) |
 | A4 — `PATH` con el directorio del usuario primero | No | Solo afecta a la propia sesión del usuario; en el piloto, el usuario es el responsable, en una sesión descartable | Antes de la etapa 3 (sesiones de otros usuarios) |
 | A5 — `failSession` fuera del lock | No, con una precondición verificable del piloto: bootstrap terminado antes de detener y recrear (§7, comprobación 3) | En el piloto, la sesión se crea, se usa y se detiene antes de recrearla, y su bootstrap terminado se comprueba con evidencia | Antes de la etapa 3; mover la escritura dentro del lock es una corrección aislada |
 | A6 — `PATCH /resources` sin lock | No, con una restricción operativa que se mantiene: prohibido editar recursos durante la recreación | Solo actúa si un admin edita los límites mientras recrea | Antes de recrear fuera del piloto |
@@ -505,9 +515,10 @@ antes de esa etapa. Ninguno se implementa sin revisión y autorización.
 | #467 — impedir la recreación con un bootstrap en vuelo, con evidencia positiva de fin (**aprobada**) | No, con la precondición verificable del piloto (§7, comprobación 3) | El mismo motivo que A5 | Implementación aparte, antes de la etapa 3 |
 | #463 — fallo aislado de tests del motor (dos apariciones, sin reproducir) | No bloquea por sí mismo; se mantiene abierto | Sin diagnóstico, no se le atribuye causa. En cada nueva aparición se conservan stdout, stderr, el código de salida y el contexto completo (SHA, comando, número de ejecución, entorno) | Abierto |
 
-## 10. Ampliación de smokes (implementada en #471; pendiente de GO de Work)
+## 10. Ampliación de smokes (implementada en #471, mergeada como `dd1b941`)
 
-**Resultado verificado:** #471 sobre `main` `5d8bbff` (con #473), head `1077873`, run de Session Image
+**Resultado verificado:** #471 sobre `main` `5d8bbff` (con #473), head `1077873` aprobado por Work y
+mergeado como `dd1b941` (mismo árbol), run de Session Image
 **40709156468 en verde**: 110 comprobaciones en 10 escenarios (`recreation audit smoke: all ok`),
 más `recreation smoke: all ok` (#473), `CONVERSATION SMOKE TEST PASSED` (Phase 12) y
 `SMOKE TEST PASSED`. El run anterior (40706623966, `79ab63b`) falló en una comprobación de S8 por una
@@ -578,10 +589,8 @@ piloto, y los criterios de 48 h de §7.
 1. #469 mergeado, con E1–E6, A1–A3 y C1–C3 cerrados. **Hecho:** `d5faa1a`.
 2. A7 corregido (PR de documentación revisado por Work). **Hecho:** #470, `a81ecc0`.
 2b. A9 corregido (#473) con GO de Work, y la matriz completa de #471 en verde sobre una base que lo
-    incluya (S1a incluido). **#473 hecho** (`5d8bbff`); **#471 en verde** (run 40709156468),
-    pendiente de GO de Work.
-3. Los smokes de §10 en CI, con evidencia verde y revisados por Work. **En verde**; pendiente de GO
-   de Work sobre #471.
+    incluya (S1a incluido). **Hecho:** #473 (`5d8bbff`) y #471 (`dd1b941`).
+3. Los smokes de §10 en CI, con evidencia verde y revisados por Work. **Hecho:** #471, GO de Work.
 4. Cada pendiente de §9 con decisión o plan aceptado por Work y el responsable, y las restricciones
    operativas del piloto escritas en §7.
 5. Dictamen integral GO de Work sobre este documento.
@@ -597,6 +606,63 @@ piloto, y los criterios de 48 h de §7.
 
 Con eso se podría pedir autorización para las etapas 0 y 1 (§6). El piloto (etapa 2) requiere
 además una autorización propia.
+
+## 12. Resumen para el dictamen integral final
+
+Base: `main` en `dd1b941`. Lo que se pide a Work: **GO / CHANGES REQUIRED de 3.0d**, y en concreto si
+queda algún bloqueante para el **despliegue coordinado** (etapas 0 y 1, §6) y para el **piloto
+descartable** (etapa 2, §7). Nada de esto autoriza por sí mismo el despliegue ni el piloto.
+
+**Cerrado.**
+
+- Defectos A1, A1.1, A1.1a, A1.1b, A1.2, A2, A3 y contrato C1–C3: #469 (`d5faa1a`).
+- **A7** (DEPLOYMENT.md): #470 (`a81ecc0`).
+- **A9** (CLI usado ⇒ no recreable): #473 (`5d8bbff`). Excepción exacta en `/tmp` y en HOME solo para
+  `~/.local{,/share,/share/applications}` y el `.desktop` de 290 bytes fijado (§1, A9).
+- **Smokes** (§10): #471 (`dd1b941`), **110 comprobaciones en 10 escenarios** en verde (run
+  40709156468), más `recreation smoke` (#473) y Phase 12.
+
+**Límites de lo simulado** (§10): D1 es un archivo JSON por sesión; el modelo es
+`mock-anthropic.mjs`; las sentencias D1 del CLI de emergencia van a un stub; la ruta `PATCH` y su lock
+solo los cubren tests unitarios. Quedan para el piloto: D1 real, el modelo real, la ruta HTTP real
+y el CLI del workspace del piloto (anexo A, filas marcadas **PIL**).
+
+**D8 ante SIGKILL y efectos del proceso anterior** (comprobación de cierre del responsable):
+
+- Probado en S2 (los dos cortes): el proceso backend muere por SIGKILL (se afirma la señal); el
+  proceso nuevo deja el intento `uncertain` + `orphanedAt`, la sesión rechaza start/stop/delete con
+  `recreate-unresolved`, la pasada de arranque deja el `-old-` tal cual, `O` no se elimina y nada se
+  resuelve.
+- **Por construcción, no por observación prolongada:** tras la muerte, la ejecución anterior solo
+  puede producir dos clases de efectos: (a) una petición a dockerd ya enviada, que dockerd termina
+  (p. ej. un rename o un create), y (b) un exec ya iniciado en el contenedor, acotado porque
+  `recreateExec` lo envuelve en `timeout -k 2 <s>` dentro del contenedor. Las escrituras de archivos
+  y de D1 las hace el propio proceso y mueren con él. Ninguno de esos efectos lo interpreta el
+  backend nuevo: la sesión queda congelada por D8 y la recuperación manual, que aún no existe, tendrá
+  que observar el estado después de esas cotas. S2 no comprueba con el tiempo que no aparezca un
+  efecto tardío; se pide a Work que valore si esa garantía por construcción es suficiente para el
+  piloto.
+
+**Bootstrap terminado** (comprobación de cierre del responsable): restricción del piloto en §7,
+comprobación 3, con evidencia de la ejecución actual (un único bootstrap por sesión, solo en el
+create; `sessionId` y `createdAt` anotados; `log: null` solo es prueba sin etapas configuradas).
+
+**Restricciones operativas que se mantienen** (no bloquean el piloto tal como está aprobado, §9):
+
+- A4 (`PATH`): solo afecta a la propia sesión; el piloto es del responsable.
+- A5 (`failSession` fuera del lock): bootstrap terminado y verificado antes de detener y recrear.
+- A6 (`PATCH /resources` sin lock): prohibido editar recursos durante la recreación.
+- A8: redacción; seguimiento.
+- D8 fail-closed; CLI fijado en 2.1.308 (`DISABLE_AUTOUPDATER=1`, comprobado antes y después); un
+  solo backend; solo una sesión nueva y descartable.
+
+**Decisiones aprobadas, implementación antes de la etapa 3:** #465 (auditoría fail-closed del
+enable ajeno), #466 (allowlist del CLI en el `PATCH`), #467 (bloquear la recreación con un bootstrap
+en vuelo, con evidencia positiva).
+
+**Seguimientos independientes, no bloqueantes:** #463 (fallo aislado de tests del motor, abierto,
+sin causa atribuida), #472 (documentación), #474 (P3: aserciones y código de salida del script de
+evidencia), #475 (P3: S7 con una petición real rechazada por revocación y su mutación).
 
 ## Anexo A. Trazabilidad de §10 "3.0d activación"
 
