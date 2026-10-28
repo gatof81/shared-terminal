@@ -67,7 +67,13 @@ let list: ListState = { status: "idle" };
 let selectedCid: string | null = null;
 let threadStatus: "idle" | "loading" | "loaded" | "error" = "idle";
 let threadError = "";
-let loadingOlder = false;
+/**
+ * The thread (`threadGen`) whose "Load earlier" request is in flight, if
+ * any. Keyed by thread, not a plain flag: a request still pending for A
+ * must neither block B's pagination nor be cleared by B.
+ */
+let loadingOlderGen: number | null = null;
+const loadingOlder = () => loadingOlderGen !== null && loadingOlderGen === threadGen;
 const window_ = new EventWindow();
 let socket: ConversationSocket | null = null;
 let liveConnected = false;
@@ -128,7 +134,7 @@ function resetState(sessionId: string | null): void {
 	selectedCid = null;
 	threadStatus = "idle";
 	threadError = "";
-	loadingOlder = false;
+	loadingOlderGen = null;
 	window_.reset();
 	liveStatus = null;
 	mobilePane = "list";
@@ -214,9 +220,9 @@ async function loadOlder(): Promise<void> {
 	const sid = stateSessionId;
 	const cid = selectedCid;
 	const first = window_.firstSeq();
-	if (sid === null || cid === null || first === null || loadingOlder) return;
+	if (sid === null || cid === null || first === null || loadingOlder()) return;
 	const gen = threadGen;
-	loadingOlder = true;
+	loadingOlderGen = gen;
 	renderAll();
 	// Keep the reader's place: measure from the bottom, restore after.
 	const fromBottom = threadScroller()?.scrollHeight ?? 0;
@@ -229,7 +235,7 @@ async function loadOlder(): Promise<void> {
 		if (gen === threadGen)
 			showToast(`Could not load earlier events: ${(err as Error).message}`, true);
 	} finally {
-		if (gen === threadGen) loadingOlder = false;
+		if (loadingOlderGen === gen) loadingOlderGen = null;
 	}
 	if (gen !== threadGen) return;
 	renderAll();
@@ -457,7 +463,7 @@ function renderThread(opts: { stick: boolean }): void {
 	if (window_.hasOlder) {
 		nodes.push(
 			button(
-				loadingOlder ? "Loading…" : "Load earlier",
+				loadingOlder() ? "Loading…" : "Load earlier",
 				"files-btn chat-older",
 				() => void loadOlder(),
 			),

@@ -316,6 +316,55 @@ describe("Chat overlay", () => {
 		expect(buttonNamed($("chat-thread"), "Load earlier")).toBeUndefined();
 	});
 
+	it("a Load earlier still pending for A neither blocks B's nor touches B's thread (C4)", async () => {
+		api.fetchConversations.mockResolvedValue({
+			capture: { requested: true, effective: true, effectiveAfterRestart: true },
+			conversations: [conv(), conv({ sessionId: "c2", title: "Second" })],
+		});
+		await openChat();
+		seq = 100;
+		await openThread([ev("user_prompt", { prompt: "A late" })], true);
+		// A's older page stays pending.
+		let resolveA: (v: unknown) => void = () => {};
+		api.fetchConversationEvents.mockReturnValueOnce(new Promise((r) => (resolveA = r)));
+		buttonNamed($("chat-thread"), "Load earlier")?.click();
+		await flush();
+		expect(buttonNamed($("chat-thread"), "Loading…")).toBeDefined();
+		// Open B while A's request is in flight.
+		seq = 300;
+		api.fetchConversationEvents.mockResolvedValueOnce({
+			events: [ev("user_prompt", { prompt: "B late" })],
+			hasMore: true,
+			firstRetainedSeq: 1,
+		});
+		document.querySelectorAll<HTMLButtonElement>(".chat-conv-row")[1]?.click();
+		await flush();
+		expect(api.fetchConversationEvents).toHaveBeenLastCalledWith("s1", "c2", { limit: 200 });
+		// A completes now: its page must not land in B, nor clear B's state.
+		resolveA({
+			events: [{ ...ev("user_prompt", { prompt: "A early" }), seq: 50 }],
+			hasMore: false,
+			firstRetainedSeq: 1,
+		});
+		await flush();
+		const texts = () =>
+			[...$("chat-thread").querySelectorAll(".chat-user .chat-text")].map((n) => n.textContent);
+		expect(texts()).toEqual(["B late"]);
+		// B can load its own earlier events.
+		api.fetchConversationEvents.mockResolvedValueOnce({
+			events: [{ ...ev("user_prompt", { prompt: "B early" }), seq: 250 }],
+			hasMore: false,
+			firstRetainedSeq: 1,
+		});
+		buttonNamed($("chat-thread"), "Load earlier")?.click();
+		await flush();
+		expect(api.fetchConversationEvents).toHaveBeenLastCalledWith("s1", "c2", {
+			before: 301,
+			limit: 200,
+		});
+		expect(texts()).toEqual(["B early", "B late"]);
+	});
+
 	it("mobile: one pane at a time, with a back button to the list", async () => {
 		mainState.mobile = true;
 		await openChat();

@@ -4,9 +4,12 @@
  * replay + live with no loss and no duplicate while events keep landing,
  * `gap history_rotated`, the slow-client budgets (replay ⇒ 1013 with at
  * most 2 MiB + the largest frame in flight; live ⇒ one `resync`), and the
- * socket/subscription caps.
+ * socket/subscription caps. The invalidation and replay-queue tests drive a
+ * fake socket whose backpressure wait is a barrier the test releases, so
+ * the interleavings they pin are deterministic, not timing-dependent.
  */
 
+import { EventEmitter } from "node:events";
 import { promises as fs } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -35,6 +38,36 @@ const pending = (i: number, data: Record<string, unknown> = {}): PendingEvent =>
 	data: { prompt: `hello ${i}`, ...data },
 });
 
+function reader(): ConstructorParameters<typeof ConversationWsHub>[0] {
+	return {
+		summaries: async (st: string) => {
+			const ids = await store.listConversationIds(st);
+			const out = [];
+			for (const cid of ids) {
+				const idx = await store.peekIndex(st, cid);
+				if (idx)
+					out.push({
+						sessionId: cid,
+						lastSeq: idx.lastSeq,
+						firstRetainedSeq: idx.firstRetainedSeq,
+						status: idx.state.status,
+					});
+			}
+			return out as never;
+		},
+		conversationFile: async (st: string, cid: string) => {
+			if (!(await store.exists(st, cid))) return null;
+			const index = await store.peekIndex(st, cid);
+			return index ? { index, eventsFile: store.eventsPath(st, cid) } : null;
+		},
+		residentState: (st: string, cid: string) => store.getResidentIndex(st, cid)?.state ?? null,
+		onPersistedEvent: (l) => store.onEvent(l),
+		noteWsResync: () => {
+			resyncs++;
+		},
+	};
+}
+
 async function start(limits: Partial<ConversationWsLimits> = {}, storeLimits = {}) {
 	store = new ConversationStore({
 		workspaceRoot: root,
@@ -46,36 +79,7 @@ async function start(limits: Partial<ConversationWsLimits> = {}, storeLimits = {
 		},
 	});
 	resyncs = 0;
-	hub = new ConversationWsHub(
-		{
-			summaries: async (st: string) => {
-				const ids = await store.listConversationIds(st);
-				const out = [];
-				for (const cid of ids) {
-					const idx = await store.peekIndex(st, cid);
-					if (idx)
-						out.push({
-							sessionId: cid,
-							lastSeq: idx.lastSeq,
-							firstRetainedSeq: idx.firstRetainedSeq,
-							status: idx.state.status,
-						});
-				}
-				return out as never;
-			},
-			conversationFile: async (st: string, cid: string) => {
-				if (!(await store.exists(st, cid))) return null;
-				const index = await store.peekIndex(st, cid);
-				return index ? { index, eventsFile: store.eventsPath(st, cid) } : null;
-			},
-			residentState: (st: string, cid: string) => store.getResidentIndex(st, cid)?.state ?? null,
-			onPersistedEvent: (l) => store.onEvent(l),
-			noteWsResync: () => {
-				resyncs++;
-			},
-		},
-		{ drainPollMs: 5, ...limits },
-	);
+	hub = new ConversationWsHub(reader(), { drainPollMs: 5, ...limits });
 	serverSockets = [];
 	const wss = new WebSocketServer({ noServer: true });
 	server = http.createServer();
@@ -205,6 +209,45 @@ describe("replay + live", () => {
 		expect(seqs(c.events())).toEqual(range(first, last));
 	});
 
+	it("structurally invalid JSON frames answer bad-request and never break the socket or the server (C1)", async () => {
+		await start();
+		await store.open("s1", "c1");
+		store.enqueue("s1", "c1", pending(1));
+		await store.flush("s1", "c1");
+		const c = await connect();
+		const bad = [
+			"null",
+			"[]",
+			'[{"type":"subscribe","conv":"c1"}]',
+			"42",
+			'"subscribe"',
+			"true",
+			"{}",
+			'{"type":"subscribe"}',
+			'{"type":"subscribe","conv":5}',
+			'{"type":"subscribe","conv":""}',
+			'{"type":"subscribe","conv":"c1","after":"7"}',
+			'{"type":"subscribe","conv":"c1","after":-1}',
+			'{"type":"subscribe","conv":"c1","after":1.5}',
+			'{"type":"unsubscribe"}',
+			'{"type":null,"conv":null}',
+		];
+		for (const b of bad) c.ws.send(b);
+		await c.waitFor(() => c.frames.filter((f) => f.type === "error").length >= bad.length);
+		expect(c.frames.filter((f) => f.type === "error").map((f) => f.code)).toEqual(
+			bad.map(() => "bad-request"),
+		);
+		expect(c.events()).toEqual([]);
+		// The same socket still serves a valid subscribe …
+		c.send({ type: "subscribe", conv: "c1", after: 0 });
+		await c.waitFor(() => c.events().length === 1);
+		// … and the server still accepts and serves new connections.
+		const c2 = await connect();
+		c2.send({ type: "subscribe", conv: "c1", after: 0 });
+		await c2.waitFor(() => c2.events().length === 1);
+		expect(c.ws.readyState).toBe(WebSocket.OPEN);
+	});
+
 	it("an unknown conversation answers error not-found; bad frames answer bad-request", async () => {
 		await start();
 		const c = await connect();
@@ -332,4 +375,201 @@ describe("caps", () => {
 		c.send({ type: "subscribe", conv: "c9", after: 0 });
 		await c.waitFor(() => c.events("c9").length === 1);
 	});
+});
+
+// ── Fake socket + barrier wait ───────────────────────────────────────────
+
+class FakeWs extends EventEmitter {
+	readonly OPEN = 1;
+	readyState = 1;
+	bufferedAmount = 0;
+	/** When false, sends never accumulate in the buffer (a fast client). */
+	holding = true;
+	frames: Array<Record<string, unknown>> = [];
+	send(d: string) {
+		this.frames.push(JSON.parse(d));
+		if (this.holding) this.bufferedAmount += Buffer.byteLength(d);
+	}
+	close() {
+		this.readyState = 3;
+		this.emit("close");
+	}
+	client(m: object) {
+		this.emit("message", Buffer.from(JSON.stringify(m)), false);
+	}
+	events(from = 0) {
+		return this.frames
+			.slice(from)
+			.filter((f) => f.type === "event")
+			.map((f) => (f.event as PersistedEvent).seq);
+	}
+}
+
+/** Every backpressure wait parks here until the test releases it. */
+function barrier() {
+	const parked: Array<() => void> = [];
+	return {
+		sleep: () => new Promise<void>((r) => parked.push(r)),
+		parked,
+		async until(n: number) {
+			const end = Date.now() + 5000;
+			while (parked.length < n) {
+				if (Date.now() > end) throw new Error(`timed out waiting for ${n} parked waits`);
+				await new Promise((r) => setImmediate(r));
+			}
+		},
+		/** Release the waits parked NOW one at a time, oldest first. */
+		async releaseAll() {
+			const n = parked.length;
+			for (let k = 0; k < n; k++) {
+				parked.shift()?.();
+				for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+			}
+		},
+	};
+}
+
+async function frameBytes(cid: string): Promise<number[]> {
+	const lines = (await fs.readFile(store.eventsPath("s1", cid), "utf8"))
+		.split("\n")
+		.filter(Boolean);
+	return lines.map((l) =>
+		Buffer.byteLength(JSON.stringify({ type: "event", conv: cid, event: JSON.parse(l) })),
+	);
+}
+
+async function settle(ms = 30) {
+	await new Promise((r) => setTimeout(r, ms));
+}
+
+describe("subscription invalidation (C2)", () => {
+	async function blockedOnFifth() {
+		await start();
+		await store.open("s1", "c1");
+		for (let i = 1; i <= 5; i++)
+			store.enqueue("s1", "c1", pending(i, { prompt: "x".repeat(1000) }));
+		await store.flush("s1", "c1");
+		const size = (await frameBytes("c1"))[0];
+		const b = barrier();
+		// Room for four frames: the replay sends 1..4 and parks on 5.
+		const h = new ConversationWsHub(reader(), { replayBudget: Math.floor(size * 4.5) }, b);
+		const ws = new FakeWs();
+		h.serve(ws as unknown as WebSocket, "s1", "u1");
+		await settle();
+		ws.bufferedAmount = 0; // the hello frame is not part of the budget under test
+		ws.client({ type: "subscribe", conv: "c1", after: 0 });
+		await b.until(1);
+		expect(ws.events()).toEqual([1, 2, 3, 4]);
+		return { b, ws, h };
+	}
+
+	it("a subscribe that replaces a parked replay: the old one never sends again (no 5,1,2,3,4,5)", async () => {
+		const { b, ws } = await blockedOnFifth();
+		// The client re-subscribes from 0 while the first replay is parked
+		// before frame 5; the new replay parks before its frame 1.
+		ws.client({ type: "subscribe", conv: "c1", after: 0 });
+		await b.until(2);
+		const mark = ws.frames.length;
+		// Drain, then wake the OLD wait first — the order that produced
+		// 5,1,2,3,4,5 when the old replay still sent after its wait.
+		ws.bufferedAmount = 0;
+		await b.releaseAll();
+		await b.until(1); // the new replay sent 1..4 and parks on 5
+		ws.bufferedAmount = 0;
+		await b.releaseAll();
+		await settle();
+		expect(ws.events(mark)).toEqual([1, 2, 3, 4, 5]);
+		// Live continues from 5 on the new subscription only, once each.
+		ws.holding = false;
+		store.enqueue("s1", "c1", pending(6));
+		await store.flush("s1", "c1");
+		await settle();
+		expect(ws.events(mark)).toEqual([1, 2, 3, 4, 5, 6]);
+	});
+
+	it("an unsubscribe while the replay is parked: nothing more is sent, live included", async () => {
+		const { b, ws, h } = await blockedOnFifth();
+		const mark = ws.frames.length;
+		ws.client({ type: "unsubscribe", conv: "c1" });
+		ws.bufferedAmount = 0;
+		await b.releaseAll();
+		store.enqueue("s1", "c1", pending(6));
+		await store.flush("s1", "c1");
+		await settle();
+		expect(ws.frames.slice(mark)).toEqual([]);
+		expect(h.queuedBytes()).toBe(0);
+	});
+
+	it("a pending resync of a replaced subscription is never sent", async () => {
+		await start();
+		await store.open("s1", "c1");
+		store.enqueue("s1", "c1", pending(1));
+		await store.flush("s1", "c1");
+		const b = barrier();
+		const h = new ConversationWsHub(reader(), { liveBudget: 4000, replayBudget: 2000 }, b);
+		const ws = new FakeWs();
+		h.serve(ws as unknown as WebSocket, "s1", "u1");
+		ws.client({ type: "subscribe", conv: "c1", after: 0 });
+		await settle();
+		expect(ws.events()).toEqual([1]);
+		ws.bufferedAmount = 3000; // live over budget on the next event, resync parked
+		store.enqueue("s1", "c1", pending(2, { prompt: "y".repeat(2000) }));
+		await store.flush("s1", "c1");
+		await b.until(1);
+		ws.client({ type: "subscribe", conv: "c1", after: 1 });
+		const mark = ws.frames.length;
+		ws.bufferedAmount = 0;
+		ws.holding = false;
+		await b.releaseAll();
+		await settle();
+		expect(ws.frames.slice(mark).filter((f) => f.type === "resync")).toEqual([]);
+		expect(ws.events(mark)).toEqual([2]);
+	});
+});
+
+describe("replay queue budget (C3)", () => {
+	it("slow client + parked replay + large concurrent events: held bytes stay under the budget, one resync, re-subscribe is gapless", async () => {
+		await start({}, { fileBytes: 1 << 30 });
+		await store.open("s1", "c1");
+		for (let i = 1; i <= 3; i++) store.enqueue("s1", "c1", pending(i));
+		await store.flush("s1", "c1");
+		const b = barrier();
+		const queueBudget = 3 * MiB;
+		// replayBudget 1: every frame after the first waits for an empty buffer.
+		const counted = new ConversationWsHub(reader(), { replayBudget: 1, queueBudget }, b);
+		const ws = new FakeWs();
+		counted.serve(ws as unknown as WebSocket, "s1", "u1");
+		await settle();
+		ws.bufferedAmount = 0;
+		let peak = 0;
+		store.onEvent(() => {
+			peak = Math.max(peak, counted.queuedBytes());
+		});
+		ws.client({ type: "subscribe", conv: "c1", after: 0 });
+		await b.until(1); // sent 1, parked on 2
+		expect(ws.events()).toEqual([1]);
+		// Big events land while the replay is parked.
+		for (let i = 4; i <= 13; i++)
+			store.enqueue("s1", "c1", pending(i, { prompt: "z".repeat(MiB) }));
+		await store.flush("s1", "c1");
+		expect(peak).toBeGreaterThan(0);
+		expect(peak).toBeLessThanOrEqual(queueBudget);
+		expect(counted.queuedBytes()).toBe(0); // dropped on overflow
+		expect(resyncs).toBe(1);
+		// Drain: the parked replay stops, the resync goes out from the
+		// last seq really sent — nothing else.
+		ws.bufferedAmount = 0;
+		await b.releaseAll();
+		await settle();
+		const after1 = ws.frames.filter((f) => f.type === "event" || f.type === "resync");
+		expect(after1.map((f) => f.type)).toEqual(["event", "resync"]);
+		expect(after1[1]).toMatchObject({ conv: "c1", fromSeq: 1 });
+		// The client re-subscribes from the cursor: 2..13, once each.
+		ws.holding = false;
+		ws.bufferedAmount = 0;
+		const mark = ws.frames.length;
+		ws.client({ type: "subscribe", conv: "c1", after: 1 });
+		await settle(200);
+		expect([1, ...ws.events(mark)]).toEqual(range(1, 13));
+	}, 30_000);
 });
