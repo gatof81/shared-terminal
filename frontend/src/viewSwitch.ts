@@ -1,5 +1,5 @@
 /**
- * viewSwitch.ts — the per-session view selector: Terminal ⇄ Files ⇄ Git.
+ * viewSwitch.ts — the per-session view selector: Terminal ⇄ Files ⇄ Git ⇄ Chat.
  *
  * Owns the one piece of state the overlays share (which view is up) and
  * the mechanics that must be identical for every overlay:
@@ -20,7 +20,7 @@
  * the toolbar): its height varies — it wraps on narrow screens and is
  * hidden entirely on mobile while the chrome drawer is collapsed.
  *
- * Each overlay module (filesView.ts, gitView.ts) registers listeners
+ * Each overlay module (filesView.ts, gitView.ts, chatView.ts) registers listeners
  * here; this module imports neither, so it can't form a cycle with them.
  */
 
@@ -34,7 +34,7 @@ import {
 	updateChromeToggle,
 } from "./main.js";
 
-export type View = "terminal" | "files" | "git";
+export type View = "terminal" | "files" | "git" | "chat";
 
 // ── DOM ─────────────────────────────────────────────────────────────────────
 const terminalToolbar = document.getElementById("terminal-toolbar")!;
@@ -54,16 +54,26 @@ const buttons: Record<View, HTMLButtonElement> = {
 	terminal: document.getElementById("view-terminal-btn") as HTMLButtonElement,
 	files: document.getElementById("view-files-btn") as HTMLButtonElement,
 	git: document.getElementById("view-git-btn") as HTMLButtonElement,
+	chat: document.getElementById("view-chat-btn") as HTMLButtonElement,
 };
 const overlays: Record<Exclude<View, "terminal">, HTMLElement> = {
 	files: document.getElementById("files-view")!,
 	git: document.getElementById("git-view")!,
+	chat: document.getElementById("chat-view")!,
 };
 // Each overlay's own "‹ Terminal" button (mobile header).
 const toTerminalBtns = [
 	document.getElementById("files-to-terminal-btn"),
 	document.getElementById("git-to-terminal-btn"),
+	document.getElementById("chat-to-terminal-btn"),
 ].filter((b): b is HTMLButtonElement => b instanceof HTMLButtonElement);
+// Mobile bottom navigation (index.html #view-nav). Shown only while an
+// overlay is up: on the Terminal view the key bar owns the bottom edge and
+// the terminal's layout box must not change on a view switch, so the nav
+// never overlaps it. CSS hides the nav entirely on wide screens.
+const terminalArea = document.getElementById("terminal-area");
+const viewNav = document.getElementById("view-nav");
+const navButtons = [...(viewNav?.querySelectorAll<HTMLButtonElement>("button[data-view]") ?? [])];
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -84,9 +94,9 @@ export function isOverlayActive(): boolean {
 	return view !== "terminal";
 }
 
-/** Label for the mobile header pill: "Files" / "Git", or null for the terminal. */
+/** Label for the mobile header pill: "Files" / "Git" / "Chat", or null for the terminal. */
 export function overlayLabel(): string | null {
-	return view === "files" ? "Files" : view === "git" ? "Git" : null;
+	return view === "files" ? "Files" : view === "git" ? "Git" : view === "chat" ? "Chat" : null;
 }
 
 /** Fires after the view changed (not on a same-view re-select). */
@@ -153,6 +163,14 @@ function renderSwitch(): void {
 	for (const [name, btn] of Object.entries(buttons)) {
 		btn.setAttribute("aria-pressed", String(view === name));
 	}
+	const navOn = view !== "terminal" && !viewSwitch.hidden;
+	if (viewNav) viewNav.hidden = !navOn;
+	terminalArea?.classList.toggle("view-nav-on", navOn);
+	for (const b of navButtons) {
+		const name = b.dataset.view as View;
+		b.setAttribute("aria-pressed", String(view === name));
+		if (name === "terminal") b.disabled = buttons.terminal.disabled;
+	}
 }
 
 function terminalAvailable(): boolean {
@@ -176,6 +194,7 @@ export function syncSessionViews(): void {
 	const canTerminal = terminalAvailable();
 	buttons.terminal.disabled = !canTerminal;
 	for (const b of toTerminalBtns) b.disabled = !canTerminal;
+	renderSwitch();
 	const hint = canTerminal ? "" : "Start the session to use the terminal";
 	buttons.terminal.title = hint || "Show terminal";
 	for (const b of toTerminalBtns) b.title = hint || "Back to terminal";
@@ -185,7 +204,7 @@ export function syncSessionViews(): void {
 	for (const l of syncListeners) l();
 	if (!canTerminal) {
 		// No terminal to show: land on Files (works for stopped sessions).
-		// A user already on Files or Git stays where they are.
+		// A user already on Files, Git or Chat stays where they are.
 		if (view === "terminal") setView("files", { forced: true });
 	} else if (forced) {
 		setView("terminal");
@@ -200,7 +219,17 @@ export function showFilesOnly(): void {
 
 buttons.terminal.addEventListener("click", () => setView("terminal"));
 for (const b of toTerminalBtns) b.addEventListener("click", () => setView("terminal"));
-for (const name of ["files", "git"] as const) {
+for (const b of navButtons) {
+	b.addEventListener("click", () => {
+		const name = b.dataset.view as View;
+		if (name === "terminal") setView("terminal");
+		else {
+			setView(name);
+			if (isMobile()) setChromeOpen(false);
+		}
+	});
+}
+for (const name of ["files", "git", "chat"] as const) {
 	buttons[name].addEventListener("click", () => {
 		setView(name);
 		// Mobile: the toolbar lives in the chrome drawer — collapse it so

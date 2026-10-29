@@ -2,6 +2,8 @@
  * api.ts — REST client for the shared-terminal backend.
  */
 
+import type { ConversationEvent } from "./conversationModel.js";
+
 // VITE_API_URL should point to the backend (via Cloudflare Tunnel or localhost)
 // e.g. https://api.terminal.yourdomain.com
 const BACKEND_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
@@ -1571,6 +1573,198 @@ export async function fetchGitLog(
 ): Promise<GitCommit[]> {
 	const body = await (await gitFetch(sessionId, "log", dir ? { dir } : {}, signal)).json();
 	return body.commits;
+}
+
+// ── Conversations (Phase 3.1, docs/CONVERSATION.md §6) ──────────────────────
+
+export interface ConversationCapture {
+	requested: boolean;
+	effective: boolean;
+	effectiveAfterRestart: boolean;
+	requiresRecreate?: boolean;
+	pendingReasons?: string[];
+}
+
+export interface ConversationSummary {
+	sessionId: string;
+	kind: "unknown" | "interactive" | "headless" | "teammate";
+	title: string | null;
+	status: string;
+	statusEvidence: string;
+	statusAt: string;
+	tabId: string | null;
+	startedAt: string;
+	endedAt: string | null;
+	lastEventAt: string;
+	lastSeq: number;
+	firstRetainedSeq: number;
+	eventsCount: number;
+	gapsCount: number;
+	claudeVersion: string | null;
+	canSendInput: false;
+}
+
+export interface ConversationEventsPage {
+	events: ConversationEvent[];
+	hasMore: boolean;
+	firstRetainedSeq: number;
+}
+
+export interface ConversationList {
+	/** Null when the request asked to skip the capture check (`capture: false`). */
+	capture: ConversationCapture | null;
+	conversations: ConversationSummary[];
+}
+
+/**
+ * The session's conversations. `capture: false` skips the server's capture
+ * check — it costs a probe of the container's relay — so the list can be
+ * polled often without that cost; the first load and a manual refresh keep it.
+ */
+export async function fetchConversations(
+	sessionId: string,
+	opts: { capture?: boolean } = {},
+): Promise<ConversationList> {
+	const qs = opts.capture === false ? "?capture=0" : "";
+	const res = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}/conversations${qs}`);
+	if (!res.ok) throw new Error(await errorMessage(res));
+	return res.json();
+}
+
+export async function fetchConversationEvents(
+	sessionId: string,
+	cid: string,
+	opts: { before?: number; limit?: number } = {},
+): Promise<ConversationEventsPage> {
+	const qs = new URLSearchParams();
+	if (opts.before !== undefined) qs.set("before", String(opts.before));
+	qs.set("limit", String(opts.limit ?? 200));
+	const res = await apiFetch(
+		`/sessions/${encodeURIComponent(sessionId)}/conversations/${encodeURIComponent(cid)}/events?${qs}`,
+	);
+	if (!res.ok) throw new Error(await errorMessage(res));
+	return res.json();
+}
+
+/** One event, for "Copy report" when it is not in the mounted window. */
+export async function fetchConversationEvent(
+	sessionId: string,
+	cid: string,
+	seq: number,
+): Promise<ConversationEvent> {
+	const res = await apiFetch(
+		`/sessions/${encodeURIComponent(sessionId)}/conversations/${encodeURIComponent(cid)}/events/${seq}`,
+	);
+	if (!res.ok) throw new Error(await errorMessage(res));
+	return res.json();
+}
+
+async function errorMessage(res: Response): Promise<string> {
+	const body = await res.json().catch(() => ({}));
+	return typeof body.error === "string" ? body.error : `Request failed (${res.status})`;
+}
+
+export type ConversationServerFrame =
+	| {
+			type: "hello";
+			conversations: Array<{
+				cid: string;
+				lastSeq: number;
+				firstRetainedSeq: number;
+				status: string;
+			}>;
+	  }
+	| { type: "event"; conv: string; event: ConversationEvent }
+	| { type: "gap"; conv: string; reason: string; from: number; to: number }
+	| { type: "status"; conv: string; status: string; evidence: string; at: string }
+	| { type: "resync"; conv: string; fromSeq: number }
+	| { type: "error"; code: string; conv?: string };
+
+export interface ConversationSocket {
+	/** Follow one conversation from `after` (replaces any previous subscription). */
+	follow(cid: string, after: number): void;
+	close(): void;
+}
+
+/**
+ * The conversation WS (§6.1) for one ST session, following at most ONE
+ * conversation at a time (the one on screen). Reconnects with backoff
+ * and resumes from the last seq it delivered, so a 1013 ("not draining")
+ * or a dropped network loses nothing; a `resync` re-subscribes from its
+ * `fromSeq`. `onFrame` sees every frame; events are deduplicated by seq.
+ */
+export function openConversationSocket(
+	sessionId: string,
+	onFrame: (f: ConversationServerFrame) => void,
+	onState?: (connected: boolean) => void,
+): ConversationSocket {
+	let ws: WebSocket | null = null;
+	let closed = false;
+	let target: { cid: string; after: number } | null = null;
+	let backoff = 500;
+	let timer: ReturnType<typeof setTimeout> | null = null;
+
+	const subscribe = () => {
+		if (ws?.readyState === WebSocket.OPEN && target) {
+			ws.send(JSON.stringify({ type: "subscribe", conv: target.cid, after: target.after }));
+		}
+	};
+	const connect = () => {
+		if (closed) return;
+		const sock = new WebSocket(`${WS_BASE}/ws/conversation/${encodeURIComponent(sessionId)}`);
+		ws = sock;
+		sock.addEventListener("open", () => {
+			backoff = 500;
+			onState?.(true);
+			subscribe();
+		});
+		sock.addEventListener("message", (e) => {
+			let f: ConversationServerFrame;
+			try {
+				f = JSON.parse(e.data as string) as ConversationServerFrame;
+			} catch {
+				return;
+			}
+			if (f.type === "event" && target && f.conv === target.cid) {
+				if (f.event.seq <= target.after) return;
+				target.after = f.event.seq;
+			}
+			if (f.type === "resync" && target && f.conv === target.cid) {
+				target.after = f.fromSeq;
+				subscribe();
+			}
+			onFrame(f);
+		});
+		sock.addEventListener("close", (e) => {
+			if (ws !== sock) return;
+			ws = null;
+			onState?.(false);
+			// 1008: refused (not the owner, too many sockets) — don't hammer.
+			if (closed || e.code === 1008) return;
+			timer = setTimeout(connect, backoff);
+			backoff = Math.min(backoff * 2, 15_000);
+		});
+	};
+	connect();
+	return {
+		follow(cid, after) {
+			if (target && target.cid !== cid && ws?.readyState === WebSocket.OPEN) {
+				ws.send(JSON.stringify({ type: "unsubscribe", conv: target.cid }));
+			}
+			target = { cid, after };
+			subscribe();
+		},
+		close() {
+			closed = true;
+			if (timer) clearTimeout(timer);
+			try {
+				ws?.close(1000, "view closed");
+			} catch {
+				/* already closed */
+			}
+			ws = null;
+		},
+	};
 }
 
 // ── Fetch wrapper ───────────────────────────────────────────────────────────

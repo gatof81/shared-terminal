@@ -34,6 +34,7 @@ import {
 // else imports them by name, so the side-effect imports keep them in.
 import "./filesView.js";
 import "./gitView.js";
+import "./chatView.js";
 import { closeInvitesModal } from "./invites.js";
 import { initKeyBar, updateKeyBarVisibility } from "./keyBar.js";
 import {

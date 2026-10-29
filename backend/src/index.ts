@@ -25,6 +25,7 @@ import { parseAllowUsers } from "./conversation/allowUsers.js";
 import { createIngestHandler } from "./conversation/ingestRoute.js";
 import { ConversationService } from "./conversation/service.js";
 import { ConversationStore } from "./conversation/store.js";
+import { ConversationWsHub } from "./conversation/ws.js";
 import { migrateDb, validateD1Config } from "./db.js";
 import { DockerManager } from "./dockerManager.js";
 import { IdleSweeper, listRunningSessionIds } from "./idleSweeper.js";
@@ -507,8 +508,11 @@ server.on("upgrade", (req, socket, head) =>
 // racing teardown.
 const stopHeartbeat = startWsHeartbeat(wss, 30_000);
 
+// 3.1 — the Conversation WS (replay + live of persisted events, owner-only).
+const conversationWs = new ConversationWsHub(conversation);
+
 wss.on("connection", (ws, req) => {
-	handleWsConnection(ws, req, sessions, docker, bootstrapBroadcaster, idleSweeper);
+	handleWsConnection(ws, req, sessions, docker, bootstrapBroadcaster, idleSweeper, conversationWs);
 });
 
 // ── Startup ───────────────────────────────────────────────────────────────────
