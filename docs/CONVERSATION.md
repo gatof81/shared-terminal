@@ -1401,9 +1401,14 @@ Correlación de turno (`missing_prompt`): `lastPromptId` es el `prompt_id` del e
 **ingerido** y lo fija solo la ingesta, de forma sincrónica; la persistencia (asíncrona, por lotes)
 *MUST NOT* modificarlo —una escritura atrasada del turno anterior no puede retroceder la correlación—
 y registra aparte `persistedPromptId`, el del evento más reciente **en disco**. Al abrir una
-conversación, `lastPromptId` se reconstruye desde el archivo (`persistedPromptId` del snapshot más
-las líneas re-escaneadas), nunca desde la memoria del proceso anterior: la recuperación no afirma
-como persistido nada que no haya llegado a disco. Test obligatorio: la intercalación "p1 ingerido con
+conversación, `lastPromptId` se reconstruye desde el archivo, nunca desde la memoria del proceso
+anterior, en tres casos: (A) el snapshot trae un `persistedPromptId` ⇒ es la base; (B) trae `null`
+explícito ⇒ nada persistido llevaba `prompt_id`, y el `lastPromptId` vivo del snapshot **no** es un
+fallback (su escritura pudo fallar); (C) snapshot anterior a este campo ⇒ se lee el archivo completo
+hasta el `offset` y se ignora el valor vivo. En los tres, las líneas re-escaneadas tras el `offset`
+avanzan la correlación; sin archivo, (A) conserva lo registrado y (B)/(C) quedan en `null`. La
+recuperación no afirma como persistido nada que no haya llegado a disco; un `missing_prompt` real
+tras un reinicio no queda oculto por el estado vivo anterior. Test obligatorio: la intercalación "p1 ingerido con
 escritura pendiente → `internal_prompt` p2 ingerido → termina la escritura de p1 → `Stop` p2 con la
 escritura de p2 pendiente" no produce `gap`; y tras un reinicio el estado reconstruido correlaciona
 `Stop` p2 sin `gap`.

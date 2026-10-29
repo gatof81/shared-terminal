@@ -1117,4 +1117,133 @@ describe("§4.6 turn correlation survives late persistence and restarts (Work P2
 		);
 		expect([i5.lastPromptId, i5.persistedPromptId, i5.eventsCount]).toEqual(["p2", "p2", 4]);
 	});
+
+	it("Work's EIO reproduction: a prompt whose append failed is never recovered as persisted, and its real missing_prompt is not hidden", async () => {
+		session("s1");
+		// appendFile fails with EIO exactly once, for the line carrying prompt "lost".
+		let failed = false;
+		const eio: StoreFs = {
+			mkdir: (p, o) => fs.mkdir(p, o),
+			appendFile: async (p, data) => {
+				if (!failed && data.includes('"prompt_id":"lost"')) {
+					failed = true;
+					throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" });
+				}
+				await fs.appendFile(p, data);
+			},
+			writeFile: (p, d) => fs.writeFile(p, d),
+			rename: (a, b) => fs.rename(a, b),
+			rm: (p, o) => fs.rm(p, o),
+			stat: (p) => fs.stat(p),
+			readFile: (p, e) => fs.readFile(p, e),
+			readdir: (p) => fs.readdir(p),
+		};
+		const s1 = new ConversationStore({ workspaceRoot: root, now: () => now, fs: eio });
+		const svc1 = new ConversationService({
+			workspaceRoot: root,
+			enabled: true,
+			port: 3001,
+			store: s1,
+			now: () => now,
+		});
+		await svc1.ingest("s1", "%0", hook("SessionStart", { source: "startup" }));
+		await svc1.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "never written", prompt_id: "lost" }),
+		);
+		await s1.flush("s1", "c1");
+		await svc1.shutdown();
+		expect(failed).toBe(true);
+		const snap = JSON.parse(await fs.readFile(s1.indexPath("s1", "c1"), "utf8"));
+		// The dead process's snapshot: live says "lost", disk says nothing.
+		expect([snap.lastPromptId, snap.persistedPromptId]).toEqual(["lost", null]);
+		const onDisk = (await fs.readFile(s1.eventsPath("s1", "c1"), "utf8"))
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l).ev);
+		expect(onDisk).toEqual(["session_start"]);
+
+		// Case B: explicit null is a value — "lost" is not recovered.
+		const s2 = new ConversationStore({ workspaceRoot: root, now: () => now });
+		const i2 = await s2.open("s1", "c1");
+		expect([i2.lastPromptId, i2.persistedPromptId]).toEqual([null, null]);
+		// (7) The Stop for the lost prompt is a REAL missing_prompt after the restart.
+		const svc2 = new ConversationService({
+			workspaceRoot: root,
+			enabled: true,
+			port: 3001,
+			store: s2,
+			now: () => now,
+		});
+		await svc2.ingest(
+			"s1",
+			"%0",
+			hook("Stop", { prompt_id: "lost", stop_hook_active: false, last_assistant_message: "r" }),
+		);
+		await s2.flush("s1", "c1");
+		await svc2.shutdown();
+		const after = (await fs.readFile(s2.eventsPath("s1", "c1"), "utf8"))
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l) as { ev: string; data: Record<string, unknown> });
+		expect(after.map((e) => e.ev)).toEqual(["session_start", "gap", "turn_end"]);
+		expect(after[1].data).toEqual({ reason: "missing_prompt", prompt_id: "lost" });
+	});
+
+	it("Work's legacy reproduction: a snapshot without persistedPromptId never lends its live value; the file decides", async () => {
+		session("s1");
+		await service.ingest("s1", "%0", hook("SessionStart", { source: "startup" }));
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "first", prompt_id: "p1" }),
+		);
+		await service.ingest("s1", "%0", hook("UserPromptSubmit", { prompt: NOTICE, prompt_id: "p2" }));
+		await store.flush("s1", "c1");
+		await service.shutdown();
+		const indexPath = store.indexPath("s1", "c1");
+		const snap = JSON.parse(await fs.readFile(indexPath, "utf8"));
+		const legacy = (over: Record<string, unknown>) => {
+			const { persistedPromptId: _dropped, ...rest } = { ...snap, ...over };
+			return JSON.stringify(rest);
+		};
+		// Case C with a live value the file does not back: the file's last prompt wins.
+		await fs.writeFile(indexPath, legacy({ lastPromptId: "ghost" }));
+		const i1 = await new ConversationStore({ workspaceRoot: root, now: () => now }).open(
+			"s1",
+			"c1",
+		);
+		expect([i1.lastPromptId, i1.persistedPromptId, i1.eventsCount]).toEqual(["p2", "p2", 3]);
+		// Case C where the lines before the offset have no prompt at all: unknown (null), not "ghost".
+		const firstLine = (await fs.readFile(store.eventsPath("s1", "c1"), "utf8")).split("\n")[0];
+		await fs.writeFile(
+			indexPath,
+			legacy({ lastPromptId: "ghost", offset: Buffer.byteLength(`${firstLine}\n`) }),
+		);
+		const i2 = await new ConversationStore({ workspaceRoot: root, now: () => now }).open(
+			"s1",
+			"c1",
+		);
+		// The tail past that offset (p1, p2) is re-scanned and advances the correlation.
+		expect([i2.lastPromptId, i2.persistedPromptId]).toEqual(["p2", "p2"]);
+		await fs.writeFile(store.eventsPath("s1", "c1"), `${firstLine}\n`);
+		await fs.writeFile(
+			indexPath,
+			legacy({ lastPromptId: "ghost", offset: Buffer.byteLength(`${firstLine}\n`) }),
+		);
+		const i3 = await new ConversationStore({ workspaceRoot: root, now: () => now }).open(
+			"s1",
+			"c1",
+		);
+		expect([i3.lastPromptId, i3.persistedPromptId]).toEqual([null, null]);
+		// Case C with the file gone: nothing is proven.
+		await fs.rm(store.eventsPath("s1", "c1"));
+		await fs.writeFile(indexPath, legacy({ lastPromptId: "ghost" }));
+		const i4 = await new ConversationStore({ workspaceRoot: root, now: () => now }).open(
+			"s1",
+			"c1",
+		);
+		expect([i4.lastPromptId, i4.persistedPromptId]).toEqual([null, null]);
+	});
 });
