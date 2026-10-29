@@ -804,9 +804,11 @@ export class ConversationService {
 			if (index.kind === "unknown" && event.ev !== "session_start" && pane && !index.paneId) {
 				this.bindPane(index, pane);
 			}
-			// Synchronous bookkeeping for the §4.6 gap detectors: the store
-			// updates these too, but only when the event is PERSISTED (async),
-			// and the next hook can arrive before that.
+			// The §4.6 turn correlation is INGEST-ordered and set here only,
+			// synchronously: persistence is async and batched, so a write of
+			// the previous turn can complete after the next prompt arrived
+			// (Work P2-2) — the store records `persistedPromptId` instead and
+			// recovery rebuilds `lastPromptId` from the file.
 			if (event.promptId) index.lastPromptId = event.promptId;
 		});
 	}

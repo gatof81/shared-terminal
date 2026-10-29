@@ -112,7 +112,7 @@ import { hooksFilePath } from "./activation.js";
 import { generateIngestToken, hashIngestToken } from "./registry.js";
 import { writeGlobalRevocation, writeSessionRevocation } from "./revocation.js";
 import { ConversationService } from "./service.js";
-import { ConversationStore } from "./store.js";
+import { ConversationStore, type StoreFs } from "./store.js";
 
 let root: string;
 let store: ConversationStore;
@@ -902,5 +902,219 @@ describe("§4.2.1 the CLI's task notification is not the person's prompt", () =>
 			["user_prompt", null],
 		]);
 		expect(store.getResidentIndex("s1", "c1")?.title).toBe("real question");
+	});
+});
+
+describe("§4.6 turn correlation survives late persistence and restarts (Work P2-2)", () => {
+	// A StoreFs whose appendFile parks every write while `hold` is on until
+	// the test releases it, and reports when the write is really on disk:
+	// the deterministic barrier for "ingested, not yet persisted".
+	function gatedFs() {
+		const parked: Array<{ data: string; release: () => void; done: Promise<void> }> = [];
+		let hold = false;
+		return {
+			parked,
+			holdWrites(on: boolean) {
+				hold = on;
+			},
+			/** Wait (bounded) until `n` writes are parked. */
+			async parkedCount(n: number): Promise<number> {
+				for (let i = 0; i < 2000 && parked.length < n; i++) {
+					await new Promise((r) => setImmediate(r));
+				}
+				return parked.length;
+			},
+			/** Release the parked write whose line contains `needle`; resolves once it is ON DISK. */
+			release(needle: string): Promise<void> {
+				const i = parked.findIndex((p) => p.data.includes(needle));
+				if (i === -1) throw new Error(`no parked write containing ${needle}`);
+				const [p] = parked.splice(i, 1);
+				p.release();
+				// On disk, plus one turn for appendOne's bookkeeping after its await.
+				return p.done.then(() => new Promise((r) => setImmediate(r)));
+			},
+			async releaseAll(): Promise<void> {
+				const all = parked.splice(0);
+				for (const p of all) p.release();
+				await Promise.all(all.map((p) => p.done));
+				await new Promise((r) => setImmediate(r));
+			},
+			fs: {
+				mkdir: (p: string, o: { recursive: true }) => fs.mkdir(p, o),
+				appendFile: async (p: string, data: string) => {
+					if (!hold) return fs.appendFile(p, data);
+					let finish: () => void = () => {};
+					const done = new Promise<void>((r) => {
+						finish = r;
+					});
+					await new Promise<void>((release) => parked.push({ data, release, done }));
+					try {
+						await fs.appendFile(p, data);
+					} finally {
+						finish();
+					}
+				},
+				writeFile: (p: string, d: string) => fs.writeFile(p, d),
+				rename: (a: string, b: string) => fs.rename(a, b),
+				rm: (p: string, o: { force: true; recursive?: boolean }) => fs.rm(p, o),
+				stat: (p: string) => fs.stat(p),
+				readFile: (p: string, e: "utf8") => fs.readFile(p, e),
+				readdir: (p: string) => fs.readdir(p),
+			} as StoreFs,
+		};
+	}
+	const NOTICE = [
+		"<task-notification>",
+		"<task-id>afc95b2b37cb620a1</task-id>",
+		"<tool-use-id>toolu_01NrcdMjX7yQ2bK9vTz3Lm4W</tool-use-id>",
+		"<status>completed</status>",
+		"</task-notification>",
+	].join("\n");
+
+	it("Work's interleaving: p1 write pending → internal_prompt p2 → p1 lands → Stop p2 with p2 pending ⇒ no gap", async () => {
+		session("s1");
+		const gate = gatedFs();
+		const gstore = new ConversationStore({ workspaceRoot: root, now: () => now, fs: gate.fs });
+		const gservice = new ConversationService({
+			workspaceRoot: root,
+			enabled: true,
+			port: 3001,
+			store: gstore,
+			now: () => now,
+		});
+		try {
+			gate.holdWrites(true);
+			// 1. p1 ingested; its write parks.
+			await gservice.ingest(
+				"s1",
+				"%0",
+				hook("UserPromptSubmit", { prompt: "first", prompt_id: "p1" }),
+			);
+			expect(await gate.parkedCount(1)).toBe(1);
+			expect(gate.parked.map((p) => JSON.parse(p.data).prompt_id)).toEqual(["p1"]);
+			const index = gstore.getResidentIndex("s1", "c1");
+			expect([index?.lastPromptId, index?.persistedPromptId]).toEqual(["p1", null]);
+			// 2. internal_prompt p2 ingested: the live correlation moves to p2; its write queues behind p1.
+			await gservice.ingest(
+				"s1",
+				"%0",
+				hook("UserPromptSubmit", { prompt: NOTICE, prompt_id: "p2" }),
+			);
+			expect(index?.lastPromptId).toBe("p2");
+			// 3. p1's write completes — it must NOT take the correlation back.
+			await gate.release('"prompt_id":"p1"');
+			expect([index?.lastPromptId, index?.persistedPromptId]).toEqual(["p2", "p1"]);
+			// p2's write is now the parked one.
+			expect(await gate.parkedCount(1)).toBe(1);
+			expect(gate.parked.map((p) => JSON.parse(p.data).ev)).toEqual(["internal_prompt"]);
+			// 4. Stop p2 arrives while p2 is still not on disk.
+			await gservice.ingest(
+				"s1",
+				"%0",
+				hook("Stop", { prompt_id: "p2", stop_hook_active: false, last_assistant_message: "done" }),
+			);
+			// 5. Everything lands; the file holds the three events and no gap.
+			gate.holdWrites(false);
+			await gate.releaseAll();
+			await gstore.flush("s1", "c1");
+			const lines = (await fs.readFile(gstore.eventsPath("s1", "c1"), "utf8"))
+				.split("\n")
+				.filter(Boolean)
+				.map((l) => JSON.parse(l) as { ev: string; prompt_id: string | null });
+			expect(lines.map((l) => [l.ev, l.prompt_id])).toEqual([
+				["user_prompt", "p1"],
+				["internal_prompt", "p2"],
+				["turn_end", "p2"],
+			]);
+			expect([index?.lastPromptId, index?.persistedPromptId, index?.gapsCount]).toEqual([
+				"p2",
+				"p2",
+				0,
+			]);
+		} finally {
+			gate.holdWrites(false);
+			await gate.releaseAll();
+			await gservice.shutdown();
+		}
+	});
+
+	it("restart: the correlation is rebuilt from the file, never from the dead process's memory", async () => {
+		session("s1");
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "first", prompt_id: "p1" }),
+		);
+		await service.ingest("s1", "%0", hook("UserPromptSubmit", { prompt: NOTICE, prompt_id: "p2" }));
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("MessageDisplay", {
+				prompt_id: "p2",
+				message_id: "m",
+				index: 0,
+				final: true,
+				delta: "x",
+			}),
+		);
+		await store.flush("s1", "c1");
+		await service.shutdown();
+		const indexPath = store.indexPath("s1", "c1");
+
+		// (a) A clean snapshot: live = persisted = the newest prompt on disk.
+		const s2 = new ConversationStore({ workspaceRoot: root, now: () => now });
+		const i2 = await s2.open("s1", "c1");
+		expect([i2.lastPromptId, i2.persistedPromptId, i2.eventsCount]).toEqual(["p2", "p2", 3]);
+		// A new process's Stop p2 finds its prompt: no missing_prompt gap.
+		const svc2 = new ConversationService({
+			workspaceRoot: root,
+			enabled: true,
+			port: 3001,
+			store: s2,
+			now: () => now,
+		});
+		await svc2.ingest(
+			"s1",
+			"%0",
+			hook("Stop", { prompt_id: "p2", stop_hook_active: false, last_assistant_message: "r2" }),
+		);
+		await s2.flush("s1", "c1");
+		await svc2.shutdown();
+		const afterStop = (await fs.readFile(s2.eventsPath("s1", "c1"), "utf8"))
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l).ev);
+		expect(afterStop).toEqual(["user_prompt", "internal_prompt", "assistant_delta", "turn_end"]);
+
+		// (b) A snapshot whose LIVE value (p3) never reached the disk is not believed.
+		const snap = JSON.parse(await fs.readFile(indexPath, "utf8"));
+		await fs.writeFile(
+			indexPath,
+			JSON.stringify({ ...snap, lastPromptId: "p3", persistedPromptId: "p2" }),
+		);
+		const i3 = await new ConversationStore({ workspaceRoot: root, now: () => now }).open(
+			"s1",
+			"c1",
+		);
+		expect([i3.lastPromptId, i3.persistedPromptId]).toEqual(["p2", "p2"]);
+
+		// (c) A stale snapshot (offset behind the file): the re-scanned tail advances both.
+		await fs.writeFile(
+			indexPath,
+			JSON.stringify({ ...snap, lastPromptId: "p0", persistedPromptId: "p0", offset: 0 }),
+		);
+		const i4 = await new ConversationStore({ workspaceRoot: root, now: () => now }).open(
+			"s1",
+			"c1",
+		);
+		expect([i4.lastPromptId, i4.persistedPromptId, i4.eventsCount]).toEqual(["p2", "p2", 4]);
+
+		// (d) No snapshot at all: a full rebuild from the file.
+		await fs.rm(indexPath);
+		const i5 = await new ConversationStore({ workspaceRoot: root, now: () => now }).open(
+			"s1",
+			"c1",
+		);
+		expect([i5.lastPromptId, i5.persistedPromptId, i5.eventsCount]).toEqual(["p2", "p2", 4]);
 	});
 });

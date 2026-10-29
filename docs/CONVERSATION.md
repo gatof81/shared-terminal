@@ -1236,7 +1236,7 @@ sobre el prompt completo y antes de L1:
 
 | Clase | Criterio (*MUST*) | Persistencia | Vista |
 | --- | --- | --- | --- |
-| **interna verificada** | el prompt, sin espacios en los extremos, es **exactamente un** bloque `<task-notification>…</task-notification>`, y `<task-id>`, `<tool-use-id>` y `<status>` aparecen **una sola vez cada uno** con valores bien formados: `task-id` `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, `tool-use-id` `^toolu_[A-Za-z0-9]{8,64}$`, `status` `^[a-z][a-z_-]{0,31}$` | `internal_prompt` con los tres ids, `prompt_bytes` y sin texto | marcador "resultado entregado a Claude", correlacionado con la herramienta (`tool_use_id`) y con el subagente (`task_id` = `agent_id`, o el `tool_start` del `Agent` emparejado en orden con el `agent_start` siguiente); nunca burbuja "You"; el resultado se muestra una sola vez, en el agente |
+| **interna verificada** | el prompt, sin espacios en los extremos, es **exactamente un** bloque `<task-notification>…</task-notification>`; `<task-id>`, `<tool-use-id>` y `<status>` tienen **exactamente una apertura y un cierre cada uno**, en **ese orden** y sin solaparse (otros hijos como `output-file` o `summary` pueden intercalarse), sin cierres sobrantes ni aperturas repetidas en todo el bloque, con valores sin `<` y bien formados: `task-id` `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, `tool-use-id` `^toolu_[A-Za-z0-9]{8,64}$`, `status` `^[a-z][a-z_-]{0,31}$` | `internal_prompt` con los tres ids, `prompt_bytes` y sin texto | marcador "resultado entregado a Claude", correlacionado con la herramienta (`tool_use_id`) y con el subagente (`task_id` = `agent_id`, o el `tool_start` del `Agent` emparejado en orden con el `agent_start` siguiente); nunca burbuja "You"; el resultado se muestra una sola vez, en el agente |
 | **no verificable** | tiene la forma del bloque (empieza y termina con las etiquetas) pero falla alguna condición: ids ausentes, repetidos o malformados, dos bloques, bloque vacío | `user_prompt` con `origin: unverified` (texto bajo L1, como siempre) | rotulado "origen no verificado": ni "You" ni interno; no da título |
 | **humana** | todo lo demás: menciona las etiquetas en una frase, pega una notificación y añade texto, escribe solo una etiqueta… | `user_prompt` | "You" (o "inyectado" según `source`, §5.1) |
 
@@ -1396,6 +1396,17 @@ completo* en una ventana corta, que colapsa reintentos idénticos sin tocar even
 Hash = SHA-256 del JSON canónico del input del hook (claves ordenadas) **antes** de redactar.
 Ventana = 10 s desde la recepción del original; tamaño de la tabla por conversación ≤ 4096 entradas
 (LRU).
+
+Correlación de turno (`missing_prompt`): `lastPromptId` es el `prompt_id` del evento más reciente
+**ingerido** y lo fija solo la ingesta, de forma sincrónica; la persistencia (asíncrona, por lotes)
+*MUST NOT* modificarlo —una escritura atrasada del turno anterior no puede retroceder la correlación—
+y registra aparte `persistedPromptId`, el del evento más reciente **en disco**. Al abrir una
+conversación, `lastPromptId` se reconstruye desde el archivo (`persistedPromptId` del snapshot más
+las líneas re-escaneadas), nunca desde la memoria del proceso anterior: la recuperación no afirma
+como persistido nada que no haya llegado a disco. Test obligatorio: la intercalación "p1 ingerido con
+escritura pendiente → `internal_prompt` p2 ingerido → termina la escritura de p1 → `Stop` p2 con la
+escritura de p2 pendiente" no produce `gap`; y tras un reinicio el estado reconstruido correlaciona
+`Stop` p2 sin `gap`.
 
 Casos que *MUST* estar en el test:
 

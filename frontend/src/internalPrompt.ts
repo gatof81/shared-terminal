@@ -64,27 +64,55 @@ export function classifyPrompt(prompt: string): PromptClass {
 		return unverified("multiple-blocks");
 	}
 	const body = s.slice(OPEN.length, s.length - CLOSE.length);
+	// The CLI's fixed order: task-id, then tool-use-id, then status (other
+	// children, e.g. output-file or summary, may sit between). Each of the
+	// three must open and close exactly once, in that order, with no stray
+	// opening or closing tag anywhere in the block.
 	const taskId = child(body, "task-id");
 	const toolUseId = child(body, "tool-use-id");
 	const status = child(body, "status");
 	if (taskId === null || toolUseId === null || status === null) return unverified("missing-field");
-	if (!TASK_ID.test(taskId)) return unverified("task-id");
-	if (!TOOL_USE_ID.test(toolUseId)) return unverified("tool-use-id");
-	if (!STATUS.test(status)) return unverified("status");
+	if (!(taskId.end < toolUseId.start && toolUseId.end < status.start)) return unverified("order");
+	if (!TASK_ID.test(taskId.value)) return unverified("task-id");
+	if (!TOOL_USE_ID.test(toolUseId.value)) return unverified("tool-use-id");
+	if (!STATUS.test(status.value)) return unverified("status");
 	return {
 		kind: "internal",
 		notice: "task-notification",
-		notification: { taskId, toolUseId, status },
+		notification: { taskId: taskId.value, toolUseId: toolUseId.value, status: status.value },
 	};
 }
 
-/** The trimmed text of `<tag>…</tag>` when it occurs exactly once; `null` otherwise. */
-function child(body: string, tag: string): string | null {
+interface Child {
+	value: string;
+	/** Offset of the opening tag in the block body. */
+	start: number;
+	/** Offset just past the closing tag. */
+	end: number;
+}
+
+/**
+ * `<tag>…</tag>` when the block body holds exactly ONE opening and exactly
+ * ONE closing tag for `tag`, the opening first and the value free of `<`;
+ * `null` for anything else — a stray closing tag before the opening, a
+ * repeated opening, a missing or doubled closing. Not an XML parser: a
+ * strict check of the one shape the CLI prints.
+ */
+function child(body: string, tag: string): Child | null {
 	const open = `<${tag}>`;
 	const close = `</${tag}>`;
+	if (count(body, open) !== 1 || count(body, close) !== 1) return null;
 	const start = body.indexOf(open);
-	if (start === -1 || body.indexOf(open, start + 1) !== -1) return null;
-	const end = body.indexOf(close, start + open.length);
-	if (end === -1 || body.indexOf(close, end + 1) !== -1) return null;
-	return body.slice(start + open.length, end).trim();
+	const closeAt = body.indexOf(close);
+	if (closeAt < start + open.length) return null;
+	const value = body.slice(start + open.length, closeAt);
+	if (value.includes("<")) return null;
+	return { value: value.trim(), start, end: closeAt + close.length };
+}
+
+function count(haystack: string, needle: string): number {
+	let n = 0;
+	for (let i = haystack.indexOf(needle); i !== -1; i = haystack.indexOf(needle, i + needle.length))
+		n++;
+	return n;
 }

@@ -92,7 +92,21 @@ export interface ConversationIndex {
 	endedAt: string | null;
 	endReason: string | null;
 	lastEventAt: string;
+	/**
+	 * The turn correlation (`missing_prompt`, §4.6): the `prompt_id` of the
+	 * newest INGESTED event. Set synchronously by the service at ingest and
+	 * never by persistence — appends are async and batched, so a write of
+	 * the previous turn landing after the next prompt was ingested would
+	 * take it backwards (Work P2-2). Rebuilt from the file on open.
+	 */
 	lastPromptId: string | null;
+	/**
+	 * The `prompt_id` of the newest event ON DISK — what recovery may
+	 * claim. Written by `appendOne`, rebuilt by the file scan; the snapshot
+	 * carries it so a restart never inherits a live value that was still
+	 * queued when the process died.
+	 */
+	persistedPromptId: string | null;
 	claudeVersion: string | null;
 	parentSessionId: string | null;
 	parentInferred: boolean;
@@ -376,6 +390,7 @@ export class ConversationStore {
 			endReason: null,
 			lastEventAt: new Date(this.now()).toISOString(),
 			lastPromptId: null,
+			persistedPromptId: null,
 			claudeVersion: null,
 			parentSessionId: null,
 			parentInferred: false,
@@ -444,7 +459,14 @@ export class ConversationStore {
 			index.gapsCount = 0;
 			index.lastSeq = Math.max(0, index.lastSeq);
 			index.firstRetainedSeq = 0;
+			index.persistedPromptId = null;
 		}
+		// Correlation after a restart comes from the FILE: the baseline is
+		// what the snapshot proved persisted (a pre-P2-2 snapshot has only
+		// the live value; it is kept rather than lost), and every scanned
+		// line with a prompt_id advances both, in file order = ingest order.
+		index.lastPromptId =
+			index.persistedPromptId ?? (index.offset === 0 ? null : index.lastPromptId);
 		let scannedSeq = index.offset === 0 ? 0 : index.lastSeq;
 		for (const line of tail.split("\n")) {
 			if (!line) continue;
@@ -461,6 +483,10 @@ export class ConversationStore {
 			index.eventsBytes += Buffer.byteLength(line, "utf8") + 1;
 			if (ev.ev === "gap") index.gapsCount++;
 			if (ev.ts) index.lastEventAt = ev.ts;
+			if (typeof ev.prompt_id === "string" && ev.prompt_id) {
+				index.persistedPromptId = ev.prompt_id;
+				index.lastPromptId = ev.prompt_id;
+			}
 			if (ev.ev === "assistant_delta") {
 				// B6 — the L2 budget must survive a restart: lines past the
 				// snapshot's offset re-add their bytes to the message tally.
@@ -611,16 +637,9 @@ export class ConversationStore {
 		r.index.eventsBytes += lineBytes;
 		r.index.lastEventAt = event.ts;
 		if (event.ev === "gap") r.index.gapsCount++;
-		// Only a PROMPT moves `lastPromptId` here. The service already set it
-		// synchronously at ingest for every event; persistence is async and
-		// batched, so a tool or agent event of the previous turn (prompt p1)
-		// can land after the next prompt (p2) was ingested — taking the
-		// value backwards and making p2's Stop a spurious `missing_prompt`
-		// gap. The 3.1 pilot's shape (agent_end, the CLI's task notification
-		// 69 ms later, the next turn) is exactly that window.
-		if (event.prompt_id && (event.ev === "user_prompt" || event.ev === "internal_prompt")) {
-			r.index.lastPromptId = event.prompt_id;
-		}
+		// Persistence records what reached the disk and never touches the
+		// live correlation: `lastPromptId` belongs to ingest (see its doc).
+		if (event.prompt_id) r.index.persistedPromptId = event.prompt_id;
 		if (r.index.firstRetainedSeq === 0) r.index.firstRetainedSeq = seq;
 		r.currentFileBytes += lineBytes;
 		r.dirty = true;
