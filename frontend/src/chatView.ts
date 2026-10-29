@@ -1034,6 +1034,8 @@ function signature(b: ThreadBlock): string {
 			return `${item.text.length}|${item.final ? "final" : "stream"}|${item.truncated}|${item.missingFragments}|${item.report ? "report" : ""}`;
 		case "agent":
 			return `${item.phase}|${item.agentType}`;
+		case "internal":
+			return `${item.agentId}|${item.agentType}|${item.toolName}|${item.status}`;
 		default:
 			return "static";
 	}
@@ -1047,10 +1049,50 @@ function renderBlock(b: ThreadBlock): HTMLElement {
 function renderItem(item: Exclude<ThreadItem, ToolItem>): HTMLElement {
 	switch (item.kind) {
 		case "user": {
-			const box = el("article", "chat-msg chat-user");
-			box.appendChild(meta("You", item.ts));
+			// "You" only for a prompt the person typed. An injected source
+			// (§5.1) and a notification-shaped prompt that could not be
+			// verified (§4.2.1) are shown as what they are.
+			const injected = item.source !== null;
+			const box = el(
+				"article",
+				`chat-msg chat-user${injected ? " injected" : ""}${item.origin === "unverified" ? " unverified" : ""}`,
+			);
+			const who =
+				item.origin === "unverified"
+					? "Prompt · origin unverified"
+					: injected
+						? `Injected · ${item.source}`
+						: "You";
+			box.appendChild(meta(who, item.ts));
 			box.appendChild(el("div", "chat-text", item.text));
 			if (item.truncated) box.appendChild(el("div", "chat-note", "Prompt truncated"));
+			return box;
+		}
+		case "internal": {
+			// The CLI told the model a background tool finished; the result
+			// itself is in the agent's card (agent_end), shown once there.
+			const box = el("div", "chat-marker internal");
+			box.appendChild(el("span", "chat-marker-icon", "↩"));
+			const outcome = item.status === "completed" ? "finished" : item.status;
+			const subject = item.agentId
+				? `${item.agentType ? `${item.agentType} agent` : "Agent"} ${outcome}`
+				: item.toolName
+					? `Background ${item.toolName} ${outcome}`
+					: `Background task ${outcome}`;
+			box.appendChild(el("span", undefined, `${subject} · result delivered to Claude`));
+			box.appendChild(el("span", "chat-marker-id", (item.agentId ?? item.toolUseId).slice(-8)));
+			if (item.agentId) {
+				const agentId = item.agentId;
+				box.appendChild(
+					button("Details", "chat-link", () => {
+						agentsOpen = true;
+						renderAll();
+						agentsEl.querySelector<HTMLElement>(`[data-agent="${agentId}"]`)?.scrollIntoView?.({
+							block: "nearest",
+						});
+					}),
+				);
+			}
 			return box;
 		}
 		case "assistant": {

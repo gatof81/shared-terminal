@@ -308,3 +308,224 @@ describe("blocks and status presentation", () => {
 		expect(statusIsLiveClaim("disconnected")).toBe(false);
 	});
 });
+
+describe("§4.2.1 the CLI's task notification is not the person's prompt", () => {
+	// The pilot's seq 21–23 shape: Agent tool → agent_start → agent tools →
+	// agent_end → UserPromptSubmit carrying the notification → next turn.
+	const notification = (toolUseId: string, taskId: string, status = "completed") =>
+		[
+			"<task-notification>",
+			`<task-id>${taskId}</task-id>`,
+			`<tool-use-id>${toolUseId}</tool-use-id>`,
+			`<status>${status}</status>`,
+			"<summary>Agent completed</summary>",
+			"<result>",
+			"the subagent's own report text",
+			"</result>",
+			"</task-notification>",
+		].join("\n");
+	const AGENT_TOOL = "toolu_01NrcdMjX7yQ2bK9vTz3Lm4W";
+	const AGENT = "afc95b2b37cb620a1";
+	const subagentRun = () => [
+		ev("user_prompt", { prompt: "Run the audit with a subagent" }, { prompt_id: "p1" }),
+		ev("tool_start", {
+			tool_use_id: AGENT_TOOL,
+			tool_name: "Agent",
+			summary: { subagent_type: "Explore" },
+		}),
+		ev("agent_start", { agent_id: AGENT, agent_type: "Explore" }, { agent_id: AGENT }),
+		ev(
+			"tool_start",
+			{ tool_use_id: "toolu_01Bash000000000001", tool_name: "Bash", summary: {} },
+			{ agent_id: AGENT },
+		),
+		ev(
+			"tool_end",
+			{ tool_use_id: "toolu_01Bash000000000001", tool_name: "Bash", ok: true },
+			{ agent_id: AGENT },
+		),
+		ev(
+			"agent_end",
+			{
+				agent_id: AGENT,
+				agent_type: "Explore",
+				last_assistant_message: "the subagent's own report text",
+			},
+			{ agent_id: AGENT },
+		),
+	];
+
+	it("a persisted internal_prompt is an internal item correlated to the agent, never a user item", () => {
+		const events = [
+			...subagentRun(),
+			ev(
+				"internal_prompt",
+				{
+					notice: "task-notification",
+					task_id: "task-x",
+					tool_use_id: AGENT_TOOL,
+					status: "completed",
+					prompt_bytes: 200,
+				},
+				{ prompt_id: "p2" },
+			),
+			ev(
+				"assistant_delta",
+				{ message_id: "m2", index: 0, final: true, delta: "Continuing." },
+				{ prompt_id: "p2" },
+			),
+			ev("turn_end", { last_assistant_message: "Continuing." }, { prompt_id: "p2" }),
+		];
+		const m = buildThread(events);
+		expect(m.items.map((i) => i.kind)).toEqual([
+			"user",
+			"tool",
+			"agent",
+			"agent",
+			"internal",
+			"assistant",
+		]);
+		const internal = m.items[4];
+		if (internal.kind !== "internal") throw new Error("not internal");
+		expect(internal).toMatchObject({
+			taskId: "task-x",
+			toolUseId: AGENT_TOOL,
+			status: "completed",
+			toolName: "Agent",
+			agentId: AGENT,
+			agentType: "Explore",
+			legacy: false,
+		});
+		// The person's prompt is the only user item; the subagent's text is nowhere in the main thread.
+		expect(m.items.filter((i) => i.kind === "user")).toHaveLength(1);
+		expect(JSON.stringify(m.items)).not.toContain("subagent's own report");
+		expect(m.agents[0].result).toBe("the subagent's own report text");
+		// The next turn's report attaches to the message AFTER the notification.
+		const last = m.items[5];
+		if (last.kind !== "assistant") throw new Error("not assistant");
+		expect(last.report?.text).toBe("Continuing.");
+	});
+
+	it("a user_prompt persisted before 4.2.1 that is a notification is re-classified (legacy), same correlation", () => {
+		const m = buildThread([
+			...subagentRun(),
+			ev("user_prompt", { prompt: notification(AGENT_TOOL, AGENT) }, { prompt_id: "p2" }),
+		]);
+		const internal = m.items[m.items.length - 1];
+		expect(internal.kind).toBe("internal");
+		if (internal.kind !== "internal") return;
+		expect(internal.legacy).toBe(true);
+		expect(internal.agentId).toBe(AGENT);
+		expect(internal.agentType).toBe("Explore");
+		expect(m.items.filter((i) => i.kind === "user")).toHaveLength(1);
+	});
+
+	it("correlates by task id = agent id when the Agent tool_start is outside the window", () => {
+		const m = buildThread([
+			ev(
+				"agent_end",
+				{ agent_id: AGENT, agent_type: "Explore", last_assistant_message: "r" },
+				{ agent_id: AGENT },
+			),
+			ev("user_prompt", { prompt: notification(AGENT_TOOL, AGENT) }),
+		]);
+		const internal = m.items[1];
+		if (internal.kind !== "internal") throw new Error("not internal");
+		expect(internal.agentId).toBe(AGENT);
+		expect(internal.toolName).toBeNull();
+	});
+
+	it("a background Bash notification names the tool and no agent", () => {
+		const m = buildThread([
+			ev("tool_start", {
+				tool_use_id: "toolu_01SuzrSX6G4ikw9fPVXhR188",
+				tool_name: "Bash",
+				summary: { run_in_background: true },
+			}),
+			ev("user_prompt", {
+				prompt: notification("toolu_01SuzrSX6G4ikw9fPVXhR188", "btesl5hn3", "failed"),
+			}),
+		]);
+		const internal = m.items[1];
+		if (internal.kind !== "internal") throw new Error("not internal");
+		expect(internal).toMatchObject({
+			toolName: "Bash",
+			agentId: null,
+			agentType: null,
+			status: "failed",
+		});
+	});
+
+	it("a person's prompt stays 'You' even when it mentions or quotes the tags; injected and unverified are marked", () => {
+		const m = buildThread([
+			ev("user_prompt", { prompt: "why does <task-notification> show as me?" }),
+			ev("user_prompt", { prompt: `${notification(AGENT_TOOL, AGENT)}\n\nexplain this` }),
+			ev("user_prompt", { prompt: "from the lead", source: "system" }),
+			ev("user_prompt", { prompt: notification("call_123", AGENT) }),
+			ev("user_prompt", { prompt: "typed", origin: "unverified" }),
+		]);
+		expect(m.items.map((i) => (i.kind === "user" ? [i.origin, i.source] : i.kind))).toEqual([
+			["human", null],
+			["human", null],
+			["human", "system"],
+			["unverified", null],
+			["unverified", null],
+		]);
+	});
+
+	it("two parallel agents: each notification lands on its own agent, in order", () => {
+		const m = buildThread([
+			ev("tool_start", {
+				tool_use_id: "toolu_01AAAAAAAAAAAAAAAA",
+				tool_name: "Agent",
+				summary: {},
+			}),
+			ev("tool_start", {
+				tool_use_id: "toolu_01BBBBBBBBBBBBBBBB",
+				tool_name: "Agent",
+				summary: {},
+			}),
+			ev("agent_start", { agent_id: "a-one", agent_type: "Explore" }, { agent_id: "a-one" }),
+			ev("agent_start", { agent_id: "a-two", agent_type: "Plan" }, { agent_id: "a-two" }),
+			ev("agent_end", { agent_id: "a-two", agent_type: "Plan" }, { agent_id: "a-two" }),
+			ev("user_prompt", { prompt: notification("toolu_01BBBBBBBBBBBBBBBB", "t2") }),
+			ev("agent_end", { agent_id: "a-one", agent_type: "Explore" }, { agent_id: "a-one" }),
+			ev("user_prompt", { prompt: notification("toolu_01AAAAAAAAAAAAAAAA", "t1") }),
+		]);
+		const internals = m.items.filter((i) => i.kind === "internal");
+		expect(internals.map((i) => (i.kind === "internal" ? [i.agentId, i.agentType] : null))).toEqual(
+			[
+				["a-two", "Plan"],
+				["a-one", "Explore"],
+			],
+		);
+	});
+});
+
+describe("§4.2.1 internal prompts through the window: no duplicates on reconnect or paging", () => {
+	const internal = (s: number) =>
+		({
+			seq: s,
+			ts: new Date(1_800_000_000_000 + s * 1000).toISOString(),
+			ev: "internal_prompt",
+			prompt_id: `p${s}`,
+			turn_id: null,
+			agent_id: null,
+			pane: null,
+			data: {
+				notice: "task-notification",
+				task_id: "t",
+				tool_use_id: "toolu_01AAAAAAAAAAAAAAAA",
+				status: "completed",
+			},
+		}) as ConversationEvent;
+	it("a live frame re-sent after a resync and an overlapping older page both collapse by seq", () => {
+		const w = new EventWindow();
+		w.setLatest([internal(10), internal(11)], true);
+		expect(w.append(internal(11))).toBe(false);
+		expect(w.append(internal(12))).toBe(true);
+		w.prepend([internal(8), internal(9), internal(10)], false);
+		expect(w.events.map((e) => e.seq)).toEqual([8, 9, 10, 11, 12]);
+		expect(buildThread(w.events).items.filter((i) => i.kind === "internal")).toHaveLength(5);
+	});
+});

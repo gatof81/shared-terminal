@@ -26,6 +26,13 @@ describe("§5.3 transition table", () => {
 		[
 			["* + user_prompt → running", S("unknown"), prompt(1), "running", "hook:UserPromptSubmit"],
 			[
+				"* + internal_prompt (§4.2.1) → running",
+				S("waiting_input"),
+				{ kind: "event", ev: "internal_prompt", at: at(1) },
+				"running",
+				"hook:UserPromptSubmit",
+			],
+			[
 				"running + Stop (no bg) → waiting_input",
 				S("running"),
 				stop(1),

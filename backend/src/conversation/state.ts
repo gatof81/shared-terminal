@@ -33,6 +33,7 @@ export type ProbeStatus = "busy" | "waiting" | "idle";
 
 export type StateInput =
 	| { kind: "event"; ev: "user_prompt"; source?: string; at: number }
+	| { kind: "event"; ev: "internal_prompt"; at: number }
 	| { kind: "event"; ev: "turn_end"; backgroundTasks: number; at: number }
 	| { kind: "event"; ev: "turn_failed"; at: number }
 	| { kind: "event"; ev: "notification"; notificationType: string; at: number }
@@ -108,9 +109,10 @@ function applyEvent(
 	const base = state.status === "ending" ? next("unknown", "reopened", input.at) : state;
 	switch (input.ev) {
 		case "user_prompt":
-			// Injected turns (`source: system|sdk|…`) still mean the agent is
-			// working on something; the UI marks them differently, the
-			// state does not.
+		case "internal_prompt":
+			// Injected turns (`source: system|sdk|…`) and the CLI's own task
+			// notifications (§4.2.1) still mean the agent is working on
+			// something; the UI marks them differently, the state does not.
 			return next("running", "hook:UserPromptSubmit", input.at);
 		case "turn_end":
 			return input.backgroundTasks > 0

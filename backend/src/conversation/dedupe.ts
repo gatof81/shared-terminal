@@ -55,7 +55,8 @@ export interface IdentityInput {
 export function identityKey(input: IdentityInput): string | null {
 	switch (input.ev) {
 		case "user_prompt":
-			return input.promptId ? `user_prompt:${input.promptId}` : null;
+		case "internal_prompt":
+			return input.promptId ? `${input.ev}:${input.promptId}` : null;
 		case "assistant_delta":
 			if (input.messageId === undefined || input.index === undefined) return null;
 			return `assistant_delta:${input.agentId ?? ""}:${input.messageId}:${input.index}`;

@@ -9,7 +9,9 @@ con revocación concurrente, puntos 2, 3 y 8 y patrón de nombres—, 2026-10-27
 de salida obligatorio, efectos compuestos y apagado, 2026-10-27; decisión del responsable sobre la
 allowlist del CLI para el piloto, §2.7.5, 2026-10-27; decisión del responsable sobre los artefactos
 de runtime del CLI 2.1.308 en `/tmp` en la allowlist de la capa, §2.7.1, 2026-10-27; decisión del
-responsable sobre el registro del manejador de enlaces del CLI 2.1.308 en HOME, §2.7.1, 2026-10-28),
+responsable sobre el registro del manejador de enlaces del CLI 2.1.308 en HOME, §2.7.1, 2026-10-28;
+corrección de atribución tras el piloto de 3.1: las notificaciones internas que el CLI entrega por
+`UserPromptSubmit` dejan de ser `user_prompt`, §4.2.1, 2026-10-29),
 vinculante para los PRs
 3.0b–3.4.** El razonamiento está en [docs/design/phase3-conversation-activity.md](./design/phase3-conversation-activity.md)
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
@@ -1183,7 +1185,8 @@ candidata); si no hay candidata única, se cuenta en `ingest_rejected` y en
 | --- | --- | --- | --- |
 | `session_start` | `SessionStart` (+`st` del script) | `source`, `agent_type?`, `model?`, `session_title?`, `claude_version?`, `tmux_session?`, `argv_flags?`, `cwd`, `transcript_path` | — |
 | `session_end` | `SessionEnd` | `reason` | — |
-| `user_prompt` | `UserPromptSubmit` | `prompt`, `source?`, `session_title?` | **L1** (truncado visible) |
+| `user_prompt` | `UserPromptSubmit` (texto humano o no verificable, §4.2.1) | `prompt`, `source?`, `session_title?`, `origin?: unverified` | **L1** (truncado visible) |
+| `internal_prompt` | `UserPromptSubmit` cuyo `prompt` es una notificación interna **verificada** del CLI (§4.2.1) | `notice: task-notification`, `task_id`, `tool_use_id`, `status`, `prompt_bytes`, `source?`, `session_title?` | — (**sin texto**: el resultado ya está en `agent_end`) |
 | `assistant_delta` | `MessageDisplay` | `message_id`, `index`, `final`, `delta` | acumulado por `message_id` ≤ **L2** |
 | `tool_start` | `PreToolUse` | `tool_use_id`, `tool_name`, `summary` (§4.3), `mcp_server?` | **L4** |
 | `tool_end` | `PostToolUse` | `tool_use_id`, `tool_name`, `ok: true`, `duration_ms?`, `response_bytes` | — |
@@ -1208,6 +1211,53 @@ el normalizador ni la deduplicación (son tipos distintos, §4.6). La representa
 3.1 (§10): un mismo `tool_use_id` se muestra como **una** herramienta, con el fallo con precedencia
 sobre el éxito en cualquier orden de llegada, y los contadores de herramientas cuentan
 `tool_use_id`s distintos, no eventos.
+
+#### 4.2.1 Notificaciones internas del CLI entregadas como `UserPromptSubmit`
+
+Observado en el piloto de 3.1 (CLI 2.1.308): cuando una tarea en segundo plano termina —un
+`Agent`, un Bash con `run_in_background`— el CLI inyecta al modelo un prompt sintético con la forma
+
+```
+<task-notification>
+<task-id>…</task-id>
+<tool-use-id>toolu_…</tool-use-id>
+<status>completed</status>
+…
+</task-notification>
+```
+
+y dispara `UserPromptSubmit` igual que para texto escrito (secuencia real: `agent_end`, esta
+notificación 69 ms después con un `prompt_id` nuevo, y el turno siguiente del asistente con ese
+mismo `prompt_id`). Nadie la escribió; representarla como `user_prompt` la atribuye a la persona y
+puede convertirla en título.
+
+Clasificación (`conversation/internalPrompt.ts`, espejo idéntico en `frontend/src/internalPrompt.ts`),
+sobre el prompt completo y antes de L1:
+
+| Clase | Criterio (*MUST*) | Persistencia | Vista |
+| --- | --- | --- | --- |
+| **interna verificada** | el prompt, sin espacios en los extremos, es **exactamente un** bloque `<task-notification>…</task-notification>`, y `<task-id>`, `<tool-use-id>` y `<status>` aparecen **una sola vez cada uno** con valores bien formados: `task-id` `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, `tool-use-id` `^toolu_[A-Za-z0-9]{8,64}$`, `status` `^[a-z][a-z_-]{0,31}$` | `internal_prompt` con los tres ids, `prompt_bytes` y sin texto | marcador "resultado entregado a Claude", correlacionado con la herramienta (`tool_use_id`) y con el subagente (`task_id` = `agent_id`, o el `tool_start` del `Agent` emparejado en orden con el `agent_start` siguiente); nunca burbuja "You"; el resultado se muestra una sola vez, en el agente |
+| **no verificable** | tiene la forma del bloque (empieza y termina con las etiquetas) pero falla alguna condición: ids ausentes, repetidos o malformados, dos bloques, bloque vacío | `user_prompt` con `origin: unverified` (texto bajo L1, como siempre) | rotulado "origen no verificado": ni "You" ni interno; no da título |
+| **humana** | todo lo demás: menciona las etiquetas en una frase, pega una notificación y añade texto, escribe solo una etiqueta… | `user_prompt` | "You" (o "inyectado" según `source`, §5.1) |
+
+Reglas:
+
+- La decisión es estructural y acotada; **nunca** se oculta ni reclasifica un prompt por una
+  coincidencia parcial de cadenas. Una persona que pegue exactamente una notificación válida y nada
+  más es indistinguible del CLI y se clasifica interna: es el único falso positivo posible y es
+  deliberado.
+- `internal_prompt` conserva `prompt_id`: es el prompt del turno siguiente, así que `turn_end` lo
+  correlaciona igual que con un `user_prompt` (§4.6 `missing_prompt`), la deduplicación usa el mismo
+  `prompt_id` y el estado pasa a `running` (§5.3). No da título (§5.1) salvo por `session_title`, que es
+  dato del CLI.
+- No se persiste ningún texto de la notificación: el resultado del subagente ya está en
+  `agent_end.last_assistant_message` (L3) y la notificación lo repite. Tampoco `summary` ni
+  `output-file`.
+- **Historial anterior:** los `user_prompt` ya persistidos con una notificación verificada no se
+  reescriben; la vista aplica la misma clasificación al leerlos y los muestra como internos
+  (`legacy`). Las filas de D1 (`title`) no se tocan.
+- Reconocidas en esta versión: solo `task-notification`. Otra notificación interna del CLI se añade
+  aquí antes que en el código.
 
 Campos no listados *MUST NOT* persistirse (parser tolerante: se descartan y se cuentan en
 `ingest_fields_dropped`). `prompt` y `last_assistant_message` son el contenido de la conversación:
@@ -1334,6 +1384,7 @@ completo* en una ventana corta, que colapsa reintentos idénticos sin tocar even
 | `ev` | Identidad (todas incluyen `session_id` de Claude) | Tratamiento del repetido |
 | --- | --- | --- |
 | `user_prompt` | `prompt_id` si está presente; si falta, hash del payload en ventana de 10 s | descartar, `dedupe_dropped++` |
+| `internal_prompt` | `prompt_id` si está presente (clave propia del tipo); si falta, hash del payload en ventana de 10 s | descartar |
 | `assistant_delta` | `agent_id?` + `message_id` + `index` | descartar |
 | `tool_start` / `tool_end` / `tool_failed` | `ev` + `tool_use_id` | descartar |
 | `agent_start` / `agent_end` | `ev` + `agent_id` | descartar |
@@ -1368,7 +1419,8 @@ Casos que *MUST* estar en el test:
   `teammate` si contiene `--agent-name`/`--agent-id`), `claude_version`, `title` (`session_title`) y
   binding.
 - `title` por defecto = primeros 80 caracteres del primer `user_prompt` con `source` ausente o
-  `user`; `session_title` lo reemplaza cuando llega.
+  `user` y sin `origin: unverified`; nunca de un `internal_prompt` (§4.2.1). `session_title` lo
+  reemplaza cuando llega.
 - `user_prompt.source ∈ {system, loop_wakeup, schedule_wakeup, poll_event, sdk}` se persiste con
   esa marca y la UI lo muestra como "mensaje inyectado", no como burbuja del usuario.
 
@@ -1388,6 +1440,7 @@ Tabla única (`conversationState.ts`, test de tabla):
 | Estado actual | Entrada | Estado siguiente | Evidencia |
 | --- | --- | --- | --- |
 | * | `user_prompt` (`source` user/ausente) | `running` | `hook:UserPromptSubmit` |
+| * | `internal_prompt` (§4.2.1) | `running` | `hook:UserPromptSubmit` |
 | `running` | `turn_end` con `background_tasks` vacío | `waiting_input` | `hook:Stop` |
 | `running` | `turn_end` con `background_tasks` no vacío | `waiting_background` | `hook:Stop` |
 | `running`/`waiting_*` | `turn_failed` | `error` | `hook:StopFailure` |
@@ -1803,6 +1856,11 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
 - [ ] `gap` y `truncated` visibles; eventos `agent_id` fuera del hilo principal; estados con
       evidencia y hora; móvil: una columna, sin scroll horizontal, composer deshabilitado con motivo;
       L8 respetado con 20k eventos (memoria del tab medida en el PR).
+- [ ] Atribución (§4.2.1): la secuencia real `agent_end → UserPromptSubmit{<task-notification>} →
+      turno siguiente` persiste `internal_prompt` sin texto, no da título, no produce `missing_prompt`
+      y se muestra como marcador correlacionado con el agente, nunca como "You"; un `user_prompt`
+      histórico con esa forma se muestra igual sin reescribir el archivo; un prompt humano que cite las
+      etiquetas sigue siendo "You"; una forma no verificable se rotula "origen no verificado".
 
 ### 3.2 composer (condicionado)
 

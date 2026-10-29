@@ -761,3 +761,146 @@ describe("lifecycle, list, reconcile, probe", () => {
 		await svc2.shutdown();
 	});
 });
+
+describe("§4.2.1 the CLI's task notification is not the person's prompt", () => {
+	// The pilot's seq 21–23 (CLI 2.1.308): the subagent ends, 69 ms later a
+	// UserPromptSubmit carries a <task-notification> for its Agent tool, and
+	// the assistant's next turn (new prompt_id) follows. Synthetic ids only.
+	const notification = (toolUseId: string, taskId: string) =>
+		[
+			"<task-notification>",
+			`<task-id>${taskId}</task-id>`,
+			`<tool-use-id>${toolUseId}</tool-use-id>`,
+			"<status>completed</status>",
+			"<summary>Agent completed</summary>",
+			"<result>",
+			"the subagent's own report text",
+			"</result>",
+			"</task-notification>",
+		].join("\n");
+
+	it("is persisted as internal_prompt without text, keeps the turn correlation and leaves the title", async () => {
+		session("s1");
+		const ingest = (body: Record<string, unknown>) =>
+			service.ingest("s1", "%0", hook(String(body.hook_event_name), body));
+		await ingest({
+			hook_event_name: "UserPromptSubmit",
+			prompt: "Run the audit with a subagent",
+			prompt_id: "p1",
+		});
+		await ingest({
+			hook_event_name: "PreToolUse",
+			prompt_id: "p1",
+			tool_name: "Agent",
+			tool_use_id: "toolu_01NrcdMjX7yQ2bK9vTz3Lm4W",
+			tool_input: {
+				subagent_type: "Explore",
+				description: "audit files",
+				prompt: "secret instructions",
+			},
+		});
+		await ingest({
+			hook_event_name: "SubagentStart",
+			prompt_id: "p1",
+			agent_id: "afc95b2b37cb620a1",
+			agent_type: "Explore",
+		});
+		await ingest({
+			hook_event_name: "SubagentStop",
+			prompt_id: "p1",
+			agent_id: "afc95b2b37cb620a1",
+			agent_type: "Explore",
+			stop_hook_active: false,
+			last_assistant_message: "the subagent's own report text",
+		});
+		// seq 22: the synthetic prompt, with the NEXT turn's prompt_id.
+		await ingest({
+			hook_event_name: "UserPromptSubmit",
+			prompt: notification("toolu_01NrcdMjX7yQ2bK9vTz3Lm4W", "afc95b2b37cb620a1"),
+			prompt_id: "p2",
+		});
+		expect(store.getResidentIndex("s1", "c1")?.state.status).toBe("running");
+		await ingest({
+			hook_event_name: "MessageDisplay",
+			prompt_id: "p2",
+			message_id: "m2",
+			index: 0,
+			final: true,
+			delta: "Continuing.",
+		});
+		await ingest({
+			hook_event_name: "Stop",
+			prompt_id: "p2",
+			stop_hook_active: false,
+			last_assistant_message: "Continuing.",
+		});
+
+		const events = await readEvents("s1", "c1");
+		expect(events.map((e) => e.ev)).toEqual([
+			"user_prompt",
+			"tool_start",
+			"agent_start",
+			"agent_end",
+			"internal_prompt",
+			"assistant_delta",
+			"turn_end",
+		]);
+		const internal = events[4] as unknown as { prompt_id: string; data: Record<string, unknown> };
+		expect(internal.prompt_id).toBe("p2");
+		expect(internal.data).toEqual({
+			notice: "task-notification",
+			task_id: "afc95b2b37cb620a1",
+			tool_use_id: "toolu_01NrcdMjX7yQ2bK9vTz3Lm4W",
+			status: "completed",
+			prompt_bytes: expect.any(Number),
+		});
+		// The result is stored once, in agent_end; the notification carries no text.
+		const line = JSON.stringify(internal);
+		expect(line).not.toContain("subagent's own report");
+		expect(line).not.toContain("<task-notification>");
+		// Turn correlation intact: the Stop for p2 found its prompt (no missing_prompt gap)…
+		expect(events.filter((e) => e.ev === "gap")).toEqual([]);
+		const index = store.getResidentIndex("s1", "c1");
+		expect(index?.lastPromptId).toBe("p2");
+		// …the state followed the turn, and the title is still the person's prompt.
+		expect(index?.state.status).toBe("waiting_input");
+		expect(index?.title).toBe("Run the audit with a subagent");
+	});
+
+	it("a notification as the first prompt gives no title; a duplicate delivery is deduped by prompt_id", async () => {
+		session("s1");
+		const body = {
+			hook_event_name: "UserPromptSubmit",
+			prompt: notification("toolu_01SuzrSX6G4ikw9fPVXhR188", "btesl5hn3"),
+			prompt_id: "p7",
+		};
+		await service.ingest("s1", "%0", hook("UserPromptSubmit", body));
+		await service.ingest("s1", "%0", hook("UserPromptSubmit", body));
+		const events = await readEvents("s1", "c1");
+		expect(events.map((e) => e.ev)).toEqual(["internal_prompt"]);
+		expect(store.getResidentIndex("s1", "c1")?.title).toBeNull();
+	});
+
+	it("an unverifiable notification shape is a user_prompt marked unverified and never the title", async () => {
+		session("s1");
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", {
+				prompt: notification("not-a-tool-use-id", "btesl5hn3"),
+				prompt_id: "p1",
+			}),
+		);
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "real question", prompt_id: "p2" }),
+		);
+		const events = await readEvents("s1", "c1");
+		expect(events.map((e) => [e.ev, e.data.origin ?? null])).toEqual([
+			["user_prompt", "unverified"],
+			["user_prompt", null],
+		]);
+		expect(store.getResidentIndex("s1", "c1")?.title).toBe("real question");
+	});
+});

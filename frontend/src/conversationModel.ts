@@ -19,7 +19,15 @@
  *     answer once, marked as the report, with its bytes kept intact for
  *     "Copy report"; a report with no matching message stays its own item.
  *   - `gap` and `truncated` are always visible.
+ *   - A `UserPromptSubmit` is not always the person: the CLI delivers its
+ *     own task notifications through it (§4.2.1). New captures persist them
+ *     as `internal_prompt`; a `user_prompt` persisted before that is
+ *     re-classified here with the same strict recognizer, so the history
+ *     already on disk reads right without being rewritten. Neither is ever
+ *     "You", and both start a new turn for the report matching.
  */
+
+import { classifyPrompt } from "./internalPrompt";
 
 export interface ConversationEvent {
 	seq: number;
@@ -40,7 +48,35 @@ export interface ReportInfo {
 }
 
 export type ThreadItem =
-	| { kind: "user"; key: string; seq: number; ts: string; text: string; truncated: boolean }
+	| {
+			kind: "user";
+			key: string;
+			seq: number;
+			ts: string;
+			text: string;
+			truncated: boolean;
+			/** `user_prompt.source` when not the person (`system`, `sdk`, …); null for a typed prompt. */
+			source: string | null;
+			/** `unverified`: shaped like a CLI notification but not a valid one — not called "You". */
+			origin: "human" | "unverified";
+	  }
+	| {
+			/** The CLI's own task notification (§4.2.1): a background tool finished and its result went to the model. */
+			kind: "internal";
+			key: string;
+			seq: number;
+			ts: string;
+			taskId: string;
+			toolUseId: string;
+			status: string;
+			/** The finished tool, when its `tool_start` is in the window. */
+			toolName: string | null;
+			/** The subagent it reports on, when it can be correlated (task id = agent id, or the Agent tool's start → the next agent_start). */
+			agentId: string | null;
+			agentType: string | null;
+			/** Re-classified from a `user_prompt` persisted before `internal_prompt` existed. */
+			legacy: boolean;
+	  }
 	| {
 			kind: "assistant";
 			key: string;
@@ -184,6 +220,32 @@ export function buildThread(events: readonly ConversationEvent[]): ThreadModel {
 	const messages = new Map<string, MessageAcc>();
 	const tools = new Map<string, ToolAcc>();
 	const agents = new Map<string, AgentView>();
+	// Agent tool → subagent correlation (§4.2.1): the CLI gives the agent no
+	// tool_use_id, so the Agent tool_starts of the main thread are matched
+	// to agent_starts in order of appearance. Best effort, display only.
+	const pendingAgentTools: string[] = [];
+	const agentByTool = new Map<string, string>();
+
+	const pushInternal = (
+		e: ConversationEvent,
+		n: { taskId: string; toolUseId: string; status: string },
+		legacy: boolean,
+	): void => {
+		const agentId = agents.has(n.taskId) ? n.taskId : (agentByTool.get(n.toolUseId) ?? null);
+		items.push({
+			kind: "internal",
+			key: `i${e.seq}`,
+			seq: e.seq,
+			ts: e.ts,
+			taskId: n.taskId,
+			toolUseId: n.toolUseId,
+			status: n.status,
+			toolName: tools.get(n.toolUseId)?.item.toolName ?? null,
+			agentId,
+			agentType: agentId ? (agents.get(agentId)?.agentType ?? "") : null,
+			legacy,
+		});
+	};
 
 	const agentOf = (id: string, type: string, seq: number, ts: string): AgentView => {
 		let a = agents.get(id);
@@ -220,15 +282,34 @@ export function buildThread(events: readonly ConversationEvent[]): ThreadModel {
 			continue;
 		}
 		switch (e.ev) {
-			case "user_prompt":
+			case "user_prompt": {
+				const text = str(d.prompt);
+				// History persisted before §4.2.1: the same recognizer, so a
+				// notification stored as a prompt is never shown as the person's.
+				const cls = classifyPrompt(text);
+				if (cls.kind === "internal") {
+					pushInternal(e, cls.notification, true);
+					break;
+				}
+				const source = str(d.source);
 				items.push({
 					kind: "user",
 					key: `u${e.seq}`,
 					seq: e.seq,
 					ts: e.ts,
-					text: str(d.prompt),
+					text,
 					truncated: d.truncated === true,
+					source: source && source !== "user" ? source : null,
+					origin: cls.kind === "unverified" || d.origin === "unverified" ? "unverified" : "human",
 				});
+				break;
+			}
+			case "internal_prompt":
+				pushInternal(
+					e,
+					{ taskId: str(d.task_id), toolUseId: str(d.tool_use_id), status: str(d.status) },
+					false,
+				);
 				break;
 			case "assistant_delta": {
 				const id = str(d.message_id) || `seq-${e.seq}`;
@@ -303,6 +384,7 @@ export function buildThread(events: readonly ConversationEvent[]): ThreadModel {
 					if (d.summary && typeof d.summary === "object") {
 						it.summary = d.summary as Record<string, unknown>;
 					}
+					if (it.toolName === "Agent") pendingAgentTools.push(id);
 				} else {
 					acc.ended = true;
 					const dur = num(d.duration_ms);
@@ -351,6 +433,10 @@ export function buildThread(events: readonly ConversationEvent[]): ThreadModel {
 			case "agent_start":
 			case "agent_end": {
 				const a = agentOf(str(d.agent_id) || `seq-${e.seq}`, str(d.agent_type), e.seq, e.ts);
+				if (e.ev === "agent_start") {
+					const toolId = pendingAgentTools.shift();
+					if (toolId !== undefined) agentByTool.set(toolId, a.agentId);
+				}
 				if (e.ev === "agent_end") {
 					a.status = "done";
 					a.endedAt = e.ts;
@@ -450,7 +536,8 @@ function lastAssistantOfTurn(
 	for (let i = items.length - 1; i >= 0; i--) {
 		const it = items[i];
 		if (it.kind === "assistant") return it.report ? null : it;
-		if (it.kind === "user" || it.kind === "report") return null;
+		// A prompt — the person's or the CLI's notification — starts a new turn.
+		if (it.kind === "user" || it.kind === "internal" || it.kind === "report") return null;
 	}
 	return null;
 }

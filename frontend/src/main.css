@@ -3843,6 +3843,11 @@ span.files-crumb {
   align-self: flex-end;
   max-width: min(44rem, 88%);
 }
+.chat-user.injected,
+.chat-user.unverified {
+  background: var(--c-surface);
+  border-style: dashed;
+}
 .chat-assistant {
   background: var(--c-surface);
   border: 1px solid var(--c-border);
@@ -4103,6 +4108,11 @@ span.files-crumb {
 }
 .chat-marker.agent.start {
   color: var(--c-accent);
+}
+.chat-marker.internal {
+  align-self: flex-start;
+  border-style: solid;
+  border-color: var(--c-border-soft);
 }
 .chat-marker-icon {
   color: var(--c-faint);

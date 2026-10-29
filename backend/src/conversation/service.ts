@@ -781,12 +781,20 @@ export class ConversationService {
 					index.endReason = null;
 				}
 			} else if (event.ev === "user_prompt") {
+				// §5.1 — the default title is the first prompt the PERSON wrote:
+				// not an injected source, not a prompt whose origin could not be
+				// verified (§4.2.1), and never an `internal_prompt` (below).
 				if (
 					index.title === null &&
-					(event.data.source === undefined || event.data.source === "user")
+					(event.data.source === undefined || event.data.source === "user") &&
+					event.data.origin !== "unverified"
 				) {
 					index.title = String(event.data.prompt).slice(0, 80);
 				}
+				if (typeof event.data.session_title === "string") index.title = event.data.session_title;
+				if (pane && !index.paneId) this.bindPane(index, pane);
+			} else if (event.ev === "internal_prompt") {
+				// The CLI's `session_title` is its own data, not the prompt's.
 				if (typeof event.data.session_title === "string") index.title = event.data.session_title;
 				if (pane && !index.paneId) this.bindPane(index, pane);
 			} else if (event.ev === "session_end") {
@@ -905,6 +913,9 @@ export class ConversationService {
 					source: event.data.source as string | undefined,
 					at,
 				};
+				break;
+			case "internal_prompt":
+				input = { kind: "event", ev: "internal_prompt", at };
 				break;
 			case "turn_end":
 				input = {

@@ -611,7 +611,16 @@ export class ConversationStore {
 		r.index.eventsBytes += lineBytes;
 		r.index.lastEventAt = event.ts;
 		if (event.ev === "gap") r.index.gapsCount++;
-		if (event.prompt_id) r.index.lastPromptId = event.prompt_id;
+		// Only a PROMPT moves `lastPromptId` here. The service already set it
+		// synchronously at ingest for every event; persistence is async and
+		// batched, so a tool or agent event of the previous turn (prompt p1)
+		// can land after the next prompt (p2) was ingested — taking the
+		// value backwards and making p2's Stop a spurious `missing_prompt`
+		// gap. The 3.1 pilot's shape (agent_end, the CLI's task notification
+		// 69 ms later, the next turn) is exactly that window.
+		if (event.prompt_id && (event.ev === "user_prompt" || event.ev === "internal_prompt")) {
+			r.index.lastPromptId = event.prompt_id;
+		}
 		if (r.index.firstRetainedSeq === 0) r.index.firstRetainedSeq = seq;
 		r.currentFileBytes += lineBytes;
 		r.dirty = true;
