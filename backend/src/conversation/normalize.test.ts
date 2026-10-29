@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { NOTIFICATION } from "./internalPrompt.test.js";
+import { NOTIFICATION } from "./internalPrompt.testutil.js";
 import { L1_PROMPT_BYTES, L3_REPORT_BYTES } from "./limits.js";
 import { normalizeHookInput } from "./normalize.js";
 

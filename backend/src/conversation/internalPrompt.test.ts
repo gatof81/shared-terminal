@@ -7,20 +7,7 @@
 
 import { describe, expect, it } from "vitest";
 import { classifyPrompt } from "./internalPrompt.js";
-
-// Shaped like the pilot's seq 22 (CLI 2.1.308, an `Agent` tool finishing
-// in the background): ids are synthetic, no content copied.
-export const NOTIFICATION = [
-	"<task-notification>",
-	"<task-id>afc95b2b37cb620a1</task-id>",
-	"<tool-use-id>toolu_01NrcdMjX7yQ2bK9vTz3Lm4W</tool-use-id>",
-	"<status>completed</status>",
-	"<summary>Agent completed</summary>",
-	"<result>",
-	"The subagent's report: **done**, 3 files, see `src/x.ts`.",
-	"</result>",
-	"</task-notification>",
-].join("\n");
+import { NOTIFICATION } from "./internalPrompt.testutil.js";
 
 const internal = (s: string) => {
 	const c = classifyPrompt(s);
