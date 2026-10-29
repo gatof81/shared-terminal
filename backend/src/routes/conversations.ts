@@ -88,6 +88,14 @@ export function registerConversationRoutes(router: Router, ctx: RouteContext): v
 					});
 					return;
 				}
+				// `?capture=0`: the summaries alone. The capture block costs a
+				// fresh relay probe of the container (D7, §2.7.6); a client
+				// polling the list for status/activity must not pay — nor make
+				// the container pay — for it on every tick.
+				if (req.query.capture === "0") {
+					res.json({ capture: null, conversations: await conversation.summaries(req.params.id) });
+					return;
+				}
 				res.json(await conversation.list(req.params.id));
 			} catch (err) {
 				handleSessionError(err, res);

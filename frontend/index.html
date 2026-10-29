@@ -332,15 +332,24 @@
             </div>
           </div>
           <!-- Chat (Phase 3.1, read-only): the session's captured Claude
-               conversations. List left / thread right on desktop, one
-               pane at a time on mobile. Built in TS (chatView.ts). -->
+               conversations. List left / thread right (+ an Agents panel)
+               on desktop, one pane at a time on mobile. Built in TS
+               (chatView.ts). -->
           <div id="chat-view" hidden>
             <div id="chat-header">
               <button id="chat-to-terminal-btn" class="files-btn files-mobile-only" type="button">
                 ‹ Terminal
               </button>
-              <button id="chat-back-btn" class="files-btn" type="button" hidden>‹ Conversations</button>
-              <div id="chat-summary" aria-live="polite"></div>
+              <button
+                id="chat-back-btn"
+                class="files-btn chat-back"
+                type="button"
+                aria-label="Back to conversations"
+                hidden
+              >
+                ‹
+              </button>
+              <div id="chat-summary"></div>
               <button
                 id="chat-refresh-btn"
                 class="files-btn"
@@ -354,8 +363,36 @@
             <div id="chat-body">
               <div id="chat-list" aria-label="Conversations"></div>
               <div id="chat-thread"></div>
+              <aside id="chat-agents" aria-label="Agents" hidden></aside>
             </div>
+            <!-- Screen-reader announcements for final assistant messages (design §6.4). -->
+            <div id="chat-announcer" class="visually-hidden" aria-live="polite"></div>
           </div>
+          <!-- Mobile bottom navigation between the session views. Shown only
+               on narrow screens and only while an overlay covers the
+               terminal (viewSwitch.ts): the terminal keeps its own key bar
+               and layout box, which must not change on a view switch. -->
+          <nav id="view-nav" aria-label="Session view" hidden>
+            <button type="button" data-view="chat" aria-pressed="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H8l-4 4z" /></svg>
+              <span>Chat</span>
+            </button>
+            <button type="button" data-view="terminal" aria-pressed="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6l6 6-6 6M12 18h8" /></svg>
+              <span>Terminal</span>
+            </button>
+            <button type="button" data-view="files" aria-pressed="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h6l2 2h10v11H3z" /></svg>
+              <span>Files</span>
+            </button>
+            <button type="button" data-view="git" aria-pressed="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="6" cy="5" r="2.5" /><circle cx="6" cy="19" r="2.5" /><circle cx="18" cy="9" r="2.5" />
+                <path d="M6 7.5v9M18 11.5c0 3-3 4-6 4H9" />
+              </svg>
+              <span>Git</span>
+            </button>
+          </nav>
         </section>
       </main>
     </div>

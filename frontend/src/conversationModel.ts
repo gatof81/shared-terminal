@@ -12,7 +12,12 @@
  *     `message_id`, in `index` order; a hole in the indexes is shown as a
  *     lost fragment, never papered over.
  *   - Events with an `agent_id` belong to a subagent: they stay out of the
- *     main thread and are grouped per agent.
+ *     main thread and are grouped per agent; the thread keeps one compact
+ *     marker where each agent started and ended.
+ *   - A turn's report (`turn_end.last_assistant_message`) is attached to
+ *     the assistant message it repeats, so the thread shows the final
+ *     answer once, marked as the report, with its bytes kept intact for
+ *     "Copy report"; a report with no matching message stays its own item.
  *   - `gap` and `truncated` are always visible.
  */
 
@@ -25,6 +30,13 @@ export interface ConversationEvent {
 	agent_id: string | null;
 	pane: string | null;
 	data: Record<string, unknown>;
+}
+
+export interface ReportInfo {
+	/** `last_assistant_message`, byte for byte as persisted. */
+	text: string;
+	truncated: boolean;
+	originalBytes: number | null;
 }
 
 export type ThreadItem =
@@ -40,6 +52,8 @@ export type ThreadItem =
 			final: boolean;
 			truncated: boolean;
 			missingFragments: number;
+			/** Set when a `turn_end` reported exactly this text: the turn's final answer. */
+			report: ReportInfo | null;
 	  }
 	| {
 			kind: "tool";
@@ -53,24 +67,28 @@ export type ThreadItem =
 			durationMs: number | null;
 			error: string | null;
 	  }
+	| ({ kind: "report"; key: string; seq: number; ts: string } & ReportInfo)
+	| { kind: "marker"; key: string; seq: number; ts: string; tone: "info" | "warn"; text: string }
 	| {
-			kind: "report";
+			kind: "agent";
 			key: string;
 			seq: number;
 			ts: string;
-			/** `last_assistant_message`, byte for byte as persisted. */
-			text: string;
-			truncated: boolean;
-			originalBytes: number | null;
-	  }
-	| { kind: "marker"; key: string; seq: number; ts: string; tone: "info" | "warn"; text: string };
+			agentId: string;
+			agentType: string;
+			phase: "start" | "end";
+	  };
 
 export interface AgentView {
 	agentId: string;
 	agentType: string;
 	status: "running" | "done";
 	startedSeq: number;
+	startedAt: string;
+	endedAt: string | null;
 	toolIds: Set<string>;
+	/** Distinct tools that reported a failure. */
+	failedToolIds: Set<string>;
 	result: string | null;
 	resultTruncated: boolean;
 }
@@ -167,7 +185,7 @@ export function buildThread(events: readonly ConversationEvent[]): ThreadModel {
 	const tools = new Map<string, ToolAcc>();
 	const agents = new Map<string, AgentView>();
 
-	const agentOf = (id: string, type: string, seq: number): AgentView => {
+	const agentOf = (id: string, type: string, seq: number, ts: string): AgentView => {
 		let a = agents.get(id);
 		if (!a) {
 			a = {
@@ -175,7 +193,10 @@ export function buildThread(events: readonly ConversationEvent[]): ThreadModel {
 				agentType: type,
 				status: "running",
 				startedSeq: seq,
+				startedAt: ts,
+				endedAt: null,
 				toolIds: new Set(),
+				failedToolIds: new Set(),
 				result: null,
 				resultTruncated: false,
 			};
@@ -189,8 +210,13 @@ export function buildThread(events: readonly ConversationEvent[]): ThreadModel {
 		const d = e.data ?? {};
 		// Subagent activity: grouped per agent, out of the main thread.
 		if (e.agent_id && e.ev !== "agent_start" && e.ev !== "agent_end") {
-			const a = agentOf(e.agent_id, "", e.seq);
-			if (e.ev === "tool_start") a.toolIds.add(str(d.tool_use_id) || `seq-${e.seq}`);
+			const a = agentOf(e.agent_id, "", e.seq, e.ts);
+			const toolId = str(d.tool_use_id) || `seq-${e.seq}`;
+			if (e.ev === "tool_start") a.toolIds.add(toolId);
+			if (e.ev === "tool_failed") {
+				a.toolIds.add(toolId);
+				a.failedToolIds.add(toolId);
+			}
 			continue;
 		}
 		switch (e.ev) {
@@ -219,6 +245,7 @@ export function buildThread(events: readonly ConversationEvent[]): ThreadModel {
 							final: false,
 							truncated: false,
 							missingFragments: 0,
+							report: null,
 						},
 						fragments: new Map(),
 					};
@@ -292,17 +319,25 @@ export function buildThread(events: readonly ConversationEvent[]): ThreadModel {
 				}
 				break;
 			}
-			case "turn_end":
-				items.push({
-					kind: "report",
-					key: `r${e.seq}`,
-					seq: e.seq,
-					ts: e.ts,
+			case "turn_end": {
+				const report: ReportInfo = {
 					text: str(d.last_assistant_message),
 					truncated: d.truncated === true,
 					originalBytes: num(d.original_bytes),
-				});
+				};
+				// The report repeats the turn's last assistant message. When
+				// that message is in the window with the same bytes, mark it
+				// as the report instead of showing the text twice; tools and
+				// markers may sit between the two, a user prompt may not.
+				const target = lastAssistantOfTurn(items);
+				if (target && report.text !== "" && target.text === report.text) {
+					target.report = report;
+					target.final = true;
+				} else {
+					items.push({ kind: "report", key: `r${e.seq}`, seq: e.seq, ts: e.ts, ...report });
+				}
 				break;
+			}
 			case "turn_failed":
 				items.push({
 					kind: "marker",
@@ -315,14 +350,24 @@ export function buildThread(events: readonly ConversationEvent[]): ThreadModel {
 				break;
 			case "agent_start":
 			case "agent_end": {
-				const a = agentOf(str(d.agent_id) || `seq-${e.seq}`, str(d.agent_type), e.seq);
+				const a = agentOf(str(d.agent_id) || `seq-${e.seq}`, str(d.agent_type), e.seq, e.ts);
 				if (e.ev === "agent_end") {
 					a.status = "done";
+					a.endedAt = e.ts;
 					if (typeof d.last_assistant_message === "string") {
 						a.result = d.last_assistant_message;
 						a.resultTruncated = d.truncated === true;
 					}
 				}
+				items.push({
+					kind: "agent",
+					key: `a${e.seq}`,
+					seq: e.seq,
+					ts: e.ts,
+					agentId: a.agentId,
+					agentType: a.agentType,
+					phase: e.ev === "agent_start" ? "start" : "end",
+				});
 				break;
 			}
 			case "gap":
@@ -396,6 +441,116 @@ export function buildThread(events: readonly ConversationEvent[]): ThreadModel {
 		agents: [...agents.values()].sort((a, b) => a.startedSeq - b.startedSeq),
 		toolCount: tools.size,
 	};
+}
+
+/** The most recent assistant message of the current turn, if the turn has one. */
+function lastAssistantOfTurn(
+	items: ThreadItem[],
+): Extract<ThreadItem, { kind: "assistant" }> | null {
+	for (let i = items.length - 1; i >= 0; i--) {
+		const it = items[i];
+		if (it.kind === "assistant") return it.report ? null : it;
+		if (it.kind === "user" || it.kind === "report") return null;
+	}
+	return null;
+}
+
+// ── Blocks (what the view lays out) ─────────────────────────────────────────
+
+export type ToolItem = Extract<ThreadItem, { kind: "tool" }>;
+
+/**
+ * The thread as the view lays it out: every item on its own, except that
+ * consecutive tool calls form one `tools` block — a run of 15 edits reads
+ * as one activity strip, not 15 cards. Keys are stable across renders
+ * (the first tool's key), so a block can keep its DOM while it grows.
+ */
+export type ThreadBlock =
+	| { kind: "item"; key: string; item: Exclude<ThreadItem, ToolItem> }
+	| { kind: "tools"; key: string; tools: ToolItem[] };
+
+export function groupBlocks(items: readonly ThreadItem[]): ThreadBlock[] {
+	const out: ThreadBlock[] = [];
+	for (const item of items) {
+		if (item.kind === "tool") {
+			const last = out[out.length - 1];
+			if (last && last.kind === "tools") last.tools.push(item);
+			else out.push({ kind: "tools", key: `T${item.key}`, tools: [item] });
+		} else {
+			out.push({ kind: "item", key: item.key, item });
+		}
+	}
+	return out;
+}
+
+/** Summary of a tools block for its collapsed header. */
+export function toolsSummary(tools: readonly ToolItem[]): {
+	count: number;
+	failed: number;
+	running: number;
+	names: string[];
+	durationMs: number | null;
+} {
+	const names: string[] = [];
+	let failed = 0;
+	let running = 0;
+	let durationMs: number | null = null;
+	for (const t of tools) {
+		if (!names.includes(t.toolName)) names.push(t.toolName);
+		if (t.state === "failed" || t.state === "interrupted") failed++;
+		if (t.state === "running") running++;
+		if (t.durationMs !== null) durationMs = (durationMs ?? 0) + t.durationMs;
+	}
+	return { count: tools.length, failed, running, names, durationMs };
+}
+
+// ── Status presentation ─────────────────────────────────────────────────────
+
+export const STATUS_LABEL: Record<string, string> = {
+	running: "Working",
+	waiting_input: "Waiting for input",
+	waiting_background: "Background tasks",
+	waiting_permission: "Needs permission",
+	error: "Error",
+	ending: "Ending",
+	ended: "Ended",
+	disconnected: "Disconnected",
+	unknown: "Unknown",
+};
+
+/** Colour family of a status: what the chip and the list dot use. */
+export function statusTone(
+	status: string,
+): "active" | "ready" | "attention" | "error" | "done" | "muted" {
+	switch (status) {
+		case "running":
+		case "waiting_background":
+			return "active";
+		case "waiting_input":
+			return "ready";
+		case "waiting_permission":
+			return "attention";
+		case "error":
+			return "error";
+		case "ended":
+		case "ending":
+			return "done";
+		default:
+			return "muted";
+	}
+}
+
+/** A status that claims activity but whose evidence is older than this is shown as stale. */
+export const STALE_EVIDENCE_MS = 10 * 60 * 1000;
+
+/** True when the status is a live claim ("working", "waiting") that time can falsify. */
+export function statusIsLiveClaim(status: string): boolean {
+	return (
+		status === "running" ||
+		status === "waiting_input" ||
+		status === "waiting_background" ||
+		status === "waiting_permission"
+	);
 }
 
 // ── Event window (L8) ───────────────────────────────────────────────────────

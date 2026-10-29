@@ -67,6 +67,13 @@ const toTerminalBtns = [
 	document.getElementById("git-to-terminal-btn"),
 	document.getElementById("chat-to-terminal-btn"),
 ].filter((b): b is HTMLButtonElement => b instanceof HTMLButtonElement);
+// Mobile bottom navigation (index.html #view-nav). Shown only while an
+// overlay is up: on the Terminal view the key bar owns the bottom edge and
+// the terminal's layout box must not change on a view switch, so the nav
+// never overlaps it. CSS hides the nav entirely on wide screens.
+const terminalArea = document.getElementById("terminal-area");
+const viewNav = document.getElementById("view-nav");
+const navButtons = [...(viewNav?.querySelectorAll<HTMLButtonElement>("button[data-view]") ?? [])];
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -156,6 +163,14 @@ function renderSwitch(): void {
 	for (const [name, btn] of Object.entries(buttons)) {
 		btn.setAttribute("aria-pressed", String(view === name));
 	}
+	const navOn = view !== "terminal" && !viewSwitch.hidden;
+	if (viewNav) viewNav.hidden = !navOn;
+	terminalArea?.classList.toggle("view-nav-on", navOn);
+	for (const b of navButtons) {
+		const name = b.dataset.view as View;
+		b.setAttribute("aria-pressed", String(view === name));
+		if (name === "terminal") b.disabled = buttons.terminal.disabled;
+	}
 }
 
 function terminalAvailable(): boolean {
@@ -179,6 +194,7 @@ export function syncSessionViews(): void {
 	const canTerminal = terminalAvailable();
 	buttons.terminal.disabled = !canTerminal;
 	for (const b of toTerminalBtns) b.disabled = !canTerminal;
+	renderSwitch();
 	const hint = canTerminal ? "" : "Start the session to use the terminal";
 	buttons.terminal.title = hint || "Show terminal";
 	for (const b of toTerminalBtns) b.title = hint || "Back to terminal";
@@ -203,6 +219,16 @@ export function showFilesOnly(): void {
 
 buttons.terminal.addEventListener("click", () => setView("terminal"));
 for (const b of toTerminalBtns) b.addEventListener("click", () => setView("terminal"));
+for (const b of navButtons) {
+	b.addEventListener("click", () => {
+		const name = b.dataset.view as View;
+		if (name === "terminal") setView("terminal");
+		else {
+			setView(name);
+			if (isMobile()) setChromeOpen(false);
+		}
+	});
+}
 for (const name of ["files", "git", "chat"] as const) {
 	buttons[name].addEventListener("click", () => {
 		setView(name);

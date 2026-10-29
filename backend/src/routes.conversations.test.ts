@@ -103,6 +103,22 @@ describe("GET /api/sessions/:id/conversations", () => {
 		expect(body.conversations[0]).toMatchObject({ sessionId: "c1", canSendInput: false });
 		expect(list).toHaveBeenCalledWith("s1");
 	});
+	it("?capture=0 answers the summaries alone, without the capture check (no relay probe)", async () => {
+		const list = vi.fn();
+		const summaries = vi.fn(async () => [
+			{ sessionId: "c1", kind: "interactive", status: "running", canSendInput: false },
+		]);
+		await start({ list, summaries } as unknown as ConversationService);
+		const res = await fetch(`${base}/api/sessions/s1/conversations?capture=0`);
+		expect(res.status).toBe(200);
+		const body = await res.json();
+		expect(body.capture).toBeNull();
+		expect(body.conversations).toHaveLength(1);
+		expect(summaries).toHaveBeenCalledWith("s1");
+		expect(list).not.toHaveBeenCalled();
+		// A foreign session is still a 404 on this path.
+		expect((await fetch(`${base}/api/sessions/foreign/conversations?capture=0`)).status).toBe(404);
+	});
 	it("a foreign session answers 404 exactly like a missing one", async () => {
 		const list = vi.fn();
 		await start({ list } as unknown as ConversationService);

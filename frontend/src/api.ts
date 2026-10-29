@@ -1610,10 +1610,23 @@ export interface ConversationEventsPage {
 	firstRetainedSeq: number;
 }
 
+export interface ConversationList {
+	/** Null when the request asked to skip the capture check (`capture: false`). */
+	capture: ConversationCapture | null;
+	conversations: ConversationSummary[];
+}
+
+/**
+ * The session's conversations. `capture: false` skips the server's capture
+ * check — it costs a probe of the container's relay — so the list can be
+ * polled often without that cost; the first load and a manual refresh keep it.
+ */
 export async function fetchConversations(
 	sessionId: string,
-): Promise<{ capture: ConversationCapture; conversations: ConversationSummary[] }> {
-	const res = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}/conversations`);
+	opts: { capture?: boolean } = {},
+): Promise<ConversationList> {
+	const qs = opts.capture === false ? "?capture=0" : "";
+	const res = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}/conversations${qs}`);
 	if (!res.ok) throw new Error(await errorMessage(res));
 	return res.json();
 }

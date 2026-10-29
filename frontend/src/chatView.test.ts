@@ -13,6 +13,7 @@ const mainState = vi.hoisted(() => ({
 	currentTerminals: new Map<string, unknown>(),
 	mobile: false,
 	showToast: vi.fn(),
+	showCopySuccessToast: vi.fn(),
 	setChromeOpen: vi.fn(),
 }));
 vi.mock("./main.js", () => ({
@@ -29,6 +30,7 @@ vi.mock("./main.js", () => ({
 	isMobile: () => mainState.mobile,
 	setChromeOpen: mainState.setChromeOpen,
 	showToast: mainState.showToast,
+	showCopySuccessToast: mainState.showCopySuccessToast,
 	updateChromeToggle: vi.fn(),
 }));
 
@@ -128,8 +130,19 @@ beforeAll(async () => {
 				<button id="chat-back-btn" hidden></button>
 				<div id="chat-summary"></div>
 				<button id="chat-refresh-btn"></button>
-				<div id="chat-body"><div id="chat-list"></div><div id="chat-thread"></div></div>
+				<div id="chat-body">
+					<div id="chat-list"></div>
+					<div id="chat-thread"></div>
+					<aside id="chat-agents" hidden></aside>
+				</div>
+				<div id="chat-announcer"></div>
 			</div>
+			<nav id="view-nav" hidden>
+				<button data-view="chat"></button>
+				<button data-view="terminal"></button>
+				<button data-view="files"></button>
+				<button data-view="git"></button>
+			</nav>
 		</section>`;
 	vi.stubGlobal(
 		"ResizeObserver",
@@ -145,6 +158,8 @@ beforeAll(async () => {
 
 beforeEach(() => {
 	seq = 0;
+	// The unread dots persist per viewer; tests must not inherit each other's.
+	localStorage.clear();
 	api.fetchConversations.mockReset().mockResolvedValue({
 		capture: { requested: true, effective: true, effectiveAfterRestart: true },
 		conversations: [conv()],
@@ -238,7 +253,12 @@ describe("Chat overlay", () => {
 		const tools = thread.querySelectorAll(".chat-tool");
 		expect(tools).toHaveLength(1);
 		expect(tools[0].classList.contains("failed")).toBe(true);
-		expect(tools[0].textContent).toContain("Bash · npm · 8 B");
+		expect(tools[0].querySelector(".chat-tool-name")?.textContent).toBe("Bash");
+		expect(tools[0].querySelector(".chat-tool-line")?.textContent).toBe("npm · 8 B");
+		// The run of tools is one block whose header counts the failure.
+		const block = thread.querySelector<HTMLDetailsElement>(".chat-tools");
+		expect(block?.open).toBe(true);
+		expect(block?.querySelector(".chat-tools-summary")?.textContent).toContain("1 failed");
 		const ta = thread.querySelector<HTMLTextAreaElement>(".chat-composer textarea");
 		expect(ta?.disabled).toBe(true);
 		// Live socket follows from the newest seq loaded.
@@ -253,6 +273,7 @@ describe("Chat overlay", () => {
 		buttonNamed($("chat-thread"), "Copy report")?.click();
 		await flush();
 		expect(writeText).toHaveBeenCalledWith(REPORT);
+		expect(mainState.showCopySuccessToast).toHaveBeenCalled();
 	});
 
 	it("a truncated report says so on the copy button", async () => {
@@ -291,7 +312,9 @@ describe("Chat overlay", () => {
 			evidence: "hook:UserPromptSubmit",
 			at: new Date().toISOString(),
 		});
-		expect($("chat-summary").textContent).toContain("Working");
+		// Desktop: the status lives in the thread head (the header keeps the list summary).
+		expect($("chat-thread").querySelector(".chat-thread-head")?.textContent).toContain("Working");
+		expect($("chat-summary").textContent).toContain("1 active");
 	});
 
 	it("Load earlier asks for events before the first loaded seq", async () => {
@@ -381,5 +404,156 @@ describe("Chat overlay", () => {
 		await openThread([ev("user_prompt", { prompt: "hi" })]);
 		vs.setView("terminal");
 		expect(sock.close).toHaveBeenCalled();
+	});
+
+	it("switching A → B → A reuses A's window and DOM: no refetch, re-follow from its seq", async () => {
+		api.fetchConversations.mockResolvedValue({
+			capture: { requested: true, effective: true, effectiveAfterRestart: true },
+			conversations: [conv(), conv({ sessionId: "c2", title: "Second" })],
+		});
+		await openChat();
+		seq = 10;
+		await openThread([ev("user_prompt", { prompt: "A text" })]);
+		const aNode = $("chat-thread").querySelector(".chat-user");
+		expect(sock.follow).toHaveBeenLastCalledWith("c1", 11);
+		seq = 20;
+		api.fetchConversationEvents.mockResolvedValueOnce({
+			events: [ev("user_prompt", { prompt: "B text" })],
+			hasMore: false,
+			firstRetainedSeq: 1,
+		});
+		document.querySelectorAll<HTMLButtonElement>(".chat-conv-row")[1]?.click();
+		await flush();
+		expect($("chat-thread").textContent).toContain("B text");
+		expect(api.fetchConversationEvents).toHaveBeenCalledTimes(2);
+		document.querySelectorAll<HTMLButtonElement>(".chat-conv-row")[0]?.click();
+		await flush();
+		expect(api.fetchConversationEvents).toHaveBeenCalledTimes(2);
+		expect($("chat-thread").textContent).toContain("A text");
+		// Same DOM node: the cached thread came back, not a rebuild.
+		expect($("chat-thread").querySelector(".chat-user")).toBe(aNode);
+		expect(sock.follow).toHaveBeenLastCalledWith("c1", 11);
+	});
+
+	it("the final answer is shown once, as the report, with Copy report; code blocks get Copy", async () => {
+		const writeText = vi.fn(async () => {});
+		vi.stubGlobal("navigator", { clipboard: { writeText } });
+		const text = "Done.\n\n```sh\nnpm test\n```\n";
+		await openChat();
+		await openThread([
+			ev("user_prompt", { prompt: "go" }),
+			ev("assistant_delta", { message_id: "m1", index: 0, delta: text, final: true }),
+			ev("turn_end", { last_assistant_message: text }),
+		]);
+		const thread = $("chat-thread");
+		const msgs = thread.querySelectorAll(".chat-assistant");
+		expect(msgs).toHaveLength(1);
+		expect(msgs[0].classList.contains("is-report")).toBe(true);
+		expect(buttonNamed(thread, "Copy report")).toBeTruthy();
+		expect(buttonNamed(thread, "Copy Markdown")).toBeUndefined();
+		const copyCode = thread.querySelector<HTMLButtonElement>(".chat-pre .chat-copy");
+		expect(copyCode?.getAttribute("aria-label")).toBe("Copy code");
+		copyCode?.click();
+		await flush();
+		expect(writeText).toHaveBeenCalledWith("npm test");
+	});
+
+	it("a run of tools is one block: collapsed when long and clean, open when something failed", async () => {
+		await openChat();
+		const events: unknown[] = [ev("user_prompt", { prompt: "go" })];
+		for (let i = 0; i < 6; i++) {
+			events.push(ev("tool_start", { tool_use_id: `t${i}`, tool_name: "Read", summary: {} }));
+			events.push(ev("tool_end", { tool_use_id: `t${i}`, tool_name: "Read", ok: true }));
+		}
+		await openThread(events);
+		const block = $("chat-thread").querySelector<HTMLDetailsElement>(".chat-tools");
+		expect(block?.open).toBe(false);
+		expect(block?.querySelectorAll(".chat-tool")).toHaveLength(6);
+		expect(block?.querySelector(".chat-tools-summary")?.textContent).toContain("6 tool calls");
+		// A failure arriving live opens the block (unless the reader toggled it).
+		sock.onFrame?.({
+			type: "event",
+			conv: "c1",
+			event: ev("tool_start", { tool_use_id: "t9", tool_name: "Bash", summary: {} }),
+		});
+		sock.onFrame?.({
+			type: "event",
+			conv: "c1",
+			event: ev("tool_failed", { tool_use_id: "t9", tool_name: "Bash", ok: false }),
+		});
+		await flush();
+		const after = $("chat-thread").querySelector<HTMLDetailsElement>(".chat-tools");
+		expect(after).toBe(block);
+		expect(after?.open).toBe(true);
+		expect(after?.querySelectorAll(".chat-tool")).toHaveLength(7);
+		expect(after?.querySelector(".chat-tools-failed")?.textContent).toBe("1 failed");
+	});
+
+	it("agents: inline markers in the thread, a panel with status, tools and result", async () => {
+		await openChat();
+		await openThread([
+			ev("user_prompt", { prompt: "go" }),
+			ev("agent_start", { agent_id: "a1", agent_type: "Explore" }, { agent_id: "a1" }),
+			ev("tool_start", { tool_use_id: "x1", tool_name: "Grep", summary: {} }, { agent_id: "a1" }),
+			ev(
+				"agent_end",
+				{ agent_id: "a1", agent_type: "Explore", last_assistant_message: "found **it**" },
+				{ agent_id: "a1" },
+			),
+		]);
+		const thread = $("chat-thread");
+		expect(thread.querySelectorAll(".chat-marker.agent")).toHaveLength(2);
+		expect(thread.textContent).toContain("Explore agent started");
+		expect(thread.textContent).toContain("Explore agent finished");
+		expect($("chat-agents").hidden).toBe(true);
+		const btn = [...thread.querySelectorAll("button")].find((b) =>
+			b.textContent?.startsWith("Agents 1"),
+		);
+		btn?.click();
+		await flush();
+		expect($("chat-agents").hidden).toBe(false);
+		expect($("chat-body").classList.contains("show-agents")).toBe(true);
+		const card = $("chat-agents").querySelector('[data-agent="a1"]');
+		expect(card?.textContent).toContain("Explore");
+		expect(card?.textContent).toContain("1 tool");
+		expect(card?.querySelector(".chat-md strong")?.textContent).toBe("it");
+		expect(buttonNamed($("chat-agents"), "Copy result")).toBeTruthy();
+	});
+
+	it("hello frames refresh the rows: a conversation that grew gets the unread dot", async () => {
+		api.fetchConversations.mockResolvedValue({
+			capture: { requested: true, effective: true, effectiveAfterRestart: true },
+			conversations: [conv(), conv({ sessionId: "c2", title: "Second", lastSeq: 5 })],
+		});
+		await openChat();
+		expect($("chat-list").querySelectorAll(".chat-conv-unread")).toHaveLength(0);
+		await openThread([ev("user_prompt", { prompt: "hi" })]);
+		sock.onFrame?.({
+			type: "hello",
+			conversations: [
+				{ cid: "c1", lastSeq: 10, firstRetainedSeq: 1, status: "waiting_input" },
+				{ cid: "c2", lastSeq: 9, firstRetainedSeq: 1, status: "running" },
+			],
+		});
+		const rows = [...$("chat-list").querySelectorAll<HTMLElement>(".chat-conv-row")];
+		const second = rows.find((r) => r.dataset.cid === "c2");
+		expect(second?.querySelector(".chat-conv-unread")).toBeTruthy();
+		expect(second?.textContent).toContain("Working");
+		expect(rows.find((r) => r.dataset.cid === "c1")?.querySelector(".chat-conv-unread")).toBeNull();
+	});
+
+	it("the view nav is shown while an overlay is up and mirrors the active view", async () => {
+		await openChat();
+		expect($("view-nav").hidden).toBe(false);
+		expect($("terminal-area").classList.contains("view-nav-on")).toBe(true);
+		const pressed = () =>
+			[...$("view-nav").querySelectorAll<HTMLButtonElement>("button")]
+				.filter((b) => b.getAttribute("aria-pressed") === "true")
+				.map((b) => b.dataset.view);
+		expect(pressed()).toEqual(["chat"]);
+		$("view-nav").querySelector<HTMLButtonElement>('[data-view="terminal"]')?.click();
+		expect(vs.getView()).toBe("terminal");
+		expect($("view-nav").hidden).toBe(true);
+		expect($("terminal-area").classList.contains("view-nav-on")).toBe(false);
 	});
 });

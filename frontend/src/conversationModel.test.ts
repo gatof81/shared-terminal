@@ -4,7 +4,11 @@ import {
 	type ConversationEvent,
 	EventWindow,
 	gapText,
+	groupBlocks,
+	statusIsLiveClaim,
+	statusTone,
 	toolLine,
+	toolsSummary,
 	WINDOW_MAX_EVENTS,
 } from "./conversationModel";
 
@@ -163,7 +167,10 @@ describe("reports, gaps and subagents", () => {
 				{ agent_id: "a1" },
 			),
 		]);
-		expect(m.items.map((i) => i.kind)).toEqual(["user"]);
+		// The agent's own activity stays out; the thread keeps where it started and ended.
+		expect(m.items.map((i) => i.kind)).toEqual(["user", "agent", "agent"]);
+		expect(m.items[1]).toMatchObject({ kind: "agent", phase: "start", agentType: "Explore" });
+		expect(m.items[2]).toMatchObject({ kind: "agent", phase: "end", agentId: "a1" });
 		expect(m.toolCount).toBe(0);
 		expect(m.agents).toHaveLength(1);
 		expect(m.agents[0]).toMatchObject({
@@ -213,5 +220,86 @@ describe("EventWindow (L8)", () => {
 		expect(w.atLatest).toBe(false);
 		expect(w.append(mk(601))).toBe(false);
 		expect(w.newerUnseen).toBe(1);
+	});
+});
+
+describe("report merged into the final message", () => {
+	it("a turn_end that repeats the last assistant message marks that message as the report", () => {
+		const text = "## Done\n\nAll green.\n";
+		const m = buildThread([
+			ev("user_prompt", { prompt: "go" }),
+			ev("assistant_delta", { message_id: "m1", index: 0, delta: text, final: true }),
+			ev("tool_start", { tool_use_id: "t1", tool_name: "Bash", summary: {} }),
+			ev("tool_end", { tool_use_id: "t1", tool_name: "Bash", ok: true }),
+			ev("turn_end", { last_assistant_message: text }),
+		]);
+		expect(m.items.map((i) => i.kind)).toEqual(["user", "assistant", "tool"]);
+		expect(m.items[1]).toMatchObject({
+			kind: "assistant",
+			final: true,
+			report: { text, truncated: false, originalBytes: null },
+		});
+	});
+
+	it("a report whose bytes differ, or with no message in the window, stays its own item", () => {
+		const a = buildThread([
+			ev("assistant_delta", { message_id: "m1", index: 0, delta: "partial", final: true }),
+			ev("turn_end", { last_assistant_message: "partial — but longer", truncated: true }),
+		]);
+		expect(a.items.map((i) => i.kind)).toEqual(["assistant", "report"]);
+		expect((a.items[0] as { report: unknown }).report).toBeNull();
+		const b = buildThread([ev("turn_end", { last_assistant_message: "alone" })]);
+		expect(b.items.map((i) => i.kind)).toEqual(["report"]);
+		// A user prompt in between is a new turn: never merged across it.
+		const c = buildThread([
+			ev("assistant_delta", { message_id: "m1", index: 0, delta: "x", final: true }),
+			ev("user_prompt", { prompt: "again" }),
+			ev("turn_end", { last_assistant_message: "x" }),
+		]);
+		expect(c.items.map((i) => i.kind)).toEqual(["assistant", "user", "report"]);
+	});
+});
+
+describe("blocks and status presentation", () => {
+	it("consecutive tools form one block keyed by the first tool; other items stand alone", () => {
+		const m = buildThread([
+			ev("user_prompt", { prompt: "go" }),
+			ev("tool_start", { tool_use_id: "t1", tool_name: "Read", summary: {} }),
+			ev("tool_end", { tool_use_id: "t1", tool_name: "Read", ok: true, duration_ms: 10 }),
+			ev("tool_start", { tool_use_id: "t2", tool_name: "Edit", summary: {} }),
+			ev("tool_failed", { tool_use_id: "t2", tool_name: "Edit", ok: false, duration_ms: 20 }),
+			ev("assistant_delta", { message_id: "m1", index: 0, delta: "done", final: true }),
+			ev("tool_start", { tool_use_id: "t3", tool_name: "Bash", summary: {} }),
+		]);
+		const blocks = groupBlocks(m.items);
+		expect(blocks.map((b) => b.kind)).toEqual(["item", "tools", "item", "tools"]);
+		const run = blocks[1];
+		if (run.kind !== "tools") throw new Error("expected tools");
+		expect(run.key).toBe("Ttt1");
+		expect(run.tools.map((t) => t.toolUseId)).toEqual(["t1", "t2"]);
+		expect(toolsSummary(run.tools)).toEqual({
+			count: 2,
+			failed: 1,
+			running: 0,
+			names: ["Read", "Edit"],
+			durationMs: 30,
+		});
+		const tail = blocks[3];
+		if (tail.kind !== "tools") throw new Error("expected tools");
+		expect(toolsSummary(tail.tools)).toMatchObject({ running: 1, durationMs: null });
+	});
+
+	it("status tones and live claims follow the contract's state machine", () => {
+		expect(statusTone("running")).toBe("active");
+		expect(statusTone("waiting_input")).toBe("ready");
+		expect(statusTone("waiting_permission")).toBe("attention");
+		expect(statusTone("error")).toBe("error");
+		expect(statusTone("ended")).toBe("done");
+		expect(statusTone("disconnected")).toBe("muted");
+		expect(statusTone("unknown")).toBe("muted");
+		expect(statusIsLiveClaim("running")).toBe(true);
+		expect(statusIsLiveClaim("waiting_permission")).toBe(true);
+		expect(statusIsLiveClaim("ended")).toBe(false);
+		expect(statusIsLiveClaim("disconnected")).toBe(false);
 	});
 });
