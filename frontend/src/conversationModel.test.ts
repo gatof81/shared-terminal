@@ -217,9 +217,14 @@ describe("EventWindow (L8)", () => {
 		);
 		expect(w.events.length).toBe(WINDOW_MAX_EVENTS);
 		expect(w.events[0].seq).toBe(1);
+		expect(w.events[w.events.length - 1].seq).toBe(500);
 		expect(w.atLatest).toBe(false);
+		// The 100 dropped from the newest end count as newer-than-the-window…
+		expect(w.newerUnseen).toBe(100);
+		// …and so does a live event that arrives while not at the latest.
 		expect(w.append(mk(601))).toBe(false);
-		expect(w.newerUnseen).toBe(1);
+		expect(w.newerUnseen).toBe(101);
+		expect(w.lastSeq).toBe(601);
 	});
 });
 

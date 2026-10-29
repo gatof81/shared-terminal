@@ -93,6 +93,23 @@ interface ThreadCache {
 	loadedAt: number;
 	/** Live blocks that arrived below the reader's position (the "↓ N new" pill). */
 	pendingBelow: number;
+	/**
+	 * Newest seq in the window at the last render. A block is "new below the
+	 * reader" only past it: an older page prepends hundreds of blocks the
+	 * reader has not seen either, but those are above, not below.
+	 */
+	renderedLastSeq: number;
+}
+
+/**
+ * The reader's place while an older page lands: the first block in view
+ * (by the seq its block starts at, not its DOM key — a run of tools split by
+ * the page boundary is re-keyed by the older first tool) and where its top
+ * edge sat relative to the scroller's.
+ */
+interface ReadAnchor {
+	seq: number;
+	offset: number;
 }
 
 /** Conversations kept warm for instant switching (LRU). */
@@ -318,6 +335,7 @@ async function openConversation(cid: string, opts: { fresh?: boolean } = {}): Pr
 			liveStatus: null,
 			loadedAt: Date.now(),
 			pendingBelow: 0,
+			renderedLastSeq: 0,
 		};
 		t.window.setLatest(page.events, page.hasMore);
 		touchCache(t);
@@ -358,10 +376,13 @@ async function loadOlder(): Promise<void> {
 	if (sid === null || cid === null || !t || first === null || loadingOlder()) return;
 	const gen = threadGen;
 	loadingOlderGen = gen;
-	renderAll();
-	// Keep the reader's place: measure from the bottom, restore after.
+	// Keep the reader's place by the block they are looking at, not by the
+	// distance to the bottom: L8 may drop the newest events of the window
+	// when the page lands, and anything measured from the bottom would then
+	// move the reader by exactly the dropped height (C6).
 	const sc = threadScroller();
-	const fromBottom = sc ? sc.scrollHeight - sc.scrollTop : 0;
+	const anchor = sc ? captureAnchor(sc) : null;
+	renderAll();
 	try {
 		const page = await fetchConversationEvents(sid, cid, { before: first, limit: PAGE });
 		if (gen !== threadGen) return;
@@ -375,7 +396,56 @@ async function loadOlder(): Promise<void> {
 	if (gen !== threadGen) return;
 	renderAll();
 	const after = threadScroller();
-	if (after) after.scrollTop = after.scrollHeight - fromBottom;
+	if (after) restoreAnchor(after, t, anchor);
+}
+
+/** The first block at least partly in view, and where its top edge sits. */
+function captureAnchor(sc: HTMLElement): ReadAnchor | null {
+	const top = sc.getBoundingClientRect().top;
+	for (const child of sc.children) {
+		const seq = Number((child as HTMLElement).dataset.seq);
+		if (!Number.isFinite(seq) || seq <= 0) continue; // the Load-earlier button, markers
+		const r = child.getBoundingClientRect();
+		if (r.bottom > top) return { seq, offset: r.top - top };
+	}
+	return null;
+}
+
+/**
+ * Put the anchored block back where it was. Blocks are contiguous and in seq
+ * order, so the block holding `anchor.seq` is the last one starting at or
+ * before it. When no block holds it — the window dropped its newest end past
+ * the anchor (L8) — the closest surviving context is the end of the window,
+ * so the reader lands there; the pill then says how many newer events exist.
+ */
+function restoreAnchor(sc: HTMLElement, t: ThreadCache, anchor: ReadAnchor | null): void {
+	if (!anchor) return;
+	const last = t.window.events[t.window.events.length - 1]?.seq ?? 0;
+	if (anchor.seq > last) {
+		setScrollNow(sc, sc.scrollHeight);
+		t.atBottom = nearBottom(sc);
+		return;
+	}
+	let node: HTMLElement | null = null;
+	for (const child of sc.children) {
+		const seq = Number((child as HTMLElement).dataset.seq);
+		if (!Number.isFinite(seq) || seq <= 0) continue;
+		if (seq > anchor.seq) break;
+		node = child as HTMLElement;
+	}
+	if (!node) return;
+	const now = node.getBoundingClientRect().top - sc.getBoundingClientRect().top;
+	setScrollNow(sc, sc.scrollTop + (now - anchor.offset));
+	t.scrollTop = sc.scrollTop;
+	t.atBottom = nearBottom(sc);
+}
+
+/** A position restore must land at once: `scroll-behavior: smooth` would animate it. */
+function setScrollNow(sc: HTMLElement, top: number): void {
+	const prev = sc.style.scrollBehavior;
+	sc.style.scrollBehavior = "auto";
+	sc.scrollTop = top;
+	sc.style.scrollBehavior = prev;
 }
 
 function jumpToLatest(): void {
@@ -786,18 +856,22 @@ function renderThread(opts: { stick: boolean; restore?: boolean }): void {
 		threadEl.replaceChildren(box);
 		return;
 	}
-	if (threadStatus === "loading" || !cur) {
-		threadEl.replaceChildren(skeletonThread());
+	// A failed first page leaves no thread (`cur` null): the error must win
+	// over the skeleton, or the reader waits on a load that is not happening (C5).
+	if (threadStatus === "error") {
+		const box = stateBox(
+			"error",
+			`Could not load this conversation: ${threadError}`,
+			button("Retry", "files-btn", () => {
+				if (selectedCid !== null) void openConversation(selectedCid, { fresh: true });
+			}),
+		);
+		box.classList.add("chat-thread-error");
+		threadEl.replaceChildren(box);
 		return;
 	}
-	if (threadStatus === "error") {
-		threadEl.replaceChildren(
-			stateBox(
-				"error",
-				threadError,
-				button("Retry", "files-btn", () => selectedCid && void openConversation(selectedCid)),
-			),
-		);
+	if (threadStatus === "loading" || !cur) {
+		threadEl.replaceChildren(skeletonThread());
 		return;
 	}
 	const t = cur;
@@ -849,8 +923,9 @@ function renderThread(opts: { stick: boolean; restore?: boolean }): void {
 			continue;
 		}
 		if (!cached) {
-			if (!wasEmpty) fresh++;
-			if (!wasEmpty && b.kind === "item" && b.item.kind === "assistant" && b.item.final)
+			const below = blockSeq(b) > t.renderedLastSeq;
+			if (!wasEmpty && below) fresh++;
+			if (!wasEmpty && below && b.kind === "item" && b.item.kind === "assistant" && b.item.final)
 				announce = true;
 		} else if (
 			!wasEmpty &&
@@ -863,6 +938,7 @@ function renderThread(opts: { stick: boolean; restore?: boolean }): void {
 		}
 		const node =
 			cached && b.kind === "tools" ? updateToolsBlock(cached.node, b.tools) : renderBlock(b);
+		node.dataset.seq = String(blockSeq(b));
 		t.nodes.set(b.key, { sig, node });
 		nodes.push(node);
 	}
@@ -871,11 +947,12 @@ function renderThread(opts: { stick: boolean; restore?: boolean }): void {
 		nodes.push(stateBox("empty", "No events in this conversation yet."));
 	}
 	scroller.replaceChildren(...nodes);
+	t.renderedLastSeq = t.window.events[t.window.events.length - 1]?.seq ?? 0;
 	if (wasEmpty || t.window.lastSeq > (seen.get(t.cid) ?? -1)) {
 		if (!document.hidden) markSeen(t.cid, t.window.lastSeq);
 	}
 	if (opts.restore) {
-		scroller.scrollTop = t.atBottom ? scroller.scrollHeight : t.scrollTop;
+		setScrollNow(scroller, t.atBottom ? scroller.scrollHeight : t.scrollTop);
 		t.pendingBelow = 0;
 	} else if (opts.stick && (wasEmpty || atBottom)) {
 		scroller.scrollTop = scroller.scrollHeight;
@@ -940,6 +1017,11 @@ function updateFloat(): void {
 		return;
 	}
 	pill.hidden = true;
+}
+
+/** The seq a block starts at (its position in the thread). */
+function blockSeq(b: ThreadBlock): number {
+	return b.kind === "tools" ? b.tools[0].seq : b.item.seq;
 }
 
 function signature(b: ThreadBlock): string {

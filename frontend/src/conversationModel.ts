@@ -573,7 +573,11 @@ export class EventWindow {
 	hasOlder = false;
 	/** The window ends at the newest known event. */
 	atLatest = true;
-	/** Live events seen while not at the latest (for "N new events"). */
+	/**
+	 * Events newer than the window's end that it does not hold: dropped from
+	 * the newest end by L8 when an older page landed, or arrived live while
+	 * not at the latest (for "N newer events · Jump to latest").
+	 */
 	newerUnseen = 0;
 	/** Highest seq received from the server, in the window or not. */
 	lastSeq = 0;
@@ -630,6 +634,8 @@ export class EventWindow {
 			this.events.pop();
 			this.total -= this.bytes.pop() ?? 0;
 			this.atLatest = false;
+			// Dropped, not forgotten: the reader is told they exist beyond the window.
+			this.newerUnseen++;
 		}
 	}
 

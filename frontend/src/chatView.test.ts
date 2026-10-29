@@ -557,3 +557,280 @@ describe("Chat overlay", () => {
 		expect($("terminal-area").classList.contains("view-nav-on")).toBe(false);
 	});
 });
+
+// ── C5 / C6: first-page failure, reading position across older pages ────────
+
+/**
+ * jsdom has no layout. This fakes the one the scroller needs: every direct
+ * child of `.chat-scroll` is `row` px tall, the scroller shows `view` px, and
+ * `scrollTop` clamps like a browser's. Returns the undo.
+ */
+function fakeLayout(row = 100, view = 500): () => void {
+	const proto = Element.prototype;
+	const isScroller = (e: Element) => e.classList.contains("chat-scroll");
+	const saved = {
+		rect: proto.getBoundingClientRect,
+		scrollHeight: Object.getOwnPropertyDescriptor(proto, "scrollHeight"),
+		clientHeight: Object.getOwnPropertyDescriptor(proto, "clientHeight"),
+		scrollTop: Object.getOwnPropertyDescriptor(proto, "scrollTop"),
+	};
+	const tops = new WeakMap<Element, number>();
+	const rect = (top: number, height: number) =>
+		({ top, bottom: top + height, height, left: 0, right: 0, width: 0, x: 0, y: top }) as DOMRect;
+	Object.defineProperty(proto, "scrollHeight", {
+		configurable: true,
+		get(this: Element) {
+			return isScroller(this) ? this.childElementCount * row : 0;
+		},
+	});
+	Object.defineProperty(proto, "clientHeight", {
+		configurable: true,
+		get(this: Element) {
+			return isScroller(this) ? view : 0;
+		},
+	});
+	Object.defineProperty(proto, "scrollTop", {
+		configurable: true,
+		get(this: Element) {
+			return tops.get(this) ?? 0;
+		},
+		set(this: Element, v: number) {
+			const max = Math.max(0, this.scrollHeight - this.clientHeight);
+			tops.set(this, Math.min(Math.max(0, v), max));
+		},
+	});
+	proto.getBoundingClientRect = function (this: Element) {
+		if (isScroller(this)) return rect(0, view);
+		const p = this.parentElement;
+		if (p && isScroller(p)) {
+			const i = [...p.children].indexOf(this);
+			return rect(i * row - p.scrollTop, row);
+		}
+		return rect(0, 0);
+	};
+	return () => {
+		proto.getBoundingClientRect = saved.rect;
+		for (const k of ["scrollHeight", "clientHeight", "scrollTop"] as const) {
+			const d = saved[k];
+			if (d) Object.defineProperty(proto, k, d);
+			else delete (proto as unknown as Record<string, unknown>)[k];
+		}
+	};
+}
+
+describe("Chat overlay — first-page error (C5) and reading position (C6)", () => {
+	let undoLayout = () => {};
+	beforeEach(() => {
+		undoLayout = fakeLayout();
+		api.fetchConversations.mockResolvedValue({
+			capture: { requested: true, effective: true, effectiveAfterRestart: true },
+			conversations: [conv(), conv({ sessionId: "c2", title: "Second" })],
+		});
+	});
+	afterEach(() => undoLayout());
+
+	const thread = () => $("chat-thread");
+	const scroller = () => thread().querySelector<HTMLElement>(".chat-scroll") as HTMLElement;
+	const pill = () => thread().querySelector<HTMLButtonElement>(".chat-float") as HTMLButtonElement;
+	const msg = (n: number, prompt = `m${n}`) => ({ ...ev("user_prompt", { prompt }), seq: n });
+	const range = (from: number, to: number) =>
+		Array.from({ length: to - from + 1 }, (_, i) => msg(from + i));
+	const page = (events: unknown[], hasMore: boolean) => ({ events, hasMore, firstRetainedSeq: 1 });
+	const rows = () => document.querySelectorAll<HTMLButtonElement>(".chat-conv-row");
+	/** The reader scrolls: the position plus the event the view listens to. */
+	const scrollTo = (y: number) => {
+		scroller().scrollTop = y;
+		scroller().dispatchEvent(new Event("scroll"));
+	};
+	/** What the reader sees at the top: the first block in view and its offset. */
+	const firstVisible = () => {
+		const sc = scroller();
+		for (const child of sc.children) {
+			const seq = Number((child as HTMLElement).dataset.seq);
+			if (!seq) continue;
+			const r = child.getBoundingClientRect();
+			if (r.bottom > 0) return { seq, offset: r.top };
+		}
+		return null;
+	};
+	/** Where a block's top edge sits relative to the scroller's (null when not in the window). */
+	const topOf = (seq: number) => {
+		const node = [...scroller().children].find(
+			(c) => (c as HTMLElement).dataset.seq === String(seq),
+		);
+		return node ? node.getBoundingClientRect().top : null;
+	};
+	const texts = () =>
+		[...thread().querySelectorAll(".chat-user .chat-text")].map((n) => n.textContent);
+
+	it("C5: a failed first page shows the error and Retry, not the skeleton; Retry reloads; no stale error", async () => {
+		await openChat();
+		api.fetchConversationEvents.mockRejectedValueOnce(new Error("boom"));
+		rows()[0]?.click();
+		await flush();
+		expect(thread().querySelector(".chat-skeleton")).toBeNull();
+		expect(thread().querySelector(".chat-thread-error")?.textContent).toContain("boom");
+		const retry = buttonNamed(thread(), "Retry");
+		expect(retry).toBeDefined();
+		// Retry: back to loading, then the conversation.
+		let resolve: (v: unknown) => void = () => {};
+		api.fetchConversationEvents.mockReturnValueOnce(new Promise((r) => (resolve = r)));
+		retry?.click();
+		await flush();
+		expect(thread().querySelector(".chat-skeleton")).toBeTruthy();
+		expect(buttonNamed(thread(), "Retry")).toBeUndefined();
+		resolve(page([msg(1, "recovered")], false));
+		await flush();
+		expect(texts()).toEqual(["recovered"]);
+		expect(api.fetchConversationEvents).toHaveBeenCalledTimes(2);
+		expect(api.fetchConversationEvents).toHaveBeenLastCalledWith("s1", "c1", { limit: 200 });
+		// B fails; going back to A shows A, and B's error does not follow.
+		api.fetchConversationEvents.mockRejectedValueOnce(new Error("second broke"));
+		rows()[1]?.click();
+		await flush();
+		expect(thread().textContent).toContain("second broke");
+		rows()[0]?.click();
+		await flush();
+		expect(thread().querySelector(".chat-thread-error")).toBeNull();
+		expect(texts()).toEqual(["recovered"]);
+		api.fetchConversationEvents.mockResolvedValueOnce(page([msg(5, "B fine now")], false));
+		rows()[1]?.click();
+		await flush();
+		expect(thread().querySelector(".chat-thread-error")).toBeNull();
+		expect(texts()).toEqual(["B fine now"]);
+	});
+
+	it("C6/1: an older page keeps the block the reader was looking at where it was", async () => {
+		await openChat();
+		await openThread(range(201, 400), true);
+		expect(scroller().scrollTop).toBe(20100 - 500); // opened at the end, clamped
+		scrollTo(150);
+		expect(firstVisible()).toEqual({ seq: 201, offset: -50 });
+		api.fetchConversationEvents.mockResolvedValueOnce(page(range(1, 200), false));
+		buttonNamed(thread(), "Load earlier")?.click();
+		await flush();
+		expect(texts()).toHaveLength(400);
+		expect(firstVisible()).toEqual({ seq: 201, offset: -50 });
+		// Prepended history is not "new below the reader".
+		expect(pill().hidden).toBe(true);
+	});
+
+	it("C6/2: crossing the 500-event window drops the newest end without moving the reader", async () => {
+		await openChat();
+		await openThread(range(301, 600), true);
+		scrollTo(150);
+		expect(firstVisible()).toEqual({ seq: 301, offset: -50 });
+		api.fetchConversationEvents.mockResolvedValueOnce(page(range(1, 300), false));
+		buttonNamed(thread(), "Load earlier")?.click();
+		await flush();
+		expect(texts()).toHaveLength(500);
+		expect(texts()[0]).toBe("m1");
+		expect(texts()[499]).toBe("m500");
+		expect(firstVisible()).toEqual({ seq: 301, offset: -50 });
+		expect(pill().hidden).toBe(false);
+		expect(pill().textContent).toBe("100 newer events · Jump to latest");
+	});
+
+	it("C6/3: crossing the 8 MiB budget keeps the anchor; an anchor dropped by L8 lands at the window's end", async () => {
+		const big = "x".repeat(1_600_000); // ≈ 3.2 MB per event in the window's accounting
+		await openChat();
+		await openThread([msg(50, big), ...range(51, 60), msg(61, big)], true);
+		scrollTo(150);
+		expect(firstVisible()).toEqual({ seq: 50, offset: -50 });
+		api.fetchConversationEvents.mockResolvedValueOnce(page([msg(1, big), ...range(2, 49)], false));
+		buttonNamed(thread(), "Load earlier")?.click();
+		await flush();
+		// Three big events do not fit: 61 was dropped from the newest end; 1..60 stay.
+		expect(texts()).toHaveLength(60);
+		expect(texts()[59]).toBe("m60");
+		expect(firstVisible()).toEqual({ seq: 50, offset: -50 });
+		expect(pill().textContent).toBe("1 newer event · Jump to latest");
+
+		// Fallback: the page alone exceeds the budget, so the anchor itself is dropped.
+		undoLayout();
+		undoLayout = fakeLayout(100, 150);
+		api.fetchConversationEvents.mockResolvedValueOnce(page([msg(10, big), msg(11, big)], true));
+		rows()[1]?.click();
+		await flush();
+		api.fetchConversationEvents.mockResolvedValueOnce(
+			page([msg(1, big), msg(2, big), msg(3, big)], false),
+		);
+		scrollTo(0); // auto-loads the page; the anchor is 10
+		expect(firstVisible()?.seq).toBe(10);
+		await flush();
+		const seqs = [...scroller().children].map((c) => (c as HTMLElement).dataset.seq);
+		expect(seqs).toEqual(["1", "2"]);
+		expect(scroller().scrollTop).toBe(scroller().scrollHeight - scroller().clientHeight);
+		expect(firstVisible()).toEqual({ seq: 1, offset: -50 });
+		expect(pill().textContent).toBe("3 newer events · Jump to latest");
+	});
+
+	it("C6/4: three pages of 200 — the message in view stays the message in view (Work's repro)", async () => {
+		await openChat();
+		await openThread(range(401, 600), true);
+		// Reading up to the top auto-loads the next page; the first block stays put.
+		api.fetchConversationEvents.mockResolvedValueOnce(page(range(201, 400), true));
+		scrollTo(0);
+		expect(firstVisible()).toEqual({ seq: 401, offset: 100 });
+		await flush();
+		expect(texts()).toHaveLength(400);
+		// 401 sits exactly where it was; the page landed above it (400 now fills the button's spot).
+		expect(topOf(401)).toBe(100);
+		expect(firstVisible()).toEqual({ seq: 400, offset: 0 });
+		// The reader scrolls up to message 202 and asks for more.
+		scrollTo(200);
+		expect(firstVisible()).toEqual({ seq: 202, offset: 0 });
+		api.fetchConversationEvents.mockResolvedValueOnce(page(range(1, 200), false));
+		buttonNamed(thread(), "Load earlier")?.click();
+		await flush();
+		expect(texts()).toHaveLength(500);
+		expect(firstVisible()).toEqual({ seq: 202, offset: 0 });
+		expect(pill().textContent).toBe("100 newer events · Jump to latest");
+	});
+
+	it("C6/5: A → B → A comes back to each conversation's own reading position", async () => {
+		await openChat();
+		await openThread(range(1, 100), false);
+		scrollTo(4200);
+		expect(firstVisible()?.seq).toBe(43);
+		api.fetchConversationEvents.mockResolvedValueOnce(page(range(201, 300), false));
+		rows()[1]?.click();
+		await flush();
+		expect(scroller().scrollTop).toBe(9500); // a new thread opens at its end
+		scrollTo(1300);
+		rows()[0]?.click();
+		await flush();
+		expect(scroller().scrollTop).toBe(4200);
+		expect(firstVisible()?.seq).toBe(43);
+		rows()[1]?.click();
+		await flush();
+		expect(scroller().scrollTop).toBe(1300);
+		expect(firstVisible()?.seq).toBe(214);
+		expect(api.fetchConversationEvents).toHaveBeenCalledTimes(2);
+	});
+
+	it("C6/6: a live event during an older-page load is counted below the reader, who does not move", async () => {
+		await openChat();
+		await openThread(range(101, 200), true);
+		scrollTo(150);
+		expect(firstVisible()).toEqual({ seq: 101, offset: -50 });
+		let resolve: (v: unknown) => void = () => {};
+		api.fetchConversationEvents.mockReturnValueOnce(new Promise((r) => (resolve = r)));
+		buttonNamed(thread(), "Load earlier")?.click();
+		await flush();
+		sock.onFrame?.({ type: "event", conv: "c1", event: msg(201, "live") });
+		await flush();
+		expect(texts()).toHaveLength(101);
+		expect(firstVisible()).toEqual({ seq: 101, offset: -50 });
+		expect(pill().textContent).toBe("↓ 1 new");
+		resolve(page(range(1, 100), false));
+		await flush();
+		expect(texts()).toHaveLength(201);
+		expect(texts()[200]).toBe("live");
+		expect(firstVisible()).toEqual({ seq: 101, offset: -50 });
+		expect(pill().textContent).toBe("↓ 1 new");
+		// Reaching the bottom clears it.
+		scrollTo(scroller().scrollHeight);
+		expect(pill().hidden).toBe(true);
+	});
+});
