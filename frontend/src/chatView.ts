@@ -604,7 +604,20 @@ function skeletonThread(): HTMLElement {
 
 function renderList(): void {
 	if (!isActive()) return;
+	// Live frames re-render the rows; a reader arrowing through them must not lose their place.
+	const focused =
+		document.activeElement instanceof HTMLElement && listEl.contains(document.activeElement)
+			? document.activeElement.dataset.cid
+			: undefined;
 	listEl.replaceChildren();
+	try {
+		renderListInner();
+	} finally {
+		if (focused) listEl.querySelector<HTMLElement>(`[data-cid="${focused}"]`)?.focus();
+	}
+}
+
+function renderListInner(): void {
 	if (list.status === "idle" || list.status === "loading") {
 		listEl.appendChild(skeletonList());
 		return;
