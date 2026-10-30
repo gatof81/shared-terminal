@@ -2330,6 +2330,10 @@ describe("DockerManager #444 tmux client release", () => {
 		);
 		// Only a process whose argv is exactly ours is ever touched.
 		expect(TMUX_CLIENTS_SCRIPT).toContain("/proc/$1/cmdline");
+		// The server is forked by the first client and inherits its argv: never a target.
+		expect(TMUX_CLIENTS_SCRIPT).toContain(
+			`[ "$1" = "$(tmux display -p '#{pid}' 2>/dev/null)" ] && return 1`,
+		);
 		expect(TMUX_CLIENTS_SCRIPT).toContain(
 			"printf 'tmux\\nnew-session\\n-A\\n-s\\n%s\\n-c\\n/home/developer/workspace' \"$tab\"",
 		);

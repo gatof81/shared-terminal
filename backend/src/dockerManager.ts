@@ -265,7 +265,9 @@ export const TMUX_ATTACH_SCRIPT = `printf '${TMUX_CLIENT_SENTINEL} %d\\n' "$$"; 
 // the shape the attach wrapper runs (tmux after exec, or the bash wrapper
 // before it), checked in /proc — a recycled pid belonging to anything else
 // is never signalled, and a client the user attached by hand is never
-// detached. `detach-client -t <tty>` is the gentle path (the client exits
+// detached. The tmux SERVER is forked by the first client and keeps that
+// client's argv, so it would pass the argv check: it is excluded by pid
+// first (`tmux display -p '#{pid}'`). `detach-client -t <tty>` is the gentle path (the client exits
 // 0, the exec ends); SIGTERM is the fallback for a client tmux does not
 // list yet. Prints one token: detached / terminated / already-exited /
 // not-ours, or `swept N`.
@@ -278,6 +280,7 @@ mode="$2"
 pid="$3"
 ours() {
 	local argv
+	[ "$1" = "$(tmux display -p '#{pid}' 2>/dev/null)" ] && return 1
 	argv="$(tr '\\0' '\\n' < "/proc/$1/cmdline" 2>/dev/null)" || return 1
 	[ -n "$argv" ] || return 1
 	if [ "$argv" = "$(printf 'tmux\\nnew-session\\n-A\\n-s\\n%s\\n-c\\n/home/developer/workspace' "$tab")" ]; then

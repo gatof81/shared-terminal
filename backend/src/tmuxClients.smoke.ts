@@ -89,10 +89,14 @@ async function clients(): Promise<Array<{ pid: number; tty: string }>> {
 		});
 }
 
-/** Attach-client PROCESSES (tmux or still the bash wrapper), whether or not tmux lists them. */
+/**
+ * Attach-client PROCESSES (tmux or still the bash wrapper), whether or not
+ * tmux lists them. The tmux SERVER is forked by the first client and keeps
+ * its argv, so it is excluded by pid.
+ */
 async function clientProcesses(): Promise<number> {
 	const { out } = await execOut(
-		`for f in /proc/[0-9]*/cmdline; do tr '\\0' ' ' < "$f" 2>/dev/null; echo; done | grep -c -E '^(tmux new-session -A -s ${TAB} |bash -c .* st-attach ${TAB} ?$)'`,
+		`srv="$(tmux display -p '#{pid}' 2>/dev/null)"; for f in /proc/[0-9]*/cmdline; do p="\${f#/proc/}"; p="\${p%/cmdline}"; [ "$p" = "$srv" ] && continue; tr '\\0' ' ' < "$f" 2>/dev/null; echo; done | grep -c -E '^(tmux new-session -A -s ${TAB} |bash -c .* st-attach ${TAB} ?$)'`,
 	);
 	return Number(out.trim()) || 0;
 }
@@ -310,7 +314,7 @@ main()
 	.then(async () => {
 		if (failures > 0 && containerId) {
 			const { out } = await execOut(
-				"tmux list-clients -a 2>&1; ps -o pid,args -u developer 2>/dev/null",
+				"tmux list-clients 2>&1; echo \"server pid: $(tmux display -p '#{pid}' 2>&1)\"; ps -o pid,args -u developer 2>/dev/null",
 			).catch(() => ({
 				out: "(no diagnostics)",
 			}));
