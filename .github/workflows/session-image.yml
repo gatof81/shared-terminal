@@ -91,6 +91,14 @@ jobs:
       - name: Smoke test
         run: ./session-image/smoke-test.sh shared-terminal-session
 
+      # #444: the attach client inside the container must exit with the last
+      # WS listener (release) and the leftovers of a dead backend process must
+      # be swept by the next attach — only a real tmux shows it. Drives the real
+      # DockerManager.attach()/detach() against a disposable container.
+      - name: tmux client release smoke test (#444, real Docker)
+        working-directory: backend
+        run: npx tsx src/tmuxClients.smoke.ts shared-terminal-session
+
       # The real CLI against a scripted model (no secrets, no egress to the
       # API) and the real ingest stack; prints and step-summarises the
       # timings the 3.0c PR reports.

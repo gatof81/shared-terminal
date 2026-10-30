@@ -60,7 +60,7 @@ Three pieces cooperate:
 
 Replay on reconnect is a `tmux capture-pane -p -e` snapshot of the current pane (colour + position preserved), not a raw byte stream — there is no `RingBuffer`. To avoid a live/replay ordering race, `attach()` installs an armed `bufferedListener` that collects live bytes into a local tail array during the attach window; `wsHandler` sends the replay, then calls `flushTail()` which drains the tail in order and flips the listener to forward-directly. From the moment the listener is armed onward, the client-visible sequence is deterministic: `[replay][every live delta in arrival order]`.
 
-Multiple browser tabs attaching to the same session share the same tmux exec (each has its own `attachId`, listener, and resize).
+Multiple browser tabs attaching to the same session share the same tmux exec (each has its own `attachId`, listener, and resize). Destroying the host side of that exec never ends the process in the container (#444), so the attach runs through `TMUX_ATTACH_SCRIPT` — a bash wrapper that prints the client's in-container pid as a sentinel line (consumed before any byte reaches a listener) and `exec`s tmux — and `detach()` of the last listener releases exactly that client with `TMUX_CLIENTS_SCRIPT` (`tmux detach-client`, argv-checked in `/proc`, never a kill of the server or session); every spawn sweeps the tab's OTHER attach clients, which is how the leftovers of a dead backend process or of a stream that died host-side disappear. `tmuxClients.smoke.ts` proves both against the real image in the Session Image workflow; a change to the attach command shape must keep the two scripts and that smoke in step.
 
 ### Persistence model
 
