@@ -33,7 +33,9 @@ import {
 	fetchConversationEvents,
 	fetchConversations,
 	openConversationSocket,
+	sendConversationMessage,
 } from "./api.js";
+import { explainCode, normalizeText, validateText } from "./composerText.js";
 import {
 	type AgentView,
 	buildThread,
@@ -556,6 +558,7 @@ function renderAll(opts: { scrollToEnd?: boolean; restoreScroll?: boolean } = {}
 	renderSummary();
 	renderList();
 	renderThread({ stick: opts.scrollToEnd === true, restore: opts.restoreScroll === true });
+	renderComposer();
 	renderAgents();
 }
 
@@ -947,6 +950,7 @@ function renderThread(opts: { stick: boolean; restore?: boolean }): void {
 		nodes.push(stateBox("empty", "No events in this conversation yet."));
 	}
 	scroller.replaceChildren(...nodes);
+	renderPendingBubble();
 	t.renderedLastSeq = t.window.events[t.window.events.length - 1]?.seq ?? 0;
 	if (wasEmpty || t.window.lastSeq > (seen.get(t.cid) ?? -1)) {
 		if (!document.hidden) markSeen(t.cid, t.window.lastSeq);
@@ -1341,18 +1345,262 @@ function agentCard(a: AgentView): HTMLElement {
 	return li;
 }
 
-// ── Composer (3.2 placeholder) ──────────────────────────────────────────────
+// ── Composer (3.2) ──────────────────────────────────────────────────────────
+// CONVERSATION.md §8. The server decides everything; this is the person's
+// side of it: one draft per conversation, one clientMessageId per click,
+// never an automatic retry, and every refusal shown in the server's words.
+
+interface ComposerNotice {
+	tone: "info" | "warn" | "error";
+	text: string;
+	/** A partial delivery (§8.1.6): the next send waits for the person to confirm they looked at the Terminal. */
+	blockUntilChecked?: boolean;
+	/** `misdelivered`: the conversation the text landed in. */
+	conversation?: string;
+}
+interface ComposerState {
+	draft: string;
+	sending: boolean;
+	notice: ComposerNotice | null;
+	/** The optimistic bubble: shown until the matching `user_prompt` arrives or the send is not delivered. */
+	pending: { id: string; text: string; sentAt: number } | null;
+	checked: boolean;
+}
+const composerStates = new Map<string, ComposerState>();
+function composerStateFor(cid: string): ComposerState {
+	let st = composerStates.get(cid);
+	if (!st) {
+		st = { draft: "", sending: false, notice: null, pending: null, checked: false };
+		composerStates.set(cid, st);
+	}
+	return st;
+}
+
+/** Why the composer is disabled right now, in the person's words; null when it can send. */
+function composerBlockReason(c: ConversationSummary | undefined, st: ComposerState): string | null {
+	if (!c) return "Open a conversation to send a message.";
+	if (c.composer?.blocked) return explainCode("send-in-progress", c.composer.reason);
+	if (!c.canSendInput) {
+		if (c.kind !== "interactive")
+			return "Only an interactive Claude Code session can take a message from Chat.";
+		if (list.status === "loaded" && list.capture && !list.capture.effective)
+			return "Capture is not active on this session, so a send could not be confirmed.";
+		return "Sending from Chat is not available for this conversation.";
+	}
+	// The CLI must be at its prompt (§10 "3.2 composer": waiting_input/idle). The
+	// server decides anyway (409 busy / needs-terminal); this only explains the
+	// obvious case before a request. A live claim with stale evidence does not
+	// block — the list may be behind, and the server has the fresh probe.
+	const stale =
+		statusIsLiveClaim(c.status) && Date.now() - Date.parse(c.statusAt) > STALE_EVIDENCE_MS;
+	if (!stale) {
+		if (c.status === "running") return "Claude is working; wait for the turn to finish.";
+		if (c.status === "waiting_permission")
+			return "A permission prompt is open in the terminal. Answer it there first.";
+		if (c.status !== "waiting_input" && c.status !== "waiting_background")
+			return "This conversation is not at its prompt.";
+	}
+	if (st.sending) return "Sending…";
+	if (st.notice?.blockUntilChecked && !st.checked)
+		return "Check the Terminal for partial text, then confirm below.";
+	return null;
+}
 
 function composer(): HTMLElement {
 	const box = el("div", "chat-composer");
+	const c = selected();
+	const cid = selectedCid;
+	const st = cid ? composerStateFor(cid) : null;
+	const status = el("div", "chat-composer-status");
+	const row = el("div", "chat-composer-row");
 	const ta = el("textarea");
-	ta.disabled = true;
-	ta.placeholder = "Replying from Chat arrives in 3.2 — use the Terminal for now";
-	ta.setAttribute("aria-label", "Message (not available yet)");
 	ta.rows = 1;
-	box.appendChild(ta);
-	box.appendChild(button("Open terminal", "files-btn", () => setView("terminal")));
+	ta.setAttribute("aria-label", "Message to Claude");
+	const sendBtn = button("Send", "files-btn chat-send", () => void submitComposer());
+	const reason = st ? composerBlockReason(c, st) : "Open a conversation to send a message.";
+	const can = reason === null;
+	ta.disabled = !can;
+	sendBtn.disabled = !can;
+	ta.placeholder = can ? "Message Claude… (Ctrl+Enter to send)" : reason;
+	if (st) {
+		ta.value = st.draft;
+		ta.addEventListener("input", () => {
+			st.draft = ta.value;
+			ta.rows = Math.min(6, Math.max(1, ta.value.split("\n").length));
+		});
+		ta.rows = Math.min(6, Math.max(1, st.draft.split("\n").length));
+	}
+	ta.addEventListener("keydown", (e) => {
+		if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+			e.preventDefault();
+			void submitComposer();
+		}
+	});
+	if (st?.notice) {
+		status.classList.add(st.notice.tone);
+		status.appendChild(el("span", undefined, st.notice.text));
+		if (st.notice.conversation) {
+			const target = st.notice.conversation;
+			status.appendChild(button("Open it", "chat-link", () => void openConversation(target)));
+		}
+		if (st.notice.blockUntilChecked && !st.checked) {
+			status.appendChild(
+				button("I checked the Terminal", "chat-link", () => {
+					st.checked = true;
+					renderComposer();
+				}),
+			);
+		}
+		status.appendChild(button("Open terminal", "chat-link", () => setView("terminal")));
+	} else if (can) {
+		status.appendChild(
+			el("span", undefined, "Ctrl+Enter sends · / and ! commands belong in the Terminal"),
+		);
+	} else {
+		status.appendChild(el("span", undefined, reason ?? ""));
+		status.appendChild(button("Open terminal", "chat-link", () => setView("terminal")));
+	}
+	row.appendChild(ta);
+	row.appendChild(sendBtn);
+	box.appendChild(status);
+	box.appendChild(row);
 	return box;
+}
+
+/** Re-render only the composer (keeps the thread's DOM and scroll). */
+function renderComposer(): void {
+	const old = threadEl.querySelector<HTMLElement>(".chat-composer");
+	if (!old) return;
+	const hadFocus = old.contains(document.activeElement);
+	const fresh = composer();
+	old.replaceWith(fresh);
+	if (hadFocus) {
+		const ta = fresh.querySelector<HTMLTextAreaElement>("textarea");
+		ta?.focus();
+		ta?.setSelectionRange(ta.value.length, ta.value.length);
+	}
+}
+
+async function submitComposer(): Promise<void> {
+	const sid = stateSessionId;
+	const cid = selectedCid;
+	if (sid === null || cid === null) return;
+	const st = composerStateFor(cid);
+	if (st.sending || composerBlockReason(selected(), st) !== null) return;
+	const v = validateText(st.draft);
+	if (!v.ok) {
+		st.notice = { tone: "error", text: explainCode(v.code) };
+		renderComposer();
+		return;
+	}
+	// One id per click (§8.1.4): a resend is the person's new action.
+	const id = crypto.randomUUID();
+	st.sending = true;
+	st.checked = false;
+	st.notice = { tone: "info", text: "Sending…" };
+	st.pending = { id, text: v.normalized, sentAt: Date.now() };
+	renderComposer();
+	renderPendingBubble();
+	try {
+		const r = await sendConversationMessage(sid, cid, st.draft, id);
+		applyComposerResult(cid, r.status, r.body);
+	} catch (err) {
+		st.pending = null;
+		st.notice = { tone: "error", text: `Send failed: ${(err as Error).message}` };
+	} finally {
+		st.sending = false;
+		renderComposer();
+		renderPendingBubble();
+		// The pane's blocking state and canSendInput come from the list.
+		void loadList({ quiet: true });
+	}
+}
+
+function applyComposerResult(
+	cid: string,
+	status: number,
+	body: Awaited<ReturnType<typeof sendConversationMessage>>["body"],
+): void {
+	const st = composerStateFor(cid);
+	if (status === 202) {
+		switch (body.result) {
+			case "delivered":
+				st.draft = "";
+				st.notice = null;
+				// The bubble stays until the real `user_prompt` arrives over the socket.
+				return;
+			case "misdelivered":
+				st.draft = "";
+				st.pending = null;
+				st.notice = {
+					tone: "info",
+					text: "Delivered, but to another conversation of this pane.",
+					conversation: body.conversation,
+				};
+				return;
+			case "unconfirmed":
+				st.pending = null;
+				st.notice = {
+					tone: "warn",
+					text: "Claude Code did not confirm the message — check the Terminal. It was not retried.",
+				};
+				return;
+			case "uncertain":
+				st.pending = null;
+				st.notice = {
+					tone: "warn",
+					text: "The outcome is not known yet; the pane stays blocked until it is verified. Nothing is retried.",
+				};
+				return;
+		}
+	}
+	st.pending = null;
+	if (status === 502 && body.error === "delivery-failed") {
+		st.notice = {
+			tone: "error",
+			text: `${explainCode("delivery-failed")} (${body.segmentsSent ?? 0} of ${body.segments ?? "?"} parts were pasted.)`,
+			blockUntilChecked: true,
+		};
+		return;
+	}
+	st.notice = { tone: "error", text: explainCode(body.error ?? `http-${status}`, body.detail) };
+}
+
+/**
+ * The optimistic bubble (§10 "3.2 composer"): appended under the thread
+ * while a send is in flight or delivered-but-not-yet-seen, removed as soon
+ * as a `user_prompt` with the same normalized text is in the window.
+ */
+function renderPendingBubble(): void {
+	const sc = threadScroller();
+	if (!sc || !cur) return;
+	const st = composerStates.get(cur.cid);
+	sc.querySelector(".chat-pending")?.remove();
+	if (!st?.pending) return;
+	const seen = buildThread(cur.window.events).items.some(
+		(i) =>
+			i.kind === "user" &&
+			i.origin === "human" &&
+			i.source === null &&
+			normalizeText(i.text) === st.pending?.text &&
+			Date.parse(i.ts) >= st.pending.sentAt - 60_000,
+	);
+	if (seen) {
+		st.pending = null;
+		return;
+	}
+	const bubble = el("article", "chat-msg chat-user chat-pending");
+	bubble.appendChild(meta("You", new Date(st.pending.sentAt).toISOString()));
+	bubble.appendChild(el("div", "chat-text", st.pending.text));
+	bubble.appendChild(
+		el(
+			"div",
+			"chat-pending-state",
+			st.sending ? "Sending…" : "Delivered — waiting for it to appear",
+		),
+	);
+	sc.appendChild(bubble);
+	if (cur.atBottom) sc.scrollTop = sc.scrollHeight;
 }
 
 // ── Copy ────────────────────────────────────────────────────────────────────

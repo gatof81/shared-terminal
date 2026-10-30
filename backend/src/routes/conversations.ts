@@ -19,6 +19,7 @@ import type { AuthedRequest } from "../auth.js";
 import { requireAuth } from "../auth.js";
 import { G5_RESPONSE_BYTES } from "../conversation/limits.js";
 import { readOne, readPage } from "../conversation/reader.js";
+import type { ConversationService } from "../conversation/service.js";
 import { InFlightLimiter } from "../inFlightLimiter.js";
 import { NotFoundError } from "../sessionManager.js";
 import { holdSlotUntilResponseEnds } from "./files.js";
@@ -37,9 +38,36 @@ function intParam(v: unknown): number | undefined {
 }
 
 export function registerConversationRoutes(router: Router, ctx: RouteContext): void {
-	const { sessions, conversation } = ctx;
+	const { sessions, conversation, composer } = ctx;
 	const { conversationIp } = ctx.limiters;
 	const readSlots = new InFlightLimiter(READ_IN_FLIGHT_PER_USER, READ_IN_FLIGHT_TOTAL);
+
+	/**
+	 * 3.2 (§8.1.1, §6): `canSendInput` and the `composer` block, orientative
+	 * — no probe, no exec. The owner is the only caller of this route, so
+	 * `callerMayOperate` is true; `capture.effective` comes from this request
+	 * when it computed it, else from the last one that did.
+	 */
+	const decorate = async (
+		sid: string,
+		capture: { effective: boolean } | null,
+		summaries: Awaited<ReturnType<ConversationService["summaries"]>>,
+	) => {
+		if (!composer) return summaries;
+		if (capture) composer.noteCapture(sid, capture.effective);
+		const av = await composer.availability(
+			sid,
+			summaries.map((s) => ({ cid: s.sessionId, kind: s.kind, paneId: s.paneId })),
+			{
+				captureEffective: capture?.effective ?? composer.lastCaptureEffective(sid),
+				callerMayOperate: true,
+			},
+		);
+		return summaries.map((s) => ({
+			...s,
+			...(av.get(s.sessionId) ?? { canSendInput: false, composer: { blocked: false } }),
+		}));
+	};
 
 	/** Ownership, then the conversation (throws NotFoundError for either). */
 	const resolve = async (req: Request, res: Response) => {
@@ -93,10 +121,18 @@ export function registerConversationRoutes(router: Router, ctx: RouteContext): v
 				// polling the list for status/activity must not pay — nor make
 				// the container pay — for it on every tick.
 				if (req.query.capture === "0") {
-					res.json({ capture: null, conversations: await conversation.summaries(req.params.id) });
+					const summaries = await conversation.summaries(req.params.id);
+					res.json({
+						capture: null,
+						conversations: await decorate(req.params.id, null, summaries),
+					});
 					return;
 				}
-				res.json(await conversation.list(req.params.id));
+				const data = await conversation.list(req.params.id);
+				res.json({
+					...data,
+					conversations: await decorate(req.params.id, data.capture, data.conversations),
+				});
 			} catch (err) {
 				handleSessionError(err, res);
 			}

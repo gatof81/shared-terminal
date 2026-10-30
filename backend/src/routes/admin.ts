@@ -93,6 +93,9 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 					conversationStats = {
 						...(await conversation.adminStats()),
 						recreateOrphans: recreation?.stats.recreateOrphans ?? 0,
+						// 3.2 (§8.1.8): aggregates only — states, codes, blocked panes;
+						// present only while the composer flag is on.
+						...(ctx.composer?.enabled ? { composer: await ctx.composer.adminStats() } : {}),
 					};
 				} catch (err) {
 					logger.warn(`[admin] conversation stats failed: ${(err as Error).message}`);

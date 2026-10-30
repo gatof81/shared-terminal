@@ -25,7 +25,7 @@ vinculante para los PRs
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
 `ac1024d`); si los dos documentos difieren, manda este;
 este archivo define lo que el código debe cumplir y lo que cada PR debe demostrar. Cambiar un
-contrato exige un PR de docs antes o junto con el código.
+contrato exige un PR de docs antes o junto con el código. **v1.7.1**: §8.1.5 paso 2b, consumo del paste antes del siguiente byte (hallazgo del smoke con CLI 2.1.314 durante la implementación 3.2, 2026-10-30)
 
 Convenciones: *MUST*/*MUST NOT* son requisitos verificados por test; *SHOULD* son requisitos
 verificados en revisión. "Bytes" significa siempre bytes UTF-8 del contenido, salvo donde se dice
@@ -1818,6 +1818,18 @@ efecto se ejecuta solo tras `mayAct` (lock vivo, operación no cancelada, §8.1.
 2. Por cada línea, por cada trozo: `tmux load-buffer -b st-<cid>-<n> -` (stdin = trozo) y
    `tmux paste-buffer -p -d -b st-<cid>-<n> -t <pane_id>`. Siempre `-p` (bracketed paste): sin él
    cada `\n` es un Enter (§8.2.5).
+   2b. **Consumo antes del siguiente byte** (v1.7.1, smoke con CLI 2.1.314, 2026-10-30): tras cada
+   paste asentado con 0, y antes de enviar cualquier otro paso, el ejecutor lee la región de
+   entrada (`capture-pane -p -e`, la misma lectura de `composer-not-empty`) hasta ver el trozo
+   consumido — su cola (≤ 24 puntos de código, comparada sin espacios porque la caja de entrada
+   envuelve e indenta) aparece **una vez más** que antes del paste (conteo, no presencia: dos
+   líneas iguales seguidas esperan cada una su propio eco). Sondeo cada 50 ms, ≤ 40 lecturas
+   (≈ 2 s). Sin evidencia ⇒ `failed{stage: paste, segments_sent: k, detail: not-consumed}` (502
+   `delivery-failed`), sin newline ni Enter: el texto puede estar en la entrada y la persona
+   comprueba el Terminal. Motivo: un CSI u o un Enter que el CLI lee **en el mismo read** que el
+   paste anterior se aplica como Enter simple y **envía el segmento** (observado con separación
+   de 0 ms; con ≥ 20 ms de separación el comportamiento es el esperado). La lectura no es un
+   efecto: no se registra en `execs` ni cuenta para `evidence`.
 3. Entre líneas: `tmux send-keys -t <pane_id> -l $'\e[13;2u'` (Shift+Enter en CSI u, que el CLI
    2.1.314 inserta como salto de línea; una línea vacía es dos secuencias seguidas). Invariante: un
    `\n` del texto **nunca** produce Enter.
@@ -1828,9 +1840,9 @@ Antes del primer paste se repite `tmux display -p -t <pane_id> '#{pane_pid} #{pa
 #{pane_dead} #{pane_current_command}'` y debe coincidir con la precondición; si no, 409
 `binding-stale`/`needs-terminal` y la `prepared` se cierra como `failed{stage: precheck,
 segments_sent: 0}` y `released{evidence: none-created}` (el único exec fue la lectura; sin efectos
-sobre el pane). **No** se relee entre pastes: la secuencia completa
-dura milisegundos y la exclusión impide otro envío; lo que no puede excluirse (una tecla de la
-persona, un diálogo que se abre) lo detecta el ack, no la entrega (§8.1.10).
+sobre el pane). Entre pastes se relee **solo** la región de entrada y solo para el consumo del
+paso 2b (no se repite la precondición: la exclusión impide otro envío); lo que no puede excluirse
+(una tecla de la persona, un diálogo que se abre) lo detecta el ack, no la entrega (§8.1.10).
 
 #### 8.1.6 Fallos parciales (fail-closed)
 

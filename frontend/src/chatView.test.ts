@@ -43,6 +43,7 @@ const sock = vi.hoisted(() => ({
 const api = vi.hoisted(() => ({
 	fetchConversations: vi.fn(),
 	fetchConversationEvents: vi.fn(),
+	sendConversationMessage: vi.fn(),
 	openConversationSocket: vi.fn(
 		(_sid: string, onFrame: (f: unknown) => void, onState: (c: boolean) => void) => {
 			sock.onFrame = onFrame;
@@ -165,6 +166,7 @@ beforeEach(() => {
 		conversations: [conv()],
 	});
 	api.fetchConversationEvents.mockReset();
+	api.sendConversationMessage.mockReset();
 	api.openConversationSocket.mockClear();
 	sock.follow.mockClear();
 	sock.close.mockClear();
@@ -919,5 +921,169 @@ describe("Chat overlay — §4.2.1 internal notifications are not 'You'", () => 
 			m.textContent?.replace(/\d{1,2}:\d{2}.*$/, "").trim(),
 		);
 		expect(labels).toEqual(["Prompt · origin unverified", "Injected · system", "You"]);
+	});
+});
+
+// ── 3.2 composer (CONVERSATION.md §8, §10 "3.2 composer") ───────────────────
+describe("Composer", () => {
+	const composerTextarea = () =>
+		$("chat-thread").querySelector<HTMLTextAreaElement>(".chat-composer textarea")!;
+	const sendBtn = () => buttonNamed($("chat-thread"), "Send")!;
+	const status = () => $("chat-thread").querySelector<HTMLElement>(".chat-composer-status")!;
+	async function openSendable(over: Record<string, unknown> = {}) {
+		api.fetchConversations.mockReset().mockResolvedValue({
+			capture: { requested: true, effective: true, effectiveAfterRestart: true },
+			conversations: [conv({ canSendInput: true, composer: { blocked: false }, ...over })],
+		});
+		await openChat();
+		// Already-open Chat keeps its list: Refresh fetches it again with this answer.
+		$("chat-refresh-btn").click();
+		await flush();
+		await openThread([ev("user_prompt", { prompt: "earlier" })]);
+	}
+	function type(text: string) {
+		const ta = composerTextarea();
+		ta.value = text;
+		ta.dispatchEvent(new Event("input"));
+	}
+
+	it("is disabled with the reason when the server says so; enabled when canSendInput", async () => {
+		await openChat();
+		await openThread([ev("user_prompt", { prompt: "x" })]);
+		expect(composerTextarea().disabled).toBe(true);
+		await openSendable({
+			canSendInput: false,
+			composer: { blocked: true, reason: "effects-pending", clientMessageId: "abc" },
+		});
+		expect(composerTextarea().disabled).toBe(true);
+		expect(composerTextarea().placeholder).toMatch(/blocked/);
+		await openSendable();
+		expect(composerTextarea().disabled).toBe(false);
+		expect(sendBtn().disabled).toBe(false);
+	});
+
+	it("is disabled while Claude is working or a permission prompt is open; a stale live claim does not block", async () => {
+		await openSendable({ status: "running" });
+		expect(composerTextarea().disabled).toBe(true);
+		expect(composerTextarea().placeholder).toMatch(/working/);
+		await openSendable({ status: "waiting_permission" });
+		expect(composerTextarea().placeholder).toMatch(/permission/);
+		await openSendable({ status: "ended" });
+		expect(composerTextarea().placeholder).toMatch(/not at its prompt/);
+		await openSendable({
+			status: "running",
+			statusAt: new Date(Date.now() - 11 * 60 * 1000).toISOString(),
+		});
+		expect(composerTextarea().disabled).toBe(false);
+	});
+
+	it("a leading / is refused locally in the server's words; nothing is sent", async () => {
+		await openSendable();
+		type("/help");
+		sendBtn().click();
+		await flush();
+		expect(api.sendConversationMessage).not.toHaveBeenCalled();
+		expect(status().textContent).toMatch(/cannot start with/);
+		expect(composerTextarea().value).toBe("/help");
+	});
+
+	it("Ctrl+Enter sends with a fresh uuid, shows the pending bubble, and the bubble yields to the real prompt", async () => {
+		await openSendable();
+		let resolveSend!: (v: unknown) => void;
+		api.sendConversationMessage.mockReturnValueOnce(
+			new Promise((r) => {
+				resolveSend = r;
+			}),
+		);
+		type("do the thing\nnow");
+		composerTextarea().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true }));
+		await flush();
+		expect(api.sendConversationMessage).toHaveBeenCalledTimes(1);
+		const [sid, cid, text, id] = api.sendConversationMessage.mock.calls[0] as string[];
+		expect([sid, cid, text]).toEqual(["s1", "c1", "do the thing\nnow"]);
+		expect(id).toMatch(/^[0-9a-f-]{36}$/);
+		expect($("chat-thread").querySelector(".chat-pending")?.textContent).toContain("do the thing");
+		expect(composerTextarea().disabled).toBe(true); // sending
+		resolveSend({
+			status: 202,
+			body: { result: "delivered", clientMessageId: id, promptId: "p9", seq: 7 },
+		});
+		await flush();
+		expect(composerTextarea().value).toBe("");
+		expect($("chat-thread").querySelector(".chat-pending")).toBeTruthy();
+		// The CLI's own prompt arrives over the socket: the optimistic bubble goes.
+		sock.onFrame?.({
+			type: "event",
+			conv: "c1",
+			event: ev("user_prompt", { prompt: "do the thing\nnow" }),
+		});
+		await flush();
+		expect($("chat-thread").querySelector(".chat-pending")).toBeNull();
+		expect($("chat-thread").querySelectorAll(".chat-user")).toHaveLength(2);
+	});
+
+	it("a 409 keeps the draft and explains it; never retries", async () => {
+		await openSendable();
+		api.sendConversationMessage.mockResolvedValueOnce({ status: 409, body: { error: "busy" } });
+		type("later");
+		sendBtn().click();
+		await flush();
+		expect(api.sendConversationMessage).toHaveBeenCalledTimes(1);
+		expect(status().textContent).toMatch(/Claude is busy/);
+		expect(composerTextarea().value).toBe("later");
+		expect($("chat-thread").querySelector(".chat-pending")).toBeNull();
+	});
+
+	it("a partial delivery (502) blocks the composer until the person confirms they checked the Terminal", async () => {
+		await openSendable();
+		api.sendConversationMessage.mockResolvedValueOnce({
+			status: 502,
+			body: { error: "delivery-failed", stage: "paste", segmentsSent: 1, segments: 3 },
+		});
+		type("a\nb\nc");
+		sendBtn().click();
+		await flush();
+		expect(status().textContent).toMatch(/1 of 3 parts/);
+		expect(composerTextarea().disabled).toBe(true);
+		buttonNamed($("chat-thread"), "I checked the Terminal")?.click();
+		await flush();
+		expect(composerTextarea().disabled).toBe(false);
+	});
+
+	it("unconfirmed and misdelivered are shown as such, with a link for misdelivered", async () => {
+		await openSendable();
+		api.sendConversationMessage.mockResolvedValueOnce({
+			status: 202,
+			body: { result: "unconfirmed" },
+		});
+		type("maybe");
+		sendBtn().click();
+		await flush();
+		expect(status().textContent).toMatch(/did not confirm/);
+		api.sendConversationMessage.mockResolvedValueOnce({
+			status: 202,
+			body: { result: "misdelivered", conversation: "c2" },
+		});
+		type("elsewhere");
+		sendBtn().click();
+		await flush();
+		expect(status().textContent).toMatch(/another conversation/);
+		expect(buttonNamed($("chat-thread"), "Open it")).toBeTruthy();
+	});
+
+	it("composer_send events render as markers: failed/uncertain warn, delivered is silent", async () => {
+		await openChat();
+		await openThread([
+			ev("composer_send", { state: "prepared", client_message_id: "x" }),
+			ev("composer_send", { state: "failed", stage: "paste", client_message_id: "x" }),
+			ev("composer_send", { state: "uncertain", orphaned: true, client_message_id: "y" }),
+			ev("composer_send", { state: "delivered", client_message_id: "z" }),
+		]);
+		const markers = [...$("chat-thread").querySelectorAll(".chat-marker")].map(
+			(m) => m.textContent ?? "",
+		);
+		expect(markers.some((t) => t.includes("failed part-way"))).toBe(true);
+		expect(markers.some((t) => t.includes("backend restart"))).toBe(true);
+		expect(markers.filter((t) => t.includes("Chat"))).toHaveLength(2);
 	});
 });

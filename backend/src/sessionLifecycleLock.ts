@@ -42,7 +42,14 @@ export type LifecycleOp =
 	// its resolution rewrite the port mappings from the config they read
 	// under this lock; a ports edit between that read and the write would be
 	// overwritten — a port made private or removed coming back public.
-	| "ports";
+	| "ports"
+	// 3.2 composer (CONVERSATION.md §8.1.4): a SEPARATE lock instance keyed by
+	// session + pane, not the session lock. `composer-send` is held by the
+	// executor for its whole active phase; `composer-admin` is what the
+	// resolution, the reconciliation and the recovery take — in `fail` mode,
+	// so an active executor answers them 409 instead of being waited for.
+	| "composer-send"
+	| "composer-admin";
 
 export class SessionBusyError extends Error {
 	readonly code = "busy";

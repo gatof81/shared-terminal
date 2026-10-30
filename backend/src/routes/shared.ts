@@ -8,6 +8,7 @@
 import type { Response } from "express";
 import type { BootstrapBroadcaster } from "../bootstrap.js";
 import type { StatsBySession } from "../containerStats.js";
+import type { ComposerService } from "../conversation/composer.js";
 import type { ConversationService } from "../conversation/service.js";
 import type { DockerManager } from "../dockerManager.js";
 import { UploadQuotaExceededError } from "../dockerManager.js";
@@ -57,6 +58,9 @@ export interface RouteContext {
 	recreation?: RecreationEngine;
 	// 3.0d — `CONVERSATION_ALLOW_USERS` (§7), lowercase user ids. Absent ⇒ empty.
 	conversationAllowUsers?: ReadonlySet<string>;
+	// 3.2 — the composer (CONVERSATION.md §8). Absent or disabled ⇒ its routes
+	// are not mounted and `canSendInput` is false everywhere.
+	composer?: ComposerService;
 }
 
 // Exported so wsHandler can apply the same upper bound when validating

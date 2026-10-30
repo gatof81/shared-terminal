@@ -3176,6 +3176,110 @@ export class DockerManager {
 	}
 
 	/**
+	 * The Docker side of the 3.2 composer (CONVERSATION.md §8.1.4 regla 3,
+	 * conversation/composer.ts). Same evidence discipline as `recreateExec`:
+	 * nothing is cut or aborted on this side and the exit comes ONLY from the
+	 * exec's own inspect — anything else is `exitCode: null`, "unknown", with
+	 * the id so the composer can ask again. Two things the recreation's exec
+	 * does not have: `stdin` (the pasted text travels through `load-buffer -`,
+	 * never as an argument) and `onCreated`, which runs between the create and
+	 * the start — the composer writes the exec id to its durable pane record
+	 * there, in the same critical section as its authorization check, and may
+	 * refuse the start (then the exec exists but runs nothing). Only a failure
+	 * to CREATE the exec throws: no process exists.
+	 */
+	composerPort(): {
+		exec(
+			containerId: string,
+			cmd: string[],
+			stdin: Buffer | null,
+			onCreated: (execId: string) => Promise<boolean>,
+		): Promise<{ execId: string; exitCode: number | null; stdout: string }>;
+		execState(execId: string): Promise<{ running: boolean; exitCode: number | null } | null>;
+		containerState(containerId: string): Promise<"running" | "stopped" | "gone">;
+	} {
+		const d = this.docker;
+		return {
+			exec: async (containerId, cmd, stdin, onCreated) => {
+				const exec = await d.getContainer(containerId).exec({
+					Cmd: cmd,
+					AttachStdin: stdin !== null,
+					AttachStdout: true,
+					AttachStderr: true,
+					Tty: false,
+					WorkingDir: "/home/developer/workspace",
+				});
+				if (!(await onCreated(exec.id))) return { execId: exec.id, exitCode: null, stdout: "" };
+				const MAX = 64 * 1024;
+				const chunks: Buffer[] = [];
+				let size = 0;
+				const stdout = new Writable({
+					write(c: Buffer, _e, cb) {
+						if (size < MAX) chunks.push(c.subarray(0, MAX - size));
+						size += c.length;
+						cb();
+					},
+				});
+				const stderr = new Writable({
+					write(_c, _e, cb) {
+						cb();
+					},
+				});
+				try {
+					const stream = await exec.start(
+						stdin !== null ? { hijack: true, stdin: true } : { hijack: false, stdin: false },
+					);
+					if (stdin !== null) {
+						// The text, then EOF: `load-buffer -` reads until the write
+						// side closes; the read side stays open until dockerd ends it.
+						(stream as unknown as { write(b: Buffer): void; end(): void }).write(stdin);
+						(stream as unknown as { end(): void }).end();
+					}
+					await new Promise<void>((resolve) => {
+						d.modem.demuxStream(stream, stdout, stderr);
+						stream.on("end", () => resolve());
+						stream.on("close", () => resolve());
+						stream.on("error", () => resolve());
+					});
+				} catch {
+					// The start may still have run the process: the inspect decides.
+				}
+				const out = Buffer.concat(chunks).toString("utf8");
+				try {
+					const info = await exec.inspect();
+					if (!info.Running && typeof info.ExitCode === "number") {
+						return { execId: exec.id, exitCode: info.ExitCode, stdout: out };
+					}
+				} catch {
+					// Unknown, below.
+				}
+				return { execId: exec.id, exitCode: null, stdout: out };
+			},
+			execState: async (execId) => {
+				try {
+					const i = await d.getExec(execId).inspect();
+					return {
+						running: !!i.Running,
+						exitCode: !i.Running && typeof i.ExitCode === "number" ? i.ExitCode : null,
+					};
+				} catch (err) {
+					if (isNotFound(err)) return null;
+					throw err;
+				}
+			},
+			containerState: async (containerId) => {
+				try {
+					const i = await d.getContainer(containerId).inspect();
+					return i.State?.Running ? "running" : "stopped";
+				} catch (err) {
+					if (isNotFound(err)) return "gone";
+					throw err;
+				}
+			},
+		};
+	}
+
+	/**
 	 * The recreation's exec (CONVERSATION.md §2.7.4). Not `execCapture`:
 	 * that one has a host-side backstop that destroys the stream and
 	 * reports the exit as unknown, which is what git's slot accounting

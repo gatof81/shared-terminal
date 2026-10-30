@@ -129,3 +129,14 @@ jobs:
       - name: Recreation audit smoke test (real Docker)
         working-directory: backend
         run: npx tsx src/recreate/recreateAudit.smoke.ts shared-terminal-session
+
+      # 3.2 composer (CONVERSATION.md §8.2.6, §8.1.5 2b): the real CLI of the
+      # image in a real tmux pane, driven through the backend's own argv
+      # builders and consumption rule — segmented delivery arrives byte for
+      # byte as UserPromptSubmit, `/` is a command not a prompt, a send while
+      # busy is queued, the input region reads empty/text/empty, and the
+      # paste→CSI u same-read hazard is reproduced as evidence. Scripted
+      # model, no key, no egress; disposable container and network.
+      - name: Composer terminal smoke test (real CLI, real tmux)
+        working-directory: backend
+        run: npx tsx src/conversation/composer.smoke.ts docker shared-terminal-session
