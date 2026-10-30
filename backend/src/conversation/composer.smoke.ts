@@ -380,6 +380,17 @@ async function waitCount(f: () => Promise<number>, n: number, ms = 20_000): Prom
 	return false;
 }
 
+/** Clear whatever sits in the CLI's input: Ctrl-U per line plus Backspace for the joins, until the region reads empty. */
+async function clearInput(): Promise<boolean> {
+	for (let i = 0; i < 12; i++) {
+		if (inputRegion(await screen()).kind === "empty") return true;
+		await drv.exec(["timeout", "5", "tmux", "send-keys", "-t", paneId, "C-u"]);
+		await drv.exec(["timeout", "5", "tmux", "send-keys", "-t", paneId, "BSpace"]);
+		await sleep(250);
+	}
+	return inputRegion(await screen()).kind === "empty";
+}
+
 /** The turn is over: the prompt is empty again and a reply marker is on screen (the CLI may clear tmux history, so no counting). */
 async function waitTurnEnd(ms = 60_000): Promise<boolean> {
 	return waitCount(
@@ -556,10 +567,7 @@ async function main(): Promise<void> {
 					(await waitCount(replies, (await replies()) + 0, 1_000)) || (await waitPrompt(60_000)),
 				);
 			}
-			await drv.exec(["timeout", "5", "tmux", "send-keys", "-t", paneId, "C-u"]);
-			await sleep(300);
-			await drv.exec(["timeout", "5", "tmux", "send-keys", "-t", paneId, "C-u"]);
-			check("input cleared after the hazard check", await waitPrompt(10_000));
+			check("input cleared after the hazard check", await clearInput());
 		}
 
 		phase("§8.2.6 (5): a send while the CLI is busy is queued and arrives identical");
@@ -616,7 +624,7 @@ async function main(): Promise<void> {
 			await dumpScreen("after !… + Enter");
 			await drv.exec(["timeout", "5", "tmux", "send-keys", "-t", paneId, "Escape"]);
 			await sleep(800);
-			await drv.exec(["timeout", "5", "tmux", "send-keys", "-t", paneId, "C-u"]);
+			await clearInput();
 			const back = await waitPrompt(20_000);
 			check("the pane recovers after Escape + Ctrl-U (prompt visible again)", back);
 			if (!back) await dumpScreen("after !… + Escape");
