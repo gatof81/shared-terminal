@@ -310,6 +310,24 @@ export function buildThread(events: readonly ConversationEvent[]): ThreadModel {
 		return a;
 	};
 
+	// 3.2: a send whose outcome was unknown at T_http but that later reached a
+	// final state is not shown as unknown (the final state is the truth).
+	const composerFinal = new Set<string>();
+	for (const e of events) {
+		if (e.ev !== "composer_send") continue;
+		const d = e.data as Record<string, unknown>;
+		const state = typeof d.state === "string" ? d.state : "";
+		if (
+			state === "delivered" ||
+			state === "unconfirmed" ||
+			state === "misdelivered" ||
+			state === "failed" ||
+			state === "resolved" ||
+			state === "released"
+		)
+			composerFinal.add(String(d.client_message_id ?? ""));
+	}
+
 	for (const e of events) {
 		const d = e.data ?? {};
 		// Subagent activity: grouped per agent, out of the main thread.
@@ -513,7 +531,9 @@ export function buildThread(events: readonly ConversationEvent[]): ThreadModel {
 				// failed, uncertain, unconfirmed, misdelivered or resolved send
 				// is a marker, once per state. A delivered send is the
 				// `user_prompt` that follows it.
-				const line = composerSendText(d);
+				const superseded =
+					d.state === "uncertain" && composerFinal.has(String(d.client_message_id ?? ""));
+				const line = superseded ? null : composerSendText(d);
 				if (line) {
 					items.push({
 						kind: "marker",

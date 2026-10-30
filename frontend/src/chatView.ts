@@ -1410,8 +1410,8 @@ function composer(): HTMLElement {
 	const box = el("div", "chat-composer");
 	const c = selected();
 	const cid = selectedCid;
+	if (cid) box.dataset.cid = cid;
 	const st = cid ? composerStateFor(cid) : null;
-	const status = el("div", "chat-composer-status");
 	const row = el("div", "chat-composer-row");
 	const ta = el("textarea");
 	ta.rows = 1;
@@ -1436,6 +1436,18 @@ function composer(): HTMLElement {
 			void submitComposer();
 		}
 	});
+	const status = composerStatus(st, reason);
+	row.appendChild(ta);
+	row.appendChild(sendBtn);
+	box.appendChild(status);
+	box.appendChild(row);
+	return box;
+}
+
+/** The composer's status line: the notice, or the hint, or the block reason. */
+function composerStatus(st: ComposerState | null, reason: string | null): HTMLElement {
+	const status = el("div", "chat-composer-status");
+	const can = reason === null;
 	if (st?.notice) {
 		status.classList.add(st.notice.tone);
 		status.appendChild(el("span", undefined, st.notice.text));
@@ -1460,25 +1472,46 @@ function composer(): HTMLElement {
 		status.appendChild(el("span", undefined, reason ?? ""));
 		status.appendChild(button("Open terminal", "chat-link", () => setView("terminal")));
 	}
-	row.appendChild(ta);
-	row.appendChild(sendBtn);
-	box.appendChild(status);
-	box.appendChild(row);
-	return box;
+	return status;
 }
 
-/** Re-render only the composer (keeps the thread's DOM and scroll). */
+/**
+ * Re-render only the composer (keeps the thread's DOM and scroll). The
+ * textarea is updated IN PLACE when it already belongs to the selected
+ * conversation: replacing it on every list poll would reset the caret and
+ * drop an in-progress IME composition while the person types.
+ */
 function renderComposer(): void {
 	const old = threadEl.querySelector<HTMLElement>(".chat-composer");
 	if (!old) return;
-	const hadFocus = old.contains(document.activeElement);
-	const fresh = composer();
-	old.replaceWith(fresh);
-	if (hadFocus) {
-		const ta = fresh.querySelector<HTMLTextAreaElement>("textarea");
-		ta?.focus();
-		ta?.setSelectionRange(ta.value.length, ta.value.length);
+	const cid = selectedCid;
+	const ta = old.querySelector<HTMLTextAreaElement>("textarea");
+	if (!ta || !cid || old.dataset.cid !== cid) {
+		const hadFocus = old.contains(document.activeElement);
+		const fresh = composer();
+		old.replaceWith(fresh);
+		if (hadFocus) {
+			const nta = fresh.querySelector<HTMLTextAreaElement>("textarea");
+			nta?.focus();
+			nta?.setSelectionRange(nta.value.length, nta.value.length);
+		}
+		return;
 	}
+	const st = composerStateFor(cid);
+	const reason = composerBlockReason(selected(), st);
+	const can = reason === null;
+	ta.disabled = !can;
+	ta.placeholder = can ? "Message Claude… (Ctrl+Enter to send)" : reason;
+	// The draft is the state; the DOM follows it only when they differ (a
+	// send cleared it, a result restored it), never while they agree.
+	if (ta.value !== st.draft) {
+		ta.value = st.draft;
+		ta.rows = Math.min(6, Math.max(1, st.draft.split("\n").length));
+	}
+	const sendBtn = old.querySelector<HTMLButtonElement>(".chat-send");
+	if (sendBtn) sendBtn.disabled = !can;
+	const status = old.querySelector<HTMLElement>(".chat-composer-status");
+	if (status) status.replaceWith(composerStatus(st, reason));
 }
 
 async function submitComposer(): Promise<void> {
@@ -1577,14 +1610,22 @@ function renderPendingBubble(): void {
 	const st = composerStates.get(cur.cid);
 	sc.querySelector(".chat-pending")?.remove();
 	if (!st?.pending) return;
-	const seen = buildThread(cur.window.events).items.some(
-		(i) =>
-			i.kind === "user" &&
-			i.origin === "human" &&
-			i.source === null &&
-			normalizeText(i.text) === st.pending?.text &&
-			Date.parse(i.ts) >= st.pending.sentAt - 60_000,
-	);
+	// The CLI's own prompt for this send: a human `user_prompt` with the same
+	// normalized text, not older than the send. Scanned on the raw events,
+	// newest first — never a second thread build per live event.
+	const pending = st.pending;
+	const seen = (() => {
+		const evs = cur.window.events;
+		for (let i = evs.length - 1; i >= 0; i--) {
+			const e = evs[i]!;
+			if (Date.parse(e.ts) < pending.sentAt - 60_000) break;
+			if (e.ev !== "user_prompt") continue;
+			const d = e.data as Record<string, unknown>;
+			if (d.origin === "unverified" || (d.source !== undefined && d.source !== "user")) continue;
+			if (typeof d.prompt === "string" && normalizeText(d.prompt) === pending.text) return true;
+		}
+		return false;
+	})();
 	if (seen) {
 		st.pending = null;
 		return;

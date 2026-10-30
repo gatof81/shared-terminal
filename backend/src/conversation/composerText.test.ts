@@ -173,7 +173,7 @@ describe("segment + stepArgv (§8.1.5)", () => {
 			"-t",
 			"%3",
 			"-S",
-			"-12",
+			"-200",
 		]);
 		expect(ancestryArgv(733, 700).slice(-3)).toEqual(["st-ancestry", "733", "700"]);
 	});
@@ -226,5 +226,21 @@ describe("inputRegion (§8.1.3 composer-not-empty)", () => {
 	});
 	it("a marker wrapped in attributes is still the marker", () => {
 		expect(inputRegion(`${RULE}\n\u001b[1m❯${RESET} \n${RULE}\n`)).toEqual({ kind: "empty" });
+	});
+});
+
+describe("inputRegion SGR handling (§8.1.3)", () => {
+	const RULE = "─".repeat(20);
+	it("a run that only ends an attribute (22m, 39m) leaves the following text typed; dim ghost stays empty", () => {
+		expect(inputRegion(`${RULE}\n❯ \u001b[2mTry "fix the tests"\u001b[22m\n${RULE}\n`)).toEqual({
+			kind: "empty",
+		});
+		expect(inputRegion(`${RULE}\n❯ \u001b[2m\u001b[22mhello\n${RULE}\n`)).toEqual({ kind: "text" });
+		expect(inputRegion(`${RULE}\n\u001b[39m❯ \u001b[38;5;244m\u001b[39mtyped\n${RULE}\n`)).toEqual({
+			kind: "text",
+		});
+		expect(
+			inputRegion(`${RULE}\n❯ \u001b[38;2;10;20;30mghost\u001b[0m \u001b[7m \u001b[0m\n${RULE}\n`),
+		).toEqual({ kind: "empty" });
 	});
 });

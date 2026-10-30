@@ -26,7 +26,13 @@ import { L1_PROMPT_BYTES } from "./limits.js";
 /** Longest single paste that the CLI does not wrap (800 ok, 850 wrapped — §8.2.3). */
 export const SEGMENT_MAX_CHARS = 800;
 /** Upper bound on pastes per message (§8.1.2 `too-many-segments`). */
-export const SEGMENTS_MAX = 256;
+/**
+ * Pastes per message. Each paste costs ≥ 3 execs (paste, ≥ 1 consumption
+ * poll, newline) and T_http is 30 s (§8.1.4): past this many a delivery
+ * would deterministically die mid-way with text in the input, so it is
+ * refused up front with nothing sent (contract v1.7.1).
+ */
+export const SEGMENTS_MAX = 48;
 /** HTTP budget: past it the POST answers `uncertain` and the operation goes on (§8.1.4). */
 export const T_HTTP_MS = 30_000;
 /** Confirmation budget after a SETTLED Enter (§8.1.7). */
@@ -215,7 +221,12 @@ export function parsePaneState(stdout: string): PaneState | null {
 	return { panePid: Number(m[1]), inMode: m[2] === "1", dead: m[3] === "1", command: m[4] };
 }
 
-export const CAPTURE_LINES = 12;
+/**
+ * Lines of the pane (history included) read for the input region. The
+ * CLI's input box grows with the message, so the prompt marker can sit well
+ * above the last rows; the parser takes the LAST marker line anyway.
+ */
+export const CAPTURE_LINES = 200;
 export function captureArgv(paneId: string): string[] {
 	return [
 		"timeout",
@@ -322,28 +333,61 @@ export function inputRegion(dump: string): InputRegion {
 	const r = extractRegion(dump);
 	if ("reason" in r) return { kind: "unknown", reason: r.reason };
 	const region = r.region;
-	// Walk the region: characters outside any SGR styling are "typed".
-	let styled = false;
+	// Walk the region: characters outside any SGR styling are "typed". The
+	// styling is tracked as a set of attribute families, so a run that only
+	// ENDS an attribute (`ESC[22m` normal intensity, `ESC[39m` default
+	// foreground, …) leaves the text unstyled — the ghost suggestion is dim,
+	// and the CLI may end that run without a full `ESC[0m`.
+	const active = new Set<string>();
 	let typed = false;
 	for (let i = 0; i < region.length; ) {
 		if (region[i] === "\u001b") {
 			// biome-ignore lint/suspicious/noControlCharactersInRegex: SGR sequence
 			const m = region.slice(i).match(/^\u001b\[([0-9;?]*)m/);
 			if (!m) return { kind: "unknown", reason: "unparsed-escape" };
-			// `ESC[0m` / `ESC[m` ends styling; anything else starts or changes it.
-			styled = !(
-				m[1] === "" ||
-				m[1] === "0" ||
-				m[1].split(";").every((p) => p === "0" || p === "")
-			);
+			applySgr(active, m[1]!);
 			i += m[0].length;
 			continue;
 		}
 		const ch = region[i]!;
-		if (!/\s/.test(ch) && !styled) typed = true;
+		if (!/\s/.test(ch) && active.size === 0) typed = true;
 		i++;
 	}
 	return typed ? { kind: "text" } : { kind: "empty" };
+}
+
+/** Apply one SGR parameter list to the set of active attribute families. */
+function applySgr(active: Set<string>, params: string): void {
+	const parts = params.split(";");
+	for (let k = 0; k < parts.length; k++) {
+		const n = parts[k] === "" ? 0 : Number(parts[k]);
+		if (Number.isNaN(n)) continue;
+		if (n === 0) active.clear();
+		else if (n === 1 || n === 2) active.add("intensity");
+		else if (n === 22) active.delete("intensity");
+		else if (n === 3) active.add("italic");
+		else if (n === 23) active.delete("italic");
+		else if (n === 4) active.add("underline");
+		else if (n === 24) active.delete("underline");
+		else if (n === 5 || n === 6) active.add("blink");
+		else if (n === 25) active.delete("blink");
+		else if (n === 7) active.add("inverse");
+		else if (n === 27) active.delete("inverse");
+		else if (n === 8) active.add("hidden");
+		else if (n === 28) active.delete("hidden");
+		else if (n === 9) active.add("strike");
+		else if (n === 29) active.delete("strike");
+		else if ((n >= 30 && n <= 37) || (n >= 90 && n <= 97)) active.add("fg");
+		else if (n === 38 || n === 48 || n === 58) {
+			// Extended colour: `38;5;N` or `38;2;R;G;B` consume their arguments.
+			const fam = n === 38 ? "fg" : n === 48 ? "bg" : "underline-colour";
+			active.add(fam);
+			k += parts[k + 1] === "5" ? 2 : parts[k + 1] === "2" ? 4 : 0;
+		} else if (n === 39) active.delete("fg");
+		else if ((n >= 40 && n <= 47) || (n >= 100 && n <= 107)) active.add("bg");
+		else if (n === 49) active.delete("bg");
+		else if (n === 59) active.delete("underline-colour");
+	}
 }
 
 // ── Paste consumption (§8.1.5 paso 2b) ──────────────────────────────────────

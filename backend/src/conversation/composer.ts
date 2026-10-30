@@ -172,12 +172,22 @@ export interface ComposerAvailability {
 
 /** `COMPOSER_CLI_VERSIONS`: comma-separated; empty/unset ⇒ the validated default. */
 export function parseCliVersions(raw: string | undefined): Set<string> {
-	const list = (raw ?? "")
+	const entries = (raw ?? "")
 		.split(",")
 		.map((v) => v.trim())
-		.filter((v) => /^\d+\.\d+\.\d+$/.test(v));
-	return new Set(list.length > 0 ? list : DEFAULT_CLI_VERSIONS);
+		.filter((v) => v.length > 0);
+	if (entries.length === 0) return new Set(DEFAULT_CLI_VERSIONS);
+	const bad = entries.filter((v) => !/^\d+\.\d+\.\d+$/.test(v));
+	// Configured but unusable must not silently become the default: the
+	// operator would believe only their list is allowed (same stance as
+	// TRUST_PROXY). Refuse to start.
+	if (bad.length > 0)
+		throw new Error(`COMPOSER_CLI_VERSIONS: not a version: ${bad.join(", ")} (expected X.Y.Z)`);
+	return new Set(entries);
 }
+
+/** Events read per conversation (newest) when an ack is re-evaluated after the fact. */
+const DEFERRED_ACK_SCAN = 4096;
 
 export class ComposerDisabledError extends Error {
 	constructor() {
@@ -253,6 +263,8 @@ export class ComposerService {
 	readonly stats = {
 		sendsByState: {} as Record<string, number>,
 		rejectedByCode: {} as Record<string, number>,
+		/** State events the store did not take (L6/open); the records stay authoritative. */
+		persistFailures: 0,
 	};
 
 	constructor(private readonly deps: ComposerDeps) {
@@ -342,7 +354,12 @@ export class ComposerService {
 
 		// Recovery first (§8.1.4 regla 8): never admit a send before the
 		// exclusion is rebuilt from the records.
-		await this.recover(sid);
+		try {
+			await this.recover(sid);
+		} catch (err) {
+			logger.warn(`[composer] recovery failed for ${sid}: ${(err as Error).message}`);
+			return this.reject("send-in-progress", 409, { detail: "unverifiable" });
+		}
 		const { records, unreadable } = await this.deps.records.list(sid);
 		if (unreadable.length > 0) {
 			return this.reject("send-in-progress", 409, { detail: "unverifiable" });
@@ -357,7 +374,15 @@ export class ComposerService {
 
 		if (index.kind !== "interactive" || !index.paneId) return this.reject("not-interactive", 409);
 		const paneId = index.paneId;
-		const blocker = records.find((r) => r.pane_id === paneId);
+		let blocker = records.find((r) => r.pane_id === paneId);
+		if (blocker) {
+			// A final, settled operation whose record removal failed earlier is
+			// still ours: re-evaluate (§8.1.4.1) instead of blocking on it.
+			const live = this.live.get(this.key(sid, paneId));
+			if (live && live.record.client_message_id === blocker.client_message_id) {
+				if (await this.tryRelease(live)) blocker = undefined;
+			}
+		}
 		if (blocker) {
 			return this.reject("send-in-progress", 409, {
 				detail:
@@ -610,6 +635,7 @@ export class ComposerService {
 		const plan = segment(normalized);
 		const bufferBase = `st-${r.cid.slice(0, 8)}`;
 		let segmentsSent = 0;
+		let stage: ExecStep = "precheck";
 		const finishActive = () => op.markActiveDone();
 		try {
 			// Precheck: the pane must still be the one the precondition saw.
@@ -629,14 +655,16 @@ export class ComposerService {
 				});
 				return;
 			}
+			// The input region as last seen: the consumption check is count-based
+			// (a line identical to the previous one waits for its own echo), and
+			// the region observed after a paste is the "before" of the next one —
+			// the newline in between adds only whitespace, which the comparison
+			// ignores — so one read per paste is enough.
+			let region = await this.readRegion(r);
 			for (const step of plan.steps) {
-				const stage: ExecStep = step.kind;
+				stage = step.kind;
 				const argv = stepArgv(step, r.pane_id, `${bufferBase}-${segmentsSent}`);
 				const stdin = step.kind === "paste" ? Buffer.from(step.text, "utf8") : null;
-				// The input region BEFORE a paste: the consumption check below is
-				// count-based, so a line identical to the previous one still waits
-				// for its own echo.
-				const before = step.kind === "paste" ? await this.readRegion(r) : null;
 				const res = await this.effect(op, stage, argv, stdin);
 				if (res.kind === "refused") return this.toCancelled(op, stage, segmentsSent, finishActive);
 				if (res.kind === "pending") return this.toUncertain(op, stage, finishActive);
@@ -655,7 +683,8 @@ export class ComposerService {
 					// gets SUBMITTED) — seen with CLI 2.1.314 in the smoke. Without
 					// evidence the delivery fails closed: the text may sit in the
 					// input, so the result is `failed` and the person checks.
-					if (!(await this.awaitConsumed(op, r, before, step.text))) {
+					const after = await this.awaitConsumed(op, r, region, step.text);
+					if (after === null) {
 						await this.toFailed(op, stage, segmentsSent, finishActive, {
 							status: 502,
 							body: {
@@ -668,6 +697,7 @@ export class ComposerService {
 						});
 						return;
 					}
+					region = after;
 				}
 				if (step.kind === "enter") {
 					await this.toEntered(op, finishActive);
@@ -678,13 +708,17 @@ export class ComposerService {
 				if (op.cancelRequested) return this.toCancelled(op, stage, segmentsSent, finishActive);
 			}
 		} catch (err) {
-			// A creation failure: no process exists ⇒ a known failure (§8.1.6).
-			logger.warn(`[composer] exec creation failed: ${(err as Error).message}`);
-			await this.toFailed(op, "paste", segmentsSent, finishActive, {
+			// Only `effect()` throws here (an exec that could not be CREATED: no
+			// process exists ⇒ a known failure, §8.1.6); every transition helper
+			// catches its own persist/record errors so an op that already
+			// reached `entered` can never be flipped to `failed` by a dropped
+			// event. `stage` is the step whose creation failed.
+			logger.warn(`[composer] exec creation failed at ${stage}: ${(err as Error).message}`);
+			await this.toFailed(op, stage, segmentsSent, finishActive, {
 				status: 502,
 				body: {
 					error: "delivery-failed",
-					stage: "paste",
+					stage,
 					segmentsSent,
 					segments: op.segments,
 					detail: "exec-rejected",
@@ -712,20 +746,38 @@ export class ComposerService {
 		}
 	}
 
-	/** Polls the input region until `chunk` shows up as consumed (bounded; false = no evidence). */
+	/**
+	 * Polls the input region until `chunk` shows up as consumed (bounded).
+	 * Returns the region that proved it (the next paste's "before"), or null
+	 * when there is no evidence.
+	 */
 	private async awaitConsumed(
 		op: LiveOp,
 		r: PaneRecord,
 		before: string | null,
 		chunk: string,
-	): Promise<boolean> {
+	): Promise<string | null> {
 		for (let i = 0; i < CONSUME_MAX_POLLS; i++) {
-			if (op.cancelled) return false;
+			if (op.cancelled) return null;
 			const after = await this.readRegion(r);
-			if (after !== null && pasteConsumed(before, after, chunk)) return true;
+			if (after !== null && pasteConsumed(before, after, chunk)) return after;
 			await this.after(CONSUME_POLL_MS);
 		}
-		return false;
+		return null;
+	}
+
+	/** A state event that must not fail the operation: logged, counted, never thrown. */
+	private async persistSafe(
+		op: LiveOp,
+		state: OperationState,
+		extra: Record<string, unknown>,
+	): Promise<void> {
+		try {
+			await this.persist(op, state, extra);
+		} catch (err) {
+			this.stats.persistFailures++;
+			logger.error(`[composer] ${state} event not persisted: ${(err as Error).message}`);
+		}
 	}
 
 	/**
@@ -783,7 +835,11 @@ export class ComposerService {
 			logger.error(`[composer] record write failed: ${(err as Error).message}`),
 		);
 		finishActive();
-		await this.persist(op, "uncertain", {
+		// The ack listener has no op to serve any more (no Enter will settle
+		// through this executor); recovery/reconcile re-arm their own.
+		op.unlisten?.();
+		op.unlisten = null;
+		await this.persistSafe(op, "uncertain", {
 			stage,
 			pending: r.execs.filter((e) => !e.settled).map((e) => ({ id: e.id, step: e.step })),
 		});
@@ -837,7 +893,7 @@ export class ComposerService {
 			logger.error(`[composer] record write failed: ${(err as Error).message}`),
 		);
 		finishActive();
-		await this.persist(op, "failed", { stage, segments_sent: segmentsSent, http });
+		await this.persistSafe(op, "failed", { stage, segments_sent: segmentsSent, http });
 		this.decideHttp(op, http);
 		op.unlisten?.();
 		op.unlisten = null;
@@ -852,7 +908,7 @@ export class ComposerService {
 			logger.error(`[composer] record write failed: ${(err as Error).message}`),
 		);
 		finishActive();
-		await this.persist(op, "entered", {});
+		await this.persistSafe(op, "entered", {});
 		// Ack window (§8.1.7): the listener has been armed since `prepared`, so
 		// a candidate may already be in; otherwise wait for one or for T_ack.
 		if (op.candidates.size === 0) {
@@ -922,20 +978,53 @@ export class ComposerService {
 		};
 	}
 
+	/**
+	 * The live ack's conclusion, under the pane lock (§8.1.4 regla 7: the
+	 * result and the release are written under the exclusion). The executor
+	 * released the lock when its active phase ended, so an admin resolution
+	 * may have run meanwhile: a result that is already final is left alone
+	 * (its HTTP answer is replayed to the waiting request), and an op that
+	 * is no longer the pane's live one writes nothing.
+	 */
 	private async concludeAck(op: LiveOp): Promise<void> {
 		op.unlisten?.();
 		op.unlisten = null;
 		const r = op.record;
-		const d = this.decideResult(op);
-		r.result = d.result;
-		r.state = d.result;
-		r.http = d.http;
-		await this.writeRecord(op).catch((err) =>
-			logger.error(`[composer] record write failed: ${(err as Error).message}`),
-		);
-		await this.persist(op, d.result, { ...d.data, http: d.http });
-		this.decideHttp(op, d.http);
-		await this.tryRelease(op);
+		try {
+			await this.lock.run(
+				op.key,
+				"composer-send",
+				async () => {
+					if (this.live.get(op.key) !== op) {
+						this.decideHttp(op, r.http ?? this.uncertainAnswer(r));
+						return;
+					}
+					if (isFinalResult(r.result)) {
+						this.decideHttp(op, r.http ?? this.uncertainAnswer(r));
+						await this.tryRelease(op);
+						return;
+					}
+					const d = this.decideResult(op);
+					r.result = d.result;
+					r.state = d.result;
+					r.http = d.http;
+					await this.writeRecord(op).catch((err) =>
+						logger.error(`[composer] record write failed: ${(err as Error).message}`),
+					);
+					await this.persistSafe(op, d.result, { ...d.data, http: d.http });
+					this.decideHttp(op, d.http);
+					await this.tryRelease(op);
+				},
+				{ mode: "wait" },
+			);
+		} catch (err) {
+			if (err instanceof SessionBusyError) {
+				logger.warn(`[composer] ack conclusion deferred: pane ${op.key} busy`);
+				this.decideHttp(op, this.uncertainAnswer(r));
+				return;
+			}
+			throw err;
+		}
 	}
 
 	// ── Release (§8.1.4 regla 7) ────────────────────────────────────────────
@@ -947,22 +1036,31 @@ export class ComposerService {
 			return false;
 		const evidence = r.evidence ?? (r.execs.length === 0 ? "none-created" : "inspected");
 		r.evidence = evidence;
-		r.state = "released";
-		if (r.http) this.recentFinals.set(`${r.cid}/${r.client_message_id}`, r.http);
-		this.capRecentFinals();
-		await this.persist(
-			op,
-			"released",
-			{ evidence, http: r.http ?? null },
-			{ confirmed: true },
-		).catch((err) =>
-			logger.error(`[composer] released event persist failed: ${(err as Error).message}`),
-		);
-		await this.deps.records
-			.remove(r.sid, r.pane_id)
-			.catch((err) =>
-				logger.error(`[composer] pane record remove failed: ${(err as Error).message}`),
+		if (r.state !== "released") {
+			// Once: a retry after a failed record removal must not persist a
+			// second `released` nor move the window again.
+			r.state = "released";
+			if (r.http) this.recentFinals.set(`${r.cid}/${r.client_message_id}`, r.http);
+			this.capRecentFinals();
+			await this.persist(
+				op,
+				"released",
+				{ evidence, http: r.http ?? null },
+				{ confirmed: true },
+			).catch((err) =>
+				logger.error(`[composer] released event persist failed: ${(err as Error).message}`),
 			);
+		}
+		try {
+			await this.deps.records.remove(r.sid, r.pane_id);
+		} catch (err) {
+			// The pane stays blocked by a record that is final and settled; the
+			// op stays live so the next send on this pane re-evaluates it
+			// (§8.1.4.1) instead of waiting for a restart.
+			logger.error(`[composer] pane record remove failed: ${(err as Error).message}`);
+			this.live.set(op.key, op);
+			return false;
+		}
 		this.live.delete(op.key);
 		return true;
 	}
@@ -1092,10 +1190,16 @@ export class ComposerService {
 	 * their deferred ack from the persisted events. Once per session per
 	 * process; the admin surface runs it again on demand.
 	 */
+	/**
+	 * Rebuild the exclusion from the records (§8.1.4 regla 8), once per
+	 * session per process — marked done only when the listing succeeded, so
+	 * a transient read error is retried by the next caller. Throws when the
+	 * records cannot be listed (the caller fails closed).
+	 */
 	async recover(sid: string, opts: { force?: boolean } = {}): Promise<void> {
 		if (this.recovered.has(sid) && !opts.force) return;
-		this.recovered.add(sid);
 		const { records } = await this.deps.records.list(sid);
+		this.recovered.add(sid);
 		for (const record of records) {
 			if (this.live.has(this.key(sid, record.pane_id))) continue; // ours, live
 			const key = this.key(sid, record.pane_id);
@@ -1222,9 +1326,14 @@ export class ComposerService {
 		const cids = await this.deps.store.listConversationIds(r.sid).catch(() => [] as string[]);
 		for (const cid of cids) {
 			// The current file and its rotated predecessor (§4.4 L7): a candidate
-			// that landed just before a rotation is still evidence.
+			// that landed just before a rotation is still evidence. Bounded to
+			// the last DEFERRED_ACK_SCAN events per conversation: a candidate is
+			// at most T_ack-and-downtime old, and an older one is `unconfirmed`,
+			// never a wrong attribution.
+			const idx = await this.deps.store.peekIndex(r.sid, cid).catch(() => null);
+			const after = Math.max(0, (idx?.lastSeq ?? 0) - DEFERRED_ACK_SCAN);
 			const events = await this.deps.store
-				.readEvents(r.sid, cid, 0, Number.MAX_SAFE_INTEGER, { archive: true })
+				.readEvents(r.sid, cid, after, DEFERRED_ACK_SCAN, { archive: true })
 				.catch(() => []);
 			for (const ev of events) {
 				if (this.isCandidate(ev, r) && !op.candidates.has(cid))
@@ -1236,7 +1345,10 @@ export class ComposerService {
 			// Still inside the window and nothing persisted yet: a live op is
 			// already waiting in its own ack path; a recovered one gets one
 			// background wait that concludes later. Never block the caller.
-			if (this.live.has(op.key) || op.ackWaiting) return;
+			// Another live op owns the pane's ack, or this one is already waiting
+			// (its own executor's window, or an earlier background wait).
+			const live = this.live.get(op.key);
+			if ((live && live !== op) || op.ackWaiting || op.resolveAck) return;
 			op.ackWaiting = true;
 			this.live.set(op.key, op);
 			this.armAck(op);
@@ -1405,6 +1517,7 @@ export class ComposerService {
 			blockedPanesNow: blocked,
 			effectsPendingNow: pending,
 			unverifiableSessionsNow: unverifiable,
+			persistFailuresSinceBoot: this.stats.persistFailures,
 		};
 	}
 }

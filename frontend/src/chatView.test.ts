@@ -977,6 +977,35 @@ describe("Composer", () => {
 		expect(composerTextarea().disabled).toBe(false);
 	});
 
+	it("a composer re-render keeps the same textarea element, its draft and the caret (no replace while typing)", async () => {
+		await openSendable();
+		const ta = composerTextarea();
+		type("hello world");
+		ta.focus();
+		ta.setSelectionRange(5, 5);
+		// A refused send re-renders the composer twice (sending, then the 409).
+		api.sendConversationMessage.mockResolvedValueOnce({ status: 409, body: { error: "busy" } });
+		sendBtn().click();
+		await flush();
+		expect(composerTextarea()).toBe(ta);
+		expect(ta.value).toBe("hello world");
+		expect(ta.selectionStart).toBe(5);
+		expect(ta.disabled).toBe(false);
+	});
+
+	it("an `uncertain` send that later reached a final state is not shown as unknown", async () => {
+		await openChat();
+		await openThread([
+			ev("composer_send", { state: "uncertain", client_message_id: "a" }),
+			ev("composer_send", { state: "delivered", client_message_id: "a" }),
+			ev("composer_send", { state: "uncertain", client_message_id: "b" }),
+		]);
+		const markers = [...$("chat-thread").querySelectorAll(".chat-marker")].map(
+			(m) => m.textContent ?? "",
+		);
+		expect(markers.filter((t) => t.includes("unknown outcome"))).toHaveLength(1);
+	});
+
 	it("a leading / is refused locally in the server's words; nothing is sent", async () => {
 		await openSendable();
 		type("/help");

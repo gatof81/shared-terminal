@@ -16,7 +16,7 @@
 
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { CONTROL_DIR, SESSION_ID_RE } from "../recreateAttempt.js";
+import { CONTROL_DIR, fsyncDir, SESSION_ID_RE } from "../recreateAttempt.js";
 import { PANE_ID_RE } from "./composerText.js";
 
 export type OperationState =
@@ -198,15 +198,6 @@ function parseRecord(raw: string, sid: string, paneDigits: string): PaneRecord {
 	return out;
 }
 
-async function fsyncDir(dir: string): Promise<void> {
-	const fh = await fs.open(dir, "r");
-	try {
-		await fh.sync();
-	} finally {
-		await fh.close();
-	}
-}
-
 export class PaneRecordStore {
 	constructor(private readonly workspaceRoot: string) {}
 
@@ -278,14 +269,20 @@ export class PaneRecordStore {
 		const dir = path.dirname(file);
 		await fs.mkdir(dir, { recursive: true });
 		const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-		const fh = await fs.open(tmp, "w", 0o600);
+		const fh = await fs.open(tmp, "wx", 0o600);
 		try {
-			await fh.writeFile(JSON.stringify(record), "utf8");
-			await fh.sync();
-		} finally {
-			await fh.close();
+			try {
+				await fh.writeFile(JSON.stringify(record), "utf8");
+				await fh.sync();
+			} finally {
+				await fh.close();
+			}
+			await fs.rename(tmp, file);
+		} catch (err) {
+			// Never leave a temp file behind: `list()` would otherwise see it.
+			await fs.rm(tmp, { force: true }).catch(() => undefined);
+			throw err;
 		}
-		await fs.rename(tmp, file);
 		await fsyncDir(dir);
 	}
 

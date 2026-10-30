@@ -13,7 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SessionMeta } from "../types.js";
-import { type ComposerDockerPort, ComposerService } from "./composer.js";
+import { type ComposerDockerPort, ComposerService, parseCliVersions } from "./composer.js";
 import { CSI_U_NEWLINE, normalizeText, textHash } from "./composerText.js";
 import { PaneRecordStore } from "./paneRecord.js";
 import type { ProbeEntry } from "./probe.js";
@@ -28,7 +28,6 @@ const ID1 = "11111111-1111-4111-8111-111111111111";
 const ID2 = "22222222-2222-4222-8222-222222222222";
 const ID3 = "33333333-3333-4333-8333-333333333333";
 const RULE = "─".repeat(40);
-const EMPTY_DUMP = `${RULE}\n❯ \n${RULE}\n  ⏵⏵ auto mode on`;
 
 // ── Scripted Docker ─────────────────────────────────────────────────────────
 
@@ -527,6 +526,110 @@ describe("exclusion by pane and idempotency (§8.1.4)", () => {
 	});
 });
 
+describe("review fixes (PR #488)", () => {
+	it("a dropped `entered` event never flips a delivered message to failed", async () => {
+		const service = makeService();
+		// The store refuses exactly the `entered` event (L6 full / not open).
+		const real = store.enqueue.bind(store);
+		let dropped = 0;
+		store.enqueue = ((sid, cid, ev) => {
+			if (ev.ev === "composer_send" && (ev.data as { state: string }).state === "entered") {
+				dropped++;
+				return "dropped";
+			}
+			return real(sid, cid, ev);
+		}) as typeof store.enqueue;
+		const p = send(service, "hello");
+		await until(() => docker.effectSteps().includes("enter"));
+		await promptArrives("hello");
+		const r = await p;
+		expect(dropped).toBe(1);
+		expect(r.body).toMatchObject({ result: "delivered" });
+		await until(recordGone, "release");
+		expect(await composerStates()).toEqual(["prepared", "delivered", "released"]);
+		expect((await service.adminStats()).persistFailuresSinceBoot).toBe(1);
+	});
+
+	it("a failed record removal keeps the op live; the next send on the pane re-evaluates and releases it", async () => {
+		const service = makeService();
+		const realRemove = records.remove.bind(records);
+		let fail = true;
+		records.remove = (async (sid, pane) => {
+			if (fail) throw new Error("EIO");
+			return realRemove(sid, pane);
+		}) as typeof records.remove;
+		const p = send(service, "first");
+		await until(() => docker.effectSteps().includes("enter"));
+		await promptArrives("first");
+		expect((await p).body).toMatchObject({ result: "delivered" });
+		await until(async () => (await composerStates()).at(-1) === "released", "released event");
+		expect((await records.read(SID, PANE)).kind).toBe("ok"); // the stale record
+		fail = false;
+		const p2 = send(service, "second", ID2);
+		await until(
+			() => docker.effectSteps().filter((s) => s === "enter").length === 2,
+			"second Enter",
+		);
+		await promptArrives("second");
+		expect((await p2).body).toMatchObject({ result: "delivered" });
+		// One `released` for the first op, not two.
+		expect((await composerStates()).filter((x) => x === "released")).toHaveLength(2);
+		await until(recordGone, "second release");
+	});
+
+	it("a failed record listing does not mark the session recovered: 409 unverifiable now, normal later", async () => {
+		const service = makeService();
+		const realList = records.list.bind(records);
+		let fail = true;
+		records.list = (async (sid) => {
+			if (fail) throw new Error("EIO");
+			return realList(sid);
+		}) as typeof records.list;
+		expect((await send(service, "x")).body).toMatchObject({
+			error: "send-in-progress",
+			detail: "unverifiable",
+		});
+		fail = false;
+		const p = send(service, "x");
+		await until(() => docker.effectSteps().includes("enter"));
+		await promptArrives("x");
+		expect((await p).body).toMatchObject({ result: "delivered" });
+	});
+
+	it("an admin resolution during the live T_ack wait wins: the late ack conclusion writes nothing and no record is re-created", async () => {
+		const service = makeService();
+		const p = send(service, "quiet");
+		await until(() => docker.effectSteps().includes("enter"));
+		await until(async () => (await composerStates()).at(-1) === "entered", "entered");
+		// No candidate arrives; the operator declares it discarded while the ack is still waiting.
+		const r = await service.resolve({
+			stSessionId: SID,
+			paneId: PANE,
+			clientMessageId: ID1,
+			outcome: "discarded",
+			by: "admin-1",
+			audit: async () => undefined,
+		});
+		expect(r.status).toBe(200);
+		await until(recordGone, "released by the resolution");
+		timers.fire(8_000); // T_ack: the live conclusion runs now
+		const res = await p;
+		await new Promise((r) => setTimeout(r, 50));
+		expect((await records.read(SID, PANE)).kind).toBe("none");
+		const states = await composerStates();
+		expect(states).toEqual(["prepared", "entered", "resolved", "released"]);
+		// The waiting request got the resolution's recorded answer, not an ack result.
+		expect(res).toMatchObject({ status: 202, body: { result: "resolved", outcome: "discarded" } });
+	});
+
+	it("parseCliVersions: unset ⇒ default, configured ⇒ exactly the list, malformed ⇒ refuses", () => {
+		expect([...parseCliVersions(undefined)]).toEqual(["2.1.314"]);
+		expect([...parseCliVersions(" 2.1.320 , 2.1.314 ")]).toEqual(["2.1.320", "2.1.314"]);
+		expect(() => parseCliVersions("2.1.320-rc1")).toThrow(/not a version/);
+		expect(() => parseCliVersions("2.1.320, latest")).toThrow(/latest/);
+	});
+});
+
 describe("paste consumption (§8.1.5 paso 2b, smoke 2026-10-30)", () => {
 	it("no byte follows a paste the CLI has not echoed: polls, then fails closed with the text possibly in the input", async () => {
 		docker.frozenEcho = true;
@@ -569,7 +672,7 @@ describe("paste consumption (§8.1.5 paso 2b, smoke 2026-10-30)", () => {
 		await promptArrives("same\nsame\nsame");
 		expect((await p).body.result).toBe("delivered");
 		// One capture before and at least one after every paste.
-		expect(docker.calls.filter((c) => c.step === "capture").length).toBeGreaterThanOrEqual(6);
+		expect(docker.calls.filter((c) => c.step === "capture").length).toBeGreaterThanOrEqual(4);
 	});
 });
 

@@ -25,7 +25,7 @@ vinculante para los PRs
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
 `ac1024d`); si los dos documentos difieren, manda este;
 este archivo define lo que el código debe cumplir y lo que cada PR debe demostrar. Cambiar un
-contrato exige un PR de docs antes o junto con el código. **v1.7.1**: §8.1.5 paso 2b, consumo del paste antes del siguiente byte (hallazgo del smoke con CLI 2.1.314 durante la implementación 3.2, 2026-10-30)
+contrato exige un PR de docs antes o junto con el código. **v1.7.1**: §8.1.5 paso 2b, consumo del paste antes del siguiente byte, y `too-many-segments` en 48 pastes por el presupuesto T_http (hallazgos del smoke con CLI 2.1.314 y de la revisión durante la implementación 3.2, 2026-10-30)
 
 Convenciones: *MUST*/*MUST NOT* son requisitos verificados por test; *SHOULD* son requisitos
 verificados en revisión. "Bytes" significa siempre bytes UTF-8 del contenido, salvo donde se dice
@@ -1614,7 +1614,7 @@ la comparación del ack. Reproduce lo que el CLI 2.1.314 hace por su cuenta con 
 | `text-too-large` | > **L1** bytes |
 | `control-bytes` | cualquier byte < 0x20 salvo `\n`, o 0x7F, o la secuencia `ESC` en cualquier posición (incluye `ESC[13;2u`: el cliente nunca envía teclas) |
 | `unsupported-prefix` | el primer carácter no blanco del texto es `/` o `!` — ambos activan modos del CLI (comando / shell) y no producen `UserPromptSubmit` (§8.2.3) |
-| `too-many-segments` | la secuencia de entrega (§8.1.5) supera **256** pastes |
+| `too-many-segments` | la secuencia de entrega (§8.1.5) supera **48** pastes (v1.7.1: cada paste cuesta ≥ 3 execs —paste, sondeo de consumo, salto— y T_http es 30 s; por encima la entrega moriría a medias con texto en la entrada, así que se rechaza antes de cualquier efecto) |
 
 Solo el primer carácter del mensaje activa modos: una línea posterior que empiece por `/` o `!` es
 texto (§8.2.3) y se acepta. `text_hash` = SHA-256 de `normalize(text)`; es lo único del texto que
@@ -2399,7 +2399,7 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
       en todas las conversaciones (test de rutas); encendida, `canSendInput` según §8.1.1 sin probe.
 - [ ] Validación 400 (§8.1.2): cada código con su vector; `normalize` idempotente y con los casos de
       §8.2.4; `/` y `!` iniciales rechazados, en líneas posteriores aceptados; `ESC` en cualquier
-      posición rechazado; L1 y 256 segmentos.
+      posición rechazado; L1 y 48 segmentos.
 - [ ] Precondiciones 409 (§8.1.3) sobre un `tmux` y un probe simulados, cada una **sin ningún
       exec de entrega**: `busy`, `dialog open`, `permission prompt`, `pane_in_mode`, `pane_dead`,
       foreground `bash`, composer con texto, probe sin la sesión, probe con otro `sessionId`,
