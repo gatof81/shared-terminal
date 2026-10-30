@@ -12,6 +12,7 @@
 
 import { z } from "zod";
 import { isSafeClaudeSessionId } from "./ids.js";
+import { classifyPrompt } from "./internalPrompt.js";
 import {
 	ERROR_TEXT_BYTES,
 	L1_PROMPT_BYTES,
@@ -32,6 +33,7 @@ export type EventName =
 	| "session_start"
 	| "session_end"
 	| "user_prompt"
+	| "internal_prompt"
 	| "assistant_delta"
 	| "tool_start"
 	| "tool_end"
@@ -304,15 +306,40 @@ export function normalizeHookInput(raw: unknown): NormalizeResult {
 		case "UserPromptSubmit": {
 			const prompt = optStr(record.prompt);
 			if (prompt === undefined) return malformed("UserPromptSubmit without prompt");
+			const source = optStr(record.source);
+			const title = optStr(record.session_title);
+			// §4.2.1 — the CLI reuses this hook for its own task notifications
+			// (a subagent or background command finished). Classified on the
+			// full prompt, before L1: a verified notification is persisted
+			// WITHOUT its text — only the ids and the status that correlate it
+			// to the tool and the agent — so the subagent's result is not
+			// stored twice (it is `agent_end.last_assistant_message`) and
+			// nothing the person did not write is shown as theirs.
+			const cls = classifyPrompt(prompt);
+			if (cls.kind === "internal") {
+				const n = cls.notification;
+				const data: EventData = {
+					notice: cls.notice,
+					task_id: n.taskId,
+					tool_use_id: n.toolUseId,
+					status: n.status,
+					prompt_bytes: utf8Bytes(prompt),
+				};
+				if (source !== undefined) data.source = clipAux(source, 32);
+				if (title !== undefined) data.session_title = clipAux(title, L4_AUX_BYTES);
+				return build("internal_prompt", data);
+			}
 			const t = truncateUtf8(prompt, L1_PROMPT_BYTES);
 			const data: EventData = { prompt: t.value };
 			if (t.truncated) {
 				data.truncated = true;
 				data.original_bytes = t.originalBytes;
 			}
-			const source = optStr(record.source);
+			// Shaped like a notification but not a valid one: kept as a prompt
+			// (it may be a person's), marked so the view does not say "You"
+			// and the title is never taken from it.
+			if (cls.kind === "unverified") data.origin = "unverified";
 			if (source !== undefined) data.source = clipAux(source, 32);
-			const title = optStr(record.session_title);
 			if (title !== undefined) data.session_title = clipAux(title, L4_AUX_BYTES);
 			return build("user_prompt", data);
 		}

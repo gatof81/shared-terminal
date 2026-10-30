@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { NOTIFICATION } from "./internalPrompt.testutil.js";
 import { L1_PROMPT_BYTES, L3_REPORT_BYTES } from "./limits.js";
 import { normalizeHookInput } from "./normalize.js";
 
@@ -54,6 +55,54 @@ describe("normalizeHookInput — happy paths", () => {
 		expect(e.promptId).toBe("p1");
 		expect(e.data).toEqual({ prompt: "hola", source: "user" });
 	});
+	it("§4.2.1 UserPromptSubmit carrying a verified task notification → internal_prompt, ids only", () => {
+		const e = ok({
+			...base,
+			hook_event_name: "UserPromptSubmit",
+			prompt: NOTIFICATION,
+			source: "user",
+			session_title: "T",
+		});
+		expect(e.ev).toBe("internal_prompt");
+		expect(e.promptId).toBe("p1");
+		expect(e.data).toEqual({
+			notice: "task-notification",
+			task_id: "afc95b2b37cb620a1",
+			tool_use_id: "toolu_01NrcdMjX7yQ2bK9vTz3Lm4W",
+			status: "completed",
+			prompt_bytes: Buffer.byteLength(NOTIFICATION),
+			source: "user",
+			session_title: "T",
+		});
+		// Never the text: the subagent's result lives in agent_end only.
+		expect(JSON.stringify(e.data)).not.toContain("subagent");
+	});
+
+	it("§4.2.1 a notification-shaped prompt that fails validation stays user_prompt, marked unverified", () => {
+		const e = ok({
+			...base,
+			hook_event_name: "UserPromptSubmit",
+			prompt: NOTIFICATION.replace("toolu_01NrcdMjX7yQ2bK9vTz3Lm4W", "nope"),
+		});
+		expect(e.ev).toBe("user_prompt");
+		expect(e.data.origin).toBe("unverified");
+		expect(e.data.prompt).toContain("<task-notification>");
+	});
+
+	it("§4.2.1 a person mentioning the tags, or pasting a notification plus a question, is user_prompt", () => {
+		for (const prompt of [
+			"why does <task-notification> show up as me?",
+			`${NOTIFICATION}
+
+explain this`,
+		]) {
+			const e = ok({ ...base, hook_event_name: "UserPromptSubmit", prompt });
+			expect(e.ev).toBe("user_prompt");
+			expect(e.data.origin).toBeUndefined();
+			expect(e.data.prompt).toBe(prompt);
+		}
+	});
+
 	it("UserPromptSubmit past L1 is truncated visibly", () => {
 		const e = ok({
 			...base,

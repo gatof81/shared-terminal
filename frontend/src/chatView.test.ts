@@ -834,3 +834,90 @@ describe("Chat overlay — first-page error (C5) and reading position (C6)", () 
 		expect(pill().hidden).toBe(true);
 	});
 });
+
+describe("Chat overlay — §4.2.1 internal notifications are not 'You'", () => {
+	const AGENT_TOOL = "toolu_01NrcdMjX7yQ2bK9vTz3Lm4W";
+	const AGENT = "afc95b2b37cb620a1";
+	const RESULT = "the subagent's own report text";
+	const notification = (toolUseId: string, taskId: string) =>
+		`<task-notification>\n<task-id>${taskId}</task-id>\n<tool-use-id>${toolUseId}</tool-use-id>\n<status>completed</status>\n<result>\n${RESULT}\n</result>\n</task-notification>`;
+	const run = (notice: Record<string, unknown>) => [
+		ev("user_prompt", { prompt: "Run the audit with a subagent" }, { prompt_id: "p1" }),
+		ev("tool_start", {
+			tool_use_id: AGENT_TOOL,
+			tool_name: "Agent",
+			summary: { subagent_type: "Explore" },
+		}),
+		ev("agent_start", { agent_id: AGENT, agent_type: "Explore" }, { agent_id: AGENT }),
+		ev(
+			"agent_end",
+			{ agent_id: AGENT, agent_type: "Explore", last_assistant_message: RESULT },
+			{ agent_id: AGENT },
+		),
+		ev(String(notice.ev), notice.data as Record<string, unknown>, { prompt_id: "p2" }),
+		ev(
+			"assistant_delta",
+			{ message_id: "m2", index: 0, final: true, delta: "Continuing." },
+			{ prompt_id: "p2" },
+		),
+		ev("turn_end", { last_assistant_message: "Continuing." }, { prompt_id: "p2" }),
+	];
+
+	for (const [label, notice] of [
+		[
+			"a persisted internal_prompt",
+			{
+				ev: "internal_prompt",
+				data: {
+					notice: "task-notification",
+					task_id: AGENT,
+					tool_use_id: AGENT_TOOL,
+					status: "completed",
+					prompt_bytes: 180,
+				},
+			},
+		],
+		[
+			"a legacy user_prompt that is a notification",
+			{ ev: "user_prompt", data: { prompt: notification(AGENT_TOOL, AGENT) } },
+		],
+	] as const) {
+		it(`${label}: one 'You', an internal marker tied to the agent, the result shown once (agents panel)`, async () => {
+			await openChat();
+			await openThread(run(notice));
+			const thread = $("chat-thread");
+			const users = [...thread.querySelectorAll(".chat-user")];
+			expect(users).toHaveLength(1);
+			expect(users[0].textContent).toContain("You");
+			expect(users[0].textContent).toContain("Run the audit");
+			const marker = thread.querySelector(".chat-marker.internal");
+			expect(marker?.textContent).toContain("Explore agent finished · result delivered to Claude");
+			expect(thread.textContent).not.toContain(RESULT);
+			expect(thread.textContent).not.toContain("<task-notification>");
+			// Claude's next turn is a report of its own, after the notification.
+			expect(thread.querySelector(".chat-assistant.is-report")?.textContent).toContain(
+				"Continuing.",
+			);
+			// Details opens the agent card, where the result lives once.
+			buttonNamed(marker as HTMLElement, "Details")?.click();
+			await flush();
+			expect($("chat-agents").hidden).toBe(false);
+			expect($("chat-agents").querySelector(`[data-agent="${AGENT}"]`)?.textContent).toContain(
+				RESULT,
+			);
+		});
+	}
+
+	it("an unverifiable notification shape and an injected prompt are labelled, never 'You'", async () => {
+		await openChat();
+		await openThread([
+			ev("user_prompt", { prompt: notification("call_123", AGENT) }),
+			ev("user_prompt", { prompt: "from the lead", source: "system" }),
+			ev("user_prompt", { prompt: "and I say <task-notification> is odd" }),
+		]);
+		const labels = [...$("chat-thread").querySelectorAll(".chat-user .chat-meta")].map((m) =>
+			m.textContent?.replace(/\d{1,2}:\d{2}.*$/, "").trim(),
+		);
+		expect(labels).toEqual(["Prompt · origin unverified", "Injected · system", "You"]);
+	});
+});

@@ -92,7 +92,21 @@ export interface ConversationIndex {
 	endedAt: string | null;
 	endReason: string | null;
 	lastEventAt: string;
+	/**
+	 * The turn correlation (`missing_prompt`, §4.6): the `prompt_id` of the
+	 * newest INGESTED event. Set synchronously by the service at ingest and
+	 * never by persistence — appends are async and batched, so a write of
+	 * the previous turn landing after the next prompt was ingested would
+	 * take it backwards (Work P2-2). Rebuilt from the file on open.
+	 */
 	lastPromptId: string | null;
+	/**
+	 * The `prompt_id` of the newest event ON DISK — what recovery may
+	 * claim. Written by `appendOne`, rebuilt by the file scan; the snapshot
+	 * carries it so a restart never inherits a live value that was still
+	 * queued when the process died.
+	 */
+	persistedPromptId: string | null;
 	claudeVersion: string | null;
 	parentSessionId: string | null;
 	parentInferred: boolean;
@@ -190,6 +204,21 @@ export function capOpenMessages(index: ConversationIndex): void {
 
 // ── Store ───────────────────────────────────────────────────────────────────
 
+/** The `prompt_id` of the last well-formed line that has one; `null` when none does. */
+function lastPromptIdIn(content: string): string | null {
+	let last: string | null = null;
+	for (const line of content.split("\n")) {
+		if (!line) continue;
+		try {
+			const ev = JSON.parse(line) as { prompt_id?: unknown };
+			if (typeof ev.prompt_id === "string" && ev.prompt_id) last = ev.prompt_id;
+		} catch {
+			/* torn line */
+		}
+	}
+	return last;
+}
+
 export class ConversationStore {
 	private readonly fs: StoreFs;
 	private readonly now: () => number;
@@ -281,8 +310,8 @@ export class ConversationStore {
 		cid: string,
 		key: string,
 	): Promise<ConversationIndex> {
-		const index = await this.loadIndex(stSessionId, cid);
-		const fileBytes = await this.recoverFromFile(stSessionId, cid, index);
+		const { index, legacyPromptCorrelation } = await this.loadIndex(stSessionId, cid);
+		const fileBytes = await this.recoverFromFile(stSessionId, cid, index, legacyPromptCorrelation);
 		// A purge or a concurrent registration may have raced the awaits.
 		if (this.purging.has(stSessionId)) throw new Error(`session ${stSessionId} is being purged`);
 		const raced = this.resident.get(key);
@@ -356,7 +385,17 @@ export class ConversationStore {
 		return this.resident.size;
 	}
 
-	private async loadIndex(stSessionId: string, cid: string): Promise<ConversationIndex> {
+	/**
+	 * `legacyPromptCorrelation` is true for a snapshot written before
+	 * `persistedPromptId` existed: its `lastPromptId` is the dead process's
+	 * LIVE value, which may never have reached the disk, so recovery must
+	 * not take it as proof (Work P2-2 round 3). An explicit `null` in a
+	 * modern snapshot is a value, not an absence.
+	 */
+	private async loadIndex(
+		stSessionId: string,
+		cid: string,
+	): Promise<{ index: ConversationIndex; legacyPromptCorrelation: boolean }> {
 		const fresh: ConversationIndex = {
 			v: 1,
 			cid,
@@ -376,6 +415,7 @@ export class ConversationStore {
 			endReason: null,
 			lastEventAt: new Date(this.now()).toISOString(),
 			lastPromptId: null,
+			persistedPromptId: null,
 			claudeVersion: null,
 			parentSessionId: null,
 			parentInferred: false,
@@ -390,26 +430,43 @@ export class ConversationStore {
 			const parsed = JSON.parse(raw) as Partial<ConversationIndex>;
 			if (parsed && parsed.v === 1 && parsed.cid === cid) {
 				return {
-					...fresh,
-					...parsed,
-					agents: parsed.agents ?? {},
-					messageBytes: parsed.messageBytes ?? {},
-					messageIndex: parsed.messageIndex ?? {},
-					sealedMessages: parsed.sealedMessages ?? [],
+					index: {
+						...fresh,
+						...parsed,
+						agents: parsed.agents ?? {},
+						messageBytes: parsed.messageBytes ?? {},
+						messageIndex: parsed.messageIndex ?? {},
+						sealedMessages: parsed.sealedMessages ?? [],
+					},
+					legacyPromptCorrelation: !("persistedPromptId" in parsed),
 				};
 			}
 		} catch {
 			/* no index or unreadable: the file scan below rebuilds */
 		}
-		return fresh;
+		return { index: fresh, legacyPromptCorrelation: false };
 	}
 
-	/** Scan the events file from `index.offset`; returns the file size. */
+	/**
+	 * Scan the events file from `index.offset`; returns the file size.
+	 *
+	 * Turn correlation (§4.6) after a restart is rebuilt from EVIDENCE ON
+	 * DISK only, in three cases: (A) the snapshot recorded a persisted
+	 * prompt id → that is the baseline; (B) it recorded `null` → nothing
+	 * persisted had a prompt id, and the dead process's live `lastPromptId`
+	 * is NOT a fallback (its write may have failed); (C) a legacy snapshot
+	 * without the field → the whole file is read for its last prompt id, and
+	 * the live value is ignored. The re-scanned tail then advances the
+	 * baseline. A missing file proves nothing: (A) keeps its recorded
+	 * value, (B) and (C) are null.
+	 */
 	private async recoverFromFile(
 		stSessionId: string,
 		cid: string,
 		index: ConversationIndex,
+		legacyPromptCorrelation: boolean,
 	): Promise<number> {
+		if (legacyPromptCorrelation) index.persistedPromptId = null;
 		const file = this.eventsPath(stSessionId, cid);
 		let content: string;
 		try {
@@ -418,6 +475,7 @@ export class ConversationStore {
 			// No file: whatever the index claims about seq is unproven.
 			// Keep lastSeq (a rotated-away file can be gone) but reset offset.
 			index.offset = 0;
+			index.lastPromptId = index.persistedPromptId;
 			return 0;
 		}
 		let size = Buffer.byteLength(content, "utf8");
@@ -444,7 +502,15 @@ export class ConversationStore {
 			index.gapsCount = 0;
 			index.lastSeq = Math.max(0, index.lastSeq);
 			index.firstRetainedSeq = 0;
+			index.persistedPromptId = null;
+		} else if (legacyPromptCorrelation) {
+			// Case C: the counters stay trusted up to `offset`, but the
+			// correlation is proven only by the lines before it.
+			index.persistedPromptId = lastPromptIdIn(
+				Buffer.from(content, "utf8").subarray(0, index.offset).toString("utf8"),
+			);
 		}
+		index.lastPromptId = index.persistedPromptId;
 		let scannedSeq = index.offset === 0 ? 0 : index.lastSeq;
 		for (const line of tail.split("\n")) {
 			if (!line) continue;
@@ -461,6 +527,10 @@ export class ConversationStore {
 			index.eventsBytes += Buffer.byteLength(line, "utf8") + 1;
 			if (ev.ev === "gap") index.gapsCount++;
 			if (ev.ts) index.lastEventAt = ev.ts;
+			if (typeof ev.prompt_id === "string" && ev.prompt_id) {
+				index.persistedPromptId = ev.prompt_id;
+				index.lastPromptId = ev.prompt_id;
+			}
 			if (ev.ev === "assistant_delta") {
 				// B6 — the L2 budget must survive a restart: lines past the
 				// snapshot's offset re-add their bytes to the message tally.
@@ -611,7 +681,9 @@ export class ConversationStore {
 		r.index.eventsBytes += lineBytes;
 		r.index.lastEventAt = event.ts;
 		if (event.ev === "gap") r.index.gapsCount++;
-		if (event.prompt_id) r.index.lastPromptId = event.prompt_id;
+		// Persistence records what reached the disk and never touches the
+		// live correlation: `lastPromptId` belongs to ingest (see its doc).
+		if (event.prompt_id) r.index.persistedPromptId = event.prompt_id;
 		if (r.index.firstRetainedSeq === 0) r.index.firstRetainedSeq = seq;
 		r.currentFileBytes += lineBytes;
 		r.dirty = true;

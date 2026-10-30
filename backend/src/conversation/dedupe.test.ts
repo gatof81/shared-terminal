@@ -28,6 +28,11 @@ describe("identityKey", () => {
 			expect(identityKey({ ev, promptId: "p1", agentId: "a1" })).toBeNull();
 		}
 	});
+	it("prompts and internal prompts key on prompt_id, as distinct types", () => {
+		expect(identityKey({ ev: "user_prompt", promptId: "p1" })).toBe("user_prompt:p1");
+		expect(identityKey({ ev: "internal_prompt", promptId: "p1" })).toBe("internal_prompt:p1");
+		expect(identityKey({ ev: "internal_prompt" })).toBeNull();
+	});
 	it("assistant deltas key on agent + message + index", () => {
 		expect(identityKey({ ev: "assistant_delta", messageId: "m", index: 3 })).toBe(
 			"assistant_delta::m:3",
