@@ -137,6 +137,14 @@ jobs:
       # busy is queued, the input region reads empty/text/empty, and the
       # paste→CSI u same-read hazard is reproduced as evidence. Scripted
       # model, no key, no egress; disposable container and network.
-      - name: Composer terminal smoke test (real CLI, real tmux)
+      # The contract wants this list run with the version in COMPOSER_CLI_VERSIONS
+      # (default 2.1.314), not the image's pin (2.1.308, the recreation
+      # allowlist): a second build of the same Dockerfile with only the CLI
+      # version changed — every layer before the install is cached from the
+      # build above, so this costs the npm install and the layers after it.
+      - name: Build session image with the composer's CLI version
+        run: docker build --build-arg CLAUDE_CODE_VERSION=2.1.314 -t shared-terminal-session:cli-2.1.314 ./session-image
+
+      - name: Composer terminal smoke test (real CLI 2.1.314, real tmux)
         working-directory: backend
-        run: npx tsx src/conversation/composer.smoke.ts docker shared-terminal-session
+        run: npx tsx src/conversation/composer.smoke.ts docker shared-terminal-session:cli-2.1.314
