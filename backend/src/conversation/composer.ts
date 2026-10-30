@@ -250,6 +250,8 @@ const isFinalResult = (r: OperationResult): boolean => r !== "pending";
 export class ComposerService {
 	private readonly lock = new SessionLifecycleLock();
 	private readonly live = new Map<string, LiveOp>();
+	/** Graceful shutdown began: no new operation is admitted (503 `shutting-down`). */
+	private stopping = false;
 	/** Finals of this process, consulted before the index (which lags a flush). */
 	private readonly recentFinals = new Map<string, HttpResult>();
 	private readonly recovered = new Set<string>();
@@ -343,6 +345,8 @@ export class ComposerService {
 
 	async send(input: SendInput): Promise<HttpResult> {
 		if (!this.deps.enabled) throw new ComposerDisabledError();
+		if (this.stopping) return this.reject("shutting-down", 503);
+		const startedAt = this.now();
 		const { stSessionId: sid, cid, callerId, meta } = input;
 		const v = validateBody(input.body);
 		if (!v.ok) return this.reject(v.code, 400);
@@ -377,11 +381,18 @@ export class ComposerService {
 		let blocker = records.find((r) => r.pane_id === paneId);
 		if (blocker) {
 			// A final, settled operation whose record removal failed earlier is
-			// still ours: re-evaluate (§8.1.4.1) instead of blocking on it.
+			// still ours: it is re-evaluated UNDER the pane lock, in the active
+			// phase (§8.1.4.1), never here — a release outside the exclusion
+			// could run late and take a successor's record with it.
 			const live = this.live.get(this.key(sid, paneId));
-			if (live && live.record.client_message_id === blocker.client_message_id) {
-				if (await this.tryRelease(live)) blocker = undefined;
-			}
+			if (
+				live &&
+				live.record.client_message_id === blocker.client_message_id &&
+				live.record.phase !== "active" &&
+				isFinalResult(live.record.result) &&
+				effectsOf(live.record) === "settled"
+			)
+				blocker = undefined;
 		}
 		if (blocker) {
 			return this.reject("send-in-progress", 409, {
@@ -406,6 +417,11 @@ export class ComposerService {
 		const opReady = new Promise<LiveOp>((r) => {
 			announce = r;
 		});
+		// T_http bounds the WHOLE request (§8.1.4 regla 4), preconditions
+		// included: a Docker query that hangs there answers 202 `uncertain`
+		// too, and the active phase then refuses to start (nothing written).
+		const ctl = { expired: false };
+		const deadline = this.after(this.tHttp).then(() => ({ kind: "deadline" as const }));
 		const run: Promise<HttpResult | LiveOp> = this.lock
 			.run(
 				key,
@@ -424,6 +440,8 @@ export class ComposerService {
 						segments: v.segments,
 						audit: input.audit,
 						announce,
+						startedAt,
+						ctl,
 					}),
 				{ mode: "fail" },
 			)
@@ -436,7 +454,14 @@ export class ComposerService {
 		const first = await Promise.race([
 			run.then((r) => ({ kind: "run" as const, r })),
 			opReady.then((op) => ({ kind: "op" as const, op })),
+			deadline,
 		]);
+		if (first.kind === "deadline") {
+			ctl.expired = true;
+			this.stats.sendsByState.uncertain = (this.stats.sendsByState.uncertain ?? 0) + 1;
+			run.catch((err) => logger.error(`[composer] active phase failed: ${(err as Error).message}`));
+			return { status: 202, body: { result: "uncertain", clientMessageId } };
+		}
 		if (first.kind === "op") {
 			// The active phase goes on under the lock; its failures are logged there.
 			run.catch((err) => logger.error(`[composer] active phase failed: ${(err as Error).message}`));
@@ -489,10 +514,23 @@ export class ComposerService {
 		audit: () => Promise<void>;
 		/** Called once the operation exists (after `prepared`), so the request can wait on its `http`. */
 		announce: (op: LiveOp) => void;
+		/** When the request began: T_http is measured from here, not from `prepared`. */
+		startedAt: number;
+		/** The request's deadline passed (answered 202 `uncertain`): start nothing. */
+		ctl: { expired: boolean };
 	}): Promise<HttpResult | LiveOp> {
 		const { sid, cid, paneId, clientMessageId } = a;
-		// Under the lock: the record must still be absent.
-		const again = await this.deps.records.read(sid, paneId);
+		// Under the lock: the record must still be absent — or be ours, final
+		// and settled with a removal that failed earlier, in which case the
+		// release is retried HERE, under the same exclusion that will write
+		// the next `prepared` (§8.1.4.1; a release outside it could run late).
+		let again = await this.deps.records.read(sid, paneId);
+		if (again.kind === "ok") {
+			const live = this.live.get(this.key(sid, paneId));
+			if (live && live.record.client_message_id === again.record.client_message_id) {
+				if (await this.tryRelease(live, true)) again = await this.deps.records.read(sid, paneId);
+			}
+		}
 		if (again.kind === "unreadable")
 			return this.reject("send-in-progress", 409, { detail: "unverifiable" });
 		if (again.kind === "ok") {
@@ -549,6 +587,10 @@ export class ComposerService {
 			}
 		}
 
+		// The request already answered `uncertain` at T_http: no effect, no
+		// record, no audit row — the id was never an operation (a retry is new).
+		if (a.ctl.expired) return this.reject("timeout", 409);
+
 		// ── prepared: record, then the confirmed event (§8.1.4) ──
 		const hash = textHash(a.normalized);
 		const at = this.isoNow();
@@ -582,7 +624,10 @@ export class ComposerService {
 		try {
 			await this.deps.records.write(record);
 		} catch (err) {
+			// Not durable (a failed fsync may still have left the file): never
+			// let a half-written record block the pane.
 			logger.error(`[composer] pane record write failed: ${(err as Error).message}`);
+			await this.deps.records.remove(sid, paneId, clientMessageId).catch(() => undefined);
 			return this.reject("persist-failed", 503);
 		}
 		// The ack observation starts here, before any effect (§8.1.7).
@@ -592,40 +637,125 @@ export class ComposerService {
 		} catch (err) {
 			logger.error(`[composer] prepared event persist failed: ${(err as Error).message}`);
 			op.unlisten?.();
-			await this.deps.records.remove(sid, paneId).catch(() => undefined);
+			await this.deps.records.remove(sid, paneId, clientMessageId).catch(() => undefined);
 			return this.reject("persist-failed", 503);
 		}
 		this.live.set(op.key, op);
 		a.announce(op);
 
 		// ── Effects ──
-		// The HTTP answer: T_http races the operation's own decision.
-		void this.after(this.tHttp).then(() => {
-			this.decideHttp(op, { status: 202, body: { result: "uncertain", clientMessageId } });
-			// Past T_http without a settled Enter the operation is cancelled
-			// (regla 4). The record is the executor's to write — it applies the
-			// cancellation at its next step, in the critical section that would
-			// have started the following effect — but the history records now
-			// that the outcome was unknown at this point.
-			if (op.record.phase === "active" && !op.cancelled) {
-				op.cancelRequested = "t-http";
-				void this.persist(op, "uncertain", {
-					stage: op.record.execs.at(-1)?.step ?? "precheck",
-					pending: op.record.execs
-						.filter((e) => !e.settled)
-						.map((e) => ({ id: e.id, step: e.step })),
-					reason: "t-http",
-				}).catch((err) =>
-					logger.warn(`[composer] uncertain event persist failed: ${(err as Error).message}`),
-				);
-			}
-		});
+		// The HTTP answer: what remains of the request's T_http races the
+		// operation's own decision; at the deadline the cancellation is
+		// COMPLETED by the timer (record + exclusion), not merely requested.
+		void this.after(Math.max(0, this.tHttp - (this.now() - a.startedAt))).then(() =>
+			this.onTHttp(op).catch((err) =>
+				logger.error(`[composer] T_http handling failed: ${(err as Error).message}`),
+			),
+		);
 		void this.runEffects(op, a.normalized, paneState.panePid).catch((err) => {
 			logger.error(`[composer] effects loop failed: ${(err as Error).message}`);
 		});
 		// `runEffects` ends the active phase; the lock is held exactly until then.
 		await op.activeDone;
 		return op;
+	}
+
+	/**
+	 * T_http (§8.1.4 regla 4): the request is answered `uncertain` and, if the
+	 * executor is still active, the cancellation is applied here and now —
+	 * record `phase: cancelled`, state `uncertain`, the exclusion released —
+	 * because the executor may be stuck in an effect whose promise never
+	 * answers. The durable record keeps the pane blocked by its pending
+	 * effects, which `reconcile` can now settle by evidence (the lock is no
+	 * longer held forever). A late answer of the effect records its evidence
+	 * (`afterCancelled`) and starts nothing.
+	 */
+	private async onTHttp(op: LiveOp): Promise<void> {
+		const r = op.record;
+		this.decideHttp(op, {
+			status: 202,
+			body: { result: "uncertain", clientMessageId: r.client_message_id },
+		});
+		if (r.phase !== "active" || op.cancelled) return;
+		await this.cancelActive(op, "t-http");
+	}
+
+	/** Apply a cancellation to an ACTIVE op from outside the executor (T_http, shutdown). */
+	private async cancelActive(op: LiveOp, reason: string): Promise<void> {
+		const r = op.record;
+		// A request still waiting on this operation learns the outcome is unknown.
+		this.decideHttp(op, {
+			status: 202,
+			body: { result: "uncertain", clientMessageId: r.client_message_id },
+		});
+		op.cancelled = true;
+		op.cancelRequested = reason;
+		r.phase = "cancelled";
+		r.cancelled_at = r.cancelled_at ?? this.isoNow();
+		r.cancel_reason = reason;
+		if (r.state === "prepared") r.state = "uncertain";
+		await this.writeRecord(op).catch((err) =>
+			logger.error(`[composer] record write failed: ${(err as Error).message}`),
+		);
+		op.unlisten?.();
+		op.unlisten = null;
+		await this.persistSafe(op, "uncertain", {
+			stage: r.execs.at(-1)?.step ?? "precheck",
+			pending: r.execs.filter((e) => !e.settled).map((e) => ({ id: e.id, step: e.step })),
+			reason,
+		});
+		// The executor's exclusion ends here; the pane stays blocked by the record.
+		op.markActiveDone();
+	}
+
+	/**
+	 * The executor learns, after an effect answered, that its operation was
+	 * cancelled meanwhile (T_http or shutdown completed the transition): the
+	 * answer is evidence — the exec entry is already settled or still
+	 * pending — and nothing further starts. Written under the pane lock,
+	 * since `reconcile` may be settling the same record.
+	 */
+	private async afterCancelled(op: LiveOp): Promise<void> {
+		try {
+			await this.lock.run(
+				op.key,
+				"composer-admin",
+				async () => {
+					if (this.live.get(op.key) !== op) return;
+					await this.writeRecord(op).catch((err) =>
+						logger.error(`[composer] record write failed: ${(err as Error).message}`),
+					);
+					await this.settleAndConclude(op);
+				},
+				{ mode: "wait" },
+			);
+		} catch (err) {
+			if (err instanceof SessionBusyError) {
+				logger.warn(`[composer] late evidence for ${op.key} not applied: pane busy`);
+				return;
+			}
+			throw err;
+		}
+	}
+
+	/**
+	 * Graceful shutdown: no new operation is admitted, and every active
+	 * executor is cancelled durably (record `phase: cancelled`, reason
+	 * `shutdown`, state `uncertain`) so the next process finds the block and
+	 * never resumes a delivery. In-flight execs are not waited for: a late
+	 * answer in this process records evidence and starts nothing; one that
+	 * never comes is settled by the next process from Docker's inspect.
+	 */
+	async shutdown(): Promise<void> {
+		this.stopping = true;
+		for (const op of [...this.live.values()]) {
+			if (op.record.phase === "active" && !op.cancelled) {
+				await this.cancelActive(op, "shutdown");
+			} else {
+				op.unlisten?.();
+				op.unlisten = null;
+			}
+		}
 	}
 
 	// ── Effects (§8.1.5, §8.1.6) ────────────────────────────────────────────
@@ -640,6 +770,7 @@ export class ComposerService {
 		try {
 			// Precheck: the pane must still be the one the precondition saw.
 			const pre = await this.effect(op, "precheck", paneStateArgv(r.pane_id), null);
+			if (r.phase !== "active") return this.afterCancelled(op);
 			if (pre.kind !== "settled") return this.toUncertain(op, "precheck", finishActive);
 			const state = pre.exitCode === 0 ? parsePaneState(pre.stdout) : null;
 			if (
@@ -666,6 +797,9 @@ export class ComposerService {
 				const argv = stepArgv(step, r.pane_id, `${bufferBase}-${segmentsSent}`);
 				const stdin = step.kind === "paste" ? Buffer.from(step.text, "utf8") : null;
 				const res = await this.effect(op, stage, argv, stdin);
+				// Cancelled meanwhile by T_http or shutdown (the transition is
+				// already written): the answer is evidence, nothing else starts.
+				if (r.phase !== "active") return this.afterCancelled(op);
 				if (res.kind === "refused") return this.toCancelled(op, stage, segmentsSent, finishActive);
 				if (res.kind === "pending") return this.toUncertain(op, stage, finishActive);
 				if (res.exitCode !== 0) {
@@ -685,6 +819,8 @@ export class ComposerService {
 					// input, so the result is `failed` and the person checks.
 					const after = await this.awaitConsumed(op, r, region, step.text);
 					if (after === null) {
+						if (r.phase !== "active") return this.afterCancelled(op);
+						if (op.cancelRequested) return this.toCancelled(op, stage, segmentsSent, finishActive);
 						await this.toFailed(op, stage, segmentsSent, finishActive, {
 							status: 502,
 							body: {
@@ -1001,7 +1137,7 @@ export class ComposerService {
 					}
 					if (isFinalResult(r.result)) {
 						this.decideHttp(op, r.http ?? this.uncertainAnswer(r));
-						await this.tryRelease(op);
+						await this.tryRelease(op, true);
 						return;
 					}
 					const d = this.decideResult(op);
@@ -1013,7 +1149,7 @@ export class ComposerService {
 					);
 					await this.persistSafe(op, d.result, { ...d.data, http: d.http });
 					this.decideHttp(op, d.http);
-					await this.tryRelease(op);
+					await this.tryRelease(op, true);
 				},
 				{ mode: "wait" },
 			);
@@ -1029,37 +1165,66 @@ export class ComposerService {
 
 	// ── Release (§8.1.4 regla 7) ────────────────────────────────────────────
 
-	/** `released` only with phase ≠ active, a final result and settled effects. */
-	private async tryRelease(op: LiveOp): Promise<boolean> {
+	/**
+	 * `released` only with phase ≠ active, a final result and settled effects
+	 * (§8.1.4 regla 7), always under the pane lock: callers that hold it pass
+	 * `held`; the others take it (wait mode). Order: the `released` event is
+	 * confirmed on disk FIRST — it carries the HTTP answer a replay needs and
+	 * feeds the 256-id window — and only then the record is removed, by
+	 * identity (a late release never takes a successor's record). A failure
+	 * at either step keeps the record and the live op, so the next send on the
+	 * pane re-evaluates instead of a restart treating the id as new.
+	 */
+	private async tryRelease(op: LiveOp, held = false): Promise<boolean> {
+		if (!held) {
+			try {
+				return await this.lock.run(op.key, "composer-admin", () => this.tryRelease(op, true), {
+					mode: "wait",
+				});
+			} catch (err) {
+				if (err instanceof SessionBusyError) {
+					logger.warn(`[composer] release of ${op.key} deferred: pane busy`);
+					return false;
+				}
+				throw err;
+			}
+		}
 		const r = op.record;
 		if (r.phase === "active" || !isFinalResult(r.result) || effectsOf(r) !== "settled")
 			return false;
+		const cur = await this.deps.records.read(r.sid, r.pane_id).catch(() => null);
+		if (cur === null || cur.kind === "unreadable") return false;
+		if (cur.kind === "ok" && cur.record.client_message_id !== r.client_message_id) {
+			// A successor owns the pane: our record is already gone.
+			if (this.live.get(op.key) === op) this.live.delete(op.key);
+			return true;
+		}
 		const evidence = r.evidence ?? (r.execs.length === 0 ? "none-created" : "inspected");
 		r.evidence = evidence;
 		if (r.state !== "released") {
-			// Once: a retry after a failed record removal must not persist a
-			// second `released` nor move the window again.
+			try {
+				await this.persist(op, "released", { evidence, http: r.http ?? null }, { confirmed: true });
+			} catch (err) {
+				logger.error(
+					`[composer] released event not persisted, record kept: ${(err as Error).message}`,
+				);
+				this.live.set(op.key, op);
+				return false;
+			}
 			r.state = "released";
 			if (r.http) this.recentFinals.set(`${r.cid}/${r.client_message_id}`, r.http);
 			this.capRecentFinals();
-			await this.persist(
-				op,
-				"released",
-				{ evidence, http: r.http ?? null },
-				{ confirmed: true },
-			).catch((err) =>
-				logger.error(`[composer] released event persist failed: ${(err as Error).message}`),
-			);
+			// A crash from here on lands at `released`: recovery only removes.
+			if (cur.kind === "ok") await this.writeRecord(op).catch(() => undefined);
 		}
-		try {
-			await this.deps.records.remove(r.sid, r.pane_id);
-		} catch (err) {
-			// The pane stays blocked by a record that is final and settled; the
-			// op stays live so the next send on this pane re-evaluates it
-			// (§8.1.4.1) instead of waiting for a restart.
-			logger.error(`[composer] pane record remove failed: ${(err as Error).message}`);
-			this.live.set(op.key, op);
-			return false;
+		if (cur.kind === "ok") {
+			try {
+				await this.deps.records.remove(r.sid, r.pane_id, r.client_message_id);
+			} catch (err) {
+				logger.error(`[composer] pane record remove failed: ${(err as Error).message}`);
+				this.live.set(op.key, op);
+				return false;
+			}
 		}
 		this.live.delete(op.key);
 		return true;
@@ -1259,7 +1424,14 @@ export class ComposerService {
 		const r = op.record;
 		const changed = await this.settleEffects(r);
 		if (changed) await this.writeRecord(op).catch(() => undefined);
-		if (r.phase === "cancelled" && !isFinalResult(r.result) && effectsOf(r) === "settled") {
+		// Once: a reconcile after the late Enter already moved the op to
+		// `entered` must not persist that state again.
+		if (
+			r.phase === "cancelled" &&
+			!isFinalResult(r.result) &&
+			r.state !== "entered" &&
+			effectsOf(r) === "settled"
+		) {
 			const enter = r.execs.find((e) => e.step === "enter");
 			if (enter?.settled && enter.settled.exit_code === 0) {
 				r.state = "entered";
@@ -1289,7 +1461,7 @@ export class ComposerService {
 			if (this.live.has(op.key) && this.live.get(op.key) !== op) return; // the live executor owns its ack
 			await this.deferredAck(op);
 		}
-		await this.tryRelease(op);
+		await this.tryRelease(op, true);
 	}
 
 	private async settleEffects(r: PaneRecord): Promise<boolean> {
@@ -1400,6 +1572,7 @@ export class ComposerService {
 
 	async resolve(input: ResolveInput): Promise<HttpResult> {
 		if (!this.deps.enabled) throw new ComposerDisabledError();
+		if (this.stopping) return this.reject("shutting-down", 503);
 		const { stSessionId: sid, paneId } = input;
 		const key = this.key(sid, paneId);
 		try {
@@ -1490,13 +1663,6 @@ export class ComposerService {
 	 * Process shutdown: stop observing. Live operations keep their records on
 	 * disk; the next process cancels and recovers them (§8.1.4 regla 8).
 	 */
-	shutdown(): void {
-		for (const op of this.live.values()) {
-			op.unlisten?.();
-			op.unlisten = null;
-		}
-	}
-
 	/** Stats for `GET /api/admin/stats → conversation.composer` (no titles, no ids). */
 	async adminStats(): Promise<Record<string, unknown>> {
 		let blocked = 0;

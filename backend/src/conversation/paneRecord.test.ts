@@ -49,10 +49,10 @@ describe("PaneRecordStore", () => {
 		expect(await store.read(SID, "%3")).toEqual({ kind: "ok", record: r });
 		expect(await store.list(SID)).toEqual({ records: [r], unreadable: [] });
 		expect(await store.sessionsWithRecords()).toEqual([SID]);
-		await store.remove(SID, "%3");
+		expect(await store.remove(SID, "%3", r.client_message_id)).toBe("removed");
 		expect(await store.read(SID, "%3")).toEqual({ kind: "none" });
 		expect(await store.list(SID)).toEqual({ records: [], unreadable: [] });
-		await store.remove(SID, "%3"); // idempotent
+		expect(await store.remove(SID, "%3", r.client_message_id)).toBe("absent"); // idempotent
 	});
 	it("leaves no temp file behind and overwrites atomically", async () => {
 		await store.write(record());
@@ -99,5 +99,38 @@ describe("PaneRecordStore", () => {
 		expect(() => store.file("../x", "%1")).toThrow(/unsafe session id/);
 		expect(() => store.file(SID, "../1")).toThrow(/unsafe pane id/);
 		expect(() => store.file(SID, "%1; rm")).toThrow(/unsafe pane id/);
+	});
+});
+
+describe("Work round 1 (#488)", () => {
+	it("write fsyncs the directory AND every parent mkdir may have created, in order, and a sync failure propagates", async () => {
+		const synced: string[] = [];
+		const st = new PaneRecordStore(root, {
+			fsyncDir: async (d) => {
+				synced.push(path.relative(root, d) || ".");
+			},
+		});
+		await st.write(record());
+		expect(synced).toEqual([
+			`.st-control/${SID}/composer`,
+			`.st-control/${SID}`,
+			".st-control",
+			".",
+		]);
+		const failing = new PaneRecordStore(root, {
+			fsyncDir: async () => {
+				throw new Error("EIO");
+			},
+		});
+		await expect(failing.write(record({ pane_id: "%4" }))).rejects.toThrow("EIO");
+	});
+
+	it("remove is identity-checked: another owner's record is left alone, an absent one reports absent", async () => {
+		await store.write(record());
+		expect(await store.remove(SID, "%3", "00000000-0000-4000-8000-000000000000")).toBe("other");
+		expect((await store.read(SID, "%3")).kind).toBe("ok");
+		expect(await store.remove(SID, "%3", record().client_message_id)).toBe("removed");
+		expect((await store.read(SID, "%3")).kind).toBe("none");
+		expect(await store.remove(SID, "%3", record().client_message_id)).toBe("absent");
 	});
 });

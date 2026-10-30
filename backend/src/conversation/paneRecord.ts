@@ -198,8 +198,16 @@ function parseRecord(raw: string, sid: string, paneDigits: string): PaneRecord {
 	return out;
 }
 
+export type RemoveOutcome = "removed" | "absent" | "other";
+
 export class PaneRecordStore {
-	constructor(private readonly workspaceRoot: string) {}
+	private readonly sync: (dir: string) => Promise<void>;
+	constructor(
+		private readonly workspaceRoot: string,
+		deps: { fsyncDir?: (dir: string) => Promise<void> } = {},
+	) {
+		this.sync = deps.fsyncDir ?? fsyncDir;
+	}
 
 	dir(sid: string): string {
 		if (!SESSION_ID_RE.test(sid)) throw new Error("[composer] unsafe session id");
@@ -260,8 +268,12 @@ export class PaneRecordStore {
 	}
 
 	/**
-	 * Atomic, durable write: temp file, fsync, rename over the target,
-	 * fsync of the directory. Any error propagates and the caller must not
+	 * Atomic, durable write: temp file, fsync, rename over the target, then
+	 * fsync of the directory AND of every parent `mkdir` may have created
+	 * (`<sid>/`, `.st-control/`, the workspace root) — the recreation
+	 * primitive's chain: a new directory entry that is not synced can vanish
+	 * in a power cut although the record was reported durable and effects
+	 * started on its strength. Any error propagates and the caller must not
 	 * treat the record as written.
 	 */
 	async write(record: PaneRecord): Promise<void> {
@@ -283,7 +295,10 @@ export class PaneRecordStore {
 			await fs.rm(tmp, { force: true }).catch(() => undefined);
 			throw err;
 		}
-		await fsyncDir(dir);
+		await this.sync(dir);
+		await this.sync(path.dirname(dir));
+		await this.sync(path.resolve(this.workspaceRoot, CONTROL_DIR));
+		await this.sync(path.resolve(this.workspaceRoot));
 	}
 
 	/** Session ids that have a composer directory (admin stats). */
@@ -309,9 +324,33 @@ export class PaneRecordStore {
 	}
 
 	/** Retire the record after `released` was persisted. Idempotent. */
-	async remove(sid: string, paneId: string): Promise<void> {
+	/**
+	 * Remove the pane's record only if it is the one `clientMessageId` names.
+	 * A release that runs late (its own removal failed earlier, or it ran
+	 * after a successor took the pane) must never take a successor's record
+	 * with it: the file is re-read first, and anything that is not ours —
+	 * another id, or an unreadable file — is left alone (`other`). The
+	 * caller serialises this with the pane lock; the check here is the
+	 * file-level backstop.
+	 */
+	async remove(sid: string, paneId: string, clientMessageId: string): Promise<RemoveOutcome> {
 		const file = this.file(sid, paneId);
+		let raw: string;
+		try {
+			raw = await fs.readFile(file, "utf8");
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code === "ENOENT") return "absent";
+			throw err;
+		}
+		let owner: string;
+		try {
+			owner = parseRecord(raw, sid, paneId.slice(1)).client_message_id;
+		} catch {
+			return "other";
+		}
+		if (owner !== clientMessageId) return "other";
 		await fs.rm(file, { force: true });
-		await fsyncDir(path.dirname(file)).catch(() => undefined);
+		await this.sync(path.dirname(file)).catch(() => undefined);
+		return "removed";
 	}
 }

@@ -151,6 +151,25 @@ const settle = () => new Promise((r) => setTimeout(r, 25));
 let root: string;
 let store: ConversationStore;
 let records: PaneRecordStore;
+/** Every listener the services under test registered; `killProcess()` cuts them all (a SIGKILL observes nothing more). */
+let listeners: Array<() => void> = [];
+function killProcess(): void {
+	for (const u of listeners) u();
+	listeners = [];
+}
+/**
+ * The pane lock is released a few microtasks after the event a test waited
+ * for (the release runs inside it); a send fired in that window is a
+ * legitimate transient 409. Tests that model a LATER send wait for the lock.
+ */
+const lockFree = (service: ComposerService, pane = PANE) =>
+	until(
+		() =>
+			(service as unknown as { lock: { heldBy(k: string): unknown } }).lock.heldBy(
+				`${SID}\u0000${pane}`,
+			) === null,
+		"pane lock free",
+	);
 let docker: FakeDocker;
 let timers: Timers;
 let probe: ProbeEntry[] | null;
@@ -167,7 +186,11 @@ function makeService(over: Partial<ConstructorParameters<typeof ComposerService>
 		sessions: { getOrThrow: async () => meta },
 		conversation: {
 			probeSession: async () => probe,
-			onPersistedEvent: (l) => store.onEvent(l),
+			onPersistedEvent: (l) => {
+				const u = store.onEvent(l);
+				listeners.push(u);
+				return u;
+			},
 			captureEffective: async () => captureEffective,
 		},
 		now: () => now,
@@ -267,6 +290,7 @@ beforeEach(async () => {
 	now = 1_800_000_000_000;
 	store = new ConversationStore({ workspaceRoot: root, now: () => now });
 	records = new PaneRecordStore(root);
+	listeners = [];
 	docker = new FakeDocker();
 	timers = new Timers();
 	probe = [{ sessionId: CID, kind: "interactive", pid: CLAUDE_PID, status: "idle" }];
@@ -526,6 +550,175 @@ describe("exclusion by pane and idempotency (§8.1.4)", () => {
 	});
 });
 
+describe("Work round 1 (#488): release identity, shutdown, released-before-remove, T_http completion", () => {
+	it("P1: a late release never removes the successor's record — releases run under the pane lock and remove by identity", async () => {
+		const service = makeService();
+		const realRemove = records.remove.bind(records);
+		let mode: "fail" | "park" | "ok" = "fail";
+		const parked: Array<() => void> = [];
+		let attempts = 0;
+		records.remove = (async (sid, pane, id) => {
+			attempts++;
+			if (mode === "fail") throw new Error("EIO");
+			if (mode === "park") await new Promise<void>((r) => parked.push(r));
+			return realRemove(sid, pane, id);
+		}) as typeof records.remove;
+		// A delivered, but its record removal failed: A stays live, its record stale.
+		const pA = send(service, "first");
+		await until(() => docker.effectSteps().includes("enter"));
+		await promptArrives("first");
+		expect((await pA).body).toMatchObject({ result: "delivered" });
+		await until(async () => (await composerStates()).at(-1) === "released");
+		await until(() => attempts === 1, "A's removal attempted (and failed)");
+		expect((await records.read(SID, PANE)).kind).toBe("ok");
+		// B and C arrive together. B takes the pane lock and retries A's release
+		// there (parked at the removal); C cannot interleave: the lock is held.
+		mode = "park";
+		docker.script.set("paste", ["park"]);
+		await lockFree(service);
+		const pB = send(service, "second", ID2);
+		await until(() => parked.length === 1, "B parked at A's removal");
+		const rC = await send(service, "third", ID3);
+		expect(rC.body).toMatchObject({ error: "send-in-progress" });
+		mode = "ok";
+		parked[0]!();
+		// B is now the pane's operation, mid-delivery (its paste is parked)…
+		await until(() => docker.parked.size === 1, "B's paste parked");
+		const during = await records.read(SID, PANE);
+		expect(during.kind === "ok" && during.record.client_message_id).toBe(ID2);
+		// …and nothing that happened before can remove ITS record: a direct
+		// late removal in A's name finds another owner and leaves it alone.
+		expect(await realRemove(SID, PANE, ID1)).toBe("other");
+		expect((await records.read(SID, PANE)).kind).toBe("ok");
+		docker.release(docker.pastes()[1]!.id, 0);
+		await until(() => docker.effectSteps().filter((x) => x === "enter").length === 2);
+		await promptArrives("second");
+		expect((await pB).body).toMatchObject({ result: "delivered" });
+		await until(recordGone, "B released");
+	});
+
+	it("P1: shutdown cancels the active executor durably and refuses new sends; a late paste answer is evidence, never a continuation", async () => {
+		docker.script.set("paste", ["park"]);
+		const service = makeService();
+		const p = send(service, "l1\nl2\nl3");
+		await until(() => docker.parked.size === 1);
+		await service.shutdown();
+		await until(
+			() =>
+				recordIs(
+					(x) =>
+						x.phase === "cancelled" && x.cancel_reason === "shutdown" && x.state === "uncertain",
+				),
+			"cancellation written by shutdown",
+		);
+		expect((await send(service, "x", ID2)).status).toBe(503);
+		expect((await send(service, "x", ID2)).body).toMatchObject({ error: "shutting-down" });
+		expect((await p).body).toMatchObject({ result: "uncertain" });
+		// The late success of the first paste: evidence for that exec only.
+		docker.release(docker.pastes()[0]!.id, 0);
+		await until(async () => (await composerStates()).at(-1) === "released", "settled by evidence");
+		expect(docker.effectSteps()).toEqual(["paste"]); // no newline, no l2, no Enter
+		expect(await composerStates()).toEqual(["prepared", "uncertain", "failed", "released"]);
+	});
+
+	it("P2: a `released` event that cannot be persisted keeps the record; after a restart the same id replays, it is not a new paste", async () => {
+		const service = makeService();
+		const real = store.enqueue.bind(store);
+		let failReleased = true;
+		store.enqueue = ((sid, cid, ev) => {
+			if (
+				failReleased &&
+				ev.ev === "composer_send" &&
+				(ev.data as { state: string }).state === "released"
+			)
+				return "dropped";
+			return real(sid, cid, ev);
+		}) as typeof store.enqueue;
+		const p = send(service, "keep me");
+		await until(() => docker.effectSteps().includes("enter"));
+		await promptArrives("keep me");
+		expect((await p).body).toMatchObject({ result: "delivered" });
+		await until(async () => (await composerStates()).at(-1) === "delivered");
+		await new Promise((r) => setTimeout(r, 50));
+		// Not released: the record stays (its state is still the result, not `released`).
+		expect(await recordIs((x) => x.state === "delivered" && x.result === "delivered")).toBe(true);
+		expect((await composerStates()).includes("released")).toBe(false);
+		// The process dies; a new one over the same files, with a working store.
+		killProcess();
+		failReleased = false;
+		store = new ConversationStore({ workspaceRoot: root });
+		await seedConversation();
+		docker = new FakeDocker();
+		const s2 = makeService();
+		const r = await send(s2, "keep me", ID1);
+		expect(r.body).toMatchObject({ result: "delivered" });
+		expect(docker.effectSteps()).toEqual([]); // a replay, not a second delivery
+		await until(recordGone, "released on recovery");
+		expect((await composerStates()).at(-1)).toBe("released");
+	});
+
+	it("P2: T_http completes the cancellation while an exec hangs — the record says cancelled, reconcile is possible (not 409), and evidence releases", async () => {
+		docker.script.set("paste", ["park"]); // never answered
+		const service = makeService();
+		const p = send(service, "stuck");
+		await until(() => docker.parked.size === 1);
+		timers.fire(30_000);
+		expect((await p).body).toMatchObject({ result: "uncertain" });
+		await until(
+			() => recordIs((x) => x.phase === "cancelled" && x.cancel_reason === "t-http"),
+			"cancellation written by the timer",
+		);
+		await lockFree(service);
+		// The executor's exclusion is released: reconcile is 200, the pane stays blocked by the pending paste.
+		const rec = await service.resolve({
+			stSessionId: SID,
+			paneId: PANE,
+			clientMessageId: ID1,
+			outcome: "reconcile",
+			by: "admin-1",
+			audit: async () => undefined,
+		});
+		expect(rec.status).toBe(200);
+		expect(rec.body).toMatchObject({ effects: "pending", released: false });
+		expect((await send(service, "y", ID2)).body).toMatchObject({
+			error: "send-in-progress",
+			detail: "effects-pending",
+		});
+		// Evidence: the container is gone ⇒ reconcile settles and releases.
+		docker.container = "stopped";
+		const rec2 = await service.resolve({
+			stSessionId: SID,
+			paneId: PANE,
+			clientMessageId: ID1,
+			outcome: "reconcile",
+			by: "admin-1",
+			audit: async () => undefined,
+		});
+		expect(rec2.body).toMatchObject({ released: true });
+		await until(recordGone);
+		expect(docker.effectSteps()).toEqual(["paste"]);
+	});
+
+	it("P2: T_http bounds the whole request — a precondition that hangs answers uncertain; when it finally returns, nothing starts and the id is new", async () => {
+		docker.script.set("display", ["park"]); // the pane-state read hangs
+		const service = makeService();
+		const p = send(service, "late");
+		await until(() => docker.parked.size === 1);
+		timers.fire(30_000);
+		expect((await p).body).toMatchObject({ result: "uncertain", clientMessageId: ID1 });
+		docker.release([...docker.parked.keys()][0]!, 0);
+		await new Promise((r) => setTimeout(r, 50));
+		expect(docker.effectSteps()).toEqual([]);
+		expect((await records.read(SID, PANE)).kind).toBe("none");
+		expect(await composerStates()).toEqual([]);
+		// The same id is a new attempt now (never an operation).
+		const p2 = send(service, "late", ID1);
+		await until(() => docker.effectSteps().includes("enter"));
+		await promptArrives("late");
+		expect((await p2).body).toMatchObject({ result: "delivered" });
+	});
+});
+
 describe("review fixes (PR #488)", () => {
 	it("a dropped `entered` event never flips a delivered message to failed", async () => {
 		const service = makeService();
@@ -554,9 +747,9 @@ describe("review fixes (PR #488)", () => {
 		const service = makeService();
 		const realRemove = records.remove.bind(records);
 		let fail = true;
-		records.remove = (async (sid, pane) => {
+		records.remove = (async (sid, pane, id) => {
 			if (fail) throw new Error("EIO");
-			return realRemove(sid, pane);
+			return realRemove(sid, pane, id);
 		}) as typeof records.remove;
 		const p = send(service, "first");
 		await until(() => docker.effectSteps().includes("enter"));
@@ -565,6 +758,7 @@ describe("review fixes (PR #488)", () => {
 		await until(async () => (await composerStates()).at(-1) === "released", "released event");
 		expect((await records.read(SID, PANE)).kind).toBe("ok"); // the stale record
 		fail = false;
+		await lockFree(service);
 		const p2 = send(service, "second", ID2);
 		await until(
 			() => docker.effectSteps().filter((s) => s === "enter").length === 2,
@@ -697,6 +891,7 @@ describe("delayed effects and cancellation (§8.1.4 reglas 3–7, §10)", () => 
 		// The pane is free again — but l1/l2 sit in the CLI's input: the person
 		// clears them (Ctrl-U) after checking the Terminal, as the 502 asked.
 		docker.typed = "";
+		await lockFree(service);
 		const p3 = send(service, "next", ID2);
 		await until(() => docker.effectSteps().includes("enter"));
 		await promptArrives("next");
@@ -881,7 +1076,7 @@ describe("restart and durability (§8.1.4 reglas 8–10, §10)", () => {
 		const s1 = makeService();
 		void send(s1, "survives");
 		await until(async () => (await composerStates()).join() === "prepared,entered");
-		s1.shutdown(); // the process dies: it observes nothing from here on
+		killProcess(); // the process dies (SIGKILL): it observes nothing from here on
 		await promptArrives("survives");
 		// Rotate the events file hard: the pane record is independent of L7.
 		store = new ConversationStore({

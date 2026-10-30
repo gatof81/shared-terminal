@@ -601,6 +601,12 @@ function shutdown() {
 	const conversationDrained = conversation.shutdown().catch((err) => {
 		logger.warn(`[server] conversation shutdown failed: ${(err as Error).message}`);
 	});
+	// 3.2 — refuse new sends and cancel the active executors durably (record
+	// phase `cancelled`, reason `shutdown`): a late Docker answer may still
+	// settle an exec as evidence, but nothing further starts (§8.1.4).
+	const composerDrained = composer.shutdown().catch((err) => {
+		logger.warn(`[server] composer shutdown failed: ${(err as Error).message}`);
+	});
 
 	// Watchdog: if a client stalls its close handshake, the bootstrap
 	// drain wedges on Docker/D1, or some other handle keeps the event
@@ -618,9 +624,11 @@ function shutdown() {
 		// under the drain's in-flight D1 writes. `finally` (not `then`):
 		// drainInFlightBootstraps never rejects today (Promise.allSettled
 		// inside), but the exit must not hinge on that staying true.
-		void Promise.allSettled([bootstrapsDrained, conversationDrained]).finally(() => {
-			clearTimeout(watchdog);
-			process.exit(0);
-		});
+		void Promise.allSettled([bootstrapsDrained, conversationDrained, composerDrained]).finally(
+			() => {
+				clearTimeout(watchdog);
+				process.exit(0);
+			},
+		);
 	});
 }

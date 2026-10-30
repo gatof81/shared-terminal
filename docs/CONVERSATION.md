@@ -1501,7 +1501,7 @@ Todas owner-only (`assertOwnedByOr404`), rate limit `conversationIp` (300/min), 
 | GET | `/api/sessions/:id/conversations/:cid/events/:seq` | un evento (para "Copiar informe" de eventos no montados) |
 | GET | `/api/sessions/:id/conversations/:cid/agents` | `{ agents: [{ agentId, agentType, status, startedSeq, endedSeq?, toolCount, hasResult }] }` |
 | WS | `/ws/conversation/<id>` | ver §6.1 |
-| POST | `/api/sessions/:id/conversations/:cid/messages` | §8 (3.2). Cuerpo `{ text, clientMessageId }`; 202 `{ result: delivered\|unconfirmed\|misdelivered\|uncertain, … }`, 400/409 según §8.1.2–§8.1.3, 502 `delivery-failed` según §8.1.6, 503 `persist-failed`; 403 lead/observador; **ausente (404) con `CONVERSATION_COMPOSER_ENABLED` apagado** |
+| POST | `/api/sessions/:id/conversations/:cid/messages` | §8 (3.2). Cuerpo `{ text, clientMessageId }`; 202 `{ result: delivered\|unconfirmed\|misdelivered\|uncertain, … }`, 400/409 según §8.1.2–§8.1.3, 502 `delivery-failed` según §8.1.6, 503 `persist-failed` / `shutting-down` (apagado en curso, v1.7.1); 403 lead/observador; **ausente (404) con `CONVERSATION_COMPOSER_ENABLED` apagado** |
 
 `canSendInput` *MUST* ser `false` siempre mientras `CONVERSATION_COMPOSER_ENABLED` esté apagado; con
 la bandera encendida es **orientativo** según §8.1.1 (sin probe ni exec) y el `POST` decide por su
@@ -1661,6 +1661,15 @@ resultado del mensaje, ni del tiempo transcurrido. Tres plazos distintos:
 - **T_http = 30 s** es el presupuesto de la respuesta HTTP. Si al vencer la operación no tiene
   resultado final, el `POST` responde **202 `{ result: "uncertain", clientMessageId }`** y la
   operación sigue viva en el servidor.
+  (v1.7.1, revisión Work de la implementación) T_http se mide desde la **recepción de la petición**,
+  precondiciones incluidas: una consulta a Docker que se cuelga antes de `prepared` también responde
+  202 `uncertain` y, cuando termina, la fase activa no arranca (sin registro, sin fila de auditoría:
+  ese id nunca fue una operación y un reintento es nuevo). Al vencer con un ejecutor activo, el
+  temporizador **completa** la cancelación —registro `phase: cancelled`, `state: uncertain`, exclusión
+  del ejecutor liberada— sin depender de que responda el exec colgado: el pane sigue bloqueado por el
+  registro durable (`effects: pending`) y `reconcile` puede asentarlo por evidencia. La respuesta
+  tardía del exec aporta su evidencia bajo el lock del pane y no inicia nada. El apagado ordenado
+  hace lo mismo con razón `shutdown` y responde 503 `shutting-down` a toda operación nueva.
 - **T_ack = 8 s** es el presupuesto de confirmación tras un Enter **asentado** (§8.1.7). No es una
   garantía de que Docker terminó nada.
 - **La elegibilidad del pane** no tiene plazo: depende solo del estado de efectos de la operación
@@ -1843,6 +1852,14 @@ segments_sent: 0}` y `released{evidence: none-created}` (el único exec fue la l
 sobre el pane). Entre pastes se relee **solo** la región de entrada y solo para el consumo del
 paso 2b (no se repite la precondición: la exclusión impide otro envío); lo que no puede excluirse
 (una tecla de la persona, un diálogo que se abre) lo detecta el ack, no la entrega (§8.1.10).
+
+Liberación (v1.7.1, revisión Work de la implementación): toda liberación (§8.1.4 regla 7) ocurre
+**bajo el lock del pane**; confirma primero el evento `released` (lleva la respuesta HTTP del replay y
+alimenta la ventana de 256) y solo después retira el registro **por identidad** (relee el archivo y
+no toca uno de otro `client_message_id`). Si cualquiera de los dos pasos falla, el registro y la
+operación se conservan y el siguiente envío al pane los reevalúa bajo el mismo lock. El registro de
+pane se escribe con la misma cadena de fsync que el de recreación (archivo, directorio, `<sid>/`,
+`.st-control/`, raíz del workspace); un fallo de sincronización no autoriza efectos.
 
 #### 8.1.6 Fallos parciales (fail-closed)
 
