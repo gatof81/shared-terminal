@@ -27,7 +27,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import Dockerode from "dockerode";
-import { DockerManager } from "./dockerManager.js";
+import { DockerManager, TMUX_ATTACH_SCRIPT, TMUX_CLIENTS_SCRIPT } from "./dockerManager.js";
 import type { SessionManager } from "./sessionManager.js";
 
 const IMAGE = process.argv[2] ?? "shared-terminal-session";
@@ -73,6 +73,56 @@ async function execOut(cmd: string): Promise<{ code: number; out: string }> {
 		s.on("close", () => r());
 	});
 	return { code: (await e.inspect()).ExitCode ?? -1, out: Buffer.concat(out).toString("utf8") };
+}
+
+/** Exit code and stdout of an argv exec inside the container. */
+async function execArgv(cmd: string[]): Promise<{ code: number; out: string }> {
+	const e = await docker
+		.getContainer(containerId)
+		.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true });
+	const s = await e.start({});
+	const out: Buffer[] = [];
+	await new Promise<void>((r) => {
+		docker.modem.demuxStream(
+			s,
+			{ write: (c: Buffer) => out.push(c) } as unknown as NodeJS.WritableStream,
+			{ write: () => true } as unknown as NodeJS.WritableStream,
+		);
+		s.on("end", () => r());
+		s.on("close", () => r());
+	});
+	return { code: (await e.inspect()).ExitCode ?? -1, out: Buffer.concat(out).toString("utf8") };
+}
+
+/** Run TMUX_CLIENTS_SCRIPT exactly as the backend does; `shim` prepends a dir whose `tmux` misbehaves. */
+async function runScript(mode: "release" | "sweep", pid: number, shim?: string): Promise<string> {
+	const cmd = shim
+		? [
+				"bash",
+				"-c",
+				`PATH="$1:$PATH" exec bash -c "$0" st-tmux-clients "$2" "$3" "$4"`,
+				TMUX_CLIENTS_SCRIPT,
+				shim,
+				TAB,
+				mode,
+				String(pid),
+			]
+		: ["bash", "-c", TMUX_CLIENTS_SCRIPT, "st-tmux-clients", TAB, mode, String(pid)];
+	return (await execArgv(cmd)).out.trim();
+}
+
+/** A raw second attach client (the real wrapper), kept open by its hijacked stream. */
+async function rawClient(): Promise<{ destroy(): void }> {
+	const e = await docker.getContainer(containerId).exec({
+		Cmd: ["bash", "-c", TMUX_ATTACH_SCRIPT, "st-attach", TAB],
+		AttachStdin: true,
+		AttachStdout: true,
+		AttachStderr: true,
+		Tty: true,
+	});
+	const s = await e.start({ hijack: true, stdin: true, Tty: true });
+	s.resume();
+	return { destroy: () => s.destroy() };
 }
 
 /** `<pid> <tty>` per tmux client attached to the smoke tab. */
@@ -295,6 +345,93 @@ async function main(): Promise<void> {
 	check(
 		"last observer detach releases",
 		await waitFor("0 clients", async () => (await clients()).length === 0),
+	);
+
+	// ── 5. Work T1: a late sweep never detaches a newer client ──────────
+	phase("Work T1: the sweep is fenced by start time");
+	const dm4 = makeDm();
+	await attach(dm4, "t1a");
+	check("A attached", await waitFor("A", async () => (await clients()).length === 1));
+	const pidA = (await clients())[0]?.pid ?? -1;
+	const rawB = await rawClient(); // a newer generation on the same tab
+	check("B attached (2 clients)", await waitFor("B", async () => (await clients()).length === 2));
+	const pidB = (await clients()).map((c) => c.pid).find((p) => p !== pidA) ?? -1;
+	const lateSweepA = await runScript("sweep", pidA);
+	check(
+		"A's sweep, run after B joined, leaves B alone",
+		lateSweepA === "swept 0" && (await clients()).length === 2,
+		lateSweepA,
+	);
+	const sweepB = await runScript("sweep", pidB);
+	check(
+		"B's sweep detaches the older A only",
+		sweepB === "swept 1" &&
+			(await waitFor(
+				"A gone",
+				async () => (await clients()).map((c) => c.pid).join() === String(pidB),
+			)),
+		sweepB,
+	);
+	const staleSweep = await runScript("sweep", pidA);
+	check(
+		"a sweep for the released A is stale and does nothing",
+		staleSweep === "swept 0 stale" && (await clients()).length === 1,
+		staleSweep,
+	);
+	dm4.detach("t1a"); // A is already gone: its release finds nothing to do
+	const releaseB = await runScript("release", pidB);
+	check(
+		"B released by pid",
+		releaseB === "detached" && (await waitFor("0", async () => (await clients()).length === 0)),
+		releaseB,
+	);
+	rawB.destroy();
+
+	// ── 6. Work T2: query failures fail closed ──────────────────────────
+	phase("Work T2: display / list-clients failures never signal");
+	const realTmux = (await execOut("command -v tmux")).out.trim();
+	check("real tmux located", realTmux.length > 0, realTmux);
+	const shim = async (dir: string, failing: string) =>
+		execOut(
+			`mkdir -p ${dir} && printf '%s\n' '#!/bin/bash' '[ "$1" = ${failing} ] && exit 1' 'exec ${realTmux} "$@"' > ${dir}/tmux && chmod +x ${dir}/tmux`,
+		);
+	await shim("/tmp/shim-display", "display");
+	await shim("/tmp/shim-list", "list-clients");
+	const dm5 = makeDm();
+	await attach(dm5, "t2a");
+	check("C attached", await waitFor("C", async () => (await clients()).length === 1));
+	const pidC = (await clients())[0]?.pid ?? -1;
+	const r1 = await runScript("release", pidC, "/tmp/shim-display");
+	check(
+		"display failing ⇒ unverified, client kept",
+		r1 === "unverified" && (await clients()).length === 1,
+		r1,
+	);
+	const r2 = await runScript("release", pidC, "/tmp/shim-list");
+	check(
+		"list-clients failing ⇒ unverified, client kept",
+		r2 === "unverified" && (await clients()).length === 1,
+		r2,
+	);
+	const r3 = await runScript("sweep", pidC, "/tmp/shim-display");
+	check(
+		"sweep with display failing ⇒ unverified",
+		r3 === "swept 0 unverified" && (await clients()).length === 1,
+		r3,
+	);
+	const r4 = await runScript("release", 999999);
+	check("a dead pid ⇒ already-exited", r4 === "already-exited", r4);
+	const srvPid = Number((await execOut("tmux display -p '#{pid}'")).out.trim());
+	const r5 = await runScript("release", srvPid);
+	check(
+		"the tmux server pid ⇒ not-ours, server alive",
+		r5 === "not-ours" && (await execOut(`tmux has-session -t ${TAB}`)).code === 0,
+		r5,
+	);
+	dm5.detach("t2a");
+	check(
+		"the normal release still works after the failed ones",
+		await waitFor("0", async () => (await clients()).length === 0),
 	);
 
 	phase("final state");

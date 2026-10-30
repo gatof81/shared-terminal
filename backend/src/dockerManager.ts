@@ -261,67 +261,109 @@ export const TMUX_CLIENT_SENTINEL = "__ST_TMUX_CLIENT__";
 export const TMUX_ATTACH_SCRIPT = `printf '${TMUX_CLIENT_SENTINEL} %d\\n' "$$"; exec tmux new-session -A -s "$1" -c /home/developer/workspace`;
 
 // Release / sweep, run as a one-shot `bash -c <script> st-tmux-clients <tab>
-// <mode> <pid>`. Both modes only ever touch a process whose argv is EXACTLY
-// the shape the attach wrapper runs (tmux after exec, or the bash wrapper
-// before it), checked in /proc — a recycled pid belonging to anything else
-// is never signalled, and a client the user attached by hand is never
-// detached. The tmux SERVER is forked by the first client and keeps that
-// client's argv, so it would pass the argv check: it is excluded by pid
-// first (`tmux display -p '#{pid}'`). `detach-client -t <tty>` is the gentle path (the client exits
-// 0, the exec ends); SIGTERM is the fallback for a client tmux does not
-// list yet. Prints one token: detached / terminated / already-exited /
-// not-ours, or `swept N`.
-//   release <pid>  — end this process's own client after the last listener left.
-//   sweep <pid>    — detach every OTHER attach client of the tab: leftovers
-//                    of a previous backend process or of a stream that
-//                    closed from the container side while listeners stayed.
+// <mode> <pid>`. Identity first, then evidence, then action — and on any
+// error or ambiguity NO action at all (Work T2): a failed cleanup may leave
+// a client behind for the next sweep, it must never touch a process whose
+// identity is not proven.
+//
+// Identity (`shape`): a process is one of ours only if its argv in /proc is
+// EXACTLY what the attach wrapper runs — `tmux` (after exec) or `wrapper`
+// (bash before it). Anything else — a recycled pid, a client the user
+// attached by hand, PID 1 — is `other`. The tmux SERVER is forked by the
+// first client and inherits the tmux argv, so a tmux-shaped pid is acted on
+// only once `tmux display -p '#{pid}'` has VERIFIED the server's pid and it
+// differs; `list-clients` must then succeed and list the pid (a successful
+// listing without it = a client tmux does not know yet: left alone,
+// `not-listed`). The wrapper stage can never be the server (no tmux
+// process has that argv) and tmux cannot know it, so SIGTERM is the one
+// correct action there — the only `kill` in the script.
+//
+// Fence (Work T1): a sweep started for client A may execute arbitrarily
+// late — after A was released and a NEWER client B attached to the same
+// tab. It therefore acts only on clients whose process STARTED strictly
+// before its own (`starttime` in /proc/<pid>/stat, clock ticks since boot),
+// read at the moment of acting; B is newer by construction, however late
+// the exec runs. An equal tick is ambiguous and left alone, and a sweep
+// whose own pid is gone or no longer ours is `stale` and does nothing.
+//
+// Prints one token:
+//   release → detached | terminated | already-exited | not-ours | not-listed | unverified
+//   sweep   → swept N | swept 0 stale | swept 0 unverified
 export const TMUX_CLIENTS_SCRIPT = `tab="$1"
 mode="$2"
 pid="$3"
-ours() {
+# argv class of <pid>: tmux (exact attach argv; the forked server inherits
+# it too), wrapper (bash before its exec), gone, other.
+shape() {
 	local argv
-	[ "$1" = "$(tmux display -p '#{pid}' 2>/dev/null)" ] && return 1
-	argv="$(tr '\\0' '\\n' < "/proc/$1/cmdline" 2>/dev/null)" || return 1
-	[ -n "$argv" ] || return 1
+	[ -r "/proc/$1/cmdline" ] || { echo gone; return; }
+	argv="$(tr '\\0' '\\n' < "/proc/$1/cmdline" 2>/dev/null)"
+	[ -n "$argv" ] || { echo gone; return; }
 	if [ "$argv" = "$(printf 'tmux\\nnew-session\\n-A\\n-s\\n%s\\n-c\\n/home/developer/workspace' "$tab")" ]; then
-		return 0
+		echo tmux
+		return
 	fi
 	case "$argv" in
-		"bash"$'\\n'"-c"$'\\n'*$'\\n'"st-attach"$'\\n'"$tab") return 0 ;;
+		"bash"$'\\n'"-c"$'\\n'*$'\\n'"st-attach"$'\\n'"$tab") echo wrapper; return ;;
 	esac
-	return 1
+	echo other
 }
+# Start time of <pid> in clock ticks since boot (/proc/<pid>/stat field 22;
+# the comm field may hold spaces, so parse after the last ") "). Fails when
+# unreadable or not a number.
+started() {
+	local rest
+	rest="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+	rest="\${rest##*) }"
+	set -- $rest
+	case "\${20:-}" in ''|*[!0-9]*) return 1 ;; esac
+	printf '%s' "\${20}"
+}
+# The server's pid, verified numeric — or failure (no server, tmux error).
+server() {
+	local s
+	s="$(tmux display -p '#{pid}' 2>/dev/null)" || return 1
+	case "$s" in ''|*[!0-9]*) return 1 ;; esac
+	printf '%s' "$s"
+}
+# "<pid> <tty>" per client of the tab — or failure when tmux could not answer.
 clients() {
 	tmux list-clients -t "$tab" -F '#{client_pid} #{client_tty}' 2>/dev/null
 }
 case "$mode" in
 release)
-	if [ ! -r "/proc/$pid/cmdline" ] || [ -z "$(tr -d '\\0' < "/proc/$pid/cmdline" 2>/dev/null)" ]; then
-		echo already-exited
-		exit 0
-	fi
-	if ! ours "$pid"; then
-		echo not-ours
-		exit 0
-	fi
+	case "$(shape "$pid")" in
+	gone) echo already-exited; exit 0 ;;
+	other) echo not-ours; exit 0 ;;
+	wrapper)
+		if kill -TERM "$pid" 2>/dev/null; then echo terminated; else echo already-exited; fi
+		exit 0 ;;
+	esac
+	srv="$(server)" || { echo unverified; exit 0; }
+	[ "$pid" = "$srv" ] && { echo not-ours; exit 0; }
+	list="$(clients)" || { echo unverified; exit 0; }
 	t=""
 	while read -r p tty; do
 		[ "$p" = "$pid" ] && t="$tty"
-	done < <(clients)
-	if [ -n "$t" ] && tmux detach-client -t "$t" 2>/dev/null; then
-		echo detached
-		exit 0
-	fi
-	if kill -TERM "$pid" 2>/dev/null; then echo terminated; else echo already-exited; fi
+	done <<< "$list"
+	[ -n "$t" ] || { echo not-listed; exit 0; }
+	if tmux detach-client -t "$t" 2>/dev/null; then echo detached; else echo unverified; fi
 	;;
 sweep)
+	case "$(shape "$pid")" in tmux|wrapper) ;; *) echo "swept 0 stale"; exit 0 ;; esac
+	own="$(started "$pid")" || { echo "swept 0 unverified"; exit 0; }
+	srv="$(server)" || { echo "swept 0 unverified"; exit 0; }
+	list="$(clients)" || { echo "swept 0 unverified"; exit 0; }
 	n=0
 	while read -r p tty; do
 		[ -n "$p" ] || continue
 		[ "$p" = "$pid" ] && continue
-		ours "$p" || continue
+		[ "$p" = "$srv" ] && continue
+		[ "$(shape "$p")" = tmux ] || continue
+		s="$(started "$p")" || continue
+		[ "$s" -lt "$own" ] || continue
 		tmux detach-client -t "$tty" 2>/dev/null && n=$((n+1))
-	done < <(clients)
+	done <<< "$list"
 	echo "swept $n"
 	;;
 *)
@@ -2414,8 +2456,10 @@ export class DockerManager {
 	 * clients a previous backend process left behind (its `shared` map died
 	 * with it), or one whose stream closed from the container side while
 	 * listeners remained (forgetIfCurrent dropped the slot, the client
-	 * lived on). Runs once per spawn, as soon as our own pid is known, so
-	 * our client is excluded by pid and never by timing.
+	 * lived on). Runs once per spawn, as soon as our own pid is known. The
+	 * exec may run late — after this client was released and a newer one
+	 * attached (Work T1) — so the script itself fences on process start
+	 * time and acts only on clients older than our own; see the script.
 	 */
 	private sweepTmuxClients(s: SharedExec): void {
 		if (s.clientPid === null) return;

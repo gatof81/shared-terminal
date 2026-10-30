@@ -92,9 +92,15 @@ interface FakeContainer {
 // split across stdout frames and stderr arriving ahead of stdout, which a
 // single canned stdout string can't express.
 type OneShotFrame = { type: 1 | 2; data: string };
-type OneShotHook = (
-	cmd: string[],
-) => { stdout?: string; frames?: OneShotFrame[]; exitCode: number } | undefined;
+type OneShotHook = (cmd: string[]) =>
+	| {
+			stdout?: string;
+			frames?: OneShotFrame[];
+			exitCode: number;
+			/** Park this one-shot until the promise resolves (a Docker exec that runs late). */
+			gate?: Promise<void>;
+	  }
+	| undefined;
 
 function makeFakeContainer(oneShot?: OneShotHook): FakeContainer {
 	const streams: PassThrough[] = [];
@@ -132,7 +138,7 @@ function makeFakeContainer(oneShot?: OneShotHook): FakeContainer {
 			const exec: FakeExec = {
 				start: vi.fn(async () => {
 					if (oneShotResult) {
-						setImmediate(() => {
+						const emit = () => {
 							// Wrap in Docker multiplexed frames to mirror Tty:false.
 							const frames = oneShotResult.frames ?? [
 								{ type: 1 as const, data: oneShotResult.stdout ?? "" },
@@ -145,7 +151,9 @@ function makeFakeContainer(oneShot?: OneShotHook): FakeContainer {
 								stream.write(Buffer.concat([header, payload]));
 							}
 							stream.end();
-						});
+						};
+						if (oneShotResult.gate) void oneShotResult.gate.then(() => setImmediate(emit));
+						else setImmediate(emit);
 					}
 					return stream;
 				}),
@@ -2328,21 +2336,93 @@ describe("DockerManager #444 tmux client release", () => {
 		expect(TMUX_ATTACH_SCRIPT).toBe(
 			`printf '${TMUX_CLIENT_SENTINEL} %d\\n' "$$"; exec tmux new-session -A -s "$1" -c /home/developer/workspace`,
 		);
-		// Only a process whose argv is exactly ours is ever touched.
+		// Identity: only a process whose argv is exactly ours is ever touched.
 		expect(TMUX_CLIENTS_SCRIPT).toContain("/proc/$1/cmdline");
-		// The server is forked by the first client and inherits its argv: never a target.
-		expect(TMUX_CLIENTS_SCRIPT).toContain(
-			`[ "$1" = "$(tmux display -p '#{pid}' 2>/dev/null)" ] && return 1`,
-		);
 		expect(TMUX_CLIENTS_SCRIPT).toContain(
 			"printf 'tmux\\nnew-session\\n-A\\n-s\\n%s\\n-c\\n/home/developer/workspace' \"$tab\"",
 		);
-		expect(TMUX_CLIENTS_SCRIPT).toContain('"st-attach"$\'\\n\'"$tab") return 0 ;;');
+		expect(TMUX_CLIENTS_SCRIPT).toContain('"st-attach"$\'\\n\'"$tab") echo wrapper; return ;;');
+		// Evidence before action (Work T2): a verified server pid, a successful
+		// listing, and the pid in it; otherwise no signal at all.
+		expect(TMUX_CLIENTS_SCRIPT).toContain('srv="$(server)" || { echo unverified; exit 0; }');
+		expect(TMUX_CLIENTS_SCRIPT).toContain('[ "$pid" = "$srv" ] && { echo not-ours; exit 0; }');
+		expect(TMUX_CLIENTS_SCRIPT).toContain('list="$(clients)" || { echo unverified; exit 0; }');
+		expect(TMUX_CLIENTS_SCRIPT).toContain('[ -n "$t" ] || { echo not-listed; exit 0; }');
 		expect(TMUX_CLIENTS_SCRIPT).toContain('tmux detach-client -t "$t"');
-		expect(TMUX_CLIENTS_SCRIPT).toContain('kill -TERM "$pid"');
-		// The sweep never touches the caller's own client.
-		expect(TMUX_CLIENTS_SCRIPT).toContain('[ "$p" = "$pid" ] && continue');
+		// The one kill: the wrapper stage, which no tmux process can be.
+		expect(TMUX_CLIENTS_SCRIPT.match(/kill -TERM/g)).toHaveLength(1);
 		expect(TMUX_CLIENTS_SCRIPT).not.toContain("kill-server");
 		expect(TMUX_CLIENTS_SCRIPT).not.toContain("kill-session");
+		// Fence (Work T1): only clients that started strictly before our own.
+		expect(TMUX_CLIENTS_SCRIPT).toContain('[ "$s" -lt "$own" ] || continue');
+		expect(TMUX_CLIENTS_SCRIPT).toContain('*) echo "swept 0 stale"; exit 0 ;;');
+		expect(TMUX_CLIENTS_SCRIPT).toContain('[ "$p" = "$pid" ] && continue');
+		expect(TMUX_CLIENTS_SCRIPT).toContain('[ "$p" = "$srv" ] && continue');
+	});
+
+	it("Work T1 interleaving: A's sweep parked in Docker, A released, B attached, A's sweep lands — B is untouched", async () => {
+		// Barrier: the FIRST sweep one-shot is held until `land()`; everything
+		// else answers at once. No timers decide the order below.
+		let land!: () => void;
+		const gate = new Promise<void>((r) => {
+			land = r;
+		});
+		let parked = false;
+		const { dm, container } = makeDocker({
+			oneShot: (cmd) => {
+				if (cmd[2] === TMUX_CLIENTS_SCRIPT && cmd[5] === "sweep" && !parked) {
+					parked = true;
+					return { stdout: "swept 0 stale", exitCode: 0, gate };
+				}
+				return undefined;
+			},
+		});
+		const scriptCalls = () => clientScriptCalls(container).map((c) => `${c[5]} ${c[6]}`);
+
+		// A: sentinel 100 ⇒ its sweep is issued (and parked).
+		await attachAndFlush(dm, "s1", "a1", 80, 24, () => undefined, "tab-test");
+		const execA = mustFind(container._execs, isAttachExec, "attach exec A");
+		execA._stream.write(sentinel("100"));
+		await tick();
+		expect(scriptCalls()).toEqual(["sweep 100"]);
+
+		// A's last listener leaves ⇒ release 100; the slot is free.
+		dm.detach("a1");
+		await tick();
+		await tick();
+		expect(scriptCalls()).toEqual(["sweep 100", "release 100"]);
+		expect(execA._stream.destroyed).toBe(true);
+
+		// B: a newer generation on the same tab, pid 200, live and listening.
+		const out: string[] = [];
+		await attachAndFlush(dm, "s1", "a2", 80, 24, (d) => out.push(d), "tab-test");
+		const execs = container._execs.filter(isAttachExec);
+		expect(execs).toHaveLength(2);
+		const execB = execs[1]!;
+		execB._stream.write(`${sentinel("200")}live`);
+		await tick();
+		expect(out.join("")).toBe("live");
+		expect(scriptCalls()).toEqual(["sweep 100", "release 100", "sweep 200"]);
+
+		// A's sweep finally runs in Docker. It carries A's pid (100) as its own
+		// — the script fences on it (TMUX_CLIENTS_SCRIPT tests: `swept 0 stale`
+		// once 100 is gone, and never a client newer than 100) — and on this
+		// side its completion changes nothing about B.
+		land();
+		await tick();
+		await tick();
+		await tick();
+		expect(scriptCalls()).toEqual(["sweep 100", "release 100", "sweep 200"]);
+		expect(execB._stream.destroyed).toBe(false);
+		const shared = (dm as unknown as { shared: Map<string, unknown> }).shared;
+		expect(shared.has("s1:tab-test")).toBe(true);
+		execB._stream.write(" and more");
+		await tick();
+		expect(out.join("")).toBe("live and more");
+		// B's own release still works, with B's pid.
+		dm.detach("a2");
+		await tick();
+		await tick();
+		expect(scriptCalls()).toEqual(["sweep 100", "release 100", "sweep 200", "release 200"]);
 	});
 });
