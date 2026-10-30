@@ -17,7 +17,9 @@ rechazo de prefijos, precondiciones, lock por pane, idempotencia, fallo cerrado,
 `composer_send`—, §8, 2026-10-30; revisión Work del contrato: exclusión por pane con estados
 persistidos y resolución administrativa, `prepared` antes del primer efecto, ack atribuido por
 pane, 2026-10-30; segunda ronda: resultado del mensaje separado de la elegibilidad del pane,
-registro de pane durable fuera de L7, liberación solo por evidencia, 2026-10-30),
+registro de pane durable fuera de L7, liberación solo por evidencia, 2026-10-30; tercera ronda:
+resolución administrativa serializada con el ejecutor bajo la misma exclusión por pane,
+`reconcile` idempotente, 2026-10-30),
 vinculante para los PRs
 3.0b–3.4.** El razonamiento está en [docs/design/phase3-conversation-activity.md](./design/phase3-conversation-activity.md)
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
@@ -1548,8 +1550,9 @@ Servidor → cliente: `{type:"hello", conversations:[{cid,lastSeq,firstRetainedS
 | `PATCH /api/admin/sessions/:id/conversation {enabled}` | admin (`adminActionIp`) | aplica la fila correspondiente de §2.4 y devuelve `{ enabled, capture }`, con `capture` según §2.7.6 |
 | `GET /api/admin/sessions/:id/recreate` | admin | preflight sin efectos (§2.7.2): `{ recreatable, blockers[], imageId, currentImageId, captureAfter }`; códigos y recuentos, nunca rutas |
 | `POST /api/admin/sessions/:id/recreate {expectImageId}` | admin (`adminActionIp`); fila `operate` fail-closed con owner ajeno | recreación de §2.7.2–§2.7.4; 409 con el código de la primera precondición que falla; 500 `recreate-failed {step, unresolved?}`; 503 `docker-unavailable` |
-| `POST /api/admin/sessions/:id/composer/resolve {paneId, clientMessageId, outcome}` | admin (`adminActionIp`); fila `operate` fail-closed | §8.1.11: fija el resultado del mensaje (`composer_send{resolved}`) e **intenta asentar** los efectos por evidencia; responde `{ result, effects, pending[], released }`; no libera el pane con efectos `pending`; 409 `not-pending` si el mensaje ya tenía resultado |
-| `npm run composer:resolve -- <sid> <paneId> <clientMessageId> <outcome>` | shell host | igual que la fila anterior, sin red (§8.1.11) |
+| `POST /api/admin/sessions/:id/composer/resolve {paneId, clientMessageId, outcome}` | admin (`adminActionIp`); con `discarded`/`sent-manually` fila `operate` fail-closed; `reconcile` sin fila | §8.1.11, bajo el lock de pane: `discarded`/`sent-manually` declaran el resultado del mensaje (`composer_send{resolved}`) solo si `phase ≠ active` y `result: pending`; `reconcile` reintenta asentar efectos (idempotente, sin cambiar `result`) y libera si procede; responde `{ phase, result, effects, pending[], released }`; 409 `operation-active` con el ejecutor activo, 409 `not-pending` si el mensaje ya tenía resultado |
+| `GET /api/admin/sessions/:id/composer/panes` | admin | §8.1.11: registros de pane de la sesión (`phase`, `result`, `effects`, `pending[]`), sin texto |
+| `npm run composer:resolve -- <sid> <paneId> <clientMessageId> <outcome\|reconcile>` | shell host | igual que las filas anteriores, sin red (§8.1.11) |
 | `CONVERSATION_ALLOW_USERS=<id,id>` | env | sesiones nuevas de esos usuarios nacen con `conversation_requested=1` |
 | `npm run conversation:disable -- <sid>\|--all` | shell host | fila "Emergencia" de §2.4 con el orden de §2.5: marca de revocación, D1, archivos; si D1 falla, deja la marca, no borra archivos y sale ≠ 0 |
 | `npm run conversation:enable-all` | shell host | quita `REVOKED_ALL`; no toca filas ni marcas por sesión |
@@ -1696,23 +1699,39 @@ conversación destino:
 Reglas (*MUST*):
 
 1. **Exclusión viva**: en el proceso, un lock por `(st_session_id, pane_id)` (como
-   `sessionLifecycleLock`, de proceso, sin espera: el segundo recibe 409) se toma antes de leer el
-   binding y se suelta cuando la operación queda `released`, o cuando pasa a `uncertain`
-   (entonces el bloqueo lo sostiene el registro de pane, no el lock).
+   `sessionLifecycleLock`, modo `fail`: sin espera, el segundo recibe 409) lo toma el ejecutor
+   antes de leer el binding y lo **conserva durante toda la fase activa** —desde `prepared` hasta
+   que él mismo escribe `entered`, `failed` o la cancelación—; lo suelta solo al escribir una de
+   esas tres transiciones. A partir de ahí el bloqueo del pane lo sostiene el registro de pane
+   (§8.1.4.1), no el lock. Toda otra operación sobre el registro —un `POST` nuevo, la resolución
+   y la reconciliación de §8.1.11, la reconstrucción de la regla 8— toma el **mismo** lock antes
+   de leerlo; si el ejecutor lo tiene, recibe 409 sin tocar nada.
 2. **Exclusión persistida**: antes de tomar el lock, el backend lee los registros de pane de la
    sesión (§8.1.4.1). Un registro para ese pane ⇒ `send-in-progress`, con `detail`
    `in-progress` (operación viva), `effects-pending` (algún exec sin asentar) o `unverifiable`
    (registro ilegible, §8.1.4.1). Nunca decide solo la memoria.
-3. **Efectos con evidencia**: cada comando tmux es un exec cuyo id se escribe en el registro de
-   pane **antes** de `start` y cuyo final se conoce **solo por su propio inspect** (`exitCode`
-   numérico), como `recreateExec` (§2.7.3); nada se corta del lado del host y ningún exec se
-   aborta. Un `exitCode: null`, un error de conexión o un plazo de espera vencido dejan ese exec
-   `pending`: la operación pasa a `uncertain` y no inicia ningún efecto más.
+3. **Efectos con evidencia y autorización serializada**: cada comando tmux es un exec cuyo id se
+   escribe en el registro de pane **antes** de `start` y cuyo final se conoce **solo por su propio
+   inspect** (`exitCode` numérico), como `recreateExec` (§2.7.3); nada se corta del lado del host
+   y ningún exec se aborta. La autorización de cada efecto (`mayAct`) es: *el ejecutor tiene el
+   lock de la regla 1* **y** *el registro no tiene `cancelled_at`*, comprobada y consumida en la
+   **misma sección crítica** en que se escribe el id del exec; la comprobación y el `start` no
+   están separados por ningún punto en que otro actor pueda escribir el registro. Un exec cuyo id
+   está en el registro **existe** para todos los demás actores aunque su `start` no haya
+   respondido: la resolución nunca asume que un efecto autorizado no ocurrió. Un `exitCode: null`,
+   un error de conexión o un plazo de espera vencido dejan ese exec `pending`: la operación pasa
+   a `uncertain` y no inicia ningún efecto más.
 4. **Cancelación lógica**: la operación queda cancelada cuando un efecto queda `pending`, cuando
-   vence T_http sin Enter asentado, o cuando el proceso se apaga. Tras la cancelación **ninguna
-   continuación inicia el siguiente segmento ni el Enter**, aunque la respuesta tardía del efecto
-   anterior llegue después y sea un éxito; la respuesta tardía solo asienta ese exec (patrón de
-   §2.7.3: `mayAct` antes de cada efecto, la respuesta tardía nunca es una continuación).
+   vence T_http sin Enter asentado, cuando el proceso se apaga, o cuando la reconstrucción de la
+   regla 8 encuentra una operación activa de un proceso muerto. La cancelación es una escritura
+   del registro (`phase: cancelled`, `cancelled_at`, `reason`) que el ejecutor hace **bajo el lock
+   de la regla 1** antes de soltarlo; en el caso del proceso muerto la hace el proceso nuevo, bajo
+   el mismo lock. Tras la cancelación **ninguna continuación inicia el siguiente segmento ni el
+   Enter**: `mayAct` falla porque el registro tiene `cancelled_at` (y porque el lock ya no es
+   suyo), aunque la respuesta tardía del efecto anterior llegue después y sea un éxito; la
+   respuesta tardía solo asienta ese exec (patrón de §2.7.3). Una operación es **activa** mientras
+   `phase: active`: su ejecutor conserva autorización para iniciar efectos. Deja de serlo al
+   escribir `entered` o `failed` (`phase: completed`) o al cancelarse.
 5. **Asentamiento solo por evidencia** (§8.1.4.1): un exec `pending` pasa a asentado únicamente
    cuando su inspect devuelve `Running: false` con `ExitCode` numérico, o cuando el contenedor que
    lo alojaba (`container_id` del registro) ya no es el de la sesión o no está `running` —nada
@@ -1726,13 +1745,17 @@ Reglas (*MUST*):
    sigue el ack. Un ack válido que llegue con efectos `pending` fija `result: delivered` (o
    `misdelivered`) y **deja el pane bloqueado**. Un Enter de resultado desconocido **nunca** se
    convierte en `delivered` por sí mismo.
-7. **Liberación**: solo cuando `result` es final **y** `effects: settled`, el backend escribe
+7. **Liberación**: solo cuando `phase ≠ active` (ninguna continuación conserva autorización),
+   `result` es final **y** `effects: settled`, el backend —bajo el lock de la regla 1— escribe
    `released` con la evidencia y retira el registro de pane. Hasta entonces el pane rechaza todo
    envío desde Chat; el Terminal no se ve afectado.
 8. **Reinicio del backend**: antes de admitir el primer envío a una sesión, el backend reconstruye
-   la exclusión desde los registros de pane (§8.1.4.1): intenta asentar los execs `pending` con la
-   regla 5; una operación `prepared` o `uncertain` cuyos efectos no asientan sigue bloqueando como
-   `uncertain{orphaned: true}`; una `entered` con efectos asentados sigue el ack diferido (§8.1.7).
+   la exclusión desde los registros de pane (§8.1.4.1), bajo el lock de cada pane: una operación
+   con `phase: active` pertenece a un proceso muerto y se **cancela** (regla 4, `reason:
+   orphaned`), y todo exec con id en el registro y sin asentar es `pending`; después intenta
+   asentar con la regla 5; una `prepared` o `uncertain` cuyos efectos no asientan sigue bloqueando
+   como `uncertain{orphaned: true}`; una `entered` con efectos asentados sigue el ack diferido
+   (§8.1.7).
    Si un registro no se puede leer o validar, la sesión entera queda `send-in-progress{detail:
    unverifiable}` hasta que un operador lo resuelva (§8.1.11). La pérdida del lock en memoria
    **no** borra la incertidumbre.
@@ -1765,13 +1788,16 @@ temporal + fsync + rename, fsync del directorio; un error de fsync es un fallo d
 una tabla ni un servicio: un archivo por pane con operación pendiente, ninguno cuando no la hay.
 
     { "v": 1, "sid", "pane_id", "pane_pid", "container_id", "cid", "client_message_id",
-      "text_hash", "prepared_at", "state", "result", "execs": [ { "id", "step", "created_at",
+      "text_hash", "prepared_at", "state", "result", "phase": "active"|"completed"|"cancelled",
+      "cancelled_at"?, "cancel_reason"?, "execs": [ { "id", "step", "created_at",
       "settled": null | { "exit_code", "at" } } ], "updated_at" }
 
-Escrituras: (1) al preparar, antes del evento `prepared`; (2) **antes del `start` de cada exec**,
-con su `id` y `step` (`load`, `paste`, `newline`, `enter`, `precheck`); (3) al asentar execs y al
-cambiar `state`/`result` (puede agrupar varios asentamientos en una escritura, pero nunca
-posponer la (2)). Lectura: al abrir la sesión, en cada `POST` al pane y en la resolución
+Escrituras, todas bajo el lock de pane (§8.1.4, regla 1): (1) al preparar, antes del evento
+`prepared`, con `phase: active`; (2) **antes del `start` de cada exec**, con su `id` y `step`
+(`load`, `paste`, `newline`, `enter`, `precheck`), en la misma sección crítica que `mayAct`;
+(3) al pasar a `completed` o `cancelled` (el ejecutor suelta el lock solo después); (4) al asentar
+execs y al cambiar `state`/`result` (puede agrupar varios asentamientos en una escritura, pero
+nunca posponer la (2) ni la (3)). Lectura: al abrir la sesión, en cada `POST` al pane y en la resolución
 administrativa. Retirada: solo al escribir `released` (regla 7), **después** de persistir ese
 evento; si la retirada falla, el registro queda y el siguiente intento lo vuelve a evaluar
 (idempotente: `result` final + `effects: settled` ⇒ `released`). Un registro que no parsea, con
@@ -1914,35 +1940,53 @@ Declarado para que nadie lo busque en el código:
 
 #### 8.1.11 Resolución administrativa de un pane bloqueado
 
-Dos cosas distintas, y ninguna sustituye a la otra:
+Tres operaciones distintas sobre el mismo endpoint y el mismo CLI, ninguna sustituye a otra, y las
+tres toman el **lock de pane de §8.1.4 regla 1 (modo `fail`) antes de leer el registro**: si el
+ejecutor lo tiene, responden 409 `operation-active` sin leer ni escribir nada.
 
-- **Resolver el mensaje** (`resolved`): declaración del operador sobre lo que vio en el Terminal.
-  `POST /api/admin/sessions/:id/composer/resolve { paneId, clientMessageId, outcome:
-  "discarded"|"sent-manually" }` (admin, `adminActionIp`, router de §7): exige `result: pending`
-  en el registro de pane, escribe `composer_send{state: resolved, outcome, by}` y una fila
-  `operate` (fail-closed: sin fila, sin resolución). `outcome` es una declaración, no un hecho del
-  sistema; no produce `delivered` ni `prompt_id`. Con `result` ya final ⇒ 409 `not-pending`.
-  Alternativa sin red: `npm run composer:resolve -- <sid> <paneId> <clientMessageId> <outcome>`
-  (host, como el CLI de §7), mismo evento.
-- **Asentar los efectos**: solo la evidencia de §8.1.4 regla 5. El endpoint y el CLI **intentan**
-  asentar (inspect de cada exec `pending`; comprobación del contenedor) y devuelven el estado
-  resultante: `{ result, effects: "settled"|"pending", pending: [{ id, step }], released: boolean
-  }`. Si quedan efectos `pending`, el pane **sigue bloqueado** aunque el mensaje esté resuelto, y
-  la respuesta lo dice.
+- **Declarar el resultado del mensaje** (`resolved`): `POST /api/admin/sessions/:id/composer/resolve
+  { paneId, clientMessageId, outcome: "discarded"|"sent-manually" }` (admin, `adminActionIp`,
+  router de §7). Precondiciones, comprobadas **bajo el lock**: la operación existe en el registro,
+  `phase ≠ active` (está cancelada o completada: ninguna continuación conserva autorización para
+  iniciar efectos, §8.1.4 regla 4) y `result: pending`. Una operación con `phase: active` ⇒ 409
+  `operation-active`: no se puede declarar nada sobre un mensaje cuyo ejecutor todavía puede
+  pegar; solo la cancelación normal (efecto `pending`, T_http, apagado, reconstrucción) la saca de
+  esa fase, nunca el administrador. Con `result` ya final ⇒ 409 `not-pending`. Si procede, escribe
+  `composer_send{state: resolved, outcome, by}` y una fila `operate` (fail-closed: sin fila, sin
+  resolución). `outcome` es una declaración, no un hecho del sistema; no produce `delivered` ni
+  `prompt_id` y **no asienta ningún efecto**: la operación sigue bloqueando el pane mientras
+  `effects: pending`. Alternativa sin red: `npm run composer:resolve -- <sid> <paneId>
+  <clientMessageId> <outcome>` (host, como el CLI de §7), mismo evento.
+- **Reconciliar** (`outcome: "reconcile"`, mismo endpoint y mismo CLI): operación **idempotente y
+  repetible** que vuelve a intentar asentar los efectos por la evidencia de §8.1.4 regla 5 (inspect
+  de cada exec `pending`; comprobación del contenedor) y, si la operación queda `phase ≠ active`,
+  `result` final y `effects: settled`, escribe `released` y retira el registro (regla 7). **No**
+  cambia `result`, **no** escribe `resolved`, **no** escribe fila `operate` (no hay declaración;
+  se registra en el log del backend). Vale en cualquier `phase ≠ active` y con cualquier
+  `result`; sobre una operación activa ⇒ 409 `operation-active`. Es el camino para "reintentar"
+  después de un `resolved` que dejó efectos `pending`.
+- **Consultar** (`GET /api/admin/sessions/:id/composer/panes`): los registros de la sesión con
+  `{ paneId, clientMessageId, cid, phase, result, effects, pending: [{ id, step }], since }`, sin
+  texto. Sin lock (lectura informativa).
 
-Procedimiento documentado (DEPLOYMENT.md) para un pane que no asienta: (1) reintentar la resolución
-—el daemon puede responder más tarde—; (2) si el daemon perdió el exec (404 con el contenedor
+Toda respuesta de `resolve` y `reconcile` devuelve el estado resultante: `{ phase, result, effects:
+"settled"|"pending", pending: [{ id, step }], released: boolean }`. Si quedan efectos `pending`, el
+pane **sigue bloqueado** aunque el mensaje esté resuelto, y la respuesta lo dice.
+
+Procedimiento documentado (DEPLOYMENT.md) para un pane que no asienta: (1) repetir `reconcile` —el
+daemon puede responder más tarde—; (2) si el daemon perdió el exec (404 con el contenedor
 `running`), **parar y arrancar la sesión** con los verbos existentes (§2.4, §7): el contenedor
 que alojaba los execs deja de correr, nada dentro de él puede actuar, y la regla 5 asienta todos
-los `pending` con `evidence: container-gone`; la UI del owner muestra esta vía. Sin ninguna de las
-dos, el pane permanece bloqueado para Chat indefinidamente; el Terminal sigue disponible. **No**
-existe un desbloqueo por tiempo, por quietud ni por declaración.
+los `pending` con `evidence: container-gone` en el siguiente `reconcile` (o en el siguiente `POST`
+al pane); la UI del owner muestra esta vía. Sin ninguna de las dos, el pane permanece bloqueado
+para Chat indefinidamente; el Terminal sigue disponible. **No** existe un desbloqueo por tiempo,
+por quietud ni por declaración.
 
 La UI del owner muestra la conversación con `composer.blocked = true`, `reason`
 (`in-progress` | `effects-pending` | `unverifiable`), el `clientMessageId` y, si aplica, que el
 mensaje ya tiene resultado pero quedan efectos sin asentar. Si antes de la resolución llega un
 candidato válido (§8.1.7, ack diferido), el `result` pasa a `delivered` o `misdelivered` por
-evidencia; el pane se libera solo cuando además `effects: settled` (regla 7).
+evidencia; el pane se libera solo cuando además `phase ≠ active` y `effects: settled` (regla 7).
 
 Invariantes (*MUST*, con tests sobre un `tmux` simulado y un smoke con el CLI real en la imagen):
 
@@ -1962,11 +2006,15 @@ Invariantes (*MUST*, con tests sobre un `tmux` simulado y un smoke con el CLI re
 8. `busy`, diálogo abierto, copy-mode, pane muerto, foreground ≠ CLI y composer no vacío bloquean
    antes del primer efecto.
 9. `unconfirmed`, `misdelivered` y `uncertain` nunca inician otro envío.
-10. Un pane con una operación de `result` pendiente **o** de `effects: pending` —viva o
-    persistida— rechaza todo envío nuevo desde Chat; ningún plazo, ack, texto visible, quietud ni
-    declaración lo libera; solo la evidencia de la regla 5 asienta efectos.
+10. Un pane con una operación de `result` pendiente **o** de `effects: pending` **o** de `phase:
+    active` —viva o persistida— rechaza todo envío nuevo desde Chat; ningún plazo, ack, texto
+    visible, quietud ni declaración lo libera; solo la evidencia de la regla 5 asienta efectos.
 11. Reproducir un `clientMessageId` resuelto devuelve la respuesta HTTP registrada.
 12. Un registro de pane ilegible bloquea la sesión entera (fail-closed) y nunca se borra solo.
+13. La autorización de cada efecto, la transición a cancelado, la declaración administrativa, la
+    reconciliación y la liberación usan la **misma** exclusión por pane; una operación activa
+    responde 409 `operation-active` a la resolución y a la reconciliación, y nunca se libera
+    mientras una continuación conserve autorización.
 
 ### 8.2 Validación previa — resultados (CLI 2.1.314, 2026-10-30)
 
@@ -2348,6 +2396,22 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
       pane ⇒ uno entrega y el otro 409 `send-in-progress`, en cualquier orden de llegada; dos panes
       distintos de la misma sesión no se bloquean; el pane se libera solo con `result` final **y**
       `effects: settled`, **nunca por plazo**.
+- [ ] Resolución serializada con el ejecutor (§8.1.4 reglas 1, 3, 4, 7; §8.1.11; tests con execs
+      aparcados tras barrera, sin temporizadores): **Caso A**, A persistió `prepared` y su ejecutor
+      sigue activo sin haber iniciado el primer exec ⇒ `resolve discarded` responde 409
+      `operation-active`, no escribe nada, A conserva autorización y bloqueo, el ejecutor inicia
+      su primer paste con normalidad y el pane no se libera hasta su final o su cancelación
+      normal; **Caso B**, A asentó el primer segmento y su ejecutor puede iniciar el siguiente ⇒
+      `resolve` 409 `operation-active`, un envío B al mismo pane 409 `send-in-progress`, ningún
+      envío se intercala por vía administrativa, A continúa; **caso positivo**, A cancelada por un
+      exec `pending` ⇒ `resolve discarded` escribe `resolved` + fila `operate`, los efectos
+      `pending` se conservan, `released: false`, el pane sigue bloqueado; `reconcile` repetido
+      devuelve lo mismo sin segundo `resolved` ni segunda fila; la respuesta tardía del exec con
+      código numérico (o el contenedor parado) ⇒ `reconcile` asienta, escribe `released` y el
+      siguiente envío pasa; **autorización vs start**: con la barrera colocada entre la escritura
+      del id del exec y su `start`, una cancelación concurrente no puede colarse (misma sección
+      crítica) y la reconstrucción tras reinicio trata ese id como `pending`; `resolve` sobre un
+      `result` final ⇒ 409 `not-pending`; `reconcile` sobre una operación activa ⇒ 409.
 - [ ] Resultado ≠ elegibilidad (§8.1.4, reglas 5–7; tests con execs aparcados tras barrera):
       (1) paste `pending` + resolución administrativa `discarded` ⇒ `result: resolved`,
       `effects: pending`, respuesta `released: false`, y un segundo envío a ese pane sigue 409
@@ -2371,8 +2435,9 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
       `entered` y `uncertain` ⇒ 409 sin ningún exec. (d) **Reinicio**: `prepared` sin estado
       posterior ⇒ `uncertain{orphaned}` y pane bloqueado al abrir, sin reenvío; `entered` sin final
       ⇒ `delivered` si el `user_prompt` candidato ya está en el log, `unconfirmed` si pasó T_ack;
-      resolución administrativa (§8.1.11) escribe `resolved` + fila `operate` e intenta asentar,
-      pero no libera con efectos `pending`; sobre un mensaje con resultado ⇒ 409 `not-pending`.
+      resolución administrativa (§8.1.11), solo sobre una operación no activa, escribe `resolved`
+      + fila `operate` pero no asienta ni libera con efectos `pending`; `reconcile` reintenta sin
+      segunda declaración; sobre un mensaje con resultado ⇒ 409 `not-pending`.
 - [ ] Idempotencia y durabilidad (§8.1.4, §8.1.4.1): registro de pane escrito (temporal + fsync +
       rename) y `prepared` confirmado en el archivo **antes** del primer exec (test con `StoreFs` con
       barrera: ningún exec hasta que ambos están escritos; si cualquiera falla ⇒ 503 `persist-failed`,
@@ -2427,7 +2492,7 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
       tecleado ⇒ `composer-not-empty`.
 - [ ] Despliegue: backend app-only con la bandera apagada; activación en una sesión descartable
       antes de encenderla en general; `COMPOSER_CLI_VERSIONS`, el registro de pane y el
-      procedimiento de §8.1.11 (reintentar; parar y arrancar la sesión para asentar por
+      procedimiento de §8.1.11 (`reconcile` repetible; parar y arrancar la sesión para asentar por
       `container-gone`) documentados en DEPLOYMENT.md.
 
 ### 3.3 agentes y teams
