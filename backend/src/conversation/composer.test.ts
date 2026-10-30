@@ -146,7 +146,6 @@ async function until(pred: () => boolean | Promise<boolean>, label = "condition"
 		await new Promise((r) => setTimeout(r, 5));
 	}
 }
-const settle = () => new Promise((r) => setTimeout(r, 25));
 
 let root: string;
 let store: ConversationStore;
@@ -363,7 +362,10 @@ describe("happy path (§8.1.5, §8.1.7)", () => {
 		await promptArrives("same text", CID, "%9"); // other pane
 		await promptArrives("same text", CID, PANE, { source: "sdk" }); // injected
 		await promptArrives("same text", CID, PANE, { origin: "unverified" }); // unverified
-		await settle();
+		// Every candidate above is persisted (promptArrives flushes) and judged
+		// by the listener synchronously; T_ack is fired once the executor is
+		// actually waiting on it (deterministic: the timer is registered).
+		await until(() => timers.pending.some((t) => t.ms === 8_000), "T_ack armed");
 		timers.fire(8_000);
 		const r = await p;
 		expect(r.body).toMatchObject({ result: "unconfirmed", clientMessageId: ID1 });
@@ -547,6 +549,105 @@ describe("exclusion by pane and idempotency (§8.1.4)", () => {
 		expect(docker.effectSteps()).toEqual(["paste"]);
 		expect(await composerStates()).toEqual(["prepared", "failed", "released"]);
 		expect(await send(service, "a\nb")).toEqual(r1);
+	});
+});
+
+describe("Work round 2 (#488): invariants 1 and 2 — no start after a lost authorization", () => {
+	/** Park the record write that carries the paste's exec id (the one between `onCreated` and `start`). */
+	function parkPasteIdWrite(): { released: () => boolean; release: () => void } {
+		const realWrite = records.write.bind(records);
+		let gate: (() => void) | null = null;
+		records.write = (async (rec) => {
+			await realWrite(rec);
+			if (rec.execs.some((e) => e.step === "paste" && !e.settled) && gate === null) {
+				await new Promise<void>((r) => {
+					gate = r;
+				});
+			}
+		}) as typeof records.write;
+		return { released: () => gate !== null, release: () => gate?.() };
+	}
+	const startedEffects = () =>
+		docker.calls
+			.filter((c) => c.started && ["paste", "newline", "enter"].includes(c.step))
+			.map((c) => c.step);
+
+	it("A: shutdown during the preconditions — the request admitted before it starts nothing after it (invariant 1)", async () => {
+		docker.script.set("display", ["park"]); // the pane-state read hangs on Docker
+		const service = makeService();
+		const p = send(service, "late");
+		await until(() => docker.parked.size === 1);
+		await service.shutdown();
+		docker.release([...docker.parked.keys()][0]!, 0);
+		const r = await p;
+		expect(r.status).toBe(503);
+		expect(r.body).toMatchObject({ error: "shutting-down" });
+		expect(startedEffects()).toEqual([]); // Docker never ran a paste or an Enter
+		expect((await records.read(SID, PANE)).kind).toBe("none"); // no durable record was ever written
+		expect(await composerStates()).toEqual([]);
+	});
+
+	it("B: shutdown between the exec id's write and its start — the paste is never started (invariant 2)", async () => {
+		const gate = parkPasteIdWrite();
+		const service = makeService();
+		const p = send(service, "hold");
+		await until(gate.released, "paste id written, start pending");
+		await service.shutdown();
+		gate.release();
+		expect((await p).body).toMatchObject({ result: "uncertain" });
+		await until(recordGone, "released: nothing pending");
+		const paste = docker.calls.find((c) => c.step === "paste")!;
+		expect(paste.started).toBe(false); // created, never started
+		expect(startedEffects()).toEqual([]);
+		expect(await composerStates()).toEqual(["prepared", "uncertain", "failed", "released"]);
+		// The next process sees no pending exec from this op.
+		expect((await send(service, "x", ID2)).status).toBe(503); // still shutting down
+	});
+
+	it("C: T_http between the exec id's write and its start — the paste is never started (invariant 2)", async () => {
+		const gate = parkPasteIdWrite();
+		const service = makeService();
+		const p = send(service, "hold");
+		await until(gate.released, "paste id written, start pending");
+		timers.fire(30_000);
+		expect((await p).body).toMatchObject({ result: "uncertain" });
+		gate.release();
+		await until(recordGone, "released: nothing pending");
+		const paste = docker.calls.find((c) => c.step === "paste")!;
+		expect(paste.started).toBe(false);
+		expect(startedEffects()).toEqual([]);
+		expect(await composerStates()).toEqual(["prepared", "uncertain", "failed", "released"]);
+		await lockFree(service);
+		// The pane is free: a new send goes through.
+		const p2 = send(service, "next", ID2);
+		await until(() => docker.effectSteps().includes("enter"));
+		await promptArrives("next");
+		expect((await p2).body).toMatchObject({ result: "delivered" });
+	});
+
+	it("shutdown landing between `prepared` and the first effect cancels the op durably (no executor start)", async () => {
+		// Park the `prepared` event's flush so shutdown runs while the record exists and the op is live.
+		const realFlush = store.flush.bind(store);
+		let gate: (() => void) | null = null;
+		store.flush = (async (sid, cid) => {
+			if (gate === null)
+				await new Promise<void>((r) => {
+					gate = r;
+				});
+			return realFlush(sid, cid);
+		}) as typeof store.flush;
+		const service = makeService();
+		const p = send(service, "edge");
+		await until(() => gate !== null, "prepared flush parked");
+		const sd = service.shutdown();
+		gate!();
+		await sd;
+		expect((await p).body).toMatchObject({ result: "uncertain" });
+		expect(startedEffects()).toEqual([]);
+		expect(docker.calls.filter((c) => c.started && c.step === "display")).toHaveLength(1); // only the precondition read
+		expect(await recordIs((x) => x.phase === "cancelled" && x.cancel_reason === "shutdown")).toBe(
+			true,
+		);
 	});
 });
 
@@ -925,7 +1026,8 @@ describe("delayed effects and cancellation (§8.1.4 reglas 3–7, §10)", () => 
 		timers.fire(30_000);
 		expect((await p).body).toMatchObject({ result: "uncertain" });
 		docker.release(docker.calls.find((c) => c.step === "enter")!.id, 0);
-		await settle();
+		// The late Enter is applied under the pane lock; wait for the lock, not for time.
+		await lockFree(service);
 		const res = await resolve(service, "reconcile");
 		expect(res.body.result).toBe("pending"); // entered: waiting for the ack, still blocked
 		expect(await recordGone()).toBe(false);

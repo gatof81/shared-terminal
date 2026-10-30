@@ -1670,6 +1670,17 @@ resultado del mensaje, ni del tiempo transcurrido. Tres plazos distintos:
   registro durable (`effects: pending`) y `reconcile` puede asentarlo por evidencia. La respuesta
   tardía del exec aporta su evidencia bajo el lock del pane y no inicia nada. El apagado ordenado
   hace lo mismo con razón `shutdown` y responde 503 `shutting-down` a toda operación nueva.
+  (v1.7.1, ronda 2 de Work) Dos invariantes de cancelación: **(1)** ninguna petición admitida antes
+  del apagado inicia efectos después de él, aunque estuviera en precondiciones — el estado de apagado
+  se decide **después** de cada espera (antes de la fila de auditoría, antes de `prepared`, y de nuevo
+  tras escribir `prepared`), nunca con una lectura previa a un `await`; la operación entra en `live`
+  antes de su registro durable para que el barrido del apagado la alcance (se repite hasta no quedar
+  ninguna activa), y una `prepared` alcanzada por el apagado queda cancelada en el registro sin que el
+  ejecutor arranque; **(2)** ninguna continuación inicia un exec tras perder su autorización: `mayAct`
+  (lock propio ∧ sin cancelación ∧ sin apagado) se vuelve a evaluar **después** de la escritura del id
+  del exec y antes de `start`; si se perdió, el exec creado nunca se arranca y su id se retira del
+  registro (nada que reconciliar), mientras que un exec ya arrancado termina y se reconcilia por
+  evidencia. La exclusión no se retiene esperando un exec enviado: la mantiene el registro durable.
 - **T_ack = 8 s** es el presupuesto de confirmación tras un Enter **asentado** (§8.1.7). No es una
   garantía de que Docker terminó nada.
 - **La elegibilidad del pane** no tiene plazo: depende solo del estado de efectos de la operación

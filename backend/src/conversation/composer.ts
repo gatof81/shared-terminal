@@ -577,6 +577,9 @@ export class ComposerService {
 		}
 
 		// ── Audit before any effect (§8.1.1), fail-closed ──
+		// A shutdown that began during the preconditions is decided before the
+		// audit row too: a refused request leaves no row.
+		if (this.stopping) return this.reject("shutting-down", 503);
 		const actor: "owner" | "admin" = a.meta.userId === a.callerId ? "owner" : "admin";
 		if (actor === "admin") {
 			try {
@@ -590,6 +593,10 @@ export class ComposerService {
 		// The request already answered `uncertain` at T_http: no effect, no
 		// record, no audit row — the id was never an operation (a retry is new).
 		if (a.ctl.expired) return this.reject("timeout", 409);
+		// Shutdown began while the preconditions were in flight (they await
+		// Docker): decided HERE, synchronously with the record's creation, not
+		// on a flag read before those awaits. Nothing is written.
+		if (this.stopping) return this.reject("shutting-down", 503);
 
 		// ── prepared: record, then the confirmed event (§8.1.4) ──
 		const hash = textHash(a.normalized);
@@ -621,13 +628,23 @@ export class ComposerService {
 			resolveAck: null,
 			unlisten: null,
 		});
+		// Live BEFORE the durable record: from here on a shutdown cancels this
+		// op like any other (its scan runs until no active op is left), so the
+		// window between `prepared` and the executor's first `mayAct` is covered.
+		this.live.set(op.key, op);
+		const withdraw = async () => {
+			op.unlisten?.();
+			op.unlisten = null;
+			if (this.live.get(op.key) === op) this.live.delete(op.key);
+			await this.deps.records.remove(sid, paneId, clientMessageId).catch(() => undefined);
+		};
 		try {
 			await this.deps.records.write(record);
 		} catch (err) {
 			// Not durable (a failed fsync may still have left the file): never
 			// let a half-written record block the pane.
 			logger.error(`[composer] pane record write failed: ${(err as Error).message}`);
-			await this.deps.records.remove(sid, paneId, clientMessageId).catch(() => undefined);
+			await withdraw();
 			return this.reject("persist-failed", 503);
 		}
 		// The ack observation starts here, before any effect (§8.1.7).
@@ -636,12 +653,23 @@ export class ComposerService {
 			await this.persist(op, "prepared", {}, { confirmed: true });
 		} catch (err) {
 			logger.error(`[composer] prepared event persist failed: ${(err as Error).message}`);
-			op.unlisten?.();
-			await this.deps.records.remove(sid, paneId, clientMessageId).catch(() => undefined);
+			await withdraw();
 			return this.reject("persist-failed", 503);
 		}
-		this.live.set(op.key, op);
 		a.announce(op);
+		// Shutdown landed during those two writes: the record exists and is
+		// cancelled durably (by shutdown's scan, or here if it has not reached
+		// this op yet); the executor never starts. Both writes happened after
+		// `stopping` was set, so the record on disk may say `active` — the
+		// cancelled state is rewritten on top.
+		if (this.stopping || op.cancelled) {
+			if (!op.cancelled) await this.cancelActive(op, "shutdown");
+			else
+				await this.writeRecord(op).catch((err) =>
+					logger.error(`[composer] record write failed: ${(err as Error).message}`),
+				);
+			return op;
+		}
 
 		// ── Effects ──
 		// The HTTP answer: what remains of the request's T_http races the
@@ -748,13 +776,20 @@ export class ComposerService {
 	 */
 	async shutdown(): Promise<void> {
 		this.stopping = true;
-		for (const op of [...this.live.values()]) {
-			if (op.record.phase === "active" && !op.cancelled) {
-				await this.cancelActive(op, "shutdown");
-			} else {
-				op.unlisten?.();
-				op.unlisten = null;
-			}
+		// Re-scan after each pass: an op that became live while a cancellation
+		// was being written (the `prepared` window) is caught by the next pass;
+		// `cancelled` is set synchronously, so each op is handled once and the
+		// active phase admits nothing new once `stopping` is set.
+		for (;;) {
+			const active = [...this.live.values()].filter(
+				(op) => op.record.phase === "active" && !op.cancelled,
+			);
+			if (active.length === 0) break;
+			for (const op of active) await this.cancelActive(op, "shutdown");
+		}
+		for (const op of this.live.values()) {
+			op.unlisten?.();
+			op.unlisten = null;
 		}
 	}
 
@@ -935,9 +970,10 @@ export class ComposerService {
 		const r = op.record;
 		let refused = false;
 		let recordedId: string | null = null;
+		const mayAct = () => !op.cancelled && !op.cancelRequested && !this.stopping;
 		const res = await this.deps.docker.exec(r.container_id, argv, stdin, async (execId) => {
 			// mayAct: our lock, no cancellation — then the id is durable BEFORE start.
-			if (op.cancelled || op.cancelRequested) {
+			if (!mayAct()) {
 				refused = true;
 				return false;
 			}
@@ -948,6 +984,22 @@ export class ComposerService {
 			} catch (err) {
 				// The id may not be durable: do not start, and fail closed.
 				logger.error(`[composer] record write before start failed: ${(err as Error).message}`);
+				refused = true;
+				return false;
+			}
+			// The authorization is re-validated AFTER the write: a cancellation
+			// (T_http, shutdown) that landed during it — `cancelled` is set
+			// synchronously before any of its own awaits — means this exec must
+			// never start. It was created but never run, and we hold its only
+			// start path, so the id is withdrawn from the record (nothing to
+			// reconcile) and the cancelled state is rewritten on top.
+			if (!mayAct()) {
+				const i = r.execs.findIndex((e) => e.id === execId);
+				if (i >= 0) r.execs.splice(i, 1);
+				recordedId = null;
+				await this.writeRecord(op).catch((err) =>
+					logger.error(`[composer] record write after refusal failed: ${(err as Error).message}`),
+				);
 				refused = true;
 				return false;
 			}
