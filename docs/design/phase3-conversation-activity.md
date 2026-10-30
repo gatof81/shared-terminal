@@ -519,6 +519,11 @@ es asíncrono; `SessionEnd` puede llegar tarde o nunca. Reglas:
 
 ## 5. Envío de mensajes (3.2) — estrategia candidata, no aprobada
 
+> **2026-10-30:** la validación de §5.4 se realizó con el CLI 2.1.314 y el responsable aprobó el
+> contrato del composer; lo vinculante es [CONVERSATION.md §8](../CONVERSATION.md) (entrega
+> segmentada en lugar de un paste único, rechazo de `/` y `!` iniciales, lock por pane,
+> idempotencia, fallo cerrado, ack con `session_id`). Lo que sigue es el razonamiento original.
+
 ### 5.1 Opciones evaluadas
 
 | Opción | ¿Oficial? | ¿Sin relanzar? | Autoridad del mensaje | Veredicto |

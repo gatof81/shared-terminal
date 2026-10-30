@@ -11,7 +11,15 @@ allowlist del CLI para el piloto, §2.7.5, 2026-10-27; decisión del responsable
 de runtime del CLI 2.1.308 en `/tmp` en la allowlist de la capa, §2.7.1, 2026-10-27; decisión del
 responsable sobre el registro del manejador de enlaces del CLI 2.1.308 en HOME, §2.7.1, 2026-10-28;
 corrección de atribución tras el piloto de 3.1: las notificaciones internas que el CLI entrega por
-`UserPromptSubmit` dejan de ser `user_prompt`, §4.2.1, 2026-10-29),
+`UserPromptSubmit` dejan de ser `user_prompt`, §4.2.1, 2026-10-29; **v1.7**: contrato del composer
+3.2 aprobado por el responsable tras la validación §8.2 con el CLI 2.1.314 —entrega segmentada,
+rechazo de prefijos, precondiciones, lock por pane, idempotencia, fallo cerrado, ack y
+`composer_send`—, §8, 2026-10-30; revisión Work del contrato: exclusión por pane con estados
+persistidos y resolución administrativa, `prepared` antes del primer efecto, ack atribuido por
+pane, 2026-10-30; segunda ronda: resultado del mensaje separado de la elegibilidad del pane,
+registro de pane durable fuera de L7, liberación solo por evidencia, 2026-10-30; tercera ronda:
+resolución administrativa serializada con el ejecutor bajo la misma exclusión por pane,
+`reconcile` idempotente, 2026-10-30),
 vinculante para los PRs
 3.0b–3.4.** El razonamiento está en [docs/design/phase3-conversation-activity.md](./design/phase3-conversation-activity.md)
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
@@ -36,6 +44,8 @@ verificados en revisión. "Bytes" significa siempre bytes UTF-8 del contenido, s
 | Managed settings en archivo: `/etc/claude-code/managed-settings.d/*.json` | code.claude.com/docs/en/managed-settings | 2.1.308 | Entrega de la configuración |
 | `claude agents --json` | code.claude.com/docs/en/agent-view | 2.1.308 | Probe de estado |
 | Variables `TMUX_PANE` (tmux) y `SESSION_ID` (Shared Terminal) | tmux(1); `buildContainerEnv` | — | Binding y auth |
+| `tmux load-buffer` / `paste-buffer -p` / `send-keys` / `display -p` / `capture-pane -p` | tmux(1) | 3.4 (imagen) | Composer (§8), siempre con argv fijo y el texto por stdin |
+| Salto de línea en el composer del CLI por Shift+Enter en CSI u (`ESC[13;2u`); envoltura `<pasted_content>` de un paste multilínea o > ~800 caracteres; modos `/` y `!` por primer carácter | comportamiento observado del binario (§8.2) | **2.1.314** (validado; `COMPOSER_CLI_VERSIONS`) | Composer (§8) |
 
 Nota (3.0c): antes de enviar un hook `http`, el CLI 2.1.308 resuelve el host y **rechaza** cualquier
 dirección de 0/8, 10/8, 100.64/10, 169.254/16, 172.16/12, 192.168/16, fc00::/7, fe80::/10 y `::`
@@ -1202,7 +1212,7 @@ candidata); si no hay candidata única, se cuenta en `ingest_rejected` y en
 | `teammate_idle` | `TeammateIdle` | `teammate_name` | — |
 | `gap` | backend | `reason`, `scope?`, `dropped?`, `dropped_bytes?`, `range?`, `detail?` | — |
 | `probe` | backend | `status`, `waitingFor?`, `found: boolean` | — |
-| `composer_send` | backend (3.2) | `clientMessageId`, `result`, `prompt_id?` | — |
+| `composer_send` | backend (3.2, §8.1.8) | uno por cambio de estado: `client_message_id`, `state: prepared\|entered\|failed\|uncertain\|delivered\|unconfirmed\|misdelivered\|resolved\|released`, `result`, `effects: pending\|settled`, `pane_id`, `pane_pid`, `container_id`, `text_hash`, `bytes`, `segments`, `actor`, `stage?`, `segments_sent?`, `pending?`, `orphaned?`, `prompt_id?`, `seq?`, `misdelivered_to?`, `outcome?`, `by?`, `evidence?`, `http?` | — (**sin texto**, solo `text_hash`) |
 
 Nota 1 (observado en 3.0c, CLI 2.1.308): con `--dangerously-skip-permissions`, un Bash que falla
 dispara `PreToolUse → PostToolUseFailure → PostToolUse` con el mismo `tool_use_id`. **Decisión del
@@ -1391,6 +1401,7 @@ completo* en una ventana corta, que colapsa reintentos idénticos sin tocar even
 | `task_created` / `task_completed` | `ev` + `task_id` | descartar |
 | `turn_end` / `turn_failed` | **sin identidad natural** (`Stop` puede dispararse varias veces en un mismo `prompt_id` cuando un hook bloquea y el turno continúa): hash del payload en ventana de 10 s | solo se descarta si el payload es idéntico dentro de la ventana |
 | `teammate_idle` | `teammate_name` + hash del payload, ventana 10 s | idem |
+| `composer_send` (§8) | `client_message_id` + `state` | descartar |
 | `notification`, `permission_request`, `compact`, `session_start`, `session_end` | hash del payload en ventana de 10 s | idem |
 
 Hash = SHA-256 del JSON canónico del input del hook (claves ordenadas) **antes** de redactar.
@@ -1448,6 +1459,9 @@ Casos que *MUST* estar en el test:
 - Dos conversaciones con el mismo `pane_id`: la más reciente conserva el binding; la anterior pasa a
   `pane_id = NULL`, `status = unknown`, evidencia `binding_lost`.
 - `session_end` con `reason: clear|resume` deshace el binding al confirmarse.
+- El composer (§8) envía al `pane_id` del binding y nunca a uno elegido por el cliente; su lock es
+  por `(st_session_id, pane_id)`, de modo que las dos conversaciones de la segunda viñeta nunca
+  entregan a la vez, y exige que el probe liste `cid` con un `pid` descendiente de `pane_pid`.
 
 ### 5.3 Máquina de estados
 
@@ -1487,8 +1501,12 @@ Todas owner-only (`assertOwnedByOr404`), rate limit `conversationIp` (300/min), 
 | GET | `/api/sessions/:id/conversations/:cid/events/:seq` | un evento (para "Copiar informe" de eventos no montados) |
 | GET | `/api/sessions/:id/conversations/:cid/agents` | `{ agents: [{ agentId, agentType, status, startedSeq, endedSeq?, toolCount, hasResult }] }` |
 | WS | `/ws/conversation/<id>` | ver §6.1 |
+| POST | `/api/sessions/:id/conversations/:cid/messages` | §8 (3.2). Cuerpo `{ text, clientMessageId }`; 202 `{ result: delivered\|unconfirmed\|misdelivered\|uncertain, … }`, 400/409 según §8.1.2–§8.1.3, 502 `delivery-failed` según §8.1.6, 503 `persist-failed`; 403 lead/observador; **ausente (404) con `CONVERSATION_COMPOSER_ENABLED` apagado** |
 
-`canSendInput` *MUST* ser `false` siempre mientras 3.2 no esté desplegado y activado.
+`canSendInput` *MUST* ser `false` siempre mientras `CONVERSATION_COMPOSER_ENABLED` esté apagado; con
+la bandera encendida es **orientativo** según §8.1.1 (sin probe ni exec) y el `POST` decide por su
+cuenta. Con la bandera encendida el resumen añade `composer: { blocked, reason?, clientMessageId?, result?,
+since? }` (§8.1.8).
 
 ### 6.1 Protocolo WS y contrapresión
 
@@ -1532,6 +1550,9 @@ Servidor → cliente: `{type:"hello", conversations:[{cid,lastSeq,firstRetainedS
 | `PATCH /api/admin/sessions/:id/conversation {enabled}` | admin (`adminActionIp`) | aplica la fila correspondiente de §2.4 y devuelve `{ enabled, capture }`, con `capture` según §2.7.6 |
 | `GET /api/admin/sessions/:id/recreate` | admin | preflight sin efectos (§2.7.2): `{ recreatable, blockers[], imageId, currentImageId, captureAfter }`; códigos y recuentos, nunca rutas |
 | `POST /api/admin/sessions/:id/recreate {expectImageId}` | admin (`adminActionIp`); fila `operate` fail-closed con owner ajeno | recreación de §2.7.2–§2.7.4; 409 con el código de la primera precondición que falla; 500 `recreate-failed {step, unresolved?}`; 503 `docker-unavailable` |
+| `POST /api/admin/sessions/:id/composer/resolve {paneId, clientMessageId, outcome}` | admin (`adminActionIp`); con `discarded`/`sent-manually` fila `operate` fail-closed; `reconcile` sin fila | §8.1.11, bajo el lock de pane: `discarded`/`sent-manually` declaran el resultado del mensaje (`composer_send{resolved}`) solo si `phase ≠ active` y `result: pending`; `reconcile` reintenta asentar efectos (idempotente, sin cambiar `result`) y libera si procede; responde `{ phase, result, effects, pending[], released }`; 409 `operation-active` con el ejecutor activo, 409 `not-pending` si el mensaje ya tenía resultado |
+| `GET /api/admin/sessions/:id/composer/panes` | admin | §8.1.11: registros de pane de la sesión (`phase`, `result`, `effects`, `pending[]`), sin texto |
+| `npm run composer:resolve -- <sid> <paneId> <clientMessageId> <outcome\|reconcile>` | shell host | igual que las filas anteriores, sin red (§8.1.11) |
 | `CONVERSATION_ALLOW_USERS=<id,id>` | env | sesiones nuevas de esos usuarios nacen con `conversation_requested=1` |
 | `npm run conversation:disable -- <sid>\|--all` | shell host | fila "Emergencia" de §2.4 con el orden de §2.5: marca de revocación, D1, archivos; si D1 falla, deja la marca, no borra archivos y sale ≠ 0 |
 | `npm run conversation:enable-all` | shell host | quita `REVOKED_ALL`; no toca filas ni marcas por sesión |
@@ -1539,48 +1560,529 @@ Servidor → cliente: `{type:"hello", conversations:[{cid,lastSeq,firstRetainedS
 
 ---
 
-## 8. Composer (3.2) — contrato condicionado
+## 8. Composer (3.2) — contrato
 
-Se implementa únicamente si el usuario aprueba 3.2 tras la validación de §8.2. Hasta entonces
-`POST /api/sessions/:id/conversations/:cid/messages` no existe.
+Estado: **aprobado por el responsable el 2026-10-30** tras la validación previa de §8.2 (CLI
+2.1.314, 18 experimentos) y el cierre de #444 (`b1479d5`). La implementación es el PR siguiente,
+backend y frontend juntos, detrás de `CONVERSATION_COMPOSER_ENABLED` (por defecto apagado). Este
+apartado es vinculante para ese PR. El razonamiento está en
+[docs/design/phase3-conversation-activity.md §5](./design/phase3-conversation-activity.md); si
+difieren, manda este.
+
+Qué es y qué no es: el composer entrega **texto a la línea de entrada del CLI interactivo que vive en
+el pane ligado**, exactamente como si la persona lo hubiera pegado y pulsado Enter en el Terminal. No
+habla con el CLI por ningún canal propio (§1.1), no crea instancias y no interpreta la respuesta.
+"Entregado" significa que el CLI aceptó el texto como un turno de usuario y lo anunció por
+`UserPromptSubmit`; **no** dice nada de lo que Claude haga después: el turno (deltas, herramientas,
+`turn_end`) llega por los eventos normales de §4.2 y se muestra como cualquier otro.
 
 ### 8.1 Contrato
 
-Body `{ text: string ≤ L1, clientMessageId: uuid }`. Respuestas:
+#### 8.1.1 Bandera, ruta y autorización
 
-| Código | `error` | Cuándo |
+- `CONVERSATION_COMPOSER_ENABLED` ausente o distinto de `1`/`true` ⇒ la ruta **no se monta** (404) y
+  `canSendInput` es `false` en §6 para toda conversación. Con la bandera encendida nada más cambia
+  hasta que un cliente envía.
+- `POST /api/sessions/:id/conversations/:cid/messages`, cuerpo JSON `{ text: string,
+  clientMessageId: string }` (`clientMessageId` = UUID v4 generado por el cliente, uno por intento de
+  la persona). Rate limit `composerUser` (30/min por usuario) además de `conversationIp`.
+- Autorización: owner, o admin con `assertCanOperate`; **lead y observadores: 403**. Un envío con
+  owner ajeno escribe **antes del primer efecto** una fila `session_observe_log mode='operate'`
+  puntual, fail-closed (como el `start` de #429): si la fila no se puede escribir, no se envía.
+- `canSendInput` (§6) es **disponibilidad orientativa** para la UI: bandera encendida ∧ `kind:
+  interactive` ∧ binding con `pane_id` ∧ `capture.effective` del último probe conocido ∧ el pane no
+  está bloqueado (§8.1.4) ∧ el llamador puede operar. Se calcula sin probe y sin exec. **No autoriza
+  nada**: el `POST` ejecuta siempre el probe fresco, las comprobaciones D7 y las precondiciones de
+  §8.1.3, y puede responder 409 con `canSendInput = true`.
+
+#### 8.1.2 Validación del texto (400, sin efectos)
+
+`normalize(s)` es la función de referencia, aplicada al texto antes de enviarlo y a ambos lados de
+la comparación del ack. Reproduce lo que el CLI 2.1.314 hace por su cuenta con un paste (§8.2.4):
+
+    normalize(s) =
+      s.replace(/\r\n?/g, "\n")                                  // CR y CRLF ⇒ LF
+       .split("\n")
+       .map(l => l.replace(/\t/g, "    ").replace(/[ \t]+$/, ""))  // tab ⇒ 4 espacios; sin blancos finales por línea
+       .join("\n")
+       .replace(/\n+$/, "")                                       // sin saltos finales
+
+| Código | Condición (sobre `normalize(text)`) |
+| --- | --- |
+| `invalid-body` | cuerpo no objeto, `text` no string, `clientMessageId` no UUID v4 |
+| `empty-text` | 0 bytes |
+| `text-too-large` | > **L1** bytes |
+| `control-bytes` | cualquier byte < 0x20 salvo `\n`, o 0x7F, o la secuencia `ESC` en cualquier posición (incluye `ESC[13;2u`: el cliente nunca envía teclas) |
+| `unsupported-prefix` | el primer carácter no blanco del texto es `/` o `!` — ambos activan modos del CLI (comando / shell) y no producen `UserPromptSubmit` (§8.2.3) |
+| `too-many-segments` | la secuencia de entrega (§8.1.5) supera **256** pastes |
+
+Solo el primer carácter del mensaje activa modos: una línea posterior que empiece por `/` o `!` es
+texto (§8.2.3) y se acepta. `text_hash` = SHA-256 de `normalize(text)`; es lo único del texto que
+se persiste (§8.1.8).
+
+#### 8.1.3 Precondiciones (409, sin efectos)
+
+Todas del lado del servidor, en este orden, con la exclusión de §8.1.4 ya tomada. **Ante cualquier
+incertidumbre no se envía**; nunca "por si acaso".
+
+| Código | Condición |
+| --- | --- |
+| `send-in-progress` | el pane está **bloqueado** (§8.1.4): su registro de pane (§8.1.4.1) tiene una operación con **otro** `clientMessageId` cuyo `result` está pendiente o cuyos `effects` están pendientes, viva o persistida; `detail: in-progress\|effects-pending\|unverifiable` y `clientMessageId` de esa operación. El mismo id pendiente no es 409: es 202 `uncertain` (§8.1.4, regla 9) |
+| `not-interactive` | `kind ≠ interactive`, o la conversación no tiene binding (`pane_id` nulo) |
+| `session-not-running` | el contenedor no está `running` |
+| `capture-inactive` | `capture.effective = false` en un probe fresco del relay (D7): sin hooks no hay ack |
+| `probe-failed` | `claude agents --json` no responde, no parsea, o **no lista** una sesión con `sessionId = cid` |
+| `binding-stale` | el probe lista `cid` pero su `pid` no es descendiente de `pane_pid` del pane ligado, o el pane ligado ya no existe (`tmux display -p -t <pane_id>` falla): la conversación cambió de pane o el pane fue recreado |
+| `busy` | probe `status: busy` |
+| `needs-terminal` | probe `waitingFor ∉ {∅, "input needed"}` (incluye `"dialog open"` y `"permission prompt"`); o `pane_in_mode = 1`; o `pane_dead = 1`; o `pane_current_command ∉ {claude, node}` |
+| `composer-not-empty` | la **región de entrada** del CLI (definición abajo) contiene texto propio, o no se pudo delimitar |
+| `cli-unvalidated` | la `claude_version` del `session_start` de la conversación ligada —es la versión del **proceso realmente en el pane**, el mismo cuyo `pid` verifica `binding-stale`— no está en `COMPOSER_CLI_VERSIONS` (§8.1.9), o falta |
+
+Región de entrada (fail-closed): `tmux capture-pane -p -e -t <pane_id> -S -12`. Con `-e` el
+volcado conserva los atributos SGR. La región es lo que sigue al **último** marcador de prompt
+(`❯` al inicio de línea) hasta la siguiente línea de regla horizontal del CLI (una línea compuesta
+solo por `─`). La región está vacía cuando no contiene ningún carácter no blanco **sin estilo**: el
+texto tecleado por la persona se pinta sin atributos, y la sugerencia fantasma del CLI («Try …», o
+un prompt anterior ofrecido como sugerencia) se pinta con atributo tenue. Cualquier carácter no
+blanco sin estilo ⇒ no vacía. Sin marcador, sin regla de cierre, con más de una región candidata,
+o con el pane en modo alternativo que no sea el del CLI ⇒ `composer-not-empty`. El historial del
+pane (encima del marcador) nunca cuenta. El smoke con el CLI real (§8.2.6, §10) *MUST* fijar los
+tres casos: vacía, vacía con sugerencia fantasma, con texto tecleado.
+
+El probe y la lectura del pane son del **mismo envío**, inmediatamente antes de la entrega; no se
+usa ningún estado cacheado de probes anteriores ni el `status` de §5.3.
+
+#### 8.1.4 Exclusión por pane, estados de la operación e idempotencia
+
+**Un pane admite una operación con efectos a la vez, y la elegibilidad para un nuevo envío depende
+únicamente de que no quede ningún efecto capaz de actuar**: ni de la respuesta HTTP, ni del
+resultado del mensaje, ni del tiempo transcurrido. Tres plazos distintos:
+
+- **T_http = 30 s** es el presupuesto de la respuesta HTTP. Si al vencer la operación no tiene
+  resultado final, el `POST` responde **202 `{ result: "uncertain", clientMessageId }`** y la
+  operación sigue viva en el servidor.
+- **T_ack = 8 s** es el presupuesto de confirmación tras un Enter **asentado** (§8.1.7). No es una
+  garantía de que Docker terminó nada.
+- **La elegibilidad del pane** no tiene plazo: depende solo del estado de efectos de la operación
+  anterior (abajo). Un pane nunca se desbloquea por timeout, por quietud, por lo que se ve en el
+  Terminal ni por una declaración.
+
+Cada operación tiene **dos estados independientes**:
+
+1. **Resultado del mensaje** (`result`): qué se sabe del texto. `pending` → `delivered` |
+   `unconfirmed` | `misdelivered` | `failed` | `resolved`. Lo deciden el ack (§8.1.7), un fallo
+   conocido (§8.1.6) o la declaración administrativa (§8.1.11).
+2. **Efectos** (`effects`): qué se sabe de los execs que la operación creó. `settled` cuando **todos**
+   los execs creados tienen un código de salida numérico conocido por su propio inspect (o no se
+   creó ninguno); `pending` mientras alguno no lo tenga —el daemon no respondió, la conexión se
+   cortó, `ExitCode` nulo, el proceso que lo creó murió— o mientras no se sepa si llegó a crearse.
+   Solo lo decide la evidencia de §8.1.4.1.
+
+**El pane está bloqueado** mientras exista una operación cuyo `result` sea `pending` **o** cuyos
+`effects` sean `pending`. Un `result` final **no** libera el pane por sí mismo: un ack válido prueba
+que un texto llegó al CLI, no que un paste pendiente haya terminado; una resolución administrativa
+registra lo que vio el operador, no lo que hizo Docker.
+
+Fases de la operación, cada una un evento `composer_send` (§4.2, §8.1.8) en el log de la
+conversación destino:
+
+| `state` | Cuándo se persiste | `result` | `effects` |
+| --- | --- | --- | --- |
+| `prepared` | **antes del primer efecto**, tras escribir el registro de pane (§8.1.4.1) y con escritura **confirmada** del evento (`enqueue` + `flush`: la línea está en el archivo, §4.1). Si cualquiera de las dos escrituras falla, no hay efectos (`503 persist-failed`) y el registro se retira | `pending` | `settled` (nada creado) |
+| `entered` | el exec del Enter asentó con código **0** | `pending` (espera ack) | según el registro |
+| `failed` | un efecto asentó con código **≠ 0**, o un exec fue rechazado antes de crearse; `stage`, `segments_sent`. El Enter nunca se envió (§8.1.6) | `failed` | según el registro |
+| `uncertain` | algún efecto quedó `pending`; `stage`, `pending[]` (ids de exec) | `pending` | `pending` |
+| `delivered` / `unconfirmed` / `misdelivered` | resultado del ack (§8.1.7); con `http` (código y cuerpo que se devolverán al reproducir) | el indicado | según el registro |
+| `resolved` | declaración administrativa (§8.1.11); `outcome`, `by` | `resolved` | según el registro |
+| `released` | el registro de pane se retiró: `result` final **y** `effects: settled`, con la evidencia (`evidence: inspected\|container-gone\|none-created`) | — | `settled` |
+
+Reglas (*MUST*):
+
+1. **Exclusión viva**: en el proceso, un lock por `(st_session_id, pane_id)` (como
+   `sessionLifecycleLock`, modo `fail`: sin espera, el segundo recibe 409) lo toma el ejecutor
+   antes de leer el binding y lo **conserva durante toda la fase activa** —desde `prepared` hasta
+   que él mismo escribe `entered`, `failed` o la cancelación—; lo suelta solo al escribir una de
+   esas tres transiciones. A partir de ahí el bloqueo del pane lo sostiene el registro de pane
+   (§8.1.4.1), no el lock. Toda otra operación sobre el registro —un `POST` nuevo, la resolución
+   y la reconciliación de §8.1.11, la reconstrucción de la regla 8— toma el **mismo** lock antes
+   de leerlo; si el ejecutor lo tiene, recibe 409 sin tocar nada.
+2. **Exclusión persistida**: antes de tomar el lock, el backend lee los registros de pane de la
+   sesión (§8.1.4.1). Un registro para ese pane ⇒ `send-in-progress`, con `detail`
+   `in-progress` (operación viva), `effects-pending` (algún exec sin asentar) o `unverifiable`
+   (registro ilegible, §8.1.4.1). Nunca decide solo la memoria.
+3. **Efectos con evidencia y autorización serializada**: cada comando tmux es un exec cuyo id se
+   escribe en el registro de pane **antes** de `start` y cuyo final se conoce **solo por su propio
+   inspect** (`exitCode` numérico), como `recreateExec` (§2.7.3); nada se corta del lado del host
+   y ningún exec se aborta. La autorización de cada efecto (`mayAct`) es: *el ejecutor tiene el
+   lock de la regla 1* **y** *el registro no tiene `cancelled_at`*, comprobada y consumida en la
+   **misma sección crítica** en que se escribe el id del exec; la comprobación y el `start` no
+   están separados por ningún punto en que otro actor pueda escribir el registro. Un exec cuyo id
+   está en el registro **existe** para todos los demás actores aunque su `start` no haya
+   respondido: la resolución nunca asume que un efecto autorizado no ocurrió. Un `exitCode: null`,
+   un error de conexión o un plazo de espera vencido dejan ese exec `pending`: la operación pasa
+   a `uncertain` y no inicia ningún efecto más.
+4. **Cancelación lógica**: la operación queda cancelada cuando un efecto queda `pending`, cuando
+   vence T_http sin Enter asentado, cuando el proceso se apaga, o cuando la reconstrucción de la
+   regla 8 encuentra una operación activa de un proceso muerto. La cancelación es una escritura
+   del registro (`phase: cancelled`, `cancelled_at`, `reason`) que el ejecutor hace **bajo el lock
+   de la regla 1** antes de soltarlo; en el caso del proceso muerto la hace el proceso nuevo, bajo
+   el mismo lock. Tras la cancelación **ninguna continuación inicia el siguiente segmento ni el
+   Enter**: `mayAct` falla porque el registro tiene `cancelled_at` (y porque el lock ya no es
+   suyo), aunque la respuesta tardía del efecto anterior llegue después y sea un éxito; la
+   respuesta tardía solo asienta ese exec (patrón de §2.7.3). Una operación es **activa** mientras
+   `phase: active`: su ejecutor conserva autorización para iniciar efectos. Deja de serlo al
+   escribir `entered` o `failed` (`phase: completed`) o al cancelarse.
+5. **Asentamiento solo por evidencia** (§8.1.4.1): un exec `pending` pasa a asentado únicamente
+   cuando su inspect devuelve `Running: false` con `ExitCode` numérico, o cuando el contenedor que
+   lo alojaba (`container_id` del registro) ya no es el de la sesión o no está `running` —nada
+   dentro de él puede actuar—. Un inspect que no responde, un 404 del daemon (registro de exec
+   perdido con el contenedor aún `running`) o cualquier error **no** asientan: el exec sigue
+   `pending`. La verificación se intenta **bajo demanda**: en cada `POST` al pane que encuentre el
+   registro, en la resolución administrativa y al abrir la sesión tras un reinicio; no hay
+   temporizadores.
+6. **Resultado por evidencia o declaración, nunca liberación**: cuando todos los efectos de una
+   `uncertain` asientan: Enter no creado o con código ≠ 0 ⇒ `failed`; Enter con 0 ⇒ `entered` y
+   sigue el ack. Un ack válido que llegue con efectos `pending` fija `result: delivered` (o
+   `misdelivered`) y **deja el pane bloqueado**. Un Enter de resultado desconocido **nunca** se
+   convierte en `delivered` por sí mismo.
+7. **Liberación**: solo cuando `phase ≠ active` (ninguna continuación conserva autorización),
+   `result` es final **y** `effects: settled`, el backend —bajo el lock de la regla 1— escribe
+   `released` con la evidencia y retira el registro de pane. Hasta entonces el pane rechaza todo
+   envío desde Chat; el Terminal no se ve afectado.
+8. **Reinicio del backend**: antes de admitir el primer envío a una sesión, el backend reconstruye
+   la exclusión desde los registros de pane (§8.1.4.1), bajo el lock de cada pane: una operación
+   con `phase: active` pertenece a un proceso muerto y se **cancela** (regla 4, `reason:
+   orphaned`), y todo exec con id en el registro y sin asentar es `pending`; después intenta
+   asentar con la regla 5; una `prepared` o `uncertain` cuyos efectos no asientan sigue bloqueando
+   como `uncertain{orphaned: true}`; una `entered` con efectos asentados sigue el ack diferido
+   (§8.1.7).
+   Si un registro no se puede leer o validar, la sesión entera queda `send-in-progress{detail:
+   unverifiable}` hasta que un operador lo resuelva (§8.1.11). La pérdida del lock en memoria
+   **no** borra la incertidumbre.
+9. **Idempotencia por `client_message_id`**: antes de `prepared`, el backend busca el id, en este
+   orden: (a) en los registros de pane de la sesión —si está ahí, la operación **sigue pendiente**:
+   202 `{ result: "uncertain", clientMessageId, effects: "pending"|"settled" }` sin ningún efecto
+   nuevo, y nunca se trata como nuevo—; (b) en el índice de la conversación (§8.1.4, regla 10) —si
+   está con resultado final, devuelve **la misma respuesta HTTP registrada** en ese evento
+   (`http.status`, `http.body`): un `failed` vuelve a ser **502**, un `delivered` vuelve a ser 202
+   con el mismo `promptId`; un 502 jamás se convierte en 202—; (c) si no está en ninguno, es un
+   intento nuevo. Un id **distinto** sobre un pane bloqueado es 409 `send-in-progress`. Un doble
+   clic produce **como máximo una** secuencia de entrega. La recuperación tras reinicio **nunca
+   reenvía** un intento incompleto.
+10. **Ventana de idempotencia**: solo las operaciones **`released`** entran en la ventana: el índice
+    de la conversación conserva los últimos **256** ids liberados con su `http` mientras el
+    archivo actual o un snapshot válido los respalden (§4.4, L7). Las operaciones con `result`
+    pendiente o `effects: pending` **no** están sujetas a la ventana ni a la rotación: viven en
+    el registro de pane hasta `released`. Fuera de la ventana —rotación del archivo, conversación
+    purgada (§9), más de 256 liberaciones— un id liberado se trata como un intento nuevo. Por eso
+    **no se promete "exactamente una entrega"**: se garantiza *como máximo una secuencia de entrega
+    por id mientras la operación exista o esté en la ventana* y *nunca un reenvío automático*; el
+    cliente genera un id nuevo por cada acción de la persona y nunca reutiliza uno pasado.
+
+##### 8.1.4.1 Registro de pane (representación durable del bloqueo)
+
+El bloqueo activo vive **fuera** del log de eventos, en
+`<WORKSPACE_ROOT>/.st-control/<sid>/composer/<pane>.json` (`<pane>` = dígitos del `pane_id`),
+escrito con el mismo primitivo que el registro de recreación (§2.7.4, `recreateAttempt.ts`:
+temporal + fsync + rename, fsync del directorio; un error de fsync es un fallo de escritura). No es
+una tabla ni un servicio: un archivo por pane con operación pendiente, ninguno cuando no la hay.
+
+    { "v": 1, "sid", "pane_id", "pane_pid", "container_id", "cid", "client_message_id",
+      "text_hash", "prepared_at", "state", "result", "phase": "active"|"completed"|"cancelled",
+      "cancelled_at"?, "cancel_reason"?, "execs": [ { "id", "step", "created_at",
+      "settled": null | { "exit_code", "at" } } ], "updated_at" }
+
+Escrituras, todas bajo el lock de pane (§8.1.4, regla 1): (1) al preparar, antes del evento
+`prepared`, con `phase: active`; (2) **antes del `start` de cada exec**, con su `id` y `step`
+(`load`, `paste`, `newline`, `enter`, `precheck`), en la misma sección crítica que `mayAct`;
+(3) al pasar a `completed` o `cancelled` (el ejecutor suelta el lock solo después); (4) al asentar
+execs y al cambiar `state`/`result` (puede agrupar varios asentamientos en una escritura, pero
+nunca posponer la (2) ni la (3)). Lectura: al abrir la sesión, en cada `POST` al pane y en la resolución
+administrativa. Retirada: solo al escribir `released` (regla 7), **después** de persistir ese
+evento; si la retirada falla, el registro queda y el siguiente intento lo vuelve a evaluar
+(idempotente: `result` final + `effects: settled` ⇒ `released`). Un registro que no parsea, con
+`v` desconocido o con `sid` ≠ el directorio es **ilegible** ⇒ `unverifiable` para toda la sesión
+(regla 8); nunca se borra automáticamente. Los registros se purgan con el workspace (§9) y nunca
+antes.
+
+#### 8.1.5 Secuencia de entrega
+
+El cliente nunca nombra pane, tab, ventana ni teclas; todo sale del binding. Cada comando es un exec
+con argv fijo; el texto viaja **solo por stdin** de `load-buffer`, nunca como argumento. Todo
+efecto se ejecuta solo tras `mayAct` (lock vivo, operación no cancelada, §8.1.4).
+
+1. `normalize(text)`, partir en líneas por `\n`; cada línea en trozos de **≤ 800 caracteres**
+   (puntos de código, sin cortar un par sustituto). Un paste con salto de línea o con más de ~800
+   caracteres es envuelto por el CLI como `<pasted_content>` (§8.2.3), de modo que deja de ser el
+   texto de la persona; por eso la entrega es segmentada.
+2. Por cada línea, por cada trozo: `tmux load-buffer -b st-<cid>-<n> -` (stdin = trozo) y
+   `tmux paste-buffer -p -d -b st-<cid>-<n> -t <pane_id>`. Siempre `-p` (bracketed paste): sin él
+   cada `\n` es un Enter (§8.2.5).
+3. Entre líneas: `tmux send-keys -t <pane_id> -l $'\e[13;2u'` (Shift+Enter en CSI u, que el CLI
+   2.1.314 inserta como salto de línea; una línea vacía es dos secuencias seguidas). Invariante: un
+   `\n` del texto **nunca** produce Enter.
+4. Al final, una sola vez: `tmux send-keys -t <pane_id> Enter`. Asentado con 0 ⇒ `entered`; ≠ 0 ⇒
+   `failed{stage: enter}`; `pending` ⇒ `uncertain{stage: enter}`.
+
+Antes del primer paste se repite `tmux display -p -t <pane_id> '#{pane_pid} #{pane_in_mode}
+#{pane_dead} #{pane_current_command}'` y debe coincidir con la precondición; si no, 409
+`binding-stale`/`needs-terminal` y la `prepared` se cierra como `failed{stage: precheck,
+segments_sent: 0}` y `released{evidence: none-created}` (el único exec fue la lectura; sin efectos
+sobre el pane). **No** se relee entre pastes: la secuencia completa
+dura milisegundos y la exclusión impide otro envío; lo que no puede excluirse (una tecla de la
+persona, un diálogo que se abre) lo detecta el ack, no la entrega (§8.1.10).
+
+#### 8.1.6 Fallos parciales (fail-closed)
+
+Si un comando de los pasos 2–3 termina con código **≠ 0 conocido** o el exec es rechazado antes de
+ejecutarse (contenedor caído, daemon que rechaza la creación):
+
+- se detiene la secuencia **en ese punto**; el Enter final **nunca** se envía tras un fallo previo;
+- **no** se reintenta ningún segmento y **no** se intenta limpiar el composer del CLI (ni `C-u`, ni
+  `Escape`, ni `C-c`): el texto parcial queda donde está;
+- respuesta **502 `delivery-failed { stage: "paste"|"newline"|"enter", segmentsSent, segments }`**,
+  evento `composer_send{state: failed}` con esa misma respuesta en `http`;
+- el frontend muestra que **puede haber texto parcial en el composer del Terminal** y exige que la
+  persona confirme haberlo revisado antes de habilitar un nuevo envío a esa conversación; del lado
+  del servidor la guarda real del siguiente envío es `composer-not-empty`.
+
+Si el resultado del comando queda **`pending`** no es un fallo: es `uncertain` (§8.1.4, regla 3) y
+el pane sigue bloqueado hasta que la evidencia de la regla 5 lo asiente; la resolución de §8.1.11
+fija el resultado del mensaje pero no libera el pane. Un ack que vence (§8.1.7) no es un fallo de
+entrega.
+
+#### 8.1.7 Confirmación (ack)
+
+La **observación empieza antes del primer efecto**: al persistir `prepared` el backend anota la
+frontera de recepción `t0` (instante de ingesta del propio `prepared`, en el reloj del proceso; tras
+un reinicio, su `ts`) y el `pane_id` de la operación. Solo cuentan `user_prompt` **recibidos por la
+ingesta después de `t0`** y cuyo `pane` (el `X-ST-Tmux-Pane` del hook, §3.2) sea **el pane de la
+operación**. Nunca se comparan `seq` de conversaciones distintas: la frontera es la recepción.
+
+Candidato = `user_prompt` con: `pane = pane_id` de la operación, recibido tras `t0`, `source`
+ausente o `user`, sin `origin: unverified` (§4.2.1), y `SHA-256(normalize(prompt)) = text_hash`.
+Un `internal_prompt`, un prompt inyectado o un prompt de **otro pane** nunca son candidatos, aunque
+el texto coincida. Un candidato consumido por una operación no confirma otra.
+
+Tras un Enter **asentado** (`entered`) se espera ≤ T_ack. El ack decide solo el `result` del
+mensaje; **no asienta efectos ni libera el pane** (§8.1.4, reglas 6 y 7):
+
+| Resultado (202) | Cuándo | Qué sabe la persona |
 | --- | --- | --- |
-| 202 | — | `{ result: "delivered", promptId }` o `{ result: "unconfirmed" }` |
-| 409 | `not-interactive` | `kind ≠ interactive` o sin binding |
-| 409 | `busy` | probe `busy` |
-| 409 | `needs-terminal` | probe `waitingFor ∉ {∅, input needed}`, `pane_in_mode`, `pane_dead`, foreground ≠ claude |
-| 409 | `send-in-progress` | lock tomado |
-| 409 | `probe-failed` | probe sin respuesta: **no se envía** |
-| 403 | — | observadores, lead |
+| `{ result: "delivered", promptId, seq }` | candidato con `session_id = cid` | el CLI aceptó el texto como turno; lo que Claude haga llega por WS como siempre |
+| `{ result: "misdelivered", conversation }` | candidato con `session_id ≠ cid`: el **mismo pane** entregó el texto a otra conversación (ventana `/clear`–`/resume`, §8.2.2) | el texto se envió, pero a otra conversación; se enlaza |
+| `{ result: "unconfirmed" }` | T_ack vence sin candidato | puede haberse enviado o no (hook perdido, texto mezclado, diálogo abierto); mirar el Terminal |
 
-Invariantes (*MUST*, con tests sobre un `tmux` simulado):
+Si llegan candidatos en más de una conversación del mismo pane dentro de la ventana, o un
+candidato cuya atribución sea ambigua (sin `pane`, o `pane` distinto), el resultado es
+`unconfirmed`: **sin atribución inequívoca no hay `delivered` ni `misdelivered`**.
+
+Ack diferido: una operación `uncertain` o `entered` que sobrevive a un reinicio obtiene su `result`
+con la misma regla sobre los eventos **ya persistidos** (candidatos con `ts > prepared.ts` y el
+mismo `pane`), y después con los que lleguen en vivo hasta T_ack desde `entered`; una `uncertain`
+sin candidato no vence: su `result` sigue pendiente hasta la evidencia de §8.1.4 o la resolución de
+§8.1.11, y su pane sigue bloqueado mientras queden efectos `pending`, sea cual sea el `result`.
+
+Reglas: un `unconfirmed` o `misdelivered` **nunca** dispara otro envío automático (un reintento
+podría duplicar un turno que sí llegó sin que lo viéramos); reenviar es siempre una acción nueva de
+la persona con un `clientMessageId` nuevo. Con Claude `busy` el CLI **encola** el texto y emite
+`UserPromptSubmit` con el `prompt_id` del turno en curso (§8.2.1): por eso `busy` bloquea antes del
+envío; un prompt encolado no puede ser candidato porque su `t0` y su pane son los de otra
+operación o de ninguna.
+
+#### 8.1.8 Evento, auditoría y observabilidad
+
+- `composer_send` (§4.2): un evento por **cambio de estado** (§8.1.4), en el log de la conversación
+  destino: `{ client_message_id, state, result, effects: pending|settled, pane_id, pane_pid,
+  container_id, text_hash, bytes, segments, actor: owner|admin, stage?, segments_sent?, pending?,
+  orphaned?, prompt_id?, seq?, misdelivered_to?, outcome?, by?, evidence?, http?: { status, body }
+  }`. El registro de pane (§8.1.4.1) es la representación durable del bloqueo; los eventos son la
+  historia y la ventana de idempotencia. **Sin texto** (solo `text_hash`). Identidad (§4.6):
+  `client_message_id` + `state`. Las respuestas 400/409 no producen evento (no hubo efecto) y se
+  cuentan en stats.
+- Cross-user: fila `operate` de §8.1.1 antes de `prepared`. Logs del backend: ids, estados y
+  resultados, nunca el texto.
+- `GET /api/admin/stats → conversation.composer = { sendsSinceBoot{byState}, rejectedSinceBoot{byCode}, blockedPanesNow, effectsPendingNow, unverifiableSessionsNow }`.
+- El resumen de conversación de §6 lleva `composer: { blocked: boolean, reason?: "in-progress"|
+  "effects-pending"|"unverifiable", clientMessageId?, result?, since? }` para que la UI explique
+  el bloqueo.
+
+#### 8.1.9 Compatibilidad con la versión del CLI
+
+Todo §8 describe el comportamiento observado del CLI **2.1.314** (§8.2). La allowlist de
+recreación (§2.7.1, `cliCompat.ts`) está validada con 2.1.308: son **contratos distintos** y ninguno
+se amplía por el otro. `COMPOSER_CLI_VERSIONS` (env, por defecto `2.1.314`) es la lista de versiones
+con las que §8.2 se repitió. La versión que se comprueba es la del **proceso que recibirá el
+texto**: la `claude_version` del `session_start` de la conversación ligada, cuyo `pid` es el que
+`binding-stale` verifica bajo `pane_pid`; un proceso no cambia de versión mientras vive, y un
+`claude` relanzado produce un `session_start` nuevo. Fuera de la lista o sin versión ⇒ 409
+`cli-unvalidated`. Añadir una versión exige repetir la lista de revalidación de §8.2.6 y adjuntar los
+resultados al PR que la añada.
+
+#### 8.1.10 Lo que tmux no permite garantizar atómicamente
+
+Declarado para que nadie lo busque en el código:
+
+- Entre la precondición y el primer paste (ms) la persona puede teclear o puede abrirse un diálogo:
+  el texto puede mezclarse con lo tecleado (§8.2.1, 1b) o perderse en el diálogo (1d). No se puede
+  excluir; se **detecta** (sin candidato ⇒ `unconfirmed`) y nunca se presenta como éxito.
+- El Enter final puede ser consumido por un diálogo abierto en ese instante y ejecutar su opción por
+  defecto (§8.2.1, 1d). Riesgo residual aceptado: la precondición `needs-terminal` lo reduce a la
+  ventana entre el probe y el Enter.
+- Un `/clear` o `/resume` en los ~200 ms de la ventana de §8.2.2 puede llevar el texto a otra
+  conversación del mismo pane: se detecta como `misdelivered`, no se corrige.
+- Un hook perdido (relay, §2.6) deja un envío real como `unconfirmed`.
+- Un exec cuyo resultado el daemon no comunica deja el pane bloqueado para Chat hasta que la
+  evidencia lo asiente (respuesta tardía del inspect, o parar y arrancar la sesión, §8.1.11); lo
+  que vea el operador en el Terminal fija el resultado del mensaje, no libera el pane. El
+  contrato prefiere ese bloqueo a un segundo texto escrito sobre un pane de estado desconocido.
+- No existe deshacer: lo pegado no se borra (§8.1.6).
+
+#### 8.1.11 Resolución administrativa de un pane bloqueado
+
+Tres operaciones distintas sobre el mismo endpoint y el mismo CLI, ninguna sustituye a otra, y las
+tres toman el **lock de pane de §8.1.4 regla 1 (modo `fail`) antes de leer el registro**: si el
+ejecutor lo tiene, responden 409 `operation-active` sin leer ni escribir nada.
+
+- **Declarar el resultado del mensaje** (`resolved`): `POST /api/admin/sessions/:id/composer/resolve
+  { paneId, clientMessageId, outcome: "discarded"|"sent-manually" }` (admin, `adminActionIp`,
+  router de §7). Precondiciones, comprobadas **bajo el lock**: la operación existe en el registro,
+  `phase ≠ active` (está cancelada o completada: ninguna continuación conserva autorización para
+  iniciar efectos, §8.1.4 regla 4) y `result: pending`. Una operación con `phase: active` ⇒ 409
+  `operation-active`: no se puede declarar nada sobre un mensaje cuyo ejecutor todavía puede
+  pegar; solo la cancelación normal (efecto `pending`, T_http, apagado, reconstrucción) la saca de
+  esa fase, nunca el administrador. Con `result` ya final ⇒ 409 `not-pending`. Si procede, escribe
+  `composer_send{state: resolved, outcome, by}` y una fila `operate` (fail-closed: sin fila, sin
+  resolución). `outcome` es una declaración, no un hecho del sistema; no produce `delivered` ni
+  `prompt_id` y **no asienta ningún efecto**: la operación sigue bloqueando el pane mientras
+  `effects: pending`. Alternativa sin red: `npm run composer:resolve -- <sid> <paneId>
+  <clientMessageId> <outcome>` (host, como el CLI de §7), mismo evento.
+- **Reconciliar** (`outcome: "reconcile"`, mismo endpoint y mismo CLI): operación **idempotente y
+  repetible** que vuelve a intentar asentar los efectos por la evidencia de §8.1.4 regla 5 (inspect
+  de cada exec `pending`; comprobación del contenedor) y, si la operación queda `phase ≠ active`,
+  `result` final y `effects: settled`, escribe `released` y retira el registro (regla 7). **No**
+  cambia `result`, **no** escribe `resolved`, **no** escribe fila `operate` (no hay declaración;
+  se registra en el log del backend). Vale en cualquier `phase ≠ active` y con cualquier
+  `result`; sobre una operación activa ⇒ 409 `operation-active`. Es el camino para "reintentar"
+  después de un `resolved` que dejó efectos `pending`.
+- **Consultar** (`GET /api/admin/sessions/:id/composer/panes`): los registros de la sesión con
+  `{ paneId, clientMessageId, cid, phase, result, effects, pending: [{ id, step }], since }`, sin
+  texto. Sin lock (lectura informativa).
+
+Toda respuesta de `resolve` y `reconcile` devuelve el estado resultante: `{ phase, result, effects:
+"settled"|"pending", pending: [{ id, step }], released: boolean }`. Si quedan efectos `pending`, el
+pane **sigue bloqueado** aunque el mensaje esté resuelto, y la respuesta lo dice.
+
+Procedimiento documentado (DEPLOYMENT.md) para un pane que no asienta: (1) repetir `reconcile` —el
+daemon puede responder más tarde—; (2) si el daemon perdió el exec (404 con el contenedor
+`running`), **parar y arrancar la sesión** con los verbos existentes (§2.4, §7): el contenedor
+que alojaba los execs deja de correr, nada dentro de él puede actuar, y la regla 5 asienta todos
+los `pending` con `evidence: container-gone` en el siguiente `reconcile` (o en el siguiente `POST`
+al pane); la UI del owner muestra esta vía. Sin ninguna de las dos, el pane permanece bloqueado
+para Chat indefinidamente; el Terminal sigue disponible. **No** existe un desbloqueo por tiempo,
+por quietud ni por declaración.
+
+La UI del owner muestra la conversación con `composer.blocked = true`, `reason`
+(`in-progress` | `effects-pending` | `unverifiable`), el `clientMessageId` y, si aplica, que el
+mensaje ya tiene resultado pero quedan efectos sin asentar. Si antes de la resolución llega un
+candidato válido (§8.1.7, ack diferido), el `result` pasa a `delivered` o `misdelivered` por
+evidencia; el pane se libera solo cuando además `phase ≠ active` y `effects: settled` (regla 7).
+
+Invariantes (*MUST*, con tests sobre un `tmux` simulado y un smoke con el CLI real en la imagen):
 
 1. El cliente nunca nombra pane, tab, ventana ni teclas.
-2. Un `clientMessageId` produce como máximo un `paste-buffer`.
+2. Un `clientMessageId` produce como máximo **una secuencia de entrega** (N pastes ≤ 800 caracteres,
+   saltos CSI u y un único Enter); la recuperación nunca reenvía; un id con operación pendiente
+   nunca se trata como nuevo.
 3. Ante cualquier precondición no verificable, no se envía.
-4. `\n` en `text` no produce `Enter`; solo el `send-keys Enter` final.
-5. El ack compara `normalize(text) === normalize(prompt)` con `normalize` definida tras §8.2.
-6. Todo envío deja un `composer_send` persistido y, si es cross-user, una fila `operate`.
+4. `\n` en `text` nunca produce `Enter`; solo el `send-keys Enter` final.
+5. El ack exige candidato del **mismo pane**, recibido tras `t0`, de origen humano y con
+   `normalize` igual; `delivered` exige además `session_id = cid`; sin atribución inequívoca,
+   `unconfirmed`.
+6. Todo envío con efectos deja el registro de pane antes del primer efecto y `composer_send` desde
+   `prepared` hasta `released`, y, si es cross-user, una fila `operate`.
+7. Tras un fallo o un resultado desconocido de un segmento, el Enter final no se envía y nada se
+   reintenta ni se limpia; una continuación tardía nunca inicia un efecto.
+8. `busy`, diálogo abierto, copy-mode, pane muerto, foreground ≠ CLI y composer no vacío bloquean
+   antes del primer efecto.
+9. `unconfirmed`, `misdelivered` y `uncertain` nunca inician otro envío.
+10. Un pane con una operación de `result` pendiente **o** de `effects: pending` **o** de `phase:
+    active` —viva o persistida— rechaza todo envío nuevo desde Chat; ningún plazo, ack, texto
+    visible, quietud ni declaración lo libera; solo la evidencia de la regla 5 asienta efectos.
+11. Reproducir un `clientMessageId` resuelto devuelve la respuesta HTTP registrada.
+12. Un registro de pane ilegible bloquea la sesión entera (fail-closed) y nunca se borra solo.
+13. La autorización de cada efecto, la transición a cancelado, la declaración administrativa, la
+    reconciliación y la liberación usan la **misma** exclusión por pane; una operación activa
+    responde 409 `operation-active` a la resolución y a la reconciliación, y nunca se libera
+    mientras una continuación conserve autorización.
 
-### 8.2 Validación previa (resultados a adjuntar al PR 3.2)
+### 8.2 Validación previa — resultados (CLI 2.1.314, 2026-10-30)
 
-Experimentos con el CLI 2.1.308 real en un contenedor de prueba, cada uno con resultado esperado,
-observado y decisión:
+Realizada en un servidor tmux aislado con un proyecto descartable cuyos hooks registran cada
+evento con marca de tiempo; `claude` 2.1.314, tmux 3.4; sin captura ni sesiones reales. Informe
+completo con esperado/observado/decisión por experimento adjunto al PR documental de este
+apartado. Resumen vinculante:
 
-1. Paste + Enter con composer vacío / con texto a medio escribir / en copy-mode / con `/config`
-   abierto / con Claude `busy`.
-2. `/clear`, `/resume <otra>`, `/fork`, `exit` + `claude` en el mismo pane: latencia entre el cambio
-   y la actualización del binding; tamaño de la ventana de carrera.
-3. Prompts multilínea, bloques de código, líneas que empiezan por `/`, `!`, `@`, texto de tamaño L1.
-4. Qué transforma el CLI en `UserPromptSubmit.prompt` respecto al texto pegado (espacios, CRLF,
-   menciones, comandos) → definición de `normalize`.
-5. `paste-buffer` con y sin `-p`.
-6. Issue #444 (clientes tmux acumulados) cerrado y verificado (`tmux list-clients` = clientes vivos).
+#### 8.2.1 Paste + Enter según el estado del pane
+
+| Estado | Observado | Decisión |
+| --- | --- | --- |
+| Composer vacío, CLI idle, una línea | `UserPromptSubmit` idéntico byte a byte 78 ms después del paste; sin campo `source` | camino feliz; `source` ausente = humano |
+| Texto a medio escribir | se mezcla (`"partial rest of message"`); el probe dice `idle` | `composer-not-empty` por `capture-pane`; el ack lo detecta |
+| Copy-mode | el texto entra al composer, el Enter lo consume copy-mode; probe `idle` | `pane_in_mode` ⇒ `needs-terminal` |
+| Diálogo de confianza de carpeta | el texto se ignora, el Enter confirma «No, exit» y el CLI termina (`pane_dead`) | sesión no listada ⇒ `probe-failed` |
+| `/help`, `/model` abiertos | probe `waiting` + `waitingFor: "dialog open"`; en `/help` paste y Enter se pierden; en `/model` el Enter **guardó el modelo por defecto global** | `waitingFor ∉ {∅, input needed}` ⇒ `needs-terminal`; nunca enviar "por si acaso" |
+| Claude `busy` | probe `busy`; si se envía, el CLI **encola** y emite `UserPromptSubmit` de inmediato con el `prompt_id` del turno en curso; el turno encolado termina con un `Stop` cuyo `prompt_id` nadie anunció | `busy` bloquea siempre; seguimiento de captura (`Stop` con `prompt_id` no anunciado) |
+
+#### 8.2.2 Cambios de conversación en el mismo pane
+
+| Comando | Observado desde el Enter | Decisión |
+| --- | --- | --- |
+| `/clear` | archivo de sesión del probe +173 ms; `SessionStart{source: clear}` +177 ms | ventana ≈ 0,2 s ⇒ re-probar en el envío, exigir `sessionId = cid`, ack con `session_id = cid`, `misdelivered` si difiere |
+| `/resume <otra>` | `SessionStart{source: resume}` +216 ms; mismo pid, otro id | idem |
+| `/fork` | **no cambia el pane**: crea un proceso aparte `kind: background`, `tmux: null` (+1,1 s) y un `claude daemon` | nunca elegible (`kind ≠ interactive`) |
+| `/exit` y `claude` | `SessionEnd{prompt_input_exit}`; el pane vuelve a `bash` en 0,95 s; el probe deja de listar; el nuevo `claude` da `SessionStart` +0,55 s con otro id | `pane_current_command ∉ {claude, node}` ⇒ `needs-terminal`; sin la sesión ⇒ `probe-failed` |
+
+#### 8.2.3 Forma del texto
+
+| Entrada | Observado | Decisión |
+| --- | --- | --- |
+| Multilínea o bloque de código en **un** paste `-p` | envuelto: `"\n\n<pasted_content id=\"…\">\n…\n</pasted_content id=\"…\">\n"`; CR ⇒ LF (CRLF ⇒ dos saltos); tab ⇒ 4 espacios; el modelo lo recibe como contenido pegado | descartado |
+| Una línea > 800 caracteres en un paste | envuelto igual (+58 bytes; 64 KiB supera L1 en el hook); 800 no se envuelve, 850 sí | trozo ≤ 800 |
+| Línea de 1800 caracteres en 3 pastes consecutivos de 600 | **no** envuelta; la decisión de envolver es por paste | partir en trozos sin tecla entre ellos |
+| Segmentos + `M-Enter` | envía cada segmento | descartado |
+| Segmentos + `\` Enter | salto de línea; prompt idéntico | alternativa; ambiguo si la línea acaba en `\` |
+| Segmentos + Shift+Enter CSI u (`ESC[13;2u`) | salto de línea; prompt idéntico byte a byte, líneas vacías incluidas | **elegido** |
+| Línea 2 con `!`, línea 3 con `/` (segmentado) | texto; ni shell ni comando | solo el primer carácter activa modos |
+| Primer carácter `/` (`/help`) | abre el overlay de ayuda; **sin** `UserPromptSubmit`; un paste posterior se pierde | `unsupported-prefix` |
+| Primer carácter `!` (`!echo …`) | **ejecuta el comando en el shell**; turno sin `UserPromptSubmit` | `unsupported-prefix` |
+| `@archivo` | sin popup; prompt idéntico | aceptado |
+| UTF-8 (acentos, emoji) | idéntico | aceptado |
+| `\n` final en un paste | recortado, no envuelto | `normalize` quita saltos finales |
+
+#### 8.2.4 Transformaciones del CLI (base de `normalize`)
+
+Espacios finales del prompt recortados, iniciales conservados; tab ⇒ 4 espacios; CR ⇒ LF; saltos
+finales recortados; UTF-8 intacto; `UserPromptSubmit` sin `source` y con `prompt_id` (UUID).
+
+#### 8.2.5 `paste-buffer` sin `-p`
+
+Cada `\n` es un Enter: dos líneas producen dos prompts separados. Una línea sin `-p` es idéntica.
+Conclusión: `-p` obligatorio; el invariante 4 se cumple solo por la entrega segmentada.
+
+#### 8.2.6 #444 y lista de revalidación
+
+#444 cerrado en `b1479d5` (PR #486): el cliente tmux se libera con el último oyente y los
+huérfanos se barren en el siguiente attach; `tmux list-clients` = clientes vivos. Antes del fix,
+una sesión de un solo tab acumulaba 17 clientes.
+
+**Revalidación obligatoria al añadir una versión a `COMPOSER_CLI_VERSIONS`** (smoke de la imagen con
+el CLI real, resultados adjuntos al PR): (1) una línea ⇒ `UserPromptSubmit` idéntico, sin `source`;
+(2) entrega segmentada de 3 líneas con una vacía ⇒ idéntico (CSI u sigue siendo salto de línea);
+(3) 800 no envuelve, 850 envuelve (umbral); (4) `!…` y `/…` iniciales no producen
+`UserPromptSubmit` (siguen siendo modos); (5) `busy` encola y el `UserPromptSubmit` trae el
+`prompt_id` del turno en curso; (6) `waitingFor: "dialog open"` con `/help`; (7) latencia de
+`/clear` y `/resume` ≤ 0,5 s; (8) `normalize` sigue siendo idempotente sobre `prompt`.
 
 ---
 
@@ -1878,9 +2380,120 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
       histórico con esa forma se muestra igual sin reescribir el archivo; un prompt humano que cite las
       etiquetas sigue siendo "You"; una forma no verificable se rotula "origen no verificado".
 
-### 3.2 composer (condicionado)
+### 3.2 composer
 
-- [ ] §8.1 completo; resultados de §8.2 en el PR; issue #444 cerrado.
+- [x] Contrato §8 aprobado (2026-10-30); resultados de §8.2 con el CLI 2.1.314; #444 cerrado (`b1479d5`).
+- [ ] Bandera: con `CONVERSATION_COMPOSER_ENABLED` apagado la ruta no existe y `canSendInput=false`
+      en todas las conversaciones (test de rutas); encendida, `canSendInput` según §8.1.1 sin probe.
+- [ ] Validación 400 (§8.1.2): cada código con su vector; `normalize` idempotente y con los casos de
+      §8.2.4; `/` y `!` iniciales rechazados, en líneas posteriores aceptados; `ESC` en cualquier
+      posición rechazado; L1 y 256 segmentos.
+- [ ] Precondiciones 409 (§8.1.3) sobre un `tmux` y un probe simulados, cada una **sin ningún
+      exec de entrega**: `busy`, `dialog open`, `permission prompt`, `pane_in_mode`, `pane_dead`,
+      foreground `bash`, composer con texto, probe sin la sesión, probe con otro `sessionId`,
+      `pane_pid` sin el pid del probe, pane inexistente, capture no efectiva, versión no validada.
+- [ ] Exclusión por pane (§8.1.4): dos envíos concurrentes a conversaciones distintas del **mismo**
+      pane ⇒ uno entrega y el otro 409 `send-in-progress`, en cualquier orden de llegada; dos panes
+      distintos de la misma sesión no se bloquean; el pane se libera solo con `result` final **y**
+      `effects: settled`, **nunca por plazo**.
+- [ ] Resolución serializada con el ejecutor (§8.1.4 reglas 1, 3, 4, 7; §8.1.11; tests con execs
+      aparcados tras barrera, sin temporizadores): **Caso A**, A persistió `prepared` y su ejecutor
+      sigue activo sin haber iniciado el primer exec ⇒ `resolve discarded` responde 409
+      `operation-active`, no escribe nada, A conserva autorización y bloqueo, el ejecutor inicia
+      su primer paste con normalidad y el pane no se libera hasta su final o su cancelación
+      normal; **Caso B**, A asentó el primer segmento y su ejecutor puede iniciar el siguiente ⇒
+      `resolve` 409 `operation-active`, un envío B al mismo pane 409 `send-in-progress`, ningún
+      envío se intercala por vía administrativa, A continúa; **caso positivo**, A cancelada por un
+      exec `pending` ⇒ `resolve discarded` escribe `resolved` + fila `operate`, los efectos
+      `pending` se conservan, `released: false`, el pane sigue bloqueado; `reconcile` repetido
+      devuelve lo mismo sin segundo `resolved` ni segunda fila; la respuesta tardía del exec con
+      código numérico (o el contenedor parado) ⇒ `reconcile` asienta, escribe `released` y el
+      siguiente envío pasa; **autorización vs start**: con la barrera colocada entre la escritura
+      del id del exec y su `start`, una cancelación concurrente no puede colarse (misma sección
+      crítica) y la reconstrucción tras reinicio trata ese id como `pending`; `resolve` sobre un
+      `result` final ⇒ 409 `not-pending`; `reconcile` sobre una operación activa ⇒ 409.
+- [ ] Resultado ≠ elegibilidad (§8.1.4, reglas 5–7; tests con execs aparcados tras barrera):
+      (1) paste `pending` + resolución administrativa `discarded` ⇒ `result: resolved`,
+      `effects: pending`, respuesta `released: false`, y un segundo envío a ese pane sigue 409
+      `send-in-progress{effects-pending}`; (2) paste `pending` + candidato válido de ack ⇒
+      `result: delivered`, pane **sigue bloqueado**, segundo envío 409; en ambos, la respuesta
+      tardía del exec con código numérico ⇒ `effects: settled` ⇒ `released` y el tercer envío
+      pasa; (3) inspect 404 con el contenedor `running` ⇒ sigue `pending`; contenedor parado o
+      `container_id` distinto ⇒ `settled{evidence: container-gone}`; (4) ninguna de estas vías
+      ejecuta un segmento ni el Enter después de la cancelación; (5) operación `released` sin
+      efectos pendientes ⇒ pane libre y su id en la ventana de 256.
+- [ ] Efectos demorados (§8.1.4, tests deterministas con execs aparcados tras una barrera, sin
+      temporizadores reales): (a) **paste demorado**: el exec del segmento 2 no responde ⇒ al vencer
+      T_http la HTTP es 202 `uncertain`, no se inicia el segmento 3 ni el Enter, el pane responde
+      `send-in-progress{uncertain}` a un segundo envío con otro id y 202 `uncertain` sin efectos al
+      mismo id; la respuesta tardía del exec llega después
+      con éxito ⇒ **no** continúa la secuencia; con todos los efectos conocidos y sin Enter ⇒
+      `failed{stage: paste}` y el pane se libera; si la respuesta nunca llega ⇒ sigue `uncertain`.
+      (b) **Enter demorado**: el Enter no responde ⇒ `uncertain{stage: enter}`, pane bloqueado,
+      sin `delivered` automático; respuesta tardía 0 ⇒ `entered` y el ack sigue; candidato válido
+      mientras tanto ⇒ `delivered` por evidencia. (c) **Segundo envío** durante `prepared`,
+      `entered` y `uncertain` ⇒ 409 sin ningún exec. (d) **Reinicio**: `prepared` sin estado
+      posterior ⇒ `uncertain{orphaned}` y pane bloqueado al abrir, sin reenvío; `entered` sin final
+      ⇒ `delivered` si el `user_prompt` candidato ya está en el log, `unconfirmed` si pasó T_ack;
+      resolución administrativa (§8.1.11), solo sobre una operación no activa, escribe `resolved`
+      + fila `operate` pero no asienta ni libera con efectos `pending`; `reconcile` reintenta sin
+      segunda declaración; sobre un mensaje con resultado ⇒ 409 `not-pending`.
+- [ ] Idempotencia y durabilidad (§8.1.4, §8.1.4.1): registro de pane escrito (temporal + fsync +
+      rename) y `prepared` confirmado en el archivo **antes** del primer exec (test con `StoreFs` con
+      barrera: ningún exec hasta que ambos están escritos; si cualquiera falla ⇒ 503 `persist-failed`,
+      cero execs y registro retirado); el id de cada exec está en el registro **antes** de su
+      `start`; doble clic (mismo `clientMessageId`, concurrente y secuencial) ⇒ **una** secuencia de
+      entrega; reproducir un id liberado devuelve la respuesta HTTP registrada (un `failed` vuelve a
+      ser 502, un `delivered` 202 con el mismo `promptId`); reproducir un id **pendiente** ⇒ 202
+      `uncertain` sin efectos, nunca intento nuevo; un id **liberado** fuera de la ventana de 256 o
+      tras rotación L7 se trata como nuevo; una operación `uncertain` + rotación L7 (archivo nuevo)
+      + reinicio ⇒ el bloqueo se conserva desde el registro de pane y el id no es nuevo; registro de
+      pane corrupto o con `sid` ajeno al reinicio ⇒ toda la sesión 409 `unverifiable`, sin borrado
+      automático; crash
+      simulado (nuevo proceso sobre el mismo archivo) **antes del primer efecto**, **tras un paste**,
+      **tras el Enter** y **antes de persistir la confirmación** ⇒ ningún reenvío en los cuatro,
+      `uncertain` en los tres primeros, y en el cuarto `delivered` por el candidato persistido.
+- [ ] Secuencia (§8.1.5): argv exactos de cada exec (test de tabla) para texto de una línea, de
+      varias líneas con una vacía, con una línea de 1800 caracteres (3 trozos sin tecla entre
+      ellos) y con tabs/CRLF; el texto solo por stdin; un único `send-keys Enter`; `\n` nunca
+      produce Enter; relectura de `display -p` antes del primer paste.
+- [ ] Fallos parciales (§8.1.6): fallo **conocido** inyectado en el paste k de n ⇒ exactamente k−1
+      pastes previos, ningún comando posterior, **sin Enter**, sin limpieza, 502
+      `delivery-failed{stage, segmentsSent}` y `composer_send{failed}` con ese `http`; fallo
+      conocido en el Enter ⇒ `stage: enter`; resultado **desconocido** ⇒ `uncertain`, nunca
+      `failed`.
+- [ ] Ack (§8.1.7): `delivered` con `promptId`; `unconfirmed` al vencer T_ack sin reintento; un
+      `internal_prompt`, un `source: sdk` o un `origin: unverified` con el mismo texto **no**
+      confirman; un `user_prompt` recibido antes de `t0` no confirma; con dos envíos consecutivos
+      cada ack consume solo el suyo; tiempo de ack medido en el smoke.
+- [ ] Atribución por pane (§8.1.7, determinista): dos panes `%1` (cid X) y `%2` (cid Y) de la misma
+      sesión envían el **mismo texto**; los `user_prompt` llegan intercalados (Y/`%2` primero, X/`%1`
+      después) ⇒ X `delivered` por su propio candidato, Y `delivered` por el suyo, ningún
+      `misdelivered`; variante: el candidato de `%1` llega en la conversación Z (mismo pane tras
+      `/clear`) ⇒ X `misdelivered{Z}`; variante: solo llega el candidato de `%2` ⇒ X `unconfirmed`
+      (nunca `misdelivered` por un prompt de otro pane); variante: candidatos en dos conversaciones
+      del mismo pane dentro de la ventana ⇒ `unconfirmed`; un candidato sin `pane` ⇒ ignorado.
+- [ ] Evento y auditoría (§8.1.8): `composer_send` por cambio de estado, sin texto (solo
+      `text_hash`), identidad `client_message_id` + `state` (§4.6); cross-user ⇒ fila `operate` antes
+      de `prepared` y fail-closed; 400/409 sin evento; stats con `uncertainNow`; resumen de §6 con
+      `composer.blocked`.
+- [ ] Autorización: observadores y lead 403; admin con `operate`; rate limit `composerUser`.
+- [ ] Frontend: composer habilitado solo con `canSendInput` y estado `waiting_input`/`idle`; chip con
+      el motivo del bloqueo por código 409; estados «enviando», «entregado» (la burbuja optimista se
+      sustituye por el `user_prompt` real por `prompt_id`), «sin confirmar» (enlace al Terminal, sin
+      reintento automático; reenviar = acción nueva con id nuevo), «entregado en otra
+      conversación» (enlace), «fallo parcial» (aviso de texto parcial y confirmación de revisión
+      antes del siguiente envío); validación local espejo de §8.1.2 solo para explicar; sin
+      duplicados en reconexión WS.
+- [ ] Smoke con el CLI real en la imagen (`composer.smoke.ts`, Session Image): la lista de
+      revalidación de §8.2.6 con la versión de `COMPOSER_CLI_VERSIONS`; una línea, segmentado con
+      línea vacía, umbral 800/850, `!`/`/` sin `UserPromptSubmit`, `busy` encolado, `dialog open`;
+      región de entrada (§8.1.3): vacía ⇒ ok, vacía con sugerencia fantasma ⇒ ok, con texto
+      tecleado ⇒ `composer-not-empty`.
+- [ ] Despliegue: backend app-only con la bandera apagada; activación en una sesión descartable
+      antes de encenderla en general; `COMPOSER_CLI_VERSIONS`, el registro de pane y el
+      procedimiento de §8.1.11 (`reconcile` repetible; parar y arrancar la sesión para asentar por
+      `container-gone`) documentados en DEPLOYMENT.md.
 
 ### 3.3 agentes y teams
 
