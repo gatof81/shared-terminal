@@ -1623,7 +1623,7 @@ incertidumbre no se envía**; nunca "por si acaso".
 
 | Código | Condición |
 | --- | --- |
-| `send-in-progress` | el pane está **bloqueado** (§8.1.4): hay una operación en `prepared`, `entered` o `uncertain` sobre `(st_session_id, pane_id)`, en este proceso o persistida; `detail: in-progress\|uncertain` y `clientMessageId` de esa operación |
+| `send-in-progress` | el pane está **bloqueado** (§8.1.4) por una operación con **otro** `clientMessageId` en `prepared`, `entered` o `uncertain` sobre `(st_session_id, pane_id)`, en este proceso o persistida; `detail: in-progress\|uncertain` y `clientMessageId` de esa operación. El mismo id en curso no es 409: es 202 `uncertain` (§8.1.4, regla 7) |
 | `not-interactive` | `kind ≠ interactive`, o la conversación no tiene binding (`pane_id` nulo) |
 | `session-not-running` | el contenedor no está `running` |
 | `capture-inactive` | `capture.effective = false` en un probe fresco del relay (D7): sin hooks no hay ack |
@@ -1708,10 +1708,11 @@ Reglas (*MUST*):
 7. **Idempotencia por `client_message_id`**: antes de `prepared`, el backend busca el id en la
    conversación. Encontrado con resultado final ⇒ devuelve **la misma respuesta HTTP registrada**
    en ese evento (`http.status`, `http.body`): un `failed` vuelve a ser **502**, un `delivered`
-   vuelve a ser 202 con el mismo `promptId`; un 502 jamás se convierte en 202. Encontrado sin
-   resultado final ⇒ 409 `send-in-progress` (o 202 `uncertain` si el llamador es el mismo intento
-   que recibió `uncertain`, distinguible por el id). Un doble clic produce **como máximo una**
-   secuencia de entrega. La recuperación tras reinicio **nunca reenvía** un intento incompleto.
+   vuelve a ser 202 con el mismo `promptId`; un 502 jamás se convierte en 202. Encontrado **sin**
+   resultado final ⇒ 202 `{ result: "uncertain", clientMessageId }`: es la misma operación y el
+   cliente consulta su estado, sin ningún efecto nuevo (un id **distinto** sobre el pane bloqueado
+   es el 409 `send-in-progress` de §8.1.3). Un doble clic produce **como máximo una** secuencia de
+   entrega. La recuperación tras reinicio **nunca reenvía** un intento incompleto.
 8. **Ventana de idempotencia**: los ids se conservan con su resultado en el índice de la
    conversación (últimos **256**) mientras el archivo actual o un snapshot válido los respalde
    (§4.4, L7). Fuera de la ventana —rotación del archivo, conversación purgada (§9), más de 256
@@ -2268,7 +2269,8 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
 - [ ] Efectos demorados (§8.1.4, tests deterministas con execs aparcados tras una barrera, sin
       temporizadores reales): (a) **paste demorado**: el exec del segmento 2 no responde ⇒ al vencer
       T_http la HTTP es 202 `uncertain`, no se inicia el segmento 3 ni el Enter, el pane responde
-      `send-in-progress{uncertain}` a un segundo envío; la respuesta tardía del exec llega después
+      `send-in-progress{uncertain}` a un segundo envío con otro id y 202 `uncertain` sin efectos al
+      mismo id; la respuesta tardía del exec llega después
       con éxito ⇒ **no** continúa la secuencia; con todos los efectos conocidos y sin Enter ⇒
       `failed{stage: paste}` y el pane se libera; si la respuesta nunca llega ⇒ sigue `uncertain`.
       (b) **Enter demorado**: el Enter no responde ⇒ `uncertain{stage: enter}`, pane bloqueado,
