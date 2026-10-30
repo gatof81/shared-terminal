@@ -11,7 +11,10 @@ allowlist del CLI para el piloto, §2.7.5, 2026-10-27; decisión del responsable
 de runtime del CLI 2.1.308 en `/tmp` en la allowlist de la capa, §2.7.1, 2026-10-27; decisión del
 responsable sobre el registro del manejador de enlaces del CLI 2.1.308 en HOME, §2.7.1, 2026-10-28;
 corrección de atribución tras el piloto de 3.1: las notificaciones internas que el CLI entrega por
-`UserPromptSubmit` dejan de ser `user_prompt`, §4.2.1, 2026-10-29),
+`UserPromptSubmit` dejan de ser `user_prompt`, §4.2.1, 2026-10-29; **v1.7**: contrato del composer
+3.2 aprobado por el responsable tras la validación §8.2 con el CLI 2.1.314 —entrega segmentada,
+rechazo de prefijos, precondiciones, lock por pane, idempotencia, fallo cerrado, ack y
+`composer_send`—, §8, 2026-10-30),
 vinculante para los PRs
 3.0b–3.4.** El razonamiento está en [docs/design/phase3-conversation-activity.md](./design/phase3-conversation-activity.md)
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
@@ -36,6 +39,8 @@ verificados en revisión. "Bytes" significa siempre bytes UTF-8 del contenido, s
 | Managed settings en archivo: `/etc/claude-code/managed-settings.d/*.json` | code.claude.com/docs/en/managed-settings | 2.1.308 | Entrega de la configuración |
 | `claude agents --json` | code.claude.com/docs/en/agent-view | 2.1.308 | Probe de estado |
 | Variables `TMUX_PANE` (tmux) y `SESSION_ID` (Shared Terminal) | tmux(1); `buildContainerEnv` | — | Binding y auth |
+| `tmux load-buffer` / `paste-buffer -p` / `send-keys` / `display -p` / `capture-pane -p` | tmux(1) | 3.4 (imagen) | Composer (§8), siempre con argv fijo y el texto por stdin |
+| Salto de línea en el composer del CLI por Shift+Enter en CSI u (`ESC[13;2u`); envoltura `<pasted_content>` de un paste multilínea o > ~800 caracteres; modos `/` y `!` por primer carácter | comportamiento observado del binario (§8.2) | **2.1.314** (validado; `COMPOSER_CLI_VERSIONS`) | Composer (§8) |
 
 Nota (3.0c): antes de enviar un hook `http`, el CLI 2.1.308 resuelve el host y **rechaza** cualquier
 dirección de 0/8, 10/8, 100.64/10, 169.254/16, 172.16/12, 192.168/16, fc00::/7, fe80::/10 y `::`
@@ -1202,7 +1207,7 @@ candidata); si no hay candidata única, se cuenta en `ingest_rejected` y en
 | `teammate_idle` | `TeammateIdle` | `teammate_name` | — |
 | `gap` | backend | `reason`, `scope?`, `dropped?`, `dropped_bytes?`, `range?`, `detail?` | — |
 | `probe` | backend | `status`, `waitingFor?`, `found: boolean` | — |
-| `composer_send` | backend (3.2) | `clientMessageId`, `result`, `prompt_id?` | — |
+| `composer_send` | backend (3.2, §8.1.8) | `client_message_id`, `result: delivered\|unconfirmed\|misdelivered\|failed`, `prompt_id?`, `seq?`, `bytes`, `segments`, `stage?`, `misdelivered_to?`, `actor` | — (**sin texto**) |
 
 Nota 1 (observado en 3.0c, CLI 2.1.308): con `--dangerously-skip-permissions`, un Bash que falla
 dispara `PreToolUse → PostToolUseFailure → PostToolUse` con el mismo `tool_use_id`. **Decisión del
@@ -1391,6 +1396,7 @@ completo* en una ventana corta, que colapsa reintentos idénticos sin tocar even
 | `task_created` / `task_completed` | `ev` + `task_id` | descartar |
 | `turn_end` / `turn_failed` | **sin identidad natural** (`Stop` puede dispararse varias veces en un mismo `prompt_id` cuando un hook bloquea y el turno continúa): hash del payload en ventana de 10 s | solo se descarta si el payload es idéntico dentro de la ventana |
 | `teammate_idle` | `teammate_name` + hash del payload, ventana 10 s | idem |
+| `composer_send` (§8) | `client_message_id` | descartar |
 | `notification`, `permission_request`, `compact`, `session_start`, `session_end` | hash del payload en ventana de 10 s | idem |
 
 Hash = SHA-256 del JSON canónico del input del hook (claves ordenadas) **antes** de redactar.
@@ -1448,6 +1454,9 @@ Casos que *MUST* estar en el test:
 - Dos conversaciones con el mismo `pane_id`: la más reciente conserva el binding; la anterior pasa a
   `pane_id = NULL`, `status = unknown`, evidencia `binding_lost`.
 - `session_end` con `reason: clear|resume` deshace el binding al confirmarse.
+- El composer (§8) envía al `pane_id` del binding y nunca a uno elegido por el cliente; su lock es
+  por `(st_session_id, pane_id)`, de modo que las dos conversaciones de la segunda viñeta nunca
+  entregan a la vez, y exige que el probe liste `cid` con un `pid` descendiente de `pane_pid`.
 
 ### 5.3 Máquina de estados
 
@@ -1487,8 +1496,10 @@ Todas owner-only (`assertOwnedByOr404`), rate limit `conversationIp` (300/min), 
 | GET | `/api/sessions/:id/conversations/:cid/events/:seq` | un evento (para "Copiar informe" de eventos no montados) |
 | GET | `/api/sessions/:id/conversations/:cid/agents` | `{ agents: [{ agentId, agentType, status, startedSeq, endedSeq?, toolCount, hasResult }] }` |
 | WS | `/ws/conversation/<id>` | ver §6.1 |
+| POST | `/api/sessions/:id/conversations/:cid/messages` | §8 (3.2). Cuerpo `{ text, clientMessageId }`; 202 `{ result: delivered\|unconfirmed\|misdelivered, … }`, 400/409 según §8.1.2–§8.1.3, 502 `delivery-failed` según §8.1.6; 403 lead/observador; **ausente (404) con `CONVERSATION_COMPOSER_ENABLED` apagado** |
 
-`canSendInput` *MUST* ser `false` siempre mientras 3.2 no esté desplegado y activado.
+`canSendInput` *MUST* ser `false` siempre mientras `CONVERSATION_COMPOSER_ENABLED` esté apagado; con
+la bandera encendida se calcula según §8.1.1 (sin probe).
 
 ### 6.1 Protocolo WS y contrapresión
 
@@ -1539,48 +1550,286 @@ Servidor → cliente: `{type:"hello", conversations:[{cid,lastSeq,firstRetainedS
 
 ---
 
-## 8. Composer (3.2) — contrato condicionado
+## 8. Composer (3.2) — contrato
 
-Se implementa únicamente si el usuario aprueba 3.2 tras la validación de §8.2. Hasta entonces
-`POST /api/sessions/:id/conversations/:cid/messages` no existe.
+Estado: **aprobado por el responsable el 2026-10-30** tras la validación previa de §8.2 (CLI
+2.1.314, 18 experimentos) y el cierre de #444 (`b1479d5`). La implementación es el PR siguiente,
+backend y frontend juntos, detrás de `CONVERSATION_COMPOSER_ENABLED` (por defecto apagado). Este
+apartado es vinculante para ese PR. El razonamiento está en
+[docs/design/phase3-conversation-activity.md §5](./design/phase3-conversation-activity.md); si
+difieren, manda este.
+
+Qué es y qué no es: el composer entrega **texto a la línea de entrada del CLI interactivo que vive en
+el pane ligado**, exactamente como si la persona lo hubiera pegado y pulsado Enter en el Terminal. No
+habla con el CLI por ningún canal propio (§1.1), no crea instancias y no interpreta la respuesta.
+"Entregado" significa que el CLI aceptó el texto como un turno de usuario y lo anunció por
+`UserPromptSubmit`; **no** dice nada de lo que Claude haga después: el turno (deltas, herramientas,
+`turn_end`) llega por los eventos normales de §4.2 y se muestra como cualquier otro.
 
 ### 8.1 Contrato
 
-Body `{ text: string ≤ L1, clientMessageId: uuid }`. Respuestas:
+#### 8.1.1 Bandera, ruta y autorización
 
-| Código | `error` | Cuándo |
+- `CONVERSATION_COMPOSER_ENABLED` ausente o distinto de `1`/`true` ⇒ la ruta **no se monta** (404) y
+  `canSendInput` es `false` en §6 para toda conversación. Con la bandera encendida nada más cambia
+  hasta que un cliente envía.
+- `POST /api/sessions/:id/conversations/:cid/messages`, cuerpo JSON `{ text: string,
+  clientMessageId: string }` (`clientMessageId` = UUID v4 generado por el cliente, uno por intento de
+  la persona). Rate limit `composerUser` (30/min por usuario) además de `conversationIp`.
+- Autorización: owner, o admin con `assertCanOperate`; **lead y observadores: 403**. Un envío con
+  owner ajeno escribe **antes del primer efecto** una fila `session_observe_log mode='operate'`
+  puntual, fail-closed (como el `start` de #429): si la fila no se puede escribir, no se envía.
+- `canSendInput` (§6) = bandera encendida ∧ `kind: interactive` ∧ binding con `pane_id` ∧
+  `capture.effective` (sin hooks no hay ack posible) ∧ el llamador puede operar. Se calcula sin probe;
+  el probe es por envío.
+
+#### 8.1.2 Validación del texto (400, sin efectos)
+
+`normalize(s)` es la función de referencia, aplicada al texto antes de enviarlo y a ambos lados de
+la comparación del ack. Reproduce lo que el CLI 2.1.314 hace por su cuenta con un paste (§8.2.4):
+
+    normalize(s) =
+      s.replace(/\r\n?/g, "\n")                                  // CR y CRLF ⇒ LF
+       .split("\n")
+       .map(l => l.replace(/\t/g, "    ").replace(/[ \t]+$/, ""))  // tab ⇒ 4 espacios; sin blancos finales por línea
+       .join("\n")
+       .replace(/\n+$/, "")                                       // sin saltos finales
+
+| Código | Condición (sobre `normalize(text)`) |
+| --- | --- |
+| `invalid-body` | cuerpo no objeto, `text` no string, `clientMessageId` no UUID v4 |
+| `empty-text` | 0 bytes |
+| `text-too-large` | > **L1** bytes |
+| `control-bytes` | cualquier byte < 0x20 salvo `\n`, o 0x7F, o la secuencia `ESC` en cualquier posición (incluye `ESC[13;2u`: el cliente nunca envía teclas) |
+| `unsupported-prefix` | el primer carácter no blanco del texto es `/` o `!` — ambos activan modos del CLI (comando / shell) y no producen `UserPromptSubmit` (§8.2.3) |
+| `too-many-segments` | la secuencia de entrega (§8.1.5) supera **256** pastes |
+
+Solo el primer carácter del mensaje activa modos: una línea posterior que empiece por `/` o `!` es
+texto (§8.2.3) y se acepta.
+
+#### 8.1.3 Precondiciones (409, sin efectos)
+
+Todas del lado del servidor, en este orden, bajo el lock de §8.1.4. **Ante cualquier
+incertidumbre no se envía**; nunca "por si acaso".
+
+| Código | Condición |
+| --- | --- |
+| `send-in-progress` | el lock del pane (§8.1.4) está tomado, o el mismo `clientMessageId` está en curso |
+| `not-interactive` | `kind ≠ interactive`, o la conversación no tiene binding (`pane_id` nulo) |
+| `session-not-running` | el contenedor no está `running` |
+| `capture-inactive` | `capture.effective = false` en un probe fresco del relay (D7): sin hooks no hay ack |
+| `probe-failed` | `claude agents --json` no responde, no parsea, o **no lista** una sesión con `sessionId = cid` |
+| `binding-stale` | el probe lista `cid` pero su `pid` no es descendiente de `pane_pid` del pane ligado, o el pane ligado ya no existe (`tmux display -p -t <pane_id>` falla): la conversación cambió de pane o el pane fue recreado |
+| `busy` | probe `status: busy` |
+| `needs-terminal` | probe `waitingFor ∉ {∅, "input needed"}` (incluye `"dialog open"` y `"permission prompt"`); o `pane_in_mode = 1`; o `pane_dead = 1`; o `pane_current_command ∉ {claude, node}` |
+| `composer-not-empty` | la línea de entrada del CLI, leída con `tmux capture-pane -p -t <pane_id>` (últimas 8 líneas), tiene texto propio después del prompt `❯` (la sugerencia fantasma del CLI no cuenta), o no se pudo determinar |
+| `cli-unvalidated` | la `claude_version` de la conversación (§5.1) no está en `COMPOSER_CLI_VERSIONS` (§8.1.9) |
+
+El probe y la lectura del pane son del **mismo envío**, inmediatamente antes de la entrega; no se
+usa ningún estado cacheado de probes anteriores ni el `status` de §5.3.
+
+#### 8.1.4 Serialización por pane e idempotencia
+
+- **Lock por identidad del pane**, no por conversación: la clave es `(st_session_id, pane_id)`.
+  Dos conversaciones que compartan pane tras `/clear` o `/resume` (§5.2) compiten por el mismo
+  lock, y así un envío no puede intercalarse con otro en el mismo terminal. El lock se toma
+  **antes** de leer el binding y se mantiene hasta que el resultado del envío queda decidido
+  (`delivered`, `unconfirmed`, `misdelivered` o `failed`), acotado por **T_ack = 8 s** desde el
+  Enter final y por **T_send = 30 s** en total. Es de proceso, como `sessionLifecycleLock`; nunca
+  bloquea a otras sesiones ni a otros panes, y nunca espera: el segundo llamador recibe 409.
+- **Generación del binding**: bajo el lock se lee la terna `(cid, pane_id, pane_pid)` del binding
+  y el `pid` del probe, y la precondición `binding-stale` exige que concuerden. Si `session_end`
+  con `clear`/`resume` llega durante la entrega, el ack lo detecta (§8.1.6) porque el
+  `UserPromptSubmit` trae otro `session_id`; la entrega **no se interrumpe ni se reintenta**.
+- **Idempotencia por `clientMessageId`**: el backend mantiene por conversación los ids vistos con su
+  resultado (memoria del proceso, y al abrir la conversación se reconstruyen desde los últimos
+  1000 eventos `composer_send` persistidos, §8.1.7). Repetir un id ya resuelto devuelve **el mismo
+  resultado** (202 con el cuerpo original) sin producir ninguna secuencia de entrega; repetir un id
+  en curso es `send-in-progress`. Un doble clic produce **como máximo una** secuencia de entrega
+  (*MUST*, test).
+
+#### 8.1.5 Secuencia de entrega
+
+El cliente nunca nombra pane, tab, ventana ni teclas; todo sale del binding. Cada comando es un exec
+con argv fijo (`execCapture`, timeout 5 s por comando); el texto viaja **solo por stdin** de
+`load-buffer`, nunca como argumento.
+
+1. `normalize(text)`, partir en líneas por `\n`; cada línea en trozos de **≤ 800 caracteres**
+   (puntos de código, sin cortar un par sustituto). Un paste con salto de línea o con más de ~800
+   caracteres es envuelto por el CLI como `<pasted_content>` (§8.2.3), de modo que deja de ser el
+   texto de la persona; por eso la entrega es segmentada.
+2. Por cada línea, por cada trozo: `tmux load-buffer -b st-<cid>-<n> -` (stdin = trozo) y
+   `tmux paste-buffer -p -d -b st-<cid>-<n> -t <pane_id>`. Siempre `-p` (bracketed paste): sin él
+   cada `\n` es un Enter (§8.2.5).
+3. Entre líneas: `tmux send-keys -t <pane_id> -l $'\e[13;2u'` (Shift+Enter en CSI u, que el CLI
+   2.1.314 inserta como salto de línea; una línea vacía es dos secuencias seguidas). Invariante: un
+   `\n` del texto **nunca** produce Enter.
+4. Al final, una sola vez: `tmux send-keys -t <pane_id> Enter`.
+
+Antes del primer paste se repite `tmux display -p -t <pane_id> '#{pane_pid} #{pane_in_mode}
+#{pane_dead} #{pane_current_command}'` y debe coincidir con la precondición; si no, 409
+`binding-stale`/`needs-terminal` sin efectos. **No** se relee entre pastes: la secuencia completa
+dura milisegundos y el lock impide otro envío; lo que no puede excluirse (una tecla de la persona,
+un diálogo que se abre) lo detecta el ack, no la entrega (§8.1.10).
+
+#### 8.1.6 Fallos parciales (fail-closed)
+
+Si cualquier comando de los pasos 2–3 falla (exit ≠ 0, timeout, exec rechazado, contenedor caído):
+
+- se detiene la secuencia **en ese punto**; el Enter final **nunca** se envía tras un fallo previo;
+- **no** se reintenta ningún segmento y **no** se intenta limpiar el composer del CLI (ni `C-u`, ni
+  `Escape`, ni `C-c`): el texto parcial queda donde está;
+- respuesta **502 `delivery-failed { stage: "paste"|"newline"|"enter", segmentsSent, segments }`**
+  y evento `composer_send{result: failed}` (§8.1.7);
+- el frontend muestra que **puede haber texto parcial en el composer del Terminal** y exige que la
+  persona confirme haberlo revisado antes de habilitar un nuevo envío a esa conversación; del lado
+  del servidor la guarda real del siguiente envío es `composer-not-empty`.
+
+Si falla el propio Enter final, el resultado es `failed{stage: "enter"}`: el texto completo puede
+estar en el composer sin enviar. Un ack que vence (§8.1.7) no es un fallo de entrega.
+
+#### 8.1.7 Confirmación (ack)
+
+Tras el Enter, el backend espera ≤ **T_ack = 8 s** (observado ≤ 0,3 s, §8.2.1) un `user_prompt`
+que llegue por la ingesta y cumpla **todo**:
+
+1. `session_id = cid` (la conversación a la que se envió);
+2. `source` ausente o `user` **y** sin `origin: unverified` (§4.2.1): un `internal_prompt` o un
+   prompt inyectado nunca confirma;
+3. `normalize(prompt) = normalize(text)`;
+4. `seq` posterior al inicio de la secuencia de entrega;
+5. correlacionado con **esta** operación: el que espera es el envío que tiene el lock del pane, y un
+   `user_prompt` consumido por un ack no confirma otro.
+
+| Resultado (202) | Cuándo | Qué sabe la persona |
 | --- | --- | --- |
-| 202 | — | `{ result: "delivered", promptId }` o `{ result: "unconfirmed" }` |
-| 409 | `not-interactive` | `kind ≠ interactive` o sin binding |
-| 409 | `busy` | probe `busy` |
-| 409 | `needs-terminal` | probe `waitingFor ∉ {∅, input needed}`, `pane_in_mode`, `pane_dead`, foreground ≠ claude |
-| 409 | `send-in-progress` | lock tomado |
-| 409 | `probe-failed` | probe sin respuesta: **no se envía** |
-| 403 | — | observadores, lead |
+| `{ result: "delivered", promptId, seq }` | 1–5 se cumplen | el CLI aceptó el texto como turno; lo que Claude haga llega por WS como siempre |
+| `{ result: "misdelivered", conversation }` | un `user_prompt` con 2–4 llega en **otra** conversación de la misma sesión (ventana `/clear`–`/resume`, §8.2.2) | el texto se envió, pero a otra conversación; se enlaza |
+| `{ result: "unconfirmed" }` | T_ack vence sin 1–5 | puede haberse enviado o no (hook perdido, texto mezclado, diálogo abierto); mirar el Terminal |
 
-Invariantes (*MUST*, con tests sobre un `tmux` simulado):
+Reglas: un `unconfirmed` o `misdelivered` **nunca** dispara otro envío automático (un reintento
+podría duplicar un turno que sí llegó sin que lo viéramos); reenviar es siempre una acción nueva de
+la persona con un `clientMessageId` nuevo. Con Claude `busy` el CLI **encola** el texto y emite
+`UserPromptSubmit` con el `prompt_id` del turno en curso (§8.2.1): por eso `busy` bloquea antes del
+envío y el ack exige `seq` posterior y el lock vivo; un ack no puede confirmarse con un prompt
+encolado.
+
+#### 8.1.8 Evento, auditoría y observabilidad
+
+- `composer_send` (§4.2) se persiste en el log de la conversación destino al decidirse el resultado:
+  `{ client_message_id, result: delivered|unconfirmed|misdelivered|failed, prompt_id?, seq?,
+  bytes, segments, stage?, misdelivered_to?, actor: owner|admin }`. **Sin texto.** Las respuestas
+  400/409 no producen evento (no hubo efecto) y se cuentan en stats.
+- Cross-user: fila `operate` de §8.1.1. Logs del backend: ids y resultado, nunca el texto.
+- `GET /api/admin/stats → conversation.composer = { sendsSinceBoot{byResult}, rejectedSinceBoot{byCode} }`.
+- Identidad y deduplicación (§4.6): `composer_send` tiene identidad `client_message_id`.
+
+#### 8.1.9 Compatibilidad con la versión del CLI
+
+Todo §8 describe el comportamiento observado del CLI **2.1.314** (§8.2). La allowlist de
+recreación (§2.7.1, `cliCompat.ts`) está validada con 2.1.308: son **contratos distintos** y ninguno
+se amplía por el otro. `COMPOSER_CLI_VERSIONS` (env, por defecto `2.1.314`) es la lista de versiones
+con las que §8.2 se repitió; una conversación cuya `claude_version` no esté en ella recibe 409
+`cli-unvalidated`. Añadir una versión exige repetir la lista de revalidación de §8.2.6 y adjuntar los
+resultados al PR que la añada.
+
+#### 8.1.10 Lo que tmux no permite garantizar atómicamente
+
+Declarado para que nadie lo busque en el código:
+
+- Entre la precondición y el primer paste (ms) la persona puede teclear o puede abrirse un diálogo:
+  el texto puede mezclarse con lo tecleado (§8.2.1, 1b) o perderse en el diálogo (1d). No se puede
+  excluir; se **detecta** (ack ≠ ⇒ `unconfirmed`) y nunca se presenta como éxito.
+- El Enter final puede ser consumido por un diálogo abierto en ese instante y ejecutar su opción por
+  defecto (§8.2.1, 1d). Riesgo residual aceptado: la precondición `needs-terminal` lo reduce a la
+  ventana entre el probe y el Enter.
+- Un `/clear` o `/resume` en los ~200 ms de la ventana de §8.2.2 puede llevar el texto a otra
+  conversación: se detecta como `misdelivered`, no se corrige.
+- Un hook perdido (relay, §2.6) deja un envío real como `unconfirmed`.
+- No existe deshacer: lo pegado no se borra (§8.1.6).
+
+Invariantes (*MUST*, con tests sobre un `tmux` simulado y un smoke con el CLI real en la imagen):
 
 1. El cliente nunca nombra pane, tab, ventana ni teclas.
-2. Un `clientMessageId` produce como máximo un `paste-buffer`.
+2. Un `clientMessageId` produce como máximo **una secuencia de entrega** (N pastes ≤ 800 caracteres,
+   saltos CSI u y un único Enter).
 3. Ante cualquier precondición no verificable, no se envía.
-4. `\n` en `text` no produce `Enter`; solo el `send-keys Enter` final.
-5. El ack compara `normalize(text) === normalize(prompt)` con `normalize` definida tras §8.2.
-6. Todo envío deja un `composer_send` persistido y, si es cross-user, una fila `operate`.
+4. `\n` en `text` nunca produce `Enter`; solo el `send-keys Enter` final.
+5. El ack compara `normalize(text) = normalize(prompt)` con la `normalize` de §8.1.2 y exige
+   `session_id = cid` y origen humano.
+6. Todo envío con efectos deja un `composer_send` persistido y, si es cross-user, una fila `operate`.
+7. Tras un fallo de un segmento, el Enter final no se envía y nada se reintenta ni se limpia.
+8. `busy`, diálogo abierto, copy-mode, pane muerto, foreground ≠ CLI y composer no vacío bloquean
+   antes del primer efecto.
+9. `unconfirmed` y `misdelivered` nunca inician otro envío.
 
-### 8.2 Validación previa (resultados a adjuntar al PR 3.2)
+### 8.2 Validación previa — resultados (CLI 2.1.314, 2026-10-30)
 
-Experimentos con el CLI 2.1.308 real en un contenedor de prueba, cada uno con resultado esperado,
-observado y decisión:
+Realizada en un servidor tmux aislado con un proyecto descartable cuyos hooks registran cada
+evento con marca de tiempo; `claude` 2.1.314, tmux 3.4; sin captura ni sesiones reales. Informe
+completo con esperado/observado/decisión por experimento adjunto al PR documental de este
+apartado. Resumen vinculante:
 
-1. Paste + Enter con composer vacío / con texto a medio escribir / en copy-mode / con `/config`
-   abierto / con Claude `busy`.
-2. `/clear`, `/resume <otra>`, `/fork`, `exit` + `claude` en el mismo pane: latencia entre el cambio
-   y la actualización del binding; tamaño de la ventana de carrera.
-3. Prompts multilínea, bloques de código, líneas que empiezan por `/`, `!`, `@`, texto de tamaño L1.
-4. Qué transforma el CLI en `UserPromptSubmit.prompt` respecto al texto pegado (espacios, CRLF,
-   menciones, comandos) → definición de `normalize`.
-5. `paste-buffer` con y sin `-p`.
-6. Issue #444 (clientes tmux acumulados) cerrado y verificado (`tmux list-clients` = clientes vivos).
+#### 8.2.1 Paste + Enter según el estado del pane
+
+| Estado | Observado | Decisión |
+| --- | --- | --- |
+| Composer vacío, CLI idle, una línea | `UserPromptSubmit` idéntico byte a byte 78 ms después del paste; sin campo `source` | camino feliz; `source` ausente = humano |
+| Texto a medio escribir | se mezcla (`"partial rest of message"`); el probe dice `idle` | `composer-not-empty` por `capture-pane`; el ack lo detecta |
+| Copy-mode | el texto entra al composer, el Enter lo consume copy-mode; probe `idle` | `pane_in_mode` ⇒ `needs-terminal` |
+| Diálogo de confianza de carpeta | el texto se ignora, el Enter confirma «No, exit» y el CLI termina (`pane_dead`) | sesión no listada ⇒ `probe-failed` |
+| `/help`, `/model` abiertos | probe `waiting` + `waitingFor: "dialog open"`; en `/help` paste y Enter se pierden; en `/model` el Enter **guardó el modelo por defecto global** | `waitingFor ∉ {∅, input needed}` ⇒ `needs-terminal`; nunca enviar "por si acaso" |
+| Claude `busy` | probe `busy`; si se envía, el CLI **encola** y emite `UserPromptSubmit` de inmediato con el `prompt_id` del turno en curso; el turno encolado termina con un `Stop` cuyo `prompt_id` nadie anunció | `busy` bloquea siempre; seguimiento de captura (`Stop` con `prompt_id` no anunciado) |
+
+#### 8.2.2 Cambios de conversación en el mismo pane
+
+| Comando | Observado desde el Enter | Decisión |
+| --- | --- | --- |
+| `/clear` | archivo de sesión del probe +173 ms; `SessionStart{source: clear}` +177 ms | ventana ≈ 0,2 s ⇒ re-probar en el envío, exigir `sessionId = cid`, ack con `session_id = cid`, `misdelivered` si difiere |
+| `/resume <otra>` | `SessionStart{source: resume}` +216 ms; mismo pid, otro id | idem |
+| `/fork` | **no cambia el pane**: crea un proceso aparte `kind: background`, `tmux: null` (+1,1 s) y un `claude daemon` | nunca elegible (`kind ≠ interactive`) |
+| `/exit` y `claude` | `SessionEnd{prompt_input_exit}`; el pane vuelve a `bash` en 0,95 s; el probe deja de listar; el nuevo `claude` da `SessionStart` +0,55 s con otro id | `pane_current_command ∉ {claude, node}` ⇒ `needs-terminal`; sin la sesión ⇒ `probe-failed` |
+
+#### 8.2.3 Forma del texto
+
+| Entrada | Observado | Decisión |
+| --- | --- | --- |
+| Multilínea o bloque de código en **un** paste `-p` | envuelto: `"\n\n<pasted_content id=\"…\">\n…\n</pasted_content id=\"…\">\n"`; CR ⇒ LF (CRLF ⇒ dos saltos); tab ⇒ 4 espacios; el modelo lo recibe como contenido pegado | descartado |
+| Una línea > 800 caracteres en un paste | envuelto igual (+58 bytes; 64 KiB supera L1 en el hook); 800 no se envuelve, 850 sí | trozo ≤ 800 |
+| Línea de 1800 caracteres en 3 pastes consecutivos de 600 | **no** envuelta; la decisión de envolver es por paste | partir en trozos sin tecla entre ellos |
+| Segmentos + `M-Enter` | envía cada segmento | descartado |
+| Segmentos + `\` Enter | salto de línea; prompt idéntico | alternativa; ambiguo si la línea acaba en `\` |
+| Segmentos + Shift+Enter CSI u (`ESC[13;2u`) | salto de línea; prompt idéntico byte a byte, líneas vacías incluidas | **elegido** |
+| Línea 2 con `!`, línea 3 con `/` (segmentado) | texto; ni shell ni comando | solo el primer carácter activa modos |
+| Primer carácter `/` (`/help`) | abre el overlay de ayuda; **sin** `UserPromptSubmit`; un paste posterior se pierde | `unsupported-prefix` |
+| Primer carácter `!` (`!echo …`) | **ejecuta el comando en el shell**; turno sin `UserPromptSubmit` | `unsupported-prefix` |
+| `@archivo` | sin popup; prompt idéntico | aceptado |
+| UTF-8 (acentos, emoji) | idéntico | aceptado |
+| `\n` final en un paste | recortado, no envuelto | `normalize` quita saltos finales |
+
+#### 8.2.4 Transformaciones del CLI (base de `normalize`)
+
+Espacios finales del prompt recortados, iniciales conservados; tab ⇒ 4 espacios; CR ⇒ LF; saltos
+finales recortados; UTF-8 intacto; `UserPromptSubmit` sin `source` y con `prompt_id` (UUID).
+
+#### 8.2.5 `paste-buffer` sin `-p`
+
+Cada `\n` es un Enter: dos líneas producen dos prompts separados. Una línea sin `-p` es idéntica.
+Conclusión: `-p` obligatorio; el invariante 4 se cumple solo por la entrega segmentada.
+
+#### 8.2.6 #444 y lista de revalidación
+
+#444 cerrado en `b1479d5` (PR #486): el cliente tmux se libera con el último oyente y los
+huérfanos se barren en el siguiente attach; `tmux list-clients` = clientes vivos. Antes del fix,
+una sesión de un solo tab acumulaba 17 clientes.
+
+**Revalidación obligatoria al añadir una versión a `COMPOSER_CLI_VERSIONS`** (smoke de la imagen con
+el CLI real, resultados adjuntos al PR): (1) una línea ⇒ `UserPromptSubmit` idéntico, sin `source`;
+(2) entrega segmentada de 3 líneas con una vacía ⇒ idéntico (CSI u sigue siendo salto de línea);
+(3) 800 no envuelve, 850 envuelve (umbral); (4) `!…` y `/…` iniciales no producen
+`UserPromptSubmit` (siguen siendo modos); (5) `busy` encola y el `UserPromptSubmit` trae el
+`prompt_id` del turno en curso; (6) `waitingFor: "dialog open"` con `/help`; (7) latencia de
+`/clear` y `/resume` ≤ 0,5 s; (8) `normalize` sigue siendo idempotente sobre `prompt`.
 
 ---
 
@@ -1878,9 +2127,53 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
       histórico con esa forma se muestra igual sin reescribir el archivo; un prompt humano que cite las
       etiquetas sigue siendo "You"; una forma no verificable se rotula "origen no verificado".
 
-### 3.2 composer (condicionado)
+### 3.2 composer
 
-- [ ] §8.1 completo; resultados de §8.2 en el PR; issue #444 cerrado.
+- [x] Contrato §8 aprobado (2026-10-30); resultados de §8.2 con el CLI 2.1.314; #444 cerrado (`b1479d5`).
+- [ ] Bandera: con `CONVERSATION_COMPOSER_ENABLED` apagado la ruta no existe y `canSendInput=false`
+      en todas las conversaciones (test de rutas); encendida, `canSendInput` según §8.1.1 sin probe.
+- [ ] Validación 400 (§8.1.2): cada código con su vector; `normalize` idempotente y con los casos de
+      §8.2.4; `/` y `!` iniciales rechazados, en líneas posteriores aceptados; `ESC` en cualquier
+      posición rechazado; L1 y 256 segmentos.
+- [ ] Precondiciones 409 (§8.1.3) sobre un `tmux` y un probe simulados, cada una **sin ningún
+      exec de entrega**: `busy`, `dialog open`, `permission prompt`, `pane_in_mode`, `pane_dead`,
+      foreground `bash`, composer con texto, probe sin la sesión, probe con otro `sessionId`,
+      `pane_pid` sin el pid del probe, pane inexistente, capture no efectiva, versión no validada.
+- [ ] Lock por pane (§8.1.4): dos envíos concurrentes a conversaciones distintas del **mismo** pane ⇒
+      uno entrega y el otro 409 `send-in-progress`, en cualquier orden de llegada; dos panes
+      distintos de la misma sesión no se bloquean; el lock se libera al decidirse el resultado y
+      nunca después de T_send.
+- [ ] Idempotencia (§8.1.4): doble clic (mismo `clientMessageId`, concurrente y secuencial) ⇒ **una**
+      secuencia de entrega y la misma respuesta; tras reiniciar el proceso, el mismo id devuelve el
+      resultado persistido en `composer_send` sin entregar.
+- [ ] Secuencia (§8.1.5): argv exactos de cada exec (test de tabla) para texto de una línea, de
+      varias líneas con una vacía, con una línea de 1800 caracteres (3 trozos sin tecla entre
+      ellos) y con tabs/CRLF; el texto solo por stdin; un único `send-keys Enter`; `\n` nunca
+      produce Enter; relectura de `display -p` antes del primer paste.
+- [ ] Fallos parciales (§8.1.6): fallo inyectado en el paste k de n ⇒ exactamente k−1 pastes
+      previos, ningún comando posterior, **sin Enter**, sin limpieza, 502 `delivery-failed{stage,
+      segmentsSent}` y `composer_send{failed}`; fallo en el Enter ⇒ `stage: enter`.
+- [ ] Ack (§8.1.7): `delivered` con `promptId`; `unconfirmed` al vencer T_ack sin reintento; un
+      `user_prompt` con el texto en otra conversación ⇒ `misdelivered{conversation}`; un
+      `internal_prompt`, un `source: sdk` o un `origin: unverified` con el mismo texto **no**
+      confirman; un `user_prompt` anterior al envío no confirma; con dos envíos consecutivos cada
+      ack consume solo el suyo; tiempo de ack medido en el smoke.
+- [ ] Evento y auditoría (§8.1.8): `composer_send` sin texto, con identidad `client_message_id`
+      (§4.6); cross-user ⇒ fila `operate` antes del primer efecto y fail-closed; 400/409 sin evento;
+      stats.
+- [ ] Autorización: observadores y lead 403; admin con `operate`; rate limit `composerUser`.
+- [ ] Frontend: composer habilitado solo con `canSendInput` y estado `waiting_input`/`idle`; chip con
+      el motivo del bloqueo por código 409; estados «enviando», «entregado» (la burbuja optimista se
+      sustituye por el `user_prompt` real por `prompt_id`), «sin confirmar» (enlace al Terminal, sin
+      reintento automático; reenviar = acción nueva con id nuevo), «entregado en otra
+      conversación» (enlace), «fallo parcial» (aviso de texto parcial y confirmación de revisión
+      antes del siguiente envío); validación local espejo de §8.1.2 solo para explicar; sin
+      duplicados en reconexión WS.
+- [ ] Smoke con el CLI real en la imagen (`composer.smoke.ts`, Session Image): la lista de
+      revalidación de §8.2.6 con la versión de `COMPOSER_CLI_VERSIONS`; una línea, segmentado con
+      línea vacía, umbral 800/850, `!`/`/` sin `UserPromptSubmit`, `busy` encolado, `dialog open`.
+- [ ] Despliegue: backend app-only con la bandera apagada; activación en una sesión descartable
+      antes de encenderla en general; `COMPOSER_CLI_VERSIONS` documentada en DEPLOYMENT.md.
 
 ### 3.3 agentes y teams
 
