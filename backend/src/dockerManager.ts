@@ -201,11 +201,22 @@ export interface Tab {
 // byte would fan out N times.
 interface SharedExec {
 	execId: string;
+	sessionId: string;
+	tabId: string;
+	containerId: string;
 	stream: Duplex;
 	resize(cols: number, rows: number): Promise<void>;
 	listeners: Map<string /*attachId*/, OutputListener>;
 	clientSizes: Map<string /*attachId*/, { cols: number; rows: number }>;
 	appliedSize: { cols: number; rows: number };
+	/**
+	 * In-container pid of the exec'd tmux client (#444), learned from the
+	 * sentinel line the attach wrapper prints before `exec tmux`. null
+	 * until that line arrives, or forever if it never does (then the
+	 * client cannot be released by this process and the next spawn's
+	 * sweep is what reclaims it).
+	 */
+	clientPid: number | null;
 }
 
 // ── Runtime readiness (#393) ─────────────────────────────────────────────────
@@ -229,6 +240,137 @@ function hostCpuNanoCap(): number {
 	const cores = os.cpus().length;
 	return cores > 0 ? cores * 1_000_000_000 : Number.POSITIVE_INFINITY;
 }
+
+// ── tmux client release (#444) ──────────────────────────────────────────────
+// Destroying the host side of a hijacked exec does NOT end the process
+// inside the container: Docker keeps the pty and the `tmux new-session -A`
+// client stays attached to the tmux server. Every WS reconnect therefore
+// left one more client behind (36 after a day of mobile reconnects), each
+// holding a pty and a slot under PidsLimit, and tmux sizes the pane to the
+// smallest attached client, so stale sizes pinned the live viewer. The fix
+// needs the client's pid as seen INSIDE the container (docker's ExecInspect
+// Pid is a host pid the backend cannot signal), so the attach runs through
+// a bash wrapper that prints its own pid first and then `exec`s tmux —
+// exec keeps the pid, so what was printed IS the tmux client's pid. The
+// sentinel line is consumed by spawnSharedExec before any byte reaches a
+// listener.
+
+export const TMUX_CLIENT_SENTINEL = "__ST_TMUX_CLIENT__";
+
+/** Attach wrapper: argv is `bash -c <script> st-attach <tabId>`. */
+export const TMUX_ATTACH_SCRIPT = `printf '${TMUX_CLIENT_SENTINEL} %d\\n' "$$"; exec tmux new-session -A -s "$1" -c /home/developer/workspace`;
+
+// Release / sweep, run as a one-shot `bash -c <script> st-tmux-clients <tab>
+// <mode> <pid>`. Identity first, then evidence, then action — and on any
+// error or ambiguity NO action at all (Work T2): a failed cleanup may leave
+// a client behind for the next sweep, it must never touch a process whose
+// identity is not proven.
+//
+// Identity (`shape`): a process is one of ours only if its argv in /proc is
+// EXACTLY what the attach wrapper runs — `tmux` (after exec) or `wrapper`
+// (bash before it). Anything else — a recycled pid, a client the user
+// attached by hand, PID 1 — is `other`. The tmux SERVER is forked by the
+// first client and inherits the tmux argv, so a tmux-shaped pid is acted on
+// only once `tmux display -p '#{pid}'` has VERIFIED the server's pid and it
+// differs; `list-clients` must then succeed and list the pid (a successful
+// listing without it = a client tmux does not know yet: left alone,
+// `not-listed`). The wrapper stage can never be the server (no tmux
+// process has that argv) and tmux cannot know it, so SIGTERM is the one
+// correct action there — the only `kill` in the script.
+//
+// Fence (Work T1): a sweep started for client A may execute arbitrarily
+// late — after A was released and a NEWER client B attached to the same
+// tab. It therefore acts only on clients whose process STARTED strictly
+// before its own (`starttime` in /proc/<pid>/stat, clock ticks since boot),
+// read at the moment of acting; B is newer by construction, however late
+// the exec runs. An equal tick is ambiguous and left alone, and a sweep
+// whose own pid is gone or no longer ours is `stale` and does nothing.
+//
+// Prints one token:
+//   release → detached | terminated | already-exited | not-ours | not-listed | unverified
+//   sweep   → swept N | swept 0 stale | swept 0 unverified
+export const TMUX_CLIENTS_SCRIPT = `tab="$1"
+mode="$2"
+pid="$3"
+# argv class of <pid>: tmux (exact attach argv; the forked server inherits
+# it too), wrapper (bash before its exec), gone, other.
+shape() {
+	local argv
+	[ -r "/proc/$1/cmdline" ] || { echo gone; return; }
+	argv="$(tr '\\0' '\\n' < "/proc/$1/cmdline" 2>/dev/null)"
+	[ -n "$argv" ] || { echo gone; return; }
+	if [ "$argv" = "$(printf 'tmux\\nnew-session\\n-A\\n-s\\n%s\\n-c\\n/home/developer/workspace' "$tab")" ]; then
+		echo tmux
+		return
+	fi
+	case "$argv" in
+		"bash"$'\\n'"-c"$'\\n'*$'\\n'"st-attach"$'\\n'"$tab") echo wrapper; return ;;
+	esac
+	echo other
+}
+# Start time of <pid> in clock ticks since boot (/proc/<pid>/stat field 22;
+# the comm field may hold spaces, so parse after the last ") "). Fails when
+# unreadable or not a number.
+started() {
+	local rest
+	rest="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+	rest="\${rest##*) }"
+	set -- $rest
+	case "\${20:-}" in ''|*[!0-9]*) return 1 ;; esac
+	printf '%s' "\${20}"
+}
+# The server's pid, verified numeric — or failure (no server, tmux error).
+server() {
+	local s
+	s="$(tmux display -p '#{pid}' 2>/dev/null)" || return 1
+	case "$s" in ''|*[!0-9]*) return 1 ;; esac
+	printf '%s' "$s"
+}
+# "<pid> <tty>" per client of the tab — or failure when tmux could not answer.
+clients() {
+	tmux list-clients -t "$tab" -F '#{client_pid} #{client_tty}' 2>/dev/null
+}
+case "$mode" in
+release)
+	case "$(shape "$pid")" in
+	gone) echo already-exited; exit 0 ;;
+	other) echo not-ours; exit 0 ;;
+	wrapper)
+		if kill -TERM "$pid" 2>/dev/null; then echo terminated; else echo already-exited; fi
+		exit 0 ;;
+	esac
+	srv="$(server)" || { echo unverified; exit 0; }
+	[ "$pid" = "$srv" ] && { echo not-ours; exit 0; }
+	list="$(clients)" || { echo unverified; exit 0; }
+	t=""
+	while read -r p tty; do
+		[ "$p" = "$pid" ] && t="$tty"
+	done <<< "$list"
+	[ -n "$t" ] || { echo not-listed; exit 0; }
+	if tmux detach-client -t "$t" 2>/dev/null; then echo detached; else echo unverified; fi
+	;;
+sweep)
+	case "$(shape "$pid")" in tmux|wrapper) ;; *) echo "swept 0 stale"; exit 0 ;; esac
+	own="$(started "$pid")" || { echo "swept 0 unverified"; exit 0; }
+	srv="$(server)" || { echo "swept 0 unverified"; exit 0; }
+	list="$(clients)" || { echo "swept 0 unverified"; exit 0; }
+	n=0
+	while read -r p tty; do
+		[ -n "$p" ] || continue
+		[ "$p" = "$pid" ] && continue
+		[ "$p" = "$srv" ] && continue
+		[ "$(shape "$p")" = tmux ] || continue
+		s="$(started "$p")" || continue
+		[ "$s" -lt "$own" ] || continue
+		tmux detach-client -t "$tty" 2>/dev/null && n=$((n+1))
+	done <<< "$list"
+	echo "swept $n"
+	;;
+*)
+	echo bad-mode
+	;;
+esac
+`;
 
 // ── Cancellable exec (process-group) plumbing ───────────────────────────────
 // Docker has no "kill exec" API: destroying the host-side stream leaves the
@@ -2254,6 +2396,9 @@ export class DockerManager {
 					} catch {
 						/* already destroyed */
 					}
+					// #444 — destroying the stream ends nothing inside the
+					// container; the tmux client has to be told to go.
+					this.releaseTmuxClient(s);
 					logger.info(`[docker] detached ${attachId}; last client, shared exec closed`);
 				} else {
 					// Someone else may have had a smaller terminal; recompute so
@@ -2265,6 +2410,72 @@ export class DockerManager {
 			() => {
 				/* spawn rejected; nothing to detach from */
 			},
+		);
+	}
+
+	/**
+	 * End this process's own tmux client after the last listener left
+	 * (#444). Fire-and-forget: detach() is synchronous and nothing waits on
+	 * the container. A failure (container already stopped, exec refused) is
+	 * logged at info — the common case is a stop/kill that took the client
+	 * down before we got here.
+	 */
+	private releaseTmuxClient(s: SharedExec): void {
+		if (s.clientPid === null) {
+			logger.warn(
+				`[docker] tmux client of ${s.execId} has no known pid; left for the next attach's sweep`,
+			);
+			return;
+		}
+		void this.execOneShot(
+			s.sessionId,
+			[
+				"bash",
+				"-c",
+				TMUX_CLIENTS_SCRIPT,
+				"st-tmux-clients",
+				s.tabId,
+				"release",
+				String(s.clientPid),
+			],
+			{ containerId: s.containerId },
+		).then(
+			({ stdout }) =>
+				logger.info(
+					`[docker] released tmux client pid ${s.clientPid} of ${s.execId}: ${stdout.trim()}`,
+				),
+			(err) =>
+				logger.info(
+					`[docker] tmux client release for ${s.execId} skipped: ${(err as Error).message}`,
+				),
+		);
+	}
+
+	/**
+	 * Detach every attach client of the tab that is not ours (#444): the
+	 * clients a previous backend process left behind (its `shared` map died
+	 * with it), or one whose stream closed from the container side while
+	 * listeners remained (forgetIfCurrent dropped the slot, the client
+	 * lived on). Runs once per spawn, as soon as our own pid is known. The
+	 * exec may run late — after this client was released and a newer one
+	 * attached (Work T1) — so the script itself fences on process start
+	 * time and acts only on clients older than our own; see the script.
+	 */
+	private sweepTmuxClients(s: SharedExec): void {
+		if (s.clientPid === null) return;
+		void this.execOneShot(
+			s.sessionId,
+			["bash", "-c", TMUX_CLIENTS_SCRIPT, "st-tmux-clients", s.tabId, "sweep", String(s.clientPid)],
+			{ containerId: s.containerId },
+		).then(
+			({ stdout }) => {
+				const out = stdout.trim();
+				if (out !== "swept 0") logger.info(`[docker] tmux client sweep for ${s.execId}: ${out}`);
+			},
+			(err) =>
+				logger.info(
+					`[docker] tmux client sweep for ${s.execId} skipped: ${(err as Error).message}`,
+				),
 		);
 	}
 
@@ -2292,8 +2503,12 @@ export class DockerManager {
 		// it). `listTabs` falls back to `session_name` for that case, which
 		// is an acceptable degradation — it's still reachable, just named
 		// after its id.
+		//
+		// The command runs through TMUX_ATTACH_SCRIPT (#444): `bash` prints
+		// its pid and `exec`s the tmux client, so the pid we read below is
+		// the client's and detach() can end exactly that process later.
 		const exec = await container.exec({
-			Cmd: ["tmux", "new-session", "-A", "-s", tabId, "-c", "/home/developer/workspace"],
+			Cmd: ["bash", "-c", TMUX_ATTACH_SCRIPT, "st-attach", tabId],
 			AttachStdin: true,
 			AttachStdout: true,
 			AttachStderr: true,
@@ -2307,6 +2522,9 @@ export class DockerManager {
 
 		const s: SharedExec = {
 			execId: key,
+			sessionId,
+			tabId,
+			containerId: meta.containerId,
 			stream,
 			resize: async (c: number, r: number) => {
 				try {
@@ -2320,6 +2538,7 @@ export class DockerManager {
 			// Sentinel {0,0} forces the first recomputeSize to actually call
 			// exec.resize — any real client size differs from this.
 			appliedSize: { cols: 0, rows: 0 },
+			clientPid: null,
 		};
 
 		// Single fan-out for the entire session. Each byte from tmux fires this
@@ -2336,8 +2555,51 @@ export class DockerManager {
 				}
 			}
 		};
+		// The wrapper's sentinel line (`<sentinel> <pid>\r\n` — the pty
+		// adds the \r) is the first thing on the stream and must never
+		// reach a terminal. It is held back only while what has arrived is
+		// still a prefix of the sentinel: output that diverges at any byte
+		// (a tmux redraw, a stream that skipped the wrapper) is forwarded
+		// at once with the pid left unknown, so a missing sentinel can
+		// never freeze the terminal.
+		const want = `${TMUX_CLIENT_SENTINEL} `;
+		let head: string | null = "";
+		const withoutSentinel = (text: string): string => {
+			if (head === null) return text;
+			head += text;
+			if (head.length < want.length) {
+				if (want.startsWith(head)) return "";
+				const out = head;
+				head = null;
+				return out;
+			}
+			if (!head.startsWith(want)) {
+				const out = head;
+				head = null;
+				return out;
+			}
+			const nl = head.indexOf("\n");
+			if (nl === -1) {
+				if (head.length <= want.length + 16) return "";
+				logger.warn(`[docker] tmux client sentinel for ${key} never ended; pid unknown`);
+				const out = head;
+				head = null;
+				return out;
+			}
+			const digits = head.slice(want.length, nl).replace(/\r$/, "");
+			const rest = head.slice(nl + 1);
+			head = null;
+			const pid = Number(digits);
+			if (/^\d{1,9}$/.test(digits) && pid >= 2) {
+				s.clientPid = pid;
+				this.sweepTmuxClients(s);
+			} else {
+				logger.warn(`[docker] unparseable tmux client pid for ${key}: ${JSON.stringify(digits)}`);
+			}
+			return rest;
+		};
 		stream.on("data", (chunk: Buffer) => {
-			broadcast(decoder.write(chunk));
+			broadcast(withoutSentinel(decoder.write(chunk)));
 		});
 
 		// If the stream dies on its own (tmux server exits, container restarted,
@@ -2356,7 +2618,11 @@ export class DockerManager {
 			}
 		};
 		stream.on("end", () => {
-			broadcast(decoder.end());
+			// A stream that ended while the sentinel was still being
+			// collected had no sentinel: hand the held bytes on.
+			const held = head ?? "";
+			head = null;
+			broadcast(held + decoder.end());
 			void forgetIfCurrent();
 		});
 		// "close" fires on abrupt destroy (container killed). We intentionally
@@ -3143,11 +3409,16 @@ export class DockerManager {
 	private async execOneShot(
 		sessionId: string,
 		cmd: string[],
-		opts: { combineStreams?: boolean; cwd?: string } = {},
+		opts: {
+			combineStreams?: boolean;
+			cwd?: string;
+			/** Skip the D1 lookup when the caller already holds the container id. */
+			containerId?: string;
+		} = {},
 	): Promise<{ stdout: string; exitCode: number }> {
-		const meta = await this.sessions.getOrThrow(sessionId);
-		if (!meta.containerId) throw new ContainerNotFoundError();
-		const container = this.docker.getContainer(meta.containerId);
+		const containerId = opts.containerId ?? (await this.sessions.getOrThrow(sessionId)).containerId;
+		if (!containerId) throw new ContainerNotFoundError();
+		const container = this.docker.getContainer(containerId);
 
 		const exec = await container.exec({
 			Cmd: cmd,

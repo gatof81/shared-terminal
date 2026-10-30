@@ -20,6 +20,9 @@ import {
 	sanitiseHostname,
 	sanitiseUploadName,
 	TabNotFoundError,
+	TMUX_ATTACH_SCRIPT,
+	TMUX_CLIENT_SENTINEL,
+	TMUX_CLIENTS_SCRIPT,
 } from "./dockerManager.js";
 import { logger } from "./logger.js";
 import type { SessionManager } from "./sessionManager.js";
@@ -27,6 +30,10 @@ import type { SessionManager } from "./sessionManager.js";
 // ── Test harness ────────────────────────────────────────────────────────────
 
 const tick = () => new Promise((r) => setImmediate(r));
+
+// The long-lived attach exec (#444): `bash -c TMUX_ATTACH_SCRIPT st-attach <tab>`,
+// which prints its pid and exec's `tmux new-session -A`.
+const isAttachCmd = (cmd: string[]): boolean => cmd[0] === "bash" && cmd[2] === TMUX_ATTACH_SCRIPT;
 
 function makeFakeSessions(containerId: string | null = "container-123"): SessionManager {
 	const meta = {
@@ -85,9 +92,15 @@ interface FakeContainer {
 // split across stdout frames and stderr arriving ahead of stdout, which a
 // single canned stdout string can't express.
 type OneShotFrame = { type: 1 | 2; data: string };
-type OneShotHook = (
-	cmd: string[],
-) => { stdout?: string; frames?: OneShotFrame[]; exitCode: number } | undefined;
+type OneShotHook = (cmd: string[]) =>
+	| {
+			stdout?: string;
+			frames?: OneShotFrame[];
+			exitCode: number;
+			/** Park this one-shot until the promise resolves (a Docker exec that runs late). */
+			gate?: Promise<void>;
+	  }
+	| undefined;
 
 function makeFakeContainer(oneShot?: OneShotHook): FakeContainer {
 	const streams: PassThrough[] = [];
@@ -108,8 +121,7 @@ function makeFakeContainer(oneShot?: OneShotHook): FakeContainer {
 			// NOT one-shots — they keep a long-lived stream open and the
 			// test drives output by writing to `container._streams[...]`.
 			const isAttach =
-				opts.Cmd[0] === "tmux" &&
-				(opts.Cmd[1] === "attach" || (opts.Cmd[1] === "new-session" && opts.Cmd.includes("-A")));
+				isAttachCmd(opts.Cmd) || (opts.Cmd[0] === "tmux" && opts.Cmd[1] === "attach");
 			// Every one-shot exec (capture-pane, kill-session, set-option,
 			// new-session -d, bash -c, …) needs SOME canned response —
 			// otherwise execOneShot's `await stream.on("end")` hangs the
@@ -126,7 +138,7 @@ function makeFakeContainer(oneShot?: OneShotHook): FakeContainer {
 			const exec: FakeExec = {
 				start: vi.fn(async () => {
 					if (oneShotResult) {
-						setImmediate(() => {
+						const emit = () => {
 							// Wrap in Docker multiplexed frames to mirror Tty:false.
 							const frames = oneShotResult.frames ?? [
 								{ type: 1 as const, data: oneShotResult.stdout ?? "" },
@@ -139,7 +151,9 @@ function makeFakeContainer(oneShot?: OneShotHook): FakeContainer {
 								stream.write(Buffer.concat([header, payload]));
 							}
 							stream.end();
-						});
+						};
+						if (oneShotResult.gate) void oneShotResult.gate.then(() => setImmediate(emit));
+						else setImmediate(emit);
 					}
 					return stream;
 				}),
@@ -196,9 +210,7 @@ function makeDocker(opts?: { sessions?: SessionManager; oneShot?: OneShotHook })
 function countAttachExecs(container: FakeContainer): number {
 	const calls = (container.exec as unknown as { mock: { calls: Array<[{ Cmd: string[] }]> } }).mock
 		.calls;
-	return calls.filter(
-		([opts]) => opts.Cmd[0] === "tmux" && opts.Cmd[1] === "new-session" && opts.Cmd.includes("-A"),
-	).length;
+	return calls.filter(([opts]) => isAttachCmd(opts.Cmd)).length;
 }
 
 // Array.prototype.find typed as `T | undefined` but in tests we often KNOW the
@@ -211,7 +223,7 @@ function mustFind<T>(arr: readonly T[], pred: (v: T) => boolean, label: string):
 	return found;
 }
 
-const isAttachExec = (e: FakeExec): boolean => e._cmd[1] === "new-session" && e._cmd.includes("-A");
+const isAttachExec = (e: FakeExec): boolean => isAttachCmd(e._cmd);
 
 // attach() now returns an armed listener (see dockerManager.attach() docs):
 // live bytes pile into a tail array until wsHandler calls flushTail(). Tests
@@ -334,8 +346,7 @@ describe("DockerManager shared-exec multiplexing", () => {
 		let resolveAttachStart: ((val: PassThrough) => void) | null = null;
 		const origExec = container.exec;
 		container.exec = vi.fn(async (opts: { Cmd: string[] }) => {
-			const isAttach =
-				opts.Cmd[0] === "tmux" && opts.Cmd[1] === "new-session" && opts.Cmd.includes("-A");
+			const isAttach = isAttachCmd(opts.Cmd);
 			if (!isAttach) {
 				// Fall through to the default fake for one-shots.
 				return (origExec as (...a: unknown[]) => Promise<FakeExec>).apply(container, [opts]);
@@ -568,13 +579,9 @@ describe("DockerManager shared-exec multiplexing", () => {
 		// replay should reflect the current pane view.
 		paneSnapshot = "abc";
 		const a2 = vi.fn();
-		const attachExecsBefore = container._execs.filter(
-			(e) => e._cmd[1] === "new-session" && e._cmd.includes("-A"),
-		).length;
+		const attachExecsBefore = container._execs.filter(isAttachExec).length;
 		const { replay } = await dm.attach("s1", "a2", 80, 24, a2, "tab-test");
-		const attachExecsAfter = container._execs.filter(
-			(e) => e._cmd[1] === "new-session" && e._cmd.includes("-A"),
-		).length;
+		const attachExecsAfter = container._execs.filter(isAttachExec).length;
 		expect(attachExecsAfter).toBe(attachExecsBefore + 1);
 		expect(replay).toBe("abc");
 	});
@@ -634,8 +641,7 @@ describe("DockerManager shared-exec multiplexing", () => {
 		let rejectedOnce = false;
 		const origExec = container.exec;
 		container.exec = vi.fn(async (opts: { Cmd: string[] }) => {
-			const isAttach =
-				opts.Cmd[0] === "tmux" && opts.Cmd[1] === "new-session" && opts.Cmd.includes("-A");
+			const isAttach = isAttachCmd(opts.Cmd);
 			if (isAttach && !rejectedOnce) {
 				rejectedOnce = true;
 				throw new Error("kaboom");
@@ -686,13 +692,11 @@ describe("DockerManager tabs", () => {
 		// (see dockerManager.ts: same Cmd creates-or-attaches so a dead tmux
 		// server doesn't fail the user's click on a stale tab). Each attach()
 		// ALSO fires a capture-pane one-shot, so container.exec runs 4× total.
-		const attachExecs = container._execs.filter(
-			(e) => e._cmd[1] === "new-session" && e._cmd.includes("-A"),
-		);
+		const attachExecs = container._execs.filter(isAttachExec);
 		expect(attachExecs).toHaveLength(2);
-		expect(attachExecs[0]!._cmd.slice(0, 3)).toEqual(["tmux", "new-session", "-A"]);
+		expect(attachExecs[0]!._cmd).toEqual(["bash", "-c", TMUX_ATTACH_SCRIPT, "st-attach", "tab-a"]);
 		expect(attachExecs[0]!._cmd).toContain("tab-a");
-		expect(attachExecs[1]!._cmd.slice(0, 3)).toEqual(["tmux", "new-session", "-A"]);
+		expect(attachExecs[1]!._cmd).toEqual(["bash", "-c", TMUX_ATTACH_SCRIPT, "st-attach", "tab-b"]);
 		expect(attachExecs[1]!._cmd).toContain("tab-b");
 
 		// tab-a's stream emits — only tab-a's listener fires.
@@ -2191,5 +2195,234 @@ describe("DockerManager.readSessionBellFlag (#355)", () => {
 		await dm.readSessionBellFlag("s1");
 		const cmd = container._execs.at(-1)!._cmd;
 		expect(cmd).toEqual(["tmux", "list-windows", "-a", "-F", "#{window_bell_flag}"]);
+	});
+});
+
+// ── #444 — the tmux client inside the container ends with the last listener ──
+describe("DockerManager #444 tmux client release", () => {
+	const sentinel = (pid: string) => `${TMUX_CLIENT_SENTINEL} ${pid}\r\n`;
+	const clientScriptCalls = (container: FakeContainer): string[][] =>
+		(container.exec as unknown as { mock: { calls: Array<[{ Cmd: string[] }]> } }).mock.calls
+			.map(([o]) => o.Cmd)
+			.filter((c) => c[0] === "bash" && c[2] === TMUX_CLIENTS_SCRIPT);
+
+	it("attaches through the pid-reporting wrapper and strips the sentinel line even when split across chunks", async () => {
+		const { dm, container } = makeDocker();
+		const out: string[] = [];
+		await attachAndFlush(dm, "s1", "a1", 80, 24, (d) => out.push(d), "tab-test");
+		const attach = mustFind(container._execs, isAttachExec, "attach exec");
+		expect(attach._cmd).toEqual(["bash", "-c", TMUX_ATTACH_SCRIPT, "st-attach", "tab-test"]);
+
+		attach._stream.write("__ST_TMUX");
+		await tick();
+		attach._stream.write("_CLIENT__ 42");
+		await tick();
+		expect(out).toEqual([]); // still a prefix of the sentinel: held back
+		attach._stream.write("42\r\nhel");
+		await tick();
+		attach._stream.write("lo");
+		await tick();
+		expect(out.join("")).toBe("hello");
+
+		// Our pid is known: exactly one sweep of the tab's OTHER clients.
+		expect(clientScriptCalls(container)).toEqual([
+			["bash", "-c", TMUX_CLIENTS_SCRIPT, "st-tmux-clients", "tab-test", "sweep", "4242"],
+		]);
+	});
+
+	it("forwards output untouched when no sentinel arrives (no freeze, no sweep)", async () => {
+		const { dm, container } = makeDocker();
+		const out: string[] = [];
+		await attachAndFlush(dm, "s1", "a1", 80, 24, (d) => out.push(d), "tab-test");
+		const attach = mustFind(container._execs, isAttachExec, "attach exec");
+		attach._stream.write("_"); // a prefix of the sentinel…
+		await tick();
+		expect(out).toEqual([]);
+		attach._stream.write("_x diverges here\r\n"); // …until it isn't
+		await tick();
+		expect(out.join("")).toBe("__x diverges here\r\n");
+		attach._stream.write("more");
+		await tick();
+		expect(out.join("")).toBe("__x diverges here\r\nmore");
+		expect(clientScriptCalls(container)).toEqual([]);
+	});
+
+	it("ignores an unusable sentinel pid (1, non-numeric) and keeps forwarding", async () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+		const { dm, container } = makeDocker();
+		const out: string[] = [];
+		await attachAndFlush(dm, "s1", "a1", 80, 24, (d) => out.push(d), "tab-test");
+		const attach = mustFind(container._execs, isAttachExec, "attach exec");
+		attach._stream.write(`${sentinel("1")}after`);
+		await tick();
+		expect(out.join("")).toBe("after");
+		expect(clientScriptCalls(container)).toEqual([]);
+		expect(warn).toHaveBeenCalledWith(expect.stringContaining("unparseable tmux client pid"));
+		warn.mockRestore();
+	});
+
+	it("releases the client only when the LAST listener leaves — observers and other tabs share it", async () => {
+		const { dm, container } = makeDocker();
+		await attachAndFlush(dm, "s1", "a1", 80, 24, () => undefined, "tab-test");
+		const attach = mustFind(container._execs, isAttachExec, "attach exec");
+		attach._stream.write(sentinel("4242"));
+		await tick();
+		// A second browser tab and a read-only observer join the same exec.
+		await attachAndFlush(dm, "s1", "a2", 100, 30, () => undefined, "tab-test");
+		await dm.attach("s1", "obs", 60, 20, () => undefined, "tab-test", true);
+		expect(countAttachExecs(container)).toBe(1);
+
+		const releases = () => clientScriptCalls(container).filter((c) => c[5] === "release");
+		dm.detach("a1");
+		await tick();
+		await tick();
+		expect(releases()).toEqual([]);
+		expect(attach._stream.destroyed).toBe(false);
+		dm.detach("obs");
+		await tick();
+		await tick();
+		expect(releases()).toEqual([]);
+
+		dm.detach("a2");
+		await tick();
+		await tick();
+		expect(attach._stream.destroyed).toBe(true);
+		expect(releases()).toEqual([
+			["bash", "-c", TMUX_CLIENTS_SCRIPT, "st-tmux-clients", "tab-test", "release", "4242"],
+		]);
+	});
+
+	it("warns and releases nothing when the pid never became known", async () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+		const { dm, container } = makeDocker();
+		await attachAndFlush(dm, "s1", "a1", 80, 24, () => undefined, "tab-test");
+		dm.detach("a1");
+		await tick();
+		await tick();
+		expect(clientScriptCalls(container)).toEqual([]);
+		expect(warn).toHaveBeenCalledWith(expect.stringContaining("no known pid"));
+		warn.mockRestore();
+	});
+
+	it("a stream that dies from the container side leaves its client to the next spawn's sweep", async () => {
+		const { dm, container } = makeDocker();
+		await attachAndFlush(dm, "s1", "a1", 80, 24, () => undefined, "tab-test");
+		const first = mustFind(container._execs, isAttachExec, "attach exec");
+		first._stream.write(sentinel("100"));
+		await tick();
+		// Docker hiccup: the hijacked stream closes while a1 is still listening.
+		first._stream.destroy();
+		await tick();
+		await tick();
+		const shared = (dm as unknown as { shared: Map<string, unknown> }).shared;
+		expect(shared.has("s1:tab-test")).toBe(false);
+		// No release was possible (nothing to tear down on our side)…
+		expect(clientScriptCalls(container).filter((c) => c[5] === "release")).toEqual([]);
+
+		// …so the next attach respawns, learns its own pid and sweeps the tab,
+		// which is where pid 100 (still attached inside the container) goes.
+		await attachAndFlush(dm, "s1", "a2", 80, 24, () => undefined, "tab-test");
+		const execs = container._execs.filter(isAttachExec);
+		expect(execs).toHaveLength(2);
+		execs[1]!._stream.write(sentinel("200"));
+		await tick();
+		expect(clientScriptCalls(container).filter((c) => c[5] === "sweep")).toEqual([
+			["bash", "-c", TMUX_CLIENTS_SCRIPT, "st-tmux-clients", "tab-test", "sweep", "100"],
+			["bash", "-c", TMUX_CLIENTS_SCRIPT, "st-tmux-clients", "tab-test", "sweep", "200"],
+		]);
+	});
+
+	it("pins the wrapper and the release script shapes the session-image smoke test runs", () => {
+		expect(TMUX_ATTACH_SCRIPT).toBe(
+			`printf '${TMUX_CLIENT_SENTINEL} %d\\n' "$$"; exec tmux new-session -A -s "$1" -c /home/developer/workspace`,
+		);
+		// Identity: only a process whose argv is exactly ours is ever touched.
+		expect(TMUX_CLIENTS_SCRIPT).toContain("/proc/$1/cmdline");
+		expect(TMUX_CLIENTS_SCRIPT).toContain(
+			"printf 'tmux\\nnew-session\\n-A\\n-s\\n%s\\n-c\\n/home/developer/workspace' \"$tab\"",
+		);
+		expect(TMUX_CLIENTS_SCRIPT).toContain('"st-attach"$\'\\n\'"$tab") echo wrapper; return ;;');
+		// Evidence before action (Work T2): a verified server pid, a successful
+		// listing, and the pid in it; otherwise no signal at all.
+		expect(TMUX_CLIENTS_SCRIPT).toContain('srv="$(server)" || { echo unverified; exit 0; }');
+		expect(TMUX_CLIENTS_SCRIPT).toContain('[ "$pid" = "$srv" ] && { echo not-ours; exit 0; }');
+		expect(TMUX_CLIENTS_SCRIPT).toContain('list="$(clients)" || { echo unverified; exit 0; }');
+		expect(TMUX_CLIENTS_SCRIPT).toContain('[ -n "$t" ] || { echo not-listed; exit 0; }');
+		expect(TMUX_CLIENTS_SCRIPT).toContain('tmux detach-client -t "$t"');
+		// The one kill: the wrapper stage, which no tmux process can be.
+		expect(TMUX_CLIENTS_SCRIPT.match(/kill -TERM/g)).toHaveLength(1);
+		expect(TMUX_CLIENTS_SCRIPT).not.toContain("kill-server");
+		expect(TMUX_CLIENTS_SCRIPT).not.toContain("kill-session");
+		// Fence (Work T1): only clients that started strictly before our own.
+		expect(TMUX_CLIENTS_SCRIPT).toContain('[ "$s" -lt "$own" ] || continue');
+		expect(TMUX_CLIENTS_SCRIPT).toContain('*) echo "swept 0 stale"; exit 0 ;;');
+		expect(TMUX_CLIENTS_SCRIPT).toContain('[ "$p" = "$pid" ] && continue');
+		expect(TMUX_CLIENTS_SCRIPT).toContain('[ "$p" = "$srv" ] && continue');
+	});
+
+	it("Work T1 interleaving: A's sweep parked in Docker, A released, B attached, A's sweep lands — B is untouched", async () => {
+		// Barrier: the FIRST sweep one-shot is held until `land()`; everything
+		// else answers at once. No timers decide the order below.
+		let land!: () => void;
+		const gate = new Promise<void>((r) => {
+			land = r;
+		});
+		let parked = false;
+		const { dm, container } = makeDocker({
+			oneShot: (cmd) => {
+				if (cmd[2] === TMUX_CLIENTS_SCRIPT && cmd[5] === "sweep" && !parked) {
+					parked = true;
+					return { stdout: "swept 0 stale", exitCode: 0, gate };
+				}
+				return undefined;
+			},
+		});
+		const scriptCalls = () => clientScriptCalls(container).map((c) => `${c[5]} ${c[6]}`);
+
+		// A: sentinel 100 ⇒ its sweep is issued (and parked).
+		await attachAndFlush(dm, "s1", "a1", 80, 24, () => undefined, "tab-test");
+		const execA = mustFind(container._execs, isAttachExec, "attach exec A");
+		execA._stream.write(sentinel("100"));
+		await tick();
+		expect(scriptCalls()).toEqual(["sweep 100"]);
+
+		// A's last listener leaves ⇒ release 100; the slot is free.
+		dm.detach("a1");
+		await tick();
+		await tick();
+		expect(scriptCalls()).toEqual(["sweep 100", "release 100"]);
+		expect(execA._stream.destroyed).toBe(true);
+
+		// B: a newer generation on the same tab, pid 200, live and listening.
+		const out: string[] = [];
+		await attachAndFlush(dm, "s1", "a2", 80, 24, (d) => out.push(d), "tab-test");
+		const execs = container._execs.filter(isAttachExec);
+		expect(execs).toHaveLength(2);
+		const execB = execs[1]!;
+		execB._stream.write(`${sentinel("200")}live`);
+		await tick();
+		expect(out.join("")).toBe("live");
+		expect(scriptCalls()).toEqual(["sweep 100", "release 100", "sweep 200"]);
+
+		// A's sweep finally runs in Docker. It carries A's pid (100) as its own
+		// — the script fences on it (TMUX_CLIENTS_SCRIPT tests: `swept 0 stale`
+		// once 100 is gone, and never a client newer than 100) — and on this
+		// side its completion changes nothing about B.
+		land();
+		await tick();
+		await tick();
+		await tick();
+		expect(scriptCalls()).toEqual(["sweep 100", "release 100", "sweep 200"]);
+		expect(execB._stream.destroyed).toBe(false);
+		const shared = (dm as unknown as { shared: Map<string, unknown> }).shared;
+		expect(shared.has("s1:tab-test")).toBe(true);
+		execB._stream.write(" and more");
+		await tick();
+		expect(out.join("")).toBe("live and more");
+		// B's own release still works, with B's pid.
+		dm.detach("a2");
+		await tick();
+		await tick();
+		expect(scriptCalls()).toEqual(["sweep 100", "release 100", "sweep 200", "release 200"]);
 	});
 });

@@ -46,6 +46,12 @@ jobs:
       - name: Install
         run: npm ci
 
+      # tmuxClientsScript.test.ts (#444) runs the release/sweep script against
+      # real tmux clients; without tmux those tests skip, and CI would stop
+      # proving the fence and the fail-closed paths.
+      - name: tmux (for the #444 script tests)
+        run: command -v tmux >/dev/null || sudo apt-get install -y --no-install-recommends tmux
+
       - name: Lint (Biome)
         run: npm run lint
 
