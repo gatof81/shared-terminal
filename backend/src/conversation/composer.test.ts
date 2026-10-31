@@ -1170,8 +1170,8 @@ describe("paste consumption (§8.1.5 paso 2b, smoke 2026-10-30)", () => {
 		// The first paste settled; the executor is now polling the input region.
 		await until(() => docker.calls.filter((c) => c.step === "capture").length >= 3, "polling");
 		expect(docker.effectSteps()).toEqual(["paste"]);
-		for (let i = 0; i < 40; i++) {
-			timers.fire(50);
+		for (let i = 0; i < 100; i++) {
+			timers.fire(100);
 			await new Promise((r) => setImmediate(r));
 		}
 		const r = await p;

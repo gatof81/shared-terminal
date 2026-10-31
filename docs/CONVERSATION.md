@@ -1857,8 +1857,10 @@ efecto se ejecuta solo tras `mayAct` (lock vivo, operación no cancelada, §8.1.
    entrada (`capture-pane -p -e`, la misma lectura de `composer-not-empty`) hasta ver el trozo
    consumido — su cola (≤ 24 puntos de código, comparada sin espacios porque la caja de entrada
    envuelve e indenta) aparece **una vez más** que antes del paste (conteo, no presencia: dos
-   líneas iguales seguidas esperan cada una su propio eco). Sondeo cada 50 ms, ≤ 40 lecturas
-   (≈ 2 s). Sin evidencia ⇒ `failed{stage: paste, segments_sent: k, detail: not-consumed}` (502
+   líneas iguales seguidas esperan cada una su propio eco). Sondeo cada 100 ms, ≤ 100 lecturas
+   (≈ 10 s; el piloto en VM100 con el CLI 2.1.314 mostró el eco de un paste más de 3,5 s después
+   cuando el envío seguía de cerca al fin de un turno — esperar más es seguro, nada se envía mientras
+   y T_http sigue acotando la petición). Sin evidencia ⇒ `failed{stage: paste, segments_sent: k, detail: not-consumed}` (502
    `delivery-failed`), sin newline ni Enter: el texto puede estar en la entrada y la persona
    comprueba el Terminal. Motivo: un CSI u o un Enter que el CLI lee **en el mismo read** que el
    paste anterior se aplica como Enter simple y **envía el segmento** (observado con separación

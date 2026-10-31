@@ -392,9 +392,16 @@ function applySgr(active: Set<string>, params: string): void {
 
 // ── Paste consumption (§8.1.5 paso 2b) ──────────────────────────────────────
 
-/** Polls of the input region after a paste before the delivery fails closed. */
-export const CONSUME_POLL_MS = 50;
-export const CONSUME_MAX_POLLS = 40;
+/**
+ * Polls of the input region after a paste before the delivery fails closed:
+ * 100 × 100 ms ≈ 10 s. The 3.2 pilot on VM100 (CLI 2.1.314, 2026-10-31)
+ * showed the CLI drawing a pasted line more than 3.5 s after the paste when
+ * the send followed a turn's end closely; the previous 40 × 50 ms window then
+ * failed closed with the text sitting in the input. Waiting longer is safe —
+ * nothing else is sent meanwhile and T_http still bounds the request.
+ */
+export const CONSUME_POLL_MS = 100;
+export const CONSUME_MAX_POLLS = 100;
 const CONSUME_TAIL_CPS = 24;
 
 /** Whitespace-free form: the CLI wraps and indents long lines in its input box. */
