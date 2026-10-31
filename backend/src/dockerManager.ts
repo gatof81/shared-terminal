@@ -3172,6 +3172,28 @@ export class DockerManager {
 					throw err;
 				}
 			},
+			sizeRw: async (id) => {
+				const i = (await d
+					.getContainer(id)
+					.inspect({ size: true } as unknown as Dockerode.ContainerInspectOptions)) as {
+					SizeRw?: number;
+				};
+				return typeof i.SizeRw === "number" ? i.SizeRw : null;
+			},
+			copyPath: async (fromId, p, toId, destDir, mayAct) => {
+				// One tar stream from O's archive endpoint into N's; dockerd
+				// extracts as root, so uids, modes, symlinks and hard links are
+				// what the archive says. The source stream is counted; the
+				// upload resolves when dockerd has extracted everything.
+				if (!mayAct()) throw new Error(`copy of ${p} not started: the attempt may no longer act`);
+				const src = await d.getContainer(fromId).getArchive({ path: p });
+				let bytes = 0;
+				src.on("data", (c: Buffer) => {
+					bytes += c.length;
+				});
+				await d.getContainer(toId).putArchive(src, { path: destDir });
+				return { bytes };
+			},
 		};
 	}
 

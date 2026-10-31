@@ -11,11 +11,25 @@
  * directory the same way, so any other version — or one that can't be
  * read — blocks the recreation. A version is added here only after that
  * smoke has run with it.
+ *
+ * 2.1.314 and 2.1.316 (legacy activation, CONVERSATION.md §2.7.7): the
+ * three pre-3.0d sessions had auto-updated to 2.1.316 and the composer
+ * pilot runs 2.1.314. Both are validated by the Session Image workflow's
+ * `cli-variants` job, which builds the same Dockerfile with
+ * `CLAUDE_CODE_VERSION` set to each and runs the whole conversation
+ * smoke (its phase 11d is the control-dir validation above), the
+ * recreation smoke (a carry-over whose N runs that CLI from the
+ * workspace) and the composer smoke against it, on every change to this
+ * directory. A version leaves this set when that job stops passing for it.
  */
 
 import { openWorkspaceFile, readHead } from "../workspaceFiles.js";
 
-export const CONTROL_MARKER_VALIDATED_CLI: ReadonlySet<string> = new Set(["2.1.308"]);
+export const CONTROL_MARKER_VALIDATED_CLI: ReadonlySet<string> = new Set([
+	"2.1.308",
+	"2.1.314",
+	"2.1.316",
+]);
 
 /** NPM_CONFIG_PREFIX=/home/developer/.npm-global, seen from the host. */
 export const WORKSPACE_CLI_PACKAGE =

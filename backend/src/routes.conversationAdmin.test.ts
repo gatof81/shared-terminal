@@ -158,7 +158,16 @@ import {
 import { ConversationService } from "./conversation/service.js";
 import { ConversationStore } from "./conversation/store.js";
 import type { DockerManager } from "./dockerManager.js";
-import { deferred, harness, IMG_N, O_ID, SID, stateOf } from "./recreate/engine.testutil.js";
+import { runRecreateAdminCli } from "./recreate/adminCli.js";
+import {
+	deferred,
+	dirtyLayer,
+	harness,
+	IMG_N,
+	O_ID,
+	SID,
+	stateOf,
+} from "./recreate/engine.testutil.js";
 import { RecreateUnresolvedError } from "./recreateAttempt.js";
 import { buildRouter } from "./routes.js";
 import { sessionLifecycleLock } from "./sessionLifecycleLock.js";
@@ -1104,5 +1113,157 @@ describe("GET /admin/stats → conversation (§7)", () => {
 		const body = (await (await call("GET", "/admin/stats")).json()) as Record<string, unknown>;
 		expect(body.conversation).toBeNull();
 		expect(body).toHaveProperty("sessions");
+	});
+});
+
+// ── §2.7.7: carry-over, approve, rollback, recover, and the host CLI ───────
+
+describe("carry-over recreation routes and the host CLI (§2.7.7)", () => {
+	const nIdOf = () => [...h.docker.containers.keys()].find((id) => id !== O_ID) as string;
+	const cli = async (argv: string[]) => {
+		const out: string[] = [];
+		const err: string[] = [];
+		const code = await runRecreateAdminCli(argv, {
+			port: (server?.address() as AddressInfo).port,
+			lookupAdmin: async (u) => (u === "root" ? { id: "admin-1", username: "root" } : null),
+			signToken: () => "tok",
+			fetch,
+			stdout: (l) => out.push(l),
+			stderr: (l) => err.push(l),
+		});
+		return { code, out: out.join("\n"), err: err.join("\n") };
+	};
+
+	it("GET ?preserveLayer=1 previews the carry-over (counts and bytes, no paths); the strict shape is unchanged; nothing happens", async () => {
+		await spinUp();
+		dirtyLayer(h);
+		const strict = (await (await call("GET", `/admin/sessions/${SID}/recreate`)).json()) as {
+			recreatable: boolean;
+			blockers: Array<{ code: string }>;
+			carry?: unknown;
+			retained?: unknown;
+		};
+		expect(strict.recreatable).toBe(false);
+		expect(strict.blockers.map((b) => b.code)).toContain("layer-home");
+		expect(strict).not.toHaveProperty("carry");
+		expect(strict).not.toHaveProperty("retained");
+		const res = await call("GET", `/admin/sessions/${SID}/recreate?preserveLayer=1`);
+		expect(res.headers.get("cache-control")).toBe("no-store");
+		const body = (await res.json()) as Record<string, unknown>;
+		expect(body).toMatchObject({
+			recreatable: true,
+			blockers: [],
+			carry: { entries: 7, bytes: 5_000_000, backupFresh: true },
+		});
+		expect(JSON.stringify(body)).not.toContain("/home/developer");
+		expect(h.docker.mutations()).toEqual([]);
+	});
+
+	it("POST {preserveLayer:true} commits and retains O; approve removes it; preserveLayer must be a boolean; an admin-owner writes no audit row", async () => {
+		await spinUp({ owner: "admin-1" });
+		dirtyLayer(h);
+		expect(
+			(
+				await call("POST", `/admin/sessions/${SID}/recreate`, {
+					expectImageId: IMAGE_N,
+					preserveLayer: "yes",
+				})
+			).status,
+		).toBe(400);
+		const res = await call("POST", `/admin/sessions/${SID}/recreate`, {
+			expectImageId: IMAGE_N,
+			preserveLayer: true,
+		});
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as Record<string, unknown>;
+		expect(body).toMatchObject({
+			outcome: "committed",
+			carried: { entries: 7 },
+			retained: { containerId: O_ID, role: "O" },
+		});
+		expect(h.docker.containers.get(O_ID)?.running).toBe(false);
+		expect(h.docker.containers.get(O_ID)?.name).toMatch(/-old-\d+$/);
+		// The retained container shows in the plain preflight too.
+		const pf = (await (await call("GET", `/admin/sessions/${SID}/recreate`)).json()) as {
+			retained?: { containerId: string };
+		};
+		expect(pf.retained?.containerId).toBe(O_ID);
+		const ap = await call("POST", `/admin/sessions/${SID}/recreate/approve`);
+		expect([ap.status, await ap.json()]).toEqual([
+			200,
+			{ removed: true, containerId: O_ID, role: "O" },
+		]);
+		expect(h.docker.containers.has(O_ID)).toBe(false);
+		const again = await call("POST", `/admin/sessions/${SID}/recreate/approve`);
+		expect([again.status, await again.json()]).toEqual([409, { error: "nothing-retained" }]);
+		expect(db.observeLog).toEqual([]);
+	});
+
+	it("rollback: 409 running while N runs; stopped ⇒ D1 back on O, N retained; a foreign owner gets a point-in-time operate row first, fail-closed", async () => {
+		await spinUp({ owner: OWNER });
+		dirtyLayer(h);
+		expect(
+			(
+				await call("POST", `/admin/sessions/${SID}/recreate`, {
+					expectImageId: IMAGE_N,
+					preserveLayer: true,
+				})
+			).status,
+		).toBe(200);
+		await vi.waitFor(() => expect(db.observeLog.map((e) => e.op)).toEqual(["start", "end"]));
+		db.observeLog.length = 0;
+		const nId = nIdOf();
+		const running = await call("POST", `/admin/sessions/${SID}/recreate/rollback`);
+		expect([running.status, await running.json()]).toEqual([409, { error: "running" }]);
+		// The audit row is written before the call, even for a refused one: the verb was invoked.
+		expect(db.observeLog.find((e) => e.op === "start")?.params).toEqual(
+			expect.arrayContaining(["admin-1", SID, OWNER, "operate"]),
+		);
+		await h.docker.stop(nId);
+		db.failObserveInsert = true;
+		const before = stateOf(h);
+		expect((await call("POST", `/admin/sessions/${SID}/recreate/rollback`)).status).toBe(500);
+		expect(stateOf(h)).toEqual(before);
+		db.failObserveInsert = false;
+		const res = await call("POST", `/admin/sessions/${SID}/recreate/rollback`);
+		expect(res.status).toBe(200);
+		expect(await res.json()).toMatchObject({
+			outcome: "rolled-back-to-retained",
+			containerId: O_ID,
+			retained: { containerId: nId, role: "N" },
+		});
+		expect(h.d1.row.container_id).toBe(O_ID);
+		expect(h.docker.containers.get(O_ID)?.name).toBe(`st-${SID.slice(0, 12)}`);
+		expect(h.docker.containers.get(nId)?.name).toMatch(/-old-\d+$/);
+	});
+
+	it("recover: 404 without an attempt, 409 once resolved; the host CLI drives every verb through the same endpoints and refuses a non-admin", async () => {
+		await spinUp({ owner: "admin-1" });
+		dirtyLayer(h);
+		const none = await call("POST", `/admin/sessions/${SID}/recreate/recover`);
+		expect([none.status, await none.json()]).toEqual([404, { error: "no-attempt" }]);
+		const pf = await cli([SID, "preflight", "--preserve", "--user", "root"]);
+		expect(pf.code).toBe(0);
+		expect(pf.out).toMatch(/^200 .*"carry":\{"entries":7/);
+		expect(
+			(
+				await call("POST", `/admin/sessions/${SID}/recreate`, {
+					expectImageId: IMAGE_N,
+					preserveLayer: true,
+				})
+			).status,
+		).toBe(200);
+		const rec = await cli([SID, "recover", "--user", "root"]);
+		expect(rec.code).toBe(1);
+		expect(rec.out).toBe('409 {"error":"already-resolved"}');
+		expect(rec.err).toContain("nothing changed");
+		expect((await cli([SID, "approve", "--user", "nobody"])).code).toBe(1);
+		expect((await cli([SID, "approve", "--preserve", "--user", "root"])).code).toBe(1); // --preserve is preflight-only
+		expect((await cli(["not-a-sid", "approve", "--user", "root"])).code).toBe(1);
+		expect(h.docker.containers.has(O_ID)).toBe(true);
+		const ap = await cli([SID, "approve", "--user", "root"]);
+		expect(ap.code).toBe(0);
+		expect(ap.out).toBe(`200 {"removed":true,"containerId":"${O_ID}","role":"O"}`);
+		expect(h.docker.containers.has(O_ID)).toBe(false);
 	});
 });

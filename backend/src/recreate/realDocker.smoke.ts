@@ -259,6 +259,14 @@ async function main(): Promise<void> {
 			row.ingest_token_hash = h;
 			return "applied";
 		},
+		// §2.7.7 rollback: one statement back to the retained container, hashes cleared.
+		casBack: async (_s, fromId, toId) => {
+			if (casMode === "rejected" || row.container_id !== fromId) return "not-applied";
+			row.container_id = toId;
+			row.ingest_token_hash = null;
+			row.ingest_token_hash_suspended = null;
+			return "applied";
+		},
 		getConfig: async () => ({ ports: [], gitIdentity, hasDotfiles: false, postStartCmd: null }),
 		setStatus: async (_s, st) => {
 			row.status = st;
@@ -325,8 +333,11 @@ async function main(): Promise<void> {
 	};
 	// N's create options: the same shape a spawn uses (asserted equal to the
 	// spawn's in dockerManager.spawnConfig.test.ts); here without D1.
-	const hooks: { afterRenameN?: () => Promise<void>; onReadiness?: (id: string) => Promise<void> } =
-		{};
+	const hooks: {
+		afterRenameN?: () => Promise<void>;
+		onReadiness?: (id: string) => Promise<void>;
+		beforeCopy?: (p: string) => Promise<void>;
+	} = {};
 	const starts: string[] = [];
 	const port = {
 		...real,
@@ -358,6 +369,10 @@ async function main(): Promise<void> {
 		start: async (id: string) => {
 			starts.push(id);
 			await real.start(id);
+		},
+		copyPath: async (from: string, p: string, to: string, dest: string, mayAct: () => boolean) => {
+			if (hooks.beforeCopy) await hooks.beforeCopy(p);
+			return real.copyPath(from, p, to, dest, mayAct);
 		},
 		exec: async (id: string, cmd: string[], t: number) => {
 			if (cmd[0] === "test" && hooks.onReadiness) {
@@ -880,6 +895,275 @@ git -c safe.directory='*' -C proj rev-parse HEAD && git -c safe.directory='*' -C
 		(await real.inspect(leftover.id)) === null,
 	);
 	check("N still there", (await real.inspect(nId)) !== null);
+
+	// ── §2.7.7: carry-over, retention, rollback, approve, D8 recovery ────
+	phase("Carry-over (§2.7.7): a legacy-shaped layer travels into the new container");
+	// N is the current container, running. Dirty its layer the way the three
+	// pre-3.0d sessions of 2026-10-31 are: npm cache, ~/.local, ~/.cache, a
+	// hand-made HOME dir, an edited ~/.bashrc, a build cache under /tmp.
+	const DIRTY = [
+		"~/.npm/_cacache/blob",
+		"~/.bashrc",
+		"~/.local/share/thing/config.json",
+		"~/.cache/x/data",
+		"/tmp/build-cache/a.o",
+		"~/dash-backup/flows.json",
+	];
+	await execOut(
+		nId,
+		`mkdir -p ~/.npm/_cacache ~/.local/share/thing ~/.cache/x /tmp/build-cache ~/dash-backup
+head -c 3000000 /dev/urandom > ~/.npm/_cacache/blob
+echo 'export LEGACY=1' >> ~/.bashrc
+echo '{"cfg":true}' > ~/.local/share/thing/config.json
+head -c 200000 /dev/urandom > ~/.cache/x/data
+head -c 1500000 /dev/urandom > /tmp/build-cache/a.o
+echo '{"flows":1}' > ~/dash-backup/flows.json`,
+	);
+	const sums = async (id: string) =>
+		(
+			await execOut(id, `sha256sum ${DIRTY.join(" ")} 2>&1 | cut -d' ' -f1 | tr '\\n' ' '`)
+		).out.trim();
+	const dirtySums = await sums(nId);
+	check(
+		"the dirty files exist in the current container",
+		dirtySums.split(" ").length === DIRTY.length && /^[0-9a-f ]+$/.test(dirtySums),
+		dirtySums,
+	);
+	await docker.getContainer(nId).stop();
+	row.status = "stopped";
+	const strictPf = (await engine.preflight(SID)) as {
+		recreatable: boolean;
+		blockers: Array<{ code: string }>;
+	};
+	check(
+		"strict preflight refuses the dirty layer",
+		strictPf.recreatable === false && strictPf.blockers.some((b) => b.code === "layer-home"),
+		strictPf.blockers,
+	);
+	// A backup manifest as backup.ts writes it — the precondition reads only
+	// `createdAt` and the `workspaces` keys.
+	const backupDir = path.join(ROOT, ".backups", "smoke");
+	const writeManifest = async () => {
+		await fs.mkdir(backupDir, { recursive: true });
+		await fs.writeFile(
+			path.join(backupDir, "manifest.json"),
+			JSON.stringify({ createdAt: new Date().toISOString(), workspaces: { [SID]: {} } }),
+		);
+	};
+	type CarryPf = {
+		recreatable: boolean;
+		blockers: Array<{ code: string }>;
+		carry?: { entries: number; bytes: number; backupFresh: boolean; diskFreeBytes: number | null };
+		retained?: { containerId: string };
+	};
+	let carryPf = (await engine.preflight(SID, { preserve: true })) as CarryPf;
+	check(
+		"without a fresh backup the carry-over is refused (backup-stale)",
+		carryPf.recreatable === false && carryPf.blockers.some((b) => b.code === "backup-stale"),
+		carryPf.blockers,
+	);
+	await writeManifest();
+	carryPf = (await engine.preflight(SID, { preserve: true })) as CarryPf;
+	check(
+		"carry-over preflight: recreatable, the entries and bytes of the real layer, disk known",
+		carryPf.recreatable === true &&
+			(carryPf.carry?.entries ?? 0) >= 5 &&
+			(carryPf.carry?.bytes ?? 0) > 4_000_000 &&
+			carryPf.carry?.backupFresh === true &&
+			typeof carryPf.carry?.diskFreeBytes === "number",
+		carryPf,
+	);
+	type CarryResult = {
+		ok?: boolean;
+		unresolved?: boolean;
+		nContainerId?: string;
+		carried?: { entries: number; bytes: number };
+		retained?: { containerId: string; name: string; role: string };
+		capture?: { effective?: boolean };
+	};
+	const carried = (await engine.recreate(SID, imageId, { preserve: true })) as CarryResult;
+	const n2 = carried.nContainerId as string;
+	check(
+		"committed with the carry-over",
+		carried.ok === true && !carried.unresolved && (carried.carried?.entries ?? 0) >= 5,
+		carried,
+	);
+	const n2i = await docker.getContainer(n2).inspect();
+	check(
+		"N2 from the checked image ID, canonical name, running",
+		n2i.Image === imageId && n2i.Name === `/${CANONICAL}` && n2i.State.Running,
+	);
+	const prev = await real.inspect(nId);
+	check(
+		"the previous container is retained: present, stopped, under its -old- name",
+		!!prev && !prev.running && /-old-\d+$/.test(prev.name) && carried.retained?.containerId === nId,
+		{ prev, retained: carried.retained },
+	);
+	check("D1 = N2 with H", row.container_id === n2 && !!row.ingest_token_hash);
+	check(
+		"every dirty file identical in N2 (sha256)",
+		(await sums(n2)) === dirtySums,
+		await sums(n2),
+	);
+	check(
+		"~/.bashrc in N2 keeps the appended line",
+		(await execOut(n2, "grep -c 'export LEGACY=1' ~/.bashrc")).out.trim() === "1",
+	);
+	check(
+		"N2's entrypoint symlinks are intact although ~/.config was carried",
+		(await execOut(n2, "readlink ~/.config/gh")).out.trim() ===
+			"/home/developer/workspace/.config/gh" &&
+			(await execOut(n2, "test -L ~/.npm-global && test -L ~/.claude")).code === 0,
+	);
+	const ver = await execOut(n2, "claude --version");
+	check(
+		"the workspace CLI runs in N2",
+		ver.code === 0 && /^\d+\.\d+\.\d+/.test(ver.out.trim()),
+		ver,
+	);
+	check(
+		"relay identified on N2 ⇒ capture effective",
+		carried.capture?.effective === true,
+		carried.capture,
+	);
+	const recC = await attempts.read(SID);
+	check(
+		"record resolved committed, naming the retained container",
+		recC.kind === "ok" &&
+			recC.record.state === "resolved" &&
+			recC.record.retained?.containerId === nId &&
+			recC.record.preserve?.entries === carried.carried?.entries,
+		recC,
+	);
+	check(
+		"the plain preflight shows the retained container",
+		((await engine.preflight(SID)) as CarryPf).retained?.containerId === nId,
+	);
+
+	phase("Rollback to the retained container (§2.7.7)");
+	type Op = { ok: boolean; code?: string; body?: Record<string, unknown> };
+	const rbRunning = (await engine.rollbackToRetained(SID)) as Op;
+	check(
+		"refused while N2 runs (409 running)",
+		!rbRunning.ok && rbRunning.code === "running",
+		rbRunning,
+	);
+	await docker.getContainer(n2).stop();
+	row.status = "stopped";
+	const rbRes = (await engine.rollbackToRetained(SID)) as Op;
+	check(
+		"rolled back to the retained container",
+		rbRes.ok === true && rbRes.body?.containerId === nId,
+		rbRes,
+	);
+	check("D1 back on it, hash cleared", row.container_id === nId && row.ingest_token_hash === null);
+	const prevAfter = await real.inspect(nId);
+	const n2After = await real.inspect(n2);
+	check(
+		"names: the previous container canonical again, N2 under -old-, both present and stopped",
+		prevAfter?.name === CANONICAL &&
+			!prevAfter.running &&
+			!!n2After &&
+			/-old-\d+$/.test(n2After.name) &&
+			!n2After.running,
+		{ prevAfter, n2After },
+	);
+	check(
+		"capture files withdrawn (the hash no longer matches the token)",
+		!(await cap.relayEnabledExists(ROOT, SID)) && !(await activation.hooksFileExists(ROOT, SID)),
+	);
+	await docker.getContainer(nId).start();
+	await waitReady(nId);
+	check(
+		"the previous container boots again with its files intact",
+		(await sums(nId)) === dirtySums,
+	);
+	await docker.getContainer(nId).stop();
+	const recR = await attempts.read(SID);
+	check(
+		"rollback record: reverse, committed on the previous container, N2 retained, the carry-over in history",
+		recR.kind === "ok" &&
+			recR.record.reverse === true &&
+			recR.record.outcome?.kind === "committed" &&
+			recR.record.outcome.nContainerId === nId &&
+			recR.record.retained?.containerId === n2 &&
+			recR.record.history.some(
+				(e) => e.outcome.kind === "committed" && e.outcome.nContainerId === n2,
+			),
+		recR,
+	);
+	const ap = (await engine.approve(SID)) as Op;
+	check("approve removes the retained N2", ap.ok === true && (await real.inspect(n2)) === null, ap);
+	const recA = await attempts.read(SID);
+	check(
+		"the record no longer names a retained container",
+		recA.kind === "ok" && recA.record.retained === undefined && !!recA.record.approvedAt,
+	);
+
+	phase("D8 recovery of a carry-over interrupted mid-copy (§2.7.7)");
+	// This process "dies" after the first copy landed: the engine is stopped
+	// and the second copy never answers here (no Docker request is made for
+	// it). Everything the next process can see is on disk and in dockerd.
+	let copies = 0;
+	hooks.beforeCopy = async () => {
+		copies++;
+		if (copies === 2) {
+			engine.stop();
+			await new Promise<never>(() => {});
+		}
+	};
+	void engine.recreate(SID, imageId, { preserve: true }).catch(() => undefined);
+	for (let i = 0; i < 600 && copies < 2; i++) await new Promise((r) => setTimeout(r, 100));
+	check("the crash point was reached: one copy done, the second never answered", copies === 2);
+	hooks.beforeCopy = undefined;
+	const attempts2 = new RecreateAttemptStore(ROOT);
+	const boot = await attempts2.recoverOnBoot();
+	const gated = await attempts2.assertResolved(SID).then(
+		() => false,
+		() => true,
+	);
+	check(
+		"the next process finds the attempt orphaned and the session gated",
+		boot.uncertain.includes(SID) && gated,
+		boot,
+	);
+	const n3 = (await real.listByLabel(LABEL_SESSION, SID)).find((c) => c.id !== nId);
+	check("N3 exists, never started", !!n3 && !n3.running, n3);
+	const lock2 = new SessionLifecycleLock();
+	lock2.setGuard((s) => attempts2.assertResolved(s));
+	const engine2 = new RecreationEngine({
+		workspaceRoot: ROOT,
+		docker: port,
+		d1,
+		attempts: attempts2,
+		lock: lock2,
+		capture,
+	});
+	const recovered = (await engine2.recover(SID)) as Op;
+	check(
+		"recover: rolled back by evidence",
+		recovered.ok === true &&
+			(recovered.body?.outcome as { kind?: string } | undefined)?.kind === "rolled-back",
+		recovered,
+	);
+	check(
+		"N3 removed, the previous container canonical, D1 unchanged",
+		!!n3 &&
+			(await real.inspect(n3.id)) === null &&
+			(await real.inspect(nId))?.name === CANONICAL &&
+			row.container_id === nId,
+	);
+	check(
+		"the session is no longer gated",
+		await attempts2.assertResolved(SID).then(
+			() => true,
+			() => false,
+		),
+	);
+	await docker.getContainer(nId).start();
+	await waitReady(nId);
+	check("its files are still intact after the recovery", (await sums(nId)) === dirtySums);
+	await docker.getContainer(nId).stop();
 }
 
 main()
