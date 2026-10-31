@@ -8,7 +8,7 @@ import { DEFAULT_MEMORY_BYTES, DEFAULT_NANO_CPUS } from "../dockerManager.js";
 import { logger } from "../logger.js";
 import * as observeLog from "../observeLog.js";
 import { getDispatcherStats } from "../portDispatcher.js";
-import { RecreateUnresolvedError } from "../recreateAttempt.js";
+import { RecreateRetainedError, RecreateUnresolvedError } from "../recreateAttempt.js";
 import {
 	EFFECTIVE_CPU_NANO_MAX,
 	EFFECTIVE_CPU_NANO_MIN,
@@ -343,7 +343,7 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 				// One lifecycle lock across the whole teardown, status
 				// re-read under it (CONVERSATION.md §2.7.2) — same as the
 				// owner's DELETE.
-				await sessionLifecycleLock.run(req.params.id, "delete", async () => {
+				await sessionLifecycleLock.run(req.params.id, hard ? "delete-hard" : "delete", async () => {
 					const current = await sessions.get(req.params.id);
 					if (!current) return;
 					// Idempotent soft branch — only kill + terminate if not
@@ -374,6 +374,12 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 				}
 				if (err instanceof RecreateUnresolvedError) {
 					res.status(409).json({ error: "recreate-unresolved" });
+					return;
+				}
+				if (err instanceof RecreateRetainedError) {
+					// §2.7.7: a carry-over or rollback still retains a container;
+					// purging the record would orphan it. approve / rollback first.
+					res.status(409).json({ error: "retained-present" });
 					return;
 				}
 				logger.error(`[admin] force-delete failed: ${(err as Error).message}`);

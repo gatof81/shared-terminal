@@ -339,7 +339,7 @@ sessions whose capture is effective — a send is confirmed by the CLI's own
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `CONVERSATION_COMPOSER_ENABLED` | unset (`false`) | Mounts `POST /api/sessions/:id/conversations/:cid/messages` and the admin routes `POST /api/admin/sessions/:id/composer/resolve`, `GET /api/admin/sessions/:id/composer/panes`; `canSendInput` becomes true for interactive conversations with a pane, effective capture and no blocking operation. |
-| `COMPOSER_CLI_VERSIONS` | `2.1.314` | Comma-separated Claude Code versions the §8.2.6 revalidation was run with. A conversation whose CLI (the process in the pane) is another version gets 409 `cli-unvalidated`. Adding a version means running `backend/src/conversation/composer.smoke.ts` against it and attaching the output to the PR. |
+| `COMPOSER_CLI_VERSIONS` | `2.1.314` | Comma-separated Claude Code versions the §8.2.6 revalidation was run with. A conversation whose CLI (the process in the pane) is another version gets 409 `cli-unvalidated`. Adding a version means running `backend/src/conversation/composer.smoke.ts` against it: the Session Image workflow's `cli-variants` job does so for 2.1.314 and 2.1.316 on every change, so `COMPOSER_CLI_VERSIONS=2.1.314,2.1.316` is the value for the existing sessions (their workspace CLI is 2.1.316). |
 
 Operator surface (`CONVERSATION.md` §8.1.11). A pane whose last send has a
 pending outcome blocks further sends from Chat (409
@@ -682,15 +682,19 @@ emergency command.
 2. Keep the 3.0d backend deployed: it is what keeps the session gated, while
    every other session goes on working.
 3. Collect the `[recreate]` log lines and the record for review.
-4. Wait for the manual administrative recovery procedure, once it exists
-   and is validated.
+4. Run the operator recovery (§2.7.7): stop every container of the
+   session by hand if one runs (`docker stop`), then
+   `POST /api/admin/sessions/<sid>/recreate/recover` (or
+   `npm run recreate:admin -- <sid> recover --user <admin>`). It resolves
+   the attempt from the evidence D1 and Docker hold — `rolled-back` (start
+   the session) or `committed` (verify the new container) — and lifts the
+   gate. It refuses while a container runs or while a live backend still
+   owns the attempt.
 
-There is **no available way out by hand**:
+There is **no other way out**:
 - a hard delete is refused;
 - don't roll the backend back;
 - don't edit the record, D1 or the containers.
-
-That is the accepted cost of piloting only on a disposable session.
 
 ### Recreating a session container
 
@@ -699,18 +703,21 @@ creation: a new or rolled-back image, capture at the container level, a
 fresh ingest token. **Never use a hard delete:** it purges the workspace and
 the session row.
 
-**Restriction (owner decision D8):** recreation is used only on the **new,
-disposable pilot session**. No real working session is recreated until the
-manual recovery procedure above exists and has been validated. The
-workspace's Claude Code must be **exactly 2.1.308**; any other version,
-including a newer one the CLI updated itself to, blocks with
-`control-marker-incompatible`. For the pilot session:
-- never run `claude update`;
-- create it with `DISABLE_AUTOUPDATER=1` among its env vars. The
-  session-image smoke checks that the pinned 2.1.308 knows the variable;
-  that no update then happens is only observable over time, so compare
-  `claude --version` before and after;
-- check `claude --version` = 2.1.308 again right before the `POST`.
+**Restriction (owner decision D8):** the strict recreation below is used on
+the **disposable pilot session**; an existing working session is recreated
+only through the carry-over mode of the next section, one session at a time
+and each with the owner's explicit GO. The workspace's Claude Code must be a
+version the control directory was validated with — **2.1.308, 2.1.314 or
+2.1.316** (`backend/src/recreate/cliCompat.ts`; 2.1.314 and 2.1.316 are
+re-validated by the Session Image workflow's `cli-variants` job on every
+change). Any other version, including a newer one the CLI updated itself to,
+blocks with `control-marker-incompatible`. For every session you recreate:
+- never run `claude update` beforehand;
+- prefer `DISABLE_AUTOUPDATER=1` among its env vars (the session-image smoke
+  checks that the pinned CLI knows the variable; that no update then happens
+  is only observable over time, so compare `claude --version` before and
+  after);
+- check `claude --version` again right before the `POST`.
 
 **The endpoint (3.0d, [CONVERSATION.md §2.7](./CONVERSATION.md#27-recreación-administrativa-y-activación-30d))**, admin only:
 
@@ -718,7 +725,9 @@ including a newer one the CLI updated itself to, blocks with
    `POST /api/admin/sessions/<sessionId>/stop`). A running session is never
    recreated.
 2. **Preflight**, no effects: `GET /api/admin/sessions/<sessionId>/recreate`
-   → `{ recreatable, blockers[], imageId, currentImageId, captureAfter }`.
+   → `{ recreatable, blockers[], imageId, currentImageId, captureAfter }`
+   (`?preserveLayer=1` adds the carry-over preview, next section; `retained`
+   appears whenever a retained container exists).
    `blockers` are codes with counts, never paths:
    - anything in the container layer that would be lost (`layer-*`, e.g.
      `~/.bash_history`, packages installed with `apt`, configured dotfiles);
@@ -764,6 +773,162 @@ including a newer one the CLI updated itself to, blocks with
 
 The preconditions refuse a container whose layer holds anything else, so
 nothing that lived only there is lost.
+
+### Activating an existing session (carry-over, §2.7.7)
+
+The three sessions created before 3.0d hold years of state in their
+container layer (`~/.npm`, `~/.local`, `~/.cache`, `~/.config`, hand-made
+HOME directories, edited `~/.bashrc`, build caches under `/tmp` — 4 to 12 GB
+each), so the strict recreation refuses them. The carry-over mode
+([CONVERSATION.md §2.7.7](./CONVERSATION.md#277-activación-de-sesiones-existentes-recreación-con-traslado-de-capa))
+creates the new container from the current image, as always, and streams
+every top-level HOME and `/tmp` entry of the old layer into it **before it
+first starts**; the old container is **kept, stopped**, under
+`st-<sid12>-old-<ts>` until you approve, so the way back is one call. A
+change outside HOME and `/tmp` (a package installed with `apt`) is not
+carried: the preflight blocks with `layer-system` and the session stays as
+it is.
+
+**One session at a time**, each with the owner's GO, in the agreed order
+(Educación HZ, then Shared Terminal, Home Automation last). Admin only. Run
+every verb on the host as
+`docker compose exec app npm run recreate:admin -- <sid> <verb> --user <admin>`
+(`preflight [--preserve]`, `recreate --image <sha> [--preserve]`, `approve`,
+`rollback`, `recover`): it calls the same endpoints on loopback. **Use the CLI,
+not `curl` against the public hostname, for the recreation itself:** a real
+layer takes minutes and Cloudflare cuts an origin response at 100 s (524),
+so a public `POST` would lose the answer every time while the backend
+continues. The CLI waits up to 65 min (T_rec's cap plus T_rb), never
+repeats a recreation on its own, and on a lost connection prints `UNCERTAIN`
+(exit 2) with the preflight of that moment — act on that evidence
+(`retained` ⇒ committed; `recreate-unresolved` ⇒ still finishing, or the
+backend died ⇒ `recover`), never by running it again.
+
+**One-time setup — where the copy is written.** The new container's layer
+is written on Docker's data-root filesystem, which the backend container
+cannot see, so it refuses every carry-over with `disk-space-unknown` until
+`RECREATE_DOCKER_FS_PATH` names a path inside the backend container on that
+same filesystem. On the host:
+
+```bash
+sudo docker info --format '{{.DockerRootDir}}'      # /var/lib/docker
+stat -c '%d %n' /var/lib/docker /var/shared-terminal/workspaces   # same device id ⇒ same filesystem
+df -P /var/lib/docker /var/shared-terminal/workspaces
+```
+
+VM100 (checked read-only 2026-10-31): both on `/dev/sda1` (device 2049) with
+`/` — so `RECREATE_DOCKER_FS_PATH=/var/shared-terminal/workspaces` in `.env`
+is correct there (the workspace bind IS that filesystem), 23.2 GiB free,
+containerd snapshotter (`overlayfs`), 18 GB of earlier backups also on it.
+On a host where the devices differ, create an empty probe directory beside
+the data root (`/var/lib/docker-fs-probe`), bind it read-only into `app`
+(`docker-compose.override.yml`: `- /var/lib/docker-fs-probe:/mnt/docker-fs:ro`)
+and set `RECREATE_DOCKER_FS_PATH=/mnt/docker-fs`. Never mount the data root
+itself. The preflight reports what it measured (`carry.diskMeasuredAt`,
+`diskFreeBytes`) against `diskRequiredBytes` = 1.2 × the layer + 1 GiB;
+`SizeRw` is an apparent size, the margin covers filesystem overhead, and
+until `approve` the old and the new layer both occupy the disk (Home
+Automation: 11.8 GB twice).
+
+1. **Agree a window with the owner.** Record `claude --version` in the
+   session (expected 2.1.316) and the running Claude processes; the owner
+   finishes their work. The stop ends the tmux tabs and the Claude processes;
+   `claude --resume` continues the conversations afterwards (the CLI's state
+   lives in the workspace, which is untouched).
+2. **Composer versions.** If the owner will use the composer, make sure the
+   pane's CLI version is in `COMPOSER_CLI_VERSIONS` (e.g.
+   `COMPOSER_CLI_VERSIONS=2.1.314,2.1.316`, both validated by the
+   `cli-variants` job) — a backend restart applies it; this is independent of
+   the recreation.
+3. **Request capture** if not already requested:
+   `PATCH /api/admin/sessions/<sid>/conversation {"enabled": true}` answers
+   `requiresRecreate: true` on a pre-3.0d container (no control mount) and
+   writes nothing; it records the request (`conversation_requested=1`) the
+   recreation needs.
+4. **Stop** the session (owner or admin `POST …/stop`). From here on nothing
+   writes to the workspace or the layer.
+5. **Backup — after the stop, before anything else:**
+   `docker compose exec app npm run backup` (into
+   `<WORKSPACE_ROOT>/.backups/<timestamp>/`). The recreation refuses with
+   `backup-stale` unless a manifest there is younger than 24 h, **taken after
+   the container stopped** (`State.FinishedAt`) and without
+   `concurrentChanges` for the session — a consistent recovery point, not the
+   previous day's backup of a live session. The backup is of the workspace
+   (and uploads); the container layer itself is kept by retention, not by
+   the backup.
+6. **Preflight:** `recreate:admin -- <sid> preflight --user <admin>` (strict —
+   `layer-home`/`layer-tmp` are expected there) and `… preflight --preserve`
+   → `recreatable: true` with `carry: { entries, bytes, skipped, backupFresh:
+   true, diskFreeBytes, diskMeasuredAt, diskRequiredBytes }` and no
+   `blockers`. Any blocker — `layer-system` (a change outside HOME and
+   `/tmp`), `layer-entrypoint-unexpected` (a real `~/.ssh`, `~/.claude`,
+   `~/.claude.json`, `~/.vscode-cli`, `~/.npm-global` or `~/.config/gh` where
+   the entrypoint puts a symlink: credentials or state the new container's
+   entrypoint would replace), `disk-space`, `disk-space-unknown`,
+   `backup-stale`, `retained-pending` — stop and report; nothing has
+   happened. Do **not** prune images or the build cache to make room without
+   the owner's GO.
+7. **Recreate:** `recreate:admin -- <sid> recreate --image <currentImageId>
+   --preserve --user <admin>`. Expect `200 { outcome: "committed", carried: {
+   entries, bytes }, retained: { containerId, name, role: "O" }, capture, … }`
+   (exit 0). The copy runs at the daemon's pace (budget 20 MiB/s: a 12 GB
+   layer is about 10 minutes; T_rec is extended accordingly, up to 60 min);
+   other lifecycle calls answer `busy` meanwhile; a second `recreate` is
+   refused with `busy` too. Outcomes:
+   - `500 { error: "recreate-failed", step }` **without** `unresolved`:
+     rolled back, the old container is canonical again, nothing else changed;
+   - `500 { …, unresolved: true }` or `UNCERTAIN` (exit 2): a request to
+     Docker (a copy of a large entry, typically) is still out; the session is
+     `recreate-unresolved` until it answers and the engine resolves by that
+     evidence — the new container is not touched while it may still be
+     written. Watch `preflight` and the `[recreate]` log lines; **never run
+     `recreate` again**. If the backend died meanwhile: `recover` (below).
+8. **Verify** with the owner: `GET /api/sessions/<sid>` shows the session
+   running on the new container; in its terminal `ls ~/.npm ~/.local
+   ~/.config`, `tail ~/.bashrc`, `claude --version` (the workspace CLI,
+   2.1.316) and `claude --resume` (previous conversations listed) all look as
+   before; `GET /api/sessions/<sid>/conversations` reports
+   `capture.effective: true` once a `claude` is running; Chat shows the
+   events; with the flag on and the version allowed, a composer send is
+   `delivered`.
+9. **Observe** for the agreed period with the old container retained (it
+   costs its layer's disk, nothing else). While it is retained, a further
+   recreation answers 409 `retained-pending` and a hard delete 409
+   `retained-present`; `start`, `stop` and a soft delete work as always. Then
+   **approve:** `recreate:admin -- <sid> approve --user <admin>` removes it
+   (409 `retained-running` if someone started it by hand). Nothing removes
+   it automatically.
+
+**Going back.** At any point before approval:
+1. Stop the session (`POST …/stop`).
+2. `recreate:admin -- <sid> rollback --user <admin>` → 200 `{ outcome:
+   "rolled-back-to-retained", containerId, retained }`: D1 points at the old
+   container again, the names are swapped back, the port mappings cleared,
+   the ingest token hash cleared (so capture is off: `token-mismatch`,
+   nothing authorized, marker and hooks file withdrawn). 409 `running` while
+   the new container runs. A transient failure (a rename the daemon refused,
+   a D1 statement that did not apply) restores the names, leaves the old
+   container retained and answers 409 `rollback-not-applied` or 500
+   `recreate-failed { detail }` — read the record (`preflight` shows
+   `retained`) rather than the status code, then simply run `rollback` again.
+3. `POST /api/sessions/<sid>/start`: the old container boots exactly as it
+   was — its files, its CLI, its state in the workspace. Verify with the owner.
+4. The new container is now the retained one (`role: "N"`): `approve`
+   removes it, or recreate again later. The failure goes to the PR/issue
+   before any further attempt.
+
+**Interrupted (backend died mid-recreation or mid-rollback).** The session
+is `recreate-unresolved` (next section). With the backend up again:
+`docker ps` must show every container of the session stopped (the old one,
+the new one, the retained one); then `recreate:admin -- <sid> recover --user
+<admin>`. It resolves from the evidence (D1, the containers by their
+immutable ids, the record) and answers `{ outcome: { kind: "rolled-back" } }`
+(nothing moved: the current container is canonical — start the session; a
+retained one, if any, is still retained and `rollback` still available) or
+`{ outcome: { kind: "committed", nContainerId }, retained }` (the move had
+happened: that container is current — verify as in step 8). 409 `running`
+until everything is stopped; 409 `not-orphaned` means a live backend owns
+the attempt (wait for it); a second `recover` answers `already-resolved`.
 
 ### Emergency only — the manual procedure
 

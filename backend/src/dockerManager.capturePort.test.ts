@@ -553,6 +553,7 @@ describe("recreatePort (CONVERSATION.md §2.7)", () => {
 			imageId: "sha256:i",
 			labels: { a: "1" },
 			mounts: ["/home/developer/workspace"],
+			finishedAt: null,
 		});
 		expect(await p.inspect("gone")).toBeNull();
 		expect(await p.listByLabel("k", "v")).toEqual([
@@ -563,6 +564,7 @@ describe("recreatePort (CONVERSATION.md §2.7)", () => {
 				imageId: "sha256:i",
 				labels: { k: "v" },
 				mounts: [],
+				finishedAt: null,
 			},
 		]);
 		expect(listContainers).toHaveBeenCalledWith({ all: true, filters: { label: ["k=v"] } });

@@ -116,6 +116,8 @@ jobs:
 
       - name: Recreation smoke test (real Docker)
         working-directory: backend
+        env:
+          ST_CLI_PIN: "2.1.308"
         run: npx tsx src/recreate/realDocker.smoke.ts shared-terminal-session
 
       # 3.0d audit (#468 §10): recreation with data and `claude --resume`,
@@ -130,21 +132,58 @@ jobs:
         working-directory: backend
         run: npx tsx src/recreate/recreateAudit.smoke.ts shared-terminal-session
 
-      # 3.2 composer (CONVERSATION.md §8.2.6, §8.1.5 2b): the real CLI of the
-      # image in a real tmux pane, driven through the backend's own argv
-      # builders and consumption rule — segmented delivery arrives byte for
-      # byte as UserPromptSubmit, `/` is a command not a prompt, a send while
-      # busy is queued, the input region reads empty/text/empty, and the
-      # paste→CSI u same-read hazard is reproduced as evidence. Scripted
-      # model, no key, no egress; disposable container and network.
-      # The contract wants this list run with the version in COMPOSER_CLI_VERSIONS
-      # (default 2.1.314), not the image's pin (2.1.308, the recreation
-      # allowlist): a second build of the same Dockerfile with only the CLI
-      # version changed — every layer before the install is cached from the
-      # build above, so this costs the npm install and the layers after it.
-      - name: Build session image with the composer's CLI version
-        run: docker build --build-arg CLAUDE_CODE_VERSION=2.1.314 -t shared-terminal-session:cli-2.1.314 ./session-image
+      # The composer smoke (CONVERSATION.md §8.2.6) runs in the `cli-variants`
+      # job below, against the versions in COMPOSER_CLI_VERSIONS, not the
+      # image's pin.
 
-      - name: Composer terminal smoke test (real CLI 2.1.314, real tmux)
+  # §2.7.7 legacy activation: the CLI versions the three pre-3.0d sessions
+  # run (2.1.316, auto-updated) and the composer pilot runs (2.1.314) must be
+  # validated the way 2.1.308 was before they enter the recreation allowlist
+  # (backend/src/recreate/cliCompat.ts) and COMPOSER_CLI_VERSIONS: the same
+  # Dockerfile built with that CLI, then the whole conversation smoke (its
+  # phase 11d is the /etc/st-control compatibility validation of
+  # CONVERSATION.md §2.7.5), the recreation smoke (a carry-over whose N runs
+  # that CLI from the workspace) and the composer smoke. One job per version,
+  # in parallel with the pinned image's job.
+  cli-variants:
+    name: CLI ${{ matrix.cli }} — control dir, recreation and composer smokes
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        cli: ["2.1.314", "2.1.316"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend deps
         working-directory: backend
-        run: npx tsx src/conversation/composer.smoke.ts docker shared-terminal-session:cli-2.1.314
+        run: npm ci
+
+      - name: Build session image with CLI ${{ matrix.cli }}
+        run: docker build --build-arg CLAUDE_CODE_VERSION=${{ matrix.cli }} -t shared-terminal-session:cli-${{ matrix.cli }} ./session-image
+
+      - name: Conversation hooks smoke test (control dir validation, CLI ${{ matrix.cli }})
+        env:
+          ST_CLI_PIN: ${{ matrix.cli }}
+        run: ./session-image/conversation-smoke.sh shared-terminal-session:cli-${{ matrix.cli }}
+
+      - name: Recreation smoke test with the workspace CLI ${{ matrix.cli }} (carry-over included)
+        working-directory: backend
+        env:
+          ST_CLI_PIN: ${{ matrix.cli }}
+        run: npx tsx src/recreate/realDocker.smoke.ts shared-terminal-session:cli-${{ matrix.cli }}
+
+      - name: Composer terminal smoke test (CLI ${{ matrix.cli }})
+        working-directory: backend
+        run: npx tsx src/conversation/composer.smoke.ts docker shared-terminal-session:cli-${{ matrix.cli }}

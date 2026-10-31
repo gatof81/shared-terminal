@@ -388,6 +388,85 @@ describe("RecreateAttemptStore — fail-closed on unreadable records", () => {
 		});
 	}
 
+	// §2.7.7 fields: each is accepted only in the state and company the contract gives it.
+	const base = () => ({
+		version: 1,
+		sessionId: SID,
+		...identity(),
+		startedAt: "t",
+		state: "resolved",
+		stateAt: "t",
+		outcome: { kind: "committed", nContainerId: "n".repeat(64) },
+		history: [],
+	});
+	const retained = { containerId: "o".repeat(64), name: "st-x-old-1", role: "O", since: "t" };
+	for (const [label, record, ok] of [
+		[
+			"preserve + retained + approvedAt on a resolved record",
+			{ ...base(), preserve: { entries: 3, bytes: 10 }, retained },
+			true,
+		],
+		[
+			"reverse with retainedContainerId",
+			{ ...base(), reverse: true, retainedContainerId: "o".repeat(64) },
+			true,
+		],
+		[
+			"orphanedAt on a resolved record WITH recoveredAt (operator recovery)",
+			{ ...base(), orphanedAt: "t", recoveredAt: "t" },
+			true,
+		],
+		["orphanedAt on a resolved record without recoveredAt", { ...base(), orphanedAt: "t" }, false],
+		[
+			"retained on an unresolved record",
+			{ ...base(), state: "uncertain", outcome: undefined, retained },
+			false,
+		],
+		[
+			"retainedContainerId without reverse",
+			{ ...base(), retainedContainerId: "o".repeat(64) },
+			false,
+		],
+		["reverse not literally true", { ...base(), reverse: 1 }, false],
+		["preserve with a negative count", { ...base(), preserve: { entries: -1, bytes: 10 } }, false],
+		["retained with an unknown role", { ...base(), retained: { ...retained, role: "X" } }, false],
+		[
+			"approvedAt on an open record",
+			{ ...base(), state: "open", outcome: undefined, approvedAt: "t" },
+			false,
+		],
+	] as const) {
+		it(`parser: ${label} ⇒ ${ok ? "readable" : "unreadable"}`, async () => {
+			const store = new RecreateAttemptStore(root);
+			await fs.mkdir(path.dirname(recordFile()), { recursive: true });
+			const json = JSON.parse(JSON.stringify(record)) as Record<string, unknown>;
+			await fs.writeFile(recordFile(), JSON.stringify(json));
+			const r = await store.read(SID);
+			expect(r.kind).toBe(ok ? "ok" : "unreadable");
+			if (ok) await expect(store.assertResolved(SID)).resolves.toBeUndefined();
+		});
+	}
+
+	it("assertResolvedAndNotRetained: a resolved record that retains a container refuses (retained-present); approve lifts it", async () => {
+		const store = new RecreateAttemptStore(root);
+		await store.begin(SID, identity());
+		await store.resolve(
+			SID,
+			identity().attemptId,
+			{ kind: "committed", nContainerId: "n".repeat(64) },
+			"ok",
+			{
+				retained,
+			},
+		);
+		await expect(store.assertResolved(SID)).resolves.toBeUndefined();
+		await expect(store.assertResolvedAndNotRetained(SID)).rejects.toMatchObject({
+			code: "retained-present",
+		});
+		await store.approve(SID);
+		await expect(store.assertResolvedAndNotRetained(SID)).resolves.toBeUndefined();
+	});
+
 	it("a directory where the record should be ⇒ unresolved", async () => {
 		const store = new RecreateAttemptStore(root);
 		await fs.mkdir(recordFile(), { recursive: true });

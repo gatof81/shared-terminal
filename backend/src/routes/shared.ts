@@ -17,7 +17,7 @@ import type { IdleSweeperStats } from "../idleSweeper.js";
 import { logger } from "../logger.js";
 import type { createAuthRateLimiters, RateLimitConfig, UsernameRateLimiter } from "../rateLimit.js";
 import type { RecreationEngine } from "../recreate/engine.js";
-import { RecreateUnresolvedError } from "../recreateAttempt.js";
+import { RecreateRetainedError, RecreateUnresolvedError } from "../recreateAttempt.js";
 import { SessionBusyError } from "../sessionLifecycleLock.js";
 import type { SessionManager } from "../sessionManager.js";
 import { ForbiddenError, NotFoundError } from "../sessionManager.js";
@@ -163,6 +163,10 @@ export function handleSessionError(err: unknown, res: Response): void {
 		// A recreation of this session is not resolved (CONVERSATION.md
 		// §2.7.4, D8 fail-closed). Nothing was done.
 		res.status(409).json({ error: "recreate-unresolved" });
+	} else if (err instanceof RecreateRetainedError) {
+		// A carry-over or rollback still retains a container (§2.7.7): a
+		// hard delete would orphan it. Nothing was done.
+		res.status(409).json({ error: "retained-present" });
 	} else if (err instanceof SessionBusyError) {
 		// Another lifecycle operation holds the session's lock and the wait
 		// cap ran out (or this verb never waits). Nothing was done.

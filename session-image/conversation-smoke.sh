@@ -384,7 +384,9 @@ check "managed dir empty in the image" [ "$(sed -n 4p <<<"$LAYOUT")" = 0 ]
 check "developer can't plant a managed file" [ "$(sed -n 5p <<<"$LAYOUT")" = not-writable ]
 check "developer can't modify the script" [ "$(sed -n 6p <<<"$LAYOUT")" = not-writable ]
 check "developer can't modify the relay" [ "$(sed -n 7p <<<"$LAYOUT")" = not-writable ]
-PIN=$(grep -oP '^ARG CLAUDE_CODE_VERSION=\K\S+' "$REPO_ROOT/session-image/Dockerfile")
+# The pin to assert: the Dockerfile's ARG, or ST_CLI_PIN for an image built
+# with --build-arg CLAUDE_CODE_VERSION (the cli-variants job, §2.7.7).
+PIN=${ST_CLI_PIN:-$(grep -oP '^ARG CLAUDE_CODE_VERSION=\K\S+' "$REPO_ROOT/session-image/Dockerfile")}
 GOT=$(sed -n 8p <<<"$LAYOUT")
 check "claude --version = '$GOT' (pin $PIN, contract floor 2.1.308)" [ "$GOT" = "$PIN (Claude Code)" ]
 note "python3 for the relay: $(sed -n 9p <<<"$LAYOUT")"
@@ -494,7 +496,7 @@ for ev in session_start user_prompt assistant_delta turn_end session_end; do
 	check "-p hola persisted $ev (cid = the CLI's session_id)" grep -qw "$ev" <<<"$HOLA_EVS"
 done
 SS=$(conv_events "$HOLA_CID" | jq -c 'select(.ev == "session_start") | .data')
-check "session_start.claude_version = 2.1.308 (from the script, via the relay)" grep -q '"claude_version":"2.1.308 (Claude Code)"' <<<"$SS"
+check "session_start.claude_version = $PIN (from the script, via the relay)" grep -qF "\"claude_version\":\"$PIN (Claude Code)\"" <<<"$SS"
 check "session_start.argv_flags = [\"-p\"] (allowlist)" grep -q '"argv_flags":\["-p"\]' <<<"$SS"
 check "assistant_delta final=true carries the full text" \
 	grep -q '"final":true' <<<"$(conv_events "$HOLA_CID" | jq -c 'select(.ev == "assistant_delta") | .data')"

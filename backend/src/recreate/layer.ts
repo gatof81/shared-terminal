@@ -64,7 +64,7 @@ export interface LayerVerdict {
 }
 
 export const HOME = "/home/developer";
-const WORKSPACE = `${HOME}/workspace`;
+export const WORKSPACE = `${HOME}/workspace`;
 export const GITCONFIG = `${HOME}/.gitconfig`;
 export const GITCONFIG_MAX_BYTES = 4096;
 /** The session user (Dockerfile: `useradd -u 1000`); tmux names its socket dir after it. */
@@ -80,7 +80,10 @@ export const ENTRYPOINT_SYMLINKS: ReadonlyMap<string, string> = new Map([
 	[`${HOME}/.ssh`, `${WORKSPACE}/.st/ssh`],
 ]);
 const ENTRYPOINT_DIRS: ReadonlySet<string> = new Set([`${HOME}/.config`]);
-const ENTRYPOINT_FILES: ReadonlySet<string> = new Set(["/tmp/.st-ready", "/tmp/st-relay.log"]);
+export const ENTRYPOINT_FILES: ReadonlySet<string> = new Set([
+	"/tmp/.st-ready",
+	"/tmp/st-relay.log",
+]);
 /**
  * Mount points Docker itself creates for `--init` (every session runs with
  * `Init: true`): docker-init is bind-mounted at /sbin/docker-init, which on
@@ -88,11 +91,11 @@ const ENTRYPOINT_FILES: ReadonlySet<string> = new Set(["/tmp/.st-ready", "/tmp/s
  * `inspect().Mounts` does not list that bind, so it is named here. Seen on
  * a real daemon by realDocker.smoke.ts.
  */
-const DOCKER_INIT_FILES: ReadonlySet<string> = new Set([
+export const DOCKER_INIT_FILES: ReadonlySet<string> = new Set([
 	"/sbin/docker-init",
 	"/usr/sbin/docker-init",
 ]);
-const TMUX_DIR = `/tmp/tmux-${SESSION_UID}`;
+export const TMUX_DIR = `/tmp/tmux-${SESSION_UID}`;
 
 // ── Claude Code's runtime artifacts under /tmp ─────────────────────────────
 //

@@ -39,9 +39,17 @@ import {
 	type AttemptOutcome,
 	type RecreateAttemptStore,
 	RecreateUnresolvedError,
+	type RetainedContainer,
 	SESSION_ID_RE,
 } from "../recreateAttempt.js";
 import { SessionBusyError, type SessionLifecycleLock } from "../sessionLifecycleLock.js";
+import {
+	type CarryPlan,
+	carryBudgetMs,
+	carryDestination,
+	planCarry,
+	requiredFreeBytes,
+} from "./carry.js";
 import { CONTROL_MARKER_VALIDATED_CLI, readWorkspaceCliVersion } from "./cliCompat.js";
 import type { RecreateD1Port, RecreateSessionConfig, RecreateSessionRow } from "./d1.js";
 import {
@@ -89,6 +97,11 @@ export interface RecreateConfig {
 	preconditionMs: number;
 	/** Re-observation interval of an in-process resolution that could not confirm yet. */
 	resolveRetryMs: number;
+	/** Carry-over (§2.7.7): throughput assumed for the copy's time budget, and the budget's cap. */
+	carryBytesPerSec: number;
+	carryCapMs: number;
+	/** A carry-over needs a backup of the session's workspace newer than this. */
+	backupMaxAgeMs: number;
 }
 
 /**
@@ -104,6 +117,9 @@ export const DEFAULT_RECREATE_CONFIG: RecreateConfig = {
 	readinessPollMs: 500,
 	preconditionMs: 30_000,
 	resolveRetryMs: 30_000,
+	carryBytesPerSec: 20 * 1024 * 1024,
+	carryCapMs: 60 * 60_000,
+	backupMaxAgeMs: 24 * 60 * 60_000,
 };
 
 export const CLI_MIN_VERSION = "2.1.308";
@@ -128,6 +144,19 @@ export interface Blocker {
 	count?: number;
 }
 
+export interface CarryPreview {
+	entries: number;
+	/** O's writable-layer size (what the copy is budgeted on), null when the daemon does not report it. */
+	bytes: number | null;
+	skipped: CarryPlan["skipped"];
+	/** Free bytes on the Docker data-root filesystem (`diskMeasuredAt`), null when not measurable. */
+	diskFreeBytes: number | null;
+	/** The path that was measured (`RECREATE_DOCKER_FS_PATH`), null when unset. */
+	diskMeasuredAt: string | null;
+	diskRequiredBytes: number | null;
+	backupFresh: boolean | null;
+}
+
 export interface PreflightResult {
 	recreatable: boolean;
 	blockers: Blocker[];
@@ -137,6 +166,10 @@ export interface PreflightResult {
 	currentImageId: string | null;
 	/** Capture would be requested-and-allowed on N (preconditions 4 and 5). */
 	captureAfter: boolean;
+	/** With `preserve`: what the carry-over would copy and the resources it needs (§2.7.7). */
+	carry?: CarryPreview;
+	/** A container kept by the last committed carry-over or rollback, awaiting approval. */
+	retained?: RetainedContainer;
 }
 
 export type RecreateResult =
@@ -157,6 +190,9 @@ export type RecreateResult =
 			unresolved?: true;
 			/** What the record is waiting on, by name. */
 			pending?: string[];
+			/** Carry-over (§2.7.7): what was copied, and the container kept until approval. */
+			carried?: { entries: number; bytes: number };
+			retained?: RetainedContainer;
 	  }
 	| { ok: false; status: 404; code: "not-found" }
 	| { ok: false; status: 409; code: string; blockers?: Blocker[]; step?: RecreateStep }
@@ -168,6 +204,11 @@ export type RecreateResult =
 			unresolved?: true;
 	  }
 	| { ok: false; status: 503; code: "docker-unavailable" };
+
+/** `approve`, `rollback` and `recover` (§2.7.7) answer with one of these. */
+export type AdminOpResult =
+	| { ok: true; status: 200; body: Record<string, unknown> }
+	| { ok: false; status: 404 | 409 | 500 | 503; code: string; detail?: string };
 
 export interface RecreateCapturePort {
 	enabled: boolean;
@@ -223,6 +264,30 @@ export interface RecreationDeps {
 	readWorkspaceSkill?: (sessionId: string, rel: string) => Promise<WorkspaceSkill>;
 	/** The workspace CLI's version (cliCompat.ts); null when unreadable. */
 	readCliVersion?: (sessionId: string) => Promise<string | null>;
+	/** Free bytes of the filesystem holding Docker's layers (default: statfs of the workspace root — same disk on the deployment). */
+	/**
+	 * Free bytes on the filesystem that holds Docker's data root (where N's
+	 * layer is written). Default: `statfs(dockerFsPath)`; null when unknown
+	 * — which blocks a carry-over (`disk-space-unknown`, fail closed).
+	 */
+	diskFree?: () => Promise<number | null>;
+	/**
+	 * A path inside this process's filesystem view that lives on the SAME
+	 * filesystem as `DockerRootDir` (`RECREATE_DOCKER_FS_PATH`): the
+	 * workspace root when both share a device (VM100: one `/dev/sda1`), or a
+	 * read-only bind of a probe directory beside the data root otherwise.
+	 * The workspace root is NOT assumed: it is a bind mount that can live
+	 * anywhere. Unset ⇒ `diskFree` answers null.
+	 */
+	dockerFsPath?: string | null;
+	/** A backup of this session's workspace newer than `maxAgeMs` exists (default: a `manifest.json` under `<root>/.backups/<dir>/`). */
+	/**
+	 * A consistent recovery point exists for the session: a backup manifest
+	 * younger than `maxAgeMs`, taken at or after `notBefore` (O's stop, so
+	 * the tarball saw no concurrent writes) and without `concurrentChanges`
+	 * for the session. Default: `backupFreshIn` over `<root>/.backups`.
+	 */
+	backupFresh?: (sessionId: string, maxAgeMs: number, notBefore: string | null) => Promise<boolean>;
 	config?: Partial<RecreateConfig>;
 	now?: () => number;
 	sleep?: (ms: number) => Promise<void>;
@@ -296,6 +361,17 @@ interface Facts {
 	config: RecreateSessionConfig;
 	layer: LayerVerdict;
 	imageOSkills: SkillSet | null;
+	/** Carry-over mode: the plan, and O's layer size the budget was computed on. */
+	carry: CarryPlan | null;
+	sizeRw: number;
+}
+
+/** A carry-over attempt copies before N starts; after the commit O is retained (§2.7.7). */
+interface CarryState {
+	plan: CarryPlan;
+	bytes: number;
+	/** Per entry, once its copy answered. */
+	carried: Array<{ path: string; bytes: number }>;
 }
 
 /** One attempt, from `begin()` to `resolved`. */
@@ -318,6 +394,12 @@ interface Attempt {
 	/** The lock held by `recreate` itself; lost when it returns. */
 	lease: Lease;
 	unknownExecs: UnknownExec[];
+	/** O's `-old-` name (the retained container's name after a committed carry-over). */
+	oOldName: string;
+	/** Carry-over mode (§2.7.7); null for a strict recreation. */
+	carry: CarryState | null;
+	/** A post-commit rollback: O and N exchange roles (§2.7.7). */
+	reverse: boolean;
 	/**
 	 * `defer-skill-seed` is gone but no seed exec was issued for N yet: the
 	 * resolution seeds (with the marker gone, `deferSeedExists` can't say).
@@ -332,6 +414,52 @@ type ResolveStep = "resolved" | "retry" | "stuck";
  * same check, for an action with several effects to ask between them.
  */
 type Act = (<T>(label: string, fn: () => Promise<T>) => Promise<T>) & { mayAct: () => boolean };
+
+/**
+ * A `manifest.json` under `<root>/.backups/<dir>/` written within `maxAgeMs`
+ * whose `workspaces` list this session (the host backup tool, backup.ts).
+ * Unreadable or malformed manifests count as absent.
+ */
+export async function backupFreshIn(
+	root: string,
+	sessionId: string,
+	maxAgeMs: number,
+	now: () => number,
+	notBefore: string | null = null,
+): Promise<boolean> {
+	const dir = path.join(root, ".backups");
+	let names: string[];
+	try {
+		names = await fs.readdir(dir);
+	} catch {
+		return false;
+	}
+	const floor = notBefore ? Date.parse(notBefore) : Number.NaN;
+	for (const n of names) {
+		try {
+			const raw = await fs.readFile(path.join(dir, n, "manifest.json"), "utf8");
+			const m = JSON.parse(raw) as {
+				createdAt?: unknown;
+				workspaces?: Record<string, { concurrentChanges?: unknown } | undefined>;
+			};
+			if (typeof m.createdAt !== "string" || !m.workspaces) continue;
+			const at = Date.parse(m.createdAt);
+			if (Number.isNaN(at) || now() - at > maxAgeMs) continue;
+			// Taken while O still ran (before its stop) or with tar reporting
+			// concurrent changes: a recovery point, not a consistent snapshot
+			// (backup.ts) — not what the one operation that touches a real
+			// session may rely on.
+			if (!Number.isNaN(floor) && at < floor) continue;
+			const entry = m.workspaces[sessionId];
+			if (!entry) continue;
+			if (entry.concurrentChanges) continue;
+			return true;
+		} catch {
+			// not a backup dir, or unreadable: counts as absent
+		}
+	}
+	return false;
+}
 
 function semverLess(a: string, b: string): boolean {
 	const pa = a.split(".").map(Number);
@@ -348,6 +476,13 @@ export class RecreationEngine {
 	private readonly sleep: (ms: number) => Promise<void>;
 	private readonly readW: (sessionId: string, rel: string) => Promise<WorkspaceSkill>;
 	private readonly readCli: (sessionId: string) => Promise<string | null>;
+	private readonly diskFree: () => Promise<number | null>;
+	private readonly dockerFsPath: string | null;
+	private readonly backupFresh: (
+		sessionId: string,
+		maxAgeMs: number,
+		notBefore: string | null,
+	) => Promise<boolean>;
 	/** Attempts of this process run that are not resolved yet. */
 	private readonly attempts = new Map<string, Attempt>();
 	private stopped = false;
@@ -359,6 +494,22 @@ export class RecreationEngine {
 		this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
 		this.readW = deps.readWorkspaceSkill ?? readWorkspaceSkill;
 		this.readCli = deps.readCliVersion ?? readWorkspaceCliVersion;
+		this.dockerFsPath = deps.dockerFsPath ?? null;
+		this.diskFree =
+			deps.diskFree ??
+			(async () => {
+				if (!this.dockerFsPath) return null;
+				try {
+					const st = await fs.statfs(this.dockerFsPath);
+					return Number(st.bavail) * Number(st.bsize);
+				} catch {
+					return null;
+				}
+			});
+		this.backupFresh =
+			deps.backupFresh ??
+			((sid, maxAge, notBefore) =>
+				backupFreshIn(deps.workspaceRoot, sid, maxAge, this.now, notBefore));
 	}
 
 	/** Sessions whose attempt in this process is still unresolved. For stats and tests. */
@@ -382,7 +533,10 @@ export class RecreationEngine {
 
 	// ── Preflight (GET) ─────────────────────────────────────────────────────
 
-	async preflight(sessionId: string): Promise<PreflightResult | { status: 404 } | { status: 503 }> {
+	async preflight(
+		sessionId: string,
+		opts: { preserve?: boolean } = {},
+	): Promise<PreflightResult | { status: 404 } | { status: 503 }> {
 		try {
 			const unresolved = await this.deps.attempts
 				.assertResolved(sessionId)
@@ -391,15 +545,20 @@ export class RecreationEngine {
 					if (err instanceof RecreateUnresolvedError) return true;
 					throw err;
 				});
-			const r = await this.evaluate(sessionId, null, "all", unresolved);
+			const r = await this.evaluate(sessionId, null, "all", unresolved, !!opts.preserve);
 			if (r === "not-found") return { status: 404 };
 			const blockers = unresolved ? [{ code: "recreate-unresolved" }, ...r.blockers] : r.blockers;
+			const rec = await this.deps.attempts.read(sessionId);
+			const retained =
+				rec.kind === "ok" && rec.record.state === "resolved" ? (rec.record.retained ?? null) : null;
 			return {
 				recreatable: blockers.length === 0,
 				blockers,
 				imageId: r.imageId,
 				currentImageId: r.currentImageId,
 				captureAfter: r.captureAfter,
+				...(r.carry ? { carry: r.carry } : {}),
+				...(retained ? { retained } : {}),
 			};
 		} catch (err) {
 			if (err instanceof DockerUnavailableError) return { status: 503 };
@@ -427,7 +586,7 @@ export class RecreationEngine {
 	async recreate(
 		sessionId: string,
 		expectImageId: string,
-		opts: { beforeEffects?: () => Promise<void> } = {},
+		opts: { beforeEffects?: () => Promise<void>; preserve?: boolean } = {},
 	): Promise<RecreateResult> {
 		try {
 			const lease: Lease = { held: true };
@@ -442,6 +601,7 @@ export class RecreationEngine {
 							this.now(),
 							lease,
 							opts.beforeEffects,
+							!!opts.preserve,
 						);
 					} finally {
 						// Before the lock is released: a pass still running on this
@@ -466,11 +626,12 @@ export class RecreationEngine {
 		lockedAt: number,
 		lease: Lease,
 		beforeEffects?: () => Promise<void>,
+		preserve = false,
 	): Promise<RecreateResult> {
 		// ── Preconditions 2–8, first failure wins, no effects ──
 		let facts: Facts;
 		try {
-			const r = await this.evaluate(sessionId, expectImageId, "first");
+			const r = await this.evaluate(sessionId, expectImageId, "first", false, preserve);
 			if (r === "not-found") return { ok: false, status: 404, code: "not-found" };
 			if (r.blockers.length > 0) {
 				const first = r.blockers[0] as Blocker;
@@ -492,6 +653,12 @@ export class RecreationEngine {
 			throw err;
 		}
 
+		// Carry-over (§2.7.7): the copy gets its own time, budgeted on O's
+		// layer size at a conservative throughput, inside this attempt's T_rec.
+		const tRecMs = facts.carry
+			? carryBudgetMs(facts.sizeRw, this.cfg.tRecMs, this.cfg.carryBytesPerSec, this.cfg.carryCapMs)
+			: this.cfg.tRecMs;
+
 		// Still nothing done: a throw here propagates with no record and no effect.
 		if (beforeEffects) await beforeEffects();
 		// The wait above (the route's audit row) is invisible to `stop()`: no
@@ -501,7 +668,7 @@ export class RecreationEngine {
 			? "shutting down"
 			: !lease.held
 				? "lock lost"
-				: this.now() >= lockedAt + this.cfg.tRecMs
+				: this.now() >= lockedAt + tRecMs
 					? "T_rec expired"
 					: null;
 		if (notNow) {
@@ -521,7 +688,13 @@ export class RecreationEngine {
 			nTempName: `${canonical}-new-${ts}`,
 		};
 		try {
-			await this.deps.attempts.begin(sessionId, identity);
+			await this.deps.attempts.begin(
+				sessionId,
+				identity,
+				facts.carry
+					? { preserve: { entries: facts.carry.entries.length, bytes: facts.sizeRw } }
+					: {},
+			);
 		} catch (err) {
 			// A refused begin() stops everything: not one effect has been
 			// issued. If the write failed after its rename, an `open` record
@@ -557,7 +730,7 @@ export class RecreationEngine {
 			attemptId,
 			oId: facts.o.id,
 			canonical,
-			run: new AttemptRun(lockedAt + this.cfg.tRecMs, { now: this.now }),
+			run: new AttemptRun(lockedAt + tRecMs, { now: this.now }),
 			snapshot: { marker: false, hooksFile: false },
 			nId: null,
 			casSentAt: null,
@@ -569,10 +742,17 @@ export class RecreationEngine {
 			lease,
 			unknownExecs: [],
 			seedPending: false,
+			oOldName: identity.oOldName,
+			carry: facts.carry ? { plan: facts.carry, bytes: facts.sizeRw, carried: [] } : null,
+			reverse: false,
 		};
 		this.attempts.set(sessionId, a);
 		logger.info(
-			`[recreate] ${sessionId}: attempt ${attemptId} open (O ${facts.o.id.slice(0, 12)})`,
+			`[recreate] ${sessionId}: attempt ${attemptId} open (O ${facts.o.id.slice(0, 12)}` +
+				(a.carry
+					? `, carry-over of ${a.carry.plan.entries.length} entries, ${a.carry.bytes} B`
+					: "") +
+				")",
 		);
 		if (this.stopped) {
 			// `stop()` ran while the record was being written, so it could not
@@ -648,6 +828,7 @@ export class RecreationEngine {
 		expectImageId: string | null,
 		mode: "first" | "all",
 		unresolved = false,
+		preserve = false,
 	): Promise<
 		| "not-found"
 		| {
@@ -656,6 +837,7 @@ export class RecreationEngine {
 				imageId: string | null;
 				currentImageId: string | null;
 				captureAfter: boolean;
+				carry?: CarryPreview;
 		  }
 	> {
 		const blockers: Blocker[] = [];
@@ -680,6 +862,15 @@ export class RecreationEngine {
 			blockers.push({ code: "container-missing" });
 			return out({});
 		}
+		// 3b. No container retained by the previous carry-over or rollback
+		// (§2.7.7): a further attempt would make the record forget it —
+		// an unreferenced 4–12 GB container and no way back. `approve`
+		// first (or `rollback`, then `approve`).
+		const prev = await this.deps.attempts.read(sessionId);
+		if (prev.kind === "ok" && prev.record.state === "resolved" && prev.record.retained) {
+			blockers.push({ code: "retained-pending" });
+			if (done()) return out({ imageId: o.imageId });
+		}
 		if (o.running) {
 			blockers.push({ code: "running" });
 			if (done()) return out({ imageId: o.imageId });
@@ -700,12 +891,14 @@ export class RecreationEngine {
 		if (revocation !== "none") captureBlockers.push({ code: "revoked" });
 		blockers.push(...captureBlockers);
 		const captureAfter = captureBlockers.length === 0 && !!image?.relay2;
+		let carryPreview: CarryPreview | undefined;
 		const result = (facts?: Facts) => ({
 			blockers,
 			facts,
 			imageId: o.imageId,
 			currentImageId: image?.imageId ?? null,
 			captureAfter,
+			...(carryPreview ? { carry: carryPreview } : {}),
 		});
 		if (done()) return result();
 		// Preflight of a session that cannot become recreatable without an
@@ -725,23 +918,61 @@ export class RecreationEngine {
 		// 6. The layer.
 		const config = await this.deps.d1.getConfig(sessionId);
 		const changes = await this.bounded("changes O", this.deps.docker.changes(o.id));
-		const layer = await classifyLayer({
-			changes,
-			stat: (p) => this.bounded("stat O", this.deps.docker.statPath(o.id, p)),
-			mounts: o.mounts,
-			gitconfig: () =>
-				this.readLayerFile("archive gitconfig", o.id, GITCONFIG, GITCONFIG_MAX_BYTES),
-			urlHandler: () =>
-				this.readLayerFile(
-					"archive url handler",
-					o.id,
-					CLI_URL_HANDLER,
-					CLI_URL_HANDLER_BYTES.length,
-				),
-			identity: config.gitIdentity,
-			hasDotfiles: config.hasDotfiles,
-		});
-		blockers.push(...layer.blockers);
+		let layer: LayerVerdict;
+		let carry: CarryPlan | null = null;
+		let sizeRw = 0;
+		if (preserve) {
+			// Carry-over (§2.7.7): HOME and /tmp entries are copied instead of
+			// blocking; only system changes and deletions block. The copy's
+			// resources are preconditions too: free disk and a fresh backup.
+			carry = await planCarry({
+				changes,
+				mounts: o.mounts,
+				stat: (p) => this.bounded("stat O", this.deps.docker.statPath(o.id, p)),
+			});
+			layer = { blockers: [], reapplyGitIdentity: false };
+			blockers.push(...carry.blockers);
+			const size = await this.bounded("size O", this.deps.docker.sizeRw(o.id));
+			sizeRw = size ?? 0;
+			// `SizeRw` is the apparent size of O's upper dir; the copy lands as
+			// a new upper dir on the Docker data-root filesystem, so what must
+			// be free is there — never assumed to be the workspace's device.
+			// Unknown free space is a blocker of its own (fail closed).
+			const free = await this.diskFree();
+			const required = size === null ? null : requiredFreeBytes(size);
+			if (size === null) blockers.push({ code: "layer-size-unknown" });
+			else if (free === null) blockers.push({ code: "disk-space-unknown" });
+			else if (free < (required as number)) blockers.push({ code: "disk-space" });
+			const fresh = await this.backupFresh(sessionId, this.cfg.backupMaxAgeMs, o.finishedAt);
+			if (!fresh) blockers.push({ code: "backup-stale" });
+			carryPreview = {
+				entries: carry.entries.length,
+				bytes: size,
+				skipped: carry.skipped,
+				diskFreeBytes: free,
+				diskMeasuredAt: this.dockerFsPath,
+				diskRequiredBytes: required,
+				backupFresh: fresh,
+			};
+		} else {
+			layer = await classifyLayer({
+				changes,
+				stat: (p) => this.bounded("stat O", this.deps.docker.statPath(o.id, p)),
+				mounts: o.mounts,
+				gitconfig: () =>
+					this.readLayerFile("archive gitconfig", o.id, GITCONFIG, GITCONFIG_MAX_BYTES),
+				urlHandler: () =>
+					this.readLayerFile(
+						"archive url handler",
+						o.id,
+						CLI_URL_HANDLER,
+						CLI_URL_HANDLER_BYTES.length,
+					),
+				identity: config.gitIdentity,
+				hasDotfiles: config.hasDotfiles,
+			});
+			blockers.push(...layer.blockers);
+		}
 		if (done()) return result();
 		// 7. The workspace (host lstat, no symlinks followed).
 		blockers.push(...(await this.workspaceBlockers(sessionId)));
@@ -771,7 +1002,7 @@ export class RecreationEngine {
 			blockers.push({ code: "control-marker-incompatible" });
 		}
 		if (blockers.length > 0 || !image) return result();
-		return result({ row, o, image, config, layer, imageOSkills });
+		return result({ row, o, image, config, layer, imageOSkills, carry, sizeRw });
 	}
 
 	/** One small regular file of O's layer; "unreadable" over `maxBytes` or not exactly one file. */
@@ -943,10 +1174,51 @@ export class RecreationEngine {
 				this.readW(sessionId, rel),
 			);
 			if (skills.length > 0) throw new StepFailure("prepare", "managed skills vs I_N", skills);
+			if (a.carry) await this.carryOver(a, nId);
 			return prep.hash;
 		} catch (err) {
 			throw this.asStep("prepare", err);
 		}
+	}
+
+	/**
+	 * Step 1b (§2.7.7): every planned entry streamed from O into N, in the
+	 * plan's order, each copy a request of the attempt (`mayAct` before it
+	 * goes out: nothing is copied after the epoch closed). Then each entry is
+	 * stat'ed in N and must have O's kind (and size, for a regular file): a
+	 * copy that did not land as planned fails the step — before N starts and
+	 * before anything is renamed, so the rollback is the ordinary one.
+	 */
+	private async carryOver(a: Attempt, nId: string): Promise<void> {
+		const carry = a.carry as CarryState;
+		const { run } = a;
+		for (const [i, e] of carry.plan.entries.entries()) {
+			const r = await run.call(`copy #${i + 1}`, () =>
+				this.deps.docker.copyPath(
+					a.oId,
+					e.path,
+					nId,
+					carryDestination(e.path),
+					() => run.epochOpen,
+				),
+			);
+			carry.carried.push({ path: e.path, bytes: r.bytes });
+		}
+		let mismatched = 0;
+		for (const e of carry.plan.entries) {
+			const inO = await run.call("stat O (carry)", () => this.deps.docker.statPath(a.oId, e.path));
+			const inN = await run.call("stat N (carry)", () => this.deps.docker.statPath(nId, e.path));
+			if (!inN || inN.kind !== e.kind || (inO?.kind === "file" && inO.size !== inN.size))
+				mismatched++;
+		}
+		if (mismatched > 0) {
+			throw new StepFailure("prepare", "carry-over verification failed", [
+				{ code: "carry-verify", count: mismatched },
+			]);
+		}
+		logger.info(
+			`[recreate] ${a.sessionId}: carried ${carry.carried.length} entries, ${carry.carried.reduce((s, c) => s + c.bytes, 0)} B`,
+		);
 	}
 
 	/** Step 2: O → -old-, N → canonical. */
@@ -1192,6 +1464,9 @@ export class RecreationEngine {
 			[
 				"remove O",
 				async () => {
+					// Carry-over (§2.7.7): O is kept, stopped, under its -old- name
+					// until an operator approves its removal — the rollback path.
+					if (a.carry) return;
 					await run.call("remove O", () =>
 						this.deps.docker.remove(a.oId).catch((err) => {
 							if (!isNotFound(err)) throw err;
@@ -1220,6 +1495,7 @@ export class RecreationEngine {
 			);
 		}
 
+		const retained = this.retainedOf(a);
 		const base = {
 			ok: true as const,
 			outcome: "committed" as const,
@@ -1228,6 +1504,15 @@ export class RecreationEngine {
 			cliVersion,
 			warnings,
 			incomplete,
+			...(a.carry
+				? {
+						carried: {
+							entries: a.carry.carried.length,
+							bytes: a.carry.carried.reduce((s, c) => s + c.bytes, 0),
+						},
+					}
+				: {}),
+			...(retained ? { retained } : {}),
 		};
 		const notConverged = incomplete.filter((i) => CONVERGENCE_ITEMS.has(i));
 		if (a.seedPending) notConverged.push("seed-skills");
@@ -1254,6 +1539,7 @@ export class RecreationEngine {
 			a.lease,
 			{ kind: "committed", nContainerId: nId },
 			incomplete.length ? `committed; pending: ${incomplete.join(", ")}` : "committed",
+			retained ?? undefined,
 		);
 		if (!resolved) {
 			// The record write failed: still owned, still gated; retried.
@@ -1267,12 +1553,36 @@ export class RecreationEngine {
 	 * Re-observed, inside the epoch: D1 on N and `running`, O gone, the
 	 * marker gone. What step 6 claimed done, seen again.
 	 */
+	/** The container a committed carry-over keeps (O, stopped, under its -old- name). */
+	private retainedOf(a: Attempt): RetainedContainer | null {
+		if (!a.carry) return null;
+		return {
+			containerId: a.oId,
+			name: a.oOldName,
+			role: "O",
+			since: new Date(this.now()).toISOString(),
+		};
+	}
+
+	/** O as a committed carry-over leaves it: present and stopped. */
+	private async oRetainedOk(
+		a: Attempt,
+		call: <T>(l: string, f: () => Promise<T>) => Promise<T>,
+	): Promise<boolean> {
+		const o = await call("confirm O retained", () => this.deps.docker.inspect(a.oId));
+		return !!o && !o.running;
+	}
+
 	private async convergedOnN(a: Attempt, nId: string): Promise<boolean> {
 		const { run, sessionId } = a;
 		try {
 			const row = await run.call("d1 re-read", () => this.deps.d1.getRow(sessionId));
 			if (row?.container_id !== nId || row.status !== "running") return false;
-			if (await run.call("confirm O gone", () => this.deps.docker.inspect(a.oId))) return false;
+			if (a.carry) {
+				if (!(await this.oRetainedOk(a, (l, f) => run.call(l, f)))) return false;
+			} else if (await run.call("confirm O gone", () => this.deps.docker.inspect(a.oId))) {
+				return false;
+			}
 			if (
 				await run.call("defer-skill-seed gone", () => this.deps.capture.deferSeedExists(sessionId))
 			)
@@ -1314,6 +1624,7 @@ export class RecreationEngine {
 		lease: Lease,
 		outcome: AttemptOutcome,
 		reason: string,
+		retained?: RetainedContainer,
 	): Promise<boolean> {
 		return this.recordOp(a, async () => {
 			if (a.state === "resolved") return true;
@@ -1325,7 +1636,7 @@ export class RecreationEngine {
 			// before the stop is not cancelled.
 			if (!lease.held || this.stopped) throw new LeaseLostError();
 			try {
-				await this.deps.attempts.resolve(a.sessionId, a.attemptId, outcome, reason);
+				await this.deps.attempts.resolve(a.sessionId, a.attemptId, outcome, reason, { retained });
 			} catch (err) {
 				logger.error(`[recreate] ${a.sessionId}: could not resolve: ${(err as Error).message}`);
 				return false;
@@ -1417,6 +1728,7 @@ export class RecreationEngine {
 		);
 		const row = await act("d1 read", () => this.deps.d1.getRow(a.sessionId));
 		const current = row?.container_id ?? null;
+		if (a.reverse) return this.resolveReverse(a, lease, act, current);
 		if (current === a.oId) return this.resolveToO(a, lease, act);
 		if (a.nId !== null && current === a.nId) return this.resolveToN(a, lease, act);
 		this.stats.recreateOrphans++;
@@ -1523,11 +1835,13 @@ export class RecreationEngine {
 				);
 				return "retry";
 			}
-			try {
-				await act("remove O", () => d.remove(a.oId));
-			} catch (err) {
-				if (err instanceof LeaseLostError) throw err;
-				if (!isNotFound(err)) return "retry";
+			if (!a.carry) {
+				try {
+					await act("remove O", () => d.remove(a.oId));
+				} catch (err) {
+					if (err instanceof LeaseLostError) throw err;
+					if (!isNotFound(err)) return "retry";
+				}
 			}
 		}
 		const n = await act("inspect N", () => d.inspect(nId));
@@ -1580,7 +1894,9 @@ export class RecreationEngine {
 		if (again?.container_id !== nId || again.status !== status) return "retry";
 		const nNow = await act("inspect N again", () => d.inspect(nId));
 		if (!nNow || nNow.running !== n.running) return "retry";
-		if (await act("confirm O gone", () => d.inspect(a.oId))) return "retry";
+		if (a.carry) {
+			if (!(await this.oRetainedOk(a, act))) return "retry";
+		} else if (await act("confirm O gone", () => d.inspect(a.oId))) return "retry";
 		if (await act("defer-skill-seed gone", () => this.deps.capture.deferSeedExists(sessionId))) {
 			return "retry";
 		}
@@ -1597,9 +1913,487 @@ export class RecreationEngine {
 			lease,
 			{ kind: "committed", nContainerId: nId },
 			"converged on N",
+			this.retainedOf(a) ?? undefined,
 		))
 			? "resolved"
 			: "retry";
+	}
+
+	// ── Carry-over follow-ups (§2.7.7): approve, rollback, recover ──────────
+
+	/**
+	 * Remove the container a committed carry-over (O) or a rollback (N) kept.
+	 * Under the session's lock; the retained container must be stopped and
+	 * must not be D1's container. Idempotent: an already removed container
+	 * just clears the record.
+	 */
+	async approve(sessionId: string): Promise<AdminOpResult> {
+		try {
+			return await this.deps.lock.run(
+				sessionId,
+				"recreate",
+				async () => {
+					const rec = await this.deps.attempts.read(sessionId);
+					if (rec.kind === "none") return { ok: false, status: 404, code: "no-attempt" };
+					if (rec.kind !== "ok" || rec.record.state !== "resolved")
+						return { ok: false, status: 409, code: "recreate-unresolved" };
+					const retained = rec.record.retained;
+					if (!retained) return { ok: false, status: 409, code: "nothing-retained" };
+					const row = await this.deps.d1.getRow(sessionId);
+					if (!row) return { ok: false, status: 404, code: "not-found" };
+					if (row.container_id === retained.containerId)
+						return { ok: false, status: 409, code: "retained-is-current" };
+					const c = await this.bounded(
+						"inspect retained",
+						this.deps.docker.inspect(retained.containerId),
+					);
+					if (c?.running) return { ok: false, status: 409, code: "retained-running" };
+					if (c) {
+						try {
+							await this.deps.docker.remove(retained.containerId);
+						} catch (err) {
+							if (!isNotFound(err)) throw err;
+						}
+						if (
+							await this.bounded(
+								"confirm retained gone",
+								this.deps.docker.inspect(retained.containerId),
+							)
+						)
+							return { ok: false, status: 500, code: "remove-failed" };
+					}
+					await this.deps.attempts.approve(sessionId);
+					logger.info(
+						`[recreate] ${sessionId}: approved; retained ${retained.role} ${retained.containerId.slice(0, 12)} ${c ? "removed" : "was already gone"}`,
+					);
+					return {
+						ok: true,
+						status: 200,
+						body: { removed: !!c, containerId: retained.containerId, role: retained.role },
+					};
+				},
+				{ mode: "fail" },
+			);
+		} catch (err) {
+			if (err instanceof SessionBusyError) return { ok: false, status: 409, code: "busy" };
+			if (err instanceof RecreateUnresolvedError)
+				return { ok: false, status: 409, code: "recreate-unresolved" };
+			if (err instanceof DockerUnavailableError)
+				return { ok: false, status: 503, code: "docker-unavailable" };
+			throw err;
+		}
+	}
+
+	/**
+	 * Back to the retained O after a committed carry-over (§2.7.7): a small
+	 * attempt of its own (record `reverse`), with N (D1's container, stopped)
+	 * and the retained O exchanging roles. Steps: N → `-old-`, O → canonical,
+	 * ONE D1 statement moving `container_id` back and dropping the ingest
+	 * hash (O predates the relay), then status/ports/capture converge on O —
+	 * which retires the capture files, since O has no control mounts. N is
+	 * kept, stopped, as the retained container (`role: N`) until approval.
+	 * Nothing is removed. The owner starts O afterwards like any session.
+	 */
+	async rollbackToRetained(sessionId: string): Promise<AdminOpResult> {
+		try {
+			const lease: Lease = { held: true };
+			return await this.deps.lock.run(
+				sessionId,
+				"recreate",
+				async () => {
+					try {
+						return await this.rollbackToRetainedLocked(sessionId, lease);
+					} finally {
+						lease.held = false;
+					}
+				},
+				{ mode: "fail" },
+			);
+		} catch (err) {
+			if (err instanceof SessionBusyError) return { ok: false, status: 409, code: "busy" };
+			if (err instanceof RecreateUnresolvedError)
+				return { ok: false, status: 409, code: "recreate-unresolved" };
+			if (err instanceof DockerUnavailableError)
+				return { ok: false, status: 503, code: "docker-unavailable" };
+			throw err;
+		}
+	}
+
+	private async rollbackToRetainedLocked(sessionId: string, lease: Lease): Promise<AdminOpResult> {
+		const rec = await this.deps.attempts.read(sessionId);
+		if (rec.kind === "none") return { ok: false, status: 404, code: "no-attempt" };
+		if (rec.kind !== "ok" || rec.record.state !== "resolved")
+			return { ok: false, status: 409, code: "recreate-unresolved" };
+		const retained = rec.record.retained;
+		if (!retained || retained.role !== "O")
+			return { ok: false, status: 409, code: "nothing-retained" };
+		const row = await this.deps.d1.getRow(sessionId);
+		if (!row) return { ok: false, status: 404, code: "not-found" };
+		// D1 must be on the container the retained one would replace — not
+		// on the retained one itself. The last record may be a carry-over
+		// (`committed` on N) or a rollback that did not apply (`rolled-back`,
+		// names restored, O still retained): both are rollback-able.
+		const nId = row.container_id;
+		if (!nId || nId === retained.containerId)
+			return { ok: false, status: 409, code: "not-on-committed-n" };
+		const n = await this.bounded("inspect N", this.deps.docker.inspect(nId));
+		if (!n) return { ok: false, status: 409, code: "container-missing" };
+		if (n.running) return { ok: false, status: 409, code: "running" };
+		const o = await this.bounded(
+			"inspect retained O",
+			this.deps.docker.inspect(retained.containerId),
+		);
+		if (!o) return { ok: false, status: 409, code: "retained-missing" };
+		if (o.running) return { ok: false, status: 409, code: "retained-running" };
+		if (this.stopped) return { ok: false, status: 500, code: "recreate-failed" };
+
+		const attemptId = randomUUID();
+		const ts = String(this.now());
+		const canonical = row.container_name;
+		const identity = {
+			attemptId,
+			oContainerId: nId,
+			oCanonicalName: canonical,
+			oOldName: `${canonical}-old-${ts}`,
+			nTempName: o.name,
+		};
+		try {
+			await this.deps.attempts.begin(sessionId, identity, {
+				reverse: true,
+				retainedContainerId: retained.containerId,
+			});
+		} catch (err) {
+			if (err instanceof RecreateUnresolvedError)
+				return { ok: false, status: 409, code: "recreate-unresolved" };
+			logger.error(`[recreate] ${sessionId}: rollback begin refused: ${(err as Error).message}`);
+			await this.deps.attempts
+				.resolve(sessionId, attemptId, { kind: "rolled-back" }, "begin failed; no effects")
+				.catch(() => undefined);
+			return { ok: false, status: 500, code: "recreate-failed" };
+		}
+		const a: Attempt = {
+			sessionId,
+			attemptId,
+			oId: nId, // the container being replaced (N)
+			canonical,
+			run: new AttemptRun(this.now() + this.cfg.tRecMs, { now: this.now }),
+			snapshot: { marker: false, hooksFile: false },
+			nId: retained.containerId, // the container coming back (O)
+			casSentAt: null,
+			cas: null,
+			state: "open",
+			recordChain: Promise.resolve(),
+			resolving: null,
+			retryTimer: null,
+			lease,
+			unknownExecs: [],
+			seedPending: false,
+			oOldName: identity.oOldName,
+			carry: null,
+			reverse: true,
+		};
+		this.attempts.set(sessionId, a);
+		logger.info(
+			`[recreate] ${sessionId}: rollback attempt ${attemptId} open (N ${nId.slice(0, 12)} → O ${retained.containerId.slice(0, 12)})`,
+		);
+		try {
+			await a.run.call("rename N", () => this.deps.docker.rename(nId, identity.oOldName));
+			await a.run.call("rename O", () => this.deps.docker.rename(retained.containerId, canonical));
+		} catch (err) {
+			a.run.close(`rollback renames failed: ${(err as Error).message}`);
+			await this.markUncertain(a, `rollback renames failed: ${(err as Error).message}`);
+			void this.runResolution(a);
+			return { ok: false, status: 500, code: "recreate-failed", detail: "rename" };
+		}
+		a.casSentAt = this.now();
+		a.cas = await a.run.untimed("d1 rollback", () =>
+			this.deps.d1.casBack(sessionId, nId, retained.containerId),
+		);
+		if (a.cas === "ambiguous") {
+			a.run.close("ambiguous rollback commit");
+			await this.markUncertain(a, "ambiguous rollback commit; D1 re-read after T_d1");
+			void this.runResolution(a);
+			return { ok: false, status: 500, code: "recreate-failed", detail: "commit" };
+		}
+		// The resolution table finishes either outcome by evidence, under this lock.
+		const r = await this.runResolution(a, lease);
+		if (r !== "resolved" || a.state !== "resolved") {
+			return { ok: false, status: 500, code: "recreate-failed", detail: "not resolved" };
+		}
+		const rec2 = await this.deps.attempts.read(sessionId);
+		const outcome = rec2.kind === "ok" ? rec2.record.outcome : undefined;
+		if (outcome?.kind === "committed") {
+			return {
+				ok: true,
+				status: 200,
+				body: {
+					outcome: "rolled-back-to-retained",
+					containerId: retained.containerId,
+					retained: rec2.kind === "ok" ? (rec2.record.retained ?? null) : null,
+				},
+			};
+		}
+		return { ok: false, status: 409, code: "rollback-not-applied" };
+	}
+
+	/**
+	 * The resolution table of a reverse attempt (§2.7.7). D1 decides, nothing
+	 * is removed: on O (the retained container, now canonical) ⇒ names as
+	 * renamed, status stopped, ports cleared, capture converged (retired for
+	 * a container without control mounts), N kept as retained; on N (the
+	 * statement did not apply) ⇒ both names back, nothing else.
+	 */
+	private async resolveReverse(
+		a: Attempt,
+		lease: Lease,
+		act: Act,
+		current: string | null,
+	): Promise<ResolveStep> {
+		const d = this.deps.docker;
+		const nId = a.oId; // the container being replaced
+		const oId = a.nId as string; // the retained container coming back
+		const { sessionId } = a;
+		if (current === oId) {
+			const o = await act("inspect O", () => d.inspect(oId));
+			if (!o) return "stuck";
+			// Names: N off the canonical name first (it may still hold it when
+			// the first rename never happened), then O onto it — never a
+			// rename into a name another container holds.
+			const n = await act("inspect N", () => d.inspect(nId));
+			if (n && n.name !== a.oOldName) {
+				await act("rename N old", () => d.rename(nId, a.oOldName)).catch(() => undefined);
+			}
+			if (o.name !== a.canonical) {
+				await act("rename O canonical", () => d.rename(oId, a.canonical)).catch(() => undefined);
+			}
+			await act("d1 status", () => this.deps.d1.setStatus(sessionId, "stopped"));
+			await act("d1 ports", () => this.deps.d1.setPorts(sessionId, [], act.mayAct));
+			await act("capture converge", () => this.deps.capture.converge(sessionId, act.mayAct));
+			// Seen again.
+			const again = await act("d1 re-read", () => this.deps.d1.getRow(sessionId));
+			if (again?.container_id !== oId || again.status !== "stopped") return "retry";
+			const oNow = await act("inspect O again", () => d.inspect(oId));
+			if (!oNow || oNow.running || oNow.name !== a.canonical) return "retry";
+			if (!(await act("capture converged", () => this.deps.capture.converged(sessionId))))
+				return "retry";
+			const nNow = await act("inspect N again", () => d.inspect(nId));
+			const retained: RetainedContainer | undefined = nNow
+				? {
+						containerId: nId,
+						name: nNow.name,
+						role: "N",
+						since: new Date(this.now()).toISOString(),
+					}
+				: undefined;
+			return (await this.resolveRecord(
+				a,
+				lease,
+				{ kind: "committed", nContainerId: oId },
+				"rolled back to the retained container",
+				retained,
+			))
+				? "resolved"
+				: "retry";
+		}
+		if (current === nId) {
+			// Not applied: undo the renames — O off the canonical name first
+			// (to a reserved `-old-<ts>` name the boot pass recognises), then
+			// N back onto it.
+			const o = await act("inspect O", () => d.inspect(oId));
+			if (o && o.name === a.canonical) {
+				await act("rename O back", () => d.rename(oId, `${a.canonical}-old-${this.now()}`)).catch(
+					() => undefined,
+				);
+			}
+			const n2 = await act("inspect N", () => d.inspect(nId));
+			if (n2 && n2.name !== a.canonical) {
+				await act("rename N canonical", () => d.rename(nId, a.canonical)).catch(() => undefined);
+			}
+			// Seen again: D1 still on N, N canonical and stopped, O present and not canonical.
+			const again = await act("d1 re-read", () => this.deps.d1.getRow(sessionId));
+			if (again?.container_id !== nId) return "retry";
+			const nNow = await act("inspect N again", () => d.inspect(nId));
+			if (!nNow || nNow.name !== a.canonical) return "retry";
+			const oNow = await act("inspect O again", () => d.inspect(oId));
+			if (oNow?.name === a.canonical) return "retry";
+			const retained: RetainedContainer | undefined = oNow
+				? {
+						containerId: oId,
+						name: oNow.name,
+						role: "O",
+						since: new Date(this.now()).toISOString(),
+					}
+				: undefined;
+			return (await this.resolveRecord(
+				a,
+				lease,
+				{ kind: "rolled-back" },
+				"rollback not applied; names restored",
+				retained,
+			))
+				? "resolved"
+				: "retry";
+		}
+		this.stats.recreateOrphans++;
+		logger.error(
+			`[recreate] ${sessionId}: rollback attempt ${a.attemptId}: D1 names neither container (${current ?? "null"}); left for the operator`,
+		);
+		return "stuck";
+	}
+
+	/**
+	 * The D8 recovery procedure (§2.7.7), operator-driven: an attempt
+	 * orphaned by a restart is adopted by this process and resolved by the
+	 * evidence available NOW — D1's row, the containers, the record — under
+	 * the session's lock (`recreate-resolve`, which the unresolved gate lets
+	 * through). Required: every container of the attempt stopped, so no exec
+	 * of the dead process can still be running inside one (no process
+	 * outlives its container's stop), and no live attempt of this process.
+	 * Nothing is inferred from elapsed time.
+	 */
+	async recover(sessionId: string): Promise<AdminOpResult> {
+		if (this.attempts.has(sessionId))
+			return { ok: false, status: 409, code: "attempt-in-progress" };
+		try {
+			return await this.deps.lock.run(
+				sessionId,
+				"recreate-resolve",
+				async () => {
+					const rec = await this.deps.attempts.read(sessionId);
+					if (rec.kind === "none") return { ok: false, status: 404, code: "no-attempt" };
+					if (rec.kind === "unreadable")
+						return { ok: false, status: 409, code: "record-unreadable", detail: rec.error };
+					const r = rec.record;
+					if (r.state === "resolved") return { ok: false, status: 409, code: "already-resolved" };
+					if (!r.orphanedAt) return { ok: false, status: 409, code: "not-orphaned" };
+					const d = this.deps.docker;
+					const row = await this.deps.d1.getRow(sessionId);
+					if (!row) return { ok: false, status: 404, code: "not-found" };
+					// Every container the attempt may have touched, by identity and by label.
+					const candidates = new Map<string, RecreateContainer>();
+					for (const ref of [r.oContainerId, r.nTempName, row.container_id ?? ""]) {
+						if (!ref) continue;
+						const c = await this.bounded("inspect candidate", d.inspect(ref));
+						if (c) candidates.set(c.id, c);
+					}
+					for (const c of await this.bounded(
+						"list by attempt",
+						d.listByLabel(LABEL_ATTEMPT, r.attemptId),
+					))
+						candidates.set(c.id, c);
+					const running = [...candidates.values()].filter((c) => c.running);
+					if (running.length > 0)
+						return {
+							ok: false,
+							status: 409,
+							code: "running",
+							detail: `${running.length} container(s) running`,
+						};
+					// N: the labelled container of this attempt (strict); for a
+					// reverse attempt, the retained container coming back — by
+					// its recorded id (the attempt renames it, so no name can
+					// identify it), or for a record without one, by D1 when D1
+					// already moved, else the holder of the canonical name that
+					// is not the replaced container.
+					let nId: string | null = null;
+					if (r.reverse) {
+						if (r.retainedContainerId) {
+							nId = r.retainedContainerId;
+						} else if (row.container_id && row.container_id !== r.oContainerId) {
+							nId = row.container_id;
+						} else {
+							const holder = await this.bounded("inspect canonical", d.inspect(r.oCanonicalName));
+							nId = holder && holder.id !== r.oContainerId ? holder.id : null;
+						}
+						if (nId) {
+							const c = await this.bounded("inspect retained", d.inspect(nId));
+							if (!c) return { ok: false, status: 409, code: "retained-missing" };
+							if (c.running)
+								return { ok: false, status: 409, code: "running", detail: "retained container" };
+						}
+					} else {
+						const labelled = [...candidates.values()].filter(
+							(c) => c.labels[LABEL_ATTEMPT] === r.attemptId && c.id !== r.oContainerId,
+						);
+						if (labelled.length > 1)
+							return {
+								ok: false,
+								status: 409,
+								code: "ambiguous-n",
+								detail: `${labelled.length} labelled containers`,
+							};
+						nId = labelled[0]?.id ?? null;
+					}
+					await this.deps.attempts.adopt(sessionId, r.attemptId);
+					const lease: Lease = { held: true };
+					const a: Attempt = {
+						sessionId,
+						attemptId: r.attemptId,
+						oId: r.oContainerId,
+						canonical: r.oCanonicalName,
+						run: new AttemptRun(this.now() + this.cfg.tRecMs, { now: this.now }),
+						snapshot: { marker: false, hooksFile: false },
+						nId,
+						casSentAt: null,
+						cas: null,
+						state: "uncertain",
+						recordChain: Promise.resolve(),
+						resolving: null,
+						retryTimer: null,
+						lease,
+						unknownExecs: [],
+						seedPending: false,
+						oOldName: r.oOldName,
+						carry: r.preserve
+							? {
+									plan: {
+										entries: [],
+										blockers: [],
+										skipped: { entrypoint: 0, cliRuntime: 0, socket: 0 },
+									},
+									bytes: r.preserve.bytes,
+									carried: [],
+								}
+							: null,
+						reverse: !!r.reverse,
+					};
+					this.attempts.set(sessionId, a);
+					try {
+						let step: ResolveStep = "retry";
+						for (let i = 0; i < 3 && step === "retry"; i++) {
+							step = await this.resolveOnce(a, lease);
+						}
+						if (step === "resolved") {
+							const after = await this.deps.attempts.read(sessionId);
+							const rr = after.kind === "ok" ? after.record : null;
+							logger.info(
+								`[recreate] ${sessionId}: attempt ${r.attemptId} recovered by the operator (${rr?.outcome?.kind})`,
+							);
+							return {
+								ok: true,
+								status: 200,
+								body: { outcome: rr?.outcome ?? null, retained: rr?.retained ?? null },
+							};
+						}
+						return {
+							ok: false,
+							status: 409,
+							code: step === "stuck" ? "recover-stuck" : "recover-retry",
+							detail: "evidence did not confirm; see the backend log",
+						};
+					} finally {
+						lease.held = false;
+						if (a.state !== "resolved") this.attempts.delete(sessionId);
+					}
+				},
+				{ mode: "fail" },
+			);
+		} catch (err) {
+			if (err instanceof SessionBusyError) return { ok: false, status: 409, code: "busy" };
+			if (err instanceof DockerUnavailableError)
+				return { ok: false, status: 503, code: "docker-unavailable" };
+			throw err;
+		}
 	}
 
 	// ── Boot pass ───────────────────────────────────────────────────────────

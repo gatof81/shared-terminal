@@ -754,7 +754,7 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 			// be starting on the workspace while it is purged. The status
 			// is re-read under the lock: whoever held it before may have
 			// changed it.
-			await sessionLifecycleLock.run(req.params.id, "delete", async () => {
+			await sessionLifecycleLock.run(req.params.id, hard ? "delete-hard" : "delete", async () => {
 				const meta = await sessions.get(req.params.id);
 				if (!meta) throw new NotFoundError("Session not found");
 

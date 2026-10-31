@@ -3145,6 +3145,7 @@ export class DockerManager {
 					imageId: c.ImageID,
 					labels: c.Labels ?? {},
 					mounts: (c.Mounts ?? []).map((m) => m.Destination),
+					finishedAt: null, // a list entry has no State.FinishedAt; inspect() for that
 				}));
 			},
 			listByName: async (fragment) => {
@@ -3156,6 +3157,7 @@ export class DockerManager {
 					imageId: c.ImageID,
 					labels: c.Labels ?? {},
 					mounts: (c.Mounts ?? []).map((m) => m.Destination),
+					finishedAt: null, // a list entry has no State.FinishedAt; inspect() for that
 				}));
 			},
 			exec: (containerId, cmd, timeoutMs, mayAct) =>
@@ -3171,6 +3173,28 @@ export class DockerManager {
 					if (isNotFound(err)) return null;
 					throw err;
 				}
+			},
+			sizeRw: async (id) => {
+				const i = (await d
+					.getContainer(id)
+					.inspect({ size: true } as unknown as Dockerode.ContainerInspectOptions)) as {
+					SizeRw?: number;
+				};
+				return typeof i.SizeRw === "number" ? i.SizeRw : null;
+			},
+			copyPath: async (fromId, p, toId, destDir, mayAct) => {
+				// One tar stream from O's archive endpoint into N's; dockerd
+				// extracts as root, so uids, modes, symlinks and hard links are
+				// what the archive says. The source stream is counted; the
+				// upload resolves when dockerd has extracted everything.
+				if (!mayAct()) throw new Error(`copy of ${p} not started: the attempt may no longer act`);
+				const src = await d.getContainer(fromId).getArchive({ path: p });
+				let bytes = 0;
+				src.on("data", (c: Buffer) => {
+					bytes += c.length;
+				});
+				await d.getContainer(toId).putArchive(src, { path: destDir });
+				return { bytes };
 			},
 		};
 	}
@@ -3955,6 +3979,11 @@ function toRecreateContainer(info: Dockerode.ContainerInspectInfo): RecreateCont
 		imageId: info.Image,
 		labels: info.Config?.Labels ?? {},
 		mounts: (info.Mounts ?? []).map((m) => m.Destination),
+		// Go's zero time while running or never started.
+		finishedAt:
+			info.State?.FinishedAt && !info.State.FinishedAt.startsWith("0001-")
+				? info.State.FinishedAt
+				: null,
 	};
 }
 

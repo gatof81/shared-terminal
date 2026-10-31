@@ -337,6 +337,14 @@ function harness(M: Mods, st: SessionState) {
 			await hooks.afterCas?.();
 			return "applied";
 		},
+		casBack: async (_s, fromId, toId) => {
+			const s = d1Read(sid);
+			if (s.row.container_id !== fromId) return "not-applied";
+			s.row.container_id = toId;
+			s.row.ingest_token_hash = null;
+			d1Write(sid, s);
+			return "applied";
+		},
 		getConfig: async () => d1Read(sid).config,
 		setStatus: async (_s, status) =>
 			d1Update(sid, (s) => {

@@ -88,6 +88,10 @@ services:
       # default (2.1.314); a value in .env now reaches the container.
       - CONVERSATION_COMPOSER_ENABLED=${CONVERSATION_COMPOSER_ENABLED:-}
       - COMPOSER_CLI_VERSIONS=${COMPOSER_CLI_VERSIONS:-}
+      # §2.7.7 carry-over recreation: a path inside this container on the same
+      # filesystem as Docker's data root (DEPLOYMENT.md "Activating an
+      # existing session"). Unset ⇒ carry-overs refuse (disk-space-unknown).
+      - RECREATE_DOCKER_FS_PATH=${RECREATE_DOCKER_FS_PATH:-}
     # Join the shared session network so the backend can reach each session
     # container directly at `http://<container_name>:<port>` (Docker embedded
     # DNS). Session containers are spawned onto the same network by name.

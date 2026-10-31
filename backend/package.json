@@ -18,6 +18,7 @@
     "conversation:disable": "node dist/conversation/cli.js disable",
     "conversation:enable-all": "node dist/conversation/cli.js enable-all",
     "composer:resolve": "node dist/conversation/composerCli.js",
+    "recreate:admin": "node dist/recreate/adminCli.js",
     "restore": "node dist/backup.js restore",
     "docker:build-session": "docker build -t shared-terminal-session ../session-image"
   },
