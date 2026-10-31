@@ -1,0 +1,86 @@
+/* ── Design tokens ──────────────────────────────────────────────
+   The one place a colour, a layer or a radius is named. Every other
+   stylesheet in styles/ refers to these; the literal values are the
+   palette the app always had (GitHub-dark), so promoting them changed
+   nothing on screen. The Chat view carried the first `--c-*` set on
+   `#chat-view`; it now lives here for the whole app.
+
+   `--c-*-rgb` triplets exist so translucent variants can be written as
+   `rgba(var(--c-accent-rgb), 0.15)` — a future theme only has to change
+   the triplet and the solid colour together.
+
+   theme.ts reads --c-bg / --c-text / --c-accent / --c-selection at
+   runtime for xterm's theme, so the terminal and the chrome can't
+   drift apart (keep those four defined on :root). */
+:root {
+  /* Surfaces */
+  --c-bg: #0d1117;
+  --c-surface: #161b22;
+  --c-surface-2: #1c2128;
+  --c-border: #30363d;
+  --c-border-soft: #21262d;
+
+  /* Text */
+  --c-text: #e6edf3;
+  --c-text-2: #c9d1d9;
+  --c-muted: #8b949e;
+  --c-faint: #6e7681;
+  --c-dim: #484f58;
+  --c-white: #fff;
+
+  /* Accent + semantic */
+  --c-accent: #58a6ff;
+  --c-accent-strong: #1f6feb;
+  --c-accent-bg: rgba(88, 166, 255, 0.12);
+  --c-ok: #3fb950;
+  --c-ok-strong: #2ea043;
+  --c-ok-bg: #238636;
+  --c-warn: #e3b341;
+  --c-warn-strong: #9e6a03;
+  --c-err: #f85149;
+  --c-err-soft: #ff8682;
+
+  /* RGB triplets for rgba() variants */
+  --c-accent-rgb: 88, 166, 255;
+  --c-ok-rgb: 63, 185, 80;
+  --c-warn-rgb: 227, 179, 65;
+  --c-err-rgb: 248, 81, 73;
+  --c-muted-rgb: 139, 148, 158;
+
+  /* Chat-specific */
+  --c-user-bg: #1a2742;
+  --c-user-border: #22406a;
+  --c-report: #3fb950;
+
+  /* Terminal (xterm theme, read by terminal.ts) */
+  --c-selection: #264f78;
+
+  /* Type */
+  --font-ui: system-ui, sans-serif;
+  --font-mono: "Cascadia Code", "Fira Code", "JetBrains Mono", "Monaco", "Courier New", monospace;
+
+  /* Radius */
+  --radius-s: 6px;
+  --radius-m: 10px;
+  --radius-l: 14px;
+
+  /* Spacing scale (rem) */
+  --s-1: 0.25rem;
+  --s-2: 0.5rem;
+  --s-3: 0.75rem;
+  --s-4: 1rem;
+  --s-5: 1.5rem;
+  --s-6: 2rem;
+
+  /* Layers, lowest to highest. The overlays (Files / Git / Chat) sit
+     above the terminal panes and the selection hint; the mobile sidebar
+     drawer shares their layer because the two never overlap (the
+     drawer covers the whole terminal area); the mobile view nav floats
+     above the overlays; dialogs above everything. */
+  --z-hint: 10;
+  --z-drawer-backdrop: 15;
+  --z-drawer: 20;
+  --z-overlay: 20;
+  --z-nav: 30;
+  --z-modal: 100;
+}

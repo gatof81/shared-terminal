@@ -1,0 +1,34 @@
+/* ── Toast ──────────────────────────────────────────────────── */
+#toast {
+  position: fixed;
+  /* position: fixed ignores the body's safe-area padding, so the toast
+     adds its own insets — otherwise it sits under the home indicator
+     on notched iPhones (bottom) or the rounded corner in landscape
+     (right). calc() with a 0px env fallback is a no-op on desktop. */
+  bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
+  right: calc(1.5rem + env(safe-area-inset-right, 0px));
+  background: var(--c-border-soft);
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  padding: 0.6rem 1rem;
+  font-size: 0.82rem;
+  max-width: 360px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+}
+#toast.visible {
+  opacity: 1;
+}
+#toast.error {
+  border-color: var(--c-err);
+  color: var(--c-err);
+}
+/* Success variant — used for the copy-on-select confirmation. Held to a
+ * shorter timeout in showCopySuccessToast() because the auto-copy path
+ * fires on every selection-finalise; a 4s lingering toast would be
+ * spammy. Green chip matches GitHub's success accent. */
+#toast.success {
+  border-color: var(--c-ok);
+  color: var(--c-ok);
+}

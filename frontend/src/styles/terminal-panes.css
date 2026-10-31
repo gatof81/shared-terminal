@@ -1,0 +1,112 @@
+/* Panes stack absolutely; toggling .active avoids remounting xterm. */
+.tab-pane {
+  position: absolute;
+  inset: 4px;
+  display: none;
+}
+.tab-pane.active {
+  display: block;
+}
+/* First-session hint that points users at the Shift+drag selection
+ * gesture. tmux mouse-on (session-image/tmux.conf:54) forwards plain
+ * mouse drags to tmux for pane/copy-mode handling, so without the
+ * Shift modifier xterm never registers a selection and the
+ * copy-on-select path (terminal.ts) has nothing to copy — silent
+ * dead end with no inline signal. One-time, persisted via
+ * localStorage; clicking ✕ on any pane's badge clears the flag and
+ * removes the badge from every currently-open pane (see
+ * `injectSelectionHint` in main.ts). */
+.select-hint {
+  position: absolute;
+  bottom: 8px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 4px 4px 10px;
+  background: rgba(22, 27, 34, 0.88);
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  color: var(--c-muted);
+  font-size: 12px;
+  font-family: inherit;
+  z-index: var(--z-hint);
+  /* Don't let the badge body steal selection drags or text-select on
+   * the terminal beneath it — only the close button needs to swallow
+   * clicks. Browsers honour pointer-events:auto on the descendant
+   * even when the parent is pointer-events:none. */
+  pointer-events: none;
+  user-select: none;
+}
+.select-hint kbd {
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border);
+  border-radius: 3px;
+  padding: 0 5px;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--c-text);
+}
+.select-hint button {
+  pointer-events: auto;
+  background: transparent;
+  border: 0;
+  color: var(--c-muted);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+.select-hint button:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--c-text);
+}
+#terminal-container .xterm {
+  height: 100%;
+}
+/* Stop the OS from claiming vertical drags as page-scroll — our
+   touch handler in terminal.ts routes them to term.scrollLines or
+   synthetic arrow keys. touch-action has to be on xterm's own
+   layers, not just the wrapping container. */
+#terminal-container .xterm,
+#terminal-container .xterm-viewport,
+#terminal-container .xterm-screen,
+/* xterm 6.x wraps the pane in a VS-Code scrollable element (#354) —
+   without touch-action:none on it too, iOS claims vertical drags for
+   its (empty) scroll surface before our touch handler sees them. */
+#terminal-container .xterm-scrollable-element {
+  touch-action: none;
+}
+/* Hide xterm.js's built-in viewport scrollbar. xterm's local scrollback
+   is structurally empty in our stack — tmux manages the pane in-place
+   so bytes never flow off the top of xterm's buffer (see WheelUpPane
+   comment block in session-image/tmux.conf for the full rationale).
+   The scrollbar that xterm draws unconditionally for `overflow-y:
+   scroll` therefore reflects nothing scrollable; it's visual noise
+   and has no use. `overflow-y: hidden !important` (with !important
+   because xterm.js's own stylesheet sets `scroll`) hides it and
+   short-circuits the native scroll path. Pane history navigation
+   happens through tmux copy-mode (entered automatically on wheel-up
+   per the WheelUpPane binding), not xterm-viewport scroll. */
+#terminal-container .xterm-viewport {
+  overflow-y: hidden !important;
+}
+/* xterm 6.x (#354) additionally renders a VS-Code-style OVERLAY
+   scrollbar (.xterm-scrollable-element > .scrollbar) on top of the
+   native viewport one the rule above hides. Same rationale: xterm's
+   local scrollback is structurally empty here, so any scrollbar it
+   draws reflects nothing scrollable. Hide the overlay too — without
+   this the fade-in thumb flashes over the pane on every wheel event
+   even though there is nowhere to scroll. */
+#terminal-container .xterm-scrollable-element > .scrollbar {
+  display: none !important;
+}
+#empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: var(--c-muted);
+  font-size: 0.9rem;
+}

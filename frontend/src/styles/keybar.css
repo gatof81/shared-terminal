@@ -1,0 +1,51 @@
+/* ── Mobile extra-keys bar ──────────────────────────────────────
+   Esc/Tab/Ctrl/^C/arrows for soft-keyboard terminals; markup in
+   index.html, wiring + focus-preservation rationale in keyBar.ts.
+   Hidden by default everywhere; shown only when BOTH gates open:
+   the JS `hidden` attribute (session active — same lifecycle as
+   the actions + button) and this media query (mobile breakpoint
+   AND coarse primary pointer, so a narrow DESKTOP window doesn't
+   grow a touch bar it can't use — it has a real keyboard). */
+#key-bar {
+  display: none;
+}
+@media (max-width: 768px) and (pointer: coarse) {
+  #key-bar:not([hidden]) {
+    display: flex;
+  }
+  #key-bar {
+    flex-shrink: 0;
+    gap: 6px;
+    padding: 6px;
+    background: var(--c-surface);
+    border-top: 1px solid var(--c-border);
+    /* No long-press text-selection magnifier / callout while holding
+       an arrow for key-repeat. */
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+  #key-bar button {
+    flex: 1;
+    min-height: 40px; /* comfortable touch target */
+    background: var(--c-bg);
+    border: 1px solid var(--c-border);
+    border-radius: 6px;
+    color: var(--c-text-2);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.9rem;
+    /* Gestures starting on a key are key presses, never page pans or
+       double-tap zooms. */
+    touch-action: none;
+  }
+  #key-bar button:active {
+    background: var(--c-border-soft);
+    border-color: var(--c-accent);
+  }
+  /* Sticky Ctrl armed state — mirrors aria-pressed, set in keyBar.ts. */
+  #key-bar-ctrl.armed {
+    background: var(--c-accent-strong);
+    border-color: var(--c-accent-strong);
+    color: var(--c-white);
+  }
+}

@@ -1,0 +1,239 @@
+/* ── Modal (invites) ────────────────────────────────────────── */
+.modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  align-items: center;
+  justify-content: center;
+}
+.modal.open {
+  display: flex;
+}
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+}
+.modal-card {
+  position: relative;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 12px;
+  padding: 1.25rem 1.25rem 1rem;
+  width: 480px;
+  max-width: 92vw;
+  /* dvh, not vh: on iOS Safari `vh` is the LARGE viewport (URL bar
+     hidden), so an 80vh modal on a fresh page-load (URL bar visible)
+     can extend past the visible area and put its action buttons /
+     scroll region off-screen. dvh tracks the actual visible height.
+     Same rationale for the other dvh caps below. */
+  max-height: 80dvh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  /* Scroll containment for the modal's children — without this,
+     content that exceeds max-height (a dense Advanced tab on a
+     short viewport, the new-session modal in particular) clips
+     past the rounded border invisibly with no scrollbar to recover
+     it. The actual scroll container is one of the modal's children
+     (e.g. `.session-tab-panel.is-active` for the new-session modal,
+     `.invite-list` for the invites modal) so the modal chrome —
+     header, tabs, action bar — stays anchored while the body
+     scrolls. See issue #247. */
+  overflow: hidden;
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+.modal-header h2 {
+  font-size: 1rem;
+  color: var(--c-text);
+  font-weight: 600;
+}
+.modal-close {
+  background: transparent;
+  border: none;
+  color: var(--c-muted);
+  font-size: 1.4rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 0.4rem;
+  border-radius: 4px;
+}
+.modal-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--c-text);
+}
+.modal-hint {
+  font-size: 0.78rem;
+  color: var(--c-muted);
+  margin-bottom: 0.85rem;
+  line-height: 1.45;
+}
+#invite-create-btn {
+  background: var(--c-ok-bg);
+  border: none;
+  border-radius: 6px;
+  padding: 0.45rem 0.75rem;
+  color: var(--c-white);
+  font-size: 0.82rem;
+  cursor: pointer;
+  margin-bottom: 0.85rem;
+  align-self: flex-start;
+}
+#invite-create-btn:hover {
+  background: var(--c-ok-strong);
+}
+#invite-create-btn:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+.invite-list {
+  flex: 1;
+  overflow-y: auto;
+  border-top: 1px solid var(--c-border-soft);
+  padding-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.invite-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.45rem 0.6rem;
+  background: var(--c-bg);
+  border: 1px solid var(--c-border-soft);
+  border-radius: 6px;
+  font-size: 0.8rem;
+}
+.invite-row.used {
+  opacity: 0.55;
+}
+.invite-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--c-text);
+  flex: 1;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.invite-status {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--c-muted);
+}
+.invite-status.unused {
+  color: var(--c-ok);
+}
+.invite-action-btn {
+  background: transparent;
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  color: var(--c-muted);
+  padding: 0.2rem 0.5rem;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+.invite-action-btn:hover {
+  color: var(--c-text);
+  border-color: var(--c-accent);
+}
+.invite-action-btn.revoke:hover {
+  color: var(--c-err);
+  border-color: var(--c-err);
+}
+.invite-empty {
+  text-align: center;
+  color: var(--c-muted);
+  font-size: 0.8rem;
+  padding: 1rem 0;
+}
+
+/* ── Modal (paste) ─────────────────────────────────────────── */
+#paste-textarea {
+  background: var(--c-bg);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  color: var(--c-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  padding: 0.55rem 0.65rem;
+  resize: vertical;
+  min-height: 110px;
+  max-height: 50dvh;
+  margin-bottom: 0.75rem;
+  width: 100%;
+  box-sizing: border-box;
+}
+#paste-textarea:focus {
+  outline: none;
+  border-color: var(--c-accent);
+}
+.paste-modal-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+#paste-clipboard-btn {
+  background: transparent;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  color: var(--c-muted);
+  font-size: 0.82rem;
+  padding: 0.4rem 0.85rem;
+  cursor: pointer;
+}
+#paste-clipboard-btn:hover {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+#paste-send-btn {
+  background: var(--c-ok-bg);
+  border: 1px solid var(--c-ok-bg);
+  border-radius: 6px;
+  color: var(--c-white);
+  font-size: 0.82rem;
+  padding: 0.4rem 0.85rem;
+  cursor: pointer;
+}
+#paste-send-btn:hover:not(:disabled) {
+  background: var(--c-ok-strong);
+  border-color: var(--c-ok-strong);
+}
+#paste-send-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 0 1fr;
+  overflow: hidden;
+  position: relative;
+}
+main.sidebar-open {
+  grid-template-columns: 260px 1fr;
+}
+/* No transition on the grid: an animated grid-template-columns change
+   races the terminal's resize path. ResizeObserver fires every frame
+   of the animation, fitAddon recomputes cols immediately, but the
+   backend resize message is debounced 100 ms — so for ~300 ms after
+   each toggle, tmux is still emitting at the old col count while
+   xterm renders at the new one. Output (prompt redraw, key echo,
+   status bar) lands in cells that don't match what's on screen,
+   producing visible glyph drift and "text outside the input line".
+   Instant grid change keeps the two sides locked.
+   The mobile sidebar drawer (transform on #sidebar inside the
+   max-width media query) is unaffected because its open/close does
+   not change the terminal's width — the drawer floats above the
+   terminal on mobile rather than pushing it. */
+main:not([data-sidebar-ready]) #sidebar {
+  transition: none !important;
+}

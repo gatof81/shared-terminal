@@ -1,0 +1,154 @@
+/* ── Mobile ─────────────────────────────────────────────────── */
+/* Breakpoint mirrored in main.ts as MOBILE_BREAKPOINT_PX — keep in sync. */
+@media (max-width: 768px) {
+  /* iOS Safari auto-zooms the whole page when a focused text control's
+     computed font-size is below 16px — and does NOT zoom back out on
+     blur, leaving the layout cropped until the user pinches. Most form
+     controls in this sheet sit at 0.78–0.9rem (≈12.5–14.4px), so every
+     login field / env-var cell / modal input triggered the zoom on
+     phones. Forcing 16px on text-editing controls (only these trigger
+     the heuristic — buttons/labels don't) removes the zoom at the cost
+     of slightly larger mobile forms, which is the accessible fix;
+     maximum-scale=1 in the viewport meta would also work but disables
+     user pinch-zoom globally.
+     !important is load-bearing: the per-component rules this must beat
+     (.auth-card input, .modal-field input, .env-table input, …) all
+     carry class specificity, which a bare element selector loses to
+     regardless of the media query.
+     xterm's hidden .xterm-helper-textarea is deliberately INCLUDED:
+     it's the element that actually receives focus when the user taps
+     the terminal, so a small computed font-size there triggers the
+     same auto-zoom on every terminal tap. It's opacity:0 / width:0
+     (xterm.css), so the forced size changes nothing visually. */
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+
+  /* Drop the grid column entirely on mobile — the sidebar floats
+     over the terminal as a drawer instead of pushing it. */
+  main,
+  main.sidebar-open {
+    grid-template-columns: 1fr;
+  }
+  #sidebar {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(280px, 85vw);
+    z-index: var(--z-drawer);
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: 4px 0 16px rgba(0, 0, 0, 0.4);
+  }
+  main.sidebar-open #sidebar {
+    transform: translateX(0);
+  }
+  main.sidebar-open #sidebar-backdrop {
+    /* `position: absolute; inset: 0` lives on the base #sidebar-backdrop
+       rule so the element is unconditionally out of grid flow — the
+       only mobile-specific bit here is paint + stacking. */
+    display: block;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: var(--z-drawer-backdrop);
+  }
+
+  /* Slim header — every pixel here comes off the terminal viewport.
+     Drop the title text and the desktop user/invites/logout cluster;
+     the sidebar drawer's footer surfaces the same actions at the
+     ergonomic bottom of the screen instead. */
+  header {
+    padding: 0.45rem 0.6rem;
+    gap: 0.5rem;
+  }
+  header h1 {
+    /* Hide rather than remove from layout — keeps the document
+       outline intact for screen readers. */
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    /* CSS 2.1 requires the rect() args to be comma-separated; the space-
+       separated form is a quirk most browsers still tolerate but isn't
+       guaranteed long-term. clip itself is deprecated, so pair it with the
+       modern clip-path so future engines that drop clip still hide the
+       node. Both rules together remain the canonical "visually hidden"
+       recipe (matches Bootstrap's .visually-hidden, Tailwind's sr-only). */
+    clip: rect(0, 0, 0, 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .header-right {
+    display: none;
+  }
+  /* The chrome-toggle replaces the title as the centre-of-screen widget
+     while a session is active — its label shows "session › tab" so the
+     user always knows their context without expanding anything. */
+  #chrome-toggle:not([hidden]) {
+    display: inline-flex;
+    flex: 1;
+  }
+
+  /* Surface the mobile menu inside the sidebar drawer. */
+  #sidebar-footer {
+    display: flex;
+  }
+
+  /* When the chrome drawer is closed (default on mobile), force the
+     toolbar + tabs out of the layout entirely so the terminal owns
+     the full viewport. The desktop inline `display: flex/none` set
+     by main.ts toolbar/tabs visibility logic is preserved when the
+     drawer is open — we just gate it behind .chrome-open. */
+  main:not(.chrome-open) #terminal-toolbar,
+  main:not(.chrome-open) #terminal-tabs {
+    display: none !important;
+  }
+
+  /* Compact toolbar+tabs when they DO show — saves another ~30 % of
+     vertical space on a 430-pt-wide screen. */
+  #terminal-toolbar {
+    padding: 0.4rem 0.6rem;
+    gap: 0.5rem;
+    font-size: 0.72rem;
+    /* The Terminal/Files switch made the row wider than a ~400px phone;
+       scroll sideways rather than wrap, so opening the chrome drawer
+       doesn't steal an extra row from the terminal. */
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  #terminal-tabs {
+    padding: 4px 6px 0 6px;
+  }
+  .tab-chip {
+    padding: 0.3rem 0.45rem;
+    max-width: 140px;
+  }
+  /* Touch targets — tap-to-close needs to stay reachable without zoom,
+     and the always-visible × is fine on mobile (no hover state to
+     gate it on like desktop has). */
+  .tab-close {
+    opacity: 1;
+    padding: 4px 6px;
+  }
+
+  /* Active session/tab in the sidebar should already be obvious — but
+     surfacing the action buttons (start/stop/✕) only on hover doesn't
+     work without a hover state on touch. Show them always on mobile. */
+  .session-actions {
+    opacity: 1;
+  }
+
+  /* Actions (+) button lives at the right edge of the mobile header.
+     chrome-toggle has `flex: 1` when active, but it can be hidden (no
+     session selected) — `margin-left: auto` pins actions-btn to the
+     right edge in both cases. Desktop doesn't need the auto-margin
+     because .header-right (which sits earlier in the DOM and carries
+     `margin-left: auto` itself) already pushes itself + actions-btn
+     to the right; on mobile .header-right is `display: none` and
+     would-be auto-pusher disappears, so we need our own. */
+  #actions-btn:not([hidden]) {
+    margin-left: auto;
+  }
+}

@@ -1,0 +1,69 @@
+/* ── Mobile view nav (Chat · Terminal · Files · Git) ─────────────────
+   Bottom bar inside #terminal-area, shown only on narrow screens and
+   only while an overlay covers the terminal (viewSwitch.ts toggles
+   `hidden` and #terminal-area.view-nav-on). The terminal view keeps its
+   own key bar at the bottom, so the two never stack. */
+#view-nav {
+  display: none;
+}
+@media (max-width: 768px) {
+  #view-nav:not([hidden]) {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: var(--z-nav);
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    background: var(--c-surface);
+    border-top: 1px solid var(--c-border);
+    min-height: 3.4rem;
+  }
+  #view-nav button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.15rem;
+    background: transparent;
+    border: 0;
+    color: var(--c-muted);
+    font: inherit;
+    font-size: 0.68rem;
+    padding: 0.35rem 0 0.3rem;
+    min-height: 3.4rem;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #view-nav button svg {
+    width: 22px;
+    height: 22px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  #view-nav button[aria-pressed="true"] {
+    color: var(--c-accent);
+  }
+  #view-nav button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  #view-nav button:focus-visible {
+    outline: 2px solid var(--c-accent);
+    outline-offset: -2px;
+  }
+  /* Overlays stop above the nav; the nav replaces their "‹ Terminal" header buttons. */
+  #terminal-area.view-nav-on #files-view,
+  #terminal-area.view-nav-on #git-view,
+  #terminal-area.view-nav-on #chat-view {
+    bottom: 3.4rem;
+  }
+  #terminal-area.view-nav-on #files-to-terminal-btn,
+  #terminal-area.view-nav-on #git-to-terminal-btn,
+  #terminal-area.view-nav-on #chat-to-terminal-btn {
+    display: none;
+  }
+}

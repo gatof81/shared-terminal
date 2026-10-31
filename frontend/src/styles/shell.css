@@ -1,0 +1,138 @@
+/* ── App view ───────────────────────────────────────────────── */
+#app-view {
+  display: none;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1.25rem;
+  background: var(--c-surface);
+  border-bottom: 1px solid var(--c-border);
+  flex-shrink: 0;
+}
+header h1 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--c-accent);
+}
+#sidebar-toggle {
+  background: transparent;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  color: var(--c-muted);
+  padding: 0.3rem 0.55rem;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+#sidebar-toggle:hover {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+#sidebar-toggle svg {
+  display: block;
+}
+/* Chrome-toggle: a mobile-only button that surfaces the current session/tab
+   context AND toggles the toolbar+tabs drawer. Hidden on desktop because the
+   toolbar+tabs are always visible there; the explicit `hidden` attribute on
+   the element gives us the same effect when the app first paints, then JS
+   removes/re-applies it as the session state changes. */
+#chrome-toggle {
+  display: none;
+  align-items: center;
+  gap: 0.4rem;
+  background: transparent;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  color: var(--c-text-2);
+  font-size: 0.78rem;
+  padding: 0.3rem 0.55rem;
+  cursor: pointer;
+  /* Squeeze the label so it ellipsises rather than wrapping when the
+     active tab name is long ("npm-run-dev-watch-mode" etc.). */
+  min-width: 0;
+  max-width: 60vw;
+}
+#chrome-toggle:hover {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+#chrome-toggle[hidden] {
+  display: none !important;
+}
+#chrome-toggle-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+#chrome-toggle-icon {
+  flex-shrink: 0;
+  transition: transform 0.15s ease;
+}
+main.chrome-open #chrome-toggle-icon {
+  transform: rotate(180deg);
+}
+.header-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+#user-display {
+  font-size: 0.8rem;
+  color: var(--c-ok);
+}
+#logout-btn {
+  background: transparent;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  color: var(--c-muted);
+  font-size: 0.75rem;
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+}
+#logout-btn:hover {
+  border-color: var(--c-err);
+  color: var(--c-err);
+}
+#templates-btn,
+#invites-btn,
+#admin-btn,
+#notifications-btn {
+  background: transparent;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  color: var(--c-muted);
+  font-size: 0.75rem;
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+}
+#templates-btn:hover,
+#invites-btn:hover,
+#admin-btn:hover,
+#notifications-btn:hover:not(:disabled) {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+/* "on" — subscribed on this device. */
+#notifications-btn.enabled,
+#sidebar-notifications-btn.enabled {
+  border-color: var(--c-ok);
+  color: var(--c-ok);
+}
+/* "blocked" — permission denied at the browser level; the click can't
+   recover it, so render it inert with an explanatory tooltip/label. */
+#notifications-btn:disabled,
+#sidebar-notifications-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
