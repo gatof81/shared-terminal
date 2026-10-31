@@ -82,6 +82,12 @@ services:
       # .env-less boot stays byte-identical.
       - CONVERSATION_ENABLED=${CONVERSATION_ENABLED:-}
       - CONVERSATION_ALLOW_USERS=${CONVERSATION_ALLOW_USERS:-}
+      # Composer 3.2 (docs/CONVERSATION.md §8, DEPLOYMENT.md "Composer").
+      # Same trap, same shape: empty ⇒ the backend keeps the composer OFF
+      # (routes not mounted, canSendInput false) and the CLI allowlist at its
+      # default (2.1.314); a value in .env now reaches the container.
+      - CONVERSATION_COMPOSER_ENABLED=${CONVERSATION_COMPOSER_ENABLED:-}
+      - COMPOSER_CLI_VERSIONS=${COMPOSER_CLI_VERSIONS:-}
     # Join the shared session network so the backend can reach each session
     # container directly at `http://<container_name>:<port>` (Docker embedded
     # DNS). Session containers are spawned onto the same network by name.
