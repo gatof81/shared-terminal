@@ -99,7 +99,11 @@ jobs:
 
   frontend-e2e:
     name: Frontend e2e (Playwright, desktop + mobile)
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: `playwright install --with-deps` only knows
+    # the Ubuntu releases its version shipped with (1.52 → up to 24.04); on a
+    # newer runner it refuses to install the browser's shared libraries.
+    # Bump the runner together with the Playwright version.
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: frontend
