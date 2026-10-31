@@ -393,14 +393,17 @@ requested for it; the Claude Code version running in its pane is in
    conversation appears in Chat with its `user_prompt`. Without this the
    composer can never confirm a send (`capture-inactive`).
 2. **CLI compatible, pane interactive.** The conversation row shows
-   `kind: interactive`, a `paneId`, `claudeVersion` in the allowlist and
-   `canSendInput: true` once the flag is on; `claude --version` in the pane
-   matches. Admin check: `GET /api/admin/sessions/<pilot>/composer/panes` →
-   `panes: []`.
+   `kind: interactive`, a `paneId` and `claudeVersion` in the allowlist;
+   `claude --version` in the pane matches. (`canSendInput` is still `false`
+   here: the flag is off.)
 3. **Turn the flag on** for the backend only (`CONVERSATION_COMPOSER_ENABLED=true`
    in `.env`, `docker compose up -d app`); the boot log prints
-   `composer ENABLED (CLI versions: …)`. Reload the frontend: the composer at
-   the bottom of the thread is enabled while the CLI is at its prompt.
+   `composer ENABLED (CLI versions: …)`. Only now do the composer routes
+   exist (they answer 404 while the flag is off, the admin ones too):
+   `GET /api/admin/sessions/<pilot>/composer/panes` → `panes: []`, and the
+   conversation row shows `canSendInput: true`. Reload the frontend: the
+   composer at the bottom of the thread is enabled while the CLI is at its
+   prompt.
 4. **Send one short, single-line message** from Chat (no leading `/` or `!`).
    Expected within a second: the optimistic bubble, then the CLI's own
    `user_prompt` replacing it, HTTP `202 {result: "delivered", promptId}`,
@@ -417,12 +420,15 @@ requested for it; the Claude Code version running in its pane is in
    with `/` (400 `unsupported-prefix`); a send with text already typed in the
    terminal's input (409 `composer-not-empty`); a send while a `/help` dialog
    is open (409 `needs-terminal`).
-8. **Turn the flag off** (`CONVERSATION_COMPOSER_ENABLED=` or remove it,
-   `docker compose up -d app`): the route answers 404, every conversation
-   reports `canSendInput: false`, the frontend shows the composer disabled
-   with its reason. The pilot's pane records must be empty before stopping
-   (`…/composer/panes` → `panes: []`); if one is left, resolve it with
-   `npm run composer:resolve` (above) before the next step.
+8. **Check and resolve the pane records while the flag is still on**:
+   `GET /api/admin/sessions/<pilot>/composer/panes` must answer `panes: []`;
+   if an operation is left, resolve it with `npm run composer:resolve`
+   (above) first — both the endpoint and the CLI need the flag on.
+9. **Turn the flag off** (`CONVERSATION_COMPOSER_ENABLED=` or remove it,
+   `docker compose up -d app`) and verify only this: the send route and the
+   admin composer routes answer 404, every conversation reports
+   `canSendInput: false`, the frontend shows the composer disabled with its
+   reason.
 
 Abort the pilot at the first `uncertain`, `misdelivered` or 502 that is not
 explained by a deliberate negative check; the pane record and the
