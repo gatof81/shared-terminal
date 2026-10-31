@@ -8,6 +8,7 @@ import { type IDisposable, type ILink, type ILinkProvider, Terminal } from "@xte
 import "@xterm/xterm/css/xterm.css";
 import { type SpecialKey, specialKeySequence } from "./keys.js";
 import { isRetryableCloseCode, MAX_RECONNECT_ATTEMPTS, reconnectDelayMs } from "./reconnect.js";
+import { readXtermTheme } from "./theme.js";
 
 /** "disconnected" and "reconnecting" are frontend-only synthetic states
  *  (the backend only ever sends "running"): "reconnecting" while the
@@ -169,12 +170,7 @@ export function openTerminalSession(opts: {
 
 	// ── xterm.js setup ──────────────────────────────────────────────────────
 	const term = new Terminal({
-		theme: {
-			background: "#0d1117",
-			foreground: "#e6edf3",
-			cursor: "#58a6ff",
-			selectionBackground: "#264f78",
-		},
+		theme: readXtermTheme(),
 		fontFamily:
 			'"Cascadia Code", "Fira Code", "JetBrains Mono", "Monaco", "Courier New", monospace',
 		fontSize: fontSize ?? 14,

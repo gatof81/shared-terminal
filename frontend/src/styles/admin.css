@@ -1,0 +1,457 @@
+/* ── Admin dashboard (#241e) ───────────────────────────────────
+   Wider modal card + scroll-aware inner layout. Stats live in a
+   responsive grid; session rows below. Same scroll-containment
+   shape as the new-session modal — header/controls anchored,
+   content scrolls inside the `.modal-card` clipping boundary. */
+.admin-modal-card {
+  width: 720px;
+  max-width: 96vw;
+}
+
+/* Observe-mode modal (#201e). Wider than the admin card so a
+   typical 120-col xterm fits without horizontal scroll, and tall
+   enough to render a usable terminal. The xterm host stretches to
+   fill the available space inside the modal card. */
+.observe-modal-card {
+  width: min(96vw, 1100px);
+  height: min(80dvh, 720px);
+  display: flex;
+  flex-direction: column;
+}
+/* Right-side cluster in the observe modal header: the admin-only
+   Take control button sits left of the close ×. */
+.observe-modal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.observe-take-control-btn {
+  background: var(--c-border-soft);
+  border: 1px solid var(--c-border);
+  color: var(--c-text);
+  border-radius: 6px;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.observe-take-control-btn:hover {
+  background: var(--c-border);
+}
+/* While operating, the button becomes the accented "Release control"
+   affordance — the escalated state is loud so it's never ambiguous
+   that keystrokes are landing in someone else's session. */
+.observe-take-control-btn--active {
+  background: var(--c-warn-strong);
+  border-color: #bb8009;
+  color: var(--c-white);
+}
+.observe-take-control-btn--active:hover {
+  background: #bb8009;
+}
+/* Observe-log rows: name + mode pill share one line. */
+.admin-observe-name-line {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+.observe-mode-pill {
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1;
+  padding: 0.2rem 0.45rem;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+/* Neutral for a passive watch, accent for an admin who drove the
+   session — matches the take-control button's escalated colour so the
+   two "operate" signals read as the same thing. */
+.observe-mode-pill--observe {
+  background: var(--c-border-soft);
+  border: 1px solid var(--c-border);
+  color: var(--c-muted);
+}
+.observe-mode-pill--operate {
+  background: rgba(158, 106, 3, 0.2);
+  border: 1px solid var(--c-warn-strong);
+  color: #e3a008;
+}
+#observe-terminal-host {
+  flex: 1;
+  min-height: 0;
+  background: var(--c-bg);
+  border: 1px solid var(--c-border-soft);
+  border-radius: 6px;
+  padding: 0.5rem;
+}
+/* xterm sets its own dimensions inside the host; ensure the
+   terminal canvas fills the host without overflowing. */
+#observe-terminal-host .xterm {
+  height: 100%;
+}
+.admin-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.85rem;
+  flex-shrink: 0;
+}
+.admin-controls button {
+  background: var(--c-border-soft);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  padding: 0.4rem 0.85rem;
+  color: var(--c-text);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.admin-controls button:hover {
+  background: var(--c-border);
+}
+.admin-controls button:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+.admin-uptime {
+  font-size: 0.78rem;
+  color: var(--c-muted);
+}
+#admin-scroll-area {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.admin-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0.6rem;
+}
+.admin-stat-card {
+  background: var(--c-bg);
+  border: 1px solid var(--c-border-soft);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.admin-stat-card h4 {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--c-muted);
+  margin-bottom: 0.2rem;
+}
+.admin-stat-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.82rem;
+}
+.admin-stat-key {
+  color: var(--c-text-2);
+}
+.admin-stat-value {
+  color: var(--c-accent);
+  font-variant-numeric: tabular-nums;
+}
+.admin-section-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--c-text);
+  margin-bottom: 0.5rem;
+}
+/* #201e-2: section header that hosts an inline action button (e.g.
+   "Groups" + "+ New group"). The h3 keeps its bottom margin removed
+   so the row aligns; the button sits flush to the right. */
+.admin-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-bottom: 0.5rem;
+}
+.admin-section-header .admin-section-title {
+  margin-bottom: 0;
+}
+.admin-section-header button {
+  background: var(--c-border-soft);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  padding: 0.3rem 0.65rem;
+  color: var(--c-text);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.admin-section-header button:hover {
+  background: var(--c-border);
+}
+.admin-session-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--c-border-soft);
+  border-radius: 6px;
+  background: var(--c-bg);
+  margin-bottom: 0.4rem;
+}
+.admin-session-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+  flex: 1;
+}
+.admin-session-meta strong {
+  font-size: 0.88rem;
+  color: var(--c-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.admin-session-sub {
+  font-size: 0.74rem;
+  color: var(--c-muted);
+}
+.admin-session-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+.admin-session-actions button {
+  background: var(--c-border-soft);
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  padding: 0.25rem 0.55rem;
+  font-size: 0.75rem;
+  color: var(--c-text-2);
+  cursor: pointer;
+}
+.admin-session-actions button:hover {
+  background: var(--c-border);
+  border-color: var(--c-accent);
+}
+.admin-session-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.admin-session-actions button.admin-session-delete:hover {
+  border-color: var(--c-err);
+  color: var(--c-err);
+}
+
+/* #270 — per-row stacked layout so the inline edit form sits under
+   the header without breaking the original flex-row alignment. */
+.admin-session-row--stacked {
+  flex-direction: column;
+  align-items: stretch;
+}
+.admin-session-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  width: 100%;
+}
+.admin-session-resources {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.72rem;
+  color: var(--c-muted);
+}
+
+/* #270 — inline edit-caps form. Two number inputs + Save / Cancel.
+   The form is hidden by default (rendered on first click) and
+   toggles via the `hidden` attribute, NOT a `display: none` class —
+   simpler and matches the rest of this file's hidden-attribute use. */
+.admin-session-edit-caps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: end;
+  padding: 0.5rem 0;
+  margin-top: 0.4rem;
+  border-top: 1px dashed var(--c-border-soft);
+}
+.admin-session-edit-caps label {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.72rem;
+  color: var(--c-muted);
+  gap: 0.2rem;
+}
+.admin-session-edit-caps input[type="number"] {
+  background: var(--c-bg);
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  color: var(--c-text);
+  font-size: 0.8rem;
+  padding: 0.25rem 0.4rem;
+  width: 7rem;
+}
+.admin-session-edit-caps button {
+  background: var(--c-border-soft);
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.78rem;
+  color: var(--c-text-2);
+  cursor: pointer;
+}
+.admin-session-edit-caps button[type="submit"]:hover {
+  border-color: var(--c-accent);
+}
+.admin-session-edit-caps button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* The list scrolls inside the modal so a user with the maximum
+   100 templates can reach every card on a short viewport — same
+   inner-scroll shape as `.session-tab-panel.is-active` and
+   `.invite-list`. Issue #247. */
+#templates-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.template-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--c-border-soft);
+  border-radius: 8px;
+  margin-bottom: 0.5rem;
+  background: var(--c-bg);
+}
+.template-card-header strong {
+  font-size: 0.95rem;
+  color: var(--c-text);
+}
+.template-card-description {
+  font-size: 0.8rem;
+  color: var(--c-muted);
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.template-card-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+.template-card-actions button {
+  background: var(--c-border-soft);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  padding: 0.25rem 0.7rem;
+  color: var(--c-text);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.template-card-actions button:hover {
+  background: var(--c-border);
+}
+.template-card-delete:hover {
+  background: rgba(var(--c-err-rgb), 0.12);
+  border-color: rgba(var(--c-err-rgb), 0.45);
+  color: var(--c-err-soft);
+}
+
+.modal-field-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.55rem;
+}
+.modal-field-checkbox input[type="checkbox"] {
+  margin: 0;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  clip: rect(0 0 0 0);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* postCreate live-tail panel (#185 / PR 185b2b). The same DOM node
+   gets the `bootstrap-error` class added on top when the WS sends a
+   terminal `fail` message — `bootstrap-error` selectors below win
+   via specificity to recolor the border + heading. Don't merge them
+   into a single class set; the staged styling makes the user-visible
+   transition (running → failed) immediate without re-rendering. */
+.bootstrap-tail {
+  margin-top: 0.85rem;
+  background: rgba(var(--c-accent-rgb), 0.06);
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  padding: 0.75rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.bootstrap-tail strong {
+  color: var(--c-accent);
+  font-size: 0.85rem;
+}
+
+/* postCreate hard-fail panel inside the new-session modal (#185). */
+.bootstrap-error {
+  margin-top: 0.85rem;
+  background: rgba(var(--c-err-rgb), 0.08);
+  border: 1px solid var(--c-err);
+  border-radius: 8px;
+  padding: 0.75rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.bootstrap-error strong {
+  color: var(--c-err-soft);
+  font-size: 0.85rem;
+}
+.bootstrap-error-hint {
+  color: #b3a4a3;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  margin: 0;
+}
+.bootstrap-error-output {
+  background: var(--c-bg);
+  color: var(--c-text);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.78rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 6px;
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+/* #274 — Standalone bootstrap-log viewer (failed-row click → modal).
+   Wider than the default modal so a 64 KiB log doesn't word-wrap into
+   an unreadable column, and a taller scroll region than the inline
+   `.bootstrap-error-output` cap of 200px since the user came here
+   specifically to read it. */
+.bootstrap-log-card {
+  max-width: 900px;
+  width: 90vw;
+}
+.bootstrap-log-card .bootstrap-error-output {
+  max-height: 60dvh;
+}
+#session-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.5rem;
+}

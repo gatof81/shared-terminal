@@ -1,0 +1,131 @@
+/* ── Terminal area ──────────────────────────────────────────── */
+#terminal-area {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+#terminal-toolbar {
+  padding: 0.5rem 1rem;
+  background: var(--c-surface);
+  border-bottom: 1px solid var(--c-border);
+  font-size: 0.78rem;
+  color: var(--c-muted);
+  display: none;
+  align-items: center;
+  gap: 0.75rem;
+  flex-shrink: 0;
+}
+#terminal-session-name {
+  color: var(--c-text);
+  font-weight: 500;
+}
+#terminal-status-badge {
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+#terminal-status-badge.running {
+  background: rgba(var(--c-ok-rgb), 0.2);
+  color: var(--c-ok);
+}
+#terminal-status-badge.stopped {
+  background: rgba(var(--c-warn-rgb), 0.2);
+  color: var(--c-warn);
+}
+#terminal-status-badge.disconnected {
+  background: rgba(var(--c-muted-rgb), 0.2);
+  color: var(--c-muted);
+}
+/* Synthetic frontend-only state while the WS auto-reconnect loop is
+   retrying (#356) — amber like `stopped` (transient, not an error),
+   distinct from the grey terminal `disconnected` state. */
+#terminal-status-badge.reconnecting {
+  background: rgba(var(--c-warn-rgb), 0.2);
+  color: var(--c-warn);
+}
+#font-size-btn {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  color: var(--c-muted);
+  font-size: 0.75rem;
+  padding: 0.2rem 0.55rem;
+  cursor: pointer;
+  line-height: 1;
+}
+#font-size-btn:hover {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+/* #357 — toolbar history-search widget. The magnifier button borrows the
+   Aa button's quiet style; the input only occupies toolbar space while
+   toggled open (the [hidden] attribute removes it entirely). */
+#terminal-search-btn {
+  background: transparent;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  color: var(--c-muted);
+  font-size: 0.85rem;
+  padding: 0.14rem 0.5rem;
+  cursor: pointer;
+  line-height: 1;
+}
+#terminal-search-btn:hover {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+#terminal-search-input {
+  background: var(--c-bg);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  color: var(--c-text);
+  font-size: 0.75rem;
+  padding: 0.2rem 0.5rem;
+  width: 11rem;
+}
+#terminal-search-input:focus {
+  border-color: var(--c-accent);
+  outline: none;
+}
+/* Actions button (+ menu) lives in the header on every viewport. The
+   menu hosts both the paste flow (mobile-essential, desktop-handy as a
+   text-paste fallback) and the file-attach flow (useful everywhere).
+   `display: inline-flex` is the visible default; the [hidden] attribute
+   from main.ts gates it on whether there's an active session, in
+   lockstep with the chrome-toggle pill. */
+#actions-btn {
+  display: inline-flex;
+  background: transparent;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  color: var(--c-text-2);
+  font-size: 1.05rem;
+  padding: 0.18rem 0.62rem;
+  cursor: pointer;
+  line-height: 1;
+  font-weight: 600;
+  /* The "+" glyph is heavier than the prior "Paste" label and tends
+     to ride high inside a tightly-padded button; nudge baseline down
+     a hair so it sits centred next to the chrome-toggle pill. */
+  padding-bottom: 0.24rem;
+}
+#actions-btn[hidden] {
+  /* The [hidden] attribute defaults to `display: none` in user-agent
+     stylesheets, but our `display: inline-flex` rule above wins on
+     specificity — so we have to spell it out for the hidden case. */
+  display: none;
+}
+#actions-btn:hover {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+#actions-btn:active,
+#actions-btn[aria-expanded="true"] {
+  background: rgba(var(--c-accent-rgb), 0.12);
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}

@@ -1,0 +1,357 @@
+/* ── Git Changes view ───────────────────────────────────────────────
+   Same overlay shape as Files (#files-view); shares the .files-btn /
+   .files-state / .files-preview-* building blocks. */
+#git-view {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  top: 0;
+  z-index: var(--z-overlay);
+  display: flex;
+  flex-direction: column;
+  background: var(--c-bg);
+  min-height: 0;
+}
+#git-view[hidden] {
+  display: none;
+}
+#git-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-surface);
+  flex-shrink: 0;
+  min-height: 2.4rem;
+}
+#git-summary {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.8rem;
+  color: var(--c-muted);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.git-summary-title {
+  color: var(--c-text);
+  font-weight: 500;
+}
+.git-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--c-text);
+  font-weight: 500;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.git-branch-icon {
+  color: var(--c-accent);
+}
+.git-branch-name.detached {
+  color: var(--c-warn);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 400;
+}
+.git-ahead-behind,
+.git-summary-count,
+.git-summary-dir {
+  font-size: 0.72rem;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--c-border);
+  border-radius: 999px;
+  color: var(--c-muted);
+}
+.git-summary-dir {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#git-refresh-btn.spinning {
+  animation: files-spin 0.8s linear infinite;
+}
+
+#git-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(240px, 340px) minmax(0, 1fr);
+}
+#git-list {
+  overflow: auto;
+  border-right: 1px solid var(--c-border);
+  padding: 0.3rem 0 1rem;
+  font-size: 0.82rem;
+  display: flex;
+  flex-direction: column;
+}
+.git-section {
+  margin: 0;
+}
+.git-section-title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0.5rem 0.75rem 0.25rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--c-muted);
+}
+.git-section-count {
+  color: var(--c-faint);
+  font-weight: 400;
+}
+.area-conflict .git-section-title {
+  color: var(--c-err);
+}
+.git-rows {
+  display: flex;
+  flex-direction: column;
+}
+.git-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 1.85rem;
+  padding: 0.2rem 0.75rem;
+  background: transparent;
+  border: 0;
+  color: var(--c-text-2);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.git-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.git-row:focus-visible {
+  outline: 1px solid var(--c-accent);
+  outline-offset: -1px;
+}
+.git-row.selected {
+  background: rgba(var(--c-accent-rgb), 0.15);
+  color: var(--c-text);
+}
+.git-row.restricted {
+  color: var(--c-faint);
+}
+.git-row-status {
+  flex-shrink: 0;
+  width: 1.25rem;
+  height: 1.25rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: rgba(var(--c-muted-rgb), 0.15);
+  color: var(--c-muted);
+}
+.git-row-status.s-M {
+  background: rgba(var(--c-warn-rgb), 0.15);
+  color: var(--c-warn);
+}
+.git-row-status.s-A,
+.git-row-status.s-U {
+  background: rgba(var(--c-ok-rgb), 0.15);
+  color: var(--c-ok);
+}
+.git-row-status.s-D {
+  background: rgba(var(--c-err-rgb), 0.15);
+  color: var(--c-err);
+}
+.git-row-status.s-R,
+.git-row-status.s-C,
+.git-row-status.s-T {
+  background: rgba(var(--c-accent-rgb), 0.15);
+  color: var(--c-accent);
+}
+.git-row-status.s-\! {
+  background: rgba(var(--c-err-rgb), 0.25);
+  color: #ff7b72;
+}
+.git-row-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+.git-row-path > span {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+.git-row-dir {
+  color: var(--c-faint);
+}
+.git-row-name {
+  color: inherit;
+}
+.git-row-stats,
+.git-row-lock {
+  flex-shrink: 0;
+  font-size: 0.7rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--c-faint);
+  display: inline-flex;
+  gap: 0.35rem;
+}
+.git-add {
+  color: var(--c-ok);
+}
+.git-del {
+  color: var(--c-err);
+}
+.git-commits {
+  margin-top: 0.5rem;
+  border-top: 1px solid var(--c-border-soft);
+}
+.git-commit {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.3rem 0.75rem;
+  color: var(--c-text-2);
+}
+.git-commit-hash {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  color: var(--c-accent);
+  padding-top: 0.1rem;
+}
+.git-commit-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.git-commit-subject {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.git-commit-meta {
+  font-size: 0.7rem;
+  color: var(--c-faint);
+}
+.git-candidates {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.4rem;
+}
+.git-candidates-title {
+  width: 100%;
+  margin: 0 0 0.2rem;
+}
+
+#git-diff {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+/* Diff table: old no | new no | marker | text. No wrapping so the
+   gutters stay aligned; long lines scroll horizontally. */
+.git-diff-table {
+  display: grid;
+  grid-template-columns: max-content max-content 1.2em minmax(0, max-content);
+  min-width: 100%;
+  width: max-content;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  padding-bottom: 1rem;
+}
+.git-diff-row {
+  display: contents;
+}
+.git-diff-row > span {
+  white-space: pre;
+  tab-size: 4;
+  padding: 0 0.5rem;
+}
+.git-diff-no {
+  color: var(--c-dim);
+  text-align: right;
+  user-select: none;
+  min-width: 3ch;
+  position: sticky;
+  background: var(--c-bg);
+}
+.git-diff-row > .git-diff-no:first-child {
+  left: 0;
+}
+.git-diff-mark {
+  user-select: none;
+  color: var(--c-faint);
+  padding: 0 0.2rem;
+}
+.git-diff-text {
+  color: var(--c-text);
+}
+.git-diff-row.kind-add > span {
+  background: rgba(var(--c-ok-rgb), 0.12);
+}
+.git-diff-row.kind-add > .git-diff-mark {
+  color: var(--c-ok);
+}
+.git-diff-row.kind-del > span {
+  background: rgba(var(--c-err-rgb), 0.12);
+}
+.git-diff-row.kind-del > .git-diff-mark {
+  color: var(--c-err);
+}
+.git-diff-row.kind-add > .git-diff-no,
+.git-diff-row.kind-del > .git-diff-no {
+  background: var(--c-bg);
+}
+.git-diff-span {
+  grid-column: 1 / -1;
+}
+.git-diff-row.kind-hunk > span {
+  color: var(--c-accent);
+  background: rgba(var(--c-accent-rgb), 0.08);
+}
+.git-diff-row.kind-meta > span {
+  color: var(--c-muted);
+}
+.git-diff-row.kind-note > span {
+  color: var(--c-faint);
+  font-style: italic;
+}
+
+@media (max-width: 768px) {
+  /* Single pane: list OR diff (.show-diff), each full width. */
+  #git-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  #git-list {
+    border-right: 0;
+  }
+  #git-body.show-diff #git-list,
+  #git-body:not(.show-diff) #git-diff {
+    display: none;
+  }
+  .git-row {
+    min-height: 2.5rem;
+    font-size: 0.9rem;
+  }
+  .git-diff-table {
+    font-size: 0.74rem;
+  }
+}

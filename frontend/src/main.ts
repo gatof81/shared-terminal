@@ -8,7 +8,7 @@
 // Side-effect import: Vite bundles and injects this stylesheet. Kept as the
 // first import so rules land in the document before any module-side DOM
 // manipulation, minimising FOUC.
-import "./main.css";
+import "./styles/index.css";
 
 import { closeActionsMenu } from "./actions.js";
 import {
@@ -902,7 +902,7 @@ mobileMql.addEventListener("change", () => {
 // `[data-sidebar-ready]`, so the synchronous flip below doesn't slide
 // the drawer in on every page load. (The desktop grid-template-columns
 // transition was removed in a fix for the resize race — see
-// main.css `main { ... }`.)
+// styles/sidebar.css `main { ... }`.)
 setSidebarOpen(!isMobile());
 mainEl.setAttribute("data-sidebar-ready", "");
 

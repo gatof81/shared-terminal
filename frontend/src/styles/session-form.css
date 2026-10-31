@@ -1,0 +1,506 @@
+/* Tabbed new-session modal — see issue #185 / epic #184. */
+.session-modal-card {
+  width: 540px;
+}
+/* The form fills the remaining space below the header + tabs, then
+   delegates scroll to the active tab panel inside it. `min-height: 0`
+   is load-bearing on flex children: without it the form would refuse
+   to shrink below its content size and the inner scroll never
+   engages. See issue #247. */
+#new-session-form {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.session-tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--c-border);
+  margin-bottom: 0.85rem;
+  /* Allow horizontal scroll on narrow viewports — five tabs in
+     ~340px would otherwise wrap and break the role=tablist row. */
+  overflow-x: auto;
+}
+.session-tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--c-muted);
+  padding: 0.45rem 0.75rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+  white-space: nowrap;
+  border-radius: 4px 4px 0 0;
+}
+.session-tab:hover {
+  color: var(--c-text);
+  background: rgba(255, 255, 255, 0.04);
+}
+.session-tab.is-active {
+  color: var(--c-text);
+  border-bottom-color: var(--c-accent);
+}
+.session-tab:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -2px;
+}
+.session-tab-panel {
+  display: none;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+.session-tab-panel.is-active {
+  display: flex;
+  /* Active panel is the scroll container — content past the
+     available height scrolls inside the panel rather than clipping
+     past the modal border. `min-height: 0` here mirrors the
+     `#new-session-form` rationale (see above). Issue #247. */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.session-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.session-field-label {
+  font-size: 0.78rem;
+  color: var(--c-muted);
+}
+.session-field input[type="text"] {
+  background: var(--c-bg);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.85rem;
+  color: var(--c-text);
+  outline: none;
+}
+.session-field input[type="text"]:focus {
+  border-color: var(--c-accent);
+}
+/* #188 PR 188e — Repo tab. `modal-field` is the new field-shape
+ * class introduced in this PR; the Basics tab's session-name input
+ * still uses the older `session-field` family, which is left
+ * unchanged. We add a flex row for the ref/target/depth triple so
+ * the three short fields fit on one line on a typical desktop
+ * viewport. The credential subpanels lift their inputs into a
+ * slightly tinted background so the user can see at a glance that
+ * they're entering secrets. */
+.modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.82rem;
+  color: var(--c-muted);
+}
+.modal-field > span {
+  font-size: 0.78rem;
+}
+.modal-field input[type="text"],
+.modal-field input[type="password"],
+.modal-field input[type="number"],
+.modal-field select,
+.modal-field textarea {
+  background: var(--c-bg);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.85rem;
+  color: var(--c-text);
+  outline: none;
+  font-family: inherit;
+}
+.modal-field input:focus,
+.modal-field select:focus,
+.modal-field textarea:focus {
+  border-color: var(--c-accent);
+}
+.modal-field textarea {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  resize: vertical;
+}
+.repo-fields-row {
+  display: flex;
+  gap: 0.65rem;
+}
+.repo-fields-row .modal-field {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.repo-auth-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  background: rgba(var(--c-accent-rgb), 0.04);
+  border: 1px solid var(--c-border-soft);
+  border-radius: 8px;
+  padding: 0.75rem;
+}
+
+/* #191 PR 191c — Advanced tab. Each section is a fieldset with a
+ * tinted background to visually group its fields. The agent-seed
+ * inline error sits beneath the textarea and goes red on parse
+ * failure (set via JS on blur). */
+.advanced-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  background: rgba(var(--c-accent-rgb), 0.04);
+  border: 1px solid var(--c-border-soft);
+  border-radius: 8px;
+  padding: 0.75rem 0.85rem;
+  margin: 0;
+}
+.advanced-section legend {
+  font-size: 0.82rem;
+  color: var(--c-text);
+  font-weight: 600;
+  padding: 0 0.4rem;
+}
+.modal-field-error {
+  color: var(--c-err);
+  font-size: 0.78rem;
+  min-height: 1.1em;
+}
+.modal-hint-inline {
+  color: var(--c-muted);
+  font-size: 0.75rem;
+  margin-top: 0.15rem;
+}
+
+.session-placeholder {
+  font-size: 0.82rem;
+  color: var(--c-muted);
+  line-height: 1.55;
+  background: rgba(var(--c-accent-rgb), 0.06);
+  border: 1px dashed var(--c-border);
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+}
+.session-placeholder strong {
+  color: var(--c-text);
+  display: inline-block;
+  margin-bottom: 0.35rem;
+}
+.session-placeholder a {
+  color: var(--c-accent);
+  text-decoration: none;
+}
+.session-placeholder a:hover {
+  text-decoration: underline;
+}
+.session-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  border-top: 1px solid var(--c-border-soft);
+  padding-top: 0.85rem;
+  /* Action bar is the second flex child of `#new-session-form`
+     (alongside the active tab panel). Without `flex-shrink: 0`,
+     a tall panel could push the buttons off the bottom of the
+     modal — same shape of bug as the panel-overflow case. */
+  flex-shrink: 0;
+}
+.session-modal-actions button {
+  background: var(--c-border-soft);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  padding: 0.45rem 0.85rem;
+  color: var(--c-text);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.session-modal-actions button:hover {
+  background: var(--c-border);
+}
+.session-modal-actions button[type="submit"] {
+  background: var(--c-ok-bg);
+  border-color: var(--c-ok-strong);
+  color: var(--c-white);
+}
+.session-modal-actions button[type="submit"]:hover {
+  background: var(--c-ok-strong);
+}
+.session-modal-actions button[type="submit"]:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+/* Env tab — typed entry table + .env paste panel (#186 / PR 186c). */
+.env-paste-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.4rem;
+}
+.env-paste-toggle {
+  background: var(--c-border-soft);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  padding: 0.35rem 0.7rem;
+  color: var(--c-text);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.env-paste-toggle:hover {
+  background: var(--c-border);
+}
+.env-paste-status {
+  font-size: 0.75rem;
+  color: var(--c-muted);
+  flex: 1;
+}
+.env-paste-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+  padding: 0.6rem;
+  background: rgba(var(--c-accent-rgb), 0.04);
+  border: 1px dashed var(--c-border);
+  border-radius: 6px;
+}
+.env-paste-panel textarea {
+  background: var(--c-bg);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+  color: var(--c-text);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.78rem;
+  outline: none;
+  resize: vertical;
+  min-height: 80px;
+}
+.env-paste-panel textarea:focus {
+  border-color: var(--c-accent);
+}
+.env-paste-actions {
+  display: flex;
+  gap: 0.4rem;
+  justify-content: flex-end;
+}
+.env-paste-actions button {
+  background: var(--c-border-soft);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  padding: 0.35rem 0.65rem;
+  color: var(--c-text);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.env-paste-actions button:hover {
+  background: var(--c-border);
+}
+#env-paste-import {
+  background: var(--c-ok-bg);
+  border-color: var(--c-ok-strong);
+  color: var(--c-white);
+}
+#env-paste-import:hover {
+  background: var(--c-ok-strong);
+}
+.env-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  margin-bottom: 0.5rem;
+}
+.env-table thead th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--c-muted);
+  padding: 0.3rem 0.4rem;
+  border-bottom: 1px solid var(--c-border-soft);
+}
+.env-table tbody td {
+  padding: 0.25rem 0.4rem;
+  vertical-align: middle;
+}
+.env-row .env-input {
+  width: 100%;
+  background: var(--c-bg);
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+  color: var(--c-text);
+  font-size: 0.8rem;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  outline: none;
+}
+.env-row .env-input:focus {
+  border-color: var(--c-accent);
+}
+.env-input-name {
+  text-transform: uppercase;
+}
+.env-type-toggle {
+  background: var(--c-border-soft);
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  padding: 0.25rem 0.55rem;
+  color: var(--c-text);
+  font-size: 0.75rem;
+  cursor: pointer;
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+.env-type-toggle:hover {
+  background: var(--c-border);
+}
+.env-type-toggle.env-type-secret {
+  background: rgba(var(--c-err-rgb), 0.12);
+  border-color: rgba(var(--c-err-rgb), 0.45);
+  color: var(--c-err-soft);
+}
+.env-row-remove {
+  background: transparent;
+  border: none;
+  color: var(--c-muted);
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 0 0.3rem;
+  border-radius: 4px;
+}
+.env-row-remove:hover {
+  color: var(--c-err);
+  background: rgba(var(--c-err-rgb), 0.08);
+}
+.env-add-row {
+  background: transparent;
+  border: 1px dashed var(--c-border);
+  border-radius: 6px;
+  padding: 0.4rem 0.7rem;
+  color: var(--c-muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+  align-self: flex-start;
+}
+.env-add-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--c-text);
+  border-style: solid;
+}
+/* #190 PR 190d — Ports tab. Reuses .env-table layout for the row
+   structure but adds its own toggle + warning chip styles. */
+.ports-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  margin-bottom: 0.5rem;
+}
+.ports-table thead th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--c-muted);
+  padding: 0.3rem 0.4rem;
+  border-bottom: 1px solid var(--c-border-soft);
+}
+.ports-table tbody td {
+  padding: 0.25rem 0.4rem;
+  vertical-align: middle;
+}
+.ports-row .env-input {
+  width: 6rem;
+  background: var(--c-bg);
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+  color: var(--c-text);
+  font-size: 0.8rem;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  outline: none;
+}
+.ports-row .env-input:focus {
+  border-color: var(--c-accent);
+}
+/* #190 — per-session ports editor modal. Reuses the .ports-table layout;
+   the row inputs/remove button mirror the create-form ports styling. */
+.ports-modal-row .ports-modal-port-input {
+  width: 7rem;
+  background: var(--c-bg);
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+  color: var(--c-text);
+  font-size: 0.8rem;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  outline: none;
+}
+.ports-modal-row .ports-modal-port-input:focus {
+  border-color: var(--c-accent);
+}
+/* #198 — readiness probe inputs. Same field styling as the port input,
+   narrower so the five-column row still fits the modal card. */
+.ports-modal-row .ports-modal-readiness-path-input,
+.ports-modal-row .ports-modal-readiness-timeout-input {
+  background: var(--c-bg);
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+  color: var(--c-text);
+  font-size: 0.8rem;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  outline: none;
+}
+.ports-modal-row .ports-modal-readiness-path-input {
+  width: 7rem;
+}
+.ports-modal-row .ports-modal-readiness-timeout-input {
+  width: 4rem;
+}
+.ports-modal-row .ports-modal-readiness-path-input:focus,
+.ports-modal-row .ports-modal-readiness-timeout-input:focus {
+  border-color: var(--c-accent);
+}
+.ports-modal-remove {
+  background: transparent;
+  border: none;
+  color: var(--c-muted);
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 0 0.3rem;
+  border-radius: 4px;
+}
+.ports-modal-remove:hover {
+  color: var(--c-err);
+  background: rgba(var(--c-err-rgb), 0.08);
+}
+.ports-public-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+/* Warning chip surfaces only on rows currently set public — visually
+   loud (amber border) so a user can't tick public without seeing the
+   "anyone with the URL" implication the issue spec calls out. */
+.ports-public-warning {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border: 1px solid rgba(255, 188, 0, 0.55);
+  border-radius: 999px;
+  background: rgba(255, 188, 0, 0.08);
+  color: #f5b044;
+  font-size: 0.7rem;
+  font-family: -apple-system, sans-serif;
+  white-space: nowrap;
+}
+.resources-mem-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.resources-mem-row input[type="number"] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.resources-mem-row select {
+  flex: 0 0 auto;
+}
+/* #195 PR 195c — Templates page (sidebar entry → modal listing
+   the user's own templates with Use / Delete actions). */

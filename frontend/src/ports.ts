@@ -122,7 +122,7 @@ function renderPortsModalRows(): void {
 		publicTd.appendChild(checkbox);
 
 		// #198 — optional readiness probe inputs. Compact widths (see
-		// main.css) so the row still fits the modal card.
+		// styles/session-form.css) so the row still fits the modal card.
 		const readinessPathTd = document.createElement("td");
 		const pathInput = document.createElement("input");
 		pathInput.type = "text";

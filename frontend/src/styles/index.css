@@ -1,0 +1,25 @@
+/* ── Stylesheet entry ───────────────────────────────────────────
+   Imported once from main.ts. Vite inlines these @imports into one
+   bundle in THIS order, which is the cascade order the single main.css
+   had before it was split by area — several later sections override
+   earlier ones by equal specificity (the mobile block, the overlay
+   views sharing .files-* classes), so a reorder is a visual change. */
+@import "./tokens.css";
+@import "./base.css";
+@import "./auth.css";
+@import "./shell.css";
+@import "./modal.css";
+@import "./sidebar.css";
+@import "./session-form.css";
+@import "./admin.css";
+@import "./sidebar-sessions.css";
+@import "./terminal.css";
+@import "./actions.css";
+@import "./terminal-panes.css";
+@import "./toast.css";
+@import "./mobile.css";
+@import "./keybar.css";
+@import "./files.css";
+@import "./git.css";
+@import "./viewnav.css";
+@import "./chat.css";

@@ -1,0 +1,35 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+body {
+  font-family: system-ui, sans-serif;
+  background: var(--c-bg);
+  color: var(--c-text);
+  /* --app-vh is pinned by main.ts off visualViewport.height so the
+     terminal fits between the status/address bar and the soft
+     keyboard on mobile — dvh alone doesn't account for iOS's
+     keyboard overlay. Falls back to 100dvh on browsers without
+     visualViewport. */
+  height: var(--app-vh, 100dvh);
+  display: flex;
+  flex-direction: column;
+  /* viewport-fit=cover (index.html) paints the app edge-to-edge on
+     notched iPhones; these insets keep the header / drawer / terminal
+     clear of the notch, rounded corners, and home indicator. All four
+     resolve to 0 on desktop and non-notched devices, so this is a
+     no-op outside iOS/Android edge-to-edge. The body background fills
+     the padded strips, so the unsafe areas still paint in-theme. */
+  padding-top: env(safe-area-inset-top);
+  padding-right: env(safe-area-inset-right);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+}
+
+/* ── Utilities ──────────────────────────────────────────────── */
+.hidden {
+  display: none !important;
+}

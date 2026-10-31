@@ -1,0 +1,171 @@
+/* Lead-side observable sessions surfaced in the sidebar below the
+   user's own list (#394). Sibling of #session-list (not inside it —
+   renderSessionList() clears that container wholesale), with its own
+   capped scroll region so a lead of a busy group can't have their own
+   sessions squeezed out of view. Hidden unless the user leads a group
+   with at least one running member session. */
+#observable-section {
+  flex-shrink: 0;
+  max-height: 40%;
+  overflow-y: auto;
+  border-top: 1px solid var(--c-border);
+  padding: 0.25rem 0.5rem 0.5rem;
+}
+#observable-section-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--c-muted);
+  padding: 0.4rem 0.6rem 0.3rem;
+}
+.observable-owner {
+  font-size: 0.68rem;
+  color: var(--c-muted);
+}
+/* Mobile-only menu inside the sidebar drawer. On desktop the same
+   actions live in the header; on mobile we surface them here so the
+   header can stay slim. Hidden by default — the mobile media query
+   below flips this to flex. */
+#sidebar-footer {
+  display: none;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 1rem;
+  border-top: 1px solid var(--c-border);
+  background: var(--c-bg);
+  flex-shrink: 0;
+}
+#sidebar-user-display {
+  font-size: 0.7rem;
+  color: var(--c-ok);
+  margin-right: auto;
+}
+#sidebar-templates-btn,
+#sidebar-invites-btn,
+#sidebar-admin-btn,
+#sidebar-notifications-btn,
+#sidebar-logout-btn {
+  background: transparent;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  color: var(--c-muted);
+  font-size: 0.78rem;
+  padding: 0.35rem 0.7rem;
+  cursor: pointer;
+}
+#sidebar-templates-btn:hover,
+#sidebar-invites-btn:hover,
+#sidebar-admin-btn:hover,
+#sidebar-notifications-btn:hover:not(:disabled) {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+#sidebar-logout-btn:hover {
+  border-color: var(--c-err);
+  color: var(--c-err);
+}
+
+.session-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: 6px;
+  cursor: pointer;
+  margin-bottom: 2px;
+  transition: background 0.1s;
+}
+.session-item:hover {
+  background: var(--c-border-soft);
+}
+.session-item.active {
+  background: #1f3348;
+}
+.session-item.terminated .session-name {
+  color: var(--c-muted);
+  font-style: italic;
+}
+.session-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.session-dot.running {
+  background: var(--c-ok);
+}
+.session-dot.stopped {
+  background: var(--c-warn);
+}
+.session-dot.terminated {
+  background: var(--c-err);
+}
+/* `failed` (#185) — postCreate hook exited non-zero. Distinct from
+   terminated (red) so users can tell at a glance which sessions need
+   recreation vs which were soft-deleted. Amber matches the "needs
+   user attention" semantics elsewhere in the UI. */
+.session-dot.failed {
+  background: #db6d28;
+  box-shadow: 0 0 0 1px rgba(var(--c-err-rgb), 0.45);
+}
+.session-name-col {
+  /* #271 — vertical container that holds the session name + optional
+     live-usage subtitle. `min-width: 0` so the inner `text-overflow:
+     ellipsis` on the name actually triggers (flex children default
+     to `min-width: auto` which lets text overflow the row). */
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  gap: 0.1rem;
+}
+.session-name {
+  font-size: 0.82rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* #271 — live CPU + memory usage rendered under the session name in
+   the sidebar. Monospace so column-aligned numbers don't jitter as
+   they update; muted colour so the name stays the primary read. */
+.session-usage {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.66rem;
+  color: var(--c-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-actions {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+}
+.session-item:hover .session-actions {
+  opacity: 1;
+}
+.session-action-btn,
+.session-kill {
+  background: transparent;
+  border: none;
+  font-size: 0.75rem;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.session-action-btn.start {
+  color: var(--c-ok);
+}
+.session-action-btn.stop {
+  color: var(--c-warn);
+}
+.session-kill {
+  color: var(--c-err);
+}
+.session-action-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+.session-kill:hover {
+  background: rgba(var(--c-err-rgb), 0.15);
+}
