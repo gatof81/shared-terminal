@@ -5,7 +5,7 @@ import { expect, test } from "./fixtures.js";
  * Screenshot baselines of the main screens, per project (desktop / mobile).
  * The terminal canvas is masked: its glyphs come from xterm's own renderer
  * (WebGL or DOM, GPU-dependent), and the mock's prompt text is asserted in
- * the functional specs anyway. Toasts are masked too (timing-dependent).
+ * the functional specs anyway. Toasts are hidden (timing-dependent).
  * Regenerate with `npm run test:e2e:update` after an intended visual change.
  */
 async function shot(page: Page, name: string): Promise<void> {
