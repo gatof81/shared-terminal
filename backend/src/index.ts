@@ -21,7 +21,9 @@ import {
 import { BellSweeper } from "./bellSweeper.js";
 import { BootstrapBroadcaster, drainInFlightBootstraps } from "./bootstrap.js";
 import { parseAllowUsers } from "./conversation/allowUsers.js";
+import { ComposerService, parseCliVersions } from "./conversation/composer.js";
 import { createIngestHandler } from "./conversation/ingestRoute.js";
+import { PaneRecordStore } from "./conversation/paneRecord.js";
 import { ConversationService } from "./conversation/service.js";
 import { ConversationStore } from "./conversation/store.js";
 import { ConversationWsHub } from "./conversation/ws.js";
@@ -167,6 +169,32 @@ logger.info(
 	CONVERSATION_ENABLED
 		? "[server] conversation capture ENABLED (per-session opt-in)"
 		: "[server] conversation capture disabled (CONVERSATION_ENABLED unset)",
+);
+// 3.2 — the composer (CONVERSATION.md §8). Off by default: with the flag off
+// its routes are not mounted and `canSendInput` stays false. The Docker port
+// is the composer's own (evidence-only execs with stdin), the pane records
+// live under `.st-control/<sid>/composer/`, and the ack listens to the same
+// persisted-event stream the WS uses.
+const COMPOSER_ENABLED =
+	process.env.CONVERSATION_COMPOSER_ENABLED === "true" ||
+	process.env.CONVERSATION_COMPOSER_ENABLED === "1";
+const composer = new ComposerService({
+	enabled: COMPOSER_ENABLED,
+	cliVersions: parseCliVersions(process.env.COMPOSER_CLI_VERSIONS),
+	store: conversationStore,
+	conversation: {
+		probeSession: (sid) => conversation.probeSession(sid),
+		onPersistedEvent: (l) => conversation.onPersistedEvent(l),
+		captureEffective: async (sid) => (await conversation.authority.capture(sid)).effective,
+	},
+	sessions,
+	docker: docker.composerPort(),
+	records: new PaneRecordStore(WORKSPACE_ROOT_FOR_CONVERSATION),
+});
+logger.info(
+	COMPOSER_ENABLED
+		? `[server] composer ENABLED (CLI versions: ${[...parseCliVersions(process.env.COMPOSER_CLI_VERSIONS)].join(", ")})`
+		: "[server] composer disabled (CONVERSATION_COMPOSER_ENABLED unset)",
 );
 // Single shared bootstrap broadcaster (PR 185b2b). Owned at the server
 // scope so the route's runAsyncBootstrap and the WS handler's
@@ -385,6 +413,7 @@ app.use(
 	buildRouter(sessions, docker, bootstrapBroadcaster, undefined, idleSweeper, conversation, {
 		recreation,
 		conversationAllowUsers: CONVERSATION_ALLOW_USERS,
+		composer,
 	}),
 );
 app.get("/health", (_req, res) => res.json({ ok: true }));
@@ -572,6 +601,12 @@ function shutdown() {
 	const conversationDrained = conversation.shutdown().catch((err) => {
 		logger.warn(`[server] conversation shutdown failed: ${(err as Error).message}`);
 	});
+	// 3.2 — refuse new sends and cancel the active executors durably (record
+	// phase `cancelled`, reason `shutdown`): a late Docker answer may still
+	// settle an exec as evidence, but nothing further starts (§8.1.4).
+	const composerDrained = composer.shutdown().catch((err) => {
+		logger.warn(`[server] composer shutdown failed: ${(err as Error).message}`);
+	});
 
 	// Watchdog: if a client stalls its close handshake, the bootstrap
 	// drain wedges on Docker/D1, or some other handle keeps the event
@@ -589,9 +624,11 @@ function shutdown() {
 		// under the drain's in-flight D1 writes. `finally` (not `then`):
 		// drainInFlightBootstraps never rejects today (Promise.allSettled
 		// inside), but the exit must not hinge on that staying true.
-		void Promise.allSettled([bootstrapsDrained, conversationDrained]).finally(() => {
-			clearTimeout(watchdog);
-			process.exit(0);
-		});
+		void Promise.allSettled([bootstrapsDrained, conversationDrained, composerDrained]).finally(
+			() => {
+				clearTimeout(watchdog);
+				process.exit(0);
+			},
+		);
 	});
 }

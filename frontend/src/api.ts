@@ -1601,7 +1601,54 @@ export interface ConversationSummary {
 	eventsCount: number;
 	gapsCount: number;
 	claudeVersion: string | null;
-	canSendInput: false;
+	/** 3.2 (§8.1.1): orientative — the POST decides; false while the composer flag is off. */
+	canSendInput: boolean;
+	/** 3.2 (§8.1.8): why the pane cannot take a send right now, when it cannot. */
+	composer?: {
+		blocked: boolean;
+		reason?: "in-progress" | "effects-pending" | "unverifiable";
+		clientMessageId?: string;
+		result?: string;
+		since?: string;
+	};
+}
+
+/** `POST …/messages` (CONVERSATION.md §8.1): the answer, 2xx or not, with its status. */
+export interface ComposerSendResult {
+	status: number;
+	body: {
+		result?: "delivered" | "unconfirmed" | "misdelivered" | "uncertain";
+		error?: string;
+		detail?: string;
+		clientMessageId?: string;
+		promptId?: string;
+		seq?: number;
+		conversation?: string;
+		stage?: string;
+		segmentsSent?: number;
+		segments?: number;
+		effects?: string;
+	};
+}
+
+/**
+ * Send a message to a conversation's CLI (3.2). Never retried by the
+ * client: a repeat is a NEW clientMessageId chosen by the person. Returns
+ * the status and body for every outcome so the view can explain 400/409/502
+ * exactly as the server said them.
+ */
+export async function sendConversationMessage(
+	sessionId: string,
+	cid: string,
+	text: string,
+	clientMessageId: string,
+): Promise<ComposerSendResult> {
+	const res = await apiFetch(
+		`/sessions/${encodeURIComponent(sessionId)}/conversations/${encodeURIComponent(cid)}/messages`,
+		{ method: "POST", body: JSON.stringify({ text, clientMessageId }) },
+	);
+	const body = (await res.json().catch(() => ({}))) as ComposerSendResult["body"];
+	return { status: res.status, body };
 }
 
 export interface ConversationEventsPage {

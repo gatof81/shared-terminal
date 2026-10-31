@@ -25,7 +25,7 @@ vinculante para los PRs
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
 `ac1024d`); si los dos documentos difieren, manda este;
 este archivo define lo que el código debe cumplir y lo que cada PR debe demostrar. Cambiar un
-contrato exige un PR de docs antes o junto con el código.
+contrato exige un PR de docs antes o junto con el código. **v1.7.1**: §8.1.5 paso 2b, consumo del paste antes del siguiente byte, y `too-many-segments` en 48 pastes por el presupuesto T_http (hallazgos del smoke con CLI 2.1.314 y de la revisión durante la implementación 3.2, 2026-10-30)
 
 Convenciones: *MUST*/*MUST NOT* son requisitos verificados por test; *SHOULD* son requisitos
 verificados en revisión. "Bytes" significa siempre bytes UTF-8 del contenido, salvo donde se dice
@@ -1501,7 +1501,7 @@ Todas owner-only (`assertOwnedByOr404`), rate limit `conversationIp` (300/min), 
 | GET | `/api/sessions/:id/conversations/:cid/events/:seq` | un evento (para "Copiar informe" de eventos no montados) |
 | GET | `/api/sessions/:id/conversations/:cid/agents` | `{ agents: [{ agentId, agentType, status, startedSeq, endedSeq?, toolCount, hasResult }] }` |
 | WS | `/ws/conversation/<id>` | ver §6.1 |
-| POST | `/api/sessions/:id/conversations/:cid/messages` | §8 (3.2). Cuerpo `{ text, clientMessageId }`; 202 `{ result: delivered\|unconfirmed\|misdelivered\|uncertain, … }`, 400/409 según §8.1.2–§8.1.3, 502 `delivery-failed` según §8.1.6, 503 `persist-failed`; 403 lead/observador; **ausente (404) con `CONVERSATION_COMPOSER_ENABLED` apagado** |
+| POST | `/api/sessions/:id/conversations/:cid/messages` | §8 (3.2). Cuerpo `{ text, clientMessageId }`; 202 `{ result: delivered\|unconfirmed\|misdelivered\|uncertain, … }`, 400/409 según §8.1.2–§8.1.3, 502 `delivery-failed` según §8.1.6, 503 `persist-failed` / `shutting-down` (apagado en curso, v1.7.1); 403 lead/observador; **ausente (404) con `CONVERSATION_COMPOSER_ENABLED` apagado** |
 
 `canSendInput` *MUST* ser `false` siempre mientras `CONVERSATION_COMPOSER_ENABLED` esté apagado; con
 la bandera encendida es **orientativo** según §8.1.1 (sin probe ni exec) y el `POST` decide por su
@@ -1614,7 +1614,7 @@ la comparación del ack. Reproduce lo que el CLI 2.1.314 hace por su cuenta con 
 | `text-too-large` | > **L1** bytes |
 | `control-bytes` | cualquier byte < 0x20 salvo `\n`, o 0x7F, o la secuencia `ESC` en cualquier posición (incluye `ESC[13;2u`: el cliente nunca envía teclas) |
 | `unsupported-prefix` | el primer carácter no blanco del texto es `/` o `!` — ambos activan modos del CLI (comando / shell) y no producen `UserPromptSubmit` (§8.2.3) |
-| `too-many-segments` | la secuencia de entrega (§8.1.5) supera **256** pastes |
+| `too-many-segments` | la secuencia de entrega (§8.1.5) supera **48** pastes (v1.7.1: cada paste cuesta ≥ 3 execs —paste, sondeo de consumo, salto— y T_http es 30 s; por encima la entrega moriría a medias con texto en la entrada, así que se rechaza antes de cualquier efecto) |
 
 Solo el primer carácter del mensaje activa modos: una línea posterior que empiece por `/` o `!` es
 texto (§8.2.3) y se acepta. `text_hash` = SHA-256 de `normalize(text)`; es lo único del texto que
@@ -1661,6 +1661,40 @@ resultado del mensaje, ni del tiempo transcurrido. Tres plazos distintos:
 - **T_http = 30 s** es el presupuesto de la respuesta HTTP. Si al vencer la operación no tiene
   resultado final, el `POST` responde **202 `{ result: "uncertain", clientMessageId }`** y la
   operación sigue viva en el servidor.
+  (v1.7.1, revisión Work de la implementación) T_http se mide desde la **recepción de la petición**,
+  precondiciones incluidas: una consulta a Docker que se cuelga antes de `prepared` también responde
+  202 `uncertain` y, cuando termina, la fase activa no arranca (sin registro, sin fila de auditoría:
+  ese id nunca fue una operación y un reintento es nuevo). Al vencer con un ejecutor activo, el
+  temporizador **completa** la cancelación —registro `phase: cancelled`, `state: uncertain`, exclusión
+  del ejecutor liberada— sin depender de que responda el exec colgado: el pane sigue bloqueado por el
+  registro durable (`effects: pending`) y `reconcile` puede asentarlo por evidencia. La respuesta
+  tardía del exec aporta su evidencia bajo el lock del pane y no inicia nada. El apagado ordenado
+  hace lo mismo con razón `shutdown` y responde 503 `shutting-down` a toda operación nueva.
+  (v1.7.1, ronda 2 de Work) Dos invariantes de cancelación: **(1)** ninguna petición admitida antes
+  del apagado inicia efectos después de él, aunque estuviera en precondiciones — el estado de apagado
+  se decide **después** de cada espera (antes de la fila de auditoría, antes de `prepared`, y de nuevo
+  tras escribir `prepared`), nunca con una lectura previa a un `await`; la operación entra en `live`
+  antes de su registro durable para que el barrido del apagado la alcance (se repite hasta no quedar
+  ninguna activa), y una `prepared` alcanzada por el apagado queda cancelada en el registro sin que el
+  ejecutor arranque; **(2)** ninguna continuación inicia un exec tras perder su autorización: `mayAct`
+  (lock propio ∧ sin cancelación ∧ sin apagado) se vuelve a evaluar **después** de la escritura del id
+  del exec y antes de `start`; si se perdió, el exec creado nunca se arranca y su id se retira del
+  registro (nada que reconciliar), mientras que un exec ya arrancado termina y se reconcilia por
+  evidencia. La exclusión no se retiene esperando un exec enviado: la mantiene el registro durable.
+  (v1.7.1, ronda 3 de Work) **Orden único de las escrituras locales del registro por pane.** Cada
+  escritura del registro de una operación (archivo temporal, fsync, rename, fsync de directorios) se
+  registra como «en vuelo» de esa operación hasta asentarse. Una cancelación (`T_http`, apagado), un
+  asentamiento por evidencia y, sobre todo, una **liberación** drenan primero las escrituras en vuelo
+  de la operación —solo sistema de archivos, nunca una respuesta de Docker— de modo que: (1) A no
+  queda `released` ni habilita a B mientras tenga escrituras capaces de modificar el registro del
+  pane, incluidas las ya iniciadas cuyo rename o fsync no terminó; (2) toda continuación tardía de A
+  (el retorno de la escritura del id del exec, la respuesta tardía de un exec) solo actúa **bajo la
+  exclusión y tras comprobar que sigue siendo la propietaria viva del pane**; si no lo es, no escribe,
+  no borra ni libera nada; la continuación que rehúsa un `start` no escribe por sí misma: retira el
+  id en memoria y el estado llega al disco por esa vía comprobada o no llega; (3) el registro en disco
+  nunca queda más antiguo que el estado escrito después (la escritura nueva espera a la anterior).
+  Sin esperas sobre Docker reteniendo el lock, y sin esperar la finalización de una continuación que
+  necesite el lock: solo se esperan promesas del sistema de archivos.
 - **T_ack = 8 s** es el presupuesto de confirmación tras un Enter **asentado** (§8.1.7). No es una
   garantía de que Docker terminó nada.
 - **La elegibilidad del pane** no tiene plazo: depende solo del estado de efectos de la operación
@@ -1818,6 +1852,18 @@ efecto se ejecuta solo tras `mayAct` (lock vivo, operación no cancelada, §8.1.
 2. Por cada línea, por cada trozo: `tmux load-buffer -b st-<cid>-<n> -` (stdin = trozo) y
    `tmux paste-buffer -p -d -b st-<cid>-<n> -t <pane_id>`. Siempre `-p` (bracketed paste): sin él
    cada `\n` es un Enter (§8.2.5).
+   2b. **Consumo antes del siguiente byte** (v1.7.1, smoke con CLI 2.1.314, 2026-10-30): tras cada
+   paste asentado con 0, y antes de enviar cualquier otro paso, el ejecutor lee la región de
+   entrada (`capture-pane -p -e`, la misma lectura de `composer-not-empty`) hasta ver el trozo
+   consumido — su cola (≤ 24 puntos de código, comparada sin espacios porque la caja de entrada
+   envuelve e indenta) aparece **una vez más** que antes del paste (conteo, no presencia: dos
+   líneas iguales seguidas esperan cada una su propio eco). Sondeo cada 50 ms, ≤ 40 lecturas
+   (≈ 2 s). Sin evidencia ⇒ `failed{stage: paste, segments_sent: k, detail: not-consumed}` (502
+   `delivery-failed`), sin newline ni Enter: el texto puede estar en la entrada y la persona
+   comprueba el Terminal. Motivo: un CSI u o un Enter que el CLI lee **en el mismo read** que el
+   paste anterior se aplica como Enter simple y **envía el segmento** (observado con separación
+   de 0 ms; con ≥ 20 ms de separación el comportamiento es el esperado). La lectura no es un
+   efecto: no se registra en `execs` ni cuenta para `evidence`.
 3. Entre líneas: `tmux send-keys -t <pane_id> -l $'\e[13;2u'` (Shift+Enter en CSI u, que el CLI
    2.1.314 inserta como salto de línea; una línea vacía es dos secuencias seguidas). Invariante: un
    `\n` del texto **nunca** produce Enter.
@@ -1828,9 +1874,17 @@ Antes del primer paste se repite `tmux display -p -t <pane_id> '#{pane_pid} #{pa
 #{pane_dead} #{pane_current_command}'` y debe coincidir con la precondición; si no, 409
 `binding-stale`/`needs-terminal` y la `prepared` se cierra como `failed{stage: precheck,
 segments_sent: 0}` y `released{evidence: none-created}` (el único exec fue la lectura; sin efectos
-sobre el pane). **No** se relee entre pastes: la secuencia completa
-dura milisegundos y la exclusión impide otro envío; lo que no puede excluirse (una tecla de la
-persona, un diálogo que se abre) lo detecta el ack, no la entrega (§8.1.10).
+sobre el pane). Entre pastes se relee **solo** la región de entrada y solo para el consumo del
+paso 2b (no se repite la precondición: la exclusión impide otro envío); lo que no puede excluirse
+(una tecla de la persona, un diálogo que se abre) lo detecta el ack, no la entrega (§8.1.10).
+
+Liberación (v1.7.1, revisión Work de la implementación): toda liberación (§8.1.4 regla 7) ocurre
+**bajo el lock del pane**; confirma primero el evento `released` (lleva la respuesta HTTP del replay y
+alimenta la ventana de 256) y solo después retira el registro **por identidad** (relee el archivo y
+no toca uno de otro `client_message_id`). Si cualquiera de los dos pasos falla, el registro y la
+operación se conservan y el siguiente envío al pane los reevalúa bajo el mismo lock. El registro de
+pane se escribe con la misma cadena de fsync que el de recreación (archivo, directorio, `<sid>/`,
+`.st-control/`, raíz del workspace); un fallo de sincronización no autoriza efectos.
 
 #### 8.1.6 Fallos parciales (fail-closed)
 
@@ -2387,7 +2441,7 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
       en todas las conversaciones (test de rutas); encendida, `canSendInput` según §8.1.1 sin probe.
 - [ ] Validación 400 (§8.1.2): cada código con su vector; `normalize` idempotente y con los casos de
       §8.2.4; `/` y `!` iniciales rechazados, en líneas posteriores aceptados; `ESC` en cualquier
-      posición rechazado; L1 y 256 segmentos.
+      posición rechazado; L1 y 48 segmentos.
 - [ ] Precondiciones 409 (§8.1.3) sobre un `tmux` y un probe simulados, cada una **sin ningún
       exec de entrega**: `busy`, `dialog open`, `permission prompt`, `pane_in_mode`, `pane_dead`,
       foreground `bash`, composer con texto, probe sin la sesión, probe con otro `sessionId`,

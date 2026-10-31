@@ -204,6 +204,48 @@ export function gapText(data: Record<string, unknown>, ts: string): string {
 	}
 }
 
+/**
+ * The thread line for a `composer_send` state (§8.1.8), or null for the
+ * states the thread does not show: `prepared`/`entered`/`released` are
+ * bookkeeping, and a `delivered` send is the `user_prompt` that follows.
+ */
+export function composerSendText(
+	data: Record<string, unknown>,
+): { tone: "info" | "warn"; text: string } | null {
+	switch (str(data.state)) {
+		case "failed":
+			return {
+				tone: "warn",
+				text: `Send from Chat failed part-way (${str(data.stage) || "paste"}) — part of the text may be in the terminal's input. Check the Terminal before sending again.`,
+			};
+		case "uncertain":
+			return {
+				tone: "warn",
+				text:
+					str(data.orphaned) === "true" || data.orphaned === true
+						? "A send from Chat was interrupted by a backend restart; the pane stays blocked until an operator verifies it."
+						: "A send from Chat has an unknown outcome; the pane stays blocked until it is verified.",
+			};
+		case "unconfirmed":
+			return {
+				tone: "info",
+				text: "A send from Chat was not confirmed by Claude Code — check the Terminal.",
+			};
+		case "misdelivered":
+			return {
+				tone: "info",
+				text: "A send from Chat landed in another conversation of this pane.",
+			};
+		case "resolved":
+			return {
+				tone: "info",
+				text: `An operator marked a send from Chat as ${str(data.outcome) || "resolved"}.`,
+			};
+		default:
+			return null;
+	}
+}
+
 interface MessageAcc {
 	item: Extract<ThreadItem, { kind: "assistant" }>;
 	fragments: Map<number, string>;
@@ -267,6 +309,24 @@ export function buildThread(events: readonly ConversationEvent[]): ThreadModel {
 		if (type && !a.agentType) a.agentType = type;
 		return a;
 	};
+
+	// 3.2: a send whose outcome was unknown at T_http but that later reached a
+	// final state is not shown as unknown (the final state is the truth).
+	const composerFinal = new Set<string>();
+	for (const e of events) {
+		if (e.ev !== "composer_send") continue;
+		const d = e.data as Record<string, unknown>;
+		const state = typeof d.state === "string" ? d.state : "";
+		if (
+			state === "delivered" ||
+			state === "unconfirmed" ||
+			state === "misdelivered" ||
+			state === "failed" ||
+			state === "resolved" ||
+			state === "released"
+		)
+			composerFinal.add(String(d.client_message_id ?? ""));
+	}
 
 	for (const e of events) {
 		const d = e.data ?? {};
@@ -466,6 +526,26 @@ export function buildThread(events: readonly ConversationEvent[]): ThreadModel {
 					text: gapText(d, e.ts),
 				});
 				break;
+			case "composer_send": {
+				// 3.2 (§8.1.8): bookkeeping states stay out of the thread; a
+				// failed, uncertain, unconfirmed, misdelivered or resolved send
+				// is a marker, once per state. A delivered send is the
+				// `user_prompt` that follows it.
+				const superseded =
+					d.state === "uncertain" && composerFinal.has(String(d.client_message_id ?? ""));
+				const line = superseded ? null : composerSendText(d);
+				if (line) {
+					items.push({
+						kind: "marker",
+						key: `cs${e.seq}`,
+						seq: e.seq,
+						ts: e.ts,
+						tone: line.tone,
+						text: line.text,
+					});
+				}
+				break;
+			}
 			case "compact":
 				if (d.phase === "post") {
 					items.push({

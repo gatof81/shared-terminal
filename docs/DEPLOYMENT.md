@@ -327,6 +327,53 @@ Both variables are forwarded by `docker-compose.yml` with empty defaults
 (before 3.0d `CONVERSATION_ENABLED` was not, so setting it in `.env` did
 nothing under compose).
 
+### Composer (3.2, `docs/CONVERSATION.md` §8)
+
+Sending a message to the Claude Code CLI from the Chat view. **Off by
+default**: with `CONVERSATION_COMPOSER_ENABLED` unset the route is not
+mounted (404) and every conversation reports `canSendInput: false`. Turn it
+on only on a backend that already runs the #444 fix (`b1479d5`) and only for
+sessions whose capture is effective — a send is confirmed by the CLI's own
+`UserPromptSubmit`, so without capture it can never be `delivered`.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `CONVERSATION_COMPOSER_ENABLED` | unset (`false`) | Mounts `POST /api/sessions/:id/conversations/:cid/messages` and the admin routes `POST /api/admin/sessions/:id/composer/resolve`, `GET /api/admin/sessions/:id/composer/panes`; `canSendInput` becomes true for interactive conversations with a pane, effective capture and no blocking operation. |
+| `COMPOSER_CLI_VERSIONS` | `2.1.314` | Comma-separated Claude Code versions the §8.2.6 revalidation was run with. A conversation whose CLI (the process in the pane) is another version gets 409 `cli-unvalidated`. Adding a version means running `backend/src/conversation/composer.smoke.ts` against it and attaching the output to the PR. |
+
+Operator surface (`CONVERSATION.md` §8.1.11). A pane whose last send has a
+pending outcome blocks further sends from Chat (409
+`send-in-progress{effects-pending}`); the Chat view explains it and the
+admin stats (`GET /api/admin/stats → composer`) count blocked panes. To
+look and resolve, from the backend container (same exclusion as the API —
+the CLI only calls the backend on loopback and refuses when it is down):
+
+```bash
+npm run composer:resolve -- <sessionId> --list --user <admin>
+npm run composer:resolve -- <sessionId> <paneId> <clientMessageId> reconcile --user <admin>
+npm run composer:resolve -- <sessionId> <paneId> <clientMessageId> discarded|sent-manually --user <admin>
+```
+
+- `reconcile` re-settles the pending execs from Docker's evidence (exit code
+  by inspect, or the container gone) and re-runs the deferred ack; it is
+  idempotent and never writes a second audit row. Repeat it after the
+  container's state changed.
+- `discarded` / `sent-manually` declare what the operator verified in the
+  Terminal (the segment was cleared, or the person sent it by hand). Only
+  possible when no executor is active on the pane and the result is still
+  pending; the API answers 409 `operation-active` / `not-pending` otherwise.
+  Each declaration writes one `operate` row in the observe log.
+- A pane stuck because an exec's outcome can never be inspected (the daemon
+  lost the exec) is released by stopping and starting the session: the
+  container is then gone for the pending execs, which is settlement evidence
+  (`evidence: container-gone`), and `reconcile` releases the pane.
+- A backend restart turns every active operation into `uncertain{orphaned}`
+  (fail-closed: nothing is resent); the person sees it in Chat and the
+  operator resolves as above.
+- A pane record that cannot be parsed makes the whole session unverifiable
+  for the composer (409) and is never deleted by the backend: inspect
+  `<WORKSPACE_ROOT>/.st-control/<sid>/composer/`.
+
 Host-side directories, all outside the workspace bind mount, next to
 `.uploads`:
 

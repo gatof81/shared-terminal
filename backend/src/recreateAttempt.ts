@@ -105,7 +105,8 @@ function nowIso(): string {
 	return new Date().toISOString();
 }
 
-async function fsyncDir(dir: string): Promise<void> {
+/** Shared with the composer's pane record (§8.1.4.1: the same durability primitive). */
+export async function fsyncDir(dir: string): Promise<void> {
 	// Not best-effort (unlike revocation.ts): a record whose rename may not
 	// survive a crash must not be reported as written, or the caller would
 	// act on a state the disk can still lose. Errors propagate.

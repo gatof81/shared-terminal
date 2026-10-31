@@ -129,6 +129,31 @@ export interface ConversationIndex {
 	sealedMessages: string[];
 	/** Set once a `gap revoked` was written for this conversation (§2.5). */
 	revokedNoted?: boolean;
+	/**
+	 * 3.2 composer (§8.1.4 regla 10): the HTTP answer recorded for each
+	 * RELEASED `client_message_id`, newest last, at most IDEMPOTENCY_WINDOW
+	 * entries. Fed by `composer_send{state: released}` lines, so it is
+	 * rebuilt from the file like the rest; a pending operation lives in its
+	 * pane record (paneRecord.ts), never here.
+	 */
+	composerSends?: Record<string, { status: number; body: unknown; at: string }>;
+}
+
+/** §8.1.4 regla 10 — released ids kept per conversation. Mirrors composerText.IDEMPOTENCY_WINDOW. */
+export const COMPOSER_IDEMPOTENCY_WINDOW = 256;
+
+/** Record a released composer operation's answer in the index (bounded, oldest out). */
+export function trackComposerSend(index: ConversationIndex, event: PersistedEvent): void {
+	if (event.ev !== "composer_send" || event.data.state !== "released") return;
+	const id = event.data.client_message_id;
+	const http = event.data.http as { status?: unknown; body?: unknown } | null | undefined;
+	if (typeof id !== "string" || !http || typeof http.status !== "number") return;
+	if (!index.composerSends) index.composerSends = {};
+	const map = index.composerSends;
+	delete map[id];
+	map[id] = { status: http.status, body: http.body, at: event.ts };
+	const keys = Object.keys(map);
+	for (let i = 0; i < keys.length - COMPOSER_IDEMPOTENCY_WINDOW; i++) delete map[keys[i]!];
 }
 
 export interface StoreFs {
@@ -437,6 +462,7 @@ export class ConversationStore {
 						messageBytes: parsed.messageBytes ?? {},
 						messageIndex: parsed.messageIndex ?? {},
 						sealedMessages: parsed.sealedMessages ?? [],
+						composerSends: parsed.composerSends ?? {},
 					},
 					legacyPromptCorrelation: !("persistedPromptId" in parsed),
 				};
@@ -531,6 +557,7 @@ export class ConversationStore {
 				index.persistedPromptId = ev.prompt_id;
 				index.lastPromptId = ev.prompt_id;
 			}
+			trackComposerSend(index, ev);
 			if (ev.ev === "assistant_delta") {
 				// B6 — the L2 budget must survive a restart: lines past the
 				// snapshot's offset re-add their bytes to the message tally.
@@ -690,6 +717,7 @@ export class ConversationStore {
 		r.eventsSinceFlush++;
 		this.stats.persisted++;
 		this.trackMessageAndAgents(r.index, event);
+		trackComposerSend(r.index, event);
 		for (const l of this.listeners) {
 			try {
 				l(stSessionId, cid, event);
@@ -824,18 +852,28 @@ export class ConversationStore {
 
 	// ── Reads ──────────────────────────────────────────────────────────────
 
-	/** Events with `seq > afterSeq`, ascending, at most `limit`. Current file only. */
+	/**
+	 * Events with `seq > afterSeq`, ascending, at most `limit`. The current
+	 * file only, unless `archive` also asks for the rotated `.1` generation
+	 * (read first, it is older).
+	 */
 	async readEvents(
 		stSessionId: string,
 		cid: string,
 		afterSeq: number,
 		limit: number,
+		opts: { archive?: boolean } = {},
 	): Promise<PersistedEvent[]> {
-		let content: string;
+		const file = this.eventsPath(stSessionId, cid);
+		let content = "";
+		if (opts.archive) {
+			content = await this.fs.readFile(`${file}.1`, "utf8").catch(() => "");
+			if (content && !content.endsWith("\n")) content += "\n";
+		}
 		try {
-			content = await this.fs.readFile(this.eventsPath(stSessionId, cid), "utf8");
+			content += await this.fs.readFile(file, "utf8");
 		} catch {
-			return [];
+			if (!content) return [];
 		}
 		const out: PersistedEvent[] = [];
 		for (const line of content.split("\n")) {

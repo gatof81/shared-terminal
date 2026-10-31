@@ -23,6 +23,7 @@ import {
 } from "./rateLimit.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerAuthRoutes } from "./routes/auth.js";
+import { registerComposerAdminRoutes, registerComposerRoutes } from "./routes/composer.js";
 import { registerConversationAdminRoutes } from "./routes/conversationAdmin.js";
 import { registerConversationRoutes } from "./routes/conversations.js";
 import { registerExecRoutes } from "./routes/exec.js";
@@ -52,7 +53,7 @@ export function buildRouter(
 	conversation?: ConversationService,
 	// 3.0d — the recreation engine and `CONVERSATION_ALLOW_USERS`; optional
 	// for the same reason.
-	conversationExtras: Pick<RouteContext, "recreation" | "conversationAllowUsers"> = {},
+	conversationExtras: Pick<RouteContext, "recreation" | "conversationAllowUsers" | "composer"> = {},
 ): Router {
 	const router = Router();
 
@@ -138,6 +139,8 @@ export function buildRouter(
 	registerGitRoutes(router, ctx);
 	registerConversationRoutes(router, ctx);
 	registerConversationAdminRoutes(router, ctx);
+	registerComposerRoutes(router, ctx);
+	registerComposerAdminRoutes(router, ctx);
 	registerExecRoutes(router, ctx);
 	registerTemplateRoutes(router, ctx);
 

@@ -483,6 +483,17 @@ export async function loginUser(username: string, password: string): Promise<Log
 	return { userId: row.id, token, isAdmin: row.is_admin === 1, isLead };
 }
 
+/**
+ * A short-lived token for the host-shell composer CLI (CONVERSATION.md
+ * §8.1.11): the CLI calls the backend's own admin endpoint on loopback so
+ * resolution and reconciliation run under the backend's pane exclusion —
+ * never a second, competing lock. Same secret and claims as a login token;
+ * the caller has already verified the user is an admin.
+ */
+export function signCliToken(userId: string, username: string): string {
+	return jwt.sign({ sub: userId, username } satisfies JwtPayload, jwtSecret(), { expiresIn: "2m" });
+}
+
 function signToken(userId: string, username: string): string {
 	const payload: JwtPayload = { sub: userId, username };
 	// Cast narrows to the library's own option-field type instead of `any`
