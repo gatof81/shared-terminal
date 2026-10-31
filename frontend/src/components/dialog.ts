@@ -71,6 +71,16 @@ export function isAnyDialogOpen(): boolean {
 	return stack.length > 0;
 }
 
+/**
+ * For other Escape handlers on `document`: true when this keypress is a
+ * dialog's to handle — a dialog is open, or one was just closed by it
+ * (the event arrives already consumed). Such a handler must then do
+ * nothing, so one Escape never closes two layers.
+ */
+export function escapeHandledByDialog(e: KeyboardEvent): boolean {
+	return e.defaultPrevented || stack.length > 0;
+}
+
 /** Close the topmost dialog. Returns false when none is open. */
 export function closeTopDialog(): boolean {
 	const top = stack[stack.length - 1];
@@ -144,10 +154,15 @@ document.addEventListener("keydown", (e) => {
 	if (!t) return;
 	if (e.key === "Escape") {
 		if (t.dialog.opts.closeOnEscape === false) return;
+		// One Escape, one layer. The dialog is closed synchronously here,
+		// so a later document listener (the mobile sidebar drawer in
+		// main.ts) would find no dialog open and close ITS layer with the
+		// same keypress. Two guards, so the order listeners were
+		// registered in doesn't matter: the event is marked consumed
+		// (preventDefault → escapeHandledByDialog()), and no later
+		// listener on document runs for it at all.
 		e.preventDefault();
-		// Other document handlers (the mobile sidebar drawer) check
-		// isAnyDialogOpen() themselves; stopping propagation here would
-		// also silence listeners registered on document before this one.
+		e.stopImmediatePropagation();
 		t.dialog.close();
 		return;
 	}

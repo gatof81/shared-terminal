@@ -4,6 +4,7 @@ import {
 	closeTopDialog,
 	confirmDialog,
 	createDialog,
+	escapeHandledByDialog,
 	isAnyDialogOpen,
 	promptDialog,
 } from "./dialog.js";
@@ -268,5 +269,119 @@ describe("alertDialog", () => {
 		const btn = document.querySelector<HTMLButtonElement>(".modal-primary-action")!;
 		btn.closest("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
 		await expect(p).resolves.toBeUndefined();
+	});
+});
+
+// Regression (PR #496 review): one Escape must close exactly one layer.
+// The drawer below stands in for main.ts's mobile sidebar handler: the
+// same guard, registered on document AFTER the dialog's listener, as in
+// the app (main.ts imports dialog.ts before adding its own handler).
+describe("Escape closes one layer at a time", () => {
+	function mobileDrawer(): { open: boolean; dispose: () => void } {
+		const drawer = { open: true, dispose: () => {} };
+		const handler = (e: KeyboardEvent) => {
+			if (e.key !== "Escape") return;
+			if (escapeHandledByDialog(e)) return;
+			if (drawer.open) drawer.open = false;
+		};
+		document.addEventListener("keydown", handler);
+		drawer.dispose = () => document.removeEventListener("keydown", handler);
+		return drawer;
+	}
+
+	it("dialog + mobile drawer open: first Escape closes the dialog only, second the drawer", () => {
+		const drawer = mobileDrawer();
+		try {
+			const d = createDialog(modal("m1", "a"));
+			d.open();
+			key("Escape");
+			expect(d.isOpen()).toBe(false);
+			expect(drawer.open).toBe(true);
+			key("Escape");
+			expect(drawer.open).toBe(false);
+		} finally {
+			drawer.dispose();
+		}
+	});
+
+	it("nested dialogs over the drawer close one per Escape, then the drawer", () => {
+		const drawer = mobileDrawer();
+		try {
+			const d1 = createDialog(modal("m1", "a"));
+			const d2 = createDialog(modal("m2", "b"));
+			d1.open();
+			d2.open();
+			key("Escape");
+			expect([d2.isOpen(), d1.isOpen(), drawer.open]).toEqual([false, true, true]);
+			key("Escape");
+			expect([d2.isOpen(), d1.isOpen(), drawer.open]).toEqual([false, false, true]);
+			key("Escape");
+			expect(drawer.open).toBe(false);
+		} finally {
+			drawer.dispose();
+		}
+	});
+
+	it("the guard holds whichever order the listeners were registered in", () => {
+		// A listener registered BEFORE dialog.ts's (runs first, sees the
+		// dialog still open) and one registered AFTER (runs after the
+		// close, sees the consumed event): neither may act.
+		const seen: string[] = [];
+		const before = (e: KeyboardEvent) => {
+			if (e.key === "Escape" && !escapeHandledByDialog(e)) seen.push("before");
+		};
+		// Capture phase runs before every bubble listener on document.
+		document.addEventListener("keydown", before, true);
+		const drawer = mobileDrawer();
+		try {
+			const d = createDialog(modal("m1", "a"));
+			d.open();
+			key("Escape");
+			expect(d.isOpen()).toBe(false);
+			expect(seen).toEqual([]);
+			expect(drawer.open).toBe(true);
+		} finally {
+			document.removeEventListener("keydown", before, true);
+			drawer.dispose();
+		}
+	});
+
+	it("with no dialog open, Escape and other keys reach the page untouched", () => {
+		const drawer = mobileDrawer();
+		const received: string[] = [];
+		const page = (e: KeyboardEvent) => received.push(`${e.key}:${e.defaultPrevented}`);
+		document.addEventListener("keydown", page);
+		try {
+			key("a");
+			key("Tab");
+			expect(received).toEqual(["a:false", "Tab:false"]);
+			key("Escape");
+			expect(received[2]).toBe("Escape:false");
+			expect(drawer.open).toBe(false);
+		} finally {
+			document.removeEventListener("keydown", page);
+			drawer.dispose();
+		}
+	});
+
+	it("the actions-style menu (a dialog) behaves the same: Escape closes only the menu", () => {
+		const drawer = mobileDrawer();
+		try {
+			const opener = document.getElementById("opener") as HTMLButtonElement;
+			const menu = createDialog(modal("actions-menu", "paste", "attach"), {
+				initialFocus: () => document.getElementById("paste"),
+				onClose: () => opener.setAttribute("aria-expanded", "false"),
+			});
+			opener.setAttribute("aria-expanded", "true");
+			menu.open(opener);
+			expect(document.activeElement?.id).toBe("paste");
+			key("Escape");
+			expect(menu.isOpen()).toBe(false);
+			expect(opener.getAttribute("aria-expanded")).toBe("false");
+			expect(document.activeElement).toBe(opener);
+			expect(drawer.open).toBe(true);
+		} finally {
+			drawer.dispose();
+		}
 	});
 });

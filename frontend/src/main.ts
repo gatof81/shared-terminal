@@ -33,7 +33,7 @@ import {
 import "./filesView.js";
 import "./gitView.js";
 import "./chatView.js";
-import { isAnyDialogOpen } from "./components/dialog.js";
+import { escapeHandledByDialog } from "./components/dialog.js";
 import { showCopySuccessToast, showToast } from "./components/toast.js";
 import "./invites.js";
 import { initKeyBar, updateKeyBarVisibility } from "./keyBar.js";
@@ -769,12 +769,13 @@ sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
 // Escape closes the mobile drawer, matching the WAI-ARIA modal-dialog
 // expectation. Desktop ignores this — the sidebar is always part of the
 // layout there and Escape conflicts with terminal/xterm key handling.
-// An open dialog owns Escape (components/dialog.ts dismisses the topmost
-// one); without the guard one press would close both.
+// A dialog owns Escape (components/dialog.ts dismisses the topmost one
+// and marks the event consumed); without the guard the same press would
+// also close the drawer — one Escape, one layer.
 document.addEventListener("keydown", (e) => {
 	if (e.key !== "Escape") return;
 	if (!isMobile()) return;
-	if (isAnyDialogOpen()) return;
+	if (escapeHandledByDialog(e)) return;
 	if (!mainEl.classList.contains("sidebar-open")) return;
 	setSidebarOpen(false);
 });
