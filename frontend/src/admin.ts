@@ -37,6 +37,7 @@ import {
 	removeAdminGroupMember,
 	updateAdminGroup,
 } from "./api.js";
+import { confirmDialog, createDialog } from "./components/dialog.js";
 import { formatBytes, formatCpuCores, formatCpuPercent } from "./format.js";
 import { activeSessionId, showToast } from "./main.js";
 import { openObserveModalFor } from "./observeModal.js";
@@ -91,38 +92,16 @@ const observersModalListEl = document.getElementById("observers-modal-list")!;
 // the dashboard's "did my force-action take effect" mental model
 // (refresh, see new state, act, refresh).
 
-let adminOpener: HTMLButtonElement | null = null;
-
-/** Symmetric with `resolveTemplatesOpener` — see that helper for the
- *  rationale. Admin is opened from a single click site per surface,
- *  so the resolver is currently only consumed by the close fallback,
- *  but keeping it parallel to Templates makes the pattern uniform if
- *  a future caller opens the admin modal from a third place. */
-function resolveAdminOpener(): HTMLButtonElement {
-	return adminBtn.offsetParent !== null ? adminBtn : sidebarAdminBtn;
-}
+const adminDialog = createDialog(adminModal, { initialFocus: () => adminRefreshBtn });
 
 function openAdminModal(opener: HTMLButtonElement) {
-	adminOpener = opener;
-	adminModal.classList.add("open");
-	adminModal.setAttribute("aria-hidden", "false");
-	adminRefreshBtn.focus();
+	adminDialog.open(opener);
 	void refreshAdmin();
 }
 
 function closeAdminModal() {
-	adminModal.classList.remove("open");
-	adminModal.setAttribute("aria-hidden", "true");
-	// Fall back to the viewport-rendered button if the opener is
-	// missing — same rationale as closeTemplatesModal.
-	(adminOpener ?? resolveAdminOpener()).focus();
-	adminOpener = null;
+	adminDialog.close();
 }
-
-adminModal.addEventListener("click", (e) => {
-	const target = e.target as HTMLElement;
-	if (target.hasAttribute("data-close-modal")) closeAdminModal();
-});
 
 adminBtn.addEventListener("click", () => openAdminModal(adminBtn));
 sidebarAdminBtn.addEventListener("click", () => openAdminModal(sidebarAdminBtn));
@@ -367,10 +346,18 @@ function renderAdminSessions(sessions: AdminSession[]): void {
 		stopBtn.textContent = "Stop";
 		stopBtn.disabled = s.status !== "running";
 		stopBtn.addEventListener("click", () =>
-			confirmAndAct(`Force-stop "${s.name}" (${s.ownerUsername})?`, stopBtn, async () => {
-				await adminForceStop(s.sessionId);
-				showToast(`Stopped ${s.name}`);
-			}),
+			confirmAndAct(
+				{
+					title: "Force-stop session",
+					message: `Force-stop "${s.name}" (${s.ownerUsername})? The owner's container is stopped; their workspace is preserved.`,
+					confirmLabel: "Force-stop",
+				},
+				stopBtn,
+				async () => {
+					await adminForceStop(s.sessionId);
+					showToast(`Stopped ${s.name}`);
+				},
+			),
 		);
 
 		// #270 — Edit caps. Disabled when the limits haven't loaded
@@ -387,7 +374,11 @@ function renderAdminSessions(sessions: AdminSession[]): void {
 		deleteBtn.className = "admin-session-delete";
 		deleteBtn.addEventListener("click", () =>
 			confirmAndAct(
-				`Soft-delete "${s.name}" (${s.ownerUsername})?\n\nContainer will be stopped and the row terminated; workspace is preserved.`,
+				{
+					title: "Soft-delete session",
+					message: `Soft-delete "${s.name}" (${s.ownerUsername})?\n\nThe container is stopped and the row terminated; the workspace is preserved and the owner can restore it.`,
+					confirmLabel: "Soft-delete",
+				},
 				deleteBtn,
 				async () => {
 					await adminForceDelete(s.sessionId, false);
@@ -402,7 +393,12 @@ function renderAdminSessions(sessions: AdminSession[]): void {
 		hardBtn.className = "admin-session-delete";
 		hardBtn.addEventListener("click", () =>
 			confirmAndAct(
-				`HARD-DELETE "${s.name}" (${s.ownerUsername})?\n\nThis purges the workspace directory AND drops the D1 row. Unrecoverable.`,
+				{
+					title: "Hard-delete session",
+					message: `Hard-delete "${s.name}" (${s.ownerUsername})?\n\nThis purges the workspace directory AND drops the session record. Unrecoverable.`,
+					confirmLabel: "Hard-delete",
+					requireText: { expected: s.name, label: `Type the session name (${s.name}) to confirm` },
+				},
 				hardBtn,
 				async () => {
 					await adminForceDelete(s.sessionId, true);
@@ -748,11 +744,16 @@ function buildEditCapsForm(
  *  requests; refreshes the dashboard on success so the row reflects
  *  the new state without the operator clicking Refresh. */
 async function confirmAndAct(
-	prompt: string,
+	question: {
+		title: string;
+		message: string;
+		confirmLabel: string;
+		requireText?: { expected: string; label?: string };
+	},
 	btn: HTMLButtonElement,
 	action: () => Promise<void>,
 ): Promise<void> {
-	if (!confirm(prompt)) return;
+	if (!(await confirmDialog({ ...question, danger: true }))) return;
 	btn.disabled = true;
 	try {
 		await action();
@@ -784,6 +785,21 @@ async function confirmAndAct(
 
 let editingGroupId: string | null = null;
 let membersGroupId: string | null = null;
+
+// Both open ON TOP of the admin dashboard; the dialog stack keeps Escape
+// and the backdrop on the topmost one and cascades when the dashboard closes.
+const adminGroupDialog = createDialog(adminGroupModal, {
+	initialFocus: () => adminGroupNameInput,
+	onClose: () => {
+		editingGroupId = null;
+	},
+});
+const adminGroupMembersDialog = createDialog(adminGroupMembersModal, {
+	initialFocus: () => adminGroupAddMemberInput,
+	onClose: () => {
+		membersGroupId = null;
+	},
+});
 
 function renderAdminGroups(groups: AdminGroupSummary[]): void {
 	adminGroupsListEl.textContent = "";
@@ -831,7 +847,11 @@ function renderAdminGroups(groups: AdminGroupSummary[]): void {
 		deleteBtn.className = "admin-session-delete";
 		deleteBtn.addEventListener("click", () =>
 			confirmAndAct(
-				`Delete group "${g.name}"?\n\nMembership rows cascade automatically. The lead user is NOT deleted.`,
+				{
+					title: "Delete group",
+					message: `Delete group "${g.name}"?\n\nMembership rows cascade automatically. The lead user is NOT deleted.`,
+					confirmLabel: "Delete group",
+				},
 				deleteBtn,
 				async () => {
 					await deleteAdminGroup(g.id);
@@ -856,9 +876,7 @@ function openAdminGroupModalForCreate(): void {
 	adminGroupDescriptionInput.value = "";
 	adminGroupLeadUserIdInput.value = "";
 	adminGroupSubmitBtn.textContent = "Create";
-	adminGroupModal.classList.add("open");
-	adminGroupModal.setAttribute("aria-hidden", "false");
-	adminGroupNameInput.focus();
+	adminGroupDialog.open(adminGroupCreateBtn);
 }
 
 function openAdminGroupModalForEdit(g: AdminGroupSummary): void {
@@ -868,21 +886,12 @@ function openAdminGroupModalForEdit(g: AdminGroupSummary): void {
 	adminGroupDescriptionInput.value = g.description ?? "";
 	adminGroupLeadUserIdInput.value = g.leadUserId;
 	adminGroupSubmitBtn.textContent = "Save";
-	adminGroupModal.classList.add("open");
-	adminGroupModal.setAttribute("aria-hidden", "false");
-	adminGroupNameInput.focus();
+	adminGroupDialog.open(document.activeElement);
 }
 
 function closeAdminGroupModal(): void {
-	adminGroupModal.classList.remove("open");
-	adminGroupModal.setAttribute("aria-hidden", "true");
-	editingGroupId = null;
+	adminGroupDialog.close();
 }
-
-adminGroupModal.addEventListener("click", (e) => {
-	const target = e.target as HTMLElement;
-	if (target.hasAttribute("data-close-modal")) closeAdminGroupModal();
-});
 
 adminGroupCreateBtn.addEventListener("click", () => openAdminGroupModalForCreate());
 
@@ -927,22 +936,13 @@ async function openAdminGroupMembersModal(g: AdminGroupSummary): Promise<void> {
 	loading.className = "modal-hint";
 	loading.textContent = "Loading members…";
 	adminGroupMembersListEl.appendChild(loading);
-	adminGroupMembersModal.classList.add("open");
-	adminGroupMembersModal.setAttribute("aria-hidden", "false");
-	adminGroupAddMemberInput.focus();
+	adminGroupMembersDialog.open(document.activeElement);
 	await refreshAdminGroupMembers(g.id, g.leadUserId);
 }
 
 function closeAdminGroupMembersModal(): void {
-	adminGroupMembersModal.classList.remove("open");
-	adminGroupMembersModal.setAttribute("aria-hidden", "true");
-	membersGroupId = null;
+	adminGroupMembersDialog.close();
 }
-
-adminGroupMembersModal.addEventListener("click", (e) => {
-	const target = e.target as HTMLElement;
-	if (target.hasAttribute("data-close-modal")) closeAdminGroupMembersModal();
-});
 
 async function refreshAdminGroupMembers(groupId: string, leadUserId: string): Promise<void> {
 	let detail: AdminGroupDetail;
@@ -988,7 +988,13 @@ async function refreshAdminGroupMembers(groupId: string, leadUserId: string): Pr
 		// Same shape as `Stop` being disabled on a non-running session.
 		removeBtn.disabled = m.userId === leadUserId;
 		removeBtn.addEventListener("click", async () => {
-			if (!confirm(`Remove ${m.username} from this group?`)) return;
+			const ok = await confirmDialog({
+				title: "Remove member",
+				message: `Remove ${m.username} from this group? Their sessions stop being observable by the group's lead.`,
+				confirmLabel: "Remove",
+				danger: true,
+			});
+			if (!ok) return;
 			removeBtn.disabled = true;
 			try {
 				await removeAdminGroupMember(groupId, m.userId);
@@ -1097,6 +1103,8 @@ function renderAdminObserveLog(entries: AdminObserveLogEntry[]): void {
 // audience ("who has been watching me?"). A non-authorised viewer
 // just sees a toast.
 
+const observersDialog = createDialog(observersModal);
+
 function openObserversModal(): void {
 	if (!activeSessionId) return;
 	const sessionId = activeSessionId;
@@ -1105,14 +1113,12 @@ function openObserversModal(): void {
 	loading.className = "modal-hint";
 	loading.textContent = "Loading…";
 	observersModalListEl.appendChild(loading);
-	observersModal.classList.add("open");
-	observersModal.setAttribute("aria-hidden", "false");
+	observersDialog.open(observersBtn);
 	void refreshObserversModal(sessionId);
 }
 
 function closeObserversModal(): void {
-	observersModal.classList.remove("open");
-	observersModal.setAttribute("aria-hidden", "true");
+	observersDialog.close();
 }
 
 async function refreshObserversModal(sessionId: string): Promise<void> {
@@ -1154,11 +1160,6 @@ async function refreshObserversModal(sessionId: string): Promise<void> {
 		observersModalListEl.appendChild(row);
 	}
 }
-
-observersModal.addEventListener("click", (e) => {
-	const target = e.target as HTMLElement;
-	if (target.hasAttribute("data-close-modal")) closeObserversModal();
-});
 
 observersBtn.addEventListener("click", () => openObserversModal());
 

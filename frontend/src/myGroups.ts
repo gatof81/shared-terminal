@@ -15,6 +15,7 @@ import {
 	type LeadGroup,
 	type ObservableSession,
 } from "./api.js";
+import { createDialog } from "./components/dialog.js";
 import { sessions, sessionsLoadedOnce, showToast } from "./main.js";
 import { closeObserveModal, openObserveModalFor } from "./observeModal.js";
 
@@ -38,7 +39,11 @@ const observableListEl = document.getElementById("observable-list")!;
 // lead-flavoured `ObserveTarget` and opens it read-only (no
 // `canOperate` — a lead never gets the Take control button).
 
-let myGroupsOpener: HTMLButtonElement | null = null;
+// Closing My groups cascades to the observe dialog opened on top of it
+// (components/dialog.ts), so a backdrop click on the parent can't leave
+// an observe WebSocket running with no UI to close it — the audit row's
+// ended_at depends on that close.
+const myGroupsDialog = createDialog(myGroupsModal, { initialFocus: () => myGroupsRefreshBtn });
 
 /** Open the shared observe modal for one of a lead's observable
  *  sessions — always read-only (no `canOperate`). The reconnect probe
@@ -58,41 +63,14 @@ function openObserveForLead(s: ObservableSession): void {
 	});
 }
 
-function resolveMyGroupsOpener(): HTMLButtonElement {
-	return myGroupsBtn.offsetParent !== null ? myGroupsBtn : sidebarMyGroupsBtn;
-}
-
 function openMyGroupsModal(opener: HTMLButtonElement) {
-	myGroupsOpener = opener;
-	myGroupsModal.classList.add("open");
-	myGroupsModal.setAttribute("aria-hidden", "false");
-	myGroupsRefreshBtn.focus();
+	myGroupsDialog.open(opener);
 	void refreshMyGroups();
 }
 
 function closeMyGroupsModal() {
-	// Tear down any active observe attach before dismissing the
-	// parent modal (#201e review round 4 SHOULD-FIX). The observe
-	// modal opens on top of My groups without closing it; if the
-	// lead backdrop-clicks the My groups modal while observe is
-	// still visible, the parent dismisses but the observe WS
-	// keeps running with no UI affordance to close it. The
-	// audit row's `ended_at` would only land when the backend
-	// heartbeat eventually killed the socket — a gap the
-	// audit-trail invariant explicitly forbids. closeObserveModal
-	// is idempotent when no observe is active, same shape as the
-	// `handleLogout` call site.
-	closeObserveModal();
-	myGroupsModal.classList.remove("open");
-	myGroupsModal.setAttribute("aria-hidden", "true");
-	(myGroupsOpener ?? resolveMyGroupsOpener()).focus();
-	myGroupsOpener = null;
+	myGroupsDialog.close();
 }
-
-myGroupsModal.addEventListener("click", (e) => {
-	const target = e.target as HTMLElement;
-	if (target.hasAttribute("data-close-modal")) closeMyGroupsModal();
-});
 
 myGroupsBtn.addEventListener("click", () => openMyGroupsModal(myGroupsBtn));
 sidebarMyGroupsBtn.addEventListener("click", () => openMyGroupsModal(sidebarMyGroupsBtn));

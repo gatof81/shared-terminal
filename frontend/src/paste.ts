@@ -6,6 +6,7 @@
  * are exported for main.ts's Escape handler and the actions (+) menu.
  */
 
+import { createDialog } from "./components/dialog.js";
 import { getActiveTerminal, showToast } from "./main.js";
 
 // ── DOM (re-queried locally; see header) ─────────────────────────────────
@@ -22,35 +23,31 @@ const pasteSendBtn = document.getElementById("paste-send-btn") as HTMLButtonElem
 // freeze the pane long before the WS layer's default 100 MB limit fired —
 // cap explicitly so the toast is the worst they see.
 const MAX_PASTE_CHARS = 65_536;
-let pasteOpener: HTMLButtonElement | null = null;
 
-function openPasteModal(opener: HTMLButtonElement) {
-	pasteOpener = opener;
-	pasteModal.classList.add("open");
-	pasteModal.setAttribute("aria-hidden", "false");
-	pasteTextarea.value = "";
-	pasteSendBtn.disabled = true;
+const pasteDialog = createDialog(pasteModal, {
 	// Focus the textarea so the soft keyboard pops and a long-press
 	// immediately offers Paste — saves the user one tap.
-	pasteTextarea.focus();
+	initialFocus: () => pasteTextarea,
+	onClose: () => {
+		pasteTextarea.value = "";
+		pasteSendBtn.disabled = true;
+		// Release the runPasteFlow in-flight guard. The flow intentionally
+		// leaves it set on the modal-open path so a second tap can't kick
+		// off a parallel readClipboardText() while the modal is open;
+		// closure of the modal (by any path) is the signal that the cycle
+		// is truly finished.
+		pasteInFlight = false;
+	},
+});
+
+function openPasteModal(opener: HTMLButtonElement) {
+	pasteTextarea.value = "";
+	pasteSendBtn.disabled = true;
+	pasteDialog.open(opener);
 }
 
 function closePasteModal() {
-	pasteModal.classList.remove("open");
-	pasteModal.setAttribute("aria-hidden", "true");
-	pasteTextarea.value = "";
-	pasteSendBtn.disabled = true;
-	// Release the runPasteFlow in-flight guard. The flow intentionally
-	// leaves it set on the modal-open path so a second tap can't kick
-	// off a parallel readClipboardText() while the modal is open;
-	// closure of the modal is the signal that the cycle is truly
-	// finished.
-	pasteInFlight = false;
-	// Restore focus to the opener — typically actionsBtn, which is
-	// visible whenever a session is active. If it's somehow gone the
-	// focus call is a harmless no-op.
-	pasteOpener?.focus();
-	pasteOpener = null;
+	pasteDialog.close();
 }
 
 async function readClipboardText(): Promise<string | null> {
@@ -177,11 +174,6 @@ pasteSendBtn.addEventListener("click", () => {
 	term.paste(text);
 	showToast(`Pasted ${text.length} character${text.length === 1 ? "" : "s"}`);
 	closePasteModal();
-});
-
-pasteModal.addEventListener("click", (e) => {
-	const target = e.target as HTMLElement;
-	if (target.hasAttribute("data-close-modal")) closePasteModal();
 });
 
 export { closePasteModal, runPasteFlow };

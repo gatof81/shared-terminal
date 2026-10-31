@@ -10,13 +10,11 @@
 // manipulation, minimising FOUC.
 import "./styles/index.css";
 
-import { closeActionsMenu } from "./actions.js";
-import {
-	closeAdminGroupMembersModal,
-	closeAdminGroupModal,
-	closeAdminModal,
-	closeObserversModal,
-} from "./admin.js";
+// Modules that register their dialogs and buttons on load; nothing else
+// imports them by name (the dialog stack in components/dialog.ts owns
+// Escape, focus and backdrop clicks for all of them).
+import "./actions.js";
+import "./admin.js";
 import {
 	checkAuthStatus,
 	InviteRequiredError,
@@ -35,22 +33,18 @@ import {
 import "./filesView.js";
 import "./gitView.js";
 import "./chatView.js";
-import { closeInvitesModal } from "./invites.js";
+import { escapeHandledByDialog } from "./components/dialog.js";
+import { showCopySuccessToast, showToast } from "./components/toast.js";
+import "./invites.js";
 import { initKeyBar, updateKeyBarVisibility } from "./keyBar.js";
 import {
-	closeMyGroupsModal,
 	closeObserveModal,
 	refreshSidebarObservables,
 	renderSidebarObservables,
 } from "./myGroups.js";
-import {
-	applyResourceCapsToForm,
-	closeNewSessionModal,
-	closeSaveTemplateModal,
-	closeTemplatesModal,
-} from "./newSession.js";
-import { closePasteModal } from "./paste.js";
-import { closePortsModal } from "./ports.js";
+import { applyResourceCapsToForm } from "./newSession.js";
+import "./paste.js";
+import "./ports.js";
 import {
 	disablePush,
 	enablePush,
@@ -82,11 +76,7 @@ const sidebarUserDisplay = document.getElementById("sidebar-user-display")!;
 
 const logoutBtn = document.getElementById("logout-btn")!;
 const invitesBtn = document.getElementById("invites-btn") as HTMLButtonElement;
-const invitesModal = document.getElementById("invites-modal")!;
 const sessionList = document.getElementById("session-list")!;
-const newSessionModal = document.getElementById("new-session-modal")!;
-const saveTemplateModal = document.getElementById("save-template-modal")!;
-const templatesModal = document.getElementById("templates-modal")!;
 const showTerminatedToggle = document.getElementById("show-terminated-toggle") as HTMLInputElement;
 const sidebarRefreshBtn = document.getElementById("sidebar-refresh-btn") as HTMLButtonElement;
 const mainEl = document.querySelector("main")!;
@@ -96,26 +86,12 @@ const sidebarBackdrop = document.getElementById("sidebar-backdrop")!;
 const sidebarInvitesBtn = document.getElementById("sidebar-invites-btn") as HTMLButtonElement;
 const sidebarAdminBtn = document.getElementById("sidebar-admin-btn") as HTMLButtonElement;
 const adminBtn = document.getElementById("admin-btn") as HTMLButtonElement;
-const adminModal = document.getElementById("admin-modal")!;
-// #201e-2 — admin Groups CRUD (in admin dashboard) + admin observe-log
-// + per-session Observers button. Visibility for the Groups + observe-log
-// sections is the parent admin modal (admin-only). Observers button is
-// shown for everyone; the backend returns 403 if the caller can't
-// observe the session.
-const adminGroupModal = document.getElementById("admin-group-modal")!;
-const adminGroupMembersModal = document.getElementById("admin-group-members-modal")!;
-const observersModal = document.getElementById("observers-modal")!;
-
-// #190 — per-session exposed-ports editor (toolbar "Ports" button).
-const portsModal = document.getElementById("ports-modal")!;
 
 // #201e — lead-side "My groups" surface. Visibility flips on isLead()
 // from the api-layer mirror. Sidebar + header buttons are gated together
 // (same shape as the Admin pair above).
 const myGroupsBtn = document.getElementById("my-groups-btn") as HTMLButtonElement;
 const sidebarMyGroupsBtn = document.getElementById("sidebar-my-groups-btn") as HTMLButtonElement;
-const myGroupsModal = document.getElementById("my-groups-modal")!;
-const observeModal = document.getElementById("observe-modal")!;
 const sidebarLogoutBtn = document.getElementById("sidebar-logout-btn") as HTMLButtonElement;
 // #355 — Web Push toggle. Header (desktop) + sidebar-footer (mobile drawer)
 // pair, mirroring the Admin/Invites button pairs. State is read from the
@@ -131,14 +107,8 @@ const chromeToggleLabel = document.getElementById("chrome-toggle-label")!;
 const terminalTabs = document.getElementById("terminal-tabs")!;
 const terminalContainer = document.getElementById("terminal-container")!;
 const fontSizeBtn = document.getElementById("font-size-btn") as HTMLButtonElement;
-// Kept here (actions.ts re-queries its own copies) because the Escape
-// handler below needs these locally: it reads actionsMenu.classList and
-// calls actionsBtn.focus() after closeActionsMenu() — the exported
-// closeActionsMenu only flips ARIA/`.open` state, it doesn't restore focus.
+// actions.ts owns the (+) menu; main.ts only toggles the button's visibility.
 const actionsBtn = document.getElementById("actions-btn") as HTMLButtonElement;
-const actionsMenu = document.getElementById("actions-menu")!;
-const pasteModal = document.getElementById("paste-modal")!;
-const toast = document.getElementById("toast")!;
 
 // ── Viewport height ─────────────────────────────────────────────────────────
 // iOS Safari's soft keyboard overlays the layout viewport without resizing
@@ -610,43 +580,9 @@ window.addEventListener(SESSION_EXPIRED_EVENT, () => {
 });
 
 // ── Toast ───────────────────────────────────────────────────────────────────
-
-let toastTimer: ReturnType<typeof setTimeout> | null = null;
-
-export function showToast(message: string, isError = false) {
-	toast.textContent = message;
-	toast.className = `visible${isError ? " error" : ""}`;
-	if (toastTimer) clearTimeout(toastTimer);
-	toastTimer = setTimeout(() => {
-		toast.className = "";
-		// Clear textContent too, not just the visibility class. Without
-		// this the message stays readable to anything that queries the
-		// DOM (devtools, browser extensions, an XSS payload) long after
-		// the visual window closes — material when the message carries
-		// a one-time secret like a freshly-minted invite code (#49).
-		toast.textContent = "";
-	}, 4000);
-}
-
-// Brief success indicator for the copy-on-select path. Kept short
-// (1.2s) and on its own helper rather than a `success` flag on
-// `showToast` because the auto-copy path fires on every selection-
-// finalise — a 4s toast that lingers across multiple selections
-// would feel intrusive, and reusing the failure toast's duration
-// would let a recent copy-success chip occlude a real error toast
-// that follows it. Reuses the same #toast element + textContent
-// clear-out for the same DOM-queryable-leftover reason as
-// `showToast`.
-const COPY_TOAST_DURATION_MS = 1200;
-export function showCopySuccessToast() {
-	toast.textContent = "✓ Copied";
-	toast.className = "visible success";
-	if (toastTimer) clearTimeout(toastTimer);
-	toastTimer = setTimeout(() => {
-		toast.className = "";
-		toast.textContent = "";
-	}, COPY_TOAST_DURATION_MS);
-}
+// Lives in components/toast.ts (live region, stacked items, dedupe); the
+// historical names stay exported from here for the modules that import them.
+export { showCopySuccessToast, showToast };
 
 // ── First-session selection hint ────────────────────────────────────────────
 // tmux mouse-on (session-image/tmux.conf:54) means a plain mouse drag in the
@@ -833,42 +769,13 @@ sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
 // Escape closes the mobile drawer, matching the WAI-ARIA modal-dialog
 // expectation. Desktop ignores this — the sidebar is always part of the
 // layout there and Escape conflicts with terminal/xterm key handling.
-// Skip when a modal is open: WAI-ARIA says Escape dismisses the topmost
-// dialog, not every overlay at once. Without this guard, an Escape press
-// while paste/invites and the sidebar are both open would close both.
+// A dialog owns Escape (components/dialog.ts dismisses the topmost one
+// and marks the event consumed); without the guard the same press would
+// also close the drawer — one Escape, one layer.
 document.addEventListener("keydown", (e) => {
 	if (e.key !== "Escape") return;
 	if (!isMobile()) return;
-	if (
-		invitesModal.classList.contains("open") ||
-		pasteModal.classList.contains("open") ||
-		actionsMenu.classList.contains("open") ||
-		newSessionModal.classList.contains("open") ||
-		// Both templates modals (the listing page and the
-		// save-as-template dialog) need the same guard or pressing
-		// Escape with one of them open AND the sidebar visible
-		// would close both at once. PR #230 round 1 NIT.
-		templatesModal.classList.contains("open") ||
-		saveTemplateModal.classList.contains("open") ||
-		// adminModal joined the modal lineup in #241e; without this
-		// guard, Escape with the admin dashboard open AND the
-		// sidebar drawer visible would close the sidebar instead
-		// of the dialog.
-		adminModal.classList.contains("open") ||
-		// #201e — same guard for the two new lead-side modals.
-		// Without this, Escape on mobile while either is open
-		// would close the sidebar drawer instead of dismissing
-		// the dialog.
-		myGroupsModal.classList.contains("open") ||
-		observeModal.classList.contains("open") ||
-		// #201e-2 — admin Group dialogs + per-session Observers
-		// modal need the same guard.
-		adminGroupModal.classList.contains("open") ||
-		adminGroupMembersModal.classList.contains("open") ||
-		observersModal.classList.contains("open") ||
-		portsModal.classList.contains("open")
-	)
-		return;
+	if (escapeHandledByDialog(e)) return;
 	if (!mainEl.classList.contains("sidebar-open")) return;
 	setSidebarOpen(false);
 });
@@ -1020,60 +927,6 @@ fontSizeBtn.addEventListener("click", () => {
 // Reflect the persisted size in the label on load so users see e.g. "Aa 16"
 // rather than a generic "Aa" after they've picked their size once.
 fontSizeBtn.textContent = `Aa ${currentFontSize}`;
-
-document.addEventListener("keydown", (e) => {
-	if (e.key !== "Escape") return;
-	// Topmost-first: WAI-ARIA 1.2 §6.2 says Escape dismisses the
-	// dialog the user is currently focused on, not the parent it
-	// floats above. The save-template dialog opens ON TOP of the
-	// create-session modal; without this priority, Escape would
-	// close the parent and leave the save-template dialog
-	// orphaned (and the parent's reset would wipe the form
-	// underneath, so confirming the save would persist a stripped
-	// template from default values). PR #229 round 1 SHOULD-FIX.
-	if (saveTemplateModal.classList.contains("open")) {
-		closeSaveTemplateModal();
-	} else if (observeModal.classList.contains("open")) {
-		// #201e — checked BEFORE myGroupsModal so the observe modal
-		// (which opens on top of My groups when the lead clicks
-		// Observe without closing the parent) dismisses first. WAI-
-		// ARIA 1.2 §6.2: Escape closes the topmost dialog. The
-		// owner-side My groups list survives so the lead can pick
-		// another session without re-opening the parent.
-		closeObserveModal();
-	} else if (myGroupsModal.classList.contains("open")) {
-		closeMyGroupsModal();
-	} else if (adminGroupMembersModal.classList.contains("open")) {
-		// #201e-2 — admin Groups dialogs open ON TOP of the parent
-		// admin dashboard. Same topmost-first ordering as
-		// observeModal above: members management nested-dialog →
-		// create/edit nested-dialog → admin parent → other modals.
-		closeAdminGroupMembersModal();
-	} else if (adminGroupModal.classList.contains("open")) {
-		closeAdminGroupModal();
-	} else if (observersModal.classList.contains("open")) {
-		// #201e-2 — Observers modal is opened from the per-session
-		// toolbar, not from inside another dialog, so it slots
-		// alongside the other top-level modals (admin/invites/etc).
-		closeObserversModal();
-	} else if (portsModal.classList.contains("open")) {
-		// #190 — Ports editor, same per-session-toolbar top-level slot.
-		closePortsModal();
-	} else if (newSessionModal.classList.contains("open")) {
-		closeNewSessionModal();
-	} else if (templatesModal.classList.contains("open")) {
-		closeTemplatesModal();
-	} else if (adminModal.classList.contains("open")) {
-		closeAdminModal();
-	} else if (invitesModal.classList.contains("open")) {
-		closeInvitesModal();
-	} else if (pasteModal.classList.contains("open")) {
-		closePasteModal();
-	} else if (actionsMenu.classList.contains("open")) {
-		closeActionsMenu();
-		actionsBtn.focus();
-	}
-});
 
 // ── Paste modal ─────────────────────────────────────────────────────────────
 // Mobile soft-keyboards don't surface a usable Cmd-V into xterm's helper

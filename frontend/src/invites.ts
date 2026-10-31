@@ -7,6 +7,7 @@
  */
 
 import { createInvite, type Invite, listInvites, revokeInvite } from "./api.js";
+import { alertDialog, confirmDialog, createDialog } from "./components/dialog.js";
 import { showToast } from "./main.js";
 
 // ── DOM (re-queried locally; see header) ─────────────────────────────────
@@ -18,34 +19,17 @@ const sidebarInvitesBtn = document.getElementById("sidebar-invites-btn") as HTML
 
 // ── Invites modal ───────────────────────────────────────────────────────────
 
-// Tracks which button opened the modal so close can return focus to the
-// same element. Without this, mobile users opening via the sidebar footer
-// would have focus restored to the desktop `invitesBtn` (display:none on
-// mobile) and lose their place in the tab order — `.focus()` is a no-op
-// on hidden elements.
-let invitesOpener: HTMLButtonElement | null = null;
+// The dialog returns focus to whichever button opened it (header on
+// desktop, sidebar footer on mobile — the other one is display:none).
+const invitesDialog = createDialog(invitesModal, { initialFocus: () => inviteCreateBtn });
 
 function openInvitesModal(opener: HTMLButtonElement) {
-	invitesOpener = opener;
-	invitesModal.classList.add("open");
-	invitesModal.setAttribute("aria-hidden", "false");
-	// Move focus into the dialog so a keyboard user activating the Invites
-	// button via Enter doesn't have their first Tab walk through the page
-	// behind the backdrop. Restored to invitesOpener on close.
-	inviteCreateBtn.focus();
+	invitesDialog.open(opener);
 	void renderInvites();
 }
 
 function closeInvitesModal() {
-	invitesModal.classList.remove("open");
-	invitesModal.setAttribute("aria-hidden", "true");
-	// Fall back to invitesBtn if the opener is missing (legacy path or
-	// a future caller that forgot to set it). On mobile invitesBtn is
-	// hidden, so a missing opener would still drop focus — but that's
-	// a regression to flag in code review, not something to silently
-	// paper over here.
-	(invitesOpener ?? invitesBtn).focus();
-	invitesOpener = null;
+	invitesDialog.close();
 }
 
 async function renderInvites() {
@@ -116,7 +100,13 @@ async function renderInvites() {
 			revokeBtn.className = "invite-action-btn revoke";
 			revokeBtn.textContent = "Revoke";
 			revokeBtn.addEventListener("click", async () => {
-				if (!confirm(`Revoke invite starting with "${invite.codePrefix}"?`)) return;
+				const ok = await confirmDialog({
+					title: "Revoke invite",
+					message: `Revoke the invite starting with "${invite.codePrefix}"? Anyone holding it will no longer be able to register.`,
+					confirmLabel: "Revoke",
+					danger: true,
+				});
+				if (!ok) return;
 				revokeBtn.disabled = true;
 				try {
 					await revokeInvite(invite.codeHash);
@@ -149,13 +139,11 @@ async function renderInvites() {
 invitesBtn.addEventListener("click", () => openInvitesModal(invitesBtn));
 sidebarInvitesBtn.addEventListener("click", () => openInvitesModal(sidebarInvitesBtn));
 
-// Mint flow: the server returns plaintext exactly once. We surface it
-// to the user with a copy-now-or-lose-it confirm dialog before refreshing
-// the list (which only carries the prefix from this point on). The
-// confirm() copy is not pretty UX, but it's the one universally available
-// "you must dismiss this" affordance the codebase already leans on (see
-// the revoke prompt above and the hard-delete prompt elsewhere); a custom
-// modal would expand scope without changing the security property.
+// Mint flow: the server returns plaintext exactly once. We copy it to the
+// clipboard and, when that fails, show it in a dialog the person must
+// dismiss before the list refreshes (which only carries the prefix from
+// this point on). The dialog node is removed on close, so the code does
+// not linger in the DOM afterwards.
 inviteCreateBtn.addEventListener("click", async () => {
 	inviteCreateBtn.disabled = true;
 	try {
@@ -169,12 +157,13 @@ inviteCreateBtn.addEventListener("click", async () => {
 			showToast("Invite code copied to clipboard");
 		} catch {
 			// Clipboard write can fail under permission-denied / non-secure-
-			// context. Fall back to alert() so the plaintext still reaches
-			// the user before it's gone forever.
-			alert(
-				`Invite code (won't be shown again — copy now):\n\n${minted.code}\n\n` +
-					"You can share this code with someone you want to invite.",
-			);
+			// context. Show the plaintext so it still reaches the user
+			// before it's gone forever.
+			await alertDialog({
+				title: "Invite code",
+				message: `This code won't be shown again — copy it now:\n\n${minted.code}\n\nShare it with the person you want to invite.`,
+				okLabel: "I copied it",
+			});
 		}
 		await renderInvites();
 	} catch (err) {
@@ -182,13 +171,6 @@ inviteCreateBtn.addEventListener("click", async () => {
 	} finally {
 		inviteCreateBtn.disabled = false;
 	}
-});
-
-// data-close-modal lives on both the backdrop and the × button — one
-// listener handles both rather than wiring two element refs.
-invitesModal.addEventListener("click", (e) => {
-	const target = e.target as HTMLElement;
-	if (target.hasAttribute("data-close-modal")) closeInvitesModal();
 });
 
 export { closeInvitesModal };

@@ -29,6 +29,7 @@ import {
 	type TemplateSummary,
 	updateTemplate,
 } from "./api.js";
+import { confirmDialog, createDialog } from "./components/dialog.js";
 import { parseDotEnv } from "./envParser.js";
 import { sessions, showToast } from "./main.js";
 import { openSession, refreshSessions, renderSessionList } from "./sessionCore.js";
@@ -61,8 +62,6 @@ const templatesBtn = document.getElementById("templates-btn") as HTMLButtonEleme
 // rendering scaffold below.
 const SESSION_TAB_PLACEHOLDERS: Record<string, { title: string; body: string; issueUrl: string }> =
 	{};
-
-let newSessionOpener: HTMLElement | null = null;
 
 function renderSessionTabPlaceholders() {
 	for (const [key, info] of Object.entries(SESSION_TAB_PLACEHOLDERS)) {
@@ -141,7 +140,6 @@ function setNewSessionModalMode(template: Template | null): void {
 }
 
 function openNewSessionModal(opener: HTMLElement) {
-	newSessionOpener = opener;
 	renderSessionTabPlaceholders();
 	setActiveSessionTab("basics");
 	newSessionInput.value = "";
@@ -160,11 +158,9 @@ function openNewSessionModal(opener: HTMLElement) {
 	// #202: headroom hint is fetched async so modal-open never blocks on
 	// it; the hint fills in when the response lands.
 	void refreshQuotaHeadroom();
-	newSessionModal.classList.add("open");
-	newSessionModal.setAttribute("aria-hidden", "false");
-	// Defer focus to the next paint so the input is reliably focusable
-	// (some browsers ignore .focus() on an element that just transitioned
-	// from display:none in the same frame).
+	newSessionDialog.open(opener);
+	// Defer focus to the next paint too: some browsers ignore .focus() on
+	// an element that just transitioned from display:none in the same frame.
 	requestAnimationFrame(() => newSessionInput.focus());
 }
 
@@ -297,8 +293,8 @@ async function openBootstrapLogModal(session: SessionInfo): Promise<void> {
 
 	const modal = document.createElement("div");
 	modal.id = "bootstrap-log-modal";
-	modal.className = "modal open";
-	modal.setAttribute("aria-hidden", "false");
+	modal.className = "modal";
+	modal.setAttribute("aria-hidden", "true");
 
 	const backdrop = document.createElement("div");
 	backdrop.className = "modal-backdrop";
@@ -340,31 +336,19 @@ async function openBootstrapLogModal(session: SessionInfo): Promise<void> {
 	modal.appendChild(card);
 	document.body.appendChild(modal);
 
-	// `escHandler` declared first so `close()` can unregister it on
-	// every close path (backdrop / × / Esc). Without this, the
-	// non-Esc close paths leak a listener on `document` each time
-	// the modal opens — they self-heal on the next Esc press but
-	// accumulate in between.
-	const escHandler = (e: KeyboardEvent) => {
-		if (e.key === "Escape") close();
-	};
-	const close = () => {
-		modal.remove();
-		document.removeEventListener("keydown", escHandler);
-		// Clear the module-level reference only if it still points at
-		// our close — a second-open before our close ran would have
-		// already swapped it. Avoids the second modal's `close` being
-		// silently nulled out by the first's tear-down.
-		if (activeBootstrapLogClose === close) activeBootstrapLogClose = null;
-	};
-	activeBootstrapLogClose = close;
-	// Close on backdrop / × / Esc — same affordances as the rest of
-	// the app's modals. The shared admin-modal click handler doesn't
-	// reach us (different element); wire ours explicitly.
-	modal.addEventListener("click", (e) => {
-		if ((e.target as HTMLElement).hasAttribute("data-close-modal")) close();
+	// Escape / backdrop / × and focus handling come from the shared
+	// dialog; onClose removes the node and clears the module-level
+	// reference only if it still points at this close — a second open
+	// before this one closed would have already swapped it.
+	const dialog = createDialog(modal, {
+		onClose: () => {
+			modal.remove();
+			if (activeBootstrapLogClose === close) activeBootstrapLogClose = null;
+		},
 	});
-	document.addEventListener("keydown", escHandler);
+	const close = () => dialog.close();
+	activeBootstrapLogClose = close;
+	dialog.open(document.activeElement);
 
 	try {
 		const log = await fetchBootstrapLog(session.sessionId);
@@ -383,9 +367,19 @@ async function openBootstrapLogModal(session: SessionInfo): Promise<void> {
 	}
 }
 
+// Teardown runs on EVERY close path (×, backdrop, Escape, programmatic)
+// via the dialog's onClose — a partially typed PAT must never survive to
+// the next open whichever way the modal was dismissed.
+const newSessionDialog = createDialog(newSessionModal, {
+	initialFocus: () => newSessionInput,
+	onClose: resetNewSessionModal,
+});
+
 function closeNewSessionModal() {
-	newSessionModal.classList.remove("open");
-	newSessionModal.setAttribute("aria-hidden", "true");
+	newSessionDialog.close();
+}
+
+function resetNewSessionModal() {
 	// PR 185b2b: closing the modal mid-bootstrap MUST cancel the WS
 	// subscription. The hook itself keeps running server-side (the
 	// async runner is fire-and-forget); we just stop tailing it. The
@@ -415,15 +409,12 @@ function closeNewSessionModal() {
 	// without going through `openNewSessionModal` would silently
 	// enter edit mode with a stale `editingTemplateId`.
 	setNewSessionModalMode(null);
-	(newSessionOpener ?? newSessionBtn).focus();
-	newSessionOpener = null;
 }
 
 newSessionBtn.addEventListener("click", () => openNewSessionModal(newSessionBtn));
 
 newSessionModal.addEventListener("click", (e) => {
 	const target = e.target as HTMLElement;
-	if (target.hasAttribute("data-close-modal")) closeNewSessionModal();
 	const tab = target.closest<HTMLButtonElement>("[data-session-tab]");
 	if (tab?.dataset.sessionTab) setActiveSessionTab(tab.dataset.sessionTab);
 });
@@ -1199,31 +1190,26 @@ const saveTemplateDescriptionInput = document.getElementById(
 ) as HTMLInputElement;
 const saveTemplateSubmit = document.getElementById("save-template-submit") as HTMLButtonElement;
 
+// Opens ON TOP of the new-session dialog: Escape and the backdrop reach
+// this one first, and the parent's form survives underneath.
+const saveTemplateDialog = createDialog(saveTemplateModal, {
+	initialFocus: () => saveTemplateNameInput,
+});
+
 function openSaveTemplateModal() {
 	saveTemplateNameInput.value = "";
 	saveTemplateDescriptionInput.value = "";
 	saveTemplateSubmit.disabled = false;
-	saveTemplateModal.classList.add("open");
-	saveTemplateModal.setAttribute("aria-hidden", "false");
+	saveTemplateDialog.open(saveTemplateBtn);
 	requestAnimationFrame(() => saveTemplateNameInput.focus());
 }
 
 function closeSaveTemplateModal() {
-	saveTemplateModal.classList.remove("open");
-	saveTemplateModal.setAttribute("aria-hidden", "true");
-	// Return focus to the trigger button so keyboard users don't lose
-	// their tab-order position. Same shape as `closeInvitesModal` /
-	// `closePasteModal`. PR #229 round 1 NIT.
-	saveTemplateBtn.focus();
+	saveTemplateDialog.close();
 }
 
 saveTemplateBtn.addEventListener("click", () => {
 	openSaveTemplateModal();
-});
-
-saveTemplateModal.addEventListener("click", (e) => {
-	const target = e.target as HTMLElement;
-	if (target.hasAttribute("data-close-modal")) closeSaveTemplateModal();
 });
 
 /**
@@ -1288,8 +1274,6 @@ const templatesModal = document.getElementById("templates-modal")!;
 const templatesList = document.getElementById("templates-list") as HTMLDivElement;
 const templatesEmptyHint = document.getElementById("templates-empty-hint") as HTMLParagraphElement;
 
-let templatesOpener: HTMLElement | null = null;
-
 /**
  * Pick the Templates button that's actually rendered for the current
  * viewport — `templatesBtn` on desktop, `sidebarTemplatesBtn` on mobile.
@@ -1308,23 +1292,15 @@ function resolveTemplatesOpener(): HTMLButtonElement {
 	return templatesBtn.offsetParent !== null ? templatesBtn : sidebarTemplatesBtn;
 }
 
+const templatesDialog = createDialog(templatesModal);
+
 function openTemplatesModal(opener: HTMLElement) {
-	templatesOpener = opener;
-	templatesModal.classList.add("open");
-	templatesModal.setAttribute("aria-hidden", "false");
+	templatesDialog.open(opener);
 	void refreshTemplatesList();
 }
 
 function closeTemplatesModal() {
-	templatesModal.classList.remove("open");
-	templatesModal.setAttribute("aria-hidden", "true");
-	// Fall back to whichever button is rendered for the current
-	// viewport if the opener is missing (legacy path or a future
-	// caller that forgot to set it). The resolver covers both
-	// desktop and mobile — `templatesBtn` is `display:none` on
-	// mobile and would silently drop focus there otherwise.
-	(templatesOpener ?? resolveTemplatesOpener()).focus();
-	templatesOpener = null;
+	templatesDialog.close();
 }
 
 async function refreshTemplatesList() {
@@ -1425,7 +1401,13 @@ sidebarTemplatesBtn.addEventListener("click", () => openTemplatesModal(sidebarTe
 
 async function deleteTemplateConfirmed(id: string, card: HTMLDivElement) {
 	const name = card.querySelector("strong")?.textContent ?? "this template";
-	if (!confirm(`Delete template "${name}"? This cannot be undone.`)) return;
+	const ok = await confirmDialog({
+		title: "Delete template",
+		message: `Delete template "${name}"? This cannot be undone.`,
+		confirmLabel: "Delete",
+		danger: true,
+	});
+	if (!ok) return;
 	try {
 		await deleteTemplate(id);
 		showToast(`Template "${name}" deleted`);
