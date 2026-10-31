@@ -29,7 +29,7 @@ docker build -t shared-terminal-session ./session-image
 docker compose up -d --build
 ```
 
-Both workspaces have vitest suites and a Biome linter — `npm test` and `npm run lint` in each. CI (`.github/workflows/ci.yml`) runs Biome + `tsc` + vitest on every PR, in both workspaces, so a lint or test failure in either side blocks merge. Don't rely on `npm run build` alone — that's tsc, not Biome. Beyond that, verify by exercising the feature in a browser.
+Both workspaces have vitest suites and a Biome linter — `npm test` and `npm run lint` in each. CI (`.github/workflows/ci.yml`) runs Biome + `tsc` + vitest on every PR, in both workspaces, so a lint or test failure in either side blocks merge. Don't rely on `npm run build` alone — that's tsc, not Biome. The frontend also has a Playwright suite (`frontend/e2e/`, `npm run test:e2e`, desktop + mobile projects) that drives the real app on the Vite dev server against the deterministic mock backend in `e2e/mockBackend.ts` — no backend, no Docker — and it is a required CI job too: navigation, dialogs, permissions, the terminal invariant (a view switch sends no resize and opens no socket) and screenshot baselines (`e2e/__screenshots__/`, regenerate with `npm run test:e2e:update` after an intended visual change). Anything that needs tmux or Docker stays in the Session Image workflow's smokes. Beyond that, verify by exercising the feature in a browser.
 
 ## Required environment
 

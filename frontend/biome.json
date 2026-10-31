@@ -7,7 +7,7 @@
 	},
 	"files": {
 		"ignoreUnknown": true,
-		"includes": ["src/**/*.ts", "src/**/*.tsx"]
+		"includes": ["src/**/*.ts", "src/**/*.tsx", "e2e/**/*.ts", "playwright.config.ts"]
 	},
 	"formatter": {
 		"enabled": true,
