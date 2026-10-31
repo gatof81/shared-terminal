@@ -2,8 +2,11 @@
  * routes/conversationAdmin.ts — the 3.0d admin surface (CONVERSATION.md §7):
  *
  *   PATCH /admin/sessions/:id/conversation {enabled}   §2.4 rows, §2.7.5
- *   GET   /admin/sessions/:id/recreate                 preflight, no effects
- *   POST  /admin/sessions/:id/recreate {expectImageId} §2.7.2–§2.7.4
+ *   GET   /admin/sessions/:id/recreate[?preserveLayer=1] preflight, no effects
+ *   POST  /admin/sessions/:id/recreate {expectImageId, preserveLayer?} §2.7.2–§2.7.4, §2.7.7
+ *   POST  /admin/sessions/:id/recreate/approve          remove the retained container (§2.7.7)
+ *   POST  /admin/sessions/:id/recreate/rollback         back to the retained O (§2.7.7)
+ *   POST  /admin/sessions/:id/recreate/recover          operator D8 recovery (§2.7.7)
  *
  * The routes only translate HTTP: the §2.4 rows live in `ConversationService`
  * (`enable`/`disable`), the recreation in `RecreationEngine`, and both own
@@ -149,7 +152,8 @@ export function registerConversationAdminRoutes(router: Router, ctx: RouteContex
 				return;
 			}
 			try {
-				const r = await recreation.preflight(req.params.id);
+				const preserve = req.query.preserveLayer === "1" || req.query.preserveLayer === "true";
+				const r = await recreation.preflight(req.params.id, { preserve });
 				if ("status" in r) {
 					if (r.status === 404) res.status(404).json({ error: "Session not found" });
 					else res.status(503).json({ error: "docker-unavailable" });
@@ -170,13 +174,19 @@ export function registerConversationAdminRoutes(router: Router, ctx: RouteContex
 		requireAdmin,
 		async (req: Request, res: Response) => {
 			const { userId } = req as AuthedRequest;
-			const expectImageId = (req.body as { expectImageId?: unknown } | undefined)?.expectImageId;
+			const body = (req.body ?? {}) as { expectImageId?: unknown; preserveLayer?: unknown };
+			const expectImageId = body.expectImageId;
 			if (typeof expectImageId !== "string" || !IMAGE_ID_RE.test(expectImageId)) {
 				res
 					.status(400)
 					.json({ error: "expectImageId must be the image ID from the preflight (sha256:…)" });
 				return;
 			}
+			if (body.preserveLayer !== undefined && typeof body.preserveLayer !== "boolean") {
+				res.status(400).json({ error: "preserveLayer must be a boolean" });
+				return;
+			}
+			const preserve = body.preserveLayer === true;
 			if (!recreation) {
 				res.status(503).json({ error: "recreation-unavailable" });
 				return;
@@ -191,6 +201,7 @@ export function registerConversationAdminRoutes(router: Router, ctx: RouteContex
 				}
 				const ownerId = meta.userId;
 				const r = await recreation.recreate(sessionId, expectImageId, {
+					preserve,
 					// §2.7.2: with a foreign owner, the `operate` row goes BEFORE
 					// any effect and is fail-closed, as the start of #429. The
 					// engine calls this under the lock once every precondition
@@ -219,6 +230,7 @@ export function registerConversationAdminRoutes(router: Router, ctx: RouteContex
 					const { ok: _ok, ...body } = r;
 					logger.info(
 						`[admin] recreate committed: session=${sessionId} caller=${userId}` +
+							(preserve ? " (carry-over)" : "") +
 							(r.unresolved ? ` (unresolved: ${(r.pending ?? []).join(", ")})` : ""),
 					);
 					res.json(body);
@@ -260,4 +272,84 @@ export function registerConversationAdminRoutes(router: Router, ctx: RouteContex
 			}
 		},
 	);
+
+	// ── §2.7.7: approve / rollback / recover ──────────────────────────────
+	// Each is one engine call under the session's lock. A foreign owner gets
+	// a point-in-time `operate` row BEFORE the call, fail-closed (as #429's
+	// start): these verbs remove a container, move D1 back to the retained
+	// one, or resolve an orphaned attempt — the audit is the mitigation for
+	// widening admin power by them. The engine's 404/409/5xx translate 1:1;
+	// `code` is the error, extra fields (`detail`) ride along.
+	for (const verb of ["approve", "rollback", "recover"] as const) {
+		router.post(
+			`/admin/sessions/:id/recreate/${verb}`,
+			adminActionIp,
+			requireAdmin,
+			async (req: Request, res: Response) => {
+				const { userId } = req as AuthedRequest;
+				if (!recreation) {
+					res.status(503).json({ error: "recreation-unavailable" });
+					return;
+				}
+				const sessionId = req.params.id;
+				try {
+					const meta = await sessions.get(sessionId);
+					if (!meta) {
+						res.status(404).json({ error: "Session not found" });
+						return;
+					}
+					if (meta.userId !== userId) {
+						let logId: string;
+						try {
+							logId = await observeLog.recordObserveStart(
+								userId,
+								sessionId,
+								meta.userId,
+								"operate",
+							);
+						} catch (err) {
+							logger.error(
+								`[admin] operate recreate/${verb} audit insert failed, aborting: ${(err as Error).message} ` +
+									`(caller=${userId} session=${sessionId})`,
+							);
+							res.status(500).json({ error: "Internal server error" });
+							return;
+						}
+						observeLog.recordObserveEnd(logId).catch((err) => {
+							logger.warn(
+								`[admin] operate recreate/${verb} audit end failed: ${(err as Error).message} (log=${logId})`,
+							);
+						});
+						logger.info(
+							`[admin] operate recreate/${verb} logged: caller=${userId} session=${sessionId} owner=${meta.userId} log=${logId}`,
+						);
+					}
+					const r =
+						verb === "approve"
+							? await recreation.approve(sessionId)
+							: verb === "rollback"
+								? await recreation.rollbackToRetained(sessionId)
+								: await recreation.recover(sessionId);
+					res.setHeader("Cache-Control", "no-store");
+					if (r.ok) {
+						logger.info(`[admin] recreate/${verb} done: session=${sessionId} caller=${userId}`);
+						res.status(r.status).json(r.body);
+						return;
+					}
+					const { ok: _ok, status, code, ...rest } = r;
+					if (status >= 500) {
+						logger.error(
+							`[admin] recreate/${verb} failed: session=${sessionId} caller=${userId} ${code} ${JSON.stringify(rest)}`,
+						);
+					}
+					res.status(status).json({ error: code, ...rest });
+				} catch (err) {
+					logger.error(
+						`[admin] recreate/${verb} threw for ${sessionId}: ${(err as Error).message}`,
+					);
+					res.status(500).json({ error: "Internal server error" });
+				}
+			},
+		);
+	}
 }

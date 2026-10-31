@@ -44,7 +44,9 @@ export type Op =
 	| "listByLabel"
 	| "listByName"
 	| "exec"
-	| "execState";
+	| "execState"
+	| "sizeRw"
+	| "copyPath";
 
 /** Runs before the op applies; may await (late answer), throw (refused, nothing applied). */
 export type Hook = (args: unknown[]) => Promise<void> | void;
@@ -213,6 +215,36 @@ export class FakeDocker implements RecreateDockerPort {
 			.filter((c) => c.name.includes(fragment))
 			.map((c) => this.view(c));
 	}
+	/** Writable-layer size reported for a container (carry-over preconditions). */
+	readonly sizeRwOf = new Map<string, number | null>();
+	/** Copies issued: `from:path→to:dest`, in order; the fake moves the stats/files over. */
+	readonly copies: string[] = [];
+	async sizeRw(id: string) {
+		await this.gate("sizeRw", [id]);
+		return this.sizeRwOf.has(id) ? (this.sizeRwOf.get(id) as number | null) : 0;
+	}
+	async copyPath(fromId: string, p: string, toId: string, destDir: string, mayAct: () => boolean) {
+		await this.gate("copyPath", [fromId, p, toId, destDir]);
+		if (!mayAct()) throw new Error("copy not started: the caller may no longer act");
+		if (!this.byRef(fromId) || !this.byRef(toId)) throw httpError(404);
+		this.copies.push(`${fromId.slice(0, 4)}:${p}→${toId.slice(0, 4)}:${destDir}`);
+		// The subtree moves: every stat and file of O at or under `p` appears in N.
+		let bytes = 0;
+		const dst = this.statsOf.get(toId) ?? new Map<string, PathStat>();
+		for (const [q, st] of this.statsOf.get(fromId) ?? []) {
+			if (q === p || q.startsWith(`${p}/`)) {
+				dst.set(q, st);
+				bytes += st.size ?? 0;
+			}
+		}
+		this.statsOf.set(toId, dst);
+		const df = this.filesOf.get(toId) ?? new Map<string, Buffer>();
+		for (const [q, b] of this.filesOf.get(fromId) ?? []) {
+			if (q === p || q.startsWith(`${p}/`)) df.set(q, b);
+		}
+		this.filesOf.set(toId, df);
+		return { bytes };
+	}
 	readonly execs: string[][] = [];
 	/**
 	 * Per exec: what dockerd reports now. A test that makes an exec's exit
@@ -323,6 +355,18 @@ export class FakeD1 implements RecreateD1Port {
 		if (this.casMode === "ambiguous-applied") return "ambiguous";
 		return applies ? "applied" : "not-applied";
 	}
+	async casBack(_sid: string, from: string, to: string): Promise<CasResult> {
+		this.writes.push("casBack");
+		if (this.casMode === "rejected") return "not-applied";
+		const applies = this.row.container_id === from;
+		if (this.casMode === "ambiguous-not") return "ambiguous";
+		if (applies) {
+			this.row.container_id = to;
+			this.row.ingest_token_hash = null;
+		}
+		if (this.casMode === "ambiguous-applied") return "ambiguous";
+		return applies ? "applied" : "not-applied";
+	}
 	async getConfig() {
 		return this.config;
 	}
@@ -401,7 +445,9 @@ export class FakeCapture implements RecreateCapturePort {
 		const c = this.d1.row.container_id
 			? this.docker?.containers.get(this.d1.row.container_id)
 			: null;
-		if (!ok || !c) return "none";
+		// As captureAuth.ts: write and retain both need the control mounts
+		// (a 3.0c or legacy container has none ⇒ nothing is authorized).
+		if (!ok || !c?.mounts.includes("/etc/st-control")) return "none";
 		return c.running ? "write" : "retain";
 	}
 	/** Runs inside converge (to hold it, or fail it). By default, the §2.7.5 rule. */
@@ -470,6 +516,9 @@ export async function harness(
 	const workspaceSkills = new Map<string, WorkspaceSkill>();
 	/** The workspace CLI N would run (control-marker-incompatible). */
 	const cli: { version: string | null } = { version: "2.1.308" };
+	/** Carry-over preconditions (§2.7.7): free disk and backup freshness, as the host would report them. */
+	const disk: { free: number | null } = { free: 64 * 1024 ** 3 };
+	const backup: { fresh: boolean } = { fresh: true };
 	docker.onRemove = (id) => {
 		if (d1.row.container_id === id) throw new Error(`removed the container D1 points at (${id})`);
 	};
@@ -482,11 +531,67 @@ export async function harness(
 		capture,
 		readWorkspaceSkill: async (_sid, rel) => workspaceSkills.get(rel) ?? { kind: "absent" },
 		readCliVersion: async () => cli.version,
+		diskFree: async () => disk.free,
+		backupFresh: async () => backup.fresh,
 		config: { ...FAST, ...opts.config },
 	});
-	return { root, docker, d1, capture, attempts, lock, engine, workspaceSkills, cli };
+	return { root, docker, d1, capture, attempts, lock, engine, workspaceSkills, cli, disk, backup };
 }
 
+/**
+ * O's layer as a real legacy session's (the three sessions of 2026-10-31):
+ * HOME dirs and dotfiles, /tmp caches, the CLI's runtime, a stale socket,
+ * Docker's `docker-init` with its ancestor directories. 7 carried entries.
+ */
+export function dirtyLayer(h: { docker: FakeDocker }, bytes = 5_000_000): void {
+	const HOME = "/home/developer";
+	const changes = [
+		...cleanChanges(),
+		{ Path: `${HOME}/.npm`, Kind: 1 },
+		{ Path: `${HOME}/.npm/_cacache`, Kind: 1 },
+		{ Path: `${HOME}/.npm/_cacache/index`, Kind: 1 },
+		{ Path: `${HOME}/.local`, Kind: 1 },
+		{ Path: `${HOME}/.local/share`, Kind: 1 },
+		{ Path: `${HOME}/.cache`, Kind: 1 },
+		{ Path: `${HOME}/.bashrc`, Kind: 0 },
+		{ Path: `${HOME}/dash-backup`, Kind: 1 },
+		{ Path: `${HOME}/dash-backup/flows.json`, Kind: 1 },
+		{ Path: "/tmp/build-cache", Kind: 1 },
+		{ Path: "/tmp/build-cache/a.o", Kind: 1 },
+		{ Path: "/tmp/cc-socks", Kind: 1 },
+		{ Path: "/tmp/cc-socks/42.sock", Kind: 1 },
+		{ Path: "/tmp/claude-1000", Kind: 1 },
+		{ Path: "/tmp/tmux-1000", Kind: 1 },
+		{ Path: "/tmp/st-relay.log", Kind: 1 },
+		{ Path: "/tmp/dead.sock", Kind: 1 },
+		{ Path: "/usr/sbin/docker-init", Kind: 1 },
+		{ Path: "/usr/sbin", Kind: 0 },
+		{ Path: "/usr", Kind: 0 },
+	];
+	h.docker.changesOf.set(O_ID, changes);
+	const st = new Map<string, PathStat>(cleanStats());
+	st.set(`${HOME}/.npm`, { kind: "dir" });
+	st.set(`${HOME}/.npm/_cacache`, { kind: "dir" });
+	st.set(`${HOME}/.npm/_cacache/index`, { kind: "file", size: 3_000_000 });
+	st.set(`${HOME}/.local`, { kind: "dir" });
+	st.set(`${HOME}/.local/share`, { kind: "dir" });
+	st.set(`${HOME}/.cache`, { kind: "dir" });
+	st.set(`${HOME}/.bashrc`, { kind: "file", size: 4_200 });
+	st.set(`${HOME}/dash-backup`, { kind: "dir" });
+	st.set(`${HOME}/dash-backup/flows.json`, { kind: "file", size: 90_000 });
+	st.set("/tmp/build-cache", { kind: "dir" });
+	st.set("/tmp/build-cache/a.o", { kind: "file", size: 1_900_000 });
+	st.set("/tmp/cc-socks", { kind: "dir" });
+	st.set("/tmp/cc-socks/42.sock", { kind: "socket" });
+	st.set("/tmp/claude-1000", { kind: "dir" });
+	st.set("/tmp/tmux-1000", { kind: "dir" });
+	st.set("/tmp/st-relay.log", { kind: "file", size: 10 });
+	st.set("/tmp/dead.sock", { kind: "socket" });
+	st.set("/usr", { kind: "dir" });
+	st.set("/usr/sbin", { kind: "dir" });
+	h.docker.statsOf.set(O_ID, st);
+	h.docker.sizeRwOf.set(O_ID, bytes);
+}
 /** What "identical to the previous state" compares (§10: D1, names, hash, files, markers, ports). */
 export function stateOf(h: Awaited<ReturnType<typeof harness>>) {
 	return {

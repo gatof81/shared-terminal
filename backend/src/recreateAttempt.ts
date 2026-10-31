@@ -52,12 +52,40 @@ export interface AttemptIdentity {
 	nTempName: string;
 }
 
+/** What a carry-over attempt (§2.7.7) copies, as planned before its first effect. */
+export interface CarrySummary {
+	entries: number;
+	/** O's writable-layer size when planned (an upper bound of what is copied). */
+	bytes: number;
+}
+
+/**
+ * The container kept after a committed carry-over (O, stopped under its
+ * `-old-` name) or after a post-commit rollback (N, stopped under a
+ * `-rolledback-` name), until an operator approves its removal.
+ */
+export interface RetainedContainer {
+	containerId: string;
+	name: string;
+	role: "O" | "N";
+	since: string;
+}
+
 export interface AttemptRecord extends AttemptIdentity {
 	version: 1;
 	sessionId: string;
 	startedAt: string;
 	state: AttemptState;
 	stateAt: string;
+	/** Present on carry-over attempts (§2.7.7), from `begin()`. */
+	preserve?: CarrySummary;
+	/** A `rollback` attempt: the roles of O and N are reversed (§2.7.7). */
+	reverse?: true;
+	/** Set with `resolved`; cleared by `approve`. */
+	retained?: RetainedContainer;
+	approvedAt?: string;
+	/** Set by `adopt`: an orphaned attempt an operator took over to resolve by evidence. */
+	recoveredAt?: string;
 	/** Present only when `state === "resolved"`. */
 	outcome?: AttemptOutcome;
 	/** Short operator-facing reason for the last transition. */
@@ -145,7 +173,38 @@ const RECORD_KEYS = new Set([
 	"reason",
 	"orphanedAt",
 	"history",
+	"preserve",
+	"reverse",
+	"retained",
+	"approvedAt",
+	"recoveredAt",
 ]);
+
+function isCarrySummary(v: unknown): v is CarrySummary {
+	if (!v || typeof v !== "object") return false;
+	const o = v as Record<string, unknown>;
+	return (
+		Object.keys(o).length === 2 &&
+		typeof o.entries === "number" &&
+		o.entries >= 0 &&
+		typeof o.bytes === "number" &&
+		o.bytes >= 0
+	);
+}
+
+function isRetained(v: unknown): v is RetainedContainer {
+	if (!v || typeof v !== "object") return false;
+	const o = v as Record<string, unknown>;
+	return (
+		Object.keys(o).length === 4 &&
+		typeof o.containerId === "string" &&
+		o.containerId.length > 0 &&
+		typeof o.name === "string" &&
+		o.name.length > 0 &&
+		(o.role === "O" || o.role === "N") &&
+		typeof o.since === "string"
+	);
+}
 
 /**
  * Strict parse. Anything unexpected — an unknown key, a wrong type, an
@@ -182,8 +241,22 @@ function parseRecord(raw: string, sessionId: string): AttemptRecord {
 		throw new Error("outcome on an unresolved record");
 	}
 	if (v.reason !== undefined && typeof v.reason !== "string") throw new Error("bad reason");
-	if (v.orphanedAt !== undefined && (typeof v.orphanedAt !== "string" || state !== "uncertain"))
+	// An orphan mark lives on an `uncertain` record — or stays, as history, on
+	// one the operator recovered (§2.7.7): resolved only via `recoveredAt`.
+	if (
+		v.orphanedAt !== undefined &&
+		(typeof v.orphanedAt !== "string" ||
+			(state !== "uncertain" && !(state === "resolved" && typeof v.recoveredAt === "string")))
+	)
 		throw new Error("bad orphanedAt");
+	if (v.preserve !== undefined && !isCarrySummary(v.preserve)) throw new Error("bad preserve");
+	if (v.reverse !== undefined && v.reverse !== true) throw new Error("bad reverse");
+	if (v.retained !== undefined && (!isRetained(v.retained) || state !== "resolved"))
+		throw new Error("bad retained");
+	if (v.approvedAt !== undefined && (typeof v.approvedAt !== "string" || state !== "resolved"))
+		throw new Error("bad approvedAt");
+	if (v.recoveredAt !== undefined && typeof v.recoveredAt !== "string")
+		throw new Error("bad recoveredAt");
 	if (!Array.isArray(v.history)) throw new Error("bad history");
 	for (const h of v.history as unknown[]) {
 		const e = h as Record<string, unknown>;
@@ -270,7 +343,11 @@ export class RecreateAttemptStore {
 	 * while a previous attempt is not resolved (or its record is
 	 * unreadable). The previous resolved attempt moves into `history`.
 	 */
-	async begin(sessionId: string, identity: AttemptIdentity): Promise<AttemptRecord> {
+	async begin(
+		sessionId: string,
+		identity: AttemptIdentity,
+		extra: { preserve?: CarrySummary; reverse?: true } = {},
+	): Promise<AttemptRecord> {
 		const prev = await this.read(sessionId);
 		if (prev.kind === "unreadable") {
 			throw new RecreateUnresolvedError(sessionId, `record unreadable: ${prev.error}`);
@@ -299,6 +376,8 @@ export class RecreateAttemptStore {
 			stateAt: at,
 			history,
 		};
+		if (extra.preserve) record.preserve = extra.preserve;
+		if (extra.reverse) record.reverse = true;
 		// Owned BEFORE the write: if the write fails after its rename (a
 		// directory fsync error), an `open` record may be on disk with no
 		// durability guarantee. This live process then still owns it and,
@@ -337,6 +416,7 @@ export class RecreateAttemptStore {
 		attemptId: string,
 		outcome: AttemptOutcome,
 		reason: string,
+		opts: { retained?: RetainedContainer } = {},
 	): Promise<AttemptRecord> {
 		if (!isOutcome(outcome)) throw new AttemptTransitionError("invalid outcome");
 		const record = await this.current(sessionId, attemptId);
@@ -349,15 +429,69 @@ export class RecreateAttemptStore {
 				throw new AttemptTransitionError(`attempt ${attemptId} is already resolved differently`);
 			}
 		}
-		if (record.orphanedAt) {
-			// D8 fail-closed: the process that held the evidence is gone.
+		if (record.orphanedAt && !record.recoveredAt) {
+			// D8 fail-closed: the process that held the evidence is gone. Only
+			// an operator's explicit `adopt` (the recovery procedure, §2.7.7)
+			// lets a resolution by evidence through.
 			throw new AttemptTransitionError(
 				`attempt ${attemptId} was orphaned by a backend restart; no automatic resolution (D8)`,
 			);
 		}
 		// Ownership goes only after the write (incl. its fsyncs) succeeded.
-		const next = await this.transition(sessionId, record, "resolved", reason, outcome);
+		const next = await this.transition(
+			sessionId,
+			record,
+			"resolved",
+			reason,
+			outcome,
+			opts.retained,
+		);
 		this.active.delete(attemptId);
+		return next;
+	}
+
+	/**
+	 * The D8 recovery procedure's first step (§2.7.7): an operator takes
+	 * over an attempt orphaned by a restart so this process may resolve it
+	 * — by evidence it gathers now, with every container of the attempt
+	 * stopped (the engine checks that). Recorded durably (`recoveredAt`)
+	 * before any effect; the orphan mark stays as history.
+	 */
+	async adopt(sessionId: string, attemptId: string): Promise<AttemptRecord> {
+		const record = await this.current(sessionId, attemptId);
+		if (record.state === "resolved") {
+			throw new AttemptTransitionError(`attempt ${attemptId} is already resolved`);
+		}
+		if (!record.orphanedAt) {
+			throw new AttemptTransitionError(
+				`attempt ${attemptId} is not orphaned: it belongs to a live process`,
+			);
+		}
+		const next: AttemptRecord = {
+			...record,
+			state: "uncertain",
+			stateAt: nowIso(),
+			reason: `adopted by an operator for recovery (${record.reason ?? "no reason"})`,
+			recoveredAt: nowIso(),
+		};
+		await this.write(sessionId, next);
+		this.active.add(attemptId);
+		return next;
+	}
+
+	/**
+	 * Approval of a resolved carry-over or rollback: the retained container
+	 * was removed by the engine; the record stops naming it. Idempotent.
+	 */
+	async approve(sessionId: string): Promise<AttemptRecord> {
+		const r = await this.read(sessionId);
+		if (r.kind !== "ok") throw new AttemptTransitionError(`no readable record for ${sessionId}`);
+		if (r.record.state !== "resolved") {
+			throw new AttemptTransitionError(`attempt ${r.record.attemptId} is not resolved`);
+		}
+		const { retained: _r, ...rest } = r.record;
+		const next: AttemptRecord = { ...rest, approvedAt: nowIso() };
+		await this.write(sessionId, next);
 		return next;
 	}
 
@@ -456,10 +590,12 @@ export class RecreateAttemptStore {
 		state: AttemptState,
 		reason: string,
 		outcome?: AttemptOutcome,
+		retained?: RetainedContainer,
 	): Promise<AttemptRecord> {
 		const next: AttemptRecord = { ...record, state, stateAt: nowIso(), reason };
 		if (outcome) next.outcome = outcome;
 		else delete next.outcome;
+		if (retained) next.retained = retained;
 		await this.write(sessionId, next);
 		return next;
 	}

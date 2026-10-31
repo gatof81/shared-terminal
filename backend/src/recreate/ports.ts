@@ -58,6 +58,23 @@ export interface RecreateDockerPort {
 	listByLabel(key: string, value?: string): Promise<RecreateContainer[]>;
 	/** Every container whose name contains `fragment` (Docker's name filter is a substring match). */
 	listByName(fragment: string): Promise<RecreateContainer[]>;
+	/** Bytes of the container's writable layer (`SizeRw`), or null when the daemon does not report it. */
+	sizeRw(id: string): Promise<number | null>;
+	/**
+	 * Carry-over (§2.7.7): stream `path` of `fromId` (a stopped container)
+	 * as a tar archive into `destDir` of `toId` (a created, not started
+	 * container). Ownership, modes, symlinks and hard links travel in the
+	 * archive; nothing is written through the host filesystem. `mayAct` is
+	 * asked before the request goes out — a copy never starts after the
+	 * attempt lost its authorization. Resolves with the bytes streamed.
+	 */
+	copyPath(
+		fromId: string,
+		path: string,
+		toId: string,
+		destDir: string,
+		mayAct: () => boolean,
+	): Promise<{ bytes: number }>;
 	/**
 	 * Runs `cmd` under the in-container `timeout` and resolves when dockerd
 	 * reports how it ended. `exitCode: null` means the termination is

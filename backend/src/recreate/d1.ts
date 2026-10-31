@@ -34,6 +34,13 @@ export interface RecreateD1Port {
 	/** The session whose canonical container name this is, if any. */
 	sessionIdByContainerName(name: string): Promise<string | null>;
 	cas(sessionId: string, oId: string, nId: string, hash: string): Promise<CasResult>;
+	/**
+	 * The reverse of `cas` for a post-commit rollback (§2.7.7): back to the
+	 * retained container, which has no ingest token (it predates the relay),
+	 * so the hash goes with it. Applies only while the row still names the
+	 * container being rolled back.
+	 */
+	casBack(sessionId: string, fromId: string, toId: string): Promise<CasResult>;
 	getConfig(sessionId: string): Promise<RecreateSessionConfig>;
 	setStatus(sessionId: string, status: "running" | "stopped"): Promise<void>;
 	/** Several statements: `mayAct` is asked before each, none is issued once it says no. */
@@ -69,6 +76,17 @@ export const d1RecreatePort: RecreateD1Port = {
 		} catch (err) {
 			// Only an answer that says "failed" proves the statement did
 			// not run. A timeout or a lost connection may have applied it.
+			return err instanceof D1StatementError ? "not-applied" : "ambiguous";
+		}
+	},
+	async casBack(sessionId, fromId, toId) {
+		try {
+			const r = await d1Query(
+				"UPDATE sessions SET container_id = ?, ingest_token_hash = NULL, ingest_token_hash_suspended = NULL WHERE session_id = ? AND container_id = ?",
+				[toId, sessionId, fromId],
+			);
+			return r.meta.changes === 1 ? "applied" : "not-applied";
+		} catch (err) {
 			return err instanceof D1StatementError ? "not-applied" : "ambiguous";
 		}
 	},
