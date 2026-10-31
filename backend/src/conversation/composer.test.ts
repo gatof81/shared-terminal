@@ -573,7 +573,11 @@ describe("CLI version match (pilot finding, VM100 2026-10-31)", () => {
 		await until(() => docker.effectSteps().includes("enter"));
 		await promptArrives("ok");
 		expect((await p).body).toMatchObject({ result: "delivered" });
-		await until(recordGone);
+		// The first op must be fully released (record gone, `released` persisted,
+		// pane lock free) before the index is re-seeded for the second case.
+		await until(recordGone, "first release");
+		await until(async () => (await composerStates()).at(-1) === "released", "released persisted");
+		await lockFree(service);
 		await seedConversation(CID, { claudeVersion: "2.1.316 (Claude Code)" });
 		const r = await send(service, "no", ID2);
 		expect(r.status).toBe(409);
