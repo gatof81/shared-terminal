@@ -12,7 +12,10 @@
     "lint:fix": "biome check src/ --write",
     "format": "biome format src/ --write",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "test:e2e:update": "playwright test --update-snapshots",
+    "typecheck:e2e": "tsc -p tsconfig.e2e.json"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
@@ -21,6 +24,8 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.14",
+    "@playwright/test": "^1.52.0",
+    "@types/node": "^22.20.5",
     "jsdom": "^29.1.1",
     "typescript": "^5.4.5",
     "vite": "^8.0.9",

@@ -49,3 +49,8 @@ REVIEW.md
 # Python bytecode (session-image/hooks/relay.py)
 __pycache__/
 *.pyc
+
+# Playwright (frontend/e2e): reports and per-run output. The screenshot
+# baselines in frontend/e2e/__screenshots__ ARE committed.
+frontend/playwright-report/
+frontend/test-results/
