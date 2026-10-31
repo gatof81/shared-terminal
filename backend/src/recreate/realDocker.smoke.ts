@@ -259,6 +259,14 @@ async function main(): Promise<void> {
 			row.ingest_token_hash = h;
 			return "applied";
 		},
+		// §2.7.7 rollback: one statement back to the retained container, hashes cleared.
+		casBack: async (_s, fromId, toId) => {
+			if (casMode === "rejected" || row.container_id !== fromId) return "not-applied";
+			row.container_id = toId;
+			row.ingest_token_hash = null;
+			row.ingest_token_hash_suspended = null;
+			return "applied";
+		},
 		getConfig: async () => ({ ports: [], gitIdentity, hasDotfiles: false, postStartCmd: null }),
 		setStatus: async (_s, st) => {
 			row.status = st;
