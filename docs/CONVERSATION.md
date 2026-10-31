@@ -1681,6 +1681,20 @@ resultado del mensaje, ni del tiempo transcurrido. Tres plazos distintos:
   del exec y antes de `start`; si se perdió, el exec creado nunca se arranca y su id se retira del
   registro (nada que reconciliar), mientras que un exec ya arrancado termina y se reconcilia por
   evidencia. La exclusión no se retiene esperando un exec enviado: la mantiene el registro durable.
+  (v1.7.1, ronda 3 de Work) **Orden único de las escrituras locales del registro por pane.** Cada
+  escritura del registro de una operación (archivo temporal, fsync, rename, fsync de directorios) se
+  registra como «en vuelo» de esa operación hasta asentarse. Una cancelación (`T_http`, apagado), un
+  asentamiento por evidencia y, sobre todo, una **liberación** drenan primero las escrituras en vuelo
+  de la operación —solo sistema de archivos, nunca una respuesta de Docker— de modo que: (1) A no
+  queda `released` ni habilita a B mientras tenga escrituras capaces de modificar el registro del
+  pane, incluidas las ya iniciadas cuyo rename o fsync no terminó; (2) toda continuación tardía de A
+  (el retorno de la escritura del id del exec, la respuesta tardía de un exec) solo actúa **bajo la
+  exclusión y tras comprobar que sigue siendo la propietaria viva del pane**; si no lo es, no escribe,
+  no borra ni libera nada; la continuación que rehúsa un `start` no escribe por sí misma: retira el
+  id en memoria y el estado llega al disco por esa vía comprobada o no llega; (3) el registro en disco
+  nunca queda más antiguo que el estado escrito después (la escritura nueva espera a la anterior).
+  Sin esperas sobre Docker reteniendo el lock, y sin esperar la finalización de una continuación que
+  necesite el lock: solo se esperan promesas del sistema de archivos.
 - **T_ack = 8 s** es el presupuesto de confirmación tras un Enter **asentado** (§8.1.7). No es una
   garantía de que Docker terminó nada.
 - **La elegibilidad del pane** no tiene plazo: depende solo del estado de efectos de la operación

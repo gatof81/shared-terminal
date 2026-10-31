@@ -223,13 +223,25 @@ interface LiveOp {
 	candidates: Map<string, { promptId: string | null; seq: number }>;
 	resolveAck: (() => void) | null;
 	unlisten: (() => void) | null;
+	/**
+	 * This operation's record writes still in flight (temp file, fsync,
+	 * rename, directory fsyncs). A release, a cancellation or a settlement
+	 * drains them first: a write that landed late must never replace the
+	 * successor's record, and the record on disk must never end up older
+	 * than the state that was written after it (§8.1.4.1). Filesystem only —
+	 * never a Docker answer.
+	 */
+	writes: Set<Promise<void>>;
 	/** Resolves when the executor leaves the active phase (entered / failed / cancelled). */
 	activeDone: Promise<void>;
 	markActiveDone: () => void;
 }
 
 function newLiveOp(
-	base: Omit<LiveOp, "http" | "resolveHttp" | "httpDecided" | "activeDone" | "markActiveDone">,
+	base: Omit<
+		LiveOp,
+		"http" | "resolveHttp" | "httpDecided" | "activeDone" | "markActiveDone" | "writes"
+	>,
 ): LiveOp {
 	let resolveHttp!: (r: HttpResult) => void;
 	const http = new Promise<HttpResult>((r) => {
@@ -239,7 +251,15 @@ function newLiveOp(
 	const activeDone = new Promise<void>((r) => {
 		markActiveDone = r;
 	});
-	return { ...base, http, resolveHttp, httpDecided: false, activeDone, markActiveDone };
+	return {
+		...base,
+		writes: new Set<Promise<void>>(),
+		http,
+		resolveHttp,
+		httpDecided: false,
+		activeDone,
+		markActiveDone,
+	};
 }
 
 const effectsOf = (r: PaneRecord): "settled" | "pending" =>
@@ -722,6 +742,9 @@ export class ComposerService {
 		r.cancelled_at = r.cancelled_at ?? this.isoNow();
 		r.cancel_reason = reason;
 		if (r.state === "prepared") r.state = "uncertain";
+		// An older write of this op (the exec id before start) may still be in
+		// flight: let it land first so the cancelled state is what stays on disk.
+		await this.drainWrites(op);
 		await this.writeRecord(op).catch((err) =>
 			logger.error(`[composer] record write failed: ${(err as Error).message}`),
 		);
@@ -749,7 +772,10 @@ export class ComposerService {
 				op.key,
 				"composer-admin",
 				async () => {
+					// Ownership under the exclusion: a late continuation of a
+					// released op (its successor may own the pane) writes nothing.
 					if (this.live.get(op.key) !== op) return;
+					await this.drainWrites(op);
 					await this.writeRecord(op).catch((err) =>
 						logger.error(`[composer] record write failed: ${(err as Error).message}`),
 					);
@@ -994,12 +1020,14 @@ export class ComposerService {
 			// start path, so the id is withdrawn from the record (nothing to
 			// reconcile) and the cancelled state is rewritten on top.
 			if (!mayAct()) {
+				// Withdrawn in memory only: this continuation may be running
+				// after the operation lost the pane (released, successor live),
+				// so it writes nothing here. The state reaches the disk through
+				// `afterCancelled` / `toCancelled`, which write under the lock
+				// after proving the op still owns the record — or not at all.
 				const i = r.execs.findIndex((e) => e.id === execId);
 				if (i >= 0) r.execs.splice(i, 1);
 				recordedId = null;
-				await this.writeRecord(op).catch((err) =>
-					logger.error(`[composer] record write after refusal failed: ${(err as Error).message}`),
-				);
 				refused = true;
 				return false;
 			}
@@ -1244,6 +1272,9 @@ export class ComposerService {
 		const r = op.record;
 		if (r.phase === "active" || !isFinalResult(r.result) || effectsOf(r) !== "settled")
 			return false;
+		// Invariant: no release while this op still has record writes in flight —
+		// a rename landing after the successor's `prepared` would replace it.
+		await this.drainWrites(op);
 		const cur = await this.deps.records.read(r.sid, r.pane_id).catch(() => null);
 		if (cur === null || cur.kind === "unreadable") return false;
 		if (cur.kind === "ok" && cur.record.client_message_id !== r.client_message_id) {
@@ -1298,9 +1329,24 @@ export class ComposerService {
 
 	// ── Persistence helpers ─────────────────────────────────────────────────
 
-	private async writeRecord(op: LiveOp): Promise<void> {
+	/** A tracked record write: its promise is in `op.writes` until it settles (success or failure). */
+	private writeRecord(op: LiveOp): Promise<void> {
 		op.record.updated_at = this.isoNow();
-		await this.deps.records.write(op.record);
+		const tracked: Promise<void> = this.deps.records.write(op.record).finally(() => {
+			op.writes.delete(tracked);
+		});
+		op.writes.add(tracked);
+		return tracked;
+	}
+
+	/**
+	 * Wait for every record write of `op` still in flight (outcome ignored:
+	 * a failed write is settled too). The waits are on the filesystem only;
+	 * nothing here depends on the pane lock or on Docker, so a caller holding
+	 * the lock cannot deadlock on it.
+	 */
+	private async drainWrites(op: LiveOp): Promise<void> {
+		while (op.writes.size > 0) await Promise.allSettled([...op.writes]);
 	}
 
 	private async persist(
@@ -1474,6 +1520,7 @@ export class ComposerService {
 	 */
 	private async settleAndConclude(op: LiveOp): Promise<void> {
 		const r = op.record;
+		await this.drainWrites(op);
 		const changed = await this.settleEffects(r);
 		if (changed) await this.writeRecord(op).catch(() => undefined);
 		// Once: a reconcile after the late Enter already moved the op to

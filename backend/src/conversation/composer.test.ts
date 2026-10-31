@@ -552,6 +552,203 @@ describe("exclusion by pane and idempotency (§8.1.4)", () => {
 	});
 });
 
+describe("Work round 3 (#488): a cancelled operation never modifies its successor's record", () => {
+	const startedEffectsOf = (ids: Set<string>) =>
+		docker.calls.filter(
+			(c) => c.started && ids.has(c.id) && ["paste", "newline", "enter"].includes(c.step),
+		);
+	/** Park the write that carries the paste's exec id: `before` the real write (rename pending) or `after` it (return pending). */
+	function parkPasteIdWrite(where: "before" | "after") {
+		const realWrite = records.write.bind(records);
+		let gate: (() => void) | null = null;
+		let parked = false;
+		records.write = (async (rec) => {
+			const target = rec.execs.some((e) => e.step === "paste" && !e.settled) && !parked;
+			if (target) parked = true;
+			if (target && where === "before")
+				await new Promise<void>((r) => {
+					gate = r;
+				});
+			await realWrite(rec);
+			if (target && where === "after")
+				await new Promise<void>((r) => {
+					gate = r;
+				});
+		}) as typeof records.write;
+		return { parked: () => gate !== null, release: () => gate?.() };
+	}
+	async function finishB(pB: Promise<unknown>, aIds: Set<string>) {
+		// B is mid-delivery (its paste parked): its record, its block.
+		await until(() => docker.parked.size === 1, "B's paste parked");
+		const during = await records.read(SID, PANE);
+		expect(during.kind === "ok" && during.record.client_message_id).toBe(ID2);
+		expect(startedEffectsOf(aIds)).toEqual([]); // nothing of A ever started
+		// Restart with B pending: B stays blocked and is never resent.
+		killProcess();
+		const prevDocker = docker;
+		docker = new FakeDocker();
+		store = new ConversationStore({ workspaceRoot: root });
+		await seedConversation();
+		const s2 = makeService();
+		expect((await send(s2, "z", ID3)).body).toMatchObject({
+			error: "send-in-progress",
+			detail: "effects-pending",
+		});
+		expect(docker.effectSteps()).toEqual([]);
+		expect(
+			await recordIs(
+				(x) =>
+					x.client_message_id === ID2 && x.phase === "cancelled" && x.cancel_reason === "orphaned",
+			),
+		).toBe(true);
+		// One `released` for A; A's id replays its recorded failure, never a new attempt.
+		const all = await eventsOf();
+		const released = all.filter((e) => e.ev === "composer_send" && e.data.state === "released");
+		expect(released.map((e) => e.data.client_message_id)).toEqual([ID1]);
+		expect((await send(s2, "first", ID1)).status).toBe(502);
+		expect(docker.effectSteps()).toEqual([]);
+		// Settle B's pending paste by evidence in the new process: B releases on reconcile.
+		docker.states.set(prevDocker.pastes().find((c) => c.stdin === "second")!.id, {
+			running: false,
+			exitCode: 0,
+		});
+		await s2.resolve({
+			stSessionId: SID,
+			paneId: PANE,
+			clientMessageId: ID2,
+			outcome: "reconcile",
+			by: "admin-1",
+			audit: async () => undefined,
+		});
+		await until(recordGone, "B released by evidence");
+		void pB;
+	}
+
+	it("Case B (rename pending): A's write still in flight blocks cancellation, reconcile and release — and B — until it lands; the final file is B's", async () => {
+		const gate = parkPasteIdWrite("before");
+		const service = makeService();
+		const pA = send(service, "first");
+		await until(gate.parked, "A's exec-id write parked before the rename");
+		const aIds = new Set(docker.calls.map((c) => c.id));
+		timers.fire(30_000); // T_http: cancellation requested…
+		expect((await pA).body).toMatchObject({ result: "uncertain" });
+		// …but the cancellation drains A's write before writing its own state, so
+		// the exclusion is still A's: reconcile and B both wait or refuse.
+		docker.container = "stopped";
+		const rec = service.resolve({
+			stSessionId: SID,
+			paneId: PANE,
+			clientMessageId: ID1,
+			outcome: "reconcile",
+			by: "admin-1",
+			audit: async () => undefined,
+		});
+		await new Promise((r) => setTimeout(r, 20));
+		expect((await send(service, "second", ID2)).body).toMatchObject({ error: "send-in-progress" });
+		expect((await records.read(SID, PANE)).kind).toBe("ok"); // A's record (cancelled or prepared), never B's
+		// The write lands: cancellation completes, A settles (container-gone) and releases.
+		gate.release();
+		const r1 = await rec;
+		expect([200, 409]).toContain(r1.status); // 409 operation-active if it raced the cancellation; then:
+		if (r1.status === 409) {
+			await lockFree(service);
+			await service.resolve({
+				stSessionId: SID,
+				paneId: PANE,
+				clientMessageId: ID1,
+				outcome: "reconcile",
+				by: "admin-1",
+				audit: async () => undefined,
+			});
+		}
+		await until(recordGone, "A released");
+		expect(await composerStates()).toEqual(["prepared", "uncertain", "failed", "released"]);
+		await lockFree(service);
+		docker.container = "running";
+		docker.script.set("paste", ["park"]);
+		const pB = send(service, "second", ID2);
+		await finishB(pB, aIds);
+	});
+
+	it("Case A (return pending): A's late continuation after its write never touches B; B starts only once A's writes settled", async () => {
+		const gate = parkPasteIdWrite("after");
+		const service = makeService();
+		const pA = send(service, "first");
+		await until(gate.parked, "A's exec-id write landed, return pending");
+		const aIds = new Set(docker.calls.map((c) => c.id));
+		timers.fire(30_000);
+		expect((await pA).body).toMatchObject({ result: "uncertain" });
+		docker.container = "stopped";
+		const rec = service.resolve({
+			stSessionId: SID,
+			paneId: PANE,
+			clientMessageId: ID1,
+			outcome: "reconcile",
+			by: "admin-1",
+			audit: async () => undefined,
+		});
+		await new Promise((r) => setTimeout(r, 20));
+		// A is not released while its write's promise is pending: B cannot begin.
+		expect((await send(service, "second", ID2)).body).toMatchObject({ error: "send-in-progress" });
+		gate.release(); // the return comes back: the continuation runs (refused start, no write)
+		const r1 = await rec;
+		if (r1.status === 409) {
+			await lockFree(service);
+			await service.resolve({
+				stSessionId: SID,
+				paneId: PANE,
+				clientMessageId: ID1,
+				outcome: "reconcile",
+				by: "admin-1",
+				audit: async () => undefined,
+			});
+		}
+		await until(recordGone, "A released");
+		expect(docker.calls.find((c) => c.step === "paste")!.started).toBe(false);
+		await lockFree(service);
+		docker.container = "running";
+		docker.script.set("paste", ["park"]);
+		const pB = send(service, "second", ID2);
+		await finishB(pB, aIds);
+	});
+
+	it("Case A′ (late Docker answer): a remote effect of released A answering after B owns the pane writes nothing", async () => {
+		docker.script.set("paste", ["park"]); // A's paste never answers in time
+		const service = makeService();
+		const pA = send(service, "first");
+		await until(() => docker.parked.size === 1);
+		const aPaste = docker.pastes()[0]!.id;
+		timers.fire(30_000);
+		expect((await pA).body).toMatchObject({ result: "uncertain" });
+		await lockFree(service);
+		docker.container = "stopped";
+		await service.resolve({
+			stSessionId: SID,
+			paneId: PANE,
+			clientMessageId: ID1,
+			outcome: "reconcile",
+			by: "admin-1",
+			audit: async () => undefined,
+		});
+		await until(recordGone, "A released by container-gone");
+		await lockFree(service);
+		docker.container = "running";
+		docker.script.set("paste", ["park"]);
+		const pB = send(service, "second", ID2);
+		await until(() => docker.parked.size === 2, "B's paste parked");
+		// A's paste answers now, late: the continuation finds B owning the pane.
+		docker.release(aPaste, 0);
+		await new Promise((r) => setTimeout(r, 30));
+		const during = await records.read(SID, PANE);
+		expect(during.kind === "ok" && during.record.client_message_id).toBe(ID2);
+		expect(docker.effectSteps()).toEqual(["paste", "paste"]); // no newline/Enter for A
+		docker.release(docker.pastes()[1]!.id, 0);
+		await until(() => docker.effectSteps().includes("enter"));
+		await promptArrives("second");
+		expect((await pB).body).toMatchObject({ result: "delivered" });
+	});
+});
+
 describe("Work round 2 (#488): invariants 1 and 2 — no start after a lost authorization", () => {
 	/** Park the record write that carries the paste's exec id (the one between `onCreated` and `start`). */
 	function parkPasteIdWrite(): { released: () => boolean; release: () => void } {
@@ -592,8 +789,14 @@ describe("Work round 2 (#488): invariants 1 and 2 — no start after a lost auth
 		const service = makeService();
 		const p = send(service, "hold");
 		await until(gate.released, "paste id written, start pending");
-		await service.shutdown();
+		// Shutdown marks the op cancelled synchronously, then waits for the
+		// in-flight record write (round 3) before writing its own state: the
+		// barrier is released while shutdown is pending; the continuation that
+		// resumes must still see the lost authorization.
+		const sd = service.shutdown();
+		await new Promise((r) => setTimeout(r, 10));
 		gate.release();
+		await sd;
 		expect((await p).body).toMatchObject({ result: "uncertain" });
 		await until(recordGone, "released: nothing pending");
 		const paste = docker.calls.find((c) => c.step === "paste")!;
