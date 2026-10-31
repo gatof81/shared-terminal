@@ -374,6 +374,60 @@ npm run composer:resolve -- <sessionId> <paneId> <clientMessageId> discarded|sen
   for the composer (409) and is never deleted by the backend: inspect
   `<WORKSPACE_ROOT>/.st-control/<sid>/composer/`.
 
+Both variables are forwarded by `docker-compose.yml` with empty defaults
+(before this, setting them in `.env` did nothing under compose — the same
+trap `CONVERSATION_ENABLED` had before 3.0d).
+
+#### Composer pilot (disposable `pilot-captura` session only)
+
+Each step needs its own authorization; none of this touches a real session.
+Prerequisites: backend at a main that includes `b3cbdbd` with
+`CONVERSATION_ENABLED=true`; the pilot session created from an image with
+the relay (`io.shared-terminal.conversation-relay="2"`) and capture
+requested for it; the Claude Code version running in its pane is in
+`COMPOSER_CLI_VERSIONS` (default 2.1.314).
+
+1. **Capture effective.** `GET /api/sessions/<pilot>/conversations` →
+   `capture.effective: true` and `effectiveAfterRestart: true`. Open the
+   pilot's terminal, start `claude`, type one prompt by hand: the
+   conversation appears in Chat with its `user_prompt`. Without this the
+   composer can never confirm a send (`capture-inactive`).
+2. **CLI compatible, pane interactive.** The conversation row shows
+   `kind: interactive`, a `paneId`, `claudeVersion` in the allowlist and
+   `canSendInput: true` once the flag is on; `claude --version` in the pane
+   matches. Admin check: `GET /api/admin/sessions/<pilot>/composer/panes` →
+   `panes: []`.
+3. **Turn the flag on** for the backend only (`CONVERSATION_COMPOSER_ENABLED=true`
+   in `.env`, `docker compose up -d app`); the boot log prints
+   `composer ENABLED (CLI versions: …)`. Reload the frontend: the composer at
+   the bottom of the thread is enabled while the CLI is at its prompt.
+4. **Send one short, single-line message** from Chat (no leading `/` or `!`).
+   Expected within a second: the optimistic bubble, then the CLI's own
+   `user_prompt` replacing it, HTTP `202 {result: "delivered", promptId}`,
+   and in the events file one `composer_send` per state
+   (`prepared → entered → delivered → released`, no text, only `text_hash`).
+   In the Terminal view the prompt was entered exactly once, byte for byte.
+5. **Reply received in Chat.** The assistant's answer streams into the same
+   thread (`assistant_delta`, `turn_end`); the composer is enabled again when
+   the CLI returns to its prompt.
+6. **Alternate Chat ⇄ Terminal** during a turn: the terminal is never
+   resized or detached; the pane stays the same `%N`; a second send while
+   the CLI is working is refused with 409 `busy` and the draft is kept.
+7. **Negative checks**, each refused before any effect: a message starting
+   with `/` (400 `unsupported-prefix`); a send with text already typed in the
+   terminal's input (409 `composer-not-empty`); a send while a `/help` dialog
+   is open (409 `needs-terminal`).
+8. **Turn the flag off** (`CONVERSATION_COMPOSER_ENABLED=` or remove it,
+   `docker compose up -d app`): the route answers 404, every conversation
+   reports `canSendInput: false`, the frontend shows the composer disabled
+   with its reason. The pilot's pane records must be empty before stopping
+   (`…/composer/panes` → `panes: []`); if one is left, resolve it with
+   `npm run composer:resolve` (above) before the next step.
+
+Abort the pilot at the first `uncertain`, `misdelivered` or 502 that is not
+explained by a deliberate negative check; the pane record and the
+`composer_send` events are the evidence to attach.
+
 Host-side directories, all outside the workspace bind mount, next to
 `.uploads`:
 

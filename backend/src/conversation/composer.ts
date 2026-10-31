@@ -171,6 +171,11 @@ export interface ComposerAvailability {
 }
 
 /** `COMPOSER_CLI_VERSIONS`: comma-separated; empty/unset ⇒ the validated default. */
+/** `CONVERSATION_COMPOSER_ENABLED`: only `true` / `1` turn the composer on; unset or empty (compose's `:-` default) keeps it off. */
+export function composerFlagEnabled(raw: string | undefined): boolean {
+	return raw === "true" || raw === "1";
+}
+
 export function parseCliVersions(raw: string | undefined): Set<string> {
 	const entries = (raw ?? "")
 		.split(",")

@@ -21,7 +21,7 @@ import {
 import { BellSweeper } from "./bellSweeper.js";
 import { BootstrapBroadcaster, drainInFlightBootstraps } from "./bootstrap.js";
 import { parseAllowUsers } from "./conversation/allowUsers.js";
-import { ComposerService, parseCliVersions } from "./conversation/composer.js";
+import { ComposerService, composerFlagEnabled, parseCliVersions } from "./conversation/composer.js";
 import { createIngestHandler } from "./conversation/ingestRoute.js";
 import { PaneRecordStore } from "./conversation/paneRecord.js";
 import { ConversationService } from "./conversation/service.js";
@@ -175,9 +175,7 @@ logger.info(
 // is the composer's own (evidence-only execs with stdin), the pane records
 // live under `.st-control/<sid>/composer/`, and the ack listens to the same
 // persisted-event stream the WS uses.
-const COMPOSER_ENABLED =
-	process.env.CONVERSATION_COMPOSER_ENABLED === "true" ||
-	process.env.CONVERSATION_COMPOSER_ENABLED === "1";
+const COMPOSER_ENABLED = composerFlagEnabled(process.env.CONVERSATION_COMPOSER_ENABLED);
 const composer = new ComposerService({
 	enabled: COMPOSER_ENABLED,
 	cliVersions: parseCliVersions(process.env.COMPOSER_CLI_VERSIONS),
