@@ -1188,7 +1188,13 @@ echo 'informe' > ~/'dash-backup/ñandú ☃ informe.txt'`,
 			await new Promise<never>(() => {});
 		}
 	};
-	void engine.recreate(SID, imageId, { preserve: true }).catch(() => undefined);
+	// The container was stopped again after the rollback check: the backup
+	// must postdate THAT stop (§2.7.7 backup-stale), as the runbook orders.
+	await writeManifest();
+	void engine
+		.recreate(SID, imageId, { preserve: true })
+		.then((r) => console.log(`  · the interrupted recreate answered: ${JSON.stringify(r)}`))
+		.catch(() => undefined);
 	for (let i = 0; i < 600 && copies < 2; i++) await new Promise((r) => setTimeout(r, 100));
 	check("the crash point was reached: one copy done, the second never answered", copies === 2);
 	hooks.beforeCopy = undefined;
