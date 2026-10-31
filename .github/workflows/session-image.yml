@@ -116,6 +116,8 @@ jobs:
 
       - name: Recreation smoke test (real Docker)
         working-directory: backend
+        env:
+          ST_CLI_PIN: "2.1.308"
         run: npx tsx src/recreate/realDocker.smoke.ts shared-terminal-session
 
       # 3.0d audit (#468 §10): recreation with data and `claude --resume`,
@@ -178,6 +180,8 @@ jobs:
 
       - name: Recreation smoke test with the workspace CLI ${{ matrix.cli }} (carry-over included)
         working-directory: backend
+        env:
+          ST_CLI_PIN: ${{ matrix.cli }}
         run: npx tsx src/recreate/realDocker.smoke.ts shared-terminal-session:cli-${{ matrix.cli }}
 
       - name: Composer terminal smoke test (CLI ${{ matrix.cli }})

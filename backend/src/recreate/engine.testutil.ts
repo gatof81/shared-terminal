@@ -54,6 +54,7 @@ export type Hook = (args: unknown[]) => Promise<void> | void;
 interface FC extends RecreateContainer {
 	starts: number;
 }
+const isoNow = () => new Date().toISOString();
 
 export function deferred<T = void>() {
 	let resolve!: (v: T) => void;
@@ -95,6 +96,7 @@ export class FakeDocker implements RecreateDockerPort {
 			imageId: IMG_O,
 			labels: {},
 			mounts: ["/home/developer/workspace", "/home/developer/uploads"],
+			finishedAt: new Date(Date.now() - 60_000).toISOString(),
 			starts: 1,
 		});
 	}
@@ -170,6 +172,7 @@ export class FakeDocker implements RecreateDockerPort {
 				"/etc/claude-code/managed-settings.d",
 				"/etc/st-control",
 			],
+			finishedAt: null,
 			starts: 0,
 		});
 		return id;
@@ -187,6 +190,7 @@ export class FakeDocker implements RecreateDockerPort {
 		const c = this.byRef(id);
 		if (!c) throw httpError(404);
 		c.running = true;
+		c.finishedAt = null;
 		c.starts++;
 	}
 	async stop(id: string) {
@@ -194,6 +198,7 @@ export class FakeDocker implements RecreateDockerPort {
 		const c = this.byRef(id);
 		if (!c) throw httpError(404);
 		c.running = false;
+		c.finishedAt = isoNow();
 	}
 	async remove(id: string) {
 		await this.gate("remove", [id]);
@@ -224,8 +229,11 @@ export class FakeDocker implements RecreateDockerPort {
 		return this.sizeRwOf.has(id) ? (this.sizeRwOf.get(id) as number | null) : 0;
 	}
 	async copyPath(fromId: string, p: string, toId: string, destDir: string, mayAct: () => boolean) {
-		await this.gate("copyPath", [fromId, p, toId, destDir]);
+		// As the real port: `mayAct` decides whether the request goes out at
+		// all; once out, Docker's answer (the hook's wait) lands whatever
+		// happened to the epoch meanwhile — a late putArchive still writes N.
 		if (!mayAct()) throw new Error("copy not started: the caller may no longer act");
+		await this.gate("copyPath", [fromId, p, toId, destDir]);
 		if (!this.byRef(fromId) || !this.byRef(toId)) throw httpError(404);
 		this.copies.push(`${fromId.slice(0, 4)}:${p}→${toId.slice(0, 4)}:${destDir}`);
 		// The subtree moves: every stat and file of O at or under `p` appears in N.

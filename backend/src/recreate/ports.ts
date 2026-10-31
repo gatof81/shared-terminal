@@ -18,6 +18,8 @@ export interface RecreateContainer {
 	imageId: string;
 	labels: Record<string, string>;
 	mounts: string[];
+	/** `State.FinishedAt` (ISO), null while running or never started. */
+	finishedAt: string | null;
 }
 
 export interface RecreateCreateSpec {

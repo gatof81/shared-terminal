@@ -81,6 +81,9 @@ export interface AttemptRecord extends AttemptIdentity {
 	preserve?: CarrySummary;
 	/** A `rollback` attempt: the roles of O and N are reversed (§2.7.7). */
 	reverse?: true;
+	/** With `reverse`: the retained container coming back, by immutable id —
+	 *  the attempt renames it, so no name in the record can identify it. */
+	retainedContainerId?: string;
 	/** Set with `resolved`; cleared by `approve`. */
 	retained?: RetainedContainer;
 	approvedAt?: string;
@@ -116,6 +119,20 @@ export class RecreateUnresolvedError extends Error {
 	) {
 		super(`session ${sessionId} has an unresolved container recreation (${detail})`);
 		this.name = "RecreateUnresolvedError";
+	}
+}
+
+/** A resolved carry-over or rollback still retains a container (§2.7.7): a hard delete would orphan it. */
+export class RecreateRetainedError extends Error {
+	readonly code = "retained-present";
+	constructor(
+		readonly sessionId: string,
+		readonly containerId: string,
+	) {
+		super(
+			`session ${sessionId} retains container ${containerId.slice(0, 12)}; approve or roll back first`,
+		);
+		this.name = "RecreateRetainedError";
 	}
 }
 
@@ -175,6 +192,7 @@ const RECORD_KEYS = new Set([
 	"history",
 	"preserve",
 	"reverse",
+	"retainedContainerId",
 	"retained",
 	"approvedAt",
 	"recoveredAt",
@@ -251,6 +269,13 @@ function parseRecord(raw: string, sessionId: string): AttemptRecord {
 		throw new Error("bad orphanedAt");
 	if (v.preserve !== undefined && !isCarrySummary(v.preserve)) throw new Error("bad preserve");
 	if (v.reverse !== undefined && v.reverse !== true) throw new Error("bad reverse");
+	if (
+		v.retainedContainerId !== undefined &&
+		(typeof v.retainedContainerId !== "string" ||
+			v.retainedContainerId.length === 0 ||
+			v.reverse !== true)
+	)
+		throw new Error("bad retainedContainerId");
 	if (v.retained !== undefined && (!isRetained(v.retained) || state !== "resolved"))
 		throw new Error("bad retained");
 	if (v.approvedAt !== undefined && (typeof v.approvedAt !== "string" || state !== "resolved"))
@@ -339,6 +364,19 @@ export class RecreateAttemptStore {
 	}
 
 	/**
+	 * The hard-delete gate (§2.7.7): `assertResolved`, and additionally no
+	 * retained container — a purge of the record would leave it with no
+	 * reference anywhere. `approve` (or `rollback` + `approve`) first.
+	 */
+	async assertResolvedAndNotRetained(sessionId: string): Promise<void> {
+		await this.assertResolved(sessionId);
+		const r = await this.read(sessionId);
+		if (r.kind === "ok" && r.record.retained) {
+			throw new RecreateRetainedError(sessionId, r.record.retained.containerId);
+		}
+	}
+
+	/**
 	 * Start an attempt: write the `open` record before any effect. Refused
 	 * while a previous attempt is not resolved (or its record is
 	 * unreadable). The previous resolved attempt moves into `history`.
@@ -346,7 +384,7 @@ export class RecreateAttemptStore {
 	async begin(
 		sessionId: string,
 		identity: AttemptIdentity,
-		extra: { preserve?: CarrySummary; reverse?: true } = {},
+		extra: { preserve?: CarrySummary; reverse?: true; retainedContainerId?: string } = {},
 	): Promise<AttemptRecord> {
 		const prev = await this.read(sessionId);
 		if (prev.kind === "unreadable") {
@@ -378,6 +416,8 @@ export class RecreateAttemptStore {
 		};
 		if (extra.preserve) record.preserve = extra.preserve;
 		if (extra.reverse) record.reverse = true;
+		if (extra.reverse && extra.retainedContainerId)
+			record.retainedContainerId = extra.retainedContainerId;
 		// Owned BEFORE the write: if the write fails after its rename (a
 		// directory fsync error), an `open` record may be on disk with no
 		// durability guarantee. This live process then still owns it and,

@@ -126,7 +126,11 @@ const isRecreateUnresolved = (sid: string) =>
 		() => false,
 		() => true,
 	);
-sessionLifecycleLock.setGuard((sid) => recreateAttempts.assertResolved(sid));
+sessionLifecycleLock.setGuard((sid, op) =>
+	op === "delete-hard"
+		? recreateAttempts.assertResolvedAndNotRetained(sid)
+		: recreateAttempts.assertResolved(sid),
+);
 docker.setRecreateUnresolvedCheck(isRecreateUnresolved);
 const conversation = new ConversationService({
 	workspaceRoot: WORKSPACE_ROOT_FOR_CONVERSATION,
@@ -164,6 +168,11 @@ const recreation = new RecreationEngine({
 	attempts: recreateAttempts,
 	lock: sessionLifecycleLock,
 	capture: conversationRecreatePort(conversation),
+	// §2.7.7: the filesystem a carry-over writes to is Docker's data root,
+	// which this container cannot see; the operator names a path on that
+	// same filesystem (DEPLOYMENT.md). Unset ⇒ carry-overs block
+	// (`disk-space-unknown`), nothing else changes.
+	dockerFsPath: process.env.RECREATE_DOCKER_FS_PATH || null,
 });
 logger.info(
 	CONVERSATION_ENABLED

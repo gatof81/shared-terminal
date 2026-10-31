@@ -3145,6 +3145,7 @@ export class DockerManager {
 					imageId: c.ImageID,
 					labels: c.Labels ?? {},
 					mounts: (c.Mounts ?? []).map((m) => m.Destination),
+					finishedAt: null, // a list entry has no State.FinishedAt; inspect() for that
 				}));
 			},
 			listByName: async (fragment) => {
@@ -3156,6 +3157,7 @@ export class DockerManager {
 					imageId: c.ImageID,
 					labels: c.Labels ?? {},
 					mounts: (c.Mounts ?? []).map((m) => m.Destination),
+					finishedAt: null, // a list entry has no State.FinishedAt; inspect() for that
 				}));
 			},
 			exec: (containerId, cmd, timeoutMs, mayAct) =>
@@ -3977,6 +3979,11 @@ function toRecreateContainer(info: Dockerode.ContainerInspectInfo): RecreateCont
 		imageId: info.Image,
 		labels: info.Config?.Labels ?? {},
 		mounts: (info.Mounts ?? []).map((m) => m.Destination),
+		// Go's zero time while running or never started.
+		finishedAt:
+			info.State?.FinishedAt && !info.State.FinishedAt.startsWith("0001-")
+				? info.State.FinishedAt
+				: null,
 	};
 }
 

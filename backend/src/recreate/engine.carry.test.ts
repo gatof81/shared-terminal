@@ -7,22 +7,27 @@
  * and lifecycle lock.
  */
 import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { RecreateAttemptStore } from "../recreateAttempt.js";
 import { SessionLifecycleLock } from "../sessionLifecycleLock.js";
 import { carryBudgetMs, planCarry, requiredFreeBytes } from "./carry.js";
-import { RecreationEngine } from "./engine.js";
+import { backupFreshIn, RecreationEngine } from "./engine.js";
 import {
 	CANONICAL,
+	cleanChanges,
 	deferred,
 	dirtyLayer,
 	FAST,
 	harness,
+	httpError,
 	IMG_N,
 	O_ID,
 	SID,
 } from "./engine.testutil.js";
-import { LABEL_ATTEMPT } from "./ports.js";
+import type { PathStat } from "./layer.js";
+import { LABEL_ATTEMPT, RESERVED_NAME_RE } from "./ports.js";
 
 type H = Awaited<ReturnType<typeof harness>>;
 const roots: string[] = [];
@@ -126,9 +131,9 @@ describe("preflight with preserve (§2.7.7)", () => {
 			},
 		],
 		[
-			"disk-space",
+			"disk-space-unknown",
 			(h) => {
-				h.disk.free = null;
+				h.disk.free = null; // RECREATE_DOCKER_FS_PATH unset or statfs failed: fail closed
 			},
 		],
 		[
@@ -242,23 +247,165 @@ describe("carry-over recreation (§2.7.7)", () => {
 		expect(h.docker.log.filter((l) => l.startsWith("start:"))).toEqual([]);
 	});
 
-	it("T_rec runs out during the copies: no further copy goes out, the rollback resolves, O canonical", async () => {
+	it("T_rec runs out during the copies: the copy in flight still lands in N, no further copy goes out, N is removed only after it answered", async () => {
 		const h = await setup({ tRecMs: 60, carryBytesPerSec: 1_000_000_000, carryCapMs: 60 });
 		dirtyLayer(h, 10);
 		let requested = 0;
+		let copyDoneAt = -1;
 		h.docker.hooks.set("copyPath", async () => {
 			requested++;
-			if (requested === 2) await tick(120); // the second copy answers after T_rec
+			if (requested === 2) {
+				await tick(120); // Docker answers the second copy after T_rec
+				copyDoneAt = h.docker.log.length;
+			}
 		});
 		const r = await h.engine.recreate(SID, IMG_N, { preserve: true });
-		expect(r).toMatchObject({ ok: false, code: "recreate-failed", step: "prepare" });
-		await tick(100);
-		// Two copies requested; the second answered after the epoch closed, so
-		// the port did not start it (nothing landed in N); the third was never requested.
+		// The resolution waited for the late answer (120 ms < T_rb): resolved, no `unresolved`.
+		expect(r).toEqual({ ok: false, status: 500, code: "recreate-failed", step: "prepare" });
+		// Two copies requested, both landed (putArchive is never aborted); the third never went out.
 		expect(requested).toBe(2);
-		expect(h.docker.copies.length).toBe(1);
+		expect(h.docker.copies.length).toBe(2);
+		// `remove N` was issued only after the late copy had answered.
+		const removeAt = h.docker.log.findIndex((l) => l.startsWith("remove:"));
+		expect(removeAt).toBeGreaterThan(copyDoneAt);
 		expect(h.docker.containers.get(O_ID)?.name).toBe(CANONICAL);
+		expect(nIdOf(h)).toBeNull();
 		expect(h.d1.row.container_id).toBe(O_ID);
+	});
+
+	it("a copy that outlasts T_rb too: 500 {unresolved:true}, the record uncertain, N untouched while the copy may still write, resolved by evidence once it answered", async () => {
+		const h = await setup({
+			tRecMs: 60,
+			tRbMs: 100,
+			carryBytesPerSec: 1_000_000_000,
+			carryCapMs: 60,
+		});
+		dirtyLayer(h, 10);
+		let requested = 0;
+		const late = deferred();
+		h.docker.hooks.set("copyPath", async () => {
+			requested++;
+			if (requested === 2) await late.promise;
+		});
+		const r = await h.engine.recreate(SID, IMG_N, { preserve: true });
+		expect(r).toEqual({
+			ok: false,
+			status: 500,
+			code: "recreate-failed",
+			step: "prepare",
+			unresolved: true,
+		});
+		expect(await recordOf(h)).toMatchObject({ state: "uncertain" });
+		await expect(h.attempts.assertResolved(SID)).rejects.toThrow();
+		// Nothing acted on N while its copy could still be writing.
+		expect(h.docker.log.some((l) => l.startsWith("remove:"))).toBe(false);
+		expect(nIdOf(h)).not.toBeNull();
+		late.resolve();
+		for (let i = 0; i < 50 && (await recordOf(h))?.state !== "resolved"; i++) await tick(20);
+		expect(await recordOf(h)).toMatchObject({
+			state: "resolved",
+			outcome: { kind: "rolled-back" },
+		});
+		expect(nIdOf(h)).toBeNull();
+		expect(h.docker.containers.get(O_ID)?.name).toBe(CANONICAL);
+		expect(h.docker.copies.length).toBe(2);
+	});
+
+	it("R3: real content where N's entrypoint puts its symlinks (~/.ssh dir, ~/.claude.json file, ~/.config/gh dir) blocks before any effect", async () => {
+		const h = await setup();
+		dirtyLayer(h);
+		const HOME = "/home/developer";
+		const changes = h.docker.changesOf.get(O_ID) as Array<{ Path: string; Kind: number }>;
+		changes.push(
+			{ Path: `${HOME}/.ssh/id_ed25519`, Kind: 1 },
+			{ Path: `${HOME}/.config/gh/hosts.yml`, Kind: 1 },
+		);
+		const st = h.docker.statsOf.get(O_ID) as Map<string, PathStat>;
+		st.set(`${HOME}/.ssh`, { kind: "dir" }); // a real dir, not the entrypoint's symlink
+		st.set(`${HOME}/.ssh/id_ed25519`, { kind: "file", size: 400 });
+		st.set(`${HOME}/.claude.json`, { kind: "file", size: 900 }); // real file where a symlink is expected
+		st.set(`${HOME}/.config/gh`, { kind: "dir" }); // inside the carried ~/.config: N's entrypoint would rm -rf it
+		st.set(`${HOME}/.config/gh/hosts.yml`, { kind: "file", size: 120 });
+		const plan = await planCarry({
+			changes: changes as never,
+			mounts: ["/home/developer/workspace", "/home/developer/uploads"],
+			stat: (p) => h.docker.statPath(O_ID, p),
+		});
+		expect(plan.blockers).toEqual([{ code: "layer-entrypoint-unexpected", count: 3 }]);
+		expect(plan.entries.map((e) => e.path)).not.toContain(`${HOME}/.ssh`);
+		const pf = await h.engine.preflight(SID, { preserve: true });
+		expect(pf).toMatchObject({ recreatable: false });
+		expect((pf as { blockers: Array<{ code: string }> }).blockers).toEqual([
+			{ code: "layer-entrypoint-unexpected", count: 3 },
+		]);
+		const r = await h.engine.recreate(SID, IMG_N, { preserve: true });
+		expect(r).toMatchObject({ ok: false, status: 409, code: "layer-entrypoint-unexpected" });
+		expect(h.docker.mutations()).toEqual([]);
+		expect(h.docker.copies).toEqual([]);
+		expect(await recordOf(h)).toBeNull();
+	});
+
+	it("retained-pending: while a container is retained, a further recreation (strict or carry-over) is refused with no effect; after approve it is allowed", async () => {
+		const h = await setup();
+		dirtyLayer(h);
+		expect((await h.engine.recreate(SID, IMG_N, { preserve: true })).ok).toBe(true);
+		const nId = nIdOf(h) as string;
+		await h.docker.stop(nId);
+		h.docker.changesOf.set(nId, cleanChanges());
+		for (const preserve of [false, true]) {
+			const r = await h.engine.recreate(SID, IMG_N, { preserve });
+			expect(r).toMatchObject({ ok: false, status: 409, code: "retained-pending" });
+			const pf = await h.engine.preflight(SID, { preserve });
+			expect((pf as { blockers: Array<{ code: string }> }).blockers.map((b) => b.code)).toContain(
+				"retained-pending",
+			);
+		}
+		expect(h.docker.containers.has(O_ID)).toBe(true);
+		expect([...h.docker.containers.keys()].length).toBe(2);
+		expect((await h.engine.approve(SID)).ok).toBe(true);
+		expect((await h.engine.recreate(SID, IMG_N)).ok).toBe(true);
+	});
+
+	it("a rollback that fails transiently (rename refused once) resolves rolled-back with O still retained under a reserved -old- name, and the next rollback succeeds", async () => {
+		const h = await setup();
+		dirtyLayer(h);
+		expect((await h.engine.recreate(SID, IMG_N, { preserve: true })).ok).toBe(true);
+		const nId = nIdOf(h) as string;
+		await h.docker.stop(nId);
+		let refused = 0;
+		h.docker.hooks.set("rename", async ([, name]) => {
+			if (refused === 0 && name === CANONICAL) {
+				refused++;
+				throw httpError(500, "daemon hiccup"); // the second rename (O → canonical) fails once
+			}
+		});
+		const first = await h.engine.rollbackToRetained(SID);
+		expect(first).toMatchObject({
+			ok: false,
+			status: 500,
+			code: "recreate-failed",
+			detail: "rename",
+		});
+		for (let i = 0; i < 50 && (await recordOf(h))?.state !== "resolved"; i++) await tick(20);
+		const rec = await recordOf(h);
+		expect(rec).toMatchObject({
+			state: "resolved",
+			reverse: true,
+			outcome: { kind: "rolled-back" },
+		});
+		expect(rec?.retained).toMatchObject({ containerId: O_ID, role: "O" });
+		// Names restored: N canonical, O under a reserved name the boot pass recognises.
+		expect(h.docker.containers.get(nId)?.name).toBe(CANONICAL);
+		expect(h.docker.containers.get(O_ID)?.name).toMatch(RESERVED_NAME_RE);
+		expect(h.d1.row.container_id).toBe(nId);
+		h.docker.hooks.delete("rename");
+		const second = await h.engine.rollbackToRetained(SID);
+		expect(second).toMatchObject({
+			ok: true,
+			body: { outcome: "rolled-back-to-retained", containerId: O_ID },
+		});
+		expect(h.d1.row.container_id).toBe(O_ID);
+		expect(h.docker.containers.get(O_ID)?.name).toBe(CANONICAL);
 	});
 
 	it("approve removes the retained O and clears the record; a running retained O is refused; approving twice says nothing-retained", async () => {
@@ -445,6 +592,90 @@ describe("operator recovery of an orphaned attempt (§2.7.7, D8)", () => {
 		await p.catch(() => undefined);
 	});
 
+	it("R1: the process dies after the rollback's casBack applied ⇒ recover resolves committed on the retained O by its recorded id; idempotent", async () => {
+		const h = await setup();
+		dirtyLayer(h);
+		expect((await h.engine.recreate(SID, IMG_N, { preserve: true })).ok).toBe(true);
+		const nId = nIdOf(h) as string;
+		await h.docker.stop(nId);
+		const hang = deferred();
+		const realStatus = h.d1.setStatus.bind(h.d1);
+		h.d1.setStatus = async (sid, status) => {
+			await hang.promise; // dies while the resolution writes status
+			return realStatus(sid, status);
+		};
+		const p = h.engine.rollbackToRetained(SID);
+		await tick(60);
+		expect(h.d1.row.container_id).toBe(O_ID); // casBack applied
+		h.engine.stop();
+		h.d1.setStatus = realStatus;
+		const { attempts, engine } = await restart(h);
+		await expect(attempts.assertResolved(SID)).rejects.toThrow();
+		const rec0 = (await attempts.read(SID)) as {
+			record: { retainedContainerId?: string; nTempName: string };
+		};
+		expect(rec0.record.retainedContainerId).toBe(O_ID);
+		// The recorded name no longer exists (the rollback renamed O to canonical): the id is what counts.
+		expect(h.docker.byRef(rec0.record.nTempName)).toBeUndefined();
+		const r = await engine.recover(SID);
+		expect(r).toMatchObject({
+			ok: true,
+			body: {
+				outcome: { kind: "committed", nContainerId: O_ID },
+				retained: { containerId: nId, role: "N" },
+			},
+		});
+		expect(h.docker.containers.get(O_ID)?.name).toBe(CANONICAL);
+		expect(h.docker.containers.get(nId)?.name).toMatch(/-old-\d+$/);
+		expect(h.d1.row.status).toBe("stopped");
+		expect(h.d1.mappings).toEqual([]);
+		await expect(attempts.assertResolved(SID)).resolves.toBeUndefined();
+		expect(await engine.recover(SID)).toMatchObject({
+			ok: false,
+			status: 409,
+			code: "already-resolved",
+		});
+		hang.resolve();
+		await p.catch(() => undefined);
+	});
+
+	it("R2: the process dies between the rollback's renames and its casBack ⇒ recover restores the names (O off canonical first) and resolves rolled-back, O still retained", async () => {
+		const h = await setup();
+		dirtyLayer(h);
+		expect((await h.engine.recreate(SID, IMG_N, { preserve: true })).ok).toBe(true);
+		const nId = nIdOf(h) as string;
+		await h.docker.stop(nId);
+		const hang = deferred();
+		const realCasBack = h.d1.casBack.bind(h.d1);
+		h.d1.casBack = async (...args) => {
+			await hang.promise; // dies with both renames done and the CAS never sent
+			return realCasBack(...args);
+		};
+		const p = h.engine.rollbackToRetained(SID);
+		await tick(60);
+		expect(h.docker.containers.get(O_ID)?.name).toBe(CANONICAL);
+		expect(h.docker.containers.get(nId)?.name).toMatch(/-old-\d+$/);
+		expect(h.d1.row.container_id).toBe(nId);
+		h.engine.stop();
+		h.d1.casBack = realCasBack;
+		const { attempts, engine } = await restart(h);
+		const r = await engine.recover(SID);
+		expect(r).toMatchObject({
+			ok: true,
+			body: { outcome: { kind: "rolled-back" }, retained: { containerId: O_ID, role: "O" } },
+		});
+		expect(h.docker.containers.get(nId)?.name).toBe(CANONICAL);
+		expect(h.docker.containers.get(O_ID)?.name).toMatch(RESERVED_NAME_RE);
+		expect(h.d1.row.container_id).toBe(nId);
+		expect(h.docker.containers.has(O_ID)).toBe(true);
+		await expect(attempts.assertResolved(SID)).resolves.toBeUndefined();
+		// The way back is still open.
+		expect((await engine.rollbackToRetained(SID)).ok).toBe(true);
+		expect(h.d1.row.container_id).toBe(O_ID);
+		hang.resolve();
+		await p.catch(() => undefined);
+	});
+
 	it("recover refuses an attempt that is not orphaned, and one already resolved", async () => {
 		const h = await setup();
 		dirtyLayer(h);
@@ -459,5 +690,41 @@ describe("operator recovery of an orphaned attempt (§2.7.7, D8)", () => {
 			status: 409,
 			code: "already-resolved",
 		});
+	});
+});
+
+// ── backupFreshIn: a consistent recovery point ─────────────────────────────
+
+describe("backupFreshIn (§2.7.7 backup-stale)", () => {
+	const manifest = async (root: string, name: string, m: Record<string, unknown>) => {
+		await fs.mkdir(path.join(root, ".backups", name), { recursive: true });
+		await fs.writeFile(path.join(root, ".backups", name, "manifest.json"), JSON.stringify(m));
+	};
+	it("fresh, after the stop, without concurrent changes ⇒ true; otherwise false", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "st-bk-"));
+		roots.push(root);
+		const now = Date.parse("2026-10-31T12:00:00Z");
+		const at = (iso: string) => ({
+			createdAt: iso,
+			workspaces: { [SID]: { fileCount: 1, tarBytes: 1 } },
+		});
+		const stoppedAt = "2026-10-31T11:00:00Z";
+		expect(await backupFreshIn(root, SID, 86_400_000, () => now, stoppedAt)).toBe(false); // nothing
+		await manifest(root, "old", at("2026-10-29T12:00:00Z")); // > 24 h
+		await manifest(root, "before-stop", at("2026-10-31T10:59:00Z")); // taken while O ran
+		await manifest(root, "other", { createdAt: "2026-10-31T11:30:00Z", workspaces: { other: {} } });
+		await manifest(root, "concurrent", {
+			createdAt: "2026-10-31T11:40:00Z",
+			workspaces: {
+				[SID]: { fileCount: 1, tarBytes: 1, concurrentChanges: { count: 2, paths: [] } },
+			},
+		});
+		await manifest(root, "garbage", { createdAt: 5 });
+		await fs.writeFile(path.join(root, ".backups", "not-a-dir"), "x");
+		expect(await backupFreshIn(root, SID, 86_400_000, () => now, stoppedAt)).toBe(false);
+		await manifest(root, "good", at("2026-10-31T11:05:00Z"));
+		expect(await backupFreshIn(root, SID, 86_400_000, () => now, stoppedAt)).toBe(true);
+		// Without a stop time (O never ran), only age and consistency count.
+		expect(await backupFreshIn(root, SID, 86_400_000, () => now, null)).toBe(true);
 	});
 });

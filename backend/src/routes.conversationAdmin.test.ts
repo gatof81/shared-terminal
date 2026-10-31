@@ -1237,6 +1237,56 @@ describe("carry-over recreation routes and the host CLI (§2.7.7)", () => {
 		expect(h.docker.containers.get(nId)?.name).toMatch(/-old-\d+$/);
 	});
 
+	it("R5: the CLI's recreate on loopback — a client timeout mid-copy answers UNCERTAIN with the preflight's evidence, never retries; a concurrent recreate is busy; the backend finishes alone", async () => {
+		await spinUp({ owner: "admin-1" });
+		dirtyLayer(h);
+		const slow = deferred();
+		let copies = 0;
+		h.docker.hooks.set("copyPath", async () => {
+			copies++;
+			if (copies === 1) await slow.promise; // Docker takes its time on the first copy
+		});
+		const first = cli([
+			SID,
+			"recreate",
+			"--image",
+			IMAGE_N,
+			"--preserve",
+			"--timeout-min",
+			"0.002",
+			"--user",
+			"root",
+		]);
+		await vi.waitFor(() => expect(copies).toBe(1));
+		// A second operator (or the same one, impatient) while the attempt holds the lock.
+		const second = await cli([SID, "recreate", "--image", IMAGE_N, "--preserve", "--user", "root"]);
+		expect(second.code).toBe(1);
+		expect(second.out).toContain('409 {"error":"busy"}');
+		const r1 = await first;
+		expect(r1.code).toBe(2);
+		expect(r1.err).toMatch(/UNCERTAIN.*client-timeout/);
+		expect(r1.err).toContain("Do NOT run recreate again");
+		expect(r1.out).toMatch(/preflight now: 200 .*"recreate-unresolved"/); // still in flight at that moment
+		slow.resolve();
+		await vi.waitFor(async () => {
+			const rec = await h.attempts.read(SID);
+			expect(rec.kind === "ok" && rec.record.state).toBe("resolved");
+		});
+		const rec = await h.attempts.read(SID);
+		expect(rec).toMatchObject({
+			kind: "ok",
+			record: { outcome: { kind: "committed" }, retained: { role: "O" } },
+		});
+		expect([...h.docker.containers.keys()].length).toBe(2); // O retained + one N, no second attempt
+		expect(h.docker.copies.length).toBe(7);
+		// Bad arguments never reach the backend.
+		expect((await cli([SID, "recreate", "--user", "root"])).code).toBe(1);
+		expect(
+			(await cli([SID, "recreate", "--image", "shared-terminal-session", "--user", "root"])).code,
+		).toBe(1);
+		expect((await cli([SID, "approve", "--image", IMAGE_N, "--user", "root"])).code).toBe(1);
+	});
+
 	it("recover: 404 without an attempt, 409 once resolved; the host CLI drives every verb through the same endpoints and refuses a non-admin", async () => {
 		await spinUp({ owner: "admin-1" });
 		dirtyLayer(h);

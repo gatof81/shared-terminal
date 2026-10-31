@@ -42,7 +42,12 @@ export interface CarryEntry {
 export interface CarryPlan {
 	/** What is streamed from O into N, in this order (HOME first). */
 	entries: CarryEntry[];
-	/** What blocks the carry-over: changes outside HOME and /tmp, or deletions of image files. */
+	/**
+	 * What blocks the carry-over: changes outside HOME and /tmp
+	 * (`layer-system`), deletions of image files (`layer-deleted`), and real
+	 * content where N's entrypoint will put its symlink
+	 * (`layer-entrypoint-unexpected`).
+	 */
 	blockers: Blocker[];
 	/** Entries deliberately not carried, by reason (counts only — paths are content). */
 	skipped: { entrypoint: number; cliRuntime: number; socket: number };
@@ -93,6 +98,9 @@ export async function planCarry(input: CarryInput): Promise<CarryPlan> {
 	const block = (code: string) => blockers.set(code, (blockers.get(code) ?? 0) + 1);
 	const skipped = { entrypoint: 0, cliRuntime: 0, socket: 0 };
 	const tops = new Map<string, "home" | "tmp">();
+	// Entrypoint paths found with real content: counted once per path (the
+	// diff lists the path and everything under it).
+	const unexpectedEntrypoint = new Set<string>();
 	// Directories outside HOME and /tmp that show as merely "changed" because
 	// something tolerated was created inside them (`/usr`, `/usr/sbin` for
 	// docker-init; a mount point's parents). Same rule as the strict mode.
@@ -126,13 +134,18 @@ export async function planCarry(input: CarryInput): Promise<CarryPlan> {
 		const tmp = topLevelUnder(p, "/tmp");
 		if (home) {
 			if (ENTRYPOINT_SYMLINKS.has(home)) {
-				// The entrypoint makes it again on N; a non-symlink here would be
-				// the entrypoint's own failure, which strict mode reports too.
-				// (`~/.config` is NOT skipped: the entrypoint only creates the
-				// directory for its `gh` symlink, and a legacy session keeps
-				// real configuration there — it is carried like any HOME entry;
-				// the symlink inside it is re-made by N's entrypoint.)
-				skipped.entrypoint++;
+				// Not carried only when it IS the entrypoint's exact symlink: N's
+				// entrypoint makes it again. Anything else at that path — a real
+				// `~/.ssh` or `~/.claude` from an image that predates the
+				// symlink, the state a prior boot's failed `ln` let the CLI
+				// write there, a symlink elsewhere — is content the entrypoint
+				// of N would replace or `rm -rf` (its rescue blocks) and the
+				// carry would silently lose. It blocks; the operator decides.
+				// (`~/.config` itself IS carried: the entrypoint only creates
+				// the directory for its `gh` symlink, re-made over what is
+				// carried; the `gh` entry inside is checked below.)
+				if (verifiedSymlinks.has(home)) skipped.entrypoint++;
+				else unexpectedEntrypoint.add(home);
 				continue;
 			}
 			if (mounts.has(home)) continue;
@@ -157,6 +170,18 @@ export async function planCarry(input: CarryInput): Promise<CarryPlan> {
 		}
 		block("layer-system");
 	}
+
+	// Entrypoint symlinks that live INSIDE a carried entry (`~/.config/gh`):
+	// N's entrypoint removes a real directory there before linking, so a
+	// carried real one would be destroyed on N's first boot. Present and not
+	// the exact symlink ⇒ block.
+	for (const link of ENTRYPOINT_SYMLINKS.keys()) {
+		const top = topLevelUnder(link, HOME);
+		if (!top || top === link || !tops.has(top)) continue;
+		const st = await input.stat(link);
+		if (st && !verifiedSymlinks.has(link)) unexpectedEntrypoint.add(link);
+	}
+	for (let i = 0; i < unexpectedEntrypoint.size; i++) block("layer-entrypoint-unexpected");
 
 	const entries: CarryEntry[] = [];
 	for (const scope of ["home", "tmp"] as const) {

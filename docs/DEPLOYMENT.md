@@ -790,46 +790,99 @@ carried: the preflight blocks with `layer-system` and the session stays as
 it is.
 
 **One session at a time**, each with the owner's GO, in the agreed order
-(Educación HZ, then Shared Terminal, Home Automation last). Admin only;
-every step is also available on the host as
+(Educación HZ, then Shared Terminal, Home Automation last). Admin only. Run
+every verb on the host as
 `docker compose exec app npm run recreate:admin -- <sid> <verb> --user <admin>`
-(`preflight [--preserve]`, `approve`, `rollback`, `recover`), which calls the
-same endpoints on loopback.
+(`preflight [--preserve]`, `recreate --image <sha> [--preserve]`, `approve`,
+`rollback`, `recover`): it calls the same endpoints on loopback. **Use the CLI,
+not `curl` against the public hostname, for the recreation itself:** a real
+layer takes minutes and Cloudflare cuts an origin response at 100 s (524),
+so a public `POST` would lose the answer every time while the backend
+continues. The CLI waits up to 65 min (T_rec's cap plus T_rb), never
+repeats a recreation on its own, and on a lost connection prints `UNCERTAIN`
+(exit 2) with the preflight of that moment — act on that evidence
+(`retained` ⇒ committed; `recreate-unresolved` ⇒ still finishing, or the
+backend died ⇒ `recover`), never by running it again.
+
+**One-time setup — where the copy is written.** The new container's layer
+is written on Docker's data-root filesystem, which the backend container
+cannot see, so it refuses every carry-over with `disk-space-unknown` until
+`RECREATE_DOCKER_FS_PATH` names a path inside the backend container on that
+same filesystem. On the host:
+
+```bash
+sudo docker info --format '{{.DockerRootDir}}'      # /var/lib/docker
+stat -c '%d %n' /var/lib/docker /var/shared-terminal/workspaces   # same device id ⇒ same filesystem
+df -P /var/lib/docker /var/shared-terminal/workspaces
+```
+
+VM100 (checked read-only 2026-10-31): both on `/dev/sda1` (device 2049) with
+`/` — so `RECREATE_DOCKER_FS_PATH=/var/shared-terminal/workspaces` in `.env`
+is correct there (the workspace bind IS that filesystem), 23.2 GiB free,
+containerd snapshotter (`overlayfs`), 18 GB of earlier backups also on it.
+On a host where the devices differ, create an empty probe directory beside
+the data root (`/var/lib/docker-fs-probe`), bind it read-only into `app`
+(`docker-compose.override.yml`: `- /var/lib/docker-fs-probe:/mnt/docker-fs:ro`)
+and set `RECREATE_DOCKER_FS_PATH=/mnt/docker-fs`. Never mount the data root
+itself. The preflight reports what it measured (`carry.diskMeasuredAt`,
+`diskFreeBytes`) against `diskRequiredBytes` = 1.2 × the layer + 1 GiB;
+`SizeRw` is an apparent size, the margin covers filesystem overhead, and
+until `approve` the old and the new layer both occupy the disk (Home
+Automation: 11.8 GB twice).
 
 1. **Agree a window with the owner.** Record `claude --version` in the
    session (expected 2.1.316) and the running Claude processes; the owner
    finishes their work. The stop ends the tmux tabs and the Claude processes;
    `claude --resume` continues the conversations afterwards (the CLI's state
    lives in the workspace, which is untouched).
-2. **Backup.** `docker compose exec app npm run backup` (into
-   `<WORKSPACE_ROOT>/.backups/<timestamp>/`). The `POST` refuses with
-   `backup-stale` unless a manifest there is younger than 24 h and includes
-   the session. **Disk:** the preflight reports `carry.diskFreeBytes` and
-   `carry.diskRequiredBytes` (1.2 × the layer + 1 GiB) and blocks with
-   `disk-space` otherwise; do **not** prune images or the build cache to make
-   room without the owner's GO.
-3. **Composer versions.** If the owner will use the composer, make sure the
+2. **Composer versions.** If the owner will use the composer, make sure the
    pane's CLI version is in `COMPOSER_CLI_VERSIONS` (e.g.
    `COMPOSER_CLI_VERSIONS=2.1.314,2.1.316`, both validated by the
    `cli-variants` job) — a backend restart applies it; this is independent of
    the recreation.
-4. **Request capture** if not already requested:
+3. **Request capture** if not already requested:
    `PATCH /api/admin/sessions/<sid>/conversation {"enabled": true}` answers
    `requiresRecreate: true` on a pre-3.0d container (no control mount) and
-   writes nothing; it records the request the recreation needs.
-5. **Stop** the session (owner or admin `POST …/stop`).
-6. **Preflight:** `GET …/recreate` (strict — `layer-home`/`layer-tmp` are
-   expected) and `GET …/recreate?preserveLayer=1` → `recreatable: true` with
-   `carry: { entries, bytes, skipped, backupFresh: true, … }` and no
-   `blockers`. Any blocker: stop and report; nothing has happened.
-7. **Recreate:** `POST …/recreate {"expectImageId": "<currentImageId>",
-   "preserveLayer": true}`. Expect 200 with `outcome: "committed"`,
-   `carried: { entries, bytes }` and `retained: { containerId, name, role:
-   "O" }`. The copy runs at the daemon's pace (budget 20 MiB/s: a 12 GB layer
-   is about 10 minutes; T_rec is extended accordingly, up to 60 min); other
-   lifecycle calls answer `busy` meanwhile. A 500 `recreate-failed {step}`
-   means it rolled back: the old container is canonical again and nothing
-   else changed.
+   writes nothing; it records the request (`conversation_requested=1`) the
+   recreation needs.
+4. **Stop** the session (owner or admin `POST …/stop`). From here on nothing
+   writes to the workspace or the layer.
+5. **Backup — after the stop, before anything else:**
+   `docker compose exec app npm run backup` (into
+   `<WORKSPACE_ROOT>/.backups/<timestamp>/`). The recreation refuses with
+   `backup-stale` unless a manifest there is younger than 24 h, **taken after
+   the container stopped** (`State.FinishedAt`) and without
+   `concurrentChanges` for the session — a consistent recovery point, not the
+   previous day's backup of a live session. The backup is of the workspace
+   (and uploads); the container layer itself is kept by retention, not by
+   the backup.
+6. **Preflight:** `recreate:admin -- <sid> preflight --user <admin>` (strict —
+   `layer-home`/`layer-tmp` are expected there) and `… preflight --preserve`
+   → `recreatable: true` with `carry: { entries, bytes, skipped, backupFresh:
+   true, diskFreeBytes, diskMeasuredAt, diskRequiredBytes }` and no
+   `blockers`. Any blocker — `layer-system` (a change outside HOME and
+   `/tmp`), `layer-entrypoint-unexpected` (a real `~/.ssh`, `~/.claude`,
+   `~/.claude.json`, `~/.vscode-cli`, `~/.npm-global` or `~/.config/gh` where
+   the entrypoint puts a symlink: credentials or state the new container's
+   entrypoint would replace), `disk-space`, `disk-space-unknown`,
+   `backup-stale`, `retained-pending` — stop and report; nothing has
+   happened. Do **not** prune images or the build cache to make room without
+   the owner's GO.
+7. **Recreate:** `recreate:admin -- <sid> recreate --image <currentImageId>
+   --preserve --user <admin>`. Expect `200 { outcome: "committed", carried: {
+   entries, bytes }, retained: { containerId, name, role: "O" }, capture, … }`
+   (exit 0). The copy runs at the daemon's pace (budget 20 MiB/s: a 12 GB
+   layer is about 10 minutes; T_rec is extended accordingly, up to 60 min);
+   other lifecycle calls answer `busy` meanwhile; a second `recreate` is
+   refused with `busy` too. Outcomes:
+   - `500 { error: "recreate-failed", step }` **without** `unresolved`:
+     rolled back, the old container is canonical again, nothing else changed;
+   - `500 { …, unresolved: true }` or `UNCERTAIN` (exit 2): a request to
+     Docker (a copy of a large entry, typically) is still out; the session is
+     `recreate-unresolved` until it answers and the engine resolves by that
+     evidence — the new container is not touched while it may still be
+     written. Watch `preflight` and the `[recreate]` log lines; **never run
+     `recreate` again**. If the backend died meanwhile: `recover` (below).
 8. **Verify** with the owner: `GET /api/sessions/<sid>` shows the session
    running on the new container; in its terminal `ls ~/.npm ~/.local
    ~/.config`, `tail ~/.bashrc`, `claude --version` (the workspace CLI,
@@ -839,33 +892,43 @@ same endpoints on loopback.
    events; with the flag on and the version allowed, a composer send is
    `delivered`.
 9. **Observe** for the agreed period with the old container retained (it
-   costs its layer's disk, nothing else). Then **approve:**
-   `POST …/recreate/approve` removes it (409 `retained-running` if someone
-   started it by hand). Until then, the session is fully usable.
+   costs its layer's disk, nothing else). While it is retained, a further
+   recreation answers 409 `retained-pending` and a hard delete 409
+   `retained-present`; `start`, `stop` and a soft delete work as always. Then
+   **approve:** `recreate:admin -- <sid> approve --user <admin>` removes it
+   (409 `retained-running` if someone started it by hand). Nothing removes
+   it automatically.
 
 **Going back.** At any point before approval:
 1. Stop the session (`POST …/stop`).
-2. `POST …/recreate/rollback` → 200 `{ outcome: "rolled-back-to-retained",
-   containerId, retained }`: D1 points at the old container again, the names
-   are swapped back, the port mappings cleared, the ingest token hash cleared
-   (so capture is off: `token-mismatch`, nothing authorized, marker and hooks
-   file withdrawn). 409 `running` while the new container runs.
+2. `recreate:admin -- <sid> rollback --user <admin>` → 200 `{ outcome:
+   "rolled-back-to-retained", containerId, retained }`: D1 points at the old
+   container again, the names are swapped back, the port mappings cleared,
+   the ingest token hash cleared (so capture is off: `token-mismatch`,
+   nothing authorized, marker and hooks file withdrawn). 409 `running` while
+   the new container runs. A transient failure (a rename the daemon refused,
+   a D1 statement that did not apply) restores the names, leaves the old
+   container retained and answers 409 `rollback-not-applied` or 500
+   `recreate-failed { detail }` — read the record (`preflight` shows
+   `retained`) rather than the status code, then simply run `rollback` again.
 3. `POST /api/sessions/<sid>/start`: the old container boots exactly as it
    was — its files, its CLI, its state in the workspace. Verify with the owner.
 4. The new container is now the retained one (`role: "N"`): `approve`
    removes it, or recreate again later. The failure goes to the PR/issue
    before any further attempt.
 
-**Interrupted (backend died mid-recreation).** The session is
-`recreate-unresolved` (next section). With the backend up again:
+**Interrupted (backend died mid-recreation or mid-rollback).** The session
+is `recreate-unresolved` (next section). With the backend up again:
 `docker ps` must show every container of the session stopped (the old one,
-and the new one if it exists); then `POST …/recreate/recover`. It answers
-`{ outcome: { kind: "rolled-back" } }` (the new container was removed, the
-old one is canonical — start the session) or `{ outcome: { kind: "committed",
-nContainerId }, retained }` (the commit had happened: the new container is
-current and the old one retained — verify as in step 8). 409 `running` until
-everything is stopped; 409 `not-orphaned` means a live backend owns the
-attempt (wait for it).
+the new one, the retained one); then `recreate:admin -- <sid> recover --user
+<admin>`. It resolves from the evidence (D1, the containers by their
+immutable ids, the record) and answers `{ outcome: { kind: "rolled-back" } }`
+(nothing moved: the current container is canonical — start the session; a
+retained one, if any, is still retained and `rollback` still available) or
+`{ outcome: { kind: "committed", nContainerId }, retained }` (the move had
+happened: that container is current — verify as in step 8). 409 `running`
+until everything is stopped; 409 `not-orphaned` means a live backend owns
+the attempt (wait for it); a second `recover` answers `already-resolved`.
 
 ### Emergency only — the manual procedure
 

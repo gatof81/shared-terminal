@@ -32,6 +32,9 @@ export type LifecycleOp =
 	| "stop"
 	| "kill"
 	| "delete"
+	// `DELETE …?hard=true`: same exclusion as `delete`; distinct so the guard
+	// can add the §2.7.7 retained-container check to the purge alone.
+	| "delete-hard"
 	| "recreate"
 	| "recreate-resolve"
 	// `PATCH …/conversation {enabled:true}` (#464 R1): it writes the marker

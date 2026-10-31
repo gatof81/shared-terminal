@@ -149,7 +149,10 @@ export interface CarryPreview {
 	/** O's writable-layer size (what the copy is budgeted on), null when the daemon does not report it. */
 	bytes: number | null;
 	skipped: CarryPlan["skipped"];
+	/** Free bytes on the Docker data-root filesystem (`diskMeasuredAt`), null when not measurable. */
 	diskFreeBytes: number | null;
+	/** The path that was measured (`RECREATE_DOCKER_FS_PATH`), null when unset. */
+	diskMeasuredAt: string | null;
 	diskRequiredBytes: number | null;
 	backupFresh: boolean | null;
 }
@@ -262,9 +265,29 @@ export interface RecreationDeps {
 	/** The workspace CLI's version (cliCompat.ts); null when unreadable. */
 	readCliVersion?: (sessionId: string) => Promise<string | null>;
 	/** Free bytes of the filesystem holding Docker's layers (default: statfs of the workspace root — same disk on the deployment). */
+	/**
+	 * Free bytes on the filesystem that holds Docker's data root (where N's
+	 * layer is written). Default: `statfs(dockerFsPath)`; null when unknown
+	 * — which blocks a carry-over (`disk-space-unknown`, fail closed).
+	 */
 	diskFree?: () => Promise<number | null>;
+	/**
+	 * A path inside this process's filesystem view that lives on the SAME
+	 * filesystem as `DockerRootDir` (`RECREATE_DOCKER_FS_PATH`): the
+	 * workspace root when both share a device (VM100: one `/dev/sda1`), or a
+	 * read-only bind of a probe directory beside the data root otherwise.
+	 * The workspace root is NOT assumed: it is a bind mount that can live
+	 * anywhere. Unset ⇒ `diskFree` answers null.
+	 */
+	dockerFsPath?: string | null;
 	/** A backup of this session's workspace newer than `maxAgeMs` exists (default: a `manifest.json` under `<root>/.backups/<dir>/`). */
-	backupFresh?: (sessionId: string, maxAgeMs: number) => Promise<boolean>;
+	/**
+	 * A consistent recovery point exists for the session: a backup manifest
+	 * younger than `maxAgeMs`, taken at or after `notBefore` (O's stop, so
+	 * the tarball saw no concurrent writes) and without `concurrentChanges`
+	 * for the session. Default: `backupFreshIn` over `<root>/.backups`.
+	 */
+	backupFresh?: (sessionId: string, maxAgeMs: number, notBefore: string | null) => Promise<boolean>;
 	config?: Partial<RecreateConfig>;
 	now?: () => number;
 	sleep?: (ms: number) => Promise<void>;
@@ -397,11 +420,12 @@ type Act = (<T>(label: string, fn: () => Promise<T>) => Promise<T>) & { mayAct: 
  * whose `workspaces` list this session (the host backup tool, backup.ts).
  * Unreadable or malformed manifests count as absent.
  */
-async function backupFreshIn(
+export async function backupFreshIn(
 	root: string,
 	sessionId: string,
 	maxAgeMs: number,
 	now: () => number,
+	notBefore: string | null = null,
 ): Promise<boolean> {
 	const dir = path.join(root, ".backups");
 	let names: string[];
@@ -410,14 +434,26 @@ async function backupFreshIn(
 	} catch {
 		return false;
 	}
+	const floor = notBefore ? Date.parse(notBefore) : Number.NaN;
 	for (const n of names) {
 		try {
 			const raw = await fs.readFile(path.join(dir, n, "manifest.json"), "utf8");
-			const m = JSON.parse(raw) as { createdAt?: unknown; workspaces?: Record<string, unknown> };
+			const m = JSON.parse(raw) as {
+				createdAt?: unknown;
+				workspaces?: Record<string, { concurrentChanges?: unknown } | undefined>;
+			};
 			if (typeof m.createdAt !== "string" || !m.workspaces) continue;
 			const at = Date.parse(m.createdAt);
 			if (Number.isNaN(at) || now() - at > maxAgeMs) continue;
-			if (sessionId in m.workspaces) return true;
+			// Taken while O still ran (before its stop) or with tar reporting
+			// concurrent changes: a recovery point, not a consistent snapshot
+			// (backup.ts) — not what the one operation that touches a real
+			// session may rely on.
+			if (!Number.isNaN(floor) && at < floor) continue;
+			const entry = m.workspaces[sessionId];
+			if (!entry) continue;
+			if (entry.concurrentChanges) continue;
+			return true;
 		} catch {
 			// not a backup dir, or unreadable: counts as absent
 		}
@@ -441,7 +477,12 @@ export class RecreationEngine {
 	private readonly readW: (sessionId: string, rel: string) => Promise<WorkspaceSkill>;
 	private readonly readCli: (sessionId: string) => Promise<string | null>;
 	private readonly diskFree: () => Promise<number | null>;
-	private readonly backupFresh: (sessionId: string, maxAgeMs: number) => Promise<boolean>;
+	private readonly dockerFsPath: string | null;
+	private readonly backupFresh: (
+		sessionId: string,
+		maxAgeMs: number,
+		notBefore: string | null,
+	) => Promise<boolean>;
 	/** Attempts of this process run that are not resolved yet. */
 	private readonly attempts = new Map<string, Attempt>();
 	private stopped = false;
@@ -453,11 +494,13 @@ export class RecreationEngine {
 		this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
 		this.readW = deps.readWorkspaceSkill ?? readWorkspaceSkill;
 		this.readCli = deps.readCliVersion ?? readWorkspaceCliVersion;
+		this.dockerFsPath = deps.dockerFsPath ?? null;
 		this.diskFree =
 			deps.diskFree ??
 			(async () => {
+				if (!this.dockerFsPath) return null;
 				try {
-					const st = await fs.statfs(deps.workspaceRoot);
+					const st = await fs.statfs(this.dockerFsPath);
 					return Number(st.bavail) * Number(st.bsize);
 				} catch {
 					return null;
@@ -465,7 +508,8 @@ export class RecreationEngine {
 			});
 		this.backupFresh =
 			deps.backupFresh ??
-			((sid, maxAge) => backupFreshIn(deps.workspaceRoot, sid, maxAge, this.now));
+			((sid, maxAge, notBefore) =>
+				backupFreshIn(deps.workspaceRoot, sid, maxAge, this.now, notBefore));
 	}
 
 	/** Sessions whose attempt in this process is still unresolved. For stats and tests. */
@@ -818,6 +862,15 @@ export class RecreationEngine {
 			blockers.push({ code: "container-missing" });
 			return out({});
 		}
+		// 3b. No container retained by the previous carry-over or rollback
+		// (§2.7.7): a further attempt would make the record forget it —
+		// an unreferenced 4–12 GB container and no way back. `approve`
+		// first (or `rollback`, then `approve`).
+		const prev = await this.deps.attempts.read(sessionId);
+		if (prev.kind === "ok" && prev.record.state === "resolved" && prev.record.retained) {
+			blockers.push({ code: "retained-pending" });
+			if (done()) return out({ imageId: o.imageId });
+		}
 		if (o.running) {
 			blockers.push({ code: "running" });
 			if (done()) return out({ imageId: o.imageId });
@@ -881,17 +934,23 @@ export class RecreationEngine {
 			blockers.push(...carry.blockers);
 			const size = await this.bounded("size O", this.deps.docker.sizeRw(o.id));
 			sizeRw = size ?? 0;
+			// `SizeRw` is the apparent size of O's upper dir; the copy lands as
+			// a new upper dir on the Docker data-root filesystem, so what must
+			// be free is there — never assumed to be the workspace's device.
+			// Unknown free space is a blocker of its own (fail closed).
 			const free = await this.diskFree();
 			const required = size === null ? null : requiredFreeBytes(size);
 			if (size === null) blockers.push({ code: "layer-size-unknown" });
-			else if (free === null || free < (required as number)) blockers.push({ code: "disk-space" });
-			const fresh = await this.backupFresh(sessionId, this.cfg.backupMaxAgeMs);
+			else if (free === null) blockers.push({ code: "disk-space-unknown" });
+			else if (free < (required as number)) blockers.push({ code: "disk-space" });
+			const fresh = await this.backupFresh(sessionId, this.cfg.backupMaxAgeMs, o.finishedAt);
 			if (!fresh) blockers.push({ code: "backup-stale" });
 			carryPreview = {
 				entries: carry.entries.length,
 				bytes: size,
 				skipped: carry.skipped,
 				diskFreeBytes: free,
+				diskMeasuredAt: this.dockerFsPath,
 				diskRequiredBytes: required,
 				backupFresh: fresh,
 			};
@@ -1970,8 +2029,12 @@ export class RecreationEngine {
 			return { ok: false, status: 409, code: "nothing-retained" };
 		const row = await this.deps.d1.getRow(sessionId);
 		if (!row) return { ok: false, status: 404, code: "not-found" };
+		// D1 must be on the container the retained one would replace — not
+		// on the retained one itself. The last record may be a carry-over
+		// (`committed` on N) or a rollback that did not apply (`rolled-back`,
+		// names restored, O still retained): both are rollback-able.
 		const nId = row.container_id;
-		if (!nId || rec.record.outcome?.kind !== "committed" || rec.record.outcome.nContainerId !== nId)
+		if (!nId || nId === retained.containerId)
 			return { ok: false, status: 409, code: "not-on-committed-n" };
 		const n = await this.bounded("inspect N", this.deps.docker.inspect(nId));
 		if (!n) return { ok: false, status: 409, code: "container-missing" };
@@ -1995,7 +2058,10 @@ export class RecreationEngine {
 			nTempName: o.name,
 		};
 		try {
-			await this.deps.attempts.begin(sessionId, identity, { reverse: true });
+			await this.deps.attempts.begin(sessionId, identity, {
+				reverse: true,
+				retainedContainerId: retained.containerId,
+			});
 		} catch (err) {
 			if (err instanceof RecreateUnresolvedError)
 				return { ok: false, status: 409, code: "recreate-unresolved" };
@@ -2090,12 +2156,15 @@ export class RecreationEngine {
 		if (current === oId) {
 			const o = await act("inspect O", () => d.inspect(oId));
 			if (!o) return "stuck";
-			if (o.name !== a.canonical) {
-				await act("rename O canonical", () => d.rename(oId, a.canonical)).catch(() => undefined);
-			}
+			// Names: N off the canonical name first (it may still hold it when
+			// the first rename never happened), then O onto it — never a
+			// rename into a name another container holds.
 			const n = await act("inspect N", () => d.inspect(nId));
 			if (n && n.name !== a.oOldName) {
 				await act("rename N old", () => d.rename(nId, a.oOldName)).catch(() => undefined);
+			}
+			if (o.name !== a.canonical) {
+				await act("rename O canonical", () => d.rename(oId, a.canonical)).catch(() => undefined);
 			}
 			await act("d1 status", () => this.deps.d1.setStatus(sessionId, "stopped"));
 			await act("d1 ports", () => this.deps.d1.setPorts(sessionId, [], act.mayAct));
@@ -2127,23 +2196,26 @@ export class RecreationEngine {
 				: "retry";
 		}
 		if (current === nId) {
-			// Not applied: undo the renames.
+			// Not applied: undo the renames — O off the canonical name first
+			// (to a reserved `-old-<ts>` name the boot pass recognises), then
+			// N back onto it.
 			const o = await act("inspect O", () => d.inspect(oId));
 			if (o && o.name === a.canonical) {
-				const n = await act("inspect N", () => d.inspect(nId));
-				if (n && n.name !== a.canonical) {
-					await act("rename O back", () =>
-						d.rename(oId, `${a.canonical}-old-${a.attemptId.slice(0, 8)}`),
-					).catch(() => undefined);
-				}
+				await act("rename O back", () => d.rename(oId, `${a.canonical}-old-${this.now()}`)).catch(
+					() => undefined,
+				);
 			}
 			const n2 = await act("inspect N", () => d.inspect(nId));
 			if (n2 && n2.name !== a.canonical) {
 				await act("rename N canonical", () => d.rename(nId, a.canonical)).catch(() => undefined);
 			}
+			// Seen again: D1 still on N, N canonical and stopped, O present and not canonical.
+			const again = await act("d1 re-read", () => this.deps.d1.getRow(sessionId));
+			if (again?.container_id !== nId) return "retry";
 			const nNow = await act("inspect N again", () => d.inspect(nId));
 			if (!nNow || nNow.name !== a.canonical) return "retry";
 			const oNow = await act("inspect O again", () => d.inspect(oId));
+			if (oNow?.name === a.canonical) return "retry";
 			const retained: RetainedContainer | undefined = oNow
 				? {
 						containerId: oId,
@@ -2217,11 +2289,28 @@ export class RecreationEngine {
 							code: "running",
 							detail: `${running.length} container(s) running`,
 						};
-					// N: the labelled container of this attempt (strict), or for a reverse attempt the retained one by name.
+					// N: the labelled container of this attempt (strict); for a
+					// reverse attempt, the retained container coming back — by
+					// its recorded id (the attempt renames it, so no name can
+					// identify it), or for a record without one, by D1 when D1
+					// already moved, else the holder of the canonical name that
+					// is not the replaced container.
 					let nId: string | null = null;
 					if (r.reverse) {
-						const byName = await this.bounded("inspect retained by name", d.inspect(r.nTempName));
-						nId = byName?.id ?? null;
+						if (r.retainedContainerId) {
+							nId = r.retainedContainerId;
+						} else if (row.container_id && row.container_id !== r.oContainerId) {
+							nId = row.container_id;
+						} else {
+							const holder = await this.bounded("inspect canonical", d.inspect(r.oCanonicalName));
+							nId = holder && holder.id !== r.oContainerId ? holder.id : null;
+						}
+						if (nId) {
+							const c = await this.bounded("inspect retained", d.inspect(nId));
+							if (!c) return { ok: false, status: 409, code: "retained-missing" };
+							if (c.running)
+								return { ok: false, status: 409, code: "running", detail: "retained container" };
+						}
 					} else {
 						const labelled = [...candidates.values()].filter(
 							(c) => c.labels[LABEL_ATTEMPT] === r.attemptId && c.id !== r.oContainerId,

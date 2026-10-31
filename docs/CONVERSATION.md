@@ -1142,56 +1142,109 @@ y `/tmp` se transmite a `N` antes de su primer arranque.
   `/tmp/st-relay.log` y el directorio de tmux; `/tmp/cc-socks` y `/tmp/claude-1000` (runtime de un
   proceso muerto); sockets; `docker-init` y sus directorios ancestros. `~/.config` **sí** se
   traslada (el entrypoint solo crea el directorio para su symlink `gh`, que vuelve a hacer sobre
-  lo trasladado). El plan se recalcula en el POST, nunca se reutiliza el del preflight.
+  lo trasladado). **Una ruta de symlink del entrypoint solo se omite si es exactamente ese
+  symlink** (tipo y destino verificados en `O`): un directorio o archivo real, o un symlink a
+  otro sitio, en `~/.ssh`, `~/.claude`, `~/.claude.json`, `~/.npm-global`, `~/.vscode-cli` o
+  `~/.config/gh` (dentro del `~/.config` trasladado, que el entrypoint de `N` borraría con
+  `rm -rf` antes de enlazar) bloquea con `layer-entrypoint-unexpected`, contado una vez por ruta:
+  es contenido (claves, credenciales, transcripciones) que el entrypoint de `N` reemplazaría y el
+  traslado perdería en silencio. El plan se recalcula en el POST, nunca se reutiliza el del
+  preflight.
 - **Precondiciones añadidas**, todas sin efectos y listadas juntas en el preflight:
   `layer-system` (cualquier cambio fuera de HOME y `/tmp`: no se puede trasladar con garantías),
   `layer-deleted` (un borrado de contenido de la imagen, salvo bajo un symlink del entrypoint
-  verificado exacto), `layer-size-unknown` (`SizeRw` no disponible), `disk-space` (libre en
-  `WORKSPACE_ROOT` < 1,2 × `SizeRw` + 1 GiB, o desconocido), `backup-stale` (ningún
-  `<WORKSPACE_ROOT>/.backups/*/manifest.json` de las últimas 24 h que incluya el workspace de la
-  sesión). En este modo la precondición 6 de §2.7.2 es el plan (desaparecen `layer-home` y
-  `layer-tmp`; `~/.gitconfig` y los dotfiles viajan tal cual); el resto de precondiciones, incluida
-  `control-marker-incompatible`, no cambia.
+  verificado exacto), `layer-entrypoint-unexpected` (arriba), `layer-size-unknown` (`SizeRw` no
+  disponible), `disk-space-unknown` (el backend no puede medir el filesystem del data root de
+  Docker: `RECREATE_DOCKER_FS_PATH` sin definir o ilegible — **falla cerrado**), `disk-space`
+  (libre en ese filesystem < 1,2 × `SizeRw` + 1 GiB), `backup-stale` (ningún
+  `<WORKSPACE_ROOT>/.backups/*/manifest.json` de las últimas 24 h, **posterior a la detención de
+  `O`** (`State.FinishedAt`) y sin `concurrentChanges` para la sesión: un punto de recuperación
+  consistente, no uno tomado con la sesión escribiendo), `retained-pending` (abajo). La medida de
+  disco es la del filesystem donde Docker escribe la capa de `N`, nunca la del workspace por
+  suposición: el operador declara en `RECREATE_DOCKER_FS_PATH` una ruta del contenedor del
+  backend que vive en el mismo filesystem que `DockerRootDir` (el propio workspace si `stat -c %d`
+  en el host da el mismo dispositivo para ambos, como en VM100: `/dev/sda1` para `/`,
+  `/var/lib/docker` y `/var/shared-terminal/workspaces`; si no, un bind de solo lectura de un
+  directorio sonda junto al data root). `SizeRw` es tamaño aparente; el 20 % y el GiB son el
+  margen, y mientras `O` siga retenida ambas capas ocupan disco. En este modo la precondición 6
+  de §2.7.2 es el plan (desaparecen `layer-home` y `layer-tmp`; `~/.gitconfig` y los dotfiles
+  viajan tal cual); el resto de precondiciones, incluida `control-marker-incompatible`, no
+  cambia.
 - **Secuencia.** Paso 1: `N` creado, sin arrancar; cada entrada del plan se copia `O → N`
   (`getArchive` → `putArchive` en el directorio padre de la entrada, en el orden del plan, cada
   copia una petición de la tentativa que pregunta `mayAct` antes de empezar); después se verifica
   cada entrada en `N` (tipo, y tamaño en los archivos): un desajuste es `carry-verify` en el paso
   1 ⇒ rollback ordinario (`N` eliminado, nada arrancado, `O` canónico). Pasos 2–6 como §2.7.2.
   T_rec = 5 min + `SizeRw` / 20 MiB/s, tope 60 min; mientras dura, los demás verbos responden
-  `busy`.
+  `busy`. Una copia en vuelo cuando vence T_rec **no se aborta ni se da por terminada**: sigue
+  escribiendo `N`, y la resolución (que elimina `N`) espera su respuesta como evidencia (§2.7.4);
+  si tarda más que T_rb, la respuesta es 500 `recreate-failed {step: "prepare", unresolved: true}`
+  y la sesión queda `recreate-unresolved` hasta que la copia responda — **un 500 no significa
+  rollback hecho**: solo lo es sin `unresolved`. Nada se libera ni se reutiliza mientras esa
+  copia pueda escribir.
 - **Retención.** El paso 6 **no elimina `O`**: queda detenido bajo `st-<sid12>-old-<ts>`. El
   registro (`resolved`, `preserve{entries,bytes}`, `retained{containerId,name,role:"O",since}`) lo
-  nombra, y el preflight lo muestra como `retained`. La sesión no queda bloqueada. Hasta la
-  aprobación, la capa de `O` sigue ocupando disco.
+  nombra, y el preflight lo muestra como `retained`. La sesión no queda bloqueada para `start`,
+  `stop` ni el borrado soft. Hasta la aprobación, la capa de `O` sigue ocupando disco, y mientras
+  haya un contenedor retenido: una **nueva recreación** (estricta o con traslado) responde 409
+  `retained-pending` sin efectos (el registro olvidaría al retenido), y el **borrado hard**
+  responde 409 `retained-present` (purgaría el registro y dejaría el contenedor sin referencia).
+  Ningún contenedor retenido se elimina automáticamente: solo `approve`.
 - **Aprobación**: `POST …/recreate/approve` elimina el contenedor retenido (409 `retained-running`
   si alguien lo arrancó, `retained-is-current` si D1 lo señala, `nothing-retained` si no hay nada);
   el registro pasa a `approvedAt` y deja de nombrarlo.
 - **Rollback al retenido**: `POST …/recreate/rollback`, solo con `N` detenido (409 `running`), D1
-  en la `N` comprometida (`not-on-committed-n`) y `O` presente y detenido (`retained-missing` /
-  `retained-running`). Es una tentativa **inversa** (`reverse: true`) sobre el mismo registro y el
-  mismo lock: `N` → `-old-<ts>`, `O` → canónico; **una** sentencia D1 devuelve `container_id` a `O`
-  y pone `ingest_token_hash` e `…_suspended` a NULL (el token de `O`, si lo tiene, deja de
-  corresponder ⇒ §2.7.5 retira marca y archivo: nada autorizado); mapeos de puertos vaciados;
+  en un contenedor distinto del retenido (`not-on-committed-n`: D1 ya señala al retenido) y `O`
+  presente y detenido (`retained-missing` / `retained-running`; `nothing-retained` si no hay nada
+  retenido con rol `O`; `container-missing` si el de D1 no existe). Es una tentativa **inversa**
+  (`reverse: true`, con `retainedContainerId` = el id inmutable de `O`: la tentativa renombra `O`,
+  así que ningún nombre del registro puede identificarla) sobre el mismo registro y el mismo
+  lock: `N` → `-old-<ts>`, `O` → canónico; **una** sentencia D1 devuelve `container_id` a `O` y
+  pone `ingest_token_hash` e `…_suspended` a NULL (el token de `O`, si lo tiene, deja de
+  corresponder ⇒ §2.7.5 retira marca y archivo: nada autorizado — para una `O` creada con 3.0c/3.0d
+  eso es definitivo: su captura solo vuelve con otra recreación); mapeos de puertos vaciados;
   `status=stopped`. `N` queda retenida (`role:"N"`) hasta `approve`; la recreación anterior pasa a
-  `history`. Si la sentencia no aplica (0 filas): nombres restaurados, D1 sigue en `N`,
-  `rollback-not-applied`. Tras el rollback, `POST /start` arranca el contenedor anterior
-  exactamente como estaba (sus archivos, su CLI, su estado en el workspace), sin captura.
+  `history`. Si la sentencia no aplica (0 filas) o un rename falla: nombres restaurados — `O`
+  primero fuera del nombre canónico, a un `-old-<ts>` reservado, y luego `N` de vuelta —, D1 sigue
+  en `N`, el registro inverso queda `rolled-back` **con `O` aún retenida**, y el siguiente
+  `rollback` vuelve a ser posible (409 `rollback-not-applied` en el primer caso, 500
+  `recreate-failed {detail: "rename"|"commit"|"not resolved"}` en los demás; con `detail` el
+  registro puede estar `uncertain` unos instantes mientras la resolución asienta la evidencia — un
+  500 del rollback **no** dice por sí solo si aplicó: lo dice el registro). Tras el rollback,
+  `POST /start` arranca el contenedor anterior exactamente como estaba (sus archivos, su CLI, su
+  estado en el workspace), sin captura.
 - **Recuperación D8 (operador)**: `POST …/recreate/recover`. Es el "procedimiento administrativo
   manual" que §2.7.4 deja pendiente: solo para un registro `uncertain` con `orphanedAt` (la
   tentativa de un proceso muerto), con **todos** los contenedores de la tentativa detenidos (409
   `running`); el operador adopta la tentativa (`recoveredAt`, duradero antes de cualquier efecto) y
   este proceso la resuelve con la tabla de §2.7.4 a partir de la evidencia (D1 decide; hasta 3
   pasadas): D1 en `O` ⇒ `N` (etiquetada, nunca arrancada) eliminada, `O` canónica, `rolled-back`;
-  D1 en `N` ⇒ `committed`, convergencia de §2.7.5, `O` retenida. Rechaza `no-attempt`,
-  `already-resolved`, `not-orphaned` (la tentativa pertenece a un proceso vivo), `record-unreadable`,
-  `ambiguous-n` (más de un contenedor etiquetado), `recover-retry`/`recover-stuck` (la evidencia
-  no confirma; nada cambia). Sigue sin existir resolución automática: `orphanedAt` queda en el
-  registro resuelto como historia (y el parser lo admite solo junto a `recoveredAt`).
+  D1 en `N` ⇒ `committed`, convergencia de §2.7.5, `O` retenida. Para una tentativa **inversa**
+  huérfana, el retenido se identifica por `retainedContainerId` (y, en un registro anterior sin
+  él, por D1 si ya se movió, o por el poseedor del nombre canónico que no es el contenedor
+  reemplazado), nunca por un nombre: muerta tras aplicarse `casBack` ⇒ `committed` sobre `O` (los
+  nombres se completan: `N` fuera del canónico antes que `O` dentro); muerta entre los renames y
+  el CAS ⇒ `rolled-back` con los nombres restaurados y `O` aún retenida (el rollback sigue
+  disponible). Todo contenedor de la tentativa, el retenido incluido, debe estar detenido
+  (`running`; `retained-missing` si desapareció). Rechaza `no-attempt`, `already-resolved`,
+  `not-orphaned` (la tentativa pertenece a un proceso vivo), `record-unreadable`, `ambiguous-n`
+  (más de un contenedor etiquetado), `recover-retry`/`recover-stuck` (la evidencia no confirma;
+  nada cambia). Repetir `recover` tras resolver responde `already-resolved`. Sigue sin existir
+  resolución automática: `orphanedAt` queda en el registro resuelto como historia (y el parser lo
+  admite solo junto a `recoveredAt`).
 - **Auditoría.** Con owner ajeno, cada uno de los tres verbos escribe una fila `operate` puntual
   **antes** de la llamada, fail-closed (como el `start` de #429).
-- **Shell host**: `npm run recreate:admin -- <sid> preflight [--preserve] | approve | rollback |
-  recover --user <admin>`, por loopback contra los mismos endpoints (el lock y la puerta viven en
-  el backend; con el backend parado rehúsa).
+- **Shell host**: `npm run recreate:admin -- <sid> preflight [--preserve] | recreate --image
+  <sha256:…> [--preserve] [--timeout-min n] | approve | rollback | recover --user <admin>`, por
+  loopback contra los mismos endpoints (el lock y la puerta viven en el backend; con el backend
+  parado rehúsa). `recreate` existe porque el traslado de una capa real dura minutos y el nombre
+  público del API está detrás de Cloudflare, que corta la respuesta a los 100 s (524): por
+  loopback nada la corta, el CLI espera hasta T_rec + T_rb (65 min por defecto) y **nunca repite
+  una recreación por su cuenta**: una desconexión o un timeout del cliente se informan como
+  UNCERTAIN (salida 2) junto con el preflight del momento (`retained` ⇒ comprometida;
+  `recreate-unresolved` ⇒ aún en curso, o muerta con el backend ⇒ `recover`); un 500 con
+  `unresolved: true` también es UNCERTAIN. El operador decide con esa evidencia; un segundo
+  `recreate` concurrente recibe `busy`.
 - **CLI**: la allowlist de `control-marker-incompatible` es {2.1.308, 2.1.314, 2.1.316}. 2.1.314 y
   2.1.316 se validan en el job `cli-variants` del workflow Session Image, que construye el mismo
   Dockerfile con cada versión y ejecuta contra ella el smoke de conversación completo (su fase 11d
@@ -1648,9 +1701,10 @@ Servidor → cliente: `{type:"hello", conversations:[{cid,lastSeq,firstRetainedS
 | `POST /api/admin/sessions/:id/recreate {expectImageId, preserveLayer?}` | admin (`adminActionIp`); fila `operate` fail-closed con owner ajeno | recreación de §2.7.2–§2.7.4; con `preserveLayer: true`, el traslado de capa de §2.7.7 (`carried`, `retained` en la respuesta); 409 con el código de la primera precondición que falla; 500 `recreate-failed {step, unresolved?}`; 503 `docker-unavailable` |
 | `GET /api/admin/sessions/:id/recreate?preserveLayer=1` | admin | preflight del traslado (§2.7.7): además `carry: { entries, bytes, skipped, diskFreeBytes, diskRequiredBytes, backupFresh }`; `retained` cuando hay un contenedor retenido (también sin el parámetro) |
 | `POST /api/admin/sessions/:id/recreate/approve` | admin (`adminActionIp`); fila `operate` puntual fail-closed con owner ajeno | §2.7.7: elimina el contenedor retenido; `{ removed, containerId, role }`; 409 `nothing-retained` / `retained-running` / `retained-is-current` / `recreate-unresolved` / `busy` |
-| `POST /api/admin/sessions/:id/recreate/rollback` | admin (`adminActionIp`); fila `operate` puntual fail-closed con owner ajeno | §2.7.7: vuelta al contenedor retenido con `N` detenida; `{ outcome: "rolled-back-to-retained", containerId, retained }`; 409 `running` / `not-on-committed-n` / `retained-missing` / `retained-running` / `rollback-not-applied` |
-| `POST /api/admin/sessions/:id/recreate/recover` | admin (`adminActionIp`); fila `operate` puntual fail-closed con owner ajeno | §2.7.7, D8: resolución por evidencia de una tentativa huérfana con todos sus contenedores detenidos; `{ outcome, retained }`; 404 `no-attempt`; 409 `already-resolved` / `not-orphaned` / `running` / `record-unreadable` / `ambiguous-n` / `recover-retry` / `recover-stuck` |
-| `npm run recreate:admin -- <sid> preflight [--preserve]\|approve\|rollback\|recover --user <admin>` | shell host | igual que las filas anteriores, por loopback (§2.7.7) |
+| `POST /api/admin/sessions/:id/recreate/rollback` | admin (`adminActionIp`); fila `operate` puntual fail-closed con owner ajeno | §2.7.7: vuelta al contenedor retenido con `N` detenida; `{ outcome: "rolled-back-to-retained", containerId, retained }`; 404 `no-attempt`/`not-found`; 409 `running` / `not-on-committed-n` / `nothing-retained` / `container-missing` / `retained-missing` / `retained-running` / `rollback-not-applied` / `recreate-unresolved` / `busy`; 500 `recreate-failed {detail: rename\|commit\|not resolved}` (el registro decide si aplicó) |
+| `POST /api/admin/sessions/:id/recreate/recover` | admin (`adminActionIp`); fila `operate` puntual fail-closed con owner ajeno | §2.7.7, D8: resolución por evidencia de una tentativa huérfana con todos sus contenedores detenidos; `{ outcome, retained }`; 404 `no-attempt`/`not-found`; 409 `already-resolved` / `not-orphaned` / `attempt-in-progress` / `running` / `retained-missing` / `record-unreadable` / `ambiguous-n` / `recover-retry` / `recover-stuck` / `busy` |
+| `DELETE /api/sessions/:id?hard=true`, `DELETE /api/admin/sessions/:id?hard=true` | owner / admin | §2.7.7: 409 `retained-present` mientras el registro nombre un contenedor retenido (`approve` o `rollback` antes); el borrado soft no cambia |
+| `npm run recreate:admin -- <sid> preflight [--preserve]\|recreate --image <sha> [--preserve]\|approve\|rollback\|recover --user <admin>` | shell host | igual que las filas anteriores, por loopback (§2.7.7); `recreate` espera hasta T_rec + T_rb y responde UNCERTAIN (salida 2) con el preflight si la conexión se pierde, sin repetir nunca |
 | `POST /api/admin/sessions/:id/composer/resolve {paneId, clientMessageId, outcome}` | admin (`adminActionIp`); con `discarded`/`sent-manually` fila `operate` fail-closed; `reconcile` sin fila | §8.1.11, bajo el lock de pane: `discarded`/`sent-manually` declaran el resultado del mensaje (`composer_send{resolved}`) solo si `phase ≠ active` y `result: pending`; `reconcile` reintenta asentar efectos (idempotente, sin cambiar `result`) y libera si procede; responde `{ phase, result, effects, pending[], released }`; 409 `operation-active` con el ejecutor activo, 409 `not-pending` si el mensaje ya tenía resultado |
 | `GET /api/admin/sessions/:id/composer/panes` | admin | §8.1.11: registros de pane de la sesión (`phase`, `result`, `effects`, `pending[]`), sin texto |
 | `npm run composer:resolve -- <sid> <paneId> <clientMessageId> <outcome\|reconcile>` | shell host | igual que las filas anteriores, sin red (§8.1.11) |
@@ -2538,7 +2592,20 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
       intactos, CLI del workspace en marcha, relay identificado; rollback al retenido que arranca
       con sus archivos; `approve`; recuperación D8 de un traslado interrumpido a mitad de copia.
 - [x] Allowlist {2.1.308, 2.1.314, 2.1.316} con el job `cli-variants` (smoke de conversación,
-      recreación y composer por versión).
+      recreación y composer por versión; el smoke de recreación comprueba que `N` ejecuta esa
+      versión exacta, `ST_CLI_PIN`).
+- [x] Revisión Work (2026-10-31): R1 (muerte tras `casBack`) y R2 (muerte entre renames y CAS)
+      recuperan por id, sin `stuck` ni `retry` perpetuo, idempotente; R3 (contenido real en rutas
+      de symlink del entrypoint, `~/.config/gh` incluido) bloquea sin efectos, también en el smoke
+      real; R4 (workspace con espacio, data root sin medir o sin espacio) bloquea
+      `disk-space-unknown`/`disk-space` antes de copiar; R5 (recreación larga por CLI loopback con
+      timeout del cliente) responde UNCERTAIN con evidencia, un segundo intento concurrente es
+      `busy`, el backend termina solo; `retained-pending`; `retained-present` en el borrado hard;
+      rollback reintentable tras un fallo transitorio con nombres `-old-<ts>` reservados; copia
+      que excede T_rec y T_rb ⇒ `unresolved:true`, `N` intacta hasta la evidencia, resuelta
+      después; `backup-stale` exige backup posterior a la detención y sin `concurrentChanges`;
+      smoke real con modos 600/700, uid/gid, hardlinks, symlinks (absoluto y roto), FIFO y nombre
+      Unicode idénticos en `N`; tests de parser de todos los campos nuevos.
 
 ### 3.1 vista
 

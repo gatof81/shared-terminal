@@ -393,6 +393,7 @@ async function main(): Promise<void> {
 		attempts,
 		lock,
 		capture,
+		dockerFsPath: ROOT, // the runner's docker root and tmp share one filesystem
 	});
 
 	// ── Precondition 6 on a real layer ───────────────────────────────────
@@ -908,7 +909,14 @@ git -c safe.directory='*' -C proj rev-parse HEAD && git -c safe.directory='*' -C
 		"~/.cache/x/data",
 		"/tmp/build-cache/a.o",
 		"~/dash-backup/flows.json",
+		"~/dash-backup/secret.key", // 0600
+		"~/.private/notes.txt", // in a 0700 dir
+		"~/dash-backup/hardlink-b", // hardlink of flows.json
+		"~/'dash-backup/ñandú ☃ informe.txt'", // unicode name
 	];
+	// Metadata the carry must keep (mode uid gid type links; readlink for symlinks; one inode for the hardlink pair).
+	const META_PATHS =
+		"~/dash-backup/secret.key ~/.private ~/.private/notes.txt ~/dash-backup/flows.json ~/dash-backup/hardlink-b ~/dash-backup/link-abs ~/dash-backup/link-dangling ~/dash-backup/fifo ~/'dash-backup/ñandú ☃ informe.txt' /tmp/build-cache/a.o";
 	await execOut(
 		nId,
 		`mkdir -p ~/.npm/_cacache ~/.local/share/thing ~/.cache/x /tmp/build-cache ~/dash-backup
@@ -917,17 +925,42 @@ echo 'export LEGACY=1' >> ~/.bashrc
 echo '{"cfg":true}' > ~/.local/share/thing/config.json
 head -c 200000 /dev/urandom > ~/.cache/x/data
 head -c 1500000 /dev/urandom > /tmp/build-cache/a.o
-echo '{"flows":1}' > ~/dash-backup/flows.json`,
+echo '{"flows":1}' > ~/dash-backup/flows.json
+(umask 077; echo 'k=1' > ~/dash-backup/secret.key)
+mkdir -m 700 ~/.private && echo notes > ~/.private/notes.txt
+ln ~/dash-backup/flows.json ~/dash-backup/hardlink-b
+ln -s /home/developer/workspace/.st ~/dash-backup/link-abs
+ln -s /nonexistent/target ~/dash-backup/link-dangling
+mkfifo ~/dash-backup/fifo
+echo 'informe' > ~/'dash-backup/ñandú ☃ informe.txt'`,
 	);
 	const sums = async (id: string) =>
 		(
 			await execOut(id, `sha256sum ${DIRTY.join(" ")} 2>&1 | cut -d' ' -f1 | tr '\\n' ' '`)
 		).out.trim();
+	const meta = async (id: string) =>
+		(
+			await execOut(
+				id,
+				`stat -c '%n %a %u %g %F %h' ${META_PATHS} 2>&1; readlink ~/dash-backup/link-abs ~/dash-backup/link-dangling; stat -c %i ~/dash-backup/flows.json ~/dash-backup/hardlink-b | uniq | wc -l`,
+			)
+		).out.trim();
 	const dirtySums = await sums(nId);
+	const dirtyMeta = await meta(nId);
 	check(
 		"the dirty files exist in the current container",
 		dirtySums.split(" ").length === DIRTY.length && /^[0-9a-f ]+$/.test(dirtySums),
 		dirtySums,
+	);
+	check(
+		"fixture metadata as intended: 600 file, 700 dir, uid 1000, hardlink pair (one inode), symlinks, fifo",
+		/secret\.key 600 1000 1000 regular file 1\b/.test(dirtyMeta) &&
+			/\.private 700 1000 1000 directory/.test(dirtyMeta) &&
+			/flows\.json 644 1000 1000 regular file 2\b/.test(dirtyMeta) &&
+			/fifo 644 1000 1000 fifo/.test(dirtyMeta) &&
+			dirtyMeta.includes("/home/developer/workspace/.st\n/nonexistent/target") &&
+			dirtyMeta.endsWith("1"),
+		dirtyMeta,
 	);
 	await docker.getContainer(nId).stop();
 	row.status = "stopped";
@@ -962,6 +995,35 @@ echo '{"flows":1}' > ~/dash-backup/flows.json`,
 		carryPf.recreatable === false && carryPf.blockers.some((b) => b.code === "backup-stale"),
 		carryPf.blockers,
 	);
+	await writeManifest();
+	// R3: real content where N's entrypoint symlinks (a pre-symlink image, or
+	// a failed `ln`): refused before any effect, nothing lost.
+	await docker.getContainer(nId).start();
+	await waitReady(nId);
+	await execOut(nId, "rm ~/.ssh && mkdir -m 700 ~/.ssh && echo k > ~/.ssh/id_test");
+	await docker.getContainer(nId).stop();
+	await writeManifest();
+	const r3 = (await engine.preflight(SID, { preserve: true })) as CarryPf;
+	check(
+		"R3: a real ~/.ssh directory in O ⇒ layer-entrypoint-unexpected, not recreatable",
+		r3.recreatable === false && r3.blockers.some((b) => b.code === "layer-entrypoint-unexpected"),
+		r3.blockers,
+	);
+	const r3post = (await engine.recreate(SID, imageId, { preserve: true })) as {
+		ok?: boolean;
+		code?: string;
+	};
+	check(
+		"R3: the POST refuses with the same code and no container was created",
+		r3post.ok === false &&
+			r3post.code === "layer-entrypoint-unexpected" &&
+			(await real.listByLabel(LABEL_SESSION, SID)).every((c) => c.id === nId),
+		r3post,
+	);
+	await docker.getContainer(nId).start();
+	await waitReady(nId);
+	await execOut(nId, "rm -rf ~/.ssh && ln -s /home/developer/workspace/.st/ssh ~/.ssh");
+	await docker.getContainer(nId).stop();
 	await writeManifest();
 	carryPf = (await engine.preflight(SID, { preserve: true })) as CarryPf;
 	check(
@@ -1006,6 +1068,11 @@ echo '{"flows":1}' > ~/dash-backup/flows.json`,
 		await sums(n2),
 	);
 	check(
+		"modes, uid/gid, types, hardlink pair, symlink targets and the fifo identical in N2",
+		(await meta(n2)) === dirtyMeta,
+		{ before: dirtyMeta, after: await meta(n2) },
+	);
+	check(
 		"~/.bashrc in N2 keeps the appended line",
 		(await execOut(n2, "grep -c 'export LEGACY=1' ~/.bashrc")).out.trim() === "1",
 	);
@@ -1021,6 +1088,15 @@ echo '{"flows":1}' > ~/dash-backup/flows.json`,
 		ver.code === 0 && /^\d+\.\d+\.\d+/.test(ver.out.trim()),
 		ver,
 	);
+	// ST_CLI_PIN (the cli-variants job): N2 runs exactly the version under validation.
+	if (process.env.ST_CLI_PIN) {
+		check(
+			`N2's CLI is the version under validation (${process.env.ST_CLI_PIN})`,
+			ver.out.trim().startsWith(`${process.env.ST_CLI_PIN} `) ||
+				ver.out.trim() === process.env.ST_CLI_PIN,
+			ver.out.trim(),
+		);
+	}
 	check(
 		"relay identified on N2 ⇒ capture effective",
 		carried.capture?.effective === true,
@@ -1138,6 +1214,7 @@ echo '{"flows":1}' > ~/dash-backup/flows.json`,
 		attempts: attempts2,
 		lock: lock2,
 		capture,
+		dockerFsPath: ROOT,
 	});
 	const recovered = (await engine2.recover(SID)) as Op;
 	check(

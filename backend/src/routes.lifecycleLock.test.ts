@@ -489,6 +489,36 @@ describe("recreate-unresolved gate on the REST routes (§2.7.4, D8 fail-closed)"
 		await expectAllRefused(w);
 	});
 
+	it("retained container (§2.7.7): hard deletes answer 409 retained-present with no effect, soft stop/delete still work", async () => {
+		// The production guard shape (index.ts): the retained check only on the purge.
+		sessionLifecycleLock.setGuard((sid, op) =>
+			op === "delete-hard" ? store.assertResolvedAndNotRetained(sid) : store.assertResolved(sid),
+		);
+		await store.begin(SID, ident);
+		await store.resolve(
+			SID,
+			ident.attemptId,
+			{ kind: "committed", nContainerId: "cid-n" },
+			"carry-over",
+			{
+				retained: { containerId: "cid-o", name: `${ident.oOldName}`, role: "O", since: "t" },
+			},
+		);
+		const w = worldFor();
+		await spinUp(w.sessions, w.docker);
+		for (const p of [`/api/sessions/${SID}?hard=true`, `/api/admin/sessions/${SID}?hard=true`]) {
+			const res = await fetch(`${baseUrl}${p}`, { method: "DELETE" });
+			expect([p, res.status, await res.json()]).toEqual([p, 409, { error: "retained-present" }]);
+		}
+		expect(w.events).toEqual([]);
+		expect(w.rowOf()).not.toBeNull();
+		// Not a purge: the retained container is no obstacle.
+		expect(
+			(await fetch(`${baseUrl}/api/sessions/${SID}/stop`, { method: "POST" })).status,
+		).toBeLessThan(300);
+		expect(sessionLifecycleLock.heldBy(SID)).toBeNull();
+	});
+
 	it("an open record left by a dead process ⇒ refused before and after boot recovery", async () => {
 		await store.begin(SID, ident);
 		// Simulated restart: the new process's store does not own att-1.
