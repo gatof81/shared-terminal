@@ -11,8 +11,6 @@
  * stays readable only for as long as it is visible.
  */
 
-import "./toast.css";
-
 export type ToastKind = "info" | "error" | "success";
 
 export interface ToastOptions {

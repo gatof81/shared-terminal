@@ -31,8 +31,6 @@
  * ask for the session's name before an irreversible delete (§9.5).
  */
 
-import "./dialog.css";
-
 export interface DialogOptions {
 	/**
 	 * Runs after the dialog closed by ANY path — ×, backdrop, Escape,

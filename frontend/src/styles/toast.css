@@ -1,4 +1,7 @@
 /* ── Toast ──────────────────────────────────────────────────── */
+/* #toast is a column of items (components/toast.ts): the container is
+   a positioned, click-through stack; each .toast-item carries the
+   chrome. */
 #toast {
   position: fixed;
   /* position: fixed ignores the body's safe-area padding, so the toast
@@ -7,28 +10,65 @@
      (right). calc() with a 0px env fallback is a no-op on desktop. */
   bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
   right: calc(1.5rem + env(safe-area-inset-right, 0px));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
+  pointer-events: none;
+  max-width: min(360px, calc(100vw - 2rem));
+  z-index: var(--z-toast);
+}
+.toast-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
   background: var(--c-border-soft);
   border: 1px solid var(--c-border);
   border-radius: 8px;
   padding: 0.6rem 1rem;
   font-size: 0.82rem;
-  max-width: 360px;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.2s;
+  color: var(--c-text);
+  max-width: 100%;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  pointer-events: auto;
+  animation: toast-in 0.18s ease-out;
 }
-#toast.visible {
-  opacity: 1;
-}
-#toast.error {
+.toast-item.error {
   border-color: var(--c-err);
   color: var(--c-err);
 }
-/* Success variant — used for the copy-on-select confirmation. Held to a
- * shorter timeout in showCopySuccessToast() because the auto-copy path
- * fires on every selection-finalise; a 4s lingering toast would be
- * spammy. Green chip matches GitHub's success accent. */
-#toast.success {
+.toast-item.success {
   border-color: var(--c-ok);
   color: var(--c-ok);
+}
+.toast-text {
+  overflow-wrap: anywhere;
+}
+.toast-action {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  color: var(--c-accent);
+  font-size: 0.78rem;
+  padding: 0.2rem 0.55rem;
+  cursor: pointer;
+}
+.toast-action:hover {
+  background: rgba(var(--c-accent-rgb), 0.12);
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast-item {
+    animation: none;
+  }
 }

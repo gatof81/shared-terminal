@@ -23,3 +23,5 @@
 @import "./git.css";
 @import "./viewnav.css";
 @import "./chat.css";
+/* Shared components (components/*.ts): styled on top of everything above. */
+@import "./dialog.css";
