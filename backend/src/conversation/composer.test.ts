@@ -13,7 +13,12 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SessionMeta } from "../types.js";
-import { type ComposerDockerPort, ComposerService, parseCliVersions } from "./composer.js";
+import {
+	type ComposerDockerPort,
+	ComposerService,
+	cliVersionOf,
+	parseCliVersions,
+} from "./composer.js";
 import { CSI_U_NEWLINE, normalizeText, textHash } from "./composerText.js";
 import { PaneRecordStore } from "./paneRecord.js";
 import type { ProbeEntry } from "./probe.js";
@@ -549,6 +554,31 @@ describe("exclusion by pane and idempotency (§8.1.4)", () => {
 		expect(docker.effectSteps()).toEqual(["paste"]);
 		expect(await composerStates()).toEqual(["prepared", "failed", "released"]);
 		expect(await send(service, "a\nb")).toEqual(r1);
+	});
+});
+
+describe("CLI version match (pilot finding, VM100 2026-10-31)", () => {
+	it("cliVersionOf: the hook's raw `claude --version` text reduces to X.Y.Z; anything else is null", () => {
+		expect(cliVersionOf("2.1.314 (Claude Code)")).toBe("2.1.314");
+		expect(cliVersionOf("2.1.314")).toBe("2.1.314");
+		expect(cliVersionOf(" 2.1.316 (Claude Code)\n")).toBe("2.1.316");
+		expect(cliVersionOf("Claude Code 2.1.314")).toBeNull();
+		expect(cliVersionOf(null)).toBeNull();
+		expect(cliVersionOf(undefined)).toBeNull();
+	});
+	it("a conversation whose claudeVersion carries the ' (Claude Code)' suffix is allowed when its X.Y.Z is listed, refused with the raw version otherwise", async () => {
+		await seedConversation(CID, { claudeVersion: "2.1.314 (Claude Code)" });
+		const service = makeService();
+		const p = send(service, "ok");
+		await until(() => docker.effectSteps().includes("enter"));
+		await promptArrives("ok");
+		expect((await p).body).toMatchObject({ result: "delivered" });
+		await until(recordGone);
+		await seedConversation(CID, { claudeVersion: "2.1.316 (Claude Code)" });
+		const r = await send(service, "no", ID2);
+		expect(r.status).toBe(409);
+		expect(r.body).toMatchObject({ error: "cli-unvalidated", version: "2.1.316 (Claude Code)" });
+		expect(docker.effectSteps().filter((s) => s === "enter")).toHaveLength(1);
 	});
 });
 

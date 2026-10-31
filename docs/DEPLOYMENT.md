@@ -388,14 +388,24 @@ requested for it; the Claude Code version running in its pane is in
 `COMPOSER_CLI_VERSIONS` (default 2.1.314).
 
 1. **Capture effective.** `GET /api/sessions/<pilot>/conversations` →
-   `capture.effective: true` and `effectiveAfterRestart: true`. Open the
+   `capture.effective: true` (`effectiveAfterRestart` is `false` for a
+   RUNNING container by definition — it describes the stopped-container
+   retention case — so do not wait for it). Open the
    pilot's terminal, start `claude`, type one prompt by hand: the
    conversation appears in Chat with its `user_prompt`. Without this the
    composer can never confirm a send (`capture-inactive`).
 2. **CLI compatible, pane interactive.** The conversation row shows
-   `kind: interactive`, a `paneId` and `claudeVersion` in the allowlist;
-   `claude --version` in the pane matches. (`canSendInput` is still `false`
-   here: the flag is off.)
+   `kind: interactive`, a `paneId` and a `claudeVersion` whose `X.Y.Z` is in
+   the allowlist (the field is the hook's raw `claude --version` text, e.g.
+   `2.1.314 (Claude Code)`); `claude --version` in the pane matches.
+   (`canSendInput` is still `false` here: the flag is off.) **Pin the CLI
+   before starting it**: the session image's `claude` auto-updates itself on
+   launch into the session's own npm prefix (the 2026-10-31 pilot went from
+   2.1.314 to 2.1.316 on its first start), so in the pilot pane install the
+   validated version and disable the updater for that process:
+   `npm install -g @anthropic-ai/claude-code@2.1.314 && DISABLE_AUTOUPDATER=1 claude`.
+   A pane on another version is refused with 409 `cli-unvalidated` until that
+   version passes the §8.2.6 smoke and is added to `COMPOSER_CLI_VERSIONS`.
 3. **Turn the flag on** for the backend only (`CONVERSATION_COMPOSER_ENABLED=true`
    in `.env`, `docker compose up -d app`); the boot log prints
    `composer ENABLED (CLI versions: …)`. Only now do the composer routes
