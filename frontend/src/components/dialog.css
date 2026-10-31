@@ -1,0 +1,54 @@
+/* ── Dialog component ───────────────────────────────────────────
+   Only what the shared confirm/prompt dialogs add on top of the
+   existing .modal / .modal-card / .modal-actions rules (main.css).
+   Loaded after the main stylesheet (imported from dialog.ts). */
+.dialog-card {
+  width: 420px;
+}
+.dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-bottom: 0.9rem;
+}
+.dialog-body .modal-hint {
+  margin-bottom: 0;
+}
+.dialog-require input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.dialog-cancel {
+  background: transparent;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 0.45rem 0.9rem;
+  color: #e6edf3;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.dialog-cancel:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.modal-danger-action {
+  background: #da3633;
+  border: 1px solid #f85149;
+  border-radius: 6px;
+  padding: 0.45rem 0.9rem;
+  color: #fff;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.modal-danger-action:hover:not(:disabled) {
+  background: #f85149;
+}
+.modal-danger-action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.modal-card:focus-visible,
+.dialog-cancel:focus-visible,
+.modal-danger-action:focus-visible {
+  outline: 2px solid #58a6ff;
+  outline-offset: 2px;
+}

@@ -8,6 +8,7 @@
  */
 
 import { downloadSessionFile, uploadSessionFiles } from "./api.js";
+import { createDialog, promptDialog } from "./components/dialog.js";
 import { activeSessionId, getActiveTerminal, showToast } from "./main.js";
 import { runPasteFlow } from "./paste.js";
 import { saveBlob } from "./saveBlob.js";
@@ -26,34 +27,23 @@ const fileInput = document.getElementById("file-input") as HTMLInputElement;
 // file-attach flow. Two-step UX (open menu → pick action) is the cost of
 // supporting more than one command from a single header button.
 
+const actionsDialog = createDialog(actionsMenu, {
+	initialFocus: () => actionsPasteBtn,
+	onClose: () => actionsBtn.setAttribute("aria-expanded", "false"),
+});
+
 function openActionsMenu() {
-	actionsMenu.classList.add("open");
-	actionsMenu.setAttribute("aria-hidden", "false");
 	actionsBtn.setAttribute("aria-expanded", "true");
-	actionsPasteBtn.focus();
+	actionsDialog.open(actionsBtn);
 }
 
 function closeActionsMenu() {
-	actionsMenu.classList.remove("open");
-	actionsMenu.setAttribute("aria-hidden", "true");
-	actionsBtn.setAttribute("aria-expanded", "false");
+	actionsDialog.close();
 }
 
 actionsBtn.addEventListener("click", () => {
-	if (actionsMenu.classList.contains("open")) {
-		closeActionsMenu();
-		actionsBtn.focus();
-	} else {
-		openActionsMenu();
-	}
-});
-
-actionsMenu.addEventListener("click", (e) => {
-	const target = e.target as HTMLElement;
-	if (target.hasAttribute("data-close-modal")) {
-		closeActionsMenu();
-		actionsBtn.focus();
-	}
+	if (actionsDialog.isOpen()) closeActionsMenu();
+	else openActionsMenu();
 });
 
 actionsPasteBtn.addEventListener("click", async () => {
@@ -98,8 +88,8 @@ actionsSelectBtn.addEventListener("click", () => {
 });
 
 // ── File download flow (#358) ───────────────────────────────────────────────
-// Quick prompt() for a workspace-relative path; the Files view (Workspace
-// Explorer) is the browse-and-click alternative. Both save via saveBlob.
+// Quick path prompt; the Files view (Workspace Explorer) is the
+// browse-and-click alternative. Both save via saveBlob.
 
 let downloadInFlight = false;
 
@@ -116,9 +106,14 @@ actionsDownloadBtn.addEventListener("click", async () => {
 	// Snapshot before the prompt/await — same session-switch guard as the
 	// attach flow above.
 	const sessionId = activeSessionId;
-	const raw = prompt("Workspace-relative path to download (e.g. dist/report.pdf):");
-	const relPath = raw?.trim();
-	if (!relPath) return;
+	const relPath = await promptDialog({
+		title: "Download file",
+		label: "Workspace-relative path",
+		placeholder: "dist/report.pdf",
+		confirmLabel: "Download",
+		validate: (v) => (v === "" ? "Enter a path inside the workspace." : null),
+	});
+	if (relPath === null) return;
 	downloadInFlight = true;
 	try {
 		showToast(`Downloading ${relPath}…`);

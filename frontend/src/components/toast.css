@@ -1,0 +1,74 @@
+/* ── Toast component ────────────────────────────────────────────
+   #toast is now a column of items (toast.ts). The single-element
+   rules in main.css (#toast background/opacity, .visible/.error/
+   .success on the container) are overridden here — the container is
+   just a positioned, click-through stack; each .toast-item carries
+   the chrome. Loaded after the main stylesheet (imported from
+   toast.ts), so equal-specificity rules below win. */
+#toast {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  opacity: 1;
+  pointer-events: none;
+  max-width: min(360px, calc(100vw - 2rem));
+  z-index: 110;
+}
+.toast-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 0.6rem 1rem;
+  font-size: 0.82rem;
+  color: #e6edf3;
+  max-width: 100%;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  pointer-events: auto;
+  animation: toast-in 0.18s ease-out;
+}
+.toast-item.error {
+  border-color: #f85149;
+  color: #f85149;
+}
+.toast-item.success {
+  border-color: #3fb950;
+  color: #3fb950;
+}
+.toast-text {
+  overflow-wrap: anywhere;
+}
+.toast-action {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #58a6ff;
+  font-size: 0.78rem;
+  padding: 0.2rem 0.55rem;
+  cursor: pointer;
+}
+.toast-action:hover {
+  background: rgba(88, 166, 255, 0.12);
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast-item {
+    animation: none;
+  }
+}

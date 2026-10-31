@@ -7,6 +7,7 @@
  */
 
 import { getSessionPorts, type PortSpec, updateSessionPorts } from "./api.js";
+import { createDialog } from "./components/dialog.js";
 import { activeSessionId, showToast } from "./main.js";
 
 // ── DOM (re-queried locally; see header) ─────────────────────────────────
@@ -50,6 +51,12 @@ let portsModalRows: PortsModalRow[] = [];
 let portsModalSessionId: string | null = null;
 let portsModalPrivilegedAllowed = false;
 let portsModalRowSeq = 0;
+
+const portsDialog = createDialog(portsModal, {
+	onClose: () => {
+		portsModalSessionId = null;
+	},
+});
 
 function newPortsModalRowId(): string {
 	portsModalRowSeq += 1;
@@ -187,8 +194,7 @@ function openPortsModal(): void {
 	loadingCell.textContent = "Loading…";
 	loading.appendChild(loadingCell);
 	portsModalTableBody.appendChild(loading);
-	portsModal.classList.add("open");
-	portsModal.setAttribute("aria-hidden", "false");
+	portsDialog.open(portsBtn);
 	void (async () => {
 		try {
 			const data = await getSessionPorts(sessionId);
@@ -230,9 +236,7 @@ function openPortsModal(): void {
 }
 
 function closePortsModal(): void {
-	portsModal.classList.remove("open");
-	portsModal.setAttribute("aria-hidden", "true");
-	portsModalSessionId = null;
+	portsDialog.close();
 }
 
 async function savePortsModal(): Promise<void> {
@@ -344,11 +348,6 @@ portsModalTableBody.addEventListener("click", (e) => {
 });
 
 portsModalSaveBtn.addEventListener("click", () => void savePortsModal());
-
-portsModal.addEventListener("click", (e) => {
-	const target = e.target as HTMLElement;
-	if (target.hasAttribute("data-close-modal")) closePortsModal();
-});
 
 portsBtn.addEventListener("click", () => openPortsModal());
 

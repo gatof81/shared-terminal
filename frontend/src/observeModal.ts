@@ -12,6 +12,7 @@
  */
 
 import { listTabs, type Tab } from "./api.js";
+import { confirmDialog, createDialog } from "./components/dialog.js";
 import { currentFontSize, showToast } from "./main.js";
 import { nextObserveMode, type ObserveMode } from "./observeMode.js";
 import { openTerminalSession, type TerminalSession } from "./terminal.js";
@@ -52,6 +53,20 @@ interface OpenState {
 	mode: ObserveMode;
 }
 let current: OpenState | null = null;
+
+// Every close path (×, backdrop, Escape, a parent dialog closing, logout)
+// runs the teardown: dispose() closes the WS and the server's ws "close"
+// records the audit row's ended_at.
+const observeDialog = createDialog(observeModal, { onClose: teardown });
+
+function teardown(): void {
+	if (activeObserveTerm) {
+		activeObserveTerm.dispose();
+		activeObserveTerm = null;
+	}
+	current = null;
+	observeTerminalHost.textContent = "";
+}
 
 function renderModeChrome(): void {
 	if (!current) return;
@@ -157,26 +172,17 @@ export async function openObserveModalFor(target: ObserveTarget): Promise<void> 
 	// hint surfaces the count so the viewer knows if there are more.
 	const tab = tabs[0]!;
 	current = { target, tab, tabCount: tabs.length, mode: "observe" };
-	observeModal.classList.add("open");
-	observeModal.setAttribute("aria-hidden", "false");
+	observeDialog.open(document.activeElement);
 	attach("observe");
 }
 
+/** Idempotent: safe from logout and from callers that don't know whether an observe is up. */
 export function closeObserveModal(): void {
-	if (activeObserveTerm) {
-		// dispose() closes the WS — the server's ws.on("close") then fires
-		// recordObserveEnd() to UPDATE ended_at (idempotent via WHERE
-		// ended_at IS NULL).
-		activeObserveTerm.dispose();
-		activeObserveTerm = null;
-	}
-	current = null;
-	observeTerminalHost.textContent = "";
-	observeModal.classList.remove("open");
-	observeModal.setAttribute("aria-hidden", "true");
+	if (observeDialog.isOpen()) observeDialog.close();
+	else teardown();
 }
 
-takeControlBtn.addEventListener("click", () => {
+takeControlBtn.addEventListener("click", async () => {
 	if (!current) return;
 	const { target, mode } = current;
 	const next = nextObserveMode(mode);
@@ -184,18 +190,15 @@ takeControlBtn.addEventListener("click", () => {
 		// Escalation is a deliberate, separately-audited act — confirm it.
 		// De-escalation (release) needs no confirm; dropping to read-only
 		// can't harm the owner's session.
-		if (
-			!confirm(
-				`Take control of "${target.name}" (${target.ownerUsername})? You will be able to type in their session. This is logged.`,
-			)
-		) {
-			return;
-		}
+		const ok = await confirmDialog({
+			title: "Take control",
+			message: `Take control of "${target.name}" (${target.ownerUsername})? You will be able to type in their session. This is logged as an operate action.`,
+			confirmLabel: "Take control",
+			danger: true,
+		});
+		// The observe may have been closed (or re-targeted) while the
+		// question was open — re-check before escalating.
+		if (!ok || current?.target !== target) return;
 	}
 	attach(next);
-});
-
-observeModal.addEventListener("click", (e) => {
-	const el = e.target as HTMLElement;
-	if (el.hasAttribute("data-close-modal")) closeObserveModal();
 });

@@ -22,6 +22,7 @@ import {
 	stopSession,
 	TabNotFoundError,
 } from "./api.js";
+import { confirmDialog } from "./components/dialog.js";
 import { parseSessionHash, reflectSessionInHash } from "./deepLink.js";
 import { formatBytes, formatCpuCores, formatCpuPercent } from "./format.js";
 import { transformKeyInput } from "./keyBar.js";
@@ -227,10 +228,26 @@ export function renderSessionList() {
 			// is hard delete — otherwise there's nothing to do.
 			const hard = s.status === "terminated" || mouseEvent.shiftKey;
 
-			const prompt = hard
-				? `Permanently delete "${s.name}"?\n\nThis stops and removes the container, wipes workspace files from disk, and removes the session record. This cannot be undone.`
-				: `Terminate "${s.name}"?\n\nContainer will be stopped and removed. Workspace files are preserved — you can restore the session later.`;
-			if (!confirm(prompt)) return;
+			// An irreversible delete asks for the session's name (§9.5 of
+			// docs/design/ui-unificada.md); a soft terminate is reversible
+			// (Restore) and only needs a plain confirmation.
+			const ok = hard
+				? await confirmDialog({
+						title: "Delete permanently",
+						message: `Delete "${s.name}" permanently?\n\nThis stops and removes the container, wipes the workspace files from disk and removes the session record. This cannot be undone.`,
+						confirmLabel: "Delete permanently",
+						requireText: {
+							expected: s.name,
+							label: `Type the session name (${s.name}) to confirm`,
+						},
+					})
+				: await confirmDialog({
+						title: "Terminate session",
+						message: `Terminate "${s.name}"?\n\nThe container is stopped and removed. Workspace files are preserved — you can restore the session later.`,
+						confirmLabel: "Terminate",
+						danger: true,
+					});
+			if (!ok) return;
 
 			try {
 				await deleteSession(s.sessionId, hard);
@@ -870,13 +887,14 @@ async function closeTab(tabId: string, triggeredBy?: HTMLButtonElement) {
 	const sessionId = activeSessionId;
 	if (closingTabs.has(tabId)) return; // duplicate invocation for same tab
 	const tabLabel = currentTabs.find((t) => t.tabId === tabId)?.label ?? tabId;
-	if (
-		!confirm(
-			`Close tab "${tabLabel}"?\n\nAny processes running in this tab will be terminated (SIGHUP).`,
-		)
-	) {
-		return;
-	}
+	const ok = await confirmDialog({
+		title: "Close tab",
+		message: `Close tab "${tabLabel}"?\n\nAny process running in this tab is terminated (SIGHUP).`,
+		confirmLabel: "Close tab",
+		danger: true,
+	});
+	// The session may have switched while the question was open.
+	if (!ok || activeSessionId !== sessionId || closingTabs.has(tabId)) return;
 	closingTabs.add(tabId);
 	// Re-render so sibling chips' × reflects the in-flight close (their
 	// disabled state mirrors the same guard).
