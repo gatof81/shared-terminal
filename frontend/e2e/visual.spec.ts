@@ -8,11 +8,17 @@ import { expect, test } from "./fixtures.js";
  * the functional specs anyway. Toasts are masked too (timing-dependent).
  * Regenerate with `npm run test:e2e:update` after an intended visual change.
  */
-function shot(page: Page, name: string) {
-	return expect(page).toHaveScreenshot(`${name}.png`, {
-		mask: [page.locator("#terminal-container"), page.locator("#toast")],
-		fullPage: false,
-	});
+async function shot(page: Page, name: string): Promise<void> {
+	// The overlays sit absolutely over the terminal's box, so masking the
+	// terminal would paint over Files / Git / Chat too: mask it only when it
+	// is the view on screen.
+	const terminalShown = !(await page
+		.locator("#files-view, #git-view, #chat-view")
+		.filter({ visible: true })
+		.count());
+	const mask = [page.locator("#toast")];
+	if (terminalShown) mask.push(page.locator("#terminal-container"));
+	await expect(page).toHaveScreenshot(`${name}.png`, { mask, fullPage: false });
 }
 
 test.describe("visual", () => {
