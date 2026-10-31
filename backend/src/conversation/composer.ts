@@ -194,6 +194,18 @@ export function parseCliVersions(raw: string | undefined): Set<string> {
 /** Events read per conversation (newest) when an ack is re-evaluated after the fact. */
 const DEFERRED_ACK_SCAN = 4096;
 
+/**
+ * The bare `X.Y.Z` of a conversation's `claudeVersion`, which is the
+ * SessionStart hook's raw `claude --version` output ("2.1.314 (Claude Code)")
+ * — the string COMPOSER_CLI_VERSIONS is compared with. Null when absent or
+ * not starting with a version (the 3.2 pilot on VM100 found the composer
+ * refusing every conversation with `cli-unvalidated` for this mismatch).
+ */
+export function cliVersionOf(raw: string | null | undefined): string | null {
+	const m = raw?.match(/^\s*(\d+\.\d+\.\d+)/);
+	return m ? m[1]! : null;
+}
+
 export class ComposerDisabledError extends Error {
 	constructor() {
 		super("composer disabled");
@@ -597,7 +609,10 @@ export class ComposerService {
 				detail: region.kind === "unknown" ? region.reason : "text",
 			});
 		}
-		if (!a.index.claudeVersion || !this.cliVersions.has(a.index.claudeVersion)) {
+		// `claudeVersion` is the hook's raw `claude --version` text
+		// ("2.1.314 (Claude Code)"); the allowlist holds bare X.Y.Z.
+		const cliVersion = cliVersionOf(a.index.claudeVersion);
+		if (!cliVersion || !this.cliVersions.has(cliVersion)) {
 			return this.reject("cli-unvalidated", 409, { version: a.index.claudeVersion });
 		}
 
