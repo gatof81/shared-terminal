@@ -169,6 +169,18 @@
   position: relative;
 }
 
+/* The chips' row. #terminal-tabs = #tab-strip + #tab-tools (shell v2 puts
+   the terminal-only controls in the latter; empty in v1): the strip
+   carries exactly the layout the chips had as direct children of
+   #terminal-tabs, so nothing moved. */
+#tab-strip {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: clip;
+}
+
 /* ── Tabs as controls (UI unification, PR 4) ───────────────────
    The chip keeps its look; its tab is a real button (role="tab") with
    the close button beside it. */

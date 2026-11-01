@@ -35,7 +35,7 @@ test.describe("router", () => {
 		await expect.poll(() => page.url()).toContain(`#/sessions/${S}/chat/conv-2`);
 
 		await app.switchView("terminal");
-		if (app.mobile) await page.click("#chrome-toggle");
+		await app.openChrome();
 		const depthBefore = await page.evaluate(
 			() => (history.state as { st?: { n: number } })?.st?.n ?? 0,
 		);

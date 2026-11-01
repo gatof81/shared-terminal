@@ -23,6 +23,7 @@ import { d1Query } from "../db.js";
 import * as groups from "../groups.js";
 import { logger } from "../logger.js";
 import { EFFECTIVE_CPU_NANO_MAX, EFFECTIVE_MEM_BYTES_MAX } from "../sessionConfig.js";
+import { UI_SHELL } from "../uiShell.js";
 import type { RouteContext } from "./shared.js";
 
 export function registerAuthRoutes(router: Router, ctx: RouteContext): void {
@@ -96,7 +97,16 @@ export function registerAuthRoutes(router: Router, ctx: RouteContext): void {
 			cpuMaxCores: EFFECTIVE_CPU_NANO_MAX / 1_000_000_000,
 			memMaxMiB: EFFECTIVE_MEM_BYTES_MAX / (1024 * 1024),
 		};
-		res.json({ needsSetup: !anyUsers, authenticated, isAdmin, isLead, resourceCaps });
+		// `uiShell` (UI unification §8.4): which frontend shell to mount —
+		// an operator switch with rollback by env var, no frontend redeploy.
+		res.json({
+			needsSetup: !anyUsers,
+			authenticated,
+			isAdmin,
+			isLead,
+			resourceCaps,
+			uiShell: UI_SHELL,
+		});
 	});
 
 	router.post("/auth/register", registerIp, async (req: Request, res: Response) => {

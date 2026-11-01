@@ -1,4 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
+import type { ShellOptions } from "./e2e/fixtures.js";
 
 // End-to-end harness (docs/design/ui-unificada.md §8.2, PR 3). The app runs
 // on the Vite dev server with VITE_API_URL pointing at ITSELF, so every
@@ -8,7 +9,7 @@ import { defineConfig, devices } from "@playwright/test";
 // stay in the Session Image workflow's smokes.
 const PORT = 5174;
 
-export default defineConfig({
+export default defineConfig<ShellOptions>({
 	testDir: "./e2e",
 	testMatch: /.*\.spec\.ts/,
 	fullyParallel: true,
@@ -25,6 +26,11 @@ export default defineConfig({
 			// Same Chromium build and the same vendored fonts everywhere (see
 			// e2e/fixtures.ts), so only anti-aliasing noise is left.
 			maxDiffPixelRatio: 0.02,
+			// pixelmatch's default YIQ threshold (0.2) lets a dark-grey toast on
+			// the near-black background pass as "same pixel"; 0.1 counts it —
+			// and with it any stale baseline (`--update-snapshots` only rewrites
+			// what fails, so a baseline that "matched" was never refreshed).
+			threshold: 0.1,
 			animations: "disabled",
 			caret: "hide",
 		},
@@ -61,6 +67,39 @@ export default defineConfig({
 				deviceScaleFactor: 1,
 				isMobile: true,
 				hasTouch: true,
+			},
+		},
+		// The same suite under shell v2 (uiShell.ts): the per-browser
+		// override is set before the app loads (e2e/fixtures.ts).
+		{
+			name: "desktop-v2",
+			use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 }, shell: "v2" },
+		},
+		{
+			name: "mobile-v2",
+			use: {
+				...devices["Desktop Chrome"],
+				viewport: { width: 390, height: 844 },
+				deviceScaleFactor: 1,
+				isMobile: true,
+				hasTouch: true,
+				shell: "v2",
+			},
+		},
+		// The merged-bar variant of v2 on a phone (uiShell.ts `?bar=merged`),
+		// for comparison on the preview: the navigation, the invariant, the
+		// shell spec and the screenshots.
+		{
+			name: "mobile-v2-merged",
+			testMatch: /(navigation|terminal-invariant|shell-v2|visual)\.spec\.ts/,
+			use: {
+				...devices["Desktop Chrome"],
+				viewport: { width: 390, height: 844 },
+				deviceScaleFactor: 1,
+				isMobile: true,
+				hasTouch: true,
+				shell: "v2",
+				bar: "merged",
 			},
 		},
 	],

@@ -26,6 +26,7 @@ import {
 	register,
 	SESSION_EXPIRED_EVENT,
 	type SessionInfo,
+	serverUiShell,
 	type Tab,
 } from "./api.js";
 // Overlay views register themselves with viewSwitch on load; nothing
@@ -62,8 +63,17 @@ import {
 	renderSessionList,
 	updateToolbar,
 } from "./sessionCore.js";
+import { initShellV2 } from "./shellV2.js";
 import { clearAllBadges } from "./tabActivity.js";
 import type { TerminalSession } from "./terminal.js";
+import {
+	applyBar,
+	applyShell,
+	consumeShellQuery,
+	currentShell,
+	readStoredBar,
+	resolveShell,
+} from "./uiShell.js";
 import { isOverlayActive, overlayLabel } from "./viewSwitch.js";
 
 // ── DOM refs ────────────────────────────────────────────────────────────────
@@ -117,6 +127,21 @@ const terminalContainer = document.getElementById("terminal-container")!;
 const fontSizeBtn = document.getElementById("font-size-btn") as HTMLButtonElement;
 // actions.ts owns the (+) menu; main.ts only toggles the button's visibility.
 const actionsBtn = document.getElementById("actions-btn") as HTMLButtonElement;
+
+// ── Shell (v1 / v2) ─────────────────────────────────────────────────────────
+// Which shell to mount: a `?ui=` override for this browser, else the
+// operator's choice from /auth/status (uiShell.ts). Applied before the
+// first paint from the override alone, then again once the server has
+// answered — shellV2.ts moves a few controls, which is safe at any time.
+const shellOverride = consumeShellQuery();
+function applyResolvedShell(): void {
+	const shell = resolveShell({ stored: shellOverride, server: serverUiShell() });
+	if (shell === currentShell() && document.documentElement.dataset.shell) return;
+	applyShell(shell);
+	applyBar(shell === "v2" ? readStoredBar() : null);
+	if (shell === "v2") initShellV2();
+}
+applyResolvedShell();
 
 // ── Viewport height ─────────────────────────────────────────────────────────
 // iOS Safari's soft keyboard overlays the layout viewport without resizing
@@ -204,7 +229,8 @@ export function disposeAllCurrentTerminals() {
 	// we just tore down — wipe it wholesale so a future session whose
 	// listTabs returns a recycled tabId doesn't inherit a stale dot.
 	clearAllBadges();
-	terminalTabs.innerHTML = "";
+	// Only the chips: #tab-tools (shell v2's font/search controls) stays.
+	(document.getElementById("tab-strip") ?? terminalTabs).replaceChildren();
 	terminalTabs.style.display = "none";
 	terminalContainer.style.display = "none";
 	// Clearing the tabs invalidates the chrome-toggle label — refresh
@@ -228,6 +254,8 @@ async function initAuth() {
 	// for "show app vs. login" and `needsSetup` for "show invite field".
 	try {
 		const { needsSetup, authenticated } = await checkAuthStatus();
+		// The operator's shell (UI_SHELL) is known now; an override wins.
+		applyResolvedShell();
 		// #200: caps now mirrored in the api module — apply to the form
 		// once on init so the very first modal open shows operator-
 		// lowered bounds. Re-applied on every modal open below to catch

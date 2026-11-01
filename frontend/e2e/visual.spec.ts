@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures.js";
 
@@ -6,7 +7,9 @@ import { expect, test } from "./fixtures.js";
  * The terminal canvas is masked: its glyphs come from xterm's own renderer
  * (WebGL or DOM, GPU-dependent), and the mock's prompt text is asserted in
  * the functional specs anyway. Toasts are hidden (timing-dependent).
- * Regenerate with `npm run test:e2e:update` after an intended visual change.
+ * Regenerate with `npm run test:e2e:update` after an intended visual change
+ * (it runs `--update-snapshots=all`: the default "changed" mode keeps any
+ * baseline that still passes the comparison, stale toast included).
  */
 async function shot(page: Page, name: string): Promise<void> {
 	// The overlays sit absolutely over the terminal's box, so masking the
@@ -16,9 +19,14 @@ async function shot(page: Page, name: string): Promise<void> {
 		.locator("#files-view, #git-view, #chat-view")
 		.filter({ visible: true })
 		.count());
-	const mask = [page.locator("#toast")];
-	if (terminalShown) mask.push(page.locator("#terminal-container"));
-	await expect(page).toHaveScreenshot(`${name}.png`, { mask, fullPage: false });
+	const mask = terminalShown ? [page.locator("#terminal-container")] : [];
+	await expect(page).toHaveScreenshot(`${name}.png`, {
+		mask,
+		fullPage: false,
+		// Toasts are timing-dependent (the GPU-fallback notice, a copy chip):
+		// hidden rather than masked, so no block covers what sits under them.
+		stylePath: fileURLToPath(new URL("./screenshot.css", import.meta.url)),
+	});
 }
 
 test.describe("visual", () => {

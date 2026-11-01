@@ -1,0 +1,231 @@
+/* ── Shell v2 (UI unification §5.2 / §5.3) ─────────────────────
+   Keyed on html[data-shell="v2"] (uiShell.ts). The v1 rules stay as
+   they are; these override them, so switching the flag back restores
+   v1 exactly. Preview stage: the session bar is the existing
+   #terminal-toolbar, always visible, with the view tabs on every view;
+   the terminal-only controls live in the tab strip (shellV2.ts); the
+   mobile drawers (chrome pill, bottom nav) are gone. */
+
+/* Header: one user menu instead of the cluster. */
+html[data-shell="v2"] .header-right > :not(#user-display) {
+  display: none;
+}
+html[data-shell="v2"] #user-menu-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  border: 1px solid var(--c-border);
+  border-radius: 50%;
+  color: var(--c-muted);
+  cursor: pointer;
+}
+html[data-shell="v2"] #user-menu-btn:hover {
+  color: var(--c-text);
+  background: rgba(255, 255, 255, 0.06);
+}
+html[data-shell="v2"] #user-menu-btn:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+html[data-shell="v2"] #chrome-toggle {
+  display: none !important;
+}
+
+/* Session bar: what belongs to the session only. */
+html[data-shell="v2"] #terminal-toolbar {
+  gap: 0.6rem;
+  padding: 0.4rem 0.75rem;
+}
+html[data-shell="v2"] #terminal-toolbar > span:first-child {
+  display: none; /* "Session:" label — the name is the first thing */
+}
+html[data-shell="v2"] #terminal-session-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+html[data-shell="v2"] #observers-btn,
+html[data-shell="v2"] #ports-btn {
+  display: none; /* in the ⋯ menu */
+}
+html[data-shell="v2"] #session-menu-btn {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  color: var(--c-muted);
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 0.2rem 0.5rem;
+  cursor: pointer;
+}
+html[data-shell="v2"] #session-menu-btn:hover {
+  color: var(--c-text);
+}
+html[data-shell="v2"] #session-menu-btn:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+/* View tabs: icon + label; the icon alone on narrow screens, except the
+   active one, which keeps its label. */
+html[data-shell="v2"] #view-switch button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.6rem;
+}
+html[data-shell="v2"] .view-icon {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  flex-shrink: 0;
+}
+html:not([data-shell="v2"]) .view-icon {
+  display: none;
+}
+
+/* Terminal-only controls in the tab strip (moved there by shellV2.ts). */
+html[data-shell="v2"] #terminal-tabs {
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+html[data-shell="v2"] #tab-strip {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: clip;
+}
+html[data-shell="v2"] #tab-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding-bottom: 4px;
+  flex-shrink: 0;
+}
+html[data-shell="v2"] #tab-tools #font-size-btn {
+  margin-left: 0;
+}
+
+/* The overlays' own "‹ Terminal" buttons: the view tabs are always there. */
+html[data-shell="v2"] #files-to-terminal-btn,
+html[data-shell="v2"] #git-to-terminal-btn,
+html[data-shell="v2"] #chat-to-terminal-btn {
+  display: none !important;
+}
+
+/* No bottom nav: the overlays reach the bottom edge. */
+html[data-shell="v2"] #view-nav {
+  display: none !important;
+}
+html[data-shell="v2"] #terminal-area.view-nav-on #files-view,
+html[data-shell="v2"] #terminal-area.view-nav-on #git-view,
+html[data-shell="v2"] #terminal-area.view-nav-on #chat-view {
+  bottom: 0;
+}
+html[data-shell="v2"] .chat-float {
+  bottom: 4.4rem;
+}
+
+@media (max-width: 768px) {
+  /* The bar and the tab strip are never hidden behind a drawer: a view
+     switch changes nothing in the terminal's box (zero resize). */
+  html[data-shell="v2"] main:not(.chrome-open) #terminal-toolbar {
+    display: flex !important;
+  }
+  html[data-shell="v2"] main:not(.chrome-open) #terminal-tabs {
+    display: flex !important;
+  }
+  html[data-shell="v2"] #terminal-toolbar {
+    padding: 0.35rem 0.5rem;
+    gap: 0.4rem;
+    overflow: visible;
+  }
+  html[data-shell="v2"] #terminal-status-badge {
+    /* The dot says it; the word is in the ⋯ menu's state line. */
+    font-size: 0;
+    width: 8px;
+    height: 8px;
+    padding: 0;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  html[data-shell="v2"] #terminal-status-badge.running {
+    background: var(--c-ok);
+  }
+  html[data-shell="v2"] #terminal-status-badge.stopped,
+  html[data-shell="v2"] #terminal-status-badge.reconnecting {
+    background: var(--c-warn);
+  }
+  html[data-shell="v2"] #terminal-status-badge.disconnected {
+    background: var(--c-muted);
+  }
+  html[data-shell="v2"] #terminal-status-badge.terminated,
+  html[data-shell="v2"] #terminal-status-badge.failed {
+    background: var(--c-err);
+  }
+  html[data-shell="v2"] #view-switch {
+    margin-left: auto;
+  }
+  html[data-shell="v2"] #view-switch button {
+    padding: 0.3rem 0.45rem;
+  }
+  html[data-shell="v2"] #view-switch button[aria-pressed="false"] .view-label {
+    display: none;
+  }
+  html[data-shell="v2"] #view-switch button[aria-pressed="true"] .view-label {
+    font-size: 0.72rem;
+  }
+  html[data-shell="v2"] #session-menu-btn {
+    margin-left: 0;
+  }
+  html[data-shell="v2"] #tab-tools #terminal-search-input {
+    width: 7rem;
+  }
+}
+
+/* The sidebar drawer's footer menu (v1 mobile) is the user menu now. */
+html[data-shell="v2"] #sidebar-footer {
+  display: none !important;
+}
+
+/* ── Merged bar variant (html[data-bar="merged"], mobile) ───────
+   The session bar shares the header's line (shellV2.ts moves it there
+   on narrow screens): ☰ · name ● · view tabs · ⋯ · user · +. */
+@media (max-width: 768px) {
+  html[data-shell="v2"][data-bar="merged"] header {
+    gap: 0.35rem;
+    padding: 0.35rem 0.5rem;
+  }
+  html[data-shell="v2"][data-bar="merged"] header #terminal-toolbar {
+    flex: 1;
+    min-width: 0;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+    border: 0;
+    gap: 0.3rem;
+  }
+  html[data-shell="v2"][data-bar="merged"] header #terminal-session-name {
+    font-size: 0.8rem;
+  }
+  html[data-shell="v2"][data-bar="merged"] header #view-switch {
+    margin-left: auto;
+  }
+  html[data-shell="v2"][data-bar="merged"] header #view-switch button {
+    padding: 0.3rem 0.4rem;
+  }
+  html[data-shell="v2"][data-bar="merged"] #user-menu-btn {
+    width: 30px;
+    height: 30px;
+  }
+}

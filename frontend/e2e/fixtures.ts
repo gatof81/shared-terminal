@@ -18,6 +18,13 @@ export const FIXED_NOW = "2026-10-31T10:30:00Z";
 
 export type View = "terminal" | "files" | "git" | "chat";
 
+/** Project option: which shell the app mounts (uiShell.ts override). */
+export interface ShellOptions {
+	shell: "v1" | "v2";
+	/** Shell v2's mobile bar variant (uiShell.ts): null = a second line, "merged" = the header's line. */
+	bar: "merged" | null;
+}
+
 const FONTS_DIR = fileURLToPath(new URL("./fonts/", import.meta.url));
 const FONT_CSS = `
 @font-face { font-family: "E2E Sans"; src: url(/e2e-fonts/LiberationSans-Regular.ttf); font-weight: 400; }
@@ -55,8 +62,38 @@ export class App {
 		readonly page: Page,
 		readonly backend: MockBackend,
 		readonly mobile: boolean,
+		readonly shell: "v1" | "v2",
 	) {
 		page.on("pageerror", (err) => this.errors.push(String(err)));
+	}
+
+	/** v1 mobile only: the chrome drawer (toolbar + tabs) must be open to reach them. */
+	async openChrome(): Promise<void> {
+		if (!this.mobile || this.shell === "v2") return;
+		const main = this.page.locator("main");
+		if (!(await main.evaluate((el) => el.classList.contains("chrome-open")))) {
+			await this.page.click("#chrome-toggle");
+		}
+	}
+
+	/**
+	 * Activate one of the header cluster's buttons by id (templates-btn,
+	 * admin-btn, logout-btn, …): the button itself in v1 (header on
+	 * desktop, sidebar footer on mobile), the user menu's entry in v2.
+	 */
+	async appMenu(id: string): Promise<void> {
+		if (this.shell === "v2") {
+			// The user menu is in the header on both layouts in v2.
+			await this.page.click("#user-menu-btn");
+			await this.page.locator(`[role="menu"].action-menu [data-action="${id}"]`).click();
+			return;
+		}
+		if (this.mobile) {
+			await this.openSidebar();
+			await this.page.click(`#sidebar-${id}`);
+			return;
+		}
+		await this.page.click(`#${id}`);
 	}
 
 	/** Load the app at `/` (optionally with a hash) already authenticated as `user`. */
@@ -95,6 +132,8 @@ export class App {
 			await this.page.click("#sidebar-toggle");
 		}
 		await expect(main).toHaveClass(/sidebar-open/);
+		// The drawer slides in (0.2 s): a row clicked mid-slide is "not stable".
+		await expect(this.page.locator("#sidebar")).toHaveCSS("transform", "matrix(1, 0, 0, 1, 0, 0)");
 	}
 
 	async sidebarOpen(): Promise<boolean> {
@@ -136,7 +175,8 @@ export class App {
 	async switchView(view: View): Promise<void> {
 		const current = await this.currentView();
 		if (current === view) return;
-		if (!this.mobile) {
+		if (!this.mobile || this.shell === "v2") {
+			// v2: the view tabs are in the session bar on every view.
 			await this.page.click(`#view-${view}-btn`);
 		} else if (current === "terminal") {
 			const main = this.page.locator("main");
@@ -174,16 +214,29 @@ export class App {
 	}
 }
 
-export const test = base.extend<{ backend: MockBackend; app: App }>({
-	backend: async ({ page }, use) => {
+export const test = base.extend<ShellOptions & { backend: MockBackend; app: App }>({
+	shell: ["v1", { option: true }],
+	bar: [null, { option: true }],
+	backend: async ({ page, shell, bar }, use) => {
 		const backend = new MockBackend();
 		await backend.install(page);
 		await installFonts(page);
 		await page.clock.setFixedTime(FIXED_NOW);
+		if (shell === "v2") {
+			// The per-browser override, as `?ui=v2` (and `?bar=merged`) would have stored it.
+			await page.addInitScript((merged: boolean) => {
+				try {
+					localStorage.setItem("st.uiShell", "v2");
+					if (merged) localStorage.setItem("st.uiShellBar", "merged");
+				} catch {
+					/* ignore */
+				}
+			}, bar === "merged");
+		}
 		await use(backend);
 	},
-	app: async ({ page, backend, isMobile }, use) => {
-		const app = new App(page, backend, isMobile === true);
+	app: async ({ page, backend, isMobile, shell }, use) => {
+		const app = new App(page, backend, isMobile === true, shell);
 		await use(app);
 		expect(app.errors, "uncaught errors in the page").toEqual([]);
 	},

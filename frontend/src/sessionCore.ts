@@ -78,6 +78,7 @@ const terminalToolbar = document.getElementById("terminal-toolbar")!;
 const terminalSessionName = document.getElementById("terminal-session-name")!;
 const terminalStatusBadge = document.getElementById("terminal-status-badge")!;
 const terminalTabs = document.getElementById("terminal-tabs")!;
+const tabStrip = document.getElementById("tab-strip") ?? terminalTabs;
 const terminalContainer = document.getElementById("terminal-container")!;
 const emptyState = document.getElementById("empty-state")!;
 const terminalStateEl = document.getElementById("terminal-state")!;
@@ -208,6 +209,12 @@ export async function runSessionAction(s: SessionInfo, id: SessionActionId): Pro
 			return;
 		}
 	}
+}
+
+/** The ⋯ menu of the ACTIVE session (shell v2's session bar). */
+export function openActiveSessionMenu(opener: HTMLElement): void {
+	const s = sessions.find((x) => x.sessionId === activeSessionId);
+	if (s) openSessionMenu(s, opener);
 }
 
 function openSessionMenu(s: SessionInfo, opener: HTMLElement): void {
@@ -687,7 +694,7 @@ export function renderTabBar() {
 		active instanceof HTMLElement && terminalTabs.contains(active)
 			? active.closest<HTMLElement>(".tab-chip")?.dataset.tabId
 			: undefined;
-	terminalTabs.replaceChildren();
+	tabStrip.replaceChildren();
 	if (!activeSessionId) {
 		terminalTabs.style.display = "none";
 		renderTerminalState();
@@ -697,8 +704,8 @@ export function renderTabBar() {
 	// — a brand-new session starts with no tabs and the user opens the
 	// first one from here.
 	terminalTabs.style.display = "flex";
-	terminalTabs.setAttribute("role", "tablist");
-	terminalTabs.setAttribute("aria-label", "Terminal tabs");
+	tabStrip.setAttribute("role", "tablist");
+	tabStrip.setAttribute("aria-label", "Terminal tabs");
 
 	for (const tab of currentTabs) {
 		const chip = document.createElement("div");
@@ -742,7 +749,7 @@ export function renderTabBar() {
 			void closeTab(tab.tabId, close);
 		});
 		chip.appendChild(close);
-		terminalTabs.appendChild(chip);
+		tabStrip.appendChild(chip);
 	}
 
 	const addBtn = document.createElement("button");
@@ -752,7 +759,7 @@ export function renderTabBar() {
 	addBtn.title = "Open a new tab (runs services independently; close to SIGHUP them)";
 	addBtn.setAttribute("aria-label", "Open a new tab");
 	addBtn.addEventListener("click", () => void addTab(addBtn));
-	terminalTabs.appendChild(addBtn);
+	tabStrip.appendChild(addBtn);
 	if (focusedTab !== undefined) {
 		terminalTabs
 			.querySelector<HTMLElement>(

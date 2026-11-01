@@ -27,8 +27,7 @@ test.describe("permissions", () => {
 
 	test("an admin sees the dashboard with every user's session", async ({ app, page }) => {
 		await app.login("admin");
-		await app.openSidebar();
-		await page.click(app.mobile ? "#sidebar-admin-btn" : "#admin-btn");
+		await app.appMenu("admin-btn");
 		const modal = page.locator("#admin-modal");
 		await expect(modal).toHaveClass(/open/);
 		const list = modal.locator("#admin-sessions-list");
