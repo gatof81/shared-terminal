@@ -15,6 +15,7 @@ import {
 	deleteSession,
 	deleteTab,
 	fetchAdminSessions,
+	fetchConversations,
 	getSession,
 	isAdmin,
 	isLead,
@@ -61,14 +62,21 @@ import {
 } from "./sessionActions.js";
 import { badgeFor, clearBadge, recordOutput } from "./tabActivity.js";
 import { openTerminalSession, type SessionStatus } from "./terminal.js";
+import { currentShell } from "./uiShell.js";
+import { readHistoryHint, readViewPref, writeHistoryHint } from "./viewPolicy.js";
 import {
 	applyRouteView,
+	beginLanding,
 	beginRouteApply,
+	endLanding,
 	endRouteApply,
+	landingFor,
+	landView,
 	reflectRoute,
 	registerRouteDetail,
 	showFilesOnly,
 	syncSessionViews,
+	type View,
 } from "./viewSwitch.js";
 
 // ── DOM (re-queried locally) ─────────────────────────────────────────────
@@ -437,7 +445,38 @@ sessionList.addEventListener("keydown", (e) => {
 // screen the way it already won the address.
 let wantedTabId: string | null = null;
 
-export async function openSession(sessionId: string, opts: { tabId?: string | null } = {}) {
+// How long the landing may wait for the "has history" answer of a session
+// opened for the first time in this browser (viewPolicy.ts). Past it the
+// session lands as if it had none; the Chat list corrects the memory.
+const LANDING_HISTORY_WAIT_MS = 1500;
+
+/**
+ * Resolve the landing view (UI unification §9, decision 1) for a session
+ * being selected. Synchronous when the person's choice or the history
+ * answer is already remembered; otherwise the one request that decides
+ * Chat vs Terminal/Files runs now, in parallel with the tab listing.
+ */
+function decideLanding(sessionId: string, running: boolean): View | Promise<View> {
+	if (currentShell() !== "v2") return landingFor(sessionId, running);
+	if (readViewPref(sessionId) !== null || readHistoryHint(sessionId) !== null) {
+		return landingFor(sessionId, running);
+	}
+	const asked = fetchConversations(sessionId, { capture: false })
+		.then((d) => {
+			writeHistoryHint(sessionId, d.conversations.length > 0);
+			return d.conversations.length > 0;
+		})
+		.catch(() => null);
+	const wait = new Promise<null>((resolve) =>
+		setTimeout(() => resolve(null), LANDING_HISTORY_WAIT_MS),
+	);
+	return Promise.race([asked, wait]).then(() => landingFor(sessionId, running));
+}
+
+export async function openSession(
+	sessionId: string,
+	opts: { tabId?: string | null; view?: View | null } = {},
+) {
 	if (activeSessionId === sessionId) return;
 	wantedTabId = opts.tabId ?? null;
 
@@ -447,19 +486,41 @@ export async function openSession(sessionId: string, opts: { tabId?: string | nu
 
 	setActiveSessionId(sessionId);
 	renderSessionList();
-	// updateToolbar → syncSessionViews re-keys every view to this session
-	// (and may force Files for a stopped one); only then is the address
-	// written, in place — selecting a session is not a history entry.
-	updateToolbar();
+	const meta = sessions.find((x) => x.sessionId === sessionId);
+	const running = meta?.status === "running";
+	// The landing view (viewPolicy.ts) unless the route names one (the
+	// router applies it right after). While it is being decided the view
+	// sync must not land a fallback of its own.
+	const landing = opts.view ? null : decideLanding(sessionId, running);
+	if (landing !== null) beginLanding();
+	try {
+		// updateToolbar → syncSessionViews re-keys every view to this session
+		// (and may force Files for a stopped one); only then is the address
+		// written, in place — selecting a session is not a history entry.
+		updateToolbar();
+	} finally {
+		if (landing !== null && !(landing instanceof Promise)) endLanding();
+	}
 	reflectRoute({ push: false });
+	// A landing that needs the history answer waits for it (bounded); the
+	// tab listing below runs meanwhile, so a running session loses nothing.
+	const land = async (): Promise<boolean> => {
+		if (landing === null) return true;
+		const v = landing instanceof Promise ? await landing : landing;
+		if (landing instanceof Promise) endLanding();
+		if (activeSessionId !== sessionId) return false;
+		landView(v, { forced: !running });
+		return true;
+	};
 
 	// Not running → no tmux to list tabs from or attach to, but the
-	// workspace is on the host: open straight into the Files view.
-	// refreshSessions re-opens it properly once the session is started.
-	const meta = sessions.find((x) => x.sessionId === sessionId);
-	if (meta && meta.status !== "running") {
+	// workspace is on the host: open straight into the Files view (or
+	// Chat, with history, under shell v2). refreshSessions re-opens it
+	// properly once the session is started.
+	if (meta && !running) {
 		filesOnlySessionId = sessionId;
-		showFilesOnly();
+		if (landing === null) showFilesOnly();
+		else await land();
 		return;
 	}
 	filesOnlySessionId = null;
@@ -469,10 +530,12 @@ export async function openSession(sessionId: string, opts: { tabId?: string | nu
 	try {
 		const tabs = await listTabs(sessionId);
 		if (activeSessionId !== sessionId) return;
+		if (!(await land())) return;
 		// Sort by creation order so +-added tabs stay on the right
 		// (listTabs returns alphabetical from tmux list-sessions).
 		setCurrentTabs(tabs.sort((a, b) => a.createdAt - b.createdAt));
 	} catch (err) {
+		if (landing instanceof Promise) endLanding();
 		// Drop back to empty state so the toolbar/container don't linger
 		// visible with no tabs.
 		if (activeSessionId === sessionId) {
@@ -584,12 +647,17 @@ export async function applyRoute(route: Route | null): Promise<void> {
 			// not rewrite it on the way (its own in-place writes are held).
 			beginRouteApply(id);
 			try {
-				await openSession(id, { tabId: route.view === "terminal" ? route.detail : null });
+				await openSession(id, {
+					tabId: route.view === "terminal" ? route.detail : null,
+					view: route.view,
+				});
 			} finally {
 				endRouteApply();
 			}
 			// A newer route landed while this one was opening the session.
 			if (gen !== routeGen || activeSessionId !== id) return;
+			// No view in the address: the landing policy chose one (and wrote it).
+			if (route.view === null) return;
 		} else {
 			if (isAdmin()) {
 				try {

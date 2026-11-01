@@ -34,6 +34,8 @@ import {
 	updateChromeToggle,
 } from "./main.js";
 import { navigate } from "./router.js";
+import { currentShell } from "./uiShell.js";
+import { chooseLanding, readHistoryHint, readViewPref, writeViewPref } from "./viewPolicy.js";
 
 export type View = "terminal" | "files" | "git" | "chat";
 
@@ -198,8 +200,13 @@ const navButtons = [...(viewNav?.querySelectorAll<HTMLButtonElement>("button[dat
 let view: View = "terminal";
 // True when the current overlay was entered because the terminal was
 // unavailable (stopped session) rather than by the user — such a view
-// snaps back to Terminal once the session is running again.
+// snaps back once the session is running again (to Terminal, or to what
+// the landing policy says under shell v2).
 let forced = false;
+// True while sessionCore is deciding a session's landing view (it may be
+// waiting on the "has history" answer): the sync below must not land a
+// fallback of its own in the meantime, or the person would see two views.
+let landingPending = false;
 
 const viewListeners: Array<(next: View, prev: View) => void> = [];
 const syncListeners: Array<() => void> = [];
@@ -239,12 +246,22 @@ function positionOverlays(): void {
 }
 new ResizeObserver(positionOverlays).observe(terminalToolbar);
 
-export function setView(next: View, opts: { forced?: boolean } = {}): void {
+/**
+ * Show a view. `forced`: a fallback because the terminal is unavailable
+ * (snaps back when it is again). `landing`: the policy's choice on
+ * selection (viewPolicy.ts). Neither is the person's choice, so neither
+ * is remembered for the session nor recorded as a history entry; a plain
+ * call is a choice and is both.
+ */
+export function setView(next: View, opts: { forced?: boolean; landing?: boolean } = {}): void {
 	forced = next !== "terminal" && opts.forced === true;
+	const chosen = opts.forced !== true && opts.landing !== true && !applying;
 	if (view === next) {
 		renderSwitch();
 		return;
 	}
+	// The last view the person chose for this session wins its next landing.
+	if (chosen && activeSessionId !== null) writeViewPref(activeSessionId, next);
 	const prev = view;
 	view = next;
 	// A detail still pending for the view being left is void.
@@ -280,9 +297,32 @@ export function setView(next: View, opts: { forced?: boolean } = {}): void {
 	renderSwitch();
 	updateChromeToggle();
 	for (const l of viewListeners) l(next, prev);
-	// A view the person chose is a history entry; a forced landing (a
-	// stopped session opening in Files) only updates the address in place.
-	reflectRoute({ push: opts.forced !== true });
+	// A view the person chose is a history entry; a landing (a stopped
+	// session opening in Files, Chat by policy) only updates the address in place.
+	reflectRoute({ push: chosen });
+}
+
+/** The policy's landing for a session (viewPolicy.ts), from what is already known. */
+export function landingFor(sessionId: string, running: boolean): View {
+	if (currentShell() !== "v2") return running ? "terminal" : "files";
+	return chooseLanding({
+		pref: readViewPref(sessionId),
+		hasHistory: readHistoryHint(sessionId),
+		running,
+	});
+}
+
+/** Land on a view (the policy's or a fallback), in place, nothing remembered. */
+export function landView(next: View, opts: { forced?: boolean } = {}): void {
+	setView(next, opts.forced ? { forced: true } : { landing: true });
+}
+
+export function beginLanding(): void {
+	landingPending = true;
+}
+
+export function endLanding(): void {
+	landingPending = false;
 }
 
 function renderSwitch(): void {
@@ -331,12 +371,16 @@ export function syncSessionViews(): void {
 	// a forced switch below (which fires onViewChange → load) loads for
 	// the NEW session rather than racing a stale one.
 	for (const l of syncListeners) l();
+	if (landingPending) return;
 	if (!canTerminal) {
-		// No terminal to show: land on Files (works for stopped sessions).
-		// A user already on Files, Git or Chat stays where they are.
-		if (view === "terminal") setView("files", { forced: true });
+		// No terminal to show: land on Files (works for stopped sessions) —
+		// or on what the policy says under shell v2. A user already on
+		// Files, Git or Chat stays where they are.
+		if (view === "terminal") landView(landingFor(s.sessionId, false), { forced: true });
 	} else if (forced) {
-		setView("terminal");
+		// The terminal is back (Start): leave the fallback for the landing
+		// the session would have had running.
+		landView(landingFor(s.sessionId, true));
 	}
 }
 

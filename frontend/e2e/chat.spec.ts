@@ -74,7 +74,7 @@ test.describe("chat", () => {
 		const ta = page.locator(".chat-composer textarea");
 		await expect(ta).toBeDisabled();
 		await expect(page.locator(".chat-composer-status")).toContainText(
-			/not available|not at its prompt/,
+			/not available|has ended/,
 		);
 	});
 

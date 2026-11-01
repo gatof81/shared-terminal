@@ -86,11 +86,12 @@ export default defineConfig<ShellOptions>({
 				shell: "v2",
 			},
 		},
-		// The merged-bar variant of v2 on a phone (uiShell.ts `?bar=merged`),
-		// for comparison on the preview: the navigation, the invariant, the
-		// shell spec and the screenshots.
+		// The stacked-bar alternative of v2 on a phone (uiShell.ts
+		// `?bar=stacked`; the merged bar is the default that `mobile-v2`
+		// runs): the navigation, the invariant, the shell spec and the
+		// screenshots.
 		{
-			name: "mobile-v2-merged",
+			name: "mobile-v2-stacked",
 			testMatch: /(navigation|terminal-invariant|shell-v2|visual)\.spec\.ts/,
 			use: {
 				...devices["Desktop Chrome"],
@@ -99,7 +100,7 @@ export default defineConfig<ShellOptions>({
 				isMobile: true,
 				hasTouch: true,
 				shell: "v2",
-				bar: "merged",
+				bar: "stacked",
 			},
 		},
 	],

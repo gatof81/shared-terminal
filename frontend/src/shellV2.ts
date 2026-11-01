@@ -26,7 +26,7 @@ export function initShellV2(): void {
 	if (inited) return;
 	inited = true;
 
-	// The merged-bar variant (uiShell.ts `bar`): on narrow screens the
+	// The merged bar (uiShell.ts `bar`, the default): on narrow screens the
 	// session bar shares the header's line. The element is MOVED, not
 	// cloned, so every module keeps its references; on a wide screen it
 	// goes back under the header. viewSwitch.positionOverlays knows the
@@ -51,9 +51,18 @@ export function initShellV2(): void {
 		}
 	}
 
-	// Terminal-only controls → the tab strip's tool slot.
+	// Terminal-only controls → the tab strip's tool slot. The Insert (+)
+	// menu writes into the terminal, so it belongs with them, not in the
+	// header: that is what keeps the session name legible on a 390-px
+	// merged bar. It stays reachable on the Terminal view (the strip is
+	// always visible there) and is hidden under an overlay as before.
 	const tools = document.getElementById("tab-tools");
-	for (const id of ["terminal-search-input", "terminal-search-btn", "font-size-btn"]) {
+	for (const id of [
+		"terminal-search-input",
+		"terminal-search-btn",
+		"font-size-btn",
+		"actions-btn",
+	]) {
 		const el = document.getElementById(id);
 		if (el && tools) tools.appendChild(el);
 	}

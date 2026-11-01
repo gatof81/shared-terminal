@@ -969,7 +969,7 @@ describe("Composer", () => {
 		await openSendable({ status: "waiting_permission" });
 		expect(composerTextarea().placeholder).toMatch(/permission/);
 		await openSendable({ status: "ended" });
-		expect(composerTextarea().placeholder).toMatch(/not at its prompt/);
+		expect(composerTextarea().placeholder).toMatch(/has ended/);
 		await openSendable({
 			status: "running",
 			statusAt: new Date(Date.now() - 11 * 60 * 1000).toISOString(),
