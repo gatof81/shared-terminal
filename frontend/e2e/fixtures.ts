@@ -10,8 +10,8 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, type Page, test as base } from "@playwright/test";
-import { MockBackend, USERS } from "./mockBackend.js";
+import { test as base, expect, type Page } from "@playwright/test";
+import { MockBackend, type USERS } from "./mockBackend.js";
 
 /** The seed data is stamped around 2026-10-31T10:00Z; the page's clock sits 30 min later. */
 export const FIXED_NOW = "2026-10-31T10:30:00Z";
@@ -156,7 +156,12 @@ export class App {
 			if (v === view) await expect(overlay).toBeVisible();
 			else await expect(overlay).toBeHidden();
 		}
-		if (view === "terminal") await expect(this.page.locator("#terminal-container")).toBeVisible();
+		if (view === "terminal") {
+			// Either a live pane or the state panel (stopped / no tabs / lost socket).
+			await expect(
+				this.page.locator("#terminal-container, #terminal-state").filter({ visible: true }),
+			).toHaveCount(1);
+		}
 	}
 
 	toast(text: string | RegExp) {

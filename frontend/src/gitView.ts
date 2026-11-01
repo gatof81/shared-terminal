@@ -28,12 +28,11 @@ import {
 	type GitCommit,
 	type GitDiff,
 	type GitStatus,
-	startSession,
 } from "./api.js";
 import { parseUnifiedDiff } from "./diff.js";
 import { relativeDate } from "./format.js";
-import { activeSessionId, isMobile, sessions, showToast } from "./main.js";
-import { refreshSessions } from "./sessionCore.js";
+import { activeSessionId, isMobile, sessions } from "./main.js";
+import { runSessionAction } from "./sessionCore.js";
 import { button, el, stateBox } from "./ui.js";
 import { getView, onSessionSync, onViewChange } from "./viewSwitch.js";
 
@@ -317,16 +316,11 @@ async function refresh(): Promise<void> {
 refreshBtn.addEventListener("click", () => void refresh());
 
 async function startThisSession(): Promise<void> {
-	const sessionId = stateSessionId;
-	if (sessionId === null) return;
-	try {
-		showToast("Starting session…");
-		await startSession(sessionId);
-		// The poll-driven sync above reloads once the list says "running".
-		await refreshSessions();
-	} catch (err) {
-		showToast((err as Error).message, true);
-	}
+	const s = sessions.find((x) => x.sessionId === stateSessionId);
+	if (!s) return;
+	// The same verb as the sidebar and the terminal's stopped state; the
+	// poll-driven sync above reloads once the list says "running".
+	await runSessionAction(s, "start");
 }
 
 // ── Rendering ───────────────────────────────────────────────────────────────

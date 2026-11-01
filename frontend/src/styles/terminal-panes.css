@@ -110,3 +110,77 @@
   color: var(--c-muted);
   font-size: 0.9rem;
 }
+
+/* ── Terminal state panel (UI unification, PR 4) ───────────────
+   Shown in place of the terminal container when there is no pane:
+   stopped / terminated / failed session, no tabs yet, a tab whose
+   socket gave up. Flex child of #terminal-area like the container,
+   never alongside it. */
+#terminal-state {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem 1rem;
+  overflow: auto;
+}
+#terminal-state[hidden] {
+  display: none;
+}
+.terminal-state-box {
+  max-width: 28rem;
+  text-align: center;
+  color: var(--c-muted);
+}
+.terminal-state-box h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--c-text);
+  margin-bottom: 0.35rem;
+}
+.terminal-state-box p {
+  font-size: 0.85rem;
+  line-height: 1.45;
+  margin-bottom: 1rem;
+}
+.terminal-state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 0.5rem;
+}
+.terminal-state-btn {
+  border-radius: 6px;
+  padding: 0.5rem 0.9rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  color: var(--c-text);
+}
+.terminal-state-btn.kind-primary {
+  background: var(--c-ok-bg);
+  border-color: var(--c-ok-strong);
+  color: var(--c-white);
+  font-weight: 600;
+}
+.terminal-state-btn.kind-danger {
+  border-color: var(--c-err);
+  color: var(--c-err);
+}
+.terminal-state-btn:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+.terminal-state-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.terminal-state-btn:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+.terminal-state-reason {
+  font-size: 0.78rem;
+  width: 100%;
+}

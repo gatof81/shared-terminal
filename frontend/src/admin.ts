@@ -1107,13 +1107,17 @@ const observersDialog = createDialog(observersModal);
 
 function openObserversModal(): void {
 	if (!activeSessionId) return;
-	const sessionId = activeSessionId;
+	openObserversModalFor(activeSessionId);
+}
+
+/** The per-session observe log — from the toolbar (active session) or a sidebar row's menu. */
+export function openObserversModalFor(sessionId: string): void {
 	observersModalListEl.textContent = "";
 	const loading = document.createElement("p");
 	loading.className = "modal-hint";
 	loading.textContent = "Loading…";
 	observersModalListEl.appendChild(loading);
-	observersDialog.open(observersBtn);
+	observersDialog.open(document.activeElement ?? observersBtn);
 	void refreshObserversModal(sessionId);
 }
 

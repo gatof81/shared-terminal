@@ -38,6 +38,7 @@ import { showCopySuccessToast, showToast } from "./components/toast.js";
 import "./invites.js";
 import { initKeyBar, updateKeyBarVisibility } from "./keyBar.js";
 import {
+	clearSidebarObservables,
 	closeObserveModal,
 	refreshSidebarObservables,
 	renderSidebarObservables,
@@ -53,10 +54,16 @@ import {
 	registerServiceWorker,
 } from "./push.js";
 import { initTerminalSearch } from "./searchBar.js";
-import { openSession, openSessionFromDeepLink, refreshSessions } from "./sessionCore.js";
+import {
+	openSession,
+	openSessionFromDeepLink,
+	refreshSessions,
+	renderSessionList,
+	updateToolbar,
+} from "./sessionCore.js";
 import { clearAllBadges } from "./tabActivity.js";
 import type { TerminalSession } from "./terminal.js";
-import { isOverlayActive, overlayLabel, syncSessionViews } from "./viewSwitch.js";
+import { isOverlayActive, overlayLabel } from "./viewSwitch.js";
 
 // ── DOM refs ────────────────────────────────────────────────────────────────
 
@@ -539,11 +546,14 @@ function handleLogout(toastMessage?: string): void {
 	// initial fetches, flashing own sessions as read-only rows. PR #397
 	// review SHOULD-FIX.
 	sessionsLoadedOnce = false;
-	// Drop the Files view's cached listings/preview and hide it. Nothing
-	// above routes through updateToolbar(), so without this a Files view
-	// left open would still show the previous user's workspace after the
-	// next login in this tab.
-	syncSessionViews();
+	// The sidebar and the terminal area must not keep the previous
+	// user's rows, toolbar or state panel behind the login view (they
+	// would show for a moment to the next person to sign in on this
+	// tab). updateToolbar() also drops the Files/Git/Chat state through
+	// syncSessionViews().
+	renderSessionList();
+	clearSidebarObservables();
+	updateToolbar();
 	showAuth();
 	// Symmetry with showApp(): keep the admin-button visibility in
 	// lockstep with the api-layer's _isAdmin flag, which logout() and
@@ -852,10 +862,12 @@ export function updateChromeToggle() {
 		return;
 	}
 	chromeToggleBtn.hidden = false;
-	// The actions menu (paste / attach / select) writes into the terminal,
-	// which the Files / Git overlays cover — hide it there; Files has its
-	// own download button.
-	actionsBtn.hidden = isOverlayActive();
+	// The actions menu (paste / attach / select) writes into the terminal:
+	// hidden while an overlay covers it (Files has its own download
+	// button) and while there is no terminal to write into (stopped
+	// session, no tab yet, lost socket — the state panel offers the action
+	// that applies instead).
+	actionsBtn.hidden = isOverlayActive() || getActiveTerminal() === null;
 	updateKeyBarVisibility();
 	const activeTab = currentTabs.find((t) => t.tabId === currentActiveTabId);
 	// Format: "session › tab". Falls back to just the session name when

@@ -242,10 +242,18 @@ export function renderSidebarObservables(): void {
 	for (const s of rows) {
 		const item = document.createElement("div");
 		item.className = "session-item";
+		item.dataset.sessionId = s.sessionId;
+
+		// A real button: reachable by keyboard, announced with its owner.
+		const select = document.createElement("button");
+		select.type = "button";
+		select.className = "session-select";
+		select.setAttribute("aria-label", `Observe ${s.name} (${s.ownerUsername}, read-only)`);
 
 		const dot = document.createElement("span");
 		dot.className = `session-dot ${s.status}`;
-		item.appendChild(dot);
+		dot.setAttribute("aria-hidden", "true");
+		select.appendChild(dot);
 
 		const nameCol = document.createElement("span");
 		nameCol.className = "session-name-col";
@@ -257,13 +265,21 @@ export function renderSidebarObservables(): void {
 		owner.className = "observable-owner";
 		owner.textContent = `${s.ownerUsername} — read-only`;
 		nameCol.appendChild(owner);
-		item.appendChild(nameCol);
+		select.appendChild(nameCol);
 
-		item.addEventListener("click", () => {
+		select.addEventListener("click", () => {
 			openObserveForLead(s);
 		});
+		item.appendChild(select);
 		observableListEl.appendChild(item);
 	}
+}
+
+/** Logout: drop the cached cross-user list and its rows. */
+export function clearSidebarObservables(): void {
+	cachedObservables = [];
+	observableListEl.textContent = "";
+	observableSection.classList.add("hidden");
 }
 
 export { closeMyGroupsModal, closeObserveModal };

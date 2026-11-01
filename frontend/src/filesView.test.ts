@@ -231,12 +231,13 @@ describe("view switching", () => {
 		expect($("view-switch").hidden).toBe(false);
 	});
 
-	it("forces Files for a stopped session and disables Terminal until it runs", async () => {
+	it("forces Files for a stopped session; Terminal stays selectable and snaps back once it runs", async () => {
 		mainState.currentTerminals = new Map();
 		selectSession("s1", "stopped");
 		await flush();
 		expect(fv.isFilesViewActive()).toBe(true);
-		expect(($("view-terminal-btn") as HTMLButtonElement).disabled).toBe(true);
+		// Selectable: the Terminal view shows the stopped state and a Start action.
+		expect(($("view-terminal-btn") as HTMLButtonElement).disabled).toBe(false);
 		expect(api.listWorkspaceDir).toHaveBeenCalledWith("s1", "");
 
 		// Session started → terminal available again → snaps back.

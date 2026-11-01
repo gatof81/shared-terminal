@@ -172,7 +172,11 @@ function renderPortsModalRows(): void {
 
 function openPortsModal(): void {
 	if (!activeSessionId) return;
-	const sessionId = activeSessionId;
+	openPortsModalFor(activeSessionId);
+}
+
+/** The editor for one session — from the toolbar (active session) or a sidebar row's menu. */
+export function openPortsModalFor(sessionId: string): void {
 	portsModalSessionId = sessionId;
 	portsModalRows = [];
 	// Reset the privileged flag too: a failed/aborted load must not leave a

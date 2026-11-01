@@ -1,5 +1,5 @@
-import { SESSION_IDS } from "./mockBackend.js";
 import { expect, test } from "./fixtures.js";
+import { SESSION_IDS } from "./mockBackend.js";
 
 /**
  * Role-gated UI: what each role sees, and that the client never asks the

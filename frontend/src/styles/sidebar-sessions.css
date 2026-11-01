@@ -169,3 +169,47 @@
 .session-kill:hover {
   background: rgba(var(--c-err-rgb), 0.15);
 }
+
+/* ── Rows as controls (UI unification, PR 4) ───────────────────
+   The row's own button selects the session; the quick action and the
+   ⋯ menu are siblings. The button resets to the row's look so nothing
+   moved on screen; focus shows the actions like hover does. */
+.session-select {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.session-select:focus-visible,
+.session-action-btn:focus-visible,
+.session-menu-btn:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 1px;
+}
+.session-item:focus-within .session-actions {
+  opacity: 1;
+}
+.session-menu-btn {
+  background: transparent;
+  border: none;
+  color: var(--c-muted);
+  font-size: 0.9rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+.session-menu-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--c-text);
+}
