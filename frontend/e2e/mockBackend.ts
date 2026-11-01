@@ -317,6 +317,8 @@ export class MockBackend {
 	sessions: MockSession[] = seedSessions();
 	fs: FsDir = seedFs();
 	conversations: Conversation[] = seedConversations();
+	/** Which sessions have captured history (the list answers [] for the others). */
+	historySessions = new Set<string>([SESSION_IDS.running, SESSION_IDS.stopped]);
 	/** Capture state reported for the running session. */
 	capture = { requested: true, effective: true, effectiveAfterRestart: true };
 	/** Which push/notification shape the server reports. */
@@ -775,7 +777,9 @@ export class MockBackend {
 				return json(200, {
 					capture: withCapture ? this.capture : null,
 					conversations:
-						s.status === "failed" ? [] : this.conversations.map((c) => this.summary(c)),
+						s.status === "failed" || !this.historySessions.has(s.sessionId)
+							? []
+							: this.conversations.map((c) => this.summary(c)),
 				});
 			}
 			const ev = /^\/conversations\/([^/]+)\/events$/.exec(rest);

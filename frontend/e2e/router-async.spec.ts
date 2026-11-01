@@ -136,7 +136,10 @@ test.describe("router with delayed answers", () => {
 		});
 		await page.waitForTimeout(500);
 		await expect(page.locator("#terminal-container .tab-pane.active")).toContainText("(tab-2)");
-		await expect(page.locator("#terminal-tabs .tab-chip.active")).toHaveAttribute("data-tab-id", "tab-2");
+		await expect(page.locator("#terminal-tabs .tab-chip.active")).toHaveAttribute(
+			"data-tab-id",
+			"tab-2",
+		);
 		expect(page.url()).toContain(`#/sessions/${S}/terminal/tab-2`);
 		// One attach, for the tab on screen; the first route opened nothing.
 		expect(backend.terminalSockets.map((s) => s.tabId)).toEqual(["tab-2"]);

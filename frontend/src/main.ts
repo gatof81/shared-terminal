@@ -71,6 +71,7 @@ import {
 	applyShell,
 	consumeShellQuery,
 	currentShell,
+	DEFAULT_BAR,
 	readStoredBar,
 	resolveShell,
 } from "./uiShell.js";
@@ -138,7 +139,7 @@ function applyResolvedShell(): void {
 	const shell = resolveShell({ stored: shellOverride, server: serverUiShell() });
 	if (shell === currentShell() && document.documentElement.dataset.shell) return;
 	applyShell(shell);
-	applyBar(shell === "v2" ? readStoredBar() : null);
+	applyBar(shell === "v2" ? (readStoredBar() ?? DEFAULT_BAR) : null);
 	if (shell === "v2") initShellV2();
 }
 applyResolvedShell();

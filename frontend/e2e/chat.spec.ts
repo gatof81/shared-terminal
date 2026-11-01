@@ -73,9 +73,7 @@ test.describe("chat", () => {
 		await page.locator("#chat-list .chat-conv-row", { hasText: "Fix tests" }).click();
 		const ta = page.locator(".chat-composer textarea");
 		await expect(ta).toBeDisabled();
-		await expect(page.locator(".chat-composer-status")).toContainText(
-			/not available|not at its prompt/,
-		);
+		await expect(page.locator(".chat-composer-status")).toContainText(/not available|has ended/);
 	});
 
 	test("mobile: thread → back returns to the list; reopening is instant (cached)", async ({

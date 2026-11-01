@@ -24,16 +24,31 @@ const BAR_KEY = "st.uiShellBar";
  * menu, Insert) instead of being a second line under it. `?bar=merged`
  * stores it, `?bar=` clears it. Nothing without shell v2.
  */
-export type UiBar = "merged";
+/**
+ * Shell v2's mobile bar: "merged" (the session bar shares the header's
+ * line — the default, the user's pick after trying both on a phone) or
+ * "stacked" (a second line under the header, kept as the alternative,
+ * `?bar=stacked`). `?bar=merged` or `?bar=` returns to the default.
+ */
+export type UiBar = "merged" | "stacked";
 
+export const DEFAULT_BAR: UiBar = "merged";
+
+export function isUiBar(v: unknown): v is UiBar {
+	return v === "merged" || v === "stacked";
+}
+
+/** The stored alternative, or null for the default. */
 export function readStoredBar(): UiBar | null {
 	try {
-		return localStorage.getItem(BAR_KEY) === "merged" ? "merged" : null;
+		const v = localStorage.getItem(BAR_KEY);
+		return isUiBar(v) && v !== DEFAULT_BAR ? v : null;
 	} catch {
 		return null;
 	}
 }
 
+/** Mark the document with the bar variant (v2 only; null = none, v1). */
 export function applyBar(bar: UiBar | null): void {
 	if (bar) document.documentElement.dataset.bar = bar;
 	else delete document.documentElement.dataset.bar;
@@ -80,8 +95,8 @@ export function consumeShellQuery(): UiShell | null {
 			else if (raw === "") localStorage.removeItem(STORAGE_KEY);
 		}
 		if (bar !== null) {
-			if (bar === "merged") localStorage.setItem(BAR_KEY, bar);
-			else if (bar === "") localStorage.removeItem(BAR_KEY);
+			if (isUiBar(bar) && bar !== DEFAULT_BAR) localStorage.setItem(BAR_KEY, bar);
+			else if (bar === "" || bar === DEFAULT_BAR) localStorage.removeItem(BAR_KEY);
 		}
 	} catch {
 		/* storage unavailable: the override just doesn't persist */

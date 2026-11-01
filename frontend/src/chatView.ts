@@ -56,6 +56,7 @@ import { formatBytes, relativeDate } from "./format.js";
 import { activeSessionId, isMobile, sessions, showCopySuccessToast, showToast } from "./main.js";
 import { renderMarkdown } from "./markdown.js";
 import { button, el, stateBox } from "./ui.js";
+import { readLastConversation, writeHistoryHint, writeLastConversation } from "./viewPolicy.js";
 import {
 	getView,
 	onSessionSync,
@@ -155,6 +156,11 @@ let mobilePane: "list" | "thread" = "list";
 let agentsOpen = false;
 let listTimer: ReturnType<typeof setInterval> | null = null;
 let renderQueued = false;
+// One shot per session selection: when the list first lands with no
+// conversation open, the one the person last read here is reopened (in
+// place — no history entry). A route that names a conversation, or none
+// ("…/chat"), and the person's own clicks all clear it first.
+let restorePending = false;
 /** Highest seq the reader has seen per conversation (the unread dot). */
 const seen = new Map<string, number>();
 let seenBaselined = false;
@@ -205,6 +211,7 @@ function resetState(sessionId: string | null): void {
 	agentsOpen = false;
 	seen.clear();
 	seenBaselined = false;
+	restorePending = sessionId !== null;
 	loadSeen();
 }
 
@@ -232,6 +239,7 @@ registerRouteDetail("chat", {
 function deselect(): void {
 	threadGen++;
 	closeSocket();
+	restorePending = false;
 	selectedCid = null;
 	cur = null;
 	threadStatus = "idle";
@@ -312,6 +320,15 @@ async function loadList(opts: { quiet?: boolean } = {}): Promise<void> {
 		if (gen !== generation) return;
 		const capture = data.capture ?? (list.status === "loaded" ? list.capture : null);
 		list = { status: "loaded", capture, conversations: data.conversations };
+		// The landing policy's memory (viewPolicy.ts): Chat first next time, if there is history.
+		writeHistoryHint(sid, data.conversations.length > 0);
+		if (restorePending && selectedCid === null && isActive()) {
+			restorePending = false;
+			const last = readLastConversation(sid);
+			if (last !== null && data.conversations.some((c) => c.sessionId === last)) {
+				void openConversation(last, { restore: true });
+			}
+		}
 		if (!seenBaselined) {
 			// First sight of this session's list: nothing is "new" yet.
 			for (const c of data.conversations)
@@ -329,18 +346,24 @@ async function loadList(opts: { quiet?: boolean } = {}): Promise<void> {
 }
 
 /** Open a conversation: from the cache when it is fresh, else the newest page. */
-async function openConversation(cid: string, opts: { fresh?: boolean } = {}): Promise<void> {
+async function openConversation(
+	cid: string,
+	opts: { fresh?: boolean; restore?: boolean } = {},
+): Promise<void> {
 	const sid = stateSessionId;
 	if (sid === null) return;
 	const gen = ++threadGen;
 	const switching = selectedCid !== cid;
 	if (cur && switching) rememberScroll();
+	restorePending = false;
 	selectedCid = cid;
+	writeLastConversation(sid, cid);
 	threadError = "";
 	mobilePane = "thread";
 	if (isMobile()) agentsOpen = false;
-	// Opening a conversation is a step Back undoes (a no-op while a route is being applied).
-	reflectRoute({ push: switching });
+	// Opening a conversation is a step Back undoes (a no-op while a route
+	// is being applied); reopening the last one on landing is not.
+	reflectRoute({ push: switching && opts.restore !== true });
 	const cached = threads.get(cid);
 	if (cached && !opts.fresh && Date.now() - cached.loadedAt < THREAD_CACHE_FRESH_MS) {
 		// Warm: show it now, re-follow from its seq (the server replays only
@@ -730,7 +753,7 @@ function renderListInner(): void {
 		listEl.appendChild(
 			stateBox(
 				"error",
-				list.message,
+				`Could not load the conversations: ${list.message}`,
 				button("Retry", "files-btn", () => void loadList()),
 			),
 		);
@@ -739,12 +762,20 @@ function renderListInner(): void {
 	const banner = captureBanner(list.capture);
 	if (banner) listEl.appendChild(banner);
 	if (list.conversations.length === 0) {
-		const empty = stateBox(
-			"empty",
-			"No conversations recorded yet. Use Claude in the terminal and they will appear here.",
-		);
+		// Three different situations read as "nothing here" — say which.
+		const cap = list.capture;
+		const why = (cap?.pendingReasons ?? []).join(", ");
+		const text =
+			cap === null || cap.effective
+				? "No conversations recorded yet. Use Claude in the terminal and they will appear here."
+				: cap.requested
+					? `Capture is requested but not active yet${why ? ` (${why})` : ""}. Conversations will appear here once it is.`
+					: "Capture is off for this session: Claude conversations are not recorded. An admin can enable it.";
+		const empty = stateBox("empty", text);
 		empty.classList.add("chat-empty");
-		if (!isMobile() || list.capture?.effective)
+		empty.dataset.reason =
+			cap === null || cap.effective ? "none" : cap.requested ? "pending" : "off";
+		if (!isMobile() || cap?.effective)
 			empty.appendChild(button("Open terminal", "files-btn", () => setView("terminal")));
 		listEl.appendChild(empty);
 		return;
@@ -1411,6 +1442,11 @@ function composerStateFor(cid: string): ComposerState {
 function composerBlockReason(c: ConversationSummary | undefined, st: ComposerState): string | null {
 	if (!c) return "Open a conversation to send a message.";
 	if (c.composer?.blocked) return explainCode("send-in-progress", c.composer.reason);
+	// Over, or lost: say that before anything about the pane.
+	if (c.status === "ended" || c.status === "ending")
+		return "This conversation has ended. Start a new one in the terminal.";
+	if (c.status === "disconnected" || c.status === "error")
+		return "This conversation is no longer reachable from Chat.";
 	if (!c.canSendInput) {
 		if (c.kind !== "interactive")
 			return "Only an interactive Claude Code session can take a message from Chat.";

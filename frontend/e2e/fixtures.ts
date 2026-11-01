@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test as base, expect, type Page } from "@playwright/test";
-import { MockBackend, type USERS } from "./mockBackend.js";
+import { MockBackend, SESSION_IDS, type USERS } from "./mockBackend.js";
 
 /** The seed data is stamped around 2026-10-31T10:00Z; the page's clock sits 30 min later. */
 export const FIXED_NOW = "2026-10-31T10:30:00Z";
@@ -21,8 +21,16 @@ export type View = "terminal" | "files" | "git" | "chat";
 /** Project option: which shell the app mounts (uiShell.ts override). */
 export interface ShellOptions {
 	shell: "v1" | "v2";
-	/** Shell v2's mobile bar variant (uiShell.ts): null = a second line, "merged" = the header's line. */
-	bar: "merged" | null;
+	/** Shell v2's mobile bar (uiShell.ts): null = the default (merged), "stacked" = the alternative. */
+	bar: "stacked" | null;
+	/**
+	 * What the browser remembers about the seeded sessions' views
+	 * (viewPolicy.ts). "legacy" (default) seeds the pre-policy landings —
+	 * Terminal for the running session, Files for the others — so the
+	 * suite's expectations hold under both shells; "none" starts clean, for
+	 * the landing policy's own spec.
+	 */
+	landing: "legacy" | "none";
 }
 
 const FONTS_DIR = fileURLToPath(new URL("./fonts/", import.meta.url));
@@ -217,21 +225,38 @@ export class App {
 export const test = base.extend<ShellOptions & { backend: MockBackend; app: App }>({
 	shell: ["v1", { option: true }],
 	bar: [null, { option: true }],
-	backend: async ({ page, shell, bar }, use) => {
+	landing: ["legacy", { option: true }],
+	backend: async ({ page, shell, bar, landing }, use) => {
 		const backend = new MockBackend();
 		await backend.install(page);
 		await installFonts(page);
 		await page.clock.setFixedTime(FIXED_NOW);
 		if (shell === "v2") {
-			// The per-browser override, as `?ui=v2` (and `?bar=merged`) would have stored it.
-			await page.addInitScript((merged: boolean) => {
+			// The per-browser override, as `?ui=v2` (and `?bar=stacked`) would have stored it.
+			await page.addInitScript((stacked: boolean) => {
 				try {
 					localStorage.setItem("st.uiShell", "v2");
-					if (merged) localStorage.setItem("st.uiShellBar", "merged");
+					if (stacked) localStorage.setItem("st.uiShellBar", "stacked");
 				} catch {
 					/* ignore */
 				}
-			}, bar === "merged");
+			}, bar === "stacked");
+		}
+		if (landing === "legacy") {
+			await page.addInitScript(
+				(prefs: Record<string, string>) => {
+					try {
+						for (const [k, v] of Object.entries(prefs)) localStorage.setItem(k, v);
+					} catch {
+						/* ignore */
+					}
+				},
+				{
+					[`st.view.${SESSION_IDS.running}`]: "terminal",
+					[`st.view.${SESSION_IDS.stopped}`]: "files",
+					[`st.view.${SESSION_IDS.terminated}`]: "files",
+				},
+			);
 		}
 		await use(backend);
 	},

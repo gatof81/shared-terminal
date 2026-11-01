@@ -718,3 +718,12 @@ migración. El flag y el shell v1 se retiran en el PR 10.
 
 Fuera de alcance explícito: i18n, tema claro (solo preparado por tokens), ampliar permisos de
 lectura a admin/lead, cambios de contrato de backend más allá del campo `uiShell`.
+
+**Estado (2026-11-01).** Decisión 1 implementada en el shell v2 (`frontend/src/viewPolicy.ts`:
+última vista elegida por sesión → Chat si hay historial capturado → Terminal/Files; una URL con
+vista gana; la memoria vive en `localStorage` por navegador y la única consulta es la lista de
+conversaciones de una sesión que el navegador no conoce, en paralelo al listado de tabs). El shell
+v1 conserva su aterrizaje. Decisión 2: tras probar ambas variantes en un iPhone, la **barra
+fusionada** (sesión y vistas en la línea del header) es la variante por defecto de v2; la barra en
+dos líneas sigue disponible como alternativa con `?bar=stacked`. El botón Insert (+) pasa a los
+controles del Terminal en la tira de tabs para que el nombre de sesión siga legible a 390 px.
