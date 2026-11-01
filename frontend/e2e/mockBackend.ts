@@ -273,6 +273,7 @@ index 1111111..2222222 100644
 // ── Recorded traffic ────────────────────────────────────────────────────────
 
 export type DelayKey =
+	| "tabs"
 	| "fsList"
 	| "fsPreview"
 	| "gitStatus"
@@ -282,6 +283,7 @@ export type DelayKey =
 	| "events";
 
 function delayKeyOf(path: string): DelayKey | null {
+	if (/\/tabs$/.test(path)) return "tabs";
 	if (/\/fs\/list$/.test(path)) return "fsList";
 	if (/\/fs\/preview$/.test(path)) return "fsPreview";
 	if (/\/git\/status$/.test(path)) return "gitStatus";

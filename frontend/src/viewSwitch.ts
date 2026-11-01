@@ -85,13 +85,20 @@ let pendingRoute: { view: View; detail: string | null } | null = null;
  * causes (a push) still goes through.
  */
 let suppressed = 0;
+// The session that application selected. Its in-place writes are the
+// ones to suppress; once another session is on screen (the person picked
+// it while the tabs were still loading) the application is over, whatever
+// its continuation still does, and that selection must reach the address.
+let suppressedFor: string | null = null;
 
-export function beginRouteApply(): void {
+export function beginRouteApply(sessionId: string): void {
 	suppressed++;
+	suppressedFor = sessionId;
 }
 
 export function endRouteApply(): void {
 	suppressed = Math.max(0, suppressed - 1);
+	if (suppressed === 0) suppressedFor = null;
 }
 
 /**
@@ -101,7 +108,11 @@ export function endRouteApply(): void {
  */
 export function reflectRoute(opts: { push: boolean }): void {
 	if (applying || activeSessionId === null) return;
-	if (suppressed > 0 && !opts.push) return;
+	if (suppressed > 0 && !opts.push) {
+		if (activeSessionId === suppressedFor) return;
+		suppressed = 0;
+		suppressedFor = null;
+	}
 	const detail = detailHandlers[view]?.current() ?? null;
 	const landed =
 		pendingRoute !== null && pendingRoute.view === view && pendingRoute.detail === detail;

@@ -115,6 +115,88 @@ test.describe("router with delayed answers", () => {
 		await expect(app.toast(/Not found/)).toHaveCount(0);
 	});
 
+	test("deep link, then another tab of the same session before the tabs arrive: the last one wins", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		// Long enough that the hash assignment below always precedes the tabs, under CI load too.
+		backend.delays = { tabs: 2500 };
+		await app.login("alice", `#/sessions/${S}/terminal/tab-1`);
+		await expect(page.locator("#terminal-session-name")).toHaveText("my-project");
+		const length = await page.evaluate(() => history.length);
+		// The person moves on while the tab list is still loading.
+		await page.waitForTimeout(200);
+		expect(backend.terminalSockets, "tabs not landed yet").toHaveLength(0);
+		await page.evaluate((h) => {
+			window.location.hash = h;
+		}, `#/sessions/${S}/terminal/tab-2`);
+		await expect(page.locator("#terminal-container .tab-pane.active")).toContainText("(tab-2)", {
+			timeout: 10_000,
+		});
+		await page.waitForTimeout(500);
+		await expect(page.locator("#terminal-container .tab-pane.active")).toContainText("(tab-2)");
+		await expect(page.locator("#terminal-tabs .tab-chip.active")).toHaveAttribute("data-tab-id", "tab-2");
+		expect(page.url()).toContain(`#/sessions/${S}/terminal/tab-2`);
+		// One attach, for the tab on screen; the first route opened nothing.
+		expect(backend.terminalSockets.map((s) => s.tabId)).toEqual(["tab-2"]);
+		// The hash assignment is the one entry; landing the tabs added none.
+		expect(await page.evaluate(() => history.length)).toBe(length + 1);
+	});
+
+	test("deep link, then another view of the same session before the tabs arrive: the view wins", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.delays = { tabs: 2500 };
+		await app.login("alice", `#/sessions/${S}/terminal/tab-2`);
+		await expect(page.locator("#terminal-session-name")).toHaveText("my-project");
+		const length = await page.evaluate(() => history.length);
+		await page.waitForTimeout(200);
+		expect(backend.terminalSockets, "tabs not landed yet").toHaveLength(0);
+		await page.evaluate((h) => {
+			window.location.hash = h;
+		}, `#/sessions/${S}/files`);
+		await app.expectView("files");
+		await expect(page.locator("#files-tree .files-row").first()).toBeVisible({ timeout: 10_000 });
+		// The tabs land underneath: the route's tab attaches, the address stays.
+		await expect.poll(() => backend.terminalSockets.length, { timeout: 10_000 }).toBe(1);
+		await page.waitForTimeout(300);
+		await app.expectView("files");
+		expect(page.url()).toContain(`#/sessions/${S}/files`);
+		expect(page.url()).not.toContain("terminal");
+		expect(backend.terminalSockets.map((s) => s.tabId)).toEqual(["tab-2"]);
+		expect(await page.evaluate(() => history.length)).toBe(length + 1);
+	});
+
+	test("deep link, then a manual selection of another session before the tabs arrive: the address follows the selection", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		// Long enough for the mobile drawer hop that the selection goes through.
+		backend.delays = { tabs: 2500 };
+		await app.login("alice", `#/sessions/${S}/terminal/tab-1`);
+		await expect(page.locator("#terminal-session-name")).toHaveText("my-project");
+		const length = await page.evaluate(() => history.length);
+		await page.waitForTimeout(200);
+		await app.openSession("docs");
+		expect(backend.terminalSockets, "tabs not landed yet").toHaveLength(0);
+		await app.expectView("files");
+		expect(page.url()).toContain(`#/sessions/${SESSION_IDS.stopped}/files`);
+		// The deep-linked session's tabs land after the switch: nothing of it shows or attaches.
+		await page.waitForTimeout(2800);
+		await expect(page.locator("#terminal-session-name")).toHaveText("docs");
+		await app.expectView("files");
+		expect(page.url()).toContain(`#/sessions/${SESSION_IDS.stopped}/files`);
+		expect(page.url()).not.toContain(S);
+		expect(backend.terminalSockets).toHaveLength(0);
+		// A selection replaces the entry; no entry from the abandoned route.
+		expect(await page.evaluate(() => history.length)).toBe(length);
+		await expect(app.toast(/Not found/)).toHaveCount(0);
+	});
+
 	test("Back and Forward over slow details: the final state matches the final address; the terminal untouched", async ({
 		app,
 		backend,

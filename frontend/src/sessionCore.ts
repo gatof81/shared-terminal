@@ -424,8 +424,15 @@ sessionList.addEventListener("keydown", (e) => {
 	e.preventDefault();
 });
 
+// The tab a route asked for while the session's tab list is still
+// loading. openSession lands on it once the tabs arrive, so a route that
+// supersedes the deep link during the load (tab-2 after tab-1) wins the
+// screen the way it already won the address.
+let wantedTabId: string | null = null;
+
 export async function openSession(sessionId: string, opts: { tabId?: string | null } = {}) {
 	if (activeSessionId === sessionId) return;
+	wantedTabId = opts.tabId ?? null;
 
 	// Tabs stay alive across tab-switch, but are torn down on session-switch.
 	disposeAllCurrentTerminals();
@@ -518,8 +525,11 @@ export async function openSession(sessionId: string, opts: { tabId?: string | nu
 	// openTab can throw synchronously (openTerminalSession init failure) —
 	// openSession is called with `void`, so an unhandled throw here would
 	// become an unhandled rejection with no toast and the UI left mid-switch.
-	// A route may name the tab to land on (#/sessions/<id>/terminal/<tab>).
-	const wanted = opts.tabId && currentTabs.some((t) => t.tabId === opts.tabId) ? opts.tabId : null;
+	// A route may name the tab to land on (#/sessions/<id>/terminal/<tab>);
+	// the latest one asked for during the load wins.
+	const asked = wantedTabId;
+	wantedTabId = null;
+	const wanted = asked && currentTabs.some((t) => t.tabId === asked) ? asked : null;
 	try {
 		openTab(wanted ?? currentTabs[0]!.tabId);
 	} catch (err) {
@@ -565,7 +575,7 @@ export async function applyRoute(route: Route | null): Promise<void> {
 		if (sessions.some((s) => s.sessionId === id)) {
 			// The address already names the route; opening the session must
 			// not rewrite it on the way (its own in-place writes are held).
-			beginRouteApply();
+			beginRouteApply(id);
 			try {
 				await openSession(id, { tabId: route.view === "terminal" ? route.detail : null });
 			} finally {
@@ -621,7 +631,11 @@ registerRouteDetail("terminal", {
 	current: () => currentActiveTabId,
 	apply: (tabId) => {
 		if (tabId === null || tabId === currentActiveTabId) return;
-		if (!currentTabs.some((t) => t.tabId === tabId)) return;
+		if (!currentTabs.some((t) => t.tabId === tabId)) {
+			// Not listed yet: openSession lands on it when the list arrives.
+			if (currentTabs.length === 0) wantedTabId = tabId;
+			return;
+		}
 		try {
 			openTab(tabId);
 		} catch (err) {
