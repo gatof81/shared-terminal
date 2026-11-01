@@ -67,24 +67,66 @@ export function isApplyingRoute(): boolean {
 }
 
 /**
+ * A detail a route named that its view could not show synchronously (a
+ * listing or the git status is still loading). The address already says
+ * it, so nothing is written meanwhile — no transient URL without the
+ * detail — and when the view lands it the write is IN PLACE, never a
+ * history entry. Void as soon as the person chooses something else, the
+ * view changes, or another route arrives.
+ */
+let pendingRoute: { view: View; detail: string | null } | null = null;
+
+/**
+ * Raised by sessionCore.applyRoute around the whole, possibly async,
+ * application of a route (opening the session, listing its tabs,
+ * attaching). The in-place writes those steps would make (the session,
+ * the first tab) are skipped: the address already says what the route
+ * named, and must not read anything else meanwhile. A write the PERSON
+ * causes (a push) still goes through.
+ */
+let suppressed = 0;
+
+export function beginRouteApply(): void {
+	suppressed++;
+}
+
+export function endRouteApply(): void {
+	suppressed = Math.max(0, suppressed - 1);
+}
+
+/**
  * Write the route for what is on screen. `push` records a history entry
  * (a view or detail the person chose); otherwise the current entry is
  * updated in place (a forced landing, a tab switch, a selection reset).
  */
 export function reflectRoute(opts: { push: boolean }): void {
 	if (applying || activeSessionId === null) return;
+	if (suppressed > 0 && !opts.push) return;
 	const detail = detailHandlers[view]?.current() ?? null;
-	navigate({ sessionId: activeSessionId, view, detail }, { replace: !opts.push });
+	const landed =
+		pendingRoute !== null && pendingRoute.view === view && pendingRoute.detail === detail;
+	// Landed, or superseded by the person's own choice: either way done.
+	if (pendingRoute !== null && pendingRoute.view === view) pendingRoute = null;
+	navigate({ sessionId: activeSessionId, view, detail }, { replace: !opts.push || landed });
 }
 
 /** Show the view and detail a route names, for the ACTIVE session. */
 export function applyRouteView(next: View | null, detail: string | null): void {
+	pendingRoute = null;
 	applying = true;
 	try {
 		if (next !== null) setView(next);
 		detailHandlers[next ?? view]?.apply(detail);
 	} finally {
 		applying = false;
+	}
+	const shown = next ?? view;
+	const handler = detailHandlers[shown];
+	if (handler && handler.current() !== (detail ?? null)) {
+		// The view is still loading what the route names: it lands it (or
+		// reports it missing) later; the address stays as it is until then.
+		pendingRoute = { view: shown, detail: detail ?? null };
+		return;
 	}
 	// The short form (#/sessions/<id>) or a view without detail: settle the
 	// address to the full form of what is shown, in place.
@@ -191,6 +233,8 @@ export function setView(next: View, opts: { forced?: boolean } = {}): void {
 	}
 	const prev = view;
 	view = next;
+	// A detail still pending for the view being left is void.
+	if (pendingRoute !== null && pendingRoute.view !== next) pendingRoute = null;
 	for (const [name, el] of Object.entries(overlays)) el.hidden = name !== next;
 	const covered = next !== "terminal";
 	// Covering the terminal visually doesn't stop Tab / Shift+Tab, a

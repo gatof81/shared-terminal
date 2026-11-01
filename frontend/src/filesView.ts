@@ -92,6 +92,11 @@ let previewToken = 0;
 // reads (each holding one of the backend's per-user preview slots).
 let previewAbort: AbortController | null = null;
 
+// The reveal in flight (a route's path, a breadcrumb, a Markdown link):
+// each await re-checks it, so a newer reveal, the person's own click, a
+// view change or a session switch leaves the older one without effect.
+let revealToken = 0;
+
 // Persisted per page-load across files: someone reading docs wants every
 // .md rendered; someone reviewing markup wants source for all of them.
 let markdownMode: "rendered" | "source" = "rendered";
@@ -108,7 +113,10 @@ export function isFilesViewActive(): boolean {
 }
 
 onViewChange((next) => {
-	if (next !== "files") return;
+	if (next !== "files") {
+		revealToken++; // a reveal pending for a view that is gone is void
+		return;
+	}
 	if (stateSessionId !== null && !dirs.has("")) void loadDir("");
 	renderAll();
 });
@@ -146,6 +154,7 @@ function syncFilesView(): void {
 
 function resetState(sessionId: string | null): void {
 	generation++;
+	revealToken++;
 	previewAbort?.abort();
 	previewAbort = null;
 	stateSessionId = sessionId;
@@ -284,10 +293,12 @@ function selectEntry(path: string, entry: WorkspaceEntry | null): void {
 /** Expand every ancestor of `path` (loading as needed), then select it. */
 async function revealPath(path: string): Promise<void> {
 	const gen = generation;
+	const token = ++revealToken;
+	const stale = () => gen !== generation || token !== revealToken;
 	for (const dir of ancestorsOf(path)) {
 		expanded.add(dir);
 		if (!dirs.get(dir)?.listing) await loadDir(dir);
-		if (gen !== generation) return;
+		if (stale()) return;
 	}
 	if (path === "") {
 		selected = null;
@@ -486,7 +497,10 @@ function renderTree(): void {
 				: entry.type === "symlink"
 					? `${entry.name} — symbolic link (not followed)`
 					: entry.name;
-			row.addEventListener("click", () => selectEntry(path, entry));
+			row.addEventListener("click", () => {
+				revealToken++; // the person's choice voids a reveal in flight
+				selectEntry(path, entry);
+			});
 			frag.appendChild(row);
 			if (isOpen) renderLevel(path, depth + 1);
 		}

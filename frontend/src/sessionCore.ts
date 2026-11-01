@@ -63,6 +63,8 @@ import { badgeFor, clearBadge, recordOutput } from "./tabActivity.js";
 import { openTerminalSession, type SessionStatus } from "./terminal.js";
 import {
 	applyRouteView,
+	beginRouteApply,
+	endRouteApply,
 	reflectRoute,
 	registerRouteDetail,
 	showFilesOnly,
@@ -550,18 +552,32 @@ export async function openSession(sessionId: string, opts: { tabId?: string | nu
  * wording between the two. (For admins the distinction is fine: the
  * admin list already shows every session.)
  */
+// Every route application bumps this; a continuation that resumes after
+// an await and finds a newer one is stale — even for the same session
+// (Back then Forward in quick succession) — and does nothing.
+let routeGen = 0;
+
 export async function applyRoute(route: Route | null): Promise<void> {
 	if (route === null) return;
+	const gen = ++routeGen;
 	const id = route.sessionId;
 	if (id !== activeSessionId) {
 		if (sessions.some((s) => s.sessionId === id)) {
-			await openSession(id, { tabId: route.view === "terminal" ? route.detail : null });
-			// A second route landed while this one was opening the session.
-			if (activeSessionId !== id) return;
+			// The address already names the route; opening the session must
+			// not rewrite it on the way (its own in-place writes are held).
+			beginRouteApply();
+			try {
+				await openSession(id, { tabId: route.view === "terminal" ? route.detail : null });
+			} finally {
+				endRouteApply();
+			}
+			// A newer route landed while this one was opening the session.
+			if (gen !== routeGen || activeSessionId !== id) return;
 		} else {
 			if (isAdmin()) {
 				try {
 					const rows = await fetchAdminSessions();
+					if (gen !== routeGen) return;
 					const s = rows.find((r) => r.sessionId === id);
 					if (s) {
 						if (s.status !== "running") {
@@ -590,6 +606,7 @@ export async function applyRoute(route: Route | null): Promise<void> {
 					// what is just a navigation.
 				}
 			}
+			if (gen !== routeGen) return;
 			showToast("Session not found", true);
 			clearRoute();
 			return;

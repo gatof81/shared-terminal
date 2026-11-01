@@ -272,6 +272,26 @@ index 1111111..2222222 100644
 
 // ── Recorded traffic ────────────────────────────────────────────────────────
 
+export type DelayKey =
+	| "fsList"
+	| "fsPreview"
+	| "gitStatus"
+	| "gitLog"
+	| "gitDiff"
+	| "conversations"
+	| "events";
+
+function delayKeyOf(path: string): DelayKey | null {
+	if (/\/fs\/list$/.test(path)) return "fsList";
+	if (/\/fs\/preview$/.test(path)) return "fsPreview";
+	if (/\/git\/status$/.test(path)) return "gitStatus";
+	if (/\/git\/log$/.test(path)) return "gitLog";
+	if (/\/git\/diff$/.test(path)) return "gitDiff";
+	if (/\/conversations$/.test(path)) return "conversations";
+	if (/\/events$/.test(path)) return "events";
+	return null;
+}
+
 export interface TerminalSocket {
 	sessionId: string;
 	tabId: string | null;
@@ -304,6 +324,13 @@ export class MockBackend {
 	conversationSockets: ConversationSocket[] = [];
 	/** Set by a test to answer any route itself before the built-ins. */
 	override: ((method: string, path: string, route: Route) => Promise<boolean>) | null = null;
+	/**
+	 * Deterministic latency per endpoint family, in ms (a test sets it):
+	 * the answer is held that long before it is sent. For the races a
+	 * fast mock would never show (a route applied while a listing or the
+	 * git status is still on its way).
+	 */
+	delays: Partial<Record<DelayKey, number>> = {};
 
 	/** Start every test logged in as `username` (skips the login form). */
 	loginAs(username: keyof typeof USERS): void {
@@ -464,6 +491,9 @@ export class MockBackend {
 		const method = req.method();
 		this.requests.push({ method, path: path + url.search });
 		if (this.override && (await this.override(method, path + url.search, route))) return;
+		const key = delayKeyOf(path);
+		const held = key === null ? 0 : (this.delays[key] ?? 0);
+		if (held > 0) await new Promise((r) => setTimeout(r, held));
 		const json = (status: number, body: unknown) =>
 			route.fulfill({
 				status,

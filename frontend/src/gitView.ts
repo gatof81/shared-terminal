@@ -159,7 +159,10 @@ export function isGitViewActive(): boolean {
 }
 
 onViewChange((next) => {
-	if (next !== "git") return;
+	if (next !== "git") {
+		pendingDetail = null; // a detail pending for a view that is gone is void
+		return;
+	}
 	if (stateSessionId !== null && status.status === "idle") void load();
 	renderAll();
 });
@@ -197,6 +200,7 @@ function resetState(sessionId: string | null): void {
 	// until git ends anyway, so the next session's load takes its turn
 	// on the queue behind them; the generation bump drops their results.
 	generation++;
+	pendingDetail = null;
 	stateSessionId = sessionId;
 	dir = "";
 	status = { status: "idle" };
@@ -337,6 +341,7 @@ function selectChange(c: GitChange): void {
 
 function chooseDir(next: string): void {
 	dir = next;
+	pendingDetail = null;
 	selected = null;
 	clearDiff();
 	mobilePane = "list";
@@ -524,7 +529,10 @@ function changeRow(c: GitChange): HTMLElement {
 		: c.restricted
 			? `${c.path} — restricted (may contain credentials)`
 			: `${statusWord(c)}: ${c.path}`;
-	row.addEventListener("click", () => selectChange(c));
+	row.addEventListener("click", () => {
+		pendingDetail = null; // the person's choice voids a route's pending detail
+		selectChange(c);
+	});
 	return row;
 }
 
