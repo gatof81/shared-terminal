@@ -33,8 +33,73 @@ import {
 	setChromeOpen,
 	updateChromeToggle,
 } from "./main.js";
+import { navigate } from "./router.js";
 
 export type View = "terminal" | "files" | "git" | "chat";
+
+// ── Route ───────────────────────────────────────────────────────────────────
+//
+// The address bar mirrors (session, view, detail) — router.ts. Each view
+// registers what its "detail" is (the open file, diff, conversation or
+// tab) and how to show one; this module writes the route whenever the
+// view or a detail changes, and applies a route the browser hands back.
+
+export interface RouteDetailHandler {
+	/** The detail on screen, or null. */
+	current(): string | null;
+	/** Show `detail` (null = nothing selected; on mobile, the list pane). */
+	apply(detail: string | null): void;
+}
+
+const detailHandlers: Partial<Record<View, RouteDetailHandler>> = {};
+
+export function registerRouteDetail(view: View, handler: RouteDetailHandler): void {
+	detailHandlers[view] = handler;
+}
+
+// True while a route from the browser (load, Back/Forward, a pasted URL)
+// is being applied: the resulting setView / selections must not write the
+// route again (the address already says it).
+let applying = false;
+
+export function isApplyingRoute(): boolean {
+	return applying;
+}
+
+/**
+ * Write the route for what is on screen. `push` records a history entry
+ * (a view or detail the person chose); otherwise the current entry is
+ * updated in place (a forced landing, a tab switch, a selection reset).
+ */
+export function reflectRoute(opts: { push: boolean }): void {
+	if (applying || activeSessionId === null) return;
+	const detail = detailHandlers[view]?.current() ?? null;
+	navigate({ sessionId: activeSessionId, view, detail }, { replace: !opts.push });
+}
+
+/** Show the view and detail a route names, for the ACTIVE session. */
+export function applyRouteView(next: View | null, detail: string | null): void {
+	applying = true;
+	try {
+		if (next !== null) setView(next);
+		detailHandlers[next ?? view]?.apply(detail);
+	} finally {
+		applying = false;
+	}
+	// The short form (#/sessions/<id>) or a view without detail: settle the
+	// address to the full form of what is shown, in place.
+	reflectRoute({ push: false });
+}
+
+/**
+ * The in-app "back" of a view's detail pane (‹ Files, ‹ Changes, ‹ in
+ * Chat): back to the list, with the address updated IN PLACE — the
+ * browser's Back keeps walking the real history (the previous thing the
+ * person opened), the mobile back gesture included.
+ */
+export function routeBack(): void {
+	applyRouteView(null, null);
+}
 
 // ── DOM ─────────────────────────────────────────────────────────────────────
 const terminalToolbar = document.getElementById("terminal-toolbar")!;
@@ -157,6 +222,9 @@ export function setView(next: View, opts: { forced?: boolean } = {}): void {
 	renderSwitch();
 	updateChromeToggle();
 	for (const l of viewListeners) l(next, prev);
+	// A view the person chose is a history entry; a forced landing (a
+	// stopped session opening in Files) only updates the address in place.
+	reflectRoute({ push: opts.forced !== true });
 }
 
 function renderSwitch(): void {

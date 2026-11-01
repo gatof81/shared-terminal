@@ -792,8 +792,9 @@ describe("mobile", () => {
 		expect($("git-body").classList.contains("show-diff")).toBe(true);
 		buttonNamed($("git-diff"), "‹ Changes")?.click();
 		expect($("git-body").classList.contains("show-diff")).toBe(false);
-		// The selection survives going back; the row is still marked.
-		expect(rowFor("unstaged:src/app.ts")?.classList.contains("selected")).toBe(true);
+		// Back to the list means "no diff open": the address drops the detail
+		// and the row is no longer marked (PR 5, router).
+		expect(rowFor("unstaged:src/app.ts")?.classList.contains("selected")).toBe(false);
 	});
 });
 

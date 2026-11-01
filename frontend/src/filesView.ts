@@ -31,7 +31,14 @@ import { activeSessionId, isMobile, sessions, showCopySuccessToast, showToast } 
 import { renderMarkdown } from "./markdown.js";
 import { saveBlob } from "./saveBlob.js";
 import { button, el, stateBox } from "./ui.js";
-import { getView, onSessionSync, onViewChange } from "./viewSwitch.js";
+import {
+	getView,
+	onSessionSync,
+	onViewChange,
+	reflectRoute,
+	registerRouteDetail,
+	routeBack,
+} from "./viewSwitch.js";
 import {
 	ancestorsOf,
 	baseName,
@@ -112,6 +119,12 @@ onViewChange((next) => {
  * and logout), after viewSwitch has settled which view is up.
  */
 onSessionSync(syncFilesView);
+
+// Route detail = the selected path (#/sessions/<id>/files/<path>).
+registerRouteDetail("files", {
+	current: () => selected?.path ?? null,
+	apply: (path) => void revealPath(path ?? ""),
+});
 
 function syncFilesView(): void {
 	const s = sessions.find((x) => x.sessionId === activeSessionId);
@@ -264,6 +277,8 @@ function selectEntry(path: string, entry: WorkspaceEntry | null): void {
 		if (isMobile()) mobilePane = "preview";
 	}
 	renderAll();
+	// Opening a file is a step Back undoes (a no-op while a route is being applied).
+	reflectRoute({ push: true });
 }
 
 /** Expand every ancestor of `path` (loading as needed), then select it. */
@@ -539,15 +554,7 @@ treeEl.addEventListener("keydown", (e) => {
 function previewHeader(name: string, meta: string, actions: HTMLElement[]): HTMLElement {
 	const header = el("div", "files-preview-header");
 	header.appendChild(
-		button(
-			"‹ Files",
-			"files-btn files-mobile-only",
-			() => {
-				mobilePane = "tree";
-				renderAll();
-			},
-			"Back to file list",
-		),
+		button("‹ Files", "files-btn files-mobile-only", routeBack, "Back to file list"),
 	);
 	const title = el("div", "files-preview-title");
 	title.appendChild(el("span", "files-preview-name", name));

@@ -56,7 +56,15 @@ import { formatBytes, relativeDate } from "./format.js";
 import { activeSessionId, isMobile, sessions, showCopySuccessToast, showToast } from "./main.js";
 import { renderMarkdown } from "./markdown.js";
 import { button, el, stateBox } from "./ui.js";
-import { getView, onSessionSync, onViewChange, setView } from "./viewSwitch.js";
+import {
+	getView,
+	onSessionSync,
+	onViewChange,
+	reflectRoute,
+	registerRouteDetail,
+	routeBack,
+	setView,
+} from "./viewSwitch.js";
 
 // ── DOM ─────────────────────────────────────────────────────────────────────
 
@@ -204,14 +212,35 @@ refreshBtn.addEventListener("click", () => {
 	void loadList();
 	if (selectedCid !== null) void openConversation(selectedCid, { fresh: true });
 });
-backBtn.addEventListener("click", showList);
+backBtn.addEventListener("click", routeBack);
 
-function showList(): void {
+// Route detail = the open conversation (#/sessions/<id>/chat/<cid>). The
+// thread cache (`threads`) survives a deselection, so Back and Forward
+// between conversations land where the reader was, without a request.
+registerRouteDetail("chat", {
+	current: () => selectedCid,
+	apply: (cid) => {
+		if (cid === null) {
+			deselect();
+			return;
+		}
+		if (cid !== selectedCid) void openConversation(cid);
+	},
+});
+
+/** No conversation open: the list (the only pane on mobile), socket released. */
+function deselect(): void {
+	threadGen++;
+	closeSocket();
+	selectedCid = null;
+	cur = null;
+	threadStatus = "idle";
+	threadError = "";
 	mobilePane = "list";
 	agentsOpen = false;
 	renderAll();
 	// Hand the focus to the row we came from, so the keyboard reader lands back where they were.
-	listEl.querySelector<HTMLElement>(".chat-conv-row.selected")?.focus();
+	listEl.querySelector<HTMLElement>('.chat-conv-row[aria-current="true"]')?.focus();
 }
 
 function startListPoll(): void {
@@ -310,6 +339,8 @@ async function openConversation(cid: string, opts: { fresh?: boolean } = {}): Pr
 	threadError = "";
 	mobilePane = "thread";
 	if (isMobile()) agentsOpen = false;
+	// Opening a conversation is a step Back undoes (a no-op while a route is being applied).
+	reflectRoute({ push: switching });
 	const cached = threads.get(cid);
 	if (cached && !opts.fresh && Date.now() - cached.loadedAt < THREAD_CACHE_FRESH_MS) {
 		// Warm: show it now, re-follow from its seq (the server replays only
@@ -798,7 +829,7 @@ threadEl.addEventListener("keydown", (e) => {
 		if (agentsOpen) {
 			agentsOpen = false;
 			renderAll();
-		} else showList();
+		} else routeBack();
 		e.preventDefault();
 	}
 });
