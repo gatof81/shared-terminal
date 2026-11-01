@@ -207,6 +207,14 @@ let forced = false;
 // waiting on the "has history" answer): the sync below must not land a
 // fallback of its own in the meantime, or the person would see two views.
 let landingPending = false;
+// Bumped on every view the person chooses. A landing decided earlier
+// (sessionCore waits on the history answer) compares it before acting,
+// so a click made meanwhile is never overwritten.
+let choiceGen = 0;
+
+export function choiceGeneration(): number {
+	return choiceGen;
+}
 
 const viewListeners: Array<(next: View, prev: View) => void> = [];
 const syncListeners: Array<() => void> = [];
@@ -261,7 +269,10 @@ export function setView(next: View, opts: { forced?: boolean; landing?: boolean 
 		return;
 	}
 	// The last view the person chose for this session wins its next landing.
-	if (chosen && activeSessionId !== null) writeViewPref(activeSessionId, next);
+	if (chosen) {
+		choiceGen++;
+		if (activeSessionId !== null) writeViewPref(activeSessionId, next);
+	}
 	const prev = view;
 	view = next;
 	// A detail still pending for the view being left is void.

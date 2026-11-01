@@ -120,6 +120,53 @@ test.describe("chat-first landing", () => {
 		await expect(page.locator("#chat-list .chat-conv-row.selected")).toHaveCount(0);
 	});
 
+	test("P2-A: a view picked while the landing is still deciding stands — on screen, in the address and as the preference", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		// The history answer arrives first, the tabs much later: the landing
+		// (Chat) resolves only after the tabs, and the person has clicked by then.
+		backend.delays = { tabs: 1500 };
+		await app.login("alice");
+		const length = await page.evaluate(() => history.length);
+		await app.openSidebar();
+		await app.sessionRow("my-project").click();
+		await expect(page.locator("#terminal-session-name")).toHaveText("my-project");
+		await expect
+			.poll(() => backend.requests.some((r) => r.path.endsWith("/conversations?capture=0")))
+			.toBe(true);
+		await page.click("#view-files-btn");
+		await app.expectView("files");
+		expect(page.url()).toContain(`#/sessions/${S}/files`);
+		// The tabs land, the landing continuation runs: nothing changes.
+		await expect.poll(() => backend.terminalSockets.length, { timeout: 10_000 }).toBe(1);
+		await page.waitForTimeout(500);
+		await app.expectView("files");
+		expect(page.url()).toContain(`#/sessions/${S}/files`);
+		expect(await page.evaluate((k) => localStorage.getItem(k), `st.view.${S}`)).toBe("files");
+		// The click is the one entry; neither the selection nor the landing added any.
+		expect(await page.evaluate(() => history.length)).toBe(length + 1);
+	});
+
+	test("P2-C: #/sessions/<id> on a fresh load lands by policy, the address says the view, no entry is added, later writes flow", async ({
+		app,
+		page,
+	}) => {
+		await app.login("alice");
+		const base = await page.evaluate(() => history.length);
+		await page.goto(`/#/sessions/${S}`);
+		await app.expectView("chat");
+		await expect(page.locator("#chat-list .chat-conv-row")).toHaveCount(2);
+		await expect.poll(() => page.url()).toContain(`#/sessions/${S}/chat`);
+		// The navigation itself is the one entry; the landing added none.
+		expect(await page.evaluate(() => history.length)).toBe(base + 1);
+		// The route's suppression is over: a manual selection reaches the address.
+		await app.openSession("docs");
+		await expect.poll(() => page.url()).toContain(`#/sessions/${STOPPED}/chat`);
+		expect(await page.evaluate(() => history.length)).toBe(base + 1);
+	});
+
 	test("an unknown session asks once, then remembers", async ({ app, backend, page }) => {
 		await app.login("alice");
 		const listCalls = () =>

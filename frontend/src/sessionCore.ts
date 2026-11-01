@@ -68,6 +68,7 @@ import {
 	applyRouteView,
 	beginLanding,
 	beginRouteApply,
+	choiceGeneration,
 	endLanding,
 	endRouteApply,
 	landingFor,
@@ -488,10 +489,13 @@ export async function openSession(
 	renderSessionList();
 	const meta = sessions.find((x) => x.sessionId === sessionId);
 	const running = meta?.status === "running";
-	// The landing view (viewPolicy.ts) unless the route names one (the
-	// router applies it right after). While it is being decided the view
-	// sync must not land a fallback of its own.
-	const landing = opts.view ? null : decideLanding(sessionId, running);
+	// The landing view (viewPolicy.ts) — shell v2 only; v1 keeps its own
+	// flow below (the open view stays, a stopped session opens in Files) —
+	// unless the route names one (the router applies it right after).
+	// While it is being decided the view sync must not land a fallback of
+	// its own, and a view the person picks meanwhile wins over it.
+	const landing = opts.view || currentShell() !== "v2" ? null : decideLanding(sessionId, running);
+	const choiceAt = choiceGeneration();
 	if (landing !== null) beginLanding();
 	try {
 		// updateToolbar → syncSessionViews re-keys every view to this session
@@ -509,6 +513,8 @@ export async function openSession(
 		const v = landing instanceof Promise ? await landing : landing;
 		if (landing instanceof Promise) endLanding();
 		if (activeSessionId !== sessionId) return false;
+		// The person chose a view while this was deciding: theirs stands.
+		if (choiceGeneration() !== choiceAt) return true;
 		landView(v, { forced: !running });
 		return true;
 	};
@@ -656,8 +662,13 @@ export async function applyRoute(route: Route | null): Promise<void> {
 			}
 			// A newer route landed while this one was opening the session.
 			if (gen !== routeGen || activeSessionId !== id) return;
-			// No view in the address: the landing policy chose one (and wrote it).
-			if (route.view === null) return;
+			// No view in the address: the session landed where the policy
+			// (v2) or the v1 flow put it, with its writes held above — put
+			// that view in the address now, in place.
+			if (route.view === null) {
+				reflectRoute({ push: false });
+				return;
+			}
 		} else {
 			if (isAdmin()) {
 				try {
