@@ -1,0 +1,5 @@
+/* Applied only while a screenshot is taken (visual.spec.ts): toasts are
+   timing-dependent (GPU-fallback notice, copy chip). */
+#toast {
+  visibility: hidden !important;
+}

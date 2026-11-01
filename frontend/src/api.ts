@@ -23,6 +23,8 @@ const WS_BASE = BACKEND_URL.replace(/^http/, "ws");
 let _loggedIn = false;
 let _isAdmin = false;
 let _isLead = false;
+// The shell the operator switched on (UI_SHELL) — `uiShell` on /auth/status.
+let _uiShell: "v1" | "v2" = "v1";
 // #200 — effective per-session resource caps mirrored from /auth/status
 // so the create-session form's CPU input `max` and the bounds hint can
 // reflect operator-lowered caps. Defaults match the v1 ceilings so a
@@ -51,6 +53,11 @@ export function isAdmin(): boolean {
  *  buttons. */
 export function isLead(): boolean {
 	return _isLead;
+}
+
+/** The server's `uiShell` from the last /auth/status (v1 until then). */
+export function serverUiShell(): "v1" | "v2" {
+	return _uiShell;
 }
 
 /** Effective per-session caps from the backend (#200). Mirrored on
@@ -84,6 +91,8 @@ export interface AuthStatus {
 	 *  client falls back to the hardcoded v1 ceilings. Units mirror
 	 *  the form: cores (decimal) and MiB (integer). */
 	resourceCaps?: { cpuMaxCores: number; memMaxMiB: number };
+	/** Which frontend shell to mount (UI unification §8.4); older backends omit it. */
+	uiShell?: "v1" | "v2";
 }
 
 export async function checkAuthStatus(): Promise<AuthStatus> {
@@ -95,6 +104,7 @@ export async function checkAuthStatus(): Promise<AuthStatus> {
 	_loggedIn = data.authenticated;
 	_isAdmin = data.isAdmin;
 	_isLead = data.isLead === true;
+	if (data.uiShell === "v1" || data.uiShell === "v2") _uiShell = data.uiShell;
 	// #200: mirror caps if present. A pre-#200 backend omits the field
 	// and leaves the v1 defaults in place — same hardcoded ceilings the
 	// form would have used before this PR.

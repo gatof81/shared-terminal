@@ -30,8 +30,7 @@ test.describe("auth", () => {
 		page,
 	}) => {
 		await app.login("alice");
-		await app.openSidebar();
-		await page.click(app.mobile ? "#sidebar-logout-btn" : "#logout-btn");
+		await app.appMenu("logout-btn");
 		await expect(page.locator("#auth-view")).toBeVisible();
 		await expect(page.locator("#app-view")).toBeHidden();
 		expect(backend.current, "the server saw the logout").toBeNull();
@@ -52,7 +51,10 @@ test.describe("auth", () => {
 	}) => {
 		await app.login("alice");
 		backend.current = null; // the server stopped accepting the cookie
-		await expect(page.locator("#auth-view")).toBeVisible({ timeout: 10_000 });
-		await expect(app.toast(/session has expired/)).toHaveCount(1);
+		// Both land on the same tick (the next poll's 401); the toast lives 4 s.
+		await Promise.all([
+			expect(page.locator("#auth-view")).toBeVisible({ timeout: 10_000 }),
+			expect(app.toast(/session has expired/)).toHaveCount(1, { timeout: 10_000 }),
+		]);
 	});
 });

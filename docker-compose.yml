@@ -87,6 +87,7 @@ services:
       # (routes not mounted, canSendInput false) and the CLI allowlist at its
       # default (2.1.314); a value in .env now reaches the container.
       - CONVERSATION_COMPOSER_ENABLED=${CONVERSATION_COMPOSER_ENABLED:-}
+      - UI_SHELL=${UI_SHELL:-}
       - COMPOSER_CLI_VERSIONS=${COMPOSER_CLI_VERSIONS:-}
       # §2.7.7 carry-over recreation: a path inside this container on the same
       # filesystem as Docker's data root (DEPLOYMENT.md "Activating an

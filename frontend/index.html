@@ -125,6 +125,21 @@
           <button id="notifications-btn" type="button" hidden>Enable notifications</button>
           <button id="logout-btn" type="button">Logout</button>
         </div>
+        <!-- Shell v2: one user menu (templates, invites, groups, admin,
+             notifications, logout) instead of the button cluster above;
+             shown by shell-v2.css, wired in shellV2.ts. -->
+        <button
+          id="user-menu-btn"
+          type="button"
+          aria-label="Account and app menu"
+          aria-haspopup="menu"
+          hidden
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <circle cx="12" cy="8" r="4"></circle>
+            <path d="M4 21c0-4 4-6 8-6s8 2 8 6"></path>
+          </svg>
+        </button>
         <button
           id="actions-btn"
           type="button"
@@ -183,18 +198,41 @@
             <!-- Workspace Explorer: Terminal ⇄ Files. Files is an overlay
                  above the terminal panes (filesView.ts) so switching never
                  resizes, detaches or disposes the terminal. -->
+            <!-- Each view button carries an icon (shell v2 shows it alone on
+                 narrow screens, the label on the active one) and a label. -->
             <div id="view-switch" role="group" aria-label="Session view" hidden>
-              <button id="view-terminal-btn" type="button" aria-pressed="true">Terminal</button>
+              <button id="view-terminal-btn" type="button" aria-pressed="true" title="Terminal">
+                <svg class="view-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6l6 6-6 6M12 18h8" /></svg>
+                <span class="view-label">Terminal</span>
+              </button>
               <button id="view-files-btn" type="button" aria-pressed="false" title="Browse workspace files">
-                Files
+                <svg class="view-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h6l2 2h10v11H3z" /></svg>
+                <span class="view-label">Files</span>
               </button>
               <button id="view-git-btn" type="button" aria-pressed="false" title="Git changes">
-                Git
+                <svg class="view-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="6" cy="5" r="2.5" /><circle cx="6" cy="19" r="2.5" /><circle cx="18" cy="9" r="2.5" />
+                  <path d="M6 7.5v9M18 11.5c0 3-3 4-6 4H9" />
+                </svg>
+                <span class="view-label">Git</span>
               </button>
               <button id="view-chat-btn" type="button" aria-pressed="false" title="Claude conversations">
-                Chat
+                <svg class="view-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H8l-4 4z" /></svg>
+                <span class="view-label">Chat</span>
               </button>
             </div>
+            <!-- Shell v2: the session's actions (start / stop / ports /
+                 observers / terminate / delete) as one menu in the bar. -->
+            <button
+              id="session-menu-btn"
+              type="button"
+              title="Session actions"
+              aria-label="Session actions"
+              aria-haspopup="menu"
+              hidden
+            >
+              ⋯
+            </button>
             <button
               id="font-size-btn"
               type="button"
@@ -254,7 +292,13 @@
               ⌕
             </button>
           </div>
-          <div id="terminal-tabs"></div>
+          <!-- The tab strip is rendered by sessionCore.renderTabBar; #tab-tools
+               is empty in shell v1 and hosts the terminal-only controls (font
+               size, history search) in shell v2 (shellV2.ts). -->
+          <div id="terminal-tabs">
+            <div id="tab-strip"></div>
+            <div id="tab-tools"></div>
+          </div>
           <div id="terminal-container"></div>
           <!-- What the terminal area offers when it has no pane to show —
                stopped / terminated / failed session, no tabs yet, or a

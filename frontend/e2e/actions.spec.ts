@@ -30,7 +30,7 @@ test.describe("session actions", () => {
 		await app.login("alice");
 		await app.openSession("my-project");
 		await app.expectTerminalReady();
-		if (app.mobile) await page.click("#chrome-toggle");
+		await app.openChrome();
 		const tabs = page.locator('#terminal-tabs [role="tab"]');
 		await expect(tabs).toHaveCount(2);
 		await expect(tabs.first()).toHaveAttribute("aria-selected", "true");
@@ -44,7 +44,7 @@ test.describe("session actions", () => {
 			.toEqual(["tab-1", "tab-2"]);
 		// Close the second tab from its own button (confirmed in a dialog). On
 		// mobile, picking a tab collapses the chrome drawer; reopen it first.
-		if (app.mobile) await page.click("#chrome-toggle");
+		await app.openChrome();
 		await page.locator('#terminal-tabs .tab-chip[data-tab-id="tab-2"] .tab-close').click();
 		await page.locator('[role="alertdialog"] .modal-danger-action').click();
 		await expect(tabs).toHaveCount(1);

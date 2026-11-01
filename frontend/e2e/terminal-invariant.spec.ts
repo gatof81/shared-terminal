@@ -22,7 +22,7 @@ test.describe("terminal invariant", () => {
 		const resizes = () => sock.sent.filter((f) => f.type === "resize").length;
 		const inputs = () => sock.sent.filter((f) => f.type === "input").length;
 
-		if (app.mobile) {
+		if (app.mobile && app.shell === "v1") {
 			// v1 mobile: the ONLY way from the Terminal into an overlay is the
 			// chrome drawer (header pill → toolbar + tabs), and showing/hiding
 			// that drawer changes the terminal's box — so this first hop does
@@ -44,12 +44,14 @@ test.describe("terminal invariant", () => {
 		const r0 = resizes();
 		const i0 = inputs();
 		// Overlay ⇄ overlay and overlay → Terminal are pure on both layouts;
-		// Terminal → overlay is pure on desktop only (mobile: the drawer, above).
-		if (!app.mobile) await app.switchView("files");
+		// Terminal → overlay is pure on desktop and on shell v2 (the view tabs
+		// are always on screen) — on v1 mobile it is the drawer hop above.
+		const pureEntry = !app.mobile || app.shell === "v2";
+		if (pureEntry) await app.switchView("files");
 		await app.switchView("git");
 		await app.switchView("chat");
 		await app.switchView("terminal");
-		if (!app.mobile) {
+		if (pureEntry) {
 			await app.switchView("chat");
 			await app.switchView("terminal");
 		}
@@ -90,7 +92,7 @@ test.describe("terminal invariant", () => {
 		await app.login("alice");
 		await app.openSession("my-project");
 		await app.expectTerminalReady();
-		if (app.mobile) await page.click("#chrome-toggle");
+		await app.openChrome();
 		await page.locator("#terminal-tabs .tab-chip", { hasText: "Tab 2" }).click();
 		await expect
 			.poll(() => backend.terminalSockets.map((s) => `${s.tabId}:${s.closed}`))

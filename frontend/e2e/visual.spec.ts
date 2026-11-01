@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures.js";
 
@@ -16,9 +17,14 @@ async function shot(page: Page, name: string): Promise<void> {
 		.locator("#files-view, #git-view, #chat-view")
 		.filter({ visible: true })
 		.count());
-	const mask = [page.locator("#toast")];
-	if (terminalShown) mask.push(page.locator("#terminal-container"));
-	await expect(page).toHaveScreenshot(`${name}.png`, { mask, fullPage: false });
+	const mask = terminalShown ? [page.locator("#terminal-container")] : [];
+	await expect(page).toHaveScreenshot(`${name}.png`, {
+		mask,
+		fullPage: false,
+		// Toasts are timing-dependent (the GPU-fallback notice, a copy chip):
+		// hidden rather than masked, so no block covers what sits under them.
+		stylePath: fileURLToPath(new URL("./screenshot.css", import.meta.url)),
+	});
 }
 
 test.describe("visual", () => {

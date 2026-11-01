@@ -321,6 +321,8 @@ export class MockBackend {
 	capture = { requested: true, effective: true, effectiveAfterRestart: true };
 	/** Which push/notification shape the server reports. */
 	pushEnabled = false;
+	/** The operator's shell (UI_SHELL) as /auth/status reports it. */
+	uiShell: "v1" | "v2" = "v1";
 	requests: Array<{ method: string; path: string }> = [];
 	terminalSockets: TerminalSocket[] = [];
 	conversationSockets: ConversationSocket[] = [];
@@ -511,6 +513,7 @@ export class MockBackend {
 				isAdmin: this.current?.isAdmin ?? false,
 				isLead: this.current?.isLead ?? false,
 				resourceCaps: { cpuMaxCores: 8, memMaxMiB: 16384 },
+				uiShell: this.uiShell,
 			});
 		}
 		if (path === "/auth/login" && method === "POST") {
