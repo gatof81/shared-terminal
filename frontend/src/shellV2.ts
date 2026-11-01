@@ -26,6 +26,31 @@ export function initShellV2(): void {
 	if (inited) return;
 	inited = true;
 
+	// The merged-bar variant (uiShell.ts `bar`): on narrow screens the
+	// session bar shares the header's line. The element is MOVED, not
+	// cloned, so every module keeps its references; on a wide screen it
+	// goes back under the header. viewSwitch.positionOverlays knows the
+	// overlays then start at the top of #terminal-area.
+	if (document.documentElement.dataset.bar === "merged") {
+		const toolbar = document.getElementById("terminal-toolbar");
+		const header = document.querySelector("header");
+		const area = document.getElementById("terminal-area");
+		const tabs = document.getElementById("terminal-tabs");
+		const toggle = document.getElementById("sidebar-toggle");
+		if (toolbar && header && area && tabs && toggle) {
+			const mql = window.matchMedia("(max-width: 768px)");
+			const place = () => {
+				if (mql.matches) {
+					if (toolbar.parentElement !== header) toggle.insertAdjacentElement("afterend", toolbar);
+				} else if (toolbar.parentElement !== area) {
+					area.insertBefore(toolbar, tabs);
+				}
+			};
+			place();
+			mql.addEventListener("change", place);
+		}
+	}
+
 	// Terminal-only controls → the tab strip's tool slot.
 	const tools = document.getElementById("tab-tools");
 	for (const id of ["terminal-search-input", "terminal-search-btn", "font-size-btn"]) {

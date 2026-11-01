@@ -16,6 +16,28 @@
 export type UiShell = "v1" | "v2";
 
 const STORAGE_KEY = "st.uiShell";
+const BAR_KEY = "st.uiShellBar";
+
+/**
+ * Shell v2's mobile bar variant, for comparing on the preview (§5.3):
+ * `merged` = the session bar shares one line with the header (☰, user
+ * menu, Insert) instead of being a second line under it. `?bar=merged`
+ * stores it, `?bar=` clears it. Nothing without shell v2.
+ */
+export type UiBar = "merged";
+
+export function readStoredBar(): UiBar | null {
+	try {
+		return localStorage.getItem(BAR_KEY) === "merged" ? "merged" : null;
+	} catch {
+		return null;
+	}
+}
+
+export function applyBar(bar: UiBar | null): void {
+	if (bar) document.documentElement.dataset.bar = bar;
+	else delete document.documentElement.dataset.bar;
+}
 
 export function isUiShell(v: unknown): v is UiShell {
 	return v === "v1" || v === "v2";
@@ -49,15 +71,23 @@ export function readStoredShell(): UiShell | null {
  */
 export function consumeShellQuery(): UiShell | null {
 	const url = new URL(window.location.href);
-	if (!url.searchParams.has("ui")) return readStoredShell();
-	const raw = url.searchParams.get("ui") ?? "";
+	if (!url.searchParams.has("ui") && !url.searchParams.has("bar")) return readStoredShell();
+	const raw = url.searchParams.get("ui");
+	const bar = url.searchParams.get("bar");
 	try {
-		if (isUiShell(raw)) localStorage.setItem(STORAGE_KEY, raw);
-		else if (raw === "") localStorage.removeItem(STORAGE_KEY);
+		if (raw !== null) {
+			if (isUiShell(raw)) localStorage.setItem(STORAGE_KEY, raw);
+			else if (raw === "") localStorage.removeItem(STORAGE_KEY);
+		}
+		if (bar !== null) {
+			if (bar === "merged") localStorage.setItem(BAR_KEY, bar);
+			else if (bar === "") localStorage.removeItem(BAR_KEY);
+		}
 	} catch {
 		/* storage unavailable: the override just doesn't persist */
 	}
 	url.searchParams.delete("ui");
+	url.searchParams.delete("bar");
 	history.replaceState(history.state, "", url.pathname + url.search + url.hash);
 	return readStoredShell();
 }

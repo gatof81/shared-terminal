@@ -231,7 +231,10 @@ function positionOverlays(): void {
 	// offsetTop/offsetHeight are relative to #terminal-area (the toolbar's
 	// offsetParent — it's position:relative) and both read 0 while the
 	// toolbar is display:none (mobile, chrome drawer collapsed).
-	const bottom = terminalToolbar.offsetTop + terminalToolbar.offsetHeight;
+	// Shell v2's merged mobile bar moves the toolbar into the header: it
+	// is then not inside #terminal-area at all and the overlays start at 0.
+	const inside = terminalArea?.contains(terminalToolbar) === true;
+	const bottom = inside ? terminalToolbar.offsetTop + terminalToolbar.offsetHeight : 0;
 	for (const el of Object.values(overlays)) el.style.top = `${bottom}px`;
 }
 new ResizeObserver(positionOverlays).observe(terminalToolbar);

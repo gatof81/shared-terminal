@@ -26,6 +26,11 @@ export default defineConfig<ShellOptions>({
 			// Same Chromium build and the same vendored fonts everywhere (see
 			// e2e/fixtures.ts), so only anti-aliasing noise is left.
 			maxDiffPixelRatio: 0.02,
+			// pixelmatch's default YIQ threshold (0.2) lets a dark-grey toast on
+			// the near-black background pass as "same pixel"; 0.1 counts it —
+			// and with it any stale baseline (`--update-snapshots` only rewrites
+			// what fails, so a baseline that "matched" was never refreshed).
+			threshold: 0.1,
 			animations: "disabled",
 			caret: "hide",
 		},
@@ -79,6 +84,22 @@ export default defineConfig<ShellOptions>({
 				isMobile: true,
 				hasTouch: true,
 				shell: "v2",
+			},
+		},
+		// The merged-bar variant of v2 on a phone (uiShell.ts `?bar=merged`),
+		// for comparison on the preview: the navigation, the invariant, the
+		// shell spec and the screenshots.
+		{
+			name: "mobile-v2-merged",
+			testMatch: /(navigation|terminal-invariant|shell-v2|visual)\.spec\.ts/,
+			use: {
+				...devices["Desktop Chrome"],
+				viewport: { width: 390, height: 844 },
+				deviceScaleFactor: 1,
+				isMobile: true,
+				hasTouch: true,
+				shell: "v2",
+				bar: "merged",
 			},
 		},
 	],

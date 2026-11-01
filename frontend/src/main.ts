@@ -66,7 +66,14 @@ import {
 import { initShellV2 } from "./shellV2.js";
 import { clearAllBadges } from "./tabActivity.js";
 import type { TerminalSession } from "./terminal.js";
-import { applyShell, consumeShellQuery, currentShell, resolveShell } from "./uiShell.js";
+import {
+	applyBar,
+	applyShell,
+	consumeShellQuery,
+	currentShell,
+	readStoredBar,
+	resolveShell,
+} from "./uiShell.js";
 import { isOverlayActive, overlayLabel } from "./viewSwitch.js";
 
 // ── DOM refs ────────────────────────────────────────────────────────────────
@@ -131,6 +138,7 @@ function applyResolvedShell(): void {
 	const shell = resolveShell({ stored: shellOverride, server: serverUiShell() });
 	if (shell === currentShell() && document.documentElement.dataset.shell) return;
 	applyShell(shell);
+	applyBar(shell === "v2" ? readStoredBar() : null);
 	if (shell === "v2") initShellV2();
 }
 applyResolvedShell();

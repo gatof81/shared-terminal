@@ -197,3 +197,35 @@ html[data-shell="v2"] .chat-float {
 html[data-shell="v2"] #sidebar-footer {
   display: none !important;
 }
+
+/* ── Merged bar variant (html[data-bar="merged"], mobile) ───────
+   The session bar shares the header's line (shellV2.ts moves it there
+   on narrow screens): ☰ · name ● · view tabs · ⋯ · user · +. */
+@media (max-width: 768px) {
+  html[data-shell="v2"][data-bar="merged"] header {
+    gap: 0.35rem;
+    padding: 0.35rem 0.5rem;
+  }
+  html[data-shell="v2"][data-bar="merged"] header #terminal-toolbar {
+    flex: 1;
+    min-width: 0;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+    border: 0;
+    gap: 0.3rem;
+  }
+  html[data-shell="v2"][data-bar="merged"] header #terminal-session-name {
+    font-size: 0.8rem;
+  }
+  html[data-shell="v2"][data-bar="merged"] header #view-switch {
+    margin-left: auto;
+  }
+  html[data-shell="v2"][data-bar="merged"] header #view-switch button {
+    padding: 0.3rem 0.4rem;
+  }
+  html[data-shell="v2"][data-bar="merged"] #user-menu-btn {
+    width: 30px;
+    height: 30px;
+  }
+}

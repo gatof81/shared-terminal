@@ -21,6 +21,8 @@ export type View = "terminal" | "files" | "git" | "chat";
 /** Project option: which shell the app mounts (uiShell.ts override). */
 export interface ShellOptions {
 	shell: "v1" | "v2";
+	/** Shell v2's mobile bar variant (uiShell.ts): null = a second line, "merged" = the header's line. */
+	bar: "merged" | null;
 }
 
 const FONTS_DIR = fileURLToPath(new URL("./fonts/", import.meta.url));
@@ -214,20 +216,22 @@ export class App {
 
 export const test = base.extend<ShellOptions & { backend: MockBackend; app: App }>({
 	shell: ["v1", { option: true }],
-	backend: async ({ page, shell }, use) => {
+	bar: [null, { option: true }],
+	backend: async ({ page, shell, bar }, use) => {
 		const backend = new MockBackend();
 		await backend.install(page);
 		await installFonts(page);
 		await page.clock.setFixedTime(FIXED_NOW);
 		if (shell === "v2") {
-			// The per-browser override, as `?ui=v2` would have stored it.
-			await page.addInitScript(() => {
+			// The per-browser override, as `?ui=v2` (and `?bar=merged`) would have stored it.
+			await page.addInitScript((merged: boolean) => {
 				try {
 					localStorage.setItem("st.uiShell", "v2");
+					if (merged) localStorage.setItem("st.uiShellBar", "merged");
 				} catch {
 					/* ignore */
 				}
-			});
+			}, bar === "merged");
 		}
 		await use(backend);
 	},

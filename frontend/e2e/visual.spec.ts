@@ -7,7 +7,9 @@ import { expect, test } from "./fixtures.js";
  * The terminal canvas is masked: its glyphs come from xterm's own renderer
  * (WebGL or DOM, GPU-dependent), and the mock's prompt text is asserted in
  * the functional specs anyway. Toasts are hidden (timing-dependent).
- * Regenerate with `npm run test:e2e:update` after an intended visual change.
+ * Regenerate with `npm run test:e2e:update` after an intended visual change
+ * (it runs `--update-snapshots=all`: the default "changed" mode keeps any
+ * baseline that still passes the comparison, stale toast included).
  */
 async function shot(page: Page, name: string): Promise<void> {
 	// The overlays sit absolutely over the terminal's box, so masking the
