@@ -9,6 +9,7 @@
  * used only inside functions, so the circular import is TDZ-safe.
  */
 
+import { openObserversModalFor } from "./admin.js";
 import {
 	createTab,
 	deleteSession,
@@ -16,12 +17,15 @@ import {
 	fetchAdminSessions,
 	getSession,
 	isAdmin,
+	isLead,
 	listSessions,
 	listTabs,
+	type SessionInfo,
 	startSession,
 	stopSession,
 	TabNotFoundError,
 } from "./api.js";
+import { openActionMenu } from "./components/actionMenu.js";
 import { confirmDialog } from "./components/dialog.js";
 import { parseSessionHash, reflectSessionInHash } from "./deepLink.js";
 import { formatBytes, formatCpuCores, formatCpuPercent } from "./format.js";
@@ -48,6 +52,13 @@ import {
 import { renderSidebarObservables } from "./myGroups.js";
 import { openBootstrapLogModal } from "./newSession.js";
 import { openObserveModalFor } from "./observeModal.js";
+import { openPortsModalFor } from "./ports.js";
+import {
+	type SessionActionContext,
+	type SessionActionId,
+	sessionActions,
+	terminalState,
+} from "./sessionActions.js";
 import { badgeFor, clearBadge, recordOutput } from "./tabActivity.js";
 import { openTerminalSession, type SessionStatus } from "./terminal.js";
 import { showFilesOnly, syncSessionViews } from "./viewSwitch.js";
@@ -61,11 +72,194 @@ const terminalStatusBadge = document.getElementById("terminal-status-badge")!;
 const terminalTabs = document.getElementById("terminal-tabs")!;
 const terminalContainer = document.getElementById("terminal-container")!;
 const emptyState = document.getElementById("empty-state")!;
+const terminalStateEl = document.getElementById("terminal-state")!;
 
 // Session currently open in Files-only mode (it wasn't running when
 // selected, so no tabs were listed and no terminal attached). Watched by
 // refreshSessions so a later start re-opens it with a live terminal.
 let filesOnlySessionId: string | null = null;
+
+// The tab whose socket gave up (terminal.ts exhausted its retries, or the
+// close was final). The pane is gone; the terminal area offers Reconnect
+// for exactly this tab until a pane is attached again or the session
+// changes. Only meaningful for the active session.
+let disconnectedTabId: string | null = null;
+
+// ── Session actions (one list, every surface) ───────────────────────────────
+//
+// sessionActions.ts decides WHAT a person may do; this is the one place
+// that DOES it. The sidebar rows, their ⋯ menu, the terminal's state panel
+// and the Git view all call runSessionAction, so a verb behaves the same
+// wherever it is offered.
+
+function actionContext(s: SessionInfo): SessionActionContext {
+	const active = s.sessionId === activeSessionId;
+	return {
+		session: { sessionId: s.sessionId, name: s.name, status: s.status },
+		// The sidebar lists the caller's own sessions; a foreign session in
+		// the shell (observe / operate) is a later PR and will pass false.
+		isOwner: true,
+		isAdmin: isAdmin(),
+		isLead: isLead(),
+		connection: !active
+			? "none"
+			: currentActiveTabId !== null
+				? "attached"
+				: disconnectedTabId !== null
+					? "disconnected"
+					: "none",
+		tabs: active ? currentTabs.length : null,
+	};
+}
+
+export async function runSessionAction(s: SessionInfo, id: SessionActionId): Promise<void> {
+	switch (id) {
+		case "open":
+			await openSession(s.sessionId);
+			return;
+		case "start":
+		case "restore":
+			try {
+				if (id === "restore") showToast(`Restoring "${s.name}"…`);
+				else showToast(`Starting "${s.name}"…`);
+				await startSession(s.sessionId);
+				await refreshSessions();
+				if (id === "restore") showToast(`Session "${s.name}" restored`);
+			} catch (err) {
+				showToast((err as Error).message, true);
+			}
+			return;
+		case "stop":
+			try {
+				await stopSession(s.sessionId);
+				await refreshSessions();
+			} catch (err) {
+				showToast((err as Error).message, true);
+			}
+			return;
+		case "newTab":
+			if (s.sessionId === activeSessionId) await addTab();
+			return;
+		case "reconnect": {
+			if (s.sessionId !== activeSessionId || disconnectedTabId === null) return;
+			const tabId = disconnectedTabId;
+			disconnectedTabId = null;
+			try {
+				openTab(tabId);
+			} catch (err) {
+				disconnectedTabId = tabId;
+				renderTerminalState();
+				showToast((err as Error).message, true);
+			}
+			return;
+		}
+		case "viewLog":
+			await openBootstrapLogModal(s);
+			return;
+		case "ports":
+			openPortsModalFor(s.sessionId);
+			return;
+		case "observers":
+			openObserversModalFor(s.sessionId);
+			return;
+		case "terminate":
+		case "delete": {
+			const hard = id === "delete";
+			// An irreversible delete asks for the session's name (§9.5 of
+			// docs/design/ui-unificada.md); a terminate is reversible
+			// (Restore) and only needs a plain confirmation.
+			const ok = hard
+				? await confirmDialog({
+						title: "Delete permanently",
+						message: `Delete "${s.name}" permanently?\n\nThis stops and removes the container, wipes the workspace files from disk and removes the session record. This cannot be undone.`,
+						confirmLabel: "Delete permanently",
+						requireText: {
+							expected: s.name,
+							label: `Type the session name (${s.name}) to confirm`,
+						},
+					})
+				: await confirmDialog({
+						title: "Terminate session",
+						message: `Terminate "${s.name}"?\n\nThe container is stopped and removed. Workspace files are preserved — you can restore the session later.`,
+						confirmLabel: "Terminate",
+						danger: true,
+					});
+			if (!ok) return;
+			try {
+				await deleteSession(s.sessionId, hard);
+				if (activeSessionId === s.sessionId) {
+					disposeAllCurrentTerminals();
+					setActiveSessionId(null);
+					reflectSessionInHash(null);
+					updateToolbar();
+				}
+				await refreshSessions();
+			} catch (err) {
+				showToast((err as Error).message, true);
+			}
+			return;
+		}
+	}
+}
+
+function openSessionMenu(s: SessionInfo, opener: HTMLElement): void {
+	openActionMenu({
+		title: s.name,
+		opener,
+		items: sessionActions(actionContext(s)),
+		onPick: (id) => void runSessionAction(s, id as SessionActionId),
+	});
+}
+
+/**
+ * The terminal area when it has no pane to show: stopped / terminated /
+ * failed session, no tabs yet, or a tab whose socket gave up. Rendered
+ * from sessionActions.terminalState so the offered buttons are exactly
+ * the actions that apply. Hidden whenever a pane is attached — the panel
+ * and the terminal container never share the box.
+ */
+export function renderTerminalState(): void {
+	const s = sessions.find((x) => x.sessionId === activeSessionId);
+	const attached = currentActiveTabId !== null && currentTerminals.has(currentActiveTabId);
+	// Tabs not listed yet (openSession in flight): nothing to say.
+	const tabsKnown =
+		s?.status !== "running" || currentTabs.length > 0 || terminalTabs.style.display === "flex";
+	const state = s && !attached && tabsKnown ? terminalState(actionContext(s)) : null;
+	terminalStateEl.replaceChildren();
+	terminalStateEl.hidden = state === null;
+	if (!state || !s) return;
+	const box = document.createElement("div");
+	box.className = "terminal-state-box";
+	box.setAttribute("role", "status");
+	const h = document.createElement("h2");
+	h.textContent = state.title;
+	box.appendChild(h);
+	const p = document.createElement("p");
+	p.textContent = state.detail;
+	box.appendChild(p);
+	const row = document.createElement("div");
+	row.className = "terminal-state-actions";
+	for (const a of state.actions) {
+		const b = document.createElement("button");
+		b.type = "button";
+		b.className = `terminal-state-btn kind-${a.kind}`;
+		b.dataset.action = a.id;
+		b.textContent = a.label;
+		if (!a.enabled) {
+			b.disabled = true;
+			const why = document.createElement("span");
+			why.className = "terminal-state-reason";
+			why.textContent = a.reason ?? "";
+			row.appendChild(b);
+			row.appendChild(why);
+			continue;
+		}
+		b.addEventListener("click", () => void runSessionAction(s, a.id));
+		row.appendChild(b);
+	}
+	box.appendChild(row);
+	terminalStateEl.appendChild(box);
+}
 
 // ── Session management ──────────────────────────────────────────────────────
 
@@ -99,204 +293,135 @@ function reattachIfStarted(): void {
 }
 
 export function renderSessionList() {
-	sessionList.innerHTML = "";
+	// Re-rendered on every 5 s poll: keep the keyboard user's place.
+	const active = document.activeElement;
+	const focusedId =
+		active instanceof HTMLElement && sessionList.contains(active)
+			? active.closest<HTMLElement>(".session-item")?.dataset.sessionId
+			: undefined;
+	const focusedRole = active instanceof HTMLElement ? (active.dataset.role ?? "select") : "select";
+	sessionList.replaceChildren();
 	for (const s of sessions) {
 		const item = document.createElement("div");
-		// Status class on the wrapper mirrors the session-dot rules so
-		// future CSS can target failed/terminated items uniformly (dim
-		// them, cross them out, etc.) without re-deriving the status
-		// from a child element. Today only `terminated` has a wrapper
-		// rule (.session-item.terminated dims the row); failed shows
-		// up via the dot only — adding the class now means a follow-up
-		// styling tweak doesn't have to touch this line.
+		// Status class on the wrapper mirrors the session-dot rules so CSS
+		// can target failed/terminated items uniformly.
 		const statusCls = s.status === "terminated" || s.status === "failed" ? ` ${s.status}` : "";
 		item.className = `session-item${s.sessionId === activeSessionId ? " active" : ""}${statusCls}`;
+		item.dataset.sessionId = s.sessionId;
+
+		// The row itself is a button (keyboard, screen readers): it selects
+		// the session. The quick action and the ⋯ menu are siblings, never
+		// nested inside it.
+		const select = document.createElement("button");
+		select.type = "button";
+		select.className = "session-select";
+		select.dataset.role = "select";
+		select.setAttribute("aria-current", String(s.sessionId === activeSessionId));
+		select.setAttribute(
+			"aria-label",
+			`${s.name}, ${s.status}${s.status === "failed" ? " — view the bootstrap log" : ""}`,
+		);
 
 		const dot = document.createElement("span");
 		dot.className = `session-dot ${s.status}`;
-		item.appendChild(dot);
+		dot.setAttribute("aria-hidden", "true");
+		select.appendChild(dot);
 
-		// #271 — wrap the name (and the optional usage line) in a
-		// vertical column so the live-usage subtitle sits under the
-		// name without breaking the parent flex row's dot/name/actions
-		// alignment. Pre-#271 this was a single `.session-name` span
-		// appended directly to `item`; the column container preserves
-		// the same `.session-name` styling underneath.
 		const nameCol = document.createElement("span");
 		nameCol.className = "session-name-col";
-
 		const name = document.createElement("span");
 		name.className = "session-name";
 		name.textContent = s.name;
 		nameCol.appendChild(name);
-
-		// Live usage lines (#272: stacked CPU + mem on separate rows so
-		// each metric is its own visual line). Render only for running
-		// sessions whose stats fetch succeeded — stopped/terminated/
-		// failed rows have no live data and a "—" placeholder would be
-		// noise on what's usually most of an inactive list.
-		// Truthy check (not `!== null`) so a SessionInfo with `usage`
-		// undefined — e.g. a POST /sessions response immediately after
-		// create, before the next auto-poll has refilled the list —
-		// doesn't slip past the guard. Pre-fix this crashed with
-		// "Cannot read properties of undefined (reading 'cpuPercent')"
-		// on the line below.
+		// Live usage lines (#272). Only running sessions with a stats sample.
 		if (s.status === "running" && s.usage) {
 			const cpuCores = s.usage.cpuPercent / 100;
 			const cpuLine = document.createElement("span");
 			cpuLine.className = "session-usage";
 			cpuLine.textContent = `CPU ${formatCpuCores(cpuCores)} cores (${formatCpuPercent(s.usage.cpuPercent)})`;
 			nameCol.appendChild(cpuLine);
-
 			const memLine = document.createElement("span");
 			memLine.className = "session-usage";
 			memLine.textContent = `Mem ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
 			nameCol.appendChild(memLine);
 		}
+		select.appendChild(nameCol);
+		select.addEventListener("click", () => {
+			// A failed session has no workspace: the row opens its log.
+			void runSessionAction(s, s.status === "failed" ? "viewLog" : "open");
+		});
+		item.appendChild(select);
 
-		item.appendChild(nameCol);
-
-		// Action buttons
 		const actions = document.createElement("span");
 		actions.className = "session-actions";
-
-		if (s.status === "stopped") {
-			const playBtn = document.createElement("button");
-			playBtn.className = "session-action-btn start";
-			playBtn.textContent = "▶";
-			playBtn.title = "Start";
-			playBtn.addEventListener("click", async (e) => {
-				e.stopPropagation();
-				try {
-					await startSession(s.sessionId);
-					await refreshSessions();
-				} catch (err) {
-					showToast((err as Error).message, true);
-				}
-			});
-			actions.appendChild(playBtn);
-		} else if (s.status === "running") {
-			const stopBtn = document.createElement("button");
-			stopBtn.className = "session-action-btn stop";
-			stopBtn.textContent = "⏸";
-			stopBtn.title = "Stop";
-			stopBtn.addEventListener("click", async (e) => {
-				e.stopPropagation();
-				try {
-					await stopSession(s.sessionId);
-					await refreshSessions();
-				} catch (err) {
-					showToast((err as Error).message, true);
-				}
-			});
-			actions.appendChild(stopBtn);
-		} else if (s.status === "terminated") {
-			// Restore — spawns a fresh container reusing the original
-			// container name + workspace bind mount. Files are preserved.
-			const restoreBtn = document.createElement("button");
-			restoreBtn.className = "session-action-btn start";
-			restoreBtn.textContent = "↻";
-			restoreBtn.title = "Restore (respawn container with existing workspace files)";
-			restoreBtn.addEventListener("click", async (e) => {
-				e.stopPropagation();
-				try {
-					showToast(`Restoring "${s.name}"…`);
-					await startSession(s.sessionId);
-					await refreshSessions();
-					showToast(`Session "${s.name}" restored`);
-				} catch (err) {
-					showToast((err as Error).message, true);
-				}
-			});
-			actions.appendChild(restoreBtn);
+		// The one obvious next step as a quick button; everything else
+		// (incl. terminate / delete, each with its own dialog) in the menu.
+		const quick = sessionActions(actionContext(s)).find(
+			(a) => a.kind === "primary" || a.id === "stop",
+		);
+		if (quick?.enabled) {
+			const b = document.createElement("button");
+			b.type = "button";
+			b.className = `session-action-btn ${quick.id === "stop" ? "stop" : "start"}`;
+			b.dataset.role = quick.id;
+			b.dataset.action = quick.id;
+			b.textContent = quick.id === "stop" ? "⏸" : quick.id === "restore" ? "↻" : "▶";
+			b.title = quick.label;
+			b.setAttribute("aria-label", `${quick.label}: ${s.name}`);
+			b.addEventListener("click", () => void runSessionAction(s, quick.id));
+			actions.appendChild(b);
 		}
-
-		const killBtn = document.createElement("button");
-		killBtn.className = "session-kill";
-		killBtn.textContent = "✕";
-		// Shift-click enables hard delete — also wipes workspace files and
-		// removes the session record entirely. Plain click is a soft delete,
-		// which keeps the workspace files so the session can be restored.
-		killBtn.title =
-			s.status === "terminated"
-				? "Delete permanently (wipes workspace files)"
-				: "Terminate (Shift-click to also wipe workspace files)";
-		killBtn.addEventListener("click", async (e) => {
-			e.stopPropagation();
-			const mouseEvent = e as MouseEvent;
-			// If the session is already terminated, the only meaningful action
-			// is hard delete — otherwise there's nothing to do.
-			const hard = s.status === "terminated" || mouseEvent.shiftKey;
-
-			// An irreversible delete asks for the session's name (§9.5 of
-			// docs/design/ui-unificada.md); a soft terminate is reversible
-			// (Restore) and only needs a plain confirmation.
-			const ok = hard
-				? await confirmDialog({
-						title: "Delete permanently",
-						message: `Delete "${s.name}" permanently?\n\nThis stops and removes the container, wipes the workspace files from disk and removes the session record. This cannot be undone.`,
-						confirmLabel: "Delete permanently",
-						requireText: {
-							expected: s.name,
-							label: `Type the session name (${s.name}) to confirm`,
-						},
-					})
-				: await confirmDialog({
-						title: "Terminate session",
-						message: `Terminate "${s.name}"?\n\nThe container is stopped and removed. Workspace files are preserved — you can restore the session later.`,
-						confirmLabel: "Terminate",
-						danger: true,
-					});
-			if (!ok) return;
-
-			try {
-				await deleteSession(s.sessionId, hard);
-				if (activeSessionId === s.sessionId) {
-					disposeAllCurrentTerminals();
-					setActiveSessionId(null);
-					updateToolbar();
-				}
-				await refreshSessions();
-			} catch (err) {
-				showToast((err as Error).message, true);
-			}
-		});
-		actions.appendChild(killBtn);
+		const more = document.createElement("button");
+		more.type = "button";
+		more.className = "session-menu-btn";
+		more.dataset.role = "menu";
+		more.textContent = "⋯";
+		more.title = "More actions";
+		more.setAttribute("aria-label", `More actions: ${s.name}`);
+		more.setAttribute("aria-haspopup", "menu");
+		more.addEventListener("click", () => openSessionMenu(s, more));
+		actions.appendChild(more);
 		item.appendChild(actions);
-
-		// Click to open session
-		item.addEventListener("click", () => {
-			if (s.status === "running" || s.status === "stopped" || s.status === "terminated") {
-				// Stopped / soft-deleted sessions still have their workspace
-				// on the host, so they open in Files-only mode (openSession).
-				void openSession(s.sessionId);
-			} else if (s.status === "failed") {
-				// Failed sessions are unrecoverable via /start (the server
-				// 409s). #274 lets the user inspect the captured bootstrap
-				// output (clone / postCreate stderr) so they can fix the
-				// config before recreating — pre-#274 the toast told them
-				// to recreate but offered no way to see WHY it failed.
-				void openBootstrapLogModal(s);
-			}
-		});
 
 		sessionList.appendChild(item);
 	}
+	if (focusedId !== undefined) {
+		sessionList
+			.querySelector<HTMLElement>(
+				`.session-item[data-session-id="${CSS.escape(focusedId)}"] [data-role="${CSS.escape(focusedRole)}"]`,
+			)
+			?.focus();
+	}
 	// Sidebar observables (#394) dedupe against THIS list, so re-render
-	// them whenever it changes. Without this, the initial-load race —
-	// observables fetch resolving before the first listSessions() — shows
-	// the user's own sessions as "read-only" rows for up to one poll
-	// cycle. Hooking here (not just the 5 s tick) makes the dedupe
-	// deterministic: whichever fetch lands last re-renders with both
-	// datasets present.
+	// them whenever it changes.
 	renderSidebarObservables();
 }
+
+// ↑ / ↓ / Home / End move between rows; Enter / Space are the buttons' own.
+sessionList.addEventListener("keydown", (e) => {
+	if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+	const rows = [...sessionList.querySelectorAll<HTMLButtonElement>(".session-select")];
+	if (rows.length === 0) return;
+	const current = (e.target as HTMLElement).closest<HTMLElement>(".session-item");
+	const i = rows.findIndex((r) => r.closest(".session-item") === current);
+	const next =
+		e.key === "Home"
+			? 0
+			: e.key === "End"
+				? rows.length - 1
+				: e.key === "ArrowDown"
+					? Math.min(rows.length - 1, i + 1)
+					: Math.max(0, i - 1);
+	rows[next]?.focus();
+	e.preventDefault();
+});
 
 export async function openSession(sessionId: string) {
 	if (activeSessionId === sessionId) return;
 
 	// Tabs stay alive across tab-switch, but are torn down on session-switch.
 	disposeAllCurrentTerminals();
+	disconnectedTabId = null;
 
 	setActiveSessionId(sessionId);
 	// #419 — every selection path (sidebar click, SW notification jump,
@@ -465,6 +590,8 @@ export function updateToolbar() {
 		terminalTabs.style.display = "none";
 		terminalContainer.style.display = "none";
 		emptyState.style.display = "flex";
+		terminalStateEl.hidden = true;
+		terminalStateEl.replaceChildren();
 		updateChromeToggle();
 		syncSessionViews();
 		return;
@@ -475,51 +602,64 @@ export function updateToolbar() {
 	// resolves.
 	emptyState.style.display = "none";
 	terminalSessionName.textContent = s.name;
-	terminalStatusBadge.textContent = s.status;
-	terminalStatusBadge.className = s.status;
+	// A running session whose terminal gave up reads "disconnected" until
+	// a pane is attached again (Reconnect) — the server-side status alone
+	// would say "running" over an empty area.
+	const badge =
+		s.status === "running" && disconnectedTabId !== null && currentActiveTabId === null
+			? "disconnected"
+			: s.status;
+	terminalStatusBadge.textContent = badge;
+	terminalStatusBadge.className = badge;
 	// Refresh the mobile header context pill — its label tracks the
 	// active session/tab, and visibility flips on/off here.
 	updateChromeToggle();
 	syncSessionViews();
+	renderTerminalState();
 }
 
 // ── Tabs within the active session ──────────────────────────────────────────
 
 export function renderTabBar() {
-	terminalTabs.innerHTML = "";
+	const active = document.activeElement;
+	const focusedTab =
+		active instanceof HTMLElement && terminalTabs.contains(active)
+			? active.closest<HTMLElement>(".tab-chip")?.dataset.tabId
+			: undefined;
+	terminalTabs.replaceChildren();
 	if (!activeSessionId) {
 		terminalTabs.style.display = "none";
+		renderTerminalState();
 		return;
 	}
 	// Render even at currentTabs.length === 0 so the + button is reachable
 	// — a brand-new session starts with no tabs and the user opens the
 	// first one from here.
 	terminalTabs.style.display = "flex";
+	terminalTabs.setAttribute("role", "tablist");
+	terminalTabs.setAttribute("aria-label", "Terminal tabs");
 
 	for (const tab of currentTabs) {
 		const chip = document.createElement("div");
 		const badge = badgeFor(tab.tabId);
-		chip.className = `tab-chip${tab.tabId === currentActiveTabId ? " active" : ""}${badge ? ` activity-${badge}` : ""}`;
+		const isActive = tab.tabId === currentActiveTabId;
+		chip.className = `tab-chip${isActive ? " active" : ""}${badge ? ` activity-${badge}` : ""}`;
 		chip.dataset.tabId = tab.tabId;
-		chip.title = tab.label;
 
+		// The chip's button is the tab (keyboard, screen readers); the close
+		// button sits beside it, never inside it.
+		const select = document.createElement("button");
+		select.type = "button";
+		select.className = "tab-chip-btn";
+		select.setAttribute("role", "tab");
+		select.setAttribute("aria-selected", String(isActive));
+		select.tabIndex = isActive || (currentActiveTabId === null && tab === currentTabs[0]) ? 0 : -1;
+		select.title = tab.label;
 		const label = document.createElement("span");
 		label.className = "tab-chip-label";
 		label.textContent = tab.label;
-		chip.appendChild(label);
-
-		const close = document.createElement("button");
-		close.className = "tab-close";
-		close.textContent = "×";
-		close.title = "Close tab";
-		close.disabled = closingTabs.has(tab.tabId);
-		close.addEventListener("click", (e) => {
-			e.stopPropagation();
-			void closeTab(tab.tabId, close);
-		});
-		chip.appendChild(close);
-
-		chip.addEventListener("click", () => {
+		select.appendChild(label);
+		select.addEventListener("click", () => {
 			// Click handlers eat synchronous throws — surface them as
 			// a toast instead of letting the UI silently revert.
 			try {
@@ -528,6 +668,19 @@ export function renderTabBar() {
 				showToast((err as Error).message, true);
 			}
 		});
+		chip.appendChild(select);
+
+		const close = document.createElement("button");
+		close.type = "button";
+		close.className = "tab-close";
+		close.textContent = "×";
+		close.title = "Close tab";
+		close.setAttribute("aria-label", `Close tab ${tab.label}`);
+		close.disabled = closingTabs.has(tab.tabId);
+		close.addEventListener("click", () => {
+			void closeTab(tab.tabId, close);
+		});
+		chip.appendChild(close);
 		terminalTabs.appendChild(chip);
 	}
 
@@ -536,14 +689,44 @@ export function renderTabBar() {
 	addBtn.type = "button";
 	addBtn.textContent = "+";
 	addBtn.title = "Open a new tab (runs services independently; close to SIGHUP them)";
+	addBtn.setAttribute("aria-label", "Open a new tab");
 	addBtn.addEventListener("click", () => void addTab(addBtn));
 	terminalTabs.appendChild(addBtn);
+	if (focusedTab !== undefined) {
+		terminalTabs
+			.querySelector<HTMLElement>(
+				`.tab-chip[data-tab-id="${CSS.escape(focusedTab)}"] .tab-chip-btn`,
+			)
+			?.focus();
+	}
 	// The chrome-toggle label tracks whichever tab is active — refresh
 	// every time the bar is rebuilt so renames/closes/switches stay in
 	// sync without having to thread updateChromeToggle() through every
 	// caller of openTab/addTab/closeTab.
 	updateChromeToggle();
+	renderTerminalState();
 }
+
+// ← / → / Home / End move between tabs (WAI-ARIA tabs, manual activation:
+// Enter / Space on the focused tab opens it).
+terminalTabs.addEventListener("keydown", (e) => {
+	if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+	const tabs = [...terminalTabs.querySelectorAll<HTMLButtonElement>(".tab-chip-btn")];
+	if (tabs.length === 0) return;
+	const i = tabs.findIndex(
+		(b) => b === document.activeElement || b.contains(document.activeElement),
+	);
+	const next =
+		e.key === "Home"
+			? 0
+			: e.key === "End"
+				? tabs.length - 1
+				: e.key === "ArrowRight"
+					? (i + 1) % tabs.length
+					: (i - 1 + tabs.length) % tabs.length;
+	tabs[next]?.focus();
+	e.preventDefault();
+});
 
 // Targeted repaint of one chip's activity badge (#359) — output streams
 // per-chunk, so rebuilding the whole bar on every state flip would churn
@@ -670,6 +853,7 @@ function openTab(tabId: string) {
 								currentTerminals.delete(tabId);
 								if (currentActiveTabId === tabId) {
 									setCurrentActiveTabId(null);
+									disconnectedTabId = tabId;
 									terminalContainer.style.display = "none";
 									// refreshSessions() below will eventually round-trip
 									// and call updateToolbar(), but until that resolves
@@ -791,6 +975,8 @@ function openTab(tabId: string) {
 	entry.pane.classList.add("active");
 	terminalContainer.style.display = "block";
 	setCurrentActiveTabId(tabId);
+	disconnectedTabId = null;
+	updateToolbar();
 	// Activation acknowledges the pending activity — the user is now
 	// looking at whatever rang/streamed. renderTabBar() below repaints
 	// the chip from the cleared state.

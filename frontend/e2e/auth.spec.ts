@@ -35,6 +35,9 @@ test.describe("auth", () => {
 		await expect(page.locator("#auth-view")).toBeVisible();
 		await expect(page.locator("#app-view")).toBeHidden();
 		expect(backend.current, "the server saw the logout").toBeNull();
+		// Nothing of the previous person stays in the DOM behind the login view.
+		await expect(page.locator("#session-list .session-item")).toHaveCount(0);
+		await expect(page.locator("#terminal-toolbar")).toBeHidden();
 		// Logging back in reloads the list from the server.
 		await app.loginViaForm("alice");
 		await expect(page.locator("#app-view")).toBeVisible();

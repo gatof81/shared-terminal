@@ -342,6 +342,20 @@ export class MockBackend {
 		return event;
 	}
 
+	/**
+	 * Close every open terminal socket of a session with a FINAL code (1008:
+	 * the app does not retry), as the backend does for a terminated or
+	 * foreign session — the terminal lands on its "disconnected" state.
+	 */
+	dropTerminalSockets(sessionId: string, code = 1008, reason = "Session gone"): void {
+		for (const s of this.terminalSockets) {
+			if (s.sessionId === sessionId && !s.closed) {
+				s.closed = true;
+				s.route.close({ code, reason });
+			}
+		}
+	}
+
 	/** Write bytes to every open terminal socket of a session (as tmux would). */
 	pushTerminalOutput(sessionId: string, data: string): void {
 		for (const s of this.terminalSockets) {

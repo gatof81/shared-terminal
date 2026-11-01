@@ -63,6 +63,14 @@ test.describe("visual", () => {
 		await shot(page, "chat");
 	});
 
+	test("terminal stopped state", async ({ app, page }) => {
+		await app.login("alice");
+		await app.openSession("docs");
+		await app.switchView("terminal");
+		await expect(page.locator("#terminal-state")).toContainText("stopped");
+		await shot(page, "terminal-stopped");
+	});
+
 	test("new session dialog", async ({ app, page }) => {
 		await app.login("alice");
 		await app.openSidebar();

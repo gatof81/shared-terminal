@@ -68,7 +68,10 @@ const api = vi.hoisted(() => {
 });
 vi.mock("./api.js", () => api);
 
-const core = vi.hoisted(() => ({ refreshSessions: vi.fn(async () => {}) }));
+const core = vi.hoisted(() => ({
+	refreshSessions: vi.fn(async () => {}),
+	runSessionAction: vi.fn(async () => {}),
+}));
 vi.mock("./sessionCore.js", () => core);
 vi.mock("./saveBlob.js", () => ({ saveBlob: vi.fn() }));
 
@@ -292,7 +295,8 @@ describe("view switching", () => {
 		await flush();
 		vs.syncSessionViews();
 		expect(vs.getView()).toBe("git");
-		expect(($("view-terminal-btn") as HTMLButtonElement).disabled).toBe(true);
+		// The Terminal view stays selectable: it shows the stopped state and Start.
+		expect(($("view-terminal-btn") as HTMLButtonElement).disabled).toBe(false);
 	});
 
 	it("collapses the mobile chrome drawer when Git is opened", async () => {
@@ -365,8 +369,11 @@ describe("status states", () => {
 		expect($("git-list").textContent).toContain("isn't running");
 		buttonNamed($("git-list"), "Start session")?.click();
 		await flush();
-		expect(api.startSession).toHaveBeenCalledWith("s1");
-		expect(core.refreshSessions).toHaveBeenCalled();
+		// The same verb as the sidebar and the terminal's stopped state.
+		expect(core.runSessionAction).toHaveBeenCalledWith(
+			expect.objectContaining({ sessionId: "s1" }),
+			"start",
+		);
 		// Poll reports running → auto reload.
 		mainState.sessions = [{ sessionId: "s1", name: "s1", status: "running" }];
 		mainState.currentTerminals = new Map([["t1", {}]]);

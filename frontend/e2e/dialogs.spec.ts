@@ -1,5 +1,5 @@
-import { SESSION_IDS } from "./mockBackend.js";
 import { expect, test } from "./fixtures.js";
+import { SESSION_IDS } from "./mockBackend.js";
 
 test.describe("dialogs", () => {
 	test("New session: Escape closes it and focus returns to the opener", async ({ app, page }) => {
@@ -75,7 +75,8 @@ test.describe("dialogs", () => {
 		await app.login("alice");
 		await app.openSidebar();
 		await page.check("#show-terminated-toggle");
-		await app.sessionRow("old-poc").locator(".session-kill").click();
+		await app.sessionRow("old-poc").locator(".session-menu-btn").click();
+		await page.locator('[role="menuitem"][data-action="delete"]').click();
 		const dialog = page.locator('[role="alertdialog"]');
 		await expect(dialog).toBeVisible();
 		await expect(dialog).toContainText("Delete permanently");
@@ -99,7 +100,8 @@ test.describe("dialogs", () => {
 	}) => {
 		await app.login("alice");
 		await app.openSidebar();
-		await app.sessionRow("my-project").locator(".session-kill").click();
+		await app.sessionRow("my-project").locator(".session-menu-btn").click();
+		await page.locator('[role="menuitem"][data-action="terminate"]').click();
 		const dialog = page.locator('[role="alertdialog"]');
 		await expect(dialog).toContainText("Terminate");
 		await expect(dialog.locator("input")).toHaveCount(0);

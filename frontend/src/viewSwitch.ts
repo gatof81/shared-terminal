@@ -192,12 +192,15 @@ export function syncSessionViews(): void {
 	}
 	viewSwitch.hidden = false;
 	const canTerminal = terminalAvailable();
-	buttons.terminal.disabled = !canTerminal;
-	for (const b of toTerminalBtns) b.disabled = !canTerminal;
+	// The Terminal view is always selectable: with no live terminal it
+	// shows the session's state and the action that applies (Start,
+	// Restore, Reconnect, Open a tab — sessionCore.renderTerminalState)
+	// rather than a disabled button whose only explanation is a tooltip.
+	buttons.terminal.disabled = false;
+	for (const b of toTerminalBtns) b.disabled = false;
 	renderSwitch();
-	const hint = canTerminal ? "" : "Start the session to use the terminal";
-	buttons.terminal.title = hint || "Show terminal";
-	for (const b of toTerminalBtns) b.title = hint || "Back to terminal";
+	buttons.terminal.title = canTerminal ? "Show terminal" : "Terminal (session not running)";
+	for (const b of toTerminalBtns) b.title = "Back to terminal";
 	// Listeners first: they re-key their state to the active session, so
 	// a forced switch below (which fires onViewChange → load) loads for
 	// the NEW session rather than racing a stale one.

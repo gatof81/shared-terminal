@@ -168,3 +168,48 @@
   display: none;
   position: relative;
 }
+
+/* ── Tabs as controls (UI unification, PR 4) ───────────────────
+   The chip keeps its look; its tab is a real button (role="tab") with
+   the close button beside it. */
+.tab-chip-btn {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.tab-chip-btn:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+.tab-chip:focus-within .tab-close {
+  opacity: 1;
+}
+.tab-close:focus-visible {
+  outline: 2px solid var(--c-accent);
+  opacity: 1;
+}
+
+/* Session action menu (components/actionMenu.ts): the Insert menu's
+   card with a danger tone and a visible reason on disabled items. */
+.action-menu .actions-menu-item.kind-danger .actions-menu-item-title {
+  color: var(--c-err);
+}
+.action-menu .actions-menu-item.kind-primary .actions-menu-item-title {
+  color: var(--c-accent);
+}
+.action-menu .actions-menu-item:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.action-menu .actions-menu-item:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 1px;
+}

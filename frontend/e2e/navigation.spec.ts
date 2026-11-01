@@ -1,5 +1,5 @@
-import { SESSION_IDS } from "./mockBackend.js";
 import { expect, test } from "./fixtures.js";
+import { SESSION_IDS } from "./mockBackend.js";
 
 test.describe("navigation", () => {
 	test("opening a running session attaches the terminal and reflects the deep link", async ({
@@ -41,16 +41,20 @@ test.describe("navigation", () => {
 		await expect(page.locator("#terminal-container .tab-pane.active")).toContainText("Welcome");
 	});
 
-	test("a stopped session opens in Files with the Terminal disabled and explained", async ({
+	test("a stopped session opens in Files; the Terminal view explains and offers Start", async ({
 		app,
 		page,
 	}) => {
 		await app.login("alice");
 		await app.openSession("docs");
 		await app.expectView("files");
-		const terminalBtn = page.locator("#view-terminal-btn");
-		await expect(terminalBtn).toBeDisabled();
-		await expect(terminalBtn).toHaveAttribute("title", /Start the session/);
+		// The Terminal view stays selectable and explains the state instead
+		// of a disabled button: the stopped panel offers Start.
+		await app.switchView("terminal");
+		const panel = page.locator("#terminal-state");
+		await expect(panel).toBeVisible();
+		await expect(panel).toContainText("This session is stopped");
+		await expect(panel.locator("button", { hasText: "Start session" })).toBeEnabled();
 		await app.switchView("git");
 		await expect(page.locator("#git-list")).toContainText("isn't running");
 		await expect(page.locator("#git-list button", { hasText: "Start session" })).toBeVisible();

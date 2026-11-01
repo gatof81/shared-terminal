@@ -256,6 +256,12 @@
           </div>
           <div id="terminal-tabs"></div>
           <div id="terminal-container"></div>
+          <!-- What the terminal area offers when it has no pane to show —
+               stopped / terminated / failed session, no tabs yet, or a
+               tab whose socket gave up (Reconnect). Built in TS from
+               sessionActions.terminalState (sessionCore.renderTerminalState);
+               never visible at the same time as #terminal-container. -->
+          <div id="terminal-state" hidden></div>
           <!-- Mobile extra-keys bar — the soft keyboard has no Esc/Tab/
                Ctrl/arrows, which a terminal (vim, tmux, shell history,
                interrupt) can't live without. Shown only on touch mobile
