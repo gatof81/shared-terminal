@@ -78,8 +78,9 @@ test.describe("chat", () => {
 		);
 	});
 
-	test("mobile: thread → back returns to the list and keeps the selection", async ({
+	test("mobile: thread → back returns to the list; reopening is instant (cached)", async ({
 		app,
+		backend,
 		page,
 	}) => {
 		test.skip(!app.mobile, "single-pane layout only on mobile");
@@ -91,6 +92,12 @@ test.describe("chat", () => {
 		await expect(page.locator("#chat-list")).toBeHidden();
 		await page.click("#chat-back-btn");
 		await expect(page.locator("#chat-list")).toBeVisible();
-		await expect(page.locator("#chat-list .chat-conv-row.selected")).toContainText("Fix tests");
+		// Back to the list means no conversation open (the address says so).
+		await expect(page.locator("#chat-list .chat-conv-row.selected")).toHaveCount(0);
+		const eventRequests = () => backend.requests.filter((r) => r.path.includes("/events")).length;
+		const before = eventRequests();
+		await page.locator("#chat-list .chat-conv-row", { hasText: "Fix tests" }).click();
+		await expect(page.locator("#chat-thread .chat-assistant")).toContainText("All green");
+		expect(eventRequests(), "the thread came from the cache").toBe(before);
 	});
 });

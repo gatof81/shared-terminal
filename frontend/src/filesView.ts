@@ -31,7 +31,14 @@ import { activeSessionId, isMobile, sessions, showCopySuccessToast, showToast } 
 import { renderMarkdown } from "./markdown.js";
 import { saveBlob } from "./saveBlob.js";
 import { button, el, stateBox } from "./ui.js";
-import { getView, onSessionSync, onViewChange } from "./viewSwitch.js";
+import {
+	getView,
+	onSessionSync,
+	onViewChange,
+	reflectRoute,
+	registerRouteDetail,
+	routeBack,
+} from "./viewSwitch.js";
 import {
 	ancestorsOf,
 	baseName,
@@ -85,6 +92,11 @@ let previewToken = 0;
 // reads (each holding one of the backend's per-user preview slots).
 let previewAbort: AbortController | null = null;
 
+// The reveal in flight (a route's path, a breadcrumb, a Markdown link):
+// each await re-checks it, so a newer reveal, the person's own click, a
+// view change or a session switch leaves the older one without effect.
+let revealToken = 0;
+
 // Persisted per page-load across files: someone reading docs wants every
 // .md rendered; someone reviewing markup wants source for all of them.
 let markdownMode: "rendered" | "source" = "rendered";
@@ -101,7 +113,10 @@ export function isFilesViewActive(): boolean {
 }
 
 onViewChange((next) => {
-	if (next !== "files") return;
+	if (next !== "files") {
+		revealToken++; // a reveal pending for a view that is gone is void
+		return;
+	}
 	if (stateSessionId !== null && !dirs.has("")) void loadDir("");
 	renderAll();
 });
@@ -112,6 +127,12 @@ onViewChange((next) => {
  * and logout), after viewSwitch has settled which view is up.
  */
 onSessionSync(syncFilesView);
+
+// Route detail = the selected path (#/sessions/<id>/files/<path>).
+registerRouteDetail("files", {
+	current: () => selected?.path ?? null,
+	apply: (path) => void revealPath(path ?? ""),
+});
 
 function syncFilesView(): void {
 	const s = sessions.find((x) => x.sessionId === activeSessionId);
@@ -133,6 +154,7 @@ function syncFilesView(): void {
 
 function resetState(sessionId: string | null): void {
 	generation++;
+	revealToken++;
 	previewAbort?.abort();
 	previewAbort = null;
 	stateSessionId = sessionId;
@@ -264,15 +286,19 @@ function selectEntry(path: string, entry: WorkspaceEntry | null): void {
 		if (isMobile()) mobilePane = "preview";
 	}
 	renderAll();
+	// Opening a file is a step Back undoes (a no-op while a route is being applied).
+	reflectRoute({ push: true });
 }
 
 /** Expand every ancestor of `path` (loading as needed), then select it. */
 async function revealPath(path: string): Promise<void> {
 	const gen = generation;
+	const token = ++revealToken;
+	const stale = () => gen !== generation || token !== revealToken;
 	for (const dir of ancestorsOf(path)) {
 		expanded.add(dir);
 		if (!dirs.get(dir)?.listing) await loadDir(dir);
-		if (gen !== generation) return;
+		if (stale()) return;
 	}
 	if (path === "") {
 		selected = null;
@@ -471,7 +497,10 @@ function renderTree(): void {
 				: entry.type === "symlink"
 					? `${entry.name} — symbolic link (not followed)`
 					: entry.name;
-			row.addEventListener("click", () => selectEntry(path, entry));
+			row.addEventListener("click", () => {
+				revealToken++; // the person's choice voids a reveal in flight
+				selectEntry(path, entry);
+			});
 			frag.appendChild(row);
 			if (isOpen) renderLevel(path, depth + 1);
 		}
@@ -539,15 +568,7 @@ treeEl.addEventListener("keydown", (e) => {
 function previewHeader(name: string, meta: string, actions: HTMLElement[]): HTMLElement {
 	const header = el("div", "files-preview-header");
 	header.appendChild(
-		button(
-			"‹ Files",
-			"files-btn files-mobile-only",
-			() => {
-				mobilePane = "tree";
-				renderAll();
-			},
-			"Back to file list",
-		),
+		button("‹ Files", "files-btn files-mobile-only", routeBack, "Back to file list"),
 	);
 	const title = el("div", "files-preview-title");
 	title.appendChild(el("span", "files-preview-name", name));

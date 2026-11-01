@@ -53,10 +53,11 @@ import {
 	type PushToggleState,
 	registerServiceWorker,
 } from "./push.js";
+import { onRoute, readRoute, start as startRouter } from "./router.js";
 import { initTerminalSearch } from "./searchBar.js";
 import {
+	applyRoute,
 	openSession,
-	openSessionFromDeepLink,
 	refreshSessions,
 	renderSessionList,
 	updateToolbar,
@@ -273,9 +274,10 @@ function showApp() {
 		// If the app was cold-started from a notification tap, jump to the
 		// referenced session once we're authenticated and showing the app.
 		openSessionFromHash();
-		// /#/sessions/<id> deep link (#419) — shareable, survives the
-		// login screen (the hash rides along untouched until here).
-		void openSessionFromDeepLink();
+		// /#/sessions/<id>[/<view>[/<detail>]] deep link (#419, PR 5) —
+		// shareable, survives the login screen (the hash rides along
+		// untouched until here) and restores the view on reload.
+		void applyRoute(readRoute());
 	});
 }
 
@@ -406,15 +408,15 @@ function openSessionFromHash() {
 	void openSession(sessionId);
 }
 
-// Live hash edits (user pastes a link into the address bar of an open
-// tab, or a Hub "Open terminal" click retargets an existing tab) route
-// through the same resolver (#419). Our own selection-time writes use
-// history.replaceState, which does NOT fire hashchange — so this cannot
-// loop on itself. Pre-auth the hash just sits in the URL; showApp()'s
-// post-refresh consumption picks it up after login.
-window.addEventListener("hashchange", () => {
+// Back / Forward and live hash edits (a link pasted into the address bar
+// of an open tab, a Hub "Open terminal" click retargeting it) route
+// through the same resolver (#419, PR 5). The router ignores its own
+// writes, so this cannot loop. Pre-auth the hash just sits in the URL;
+// showApp()'s post-refresh consumption picks it up after login.
+startRouter();
+onRoute((route) => {
 	if (!isLoggedIn()) return;
-	void openSessionFromDeepLink();
+	void applyRoute(route);
 });
 
 function updateAuthUI() {

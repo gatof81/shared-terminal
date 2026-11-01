@@ -27,7 +27,6 @@ import {
 } from "./api.js";
 import { openActionMenu } from "./components/actionMenu.js";
 import { confirmDialog } from "./components/dialog.js";
-import { parseSessionHash, reflectSessionInHash } from "./deepLink.js";
 import { formatBytes, formatCpuCores, formatCpuPercent } from "./format.js";
 import { transformKeyInput } from "./keyBar.js";
 import {
@@ -53,6 +52,7 @@ import { renderSidebarObservables } from "./myGroups.js";
 import { openBootstrapLogModal } from "./newSession.js";
 import { openObserveModalFor } from "./observeModal.js";
 import { openPortsModalFor } from "./ports.js";
+import { clear as clearRoute, type Route } from "./router.js";
 import {
 	type SessionActionContext,
 	type SessionActionId,
@@ -61,7 +61,15 @@ import {
 } from "./sessionActions.js";
 import { badgeFor, clearBadge, recordOutput } from "./tabActivity.js";
 import { openTerminalSession, type SessionStatus } from "./terminal.js";
-import { showFilesOnly, syncSessionViews } from "./viewSwitch.js";
+import {
+	applyRouteView,
+	beginRouteApply,
+	endRouteApply,
+	reflectRoute,
+	registerRouteDetail,
+	showFilesOnly,
+	syncSessionViews,
+} from "./viewSwitch.js";
 
 // ── DOM (re-queried locally) ─────────────────────────────────────────────
 const sessionList = document.getElementById("session-list")!;
@@ -190,7 +198,7 @@ export async function runSessionAction(s: SessionInfo, id: SessionActionId): Pro
 				if (activeSessionId === s.sessionId) {
 					disposeAllCurrentTerminals();
 					setActiveSessionId(null);
-					reflectSessionInHash(null);
+					clearRoute();
 					updateToolbar();
 				}
 				await refreshSessions();
@@ -416,20 +424,27 @@ sessionList.addEventListener("keydown", (e) => {
 	e.preventDefault();
 });
 
-export async function openSession(sessionId: string) {
+// The tab a route asked for while the session's tab list is still
+// loading. openSession lands on it once the tabs arrive, so a route that
+// supersedes the deep link during the load (tab-2 after tab-1) wins the
+// screen the way it already won the address.
+let wantedTabId: string | null = null;
+
+export async function openSession(sessionId: string, opts: { tabId?: string | null } = {}) {
 	if (activeSessionId === sessionId) return;
+	wantedTabId = opts.tabId ?? null;
 
 	// Tabs stay alive across tab-switch, but are torn down on session-switch.
 	disposeAllCurrentTerminals();
 	disconnectedTabId = null;
 
 	setActiveSessionId(sessionId);
-	// #419 — every selection path (sidebar click, SW notification jump,
-	// deep-link consumption) funnels through here, so this single write
-	// keeps the address bar a shareable /#/sessions/<id> link.
-	reflectSessionInHash(sessionId);
 	renderSessionList();
+	// updateToolbar → syncSessionViews re-keys every view to this session
+	// (and may force Files for a stopped one); only then is the address
+	// written, in place — selecting a session is not a history entry.
 	updateToolbar();
+	reflectRoute({ push: false });
 
 	// Not running → no tmux to list tabs from or attach to, but the
 	// workspace is on the host: open straight into the Files view.
@@ -457,7 +472,7 @@ export async function openSession(sessionId: string) {
 			setActiveSessionId(null);
 			// Un-reflect the failed selection so a reload doesn't replay
 			// the broken deep link (#419).
-			reflectSessionInHash(null);
+			clearRoute();
 			setCurrentTabs([]);
 			renderSessionList();
 			updateToolbar();
@@ -510,8 +525,13 @@ export async function openSession(sessionId: string) {
 	// openTab can throw synchronously (openTerminalSession init failure) —
 	// openSession is called with `void`, so an unhandled throw here would
 	// become an unhandled rejection with no toast and the UI left mid-switch.
+	// A route may name the tab to land on (#/sessions/<id>/terminal/<tab>);
+	// the latest one asked for during the load wins.
+	const asked = wantedTabId;
+	wantedTabId = null;
+	const wanted = asked && currentTabs.some((t) => t.tabId === asked) ? asked : null;
 	try {
-		openTab(currentTabs[0]!.tabId);
+		openTab(wanted ?? currentTabs[0]!.tabId);
 	} catch (err) {
 		if (activeSessionId === sessionId) {
 			setActiveSessionId(null);
@@ -524,14 +544,17 @@ export async function openSession(sessionId: string) {
 }
 
 /**
- * Consume a /#/sessions/<id> deep link (#419). Called by main.ts after
- * the own-session list has loaded (post-auth) and on every hashchange.
+ * Apply a route from the address bar (#419, UI unification PR 5): on load
+ * after the own-session list has loaded, on Back/Forward and on a pasted
+ * URL (router.ts → main.ts).
  *
- * Resolution order:
- *   1. Own session → select it (same path as a sidebar click).
+ * Resolution order for the session:
+ *   1. Own session → select it (same path as a sidebar click), then the
+ *      view and detail the route names.
  *   2. Not own + admin → resolve via the admin list and open the observe
  *      modal (take-control available, exactly the dashboard's path).
- *   3. Anything else → one "Session not found" toast.
+ *   3. Anything else → one "Session not found" toast and the address
+ *      cleared, so a reload does not replay it.
  *
  * No-existence-leak invariant: for a NON-admin, foreign and nonexistent
  * ids take the identical branch — the own-list check is client-side and
@@ -539,49 +562,87 @@ export async function openSession(sessionId: string) {
  * wording between the two. (For admins the distinction is fine: the
  * admin list already shows every session.)
  */
-export async function openSessionFromDeepLink(): Promise<void> {
-	const id = parseSessionHash(window.location.hash);
-	if (id === null) return;
-	// Already there (e.g. our own reflectSessionInHash write, or a
-	// re-fired hashchange) — nothing to do.
-	if (id === activeSessionId) return;
-	if (sessions.some((s) => s.sessionId === id)) {
-		await openSession(id);
-		return;
-	}
-	if (isAdmin()) {
-		try {
-			const rows = await fetchAdminSessions();
-			const s = rows.find((r) => r.sessionId === id);
-			if (s) {
-				if (s.status !== "running") {
-					// Mirrors the dashboard, which only offers Observe on
-					// running rows — the WS attach needs a live container.
-					showToast(`Session "${s.name}" is not running — nothing to observe`, true);
-					return;
-				}
-				// Same target shape as the dashboard's openAdminObserve
-				// (#admin-operate 4/4): observe first, take-control offered.
-				void openObserveModalFor({
-					sessionId: s.sessionId,
-					name: s.name,
-					ownerUsername: s.ownerUsername,
-					canOperate: true,
-					canReconnect: async () =>
-						(await fetchAdminSessions()).some(
-							(x) => x.sessionId === s.sessionId && x.status === "running",
-						),
-				});
-				return;
+// Every route application bumps this; a continuation that resumes after
+// an await and finds a newer one is stale — even for the same session
+// (Back then Forward in quick succession) — and does nothing.
+let routeGen = 0;
+
+export async function applyRoute(route: Route | null): Promise<void> {
+	if (route === null) return;
+	const gen = ++routeGen;
+	const id = route.sessionId;
+	if (id !== activeSessionId) {
+		if (sessions.some((s) => s.sessionId === id)) {
+			// The address already names the route; opening the session must
+			// not rewrite it on the way (its own in-place writes are held).
+			beginRouteApply(id);
+			try {
+				await openSession(id, { tabId: route.view === "terminal" ? route.detail : null });
+			} finally {
+				endRouteApply();
 			}
-		} catch {
-			// Admin-list fetch failed (transient) — fall through to the
-			// generic toast rather than surfacing a scarier error for
-			// what is just a navigation.
+			// A newer route landed while this one was opening the session.
+			if (gen !== routeGen || activeSessionId !== id) return;
+		} else {
+			if (isAdmin()) {
+				try {
+					const rows = await fetchAdminSessions();
+					if (gen !== routeGen) return;
+					const s = rows.find((r) => r.sessionId === id);
+					if (s) {
+						if (s.status !== "running") {
+							// Mirrors the dashboard, which only offers Observe on
+							// running rows — the WS attach needs a live container.
+							showToast(`Session "${s.name}" is not running — nothing to observe`, true);
+							return;
+						}
+						// Same target shape as the dashboard's openAdminObserve
+						// (#admin-operate 4/4): observe first, take-control offered.
+						void openObserveModalFor({
+							sessionId: s.sessionId,
+							name: s.name,
+							ownerUsername: s.ownerUsername,
+							canOperate: true,
+							canReconnect: async () =>
+								(await fetchAdminSessions()).some(
+									(x) => x.sessionId === s.sessionId && x.status === "running",
+								),
+						});
+						return;
+					}
+				} catch {
+					// Admin-list fetch failed (transient) — fall through to the
+					// generic toast rather than surfacing a scarier error for
+					// what is just a navigation.
+				}
+			}
+			if (gen !== routeGen) return;
+			showToast("Session not found", true);
+			clearRoute();
+			return;
 		}
 	}
-	showToast("Session not found", true);
+	applyRouteView(route.view, route.detail);
 }
+
+// The terminal's route detail is the active tab. Switching tabs updates
+// the address in place (openTab), never as a history entry.
+registerRouteDetail("terminal", {
+	current: () => currentActiveTabId,
+	apply: (tabId) => {
+		if (tabId === null || tabId === currentActiveTabId) return;
+		if (!currentTabs.some((t) => t.tabId === tabId)) {
+			// Not listed yet: openSession lands on it when the list arrives.
+			if (currentTabs.length === 0) wantedTabId = tabId;
+			return;
+		}
+		try {
+			openTab(tabId);
+		} catch (err) {
+			showToast((err as Error).message, true);
+		}
+	},
+});
 
 export function updateToolbar() {
 	const s = sessions.find((x) => x.sessionId === activeSessionId);
@@ -977,6 +1038,7 @@ function openTab(tabId: string) {
 	setCurrentActiveTabId(tabId);
 	disconnectedTabId = null;
 	updateToolbar();
+	reflectRoute({ push: false });
 	// Activation acknowledges the pending activity — the user is now
 	// looking at whatever rang/streamed. renderTabBar() below repaints
 	// the chip from the cleared state.

@@ -34,7 +34,14 @@ import { relativeDate } from "./format.js";
 import { activeSessionId, isMobile, sessions } from "./main.js";
 import { runSessionAction } from "./sessionCore.js";
 import { button, el, stateBox } from "./ui.js";
-import { getView, onSessionSync, onViewChange } from "./viewSwitch.js";
+import {
+	getView,
+	onSessionSync,
+	onViewChange,
+	reflectRoute,
+	registerRouteDetail,
+	routeBack,
+} from "./viewSwitch.js";
 
 // ── DOM ─────────────────────────────────────────────────────────────────────
 const summaryEl = document.getElementById("git-summary")!;
@@ -109,6 +116,37 @@ function enqueue(run: () => Promise<void>): Promise<void> {
 }
 
 let mobilePane: "list" | "diff" = "list";
+// A route detail (<area>:<path>) that arrived before the status did.
+let pendingDetail: string | null = null;
+
+// Route detail = the selected change (#/sessions/<id>/git/<area>:<path>).
+registerRouteDetail("git", {
+	current: () => (selected ? `${selected.area}:${selected.path}` : null),
+	apply: (detail) => {
+		pendingDetail = null;
+		if (detail === null) {
+			selected = null;
+			clearDiff();
+			mobilePane = "list";
+			renderAll();
+			return;
+		}
+		if (status.status !== "loaded" || !status.data.repo) {
+			pendingDetail = detail; // applied when the status lands (load)
+			return;
+		}
+		const c = findChangeByKey(status.data, detail);
+		if (c) selectChange(c);
+	},
+});
+
+function findChangeByKey(data: GitStatus, key: string): GitChange | undefined {
+	const i = key.indexOf(":");
+	if (i === -1 || !data.repo) return undefined;
+	const area = key.slice(0, i);
+	const path = key.slice(i + 1);
+	return data.changes.find((c) => c.area === area && c.path === path);
+}
 
 // Past this many rendered rows the diff pane stops: it's a browser pane,
 // not an IDE, and the server already caps the patch bytes.
@@ -121,7 +159,10 @@ export function isGitViewActive(): boolean {
 }
 
 onViewChange((next) => {
-	if (next !== "git") return;
+	if (next !== "git") {
+		pendingDetail = null; // a detail pending for a view that is gone is void
+		return;
+	}
 	if (stateSessionId !== null && status.status === "idle") void load();
 	renderAll();
 });
@@ -159,6 +200,7 @@ function resetState(sessionId: string | null): void {
 	// until git ends anyway, so the next session's load takes its turn
 	// on the queue behind them; the generation bump drops their results.
 	generation++;
+	pendingDetail = null;
 	stateSessionId = sessionId;
 	dir = "";
 	status = { status: "idle" };
@@ -195,6 +237,12 @@ async function load(): Promise<void> {
 					mobilePane = "list";
 				}
 				renderAll();
+				// A deep link into a diff: the change can be selected now.
+				if (pendingDetail !== null) {
+					const c = data.repo ? findChangeByKey(data, pendingDetail) : undefined;
+					pendingDetail = null;
+					if (c) selectChange(c);
+				}
 			},
 			(err: unknown) => {
 				if (stale()) return;
@@ -287,10 +335,13 @@ function selectChange(c: GitChange): void {
 	}
 	if (isMobile()) mobilePane = "diff";
 	renderAll();
+	// Opening a diff is a step Back undoes (a no-op while a route is being applied).
+	reflectRoute({ push: true });
 }
 
 function chooseDir(next: string): void {
 	dir = next;
+	pendingDetail = null;
 	selected = null;
 	clearDiff();
 	mobilePane = "list";
@@ -478,7 +529,10 @@ function changeRow(c: GitChange): HTMLElement {
 		: c.restricted
 			? `${c.path} — restricted (may contain credentials)`
 			: `${statusWord(c)}: ${c.path}`;
-	row.addEventListener("click", () => selectChange(c));
+	row.addEventListener("click", () => {
+		pendingDetail = null; // the person's choice voids a route's pending detail
+		selectChange(c);
+	});
 	return row;
 }
 
@@ -593,15 +647,7 @@ function notRepoBox(candidates: string[]): HTMLElement {
 function diffHeader(name: string, meta: HTMLElement | string, actions: HTMLElement[]): HTMLElement {
 	const header = el("div", "files-preview-header");
 	header.appendChild(
-		button(
-			"‹ Changes",
-			"files-btn files-mobile-only",
-			() => {
-				mobilePane = "list";
-				renderAll();
-			},
-			"Back to the change list",
-		),
+		button("‹ Changes", "files-btn files-mobile-only", routeBack, "Back to the change list"),
 	);
 	const title = el("div", "files-preview-title");
 	title.appendChild(el("span", "files-preview-name", name));

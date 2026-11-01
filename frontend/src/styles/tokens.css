@@ -73,15 +73,16 @@
   --s-6: 2rem;
 
   /* Layers, lowest to highest. The overlays (Files / Git / Chat) sit
-     above the terminal panes and the selection hint; the mobile sidebar
-     drawer shares their layer because the two never overlap (the
-     drawer covers the whole terminal area); the mobile view nav floats
-     above the overlays; dialogs above everything. */
+     above the terminal panes and the selection hint; the mobile view nav
+     floats above the overlays; the mobile sidebar drawer (and its
+     backdrop) above all of those — it opens from the header over
+     WHATEVER view is up, Files included, and must not be painted under
+     it; dialogs above everything. */
   --z-hint: 10;
-  --z-drawer-backdrop: 15;
-  --z-drawer: 20;
   --z-overlay: 20;
   --z-nav: 30;
+  --z-drawer-backdrop: 34;
+  --z-drawer: 35;
   --z-modal: 100;
   --z-toast: 110;
 }
