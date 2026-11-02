@@ -25,7 +25,7 @@ vinculante para los PRs
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
 `ac1024d`); si los dos documentos difieren, manda este;
 este archivo define lo que el código debe cumplir y lo que cada PR debe demostrar. Cambiar un
-contrato exige un PR de docs antes o junto con el código. **v1.7.1**: §8.1.5 paso 2b, consumo del paste antes del siguiente byte, y `too-many-segments` en 48 pastes por el presupuesto T_http (hallazgos del smoke con CLI 2.1.314 y de la revisión durante la implementación 3.2, 2026-10-30)
+contrato exige un PR de docs antes o junto con el código. **v1.7.1**: §8.1.5 paso 2b, consumo del paste antes del siguiente byte, y `too-many-segments` en 48 pastes por el presupuesto T_http (hallazgos del smoke con CLI 2.1.314 y de la revisión durante la implementación 3.2, 2026-10-30). **v1.7.2** (aprobado por el responsable como P1 de backend de Chat, 2026-11-02, tras la reanudación real de Educación HZ): §5.2 el binding vale para UN arranque del contenedor —toda parada lo retira de todas las conversaciones de la sesión, residentes o no—; §5.3 el probe solo lleva a `waiting_input` con identidad verificada (entrada `interactive`, `pid` descendiente del `pane_pid` del pane ligado), nunca revive `ended`, un estado ilegible no es `idle`, y el silencio de 10 min y un probe dirigido tras `SessionStart` se despachan de verdad; §8.1.3 `binding-stale` también para una entrada del probe con `kind ≠ interactive` aunque descienda del pane
 
 Convenciones: *MUST*/*MUST NOT* son requisitos verificados por test; *SHOULD* son requisitos
 verificados en revisión. "Bytes" significa siempre bytes UTF-8 del contenido, salvo donde se dice
@@ -1360,7 +1360,7 @@ candidata); si no hay candidata única, se cuenta en `ingest_rejected` y en
 | `task_created` / `task_completed` | `TaskCreated`/`TaskCompleted` | `task_id`, `task_subject`, `teammate_name?` | `task_subject` ≤ L4 (sin `task_description`) |
 | `teammate_idle` | `TeammateIdle` | `teammate_name` | — |
 | `gap` | backend | `reason`, `scope?`, `dropped?`, `dropped_bytes?`, `range?`, `detail?` | — |
-| `probe` | backend | `status`, `waitingFor?`, `found: boolean` | — |
+| `probe` | backend | `status` (**v1.7.2**: `null` si falta o es ilegible, antes se escribía `idle`), `waitingFor?`, `found: boolean`; **v1.7.2**, aditivos: `kind` de la entrada, `verified` (identidad verificada, §5.3) y `applied` (si cambió o renovó el estado) | — |
 | `composer_send` | backend (3.2, §8.1.8) | uno por cambio de estado: `client_message_id`, `state: prepared\|entered\|failed\|uncertain\|delivered\|unconfirmed\|misdelivered\|resolved\|released`, `result`, `effects: pending\|settled`, `pane_id`, `pane_pid`, `container_id`, `text_hash`, `bytes`, `segments`, `actor`, `stage?`, `segments_sent?`, `pending?`, `orphaned?`, `prompt_id?`, `seq?`, `misdelivered_to?`, `outcome?`, `by?`, `evidence?`, `http?` | — (**sin texto**, solo `text_hash`) |
 
 Nota 1 (observado en 3.0c, CLI 2.1.308): con `--dangerously-skip-permissions`, un Bash que falla
@@ -1608,6 +1608,23 @@ Casos que *MUST* estar en el test:
 - Dos conversaciones con el mismo `pane_id`: la más reciente conserva el binding; la anterior pasa a
   `pane_id = NULL`, `status = unknown`, evidencia `binding_lost`.
 - `session_end` con `reason: clear|resume` deshace el binding al confirmarse.
+- **(v1.7.2) Un binding vale para un único arranque del contenedor.** Los `pane_id` son del servidor
+  tmux del contenedor y se reutilizan (`%0` de nuevo) en cada arranque, también en el `N` de una
+  recreación. Toda parada de la sesión (stop, kill, reconcile que la encuentra caída; la parada de
+  `O` antes de recrear incluida) *MUST* poner `pane_id = NULL`, `tab_id = NULL` y `disconnected ·
+  reconcile` en **todas** las conversaciones de la sesión —también las que no están residentes en
+  memoria—, en el índice y en la fila D1. El arranque reconcilia igual las sesiones que encuentra
+  paradas. Nada se reasigna: una conversación vuelve a tener pane solo cuando un evento suyo llega
+  desde ese pane del contenedor vivo. El historial (`events.jsonl`) no se toca.
+  La retirada es idempotente (solo escribe lo que todavía difiere, índice y fila D1 por separado)
+  y recuperable: una escritura fallida se completa en la siguiente parada o en el reconcile de
+  arranque, y un índice cuyo snapshot no se pudo escribir sigue residente con el estado retirado.
+  El trabajo **en vuelo** del arranque anterior queda anulado en el instante de la parada: un hook
+  que se estaba ingiriendo se rechaza `not_running` (como si hubiera llegado después) y un probe o
+  una verificación de identidad que respondan tarde no aplican nada (`pid` y `%0` se reutilizan en
+  el arranque siguiente).
+- La retirada del binding por la viñeta de "dos conversaciones" *MUST* alcanzar también a una
+  conversación cuyo índice no esté residente (G4): se abre para comprobarlo.
 - El composer (§8) envía al `pane_id` del binding y nunca a uno elegido por el cliente; su lock es
   por `(st_session_id, pane_id)`, de modo que las dos conversaciones de la segunda viñeta nunca
   entregan a la vez, y exige que el probe liste `cid` con un `pid` descendiente de `pane_pid`.
@@ -1628,10 +1645,31 @@ Tabla única (`conversationState.ts`, test de tabla):
 | * | `notification{idle_prompt}` | `waiting_input` | `hook:Notification` |
 | * | `session_end` | `ending` → `ended` tras 5 s sin eventos | `hook:SessionEnd` |
 | `ending` | cualquier evento del mismo `session_id` | estado según el evento | — |
-| * | `probe{found:false}` con contenedor running | `ended` | `probe:absent` |
-| * | `probe{status}` | `busy`→`running`, `waiting`+`input needed`→`waiting_input`, `waiting`+`permission prompt`→`waiting_permission`, `idle`→`waiting_input` | `probe:<status>` |
+| * salvo `ended` | `probe{found:false}` con contenedor running | `ended` | `probe:absent` |
+| * salvo `ended` | `probe{busy}` | `running` | `probe:busy` |
+| * salvo `ended` | `probe{waiting, permission prompt}` | `waiting_permission` | `probe:waiting` |
+| * salvo `ended` | `probe{idle}` o `probe{waiting, input needed}` **con identidad verificada** (abajo) | `waiting_input` | `probe:idle` / `probe:waiting` |
+| * | `probe` con identidad no verificada para `waiting_input`, o con `status` ausente o ilegible | sin cambio | — |
+| `ended` | cualquier `probe` | sin cambio (solo un hook reabre) | — |
 | * | contenedor no running | `disconnected` | `reconcile` |
-| * | sin eventos ni probe exitoso en 10 min con contenedor running | `unknown` | `timeout` |
+| `running`/`waiting_*` | sin eventos ni probe exitoso en 10 min con contenedor running | `unknown` | `timeout` |
+
+**(v1.7.2) Identidad verificada.** Un probe solo deja una conversación en `waiting_input` —el estado
+que habilita el composer— cuando, para ese `cid`, la entrada del probe es `kind: interactive`, la
+conversación tiene binding en el arranque actual (§5.2) y el `pid` de la entrada desciende del
+`pane_pid` de ese pane (`tmux display` + el mismo script de ascendencia que `binding-stale`,
+§8.1.3). Un trabajo en background que desciende del pane **no** cuenta. Si cualquier comprobación
+falla o no se puede hacer, el estado no cambia. `busy` y `permission prompt` se aplican sin esa
+verificación: no habilitan el envío. El composer verifica todo de nuevo al enviar.
+
+**(v1.7.2) Cuándo hay probe.** Además del reconcile de arranque: (a) un probe dirigido, de una sola
+ejecución en vuelo por sesión, unos segundos después de un `session_start` que deja la conversación
+en `unknown` —el caso de `--resume`/`/resume` con el CLI esperando en su prompt, que no emite ningún
+hook hasta que alguien escribe—; (b) un barrido periódico que, para cada conversación viva de una
+sesión running con la última evidencia (evento o probe exitoso) de hace ≥ 8 min, hace un probe de
+la sesión; si a los 10 min sigue sin evidencia, aplica la fila `timeout`. Un probe exitoso que
+confirma el estado lo renueva (`status_at`), así que una conversación esperando de verdad en su
+prompt no cae a `unknown` por silencio.
 
 Un probe exitoso *MUST* tener prioridad sobre el último hook si es más reciente; un hook *MUST*
 tener prioridad sobre un probe anterior. Se decide por `status_at`.
@@ -1787,7 +1825,7 @@ incertidumbre no se envía**; nunca "por si acaso".
 | `session-not-running` | el contenedor no está `running` |
 | `capture-inactive` | `capture.effective = false` en un probe fresco del relay (D7): sin hooks no hay ack |
 | `probe-failed` | `claude agents --json` no responde, no parsea, o **no lista** una sesión con `sessionId = cid` |
-| `binding-stale` | el probe lista `cid` pero su `pid` no es descendiente de `pane_pid` del pane ligado, o el pane ligado ya no existe (`tmux display -p -t <pane_id>` falla): la conversación cambió de pane o el pane fue recreado |
+| `binding-stale` | el probe lista `cid` pero su `pid` no es descendiente de `pane_pid` del pane ligado, o el pane ligado ya no existe (`tmux display -p -t <pane_id>` falla): la conversación cambió de pane o el pane fue recreado; **(v1.7.2)** o la entrada del probe para `cid` tiene `kind ≠ interactive` (`detail: "kind:<kind>"`): un trabajo en background puede descender del pane y no es el proceso que lee el prompt |
 | `busy` | probe `status: busy` |
 | `needs-terminal` | probe `waitingFor ∉ {∅, "input needed"}` (incluye `"dialog open"` y `"permission prompt"`); o `pane_in_mode = 1`; o `pane_dead = 1`; o `pane_current_command ∉ {claude, node}` |
 | `composer-not-empty` | la **región de entrada** del CLI (definición abajo) contiene texto propio, o no se pudo delimitar |

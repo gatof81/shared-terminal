@@ -629,11 +629,17 @@ export class ConversationStore {
 	}
 
 	/** Wait for every queued event of a conversation to hit disk (tests, shutdown). */
-	async flush(stSessionId: string, cid: string): Promise<void> {
+	/**
+	 * Write the snapshot now. Resolves false when it could not be written
+	 * (the index stays resident and dirty; `writeIndex` logged why) — callers
+	 * that must know the snapshot is durable check it (v1.7.2 binding release).
+	 */
+	async flush(stSessionId: string, cid: string): Promise<boolean> {
 		const r = this.resident.get(`${stSessionId}/${cid}`);
-		if (!r) return;
+		if (!r) return true;
 		await r.chain;
 		await this.writeIndex(r);
+		return !r.dirty;
 	}
 
 	async flushAll(): Promise<void> {

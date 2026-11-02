@@ -460,6 +460,10 @@ describe("validation and preconditions (§8.1.2, §8.1.3): no effect, no record"
 		docker.ancestry = "no";
 		await expectCode("binding-stale");
 		docker.ancestry = "yes";
+		// v1.7.2: a background job for this cid that DESCENDS from the pane
+		// (ancestry "yes") and is idle is still not the process at the prompt.
+		probe = [{ sessionId: CID, kind: "background", pid: CLAUDE_PID, status: "idle" }];
+		await expectCode("binding-stale", "kind:background");
 		probe = [{ sessionId: "other", kind: "interactive", pid: 1, status: "idle" }];
 		await expectCode("probe-failed");
 		probe = null;
@@ -475,6 +479,12 @@ describe("validation and preconditions (§8.1.2, §8.1.3): no effect, no record"
 		await expectCode("session-not-running");
 		meta = { ...meta, status: "running" };
 		await seedConversation(CID, { kind: "headless" });
+		await expectCode("not-interactive");
+		// v1.7.2 gate: a conversation of a previous container start has its
+		// binding released (paneId null). Even with a probe that lists it as
+		// idle and interactive, and a pane %0 alive in the new start, nothing
+		// is sent — refused before any probe or tmux exec.
+		await seedConversation(CID, { paneId: null });
 		await expectCode("not-interactive");
 		await noEffects();
 	});

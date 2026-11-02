@@ -38,13 +38,18 @@ import {
 	removeAllRelayMarkers,
 	removeRelayEnabled,
 } from "./captureAuth.js";
+import { ancestryArgv, EXEC_TIMEOUT_S, paneStateArgv, parsePaneState } from "./composerText.js";
 import { DedupeTable, identityKey, payloadHash } from "./dedupe.js";
 import { isSafeStSessionId } from "./ids.js";
 import {
 	L2_MESSAGE_BYTES,
 	RATE_LIMIT_GAP_WINDOW_MS,
 	SESSION_END_GRACE_MS,
+	SILENCE_PROBE_AFTER_MS,
+	SILENCE_SWEEP_INTERVAL_MS,
+	TARGETED_PROBE_DELAY_MS,
 	TOKEN_CACHE_TTL_MS,
+	UNKNOWN_AFTER_SILENCE_MS,
 } from "./limits.js";
 import { type NormalizedEvent, normalizeHookInput } from "./normalize.js";
 import {
@@ -63,13 +68,14 @@ import {
 	listConversationRows,
 	listRequestedSessions,
 	listRunningCaptureSessions,
+	releaseConversationBinding,
 	reserveConversationOwner,
 	revokeIngestTokens,
 	tokenMatchesHash,
 	updateConversation,
 } from "./registry.js";
 import { checkRevocation } from "./revocation.js";
-import { applyStateInput, type ConversationState, type StateInput } from "./state.js";
+import { applyStateInput, type ConversationState, isLiveClaim, type StateInput } from "./state.js";
 import {
 	type ConversationIndex,
 	type ConversationKind,
@@ -205,6 +211,12 @@ interface ConvRuntime {
 	lastRateGapAt: number;
 	rateDropped: number;
 	rateDroppedBytes: number;
+	/**
+	 * ms of the last accepted HOOK event (v1.7.2 §5.3 silence). Not the
+	 * index's `lastEventAt`: persisted `probe` events move that one, and an
+	 * unverified probe is not evidence of anything.
+	 */
+	lastHookAt: number;
 }
 
 /** The ST session was hard-deleted while this work was in flight (B4). */
@@ -249,6 +261,18 @@ export class ConversationService {
 
 	private epochOf(stSessionId: string): number {
 		return this.purgeEpoch.get(stSessionId) ?? 0;
+	}
+	/**
+	 * v1.7.2 §5.2 — the container-START generation of a session, bumped
+	 * synchronously by `onSessionDown`. Work that began under one start (a
+	 * hook being ingested, a probe in flight, an identity check) and
+	 * finishes after a stop must not bind, transition or verify anything:
+	 * the runtimes it would touch may already belong to the NEXT start, whose
+	 * tmux reuses the same pane ids and whose pid namespace reuses pids.
+	 */
+	private readonly startGen = new Map<string, number>();
+	private startGenOf(stSessionId: string): number {
+		return this.startGen.get(stSessionId) ?? 0;
 	}
 	/**
 	 * B4 (round 3) — admission is closed for good once a purge starts. ST
@@ -492,6 +516,8 @@ export class ConversationService {
 		raw: unknown,
 		relay: RelayReport | undefined,
 	): Promise<IngestOutcome> {
+		// Captured before the first await: the container start this hook came from.
+		const startGen = this.startGenOf(stSessionId);
 		const normalized = normalizeHookInput(raw);
 		if (!normalized.ok) {
 			this.stats.rejected.malformed = (this.stats.rejected.malformed ?? 0) + 1;
@@ -544,6 +570,10 @@ export class ConversationService {
 		if (this.isDead(stSessionId) || this.epochOf(stSessionId) !== epoch || rt.epoch !== epoch) {
 			return this.reject("not_running");
 		}
+		// v1.7.2: the container stopped while this hook was being ingested —
+		// same answer as a hook arriving after the stop (authorize: not_running).
+		// It must not bind a pane id the next start will reuse.
+		if (this.startGenOf(stSessionId) !== startGen) return this.reject("not_running");
 		// §3.2.1 — before the carrying event (the losses precede it) and
 		// before dedupe: a duplicate still delivers the report.
 		if (relay) this.applyRelayReport(rt, relay);
@@ -593,7 +623,11 @@ export class ConversationService {
 			} catch {
 				return this.reject("not_running");
 			}
-			if (this.isDead(stSessionId) || this.epochOf(stSessionId) !== epoch)
+			if (
+				this.isDead(stSessionId) ||
+				this.epochOf(stSessionId) !== epoch ||
+				this.startGenOf(stSessionId) !== startGen
+			)
 				return this.reject("not_running");
 			outcome = this.deps.store.enqueue(stSessionId, cid, pending);
 		}
@@ -683,6 +717,7 @@ export class ConversationService {
 			lastRateGapAt: 0,
 			rateDropped: 0,
 			rateDroppedBytes: 0,
+			lastHookAt: Date.parse(index.lastEventAt ?? "") || this.now(),
 		};
 		this.runtime.set(cid, rt);
 		return rt;
@@ -826,15 +861,39 @@ export class ConversationService {
 	private bindPane(index: ConversationIndex, pane: string): void {
 		if (index.paneId === pane) return;
 		index.paneId = pane;
+		const at = this.now();
 		for (const other of this.runtime.values()) {
 			if (other.stSessionId !== index.stSessionId || other.cid === index.cid) continue;
 			const otherIndex = this.deps.store.getResidentIndex(other.stSessionId, other.cid);
-			if (otherIndex && otherIndex.paneId === pane) {
-				otherIndex.paneId = null;
-				otherIndex.tabId = null;
-				otherIndex.state = { status: "unknown", evidence: "binding_lost", at: this.now() };
-				this.markDirty(other.stSessionId, other.cid);
+			if (otherIndex) {
+				if (otherIndex.paneId === pane) {
+					otherIndex.paneId = null;
+					otherIndex.tabId = null;
+					otherIndex.state = { status: "unknown", evidence: "binding_lost", at };
+					this.markDirty(other.stSessionId, other.cid);
+				}
+				continue;
 			}
+			// v1.7.2 §5.2: an index evicted by G4 still holds its binding on
+			// disk; open it to check (async — this caller is synchronous, the
+			// release lands right after, before any later event of `other`
+			// can be applied since each one first re-opens the index).
+			void this.releaseEvictedHolder(other, pane, at);
+		}
+	}
+
+	private async releaseEvictedHolder(other: ConvRuntime, pane: string, at: number): Promise<void> {
+		try {
+			const idx = await this.deps.store.open(other.stSessionId, other.cid);
+			if (idx.paneId !== pane) return;
+			this.deps.store.update(other.stSessionId, other.cid, (i) => {
+				i.paneId = null;
+				i.tabId = null;
+				i.state = { status: "unknown", evidence: "binding_lost", at };
+			});
+			await this.heartbeat.flushNow(`${other.stSessionId}/${other.cid}`);
+		} catch {
+			/* unreadable index: nothing to release */
 		}
 	}
 
@@ -971,11 +1030,18 @@ export class ConversationService {
 			default:
 				input = { kind: "event", ev: event.ev as "assistant_delta", at };
 		}
-		this.transition(rt, input);
+		rt.lastHookAt = at;
+		const after = this.transition(rt, input);
 		if (event.ev === "session_end") this.scheduleEndGrace(rt);
 		else if (rt.endTimer) {
 			clearTimeout(rt.endTimer);
 			rt.endTimer = null;
+		}
+		// v1.7.2 §5.3 (a): a CLI that resumed (or started) and waits at its
+		// prompt emits no hook until someone types, so nothing else would
+		// ever move this `unknown`. Ask the process itself, shortly.
+		if (event.ev === "session_start" && after?.status === "unknown") {
+			this.scheduleTargetedProbe(rt.stSessionId);
 		}
 	}
 
@@ -987,6 +1053,13 @@ export class ConversationService {
 		if (after === before) return before;
 		this.deps.store.update(rt.stSessionId, rt.cid, (i) => {
 			i.state = after;
+			// v1.7.2 §5.2: a conversation whose process is gone, or whose
+			// container stopped, holds no pane — a pane id is only meaningful
+			// in the tmux server of the container start that reported it.
+			if (releasesBinding(after)) {
+				i.paneId = null;
+				i.tabId = null;
+			}
 		});
 		// Status changes are worth a D1 write right away (coalesced per 30 s
 		// anyway: a flapping session cannot amplify writes).
@@ -1036,6 +1109,12 @@ export class ConversationService {
 
 	/** Container stopped/killed: every conversation of the session is `disconnected`. */
 	async onSessionDown(stSessionId: string): Promise<void> {
+		// First, synchronously: everything in flight for the start that just
+		// ended is void from here on (ingest, probe, identity check).
+		this.startGen.set(stSessionId, this.startGenOf(stSessionId) + 1);
+		// A probe still in flight belongs to the old start; the next start's
+		// callers must not join it.
+		this.probing.delete(stSessionId);
 		this.tokenCache.delete(stSessionId);
 		this.rate.forget(stSessionId);
 		for (const rt of Array.from(this.runtime.values())) {
@@ -1054,6 +1133,110 @@ export class ConversationService {
 			this.runtime.delete(rt.cid);
 			// B5 — ownership survives a stop (the D1 row keeps it too); only
 			// a purge forgets it.
+		}
+		const t = this.targetedTimers.get(stSessionId);
+		if (t) clearTimeout(t);
+		this.targetedTimers.delete(stSessionId);
+		// v1.7.2 §5.2 — and EVERY other conversation of the session on disk,
+		// resident or not: the next container start (the same container, or
+		// N of a recreation) numbers its panes from %0 again, and a binding
+		// left here would be inherited by whatever runs there.
+		await this.releaseBindings(stSessionId);
+	}
+
+	/**
+	 * v1.7.2 §5.2: every conversation of a session that is not running gets
+	 * `pane_id = NULL`, `tab_id = NULL` and `disconnected · reconcile`, in
+	 * the index and the D1 row. Only state and binding change — the events
+	 * file is never touched — and nothing is re-bound: a conversation gets a
+	 * pane again only from its own next event. Conversations with a runtime
+	 * are handled by `onSessionDown` itself; this covers the others.
+	 * Best-effort per conversation: an unreadable index is skipped.
+	 */
+	private async releaseBindings(stSessionId: string): Promise<void> {
+		// Idempotent and recoverable: the index (memory + snapshot) and the D1
+		// row are converged INDEPENDENTLY and only where they still differ,
+		// so a run that failed half-way (snapshot write, D1) is completed by
+		// the next one — the next stop, or the boot reconcile of a session
+		// found stopped — and a run with nothing left to do writes nothing.
+		const startGen = this.startGenOf(stSessionId);
+		let cids: string[] = [];
+		try {
+			cids = await this.deps.store.listConversationIds(stSessionId);
+		} catch {
+			cids = [];
+		}
+		// One D1 read: which rows still claim a pane or a live state. Null
+		// when D1 is unreachable — then every conversation's row is written
+		// (the statement is idempotent) and failures are left for next time.
+		let rows: Map<string, ConversationRow> | null = null;
+		try {
+			rows = new Map((await listConversationRows(stSessionId)).map((r) => [r.session_id, r]));
+		} catch {
+			rows = null;
+		}
+		const at = this.now();
+		let failed = 0;
+		const all = new Set<string>([...cids, ...(rows ? rows.keys() : [])]);
+		for (const cid of all) {
+			if (this.isDead(stSessionId)) return;
+			// A runtime appeared, or a new start began: an event came from the
+			// live container, and that conversation's binding is its own now.
+			if (this.runtime.has(cid) || this.startGenOf(stSessionId) !== startGen) continue;
+			// ── index ──
+			if (cids.includes(cid)) {
+				const wasResident = !!this.deps.store.getResidentIndex(stSessionId, cid);
+				try {
+					const index = wasResident
+						? (this.deps.store.getResidentIndex(stSessionId, cid) as ConversationIndex)
+						: await this.deps.store.open(stSessionId, cid);
+					const stale =
+						index.paneId !== null || index.tabId !== null || index.state.status !== "disconnected";
+					if (stale) {
+						this.deps.store.update(stSessionId, cid, (i) => {
+							i.state = { status: "disconnected", evidence: "reconcile", at };
+							i.paneId = null;
+							i.tabId = null;
+						});
+					}
+					// Durable before moving on. If the snapshot cannot be written the
+					// index STAYS resident (memory answers the released state; the
+					// next run writes it), instead of being closed and served stale
+					// from disk.
+					// Always flushed (a no-op when nothing is pending): an earlier run
+					// may have released it in memory without managing to write it.
+					const durable = await this.deps.store.flush(stSessionId, cid);
+					if (!durable) throw new Error("index snapshot not written");
+					if (!wasResident) await this.deps.store.close(stSessionId, cid);
+				} catch (err) {
+					failed++;
+					logger.warn(
+						`[conversation] release binding (index) failed for ${stSessionId}/${cid}: ${(err as Error).message}`,
+					);
+				}
+			}
+			// ── D1 ──
+			const row = rows?.get(cid);
+			const rowStale =
+				rows === null ||
+				(row !== undefined &&
+					(row.pane_id !== null || row.tab_id !== null || row.status !== "disconnected"));
+			if (rowStale && (rows === null ? cids.includes(cid) : true)) {
+				try {
+					await releaseConversationBinding(stSessionId, cid, new Date(at).toISOString());
+					this.stats.d1Writes++;
+				} catch (err) {
+					failed++;
+					logger.warn(
+						`[conversation] release binding (D1) failed for ${stSessionId}/${cid}: ${(err as Error).message}`,
+					);
+				}
+			}
+		}
+		if (failed > 0) {
+			logger.warn(
+				`[conversation] release bindings of ${stSessionId}: ${failed} write(s) failed; retried at the next stop or boot reconcile`,
+			);
 		}
 	}
 
@@ -1257,18 +1440,47 @@ export class ConversationService {
 		}
 	}
 
-	applyProbe(stSessionId: string, entries: ProbeEntry[]): void {
+	/**
+	 * Apply one probe of the session to its resident conversations (§5.3,
+	 * v1.7.2). `waiting_input` — the state that enables the composer — is
+	 * reached only with the identity verified (`verifyIdentity`); `busy` and
+	 * `permission prompt` apply without it (they never enable a send); an
+	 * entry whose status is missing or unreadable changes nothing; an ended
+	 * conversation is never revived (state.ts).
+	 */
+	async applyProbe(
+		stSessionId: string,
+		entries: ProbeEntry[],
+		startGen = this.startGenOf(stSessionId),
+	): Promise<void> {
 		const at = this.now();
 		const byId = new Map(entries.map((e) => [e.sessionId, e]));
-		for (const rt of this.runtime.values()) {
+		for (const rt of Array.from(this.runtime.values())) {
 			if (rt.stSessionId !== stSessionId) continue;
+			const index = this.deps.store.getResidentIndex(rt.stSessionId, rt.cid);
+			if (!index) continue;
 			const e = byId.get(rt.cid);
-			const input: StateInput = e
-				? e.status
-					? { kind: "probe", found: true, status: e.status, waitingFor: e.waitingFor, at }
-					: { kind: "probe", found: true, status: "idle", at }
-				: { kind: "probe", found: false, at };
-			this.transition(rt, input);
+			let input: StateInput;
+			if (!e) input = { kind: "probe", found: false, at };
+			else {
+				const wantsIdle =
+					e.status === "idle" ||
+					(e.status === "waiting" && (e.waitingFor ?? "input needed") === "input needed");
+				const verified = wantsIdle ? await this.verifyIdentity(index, e) : false;
+				// The check awaited execs: a stop in the meantime voids it.
+				if (this.startGenOf(stSessionId) !== startGen) return;
+				input = {
+					kind: "probe",
+					found: true,
+					...(e.status ? { status: e.status } : {}),
+					...(e.waitingFor ? { waitingFor: e.waitingFor } : {}),
+					verified,
+					at,
+				};
+			}
+			if (this.startGenOf(stSessionId) !== startGen) return;
+			const before = index.state;
+			const after = this.transition(rt, input);
 			this.enqueueOrOpen(rt, {
 				ev: "probe",
 				prompt_id: null,
@@ -1278,11 +1490,145 @@ export class ConversationService {
 				data: e
 					? {
 							found: true,
-							status: e.status ?? "idle",
+							status: e.status ?? null,
+							kind: e.kind,
 							...(e.waitingFor ? { waitingFor: e.waitingFor } : {}),
+							...(input.kind === "probe" && input.found
+								? { verified: input.verified === true }
+								: {}),
+							applied: after !== null && after !== before,
 						}
-					: { found: false },
+					: { found: false, applied: after !== null && after !== before },
 			});
+		}
+	}
+
+	/**
+	 * v1.7.2 §5.3 "identidad verificada": the probe entry is the INTERACTIVE
+	 * process reading the prompt of the pane this conversation is bound to,
+	 * in the current container start. A background job can descend from the
+	 * pane (a parked session continued as a daemon job) and is not it. Every
+	 * check that fails or cannot be made answers false (fail closed).
+	 */
+	private async verifyIdentity(index: ConversationIndex, e: ProbeEntry): Promise<boolean> {
+		if (e.kind !== "interactive") return false;
+		if (!index.paneId || typeof e.pid !== "number") return false;
+		if (!this.deps.execCapture) return false;
+		const opts = { maxBytes: 4096, timeoutMs: (EXEC_TIMEOUT_S + 2) * 1000 };
+		try {
+			const pane = await this.deps.execCapture(
+				index.stSessionId,
+				paneStateArgv(index.paneId),
+				opts,
+			);
+			if (pane.timedOut || pane.truncated || pane.exitCode !== 0) return false;
+			const state = parsePaneState(pane.stdout.toString("utf8"));
+			if (!state || state.dead) return false;
+			const anc = await this.deps.execCapture(
+				index.stSessionId,
+				ancestryArgv(e.pid, state.panePid),
+				opts,
+			);
+			if (anc.timedOut || anc.truncated || anc.exitCode !== 0) return false;
+			return anc.stdout.toString("utf8").trim() === "yes";
+		} catch {
+			return false;
+		}
+	}
+
+	/** One probe per session in flight; callers share it (§5.3 v1.7.2). */
+	private readonly probing = new Map<string, Promise<boolean>>();
+	private readonly targetedTimers = new Map<string, NodeJS.Timeout>();
+	private sweepTimer: NodeJS.Timeout | null = null;
+
+	/** Probe the session and apply the result. Resolves true iff the probe answered. */
+	probeAndApply(stSessionId: string): Promise<boolean> {
+		const inFlight = this.probing.get(stSessionId);
+		if (inFlight) return inFlight;
+		const startGen = this.startGenOf(stSessionId);
+		const run = (async () => {
+			const entries = await this.probeSession(stSessionId);
+			if (!entries || this.isDead(stSessionId)) return false;
+			// A probe of a container start that has since stopped (its answer
+			// came late, possibly from O) describes nothing that exists now.
+			if (this.startGenOf(stSessionId) !== startGen) return false;
+			await this.applyProbe(stSessionId, entries, startGen);
+			return true;
+		})().finally(() => {
+			if (this.probing.get(stSessionId) === run) this.probing.delete(stSessionId);
+		});
+		this.probing.set(stSessionId, run);
+		return run;
+	}
+
+	private scheduleTargetedProbe(stSessionId: string): void {
+		if (!this.deps.execCapture || this.targetedTimers.has(stSessionId)) return;
+		const t = setTimeout(() => {
+			this.targetedTimers.delete(stSessionId);
+			void this.probeAndApply(stSessionId).catch(() => undefined);
+		}, TARGETED_PROBE_DELAY_MS);
+		t.unref?.();
+		this.targetedTimers.set(stSessionId, t);
+	}
+
+	/** Start the periodic §5.3 silence sweep (index.ts; tests call `sweepSilence`). */
+	startSilenceSweep(): void {
+		if (this.sweepTimer || !this.deps.enabled) return;
+		this.sweepTimer = setInterval(() => {
+			void this.sweepSilence().catch((err) =>
+				logger.warn(`[conversation] silence sweep failed: ${(err as Error).message}`),
+			);
+		}, SILENCE_SWEEP_INTERVAL_MS);
+		this.sweepTimer.unref?.();
+	}
+
+	/**
+	 * v1.7.2 §5.3 (b). For each live conversation (running / waiting_*) of a
+	 * session whose last evidence — an accepted hook, or a probe that moved
+	 * or renewed its state — is ≥ SILENCE_PROBE_AFTER_MS old: one probe of
+	 * the session. Whatever is still without evidence after
+	 * UNKNOWN_AFTER_SILENCE_MS then decays to `unknown · timeout`. Runtimes
+	 * exist only for sessions whose container is up (onSessionDown drops
+	 * them), which is the table's "con contenedor running".
+	 */
+	async sweepSilence(): Promise<void> {
+		// One sweep at a time: a sweep slowed by probes (≤ PROBE_TIMEOUT_MS
+		// each, plus identity execs) must not overlap the next tick.
+		if (this.sweeping) return;
+		this.sweeping = true;
+		try {
+			await this.sweepSilenceOnce();
+		} finally {
+			this.sweeping = false;
+		}
+	}
+
+	private sweeping = false;
+
+	private async sweepSilenceOnce(): Promise<void> {
+		const now = this.now();
+		const evidenceAt = (rt: ConvRuntime, i: ConversationIndex) =>
+			Math.max(rt.lastHookAt, i.state.at);
+		const due = new Map<string, ConvRuntime[]>();
+		for (const rt of this.runtime.values()) {
+			if (this.isDead(rt.stSessionId)) continue;
+			const index = this.deps.store.getResidentIndex(rt.stSessionId, rt.cid);
+			if (!index || !isLiveClaim(index.state.status)) continue;
+			if (now - evidenceAt(rt, index) < SILENCE_PROBE_AFTER_MS) continue;
+			const list = due.get(rt.stSessionId) ?? [];
+			list.push(rt);
+			due.set(rt.stSessionId, list);
+		}
+		for (const [sid, rts] of due) {
+			await this.probeAndApply(sid).catch(() => false);
+			const at = this.now();
+			for (const rt of rts) {
+				const index = this.deps.store.getResidentIndex(rt.stSessionId, rt.cid);
+				if (!index || !isLiveClaim(index.state.status)) continue;
+				if (at - evidenceAt(rt, index) >= UNKNOWN_AFTER_SILENCE_MS) {
+					this.transition(rt, { kind: "silence", at });
+				}
+			}
 		}
 	}
 
@@ -1328,6 +1674,9 @@ export class ConversationService {
 						continue;
 					}
 				}
+				// v1.7.2 §5.2: a session found stopped holds no pane — also the
+				// bindings a stop left behind before this rule existed.
+				if (!runningIds.has(sid)) await this.releaseBindings(sid);
 				const revocation = await checkRevocation(this.deps.workspaceRoot, sid);
 				if (revocation !== "none") {
 					const row = await getSessionCapture(sid);
@@ -1354,11 +1703,36 @@ export class ConversationService {
 						to: new Date(this.now()).toISOString(),
 					});
 				}
-				const entries = await this.probeSession(sid);
-				if (entries) this.applyProbe(sid, entries);
+				await this.probeAndApply(sid);
 			} catch (err) {
 				logger.warn(`[conversation] reconcile failed for ${sid}: ${(err as Error).message}`);
 			}
+		}
+		// Sessions with conversations on disk but no capture files (their
+		// capture was withdrawn): their bindings converge too. Only the
+		// binding/state — no capture file is written or retired here.
+		for (const sid of await this.sessionsWithConversations()) {
+			if (ids.has(sid) || runningIds.has(sid)) continue;
+			try {
+				if (this.deps.isRecreateUnresolved) {
+					if (await this.deps.isRecreateUnresolved(sid).catch(() => true)) continue;
+				}
+				await this.releaseBindings(sid);
+			} catch (err) {
+				logger.warn(
+					`[conversation] reconcile: releasing bindings of ${sid} failed: ${(err as Error).message}`,
+				);
+			}
+		}
+	}
+
+	/** ST session ids with a `.conversations/<sid>` directory. */
+	private async sessionsWithConversations(): Promise<string[]> {
+		try {
+			const entries = await fs.readdir(path.resolve(this.deps.workspaceRoot, ".conversations"));
+			return entries.filter((sid) => isSafeStSessionId(sid));
+		} catch {
+			return [];
 		}
 	}
 
@@ -1389,6 +1763,10 @@ export class ConversationService {
 	}
 
 	async shutdown(): Promise<void> {
+		if (this.sweepTimer) clearInterval(this.sweepTimer);
+		this.sweepTimer = null;
+		for (const t of this.targetedTimers.values()) clearTimeout(t);
+		this.targetedTimers.clear();
 		for (const rt of this.runtime.values()) {
 			if (rt.endTimer) clearTimeout(rt.endTimer);
 			await this.heartbeat.flushNow(`${rt.stSessionId}/${rt.cid}`);
@@ -1409,6 +1787,18 @@ export class ConversationService {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * v1.7.2 §5.2: states in which a conversation holds no pane — its container
+ * stopped, or the probe found no process for it. (`ended` after a
+ * SessionEnd keeps the existing §5.2 rule: only clear/resume release.)
+ */
+function releasesBinding(state: ConversationState): boolean {
+	return (
+		state.status === "disconnected" ||
+		(state.status === "ended" && state.evidence === "probe:absent")
+	);
+}
 
 function parseBearer(header: string | undefined): string | null {
 	if (!header) return null;
