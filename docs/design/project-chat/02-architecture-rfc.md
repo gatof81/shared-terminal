@@ -240,8 +240,10 @@ sequenceDiagram
 - **Completado** = llegó el `turn_end` del `prompt_id` aceptado **y ninguna otra entrada compartió
   ese turno** (protocolo §3.1). Sólo entonces el **resultado** es ese informe final (referencia), más
   cualquier publicación explícita del agente con `in_reply_to`. Si otra entrada compartió el turno
-  (Terminal, Control Directo, notificación de tarea), la entrega termina `ended_unattributed` y el
-  informe no se presenta como respuesta al mensaje.
+  (Terminal, Control Directo, notificación de tarea), o el mensaje se encoló detrás de otro turno, o
+  hubo pérdidas de hooks, la entrega termina `ended_unattributed` y el informe no se presenta como
+  respuesta al mensaje. La regla mira la secuencia de eventos y no sólo `prompt_id`, porque el CLI
+  anuncia una entrada encolada con el `prompt_id` del turno en curso (CONVERSATION.md §8.2.1).
 - Sin `channel_prompt` dentro de `T_accept` ⇒ `uncertain`: el CLI puede tenerlo en su cola y
   ejecutarlo más tarde, así que sigue contando como en vuelo. Pasa a `unconfirmed` sólo con evidencia
   de que el CLI ya no lo tiene (protocolo §3 regla 2b). **Nunca** se reenvía solo, ni por Channels

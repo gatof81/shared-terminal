@@ -119,6 +119,7 @@ stateDiagram-v2
   transported --> unconfirmed: runtime retirado (proceso claude terminado)
   accepted --> completed: turn_end con atribución inequívoca (§3.1)
   accepted --> ended_unattributed: turn_end con otra entrada en el mismo turno (§3.1)
+  accepted --> ended_unattributed: sin cierre y runtime en su prompt (no-close)
   accepted --> interrupted: turn_failed, session_end o runtime retirado
   completed --> [*]
   ended_unattributed --> [*]
@@ -138,7 +139,7 @@ stateDiagram-v2
 | `uncertain` | sin evidencia todavía, pero el CLI **puede** tenerlo en su cola (`priority: "next"`, C2) y procesarlo más tarde; **cuenta como en vuelo** | log | no |
 | `accepted` | la captura persistió el `channel_prompt` de ese `st_msg` (con `cid`, `prompt_id`) | log | no |
 | `completed` | llegó el `turn_end` del turno aceptado y la atribución es **inequívoca** (§3.1); `turn_seq` referencia el informe, que es el resultado del mensaje | log | sí |
-| `ended_unattributed{reason}` | el turno aceptado terminó, pero en él entró otra entrada (`mixed-input`, `grouped`, `no-prompt-id`, `multiple-stop`): el informe **no** se presenta como resultado de este mensaje; sólo se enlaza el hilo | log | sí |
+| `ended_unattributed{reason}` | el turno aceptado terminó, pero en él entró otra entrada (`queued`, `mixed-input`, `grouped`, `no-prompt-id`, `gap`, `relay-unverified`, `no-close`): el informe **no** se presenta como resultado de este mensaje; sólo se enlaza el hilo | log | sí |
 | `interrupted` | el turno aceptado terminó sin `turn_end` (`turn_failed`, `session_end`, parada) | log | sí |
 | `unconfirmed` | no hubo aceptación y hay evidencia de que el CLI ya no lo tiene (abajo); pudo haber llegado al modelo sin hook (relay perdido); **sin reintento automático** | log | sí |
 | `failed{reason}` | no se transportó: `expired`, `agent-removed`, `queue-full`, `persist-failed` | log | sí |
@@ -174,51 +175,85 @@ Reglas:
 
 ### 3.1 Atribución del resultado (decisión R8)
 
-El informe final de un turno es el resultado de un mensaje **sólo** si ese mensaje fue la única
-entrada del turno. Definiciones, todas sobre eventos **persistidos** de la conversación `cid` del
-`channel_prompt` aceptado, en orden de `seq`:
+El informe final de un turno es el resultado de un mensaje **sólo** si el mensaje abrió ese turno y
+nada más entró en él. La regla no se apoya sólo en `prompt_id`: el CLI 2.1.314 anuncia una entrada
+encolada **con el `prompt_id` del turno en curso** y cierra el turno encolado con un `Stop` cuyo
+`prompt_id` nadie anunció (CONVERSATION.md §8.2.1). Por eso la atribución mira la **secuencia** de
+eventos de la conversación, no sólo el identificador.
 
-- **Turno aceptado** = el `prompt_id` `P` del `channel_prompt` que llevó la entrega a `accepted`.
-- **Ventana** = desde ese `channel_prompt` hasta el **primer** `turn_end`/`turn_failed` con
-  `prompt_id = P` (incluido), o hasta un `session_end` o la retirada del runtime.
-- **Entrada ajena** = dentro de la ventana, cualquier `user_prompt` (cualquier `origin`),
-  `internal_prompt` u otro `channel_prompt` con `prompt_id = P`, o un `channel_prompt` que traiga más
-  de un `st_msg`.
+Definiciones, sobre eventos **persistidos** de la conversación `cid` del `channel_prompt` aceptado,
+en orden de `seq`:
 
-| Caso | Resultado |
-| --- | --- |
-| `channel_prompt` con un solo `st_msg`, `prompt_id = P` presente, sin entrada ajena en la ventana, ventana cerrada por `turn_end` | `completed`, `turn_seq` = ese `turn_end` |
-| entrada ajena en la ventana (Terminal, Control Directo, notificación de tarea, otro mensaje) | `ended_unattributed{mixed-input}` |
-| `channel_prompt` con varios `st_msg` (agrupación, C6) — no debería ocurrir con un mensaje en vuelo por agente; si ocurre, es una violación de invariante y se cuenta | todas esas entregas `ended_unattributed{grouped}` |
-| `user_prompt{origin: mixed}` que contiene el `st_msg` | `accepted` y después `ended_unattributed{mixed-input}` |
-| `channel_prompt` sin `prompt_id` | `accepted`, después `ended_unattributed{no-prompt-id}` al primer `turn_end` de la conversación |
-| ventana cerrada por `turn_failed`, `session_end` o retirada | `interrupted` |
-| otro `turn_end` con `prompt_id = P` antes de cualquier prompt nuevo (un hook `Stop` que bloquea y continúa, §4.6) | si ya era `completed`: anotación `attribution: superseded` en el log, la tarjeta muestra "el turno continuó; ver hilo"; el estado no cambia |
+- **Prompt** = cualquier `user_prompt` (cualquier `origin`), `internal_prompt` o `channel_prompt`.
+- **Cierre** = `turn_end` o `turn_failed`.
+- `P` = `prompt_id` del `channel_prompt` que llevó la entrega a `accepted`.
+- **Ventana** = desde el `transported` de la entrega (en tiempo de recepción del backend) hasta el
+  **primer** cierre con `prompt_id = P` después del `channel_prompt`, o hasta un `session_end` o la
+  retirada del runtime.
 
-Por qué basta: con un mensaje en vuelo por agente (§4), la única forma de que otra entrada comparta el
-turno es que venga de fuera del monitor, y el CLI la anuncia por `UserPromptSubmit` con el `prompt_id`
-del turno en curso (observado con el Composer, CONVERSATION.md §8.2.1) **antes** de su `Stop`; el
-relay reenvía en orden (§2.6), así que esa entrada queda dentro de la ventana. Lo que no cubre: un
-`UserPromptSubmit` perdido por el relay (`gap`). Por eso un `gap` de la conversación dentro de la
-ventana también da `ended_unattributed{gap}`. Hipótesis que la POC verifica (E4c, E4d, criterio G11):
-que el hook de una entrada tecleada o de una notificación de tarea durante el turno llega antes del
-`Stop` del turno con el mismo `prompt_id`.
+`completed` exige **todas** estas condiciones; la primera que falla da el motivo:
+
+| # | Condición | Si falla |
+| --- | --- | --- |
+| A1 | El `channel_prompt` lleva un solo `st_msg` | `ended_unattributed{grouped}` |
+| A2 | `P` existe | `ended_unattributed{no-prompt-id}` (cierra la ventana el primer cierre de la conversación) |
+| A3 | `P` es **nuevo**: ningún prompt persistido de `cid` anterior al `channel_prompt` llevaba `P` (si no, el mensaje se encoló detrás de otro turno y `P` es de ese turno) | `ended_unattributed{queued}` |
+| A4 | En la ventana no hay **ningún** otro prompt, sea cual sea su `prompt_id` | `ended_unattributed{mixed-input}` |
+| A5 | En la ventana no hay ningún cierre con un `prompt_id` distinto de `P` ni sin `prompt_id` (un `Stop` no anunciado es el rastro de una entrada encolada) | `ended_unattributed{mixed-input}` |
+| A6 | En la ventana no hay `gap` de la conversación | `ended_unattributed{gap}` |
+| A7 | **Relay limpio**: la generación del relay y su contador acumulado de pérdidas, leídos por `st-channel` en `/st-relay/status` (loopback), son iguales en `transported` y `T_settle` después del cierre, y ningún evento de la ventana ni el siguiente trae cabeceras `X-ST-Relay-*` de pérdida | `ended_unattributed{relay-unverified}` |
+| A8 | La captura no descartó por deduplicación ningún prompt de `cid` en la ventana (§5, identidad de prompts) | `ended_unattributed{mixed-input}` |
+| — | El cierre es `turn_failed`, o la ventana la cierra `session_end` o la retirada del runtime | `interrupted` |
+
+Lectura del relay (A7): hoy `/st-relay/status` sólo devuelve la generación (CONVERSATION.md §2.6);
+el contador acumulado de pérdidas (`X-ST-Relay-Dropped-Total`) es una ampliación de la imagen en P5.
+`st-channel` envía `relayGeneration`/`relayDropped` en `hello` y en cada `next`; para la lectura
+posterior al cierre, el monitor termina el long-poll en curso con 204 `{relayCheck: true}` y
+`st-channel` responde con un `next` nuevo que trae la lectura. Sin esa lectura, A7 falla.
+
+La decisión se toma **después** de `T_settle` (§8) desde el cierre: durante ese tiempo la
+entrega sigue `accepted`. Nada la convierte después en `completed` ni la saca de
+`ended_unattributed`.
+
+Salida sin cierre (`no-close`): si tras `accepted` dos probes con el runtime **en su prompt**
+(definición estricta de §4), separados por ≥ `T_clear`, no tienen entre medias ningún cierre con
+`prompt_id = P`, la entrega pasa a `ended_unattributed{no-close}` (el `Stop` se perdió o el turno se
+cerró con otro id). Así un hook perdido no bloquea al agente hasta `T_queue`.
+
+Un `turn_end` adicional con `prompt_id = P` después del cierre y antes de cualquier prompt nuevo (un
+hook `Stop` que bloquea y continúa, §4.6) no cambia el estado: se anota `attribution: superseded` y
+la tarjeta dice "el turno continuó; ver hilo".
+
+Qué no puede cubrir ninguna regla: un hook que el CLI **nunca envió** (fallo del lado del CLI antes
+del relay) es invisible. Es un riesgo residual declarado; A6–A7 cubren todo lo que pasa por el relay.
+
+Hipótesis que la POC verifica (E4c, E4d, criterio G11): con la entrada tecleada 0,5 s **antes** de la
+notificación, el `channel_prompt` lleva el `prompt_id` del turno humano (A3); con la entrada tecleada
+durante el turno, aparece un prompt en la ventana (A4) o un cierre no anunciado (A5); con una
+notificación de tarea, aparece un `internal_prompt` en la ventana (A4).
 
 ## 4. Elegibilidad, orden y concurrencia
 
 - **Orden**: por agente, FIFO por `seq` de `queued`. Entre agentes no hay orden global.
 - **Uno en vuelo por agente**: un agente con una entrega en `transporting`, `transported`,
   `uncertain` o `accepted` no recibe otra.
-- **Elegible** ⇔ regla 1–4 del RFC §5.5: runtime único del `start_gen` actual ∧ conversación del
-  runtime (`probe.pid = claude_pid`) en `waiting_input` con identidad verificada ∧ nada en vuelo ∧
-  pane sin registro del Composer sin liberar.
+- **"En su prompt"** (definición estricta, usada por la elegibilidad y por las reglas 2b (b), 2b (c)
+  y `no-close`): probe de la conversación del runtime (`probe.pid = claude_pid`) con identidad
+  verificada (§5.3 v1.7.2), `status = idle` o `waiting` con `waitingFor ∈ {ausente, "input needed"}`
+  (regla de v1.7.4), **y** la región de entrada del pane vacía según el parser de
+  `composer-not-empty` de §8.1.3 (`capture-pane`, lectura; no escribe nada). Un diálogo abierto o un
+  borrador en el input **no** es "en su prompt".
+- **Elegible** ⇔ regla 1–4 del RFC §5.5: runtime único del `start_gen` actual, no `degraded` ∧ "en
+  su prompt" ∧ nada en vuelo ∧ pane sin registro del Composer sin liberar.
 - La evaluación ocurre en el `next` bajo un lock en memoria por agente: una **instancia propia** de
   `SessionLifecycleLock` para el monitor (como hace el Composer en `composer.ts`), clave
   `project-agent:<agent_id>`, modo `fail`. No el singleton de ciclo de vida, cuyo guard
   `recreate-unresolved` no aplica aquí. Dos `next` concurrentes del mismo runtime no prestan dos
   mensajes.
-- La evidencia de "en su prompt" se renueva con un probe dirigido si la última tiene más de
-  `T_fresh` (30 s) — el mismo probe single-flight de §5.3.
+- El `next` hace su **propio** probe y lectura de la región de entrada justo antes de prestar
+  (`T_fresh` = 2 s): la ventana entre la comprobación y la notificación queda en el orden de
+  segundos. No se puede eliminar (la persona puede pulsar Enter en ese instante); A3–A5 de §3.1 la
+  detectan.
 
 ## 5. Captura: `channel_prompt`
 
@@ -233,6 +268,15 @@ Clasificador nuevo en la ingesta, **antes** de L1, con copia idéntica en el fro
 | canal no verificable | empieza y termina con la etiqueta pero falla alguna condición, `source` presente y ≠ `system`, o versión del CLI fuera de la lista | `user_prompt{origin: unverified}` (texto bajo L1, como §4.2.1) |
 | resto | todo lo demás | sin cambios |
 
+**Identidad para la deduplicación (§4.6).** Las clases derivadas de canal (`channel_prompt`,
+`user_prompt{origin: mixed}`, `user_prompt{channel_source_absent}`) usan su propio espacio de claves:
+`channel:<prompt_id>:<st_msgs ordenados>`. Además, P4 cambia la identidad de `user_prompt` e
+`internal_prompt` de `prompt_id` a `prompt_id` + SHA-256 del `prompt`: hoy la segunda entrada con el
+mismo `prompt_id` —exactamente la entrada encolada de §8.2.1— se descarta como duplicada y la
+atribución nunca la vería. Es un cambio de contrato de CONVERSATION.md §4.6 en su propio PR; los
+reintentos idénticos siguen colapsando. Hasta ese cambio, A8 trata cualquier `dedupe_dropped` de un
+prompt en la ventana como entrada ajena.
+
 La forma exacta de una entrega agrupada (un hook con varias etiquetas, o un hook por etiqueta) es
 **hipótesis** y criterio G10 de la POC; esta tabla se fija con ese resultado antes de P4. El caso
 "mezclado" es la única excepción a "un hecho, un lugar": se acepta porque sólo ocurre en la carrera
@@ -242,15 +286,18 @@ con el Terminal y está marcada.
 `source = system` acepta una entrega. Razones:
 
 1. **Seguridad**: `source` es lo que distingue una entrada inyectada por el CLI de un texto que la
-   persona teclea en el Terminal (`source: user`). Con `source` ausente, una etiqueta tecleada o
-   pegada sería indistinguible de una entrega real.
+   persona teclea en el Terminal. En 2.1.314 el texto tecleado llega **sin** `source`
+   (CONVERSATION.md §8.2.1: "`source` ausente = humano"). Aceptar `source` ausente haría que una
+   etiqueta tecleada o pegada en el Terminal confirmara una entrega.
 2. **Verificable**: la versión del CLI de las sesiones de agente está fijada (R9) y sólo entra en
    `CHANNEL_CLI_VERSIONS` si la POC (o su revalidación) observó `source = system` en el 100 % de las
    entregas (G3). El esquema 2.1.314 advierte *"Payloads may omit it while the field rolls out"*: por
    eso la regla se valida **por versión** y no se asume.
 3. **Fallo cerrado y visible**: si una versión validada omite `source` (no debería: el pin lo
-   impide), la entrega no se acepta, queda `uncertain` → `unconfirmed{no-evidence}` y el runtime pasa
-   a `degraded{source-absent}` (§6.4). Nunca se acepta "por la forma".
+   impide), la entrega no se acepta, queda `uncertain` → `unconfirmed{no-evidence}`, y el runtime pasa
+   a `degraded{source-absent}` (§6.4) **sólo** si el `st_msg` de esa etiqueta es el de la entrega en
+   vuelo de ese runtime. Una etiqueta sin `source` que no coincide (lo normal: alguien pegó una
+   etiqueta en el Terminal) sólo se cuenta. Nunca se acepta "por la forma".
 
 - El nombre de servidor esperado (`source`) es fijo y depende de cómo se cargue (`server:st` en la
   POC, `plugin:st:st` con plugin) — **(POC)**.
@@ -291,8 +338,8 @@ endpoint es nuestro proceso, no un hook del CLI.
 
 | Método | Ruta | Cuerpo | Respuesta |
 | --- | --- | --- | --- |
-| `POST` | `/ingest/channel/hello` | `{pane, claudePid, cliVersion, nonce}` | `{endpointId, agent: {handle, project} \| null, pollWaitSec}`. Antes de declarar ambigüedad, el monitor comprueba los runtimes anteriores de la sesión: uno cuyo `claude_pid` ya no existe (probe sin ese `pid`, o `/proc` por `execCapture`) se retira primero. Sólo dos procesos vivos ⇒ ambos `ambiguous`; la ambigüedad termina cuando queda uno (salida, `bye` o la misma comprobación en el siguiente `next`) |
-| `GET` | `/ingest/channel/next?endpoint=…` | long-poll ≤ 25 s | 200 `{leaseId, msgId, content, meta}` \| 204 \| 410 `retired` (el endpoint debe volver a `hello`) |
+| `POST` | `/ingest/channel/hello` | `{pane, claudePid, claudeStartTime, cliVersion, relayGeneration, relayDropped, nonce}` (`claudeStartTime` = campo 22 de `/proc/<claudePid>/stat`) | `{endpointId, agent: {handle, project} \| null, pollWaitSec}`. Antes de declarar ambigüedad, el monitor comprueba los runtimes anteriores de la sesión: uno cuyo `claude_pid` ya no existe (probe sin ese `pid`, o `/proc` por `execCapture`) se retira primero. Sólo dos procesos vivos ⇒ ambos `ambiguous`; la ambigüedad termina cuando queda uno (salida, `bye` o la misma comprobación en el siguiente `next`) |
+| `GET` | `/ingest/channel/next?endpoint=…&relayGeneration=…&relayDropped=…` | long-poll ≤ 25 s; 204 puede traer `{relayCheck: true}` (§3.1 A7) | 200 `{leaseId, msgId, content, meta}` \| 204 \| 410 `retired` (el endpoint debe volver a `hello`) |
 | `POST` | `/ingest/channel/transported` | `{endpointId, leaseId}` | 204; lease desconocido o vencido ⇒ 409 (el monitor ya lo marcó `uncertain`) |
 | `POST` | `/ingest/channel/post` | `{endpointId, clientMessageId, to?: [handle], kind, text, inReplyTo?}` | `{msgId, deliveries}`; 429 por límites; el resultado de la herramienta MCP se lo cuenta al modelo |
 | `POST` | `/ingest/channel/bye` | `{endpointId}` | 204 (retiro ordenado; el desordenado lo detecta `start_gen` o el vencimiento del poll) |
@@ -341,10 +388,12 @@ sí se garantiza:
    en `degraded{no-evidence}`; también `degraded{source-absent}` (§5). Un runtime `degraded` no
    recibe ninguna entrega. La UI muestra el agente como "canal sin respuesta" con la causa, y cada
    mensaje en cola dice "retenido: canal degradado".
-3. **Salida de `degraded` sólo por acción humana o por un runtime nuevo**: un nuevo `hello` (otro
-   proceso `claude`) o el botón del owner "Probar el canal otra vez", que reactiva el runtime para el
-   **siguiente** mensaje en cola (nunca reenvía el que quedó `unconfirmed`). No hay temporizador que
-   lo reactive solo.
+3. **`degraded` es del proceso, no del endpoint**: se guarda en el log del proyecto con la clave
+   (`st_session_id`, `claude_pid`, `claude_start_time`) y sobrevive a un reinicio del backend y a los
+   `hello` repetidos del mismo proceso (410 tras un reinicio, red cortada). Sólo lo levantan: un
+   proceso `claude` **distinto** (otro `pid` u otro `start_time`), o el botón del owner "Probar el
+   canal otra vez", que reactiva el canal para el **siguiente** mensaje en cola (nunca reenvía el que
+   quedó `unconfirmed`). No hay temporizador ni reconexión que lo levante sola.
 4. **Ningún fallback automático.** *MUST NOT*: el módulo del monitor (`backend/src/projectChat/**`)
    importa `conversation/composer*`, construye argv de `tmux`, o llama a `execCapture`/`streamExec`
    con un comando de escritura al pane. Lo comprueba un test de frontera de imports (nuevo) y un test de comportamiento: con el transporte fallando en todas sus
@@ -386,7 +435,8 @@ backend. Un agente comprometido puede como mucho estropear sus propias entregas.
 | T_lease | informe `transported` tras `next` | 10 s | `uncertain{lease}` |
 | T_accept | `channel_prompt` tras `transported` | **(POC)**: 3 × p99 medido, mínimo 15 s | `uncertain{no-evidence}` |
 | T_queue | vida en `queued`/`awaiting_approval` | 24 h | `failed{expired}` |
-| T_fresh | antigüedad máxima de la evidencia "en su prompt" | 30 s | probe dirigido |
+| T_fresh | antigüedad máxima de la evidencia "en su prompt" al prestar | 2 s (el `next` hace su propio probe) | probe dirigido |
+| T_settle | espera tras el cierre antes de decidir la atribución (§3.1 A7) | **(POC)**: ≥ 3 × la latencia máxima hook→backend medida, mínimo 5 s | decisión con lo que haya; sin lectura limpia del relay ⇒ `relay-unverified` |
 | T_clear | separación de los dos probes de la regla 2b (c) | **(POC)**: 3 × la latencia máxima de despertar medida en G2, mínimo 30 s | `uncertain` → `unconfirmed{no-evidence}` |
 | L7' | log del proyecto | 64 MiB | rotación como §4.4 L7 |
 
