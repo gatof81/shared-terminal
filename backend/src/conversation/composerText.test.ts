@@ -309,7 +309,7 @@ describe("foreground identity (§8.1.3 needs-terminal, foreground)", () => {
 				const vdir = path.join(dir, ".local/share/claude/versions");
 				mkdirSync(vdir, { recursive: true });
 				const native = path.join(vdir, "2.1.316");
-				copyFileSync("/usr/bin/sleep", native);
+				copyFileSync("/bin/bash", native); // not coreutils: CI runners ship a multi-call coreutils that refuses another name
 				chmodSync(native, 0o755);
 				tmux(
 					"-f",
@@ -366,12 +366,16 @@ describe("foreground identity (§8.1.3 needs-terminal, foreground)", () => {
 				// 1. the native-named binary in the foreground
 				wait(prompted);
 				expect(prompted(), "shell prompt before typing").toBe(true);
-				tmux("send-keys", "-t", pane, `${native} 300`, "Enter");
+				tmux("send-keys", "-t", pane, `${native} --norc --noprofile -c "read -r _ # 300"`, "Enter");
 				let pid = 0;
 				wait(() => {
-					const out = spawnSync("pgrep", ["-f", `${native} 300`], {
-						encoding: "utf8",
-					}).stdout.trim();
+					const out = spawnSync(
+						"pgrep",
+						["-f", `^${native} --norc --noprofile -c read -r _ # 300`],
+						{
+							encoding: "utf8",
+						},
+					).stdout.trim();
 					pid = Number(out.split("\n")[0] || 0);
 					return pid > 0;
 				});
@@ -389,11 +393,13 @@ describe("foreground identity (§8.1.3 needs-terminal, foreground)", () => {
 				expect(read(pid)).toBeNull();
 				wait(prompted);
 				expect(prompted(), "shell prompt before typing").toBe(true);
-				tmux("send-keys", "-t", pane, `${native} 301 &`, "Enter");
+				tmux("send-keys", "-t", pane, `${native} --norc --noprofile -c "sleep 301; :" &`, "Enter");
 				let bg = 0;
 				wait(() => {
 					bg = Number(
-						spawnSync("pgrep", ["-f", `${native} 301`], { encoding: "utf8" })
+						spawnSync("pgrep", ["-f", `^${native} --norc --noprofile -c sleep 301; :`], {
+							encoding: "utf8",
+						})
 							.stdout.trim()
 							.split("\n")[0] || 0,
 					);
