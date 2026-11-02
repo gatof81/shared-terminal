@@ -1,5 +1,14 @@
 # Fase 0 local — Channels con `fakechat` en tu Mac o PC
 
+> **Estado (2026-11-02): reemplazado.** El responsable ejecuta la fase 0 instrumentada en su sesión
+> local habitual con hooks sólo en la carpeta de prueba: ver `poc/channels-mac/`. Este kit de usuario
+> temporal queda como alternativa, con hallazgos pendientes de su última verificación: la
+> confirmación de un NO-GO compara líneas del log con su timestamp y nunca coincide; la lista de
+> herramientas denegadas no cubre `Skill`, `RemoteTrigger`, `CronCreate`, `ScheduleWakeup`,
+> `SendMessage`, `Artifact` y otras; un borrador en el input puede clasificarse como "no despertó";
+> en Linux falta `POC_UID`; volver a bajar el kit lo anida.
+
+
 Variante **local** de la fase 0 (`docs/design/project-chat/04-poc.md` §1.7, PR #512). Sólo
 responde dos preguntas: ¿Channels está disponible con tu suscripción? ¿despierta una sesión
 interactiva inactiva? No prueba fallos, concurrencia ni reinicios: eso es la POC completa, que sigue
