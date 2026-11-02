@@ -361,6 +361,111 @@ afterEach(async () => {
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
+describe("#510 — the probe must confirm the CLI is at its prompt (v1.7.4 §8.1.3)", () => {
+	// Nothing may happen for a refused send: no tmux effect (load-buffer /
+	// newline / Enter), not even the input-region read; no pane record; no
+	// composer_send event.
+	const nothingHappened = async () => {
+		expect(docker.effectSteps()).toEqual([]);
+		expect(docker.calls.filter((c) => c.step === "capture")).toEqual([]);
+		expect(await records.read(SID, PANE)).toEqual({ kind: "none" });
+		expect(await composerStates()).toEqual([]);
+	};
+	const refused: Array<[string, Partial<ProbeEntry>, string]> = [
+		["status missing", { status: undefined }, "status-unknown"],
+		[
+			"status unreadable (a value the parser does not know)",
+			{ status: "sleeping" as never },
+			"status-unknown",
+		],
+		[
+			"waiting without waitingFor",
+			{ status: "waiting", waitingFor: undefined },
+			"waiting-unspecified",
+		],
+	];
+	for (const [name, over, detail] of refused) {
+		it(`refuses ${name}: 409 needs-terminal{${detail}} before any effect`, async () => {
+			await seedConversation();
+			const service = makeService();
+			probe = [{ sessionId: CID, kind: "interactive", pid: CLAUDE_PID, status: "idle", ...over }];
+			if (over.status === undefined) delete probe[0]!.status;
+			const r = await send(service, "hi", ID1);
+			expect([r.status, r.body.error, r.body.detail]).toEqual([409, "needs-terminal", detail]);
+			await nothingHappened();
+		});
+	}
+
+	it("an unreadable status in the REAL `claude agents --json` output is refused the same way", async () => {
+		const { parseAgentsJson } = await import("./probe.js");
+		const parsed = parseAgentsJson(
+			JSON.stringify([
+				{ sessionId: CID, kind: "interactive", pid: CLAUDE_PID, status: "thinking" },
+			]),
+		);
+		expect(parsed?.[0]?.status).toBeUndefined();
+		await seedConversation();
+		const service = makeService();
+		probe = parsed;
+		const r = await send(service, "hi", ID1);
+		expect([r.status, r.body.error, r.body.detail]).toEqual([
+			409,
+			"needs-terminal",
+			"status-unknown",
+		]);
+		await nothingHappened();
+	});
+
+	it("the existing refusals keep their codes (busy; a dialog open)", async () => {
+		await seedConversation();
+		const service = makeService();
+		probe = [{ sessionId: CID, kind: "interactive", pid: CLAUDE_PID, status: "busy" }];
+		expect((await send(service, "hi", ID1)).body.error).toBe("busy");
+		probe = [
+			{
+				sessionId: CID,
+				kind: "interactive",
+				pid: CLAUDE_PID,
+				status: "waiting",
+				waitingFor: "dialog open",
+			},
+		];
+		const r = await send(service, "hi", ID1);
+		expect([r.body.error, r.body.detail]).toEqual(["needs-terminal", "dialog open"]);
+		await nothingHappened();
+	});
+
+	for (const [name, entry] of [
+		["idle", { status: "idle" }],
+		["waiting for input needed", { status: "waiting", waitingFor: "input needed" }],
+	] as const) {
+		it(`still sends when the probe says ${name}`, async () => {
+			await seedConversation();
+			const service = makeService();
+			probe = [{ sessionId: CID, kind: "interactive", pid: CLAUDE_PID, ...entry }];
+			const p = send(service, "hello", ID1);
+			await until(() => docker.effectSteps().includes("enter"), "enter");
+			expect(docker.effectSteps()).toEqual(["paste", "enter"]);
+			await promptArrives("hello");
+			const r = await p;
+			expect(r.status).toBe(202);
+			expect(r.body).toMatchObject({ result: "delivered" });
+		});
+	}
+
+	it("identity checks still run first: a background job is binding-stale, a pid outside the pane is binding-stale", async () => {
+		await seedConversation();
+		const service = makeService();
+		probe = [{ sessionId: CID, kind: "background", pid: CLAUDE_PID }];
+		const bg = await send(service, "hi", ID1);
+		expect([bg.body.error, bg.body.detail]).toEqual(["binding-stale", "kind:background"]);
+		probe = [{ sessionId: CID, kind: "interactive", pid: CLAUDE_PID }];
+		docker.ancestry = "no";
+		expect((await send(service, "hi", ID1)).body.error).toBe("binding-stale");
+		await nothingHappened();
+	});
+});
+
 describe("happy path (§8.1.5, §8.1.7)", () => {
 	it("prepared is durable before the first effect; paste/newline/Enter; the ack delivers; the pane is released; replay answers the same", async () => {
 		const service = makeService();

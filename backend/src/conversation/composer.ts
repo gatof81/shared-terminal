@@ -604,6 +604,21 @@ export class ComposerService {
 		if (entry.waitingFor !== undefined && entry.waitingFor !== "input needed") {
 			return this.reject("needs-terminal", 409, { detail: entry.waitingFor });
 		}
+		// v1.7.4 §8.1.3 (#510): the probe must CONFIRM the CLI is at its
+		// prompt — `idle`, or `waiting` for "input needed". A missing or
+		// unreadable status (parseAgentsJson leaves it undefined) and a
+		// `waiting` with no `waitingFor` prove nothing: §8.2 never observed a
+		// `waiting` without one, so its absence is not taken as "input
+		// needed". Without this the visible-prompt check below was the only
+		// evidence of an interactive state. Refused here, before any effect.
+		const atPrompt =
+			entry.status === "idle" ||
+			(entry.status === "waiting" && entry.waitingFor === "input needed");
+		if (!atPrompt) {
+			return this.reject("needs-terminal", 409, {
+				detail: entry.status === "waiting" ? "waiting-unspecified" : "status-unknown",
+			});
+		}
 		if (paneState.inMode) return this.reject("needs-terminal", 409, { detail: "copy-mode" });
 		if (paneState.dead) return this.reject("needs-terminal", 409, { detail: "pane-dead" });
 		// Claude must own the terminal: identity, session, tty and foreground

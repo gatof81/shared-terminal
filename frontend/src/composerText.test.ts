@@ -50,6 +50,17 @@ describe("explainCode", () => {
 	});
 });
 
+describe("explainCode needs-terminal: prompt not confirmed (#510)", () => {
+	it("says nothing was sent and points at the Terminal, not at a dialog", () => {
+		for (const d of ["status-unknown", "waiting-unspecified"]) {
+			expect(explainCode("needs-terminal", d)).toBe(
+				"Claude Code did not confirm it is waiting at its prompt, so nothing was sent. Check the Terminal.",
+			);
+		}
+		expect(explainCode("needs-terminal", "dialog open")).toContain("dialog");
+	});
+});
+
 describe("explainCode binding-stale detail", () => {
 	it("names the process kind when the CLI runs the conversation outside the pane", () => {
 		expect(explainCode("binding-stale", "kind:background")).toContain("background process");
