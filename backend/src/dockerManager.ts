@@ -3146,7 +3146,19 @@ export class DockerManager {
 		// An image ID is immutable, so its labels are cacheable forever.
 		const cached = this.relayLabelByImageId.get(imageId);
 		if (cached !== undefined) return cached;
-		const info = await this.docker.getImage(imageId).inspect();
+		let info: Dockerode.ImageInspectInfo;
+		try {
+			info = await this.docker.getImage(imageId).inspect();
+		} catch (err) {
+			// The image was deleted while a container still runs on it (the
+			// pre-3.0d sessions: `docker rmi -f` leaves the container and its
+			// layers). A missing image cannot be the relay image ⇒ false, so
+			// capture answers "requires recreate" instead of failing the
+			// request. Not cached: the same ID could be pulled again. Any
+			// other daemon error still propagates (fail-closed).
+			if ((err as { statusCode?: number }).statusCode === 404) return false;
+			throw err;
+		}
 		const ok = info.Config?.Labels?.[RELAY_IMAGE_LABEL] === RELAY_IMAGE_LABEL_VALUE;
 		this.relayLabelByImageId.set(imageId, ok);
 		return ok;

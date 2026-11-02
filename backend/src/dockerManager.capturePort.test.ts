@@ -113,6 +113,36 @@ describe("inspectCapture", () => {
 			dm({ container: new Error("ECONNREFUSED") }).m.inspectCapture("cid"),
 		).rejects.toThrow("ECONNREFUSED");
 	});
+	it("the container's image was deleted (404 on the image): imageRelay2 false, the rest read as usual; not cached", async () => {
+		const legacy = {
+			...base,
+			Image: "sha256:gone",
+			Config: { Env: ["PATH=/usr/bin", "SESSION_ID=x"] },
+			Mounts: [{ Destination: "/home/developer/workspace" }],
+		};
+		const { m, imageInspect } = dm({ container: legacy, images: {} });
+		expect(await m.inspectCapture("cid")).toEqual({
+			exists: true,
+			running: true,
+			token: null,
+			managedMount: false,
+			controlMount: false,
+			imageId: "sha256:gone",
+			imageRelay2: false,
+		});
+		await m.inspectCapture("cid");
+		expect(imageInspect).toHaveBeenCalledTimes(2); // a 404 is not cached
+	});
+	it("an image error other than 404 still propagates (fail-closed)", async () => {
+		for (const err of [
+			Object.assign(new Error("server error"), { statusCode: 500 }),
+			new Error("connect ECONNREFUSED /var/run/docker.sock"),
+		]) {
+			await expect(
+				dm({ container: base, images: { "sha256:aaa": err } }).m.inspectCapture("cid"),
+			).rejects.toThrow(err.message);
+		}
+	});
 	it("labels are cached per immutable image ID", async () => {
 		const { m, imageInspect } = dm({
 			container: base,
