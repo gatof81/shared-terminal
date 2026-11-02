@@ -480,6 +480,12 @@ describe("validation and preconditions (§8.1.2, §8.1.3): no effect, no record"
 		meta = { ...meta, status: "running" };
 		await seedConversation(CID, { kind: "headless" });
 		await expectCode("not-interactive");
+		// v1.7.2 gate: a conversation of a previous container start has its
+		// binding released (paneId null). Even with a probe that lists it as
+		// idle and interactive, and a pane %0 alive in the new start, nothing
+		// is sent — refused before any probe or tmux exec.
+		await seedConversation(CID, { paneId: null });
+		await expectCode("not-interactive");
 		await noEffects();
 	});
 	it("a cross-user send writes the operate row before any effect, fail-closed; the event says admin", async () => {

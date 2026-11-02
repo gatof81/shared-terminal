@@ -1616,6 +1616,13 @@ Casos que *MUST* estar en el test:
   memoria—, en el índice y en la fila D1. El arranque reconcilia igual las sesiones que encuentra
   paradas. Nada se reasigna: una conversación vuelve a tener pane solo cuando un evento suyo llega
   desde ese pane del contenedor vivo. El historial (`events.jsonl`) no se toca.
+  La retirada es idempotente (solo escribe lo que todavía difiere, índice y fila D1 por separado)
+  y recuperable: una escritura fallida se completa en la siguiente parada o en el reconcile de
+  arranque, y un índice cuyo snapshot no se pudo escribir sigue residente con el estado retirado.
+  El trabajo **en vuelo** del arranque anterior queda anulado en el instante de la parada: un hook
+  que se estaba ingiriendo se rechaza `not_running` (como si hubiera llegado después) y un probe o
+  una verificación de identidad que respondan tarde no aplican nada (`pid` y `%0` se reutilizan en
+  el arranque siguiente).
 - La retirada del binding por la viñeta de "dos conversaciones" *MUST* alcanzar también a una
   conversación cuyo índice no esté residente (G4): se abre para comprobarlo.
 - El composer (§8) envía al `pane_id` del binding y nunca a uno elegido por el cliente; su lock es

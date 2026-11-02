@@ -269,6 +269,25 @@ export async function listConversationRows(stSessionId: string): Promise<Convers
 	return r.results;
 }
 
+/**
+ * v1.7.2 §5.2 — the D1 half of a binding release: pane/tab cleared and the
+ * row marked `disconnected · reconcile`. A narrow, idempotent statement (no
+ * counters are rewritten from a possibly older index), owner-guarded like
+ * every other row write.
+ */
+export async function releaseConversationBinding(
+	stSessionId: string,
+	cid: string,
+	statusAt: string,
+): Promise<void> {
+	await d1Query(
+		`UPDATE claude_conversations SET pane_id = NULL, tab_id = NULL, status = 'disconnected',
+			status_evidence = 'reconcile', status_at = ?
+		WHERE session_id = ? AND st_session_id = ?`,
+		[statusAt, cid, stSessionId],
+	);
+}
+
 export async function deleteConversationRows(stSessionId: string): Promise<void> {
 	await d1Query("DELETE FROM claude_conversations WHERE st_session_id = ?", [stSessionId]);
 }

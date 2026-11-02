@@ -61,6 +61,18 @@ const dbStubs = vi.hoisted(() => ({
 				meta: {},
 			};
 		}
+		if (/^UPDATE claude_conversations SET pane_id = NULL/.test(sql)) {
+			// releaseConversationBinding (v1.7.2): [status_at, cid, owner]
+			const row = dbStubs.conversations.get(String(params[1]));
+			if (row && row.st_session_id === params[2]) {
+				row.pane_id = null;
+				row.tab_id = null;
+				row.status = "disconnected";
+				row.status_evidence = "reconcile";
+				row.status_at = params[0];
+			}
+			return { results: [], success: true, meta: {} };
+		}
 		if (/^UPDATE claude_conversations SET/.test(sql)) {
 			const cid = String(params[params.length - 2]);
 			const owner = String(params[params.length - 1]);

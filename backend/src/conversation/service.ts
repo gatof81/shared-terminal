@@ -68,6 +68,7 @@ import {
 	listConversationRows,
 	listRequestedSessions,
 	listRunningCaptureSessions,
+	releaseConversationBinding,
 	reserveConversationOwner,
 	revokeIngestTokens,
 	tokenMatchesHash,
@@ -260,6 +261,18 @@ export class ConversationService {
 
 	private epochOf(stSessionId: string): number {
 		return this.purgeEpoch.get(stSessionId) ?? 0;
+	}
+	/**
+	 * v1.7.2 §5.2 — the container-START generation of a session, bumped
+	 * synchronously by `onSessionDown`. Work that began under one start (a
+	 * hook being ingested, a probe in flight, an identity check) and
+	 * finishes after a stop must not bind, transition or verify anything:
+	 * the runtimes it would touch may already belong to the NEXT start, whose
+	 * tmux reuses the same pane ids and whose pid namespace reuses pids.
+	 */
+	private readonly startGen = new Map<string, number>();
+	private startGenOf(stSessionId: string): number {
+		return this.startGen.get(stSessionId) ?? 0;
 	}
 	/**
 	 * B4 (round 3) — admission is closed for good once a purge starts. ST
@@ -503,6 +516,8 @@ export class ConversationService {
 		raw: unknown,
 		relay: RelayReport | undefined,
 	): Promise<IngestOutcome> {
+		// Captured before the first await: the container start this hook came from.
+		const startGen = this.startGenOf(stSessionId);
 		const normalized = normalizeHookInput(raw);
 		if (!normalized.ok) {
 			this.stats.rejected.malformed = (this.stats.rejected.malformed ?? 0) + 1;
@@ -555,6 +570,10 @@ export class ConversationService {
 		if (this.isDead(stSessionId) || this.epochOf(stSessionId) !== epoch || rt.epoch !== epoch) {
 			return this.reject("not_running");
 		}
+		// v1.7.2: the container stopped while this hook was being ingested —
+		// same answer as a hook arriving after the stop (authorize: not_running).
+		// It must not bind a pane id the next start will reuse.
+		if (this.startGenOf(stSessionId) !== startGen) return this.reject("not_running");
 		// §3.2.1 — before the carrying event (the losses precede it) and
 		// before dedupe: a duplicate still delivers the report.
 		if (relay) this.applyRelayReport(rt, relay);
@@ -604,7 +623,11 @@ export class ConversationService {
 			} catch {
 				return this.reject("not_running");
 			}
-			if (this.isDead(stSessionId) || this.epochOf(stSessionId) !== epoch)
+			if (
+				this.isDead(stSessionId) ||
+				this.epochOf(stSessionId) !== epoch ||
+				this.startGenOf(stSessionId) !== startGen
+			)
 				return this.reject("not_running");
 			outcome = this.deps.store.enqueue(stSessionId, cid, pending);
 		}
@@ -1086,6 +1109,12 @@ export class ConversationService {
 
 	/** Container stopped/killed: every conversation of the session is `disconnected`. */
 	async onSessionDown(stSessionId: string): Promise<void> {
+		// First, synchronously: everything in flight for the start that just
+		// ended is void from here on (ingest, probe, identity check).
+		this.startGen.set(stSessionId, this.startGenOf(stSessionId) + 1);
+		// A probe still in flight belongs to the old start; the next start's
+		// callers must not join it.
+		this.probing.delete(stSessionId);
 		this.tokenCache.delete(stSessionId);
 		this.rate.forget(stSessionId);
 		for (const rt of Array.from(this.runtime.values())) {
@@ -1125,36 +1154,89 @@ export class ConversationService {
 	 * Best-effort per conversation: an unreadable index is skipped.
 	 */
 	private async releaseBindings(stSessionId: string): Promise<void> {
+		// Idempotent and recoverable: the index (memory + snapshot) and the D1
+		// row are converged INDEPENDENTLY and only where they still differ,
+		// so a run that failed half-way (snapshot write, D1) is completed by
+		// the next one — the next stop, or the boot reconcile of a session
+		// found stopped — and a run with nothing left to do writes nothing.
+		const startGen = this.startGenOf(stSessionId);
 		let cids: string[] = [];
 		try {
 			cids = await this.deps.store.listConversationIds(stSessionId);
 		} catch {
-			return;
+			cids = [];
 		}
-		for (const cid of cids) {
+		// One D1 read: which rows still claim a pane or a live state. Null
+		// when D1 is unreachable — then every conversation's row is written
+		// (the statement is idempotent) and failures are left for next time.
+		let rows: Map<string, ConversationRow> | null = null;
+		try {
+			rows = new Map((await listConversationRows(stSessionId)).map((r) => [r.session_id, r]));
+		} catch {
+			rows = null;
+		}
+		const at = this.now();
+		let failed = 0;
+		const all = new Set<string>([...cids, ...(rows ? rows.keys() : [])]);
+		for (const cid of all) {
 			if (this.isDead(stSessionId)) return;
-			const rt = this.runtime.get(cid);
-			if (rt) continue; // a runtime appeared meanwhile: an event came from the new start
-			const wasResident = !!this.deps.store.getResidentIndex(stSessionId, cid);
-			let index: ConversationIndex;
-			try {
-				index = wasResident
-					? (this.deps.store.getResidentIndex(stSessionId, cid) as ConversationIndex)
-					: await this.deps.store.open(stSessionId, cid);
-			} catch {
-				continue;
+			// A runtime appeared, or a new start began: an event came from the
+			// live container, and that conversation's binding is its own now.
+			if (this.runtime.has(cid) || this.startGenOf(stSessionId) !== startGen) continue;
+			// ── index ──
+			if (cids.includes(cid)) {
+				const wasResident = !!this.deps.store.getResidentIndex(stSessionId, cid);
+				try {
+					const index = wasResident
+						? (this.deps.store.getResidentIndex(stSessionId, cid) as ConversationIndex)
+						: await this.deps.store.open(stSessionId, cid);
+					const stale =
+						index.paneId !== null || index.tabId !== null || index.state.status !== "disconnected";
+					if (stale) {
+						this.deps.store.update(stSessionId, cid, (i) => {
+							i.state = { status: "disconnected", evidence: "reconcile", at };
+							i.paneId = null;
+							i.tabId = null;
+						});
+					}
+					// Durable before moving on. If the snapshot cannot be written the
+					// index STAYS resident (memory answers the released state; the
+					// next run writes it), instead of being closed and served stale
+					// from disk.
+					// Always flushed (a no-op when nothing is pending): an earlier run
+					// may have released it in memory without managing to write it.
+					const durable = await this.deps.store.flush(stSessionId, cid);
+					if (!durable) throw new Error("index snapshot not written");
+					if (!wasResident) await this.deps.store.close(stSessionId, cid);
+				} catch (err) {
+					failed++;
+					logger.warn(
+						`[conversation] release binding (index) failed for ${stSessionId}/${cid}: ${(err as Error).message}`,
+					);
+				}
 			}
-			const next = applyStateInput(index.state, { kind: "container_down", at: this.now() });
-			const stale = index.paneId !== null || index.tabId !== null || next !== index.state;
-			if (stale) {
-				this.deps.store.update(stSessionId, cid, (i) => {
-					i.state = next;
-					i.paneId = null;
-					i.tabId = null;
-				});
-				await this.heartbeat.flushNow(`${stSessionId}/${cid}`);
+			// ── D1 ──
+			const row = rows?.get(cid);
+			const rowStale =
+				rows === null ||
+				(row !== undefined &&
+					(row.pane_id !== null || row.tab_id !== null || row.status !== "disconnected"));
+			if (rowStale && (rows === null ? cids.includes(cid) : true)) {
+				try {
+					await releaseConversationBinding(stSessionId, cid, new Date(at).toISOString());
+					this.stats.d1Writes++;
+				} catch (err) {
+					failed++;
+					logger.warn(
+						`[conversation] release binding (D1) failed for ${stSessionId}/${cid}: ${(err as Error).message}`,
+					);
+				}
 			}
-			if (!wasResident) await this.deps.store.close(stSessionId, cid).catch(() => undefined);
+		}
+		if (failed > 0) {
+			logger.warn(
+				`[conversation] release bindings of ${stSessionId}: ${failed} write(s) failed; retried at the next stop or boot reconcile`,
+			);
 		}
 	}
 
@@ -1366,7 +1448,11 @@ export class ConversationService {
 	 * entry whose status is missing or unreadable changes nothing; an ended
 	 * conversation is never revived (state.ts).
 	 */
-	async applyProbe(stSessionId: string, entries: ProbeEntry[]): Promise<void> {
+	async applyProbe(
+		stSessionId: string,
+		entries: ProbeEntry[],
+		startGen = this.startGenOf(stSessionId),
+	): Promise<void> {
 		const at = this.now();
 		const byId = new Map(entries.map((e) => [e.sessionId, e]));
 		for (const rt of Array.from(this.runtime.values())) {
@@ -1381,6 +1467,8 @@ export class ConversationService {
 					e.status === "idle" ||
 					(e.status === "waiting" && (e.waitingFor ?? "input needed") === "input needed");
 				const verified = wantsIdle ? await this.verifyIdentity(index, e) : false;
+				// The check awaited execs: a stop in the meantime voids it.
+				if (this.startGenOf(stSessionId) !== startGen) return;
 				input = {
 					kind: "probe",
 					found: true,
@@ -1390,6 +1478,7 @@ export class ConversationService {
 					at,
 				};
 			}
+			if (this.startGenOf(stSessionId) !== startGen) return;
 			const before = index.state;
 			const after = this.transition(rt, input);
 			this.enqueueOrOpen(rt, {
@@ -1456,12 +1545,18 @@ export class ConversationService {
 	probeAndApply(stSessionId: string): Promise<boolean> {
 		const inFlight = this.probing.get(stSessionId);
 		if (inFlight) return inFlight;
+		const startGen = this.startGenOf(stSessionId);
 		const run = (async () => {
 			const entries = await this.probeSession(stSessionId);
 			if (!entries || this.isDead(stSessionId)) return false;
-			await this.applyProbe(stSessionId, entries);
+			// A probe of a container start that has since stopped (its answer
+			// came late, possibly from O) describes nothing that exists now.
+			if (this.startGenOf(stSessionId) !== startGen) return false;
+			await this.applyProbe(stSessionId, entries, startGen);
 			return true;
-		})().finally(() => this.probing.delete(stSessionId));
+		})().finally(() => {
+			if (this.probing.get(stSessionId) === run) this.probing.delete(stSessionId);
+		});
 		this.probing.set(stSessionId, run);
 		return run;
 	}
@@ -1497,6 +1592,20 @@ export class ConversationService {
 	 * them), which is the table's "con contenedor running".
 	 */
 	async sweepSilence(): Promise<void> {
+		// One sweep at a time: a sweep slowed by probes (≤ PROBE_TIMEOUT_MS
+		// each, plus identity execs) must not overlap the next tick.
+		if (this.sweeping) return;
+		this.sweeping = true;
+		try {
+			await this.sweepSilenceOnce();
+		} finally {
+			this.sweeping = false;
+		}
+	}
+
+	private sweeping = false;
+
+	private async sweepSilenceOnce(): Promise<void> {
 		const now = this.now();
 		const evidenceAt = (rt: ConvRuntime, i: ConversationIndex) =>
 			Math.max(rt.lastHookAt, i.state.at);
