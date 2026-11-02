@@ -196,7 +196,7 @@ en orden de `seq`:
 - **Prompt** = cualquier `user_prompt` (cualquier `origin`), `internal_prompt` o `channel_prompt`.
 - **Cierre** = `turn_end` o `turn_failed`.
 - `P` = `prompt_id` del `channel_prompt` que llevó la entrega a `accepted`.
-- **Ventana** = desde el `transported` de la entrega (en tiempo de recepción del backend) hasta el
+- **Ventana** = desde el `transported` de la entrega o, si la entrega se aceptó sin llegar a `transported` (hook antes del informe, o `accepted{late}` desde `uncertain{lease}`), desde su `transporting` (en tiempo de recepción del backend) hasta el
   **primer** cierre con `prompt_id = P` después del `channel_prompt`, o hasta un `session_end` o la
   retirada del runtime.
 
@@ -210,7 +210,7 @@ en orden de `seq`:
 | A4 | En la ventana no hay **ningún** otro prompt, sea cual sea su `prompt_id` | `ended_unattributed{mixed-input}` |
 | A5 | En la ventana no hay ningún cierre con un `prompt_id` distinto de `P` ni sin `prompt_id` (un `Stop` no anunciado es el rastro de una entrada encolada) | `ended_unattributed{mixed-input}` |
 | A6 | En la ventana no hay `gap` de la conversación | `ended_unattributed{gap}` |
-| A7 | **Relay limpio**: la generación del relay y su contador acumulado de pérdidas, leídos por `st-channel` en `/st-relay/status` (loopback), son iguales en la lectura de base (la que trae `POST transported`, persistida en el evento `delivery`) y en una lectura tomada ≥ `T_settle` después del cierre, y ningún evento de la ventana ni el siguiente trae cabeceras `X-ST-Relay-*` de pérdida | `ended_unattributed{relay-unverified}` |
+| A7 | **Relay limpio**: la generación del relay y su contador acumulado de pérdidas, leídos por `st-channel` en `/st-relay/status` (loopback), son iguales en la lectura de base (la que trae `POST transported`, persistida en el evento `delivery`; si no hubo `transported`, la del `next` que ganó el lease, persistida en `transporting`) y en una lectura tomada ≥ `T_settle` después del cierre, y ningún evento de la ventana ni el siguiente trae cabeceras `X-ST-Relay-*` de pérdida | `ended_unattributed{relay-unverified}` |
 | — | El cierre es `turn_failed`, o la ventana la cierra `session_end` o la retirada del runtime | `interrupted` |
 
 Lectura del relay (A7): hoy `/st-relay/status` sólo devuelve la generación (CONVERSATION.md §2.6);
@@ -335,6 +335,7 @@ con el Terminal y está marcada.
 | `POST` | `/api/projects/:pid/messages` | `{text, to: [handle], kind?, inReplyTo?, clientMessageId}` → 202 `{msgId, deliveries:[{agent, state}]}`; idempotente por `clientMessageId` (misma respuesta) |
 | `GET` | `/api/projects/:pid/messages?before=<seq>&limit≤200` | página del log plegada (mensajes + último estado de cada entrega) |
 | `POST` | `/api/projects/:pid/messages/:mid/approve` | `{agent, decision}` |
+| `POST` | `/api/projects/:pid/agents/:aid/channel/retry` | "Probar el canal otra vez": owner-only; 409 `not-degraded` salvo con el runtime `degraded`; escribe `runtime cleared{by}`; no toca ninguna entrega (el `unconfirmed` no se reenvía); la siguiente entrega en cola vuelve a ser elegible |
 | `POST` | `/api/projects/:pid/messages/:mid/cancel` | sólo `awaiting_approval`/`queued` |
 | `GET` | `/api/projects/:pid/agents` | roster con presencia (`state`, `statusEvidence`, `runtime: {registered, degraded?, reason?}`, `queueDepth`) |
 | `WS` | `/ws/project/<pid>` | protocolo de §6.1 de CONVERSATION.md: `subscribe{after}` → replay sin huecos + vivo; nueva ruta en `WS_PATH_PREFIXES` con test en `wsUpgrade.test.ts` |
@@ -351,7 +352,7 @@ endpoint es nuestro proceso, no un hook del CLI.
 | Método | Ruta | Cuerpo | Respuesta |
 | --- | --- | --- | --- |
 | `POST` | `/ingest/channel/hello` | `{pane, claudePid, claudeStartTime, cliVersion, relayGeneration, relayDropped, nonce}` (`claudeStartTime` = campo 22 de `/proc/<claudePid>/stat`) | `{endpointId, agent: {handle, project} \| null, pollWaitSec}`. Antes de declarar ambigüedad, el monitor comprueba los runtimes anteriores de la sesión: uno cuyo `claude_pid` ya no existe (probe sin ese `pid`, o `/proc` por `execCapture`) se retira primero. Sólo dos procesos vivos ⇒ ambos `ambiguous`; la ambigüedad termina cuando queda uno (salida, `bye` o la misma comprobación en el siguiente `next`) |
-| `GET` | `/ingest/channel/next?endpoint=…&relayGeneration=…&relayDropped=…` | long-poll ≤ 25 s; 204 puede traer `{relayCheck: true}` (§3.1 A7) | 200 `{leaseId, msgId, content, meta}` \| 204 \| 410 `retired` (el endpoint debe volver a `hello`) |
+| `GET` | `/ingest/channel/next?endpoint=…&relayGeneration=…&relayDropped=…` | long-poll ≤ 25 s; 204 puede traer `{relayCheck: true}` (§3.1 A7) | 200 `{leaseId, leaseTtlMs, msgId, content, meta}`. *MUST*: `st-channel` no escribe la notificación si ya pasó `requestSentAt + leaseTtlMs − 2 s` (medido desde que **envió** el `next`, cota conservadora porque el lease del servidor empieza después); en ese caso descarta el lease sin escribir nada. Así un 200 retrasado por la red nunca produce una escritura después de que el lease venció y la entrega pudo volverse terminal \| 204 \| 410 `retired` (el endpoint debe volver a `hello`) |
 | `POST` | `/ingest/channel/transported` | `{endpointId, leaseId, relayGeneration, relayDropped}` (lectura tomada justo antes de escribir la notificación; es la base de A7 y de la regla 2b) | 204; lease desconocido o vencido ⇒ 409 (el monitor ya lo marcó `uncertain`) |
 | `POST` | `/ingest/channel/post` | `{endpointId, clientMessageId, to?: [handle], kind, text, inReplyTo?}` | `{msgId, deliveries}`; 429 por límites; el resultado de la herramienta MCP se lo cuenta al modelo |
 | `POST` | `/ingest/channel/bye` | `{endpointId}` | 204 (retiro ordenado; el desordenado lo detecta `start_gen` o el vencimiento del poll) |
@@ -400,7 +401,7 @@ sí se garantiza:
    `transported` (la notificación se escribió); salió por la regla 2b (c), con todos los probes de la
    espera "en su prompt" y sin ningún evento de la conversación entre medias; y la lectura del relay
    fue limpia. Un `unconfirmed{relay-loss}` o `{not-transported}` **no** degrada. También
-   `degraded{source-absent}` (§5); también `degraded{source-absent}` (§5). Un runtime `degraded` no
+   `degraded{source-absent}` (§5). Un runtime `degraded` no
    recibe ninguna entrega. La UI muestra el agente como "canal sin respuesta" con la causa, y cada
    mensaje en cola dice "retenido: canal degradado".
 3. **`degraded` es del proceso, no del endpoint**: se guarda en el log del proyecto con la clave
@@ -452,7 +453,7 @@ backend. Un agente comprometido puede como mucho estropear sus propias entregas.
 | T_queue | vida en `queued`/`awaiting_approval` | 24 h | `failed{expired}` |
 | T_fresh | antigüedad máxima de la evidencia "en su prompt" al prestar | 2 s (el `next` hace su propio probe) | probe dirigido |
 | T_settle | espera tras el cierre antes de decidir la atribución (§3.1 A7) | **(POC)**: ≥ 3 × la latencia máxima hook→backend medida, mínimo 5 s | decisión con lo que haya; sin lectura limpia del relay ⇒ `relay-unverified` |
-| T_clear | separación de los dos probes de la regla 2b (c) | **(POC)**: 3 × la latencia máxima de despertar medida en G2, mínimo 30 s | `uncertain` → `unconfirmed{no-evidence}` |
+| T_clear | separación de los dos probes de la regla 2b (c) | **(POC)**: 3 × la latencia máxima de despertar medida en G2, mínimo 30 s | `uncertain` → `unconfirmed{…}` según la regla 2b (`no-evidence`, `relay-loss` o `not-transported`) |
 | L7' | log del proyecto | 64 MiB | rotación como §4.4 L7 |
 
 ## 9. Recuperación

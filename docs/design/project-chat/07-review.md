@@ -77,3 +77,17 @@ Revisor independiente nuevo sobre las correcciones de la ronda 2. Confirmó resu
 
 Riesgo declarado, no resuelto: si un diálogo o un borrador en el Terminal impiden "en su prompt",
 una entrega `accepted` sin cierre espera a la persona; se muestra como "necesita el Terminal".
+
+## Ronda 4 (2026-11-02): verificación de la ronda 3
+
+Revisor independiente nuevo. Confirmó resueltos los siete puntos de la ronda 3 y no encontró un
+`completed` falso por recuperación, un `degraded` sin evidencia ni una salida automática de
+`degraded`. Veredicto inicial: **SHOULD-FIX** (0 BLOCKER, 2 SHOULD-FIX, 3 NIT); todos resueltos.
+
+| # | Severidad | Hallazgo | Resolución |
+| --- | --- | --- | --- |
+| 1 | SHOULD-FIX | Con el reloj de 2b (c) desde el vencimiento del lease, un 200 de `next` retrasado por la red podía escribir la notificación después de que la entrega fuera terminal (duplicado si la persona reenvió) | `next` devuelve `leaseTtlMs`; `st-channel` no escribe pasado `requestSentAt + leaseTtlMs − 2 s`; fila E8 "200 retrasado" |
+| 2 | SHOULD-FIX | Una fila vieja de E8 seguía esperando `unconfirmed{no-evidence}` ante una pérdida del relay | Ahora `unconfirmed{relay-loss}` sin `degraded`, con lo prohibido explícito |
+| 3 | NIT | Inicio de ventana y base de A7 sin definir para una entrega aceptada sin `transported` | Se usa `transporting` y la lectura del `next` |
+| 4 | NIT | Texto duplicado y la fila de `T_clear` con un solo motivo | Corregidos |
+| 5 | NIT | "Probar el canal otra vez" sin ruta | `POST /api/projects/:pid/agents/:aid/channel/retry` |
