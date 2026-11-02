@@ -93,6 +93,53 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 		expect(Math.round((await page.locator("body").boundingBox())!.y)).toBe(0);
 	});
 
+	test("a reader at the bottom stays at the bottom when the keyboard shrinks the thread; one reading earlier keeps their place", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		// Enough messages for the thread to scroll.
+		const conv = backend.conversations[0]!;
+		for (let i = 0; i < 40; i++) {
+			conv.events.push({
+				seq: (conv.events.at(-1)?.seq ?? 0) + 1,
+				ts: conv.events.at(-1)!.ts,
+				ev: "assistant_delta",
+				prompt_id: `p-k${i}`,
+				turn_id: `t-k${i}`,
+				agent_id: null,
+				pane: "%1",
+				data: { message_id: `mk${i}`, index: 0, delta: `Filler message ${i}`, final: true },
+			});
+		}
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.switchView("chat");
+		await page.locator("#chat-list .chat-conv-row", { hasText: "Refactor auth flow" }).click();
+		const sc = page.locator("#chat-thread .chat-scroll");
+		await expect(sc).toContainText("Filler message 39");
+		const gap = () =>
+			sc.evaluate((el) => Math.round(el.scrollHeight - el.clientHeight - el.scrollTop));
+		await expect.poll(gap).toBeLessThan(4);
+
+		const viewport = page.viewportSize()!;
+		await keyboard(page, viewport.height - 380, 0);
+		await expect.poll(gap, "the last message stayed in view").toBeLessThan(4);
+		await keyboard(page, viewport.height, 0);
+		await expect.poll(gap).toBeLessThan(4);
+
+		// Reading earlier messages: the keyboard does not yank the reader down.
+		await sc.evaluate((el) => {
+			el.style.scrollBehavior = "auto";
+			el.scrollTop = 200;
+			el.dispatchEvent(new Event("scroll"));
+		});
+		const before = await sc.evaluate((el) => el.scrollTop);
+		await keyboard(page, viewport.height - 380, 0);
+		await page.waitForTimeout(300);
+		expect(await sc.evaluate((el) => el.scrollTop)).toBe(before);
+	});
+
 	test("the covered terminal sends no resize while the keyboard opens and closes in Chat; one controlled sync on return", async ({
 		app,
 		backend,
