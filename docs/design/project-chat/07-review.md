@@ -33,3 +33,27 @@ entrega/procesamiento/resultado, aprobación agente→agente, migraciones sólo 
 - Que Channels despierte una sesión inactiva (#44380) y sobreviva a `--resume` sólo lo dice la POC.
 - La dependencia de un research preview con kill switch remoto es una decisión de producto (R1).
 - Las hipótesis marcadas **H** en el RFC §3.1 siguen siendo hipótesis hasta la POC.
+
+---
+
+## Ronda 2 (2026-11-02): correcciones pedidas por el responsable
+
+Revisor independiente nuevo, sobre el commit con las cinco correcciones del responsable y la
+restricción de autenticación (sólo suscripción). Veredicto inicial: **BLOCKER** (1 BLOCKER,
+8 SHOULD-FIX, 1 NIT). Correcciones 1–3 y la autenticación: logradas. Correcciones 4 y 5: parciales.
+Dos afirmaciones de hecho del revisor se verificaron contra CONVERSATION.md §8.2.1 antes de corregir.
+Además el autor encontró un problema que el revisor no señaló: la deduplicación actual de
+`user_prompt` por `prompt_id` (`dedupe.ts`) descarta justamente la entrada encolada.
+
+| # | Severidad | Hallazgo | Resolución |
+| --- | --- | --- | --- |
+| 1 | BLOCKER | Un mensaje encolado detrás de un turno humano hereda su `prompt_id` (§8.2.1) y se marcaba `completed` con el informe de ese turno | §3.1 reescrito sobre la secuencia de eventos: A3 (`P` nuevo, si no `queued`), A4 (ningún otro prompt de ningún id), A5 (ningún cierre no anunciado) |
+| 2 | SHOULD-FIX | Pérdidas del relay sin `gap` dentro de la ventana | A6–A7: decisión tras `T_settle`, relay limpio por generación y contador de pérdidas (ampliación del relay en P5); si no, `relay-unverified`. Riesgo residual declarado: hook que el CLI nunca envió |
+| 3 | SHOULD-FIX | `accepted` sin salida por evidencia bloqueaba al agente hasta 24 h | `ended_unattributed{no-close}` tras dos probes "en su prompt" sin cierre |
+| 4 | SHOULD-FIX | Un `unconfirmed` prematuro pasaba los criterios; "en su prompt" sin definir | Definición estricta (identidad, `waitingFor`, input vacío) en §4; G6/G12 exigen 0 `late_after_terminal`; filas E8 con diálogo y borrador |
+| 5 | SHOULD-FIX | `degraded{source-absent}` disparable pegando una etiqueta; el texto tecleado no trae `source: user` sino ningún `source` | Texto corregido; `degraded{source-absent}` sólo si el `st_msg` es el de la entrega en vuelo |
+| 6 | SHOULD-FIX | `degraded` se levantaba solo tras un reinicio o una reconexión | `degraded` por proceso (`st_session_id`, `claude_pid`, `claude_start_time`), persistido; fila E8 y G12 |
+| 7 | SHOULD-FIX | Identidad de deduplicación de la evidencia de canal sin definir; colisiona con `user_prompt` | Espacio de claves propio; cambio de contrato §4.6 en P4 (`prompt_id` + hash); A8 hasta entonces |
+| 8 | SHOULD-FIX | Orden de eliminación imposible (`/logout` después de borrar) y escaneo de evidencias sin definir | `/logout` primero; lista cerrada de evidencias; patrones de redacción; nunca los archivos de credenciales |
+| 9 | SHOULD-FIX (por verificar) | `fakechat` puede necesitar Bun y dependencias que el proxy bloquea | Se resuelve en S0 antes del login; un fallo del plugin es fallo del harness, nunca NO-GO |
+| 10 | NIT | Restos: E0 "autenticación elegida", ancla rota, motivo `multiple-stop`, motivo `gap` | Alineados |

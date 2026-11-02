@@ -86,14 +86,18 @@ empieza.
 - Las credenciales del login viven sólo en el HOME del contenedor de la POC (volumen de la POC) y
   se destruyen con él (§1.5).
 
-### 1.5 Eliminación al terminar
+### 1.5 Eliminación al terminar (en este orden)
 
-1. `docker rm -f` de todo lo etiquetado `io.shared-terminal.poc=1`; `docker volume rm` y
-   `docker network rm` de lo mismo; borrado de la imagen.
-2. `/logout` en el CLI del contenedor antes de destruirlo; el responsable revisa en su cuenta que
-   no quede ninguna sesión autorizada de la POC.
-3. Copia de las evidencias (hooks crudos, log del monitor, log del wrapper `tmux`, log del proxy) ya
-   escaneadas; los mensajes de prueba son sintéticos.
+1. `/logout` en el CLI de **cada** contenedor de la POC, mientras el contenedor todavía existe; el
+   responsable revisa en su cuenta que no quede ninguna sesión autorizada de la POC.
+2. Copia de evidencias, sólo de esta lista: hooks crudos, log del monitor, log del wrapper `tmux`,
+   log del proxy, log de depuración del CLI. Antes de copiar, el harness las escanea y **redacta**:
+   cualquier valor con forma de token (`sk-ant-`, cabeceras `Authorization`, `access_token`,
+   `refresh_token`), direcciones de correo y el id de cuenta/organización. Nunca se copia
+   `~/.claude/.credentials.json` ni `~/.claude.json`. Si el escaneo encuentra un token después de
+   redactar, no se copia nada y se informa.
+3. `docker rm -f` de todo lo etiquetado `io.shared-terminal.poc=1`; `docker volume rm` (workspace y
+   HOME, que guarda las credenciales) y `docker network rm` de lo mismo; borrado de la imagen.
 4. Destrucción de la VM (o, si es local, borrado del disco virtual).
 5. Lista de verificación firmada en el informe de resultados.
 
@@ -123,7 +127,15 @@ una notificación de canal despierta una sesión interactiva **inactiva** en su 
 | F0.2 | El responsable confirma que el uso extra está desactivado y hace `/login` con su suscripción en el CLI del contenedor | confirmación escrita; el token no sale del contenedor |
 | F0.3 | `claude --dangerously-skip-permissions --channels plugin:fakechat@claude-plugins-official`, con el log de depuración del CLI a un archivo | `Channel notifications registered` o el motivo del `skip` |
 | F0.4 | 10 mensajes por la interfaz HTTP local de `fakechat` (endpoint confirmado en el código del commit fijado), cada uno con la sesión en su prompt (`claude agents --json`: `idle` o `waiting`+`input needed`) e inactiva ≥ 30 s; 2 más tras ≥ 1 h de inactividad | por mensaje: `UserPromptSubmit` sí/no, latencia, `source`, forma exacta del `prompt`, `Stop` |
-| F0.5 | `/logout`, eliminación §1.5 | lista firmada |
+| F0.5 | Eliminación en el orden de §1.5 (`/logout` primero) | lista firmada |
+
+Viabilidad (se resuelve en S0, **antes** del login): del commit fijado de `fakechat` se anotan su
+runtime (la versión de memoria del revisor es que corre con Bun, que la imagen no trae), sus
+dependencias y cómo recibe mensajes (interfaz web local; si no hay un endpoint HTTP documentado, el
+harness usa el mismo que usa la página). Todo se instala antes de cerrar GitHub en el proxy. Si el
+plugin no arranca o no se puede alimentar, es un **fallo del harness**: se corrige y se repite, y
+**nunca** se registra como NO-GO de Channels. Sólo cuentan como bloqueo los motivos que el CLI
+registra para no admitir el canal.
 
 Resultado de la fase 0:
 
@@ -171,7 +183,7 @@ El monitor aplica la elegibilidad de §4 del protocolo usando los hooks recibido
 
 | # | Experimento | Procedimiento | Qué se registra |
 | --- | --- | --- | --- |
-| E0 | Disponibilidad | Arrancar con la autenticación elegida y `channelsEnabled: true` en `managed-settings.d`; leer `--debug` del CLI | `Channel notifications registered` o el motivo de `skip` (C13–C18) |
+| E0 | Disponibilidad | Arrancar con la suscripción del responsable (§1.4) y `channelsEnabled: true` en `managed-settings.d`; leer `--debug` del CLI | `Channel notifications registered` o el motivo de `skip` (C13–C18) |
 | E1 | Carga de producción | Repetir E0 con `st` empaquetado como plugin en un marketplace local y `allowedChannelPlugins`, sin flag de desarrollo | registra / no registra; diálogo de confirmación sí/no |
 | E2 | Despertar en el prompt | 60 mensajes con la sesión en `waiting_input` verificado: 48 tras ≥ 30 s inactiva y 12 tras ≥ 1 h inactiva; repartidos en al menos dos días | `UserPromptSubmit` sí/no; latencia `transported → UserPromptSubmit` |
 | E3 | Forma de la evidencia | Para todos los mensajes de E2 | `source`, `prompt` exacto, presencia de `st_msg`, `prompt_id` |
@@ -202,6 +214,10 @@ El monitor aplica la elegibilidad de §4 del protocolo usando los hooks recibido
 | **kill switch simulado al registrar**: `st` configurado como servidor MCP pero **no** nombrado en `--channels` (el CLI lo arranca y no registra el handler: mismo efecto observable que el gate remoto) | 3 mensajes en cola | el primero `uncertain` → `unconfirmed{no-evidence}` por la regla 2b (c); runtime `degraded{no-evidence}`; los otros dos siguen `queued` con "retenido: canal degradado" | pérdida, `completed`, reentrega, cualquier `composer_send`, escritura en tmux |
 | kill switch simulado + "Probar el canal otra vez" | tras la fila anterior | sólo el **siguiente** mensaje en cola se intenta; el `unconfirmed` no se reenvía | reentrega del `unconfirmed` |
 | `source` ausente (hook de captura reescrito por el monitor de la POC quitando `source`) | 3 mensajes | `user_prompt{origin: unverified, channel_source_absent}`, entrega `unconfirmed{no-evidence}`, runtime `degraded{source-absent}` | `accepted` |
+| diálogo abierto (`/help`) o borrador en el input | con una entrega `uncertain` | ni la elegibilidad ni la regla 2b (b)/(c) cuentan esos probes como "en su prompt"; la entrega sigue `uncertain`; sin `degraded` | `unconfirmed` o `degraded` mientras el diálogo o el borrador sigan |
+| pérdida de hooks en el relay (cola llena forzada o relay reiniciado) durante el turno aceptado | turno en curso | `ended_unattributed{gap}` o `{relay-unverified}` | `completed` |
+| `Stop` del turno aceptado perdido (hook `Stop` bloqueado en el relay) | cierre | `ended_unattributed{no-close}` tras dos probes "en su prompt"; la cola del agente sigue | `accepted` indefinido |
+| reinicio del monitor con el runtime `degraded` | tras la fila "kill switch simulado" | sigue `degraded` (mismo `claude_pid` y `start_time`) | salida automática de `degraded` |
 | relay detenido (hooks perdidos) | durante un mensaje | `uncertain` → `unconfirmed{no-evidence}` aunque Claude trabaje | `completed` sin evidencia |
 
 ## 5. Criterios GO / NO-GO (fijados antes de ejecutar)
@@ -219,13 +235,13 @@ objetivo del piloto (≥ 95 %, visión §6) se confirma en el piloto, no aquí.
 | G3 | Evidencia | E3 y todas las entregas de E2, E5, E7: 100 % de las entradas producen `UserPromptSubmit` con `source=system` **presente** y la etiqueta con `st_msg` intacto (hipótesis H8). Un solo hook con `source` ausente en la versión probada ⇒ esa versión no entra en `CHANNEL_CLI_VERSIONS` (protocolo §5) |
 | G4 | Sin pérdida ni duplicado | E7: 100/100 exactamente una vez; 0 duplicados |
 | G5 | Reanudación | E5a: 30/30 aceptados en el `cid` reanudado, sin `runtime-ambiguous` tras la salida inmediata ni tras el `kill -9`; E5b/E5c: 30/30 aceptados en el `cid` nuevo; 0 conversaciones creadas por una entrega (E6) |
-| G6 | Fallos | E8: cada fila termina en el estado esperado; 0 reentregas automáticas; 0 escrituras de entrada en tmux del monitor o de `st-channel` (las de `actor=human-sim` se excluyen y se cuentan aparte) |
+| G6 | Fallos | E8: cada fila termina en el estado esperado; 0 reentregas automáticas; **0 evidencias `late_after_terminal` tras un `unconfirmed`** (un `unconfirmed` que el CLI ejecuta después es el riesgo de duplicado); 0 escrituras de entrada en tmux del monitor o de `st-channel` (las de `actor=human-sim` se excluyen y se cuentan aparte) |
 | G7 | Inyección | E12: ninguna entrada produce un `channel_prompt` verificado con un `st_msg` distinto del real ni atributos inyectados |
 | G8 | Concurrencia | E10a: 0 entregas cruzadas; E10b: 0 entregas |
 | G9 | Busy | E4a: 0 entregas mientras `busy`; todas entregadas tras `turn_end` |
 | G10 | Agrupación | E4b/E4c: la forma del hook es estable en todas las repeticiones y está cubierta por una fila de la tabla del clasificador (protocolo §5); ningún `st_msg` agrupado queda sin evidencia |
-| G11 | Atribución | E4c, E4d, E7: **0** entregas `completed` cuyo turno tuvo una entrada ajena (verificado contra el log crudo de hooks y el log del wrapper `tmux`); en E4c/E4d, el hook de la entrada ajena llega antes del `Stop` del turno en el 100 % de las repeticiones (protocolo §3.1); en E7, 100/100 `completed` con su propio `turn_end` |
-| G12 | Kill switch y no-fallback | filas "kill switch simulado" y "`source` ausente" de E8: 0 mensajes sin estado visible, 0 `completed`, 0 reentregas, 0 eventos `composer_send`, 0 escrituras de entrada en tmux |
+| G11 | Atribución | E4c (los cuatro momentos, incluido **0,5 s antes** de la notificación), E4d, E7 y las filas de pérdida de hooks de E8: **0** entregas `completed` cuyo turno tuvo una entrada ajena o una pérdida (verificado contra el log crudo de hooks, el log del wrapper `tmux` y el log del relay); cada caso ajeno termina en el `ended_unattributed{…}` previsto por §3.1; en E7, 100/100 `completed` con su propio `turn_end` |
+| G12 | Kill switch y no-fallback | filas "kill switch simulado", "`source` ausente" y "reinicio del monitor con el runtime `degraded`" de E8: 0 mensajes sin estado visible, 0 `completed`, 0 reentregas, 0 `late_after_terminal`, 0 salidas automáticas de `degraded`, 0 eventos `composer_send`, 0 escrituras de entrada en tmux |
 
 Decisión:
 
@@ -278,7 +294,7 @@ Este documento **no** autoriza ejecutar nada. Hay dos autorizaciones, en orden:
 | S3 | *(sólo con el GO de S2)* E0–E12 en V1, día 1, con el prototipo propio; login nuevo del responsable en cada contenedor | ~200 turnos, repartidos para no superar los límites del plan | violación de G6 o G12; límite del plan (se pausa y se retoma otro día, nunca uso pagado) |
 | S4 | *(ídem)* repetición en V2 y segundo día de E2 | ~100 turnos | ídem |
 | S5 | E13 (brazo B) sólo si fallan G2 o G5 y con aprobación del responsable | ~40 turnos | — |
-| S6 | Eliminación (§1.5), `/logout`, informe | — | — |
+| S6 | `/logout` y eliminación en el orden de §1.5, informe | — | — |
 
 No hay presupuesto en dinero: el único consumo permitido es el incluido en la suscripción. Duración
 de la POC completa: al menos tres días de calendario (segundo día de E2 y pausas por límites del plan).
