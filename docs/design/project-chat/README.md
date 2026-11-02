@@ -29,8 +29,10 @@ Skill asociada: [`.claude/skills/architecture-spec/SKILL.md`](../../../.claude/s
    llamar. `chat_post` queda para avances y preguntas.
 5. **Un mensaje en vuelo por agente, sólo con el agente en su prompt verificado.** Evita el
    agrupamiento documentado de Channels en `busy` y mantiene 1 mensaje ↔ 1 turno.
-6. **At-most-once y sin reintentos automáticos**, ni por Channels ni por Composer. `unconfirmed` es
-   un estado final explicado; reenviar es un mensaje nuevo de la persona.
+6. **At-most-once y sin reintentos automáticos**, ni por Channels ni por Composer. Sin evidencia, la
+   entrega queda `uncertain` (cuenta como en vuelo, porque el CLI puede tenerla en cola) hasta
+   probar que el CLI ya no la tiene; sólo entonces es `unconfirmed` y la persona puede reenviar
+   como mensaje nuevo.
 7. **Identidad**: Proyecto → Agente (estable, `@handle`, 1 sesión en v1) → Runtime (proceso `claude`
    con `st-channel` en un arranque) → Conversación (evidencia, cambia con `/clear` y `/resume`).
 8. **Agente→agente sólo con aprobación humana o arista `allow` explícita**, más límites de
@@ -51,11 +53,13 @@ Skill asociada: [`.claude/skills/architecture-spec/SKILL.md`](../../../.claude/s
 | `--channels` desactiva `AskUserQuestion` y plan mode (CHANGELOG 2.1.83) | Media | Canal sólo en sesiones de agente (R7); E11 lo mide |
 | Prompt injection entre agentes con `--dangerously-skip-permissions` | Alta | Aprobación por defecto; límites; marca `from_kind`; clasificador estricto |
 | Dos mecanismos (Channels y Composer) | Media | Composer congelado y nunca invocado por el monitor |
-| Mantenimiento de `st-channel` frente a cambios del protocolo (revisión MCP 2026-07-28) | Media | Revisión negociada fija; `CHANNEL_CLI_VERSIONS`; smoke por variante |
+| Mantenimiento de `st-channel` frente a cambios del protocolo (revisión MCP 2026-07-28) | Media | Revisión negociada fija; `CHANNEL_CLI_VERSIONS` |
+| Revalidar cada versión del CLI exige autenticación real y gasto; con auto-update, cada versión nueva deja a los agentes sin canal | Media | Pin del CLI en sesiones de agente + corrida manual firmada (R9) |
+| La evidencia de aceptación la reporta el propio contenedor del agente (token compartido por sus procesos) | Baja | Frontera de confianza declarada; el token no da poder fuera de la sesión |
 
 ## 3. Decisiones que necesitan al responsable
 
-R1–R8 en [02-architecture-rfc.md §9](./02-architecture-rfc.md#9-decisiones-que-necesitan-al-responsable),
+R1–R9 en [02-architecture-rfc.md §9](./02-architecture-rfc.md#9-decisiones-que-necesitan-al-responsable),
 más: autenticación y presupuesto de la POC ([04-poc.md §1](./04-poc.md#1-aislamiento-y-límites)).
 
 ## 4. Relación con otros documentos
