@@ -400,6 +400,29 @@ describe("enable / disable (§2.4 table, §2.7.5)", () => {
 		expect(await exists(hooksFilePath(root, "s1"))).toBe(false);
 		expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
 	});
+	it("capture requested on a legacy running container whose original image is gone: requested=1, recreate required, no in-place capture", async () => {
+		const row = session("s1");
+		await plant("s1");
+		// DockerManager maps the deleted image's inspect 404 to imageRelay2=false.
+		// The legacy container also predates the required capture token and mounts.
+		const { enable, probe } = authority({
+			container: view({ imageRelay2: false, token: null, controlMount: false }),
+		});
+		const r = await enable("s1");
+		expect(row.conversation_requested).toBe(1);
+		expect(r.capture).toMatchObject({
+			requested: true,
+			effective: false,
+			effectiveAfterRestart: false,
+			requiresRecreate: true,
+		});
+		expect(r.capture.pendingReasons).toEqual(
+			expect.arrayContaining(["image-without-relay", "container-without-capture"]),
+		);
+		expect(probe).not.toHaveBeenCalled();
+		expect(await exists(hooksFilePath(root, "s1"))).toBe(false);
+		expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
+	});
 	it("running container WITHOUT a token: nothing written, residuals removed, requiresRecreate", async () => {
 		session("s1");
 		await plant("s1");
