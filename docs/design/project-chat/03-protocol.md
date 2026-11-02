@@ -86,9 +86,9 @@ su efecto.
 | `ev` | Campos | Identidad (dedupe) |
 | --- | --- | --- |
 | `message` | `msg_id`, `client_message_id`, `author{kind: human\|agent, user_id?\|agent_id?}`, `to[]` (agent_ids), `kind: request\|info\|progress\|result\|question`, `text` (≤ **M1**), `in_reply_to?`, `chain{chain_id, depth}` | `author` + `client_message_id` |
-| `delivery` | `msg_id`, `agent_id`, `state` (§3), `reason?`, `lease_id?`, `endpoint_id?`, `start_gen?`, `cid?`, `prompt_id?`, `turn_seq?`, `by?` | `msg_id` + `agent_id` + `state` |
+| `delivery` | `msg_id`, `agent_id`, `state` (§3), `reason?`, `lease_id?`, `endpoint_id?`, `start_gen?`, `relay{generation, dropped}?` (lectura de base, en `transporting`/`transported`), `cid?`, `prompt_id?`, `turn_seq?`, `by?` | `msg_id` + `agent_id` + `state` |
 | `approval` | `msg_id`, `agent_id`, `decision: approved\|denied`, `by` (user_id) | `msg_id` + `agent_id` |
-| `runtime` | `agent_id`, `endpoint_id`, `event: registered\|retired\|ambiguous\|degraded`, `start_gen`, `pane`, `claude_pid`, `cli_version`, `reason?` | `endpoint_id` + `event` |
+| `runtime` | `agent_id`, `endpoint_id`, `event: registered\|retired\|ambiguous\|degraded\|cleared`, `start_gen`, `pane`, `claude_pid`, `claude_start_time`, `cli_version`, `reason?`, `trigger_msg_id?` (la entrega que causó `degraded`), `by?` (usuario que pulsó "Probar el canal otra vez" en `cleared`) | `endpoint_id` + `event` + `trigger_msg_id` (o `seq` del evento para `cleared`): un segundo `degraded` tras un `cleared` no se descarta como repetido |
 | `gap` | como §4.5 | — |
 
 El texto vive **sólo** aquí. La captura de la conversación guarda `channel_prompt` sin texto (§5).
@@ -112,6 +112,7 @@ stateDiagram-v2
   transporting --> transported: st-channel informa
   transporting --> uncertain: lease vence / reinicio del backend
   transported --> accepted: channel_prompt con st_msg
+  transporting --> accepted: channel_prompt antes del informe de st-channel
   transported --> uncertain: T_accept vence / reinicio del backend
   uncertain --> accepted: channel_prompt tardío (late)
   uncertain --> unconfirmed: evidencia de que el CLI ya no lo tiene
@@ -157,7 +158,15 @@ Reglas:
    **después** de un `turn_end` recibido tras `transported`, sin `channel_prompt` de ese `st_msg`
    (la cola `next` del CLI se vacía antes de volver al prompt — **H**, POC E4c); o (c) dos probes
    verificados separados por ≥ `T_clear` muestran el runtime en su prompt, el primero ≥ `T_clear`
-   después de `transported`, sin ningún prompt (de ningún origen) entre medias. (c) cubre el caso en
+   después de `transported` —o, si nunca llegó a `transported` (`uncertain{lease}`), después del
+   vencimiento del lease—, sin ningún prompt ni cierre (de ningún origen) entre medias y con todos los
+   probes intermedios "en su prompt" (§4). **Relay**: (b) y (c) sólo valen con una lectura limpia
+   del relay (misma generación y mismo contador de pérdidas que la lectura de base persistida, como
+   A7 de §3.1). Si cambió o no se pudo leer, el resultado es `unconfirmed{relay-loss}`: la UI avisa
+   "puede haberse ejecutado; el hook pudo perderse — mirá el hilo o el Terminal antes de reenviar" y
+   **nunca** se degrada el runtime. Motivo: un hook perdido no prueba que el CLI no lo haya ejecutado.
+   Si nunca llegó a `transported`, el motivo es `unconfirmed{not-transported}` (no se sabe si la
+   notificación se escribió) y tampoco degrada. (c) cubre el caso en
    que no hay ningún turno posterior —típicamente el kill switch (§6.4)— y **sólo vale si la POC
    validó G2** (un CLI en su prompt con algo en la cola lo procesa); sin G2, (c) no existe y la
    entrega queda `uncertain` hasta (a) o (b).
@@ -191,7 +200,7 @@ en orden de `seq`:
   **primer** cierre con `prompt_id = P` después del `channel_prompt`, o hasta un `session_end` o la
   retirada del runtime.
 
-`completed` exige **todas** estas condiciones; la primera que falla da el motivo:
+`completed` exige **todas** estas condiciones (A1–A7); la primera que falla da el motivo:
 
 | # | Condición | Si falla |
 | --- | --- | --- |
@@ -201,8 +210,7 @@ en orden de `seq`:
 | A4 | En la ventana no hay **ningún** otro prompt, sea cual sea su `prompt_id` | `ended_unattributed{mixed-input}` |
 | A5 | En la ventana no hay ningún cierre con un `prompt_id` distinto de `P` ni sin `prompt_id` (un `Stop` no anunciado es el rastro de una entrada encolada) | `ended_unattributed{mixed-input}` |
 | A6 | En la ventana no hay `gap` de la conversación | `ended_unattributed{gap}` |
-| A7 | **Relay limpio**: la generación del relay y su contador acumulado de pérdidas, leídos por `st-channel` en `/st-relay/status` (loopback), son iguales en `transported` y `T_settle` después del cierre, y ningún evento de la ventana ni el siguiente trae cabeceras `X-ST-Relay-*` de pérdida | `ended_unattributed{relay-unverified}` |
-| A8 | La captura no descartó por deduplicación ningún prompt de `cid` en la ventana (§5, identidad de prompts) | `ended_unattributed{mixed-input}` |
+| A7 | **Relay limpio**: la generación del relay y su contador acumulado de pérdidas, leídos por `st-channel` en `/st-relay/status` (loopback), son iguales en la lectura de base (la que trae `POST transported`, persistida en el evento `delivery`) y en una lectura tomada ≥ `T_settle` después del cierre, y ningún evento de la ventana ni el siguiente trae cabeceras `X-ST-Relay-*` de pérdida | `ended_unattributed{relay-unverified}` |
 | — | El cierre es `turn_failed`, o la ventana la cierra `session_end` o la retirada del runtime | `interrupted` |
 
 Lectura del relay (A7): hoy `/st-relay/status` sólo devuelve la generación (CONVERSATION.md §2.6);
@@ -218,7 +226,10 @@ entrega sigue `accepted`. Nada la convierte después en `completed` ni la saca d
 Salida sin cierre (`no-close`): si tras `accepted` dos probes con el runtime **en su prompt**
 (definición estricta de §4), separados por ≥ `T_clear`, no tienen entre medias ningún cierre con
 `prompt_id = P`, la entrega pasa a `ended_unattributed{no-close}` (el `Stop` se perdió o el turno se
-cerró con otro id). Así un hook perdido no bloquea al agente hasta `T_queue`.
+cerró con otro id). Así un hook perdido no bloquea al agente hasta `T_queue`. Caso que queda en manos de la persona:
+si un diálogo o un borrador en el Terminal impiden que el runtime esté "en su prompt", `no-close`
+no se dispara y la entrega sigue `accepted`; el roster muestra "necesita el Terminal" y la cola
+del agente espera. No se fuerza nada: es el mismo bloqueo que la persona ve en el Terminal.
 
 Un `turn_end` adicional con `prompt_id = P` después del cierre y antes de cualquier prompt nuevo (un
 hook `Stop` que bloquea y continúa, §4.6) no cambia el estado: se anota `attribution: superseded` y
@@ -274,8 +285,9 @@ Clasificador nuevo en la ingesta, **antes** de L1, con copia idéntica en el fro
 `internal_prompt` de `prompt_id` a `prompt_id` + SHA-256 del `prompt`: hoy la segunda entrada con el
 mismo `prompt_id` —exactamente la entrada encolada de §8.2.1— se descarta como duplicada y la
 atribución nunca la vería. Es un cambio de contrato de CONVERSATION.md §4.6 en su propio PR; los
-reintentos idénticos siguen colapsando. Hasta ese cambio, A8 trata cualquier `dedupe_dropped` de un
-prompt en la ventana como entrada ajena.
+reintentos idénticos siguen colapsando. Ese cambio es **precondición** de P6 (el monitor no entrega
+nada antes de que exista): por eso §3.1 no necesita una condición para descartes por deduplicación,
+que hoy sólo se cuentan a nivel de proceso.
 
 La forma exacta de una entrega agrupada (un hook con varias etiquetas, o un hook por etiqueta) es
 **hipótesis** y criterio G10 de la POC; esta tabla se fija con ese resultado antes de P4. El caso
@@ -340,7 +352,7 @@ endpoint es nuestro proceso, no un hook del CLI.
 | --- | --- | --- | --- |
 | `POST` | `/ingest/channel/hello` | `{pane, claudePid, claudeStartTime, cliVersion, relayGeneration, relayDropped, nonce}` (`claudeStartTime` = campo 22 de `/proc/<claudePid>/stat`) | `{endpointId, agent: {handle, project} \| null, pollWaitSec}`. Antes de declarar ambigüedad, el monitor comprueba los runtimes anteriores de la sesión: uno cuyo `claude_pid` ya no existe (probe sin ese `pid`, o `/proc` por `execCapture`) se retira primero. Sólo dos procesos vivos ⇒ ambos `ambiguous`; la ambigüedad termina cuando queda uno (salida, `bye` o la misma comprobación en el siguiente `next`) |
 | `GET` | `/ingest/channel/next?endpoint=…&relayGeneration=…&relayDropped=…` | long-poll ≤ 25 s; 204 puede traer `{relayCheck: true}` (§3.1 A7) | 200 `{leaseId, msgId, content, meta}` \| 204 \| 410 `retired` (el endpoint debe volver a `hello`) |
-| `POST` | `/ingest/channel/transported` | `{endpointId, leaseId}` | 204; lease desconocido o vencido ⇒ 409 (el monitor ya lo marcó `uncertain`) |
+| `POST` | `/ingest/channel/transported` | `{endpointId, leaseId, relayGeneration, relayDropped}` (lectura tomada justo antes de escribir la notificación; es la base de A7 y de la regla 2b) | 204; lease desconocido o vencido ⇒ 409 (el monitor ya lo marcó `uncertain`) |
 | `POST` | `/ingest/channel/post` | `{endpointId, clientMessageId, to?: [handle], kind, text, inReplyTo?}` | `{msgId, deliveries}`; 429 por límites; el resultado de la herramienta MCP se lo cuenta al modelo |
 | `POST` | `/ingest/channel/bye` | `{endpointId}` | 204 (retiro ordenado; el desordenado lo detecta `start_gen` o el vencimiento del poll) |
 
@@ -383,9 +395,12 @@ sí se garantiza:
    (§2.2) y termina en un estado visible: si el CLI descarta la notificación, la entrega queda
    `uncertain` y pasa a `unconfirmed{no-evidence}` por la regla 2b (c) — nunca a `completed`, nunca
    desaparece. Los mensajes todavía `queued` siguen en cola.
-2. **Degradación visible e inmediata.** El **primer** `unconfirmed{no-evidence}` en un runtime cuya
-   conversación estuvo en su prompt verificado durante toda la espera (regla 2b (c)) pone el runtime
-   en `degraded{no-evidence}`; también `degraded{source-absent}` (§5). Un runtime `degraded` no
+2. **Degradación visible e inmediata.** El **primer** `unconfirmed{no-evidence}` que cumple las tres
+   condiciones siguientes pone el runtime en `degraded{no-evidence}`: la entrega llegó a
+   `transported` (la notificación se escribió); salió por la regla 2b (c), con todos los probes de la
+   espera "en su prompt" y sin ningún evento de la conversación entre medias; y la lectura del relay
+   fue limpia. Un `unconfirmed{relay-loss}` o `{not-transported}` **no** degrada. También
+   `degraded{source-absent}` (§5); también `degraded{source-absent}` (§5). Un runtime `degraded` no
    recibe ninguna entrega. La UI muestra el agente como "canal sin respuesta" con la causa, y cada
    mensaje en cola dice "retenido: canal degradado".
 3. **`degraded` es del proceso, no del endpoint**: se guarda en el log del proyecto con la clave
@@ -443,10 +458,15 @@ backend. Un agente comprometido puede como mucho estropear sus propias entregas.
 ## 9. Recuperación
 
 1. **Arranque del backend**: abrir cada log de proyecto con agentes activos; toda entrega
-   `transporting`/`transported` ⇒ `uncertain{orphaned}` (sale por la regla 2b de §3); `accepted` sin `turn_end` se re-evalúa
-   con los eventos persistidos de la conversación (`cid`, `prompt_id`) — si el `turn_end` existe,
-   `completed`; si la conversación está viva, sigue `accepted`; si no, `interrupted`. Los runtimes no
-   sobreviven: cada `st-channel` recibe 410 y vuelve a `hello`.
+   `transporting`/`transported` ⇒ `uncertain{orphaned}` (sale por la regla 2b de §3). Toda entrega
+   `accepted` se decide con **las mismas condiciones A1–A7 de §3.1** sobre los eventos persistidos de
+   la conversación: nunca hay un atajo de recuperación hacia `completed`. A7 usa la lectura de base
+   persistida y una lectura nueva que `st-channel` trae al volver a `hello`; como el contador del relay
+   es acumulado, la comparación sigue valiendo tras el reinicio del backend si la generación del relay
+   no cambió; si no hay lectura nueva, o la generación cambió, `ended_unattributed{relay-unverified}`.
+   Con la ventana todavía abierta y la conversación viva, sigue `accepted`; si el proceso terminó,
+   `interrupted`. Los runtimes no sobreviven: cada `st-channel` recibe 410 y vuelve a `hello`;
+   `degraded` sí sobrevive (§6.4).
 2. **Parada del contenedor** (`onSessionDown`, ya existe): retira runtimes del `start_gen`; entregas en
    vuelo ⇒ `unconfirmed{runtime-retired}` o `interrupted`.
 2'. **Salida del CLI sin parar el contenedor** (`exit`, crash): `start_gen` **no** cambia (sólo lo
