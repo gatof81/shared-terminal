@@ -77,7 +77,7 @@ Multiple browser tabs attaching to the same session share the same tmux exec (ea
 
 ### Delete semantics
 
-`DELETE /api/sessions/:id` is a **soft delete** by default: container is killed, row flips to `status=terminated`, workspace files are preserved so the user can later `POST /start` to respawn. Pass `?hard=true` to also purge the workspace dir and drop the row. `purgeWorkspace` refuses any path that does not resolve under `WORKSPACE_ROOT`.
+`DELETE /api/sessions/:id` is a **soft delete** by default: container is killed, row flips to `status=terminated`, workspace files are preserved so the user can later `POST /start` to respawn. Pass `?hard=true` to also purge the workspace dir and drop the row. `purgeWorkspace` refuses any path that does not resolve under `WORKSPACE_ROOT`. **Teardown is fail-closed**: `kill()` / `stopContainer()` treat only Docker's own 404 (and 304 on `stop`) as "already done"; any other answer (5xx, 409, `ECONNREFUSED`/`EACCES` socket errors, which docker-modem passes through without a `statusCode`) propagates, the row keeps its status and `container_id`, and the route answers 500 `teardown-failed` with the stage (`kill` / `stop` / `purge`). A hard delete never drops the row after a failed `purgeWorkspace` — the row is the only reference a retry needs, and the purge is idempotent, so the same verb again is the recovery (`isNotFound` / `isNotModified` live in `recreate/ports.ts`; `*.failpath.test.ts` inject each error class).
 
 ### Backup & restore (#240)
 

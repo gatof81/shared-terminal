@@ -53,6 +53,7 @@ import type { LayerChange, PathKind } from "./recreate/layer.js";
 import {
 	type ExecResult,
 	isNotFound,
+	isNotModified,
 	type RecreateContainer,
 	type RecreateDockerPort,
 } from "./recreate/ports.js";
@@ -1232,28 +1233,33 @@ export class DockerManager {
 		const meta = await this.sessions.get(sessionId);
 
 		if (meta?.containerId) {
+			// Fail-closed: only Docker's own "already done" answers (404 not
+			// found; 304 not modified on `stop`) let the teardown proceed.
+			// A 5xx, a 409 (removal in progress) or a socket error means the
+			// daemon confirmed nothing, and the container may well still be
+			// running — so the error propagates and `container_id` stays in
+			// D1, which is the one reference a retry (or /start's stale-name
+			// reclaim) needs. Swallowing here used to null the id on ANY
+			// error and the delete routes then dropped the row: a running
+			// container nobody referenced any more.
+			const container = this.docker.getContainer(meta.containerId);
 			try {
-				const container = this.docker.getContainer(meta.containerId);
-				try {
-					await container.stop({ t: 5 });
-				} catch {
-					/* already stopped */
-				}
-				// `v: true` also removes any anonymous volumes attached to the
-				// container (bind mounts are unaffected — those are cleaned by
-				// purgeWorkspace on hard delete).
-				try {
-					await container.remove({ force: true, v: true });
-				} catch {
-					/* already removed */
-				}
+				await container.stop({ t: 5 });
 			} catch (err) {
-				logger.error(
-					`[docker] error killing container for session ${sessionId}: ${(err as Error).message}`,
-				);
+				if (!isNotFound(err) && !isNotModified(err)) throw err;
 			}
-			// The container no longer exists in Docker — reflect that in D1 so any
-			// later lookup doesn't chase a dead container id.
+			// `v: true` also removes any anonymous volumes attached to the
+			// container (bind mounts are unaffected — those are cleaned by
+			// purgeWorkspace on hard delete).
+			try {
+				await container.remove({ force: true, v: true });
+			} catch (err) {
+				if (!isNotFound(err)) throw err;
+			}
+			// Removed, or confirmed gone — reflect that in D1 so any later
+			// lookup doesn't chase a dead container id. A failure here is
+			// harmless: reconcile's 404 branch and /start both cope with a
+			// stale id, so it is logged rather than failing the teardown.
 			try {
 				await this.sessions.setContainerId(sessionId, null);
 			} catch (err) {
@@ -1917,12 +1923,25 @@ export class DockerManager {
 	async stopContainer(sessionId: string): Promise<void> {
 		const meta = await this.sessions.getOrThrow(sessionId);
 		if (!meta.containerId) return;
+		let gone = false;
 		try {
 			await this.docker.getContainer(meta.containerId).stop({ t: 5 });
-		} catch {
-			/* already stopped */
+		} catch (err) {
+			if (isNotFound(err)) {
+				// Gone behind our back: the same atomic record reconcile's
+				// 404 branch writes, so /start respawns instead of inspecting
+				// a dead id.
+				gone = true;
+				await this.sessions.recordContainerGone(sessionId);
+			} else if (!isNotModified(err)) {
+				// Not confirmed stopped (daemon/socket error): the row stays
+				// `running` and the mappings stay, so the sweeper, quotas and
+				// the dispatcher keep seeing the live container; the caller
+				// (route 500, sweeper next pass) retries.
+				throw err;
+			}
 		}
-		await this.sessions.updateStatus(sessionId, "stopped");
+		if (!gone) await this.sessions.updateStatus(sessionId, "stopped");
 		// #190 PR 190b — clear port mappings: a stopped container's host
 		// port no longer reaches anything, and Docker may rebind the
 		// same ephemeral port to a different container on the next

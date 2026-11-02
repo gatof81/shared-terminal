@@ -27,7 +27,13 @@ import {
 	UserQuotasPatchSchema,
 	updateUserQuotas,
 } from "../userQuotas.js";
-import { type RouteContext, r1, serializeMeta, serializeUsage } from "./shared.js";
+import {
+	type RouteContext,
+	r1,
+	serializeMeta,
+	serializeUsage,
+	TeardownFailedError,
+} from "./shared.js";
 
 export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 	const { sessions, docker, idleSweeper, conversation, recreation } = ctx;
@@ -302,11 +308,24 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 					return;
 				}
 				await sessionLifecycleLock.run(req.params.id, "stop", () =>
-					docker.stopContainer(req.params.id),
+					// Fail-closed like the owner route: an unconfirmed stop keeps
+					// the row `running` (and the sweeper's entry), see TeardownFailedError.
+					docker.stopContainer(req.params.id).catch((err) => {
+						throw new TeardownFailedError("stop", err);
+					}),
 				);
 				idleSweeper?.forget(req.params.id);
 				res.status(204).send();
 			} catch (err) {
+				if (err instanceof TeardownFailedError) {
+					logger.error(
+						`[admin] force-stop not confirmed for ${req.params.id}: ${err.causeMessage}`,
+					);
+					res
+						.status(500)
+						.json({ error: "teardown-failed", stage: err.stage, message: err.message });
+					return;
+				}
 				if (err instanceof SessionBusyError) {
 					res.status(409).json({ error: "busy" });
 					return;
@@ -349,25 +368,34 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 					// Idempotent soft branch — only kill + terminate if not
 					// already torn down.
 					if (current.status !== "terminated") {
-						await docker.kill(req.params.id);
+						// Same fail-closed shape as the owner route: an unconfirmed
+						// kill or purge keeps the row (and the container_id) so
+						// the retry converges; see TeardownFailedError.
+						await docker.kill(req.params.id).catch((err) => {
+							throw new TeardownFailedError("kill", err);
+						});
 						await sessions.terminate(req.params.id);
 						idleSweeper?.forget(req.params.id);
 					}
 					if (hard) {
-						try {
-							await docker.purgeWorkspace(req.params.id);
-						} catch (err) {
-							logger.error(
-								`[admin] force-delete purgeWorkspace failed for ${req.params.id}: ${(err as Error).message}`,
-							);
-							// Fall through — the D1 row removal still happens.
-						}
+						await docker.purgeWorkspace(req.params.id).catch((err) => {
+							throw new TeardownFailedError("purge", err);
+						});
 						await sessions.deleteRow(req.params.id);
 						idleSweeper?.forget(req.params.id);
 					}
 				});
 				res.status(204).send();
 			} catch (err) {
+				if (err instanceof TeardownFailedError) {
+					logger.error(
+						`[admin] force-delete ${err.stage} not confirmed for ${req.params.id}: ${err.causeMessage}`,
+					);
+					res
+						.status(500)
+						.json({ error: "teardown-failed", stage: err.stage, message: err.message });
+					return;
+				}
 				if (err instanceof SessionBusyError) {
 					res.status(409).json({ error: "busy" });
 					return;
