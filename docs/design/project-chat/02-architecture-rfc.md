@@ -69,7 +69,7 @@ Leyenda: **D** documentado · **B** observado en el binario 2.1.314 · **I** rep
 | C5 | **Despertar** una sesión en su prompt | D (sólo como ejemplo en el quickstart); I #44380 "Channel messages don't wake idle sessions" (abierto) | **Hipótesis disputada** — criterio de NO-GO de la POC |
 | C6 | Recibir mientras Claude trabaja | D: "If several notifications arrive while Claude is busy, they're delivered together on the next turn and Claude handles them as a group"; B: `priority:"next"` | Documentado: **se encolan y se agrupan** (rompe la correlación 1 mensaje ↔ 1 turno) |
 | C7 | Confirmación de entrega | D: "Claude Code doesn't acknowledge notifications… resolves when the message is written to the transport… drops the events silently" | **No existe**. Hay que construirla con evidencia externa (§5.4) |
-| C8 | `UserPromptSubmit` para la entrada de canal | B: esquema del hook, `source: "system"` = "other machine-injected turns (peer/**channel messages**, task notifications, auto-continuation)"; `isMeta ⇒ "system"` | **Observado en binario**; **H** que `prompt` contenga la etiqueta `<channel …>` con nuestro `meta` |
+| C8 | `UserPromptSubmit` para la entrada de canal | B: esquema del hook, `source: "system"` = "other machine-injected turns (peer/**channel messages**, task notifications, auto-continuation)"; `isMeta ⇒ "system"` | **Observado en binario**, con salvedad: el mismo esquema dice *"Payloads may omit it while the field rolls out"*. **H** que `prompt` contenga la etiqueta `<channel …>` con nuestro `meta` |
 | C9 | Respuesta | D: herramienta MCP `reply` convencional; I #95011 "Claude does not call the reply tool automatically" | Documentado, **no determinista** (depende del modelo) |
 | C10 | `--resume` / `--continue` | — (docs no dicen nada); I #78028, #90160, #101872, #80707 (flag perdido en re-host/fork/background) | **Hipótesis**; la POC lo mide |
 | C11 | Varias sesiones simultáneas | D: "run separate sessions"; un servidor por proceso CLI | Documentado (un proceso de canal por CLI) |
@@ -159,7 +159,7 @@ flowchart LR
 | Componente | Nuevo / reutilizado | Responsabilidad |
 | --- | --- | --- |
 | `projectChat/monitor.ts` (backend) | **Nuevo módulo**, mismo proceso | Fuente de verdad de mensajes y entregas; elegibilidad; límites; política entre agentes; correlación con la evidencia. |
-| Log del proyecto `<WORKSPACE_ROOT>/.projects/<projectId>/chat.events.jsonl` | **Nuevo archivo**, patrón de `conversation/store.ts` (seq, snapshot atómico, rotación L7) | Contenido y transiciones. El contenido **nunca** entra en D1. |
+| Log del proyecto `<WORKSPACE_ROOT>/.projects/<projectId>/chat.events.jsonl` | **Nuevo archivo**: formato de `conversation/store.ts` (seq, snapshot, rotación) pero escritura con fsync y **sin** ruta de descarte (protocolo §2.2) | Contenido y transiciones. El contenido **nunca** entra en D1. |
 | D1 `projects`, `project_agents`, `project_agent_edges` | **Nuevas tablas**, migración append-only | Metadatos: propiedad, membresía, handles, política. Sin contenido. |
 | `/ingest/channel/*` (backend) | **Nuevas rutas**, montadas como `/ingest/claude/hook` (antes de `express.json`, lector de cuerpo acotado) | API del endpoint de canal autenticada con el token de ingesta de la sesión. |
 | `st-channel` (imagen) | **Nuevo proceso**, hijo stdio del CLI, Python stdlib como `relay.py` | Adaptador Channels: registra el runtime, recibe el mensaje del monitor, emite la notificación, expone herramientas de publicación. **Sin estado durable.** |
@@ -239,8 +239,11 @@ sequenceDiagram
   Dice que el CLI la convirtió en un turno. No dice nada del resultado.
 - **Completado** = llegó el `turn_end` del `prompt_id` aceptado. El **resultado** es ese informe
   final (referencia) más cualquier publicación explícita del agente con `in_reply_to`.
-- Sin `channel_prompt` dentro de `T_accept` ⇒ `unconfirmed`. **Nunca** se reenvía solo, ni por
-  Channels ni por Composer: la persona decide (nuevo mensaje, o Control Directo explícito).
+- Sin `channel_prompt` dentro de `T_accept` ⇒ `uncertain`: el CLI puede tenerlo en su cola y
+  ejecutarlo más tarde, así que sigue contando como en vuelo. Pasa a `unconfirmed` sólo con evidencia
+  de que el CLI ya no lo tiene (protocolo §3 regla 2b). **Nunca** se reenvía solo, ni por Channels
+  ni por Composer: la persona decide (nuevo mensaje, o Control Directo explícito), y sólo cuando la
+  entrega ya es `unconfirmed`.
 
 ### 5.5 Elegibilidad y concurrencia (el monitor evita el agrupamiento)
 
@@ -289,13 +292,14 @@ la tarjeta de resultado lo dice ("respondido junto con un mensaje escrito en el 
 | Situación | Qué pasa | Qué ve la persona |
 | --- | --- | --- |
 | CLI sin `--channels`, o canal no registrado (C13–C18) | `st-channel` no arranca o no se registra; no hay runtime | Agente "sin canal" con la razón conocida; mensajes en cola |
-| Kill switch remoto (C17) | `st-channel` arranca pero el CLI no registra el handler. Sin señal directa al servidor | Entregas `unconfirmed`; tras 2 consecutivas en el mismo runtime, runtime `degraded` y el monitor deja de entregar a ese runtime |
-| `st-channel` muere antes de informar `transported` | Lease vence (`T_lease`) | `unconfirmed` (pudo llegar o no); nada se reenvía |
-| Backend se reinicia | Al abrir el log, toda entrega `transporting`/`transported` sin `accepted` pasa a `unconfirmed{orphaned}`; `queued` sigue en cola | Igual que arriba |
-| Contenedor se para / CLI sale | Runtime retirado (`startGen`); entregas en vuelo ⇒ `unconfirmed`; `queued` sigue esperando | Agente "desconectado"; cola visible |
+| Kill switch remoto (C17) | `st-channel` arranca pero el CLI no registra el handler o descarta la notificación (el gate se evalúa en **cada** notificación, B). Sin señal directa al servidor | Entregas `uncertain` → `unconfirmed`; tras 2 consecutivas en el mismo runtime, runtime `degraded` y el monitor deja de entregar a ese runtime |
+| `st-channel` muere antes de informar `transported` | Lease vence (`T_lease`) | `uncertain` (pudo llegar o no) hasta la evidencia de la regla 2b; nada se reenvía |
+| Backend se reinicia | Al abrir el log, toda entrega `transporting`/`transported` sin `accepted` pasa a `uncertain{orphaned}`; un `channel_prompt` tardío la lleva a `accepted{late}`; `queued` sigue en cola | Igual que arriba |
+| Contenedor se para | Runtime retirado (`startGen` cambia en `onSessionDown`); entregas en vuelo ⇒ `unconfirmed`/`interrupted`; `queued` sigue esperando | Agente "desconectado"; cola visible |
+| CLI sale (`exit`, crash) sin parar el contenedor | `startGen` **no** cambia; el runtime se retira por `bye`, por la comprobación de `pid` en el siguiente `hello`/`next`, o por silencio (60 s) | Igual; un `claude --resume` inmediato no queda `ambiguous` |
 | `claude --resume` | Nuevo proceso ⇒ nuevo `st-channel` ⇒ nuevo runtime (si el alias lleva `--channels`); conversación reanudada | Agente vuelve a estar disponible |
 | `/resume` o `/clear` dentro del CLI | Mismo proceso y runtime; cambia la conversación viva | Los mensajes siguientes se aceptan en la conversación nueva; el historial lo muestra |
-| Hook perdido (relay) | Sin `channel_prompt` ⇒ `unconfirmed` aunque Claude haya trabajado | Explicación "sin evidencia"; el `turn_end` posterior se muestra en el hilo del agente |
+| Hook perdido (relay) | Sin `channel_prompt` ⇒ `uncertain` y después `unconfirmed` aunque Claude haya trabajado | Explicación "sin evidencia"; el `turn_end` posterior se muestra en el hilo del agente |
 | Dos `claude` con canal en el mismo contenedor | `runtime-ambiguous` | Aviso con la acción (cerrar uno) |
 | Disco lleno en el host | Escritura del log falla ⇒ el `POST` responde 503, nada se entrega | Error inmediato |
 
@@ -307,9 +311,11 @@ reintento**. Es la misma política que el Composer (§8.1.7) y la que pidió el 
 - **Aislamiento**: proyectos owner-only; todos los agentes de un proyecto pertenecen al owner; una
   sesión pertenece como mucho a un proyecto activo. Admin/lead no leen el chat en v1 (decisión
   abierta §9).
-- **Autenticación del endpoint**: token de ingesta por arranque (`ST_INGEST_TOKEN`, §3.4 de phase3),
-  validado contra `ingest_token_hash` + `SESSION_ID`. Autoriza sólo a: registrar runtimes de **esa**
-  sesión, recibir mensajes de **su** agente y publicar **como** ese agente en **su** proyecto.
+- **Autenticación del endpoint**: token de ingesta de la sesión (`ST_INGEST_TOKEN`, creado con el
+  contenedor y conservado entre stop/start), validado contra `ingest_token_hash` + `SESSION_ID`.
+  Autoriza sólo a: registrar runtimes de **esa** sesión, recibir mensajes de **su** agente y publicar
+  **como** ese agente en **su** proyecto. Cualquier proceso del contenedor tiene el token: la
+  evidencia de aceptación es tan fiable como el contenedor del agente, nunca más (protocolo §7).
 - **Prompt injection**: (1) entre agentes, aprobación o arista explícita (§5.6); (2) el contenido de
   mensajes de agentes se marca `from_kind="agent"`; (3) el CLI escapa `content` y `meta` (B: `Bd`,
   `EPt`) — **H**, la POC lo prueba con un `</channel>` y atributos falsos dentro del contenido;
@@ -335,7 +341,11 @@ reintento**. Es la misma política que el Composer (§8.1.7) y la que pidió el 
   `st-channel` + alias con `--channels`), con el motor de 3.0d. Ninguna sesión cambia sin que el
   admin lo pida.
 - Versión del CLI: lista explícita `CHANNEL_CLI_VERSIONS`, como `COMPOSER_CLI_VERSIONS`; fuera de la
-  lista el agente queda "canal no validado" y no recibe.
+  lista el agente queda "canal no validado" y no recibe. Revalidar exige autenticación first-party
+  real (C16–C17: el mock del smoke no sirve), así que no puede ser un job de CI ordinario. Con el
+  auto-update de los workspaces, cada versión nueva dejaría a los agentes sin canal hasta revalidar.
+  Propuesta (R9): **fijar la versión del CLI en las sesiones de agente** (sin auto-update) y
+  revalidar con una corrida manual firmada, con tope de gasto, antes de subir el pin.
 
 ## 9. Decisiones que necesitan al responsable
 
@@ -349,3 +359,4 @@ reintento**. Es la misma política que el Composer (§8.1.7) y la que pidió el 
 | R6 | Plugin en marketplace local vs. flag de desarrollo en producción | Plugin + `allowedChannelPlugins`; el flag de desarrollo nunca fuera de la POC |
 | R7 | Habilitar `--channels` sólo en sesiones de agente (por C20) | Sí |
 | R8 | El resultado es el `turn_end` del turno aceptado (no la herramienta `reply`) | Sí; `chat_post` queda para avances y preguntas |
+| R9 | Cómo se revalida cada versión del CLI para el canal (§8) | Pin del CLI en sesiones de agente + corrida manual firmada con tope de gasto; dueño: el responsable |

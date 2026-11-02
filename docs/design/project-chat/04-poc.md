@@ -33,6 +33,14 @@ duplicados, y con fallos explicables?*
 - **Costo estimado**: ~300 turnos cortos. Con un modelo pequeño para E2–E8 y el modelo por defecto en
   E9: del orden de USD 10–30. El responsable lo aprueba antes.
 
+### 1.1 Fase 0: descarte barato
+
+Antes de escribir `monitor.mjs` o `st_channel.py`: con el plugin oficial `fakechat`
+(`claude-plugins-official`) y la autenticación de producción, en el contenedor desechable, comprobar
+G1 (registra), una muestra de G2 (10 mensajes con la sesión inactiva) y la forma del hook de G3. Si
+el canal no está disponible (kill switch, #105326) o no despierta, la POC se detiene ahí con NO-GO o
+pasa al brazo B, sin haber construido nada propio.
+
 ## 2. Versiones
 
 | Variante | CLI | Motivo |
@@ -72,10 +80,10 @@ El monitor aplica la elegibilidad de §4 del protocolo usando los hooks recibido
 | --- | --- | --- | --- |
 | E0 | Disponibilidad | Arrancar con la autenticación elegida y `channelsEnabled: true` en `managed-settings.d`; leer `--debug` del CLI | `Channel notifications registered` o el motivo de `skip` (C13–C18) |
 | E1 | Carga de producción | Repetir E0 con `st` empaquetado como plugin en un marketplace local y `allowedChannelPlugins`, sin flag de desarrollo | registra / no registra; diálogo de confirmación sí/no |
-| E2 | Despertar en el prompt | 20 mensajes, cada uno con la sesión en `waiting_input` verificado y ≥ 30 s inactiva | `UserPromptSubmit` sí/no; latencia `transported → UserPromptSubmit` |
+| E2 | Despertar en el prompt | 60 mensajes con la sesión en `waiting_input` verificado: 48 tras ≥ 30 s inactiva y 12 tras ≥ 1 h inactiva; repartidos en al menos dos días | `UserPromptSubmit` sí/no; latencia `transported → UserPromptSubmit` |
 | E3 | Forma de la evidencia | Para todos los mensajes de E2 | `source`, `prompt` exacto, presencia de `st_msg`, `prompt_id` |
-| E4 | Busy | (a) política del monitor: mensaje en cola mientras Claude trabaja; (b) **comportamiento crudo**: 3 notificaciones durante un turno largo, sin política | (a) se entrega tras `turn_end`; (b) agrupación, `prompt_id`, si interrumpe |
-| E5 | Reanudación | (a) salir y `claude --resume <cid>` con los mismos flags; (b) `/resume` a otra conversación dentro del CLI; (c) `/clear`; 10 mensajes tras cada uno | runtime nuevo o el mismo; `cid` donde se acepta; conversaciones nuevas creadas |
+| E4 | Busy | (a) política del monitor: mensaje en cola mientras Claude trabaja; (b) **comportamiento crudo**: 3 notificaciones durante un turno largo, sin política (10 repeticiones); (c) una notificación y un texto tecleado por el harness con `tmux send-keys` **fuera** de la ventana medida por G6 (simula a la persona) | (a) se entrega tras `turn_end`; (b)/(c) cuántos hooks, forma exacta del `prompt`, `prompt_id`, si interrumpe |
+| E5 | Reanudación | (a) salir y `claude --resume <cid>` con los mismos flags, inmediatamente (< 5 s) y tras un `kill -9`; (b) `/resume` a otra conversación dentro del CLI; (c) `/clear`; 30 mensajes tras cada uno | runtime nuevo o el mismo; `cid` donde se acepta; conversaciones nuevas creadas |
 | E6 | Sesiones no creadas | antes/después de cada experimento | número de entradas de `claude agents --json` y de `session_id` distintos en los hooks |
 | E7 | Pérdida y duplicados | 100 mensajes secuenciales con la política del monitor | exactamente un `channel_prompt` y un `turn_end` por mensaje; `prompt_id` distintos |
 | E8 | Fallos inyectados | ver §4.1 | estado final de cada entrega |
@@ -89,31 +97,36 @@ El monitor aplica la elegibilidad de §4 del protocolo usando los hooks recibido
 
 | Fallo inyectado | Momento | Estado esperado | Prohibido |
 | --- | --- | --- | --- |
-| `kill -9` de `st_channel.py` | entre la notificación y `transported` | `unconfirmed{lease}` (y, si llega el hook, el monitor registra la evidencia sin cambiar el estado terminal) | reentrega |
-| `kill -9` de `st_channel.py` | antes de la notificación, con lease | `unconfirmed{lease}` | reentrega |
-| reinicio de `monitor.mjs` | con una entrega `transported` | `unconfirmed{orphaned}` | reentrega |
+| `kill -9` de `st_channel.py` | entre la notificación y `transported` | `uncertain{lease}` y después `accepted{late}` (llega el hook) | reentrega |
+| `kill -9` de `st_channel.py` | antes de la notificación, con lease | `uncertain{lease}` → `unconfirmed` por la regla 2b | reentrega |
+| reinicio de `monitor.mjs` | con una entrega `transported` | `uncertain{orphaned}`; `accepted{late}` si llega el hook; si no, `unconfirmed` por la regla 2b | reentrega |
+| texto humano tecleado 0,5 s después de `transported` (E4c) | turno humano en curso | `uncertain` mientras el CLI lo tenga en cola; después `accepted{late}` o `unconfirmed` por la regla 2b; ninguna otra entrega a ese agente mientras tanto | reentrega; segunda entrega concurrente |
 | `kill` de `claude` | durante el turno aceptado | `interrupted` | reentrega por Composer o tmux |
 | `docker stop` | con 3 mensajes en cola | cola intacta; entrega tras arrancar y relanzar `claude` | pérdida o duplicado |
-| red cortada contenedor→monitor | 60 s | `st_channel` reintenta `hello`; entregas en vuelo `unconfirmed` | duplicado |
+| red cortada contenedor→monitor | 60 s | `st_channel` reintenta `hello`; entregas en vuelo `uncertain`, después `accepted{late}` o `unconfirmed` por la regla 2b | duplicado |
 | `channelsEnabled` ausente | arranque | sin runtime; la cola espera y el motivo es visible | cualquier entrega |
-| relay detenido (hooks perdidos) | durante un mensaje | `unconfirmed{no-evidence}` aunque Claude trabaje | `completed` sin evidencia |
+| relay detenido (hooks perdidos) | durante un mensaje | `uncertain` → `unconfirmed{no-evidence}` aunque Claude trabaje | `completed` sin evidencia |
 
 ## 5. Criterios GO / NO-GO (fijados antes de ejecutar)
 
 Se evalúan en **V1 y V2**. "Sin explicación" significa que el log del CLI y los hooks no permiten
-atribuir el caso a un fallo inyectado.
+atribuir el caso a un fallo inyectado. Con muestras pequeñas no se informa "p99" sino el máximo y la
+cota superior al 95 % de la tasa de fallo (regla del tres: 0 fallos en n ⇒ ≤ 3/n). Con 60 muestras,
+0 fallos acota la tasa real en ≈ 5 %; con 30, en ≈ 10 %. La POC decide si el mecanismo funciona; el
+objetivo del piloto (≥ 95 %, visión §6) se confirma en el piloto, no aquí.
 
 | Id | Criterio | Umbral GO |
 | --- | --- | --- |
 | G1 | Registro | E0 registra con la autenticación de producción. E1 registra sin flag de desarrollo (si sólo E0 registra: **GO condicional** a la decisión R6) |
-| G2 | Despertar | E2: 20/20 turnos iniciados; p99 de latencia ≤ 5 s |
+| G2 | Despertar | E2: 60/60 turnos iniciados (incluidas las 12 muestras de ≥ 1 h); latencia máxima ≤ 5 s |
 | G3 | Evidencia | E3: 100 % de las entradas producen `UserPromptSubmit` con `source=system` y la etiqueta con `st_msg` intacto (hipótesis H8) |
 | G4 | Sin pérdida ni duplicado | E7: 100/100 exactamente una vez; 0 duplicados |
-| G5 | Reanudación | E5a: 10/10 aceptados en el `cid` reanudado; E5b/E5c: 10/10 aceptados en el `cid` nuevo; 0 conversaciones creadas por una entrega (E6) |
+| G5 | Reanudación | E5a: 30/30 aceptados en el `cid` reanudado, sin `runtime-ambiguous` tras la salida inmediata ni tras el `kill -9`; E5b/E5c: 30/30 aceptados en el `cid` nuevo; 0 conversaciones creadas por una entrega (E6) |
 | G6 | Fallos | E8: cada fila termina en el estado esperado; 0 reentregas automáticas; 0 escrituras de entrada en tmux |
 | G7 | Inyección | E12: ninguna entrada produce un `channel_prompt` verificado con un `st_msg` distinto del real ni atributos inyectados |
 | G8 | Concurrencia | E10a: 0 entregas cruzadas; E10b: 0 entregas |
 | G9 | Busy | E4a: 0 entregas mientras `busy`; todas entregadas tras `turn_end` |
+| G10 | Agrupación | E4b/E4c: la forma del hook es estable en las 10 repeticiones y está cubierta por una fila de la tabla del clasificador (protocolo §5); ningún `st_msg` agrupado queda sin evidencia |
 
 Decisión:
 
@@ -124,7 +137,7 @@ Decisión:
 | Falla G2 o G5 | Correr E13 (brazo B). Si B cumple G2–G9: GO con B como adaptador y Channels descartado; si no: **NO-GO** |
 | Falla G3 | **NO-GO**: sin evidencia de aceptación del CLI, "entregado" no es demostrable (la herramienta `reply` depende del modelo, E9) |
 | Falla G4, G6 o G8 por diseño | **NO-GO** y rediseño. Si es un error del prototipo, se corrige y se repite **toda** la tanda |
-| Falla G7 | Rediseño del clasificador antes de cualquier GO |
+| Falla G7 o G10 | Rediseño del clasificador antes de cualquier GO |
 | E11 muestra un efecto inaceptable en el Terminal | No bloquea la POC; el responsable decide si el canal se limita a sesiones de agente (R7) |
 
 ## 6. Entregables de la POC

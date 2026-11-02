@@ -29,7 +29,7 @@ terminaron.
 | U2 | Saber quién trabaja y quién espera | Abrir cada sesión | Roster: trabajando / esperando input / desconectado / sin canal |
 | U3 | Ver el resultado | Leer el hilo de la conversación | Tarjeta de resultado bajo el mensaje, con enlace al hilo completo |
 | U4 | Pedir lo mismo a dos agentes | Dos sesiones, dos envíos | `@backend @frontend …` — una entrega por agente, cada una con su estado |
-| U5 | Un agente pide ayuda a otro | No existe | `chat_send` desde el agente; la persona aprueba (o declaró antes que ese par puede hablar) |
+| U5 | Un agente pide ayuda a otro | No existe | `chat_send` desde el agente; la persona aprueba (o declaró antes que ese par puede hablar). El resultado se publica en el proyecto; devolverlo al agente que pidió sigue la misma regla de aprobación |
 | U6 | Un mensaje no llegó | Composer: `unconfirmed`, mirar el Terminal | Estado explícito ("sin confirmar: no sabemos si llegó"); reenviar o usar Control Directo es decisión de la persona |
 | U7 | Algo se trabó | Terminal | Control Directo (Composer) o Terminal, como hoy |
 
