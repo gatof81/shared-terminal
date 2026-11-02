@@ -18,9 +18,10 @@ empieza.
 
 ### 1.1 Host
 
-- Una **VM desechable dedicada** (local o cloud), creada para la POC y destruida al terminar.
+- Una **VM Linux x86_64 desechable**, en una **máquina físicamente independiente del Proxmox de
+  producción** (preferencia del responsable, 2026-11-02), creada para la POC y destruida al terminar.
   *MUST NOT* ser el host de producción (el que corre `st-backend` y las sesiones), ni ningún host
-  donde corran sesiones reales, incluidas las de Claude A y Home Automation, ni este workspace.
+  donde corran sesiones reales, incluidas las de Claude A, Home Automation y B, ni este workspace.
 - Sin credenciales de producción en la VM: ni `.env` del backend, ni tokens de Cloudflare, ni
   `JWT_SECRET`, ni `SECRETS_ENCRYPTION_KEY`, ni acceso al túnel. Sin rutas de red hacia la red de
   producción (ni VPN ni túnel).
@@ -114,6 +115,28 @@ empieza.
   otra autenticación que la de §1.4.
 
 ### 1.7 Fase 0: disponibilidad y despertar con `fakechat`
+
+**Kit:** rama `poc/channels-phase0` (sin merge), carpeta `poc/channels/`, con el runbook en su
+README. Diferencias deliberadas con §1.2 para la fase 0: imagen **mínima** (Node 22, CLI fijado,
+Bun, tmux) en lugar de la imagen de sesión, porque la fase 0 sólo pregunta si el canal se registra y
+despierta, y menos piezas toleran mejor `--cap-drop ALL` y `--read-only`. `fakechat` se instala
+desde el **marketplace oficial**, para seguir en la allowlist de Anthropic (una copia local podría
+quedar fuera: "unknown source"), y el commit fijado
+(`claude-plugins-official@7994c27`, `external_plugins/fakechat`) se impone **por hash** de sus
+archivos. `fakechat` corre con **Bun**, ejecuta `bun install` al arrancar, y se alimenta con
+`POST /upload` en `127.0.0.1:8787`, cuyo `id` se convierte en `message_id` de la etiqueta. S0
+preinstala sus dependencias y prueba que arranca con GitHub y npm cerrados.
+
+**Dos etapas separadas** (decisión del responsable, 2026-11-02):
+
+- **S0, preparación**: VM, aislamiento, proxy, harness y `fakechat`, **sin** la suscripción.
+  Termina con `evidence.md`: aislamiento comprobado y ninguna credencial existente. Se presenta al
+  responsable.
+- **S1, fase 0**: sólo después de revisar S0 y de que el responsable haga el `/login` oficial.
+  Disponibilidad del canal y hasta 12 despertares. El informe separa **registro del canal**,
+  **despertar efectivo**, **`source` del hook** y **correlación del mensaje**, y termina en una
+  nueva decisión del responsable.
+
 
 Es lo **único** que se ejecutará primero, y sólo con una autorización explícita del responsable para
 esta prueba. No se escribe `monitor.mjs` ni `st_channel.py` antes de su resultado.
@@ -291,7 +314,7 @@ Este documento **no** autoriza ejecutar nada. Hay dos autorizaciones, en orden:
 
 | Etapa | Contenido | Consumo | Se detiene si |
 | --- | --- | --- | --- |
-| S0 | Construir imagen y harness en la VM; guarda de §1.1; instalar `fakechat` | ninguno | la guarda encuentra algo de producción |
+| S0 | Kit `poc/channels`: `provision`, `guard`, `s0-up`, `s0-plugin`, `s0-evidence`; se presenta `evidence.md` | ninguno | la guarda encuentra algo de producción; cualquier FAIL de la evidencia; `fakechat` no coincide con el commit |
 | S1 | Fase 0 (§1.7): login del responsable, registro, 12 despertares | ~12 turnos triviales del plan | bloqueo de Channels (NO-GO), límite del plan o propuesta de uso pagado |
 | S2 | Informe de la fase 0 y **pedido de GO separado** | — | — |
 | S3 | *(sólo con el GO de S2)* E0–E12 en V1, día 1, con el prototipo propio; login nuevo del responsable en cada contenedor | ~200 turnos, repartidos para no superar los límites del plan | violación de G6 o G12; límite del plan (se pausa y se retoma otro día, nunca uso pagado) |
