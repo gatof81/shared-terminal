@@ -586,6 +586,14 @@ export class ComposerService {
 		const probe = await this.deps.conversation.probeSession(sid);
 		const entry = probe?.find((e) => e.sessionId === cid);
 		if (!probe || !entry) return this.reject("probe-failed", 409);
+		// v1.7.2 §8.1.3: the entry must be the INTERACTIVE process reading the
+		// pane's prompt. A background job (e.g. a parked session continued as a
+		// daemon job) can descend from the pane's pid and pass the ancestry
+		// check below, while the text would land in the parked prompt of the
+		// process that no longer runs this conversation.
+		if (entry.kind !== "interactive") {
+			return this.reject("binding-stale", 409, { detail: `kind:${entry.kind}` });
+		}
 		const paneState = await this.readPaneState(containerId, paneId);
 		if (!paneState) return this.reject("binding-stale", 409);
 		if (

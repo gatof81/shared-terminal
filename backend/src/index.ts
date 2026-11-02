@@ -500,6 +500,9 @@ async function start() {
 	} catch (err) {
 		logger.warn(`[server] conversation reconcile failed: ${(err as Error).message}`);
 	}
+	// v1.7.2 §5.3: the silence decay and its re-confirming probe, after the
+	// boot reconcile (which already probed every running session once).
+	conversation.startSilenceSweep();
 	// Wait for the timing-parity dummy bcrypt hash to finish computing
 	// before accepting requests. Without this, the first unknown-user
 	// login would block on the ~2^BCRYPT_ROUNDS-ms hash computation,

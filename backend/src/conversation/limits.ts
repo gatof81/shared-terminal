@@ -62,6 +62,22 @@ export const DEDUPE_TABLE_MAX = 4096;
 /** §5.3 — `ending` → `ended` grace, and the silence after which `unknown` applies. */
 export const SESSION_END_GRACE_MS = 5_000;
 export const UNKNOWN_AFTER_SILENCE_MS = 10 * 60_000;
+/**
+ * v1.7.2 §5.3 "Cuándo hay probe": a live conversation whose last evidence is
+ * this old gets a probe of its session, so one really waiting at its prompt
+ * is re-confirmed (status_at renewed) before UNKNOWN_AFTER_SILENCE_MS — and
+ * before the UI's 10-min staleness — instead of decaying to `unknown`.
+ */
+export const SILENCE_PROBE_AFTER_MS = 8 * 60_000;
+/** How often the silence sweep looks. */
+export const SILENCE_SWEEP_INTERVAL_MS = 60_000;
+/**
+ * The targeted probe after a SessionStart that leaves `unknown` (the
+ * `--resume` case): late enough for the CLI to have drawn its prompt (the
+ * §8.2.2 measurements put the switch at ≈ 0.2 s), early enough that Chat
+ * does not sit on "not at its prompt".
+ */
+export const TARGETED_PROBE_DELAY_MS = 3_000;
 
 /** §3.1 — token cache TTL (belt and braces next to the revocation marker). */
 export const TOKEN_CACHE_TTL_MS = 60_000;

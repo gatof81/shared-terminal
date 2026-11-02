@@ -633,7 +633,7 @@ describe("lifecycle, list, reconcile, probe", () => {
 		session("s1");
 		await service.ingest("s1", "%0", hook("UserPromptSubmit", { prompt: "a", prompt_id: "p1" }));
 		now += 10;
-		service.applyProbe("s1", [
+		await service.applyProbe("s1", [
 			{ sessionId: "c1", kind: "interactive", status: "waiting", waitingFor: "permission prompt" },
 		]);
 		expect(store.getResidentIndex("s1", "c1")?.state).toMatchObject({
@@ -641,15 +641,22 @@ describe("lifecycle, list, reconcile, probe", () => {
 			evidence: "probe:waiting",
 		});
 		now += 10;
-		service.applyProbe("s1", []);
+		await service.applyProbe("s1", []);
 		expect(store.getResidentIndex("s1", "c1")?.state).toMatchObject({
 			status: "ended",
 			evidence: "probe:absent",
 		});
 		const events = await readEvents("s1", "c1");
 		expect(events.filter((e) => e.ev === "probe").map((e) => e.data)).toEqual([
-			{ found: true, status: "waiting", waitingFor: "permission prompt" },
-			{ found: false },
+			{
+				found: true,
+				status: "waiting",
+				kind: "interactive",
+				waitingFor: "permission prompt",
+				verified: false,
+				applied: true,
+			},
+			{ found: false, applied: true },
 		]);
 	});
 	it("reconcile with the flag off only removes stale hooks files and relay markers", async () => {

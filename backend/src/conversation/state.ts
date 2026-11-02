@@ -55,7 +55,22 @@ export type StateInput =
 	  }
 	| { kind: "end_grace_elapsed"; at: number }
 	| { kind: "probe"; found: false; at: number }
-	| { kind: "probe"; found: true; status: ProbeStatus; waitingFor?: string; at: number }
+	| {
+			kind: "probe";
+			found: true;
+			/** Absent when the entry's status was missing or unreadable (v1.7.2: no transition). */
+			status?: ProbeStatus;
+			waitingFor?: string;
+			/**
+			 * v1.7.2 §5.3 "identidad verificada": the entry is `interactive`, the
+			 * conversation is bound in the current container start and the
+			 * entry's pid descends from that pane's pid. Required for the
+			 * transitions to `waiting_input` (the state that enables the
+			 * composer); `busy` and `permission prompt` do not need it.
+			 */
+			verified?: boolean;
+			at: number;
+	  }
 	| { kind: "container_down"; at: number }
 	| { kind: "container_up"; at: number }
 	| { kind: "silence"; at: number };
@@ -82,22 +97,29 @@ export function applyStateInput(state: ConversationState, input: StateInput): Co
 		case "end_grace_elapsed":
 			return state.status === "ending" ? next("ended", "hook:SessionEnd", input.at) : state;
 		case "probe":
+			// v1.7.2: a probe never revives an ended conversation — only a hook
+			// (a SessionStart of a resume) reopens it.
+			if (state.status === "ended") return state;
 			if (!input.found) return next("ended", "probe:absent", input.at);
+			// Missing or unreadable status: the process exists, its state is
+			// not known — not "idle".
+			if (input.status === undefined) return state;
 			if (input.status === "busy") return next("running", "probe:busy", input.at);
-			if (input.status === "idle") return next("waiting_input", "probe:idle", input.at);
-			// waiting
-			if (input.waitingFor === "permission prompt") {
+			if (input.status === "waiting" && input.waitingFor === "permission prompt") {
 				return next("waiting_permission", "probe:waiting", input.at);
 			}
+			// idle, or waiting for input: only with the identity verified.
+			if (!input.verified) return state;
+			if (input.status === "idle") return next("waiting_input", "probe:idle", input.at);
 			return next("waiting_input", "probe:waiting", input.at);
 		case "container_down":
 			return next("disconnected", "reconcile", input.at);
 		case "container_up":
 			return state.status === "disconnected" ? next("unknown", "reconcile", input.at) : state;
 		case "silence":
-			return state.status === "ended" || state.status === "disconnected"
-				? state
-				: next("unknown", "timeout", input.at);
+			// §5.3: only a live claim decays; `unknown`, `error` and the
+			// terminal states have nothing to falsify.
+			return isLiveClaim(state.status) ? next("unknown", "timeout", input.at) : state;
 	}
 }
 
@@ -147,4 +169,14 @@ function applyEvent(
 		default:
 			return base;
 	}
+}
+
+/** A status that claims current activity — what the §5.3 silence falsifies. */
+export function isLiveClaim(status: ConversationStatus): boolean {
+	return (
+		status === "running" ||
+		status === "waiting_input" ||
+		status === "waiting_background" ||
+		status === "waiting_permission"
+	);
 }
