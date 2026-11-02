@@ -1,7 +1,8 @@
 # Project Chat + Agent Monitor + Channels — diseño
 
-Estado: **borrador de investigación y diseño (2026-11-02). Nada implementado.** Nada se construye
-hasta el GO de la POC y la decisión del responsable sobre §3.
+Estado: **dirección aprobada conceptualmente por el responsable (2026-11-02); decisiones R1–R9
+resueltas. Nada implementado.** No está autorizado ejecutar la POC, implementar, mergear ni
+desplegar: la POC necesita un GO separado sobre [04-poc.md §7](./04-poc.md#7-propuesta-de-ejecución-requiere-un-go-separado-del-responsable).
 
 | Documento | Contenido |
 | --- | --- |
@@ -23,10 +24,14 @@ Skill asociada: [`.claude/skills/architecture-spec/SKILL.md`](../../../.claude/s
 2. **Channels es sólo transporte.** Un proceso sin estado en el contenedor (`st-channel`, servidor MCP
    stdio hijo del CLI) hace long-poll al monitor y emite la notificación. No confirma nada.
 3. **La aceptación se demuestra con la captura de hooks que ya existe**: el `UserPromptSubmit` de la
-   entrada de canal (`source: system`, etiqueta `<channel … st_msg=…>`) se clasifica como
-   `channel_prompt`. Es hipótesis H8 y criterio G3 de la POC.
-4. **El resultado es el `turn_end` del turno aceptado**, no una herramienta que el modelo puede no
-   llamar. `chat_post` queda para avances y preguntas.
+   entrada de canal se clasifica como `channel_prompt` **sólo** con `source: system` presente, la
+   etiqueta `<channel … st_msg=…>` y una versión del CLI validada. Con `source` ausente no se acepta
+   nada: así una etiqueta tecleada en el Terminal nunca confirma una entrega. Es la hipótesis H8 y el
+   criterio G3 de la POC.
+4. **El resultado es el `turn_end` del turno aceptado sólo si la atribución es inequívoca**: ninguna
+   otra entrada (Terminal, Control Directo, notificación de tarea) compartió el turno. Si no, la
+   entrega termina `ended_unattributed` y el informe no se presenta como respuesta. `chat_post` queda
+   para avances y preguntas.
 5. **Un mensaje en vuelo por agente, sólo con el agente en su prompt verificado.** Evita el
    agrupamiento documentado de Channels en `busy` y mantiene 1 mensaje ↔ 1 turno.
 6. **At-most-once y sin reintentos automáticos**, ni por Channels ni por Composer. Sin evidencia, la
@@ -45,22 +50,23 @@ Skill asociada: [`.claude/skills/architecture-spec/SKILL.md`](../../../.claude/s
 
 | Riesgo | Severidad | Mitigación |
 | --- | --- | --- |
-| Channels es research preview con kill switch remoto ("not currently available", #105326) | Alta | GO sólo con POC; degradación visible; brazo B (hooks `asyncRewake`) evaluado; revisión por versión del CLI |
+| Channels es research preview con kill switch remoto ("not currently available", #105326) | Alta | GO sólo con POC; el gate se evalúa en cada notificación, así que se detecta por evidencia: `unconfirmed{no-evidence}` + runtime `degraded` al primer caso, cola retenida y visible, nunca Composer (protocolo §6.4, criterio G12); brazo B evaluado |
 | No despierta una sesión inactiva (#44380, abierto) | Alta | Criterio G2; si falla, brazo B |
 | `--resume`/re-host pierde el flag (#78028, #90160, #101872) | Media | Criterio G5; el alias de la imagen lleva el flag; runtime se re-registra por proceso |
 | Sin evidencia de aceptación (H8 falsa) | Alta | Criterio G3 = NO-GO |
-| Política: con managed settings presentes, `channelsEnabled` debe ser `true` (Console) y Team/Enterprise lo exige del admin | Media | Lo escribe nuestra activación; la POC lo prueba con la autenticación de producción |
+| Channels no disponible con la suscripción del responsable (#105326 en Max) o exigido por política de organización | Alta | La fase 0 lo comprueba primero con `fakechat`; si está bloqueado: NO-GO registrado, sin cambiar a API |
 | `--channels` desactiva `AskUserQuestion` y plan mode (CHANGELOG 2.1.83) | Media | Canal sólo en sesiones de agente (R7); E11 lo mide |
 | Prompt injection entre agentes con `--dangerously-skip-permissions` | Alta | Aprobación por defecto; límites; marca `from_kind`; clasificador estricto |
 | Dos mecanismos (Channels y Composer) | Media | Composer congelado y nunca invocado por el monitor |
 | Mantenimiento de `st-channel` frente a cambios del protocolo (revisión MCP 2026-07-28) | Media | Revisión negociada fija; `CHANNEL_CLI_VERSIONS` |
-| Revalidar cada versión del CLI exige autenticación real y gasto; con auto-update, cada versión nueva deja a los agentes sin canal | Media | Pin del CLI en sesiones de agente + corrida manual firmada (R9) |
+| Revalidar cada versión del CLI exige autenticación real (la suscripción del responsable) y consume su plan; con auto-update, cada versión nueva dejaría a los agentes sin canal | Media | Pin del CLI en sesiones de agente + corrida manual firmada (R9) |
 | La evidencia de aceptación la reporta el propio contenedor del agente (token compartido por sus procesos) | Baja | Frontera de confianza declarada; el token no da poder fuera de la sesión |
 
-## 3. Decisiones que necesitan al responsable
+## 3. Decisiones del responsable
 
-R1–R9 en [02-architecture-rfc.md §9](./02-architecture-rfc.md#9-decisiones-que-necesitan-al-responsable),
-más: autenticación y presupuesto de la POC ([04-poc.md §1](./04-poc.md#1-aislamiento-y-límites)).
+R1–R9 y autenticación (sólo la suscripción del responsable, sin gasto adicional): resueltas el 2026-11-02, registradas en
+[02-architecture-rfc.md §9](./02-architecture-rfc.md#9-decisiones-del-responsable-2026-11-02).
+Pendiente: la autorización de la **fase 0** con `fakechat` y, sólo si la supera, un GO separado para la POC completa ([04-poc.md §7](./04-poc.md#7-propuesta-de-ejecución-requiere-un-go-separado-del-responsable)).
 
 ## 4. Relación con otros documentos
 
