@@ -13,6 +13,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createIdleTracker } from "./idle.mjs";
 
 const POC = dirname(fileURLToPath(import.meta.url));
 const OUT = join(POC, "out");
@@ -28,6 +29,10 @@ const die = (m, code = 4) => {
 	process.exit(code);
 };
 if (!/^[A-Z]$/.test(label) || !(count > 0) || !(minIdle >= 0)) die("uso: send.mjs --label T|S|L --count N --min-idle S", 1);
+// Only the single instrumented test is authorized for now; the 12-sample
+// series need a separate decision and an explicit flag.
+if (label !== "T" && !args.includes("--series-authorized")) die("sólo está autorizada la prueba individual (--label T --count 1); las series necesitan --series-authorized", 1);
+if (label === "T" && count !== 1) die("la prueba individual es de un solo mensaje (--count 1)", 1);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const sh = (c, a) => spawnSync(c, a, { encoding: "utf8", timeout: 30_000 });
 const sha = (s) => createHash("sha256").update(s).digest("hex");
@@ -66,20 +71,28 @@ function portOwnedBy(pid) {
 	return { ok: false, detail: `listener ${lp} NO desciende de claude ${pid}` };
 }
 
-async function waitIdle(sessionId) {
+// --min-idle is enforced as CONTINUOUS observation (idle.mjs): one probe every
+// POLL_MS; any probe off the prompt, any new hook line or a gap > MAX_GAP_MS
+// restarts the window. The hooks file may be empty or missing: it only feeds
+// "did anything happen", never "how long ago".
+const POLL_MS = 3000;
+const MAX_GAP_MS = 10_000;
+async function waitIdle() {
+	const tracker = createIdleTracker({ minIdleMs: minIdle * 1000, maxGapMs: MAX_GAP_MS });
 	const end = Date.now() + (minIdle + 900) * 1000;
 	while (Date.now() < end) {
 		const s = session();
 		if (s.err) return { ok: false, detail: s.err };
-		const mine = hooks().filter((h) => h.session_id === s.sessionId || !s.sessionId);
-		if (mine.some((h) => h.event === "StopFailure" && h.t_ms > startedAt)) return { ok: false, detail: "StopFailure" };
-		const last = mine.at(-1);
-		const openTurn = mine.filter((h) => h.event === "UserPromptSubmit").at(-1)?.t_ms > (mine.filter((h) => h.event === "Stop").at(-1)?.t_ms ?? 0);
-		const idleFor = last ? (Date.now() - last.t_ms) / 1000 : null;
-		if (s.atPrompt && !openTurn && (idleFor === null || idleFor >= minIdle)) return { ok: true, s, idleFor };
-		await sleep(5000);
+		const all = hooks();
+		if (all.some((h) => h.event === "StopFailure" && h.t_ms > startedAt)) return { ok: false, detail: "StopFailure" };
+		const mine = all.filter((h) => !s.sessionId || h.session_id === s.sessionId);
+		const lastUps = mine.filter((h) => h.event === "UserPromptSubmit").at(-1)?.t_ms ?? 0;
+		const lastStop = mine.filter((h) => h.event === "Stop" || h.event === "StopFailure").at(-1)?.t_ms ?? 0;
+		const st = tracker.observe({ tMs: Date.now(), atPrompt: s.atPrompt, openTurn: lastUps > lastStop, hookCount: all.length });
+		if (st.ready) return { ok: true, s, idleObservedS: st.observedMs / 1000, observations: st.observations };
+		await sleep(POLL_MS);
 	}
-	return { ok: false, detail: "no se alcanzó la inactividad requerida" };
+	return { ok: false, detail: "no se observó la inactividad continua requerida" };
 }
 
 // ── Fakechat broadcast listener (receive only; never sends on the socket)
@@ -113,7 +126,7 @@ if (!ws) die(`fallo del harness: no puedo escuchar ws://127.0.0.1:${PORT}/ws`);
 console.log(`sesión ${s0.sessionId} (pid ${s0.pid}); ${own.detail}`);
 
 for (let n = 1; n <= count; n++) {
-	const w = await waitIdle(s0.sessionId);
+	const w = await waitIdle();
 	if (!w.ok) die(`#${n} no enviado: ${w.detail}`, w.detail === "StopFailure" ? 7 : 6);
 	const id = `P0${label}${String(n).padStart(2, "0")}-${randomBytes(3).toString("hex")}`;
 	const text = `${id}: respondé exactamente OK_${id} y enviá tu respuesta a Fakechat.`;
@@ -128,7 +141,7 @@ for (let n = 1; n <= count; n++) {
 		fd.set("text", text);
 		http = String((await fetch(`http://127.0.0.1:${PORT}/upload`, { method: "POST", body: fd })).status);
 	} catch (e) { http = `error:${e.message}`; }
-	const rec = { label, n, id, t_send: tSend, idle_before_s: w.idleFor, session_id: w.s.sessionId, upload_http: http };
+	const rec = { label, n, id, t_send: tSend, idle_observed_s: w.idleObservedS, idle_observations: w.observations, session_id: w.s.sessionId, upload_http: http };
 	if (http !== "204") {
 		writeFileSync(sendsPath, `${JSON.stringify({ ...rec, result: "harness-error" })}\n`, { flag: "a" });
 		die(`#${n}: Fakechat respondió ${http}: fallo del harness, no NO-GO`);

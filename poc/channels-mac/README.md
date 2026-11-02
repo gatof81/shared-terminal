@@ -10,8 +10,9 @@ credenciales y **no** usa `/logout`.
 | Archivo | Para qué |
 | --- | --- |
 | `hook-logger.mjs` | Hook **observacional**: una línea JSONL por evento en `.poc0/out/hooks.jsonl`. No imprime nada (en `UserPromptSubmit`/`SessionStart` lo impreso se agregaría al contexto de Claude), siempre sale con 0 (el 2 bloquearía el turno) y se traga sus errores |
-| `manage.mjs` | `install` / `check` / `uninstall` en **una** carpeta: fusiona entradas en `<carpeta>/.claude/settings.local.json` sin tocar lo que ya hay, y las quita igual |
-| `send.mjs` | Envía mensajes de prueba por Fakechat (`POST /upload`, como la página) y mide: hook, `Stop`, respuesta en Fakechat. Nunca teclea en la terminal ni reintenta |
+| `manage.mjs` | `install` / `check` / `uninstall` en **una** carpeta: fusiona entradas en `<carpeta>/.claude/settings.local.json` sin tocar lo que ya hay; al retirar restaura byte por byte, o quita sólo lo suyo si hubo cambios ajenos |
+| `idle.mjs` / `classify.mjs` | Lógica pura de inactividad observada y de clasificación (despertar ≠ bidireccional), cubierta por `test/` |
+| `send.mjs` | Envía el mensaje de prueba por Fakechat (`POST /upload`, como la página) y mide: hook, `Stop`, respuesta en Fakechat. Nunca teclea en la terminal ni reintenta; sin `--series-authorized` sólo acepta la prueba individual |
 | `report.mjs` | Arma la sección de resultados para la PR #512 |
 
 ### Qué registra el logger (y qué no)
@@ -28,33 +29,43 @@ credenciales y **no** usa `/logout`.
 **Nunca**: texto de prompts o respuestas, entradas o salidas de herramientas, `transcript_path`,
 `cwd`, tokens ni credenciales.
 
-## Instrucciones exactas
+## Instrucciones exactas (sólo la prueba individual)
 
-> `COMMIT` es el commit de la rama `poc/channels-phase0` indicado en la autorización.
-> `TEST` es tu carpeta de prueba dedicada, la misma donde corrés Claude con Fakechat (por ejemplo
-> `~/poc-channels-test`). Que no sea un proyecto real ni tu HOME.
+> `COMMIT` y la lista SHA-256 son los indicados en la autorización. `TEST` es tu carpeta de prueba
+> dedicada, la misma donde corrés Claude con Fakechat. Que no sea un proyecto real ni tu HOME.
 
-### 1. Bajar el kit (fuera de la carpeta de prueba)
+### 1. Bajar el kit por SHA exacto (con `gh`, funciona con el repo público o privado)
 
 ```bash
 COMMIT=<sha completo indicado>
-mkdir -p ~/poc0-kit && cd ~/poc0-kit
-curl -fsSL "https://codeload.github.com/gatof81/shared-terminal/tar.gz/$COMMIT" | tar xz --strip-components=1
+rm -rf ~/poc0-kit && mkdir -p ~/poc0-kit && cd ~/poc0-kit
+gh api "repos/gatof81/shared-terminal/tarball/$COMMIT" > kit.tgz
+tar xzf kit.tgz --strip-components=1 && rm kit.tgz
 KIT=~/poc0-kit/poc/channels-mac
 TEST=~/poc-channels-test            # ajustar
+(cd "$KIT" && shasum -a 256 -c <<'SUMS'
+<pegar la lista SHA-256 indicada>
+SUMS
+)                                   # todas deben decir OK
 command -v bun                      # Fakechat ya lo usa; debe existir
 ```
+
+Opcional, para correr los tests sintéticos del kit (no tocan Claude ni tu carpeta):
+`cd "$KIT" && bun test test/` o, con Node 22, `node --test test/*.test.mjs`.
 
 ### 2. Instalar en la carpeta de prueba
 
 En la terminal donde corre Claude con Fakechat, salí con `/exit`. **No** uses `/logout`: el login
-queda en el llavero y sobrevive al reinicio. Tus otras sesiones de Claude no se ven afectadas: los
-settings locales sólo aplican a sesiones abiertas en `TEST`.
+queda en el llavero y sobrevive al reinicio. Tus otras sesiones no se ven afectadas: los settings
+locales sólo aplican a sesiones abiertas en `TEST`.
 
 ```bash
 bun "$KIT/manage.mjs" install "$TEST"
-bun "$KIT/manage.mjs" check "$TEST"     # debe decir: autotest exit=0 stdout=""
+bun "$KIT/manage.mjs" check "$TEST"
+# debe decir: eventos con el logger: (7 eventos) · autotest: exit=0 stdout="" escribió=true
 ```
+
+`install` guarda una copia exacta de tu `settings.local.json` (si existía) en `TEST/.poc0/`.
 
 ### 3. Relanzar Claude con Channels
 
@@ -63,53 +74,38 @@ cd "$TEST" && claude --channels plugin:fakechat@claude-plugins-official --debug-
 ```
 
 - Si Claude pide revisar los hooks nuevos, el comando debe ser `"<ruta de bun>" "<TEST>/.poc0/hook-logger.mjs"`.
-- En Claude, `/hooks` muestra los hooks registrados (sólo mirar; Esc para salir).
-- El log de depuración queda sólo en `TEST/.poc0/out`; no se comparte. El informe usa sólo la hora
-  de recepción de los mensajes de prueba.
-- Opcional: abrir `http://localhost:8787` para ver las respuestas.
-- Durante las pruebas, no abrir otras sesiones nuevas de Claude: el plugin está habilitado para tu
+- `/hooks` dentro de Claude los muestra (sólo mirar; Esc para salir).
+- El log de depuración queda sólo en `TEST/.poc0/out` y no se comparte; el informe usa sólo la hora
+  de recepción del mensaje de prueba.
+- No abras otras sesiones nuevas de Claude durante la prueba: el plugin está habilitado para tu
   usuario y otra sesión podría intentar tomar el puerto 8787. `send.mjs` comprueba que el puerto
-  pertenece a la sesión de `TEST` y, si no, se detiene sin enviar nada.
+  pertenece a la sesión de `TEST` y, si no, se detiene sin enviar.
 
-### 4. Primera prueba instrumentada: un solo mensaje
+### 4. La prueba instrumentada: un solo mensaje
 
-En **otra** terminal (no la de Claude). No escribas nada en la de Claude.
+En **otra** terminal. No escribas nada en la de Claude.
 
 ```bash
 cd "$TEST"
 bun .poc0/send.mjs --label T --count 1 --min-idle 30
-bun .poc0/report.mjs
-open .poc0/out/phase0-instrumented-report.md
+bun .poc0/report.mjs && open .poc0/out/phase0-instrumented-report.md
 ```
 
-**Pará acá** y revisá (o mandame) el informe antes de las series. Lo decisivo: si el hook trae
-`source=system`, la forma de la etiqueta `<channel>` y si la correlación sale OK.
+`--min-idle 30` son 30 s **observados**: `send.mjs` consulta el estado cada 3 s y sólo envía tras 30 s
+seguidos con la sesión en su prompt, sin hooks nuevos y sin huecos de más de 10 s; cualquier
+actividad reinicia la cuenta. Por eso tarda al menos ~30 s antes de enviar.
 
-### 5. Las 12 muestras de la fase 0 (después de revisar la prueba individual)
+Salidas: **0** terminó · **4** fallo del harness (nunca NO-GO) · **5** sin `UserPromptSubmit` en
+120 s (no se reintenta) · **6** no se observó la inactividad · **7** `StopFailure`.
 
-```bash
-cd "$TEST"
-caffeinate -dimsu &
-bun .poc0/send.mjs --label S --count 10 --min-idle 30     # ~10–15 min
-bun .poc0/send.mjs --label L --count 2  --min-idle 3600   # ≥ 2 h
-bun .poc0/report.mjs
-kill %1
-```
+El informe separa **despertar del agente** (criterio de §1.7) y **comunicación bidireccional**
+(mensaje → turno → `Stop` → respuesta vista en Fakechat). La prueba es "limpia" sólo con las dos y
+con `source=system` y correlación OK. Las series de 12 muestras **no** están autorizadas: `send.mjs`
+las rechaza sin `--series-authorized`.
 
-Salidas de `send.mjs`:
-- **0**: terminó.
-- **4**: fallo del harness (puerto de otra sesión, Fakechat no aceptó la subida, `claude agents`
-  ilegible). **Nunca** es NO-GO.
-- **5**: un mensaje sin `UserPromptSubmit` en 120 s. La serie se detiene y no se reintenta. El
-  informe dice qué evidencia hay.
-- **6**: no se alcanzó la inactividad.
-- **7**: `StopFailure` (límite del plan o error).
+**Mandame el informe** (y, si querés, `hooks.jsonl`, que no tiene texto) antes de cualquier otra cosa.
 
-Para repetir una serie, volver a correr el mismo comando: la tanda anterior se guarda aparte y el
-informe usa sólo la última. Si aparece un diálogo de permiso, anotalo: el informe lo marca como
-intervención.
-
-### 6. Retirar la instrumentación
+### 5. Retirar la instrumentación
 
 ```bash
 bun "$KIT/manage.mjs" uninstall "$TEST"                  # conserva los logs en TEST/.poc0/out
@@ -117,9 +113,12 @@ bun "$KIT/manage.mjs" uninstall "$TEST"                  # conserva los logs en 
 rm -rf ~/poc0-kit
 ```
 
-`uninstall` quita sólo las entradas del kit de `settings.local.json` y deja el archivo como estaba
-(o lo elimina si no existía). Para que la sesión deje de usar los hooks, `/exit` y relanzar igual que
-en el paso 3, sin `--debug-file`.
+- Si nadie tocó `settings.local.json` durante la prueba, queda **byte por byte** como estaba (o se
+  elimina si no existía, junto con `.claude/` si el kit la creó y quedó vacía). Mensaje:
+  `restaurado-exacto`.
+- Si Claude u otra cosa lo modificó (por ejemplo, un "no volver a preguntar"), se quitan **sólo** los
+  hooks del kit y se conservan esos cambios. Mensaje: `sólo-hooks-del-kit-quitados`.
+- Para que la sesión deje de usar los hooks: `/exit` y relanzar como en el paso 3, sin `--debug-file`.
 
 ## Seguridad: lo que conviene saber
 
@@ -132,4 +131,4 @@ en el paso 3, sin `--debug-file`.
   Durante las series: no navegues por sitios desconocidos, mantené la carpeta de prueba sin datos
   sensibles, no uses `--dangerously-skip-permissions` y contestá **No** a cualquier diálogo de
   herramienta inesperado.
-- Los ~13 turnos consumen el límite incluido de tu suscripción; no hay gasto adicional.
+- La prueba individual consume un turno del límite incluido de tu suscripción; no hay gasto adicional.
