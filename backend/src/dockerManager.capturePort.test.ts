@@ -113,6 +113,31 @@ describe("inspectCapture", () => {
 			dm({ container: new Error("ECONNREFUSED") }).m.inspectCapture("cid"),
 		).rejects.toThrow("ECONNREFUSED");
 	});
+	it("deleted original image (404): running container remains inspectable, relay2=false; a later image reload is retried", async () => {
+		const images: Record<string, Record<string, string>> = {};
+		const { m, imageInspect } = dm({ container: base, images });
+		await expect(m.inspectCapture("cid")).resolves.toMatchObject({
+			exists: true,
+			running: true,
+			imageId: "sha256:aaa",
+			imageRelay2: false,
+		});
+		images["sha256:aaa"] = { "io.shared-terminal.conversation-relay": "2" };
+		await expect(m.inspectCapture("cid")).resolves.toMatchObject({
+			imageRelay2: true,
+		});
+		expect(imageInspect).toHaveBeenCalledTimes(2);
+	});
+	it("image inspection errors other than 404 propagate, never masquerading as legacy", async () => {
+		for (const err of [
+			Object.assign(new Error("daemon failure"), { statusCode: 500 }),
+			new Error("ECONNREFUSED"),
+		]) {
+			await expect(
+				dm({ container: base, images: { "sha256:aaa": err } }).m.inspectCapture("cid"),
+			).rejects.toThrow(err.message);
+		}
+	});
 	it("labels are cached per immutable image ID", async () => {
 		const { m, imageInspect } = dm({
 			container: base,
