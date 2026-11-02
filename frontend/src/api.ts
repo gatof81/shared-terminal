@@ -187,14 +187,21 @@ export async function logout(): Promise<void> {
 	// Swallow network errors so a logout-while-offline still tears down
 	// local state. The server's view becomes consistent on the next
 	// /auth/status round-trip after the user comes back online.
+	//
+	// The mirror is cleared BEFORE the request leaves, never after it
+	// answers: a logout that answers late — after the person has signed
+	// in again on the same tab — must not flip the new login's
+	// `isLoggedIn` / `isAdmin` / `isLead` back to false (the poll would
+	// stop, Back/Forward would be ignored and a real 401 would no longer
+	// route to the login view).
+	_loggedIn = false;
+	_isAdmin = false;
+	_isLead = false;
 	try {
 		await apiFetch("/auth/logout", { method: "POST" });
 	} catch {
 		/* network down — local teardown is what the user actually wants */
 	}
-	_loggedIn = false;
-	_isAdmin = false;
-	_isLead = false;
 }
 
 // ── Session types ───────────────────────────────────────────────────────────

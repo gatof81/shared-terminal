@@ -19,6 +19,7 @@ import {
 	getSession,
 	isAdmin,
 	isLead,
+	isLoggedIn,
 	listSessions,
 	listTabs,
 	type SessionInfo,
@@ -53,7 +54,7 @@ import { renderSidebarObservables } from "./myGroups.js";
 import { openBootstrapLogModal } from "./newSession.js";
 import { openObserveModalFor } from "./observeModal.js";
 import { openPortsModalFor } from "./ports.js";
-import { clear as clearRoute, type Route } from "./router.js";
+import { clear as clearRoute, type Route, readRoute } from "./router.js";
 import {
 	type SessionActionContext,
 	type SessionActionId,
@@ -287,19 +288,54 @@ export function renderTerminalState(): void {
 
 // ── Session management ──────────────────────────────────────────────────────
 
+// Every list request takes a number; only the newest one's answer is
+// applied. An older answer landing later — a poll or a manual refresh
+// that was slow, or a request sent with the PREVIOUS account's cookie
+// before a logout and a new login — is dropped, so it can never replace
+// a fresher list (or put account A's sessions in account B's sidebar).
+// `invalidateSessionList()` (logout) retires every request in flight.
+let listGen = 0;
+// Whether a list has ever been applied since the last invalidation. The
+// deep-link resolver needs to tell "the list never loaded" from "loaded
+// and the session is not in it" — only the latter is "Session not found".
+let listLoaded = false;
+
+export function invalidateSessionList(): void {
+	listGen++;
+	listLoaded = false;
+}
+
+export function sessionListLoaded(): boolean {
+	return listLoaded;
+}
+
 export async function refreshSessions() {
 	// Read the checkbox state fresh every time so there's no stale
 	// module-variable to get out of sync with the DOM.
 	const includeTerminated = showTerminatedToggle.checked;
+	const gen = ++listGen;
 	try {
-		setSessions(await listSessions(includeTerminated));
+		const list = await listSessions(includeTerminated);
+		// Superseded (a newer request, or a logout) or answered for an
+		// account that is no longer the one signed in: not ours to apply.
+		if (gen !== listGen || !isLoggedIn()) return;
+		const firstLoad = !listLoaded;
+		listLoaded = true;
+		setSessions(list);
 		console.debug(
 			`[sessions] fetched ${sessions.length} session(s) (includeTerminated=${includeTerminated})`,
 			sessions.map((s) => ({ id: s.sessionId.slice(0, 8), name: s.name, status: s.status })),
 		);
 		renderSessionList();
 		reattachIfStarted();
+		// A deep link that could not be resolved while the list had never
+		// loaded (a failed first request) is applied now that it has.
+		if (firstLoad && activeSessionId === null) {
+			const route = readRoute();
+			if (route !== null) void applyRoute(route);
+		}
 	} catch (err) {
+		if (gen !== listGen) return;
 		showToast((err as Error).message, true);
 	}
 }
@@ -496,22 +532,35 @@ export async function openSession(
 	// its own, and a view the person picks meanwhile wins over it.
 	const landing = opts.view || currentShell() !== "v2" ? null : decideLanding(sessionId, running);
 	const choiceAt = choiceGeneration();
-	if (landing !== null) beginLanding();
+	// The pending landing belongs to THIS session (viewSwitch keys it by
+	// id): an overlapping open of another session neither ends it early
+	// nor is blocked by it, and every exit of this function ends it.
+	if (landing !== null) beginLanding(sessionId);
 	try {
-		// updateToolbar → syncSessionViews re-keys every view to this session
-		// (and may force Files for a stopped one); only then is the address
-		// written, in place — selecting a session is not a history entry.
-		updateToolbar();
+		await openSessionBody(sessionId, meta, running, landing, choiceAt);
 	} finally {
-		if (landing !== null && !(landing instanceof Promise)) endLanding();
+		if (landing !== null) endLanding(sessionId);
 	}
+}
+
+async function openSessionBody(
+	sessionId: string,
+	meta: SessionInfo | undefined,
+	running: boolean,
+	landing: View | Promise<View> | null,
+	choiceAt: number,
+): Promise<void> {
+	// updateToolbar → syncSessionViews re-keys every view to this session
+	// (and may force Files for a stopped one); only then is the address
+	// written, in place — selecting a session is not a history entry.
+	updateToolbar();
 	reflectRoute({ push: false });
 	// A landing that needs the history answer waits for it (bounded); the
 	// tab listing below runs meanwhile, so a running session loses nothing.
 	const land = async (): Promise<boolean> => {
 		if (landing === null) return true;
 		const v = landing instanceof Promise ? await landing : landing;
-		if (landing instanceof Promise) endLanding();
+		endLanding(sessionId);
 		if (activeSessionId !== sessionId) return false;
 		// The person chose a view while this was deciding: theirs stands.
 		if (choiceGeneration() !== choiceAt) return true;
@@ -541,7 +590,6 @@ export async function openSession(
 		// (listTabs returns alphabetical from tmux list-sessions).
 		setCurrentTabs(tabs.sort((a, b) => a.createdAt - b.createdAt));
 	} catch (err) {
-		if (landing instanceof Promise) endLanding();
 		// Drop back to empty state so the toolbar/container don't linger
 		// visible with no tabs.
 		if (activeSessionId === sessionId) {
@@ -703,6 +751,11 @@ export async function applyRoute(route: Route | null): Promise<void> {
 				}
 			}
 			if (gen !== routeGen) return;
+			// Nothing is known yet (the first list request failed): keep the
+			// address — the session may well exist — and let the next
+			// successful load apply the route. "Not found" is only a verdict
+			// over a list that did load.
+			if (!listLoaded && sessions.length === 0) return;
 			showToast("Session not found", true);
 			clearRoute();
 			return;

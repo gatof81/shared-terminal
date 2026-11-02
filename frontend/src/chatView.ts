@@ -133,6 +133,11 @@ const PAGE = 200;
 let stateSessionId: string | null = null;
 /** Bumped on session change: drops every result of the previous session. */
 let generation = 0;
+// Per-request sequence within a session: a refresh click, the poll and a
+// Retry all load the same list, and only the newest request's answer may
+// land — an older one answering later would roll the list (and the
+// landing policy's "has history" memory) back.
+let listReq = 0;
 /** Bumped on each conversation open: drops results for a previous thread. */
 let threadGen = 0;
 let list: ListState = { status: "idle" };
@@ -309,6 +314,7 @@ async function loadList(opts: { quiet?: boolean } = {}): Promise<void> {
 	const sid = stateSessionId;
 	if (sid === null) return;
 	const gen = generation;
+	const req = ++listReq;
 	const quiet = opts.quiet === true && list.status === "loaded";
 	if (!quiet) {
 		list = { status: "loading" };
@@ -317,7 +323,7 @@ async function loadList(opts: { quiet?: boolean } = {}): Promise<void> {
 	refreshBtn.classList.add("spinning");
 	try {
 		const data = await fetchConversations(sid, { capture: !quiet });
-		if (gen !== generation) return;
+		if (gen !== generation || req !== listReq) return;
 		const capture = data.capture ?? (list.status === "loaded" ? list.capture : null);
 		list = { status: "loaded", capture, conversations: data.conversations };
 		// The landing policy's memory (viewPolicy.ts): Chat first next time, if there is history.
@@ -337,10 +343,10 @@ async function loadList(opts: { quiet?: boolean } = {}): Promise<void> {
 			saveSeen();
 		}
 	} catch (err) {
-		if (gen !== generation) return;
+		if (gen !== generation || req !== listReq) return;
 		if (!quiet) list = { status: "error", message: (err as Error).message };
 	} finally {
-		if (gen === generation) refreshBtn.classList.remove("spinning");
+		if (gen === generation && req === listReq) refreshBtn.classList.remove("spinning");
 	}
 	renderAll();
 }
