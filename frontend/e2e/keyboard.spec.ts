@@ -125,6 +125,19 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 		const viewport = page.viewportSize()!;
 		await keyboard(page, viewport.height - 380, 0);
 		await expect.poll(gap, "the last message stayed in view").toBeLessThan(4);
+		// With the keyboard up, a new message still sticks to the bottom.
+		backend.pushConversationEvent(conv.cid, {
+			ts: conv.events.at(-1)!.ts,
+			ev: "assistant_delta",
+			prompt_id: "p-live",
+			turn_id: "t-live",
+			agent_id: null,
+			pane: "%1",
+			data: { message_id: "m-live", index: 0, delta: "Arrived with the keyboard up", final: true },
+		});
+		await expect(sc).toContainText("Arrived with the keyboard up");
+		await expect.poll(gap, "a live message sticks while the keyboard is up").toBeLessThan(4);
+		await expect(page.locator("#chat-thread .chat-float")).toBeHidden();
 		await keyboard(page, viewport.height, 0);
 		await expect.poll(gap).toBeLessThan(4);
 
@@ -135,9 +148,21 @@ test.describe("soft keyboard (simulated visual viewport)", () => {
 			el.dispatchEvent(new Event("scroll"));
 		});
 		const before = await sc.evaluate((el) => el.scrollTop);
+		const firstVisible = () =>
+			sc.evaluate((el) => {
+				const top = el.getBoundingClientRect().top;
+				const items = [...el.querySelectorAll<HTMLElement>(".chat-assistant, .chat-user")];
+				return items.find((i) => i.getBoundingClientRect().bottom > top + 1)?.textContent ?? "";
+			});
+		const readingAt = await firstVisible();
 		await keyboard(page, viewport.height - 380, 0);
 		await page.waitForTimeout(300);
-		expect(await sc.evaluate((el) => el.scrollTop)).toBe(before);
+		expect(await sc.evaluate((el) => el.scrollTop), "keyboard up: not yanked down").toBe(before);
+		expect(await firstVisible(), "the same message is still at the top").toBe(readingAt);
+		await keyboard(page, viewport.height, 0);
+		await page.waitForTimeout(300);
+		expect(await sc.evaluate((el) => el.scrollTop), "keyboard down: still in place").toBe(before);
+		expect(await firstVisible()).toBe(readingAt);
 	});
 
 	test("the covered terminal sends no resize while the keyboard opens and closes in Chat; one controlled sync on return", async ({
