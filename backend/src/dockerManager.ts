@@ -3156,7 +3156,7 @@ export class DockerManager {
 			// capture answers "requires recreate" instead of failing the
 			// request. Not cached: the same ID could be pulled again. Any
 			// other daemon error still propagates (fail-closed).
-			if ((err as { statusCode?: number }).statusCode === 404) return false;
+			if (isNotFound(err)) return false;
 			throw err;
 		}
 		const ok = info.Config?.Labels?.[RELAY_IMAGE_LABEL] === RELAY_IMAGE_LABEL_VALUE;
@@ -3203,6 +3203,9 @@ export class DockerManager {
 			if ((err as { statusCode?: number }).statusCode === 404) return null;
 			throw err;
 		}
+		// If the image is deleted between the tag lookup above and the label read,
+		// relay2 is false (fail closed): callers answer `image-without-relay`
+		// where `image-changed` would be more precise; a retry resolves it.
 		return { imageId: id, relay2: await this.imageHasRelay2(id) };
 	}
 
