@@ -16,8 +16,8 @@ Plataformas: **macOS** (principal) y **Linux de escritorio**. Windows no está c
 | Sin credenciales existentes | HOME nuevo; `preflight` comprueba que no hay credenciales de Claude (archivo, `~/.claude.json`, llavero) ni claves SSH antes del login |
 | `fakechat` fijado y dependencias revisadas | Instalado desde el marketplace oficial y comparado por SHA-256 con `claude-plugins-official@7994c27` (`manifest.sha256`); `bun install --frozen-lockfile` (95 paquetes del `bun.lock` con integridad sha512; lista en `out/deps.txt`); falla si el lockfile cambia |
 | Sin Docker, Shared Terminal, Proxmox ni producción | El kit no ejecuta `docker`, `ssh` ni contacta otros hosts que Anthropic, GitHub, `bun.sh` y npm; `preflight` comprueba que el usuario no es admin ni del grupo `docker` y que `docker ps` falla |
-| Sin tocar tus proyectos, tu Claude Code ni tus sesiones | Todo vive en el HOME de `pocchannels`; el CLI y Bun se instalan **en ese HOME** (`preflight` falla si `claude`/`bun` resuelven a tu instalación); no se tocan managed settings de la máquina (si existen, `preflight` falla y se consulta) |
-| Sin `--dangerously-skip-permissions` | Modo de permisos normal; herramientas denegadas salvo la respuesta de `fakechat` (`settings.template.json`). Si aun así aparece un diálogo de permiso, contestás **No**; el despertar ya quedó medido |
+| Sin tocar tus proyectos, tu Claude Code ni tus sesiones | Todo vive en el HOME de `pocchannels`; el CLI y Bun se instalan **en ese HOME** (`preflight` falla si `claude`/`bun` resuelven a tu instalación); no se tocan managed settings de la máquina, `managed-mcp.json` ni perfiles MDM (si existen, `preflight` falla y se consulta) |
+| Sin `--dangerously-skip-permissions` | Modo de permisos normal; **todas** las herramientas denegadas, incluida la respuesta de `fakechat` (su `reply` puede copiar cualquier archivo legible y servirlo sin autenticación). La medición sólo necesita `UserPromptSubmit` y `Stop`, y un turno con una herramienta rechazada igual termina en `Stop`. Si aparece un diálogo de permiso, contestás **No** |
 | Registro | Hooks a archivo (`SessionStart`, `UserPromptSubmit`, `Stop`, `StopFailure`, `Notification`, `SessionEnd`) y log de depuración del CLI. El informe separa registro, despertar, latencia, `source` y correlación |
 | Limpieza | `/logout`, copia redactada, borrado del usuario (HOME y llavero incluidos) |
 
@@ -31,11 +31,18 @@ Plataformas: **macOS** (principal) y **Linux de escritorio**. Windows no está c
    temporal. Mitigación: no hay credenciales de producción en ese usuario y Claude no tiene
    herramientas de red ni de shell. A diferencia de la VM, aquí se demuestra que **no se toca**
    producción, no que **no se pueda**.
-3. **`fakechat` escucha en `127.0.0.1` sin autenticación.** Mientras dura la prueba, cualquier
-   proceso local de cualquier usuario podría enviar un mensaje a esa sesión. Mitigación: puerto alto
-   (`18787`), ventana corta y herramientas denegadas: lo peor es una respuesta de texto.
+3. **`fakechat` escucha en `127.0.0.1` sin autenticación ni control de origen.** Durante las ~2,5 h
+   de la prueba, cualquier proceso local de cualquier usuario **y cualquier página web abierta en
+   cualquier navegador del equipo** (un formulario multipart a `/upload` o un WebSocket a `/ws` no
+   necesitan permiso del navegador) puede enviar un prompt a esa sesión. Mitigación: **todas** las
+   herramientas están denegadas, incluida `reply`, así que un prompt inyectado sólo produce texto en
+   la Terminal 1 y consume cuota; el informe lo detecta (prompts ajenos durante la espera) y esa
+   muestra no cuenta como correlación limpia. Conviene no navegar por sitios desconocidos durante la
+   prueba.
 4. **Código de terceros.** `fakechat` y sus 95 dependencias corren como el usuario temporal;
-   versiones fijadas por lockfile con integridad, no auditadas línea por línea.
+   versiones fijadas por lockfile con integridad, no auditadas línea por línea. El script de arranque
+   del plugin ejecuta un `bun install` no congelado en cada inicio: `registration` vuelve a comprobar
+   el pin después del arranque medido.
 5. **Mismo plan.** Los ~12 turnos consumen el límite incluido de tu suscripción, compartido con tus
    sesiones reales; no hay gasto adicional.
 6. **`claude.ai` en el navegador del usuario temporal.** El login se hace en el navegador de ese
@@ -72,10 +79,10 @@ Plataformas: **macOS** (principal) y **Linux de escritorio**. Windows no está c
 4. Bajar el kit en el commit indicado:
 
    ```bash
-   KIT_COMMIT=<sha indicado>
-   mkdir -p ~/poc && cd ~/poc
-   curl -fsSL "https://codeload.github.com/gatof81/shared-terminal/tar.gz/$KIT_COMMIT" | tar xz
-   mv "shared-terminal-$KIT_COMMIT/poc/channels-local" kit && rm -rf "shared-terminal-$KIT_COMMIT"
+   KIT_COMMIT=<sha completo indicado>
+   mkdir -p ~/poc/kitsrc && cd ~/poc
+   curl -fsSL "https://codeload.github.com/gatof81/shared-terminal/tar.gz/$KIT_COMMIT" | tar xz -C kitsrc --strip-components=1
+   mv kitsrc/poc/channels-local kit && rm -rf kitsrc
    ```
 
 5. Preparar e inspeccionar:
@@ -103,9 +110,11 @@ Plataformas: **macOS** (principal) y **Linux de escritorio**. Windows no está c
    el navegador de este usuario. Nunca elegir API key ni Console. `/status` debe mostrar tu plan.
    Confirmar en claude.ai que el **uso extra está desactivado**. Después, `/exit`.
 
-7. **Terminal 1** — relanzar con el canal, y **no escribir nada** en esta ventana desde ahora:
+7. **Terminal 1** — relanzar con el canal, y **no escribir nada** en esta ventana desde ahora (un
+   borrador en el input retiene los mensajes encolados):
 
    ```bash
+   [ -f ~/poc/out/claude-debug.log ] && mv ~/poc/out/claude-debug.log ~/poc/out/claude-debug.$(date +%s).log
    cd ~/poc/workspace && claude --channels plugin:fakechat@claude-plugins-official --debug-file ~/poc/out/claude-debug.log
    ```
 
@@ -120,13 +129,24 @@ Plataformas: **macOS** (principal) y **Linux de escritorio**. Windows no está c
    kill %1
    ```
 
-   `registration` con salida 3 = **NO-GO**: no seguir y no cambiar de autenticación. `wake` se
-   detiene solo en el primer mensaje que no despierta, ante un límite del plan (`StopFailure`) o
-   con Ctrl-C. Nunca reintenta.
+   Salidas de `registration`:
+   - **0**: canal registrado; seguir.
+   - **4 con "skip … todavía NO confirmado"**: puede deberse a flags remotos que aún no estaban en la
+     caché de un HOME nuevo. Salir del CLI (`/exit`), esperar ≥ 60 s, repetir el paso 7 y
+     `registration`. Sólo un segundo skip con el mismo motivo y los flags ya en caché es NO-GO.
+   - **3**: **NO-GO confirmado**. No seguir y no cambiar de autenticación.
+   - **4 con otro mensaje**: fallo del harness (puerto, pin, hooks); se corrige y se repite, nunca es
+     NO-GO.
+
+   `wake` se detiene sola en el primer mensaje sin `UserPromptSubmit`, ante un límite del plan
+   (`StopFailure`) o con Ctrl-C, y nunca reintenta. Sin despertar sólo es **NO-GO** (salida 5) si el
+   CLI registró la recepción del mensaje, la sesión sigue en su prompt y no hubo turno; cualquier
+   otro caso es **indeterminado** (salida 8). Para repetir una tanda: `wake … --fresh` (la anterior
+   se guarda aparte y el informe sólo cuenta la última).
 
 ### Limpieza
 
-9. **Terminal 1**: `/logout`, `/exit`. **Terminal 2**: `bun ~/poc/kit/phase0.mjs archive` (copia
+9. Anotar el uid del usuario temporal (`id -u`) para el paso 10. **Terminal 1**: `/logout`, `/exit`. **Terminal 2**: `bun ~/poc/kit/phase0.mjs archive` (copia
    redactada en `/Users/Shared/poc-channels-out-*`). Cerrar la sesión de `pocchannels`.
 10. **Con tu usuario**: copiar el informe y borrar todo:
 
@@ -134,7 +154,13 @@ Plataformas: **macOS** (principal) y **Linux de escritorio**. Windows no está c
     cp -R /Users/Shared/poc-channels-out-* ~/Desktop/
     sudo sysadminctl -deleteUser pocchannels     # borra HOME, llavero, CLI, Bun, plugin
     sudo rm -rf /Users/Shared/poc-channels-out-*
+    POC_UID=<uid anotado>
+    sudo find /private/var/folders -maxdepth 4 -user "$POC_UID" -print    # revisar la lista
+    sudo find /private/var/folders -maxdepth 4 -user "$POC_UID" -prune -exec rm -rf {} +
     ```
+
+    Los temporales por usuario de macOS (`/private/var/folders/…`) sobreviven al borrado del usuario;
+    por eso se eliminan por uid, sólo los de ese uid.
 
     En claude.ai, revisar que no quede ninguna sesión o autorización de la prueba.
 
@@ -150,4 +176,5 @@ Igual, con estas diferencias:
 - Paso 3: usar `~/.bashrc` en lugar de `~/.zshrc` (`exec bash`).
 - Paso 8: `systemd-inhibit --what=sleep:idle sleep infinity &` en lugar de `caffeinate`.
 - Paso 9: la copia redactada queda en `/tmp/poc-channels-out-*`.
-- Paso 10: `sudo loginctl terminate-user pocchannels; sudo userdel -r pocchannels; sudo rm -rf /tmp/poc-channels-out-*`.
+- Paso 10: `cp -R /tmp/poc-channels-out-* ~/` (copiar primero), y después
+  `sudo loginctl terminate-user pocchannels; sudo userdel -r pocchannels; sudo rm -rf /tmp/poc-channels-out-* "/tmp/claude-$POC_UID"`.

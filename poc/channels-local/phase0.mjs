@@ -57,6 +57,14 @@ const evName = (r) => r?.event?.hook_event_name;
 const which = (c) => sh("/bin/sh", ["-c", `command -v ${c}`]).out.trim();
 const underHome = (p) => p !== "" && !relative(HOME, p).startsWith("..");
 
+// `security` exits 44 for "not found", 0 for found; anything else (locked or
+// unavailable keychain, wrong session) is "unknown" and must never read as absent.
+function keychainState() {
+	if (!IS_MAC) return "n/a";
+	const c = sh("security", ["find-generic-password", "-s", "Claude Code-credentials"]).code;
+	return c === 44 ? "absent" : c === 0 ? "present" : `unknown(${c})`;
+}
+
 function assertTempUser() {
 	const u = userInfo().username;
 	if (!/^poc/.test(u)) die(`este kit sólo corre como el usuario temporal (poc…); usuario actual: ${u}`);
@@ -117,13 +125,22 @@ function setup() {
 	const bun = which("bun");
 	if (!underHome(bun)) die(`bun debe estar instalado en el HOME del usuario temporal (encontrado: ${bun || "ninguno"})`);
 	const settingsPath = join(HOME, ".claude", "settings.json");
-	const tpl = readFileSync(join(KIT, "settings.template.json"), "utf8")
+	const tpl = JSON.parse(readFileSync(join(KIT, "settings.template.json"), "utf8")
 		.replaceAll("__BUN__", bun)
-		.replaceAll("__HOOK__", join(KIT, "hook.mjs"));
-	if (existsSync(settingsPath) && readFileSync(settingsPath, "utf8") !== tpl)
-		die(`${settingsPath} ya existe con otro contenido: el HOME no es nuevo`);
+		.replaceAll("__HOOK__", join(KIT, "hook.mjs")));
+	// `claude plugin` adds its own keys (marketplaces, enabledPlugins) to this
+	// file, so a re-run only (re)writes the keys the kit owns and keeps the rest.
+	// Any OTHER pre-existing key means the HOME is not fresh.
+	const OWNED = ["forceLoginMethod", "env", "permissions", "hooks"];
+	const PLUGIN_KEYS = ["extraKnownMarketplaces", "enabledPlugins"];
+	let cur = {};
+	if (existsSync(settingsPath)) {
+		cur = JSON.parse(readFileSync(settingsPath, "utf8"));
+		const foreign = Object.keys(cur).filter((k) => !OWNED.includes(k) && !PLUGIN_KEYS.includes(k));
+		if (foreign.length) die(`${settingsPath} tiene claves ajenas al kit (${foreign.join(", ")}): el HOME no es nuevo`);
+	}
 	mkdirSync(dirname(settingsPath), { recursive: true });
-	writeFileSync(settingsPath, tpl);
+	writeFileSync(settingsPath, `${JSON.stringify({ ...cur, ...Object.fromEntries(OWNED.map((k) => [k, tpl[k]])) }, null, 2)}\n`);
 	console.log(`settings escritos en ${settingsPath}`);
 
 	const claude = which("claude");
@@ -186,13 +203,15 @@ async function preflight() {
 	row("sin credenciales de Claude previas (archivo)", !existsSync(join(HOME, ".claude", ".credentials.json")));
 	const cj = join(HOME, ".claude.json");
 	row("sin cuenta previa en ~/.claude.json", !existsSync(cj) || !readFileSync(cj, "utf8").includes("oauthAccount"));
-	if (IS_MAC)
-		row("sin credenciales de Claude en el llavero de este usuario",
-			sh("security", ["find-generic-password", "-s", "Claude Code-credentials"]).code !== 0);
+	if (IS_MAC) {
+		const k = keychainState();
+		row("sin credenciales de Claude en el llavero de este usuario", k === "absent", k);
+	}
 	row("sin claves SSH en este usuario", !existsSync(join(HOME, ".ssh")) || readdirSync(join(HOME, ".ssh")).length === 0);
 	const managed = IS_MAC
-		? ["/Library/Application Support/ClaudeCode/managed-settings.json", "/Library/Application Support/ClaudeCode/managed-settings.d"]
-		: ["/etc/claude-code/managed-settings.json", "/etc/claude-code/managed-settings.d"];
+		? ["/Library/Application Support/ClaudeCode/managed-settings.json", "/Library/Application Support/ClaudeCode/managed-settings.d",
+			"/Library/Application Support/ClaudeCode/managed-mcp.json", "/Library/Managed Preferences/com.anthropic.claudecode.plist"]
+		: ["/etc/claude-code/managed-settings.json", "/etc/claude-code/managed-settings.d", "/etc/claude-code/managed-mcp.json"];
 	const present = managed.filter((p) => existsSync(p));
 	row("sin managed settings de la máquina (afectarían la prueba)", present.length === 0, present.join(", ") || "ninguno");
 	const claude = which("claude");
@@ -206,6 +225,7 @@ async function preflight() {
 	try {
 		s = JSON.parse(readFileSync(settings, "utf8"));
 	} catch {}
+	row("respuesta de fakechat denegada (sólo se mide el turno)", (s.permissions?.deny ?? []).includes("mcp__plugin_fakechat_fakechat__reply") && !(s.permissions?.allow ?? []).length);
 	row("settings del usuario temporal: hooks a archivo", !!s.hooks?.UserPromptSubmit && !!s.hooks?.Stop, settings);
 	row("sin modo bypass de permisos", s.permissions?.defaultMode !== "bypassPermissions" && !s.permissions?.allow?.includes("Bash"), "");
 	row("variables DISABLE_AUTOUPDATER y DISABLE_EXTRA_USAGE_COMMAND presentes (el uso extra lo confirma el responsable en su cuenta)", s.env?.DISABLE_AUTOUPDATER === "1" && s.env?.DISABLE_EXTRA_USAGE_COMMAND === "1");
@@ -233,6 +253,24 @@ async function preflight() {
 }
 
 // ── registration ────────────────────────────────────────────────────────
+// Records only whether the gate's remote flags (tengu_harbor*) are cached in
+// the temp user's ~/.claude.json and their values; nothing else is read out.
+function cachedHarborFlags() {
+	const p = join(HOME, ".claude.json");
+	const found = {};
+	try {
+		const walk = (o, depth) => {
+			if (!o || typeof o !== "object" || depth > 6) return;
+			for (const [k, v] of Object.entries(o)) {
+				if (/^tengu_harbor/.test(k)) found[k] = typeof v === "object" ? JSON.stringify(v).slice(0, 200) : v;
+				else walk(v, depth + 1);
+			}
+		};
+		walk(JSON.parse(readFileSync(p, "utf8")), 0);
+	} catch {}
+	return { present: Object.keys(found).length > 0, values: found };
+}
+
 // Only availability/policy reasons are a NO-GO; any other skip (the plugin's
 // server failed to start, port in use…) is a harness failure, because a NO-GO
 // is final and must never come from our own setup.
@@ -279,13 +317,38 @@ async function registration() {
 	const p = probe();
 	const lp = listenerPid(PORT);
 	const owned = !!p.pid && !!lp && ancestors(lp).includes(String(p.pid));
-	writeFileSync(join(OUT, "registration.txt"),
-		`registration=${reg}\nfakechat_http=${http}\nlistener_pid=${lp}\nclaude_pid=${p.pid ?? ""}\nlistener_owned=${owned}\nat=${now()}\n`);
-	writeFileSync(join(OUT, "channel-line.log"), `${redactText(line)}\n`);
-	console.log(`registro: ${reg} · fakechat HTTP ${http} · puerto de este claude: ${owned}`);
+	// The plugin's start script runs a non-frozen `bun install` on every launch,
+	// so the pin is checked again here, after the launch that is measured.
+	const pinOk = findFakechatDirs().every((d) => checkManifest(d).every((x) => x.ok));
+	// A policy-class skip can come from remote feature flags not yet cached in a
+	// brand-new HOME (the gate fails closed and does not re-register later). The
+	// first one is therefore NOT final: it needs a second launch ≥ 60 s later
+	// with the flags present in the cache and the same reason.
+	const flags = cachedHarborFlags();
+	const attempts = readJsonl(join(OUT, "registration-attempts.jsonl"));
+	let final = reg;
 	if (reg === "skipped") {
-		console.log("NO-GO: Channels no está disponible para esta suscripción. Detener la fase 0. No cambiar a API.");
+		const prev = attempts.filter((a) => a.reg === "skipped" || a.reg === "skipped-unconfirmed").at(-1);
+		const confirmed = prev && Date.now() / 1000 - prev.at_s >= 60 && prev.reason === redactText(line) && flags.present;
+		final = confirmed ? "skipped" : "skipped-unconfirmed";
+	}
+	writeFileSync(join(OUT, "registration-attempts.jsonl"),
+		`${JSON.stringify({ at_s: Date.now() / 1000, reg: final, reason: redactText(line), flags })}\n`, { flag: "a" });
+	writeFileSync(join(OUT, "registration.txt"),
+		`registration=${final}\nfakechat_http=${http}\nlistener_pid=${lp}\nclaude_pid=${p.pid ?? ""}\nlistener_owned=${owned}\npin_ok=${pinOk}\nflags=${JSON.stringify(flags)}\nat=${now()}\n`);
+	writeFileSync(join(OUT, "channel-line.log"), `${redactText(line)}\n`);
+	console.log(`registro: ${final} · fakechat HTTP ${http} · puerto de este claude: ${owned} · pin: ${pinOk}`);
+	if (!pinOk) {
+		console.log("fakechat ya no coincide con el commit fijado tras el arranque: fallo del harness, detenido.");
+		process.exit(4);
+	}
+	if (final === "skipped") {
+		console.log("NO-GO confirmado: Channels no está disponible para esta suscripción (dos arranques, mismo motivo, flags en caché). Detener la fase 0. No cambiar a API.");
 		process.exit(3);
+	}
+	if (final === "skipped-unconfirmed") {
+		console.log("Skip por política o disponibilidad, todavía NO confirmado. Salir del CLI (/exit), esperar ≥ 60 s y repetir el paso 7 y 'registration'.");
+		process.exit(4);
 	}
 	if (reg !== "registered" || http !== "200" || !owned) {
 		console.log("Fallo del harness (no NO-GO): ver channel-line.log / registration.txt y repetir el paso 7.");
@@ -333,8 +396,15 @@ async function wake(args) {
 	const minIdle = Number(args[args.indexOf("--min-idle") + 1]);
 	if (!(count > 0) || !(minIdle >= 0)) die("uso: wake --count N --min-idle S");
 	const label = minIdle >= 3600 ? "long" : "short";
+	const sendsPath = join(OUT, `sends-${label}.jsonl`);
+	if (existsSync(sendsPath)) {
+		if (!args.includes("--fresh")) die(`${sendsPath} ya existe: para una tanda nueva, repetir con --fresh (la anterior se guarda aparte)`);
+		const aside = sendsPath.replace(".jsonl", `.${Date.now()}.jsonl`);
+		writeFileSync(aside, readFileSync(sendsPath));
+		writeFileSync(sendsPath, "");
+	}
 	const reg = existsSync(join(OUT, "registration.txt")) ? readFileSync(join(OUT, "registration.txt"), "utf8") : "";
-	if (!reg.includes("registration=registered") || !reg.includes("listener_owned=true")) die("primero 'registration' con resultado registrado");
+	if (!reg.includes("registration=registered\n") || !reg.includes("listener_owned=true")) die("primero 'registration' con resultado registrado");
 	if (!hooks().some((r) => evName(r) === "SessionStart")) die("no hay ningún SessionStart en hooks.jsonl: los hooks no funcionan (fallo del harness)");
 	const file = join(OUT, `sends-${label}.jsonl`);
 	const append = (o) => writeFileSync(file, `${JSON.stringify(o)}\n`, { flag: "a" });
@@ -381,10 +451,19 @@ async function wake(args) {
 			}
 		}
 		if (!ups) {
+			// Only a message the CLI demonstrably RECEIVED, with the session still
+			// idle and no turn for it, is a "no-wake". A silent drop by the CLI, a
+			// draft left in the input, or anything unclear is indeterminate.
 			const after = hooks().filter((r) => r.recv_ts > sentAt).map((r) => evName(r));
-			append({ ...rec, result: "no-wake", other_prompts: others, hooks_after_send: after });
-			console.log(`#${i} ${mid}: NO despertó en 120 s. Fase 0 detenida.`);
-			process.exit(5);
+			const debug = existsSync(join(OUT, "claude-debug.log")) ? readFileSync(join(OUT, "claude-debug.log"), "utf8") : "";
+			const received = debug.split("\n").some((l) => l.includes("notifications/claude/channel:") && l.includes(mid));
+			const pAfter = probe();
+			const inTranscript = sh("/bin/sh", ["-c", `grep -rl -- '${mid}' "$HOME/.claude/projects" 2>/dev/null | head -1`]).out.trim() !== "";
+			const turnHooks = after.filter((e) => e === "UserPromptSubmit" || e === "Stop");
+			const result = received && pAfter.ok && !inTranscript && turnHooks.length === 0 ? "no-wake" : "indeterminate";
+			append({ ...rec, result, other_prompts: others, hooks_after_send: after, cli_received: received, probe_after: pAfter.detail, in_transcript: inTranscript });
+			console.log(`#${i} ${mid}: sin UserPromptSubmit en 120 s → ${result} (recibido por el CLI: ${received}, en el transcript: ${inTranscript}). Detenido.`);
+			process.exit(result === "no-wake" ? 5 : 8);
 		}
 		const pe = ups.event;
 		Object.assign(rec, {
@@ -401,7 +480,7 @@ async function wake(args) {
 				if (r.recv_ts <= sentAt) continue;
 				if (evName(r) === "StopFailure") failure = true;
 				if (evName(r) === "Notification" && /permission/i.test(r.event.notification_type ?? "")) rec.permission_prompt = true;
-				if (evName(r) === "Stop" && r.recv_ts > ups.recv_ts && r.event.prompt_id === pe.prompt_id) stop = r;
+				if (evName(r) === "Stop" && r.recv_ts > ups.recv_ts && pe.prompt_id && r.event.prompt_id === pe.prompt_id) stop = r;
 			}
 		}
 		rec.stop_same_prompt_id = !!stop;
@@ -447,9 +526,10 @@ function report() {
 	const corrOk = wakes.length > 0 && wakes.every((r) => r._corrOk);
 	const lat = wakes.map((r) => r.latency_s).sort((a, b) => a - b);
 	let verdict;
-	if (registration === "skipped") verdict = "**NO-GO**: Channels no se registra con la suscripción. No se cambia a API.";
+	if (registration === "skipped-unconfirmed") verdict = "**Indeterminado**: skip de política sin confirmar (falta el segundo arranque).";
+	else if (registration === "skipped") verdict = "**NO-GO**: Channels no se registra con la suscripción. No se cambia a API.";
 	else if (registration !== "registered") verdict = "**Indeterminado**: sin evidencia de registro (fallo del harness, no NO-GO).";
-	else if (rows.some((r) => r.result === "harness-error")) verdict = "**Indeterminado**: hubo un fallo del harness (ver tabla). No es NO-GO.";
+	else if (rows.some((r) => r.result === "harness-error" || r.result === "indeterminate")) verdict = "**Indeterminado**: hubo un fallo del harness (ver tabla). No es NO-GO.";
 	else if (rows.some((r) => r.result === "no-wake")) verdict = "**NO-GO de Channels para despertar.** El responsable decide si se evalúa `asyncRewake` (R2).";
 	else if (!all) verdict = "**Incompleta**: faltan muestras. Sin veredicto.";
 	else if (srcOk && corrOk) verdict = "**Fase 0 superada** (12/12, `source=system`, correlación OK). No es un GO de arquitectura: 12 muestras acotan la tasa de fallo en ≈ 25 %. Pedir GO separado para la POC completa.";
@@ -488,8 +568,8 @@ export function redactText(t) {
 
 function archive() {
 	assertTempUser();
-	const stillLogged = existsSync(join(HOME, ".claude", ".credentials.json")) ||
-		(IS_MAC && sh("security", ["find-generic-password", "-s", "Claude Code-credentials"]).code === 0);
+	const k = keychainState();
+	const stillLogged = existsSync(join(HOME, ".claude", ".credentials.json")) || (IS_MAC && k !== "absent");
 	if (stillLogged && !process.argv.includes("--logout-confirmed"))
 		die("todavía hay credenciales de Claude: hacer /logout en la Terminal 1. Si ya lo hiciste y el llavero conserva la entrada, repetir con --logout-confirmed (el borrado del usuario la elimina)");
 	const dest = IS_MAC ? `/Users/Shared/poc-channels-out-${Date.now()}` : `/tmp/poc-channels-out-${Date.now()}`;
