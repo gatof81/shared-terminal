@@ -206,7 +206,7 @@ let forced = false;
 // True while sessionCore is deciding a session's landing view (it may be
 // waiting on the "has history" answer): the sync below must not land a
 // fallback of its own in the meantime, or the person would see two views.
-let landingPending = false;
+let landingOwner: string | null = null;
 // Bumped on every view the person chooses. A landing decided earlier
 // (sessionCore waits on the history answer) compares it before acting,
 // so a click made meanwhile is never overwritten.
@@ -264,14 +264,17 @@ new ResizeObserver(positionOverlays).observe(terminalToolbar);
 export function setView(next: View, opts: { forced?: boolean; landing?: boolean } = {}): void {
 	forced = next !== "terminal" && opts.forced === true;
 	const chosen = opts.forced !== true && opts.landing !== true && !applying;
-	if (view === next) {
-		renderSwitch();
-		return;
-	}
-	// The last view the person chose for this session wins its next landing.
+	// The last view the person chose for this session wins its next landing
+	// — a click on the tab that is already pressed included: confirming
+	// "Terminal" while the landing is still deciding is a choice the
+	// landing must not override (it compares choiceGeneration()).
 	if (chosen) {
 		choiceGen++;
 		if (activeSessionId !== null) writeViewPref(activeSessionId, next);
+	}
+	if (view === next) {
+		renderSwitch();
+		return;
 	}
 	const prev = view;
 	view = next;
@@ -328,12 +331,14 @@ export function landView(next: View, opts: { forced?: boolean } = {}): void {
 	setView(next, opts.forced ? { forced: true } : { landing: true });
 }
 
-export function beginLanding(): void {
-	landingPending = true;
+/** sessionCore is deciding `sessionId`'s landing: the sync lands no fallback of its own for it. */
+export function beginLanding(sessionId: string): void {
+	landingOwner = sessionId;
 }
 
-export function endLanding(): void {
-	landingPending = false;
+/** Ends `sessionId`'s pending landing — never another session's (an overlapping open). */
+export function endLanding(sessionId: string): void {
+	if (landingOwner === sessionId) landingOwner = null;
 }
 
 function renderSwitch(): void {
@@ -363,7 +368,7 @@ export function syncSessionViews(): void {
 	const s = sessions.find((x) => x.sessionId === activeSessionId);
 	if (!s) {
 		viewSwitch.hidden = true;
-		setView("terminal");
+		setView("terminal", { landing: true });
 		for (const l of syncListeners) l();
 		return;
 	}
@@ -382,7 +387,7 @@ export function syncSessionViews(): void {
 	// a forced switch below (which fires onViewChange → load) loads for
 	// the NEW session rather than racing a stale one.
 	for (const l of syncListeners) l();
-	if (landingPending) return;
+	if (landingOwner !== null && landingOwner === activeSessionId) return;
 	if (!canTerminal) {
 		// No terminal to show: land on Files (works for stopped sessions) —
 		// or on what the policy says under shell v2. A user already on

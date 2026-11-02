@@ -58,6 +58,7 @@ import { onRoute, readRoute, start as startRouter } from "./router.js";
 import { initTerminalSearch } from "./searchBar.js";
 import {
 	applyRoute,
+	invalidateSessionList,
 	openSession,
 	refreshSessions,
 	renderSessionList,
@@ -567,6 +568,9 @@ function handleLogout(toastMessage?: string): void {
 	// unconditionally needs no guard.
 	closeObserveModal();
 	void logout();
+	// A list request still in flight was sent with this account's cookie:
+	// its answer must not be applied after the next person signs in.
+	invalidateSessionList();
 	disposeAllCurrentTerminals();
 	activeSessionId = null;
 	sessions = [];
