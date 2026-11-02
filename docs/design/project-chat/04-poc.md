@@ -130,9 +130,9 @@ prueban fallos, concurrencia y reinicios. Kit: rama `poc/channels-phase0` (sin m
 | `fakechat` fijado y dependencias revisadas | Desde el marketplace oficial (para seguir en la allowlist de Anthropic); se exige el **conjunto exacto de archivos** y el SHA-256 de cada uno de `claude-plugins-official@7994c27`; `bun install --frozen-lockfile` con los 95 paquetes del `bun.lock` (integridad sha512); falla si el lockfile cambia. Las dependencias son el SDK de MCP 1.27.1 y lo que arrastra para su modo HTTP (express, hono, cors, jose…), que `fakechat` no usa: habla por stdio |
 | Sin Docker, Shared Terminal, Proxmox ni producción | El kit no ejecuta `docker` ni `ssh` ni contacta otros hosts que Anthropic, GitHub, `bun.sh` y npm; el preflight exige que el usuario no sea administrador ni del grupo `docker` y que `docker ps` falle |
 | Sin tocar proyectos, configuración ni sesiones | Todo en el HOME del usuario temporal; CLI 2.1.314 y Bun 1.3.10 instalados **en ese HOME** (el preflight falla si resuelven a la instalación habitual); managed settings de la máquina **no** se tocan (si existen, el preflight falla y se consulta) |
-| Sin `--dangerously-skip-permissions` | Modo normal; herramientas denegadas salvo la respuesta de `fakechat`; si aparece un diálogo de permiso, la persona contesta **No** (el despertar ya quedó medido) |
+| Sin `--dangerously-skip-permissions` | Modo normal; **todas** las herramientas denegadas, incluida la respuesta de `fakechat` (su `reply` copia cualquier archivo legible a una carpeta que sirve sin autenticación). La medición sólo necesita `UserPromptSubmit` y `Stop`; si aparece un diálogo de permiso, la persona contesta **No** |
 | Registro | Hooks `command` a un archivo (`SessionStart`, `UserPromptSubmit`, `Stop`, `StopFailure`, `Notification`, `SessionEnd`) y log de depuración del CLI |
-| Limpieza | `/logout`, copia redactada (exige que ya no haya credenciales), borrado del usuario (HOME y llavero) y revisión de autorizaciones en claude.ai |
+| Limpieza | `/logout`, copia redactada (exige que ya no haya credenciales), borrado del usuario (HOME y llavero), borrado de sus temporales por uid (`/private/var/folders` en macOS, `/tmp/claude-<uid>` en Linux) y revisión de autorizaciones en claude.ai |
 
 **Limitaciones de seguridad que introduce la variante local** (aceptadas por el responsable al
 elegirla; ninguna afecta la validez de lo que la fase 0 mide):
@@ -143,9 +143,11 @@ elegirla; ninguna afecta la validez de lo que la fase 0 mide):
 2. **Red sin restringir.** La LAN, Proxmox incluido, es alcanzable a nivel de red. Mitigación: ninguna
    credencial de producción en ese usuario y ninguna herramienta de red o shell para Claude. A
    diferencia de la VM, se demuestra que **no se toca** producción, no que **no se pueda**.
-3. **`fakechat` sin autenticación en `127.0.0.1`.** Durante la prueba, cualquier proceso local de
-   cualquier usuario podría inyectar un mensaje en esa sesión. Mitigación: puerto alto, ventana
-   corta, herramientas denegadas: lo peor es una respuesta de texto.
+3. **`fakechat` sin autenticación ni control de origen en `127.0.0.1`.** Durante las ~2,5 h de la
+   prueba, cualquier proceso local y **cualquier página web abierta en el equipo** (formulario
+   multipart a `/upload`, WebSocket a `/ws`) puede enviar un prompt a esa sesión. Mitigación:
+   **ninguna** herramienta permitida, incluida `reply`, así que un prompt inyectado sólo produce
+   texto y consume cuota; el informe lo detecta y esa muestra no cuenta como correlación limpia.
 4. **Código de terceros** (`fakechat` y 95 paquetes) corre como el usuario temporal; fijado por
    lockfile con integridad, no auditado línea por línea.
 5. **Mismo plan.** Los ~12 turnos consumen el límite incluido de la suscripción, compartido con las
@@ -164,6 +166,14 @@ elegirla; ninguna afecta la validez de lo que la fase 0 mide):
   nueva decisión del responsable. Un fallo del harness (subida rechazada, hooks sin funcionar, puerto
   de otro proceso, motivo de `skip` que no es de disponibilidad o política) **nunca** se registra como
   NO-GO.
+- **NO-GO de disponibilidad sólo confirmado dos veces**: el gate del CLI decide con flags remotos
+  que, en un HOME nuevo, pueden no estar todavía en caché, y falla cerrado. Un primer `skip` de
+  política o disponibilidad queda **sin confirmar**; es NO-GO sólo si un segundo arranque, ≥ 60 s
+  después, da el mismo motivo con los flags ya en caché.
+- **NO-GO de despertar sólo con evidencia**: sin `UserPromptSubmit`, la muestra es "no despertó"
+  únicamente si el CLI registró la recepción del mensaje, la sesión sigue en su prompt y no hubo
+  turno. Cualquier otro caso (descarte silencioso del CLI, borrador en el input, duda) es
+  **indeterminado**.
 
 Es lo **único** que se ejecutará primero, y sólo con una autorización explícita del responsable para
 esta prueba. No se escribe `monitor.mjs` ni `st_channel.py` antes de su resultado.
@@ -195,6 +205,65 @@ Resultado de la fase 0:
 | Registra pero no despierta en alguno de los 12 | **NO-GO de Channels para despertar** | El responsable decide si autoriza evaluar el brazo B (`asyncRewake`, también con su suscripción) — R2 |
 | 12/12 despiertan y el hook trae `source: system` con la etiqueta | **Fase 0 superada** (no es un GO de arquitectura: 12 muestras sólo acotan la tasa de fallo en ≈ 25 %) | Presentar resultados y pedir un **GO separado** para la POC completa (§7) |
 | 12/12 despiertan pero `source` ausente o la etiqueta no está en el `prompt` | Fase 0 superada en disponibilidad; **G3 en riesgo** | Presentar; la POC completa sólo con GO explícito sabiendo que G3 probablemente falle |
+
+### 1.8 Evidencia exploratoria (2026-11-02) — **no** cuenta entre las 12 muestras
+
+Pruebas manuales del responsable en su Mac, en su sesión habitual de Claude Code, con su
+suscripción y `claude --channels plugin:fakechat@claude-plugins-official`, sin hooks ni medición.
+Versión del CLI: a completar.
+
+| Hora | Enviado desde Fakechat | Respuesta en Fakechat | Observación |
+| --- | --- | --- | --- |
+| 19:33:49 | `hola` | 19:33:56 | — |
+| 19:34:25 | `Prueba de Shared Terminal. Respondé exactamente CHANNELS_OK y enviá tu respuesta a Fakechat.` | 19:34:28, `CHANNELS_OK` | — |
+| 19:37:22 | `IDLE_01: Respondé exactamente IDLE_OK_01.` | 19:37:25, `IDLE_OK_01` | ≈ 2 min 54 s después de la respuesta anterior |
+
+En la terminal aparecieron las tres entradas con el prefijo `← fakechat · web:` y cada una provocó
+actividad sin que nadie escribiera ni pulsara Enter. Claude respondió las tres veces con la
+herramienta de `plugin:fakechat:fakechat`.
+
+| Qué muestra | Qué **no** muestra |
+| --- | --- |
+| Channels está disponible con la suscripción del responsable (2026-11-02) | Que `UserPromptSubmit` traiga `source=system` |
+| El plugin oficial se carga con `--channels`, sin flag de desarrollo | Que el `prompt` del hook lleve una etiqueta `<channel>` utilizable para correlación |
+| Una notificación llega a una sesión interactiva **existente** | Atribución inequívoca de cada `turn_end` |
+| La sesión procesa el mensaje sin intervención en la terminal | Despertar tras ≥ 1 h de inactividad |
+| Claude puede responder por la herramienta MCP del plugin cuando se le pide | `--resume`, concurrencia, fallos, kill switch |
+| Al menos un despertar tras ≈ 3 min sin mensajes | Fiabilidad (3 muestras no acotan ninguna tasa) |
+
+### 1.9 Fase 0 instrumentada: sesión local del responsable con hooks de carpeta
+
+**Decisión del responsable (2026-11-02):** las 12 muestras de §1.7 se toman en la misma sesión local
+de §1.8, no en un usuario temporal. La instrumentación se instala **sólo** en la carpeta de prueba
+(`<carpeta>/.claude/settings.local.json`): sin tocar `~/.claude/settings.json`, sin reinstalar
+Claude ni el plugin, sin leer credenciales y sin `/logout`. Kit: rama `poc/channels-phase0`,
+carpeta `poc/channels-mac/`; el kit de usuario temporal (`poc/channels-local/`) queda como
+alternativa no usada.
+
+- **Hooks**: `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionStart`, `Notification` y
+  `PostToolUse(Failure)` sólo para las herramientas de Fakechat. Los nombres de eventos y campos se
+  comprobaron en el binario 2.1.314. El logger registra además los **nombres** de los campos que
+  llegan, porque la versión del responsable puede ser otra.
+- **Observacional**: no imprime nada (en `UserPromptSubmit` y `SessionStart` lo impreso entra al
+  contexto de Claude), siempre sale con 0 (el 2 bloquea) y no guarda texto de prompts o respuestas:
+  sólo bytes, SHA-256, ids de prueba y los atributos permitidos de `<channel>`.
+- **Orden**: primero **una** prueba instrumentada tras ≥ 30 s de inactividad. Sólo si su informe es
+  limpio, las 10 cortas y las 2 de ≥ 1 h.
+- **Por mensaje**: recibido por el CLI (línea de recepción del log de depuración), hook, despertar
+  sin intervención, `Stop` del mismo `prompt_id`, respuesta vuelta a Fakechat (escucha pasiva de su
+  WebSocket), latencias, `source` (presente o ausente), forma del prompt y correlación (A1–A5 de
+  protocolo §3.1, `message_id` igual al id enviado).
+- **Fakechat no es el monitor**: su `message_id` demuestra que una clave de `meta` aparece como
+  atributo de `<channel>`. **No** demuestra `st_msg`, el nombre de nuestro servidor, su carga como
+  plugin autorizado ni las condiciones A3–A7 con interferencia o relay. Eso sigue siendo hipótesis
+  hasta la POC completa.
+- **Seguridad de esta variante**: es la sesión habitual del responsable, no un perfil aislado. El
+  riesgo nuevo es la inyección por Fakechat (sin autenticación ni control de origen): con `reply`
+  permitido, un mensaje inyectado podría pedir adjuntar un archivo legible, que Fakechat sirve sin
+  autenticación en `localhost`. Mitigaciones en el README del kit: carpeta dedicada sin datos
+  sensibles, sin modo bypass, contestar No a diálogos inesperados, no navegar por sitios
+  desconocidos durante las series.
+- **Criterios**: el veredicto aplica la tabla de §1.7 sin cambios; G1–G12 de §5 no se tocan.
 
 ## 2. Versiones
 
