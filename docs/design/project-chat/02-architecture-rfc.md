@@ -76,8 +76,8 @@ Leyenda: **D** documentado · **B** observado en el binario 2.1.314 · **I** rep
 | C12 | Reconexión | B: "Channel notifications re-registered after reconnect"; CHANGELOG 2.1.187 (conexiones caídas tras `/bg`, `/tui`, `/update`) | Parcial; **H** sin pérdidas |
 | C13 | Requiere `--channels <servers>` al lanzar; flag oculto en `--help` | D; B (`--channels <servers...>` con `hideHelp()`) | Comprobado |
 | C14 | Servidor propio fuera de la allowlist ⇒ `--dangerously-load-development-channels server:<name>` (confirmación al arrancar) o plugin admitido por `allowedChannelPlugins` en managed settings | D; B ("is not on the approved channels allowlist (use --dangerously-load-development-channels for local dev)") | Comprobado; **H** que un marketplace local en la imagen sea admitible |
-| C15 | Política: `channelsEnabled` en managed settings. claude.ai Team/Enterprise: apagado por defecto; Console (API key): **encendido salvo que existan managed settings** | B (descripción del setting); D (enterprise controls) | Comprobado. **Nuestros contenedores tienen managed settings** (`managed-settings.d/conversation.json`) ⇒ hay que escribir `channelsEnabled: true` |
-| C16 | Sólo proveedor first-party (claude.ai o Console); no Bedrock/Vertex/Foundry | D; B ("channels are not available on third-party providers") | Comprobado |
+| C15 | Política: `channelsEnabled` en managed settings. claude.ai Team/Enterprise: apagado por defecto; Console (API key): **encendido salvo que existan managed settings** | B (descripción del setting); D (enterprise controls) | Comprobado. **Nuestros contenedores tienen managed settings** (`managed-settings.d/conversation.json`) ⇒ hay que escribir `channelsEnabled: true`. Planes individuales de claude.ai (Pro/Max): según la doc "skip these checks entirely"; el binario sólo exige el setting a Team/Enterprise. Pero #105326 reporta "not currently available" en Max desde 2026-10-25: **la disponibilidad con la suscripción del responsable es lo primero que comprueba la fase 0** |
+| C16 | Sólo proveedor first-party (claude.ai o Console); no Bedrock/Vertex/Foundry. **Para este proyecto sólo se usa la suscripción de claude.ai** (decisión del responsable) | D; B ("channels are not available on third-party providers") | Comprobado |
 | C17 | Kill switch remoto: "channels feature is not currently available" | B (gate `Oj()`); I #105326 (Max, desde 2026-10-25, abierto) | **Riesgo**: Anthropic puede apagarlo sin release |
 | C18 | Servidor que negocia la revisión MCP 2026-07-28 ⇒ no se registra como canal | D (mcp: "can't deliver channel messages"); B (`era: modern` ⇒ skip) | Comprobado: nuestro servidor **MUST** negociar la revisión anterior |
 | C19 | No funciona en `-p` / Agent SDK | D; I #99658 | Comprobado: sólo agentes interactivos |
@@ -237,8 +237,11 @@ sequenceDiagram
   que el CLI la haya encolado (C7).
 - **Aceptado** = la captura persistió un `channel_prompt` con ese `st_msg` desde el pane del runtime.
   Dice que el CLI la convirtió en un turno. No dice nada del resultado.
-- **Completado** = llegó el `turn_end` del `prompt_id` aceptado. El **resultado** es ese informe
-  final (referencia) más cualquier publicación explícita del agente con `in_reply_to`.
+- **Completado** = llegó el `turn_end` del `prompt_id` aceptado **y ninguna otra entrada compartió
+  ese turno** (protocolo §3.1). Sólo entonces el **resultado** es ese informe final (referencia), más
+  cualquier publicación explícita del agente con `in_reply_to`. Si otra entrada compartió el turno
+  (Terminal, Control Directo, notificación de tarea), la entrega termina `ended_unattributed` y el
+  informe no se presenta como respuesta al mensaje.
 - Sin `channel_prompt` dentro de `T_accept` ⇒ `uncertain`: el CLI puede tenerlo en su cola y
   ejecutarlo más tarde, así que sigue contando como en vuelo. Pasa a `unconfirmed` sólo con evidencia
   de que el CLI ya no lo tiene (protocolo §3 regla 2b). **Nunca** se reenvía solo, ni por Channels
@@ -257,9 +260,10 @@ Un mensaje se entrega a un agente sólo si:
 4. el pane no tiene una operación del Composer sin liberar (registro de pane, §8.1.4.1).
 
 Con eso, el caso documentado de agrupamiento en `busy` (C6) sólo puede ocurrir por una carrera con
-algo que **no** es el monitor (la persona escribe en el Terminal en el mismo instante). Esa carrera se
-detecta: el `channel_prompt` llega con un `prompt_id` que también tiene un `user_prompt` humano, y
-la tarjeta de resultado lo dice ("respondido junto con un mensaje escrito en el Terminal").
+algo que **no** es el monitor (la persona escribe en el Terminal en el mismo instante, o termina una
+tarea en background). Esa carrera se detecta por `prompt_id` dentro de la ventana del turno y la
+entrega termina `ended_unattributed{mixed-input}`: nunca se atribuye un informe compartido a un solo
+mensaje (protocolo §3.1).
 
 ### 5.6 Agente a agente
 
@@ -292,7 +296,7 @@ la tarjeta de resultado lo dice ("respondido junto con un mensaje escrito en el 
 | Situación | Qué pasa | Qué ve la persona |
 | --- | --- | --- |
 | CLI sin `--channels`, o canal no registrado (C13–C18) | `st-channel` no arranca o no se registra; no hay runtime | Agente "sin canal" con la razón conocida; mensajes en cola |
-| Kill switch remoto (C17) | `st-channel` arranca pero el CLI no registra el handler o descarta la notificación (el gate se evalúa en **cada** notificación, B). Sin señal directa al servidor | Entregas `uncertain` → `unconfirmed`; tras 2 consecutivas en el mismo runtime, runtime `degraded` y el monitor deja de entregar a ese runtime |
+| Kill switch remoto (C17) | `st-channel` arranca pero el CLI no registra el handler o descarta la notificación (el gate se evalúa en **cada** notificación, B). Sin señal directa al servidor | La entrega queda `uncertain` → `unconfirmed{no-evidence}` (regla 2b (c)); el runtime pasa a `degraded` en el **primer** caso y no recibe nada más; la cola se conserva y se ve "retenido". Sale sólo por un runtime nuevo o por acción del owner. Nunca Composer (protocolo §6.4) |
 | `st-channel` muere antes de informar `transported` | Lease vence (`T_lease`) | `uncertain` (pudo llegar o no) hasta la evidencia de la regla 2b; nada se reenvía |
 | Backend se reinicia | Al abrir el log, toda entrega `transporting`/`transported` sin `accepted` pasa a `uncertain{orphaned}`; un `channel_prompt` tardío la lleva a `accepted{late}`; `queued` sigue en cola | Igual que arriba |
 | Contenedor se para | Runtime retirado (`startGen` cambia en `onSessionDown`); entregas en vuelo ⇒ `unconfirmed`/`interrupted`; `queued` sigue esperando | Agente "desconectado"; cola visible |
@@ -344,19 +348,26 @@ reintento**. Es la misma política que el Composer (§8.1.7) y la que pidió el 
   lista el agente queda "canal no validado" y no recibe. Revalidar exige autenticación first-party
   real (C16–C17: el mock del smoke no sirve), así que no puede ser un job de CI ordinario. Con el
   auto-update de los workspaces, cada versión nueva dejaría a los agentes sin canal hasta revalidar.
-  Propuesta (R9): **fijar la versión del CLI en las sesiones de agente** (sin auto-update) y
-  revalidar con una corrida manual firmada, con tope de gasto, antes de subir el pin.
+  Decisión (R9): **fijar la versión del CLI en las sesiones de agente** (sin auto-update) y
+  revalidar con una corrida manual firmada antes de subir el pin, autenticada con la suscripción del
+  responsable y sin gasto adicional (mismas reglas que la POC, 04-poc.md §1.4).
 
-## 9. Decisiones que necesitan al responsable
+## 9. Decisiones del responsable (2026-11-02)
 
-| # | Decisión | Recomendación |
+La dirección está aprobada **conceptualmente**. No están autorizados: ejecutar la POC, implementar
+el monitor, mergear ni desplegar.
+
+| # | Decisión | Resolución del responsable |
 | --- | --- | --- |
-| R1 | Aceptar una dependencia de un research preview con kill switch remoto como chat principal | Sí, **sólo** si la POC da GO y con la salida de §6 (degradación visible, sin fallback automático). Revisar en cada release del CLI |
-| R2 | Fallback de transporte si Channels no despierta o no sobrevive a `--resume`: alternativa B (hooks `asyncRewake`) | Evaluarla en la misma POC (brazo B, condicional) antes de decidir |
-| R3 | Agente↔sesión 1:1 en v1 | Sí. Varios agentes por contenedor esperan a tener evidencia |
-| R4 | Agente→agente con aprobación humana por defecto | Sí |
-| R5 | Admin/lead leyendo chats de proyecto | No en v1 (owner-only, como conversaciones) |
-| R6 | Plugin en marketplace local vs. flag de desarrollo en producción | Plugin + `allowedChannelPlugins`; el flag de desarrollo nunca fuera de la POC |
-| R7 | Habilitar `--channels` sólo en sesiones de agente (por C20) | Sí |
-| R8 | El resultado es el `turn_end` del turno aceptado (no la herramienta `reply`) | Sí; `chat_post` queda para avances y preguntas |
-| R9 | Cómo se revalida cada versión del CLI para el canal (§8) | Pin del CLI en sesiones de agente + corrida manual firmada con tope de gasto; dueño: el responsable |
+| R1 | Dependencia de un research preview con kill switch remoto | **Sí, condicional a una POC exitosa.** Channels puede ser el transporte principal, pero no una dependencia indispensable del producto: degradación visible y ningún fallback automático (protocolo §6.4) |
+| R2 | Alternativa si Channels no despierta o no sobrevive a `--resume` | **Sí, evaluar `asyncRewake`** (POC E13) si Channels falla. **No** se aprueba automáticamente para producción |
+| R3 | Agente ↔ sesión | **1:1** |
+| R4 | Agente → agente | **Aprobación humana por defecto** y reglas explícitas (aristas `allow`) |
+| R5 | Visibilidad | **Owner-only en v1** |
+| R6 | Carga del canal | **Plugin local autorizado** (`allowedChannelPlugins`); **sin** flags de desarrollo en producción |
+| R7 | Alcance | Channels **sólo** en sesiones configuradas como agentes |
+| R8 | Resultado | `turn_end` del turno aceptado, **siempre que la correlación sea inequívoca** (protocolo §3.1; si no, `ended_unattributed`) |
+| R9 | Versión del CLI | **Fijada** en sesiones de agente; se actualiza sólo tras validación (con la suscripción, sin gasto adicional). Las sesiones convencionales no cambian |
+| — | Autenticación de la POC (**decisión definitiva**, reemplaza la propuesta anterior de API key de Console) | **Sólo la suscripción de Claude del responsable**, con el login oficial de Claude Code. Sin Console ni API keys de pago. Sin extraer ni reutilizar tokens OAuth o credenciales de sesiones existentes |
+| — | Consumo de la POC | **Ningún gasto adicional**: sólo lo incluido en la suscripción, con el uso extra desactivado. La propuesta anterior de USD 30 queda sin efecto |
+| — | Secuencia | Primero **sólo la fase 0** con `fakechat`, previa autorización para esa prueba: disponibilidad con la suscripción y despertar de una sesión inactiva. Bloqueo de Channels para la suscripción ⇒ **NO-GO**, sin cambiar a API. Si funciona ⇒ resultados y **GO separado** para la POC completa (04-poc.md §1.7, §7) |

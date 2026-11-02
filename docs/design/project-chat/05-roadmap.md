@@ -23,7 +23,7 @@ flowchart LR
 | Fase | Contenido | PRs | Depende de | Riesgo principal | Sale cuando |
 | --- | --- | --- | --- | --- | --- |
 | **P0** | Estos documentos + skill `architecture-spec` | 1 (docs, draft) | — | — | el responsable cierra las decisiones R1–R8 |
-| **P1** | POC aislada (§04), empezando por la fase 0 con `fakechat` | rama sin merge + 1 PR de docs con resultados | P0, aprobación de costo y autenticación | Kill switch o política impiden registrar (C15, C17) | tabla de resultados + recomendación |
+| **P1** | POC aislada (§04): primero **sólo** la fase 0 con `fakechat` (autorización propia); la POC completa con un GO separado. Sólo con la suscripción del responsable | rama sin merge + 1 PR de docs con resultados | P0; autorización de la fase 0 | Channels bloqueado para la suscripción (C15, C17, #105326) ⇒ NO-GO, sin cambiar a API | tabla de resultados + recomendación |
 | **P2** | `docs/PROJECT_CHAT.md` vinculante (protocolo con los valores de la POC) | 1 (docs) | GO | que la POC deje hipótesis abiertas | aprobado por el responsable |
 | **P3** | Migración D1 (3 tablas), `projectChat/store.ts` (formato de `conversation/store.ts`, escritura con fsync de `paneRecord.ts`, sin ruta de descarte), rutas de lectura y CRUD de proyectos/agentes, `/ws/project/` en `WS_PATH_PREFIXES` | 2 (backend, luego API+WS) | P2 | duplicar lógica del store en vez de extraerla | tests de store (seq, snapshot, rotación) y de `wsUpgrade` |
 | **P4** | Clasificador `channel_prompt` en la ingesta + copia idéntica en el frontend; render como marcador | 1 | P2 | falsos positivos con texto humano | tests de tabla como `internalPrompt` |
@@ -37,7 +37,7 @@ flowchart LR
 
 | Riesgo | Mitigación |
 | --- | --- |
-| Revalidar cada versión del CLI exige autenticación real (no sirve el mock de CI) | Pin del CLI en sesiones de agente; corrida manual firmada con tope de gasto antes de subirlo (R9) |
+| Revalidar cada versión del CLI exige autenticación real (no sirve el mock de CI) | Pin del CLI en sesiones de agente; corrida manual firmada con la suscripción del responsable, sin gasto adicional, antes de subirlo (R9) |
 | Channels cambia o se apaga (research preview, kill switch) | `CHANNEL_CLI_VERSIONS`; degradación visible; el chat y la cola siguen funcionando, sólo falla el transporte; brazo B documentado |
 | Dos mecanismos de entrega (Channels y Composer) que derivan | El monitor nunca usa Composer; Composer congelado (sin features nuevas); un solo log por hecho |
 | Costo de mantener `st-channel` | Proceso sin estado, ≤ ~400 líneas, sin dependencias; smoke por variante de CLI |
