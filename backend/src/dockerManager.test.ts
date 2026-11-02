@@ -1810,7 +1810,14 @@ describe("DockerManager.runPostStart", () => {
 // the next reconcile.
 describe("DockerManager.kill port-mapping cleanup (#309)", () => {
 	it("clears port mappings even when container_id is already null", async () => {
-		const { dm } = makeDocker({ sessions: makeFakeSessions(null) });
+		const { dm, container } = makeDocker({ sessions: makeFakeSessions(null) });
+		// With no container_id, kill() looks the session's container up by
+		// its deterministic name (P1-C); Docker knows none here.
+		(container as unknown as { inspect: unknown }).inspect = vi.fn(async () => {
+			const e = new Error("(HTTP code 404) no such container") as Error & { statusCode: number };
+			e.statusCode = 404;
+			throw e;
+		});
 		dbStubs.d1Query.mockClear();
 		await dm.kill("s1");
 		// clearPortMappings issues a DELETE on sessions_port_mappings bound

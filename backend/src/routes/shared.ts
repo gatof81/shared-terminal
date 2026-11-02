@@ -172,7 +172,7 @@ export class TeardownFailedError extends Error {
 		super(
 			stage === "purge"
 				? "The workspace could not be purged; the session is kept as terminated. Retry the delete."
-				: "Docker did not confirm the container teardown; the session is unchanged. Retry.",
+				: "Docker did not confirm the container teardown: its state may be partial (stopped but not removed). The session record was not changed. Retry.",
 		);
 		this.name = "TeardownFailedError";
 		this.cause = cause;

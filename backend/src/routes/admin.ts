@@ -367,13 +367,14 @@ export function registerAdminRoutes(router: Router, ctx: RouteContext): void {
 					if (!current) return;
 					// Idempotent soft branch — only kill + terminate if not
 					// already torn down.
+					// Same shape as the owner route: kill on every delete (a
+					// terminated row may still hold a container, P1-C), fail-
+					// closed so an unconfirmed kill or purge keeps the row and
+					// the container_id and the retry converges; see TeardownFailedError.
+					await docker.kill(req.params.id).catch((err) => {
+						throw new TeardownFailedError("kill", err);
+					});
 					if (current.status !== "terminated") {
-						// Same fail-closed shape as the owner route: an unconfirmed
-						// kill or purge keeps the row (and the container_id) so
-						// the retry converges; see TeardownFailedError.
-						await docker.kill(req.params.id).catch((err) => {
-							throw new TeardownFailedError("kill", err);
-						});
 						await sessions.terminate(req.params.id);
 						idleSweeper?.forget(req.params.id);
 					}

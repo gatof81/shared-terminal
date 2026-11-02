@@ -668,9 +668,34 @@ export class DockerManager {
 				),
 		);
 
-		await container.start();
+		// Persist the created container's id BEFORE starting it (P1-B):
+		// from here on every failure (start, port mappings, the caller's
+		// own post-spawn steps) finds the container through D1, and the
+		// create route's rollback `kill()` can confirm its removal. If D1
+		// refuses this one write we still hold the exact id Docker gave
+		// us, so the never-started container is removed by that id —
+		// fail-closed: an unconfirmed removal surfaces too, and the row
+		// (container_id NULL) plus the deterministic name let `kill()`'s
+		// identity-checked lookup finish the job later.
 		const containerId = container.id;
-		await this.sessions.setContainerId(sessionId, containerId);
+		try {
+			await this.sessions.setContainerId(sessionId, containerId);
+		} catch (persistErr) {
+			try {
+				await container.remove({ force: true, v: true });
+			} catch (removeErr) {
+				if (!isNotFound(removeErr)) {
+					logger.error(
+						`[docker] spawn ${sessionId}: container ${containerId} created but neither referenced in D1 nor confirmed removed: ${(removeErr as Error).message}`,
+					);
+					throw new Error(
+						`${(persistErr as Error).message}; container ${containerId} removal not confirmed: ${(removeErr as Error).message}`,
+					);
+				}
+			}
+			throw persistErr;
+		}
+		await container.start();
 
 		// #190 (direct-proxy switch) — persist the exposed-port set straight
 		// from config; the dispatcher resolves the container by name, so there
@@ -1229,43 +1254,107 @@ export class DockerManager {
 		await Promise.allSettled(files.map((f) => fs.unlink(f.path)));
 	}
 
+	/**
+	 * Stop and remove one container, fail-closed: only Docker's own
+	 * "already done" answers (404 not found; 304 not modified on `stop`)
+	 * let it complete. A 5xx, a 409 (removal in progress) or a socket
+	 * error means the daemon confirmed nothing and the container may well
+	 * still be running, so the error propagates. Returns false when Docker
+	 * never knew the ref (404 on both calls).
+	 */
+	private async stopAndRemove(containerRef: string): Promise<boolean> {
+		const container = this.docker.getContainer(containerRef);
+		let seen = true;
+		try {
+			await container.stop({ t: 5 });
+		} catch (err) {
+			if (isNotFound(err)) seen = false;
+			else if (!isNotModified(err)) throw err;
+		}
+		// `v: true` also removes any anonymous volumes attached to the
+		// container (bind mounts are unaffected — those are cleaned by
+		// purgeWorkspace on hard delete).
+		try {
+			await container.remove({ force: true, v: true });
+		} catch (err) {
+			if (!isNotFound(err)) throw err;
+			seen = false;
+		}
+		return seen;
+	}
+
+	/**
+	 * The container a session owns when its row does not say (P1-B: a
+	 * spawn whose D1 write failed; P1-C: a pre-fail-closed teardown that
+	 * nulled the id on a daemon error). Looked up by the deterministic
+	 * name and accepted only when the inspect proves it is THIS session's
+	 * — its workspace bind is `<WORKSPACE_ROOT>/<sessionId>` — so nothing
+	 * is ever removed by name alone. Returns null on a 404 (nothing
+	 * there) or an identity mismatch; a daemon or socket error propagates,
+	 * because an unreachable daemon is not an absent container.
+	 */
+	private async findSessionContainerByName(
+		sessionId: string,
+		containerName: string,
+	): Promise<string | null> {
+		let info: Dockerode.ContainerInspectInfo;
+		try {
+			info = await this.docker.getContainer(containerName).inspect();
+		} catch (err) {
+			if (isNotFound(err)) return null;
+			throw err;
+		}
+		const wantSource = path.resolve(WORKSPACE_ROOT, sessionId);
+		const binds = info.HostConfig?.Binds ?? [];
+		const bindMatch = binds.some((b) => {
+			const [source, target] = b.split(":");
+			return target === "/home/developer/workspace" && path.resolve(source ?? "") === wantSource;
+		});
+		const mountMatch = (info.Mounts ?? []).some(
+			(m) =>
+				m.Destination === "/home/developer/workspace" &&
+				path.resolve(m.Source ?? "") === wantSource,
+		);
+		if (!bindMatch && !mountMatch) {
+			logger.warn(
+				`[docker] ${containerName} exists but does not mount ${wantSource}: not session ${sessionId}'s container, left alone`,
+			);
+			return null;
+		}
+		return info.Id;
+	}
+
 	async kill(sessionId: string): Promise<void> {
 		const meta = await this.sessions.get(sessionId);
 
-		if (meta?.containerId) {
-			// Fail-closed: only Docker's own "already done" answers (404 not
-			// found; 304 not modified on `stop`) let the teardown proceed.
-			// A 5xx, a 409 (removal in progress) or a socket error means the
-			// daemon confirmed nothing, and the container may well still be
-			// running — so the error propagates and `container_id` stays in
-			// D1, which is the one reference a retry (or /start's stale-name
-			// reclaim) needs. Swallowing here used to null the id on ANY
-			// error and the delete routes then dropped the row: a running
-			// container nobody referenced any more.
-			const container = this.docker.getContainer(meta.containerId);
-			try {
-				await container.stop({ t: 5 });
-			} catch (err) {
-				if (!isNotFound(err) && !isNotModified(err)) throw err;
+		if (meta) {
+			// Swallowing errors here used to null the id on ANY Docker error
+			// and the delete routes then dropped the row: a running container
+			// nobody referenced any more. `stopAndRemove` now propagates
+			// anything the daemon did not confirm, and `container_id` stays
+			// in D1 — the one reference a retry (or /start's stale-name
+			// reclaim) needs.
+			let found = false;
+			if (meta.containerId) found = await this.stopAndRemove(meta.containerId);
+			// No id, or an id Docker no longer knows: the session may still
+			// own a container under its deterministic name (see
+			// findSessionContainerByName). A daemon error here propagates too.
+			if (!found) {
+				const byName = await this.findSessionContainerByName(sessionId, meta.containerName);
+				if (byName !== null) await this.stopAndRemove(byName);
 			}
-			// `v: true` also removes any anonymous volumes attached to the
-			// container (bind mounts are unaffected — those are cleaned by
-			// purgeWorkspace on hard delete).
-			try {
-				await container.remove({ force: true, v: true });
-			} catch (err) {
-				if (!isNotFound(err)) throw err;
-			}
-			// Removed, or confirmed gone — reflect that in D1 so any later
-			// lookup doesn't chase a dead container id. A failure here is
-			// harmless: reconcile's 404 branch and /start both cope with a
-			// stale id, so it is logged rather than failing the teardown.
-			try {
-				await this.sessions.setContainerId(sessionId, null);
-			} catch (err) {
-				logger.error(
-					`[docker] failed to null container_id for session ${sessionId}: ${(err as Error).message}`,
-				);
+			if (meta.containerId) {
+				// Removed, or confirmed gone — reflect that in D1 so any later
+				// lookup doesn't chase a dead container id. A failure here is
+				// harmless: reconcile's 404 branch and /start both cope with
+				// a stale id, so it is logged rather than failing the teardown.
+				try {
+					await this.sessions.setContainerId(sessionId, null);
+				} catch (err) {
+					logger.error(
+						`[docker] failed to null container_id for session ${sessionId}: ${(err as Error).message}`,
+					);
+				}
 			}
 		}
 

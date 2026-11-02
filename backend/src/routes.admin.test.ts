@@ -536,11 +536,11 @@ describe("DELETE /api/admin/sessions/:id (#241d)", () => {
 		expect(deleteRow).toHaveBeenCalledWith("s-any");
 	});
 
-	it("hard-delete on an already-terminated session skips kill+terminate but still purges + drops the row", async () => {
-		// Idempotent shape: the soft-delete branch is the only one that
-		// invokes kill/terminate; the hard-delete branch is independent
-		// so an admin can hard-purge a soft-deleted session via
-		// ?hard=true even though the container is already gone.
+	it("hard-delete on an already-terminated session still runs kill (idempotent), skips terminate, purges + drops the row", async () => {
+		// P1-C: a terminated row may still hold a container (a teardown
+		// Docker never confirmed), so kill runs on every delete — it is
+		// idempotent (404 = done) and the only proof nothing uses the
+		// workspace before the purge. Only `terminate` is skipped.
 		const get = vi.fn(async () => meta("terminated"));
 		const terminate = vi.fn(async () => undefined);
 		const deleteRow = vi.fn(async () => undefined);
@@ -553,7 +553,7 @@ describe("DELETE /api/admin/sessions/:id (#241d)", () => {
 
 		const res = await fetch(`${baseUrl}/api/admin/sessions/s-any?hard=true`, { method: "DELETE" });
 		expect(res.status).toBe(204);
-		expect(kill).not.toHaveBeenCalled();
+		expect(kill).toHaveBeenCalledWith("s-any");
 		expect(terminate).not.toHaveBeenCalled();
 		expect(purgeWorkspace).toHaveBeenCalledWith("s-any");
 		expect(deleteRow).toHaveBeenCalledWith("s-any");

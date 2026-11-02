@@ -308,3 +308,106 @@ describe("DockerManager.stopContainer() — Docker failure vs already stopped (H
 		expect(spies.updateStatus).toHaveBeenCalledWith("s1", "stopped");
 	});
 });
+
+// ── P1-C / P1-B: a session whose row has no container_id may still own a
+// container (a spawn whose D1 write failed; a pre-fail-closed teardown
+// that nulled the id on a daemon error). kill() must look it up by its
+// deterministic name, prove it is THIS session's (the workspace bind),
+// and never read a daemon failure as "nothing there".
+const WORKSPACE_ROOT_FOR_TESTS = process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
+
+function makeDmByRef(
+	sessions: SessionManager,
+	byRef: Record<string, FakeContainer | (() => never)>,
+): { dm: DockerManager; getContainer: ReturnType<typeof vi.fn> } {
+	const dm = new DockerManager(sessions);
+	const getContainer = vi.fn((ref: string) => {
+		const c = byRef[ref];
+		if (typeof c === "function") return c();
+		if (!c) throw new Error(`test: unexpected getContainer(${ref})`);
+		return c;
+	});
+	(dm as unknown as { docker: unknown }).docker = { getContainer };
+	return { dm, getContainer };
+}
+
+describe("DockerManager.kill() with container_id = NULL — lookup by name with identity (P1-C/P1-B)", () => {
+	it("finds the session's container by its deterministic name, validates the workspace bind, removes it", async () => {
+		const { sessions, spies } = makeSessions(null);
+		const owned = makeContainer({
+			inspect: vi.fn(async () => ({
+				Id: "c-by-name",
+				State: { Running: true },
+				HostConfig: { Binds: [`${WORKSPACE_ROOT_FOR_TESTS}/s1:/home/developer/workspace`] },
+			})),
+		});
+		const { dm } = makeDmByRef(sessions, { "st-s1": owned, "c-by-name": owned });
+		await expect(dm.kill("s1")).resolves.toBeUndefined();
+		expect(owned.remove).toHaveBeenCalledTimes(1);
+		// The row already says NULL: nothing to write.
+		expect(spies.setContainerId).not.toHaveBeenCalled();
+	});
+
+	it("a container holding the name but mounting ANOTHER workspace is not ours: left alone", async () => {
+		const { sessions } = makeSessions(null);
+		const foreign = makeContainer({
+			inspect: vi.fn(async () => ({
+				Id: "c-foreign",
+				State: { Running: true },
+				HostConfig: {
+					Binds: [`${WORKSPACE_ROOT_FOR_TESTS}/other-session:/home/developer/workspace`],
+				},
+			})),
+		});
+		const { dm } = makeDmByRef(sessions, { "st-s1": foreign, "c-foreign": foreign });
+		await expect(dm.kill("s1")).resolves.toBeUndefined();
+		expect(foreign.stop).not.toHaveBeenCalled();
+		expect(foreign.remove).not.toHaveBeenCalled();
+	});
+
+	it("the name answers 404: nothing to tear down, kill completes", async () => {
+		const { sessions } = makeSessions(null);
+		const gone = makeContainer({
+			inspect: vi.fn(async () => {
+				throw dockerHttpError(404, "no such container");
+			}),
+		});
+		const { dm } = makeDmByRef(sessions, { "st-s1": gone });
+		await expect(dm.kill("s1")).resolves.toBeUndefined();
+		expect(gone.remove).not.toHaveBeenCalled();
+	});
+
+	it("daemon unreachable during the lookup: kill rejects — absence is never assumed", async () => {
+		const { sessions } = makeSessions(null);
+		const down = makeContainer({
+			inspect: vi.fn(async () => {
+				throw socketError("ECONNREFUSED");
+			}),
+		});
+		const { dm } = makeDmByRef(sessions, { "st-s1": down });
+		await expect(dm.kill("s1")).rejects.toThrow(/ECONNREFUSED/);
+	});
+
+	it("the stored id is gone (404) but the name holds the session's container: that one is removed too", async () => {
+		const { sessions, spies } = makeSessions("c-stale");
+		const stale = makeContainer({
+			stop: vi.fn(async () => {
+				throw dockerHttpError(404, "no such container");
+			}),
+			remove: vi.fn(async () => {
+				throw dockerHttpError(404, "no such container");
+			}),
+		});
+		const live = makeContainer({
+			inspect: vi.fn(async () => ({
+				Id: "c-live",
+				State: { Running: true },
+				HostConfig: { Binds: [`${WORKSPACE_ROOT_FOR_TESTS}/s1:/home/developer/workspace`] },
+			})),
+		});
+		const { dm } = makeDmByRef(sessions, { "c-stale": stale, "st-s1": live, "c-live": live });
+		await expect(dm.kill("s1")).resolves.toBeUndefined();
+		expect(live.remove).toHaveBeenCalledTimes(1);
+		expect(spies.setContainerId).toHaveBeenCalledWith("s1", null);
+	});
+});

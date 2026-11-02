@@ -510,17 +510,27 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 					// swallows "no such container" internally.
 					// Still inside the create's lifecycle hold: no other verb can
 					// run on this session until the rollback is done.
+					// P1-A: the row goes only when the kill was confirmed. If
+					// Docker did not confirm (daemon down), the row — with its
+					// container_id and deterministic name — is the one handle a
+					// later DELETE, the idle sweeper or reconcile can use to
+					// finish the teardown; dropping it would orphan a container
+					// that may be running.
+					let killed = true;
 					await docker.kill(rollbackId).catch((killErr) => {
+						killed = false;
 						logger.error(
-							`[routes] CRITICAL: kill during create rollback for session ${rollbackId} failed: ${(killErr as Error).message}`,
+							`[routes] CRITICAL: kill during create rollback for session ${rollbackId} not confirmed, row kept for a later delete: ${(killErr as Error).message}`,
 						);
 					});
-					try {
-						await sessions.deleteRow(rollbackId);
-					} catch (cleanupErr) {
-						logger.error(
-							`[routes] CRITICAL: spawn rollback failed for session ${rollbackId}: ${(cleanupErr as Error).message}`,
-						);
+					if (killed) {
+						try {
+							await sessions.deleteRow(rollbackId);
+						} catch (cleanupErr) {
+							logger.error(
+								`[routes] CRITICAL: spawn rollback failed for session ${rollbackId}: ${(cleanupErr as Error).message}`,
+							);
+						}
 					}
 				}
 				res.status(500).json({ error: (err as Error).message });
@@ -759,15 +769,19 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				const meta = await sessions.get(req.params.id);
 				if (!meta) throw new NotFoundError("Session not found");
 
-				// Idempotent path: only tear down the container + flip to
-				// terminated the first time. Subsequent calls skip this.
+				// kill() runs on EVERY delete, `terminated` rows included
+				// (P1-C): a row can say terminated while Docker still holds
+				// the container (a teardown that was not confirmed, a spawn
+				// whose D1 write failed), and nothing may be purged while a
+				// container can still be using the workspace. kill() is
+				// idempotent (404 = done, name lookup identity-checked) and
+				// fail-closed: an unconfirmed kill leaves the row as it was,
+				// so a retry finds the container again instead of a
+				// dangling one.
+				await docker.kill(req.params.id).catch((err) => {
+					throw new TeardownFailedError("kill", err);
+				});
 				if (meta.status !== "terminated") {
-					// Fail-closed (kill only confirms on Docker's own 404/304):
-					// an unconfirmed kill leaves the row as it was, so a retry
-					// finds the container again instead of a dangling one.
-					await docker.kill(req.params.id).catch((err) => {
-						throw new TeardownFailedError("kill", err);
-					});
 					await sessions.terminate(req.params.id);
 					// Drop the idle-sweeper's lastActivity entry — without
 					// this the Map grows unboundedly across the backend's

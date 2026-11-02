@@ -457,6 +457,43 @@ describe("POST /sessions — async bootstrap dispatch (PR 185b2b)", () => {
 		expect(spies.deleteRow).not.toHaveBeenCalled();
 		expect(bootstrapStubs.runAsyncBootstrap).not.toHaveBeenCalled();
 	});
+
+	// P1-A — the rollback after a post-spawn failure must not drop the row
+	// unless the kill was confirmed: the row is the only reference to a
+	// container Docker may still be running.
+	it("post-spawn failure, rollback kill confirmed: row dropped, 500", async () => {
+		const { sessions, docker, spies } = makeFakes();
+		(sessions.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+		await spinUp(sessions, docker);
+		const res = await fetch(`${baseUrl}/api/sessions`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ name: "test" }),
+		});
+		expect(res.status).toBe(500);
+		expect(spies.spawn).toHaveBeenCalledTimes(1);
+		expect(spies.kill).toHaveBeenCalledWith("sess-1");
+		expect(spies.deleteRow).toHaveBeenCalledWith("sess-1");
+	});
+
+	it("post-spawn failure, rollback kill NOT confirmed (daemon unreachable): the row stays", async () => {
+		const { sessions, docker, spies } = makeFakes();
+		(sessions.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+		spies.kill.mockRejectedValueOnce(
+			Object.assign(new Error("connect ECONNREFUSED /var/run/docker.sock"), {
+				code: "ECONNREFUSED",
+			}),
+		);
+		await spinUp(sessions, docker);
+		const res = await fetch(`${baseUrl}/api/sessions`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ name: "test" }),
+		});
+		expect(res.status).toBe(500);
+		expect(spies.kill).toHaveBeenCalledWith("sess-1");
+		expect(spies.deleteRow, "the row is the reference a later delete needs").not.toHaveBeenCalled();
+	});
 });
 
 // ── Admin-only create-on-behalf (#420) ──────────────────────────────────────

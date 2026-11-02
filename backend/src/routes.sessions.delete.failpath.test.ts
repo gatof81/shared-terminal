@@ -270,3 +270,46 @@ describe("DELETE /sessions/:id while the Docker daemon is unreachable (H1 + H2 c
 		expect(res.status).not.toBe(204);
 	});
 });
+
+// ── P1-C: a `terminated` row may still have a container (the pre-fail-closed
+// teardown produced exactly that). Both DELETE routes must still run kill()
+// — idempotent, and the only thing that proves nothing uses the workspace —
+// before a purge or a row drop, and a daemon they cannot reach must stop them.
+describe("DELETE on a status=terminated session that still has a container (P1-C)", () => {
+	it("owner hard delete: kill runs before the purge and the row drop", async () => {
+		const { sessions, spies } = makeFakeSessions("terminated", "c-still-there");
+		const { docker, spies: dockerSpies } = makeFakeDocker();
+		await spinUp(sessions, docker);
+		const res = await fetch(`${baseUrl}/api/sessions/sess-1?hard=true`, { method: "DELETE" });
+		expect(res.status).toBe(204);
+		expect(dockerSpies.kill).toHaveBeenCalledTimes(1);
+		const killAt = dockerSpies.kill.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY;
+		const purgeAt = dockerSpies.purgeWorkspace.mock.invocationCallOrder[0] ?? 0;
+		const dropAt = spies.deleteRow.mock.invocationCallOrder[0] ?? 0;
+		expect(killAt, "kill before purge").toBeLessThan(purgeAt);
+		expect(killAt, "kill before the row drop").toBeLessThan(dropAt);
+	});
+
+	it("admin hard delete: same order", async () => {
+		const { sessions, spies } = makeFakeSessions("terminated", "c-still-there");
+		const { docker, spies: dockerSpies } = makeFakeDocker();
+		await spinUp(sessions, docker);
+		const res = await fetch(`${baseUrl}/api/admin/sessions/sess-1?hard=true`, { method: "DELETE" });
+		expect(res.status).toBe(204);
+		expect(dockerSpies.kill).toHaveBeenCalledTimes(1);
+		const killAt = dockerSpies.kill.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY;
+		expect(killAt).toBeLessThan(dockerSpies.purgeWorkspace.mock.invocationCallOrder[0] ?? 0);
+		expect(killAt).toBeLessThan(spies.deleteRow.mock.invocationCallOrder[0] ?? 0);
+	});
+
+	it("terminated, container_id NULL, daemon unreachable: 500 and neither purge nor row drop", async () => {
+		const { sessions, spies } = makeFakeSessions("terminated", null);
+		const { docker, spies: dockerSpies } = makeFakeDocker();
+		dockerSpies.kill.mockRejectedValue(socketError("ECONNREFUSED"));
+		await spinUp(sessions, docker);
+		const res = await fetch(`${baseUrl}/api/sessions/sess-1?hard=true`, { method: "DELETE" });
+		expect(res.status).toBe(500);
+		expect(dockerSpies.purgeWorkspace).not.toHaveBeenCalled();
+		expect(spies.deleteRow).not.toHaveBeenCalled();
+	});
+});
