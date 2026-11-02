@@ -141,6 +141,7 @@ export async function register(
 	password: string,
 	inviteCode?: string,
 ): Promise<AuthSuccess> {
+	await settlePendingLogout();
 	const res = await apiFetch("/auth/register", {
 		method: "POST",
 		body: JSON.stringify({ username, password, inviteCode }),
@@ -159,7 +160,38 @@ export async function register(
 	return data;
 }
 
+// ── Logout vs. the next login: the cookie, not just the mirror ──────────────
+//
+// `POST /auth/logout` answers with a `Set-Cookie` that DELETES `st_token`.
+// Browsers apply `Set-Cookie` in the order responses ARRIVE: a logout
+// answering after the next login's `Set-Cookie` would delete the new
+// person's real cookie while the mirror below says they are signed in —
+// every request then 401s. So a login (or register) first lets a logout
+// still in flight settle: it waits a bounded moment for the answer, and
+// past that budget ABORTS the request — an aborted fetch's late answer
+// is dropped by the browser's network layer before its headers (and its
+// Set-Cookie) are processed. Either way no stale clear can land after the
+// new cookie. `e2e/auth-cookie.spec.ts` drives this against a real HTTP
+// server and the browser's real cookie jar.
+export const LOGOUT_SETTLE_MS = 2000;
+
+let pendingLogout: { promise: Promise<void>; controller: AbortController } | null = null;
+
+async function settlePendingLogout(): Promise<void> {
+	const p = pendingLogout;
+	if (p === null) return;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const budget = new Promise<"timeout">((resolve) => {
+		timer = setTimeout(() => resolve("timeout"), LOGOUT_SETTLE_MS);
+	});
+	const outcome = await Promise.race([p.promise.then(() => "done" as const), budget]);
+	if (timer !== undefined) clearTimeout(timer);
+	if (outcome === "timeout") p.controller.abort();
+	await p.promise;
+}
+
 export async function login(username: string, password: string): Promise<AuthSuccess> {
+	await settlePendingLogout();
 	const res = await apiFetch("/auth/login", {
 		method: "POST",
 		body: JSON.stringify({ username, password }),
@@ -197,10 +229,17 @@ export async function logout(): Promise<void> {
 	_loggedIn = false;
 	_isAdmin = false;
 	_isLead = false;
+	const controller = new AbortController();
+	const promise = apiFetch("/auth/logout", { method: "POST", signal: controller.signal }).then(
+		() => undefined,
+		() => undefined, // network down, or aborted by a newer login — local teardown is what matters
+	);
+	const entry = { promise, controller };
+	pendingLogout = entry;
 	try {
-		await apiFetch("/auth/logout", { method: "POST" });
-	} catch {
-		/* network down — local teardown is what the user actually wants */
+		await promise;
+	} finally {
+		if (pendingLogout === entry) pendingLogout = null;
 	}
 }
 
