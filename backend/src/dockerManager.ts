@@ -69,6 +69,23 @@ import type { SessionMeta } from "./types.js";
 
 const SESSION_IMAGE = process.env.SESSION_IMAGE ?? "shared-terminal-session";
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
+
+/**
+ * The session's container was created but its id could not be recorded
+ * in D1 (spawn, P1-B). The message is what POST /sessions shows; it says
+ * whether the container is gone or may still exist, nothing about the
+ * backends. Details are in the server log.
+ */
+export class SpawnPersistError extends Error {
+	constructor(readonly containerRemoved: boolean) {
+		super(
+			containerRemoved
+				? "The session could not be registered; its container was removed. Retry."
+				: "The session could not be registered and its container could not be confirmed removed. Retry the create, or delete the session.",
+		);
+		this.name = "SpawnPersistError";
+	}
+}
 // #190 (direct-proxy switch) — every session container joins this shared
 // user-defined Docker network so the backend can reach it by container name
 // over Docker's embedded DNS (the dispatcher proxies to
@@ -681,19 +698,19 @@ export class DockerManager {
 		try {
 			await this.sessions.setContainerId(sessionId, containerId);
 		} catch (persistErr) {
+			// The client gets one generic line (POST /sessions echoes the
+			// message); D1's and Docker's own words go to the log only.
+			let removal = "removed";
 			try {
 				await container.remove({ force: true, v: true });
 			} catch (removeErr) {
-				if (!isNotFound(removeErr)) {
-					logger.error(
-						`[docker] spawn ${sessionId}: container ${containerId} created but neither referenced in D1 nor confirmed removed: ${(removeErr as Error).message}`,
-					);
-					throw new Error(
-						`${(persistErr as Error).message}; container ${containerId} removal not confirmed: ${(removeErr as Error).message}`,
-					);
-				}
+				if (!isNotFound(removeErr))
+					removal = `removal NOT confirmed: ${(removeErr as Error).message}`;
 			}
-			throw persistErr;
+			logger.error(
+				`[docker] spawn ${sessionId}: container ${containerId} created but its id could not be recorded (${(persistErr as Error).message}); ${removal}`,
+			);
+			throw new SpawnPersistError(removal === "removed");
 		}
 		await container.start();
 
@@ -2009,28 +2026,56 @@ export class DockerManager {
 		}
 	}
 
+	/**
+	 * `stop` one container, fail-closed. Returns false when Docker never
+	 * knew the ref (404); 304 (already stopped) is success; anything else
+	 * — daemon/socket error — propagates, because the row must keep saying
+	 * `running` (sweeper, quotas, dispatcher) until Docker confirms.
+	 */
+	private async stopOnly(containerRef: string): Promise<boolean> {
+		try {
+			await this.docker.getContainer(containerRef).stop({ t: 5 });
+			return true;
+		} catch (err) {
+			if (isNotFound(err)) return false;
+			if (isNotModified(err)) return true;
+			throw err;
+		}
+	}
+
 	async stopContainer(sessionId: string): Promise<void> {
 		const meta = await this.sessions.getOrThrow(sessionId);
-		if (!meta.containerId) return;
-		let gone = false;
-		try {
-			await this.docker.getContainer(meta.containerId).stop({ t: 5 });
-		} catch (err) {
-			if (isNotFound(err)) {
-				// Gone behind our back: the same atomic record reconcile's
-				// 404 branch writes, so /start respawns instead of inspecting
-				// a dead id.
-				gone = true;
-				await this.sessions.recordContainerGone(sessionId);
-			} else if (!isNotModified(err)) {
-				// Not confirmed stopped (daemon/socket error): the row stays
-				// `running` and the mappings stay, so the sweeper, quotas and
-				// the dispatcher keep seeing the live container; the caller
-				// (route 500, sweeper next pass) retries.
-				throw err;
+		// The row's id first; when it is NULL or Docker no longer knows it,
+		// the session may still own a live container under its
+		// deterministic name (a spawn whose D1 write failed, a teardown
+		// Docker never confirmed) — the same identity-checked lookup
+		// kill() uses, but here the container is only stopped, never
+		// removed, and the row is re-pointed at it so /start finds it.
+		let stopped = meta.containerId !== null && (await this.stopOnly(meta.containerId));
+		if (!stopped) {
+			const byName = await this.findSessionContainerByName(sessionId, meta.containerName);
+			if (byName !== null) {
+				stopped = await this.stopOnly(byName);
+				if (stopped && byName !== meta.containerId) {
+					try {
+						await this.sessions.setContainerId(sessionId, byName);
+					} catch (err) {
+						logger.error(
+							`[docker] stop ${sessionId}: could not record container ${byName} in D1: ${(err as Error).message}`,
+						);
+					}
+				}
 			}
 		}
-		if (!gone) await this.sessions.updateStatus(sessionId, "stopped");
+		if (stopped) {
+			await this.sessions.updateStatus(sessionId, "stopped");
+		} else {
+			// Nothing of this session's exists in Docker (404 on the id AND
+			// no identity-matching container under the name): the same
+			// atomic record reconcile's 404 branch writes, so /start
+			// respawns instead of inspecting a dead id.
+			await this.sessions.recordContainerGone(sessionId);
+		}
 		// #190 PR 190b — clear port mappings: a stopped container's host
 		// port no longer reaches anything, and Docker may rebind the
 		// same ephemeral port to a different container on the next

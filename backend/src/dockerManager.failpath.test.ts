@@ -411,3 +411,108 @@ describe("DockerManager.kill() with container_id = NULL — lookup by name with 
 		expect(spies.setContainerId).toHaveBeenCalledWith("s1", null);
 	});
 });
+
+// ── P2 (3rd review): stopContainer() with no usable container_id must still
+// find the session's live container by name (identity-checked), stop it
+// WITHOUT removing it, keep the row referencing it, and never read a daemon
+// failure as "nothing to stop".
+describe("DockerManager.stopContainer() with container_id NULL or stale (P2)", () => {
+	function owned(id: string): FakeContainer {
+		return makeContainer({
+			inspect: vi.fn(async () => ({
+				Id: id,
+				State: { Running: true },
+				HostConfig: { Binds: [`${WORKSPACE_ROOT_FOR_TESTS}/s1:/home/developer/workspace`] },
+			})),
+		});
+	}
+
+	it("container_id NULL, own container running under the name: it is stopped, kept, and the row now references it", async () => {
+		const { sessions, spies } = makeSessions(null);
+		const live = owned("c-live");
+		const { dm } = makeDmByRef(sessions, { "st-s1": live, "c-live": live });
+		await expect(dm.stopContainer("s1")).resolves.toBeUndefined();
+		expect(live.stop).toHaveBeenCalledTimes(1);
+		expect(live.remove).not.toHaveBeenCalled();
+		expect(spies.setContainerId).toHaveBeenCalledWith("s1", "c-live");
+		expect(spies.updateStatus).toHaveBeenCalledWith("s1", "stopped");
+		expect(spies.recordContainerGone).not.toHaveBeenCalled();
+	});
+
+	it("stale container_id (404), own container running under the name: stopped, kept, row re-pointed — not marked gone", async () => {
+		const { sessions, spies } = makeSessions("c-stale");
+		const stale = makeContainer({
+			stop: vi.fn(async () => {
+				throw dockerHttpError(404, "no such container");
+			}),
+		});
+		const live = owned("c-live");
+		const { dm } = makeDmByRef(sessions, { "c-stale": stale, "st-s1": live, "c-live": live });
+		await expect(dm.stopContainer("s1")).resolves.toBeUndefined();
+		expect(live.stop).toHaveBeenCalledTimes(1);
+		expect(live.remove).not.toHaveBeenCalled();
+		expect(spies.recordContainerGone).not.toHaveBeenCalled();
+		expect(spies.setContainerId).toHaveBeenCalledWith("s1", "c-live");
+		expect(spies.updateStatus).toHaveBeenCalledWith("s1", "stopped");
+	});
+
+	it("truly absent (stale id 404 AND name 404): recorded gone, consistently", async () => {
+		const { sessions, spies } = makeSessions("c-stale");
+		const stale = makeContainer({
+			stop: vi.fn(async () => {
+				throw dockerHttpError(404, "no such container");
+			}),
+		});
+		const none = makeContainer({
+			inspect: vi.fn(async () => {
+				throw dockerHttpError(404, "no such container");
+			}),
+		});
+		const { dm } = makeDmByRef(sessions, { "c-stale": stale, "st-s1": none });
+		await expect(dm.stopContainer("s1")).resolves.toBeUndefined();
+		expect(spies.recordContainerGone).toHaveBeenCalledWith("s1");
+		expect(spies.updateStatus).not.toHaveBeenCalledWith("s1", "stopped");
+	});
+
+	it("container_id NULL and the name answers 404: recorded gone (stopped + NULL), not a bare status write", async () => {
+		const { sessions, spies } = makeSessions(null);
+		const none = makeContainer({
+			inspect: vi.fn(async () => {
+				throw dockerHttpError(404, "no such container");
+			}),
+		});
+		const { dm } = makeDmByRef(sessions, { "st-s1": none });
+		await expect(dm.stopContainer("s1")).resolves.toBeUndefined();
+		expect(spies.recordContainerGone).toHaveBeenCalledWith("s1");
+	});
+
+	it("daemon unreachable during the name lookup: rejects, status untouched, mappings untouched", async () => {
+		const { sessions, spies } = makeSessions(null);
+		const down = makeContainer({
+			inspect: vi.fn(async () => {
+				throw socketError("ECONNREFUSED");
+			}),
+		});
+		const { dm } = makeDmByRef(sessions, { "st-s1": down });
+		await expect(dm.stopContainer("s1")).rejects.toThrow(/ECONNREFUSED/);
+		expect(spies.updateStatus).not.toHaveBeenCalled();
+		expect(spies.recordContainerGone).not.toHaveBeenCalled();
+		expect(portMappingDeletes()).toBe(0);
+	});
+
+	it("the name is held by a container with ANOTHER session's bind: left alone, our row recorded gone", async () => {
+		const { sessions, spies } = makeSessions(null);
+		const foreign = makeContainer({
+			inspect: vi.fn(async () => ({
+				Id: "c-foreign",
+				State: { Running: true },
+				HostConfig: { Binds: [`${WORKSPACE_ROOT_FOR_TESTS}/other:/home/developer/workspace`] },
+			})),
+		});
+		const { dm } = makeDmByRef(sessions, { "st-s1": foreign, "c-foreign": foreign });
+		await expect(dm.stopContainer("s1")).resolves.toBeUndefined();
+		expect(foreign.stop).not.toHaveBeenCalled();
+		expect(foreign.remove).not.toHaveBeenCalled();
+		expect(spies.recordContainerGone).toHaveBeenCalledWith("s1");
+	});
+});

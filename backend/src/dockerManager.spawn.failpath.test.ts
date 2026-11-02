@@ -114,13 +114,18 @@ describe("spawn(): the created container is always reachable afterwards (P1-B)",
 			remove: vi.fn(async () => undefined),
 		};
 		const { dm } = makeDm(sessions, container);
-		await expect(dm.spawn("sess-1")).rejects.toThrow(/D1 unavailable/);
+		const err = await dm.spawn("sess-1").catch((e: Error) => e);
+		expect(err).toBeInstanceOf(Error);
+		// Generic to the client (POST /sessions echoes the message); the D1
+		// words stay in the log.
+		expect((err as Error).message).toMatch(/could not be registered; its container was removed/);
+		expect((err as Error).message).not.toMatch(/D1 unavailable|503/);
 		expect(container.remove).toHaveBeenCalledTimes(1);
 		expect(container.remove.mock.calls[0]?.[0]).toMatchObject({ force: true });
 		expect(container.start).not.toHaveBeenCalled();
 	});
 
-	it("D1 refuses the write AND Docker cannot confirm the removal: spawn rejects, the error names both", async () => {
+	it("D1 refuses the write AND Docker cannot confirm the removal: spawn rejects with a generic message, details logged", async () => {
 		const setContainerId = vi.fn(async () => {
 			throw new Error("D1 unavailable (HTTP 503)");
 		});
@@ -133,7 +138,9 @@ describe("spawn(): the created container is always reachable afterwards (P1-B)",
 			}),
 		};
 		const { dm } = makeDm(sessions, container);
-		await expect(dm.spawn("sess-1")).rejects.toThrow(/D1 unavailable/);
+		const err = await dm.spawn("sess-1").catch((e: Error) => e);
+		expect((err as Error).message).toMatch(/could not be confirmed removed/);
+		expect((err as Error).message).not.toMatch(/D1 unavailable|ECONNREFUSED|docker\.sock/);
 		expect(container.remove).toHaveBeenCalledTimes(1);
 		expect(container.start).not.toHaveBeenCalled();
 	});

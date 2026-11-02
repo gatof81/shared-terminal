@@ -159,6 +159,30 @@ describe("IdleSweeper.runSweep", () => {
 		expect(stops).toEqual(["s-bad", "s-good"]);
 	});
 
+	it("an unconfirmed stop (rejected) is not counted as swept and the entry stays for the next pass", async () => {
+		const { sweeper, advance, stopSpy } = makeSweeper({
+			startTime: 0,
+			stopContainer: async () => {
+				throw Object.assign(new Error("connect ECONNREFUSED /var/run/docker.sock"), {
+					code: "ECONNREFUSED",
+				});
+			},
+		});
+		sweeper.bump("s1");
+		advance(120_000);
+		mockRunningWithTtl([{ session_id: "s1", idle_ttl_seconds: 60 }]);
+		await sweeper.runSweep();
+		expect(stopSpy).toHaveBeenCalledWith("s1");
+		expect(sweeper.getStats().sweptSinceBoot).toBe(0);
+		expect(sweeper.getStats().currentMapSize, "retried next sweep, not forgotten").toBe(1);
+		// Next pass, the daemon is back: the same session is stopped and counted once.
+		stopSpy.mockImplementation(async () => {});
+		mockRunningWithTtl([{ session_id: "s1", idle_ttl_seconds: 60 }]);
+		await sweeper.runSweep();
+		expect(sweeper.getStats().sweptSinceBoot).toBe(1);
+		expect(sweeper.getStats().currentMapSize).toBe(0);
+	});
+
 	it("uses inclusive boundary — exactly the TTL is NOT a reap", async () => {
 		// Boundary pin: a session whose idle equals the TTL exactly
 		// stays alive for one more sweep window. Dropping `<=` to
