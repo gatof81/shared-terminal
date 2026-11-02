@@ -53,7 +53,27 @@ Además el autor encontró un problema que el revisor no señaló: la deduplicac
 | 4 | SHOULD-FIX | Un `unconfirmed` prematuro pasaba los criterios; "en su prompt" sin definir | Definición estricta (identidad, `waitingFor`, input vacío) en §4; G6/G12 exigen 0 `late_after_terminal`; filas E8 con diálogo y borrador |
 | 5 | SHOULD-FIX | `degraded{source-absent}` disparable pegando una etiqueta; el texto tecleado no trae `source: user` sino ningún `source` | Texto corregido; `degraded{source-absent}` sólo si el `st_msg` es el de la entrega en vuelo |
 | 6 | SHOULD-FIX | `degraded` se levantaba solo tras un reinicio o una reconexión | `degraded` por proceso (`st_session_id`, `claude_pid`, `claude_start_time`), persistido; fila E8 y G12 |
-| 7 | SHOULD-FIX | Identidad de deduplicación de la evidencia de canal sin definir; colisiona con `user_prompt` | Espacio de claves propio; cambio de contrato §4.6 en P4 (`prompt_id` + hash); A8 hasta entonces |
+| 7 | SHOULD-FIX | Identidad de deduplicación de la evidencia de canal sin definir; colisiona con `user_prompt` | Espacio de claves propio; cambio de contrato §4.6 en P4 (`prompt_id` + hash), precondición de P6 (ronda 3) |
 | 8 | SHOULD-FIX | Orden de eliminación imposible (`/logout` después de borrar) y escaneo de evidencias sin definir | `/logout` primero; lista cerrada de evidencias; patrones de redacción; nunca los archivos de credenciales |
 | 9 | SHOULD-FIX (por verificar) | `fakechat` puede necesitar Bun y dependencias que el proxy bloquea | Se resuelve en S0 antes del login; un fallo del plugin es fallo del harness, nunca NO-GO |
 | 10 | NIT | Restos: E0 "autenticación elegida", ancla rota, motivo `multiple-stop`, motivo `gap` | Alineados |
+
+## Ronda 3 (2026-11-02): verificación de la ronda 2
+
+Revisor independiente nuevo sobre las correcciones de la ronda 2. Confirmó resueltos los puntos 1
+(en §3.1), 3, 4, 5, 7, 8 y 9, y probó sin éxito estos escenarios: notificaciones de tarea, `/clear`,
+`/resume`, `SubagentStop`, `Stop` duplicado y hooks tardíos. Veredicto inicial: **BLOCKER**
+(1 BLOCKER, 3 SHOULD-FIX, 3 NIT).
+
+| # | Severidad | Hallazgo | Resolución |
+| --- | --- | --- | --- |
+| 1 | BLOCKER | La recuperación tras un reinicio del backend marcaba `completed` por la existencia de un `turn_end`, sin A1–A7: reabría el BLOCKER de la ronda 2 por ese camino | §9: la recuperación aplica A1–A7; la lectura de base del relay se persiste en el evento `delivery`; sin lectura nueva o con otra generación ⇒ `relay-unverified`. Fila E8 "reinicio durante `T_settle`" en G11 |
+| 2 | SHOULD-FIX | Una pérdida del relay llevaba a `unconfirmed{no-evidence}` y a un `degraded` falso aunque Claude hubiera ejecutado el mensaje | La regla 2b exige relay limpio; si no, `unconfirmed{relay-loss}` con aviso "puede haberse ejecutado" y sin degradar; fila E8 nueva |
+| 3 | SHOULD-FIX | Una caída del adaptador o un corte de red producían un `degraded` de kill switch; 2b (c) no tenía reloj sin `transported` | Se degrada sólo si la entrega llegó a `transported`, con todos los probes "en su prompt" y relay limpio; el reloj empieza en el vencimiento del lease; motivo `not-transported`; filas E8 y G12 alineadas |
+| 4 | SHOULD-FIX | El log no podía guardar `degraded` por proceso ni la acción "Probar el canal otra vez" | Evento `runtime` con `claude_start_time`, `cleared{by}` y una identidad que no descarta un segundo `degraded` |
+| 5 | NIT | El diagrama no tenía `transporting → accepted` | Añadido |
+| 6 | NIT | La lectura de base de A7 no viajaba en `transported` | `POST transported` la trae |
+| 7 | NIT | A8 dependía de una señal que no existe por conversación | Eliminado; el cambio de identidad de §4.6 es precondición de P6 |
+
+Riesgo declarado, no resuelto: si un diálogo o un borrador en el Terminal impiden "en su prompt",
+una entrega `accepted` sin cierre espera a la persona; se muestra como "necesita el Terminal".
