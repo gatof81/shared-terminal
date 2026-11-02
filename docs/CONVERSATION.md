@@ -2100,11 +2100,21 @@ segments_sent: 0}` y `released{evidence: none-created}` (el único exec fue la l
 sobre el pane). Entre pastes se relee **solo** la región de entrada y solo para el consumo del
 paso 2b (no se repite la precondición: la exclusión impide otro envío); lo que no puede excluirse
 (una tecla de la persona, un diálogo que se abre) lo detecta el ack, no la entrega (§8.1.10).
-Ventana entre el precheck y el primer paste: si el CLI sale justo entonces, el paste puede llegar a la
-línea de la shell, **nunca ejecutado**: los pastes no contienen `\n` (cada salto viaja aparte como
-CSI u), el paste es entre corchetes (`paste-buffer -p`), y el Enter solo se envía tras ver el texto
-consumido en la región de entrada **del CLI** (marcador `❯` entre reglas `─`), que una shell no
-muestra ⇒ `failed{not-consumed}` sin Enter.
+Carreras que el precheck **no** elimina. Cada comprobación describe el estado en el momento de su
+lectura; tmux no ofrece una entrega condicionada a la identidad del proceso en primer plano, así que
+entre la última lectura y cada tecla (cada paste, cada salto CSI u y el Enter final) otro proceso
+puede pasar a recibir el terminal. Lo que el diseño acota, sin garantía absoluta:
+- un paste no contiene `\n` (cada salto viaja aparte como CSI u) y va entre corchetes
+  (`paste-buffer -p`): por sí solo no envía una línea a quien lo reciba;
+- el Enter se envía solo después de ver el texto consumido en la región de entrada **del CLI**
+  (marcador `❯` entre reglas `─`); si el CLI salió antes de esa lectura, el texto no aparece ahí ⇒
+  `failed{not-consumed}` y no se envía Enter;
+- **queda una ventana** entre esa última lectura de la región y el Enter (y entre el precheck y el
+  primer paste): si en ese instante el CLI termina o cede el terminal, el Enter (o el paste) llega al
+  proceso que tenga el terminal entonces. Si es la shell, recibe un Enter sobre una línea que el CLI ya
+  había consumido, normalmente vacía, salvo que alguien haya escrito en ella en ese mismo intervalo.
+  Esta ventana es del orden de milisegundos, no se puede cerrar desde fuera del CLI y es la misma que
+  la de una tecla de la persona (§8.1.10); el ack (§8.1.7) no confirma un envío que no llegó al CLI.
 
 Liberación (v1.7.1, revisión Work de la implementación): toda liberación (§8.1.4 regla 7) ocurre
 **bajo el lock del pane**; confirma primero el evento `released` (lleva la respuesta HTTP del replay y

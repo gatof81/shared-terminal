@@ -423,6 +423,11 @@ export function isClaudeExe(exe: string): boolean {
  * unlocated ⇒ refused); `!` commands run detached from the tty. Accepted
  * false negative: Claude run as a child of a `node` launcher in the
  * launcher's group (`cli-wrapper.cjs`) does not lead its group ⇒ refused.
+ *
+ * Not a guarantee for later keystrokes: each read describes the moment it
+ * was taken; the window between the last read and the next paste or the
+ * final Enter remains (CONVERSATION.md §8.1.5, "Carreras que el precheck no
+ * elimina").
  */
 export function foregroundFault(f: PaneFacts, expectedPid: number): string | null {
 	if (f.proc.pid !== expectedPid || f.paneProc.pid !== f.pane.panePid) return "mismatch";
