@@ -456,7 +456,7 @@ describe("POST /api/admin/sessions/:id/stop (#241d)", () => {
 		expect(stopContainer).not.toHaveBeenCalled();
 	});
 
-	it("returns 500 with a generic body when stopContainer throws", async () => {
+	it("returns 500 teardown-failed (stage stop) with a generic body when stopContainer throws", async () => {
 		const get = vi.fn(async () => meta());
 		const stopContainer = vi.fn(async () => {
 			throw new Error("docker daemon unreachable");
@@ -468,9 +468,10 @@ describe("POST /api/admin/sessions/:id/stop (#241d)", () => {
 
 		const res = await fetch(`${baseUrl}/api/admin/sessions/s-any/stop`, { method: "POST" });
 		expect(res.status).toBe(500);
-		const body = (await res.json()) as { error: string };
-		expect(body.error).toBe("Internal server error");
-		expect(body.error).not.toContain("docker daemon");
+		const body = (await res.json()) as { error: string; stage?: string; message?: string };
+		expect(body.error).toBe("teardown-failed");
+		expect(body.stage).toBe("stop");
+		expect(JSON.stringify(body)).not.toContain("docker daemon");
 	});
 });
 
@@ -535,11 +536,11 @@ describe("DELETE /api/admin/sessions/:id (#241d)", () => {
 		expect(deleteRow).toHaveBeenCalledWith("s-any");
 	});
 
-	it("hard-delete on an already-terminated session skips kill+terminate but still purges + drops the row", async () => {
-		// Idempotent shape: the soft-delete branch is the only one that
-		// invokes kill/terminate; the hard-delete branch is independent
-		// so an admin can hard-purge a soft-deleted session via
-		// ?hard=true even though the container is already gone.
+	it("hard-delete on an already-terminated session still runs kill (idempotent), skips terminate, purges + drops the row", async () => {
+		// P1-C: a terminated row may still hold a container (a teardown
+		// Docker never confirmed), so kill runs on every delete — it is
+		// idempotent (404 = done) and the only proof nothing uses the
+		// workspace before the purge. Only `terminate` is skipped.
 		const get = vi.fn(async () => meta("terminated"));
 		const terminate = vi.fn(async () => undefined);
 		const deleteRow = vi.fn(async () => undefined);
@@ -552,7 +553,7 @@ describe("DELETE /api/admin/sessions/:id (#241d)", () => {
 
 		const res = await fetch(`${baseUrl}/api/admin/sessions/s-any?hard=true`, { method: "DELETE" });
 		expect(res.status).toBe(204);
-		expect(kill).not.toHaveBeenCalled();
+		expect(kill).toHaveBeenCalledWith("s-any");
 		expect(terminate).not.toHaveBeenCalled();
 		expect(purgeWorkspace).toHaveBeenCalledWith("s-any");
 		expect(deleteRow).toHaveBeenCalledWith("s-any");
@@ -590,11 +591,10 @@ describe("DELETE /api/admin/sessions/:id (#241d)", () => {
 		expect(kill).not.toHaveBeenCalled();
 	});
 
-	it("returns 500 with a generic body when kill throws", async () => {
-		// purgeWorkspace's own failure is logged-and-swallowed inside the
-		// handler (the row removal still happens), so the failure path
-		// we surface here is the kill() throw — pre-terminate, pre-row-
-		// drop, the part the catch block actually owns.
+	it("returns 500 teardown-failed (stage kill) with a generic body when kill throws", async () => {
+		// Fail-closed teardown: an unconfirmed kill answers 500 with the
+		// stage, never Docker's own words (see TeardownFailedError); the
+		// row is untouched so the retry converges.
 		const get = vi.fn(async () => meta());
 		const kill = vi.fn(async () => {
 			throw new Error("docker daemon unreachable");
@@ -607,9 +607,11 @@ describe("DELETE /api/admin/sessions/:id (#241d)", () => {
 
 		const res = await fetch(`${baseUrl}/api/admin/sessions/s-any`, { method: "DELETE" });
 		expect(res.status).toBe(500);
-		const body = (await res.json()) as { error: string };
-		expect(body.error).toBe("Internal server error");
-		expect(body.error).not.toContain("docker daemon");
+		const body = (await res.json()) as { error: string; stage?: string; message?: string };
+		expect(body.error).toBe("teardown-failed");
+		expect(body.stage).toBe("kill");
+		expect(JSON.stringify(body)).not.toContain("docker daemon");
+		expect(terminate).not.toHaveBeenCalled();
 	});
 });
 

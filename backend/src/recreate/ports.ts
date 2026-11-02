@@ -120,3 +120,15 @@ export const RESERVED_NAME_RE = /^st-([0-9a-f]{8}-[0-9a-f]{3})-(old|new)-([0-9]+
 export function isNotFound(err: unknown): boolean {
 	return (err as { statusCode?: number } | null)?.statusCode === 404;
 }
+
+/**
+ * Docker answers `stop` on a container that is not running with 304 Not
+ * Modified. Together with 404 these are the ONLY answers that mean "the
+ * work is already done"; a 5xx, a 409 or a socket error (`ECONNREFUSED`,
+ * `EACCES` — docker-modem passes those through without a `statusCode`)
+ * means the daemon did not confirm anything, and the caller must not
+ * record the container as stopped or gone.
+ */
+export function isNotModified(err: unknown): boolean {
+	return (err as { statusCode?: number } | null)?.statusCode === 304;
+}

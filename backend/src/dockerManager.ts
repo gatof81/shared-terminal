@@ -53,6 +53,7 @@ import type { LayerChange, PathKind } from "./recreate/layer.js";
 import {
 	type ExecResult,
 	isNotFound,
+	isNotModified,
 	type RecreateContainer,
 	type RecreateDockerPort,
 } from "./recreate/ports.js";
@@ -68,6 +69,47 @@ import type { SessionMeta } from "./types.js";
 
 const SESSION_IMAGE = process.env.SESSION_IMAGE ?? "shared-terminal-session";
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
+
+/**
+ * The session's container was created but its id could not be recorded
+ * in D1 (spawn, P1-B). The message is what POST /sessions shows; it says
+ * whether the container is gone or may still exist, nothing about the
+ * backends. Details are in the server log.
+ */
+/**
+ * Is this container THIS session's? Its workspace bind must be
+ * `<WORKSPACE_ROOT>/<sessionId>`. The deterministic name alone proves
+ * nothing (`st-<sid[:12]>` could collide, and a stopped foreign container
+ * holds its data): nothing is adopted, started, stopped or removed by
+ * name without this check.
+ */
+export function isSessionContainer(
+	info: Pick<Dockerode.ContainerInspectInfo, "HostConfig" | "Mounts">,
+	sessionId: string,
+): boolean {
+	const wantSource = path.resolve(WORKSPACE_ROOT, sessionId);
+	const binds = info.HostConfig?.Binds ?? [];
+	const bindMatch = binds.some((b) => {
+		const [source, target] = b.split(":");
+		return target === "/home/developer/workspace" && path.resolve(source ?? "") === wantSource;
+	});
+	const mountMatch = (info.Mounts ?? []).some(
+		(m) =>
+			m.Destination === "/home/developer/workspace" && path.resolve(m.Source ?? "") === wantSource,
+	);
+	return bindMatch || mountMatch;
+}
+
+export class SpawnPersistError extends Error {
+	constructor(readonly containerRemoved: boolean) {
+		super(
+			containerRemoved
+				? "The session could not be registered; its container was removed. Retry."
+				: "The session could not be registered and its container could not be confirmed removed. Retry the create, or delete the session.",
+		);
+		this.name = "SpawnPersistError";
+	}
+}
 // #190 (direct-proxy switch) — every session container joins this shared
 // user-defined Docker network so the backend can reach it by container name
 // over Docker's embedded DNS (the dispatcher proxies to
@@ -667,9 +709,34 @@ export class DockerManager {
 				),
 		);
 
-		await container.start();
+		// Persist the created container's id BEFORE starting it (P1-B):
+		// from here on every failure (start, port mappings, the caller's
+		// own post-spawn steps) finds the container through D1, and the
+		// create route's rollback `kill()` can confirm its removal. If D1
+		// refuses this one write we still hold the exact id Docker gave
+		// us, so the never-started container is removed by that id —
+		// fail-closed: an unconfirmed removal surfaces too, and the row
+		// (container_id NULL) plus the deterministic name let `kill()`'s
+		// identity-checked lookup finish the job later.
 		const containerId = container.id;
-		await this.sessions.setContainerId(sessionId, containerId);
+		try {
+			await this.sessions.setContainerId(sessionId, containerId);
+		} catch (persistErr) {
+			// The client gets one generic line (POST /sessions echoes the
+			// message); D1's and Docker's own words go to the log only.
+			let removal = "removed";
+			try {
+				await container.remove({ force: true, v: true });
+			} catch (removeErr) {
+				if (!isNotFound(removeErr))
+					removal = `removal NOT confirmed: ${(removeErr as Error).message}`;
+			}
+			logger.error(
+				`[docker] spawn ${sessionId}: container ${containerId} created but its id could not be recorded (${(persistErr as Error).message}); ${removal}`,
+			);
+			throw new SpawnPersistError(removal === "removed");
+		}
+		await container.start();
 
 		// #190 (direct-proxy switch) — persist the exposed-port set straight
 		// from config; the dispatcher resolves the container by name, so there
@@ -886,21 +953,17 @@ export class DockerManager {
 	}
 
 	/**
-	 * Run `create` (a `docker.createContainer` thunk), recovering from a
-	 * 409 name conflict caused by a stale NON-running container still
-	 * holding the session's `st-<sid>` name (#384 secondary). This
-	 * happens when a previous teardown removed the D1 container_id but
-	 * the daemon-side remove failed or was interrupted — the workspace
-	 * is a host bind mount, so removing the dead container is loss-free
-	 * and retrying is strictly better than bubbling an opaque 500 the
-	 * operator has to resolve with a manual `docker rm`.
-	 *
-	 * Only the exited case is reclaimed: if the conflicting container is
-	 * RUNNING the 409 is a genuine conflict (two spawns racing, or state
-	 * drift reconcile hasn't seen yet) and force-removing it would kill
-	 * a live session — rethrow the original error instead. One retry,
-	 * no loop: a second 409 means something is actively recreating the
-	 * name and deserves the error.
+	 * Create the session's container, resolving a 409 name conflict
+	 * WITHOUT ever removing what holds the name. A conflict means a
+	 * container already carries `st-<sid[:12]>`: if its workspace bind
+	 * proves it is this session's own (a spawn whose D1 write failed, a
+	 * stop or teardown Docker never confirmed) and it is stopped, it is
+	 * ADOPTED — its writable layer (installed packages, `~/.config`, the
+	 * CLI's state) is data, and recreating it would lose that; if it is
+	 * running the 409 is rethrown (never force-remove a live session);
+	 * if the bind is another session's it is refused outright. The
+	 * caller (`spawnWithConfig`) then persists the returned container's
+	 * id and starts it exactly as it would a fresh one.
 	 */
 	private async createContainerReclaimingStaleName(
 		sessionId: string,
@@ -911,34 +974,27 @@ export class DockerManager {
 			return await create();
 		} catch (err) {
 			if ((err as { statusCode?: number }).statusCode !== 409) throw err;
-			let staleIsRunning: boolean;
+			// Something holds the name. It is removed under NO circumstance:
+			// if it is this session's own container (workspace bind), its
+			// writable layer is data and it is adopted instead of recreated;
+			// if it is not, it belongs to someone else. Anything but a clean
+			// inspect (daemon error) surfaces the original conflict.
+			let info: Dockerode.ContainerInspectInfo;
 			try {
-				const info = await this.docker.getContainer(containerName).inspect();
-				staleIsRunning = info.State?.Running === true;
+				info = await this.docker.getContainer(containerName).inspect();
 			} catch {
-				// 409 but the name can't be inspected (removed in the
-				// window, daemon hiccup) — surface the original error.
 				throw err;
 			}
-			if (staleIsRunning) throw err;
-			logger.warn(
-				`[docker] session ${sessionId}: removing stale exited container holding name ` +
-					`${containerName} and retrying create (workspace is a bind mount — loss-free)`,
-			);
-			try {
-				await this.docker.getContainer(containerName).remove();
-			} catch (removeErr) {
-				// 404 = removed externally in the inspect→remove window (a
-				// concurrent hard-delete / manual `docker rm` finishing the
-				// job) — the name slot is free, which is all the retry
-				// needs; proceed. Anything else propagates, including the
-				// 409 dockerd returns for a container that STARTED in the
-				// window (`remove()` without force refuses running
-				// containers, preserving the never-kill-a-live-session
-				// invariant). PR #400 review round 2 SHOULD-FIX.
-				if ((removeErr as { statusCode?: number }).statusCode !== 404) throw removeErr;
+			if (!isSessionContainer(info, sessionId)) {
+				throw new Error(
+					`container name ${containerName} is held by a container that is not this session's (409); refusing to remove it`,
+				);
 			}
-			return await create();
+			if (info.State?.Running === true) throw err;
+			logger.warn(
+				`[docker] session ${sessionId}: adopting its stopped container ${info.Id} that holds ${containerName} instead of recreating it`,
+			);
+			return this.docker.getContainer(info.Id);
 		}
 	}
 
@@ -1228,38 +1284,116 @@ export class DockerManager {
 		await Promise.allSettled(files.map((f) => fs.unlink(f.path)));
 	}
 
+	/**
+	 * Stop and remove one container, fail-closed: only Docker's own
+	 * "already done" answers (404 not found; 304 not modified on `stop`)
+	 * let it complete. A 5xx, a 409 (removal in progress) or a socket
+	 * error means the daemon confirmed nothing and the container may well
+	 * still be running, so the error propagates. Returns false when Docker
+	 * never knew the ref (404 on both calls).
+	 */
+	private async stopAndRemove(containerRef: string): Promise<boolean> {
+		const container = this.docker.getContainer(containerRef);
+		let seen = true;
+		try {
+			await container.stop({ t: 5 });
+		} catch (err) {
+			if (isNotFound(err)) seen = false;
+			else if (!isNotModified(err)) throw err;
+		}
+		// `v: true` also removes any anonymous volumes attached to the
+		// container (bind mounts are unaffected — those are cleaned by
+		// purgeWorkspace on hard delete).
+		try {
+			await container.remove({ force: true, v: true });
+		} catch (err) {
+			if (!isNotFound(err)) throw err;
+			seen = false;
+		}
+		return seen;
+	}
+
+	/**
+	 * The container a session owns when its row does not say (P1-B: a
+	 * spawn whose D1 write failed; P1-C: a pre-fail-closed teardown that
+	 * nulled the id on a daemon error). Looked up by the deterministic
+	 * name and accepted only when the inspect proves it is THIS session's
+	 * — its workspace bind is `<WORKSPACE_ROOT>/<sessionId>` — so nothing
+	 * is ever removed by name alone. Returns null on a 404 (nothing
+	 * there) or an identity mismatch; a daemon or socket error propagates,
+	 * because an unreachable daemon is not an absent container.
+	 */
+	private async findSessionContainerByName(
+		sessionId: string,
+		containerName: string,
+	): Promise<string | null> {
+		let info: Dockerode.ContainerInspectInfo;
+		try {
+			info = await this.docker.getContainer(containerName).inspect();
+		} catch (err) {
+			if (isNotFound(err)) return null;
+			throw err;
+		}
+		if (!isSessionContainer(info, sessionId)) {
+			logger.warn(
+				`[docker] ${containerName} exists but does not mount ${path.resolve(WORKSPACE_ROOT, sessionId)}: not session ${sessionId}'s container, left alone`,
+			);
+			return null;
+		}
+		return info.Id;
+	}
+
+	/**
+	 * Adopt the session's own container found under its deterministic
+	 * name when the row's id is NULL or stale: persist the identity FIRST
+	 * (fail-closed — a start or stop that cannot be recorded must not
+	 * proceed), then return it. null when nothing of the session's holds
+	 * the name; a daemon error propagates.
+	 */
+	private async adoptSessionContainerByName(
+		sessionId: string,
+		containerName: string,
+	): Promise<string | null> {
+		const byName = await this.findSessionContainerByName(sessionId, containerName);
+		if (byName === null) return null;
+		await this.sessions.setContainerId(sessionId, byName);
+		logger.info(
+			`[docker] session ${sessionId}: adopted its container ${byName} found under ${containerName}`,
+		);
+		return byName;
+	}
+
 	async kill(sessionId: string): Promise<void> {
 		const meta = await this.sessions.get(sessionId);
 
-		if (meta?.containerId) {
-			try {
-				const container = this.docker.getContainer(meta.containerId);
-				try {
-					await container.stop({ t: 5 });
-				} catch {
-					/* already stopped */
-				}
-				// `v: true` also removes any anonymous volumes attached to the
-				// container (bind mounts are unaffected — those are cleaned by
-				// purgeWorkspace on hard delete).
-				try {
-					await container.remove({ force: true, v: true });
-				} catch {
-					/* already removed */
-				}
-			} catch (err) {
-				logger.error(
-					`[docker] error killing container for session ${sessionId}: ${(err as Error).message}`,
-				);
+		if (meta) {
+			// Swallowing errors here used to null the id on ANY Docker error
+			// and the delete routes then dropped the row: a running container
+			// nobody referenced any more. `stopAndRemove` now propagates
+			// anything the daemon did not confirm, and `container_id` stays
+			// in D1 — the one reference a retry (or /start's stale-name
+			// reclaim) needs.
+			let found = false;
+			if (meta.containerId) found = await this.stopAndRemove(meta.containerId);
+			// No id, or an id Docker no longer knows: the session may still
+			// own a container under its deterministic name (see
+			// findSessionContainerByName). A daemon error here propagates too.
+			if (!found) {
+				const byName = await this.findSessionContainerByName(sessionId, meta.containerName);
+				if (byName !== null) await this.stopAndRemove(byName);
 			}
-			// The container no longer exists in Docker — reflect that in D1 so any
-			// later lookup doesn't chase a dead container id.
-			try {
-				await this.sessions.setContainerId(sessionId, null);
-			} catch (err) {
-				logger.error(
-					`[docker] failed to null container_id for session ${sessionId}: ${(err as Error).message}`,
-				);
+			if (meta.containerId) {
+				// Removed, or confirmed gone — reflect that in D1 so any later
+				// lookup doesn't chase a dead container id. A failure here is
+				// harmless: reconcile's 404 branch and /start both cope with
+				// a stale id, so it is logged rather than failing the teardown.
+				try {
+					await this.sessions.setContainerId(sessionId, null);
+				} catch (err) {
+					logger.error(
+						`[docker] failed to null container_id for session ${sessionId}: ${(err as Error).message}`,
+					);
+				}
 			}
 		}
 
@@ -1407,22 +1541,19 @@ export class DockerManager {
 	async startContainer(sessionId: string): Promise<void> {
 		const meta = await this.sessions.getOrThrow(sessionId);
 
-		// Load the typed session config once at the top and thread it through
-		// every downstream consumer in this function — `spawnWithConfig`,
-		// `runPostStartIfConfigured`, and the port-mapping-refresh path on
-		// container restart. Pre-#207, both the spawn cases (Case 1 cold-
-		// start, Case 2 stale catch) loaded the row inside `spawn()` AND
-		// inside `runPostStartIfConfigured`, plus the restart path loaded it
-		// again to recover the per-port `public` flag — three D1 round-trips
-		// for one logical operation. CLAUDE.md flags D1 query count as the
-		// hot-path concern, so collapse to one. The wrapper `spawn()` retains
-		// its standalone-load shape for tests + the POST /api/sessions caller.
 		const config = await this.loadConfigForSpawn(sessionId);
 
-		// Case 1: no container exists (terminated session, or one whose container
-		// was removed out-of-band). Spawn a fresh container reusing the existing
-		// container name + workspace bind mount.
-		if (!meta.containerId) {
+		// The row's id, or — when it is NULL or Docker no longer knows it —
+		// the session's own container found under its deterministic name
+		// (identity-checked, persisted before anything else). A stopped
+		// container's writable layer is data: it is reused, never removed
+		// to free its name. A daemon error during the lookup propagates:
+		// nothing is created, removed or started on an answer we never got.
+		let containerId = meta.containerId;
+		if (containerId === null) {
+			containerId = await this.adoptSessionContainerByName(sessionId, meta.containerName);
+		}
+		if (containerId === null) {
 			await this.spawnWithConfig(sessionId, config);
 			await this.sessions.updateStatus(sessionId, "running");
 			logger.info(`[docker] respawned container for session ${sessionId}`);
@@ -1430,47 +1561,45 @@ export class DockerManager {
 			return;
 		}
 
-		// Case 2: container id is on file. Check it still exists in Docker; if it
-		// does, just start it. If Docker has no record of it, forget the stale id
-		// and spawn a replacement.
+		let info: Dockerode.ContainerInspectInfo;
 		try {
-			const info = await this.docker.getContainer(meta.containerId).inspect();
-			this.warnIfPreHardened(sessionId, meta.containerId, info.HostConfig);
-			if (!info.State.Running) {
-				await this.docker.getContainer(meta.containerId).start();
-				// #190 (direct-proxy switch) — rewrite the exposed-port
-				// set from config after restart. `stopContainer()` cleared
-				// the mapping rows, so without this the dispatcher would
-				// 404 every proxied port on this session until the next
-				// reconcile() — the most common lifecycle path for any
-				// session with declared ports. Config is the source of
-				// truth (the user's declarative intent, kept current by
-				// `PATCH /ports`). Skip the write when there are no ports:
-				// `stopContainer()` already cleared the table, so there's
-				// nothing to rewrite. Mirror spawn()'s best-effort pattern:
-				// a failure logs and lets the container keep running.
-				const declaredPorts = config?.ports ?? [];
-				try {
-					if (declaredPorts.length > 0) {
-						await setPortMappings(sessionId, mappingsFromConfig(declaredPorts));
-					}
-				} catch (err) {
-					logger.warn(
-						`[docker] failed to refresh port mappings for session ${sessionId} after restart: ${(err as Error).message}`,
-					);
-				}
+			info = await this.docker.getContainer(containerId).inspect();
+		} catch (err) {
+			if (!isNotFound(err)) throw err;
+			// Stale id. The session may still own a container under its
+			// name (adopt it); only when it does not is a fresh spawn right.
+			const adopted = await this.adoptSessionContainerByName(sessionId, meta.containerName);
+			if (adopted === null) {
+				logger.info(`[docker] stale container_id for session ${sessionId}, respawning`);
+				await this.sessions.setContainerId(sessionId, null);
+				await this.spawnWithConfig(sessionId, config);
+				await this.sessions.updateStatus(sessionId, "running");
+				await this.runPostStartIfConfigured(sessionId, config);
+				return;
 			}
-			// When `info.State.Running` was already true (container was
-			// running before this call), the D1 row written by spawn()
-			// or the last reconcile() is still valid — no re-inspect.
-			await this.sessions.updateStatus(sessionId, "running");
-			logger.info(`[docker] restarted container for session ${sessionId}`);
-		} catch {
-			logger.info(`[docker] stale container_id for session ${sessionId}, respawning`);
-			await this.sessions.setContainerId(sessionId, null);
-			await this.spawnWithConfig(sessionId, config);
-			await this.sessions.updateStatus(sessionId, "running");
+			containerId = adopted;
+			info = await this.docker.getContainer(containerId).inspect();
 		}
+		this.warnIfPreHardened(sessionId, containerId, info.HostConfig);
+		if (!info.State.Running) {
+			await this.docker.getContainer(containerId).start();
+			// #190: the exposed set is derived from config (the dispatcher
+			// resolves the container by name), so refresh the mappings
+			// `stopContainer()` cleared; without this the dispatcher would
+			// 404 every proxied port until the next reconcile. Best-effort.
+			const declaredPorts = config?.ports ?? [];
+			try {
+				if (declaredPorts.length > 0) {
+					await setPortMappings(sessionId, mappingsFromConfig(declaredPorts));
+				}
+			} catch (err) {
+				logger.warn(
+					`[docker] failed to refresh port mappings for session ${sessionId} after restart: ${(err as Error).message}`,
+				);
+			}
+		}
+		await this.sessions.updateStatus(sessionId, "running");
+		logger.info(`[docker] restarted container for session ${sessionId}`);
 		await this.runPostStartIfConfigured(sessionId, config);
 	}
 
@@ -1914,15 +2043,55 @@ export class DockerManager {
 		}
 	}
 
+	/**
+	 * `stop` one container, fail-closed. Returns false when Docker never
+	 * knew the ref (404); 304 (already stopped) is success; anything else
+	 * — daemon/socket error — propagates, because the row must keep saying
+	 * `running` (sweeper, quotas, dispatcher) until Docker confirms.
+	 */
+	private async stopOnly(containerRef: string): Promise<boolean> {
+		try {
+			await this.docker.getContainer(containerRef).stop({ t: 5 });
+			return true;
+		} catch (err) {
+			if (isNotFound(err)) return false;
+			if (isNotModified(err)) return true;
+			throw err;
+		}
+	}
+
 	async stopContainer(sessionId: string): Promise<void> {
 		const meta = await this.sessions.getOrThrow(sessionId);
-		if (!meta.containerId) return;
-		try {
-			await this.docker.getContainer(meta.containerId).stop({ t: 5 });
-		} catch {
-			/* already stopped */
+		// The row's id first; when it is NULL or Docker no longer knows it,
+		// the session may still own a live container under its
+		// deterministic name (a spawn whose D1 write failed, a teardown
+		// Docker never confirmed) — the same identity-checked lookup
+		// kill() uses, but here the container is only stopped, never
+		// removed, and the row is re-pointed at it so /start finds it.
+		let stopped = meta.containerId !== null && (await this.stopOnly(meta.containerId));
+		if (!stopped) {
+			const byName = await this.findSessionContainerByName(sessionId, meta.containerName);
+			if (byName !== null) {
+				stopped = await this.stopOnly(byName);
+				// The recovered identity is part of the stop: if D1 cannot
+				// record it the stop is NOT complete (the row would say
+				// `stopped` with no id, and a later /start could respawn
+				// instead of reusing this container and its layer). The
+				// error propagates; the retry meets a 304 and converges.
+				if (stopped && byName !== meta.containerId) {
+					await this.sessions.setContainerId(sessionId, byName);
+				}
+			}
 		}
-		await this.sessions.updateStatus(sessionId, "stopped");
+		if (stopped) {
+			await this.sessions.updateStatus(sessionId, "stopped");
+		} else {
+			// Nothing of this session's exists in Docker (404 on the id AND
+			// no identity-matching container under the name): the same
+			// atomic record reconcile's 404 branch writes, so /start
+			// respawns instead of inspecting a dead id.
+			await this.sessions.recordContainerGone(sessionId);
+		}
 		// #190 PR 190b — clear port mappings: a stopped container's host
 		// port no longer reaches anything, and Docker may rebind the
 		// same ephemeral port to a different container on the next

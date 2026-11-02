@@ -199,14 +199,17 @@ describe("DELETE /sessions/:id", () => {
 		expect(spies.deleteRow).not.toHaveBeenCalled();
 	});
 
-	it("soft delete is idempotent — already-terminated skips kill/terminate", async () => {
+	it("soft delete is idempotent — already-terminated still runs kill (idempotent, P1-C) but not terminate", async () => {
 		const { sessions, spies } = makeFakeSessions("terminated");
 		const { docker, spies: dockerSpies } = makeFakeDocker();
 		await spinUp(sessions, docker);
 
 		const res = await fetch(`${baseUrl}/api/sessions/sess-1`, { method: "DELETE" });
 		expect(res.status).toBe(204);
-		expect(dockerSpies.kill).not.toHaveBeenCalled();
+		// A terminated row may still hold a container (a teardown Docker
+		// never confirmed): kill runs on every delete and is a no-op when
+		// Docker answers 404.
+		expect(dockerSpies.kill).toHaveBeenCalledWith("sess-1");
 		expect(spies.terminate).not.toHaveBeenCalled();
 	});
 

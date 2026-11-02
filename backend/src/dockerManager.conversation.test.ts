@@ -228,7 +228,16 @@ describe("startContainer and capture (§2.4, 3.0c R1)", () => {
 			id: "cid-1",
 			start: vi.fn(async () => undefined),
 			inspect: vi.fn(async () => {
-				if (state === "gone") throw new Error("No such container: cid-1");
+				if (state === "gone") {
+					// Docker's own answer for a removed container: only a 404
+					// means "stale" to startContainer (a bare error is a daemon
+					// failure and propagates, 4th review of #502).
+					const e = new Error("(HTTP code 404) no such container: cid-1") as Error & {
+						statusCode: number;
+					};
+					e.statusCode = 404;
+					throw e;
+				}
 				return { State: { Running: false }, HostConfig: {} };
 			}),
 		};
