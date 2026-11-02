@@ -5,6 +5,7 @@ import {
 	EventWindow,
 	gapText,
 	groupBlocks,
+	lastEvidenceAt,
 	presentStatus,
 	statusIsLiveClaim,
 	statusTone,
@@ -566,5 +567,26 @@ describe("presentStatus (what the list and chip show)", () => {
 		for (const s of ["ended", "ending", "disconnected", "error"]) {
 			expect(presentStatus(s, ago(0), now).active, s).toBe(false);
 		}
+	});
+});
+
+describe("lastEvidenceAt", () => {
+	it("a long turn that keeps emitting events is fresh although its status time is old", () => {
+		const now = Date.parse("2026-11-02T12:00:00Z");
+		const c = { statusAt: "2026-11-02T11:30:00Z", lastEventAt: "2026-11-02T11:59:00Z" };
+		expect(lastEvidenceAt(c)).toBe(c.lastEventAt);
+		expect(presentStatus("running", lastEvidenceAt(c), now)).toMatchObject({
+			label: "Working",
+			active: true,
+		});
+	});
+
+	it("falls back to the status time when the event time is missing or older", () => {
+		expect(lastEvidenceAt({ statusAt: "2026-11-02T11:00:00Z", lastEventAt: null })).toBe(
+			"2026-11-02T11:00:00Z",
+		);
+		expect(
+			lastEvidenceAt({ statusAt: "2026-11-02T11:00:00Z", lastEventAt: "2026-11-02T10:00:00Z" }),
+		).toBe("2026-11-02T11:00:00Z");
 	});
 });

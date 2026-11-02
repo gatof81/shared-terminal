@@ -42,9 +42,12 @@ import {
 	clock,
 	EventWindow,
 	groupBlocks,
+	lastEvidenceAt,
 	presentStatus,
 	STALE_EVIDENCE_MS,
+	STATUS_LABEL,
 	statusIsLiveClaim,
+	statusTone,
 	type ThreadBlock,
 	type ThreadItem,
 	type ToolItem,
@@ -630,7 +633,9 @@ function titleOf(c: ConversationSummary): string {
 }
 
 function currentStatus(c: ConversationSummary): LiveStatus {
-	return cur?.liveStatus ?? { status: c.status, evidence: c.statusEvidence, at: c.statusAt };
+	const live = cur?.liveStatus ?? { status: c.status, evidence: c.statusEvidence, at: c.statusAt };
+	// Freshness: the later of the status time and the last event (lastEvidenceAt).
+	return { ...live, at: lastEvidenceAt({ statusAt: live.at, lastEventAt: c.lastEventAt }) };
 }
 
 /**
@@ -638,8 +643,21 @@ function currentStatus(c: ConversationSummary): LiveStatus {
  * evidence is older than a minute — its age, so "Working" never reads as a
  * fact when the last sign of life is from an hour ago (contract §5.3).
  */
-function statusChip(st: LiveStatus, opts: { age?: boolean } = {}): HTMLElement {
-	const shown = presentStatus(st.status, st.at, Date.now());
+function statusChip(
+	st: LiveStatus,
+	opts: { age?: boolean; staleness?: boolean } = {},
+): HTMLElement {
+	// `staleness: false` for chips whose time is not evidence of liveness
+	// (a subagent's start time): they keep their own label.
+	const shown =
+		opts.staleness === false
+			? {
+					label: STATUS_LABEL[st.status] ?? st.status,
+					tone: statusTone(st.status),
+					active: false,
+					stale: false,
+				}
+			: presentStatus(st.status, st.at, Date.now());
 	const chip = el("span", `chat-status tone-${shown.tone}`);
 	chip.appendChild(el("span", "chat-dot"));
 	chip.appendChild(el("span", "chat-status-label", shown.label));
@@ -681,7 +699,7 @@ function renderSummary(): void {
 	if (list.status === "loaded") {
 		const now = Date.now();
 		const active = list.conversations.filter(
-			(x) => presentStatus(x.status, x.statusAt, now).active,
+			(x) => presentStatus(x.status, lastEvidenceAt(x), now).active,
 		).length;
 		summaryEl.appendChild(el("span", "chat-summary-count", String(list.conversations.length)));
 		if (active > 0) summaryEl.appendChild(el("span", "chat-summary-active", `${active} active`));
@@ -793,7 +811,9 @@ function renderListInner(): void {
 	// disconnected and errored conversations are all listed under "Earlier",
 	// still openable and readable.
 	const now = Date.now();
-	const active = list.conversations.filter((c) => presentStatus(c.status, c.statusAt, now).active);
+	const active = list.conversations.filter(
+		(c) => presentStatus(c.status, lastEvidenceAt(c), now).active,
+	);
 	const rest = list.conversations.filter((c) => !active.includes(c));
 	const sectioned = active.length > 0 && rest.length > 0;
 	if (sectioned) listEl.appendChild(el("h3", "chat-list-title", "Active"));
@@ -814,7 +834,7 @@ function convList(items: ConversationSummary[]): HTMLElement {
 		const current = c.sessionId === selectedCid;
 		if (current) row.classList.add("selected");
 		row.setAttribute("aria-current", String(current));
-		const shown = presentStatus(c.status, c.statusAt, Date.now());
+		const shown = presentStatus(c.status, lastEvidenceAt(c), Date.now());
 		const tone = shown.tone;
 		row.classList.add(`tone-${tone}`);
 		const dot = el("span", `chat-conv-dot tone-${tone}`);
@@ -1383,11 +1403,14 @@ function agentCard(a: AgentView): HTMLElement {
 	const top = el("div", "chat-agent-top");
 	top.appendChild(el("span", "chat-agent-type", a.agentType || "agent"));
 	top.appendChild(
-		statusChip({
-			status: a.status === "done" ? "ended" : "running",
-			evidence: "",
-			at: a.endedAt ?? a.startedAt,
-		}),
+		statusChip(
+			{
+				status: a.status === "done" ? "ended" : "running",
+				evidence: "",
+				at: a.endedAt ?? a.startedAt,
+			},
+			{ staleness: false },
+		),
 	);
 	li.appendChild(top);
 	const bits: string[] = [a.agentId.slice(0, 8)];
@@ -1476,7 +1499,7 @@ function composerBlockReason(c: ConversationSummary | undefined, st: ComposerSta
 	// obvious case before a request. A live claim with stale evidence does not
 	// block — the list may be behind, and the server has the fresh probe.
 	const stale =
-		statusIsLiveClaim(c.status) && Date.now() - Date.parse(c.statusAt) > STALE_EVIDENCE_MS;
+		statusIsLiveClaim(c.status) && Date.now() - Date.parse(lastEvidenceAt(c)) > STALE_EVIDENCE_MS;
 	if (!stale) {
 		if (c.status === "running") return "Claude is working; wait for the turn to finish.";
 		if (c.status === "waiting_permission")

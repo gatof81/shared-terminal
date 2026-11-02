@@ -88,6 +88,34 @@ test.describe("chat: active vs earlier", () => {
 		await expect(status).not.toContainText("no longer has a terminal pane");
 	});
 
+	test("a long turn that keeps emitting events stays Active although its status time is old", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		// running since 10:05, last tool event at 10:29 (the clock is 10:30):
+		// the backend renews statusAt only on transitions.
+		const c1 = backend.conversations[0]!;
+		c1.status = "running";
+		c1.statusAt = "2026-10-31T10:05:00Z";
+		c1.events.push({
+			seq: (c1.events.at(-1)?.seq ?? 0) + 1,
+			ts: "2026-10-31T10:29:00Z",
+			ev: "tool_start",
+			prompt_id: "p-long",
+			turn_id: "t-long",
+			agent_id: null,
+			pane: "%1",
+			data: { tool_use_id: "tu-long", tool_name: "Bash", summary: { program: "npm" } },
+		});
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.switchView("chat");
+		const row = page.locator("#chat-list .chat-conv-row", { hasText: "Refactor auth flow" });
+		await expect(row).toContainText("Working");
+		await expect(page.locator("#chat-summary .chat-summary-active")).toHaveText("1 active");
+	});
+
 	test("a fresh live claim is the one Active conversation, counted once", async ({
 		app,
 		backend,

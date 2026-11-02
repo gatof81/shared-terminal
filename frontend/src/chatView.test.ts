@@ -973,6 +973,8 @@ describe("Composer", () => {
 		await openSendable({
 			status: "running",
 			statusAt: new Date(Date.now() - 11 * 60 * 1000).toISOString(),
+			// Stale means no sign of life at all: the last event is old too.
+			lastEventAt: new Date(Date.now() - 11 * 60 * 1000).toISOString(),
 		});
 		expect(composerTextarea().disabled).toBe(false);
 	});

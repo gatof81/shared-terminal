@@ -741,6 +741,22 @@ export interface StatusPresentation {
 	stale: boolean;
 }
 
+/**
+ * When a conversation last showed a sign of life: the later of its status
+ * time and its last event. The backend renews `statusAt` only on a state
+ * transition (or a confirming probe), so a long turn that keeps emitting
+ * tool events stays "running" with an old `statusAt` — its last event is
+ * what proves it is alive (the same evidence the backend's silence
+ * timeout, CONVERSATION.md §5.3, measures).
+ */
+export function lastEvidenceAt(c: { statusAt: string; lastEventAt?: string | null }): string {
+	const s = Date.parse(c.statusAt);
+	const e = Date.parse(c.lastEventAt ?? "");
+	if (Number.isNaN(e)) return c.statusAt;
+	if (Number.isNaN(s)) return c.lastEventAt as string;
+	return e > s ? (c.lastEventAt as string) : c.statusAt;
+}
+
 export function presentStatus(status: string, at: string, now: number): StatusPresentation {
 	const t = Date.parse(at);
 	const stale = statusIsLiveClaim(status) && (Number.isNaN(t) || now - t >= STALE_EVIDENCE_MS);
