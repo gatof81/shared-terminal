@@ -5,14 +5,22 @@
  * CLI 2.1.314.
  */
 
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	ancestryArgv,
 	CSI_U_NEWLINE,
 	captureArgv,
+	foregroundFault,
 	inputRegion,
+	isClaudeExe,
 	normalizeText,
+	PANE_FACTS_SCRIPT,
+	paneFactsArgv,
 	paneStateArgv,
+	parsePaneFacts,
 	parsePaneState,
 	SEGMENT_MAX_CHARS,
 	SEGMENTS_MAX,
@@ -193,6 +201,251 @@ describe("segment + stepArgv (§8.1.5)", () => {
 		expect(parsePaneState("can't find pane")).toBeNull();
 		expect(parsePaneState("")).toBeNull();
 	});
+});
+
+describe("foreground identity (§8.1.3 needs-terminal, foreground)", () => {
+	const facts = (over: { p?: string; t?: string; a?: string; e?: string; d?: string } = {}) =>
+		[
+			`D ${over.d ?? "700 0 0 2.1.316"}`,
+			`P ${over.p ?? "733 S 700 733 700 34817 733 1000"}`,
+			`T ${over.t ?? "700 S 119 700 700 34817 733 900"}`,
+			`A ${over.a ?? "yes"}`,
+			`E ${over.e ?? "/home/developer/.local/share/claude/versions/2.1.316"}`,
+			"",
+		].join("\n");
+	it("paneFactsArgv: fixed argv, the pane and the pid as positional arguments, never in the script", () => {
+		expect(paneFactsArgv("%3", 733).slice(-3)).toEqual(["st-pane-facts", "%3", "733"]);
+		expect(paneFactsArgv("%3", 733)[6]).toBe(PANE_FACTS_SCRIPT);
+	});
+	it("parsePaneFacts: exactly five well-formed lines, in order; anything else ⇒ null", () => {
+		const f = parsePaneFacts(facts());
+		expect(f?.pane).toEqual({ panePid: 700, inMode: false, dead: false, command: "2.1.316" });
+		expect(f?.proc).toEqual({
+			pid: 733,
+			state: "S",
+			ppid: 700,
+			pgrp: 733,
+			sid: 700,
+			tty: 34817,
+			tpgid: 733,
+			start: "1000",
+		});
+		expect(f?.ancestry).toBe(true);
+		for (const bad of [
+			"",
+			facts().split("\n").slice(0, 4).join("\n"), // missing E
+			facts({ p: "733 S 700 733 700 34817 733" }), // missing start time
+			facts({ a: "maybe" }),
+			facts({ e: "relative/path" }),
+			facts({ d: "can't find pane" }),
+			facts().replace("P 733", "T 733"), // lines out of order
+			`${facts()}extra\n`,
+		]) {
+			expect(parsePaneFacts(bad)).toBeNull();
+		}
+	});
+	it("isClaudeExe: npm, node, native (also replaced by an update); nothing else", () => {
+		for (const ok of [
+			"/home/developer/workspace/.npm-global/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+			"/home/developer/.npm-global/bin/claude",
+			"/usr/bin/node",
+			"/home/developer/.local/share/claude/versions/2.1.316",
+			"/home/developer/.local/share/claude/versions/2.1.220 (deleted)",
+			"/home/developer/workspace/.npm-global/lib/node_modules/@anthropic-ai/.claude-code-w1jVs9XG/bin/claude.exe (deleted)",
+		])
+			expect(isClaudeExe(ok)).toBe(true);
+		for (const no of [
+			"/usr/bin/bash",
+			"/usr/bin/vim",
+			"/home/developer/.local/share/other/2.1.316",
+			"/tmp/2.1.316",
+			"/home/developer/claude.sh",
+		])
+			expect(isClaudeExe(no)).toBe(false);
+	});
+	it("foregroundFault: each condition refuses on its own", () => {
+		const f = (o = {}) =>
+			parsePaneFacts(facts(o)) as NonNullable<ReturnType<typeof parsePaneFacts>>;
+		expect(foregroundFault(f(), 733)).toBeNull();
+		expect(foregroundFault(f(), 734)).toBe("mismatch");
+		expect(foregroundFault(f({ e: "/usr/bin/bash" }), 733)).toBe("identity");
+		expect(foregroundFault(f({ p: "733 T 700 733 700 34817 733 1000" }), 733)).toBe("state");
+		expect(foregroundFault(f({ p: "733 Z 700 733 700 34817 733 1000" }), 733)).toBe("state");
+		expect(foregroundFault(f({ p: "733 S 700 733 1 34817 733 1000" }), 733)).toBe("session");
+		expect(foregroundFault(f({ t: "700 S 119 700 119 34817 733 900" }), 733)).toBe("session");
+		expect(foregroundFault(f({ p: "733 S 700 733 700 34818 733 1000" }), 733)).toBe("tty");
+		expect(
+			foregroundFault(
+				f({ p: "733 S 700 733 700 0 -1 1000", t: "700 S 119 700 700 0 -1 900" }),
+				733,
+			),
+		).toBe("tty");
+		expect(foregroundFault(f({ p: "733 S 700 700 700 34817 700 1000" }), 733)).toBe("group");
+		expect(
+			foregroundFault(
+				f({ p: "733 S 700 733 700 34817 700 1000", t: "700 S 119 700 700 34817 700 900" }),
+				733,
+			),
+		).toBe("not-foreground");
+		expect(foregroundFault(f({ t: "700 S 119 700 700 34817 999 900" }), 733)).toBe(
+			"not-foreground",
+		);
+	});
+
+	// The real script against a real tmux pane and /proc on this host (skipped where tmux is missing).
+	const hasTmux = spawnSync("tmux", ["-V"]).status === 0 && existsSync("/proc/self/stat");
+	it.skipIf(!hasTmux)(
+		"PANE_FACTS_SCRIPT on a real tmux pane: a native-named binary in the foreground passes; a background job, a gone process and a foreground child in its own group do not",
+		() => {
+			// Inside the checkout, not os.tmpdir(): CI runners may mount /tmp noexec, and the test
+			// executes copies of binaries from here.
+			const dir = mkdtempSync(path.join(process.cwd(), ".st-facts-"));
+			const sock = `st-facts-${process.pid}`;
+			const tmux = (...a: string[]) =>
+				execFileSync("tmux", ["-L", sock, ...a], { encoding: "utf8" });
+			let restorePath = () => {};
+			try {
+				// A "native install": a copy of a real binary under …/claude/versions/<X.Y.Z>, as the installer lays it out.
+				const vdir = path.join(dir, ".local/share/claude/versions");
+				mkdirSync(vdir, { recursive: true });
+				const native = path.join(vdir, "2.1.316");
+				copyFileSync("/bin/bash", native); // not coreutils: CI runners ship a multi-call coreutils that refuses another name
+				chmodSync(native, 0o755);
+				tmux(
+					"-f",
+					"/dev/null",
+					"new-session",
+					"-d",
+					"-s",
+					"t",
+					"-x",
+					"80",
+					"-y",
+					"20",
+					"env PS1='st-ready$ ' TERM=xterm bash --norc --noprofile -i",
+				);
+				const pane = tmux("display", "-p", "-t", "t", "#{pane_id}").trim();
+				// Type only once the interactive shell shows its prompt (on a busy CI runner the
+				// keys otherwise race the shell's start and the job never runs).
+				const prompted = () =>
+					tmux("capture-pane", "-p", "-t", pane)
+						.split("\n")
+						.filter((l) => l.trim().length > 0)
+						.at(-1)
+						?.trim() === "st-ready$";
+				let lastRaw = "";
+				const read = (pid: number) => {
+					const r = spawnSync(
+						"bash",
+						["-c", PANE_FACTS_SCRIPT, "st-pane-facts", pane, String(pid)],
+						{
+							encoding: "utf8",
+							// Never pass an undefined value (Node would send the string "undefined").
+							env: { ...process.env, TMUX: "" },
+						},
+					);
+					lastRaw = `exit=${r.status} pid=${pid} pane=${pane}\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}\nscreen:\n${tmux("capture-pane", "-p", "-t", pane)}`;
+					return r.status === 0 ? parsePaneFacts(r.stdout.replace(/^/, "")) : null;
+				};
+				const wait = (cond: () => boolean) => {
+					for (let i = 0; i < 400 && !cond(); i++) spawnSync("sleep", ["0.05"]);
+				};
+				// The script talks to the default tmux socket; point it at ours through a wrapper on PATH.
+				const bin = path.join(dir, "bin");
+				mkdirSync(bin);
+				require("node:fs").writeFileSync(
+					path.join(bin, "tmux"),
+					`#!/bin/sh\nexec ${execFileSync("sh", ["-c", "command -v tmux"], { encoding: "utf8" }).trim()} -L ${sock} "$@"\n`,
+					{ mode: 0o755 },
+				);
+				const savedPath = process.env.PATH;
+				process.env.PATH = `${bin}:${process.env.PATH}`;
+				restorePath = () => {
+					process.env.PATH = savedPath;
+				};
+				// 1. the native-named binary in the foreground
+				wait(prompted);
+				expect(prompted(), "shell prompt before typing").toBe(true);
+				tmux("send-keys", "-t", pane, `${native} --norc --noprofile -c "read -r _ # 300"`, "Enter");
+				let pid = 0;
+				wait(() => {
+					const out = spawnSync(
+						"pgrep",
+						["-f", `^${native} --norc --noprofile -c read -r _ # 300`],
+						{
+							encoding: "utf8",
+						},
+					).stdout.trim();
+					pid = Number(out.split("\n")[0] || 0);
+					return pid > 0;
+				});
+				wait(
+					() => tmux("display", "-p", "-t", pane, "#{pane_current_command}").trim() === "2.1.316",
+				);
+				const fg = read(pid);
+				expect(fg, lastRaw).not.toBeNull();
+				expect(fg?.pane.command).toBe("2.1.316");
+				expect(fg?.ancestry).toBe(true);
+				expect(fg && foregroundFault(fg, pid)).toBeNull();
+				// 2. back at the shell: the same process is gone ⇒ unreadable ⇒ fail closed; a background job ⇒ not-foreground
+				tmux("send-keys", "-t", pane, "C-c", "");
+				wait(() => tmux("display", "-p", "-t", pane, "#{pane_current_command}").trim() === "bash");
+				expect(read(pid)).toBeNull();
+				wait(prompted);
+				expect(prompted(), "shell prompt before typing").toBe(true);
+				tmux("send-keys", "-t", pane, `${native} --norc --noprofile -c "sleep 301; :" &`, "Enter");
+				let bg = 0;
+				wait(() => {
+					bg = Number(
+						spawnSync("pgrep", ["-f", `^${native} --norc --noprofile -c sleep 301; :`], {
+							encoding: "utf8",
+						})
+							.stdout.trim()
+							.split("\n")[0] || 0,
+					);
+					return bg > 0;
+				});
+				const back = read(bg);
+				expect(back, lastRaw).not.toBeNull();
+				expect(back && foregroundFault(back, bg)).toBe("not-foreground");
+				// 3. a foreground child in its own group: a native-named job-control shell (a copy of bash under
+				// …/claude/versions/2.1.315) owns the terminal, then runs a job that takes it over.
+				const native2 = path.join(vdir, "2.1.315");
+				copyFileSync("/bin/bash", native2);
+				chmodSync(native2, 0o755);
+				wait(prompted);
+				expect(prompted(), "shell prompt before typing").toBe(true);
+				tmux("send-keys", "-t", pane, `kill %1; ${native2} --norc --noprofile -i`, "Enter");
+				let owner = 0;
+				wait(() => {
+					owner = Number(
+						spawnSync("pgrep", ["-f", `^${native2} --norc`], { encoding: "utf8" })
+							.stdout.trim()
+							.split("\n")[0] || 0,
+					);
+					return (
+						owner > 0 &&
+						tmux("display", "-p", "-t", pane, "#{pane_current_command}").trim() === "2.1.315"
+					);
+				});
+				const before = read(owner);
+				expect(before, lastRaw).not.toBeNull();
+				expect(before && foregroundFault(before, owner)).toBeNull();
+				wait(prompted);
+				expect(prompted(), "shell prompt before typing").toBe(true);
+				tmux("send-keys", "-t", pane, "sleep 303", "Enter");
+				wait(() => tmux("display", "-p", "-t", pane, "#{pane_current_command}").trim() === "sleep");
+				const after = read(owner);
+				expect(after, lastRaw).not.toBeNull();
+				expect(after?.ancestry).toBe(true);
+				expect(after && foregroundFault(after, owner)).toBe("not-foreground");
+			} finally {
+				restorePath();
+				spawnSync("tmux", ["-L", sock, "kill-server"]);
+				rmSync(dir, { recursive: true, force: true });
+			}
+		},
+	);
 });
 
 describe("inputRegion (§8.1.3 composer-not-empty)", () => {

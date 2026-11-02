@@ -64,6 +64,45 @@ class FakeDocker implements ComposerDockerPort {
 	frozenEcho = false;
 	typed = "";
 	ancestry = "yes";
+	/** /proc facts of the probed Claude pid (P line); defaults: group leader, foreground, same session/tty as the pane. */
+	proc: Partial<{
+		state: string;
+		pgrp: number;
+		sid: number;
+		tty: number;
+		tpgid: number;
+		start: string;
+	}> = {};
+	/** /proc facts of the pane's process (T line). */
+	paneProc: Partial<{ sid: number; tty: number; tpgid: number }> = {};
+	exe =
+		"/home/developer/workspace/.npm-global/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe";
+	/** The pane-facts script answers exit 0 with this instead of the five lines (malformed read). */
+	factsOverride: string | null = null;
+	/** The five lines `paneFactsArgv` prints, from the knobs above. */
+	facts(cmd: string[]): string {
+		if (this.factsOverride !== null) return this.factsOverride;
+		const pid = Number(cmd.at(-1));
+		const panePid = Number(this.paneState.split(" ")[0]);
+		const p = {
+			state: "S",
+			pgrp: pid,
+			sid: panePid,
+			tty: 34817,
+			tpgid: pid,
+			start: "1000",
+			...this.proc,
+		};
+		const t = { sid: panePid, tty: 34817, tpgid: p.tpgid, ...this.paneProc };
+		return [
+			`D ${this.paneState}`,
+			`P ${pid} ${p.state} ${panePid} ${p.pgrp} ${p.sid} ${p.tty} ${p.tpgid} ${p.start}`,
+			`T ${panePid} S 119 ${panePid} ${t.sid} ${t.tty} ${t.tpgid} 900`,
+			`A ${this.ancestry}`,
+			`E ${this.exe}`,
+			"",
+		].join("\n");
+	}
 	container: "running" | "stopped" | "gone" = "running";
 	/** Per step: outcomes for successive execs of that step; default exit 0. */
 	script = new Map<Step, Array<{ exit: number | null } | "park" | "reject">>();
@@ -113,7 +152,7 @@ class FakeDocker implements ComposerDockerPort {
 		}
 		const stdout =
 			step === "display"
-				? `${this.paneState}\n`
+				? this.facts(cmd)
 				: step === "capture"
 					? (this.dump ?? `${RULE}\n❯ ${this.typed}\n${RULE}\n  ⏵⏵ auto mode on`)
 					: step === "ancestry"
@@ -449,8 +488,11 @@ describe("validation and preconditions (§8.1.2, §8.1.3): no effect, no record"
 		await expectCode("needs-terminal", "copy-mode");
 		docker.paneState = `${PANE_PID} 0 1 claude`;
 		await expectCode("needs-terminal", "pane-dead");
+		// Claude backgrounded or exited: the shell's group owns the terminal.
 		docker.paneState = `${PANE_PID} 0 0 bash`;
+		docker.proc = { tpgid: PANE_PID };
 		await expectCode("needs-terminal", "foreground:bash");
+		docker.proc = {};
 		docker.paneState = `${PANE_PID} 0 0 claude`;
 		docker.dump = `${RULE}\n❯ partial\n${RULE}\n`;
 		await expectCode("composer-not-empty", "text");
@@ -488,6 +530,127 @@ describe("validation and preconditions (§8.1.2, §8.1.3): no effect, no record"
 		await expectCode("not-interactive");
 		await noEffects();
 	});
+	it("foreground identity (§8.1.3): who owns the terminal, never the command name", async () => {
+		const service = makeService();
+		const refused = async (detail: string) => {
+			const r = await send(service, "hi", ID1);
+			expect([r.status, r.body.error, r.body.detail]).toEqual([409, "needs-terminal", detail]);
+		};
+		// 4. back at Bash: the shell's group is the foreground group.
+		docker.paneState = `${PANE_PID} 0 0 bash`;
+		docker.proc = { tpgid: PANE_PID };
+		docker.paneProc = { tpgid: PANE_PID };
+		await refused("foreground:bash");
+		// 5. a foreground job that takes the terminal in its own group: Claude's group is not the tty's.
+		docker.paneState = `${PANE_PID} 0 0 vim`;
+		docker.proc = { tpgid: 4242 };
+		docker.paneProc = { tpgid: 4242 };
+		await refused("foreground:vim");
+		docker.paneState = `${PANE_PID} 0 0 claude`;
+		docker.paneProc = {};
+		// Claude not its own group leader (started outside the shell's job control).
+		docker.proc = { pgrp: PANE_PID, tpgid: PANE_PID };
+		await refused("foreground:claude");
+		// Different session, different tty, no tty.
+		docker.proc = { sid: 1 };
+		await refused("foreground:claude");
+		docker.proc = { tty: 34818 };
+		await refused("foreground:claude");
+		docker.proc = { tty: 0 };
+		await refused("foreground:claude");
+		// The pane's process does not lead its session (not the pty's shell).
+		docker.proc = {};
+		docker.paneProc = { sid: 1 };
+		await refused("foreground:claude");
+		docker.paneProc = {};
+		// Stopped (Ctrl-Z) or zombie.
+		docker.proc = { state: "T" };
+		await refused("foreground:claude");
+		docker.proc = { state: "Z" };
+		await refused("foreground:claude");
+		docker.proc = {};
+		// Identity: the probed pid runs something that is not a Claude binary.
+		docker.exe = "/usr/bin/bash";
+		await refused("foreground:claude");
+		docker.exe = "/home/developer/.local/share/other/2.1.316";
+		await refused("foreground:claude");
+		// 6. unreadable or inconsistent facts: fail closed (stale binding, nothing sent).
+		docker.exe = "/home/developer/.local/share/claude/versions/2.1.316";
+		docker.factsOverride = "D 700 0 0 claude\nP 733 S 700 733 700 34817 733 1000\n";
+		expect((await send(service, "hi", ID1)).body.error).toBe("binding-stale");
+		docker.factsOverride = null;
+		docker.script.set("display", [{ exit: 3 }]);
+		expect((await send(service, "hi", ID1)).body.error).toBe("binding-stale");
+		await noEffects();
+	});
+
+	for (const [label, paneCmd, exe, version] of [
+		[
+			"1. native install (binary named after its version)",
+			"2.1.314",
+			"/home/developer/.local/share/claude/versions/2.1.314",
+			"2.1.314",
+		],
+		[
+			"2. npm install",
+			"claude",
+			"/home/developer/workspace/.npm-global/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+			"2.1.314",
+		],
+		[
+			"3. resumed conversation on a native binary replaced by an update",
+			"2.1.314",
+			"/home/developer/.local/share/claude/versions/2.1.314 (deleted)",
+			"2.1.314",
+		],
+	] as const) {
+		it(`foreground identity: ${label} ⇒ delivered`, async () => {
+			const service = makeService();
+			await seedConversation(CID, { claudeVersion: `${version} (Claude Code)` });
+			docker.paneState = `${PANE_PID} 0 0 ${paneCmd}`;
+			docker.exe = exe;
+			const p = send(service, "hi", ID1);
+			await until(() => docker.effectSteps().includes("enter"));
+			expect(docker.effectSteps()).toEqual(["paste", "enter"]);
+			await promptArrives("hi");
+			expect((await p).body.result).toBe("delivered");
+		});
+	}
+
+	it("precheck: the Claude process changed between the precondition and the first keystroke (restart or reused pid) ⇒ binding-stale, nothing typed", async () => {
+		const service = makeService();
+		docker.script.set("display", [{ exit: 0 }, "park"]);
+		const p = send(service, "hi", ID1);
+		await until(() => docker.parked.size === 1);
+		docker.proc = { start: "2000" }; // same pid, different start time
+		docker.release(docker.calls.filter((c) => c.step === "display")[1]!.id, 0);
+		const r = await p;
+		expect(r.body.error).toBe("binding-stale");
+		await until(async () =>
+			(await eventsOf()).some((e) => e.ev === "composer_send" && e.data.state === "failed"),
+		);
+		const failed = (await eventsOf()).find(
+			(e) => e.ev === "composer_send" && e.data.state === "failed",
+		);
+		expect(failed?.data.stage).toBe("precheck");
+		expect(docker.effectSteps()).toEqual([]);
+	});
+
+	it("precheck: Claude left the foreground after the precondition ⇒ needs-terminal, nothing typed", async () => {
+		const service = makeService();
+		docker.script.set("display", [{ exit: 0 }, "park"]);
+		const p = send(service, "hi", ID1);
+		await until(() => docker.parked.size === 1);
+		docker.proc = { tpgid: PANE_PID };
+		docker.paneProc = { tpgid: PANE_PID };
+		docker.release(docker.calls.filter((c) => c.step === "display")[1]!.id, 0);
+		expect((await p).body.error).toBe("needs-terminal");
+		await until(async () =>
+			(await eventsOf()).some((e) => e.ev === "composer_send" && e.data.state === "failed"),
+		);
+		expect(docker.effectSteps()).toEqual([]);
+	});
+
 	it("a cross-user send writes the operate row before any effect, fail-closed; the event says admin", async () => {
 		const service = makeService();
 		audit.fail = true;

@@ -274,6 +274,172 @@ export function ancestryArgv(pid: number, panePid: number): string[] {
 	];
 }
 
+// ── Foreground identity (§8.1.3 `needs-terminal`, foreground) ──────────────
+
+/**
+ * One read, in one exec, of everything the foreground rule needs: the pane
+ * (`tmux display`), `/proc/<pid>/stat` of the probed Claude pid (P) and of
+ * the pane's process (T) — state, ppid, process group, session, controlling
+ * tty, the tty's foreground group (tpgid), start time —, whether the pid
+ * descends from the pane's process (A), and the pid's executable (E).
+ *
+ * Why not the pane's command name any more: the native installer runs
+ * `~/.local/share/claude/versions/<X.Y.Z>`, so tmux reports the version
+ * (`2.1.316`) as `pane_current_command` and a name list refused a Claude
+ * that WAS in the foreground (Educación HZ, 2026-11-02). The rule is now
+ * about the process the probe names and who owns the terminal, decided in
+ * `foregroundFault`. Any missing or malformed line ⇒ the parser answers
+ * null and the caller refuses (fail closed).
+ */
+export const PANE_FACTS_SCRIPT = `pane="$1"
+pid="$2"
+case "$pid" in ''|*[!0-9]*) exit 3;; esac
+d="$(tmux display -p -t "$pane" '#{pane_pid} #{pane_in_mode} #{pane_dead} #{pane_current_command}')" || exit 3
+pp="\${d%% *}"
+case "$pp" in ''|*[!0-9]*) exit 3;; esac
+facts() {
+	s="$(cat "/proc/$2/stat" 2>/dev/null)" || return 1
+	r="\${s##*) }"
+	set -- "$1" "$2" $r
+	printf '%s %s %s %s %s %s %s %s %s\\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "\${22}"
+}
+printf 'D %s\\n' "$d"
+facts P "$pid" || exit 3
+facts T "$pp" || exit 3
+a=no
+p="$pid"
+while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null; do
+	if [ "$p" = "$pp" ]; then a=yes; break; fi
+	s="$(cat "/proc/$p/stat" 2>/dev/null)" || break
+	r="\${s##*) }"
+	set -- $r
+	p="\${2:-}"
+done
+printf 'A %s\\n' "$a"
+e="$(readlink "/proc/$pid/exe" 2>/dev/null)" || exit 3
+printf 'E %s\\n' "$e"
+`;
+export function paneFactsArgv(paneId: string, pid: number): string[] {
+	return [
+		"timeout",
+		"-k",
+		"2",
+		String(EXEC_TIMEOUT_S),
+		"bash",
+		"-c",
+		PANE_FACTS_SCRIPT,
+		"st-pane-facts",
+		paneId,
+		String(pid),
+	];
+}
+
+export interface ProcFacts {
+	pid: number;
+	state: string;
+	ppid: number;
+	pgrp: number;
+	sid: number;
+	tty: number;
+	tpgid: number;
+	/** `starttime` (clock ticks since boot), as text: identity across reads. */
+	start: string;
+}
+export interface PaneFacts {
+	pane: PaneState;
+	/** The probed Claude pid. */
+	proc: ProcFacts;
+	/** The pane's own process (`pane_pid`, the shell tmux started). */
+	paneProc: ProcFacts;
+	/** The Claude pid descends from the pane's process. */
+	ancestry: boolean;
+	/** `readlink /proc/<pid>/exe`, possibly ending in " (deleted)". */
+	exe: string;
+}
+
+const PROC_LINE = /^([PT]) (\d+) ([A-Za-z]) (\d+) (\d+) (\d+) (\d+) (-?\d+) (\d+)$/;
+function parseProc(line: string, tag: "P" | "T"): ProcFacts | null {
+	const m = line.match(PROC_LINE);
+	if (!m || m[1] !== tag) return null;
+	return {
+		pid: Number(m[2]),
+		state: m[3] as string,
+		ppid: Number(m[4]),
+		pgrp: Number(m[5]),
+		sid: Number(m[6]),
+		tty: Number(m[7]),
+		tpgid: Number(m[8]),
+		start: m[9] as string,
+	};
+}
+
+/** Strict: exactly the five lines, in order; anything else ⇒ null. */
+export function parsePaneFacts(stdout: string): PaneFacts | null {
+	const lines = stdout.replace(/\n$/, "").split("\n");
+	if (lines.length !== 5) return null;
+	const [d, p, t, a, e] = lines as [string, string, string, string, string];
+	if (!d.startsWith("D ")) return null;
+	const pane = parsePaneState(d.slice(2));
+	const proc = parseProc(p, "P");
+	const paneProc = parseProc(t, "T");
+	const am = a.match(/^A (yes|no)$/);
+	const em = e.match(/^E (\/.+)$/);
+	if (!pane || !proc || !paneProc || !am || !em) return null;
+	return { pane, proc, paneProc, ancestry: am[1] === "yes", exe: em[1] as string };
+}
+
+/**
+ * Is `exe` a Claude Code binary? The npm package runs `bin/claude.exe`
+ * (process name `claude`), older ones `node` with the CLI script, the
+ * native installer `~/.local/share/claude/versions/<X.Y.Z>`. A binary
+ * replaced by an update shows " (deleted)" and is still the same process.
+ */
+export function isClaudeExe(exe: string): boolean {
+	const p = exe.replace(/ \(deleted\)$/, "");
+	const base = p.slice(p.lastIndexOf("/") + 1);
+	if (base === "claude" || base === "claude.exe" || base === "node") return true;
+	return /^\d+\.\d+\.\d+$/.test(base) && /\/claude\/versions\/[^/]+$/.test(p);
+}
+
+/**
+ * Why the probed pid is NOT Claude in the terminal's foreground, or null
+ * when it is. Every condition must hold (fail closed on each):
+ * - the facts are about the pid the probe named and the pane tmux reports;
+ * - the executable is a Claude binary (`identity`);
+ * - the pane's process leads its own session and Claude is in that same
+ *   session, on the same, real controlling tty (`session`, `tty`);
+ * - Claude leads its own process group — the shell's job control put it
+ *   there —, so the foreground group cannot be some other job (`group`);
+ * - that group is the tty's foreground group, as seen from both processes
+ *   (`not-foreground`);
+ * - the process is alive and not stopped (`state`).
+ * Ancestry is decided by the caller (`binding-stale`, a different code).
+ *
+ Limit, documented in CONVERSATION.md §8.1.3: a child that stays in
+ * Claude's process group shares the foreground with it and this check
+ * cannot tell which member reads the tty — concretely the external editor
+ * (Ctrl+G), which leaves tpgid and the probe unchanged. Only the input-region
+ * read of the precondition covers it (the editor hides Claude's `❯` box ⇒
+ * unlocated ⇒ refused); `!` commands run detached from the tty. Accepted
+ * false negative: Claude run as a child of a `node` launcher in the
+ * launcher's group (`cli-wrapper.cjs`) does not lead its group ⇒ refused.
+ *
+ * Not a guarantee for later keystrokes: each read describes the moment it
+ * was taken; the window between the last read and the next paste or the
+ * final Enter remains (CONVERSATION.md §8.1.5, "Carreras que el precheck no
+ * elimina").
+ */
+export function foregroundFault(f: PaneFacts, expectedPid: number): string | null {
+	if (f.proc.pid !== expectedPid || f.paneProc.pid !== f.pane.panePid) return "mismatch";
+	if (!isClaudeExe(f.exe)) return "identity";
+	if (/^[ZTtXx]$/.test(f.proc.state)) return "state";
+	if (f.paneProc.sid !== f.paneProc.pid || f.proc.sid !== f.paneProc.sid) return "session";
+	if (f.proc.tty === 0 || f.proc.tty !== f.paneProc.tty) return "tty";
+	if (f.proc.pgrp !== f.proc.pid) return "group";
+	if (f.proc.tpgid !== f.proc.pgrp || f.paneProc.tpgid !== f.proc.pgrp) return "not-foreground";
+	return null;
+}
+
 // ── Input region (§8.1.3 `composer-not-empty`) ──────────────────────────────
 
 export type InputRegion =

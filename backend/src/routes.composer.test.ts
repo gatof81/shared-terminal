@@ -128,7 +128,8 @@ class FakeDocker implements ComposerDockerPort {
 		}
 		const stdout =
 			step === "display"
-				? "700 0 0 claude\n"
+				? // The pane-facts read (§8.1.3): Claude (the probed pid) leads its group, owns pts of pane 700.
+					`D 700 0 0 claude\nP ${cmd.at(-1)} S 700 ${cmd.at(-1)} 700 34817 ${cmd.at(-1)} 1000\nT 700 S 119 700 700 34817 ${cmd.at(-1)} 900\nA yes\nE /home/developer/.npm-global/bin/claude\n`
 				: step === "capture"
 					? `${RULE}\n❯ ${this.typed}\n${RULE}\n`
 					: step === "ancestry"

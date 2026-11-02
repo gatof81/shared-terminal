@@ -48,10 +48,13 @@ import {
 	CONSUME_MAX_POLLS,
 	CONSUME_POLL_MS,
 	captureArgv,
+	foregroundFault,
 	inputRegion,
 	inputRegionPlain,
 	normalizeText,
+	paneFactsArgv,
 	paneStateArgv,
+	parsePaneFacts,
 	parsePaneState,
 	pasteConsumed,
 	segment,
@@ -69,6 +72,13 @@ const SOCK = `st-composer-smoke-${RUN}`;
 const MOCK_PORT = 18080 + (process.pid % 1000);
 const MOCK_REPLY_MARKER = "· done";
 const SMOKE_KEY = "sk-ant-smoke-key-00000000000000000000";
+/**
+ * `ST_NATIVE_LAYOUT=1` (docker mode): run the CLI the way the native installer
+ * does — the image's binary copied to `~/.local/share/claude/versions/<X.Y.Z>`
+ * and started from a shell in the pane, so `pane_current_command` is the
+ * version (Educación HZ, 2026-11-02) and Claude is a job of that shell.
+ */
+const NATIVE_LAYOUT = process.env.ST_NATIVE_LAYOUT === "1";
 
 let failures = 0;
 function check(what: string, ok: boolean, detail?: unknown): void {
@@ -275,6 +285,40 @@ jq --arg k "${key.slice(-20)}" '. + {hasCompletedOnboarding: true, theme: "dark"
 cat /tmp/cj > "$f"`;
 		r = await this.dexec(["bash", "-c", seed]);
 		if (r.code !== 0) throw new Error(`seed: ${r.out}`);
+		if (NATIVE_LAYOUT) {
+			r = await this.dexec([
+				"bash",
+				"-c",
+				'set -e; v="$(claude --version | cut -d" " -f1)"; d=~/.local/share/claude/versions; mkdir -p "$d"; cp "$(readlink -f "$(command -v claude)")" "$d/$v"; chmod 755 "$d/$v"; echo "$d/$v"',
+			]);
+			if (r.code !== 0) throw new Error(`native layout: ${r.out}`);
+			const bin = r.out.trim().split("\n").pop() as string;
+			r = await this.dexec([
+				"tmux",
+				"new-session",
+				"-d",
+				"-s",
+				TAB,
+				"-x",
+				"160",
+				"-y",
+				"45",
+				"-c",
+				this.projectPath,
+			]);
+			if (r.code !== 0) throw new Error(`tmux: ${r.out}`);
+			await sleep(500);
+			r = await this.dexec([
+				"tmux",
+				"send-keys",
+				"-t",
+				TAB,
+				`export DISABLE_AUTOUPDATER=1; ${bin}`,
+				"Enter",
+			]);
+			if (r.code !== 0) throw new Error(`tmux send-keys: ${r.out}`);
+			return;
+		}
 		r = await this.dexec([
 			"tmux",
 			"new-session",
@@ -318,6 +362,8 @@ function summarizeProbe(json: string): string {
 // ── Scenario helpers ────────────────────────────────────────────────────────
 
 let drv: Driver;
+/** The CLI pid the probe named in the foreground-identity phase (reused after /exit). */
+let claudePidSeen = 0;
 let paneId = "%0";
 
 async function screen(): Promise<string> {
@@ -515,6 +561,41 @@ async function main(): Promise<void> {
 				check(`ancestry: the pane's child ${child} ⇒ yes`, r === "yes", r);
 			}
 		}
+		// §8.1.3 foreground identity on the real CLI: the probe's pid for this
+		// conversation, read through the same script the composer uses.
+		const probeOut = (await drv.exec(["timeout", "20", "claude", "agents", "--json"])).out;
+		let claudePid = 0;
+		try {
+			const arr = JSON.parse(probeOut) as Array<{ pid?: number; cwd?: string }>;
+			claudePid =
+				arr.find((a) => typeof a.pid === "number" && String(a.cwd ?? "").length > 0)?.pid ?? 0;
+		} catch {}
+		check("probe names the CLI's pid", claudePid > 0, probeOut.slice(0, 200));
+		claudePidSeen = claudePid;
+		const facts = parsePaneFacts((await drv.exec(paneFactsArgv(paneId, claudePid))).out);
+		check("pane facts parse (pane, Claude, pane process, ancestry, exe)", facts !== null);
+		if (facts) {
+			note(
+				`pane_current_command = ${facts.pane.command}; exe = ${facts.exe}; pgrp ${facts.proc.pgrp} tpgid ${facts.proc.tpgid} sid ${facts.proc.sid} pane_pid ${facts.pane.panePid}`,
+			);
+			if (NATIVE_LAYOUT) {
+				check(
+					"native layout: pane_current_command is the version, exe under …/claude/versions/",
+					/^\d+\.\d+\.\d+$/.test(facts.pane.command) && /\/claude\/versions\//.test(facts.exe),
+					facts.pane.command,
+				);
+				check(
+					"native layout: Claude is a job of the pane's shell (not the pane process)",
+					facts.proc.pid !== facts.pane.panePid,
+				);
+			}
+			check("Claude descends from the pane", facts.ancestry);
+			check(
+				"foreground identity: Claude owns the terminal",
+				foregroundFault(facts, claudePid) === null,
+				foregroundFault(facts, claudePid),
+			);
+		}
 		const idle = inputRegion(await screen());
 		check(
 			"input region at the idle prompt ⇒ empty (ghost suggestion must not count)",
@@ -628,6 +709,55 @@ async function main(): Promise<void> {
 			const back = await waitPrompt(20_000);
 			check("the pane recovers after Escape + Ctrl-U (prompt visible again)", back);
 			if (!back) await dumpScreen("after !… + Escape");
+		}
+
+		if (NATIVE_LAYOUT) {
+			phase("§8.1.3 foreground: back at the shell after /exit");
+			// The pid the probe named at the start (an `-f` pattern run through `bash -c` would match bash itself).
+			const pidBefore = String(claudePidSeen);
+			await drv.exec(["timeout", "5", "tmux", "send-keys", "-t", paneId, "/exit", "Enter"]);
+			let atShell = false;
+			for (let i = 0; i < 40; i++) {
+				const c = (
+					await drv.exec([
+						"timeout",
+						"5",
+						"tmux",
+						"display",
+						"-p",
+						"-t",
+						paneId,
+						"#{pane_current_command}",
+					])
+				).out.trim();
+				if (c === "bash") {
+					atShell = true;
+					break;
+				}
+				await sleep(250);
+			}
+			check("/exit returns the pane to the shell", atShell);
+			const gone = parsePaneFacts(
+				(await drv.exec(paneFactsArgv(paneId, Number(pidBefore) || 1))).out,
+			);
+			check(
+				"Claude exited ⇒ its facts are unreadable (fail closed) or not in the foreground",
+				gone === null || foregroundFault(gone, Number(pidBefore)) !== null,
+				gone && foregroundFault(gone, Number(pidBefore)),
+			);
+			const shellPid = Number(
+				(
+					await drv.exec(["timeout", "5", "tmux", "display", "-p", "-t", paneId, "#{pane_pid}"])
+				).out.trim(),
+			);
+			const shell = parsePaneFacts((await drv.exec(paneFactsArgv(paneId, shellPid))).out);
+			check(
+				"the shell owns the terminal (tpgid = its pid) and is not a Claude binary ⇒ refused (identity)",
+				shell !== null &&
+					shell.paneProc.tpgid === shellPid &&
+					foregroundFault(shell, shellPid) === "identity",
+				shell && { tpgid: shell.paneProc.tpgid, fault: foregroundFault(shell, shellPid) },
+			);
 		}
 
 		phase("summary");
