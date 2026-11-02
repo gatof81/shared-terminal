@@ -88,6 +88,43 @@ describe("planCarry (§2.7.7)", () => {
 			{ code: "layer-system", count: 2 },
 		]);
 	});
+	it("deletions: npm's rotated debug log under ~/.npm/_logs is tolerated; the directory, nested paths, other logs and other files still block", async () => {
+		const HOME = "/home/developer";
+		const plan = async (deleted: string[]) =>
+			planCarry({
+				changes: [
+					{ Path: `${HOME}/.npm`, Kind: 0 },
+					{ Path: `${HOME}/.npm/_cacache`, Kind: 1 },
+					...deleted.map((p) => ({ Path: p, Kind: 2 })),
+				],
+				mounts: [],
+				stat: async (p) => (p === `${HOME}/.npm` ? { kind: "dir" } : null),
+			});
+		// Positive: exactly the shape the three legacy sessions show.
+		const ok = await plan([`${HOME}/.npm/_logs/2026-07-13T14_04_52_155Z-debug-0.log`]);
+		expect(ok.blockers).toEqual([]);
+		expect(ok.entries.map((e) => e.path)).toEqual([`${HOME}/.npm`]);
+		expect(
+			(await plan([`${HOME}/.npm/_logs/2026-07-13T14_04_52_155Z-debug.log`])).blockers,
+		).toEqual([]);
+		// Negative: anything else deleted blocks, counted per path.
+		for (const p of [
+			`${HOME}/.npm/_logs`, // the directory itself
+			`${HOME}/.npm/_logs/sub/x-debug-0.log`, // nested
+			`${HOME}/.npm/_logs/notes.txt`, // not an npm debug log
+			`${HOME}/.npm/_cacache/index-v5/aa`, // elsewhere under .npm
+			`${HOME}/.profile`,
+			`${HOME}/_logs/x-debug-0.log`,
+			"/tmp/_logs/x-debug-0.log",
+		]) {
+			expect((await plan([p])).blockers).toEqual([{ code: "layer-deleted", count: 1 }]);
+		}
+		expect(
+			(await plan([`${HOME}/.npm/_logs/a-debug-0.log`, `${HOME}/.profile`, `${HOME}/.bashrc`]))
+				.blockers,
+		).toEqual([{ code: "layer-deleted", count: 2 }]);
+	});
+
 	it("budget and disk arithmetic", () => {
 		expect(carryBudgetMs(0, 300_000, 20 * 1024 ** 2, 3_600_000)).toBe(300_000);
 		expect(carryBudgetMs(12 * 1024 ** 3, 300_000, 20 * 1024 ** 2, 3_600_000)).toBe(

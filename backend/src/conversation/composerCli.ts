@@ -78,22 +78,33 @@ export async function runComposerCli(argv: string[], deps: ComposerCliDeps): Pro
 	}
 }
 
+/**
+ * The production wiring of `main` (see recreate/adminCli.ts `hostDeps`): the
+ * JWT secret must be validated in this process before `signCliToken` works.
+ */
+export async function hostDeps(): Promise<Pick<ComposerCliDeps, "lookupAdmin" | "signToken">> {
+	const { d1Query } = await import("../db.js");
+	const { signCliToken, validateJwtSecret } = await import("../auth.js");
+	validateJwtSecret();
+	return {
+		lookupAdmin: async (username) => {
+			const r = await d1Query<{ id: string; username: string; is_admin: number }>(
+				"SELECT id, username, is_admin FROM users WHERE username = ?",
+				[username],
+			);
+			const row = r.results[0];
+			return row && row.is_admin === 1 ? { id: row.id, username: row.username } : null;
+		},
+		signToken: signCliToken,
+	};
+}
+
 /* c8 ignore start */
 if (typeof require !== "undefined" && require.main === module) {
 	void (async () => {
-		const { d1Query } = await import("../db.js");
-		const { signCliToken } = await import("../auth.js");
 		const code = await runComposerCli(process.argv.slice(2), {
 			port: Number.parseInt(process.env.PORT ?? "3001", 10),
-			lookupAdmin: async (username) => {
-				const r = await d1Query<{ id: string; username: string; is_admin: number }>(
-					"SELECT id, username, is_admin FROM users WHERE username = ?",
-					[username],
-				);
-				const row = r.results[0];
-				return row && row.is_admin === 1 ? { id: row.id, username: row.username } : null;
-			},
-			signToken: signCliToken,
+			...(await hostDeps()),
 			fetch,
 			stdout: (l) => console.log(l),
 			stderr: (l) => console.error(l),

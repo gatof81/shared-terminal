@@ -56,6 +56,17 @@ export interface CarryPlan {
 /** The CLI's runtime dirs under /tmp (layer.ts documents their shapes): a dead process's state. */
 const CLI_TMP_RUNTIME: ReadonlySet<string> = new Set(["/tmp/cc-socks", "/tmp/claude-1000"]);
 
+/**
+ * The one deletion the carry tolerates: an npm debug log the image build
+ * left under `~/.npm/_logs/` and npm's own log rotation removed since (the
+ * three pre-3.0d sessions each show exactly one: `2026-07-13T…-debug-0.log`
+ * from the `pre-3.0` image). Carrying O's `~/.npm` over N's image copy makes
+ * that log reappear in N, which is inert. Only a regular npm log FILE
+ * directly in `_logs/` qualifies — never the directory, a nested path or
+ * anything else under HOME, whose deletion still blocks (`layer-deleted`).
+ */
+const NPM_LOG_DELETION_RE = /^\/home\/developer\/\.npm\/_logs\/[^/]+-debug(-\d+)?\.log$/;
+
 function isUnder(p: string, dir: string): boolean {
 	return p === dir || p.startsWith(`${dir}/`);
 }
@@ -125,8 +136,10 @@ export async function planCarry(input: CarryInput): Promise<CarryPlan> {
 		if (DOCKER_INIT_FILES.has(p)) continue; // Docker's `--init` binary, present in every session
 		if (p === HOME || p === "/tmp" || p === "/home") continue; // the parents, "changed" by their children
 		if (ch.Kind === 2) {
-			// A deletion cannot be carried: only the entrypoint's own replacement is tolerated.
+			// A deletion cannot be carried: only the entrypoint's own replacement
+			// and npm's rotated debug logs are tolerated.
 			if ([...verifiedSymlinks].some((l) => p !== l && isUnder(p, l))) continue;
+			if (NPM_LOG_DELETION_RE.test(p)) continue;
 			block("layer-deleted");
 			continue;
 		}
