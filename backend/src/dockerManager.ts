@@ -3146,7 +3146,14 @@ export class DockerManager {
 		// An image ID is immutable, so its labels are cacheable forever.
 		const cached = this.relayLabelByImageId.get(imageId);
 		if (cached !== undefined) return cached;
-		const info = await this.docker.getImage(imageId).inspect();
+		const info = await this.docker.getImage(imageId).inspect().catch((err: unknown) => {
+			// Docker can retain a running container after its original image was removed.
+			// Missing is not a relay-capable image; other daemon failures must propagate.
+			if ((err as { statusCode?: number }).statusCode === 404) return null;
+			throw err;
+		});
+		// Do not cache a 404: the same immutable image ID may be loaded again.
+		if (info === null) return false;
 		const ok = info.Config?.Labels?.[RELAY_IMAGE_LABEL] === RELAY_IMAGE_LABEL_VALUE;
 		this.relayLabelByImageId.set(imageId, ok);
 		return ok;
