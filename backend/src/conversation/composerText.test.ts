@@ -321,9 +321,17 @@ describe("foreground identity (§8.1.3 needs-terminal, foreground)", () => {
 					"80",
 					"-y",
 					"20",
-					"bash --norc --noprofile -i",
+					"env PS1='st-ready$ ' TERM=xterm bash --norc --noprofile -i",
 				);
 				const pane = tmux("display", "-p", "-t", "t", "#{pane_id}").trim();
+				// Type only once the interactive shell shows its prompt (on a busy CI runner the
+				// keys otherwise race the shell's start and the job never runs).
+				const prompted = () =>
+					tmux("capture-pane", "-p", "-t", pane)
+						.split("\n")
+						.filter((l) => l.trim().length > 0)
+						.at(-1)
+						?.trim() === "st-ready$";
 				let lastRaw = "";
 				const read = (pid: number) => {
 					const r = spawnSync(
@@ -339,7 +347,7 @@ describe("foreground identity (§8.1.3 needs-terminal, foreground)", () => {
 					return r.status === 0 ? parsePaneFacts(r.stdout.replace(/^/, "")) : null;
 				};
 				const wait = (cond: () => boolean) => {
-					for (let i = 0; i < 100 && !cond(); i++) spawnSync("sleep", ["0.05"]);
+					for (let i = 0; i < 400 && !cond(); i++) spawnSync("sleep", ["0.05"]);
 				};
 				// The script talks to the default tmux socket; point it at ours through a wrapper on PATH.
 				const bin = path.join(dir, "bin");
@@ -355,6 +363,8 @@ describe("foreground identity (§8.1.3 needs-terminal, foreground)", () => {
 					process.env.PATH = savedPath;
 				};
 				// 1. the native-named binary in the foreground
+				wait(prompted);
+				expect(prompted(), "shell prompt before typing").toBe(true);
 				tmux("send-keys", "-t", pane, `${native} 300`, "Enter");
 				let pid = 0;
 				wait(() => {
@@ -376,6 +386,8 @@ describe("foreground identity (§8.1.3 needs-terminal, foreground)", () => {
 				tmux("send-keys", "-t", pane, "C-c", "");
 				wait(() => tmux("display", "-p", "-t", pane, "#{pane_current_command}").trim() === "bash");
 				expect(read(pid)).toBeNull();
+				wait(prompted);
+				expect(prompted(), "shell prompt before typing").toBe(true);
 				tmux("send-keys", "-t", pane, `${native} 301 &`, "Enter");
 				let bg = 0;
 				wait(() => {
@@ -394,6 +406,8 @@ describe("foreground identity (§8.1.3 needs-terminal, foreground)", () => {
 				const native2 = path.join(vdir, "2.1.315");
 				copyFileSync("/bin/bash", native2);
 				chmodSync(native2, 0o755);
+				wait(prompted);
+				expect(prompted(), "shell prompt before typing").toBe(true);
 				tmux("send-keys", "-t", pane, `kill %1; ${native2} --norc --noprofile -i`, "Enter");
 				let owner = 0;
 				wait(() => {
@@ -410,6 +424,8 @@ describe("foreground identity (§8.1.3 needs-terminal, foreground)", () => {
 				const before = read(owner);
 				expect(before, lastRaw).not.toBeNull();
 				expect(before && foregroundFault(before, owner)).toBeNull();
+				wait(prompted);
+				expect(prompted(), "shell prompt before typing").toBe(true);
 				tmux("send-keys", "-t", pane, "sleep 303", "Enter");
 				wait(() => tmux("display", "-p", "-t", pane, "#{pane_current_command}").trim() === "sleep");
 				const after = read(owner);
