@@ -1,4 +1,26 @@
-# POC de Channels — kit de la fase 0 (S0 + S1)
+# POC de Channels — kit en VM (reservado para la POC completa)
+
+> **Estado (2026-11-02):** la fase 0 ya **no** usa este kit. Por decisión del responsable corre en un
+> usuario temporal de su Mac o PC (`poc/channels-local/`). Este kit de VM queda como base para la
+> **POC completa** (fallos, concurrencia, reinicios), que necesita su propio GO. Antes de reutilizarlo
+> hay que resolver los hallazgos de su revisión independiente:
+>
+> - `docker cp` a un `/tmp` tmpfs de un contenedor `--read-only` falla: usar `docker exec -i … cat >`.
+> - El pin compara 7 hashes pero no el conjunto exacto de archivos: un `hooks/` o `skills/` añadido
+>   pasaría.
+> - Falta `forceLoginMethod: "claudeai"` en managed settings.
+> - Un `evidence.md` truncado pasa la puerta de S1: exigir una línea final `RESULT: ALL-PASS`.
+> - Las comprobaciones negativas de red dan PASS si la sonda misma falla: añadir controles positivos.
+> - Varios fallos del harness se registran como NO-GO: estado de `upload`, detección por la etiqueta
+>   exacta, hooks sin `SessionStart`, `fakechat` sobrante de la sesión de login, `skip` del canal no
+>   clasificado por motivo.
+> - `teardown.sh` puede borrar el volumen de credenciales sin `/logout` y sin comprobarlo.
+> - El log de depuración se copia al host sin redactar; la redacción no cubre variantes de ids.
+> - Menores: regla `OUTPUT` añadida al final (ufw), sin IPv6, sondas más laxas que el backend,
+>   recuento de re-ejecuciones, `pkill` que se mata a sí mismo, `docker rm` por nombre.
+>
+> El kit local ya incorpora las correcciones equivalentes.
+
 
 **Rama sin merge.** Diseño y criterios: `docs/design/project-chat/04-poc.md` (§1, §1.7, §7) en la PR
 #512. Este kit sólo cubre la **fase 0**: disponibilidad de Channels con la suscripción del
