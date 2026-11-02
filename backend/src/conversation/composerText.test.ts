@@ -7,7 +7,6 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -298,7 +297,9 @@ describe("foreground identity (§8.1.3 needs-terminal, foreground)", () => {
 	it.skipIf(!hasTmux)(
 		"PANE_FACTS_SCRIPT on a real tmux pane: a native-named binary in the foreground passes; a background job, a gone process and a foreground child in its own group do not",
 		() => {
-			const dir = mkdtempSync(path.join(os.tmpdir(), "st-facts-"));
+			// Inside the checkout, not os.tmpdir(): CI runners may mount /tmp noexec, and the test
+			// executes copies of binaries from here.
+			const dir = mkdtempSync(path.join(process.cwd(), ".st-facts-"));
 			const sock = `st-facts-${process.pid}`;
 			const tmux = (...a: string[]) =>
 				execFileSync("tmux", ["-L", sock, ...a], { encoding: "utf8" });
@@ -343,7 +344,7 @@ describe("foreground identity (§8.1.3 needs-terminal, foreground)", () => {
 							env: { ...process.env, TMUX: "" },
 						},
 					);
-					lastRaw = `exit=${r.status} pid=${pid} pane=${pane}\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`;
+					lastRaw = `exit=${r.status} pid=${pid} pane=${pane}\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}\nscreen:\n${tmux("capture-pane", "-p", "-t", pane)}`;
 					return r.status === 0 ? parsePaneFacts(r.stdout.replace(/^/, "")) : null;
 				};
 				const wait = (cond: () => boolean) => {
