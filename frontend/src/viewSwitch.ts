@@ -34,6 +34,7 @@ import {
 	updateChromeToggle,
 } from "./main.js";
 import { navigate } from "./router.js";
+import { setGeometryFrozen } from "./terminalGeometry.js";
 import { currentShell } from "./uiShell.js";
 import { chooseLanding, readHistoryHint, readViewPref, writeViewPref } from "./viewPolicy.js";
 
@@ -278,6 +279,10 @@ export function setView(next: View, opts: { forced?: boolean; landing?: boolean 
 	}
 	const prev = view;
 	view = next;
+	// The covered terminal keeps its geometry until it is shown again
+	// (terminalGeometry.ts): the soft keyboard of the Chat composer must
+	// not resize tmux for every viewer. Thawing runs one deferred fit.
+	setGeometryFrozen(next !== "terminal");
 	// A detail still pending for the view being left is void.
 	if (pendingRoute !== null && pendingRoute.view !== next) pendingRoute = null;
 	for (const [name, el] of Object.entries(overlays)) el.hidden = name !== next;

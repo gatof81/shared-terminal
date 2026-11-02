@@ -59,10 +59,21 @@ test.describe("terminal invariant", () => {
 
 		expect(backend.terminalSockets.length, "no new terminal socket").toBe(sockets);
 		expect(sock.closed, "the attach stayed open").toBe(false);
-		expect(resizes() - r0, "no resize sent by a view switch").toBe(0);
+		// v1 mobile: entering an overlay closes the chrome drawer, which changes
+		// the terminal's box while it is covered. The covered terminal keeps its
+		// geometry (terminalGeometry.ts) and syncs it ONCE when it is shown
+		// again; everywhere else a view switch sends nothing.
+		const deferredSync = app.mobile && app.shell === "v1" ? 1 : 0;
+		expect(resizes() - r0, "no resize sent by a view switch").toBe(deferredSync);
 		expect(inputs() - i0, "no input sent by a view switch").toBe(0);
-		expect(sock.sent.length - framesBefore, "no frame of any kind").toBe(0);
-		expect(await page.locator(".tab-pane.active .xterm-rows > div").count()).toBe(rowsBefore);
+		expect(sock.sent.length - framesBefore, "no frame of any kind").toBe(deferredSync);
+		const rowsAfter = await page.locator(".tab-pane.active .xterm-rows > div").count();
+		if (deferredSync === 0) expect(rowsAfter).toBe(rowsBefore);
+		else {
+			// The one deferred sync carries exactly the size the terminal shows.
+			const last = sock.sent.filter((f) => f.type === "resize").at(-1) as { rows: number };
+			expect(rowsAfter).toBe(last.rows);
+		}
 		// Output that arrives while an overlay is up still lands in the terminal.
 		await app.switchView("chat");
 		backend.pushTerminalOutput(sock.sessionId, "\r\nstill here\r\n");
