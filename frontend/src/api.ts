@@ -1685,6 +1685,8 @@ export interface ConversationSummary {
 	statusEvidence: string;
 	statusAt: string;
 	tabId: string | null;
+	/** The tmux pane the conversation is bound to; null = no pane (sends impossible). */
+	paneId: string | null;
 	startedAt: string;
 	endedAt: string | null;
 	lastEventAt: string;

@@ -42,6 +42,8 @@ import {
 	clock,
 	EventWindow,
 	groupBlocks,
+	lastEvidenceAt,
+	presentStatus,
 	STALE_EVIDENCE_MS,
 	STATUS_LABEL,
 	statusIsLiveClaim,
@@ -631,7 +633,9 @@ function titleOf(c: ConversationSummary): string {
 }
 
 function currentStatus(c: ConversationSummary): LiveStatus {
-	return cur?.liveStatus ?? { status: c.status, evidence: c.statusEvidence, at: c.statusAt };
+	const live = cur?.liveStatus ?? { status: c.status, evidence: c.statusEvidence, at: c.statusAt };
+	// Freshness: the later of the status time and the last event (lastEvidenceAt).
+	return { ...live, at: lastEvidenceAt({ statusAt: live.at, lastEventAt: c.lastEventAt }) };
 }
 
 /**
@@ -639,16 +643,30 @@ function currentStatus(c: ConversationSummary): LiveStatus {
  * evidence is older than a minute — its age, so "Working" never reads as a
  * fact when the last sign of life is from an hour ago (contract §5.3).
  */
-function statusChip(st: LiveStatus, opts: { age?: boolean } = {}): HTMLElement {
-	const chip = el("span", `chat-status tone-${statusTone(st.status)}`);
+function statusChip(
+	st: LiveStatus,
+	opts: { age?: boolean; staleness?: boolean } = {},
+): HTMLElement {
+	// `staleness: false` for chips whose time is not evidence of liveness
+	// (a subagent's start time): they keep their own label.
+	const shown =
+		opts.staleness === false
+			? {
+					label: STATUS_LABEL[st.status] ?? st.status,
+					tone: statusTone(st.status),
+					active: false,
+					stale: false,
+				}
+			: presentStatus(st.status, st.at, Date.now());
+	const chip = el("span", `chat-status tone-${shown.tone}`);
 	chip.appendChild(el("span", "chat-dot"));
-	chip.appendChild(el("span", "chat-status-label", STATUS_LABEL[st.status] ?? st.status));
+	chip.appendChild(el("span", "chat-status-label", shown.label));
 	const t = new Date(st.at).getTime();
 	const ageMs = Number.isNaN(t) ? 0 : Date.now() - t;
 	if (opts.age && ageMs >= 60_000) {
 		chip.appendChild(el("span", "chat-status-age", relativeDate(st.at)));
 	}
-	if (statusIsLiveClaim(st.status) && ageMs >= STALE_EVIDENCE_MS) chip.classList.add("stale");
+	if (shown.stale) chip.classList.add("stale");
 	chip.title = [st.evidence, st.at ? `last evidence ${clock(st.at)}` : ""]
 		.filter(Boolean)
 		.join(" · ");
@@ -679,7 +697,10 @@ function renderSummary(): void {
 	}
 	summaryEl.appendChild(el("span", "chat-summary-title", "Conversations"));
 	if (list.status === "loaded") {
-		const active = list.conversations.filter((x) => statusIsLiveClaim(x.status)).length;
+		const now = Date.now();
+		const active = list.conversations.filter(
+			(x) => presentStatus(x.status, lastEvidenceAt(x), now).active,
+		).length;
 		summaryEl.appendChild(el("span", "chat-summary-count", String(list.conversations.length)));
 		if (active > 0) summaryEl.appendChild(el("span", "chat-summary-active", `${active} active`));
 	}
@@ -786,8 +807,12 @@ function renderListInner(): void {
 		listEl.appendChild(empty);
 		return;
 	}
+	// "Active" = a live claim with fresh evidence. Unknown, stale, ended,
+	// disconnected and errored conversations are all listed under "Earlier",
+	// still openable and readable.
+	const now = Date.now();
 	const active = list.conversations.filter(
-		(c) => statusIsLiveClaim(c.status) || c.status === "error",
+		(c) => presentStatus(c.status, lastEvidenceAt(c), now).active,
 	);
 	const rest = list.conversations.filter((c) => !active.includes(c));
 	const sectioned = active.length > 0 && rest.length > 0;
@@ -809,10 +834,11 @@ function convList(items: ConversationSummary[]): HTMLElement {
 		const current = c.sessionId === selectedCid;
 		if (current) row.classList.add("selected");
 		row.setAttribute("aria-current", String(current));
-		const tone = statusTone(c.status);
+		const shown = presentStatus(c.status, lastEvidenceAt(c), Date.now());
+		const tone = shown.tone;
 		row.classList.add(`tone-${tone}`);
 		const dot = el("span", `chat-conv-dot tone-${tone}`);
-		dot.title = STATUS_LABEL[c.status] ?? c.status;
+		dot.title = shown.label;
 		row.appendChild(dot);
 		const main = el("span", "chat-conv-main");
 		const top = el("span", "chat-conv-top");
@@ -820,9 +846,7 @@ function convList(items: ConversationSummary[]): HTMLElement {
 		top.appendChild(el("span", "chat-conv-time", relativeDate(c.lastEventAt)));
 		main.appendChild(top);
 		const bottom = el("span", "chat-conv-bottom");
-		bottom.appendChild(
-			el("span", `chat-conv-status tone-${tone}`, STATUS_LABEL[c.status] ?? c.status),
-		);
+		bottom.appendChild(el("span", `chat-conv-status tone-${tone}`, shown.label));
 		if (c.kind === "headless" || c.kind === "teammate")
 			bottom.appendChild(el("span", "chat-conv-kind", c.kind));
 		if (c.gapsCount > 0) {
@@ -1379,11 +1403,14 @@ function agentCard(a: AgentView): HTMLElement {
 	const top = el("div", "chat-agent-top");
 	top.appendChild(el("span", "chat-agent-type", a.agentType || "agent"));
 	top.appendChild(
-		statusChip({
-			status: a.status === "done" ? "ended" : "running",
-			evidence: "",
-			at: a.endedAt ?? a.startedAt,
-		}),
+		statusChip(
+			{
+				status: a.status === "done" ? "ended" : "running",
+				evidence: "",
+				at: a.endedAt ?? a.startedAt,
+			},
+			{ staleness: false },
+		),
 	);
 	li.appendChild(top);
 	const bits: string[] = [a.agentId.slice(0, 8)];
@@ -1458,6 +1485,13 @@ function composerBlockReason(c: ConversationSummary | undefined, st: ComposerSta
 			return "Only an interactive Claude Code session can take a message from Chat.";
 		if (list.status === "loaded" && list.capture && !list.capture.effective)
 			return "Capture is not active on this session, so a send could not be confirmed.";
+		// The backend took the pane away from this conversation (another one
+		// started or resumed in it, or the container went down): its history
+		// stays readable here, input goes through the terminal.
+		// paneId, not tabId: the tab can be unknown on a well-bound pane
+		// (the hook carried no tmux session), and canSendInput follows the pane.
+		if (c.statusEvidence === "binding_lost" || c.paneId === null)
+			return "This conversation no longer has a terminal pane — another conversation took it over, or the session was restarted. Its history stays readable; type in the Terminal to continue.";
 		return "Sending from Chat is not available for this conversation.";
 	}
 	// The CLI must be at its prompt (§10 "3.2 composer": waiting_input/idle). The
@@ -1465,11 +1499,13 @@ function composerBlockReason(c: ConversationSummary | undefined, st: ComposerSta
 	// obvious case before a request. A live claim with stale evidence does not
 	// block — the list may be behind, and the server has the fresh probe.
 	const stale =
-		statusIsLiveClaim(c.status) && Date.now() - Date.parse(c.statusAt) > STALE_EVIDENCE_MS;
+		statusIsLiveClaim(c.status) && Date.now() - Date.parse(lastEvidenceAt(c)) > STALE_EVIDENCE_MS;
 	if (!stale) {
 		if (c.status === "running") return "Claude is working; wait for the turn to finish.";
 		if (c.status === "waiting_permission")
 			return "A permission prompt is open in the terminal. Answer it there first.";
+		if (c.status === "unknown")
+			return "State unknown — Claude Code hasn't reported since it started or resumed. It updates when it reports or a check confirms it's at its prompt; typing in the Terminal also updates it.";
 		if (c.status !== "waiting_input" && c.status !== "waiting_background")
 			return "This conversation is not at its prompt.";
 	}

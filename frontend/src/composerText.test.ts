@@ -49,3 +49,12 @@ describe("explainCode", () => {
 		expect(explainCode("something-new")).toBe("Send refused (something-new).");
 	});
 });
+
+describe("explainCode binding-stale detail", () => {
+	it("names the process kind when the CLI runs the conversation outside the pane", () => {
+		expect(explainCode("binding-stale", "kind:background")).toContain("background process");
+		expect(explainCode("binding-stale")).toBe(
+			"The conversation is no longer in the pane it was bound to.",
+		);
+	});
+});

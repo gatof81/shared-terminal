@@ -88,7 +88,12 @@ export function explainCode(code: string, detail?: string): string {
 		case "probe-failed":
 			return "Claude's state could not be read; try again.";
 		case "binding-stale":
-			return "The conversation is no longer in the pane it was bound to.";
+			// detail "kind:<kind>": the process the CLI reports for this
+			// conversation is not the interactive one in the pane (e.g. a
+			// background job it was moved to).
+			return detail?.startsWith("kind:")
+				? `This conversation is running as a ${detail.slice(5)} process, not in the terminal pane, so Chat cannot type into it. Use the Terminal.`
+				: "The conversation is no longer in the pane it was bound to.";
 		case "busy":
 			return "Claude is busy; wait for the turn to finish.";
 		case "needs-terminal":
