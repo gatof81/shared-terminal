@@ -26,8 +26,10 @@
  * shared by every tab of the origin, which share one cookie jar — a tab
  * logging in while another's logout is in flight waits for it too. It is
  * released when its holder's promise settles or the tab goes away. Without
- * it (old browsers, jsdom) an in-page queue with the same semantics covers
- * this tab only.
+ * it (old browsers, jsdom) an in-page queue with the same semantics orders
+ * THIS tab only: a logout in another tab is not waited for, so the
+ * cross-tab cookie guarantee holds only where Web Locks exist (every
+ * current engine: Chromium, Firefox ≥ 96, Safari ≥ 15.4).
  *
  * Waiting can be bounded (`waitMs`): past it the caller gets
  * `AuthBusyError` and NOTHING was sent — aborting the wait for a lock is

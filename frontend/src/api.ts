@@ -42,7 +42,8 @@ function setAuthMirror(loggedIn: boolean, admin: boolean, lead: boolean): void {
 }
 
 /** How long a login, register or status probe waits for an auth transition
- *  in flight (in this tab or another) before giving up WITHOUT sending —
+ *  in flight (in any tab with Web Locks; in this tab only without them)
+ *  before giving up WITHOUT sending —
  *  see authLock.ts. Generous: the only thing it waits for is the previous
  *  request's answer. */
 export const AUTH_WAIT_MS = 10_000;
@@ -119,7 +120,8 @@ export interface AuthStatus {
 }
 
 export async function checkAuthStatus(): Promise<AuthStatus> {
-	// Shared mode: never sent while a login/logout of this browser is in
+	// Shared mode: never sent while a login/logout of this browser (of
+	// this tab only, where Web Locks are missing — authLock.ts) is in
 	// flight, so it never reads a cookie that transition is about to
 	// replace or delete (authLock.ts).
 	return withAuthLock("shared", fetchAuthStatus, AUTH_WAIT_MS);
@@ -218,7 +220,8 @@ async function registerLocked(
 
 export async function login(username: string, password: string): Promise<AuthSuccess> {
 	// Exclusive: the request leaves only once every earlier transition of
-	// this browser has its answer, so this login's Set-Cookie is the last
+	// this browser (this tab only without Web Locks) has its answer, so
+	// this login's Set-Cookie is the last
 	// one applied — a logout still in flight cannot delete it afterwards.
 	return withAuthLock("exclusive", () => loginLocked(username, password), AUTH_WAIT_MS);
 }

@@ -25,6 +25,8 @@ class AuthServer {
 	base = "";
 	private holdNext = new Set<Holdable>();
 	private held = new Map<Holdable, (status?: number) => void>();
+	/** What `GET /sessions` answers per signed-in user (default: none). */
+	lists = new Map<string, unknown[]>();
 	/** Arrival order of every request, with the cookie it carried. */
 	log: Array<{ what: string; cookie: string | null }> = [];
 
@@ -119,7 +121,7 @@ class AuthServer {
 			if (forced !== undefined)
 				return json(forced, forced === 200 ? [] : { error: "Unauthorized" });
 			if (user === null) return json(401, { error: "Unauthorized" });
-			return json(200, []);
+			return json(200, this.lists.get(user) ?? []);
 		}
 		json(404, { error: `unserved ${path}` });
 	}
@@ -293,5 +295,51 @@ test.describe("auth transitions on the real cookie jar", () => {
 		await expect(page.locator("#toast .toast-item", { hasText: "expired" })).toHaveCount(1);
 		await expect.poll(() => server.received("POST /auth/logout")).toBe(logoutsBefore + 1);
 		await expect.poll(() => tokenOf(context)).toBe(null);
+	});
+	test("a /auth/status answering after the next login does not overwrite the new identity", async ({
+		app,
+		page,
+		backend,
+	}) => {
+		await signIn(page, "alice");
+		await expect(page.locator("#app-view")).toBeVisible();
+		await app.appMenu("logout-btn");
+		await expect(page.locator("#auth-view")).toBeVisible();
+
+		// On the login screen a status probe goes out (entering register mode
+		// re-reads needsSetup) and its answer is held.
+		server.hold("status");
+		await page.click("#auth-toggle-link");
+		await expect.poll(() => server.isHeld("status")).toBe(true);
+		await page.click("#auth-toggle-link"); // back to login, no probe
+
+		const bobSession = backend.sessions.find((x) => x.ownerUserId === "u-bob")!;
+		server.lists.set("bob", [backend.serialize(bobSession)]);
+		backend.loginAs("bob");
+		await page.fill("#auth-username", "bob");
+		await page.fill("#auth-password", "pw");
+		await page.locator("#auth-submit").click({ noWaitAfter: true });
+		await page.waitForTimeout(1000);
+		// The probe's answer ("not signed in") lands now.
+		server.release("status");
+		await expect(page.locator("#app-view")).toBeVisible({ timeout: 15_000 });
+		await page.waitForTimeout(500);
+
+		// Bob is still Bob for the app: a new session of his appears on refresh.
+		server.lists.set("bob", [
+			backend.serialize(bobSession),
+			{
+				...backend.serialize(bobSession),
+				sessionId: "00000000-0000-4000-8000-0000000000b2",
+				name: "bob-new",
+			},
+		]);
+		await app.openSidebar();
+		await page.click("#sidebar-refresh-btn");
+		await expect(
+			app.sessionRow("bob-new"),
+			"a stale status answer signed the mirror out",
+		).toBeVisible();
+		expect(await tokenOf(page.context())).toBe("bob");
 	});
 });
