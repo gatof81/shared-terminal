@@ -247,8 +247,13 @@ alternativa no usada.
 - **Observacional**: no imprime nada (en `UserPromptSubmit` y `SessionStart` lo impreso entra al
   contexto de Claude), siempre sale con 0 (el 2 bloquea) y no guarda texto de prompts o respuestas:
   sólo bytes, SHA-256, ids de prueba y los atributos permitidos de `<channel>`.
-- **Orden**: primero **una** prueba instrumentada tras ≥ 30 s de inactividad. Sólo si su informe es
-  limpio, las 10 cortas y las 2 de ≥ 1 h.
+- **Orden**: primero **una** prueba instrumentada tras ≥ 30 s de inactividad **observada** (estado
+  consultado cada 3 s, sin huecos > 10 s ni hooks nuevos; una sola observación nunca cuenta). Es lo
+  único autorizado (2026-11-02): el kit rechaza las series sin una marca explícita. Las 10 cortas y
+  las 2 de ≥ 1 h necesitan una autorización aparte tras revisar ese informe.
+- **Despertar ≠ flujo bidireccional**: el informe da el veredicto de despertar de §1.7 y, aparte, si
+  cada mensaje completó mensaje → turno → `Stop` → respuesta vista en Fakechat. Sin la respuesta
+  observada en Fakechat, nunca se declara el flujo completo.
 - **Por mensaje**: recibido por el CLI (línea de recepción del log de depuración), hook, despertar
   sin intervención, `Stop` del mismo `prompt_id`, respuesta vuelta a Fakechat (escucha pasiva de su
   WebSocket), latencias, `source` (presente o ausente), forma del prompt y correlación (A1–A5 de
