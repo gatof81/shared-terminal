@@ -54,7 +54,7 @@ Skill asociada: [`.claude/skills/architecture-spec/SKILL.md`](../../../.claude/s
 | No despierta una sesión inactiva (#44380, abierto) | Alta | Criterio G2; si falla, brazo B |
 | `--resume`/re-host pierde el flag (#78028, #90160, #101872) | Media | Criterio G5; el alias de la imagen lleva el flag; runtime se re-registra por proceso |
 | Sin evidencia de aceptación (H8 falsa) | Alta | Criterio G3 = NO-GO |
-| Channels no disponible con la suscripción del responsable (#105326 en Max) o exigido por política de organización | Alta | La fase 0 lo comprueba primero con `fakechat`; si está bloqueado: NO-GO registrado, sin cambiar a API |
+| Channels no disponible con la suscripción del responsable (#105326 en Max) o exigido por política de organización | Media (era Alta) | **Observado disponible** el 2026-11-02 con `fakechat` (exploratorio, 04-poc.md §1.8); el kill switch remoto sigue siendo un riesgo; si se bloquea: NO-GO, sin cambiar a API |
 | `--channels` desactiva `AskUserQuestion` y plan mode (CHANGELOG 2.1.83) | Media | Canal sólo en sesiones de agente (R7); E11 lo mide |
 | Prompt injection entre agentes con `--dangerously-skip-permissions` | Alta | Aprobación por defecto; límites; marca `from_kind`; clasificador estricto |
 | Dos mecanismos (Channels y Composer) | Media | Composer congelado y nunca invocado por el monitor |
