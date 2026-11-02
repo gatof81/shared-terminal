@@ -157,7 +157,7 @@ describe("inspectCapture", () => {
 		expect(((await fresh.m.inspectCapture("cid")) as { imageRelay2: boolean }).imageRelay2).toBe(
 			false,
 		);
-		// And currentSessionImage too: the label is re-read on every call.
+		// The same ID pulled again counts as labelled again on the next call.
 		images["sha256:aaa"] = { "io.shared-terminal.conversation-relay": "2" };
 		expect(((await m.inspectCapture("cid")) as { imageRelay2: boolean }).imageRelay2).toBe(true);
 	});
@@ -176,6 +176,19 @@ describe("currentSessionImage", () => {
 			relay2: true,
 		});
 		expect(await dm({ images: {} }).m.currentSessionImage()).toBeNull();
+	});
+	it("one inspect per call, read now: the session image deleted ⇒ null on the next call of the same instance; relabelled ⇒ seen", async () => {
+		const images: Record<string, Record<string, string>> = {
+			"shared-terminal-session": { "io.shared-terminal.conversation-relay": "2" },
+		};
+		const { m, imageInspect } = dm({ images });
+		expect((await m.currentSessionImage())?.relay2).toBe(true);
+		expect(imageInspect).toHaveBeenCalledTimes(1); // the ID and the label from the same inspect
+		images["shared-terminal-session"] = {};
+		expect((await m.currentSessionImage())?.relay2).toBe(false);
+		delete images["shared-terminal-session"];
+		expect(await m.currentSessionImage()).toBeNull();
+		expect(imageInspect).toHaveBeenCalledTimes(3);
 	});
 });
 

@@ -3197,17 +3197,20 @@ export class DockerManager {
 
 	/** The image a spawn would use now (by its immutable ID), or null if missing. */
 	async currentSessionImage(): Promise<{ imageId: string; relay2: boolean } | null> {
-		let id: string;
+		// One inspect of the tag gives both the ID and its labels, read now (no
+		// cache, like imageHasRelay2): no second lookup, so no window in which
+		// the image could vanish between the two.
+		let info: Dockerode.ImageInspectInfo;
 		try {
-			id = (await this.docker.getImage(SESSION_IMAGE).inspect()).Id;
+			info = await this.docker.getImage(SESSION_IMAGE).inspect();
 		} catch (err) {
-			if ((err as { statusCode?: number }).statusCode === 404) return null;
+			if (isNotFound(err)) return null;
 			throw err;
 		}
-		// If the image is deleted between the tag lookup above and the label read,
-		// relay2 is false (fail closed): callers answer `image-without-relay`
-		// where `image-changed` would be more precise; a retry resolves it.
-		return { imageId: id, relay2: await this.imageHasRelay2(id) };
+		return {
+			imageId: info.Id,
+			relay2: info.Config?.Labels?.[RELAY_IMAGE_LABEL] === RELAY_IMAGE_LABEL_VALUE,
+		};
 	}
 
 	// ── Recreation port (3.0d, CONVERSATION.md §2.7) ───────────────────────
