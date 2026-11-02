@@ -54,6 +54,7 @@ import {
 	serializeMeta,
 	serializeUsage,
 	TERMINAL_DIM_MAX,
+	TeardownFailedError,
 } from "./shared.js";
 
 // POST /sessions input caps. Bound user-controlled fields at the
@@ -761,7 +762,12 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				// Idempotent path: only tear down the container + flip to
 				// terminated the first time. Subsequent calls skip this.
 				if (meta.status !== "terminated") {
-					await docker.kill(req.params.id);
+					// Fail-closed (kill only confirms on Docker's own 404/304):
+					// an unconfirmed kill leaves the row as it was, so a retry
+					// finds the container again instead of a dangling one.
+					await docker.kill(req.params.id).catch((err) => {
+						throw new TeardownFailedError("kill", err);
+					});
 					await sessions.terminate(req.params.id);
 					// Drop the idle-sweeper's lastActivity entry — without
 					// this the Map grows unboundedly across the backend's
@@ -777,15 +783,15 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 				}
 
 				if (hard) {
-					// Wipe workspace files and drop the row entirely.
-					try {
-						await docker.purgeWorkspace(req.params.id);
-					} catch (err) {
-						logger.error(
-							`[routes] purgeWorkspace failed for ${req.params.id}: ${(err as Error).message}`,
-						);
-						// Fall through — we still want to remove the row.
-					}
+					// Wipe workspace files, then drop the row. The row is the
+					// only reference that lets a retry purge the workspace,
+					// uploads, `.st-control` and conversation data: a failed
+					// purge must surface (500 teardown-failed) and keep it —
+					// the session stays `terminated`, and `purgeWorkspace` is
+					// idempotent, so the next `?hard=true` converges.
+					await docker.purgeWorkspace(req.params.id).catch((err) => {
+						throw new TeardownFailedError("purge", err);
+					});
 					await sessions.deleteRow(req.params.id);
 					// Hard-delete also drops the activity entry — covers
 					// the path where a user goes straight to ?hard=true on
@@ -807,7 +813,9 @@ export function registerSessionRoutes(router: Router, ctx: RouteContext): void {
 		try {
 			await sessions.assertOwnedBy(req.params.id, userId);
 			await sessionLifecycleLock.run(req.params.id, "stop", () =>
-				docker.stopContainer(req.params.id),
+				docker.stopContainer(req.params.id).catch((err) => {
+					throw new TeardownFailedError("stop", err);
+				}),
 			);
 			// Same `forget` rationale as DELETE above: a stopped
 			// session shouldn't sit in the activity map collecting

@@ -154,8 +154,39 @@ export async function assertOwnedByOr404(
 	}
 }
 
+/**
+ * A stop / kill / purge that Docker or the filesystem did not confirm
+ * (daemon down, socket permissions, EBUSY on a bind-mount source…). The
+ * routes answer 500 with the stage so the caller knows the session is
+ * exactly where it was — its row, status and `container_id` untouched —
+ * and that retrying the same verb is the recovery.
+ */
+export class TeardownFailedError extends Error {
+	readonly cause: unknown;
+	constructor(
+		readonly stage: "kill" | "stop" | "purge",
+		cause: unknown,
+	) {
+		// The body stays generic: Docker's and the filesystem's own words
+		// (socket paths, daemon versions) are for the log, not the client.
+		super(
+			stage === "purge"
+				? "The workspace could not be purged; the session is kept as terminated. Retry the delete."
+				: "Docker did not confirm the container teardown; the session is unchanged. Retry.",
+		);
+		this.name = "TeardownFailedError";
+		this.cause = cause;
+	}
+	get causeMessage(): string {
+		return (this.cause as Error | undefined)?.message ?? String(this.cause);
+	}
+}
+
 export function handleSessionError(err: unknown, res: Response): void {
-	if (err instanceof NotFoundError) {
+	if (err instanceof TeardownFailedError) {
+		logger.error(`[routes] teardown ${err.stage} not confirmed: ${err.causeMessage}`);
+		res.status(500).json({ error: "teardown-failed", stage: err.stage, message: err.message });
+	} else if (err instanceof NotFoundError) {
 		res.status(404).json({ error: err.message });
 	} else if (err instanceof ForbiddenError) {
 		res.status(403).json({ error: err.message });
