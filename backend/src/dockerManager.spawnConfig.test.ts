@@ -768,73 +768,99 @@ describe("host CPU clamp (#384)", () => {
 
 // ── Stale-name 409 reclaim (#384 secondary) ─────────────────────────────────
 
-describe("stale-name 409 reclaim (#384)", () => {
+describe("stale-name 409 conflict (#384, 4th review of #502): adopt our own stopped container, refuse a foreign one, never remove", () => {
+	const ROOT = process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
 	function makeDmForConflict(opts: {
-		staleRunning: boolean;
+		holderRunning: boolean;
+		holderIsOurs: boolean;
 		inspectThrows?: boolean;
 		createErrorStatus?: number;
 	}): {
 		dm: DockerManager;
 		createSpy: ReturnType<typeof vi.fn>;
 		removeSpy: ReturnType<typeof vi.fn>;
+		holder: { start: ReturnType<typeof vi.fn> };
+		sessions: SessionManager;
 	} {
-		const dm = new DockerManager(fakeSessions());
-		const goodContainer = {
-			id: "container-new",
-			start: vi.fn(async () => {}),
-			inspect: vi.fn(async () => ({ NetworkSettings: { Ports: {} } })),
-		};
+		const sessions = fakeSessions();
+		const dm = new DockerManager(sessions);
 		const removeSpy = vi.fn(async () => {});
-		let createCalls = 0;
 		const createSpy = vi.fn(async () => {
-			createCalls++;
-			if (createCalls === 1) {
-				const e = new Error("Conflict. The container name is already in use") as Error & {
-					statusCode: number;
-				};
-				e.statusCode = opts.createErrorStatus ?? 409;
-				throw e;
-			}
-			return goodContainer;
+			const e = new Error("Conflict. The container name is already in use") as Error & {
+				statusCode: number;
+			};
+			e.statusCode = opts.createErrorStatus ?? 409;
+			throw e;
 		});
-		const staleContainer = {
+		const binds = opts.holderIsOurs
+			? [`${ROOT}/sess-1:/home/developer/workspace`]
+			: [`${ROOT}/another-session:/home/developer/workspace`];
+		const holder = {
+			id: "container-holder",
 			inspect: opts.inspectThrows
 				? vi.fn(async () => {
-						throw new Error("no such container");
+						throw new Error("connect ECONNREFUSED /var/run/docker.sock");
 					})
-				: vi.fn(async () => ({ State: { Running: opts.staleRunning } })),
+				: vi.fn(async () => ({
+						Id: "container-holder",
+						State: { Running: opts.holderRunning },
+						HostConfig: { Binds: binds },
+					})),
 			remove: removeSpy,
+			start: vi.fn(async () => {}),
 		};
-		const fakeDocker = {
+		(dm as unknown as { docker: unknown }).docker = {
 			createContainer: createSpy,
-			getContainer: vi.fn(() => staleContainer),
+			getContainer: vi.fn(() => holder),
 		};
-		(dm as unknown as { docker: unknown }).docker = fakeDocker;
-		return { dm, createSpy, removeSpy };
+		return { dm, createSpy, removeSpy, holder, sessions };
 	}
 
-	it("removes a stale exited container holding the name and retries once", async () => {
-		const { dm, createSpy, removeSpy } = makeDmForConflict({ staleRunning: false });
+	it("our own STOPPED container holds the name: adopted (its id persisted, then started), never removed, no second create", async () => {
+		const { dm, createSpy, removeSpy, holder, sessions } = makeDmForConflict({
+			holderRunning: false,
+			holderIsOurs: true,
+		});
 		await dm.spawn("sess-1");
-		expect(removeSpy).toHaveBeenCalledTimes(1);
-		expect(createSpy).toHaveBeenCalledTimes(2);
+		expect(removeSpy).not.toHaveBeenCalled();
+		expect(createSpy).toHaveBeenCalledTimes(1);
+		expect(holder.start).toHaveBeenCalledTimes(1);
+		expect(sessions.setContainerId).toHaveBeenCalledWith("sess-1", "container-holder");
 	});
 
-	it("rethrows when the conflicting container is RUNNING (never force-removes a live session)", async () => {
-		const { dm, removeSpy } = makeDmForConflict({ staleRunning: true });
+	it("our own RUNNING container holds the name: the 409 is rethrown, nothing removed (never force-removes a live session)", async () => {
+		const { dm, removeSpy, holder } = makeDmForConflict({
+			holderRunning: true,
+			holderIsOurs: true,
+		});
 		await expect(dm.spawn("sess-1")).rejects.toMatchObject({ statusCode: 409 });
 		expect(removeSpy).not.toHaveBeenCalled();
+		expect(holder.start).not.toHaveBeenCalled();
 	});
 
-	it("rethrows the original 409 when the stale name can't be inspected", async () => {
-		const { dm, removeSpy } = makeDmForConflict({ staleRunning: false, inspectThrows: true });
+	it("a FOREIGN container holds the name (other workspace bind), stopped or not: refused, never adopted, never removed", async () => {
+		for (const holderRunning of [false, true]) {
+			const { dm, removeSpy, holder } = makeDmForConflict({ holderRunning, holderIsOurs: false });
+			await expect(dm.spawn("sess-1")).rejects.toThrow(/not this session's/);
+			expect(removeSpy).not.toHaveBeenCalled();
+			expect(holder.start).not.toHaveBeenCalled();
+		}
+	});
+
+	it("rethrows the original 409 when the holder can't be inspected (daemon error), nothing removed", async () => {
+		const { dm, removeSpy } = makeDmForConflict({
+			holderRunning: false,
+			holderIsOurs: true,
+			inspectThrows: true,
+		});
 		await expect(dm.spawn("sess-1")).rejects.toMatchObject({ statusCode: 409 });
 		expect(removeSpy).not.toHaveBeenCalled();
 	});
 
 	it("does not intercept non-409 create errors", async () => {
 		const { dm, createSpy, removeSpy } = makeDmForConflict({
-			staleRunning: false,
+			holderRunning: false,
+			holderIsOurs: true,
 			createErrorStatus: 500,
 		});
 		await expect(dm.spawn("sess-1")).rejects.toMatchObject({ statusCode: 500 });
@@ -842,59 +868,6 @@ describe("stale-name 409 reclaim (#384)", () => {
 		expect(removeSpy).not.toHaveBeenCalled();
 	});
 });
-
-// ── Reclaim remove() race (#384, PR #400 round 2) ───────────────────────────
-
-describe("stale-name reclaim remove() race (#384)", () => {
-	function makeDmWithRemoveError(removeStatusCode: number): {
-		dm: DockerManager;
-		createSpy: ReturnType<typeof vi.fn>;
-	} {
-		const dm = new DockerManager(fakeSessions());
-		const goodContainer = {
-			id: "container-new",
-			start: vi.fn(async () => {}),
-			inspect: vi.fn(async () => ({ NetworkSettings: { Ports: {} } })),
-		};
-		let createCalls = 0;
-		const createSpy = vi.fn(async () => {
-			createCalls++;
-			if (createCalls === 1) {
-				const e = new Error("Conflict") as Error & { statusCode: number };
-				e.statusCode = 409;
-				throw e;
-			}
-			return goodContainer;
-		});
-		const staleContainer = {
-			inspect: vi.fn(async () => ({ State: { Running: false } })),
-			remove: vi.fn(async () => {
-				const e = new Error("remove failed") as Error & { statusCode: number };
-				e.statusCode = removeStatusCode;
-				throw e;
-			}),
-		};
-		(dm as unknown as { docker: unknown }).docker = {
-			createContainer: createSpy,
-			getContainer: vi.fn(() => staleContainer),
-		};
-		return { dm, createSpy };
-	}
-
-	it("still retries when remove() 404s (stale container vanished in the inspect→remove window)", async () => {
-		const { dm, createSpy } = makeDmWithRemoveError(404);
-		await dm.spawn("sess-1");
-		expect(createSpy).toHaveBeenCalledTimes(2);
-	});
-
-	it("propagates a non-404 remove() failure (e.g. 409: container started in the window)", async () => {
-		const { dm, createSpy } = makeDmWithRemoveError(409);
-		await expect(dm.spawn("sess-1")).rejects.toMatchObject({ statusCode: 409 });
-		expect(createSpy).toHaveBeenCalledTimes(1);
-	});
-});
-
-// ── 3.0d recreation: N is created with the spawn's own options ──────────
 
 describe("recreatePort().buildCreate (CONVERSATION.md §2.7.2 step 1)", () => {
 	const spec = {
