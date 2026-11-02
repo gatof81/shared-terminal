@@ -6,7 +6,7 @@
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -294,7 +294,7 @@ describe("foreground identity (§8.1.3 needs-terminal, foreground)", () => {
 	});
 
 	// The real script against a real tmux pane and /proc on this host (skipped where tmux is missing).
-	const hasTmux = spawnSync("tmux", ["-V"]).status === 0;
+	const hasTmux = spawnSync("tmux", ["-V"]).status === 0 && existsSync("/proc/self/stat");
 	it.skipIf(!hasTmux)(
 		"PANE_FACTS_SCRIPT on a real tmux pane: a native-named binary in the foreground passes; a background job, a gone process and a foreground child in its own group do not",
 		() => {
@@ -365,6 +365,7 @@ describe("foreground identity (§8.1.3 needs-terminal, foreground)", () => {
 					() => tmux("display", "-p", "-t", pane, "#{pane_current_command}").trim() === "2.1.316",
 				);
 				const fg = read(pid);
+				expect(fg).not.toBeNull();
 				expect(fg?.pane.command).toBe("2.1.316");
 				expect(fg?.ancestry).toBe(true);
 				expect(fg && foregroundFault(fg, pid)).toBeNull();
@@ -383,6 +384,7 @@ describe("foreground identity (§8.1.3 needs-terminal, foreground)", () => {
 					return bg > 0;
 				});
 				const back = read(bg);
+				expect(back).not.toBeNull();
 				expect(back && foregroundFault(back, bg)).toBe("not-foreground");
 				// 3. a foreground child in its own group: a native-named job-control shell (a copy of bash under
 				// …/claude/versions/2.1.315) owns the terminal, then runs a job that takes it over.
@@ -403,10 +405,12 @@ describe("foreground identity (§8.1.3 needs-terminal, foreground)", () => {
 					);
 				});
 				const before = read(owner);
+				expect(before).not.toBeNull();
 				expect(before && foregroundFault(before, owner)).toBeNull();
 				tmux("send-keys", "-t", pane, "sleep 303", "Enter");
 				wait(() => tmux("display", "-p", "-t", pane, "#{pane_current_command}").trim() === "sleep");
 				const after = read(owner);
+				expect(after).not.toBeNull();
 				expect(after?.ancestry).toBe(true);
 				expect(after && foregroundFault(after, owner)).toBe("not-foreground");
 			} finally {

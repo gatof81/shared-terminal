@@ -541,7 +541,7 @@ describe("validation and preconditions (§8.1.2, §8.1.3): no effect, no record"
 		docker.proc = { tpgid: PANE_PID };
 		docker.paneProc = { tpgid: PANE_PID };
 		await refused("foreground:bash");
-		// 5. a foreground child in its own group (an editor, a `!` command): Claude's group is not the tty's.
+		// 5. a foreground job that takes the terminal in its own group: Claude's group is not the tty's.
 		docker.paneState = `${PANE_PID} 0 0 vim`;
 		docker.proc = { tpgid: 4242 };
 		docker.paneProc = { tpgid: 4242 };
@@ -625,7 +625,7 @@ describe("validation and preconditions (§8.1.2, §8.1.3): no effect, no record"
 		docker.proc = { start: "2000" }; // same pid, different start time
 		docker.release(docker.calls.filter((c) => c.step === "display")[1]!.id, 0);
 		const r = await p;
-		expect(r.body.error ?? r.body.result).toBeDefined();
+		expect(r.body.error).toBe("binding-stale");
 		await until(async () =>
 			(await eventsOf()).some((e) => e.ev === "composer_send" && e.data.state === "failed"),
 		);
@@ -644,7 +644,7 @@ describe("validation and preconditions (§8.1.2, §8.1.3): no effect, no record"
 		docker.proc = { tpgid: PANE_PID };
 		docker.paneProc = { tpgid: PANE_PID };
 		docker.release(docker.calls.filter((c) => c.step === "display")[1]!.id, 0);
-		await p;
+		expect((await p).body.error).toBe("needs-terminal");
 		await until(async () =>
 			(await eventsOf()).some((e) => e.ev === "composer_send" && e.data.state === "failed"),
 		);

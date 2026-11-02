@@ -1845,9 +1845,18 @@ y todas estas condiciones; cualquier lectura que falte, falle o no parsee ⇒ `b
 **No** se usa el nombre `pane_current_command`: el instalador nativo ejecuta un binario llamado
 como su versión (`2.1.316`) y tmux informa ese nombre (Educación HZ, 2026-11-02: falso negativo).
 Límite real: un hijo que permanece en el grupo de procesos de Claude comparte el primer plano con él
-y esta comprobación no distingue cuál lee la tty; lo cubren el probe (`busy`, `waitingFor`), la
-región de entrada (el prompt propio del CLI, vacío) y la repetición en el precheck. Un hijo que
-toma el terminal en su propio grupo (editor, comando `!`) sí cambia el `tpgid` ⇒ `needs-terminal`.
+y esta comprobación no distingue cuál lee la tty. El caso concreto es el editor externo (Ctrl+G con
+`EDITOR`): corre en el grupo de Claude, el `tpgid` no cambia y el probe sigue en `idle`; lo cubre
+**solo** la región de entrada leída en la precondición (el editor tapa el prompt `❯` del CLI ⇒ no se
+delimita ⇒ `composer-not-empty`). Entre esa lectura y el primer paste queda la misma ventana que una
+tecla de la persona (§8.1.10): un paste caído en el editor no se ve consumido en la región ⇒
+`failed{not-consumed}` sin Enter. Los comandos `!` del CLI corren separados de la tty (`setsid`) y no
+la toman. Un trabajo que toma el terminal **en su propio grupo** sí cambia el `tpgid` ⇒
+`needs-terminal`.
+Falso negativo aceptado (fail-closed): Claude lanzado por un envoltorio `node` que lo ejecuta como
+hijo en el grupo del envoltorio (p. ej. `node …/claude-code/cli-wrapper.cjs`, el respaldo de una
+instalación npm con `--ignore-scripts`): Claude no lidera su grupo ⇒ `needs-terminal` (antes, por el
+nombre `node`, se aceptaba). La imagen de sesión y el instalador nativo no lo usan.
 
 Región de entrada (fail-closed): `tmux capture-pane -p -e -t <pane_id> -S -12`. Con `-e` el
 volcado conserva los atributos SGR. La región es lo que sigue al **último** marcador de prompt

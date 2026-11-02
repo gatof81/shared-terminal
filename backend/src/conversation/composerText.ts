@@ -415,11 +415,14 @@ export function isClaudeExe(exe: string): boolean {
  * - the process is alive and not stopped (`state`).
  * Ancestry is decided by the caller (`binding-stale`, a different code).
  *
- * Limit, documented in CONVERSATION.md §8.1.3: a child that stays in
- * Claude's process group (Claude does not move its children out) shares
- * the foreground with it; this check cannot tell which member reads the
- * tty. The probe's `busy`/`waitingFor`, the input-region check (Claude's
- * own prompt box, empty) and the precheck cover that case.
+ Limit, documented in CONVERSATION.md §8.1.3: a child that stays in
+ * Claude's process group shares the foreground with it and this check
+ * cannot tell which member reads the tty — concretely the external editor
+ * (Ctrl+G), which leaves tpgid and the probe unchanged. Only the input-region
+ * read of the precondition covers it (the editor hides Claude's `❯` box ⇒
+ * unlocated ⇒ refused); `!` commands run detached from the tty. Accepted
+ * false negative: Claude run as a child of a `node` launcher in the
+ * launcher's group (`cli-wrapper.cjs`) does not lead its group ⇒ refused.
  */
 export function foregroundFault(f: PaneFacts, expectedPid: number): string | null {
 	if (f.proc.pid !== expectedPid || f.paneProc.pid !== f.pane.panePid) return "mismatch";

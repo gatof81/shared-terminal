@@ -362,6 +362,8 @@ function summarizeProbe(json: string): string {
 // ── Scenario helpers ────────────────────────────────────────────────────────
 
 let drv: Driver;
+/** The CLI pid the probe named in the foreground-identity phase (reused after /exit). */
+let claudePidSeen = 0;
 let paneId = "%0";
 
 async function screen(): Promise<string> {
@@ -569,6 +571,7 @@ async function main(): Promise<void> {
 				arr.find((a) => typeof a.pid === "number" && String(a.cwd ?? "").length > 0)?.pid ?? 0;
 		} catch {}
 		check("probe names the CLI's pid", claudePid > 0, probeOut.slice(0, 200));
+		claudePidSeen = claudePid;
 		const facts = parsePaneFacts((await drv.exec(paneFactsArgv(paneId, claudePid))).out);
 		check("pane facts parse (pane, Claude, pane process, ancestry, exe)", facts !== null);
 		if (facts) {
@@ -710,10 +713,10 @@ async function main(): Promise<void> {
 
 		if (NATIVE_LAYOUT) {
 			phase("§8.1.3 foreground: back at the shell after /exit");
-			const pidBefore = (
-				await drv.exec(["bash", "-c", "pgrep -f 'claude/versions/' | head -1"])
-			).out.trim();
+			// The pid the probe named at the start (an `-f` pattern run through `bash -c` would match bash itself).
+			const pidBefore = String(claudePidSeen);
 			await drv.exec(["timeout", "5", "tmux", "send-keys", "-t", paneId, "/exit", "Enter"]);
+			let atShell = false;
 			for (let i = 0; i < 40; i++) {
 				const c = (
 					await drv.exec([
@@ -727,9 +730,13 @@ async function main(): Promise<void> {
 						"#{pane_current_command}",
 					])
 				).out.trim();
-				if (c === "bash") break;
+				if (c === "bash") {
+					atShell = true;
+					break;
+				}
 				await sleep(250);
 			}
+			check("/exit returns the pane to the shell", atShell);
 			const gone = parsePaneFacts(
 				(await drv.exec(paneFactsArgv(paneId, Number(pidBefore) || 1))).out,
 			);
@@ -745,9 +752,11 @@ async function main(): Promise<void> {
 			);
 			const shell = parsePaneFacts((await drv.exec(paneFactsArgv(paneId, shellPid))).out);
 			check(
-				"the shell owns the terminal but is not a Claude binary ⇒ refused (identity)",
-				shell !== null && foregroundFault(shell, shellPid) === "identity",
-				shell && foregroundFault(shell, shellPid),
+				"the shell owns the terminal (tpgid = its pid) and is not a Claude binary ⇒ refused (identity)",
+				shell !== null &&
+					shell.paneProc.tpgid === shellPid &&
+					foregroundFault(shell, shellPid) === "identity",
+				shell && { tpgid: shell.paneProc.tpgid, fault: foregroundFault(shell, shellPid) },
 			);
 		}
 
