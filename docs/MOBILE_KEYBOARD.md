@@ -12,6 +12,14 @@ only be checked on the device. This page is that check.
   `visualViewport.offsetTop` into `--app-top` (body `translateY`). To reveal a
   focused field Safari pans the visual viewport instead of scrolling the page,
   so without the offset the app sits that far above the keyboard.
+- `--app-top` follows both `resize` and `scroll` of the visual viewport (a pan
+  can change the offset without changing the height). It is ignored under a
+  pinch zoom (`visualViewport.scale ≠ 1`: the offset is then the reader panning
+  the magnified page) and bounded by `innerHeight − visualViewport.height`
+  (at scale 1 the visual viewport lies inside the layout one), so an offset
+  Safari might still report after the keyboard closes cannot push the app down.
+  Whether Safari ever does report such a stale offset is not known; the bound
+  makes it harmless either way.
 - `html[data-kb="open"]` is set while the visual viewport is more than 120 px
   shorter than the layout viewport; `base.css` then drops the bottom safe-area
   padding (the home indicator is under the keyboard).
@@ -44,6 +52,9 @@ only be checked on the device. This page is that check.
 | Tap outside / Done | `kb -`, `--app-top 0px`, `ta.bottom` back where it was | numbers stuck: report them |
 | Terminal view → note the rows (`stty size` in the pane) → Chat → open and close the keyboard 3× → Terminal | `stty size` unchanged while in Chat; at most one change on return, matching the visible area | any change while in Chat |
 | Rotate the phone in Chat with the keyboard up | layout follows; no gap | report the numbers |
+| With the keyboard up, tap another field (or drag the page slightly) | `vv.top` may change alone; the app follows it | the app lags behind the pan |
+| Close the keyboard and read `vv.top` | `0`, or if not, `--app-top 0px` anyway | `--app-top` > 0 with the keyboard down |
+| Pinch-zoom anywhere, pan around | the zoomed page pans normally; `--app-top 0px` | content chases the finger |
 
 v1 keeps its bottom view bar above the keyboard while typing in Chat (about
 54 px); that is expected in v1 and absent in v2.

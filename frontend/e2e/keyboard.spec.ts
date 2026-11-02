@@ -40,6 +40,17 @@ test.beforeEach(async ({ page }) => {
 			target.dispatchEvent(new Event("resize"));
 			target.dispatchEvent(new Event("scroll"));
 		};
+		// A pan alone: offsetTop (and the zoom scale) change, the height does
+		// not, and Safari fires only `scroll`.
+		(window as unknown as { __pan: (top: number, scale?: number) => void }).__pan = (
+			top,
+			scale = 1,
+		) => {
+			target.offsetTop = top;
+			target.pageTop = top;
+			target.scale = scale;
+			target.dispatchEvent(new Event("scroll"));
+		};
 	});
 });
 
@@ -52,8 +63,72 @@ async function keyboard(page: import("@playwright/test").Page, height: number, o
 	);
 }
 
+async function pan(page: import("@playwright/test").Page, offsetTop: number, scale = 1) {
+	await page.evaluate(
+		([t, s]) => {
+			(window as unknown as { __pan: (top: number, scale?: number) => void }).__pan(t, s);
+		},
+		[offsetTop, scale] as const,
+	);
+}
+
 test.describe("soft keyboard (simulated visual viewport)", () => {
 	test.skip(({ isMobile }) => !isMobile, "mobile layouts");
+
+	test("a pan alone (only `scroll`, same height) moves the app with it", async ({ app, page }) => {
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.switchView("chat");
+		const viewport = page.viewportSize()!;
+		await keyboard(page, viewport.height - 380, 0);
+		const top = () => page.locator("body").evaluate((b) => Math.round(b.getBoundingClientRect().y));
+		expect(await top()).toBe(0);
+		// Focus moves to another field: Safari pans 120 px, no resize event.
+		await pan(page, 120);
+		await expect.poll(top).toBe(120);
+		await pan(page, 0);
+		await expect.poll(top).toBe(0);
+	});
+
+	test("a stale offset after the keyboard closes cannot push the app down", async ({
+		app,
+		page,
+	}) => {
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.switchView("chat");
+		const viewport = page.viewportSize()!;
+		const top = () => page.locator("body").evaluate((b) => Math.round(b.getBoundingClientRect().y));
+		await keyboard(page, viewport.height - 380, 300);
+		await expect.poll(top).toBe(300);
+		// Keyboard closed, full height back, but the offset is still reported.
+		await keyboard(page, viewport.height, 300);
+		await expect.poll(top, "bounded by innerHeight - height = 0").toBe(0);
+		await expect(page.locator("html")).not.toHaveAttribute("data-kb", "open");
+	});
+
+	test("under a pinch zoom the offset is the reader panning: the app is not translated", async ({
+		app,
+		page,
+	}) => {
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.switchView("chat");
+		const top = () => page.locator("body").evaluate((b) => Math.round(b.getBoundingClientRect().y));
+		await pan(page, 250, 2);
+		await page.waitForTimeout(200);
+		expect(await top(), "zoomed pan must not move the layout").toBe(0);
+		expect(
+			await page.evaluate(() =>
+				getComputedStyle(document.documentElement).getPropertyValue("--app-top").trim(),
+			),
+		).toBe("0px");
+		// Back to scale 1 with the keyboard up: the offset counts again.
+		await pan(page, 0, 1);
+		await keyboard(page, page.viewportSize()!.height - 380, 80);
+		await expect.poll(top).toBe(80);
+		await keyboard(page, page.viewportSize()!.height, 0);
+	});
 
 	test("the app lays out in the visible band: body follows the panned viewport, no bottom safe-area strip", async ({
 		app,
