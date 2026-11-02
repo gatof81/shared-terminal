@@ -97,6 +97,10 @@ export function explainCode(code: string, detail?: string): string {
 		case "busy":
 			return "Claude is busy; wait for the turn to finish.";
 		case "needs-terminal":
+			// #510: the probe did not confirm the CLI is at its prompt (no
+			// readable status, or `waiting` without saying for what).
+			if (detail === "status-unknown" || detail === "waiting-unspecified")
+				return "Claude Code did not confirm it is waiting at its prompt, so nothing was sent. Check the Terminal.";
 			return detail === "copy-mode"
 				? "The terminal is in scroll/copy mode. Leave it first."
 				: detail?.startsWith("foreground")
