@@ -187,3 +187,12 @@ jobs:
       - name: Composer terminal smoke test (CLI ${{ matrix.cli }})
         working-directory: backend
         run: npx tsx src/conversation/composer.smoke.ts docker shared-terminal-session:cli-${{ matrix.cli }}
+
+      # §8.1.3 foreground identity with the native installer's layout: the same
+      # CLI binary run from ~/.local/share/claude/versions/<X.Y.Z> as a job of
+      # the pane's shell (tmux reports the version as the pane command).
+      - name: Composer terminal smoke test, native-installer layout (CLI ${{ matrix.cli }})
+        working-directory: backend
+        env:
+          ST_NATIVE_LAYOUT: "1"
+        run: npx tsx src/conversation/composer.smoke.ts docker shared-terminal-session:cli-${{ matrix.cli }}

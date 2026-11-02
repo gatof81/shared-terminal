@@ -25,7 +25,7 @@ vinculante para los PRs
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
 `ac1024d`); si los dos documentos difieren, manda este;
 este archivo define lo que el código debe cumplir y lo que cada PR debe demostrar. Cambiar un
-contrato exige un PR de docs antes o junto con el código. **v1.7.1**: §8.1.5 paso 2b, consumo del paste antes del siguiente byte, y `too-many-segments` en 48 pastes por el presupuesto T_http (hallazgos del smoke con CLI 2.1.314 y de la revisión durante la implementación 3.2, 2026-10-30). **v1.7.2** (aprobado por el responsable como P1 de backend de Chat, 2026-11-02, tras la reanudación real de Educación HZ): §5.2 el binding vale para UN arranque del contenedor —toda parada lo retira de todas las conversaciones de la sesión, residentes o no—; §5.3 el probe solo lleva a `waiting_input` con identidad verificada (entrada `interactive`, `pid` descendiente del `pane_pid` del pane ligado), nunca revive `ended`, un estado ilegible no es `idle`, y el silencio de 10 min y un probe dirigido tras `SessionStart` se despachan de verdad; §8.1.3 `binding-stale` también para una entrada del probe con `kind ≠ interactive` aunque descienda del pane
+contrato exige un PR de docs antes o junto con el código. **v1.7.1**: §8.1.5 paso 2b, consumo del paste antes del siguiente byte, y `too-many-segments` en 48 pastes por el presupuesto T_http (hallazgos del smoke con CLI 2.1.314 y de la revisión durante la implementación 3.2, 2026-10-30). **v1.7.2** (aprobado por el responsable como P1 de backend de Chat, 2026-11-02, tras la reanudación real de Educación HZ): §5.2 el binding vale para UN arranque del contenedor —toda parada lo retira de todas las conversaciones de la sesión, residentes o no—; §5.3 el probe solo lleva a `waiting_input` con identidad verificada (entrada `interactive`, `pid` descendiente del `pane_pid` del pane ligado), nunca revive `ended`, un estado ilegible no es `idle`, y el silencio de 10 min y un probe dirigido tras `SessionStart` se despachan de verdad; §8.1.3 `binding-stale` también para una entrada del probe con `kind ≠ interactive` aunque descienda del pane **v1.7.3**: §8.1.3 identidad de foreground por proceso (identidad, sesión, tty, grupo de primer plano, `starttime` repetido en el precheck) en lugar del nombre `pane_current_command`, que el instalador nativo hace igual a la versión (falso negativo en Educación HZ, 2026-11-02)
 
 Convenciones: *MUST*/*MUST NOT* son requisitos verificados por test; *SHOULD* son requisitos
 verificados en revisión. "Bytes" significa siempre bytes UTF-8 del contenido, salvo donde se dice
@@ -1827,9 +1827,27 @@ incertidumbre no se envía**; nunca "por si acaso".
 | `probe-failed` | `claude agents --json` no responde, no parsea, o **no lista** una sesión con `sessionId = cid` |
 | `binding-stale` | el probe lista `cid` pero su `pid` no es descendiente de `pane_pid` del pane ligado, o el pane ligado ya no existe (`tmux display -p -t <pane_id>` falla): la conversación cambió de pane o el pane fue recreado; **(v1.7.2)** o la entrada del probe para `cid` tiene `kind ≠ interactive` (`detail: "kind:<kind>"`): un trabajo en background puede descender del pane y no es el proceso que lee el prompt |
 | `busy` | probe `status: busy` |
-| `needs-terminal` | probe `waitingFor ∉ {∅, "input needed"}` (incluye `"dialog open"` y `"permission prompt"`); o `pane_in_mode = 1`; o `pane_dead = 1`; o `pane_current_command ∉ {claude, node}` |
+| `needs-terminal` | probe `waitingFor ∉ {∅, "input needed"}` (incluye `"dialog open"` y `"permission prompt"`); o `pane_in_mode = 1`; o `pane_dead = 1`; o el proceso del probe **no es el CLI en el primer plano del terminal** (identidad de foreground, abajo; `detail: foreground:<pane_current_command>`) |
 | `composer-not-empty` | la **región de entrada** del CLI (definición abajo) contiene texto propio, o no se pudo delimitar |
 | `cli-unvalidated` | la `claude_version` del `session_start` de la conversación ligada —es la versión del **proceso realmente en el pane**, el mismo cuyo `pid` verifica `binding-stale`— no está en `COMPOSER_CLI_VERSIONS` (§8.1.9), o falta |
+
+Identidad de foreground (fail-closed, v1.7.3). Una sola lectura —`tmux display` del pane,
+`/proc/<pid>/stat` del `pid` del probe y del `pane_pid`, la ascendencia y `readlink /proc/<pid>/exe`—
+y todas estas condiciones; cualquier lectura que falte, falle o no parsee ⇒ `binding-stale`:
+- `pid` desciende de `pane_pid` (si no ⇒ `binding-stale`);
+- el ejecutable es un binario de Claude Code: `claude`, `claude.exe` o `node`, o el del instalador
+  nativo `…/claude/versions/<X.Y.Z>`; un binario sustituido por una actualización (` (deleted)`)
+  sigue siendo el mismo proceso;
+- el proceso vive y no está detenido (estado ∉ {Z, T, t, X});
+- `pane_pid` lidera su sesión y `pid` está en esa misma sesión, con la misma tty controladora real;
+- `pid` lidera su grupo de procesos (el control de trabajos de la shell lo puso ahí);
+- ese grupo es el grupo de primer plano de la tty, visto desde ambos procesos (`tpgid`).
+**No** se usa el nombre `pane_current_command`: el instalador nativo ejecuta un binario llamado
+como su versión (`2.1.316`) y tmux informa ese nombre (Educación HZ, 2026-11-02: falso negativo).
+Límite real: un hijo que permanece en el grupo de procesos de Claude comparte el primer plano con él
+y esta comprobación no distingue cuál lee la tty; lo cubren el probe (`busy`, `waitingFor`), la
+región de entrada (el prompt propio del CLI, vacío) y la repetición en el precheck. Un hijo que
+toma el terminal en su propio grupo (editor, comando `!`) sí cambia el `tpgid` ⇒ `needs-terminal`.
 
 Región de entrada (fail-closed): `tmux capture-pane -p -e -t <pane_id> -S -12`. Con `-e` el
 volcado conserva los atributos SGR. La región es lo que sigue al **último** marcador de prompt
@@ -2065,13 +2083,19 @@ efecto se ejecuta solo tras `mayAct` (lock vivo, operación no cancelada, §8.1.
 4. Al final, una sola vez: `tmux send-keys -t <pane_id> Enter`. Asentado con 0 ⇒ `entered`; ≠ 0 ⇒
    `failed{stage: enter}`; `pending` ⇒ `uncertain{stage: enter}`.
 
-Antes del primer paste se repite `tmux display -p -t <pane_id> '#{pane_pid} #{pane_in_mode}
-#{pane_dead} #{pane_current_command}'` y debe coincidir con la precondición; si no, 409
+Antes del primer paste se repite la lectura completa de la identidad de foreground (§8.1.3) y debe
+coincidir con la precondición: el mismo `pane_pid`, el **mismo proceso** (`pid` y su `starttime`:
+un CLI reiniciado o un pid reutilizado es otro proceso), y todas las condiciones de nuevo; si no, 409
 `binding-stale`/`needs-terminal` y la `prepared` se cierra como `failed{stage: precheck,
 segments_sent: 0}` y `released{evidence: none-created}` (el único exec fue la lectura; sin efectos
 sobre el pane). Entre pastes se relee **solo** la región de entrada y solo para el consumo del
 paso 2b (no se repite la precondición: la exclusión impide otro envío); lo que no puede excluirse
 (una tecla de la persona, un diálogo que se abre) lo detecta el ack, no la entrega (§8.1.10).
+Ventana entre el precheck y el primer paste: si el CLI sale justo entonces, el paste puede llegar a la
+línea de la shell, **nunca ejecutado**: los pastes no contienen `\n` (cada salto viaja aparte como
+CSI u), el paste es entre corchetes (`paste-buffer -p`), y el Enter solo se envía tras ver el texto
+consumido en la región de entrada **del CLI** (marcador `❯` entre reglas `─`), que una shell no
+muestra ⇒ `failed{not-consumed}` sin Enter.
 
 Liberación (v1.7.1, revisión Work de la implementación): toda liberación (§8.1.4 regla 7) ocurre
 **bajo el lock del pane**; confirma primero el evento `released` (lleva la respuesta HTTP del replay y
@@ -2290,7 +2314,7 @@ apartado. Resumen vinculante:
 | `/clear` | archivo de sesión del probe +173 ms; `SessionStart{source: clear}` +177 ms | ventana ≈ 0,2 s ⇒ re-probar en el envío, exigir `sessionId = cid`, ack con `session_id = cid`, `misdelivered` si difiere |
 | `/resume <otra>` | `SessionStart{source: resume}` +216 ms; mismo pid, otro id | idem |
 | `/fork` | **no cambia el pane**: crea un proceso aparte `kind: background`, `tmux: null` (+1,1 s) y un `claude daemon` | nunca elegible (`kind ≠ interactive`) |
-| `/exit` y `claude` | `SessionEnd{prompt_input_exit}`; el pane vuelve a `bash` en 0,95 s; el probe deja de listar; el nuevo `claude` da `SessionStart` +0,55 s con otro id | `pane_current_command ∉ {claude, node}` ⇒ `needs-terminal`; sin la sesión ⇒ `probe-failed` |
+| `/exit` y `claude` | `SessionEnd{prompt_input_exit}`; el pane vuelve a `bash` en 0,95 s; el probe deja de listar; el nuevo `claude` da `SessionStart` +0,55 s con otro id | la shell en primer plano ⇒ `needs-terminal` (identidad de foreground); sin la sesión ⇒ `probe-failed` |
 
 #### 8.2.3 Forma del texto
 

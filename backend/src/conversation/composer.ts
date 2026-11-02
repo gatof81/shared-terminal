@@ -40,17 +40,17 @@ import { logger } from "../logger.js";
 import { SessionBusyError, SessionLifecycleLock } from "../sessionLifecycleLock.js";
 import type { SessionMeta } from "../types.js";
 import {
-	ancestryArgv,
 	CONSUME_MAX_POLLS,
 	CONSUME_POLL_MS,
 	captureArgv,
 	DEFAULT_CLI_VERSIONS,
+	foregroundFault,
 	IDEMPOTENCY_WINDOW,
 	inputRegion,
 	inputRegionPlain,
 	normalizeText,
-	paneStateArgv,
-	parsePaneState,
+	paneFactsArgv,
+	parsePaneFacts,
 	pasteConsumed,
 	segment,
 	stepArgv,
@@ -594,23 +594,29 @@ export class ComposerService {
 		if (entry.kind !== "interactive") {
 			return this.reject("binding-stale", 409, { detail: `kind:${entry.kind}` });
 		}
-		const paneState = await this.readPaneState(containerId, paneId);
-		if (!paneState) return this.reject("binding-stale", 409);
-		if (
-			typeof entry.pid !== "number" ||
-			!(await this.isDescendant(containerId, entry.pid, paneState.panePid))
-		) {
-			return this.reject("binding-stale", 409);
-		}
+		if (typeof entry.pid !== "number") return this.reject("binding-stale", 409);
+		// One read of the pane and of the probed process (§8.1.3): nothing
+		// readable, or the pid not under the pane ⇒ the binding is stale.
+		const facts = await this.readPaneFacts(containerId, paneId, entry.pid);
+		if (!facts?.ancestry) return this.reject("binding-stale", 409);
+		const paneState = facts.pane;
 		if (entry.status === "busy") return this.reject("busy", 409);
 		if (entry.waitingFor !== undefined && entry.waitingFor !== "input needed") {
 			return this.reject("needs-terminal", 409, { detail: entry.waitingFor });
 		}
 		if (paneState.inMode) return this.reject("needs-terminal", 409, { detail: "copy-mode" });
 		if (paneState.dead) return this.reject("needs-terminal", 409, { detail: "pane-dead" });
-		if (paneState.command !== "claude" && paneState.command !== "node") {
+		// Claude must own the terminal: identity, session, tty and foreground
+		// process group — never the pane command's NAME (the native install
+		// runs a binary named after its version, `2.1.316`).
+		const fault = foregroundFault(facts, entry.pid);
+		if (fault) {
+			logger.info(
+				`[composer] ${sid} ${paneId}: not sending, Claude pid ${entry.pid} is not in the foreground (${fault}; pane command ${paneState.command})`,
+			);
 			return this.reject("needs-terminal", 409, { detail: `foreground:${paneState.command}` });
 		}
+		const identity = { pid: entry.pid, start: facts.proc.start };
 		const region = await this.readInputRegion(containerId, paneId);
 		if (region.kind !== "empty") {
 			return this.reject("composer-not-empty", 409, {
@@ -728,7 +734,7 @@ export class ComposerService {
 				logger.error(`[composer] T_http handling failed: ${(err as Error).message}`),
 			),
 		);
-		void this.runEffects(op, a.normalized, paneState.panePid).catch((err) => {
+		void this.runEffects(op, a.normalized, paneState.panePid, identity).catch((err) => {
 			logger.error(`[composer] effects loop failed: ${(err as Error).message}`);
 		});
 		// `runEffects` ends the active phase; the lock is held exactly until then.
@@ -849,7 +855,12 @@ export class ComposerService {
 
 	// ── Effects (§8.1.5, §8.1.6) ────────────────────────────────────────────
 
-	private async runEffects(op: LiveOp, normalized: string, panePid: number): Promise<void> {
+	private async runEffects(
+		op: LiveOp,
+		normalized: string,
+		panePid: number,
+		identity: { pid: number; start: string },
+	): Promise<void> {
 		const r = op.record;
 		const plan = segment(normalized);
 		const bufferBase = `st-${r.cid.slice(0, 8)}`;
@@ -857,21 +868,20 @@ export class ComposerService {
 		let stage: ExecStep = "precheck";
 		const finishActive = () => op.markActiveDone();
 		try {
-			// Precheck: the pane must still be the one the precondition saw.
-			const pre = await this.effect(op, "precheck", paneStateArgv(r.pane_id), null);
+			// Precheck, the last read before the first keystroke: the pane must
+			// still be the one the precondition saw, with the SAME Claude process
+			// (pid and start time: a restarted CLI or a reused pid is a different
+			// process) still in the terminal's foreground.
+			const pre = await this.effect(op, "precheck", paneFactsArgv(r.pane_id, identity.pid), null);
 			if (r.phase !== "active") return this.afterCancelled(op);
 			if (pre.kind !== "settled") return this.toUncertain(op, "precheck", finishActive);
-			const state = pre.exitCode === 0 ? parsePaneState(pre.stdout) : null;
-			if (
-				!state ||
-				state.panePid !== panePid ||
-				state.inMode ||
-				state.dead ||
-				(state.command !== "claude" && state.command !== "node")
-			) {
+			const f = pre.exitCode === 0 ? parsePaneFacts(pre.stdout) : null;
+			const stale =
+				!f || f.pane.panePid !== panePid || !f.ancestry || f.proc.start !== identity.start;
+			if (stale || f.pane.inMode || f.pane.dead || foregroundFault(f, identity.pid) !== null) {
 				await this.toFailed(op, "precheck", 0, finishActive, {
 					status: 409,
-					body: { error: !state || state.panePid !== panePid ? "binding-stale" : "needs-terminal" },
+					body: { error: stale ? "binding-stale" : "needs-terminal" },
 				});
 				return;
 			}
@@ -1428,32 +1438,17 @@ export class ComposerService {
 
 	// ── Container reads (preconditions) ─────────────────────────────────────
 
-	private async readPaneState(containerId: string, paneId: string) {
+	private async readPaneFacts(containerId: string, paneId: string, pid: number) {
 		try {
 			const res = await this.deps.docker.exec(
 				containerId,
-				paneStateArgv(paneId),
+				paneFactsArgv(paneId, pid),
 				null,
 				async () => true,
 			);
-			if (res.exitCode !== 0) return null;
-			return parsePaneState(res.stdout);
+			return res.exitCode === 0 ? parsePaneFacts(res.stdout) : null;
 		} catch {
 			return null;
-		}
-	}
-
-	private async isDescendant(containerId: string, pid: number, panePid: number): Promise<boolean> {
-		try {
-			const res = await this.deps.docker.exec(
-				containerId,
-				ancestryArgv(pid, panePid),
-				null,
-				async () => true,
-			);
-			return res.exitCode === 0 && res.stdout.trim() === "yes";
-		} catch {
-			return false;
 		}
 	}
 
