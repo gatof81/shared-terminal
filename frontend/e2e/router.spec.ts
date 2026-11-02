@@ -78,11 +78,19 @@ test.describe("router", () => {
 		await page.goBack();
 		await app.expectView("terminal");
 		await page.waitForTimeout(300);
-		// Pure view history: no socket, no resize, no input (the mobile
-		// drawer hop that costs resizes in v1 is not part of Back/Forward).
+		// Pure view history: no socket, no input, no resize — except on v1
+		// mobile, where entering the overlays closed the chrome drawer while
+		// the terminal was covered: the covered terminal kept its geometry
+		// and syncs it ONCE when Back returns to it (terminalGeometry.ts).
 		expect(backend.terminalSockets.length).toBe(sockets);
 		expect(sock.closed).toBe(false);
-		expect(frames() - f0, "frames sent during Back/Forward").toBe(0);
+		const deferredSync = app.mobile && app.shell === "v1" ? 1 : 0;
+		const sent = sock.sent.slice(f0);
+		expect(sent.length, "frames sent during Back/Forward").toBe(deferredSync);
+		expect(
+			sent.every((f) => f.type === "resize"),
+			"only the deferred resize",
+		).toBe(true);
 		await expect(page.locator(".tab-pane.active")).toContainText("Welcome");
 	});
 

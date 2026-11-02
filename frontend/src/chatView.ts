@@ -987,6 +987,17 @@ function renderThread(opts: { stick: boolean; restore?: boolean }): void {
 		scroller = el("div", "chat-scroll");
 		scroller.dataset.cid = t.cid;
 		scroller.addEventListener("scroll", onScroll, { passive: true });
+		// The visible height changes without a scroll event — the mobile soft
+		// keyboard shrinks the app (`--app-vh`), the composer grows a row. A
+		// reader who was at the bottom stays at the bottom; one reading earlier
+		// messages keeps their place (scrollTop is untouched then). `atBottom`
+		// still holds the pre-resize truth: a shrink fires no scroll event.
+		if (typeof ResizeObserver !== "undefined") {
+			const sc = scroller;
+			new ResizeObserver(() => {
+				if (cur?.atBottom && sc.isConnected) setScrollNow(sc, sc.scrollHeight);
+			}).observe(sc);
+		}
 		threadEl.appendChild(scroller);
 		threadEl.appendChild(floatPill());
 		threadEl.appendChild(composer());

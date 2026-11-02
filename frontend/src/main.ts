@@ -151,12 +151,43 @@ applyResolvedShell();
 // keyboard. VisualViewport fires resize events as the keyboard opens/closes
 // and as the URL bar shows/hides — we mirror its height into --app-vh so the
 // xterm host container refits to the space actually visible to the user.
+//
+// The visual viewport's OFFSET is mirrored too (--app-top). To reveal a
+// focused field (the Chat composer) Safari pans the visual viewport down
+// instead of scrolling the page, which is never taller than the layout
+// viewport here: `offsetTop` grows by up to the keyboard's height while
+// `scrollY` stays 0. Laying the app out at y=0 with the visual height
+// then leaves it that far ABOVE the keyboard; translating body by the
+// offset puts it exactly in the visible band. Both are 0 on desktop.
+//
+// `data-kb="open"` marks the soft keyboard as up (the visual viewport is
+// clearly shorter than the layout one): the bottom safe-area inset is for
+// the home indicator, which the keyboard already covers, so base.css
+// drops it then instead of leaving a strip between composer and keyboard.
+const KEYBOARD_MIN_PX = 120;
 function syncViewportHeight() {
 	const vv = window.visualViewport;
 	const h = vv ? vv.height : window.innerHeight;
-	document.documentElement.style.setProperty("--app-vh", `${h}px`);
+	// Only at scale 1: under a pinch zoom `offsetTop` is the reader panning
+	// the magnified page, and translating body by it would make the content
+	// chase the gesture. The keyboard reveal happens at scale 1.
+	const unzoomed = !vv || Math.abs((vv.scale ?? 1) - 1) < 0.01;
+	// At scale 1 the visual viewport lies inside the layout viewport, so its
+	// offset can never exceed `innerHeight - height`. Clamping to that bound
+	// is geometry, not a guess: a stale offset Safari might still report
+	// after the keyboard closes (full height ⇒ bound 0) cannot push the app
+	// below the screen.
+	const maxTop = Math.max(0, window.innerHeight - h);
+	const top = vv && unzoomed ? Math.min(Math.max(0, vv.offsetTop), maxTop) : 0;
+	const root = document.documentElement;
+	root.style.setProperty("--app-vh", `${h}px`);
+	root.style.setProperty("--app-top", `${top}px`);
+	if (window.innerHeight - h > KEYBOARD_MIN_PX) root.dataset.kb = "open";
+	else delete root.dataset.kb;
 }
 syncViewportHeight();
+// `scroll` matters on its own: Safari can pan (offsetTop) without a
+// height change, e.g. moving focus between fields with the keyboard up.
 window.visualViewport?.addEventListener("resize", syncViewportHeight);
 window.visualViewport?.addEventListener("scroll", syncViewportHeight);
 window.addEventListener("resize", syncViewportHeight);

@@ -8,6 +8,7 @@ import { type IDisposable, type ILink, type ILinkProvider, Terminal } from "@xte
 import "@xterm/xterm/css/xterm.css";
 import { type SpecialKey, specialKeySequence } from "./keys.js";
 import { isRetryableCloseCode, MAX_RECONNECT_ATTEMPTS, reconnectDelayMs } from "./reconnect.js";
+import { deferFit, isGeometryFrozen } from "./terminalGeometry.js";
 import { readXtermTheme } from "./theme.js";
 
 /** "disconnected" and "reconnecting" are frontend-only synthetic states
@@ -1040,7 +1041,19 @@ export function openTerminalSession(opts: {
 			send({ type: "resize", cols: term.cols, rows: term.rows });
 		}, RESIZE_DEBOUNCE_MS);
 	};
+	let cancelDeferredFit: (() => void) | null = null;
 	const scheduleFit = () => {
+		// An overlay covers the terminal: keep its geometry (no local fit,
+		// no tmux resize) and fit once when the Terminal view returns —
+		// see terminalGeometry.ts.
+		if (isGeometryFrozen()) {
+			cancelDeferredFit?.();
+			cancelDeferredFit = deferFit(() => {
+				cancelDeferredFit = null;
+				scheduleFit();
+			});
+			return;
+		}
 		if (fitScheduled) return;
 		fitScheduled = true;
 		requestAnimationFrame(() => {
@@ -1247,6 +1260,8 @@ export function openTerminalSession(opts: {
 		// here to remove the subtle refactor trap.
 		if (resizeSendTimer !== null) clearTimeout(resizeSendTimer);
 		ro.disconnect();
+		cancelDeferredFit?.();
+		cancelDeferredFit = null;
 		document.removeEventListener("visibilitychange", onVisibilityChange);
 		window.removeEventListener("focus", onWindowFocus);
 		container.removeEventListener("pointerdown", focusOnPointer);
