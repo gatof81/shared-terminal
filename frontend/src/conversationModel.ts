@@ -720,6 +720,41 @@ export function statusIsLiveClaim(status: string): boolean {
 	);
 }
 
+/**
+ * How a conversation's state is PRESENTED (list row, chip, "N active"),
+ * from the backend's status and the age of its evidence — the status
+ * itself is never changed here (contract §5: the backend owns it).
+ *
+ * - `active`: a live claim (running / waiting_*) whose evidence is fresh.
+ *   Only these go to the list's "Active" section and its count.
+ * - A live claim whose evidence is older than STALE_EVIDENCE_MS reads "No
+ *   recent activity": nothing proves Claude is still there.
+ * - `unknown` reads "State unknown" (Claude Code has not reported since it
+ *   started or resumed, or the backend lost track): never presented as a
+ *   working process.
+ * Every conversation stays listed and readable whatever its presentation.
+ */
+export interface StatusPresentation {
+	label: string;
+	tone: ReturnType<typeof statusTone>;
+	active: boolean;
+	stale: boolean;
+}
+
+export function presentStatus(status: string, at: string, now: number): StatusPresentation {
+	const t = Date.parse(at);
+	const stale = statusIsLiveClaim(status) && (Number.isNaN(t) || now - t >= STALE_EVIDENCE_MS);
+	if (stale) return { label: "No recent activity", tone: "muted", active: false, stale: true };
+	if (status === "unknown")
+		return { label: "State unknown", tone: "muted", active: false, stale: false };
+	return {
+		label: STATUS_LABEL[status] ?? status,
+		tone: statusTone(status),
+		active: statusIsLiveClaim(status),
+		stale: false,
+	};
+}
+
 // ── Event window (L8) ───────────────────────────────────────────────────────
 
 /** L8 — at most this many events / bytes held for the DOM. */

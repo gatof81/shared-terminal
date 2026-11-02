@@ -5,6 +5,7 @@ import {
 	EventWindow,
 	gapText,
 	groupBlocks,
+	presentStatus,
 	statusIsLiveClaim,
 	statusTone,
 	toolLine,
@@ -527,5 +528,43 @@ describe("§4.2.1 internal prompts through the window: no duplicates on reconnec
 		w.prepend([internal(8), internal(9), internal(10)], false);
 		expect(w.events.map((e) => e.seq)).toEqual([8, 9, 10, 11, 12]);
 		expect(buildThread(w.events).items.filter((i) => i.kind === "internal")).toHaveLength(5);
+	});
+});
+
+describe("presentStatus (what the list and chip show)", () => {
+	const now = Date.parse("2026-11-02T12:00:00Z");
+	const ago = (min: number) => new Date(now - min * 60_000).toISOString();
+
+	it("a fresh live claim is active and keeps its label", () => {
+		for (const [status, label] of [
+			["running", "Working"],
+			["waiting_input", "Waiting for input"],
+			["waiting_background", "Background tasks"],
+			["waiting_permission", "Needs permission"],
+		] as const) {
+			const p = presentStatus(status, ago(2), now);
+			expect(p, status).toMatchObject({ label, active: true, stale: false });
+		}
+	});
+
+	it("a live claim without recent evidence is not active and says so", () => {
+		const p = presentStatus("running", ago(11), now);
+		expect(p).toEqual({ label: "No recent activity", tone: "muted", active: false, stale: true });
+		expect(presentStatus("waiting_input", "not-a-date", now).active).toBe(false);
+	});
+
+	it("unknown is never presented as a working process", () => {
+		expect(presentStatus("unknown", ago(0), now)).toEqual({
+			label: "State unknown",
+			tone: "muted",
+			active: false,
+			stale: false,
+		});
+	});
+
+	it("ended, disconnected and error are listed but not active", () => {
+		for (const s of ["ended", "ending", "disconnected", "error"]) {
+			expect(presentStatus(s, ago(0), now).active, s).toBe(false);
+		}
 	});
 });
