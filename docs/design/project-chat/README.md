@@ -66,7 +66,7 @@ Skill asociada: [`.claude/skills/architecture-spec/SKILL.md`](../../../.claude/s
 
 R1–R9 y autenticación (sólo la suscripción del responsable, sin gasto adicional): resueltas el 2026-11-02, registradas en
 [02-architecture-rfc.md §9](./02-architecture-rfc.md#9-decisiones-del-responsable-2026-11-02).
-Pendiente: la autorización de la **fase 0** con `fakechat` y, sólo si la supera, un GO separado para la POC completa ([04-poc.md §7](./04-poc.md#7-propuesta-de-ejecución-dos-autorizaciones-separadas)).
+Pendiente: la autorización de la **fase 0** con `fakechat` (local, como usuario temporal en el Mac o PC del responsable; la VM queda para la POC completa) y, sólo si la supera, un GO separado para la POC completa ([04-poc.md §7](./04-poc.md#7-propuesta-de-ejecución-dos-autorizaciones-separadas)).
 
 ## 4. Relación con otros documentos
 

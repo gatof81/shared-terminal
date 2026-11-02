@@ -114,29 +114,56 @@ empieza.
 - La POC **no** usa el mock del smoke (Channels exige autenticación first-party, C16) ni ninguna
   otra autenticación que la de §1.4.
 
-### 1.7 Fase 0: disponibilidad y despertar con `fakechat`
+### 1.7 Fase 0: disponibilidad y despertar con `fakechat` (variante local)
 
-**Kit:** rama `poc/channels-phase0` (sin merge), carpeta `poc/channels/`, con el runbook en su
-README. Diferencias deliberadas con §1.2 para la fase 0: imagen **mínima** (Node 22, CLI fijado,
-Bun, tmux) en lugar de la imagen de sesión, porque la fase 0 sólo pregunta si el canal se registra y
-despierta, y menos piezas toleran mejor `--cap-drop ALL` y `--read-only`. `fakechat` se instala
-desde el **marketplace oficial**, para seguir en la allowlist de Anthropic (una copia local podría
-quedar fuera: "unknown source"), y el commit fijado
-(`claude-plugins-official@7994c27`, `external_plugins/fakechat`) se impone **por hash** de sus
-archivos. `fakechat` corre con **Bun**, ejecuta `bun install` al arrancar, y se alimenta con
-`POST /upload` en `127.0.0.1:8787`, cuyo `id` se convierte en `message_id` de la etiqueta. S0
-preinstala sus dependencias y prueba que arranca con GitHub y npm cerrados.
+**Decisión del responsable (2026-11-02):** la fase 0 **no** usa VM. Corre como un **usuario
+temporal del sistema, estándar y nuevo**, en el Mac o PC del responsable. Las secciones §1.1–§1.6
+(VM, contenedor endurecido, proxy, eliminación de la VM) quedan para la **POC completa**, donde sí se
+prueban fallos, concurrencia y reinicios. Kit: rama `poc/channels-phase0` (sin merge), carpeta
+`poc/channels-local/`, con el procedimiento paso a paso en su README.
+
+| Requisito | Cómo lo cumple la variante local |
+| --- | --- |
+| Perfil aislado | Usuario del sistema nuevo y no administrador (`pocchannels`): HOME, `~/.claude`, llavero y navegador propios; se borra al final. **No** se usa `CLAUDE_CONFIG_DIR` dentro del usuario habitual: en macOS el token va al llavero y podría mezclarse con la instalación habitual |
+| Suscripción, sin API key ni uso extra | `/login` oficial; `forceLoginMethod: "claudeai"` en los settings del usuario temporal; `DISABLE_EXTRA_USAGE_COMMAND=1`; el responsable confirma en su cuenta que el uso extra está desactivado; el preflight falla con variables de API key |
+| Sin credenciales existentes | HOME nuevo; el preflight comprueba antes del login que no hay credenciales de Claude (archivo, `~/.claude.json`, llavero) ni claves SSH |
+| `fakechat` fijado y dependencias revisadas | Desde el marketplace oficial (para seguir en la allowlist de Anthropic); se exige el **conjunto exacto de archivos** y el SHA-256 de cada uno de `claude-plugins-official@7994c27`; `bun install --frozen-lockfile` con los 95 paquetes del `bun.lock` (integridad sha512); falla si el lockfile cambia. Las dependencias son el SDK de MCP 1.27.1 y lo que arrastra para su modo HTTP (express, hono, cors, jose…), que `fakechat` no usa: habla por stdio |
+| Sin Docker, Shared Terminal, Proxmox ni producción | El kit no ejecuta `docker` ni `ssh` ni contacta otros hosts que Anthropic, GitHub, `bun.sh` y npm; el preflight exige que el usuario no sea administrador ni del grupo `docker` y que `docker ps` falle |
+| Sin tocar proyectos, configuración ni sesiones | Todo en el HOME del usuario temporal; CLI 2.1.314 y Bun 1.3.10 instalados **en ese HOME** (el preflight falla si resuelven a la instalación habitual); managed settings de la máquina **no** se tocan (si existen, el preflight falla y se consulta) |
+| Sin `--dangerously-skip-permissions` | Modo normal; herramientas denegadas salvo la respuesta de `fakechat`; si aparece un diálogo de permiso, la persona contesta **No** (el despertar ya quedó medido) |
+| Registro | Hooks `command` a un archivo (`SessionStart`, `UserPromptSubmit`, `Stop`, `StopFailure`, `Notification`, `SessionEnd`) y log de depuración del CLI |
+| Limpieza | `/logout`, copia redactada (exige que ya no haya credenciales), borrado del usuario (HOME y llavero) y revisión de autorizaciones en claude.ai |
+
+**Limitaciones de seguridad que introduce la variante local** (aceptadas por el responsable al
+elegirla; ninguna afecta la validez de lo que la fase 0 mide):
+
+1. **Sin sandbox.** El usuario temporal comparte equipo y kernel y puede leer archivos legibles por
+   todos de otros usuarios. Mitigación: herramientas de lectura, escritura y shell denegadas;
+   mensajes triviales; en macOS las carpetas personales son privadas por defecto.
+2. **Red sin restringir.** La LAN, Proxmox incluido, es alcanzable a nivel de red. Mitigación: ninguna
+   credencial de producción en ese usuario y ninguna herramienta de red o shell para Claude. A
+   diferencia de la VM, se demuestra que **no se toca** producción, no que **no se pueda**.
+3. **`fakechat` sin autenticación en `127.0.0.1`.** Durante la prueba, cualquier proceso local de
+   cualquier usuario podría inyectar un mensaje en esa sesión. Mitigación: puerto alto, ventana
+   corta, herramientas denegadas: lo peor es una respuesta de texto.
+4. **Código de terceros** (`fakechat` y 95 paquetes) corre como el usuario temporal; fijado por
+   lockfile con integridad, no auditado línea por línea.
+5. **Mismo plan.** Los ~12 turnos consumen el límite incluido de la suscripción, compartido con las
+   sesiones reales; sin gasto adicional.
+6. **Login en el navegador del usuario temporal** (macOS) o en una ventana privada (Linux): el token
+   nuevo vive sólo en ese usuario y se elimina con él.
 
 **Dos etapas separadas** (decisión del responsable, 2026-11-02):
 
-- **S0, preparación**: VM, aislamiento, proxy, harness y `fakechat`, **sin** la suscripción.
-  Termina con `evidence.md`: aislamiento comprobado y ninguna credencial existente. Se presenta al
-  responsable.
+- **S0, preparación**: crear el usuario, instalar CLI y Bun fijados en su HOME, bajar el kit,
+  `setup` (`fakechat` + pin + dependencias) y `preflight`, **sin** la suscripción. Termina con
+  `preflight.md` sin ningún FAIL.
 - **S1, fase 0**: sólo después de revisar S0 y de que el responsable haga el `/login` oficial.
-  Disponibilidad del canal y hasta 12 despertares. El informe separa **registro del canal**,
-  **despertar efectivo**, **`source` del hook** y **correlación del mensaje**, y termina en una
-  nueva decisión del responsable.
-
+  Registro del canal y hasta 12 despertares. El informe separa **registro del canal**, **despertar
+  efectivo**, **latencia**, **`source` del hook** y **correlación del mensaje**, y termina en una
+  nueva decisión del responsable. Un fallo del harness (subida rechazada, hooks sin funcionar, puerto
+  de otro proceso, motivo de `skip` que no es de disponibilidad o política) **nunca** se registra como
+  NO-GO.
 
 Es lo **único** que se ejecutará primero, y sólo con una autorización explícita del responsable para
 esta prueba. No se escribe `monitor.mjs` ni `st_channel.py` antes de su resultado.
@@ -146,11 +173,11 @@ una notificación de canal despierta una sesión interactiva **inactiva** en su 
 
 | Paso | Qué | Evidencia |
 | --- | --- | --- |
-| F0.1 | VM y contenedor según §1.1–§1.3; `fakechat` instalado desde `claude-plugins-official` en un commit fijado y anotado; hooks de la POC (`SessionStart`, `UserPromptSubmit`, `Stop`, `StopFailure`) como hooks `command` que añaden su entrada JSON a un archivo del contenedor. Sin uso de la suscripción | lista de verificación §1.1 |
-| F0.2 | El responsable confirma que el uso extra está desactivado y hace `/login` con su suscripción en el CLI del contenedor | confirmación escrita; el token no sale del contenedor |
-| F0.3 | `claude --dangerously-skip-permissions --channels plugin:fakechat@claude-plugins-official`, con el log de depuración del CLI a un archivo | `Channel notifications registered` o el motivo del `skip` |
-| F0.4 | 10 mensajes por la interfaz HTTP local de `fakechat` (endpoint confirmado en el código del commit fijado), cada uno con la sesión en su prompt (`claude agents --json`: `idle` o `waiting`+`input needed`) e inactiva ≥ 30 s; 2 más tras ≥ 1 h de inactividad | por mensaje: `UserPromptSubmit` sí/no, latencia, `source`, forma exacta del `prompt`, `Stop` |
-| F0.5 | Eliminación en el orden de §1.5 (`/logout` primero) | lista firmada |
+| F0.1 | Usuario temporal, CLI y Bun fijados en su HOME, kit en el commit autorizado, `setup` y `preflight` (S0). Sin uso de la suscripción | `preflight.md` sin FAIL |
+| F0.2 | El responsable hace `/login` con su suscripción y confirma que el uso extra está desactivado | `/status` con el plan; el token no sale del usuario temporal |
+| F0.3 | `claude --channels plugin:fakechat@claude-plugins-official --debug-file …`, **sin** `--dangerously-skip-permissions`; `phase0.mjs registration` | registro o motivo del `skip`; el puerto de `fakechat` pertenece a ese `claude` |
+| F0.4 | 10 mensajes con la sesión en su prompt (`claude agents --json`: `idle` o `waiting`+`input needed`) e inactiva ≥ 30 s, y 2 más tras ≥ 1 h | por mensaje: despertó, latencia, `source`, forma exacta del `prompt`, `Stop` del mismo `prompt_id` |
+| F0.5 | `/logout`, `archive` (copia redactada) y borrado del usuario | informe archivado; usuario eliminado |
 
 Viabilidad (se resuelve en S0, **antes** del login): del commit fijado de `fakechat` se anotan su
 runtime (la versión de memoria del revisor es que corre con Bun, que la imagen no trae), sus
@@ -305,17 +332,17 @@ Este documento **no** autoriza ejecutar nada. Hay dos autorizaciones, en orden:
 | # | Precondición | Quién |
 | --- | --- | --- |
 | P1 | Autorización explícita para la fase 0 | responsable |
-| P2 | VM desechable según §1.1, sin credenciales ni rutas de producción, lejos de las sesiones reales (Claude A, Home Automation) | responsable o agente con su aprobación |
+| P2 | Mac o PC del responsable con un usuario temporal nuevo y no administrador (§1.7); la VM queda para la POC completa | responsable |
 | P3 | Uso extra desactivado en la cuenta de la suscripción | responsable |
-| P4 | Harness de la fase 0 (guardas, proxy, hooks a archivo, envío por `fakechat`) revisado antes de correr | agente; revisión independiente |
+| P4 | Kit local (`poc/channels-local`) revisado de forma independiente en el commit que se autoriza | agente; revisión independiente |
 | P5 | Criterios de §1.7 y §5 sin cambios desde este PR | — |
 
 ### 7.2 Etapas
 
 | Etapa | Contenido | Consumo | Se detiene si |
 | --- | --- | --- | --- |
-| S0 | Kit `poc/channels`: `provision`, `guard`, `s0-up`, `s0-plugin`, `s0-evidence`; se presenta `evidence.md` | ninguno | la guarda encuentra algo de producción; cualquier FAIL de la evidencia; `fakechat` no coincide con el commit |
-| S1 | Fase 0 (§1.7): login del responsable, registro, 12 despertares | ~12 turnos triviales del plan | bloqueo de Channels (NO-GO), límite del plan o propuesta de uso pagado |
+| S0 | Kit `poc/channels-local` como usuario temporal: instalación fijada, `setup`, `preflight`; se presenta `preflight.md` | ninguno | algún FAIL del preflight; `fakechat` no coincide con el commit |
+| S1 | Fase 0 (§1.7): `/login` del responsable, `registration`, 12 despertares, `report`, limpieza | ~12 turnos triviales del plan | bloqueo de Channels (NO-GO), límite del plan, propuesta de uso pagado o fallo del harness (se corrige y se repite, nunca NO-GO) |
 | S2 | Informe de la fase 0 y **pedido de GO separado** | — | — |
 | S3 | *(sólo con el GO de S2)* E0–E12 en V1, día 1, con el prototipo propio; login nuevo del responsable en cada contenedor | ~200 turnos, repartidos para no superar los límites del plan | violación de G6 o G12; límite del plan (se pausa y se retoma otro día, nunca uso pagado) |
 | S4 | *(ídem)* repetición en V2 y segundo día de E2 | ~100 turnos | ídem |
