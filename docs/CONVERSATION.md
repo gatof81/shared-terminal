@@ -1077,7 +1077,9 @@ otro error del daemon al inspeccionar la imagen sigue propagándose (fail-closed
 contenedor 3.0d que capturaba y cuya imagen se borra después: pierde la autorización de escritura y de
 retención (el siguiente `converge` retira archivo y marca) y responde `requiresRecreate: true` — en
 general, `requiresRecreate` es `true` para todo contenedor existente cuya imagen no lleve la etiqueta
-`="2"`, porque solo un contenedor nuevo puede recuperarla.
+`="2"`, porque solo un contenedor nuevo puede recuperarla. La etiqueta se lee de la imagen tal como existe en
+cada evaluación, sin caché: una imagen borrada deja de contar como `="2"` en la siguiente consulta, no
+solo tras reiniciar el backend.
 
 **Correspondencia token ↔ hash.** La huella del contenedor es `sha256(ST_INGEST_TOKEN)` del
 `Config.Env` del `inspect` del contenedor de D1. Se calcula en memoria y se compara en tiempo

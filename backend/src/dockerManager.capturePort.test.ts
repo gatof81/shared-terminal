@@ -143,14 +143,23 @@ describe("inspectCapture", () => {
 			).rejects.toThrow(err.message);
 		}
 	});
-	it("labels are cached per immutable image ID", async () => {
-		const { m, imageInspect } = dm({
-			container: base,
-			images: { "sha256:aaa": { "io.shared-terminal.conversation-relay": "2" } },
-		});
-		await m.inspectCapture("cid");
-		await m.inspectCapture("cid");
-		expect(imageInspect).toHaveBeenCalledTimes(1);
+	it("the label is read as the image exists NOW: relay2 true, then the image is deleted ⇒ false on the next call of the same instance, as after a restart", async () => {
+		const images: Record<string, Record<string, string>> = {
+			"sha256:aaa": { "io.shared-terminal.conversation-relay": "2" },
+		};
+		const { m, imageInspect } = dm({ container: base, images });
+		expect(((await m.inspectCapture("cid")) as { imageRelay2: boolean }).imageRelay2).toBe(true);
+		delete images["sha256:aaa"]; // `docker rmi -f` while the container keeps running
+		expect(((await m.inspectCapture("cid")) as { imageRelay2: boolean }).imageRelay2).toBe(false);
+		expect(imageInspect).toHaveBeenCalledTimes(2); // no positive cache
+		// A fresh instance (backend restarted) sees the same thing.
+		const fresh = dm({ container: base, images });
+		expect(((await fresh.m.inspectCapture("cid")) as { imageRelay2: boolean }).imageRelay2).toBe(
+			false,
+		);
+		// And currentSessionImage too: the label is re-read on every call.
+		images["sha256:aaa"] = { "io.shared-terminal.conversation-relay": "2" };
+		expect(((await m.inspectCapture("cid")) as { imageRelay2: boolean }).imageRelay2).toBe(true);
 	});
 });
 
