@@ -2,7 +2,10 @@
  * api.ts — REST client for the shared-terminal backend.
  */
 
+import { withAuthLock } from "./authLock.js";
 import type { ConversationEvent } from "./conversationModel.js";
+
+export { AuthBusyError } from "./authLock.js";
 
 // VITE_API_URL should point to the backend (via Cloudflare Tunnel or localhost)
 // e.g. https://api.terminal.yourdomain.com
@@ -23,6 +26,26 @@ const WS_BASE = BACKEND_URL.replace(/^http/, "ws");
 let _loggedIn = false;
 let _isAdmin = false;
 let _isLead = false;
+// The auth generation: bumped by every change of the mirror above (and by
+// every logout, changed or not). A request remembers the generation it was
+// sent under, and an answer may only act on the mirror while that is still
+// the current one — an answer that belongs to an earlier account (a 401,
+// a /auth/status, a login a logout overtook) can never touch a later one.
+let authEpoch = 0;
+
+function setAuthMirror(loggedIn: boolean, admin: boolean, lead: boolean): void {
+	if (_loggedIn === loggedIn && _isAdmin === admin && _isLead === lead) return;
+	_loggedIn = loggedIn;
+	_isAdmin = admin;
+	_isLead = lead;
+	authEpoch++;
+}
+
+/** How long a login, register or status probe waits for an auth transition
+ *  in flight (in this tab or another) before giving up WITHOUT sending —
+ *  see authLock.ts. Generous: the only thing it waits for is the previous
+ *  request's answer. */
+export const AUTH_WAIT_MS = 10_000;
 // The shell the operator switched on (UI_SHELL) — `uiShell` on /auth/status.
 let _uiShell: "v1" | "v2" = "v1";
 // #200 — effective per-session resource caps mirrored from /auth/status
@@ -96,14 +119,26 @@ export interface AuthStatus {
 }
 
 export async function checkAuthStatus(): Promise<AuthStatus> {
+	// Shared mode: never sent while a login/logout of this browser is in
+	// flight, so it never reads a cookie that transition is about to
+	// replace or delete (authLock.ts).
+	return withAuthLock("shared", fetchAuthStatus, AUTH_WAIT_MS);
+}
+
+async function fetchAuthStatus(): Promise<AuthStatus> {
+	const epoch = authEpoch;
 	const res = await apiFetch("/auth/status");
 	const data = (await res.json()) as AuthStatus;
+	if (epoch !== authEpoch) {
+		// The mirror changed while this was in flight (a logout, a 401):
+		// the answer describes the account before that change. Answer
+		// with the CURRENT identity so no caller routes on the stale one.
+		return { ...data, authenticated: _loggedIn, isAdmin: _isAdmin, isLead: _isLead };
+	}
 	// The server is the source of truth for cookie presence + admin
 	// + lead status. Mirror all three so isLoggedIn() / isAdmin() /
 	// isLead() can answer instantly thereafter.
-	_loggedIn = data.authenticated;
-	_isAdmin = data.isAdmin;
-	_isLead = data.isLead === true;
+	setAuthMirror(data.authenticated, data.isAdmin, data.isLead === true);
 	if (data.uiShell === "v1" || data.uiShell === "v2") _uiShell = data.uiShell;
 	// #200: mirror caps if present. A pre-#200 backend omits the field
 	// and leaves the v1 defaults in place — same hardcoded ceilings the
@@ -136,12 +171,34 @@ export interface AuthSuccess {
 	isLead?: boolean;
 }
 
+/** A logout (or an expiry) started while this login/register was in flight:
+ *  its answer belongs to an account the person already left. The cookie it
+ *  set is deleted by that logout, which is queued behind it (authLock.ts). */
+export class AuthSupersededError extends Error {
+	constructor() {
+		super("Signed out while signing in — please sign in again.");
+		this.name = "AuthSupersededError";
+	}
+}
+
 export async function register(
 	username: string,
 	password: string,
 	inviteCode?: string,
 ): Promise<AuthSuccess> {
-	await settlePendingLogout();
+	return withAuthLock(
+		"exclusive",
+		() => registerLocked(username, password, inviteCode),
+		AUTH_WAIT_MS,
+	);
+}
+
+async function registerLocked(
+	username: string,
+	password: string,
+	inviteCode?: string,
+): Promise<AuthSuccess> {
+	const epoch = authEpoch;
 	const res = await apiFetch("/auth/register", {
 		method: "POST",
 		body: JSON.stringify({ username, password, inviteCode }),
@@ -154,44 +211,20 @@ export async function register(
 		throw new Error(body.error ?? "Registration failed");
 	}
 	const data = (await res.json()) as AuthSuccess;
-	_loggedIn = true;
-	_isAdmin = data.isAdmin;
-	_isLead = data.isLead === true;
+	if (epoch !== authEpoch) throw new AuthSupersededError();
+	setAuthMirror(true, data.isAdmin, data.isLead === true);
 	return data;
 }
 
-// ── Logout vs. the next login: the cookie, not just the mirror ──────────────
-//
-// `POST /auth/logout` answers with a `Set-Cookie` that DELETES `st_token`.
-// Browsers apply `Set-Cookie` in the order responses ARRIVE: a logout
-// answering after the next login's `Set-Cookie` would delete the new
-// person's real cookie while the mirror below says they are signed in —
-// every request then 401s. So a login (or register) first lets a logout
-// still in flight settle: it waits a bounded moment for the answer, and
-// past that budget ABORTS the request — an aborted fetch's late answer
-// is dropped by the browser's network layer before its headers (and its
-// Set-Cookie) are processed. Either way no stale clear can land after the
-// new cookie. `e2e/auth-cookie.spec.ts` drives this against a real HTTP
-// server and the browser's real cookie jar.
-export const LOGOUT_SETTLE_MS = 2000;
-
-let pendingLogout: { promise: Promise<void>; controller: AbortController } | null = null;
-
-async function settlePendingLogout(): Promise<void> {
-	const p = pendingLogout;
-	if (p === null) return;
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	const budget = new Promise<"timeout">((resolve) => {
-		timer = setTimeout(() => resolve("timeout"), LOGOUT_SETTLE_MS);
-	});
-	const outcome = await Promise.race([p.promise.then(() => "done" as const), budget]);
-	if (timer !== undefined) clearTimeout(timer);
-	if (outcome === "timeout") p.controller.abort();
-	await p.promise;
+export async function login(username: string, password: string): Promise<AuthSuccess> {
+	// Exclusive: the request leaves only once every earlier transition of
+	// this browser has its answer, so this login's Set-Cookie is the last
+	// one applied — a logout still in flight cannot delete it afterwards.
+	return withAuthLock("exclusive", () => loginLocked(username, password), AUTH_WAIT_MS);
 }
 
-export async function login(username: string, password: string): Promise<AuthSuccess> {
-	await settlePendingLogout();
+async function loginLocked(username: string, password: string): Promise<AuthSuccess> {
+	const epoch = authEpoch;
 	const res = await apiFetch("/auth/login", {
 		method: "POST",
 		body: JSON.stringify({ username, password }),
@@ -201,9 +234,8 @@ export async function login(username: string, password: string): Promise<AuthSuc
 		throw new Error(body.error ?? "Login failed");
 	}
 	const data = (await res.json()) as AuthSuccess;
-	_loggedIn = true;
-	_isAdmin = data.isAdmin;
-	_isLead = data.isLead === true;
+	if (epoch !== authEpoch) throw new AuthSupersededError();
+	setAuthMirror(true, data.isAdmin, data.isLead === true);
 	return data;
 }
 
@@ -226,21 +258,22 @@ export async function logout(): Promise<void> {
 	// `isLoggedIn` / `isAdmin` / `isLead` back to false (the poll would
 	// stop, Back/Forward would be ignored and a real 401 would no longer
 	// route to the login view).
-	_loggedIn = false;
-	_isAdmin = false;
-	_isLead = false;
-	const controller = new AbortController();
-	const promise = apiFetch("/auth/logout", { method: "POST", signal: controller.signal }).then(
-		() => undefined,
-		() => undefined, // network down, or aborted by a newer login — local teardown is what matters
-	);
-	const entry = { promise, controller };
-	pendingLogout = entry;
-	try {
-		await promise;
-	} finally {
-		if (pendingLogout === entry) pendingLogout = null;
-	}
+	setAuthMirror(false, false, false);
+	// Bumped even when the mirror was already clear (the session-expired
+	// path clears it first): a login in flight right now must learn that
+	// it was overtaken.
+	authEpoch++;
+	// The POST itself waits for the lock, without a deadline: a logout is
+	// never skipped (the cookie must go), and every login/status probe
+	// started after it queues behind it until its answer — its cookie
+	// delete — has landed. Nothing aborts it (authLock.ts says why).
+	await withAuthLock("exclusive", async () => {
+		try {
+			await apiFetch("/auth/logout", { method: "POST" });
+		} catch {
+			/* network down — local teardown is what the user actually wants */
+		}
+	});
 }
 
 // ── Session types ───────────────────────────────────────────────────────────
@@ -1888,6 +1921,10 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
 	// A 401 from /auth/login on bad credentials, with `_loggedIn === false`
 	// before the call, must NOT trigger the SESSION_EXPIRED_EVENT.
 	const sentAuth = _loggedIn;
+	// …and under which account: a 401 may only end the generation it was
+	// sent under. One sent for an account that has since logged out (and
+	// another logged in) answers for that old account, not this one.
+	const sentEpoch = authEpoch;
 	// `credentials: "include"` is mandatory for cookie-based auth across
 	// origins (frontend on Pages, backend on Tunnel). Without it the
 	// browser silently drops the auth cookie.
@@ -1909,10 +1946,10 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
 	// - `_loggedIn` check dedups concurrent 401 bursts (session poll +
 	//   a user-triggered call racing): the first one through flips it
 	//   false and the rest see false, so the event fires exactly once.
-	if (sentAuth && res.status === 401 && _loggedIn) {
-		_loggedIn = false;
-		_isAdmin = false;
-		_isLead = false;
+	// - `sentEpoch` drops a 401 that belongs to an earlier account; it
+	//   also dedups the burst: the first 401 bumps the generation.
+	if (sentAuth && res.status === 401 && _loggedIn && sentEpoch === authEpoch) {
+		setAuthMirror(false, false, false);
 		window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT));
 	}
 

@@ -1,40 +1,66 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import type { Route } from "@playwright/test";
+import type { BrowserContext, Page, Route } from "@playwright/test";
 import { expect, test } from "./fixtures.js";
+import { MockBackend } from "./mockBackend.js";
 
 /**
- * Race B at the HTTP level: a `POST /auth/logout` that answers AFTER the
- * next person's login carries a Set-Cookie that deletes `st_token`, and
- * browsers apply Set-Cookie in arrival order. The auth and list endpoints
- * are served by a REAL HTTP server (a Node `http` server this test starts)
- * whose logout answer is held until the test releases it; the browser's
- * real cookie jar is observed with `context.cookies()` and through the
- * Cookie header the server receives. The mock only forwards those
- * requests (with the jar's cookie) and relays the server's headers,
- * Set-Cookie included.
+ * Auth transitions against the browser's REAL network stack and cookie jar.
+ *
+ * The app's `/api/auth/*` and `/api/sessions` requests are not fulfilled by
+ * Playwright: `route.continue({ url })` hands them back to Chromium, which
+ * sends them to a real Node HTTP server started by the test, receives the
+ * answer itself and applies its `Set-Cookie` itself — as in production.
+ * Nothing relays headers or decides in JS whether a response "counts". The
+ * server can hold an answer until the test releases it. Cookies are not
+ * port-scoped, so the server's host-only `st_token` on `localhost` is the
+ * page's cookie too; the `Cookie` header the server receives is the proof
+ * of who the next request belongs to.
  */
 
-class AuthServer {
-	server: http.Server;
-	base = "";
-	held: { release: () => void } | null = null;
-	holdNextLogout = false;
-	seenCookies: string[] = [];
+type Holdable = "logout" | "sessions" | "status";
 
-	constructor() {
-		this.server = http.createServer((req, res) => void this.handle(req, res));
-	}
+class AuthServer {
+	private server = http.createServer((req, res) => void this.handle(req, res));
+	base = "";
+	private holdNext = new Set<Holdable>();
+	private held = new Map<Holdable, (status?: number) => void>();
+	/** Arrival order of every request, with the cookie it carried. */
+	log: Array<{ what: string; cookie: string | null }> = [];
 
 	async start(): Promise<void> {
 		await new Promise<void>((resolve) => this.server.listen(0, "127.0.0.1", resolve));
-		const { port } = this.server.address() as AddressInfo;
-		this.base = `http://127.0.0.1:${port}`;
+		this.base = `http://localhost:${(this.server.address() as AddressInfo).port}`;
 	}
 
 	async stop(): Promise<void> {
-		this.held?.release();
+		for (const release of this.held.values()) release();
+		this.server.closeAllConnections();
 		await new Promise<void>((resolve) => this.server.close(() => resolve()));
+	}
+
+	/** The next request of this kind is held until `release`. */
+	hold(kind: Holdable): void {
+		this.holdNext.add(kind);
+	}
+
+	isHeld(kind: Holdable): boolean {
+		return this.held.has(kind);
+	}
+
+	release(kind: Holdable, status?: number): void {
+		const r = this.held.get(kind);
+		if (!r) throw new Error(`nothing held: ${kind}`);
+		this.held.delete(kind);
+		r(status);
+	}
+
+	received(what: string): number {
+		return this.log.filter((l) => l.what === what).length;
+	}
+
+	lastCookie(what: string): string | null | undefined {
+		return this.log.filter((l) => l.what === what).at(-1)?.cookie;
 	}
 
 	private user(req: http.IncomingMessage): string | null {
@@ -43,144 +69,229 @@ class AuthServer {
 	}
 
 	private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-		const path = new URL(req.url ?? "/", this.base).pathname.replace(/^\/api/, "");
-		const json = (status: number, body: unknown, headers: Record<string, string> = {}) => {
+		const path = new URL(req.url ?? "/", "http://x").pathname.replace(/^\/api/, "");
+		const user = this.user(req);
+		let body = "";
+		for await (const chunk of req) body += chunk;
+		this.log.push({ what: `${req.method} ${path}`, cookie: user });
+		const json = (status: number, payload: unknown, headers: Record<string, string> = {}) => {
 			res.writeHead(status, { "content-type": "application/json", ...headers });
-			res.end(JSON.stringify(body));
+			res.end(JSON.stringify(payload));
+		};
+		const maybeHold = async (kind: Holdable): Promise<number | undefined> => {
+			if (!this.holdNext.delete(kind)) return undefined;
+			return new Promise<number | undefined>((resolve) => this.held.set(kind, resolve));
 		};
 		if (path === "/auth/status") {
+			await maybeHold("status");
 			json(200, {
 				needsSetup: false,
-				authenticated: this.user(req) !== null,
-				isAdmin: false,
+				authenticated: user !== null,
+				isAdmin: user === "alice",
 				isLead: false,
-				resourceCaps: { cpuMaxCores: 4, memMaxMiB: 8192 },
+				resourceCaps: { cpuMaxCores: 8, memMaxMiB: 16384 },
 			});
 			return;
 		}
 		if (path === "/auth/login" && req.method === "POST") {
-			let body = "";
-			for await (const chunk of req) body += chunk;
 			const { username } = JSON.parse(body || "{}") as { username: string };
 			json(
 				200,
-				{ userId: `u-${username}`, isAdmin: false, isLead: false },
-				{ "set-cookie": `st_token=${encodeURIComponent(username)}; Path=/; HttpOnly` },
+				{ userId: `u-${username}`, isAdmin: username === "alice", isLead: false },
+				{
+					"set-cookie": `st_token=${encodeURIComponent(username)}; Path=/; HttpOnly; SameSite=Strict`,
+				},
 			);
 			return;
 		}
 		if (path === "/auth/logout" && req.method === "POST") {
-			const answer = () => {
-				if (res.writableEnded) return;
-				res.writeHead(204, { "set-cookie": "st_token=; Path=/; HttpOnly; Max-Age=0" });
-				res.end();
-			};
-			if (this.holdNextLogout) {
-				this.holdNextLogout = false;
-				this.held = { release: answer };
-				return;
-			}
-			answer();
+			await maybeHold("logout");
+			// What backend clearAuthCookie sends: an unconditional delete.
+			res.writeHead(204, {
+				"set-cookie":
+					"st_token=; Path=/; HttpOnly; SameSite=Strict; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+			});
+			res.end();
 			return;
 		}
-		if (path.startsWith("/sessions")) {
-			const u = this.user(req);
-			this.seenCookies.push(u ?? "<none>");
-			if (u === null) json(401, { error: "Unauthorized" });
-			else json(200, []);
-			return;
+		if (path === "/sessions") {
+			const forced = await maybeHold("sessions");
+			if (forced !== undefined)
+				return json(forced, forced === 200 ? [] : { error: "Unauthorized" });
+			if (user === null) return json(401, { error: "Unauthorized" });
+			return json(200, []);
 		}
-		json(404, { error: `unmocked ${path}` });
+		json(404, { error: `unserved ${path}` });
 	}
 }
 
-test.describe("auth cookie sequence (real HTTP server, real cookie jar)", () => {
-	let server: AuthServer;
+const backendClass = () => MockBackend;
 
+const REAL = /^\/(auth\/(status|login|logout)|sessions)(\?|$)/;
+
+function wire(backend: MockBackend, server: AuthServer): void {
+	backend.override = async (_method: string, path: string, route: Route) => {
+		if (!REAL.test(path)) return false;
+		// Back to the browser's own network stack, aimed at the real server.
+		await route.continue({ url: `${server.base}/api${path}` });
+		return true;
+	};
+	// The other endpoints (groups, quotas…) stay on the mock, which must see
+	// someone signed in or its 401s would fire the session-expired path.
+	backend.loginAs("alice");
+}
+
+const tokenOf = async (context: BrowserContext): Promise<string | null> =>
+	(await context.cookies()).find((c) => c.name === "st_token")?.value ?? null;
+
+async function signIn(page: Page, user: string): Promise<void> {
+	await expect(page.locator("#auth-view")).toBeVisible();
+	await page.fill("#auth-username", user);
+	await page.fill("#auth-password", "pw");
+	await page.click("#auth-submit");
+}
+
+test.describe("auth transitions on the real cookie jar", () => {
+	let server: AuthServer;
 	test.beforeEach(async ({ backend, page }) => {
 		server = new AuthServer();
 		await server.start();
-		const forward = async (path: string, route: Route) => {
-			const req = route.request();
-			// The Cookie header the browser would send, read from its own jar
-			// for the page's origin.
-			const jar = await page.context().cookies(page.url());
-			const cookie = jar.map((c) => `${c.name}=${c.value}`).join("; ");
-			try {
-				const upstream = await fetch(`${server.base}/api${path}`, {
-					method: req.method(),
-					headers: { "content-type": "application/json", ...(cookie ? { cookie } : {}) },
-					body: req.method() === "POST" ? (req.postData() ?? "{}") : undefined,
-				});
-				const setCookie = upstream.headers.get("set-cookie");
-				await route.fulfill({
-					status: upstream.status,
-					headers: {
-						"content-type": upstream.headers.get("content-type") ?? "application/json",
-						...(setCookie ? { "set-cookie": setCookie } : {}),
-					},
-					body: upstream.status === 204 ? "" : await upstream.text(),
-				});
-			} catch {
-				/* the page aborted this request, or the test ended: nothing to apply */
-			}
-		};
-		// Detached: a held logout keeps its route pending without holding the
-		// page's actions, exactly like a slow server would.
-		backend.override = async (_method, path, route) => {
-			if (!/^\/(auth\/|sessions(\?|$))/.test(path)) return false;
-			void forward(path, route);
-			return true;
-		};
-		// The mock still answers the app's other endpoints (groups,
-		// observables…); it must see a signed-in user or its 401s would fire
-		// the session-expired path and log the page out on its own.
-		backend.loginAs("alice");
+		wire(backend, server);
 		await page.goto("/");
 	});
-
-	test.afterEach(async () => {
+	test.afterEach(async ({ page: _page }, testInfo) => {
+		if (testInfo.status !== testInfo.expectedStatus) {
+			console.log(`AUTH-SERVER log: ${JSON.stringify(server.log)}`);
+		}
 		await server.stop();
 	});
 
 	test("a logout answering after the next login never deletes the new person's cookie", async ({
+		app,
 		page,
 		context,
 		backend,
 	}) => {
-		const cookie = async () =>
-			(await context.cookies()).find((c) => c.name === "st_token")?.value ?? null;
-		await expect(page.locator("#auth-view")).toBeVisible();
-		await page.fill("#auth-username", "alice");
-		await page.fill("#auth-password", "pw");
-		await page.click("#auth-submit");
+		await signIn(page, "alice");
 		await expect(page.locator("#app-view")).toBeVisible();
-		await expect.poll(cookie).toBe("alice");
+		await expect.poll(() => tokenOf(context)).toBe("alice");
 
-		// Alice's logout is held by the server; Bob signs in meanwhile. (The
-		// v2 user menu and the v1 mobile sidebar both end in this button's
-		// click, so dispatching it works on every layout.)
-		server.holdNextLogout = true;
-		await page.evaluate(() => document.getElementById("logout-btn")?.click());
+		// Alice's logout reaches the server, whose answer (the cookie delete) is held.
+		server.hold("logout");
+		await app.appMenu("logout-btn");
 		await expect(page.locator("#auth-view")).toBeVisible();
-		await expect.poll(() => server.held !== null).toBe(true);
+		await expect.poll(() => server.isHeld("logout")).toBe(true);
+
+		// Bob signs in on the same tab meanwhile.
 		backend.loginAs("bob");
 		await page.fill("#auth-username", "bob");
 		await page.fill("#auth-password", "pw");
-		await page.click("#auth-submit");
+		await page.locator("#auth-submit").click({ noWaitAfter: true });
+		await page.waitForTimeout(1000);
+		// Alice's delete lands now — after Bob's login was asked for.
+		server.release("logout");
 		await expect(page.locator("#app-view")).toBeVisible({ timeout: 15_000 });
-		await expect.poll(cookie).toBe("bob");
-
-		// Alice's logout answer (a cookie-deleting Set-Cookie) lands now.
-		server.held?.release();
 		await page.waitForTimeout(500);
-		expect(await cookie(), "the stale logout deleted the new login's cookie").toBe("bob");
 
-		// The next list request reaches the server with Bob's cookie.
-		const before = server.seenCookies.length;
-		await page.evaluate(() => document.getElementById("sidebar-refresh-btn")?.click());
-		await expect.poll(() => server.seenCookies.length).toBeGreaterThan(before);
-		expect(server.seenCookies[server.seenCookies.length - 1]).toBe("bob");
+		expect(await tokenOf(context), "a stale logout deleted the new login's cookie").toBe("bob");
+		const before = server.received("GET /sessions");
+		await app.openSidebar();
+		await page.click("#sidebar-refresh-btn");
+		await expect.poll(() => server.received("GET /sessions")).toBeGreaterThan(before);
+		expect(server.lastCookie("GET /sessions"), "the next request is Bob's").toBe("bob");
+		// The order the server saw: Alice's logout before Bob's login.
+		const order = server.log.map((l) => l.what).filter((w) => w.startsWith("POST /auth/"));
+		expect(order.slice(-2)).toEqual(["POST /auth/logout", "POST /auth/login"]);
 		await expect(page.locator("#app-view")).toBeVisible();
+	});
+
+	test("a tab opened while another tab's logout is in flight does not sign in as the leaving account", async ({
+		app,
+		page,
+		context,
+	}) => {
+		await signIn(page, "alice");
+		await expect(page.locator("#app-view")).toBeVisible();
+		await expect.poll(() => tokenOf(context)).toBe("alice");
+
+		server.hold("logout");
+		await app.appMenu("logout-btn");
+		await expect.poll(() => server.isHeld("logout")).toBe(true);
+
+		// The cross-tab ordering is the browser's Web Locks, not the in-page fallback.
+		expect(await page.evaluate(() => typeof navigator.locks?.request)).toBe("function");
+		// A second tab of the same browser (same cookie jar) opens now.
+		const other = await context.newPage();
+		const otherBackend = new (backendClass())();
+		wire(otherBackend, server);
+		await otherBackend.install(other);
+		void other.goto("/");
+		await other.waitForTimeout(1000);
+		// Alice's cookie is still in the jar until her logout answers; the
+		// new tab must not have shown her app meanwhile.
+		await expect(
+			other.locator("#app-view"),
+			"the new tab signed in as the leaving account",
+		).toBeHidden();
+		expect(
+			server.lastCookie("GET /auth/status") ?? null,
+			"a status probe rode Alice's cookie",
+		).toBe(null);
+		server.release("logout");
+		await expect(other.locator("#auth-view"), "the new tab shows the login form").toBeVisible({
+			timeout: 15_000,
+		});
+		await expect(other.locator("#app-view")).toBeHidden();
+		await expect(other.locator("#toast .toast-item", { hasText: "expired" })).toHaveCount(0);
+		expect(await tokenOf(context)).toBe(null);
+	});
+
+	test("a 401 answering for the previous account does not sign the new one out", async ({
+		app,
+		page,
+		context,
+		backend,
+	}) => {
+		await signIn(page, "alice");
+		await expect(page.locator("#app-view")).toBeVisible();
+		await expect.poll(() => tokenOf(context)).toBe("alice");
+
+		// A list request sent with Alice's cookie is held; it will answer 401.
+		server.hold("sessions");
+		await app.openSidebar();
+		await page.click("#sidebar-refresh-btn");
+		await expect.poll(() => server.isHeld("sessions")).toBe(true);
+
+		await app.appMenu("logout-btn");
+		await expect(page.locator("#auth-view")).toBeVisible();
+		backend.loginAs("bob");
+		await signIn(page, "bob");
+		await expect(page.locator("#app-view")).toBeVisible();
+		await expect.poll(() => tokenOf(context)).toBe("bob");
+
+		const logoutsBefore = server.received("POST /auth/logout");
+		server.release("sessions", 401);
+		await page.waitForTimeout(1000);
+		await expect(page.locator("#app-view"), "Bob was signed out by Alice's 401").toBeVisible();
+		await expect(page.locator("#toast .toast-item", { hasText: "expired" })).toHaveCount(0);
+		expect(server.received("POST /auth/logout")).toBe(logoutsBefore);
+		expect(await tokenOf(context)).toBe("bob");
+	});
+
+	test("a 401 for the current account still signs it out, once", async ({ app, page, context }) => {
+		await signIn(page, "alice");
+		await expect(page.locator("#app-view")).toBeVisible();
+		await expect.poll(() => tokenOf(context)).toBe("alice");
+
+		const logoutsBefore = server.received("POST /auth/logout");
+		server.hold("sessions");
+		await app.openSidebar();
+		await page.click("#sidebar-refresh-btn");
+		await expect.poll(() => server.isHeld("sessions")).toBe(true);
+		server.release("sessions", 401);
+		await expect(page.locator("#auth-view")).toBeVisible();
+		await expect(page.locator("#toast .toast-item", { hasText: "expired" })).toHaveCount(1);
+		await expect.poll(() => server.received("POST /auth/logout")).toBe(logoutsBefore + 1);
+		await expect.poll(() => tokenOf(context)).toBe(null);
 	});
 });
