@@ -1465,7 +1465,9 @@ function composerBlockReason(c: ConversationSummary | undefined, st: ComposerSta
 		// The backend took the pane away from this conversation (another one
 		// started or resumed in it, or the container went down): its history
 		// stays readable here, input goes through the terminal.
-		if (c.statusEvidence === "binding_lost" || c.tabId === null)
+		// paneId, not tabId: the tab can be unknown on a well-bound pane
+		// (the hook carried no tmux session), and canSendInput follows the pane.
+		if (c.statusEvidence === "binding_lost" || c.paneId === null)
 			return "This conversation no longer has a terminal pane — another conversation took it over, or the session was restarted. Its history stays readable; type in the Terminal to continue.";
 		return "Sending from Chat is not available for this conversation.";
 	}

@@ -35,7 +35,7 @@ test.describe("chat: active vs earlier", () => {
 			title: "Displaced session",
 			status: "unknown",
 			statusEvidence: "binding_lost",
-			tabId: null,
+			paneId: null,
 			canSendInput: false,
 			events: c2!.events.map((e) => ({ ...e })),
 		});
@@ -67,6 +67,25 @@ test.describe("chat: active vs earlier", () => {
 		await expect(page.locator(".chat-composer-status")).toContainText(
 			"no longer has a terminal pane",
 		);
+	});
+
+	test("a conversation still bound to its pane that cannot take input does not claim the pane was lost", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		// Bound (paneId set) and fresh, but not sendable for another reason
+		// (e.g. the viewer may not operate it): the generic reason, not "no pane".
+		const c1 = backend.conversations[0]!;
+		c1.canSendInput = false;
+		c1.paneId = "%1";
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.switchView("chat");
+		await page.locator("#chat-list .chat-conv-row", { hasText: "Refactor auth flow" }).click();
+		const status = page.locator(".chat-composer-status");
+		await expect(status).toContainText("Sending from Chat is not available");
+		await expect(status).not.toContainText("no longer has a terminal pane");
 	});
 
 	test("a fresh live claim is the one Active conversation, counted once", async ({

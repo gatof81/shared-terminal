@@ -69,7 +69,7 @@ interface Conversation {
 	statusAt?: string;
 	statusEvidence?: string;
 	/** null = the conversation has no pane (binding lost). */
-	tabId?: string | null;
+	paneId?: string | null;
 }
 
 const T0 = Date.parse("2026-10-31T10:00:00Z");
@@ -883,7 +883,8 @@ export class MockBackend {
 			// Fresh by default (the fixed test clock is T0 + 30 min): the list's
 			// "Active" section only shows live claims with recent evidence.
 			statusAt: c.statusAt ?? iso(29 * 60),
-			tabId: c.tabId === undefined ? "tab-1" : c.tabId,
+			tabId: "tab-1",
+			paneId: c.paneId === undefined ? "%1" : c.paneId,
 			startedAt: c.startedAt,
 			endedAt: c.status === "ended" ? last?.ts : null,
 			lastEventAt: last?.ts ?? c.startedAt,
