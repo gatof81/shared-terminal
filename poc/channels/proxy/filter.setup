@@ -1,0 +1,9 @@
+(^|\.)anthropic\.com$
+(^|\.)claude\.ai$
+(^|\.)claude\.com$
+^github\.com$
+^api\.github\.com$
+^codeload\.github\.com$
+^raw\.githubusercontent\.com$
+^objects\.githubusercontent\.com$
+^registry\.npmjs\.org$
