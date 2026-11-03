@@ -10,11 +10,13 @@
 // Fakechat's /ws broadcast (listen only) and, if present, the CLI debug log.
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { factsToRow, parseHookLines, windowFacts } from "./events.mjs";
 import { createIdleTracker } from "./idle.mjs";
+import { matchTranscript, transcriptEvidence } from "./transcript-match.mjs";
 
 const POC = dirname(fileURLToPath(import.meta.url));
 const OUT = join(POC, "out");
@@ -96,6 +98,29 @@ async function waitIdle() {
 	return { ok: false, detail: "no se observó la inactividad continua requerida" };
 }
 
+// ── Alternative A: the probe's hook-time verdict vs a later read of the whole
+// transcript (after the turn). Read-only; the transcript is located by session
+// id and its path is never written anywhere.
+function laterTranscriptCheck(ups, id, tSend) {
+	const pp = join(OUT, "transcript-probe.jsonl");
+	const probeLines = existsSync(pp)
+		? readFileSync(pp, "utf8").split("\n").filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }).filter((x) => x.prompt_id && x.prompt_id === ups.prompt_id)
+		: [];
+	const projects = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "projects");
+	const files = existsSync(projects) ? readdirSync(projects).map((d) => join(projects, d, `${ups.session_id}.jsonl`)).filter((x) => existsSync(x)) : [];
+	let later = null;
+	const t = Date.now();
+	if (files.length === 1) {
+		try {
+			later = matchTranscript(readFileSync(files[0], "utf8"), { startsAtZero: true, promptId: ups.prompt_id, messageId: id, sessionId: ups.session_id,
+				server: process.env.POC0_CHANNEL_SERVER ?? "plugin:fakechat:fakechat" });
+		} catch {
+			later = { status: "unverified", reasons: ["unreadable"], prompt_records_for_prompt_id: 0 };
+		}
+	} else later = { status: "unverified", reasons: [files.length ? "several-files" : "file-missing"], prompt_records_for_prompt_id: 0 };
+	return transcriptEvidence(probeLines, later, t - tSend);
+}
+
 // ── Fakechat broadcast listener (receive only; never sends on the socket)
 const replies = [];
 function listen() {
@@ -175,6 +200,7 @@ for (let n = 1; n <= count; n++) {
 	// row can be re-derived from hooks.jsonl later without guessing.
 	f = windowFacts(hooks(), { id, fromLine });
 	Object.assign(rec, factsToRow(f, { id, tSend, reply }), { cli_received: cliReceived, hooks_lines: [fromLine, f.lastLine] });
+	if (f.ups) rec.transcript_a = laterTranscriptCheck(f.ups, id, tSend);
 	writeFileSync(sendsPath, `${JSON.stringify(rec)}\n`, { flag: "a" });
 	console.log(`#${n} ${id}: hook=${!!f.ups}${f.ups ? ` (${rec.ups.latency_ms} ms, source=${f.ups.source_present ? f.ups.source : "<ausente>"})` : ""} · Stop=${!!f.stop} · respuesta en Fakechat=${!!reply}`);
 	if (!f.ups) die(`#${n}: sin UserPromptSubmit en 120 s. Serie detenida (no se reintenta). Ver el informe.`, 5);
