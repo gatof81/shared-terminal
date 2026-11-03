@@ -2493,9 +2493,17 @@ el CLI real, resultados adjuntos al PR): (1) una línea ⇒ `UserPromptSubmit` i
 
 - Soft delete (`DELETE /api/sessions/:id`): conserva `.conversations/<sid>` y `.claude-managed/<sid>`.
 - Hard delete (`?hard=true`): purga ambos (mismo guard de ruta que `purgeWorkspace`). Las filas de `claude_conversations` y `conversation_user_meta` de la sesión se borran con ella.
-- No hay borrado permanente de una conversación individual (decisión del responsable 2026-11-03: el almacenamiento medido es ~3 MiB y no lo justifica); archivar (§6.2) no borra nada.
+- No hay borrado permanente de una conversación individual (decisión del responsable 2026-11-03: el almacenamiento medido es ~3 MiB y no lo justifica).
+- **Archivar no elimina datos** (§6.2): ni eventos, ni rotaciones `.1`, ni el índice, ni la fila de
+  `claude_conversations`, ni el transcript del CLI; desarchivar devuelve la conversación tal cual.
+  Una conversación archivada que se reanuda (`--resume`, mismo `cid`) sigue archivada y *MUST*
+  aparecer señalizada en el filtro **Activas** mientras tenga un reclamo vivo (§6.2).
 - `CONVERSATION_TTL_DAYS` (opcional, unset = sin TTL): conversaciones `ended` con
-  `ended_at` más antiguo se purgan (archivo + fila) en un sweeper diario.
+  `ended_at` más antiguo se purgan (archivo + fila) en un sweeper diario. **No implementado**
+  (verificado 2026-11-03 en `main` `4790cd8`: ni la variable ni el sweeper existen en el código ni en
+  `.env.example`): hoy ninguna conversación se purga por antigüedad. Es diseño pendiente, no un
+  comportamiento con el que se pueda contar, y si se implementa *MUST* respetar la decisión de abajo
+  (no hay purga individual sin un contrato propio).
 - Backup (#240): `claude_conversations` y `conversation_user_meta` (desde el esquema 18, §6.2) entran en `TABLES`; `.conversations/` entra en el tarball por
   sesión; `.claude-managed/` **no** (se regenera desde D1 en `reconcile`).
 - SECURITY.md recibe la sección "Conversation events at rest" con este contrato, incluida §4.3.2.
