@@ -9,9 +9,16 @@ Evidencia hasta ahora (2026-11-03):
 - **XA-1** dio `late`.
 - **XB-1** dio **PASS-A**: el origen se observó en el mod `prompt.submit`, y PASS-A no reemplaza a
   G3.
-- **PASS-B** (integridad hasta el backend) está diseñado y no implementado, en
-  [04-poc.md §1.14](./04-poc.md#114-pass-b-integridad-de-la-evidencia-hasta-el-backend-diseño-nada-implementado-pass-b0-no-autorizado).
-  PASS-B0 no está autorizado.
+- **PASS-B0 dio PASS** (VM100, kernel 6.8.0-147, CLI 2.1.314, kit `447f639`, una muestra).
+  Una llamada `$.http.fetch` con `socketPath` llega a un socket Unix. El par es el proceso
+  principal del CLI, en el contenedor y desde el host (`NSpid`, cgroup, pidfd). La conexión es
+  `O_CLOEXEC` y no se hereda. El socket del host no se puede quitar desde el contenedor. Ver
+  [04-poc.md §1.14.13](./04-poc.md#11413-corrida-4-en-vm100-2026-11-03-pass-kit-447f639-estado-y-siguiente-gate).
+- **PASS-B** (integridad hasta el backend) **no está alcanzado**:
+  - B1 (instalación administrada y H-ND), B2 (ataques, con el gateway) y B3 (recuperación)
+    siguen pendientes y no autorizados;
+  - el siguiente gate es **PASS-B1**;
+  - PASS-A + PASS-B0 no habilitan el Monitor ni reemplazan a G3.
 
 Dirección de producto (2026-11-03): **conversación de cada agente con invitados temporales vía
 `@menciones`**, más un modo Colaboración autorizado por la persona. Decisiones D1–D6 aprobadas y
