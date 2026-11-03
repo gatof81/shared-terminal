@@ -366,22 +366,31 @@ el archivo cuando corrió el hook (+53 ms). Debug en 0–75 s: sin retry, 429 ni
 
 #### 1.11.1 Experimento XA-1 (factibilidad local; **no autorizado**)
 
-Una sola prueba T como §1.9, con el kit `poc/channels-phase0@e398df5`, que agrega
+Una sola prueba T como §1.9, con el kit `poc/channels-phase0@508a57d`, que agrega
 `transcript-probe.mjs` al mismo `UserPromptSubmit` del logger.
 
 | Pregunta | Cómo se mide |
 | --- | --- |
 | ¿El registro ya está **en el archivo** cuando corre el hook? | La sonda hace **una** lectura de los últimos ≤ 1 MiB del transcript al ejecutarse, sin esperar ni reintentar. "Presente" = legible por otro proceso en ese instante (no prueba durabilidad: no hay `fsync` observable) |
-| ¿Se relaciona sin ambigüedad con `prompt_id` y el id del mensaje? | `verified` sólo con **exactamente un** registro de prompt (no `tool_result`) con ese `promptId`, de canal, del servidor esperado, de la sesión, con `isMeta`, una sola etiqueta y ese `message_id`, que no aparece en ningún otro registro leído |
-| ¿Cuántas veces falta o llega tarde? | `send.mjs` relee el archivo completo tras el turno: `present-at-hook`, `late` (ausente al hook, verificado después), `missing`, `invalid`. **Una** muestra no mide una tasa: eso exigiría una serie (XA-2), con autorización aparte |
+| ¿Se relaciona sin ambigüedad con `prompt_id` y el id del mensaje? | Verificado sólo con **exactamente un** registro de prompt (no `tool_result`) con ese `promptId`, de canal, del servidor esperado, de la sesión, con `isMeta`, cuyo contenido es **byte a byte igual** al prompt que recibió el hook y es **un único** elemento `<channel>` con la forma exacta de 2.1.317 (apertura, salto, contenido, salto, cierre; nada fuera; sin etiqueta anidada; sin atributos repetidos — una clave `meta` llamada `source` lo sería — y `source` igual al servidor), con ese `message_id`, que no aparece en otro registro leído |
+| ¿Cuántas veces falta o llega tarde? | `send.mjs` relee el archivo completo tras el turno (igualdad por el SHA-256 del prompt que guarda el logger): `present-at-hook` (verificado al hook **y** en la relectura completa), `late` (sin registro al hook, verificado después), `missing`, `invalid` (todo lo demás). **Una** muestra no mide una tasa: eso exigiría una serie (XA-2), con autorización aparte |
 | ¿Es estrictamente observacional? | No imprime (lo impreso entraría al contexto), siempre sale con 0, no bloquea ni modifica el prompt; registra su propia duración (`read_ms`). Única interferencia: el tiempo de una lectura acotada |
-| ¿Archivo ausente, incompleto, duplicado o ilegible? | Siempre `unverified` con motivo: ruta ausente, otro nombre, fuera de `projects`, symlink, no es archivo, ausente, ilegible, vacío, línea ilegible, línea final a medio escribir, sin registro, duplicado, otro origen/servidor/sesión, sin `isMeta`, otra etiqueta o `message_id`, id repetido en otro registro, registro fuera de la cola leída, mensaje que llegó como `queued_command` |
+| ¿Archivo ausente, incompleto, duplicado o ilegible? | Siempre `unverified` con motivo: ruta ausente, otro nombre, fuera de `projects`, symlink, no es archivo, ausente, ilegible, vacío, línea ilegible, línea final a medio escribir (**aunque el registro buscado esté**), sin registro, contenido distinto del prompt o comparación imposible, etiqueta mal formada, duplicado, otro origen/servidor/sesión, sin `isMeta`, otra etiqueta o `message_id`, id repetido en otro registro, registro fuera de la cola leída, mensaje que llegó como `queued_command` |
 
-Tests sintéticos del kit: 51 (24 nuevos para la alternativa A). La sonda nunca guarda texto,
+**Alcance de la unicidad:** la sonda lee como mucho el último MiB. Si la lectura no empezó en el byte 0,
+el resultado es `verified-in-observed-bytes`, con unicidad **sólo en los bytes leídos** y
+`unique_global` nulo; únicamente una lectura completa puede dar `verified` con unicidad global. En
+XA-1 la unicidad global la aporta la relectura completa posterior, que es de otro momento: no es
+una garantía al instante del hook.
+
+Tests sintéticos del kit: 69 (42 de la alternativa A, entre ellos las regresiones de línea final
+incompleta tras un registro válido, duplicado fuera de la cola leída, igualdad exacta y etiqueta
+mal formada, y el retiro del kit anterior conservando los logs de T). La sonda nunca guarda texto,
 rutas ni el prompt; `check` la autoprueba sobre un transcript sintético en un directorio temporal.
 
-**Factibilidad positiva** sólo si en XA-1: una línea de sonda para el `prompt_id`, `verified`,
-categoría `present-at-hook`, lectura posterior también `verified`, logger y flujo como en T.
+**Factibilidad positiva** sólo si en XA-1: una línea de sonda para el `prompt_id`, con `verified` o
+`verified-in-observed-bytes` (se informa cuál), categoría `present-at-hook`, relectura completa
+`verified` con unicidad global, logger y flujo como en T.
 Cualquier otro resultado se informa tal cual y la alternativa A no avanza sin rediseño.
 
 #### 1.11.2 Garantías que la prueba local **no** demuestra (requisitos para producción)
