@@ -17,7 +17,9 @@ export function classify(r) {
 				"A2 prompt_id presente": !!u.prompt_id,
 				"A3 prompt_id nuevo": u.prompt_id_seen_before === false,
 				"A4 sin otros prompts": r.other_prompt_events_after_send === 0,
-				"A5 sin Stop ajeno": (r.stops_with_other_or_no_prompt_id ?? []).length === 0,
+				// Any other Stop in the window fails A5, a duplicate with the SAME
+				// prompt_id included: R8 needs one unambiguous turn_end.
+				"A5 sin Stop ajeno": (r.other_stops ?? r.stops_with_other_or_no_prompt_id ?? []).length === 0,
 				"Stop del mismo prompt_id": responded,
 				"message_id = id enviado": u.tag_message_id_matches === true,
 			}
@@ -73,6 +75,8 @@ export function singleSummary(row) {
 		`- \`source\`: ${r.ups ? (r.ups.source_present ? `\`${r.ups.source}\`` : "**ausente**") : "—"}`,
 		`- Correlación: ${r.corr ? (r.corrOk ? "OK" : `FALLA: ${Object.entries(r.corr).filter(([, v]) => !v).map(([k]) => k).join(", ")}`) : "—"}`,
 	];
+	for (const p of r.other_prompts ?? []) lines.push(`  - \`UserPromptSubmit\` adicional: línea ${p.line}, prompt_id \`${p.prompt_id ?? "—"}\``);
+	for (const s of r.other_stops ?? []) lines.push(`  - \`Stop\` adicional: línea ${s.line}, prompt_id \`${s.prompt_id ?? "—"}\`${s.same_prompt_id ? " (mismo prompt_id: Stop duplicado)" : ""}`);
 	const go = r.woke && r.bidirectional && r.sourceSystem && r.corrOk;
 	lines.push(go
 		? "- **Prueba individual limpia**: se puede pedir autorización para las 12 muestras."

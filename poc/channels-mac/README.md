@@ -12,6 +12,8 @@ credenciales y **no** usa `/logout`.
 | `hook-logger.mjs` | Hook **observacional**: una línea JSONL por evento en `.poc0/out/hooks.jsonl`. No imprime nada (en `UserPromptSubmit`/`SessionStart` lo impreso se agregaría al contexto de Claude), siempre sale con 0 (el 2 bloquearía el turno) y se traga sus errores |
 | `manage.mjs` | `install` / `check` / `uninstall` en **una** carpeta: fusiona entradas en `<carpeta>/.claude/settings.local.json` sin tocar lo que ya hay; al retirar restaura byte por byte, o quita sólo lo suyo si hubo cambios ajenos |
 | `idle.mjs` / `classify.mjs` | Lógica pura de inactividad observada y de clasificación (despertar ≠ bidireccional), cubierta por `test/` |
+| `events.mjs` | Identidad de evento = **línea absoluta** de `hooks.jsonl` (nunca identidad de objeto entre lecturas) y hechos de la ventana de cada envío; cubierta por `test/events.test.mjs` |
+| `rediagnose.mjs` | Recalcula la ventana de un envío **desde los registros existentes**, sin modificarlos; escribe `rediagnosis-<id>.json/.md` aparte |
 | `send.mjs` | Envía el mensaje de prueba por Fakechat (`POST /upload`, como la página) y mide: hook, `Stop`, respuesta en Fakechat. Nunca teclea en la terminal ni reintenta; sin `--series-authorized` sólo acepta la prueba individual |
 | `report.mjs` | Arma la sección de resultados para la PR #512 |
 
@@ -104,6 +106,18 @@ con `source=system` y correlación OK. Las series de 12 muestras **no** están a
 las rechaza sin `--series-authorized`.
 
 **Mandame el informe** (y, si querés, `hooks.jsonl`, que no tiene texto) antes de cualquier otra cosa.
+
+### 4b. Rediagnóstico de un envío ya registrado (sólo lectura, sin instalar nada)
+
+Los envíos registrados antes de la corrección de identidad de eventos (prueba T `P0T01-f9dfb6`)
+contaban su propio `UserPromptSubmit` y su propio `Stop` como ajenos. Para recalcularlos no hace
+falta reinstalar: se corre desde el kit apuntando a la carpeta de logs; `sends-*.jsonl` y
+`hooks.jsonl` no se modifican.
+
+```bash
+bun "$KIT/rediagnose.mjs" P0T01-f9dfb6 --out "$TEST/.poc0/out"
+open "$TEST/.poc0/out/rediagnosis-P0T01-f9dfb6.md"
+```
 
 ### 5. Retirar la instrumentación
 

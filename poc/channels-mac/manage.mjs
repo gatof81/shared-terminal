@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 
 const KIT = dirname(fileURLToPath(import.meta.url));
 const MARK = ".poc0/hook-logger.mjs";
-export const FILES = ["hook-logger.mjs", "send.mjs", "report.mjs", "idle.mjs", "classify.mjs"];
+export const FILES = ["hook-logger.mjs", "send.mjs", "report.mjs", "idle.mjs", "classify.mjs", "events.mjs", "rediagnose.mjs"];
 const sha = (b) => createHash("sha256").update(b).digest("hex");
 
 export function paths(folder) {

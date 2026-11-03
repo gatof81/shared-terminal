@@ -13,6 +13,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { factsToRow, parseHookLines, windowFacts } from "./events.mjs";
 import { createIdleTracker } from "./idle.mjs";
 
 const POC = dirname(fileURLToPath(import.meta.url));
@@ -38,7 +39,7 @@ const sh = (c, a) => spawnSync(c, a, { encoding: "utf8", timeout: 30_000 });
 const sha = (s) => createHash("sha256").update(s).digest("hex");
 const hooks = () => {
 	const p = join(OUT, "hooks.jsonl");
-	return existsSync(p) ? readFileSync(p, "utf8").split("\n").filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }) : [];
+	return existsSync(p) ? parseHookLines(readFileSync(p, "utf8")) : [];
 };
 
 // ── the test session: exactly one interactive claude whose cwd is this folder
@@ -130,9 +131,11 @@ for (let n = 1; n <= count; n++) {
 	if (!w.ok) die(`#${n} no enviado: ${w.detail}`, w.detail === "StopFailure" ? 7 : 6);
 	const id = `P0${label}${String(n).padStart(2, "0")}-${randomBytes(3).toString("hex")}`;
 	const text = `${id}: respondé exactamente OK_${id} y enviá tu respuesta a Fakechat.`;
-	const before = hooks();
-	const priorPromptIds = new Set(before.map((h) => h.prompt_id).filter(Boolean));
-	const seen = before.length;
+	// The window starts after the last line parsed before the send; every
+	// later comparison is by absolute line (events.mjs), never object identity.
+	// A line still being written at that instant lands inside the window: an
+	// extra event can only make the row stricter, never cleaner.
+	const fromLine = hooks().reduce((m, h) => Math.max(m, h._line + 1), 0);
 	const tSend = Date.now();
 	let http = "error";
 	try {
@@ -146,27 +149,18 @@ for (let n = 1; n <= count; n++) {
 		writeFileSync(sendsPath, `${JSON.stringify({ ...rec, result: "harness-error" })}\n`, { flag: "a" });
 		die(`#${n}: Fakechat respondió ${http}: fallo del harness, no NO-GO`);
 	}
-	let ups = null;
-	let otherPrompts = 0;
-	for (const end = Date.now() + 120_000; Date.now() < end && !ups; ) {
+	let f = windowFacts([], { id, fromLine });
+	for (const end = Date.now() + 120_000; Date.now() < end && !f.ups; ) {
 		await sleep(500);
-		const fresh = hooks().slice(seen).filter((h) => h.event === "UserPromptSubmit");
-		ups = fresh.find((h) => (h.test_ids ?? []).includes(id) || (h.channel_tags ?? []).some((t) => t.attrs?.message_id === id)) ?? null;
-		otherPrompts = fresh.filter((h) => h !== ups).length;
+		f = windowFacts(hooks(), { id, fromLine });
 	}
-	let stop = null;
 	let reply = null;
-	let tool = null;
-	let failure = false;
-	if (ups) {
-		for (const end = Date.now() + 300_000; Date.now() < end && !(stop && reply); ) {
+	if (f.ups) {
+		for (const end = Date.now() + 300_000; Date.now() < end && !(f.stop && reply); ) {
 			await sleep(1000);
-			const fresh = hooks().slice(seen);
-			failure = fresh.some((h) => h.event === "StopFailure");
-			stop = fresh.find((h) => h.event === "Stop" && h.t_ms >= ups.t_ms && ups.prompt_id && h.prompt_id === ups.prompt_id) ?? null;
-			tool = fresh.find((h) => (h.event === "PostToolUse" || h.event === "PostToolUseFailure") && (h.reply_to === id || (h.text_ok_ids ?? []).includes(id))) ?? null;
+			f = windowFacts(hooks(), { id, fromLine });
 			reply = replies.find((r) => r.t_ms >= tSend && (r.reply_to === id || r.ok_ids.includes(id))) ?? null;
-			if (failure) break;
+			if (f.stopFailure) break;
 		}
 	}
 	// Independent arrival evidence: the CLI logs "notifications/claude/channel:
@@ -177,30 +171,14 @@ for (let n = 1; n <= count; n++) {
 		const line = readFileSync(dbg, "utf8").split("\n").find((l) => l.includes("notifications/claude/channel:") && l.includes(id));
 		cliReceived = line ? { t_ms: Date.parse(line.split(" ")[0]) || null } : false;
 	}
-	const fresh = hooks().slice(seen);
-	Object.assign(rec, {
-		result: ups ? "hook" : "no-hook",
-		cli_received: cliReceived,
-		ups: ups && {
-			t_ms: ups.t_ms, latency_ms: ups.t_ms - tSend, source_present: ups.source_present, source: ups.source,
-			prompt_id: ups.prompt_id, prompt_id_seen_before: ups.prompt_id ? priorPromptIds.has(ups.prompt_id) : null,
-			channel_tag_count: ups.channel_tag_count, only_channel_tags: ups.only_channel_tags, outside_text_bytes: ups.outside_text_bytes,
-			tag_attr_names: ups.channel_tags?.[0]?.attr_names ?? [], tag_source: ups.channel_tags?.[0]?.attrs?.source ?? null,
-			tag_message_id_matches: ups.channel_tags?.[0]?.attrs?.message_id === id, keys: ups.keys,
-		},
-		other_prompts_in_window: otherPrompts,
-		other_prompt_events_after_send: fresh.filter((h) => h.event === "UserPromptSubmit" && h !== ups).length,
-		permission_dialog: fresh.some((h) => h.event === "Notification" && /permission/.test(h.notification_type ?? "")),
-		stop: stop && { latency_ms: stop.t_ms - tSend, same_prompt_id: true, ok_in_last_message: (stop.last_message_ok_ids ?? []).includes(id) },
-		stops_with_other_or_no_prompt_id: fresh.filter((h) => h.event === "Stop" && h !== stop).map((h) => h.prompt_id ?? null),
-		reply_tool: tool && { ok: tool.ok, tool_name: tool.tool_name, reply_to_matches: tool.reply_to === id, latency_ms: tool.t_ms - tSend },
-		fakechat_reply: reply && { latency_ms: reply.t_ms - tSend, reply_to_matches: reply.reply_to === id, exact: reply.exact_text === `OK_${id}` },
-		stop_failure: failure,
-	});
+	// Final facts from ONE read; the window's line range is recorded so the
+	// row can be re-derived from hooks.jsonl later without guessing.
+	f = windowFacts(hooks(), { id, fromLine });
+	Object.assign(rec, factsToRow(f, { id, tSend, reply }), { cli_received: cliReceived, hooks_lines: [fromLine, f.lastLine] });
 	writeFileSync(sendsPath, `${JSON.stringify(rec)}\n`, { flag: "a" });
-	console.log(`#${n} ${id}: hook=${!!ups}${ups ? ` (${rec.ups.latency_ms} ms, source=${ups.source_present ? ups.source : "<ausente>"})` : ""} · Stop=${!!stop} · respuesta en Fakechat=${!!reply}`);
-	if (!ups) die(`#${n}: sin UserPromptSubmit en 120 s. Serie detenida (no se reintenta). Ver el informe.`, 5);
-	if (failure) die("StopFailure (límite del plan o error): serie detenida.", 7);
+	console.log(`#${n} ${id}: hook=${!!f.ups}${f.ups ? ` (${rec.ups.latency_ms} ms, source=${f.ups.source_present ? f.ups.source : "<ausente>"})` : ""} · Stop=${!!f.stop} · respuesta en Fakechat=${!!reply}`);
+	if (!f.ups) die(`#${n}: sin UserPromptSubmit en 120 s. Serie detenida (no se reintenta). Ver el informe.`, 5);
+	if (f.stopFailure) die("StopFailure (límite del plan o error): serie detenida.", 7);
 }
 ws.close();
 console.log(`listo: ${sendsPath}`);
