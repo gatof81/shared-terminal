@@ -15,7 +15,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync, renameSync, writeF
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { factsToRow, parseHookLines, windowFacts } from "./events.mjs";
+import { factsToRow, parseHookLines, replyRecord, windowFacts } from "./events.mjs";
 import { createIdleTracker } from "./idle.mjs";
 import { matchTranscript, transcriptEvidence } from "./transcript-match.mjs";
 
@@ -136,9 +136,7 @@ function listen() {
 			try {
 				const d = JSON.parse(String(m.data));
 				if (d.type !== "msg" || d.from !== "assistant") return;
-				const text = String(d.text ?? "");
-				replies.push({ t_ms: Date.now(), reply_to: d.replyTo ?? null, text_bytes: Buffer.byteLength(text), text_sha256: sha(text),
-					ok_ids: [...new Set((text.match(/OK_P0[A-Z]\d{2}-[0-9a-f]{6}/g) ?? []).map((x) => x.slice(3)))], exact_text: text.trim() });
+				replies.push(replyRecord(d, Date.now(), sha));
 			} catch {}
 		};
 	});

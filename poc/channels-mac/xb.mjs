@@ -124,13 +124,15 @@ export function analyze({ mod, hooks, send, controls, debugLines = [], badModFil
 		// The reply counts only if it is the exact text, addressed to this
 		// message, and the one reply tool call of this prompt_id (logger).
 		const P = F.channel.prompt_id;
-		const replies = P ? hooks.filter((h) => h.event === "PostToolUse" && /fakechat__reply$/.test(h.tool_name ?? "") && h.prompt_id === P) : [];
+		// Every attempt counts, failed ones included: a failed reply followed by a
+		// successful retry is two attempts and fails the criterion.
+		const replies = P ? hooks.filter((h) => (h.event === "PostToolUse" || h.event === "PostToolUseFailure") && /fakechat__reply$/.test(h.tool_name ?? "") && h.prompt_id === P) : [];
 		const fr = send.fakechat_reply;
 		F.channel.reply_tool_calls = replies.length;
 		F.channel.reply_exact = fr?.exact === true;
 		F.channel.reply_to_matches = fr?.reply_to_matches === true;
 		F.channel.reply_observed = send.result === "hook" && F.channel.reply_exact && F.channel.reply_to_matches && replies.length === 1
-			&& replies[0].ok === true && (replies[0].reply_to === send.id || (replies[0].text_ok_ids ?? []).includes(send.id));
+			&& replies[0].event === "PostToolUse" && replies[0].ok === true && (replies[0].reply_to === send.id || (replies[0].text_ok_ids ?? []).includes(send.id));
 		if (!F.channel.id_seen) inconclusive(`channel:${F.channel.why}`);
 		else if (!F.channel.ok) fail(`channel:${F.channel.why}`);
 		if (!F.channel.reply_observed) fail("channel:reply-not-observed");

@@ -50,6 +50,22 @@ export function windowFacts(events, { id, fromLine, toLine = Number.POSITIVE_INF
 	};
 }
 
+// One Fakechat broadcast of an assistant message, as send.mjs records it.
+// `exact_text` is the text AS BROADCAST: Fakechat relays the reply tool's
+// `text` argument unchanged, so no normalisation is applied and " OK_<id>"
+// or "OK_<id>\n" is not an exact reply.
+export function replyRecord(d, tMs, sha) {
+	const text = String(d.text ?? "");
+	return {
+		t_ms: tMs,
+		reply_to: d.replyTo ?? null,
+		text_bytes: Buffer.byteLength(text),
+		text_sha256: sha(text),
+		ok_ids: [...new Set((text.match(/OK_P0[A-Z]\d{2}-[0-9a-f]{6}/g) ?? []).map((x) => x.slice(3)))],
+		exact_text: text,
+	};
+}
+
 // The sends-<label>.jsonl fields classify.mjs reads, from one windowFacts().
 export function factsToRow(f, { id, tSend, reply }) {
 	const u = f.ups;

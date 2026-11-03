@@ -129,3 +129,16 @@ test("rediagnóstico con un prompt ajeno real dentro de la ventana: sigue fallan
 	assert.equal(classify(r.fixed).corrOk, false);
 	assert.equal(r.fixed.other_prompts[0].prompt_id, "p2");
 });
+
+// The reply must equal OK_<id> byte for byte: no trim, no newline allowance.
+test("respuesta de Fakechat: igualdad exacta sin normalizar espacios", async () => {
+	const { replyRecord } = await import("../events.mjs");
+	const { createHash } = await import("node:crypto");
+	const sha = (s) => createHash("sha256").update(s).digest("hex");
+	const row = (text) => factsToRow({ ups: null, stop: null, tool: null, otherUps: [], otherStops: [], promptIdSeenBefore: false },
+		{ id: ID, tSend: T0, reply: replyRecord({ text, replyTo: ID }, T0 + 1000, sha) }).fakechat_reply;
+	assert.equal(row(`OK_${ID}`).exact, true);
+	for (const t of [` OK_${ID}`, `OK_${ID} `, `OK_${ID}\n`, `\tOK_${ID}`, `OK_${ID}  `])
+		assert.equal(row(t).exact, false, JSON.stringify(t));
+	assert.equal(replyRecord({ text: `OK_${ID} ` }, 1, sha).exact_text, `OK_${ID} `, "se guarda tal cual llegó");
+});

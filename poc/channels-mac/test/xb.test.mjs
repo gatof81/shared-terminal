@@ -240,6 +240,11 @@ test("analizador: casos negativos", () => {
 		["reply registrado bajo otro prompt_id", (f) => (f.hooks.find((h) => h.event === "PostToolUse").prompt_id = "P-2"), "FAIL", /reply-not-observed/],
 		["dos reply para el mismo prompt_id", (f) => f.hooks.push({ ...f.hooks.find((h) => h.event === "PostToolUse") }), "FAIL", /reply-not-observed/],
 		["reply fallido (PostToolUse no ok)", (f) => (f.hooks.find((h) => h.event === "PostToolUse").ok = false), "FAIL", /reply-not-observed/],
+		["reply fallido seguido de uno exitoso (dos intentos)", (f) => {
+			const okReply = f.hooks.find((h) => h.event === "PostToolUse");
+			f.hooks.splice(f.hooks.indexOf(okReply), 0, { ...okReply, event: "PostToolUseFailure", ok: false });
+		}, "FAIL", /reply-not-observed/],
+		["sólo un intento y es PostToolUseFailure", (f) => Object.assign(f.hooks.find((h) => h.event === "PostToolUse"), { event: "PostToolUseFailure", ok: false }), "FAIL", /reply-not-observed/],
 		["reply con otro destinatario en el logger", (f) => Object.assign(f.hooks.find((h) => h.event === "PostToolUse"), { reply_to: "P0B01-ffffff", text_ok_ids: [] }), "FAIL", /reply-not-observed/],
 		["la etiqueta pegada no llegó como etiqueta", (f) => (f.hooks.find((h) => (h.test_ids ?? []).includes(ctrls.pasted_tag.id)).channel_tag_count = 0), "INCONCLUSIVE", /pasted-tag-did-not-arrive/],
 	];
