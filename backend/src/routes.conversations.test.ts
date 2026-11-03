@@ -11,8 +11,14 @@ import express from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const authStubs = vi.hoisted(() => ({
-	requireAuth: (req: { userId?: string }, _res: unknown, next: () => void) => {
-		req.userId = "u1";
+	// `x-test-user` lets a test act as another caller (an admin, a group lead); default the owner u1.
+	requireAuth: (
+		req: { userId?: string; isAdmin?: boolean; headers: Record<string, string | undefined> },
+		_res: unknown,
+		next: () => void,
+	) => {
+		req.userId = req.headers["x-test-user"] ?? "u1";
+		req.isAdmin = req.headers["x-test-admin"] === "1";
 		next();
 	},
 	requireAdmin: vi.fn((req: { userId?: string }, _res: unknown, next: () => void) => {
@@ -174,10 +180,16 @@ describe("PATCH /api/sessions/:id/conversations/:cid", () => {
 		canSendInput: false,
 		...patch,
 	});
-	const patchReq = (sid: string, cid: string, body: unknown, type = "application/json") =>
+	const patchReq = (
+		sid: string,
+		cid: string,
+		body: unknown,
+		type = "application/json",
+		as: Record<string, string> = {},
+	) =>
 		fetch(`${base}/api/sessions/${sid}/conversations/${cid}`, {
 			method: "PATCH",
-			headers: { "Content-Type": type },
+			headers: { "Content-Type": type, ...as },
 			body: typeof body === "string" ? body : JSON.stringify(body),
 		});
 	const svc = (impl?: (sid: string, cid: string, p: unknown) => unknown) => {
@@ -223,6 +235,20 @@ describe("PATCH /api/sessions/:id/conversations/:cid", () => {
 		expect(foreign.status).toBe(404);
 		expect(missing.status).toBe(404);
 		expect(await foreign.json()).toEqual(await missing.json());
+		expect(setOwnerMeta).not.toHaveBeenCalled();
+	});
+	it("an admin or a group lead of the owner is NOT the owner: 404, the service is never reached (§10 3.1b)", async () => {
+		const { setOwnerMeta, service } = svc();
+		await start(service);
+		const admin = await patchReq("s1", "c1", { title: "x" }, "application/json", {
+			"x-test-user": "admin1",
+			"x-test-admin": "1",
+		});
+		const lead = await patchReq("s1", "c1", { archived: true }, "application/json", {
+			"x-test-user": "lead1",
+		});
+		expect(admin.status).toBe(404);
+		expect(lead.status).toBe(404);
 		expect(setOwnerMeta).not.toHaveBeenCalled();
 	});
 	it("an unknown conversation is 404 conversation-not-found", async () => {

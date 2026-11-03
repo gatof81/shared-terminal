@@ -19,10 +19,13 @@ const { DatabaseSync } = createRequire(import.meta.url)(
 ) as typeof import("node:sqlite");
 let db: DatabaseSyncT;
 let failD1 = false;
+/** Fail only the statements matching this pattern (null = none). */
+let failSql: RegExp | null = null;
 const realFetch = globalThis.fetch;
 
 function d1Answer(sql: string, params: unknown[]) {
-	if (failD1) return { success: false, errors: [{ message: "D1 down (test)" }], result: [] };
+	if (failD1 || failSql?.test(sql))
+		return { success: false, errors: [{ message: "D1 down (test)" }], result: [] };
 	try {
 		const st = db.prepare(sql);
 		const bind = params.map((p) => (typeof p === "boolean" ? Number(p) : p)) as Array<
@@ -86,6 +89,7 @@ function insertSession(sid: string, requested = 0) {
 
 beforeEach(async () => {
 	failD1 = false;
+	failSql = null;
 	root = await fs.mkdtemp(path.join(os.tmpdir(), "st-ownermeta-"));
 	await freshDb();
 });
@@ -162,6 +166,15 @@ describe("registry SQL", () => {
 		expect(meta.get("c-new")).toEqual({ customTitle: "Nuevo", archivedAt: null });
 		expect(meta.get("c-old")).toBeUndefined();
 		expect(meta.get("c-disk-only")?.archivedAt).not.toBeNull();
+	});
+
+	it("hard delete: the metadata delete runs even when the rows delete fails, and the error surfaces", async () => {
+		const { reg } = await load();
+		await reg.upsertConversationMeta(SID, CID, { title: "x" });
+		failSql = /^DELETE FROM claude_conversations/;
+		await expect(reg.deleteConversationRows(SID)).rejects.toThrow();
+		failSql = null;
+		expect(db.prepare("SELECT COUNT(*) AS n FROM conversation_user_meta").get()).toEqual({ n: 0 });
 	});
 
 	it("hard delete removes the metadata with the rows; another session's stays", async () => {
@@ -290,6 +303,57 @@ describe("ConversationService owner metadata", () => {
 			title: "el primer prompt de la persona",
 		});
 		await restarted.shutdown();
+	});
+
+	/** A conversation known only from its files: D1 row gone, service restarted (nothing resident). */
+	async function filesOnly() {
+		const { service } = await serviceWithConversation();
+		await service.shutdown();
+		db.prepare("DELETE FROM claude_conversations WHERE session_id = ?").run(CID);
+		const { ConversationService, ConversationStore } = await load();
+		const store = new ConversationStore({ workspaceRoot: root });
+		return {
+			store,
+			service: new ConversationService({ workspaceRoot: root, enabled: true, port: 3001, store }),
+		};
+	}
+
+	it("files-only: un-archiving and clearing the name answer 200 with the summary (no false 404)", async () => {
+		const { service } = await filesOnly();
+		expect(await service.setOwnerMeta(SID, CID, { archived: false })).toMatchObject({
+			sessionId: CID,
+			customTitle: null,
+			archivedAt: null,
+		});
+		expect(await service.setOwnerMeta(SID, CID, { title: "a" })).toMatchObject({
+			customTitle: "a",
+		});
+		expect(await service.setOwnerMeta(SID, CID, { title: null })).toMatchObject({
+			sessionId: CID,
+			customTitle: null,
+		});
+		await service.shutdown();
+	});
+
+	it("an events file without an index is not a conversation a summary can be built for: 404, nothing written", async () => {
+		const { service, store } = await filesOnly();
+		await fs.rm(store.indexPath(SID, CID));
+		expect(await service.setOwnerMeta(SID, CID, { title: "x" })).toBeNull();
+		expect(db.prepare("SELECT COUNT(*) AS n FROM conversation_user_meta").get()).toEqual({ n: 0 });
+		await service.shutdown();
+	});
+
+	it("the PATCH answer comes from what the write RETURNed: a failing list read cannot hide the new name", async () => {
+		const { service } = await serviceWithConversation();
+		failSql = /^SELECT 'c' AS src/;
+		const fetchMock = vi.mocked(globalThis.fetch);
+		fetchMock.mockClear();
+		const out = await service.setOwnerMeta(SID, CID, { title: "Nuevo" });
+		expect(out).toMatchObject({ customTitle: "Nuevo" });
+		// Resident index ⇒ the only D1 call is the upsert itself.
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		failSql = null;
+		await service.shutdown();
 	});
 
 	it("with D1 down the list still answers from the resident index and says meta is unavailable", async () => {

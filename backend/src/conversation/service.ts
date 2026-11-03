@@ -64,8 +64,8 @@ import { LargeBodyGate, SessionRateLimiter } from "./rateLimit.js";
 import {
 	type ConversationOwnerMeta,
 	type ConversationRow,
-	conversationRowExists,
 	deleteConversationRows,
+	getConversationRow,
 	getSessionCapture,
 	HeartbeatCoalescer,
 	listConversationRows,
@@ -1444,14 +1444,21 @@ export class ConversationService {
 		patch: { title?: string | null; archived?: boolean },
 	): Promise<ConversationSummary | null> {
 		if (!isSafeClaudeSessionId(cid)) return null;
-		const known =
-			this.deps.store.getResidentIndex(stSessionId, cid) !== undefined ||
-			(await this.deps.store.exists(stSessionId, cid).catch(() => false)) ||
-			(await conversationRowExists(stSessionId, cid));
-		if (!known) return null;
-		await upsertConversationMeta(stSessionId, cid, patch);
-		const { conversations } = await this.summariesWithMeta(stSessionId);
-		return conversations.find((c) => c.sessionId === cid) ?? null;
+		// "Exists" = something a summary can be built from — the same sources the
+		// list uses: a resident or on-disk index, else the D1 row. An events file
+		// without an index is not enough (no summary could be answered for it).
+		const index =
+			this.deps.store.getResidentIndex(stSessionId, cid) ??
+			(await this.deps.store.peekIndex(stSessionId, cid).catch(() => null));
+		const row = index ? null : await getConversationRow(stSessionId, cid);
+		if (!index && !row) return null;
+		// The answer is built from what the write itself RETURNed, never from a
+		// second read: a list read that failed after a successful write would
+		// otherwise answer the automatic title as current (or a false 404).
+		const stored = await upsertConversationMeta(stSessionId, cid, patch);
+		const summary = index ? summarizeIndex(index) : summarizeRow(row as ConversationRow);
+		applyOwnerMeta(summary, stored);
+		return summary;
 	}
 
 	/**

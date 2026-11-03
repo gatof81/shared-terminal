@@ -289,10 +289,15 @@ export async function releaseConversationBinding(
 }
 
 export async function deleteConversationRows(stSessionId: string): Promise<void> {
-	await d1Query("DELETE FROM claude_conversations WHERE st_session_id = ?", [stSessionId]);
-	// Explicit, not left to the FK cascade: D1's foreign-key enforcement is
-	// not something the hard delete should depend on (§9).
-	await d1Query("DELETE FROM conversation_user_meta WHERE st_session_id = ?", [stSessionId]);
+	// Two independent statements: the metadata delete must not depend on the
+	// rows delete succeeding, nor on D1's FK cascade (§9). The first error is
+	// rethrown once both have been attempted.
+	const results = await Promise.allSettled([
+		d1Query("DELETE FROM claude_conversations WHERE st_session_id = ?", [stSessionId]),
+		d1Query("DELETE FROM conversation_user_meta WHERE st_session_id = ?", [stSessionId]),
+	]);
+	const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
+	if (failed) throw failed.reason;
 }
 
 // ── Owner metadata (CONVERSATION.md §6.2, v1.8) ────────────────────────────
@@ -380,13 +385,16 @@ export async function listConversationRowsWithMeta(
 	return { rows, meta };
 }
 
-/** True when claude_conversations has a row for this conversation of this session. */
-export async function conversationRowExists(stSessionId: string, cid: string): Promise<boolean> {
-	const r = await d1Query<{ n: number }>(
-		"SELECT COUNT(*) AS n FROM claude_conversations WHERE st_session_id = ? AND session_id = ?",
+/** The claude_conversations row of this conversation of this session, or null. */
+export async function getConversationRow(
+	stSessionId: string,
+	cid: string,
+): Promise<ConversationRow | null> {
+	const r = await d1Query<ConversationRow>(
+		`SELECT ${ROW_COLUMNS.join(", ")} FROM claude_conversations WHERE st_session_id = ? AND session_id = ?`,
 		[stSessionId, cid],
 	);
-	return (r.results[0]?.n ?? 0) > 0;
+	return r.results[0] ?? null;
 }
 
 /**
