@@ -1,0 +1,11 @@
+# /etc/st-ops/deploy.conf — root:root 0644. Read by st-ops-root; never by the st-ops account's own code.
+# Public repository the server fetches by itself (no credentials): provenance never comes from the caller.
+REPO_URL=https://github.com/gatof81/shared-terminal.git
+# The compose checkout that runs the backend.
+ST_DIR=/home/diego/shared-terminal
+# Every one of these check-runs must exist on the SHA, come from GitHub Actions or the Pages app, and be `success`.
+REQUIRED_CHECKS="Backend (tsc + vitest)|Frontend (tsc + vite build)|Frontend e2e (Playwright, desktop + mobile)|Build + docker smoke test|Cloudflare Pages"
+# A request expires this many seconds after it was created (the owner signs within this window).
+REQUEST_TTL=7200
+# Minimum free space on the Docker data-root filesystem, KiB.
+MIN_FREE_KIB=5242880
