@@ -78,7 +78,21 @@ vi.mock("./db.js", () => ({
 }));
 
 import { classifyTarStderr, findEncryptedBlob, runBackup, runRestore } from "./backup.js";
-import { encryptSecret } from "./secrets.js";
+import {
+	ATTESTATION_KEY_INFO,
+	classifyAttestation,
+	readAttestation,
+	signAttestation,
+	writeAttestation,
+} from "./conversation/captureAttestation.js";
+import { CaptureAuthority, type ContainerView } from "./conversation/captureAuth.js";
+import { hashIngestToken } from "./conversation/registry.js";
+import {
+	checkRevocation,
+	retireSessionRevocation,
+	writeSessionRevocation,
+} from "./conversation/revocation.js";
+import { deriveSubkey, encryptSecret } from "./secrets.js";
 
 let outDir: string;
 
@@ -445,5 +459,246 @@ describe("findEncryptedBlob", () => {
 		expect(findEncryptedBlob({ ciphertext: "c", iv: 1, tag: "t" })).toBeNull();
 		expect(findEncryptedBlob("string")).toBeNull();
 		expect(findEncryptedBlob(null)).toBeNull();
+	});
+});
+
+// ── Control evidence: attestations and revocations across a restore ───────
+describe("restore of the control evidence (.st-control + revocation markers)", () => {
+	const SID = "a7246fa7-5c1e-4a52-9a5e-2b8f3f1d0c11";
+	const CID = "7101d5ae".padEnd(64, "a");
+	const IMG = `sha256:${"e".repeat(64)}`;
+	const TOKEN = "c".repeat(64);
+	const LABELS = {
+		"io.shared-terminal.conversation-relay": "2",
+		"io.shared-terminal.session": SID,
+	};
+	const key = () => deriveSubkey(ATTESTATION_KEY_INFO);
+	const live = (...p: string[]) => path.join(WORKSPACE_ROOT, ...p);
+	const has = (p: string) =>
+		fs.lstat(p).then(
+			() => true,
+			() => false,
+		);
+	const hooks = () => live(".claude-managed", SID, "conversation.json");
+
+	function attestation(k: Buffer = key(), basis: "recreate" | "history" = "recreate") {
+		return signAttestation(
+			{ sessionId: SID, containerId: CID, imageId: IMG, basis, attemptId: "att-1" },
+			k,
+		);
+	}
+
+	/** The authority the boot reconcile uses, on the restored disk; image GONE (the incident). */
+	function authority() {
+		const view: ContainerView = {
+			exists: true,
+			running: true,
+			token: TOKEN,
+			managedMount: true,
+			controlMount: true,
+			imageId: IMG,
+			imageRelay2: false,
+			id: CID,
+			imageExists: false,
+			labels: { ...LABELS },
+		};
+		return new CaptureAuthority({
+			workspaceRoot: WORKSPACE_ROOT,
+			enabled: true,
+			docker: {
+				inspectCapture: async () => view,
+				currentImage: async () => ({ imageId: "sha256:new", relay2: true }),
+				probeRelay: async () => true,
+			},
+			// Same Docker host: `/start` re-adopted the session's own container by
+			// name, so D1 points at it again.
+			getRow: async () => ({
+				status: "running",
+				conversation_requested: 1,
+				ingest_token_hash: hashIngestToken(TOKEN),
+				ingest_token_hash_suspended: null,
+				user_id: "u1",
+				container_id: CID,
+			}),
+			checkRevocation: (sid) => checkRevocation(WORKSPACE_ROOT, sid),
+			isRecreateUnresolved: async () => false,
+			writeHooksFile: async () => {
+				await fs.mkdir(path.dirname(hooks()), { recursive: true });
+				await fs.writeFile(hooks(), "{}");
+			},
+			removeHooksFile: async () => {
+				await fs.rm(hooks(), { force: true });
+			},
+			hooksFileExists: () => has(hooks()),
+			readAttestation: (sid, cid) => readAttestation(WORKSPACE_ROOT, sid, cid),
+			attestationKey: key,
+			sleep: async () => undefined,
+			identifyWaitMs: 10,
+		});
+	}
+
+	async function backupThenLoseWorkspaceRoot(): Promise<void> {
+		dbState.tables.set("users", [{ id: "u1", username: "diego" }]);
+		dbState.tables.set("sessions", [{ session_id: SID, user_id: "u1", status: "running" }]);
+		await runBackup(outDir);
+		for (const e of await fs.readdir(WORKSPACE_ROOT))
+			await fs.rm(live(e), { recursive: true, force: true });
+		dbState.tables.clear();
+	}
+
+	async function seedSource(): Promise<void> {
+		await seedWorkspace(SID, {
+			[`${SID}/notes.md`]: "x",
+			[`.conversations/${SID}/c1.events.jsonl`]: '{"seq":1}\n',
+			[`.st-control/${SID}/recreate-attempt.json`]: '{"state":"open"}',
+			[`.st-control/${SID}/relay.enabled`]: "",
+			[`.st-control/${SID}/defer-skill-seed`]: "",
+			[`.st-control/${SID}/composer/1.json`]: '{"phase":"active"}',
+		});
+		await writeAttestation(WORKSPACE_ROOT, attestation());
+	}
+
+	it("recovery after losing WORKSPACE_ROOT on the same Docker host: the attestation comes back, capture converges, nothing stale goes live", async () => {
+		await seedSource();
+		await backupThenLoseWorkspaceRoot();
+		const listing = execFileSync("tar", [
+			"-tzf",
+			path.join(outDir, "workspaces", `${SID}.tar.gz`),
+		]).toString();
+		expect(listing).toContain(`.st-control/${SID}/capture-attestation.${CID}.json`);
+
+		await runRestore(outDir);
+
+		// Installed, and it verifies with this deployment's key.
+		const read = await readAttestation(WORKSPACE_ROOT, SID, CID);
+		expect(read.kind).toBe("present");
+		expect(
+			classifyAttestation(read, { sessionId: SID, containerId: CID, imageId: IMG }, key()),
+		).toBe("valid");
+		// The source's operational state is evidence only — never live.
+		for (const f of ["recreate-attempt.json", "relay.enabled", "defer-skill-seed", "composer"])
+			expect(await has(live(".st-control", SID, f))).toBe(false);
+		const ev = await fs.readdir(live(".restore-evidence"));
+		expect(ev).toHaveLength(1);
+		const evDir = live(".restore-evidence", ev[0]!);
+		expect(
+			await fs.readFile(path.join(evDir, ".st-control", SID, "recreate-attempt.json"), "utf8"),
+		).toBe('{"state":"open"}');
+		expect(await has(path.join(evDir, ".st-control", SID, "composer", "1.json"))).toBe(true);
+		// The rest of the session restored as before.
+		expect(await fs.readFile(live(".conversations", SID, "c1.events.jsonl"), "utf8")).toBe(
+			'{"seq":1}\n',
+		);
+
+		// The boot reconcile on the restored disk, image gone: capture is
+		// re-established (relay identified first) instead of withdrawn.
+		const a = authority();
+		expect(await a.converge(SID)).toBe("written");
+		expect((await a.capture(SID)).effective).toBe(true);
+	});
+
+	it("without the attestation in the backup (pre-fix backups) the same restore leaves capture off — the gap this closes", async () => {
+		await seedSource();
+		await fs.rm(live(".st-control", SID, `capture-attestation.${CID}.json`));
+		await backupThenLoseWorkspaceRoot();
+		await runRestore(outDir);
+		const a = authority();
+		expect(await a.converge(SID)).toBe("nothing");
+		const block = await a.capture(SID);
+		expect(block.effective).toBe(false);
+		expect(block.pendingReasons).toContain("image-without-relay");
+	});
+
+	it("an attestation that does not verify with this key is not installed; one on the destination is never replaced", async () => {
+		await writeAttestation(WORKSPACE_ROOT, attestation(Buffer.alloc(32, 1)));
+		await backupThenLoseWorkspaceRoot();
+		await runRestore(outDir);
+		expect(await has(live(".st-control", SID, `capture-attestation.${CID}.json`))).toBe(false);
+
+		// Destination already holds its own (valid) record of the container.
+		await fs.rm(outDir, { recursive: true, force: true });
+		for (const e of await fs.readdir(WORKSPACE_ROOT))
+			await fs.rm(live(e), { recursive: true, force: true });
+		await writeAttestation(WORKSPACE_ROOT, attestation(key(), "recreate"));
+		await backupThenLoseWorkspaceRoot();
+		const mine = attestation(key(), "history");
+		await writeAttestation(WORKSPACE_ROOT, mine);
+		const before = await fs.readFile(
+			live(".st-control", SID, `capture-attestation.${CID}.json`),
+			"utf8",
+		);
+		await runRestore(outDir);
+		expect(
+			await fs.readFile(live(".st-control", SID, `capture-attestation.${CID}.json`), "utf8"),
+		).toBe(before);
+	});
+
+	it("a symlink posing as an attestation is rejected (only regular files are read)", async () => {
+		await backupThenLoseWorkspaceRoot();
+		const src = mkdtempSync(path.join(os.tmpdir(), "st-evil-ctl-"));
+		await fs.mkdir(path.join(src, ".st-control", SID), { recursive: true });
+		await fs.writeFile(path.join(src, "real.json"), JSON.stringify(attestation()));
+		await fs.symlink(
+			path.join(src, "real.json"),
+			path.join(src, ".st-control", SID, `capture-attestation.${CID}.json`),
+		);
+		execFileSync("tar", [
+			"-czf",
+			path.join(outDir, "workspaces", `${SID}.tar.gz`),
+			"-C",
+			src,
+			`.st-control/${SID}`,
+		]);
+		await runRestore(outDir);
+		expect(await has(live(".st-control", SID, `capture-attestation.${CID}.json`))).toBe(false);
+		await fs.rm(src, { recursive: true, force: true });
+	});
+
+	describe("revocations: never undone, never resurrected", () => {
+		const revoked = () => live(".conversations", SID, "REVOKED");
+
+		it("a revocation LIFTED in the backup is not brought back", async () => {
+			await writeSessionRevocation(WORKSPACE_ROOT, SID, { at: "t", by: "api" });
+			const bytes = await fs.readFile(revoked(), "utf8");
+			expect(await retireSessionRevocation(WORKSPACE_ROOT, SID, bytes)).toBe("removed");
+			await backupThenLoseWorkspaceRoot();
+			await runRestore(outDir);
+			expect(await has(revoked())).toBe(false);
+			expect(await checkRevocation(WORKSPACE_ROOT, SID)).toBe("none");
+		});
+
+		it("a revocation IN EFFECT in the backup comes back in effect on a fresh destination (fail-closed)", async () => {
+			await writeSessionRevocation(WORKSPACE_ROOT, SID, { at: "t", by: "cli" });
+			const bytes = await fs.readFile(revoked(), "utf8");
+			await backupThenLoseWorkspaceRoot();
+			await runRestore(outDir);
+			expect(await fs.readFile(revoked(), "utf8")).toBe(bytes);
+			expect(await checkRevocation(WORKSPACE_ROOT, SID)).toBe("session");
+			// …and the official enable can lift exactly it.
+			expect(await retireSessionRevocation(WORKSPACE_ROOT, SID, bytes)).toBe("removed");
+		});
+
+		it("over a destination that LIFTED a later revocation, the backup's old in-effect one is NOT reactivated", async () => {
+			await writeSessionRevocation(WORKSPACE_ROOT, SID, { at: "old", by: "cli" });
+			await backupThenLoseWorkspaceRoot(); // backup: X in effect
+			await writeSessionRevocation(WORKSPACE_ROOT, SID, { at: "new", by: "api" });
+			const y = await fs.readFile(revoked(), "utf8");
+			await retireSessionRevocation(WORKSPACE_ROOT, SID, y); // destination: Y lifted
+			await runRestore(outDir);
+			expect(await fs.readFile(revoked(), "utf8")).toBe(y);
+			expect(await checkRevocation(WORKSPACE_ROOT, SID)).toBe("none");
+		});
+
+		it("over a destination with a revocation IN EFFECT, a backup whose one was lifted does NOT undo it", async () => {
+			await writeSessionRevocation(WORKSPACE_ROOT, SID, { at: "old", by: "api" });
+			await retireSessionRevocation(WORKSPACE_ROOT, SID, await fs.readFile(revoked(), "utf8"));
+			await backupThenLoseWorkspaceRoot(); // backup: X lifted (REVOKED + LIFTED)
+			await writeSessionRevocation(WORKSPACE_ROOT, SID, { at: "emergency", by: "cli" });
+			const y = await fs.readFile(revoked(), "utf8");
+			await runRestore(outDir);
+			expect(await fs.readFile(revoked(), "utf8")).toBe(y);
+			expect(await has(live(".conversations", SID, "LIFTED"))).toBe(false);
+			expect(await checkRevocation(WORKSPACE_ROOT, SID)).toBe("session");
+		});
 	});
 });

@@ -220,28 +220,61 @@ export async function readAttestation(
  * dir, of `.st-control` and of the workspace root (the dir may have just been
  * created; same chain as recreateAttempt.ts). root:root 0644 (the session can
  * read it through the read-only control mount; it holds no secret, and
- * without the key it cannot be forged). `mayWrite` is asked right before the
- * write (a recreation whose epoch closed writes nothing).
+ * without the key it cannot be forged).
+ *
+ * `mayWrite` is asked twice: before anything is created, and again right
+ * before the file is PUBLISHED (the rename/link). A recreation's epoch can
+ * close while the temp file is being written or fsynced; without the second
+ * check that late continuation would still publish a record after its
+ * deadline (#520 review, owner finding). What a closed epoch leaves behind
+ * is at most the temp file, which is removed. The rename already issued
+ * when the epoch closes cannot be recalled — that residue is the same as
+ * every attempt request's and is why the resolution waits for the `attest N`
+ * request to answer before it acts (recreate/run.ts).
+ *
+ * `noClobber` (restore): publish with link(2), which fails if the name
+ * exists — an attestation already on the destination is never replaced.
+ * Returns true only when this call published the file.
  */
 export async function writeAttestation(
 	workspaceRoot: string,
 	record: CaptureAttestation,
 	mayWrite: () => boolean = () => true,
+	opts: { noClobber?: boolean } = {},
 ): Promise<boolean> {
 	assertShape(record);
+	if (!mayWrite()) return false;
 	const dir = await ensureControlDir(workspaceRoot, record.sessionId);
 	const file = attestationPath(workspaceRoot, record.sessionId, record.containerId);
-	if (!mayWrite()) return false;
 	const tmp = `${file}.tmp.${process.pid}.${randomBytes(6).toString("hex")}`;
-	const fh = await fs.open(tmp, "wx", 0o644);
+	let published = false;
 	try {
-		await fh.writeFile(`${JSON.stringify(record)}\n`);
-		await fh.sync();
+		const fh = await fs.open(tmp, "wx", 0o644);
+		try {
+			await fh.writeFile(`${JSON.stringify(record)}\n`);
+			await fh.sync();
+		} finally {
+			await fh.close();
+		}
+		await fs.chmod(tmp, 0o644);
+		// Load-bearing: the last check sits immediately before the publish,
+		// with no await between them.
+		if (!mayWrite()) return false;
+		if (opts.noClobber) {
+			try {
+				await fs.link(tmp, file);
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+				throw err;
+			}
+		} else {
+			await fs.rename(tmp, file);
+		}
+		published = true;
 	} finally {
-		await fh.close();
+		// rename consumed the temp; link left it (and every early return did).
+		if (!published || opts.noClobber) await fs.rm(tmp, { force: true });
 	}
-	await fs.chmod(tmp, 0o644);
-	await fs.rename(tmp, file);
 	await fsyncDir(dir);
 	await fsyncDir(path.dirname(dir));
 	await fsyncDir(workspaceRoot);

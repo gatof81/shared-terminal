@@ -1015,7 +1015,24 @@ Restore guards:
   decrypt round-trip on a sample blob from the dump; the key must travel
   to the destination separately from the backup itself.
 - Workspace tarballs are entry-checked before extraction (paths must stay
-  under `<sid>/` or `.uploads/<sid>/` — no traversal).
+  under `<sid>/`, `.uploads/<sid>/`, `.conversations/<sid>/` or
+  `.st-control/<sid>/` — no traversal).
+- **Control evidence is never extracted live.** The tarball carries the
+  session's `.st-control/<sid>/` (capture attestations, recreation record,
+  composer pane records, `relay.enabled`). Restore extracts it, together
+  with `.conversations/<sid>/REVOKED` and `LIFTED`, into
+  `<WORKSPACE_ROOT>/.restore-evidence/<backup>-<random>/` (0700, never read
+  by the backend; remove it by hand when no longer needed) and installs
+  from there only (a) capture attestations that verify with THIS
+  deployment's key, never replacing one already present, and (b) the
+  revocation that was **in effect** in the backup, only when the
+  destination has no `REVOKED` of its own — a destination marker is never
+  touched, a revocation lifted in the backup is not brought back, and one
+  in effect comes back in effect (lift it with the admin enable). The log
+  line `[restore] control <sid>: attestations installed=… kept=…
+  rejected=…; revocation …` reports each. `rejected > 0` means the
+  attestations do not verify with this key (wrong key or damaged backup).
+  See docs/CONVERSATION.md §2.7.5.1.
 
 Previously-`running` sessions land as `stopped` with a NULL container id
 — the destination host has none of the source's containers, matching what

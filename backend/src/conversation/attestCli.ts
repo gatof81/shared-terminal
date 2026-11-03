@@ -44,7 +44,8 @@ export interface AttestDeps {
 	checkRevocation: (sessionId: string) => Promise<RevocationState>;
 	isRecreateUnresolved: (sessionId: string) => Promise<boolean>;
 	readAttestation: (sessionId: string, containerId: string) => Promise<AttestationRead>;
-	writeAttestation: (record: CaptureAttestation) => Promise<unknown>;
+	/** Publishes without replacing (link(2)); false when the name already exists. */
+	writeAttestation: (record: CaptureAttestation) => Promise<boolean>;
 	key: () => Buffer;
 }
 
@@ -87,10 +88,11 @@ export async function attestFromHistory(
 		hooksFile: false,
 	});
 	if (corr !== "match") notes.push(`token-${corr}`);
+	const attempt = await deps.readAttempt(sessionId);
 	const verdict = historicalEvidence({
 		sessionId,
 		d1ContainerId: row.container_id,
-		attempt: await deps.readAttempt(sessionId),
+		attempt,
 		container: { id: view.id, imageId: view.imageId, labels: view.labels ?? {} },
 		image: { exists: view.imageExists !== false, relay2: view.imageRelay2 },
 	});
@@ -120,7 +122,14 @@ export async function attestFromHistory(
 			attemptId: verdict.attemptId,
 			...ids,
 		};
-	await deps.writeAttestation(
+	// This tool runs in its own process, outside the backend's lifecycle lock:
+	// a recreation, a disable or a revocation may land while it ran. Re-read
+	// what the verdict rests on immediately before publishing and refuse on
+	// any change (the record, D1's container, revocation, an open attempt).
+	const again = await recheck(deps, sessionId, row.container_id, attempt);
+	if (again.length > 0)
+		return { ok: false, written: false, notes: ["changed-during-check", ...again], ...ids };
+	const written = await deps.writeAttestation(
 		signAttestation(
 			{
 				sessionId,
@@ -132,7 +141,28 @@ export async function attestFromHistory(
 			deps.key(),
 		),
 	);
+	if (!written)
+		return { ok: false, written: false, notes: ["attestation-appeared (left untouched)"], ...ids };
 	return { ok: true, written: true, notes: why, attemptId: verdict.attemptId, ...ids };
+}
+
+async function recheck(
+	deps: AttestDeps,
+	sessionId: string,
+	containerId: string,
+	attempt: ReadResult,
+): Promise<string[]> {
+	const out: string[] = [];
+	const row = await deps.getRow(sessionId);
+	if (!row || row.container_id !== containerId) out.push("d1-container-changed");
+	if (!row || row.conversation_requested !== 1) out.push("not-requested");
+	if ((await deps.checkRevocation(sessionId)) !== "none") out.push("revoked");
+	if (await deps.isRecreateUnresolved(sessionId).catch(() => true)) out.push("recreate-unresolved");
+	// Byte-for-byte the record the verdict was computed from (any new history
+	// entry, retained container or state change counts as a change).
+	if (JSON.stringify(await deps.readAttempt(sessionId)) !== JSON.stringify(attempt))
+		out.push("recreate-record-changed");
+	return out;
 }
 
 // ── Entry point (inside the backend container) ─────────────────────────────
@@ -173,7 +203,7 @@ async function main(argv: string[]): Promise<number> {
 					() => true,
 				),
 			readAttestation: (s, cid) => readAttestation(WR, s, cid),
-			writeAttestation: (rec) => writeAttestation(WR, rec),
+			writeAttestation: (rec) => writeAttestation(WR, rec, () => true, { noClobber: true }),
 			key: () => deriveSubkey(ATTESTATION_KEY_INFO),
 		},
 		sid,

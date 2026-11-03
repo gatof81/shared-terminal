@@ -8,7 +8,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReadResult } from "../recreateAttempt.js";
 import { type AttestDeps, attestFromHistory } from "./attestCli.js";
 import {
@@ -317,6 +317,80 @@ describe("attestation records", () => {
 	});
 });
 
+describe("writeAttestation: an epoch that closes mid-write publishes nothing", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+	/** The temp file's handle runs `during(stage)` after writeFile / sync. */
+	function interceptTempHandle(during: (stage: "write" | "sync") => void): void {
+		const real = fs.open.bind(fs);
+		vi.spyOn(fs, "open").mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+			const fh = await real(...args);
+			if (!String(args[0]).includes(".tmp.")) return fh;
+			const write = fh.writeFile.bind(fh);
+			const sync = fh.sync.bind(fh);
+			fh.writeFile = (async (...a: Parameters<typeof fh.writeFile>) => {
+				await write(...a);
+				during("write");
+			}) as typeof fh.writeFile;
+			fh.sync = async () => {
+				await sync();
+				during("sync");
+			};
+			return fh;
+		}) as typeof fs.open);
+	}
+	const leftovers = async () =>
+		(await fs.readdir(path.join(root, ".st-control", SID)).catch(() => [] as string[])).filter(
+			(n) => n.includes(".tmp."),
+		);
+
+	for (const stage of ["write", "sync"] as const) {
+		it(`epoch closed during ${stage}: returns false, no file published, temp removed`, async () => {
+			let open = true;
+			interceptTempHandle((s) => {
+				if (s === stage) open = false;
+			});
+			expect(await writeAttestation(root, attestation(), () => open)).toBe(false);
+			expect(await exists(attestationPath(root, SID, CID))).toBe(false);
+			expect(await leftovers()).toEqual([]);
+			// And capture does not gain from it: still no attestation to read.
+			expect((await readAttestation(root, SID, CID)).kind).toBe("absent");
+		});
+	}
+	it("epoch already closed: nothing is created, not even the control dir", async () => {
+		expect(await writeAttestation(root, attestation(), () => false)).toBe(false);
+		expect(await exists(path.join(root, ".st-control"))).toBe(false);
+	});
+	it("an epoch that stays open publishes (the check does not over-deny)", async () => {
+		interceptTempHandle(() => {});
+		expect(await writeAttestation(root, attestation(), () => true)).toBe(true);
+		expect((await readAttestation(root, SID, CID)).kind).toBe("present");
+		expect(await leftovers()).toEqual([]);
+	});
+	it("a failing write leaves no temp file behind and publishes nothing", async () => {
+		interceptTempHandle((s) => {
+			if (s === "sync") throw new Error("EIO");
+		});
+		await expect(writeAttestation(root, attestation())).rejects.toThrow("EIO");
+		expect(await exists(attestationPath(root, SID, CID))).toBe(false);
+		expect(await leftovers()).toEqual([]);
+	});
+	it("noClobber never replaces an existing attestation", async () => {
+		const first = attestation({ basis: "spawn" });
+		await writeAttestation(root, first);
+		const second = attestation({ basis: "history", issuedAt: "2026-11-04T00:00:00.000Z" });
+		expect(await writeAttestation(root, second, () => true, { noClobber: true })).toBe(false);
+		expect(await readAttestation(root, SID, CID)).toEqual({ kind: "present", record: first });
+		expect(await leftovers()).toEqual([]);
+	});
+	it("noClobber publishes when the name is free", async () => {
+		expect(await writeAttestation(root, attestation(), () => true, { noClobber: true })).toBe(true);
+		expect((await readAttestation(root, SID, CID)).kind).toBe("present");
+		expect(await leftovers()).toEqual([]);
+	});
+});
+
 describe("attestFromHistory (existing containers, evidence from the recreation record)", () => {
 	const record = (patch: Record<string, unknown> = {}): ReadResult => ({
 		kind: "ok",
@@ -349,6 +423,7 @@ describe("attestFromHistory (existing containers, evidence from the recreation r
 			readAttestation: async () => ({ kind: "absent" }),
 			writeAttestation: async (r) => {
 				written.push(r);
+				return true;
 			},
 			key: () => KEY,
 			...patch,
@@ -374,6 +449,39 @@ describe("attestFromHistory (existing containers, evidence from the recreation r
 				KEY,
 			),
 		).toBe("valid");
+	});
+	it.each([
+		[
+			"D1 moved to another container",
+			"d1-container-changed",
+			{ getRow: [row(), row({ container_id: OLD_CID })] },
+		],
+		["a revocation landed", "revoked", { checkRevocation: ["none", "revoked"] }],
+		["a recreation began", "recreate-unresolved", { isRecreateUnresolved: [false, true] }],
+		[
+			"the record changed (a newer attempt)",
+			"recreate-record-changed",
+			{ readAttempt: [record(), record({ attemptId: "other-attempt" })] },
+		],
+	] as const)("changed between check and publish (%s) ⇒ nothing written", async (_n, note, seq) => {
+		const patch: Partial<AttestDeps> = {};
+		for (const [k, values] of Object.entries(seq)) {
+			let i = 0;
+			// First call = the check, second = the recheck right before the write.
+			(patch as Record<string, unknown>)[k] = async () =>
+				(values as readonly unknown[])[Math.min(i++, values.length - 1)];
+		}
+		const d = deps(patch);
+		const r = await attestFromHistory(d, SID, { write: true });
+		expect(r).toMatchObject({ ok: false, written: false });
+		expect(r.notes).toEqual(expect.arrayContaining(["changed-during-check", note]));
+		expect(d.written).toHaveLength(0);
+	});
+	it("an attestation that appeared meanwhile is left untouched (publish is no-clobber)", async () => {
+		const d = deps({ writeAttestation: async () => false });
+		const r = await attestFromHistory(d, SID, { write: true });
+		expect(r).toMatchObject({ ok: false, written: false });
+		expect(r.notes).toContain("attestation-appeared (left untouched)");
 	});
 	it("dry run writes nothing", async () => {
 		const d = deps();

@@ -36,12 +36,22 @@
  */
 
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
+import {
+	ATTESTATION_FILE_PREFIX,
+	ATTESTATION_KEY_INFO,
+	classifyAttestation,
+	readAttestation,
+	writeAttestation,
+} from "./conversation/captureAttestation.js";
+import { LIFTED_FILE, REVOKED_FILE, readSessionRevocation } from "./conversation/revocation.js";
 import { d1Query, migrateDb } from "./db.js";
 import { logger } from "./logger.js";
-import { decryptSecret, type EncryptedSecret } from "./secrets.js";
+import { CONTROL_DIR, fsyncDir } from "./recreateAttempt.js";
+import { decryptSecret, deriveSubkey, type EncryptedSecret } from "./secrets.js";
 
 const execFileP = promisify(execFile);
 
@@ -151,6 +161,11 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 			path.join(".uploads", session_id),
 			// Phase 3 — the conversation event log (docs/CONVERSATION.md §9).
 			path.join(".conversations", session_id),
+			// The session's control dir (capture attestations, recreation
+			// record, composer pane records, relay.enabled …). Carried as
+			// EVIDENCE: restore installs only the attestations from it, and
+			// only after verifying them — see installControlEvidence.
+			path.join(CONTROL_DIR, session_id),
 		]) {
 			try {
 				await fs.access(path.join(WORKSPACE_ROOT, rel));
@@ -410,6 +425,7 @@ export async function runRestore(inDir: string, opts: { force?: boolean } = {}):
 	// WORKSPACE_ROOT (classic tar path traversal).
 	const wsDir = path.join(inDir, "workspaces");
 	const tarballs = await fs.readdir(wsDir).catch(() => [] as string[]);
+	let evidenceDir: string | undefined;
 	for (const file of tarballs) {
 		if (!file.endsWith(".tar.gz")) continue;
 		const sid = file.slice(0, -".tar.gz".length);
@@ -425,17 +441,232 @@ export async function runRestore(inDir: string, opts: { force?: boolean } = {}):
 					e.startsWith(`.uploads/${sid}/`) ||
 					e === `.uploads/${sid}` ||
 					e.startsWith(`.conversations/${sid}/`) ||
-					e === `.conversations/${sid}`) &&
+					e === `.conversations/${sid}` ||
+					e.startsWith(`${CONTROL_DIR}/${sid}/`) ||
+					e === `${CONTROL_DIR}/${sid}`) &&
 				!e.includes(".."),
 		);
 		if (!ok) {
 			throw new Error(`workspace tarball ${file} contains out-of-scope paths — refusing`);
 		}
-		await execFileP("tar", ["-xzf", tarPath, "-C", WORKSPACE_ROOT]);
+		// Everything EXCEPT the session's control dir and its revocation
+		// markers goes to its live place. Those must never be overwritten by
+		// an older copy: a backup's `.st-control` would bring back a recreation
+		// record, pane records or `relay.enabled` that no longer describe any
+		// container, and a backup's REVOKED/LIFTED pair would, over a newer
+		// destination state, either undo a revocation in effect (its LIFTED
+		// replaced) or put an already-lifted one back in effect (its LIFTED
+		// left in place, REVOKED replaced). `--anchored` keeps the patterns
+		// from matching the same names inside the workspace itself.
+		await execFileP("tar", [
+			"-xzf",
+			tarPath,
+			"-C",
+			WORKSPACE_ROOT,
+			"--anchored",
+			`--exclude=${CONTROL_DIR}`,
+			`--exclude=.conversations/${sid}/${REVOKED_FILE}`,
+			`--exclude=.conversations/${sid}/${LIFTED_FILE}`,
+		]);
+		const held = entries.filter(
+			(e) =>
+				e.replace(/\/$/, "") === `${CONTROL_DIR}/${sid}` ||
+				e === `.conversations/${sid}/${REVOKED_FILE}` ||
+				e === `.conversations/${sid}/${LIFTED_FILE}`,
+		);
+		if (held.length > 0) {
+			evidenceDir ??= await makeEvidenceDir(manifest.createdAt);
+			await execFileP("tar", [
+				"-xzf",
+				tarPath,
+				"-C",
+				evidenceDir,
+				"--",
+				...held.map((e) => e.replace(/\/$/, "")),
+			]);
+			const r = await installControlEvidence(evidenceDir, sid);
+			logger.info(
+				`[restore] control ${sid}: attestations installed=${r.installed} kept=${r.kept} rejected=${r.rejected}; revocation ${r.revocation}`,
+			);
+		}
 		logger.info(`[restore] workspace ${sid}: ${entries.length} entries`);
+	}
+	if (evidenceDir) {
+		logger.info(
+			`[restore] the backup's control dirs and revocation markers are kept as evidence in ${evidenceDir} (nothing there is live)`,
+		);
 	}
 
 	logger.info(`[restore] complete from ${inDir} (backup of ${manifest.createdAt})`);
+}
+
+// ── Control evidence (restore) ──────────────────────────────────────────────
+
+/**
+ * `<WORKSPACE_ROOT>/.restore-evidence/<backup>-<random>/`: where a restore
+ * extracts the backup's `.st-control/<sid>` and REVOKED/LIFTED. Never read by
+ * the backend; kept for the operator (a recreation record or a pane record
+ * is what an investigation after a disaster needs) until removed by hand.
+ */
+async function makeEvidenceDir(createdAt: string): Promise<string> {
+	const parent = path.join(WORKSPACE_ROOT, ".restore-evidence");
+	await fs.mkdir(parent, { recursive: true, mode: 0o700 });
+	const dir = path.join(
+		parent,
+		`${createdAt.replace(/[^0-9A-Za-z]/g, "-")}-${randomBytes(4).toString("hex")}`,
+	);
+	await fs.mkdir(dir, { mode: 0o700 });
+	return dir;
+}
+
+async function isRegularFile(p: string): Promise<boolean> {
+	try {
+		return (await fs.lstat(p)).isFile();
+	} catch {
+		return false;
+	}
+}
+
+export interface ControlInstall {
+	installed: number;
+	/** The destination already held an attestation of that container (never replaced). */
+	kept: number;
+	/** Did not verify with this deployment's key, malformed, or not a regular file. */
+	rejected: number;
+	revocation: "none" | "installed" | "destination-kept" | "lifted-in-backup";
+}
+
+/**
+ * What a restore takes from the backup's control evidence, and nothing more:
+ *
+ * - **Capture attestations** (docs/CONVERSATION.md §2.7.5.1): each one that
+ *   verifies with THIS deployment's key and names this session and the
+ *   container its file name names is published at its live path, without
+ *   replacing one already there. Installing one cannot grant anything by
+ *   itself: it is a fact the backend signed about one container's creation
+ *   (bound to its immutable id and image id), and capture still requires
+ *   that container to be D1's, running, with both mounts, the token ↔ hash
+ *   match, no revocation and a fresh relay probe. On a new host none of
+ *   those containers exist and the files are inert; restored onto the same
+ *   Docker host after losing WORKSPACE_ROOT, they are what keeps a session
+ *   whose image was removed capable without a recreation — the recreation
+ *   record that `conversation:attest` would need is not restored (below).
+ * - **The per-session revocation**: the one IN EFFECT in the backup (REVOKED
+ *   not named by LIFTED, the receiver's own rule) is installed only when the
+ *   destination has no REVOKED of its own — a destination marker is always
+ *   the newer state and is never touched. A revocation already lifted in the
+ *   backup is not installed (nothing to bring back). One still in effect at
+ *   the backup comes back in effect (fail-closed; the official enable lifts
+ *   it like any other), because dropping it would silently undo an emergency
+ *   disable.
+ * - Everything else (`recreate-attempt.json`, composer pane records,
+ *   `relay.enabled`, `defer-skill-seed`) stays in the evidence dir only: each
+ *   describes containers or in-flight operations of the SOURCE, and the
+ *   gates that read them (recreate-unresolved, retained-pending,
+ *   send-in-progress) would act on that stale state. Restore lands every
+ *   session stopped with no container (the same conclusion), and capture is
+ *   re-established by the official procedure.
+ */
+export async function installControlEvidence(
+	evidenceDir: string,
+	sessionId: string,
+	workspaceRoot: string = WORKSPACE_ROOT,
+): Promise<ControlInstall> {
+	const out: ControlInstall = { installed: 0, kept: 0, rejected: 0, revocation: "none" };
+	const stagedControl = path.join(evidenceDir, CONTROL_DIR, sessionId);
+	const names = await fs.readdir(stagedControl).catch(() => [] as string[]);
+	const attestationName = new RegExp(
+		`^${ATTESTATION_FILE_PREFIX.replace(/\./g, "\\.")}([0-9a-f]{64})\\.json$`,
+	);
+	let key: Buffer | null = null;
+	for (const name of names) {
+		const m = attestationName.exec(name);
+		if (!m) continue;
+		const containerId = m[1] as string;
+		if (!(await isRegularFile(path.join(stagedControl, name)))) {
+			out.rejected++;
+			continue;
+		}
+		const read = await readAttestation(evidenceDir, sessionId, containerId);
+		if (read.kind !== "present") {
+			out.rejected++;
+			continue;
+		}
+		try {
+			key ??= deriveSubkey(ATTESTATION_KEY_INFO);
+		} catch (err) {
+			logger.warn(
+				`[restore] control ${sessionId}: no attestation key (${(err as Error).message}) — attestations not installed`,
+			);
+			out.rejected++;
+			continue;
+		}
+		const verdict = classifyAttestation(
+			read,
+			{ sessionId, containerId, imageId: read.record.imageId },
+			key,
+		);
+		if (verdict !== "valid") {
+			out.rejected++;
+			continue;
+		}
+		if (await writeAttestation(workspaceRoot, read.record, () => true, { noClobber: true }))
+			out.installed++;
+		else out.kept++;
+	}
+	if (out.rejected > 0) {
+		logger.warn(
+			`[restore] control ${sessionId}: ${out.rejected} attestation(s) did not verify — not installed (a different SECRETS_ENCRYPTION_KEY, or a damaged/tampered backup)`,
+		);
+	}
+
+	const stagedConv = path.join(evidenceDir, ".conversations", sessionId);
+	const stagedRevoked = path.join(stagedConv, REVOKED_FILE);
+	const stagedLifted = path.join(stagedConv, LIFTED_FILE);
+	if (await isRegularFile(stagedRevoked)) {
+		const liveRevoked = path.join(workspaceRoot, ".conversations", sessionId, REVOKED_FILE);
+		const liftedOk =
+			!(await fs.lstat(stagedLifted).catch(() => null)) || (await isRegularFile(stagedLifted));
+		// A non-regular LIFTED lifts nothing: read the backup as "in effect".
+		const inEffect = liftedOk
+			? await readSessionRevocation(evidenceDir, sessionId)
+			: await fs.readFile(stagedRevoked, "utf8");
+		if (inEffect === null) out.revocation = "lifted-in-backup";
+		else {
+			// link(2) decides atomically: any destination REVOKED (the newer
+			// state, whatever its LIFTED says) is never replaced.
+			out.revocation = (await publishNoClobber(liveRevoked, inEffect))
+				? "installed"
+				: "destination-kept";
+		}
+	}
+	return out;
+}
+
+/** temp + fsync + link(2): creates `file` with exactly `bytes`, never replaces it. */
+async function publishNoClobber(file: string, bytes: string): Promise<boolean> {
+	const dir = path.dirname(file);
+	await fs.mkdir(dir, { recursive: true });
+	const tmp = `${file}.tmp.${process.pid}.${randomBytes(6).toString("hex")}`;
+	try {
+		const fh = await fs.open(tmp, "wx", 0o600);
+		try {
+			await fh.writeFile(bytes);
+			await fh.sync();
+		} finally {
+			await fh.close();
+		}
+		try {
+			await fs.link(tmp, file);
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+			throw err;
+		}
+	} finally {
+		await fs.rm(tmp, { force: true });
+	}
+	await fsyncDir(dir);
+	return true;
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────────────

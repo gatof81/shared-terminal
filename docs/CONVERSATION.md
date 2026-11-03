@@ -1081,7 +1081,12 @@ clave no se puede fabricar.
 1. `spawn` con captura preparada: tras crear el contenedor (nunca uno adoptado bajo su nombre) y
    antes de arrancarlo;
 2. recreación, paso 1: tras crear N desde el ID de imagen verificado, como request propio del
-   intento (`attest N`), con `mayAct` justo antes de escribir — una época cerrada no escribe;
+   intento (`attest N`), con `mayAct` antes de crear nada **y otra vez inmediatamente antes de
+   publicar** (el `rename`, sin `await` entre la consulta y la publicación): una época que se
+   cierra durante la escritura o el fsync no publica, y el temporal se borra. Un `rename` ya
+   emitido cuando la época se cierra no se puede revocar; por eso la resolución espera a que el
+   request `attest N` responda antes de actuar (`run.settled()`), como con todo request del
+   intento;
 3. en ambos casos se **re-verifica en ese momento** que la imagen del contenedor exista y lleve
    `="2"` y que el contenedor lleve la etiqueta; si no, no se emite (fallo silencioso hacia la
    regla de imagen, con log).
@@ -1108,9 +1113,36 @@ nombra exactamente al contenedor de D1, y las etiquetas que el motor puso a ese 
 crearlo (`session`, `recreate-attempt`, `recreate-of`) y su etiqueta `="2"` coinciden; además
 captura permitida, ambos montajes y token ↔ hash. Si la imagen aún existe debe llevar la
 etiqueta. Un contenedor de un `spawn` sin registro, o cualquier discrepancia, se rechaza (requiere
-recreación). Una acreditación contradictoria existente nunca se sobrescribe. La herramienta no
+recreación). Una acreditación contradictoria existente nunca se sobrescribe. La herramienta corre
+fuera del lock de ciclo de vida del backend, así que **inmediatamente antes de publicar** vuelve
+a leer el contenedor de D1, `requested`, la revocación, la recreación no resuelta y el registro
+(byte a byte) y se niega ante cualquier cambio (`changed-during-check`); publica con `link(2)`,
+que nunca reemplaza un archivo que haya aparecido mientras tanto. La herramienta no
 escribe marca ni archivo: la restauración es el procedimiento oficial de escritura (`PATCH
 /api/admin/sessions/:id/conversation {enabled:true}`), con su probe de identificación.
+
+**Backup y restauración** (`backup.ts`). El backup incluye `.st-control/<sid>` en el tarball de
+la sesión, como **evidencia**. La restauración no lo extrae a su lugar vivo, ni tampoco
+`.conversations/<sid>/REVOKED|LIFTED`: los deja en `<WORKSPACE_ROOT>/.restore-evidence/<backup>-<rnd>/`
+(0700, el backend nunca lo lee) y de ahí instala solo:
+
+- las acreditaciones que verifican con la clave de **este** despliegue, nombran esta sesión y el
+  contenedor de su nombre de archivo, son archivos regulares, y no reemplazan una ya presente
+  (`link(2)`). No conceden nada por sí solas (un hecho firmado sobre la creación de un contenedor
+  concreto; el resto de §2.7.5 sigue exigido). En otro host son inertes; en el mismo host Docker
+  tras perder `WORKSPACE_ROOT`, evitan recrear una sesión cuya imagen ya no existe;
+- la revocación **en efecto** en el backup (la regla del receptor: `REVOKED` no nombrado por
+  `LIFTED`), solo si el destino no tiene `REVOKED` propio (`link(2)`): una marca del destino es
+  siempre el estado más nuevo y no se toca (ni se deshace una vigente ni se reactiva una
+  levantada). Una revocación ya levantada en el backup no se instala; una vigente en el backup
+  vuelve vigente (fail-closed: descartarla desharía en silencio una desactivación de emergencia)
+  y la habilitación oficial la levanta como a cualquier otra. `REVOKED_ALL` no forma parte del
+  backup.
+
+El registro de recreación, los registros de pane del composer, `relay.enabled` y
+`defer-skill-seed` describen contenedores u operaciones en curso del **origen** y quedan solo
+como evidencia: los gates que los leen actuarían sobre ese estado viejo. La restauración deja
+cada sesión `stopped` sin contenedor, y la captura se restablece con el procedimiento oficial.
 
 **Clave.** Cambiar `SECRETS_ENCRYPTION_KEY` invalida todas las acreditaciones: cada una pasa a
 `contradiction` y su sesión pierde la captura aunque su imagen exista, hasta recrearla (mismo
