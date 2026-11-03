@@ -67,7 +67,7 @@ if a[:1] == ["run"]:
     hc.update(S.get("override_hostconfig", {}))
     c = {"id": uuid.uuid4().hex * 2, "name": get("--name"), "labels": labels, "user": get("--user"), "hc": hc, "mounts": mounts + S.get("extra_mounts", [])}
     S.setdefault("containers", []).append(c)
-    out(c["id"])
+    out(S.get("run_id_override", c["id"]))
 if a[:1] == ["inspect"]:
     if a[1] == "-f":
         c = find(a[3])
@@ -94,6 +94,14 @@ if a[:1] == ["exec"]:
     if not c:
         out("Error: No such container", 1)
     cmd = rest[3:]
+    if c.get("stopped"):
+        out("Error response from daemon: container is not running", 1)
+    if "passb0-evidence-check" in cmd:
+        for d in ("tmp/passb0", "home/developer/passb0-ws/.passb0/out"):
+            for _, _, fs in os.walk(os.path.join(S["cfs"], d)):
+                if fs:
+                    out("", 1)
+        out("")
     if cmd[:2] == ["claude", "--version"]:
         out(f"{S.get('cli_version', '2.1.314')} (Claude Code)")
     if cmd[:1] == ["mkdir"] and S.get("fail_mkdir"):

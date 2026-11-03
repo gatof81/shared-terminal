@@ -59,7 +59,9 @@ def fixture():
                     "child": {"waited": True, "peer_known": True, "peer_in_self": True}},
         "rocheck": {"create": "EROFS", "mkdir": "EROFS", "rename": "EROFS", "unlink": "EROFS"},
         "debug": {"mod_lines": 2, "mod_bad_lines": 0},
-        "preflight": None,
+        "preflight": {"cli_version": "2.1.314", "kernel": "6.8.0", "ptrace_scope": "1", "image_id_prefix": "abababababab"},
+        "cli_before": {"version": "2.1.314"},
+        "cli_after": {"version": "2.1.314"},
         "manifest": {"items": {"mod": "ok"}, "files": {"c.jsonl": True}, "mod_files": 7, "complete": True},
     }
 
@@ -110,7 +112,7 @@ class Pass(unittest.TestCase):
         for name, rows in (("c.jsonl", D["c"]), ("h.jsonl", D["h"])):
             with open(f"{d}/{name}", "w") as f:
                 f.writelines(json.dumps(x) + "\n" for x in rows)
-        for name, key in (("capture-manifest.json", "manifest"), ("cliinfo.json", "cliinfo"), ("base-c.json", "base_c"), ("base-h.json", "base_h"), ("control-c.json", "control"), ("rocheck.json", "rocheck")):
+        for name, key in (("capture-manifest.json", "manifest"), ("cliinfo.json", "cliinfo"), ("base-c.json", "base_c"), ("base-h.json", "base_h"), ("control-c.json", "control"), ("rocheck.json", "rocheck"), ("preflight.json", "preflight"), ("cli-version-before.json", "cli_before"), ("cli-version-after.json", "cli_after")):
             dump(f"{d}/{name}", D[key])
         with open(f"{d}/claude-debug.log", "w") as f:
             f.write("x st-passb0-probe loaded\ny unrelated failed\n")
@@ -160,6 +162,12 @@ NEGATIVES = [
     ("call missing", lambda D: D["mod"].pop(5), "INCONCLUSIVE", "mod-calls-missing"),
     ("capture incomplete", lambda D: D["manifest"].update(complete=False, items={"mod": "failed:1"}), "INCONCLUSIVE", "capture-incomplete"),
     ("capture manifest missing", lambda D: D.update(manifest=None), "INCONCLUSIVE", "capture-manifest-missing"),
+    ("CLI changed during the run", lambda D: D["cli_after"].update(version="2.1.315"), "INCONCLUSIVE", "cli-version-mismatch:after"),
+    ("CLI version after not recorded", lambda D: D.update(cli_after=None), "INCONCLUSIVE", "cli-version-unverified:after"),
+    ("CLI version after empty", lambda D: D["cli_after"].update(version=""), "INCONCLUSIVE", "cli-version-unverified:after"),
+    ("CLI in container not 2.1.314", lambda D: D["cli_before"].update(version="2.1.308"), "INCONCLUSIVE", "cli-version-mismatch:before"),
+    ("preflight version other", lambda D: D["preflight"].update(cli_version="2.1.308"), "INCONCLUSIVE", "cli-version-mismatch:preflight"),
+    ("preflight missing", lambda D: D.update(preflight=None), "INCONCLUSIVE", "cli-version-unverified:preflight"),
 ]
 
 

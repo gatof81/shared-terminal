@@ -581,7 +581,8 @@ def check_limits(inspect, stamp, kit, run):
 # ── manifest: what capture actually brought back ──────────────────────────
 
 EXPECTED_FILES = ("c.jsonl", "h.jsonl", "cliinfo.json", "base-c.json", "base-h.json", "control-c.json",
-                  "rocheck.json", "claude-debug.log", "measure.json", "preflight.json", "held-h.json")
+                  "rocheck.json", "claude-debug.log", "measure.json", "preflight.json", "held-h.json",
+                  "cli-version-before.json", "cli-version-after.json")
 
 
 def manifest(res, items):

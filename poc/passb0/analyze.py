@@ -17,6 +17,9 @@ SCOPE = "B0: viabilidad del socket (credenciales del par sobre conexiones concre
 MOD_CALLS = ("c1", "h1", "h2", "hold-c", "hold-h")
 INCONCLUSIVE_ERRORS = {"network-policy", "nonessential-disabled"}
 DEBUG_MOD = re.compile(r"st-passb0-probe")
+# The only version this experiment is approved for (owner decision); it must hold at the
+# preflight, in the container before the run and after it.
+WANT_CLI = "2.1.314"
 DEBUG_BAD = re.compile(r"skipped|failed|refused|not loaded|was not loaded|error", re.I)
 
 
@@ -70,6 +73,8 @@ def load(d):
         "debug": debug,
         "preflight": _json(os.path.join(d, "preflight.json")),
         "manifest": _json(os.path.join(d, "capture-manifest.json")),
+        "cli_before": _json(os.path.join(d, "cli-version-before.json")),
+        "cli_after": _json(os.path.join(d, "cli-version-after.json")),
     }
 
 
@@ -94,6 +99,18 @@ def analyze(D):
         inc("capture-incomplete")
         facts["capture_failed_items"] = sorted(k for k, v in (man.get("items") or {}).items() if v != "ok")
         facts["capture_missing_files"] = sorted(k for k, v in (man.get("files") or {}).items() if not v)
+
+    # ── the measured CLI is the approved version at every point it was checked ──
+    # Not a statement about the hypothesis, so a deviation is INCONCLUSIVE, never PASS.
+    seen = {"preflight": (D.get("preflight") or {}).get("cli_version"),
+            "before": (D.get("cli_before") or {}).get("version"),
+            "after": (D.get("cli_after") or {}).get("version")}
+    facts["cli_version_ok"] = {k: v == WANT_CLI for k, v in seen.items()}
+    for k, v in seen.items():
+        if not isinstance(v, str) or not v:
+            inc(f"cli-version-unverified:{k}")
+        elif v != WANT_CLI:
+            inc(f"cli-version-mismatch:{k}")
 
     # ── the mod ran, once, completely ──
     mod = D["mod"]

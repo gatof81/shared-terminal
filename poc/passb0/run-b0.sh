@@ -10,6 +10,13 @@
 # - A phase writes BASE/state/<phase>.ok only on success, and every phase refuses to start
 #   without the marker of the phase before it, whatever the operator saw on screen.
 # capture and cleanup are the exceptions: they must also run after a partial failure.
+#
+# The experiment container is evidence. cleanup removes it only on one of three grounds,
+# checked against that exact container id (state/container_id) and recorded in RES:
+#   captured            capture.ok exists and RES still verifies against SHA256SUMS
+#   no-evidence         an exec in the container proves both output dirs hold no file
+#   discard-authorized  the operator set B0_DISCARD_EVIDENCE=<full id of that container>
+# Anything else (a partial capture included) stops with exit 66 and touches nothing.
 set -euo pipefail
 umask 077
 
@@ -39,6 +46,16 @@ B0() { X python3 -I /opt/passb0-kit/b0.py "$@"; }
 need() { [ -f "$STATE/$1" ] || die "falta la marca $1: corré antes la fase anterior" 65; }
 ok() { : > "$STATE/$PHASE.ok"; echo "OK: $PHASE"; }
 image_id() { cat "$STATE/image_id"; }
+# Writes {"version", "expected", "match"} for the CLI inside the container; returns 0 only on
+# an exact match. Explicit checks throughout: it also runs where errexit does not apply.
+cli_version_to() {
+	local out v
+	out=$(X claude --version) || return 2
+	v=$(awk 'NR == 1 {print $1}' <<< "$out")
+	python3 -I -c 'import json,sys; json.dump({"version": sys.argv[1], "expected": sys.argv[2], "match": sys.argv[1] == sys.argv[2]}, open(sys.argv[3], "w"))' \
+		"$v" "$WANT_CLI" "$1" || return 3
+	[ "$v" = "$WANT_CLI" ] || return 1
+}
 
 preflight() {
 	# Read-only: no container, image, network or setting is created or changed.
@@ -78,11 +95,12 @@ setup() {
 		--mount "type=bind,src=$KIT,dst=/opt/passb0-kit,readonly" \
 		--mount "type=bind,src=$RUN,dst=/run/st-attest,readonly" \
 		"$id" 3600 > "$STATE/container_id"
+	[[ $(cat "$STATE/container_id") =~ ^[0-9a-f]{64}$ ]] || die "docker run no devolvió un id de contenedor"
+	[ "$(D inspect -f '{{.Id}}' "$EXP")" = "$(cat "$STATE/container_id")" ] || die "el nombre $EXP no apunta al contenedor creado"
 	# What Docker actually applied, not what we asked for.
 	D inspect "$EXP" > "$STATE/inspect.json"
 	python3 -I "$KIT/b0.py" checklimits "$STATE/inspect.json" "$STAMP" "$KIT" "$RUN" || die "límites del contenedor distintos de lo pedido"
-	v=$(X claude --version | awk '{print $1}')
-	[ "$v" = "$WANT_CLI" ] || die "dentro del contenedor: Claude Code $v, no $WANT_CLI (corré capture y cleanup)"
+	cli_version_to "$RES/cli-version-before.json" || die "dentro del contenedor la versión no es $WANT_CLI (ver cli-version-before.json; corré capture y cleanup)"
 	[ "$(X id -u)" = 1000 ] || die "uid distinto de 1000"
 	B0 cliinfo > "$STATE/cliinfo-before.json"
 	python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["cli"] == [] else 1)' "$STATE/cliinfo-before.json" \
@@ -135,6 +153,8 @@ capture() {
 	# fails is written down, never hidden, and the rest is still copied. Needs only the
 	# preflight: after a setup that failed half-way there is still something to keep.
 	need preflight.ok
+	# A rerun that fails must not leave an earlier success standing.
+	rm -f "$STATE/capture.ok"
 	: > "$STATE/capture.attempted"
 	local items=() st
 	item() { # name, command...
@@ -149,7 +169,7 @@ capture() {
 	item container-out D cp "$EXP:/tmp/passb0/out/." "$RES/"
 	item mod D cp "$EXP:$W/.passb0/out/mod" "$RES/"
 	item held-h cp -p "$RUN/held-h.json" "$RES/held-h.json"
-	item cli-version-after X claude --version
+	item cli-version-after cli_version_to "$RES/cli-version-after.json"
 	python3 -I "$KIT/b0.py" manifest "$RES" "${items[@]}" > /dev/null
 	(cd "$RES" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
 	(cd "$RES" && sha256sum -c --quiet SHA256SUMS)
@@ -167,9 +187,28 @@ validate() {
 	ok
 }
 
+# Prints the ground on which container $1 may be removed; returns 1 when there is none.
+removal_basis() {
+	local id=$1
+	if [ -f "$STATE/capture.ok" ] && [ -f "$RES/SHA256SUMS" ] && (cd "$RES" && sha256sum -c --quiet SHA256SUMS > /dev/null 2>&1) \
+		&& python3 -I -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("complete") is True else 1)' "$RES/capture-manifest.json" 2> /dev/null; then
+		echo captured; return 0
+	fi
+	if [ -n "${B0_DISCARD_EVIDENCE:-}" ]; then
+		if [ "$B0_DISCARD_EVIDENCE" = "$id" ]; then echo discard-authorized; return 0; fi
+		echo "B0_DISCARD_EVIDENCE no coincide con el id del contenedor: se ignora" >&2
+	fi
+	# Exec fails on a stopped container, so "cannot look" never counts as "nothing there".
+	if X sh -c 'for d in /tmp/passb0 "$1/.passb0/out"; do [ ! -e "$d" ] || [ -z "$(find "$d" -type f -print -quit)" ] || exit 1; done' \
+		passb0-evidence-check "$W" > /dev/null 2>&1; then
+		echo no-evidence; return 0
+	fi
+	return 1
+}
+
 cleanup() {
 	# Idempotent; keeps BASE/kit, kit.tgz and RES. Never signals a pid it cannot prove.
-	local ids id lbl name r server_gone=false fail=0
+	local ids id lbl name r want_id basis server_gone=false fail=0
 	if [ -f "$STATE/server-h.identity.json" ]; then
 		if r=$(python3 -I "$KIT/b0.py" stop --identity "$STATE/server-h.identity.json"); then server_gone=true; else fail=1; fi
 		echo "servidor del host: $r"
@@ -179,13 +218,19 @@ cleanup() {
 		echo "hay un servidor sin identidad registrada: no se señala; detenelo a mano" >&2; fail=1
 	fi
 	ids=$(D ps -a -q --no-trunc --filter "label=$LABEL")
-	if [ -n "$ids" ] && [ ! -f "$STATE/capture.attempted" ]; then
-		die "el contenedor existe y no se corrió capture: corré capture primero (la evidencia se perdería)" 66
-	fi
+	want_id=$(cat "$STATE/container_id" 2> /dev/null || true)
 	for id in $ids; do
 		lbl=$(D inspect -f '{{index .Config.Labels "passb0.experiment"}}' "$id")
 		name=$(D inspect -f '{{.Name}}' "$id")
-		if [ "$lbl" = "$STAMP" ] && [ "$name" = "/$EXP" ]; then D rm -f -v "$id" > /dev/null; else echo "no toco $id: etiqueta o nombre ajenos" >&2; fail=1; fi
+		if [ "$lbl" != "$STAMP" ] || [ "$name" != "/$EXP" ] || [[ ! $want_id =~ ^[0-9a-f]{64}$ ]] || [ "$id" != "$want_id" ]; then
+			echo "no toco ${id:0:12}: etiqueta, nombre o id distintos de state/container_id" >&2; fail=1; continue
+		fi
+		basis=$(removal_basis "$id") || die "el contenedor puede tener evidencia sin copia verificada: no se borra.
+  Opciones: capture completa (capture.ok), o B0_DISCARD_EVIDENCE=<id completo> si decidís descartarla" 66
+		python3 -I -c 'import json,sys; json.dump({"container_prefix": sys.argv[1][:12], "basis": sys.argv[2]}, open(sys.argv[3], "w"))' \
+			"$id" "$basis" "$RES/removal.json"
+		D rm -f -v "$id" > /dev/null
+		echo "contenedor borrado: $basis"
 	done
 	[ -z "$(D ps -a -q --filter "label=$LABEL")" ] || { echo "queda un contenedor del experimento" >&2; fail=1; }
 	if [ -f "$STATE/image_id" ]; then

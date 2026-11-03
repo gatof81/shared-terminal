@@ -194,6 +194,7 @@ class Runner(unittest.TestCase):
             self.assertIsNone(p.poll(), "the process must not have been signalled")
         finally:
             p.kill()
+            p.wait()
 
     # ── capture / cleanup ──
     def mkcfs(self, complete):
@@ -236,11 +237,132 @@ class Runner(unittest.TestCase):
         self.assertTrue(self.marker("capture.attempted"))
         self.assertOk(self.phase("cleanup"), "cleanup")
 
-    def test_cleanup_refuses_before_capture_when_the_container_exists(self):
+    def container_id(self):
+        with open(os.path.join(self.base, "state", "container_id")) as f:
+            return f.read().strip()
+
+    def cleanup(self, **env):
+        old = dict(os.environ)
+        os.environ.update(env)
+        try:
+            return self.phase("cleanup")
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
+    def removal(self):
+        with open(os.path.join(self.res, "removal.json")) as f:
+            return json.load(f)["basis"]
+
+    def test_cleanup_refuses_before_capture_when_the_container_holds_evidence(self):
         self.phase("preflight")
         self.phase("setup")
-        self.assertFailedClosed(self.phase("cleanup"), 66)
+        self.mkcfs(complete=True)
+        self.assertFailedClosed(self.cleanup(), 66)
         self.assertEqual(len(self.state()["containers"]), 1)
+
+    def test_cleanup_removes_an_empty_container_on_proven_absence(self):
+        self.phase("preflight")
+        self.phase("setup")
+        self.assertOk(self.cleanup(), "cleanup")
+        self.assertEqual(self.removal(), "no-evidence")
+        self.assertEqual(self.state()["containers"], [])
+
+    def test_cleanup_refuses_after_a_partial_capture(self):
+        self.phase("preflight")
+        self.phase("setup")
+        self.mkcfs(complete=False)
+        self.assertFailedClosed(self.phase("capture"), 4)
+        self.assertFalse(self.marker("capture.ok"))
+        r = self.cleanup()
+        self.assertFailedClosed(r, 66)
+        self.assertIn("B0_DISCARD_EVIDENCE", r.stderr)
+        self.assertEqual(len(self.state()["containers"]), 1)
+        self.assertFalse(os.path.exists(os.path.join(self.res, "removal.json")))
+
+    def test_cleanup_refuses_a_stopped_container_it_cannot_look_into(self):
+        self.phase("preflight")
+        self.phase("setup")
+        s = self.state()
+        s["containers"][0]["stopped"] = True
+        self.write_state(s)
+        self.assertFailedClosed(self.cleanup(), 66)
+        self.assertEqual(len(self.state()["containers"]), 1)
+
+    def test_discard_authorization_must_name_this_container(self):
+        self.phase("preflight")
+        self.phase("setup")
+        self.mkcfs(complete=False)
+        self.phase("capture")
+        self.assertFailedClosed(self.cleanup(B0_DISCARD_EVIDENCE="e" * 64), 66)
+        self.assertFailedClosed(self.cleanup(B0_DISCARD_EVIDENCE="1"), 66)
+        self.assertEqual(len(self.state()["containers"]), 1)
+        cid = self.container_id()
+        self.assertOk(self.cleanup(B0_DISCARD_EVIDENCE=cid), "cleanup")
+        self.assertEqual(self.state()["containers"], [])
+        self.assertEqual(self.removal(), "discard-authorized")
+
+    def test_capture_ok_alone_is_not_enough_when_results_changed(self):
+        self.phase("preflight")
+        self.phase("setup")
+        self.mkcfs(complete=True)
+        self.assertOk(self.phase("capture"), "capture")
+        self.assertTrue(self.marker("capture.ok"))
+        with open(os.path.join(self.res, "c.jsonl"), "a") as f:
+            f.write("tampered\n")
+        self.assertFailedClosed(self.cleanup(), 66)
+        self.assertEqual(len(self.state()["containers"]), 1)
+
+    def test_a_failed_capture_rerun_withdraws_capture_ok(self):
+        self.phase("preflight")
+        self.phase("setup")
+        self.mkcfs(complete=True)
+        self.assertOk(self.phase("capture"), "capture")
+        self.patch(cli_version="2.1.315")
+        self.assertFailedClosed(self.phase("capture"), 4)
+        self.assertFalse(self.marker("capture.ok"))
+
+    def test_capture_requires_the_exact_cli_version_after_the_run(self):
+        self.phase("preflight")
+        self.phase("setup")
+        self.mkcfs(complete=True)
+        self.patch(cli_version="2.1.315")
+        self.assertFailedClosed(self.phase("capture"), 4)
+        with open(os.path.join(self.res, "cli-version-after.json")) as f:
+            self.assertEqual(json.load(f), {"version": "2.1.315", "expected": "2.1.314", "match": False})
+        with open(os.path.join(self.res, "capture-manifest.json")) as f:
+            self.assertTrue(json.load(f)["items"]["cli-version-after"].startswith("failed"))
+        self.assertFailedClosed(self.phase("validate"))
+        with open(os.path.join(self.res, "report.json")) as f:
+            self.assertIn("cli-version-mismatch:after", f.read())
+
+    def test_setup_persists_the_version_it_checked(self):
+        self.phase("preflight")
+        self.assertOk(self.phase("setup"), "setup")
+        with open(os.path.join(self.res, "cli-version-before.json")) as f:
+            self.assertEqual(json.load(f)["match"], True)
+
+    def test_cleanup_never_removes_a_container_other_than_the_recorded_id(self):
+        self.phase("preflight")
+        self.phase("setup")
+        put(os.path.join(self.base, "state", "container_id"), "e" * 64 + "\n")
+        self.assertFailedClosed(self.cleanup(), 67)
+        self.assertEqual(len(self.state()["containers"]), 1)
+
+    def test_cleanup_never_removes_a_container_without_a_recorded_id(self):
+        self.phase("preflight")
+        self.phase("setup")
+        os.unlink(os.path.join(self.base, "state", "container_id"))
+        self.assertFailedClosed(self.cleanup(), 67)
+        self.assertEqual(len(self.state()["containers"]), 1)
+
+    def test_setup_stops_when_the_name_points_elsewhere(self):
+        self.phase("preflight")
+        s = self.state()
+        s["run_id_override"] = "e" * 64
+        self.write_state(s)
+        self.assertFailedClosed(self.phase("setup"))
+        self.assertFalse(self.marker("setup.ok"))
 
     def test_cleanup_does_not_touch_a_container_with_a_foreign_name(self):
         self.phase("preflight")
