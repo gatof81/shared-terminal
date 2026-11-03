@@ -636,7 +636,7 @@ Bash. Diseño propuesto (no implementado; requiere su propio experimento en un c
 | Cambio de API | Lista propia de versiones validadas (como `COMPOSER_CLI_VERSIONS`). Un campo desconocido ⇒ `unverified` | Diseño |
 | Costo arquitectónico | Las sesiones tmux no cambian. Cambian los managed settings y un montaje de solo lectura, así que se necesita **recrear** el contenedor (§2.4.1 de CONVERSATION.md) | — |
 
-#### 1.13.4 Diseño de XB-1 (kit `poc/channels-phase0@1ed7e73`; propuesto, **no ejecutado**)
+#### 1.13.4 Diseño de XB-1 (kit `poc/channels-phase0@a04f0c0`; propuesto, **no ejecutado**)
 
 **Objetivo.** Una sola ejecución en el Mac compara un mensaje real de Channels contra un prompt
 tecleado y contra una etiqueta `<channel>` pegada. Comprueba que los orígenes difieren y que la
@@ -715,7 +715,10 @@ responsable (`1ed7e73`):
 - **exactamente un** `Stop` del logger y **exactamente uno** del mod con P (R8 sin cambios). Lo
   mismo se exige para cada control;
 - respuesta: el `fakechat_reply` con texto **exacto** `OK_<id>` y dirigido a ese mensaje, y
-  **exactamente un** `PostToolUse` correcto de `reply` con P y ese destinatario en el logger;
+  **exactamente un** intento de `reply` con P en el logger, contando `PostToolUse` y
+  `PostToolUseFailure`, y ese intento exitoso y con ese destinatario. Un fallo seguido de un
+  reintento exitoso es FAIL. La igualdad con `OK_<id>` es byte a byte, sin `trim()`: Fakechat
+  retransmite el argumento `text` sin cambios (`a04f0c0`);
 - control tecleado y control pegado: cada uno ligado a su propio P′, con `origin = composer` y sin
   servidor; la etiqueta pegada llegó como etiqueta según el logger;
 - en toda la corrida, exactamente un envío con `origin = channel`;
