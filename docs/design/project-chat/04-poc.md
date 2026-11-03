@@ -1842,7 +1842,7 @@ apruebo la corrida 2.
 
 **Tests:**
 - runner 30;
-- servidores 47, con sockets reales:
+- servidores 38, con sockets reales:
   - vista del host simulada: la consulta del servidor falla como en el host y la del
     checker es real;
   - inodos inválidos, de una conexión cerrada, de un cliente que se fue, de un listener, de
