@@ -4,6 +4,15 @@ Estado: **dirección aprobada conceptualmente por el responsable (2026-11-02); d
 resueltas. Nada implementado.** No está autorizado ejecutar la POC, implementar, mergear ni
 desplegar: la POC necesita un GO separado sobre [04-poc.md §7](./04-poc.md#7-propuesta-de-ejecución-dos-autorizaciones-separadas).
 
+Evidencia hasta ahora (2026-11-03):
+- **G3 sigue sin cumplirse**: `source` está ausente en 2.1.314 y 2.1.317.
+- **XA-1** dio `late`.
+- **XB-1** dio **PASS-A**: el origen se observó en el mod `prompt.submit`, y PASS-A no reemplaza a
+  G3.
+- **PASS-B** (integridad hasta el backend) está diseñado y no implementado, en
+  [04-poc.md §1.14](./04-poc.md#114-pass-b-integridad-de-la-evidencia-hasta-el-backend-diseño-nada-implementado-pass-b0-no-autorizado).
+  PASS-B0 no está autorizado.
+
 | Documento | Contenido |
 | --- | --- |
 | [01-vision.md](./01-vision.md) | Qué construimos, para quién, casos de uso, alcance |
