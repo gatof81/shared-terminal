@@ -347,9 +347,10 @@ Descartadas por no cumplir G3 tal como está escrito: un nonce de nuestro servid
 del token, no origen) y `asyncRewake` (R2), que también llega como prompt sin `source`.
 
 **Estado:** las 12 muestras **no** están autorizadas; G1–G12 y R8 sin cambios. La alternativa A
-dio positivo sobre los registros existentes y está en investigación (§1.11).
+dio positivo sobre los registros existentes (§1.11); XA-1 dio `late` y el orden del binario lo
+explica: en 2.1.317 el hook corre antes de la escritura del transcript (§1.12).
 
-### 1.11 Alternativa A: origen según el transcript del CLI (en investigación)
+### 1.11 Alternativa A: origen según el transcript del CLI (XA-1 `late`; ver §1.12)
 
 **No cambia G3, R8 ni G1–G12.** Esta sección diseña cómo investigarla; la propuesta G3-A del final
 es para una revisión de diseño aparte y **no** está aprobada ni sustituye a G3.
@@ -426,6 +427,111 @@ Una entrada de canal estaría **verificada por transcript** sólo si:
 
 Aceptarla sería una decisión explícita del responsable tras esa revisión; mientras tanto, G3 rige
 tal como está.
+
+### 1.12 Resultado de XA-1 y orden real hook → transcript (2.1.317)
+
+**XA-1 (2026-11-03, Mac del responsable, CLI 2.1.317, kit `508a57d`): categoría `late`.** No es
+factibilidad positiva según el criterio de §1.11.1 y no se reinterpreta como éxito.
+
+| Medida | Valor |
+| --- | --- |
+| Flujo | `result=hook`; `UserPromptSubmit` +71 ms; `reply` +5,544 s; `Stop` +6,746 s; sin prompts ni `Stop` ajenos |
+| `source` en el hook | ausente (G3 sigue sin cumplirse) |
+| Sonda al hook | una línea; `unverified`, motivo `no-prompt-record`; lectura desde el byte 0, sin línea final incompleta, 1 ms; 0 registros con ese `promptId` |
+| Relectura completa (+7,534 s) | `verified`, unicidad global; `origin.kind=channel`, servidor esperado, `isMeta`, `promptSource=system`, misma sesión, contenido igual al prompt, etiqueta válida |
+
+#### 1.12.1 Orden de ejecución en el binario (inspección estática)
+
+Artefacto: `@anthropic-ai/claude-code-darwin-arm64@2.1.317` (npm `shasum` `bea435eb…`), código
+minificado leído de las cadenas del binario. Los nombres de función son los minificados de esa
+versión y cambian entre versiones.
+
+**Hechos comprobados en el código:**
+
+1. **Recepción.** El handler de `notifications/claude/channel` (registrado sólo si la puerta de
+   canales devuelve `register`) arma el texto con `_Bt(server, content, meta)` (el elemento
+   `<channel source="…">`) y hace `enqueue({mode:"prompt", value, priority:"next", isMeta:true,
+   origin:{kind:"channel", server}, skipSlashCommands:true, skipAttachments:true})`. No escribe nada
+   en el transcript.
+2. **Desencolado.** El turno recorre los comandos desencolados y, para cada uno, hace
+   `await GNt(...)` → `Hn(...)` (`processUserInput`), con `promptSource="system"` por `isMeta`. Los
+   mensajes que devuelve se acumulan en un lote local `$o`.
+3. **Creación del mensaje.** Dentro de `Hn`, `yr(...)` crea el mensaje de usuario en memoria
+   (`De({content, uuid, isMeta, promptSource, promptId, origin})`). De ahí sale el `timestamp` que X1
+   vio en +25 ms.
+4. **Hook.** Todavía dentro de `Hn` (marcas `query_hooks_start` / `input_hooks`), la cadena
+   `prompt.submit` ejecuta como núcleo los hooks clásicos (`P1r` → `Bkt`), que arman el payload
+   `{…base, hook_event_name:"UserPromptSubmit", prompt, ...!1, session_title}` y esperan a los hooks.
+   `Hn` devuelve sólo después.
+5. **Agregado a la conversación.** Recién al terminar el bucle (`query_process_user_input_end`) el
+   turno llama `run($o, …)`. Durante el lote, `applyMessageOp` está envuelto para **acumular** los
+   `append` en vez de publicarlos (`aQo`, hasta `isBatchHandedOff`).
+6. **Escritura del transcript.** En el modo interactivo, la escribe `kDe.write`, invocado por un
+   efecto de React sobre la lista de mensajes (`CDe`: `useEffect(() => recorder.record(messages, …))`)
+   → `VT` → `insertMessageChain` → `trackWrite` → `appendEntry`. `promptId` se toma de `eN()` al
+   escribir.
+7. **Modelo.** La consulta al modelo sale de `run(...)` (paso 5), después de los hooks.
+
+**Conclusión (hecho, no hipótesis):** el hook corre **estructuralmente antes** de que el mensaje
+llegue siquiera a la lista que el grabador del transcript observa. No hay carrera: en 2.1.317, en este
+camino, el registro **no puede** estar en el archivo cuando corre `UserPromptSubmit`. XA-1 `late`
+es el resultado esperado por construcción, no una muestra desafortunada; repetirla no cambiaría la
+categoría. La variante "al hook" de la alternativa A (§1.11, G3-A punto 2) no es viable en 2.1.317.
+
+**Hecho adicional sobre `source`:** el llamador calcula el origen y lo pasa al constructor del
+payload. `ue(promptSource, wakeupSource)` devuelve `"system"` para el canal y llega a
+`Bkt(text, mode, ctx, source, tiers)` como cuarto argumento, pero el payload no lo usa: en su lugar
+hay `...!1`, que es la forma que deja una función desactivada en la compilación. Es compatible con
+anthropics/claude-code#94675.
+
+**Hipótesis (no comprobadas):** que la corrección de #94675 consista en activar esa rama; que el orden
+sea el mismo en `-p`/SDK (no se leyó ese camino); que otras versiones mantengan el orden (validar por
+versión).
+
+#### 1.12.2 Alternativas evaluadas (sin implementar)
+
+En todas, la evidencia que sale del contenedor viaja por los hooks y el relay de loopback (§2.6 de
+CONVERSATION.md). Cualquier proceso del contenedor puede enviar a ese relay, así que la captura
+actual ya confía en el contenido del contenedor frente a un agente con Bash. Ninguna alternativa que
+pase por ahí es más fuerte que ese límite.
+
+| | Alternativa | Quién garantiza el origen | ¿Un prompt tecleado o pegado lo falsifica? | ¿Un agente con Bash/Write altera la evidencia? | Correlación | Concurrencia, `--resume`, fallos | ¿Cambia tmux? | Dependencias |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A′ | Transcript leído **al hook** | El CLI, al escribir | No | Sí, si escribe el archivo | `promptId` = `prompt_id` | — | No | **Inviable en 2.1.317**: el registro todavía no existe (§1.12.1) |
+| A″ | Transcript leído **después** | El CLI, pero leído tarde | No | Sí: hay ventana entre la escritura y la lectura | Igual | Escritura asincrónica; reparación al cargar | No | **Rechazada por el responsable**: retraso, polling o relectura que da por verificado |
+| B | Módulo de hooks de plugin, evento `prompt.submit` | El CLI: `origin` sale del comando encolado (`RQs` → `wue`: canal ⇒ `{kind:"channel", server}`; tecleado ⇒ `{kind:"composer"}`), no del texto | No: el texto no cambia `origin` | El módulo se carga desde disco; si el agente puede escribirlo, puede reemplazarlo. Necesita una ubicación sólo lectura o administrada (por verificar). La salida pasa por el relay | El input lleva `text`, `origin`, `isMeta` y `turnId?`, **sin** `prompt_id`. Se correlaciona porque corre en el mismo instante que el hook clásico (lo envuelve: `next()`) y con igualdad de texto | Mismo proceso y momento que el hook; `--resume` no cambia el origen de un comando nuevo | No | **API de acceso anticipado.** Se activa por un flag remoto (`tengu_plugin_hooks_modules`, GrowthBook). Se apaga con `disableAllHooks`, `allowManagedHooksOnly` o política. Formato no documentado como estable |
+| C | Esperar #94675 (`source` en el hook) | El CLI, en el payload del hook | No | Igual que cualquier hook (límite del relay) | `prompt_id` nativo | Igual que hoy | No | Fecha desconocida. Detectable por inspección estática: desaparece `...!1` en `Bkt` |
+| D | Protocolo de confirmación: nuestro servidor de canal o el backend registra `(nonce secreto, sha256(contenido))` **antes** de enviar; el hook informa `prompt_id` y el SHA-256 del prompt; el backend acepta una sola aparición | Nuestro backend, sobre **lo que envió** (autor y contenido), no sobre el camino de entrega | Uno tecleado con otro texto no coincide. Copiar el texto exacto exige conocer el nonce antes de la entrega; si llega después, es una segunda aparición: ambas quedan `unverified`, sin falso positivo | Si el servidor de canal corre en el contenedor, un proceso del mismo usuario podría leer el nonce al vuelo (riesgo residual). Un servidor remoto lo reduce, pero exige transporte HTTP de canales (no evaluado) | `nonce` ↔ `prompt_id` ↔ `Stop`/respuesta | El nonce es de un solo uso y tiene vencimiento; la regla se mantiene ante reinicios | No | Ninguna interna del CLI. **No da procedencia del camino**: atribuye contenido, que es lo que §1.10 ya descartó como sustituto de G3 |
+| E | Relay propio del servidor Channels (evidencia independiente) | Nuestro servidor: qué envió y cuándo | — | Igual que D si es local | La notificación MCP es unidireccional, sin acuse | — | No | Sólo prueba envío; es una pieza de D |
+| F | Arquitectura distinta: el composer actual (3.2, pegado en tmux con acuse por `textHash` en el panel) o headless stream-json | El backend envía; acuse por `user_prompt` humano en el mismo panel (3.2) | La regla de 3.2 ya es fail-closed | El mismo límite del relay | `clientMessageId` ↔ `user_prompt` | Ya resuelto en el contrato v1.7.x | 3.2 no; headless sí (rompe R1) | Sin Channels |
+
+#### 1.12.3 Recomendación
+
+1. **Cerrar la variante "al hook" de la alternativa A en 2.1.317.** Es inviable por construcción y la
+   relectura posterior está descartada. G3-A queda como estaba: no aprobada y, en su punto 2,
+   inaplicable a esta versión.
+2. **En 2.1.317, Channels no da atribución del *camino* verificable con interfaces estables.**
+   - Con interfaz estable sólo daría C, que todavía no existe.
+   - Con interfaz de acceso anticipado daría B, que depende de un flag remoto.
+   - D atribuye contenido, no camino.
+3. **Para decidir:**
+   - Si el Monitor necesita procedencia del camino **ya**: buscar otro mecanismo. El composer 3.2
+     preserva la arquitectura, usa la suscripción y ya tiene su contrato. Channels queda en espera
+     de C.
+   - Si basta atribuir el contenido a un emisor autenticado por el backend: D (con E) es diseñable
+     sin depender del CLI. Sería una garantía **distinta** de G3, que requeriría su propia revisión.
+4. **Seguimiento barato de C:** comprobar en el binario de cada versión nueva si `Bkt` deja de tener
+   `...!1` y emite `source`, antes de cualquier prueba T.
+
+#### 1.12.4 Experimento mínimo siguiente (propuesto, **no ejecutado ni autorizado**)
+
+**XB-0: ¿está disponible B para esta cuenta?** Sólo lectura, sin ejecutar Claude.
+- Leer **un único valor** booleano de la caché de flags del CLI, sin imprimir nada más del archivo:
+  `jq '.cachedGrowthBookFeatures.tengu_plugin_hooks_modules // "absent"' ~/.claude.json`.
+- Si da `false` o `absent`, B no está disponible y la decisión se reduce a C, D o F.
+- Si da `true`, se diseña **XB-1**: un módulo `prompt.submit` sólo observacional, que registra
+  `origin.kind`, `origin.server`, `isMeta` y el SHA-256 del texto, en el mismo kit, con una sola
+  prueba T y con autorización aparte.
 
 ## 2. Versiones
 
