@@ -533,7 +533,7 @@ pase por ahí es más fuerte que ese límite.
   `origin.kind`, `origin.server`, `isMeta` y el SHA-256 del texto, en el mismo kit, con una sola
   prueba T y con autorización aparte.
 
-### 1.13 Alternativa B: mods con `prompt.submit` (en investigación; XB-1 **no autorizado**)
+### 1.13 Alternativa B: mods con `prompt.submit` (XB-1 ejecutado una vez: **PASS-A**, §1.13.5)
 
 **No cambia G3, R8 ni G1–G12; G3-A sigue sin aprobarse.** XB-0 (2026-11-03, Mac del responsable,
 2.1.317) leyó `tengu_plugin_hooks_modules = true` en la caché de flags. Eso **no** prueba que un mod
@@ -626,7 +626,7 @@ Bash. Diseño propuesto (no implementado; requiere su propio experimento en un c
 | --- | --- | --- |
 | El agente cambia el módulo | Mod **de la organización**, configurado en nuestros managed settings de solo lectura:<br>• `extraKnownMarketplaces` apuntando a un directorio local de solo lectura;<br>• `enabledPlugins` + `prependPlugins`;<br>• `pluginDigests`, el SHA-256 de cada archivo de la carpeta: "any other copy does not load".<br>A eso se suma la carpeta montada de solo lectura | D/B; sin probar |
 | El agente agrega su propio mod, o usa `--plugin-dir` / `CLAUDE_CODE_PLUGIN_DIRS` | `allowManagedModsOnly` (opción del guard integrado) + `disableSideloadFlags` | D; falta verificar que también cubra `CLAUDE_CODE_PLUGIN_DIRS` |
-| Otro proceso falsifica la evidencia | Canal propio: `$.http.fetch` con `socketPath`, un socket Unix del relay. Si el `fetch` lo hace el proceso del CLI, el relay puede exigir `SO_PEERCRED` igual al pid del Claude del panel (misma regla de identidad que el composer: ejecutable, `starttime`, primer plano). Bash, MCP y hooks son otros pids ⇒ rechazados. La veredicción usaría **sólo** este canal; los hooks por TCP quedarían como informativos | **Hipótesis.** Indicios: en 2.1.317 el código acepta `socketPath`: `gFn` exige ruta absoluta y sin NUL, y rechaza la llamada si la build no tiene transporte Unix; luego lo pasa al `fetch` de Bun como `unix:`. El tipo público (2.1.277) documenta `socketPath` como "a Unix socket to go over instead of TCP". **No se ejecutó nunca.** Tampoco se observó el pid real de la conexión ni el comportamiento con el guard o con la política de red de plugins. No es un componente viable hasta una prueba propia |
+| Otro proceso falsifica la evidencia | Canal propio: `$.http.fetch` con `socketPath`, un socket Unix del relay. Si el `fetch` lo hace el proceso del CLI, el relay puede exigir `SO_PEERCRED` igual al pid del Claude del panel (misma regla de identidad que el composer: ejecutable, `starttime`, primer plano). Bash, MCP y hooks son otros pids ⇒ rechazados. La veredicción usaría **sólo** este canal; los hooks por TCP quedarían como informativos | **Hipótesis.** Indicios: en 2.1.317 el código acepta `socketPath`: `gFn` exige ruta absoluta y sin NUL, y rechaza la llamada si la build no tiene transporte Unix; luego lo pasa al `fetch` de Bun como `unix:`. El tipo público (2.1.277) documenta `socketPath` como "a Unix socket to go over instead of TCP". **No se ejecutó nunca.** Tampoco se observó el pid real de la conexión ni el comportamiento con el guard o con la política de red de plugins. No es un componente viable hasta una prueba propia. Auditoría y diseño en §1.14: `SO_PEERCRED` solo **no** basta |
 | Inyección en el proceso del CLI (ptrace, `/proc/<pid>/mem`) | Yama `ptrace_scope` ≥ 1, con el que un hijo no puede adjuntarse al padre. Comprobarlo como precondición del contenedor | Hipótesis |
 | Binario del CLI reemplazado en HOME | Verificar el hash de `/proc/<pid>/exe` contra el CLI fijado en la imagen (R9) | Hipótesis |
 | Pérdida o duplicado | `inst` aleatorio por carga + `seq` contiguo. Un hueco o una repetición deja `unverified` lo que esté afectado. Una recarga del módulo (nueva `inst`) deja `unverified` lo que estaba en vuelo | Diseño; probado en tests |
@@ -636,7 +636,7 @@ Bash. Diseño propuesto (no implementado; requiere su propio experimento en un c
 | Cambio de API | Lista propia de versiones validadas (como `COMPOSER_CLI_VERSIONS`). Un campo desconocido ⇒ `unverified` | Diseño |
 | Costo arquitectónico | Las sesiones tmux no cambian. Cambian los managed settings y un montaje de solo lectura, así que se necesita **recrear** el contenedor (§2.4.1 de CONVERSATION.md) | — |
 
-#### 1.13.4 Diseño de XB-1 (kit `poc/channels-phase0@a04f0c0`; propuesto, **no ejecutado**)
+#### 1.13.4 Diseño de XB-1 (kit `poc/channels-phase0@a04f0c0`; ejecutado el 2026-11-03, resultado en §1.13.5)
 
 **Objetivo.** Una sola ejecución en el Mac compara un mensaje real de Channels contra un prompt
 tecleado y contra una etiqueta `<channel>` pegada. Comprueba que los orígenes difieren y que la
@@ -747,6 +747,396 @@ correlacionada.
 - `manage.mjs`: copia y verifica el mod, y la sonda pasa a ser opcional.
 - `send.mjs`: acepta `--label B` como prueba individual y sólo agrega `transcript_a` si hay sonda.
 - El logger, `events`, `classify`, `report` y el matcher de A no cambian.
+
+#### 1.13.5 Resultado de XB-1 (2026-11-03, Mac del responsable, 2.1.317, kit `a04f0c0`)
+
+**PASS-A** (`xb.mjs report`: `salida=0`, `reasons=[]`). Fue una sola ejecución: un mensaje de
+Channels y dos controles humanos, con restauración posterior. Evaluó **sólo** la procedencia y la
+correlación dentro del CLI.
+
+| Aspecto | Observado |
+| --- | --- |
+| Mod | 13 registros, una `inst`, `seq` contiguo, ningún duplicado, ningún error |
+| Envíos | 3 `prompt.submit`, sin solape |
+| Canal | `origin.kind = channel`, servidor `plugin:fakechat:fakechat`, ligado a P1; un `UserPromptSubmit`; un `Stop` del logger y uno del mod; un único `reply`, exitoso, con texto y destinatario exactos |
+| Control tecleado | `origin.kind = composer`, ligado a P2 |
+| Control con `<channel>` falsificado y pegado | `origin.kind = composer`, ligado a P3 |
+| Identificadores | P1, P2 y P3 distintos; correlación única en los tres |
+| Guard `cc-plugin-sec-default` | Aparece en el debug log como `not seated`: no estaba activo |
+| `source` del hook clásico | Sigue **ausente** |
+
+**Desvío del procedimiento.** La comprobación previa del paso 5 pedía **cero** menciones de
+`cc-plugin-sec-default` en el debug log, y hubo una (`not seated`). El responsable la evaluó como
+"guard no cargado". Los `classic.*` llegaron al mod, que es la prueba directa de que el guard no los
+bloqueó. No cambia el criterio, pero queda anotado. En un PASS-B0/B1 la comprobación debe buscar el
+estado (`seated` / `not seated`) y no sólo el nombre.
+
+**Qué no significa:**
+- **No** es PASS-B ni habilita el Monitor.
+- **No** cambia G3, R8 ni G1–G12. G3 sigue sin cumplirse porque `source` está ausente. G3-A sigue
+  sin aprobarse.
+- Es una muestra, no una serie. Las series de fiabilidad no están autorizadas.
+
+### 1.14 PASS-B: integridad de la evidencia hasta el backend (diseño; **nada implementado**, PASS-B0 **no autorizado**)
+
+**No cambia G3, R8 ni G1–G12; G3-A sigue sin aprobarse; PASS-A no reemplaza a G3.** Si PASS-B
+llegara a pasar, daría una garantía **distinta** de la letra de G3 (`source=system` en el hook).
+Usarla en su lugar exigiría una decisión explícita del responsable, como la que G3-A todavía no tiene.
+
+Fuentes de esta sección:
+- (B) cadenas del binario `darwin-arm64@2.1.317` y de `2.1.314`, el CLI de nuestra imagen. Las rutas
+  citadas están en los dos;
+- (K) semántica documentada del kernel Linux;
+- (R) código de este repositorio;
+- (O) observado en este contenedor de desarrollo (kernel `6.8.0-147`).
+
+Todo lo que no tiene una prueba propia está marcado **hipótesis**.
+
+#### 1.14.1 Qué tiene que afirmar PASS-B, y qué nunca va a afirmar
+
+**Afirmación verificada** para un mensaje M de Project Chat:
+
+> El proceso del CLI del contenedor C, con binario permitido y sin inyección observable, informó
+> por un canal autenticado que su prompt P de la sesión S entró con `origin = channel` desde el
+> servidor administrado X. Además, el cuerpo de P es exactamente M, que el backend emitió por ese
+> canal y que apareció una sola vez.
+
+Hacen falta **dos mitades**, y ninguna alcanza sola:
+- **Camino.** La evidencia del CLI dice por dónde entró el prompt. PASS-A lo demostró dentro del CLI.
+- **Contenido.** La atribución del backend dice quién lo escribió: es la alternativa D de §1.12.2.
+
+La razón está en el hallazgo A4 de §1.14.3: un proceso del agente podría hacer que el CLI asigne
+`origin = channel` **legítimo** a un texto que escribió el agente.
+
+**Nunca afirma:**
+- que un prompt `composer` lo tecleó una persona. El agente puede escribir en la terminal con
+  `tmux send-keys` o en el pty, que son del mismo usuario; `composer` significa "entrada de
+  terminal";
+- que el modelo procesó bien el mensaje (eso es R8 y E9);
+- disponibilidad. El agente siempre puede matar el CLI, el servidor de canal o el gateway; lo único
+  que se garantiza es que eso **no** produce `verified`;
+- nada sobre versiones del CLI que no estén en la lista validada.
+
+#### 1.14.2 Modelo de amenazas
+
+| | Alcance |
+| --- | --- |
+| **Adversario A1: el agente** | Código arbitrario como `developer` (uid 1000) dentro del contenedor de la sesión, por cualquier vía: Bash, procesos en segundo plano, servidores MCP o hooks que configure, archivos que escriba (workspace, HOME, `/tmp`, settings de usuario y de proyecto, `~/.claude.json` con la caché de flags). Además puede: controlar tmux, porque el servidor es del mismo uid (`send-keys`, `respawn-pane`, `new-window`); mandar señales y aplicar `prlimit` a procesos de su uid; leer en `/proc` de su uid lo que pide modo READ (`environ`, `cmdline`, `maps`, enlaces de `fd`); abrir conexiones de red |
+| **Lo que A1 no puede** (supuestos verificables) | Ser root ni tener capacidades: `CapDrop: ALL` y `no-new-privileges` (R: `dockerManager.ts`), `USER developer` (R: `session-image/Dockerfile`). Adjuntarse con ptrace a procesos que no desciendan de él: Yama `ptrace_scope = 1` (O: vale 1 en este contenedor; es del kernel del host, así que en VM100 es **precondición** a comprobar). Escribir en montajes de solo lectura |
+| **Adversario A2: el agente de otra sesión** | Lo mismo, en otro contenedor. Sólo comparte la red `sessions-net` (#291) y el kernel |
+| **Confiables** | Kernel y Docker del host, root del host, backend, el gateway de §1.14.4, el binario publicado del CLI (por hash, R9), el código de nuestro mod y de nuestro servidor de canal (de solo lectura) y el responsable |
+| **Fuera de alcance** | Escape del contenedor o exploits del kernel, host comprometido, el backend de Anthropic, el comportamiento del modelo y la denegación de servicio |
+
+#### 1.14.3 Auditoría de las garantías
+
+| # | Pregunta | Hallazgo | Fuente | Estado |
+| --- | --- | --- | --- | --- |
+| A1 | ¿Qué pid ve el servidor cuando el mod llama `$.http.fetch`? | `$.http.fetch` es una operación del anfitrión del CLI: el `Worker` del mod la pide y el proceso del CLI la ejecuta (`iWr`). Esa función llama al `fetch` global de Bun con `{unix: socketPath}` (`zit`) y le quita el proxy. No aparece ningún proceso intermediario. Un `Worker` es un hilo del mismo proceso, y `SO_PEERCRED` da el tgid, así que **se espera el pid del proceso principal del CLI** | B, K | Estático. **B0 lo observa** |
+| A1′ | ¿Basta ese pid? | **No.** El mismo pid es también el de todos los demás clientes del CLI: cualquier otro mod, el cliente MCP por HTTP, los hooks HTTP, el proxy MITM del sandbox (`network.mitmProxy.socketPath`, que va por socket Unix) y WebFetch. El propio CLI lo dice de su `verifiedPeerPid`: "identifies the CONNECTING process, which for relayed traffic … is the relay". `SO_PEERCRED` sólo dice que **conectó el CLI**, no que conectó **nuestro mod** | B | Hecho estático ⇒ hace falta la clave por instancia de §1.14.4 |
+| A2 | ¿Cómo se traducen los pid entre namespaces? | El kernel traduce el pid de `SO_PEERCRED` al namespace de **quien lo lee**; si el lector no ve al proceso, obtiene 0. Un lector en el namespace del host recibe el pid del host y lo lleva al del contenedor con `NSpid` de `/proc/<pid>/status`. El contenedor se identifica por `/proc/<pid>/cgroup`. El backend corre en un contenedor de compose **sin** `pid: host` (R: `docker-compose.yml`), así que no puede ser el lector tal como está. `SO_PEERPIDFD` (Linux ≥ 6.5; el host tiene 6.8) fija el proceso y evita la reutilización de pid | K, R, O | Hipótesis. **B0 lo observa** |
+| A3 | ¿Otro proceso del mismo usuario puede conectarse o reutilizar la conexión? | **Conectarse, sí.** Para conectar a un socket hace falta permiso de escritura sobre el archivo, y un montaje de solo lectura no lo impide (la comprobación EROFS no se aplica a sockets); obtiene su **propio** pid. **Reutilizar la conexión del CLI:** un socket no se puede reabrir por `/proc/<pid>/fd` (ENXIO); `pidfd_getfd` exige permiso de adjuntarse (Yama). Queda la herencia a hijos si el fd no es `O_CLOEXEC` | K | Hipótesis. B0 mira las banderas en `/proc/<cli>/fdinfo` |
+| A4 | ¿Bash, MCP, hooks o procesos en segundo plano pueden inyectar evidencia? | **Directamente, no**: son otros pid y se rechazan. **Indirectamente, sí, por dos vías:** | K, B | |
+| | | (a) **Diputado confundido.** Los settings de usuario son escribibles por el agente; con ellos puede apuntar al socket un servidor MCP HTTP, un hook HTTP o el proxy MITM del sandbox, y conecta el pid del CLI. Mitigación: settings administrados que sólo admitan hooks y MCP de la organización, más la clave por instancia | B | Hipótesis. **B2** |
+| | | (b) **Reinyección por el pipe.** Un proceso del mismo uid puede abrir `/proc/<pid>/fd/<n>` de un **pipe**. Ese acceso es de modo READ y **Yama no lo cubre**. Así podría escribir un `notifications/claude/channel` en el pipe por donde el CLI lee al servidor de canal, y el CLI le daría `origin = channel` **auténtico** a un contenido del agente | K | Hipótesis fuerte. **B2**. ⇒ el **contenido** se atribuye en el backend (§1.14.1) |
+| A5 | ptrace, `/proc`, entorno, filesystem, binario | **Un descendiente del CLI no puede adjuntarse** (Yama 1), y `mem`, `process_vm_readv` y `pidfd_getfd` piden permiso de adjuntarse. **Pero el agente puede reiniciar el CLI** por tmux debajo de un padre que controla, que entonces es su ancestro y puede adjuntarse. Por ejemplo `bash` con un builtin cargado por `enable -f`, o un `python3` que hace `fork` + `ptrace`. También puede arrancarlo con `LD_PRELOAD`, `NODE_OPTIONS` o `BUN_*`, y con `prlimit` + una señal forzar un volcado de memoria (sólo al morir el proceso). **Binario:** en nuestra imagen el CLI está bajo `~/.npm-global`, que apunta al **workspace** (O: `.../workspace/.npm-global/.../claude.exe`), escribible y persistente. El inodo en ejecución no se puede escribir (ETXTBSY), pero un arranque nuevo toma el archivo reemplazado. **El CLI sólo se vuelve no volcable (`PR_SET_DUMPABLE`) en modo code review**: "so the review's commands could read its tokens from memory". Anthropic trata la lectura de memoria por el mismo uid como amenaza real, y en modo interactivo no la cierra | K, B, O | Comprobaciones posibles: ver I1–I7. **Residuo**: adjuntarse, leer y soltar entre dos comprobaciones (ver H-ND) |
+| A6 | ¿La instalación administrada impide reemplazar el mod o cargar otro? | El tier de organización exige que los managed settings declaren el marketplace en `extraKnownMarketplaces` como **directorio local leído en su lugar** y que lo listen por ruta relativa; una copia (caché, archivo, semilla) es tier de usuario. `pluginDigests` sólo aplica a fuentes remotas. Con un montaje de solo lectura el agente no cambia los archivos. `allowManagedModsOnly`: "mods are limited to your organization's by policy … was not loaded". `disableSideloadFlags` rechaza `--plugin-dir`. **Falta probar** que cubran `CLAUDE_CODE_PLUGIN_DIRS`, `enabledPlugins` de usuario y de proyecto, `claude plugin install` y una copia con el mismo nombre, y que con el guard `sec-default` cargado (con managed settings carga) los `classic.*` de un mod de la organización corran. Importa porque cualquier otro mod corre en el **mismo pid** | B | Hipótesis. **B1** |
+| A7 | ¿Y si se apaga el interruptor remoto de mods? | Lectura estática anterior: no cargan los mods instalados y sí los integrados. **No está establecido** si uno de la organización cuenta como instalado. En cualquier caso: sin mod no hay inscripción ⇒ todo `unverified` (fail-closed) y el composer 3.2 sigue igual. El agente puede cambiar la caché del flag en `~/.claude.json`, pero sólo gana denegación de servicio | B | B1, si existe una forma de forzarlo sin tocar la cuenta; si no, queda documentado |
+| A8 | Replay, registros fabricados, desorden, confusión entre sesiones | Con el diseño de §1.14.4: clave por instancia, MAC con `inst` y `seq`, `seq` contiguo, **una** inscripción por proceso (pidfd), socket por contenedor, contenedor por cgroup y nonce de un solo uso para el contenido. Si el gateway se reinicia se pierden las claves y todo queda `unverified` hasta que reinicie el CLI | Diseño | B2 / B3 |
+
+**Conclusión de la auditoría.** `SO_PEERCRED` sirve para un solo paso: decidir a **qué proceso** se
+le entrega la clave. Nunca prueba por sí solo que un mensaje sea evidencia. Quedan dos límites que la
+arquitectura del socket **no** resuelve:
+- **A4b:** obliga a atribuir el contenido en el backend.
+- **A5, el residuo de reiniciar el CLI debajo de un ancestro preparado:** se cierra sólo con una
+  barrera del kernel, que es la hipótesis H-ND, o aislando las herramientas del agente (§1.14.7).
+
+#### 1.14.4 Arquitectura de confianza propuesta
+
+```
+contenedor de la sesión (uid 1000, CapDrop ALL)          host
+┌──────────────────────────────────────────────┐        ┌─────────────────────────────┐
+│ CLI publicado (hash permitido)               │        │ gateway st-attest           │
+│  └ Worker: mod de la organización (RO)       │ socket │  pid ns del host, lee /proc │
+│      clave K sólo en memoria ────────────────┼─Unix──►│  SO_PEERCRED + SO_PEERPIDFD │
+│  └ hijo MCP: servidor de canal (RO) ◄────────┼────────┤  un socket por contenedor   │
+│ /run/st-attest/s.sock  (montaje RO del host) │        │  └──► backend (sólo de aquí)│
+└──────────────────────────────────────────────┘        └─────────────────────────────┘
+```
+
+**Componentes:**
+- **E, el emisor.** El CLI publicado más el mod `st-provenance`, de la organización, desde un
+  marketplace local de solo lectura. Con `allowManagedModsOnly`, `disableSideloadFlags`, sólo hooks y
+  MCP administrados, y ningún otro mod administrado: comparten el pid.
+- **C, el servidor de canal.** Plugin MCP administrado. **No escucha ningún puerto**: recibe los
+  mensajes sólo desde el gateway. Al arrancar se declara no volcable (`prctl`, código propio). La
+  atribución del contenido **no** depende de que C sea íntegro.
+- **G, el gateway.** Proceso del host en el namespace de pid del host. Es lo **único** que lee
+  credenciales del par. Puede ser un sidecar de compose con `pid: host` y sólo `CAP_SYS_PTRACE` para
+  leer `/proc` de otro uid, o una unidad del host; la decisión de despliegue es para después de B1.
+  Usa un socket por contenedor, en un directorio del host montado de solo lectura en
+  `/run/st-attest`.
+- **B, el backend.** Acepta evidencia **sólo** desde G. Lleva el libro de mensajes enviados:
+  `(nonce, sha256(cuerpo), conversación, t)`, registrado **antes** de enviar. El relay TCP de hooks
+  queda como información, nunca como evidencia.
+
+**Identidad del par**, comprobada por G con el pidfd en la inscripción y en **cada** petición:
+
+| # | Comprobación |
+| --- | --- |
+| I1 | El cgroup es el del contenedor del socket, y ese contenedor es el `container_id` de D1 de esa sesión |
+| I2 | El SHA-256 del inodo de `/proc/<pid>/exe` está en la lista de binarios publicados (R9). Se puede cachear por `(dev, ino)` mientras viva el proceso, gracias a ETXTBSY |
+| I3 | `maps` sin bibliotecas fuera de una lista (bloquea `LD_PRELOAD` y similares) |
+| I4 | `environ` sin `LD_*`, `NODE_OPTIONS` ni `BUN_*`; `cmdline` dentro de una lista |
+| I5 | `TracerPid = 0` |
+| I6 | El padre es el proceso raíz del panel y su `exe` es el `bash` de la imagen |
+| I7 | El `starttime` es el mismo que en la inscripción |
+
+**Protocolo:**
+1. **Inscripción**, en `session.start`. El mod envía `POST /enroll {inst, session_id, versión}`. Si
+   pasan I1–I7 y es la **primera** inscripción de ese proceso, G devuelve una clave K aleatoria de 32
+   bytes, que vive sólo en la memoria del mod. Una segunda inscripción del mismo proceso **quema** la
+   instancia: todo lo de ese proceso queda `unverified` hasta que termine. Así un diputado (A4a) que
+   se inscriba antes o después del mod deja dos inscripciones y la instancia queda quemada.
+2. **Eventos.** El mod envía `POST /ev {inst, seq, registro, mac = HMAC(K, inst‖seq‖registro)}`. G
+   comprueba que el par sea el proceso inscripto, que el MAC sea válido, que `seq` sea el anterior
+   más uno y que valgan I5 e I7. Recién entonces lo reenvía a B con la identidad comprobada:
+   contenedor, pid, `starttime` y hash del binario.
+   - El registro es el de XB-1 **más** `sha256` del cuerpo del prompt. El cuerpo se extrae del sobre
+     `<channel …>` con un parser estricto; un sobre no canónico ⇒ `unverified`.
+   - Nunca viaja texto.
+3. **Veredicto de M:**
+   - `verified` sólo si se cumple todo esto:
+     - instancia inscripta y no quemada;
+     - `seq` sin huecos hasta el `Stop`;
+     - `origin = channel` con el servidor administrado X;
+     - envío ligado según las reglas de PASS-A;
+     - el hash del cuerpo es el de M;
+     - el nonce de M aparece **una sola vez**;
+     - exactamente un `Stop` (R8).
+   - Cualquier otra cosa ⇒ `unverified`, con su motivo. Una segunda aparición deja **ambas**
+     `unverified`.
+
+**Hipótesis H-ND (barrera del kernel).** Si el binario del CLI pertenece a root y tiene modo `0711`
+(ejecutable pero **no legible** para uid 1000), el kernel lo marca no volcable al ejecutarlo. A partir
+de ahí ni el mismo uid ni un ancestro pueden adjuntarse ni leer `mem`, `environ` o `fd`. Eso cerraría
+A5 y también la reapertura del pipe **del lado del CLI** (A4b). Riesgo: un ejecutable de Bun de un
+solo archivo puede necesitar leerse a sí mismo para cargar su código, y entonces no arrancaría. Se
+prueba en B1. Si falla, A5 queda como residuo **documentado**, y la recomendación pasa a §1.14.7.
+
+#### 1.14.5 Qué es demostrable y qué no
+
+| Demostrable si pasa la prueba indicada | Prueba |
+| --- | --- |
+| El par del socket es el proceso principal del CLI, no un intermediario; el pid se puede llevar al contenedor; el pidfd coincide | B0 |
+| La conexión no se hereda (`O_CLOEXEC`); conectar por un montaje de solo lectura funciona y el agente no puede quitar ni reemplazar el socket | B0 |
+| El mod carga en el tier de organización; ningún otro camino carga un mod; los `classic.*` corren con el guard cargado | B1 |
+| H-ND: el CLI arranca no volcable y uid 1000 no puede leer su `environ` ni su `mem` | B1 |
+| Los eventos de Bash, MCP o hooks, los replays, el desorden y el cambio de ids o de sesión se rechazan o quedan `unverified` | B2 |
+| La reinyección por el pipe produce `origin = channel` pero el veredicto es `unverified`, porque el contenido no coincide | B2 |
+| Pérdida, reinicios, `--resume`, `/clear` y varias sesiones nunca mezclan identidades ni producen `verified` | B3 |
+
+**No demostrable con esta arquitectura:**
+- que una persona tecleó un prompt;
+- que un CLI que el agente reinició debajo de un ancestro preparado no fue leído en memoria **entre**
+  dos comprobaciones, salvo que H-ND se cumpla;
+- disponibilidad;
+- la corrección del binario publicado (es confianza por hash, no prueba);
+- el comportamiento de versiones o de API de mods que no estén validadas;
+- la configuración del kernel del host (Yama). Es una precondición: el diseño la comprueba, no la
+  impone.
+
+**Nota sobre G3** (no lo cambia): aunque el CLI emitiera `source=system`, hoy esa evidencia viajaría
+por un hook de comando y el relay TCP de loopback, que cualquier proceso del contenedor puede
+falsificar (§1.13.3 B). El problema de integridad de PASS-B existe también para la letra de G3.
+
+#### 1.14.6 Plan de experimentos (incremental; cada etapa necesita su propia autorización)
+
+Reglas comunes:
+- Contenedores **descartables**, nunca sesiones ni contenedores de producción, y nada en D1.
+- El nombre fuera de los patrones `st-<sid>` y `-old-`/`-new-`, para que ni reconcile ni la limpieza
+  de recreación los vean.
+- Sin `sessions-net`.
+- No se actualiza ningún Claude Code: se usa el CLI que ya trae la imagen.
+- Se registran sólo hechos (pid con alias, booleanos, conteos), nunca texto ni credenciales.
+- Los logs se copian a una carpeta de resultados **antes** de borrar el contenedor.
+
+**Decisiones del responsable antes de B0:**
+1. **Host.**
+   - VM100 tiene el kernel y la configuración de Docker reales, pero es el host de producción.
+     Contenedores descartables sin efectos en sesiones.
+   - Otra máquina Linux con kernel ≥ 6.5 evita VM100, pero su kernel y su Yama pueden ser distintos.
+     Recomiendo VM100 con las reglas de arriba.
+2. **Versión.** El CLI de la imagen (2.1.314, el validado para contenedores). El resultado vale sólo
+   para esa versión. 2.1.317 en Linux sería otra corrida.
+3. **Autenticación.** No se sabe si el CLI dispara `session.start` y carga mods antes del login. B0
+   intenta primero **sin** login. Si da INCONCLUSIVE por eso, la alternativa sería un `/login` nuevo
+   con tu suscripción dentro del contenedor descartable, que se borra con él. No reutiliza
+   credenciales, pero es un login y lo decidís vos.
+
+**PASS-B0: viabilidad del socket (diseño detallado).**
+- **Objetivo.** Medir cuatro hechos:
+  1. si `$.http.fetch` con `socketPath` llega a un servidor Unix;
+  2. qué credenciales del par ve el servidor dentro del namespace del contenedor y en el del host;
+  3. si el fd de la conexión es `O_CLOEXEC`;
+  4. si se puede conectar a un socket en un montaje de solo lectura sin poder reemplazarlo.
+- **Fuera de B0:** la clave, el MAC, la instalación administrada y los ataques.
+- **Precondiciones:**
+  - imagen de sesión actual (mismo `USER`, `CapDrop`, `no-new-privileges` y `PidsLimit` que
+    `spawn()`);
+  - `ptrace_scope` y `uname -r` registrados;
+  - un directorio nuevo del host `…/st-passb0-<ts>/` con el socket del host, montado de solo
+    lectura en `/run/st-attest`;
+  - kit por SHA con hashes, como en XB-1.
+- **Instrumentación:**
+  - Mod `st-passb0-probe`, cargado con `--plugin-dir`: en B0 no se prueba la instalación
+    administrada y el contenedor no tiene managed settings. En `session.start` hace tres llamadas
+    con cuerpo `{inst, n}` y sin texto:
+    - una al socket interno `/tmp/passb0/s.sock`;
+    - una al del host `/run/st-attest/s.sock`;
+    - una segunda al del host, para ver si reutiliza la conexión.
+
+    Escribe el resultado de cada una (estado HTTP o clase de error) con `$.fs.write`.
+  - Servidor S_c en el contenedor: `python3 -I`, script de solo lectura lanzado por `docker exec`.
+    Registra por conexión:
+    - `SO_PEERCRED` y `SO_PEERPIDFD` (el pid del pidfd sale de `fdinfo`);
+    - `comm`, `exe`, `Tgid`, `NSpid`, `TracerPid`, `starttime`;
+    - las banderas del fd del lado del CLI, leídas en `/proc/<cli>/fdinfo`.
+  - Servidor S_h en el host, como root en el namespace del host: registra el pid del host, `NSpid` y
+    si el cgroup corresponde al contenedor descartable.
+  - Línea base: un cliente `python3` lanzado como `developer` con `docker exec` conecta a los dos
+    sockets. Tiene que verse **su** pid, distinto del CLI.
+  - Negativo de solo lectura: desde el contenedor, `rm` y `mv` del socket del host tienen que fallar
+    con EROFS.
+- **Pasos previstos** (los comandos completos se dan al autorizar):
+  1. `docker run --rm -d` del contenedor descartable con el montaje de solo lectura.
+  2. Arrancar S_h y S_c.
+  3. Lanzar el CLI en tmux dentro del contenedor:
+     `claude --plugin-dir <kit>/mod --debug-file <out>/claude-debug.log`. Se acepta la confianza de
+     la carpeta, que es estado del contenedor descartable.
+  4. Esperar el registro `session.start` (un reintento a los 10 s).
+  5. Cliente base y negativo EROFS.
+  6. Analizador: emite PASS, FAIL o INCONCLUSIVE con alias.
+  7. Copiar los resultados, salir del CLI y `docker rm -f`. El directorio del host se conserva junto
+     con los resultados.
+- **PASS-B0** sólo si se cumple todo esto:
+  - las tres llamadas del mod reciben 200;
+  - S_c ve como par el **pid principal del CLI**: `Tgid` igual a pid, `exe` igual al binario del
+    CLI, y ningún otro proceso;
+  - el pidfd resuelve al mismo pid;
+  - S_h ve un pid del host cuyo `NSpid` es el mismo CLI y cuyo cgroup es el del contenedor
+    descartable;
+  - el cliente base se ve con su propio pid;
+  - los fd de la conexión son `O_CLOEXEC`;
+  - la conexión por el montaje de solo lectura funciona y `rm`/`mv` dan EROFS.
+- **FAIL:**
+  - el build dice que soporta `socketPath`, pero la llamada no llega;
+  - el par **no** es el proceso principal del CLI (un intermediario o un ayudante): invalida el diseño
+    basado en el pid;
+  - el fd se puede heredar;
+  - el pid del host no se puede llevar al contenedor;
+  - el socket del host se puede quitar o reemplazar desde el contenedor.
+- **INCONCLUSIVE:**
+  - el mod no cargó, o `session.start` no se disparó (login o confianza);
+  - la política de red de plugins rechazó la llamada ("Network access from plugins" o tráfico no
+    esencial deshabilitado). Se registra la causa exacta y no se repite sin decisión.
+- **Recuperación.** `docker rm -f` del descartable. No hay nada en D1, ninguna sesión tocada ni
+  cambios en el composer.
+
+**PASS-B1: integridad de la instalación** (después de B0 PASS; contenedor descartable con sus
+propios managed settings de solo lectura).
+- **Configuración:**
+  - marketplace local de solo lectura con `st-provenance`;
+  - `enabledPlugins`;
+  - `allowManagedModsOnly`, `disableSideloadFlags` y `allowManagedHooksOnly`;
+  - MCP sólo administrado. El nombre exacto de la clave se verifica en el binario.
+- **Observado:**
+  - el mod carga en el tier de organización;
+  - el estado del guard;
+  - los `classic.*` llegan.
+- **Intentos, uno por uno, como `developer`:**
+  - escribir en la carpeta del mod;
+  - un mod de usuario por `~/.claude/settings.json`;
+  - `.claude/settings.json` de proyecto;
+  - `--plugin-dir`;
+  - `CLAUDE_CODE_PLUGIN_DIRS`;
+  - `claude plugin install`;
+  - una copia con el mismo nombre en la caché.
+- **H-ND:** un segundo descartable con el binario de root en modo `0711`. Se mira:
+  - si arranca;
+  - si `cat /proc/<pid>/environ` y la lectura de `mem` como `developer` dan EACCES.
+- **Interruptor:** sólo si existe un override local del flag que no toque la cuenta.
+- **Resultado:**
+  - **PASS:** carga en el tier de organización y **todos** los caminos no autorizados se rechazan,
+    cada uno con su línea en el debug log;
+  - **FAIL:** carga cualquier mod no autorizado;
+  - **INCONCLUSIVE:** el guard impide observar.
+
+  H-ND se informa aparte, como resultado propio.
+
+**PASS-B2: pruebas adversariales.** Necesita escribir el prototipo del gateway (inscripción, MAC,
+I1–I7), con su propia revisión y autorización. Ataques desde el contenedor descartable:
+
+| # | Ataque | Esperado |
+| --- | --- | --- |
+| 1 | POST con un evento inventado desde Bash, desde un servidor MCP y desde un hook | Rechazado (par ≠ inscripto) |
+| 2 | Replay de bytes de un evento anterior | Rechazado (`seq`/MAC) |
+| 3 | Hueco o desorden de `seq` | Lo afectado queda `unverified` |
+| 4 | Cambiar `prompt_id` o `session_id` en un evento | Rechazado (MAC) |
+| 5 | Un segundo CLI (`claude -p` hijo, o uno nuevo en otra ventana de tmux) se inscribe | Instancia propia, separada, o rechazada por I6. Nunca se mezcla |
+| 6 | Reinyectar un `notifications/claude/channel` por `/proc/<pid>/fd` | Puede dar `origin = channel`, pero el veredicto es `unverified` (hash/nonce) |
+| 7 | Duplicar un mensaje real por el pipe | Las dos apariciones quedan `unverified` |
+| 8 | Diputado: MCP HTTP, hook HTTP o MITM del sandbox apuntando al socket | Sin MAC ⇒ rechazado; si se inscribe, instancia quemada |
+| 9 | Reiniciar el CLI con `LD_PRELOAD`, `NODE_OPTIONS`, debajo de `python3` o de `bash` con builtin | Rechazado por I3, I4 o I6. El caso del builtin queda como residuo, salvo H-ND |
+| 10 | Etiqueta `<channel>` tecleada por tmux | `composer` ⇒ nunca canal |
+
+- **PASS:** ningún ataque produce `verified` y cada uno queda rechazado o `unverified` con su motivo.
+- **FAIL:** un solo `verified` producido por un ataque.
+
+**PASS-B3: recuperación.**
+- Pérdida de un evento (G descarta uno): hueco ⇒ `unverified`.
+- Reinicio de G: claves perdidas ⇒ `unverified` hasta que reinicie el CLI.
+- Reinicio del CLI: inscripción nueva; lo que estaba en vuelo queda `unverified`.
+- Reconexión del socket.
+- `--resume` y `/clear`: cambio de `session_id` dentro del mismo proceso, o en un proceso nuevo.
+- Dos CLI en el mismo contenedor, dos contenedores a la vez, y stop/start del contenedor (los paneles
+  se renumeran, v1.7.2).
+
+- **PASS:** ninguna confusión de identidad y nada `verified` sin evidencia continua.
+- **FAIL:** cualquier atribución cruzada.
+
+#### 1.14.7 Alternativas si el socket y las credenciales no resisten
+
+| Alternativa | Aislamiento real | Costo y riesgo | Estado |
+| --- | --- | --- | --- |
+| **H-ND** (binario no legible ⇒ proceso no volcable) | Del kernel, contra el mismo uid **y** contra ancestros | Puede romper el arranque de Bun; cambia el layout de la imagen (el binario sale del workspace) | B1 |
+| **Sandbox del CLI para Bash** (bubblewrap), impuesto por managed settings y sin comandos fuera del sandbox | Namespaces separados para las herramientas del agente: no verían ni podrían abrir el CLI, su `/proc` ni su pipe, y quizás tampoco tmux | El seccomp por defecto de Docker no deja crear namespaces sin privilegios (habría que relajarlo); red por lista permitida; MCP y hooks siguen fuera del sandbox (exige MCP y hooks sólo administrados). Impacto de producto alto | Hipótesis. Sería un experimento propio |
+| **Otro uid para las herramientas del agente** | Real | El CLI ejecuta las herramientas con su propio uid; necesitaría un cambio upstream | Descartada hoy |
+| **Sólo contenido (D)** | No es aislamiento: es atribución | Ya descartada como sustituto de G3 (§1.10, §1.12.2) | — |
+| **Esperar `source` (#94675)** | No cambia nada en el transporte | Tiene el mismo problema de integridad hasta el backend (nota de §1.14.5) | Sin fecha |
+| **Evidencia sólo informativa** | Ninguno | El Monitor mostraría el origen como no verificado, sin afirmar seguridad. Es una decisión de producto | Disponible |
+
+Si **B1 falla en A6** (carga otro mod) o **H-ND falla y no se acepta el residuo de A5**, la
+recomendación es **NO-GO** para esta arquitectura en producción. Las opciones serían evaluar el
+sandbox o quedarse con la evidencia informativa. No se fuerza una solución insegura para mantener
+Channels.
+
+#### 1.14.8 Recomendación
+
+**GO para construir el prototipo de PASS-B0, y sólo eso:**
+- el mod de prueba;
+- los dos servidores de medición;
+- el analizador y sus tests sintéticos.
+
+Ejecutarlo requiere una autorización aparte, con las tres decisiones de §1.14.6. B0 es barato y
+descartable, y responde la pregunta que bloquea todo lo demás: si el par del socket es de verdad el
+proceso del CLI.
+
+**Un PASS-B0 no valida la arquitectura.** Hay dos límites que no dependen de B0 y que deciden el
+GO/NO-GO final:
+- A4b obliga a atribuir el contenido;
+- A5 necesita H-ND (B1) o un aislamiento como el sandbox.
+
+Con un FAIL en B0, el diseño basado en el pid queda descartado y se pasa directamente a §1.14.7.
 
 ## 2. Versiones
 
