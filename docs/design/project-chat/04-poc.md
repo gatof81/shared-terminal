@@ -586,8 +586,10 @@ ocurre **dentro** del `await next(e)` de nuestro `prompt.submit`. El mod liga lo
 2. Un `classic.UserPromptSubmit` se adjunta **sólo** si hay exactamente un envío en vuelo.
 3. Al volver `next`, el envío queda ligado a `prompt_id` P si se cumplen todas estas condiciones:
    - no hubo solape;
-   - hubo una o más llamadas clásicas;
-   - todas traen el mismo P y la misma sesión;
+   - hubo **exactamente una** llamada clásica. Dos o más (por ejemplo, una pasada gestionada más
+     el resto, o un mod que llama `next` dos veces) dejan el envío sin atribuir, aunque traigan el
+     mismo P;
+   - trae P y la sesión;
    - el `prompt` clásico es **igual** al `text`. Esta igualdad es una comprobación de
      consistencia, no la clave.
 
@@ -624,7 +626,7 @@ Bash. Diseño propuesto (no implementado; requiere su propio experimento en un c
 | --- | --- | --- |
 | El agente cambia el módulo | Mod **de la organización**, configurado en nuestros managed settings de solo lectura:<br>• `extraKnownMarketplaces` apuntando a un directorio local de solo lectura;<br>• `enabledPlugins` + `prependPlugins`;<br>• `pluginDigests`, el SHA-256 de cada archivo de la carpeta: "any other copy does not load".<br>A eso se suma la carpeta montada de solo lectura | D/B; sin probar |
 | El agente agrega su propio mod, o usa `--plugin-dir` / `CLAUDE_CODE_PLUGIN_DIRS` | `allowManagedModsOnly` (opción del guard integrado) + `disableSideloadFlags` | D; falta verificar que también cubra `CLAUDE_CODE_PLUGIN_DIRS` |
-| Otro proceso falsifica la evidencia | Canal propio: `$.http.fetch` con `socketPath`, un socket Unix del relay. El `fetch` lo hace el proceso del CLI, así que el relay puede exigir `SO_PEERCRED` igual al pid del Claude del panel (misma regla de identidad que el composer: ejecutable, `starttime`, primer plano). Bash, MCP y hooks son otros pids ⇒ rechazados. La veredicción usa **sólo** este canal; los hooks por TCP quedan como informativos | B (socket del `fetch` de mods); sin probar |
+| Otro proceso falsifica la evidencia | Canal propio: `$.http.fetch` con `socketPath`, un socket Unix del relay. Si el `fetch` lo hace el proceso del CLI, el relay puede exigir `SO_PEERCRED` igual al pid del Claude del panel (misma regla de identidad que el composer: ejecutable, `starttime`, primer plano). Bash, MCP y hooks son otros pids ⇒ rechazados. La veredicción usaría **sólo** este canal; los hooks por TCP quedarían como informativos | **Hipótesis.** Indicios: en 2.1.317 el código acepta `socketPath`: `gFn` exige ruta absoluta y sin NUL, y rechaza la llamada si la build no tiene transporte Unix; luego lo pasa al `fetch` de Bun como `unix:`. El tipo público (2.1.277) documenta `socketPath` como "a Unix socket to go over instead of TCP". **No se ejecutó nunca.** Tampoco se observó el pid real de la conexión ni el comportamiento con el guard o con la política de red de plugins. No es un componente viable hasta una prueba propia |
 | Inyección en el proceso del CLI (ptrace, `/proc/<pid>/mem`) | Yama `ptrace_scope` ≥ 1, con el que un hijo no puede adjuntarse al padre. Comprobarlo como precondición del contenedor | Hipótesis |
 | Binario del CLI reemplazado en HOME | Verificar el hash de `/proc/<pid>/exe` contra el CLI fijado en la imagen (R9) | Hipótesis |
 | Pérdida o duplicado | `inst` aleatorio por carga + `seq` contiguo. Un hueco o una repetición deja `unverified` lo que esté afectado. Una recarga del módulo (nueva `inst`) deja `unverified` lo que estaba en vuelo | Diseño; probado en tests |
@@ -634,11 +636,20 @@ Bash. Diseño propuesto (no implementado; requiere su propio experimento en un c
 | Cambio de API | Lista propia de versiones validadas (como `COMPOSER_CLI_VERSIONS`). Un campo desconocido ⇒ `unverified` | Diseño |
 | Costo arquitectónico | Las sesiones tmux no cambian. Cambian los managed settings y un montaje de solo lectura, así que se necesita **recrear** el contenedor (§2.4.1 de CONVERSATION.md) | — |
 
-#### 1.13.4 Diseño de XB-1 (kit `poc/channels-phase0@68a939c`; propuesto, **no ejecutado**)
+#### 1.13.4 Diseño de XB-1 (kit `poc/channels-phase0@1ed7e73`; propuesto, **no ejecutado**)
 
 **Objetivo.** Una sola ejecución en el Mac compara un mensaje real de Channels contra un prompt
 tecleado y contra una etiqueta `<channel>` pegada. Comprueba que los orígenes difieren y que la
-evidencia se correlaciona por `prompt_id`. **No** prueba la integridad B.
+evidencia se correlaciona por `prompt_id`.
+
+**Dos criterios separados:**
+
+| Criterio | Qué prueba | Cómo se evalúa |
+| --- | --- | --- |
+| **PASS-A** | Procedencia y correlación **dentro del CLI** | XB-1, el único que XB-1 puede dar. El informe lo declara en `scope` |
+| **PASS-B** | Integridad de la evidencia **hasta el backend**: mod de la organización con digests, canal autenticado (hipótesis `socketPath` + `SO_PEERCRED`), pérdida y duplicados | Experimento futuro, aparte, en un contenedor. **No** existe todavía y XB-1 no lo aproxima |
+
+Un PASS-A **no** autoriza a usar la evidencia en el Monitor.
 
 **Contrato de eventos esperado** (un archivo JSON por registro en `.poc0/out/mod/`, sin texto):
 
@@ -658,7 +669,14 @@ evidencia se correlaciona por `prompt_id`. **No** prueba la integridad B.
 - El logger de XA-1 sigue igual. La sonda del transcript **no** se instala; `--with-probe` la
   repone.
 
-**Tests sintéticos (85, todos pasan en Node 22; los del analizador y el binder son 14).**
+**Tests sintéticos.** Son 85 y todos pasan en Node 22. De ellos, 14 son de XB-1; el de casos
+negativos del analizador cubre 31 variantes, 12 de ellas agregadas tras la revisión del
+responsable (`1ed7e73`):
+- un segundo `Stop` del logger o del mod;
+- dos `classic` en un envío;
+- los controles con el mismo `prompt_id`;
+- siete variantes de respuesta: no exacta, otro destinatario en Fakechat, sin `PostToolUse`, con
+  otro P, dos `reply`, `reply` fallido y otro destinatario en el logger.
 - Binder: canal nominal; tecleado; etiqueta pegada ⇒ `composer`; dos envíos en vuelo ⇒ ninguno
   ligado; `classic` sin envío; dos pasadas clásicas con el mismo id (liga) y con ids distintos (no
   liga); texto reescrito más abajo de la cadena; sin `classic` (guard); `next` que lanza (mismo
@@ -687,18 +705,25 @@ evidencia se correlaciona por `prompt_id`. **No** prueba la integridad B.
 9. `xb.mjs report`.
 10. `/exit`, `uninstall` y relanzar normal.
 
-**PASS** sólo si se cumple todo esto:
+**PASS-A** sólo si se cumple todo esto:
 - el mod cargó: hay `session.start`, una sola `inst`, `seq` contiguo, ningún archivo ilegible y
   ningún hook del mod saltado en el debug log;
-- canal: un UPS del logger con su id ⇒ P; exactamente un envío ligado a P, con `origin = channel`,
-  servidor `plugin:fakechat:fakechat`, sin solape, texto igual, misma sesión, `entered`, `Stop` del
-  logger y del mod con P, y respuesta en Fakechat;
+- canal: un UPS del logger con su id ⇒ P, y un solo UPS con P; exactamente un envío ligado a P y
+  ningún otro que lo mencione; ese envío tiene `origin = channel`, servidor
+  `plugin:fakechat:fakechat`, sin solape, **una** llamada clásica, texto igual, misma sesión y
+  `entered`;
+- **exactamente un** `Stop` del logger y **exactamente uno** del mod con P (R8 sin cambios). Lo
+  mismo se exige para cada control;
+- respuesta: el `fakechat_reply` con texto **exacto** `OK_<id>` y dirigido a ese mensaje, y
+  **exactamente un** `PostToolUse` correcto de `reply` con P y ese destinatario en el logger;
 - control tecleado y control pegado: cada uno ligado a su propio P′, con `origin = composer` y sin
   servidor; la etiqueta pegada llegó como etiqueta según el logger;
 - en toda la corrida, exactamente un envío con `origin = channel`;
-- los tres P son distintos.
+- los tres P son distintos **entre sí**: canal y controles, y también los dos controles.
 
-**FAIL:** cualquier otro valor de los anteriores.
+**FAIL:** cualquier otro valor de los anteriores, entre ellos un segundo `Stop`, un segundo
+`classic.UserPromptSubmit` en un envío, `prompt_id` repetidos o una respuesta no exacta o mal
+correlacionada.
 
 **INCONCLUSIVE** (se informa tal cual; no se repite sin decisión):
 - el mod no cargó;
