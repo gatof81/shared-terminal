@@ -42,6 +42,12 @@ export interface ConversationLifecycleHooks {
 
 import { INGEST_TOKEN_ENV, MANAGED_MOUNT_TARGET } from "./conversation/activation.js";
 import {
+	ATTESTATION_KEY_INFO,
+	type AttestationBasis,
+	signAttestation,
+	writeAttestation,
+} from "./conversation/captureAttestation.js";
+import {
 	CONTROL_MOUNT_TARGET,
 	type ContainerView,
 	RELAY_IMAGE_LABEL,
@@ -57,6 +63,7 @@ import {
 	type RecreateContainer,
 	type RecreateDockerPort,
 } from "./recreate/ports.js";
+import { deriveSubkey } from "./secrets.js";
 import {
 	decryptStoredEntries,
 	EFFECTIVE_CPU_NANO_MAX,
@@ -736,6 +743,12 @@ export class DockerManager {
 			);
 			throw new SpawnPersistError(removal === "removed");
 		}
+		// §2.7.5.1 — capture prepared ⇒ the container was created from an image
+		// whose relay label was just checked: bind that fact to this container
+		// now, before it starts, so authorization no longer depends on Docker
+		// keeping the image. Best-effort: without it the image rule still applies.
+		if (capture.imageId) await this.attestCaptureContainer(sessionId, containerId, "spawn", null);
+
 		await container.start();
 
 		// #190 (direct-proxy switch) — persist the exposed-port set straight
@@ -3149,20 +3162,45 @@ export class DockerManager {
 	 * differently before and after a restart. The cost is one local Docker
 	 * read next to the container inspect that every caller already makes.
 	 */
-	private async imageHasRelay2(imageId: string): Promise<boolean> {
-		let info: Dockerode.ImageInspectInfo;
+	private imageRelayInfo(imageId: string): Promise<{ exists: boolean; relay2: boolean }> {
+		return imageRelayInfoWith(this.docker, imageId);
+	}
+
+	/**
+	 * §2.7.5.1 — sign and persist the capability attestation of a container
+	 * the backend has JUST created. Re-checked here, not trusted from the
+	 * caller: the container's own image must exist now and carry the relay
+	 * label, and the container must carry it too. Best-effort and logged —
+	 * a missing attestation only means the image rule alone applies.
+	 */
+	async attestCaptureContainer(
+		sessionId: string,
+		containerId: string,
+		basis: AttestationBasis,
+		attemptId: string | null,
+		workspaceRoot = WORKSPACE_ROOT,
+	): Promise<boolean> {
 		try {
-			info = await this.docker.getImage(imageId).inspect();
+			const info = await this.docker.getContainer(containerId).inspect();
+			const image = await this.imageRelayInfo(info.Image);
+			if (!image.exists || !image.relay2)
+				throw new Error("its image does not exist or lacks the relay label");
+			if (info.Config?.Labels?.[RELAY_IMAGE_LABEL] !== RELAY_IMAGE_LABEL_VALUE)
+				throw new Error("the container lacks the relay label");
+			await writeAttestation(
+				workspaceRoot,
+				signAttestation(
+					{ sessionId, containerId: info.Id, imageId: info.Image, basis, attemptId },
+					deriveSubkey(ATTESTATION_KEY_INFO),
+				),
+			);
+			return true;
 		} catch (err) {
-			// Deleted while a container still runs on it (`docker rmi -f` leaves
-			// the container and its layers; the pre-3.0d sessions): a missing
-			// image cannot be the relay image ⇒ false, so capture answers
-			// "requires recreate" instead of failing the request. Any other
-			// daemon error propagates (fail-closed).
-			if (isNotFound(err)) return false;
-			throw err;
+			logger.warn(
+				`[docker] capture attestation not written for ${sessionId} (${containerId.slice(0, 12)}): ${(err as Error).message}`,
+			);
+			return false;
 		}
-		return info.Config?.Labels?.[RELAY_IMAGE_LABEL] === RELAY_IMAGE_LABEL_VALUE;
 	}
 
 	/**
@@ -3171,34 +3209,14 @@ export class DockerManager {
 	 * drops it), both mounts, and its OWN image's relay label. A 404 is
 	 * `{exists:false}`; any other daemon error propagates (fail-closed).
 	 */
-	async inspectCapture(containerId: string): Promise<ContainerView> {
-		let info: Dockerode.ContainerInspectInfo;
-		try {
-			info = await this.docker.getContainer(containerId).inspect();
-		} catch (err) {
-			if ((err as { statusCode?: number }).statusCode === 404) return { exists: false };
-			throw err;
-		}
-		const env = info.Config?.Env ?? [];
-		const tokenEntry = env.find((e) => e.startsWith(`${INGEST_TOKEN_ENV}=`));
-		const token = tokenEntry ? tokenEntry.slice(INGEST_TOKEN_ENV.length + 1) || null : null;
-		const mounts = info.Mounts ?? [];
-		const mounted = (target: string) => mounts.some((m) => m.Destination === target);
-		return {
-			exists: true,
-			running: info.State?.Running === true,
-			token,
-			managedMount: mounted(MANAGED_MOUNT_TARGET),
-			controlMount: mounted(CONTROL_MOUNT_TARGET),
-			imageId: info.Image,
-			imageRelay2: await this.imageHasRelay2(info.Image),
-		};
+	inspectCapture(containerId: string): Promise<ContainerView> {
+		return inspectCaptureWith(this.docker, containerId);
 	}
 
 	/** The image a spawn would use now (by its immutable ID), or null if missing. */
 	async currentSessionImage(): Promise<{ imageId: string; relay2: boolean } | null> {
 		// One inspect of the tag gives both the ID and its labels, read now (no
-		// cache, like imageHasRelay2): no second lookup, so no window in which
+		// cache, like imageRelayInfo): no second lookup, so no window in which
 		// the image could vanish between the two.
 		let info: Dockerode.ImageInspectInfo;
 		try {
@@ -3303,8 +3321,16 @@ export class DockerManager {
 					spec.labels,
 				);
 			},
-			create: async (options) =>
-				(await d.createContainer(options as Dockerode.ContainerCreateOptions)).id,
+			create: async (options) => {
+				const id = (await d.createContainer(options as Dockerode.ContainerCreateOptions)).id;
+				// §2.7.5.1 — N is created from the image the engine just checked
+				// (relay label, by immutable id): bind that to N before its start.
+				const labels = (options as Dockerode.ContainerCreateOptions).Labels ?? {};
+				const sid = labels["io.shared-terminal.session"];
+				const attempt = labels["io.shared-terminal.recreate-attempt"];
+				if (sid && attempt) await this.attestCaptureContainer(sid, id, "recreate", attempt);
+				return id;
+			},
 			rename: async (id, name) => {
 				await d.getContainer(id).rename({ name });
 			},
@@ -4184,4 +4210,59 @@ export function goModeKind(mode: number): PathKind {
 	// named pipe, device, char device, irregular
 	if (has(25) || has(26) || has(21) || has(19)) return "other";
 	return "file";
+}
+
+// ── Capture inspection, shared with the attest CLI (§2.7.5.1) ─────────────
+
+export async function imageRelayInfoWith(
+	docker: Dockerode,
+	imageId: string,
+): Promise<{ exists: boolean; relay2: boolean }> {
+	let info: Dockerode.ImageInspectInfo;
+	try {
+		info = await docker.getImage(imageId).inspect();
+	} catch (err) {
+		// Gone while a container still runs on it — on the containerd image
+		// store a rebuild of the tag is enough (2026-11-03): the image rule
+		// then says "no label", and only a capability attestation for that
+		// exact container can keep it authorized (§2.7.5.1). Any other
+		// daemon error propagates (fail-closed).
+		if (isNotFound(err)) return { exists: false, relay2: false };
+		throw err;
+	}
+	return {
+		exists: true,
+		relay2: info.Config?.Labels?.[RELAY_IMAGE_LABEL] === RELAY_IMAGE_LABEL_VALUE,
+	};
+}
+
+export async function inspectCaptureWith(
+	docker: Dockerode,
+	containerId: string,
+): Promise<ContainerView> {
+	let info: Dockerode.ContainerInspectInfo;
+	try {
+		info = await docker.getContainer(containerId).inspect();
+	} catch (err) {
+		if ((err as { statusCode?: number }).statusCode === 404) return { exists: false };
+		throw err;
+	}
+	const env = info.Config?.Env ?? [];
+	const tokenEntry = env.find((e) => e.startsWith(`${INGEST_TOKEN_ENV}=`));
+	const token = tokenEntry ? tokenEntry.slice(INGEST_TOKEN_ENV.length + 1) || null : null;
+	const mounts = info.Mounts ?? [];
+	const mounted = (target: string) => mounts.some((m) => m.Destination === target);
+	const image = await imageRelayInfoWith(docker, info.Image);
+	return {
+		exists: true,
+		running: info.State?.Running === true,
+		token,
+		managedMount: mounted(MANAGED_MOUNT_TARGET),
+		controlMount: mounted(CONTROL_MOUNT_TARGET),
+		imageId: info.Image,
+		imageRelay2: image.relay2,
+		id: info.Id,
+		imageExists: image.exists,
+		labels: info.Config?.Labels ?? {},
+	};
 }

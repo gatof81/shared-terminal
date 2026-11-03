@@ -17,6 +17,7 @@
     "backup": "node dist/backup.js backup",
     "conversation:disable": "node dist/conversation/cli.js disable",
     "conversation:enable-all": "node dist/conversation/cli.js enable-all",
+    "conversation:attest": "node dist/conversation/attestCli.js attest",
     "composer:resolve": "node dist/conversation/composerCli.js",
     "recreate:admin": "node dist/recreate/adminCli.js",
     "restore": "node dist/backup.js restore",

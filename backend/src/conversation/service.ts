@@ -29,6 +29,7 @@ import {
 	removeHooksFile,
 	writeHooksFile,
 } from "./activation.js";
+import { readAttestation } from "./captureAttestation.js";
 import {
 	CaptureAuthority,
 	type CaptureBlock,
@@ -198,6 +199,12 @@ export interface ServiceDeps extends ActivationDeps {
 	/** 3.0d Docker view for capture authorization (§2.7.5–§2.7.6); absent
 	 *  in tests that don't exercise it — then no container is ever seen. */
 	captureDocker?: CaptureDockerPort;
+	/**
+	 * §2.7.5.1 — key that verifies capability attestations (a subkey of
+	 * SECRETS_ENCRYPTION_KEY). Not wired ⇒ attestations are ignored and the
+	 * image rule alone decides.
+	 */
+	captureAttestationKey?: () => Buffer;
 }
 
 const NO_DOCKER: CaptureDockerPort = {
@@ -349,6 +356,10 @@ export class ConversationService {
 			writeHooksFile: (sid) => writeHooksFile(this.activationDeps, sid),
 			removeHooksFile: (sid) => removeHooksFile(deps.workspaceRoot, sid),
 			hooksFileExists: (sid) => hooksFileExists(deps.workspaceRoot, sid),
+			readAttestation: deps.captureAttestationKey
+				? (sid) => readAttestation(deps.workspaceRoot, sid)
+				: undefined,
+			attestationKey: deps.captureAttestationKey,
 			now: deps.now,
 		});
 		this.now = deps.now ?? Date.now;
