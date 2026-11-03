@@ -285,19 +285,28 @@ describe("carry-over recreation (§2.7.7)", () => {
 	});
 
 	it("T_rec runs out during the copies: the copy in flight still lands in N, no further copy goes out, N is removed only after it answered", async () => {
-		const h = await setup({ tRecMs: 60, carryBytesPerSec: 1_000_000_000, carryCapMs: 60 });
+		// Budgets wide enough that the first copies always start inside T_rec even on a
+		// loaded CI runner (a 60 ms T_rec could expire before the second copy was
+		// requested, which made the test flaky); the second copy then answers after
+		// T_rec and well inside T_rb.
+		const h = await setup({
+			tRecMs: 600,
+			tRbMs: 3000,
+			carryBytesPerSec: 1_000_000_000,
+			carryCapMs: 600,
+		});
 		dirtyLayer(h, 10);
 		let requested = 0;
 		let copyDoneAt = -1;
 		h.docker.hooks.set("copyPath", async () => {
 			requested++;
 			if (requested === 2) {
-				await tick(120); // Docker answers the second copy after T_rec
+				await tick(900); // Docker answers the second copy after T_rec (600 ms)
 				copyDoneAt = h.docker.log.length;
 			}
 		});
 		const r = await h.engine.recreate(SID, IMG_N, { preserve: true });
-		// The resolution waited for the late answer (120 ms < T_rb): resolved, no `unresolved`.
+		// The resolution waited for the late answer (inside T_rb): resolved, no `unresolved`.
 		expect(r).toEqual({ ok: false, status: 500, code: "recreate-failed", step: "prepare" });
 		// Two copies requested, both landed (putArchive is never aborted); the third never went out.
 		expect(requested).toBe(2);
@@ -311,11 +320,13 @@ describe("carry-over recreation (§2.7.7)", () => {
 	});
 
 	it("a copy that outlasts T_rb too: 500 {unresolved:true}, the record uncertain, N untouched while the copy may still write, resolved by evidence once it answered", async () => {
+		// T_rec wide enough that the second copy is always requested before it expires
+		// (see the test above); that copy then never answers within T_rec + T_rb.
 		const h = await setup({
-			tRecMs: 60,
-			tRbMs: 100,
+			tRecMs: 600,
+			tRbMs: 300,
 			carryBytesPerSec: 1_000_000_000,
-			carryCapMs: 60,
+			carryCapMs: 600,
 		});
 		dirtyLayer(h, 10);
 		let requested = 0;
@@ -568,11 +579,17 @@ describe("operator recovery of an orphaned attempt (§2.7.7, D8)", () => {
 		const h = await setup();
 		dirtyLayer(h);
 		const hang = deferred();
+		const reached = deferred();
 		h.docker.hooks.set("copyPath", async () => {
-			if (h.docker.copies.length === 1) await hang.promise; // the second copy never answers in this process
+			if (h.docker.copies.length === 1) {
+				reached.resolve();
+				await hang.promise; // the second copy never answers in this process
+			}
 		});
 		const p = h.engine.recreate(SID, IMG_N, { preserve: true });
-		await tick(30);
+		// Wait for the hang itself, not a fixed delay: on a loaded runner the engine may not
+		// have reached the copy yet after a few ms.
+		await reached.promise;
 		h.engine.stop(); // the process dies (nothing else of it runs)
 		const { attempts, engine } = await restart(h);
 		await expect(attempts.assertResolved(SID)).rejects.toThrow(/uncertain|open/);
@@ -596,13 +613,15 @@ describe("operator recovery of an orphaned attempt (§2.7.7, D8)", () => {
 		const h = await setup();
 		dirtyLayer(h);
 		const hang = deferred();
+		const reached = deferred();
 		const realStatus = h.d1.setStatus.bind(h.d1);
 		h.d1.setStatus = async (sid, status) => {
+			reached.resolve();
 			await hang.promise; // the process dies while step 6 waits on D1
 			return realStatus(sid, status);
 		};
 		const p = h.engine.recreate(SID, IMG_N, { preserve: true });
-		await tick(60);
+		await reached.promise;
 		const nId = nIdOf(h) as string;
 		expect(h.d1.row.container_id).toBe(nId); // committed
 		h.engine.stop();
@@ -636,13 +655,15 @@ describe("operator recovery of an orphaned attempt (§2.7.7, D8)", () => {
 		const nId = nIdOf(h) as string;
 		await h.docker.stop(nId);
 		const hang = deferred();
+		const reached = deferred();
 		const realStatus = h.d1.setStatus.bind(h.d1);
 		h.d1.setStatus = async (sid, status) => {
+			reached.resolve();
 			await hang.promise; // dies while the resolution writes status
 			return realStatus(sid, status);
 		};
 		const p = h.engine.rollbackToRetained(SID);
-		await tick(60);
+		await reached.promise;
 		expect(h.d1.row.container_id).toBe(O_ID); // casBack applied
 		h.engine.stop();
 		h.d1.setStatus = realStatus;
@@ -683,13 +704,15 @@ describe("operator recovery of an orphaned attempt (§2.7.7, D8)", () => {
 		const nId = nIdOf(h) as string;
 		await h.docker.stop(nId);
 		const hang = deferred();
+		const reached = deferred();
 		const realCasBack = h.d1.casBack.bind(h.d1);
 		h.d1.casBack = async (...args) => {
+			reached.resolve();
 			await hang.promise; // dies with both renames done and the CAS never sent
 			return realCasBack(...args);
 		};
 		const p = h.engine.rollbackToRetained(SID);
-		await tick(60);
+		await reached.promise;
 		expect(h.docker.containers.get(O_ID)?.name).toBe(CANONICAL);
 		expect(h.docker.containers.get(nId)?.name).toMatch(/-old-\d+$/);
 		expect(h.d1.row.container_id).toBe(nId);
