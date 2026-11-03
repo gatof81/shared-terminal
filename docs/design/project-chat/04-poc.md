@@ -347,7 +347,76 @@ Descartadas por no cumplir G3 tal como está escrito: un nonce de nuestro servid
 del token, no origen) y `asyncRewake` (R2), que también llega como prompt sin `source`.
 
 **Estado:** las 12 muestras **no** están autorizadas; G1–G12 y R8 sin cambios. La alternativa A
-se evalúa primero con los registros existentes antes de proponer un experimento específico.
+dio positivo sobre los registros existentes y está en investigación (§1.11).
+
+### 1.11 Alternativa A: origen según el transcript del CLI (en investigación)
+
+**No cambia G3, R8 ni G1–G12.** Esta sección diseña cómo investigarla; la propuesta G3-A del final
+es para una revisión de diseño aparte y **no** está aprobada ni sustituye a G3.
+
+**X1 sobre los registros existentes de T (2.1.317, 2026-11-03):** un archivo de transcript, sin
+líneas ilegibles; exactamente un registro de canal para la prueba (`type=user`, `isMeta=true`,
+`promptSource=system`, `origin.kind=channel`, `origin.server=plugin:fakechat:fakechat`, misma
+sesión); su `promptId` es **igual** al `prompt_id` del único `UserPromptSubmit` de la prueba, sin
+otro registro de canal con ese `promptId`; un `Stop` con ese `prompt_id`. Las dos menciones del id
+son ese registro y la respuesta del asistente. El `timestamp` del registro (+25 ms) es la creación
+del mensaje, **no** la hora de escritura: con estos registros no se sabe si el registro ya estaba en
+el archivo cuando corrió el hook (+53 ms). Debug en 0–75 s: sin retry, 429 ni 529; cinco líneas con
+"permission", que no prueban diálogos.
+
+#### 1.11.1 Experimento XA-1 (factibilidad local; **no autorizado**)
+
+Una sola prueba T como §1.9, con el kit `poc/channels-phase0@e398df5`, que agrega
+`transcript-probe.mjs` al mismo `UserPromptSubmit` del logger.
+
+| Pregunta | Cómo se mide |
+| --- | --- |
+| ¿El registro ya está **en el archivo** cuando corre el hook? | La sonda hace **una** lectura de los últimos ≤ 1 MiB del transcript al ejecutarse, sin esperar ni reintentar. "Presente" = legible por otro proceso en ese instante (no prueba durabilidad: no hay `fsync` observable) |
+| ¿Se relaciona sin ambigüedad con `prompt_id` y el id del mensaje? | `verified` sólo con **exactamente un** registro de prompt (no `tool_result`) con ese `promptId`, de canal, del servidor esperado, de la sesión, con `isMeta`, una sola etiqueta y ese `message_id`, que no aparece en ningún otro registro leído |
+| ¿Cuántas veces falta o llega tarde? | `send.mjs` relee el archivo completo tras el turno: `present-at-hook`, `late` (ausente al hook, verificado después), `missing`, `invalid`. **Una** muestra no mide una tasa: eso exigiría una serie (XA-2), con autorización aparte |
+| ¿Es estrictamente observacional? | No imprime (lo impreso entraría al contexto), siempre sale con 0, no bloquea ni modifica el prompt; registra su propia duración (`read_ms`). Única interferencia: el tiempo de una lectura acotada |
+| ¿Archivo ausente, incompleto, duplicado o ilegible? | Siempre `unverified` con motivo: ruta ausente, otro nombre, fuera de `projects`, symlink, no es archivo, ausente, ilegible, vacío, línea ilegible, línea final a medio escribir, sin registro, duplicado, otro origen/servidor/sesión, sin `isMeta`, otra etiqueta o `message_id`, id repetido en otro registro, registro fuera de la cola leída, mensaje que llegó como `queued_command` |
+
+Tests sintéticos del kit: 51 (24 nuevos para la alternativa A). La sonda nunca guarda texto,
+rutas ni el prompt; `check` la autoprueba sobre un transcript sintético en un directorio temporal.
+
+**Factibilidad positiva** sólo si en XA-1: una línea de sonda para el `prompt_id`, `verified`,
+categoría `present-at-hook`, lectura posterior también `verified`, logger y flujo como en T.
+Cualquier otro resultado se informa tal cual y la alternativa A no avanza sin rediseño.
+
+#### 1.11.2 Garantías que la prueba local **no** demuestra (requisitos para producción)
+
+| Riesgo | Por qué importa | Protección necesaria (a verificar por versión) |
+| --- | --- | --- |
+| El agente escribe el transcript | El archivo es del mismo usuario que el agente; Bash/Write o un trabajo en segundo plano pueden agregar o reescribir líneas | Prohibir escritura en el directorio de transcripts a las herramientas del agente (managed `permissions.deny` para Edit/Write y `sandbox` de sistema de archivos para Bash y trabajos en segundo plano); verificado con un smoke por versión |
+| Inserción de un registro falso | Un registro de canal falso junto a un prompt tecleado | La regla "exactamente un registro de prompt por `promptId`" lo vuelve `unverified` (denegación, no falso positivo) |
+| Reescritura antes de la captura | Reemplazar el registro real en la ventana entre su escritura y el hook (~ decenas de ms) | La prohibición de escritura anterior; además, evidencia de manipulación: inode y tamaño por captura; un archivo que encoge o cambia de inode marca la sesión como evidencia comprometida |
+| Manipulación después de la captura | Releer más tarde no prueba nada | La sonda captura **en el hook** y la copia viaja por el relay al backend (fuera del alcance del agente); nunca se relee el transcript para decidir |
+| Formato interno sin documentar | `origin`, `promptSource`, `promptId` pueden cambiar; el CLI repara filas al cargar | Pin del CLI (R9) y lista de versiones validadas **propia** de este contrato; campos desconocidos ⇒ `unverified` |
+| Escritura tardía o perdida | La cola de escritura es asincrónica; un error sólo se registra | Ausente al hook ⇒ `unverified`, nunca un éxito diferido |
+| Reinicio, `--resume`, fork, compactación, rewind | El registro puede quedar en otro archivo o podarse | `unverified` hasta revalidar; la evidencia se captura en el momento |
+| Privacidad | La sonda lee el contenido para comparar el id | Lee dentro del contenedor y no emite texto (mismo nivel 0 que la captura) |
+
+Riesgo residual declarado: otro proceso del mismo usuario fuera del sandbox (un servidor MCP, otro
+hook) podría escribir el archivo.
+
+#### 1.11.3 Propuesta G3-A (para revisión separada; no aprobada, no sustituye a G3)
+
+Una entrada de canal estaría **verificada por transcript** sólo si:
+1. El `UserPromptSubmit` tiene `prompt_id` P y el prompt cumple la forma del protocolo §5
+   (etiqueta con `st_msg`).
+2. Al ejecutarse ese hook, la cola leída del transcript de la sesión contiene exactamente un registro
+   de prompt con `promptId` P, `type=user`, `isMeta`, `origin.kind=channel`, `origin.server` igual a
+   nuestro servidor, la misma sesión y el `st_msg` en su única etiqueta, y ese `st_msg` no aparece en
+   otro registro.
+3. La captura se hace en el hook y se conserva fuera del alcance del agente; nunca se relee después.
+4. Las protecciones de §1.11.2 están activas y verificadas para la versión, que figura en una lista
+   propia de este contrato.
+5. Cualquier ausencia, demora, ambigüedad, reinicio, `--resume` o duda ⇒ `unverified`, sin pasar a
+   verificada después.
+
+Aceptarla sería una decisión explícita del responsable tras esa revisión; mientras tanto, G3 rige
+tal como está.
 
 ## 2. Versiones
 
