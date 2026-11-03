@@ -682,7 +682,7 @@ responsable (`1ed7e73`):
   liga); texto reescrito más abajo de la cadena; sin `classic` (guard); `next` que lanza (mismo
   error) y `drop`; escritura fallida sin efecto en el flujo; evento malformado;
   `session.append`/`Stop`.
-- Analizador: PASS y 19 casos negativos (mod no cargado, guard, control con origen `channel`,
+- Analizador: PASS y los 19 casos negativos de `68a939c` (mod no cargado, guard, control con origen `channel`,
   servidor distinto, solape, sin ligar, ligado dos veces, hueco de `seq`, dos instancias, `Stop`
   ausente, UPS duplicado, sesión distinta, sin respuesta, control no ejecutado, sin controles, hook
   saltado en el debug log, registro ilegible, etiqueta pegada que no llegó como etiqueta).
