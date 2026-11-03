@@ -332,6 +332,17 @@ describe("ConversationService owner metadata", () => {
 			sessionId: CID,
 			customTitle: null,
 		});
+		// …and the next list still has it (no vanishing after the metadata went back to all-NULL).
+		const listed = (await service.summariesWithMeta(SID)).conversations.filter(
+			(c) => c.sessionId === CID,
+		);
+		expect(listed).toHaveLength(1);
+		expect(listed[0]).toMatchObject({ customTitle: null, archivedAt: null });
+		await service.setOwnerMeta(SID, CID, { archived: true });
+		await service.setOwnerMeta(SID, CID, { archived: false });
+		expect((await service.summariesWithMeta(SID)).conversations.map((c) => c.sessionId)).toContain(
+			CID,
+		);
 		await service.shutdown();
 	});
 

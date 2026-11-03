@@ -371,7 +371,10 @@ export async function listConversationRowsWithMeta(
 	const rows: ConversationRow[] = [];
 	const meta = new Map<string, ConversationOwnerMeta>();
 	for (const row of r.results) {
-		if (row.meta_custom_title !== null || row.meta_archived_at !== null) {
+		// A metadata-only row is kept even when both fields are NULL again (a
+		// cleared name, an un-archive): it is the only way a conversation known
+		// just from its files stays in the list after the owner touched it.
+		if (row.src === "m" || row.meta_custom_title !== null || row.meta_archived_at !== null) {
 			meta.set(row.meta_cid, {
 				customTitle: row.meta_custom_title,
 				archivedAt: row.meta_archived_at,
