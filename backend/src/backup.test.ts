@@ -671,6 +671,42 @@ describe("restore of the control evidence (.st-control + revocation markers)", (
 		}
 	});
 
+	it.each([
+		["<sid>//", (sid: string) => `${sid}//`],
+		[".uploads/<sid>//", (sid: string) => `.uploads/${sid}//`],
+		["<sid>/./", (sid: string) => `${sid}/./`],
+		["./<sid>", (sid: string) => `./${sid}`],
+	])("a non-canonical member name (%s) is refused — it would dodge the root-type rule", async (_n, nameOf) => {
+		await seedWorkspace(SID, { [`${SID}/a.txt`]: "a" });
+		await backupThenLoseWorkspaceRoot();
+		const src = mkdtempSync(path.join(os.tmpdir(), "st-evil-canon-"));
+		const outside = mkdtempSync(path.join(os.tmpdir(), "st-outside-"));
+		await fs.mkdir(path.join(src, SID), { recursive: true });
+		await fs.mkdir(path.join(src, ".uploads", SID), { recursive: true });
+		const lnk = path.join(src, "lnk");
+		await fs.symlink(outside, lnk);
+		// GNU tar: --transform renames the symlink member to the odd name.
+		const odd = nameOf(SID);
+		execFileSync("tar", [
+			"-czf",
+			path.join(outDir, "workspaces", `${SID}.tar.gz`),
+			"-C",
+			src,
+			SID,
+			`.uploads/${SID}`,
+			`--transform=s,^lnk$,${odd.replace(/,/g, "\\,")},`,
+			"lnk",
+		]);
+		const listing = execFileSync("tar", ["-tzf", path.join(outDir, "workspaces", `${SID}.tar.gz`)])
+			.toString()
+			.split("\n");
+		expect(listing).toContain(odd);
+		await expect(runRestore(outDir)).rejects.toThrow(/non-canonical member/);
+		expect((await fs.lstat(live(SID)).catch(() => null))?.isSymbolicLink() ?? false).toBe(false);
+		await fs.rm(src, { recursive: true, force: true });
+		await fs.rm(outside, { recursive: true, force: true });
+	});
+
 	it("a tarball not named after a session of this backup is refused before any write (no `.conversations.tar.gz`)", async () => {
 		await seedWorkspace(SID, { [`${SID}/a.txt`]: "a" });
 		await backupThenLoseWorkspaceRoot();

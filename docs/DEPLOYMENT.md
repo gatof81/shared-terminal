@@ -1040,7 +1040,12 @@ Restore guards:
 - **Global emergency cut.** `.conversations/REVOKED_ALL`, when present, is
   copied to `<backup>/REVOKED_ALL` (`globalRevocation: true` in the
   manifest) and restored in effect unless the destination has its own —
-  lift it with `npm run conversation:enable-all`.
+  lift it with `npm run conversation:enable-all`. `enable-all` leaves no
+  trace of the lift, so a `--force` restore on the SAME host of a backup
+  taken during a global cut puts the cut back even if it was lifted since
+  (fail-closed, logged): run `enable-all` again if that cut is over.
+- Member names must be canonical (`<sid>//`, `<sid>/./`, `./<sid>` are
+  refused): tar treats them as the same path, the type rules would not.
 
 Previously-`running` sessions land as `stopped` with a NULL container id
 — the destination host has none of the source's containers, matching what

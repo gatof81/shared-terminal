@@ -478,6 +478,16 @@ export async function runRestore(inDir: string, opts: { force?: boolean } = {}):
 			maxBuffer: 64 * 1024 * 1024,
 		});
 		const entries = stdout.split("\n").filter((l) => l.trim() !== "");
+		// Canonical names only: `<sid>//` or `<sid>/./` is the same path to
+		// tar but would slip past the root-type rule below as "not a root"
+		// (2nd review of #520: a symlink member `<sid>//` replaced the live
+		// workspace root, which Docker then bind-mounts read-write).
+		const odd = entries.find((e) => path.posix.normalize(e) !== e);
+		if (odd !== undefined) {
+			throw new Error(
+				`workspace tarball ${file}: non-canonical member ${JSON.stringify(odd)} — refusing`,
+			);
+		}
 		const ok = entries.every(
 			(e) =>
 				(e === sid ||
