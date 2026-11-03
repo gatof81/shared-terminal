@@ -130,6 +130,8 @@ test.describe("chat: rename and archive (v1.8 §6.2)", () => {
 
 		await page.reload();
 		await app.switchView("chat");
+		// The reload reopens the last conversation; on mobile that is the thread pane: back to the list.
+		if (await page.locator("#chat-back-btn").isVisible()) await page.locator("#chat-back-btn").click();
 		await expect(page.locator('.chat-filter-btn[data-filter="archived"]')).toHaveAttribute(
 			"aria-pressed",
 			"true",
