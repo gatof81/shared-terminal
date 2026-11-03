@@ -25,7 +25,7 @@ vinculante para los PRs
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
 `ac1024d`); si los dos documentos difieren, manda este;
 este archivo define lo que el código debe cumplir y lo que cada PR debe demostrar. Cambiar un
-contrato exige un PR de docs antes o junto con el código. **v1.7.1**: §8.1.5 paso 2b, consumo del paste antes del siguiente byte, y `too-many-segments` en 48 pastes por el presupuesto T_http (hallazgos del smoke con CLI 2.1.314 y de la revisión durante la implementación 3.2, 2026-10-30). **v1.7.2** (aprobado por el responsable como P1 de backend de Chat, 2026-11-02, tras la reanudación real de Educación HZ): §5.2 el binding vale para UN arranque del contenedor —toda parada lo retira de todas las conversaciones de la sesión, residentes o no—; §5.3 el probe solo lleva a `waiting_input` con identidad verificada (entrada `interactive`, `pid` descendiente del `pane_pid` del pane ligado), nunca revive `ended`, un estado ilegible no es `idle`, y el silencio de 10 min y un probe dirigido tras `SessionStart` se despachan de verdad; §8.1.3 `binding-stale` también para una entrada del probe con `kind ≠ interactive` aunque descienda del pane **v1.7.3**: §8.1.3 identidad de foreground por proceso (identidad, sesión, tty, grupo de primer plano, `starttime` repetido en el precheck) en lugar del nombre `pane_current_command`, que el instalador nativo hace igual a la versión (falso negativo en Educación HZ, 2026-11-02). **v1.7.4** (#510, aprobado por el responsable 2026-11-02): §8.1.3 el envío exige que el probe confirme el prompt (`idle`, o `waiting` + `input needed`); `status` ausente/ilegible y `waiting` sin `waitingFor` responden `needs-terminal` antes de cualquier efecto
+contrato exige un PR de docs antes o junto con el código. **v1.7.1**: §8.1.5 paso 2b, consumo del paste antes del siguiente byte, y `too-many-segments` en 48 pastes por el presupuesto T_http (hallazgos del smoke con CLI 2.1.314 y de la revisión durante la implementación 3.2, 2026-10-30). **v1.7.2** (aprobado por el responsable como P1 de backend de Chat, 2026-11-02, tras la reanudación real de Educación HZ): §5.2 el binding vale para UN arranque del contenedor —toda parada lo retira de todas las conversaciones de la sesión, residentes o no—; §5.3 el probe solo lleva a `waiting_input` con identidad verificada (entrada `interactive`, `pid` descendiente del `pane_pid` del pane ligado), nunca revive `ended`, un estado ilegible no es `idle`, y el silencio de 10 min y un probe dirigido tras `SessionStart` se despachan de verdad; §8.1.3 `binding-stale` también para una entrada del probe con `kind ≠ interactive` aunque descienda del pane **v1.7.3**: §8.1.3 identidad de foreground por proceso (identidad, sesión, tty, grupo de primer plano, `starttime` repetido en el precheck) en lugar del nombre `pane_current_command`, que el instalador nativo hace igual a la versión (falso negativo en Educación HZ, 2026-11-02). **v1.7.4** (#510, aprobado por el responsable 2026-11-02): §8.1.3 el envío exige que el probe confirme el prompt (`idle`, o `waiting` + `input needed`); `status` ausente/ilegible y `waiting` sin `waitingFor` responden `needs-terminal` antes de cualquier efecto. **v1.8** (aprobado por el responsable 2026-11-03): §6.2 metadata del dueño —renombrar y archivar— en la tabla propia `conversation_user_meta` (migración v18), fuera de la captura; §6 la lista añade `customTitle`, `archivedAt` y `meta`; §9 backup y borrado de esa tabla
 
 Convenciones: *MUST*/*MUST NOT* son requisitos verificados por test; *SHOULD* son requisitos
 verificados en revisión. "Bytes" significa siempre bytes UTF-8 del contenido, salvo donde se dice
@@ -1696,10 +1696,11 @@ Todas owner-only (`assertOwnedByOr404`), rate limit `conversationIp` (300/min), 
 
 | Método | Ruta | Respuesta |
 | --- | --- | --- |
-| GET | `/api/sessions/:id/conversations` | `{ capture: { requested, effective, effectiveAfterRestart }, conversations: [{ sessionId, kind, title, status, statusEvidence, statusAt, tabId, paneId, startedAt, endedAt, lastEventAt, lastSeq, firstRetainedSeq, eventsCount, gapsCount, claudeVersion, parentSessionId, parentInferred, canSendInput }] }`. Con `?capture=0` responde `capture: null` y omite el probe del relay (D7): es la forma que un cliente *MUST* usar para sondear la lista periódicamente. |
+| GET | `/api/sessions/:id/conversations` | `{ capture: { requested, effective, effectiveAfterRestart }, conversations: [{ sessionId, kind, title, status, statusEvidence, statusAt, tabId, paneId, startedAt, endedAt, lastEventAt, lastSeq, firstRetainedSeq, eventsCount, gapsCount, claudeVersion, parentSessionId, parentInferred, canSendInput, customTitle, archivedAt }], meta }` (`customTitle`, `archivedAt` y `meta` desde v1.8, §6.2). Con `?capture=0` responde `capture: null` y omite el probe del relay (D7): es la forma que un cliente *MUST* usar para sondear la lista periódicamente. |
 | GET | `/api/sessions/:id/conversations/:cid/events?before=<seq>&limit=<n≤500>` | `{ events: [...], hasMore, firstRetainedSeq }` (orden ascendente por `seq`; `before` exclusivo; `before ≤ firstRetainedSeq` ⇒ `events: []`, `hasMore: false`) |
 | GET | `/api/sessions/:id/conversations/:cid/events/:seq` | un evento (para "Copiar informe" de eventos no montados) |
 | GET | `/api/sessions/:id/conversations/:cid/agents` | `{ agents: [{ agentId, agentType, status, startedSeq, endedSeq?, toolCount, hasResult }] }` |
+| PATCH | `/api/sessions/:id/conversations/:cid` | §6.2 (v1.8). Cuerpo `{ title?, archived? }`; 200 con el resumen; 400 `invalid-body` / `invalid-title` / `title-too-long`; 404 `conversation-not-found`; 503 `meta-unavailable` |
 | WS | `/ws/conversation/<id>` | ver §6.1 |
 | POST | `/api/sessions/:id/conversations/:cid/messages` | §8 (3.2). Cuerpo `{ text, clientMessageId }`; 202 `{ result: delivered\|unconfirmed\|misdelivered\|uncertain, … }`, 400/409 según §8.1.2–§8.1.3, 502 `delivery-failed` según §8.1.6, 503 `persist-failed` / `shutting-down` (apagado en curso, v1.7.1); 403 lead/observador; **ausente (404) con `CONVERSATION_COMPOSER_ENABLED` apagado** |
 
@@ -1742,6 +1743,103 @@ Servidor → cliente: `{type:"hello", conversations:[{cid,lastSeq,firstRetainedS
   conversación por usuario (el quinto recibe `error{code:"too-many-sockets"}` y 1008).
 
 ---
+
+### 6.2 Metadata del dueño: renombrar y archivar (v1.8)
+
+Un nombre propio y el archivado son **datos del dueño sobre la conversación**, no eventos de la
+conversación: no los produce el CLI, no se reconstruyen desde el archivo y ningún componente de la
+captura los escribe. Por eso viven en una tabla propia y nunca en `claude_conversations`, en el
+índice ni en el archivo de eventos.
+
+**Almacenamiento (migración v18).**
+
+```sql
+CREATE TABLE conversation_user_meta (
+  st_session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+  cid           TEXT NOT NULL,
+  custom_title  TEXT,          -- NULL = sin nombre propio (se muestra el automático)
+  archived_at   TEXT,          -- NULL = no archivada; datetime('now'), UTC sin sufijo (d1Time.ts)
+  updated_at    TEXT NOT NULL,
+  PRIMARY KEY (st_session_id, cid)
+)
+```
+
+1. La ingesta, el heartbeat, el probe, `releaseBindings`, `reconcile`, la recreación (§2.7) y el
+   composer (§8) *MUST NOT* leer ni escribir esta tabla. El único lector es el resumen de §6 (lista
+   y `hello` del WS); el único escritor es el `PATCH` de abajo, más el borrado de la sesión.
+2. Un `PATCH` *MUST NOT* añadir eventos, cambiar `seq`, tocar el índice ni el archivo, ni cambiar el
+   estado, el binding o los contadores: el archivo de eventos sigue siendo solo lo que el CLI
+   produjo (§4) y L7/la recuperación desde el archivo no cambian.
+3. La lista *MUST* leer la metadata en la **misma** consulta D1 que las filas (`LEFT JOIN`), sin
+   añadir llamadas en el camino caliente (Notes on D1). Si esa consulta falla, la lista se sirve
+   como hoy desde los índices residentes y responde `meta: "unavailable"` (ver abajo); la UI
+   *MUST* decir que los nombres no se pudieron cargar en vez de mostrar los automáticos como si
+   fueran los vigentes.
+
+**Endpoint.** `PATCH /api/sessions/:id/conversations/:cid`, cuerpo JSON `{ title?: string | null,
+archived?: boolean }`.
+
+| Regla | Detalle |
+| --- | --- |
+| Autorización | owner-only (`assertOwnedByOr404`, como el resto de §6): un nombre es contenido. Ni admin ni lead lo escriben (no hay arista de operate aquí). |
+| Transporte | `Content-Type: application/json` obligatorio (CSRF, como el resto de la API); rate limit propio `conversationMetaIp` 60/min por IP |
+| Cuerpo | al menos una de las dos claves; cualquier otra clave ⇒ 400 `invalid-body`; `archived` no booleano ⇒ 400 `invalid-body` |
+| `cid` | mismo validador de componente seguro que el store; la conversación *MUST* existir para **esa** sesión (fila D1 o índice en disco/residente); si no ⇒ 404 `conversation-not-found` (igual que una sesión ajena) |
+| Estado de la sesión | indiferente: se puede renombrar/archivar con la sesión parada o con soft delete (son legibles, §9) |
+| Campos parciales | solo se escribe lo que viene: un `PATCH {title}` *MUST NOT* cambiar `archived_at` y viceversa (upsert por columna) |
+| Archivar | `true` fija `archived_at` si era NULL y conserva la hora si ya estaba archivada (idempotente); `false` lo pone a NULL |
+| Respuesta | 200 con el resumen de esa conversación (misma forma que un elemento de la lista); D1 falla ⇒ 503 `meta-unavailable` sin escritura parcial |
+| Registro | los logs llevan `cid` y el resultado, *MUST NOT* llevar el título |
+
+**Normalización del título** (`conversationTitle.ts`; el frontend lleva una copia byte a byte, como
+`composerText.ts`, usada solo para explicar un rechazo antes de enviar: el servidor decide).
+
+1. `null` borra el nombre propio.
+2. Un string *MUST* ser UTF-16 bien formado (sin surrogates sueltos) ⇒ si no, 400 `invalid-title`.
+3. Se normaliza a NFC; contiene `\p{Cc}` (C0, DEL, C1, también `\t` `\n`) o un control de
+   dirección (U+200E, U+200F, U+202A–U+202E, U+2066–U+2069) ⇒ 400 `invalid-title`.
+4. Se recortan los espacios de los extremos y cada racha interior de `\s` se reduce a un espacio.
+5. Vacío tras el recorte ⇒ equivale a `null`. Más de **80** puntos de código ⇒ 400
+   `title-too-long` (el mismo tope que el título automático, §5.1). Nunca se trunca en silencio.
+
+**Resumen (§6).** Cada conversación añade `customTitle: string | null` y `archivedAt: string |
+null`; la respuesta añade `meta: "ok" | "unavailable"`. `title` **no cambia de significado**:
+sigue siendo el automático de §5.1 (primer prompt o `session_title` del CLI), de modo que un
+cliente existente no se rompe y el automático sigue disponible. El título que se muestra es
+`customTitle ?? title ?? <genérico>`: un nombre propio *MUST* prevalecer en la lista, en la
+cabecera del hilo y en el título del documento, y un `session_title` posterior del CLI (p. ej.
+su `/rename`) actualiza `title` sin desplazarlo; la cabecera del hilo *SHOULD* mostrar el
+automático como texto secundario cuando difiere.
+
+**Independencia de composer, captura y `--resume`.**
+
+- Archivar no cambia el estado, el binding, la ingesta ni la elegibilidad del composer:
+  `canSendInput`, el bloque `composer` y las precondiciones de §8.1.3 *MUST* ser idénticos para
+  una conversación archivada y una no archivada (test).
+- `claude --resume <id>` continúa el mismo `session_id` ⇒ el mismo `cid` ⇒ la misma metadata: el
+  nombre propio sobrevive a la reanudación y a una recreación del contenedor (§2.7), porque la
+  tabla es por sesión de Shared Terminal y no por contenedor.
+  `--fork-session` crea un `session_id` nuevo y por lo tanto una conversación nueva, sin nombre
+  propio ni archivado heredados (es otra conversación; no se copia la metadata).
+- **No hay desarchivado automático** (ningún componente de la captura puede escribir la tabla,
+  regla 1). En su lugar, la UI *MUST* hacer localizable una conversación archivada que vuelve a
+  estar activa: el filtro **Activas** incluye las archivadas con un reclamo vivo (§5.3, mismo
+  criterio de "Active" de la vista), marcadas "Archivada" y con la acción Desarchivar en la fila;
+  el filtro **Archivadas** las muestra con su estado vivo, y el selector de filtros indica cuántas
+  archivadas tienen actividad.
+
+**UI.** Filtros **Activas · Archivadas · Todas** sobre la lista (Activas por defecto; la elección
+se recuerda por navegador en `localStorage`, envuelto en `try/catch`). Dentro de un filtro se
+mantiene la separación actual por actividad, con el encabezado "Live" en lugar de "Active" para no
+confundirlo con el filtro. Cada fila y la cabecera del hilo tienen un menú ⋯ con **Renombrar** y
+**Archivar/Desarchivar**; Renombrar abre un diálogo con el nombre actual, un botón para volver al
+automático y el error del servidor en palabras. Todo texto se construye con `textContent`.
+Archivar la conversación abierta no la cierra. El deep link `#/sessions/<id>/chat/<cid>` abre una
+conversación archivada igual que cualquier otra.
+
+**Borrado.** Soft delete de la sesión conserva la tabla; hard delete la borra (cascada y, además,
+explícitamente en el mismo punto que `deleteConversationRows`, sin depender de que D1 aplique la
+FK). El borrado permanente de una conversación individual **no** forma parte de v1.8.
 
 ## 7. Comando y endpoint de activación (3.0d)
 
@@ -2394,10 +2492,19 @@ el CLI real, resultados adjuntos al PR): (1) una línea ⇒ `UserPromptSubmit` i
 ## 9. Retención y purga
 
 - Soft delete (`DELETE /api/sessions/:id`): conserva `.conversations/<sid>` y `.claude-managed/<sid>`.
-- Hard delete (`?hard=true`): purga ambos (mismo guard de ruta que `purgeWorkspace`).
+- Hard delete (`?hard=true`): purga ambos (mismo guard de ruta que `purgeWorkspace`). Las filas de `claude_conversations` y `conversation_user_meta` de la sesión se borran con ella.
+- No hay borrado permanente de una conversación individual (decisión del responsable 2026-11-03: el almacenamiento medido es ~3 MiB y no lo justifica).
+- **Archivar no elimina datos** (§6.2): ni eventos, ni rotaciones `.1`, ni el índice, ni la fila de
+  `claude_conversations`, ni el transcript del CLI; desarchivar devuelve la conversación tal cual.
+  Una conversación archivada que se reanuda (`--resume`, mismo `cid`) sigue archivada y *MUST*
+  aparecer señalizada en el filtro **Activas** mientras tenga un reclamo vivo (§6.2).
 - `CONVERSATION_TTL_DAYS` (opcional, unset = sin TTL): conversaciones `ended` con
-  `ended_at` más antiguo se purgan (archivo + fila) en un sweeper diario.
-- Backup (#240): `claude_conversations` entra en `TABLES`; `.conversations/` entra en el tarball por
+  `ended_at` más antiguo se purgan (archivo + fila) en un sweeper diario. **No implementado**
+  (verificado 2026-11-03 en `main` `4790cd8`: ni la variable ni el sweeper existen en el código ni en
+  `.env.example`): hoy ninguna conversación se purga por antigüedad. Es diseño pendiente, no un
+  comportamiento con el que se pueda contar, y si se implementa *MUST* respetar la decisión de abajo
+  (no hay purga individual sin un contrato propio).
+- Backup (#240): `claude_conversations` y `conversation_user_meta` (desde el esquema 18, §6.2) entran en `TABLES`; `.conversations/` entra en el tarball por
   sesión; `.claude-managed/` **no** (se regenera desde D1 en `reconcile`).
 - SECURITY.md recibe la sección "Conversation events at rest" con este contrato, incluida §4.3.2.
 
@@ -2724,6 +2831,27 @@ tener su test; si hay contradicción con el diseño, manda §2.7.
       y se muestra como marcador correlacionado con el agente, nunca como "You"; un `user_prompt`
       histórico con esa forma se muestra igual sin reescribir el archivo; un prompt humano que cite las
       etiquetas sigue siendo "You"; una forma no verificable se rotula "origen no verificado".
+
+### 3.1b metadata del dueño (v1.8)
+
+- [ ] Migración v18 append-only; `conversation_user_meta` en `TABLES` de backup con `sinceSchema: 18`;
+      restore de un backup anterior al esquema 18 la deja vacía.
+- [ ] `PATCH` owner-only (ajena ⇒ 404, admin y lead ⇒ 404), `Content-Type` JSON obligatorio,
+      claves desconocidas ⇒ 400, `cid` inexistente en esa sesión ⇒ 404; parcial por campo
+      (`{title}` no toca `archived_at` y viceversa); archivar dos veces conserva la primera hora.
+- [ ] Normalización: tabla de casos (NFC, controles C0/C1, bidi, surrogate suelto, rachas de
+      espacios, vacío ⇒ null, 80/81 puntos de código); copia del frontend byte a byte idéntica (test).
+- [ ] La lista sigue haciendo **una** consulta D1; con la consulta fallando responde
+      `meta: "unavailable"` y la UI lo dice.
+- [ ] Un `PATCH` no cambia el archivo de eventos, el índice, `seq`, estado ni binding (test que
+      compara bytes y snapshot antes/después); el composer da la misma respuesta de elegibilidad para
+      una conversación archivada (test); un `SessionStart` con `source: resume` del mismo `cid`
+      conserva `customTitle` y `archivedAt`.
+- [ ] UI: el nombre propio prevalece en lista, cabecera y título; filtros Activas/Archivadas/Todas;
+      una archivada con reclamo vivo aparece en Activas con su marca y Desarchivar; menú ⋯ y diálogo
+      por teclado; Playwright con el mock backend (escritorio + móvil, v1 y v2) y baselines
+      actualizadas; el invariante del Terminal se mantiene (renombrar/archivar no envía `resize`
+      ni abre sockets).
 
 ### 3.2 composer
 
