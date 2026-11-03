@@ -3140,16 +3140,29 @@ export class DockerManager {
 	 */
 	// ── 3.0d capture authorization port (CONVERSATION.md §2.7.5–§2.7.6) ──
 
-	private readonly relayLabelByImageId = new Map<string, boolean>();
-
+	/**
+	 * The relay label of an image AS IT EXISTS NOW (§2.7.5 item 5, §2.7.6).
+	 * Deliberately not cached: an image ID's labels never change, but the
+	 * image can be deleted while containers keep running on it, and a deleted
+	 * image counts as unlabelled. A cache would keep a deleted image "relay"
+	 * until the backend restarted — the same Docker state authorizing
+	 * differently before and after a restart. The cost is one local Docker
+	 * read next to the container inspect that every caller already makes.
+	 */
 	private async imageHasRelay2(imageId: string): Promise<boolean> {
-		// An image ID is immutable, so its labels are cacheable forever.
-		const cached = this.relayLabelByImageId.get(imageId);
-		if (cached !== undefined) return cached;
-		const info = await this.docker.getImage(imageId).inspect();
-		const ok = info.Config?.Labels?.[RELAY_IMAGE_LABEL] === RELAY_IMAGE_LABEL_VALUE;
-		this.relayLabelByImageId.set(imageId, ok);
-		return ok;
+		let info: Dockerode.ImageInspectInfo;
+		try {
+			info = await this.docker.getImage(imageId).inspect();
+		} catch (err) {
+			// Deleted while a container still runs on it (`docker rmi -f` leaves
+			// the container and its layers; the pre-3.0d sessions): a missing
+			// image cannot be the relay image ⇒ false, so capture answers
+			// "requires recreate" instead of failing the request. Any other
+			// daemon error propagates (fail-closed).
+			if (isNotFound(err)) return false;
+			throw err;
+		}
+		return info.Config?.Labels?.[RELAY_IMAGE_LABEL] === RELAY_IMAGE_LABEL_VALUE;
 	}
 
 	/**
@@ -3184,14 +3197,20 @@ export class DockerManager {
 
 	/** The image a spawn would use now (by its immutable ID), or null if missing. */
 	async currentSessionImage(): Promise<{ imageId: string; relay2: boolean } | null> {
-		let id: string;
+		// One inspect of the tag gives both the ID and its labels, read now (no
+		// cache, like imageHasRelay2): no second lookup, so no window in which
+		// the image could vanish between the two.
+		let info: Dockerode.ImageInspectInfo;
 		try {
-			id = (await this.docker.getImage(SESSION_IMAGE).inspect()).Id;
+			info = await this.docker.getImage(SESSION_IMAGE).inspect();
 		} catch (err) {
-			if ((err as { statusCode?: number }).statusCode === 404) return null;
+			if (isNotFound(err)) return null;
 			throw err;
 		}
-		return { imageId: id, relay2: await this.imageHasRelay2(id) };
+		return {
+			imageId: info.Id,
+			relay2: info.Config?.Labels?.[RELAY_IMAGE_LABEL] === RELAY_IMAGE_LABEL_VALUE,
+		};
 	}
 
 	// ── Recreation port (3.0d, CONVERSATION.md §2.7) ───────────────────────

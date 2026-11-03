@@ -113,14 +113,53 @@ describe("inspectCapture", () => {
 			dm({ container: new Error("ECONNREFUSED") }).m.inspectCapture("cid"),
 		).rejects.toThrow("ECONNREFUSED");
 	});
-	it("labels are cached per immutable image ID", async () => {
-		const { m, imageInspect } = dm({
-			container: base,
-			images: { "sha256:aaa": { "io.shared-terminal.conversation-relay": "2" } },
+	it("the container's image was deleted (404 on the image): imageRelay2 false, the rest read as usual; not cached", async () => {
+		const legacy = {
+			...base,
+			Image: "sha256:gone",
+			Config: { Env: ["PATH=/usr/bin", "SESSION_ID=x"] },
+			Mounts: [{ Destination: "/home/developer/workspace" }],
+		};
+		const { m, imageInspect } = dm({ container: legacy, images: {} });
+		expect(await m.inspectCapture("cid")).toEqual({
+			exists: true,
+			running: true,
+			token: null,
+			managedMount: false,
+			controlMount: false,
+			imageId: "sha256:gone",
+			imageRelay2: false,
 		});
 		await m.inspectCapture("cid");
-		await m.inspectCapture("cid");
-		expect(imageInspect).toHaveBeenCalledTimes(1);
+		expect(imageInspect).toHaveBeenCalledTimes(2); // a 404 is not cached
+	});
+	it("an image error other than 404 still propagates (fail-closed)", async () => {
+		for (const err of [
+			Object.assign(new Error("server error"), { statusCode: 500 }),
+			new Error("connect ECONNREFUSED /var/run/docker.sock"),
+		]) {
+			await expect(
+				dm({ container: base, images: { "sha256:aaa": err } }).m.inspectCapture("cid"),
+			).rejects.toThrow(err.message);
+		}
+	});
+	it("the label is read as the image exists NOW: relay2 true, then the image is deleted ⇒ false on the next call of the same instance, as after a restart", async () => {
+		const images: Record<string, Record<string, string>> = {
+			"sha256:aaa": { "io.shared-terminal.conversation-relay": "2" },
+		};
+		const { m, imageInspect } = dm({ container: base, images });
+		expect(((await m.inspectCapture("cid")) as { imageRelay2: boolean }).imageRelay2).toBe(true);
+		delete images["sha256:aaa"]; // `docker rmi -f` while the container keeps running
+		expect(((await m.inspectCapture("cid")) as { imageRelay2: boolean }).imageRelay2).toBe(false);
+		expect(imageInspect).toHaveBeenCalledTimes(2); // no positive cache
+		// A fresh instance (backend restarted) sees the same thing.
+		const fresh = dm({ container: base, images });
+		expect(((await fresh.m.inspectCapture("cid")) as { imageRelay2: boolean }).imageRelay2).toBe(
+			false,
+		);
+		// The same ID pulled again counts as labelled again on the next call.
+		images["sha256:aaa"] = { "io.shared-terminal.conversation-relay": "2" };
+		expect(((await m.inspectCapture("cid")) as { imageRelay2: boolean }).imageRelay2).toBe(true);
 	});
 });
 
@@ -137,6 +176,19 @@ describe("currentSessionImage", () => {
 			relay2: true,
 		});
 		expect(await dm({ images: {} }).m.currentSessionImage()).toBeNull();
+	});
+	it("one inspect per call, read now: the session image deleted ⇒ null on the next call of the same instance; relabelled ⇒ seen", async () => {
+		const images: Record<string, Record<string, string>> = {
+			"shared-terminal-session": { "io.shared-terminal.conversation-relay": "2" },
+		};
+		const { m, imageInspect } = dm({ images });
+		expect((await m.currentSessionImage())?.relay2).toBe(true);
+		expect(imageInspect).toHaveBeenCalledTimes(1); // the ID and the label from the same inspect
+		images["shared-terminal-session"] = {};
+		expect((await m.currentSessionImage())?.relay2).toBe(false);
+		delete images["shared-terminal-session"];
+		expect(await m.currentSessionImage()).toBeNull();
+		expect(imageInspect).toHaveBeenCalledTimes(3);
 	});
 });
 

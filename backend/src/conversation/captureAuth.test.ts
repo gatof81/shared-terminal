@@ -699,6 +699,24 @@ describe("converge(): reconcile (§2.4 row, K2)", () => {
 			expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
 		});
 	}
+	it("a 3.0d capturing container whose image was deleted (no relay label) ⇒ withdrawn, requiresRecreate:true", async () => {
+		for (const running of [true, false]) {
+			session("s1", running ? {} : { status: "stopped" });
+			await configured("s1");
+			const a = make({ container: view({ running, imageRelay2: false }) });
+			expect(await a.authority.converge("s1")).toBe("withdrawn");
+			expect(await exists(hooksFilePath(root, "s1"))).toBe(false);
+			expect(await exists(relayEnabledPath(root, "s1"))).toBe(false);
+			const c = await a.authority.capture("s1");
+			expect([running, c.effective, c.effectiveAfterRestart, c.requiresRecreate]).toEqual([
+				running,
+				false,
+				false,
+				true,
+			]);
+			expect(c.pendingReasons).toContain("image-without-relay");
+		}
+	});
 	it("stopped with retain authorization keeps only a complete pair; a half is retired", async () => {
 		session("s1", { status: "stopped" });
 		const stopped = { container: view({ running: false }) };

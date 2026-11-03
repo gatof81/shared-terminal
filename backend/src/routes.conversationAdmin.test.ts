@@ -157,7 +157,7 @@ import {
 } from "./conversation/revocation.js";
 import { ConversationService } from "./conversation/service.js";
 import { ConversationStore } from "./conversation/store.js";
-import type { DockerManager } from "./dockerManager.js";
+import { type DockerManager, DockerManager as DockerManagerClass } from "./dockerManager.js";
 import { runRecreateAdminCli } from "./recreate/adminCli.js";
 import {
 	deferred,
@@ -415,6 +415,58 @@ describe("PATCH /admin/sessions/:id/conversation (§7, §2.4)", () => {
 		expect(body.capture.pendingReasons).toEqual(expect.arrayContaining(["hooks-file-missing"]));
 		expect(await files(SID)).toEqual({ marker: false, hooksFile: false });
 	}, 15_000);
+
+	it("legacy container whose image was deleted (real DockerManager.inspectCapture, image 404) ⇒ conversation_requested=1, requiresRecreate, nothing written", async () => {
+		await spinUp();
+		// The real Docker port over a fake daemon: a running pre-3.0d container (no token, no
+		// control or managed mount) on an image that no longer exists.
+		const dmgr = new DockerManagerClass({} as SessionManager);
+		(dmgr as unknown as { docker: unknown }).docker = {
+			getContainer: () => ({
+				inspect: async () => ({
+					State: { Running: true },
+					Image: "sha256:deleted",
+					Config: { Env: ["PATH=/usr/bin", "SESSION_ID=x"] },
+					Mounts: [{ Destination: "/home/developer/workspace" }],
+				}),
+			}),
+			getImage: () => ({
+				inspect: async () => {
+					throw Object.assign(new Error("no such image"), { statusCode: 404 });
+				},
+			}),
+		};
+		inspectCapture.mockImplementation(((cid: string) => dmgr.inspectCapture(cid)) as never);
+		try {
+			db.rows.set(SID, sessionRow({ conversation_requested: 0 }));
+			const res = await patch(SID, { enabled: true });
+			expect(res.status).toBe(200);
+			const body = (await res.json()) as {
+				enabled: boolean;
+				capture: {
+					requested: boolean;
+					effective: boolean;
+					requiresRecreate: boolean;
+					pendingReasons: string[];
+				};
+			};
+			expect(body.enabled).toBe(true);
+			expect(body.capture).toMatchObject({
+				requested: true,
+				effective: false,
+				requiresRecreate: true,
+			});
+			expect(body.capture.pendingReasons).toEqual(
+				expect.arrayContaining(["container-without-capture", "image-without-relay"]),
+			);
+			expect(db.rows.get(SID)?.conversation_requested).toBe(1);
+			// Nothing is activated on the old container.
+			expect(await files(SID)).toEqual({ marker: false, hooksFile: false });
+		} finally {
+			// Restored even when an assertion fails: the mock is shared by every later test.
+			inspectCapture.mockImplementation(async () => view);
+		}
+	});
 
 	it("a container that can't capture in place (no token / no control mount / token-mismatch) ⇒ requiresRecreate, residual files removed, nothing written", async () => {
 		const cases: Array<[string, Partial<ContainerView>, Partial<Row>, string]> = [

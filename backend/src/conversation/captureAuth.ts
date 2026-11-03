@@ -297,7 +297,11 @@ export function baseCapture(f: CaptureFacts): Omit<CaptureBlock, "effective" | "
 		else if (corr === "mismatch") reasons.push("token-mismatch");
 		if (!c.imageRelay2) reasons.push("image-without-relay");
 		if (!c.running) reasons.push("stopped");
-		requiresRecreate = withoutCapture || corr === "mismatch";
+		// A container whose own image lacks the relay label — including an image
+		// deleted after the container was created (404 ⇒ no label) — can never
+		// regain write or retain authorization in place: only a new container
+		// from the current image can.
+		requiresRecreate = withoutCapture || corr === "mismatch" || !c.imageRelay2;
 		if (corr === "match" && (!f.marker || !f.hooksFile)) reasons.push("hooks-file-missing");
 	}
 	const effectiveAfterRestart = noContainer
