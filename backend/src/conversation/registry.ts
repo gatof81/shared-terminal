@@ -290,6 +290,134 @@ export async function releaseConversationBinding(
 
 export async function deleteConversationRows(stSessionId: string): Promise<void> {
 	await d1Query("DELETE FROM claude_conversations WHERE st_session_id = ?", [stSessionId]);
+	// Explicit, not left to the FK cascade: D1's foreign-key enforcement is
+	// not something the hard delete should depend on (§9).
+	await d1Query("DELETE FROM conversation_user_meta WHERE st_session_id = ?", [stSessionId]);
+}
+
+// ── Owner metadata (CONVERSATION.md §6.2, v1.8) ────────────────────────────
+
+export interface ConversationOwnerMeta {
+	customTitle: string | null;
+	archivedAt: string | null;
+}
+
+// Explicit columns, never `c.*`: the UNION ALL below needs both halves to
+// have the same arity, and a column added to claude_conversations later
+// would otherwise break the LIST (not just the metadata) at runtime.
+const ROW_COLUMNS = [
+	"session_id",
+	"st_session_id",
+	"kind",
+	"parent_session_id",
+	"parent_inferred",
+	"title",
+	"tab_id",
+	"pane_id",
+	"status",
+	"status_evidence",
+	"status_at",
+	"started_at",
+	"ended_at",
+	"end_reason",
+	"last_event_at",
+	"last_prompt_id",
+	"last_seq",
+	"claude_version",
+	"events_bytes",
+	"events_count",
+	"gaps_count",
+] as const satisfies ReadonlyArray<keyof ConversationRow>;
+
+type RowWithMeta = ConversationRow & {
+	src: "c" | "m";
+	meta_cid: string;
+	meta_custom_title: string | null;
+	meta_archived_at: string | null;
+};
+
+/**
+ * The rows AND the owner metadata in ONE D1 call (§6.2 rule 3: the list is
+ * a hot path). The second half returns metadata whose conversation has no
+ * row — a conversation known only from its files on disk (its row upsert
+ * failed) can still be renamed, and its name must still show.
+ */
+export async function listConversationRowsWithMeta(
+	stSessionId: string,
+): Promise<{ rows: ConversationRow[]; meta: Map<string, ConversationOwnerMeta> }> {
+	const cols = ROW_COLUMNS.map((c) => `c.${c}`).join(", ");
+	const nulls = ROW_COLUMNS.map((c) => `NULL AS ${c}`).join(", ");
+	const r = await d1Query<RowWithMeta>(
+		`SELECT 'c' AS src, c.session_id AS meta_cid, m.custom_title AS meta_custom_title,
+				m.archived_at AS meta_archived_at, ${cols}
+			FROM claude_conversations c
+			LEFT JOIN conversation_user_meta m ON m.st_session_id = c.st_session_id AND m.cid = c.session_id
+			WHERE c.st_session_id = ?
+		UNION ALL
+		SELECT 'm' AS src, m.cid AS meta_cid, m.custom_title AS meta_custom_title,
+				m.archived_at AS meta_archived_at, ${nulls}
+			FROM conversation_user_meta m
+			WHERE m.st_session_id = ? AND NOT EXISTS (
+				SELECT 1 FROM claude_conversations c2 WHERE c2.st_session_id = m.st_session_id AND c2.session_id = m.cid
+			)
+		ORDER BY last_event_at DESC`,
+		[stSessionId, stSessionId],
+	);
+	const rows: ConversationRow[] = [];
+	const meta = new Map<string, ConversationOwnerMeta>();
+	for (const row of r.results) {
+		if (row.meta_custom_title !== null || row.meta_archived_at !== null) {
+			meta.set(row.meta_cid, {
+				customTitle: row.meta_custom_title,
+				archivedAt: row.meta_archived_at,
+			});
+		}
+		if (row.src === "c") {
+			const { src: _s, meta_cid: _c, meta_custom_title: _t, meta_archived_at: _a, ...plain } = row;
+			rows.push(plain);
+		}
+	}
+	return { rows, meta };
+}
+
+/** True when claude_conversations has a row for this conversation of this session. */
+export async function conversationRowExists(stSessionId: string, cid: string): Promise<boolean> {
+	const r = await d1Query<{ n: number }>(
+		"SELECT COUNT(*) AS n FROM claude_conversations WHERE st_session_id = ? AND session_id = ?",
+		[stSessionId, cid],
+	);
+	return (r.results[0]?.n ?? 0) > 0;
+}
+
+/**
+ * One statement, per-field (§6.2): a field that is not in the patch keeps
+ * its stored value; archiving an archived conversation keeps the first
+ * `archived_at`. Returns what is stored afterwards.
+ */
+export async function upsertConversationMeta(
+	stSessionId: string,
+	cid: string,
+	patch: { title?: string | null; archived?: boolean },
+): Promise<ConversationOwnerMeta> {
+	const setTitle = patch.title !== undefined ? 1 : 0;
+	const setArchived = patch.archived !== undefined ? 1 : 0;
+	const archived = patch.archived ? 1 : 0;
+	const r = await d1Query<{ custom_title: string | null; archived_at: string | null }>(
+		`INSERT INTO conversation_user_meta (st_session_id, cid, custom_title, archived_at, updated_at)
+			VALUES (?1, ?2, CASE WHEN ?3 = 1 THEN ?4 ELSE NULL END,
+				CASE WHEN ?5 = 1 AND ?6 = 1 THEN datetime('now') ELSE NULL END, datetime('now'))
+		ON CONFLICT (st_session_id, cid) DO UPDATE SET
+			custom_title = CASE WHEN ?3 = 1 THEN excluded.custom_title ELSE conversation_user_meta.custom_title END,
+			archived_at = CASE
+				WHEN ?5 = 0 THEN conversation_user_meta.archived_at
+				WHEN ?6 = 1 THEN COALESCE(conversation_user_meta.archived_at, datetime('now'))
+				ELSE NULL END,
+			updated_at = excluded.updated_at
+		RETURNING custom_title, archived_at`,
+		[stSessionId, cid, setTitle, patch.title ?? null, setArchived, archived],
+	);
+	const row = r.results[0];
+	return { customTitle: row?.custom_title ?? null, archivedAt: row?.archived_at ?? null };
 }
 
 export function rowStatusAt(row: ConversationRow): Date {

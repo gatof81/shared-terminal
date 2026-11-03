@@ -799,6 +799,28 @@ export const MIGRATIONS: readonly Migration[] = [
 		description: "sessions.revocation_seq — revocations vs a concurrent enable (3.0d)",
 		apply: () => addColumnIfMissing("sessions", "revocation_seq INTEGER NOT NULL DEFAULT 0"),
 	},
+	{
+		// CONVERSATION.md §6.2 (v1.8): the owner's custom title and archive
+		// flag. A table of its own, never columns on claude_conversations:
+		// the capture upserts those rows (creation, heartbeat, releases) and
+		// must not be able to touch — or race — what the owner wrote. Keyed
+		// per ST session, so a CLI `--resume` (same cid) keeps it and a
+		// recreation of the container does not matter.
+		version: 18,
+		description: "conversation_user_meta — owner rename/archive (contract v1.8 §6.2)",
+		apply: async () => {
+			await d1Query(
+				`CREATE TABLE IF NOT EXISTS conversation_user_meta (
+					st_session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+					cid           TEXT NOT NULL,
+					custom_title  TEXT,
+					archived_at   TEXT,
+					updated_at    TEXT NOT NULL,
+					PRIMARY KEY (st_session_id, cid)
+				)`,
+			);
+		},
+	},
 ];
 
 /**

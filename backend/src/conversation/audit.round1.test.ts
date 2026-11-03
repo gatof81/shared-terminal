@@ -54,6 +54,19 @@ const dbStubs = vi.hoisted(() => ({
 			if (row && row.st_session_id === owner) row.status = params[6];
 			return { results: [], success: true, meta: {} };
 		}
+		// v1.8 §6.2: the list now reads rows + owner metadata in one query (no metadata here).
+		if (/^SELECT 'c' AS src/.test(sql)) {
+			const rows = Array.from(dbStubs.conversations.values())
+				.filter((r) => r.st_session_id === params[0])
+				.map((r) => ({
+					src: "c",
+					meta_cid: r.session_id,
+					meta_custom_title: null,
+					meta_archived_at: null,
+					...r,
+				}));
+			return { results: rows, success: true, meta: {} };
+		}
 		if (/^SELECT \* FROM claude_conversations WHERE st_session_id/.test(sql)) {
 			return {
 				results: Array.from(dbStubs.conversations.values()).filter(

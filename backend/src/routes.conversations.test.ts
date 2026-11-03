@@ -53,7 +53,7 @@ import { ForbiddenError, NotFoundError, type SessionManager } from "./sessionMan
 let server: http.Server;
 let base: string;
 
-function start(conversation?: ConversationService) {
+function start(conversation?: ConversationService, composer?: unknown) {
 	const sessions = {
 		assertOwnedBy: vi.fn(async (id: string, userId: string) => {
 			if (id === "missing") throw new NotFoundError();
@@ -68,7 +68,15 @@ function start(conversation?: ConversationService) {
 	app.use(express.json());
 	app.use(
 		"/api",
-		buildRouter(sessions, docker, {} as BootstrapBroadcaster, undefined, undefined, conversation),
+		buildRouter(
+			sessions,
+			docker,
+			{} as BootstrapBroadcaster,
+			undefined,
+			undefined,
+			conversation,
+			composer ? { composer: composer as never } : {},
+		),
 	);
 	server = http.createServer(app);
 	return new Promise<void>((r) =>
@@ -105,16 +113,21 @@ describe("GET /api/sessions/:id/conversations", () => {
 	});
 	it("?capture=0 answers the summaries alone, without the capture check (no relay probe)", async () => {
 		const list = vi.fn();
-		const summaries = vi.fn(async () => [
-			{ sessionId: "c1", kind: "interactive", status: "running", canSendInput: false },
-		]);
-		await start({ list, summaries } as unknown as ConversationService);
+		const summariesWithMeta = vi.fn(async () => ({
+			conversations: [
+				{ sessionId: "c1", kind: "interactive", status: "running", canSendInput: false },
+			],
+			meta: "unavailable",
+		}));
+		await start({ list, summariesWithMeta } as unknown as ConversationService);
 		const res = await fetch(`${base}/api/sessions/s1/conversations?capture=0`);
 		expect(res.status).toBe(200);
 		const body = await res.json();
 		expect(body.capture).toBeNull();
 		expect(body.conversations).toHaveLength(1);
-		expect(summaries).toHaveBeenCalledWith("s1");
+		// v1.8 §6.2: the UI must be able to say the names could not be loaded.
+		expect(body.meta).toBe("unavailable");
+		expect(summariesWithMeta).toHaveBeenCalledWith("s1");
 		expect(list).not.toHaveBeenCalled();
 		// A foreign session is still a 404 on this path.
 		expect((await fetch(`${base}/api/sessions/foreign/conversations?capture=0`)).status).toBe(404);
@@ -143,7 +156,161 @@ describe("GET /api/sessions/:id/conversations", () => {
 				checkedAt: null,
 			},
 			conversations: [],
+			meta: "ok",
 		});
+	});
+});
+
+// ── v1.8 §6.2 rename / archive ─────────────────────────────────────────────
+
+describe("PATCH /api/sessions/:id/conversations/:cid", () => {
+	const summary = (patch: Record<string, unknown> = {}) => ({
+		sessionId: "c1",
+		kind: "interactive",
+		title: "auto",
+		customTitle: null,
+		archivedAt: null,
+		status: "ended",
+		canSendInput: false,
+		...patch,
+	});
+	const patchReq = (sid: string, cid: string, body: unknown, type = "application/json") =>
+		fetch(`${base}/api/sessions/${sid}/conversations/${cid}`, {
+			method: "PATCH",
+			headers: { "Content-Type": type },
+			body: typeof body === "string" ? body : JSON.stringify(body),
+		});
+	const svc = (impl?: (sid: string, cid: string, p: unknown) => unknown) => {
+		const setOwnerMeta = vi.fn(
+			impl ??
+				(async (_sid: string, cid: string, p: { title?: string | null; archived?: boolean }) =>
+					cid === "c1"
+						? summary({
+								customTitle: p.title ?? null,
+								archivedAt: p.archived ? "2026-11-03T10:00:00.000Z" : null,
+							})
+						: null),
+		);
+		return { setOwnerMeta, service: { setOwnerMeta } as unknown as ConversationService };
+	};
+
+	it("renames for the owner and answers the summary, with only the given field passed down", async () => {
+		const { setOwnerMeta, service } = svc();
+		await start(service);
+		const res = await patchReq("s1", "c1", { title: "  Mi   plan " });
+		expect(res.status).toBe(200);
+		expect(res.headers.get("cache-control")).toBe("no-store");
+		expect(await res.json()).toMatchObject({
+			sessionId: "c1",
+			title: "auto",
+			customTitle: "Mi plan",
+		});
+		expect(setOwnerMeta).toHaveBeenCalledWith("s1", "c1", { title: "Mi plan" });
+	});
+	it("archive alone does not touch the title; an empty title means clear", async () => {
+		const { setOwnerMeta, service } = svc();
+		await start(service);
+		expect((await patchReq("s1", "c1", { archived: true })).status).toBe(200);
+		expect(setOwnerMeta).toHaveBeenLastCalledWith("s1", "c1", { archived: true });
+		expect((await patchReq("s1", "c1", { title: "   " })).status).toBe(200);
+		expect(setOwnerMeta).toHaveBeenLastCalledWith("s1", "c1", { title: null });
+	});
+	it("foreign and missing sessions answer the same 404 and never reach the service", async () => {
+		const { setOwnerMeta, service } = svc();
+		await start(service);
+		const foreign = await patchReq("foreign", "c1", { title: "x" });
+		const missing = await patchReq("missing", "c1", { title: "x" });
+		expect(foreign.status).toBe(404);
+		expect(missing.status).toBe(404);
+		expect(await foreign.json()).toEqual(await missing.json());
+		expect(setOwnerMeta).not.toHaveBeenCalled();
+	});
+	it("an unknown conversation is 404 conversation-not-found", async () => {
+		await start(svc().service);
+		const res = await patchReq("s1", "nope", { title: "x" });
+		expect(res.status).toBe(404);
+		expect(await res.json()).toEqual({ error: "conversation-not-found" });
+	});
+	it.each([
+		["no keys", {}],
+		["an unknown key", { title: "x", pinned: true }],
+		["archived not boolean", { archived: "yes" }],
+		["an array body", [1]],
+	])("400 invalid-body for %s", async (_n, body) => {
+		const { setOwnerMeta, service } = svc();
+		await start(service);
+		const res = await patchReq("s1", "c1", body);
+		expect(res.status).toBe(400);
+		expect(await res.json()).toEqual({ error: "invalid-body" });
+		expect(setOwnerMeta).not.toHaveBeenCalled();
+	});
+	it("a JSON `null` body is a 400 from express.json's strict mode, before the handler", async () => {
+		const { setOwnerMeta, service } = svc();
+		await start(service);
+		expect((await patchReq("s1", "c1", "null")).status).toBe(400);
+		expect(setOwnerMeta).not.toHaveBeenCalled();
+	});
+	it("400 invalid-body without a JSON content type (CSRF shape)", async () => {
+		const { setOwnerMeta, service } = svc();
+		await start(service);
+		const res = await patchReq("s1", "c1", JSON.stringify({ title: "x" }), "text/plain");
+		expect(res.status).toBe(400);
+		expect(setOwnerMeta).not.toHaveBeenCalled();
+	});
+	it("title rules: invalid-title and title-too-long, never truncated", async () => {
+		const { setOwnerMeta, service } = svc();
+		await start(service);
+		const bad = await patchReq("s1", "c1", { title: "a\u202Eb" });
+		expect(bad.status).toBe(400);
+		expect(await bad.json()).toEqual({ error: "invalid-title" });
+		const long = await patchReq("s1", "c1", { title: "x".repeat(81) });
+		expect(long.status).toBe(400);
+		expect(await long.json()).toEqual({ error: "title-too-long" });
+		expect((await patchReq("s1", "c1", { title: 5 })).status).toBe(400);
+		expect(setOwnerMeta).not.toHaveBeenCalled();
+	});
+	it("a D1 failure is 503 meta-unavailable", async () => {
+		await start(
+			svc(async () => {
+				throw new Error("D1 down");
+			}).service,
+		);
+		const res = await patchReq("s1", "c1", { archived: true });
+		expect(res.status).toBe(503);
+		expect(await res.json()).toEqual({ error: "meta-unavailable" });
+	});
+	it("without the subsystem wired the route is a 404", async () => {
+		await start(undefined);
+		expect((await patchReq("s1", "c1", { title: "x" })).status).toBe(404);
+	});
+	it("archiving never changes composer eligibility: the composer sees cid/kind/pane only, same answer", async () => {
+		const availability = vi.fn(
+			async (_sid: string, items: Array<{ cid: string; kind: string; paneId: string | null }>) =>
+				new Map(items.map((i) => [i.cid, { canSendInput: true, composer: { blocked: false } }])),
+		);
+		const composer = {
+			availability,
+			noteCapture: vi.fn(),
+			lastCaptureEffective: vi.fn(() => true),
+		};
+		const summariesWithMeta = vi.fn(async () => ({
+			conversations: [
+				summary({ sessionId: "c1", paneId: "%0", archivedAt: "2026-11-03T10:00:00.000Z" }),
+				summary({ sessionId: "c2", paneId: "%1", archivedAt: null }),
+			],
+			meta: "ok",
+		}));
+		await start({ summariesWithMeta } as unknown as ConversationService, composer);
+		const body = await (await fetch(`${base}/api/sessions/s1/conversations?capture=0`)).json();
+		expect(availability.mock.calls[0][1]).toEqual([
+			{ cid: "c1", kind: "interactive", paneId: "%0" },
+			{ cid: "c2", kind: "interactive", paneId: "%1" },
+		]);
+		expect(body.conversations.map((c: { canSendInput: boolean }) => c.canSendInput)).toEqual([
+			true,
+			true,
+		]);
+		expect(body.conversations[0].archivedAt).not.toBeNull();
 	});
 });
 

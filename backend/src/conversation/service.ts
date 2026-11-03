@@ -15,6 +15,7 @@
 
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { parseD1Utc } from "../d1Time.js";
 import { logger } from "../logger.js";
 import {
 	type ActivationDeps,
@@ -40,7 +41,7 @@ import {
 } from "./captureAuth.js";
 import { ancestryArgv, EXEC_TIMEOUT_S, paneStateArgv, parsePaneState } from "./composerText.js";
 import { DedupeTable, identityKey, payloadHash } from "./dedupe.js";
-import { isSafeStSessionId } from "./ids.js";
+import { isSafeClaudeSessionId, isSafeStSessionId } from "./ids.js";
 import {
 	L2_MESSAGE_BYTES,
 	RATE_LIMIT_GAP_WINDOW_MS,
@@ -61,11 +62,14 @@ import {
 } from "./probe.js";
 import { LargeBodyGate, SessionRateLimiter } from "./rateLimit.js";
 import {
+	type ConversationOwnerMeta,
 	type ConversationRow,
+	conversationRowExists,
 	deleteConversationRows,
 	getSessionCapture,
 	HeartbeatCoalescer,
 	listConversationRows,
+	listConversationRowsWithMeta,
 	listRequestedSessions,
 	listRunningCaptureSessions,
 	releaseConversationBinding,
@@ -73,6 +77,7 @@ import {
 	revokeIngestTokens,
 	tokenMatchesHash,
 	updateConversation,
+	upsertConversationMeta,
 } from "./registry.js";
 import { checkRevocation } from "./revocation.js";
 import { applyStateInput, type ConversationState, isLiveClaim, type StateInput } from "./state.js";
@@ -144,6 +149,13 @@ export interface ConversationSummary {
 	parentInferred: boolean;
 	/** 3.2 (§8.1.1): orientative; false until the composer route decorates it. */
 	canSendInput: boolean;
+	/**
+	 * v1.8 §6.2 — the owner's name for it (prevails over `title`, which stays
+	 * the automatic one) and when it was archived. Owner data, never derived
+	 * from the events.
+	 */
+	customTitle: string | null;
+	archivedAt: string | null;
 	/** 3.2 (§8.1.8): the pane's blocking state, when the composer is wired. */
 	composer?: {
 		blocked: boolean;
@@ -1352,9 +1364,10 @@ export class ConversationService {
 	async list(stSessionId: string): Promise<{
 		capture: CaptureBlock;
 		conversations: ConversationSummary[];
+		meta: "ok" | "unavailable";
 	}> {
 		const capture = await this.authority.capture(stSessionId);
-		return { capture, conversations: await this.summaries(stSessionId) };
+		return { capture, ...(await this.summariesWithMeta(stSessionId)) };
 	}
 
 	/**
@@ -1363,10 +1376,25 @@ export class ConversationService {
 	 * open must not pay for.
 	 */
 	async summaries(stSessionId: string): Promise<ConversationSummary[]> {
+		return (await this.summariesWithMeta(stSessionId)).conversations;
+	}
+
+	/**
+	 * The summaries plus whether the owner metadata could be read (§6.2
+	 * rule 3): with D1 failing the list is still served from the resident
+	 * indexes, but `meta: "unavailable"` lets the UI say the names are
+	 * missing instead of passing the automatic titles off as current.
+	 */
+	async summariesWithMeta(
+		stSessionId: string,
+	): Promise<{ conversations: ConversationSummary[]; meta: "ok" | "unavailable" }> {
 		let rows: ConversationRow[] = [];
+		let ownerMeta = new Map<string, ConversationOwnerMeta>();
+		let meta: "ok" | "unavailable" = "ok";
 		try {
-			rows = await listConversationRows(stSessionId);
+			({ rows, meta: ownerMeta } = await listConversationRowsWithMeta(stSessionId));
 		} catch (err) {
+			meta = "unavailable";
 			logger.warn(`[conversation] list failed for ${stSessionId}: ${(err as Error).message}`);
 		}
 		const out: ConversationSummary[] = [];
@@ -1382,10 +1410,33 @@ export class ConversationService {
 			const index = this.deps.store.getResidentIndex(stSessionId, rt.cid);
 			if (index) out.push(summarizeIndex(index));
 		}
+		for (const s of out) applyOwnerMeta(s, ownerMeta.get(s.sessionId));
 		out.sort((a, b) =>
 			a.lastEventAt < b.lastEventAt ? 1 : a.lastEventAt > b.lastEventAt ? -1 : 0,
 		);
-		return out;
+		return { conversations: out, meta };
+	}
+
+	/**
+	 * v1.8 §6.2 — rename/archive. The conversation must exist for THIS
+	 * session (files on disk, a resident index, or a D1 row); `null` for
+	 * "no such conversation". Writes only conversation_user_meta: never the
+	 * events file, the index, the state or the binding (rule 2).
+	 */
+	async setOwnerMeta(
+		stSessionId: string,
+		cid: string,
+		patch: { title?: string | null; archived?: boolean },
+	): Promise<ConversationSummary | null> {
+		if (!isSafeClaudeSessionId(cid)) return null;
+		const known =
+			this.deps.store.getResidentIndex(stSessionId, cid) !== undefined ||
+			(await this.deps.store.exists(stSessionId, cid).catch(() => false)) ||
+			(await conversationRowExists(stSessionId, cid));
+		if (!known) return null;
+		await upsertConversationMeta(stSessionId, cid, patch);
+		const { conversations } = await this.summariesWithMeta(stSessionId);
+		return conversations.find((c) => c.sessionId === cid) ?? null;
 	}
 
 	/**
@@ -1806,6 +1857,15 @@ function parseBearer(header: string | undefined): string | null {
 	return m ? m[1] : null;
 }
 
+function applyOwnerMeta(s: ConversationSummary, meta: ConversationOwnerMeta | undefined): void {
+	if (!meta) return;
+	s.customTitle = meta.customTitle;
+	// D1 `datetime('now')` is suffix-less UTC: parse it as UTC, answer ISO.
+	s.archivedAt = meta.archivedAt
+		? parseD1Utc(meta.archivedAt, "conversation_user_meta").toISOString()
+		: null;
+}
+
 function summarizeIndex(index: ConversationIndex): ConversationSummary {
 	return {
 		sessionId: index.cid,
@@ -1827,6 +1887,8 @@ function summarizeIndex(index: ConversationIndex): ConversationSummary {
 		parentSessionId: index.parentSessionId,
 		parentInferred: index.parentInferred,
 		canSendInput: false,
+		customTitle: null,
+		archivedAt: null,
 	};
 }
 
@@ -1851,5 +1913,7 @@ function summarizeRow(row: ConversationRow): ConversationSummary {
 		parentSessionId: row.parent_session_id,
 		parentInferred: row.parent_inferred === 1,
 		canSendInput: false,
+		customTitle: null,
+		archivedAt: null,
 	};
 }
