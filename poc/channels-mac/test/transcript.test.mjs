@@ -176,9 +176,9 @@ test("informe: sección de la alternativa A separada; la prueba sigue no limpia 
 	assert.match(md, /Prueba individual no limpia/);
 });
 
-test("manage: el probe comparte la entrada de UserPromptSubmit y el autotest lo verifica", () => {
+test("manage --with-probe: el probe comparte la entrada de UserPromptSubmit y el autotest lo verifica", () => {
 	const f = mkdtempSync(join(tmpdir(), "poc0-manage-probe-"));
-	install(f, { bunPath: process.execPath });
+	install(f, { bunPath: process.execPath, probe: true });
 	const s = JSON.parse(readFileSync(join(f, ".claude", "settings.local.json"), "utf8"));
 	assert.equal(s.hooks.UserPromptSubmit[0].hooks.length, 2);
 	assert.match(s.hooks.UserPromptSubmit[0].hooks[1].command, /transcript-probe\.mjs/);

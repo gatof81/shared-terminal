@@ -3,6 +3,7 @@
 //   bun .poc0/send.mjs --label T --count 1  --min-idle 30     # first instrumented test
 //   bun .poc0/send.mjs --label S --count 10 --min-idle 30     # short series
 //   bun .poc0/send.mjs --label L --count 2  --min-idle 3600   # long series
+//   bun .poc0/send.mjs --label B --count 1  --min-idle 30     # XB-1 (alternative B, single message)
 // Run from the test folder. It never types in the terminal, never retries,
 // and stops at the first message without a UserPromptSubmit, at any
 // StopFailure, or on a harness problem (which is never a NO-GO).
@@ -31,11 +32,12 @@ const die = (m, code = 4) => {
 	console.error(m);
 	process.exit(code);
 };
-if (!/^[A-Z]$/.test(label) || !(count > 0) || !(minIdle >= 0)) die("uso: send.mjs --label T|S|L --count N --min-idle S", 1);
+if (!/^[A-Z]$/.test(label) || !(count > 0) || !(minIdle >= 0)) die("uso: send.mjs --label T|B|S|L --count N --min-idle S", 1);
 // Only the single instrumented test is authorized for now; the 12-sample
 // series need a separate decision and an explicit flag.
-if (label !== "T" && !args.includes("--series-authorized")) die("sólo está autorizada la prueba individual (--label T --count 1); las series necesitan --series-authorized", 1);
-if (label === "T" && count !== 1) die("la prueba individual es de un solo mensaje (--count 1)", 1);
+const SINGLE = new Set(["T", "B"]);
+if (!SINGLE.has(label) && !args.includes("--series-authorized")) die("sólo están autorizadas las pruebas individuales (--label T|B --count 1); las series necesitan --series-authorized", 1);
+if (SINGLE.has(label) && count !== 1) die("la prueba individual es de un solo mensaje (--count 1)", 1);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const sh = (c, a) => spawnSync(c, a, { encoding: "utf8", timeout: 30_000 });
 const sha = (s) => createHash("sha256").update(s).digest("hex");
@@ -202,7 +204,9 @@ for (let n = 1; n <= count; n++) {
 	// row can be re-derived from hooks.jsonl later without guessing.
 	f = windowFacts(hooks(), { id, fromLine });
 	Object.assign(rec, factsToRow(f, { id, tSend, reply }), { cli_received: cliReceived, hooks_lines: [fromLine, f.lastLine] });
-	if (f.ups) rec.transcript_a = laterTranscriptCheck(f.ups, id, tSend);
+	// Alternative A only when its probe is installed (XA-1). XB-1 installs no
+	// probe, and a later read of the transcript is never evidence there.
+	if (f.ups && existsSync(join(OUT, "transcript-probe.jsonl"))) rec.transcript_a = laterTranscriptCheck(f.ups, id, tSend);
 	writeFileSync(sendsPath, `${JSON.stringify(rec)}\n`, { flag: "a" });
 	console.log(`#${n} ${id}: hook=${!!f.ups}${f.ups ? ` (${rec.ups.latency_ms} ms, source=${f.ups.source_present ? f.ups.source : "<ausente>"})` : ""} · Stop=${!!f.stop} · respuesta en Fakechat=${!!reply}`);
 	if (!f.ups) die(`#${n}: sin UserPromptSubmit en 120 s. Serie detenida (no se reintenta). Ver el informe.`, 5);

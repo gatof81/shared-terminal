@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { install, uninstall } from "../manage.mjs";
+import { check, install, uninstall } from "../manage.mjs";
 
 const bunPath = process.execPath;
 const folder = () => mkdtempSync(join(tmpdir(), "poc0-manage-"));
@@ -96,7 +96,8 @@ test("settings.local.json inválido: install se niega", () => {
 
 // The owner's Mac has the PREVIOUS kit installed (logger only on
 // UserPromptSubmit). The new manage.mjs must retire it, keep every log, and
-// then install the new kit with the probe.
+// then install the new kit (XB-1: logger only on UserPromptSubmit, the mod in
+// .poc0/mod and nowhere in the settings).
 function oldInstall(f, prior) {
 	const poc = join(f, ".poc0");
 	mkdirSync(join(poc, "out"), { recursive: true });
@@ -117,7 +118,7 @@ function oldInstall(f, prior) {
 	writeFileSync(join(poc, "out", "sends-T.jsonl"), '{"id":"P0T01-f9dfb6"}\n');
 }
 
-test("kit anterior instalado: el manage nuevo lo retira byte por byte, conserva los logs e instala la sonda", () => {
+test("kit anterior instalado: el manage nuevo lo retira byte por byte, conserva los logs e instala el kit XB-1", () => {
 	const f = folder();
 	oldInstall(f, PRIOR);
 	const logsBefore = readFileSync(join(f, ".poc0", "out", "hooks.jsonl"), "utf8") + readFileSync(join(f, ".poc0", "out", "sends-T.jsonl"), "utf8");
@@ -128,8 +129,11 @@ test("kit anterior instalado: el manage nuevo lo retira byte por byte, conserva 
 	assert.equal(readFileSync(join(f, ".poc0", "out", "hooks.jsonl"), "utf8") + readFileSync(join(f, ".poc0", "out", "sends-T.jsonl"), "utf8"), logsBefore);
 	install(f, { bunPath });
 	const s = JSON.parse(readFileSync(settings(f), "utf8"));
-	assert.equal(s.hooks.UserPromptSubmit.at(-1).hooks.length, 2);
+	assert.equal(s.hooks.UserPromptSubmit.at(-1).hooks.length, 1, "XB-1 no instala la sonda del transcript");
+	assert.ok(existsSync(join(f, ".poc0", "mod", "hooks", "register.mjs")));
+	assert.equal(JSON.stringify(s).includes("st-provenance-probe"), false, "el mod no se nombra en settings");
 	assert.equal(uninstall(f).mode, "restaurado-exacto");
+	assert.equal(existsSync(join(f, ".poc0", "mod")), false, "uninstall quita la copia del mod");
 	assert.equal(readFileSync(settings(f), "utf8"), PRIOR);
 });
 
@@ -145,4 +149,30 @@ test("kit anterior + permiso guardado por Claude durante T: se quitan sólo los 
 	assert.deepEqual(s.permissions.allow, ["mcp__plugin_fakechat_fakechat__reply", "Bash(ls:*)"]);
 	assert.equal(JSON.stringify(s).includes(".poc0/"), false);
 	assert.deepEqual(s.hooks, { Stop: [{ hooks: [{ type: "command", command: "echo mía" }] }] });
+});
+
+// XA-1 is what the owner's Mac has now: logger + probe on UserPromptSubmit,
+// probe files copied. The XB-1 manage must retire it the same way.
+test("kit XA-1 (con sonda) instalado: el manage XB-1 lo retira byte por byte y conserva out/", () => {
+	const f = folder();
+	mkdirSync(join(f, ".claude"));
+	writeFileSync(settings(f), PRIOR);
+	install(f, { bunPath, probe: true });
+	writeFileSync(join(f, ".poc0", "out", "transcript-probe.jsonl"), '{"status":"unverified"}\n');
+	const r = uninstall(f);
+	assert.equal(r.mode, "restaurado-exacto");
+	assert.equal(readFileSync(settings(f), "utf8"), PRIOR);
+	assert.equal(existsSync(join(f, ".poc0", "transcript-probe.mjs")), false);
+	assert.equal(readFileSync(join(f, ".poc0", "out", "transcript-probe.jsonl"), "utf8"), '{"status":"unverified"}\n');
+});
+
+test("check XB-1: mod copia exacta y fuera de settings; una copia alterada del mod hace fallar el check", () => {
+	const f = folder();
+	install(f, { bunPath });
+	const c = check(f);
+	assert.equal(c.events.length, 7);
+	assert.equal(c.probe, null);
+	assert.deepEqual(c.mod, { ok: true, inSettings: false });
+	writeFileSync(join(f, ".poc0", "mod", "hooks", "bind.mjs"), "// cambiado");
+	assert.equal(check(f).mod.ok, false);
 });

@@ -1,0 +1,8 @@
+{
+  "name": "st-provenance-probe",
+  "version": "0.0.1",
+  "description": "XB-1: observes prompt.submit origin and binds it to the UserPromptSubmit prompt_id. Writes facts only, never text.",
+  "author": {
+    "name": "Shared Terminal POC"
+  }
+}

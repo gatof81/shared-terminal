@@ -14,6 +14,8 @@ credenciales y **no** usa `/logout`.
 | `idle.mjs` / `classify.mjs` | Lógica pura de inactividad observada y de clasificación (despertar ≠ bidireccional), cubierta por `test/` |
 | `events.mjs` | Identidad de evento = **línea absoluta** de `hooks.jsonl` (nunca identidad de objeto entre lecturas) y hechos de la ventana de cada envío; cubierta por `test/events.test.mjs` |
 | `transcript-probe.mjs` / `transcript-match.mjs` | Alternativa A (#512 04-poc.md §1.11): en `UserPromptSubmit`, **una** lectura acotada (≤ 1 MiB final) del transcript de la sesión para ver si el registro `origin.kind=channel` con ese `prompt_id` y `message_id` ya está escrito. Observacional: no imprime, sale con 0, no espera ni reintenta; guarda sólo veredicto, motivos, conteos y tiempos en `out/transcript-probe.jsonl`. Todo caso dudoso es `unverified` |
+| `mod/` (`st-provenance-probe`) | Alternativa B (#512 04-poc.md §1.13), XB-1: mod **observacional** que se carga sólo con `claude --plugin-dir .poc0/mod` (ninguna configuración lo nombra). En `prompt.submit` lee `origin` (lo pone el CLI, ningún hook puede cambiarlo); lo liga al `prompt_id` del `classic.UserPromptSubmit` que corre **dentro** de su `next()`; con dos envíos en vuelo no liga ninguno. Cada handler llama `next(e)` una vez y devuelve lo que devuelve. Escribe un JSON por evento en `out/mod/` sin texto: origen, conteos, ids de prompt y sesión |
+| `xb.mjs` | `controls` genera los dos prompts de control (tecleado y con etiqueta `<channel>` pegada); `report` junta `out/mod/`, `hooks.jsonl` y `sends-B.jsonl` por `prompt_id` y da PASS / FAIL / INCONCLUSIVE con alias y booleanos |
 | `rediagnose.mjs` | Recalcula la ventana de un envío **desde los registros existentes**, sin modificarlos; escribe `rediagnosis-<id>.json/.md` aparte |
 | `send.mjs` | Envía el mensaje de prueba por Fakechat (`POST /upload`, como la página) y mide: hook, `Stop`, respuesta en Fakechat. Nunca teclea en la terminal ni reintenta; sin `--series-authorized` sólo acepta la prueba individual |
 | `report.mjs` | Arma la sección de resultados para la PR #512 |
@@ -66,7 +68,8 @@ locales sólo aplican a sesiones abiertas en `TEST`.
 bun "$KIT/manage.mjs" install "$TEST"
 bun "$KIT/manage.mjs" check "$TEST"
 # debe decir: eventos con el logger: (7 eventos) · autotest: exit=0 stdout="" escribió=true
-# y: sonda del transcript: exit=0 stdout="" veredicto=verified
+# y: sonda del transcript: no instalada (XB-1)   ← con --with-probe (XA-1): exit=0 stdout="" veredicto=verified
+# y: mod XB-1 en .poc0/mod: copia exacta=true, nombrado en settings=false
 ```
 
 `install` guarda una copia exacta de tu `settings.local.json` (si existía) en `TEST/.poc0/`.
