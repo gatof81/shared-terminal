@@ -78,7 +78,7 @@ test("records keep the server's conn and nonce, and only type-checked child fiel
 	assert.equal(c1.conn, conn(1));
 	assert.match(c1.nonce, /^[0-9a-f]{16}$/);
 	const h = recs.find((r) => r.label === "hold-c");
-	assert.deepEqual(h.waitheld, { waited: true, conn: conn(4) });
+	assert.deepEqual(h.waitheld, { waited: true, conn: conn(4), error: null, exit: 0, held_last_error: null, ms: 0 });
 	assert.deepEqual(h.child.holders, [{ pid: 8, fd: 30, cloexec: true }]);
 	assert.equal(JSON.stringify(recs).includes("SECRET"), false);
 	assert.equal(JSON.stringify(recs).includes("extra"), false);
@@ -96,12 +96,25 @@ test("a fetch rejection is recorded by class and never escapes", async () => {
 	assert.ok(recs.some((r) => r.kind === "done"));
 });
 
-test("hold: no fdcheck when waitheld did not see the connection", async () => {
-	const { log, recs } = await runProbe({ runImpl: async () => ({ exitCode: 0, stdout: JSON.stringify({ waited: false }), stderr: "" }) });
+test("hold: no fdcheck when waitheld did not see the connection, and the record says why", async () => {
+	const { log, recs } = await runProbe({ runImpl: async () => ({ exitCode: 0, stdout: JSON.stringify({ waited: false, held_last_error: "EACCES" }), stderr: "" }) });
 	assert.equal(log.filter((l) => l[0] === "run" && l[1] === "fdcheck").length, 0);
 	const h = recs.find((r) => r.label === "hold-h");
-	assert.deepEqual(h.waitheld, { waited: false, conn: null });
+	assert.deepEqual(h.waitheld, { waited: false, conn: null, error: null, exit: 0, held_last_error: "EACCES", ms: 0 });
 	assert.equal(h.child, undefined);
+});
+
+test("hold: a waitheld run that fails is recorded as its error class", async () => {
+	const { recs } = await runProbe({ runImpl: async () => { throw new Error("$.process.run refused: x"); } });
+	const h = recs.find((r) => r.label === "hold-h");
+	assert.equal(h.waitheld.waited, false);
+	assert.equal(h.waitheld.error, "refused-other");
+	assert.equal(h.child, undefined);
+});
+
+test("hold: the checker's reason is kept only when it looks like one", async () => {
+	const { recs } = await runProbe({ runImpl: async () => ({ exitCode: 0, stdout: JSON.stringify({ waited: false, held_last_error: "/etc/passwd x" }), stderr: "" }) });
+	assert.equal(recs.find((r) => r.label === "hold-h").waitheld.held_last_error, null);
 });
 
 test("hold: unparsable or failing child output is an error field, not a crash", async () => {

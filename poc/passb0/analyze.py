@@ -270,8 +270,19 @@ def analyze(D):
             continue
         ch = r.get("child") or {}
         row = {}
-        if not (r.get("waitheld") or {}).get("waited") or ch.get("waited") is not True or ch.get("held_conn") != r.get("conn"):
+        wh = r.get("waitheld") or {}
+        if not wh.get("waited") or ch.get("waited") is not True or ch.get("held_conn") != r.get("conn"):
             inc(f"checker-not-synchronized:{l}")
+            # Which step did not synchronize, and the reason each one gave (no token leaves).
+            facts[f"{l}_sync"] = {
+                "waitheld_waited": wh.get("waited") is True,
+                "waitheld_error": wh.get("error"),
+                "waitheld_held_last_error": wh.get("held_last_error"),
+                "fdcheck_ran": bool(ch),
+                "fdcheck_waited": ch.get("waited") is True,
+                "fdcheck_held_last_error": ch.get("held_last_error"),
+                "conn_matches": ch.get("held_conn") is not None and ch.get("held_conn") == r.get("conn"),
+            }
             facts[f"{l}_fd"] = row
             continue
         if ch.get("peer_known") is not True:

@@ -240,6 +240,62 @@ class RoCheck(unittest.TestCase):
         self.assertEqual(set(r.values()), {"EACCES"})
 
 
+class HeldFile(unittest.TestCase):
+    """VM100 run 1 (2026-11-03): hold-h never synchronized. The host server inherits the
+    runner's umask 077, so without an explicit mode the held file is 0600 and a checker
+    running as another uid cannot read it."""
+
+    def test_held_file_is_readable_by_others_even_under_umask_077(self):
+        d = tempfile.mkdtemp()
+        sock, held = os.path.join(d, "h.sock"), os.path.join(d, "held-h.json")
+        p = subprocess.Popen([sys.executable, "-I", B0, "server", "--scope", "host", "--sock", sock, "--out", d,
+                              "--held", held, "--expect-container", "x" * 64, "--hold-ms", "300", "--deadline-s", "20"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=lambda: os.umask(0o077))
+        try:
+            for _ in range(100):
+                if os.path.exists(sock):
+                    break
+                time.sleep(0.05)
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.connect(sock)
+            body = b'{"label":"hold-h","nonce":"ab"}'
+            s.sendall(b"POST /hold HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+            while s.recv(4096):
+                pass
+            s.close()
+            self.assertEqual(os.stat(held).st_mode & 0o777, 0o644)
+            # The results the same server writes stay private: only the held file is widened.
+            self.assertEqual(os.stat(os.path.join(d, "h.jsonl")).st_mode & 0o077, 0)
+        finally:
+            p.terminate()
+            p.wait(10)
+
+    def run_waitheld(self, held, after_ms=0):
+        r = subprocess.run([sys.executable, "-I", B0, "waitheld", "--held", held, "--after-ms", str(after_ms), "--wait-ms", "300"],
+                           capture_output=True, text=True, timeout=10)
+        return json.loads(r.stdout)
+
+    def test_waitheld_says_why_it_did_not_synchronize(self):
+        d = tempfile.mkdtemp()
+        held = os.path.join(d, "held.json")
+        self.assertEqual(self.run_waitheld(held), {"waited": False, "held_conn": None, "held_last_error": "ENOENT"})
+        b0.write_json_atomic(held, {"conn": "0" * 16, "t_ms": 5})
+        self.assertEqual(self.run_waitheld(held, after_ms=10)["held_last_error"], "stale")
+        os.chmod(held, 0)
+        try:
+            self.assertEqual(self.run_waitheld(held)["held_last_error"], "EACCES")
+        finally:
+            os.chmod(held, 0o600)
+        r = self.run_waitheld(held)
+        self.assertEqual((r["waited"], r["held_conn"]), (True, "0" * 16))
+        self.assertNotIn("held_last_error", r)
+
+    def test_fdcheck_reports_the_same_reason(self):
+        d = tempfile.mkdtemp()
+        out = b0.fdcheck(os.path.join(d, "absent.json"), 0, 200)
+        self.assertEqual((out["waited"], out["held_last_error"]), (False, "ENOENT"))
+
+
 class Stop(unittest.TestCase):
     def start_server(self):
         d = tempfile.mkdtemp()

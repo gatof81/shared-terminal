@@ -185,6 +185,18 @@ class Negatives(unittest.TestCase):
             D.update(base_h=None)
         self.assertEqual(run(m)["verdict"], "FAIL")
 
+    def test_unsynchronized_checker_says_which_step_and_why(self):
+        def m(D):
+            call(D, "hold-h").update(waitheld={"waited": False, "conn": None, "error": None, "exit": 0, "held_last_error": "EACCES"})
+            call(D, "hold-h").pop("child")
+        r = run(m)
+        self.assertEqual(r["verdict"], "INCONCLUSIVE")
+        self.assertIn("checker-not-synchronized:hold-h", r["reasons"])
+        self.assertEqual(r["facts"]["hold-h_sync"], {"waitheld_waited": False, "waitheld_error": None, "waitheld_held_last_error": "EACCES",
+                                                     "fdcheck_ran": False, "fdcheck_waited": False, "fdcheck_held_last_error": None,
+                                                     "conn_matches": False})
+        self.assertNotIn("hold-c_sync", r["facts"])
+
     def test_main_exit_code_on_non_pass(self):
         d = tempfile.mkdtemp()
         self.assertEqual(quiet_main(["analyze.py", "report", d]), 2)

@@ -52,11 +52,13 @@ def errname(e):
     return errno.errorcode.get(code, type(e).__name__) if code else type(e).__name__
 
 
-def write_json_atomic(path, obj):
+def write_json_atomic(path, obj, mode=None):
     tmp = f"{path}.tmp{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(json.dumps(obj) + "\n")
         f.flush()
+        if mode is not None:
+            os.fchmod(f.fileno(), mode)
         os.fsync(f.fileno())
     os.replace(tmp, path)
 
@@ -304,7 +306,10 @@ class Server:
             rec.update(parse_body(raw))
             rec["conn"] = secrets.token_hex(8)
             if rec["path"] == "/hold":
-                write_json_atomic(self.held, {"scope": self.scope, "conn": rec["conn"], "peer_ino": rec.get("peer_ino"), "t_ms": int(time.time() * 1000)})
+                # The reader is the checker in the container, uid 1000, which need not be this
+                # process's uid, and the runner's umask 077 would make the file 0600: set the
+                # mode explicitly, as open() did for the socket. It holds no secret.
+                write_json_atomic(self.held, {"scope": self.scope, "conn": rec["conn"], "peer_ino": rec.get("peer_ino"), "t_ms": int(time.time() * 1000)}, mode=0o644)
                 self.stop.wait(self.hold_ms / 1000)
             respond(conn, 200, {"conn": rec["conn"], "scope": self.scope})
             rec["status"] = 200
@@ -347,17 +352,25 @@ class Server:
 
 # ── fdcheck: what a child of the caller actually holds ────────────────────
 
-def wait_held(held, after_ms=0, wait_ms=8000):
+def wait_held(held, after_ms=0, wait_ms=8000, why=None):
+    """The held file written after after_ms, or None. `why` (a dict) receives the reason
+    of the last failed read, so a checker that never synchronized says why."""
     deadline = time.monotonic() + wait_ms / 1000
+    last = "none"
     while time.monotonic() < deadline:
         try:
             with open(held, encoding="utf-8") as f:
                 h = json.loads(f.read())
             if isinstance(h, dict) and isinstance(h.get("t_ms"), int) and h["t_ms"] >= after_ms:
                 return h
-        except (OSError, json.JSONDecodeError):
-            pass
+            last = "stale" if isinstance(h, dict) else "not-object"
+        except OSError as e:
+            last = errname(e)
+        except json.JSONDecodeError:
+            last = "not-json"
         time.sleep(0.05)
+    if why is not None:
+        why["held_last_error"] = last
     return None
 
 
@@ -366,7 +379,7 @@ def fdcheck(held, after_ms=0, wait_ms=8000):
     # this process opens no socket of its own before this line.
     own = set(socket_inodes_of("self").values())
     out = {"self_pid": os.getpid(), "self_ppid": os.getppid(), "own_socket_count": len(own)}
-    h = wait_held(held, after_ms, wait_ms)
+    h = wait_held(held, after_ms, wait_ms, out)
     out["waited"] = h is not None
     if h is None:
         return out
@@ -663,8 +676,9 @@ def main(argv=None):
         print(json.dumps({"listening": True, "scope": a.scope, "pid": os.getpid()}), flush=True)
         srv.serve(a.deadline_s)
     elif a.cmd == "waitheld":
-        h = wait_held(a.held, a.after_ms, a.wait_ms)
-        print(json.dumps({"waited": h is not None, "held_conn": (h or {}).get("conn")}))
+        why = {}
+        h = wait_held(a.held, a.after_ms, a.wait_ms, why)
+        print(json.dumps({"waited": h is not None, "held_conn": (h or {}).get("conn"), **why}))
     elif a.cmd == "fdcheck":
         print(json.dumps(fdcheck(a.held, a.after_ms, a.wait_ms)))
     elif a.cmd == "client":

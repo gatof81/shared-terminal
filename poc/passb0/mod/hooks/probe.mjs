@@ -18,6 +18,9 @@ export const PLAN = [
 ];
 
 const HEX16 = /^[0-9a-f]{16}$/;
+// errno names and the checker's own reasons ("stale", "not-json", "none").
+const REASON = /^[A-Za-z-]{1,16}$/;
+const reason = (v) => (typeof v === "string" && REASON.test(v) ? v : null);
 
 // Error classes from the CLI's own refusal texts (2.1.314/2.1.317): only the class
 // is kept, so a message never carries a path or a host into the record.
@@ -87,7 +90,16 @@ export function createProbe({ inst, now, rand }) {
 			const w = await Promise.resolve()
 				.then(() => io.run(py("waitheld", t.held, after), { timeoutMs: 15000 }))
 				.then(parseRun, (err) => ({ error: classify(err) }));
-			rec.waitheld = { waited: w.waited === true, conn: typeof w.held_conn === "string" && HEX16.test(w.held_conn) ? w.held_conn : null };
+			rec.waitheld = {
+				waited: w.waited === true,
+				conn: typeof w.held_conn === "string" && HEX16.test(w.held_conn) ? w.held_conn : null,
+				// Why it did not synchronize: the run itself failed (`error`, an error class), or the
+				// checker ran and never read a fresh held file (`held_last_error`, e.g. EACCES).
+				error: typeof w.error === "string" ? w.error.slice(0, 40) : null,
+				exit: Number.isInteger(w.exit) ? w.exit : null,
+				held_last_error: reason(w.held_last_error),
+				ms: now() - after,
+			};
 			if (w.waited === true) {
 				const c = await Promise.resolve()
 					.then(() => io.run(py("fdcheck", t.held, after), { timeoutMs: 15000 }))
@@ -140,6 +152,7 @@ export function pickChild(c) {
 		self_ppid: int(c?.self_ppid),
 		waited: c?.waited === true,
 		held_conn: typeof c?.held_conn === "string" && HEX16.test(c.held_conn) ? c.held_conn : null,
+		held_last_error: reason(c?.held_last_error),
 		peer_known: c?.peer_known === true,
 		peer_in_self: typeof c?.peer_in_self === "boolean" ? c.peer_in_self : null,
 		own_socket_count: int(c?.own_socket_count),
