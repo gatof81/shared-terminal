@@ -1138,6 +1138,290 @@ GO/NO-GO final:
 
 Con un FAIL en B0, el diseño basado en el pid queda descartado y se pasa directamente a §1.14.7.
 
+#### 1.14.9 Prototipo PASS-B0 y procedimiento (kit `poc/channels-phase0@b902dff`; **no ejecutado**)
+
+Decisión del responsable (2026-11-03): **GO para implementar sólo el prototipo y NO-GO para
+ejecutarlo**. Al autorizar se fijan:
+- **Host:** VM100, sólo con un contenedor descartable aislado.
+- **CLI:** el 2.1.314 de la imagen, sin actualizar.
+- **Login:** ninguno. Sin login y sin mod ⇒ INCONCLUSIVE.
+
+**Ajustes incorporados al diseño:**
+- **A4b sigue siendo hipótesis.** Reabrir un pipe por `/proc/<pid>/fd` pasa por las comprobaciones
+  de ptrace en modo READ y por los permisos del objeto. Compartir uid **no** garantiza el acceso.
+- **A3: la bandera y la consecuencia se miden por separado.** La bandera es `O_CLOEXEC` en
+  `fdinfo`. La consecuencia es si un hijo creado con `fork` + `exec` **mientras la conexión está
+  abierta** tiene el inodo del par entre sus fds. El kit tiene un test que muestra que divergen: un
+  fd sin `O_CLOEXEC` que el lanzador igual cierra.
+- **A1: todo se mide por conexión concreta.**
+  - Cada llamada del mod lleva un nonce, y el servidor responde un token de conexión.
+  - Por conexión se registran `SO_PEERCRED`, `SO_PEERPIDFD` (con `Pid`/`NSpid` del `fdinfo` del
+    pidfd), el `starttime` releído (estabilidad) y el inodo del par por sock_diag.
+  - No se infiere que dos llamadas comparten descriptor ni proceso: `h2` mide si reutiliza la
+    conexión de `h1`, y sólo es informativo.
+- **A6: el HMAC autentica la posesión de K**, no que la llamada haya salido de nuestro mod.
+- **H-ND es un experimento propio de B1**, no una propiedad.
+
+**Contenido del kit** (`poc/passb0/`):
+- el mod `st-passb0-probe`;
+- `b0.py`, con `server` (en el contenedor o en el host), `waitheld`, `fdcheck`, `client`
+  (`base` y `control`), `rocheck` y `cliinfo`;
+- `analyze.py`;
+- los tests.
+
+No incluye gateway, claves ni HMAC, ni toca el backend, el Monitor o los managed settings.
+
+**Tests sintéticos** (en desarrollo, kernel 6.8, sin CLI ni Docker):
+- `test_b0.py`: 17 tests con sockets Unix reales:
+  - pid, uid y tgid del par, también cuando conecta un hilo;
+  - pidfd;
+  - el inodo del par por sock_diag es el del extremo del cliente;
+  - otro proceso se ve como sí mismo;
+  - un fd `O_CLOEXEC` no se hereda;
+  - un fd heredable entregado a propósito **sí** se detecta;
+  - bandera y consecuencia divergentes;
+  - el control positivo;
+  - peticiones malformadas o enormes se registran sin caer el servidor;
+  - los campos del cuerpo pasan por filtros;
+  - no se pisa un socket existente;
+  - `cgroup` distinto en el host;
+  - parseo de `status` y de `stat` con un `comm` hostil;
+  - `rocheck` sobre un directorio escribible y sobre uno sin permiso.
+- `test_analyze.py`: un PASS, un ida y vuelta por archivos y un reporte sin identificadores; 38
+  mutaciones, una por criterio; FAIL prevalece sobre INCONCLUSIVE.
+- `probe.test.mjs`: 10 tests del mod con llamadas falsas:
+  - el orden `fetch` → `waitheld` → `fdcheck`;
+  - los rechazos se registran por clase;
+  - una escritura fallida deja un hueco de `seq`;
+  - de la salida del hijo sólo pasan campos tipados.
+- Verificación por mutación: quitar la comprobación de `O_CLOEXEC` en el analizador, lanzar el hijo
+  antes del `fetch` en el mod o leer los fds del hijo tarde hace fallar los tests correspondientes.
+- `claude plugin validate` (2.1.314): hooks `session.start`; llamadas `$.fs.write`,
+  `$.http.fetch`, `$.process.run`; ✔.
+
+SHA-256 en `b902dff`:
+```
+ddac348c56d95403633e44f5b5776c25c23533f4f1b56d3adb5293ee713b5312  analyze.py
+b46cfab1b115ddd0b7187780d4a22efc2a3d2ea684850b7c636dc83c1ced40f7  b0.py
+c77dcffd3df92dead59e05482a3c2b0c935e9b279830a71ba199f49096bc1767  mod/.claude-plugin/plugin.json
+d87f4cbc7a53b0d733c13dd4c7f81e49d7ede3b21163e0d64e2234176d43100d  mod/hooks/hooks.json
+7dc6f559e44df194adcaa7d1e13dfb7857fd7e16195680069f0caf6d9bccfe2e  mod/hooks/probe.mjs
+47aa77c452e02165e542f5067ead5aebb89aae3a46f6f7e28fca971eca43735c  mod/hooks/register.mjs
+b9e0c89e8fe0e7b17054085da9478079bf500d76d25119c63d8218660fe9e847  README.md
+0cbcde02beb60b70fc6f4e06783edacafa2ad7931100932ab2a664e14d23fa7e  test/probe.test.mjs
+1b139c07073e7aad5c0b303a6fca8890936d5d9b19500517c8f043aa7ca2281a  test/test_analyze.py
+9190fd658af9f431e8c650aefecca064469091eea237e26a9726eecc7080542f  test/test_b0.py
+```
+
+**Hechos de 2.1.314 que fijan el procedimiento** (estáticos, B):
+- con el tráfico no esencial deshabilitado, un plugin sin marketplace (`--plugin-dir`) no tiene red,
+  así que **no** se define `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`;
+- `DISABLE_AUTOUPDATER` existe y se define para que el CLI no se actualice;
+- la imagen no declara `VOLUME`;
+- el `Dockerfile` instala por defecto `CLAUDE_CODE_VERSION=2.1.308`, así que la versión de la imagen
+  de VM100 **se comprueba** y, si no es 2.1.314, se detiene.
+
+**Operaciones privilegiadas en VM100** (las únicas; ninguna usa `sudo`):
+
+| # | Operación | Efecto | Límite |
+| --- | --- | --- | --- |
+| P1 | `docker image inspect` | Lectura | — |
+| P2 | `docker run -d` de `passb0-exp-<STAMP>` | Crea **un** contenedor | `--user developer`, `--cap-drop ALL`, `no-new-privileges`, `--pids-limit 256`, `--memory 2g`, `--memory-swap 2g`, `--cpus 1`, red `bridge` (nunca `sessions-net`), `--restart no`, `sleep 3600` como proceso (se detiene solo a la hora). Dos montajes de **solo lectura** (kit y `run/`). Sin `docker.sock`, sin workspace, sin D1 |
+| P3 | `docker exec -u developer` | Procesos dentro de ese contenedor | Nunca `-u root` |
+| P4 | `docker cp` contenedor → host | Copia `/tmp/passb0/out` a `results/` | Sólo hechos y las líneas del debug log que nombran el plugin |
+| P5 | `docker rm -f -v` | Borra **ese** contenedor | Sólo si la etiqueta `passb0.experiment` es igual a `STAMP` |
+| P6 | `python3 -I b0.py server --scope host` como **tu usuario** | Escucha un socket en `~/passb0-<STAMP>/run/` | Termina sola a los 3000 s. Sin root: lee sólo lo legible en `/proc` |
+
+**No hace:**
+- `docker pull`, `build`, `network create`, `volume create`, `compose` ni reiniciar Docker;
+- ninguna configuración global del host;
+- tocar sesiones, D1, el composer o la producción.
+
+Docker es equivalente a root: si tu usuario necesita `sudo` para `docker`, anteponelo **sólo** a
+P1–P5.
+
+**Procedimiento.** Cada bloque corre en una subshell con `set -euo pipefail` y sin ningún `|| echo`
+que tape errores. Si un bloque dice `FALLÓ`, se pasa al paso 9 (rollback).
+
+```bash
+# 0. Variables (en VM100, en una terminal A)
+COMMIT=b902dfff0c9d9232b78284009c8515d24d2ec027
+STAMP=$(date +%Y%m%d-%H%M%S)
+BASE=$HOME/passb0-$STAMP; KIT_ROOT=$BASE/kit; KIT=$KIT_ROOT/poc/passb0
+RUN=$BASE/run; RES=$BASE/results; EXP=passb0-exp-$STAMP; IMAGE=shared-terminal-session
+```
+
+```bash
+# 1. Preflight del host (sólo lecturas)
+( set -euo pipefail
+  test ! -e "$BASE"
+  [ "$(cat /proc/sys/kernel/yama/ptrace_scope)" = 1 ]
+  python3 -c 'import os,sys; v=tuple(int(x) for x in os.uname().release.split(".")[:2]); sys.exit(0 if v>=(6,5) and sys.version_info>=(3,9) else 1)'
+  docker info --format '{{json .SecurityOptions}}' | grep -vq userns
+  IMAGE_ID=$(docker image inspect "$IMAGE" --format '{{.Id}}'); test -n "$IMAGE_ID"
+  [ -z "$(docker ps -a --filter label=passb0.experiment -q)" ]
+  [ -z "$(docker ps -a --filter name=^/passb0-exp- -q)" ]
+  echo "$IMAGE_ID"
+) && echo "OK: preflight" || echo "FALLÓ: preflight"
+export IMAGE_ID=$(docker image inspect "$IMAGE" --format '{{.Id}}')   # la usan los pasos 2, 3 y 9
+```
+
+```bash
+# 2. Carpetas nuevas y kit por SHA, verificado
+( set -euo pipefail
+  mkdir -m 0700 "$BASE"; mkdir -m 0700 "$KIT_ROOT" "$RES"; mkdir -m 0755 "$RUN"
+  gh api "repos/gatof81/shared-terminal/tarball/$COMMIT" > "$BASE/kit.tgz"   # o copiá el .tgz desde tu Mac
+  tar xzf "$BASE/kit.tgz" -C "$KIT_ROOT" --strip-components=1
+  cd "$KIT"; sha256sum -c --strict <<'SUMS'
+ddac348c56d95403633e44f5b5776c25c23533f4f1b56d3adb5293ee713b5312  analyze.py
+b46cfab1b115ddd0b7187780d4a22efc2a3d2ea684850b7c636dc83c1ced40f7  b0.py
+c77dcffd3df92dead59e05482a3c2b0c935e9b279830a71ba199f49096bc1767  mod/.claude-plugin/plugin.json
+d87f4cbc7a53b0d733c13dd4c7f81e49d7ede3b21163e0d64e2234176d43100d  mod/hooks/hooks.json
+7dc6f559e44df194adcaa7d1e13dfb7857fd7e16195680069f0caf6d9bccfe2e  mod/hooks/probe.mjs
+47aa77c452e02165e542f5067ead5aebb89aae3a46f6f7e28fca971eca43735c  mod/hooks/register.mjs
+SUMS
+  python3 -I -c 'import json,os,platform; print(json.dumps({"kernel":platform.release(),"ptrace_scope":open("/proc/sys/kernel/yama/ptrace_scope").read().strip(),"image_id_prefix":os.environ["IMAGE_ID"][7:19]}))' > "$RES/preflight.json"
+) && echo "OK: kit verificado" || echo "FALLÓ: kit"
+```
+
+```bash
+# 3. Contenedor descartable (P2) y preflight dentro (P3)
+( set -euo pipefail
+  docker run -d --name "$EXP" --label passb0.experiment="$STAMP" --init --entrypoint /usr/bin/sleep \
+    --user developer --workdir /home/developer --cap-drop ALL --security-opt no-new-privileges:true \
+    --pids-limit 256 --memory 2g --memory-swap 2g --cpus 1 --network bridge --restart no \
+    --mount type=bind,src="$KIT",dst=/opt/passb0-kit,readonly \
+    --mount type=bind,src="$RUN",dst=/run/st-attest,readonly \
+    "$IMAGE_ID" 3600 >/dev/null
+  [ "$(docker exec -u developer "$EXP" claude --version | awk '{print $1}')" = 2.1.314 ]
+  [ "$(docker exec -u developer "$EXP" id -u)" = 1000 ]
+  [ -z "$(docker exec -u developer "$EXP" python3 -I /opt/passb0-kit/b0.py cliinfo | python3 -c 'import json,sys; print(json.load(sys.stdin)["cli"] or "")')" ]
+  docker exec -u developer "$EXP" mkdir -p /home/developer/passb0-ws/.passb0/out/mod
+) && echo "OK: contenedor listo con 2.1.314" || echo "FALLÓ: contenedor (paso 9)"
+```
+
+```bash
+# 4. Servidores: S_c dentro (P3) y S_h en el host (P6), como tu usuario
+( set -euo pipefail
+  docker exec -d -u developer "$EXP" python3 -I /opt/passb0-kit/b0.py server --scope container \
+    --sock /tmp/passb0/c.sock --out /tmp/passb0/out --held /tmp/passb0/held-c.json --deadline-s 3000
+  CID=$(docker inspect -f '{{.Id}}' "$EXP")
+  nohup python3 -I "$KIT/b0.py" server --scope host --sock "$RUN/h.sock" --out "$RES" \
+    --held "$RUN/held-h.json" --expect-container "$CID" --deadline-s 3000 > "$RES/server-h.out" 2>&1 &
+  echo $! > "$BASE/server-h.pid"
+  for i in $(seq 1 50); do [ -S "$RUN/h.sock" ] && docker exec -u developer "$EXP" test -S /tmp/passb0/c.sock && break; sleep 0.2; done
+  [ -S "$RUN/h.sock" ]; docker exec -u developer "$EXP" test -S /tmp/passb0/c.sock
+) && echo "OK: servidores escuchando" || echo "FALLÓ: servidores (paso 9)"
+```
+
+**5. Lanzar el CLI** (en otra terminal B de VM100; definí ahí también `EXP`):
+```bash
+docker exec -it -u developer -e DISABLE_AUTOUPDATER=1 -w /home/developer/passb0-ws "$EXP" \
+  claude --plugin-dir /opt/passb0-kit/mod --debug-file /home/developer/passb0-ws/.passb0/out/claude-debug.log
+```
+- **Permitido:** elegir el tema y aceptar la confianza de la carpeta. Las dos cosas son estado del
+  contenedor descartable.
+- **Prohibido:** cualquier opción de login, `/login`, pegar un token o escribir un prompt.
+- Si aparece la pantalla de login, no elijas nada y seguí con el paso 6, que va a dar INCONCLUSIVE.
+
+```bash
+# 6. Esperar el fin de la medición (máximo 120 s) y tomar los hechos del contenedor (terminal A)
+( set -euo pipefail
+  W=/home/developer/passb0-ws/.passb0/out/mod
+  ok=0; for i in $(seq 1 120); do
+    if docker exec -u developer "$EXP" sh -c "grep -l '\"kind\":\"done\"' $W/*.json >/dev/null 2>&1"; then ok=1; break; fi; sleep 1; done
+  [ "$ok" = 1 ]
+) && echo "OK: medición completa" || echo "SIN 'done' en 120 s: seguí igual (el analizador dará INCONCLUSIVE)"
+( set -euo pipefail
+  X="docker exec -u developer $EXP python3 -I /opt/passb0-kit/b0.py"
+  $X cliinfo --out /tmp/passb0/out/cliinfo.json >/dev/null
+  $X client --sock /tmp/passb0/c.sock --label base --out /tmp/passb0/out/base-c.json >/dev/null
+  $X client --sock /run/st-attest/h.sock --label base --out /tmp/passb0/out/base-h.json >/dev/null
+  $X client --sock /tmp/passb0/c.sock --label control --held /tmp/passb0/held-c.json --out /tmp/passb0/out/control-c.json >/dev/null
+  $X rocheck --dir /run/st-attest --out /tmp/passb0/out/rocheck.json >/dev/null
+) && echo "OK: línea base, control y rocheck" || echo "FALLÓ: hechos (paso 9)"
+```
+
+**7.** En la terminal B: `/exit`, o Ctrl-C dos veces si quedó en la pantalla de login.
+
+```bash
+# 7b. Versión después de salir, captura de evidencia y fin de S_h (terminal A)
+( set -euo pipefail
+  [ "$(docker exec -u developer "$EXP" claude --version | awk '{print $1}')" = 2.1.314 ]
+  D=/home/developer/passb0-ws/.passb0/out
+  docker exec -u developer "$EXP" sh -c "mkdir -p /tmp/passb0/out/mod && cp $D/mod/*.json /tmp/passb0/out/mod/ 2>/dev/null; \
+    grep -E 'st-passb0-probe|sec-default' $D/claude-debug.log > /tmp/passb0/out/claude-debug.log || true"
+  docker cp "$EXP":/tmp/passb0/out/. "$RES/"
+  kill "$(cat "$BASE/server-h.pid")"; for i in $(seq 1 50); do kill -0 "$(cat "$BASE/server-h.pid")" 2>/dev/null || break; sleep 0.2; done
+  ! kill -0 "$(cat "$BASE/server-h.pid")" 2>/dev/null
+  [ ! -e "$RUN/h.sock" ]
+  [ -f "$RES/c.jsonl" ] && [ -f "$RES/h.jsonl" ] && [ -f "$RES/cliinfo.json" ]
+  if [ -f "$RUN/held-h.json" ]; then cp -p "$RUN/held-h.json" "$RES/"; fi
+  cd "$RES"; find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+  [ "$(sha256sum -c SHA256SUMS | grep -c ': OK$')" -eq "$(wc -l < SHA256SUMS)" ]
+) && echo "OK: evidencia en $RES" || echo "FALLÓ: captura (paso 9; no borres nada de $RES)"
+```
+
+```bash
+# 8. Resultado
+python3 -I "$KIT/analyze.py" report "$RES" | tee "$RES/report.json"; echo "salida=${PIPESTATUS[0]}"
+```
+`salida=0` sólo con PASS. Mandá `report.json`: sólo tiene alias y booleanos.
+
+```bash
+# 9. Rollback y limpieza verificada (idempotente; también si algo falló antes)
+( set -euo pipefail
+  if [ -f "$BASE/server-h.pid" ] && kill -0 "$(cat "$BASE/server-h.pid")" 2>/dev/null; then kill "$(cat "$BASE/server-h.pid")"; sleep 1; fi
+  if docker inspect "$EXP" >/dev/null 2>&1; then
+    [ "$(docker inspect -f '{{index .Config.Labels "passb0.experiment"}}' "$EXP")" = "$STAMP" ]
+    docker rm -f -v "$EXP" >/dev/null
+  fi
+  [ -z "$(docker ps -a --filter label=passb0.experiment -q)" ]
+  [ "$(docker image inspect "$IMAGE" --format '{{.Id}}')" = "$IMAGE_ID" ]
+  rm -f "$RUN/h.sock" "$RUN/held-h.json"; rmdir "$RUN"
+) && echo "OK: sin contenedor, sin servidor, imagen intacta; se conservan $BASE/kit, $BASE/kit.tgz y $RES" || echo "FALLÓ: rollback, mandame la salida"
+```
+
+**Criterios** (los aplica `analyze.py`):
+
+- **PASS** sólo si se cumple todo esto:
+  - el mod cargó una vez, con `seq` contiguo y `done`;
+  - hay exactamente un proceso del CLI;
+  - las cinco llamadas dieron 200, cada una ligada a **una** conexión del servidor por token y
+    nonce;
+  - en el contenedor, el par es el CLI: mismo pid y tgid, uid 1000, mismo `starttime` y SHA-256 del
+    ejecutable, pidfd del mismo pid y lectura estable;
+  - en el host, el `NSpid` lleva al mismo CLI, el cgroup es el del contenedor y el pidfd coincide
+    (también en `NSpid`);
+  - los dos clientes base se ven como ellos mismos;
+  - el control positivo detecta la herencia;
+  - en `hold-c` y `hold-h`, el único poseedor de la conexión es el CLI, con `O_CLOEXEC`, y el hijo
+    creado mientras estaba abierta **no** la tiene;
+  - `create`, `mkdir`, `rename` y `unlink` en el directorio del socket dan EROFS.
+- **FAIL:**
+  - `socketPath` rechazado por el build, o una llamada que no llega;
+  - una conexión sin correspondencia;
+  - el par no es el CLI (intermediario, otro pid, otro binario, pid reutilizado, pidfd distinto);
+  - un `NSpid` o un cgroup que no corresponde;
+  - el cliente base atribuido al CLI;
+  - el fd sin `O_CLOEXEC`, en varios fds o en otro proceso;
+  - el hijo heredó la conexión;
+  - el directorio del socket es escribible.
+- **INCONCLUSIVE:**
+  - el mod no cargó (login, confianza o interruptor; el informe incluye el valor del flag en caché);
+  - registros incompletos o líneas problemáticas del mod en el debug log;
+  - varios procesos del CLI;
+  - la política de red de plugins;
+  - `SO_PEERPIDFD` no disponible;
+  - el control falló;
+  - el checker no sincronizó, o el inodo del par es desconocido;
+  - la búsqueda de poseedores fue denegada;
+  - otro errno en `rocheck`;
+  - faltan logs.
+
+**Nada se repite sin una decisión tuya.** Un PASS-B0 sólo responde la viabilidad del socket y no
+valida la arquitectura (§1.14.8).
+
 ## 2. Versiones
 
 | Variante | CLI | Motivo |
