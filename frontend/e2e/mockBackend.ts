@@ -15,6 +15,7 @@
  */
 
 import type { Page, Route, WebSocketRoute } from "@playwright/test";
+import { normalizeTitle } from "../src/conversationTitle.js";
 
 // ── Seed data ───────────────────────────────────────────────────────────────
 
@@ -70,6 +71,9 @@ interface Conversation {
 	statusEvidence?: string;
 	/** null = the conversation has no pane (binding lost). */
 	paneId?: string | null;
+	/** v1.8 §6.2 owner metadata. */
+	customTitle?: string | null;
+	archivedAt?: string | null;
 }
 
 const T0 = Date.parse("2026-10-31T10:00:00Z");
@@ -333,6 +337,10 @@ export class MockBackend {
 	requests: Array<{ method: string; path: string }> = [];
 	terminalSockets: TerminalSocket[] = [];
 	conversationSockets: ConversationSocket[] = [];
+	/** v1.8 §6.2: the list says the owner metadata could not be read. */
+	metaUnavailable = false;
+	/** The next rename/archive PATCH answers this instead (then clears). */
+	failNextMetaPatch: { status: number; error: string } | null = null;
 	/** Set by a test to answer any route itself before the built-ins. */
 	override: ((method: string, path: string, route: Route) => Promise<boolean>) | null = null;
 	/**
@@ -785,7 +793,37 @@ export class MockBackend {
 						s.status === "failed" || !this.historySessions.has(s.sessionId)
 							? []
 							: this.conversations.map((c) => this.summary(c)),
+					meta: this.metaUnavailable ? "unavailable" : "ok",
 				});
+			}
+			// v1.8 §6.2 — rename / archive (owner-only, per field, same title rules as the server).
+			const metaPatch = /^\/conversations\/([^/]+)$/.exec(rest);
+			if (metaPatch && method === "PATCH") {
+				if (!own) return json(404, { error: "Session not found" });
+				const conv = this.conversations.find((c) => c.cid === decodeURIComponent(metaPatch[1]!));
+				if (!conv) return json(404, { error: "conversation-not-found" });
+				if (this.failNextMetaPatch) {
+					const f = this.failNextMetaPatch;
+					this.failNextMetaPatch = null;
+					return json(f.status, { error: f.error });
+				}
+				const body = req.postDataJSON() as Record<string, unknown> | null;
+				const keys = body && typeof body === "object" ? Object.keys(body) : [];
+				if (
+					keys.length === 0 ||
+					keys.some((k) => k !== "title" && k !== "archived") ||
+					("archived" in (body ?? {}) && typeof body?.archived !== "boolean")
+				)
+					return json(400, { error: "invalid-body" });
+				if (body && "title" in body) {
+					const t = normalizeTitle(body.title);
+					if (!t.ok) return json(400, { error: t.code });
+					conv.customTitle = t.value;
+				}
+				if (body && typeof body.archived === "boolean") {
+					conv.archivedAt = body.archived ? (conv.archivedAt ?? iso(30 * 60)) : null;
+				}
+				return json(200, this.summary(conv));
 			}
 			const ev = /^\/conversations\/([^/]+)\/events$/.exec(rest);
 			if (ev) {
@@ -894,6 +932,8 @@ export class MockBackend {
 			gapsCount: 0,
 			claudeVersion: "2.1.314",
 			canSendInput: c.canSendInput,
+			customTitle: this.metaUnavailable ? null : (c.customTitle ?? null),
+			archivedAt: this.metaUnavailable ? null : (c.archivedAt ?? null),
 		};
 	}
 

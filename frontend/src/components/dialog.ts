@@ -295,6 +295,13 @@ export interface PromptOptions {
 	cancelLabel?: string;
 	/** Returns an error message to show inline, or null when the value is acceptable. */
 	validate?: (value: string) => string | null;
+	/**
+	 * Optional async step run on confirm, while the dialog stays open (the
+	 * buttons are disabled meanwhile): resolve null to close with the value,
+	 * or a message to show inline and keep the dialog open — so a server's
+	 * refusal is explained where the person typed, and nothing is lost.
+	 */
+	onConfirm?: (value: string) => Promise<string | null>;
 }
 
 let dialogSeq = 0;
@@ -454,18 +461,43 @@ export function promptDialog(opts: PromptOptions): Promise<string | null> {
 		error.hidden = true;
 		b.body.append(field, error);
 		let result: string | null = null;
+		let pending = false;
+		const showError = (problem: string) => {
+			error.textContent = problem;
+			error.hidden = false;
+			input.focus();
+		};
 		b.form.addEventListener("submit", (e) => {
 			e.preventDefault();
+			if (pending) return;
 			const value = input.value.trim();
 			const problem = opts.validate?.(value) ?? null;
 			if (problem !== null) {
-				error.textContent = problem;
-				error.hidden = false;
-				input.focus();
+				showError(problem);
 				return;
 			}
-			result = value;
-			dialog.close();
+			if (!opts.onConfirm) {
+				result = value;
+				dialog.close();
+				return;
+			}
+			pending = true;
+			b.confirmBtn.disabled = true;
+			b.form.setAttribute("aria-busy", "true");
+			void opts
+				.onConfirm(value)
+				.catch((err: unknown) => (err as Error).message || "Something went wrong")
+				.then((failure) => {
+					pending = false;
+					b.confirmBtn.disabled = false;
+					b.form.removeAttribute("aria-busy");
+					if (failure !== null) {
+						showError(failure);
+						return;
+					}
+					result = value;
+					dialog.close();
+				});
 		});
 		input.addEventListener("input", () => {
 			error.hidden = true;

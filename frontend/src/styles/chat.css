@@ -324,6 +324,116 @@
   flex-shrink: 0;
 }
 
+/* v1.8 §6.2 — filters, archived rows, the ⋯ menu button */
+.chat-filter {
+  display: flex;
+  gap: 0.35rem;
+  padding: 0.5rem 0.75rem 0.15rem;
+  flex-wrap: wrap;
+}
+.chat-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid var(--c-border);
+  background: transparent;
+  color: var(--c-muted);
+  border-radius: 999px;
+  padding: 0.2rem 0.65rem;
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+  min-height: 1.9rem;
+}
+.chat-filter-btn[aria-pressed="true"] {
+  background: var(--c-accent-bg);
+  border-color: var(--c-accent);
+  color: var(--c-text);
+}
+.chat-filter-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.chat-filter-count {
+  color: var(--c-faint);
+  font-variant-numeric: tabular-nums;
+}
+.chat-filter-live {
+  color: var(--c-ok);
+  border: 1px solid var(--c-ok-strong);
+  border-radius: 4px;
+  padding: 0 0.3rem;
+  font-size: 0.66rem;
+}
+.chat-conv-item {
+  display: flex;
+  align-items: stretch;
+}
+.chat-conv-item .chat-conv-row {
+  flex: 1;
+  min-width: 0;
+}
+.chat-conv-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding-right: 0.4rem;
+  flex-shrink: 0;
+}
+.chat-meta-btn {
+  border: 0;
+  background: transparent;
+  color: var(--c-muted);
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.chat-meta-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--c-text);
+}
+.chat-meta-btn:disabled {
+  opacity: 0.4;
+  cursor: progress;
+}
+.chat-conv-unarchive {
+  font-size: 0.72rem;
+  padding: 0.15rem 0.5rem;
+}
+.chat-conv-row.archived .chat-conv-title {
+  color: var(--c-text-2);
+}
+.chat-conv-archived {
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  padding: 0 0.3rem;
+  font-size: 0.66rem;
+  color: var(--c-muted);
+  white-space: nowrap;
+}
+.chat-conv-archived.live {
+  border-color: var(--c-ok-strong);
+  color: var(--c-ok);
+}
+@media (max-width: 768px) {
+  /* Touch targets: 44px. */
+  .chat-meta-btn {
+    width: 2.75rem;
+    height: 2.75rem;
+  }
+  .chat-filter-btn {
+    min-height: 2.75rem;
+    padding: 0.2rem 0.9rem;
+  }
+  .chat-conv-unarchive {
+    min-height: 2.75rem;
+  }
+}
+
 /* Skeletons */
 .chat-skeleton {
   padding: 0.5rem 0.75rem;

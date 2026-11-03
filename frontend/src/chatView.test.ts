@@ -316,7 +316,7 @@ describe("Chat overlay", () => {
 		});
 		// Desktop: the status lives in the thread head (the header keeps the list summary).
 		expect($("chat-thread").querySelector(".chat-thread-head")?.textContent).toContain("Working");
-		expect($("chat-summary").textContent).toContain("1 active");
+		expect($("chat-summary").textContent).toContain("1 live");
 	});
 
 	it("Load earlier asks for events before the first loaded seq", async () => {

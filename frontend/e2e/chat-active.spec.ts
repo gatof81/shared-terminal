@@ -1,7 +1,7 @@
 import { expect, test } from "./fixtures.js";
 
 /**
- * The list's "Active" section and the composer's reasons follow the
+ * The list's "Live" section (v1.8: renamed from "Active", now a filter) and the composer's reasons follow the
  * backend's status AND the age of its evidence (conversationModel
  * presentStatus): a live claim nobody has confirmed for 10 minutes, an
  * `unknown` conversation and one without a pane are listed under
@@ -113,7 +113,7 @@ test.describe("chat: active vs earlier", () => {
 		await app.switchView("chat");
 		const row = page.locator("#chat-list .chat-conv-row", { hasText: "Refactor auth flow" });
 		await expect(row).toContainText("Working");
-		await expect(page.locator("#chat-summary .chat-summary-active")).toHaveText("1 active");
+		await expect(page.locator("#chat-summary .chat-summary-active")).toHaveText("1 live");
 	});
 
 	test("a fresh live claim is the one Active conversation, counted once", async ({
@@ -126,8 +126,8 @@ test.describe("chat: active vs earlier", () => {
 		await app.openSession("my-project");
 		await app.switchView("chat");
 		const list = page.locator("#chat-list");
-		await expect(list.locator(".chat-list-title")).toHaveText(["Active", "Earlier"]);
-		await expect(page.locator("#chat-summary .chat-summary-active")).toHaveText("1 active");
+		await expect(list.locator(".chat-list-title")).toHaveText(["Live", "Earlier"]);
+		await expect(page.locator("#chat-summary .chat-summary-active")).toHaveText("1 live");
 		await expect(list.locator(".chat-conv-row").first()).toContainText("Waiting for input");
 	});
 });

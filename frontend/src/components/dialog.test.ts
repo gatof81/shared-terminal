@@ -259,6 +259,52 @@ describe("promptDialog", () => {
 	});
 });
 
+describe("promptDialog onConfirm (async step, dialog stays open)", () => {
+	it("keeps the dialog open with the server's message, disables Save meanwhile, closes on success", async () => {
+		let answer: (v: string | null) => void = () => {};
+		const onConfirm = vi.fn(() => new Promise<string | null>((r) => (answer = r)));
+		const p = promptDialog({ title: "Rename", initialValue: "x", onConfirm });
+		const input = document.querySelector<HTMLInputElement>(".dialog-card input")!;
+		const form = input.closest("form")!;
+		const save = document.querySelector<HTMLButtonElement>(".modal-primary-action")!;
+		input.value = " Nuevo ";
+		form.dispatchEvent(new Event("submit", { cancelable: true }));
+		expect(onConfirm).toHaveBeenCalledWith("Nuevo");
+		expect(save.disabled).toBe(true);
+		// A second submit while pending is ignored.
+		form.dispatchEvent(new Event("submit", { cancelable: true }));
+		expect(onConfirm).toHaveBeenCalledTimes(1);
+		answer("Too long: at most 80 characters.");
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(isAnyDialogOpen()).toBe(true);
+		expect(save.disabled).toBe(false);
+		const err = document.querySelector<HTMLElement>(".modal-field-error")!;
+		expect(err.hidden).toBe(false);
+		expect(err.textContent).toBe("Too long: at most 80 characters.");
+		expect(input.value).toBe(" Nuevo ");
+		form.dispatchEvent(new Event("submit", { cancelable: true }));
+		answer(null);
+		await expect(p).resolves.toBe("Nuevo");
+		expect(isAnyDialogOpen()).toBe(false);
+	});
+	it("a thrown onConfirm is shown as its message and the dialog stays open", async () => {
+		const p = promptDialog({
+			title: "Rename",
+			onConfirm: async () => {
+				throw new Error("boom");
+			},
+		});
+		const input = document.querySelector<HTMLInputElement>(".dialog-card input")!;
+		input.value = "a";
+		input.closest("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+		await new Promise((r) => setTimeout(r, 0));
+		expect(document.querySelector<HTMLElement>(".modal-field-error")?.textContent).toBe("boom");
+		(document.querySelector(".dialog-cancel") as HTMLElement).click();
+		await expect(p).resolves.toBeNull();
+	});
+});
+
 describe("alertDialog", () => {
 	it("has no Cancel, resolves on OK, and keeps multi-line text as paragraphs", async () => {
 		const p = alertDialog({ title: "Invite code", message: "Copy now:\n\nABC-123" });

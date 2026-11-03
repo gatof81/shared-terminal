@@ -1697,6 +1697,13 @@ export interface ConversationSummary {
 	claudeVersion: string | null;
 	/** 3.2 (§8.1.1): orientative — the POST decides; false while the composer flag is off. */
 	canSendInput: boolean;
+	/**
+	 * v1.8 §6.2: the owner's name for it — prevails over `title`, which stays
+	 * the automatic one — and when it was archived. Absent from an older
+	 * backend (read as null).
+	 */
+	customTitle?: string | null;
+	archivedAt?: string | null;
 	/** 3.2 (§8.1.8): why the pane cannot take a send right now, when it cannot. */
 	composer?: {
 		blocked: boolean;
@@ -1755,6 +1762,36 @@ export interface ConversationList {
 	/** Null when the request asked to skip the capture check (`capture: false`). */
 	capture: ConversationCapture | null;
 	conversations: ConversationSummary[];
+	/** v1.8 §6.2: "unavailable" = names/archive could not be read (absent from an older backend = ok). */
+	meta?: "ok" | "unavailable";
+}
+
+export type ConversationMetaResult =
+	| { ok: true; summary: ConversationSummary }
+	| { ok: false; status: number; code: string };
+
+/**
+ * Rename (`title`: a string, or null = back to the automatic title) and/or
+ * archive a conversation (v1.8 §6.2). Owner-only server-side. Never retried
+ * here: the answer — success or the server's code — goes back to the person.
+ */
+export async function patchConversationMeta(
+	sessionId: string,
+	cid: string,
+	patch: { title?: string | null; archived?: boolean },
+): Promise<ConversationMetaResult> {
+	let res: Response;
+	try {
+		res = await apiFetch(
+			`/sessions/${encodeURIComponent(sessionId)}/conversations/${encodeURIComponent(cid)}`,
+			{ method: "PATCH", body: JSON.stringify(patch) },
+		);
+	} catch {
+		return { ok: false, status: 0, code: "network" };
+	}
+	const body = (await res.json().catch(() => ({}))) as ConversationSummary & { error?: string };
+	if (res.ok && typeof body.sessionId === "string") return { ok: true, summary: body };
+	return { ok: false, status: res.status, code: typeof body.error === "string" ? body.error : "" };
 }
 
 /**
