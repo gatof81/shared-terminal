@@ -1405,6 +1405,145 @@ Mandame `report.json`: tiene alias y booleanos.
 
 **Nada se repite sin una decisión tuya.** Un PASS-B0 sólo responde la viabilidad del socket (§1.14.8).
 
+#### 1.14.10 Corrida 1 en VM100 (2026-11-03): INCONCLUSIVE; diagnóstico en curso (kit de desarrollo `f8679d6`)
+
+**Lo que informó el responsable** (kit `d224ebe`, carpeta `~/passb0-20261103-151611`):
+- **Entorno:** kernel `6.8.0-147-generic`, `ptrace_scope=1`, los 13 hashes OK. La etiqueta
+  `shared-terminal-session` se reconstruyó con 2.1.314 (imagen `sha256:cf6b1ff94ead…`). Esto
+  difiere de la alternativa A, que usaba una etiqueta propia; lo decidió el responsable.
+- **Fases:** `preflight`, `setup` (`differs: []`), `servers`, `measure` y `capture` terminaron con
+  salida 0. `validate` terminó con 2: **INCONCLUSIVE** por `debug-log-mod-problem` y
+  `checker-not-synchronized:hold-h`.
+- **A favor:**
+  - las cinco llamadas atribuyeron el par al CLI (`SO_PEERPIDFD`, `starttime`, ejecutable, uid,
+    cgroup y `NSpid`);
+  - las dos bases se vieron a sí mismas y el control detectó la herencia;
+  - `hold-c`: un único poseedor (el CLI), `O_CLOEXEC` puesto, sin herencia, `scan_denied=0`;
+  - `rocheck`: `EROFS` ×4;
+  - la versión es 2.1.314 en los tres puntos.
+- **Sin dato:** `hold-h_fd` está vacío. No hay medición de `O_CLOEXEC` ni de herencia sobre la
+  conexión del host.
+
+Esta corrida **no** se declara PASS. Hasta cerrar el diagnóstico no se repite nada, y
+`cleanup` de la corrida 1 tampoco se corre: el contenedor detenido conserva el debug log
+completo (`capture` trajo sólo las líneas filtradas), que puede hacer falta.
+
+**B. `checker-not-synchronized:hold-h`**
+
+*Hechos, desde el código de `d224ebe`:*
+1. `run-b0.sh` hace `umask 077` y desde ahí lanza el servidor del host con `nohup`, que hereda esa
+   máscara.
+2. El servidor escribe `held-h.json` con `write_json_atomic`, que usa `open(…, "w")` sin modo
+   explícito. Con umask 077 el archivo queda **0600**, a nombre del usuario que corrió el runner.
+3. El checker (`waitheld` y después `fdcheck`) corre **en el contenedor**, como uid 1000, y lee
+   ese archivo por el montaje de solo lectura `/run/st-attest`.
+4. El socket del mismo directorio sí recibe un `chmod 0666` explícito, justamente porque el
+   lector puede tener otro uid. Por eso `h1` y `h2` conectaron.
+5. `wait_held` trata **cualquier** `OSError` igual que un archivo ausente: reintenta hasta 6 s y
+   devuelve `waited: false` sin el motivo.
+6. El mod de `d224ebe` guarda de `waitheld` sólo `waited` y `conn`; el error de
+   `$.process.run` se descarta. Si `waitheld` no sincroniza, `fdcheck` no corre.
+7. En el contenedor, `held-c.json` lo escribe el servidor interno, como uid 1000 y con la umask
+   0022 de `docker exec`. Por eso `hold-c` no puede fallar por esta causa, y nada de lo anterior
+   lo distingue de `hold-h`.
+
+*Hipótesis* (ninguna está demostrada todavía; `diag.py` las separa con la evidencia existente):
+
+| | Hipótesis | La confirma | La descarta |
+| --- | --- | --- | --- |
+| H1 | **Permisos:** `held-h.json` 0600 y el servidor del host con un uid ≠ 1000 ⇒ `EACCES` en el contenedor | `held_h_file.results_copy.mode = 0o600` (`cp -p` conserva el modo), `host_server.uid_is_1000 = false`, `held_file_written` ≪ 6000 ms y `held_file_conn_matches_call = true` | `uid_is_1000 = true`: el dueño 1000 puede leer un 0600 |
+| H2 | **`$.process.run` falló** en `waitheld` (rechazo o error del host) | una línea marcada del debug log con `during_call = hold-h` y `ms_into_call` cerca de 0. Explicaría **los dos** motivos con una sola causa | ninguna línea marcada dentro de `hold-h` |
+| H3 | **Tiempos:** el archivo se escribió después de la ventana de 6 s de `waitheld` (por ejemplo, el hash del ejecutable del CLI tardó) | `held_file_written` > ~6000 ms | `held_file_written` ≪ 6000 ms |
+| H4 | **Visibilidad:** el `rename` en el host no se vio a través del bind mount | sólo queda si H1–H3 se descartan. La corrida 1 no tiene datos para probarla; con `f8679d6`, `held_last_error = ENOENT` la mostraría | H1, H2 o H3 confirmada |
+
+H1 y H2 pueden darse a la vez. **No supongo una carrera:** las tres primeras se deciden con
+`results/` y `state/` tal como están.
+
+**A. `debug-log-mod-problem`**
+
+*Hechos:*
+- `analyze.py` cuenta las líneas del debug log que nombran `st-passb0-probe` (41) y marca las que
+  contienen `skipped|failed|refused|not loaded|error`, sin distinguir mayúsculas. Una sola
+  (`debug_mod_bad_lines=1`) basta para INCONCLUSIVE.
+- `capture` trajo sólo las líneas que nombran el plugin o el guard.
+- Desde aquí no puedo ver cuál es la línea.
+
+*Hipótesis:* la cadena 2.1.314 tiene varios mensajes candidatos que nombran un plugin y una de
+esas palabras:
+- de carga (`hooks module … not loaded`, `… failed to load`);
+- de operaciones (`$.<op> refused: …`);
+- de hooks (`session.start: failed for …`, `skipped: re-entry`).
+
+Algunos son inocuos y otros, errores reales. Si la línea cae dentro de `hold-h` (H2), los dos
+motivos tienen una sola causa.
+
+*Regla de decisión:*
+- **Error real:** se corrige la causa y el filtro **no** se toca.
+- **Inocuo**, por ejemplo una palabra del filtro dentro de un mensaje informativo: se justifica
+  con la línea y con el código del CLI que la emite, y se agrega un test de regresión con esa
+  plantilla exacta. Nunca se amplía el filtro en general.
+- **Sin evidencia suficiente:** sigue siendo INCONCLUSIVE.
+
+**Cambios en el kit de desarrollo `f8679d6`** (no aprobados para una corrida):
+- **Archivo `held` legible por el checker.** El servidor escribe el archivo con modo `0644`
+  explícito (no contiene secretos), como ya hacía con el socket. `h.jsonl` y `results/` siguen
+  privados. Corrige H1 si se confirma, y si no, saca la dependencia del uid del operador. Test:
+  servidor real con umask 077 ⇒ `held` 0644 y `h.jsonl` sin permisos para otros. Si se quita el
+  modo, el test falla.
+- **El checker dice por qué no sincronizó.**
+  - `waitheld` y `fdcheck` informan el motivo de la última lectura fallida (`ENOENT`, `EACCES`,
+    `stale`, `not-json`).
+  - El mod guarda, además, la clase de error de `$.process.run`, el código de salida y la
+    duración.
+  - El analizador agrega los hechos `<label>_sync`.
+  - Los criterios no cambian: sigue siendo INCONCLUSIVE.
+  - Tests: los motivos `ENOENT`, `stale` y `EACCES`, una ejecución rechazada, un motivo con forma
+    inválida que se descarta, y el hecho `hold-h_sync` del analizador.
+- **`diag.py`**, diagnóstico de solo lectura de una corrida terminada:
+  - tiempos de cada llamada en ms desde su inicio;
+  - lo que informaron `waitheld` y `fdcheck`;
+  - modo y dueño del archivo `held` como booleanos;
+  - las líneas marcadas del debug log, redactadas y ubicadas en la llamada en curso.
+  No escribe ni ejecuta nada. Tests: no deja salir pid, inodo, token, nonce ni uid, y no
+  modifica nada.
+- **El filtro del debug log no cambia** hasta ver la línea.
+- **Tests:** runner 30, servidores 25, analizador 7 tests con 46 mutaciones, `diag` 4, mod 12;
+  `claude plugin validate` ✔.
+
+**Diagnóstico sobre la corrida 1** (VM100, solo lectura; no crea ni toca contenedores):
+
+```bash
+BASE=~/passb0-20261103-151611
+mkdir -m 0700 "$BASE/diag"
+gh api -H "Accept: application/vnd.github.raw" \
+  "repos/gatof81/shared-terminal/contents/poc/passb0/diag.py?ref=f8679d6ab4c4d0ffad533a8fd812dd43ca48c79b" > "$BASE/diag/diag.py"
+echo "34be61e91b12b6c3c65ff3a7ef23b390bb0b1fce2af6db119aa4ef80631374ae  $BASE/diag/diag.py" | sha256sum -c --strict
+python3 -I "$BASE/diag/diag.py" "$BASE" > "$BASE/diag/diag-1.json"; echo "salida=$?"
+```
+
+Revisá `diag-1.json` antes de mandarlo. Tiene alias, booleanos, milisegundos y líneas del debug
+log redactadas (hex largos, UUID y `/home/<user>`).
+
+**Sólo si la línea marcada necesita contexto**, y con tu autorización explícita: una copia del
+debug log **completo** desde el contenedor detenido. `docker cp` no lo arranca ni lo modifica:
+
+```bash
+EXP=passb0-exp-20261103-151611
+docker cp "$EXP:/home/developer/passb0-ws/.passb0/out/claude-debug.log" "$BASE/diag/claude-debug.full.log"
+python3 -I "$BASE/diag/diag.py" "$BASE" --full-log "$BASE/diag/claude-debug.full.log" > "$BASE/diag/diag-2.json"
+```
+
+**Segunda medición aislada** (borrador; **no autorizada**). Tiene tres requisitos previos:
+1. el diagnóstico cerró H1–H4 y el motivo A;
+2. el kit tiene la corrección correspondiente, con su SHA y sus hashes;
+3. el `cleanup` de la corrida 1 está autorizado. Hace falta porque `preflight` rechaza cualquier
+   contenedor `passb0` existente; borraría el contenedor por la causa `captured`, después de la
+   copia del debug log completo si se hizo.
+
+Después se sigue el mismo procedimiento de §1.14.9 en una carpeta nueva (`STAMP` nuevo), con el
+paso 0 apuntando al SHA nuevo y su lista de hashes. Debe dar **PASS** sin tocar ningún criterio,
+y los hechos `hold-h_sync` y `hold-h_fd` deben estar completos.
+
 ## 2. Versiones
 
 | Variante | CLI | Motivo |
