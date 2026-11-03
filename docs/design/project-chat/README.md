@@ -13,15 +13,19 @@ Evidencia hasta ahora (2026-11-03):
   [04-poc.md §1.14](./04-poc.md#114-pass-b-integridad-de-la-evidencia-hasta-el-backend-diseño-nada-implementado-pass-b0-no-autorizado).
   PASS-B0 no está autorizado.
 
+Dirección de producto (2026-11-03): **conversación de cada agente con invitados temporales vía
+`@menciones`**, más un modo Colaboración autorizado por la persona. Decisiones D1–D6 aprobadas y
+aplicadas a 01, 02, 03, 05 y 06 (R10–R15 en 02 §9). Los gates de Channels no cambian.
+
 | Documento | Contenido |
 | --- | --- |
 | [01-vision.md](./01-vision.md) | Qué construimos, para quién, casos de uso, alcance |
 | [02-architecture-rfc.md](./02-architecture-rfc.md) | Evidencia sobre Channels, alternativas, componentes, fallos, seguridad, decisiones |
 | [03-protocol.md](./03-protocol.md) | Identidades, persistencia, estados de entrega, API, límites, recuperación |
 | [04-poc.md](./04-poc.md) | POC aislada con un agente y criterios GO / NO-GO fijados de antemano |
-| [08-host-chat-guests.md](./08-host-chat-guests.md) | **Propuesta (no aprobada)**: conversación individual por agente con invitados temporales vía `@menciones`; impacto en 01, 02, 03, 05 y 06 |
+| [08-host-chat-guests.md](./08-host-chat-guests.md) | **Aprobada (2026-11-03), ya aplicada**: registro de la propuesta de conversación individual por agente con invitados temporales vía `@menciones` (D1–D6; D3 modificada con el modo Colaboración) |
 | [05-roadmap.md](./05-roadmap.md) | Fases y PRs independientes, dependencias, riesgos |
-| [06-ux.md](./06-ux.md) | Chat del proyecto, menciones, presencia, estados, Control Directo |
+| [06-ux.md](./06-ux.md) | Conversación del agente, invitados, menciones, participantes, Colaboración, estados, Control Directo |
 | [07-review.md](./07-review.md) | Revisión crítica independiente y cómo se resolvió cada hallazgo |
 
 Skill asociada: [`.claude/skills/architecture-spec/SKILL.md`](../../../.claude/skills/architecture-spec/SKILL.md).
@@ -29,8 +33,9 @@ Skill asociada: [`.claude/skills/architecture-spec/SKILL.md`](../../../.claude/s
 ## 1. Decisiones arquitectónicas principales
 
 1. **El monitor es un módulo del backend existente**, no un servicio nuevo. Persiste en un log
-   append-only por proyecto en el host (patrón de `conversation/store.ts`) y en tres tablas D1 de
-   metadatos. El contenido nunca entra en D1.
+   append-only por conversación anfitriona en el host (patrón de `conversation/store.ts`) y en
+   tablas D1 de metadatos (proyectos, agentes, aristas, conversaciones, participaciones). El
+   contenido nunca entra en D1.
 2. **Channels es sólo transporte.** Un proceso sin estado en el contenedor (`st-channel`, servidor MCP
    stdio hijo del CLI) hace long-poll al monitor y emite la notificación. No confirma nada.
 3. **La aceptación se demuestra con la captura de hooks que ya existe**: el `UserPromptSubmit` de la
@@ -50,10 +55,11 @@ Skill asociada: [`.claude/skills/architecture-spec/SKILL.md`](../../../.claude/s
    como mensaje nuevo.
 7. **Identidad**: Proyecto → Agente (estable, `@handle`, 1 sesión en v1) → Runtime (proceso `claude`
    con `st-channel` en un arranque) → Conversación (evidencia, cambia con `/clear` y `/resume`).
-8. **Agente→agente sólo con aprobación humana o arista `allow` explícita**, más límites de
-   profundidad, presupuesto por cadena y tasa.
+8. **Agente→agente sólo con aprobación humana, arista `allow` explícita entre participantes activos
+   o una Colaboración que la persona activó en esa conversación**, más límites de profundidad,
+   presupuesto por cadena y tasa. Invitar a otro agente siempre necesita aprobación.
 9. **Composer congelado como Control Directo**; el monitor nunca lo usa; exclusión mutua por pane.
-10. **Un hecho, un lugar**: el texto del mensaje en el log del proyecto; la ejecución en la
+10. **Un hecho, un lugar**: el texto del mensaje en el log de la conversación anfitriona; la ejecución en la
     conversación; se enlazan por referencia.
 
 ## 2. Riesgos principales

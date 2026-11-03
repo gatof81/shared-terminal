@@ -1,8 +1,14 @@
 # Propuesta: conversación del agente con invitados temporales
 
-Estado: **propuesta de cambios de diseño (2026-11-03); no aprobada.** No cambia ningún documento
-vigente hasta que el responsable la apruebe. Una vez aprobada, se aplica a 01, 02, 03, 05 y 06 según
-§9.
+Estado: **aprobada por el responsable el 2026-11-03** con las decisiones D1–D6 (D3 **modificada**:
+se agrega un modo Colaboración autorizado explícitamente por la persona, diseñado en 02 §5.6, 03 y 06
+§6). Ya está aplicada a 01, 02, 03, 05 y 06, y registrada como R10–R15 en
+[02 §9](./02-architecture-rfc.md#9-decisiones-del-responsable-2026-11-02). Este documento queda como
+registro de referencia de la propuesta y sus razones; ante cualquier diferencia, mandan los
+documentos vigentes.
+
+Estado original: propuesta de cambios de diseño (2026-11-03); no aprobada. Una vez aprobada, se
+aplica a 01, 02, 03, 05 y 06 según §9.
 
 Esta propuesta **no** cambia:
 - los gates de Channels: G1–G12, G3 (G3-A no está aprobado), R8, PASS-A/PASS-B y la POC;
