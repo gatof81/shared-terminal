@@ -202,5 +202,68 @@ class Negatives(unittest.TestCase):
         self.assertEqual(quiet_main(["analyze.py", "report", d]), 2)
 
 
+# The CLI's own templates (2.1.314), with the debug log's line prefix.
+P = "2026-11-03T15:20:00.000Z [DEBUG] "
+HELD = P + "hooks modules not loaded until workspace trust is accepted: st-passb0-probe, sec-default\n"
+LOADED = P + "hooks module st-passb0-probe@inline loaded (worker, environment e1, tier user); events: session.start\n"
+TYPE_ROOT_EROFS = P + "type root of st-passb0-probe not laid: EROFS: read-only file system, mkdir '/x/types'\n"
+
+
+class DebugLog(unittest.TestCase):
+    """The trust-held line is exempt only when a load of the probe follows it."""
+
+    def verdict(self, text):
+        D = fixture()
+        D["debug"] = analyze.debug_scan(text.splitlines(keepends=True))
+        return analyze.analyze(D)
+
+    def test_held_until_trust_then_loaded_is_not_a_problem(self):
+        r = self.verdict(HELD + TYPE_ROOT_EROFS + LOADED)
+        self.assertEqual(r["verdict"], "PASS", r["reasons"])
+        self.assertEqual((r["facts"]["debug_mod_bad_lines"], r["facts"]["debug_mod_trust_held_then_loaded"],
+                          r["facts"]["debug_mod_trust_held_never_loaded"]), (0, 1, 0))
+
+    def test_held_and_never_loaded_is_a_problem(self):
+        r = self.verdict(HELD + TYPE_ROOT_EROFS)
+        self.assertEqual(r["verdict"], "INCONCLUSIVE")
+        self.assertIn("debug-log-mod-problem", r["reasons"])
+        self.assertEqual(r["facts"]["debug_mod_trust_held_never_loaded"], 1)
+
+    def test_held_then_definitive_load_failure_is_a_problem(self):
+        fail = P + "hooks module st-passb0-probe@inline failed to load: SyntaxError\n"
+        for text in (HELD + fail, HELD + fail + LOADED, HELD + LOADED + fail):
+            with self.subTest(text=text):
+                self.assertIn("debug-log-mod-problem", self.verdict(text)["reasons"])
+
+    def test_load_before_the_held_line_does_not_resolve_it(self):
+        self.assertIn("debug-log-mod-problem", self.verdict(LOADED + HELD)["reasons"])
+
+    def test_other_not_loaded_messages_still_count(self):
+        for line in (P + "hooks module st-passb0-probe@inline not loaded: policy\n",
+                     P + "hooks module st-passb0-probe@inline update skipped: re-entry (x)\n",
+                     P + "hooks modules not loaded until workspace trust is accepted: st-passb0-probe-x\n",
+                     P + "plugin hooks after workspace trust: st-passb0-probe failed\n"):
+            with self.subTest(line=line):
+                self.assertIn("debug-log-mod-problem", self.verdict(line + LOADED)["reasons"])
+
+    def test_load_of_another_module_does_not_resolve_it(self):
+        other = P + "hooks module st-passb0-probe2@inline loaded (worker, environment e1, tier user); events: x\n"
+        self.assertIn("debug-log-mod-problem", self.verdict(HELD + other)["reasons"])
+
+    def test_a_load_line_that_itself_reports_a_problem_does_not_resolve_it(self):
+        odd = P + "hooks module st-passb0-probe@inline loaded (worker, environment e1, tier user); events: error\n"
+        self.assertEqual(analyze.debug_scan([HELD, odd])["trust_held_never_loaded"], 1)
+
+    def test_read_only_type_root_is_not_flagged(self):
+        self.assertEqual(analyze.debug_scan([TYPE_ROOT_EROFS])["mod_bad_lines"], 0)
+
+    def test_load_reads_the_file_the_same_way(self):
+        d = tempfile.mkdtemp()
+        with open(f"{d}/claude-debug.log", "w") as f:
+            f.write(HELD + LOADED)
+        self.assertEqual(analyze.load(d)["debug"], {"mod_lines": 2, "mod_bad_lines": 0,
+                                                    "trust_held_then_loaded": 1, "trust_held_never_loaded": 0})
+
+
 if __name__ == "__main__":
     unittest.main()

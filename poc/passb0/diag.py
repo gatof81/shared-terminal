@@ -17,9 +17,12 @@ import re
 import stat
 import sys
 
-# The same two expressions as analyze.py, so a flagged line here is a flagged line there.
+# The same expressions as analyze.py, so a flagged line here is a flagged line there; a
+# flagged line analyze.py exempts (debug_scan) says so in `exempt_trust_held_then_loaded`.
 DEBUG_MOD = re.compile(r"st-passb0-probe")
 DEBUG_BAD = re.compile(r"skipped|failed|refused|not loaded|was not loaded|error", re.I)
+DEBUG_TRUST_HELD = re.compile(r"(?:^|\s)hooks modules not loaded until workspace trust is accepted: ([^\n]*?)\s*$")
+DEBUG_PROBE_LOADED = re.compile(r"(?:^|\s)hooks module st-passb0-probe(?:@[\w.-]+)? loaded \(")
 UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 HEX = re.compile(r"\b[0-9a-f]{8,}\b")
 HOME = re.compile(r"/home/[^/\s\"']+")
@@ -106,7 +109,11 @@ def debug_facts(path, full_log=None, windows=()):
             t = ts_ms(l)
             # Which mod call was in progress when the line was logged, and how far into it.
             during = [(lab, t - a) for lab, a, b in windows if t is not None and a <= t <= b]
+            m = DEBUG_TRUST_HELD.search(l)
+            exempt = bool(m) and "st-passb0-probe" in [x.strip() for x in m.group(1).split(",")] \
+                and any(DEBUG_PROBE_LOADED.search(x) and not DEBUG_BAD.search(x) for x in lines[i + 1:])
             flagged.append({"index": i, "dt_ms": None if t is None or t0 is None else t - t0, "matched": words,
+                            "exempt_trust_held_then_loaded": exempt,
                             "during_call": during[0][0] if during else None, "ms_into_call": during[0][1] if during else None,
                             "text": redact(l)})
     counts = {}

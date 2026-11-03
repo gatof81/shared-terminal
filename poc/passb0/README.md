@@ -18,4 +18,4 @@ Run the tests:
     python3 test/test_b0.py && python3 test/test_analyze.py && python3 test/test_runner.py && node --test test/probe.test.mjs
     claude plugin validate ./mod
 
-None of the records hold a process environment, a command line, prompt text or a credential. The analyzer reads only the lines of the CLI debug log that name this plugin, and the procedure copies out only those lines.
+None of the records hold a process environment, a command line, prompt text or a credential. The analyzer reads only the lines of the CLI debug log that name this plugin, and the procedure copies out only those lines. Of those, the only flagged line it does not count is the CLI's `hooks modules not loaded until workspace trust is accepted: …` naming the probe, and only when a `hooks module st-passb0-probe@… loaded (` line follows it (`debug_scan`); any other `not loaded`, or a held line never followed by a load, still makes the run INCONCLUSIVE.

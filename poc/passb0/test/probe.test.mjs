@@ -117,6 +117,12 @@ test("hold: the checker's reason is kept only when it looks like one", async () 
 	assert.equal(recs.find((r) => r.label === "hold-h").waitheld.held_last_error, null);
 });
 
+test("fdcheck: the checker's reason is kept only when it looks like one", () => {
+	assert.equal(pickChild({ waited: false, held_last_error: "stale" }).held_last_error, "stale");
+	assert.equal(pickChild({ waited: false, held_last_error: "/etc/passwd x" }).held_last_error, null);
+	assert.equal(pickChild({ waited: false, held_last_error: 13 }).held_last_error, null);
+});
+
 test("hold: unparsable or failing child output is an error field, not a crash", async () => {
 	let k = 0;
 	const { recs } = await runProbe({

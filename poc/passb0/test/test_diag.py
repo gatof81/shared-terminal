@@ -67,6 +67,17 @@ class Diag(unittest.TestCase):
         self.assertEqual(dbg["flagged"][0]["dt_ms"], 2250)
         self.assertEqual((dbg["flagged"][0]["during_call"], dbg["flagged"][0]["ms_into_call"]), ("hold-h", 250))
         self.assertIn("/home/<user>/x <hex>", dbg["flagged"][0]["text"])
+        self.assertFalse(dbg["flagged"][0]["exempt_trust_held_then_loaded"])
+
+    def test_trust_held_line_says_whether_analyze_exempts_it(self):
+        p = "2026-11-03T15:20:03.000Z [DEBUG] "
+        held = p + "hooks modules not loaded until workspace trust is accepted: st-passb0-probe, sec-default\n"
+        loaded = p + "hooks module st-passb0-probe@inline loaded (worker, environment e1, tier user); events: x\n"
+        for text, exempt in ((held + loaded, True), (held, False), (loaded + held, False)):
+            with self.subTest(exempt=exempt, text=text):
+                put(os.path.join(self.res, "claude-debug.log"), text)
+                flagged = diag.diagnose(self.base)["debug"]["flagged"]
+                self.assertEqual([f["exempt_trust_held_then_loaded"] for f in flagged], [exempt])
 
     def test_nothing_identifying_leaves(self):
         out = json.dumps(diag.diagnose(self.base))

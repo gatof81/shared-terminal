@@ -21,6 +21,33 @@ DEBUG_MOD = re.compile(r"st-passb0-probe")
 # preflight, in the container before the run and after it.
 WANT_CLI = "2.1.314"
 DEBUG_BAD = re.compile(r"skipped|failed|refused|not loaded|was not loaded|error", re.I)
+# The one flagged line that is not a load failure (VM100 run 1). 2.1.314 logs it from
+# loadPluginHooks while workspace trust is still pending, naming the modules it holds back;
+# after the trust is accepted loadHooksModulesHeldForTrust runs the load again, and a module
+# that loads then logs `hooks module <name>@<source> loaded (...)`. So the held line is
+# exempt only when a load line for the probe follows it in the same log, and only when the
+# message is exactly that template: any other "not loaded" (or a held line never followed by
+# a load) still counts.
+DEBUG_TRUST_HELD = re.compile(r"(?:^|\s)hooks modules not loaded until workspace trust is accepted: ([^\n]*?)\s*$")
+DEBUG_PROBE_LOADED = re.compile(r"(?:^|\s)hooks module st-passb0-probe(?:@[\w.-]+)? loaded \(")
+
+
+def debug_scan(lines):
+    """Lines that name the probe, and of them the ones that report a problem."""
+    lines = [l for l in lines if DEBUG_MOD.search(l)]
+    bad, resolved, unresolved = 0, 0, 0
+    for i, l in enumerate(lines):
+        if not DEBUG_BAD.search(l):
+            continue
+        m = DEBUG_TRUST_HELD.search(l)
+        if m and "st-passb0-probe" in [x.strip() for x in m.group(1).split(",")]:
+            if any(DEBUG_PROBE_LOADED.search(x) and not DEBUG_BAD.search(x) for x in lines[i + 1:]):
+                resolved += 1
+                continue
+            unresolved += 1
+        bad += 1
+    return {"mod_lines": len(lines), "mod_bad_lines": bad,
+            "trust_held_then_loaded": resolved, "trust_held_never_loaded": unresolved}
 
 
 def _jsonl(path):
@@ -60,8 +87,7 @@ def load(d):
     dp = os.path.join(d, "claude-debug.log")
     if os.path.exists(dp):
         with open(dp, encoding="utf-8", errors="replace") as f:
-            lines = [l for l in f if DEBUG_MOD.search(l)]
-        debug = {"mod_lines": len(lines), "mod_bad_lines": sum(1 for l in lines if DEBUG_BAD.search(l))}
+            debug = debug_scan(f)
     return {
         "mod": mod, "mod_bad": mod_bad,
         "c": c, "h": h, "server_bad": c_bad + h_bad,
@@ -119,6 +145,9 @@ def analyze(D):
     if D["debug"] is not None:
         facts["debug_mod_lines"] = D["debug"]["mod_lines"]
         facts["debug_mod_bad_lines"] = D["debug"]["mod_bad_lines"]
+        for k in ("trust_held_then_loaded", "trust_held_never_loaded"):
+            if k in D["debug"]:
+                facts[f"debug_mod_{k}"] = D["debug"][k]
     if not starts:
         inc("mod-not-loaded")
         return done()
@@ -216,6 +245,12 @@ def analyze(D):
             }
             ok = seen == P and all(v for k, v in row.items() if k not in ("peer", "pidfd_same")) and (row["pidfd_same"] or not pf.get("ok"))
         else:
+            # No exe comparison here: the host server runs under the
+            # operator's uid, not 1000, so readlink of /proc/<pid>/exe is a ptrace-mode access
+            # check it fails (EACCES; VM100 run 1 recorded exactly that on h1, h2 and hold-h).
+            # What still identifies the peer is world-readable /proc state and the kernel's
+            # own answers: SO_PEERCRED, its NSpid down to the container's pid of the CLI, the
+            # container's cgroup, tgid, a stable re-read, and the pidfd's NSpid.
             ns = pr.get("nspid") or []
             seen = ns[-1] if len(ns) >= 2 else None
             row = {
