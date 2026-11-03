@@ -153,6 +153,16 @@ export function pickChild(c) {
 		waited: c?.waited === true,
 		held_conn: typeof c?.held_conn === "string" && HEX16.test(c.held_conn) ? c.held_conn : null,
 		held_last_error: reason(c?.held_last_error),
+		local_ino: int(c?.local_ino),
+		diag: c?.diag && typeof c.diag === "object"
+			? {
+					found: c.diag.found === true,
+					error: reason(c.diag.error),
+					stream_established: c.diag.stream_established === true,
+					mutual: c.diag.mutual === true,
+					server_agrees: typeof c.diag.server_agrees === "boolean" ? c.diag.server_agrees : null,
+				}
+			: null,
 		peer_known: c?.peer_known === true,
 		peer_in_self: typeof c?.peer_in_self === "boolean" ? c.peer_in_self : null,
 		own_socket_count: int(c?.own_socket_count),
@@ -160,6 +170,8 @@ export function pickChild(c) {
 		holders: Array.isArray(c?.holders)
 			? c.holders.slice(0, 16).map((h) => ({ pid: int(h?.pid), fd: int(h?.fd), cloexec: typeof h?.cloexec === "boolean" ? h.cloexec : null }))
 			: null,
+		// Truncated, never emptied: one holder of the accepted end is enough to refuse.
+		local_holder_pids: Array.isArray(c?.local_holder_pids) ? c.local_holder_pids.slice(0, 16).map(int) : null,
 	};
 	if (out.error === undefined) delete out.error;
 	return out;

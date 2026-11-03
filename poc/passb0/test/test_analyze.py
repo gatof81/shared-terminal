@@ -11,13 +11,13 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import analyze  # noqa: E402
 
-CLI, CHILD, BASE_C, BASE_H, OTHER = 87, 301, 402, 403, 999
+CLI, CHILD, BASE_C, BASE_H, OTHER, SRV_C = 87, 301, 402, 403, 999, 55
 HOST = {CLI: 40087, BASE_C: 40402, BASE_H: 40403, OTHER: 40999}
 SHA = "a" * 64
 CTR = "f" * 64
 
 
-def server(scope, label, conn, nonce, pid=CLI, peer_ino=None):
+def server(scope, label, conn, nonce, pid=CLI, peer_ino=None, local_ino=None):
     hp = HOST[pid]
     proc = {"tgid": pid, "starttime": 5000 if pid == CLI else 6000, "stable": True, "uid": 1000}
     if scope == "c":
@@ -28,8 +28,12 @@ def server(scope, label, conn, nonce, pid=CLI, peer_ino=None):
         proc.update({"tgid": hp, "nspid": [hp, pid], "cgroup_match": True})
         cred = {"pid": hp, "uid": 1000, "gid": 1000}
         pidfd = {"ok": True, "pid": hp, "nspid": [hp, pid], "alive_after": True}
-    return {"scope": "container" if scope == "c" else "host", "cred": cred, "pidfd": pidfd, "proc": proc,
-            "conn": conn, "nonce": nonce, "label": label, "status": 200, "peer_ino": peer_ino}
+    rec = {"scope": "container" if scope == "c" else "host", "cred": cred, "pidfd": pidfd, "proc": proc,
+           "conn": conn, "nonce": nonce, "label": label, "status": 200, "local_ino": local_ino, "peer_ino": peer_ino}
+    if scope == "h":
+        # What VM100 run 2 showed: the host cannot resolve the peer (other network namespace).
+        rec["peer_ino"], rec["peer_ino_error"] = None, "ENOENT"
+    return rec
 
 
 def fixture():
@@ -41,11 +45,16 @@ def fixture():
                "ok": True, "status": 200, "conn": conn}
         if label.startswith("hold"):
             rec["waitheld"] = {"waited": True, "conn": conn}
-            rec["child"] = {"exit": 0, "self_pid": CHILD, "self_ppid": CLI, "waited": True, "held_conn": conn, "peer_known": True,
-                            "peer_in_self": False, "own_socket_count": 0, "scan_denied": 0,
-                            "holders": [{"pid": CLI, "fd": 31, "cloexec": True}]}
+            rec["child"] = {"exit": 0, "self_pid": CHILD, "self_ppid": CLI, "waited": True, "held_conn": conn,
+                            "local_ino": 8000 + i,
+                            "diag": {"found": True, "error": None, "stream_established": True, "mutual": True,
+                                     "server_agrees": True if target == "c" else None},
+                            "peer_known": True, "peer_in_self": False, "own_socket_count": 0, "scan_denied": 0,
+                            "holders": [{"pid": CLI, "fd": 31, "cloexec": True}],
+                            # In the container the internal server holds hold-c's accepted end; nobody holds hold-h's.
+                            "local_holder_pids": [SRV_C] if target == "c" else []}
         mod.append(rec)
-        (c if target == "c" else h).append(server(target, label, conn, nonce, peer_ino=ino if label != "h2" else 7001))
+        (c if target == "c" else h).append(server(target, label, conn, nonce, peer_ino=ino if label != "h2" else 7001, local_ino=8000 + i))
     mod.append({"inst": "i1", "seq": 7, "kind": "done", "calls": 5})
     c.append(server("c", "base", "b" * 16, "bc", pid=BASE_C))
     h.append(server("h", "base", "c" * 16, "bh", pid=BASE_H))
@@ -95,12 +104,16 @@ class Pass(unittest.TestCase):
         r = analyze.analyze(fixture())
         self.assertEqual(r["verdict"], "PASS", r["reasons"])
         self.assertEqual(r["reasons"], [])
-        self.assertTrue(r["facts"]["h2_reused_h1_connection"])
+        # Informative only, and the host cannot resolve a client end: absent, never guessed.
+        self.assertNotIn("h2_reused_h1_connection", r["facts"])
         self.assertEqual(r["facts"]["hold-c_fd"]["holders"], ["CLI"])
+        self.assertEqual(r["facts"]["hold-h_fd"]["holders"], ["CLI"])
+        self.assertEqual(r["facts"]["hold-h_fd"]["accepted_end"], {"matches_server_record": True, "stream_established": True,
+                                                                  "mutual": True, "server_agrees": None, "error": None})
 
     def test_report_leaks_no_identifier(self):
         out = json.dumps(analyze.analyze(fixture()))
-        for v in (str(CLI), str(HOST[CLI]), "0000000000000003", SHA, "7003"):
+        for v in (str(CLI), str(HOST[CLI]), "0000000000000003", SHA, "7003", "8004", str(SRV_C)):
             self.assertNotIn(v, out)
 
     def test_load_round_trip(self):
@@ -150,6 +163,21 @@ NEGATIVES = [
     ("control failed", lambda D: D["control"]["child"].update(peer_in_self=False), "INCONCLUSIVE", "control-failed"),
     ("checker not synchronized", lambda D: call(D, "hold-c")["child"].update(held_conn="9" * 16), "INCONCLUSIVE", "checker-not-synchronized:hold-c"),
     ("peer inode unknown", lambda D: call(D, "hold-h")["child"].update(peer_known=False), "INCONCLUSIVE", "peer-inode-unknown:hold-h"),
+    # The accepted end's inode, as it came through the held file, is never taken on trust.
+    ("held inode is another connection's", lambda D: call(D, "hold-h")["child"].update(local_ino=8001), "INCONCLUSIVE", "held-socket-mismatch:hold-h"),
+    ("held inode absent", lambda D: call(D, "hold-h")["child"].update(local_ino=None), "INCONCLUSIVE", "held-socket-mismatch:hold-h"),
+    ("server recorded no inode", lambda D: srv(D, "hold-h").update(local_ino=None), "INCONCLUSIVE", "held-socket-mismatch:hold-h"),
+    ("held inode bool", lambda D: call(D, "hold-h")["child"].update(local_ino=True), "INCONCLUSIVE", "held-socket-mismatch:hold-h"),
+    ("accepted end held in the container", lambda D: call(D, "hold-h")["child"].update(local_holder_pids=[OTHER]), "INCONCLUSIVE", "held-socket-mismatch:hold-h"),
+    ("accepted-end holders unknown", lambda D: call(D, "hold-h")["child"].update(local_holder_pids=None), "INCONCLUSIVE", "held-socket-mismatch:hold-h"),
+    ("connection closed (peer not mutual)", lambda D: call(D, "hold-h")["child"]["diag"].update(mutual=False), "INCONCLUSIVE", "peer-inode-unknown:hold-h"),
+    ("checker says known but not mutual", lambda D: call(D, "hold-c")["child"]["diag"].update(mutual=False), "INCONCLUSIVE", "peer-inode-unknown:hold-c"),
+    ("accepted end not found", lambda D: call(D, "hold-h")["child"].update(peer_known=False, diag={"found": False, "error": "ENOENT", "stream_established": False, "mutual": False, "server_agrees": None}), "INCONCLUSIVE", "peer-inode-unknown:hold-h"),
+    ("checker diag missing", lambda D: call(D, "hold-h")["child"].update(diag=None), "INCONCLUSIVE", "peer-inode-unknown:hold-h"),
+    ("server and checker disagree (container)", lambda D: call(D, "hold-c")["child"]["diag"].update(server_agrees=False), "INCONCLUSIVE", "peer-inode-unknown:hold-c"),
+    ("server and checker disagree (host)", lambda D: call(D, "hold-h")["child"]["diag"].update(server_agrees=False), "INCONCLUSIVE", "peer-inode-unknown:hold-h"),
+    ("container server peer missing", lambda D: call(D, "hold-c")["child"]["diag"].update(server_agrees=None), "INCONCLUSIVE", "peer-inode-unknown:hold-c"),
+    ("hold-h conn of another call", lambda D: srv(D, "hold-h").update(nonce="zz"), "FAIL", "connection-not-matched:hold-h"),
     ("fd not cloexec", lambda D: call(D, "hold-c")["child"]["holders"][0].update(cloexec=False), "FAIL", "fd-not-cloexec:hold-c"),
     ("inherited by child", lambda D: call(D, "hold-h")["child"].update(peer_in_self=True), "FAIL", "inherited-by-child:hold-h"),
     ("held by another process", lambda D: call(D, "hold-c")["child"]["holders"].append({"pid": OTHER, "fd": 3, "cloexec": True}), "FAIL", "connection-held-by-other:hold-c"),

@@ -138,6 +138,7 @@ class ContainerScope(ServerCase):
     def test_cloexec_descriptor_is_not_inherited(self):
         ch = self.hold_then_check(inheritable=False, pass_fd=False)
         self.assertTrue(ch["peer_known"])
+        self.assertEqual(ch["diag"], {"found": True, "error": None, "stream_established": True, "mutual": True, "server_agrees": True})
         self.assertFalse(ch["peer_in_self"])
         self.assertEqual(ch["self_ppid"], os.getpid())
         self.assertEqual([(h["pid"], h["cloexec"]) for h in ch["holders"]], [(os.getpid(), True)])
@@ -202,6 +203,151 @@ class HostScope(ServerCase):
         r = self.records(1)[0]
         self.assertFalse(r["proc"]["cgroup_match"])
         self.assertTrue(os.path.basename(self.srv.out) == "h.jsonl")
+
+
+class HostNamespaceView(ServerCase):
+    """VM100 run 2: the host server's sock_diag cannot see the accepted end (it lives in the
+    client's network namespace), so the held file carries no peer. One namespace here, so the
+    server's lookup is made to fail the way the kernel fails it there; the checker's is real."""
+    scope = "host"
+    expect = "0123456789abcdef" * 4
+
+    def setUp(self):
+        real = b0.peer_inode
+
+        def enoent(_ino):
+            raise FileNotFoundError(2, "sock_diag")
+        b0.peer_inode = enoent
+        self.addCleanup(setattr, b0, "peer_inode", real)
+        super().setUp()
+
+    def test_checker_resolves_the_peer_from_the_accepted_end(self):
+        ch = ContainerScope.hold_then_check(self, inheritable=False, pass_fd=False)
+        r = self.records(1)[0]
+        self.assertNotIn("peer_ino", r)
+        self.assertEqual(r["peer_ino_error"], "ENOENT")
+        self.assertEqual(ch["local_ino"], r["local_ino"])
+        self.assertTrue(ch["peer_known"])
+        self.assertEqual(ch["diag"], {"found": True, "error": None, "stream_established": True, "mutual": True, "server_agrees": None})
+        self.assertEqual([(h["pid"], h["cloexec"]) for h in ch["holders"]], [(os.getpid(), True)])
+        self.assertFalse(ch["peer_in_self"])
+        # Artifact of one namespace: the server thread lives in this process. On VM100 the
+        # host server is outside the container's pid namespace and this list is empty.
+        self.assertEqual(ch["local_holder_pids"], [os.getpid()])
+
+
+class AcceptedEnd(unittest.TestCase):
+    """peer_from_accepted takes nothing from the held file on trust."""
+
+    def ino(self, s):
+        return os.fstat(s.fileno()).st_ino
+
+    def pair(self, kind=socket.SOCK_STREAM):
+        a, b = socket.socketpair(socket.AF_UNIX, kind)
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        return a, b
+
+    def test_a_live_connection_resolves_both_ways(self):
+        a, b = self.pair()
+        self.assertEqual(b0.peer_from_accepted(self.ino(a)),
+                         (self.ino(b), {"found": True, "error": None, "stream_established": True, "mutual": True, "server_agrees": None}))
+        self.assertEqual(b0.peer_from_accepted(self.ino(a), self.ino(b))[1]["server_agrees"], True)
+
+    def test_invalid_inode_values_are_not_queried(self):
+        for v in (None, "123", True, 0, -1, 2 ** 32, 1.5):
+            with self.subTest(v=v):
+                self.assertEqual(b0.peer_from_accepted(v), (None, {"found": False, "error": "no-local-ino", "stream_established": False,
+                                                                   "mutual": False, "server_agrees": None}))
+
+    def test_a_closed_connection_is_not_found(self):
+        a, b = socket.socketpair()
+        ino = self.ino(a)
+        a.close()
+        b.close()
+        peer, d = b0.peer_from_accepted(ino)
+        self.assertIsNone(peer)
+        self.assertEqual((d["found"], d["error"]), (False, "ENOENT"))
+
+    def test_client_gone_while_accepted_end_open(self):
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+        b.close()
+        peer, d = b0.peer_from_accepted(self.ino(a))
+        self.assertIsNone(peer)
+        self.assertFalse(d["mutual"])
+
+    def test_listener_and_datagram_are_refused(self):
+        d = tempfile.mkdtemp()
+        lst = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(lst.close)
+        lst.bind(os.path.join(d, "l.sock"))
+        lst.listen(1)
+        a, _ = self.pair(socket.SOCK_DGRAM)
+        for s in (lst, a):
+            with self.subTest(s=s):
+                peer, dg = b0.peer_from_accepted(self.ino(s))
+                self.assertIsNone(peer)
+                self.assertTrue(dg["found"])
+                self.assertFalse(dg["stream_established"])
+
+    def test_disagreement_with_the_server_is_refused(self):
+        a, b = self.pair()
+        peer, d = b0.peer_from_accepted(self.ino(a), self.ino(b) + 1)
+        self.assertIsNone(peer)
+        self.assertIs(d["server_agrees"], False)
+
+    def with_answers(self, answers):
+        real = b0.unix_diag
+        b0.unix_diag = lambda ino: dict(answers[ino])
+        self.addCleanup(setattr, b0, "unix_diag", real)
+
+    def test_a_peer_that_does_not_name_the_accepted_end_back_is_refused(self):
+        st = {"type": socket.SOCK_STREAM, "state": b0.TCP_ESTABLISHED}
+        self.with_answers({10: {"ino": 10, "peer": 20, **st}, 20: {"ino": 20, "peer": 30, **st}})
+        peer, d = b0.peer_from_accepted(10)
+        self.assertIsNone(peer)
+        self.assertEqual((d["stream_established"], d["mutual"]), (True, False))
+
+    def test_an_accepted_end_not_established_is_refused(self):
+        self.with_answers({10: {"ino": 10, "peer": 20, "type": socket.SOCK_STREAM, "state": 7},
+                           20: {"ino": 20, "peer": 10, "type": socket.SOCK_STREAM, "state": b0.TCP_ESTABLISHED}})
+        self.assertEqual(b0.peer_from_accepted(10)[0], None)
+
+    def test_a_peer_end_not_established_is_refused(self):
+        self.with_answers({10: {"ino": 10, "peer": 20, "type": socket.SOCK_STREAM, "state": b0.TCP_ESTABLISHED},
+                           20: {"ino": 20, "peer": 10, "type": socket.SOCK_STREAM, "state": 7}})
+        self.assertEqual(b0.peer_from_accepted(10)[0], None)
+
+    def run_fdcheck(self, held_obj):
+        d = tempfile.mkdtemp()
+        held = os.path.join(d, "held.json")
+        b0.write_json_atomic(held, {"scope": "host", "conn": "0" * 16, "t_ms": int(time.time() * 1000), **held_obj})
+        return json.loads(subprocess.run([sys.executable, "-I", B0, "fdcheck", "--held", held, "--wait-ms", "500"],
+                                         capture_output=True, text=True, timeout=30).stdout)
+
+    def test_fdcheck_without_local_ino_knows_no_peer(self):
+        ch = self.run_fdcheck({"peer_ino": None})
+        self.assertFalse(ch["peer_known"])
+        self.assertEqual(ch["diag"]["error"], "no-local-ino")
+
+    def test_fdcheck_on_a_closed_connection_knows_no_peer(self):
+        a, b = socket.socketpair()
+        ino = self.ino(a)
+        a.close()
+        b.close()
+        ch = self.run_fdcheck({"local_ino": ino})
+        self.assertFalse(ch["peer_known"])
+        self.assertEqual(ch["diag"]["error"], "ENOENT")
+
+    def test_fdcheck_on_another_live_connection_says_who_holds_its_accepted_end(self):
+        # A wrong but valid inode resolves; what exposes it is the accepted end's holder here
+        # (and, in analyze.py, the server's own record of the connection).
+        a, b = self.pair()
+        ch = self.run_fdcheck({"local_ino": self.ino(a)})
+        self.assertTrue(ch["peer_known"])
+        self.assertEqual(ch["local_ino"], self.ino(a))
+        self.assertEqual(ch["local_holder_pids"], [os.getpid()])
 
 
 class ProcParsing(unittest.TestCase):

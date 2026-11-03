@@ -320,7 +320,32 @@ def analyze(D):
             }
             facts[f"{l}_fd"] = row
             continue
-        if ch.get("peer_known") is not True:
+        # The checker resolved the peer from the ACCEPTED end's inode (the host server cannot:
+        # unix_diag only sees its own network namespace). That inode came through the held
+        # file, so it must be the one the server recorded for this very connection (conn and
+        # nonce matched), and, for the host's connection, no process in the container may hold
+        # it: the host server's end is not in the container's pid namespace.
+        s = server_rec(r.get("target"), r.get("conn"), r.get("nonce"))
+        dg = ch.get("diag") or {}
+        row["accepted_end"] = {"matches_server_record": s is not None and isinstance(ch.get("local_ino"), int)
+                               and ch.get("local_ino") == s.get("local_ino"),
+                               "stream_established": dg.get("stream_established") is True,
+                               "mutual": dg.get("mutual") is True,
+                               "server_agrees": dg.get("server_agrees"),
+                               "error": dg.get("error")}
+        if not row["accepted_end"]["matches_server_record"]:
+            inc(f"held-socket-mismatch:{l}")
+            facts[f"{l}_fd"] = row
+            continue
+        lh = ch.get("local_holder_pids")
+        if r.get("target") == "h" and lh != []:
+            inc(f"held-socket-mismatch:{l}")
+            facts[f"{l}_fd"] = row
+            continue
+        # In the container both ends are visible to the server too: there the two must agree.
+        need_server = r.get("target") == "c"
+        if ch.get("peer_known") is not True or not row["accepted_end"]["mutual"] \
+                or (need_server and dg.get("server_agrees") is not True) or dg.get("server_agrees") is False:
             inc(f"peer-inode-unknown:{l}")
             facts[f"{l}_fd"] = row
             continue

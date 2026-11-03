@@ -117,6 +117,17 @@ test("hold: the checker's reason is kept only when it looks like one", async () 
 	assert.equal(recs.find((r) => r.label === "hold-h").waitheld.held_last_error, null);
 });
 
+test("pickChild: the accepted-end fields are type-checked, holders truncated but never emptied", () => {
+	const ok = pickChild({ local_ino: 812, diag: { found: true, error: null, stream_established: true, mutual: true, server_agrees: null }, local_holder_pids: [] });
+	assert.deepEqual([ok.local_ino, ok.diag, ok.local_holder_pids], [812, { found: true, error: null, stream_established: true, mutual: true, server_agrees: null }, []]);
+	const bad = pickChild({ local_ino: "812", diag: { found: "yes", error: "/x y", stream_established: 1, mutual: "true", server_agrees: "no", ino: 5 }, local_holder_pids: Array.from({ length: 40 }, (_, i) => i + 1) });
+	assert.equal(bad.local_ino, null);
+	assert.deepEqual(bad.diag, { found: false, error: null, stream_established: false, mutual: false, server_agrees: null });
+	assert.equal(bad.local_holder_pids.length, 16);
+	assert.equal(pickChild({ diag: "x", local_holder_pids: "x" }).diag, null);
+	assert.equal(pickChild({ local_holder_pids: { length: 0 } }).local_holder_pids, null);
+});
+
 test("fdcheck: the checker's reason is kept only when it looks like one", () => {
 	assert.equal(pickChild({ waited: false, held_last_error: "stale" }).held_last_error, "stale");
 	assert.equal(pickChild({ waited: false, held_last_error: "/etc/passwd x" }).held_last_error, null);

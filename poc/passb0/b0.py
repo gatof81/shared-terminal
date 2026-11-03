@@ -41,6 +41,7 @@ NLM_F_REQUEST = 1
 NLMSG_ERROR = 2
 UDIAG_SHOW_PEER = 0x4
 UNIX_DIAG_PEER = 2
+TCP_ESTABLISHED = 1  # udiag_state of a connected stream socket
 MAX_BODY = 4096
 HEX = re.compile(r"^[0-9a-f]{1,32}$")
 LABEL = re.compile(r"^[a-z0-9-]{1,16}$")
@@ -141,9 +142,16 @@ def pidfd_info(fd):
     return out
 
 
-def peer_inode(local_ino):
-    """Inode of the other end of a connected Unix socket, by sock_diag (UNIX_DIAG_PEER)."""
-    req = struct.pack("=BBHIII2I", socket.AF_UNIX, 0, 0, 0xFFFFFFFF, local_ino, UDIAG_SHOW_PEER, 0xFFFFFFFF, 0xFFFFFFFF)
+def unix_diag(ino):
+    """sock_diag's answer for one Unix socket inode: {ino, type, state, peer}.
+
+    The kernel looks the inode up only among the sockets of the CALLER's network namespace
+    (unix_diag_get_exact → unix_lookup_by_ino(sock_net(in_skb->sk), …)), and the socket
+    accept() returns is created in the CONNECTING process's namespace (unix_stream_connect →
+    unix_create1(sock_net(sk), …)). So the host server cannot see its own accepted end of a
+    connection from the container (ENOENT; VM100 run 2), while a process in the container can.
+    """
+    req = struct.pack("=BBHIII2I", socket.AF_UNIX, 0, 0, 0xFFFFFFFF, ino, UDIAG_SHOW_PEER, 0xFFFFFFFF, 0xFFFFFFFF)
     hdr = struct.pack("=IHHII", 16 + len(req), SOCK_DIAG_BY_FAMILY, NLM_F_REQUEST, 1, 0)
     with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_SOCK_DIAG) as s:
         s.settimeout(2)
@@ -152,15 +160,57 @@ def peer_inode(local_ino):
     length, mtype = struct.unpack_from("=IH", data, 0)
     if mtype == NLMSG_ERROR:
         raise OSError(-struct.unpack_from("=i", data, 16)[0], "sock_diag")
+    if mtype != SOCK_DIAG_BY_FAMILY or length < 32:
+        raise OSError(errno.EPROTO, "sock_diag")
+    family, stype, state, _, got = struct.unpack_from("=BBBBI", data, 16)
+    if family != socket.AF_UNIX or got != ino:
+        raise OSError(errno.EPROTO, "sock_diag")
+    out = {"ino": got, "type": stype, "state": state, "peer": None}
     off = 16 + 16  # nlmsghdr + unix_diag_msg
     while off + 4 <= length:
         rta_len, rta_type = struct.unpack_from("=HH", data, off)
         if rta_len < 4:
             break
         if rta_type == UNIX_DIAG_PEER:
-            return struct.unpack_from("=I", data, off + 4)[0]
+            out["peer"] = struct.unpack_from("=I", data, off + 4)[0]
         off += (rta_len + 3) & ~3
-    return None
+    return out
+
+
+def peer_inode(local_ino):
+    """Inode of the other end of a connected Unix socket, by sock_diag (UNIX_DIAG_PEER)."""
+    return unix_diag(local_ino)["peer"]
+
+
+def peer_from_accepted(local_ino, server_peer=None):
+    """The client's end of the connection whose ACCEPTED end is local_ino, proved from this
+    process's network namespace, or None. `diag` says what was established.
+
+    The inode comes from the held file, so nothing about it is taken on trust: the socket must
+    be a connected stream socket, its peer must name it back (a closed client leaves a peer
+    that no longer resolves), and when the server could read the peer itself the two must agree.
+    """
+    diag = {"found": False, "error": None, "stream_established": False, "mutual": False, "server_agrees": None}
+    if type(local_ino) is not int or not 0 < local_ino < 2 ** 32:
+        diag["error"] = "no-local-ino"
+        return None, diag
+    try:
+        a = unix_diag(local_ino)
+        diag["found"] = True
+        diag["stream_established"] = a["type"] == socket.SOCK_STREAM and a["state"] == TCP_ESTABLISHED
+        peer = a["peer"]
+        if not diag["stream_established"] or not peer:
+            return None, diag
+        b = unix_diag(peer)
+        diag["mutual"] = b["peer"] == local_ino and b["type"] == socket.SOCK_STREAM and b["state"] == TCP_ESTABLISHED
+    except OSError as e:
+        diag["error"] = errname(e)
+        return None, diag
+    if server_peer is not None:
+        diag["server_agrees"] = server_peer == peer
+    if not diag["mutual"] or diag["server_agrees"] is False:
+        return None, diag
+    return peer, diag
 
 
 def socket_inodes_of(pid):
@@ -309,7 +359,10 @@ class Server:
                 # The reader is the checker in the container, uid 1000, which need not be this
                 # process's uid, and the runner's umask 077 would make the file 0600: set the
                 # mode explicitly, as open() did for the socket. It holds no secret.
-                write_json_atomic(self.held, {"scope": self.scope, "conn": rec["conn"], "peer_ino": rec.get("peer_ino"), "t_ms": int(time.time() * 1000)}, mode=0o644)
+                # local_ino: the checker resolves the peer from it in its own namespace
+                # (unix_diag), since this server cannot when the client is in another one.
+                write_json_atomic(self.held, {"scope": self.scope, "conn": rec["conn"], "local_ino": rec["local_ino"],
+                                              "peer_ino": rec.get("peer_ino"), "t_ms": int(time.time() * 1000)}, mode=0o644)
                 self.stop.wait(self.hold_ms / 1000)
             respond(conn, 200, {"conn": rec["conn"], "scope": self.scope})
             rec["status"] = 200
@@ -384,13 +437,16 @@ def fdcheck(held, after_ms=0, wait_ms=8000):
     if h is None:
         return out
     out["held_conn"] = h.get("conn")
-    peer = h.get("peer_ino")
-    out["peer_known"] = isinstance(peer, int)
+    local = h.get("local_ino")
+    out["local_ino"] = local if type(local) is int else None
+    server_peer = h.get("peer_ino") if type(h.get("peer_ino")) is int else None
+    peer, out["diag"] = peer_from_accepted(local, server_peer)
+    out["peer_known"] = peer is not None
     if not out["peer_known"]:
         return out
     # Inherited fds are already open at exec, so "own" read at start is the inheritance result.
     out["peer_in_self"] = peer in own
-    holders, denied = [], 0
+    holders, local_holders, denied = [], [], 0
     for d in os.listdir("/proc"):
         if not d.isdigit() or int(d) == os.getpid():
             continue
@@ -398,11 +454,16 @@ def fdcheck(held, after_ms=0, wait_ms=8000):
             for fd, ino in socket_inodes_of(d).items():
                 if ino == peer:
                     holders.append({"pid": int(d), "fd": fd, "cloexec": fd_cloexec(d, fd)})
+                elif ino == local:
+                    # Who holds the ACCEPTED end in this pid namespace: nobody for the host
+                    # server's connection, so anyone here means the inode is not that connection.
+                    local_holders.append(int(d))
         except PermissionError:
             denied += 1
         except (FileNotFoundError, ProcessLookupError):
             pass
     out["holders"] = holders
+    out["local_holder_pids"] = sorted(set(local_holders))
     out["scan_denied"] = denied
     return out
 
