@@ -314,7 +314,9 @@ Un mensaje se entrega a un agente sólo si:
 3. el agente no tiene otra entrega `transporting`/`transported`/`accepted` sin completar;
 4. el pane no tiene una operación del Composer sin liberar (registro de pane, §8.1.4.1);
 5. el destinatario tiene una participación `active` en la conversación del mensaje **con el mismo
-   `participation_id`** que registró la entrega, comprobado **en el momento del préstamo** (`next`).
+   `participation_id`** que registró la entrega, comprobado **en el momento del préstamo** (`next`),
+   y D1 y el log de la conversación coinciden en sus participantes (si no, la conversación está
+   `participants-unverified` y no presta nada; protocolo §9.5).
    Si no (retirado, reinvitado, conversación archivada), la entrega no se presta y pasa a
    `cancelled{participant-removed}` o `cancelled{chat-archived}`;
 6. si el autor es un agente, la entrega tiene una **autorización válida en el momento del
@@ -406,7 +408,7 @@ texto; el contexto adicional lo agrega la persona al aprobarlo, nunca el agente 
   agentes corren con `--dangerously-skip-permissions`, así que cualquier texto entregado tiene el
   poder completo del contenedor destino).
 - Límites anti-bucle (protocolo §8): profundidad de cadena ≤ 3 fuera de Colaboración, ≤ 20 mensajes
-  por cadena, ≤ 10 mensajes salientes por minuto por agente, ≤ 5 destinatarios, sin auto-envío, cola
+  de agentes por cadena (global: con cualquier autorización y a través de todos los permisos), ≤ 10 mensajes salientes por minuto por agente, ≤ 5 destinatarios, sin auto-envío, cola
   por agente ≤ 20; participantes por conversación ≤ 6; invitaciones iniciadas por agentes ≤ 2 por
   cadena.
 
@@ -419,7 +421,8 @@ texto; el contexto adicional lo agrega la persona al aprobarlo, nunca el agente 
 | Qué autoriza | Un `chat_send` explícito de un participante del permiso a otro participante **del permiso**, **en esa misma conversación**, se entrega sin aprobación por mensaje. Cada entrega así consume una unidad del presupuesto y lleva `authorized_by: collab:<grant_id>` |
 | Qué **no** autoriza | Reenvío automático de respuestas (sólo `chat_send` explícitos); invitar (R13 sigue); destinatarios fuera del permiso; otras conversaciones (`grant.chat_id == msg.chat_id`); participantes reinvitados después del permiso (su `participation_id` cambió); ampliar las aristas del proyecto |
 | Fin | `collab_revoked{grant_id, by}` o `collab_ended{grant_id, reason: budget\|expired\|participant-removed\|chat-archived}`. Las entregas originadas por agentes bajo el permiso que siguen en cola pasan a `cancelled{collab-ended}`; las que ya están en vuelo no se pueden recuperar: siguen y se marcan "en curso al terminar la colaboración" |
-| Bucles | Presupuesto y vencimiento, más el límite de tasa por agente (M6) y la prohibición de auto-envío (M7). Dentro de un permiso la profundidad de la cadena la acota `max_deliveries`, nunca por encima del tope duro por cadena (M5 = 20) |
+| Bucles | Presupuesto y vencimiento, más el límite de tasa por agente (M6) y la prohibición de auto-envío (M7). Dentro de un permiso, M4 (profundidad ≤ 3) no se aplica: la profundidad la acota `max_deliveries`, y siempre M5 = 20, que es **global por cadena** |
+| La cadena | Una cadena conserva su `chain_id`, su `depth` y sus contadores (M5, M10) al entrar a una Colaboración y al salir de ella: `depth` también avanza en las entregas `collab:`. Renovar el permiso, o activar otro después de que terminó, no abre una cadena nueva ni devuelve unidades de M5. Si la cadena sale del permiso con `depth` > 3, el camino ordinario la rechaza (`depth-exceeded`); la persona puede abrir una cadena nueva con un mensaje propio |
 
 El presupuesto se consume **al prestar** (cuando se escribe `transporting`), no al encolar, para que
 la condición 6 de §5.5 ("le queda presupuesto en el momento del préstamo") y el contador que ve la
@@ -462,6 +465,7 @@ ese permiso.
 | Invitado retirado con una entrega en vuelo | No se puede recuperar; sigue su curso | El resultado aparece marcado "llegó después del retiro"; lo que estaba en cola se ve `cancelled{participant-removed}` |
 | La Colaboración termina con entregas pendientes | En cola ⇒ `cancelled{collab-ended}`; en vuelo siguen | Banner con el motivo; cada entrega en vuelo marcada "en curso al terminar la colaboración" |
 | Participantes cambiaron mientras la persona escribía | 409 `participants-changed`, nada se persiste | El borrador se conserva y se muestra el conjunto nuevo |
+| D1 y el log no coinciden en los participantes (caída entre las dos escrituras) | La conversación queda `participants-unverified`: no presta nada y responde 409 a envíos, invitaciones y Colaboración. Sólo se reconcilia sola una única transición, con D1 una versión por delante y sin una aprobación faltante; se escribe con `recovered: true`, la discrepancia y la procedencia, nunca como una aprobación humana. Los permisos de Colaboración no se reconstruyen desde D1 (protocolo §9.5) | "Participantes por verificar": la discrepancia, y la acción de resolverla (registrada con su identidad) cuando no es inequívoca |
 
 Principio: **at-most-once en el transporte, evidencia para confirmar, la persona decide el
 reintento**. Es la misma política que el Composer (§8.1.7) y la que pidió el responsable.

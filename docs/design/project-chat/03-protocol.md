@@ -116,6 +116,12 @@ viven sólo en el log de la conversación (son temporales, se consumen en el cam
 préstamo y su único escritor es el del log); el snapshot del índice guarda el permiso vivo y su
 consumo.
 
+D1 es el **estado vigente** de los participantes y el log es la **historia durable**. Que ambos
+coincidan es una precondición: si el pliegue de los eventos `participant` del log no da el mismo
+conjunto y la misma `participants_version` que D1, la conversación pasa a
+`participants-unverified` y no presta nada hasta una reconciliación verificable (§9.5). Esto es
+fail-closed: la discrepancia nunca se resuelve eligiendo un lado sin evidencia.
+
 ### 2.2 Logs de las conversaciones (host)
 
 ```
@@ -143,11 +149,11 @@ su efecto.
 | `ev` | Campos | Identidad (dedupe) |
 | --- | --- | --- |
 | `chat` | `chat_id`, `project_id`, `host_agent_id`, `event: created\|archived`, `by` (user_id) | `chat_id` + `event` |
-| `participant` | `participation_id`, `agent_id`, `role: host\|guest`, `event: invited\|joined\|declined\|removed`, `by` (`user:<id>` o `agent:<agent_id>`), `awaiting_approval?` (en `invited` pedido por un agente), `participants_version` (resultante), `reason?` (`agent-removed`, `chat-archived`) | `participation_id` + `event` |
+| `participant` | `participation_id`, `agent_id`, `role: host\|guest`, `event: invited\|joined\|declined\|removed`, `by` (`user:<id>` o `agent:<agent_id>`; **ausente** en un evento recuperado cuyo autor no consta), `awaiting_approval?` (en `invited` pedido por un agente), `participants_version` (resultante), `reason?` (`agent-removed`, `chat-archived`). Si lo escribe la reconciliación (§9.5): `recovered: true`, `reconcile_id`, `discrepancy{log_version, d1_version, kind}` y `provenance{source: "d1", invited_by?, d1_state, d1_ended_at?}` — sólo lo que D1 registra, nunca una aprobación | `participation_id` + `event` (recuperados: `reconcile_id`) |
 | `collab_grant` | `grant_id`, `chat_id`, `by` (user_id), `participants: [{agent_id, participation_id}]`, `max_deliveries`, `expires_at`, `created_at` — exactamente el alcance que se mostró al activar | `grant_id` |
 | `collab_revoked` | `grant_id`, `by` (user_id) | `grant_id` |
 | `collab_ended` | `grant_id`, `reason: budget\|expired\|participant-removed\|chat-archived` | `grant_id` |
-| `message` | `msg_id`, `chat_id`, `client_message_id`, `author{kind: human\|agent, user_id?\|agent_id?, participation_id?}`, `to[]` (agent_ids resueltos), `routing: default-host\|explicit`, `participants_version`, `context[]` (`msg_id`s elegidos por la persona; vacío por defecto), `kind: request\|info\|progress\|result\|question`, `text` (≤ **M1**), `in_reply_to?`, `chain{chain_id, depth}` | `author` + `client_message_id` |
+| `message` | `msg_id`, `chat_id`, `client_message_id`, `author{kind: human\|agent, user_id?\|agent_id?, participation_id?}`, `to[]` (agent_ids resueltos), `routing: default-host\|explicit`, `participants_version`, `context[]` (`msg_id`s elegidos por la persona; vacío por defecto), `kind: request\|info\|progress\|result\|question`, `text` (≤ **M1**), `in_reply_to?`, `chain{chain_id, depth}` (siempre el de la cadena de `in_reply_to`, con cualquier autorización; los contadores de §8 se derivan del log por `chain_id`) | `author` + `client_message_id` |
 | `delivery` | `msg_id`, `chat_id`, `agent_id`, `participation_id` (del destinatario), `state` (§3), `reason?`, `authorized_by?` (`approval`\|`edge`\|`collab:<grant_id>`, sólo autor agente), `collab_n?` (unidad consumida, en `transporting`), `marks?` (`after_removal`, `after_collab_end`), `lease_id?`, `endpoint_id?`, `start_gen?`, `relay{generation, dropped}?` (lectura de base, en `transporting`/`transported`), `cid?`, `prompt_id?`, `turn_seq?`, `by?` | `msg_id` + `agent_id` + `state` |
 | `approval` | `msg_id`, `agent_id`, `decision: approved\|denied`, `context[]?` (agregado por la persona al aprobar), `by` (user_id) | `msg_id` + `agent_id` |
 | `runtime` | `agent_id`, `endpoint_id`, `event: registered\|retired\|ambiguous\|degraded\|cleared`, `start_gen`, `pane`, `claude_pid`, `claude_start_time`, `cli_version`, `reason?`, `trigger_msg_id?` (la entrega que causó `degraded`), `by?` (usuario que pulsó "Probar el canal otra vez" en `cleared`) | `endpoint_id` + `event` + `trigger_msg_id` (o `seq` del evento para `cleared`): un segundo `degraded` tras un `cleared` no se descarta como repetido |
@@ -548,8 +554,8 @@ mucho estropear sus propias entregas y, dentro de una Colaboración viva, gastar
 | M1 | texto de un mensaje | 16 KiB UTF-8 | 400 `too-large` (sin truncar: es una orden) |
 | M2 | entregas no terminales por agente | 20 | 409 `queue-full` (humano) / resultado de herramienta (agente) |
 | M3 | destinatarios por mensaje | 5 | 400 |
-| M4 | profundidad de cadena (`depth`, humano = 0) fuera de Colaboración | 3 | `chat_send` rechazado `depth-exceeded` |
-| M5 | mensajes de agentes por cadena | 20 | rechazado `chain-budget` |
+| M4 | profundidad de cadena (`depth`, humano = 0) para entregas **no** `collab:` | 3 | `chat_send` rechazado `depth-exceeded` |
+| M5 | mensajes de agentes por cadena, **global**: cuenta todo mensaje de agente de la cadena con cualquier autorización (`approval`, `edge`, `collab:`) y de todos los permisos; nunca se reinicia | 20 | rechazado `chain-budget` |
 | M6 | mensajes salientes por agente | 10/min, 200/día | 429 |
 | M7 | auto-envío | prohibido | 400 |
 | M8 | mensajes humanos | 30/min por usuario | 429 |
@@ -558,13 +564,14 @@ mucho estropear sus propias entregas y, dentro de una Colaboración viva, gastar
 | M11 | `max_deliveries` de una Colaboración | 6 por defecto, tope 20 | 400 al activar; al agotarse ⇒ `collab_ended{budget}` |
 | M12 | duración de una Colaboración | 30 min por defecto, tope 2 h | 400 al activar; al vencer ⇒ `collab_ended{expired}` |
 | M13 | Colaboraciones vivas por conversación | 1 | 409 `collab-active` |
-| — | profundidad dentro de una Colaboración | la acota `max_deliveries` (M11), nunca por encima del tope por cadena M5 = 20; M4 no se aplica a las entregas `collab:` | `chat_send` fuera del permiso ⇒ camino normal (aprobación o arista) |
+| — | profundidad dentro de una Colaboración | la acota `max_deliveries` (M11), nunca por encima del tope por cadena M5 = 20; M4 no se aplica a las entregas `collab:` | `chat_send` fuera del permiso ⇒ camino normal (aprobación o arista), con M4 evaluado sobre la profundidad real |
 | T_lease | informe `transported` tras `next` | 10 s | `uncertain{lease}` |
 | T_accept | `channel_prompt` tras `transported` | **(POC)**: 3 × p99 medido, mínimo 15 s | `uncertain{no-evidence}` |
 | T_queue | vida en `queued`/`awaiting_approval` | 24 h | `failed{expired}` |
 | T_fresh | antigüedad máxima de la evidencia "en su prompt" al prestar | 2 s (el `next` hace su propio probe) | probe dirigido |
 | T_settle | espera tras el cierre antes de decidir la atribución (§3.1 A7) | **(POC)**: ≥ 3 × la latencia máxima hook→backend medida, mínimo 5 s | decisión con lo que haya; sin lectura limpia del relay ⇒ `relay-unverified` |
 | T_clear | separación de los dos probes de la regla 2b (c) | **(POC)**: 3 × la latencia máxima de despertar medida en G2, mínimo 30 s | `uncertain` → `unconfirmed{…}` según la regla 2b (`no-evidence`, `relay-loss` o `not-transported`) |
+| — | cadena a través de la frontera Colaboración ↔ mensajes ordinarios | `chain_id`, `depth` y los contadores M5/M10 se conservan: `depth` se incrementa también en las entregas `collab:`. Un permiso nuevo (renovar, o activar otro tras `collab_ended`/`collab_revoked`) trae su propio `max_deliveries`, pero **no** abre una cadena nueva ni devuelve unidades de M5 | si la cadena sale del permiso con `depth` > 3, sólo sigue con un permiso vivo o con un mensaje humano, que abre una cadena nueva |
 | L7' | log de una conversación anfitriona, y log de runtimes | 64 MiB cada uno | rotación como §4.4 L7 |
 
 ## 9. Recuperación
@@ -592,6 +599,31 @@ mucho estropear sus propias entregas y, dentro de una Colaboración viva, gastar
 4. **Pérdida del log** (archivo ilegible): la conversación queda `unverifiable`, el `POST` responde
    409 y nada se entrega desde ella. Si el ilegible es el log de runtimes, ningún agente del proyecto
    recibe nada (el estado `degraded` no se puede probar). Ningún estado se infiere sin el archivo.
-5. **D1 y log en desacuerdo sobre participantes** (caída entre las dos escrituras): D1 es el
-   conjunto vigente; al abrir la conversación el monitor escribe el `participant` que falta con
-   `recovered: true`. Ninguna entrega se presta a una participación que no esté `active` en D1.
+5. **D1 y log en desacuerdo sobre participantes** (por ejemplo, una caída entre el CAS de D1 y la
+   línea del log). D1 es el estado vigente y el log la historia durable, pero ninguno se impone sin
+   verificación:
+   - **Detección.** Al abrir la conversación, y antes de cada préstamo con el índice en memoria, el
+     monitor compara el pliegue de los `participant` del log con D1 (conjunto y
+     `participants_version`). Si difieren, la conversación queda `participants-unverified`:
+     `next` no presta nada de ella, y `POST` de mensajes, invitaciones y `…/collab` responden 409
+     `participants-unverified`. Lo que ya estaba en vuelo sigue su curso, como en cualquier caída.
+   - **Reconciliación inequívoca.** Es el único caso que se resuelve solo: D1 está **exactamente
+     una** versión por delante, la diferencia es **una** transición de **una** participación, y esa
+     transición no requiere una aprobación humana que el log no tenga. Se escribe ese `participant`
+     con `recovered: true`, `reconcile_id = sha256(chat_id, log_version, d1_version)`,
+     `discrepancy{log_version, d1_version, kind}` y `provenance` con lo que D1 registra
+     (`invited_by`, `state`, `ended_at`) y nada más: `by` queda ausente si no consta, y **nunca** se
+     escribe una aprobación humana que no esté en el log. Es idempotente: si el log ya tiene un
+     evento con ese `reconcile_id`, no se escribe otro. La conversación sale de
+     `participants-unverified` sólo después de releer el log y comprobar que su pliegue coincide con
+     D1.
+   - **Todo lo demás queda fail-closed:** log por delante de D1, más de una versión de diferencia,
+     más de una transición, una invitación pedida por un agente que D1 marca `active` sin
+     aprobación en el log, o D1 o el log ilegibles. La conversación sigue `participants-unverified`
+     y el owner ve la discrepancia. Resolverla es una acción humana explícita, registrada con su
+     identidad. No la resuelve un reintento automático.
+   - **Los permisos de Colaboración no se reconstruyen desde D1**, porque viven sólo en el log. Si
+     el log no tiene un `collab_grant`, no hay permiso. Si la reconciliación retira a un
+     participante de un permiso vivo, el permiso termina con `collab_ended{participant-removed}`,
+     como siempre.
+   - Ninguna entrega se presta a una participación que no esté `active` en D1 **y** en el log.

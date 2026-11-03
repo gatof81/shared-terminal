@@ -7,6 +7,18 @@ se agrega un modo Colaboración autorizado explícitamente por la persona, dise�
 registro de referencia de la propuesta y sus razones; ante cualquier diferencia, mandan los
 documentos vigentes.
 
+Interpretaciones confirmadas por el responsable (2026-11-03, segunda revisión):
+1. M3 son destinatarios por mensaje (5); M5, mensajes de agentes por cadena (20).
+2. M4 (profundidad 3) no limita los intercambios dentro de una Colaboración, a condición de que M5
+   sea un límite **global** por cadena, que renovar el permiso no reinicie el presupuesto de la
+   cadena y que la cadena conserve su identificación y sus contadores al cruzar la frontera entre
+   Colaboración y mensajes ordinarios (03 §8, 02 §5.6).
+3. D1 es el estado vigente de los participantes y el log la historia durable. Una discrepancia
+   bloquea los préstamos hasta una reconciliación verificable e idempotente; un evento
+   `recovered: true` lleva la discrepancia, las versiones y la procedencia conocida, sin inventar
+   una aprobación humana; los permisos de Colaboración no se reconstruyen desde D1; si la
+   reconciliación no es inequívoca, la conversación queda fail-closed (03 §9.5).
+
 Estado original: propuesta de cambios de diseño (2026-11-03); no aprobada. Una vez aprobada, se
 aplica a 01, 02, 03, 05 y 06 según §9.
 
