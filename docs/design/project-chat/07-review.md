@@ -91,3 +91,11 @@ Revisor independiente nuevo. Confirmó resueltos los siete puntos de la ronda 3 
 | 3 | NIT | Inicio de ventana y base de A7 sin definir para una entrega aceptada sin `transported` | Se usa `transporting` y la lectura del `next` |
 | 4 | NIT | Texto duplicado y la fila de `T_clear` con un solo motivo | Corregidos |
 | 5 | NIT | "Probar el canal otra vez" sin ruta | `POST /api/projects/:pid/agents/:aid/channel/retry` |
+
+## Fase 0, prueba T (2026-11-03): defecto del harness
+
+Hallado por el responsable al revisar la extracción redactada de `P0T01-f9dfb6`.
+
+| # | Severidad | Hallazgo | Resolución |
+| --- | --- | --- | --- |
+| 1 | SHOULD-FIX | `send.mjs` comparaba con `!==` eventos de lecturas distintas de `hooks.jsonl`: el propio `UserPromptSubmit` y el propio `Stop` contaban como ajenos y A4/A5 fallaban sin eventos ajenos | Identidad por línea absoluta (`events.mjs`, `poc/channels-phase0@5686b65`); tests de regresión; T recalculada desde los registros existentes (04-poc.md §1.10). El fallo era en contra (nunca produjo un éxito falso) |
