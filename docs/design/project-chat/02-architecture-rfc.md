@@ -501,6 +501,18 @@ reintento**. Es la misma política que el Composer (§8.1.7) y la que pidió el 
 - **Invitaciones**: invitar a otro agente desde un agente requiere siempre aprobación (R13); los
   invitados son del mismo proyecto (R14) y el selector muestra handle, nombre, proveedor, rol y
   sesión; un handle ambiguo no se confirma.
+- **Integridad de la evidencia hasta el backend** (PASS-B, 04-poc.md §1.14). El token de ingesta
+  no alcanza, porque lo tiene cualquier proceso del contenedor. PASS-B busca un canal donde el
+  backend identifique **al proceso del CLI**. B0 dio PASS (§1.14.13): el par de un socket Unix es
+  el CLI y el host lo identifica con `SO_PEERCRED`/pidfd, `NSpid` y el cgroup. No usa
+  `sock_diag`, que sólo responde dentro del namespace de red de quien consulta. Lo que no está
+  probado:
+  - la instalación administrada (B1);
+  - el gateway con inscripción y MAC (B2);
+  - la recuperación (B3);
+  - el hash del binario desde el host.
+
+  Hasta que PASS-B pase, la evidencia sigue valiendo lo que vale el contenedor.
 - **Sin relay de permisos**: `st-channel` no declara `claude/channel/permission` (quien responde por
   el canal podría aprobar herramientas, D).
 - **Sin flag de desarrollo en producción**: la POC usa `--dangerously-load-development-channels`; la

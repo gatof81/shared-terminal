@@ -777,7 +777,7 @@ estado (`seated` / `not seated`) y no sólo el nombre.
   sin aprobarse.
 - Es una muestra, no una serie. Las series de fiabilidad no están autorizadas.
 
-### 1.14 PASS-B: integridad de la evidencia hasta el backend (diseño; **nada implementado**, PASS-B0 **no autorizado**)
+### 1.14 PASS-B: integridad de la evidencia hasta el backend (PASS-B0: **PASS**, §1.14.13; B1–B3 no autorizados)
 
 **No cambia G3, R8 ni G1–G12; G3-A sigue sin aprobarse; PASS-A no reemplaza a G3.** Si PASS-B
 llegara a pasar, daría una garantía **distinta** de la letra de G3 (`source=system` en el hook).
@@ -927,8 +927,8 @@ prueba en B1. Si falla, A5 queda como residuo **documentado**, y la recomendaci�
 
 | Demostrable si pasa la prueba indicada | Prueba |
 | --- | --- |
-| El par del socket es el proceso principal del CLI, no un intermediario; el pid se puede llevar al contenedor; el pidfd coincide | B0 |
-| La conexión no se hereda (`O_CLOEXEC`); conectar por un montaje de solo lectura funciona y el agente no puede quitar ni reemplazar el socket | B0 |
+| El par del socket es el proceso principal del CLI, no un intermediario; el pid se puede llevar al contenedor; el pidfd coincide | B0: **demostrado** (§1.14.13; 2.1.314, VM100, una muestra) |
+| La conexión no se hereda (`O_CLOEXEC`); conectar por un montaje de solo lectura funciona y el agente no puede quitar ni reemplazar el socket | B0: **demostrado** (§1.14.13) |
 | El mod carga en el tier de organización; ningún otro camino carga un mod; los `classic.*` corren con el guard cargado | B1 |
 | H-ND: el CLI arranca no volcable y uid 1000 no puede leer su `environ` ni su `mem` | B1 |
 | Los eventos de Bash, MCP o hooks, los replays, el desorden y el cambio de ids o de sesión se rechazan o quedan `unverified` | B2 |
@@ -1137,6 +1137,8 @@ GO/NO-GO final:
 - A5 necesita H-ND (B1) o un aislamiento como el sandbox.
 
 Con un FAIL en B0, el diseño basado en el pid queda descartado y se pasa directamente a §1.14.7.
+
+**Resultado (2026-11-03):** PASS en la corrida 4. Estado, conclusiones y siguiente gate en §1.14.13.
 
 #### 1.14.9 Prototipo PASS-B0 y procedimiento (kit `poc/channels-phase0@d224ebe`; **no ejecutado**)
 
@@ -1938,6 +1940,140 @@ a26b7301cbb47f831ed42ad4a4e3ef2f54645fc8c04adbae58c6d4d070811a00  test/test_anal
     `true`, y `server_agrees` en `null`;
   - `hold-c_fd.accepted_end.server_agrees` en `true`;
   - en las dos, un único poseedor (el CLI), `O_CLOEXEC`, sin herencia y `scan_denied=0`.
+
+#### 1.14.13 Corrida 4 en VM100 (2026-11-03): **PASS** (kit `447f639`). Estado y siguiente gate
+
+**Resultado:** `verdict=PASS`, `reasons=[]`. Es una sola muestra, con el alcance de §1.14.6:
+viabilidad del socket.
+
+La corrida 3 no se informó en este documento. El PASS corresponde a la corrida 4, sobre la
+carpeta `~/passb0-20261103-203739`.
+
+**Versiones y entorno:**
+
+| | Valor |
+| --- | --- |
+| Host | VM100 |
+| Kernel | `6.8.0-147-generic` (el de §1.14.12) |
+| Claude Code | 2.1.314 en `preflight`, en `setup` y después de la corrida (`cli_version_ok`) |
+| Imagen | `shared-terminal-session`, reconstruida con 2.1.314 por decisión del responsable (§1.14.11) |
+| Kit | `poc/channels-phase0@447f6394b62031e7617390255a8500a398f18cd2`; el paso 0 exige los 15 hashes de §1.14.12 |
+| Procedimiento | §1.14.9 con `STAMP` nuevo; sin login; en la terminal sólo tema y confianza de la carpeta |
+
+**Fases:** `measure=0`, `capture=0`, `validate=0`.
+
+**Hechos que informó el responsable:**
+- **Atribución:** las cinco conexiones (`c1`, `h1`, `h2`, `hold-c`, `hold-h`) quedaron
+  atribuidas al proceso principal del CLI.
+  - **En el contenedor:** pid y tgid, uid 1000, `starttime`, SHA-256 del ejecutable y pidfd.
+  - **En el host:** `NSpid` hasta el CLI, cgroup del contenedor, tgid, relectura estable y
+    `NSpid` del pidfd.
+- **Retenciones** (`hold-c` y `hold-h`):
+  - extremo aceptado igual al registro del servidor, stream establecido y par mutuo;
+  - un único poseedor (el CLI), con `O_CLOEXEC`;
+  - el hijo creado durante la retención no hereda la conexión;
+  - `scan_denied=0`.
+- **Control positivo:** detecta la herencia. Los dos clientes base se ven como ellos mismos.
+- **Directorio del socket del host:** `create`, `mkdir`, `rename` y `unlink` dan `EROFS`.
+- **Debug del mod:** sin líneas problemáticas sin resolver.
+
+**Cierre ejecutado por el responsable:**
+1. respaldo previo verificado;
+2. servidor del host detenido por identidad;
+3. contenedor borrado con `basis=captured`;
+4. `cleanup.clean=true`;
+5. respaldo final verificado.
+
+**Evidencia:** queda **sólo en VM100**. No se sube al repositorio ni a la PR:
+- `/home/diego/passb0-20261103-203739.evidence.tgz`;
+- `/home/diego/passb0-20261103-203739.final.tgz`.
+
+Este documento recoge únicamente alias, booleanos y versiones. Ningún pid, inodo, token, nonce,
+texto ni log sin depurar sale de VM100.
+
+**Qué demuestra PASS-B0** (para 2.1.314, en el kernel de VM100, con el mod cargado por
+`--plugin-dir`):
+
+| # | Hecho | Hipótesis de §1.14.3 |
+| --- | --- | --- |
+| 1 | `$.http.fetch` con `socketPath` llega a un servidor Unix, dentro del contenedor y en el host a través de un montaje de solo lectura | Transporte de §1.14.4 viable |
+| 2 | El par de la conexión es el **proceso principal** del CLI, no un intermediario, y el pidfd fija ese mismo proceso | A1 confirmada |
+| 3 | Un lector del host lleva el pid al contenedor con `NSpid` y reconoce el contenedor por el cgroup | A2 confirmada para un lector en el namespace de pids del host |
+| 4 | La conexión es `O_CLOEXEC`, la tiene sólo el CLI, y un hijo creado con `$.process.run` mientras está abierta no la hereda | A3, la parte de herencia |
+| 5 | El agente puede conectarse al socket del host pero no quitarlo ni reemplazarlo (EROFS) | A3, la parte del montaje |
+
+**Conclusiones arquitectónicas** (de las corridas 1 a 4; afectan al gateway de §1.14.4):
+1. **El diseño basado en las credenciales del par sigue en pie.** Con un FAIL en B0 se habría
+   pasado directamente a §1.14.7; eso no hace falta.
+2. **La identidad del par, en el host, sale de lo que da el kernel:**
+   - `SO_PEERCRED`;
+   - `SO_PEERPIDFD`;
+   - `NSpid`;
+   - el cgroup;
+   - `starttime`.
+
+   **No sale de `sock_diag`.** El socket aceptado vive en el namespace de red del cliente y
+   `unix_diag` sólo responde dentro del de quien consulta (§1.14.12). Un gateway en el host no
+   puede comparar inodos de pares. Las comprobaciones de fd e inodo de B0 son instrumentos de
+   medición dentro del contenedor, no una garantía del gateway: el checker es hijo del CLI.
+3. **El hash del ejecutable en el host no está demostrado.** Un lector con otro uid recibe `EACCES`
+   en `/proc/<pid>/exe` (`ptrace_scope=1`; §1.14.11). B0 lo midió dentro del contenedor. Para que
+   el gateway ate la identidad al binario (I3), tiene que correr como root o con
+   `CAP_SYS_PTRACE` en el host, y eso no se probó.
+4. **Dónde vive el gateway** sigue abierto. El backend corre en compose **sin** `pid: host`, así
+   que tal como está no puede leer `NSpid` del CLI (A2). Las opciones son:
+   - un proceso del host;
+   - el backend con `pid: host`, que amplía su superficie.
+
+   Es una decisión del responsable antes de B2.
+5. **Ningún archivo que el contenedor lea del host puede contener material de clave.** El archivo
+   de control `0644` de B0 era aceptable porque no tiene secretos. En B1 y B2 ese esquema no se
+   traslada.
+6. **El mod se carga recién al aceptar la confianza de la carpeta.** Con `--plugin-dir` el CLI lo
+   retiene hasta entonces y lo carga después (§1.14.11). Cómo se comporta un mod **administrado**
+   (tier de organización) frente a la confianza es una pregunta de B1, no de B0.
+
+**Lo que PASS-B0 no demuestra:**
+- la clave, el MAC, la inscripción ni el gateway;
+- la instalación administrada, el tier de organización ni el rechazo de caminos no autorizados (B1);
+- H-ND (B1);
+- resistencia a ataques (B2) ni recuperación (B3);
+- la atribución del contenido (A4b), que sigue siendo obligatoria;
+- el residuo A5;
+- otras versiones del CLI (2.1.316, 2.1.317), otros kernels ni repetibilidad: es una muestra.
+
+**Estado:**
+- **PASS-B0: PASS.**
+- **PASS-B: no alcanzado.** Faltan B1, B2 y B3, y cada uno necesita su autorización.
+- G3 sigue sin cumplirse.
+- G3-A sigue sin aprobarse.
+- R8 y G1–G12 no cambian.
+- PASS-A y PASS-B0 juntos no habilitan el Monitor.
+
+**Siguiente gate: PASS-B1, integridad de la instalación** (diseño en §1.14.6). Nada de esto está
+autorizado.
+
+| Dependencia | Estado | Quién |
+| --- | --- | --- |
+| PASS-B0 | **Cumplida** | — |
+| Infraestructura del kit (runner por fases, captura verificada, cleanup por fundamento, analizador con mutaciones) | Reutilizable | — |
+| Nombres exactos de las claves de managed settings en 2.1.314 (`allowManagedModsOnly`, `disableSideloadFlags`, `allowManagedHooksOnly`, MCP sólo administrado) y del tier de organización | Pendiente. Es inspección estática del binario, sin VM100 | Claude, con un GO para diseñar B1 |
+| Mod administrado (`st-provenance` de prueba) en un marketplace local de solo lectura y managed settings montados ro en el descartable | Diseño pendiente | Claude |
+| H-ND: imagen variante con el binario de root en modo `0711` | Exige construir una imagen (operación privilegiada, como la alternativa A de §1.14.9) | Decisión del responsable: B1 junto o H-ND aparte como B1b |
+| Ejecución en VM100 | Mismas reglas que B0 | Autorización del responsable |
+
+**Después de B1:**
+- **B2** necesita:
+  - el prototipo del gateway: inscripción, HMAC e I1–I7. Hoy está explícitamente **no
+    autorizado**;
+  - la decisión de dónde vive el gateway (conclusión 4);
+  - la atribución del contenido (A4b).
+- **B3** depende de B2.
+
+**Paralelo a esta rama, sin cambios:**
+- G3: `source=system` sigue ausente (#94675);
+- la decisión sobre G3-A;
+- la alternativa de evidencia sólo informativa (§1.14.7), que es una decisión de producto.
 
 ## 2. Versiones
 
