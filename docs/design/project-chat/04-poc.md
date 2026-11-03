@@ -533,6 +533,193 @@ pase por ahí es más fuerte que ese límite.
   `origin.kind`, `origin.server`, `isMeta` y el SHA-256 del texto, en el mismo kit, con una sola
   prueba T y con autorización aparte.
 
+### 1.13 Alternativa B: mods con `prompt.submit` (en investigación; XB-1 **no autorizado**)
+
+**No cambia G3, R8 ni G1–G12; G3-A sigue sin aprobarse.** XB-0 (2026-11-03, Mac del responsable,
+2.1.317) leyó `tengu_plugin_hooks_modules = true` en la caché de flags. Eso **no** prueba que un mod
+cargue ni que funcione: sólo que el interruptor remoto estaba encendido cuando se guardó la caché.
+
+Fuentes:
+- (B) el binario `darwin-arm64@2.1.317`;
+- (D) la documentación oficial de *mods*: `code.claude.com/docs/en/plugins/mods/{reference,events}`;
+- (T) las declaraciones públicas `mods/types/claude-code.d.ts`, escritas por 2.1.277.
+
+#### 1.13.1 Viabilidad: carga y requisitos
+
+| Pregunta | Respuesta | Fuente |
+| --- | --- | --- |
+| Cómo se registra | Un plugin con `hooks/hooks.json` `{"modules": ["./register.mjs"]}` que exporta `register(on)`; `on(evento, [filtro], async ($, e, next) => next(e))`. Es *middleware*: `next(e)` corre los mods siguientes y al final el comportamiento del CLI. `claude plugin validate` lee del código fuente los eventos y las llamadas (el nuestro: 5 eventos y `$.fs.write`) | D, B, validado aquí con 2.1.314 |
+| Dónde corre | En un `Worker` del mismo proceso del CLI ("plugin sandbox"). Las llamadas `$.*` las ejecuta el proceso del CLI | B |
+| Cómo se carga sin instalar nada | `claude --plugin-dir <carpeta>`: plugin sólo para esa sesión, sin tocar configuración. **Recarga el módulo al guardar** un archivo de la carpeta | D |
+| Interruptor | `tengu_plugin_hooks_modules` (GrowthBook). Si está apagado, los mods instalados no cargan y los integrados sí | B |
+| Suscripción | No exige API key. Los únicos bloqueos que nombra el código son: el interruptor, un *tenant* de `claude-code-server`, un *daemon* de servidor de herramientas, `--bare` (sólo carga lo administrado) y el modo seguro | B (no hay una prueba de carga en el Mac) |
+| Restricciones | `disableAllHooks` (en managed settings apaga todo); `allowManagedHooksOnly` y `allowManagedModsOnly` (sólo mods de la organización); `disableSideloadFlags` (rechaza `--plugin-dir`); confianza del workspace pendiente ⇒ no carga | D, B |
+| **Guard integrado** `sec-default@builtin` | Se carga si la máquina tiene managed settings o si la sesión entró con un `/login` Team o Enterprise. Con el guard cargado, **los `classic.*` de un mod que instaló el usuario no corren** | D |
+| Docker/tmux | Nada en el código depende de la terminal: el mod corre dentro del proceso del CLI que está en el panel. Pero nuestras sesiones **sí** tienen managed settings (`/etc/claude-code/managed-settings.d/`), así que el guard carga: el mod tendría que ser **de la organización**, no del usuario (§1.13.3) | B, D |
+| Estado del producto | Documentado oficialmente, pero activado por un interruptor remoto. Desde 2.1.277 la API cambia de versión en versión (las tablas indican el mínimo de cada campo) | D, T |
+
+#### 1.13.2 Qué entrega `prompt.submit` y cómo se correlaciona
+
+| Campo | `prompt.submit` | Fuente |
+| --- | --- | --- |
+| `origin.kind` | **Sí.** Es un conjunto cerrado: `composer` (Enter del usuario, tecleado o en cola), `channel` + `server`, `sdk`, `bridge`, `peer`, `task-notification`, … En el código: lo arma `RQs`/`wue` desde el `origin` del comando encolado; el handler de `notifications/claude/channel` encola `{kind:"channel", server}` y el Enter encola `{kind:"human"}`, que se mapea a `composer` | T, B |
+| `origin.server` | **Sí**, sólo cuando `kind = channel` | T, B |
+| `isMeta` | En 2.1.317 el CLI lo pasa cuando la entrega es `isMeta` (`...e.isMeta===!0&&{isMeta}`), pero **no** está en el tipo público. No se usa como criterio | B (T no lo declara) |
+| Texto | `text`: el prompt tal como llegará al modelo | T |
+| Turno | `turnId` sólo cuando el prompt entra en un turno que está corriendo; **ausente** si la sesión estaba ociosa (el caso del canal en T) | T, B |
+| Sesión | No viene en el evento. Existe `$.session.id()`, y `classic.UserPromptSubmit` trae `session_id` | T |
+| `prompt_id` | **No viene** | T, B |
+
+**Integridad del origen dentro del CLI (hecho).** El CLI rechaza la respuesta de un mod que pone
+otro origen; el mensaje del binario es "an origin the engine did not set (a hook may leave the
+origin out of its answer, or answer it as received; it may not set one)". El tipo público lo
+documenta como "a closed set, never a text prefix… no hook may set one".
+
+**Correlación sin tiempos ni texto.** Los hooks de settings corren como **núcleo** de la cadena de
+`prompt.submit`. El camino en el código es `core: {"prompt.submit": …}` → `P1r` → `Bkt` → `gI`, y
+`gI`, si un mod escucha `classic.UserPromptSubmit`, despacha el payload clásico (con `prompt_id` y
+`session_id`) a la cadena de mods (`RFr` → `x8n`). Por lo tanto, ese `classic.UserPromptSubmit`
+ocurre **dentro** del `await next(e)` de nuestro `prompt.submit`. El mod liga los dos así:
+
+1. Al entrar a `prompt.submit` registra el envío como "en vuelo". Si ya había otro, ambos quedan
+   marcados con solape.
+2. Un `classic.UserPromptSubmit` se adjunta **sólo** si hay exactamente un envío en vuelo.
+3. Al volver `next`, el envío queda ligado a `prompt_id` P si se cumplen todas estas condiciones:
+   - no hubo solape;
+   - hubo una o más llamadas clásicas;
+   - todas traen el mismo P y la misma sesión;
+   - el `prompt` clásico es **igual** al `text`. Esta igualdad es una comprobación de
+     consistencia, no la clave.
+
+Cualquier otro caso deja el envío sin ligar (fail-closed). A partir de P, todo se une por el id
+nativo:
+- `classic.Stop` (P) y el `Stop` del logger (P);
+- el `PostToolUse` de `reply` (P);
+- en el canal, el `message_id` que trae la etiqueta del prompt de P.
+
+`session.append` (puerta `prompt`) aporta además el `uuid` del registro del transcript y su
+`origin`, ambos fijados por el CLI. Sirve para auditar, no es criterio.
+
+**Hipótesis que XB-1 verifica:**
+- que el anidamiento se observa así en ejecución;
+- que hay una sola instancia del módulo por proceso;
+- que la entrega del canal corre `prompt.submit` con `origin = channel` y la etiqueta pegada con
+  `origin = composer`.
+
+#### 1.13.3 Seguridad del Monitor
+
+**A. Procedencia dentro del CLI.**
+- **Hechos.** El `origin` sale del comando interno y no del texto:
+  - el canal lo encola el handler MCP, sólo para servidores que pasaron la puerta de canales;
+  - el Enter encola `human` ⇒ `composer`;
+  - ningún mod puede cambiarlo.
+- **Consecuencia.** Pegar `<channel source=…>` produce `composer`.
+- **A verificar en XB-1:** que en la práctica el texto pegado no cambia nada.
+
+**B. Integridad hasta el backend.** Hoy cualquier proceso del contenedor puede enviar eventos al
+relay por TCP de loopback, así que **nada** que pase por ahí es evidencia frente a un agente con
+Bash. Diseño propuesto (no implementado; requiere su propio experimento en un contenedor):
+
+| Riesgo | Protección | Estado |
+| --- | --- | --- |
+| El agente cambia el módulo | Mod **de la organización**, configurado en nuestros managed settings de solo lectura:<br>• `extraKnownMarketplaces` apuntando a un directorio local de solo lectura;<br>• `enabledPlugins` + `prependPlugins`;<br>• `pluginDigests`, el SHA-256 de cada archivo de la carpeta: "any other copy does not load".<br>A eso se suma la carpeta montada de solo lectura | D/B; sin probar |
+| El agente agrega su propio mod, o usa `--plugin-dir` / `CLAUDE_CODE_PLUGIN_DIRS` | `allowManagedModsOnly` (opción del guard integrado) + `disableSideloadFlags` | D; falta verificar que también cubra `CLAUDE_CODE_PLUGIN_DIRS` |
+| Otro proceso falsifica la evidencia | Canal propio: `$.http.fetch` con `socketPath`, un socket Unix del relay. El `fetch` lo hace el proceso del CLI, así que el relay puede exigir `SO_PEERCRED` igual al pid del Claude del panel (misma regla de identidad que el composer: ejecutable, `starttime`, primer plano). Bash, MCP y hooks son otros pids ⇒ rechazados. La veredicción usa **sólo** este canal; los hooks por TCP quedan como informativos | B (socket del `fetch` de mods); sin probar |
+| Inyección en el proceso del CLI (ptrace, `/proc/<pid>/mem`) | Yama `ptrace_scope` ≥ 1, con el que un hijo no puede adjuntarse al padre. Comprobarlo como precondición del contenedor | Hipótesis |
+| Binario del CLI reemplazado en HOME | Verificar el hash de `/proc/<pid>/exe` contra el CLI fijado en la imagen (R9) | Hipótesis |
+| Pérdida o duplicado | `inst` aleatorio por carga + `seq` contiguo. Un hueco o una repetición deja `unverified` lo que esté afectado. Una recarga del módulo (nueva `inst`) deja `unverified` lo que estaba en vuelo | Diseño; probado en tests |
+| Concurrencia | Solape ⇒ sin ligar ⇒ `unverified` | Diseño; probado en tests |
+| `--resume` y reinicios | La evidencia se toma al enviar; `session.start` no se repite en `/resume` y el `prompt_id` es nuevo por prompt. Lo histórico sin evidencia previa queda `unverified` | Doc + diseño |
+| El interruptor se apaga | No hay mod ⇒ no hay evidencia ⇒ todo `unverified`. El composer 3.2 sigue operativo | B |
+| Cambio de API | Lista propia de versiones validadas (como `COMPOSER_CLI_VERSIONS`). Un campo desconocido ⇒ `unverified` | Diseño |
+| Costo arquitectónico | Las sesiones tmux no cambian. Cambian los managed settings y un montaje de solo lectura, así que se necesita **recrear** el contenedor (§2.4.1 de CONVERSATION.md) | — |
+
+#### 1.13.4 Diseño de XB-1 (kit `poc/channels-phase0@68a939c`; propuesto, **no ejecutado**)
+
+**Objetivo.** Una sola ejecución en el Mac compara un mensaje real de Channels contra un prompt
+tecleado y contra una etiqueta `<channel>` pegada. Comprueba que los orígenes difieren y que la
+evidencia se correlaciona por `prompt_id`. **No** prueba la integridad B.
+
+**Contrato de eventos esperado** (un archivo JSON por registro en `.poc0/out/mod/`, sin texto):
+
+| Registro | Campos |
+| --- | --- |
+| `session.start` | `inst`, `seq`, `t`: prueba que el mod cargó |
+| `classic.UserPromptSubmit` | `prompt_id`, `session_id`, `prompt_len`, `inflight`, `attached` |
+| `prompt.submit` | `origin_kind`, `origin_server`, `is_meta`, `turn_id_present`, `text_len`, `outcome` (`entered`/`drop`/`threw`), `overlap`, `classic_count`, `classic_prompt_ids`, `classic_session_ids`, `classic_text_equal_all`, `bound_prompt_id`, `bound_session_id` |
+| `classic.Stop` | `prompt_id`, `session_id` |
+| `session.append` (puerta `prompt`) | `uuid`, `origin_kind`, `origin_server`, `is_meta` |
+
+**Instrumentación.**
+- Mod `st-provenance-probe`: cinco handlers. Cada uno llama `next(e)` una vez con el mismo evento
+  y devuelve o relanza lo que dio `next`.
+- Nada antes de `next` puede lanzar. Una escritura que falla sólo deja un hueco de `seq`.
+- Las escrituras van **fuera** de la carpeta del plugin para no provocar una recarga.
+- El logger de XA-1 sigue igual. La sonda del transcript **no** se instala; `--with-probe` la
+  repone.
+
+**Tests sintéticos (85, todos pasan en Node 22; los del analizador y el binder son 14).**
+- Binder: canal nominal; tecleado; etiqueta pegada ⇒ `composer`; dos envíos en vuelo ⇒ ninguno
+  ligado; `classic` sin envío; dos pasadas clásicas con el mismo id (liga) y con ids distintos (no
+  liga); texto reescrito más abajo de la cadena; sin `classic` (guard); `next` que lanza (mismo
+  error) y `drop`; escritura fallida sin efecto en el flujo; evento malformado;
+  `session.append`/`Stop`.
+- Analizador: PASS y 19 casos negativos (mod no cargado, guard, control con origen `channel`,
+  servidor distinto, solape, sin ligar, ligado dos veces, hueco de `seq`, dos instancias, `Stop`
+  ausente, UPS duplicado, sesión distinta, sin respuesta, control no ejecutado, sin controles, hook
+  saltado en el debug log, registro ilegible, etiqueta pegada que no llegó como etiqueta).
+- `manage`: retira XA-1 byte por byte conservando `out/`; `check` detecta una copia alterada del
+  mod.
+
+**Procedimiento** (comandos completos al autorizar):
+1. Respaldo verificado de `.poc0` (como en XA-1).
+2. Kit por SHA con hashes.
+3. `uninstall` de XA-1 y `install` de XB-1.
+4. `claude plugin validate .poc0/mod`.
+5. Lanzar `claude --channels plugin:fakechat@claude-plugins-official --plugin-dir .poc0/mod
+   --debug-file .poc0/out/claude-debug.log`.
+6. Confirmar la carga con `/plugin` ("1 mod active · st-provenance-probe") y el registro
+   `session.start`. Si el debug log menciona `cc-plugin-sec-default`, detenerse: el guard
+   invalidaría la prueba.
+7. `send.mjs --label B --count 1`.
+8. Tras el `Stop`, `xb.mjs controls` y el responsable ingresa el control 1 (tecleado) y luego el
+   control 2 (etiqueta pegada).
+9. `xb.mjs report`.
+10. `/exit`, `uninstall` y relanzar normal.
+
+**PASS** sólo si se cumple todo esto:
+- el mod cargó: hay `session.start`, una sola `inst`, `seq` contiguo, ningún archivo ilegible y
+  ningún hook del mod saltado en el debug log;
+- canal: un UPS del logger con su id ⇒ P; exactamente un envío ligado a P, con `origin = channel`,
+  servidor `plugin:fakechat:fakechat`, sin solape, texto igual, misma sesión, `entered`, `Stop` del
+  logger y del mod con P, y respuesta en Fakechat;
+- control tecleado y control pegado: cada uno ligado a su propio P′, con `origin = composer` y sin
+  servidor; la etiqueta pegada llegó como etiqueta según el logger;
+- en toda la corrida, exactamente un envío con `origin = channel`;
+- los tres P son distintos.
+
+**FAIL:** cualquier otro valor de los anteriores.
+
+**INCONCLUSIVE** (se informa tal cual; no se repite sin decisión):
+- el mod no cargó;
+- los `classic.*` no llegaron (guard);
+- falta un control;
+- la etiqueta pegada no llegó como etiqueta.
+
+**Riesgos de instalación y restauración:**
+- `--plugin-dir` vale sólo para esa sesión y no deja configuración. El logger se retira como en
+  XA-1, restaurando byte por byte.
+- La recarga al guardar exige no tocar `.poc0/mod` durante la prueba.
+- Un mod que falla lo salta el CLI y el prompt sigue (lo dice D); queda registrado como fallo.
+- Si el guard o un managed setting existiera en el Mac, la prueba daría INCONCLUSIVE sin efectos.
+- Los controles hacen que el modelo responda dos textos breves sin usar herramientas.
+
+**Cambios respecto del kit XA-1 (`508a57d`):**
+- Nuevos: `mod/` (4 archivos), `xb.mjs`, `test/xb.test.mjs`.
+- `manage.mjs`: copia y verifica el mod, y la sonda pasa a ser opcional.
+- `send.mjs`: acepta `--label B` como prueba individual y sólo agrega `transcript_a` si hay sonda.
+- El logger, `events`, `classify`, `report` y el matcher de A no cambian.
+
 ## 2. Versiones
 
 | Variante | CLI | Motivo |
