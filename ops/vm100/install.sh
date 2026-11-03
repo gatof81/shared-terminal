@@ -15,7 +15,7 @@ if ! id st-ops >/dev/null 2>&1; then
 	useradd --system --home-dir /nonexistent --no-create-home --shell /bin/sh st-ops
 fi
 passwd -l st-ops >/dev/null
-if id -nG st-ops | tr ' ' '\n' | grep -qxE 'docker|sudo|adm'; then
+if id -nG st-ops | tr ' ' '\n' | grep -xE 'docker|sudo|adm' >/dev/null; then
 	echo "STOP: st-ops is in a privileged group"; exit 1
 fi
 

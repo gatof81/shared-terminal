@@ -21,26 +21,26 @@ st_ops_audit() {
 
 is_sha() { [[ $1 =~ ^[0-9a-f]{40}$ ]]; }
 is_request_id() { [[ $1 =~ ^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$ ]]; }
-is_scope() { [[ $1 == backend || $1 == full ]]; }
 
 # deploy.conf is parsed, never sourced: only these keys, plain values.
 load_conf() {
 	local f="$ST_OPS_ETC/deploy.conf" k v
 	[[ -f $f ]] || die conf "missing $f"
-	REPO_URL='' ST_DIR='' REQUIRED_CHECKS='' REQUEST_TTL='' MIN_FREE_KIB=''
+	REPO_URL='' ST_DIR='' COMPOSE_PROJECT='' REQUIRED_CHECKS='' REQUEST_TTL='' MIN_FREE_KIB=''
 	while IFS='=' read -r k v; do
 		[[ -z $k || $k == \#* ]] && continue
 		v=${v#\"}; v=${v%\"}
 		case $k in
 		REPO_URL) [[ $v =~ ^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\.git$ ]] || die conf "REPO_URL"; REPO_URL=$v ;;
 		ST_DIR) [[ $v =~ ^/[A-Za-z0-9._/-]+$ ]] || die conf "ST_DIR"; ST_DIR=$v ;;
+		COMPOSE_PROJECT) [[ $v =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || die conf "COMPOSE_PROJECT"; COMPOSE_PROJECT=$v ;;
 		REQUIRED_CHECKS) REQUIRED_CHECKS=$v ;;
 		REQUEST_TTL) [[ $v =~ ^[0-9]{2,6}$ ]] || die conf "REQUEST_TTL"; REQUEST_TTL=$v ;;
 		MIN_FREE_KIB) [[ $v =~ ^[0-9]{1,12}$ ]] || die conf "MIN_FREE_KIB"; MIN_FREE_KIB=$v ;;
 		*) die conf "unknown key $k" ;;
 		esac
 	done <"$f"
-	[[ -n $REPO_URL && -n $ST_DIR && -n $REQUIRED_CHECKS && -n $REQUEST_TTL && -n $MIN_FREE_KIB ]] || die conf "incomplete"
+	[[ -n $REPO_URL && -n $ST_DIR && -n $COMPOSE_PROJECT && -n $REQUIRED_CHECKS && -n $REQUEST_TTL && -n $MIN_FREE_KIB ]] || die conf "incomplete"
 }
 
 # identities: `<name> <SHA256:fingerprint>` per line. A key that is not listed gets nothing, even if sshd let it in.
@@ -71,16 +71,58 @@ mirror_fetch() {
 }
 
 # On main's FIRST-PARENT chain: a commit merged into main, not one that only exists on a merged branch.
+# Not `grep -q`: it exits at the first match, rev-list then dies of SIGPIPE (141) and, under pipefail, a RECENT
+# SHA — found early, the normal case — reads as "not on main" once the history outgrows the pipe buffer. Only with
+# the default SIGPIPE disposition (sshd, systemd-run); a caller that ignores SIGPIPE hides it.
 on_main() {
-	mirror rev-list --first-parent -n 20000 refs/heads/main | grep -qx "$1"
+	mirror rev-list --first-parent -n 20000 refs/heads/main | grep -x "$1" >/dev/null
 }
 
-st_git() { git -c "safe.directory=$ST_DIR" -C "$ST_DIR" "$@"; }
-deployed_sha() { st_git rev-parse HEAD; }
+# Root never runs git inside the diego-owned checkout: its .git/config and hooks (core.fsmonitor, filters,
+# post-checkout, …) are diego's, and running them as root would hand that account root through st-ops. Whatever
+# is read or done there runs AS diego, which grants nothing diego does not already have.
+as_owner_of_checkout() { runuser -u "$(stat -c %U "$ST_DIR")" -- "$@"; }
+checkout_head() { as_owner_of_checkout git -C "$ST_DIR" rev-parse HEAD; }
 
-# Paths whose change the owner must see in the text they sign. `session-image/` is never deployable here.
-SENSITIVE_RE='^(\.github/|Dockerfile$|docker-compose\.yml$|backend/package(-lock)?\.json$|backend/src/db\.ts$|session-image/|ops/)'
-BACKEND_ONLY_BLOCK_RE='^(Dockerfile$|docker-compose\.yml$|backend/package(-lock)?\.json$)'
+app_container() {
+	docker ps -q --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" --filter label=com.docker.compose.service=app | head -1
+}
+
+# The deployed SHA is the label st-ops puts on the image it builds; before the first st-ops deploy (an image
+# built by hand with compose, no label) it is the checkout's HEAD.
+APP_SHA_LABEL=io.shared-terminal.st-ops.sha
+deployed_sha() {
+	local cid img sha
+	cid=$(app_container)
+	if [[ -n $cid ]]; then
+		img=$(docker inspect "$cid" --format '{{.Image}}')
+		sha=$(docker image inspect "$img" --format "{{index .Config.Labels \"$APP_SHA_LABEL\"}}" 2>/dev/null || true)
+		if is_sha "$sha"; then
+			echo "$sha"
+			return 0
+		fi
+	fi
+	checkout_head
+}
+
+# v1 scope = backend code only, as an ALLOWLIST: the image st-ops builds is Dockerfile + backend/ of the SHA,
+# run with the compose definition that is already deployed. Anything that could change what is built or how it
+# runs outside backend/src — Dockerfile, compose, dependencies, the session image, a new top-level file — is
+# refused, so what is deployed is exactly what the owner signed. Those changes stay manual deploys.
+ALLOWED_PATHS_RE='^(backend/src/|backend/(tsconfig\.json|biome\.json|vitest\.config\.ts)$|frontend/|docs/|\.github/|ops/|[A-Za-z0-9_-]+\.md$|LICENSE$|\.gitignore$|\.env\.example$)'
+# Allowed, but the owner must see them in the text they sign.
+SENSITIVE_RE='^(\.github/|backend/src/db\.ts$|ops/)'
+
+# Prints the changed paths outside the allowlist (empty = in scope).
+scope_violations() { grep -vE "$ALLOWED_PATHS_RE" <<<"$1" | grep -v '^$' || true; }
+
+# Automatic rollback is safe only when the schema cannot have moved: a migration may have run (fully, or
+# partially — the ledger row is written after apply()) before the new backend failed, and the old code boots
+# against any newer schema without checking compatibility (migrateDb skips unknown versions). So: any
+# migration in the jump ⇒ no automatic rollback, the owner decides with the fresh backup at hand.
+rollback_policy() { # $1 = migration version at from, $2 = at sha
+	if [[ $1 =~ ^[0-9]+$ && $2 =~ ^[0-9]+$ && $1 == "$2" ]]; then echo previous-image; else echo withheld; fi
+}
 
 changed_paths() { mirror diff --name-only "$1" "$2"; }
 
@@ -192,7 +234,7 @@ st-ops verbs:
   help                              this text
   status                            deployed SHA, health, disk, backups, sessions (read-only)
   logs [lines]                      tail of the backend log (<= 500 lines)
-  request-deploy <sha> [scope]      prepare a deploy of <sha> (scope: backend | full); prints the text the owner signs
+  request-deploy <sha>              prepare a backend deploy of <sha>; prints the text the owner signs
   deploy <id>                       start a signed request; the owner's signature is read from stdin
   request-text <id>                 the exact bytes of a request (save as request.txt for the owner to sign)
   deploy-status <id>                progress and result of a request
@@ -208,7 +250,7 @@ verb_status() {
 	health=$(timeout 5 curl -s "http://localhost:$(st_port)/health" || true)
 	echo "health: ${health:-unreachable}"
 	echo "disk-free-kib: $(df --output=avail -k /var/lib/docker | tail -1 | tr -d ' ')"
-	(cd "$ST_DIR" && docker compose ps --format '{{.Service}} {{.State}} {{.Health}}' 2>/dev/null | sed 's/^/compose: /') || true
+	docker ps -a --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" --format 'compose: {{.Label "com.docker.compose.service"}} {{.State}} {{.Status}}'
 	docker ps -a --filter name=^/st- --format 'session: {{.Names}} {{.State}} {{.Status}}' | sort
 	local wr bk
 	wr=$(st_workspace_root)
@@ -232,13 +274,16 @@ st_workspace_root() {
 verb_logs() {
 	local n=${1:-200}
 	[[ $n =~ ^[0-9]{1,3}$ ]] && ((n >= 1 && n <= 500)) || die usage "logs [1-500]"
-	(cd "$ST_DIR" && docker compose logs --no-color --timestamps --tail "$n" app)
+	local cid
+	cid=$(app_container)
+	[[ -n $cid ]] || die state "app container not running"
+	docker logs --timestamps --tail "$n" "$cid" 2>&1
 }
 
 verb_request_deploy() {
-	local sha=${1:-} scope=${2:-backend} from tree d id now exp paths sens blocked mfrom mto commits
-	is_sha "$sha" || die usage "request-deploy <40-hex sha> [backend|full]"
-	is_scope "$scope" || die usage "scope is backend or full"
+	local sha=${1:-} from tree d id now exp paths sens out mfrom mto commits
+	(($# <= 1)) || die usage "request-deploy <40-hex sha>   (v1 has a single scope: backend code)"
+	is_sha "$sha" || die usage "request-deploy <40-hex sha>"
 	with_lock
 	pending_request >/dev/null && die pending "a request is already pending: $(pending_request) (cancel it first)"
 	deploy_running && die busy "a deploy is running"
@@ -253,11 +298,8 @@ verb_request_deploy() {
 	ci_green "$sha" || die ci "CI is not green on $sha"
 	tree=$(mirror rev-parse "$sha^{tree}")
 	paths=$(changed_paths "$from" "$sha")
-	grep -qE '^session-image/' <<<"$paths" && die scope "the session image changes: that is not a backend deploy"
-	if [[ $scope == backend ]]; then
-		blocked=$(grep -E "$BACKEND_ONLY_BLOCK_RE" <<<"$paths" | paste -sd, - || true)
-		[[ -z $blocked ]] || die scope "scope backend refuses changes to: $blocked (ask the owner for scope full)"
-	fi
+	out=$(scope_violations "$paths" | head -20 | paste -sd, -)
+	[[ -z $out ]] || die scope "outside the v1 backend scope (deploy those manually): $out"
 	sens=$(grep -E "$SENSITIVE_RE" <<<"$paths" | paste -sd, - || true)
 	mfrom=$(migration_version "$from")
 	mto=$(migration_version "$sha")
@@ -274,10 +316,11 @@ verb_request_deploy() {
 		echo "host: $(hostname)"
 		echo "sha: $sha"
 		echo "tree: $tree"
-		echo "scope: $scope"
+		echo "scope: backend-v1"
 		echo "from: $from"
 		echo "commits: $commits"
 		echo "migrations: $mfrom -> $mto"
+		echo "auto-rollback: $(rollback_policy "$mfrom" "$mto")"
 		echo "sensitive-paths: ${sens:-none}"
 		echo "requested-by: $ST_OPS_IDENT"
 		echo "created: $(date -u -d "@$now" +%FT%TZ)"
@@ -285,7 +328,7 @@ verb_request_deploy() {
 		echo "expires-epoch: $exp"
 	} >"$d/request.txt"
 	chmod 0644 "$d/request.txt"
-	st_ops_audit "rc=0 request=$id sha=$sha scope=$scope"
+	st_ops_audit "rc=0 request=$id sha=$sha"
 	echo "Request $id created. The owner signs EXACTLY these bytes (file request.txt):"
 	echo "-----8<-----"
 	cat "$d/request.txt"

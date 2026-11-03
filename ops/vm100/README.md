@@ -1,6 +1,6 @@
 # ops/vm100 — `st-ops`: operación de Shared Terminal sin root
 
-Estado: **propuesta (2026-11-03), nada instalado ni concedido.** Decisión del responsable: la sesión B
+Estado: **propuesta, revisión 2 (2026-11-03), NO-GO de instalación: nada instalado ni concedido.** Decisión del responsable: la sesión B
 debe poder operar y desplegar Shared Terminal sin depender de A, **sin** root general, sin `sudo`, sin
 el grupo `docker` y sin la identidad SSH de A; cada deploy requiere el GO explícito del responsable, y
 el servidor verifica SHA, procedencia de `main`, CI, backup, preflight y resultado.
@@ -44,7 +44,7 @@ B ──ssh st-ops──▶ sshd (Match User st-ops: ForceCommand, sin TTY ni fo
 | Verbo | Efecto | Requiere firma |
 | --- | --- | --- |
 | `help`, `status`, `logs [n≤500]` | solo lectura (SHA desplegado, health, disco, compose, sesiones por nombre/estado, último backup, última línea off-host) | no |
-| `request-deploy <sha> [backend\|full]` | verifica y crea **una** solicitud pendiente (caduca a las 2 h); imprime el texto exacto a firmar | no |
+| `request-deploy <sha>` | verifica y crea **una** solicitud pendiente (caduca a las 2 h); imprime el texto exacto a firmar | no |
 | `request-text <id>` | los bytes exactos de la solicitud (`> request.txt`) | no |
 | `deploy <id>` (firma por stdin) | consume la solicitud y lanza el pipeline | **sí** |
 | `deploy-status <id>` | progreso (líneas propias del pipeline, nunca salida de comandos) y `result.json` | no |
@@ -65,10 +65,15 @@ En `request-deploy` y **otra vez** al comenzar el pipeline (el mundo puede haber
 3. CI: cada check requerido (`deploy.conf → REQUIRED_CHECKS`: backend, frontend, e2e, docker smoke,
    Cloudflare Pages) existe en ese SHA, emitido por GitHub Actions o la app de Pages, y su última
    ejecución terminó en `success`.
-4. Alcance: `session-image/` cambia ⇒ siempre rechazado (no es un deploy de backend). Con `backend`,
-   también se rechazan `Dockerfile`, `docker-compose.yml` y `backend/package*.json`; `full` los admite.
-   Las rutas sensibles (`.github/`, `Dockerfile`, compose, lockfile, `db.ts`, `ops/`) y el salto de
-   migraciones (`17 -> 18`) **van en el texto firmado**, para que el responsable vea qué aprueba.
+4. Alcance **v1 = código de backend**, como *allowlist* (`ALLOWED_PATHS_RE`): `backend/src/`,
+   `backend/{tsconfig,biome}.json`, `backend/vitest.config.ts`, `frontend/` (lo despliega Pages, no
+   st-ops), `docs/`, `.github/`, `ops/`, `*.md` de la raíz, `LICENSE`, `.gitignore`, `.env.example`.
+   **Cualquier otra ruta se rechaza** —`Dockerfile`, `docker-compose.yml`, `backend/package*.json`,
+   `session-image/`, `.dockerignore`, un archivo nuevo en la raíz— y queda como deploy manual. Así lo
+   desplegado es exactamente lo firmado: la imagen = `Dockerfile` + `backend/` del árbol firmado, con
+   la definición de compose que ya está desplegada (byte a byte la del árbol firmado). Las rutas
+   sensibles permitidas (`.github/`, `db.ts`, `ops/`) y el salto de migraciones van **en el texto
+   firmado**, junto con `auto-rollback: previous-image | withheld`.
 5. Firma: `ssh-keygen -Y verify` sobre los bytes exactos de `request.txt`, principal `owner`, namespace
    propio; caducidad; un solo uso (`used` se escribe **antes** de lanzar el pipeline: una aprobación
    se consume con el intento, nunca se puede reproducir); árbol del SHA = el firmado; el SHA desplegado
@@ -76,23 +81,71 @@ En `request-deploy` y **otra vez** al comenzar el pipeline (el mundo puede haber
 
 ## Pipeline (`st-ops-deploy-run`, unidad systemd: una SSH caída no lo interrumpe)
 
-1. Re-verificación (arriba).
-2. Preflight: no es un contenedor; checkout limpio; espacio ≥ `MIN_FREE_KIB`; todo registro de
-   recreación `resolved`; ningún envío del composer en vuelo; backend sano; instantáneas de los
-   contenedores de sesión, de los flags del contenedor `app` y del hash de `.env`.
-3. Backup con la herramienta construida desde el SHA objetivo (solo lectura, `DAC_READ_SEARCH`),
-   verificado contra su manifest (filas, tarballs legibles, conteo de archivos, cambios concurrentes
-   solo volátiles). Nombre `deploy-<sha12>-<ts>` en `.backups/`.
-4. Nada cambió durante el backup (SHA desplegado, sesiones, composer).
-5. `checkout --detach <sha>` + verificación de árbol, `docker compose up -d --build app`, health.
-   **Rollback automático solo si el backend no levanta** (compose falla o health no responde en 2 min):
-   vuelve al `from` y reporta `rolled-back` o `rollback-failed`.
-6. Verificación: health, `/api/auth/status` 200, flags de `app` idénticos, `.env` intacto,
-   contenedores de sesión intactos, las líneas de arranque de captura/composer siguen presentes. Si algo
-   difiere el resultado es `deployed-unverified` y **no** se revierte: decide el responsable.
+1. Re-verificación (arriba), incluido que el salto de migraciones sea el firmado.
+2. Preflight: no es un contenedor; el `app` del proyecto `COMPOSE_PROJECT` corre la imagen que
+   `<proyecto>-app:latest` nombra (si no, hubo deriva manual y se rechaza); el `docker-compose.yml` del
+   checkout es byte a byte el del árbol firmado y `compose config` valida; espacio ≥ `MIN_FREE_KIB`; todo
+   registro de recreación `resolved`; **composer probadamente ocioso** (abajo); backend sano;
+   instantáneas de sesiones, flags de `app`, hash de `.env` e ID de la imagen anterior.
+3. **Build** desde el árbol firmado (abajo) con etiquetas `io.shared-terminal.st-ops.{sha,tree,request}`.
+   El backend viejo sigue corriendo: un build fallido no cambia nada (`refused build`).
+4. Backup con esa misma imagen (su `backup.ts` conoce el esquema destino; solo lectura,
+   `DAC_READ_SEARCH`), verificado contra su manifest. Nombre `deploy-<sha12>-<ts>` en `.backups/`.
+5. Nada cambió durante build + backup (SHA desplegado, imagen corriendo, sesiones, composer).
+6. Arranque: `docker tag <nueva> <proyecto>-app:latest` + `compose -p … -f <compose firmado>
+   up -d --no-build app`; health; la imagen corriendo *es* la construida.
+7. Si el arranque falla:
+   - la imagen anterior sigue corriendo y sana ⇒ `failed-not-started` (el código nuevo nunca corrió);
+   - **hay migraciones en el salto** ⇒ `failed-rollback-withheld`: sin rollback automático (abajo);
+   - sin migraciones ⇒ rollback a la **imagen anterior exacta, por ID** (sin reconstruir) ⇒
+     `rolled-back` o `rollback-failed`.
+8. Verificación: health, `/api/auth/status` 200, flags de `app` idénticos, `.env` intacto, sesiones
+   intactas, la etiqueta de la imagen nombra el SHA, las líneas de arranque de captura/composer siguen.
+   Si algo difiere ⇒ `deployed-unverified`, sin revertir: decide el responsable.
+9. Registro **como `diego`**: `git fetch` + `checkout --detach <sha>` del checkout, para que un
+   `compose up --build` manual posterior no reconstruya código viejo. Si falla, el resultado lo avisa.
 
 Nunca: edita `.env`, toca un contenedor de sesión, reconstruye la imagen de sesión, hace `prune`,
 imprime un valor de configuración (la salida de comandos va a `private/`, root 0700).
+
+### Confianza en el filesystem
+
+Root **nunca** ejecuta git ni un build dentro del checkout de `diego`: su `.git/config` y sus hooks
+(`core.fsmonitor`, filtros smudge/clean, `post-checkout`…) son de `diego`, y ejecutarlos como root le
+daría root a esa cuenta *a través de st-ops*. El contexto de build es `git archive <sha>` del espejo de
+root, extraído en un directorio nuevo de root (`private/src`): sin `.git`, sin hooks, sin configuración
+de git, sin archivos no rastreados ni cambios locales. De ese checkout solo se leen `.env` (configuración
+que st-ops no controla; su hash se compara antes/después) y `docker-compose.yml` (que debe coincidir byte
+a byte con el firmado; compose usa la copia de root con `-p`/`-f` explícitos, sin descubrir overrides).
+Lo poco que se hace en el checkout —leer `HEAD` antes del primer deploy con etiqueta, y el registro del
+paso 9— corre como `diego` (`runuser`), que no gana nada que no tenga.
+
+El SHA desplegado es la etiqueta de la imagen que corre; antes del primer deploy por st-ops, el `HEAD`
+del checkout leído como `diego`.
+
+### Composer: falla cerrado
+
+Un envío del composer en vuelo cuando `app` reinicia deja un registro de pane para `reconcile`; el deploy
+solo sigue con **evidencia positiva** de que no hay ninguno, en dos capas que deben coincidir:
+
+1. Disco: el registro de pane existe desde `prepared` (antes del primer efecto) hasta `released`
+   (CONVERSATION.md §8.1.4), sea cual sea el proceso dueño y esté o no el flag encendido. Cualquier
+   entrada en cualquier `.st-control/*/composer/` —registro, temporal de una escritura atómica, algo
+   inesperado— o un directorio que no se puede listar ⇒ no ocioso.
+2. Backend (solo con `CONVERSATION_COMPOSER_ENABLED` = `true`/`1`, la regla de `composerFlagEnabled`):
+   token admin; `GET /api/admin/sessions` debe ser 200 con una lista de `sessionId` válidos; para cada
+   uno, `GET …/composer/panes` debe ser 200 con `panes: []` **y** `unreadable: []`. 401, 403, 404, 5xx,
+   error de transporte, JSON no válido o con otra forma ⇒ no ocioso.
+
+### Migraciones y rollback
+
+`migrateDb` aplica las migraciones al arrancar, antes de servir `/health`, y el ledger se escribe
+**después** de `apply()`; el código viejo arranca contra cualquier esquema más nuevo sin comprobar nada
+(salta las versiones que no conoce). Si el código nuevo cae después de migrar (total o parcialmente),
+volver al viejo "levanta" pero sin ninguna garantía de compatibilidad. Por eso: **un salto de migraciones
+desactiva el rollback automático** (`withheld`, visible en el texto firmado), y el responsable decide con
+el backup del paso 4 a mano. Sin migraciones el esquema no se movió y el rollback a la imagen anterior por
+ID es seguro. Los tests cubren los tres casos.
 
 ## Flujo de un deploy
 
@@ -141,11 +194,23 @@ Si B mostrara un texto distinto del guardado, la firma no verifica contra la sol
 - `from="172.20.0.0/16"` admite cualquier contenedor de `sessions-net`: la clave privada de B es lo
   que identifica, no la IP (la de B cambia con cada recreación).
 - `status`/`logs` muestran nombres de sesiones y logs del backend: son datos de operador.
+- La imagen base (`node:22-slim`) es una etiqueta mutable: el build no la fija por digest. Mismo
+  comportamiento que el deploy manual de hoy; fijarla es un cambio del `Dockerfile` (y por eso un deploy
+  manual).
+- Entre el último chequeo del composer y el reinicio de `app` queda una ventana de segundos en la que un
+  envío podría empezar; lo mismo que en los scripts manuales, y `reconcile` lo recupera por evidencia.
+- `--project-directory` + `-f` de una copia: la resolución de rutas relativas de compose debe confirmarse en
+  la primera ejecución supervisada (el compose actual no usa rutas relativas salvo el `build.context`, que
+  `--no-build` no usa).
 
 ## Tests
 
-`bash ops/vm100/test/run.sh` — sin root, sin Docker, sin red: dispatcher (metacaracteres, longitud,
-login sin clave), configuración (claves desconocidas), identidades, CI (re-ejecución gana, app ajena no
-cuenta, check ausente), firmas reales (otros bytes, otro namespace, clave del operador), procedencia
-(commit de rama lateral), alcance, una solicitud pendiente a la vez, consumo y no-reproducción de la
-aprobación, caducidad.
+`bash ops/vm100/test/run.sh` (140 casos) — sin root, sin Docker, sin red: dispatcher (metacaracteres,
+longitud, login sin clave), configuración, identidades, CI (re-ejecución gana, app ajena no cuenta, check
+ausente), firmas reales (otros bytes, otro namespace, clave del operador), procedencia (rama lateral;
+`on_main` con 3000 commits bajo `pipefail` y SIGPIPE por defecto), alcance (allowlist en ambos sentidos),
+política de rollback y `recover_after_failed_start` (migración + health caído ⇒ sin rollback; sin
+migración ⇒ imagen anterior exacta; imagen nueva nunca arrancó), composer (registros en disco, directorio
+ilegible, 401/403/404/500/transporte/JSON inválido en ambas llamadas), una solicitud pendiente a la vez,
+consumo y no reproducción de la aprobación, caducidad. **No** cubren: el pipeline completo contra Docker
+real ni `compose` (primera ejecución supervisada en VM100).
