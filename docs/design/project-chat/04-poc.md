@@ -1783,6 +1783,162 @@ Si vuelve a dar INCONCLUSIVE por `hold-h`, `hold-h_sync` trae el motivo (`EACCES
 apruebo la corrida 2.
 
 
+#### 1.14.12 Corrida 2: INCONCLUSIVE por `peer-inode-unknown:hold-h`; kit `447f639` (**tercera corrida no autorizada**)
+
+**Lo que informó el responsable:**
+- `h1`, `h2` y `hold-h` dieron 200, con `local_ino` conocido y `peer_ino_error=ENOENT`.
+- En `hold-h`:
+  - `waitheld` y `fdcheck` sincronizaron;
+  - `peer_known=false`.
+- El debug está limpio y `hold-c` pasa.
+- La corrida 2 sigue capturada. **No se limpia.**
+
+**Causa raíz: verificada en el código del kernel, no reproducida.**
+- **Qué fuentes leí:**
+  - upstream `v6.8`;
+  - el tag `Ubuntu-6.8.0-147.147` del árbol noble, que es el kernel de VM100.
+  - Las funciones que importan son idénticas en los dos: `unix_stream_connect`,
+    `unix_find_bsd`, `unix_lookup_by_ino`, `unix_diag_get_exact` y `sk_diag_dump_peer`.
+    `unix_create1` difiere sólo en cambios del recolector y de lockdep.
+- **Cómo se crea el extremo aceptado:**
+  - `unix_stream_connect` toma `net = sock_net(sk)` **del cliente**;
+  - crea el socket que después devuelve `accept()` con `unix_create1(net, NULL, 0, …)`;
+  - `unix_create1` lo inserta en la tabla de **esa** red con `unix_insert_unbound_socket(net, sk)`.
+- **El servidor puede aceptar igual:** `unix_find_bsd` busca el destino por ruta (inodo del
+  sistema de archivos), sin mirar el namespace. Por eso el cliente del contenedor llega al
+  socket del host.
+- **Por qué el host recibe ENOENT:** `unix_diag_get_exact` usa `net = sock_net(in_skb->sk)`,
+  el namespace **de quien consulta**, y `unix_lookup_by_ino(net, ino)` recorre sólo
+  `net->unx.table`. El servidor del host consulta desde el namespace del host y recibe
+  `-ENOENT` para **su propio** extremo aceptado.
+- **El resto de la corrida 2 encaja:**
+  - en el lado c todo está en el namespace del contenedor y funciona;
+  - el número de inodo (`fstat`, sockfs) es global, así que el contenedor ve el mismo número
+    que el host.
+- **Lo que no pude hacer:** reproducirlo con dos namespaces. Este entorno no permite
+  `unshare -n`. La prueba directa es una tercera corrida en VM100.
+
+**Corrección mínima** (`447f639`, sobre `9996286`):
+- **Servidor:** `held-h.json` lleva además `local_ino`, que es el `fstat` del fd aceptado.
+- **Checker** (`fdcheck`, `peer_from_accepted`):
+  - consulta `sock_diag` desde **su** namespace, el del contenedor y el del CLI;
+  - el inodo del JSON no se acepta así nomás. Se rechaza si no es un entero en
+    `1…2³²−1`, si no existe, si no es un socket de stream `ESTABLISHED`, si no tiene par, si
+    el par no lo nombra de vuelta (no es mutuo) o si el par no está `ESTABLISHED`;
+  - si el servidor obtuvo el par (lado c), los dos valores tienen que coincidir;
+  - informa qué pids de su namespace tienen el extremo aceptado (`local_holder_pids`).
+- **Analizador:**
+  - el `local_ino` que usó el checker tiene que ser **el mismo** que el servidor registró
+    para la conexión ligada por `conn` y `nonce`; si no, `held-socket-mismatch`;
+  - en `hold-h` nadie dentro del contenedor puede tener el extremo aceptado, porque el
+    servidor del host no está en ese namespace de pids; si no, `held-socket-mismatch`;
+  - en `hold-c` el par del servidor tiene que coincidir;
+  - sin par mutuo, `peer-inode-unknown`;
+  - después siguen los mismos criterios de siempre: único poseedor el CLI, `O_CLOEXEC`, sin
+    herencia y `scan_denied=0`.
+  - Nada se relajó: las razones nuevas son INCONCLUSIVE y sólo agregan condiciones.
+- **El dato informativo `h2_reused_h1_connection`** ya no aparece: el host nunca resuelve el
+  extremo del cliente, y el analizador no lo inventa.
+
+**Tests:**
+- runner 30;
+- servidores 47, con sockets reales:
+  - vista del host simulada: la consulta del servidor falla como en el host y la del
+    checker es real;
+  - inodos inválidos, de una conexión cerrada, de un cliente que se fue, de un listener, de
+    datagramas y de otra conexión viva;
+  - desacuerdo con el servidor;
+  - respuestas del kernel no mutuas o no `ESTABLISHED` (con `unix_diag` falso);
+- analizador 16, con 60 mutaciones de criterio y 14 negativas nuevas;
+- `diag` 5;
+- mod 14;
+- `claude plugin validate`: pasa.
+
+**15 mutaciones de código, todas detectadas:**
+- en el checker:
+  - no exigir par mutuo;
+  - no exigir `ESTABLISHED` en el extremo aceptado;
+  - no exigirlo en el par;
+  - no comparar con el servidor;
+  - no validar el inodo;
+  - el servidor sin `local_ino`;
+  - no buscar quién tiene el extremo aceptado;
+  - confiar en el par del servidor;
+- en el analizador:
+  - no comparar con el registro del servidor;
+  - no aplicar la regla de poseedores en `hold-h`;
+  - no exigir acuerdo en `hold-c`;
+  - no exigir par mutuo;
+  - ignorar un desacuerdo en el host;
+- en el mod:
+  - pasar `diag` sin filtrar;
+  - pasar `local_holder_pids` sin filtrar.
+
+**Hashes del kit.** Comprobé que el tarball de GitHub de
+`447f6394b62031e7617390255a8500a398f18cd2` coincide con estos 15:
+
+```
+89d07fea590466096bc7f8bd3d6e56a06f6cb88060ead812bcb4dfe6f6a30d98  analyze.py
+370e1d3f15810809a6cfffd65353194506e7aa5622a00f120398b708261addee  b0.py
+6676f48339f5021686a3a9f33d3826521d82ffcfff7f528f813b2b24d5e41333  diag.py
+c77dcffd3df92dead59e05482a3c2b0c935e9b279830a71ba199f49096bc1767  mod/.claude-plugin/plugin.json
+d87f4cbc7a53b0d733c13dd4c7f81e49d7ede3b21163e0d64e2234176d43100d  mod/hooks/hooks.json
+dfa0451674cf535ca1775a01c3469e208bfcee04b9b58ec5899dcc11e97af6c8  mod/hooks/probe.mjs
+47aa77c452e02165e542f5067ead5aebb89aae3a46f6f7e28fca971eca43735c  mod/hooks/register.mjs
+683d825b530200f5afde17c842d0f5841e8f1519ed903118470e3b411fe3a5b0  README.md
+9006cc347a90e81faf971bc5b5df9ad496112f99d3e30f69d96db115af0ae781  run-b0.sh
+ac1e593a088b32a4d4245c385dc3693207ebb8275289bf6b76b5c6b7ee367209  test/fakebin/docker
+79ef6d8aaa92e72ec5f222686893afd8557a74f3a5ff072abd4cd0219327500a  test/probe.test.mjs
+a26b7301cbb47f831ed42ad4a4e3ef2f54645fc8c04adbae58c6d4d070811a00  test/test_analyze.py
+543a92136516dbdec040118b7adce98ae3692b3a51be0097c869aa47ae661342  test/test_b0.py
+5ddb66ee9ba63206b3f4a66fa24886db472b1e3f43a01e14d2f2a6f8542e82b2  test/test_diag.py
+119028ca34b0bdf6a87b26296c45ceae4b7ce23bbe84b31f939aed831ca0b7f2  test/test_runner.py
+```
+
+`run-b0.sh` no cambió.
+
+**Revisión de seguridad y de falso PASS.**
+- **Inodo equivocado pero válido**, por ejemplo de otra conexión viva del contenedor.
+  `sock_diag` lo resolvería, pero lo frenan otras tres comprobaciones:
+  - no coincide con el registro del servidor para esa `conn` y ese `nonce`;
+  - en `hold-h` su extremo aceptado tiene poseedor dentro del contenedor;
+  - el poseedor del par no sería el CLI identificado por el servidor.
+  Cubierto por tests de `b0.py` y del analizador.
+- **Archivo viejo o de otra llamada:** sigue la comprobación de `t_ms` posterior al inicio
+  y de `conn` igual a la de la llamada.
+- **Conexión ya cerrada:**
+  - si se cerraron los dos extremos, `ENOENT`;
+  - si se fue sólo el cliente, el par no es mutuo (el kernel devuelve 0 o un socket que ya
+    no resuelve).
+  Las dos dan INCONCLUSIVE, nunca PASS.
+- **Reutilización de inodos:** sockfs los numera de forma creciente. Para que diera un falso
+  PASS haría falta coincidir a la vez con el registro del servidor, con un par mutuo y con el
+  CLI como poseedor.
+- **El checker** es hijo del CLI y corre como uid 1000. No gana privilegios:
+  - `sock_diag` de AF_UNIX no exige capacidades;
+  - el servidor interno ya lo usaba en la corrida 2.
+- **Lo que no cubre:** un CLI malicioso que falsee la salida del checker. Pasaba igual con
+  `hold-c`, y B0 mide al kernel, no al CLI como adversario (§1.14.8).
+- **Exposición en el host:** `held-h.json` (`0644`, ≤ 3000 s) suma un número de inodo. No es
+  un secreto.
+- **Sin cambios:**
+  - el aislamiento;
+  - las operaciones P1–P6;
+  - los gates G1–G12, G3, G3-A y R8;
+  - Composer.
+
+**Tercera corrida (borrador; no autorizada).**
+- **Requisito:** cerrar la corrida 2 con su propio kit (`9996286`). `preflight` rechaza
+  contenedores `passb0` existentes. Es el mismo procedimiento de cierre de §1.14.11, con su
+  `BASE`; no se hace sin tu OK.
+- **Procedimiento:** el de §1.14.9, con un `STAMP` nuevo,
+  `COMMIT=447f6394b62031e7617390255a8500a398f18cd2` y los 15 hashes de arriba.
+- **Para aceptar un PASS:**
+  - `hold-h_fd.accepted_end` con `matches_server_record`, `stream_established` y `mutual` en
+    `true`, y `server_agrees` en `null`;
+  - `hold-c_fd.accepted_end.server_agrees` en `true`;
+  - en las dos, un único poseedor (el CLI), `O_CLOEXEC`, sin herencia y `scan_denied=0`.
+
 ## 2. Versiones
 
 | Variante | CLI | Motivo |
