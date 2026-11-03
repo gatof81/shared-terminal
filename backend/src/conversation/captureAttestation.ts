@@ -35,10 +35,16 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { AttemptRecord, ReadResult } from "../recreateAttempt.js";
+import { type AttemptRecord, fsyncDir, type ReadResult } from "../recreateAttempt.js";
 import { controlDir, ensureControlDir } from "./captureAuth.js";
 
-export const ATTESTATION_FILE = "capture-attestation.json";
+/**
+ * One file PER CONTAINER (`capture-attestation.<containerId>.json`): a
+ * recreation that attests N never replaces O's record, so a rollback onto O
+ * (whose image may be gone too) still finds its own; a writer for one
+ * container can never race a writer for another.
+ */
+export const ATTESTATION_FILE_PREFIX = "capture-attestation.";
 /** HKDF `info` for the attestation subkey (secrets.ts deriveSubkey). */
 export const ATTESTATION_KEY_INFO = "st-capture-attestation/v1";
 
@@ -173,40 +179,58 @@ export function parseAttestation(text: string): CaptureAttestation {
 	return r;
 }
 
-export function attestationPath(workspaceRoot: string, sessionId: string): string {
-	return path.join(controlDir(workspaceRoot, sessionId), ATTESTATION_FILE);
+export function attestationPath(
+	workspaceRoot: string,
+	sessionId: string,
+	containerId: string,
+): string {
+	if (!CONTAINER_ID_RE.test(containerId)) throw new Error("capture attestation: bad container id");
+	return path.join(
+		controlDir(workspaceRoot, sessionId),
+		`${ATTESTATION_FILE_PREFIX}${containerId}.json`,
+	);
 }
 
+/** The record of ONE container. A file whose content names another container is unreadable. */
 export async function readAttestation(
 	workspaceRoot: string,
 	sessionId: string,
+	containerId: string,
 ): Promise<AttestationRead> {
 	let text: string;
 	try {
-		text = await fs.readFile(attestationPath(workspaceRoot, sessionId), "utf8");
+		text = await fs.readFile(attestationPath(workspaceRoot, sessionId, containerId), "utf8");
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" };
 		return { kind: "unreadable", error: (err as Error).message };
 	}
 	try {
-		return { kind: "present", record: parseAttestation(text) };
+		const record = parseAttestation(text);
+		if (record.containerId !== containerId)
+			return { kind: "unreadable", error: "capture attestation: file names another container" };
+		return { kind: "present", record };
 	} catch (err) {
 		return { kind: "unreadable", error: (err as Error).message };
 	}
 }
 
 /**
- * Durable, atomic: temp + fsync + rename + fsync of the dir. root:root 0644
- * (the session can read it through the read-only control mount; it holds no
- * secret, and without the key it cannot be forged).
+ * Durable, atomic: temp + fsync + rename, then fsync of the session's control
+ * dir, of `.st-control` and of the workspace root (the dir may have just been
+ * created; same chain as recreateAttempt.ts). root:root 0644 (the session can
+ * read it through the read-only control mount; it holds no secret, and
+ * without the key it cannot be forged). `mayWrite` is asked right before the
+ * write (a recreation whose epoch closed writes nothing).
  */
 export async function writeAttestation(
 	workspaceRoot: string,
 	record: CaptureAttestation,
-): Promise<void> {
+	mayWrite: () => boolean = () => true,
+): Promise<boolean> {
 	assertShape(record);
 	const dir = await ensureControlDir(workspaceRoot, record.sessionId);
-	const file = path.join(dir, ATTESTATION_FILE);
+	const file = attestationPath(workspaceRoot, record.sessionId, record.containerId);
+	if (!mayWrite()) return false;
 	const tmp = `${file}.tmp.${process.pid}.${randomBytes(6).toString("hex")}`;
 	const fh = await fs.open(tmp, "wx", 0o644);
 	try {
@@ -217,12 +241,10 @@ export async function writeAttestation(
 	}
 	await fs.chmod(tmp, 0o644);
 	await fs.rename(tmp, file);
-	const d = await fs.open(dir, "r");
-	try {
-		await d.sync();
-	} finally {
-		await d.close();
-	}
+	await fsyncDir(dir);
+	await fsyncDir(path.dirname(dir));
+	await fsyncDir(workspaceRoot);
+	return true;
 }
 
 /** The decision rule (pure). `container` is what Docker reports NOW. */
@@ -252,8 +274,9 @@ export function classifyAttestation(
 	if (a.length !== b.length || !timingSafeEqual(a, b)) return "contradiction";
 	// Unknown id for the inspected container: nothing to bind to.
 	if (!container.containerId) return "absent";
-	// A previous container's record (the session was recreated since): not applicable.
-	if (r.containerId !== container.containerId) return "absent";
+	// Read by container id, so another container's record is never handed here;
+	// if it is, the store is inconsistent — deny.
+	if (r.containerId !== container.containerId) return "contradiction";
 	if (r.sessionId !== container.sessionId || r.imageId !== container.imageId)
 		return "contradiction";
 	return "valid";

@@ -1159,6 +1159,16 @@ export class RecreationEngine {
 				}),
 			);
 			const nId = a.nId as string;
+			// §2.7.5.1 — bind N to the image it was just created from, so its
+			// capture survives the loss of that image (a tag rebuild). Its own
+			// request: a hang here never hides N's id, and a closed epoch writes
+			// nothing. Best-effort: without it the image rule alone applies.
+			const attest = this.deps.docker.attest;
+			if (attest) {
+				await run.call("attest N", () =>
+					attest.call(this.deps.docker, sessionId, nId, a.attemptId, () => run.epochOpen),
+				);
+			}
 			const tar = await run.call("archive N skills", () =>
 				this.deps.docker.readArchive(nId, SKILLS_IMAGE_DIR, SKILLS_ARCHIVE_MAX_BYTES),
 			);

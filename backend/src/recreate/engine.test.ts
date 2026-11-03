@@ -253,6 +253,40 @@ describe("preconditions (§2.7.2): first failure ⇒ 409 with its code, no effec
 // ── Happy path ─────────────────────────────────────────────────────────────
 
 describe("successful recreation (K1.3: the attempt acts under its own lock and epoch)", () => {
+	it("§2.7.5.1 attests N once, after its create answered, with the epoch open, before N's skills are read", async () => {
+		const h = await setup();
+		const seen: Array<{
+			sid: string;
+			id: string;
+			attemptId: string;
+			open: boolean;
+			logAt: number;
+		}> = [];
+		(h.docker as unknown as { attest: unknown }).attest = async (
+			sid: string,
+			id: string,
+			attemptId: string,
+			mayAct: () => boolean,
+		) => {
+			seen.push({ sid, id, attemptId, open: mayAct(), logAt: h.docker.log.length });
+			return true;
+		};
+		const r = await h.engine.recreate(SID, IMG_N);
+		expect(r).toMatchObject({ ok: true, outcome: "committed" });
+		const nId = nIdOf(h) as string;
+		expect(seen).toHaveLength(1);
+		expect(seen[0]).toMatchObject({ sid: SID, id: nId, open: true });
+		expect(seen[0]!.attemptId).toMatch(/\S/);
+		const before = h.docker.log.slice(0, seen[0]!.logAt);
+		expect(before.some((l) => l.startsWith("create:"))).toBe(true);
+		// O's skills archive is read earlier (preconditions); only N's must come after.
+		const n16 = nId.slice(0, 16);
+		expect(
+			before.some((l) => l === `readArchive:${n16},…` || l.startsWith(`readArchive:${n16}`)),
+		).toBe(false);
+		expect(before.some((l) => l.startsWith(`start:${n16}`))).toBe(false);
+		expect(h.docker.log.some((l) => l.startsWith(`readArchive:${n16}`))).toBe(true);
+	});
 	it("commits N with H, completes step 6 and resolves committed", async () => {
 		const h = await setup();
 		h.docker.gitconfig.set(O_ID, "[user]\n\tname = Ada\n\temail = a@x\n");

@@ -699,21 +699,29 @@ export class DockerManager {
 				);
 			}
 		}
+		// §2.7.5.1 — only a container created HERE is attested, never one
+		// adopted under its name (that one was not created from the checked image).
+		let freshlyCreated = false;
 		const container = await this.createContainerReclaimingStaleName(
 			sessionId,
 			meta.containerName,
 			() =>
-				this.docker.createContainer(
-					this.containerOptions(
-						sessionId,
-						meta,
-						config,
-						envArray,
-						capture,
-						uploadsHostDir,
-						meta.containerName,
-					),
-				),
+				this.docker
+					.createContainer(
+						this.containerOptions(
+							sessionId,
+							meta,
+							config,
+							envArray,
+							capture,
+							uploadsHostDir,
+							meta.containerName,
+						),
+					)
+					.then((c) => {
+						freshlyCreated = true;
+						return c;
+					}),
 		);
 
 		// Persist the created container's id BEFORE starting it (P1-B):
@@ -747,7 +755,8 @@ export class DockerManager {
 		// whose relay label was just checked: bind that fact to this container
 		// now, before it starts, so authorization no longer depends on Docker
 		// keeping the image. Best-effort: without it the image rule still applies.
-		if (capture.imageId) await this.attestCaptureContainer(sessionId, containerId, "spawn", null);
+		if (capture.imageId && freshlyCreated)
+			await this.attestCaptureContainer(sessionId, containerId, "spawn", null);
 
 		await container.start();
 
@@ -3179,6 +3188,7 @@ export class DockerManager {
 		basis: AttestationBasis,
 		attemptId: string | null,
 		workspaceRoot = WORKSPACE_ROOT,
+		mayWrite: () => boolean = () => true,
 	): Promise<boolean> {
 		try {
 			const info = await this.docker.getContainer(containerId).inspect();
@@ -3187,14 +3197,14 @@ export class DockerManager {
 				throw new Error("its image does not exist or lacks the relay label");
 			if (info.Config?.Labels?.[RELAY_IMAGE_LABEL] !== RELAY_IMAGE_LABEL_VALUE)
 				throw new Error("the container lacks the relay label");
-			await writeAttestation(
+			return await writeAttestation(
 				workspaceRoot,
 				signAttestation(
 					{ sessionId, containerId: info.Id, imageId: info.Image, basis, attemptId },
 					deriveSubkey(ATTESTATION_KEY_INFO),
 				),
+				mayWrite,
 			);
-			return true;
 		} catch (err) {
 			logger.warn(
 				`[docker] capture attestation not written for ${sessionId} (${containerId.slice(0, 12)}): ${(err as Error).message}`,
@@ -3321,16 +3331,12 @@ export class DockerManager {
 					spec.labels,
 				);
 			},
-			create: async (options) => {
-				const id = (await d.createContainer(options as Dockerode.ContainerCreateOptions)).id;
-				// §2.7.5.1 — N is created from the image the engine just checked
-				// (relay label, by immutable id): bind that to N before its start.
-				const labels = (options as Dockerode.ContainerCreateOptions).Labels ?? {};
-				const sid = labels["io.shared-terminal.session"];
-				const attempt = labels["io.shared-terminal.recreate-attempt"];
-				if (sid && attempt) await this.attestCaptureContainer(sid, id, "recreate", attempt);
-				return id;
-			},
+			create: async (options) =>
+				(await d.createContainer(options as Dockerode.ContainerCreateOptions)).id,
+			// §2.7.5.1 — its own request in the engine (after N's id is known), so
+			// "create N" stays one Docker call and a closed epoch writes nothing.
+			attest: (sid, id, attemptId, mayAct) =>
+				this.attestCaptureContainer(sid, id, "recreate", attemptId, WORKSPACE_ROOT, mayAct),
 			rename: async (id, name) => {
 				await d.getContainer(id).rename({ name });
 			},

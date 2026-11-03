@@ -1067,8 +1067,10 @@ todas las sesiones que capturaban, sin que esos contenedores hubieran cambiado. 
 de un contenedor en marcha no puede depender de que Docker conserve un objeto que cualquier
 rebuild borra.
 
-**Qué es.** Un registro `<WORKSPACE_ROOT>/.st-control/<sid>/capture-attestation.json`, root
-`0644`, escrito de forma atómica y durable (temp + fsync + rename + fsync del dir):
+**Qué es.** Un registro **por contenedor**,
+`<WORKSPACE_ROOT>/.st-control/<sid>/capture-attestation.<containerId>.json` (acreditar N nunca
+reemplaza el de O: un rollback a O conserva el suyo), root `0644`, escrito de forma atómica y
+durable (temp + fsync + rename + fsync del dir de la sesión, de `.st-control` y de la raíz):
 `{v:1, sessionId, containerId (64 hex), imageId (sha256:…), relay:"2", basis, attemptId,
 issuedAt, mac}`. `mac` = HMAC-SHA256 de los campos en orden fijo, con una subclave HKDF de
 `SECRETS_ENCRYPTION_KEY` (`info = "st-capture-attestation/v1"`). No contiene secretos; sin la
@@ -1076,16 +1078,20 @@ clave no se puede fabricar.
 
 **Quién la emite y cuándo** — solo el backend, en el momento en que observa el hecho:
 
-1. `spawn` con captura preparada: tras crear el contenedor y antes de arrancarlo;
-2. recreación, paso 1: tras crear N desde el ID de imagen verificado;
+1. `spawn` con captura preparada: tras crear el contenedor (nunca uno adoptado bajo su nombre) y
+   antes de arrancarlo;
+2. recreación, paso 1: tras crear N desde el ID de imagen verificado, como request propio del
+   intento (`attest N`), con `mayAct` justo antes de escribir — una época cerrada no escribe;
 3. en ambos casos se **re-verifica en ese momento** que la imagen del contenedor exista y lleve
    `="2"` y que el contenedor lleve la etiqueta; si no, no se emite (fallo silencioso hacia la
    regla de imagen, con log).
 
-**Cómo decide** (`classifyAttestation`, puro): `valid` (firma correcta, mismo `sessionId`,
-`containerId` = el contenedor de D1 inspeccionado, mismo `imageId`); `absent` (no hay, o es de
-**otro** contenedor: obsoleta tras una recreación, no aplica); `contradiction` (no verifica, no se
-puede leer, o nombra a este contenedor con otra imagen o sesión).
+**Cómo decide** (`classifyAttestation`, puro; se lee solo el archivo del contenedor de D1
+inspeccionado): `valid` (firma correcta, mismo `sessionId`, mismo `containerId`, mismo
+`imageId`); `absent` (no hay archivo para ese contenedor — los de contenedores anteriores nunca
+se leen); `contradiction` (no verifica, no se puede leer, su contenido nombra a otro contenedor,
+o nombra a este con otra imagen o sesión). Rige igual en la autoridad del servicio y en las de
+la recreación (paso 5, restauración de O, convergencia).
 
 - Imagen presente: decide la regla de imagen, como hasta ahora. Una acreditación **no** puede
   autorizar una imagen presente sin la etiqueta.
@@ -1105,6 +1111,10 @@ etiqueta. Un contenedor de un `spawn` sin registro, o cualquier discrepancia, se
 recreación). Una acreditación contradictoria existente nunca se sobrescribe. La herramienta no
 escribe marca ni archivo: la restauración es el procedimiento oficial de escritura (`PATCH
 /api/admin/sessions/:id/conversation {enabled:true}`), con su probe de identificación.
+
+**Clave.** Cambiar `SECRETS_ENCRYPTION_KEY` invalida todas las acreditaciones: cada una pasa a
+`contradiction` y su sesión pierde la captura aunque su imagen exista, hasta recrearla (mismo
+coste que ya tiene la rotación para los secretos, §1/SECURITY.md).
 
 **Hot reload.** Restaurar marca y archivo no garantiza que un proceso Claude ya en marcha vuelva
 a emitir hooks (§2.3, `emissionStopsAfterRestart`): la recuperación solo se declara cuando llegan

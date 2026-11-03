@@ -29,7 +29,7 @@ import {
 	removeHooksFile,
 	writeHooksFile,
 } from "./activation.js";
-import { readAttestation } from "./captureAttestation.js";
+import { type AttestationRead, readAttestation } from "./captureAttestation.js";
 import {
 	CaptureAuthority,
 	type CaptureBlock,
@@ -343,6 +343,20 @@ export class ConversationService {
 	};
 
 	readonly authority: CaptureAuthority;
+	private readonly captureAttestationKey?: () => Buffer;
+	/**
+	 * §2.7.5.1 — the same attestation wiring for every CaptureAuthority built
+	 * elsewhere (the recreation's): one rule, one source, or none at all.
+	 */
+	attestationDeps(): {
+		readAttestation?: (sessionId: string, containerId: string) => Promise<AttestationRead>;
+		attestationKey?: () => Buffer;
+	} {
+		const key = this.captureAttestationKey;
+		if (!key) return {};
+		const root = this.deps.workspaceRoot;
+		return { readAttestation: (sid, cid) => readAttestation(root, sid, cid), attestationKey: key };
+	}
 
 	constructor(private readonly deps: ServiceDeps) {
 		this.authority = new CaptureAuthority({
@@ -357,11 +371,12 @@ export class ConversationService {
 			removeHooksFile: (sid) => removeHooksFile(deps.workspaceRoot, sid),
 			hooksFileExists: (sid) => hooksFileExists(deps.workspaceRoot, sid),
 			readAttestation: deps.captureAttestationKey
-				? (sid) => readAttestation(deps.workspaceRoot, sid)
+				? (sid, cid) => readAttestation(deps.workspaceRoot, sid, cid)
 				: undefined,
 			attestationKey: deps.captureAttestationKey,
 			now: deps.now,
 		});
+		this.captureAttestationKey = deps.captureAttestationKey;
 		this.now = deps.now ?? Date.now;
 		this.heartbeat = new HeartbeatCoalescer(async (key) => {
 			const [st, cid] = key.split("/");

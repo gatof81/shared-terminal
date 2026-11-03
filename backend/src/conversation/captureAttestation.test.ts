@@ -130,7 +130,8 @@ function authority(
 			await fs.rm(hooksPath(), { force: true });
 		},
 		hooksFileExists: () => exists(hooksPath()),
-		readAttestation: opts.wired === false ? undefined : (sid) => readAttestation(root, sid),
+		readAttestation:
+			opts.wired === false ? undefined : (sid, cid) => readAttestation(root, sid, cid),
 		attestationKey: opts.wired === false ? undefined : () => KEY,
 		sleep: async () => undefined,
 		identifyWaitMs: 10,
@@ -191,8 +192,8 @@ describe("negative cases: nothing but a verified attestation of THIS container r
 	) => {
 		await seedCaptureFiles();
 		if (att === "garbage") {
-			await fs.mkdir(path.dirname(attestationPath(root, SID)), { recursive: true });
-			await fs.writeFile(attestationPath(root, SID), '{"v":1}');
+			await fs.mkdir(path.dirname(attestationPath(root, SID, CID)), { recursive: true });
+			await fs.writeFile(attestationPath(root, SID, CID), '{"v":1}');
 		} else if (att) await writeAttestation(root, att);
 		const a = authority(opts);
 		const r = await a.converge(SID);
@@ -268,6 +269,25 @@ describe("negative cases: nothing but a verified attestation of THIS container r
 });
 
 describe("attestation records", () => {
+	it("one file per container: attesting N never replaces O's (a rollback onto O keeps its attestation)", async () => {
+		await writeAttestation(root, attestation()); // O = CID
+		await writeAttestation(root, attestation({ containerId: OLD_CID, basis: "recreate" })); // N
+		const o = await readAttestation(root, SID, CID);
+		expect(classifyAttestation(o, { sessionId: SID, containerId: CID, imageId: IMG }, KEY)).toBe(
+			"valid",
+		);
+		await seedCaptureFiles();
+		expect(await authority().converge(SID)).toBe("kept");
+	});
+	it("a file whose content names another container is a contradiction (never another container's grant)", async () => {
+		await writeAttestation(root, attestation({ containerId: OLD_CID }));
+		await fs.copyFile(attestationPath(root, SID, OLD_CID), attestationPath(root, SID, CID));
+		expect((await readAttestation(root, SID, CID)).kind).toBe("unreadable");
+		await seedCaptureFiles();
+		const a = authority();
+		expect(await a.converge(SID)).toBe("withdrawn");
+		expect((await a.capture(SID)).pendingReasons).toContain("attestation-contradiction");
+	});
 	it("sign → parse round-trips; the parser is strict", () => {
 		const r = attestation();
 		expect(parseAttestation(JSON.stringify(r))).toEqual(r);
@@ -292,8 +312,8 @@ describe("attestation records", () => {
 	it("written durable and world-readable (0644), read back identical", async () => {
 		const r = attestation();
 		await writeAttestation(root, r);
-		expect((await fs.stat(attestationPath(root, SID))).mode & 0o777).toBe(0o644);
-		expect(await readAttestation(root, SID)).toEqual({ kind: "present", record: r });
+		expect((await fs.stat(attestationPath(root, SID, CID))).mode & 0o777).toBe(0o644);
+		expect(await readAttestation(root, SID, CID)).toEqual({ kind: "present", record: r });
 	});
 });
 

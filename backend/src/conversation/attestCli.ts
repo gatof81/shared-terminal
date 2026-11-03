@@ -43,8 +43,8 @@ export interface AttestDeps {
 	readAttempt: (sessionId: string) => Promise<ReadResult>;
 	checkRevocation: (sessionId: string) => Promise<RevocationState>;
 	isRecreateUnresolved: (sessionId: string) => Promise<boolean>;
-	readAttestation: (sessionId: string) => Promise<AttestationRead>;
-	writeAttestation: (record: CaptureAttestation) => Promise<void>;
+	readAttestation: (sessionId: string, containerId: string) => Promise<AttestationRead>;
+	writeAttestation: (record: CaptureAttestation) => Promise<unknown>;
 	key: () => Buffer;
 }
 
@@ -96,7 +96,7 @@ export async function attestFromHistory(
 	});
 	if (!verdict.ok) notes.push(...verdict.reasons);
 	const current = classifyAttestation(
-		await deps.readAttestation(sessionId),
+		await deps.readAttestation(sessionId, view.id),
 		{ sessionId, containerId: view.id, imageId: view.imageId },
 		deps.key(),
 	);
@@ -172,7 +172,7 @@ async function main(argv: string[]): Promise<number> {
 					() => false,
 					() => true,
 				),
-			readAttestation: (s) => readAttestation(WR, s),
+			readAttestation: (s, cid) => readAttestation(WR, s, cid),
 			writeAttestation: (rec) => writeAttestation(WR, rec),
 			key: () => deriveSubkey(ATTESTATION_KEY_INFO),
 		},

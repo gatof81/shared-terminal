@@ -150,6 +150,54 @@ describe("spawn with conversation hooks", () => {
 		await without.dm.spawn("sess-1");
 		expect(without.captured.opts.Image).toBe("shared-terminal-session");
 	});
+	it("§2.7.5.1 with capture prepared: create → persist id → attest → start; without capture: never attested", async () => {
+		const order: string[] = [];
+		const withCapture = makeDm();
+		const sessions = (
+			withCapture.dm as unknown as { sessions: { setContainerId: ReturnType<typeof vi.fn> } }
+		).sessions;
+		sessions.setContainerId.mockImplementation(async () => {
+			order.push("persist");
+		});
+		const docker = (
+			withCapture.dm as unknown as {
+				docker: {
+					createContainer: ReturnType<typeof vi.fn>;
+					getContainer: () => { start: ReturnType<typeof vi.fn> };
+				};
+			}
+		).docker;
+		const created = docker.createContainer.getMockImplementation()!;
+		docker.createContainer.mockImplementation(async (o: Record<string, unknown>) => {
+			order.push("create");
+			return created(o);
+		});
+		docker.getContainer().start.mockImplementation(async () => {
+			order.push("start");
+		});
+		const attest = vi
+			.spyOn(withCapture.dm, "attestCaptureContainer")
+			.mockImplementation(async () => {
+				order.push("attest");
+				return true;
+			});
+		withCapture.dm.setConversationHooks({
+			prepareSpawn: vi.fn(async () => ({
+				env: ["ST_INGEST_TOKEN=deadbeef"],
+				binds: [],
+				imageId: "sha256:checked",
+			})),
+			onSessionDown: vi.fn(async () => undefined),
+			onSessionPurged: vi.fn(async () => undefined),
+		});
+		await withCapture.dm.spawn("sess-1");
+		expect(order).toEqual(["create", "persist", "attest", "start"]);
+		expect(attest).toHaveBeenCalledWith("sess-1", "container-abc", "spawn", null);
+		const without = makeDm();
+		const none = vi.spyOn(without.dm, "attestCaptureContainer");
+		await without.dm.spawn("sess-1");
+		expect(none).not.toHaveBeenCalled();
+	});
 	it("§2.6 a proxy in the session env gets 127.0.0.1 in NO_PROXY only when capture is on", async () => {
 		const proxied = { HTTPS_PROXY: "http://proxy:3128", NO_PROXY: "internal.example" };
 		const off = makeDm(proxied);

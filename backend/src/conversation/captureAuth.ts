@@ -371,7 +371,7 @@ export interface CaptureAuthorityDeps {
 	 * §2.7.5.1 — read the capability attestation and the key to verify it.
 	 * Not wired ⇒ every attestation is "absent" (the image rule alone).
 	 */
-	readAttestation?: (sessionId: string) => Promise<AttestationRead>;
+	readAttestation?: (sessionId: string, containerId: string) => Promise<AttestationRead>;
 	attestationKey?: () => Buffer;
 	removeHooksFile: (sessionId: string) => Promise<void>;
 	hooksFileExists: (sessionId: string) => Promise<boolean>;
@@ -457,10 +457,10 @@ export class CaptureAuthority {
 	): Promise<AttestationCheck> {
 		const read = this.deps.readAttestation;
 		const key = this.deps.attestationKey;
-		if (!read || !key || !container?.exists) return "absent";
+		if (!read || !key || !container?.exists || !container.id) return "absent";
 		try {
 			return classifyAttestation(
-				await read(sessionId),
+				await read(sessionId, container.id),
 				{ sessionId, containerId: container.id, imageId: container.imageId },
 				key(),
 			);

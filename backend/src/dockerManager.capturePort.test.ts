@@ -678,7 +678,7 @@ describe("attestCaptureContainer (spawn / recreation N)", () => {
 			images: { [IMG]: { "io.shared-terminal.conversation-relay": "2" } },
 		});
 		expect(await m.attestCaptureContainer("s1", CID, "spawn", null, root)).toBe(true);
-		const read = await readAttestation(root, "s1");
+		const read = await readAttestation(root, "s1", CID);
 		expect(read.kind).toBe("present");
 		expect(
 			classifyAttestation(
@@ -697,7 +697,7 @@ describe("attestCaptureContainer (spawn / recreation N)", () => {
 			images,
 		});
 		expect(await m.attestCaptureContainer("s1", CID, "spawn", null, root)).toBe(false);
-		expect((await readAttestation(root, "s1")).kind).toBe("absent");
+		expect((await readAttestation(root, "s1", CID)).kind).toBe("absent");
 	});
 	it("never attests a container without the relay label", async () => {
 		const { m } = dm({
@@ -705,6 +705,6 @@ describe("attestCaptureContainer (spawn / recreation N)", () => {
 			images: { [IMG]: { "io.shared-terminal.conversation-relay": "2" } },
 		});
 		expect(await m.attestCaptureContainer("s1", CID, "recreate", "att-1", root)).toBe(false);
-		expect((await readAttestation(root, "s1")).kind).toBe("absent");
+		expect((await readAttestation(root, "s1", CID)).kind).toBe("absent");
 	});
 });
