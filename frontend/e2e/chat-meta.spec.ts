@@ -96,7 +96,8 @@ test.describe("chat: rename and archive (v1.8 §6.2)", () => {
 		backend.failNextMetaPatch = { status: 503, error: "meta-unavailable" };
 		await input.fill("Tests verdes");
 		await page.keyboard.press("Enter");
-		await expect(error).toContainText("could not be saved");
+		// 503 may follow a write whose outcome D1 left unknown: never "nothing changed".
+		await expect(error).toContainText("may have been saved");
 		await expect(input).toHaveValue("Tests verdes");
 		await expect(page.locator(".dialog-card")).toBeVisible();
 		await expect(row(page, "Fix tests")).toHaveCount(1);
@@ -192,7 +193,8 @@ test.describe("chat: rename and archive (v1.8 §6.2)", () => {
 		backend.failNextMetaPatch = { status: 503, error: "meta-unavailable" };
 		await menuBtn(page, "conv-2").click();
 		await page.locator('.action-menu [data-action="archive"]').click();
-		await expect(page.locator("#toast .toast-item.error")).toContainText("could not be saved");
+		await expect(page.locator("#toast .toast-item.error")).toContainText("may have been saved");
+		// The re-read shows the truth: this time nothing was written.
 		await expect(row(page, "Fix tests")).toHaveCount(1);
 		expect(backend.conversations.find((c) => c.cid === "conv-2")?.archivedAt ?? null).toBeNull();
 	});
@@ -237,7 +239,7 @@ test.describe("chat: rename and archive (v1.8 §6.2)", () => {
 		backend.failNextMetaPatch = { status: 503, error: "meta-unavailable" };
 		await menuBtn(page, "conv-2").click();
 		await page.locator('.action-menu [data-action="restore"]').click();
-		await expect(page.locator("#toast .toast-item.error")).toContainText("could not be saved");
+		await expect(page.locator("#toast .toast-item.error")).toContainText("may have been saved");
 		await expect(row(page, "Mío")).toHaveCount(1);
 	});
 });

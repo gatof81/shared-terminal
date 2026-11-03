@@ -126,8 +126,8 @@ describe("words", () => {
 			expect(explainMetaError(status, code)).toMatch(/may have been saved/);
 			expect(explainMetaError(status, code)).not.toMatch(/Nothing changed/);
 		}
-		// An explicit "could not store" is a definite refusal.
-		expect(metaOutcomeUnknown(503, "meta-unavailable")).toBe(false);
+		// 503 meta-unavailable is also sent when the D1 write timed out: not a definite refusal.
+		expect(metaOutcomeUnknown(503, "meta-unavailable")).toBe(true);
 		expect(metaOutcomeUnknown(400, "invalid-title")).toBe(false);
 	});
 });

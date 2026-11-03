@@ -1210,7 +1210,18 @@ function renderThreadHead(): void {
 	const head = threadEl.querySelector<HTMLElement>(".chat-thread-head");
 	const c = selected();
 	if (!head || !c) return;
+	// Status frames rebuild the header: keep the keyboard on its ⋯ / Agents button.
+	const a = document.activeElement;
+	const sel =
+		a instanceof HTMLElement && head.contains(a)
+			? a.dataset.metaWhere === "head"
+				? '[data-meta-where="head"]'
+				: a.classList.contains("chat-agents-btn")
+					? ".chat-agents-btn"
+					: null
+			: null;
 	head.replaceChildren(...threadHeadChildren(c));
+	if (sel) head.querySelector<HTMLElement>(sel)?.focus();
 }
 
 function threadHeadChildren(c: ConversationSummary): HTMLElement[] {

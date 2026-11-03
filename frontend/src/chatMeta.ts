@@ -140,13 +140,15 @@ export function titleProblem(value: string): string | null {
 
 /**
  * True when the change may have been saved although no success came back:
- * the server writes before it builds its answer, so a 5xx (other than the
- * explicit "could not store" 503), a 2xx without a summary or a lost
- * answer prove nothing either way. The caller re-reads the list.
+ * the server writes before it builds its answer, so any 5xx, a 2xx without
+ * a summary or a lost answer prove nothing either way — including 503
+ * `meta-unavailable`, which the server also sends when its D1 write timed
+ * out (db.ts: only a D1StatementError proves "not applied"). The caller
+ * re-reads the list.
  */
 export function metaOutcomeUnknown(status: number, code: string): boolean {
 	if (code === "network" || code === "unconfirmed") return true;
-	return status >= 500 && code !== "meta-unavailable";
+	return status >= 500;
 }
 
 /** A refused rename/archive, in words (`status` 0 = the request never got an answer). */
@@ -160,8 +162,6 @@ export function explainMetaError(status: number, code: string): string {
 			return "The name contains control or text-direction characters. Use plain text.";
 		case "conversation-not-found":
 			return "This conversation is no longer available. Refresh the list.";
-		case "meta-unavailable":
-			return "The change could not be saved right now (storage unavailable). Nothing changed — try again.";
 	}
 	if (status === 429) return "Too many changes in a short time. Wait a moment and try again.";
 	if (status === 404) return "This conversation is no longer available. Refresh the list.";
