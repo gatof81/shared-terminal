@@ -1408,7 +1408,22 @@ export class ConversationService {
 		for (const rt of this.runtime.values()) {
 			if (rt.stSessionId !== stSessionId || seen.has(rt.cid)) continue;
 			const index = this.deps.store.getResidentIndex(stSessionId, rt.cid);
-			if (index) out.push(summarizeIndex(index));
+			if (index) {
+				seen.add(rt.cid);
+				out.push(summarizeIndex(index));
+			}
+		}
+		// Metadata whose conversation has neither a D1 row nor a resident index: the
+		// owner renamed a conversation known only from its files (setOwnerMeta accepts
+		// it). Its snapshot is read from disk — no extra D1 call — so the list shows
+		// it, with its name, and the PATCH can answer its summary.
+		for (const cid of ownerMeta.keys()) {
+			if (seen.has(cid) || !isSafeClaudeSessionId(cid)) continue;
+			const index = await this.deps.store.peekIndex(stSessionId, cid).catch(() => null);
+			if (index) {
+				seen.add(cid);
+				out.push(summarizeIndex(index));
+			}
 		}
 		for (const s of out) applyOwnerMeta(s, ownerMeta.get(s.sessionId));
 		out.sort((a, b) =>

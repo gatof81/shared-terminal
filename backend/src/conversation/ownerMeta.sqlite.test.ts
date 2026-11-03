@@ -265,6 +265,33 @@ describe("ConversationService owner metadata", () => {
 		await service.shutdown();
 	});
 
+	it("a conversation known only from its files (no D1 row, not resident) can be renamed AND is listed with its name", async () => {
+		const { service } = await serviceWithConversation();
+		await service.shutdown();
+		// Its row upsert failed back then (or the row was lost): only the index and events file remain.
+		db.prepare("DELETE FROM claude_conversations WHERE session_id = ?").run(CID);
+		const { ConversationService, ConversationStore } = await load();
+		const restarted = new ConversationService({
+			workspaceRoot: root,
+			enabled: true,
+			port: 3001,
+			store: new ConversationStore({ workspaceRoot: root }),
+		});
+		const out = await restarted.setOwnerMeta(SID, CID, { title: "Solo en disco" });
+		expect(out).toMatchObject({ sessionId: CID, customTitle: "Solo en disco" });
+		const fetchMock = vi.mocked(globalThis.fetch);
+		fetchMock.mockClear();
+		const { conversations, meta } = await restarted.summariesWithMeta(SID);
+		// Still ONE D1 call for the list (§6.2 rule 3).
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(meta).toBe("ok");
+		expect(conversations.find((c) => c.sessionId === CID)).toMatchObject({
+			customTitle: "Solo en disco",
+			title: "el primer prompt de la persona",
+		});
+		await restarted.shutdown();
+	});
+
 	it("with D1 down the list still answers from the resident index and says meta is unavailable", async () => {
 		const { service } = await serviceWithConversation();
 		await service.setOwnerMeta(SID, CID, { title: "Mío" });
