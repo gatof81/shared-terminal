@@ -339,8 +339,13 @@ export class MockBackend {
 	conversationSockets: ConversationSocket[] = [];
 	/** v1.8 §6.2: the list says the owner metadata could not be read. */
 	metaUnavailable = false;
-	/** The next rename/archive PATCH answers this instead (then clears). */
-	failNextMetaPatch: { status: number; error: string } | null = null;
+	/**
+	 * The next rename/archive PATCH answers this instead (then clears). `afterWrite`: the change is
+	 * applied first — the real backend writes before it builds its answer, so a 5xx can follow a write.
+	 */
+	failNextMetaPatch: { status: number; error: string; afterWrite?: boolean } | null = null;
+	/** Hold every rename/archive answer this long (ms). */
+	metaPatchDelayMs = 0;
 	/** Set by a test to answer any route itself before the built-ins. */
 	override: ((method: string, path: string, route: Route) => Promise<boolean>) | null = null;
 	/**
@@ -802,11 +807,11 @@ export class MockBackend {
 				if (!own) return json(404, { error: "Session not found" });
 				const conv = this.conversations.find((c) => c.cid === decodeURIComponent(metaPatch[1]!));
 				if (!conv) return json(404, { error: "conversation-not-found" });
-				if (this.failNextMetaPatch) {
-					const f = this.failNextMetaPatch;
-					this.failNextMetaPatch = null;
-					return json(f.status, { error: f.error });
-				}
+				if (this.metaPatchDelayMs > 0)
+					await new Promise((r) => setTimeout(r, this.metaPatchDelayMs));
+				const fail = this.failNextMetaPatch;
+				this.failNextMetaPatch = null;
+				if (fail && !fail.afterWrite) return json(fail.status, { error: fail.error });
 				const body = req.postDataJSON() as Record<string, unknown> | null;
 				const keys = body && typeof body === "object" ? Object.keys(body) : [];
 				if (
@@ -823,6 +828,7 @@ export class MockBackend {
 				if (body && typeof body.archived === "boolean") {
 					conv.archivedAt = body.archived ? (conv.archivedAt ?? iso(30 * 60)) : null;
 				}
+				if (fail) return json(fail.status, { error: fail.error });
 				return json(200, this.summary(conv));
 			}
 			const ev = /^\/conversations\/([^/]+)\/events$/.exec(rest);

@@ -138,8 +138,21 @@ export function titleProblem(value: string): string | null {
 		: "The name contains control or text-direction characters. Use plain text.";
 }
 
+/**
+ * True when the change may have been saved although no success came back:
+ * the server writes before it builds its answer, so a 5xx (other than the
+ * explicit "could not store" 503), a 2xx without a summary or a lost
+ * answer prove nothing either way. The caller re-reads the list.
+ */
+export function metaOutcomeUnknown(status: number, code: string): boolean {
+	if (code === "network" || code === "unconfirmed") return true;
+	return status >= 500 && code !== "meta-unavailable";
+}
+
 /** A refused rename/archive, in words (`status` 0 = the request never got an answer). */
 export function explainMetaError(status: number, code: string): string {
+	if (metaOutcomeUnknown(status, code))
+		return "The server did not confirm the change — it may have been saved. The list is being refreshed to show the current state.";
 	switch (code) {
 		case "title-too-long":
 			return `Too long: at most ${TITLE_MAX_CODE_POINTS} characters.`;
@@ -149,8 +162,6 @@ export function explainMetaError(status: number, code: string): string {
 			return "This conversation is no longer available. Refresh the list.";
 		case "meta-unavailable":
 			return "The change could not be saved right now (storage unavailable). Nothing changed — try again.";
-		case "network":
-			return "No answer from the server. Nothing was confirmed — check your connection and try again.";
 	}
 	if (status === 429) return "Too many changes in a short time. Wait a moment and try again.";
 	if (status === 404) return "This conversation is no longer available. Refresh the list.";

@@ -51,6 +51,7 @@ import {
 	inFilter,
 	isArchived,
 	MetaOverlay,
+	metaOutcomeUnknown,
 	readFilter,
 	titleProblem,
 	writeFilter,
@@ -793,17 +794,27 @@ function skeletonThread(): HTMLElement {
 
 function renderList(): void {
 	if (!isActive()) return;
-	// Live frames re-render the rows; a reader arrowing through them must not lose their place.
-	const focused =
-		document.activeElement instanceof HTMLElement && listEl.contains(document.activeElement)
-			? document.activeElement.dataset.cid
-			: undefined;
+	// Live frames and polls re-render the rows; whoever is on a row, its ⋯, its Unarchive
+	// or a filter button (keyboard, screen reader) must stay on the same control.
+	const focusSel = focusedListControl();
 	listEl.replaceChildren();
 	try {
 		renderListInner();
 	} finally {
-		if (focused) listEl.querySelector<HTMLElement>(`[data-cid="${focused}"]`)?.focus();
+		if (focusSel) listEl.querySelector<HTMLElement>(focusSel)?.focus();
 	}
+}
+
+/** A selector that finds the focused list control again after a re-render, or null. */
+function focusedListControl(): string | null {
+	const a = document.activeElement;
+	if (!(a instanceof HTMLElement) || !listEl.contains(a)) return null;
+	const d = a.dataset;
+	if (d.metaCid) return `[data-meta-cid="${CSS.escape(d.metaCid)}"][data-meta-where="list"]`;
+	if (d.unarchiveCid) return `[data-unarchive-cid="${CSS.escape(d.unarchiveCid)}"]`;
+	if (d.filter) return `.chat-filter-btn[data-filter="${CSS.escape(d.filter)}"]`;
+	if (d.cid) return `.chat-conv-row[data-cid="${CSS.escape(d.cid)}"]`;
+	return null;
 }
 
 function renderListInner(): void {
@@ -985,11 +996,13 @@ function convList(items: ConversationSummary[]): HTMLElement {
 		const tools = el("span", "chat-conv-tools");
 		if (isArchived(c) && shown.active) {
 			const un = button("Unarchive", "files-btn chat-conv-unarchive", () => {
+				if (metaBusy.has(c.sessionId)) return;
 				metaFocusWhere = "list";
 				void setArchived(c, false);
 			});
 			un.setAttribute("aria-label", `Unarchive: ${titleOf(c)}`);
-			un.disabled = metaBusy.has(c.sessionId);
+			un.dataset.unarchiveCid = c.sessionId;
+			markBusy(un, c.sessionId);
 			tools.appendChild(un);
 		}
 		tools.appendChild(metaMenuButton(c, "list"));
@@ -1009,12 +1022,39 @@ function metaMenuButton(c: ConversationSummary, where: "list" | "head"): HTMLBut
 	b.title = "Rename or archive";
 	b.setAttribute("aria-label", `Actions: ${titleOf(c)}`);
 	b.setAttribute("aria-haspopup", "menu");
-	b.disabled = metaBusy.has(c.sessionId);
+	// With the metadata unreadable the current name/archive state is unknown: no guessed actions.
+	b.disabled = metaState === "unavailable";
+	if (metaState === "unavailable") b.title = "Names and archive state are unavailable right now";
+	// Busy = aria-disabled, not `disabled`: a disabled button cannot keep the keyboard focus.
+	markBusy(b, c.sessionId);
 	b.addEventListener("click", () => {
+		if (metaBusy.has(c.sessionId)) return;
 		metaFocusWhere = where;
 		openMetaMenu(c.sessionId, b);
 	});
 	return b;
+}
+
+function markBusy(b: HTMLElement, cid: string): void {
+	if (!metaBusy.has(cid)) return;
+	b.setAttribute("aria-disabled", "true");
+	b.classList.add("busy");
+}
+
+/** Back to this conversation's ⋯ where the action started (after any dialog's own focus return). */
+function refocusMeta(cid: string): void {
+	const where = metaFocusWhere;
+	setTimeout(() => {
+		const target =
+			document.querySelector<HTMLElement>(
+				`[data-meta-cid="${CSS.escape(cid)}"][data-meta-where="${where}"]`,
+			) ?? document.querySelector<HTMLElement>(`[data-meta-cid="${CSS.escape(cid)}"]`);
+		if (target && target.offsetParent !== null && !isFocusInDialog()) target.focus();
+	}, 0);
+}
+
+function isFocusInDialog(): boolean {
+	return document.activeElement?.closest(".modal.open") != null;
 }
 
 function openMetaMenu(cid: string, opener: HTMLElement): void {
@@ -1040,7 +1080,10 @@ function openMetaMenu(cid: string, opener: HTMLElement): void {
 		],
 		onPick: (id) => {
 			if (id === "rename") void renameConversation(cid);
-			else if (id === "restore") void applyMeta(cid, { title: null }, "Automatic title restored");
+			else if (id === "restore")
+				void applyMeta(cid, { title: null }, "Automatic title restored").then(
+					(f) => f !== null && showToast(f, true),
+				);
 			else if (id === "archive" || id === "unarchive") void setArchived(c, id === "archive");
 		},
 	});
@@ -1059,6 +1102,8 @@ async function renameConversation(cid: string): Promise<void> {
 		placeholder: auto ?? "Conversation name",
 		initialValue: c.customTitle ?? "",
 		confirmLabel: "Save",
+		// §6.2: a button back to the automatic title, in the dialog itself.
+		alternate: auto ? { label: "Use automatic title", value: "" } : undefined,
 		validate: (v) => (v === "" ? null : titleProblem(v)),
 		// The dialog stays open until the server answered: a refusal is explained where it was typed.
 		onConfirm: (v) =>
@@ -1086,17 +1131,29 @@ async function applyMeta(
 	done: string,
 ): Promise<string | null> {
 	const sid = stateSessionId;
-	if (sid === null || metaBusy.has(cid)) return null;
+	// Never "success" without a request: the rename dialog would close as saved.
+	if (sid === null) return "No session is open.";
+	if (metaBusy.has(cid))
+		return "Another change to this conversation is still in progress. Try again in a moment.";
 	const gen = generation;
 	metaBusy.add(cid);
 	renderList();
+	renderThreadHead();
 	const r = await patchConversationMeta(sid, cid, patch);
-	if (gen !== generation) return null;
+	if (gen !== generation)
+		return "The session changed while saving; check the list of that session.";
 	metaBusy.delete(cid);
 	if (!r.ok) {
 		renderList();
+		renderThreadHead();
+		// The write may have landed: re-read instead of guessing.
+		if (metaOutcomeUnknown(r.status, r.code)) void loadList({ quiet: true });
+		refocusMeta(cid);
 		return explainMetaError(r.status, r.code);
 	}
+	// Recorded whether or not the row is in view (the list may be reloading right now):
+	// a list request that left before this answer must not bring the old state back.
+	metaOverlay.record(r.summary, listReq);
 	const row = rowOf(cid);
 	if (row) {
 		// Only the owner's fields: status/binding come from the capture, and a
@@ -1104,22 +1161,14 @@ async function applyMeta(
 		row.title = r.summary.title;
 		row.customTitle = r.summary.customTitle ?? null;
 		row.archivedAt = r.summary.archivedAt ?? null;
-		metaOverlay.record(r.summary, listReq);
 	}
 	renderSummary();
 	renderThreadHead();
 	renderList();
-	if (announcer) announcer.textContent = `${done}: ${row ? titleOf(row) : ""}`;
+	if (announcer) announcer.textContent = `${done}: ${displayTitle(r.summary)}`;
 	// The list re-rendered under the person's focus: put it back on this conversation's ⋯ where
 	// the action started. A macrotask, so it runs after a dialog's own close/focus-return.
-	const where = metaFocusWhere;
-	setTimeout(() => {
-		const target =
-			document.querySelector<HTMLElement>(
-				`[data-meta-cid="${CSS.escape(cid)}"][data-meta-where="${where}"]`,
-			) ?? document.querySelector<HTMLElement>(`[data-meta-cid="${CSS.escape(cid)}"]`);
-		if (target && target.offsetParent !== null) target.focus();
-	}, 0);
+	refocusMeta(cid);
 	return null;
 }
 

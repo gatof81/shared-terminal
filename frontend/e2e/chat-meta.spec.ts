@@ -196,4 +196,48 @@ test.describe("chat: rename and archive (v1.8 §6.2)", () => {
 		await expect(row(page, "Fix tests")).toHaveCount(1);
 		expect(backend.conversations.find((c) => c.cid === "conv-2")?.archivedAt ?? null).toBeNull();
 	});
+	test("a 500 after the write says it may have been saved and re-reads the list (never 'nothing changed')", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		await openChat(app, page);
+		backend.failNextMetaPatch = { status: 500, error: "Internal server error", afterWrite: true };
+		await menuBtn(page, "conv-2").click();
+		await page.locator('.action-menu [data-action="archive"]').click();
+		await expect(page.locator("#toast .toast-item.error")).toContainText("may have been saved");
+		// The re-read shows what the server actually holds: archived.
+		await expect(row(page, "Fix tests")).toHaveCount(0);
+		await expect(page.locator('.chat-filter-btn[data-filter="archived"]')).toContainText("1");
+	});
+
+	test("while a rename is being saved the dialog cannot be dismissed; 'Use automatic title' is in the dialog", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.conversations.find((c) => c.cid === "conv-2")!.customTitle = "Mío";
+		await openChat(app, page);
+		backend.metaPatchDelayMs = 800;
+		await menuBtn(page, "conv-2").click();
+		await page.locator('.action-menu [data-action="rename"]').click();
+		await expect(page.locator(".dialog-card input")).toHaveValue("Mío");
+		await page.locator(".dialog-card button", { hasText: "Use automatic title" }).click();
+		await page.keyboard.press("Escape");
+		await expect(page.locator(".dialog-card")).toBeVisible();
+		await expect(page.locator(".dialog-card .dialog-cancel")).toBeDisabled();
+		await expect(page.locator(".dialog-card")).toHaveCount(0);
+		await expect(row(page, "Fix tests")).toHaveCount(1);
+		expect(backend.conversations.find((c) => c.cid === "conv-2")?.customTitle).toBeNull();
+	});
+
+	test("a refused 'Restore automatic title' is a visible error", async ({ app, backend, page }) => {
+		backend.conversations.find((c) => c.cid === "conv-2")!.customTitle = "Mío";
+		await openChat(app, page);
+		backend.failNextMetaPatch = { status: 503, error: "meta-unavailable" };
+		await menuBtn(page, "conv-2").click();
+		await page.locator('.action-menu [data-action="restore"]').click();
+		await expect(page.locator("#toast .toast-item.error")).toContainText("could not be saved");
+		await expect(row(page, "Mío")).toHaveCount(1);
+	});
 });

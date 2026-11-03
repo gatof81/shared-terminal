@@ -1791,6 +1791,8 @@ export async function patchConversationMeta(
 	}
 	const body = (await res.json().catch(() => ({}))) as ConversationSummary & { error?: string };
 	if (res.ok && typeof body.sessionId === "string") return { ok: true, summary: body };
+	// A 2xx without a summary confirms nothing (the write may or may not have happened).
+	if (res.ok) return { ok: false, status: res.status, code: "unconfirmed" };
 	return { ok: false, status: res.status, code: typeof body.error === "string" ? body.error : "" };
 }
 

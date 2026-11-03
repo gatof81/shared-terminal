@@ -9,6 +9,7 @@ import {
 	filterCounts,
 	inFilter,
 	MetaOverlay,
+	metaOutcomeUnknown,
 	readFilter,
 	titleProblem,
 	writeFilter,
@@ -111,8 +112,22 @@ describe("words", () => {
 		] as const) {
 			const m = explainMetaError(status, code);
 			expect(m.length).toBeGreaterThan(10);
-			expect(m).not.toMatch(/saved\b(?! right now)/i);
+			// Never a claim of success: "saved" only as "could not be saved" or "may have been saved".
+			expect(m).not.toMatch(/(?<!be |been )saved\b/i);
 		}
-		expect(explainMetaError(0, "network")).toMatch(/Nothing was confirmed/);
+		// A write may have landed: never "nothing changed" for those.
+		for (const [status, code] of [
+			[0, "network"],
+			[200, "unconfirmed"],
+			[500, ""],
+			[502, "x"],
+		] as const) {
+			expect(metaOutcomeUnknown(status, code)).toBe(true);
+			expect(explainMetaError(status, code)).toMatch(/may have been saved/);
+			expect(explainMetaError(status, code)).not.toMatch(/Nothing changed/);
+		}
+		// An explicit "could not store" is a definite refusal.
+		expect(metaOutcomeUnknown(503, "meta-unavailable")).toBe(false);
+		expect(metaOutcomeUnknown(400, "invalid-title")).toBe(false);
 	});
 });

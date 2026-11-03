@@ -43,6 +43,12 @@ export interface DialogOptions {
 	initialFocus?: () => HTMLElement | null | undefined;
 	/** Escape closes the dialog. Default true. */
 	closeOnEscape?: boolean;
+	/**
+	 * Consulted before a dismissal by the person (Escape, ×, backdrop,
+	 * Cancel); false keeps the dialog open. Programmatic `close()` and a
+	 * parent closing underneath are not affected. Default: always allowed.
+	 */
+	canDismiss?: () => boolean;
 }
 
 export interface Dialog {
@@ -152,6 +158,12 @@ document.addEventListener("keydown", (e) => {
 	if (!t) return;
 	if (e.key === "Escape") {
 		if (t.dialog.opts.closeOnEscape === false) return;
+		if (t.dialog.opts.canDismiss && !t.dialog.opts.canDismiss()) {
+			// Consumed, so no other layer closes with this keypress either.
+			e.preventDefault();
+			e.stopImmediatePropagation();
+			return;
+		}
 		// One Escape, one layer. The dialog is closed synchronously here,
 		// so a later document listener (the mobile sidebar drawer in
 		// main.ts) would find no dialog open and close ITS layer with the
@@ -207,7 +219,9 @@ class DialogImpl implements Dialog {
 		el.addEventListener("click", (e) => {
 			const target = e.target;
 			if (!(target instanceof Element)) return;
-			if (target.closest("[data-close-modal]")) this.close();
+			if (!target.closest("[data-close-modal]")) return;
+			if (this.opts.canDismiss && !this.opts.canDismiss()) return;
+			this.close();
 		});
 	}
 
@@ -300,8 +314,15 @@ export interface PromptOptions {
 	 * buttons are disabled meanwhile): resolve null to close with the value,
 	 * or a message to show inline and keep the dialog open — so a server's
 	 * refusal is explained where the person typed, and nothing is lost.
+	 * While it runs the dialog cannot be dismissed (Escape, ×, backdrop,
+	 * Cancel), so its outcome is never shown into a removed dialog.
 	 */
 	onConfirm?: (value: string) => Promise<string | null>;
+	/**
+	 * A secondary button that submits a fixed value without validation
+	 * (e.g. "Use automatic title" = ""), through the same onConfirm path.
+	 */
+	alternate?: { label: string; value: string };
 }
 
 let dialogSeq = 0;
@@ -462,11 +483,50 @@ export function promptDialog(opts: PromptOptions): Promise<string | null> {
 		b.body.append(field, error);
 		let result: string | null = null;
 		let pending = false;
+		const closeX = b.root.querySelector<HTMLButtonElement>(".modal-close");
 		const showError = (problem: string) => {
 			error.textContent = problem;
 			error.hidden = false;
 			input.focus();
 		};
+		const setPending = (on: boolean) => {
+			pending = on;
+			for (const btn of [b.confirmBtn, b.cancelBtn, closeX, altBtn]) if (btn) btn.disabled = on;
+			if (on) b.form.setAttribute("aria-busy", "true");
+			else b.form.removeAttribute("aria-busy");
+		};
+		const confirm = (value: string) => {
+			if (!opts.onConfirm) {
+				result = value;
+				dialog.close();
+				return;
+			}
+			setPending(true);
+			void opts
+				.onConfirm(value)
+				.catch((err: unknown) =>
+					err instanceof Error && err.message ? err.message : "Something went wrong",
+				)
+				.then((failure) => {
+					setPending(false);
+					if (failure !== null) {
+						showError(failure);
+						return;
+					}
+					result = value;
+					dialog.close();
+				});
+		};
+		let altBtn: HTMLButtonElement | null = null;
+		if (opts.alternate) {
+			const alt = opts.alternate;
+			altBtn = el("button", "dialog-alternate", alt.label);
+			altBtn.type = "button";
+			altBtn.addEventListener("click", () => {
+				if (!pending) confirm(alt.value);
+			});
+			b.actions.insertBefore(altBtn, b.actions.firstChild);
+		}
 		b.form.addEventListener("submit", (e) => {
 			e.preventDefault();
 			if (pending) return;
@@ -476,28 +536,7 @@ export function promptDialog(opts: PromptOptions): Promise<string | null> {
 				showError(problem);
 				return;
 			}
-			if (!opts.onConfirm) {
-				result = value;
-				dialog.close();
-				return;
-			}
-			pending = true;
-			b.confirmBtn.disabled = true;
-			b.form.setAttribute("aria-busy", "true");
-			void opts
-				.onConfirm(value)
-				.catch((err: unknown) => (err as Error).message || "Something went wrong")
-				.then((failure) => {
-					pending = false;
-					b.confirmBtn.disabled = false;
-					b.form.removeAttribute("aria-busy");
-					if (failure !== null) {
-						showError(failure);
-						return;
-					}
-					result = value;
-					dialog.close();
-				});
+			confirm(value);
 		});
 		input.addEventListener("input", () => {
 			error.hidden = true;
@@ -505,6 +544,7 @@ export function promptDialog(opts: PromptOptions): Promise<string | null> {
 		document.body.appendChild(b.root);
 		const dialog = createDialog(b.root, {
 			initialFocus: () => input,
+			canDismiss: () => !pending,
 			onClose: () => {
 				b.root.remove();
 				resolve(result);
