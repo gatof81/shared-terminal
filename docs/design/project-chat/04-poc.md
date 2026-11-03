@@ -1138,7 +1138,7 @@ GO/NO-GO final:
 
 Con un FAIL en B0, el diseño basado en el pid queda descartado y se pasa directamente a §1.14.7.
 
-#### 1.14.9 Prototipo PASS-B0 y procedimiento (kit `poc/channels-phase0@5d293cf`; **no ejecutado**)
+#### 1.14.9 Prototipo PASS-B0 y procedimiento (kit `poc/channels-phase0@d224ebe`; **no ejecutado**)
 
 **Decisiones del responsable (2026-11-03):**
 - **GO** para el prototipo y su implementación.
@@ -1159,6 +1159,20 @@ Con un FAIL en B0, el diseño basado en el pid queda descartado y se pasa direct
 - **A6:** el HMAC autentica la posesión de K, no que la llamada haya salido de nuestro mod.
 - **H-ND** es un experimento de B1.
 
+**Estado de la autorización (2026-11-03, tercera revisión):** diseño general aprobado. **GO
+limitado** al paso 0 y a `preflight` en VM100. `setup`, `servers`, `measure`, `capture`,
+`validate` y `cleanup` de una corrida real siguen **sin autorizar**. Si `preflight` sale con 3
+porque la imagen trae 2.1.308, se detiene ahí: la preferida es la alternativa A, pero su build
+tampoco está autorizado.
+
+**Correcciones de la tercera revisión (`d224ebe`):**
+
+| # | Pedido | Cómo quedó |
+| --- | --- | --- |
+| 7 | `cleanup` no puede destruir evidencia sin copia | `capture.attempted` ya no alcanza. `cleanup` borra el contenedor sólo con **uno** de tres fundamentos, y lo registra en `results/removal.json`: **`captured`**, si `state/capture.ok` existe, el manifiesto está completo y `results/` **todavía** verifica contra `SHA256SUMS`; **`no-evidence`**, si un `exec` en el contenedor prueba que ni `/tmp/passb0` ni `~/passb0-ws/.passb0/out` tienen archivos (un `exec` que falla, por ejemplo con el contenedor detenido, **no** prueba ausencia); o **`discard-authorized`**, si exportaste `B0_DISCARD_EVIDENCE=<id completo de ese contenedor>`. Un valor que no coincide se ignora. En cualquier otro caso, incluida una captura parcial, sale con 66 y no toca el contenedor. Una nueva corrida de `capture` que falla retira el `capture.ok` anterior |
+| 8 | Versión exacta en `capture` | El ítem `cli-version-after` exige exactamente `2.1.314` y persiste `results/cli-version-after.json` (`version`, `expected`, `match`). `setup` persiste también `cli-version-before.json`. Ambos están en el manifiesto, así que una discrepancia deja la captura incompleta (salida 4). El analizador exige `2.1.314` en `preflight.json`, antes y después: si falta o difiere, da INCONCLUSIVE (`cli-version-unverified:*` / `cli-version-mismatch:*`) y nunca PASS |
+| 9 | Cotejo del ID | `setup` exige que `docker run` devuelva un id de 64 hex y que el nombre resuelva a ese id. `cleanup` borra sólo un contenedor cuya etiqueta, nombre **e** id coincidan con `state/container_id`. Sin ese archivo o con otro id, no lo toca y sale con 67 |
+
 **Correcciones de la segunda revisión (`5d293cf`):**
 
 | # | Pedido | Cómo quedó |
@@ -1170,14 +1184,15 @@ Con un FAIL en B0, el diseño basado en el pid queda descartado y se pasa direct
 | 5 | Hashes | El paso 0 verifica los **13** archivos publicados (`sha256sum -c --strict`) **y** que la lista de `poc/passb0/` sea exactamente esa, sin archivos extra ni faltantes |
 | 6 | Límites y limpieza | `setup` no confía en los flags: compara con `docker inspect` lo que Docker **aplicó** (`checklimits`): etiqueta, usuario, 2 GiB sin swap extra, 1 CPU, 256 PIDs, `CapDrop ALL` sin `CapAdd`, `no-new-privileges`, no privilegiado, red `bridge`, sin namespaces del host, exactamente dos montajes de solo lectura, ningún `docker.sock`. Cualquier diferencia ⇒ falla. `cleanup` es idempotente y funciona tras fallos parciales: detiene el servidor por identidad, borra sólo el contenedor con **la etiqueta y el nombre** de esta corrida (`-v`), verifica que no quede ninguno, que la imagen no cambió y que `run/` quedó vacío. No borra `held-h.json` sin una copia idéntica en `results/`, ni el socket sin el servidor probadamente detenido. Registra `cleanup.json` |
 
-**Tests sintéticos** (en desarrollo; también pasan sobre la copia descargada por SHA):
+**Tests sintéticos** (en desarrollo; también pasan sobre la copia descargada por SHA de `d224ebe`):
 - `test_b0.py`, 22 tests: los 17 anteriores, más:
   - `stop`: proceso verificado detenido y socket borrado; idempotencia; rechazo por
     `starttime`, `cmdline` o uid distintos sin señalar; proceso muerto u otro boot;
   - `imageversion`;
   - `checklimits`, con 11 desvíos.
-- `test_analyze.py`: 40 mutaciones; las nuevas son captura incompleta y manifiesto ausente.
-- `test_runner.py`, 19 tests con un `docker` falso y un servidor del host real:
+- `test_analyze.py`: 46 mutaciones. Las de la segunda revisión son captura incompleta y manifiesto
+  ausente; las de la tercera, versión distinta o ausente en `preflight`, antes y después.
+- `test_runner.py`, 30 tests con un `docker` falso y un servidor del host real:
   - `preflight` sin escrituras; STOP con 2.1.308, con versión desconocida, con userns y con
     restos de otra corrida;
   - cada fase exige la marca anterior;
@@ -1188,30 +1203,39 @@ Con un FAIL en B0, el diseño basado en el pid queda descartado y se pasa direct
   - no señala con una identidad distinta;
   - captura incompleta ⇒ evidencia conservada e INCONCLUSIVE;
   - captura después de un `setup` fallido;
-  - `cleanup` se niega antes de la captura;
   - no toca un contenedor ajeno;
-  - conserva `held-h.json` sin copia.
+  - conserva `held-h.json` sin copia;
+  - tercera revisión: `cleanup` se niega (66) con evidencia y sin captura, tras una captura
+    parcial, con el contenedor detenido (no puede mirar adentro), con `capture.ok` pero
+    `results/` modificado y con `B0_DISCARD_EVIDENCE` de otro id; borra con el id exacto
+    (`discard-authorized`) y un contenedor vacío (`no-evidence`); no borra (67) sin
+    `state/container_id` o con otro id; `setup` falla si el nombre apunta a otro id; `capture`
+    falla con 2.1.315 después de la corrida y lo persiste; una nueva captura fallida retira
+    `capture.ok`.
 - `probe.test.mjs`: los 10 tests del mod.
 - Verificación por mutación: quitar la marca previa, la comparación de `starttime` o `errexit`
-  hace fallar los tests correspondientes.
+  hace fallar los tests correspondientes. En la tercera revisión, también: quitar el cotejo de id,
+  el `sha256sum -c` de `cleanup`, la igualdad exacta de versión, el retiro de `capture.ok`, el id
+  en `B0_DISCARD_EVIDENCE`, tratar un `exec` fallido como "sin evidencia" o el cotejo nombre→id de
+  `setup`.
 - `claude plugin validate` (2.1.314): ✔.
 
 **Hashes publicados** (verificados sobre la descarga de GitHub por SHA; los 13 dan `OK` y la lista
 es idéntica):
 ```
-b4db38fe56e6913c08d4ead45ed1ff194c698a3b0b23c9b12ab05fdf85fe40c6  analyze.py
-c3b368f0a764b0dcf4d95d97f3829197668e93875953b3e6422a4ccd840d22fe  b0.py
+7cad57fdd43e4b8a71ab0e7db31fa0c8bfda4b5b398bca1a6dac8f6fc1c1bbac  analyze.py
+4539a7fc25b7d4e7f09c92f951c578a743d2890b5b84c6e3728368205c6fd92d  b0.py
 c77dcffd3df92dead59e05482a3c2b0c935e9b279830a71ba199f49096bc1767  mod/.claude-plugin/plugin.json
 d87f4cbc7a53b0d733c13dd4c7f81e49d7ede3b21163e0d64e2234176d43100d  mod/hooks/hooks.json
 7dc6f559e44df194adcaa7d1e13dfb7857fd7e16195680069f0caf6d9bccfe2e  mod/hooks/probe.mjs
 47aa77c452e02165e542f5067ead5aebb89aae3a46f6f7e28fca971eca43735c  mod/hooks/register.mjs
-243ea238a943282c537950e3dd1a557de4e4f1adadc4e7e8ae56d794505490bc  README.md
-57d58a8e162ba9af875ae51bedc7c2f6dcbb3830793d1d5f72bedf5e36e89a7b  run-b0.sh
-47c0cef6ee9f81340af0bf9b61dbc348b840a96f484e7caac9f98aead166406d  test/fakebin/docker
+d25be34dbe1928b9cdb1639c8488785b5f2d5c106d0faab90b8a37ef8d65109d  README.md
+9006cc347a90e81faf971bc5b5df9ad496112f99d3e30f69d96db115af0ae781  run-b0.sh
+ac1e593a088b32a4d4245c385dc3693207ebb8275289bf6b76b5c6b7ee367209  test/fakebin/docker
 0cbcde02beb60b70fc6f4e06783edacafa2ad7931100932ab2a664e14d23fa7e  test/probe.test.mjs
-6869c13d0950073ed02ddde885363a372e8b0f6b04e84aaa100e41e2e8145c49  test/test_analyze.py
+fdf4e0bbe5b37a57f59fcf68d45083dec774599e54710f4212d419bd378ee40d  test/test_analyze.py
 afa103846fee5445d4bbb1dec3338491354943cdd253203f87320e45b0904bce  test/test_b0.py
-25cc26e6c88ec0ebd81c6403386b3640a843adb12ae2ef4f3d5ce355a35447ef  test/test_runner.py
+119028ca34b0bdf6a87b26296c45ceae4b7ce23bbe84b31f939aed831ca0b7f2  test/test_runner.py
 ```
 
 **Operaciones privilegiadas en VM100** (ninguna usa `sudo`; si tu usuario necesita `sudo` para
@@ -1223,7 +1247,7 @@ Docker, se exporta `B0_DOCKER_SUDO=1` y el runner usa `sudo -n docker` sólo en 
 | P2 | `docker run -d` de `passb0-exp-<STAMP>` | `setup` | Una vez. Límites verificados después con `docker inspect` (#6). `sleep 3600`: se detiene solo a la hora |
 | P3 | `docker exec -u developer` (también `-d` para el servidor interno y `-it` para el CLI) | `setup` … `capture` | Nunca `-u root` |
 | P4 | `docker cp` del contenedor al host | `capture` | Hechos, archivos del mod y sólo las líneas del debug log que nombran el plugin o el guard |
-| P5 | `docker rm -f -v` | `cleanup` | Sólo si la etiqueta `passb0.experiment` **y** el nombre coinciden con esta corrida |
+| P5 | `docker rm -f -v` | `cleanup` | Sólo si la etiqueta `passb0.experiment`, el nombre **y** el id de `state/container_id` coinciden con esta corrida, y con un fundamento registrado: `captured`, `no-evidence` o `discard-authorized` (#7) |
 | P6 | El servidor del host (`nohup python3 -I`) como **tu usuario**, y su `stop` por pidfd | `servers`, `cleanup` | Socket en `~/passb0-<STAMP>/run/`. Se apaga solo a los 3000 s. Sólo recibe la señal si la identidad coincide |
 
 **No hace:**
@@ -1251,7 +1275,7 @@ de ese tag, comprobando su ID). Esto se agrega sólo si lo autorizás.
 ```bash
 # Paso 0: carpeta nueva, kit por SHA, los 13 hashes y la lista exacta, env. Se ejecuta como un script.
 bash -euo pipefail -s <<'STEP0'
-COMMIT=5d293cf6729f887d589417b3699ce0c1cdfd44f9
+COMMIT=d224ebea037ed8e728a7a257b0e94def9492e723
 STAMP=$(date +%Y%m%d-%H%M%S)
 BASE=$HOME/passb0-$STAMP
 test ! -e "$BASE"
@@ -1259,19 +1283,19 @@ mkdir -m 0700 "$BASE"; mkdir -m 0700 "$BASE/kit" "$BASE/results"; mkdir -m 0755 
 gh api "repos/gatof81/shared-terminal/tarball/$COMMIT" > "$BASE/kit.tgz"   # sin gh: copiá el .tgz del mismo SHA
 tar xzpf "$BASE/kit.tgz" -C "$BASE/kit" --strip-components=1                  # -p: modos 0644/0755 legibles por uid 1000
 cat > "$BASE/kit.sha256" <<'SUMS'
-b4db38fe56e6913c08d4ead45ed1ff194c698a3b0b23c9b12ab05fdf85fe40c6  analyze.py
-c3b368f0a764b0dcf4d95d97f3829197668e93875953b3e6422a4ccd840d22fe  b0.py
+7cad57fdd43e4b8a71ab0e7db31fa0c8bfda4b5b398bca1a6dac8f6fc1c1bbac  analyze.py
+4539a7fc25b7d4e7f09c92f951c578a743d2890b5b84c6e3728368205c6fd92d  b0.py
 c77dcffd3df92dead59e05482a3c2b0c935e9b279830a71ba199f49096bc1767  mod/.claude-plugin/plugin.json
 d87f4cbc7a53b0d733c13dd4c7f81e49d7ede3b21163e0d64e2234176d43100d  mod/hooks/hooks.json
 7dc6f559e44df194adcaa7d1e13dfb7857fd7e16195680069f0caf6d9bccfe2e  mod/hooks/probe.mjs
 47aa77c452e02165e542f5067ead5aebb89aae3a46f6f7e28fca971eca43735c  mod/hooks/register.mjs
-243ea238a943282c537950e3dd1a557de4e4f1adadc4e7e8ae56d794505490bc  README.md
-57d58a8e162ba9af875ae51bedc7c2f6dcbb3830793d1d5f72bedf5e36e89a7b  run-b0.sh
-47c0cef6ee9f81340af0bf9b61dbc348b840a96f484e7caac9f98aead166406d  test/fakebin/docker
+d25be34dbe1928b9cdb1639c8488785b5f2d5c106d0faab90b8a37ef8d65109d  README.md
+9006cc347a90e81faf971bc5b5df9ad496112f99d3e30f69d96db115af0ae781  run-b0.sh
+ac1e593a088b32a4d4245c385dc3693207ebb8275289bf6b76b5c6b7ee367209  test/fakebin/docker
 0cbcde02beb60b70fc6f4e06783edacafa2ad7931100932ab2a664e14d23fa7e  test/probe.test.mjs
-6869c13d0950073ed02ddde885363a372e8b0f6b04e84aaa100e41e2e8145c49  test/test_analyze.py
+fdf4e0bbe5b37a57f59fcf68d45083dec774599e54710f4212d419bd378ee40d  test/test_analyze.py
 afa103846fee5445d4bbb1dec3338491354943cdd253203f87320e45b0904bce  test/test_b0.py
-25cc26e6c88ec0ebd81c6403386b3640a843adb12ae2ef4f3d5ce355a35447ef  test/test_runner.py
+119028ca34b0bdf6a87b26296c45ceae4b7ce23bbe84b31f939aed831ca0b7f2  test/test_runner.py
 SUMS
 cd "$BASE/kit/poc/passb0"
 sha256sum -c --strict --quiet "$BASE/kit.sha256"
@@ -1288,6 +1312,16 @@ STEP0
 BASE=~/passb0-AAAAMMDD-HHMMSS
 R() { bash "$BASE/kit/poc/passb0/run-b0.sh" "$BASE" "$1"; echo "fase $1: salida=$?"; }
 R preflight     # solo lectura; salida 3 = STOP por versión (ver alternativas)
+```
+**Hasta acá llega el GO limitado.** Después de `preflight`, mandame su salida completa (la
+última línea es `fase preflight: salida=N`) y `cat "$BASE/results/preflight.json"`: kernel,
+`ptrace_scope`, los 12 primeros hex del id de imagen y la versión. `preflight` no crea
+contenedores ni redes y no cambia nada; deja sólo `state/preflight.ok`, `state/image_id` y
+`results/preflight.json` (si sale con otro código, ni eso). No hay nada que limpiar: si no
+seguimos, `rm -rf "$BASE"` lo borra todo.
+
+Lo que sigue necesita la autorización final:
+```bash
 R setup         # P2: crea el contenedor y verifica lo que Docker aplicó y la versión adentro
 R servers       # P3 y P6: servidor interno y del host, con identidad
 ```
@@ -1313,13 +1347,20 @@ R capture       # salida 4 = captura incompleta: la evidencia queda; sigue valid
 R validate      # imprime report.json; salida 0 sólo con PASS
 R cleanup       # idempotente; repetila hasta "OK: cleanup" o mandame su salida
 ```
+Si `cleanup` sale con **66**, el contenedor puede tener evidencia sin copia verificada y no se
+borró. Primero repetí `R capture`. Si la captura sigue incompleta y decidís descartar lo que
+quede adentro, autorizalo para **ese** contenedor:
+`B0_DISCARD_EVIDENCE=$(cat "$BASE/state/container_id") R cleanup`. Queda registrado en
+`results/removal.json` como `discard-authorized`. Una salida **67** dice qué quedó sin limpiar
+(un contenedor que no coincide con `state/container_id`, un servidor sin identidad, un
+`held-h.json` sin copia) y no se resuelve sola: mandame la salida.
 Si algo falló antes de `measure`, corré `R capture` y `R cleanup`. Si falló `preflight`, no
 se creó nada.
 
 Quedan **siempre**:
 - `$BASE/kit` y `$BASE/kit.tgz`;
-- `$BASE/results`, con `report.json`, `capture-manifest.json`, `cleanup.json` y
-  `SHA256SUMS`;
+- `$BASE/results`, con `report.json`, `capture-manifest.json`, `cli-version-before.json`,
+  `cli-version-after.json`, `removal.json`, `cleanup.json` y `SHA256SUMS`;
 - `$BASE/state`.
 
 Mandame `report.json`: tiene alias y booleanos.
@@ -1327,6 +1368,8 @@ Mandame `report.json`: tiene alias y booleanos.
 **Criterios** (`analyze.py`):
 - **PASS** sólo si se cumple todo esto:
   - la captura está completa;
+  - la versión del CLI es exactamente 2.1.314 en `preflight`, en `setup` y después de la
+    corrida;
   - el mod cargó una vez, con `seq` contiguo y `done`;
   - hay exactamente un proceso del CLI;
   - las cinco llamadas dieron 200, cada una ligada a **una** conexión por token y nonce;
