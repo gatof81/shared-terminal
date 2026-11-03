@@ -270,6 +270,85 @@ alternativa no usada.
   desconocidos durante las series.
 - **Criterios**: el veredicto aplica la tabla de §1.7 sin cambios; G1–G12 de §5 no se tocan.
 
+### 1.10 Resultado de la prueba instrumentada T (2026-11-03)
+
+Prueba única autorizada en §1.9, id `P0T01-f9dfb6`, en la sesión del responsable con **Claude Code
+2.1.317** (no 2.1.314: la sesión habitual se auto-actualiza; R9 rige para las sesiones de agente, no
+para esta fase). No cuenta entre las 12 muestras. Cronología reconstruida de los registros
+existentes con la extracción redactada X0 (sin texto):
+
+| Tiempo desde el envío | Evento | `prompt_id` |
+| --- | --- | --- |
+| −32 s … 0 | inactividad **observada** (32 s) | — |
+| +0,05 s | único `UserPromptSubmit`: una etiqueta `<channel>`, sin texto fuera; atributos `source`, `chat_id`, `message_id`, `user`, `ts`; `message_id` = id enviado; campo `source` del hook **ausente** | P1 |
+| +70,18 s | `PostToolUse` de `reply` de Fakechat, respuesta exacta (vista en el WebSocket a +70,14 s) | P1 |
+| +72,75 s | único `Stop` | P1 |
+| +132,81 s | `Notification` `idle_prompt`, posterior al cierre del turno | — |
+
+No hay otros `UserPromptSubmit` ni `Stop` en la ventana analizada.
+
+**A4/A5 fallaron por un defecto del harness, no por eventos ajenos** (lo encontró el responsable):
+`send.mjs` volvía a parsear `hooks.jsonl` en cada lectura y comparaba con `!==` objetos de lecturas
+distintas, así que el propio `UserPromptSubmit` y el propio `Stop` se contaban como ajenos.
+Corrección en `poc/channels-phase0@5686b65`: la identidad de un evento es su **línea absoluta** en el
+JSONL (append-only); dos eventos distintos con el mismo `prompt_id` siguen siendo dos, y un `Stop`
+duplicado del mismo `prompt_id` **sigue fallando A5** (R8 exige un único `turn_end`). Tests de
+regresión: lecturas independientes, un solo prompt/`Stop`, `Stop` duplicado, prompt realmente
+ajeno, línea a medio escribir. `rediagnose.mjs` recalcula un envío desde los registros existentes
+sin modificarlos.
+
+**Diagnóstico recalculado de T:**
+
+| Dimensión | Resultado |
+| --- | --- |
+| Recepción por el CLI | sí |
+| Despertar sin intervención (§1.7) | **observado** (sin otros prompts ni diálogo de permiso; `idle_prompt` no es un diálogo) |
+| Flujo bidireccional (mensaje → turno → `Stop` → respuesta en Fakechat) | **observado** |
+| Correlación A1–A5 + `Stop` del mismo `prompt_id` + `message_id` | OK |
+| Campo `source` del hook | **ausente** |
+| Prueba individual | **no limpia**: falta `source=system` |
+| G3 en 2.1.317 | **no se cumple**: por G3 (§5), esa versión no entra en `CHANNEL_CLI_VERSIONS` |
+
+**`source` en el binario (análisis estático, sin ejecutar):** en 2.1.314 (instalado en el host de
+desarrollo) y en 2.1.317 (`@anthropic-ai/claude-code-darwin-arm64@2.1.317`, Mach-O arm64,
+`shasum` igual al del registro npm, `VERSION:"2.1.317"`), los **dos** únicos constructores del
+payload de `UserPromptSubmit` dejan vacío el lugar del campo:
+
+    hook_event_name:"UserPromptSubmit",prompt:r,...!1,session_title:…
+    hook_event_name:"UserPromptSubmit",prompt:e,...!1,session_title:…
+
+`...!1` expande un `false` literal: el esquema declara `source` ("Payloads may omit it while the
+field rolls out"), pero el hook de comando **nunca** lo recibe, sea cual sea el origen. Coincide con
+[anthropics/claude-code#94675](https://github.com/anthropics/claude-code/issues/94675) (abierto;
+ausente de 2.1.273 a 2.1.316 según sus comentarios). Internamente el CLI sí conoce el origen
+(`origin:{kind:"channel",server}` al encolar, C2) y lo escribe en el transcript, no en el hook.
+El atributo `source` de `<channel>` es texto del prompt: **no** es evidencia de origen.
+
+**Los 50 ms frente a los 70 s:** el hook se dispara al enviarse el prompt encolado, antes de
+cualquier llamada al modelo; mide la entrega. Los 70 s son la duración del turno hasta la llamada a
+`reply`, dentro de un único turno sin otros eventos de hook en medio; los registros redactados no
+determinan la causa (en §1.8 la respuesta tardó 3–7 s). No afecta al despertar ni a la correlación;
+la latencia sigue siendo una dimensión que la POC completa mide.
+
+**Hallazgo para R8 (sin cambiar R8):** en 2.1.314 y 2.1.317 el `Stop` de comando sale por dos
+caminos (fin bloqueable del turno y fin de turno por resultado de herramienta, fin MCP o *loop
+tick*), con el mismo payload y sin motivo. En T hubo uno solo; un duplicado haría fallar A5.
+
+**Alternativas técnicas para el origen verificable (no elegidas; G3 no cambia):**
+
+| | Alternativa | Qué aporta | Riesgo o costo | Verificación mínima |
+| --- | --- | --- | --- | --- |
+| A | Metadatos del transcript (`origin.kind = "channel"`, `promptSource`, `promptId`) | Escritos por el CLI; teclear texto no los produce | Formato interno sin documentar; momento de escritura respecto del hook; leer el transcript sólo por metadatos | Extraer esos campos del transcript de T (registros existentes) y comparar `promptId` con el `prompt_id` del hook |
+| B | Hook de función de mods `prompt.submit` | Puede recibir `isMeta`/origen | Acceso anticipado; habilitación por managed settings (posible choque con R6); presencia del origen sin verificar | Inspección estática del binario |
+| C | Esperar la corrección de #94675 | El `source` que pide G3 | Fecha desconocida; versión nueva validada por R9 | Inspección estática (desaparece `...!1`) y luego una prueba T |
+| D | Sesiones headless stream-json (`origin` en `result`) | Origen tipado | Cambia la arquitectura (agentes interactivos en tmux) | Diseño aparte |
+
+Descartadas por no cumplir G3 tal como está escrito: un nonce de nuestro servidor (prueba posesión
+del token, no origen) y `asyncRewake` (R2), que también llega como prompt sin `source`.
+
+**Estado:** las 12 muestras **no** están autorizadas; G1–G12 y R8 sin cambios. La alternativa A
+se evalúa primero con los registros existentes antes de proponer un experimento específico.
+
 ## 2. Versiones
 
 | Variante | CLI | Motivo |
