@@ -1,0 +1,1 @@
+{"name":"st-passb0-probe","version":"0.0.1","description":"PASS-B0: measures which process a Unix-socket $.http.fetch reaches a server as. Writes facts only, never text.","author":{"name":"Shared Terminal POC"}}
