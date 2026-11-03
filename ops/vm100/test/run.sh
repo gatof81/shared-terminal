@@ -76,13 +76,15 @@ side=$(git -C "$up" rev-parse HEAD)
 git -C "$up" checkout -q main
 git -C "$up" -c user.name=t -c user.email=t@t merge -q --no-ff side -m merge
 merged=$(git -C "$up" rev-parse HEAD)
-mkdir -p "$up/docs" && echo d >"$up/docs/x.md" && echo r >"$up/README.md" && git -C "$up" add -A && gcommit -m docs
+mkdir -p "$up/docs" && echo d >"$up/docs/x.md" && echo r >"$up/README.md" && git -C "$up" add -A && gcommit -m $'docs \e[31mred\a'
 docs=$(git -C "$up" rev-parse HEAD)
 printf 'MIGRATIONS = [\n\t{ version: 17 },\n\t{ version: 18 },\n]\n' >"$up/backend/src/db.ts" && git -C "$up" add -A && gcommit -m mig
 mig=$(git -C "$up" rev-parse HEAD)
 # Each of these is refused by the v1 allowlist (and so is everything after it, whose diff from base includes it).
 echo "FROM y" >"$up/Dockerfile" && git -C "$up" add -A && gcommit -m dockerfile
 dockerfile=$(git -C "$up" rev-parse HEAD)
+git -C "$up" mv Dockerfile docs/old-Dockerfile && gcommit -m rename
+renamed=$(git -C "$up" rev-parse HEAD)
 git clone -q "$up" "$T/st"
 git -C "$T/st" checkout -q --detach "$base"
 
@@ -90,7 +92,8 @@ cat >"$ST_OPS_ETC/deploy.conf" <<EOF
 REPO_URL=https://github.com/example/shared-terminal.git
 ST_DIR=$T/st
 COMPOSE_PROJECT=shared-terminal
-REQUIRED_CHECKS="Backend (tsc + vitest)|Cloudflare Pages"
+REQUIRED_WORKFLOW=.github/workflows/ci.yml
+REQUIRED_CHECKS="Backend (tsc + vitest)|Frontend (tsc + vite build)"
 REQUEST_TTL=7200
 MIN_FREE_KIB=1
 EOF
@@ -105,25 +108,42 @@ lib() {
 			[[ -d $ST_OPS_STATE/mirror.git ]] || git init -q --bare "$ST_OPS_STATE/mirror.git"
 			git -C "$ST_OPS_STATE/mirror.git" fetch -q --no-tags "$up" '+refs/heads/main:refs/heads/main'
 		}
-		fetch_check_runs() { cat "$T/checks.json"; }
+		fetch_workflow_runs() { sed "s/@SHA@/$1/g" "$T/runs.json"; }
+		fetch_check_runs() { sed "s/@SHA@/$1/g" "$T/checks.json"; }
 		systemd-run() { echo "systemd-run $*" >>"$T/systemd-run.log"; }
 		systemctl() { :; }
 		app_container() { :; }
 		as_owner_of_checkout() { "$@"; }
+		# The running image's label, when the test says there is one ($T/label); otherwise the checkout's HEAD.
+		deployed_info() {
+			if [[ -s $T/label ]]; then echo "$(cat "$T/label") image-label"; else echo "$(git -C "$ST_DIR" rev-parse HEAD) checkout-head"; fi
+		}
 		# shellcheck source=../lib/st-ops-deploy.sh
 		source "$here/lib/st-ops-deploy.sh"
 		"$@"
 	)
 }
-checks() { # $1 = backend conclusion, $2 = pages app slug
+# CI fixture: the push run of ci.yml on main for the SHA (suite 500) and its check-runs.
+ci_fixture() { # $1 = run conclusion, $2 = backend check conclusion, $3 = spoof yes|no, $4 = event, $5 = branch
+	cat >"$T/runs.json" <<EOF
+{"workflow_runs":[
+ {"id":10,"run_attempt":1,"path":".github/workflows/ci.yml","event":"${4:-push}","head_branch":"${5:-main}","head_sha":"@SHA@","status":"completed","conclusion":"$1","check_suite_id":500},
+ {"id":11,"run_attempt":1,"path":".github/workflows/evil.yml","event":"push","head_branch":"main","head_sha":"@SHA@","status":"completed","conclusion":"success","check_suite_id":999}
+]}
+EOF
+	local spoof=""
+	[[ ${3:-no} == yes ]] && spoof=',
+ {"id":9,"name":"Backend (tsc + vitest)","head_sha":"@SHA@","status":"completed","conclusion":"success","started_at":"2026-11-03T12:00:00Z","app":{"slug":"github-actions"},"check_suite":{"id":999}},
+ {"id":8,"name":"Frontend (tsc + vite build)","head_sha":"@SHA@","status":"completed","conclusion":"success","started_at":"2026-11-03T12:00:00Z","app":{"slug":"github-actions"},"check_suite":{"id":999}}'
 	cat >"$T/checks.json" <<EOF
 {"check_runs":[
- {"id":1,"name":"Backend (tsc + vitest)","status":"completed","conclusion":"failure","started_at":"2026-11-03T10:00:00Z","app":{"slug":"github-actions"}},
- {"id":2,"name":"Backend (tsc + vitest)","status":"completed","conclusion":"$1","started_at":"2026-11-03T11:00:00Z","app":{"slug":"github-actions"}},
- {"id":3,"name":"Cloudflare Pages","status":"completed","conclusion":"success","started_at":"2026-11-03T11:00:00Z","app":{"slug":"$2"}}
+ {"id":1,"name":"Backend (tsc + vitest)","head_sha":"@SHA@","status":"completed","conclusion":"failure","started_at":"2026-11-03T10:00:00Z","app":{"slug":"github-actions"},"check_suite":{"id":500}},
+ {"id":2,"name":"Backend (tsc + vitest)","head_sha":"@SHA@","status":"completed","conclusion":"$2","started_at":"2026-11-03T11:00:00Z","app":{"slug":"github-actions"},"check_suite":{"id":500}},
+ {"id":3,"name":"Frontend (tsc + vite build)","head_sha":"@SHA@","status":"completed","conclusion":"success","started_at":"2026-11-03T11:00:00Z","app":{"slug":"github-actions"},"check_suite":{"id":500}}$spoof
 ]}
 EOF
 }
+ci_fixture success success
 
 # ── Validation and config ──
 expect_rc 0 "is_sha" lib is_sha "$base"
@@ -139,15 +159,26 @@ cp "$T/conf.bak" "$ST_OPS_ETC/deploy.conf"
 expect_rc 0 "resolve_ident known key" lib resolve_ident "$fp_b"
 expect_rc 2 "resolve_ident unknown key" lib resolve_ident "$(ssh-keygen -lf "$T/other.pub" | awk '{print $2}')"
 
-# ── CI ──
-checks success github-actions
-expect_rc 0 "ci green (latest re-run wins)" lib eval 'load_conf; ci_green x'
-checks failure github-actions
-expect_rc 1 "ci not green" lib eval 'load_conf; ci_green x'
-checks success some-other-app
-expect_rc 1 "ci: a check-run from another app does not count" lib eval 'load_conf; ci_green x'
-expect_out "MISSING Cloudflare Pages" "ci names the missing check"
-checks success cloudflare-workers-and-pages
+# ── CI: bound to the ci.yml push run on main ──
+cig() { lib eval "load_conf; ci_green $base"; }
+ci_fixture success success
+expect_rc 0 "ci green (the re-run inside the suite wins)" cig
+ci_fixture failure failure
+expect_rc 1 "ci red" cig
+ci_fixture failure failure yes
+expect_rc 1 "ci: newer 'success' check-runs from another suite (B's own workflow) do not count" cig
+ci_fixture success failure yes
+expect_rc 1 "ci: a spoofed check cannot mask a failed job of the real run" cig
+ci_fixture success success no pull_request
+expect_rc 1 "ci: a pull_request run is not the push run on main" cig
+expect_out "no push run" "ci says there is no push run"
+ci_fixture success success no push some-branch
+expect_rc 1 "ci: a push run on another branch does not count" cig
+ci_fixture success success
+python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["check_runs"]=[c for c in d["check_runs"] if not c["name"].startswith("Frontend")]; json.dump(d,open(p,"w"))' "$T/checks.json"
+expect_rc 1 "ci: a required job missing from the run" cig
+expect_out "MISSING Frontend" "ci names the missing job"
+ci_fixture success success
 
 # ── Signatures ──
 printf 'st-ops deploy request v1\nid: x\n' >"$T/req.txt"
@@ -168,9 +199,10 @@ expect_out "ERROR provenance" "side refused as provenance"
 expect_rc 2 "request: a Dockerfile change is outside v1" rd "$dockerfile"
 expect_out "ERROR scope: .*Dockerfile" "dockerfile refused as scope, named"
 expect_rc 2 "request: there is no scope argument any more" rd "$merged" full
-checks failure github-actions
+ci_fixture failure failure
 expect_rc 2 "request: CI red" rd "$merged"
-checks success cloudflare-workers-and-pages
+ci_fixture success success
+echo "$base" >"$T/label"
 expect_rc 0 "request: merged commit" rd "$merged"
 id=$(sed -n 's/^id: //p' "$T/out")
 expect_out "^sha: $merged$" "request carries the sha"
@@ -178,6 +210,13 @@ expect_out "^from: $base$" "request carries from"
 expect_out "^migrations: 17 -> 17$" "request carries migrations"
 expect_out "^auto-rollback: previous-image$" "no migration: rollback to the previous image"
 expect_out "^scope: backend-v1$" "single scope"
+expect_out "^from-source: image-label$" "from known from the image label"
+expect_out "^runs-as: root-equivalent" "the owner is told the code runs as root-equivalent"
+expect_out "^compare: https://github.com/example/shared-terminal/compare/$base...$merged$" "compare link"
+expect_out "^commit-list:$" "commit list present"
+expect_out "^  [0-9a-f]{7,} merge$" "first-parent commits listed, indented"
+expect_out "^diffstat:$" "diffstat present"
+expect_out "^ +backend/src/side.ts +\\|" "diffstat names the files"
 expect_rc 2 "request: only one pending" rd "$two"
 expect_out "ERROR pending" "second request refused as pending"
 rdir="$ST_OPS_STATE/requests/$id"
@@ -241,22 +280,31 @@ for path in Dockerfile docker-compose.yml compose.yaml docker-compose.override.y
 done
 
 # ── Migrations and the rollback policy ──
-[[ $(lib rollback_policy 17 17) == previous-image ]] && ok || ko "17->17 rolls back"
-[[ $(lib rollback_policy 17 18) == withheld ]] && ok || ko "17->18 withholds"
-[[ $(lib rollback_policy '?' 17) == withheld ]] && ok || ko "unknown version withholds"
+[[ $(lib rollback_policy 17 17 image-label) == previous-image ]] && ok || ko "17->17 from a label rolls back"
+[[ $(lib rollback_policy 17 18 image-label) == withheld ]] && ok || ko "17->18 withholds"
+[[ $(lib rollback_policy '?' 17 image-label) == withheld ]] && ok || ko "unknown version withholds"
+[[ $(lib rollback_policy 17 17 checkout-head) == withheld ]] && ok || ko "an unverified from (checkout HEAD) withholds even without a migration"
+[[ $(lib rollback_policy 17 17) == withheld ]] && ok || ko "no source given withholds"
 rm -rf "$ST_OPS_STATE/requests"
 expect_rc 0 "request with a migration jump is allowed" rd "$mig"
 expect_out "^migrations: 17 -> 18$" "jump shown"
 expect_out "^auto-rollback: withheld$" "the owner signs knowing there is no automatic rollback"
 expect_out "^sensitive-paths: .*backend/src/db.ts" "db.ts flagged sensitive"
+expect_out "^  [0-9a-f]{7,} docs \?\[31mred\?$" "control characters of commit subjects are neutralised"
 rm -rf "$ST_OPS_STATE/requests"
+rm -f "$T/label"
+expect_rc 0 "request without an image label" rd "$merged"
+expect_out "^from-source: checkout-head$" "from known only from the checkout"
+expect_out "^auto-rollback: withheld$" "no automatic rollback when from is unverified"
+rm -rf "$ST_OPS_STATE/requests"
+echo "$base" >"$T/label"
 
 # recover_after_failed_start with stubs: what runs after a failed start, per scenario.
 recover() { # $1 = MIG_FROM, $2 = MIG_TO, $3 = image running after the failure, $4 = health after (ok|fail)
 	lib eval "
 		DD=$T/dd; mkdir -p \$DD; : >\$DD/progress.log; rm -f $T/started
 		ID=x SHA=s FROM=f BACKUP_DIR=/b OLD_IMG=sha256:old000000000000 NEW_IMG=sha256:new000000000000 APP_IMAGE=shared-terminal-app
-		MIG_FROM=$1 MIG_TO=$2
+		MIG_FROM=$1 MIG_TO=$2 FROM_SOURCE=image-label ROLLBACK=\$(rollback_policy $1 $2 image-label)
 		running_image() { if [[ -e $T/started ]]; then cat $T/started; else echo $3; fi; }
 		health_wait() { [[ -e $T/started || $4 == ok ]]; }
 		start_image() { echo \$1 >$T/started; }
@@ -315,7 +363,7 @@ fi
 ci() { # $1 = flag on|off, $2 = token ok|fail, $3 = sessions code, $4 = panes code, $5 = panes body
 	lib eval "
 		DD=$T/dd; mkdir -p \$DD; : >\$DD/progress.log; WR=$wr; APP=app; API=http://x
-		composer_flag_on() { [[ $1 == on ]]; }
+		composer_flag_state() { [[ $1 == error ]] && return 1; echo $1; }
 		admin_token() { [[ $2 == ok ]] && echo tok; }
 		http_get() {
 			case \$1 in
@@ -338,6 +386,79 @@ expect_rc 1 "composer_idle: busy pane" ci on ok 200 200 '{"panes":[{"paneId":"%0
 touch "$wr/.st-control/aaaa/composer/0.json"
 expect_rc 1 "composer_idle: a record on disk blocks even with the flag off" ci off ok 200 200 '{"panes":[],"unreadable":[]}'
 rm "$wr/.st-control/aaaa/composer/0.json"
+
+expect_rc 1 "composer_idle: the app env cannot be read (not the same as flag off)" ci error ok 200 200 '{"panes":[],"unreadable":[]}'
+
+# ── Review round (#517): renames, exit paths, Docker-derived facts ──
+lib eval "load_conf; mirror_fetch"
+[[ -n $(lib eval "load_conf; scope_violations \"\$(changed_paths $dockerfile $renamed)\"") ]] && ok ||
+	ko "moving Dockerfile under docs/ must still be outside the scope (--no-renames)"
+lib eval "load_conf; changed_paths $dockerfile $renamed" >"$T/out" 2>&1
+expect_out "^Dockerfile$" "the deleted side of a rename is listed"
+
+# deploy-status: used, no result, unit gone => aborted-unknown (not "started" forever).
+mkdir -p "$ST_OPS_STATE/requests/20261103T000000Z-aaaaaaaaaaaa/used"
+printf 'id: x\nexpires-epoch: 9999999999\n' >"$ST_OPS_STATE/requests/20261103T000000Z-aaaaaaaaaaaa/request.txt"
+lib eval "systemctl() { return 3; }; load_conf; verb_deploy_status 20261103T000000Z-aaaaaaaaaaaa" >"$T/out" 2>&1
+expect_out "^state: aborted-unknown" "a deploy killed without its trap reads as aborted-unknown"
+rm -rf "$ST_OPS_STATE/requests"
+
+# on_exit: no result yet, the new image tagged but not running => :latest back to the old image, result aborted.
+lib eval "
+	DD=$T/dx; mkdir -p \$DD; echo 'last step' >\$DD/progress.log
+	ID=x SHA=s FROM=f STARTED=1 OLD_IMG=sha256:old NEW_IMG=sha256:new APP_IMAGE=shared-terminal-app
+	running_image() { echo sha256:old; }
+	docker() { echo \"docker \$*\" >>$T/docker.log; }
+	on_exit 1
+" >/dev/null 2>&1
+grep -q '"result": "aborted"' "$T/dx/result.json" 2>/dev/null && ok || ko "on_exit writes an aborted result"
+grep -qx "docker tag sha256:old shared-terminal-app:latest" "$T/docker.log" 2>/dev/null && ok || ko "on_exit re-tags :latest to the previous image"
+: >"$T/docker.log"
+lib eval "
+	DD=$T/dx; ID=x SHA=s FROM=f STARTED=1 OLD_IMG=sha256:old NEW_IMG=sha256:new APP_IMAGE=shared-terminal-app
+	docker() { echo \"docker \$*\" >>$T/docker.log; }
+	on_exit 0
+" >/dev/null 2>&1
+[[ ! -s $T/docker.log ]] && ok || ko "on_exit does nothing once a result exists"
+
+# Recreation records: an unlistable part of .st-control is not "no records".
+if [[ $(id -u) != 0 ]]; then
+	mkdir -p "$T/wr2/.st-control/x/locked"
+	chmod 000 "$T/wr2/.st-control/x/locked"
+	lib eval "DD=$T/dx; WR=$T/wr2; recreate_records_resolved" >/dev/null 2>&1 && ko "an unlistable .st-control must fail closed" || ok
+	chmod 755 "$T/wr2/.st-control/x/locked"
+fi
+
+# Facts from docker inspect, not .env.
+dk() { # stubbed docker inspect output for the mount/port formats
+	lib eval "docker() { case \"\$*\" in *Mounts*) echo '$1' ;; *Ports*) echo '$2' ;; esac; }; $3"
+}
+mkdir -p "$T/wsroot"
+[[ $(dk "$T/wsroot" 3001 'app_workspace_root c') == "$T/wsroot" ]] && ok || ko "workspace root from the app's bind"
+dk "" 3001 'app_workspace_root c' >/dev/null 2>&1 && ko "no bind => refuse, never a default path" || ok
+dk "$T/missing-dir" 3001 'app_workspace_root c' >/dev/null 2>&1 && ko "a bind source that is not a dir => refuse" || ok
+[[ $(dk "$T/wsroot" 3999 'app_api_port c') == 3999 ]] && ok || ko "API port from the published port"
+dk "$T/wsroot" "" 'app_api_port c' >/dev/null 2>&1 && ko "no published port => refuse" || ok
+
+# A root-owned checkout is refused rather than "run as its owner" = root.
+(
+	source "$here/lib/st-ops-lib.sh"
+	ST_DIR=/
+	as_owner_of_checkout true
+) >/dev/null 2>&1 && ko "a root-owned checkout must be refused" || ok
+
+# The real deployed_info: label when the image has one, checkout HEAD (marked) otherwise.
+(
+	source "$here/lib/st-ops-lib.sh"
+	ST_DIR=$T/st
+	app_container() { echo cid; }
+	as_owner_of_checkout() { "$@"; }
+	docker() { case "$1" in inspect) echo sha256:img ;; image) echo "$LABEL" ;; esac; }
+	LABEL=$merged
+	[[ $(deployed_info) == "$merged image-label" ]] || exit 1
+	LABEL=""
+	[[ $(deployed_info) == "$(git -C "$T/st" rev-parse HEAD) checkout-head" ]] || exit 1
+) && ok || ko "deployed_info: label first, else checkout-head"
 
 echo "st-ops tests: $pass passed, $fail failed"
 ((fail == 0))

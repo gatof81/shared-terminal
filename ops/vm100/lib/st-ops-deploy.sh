@@ -71,8 +71,11 @@ admin_token() {
 const {d1Query}=require("./dist/db.js"); const {signCliToken,validateJwtSecret}=require("./dist/auth.js"); validateJwtSecret();
 (async()=>{const u=await d1Query("SELECT id, username FROM users WHERE is_admin = 1 ORDER BY created_at LIMIT 1",[]); process.stdout.write(signCliToken(u.results[0].id,u.results[0].username));})();' 2>/dev/null </dev/null
 }
-composer_flag_on() { # $1 = container. Same rule as composerFlagEnabled(): exactly `true` or `1`.
-	docker inspect "$1" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -xE 'CONVERSATION_COMPOSER_ENABLED=(true|1)' >/dev/null
+# Prints on / off, exit 1 when the container's env cannot be read (that is not "off").
+composer_flag_state() { # $1 = container. Same rule as composerFlagEnabled(): exactly `true` or `1`.
+	local env
+	env=$(docker inspect "$1" --format '{{range .Config.Env}}{{println .}}{{end}}') || return 1
+	if grep -xE 'CONVERSATION_COMPOSER_ENABLED=(true|1)' >/dev/null <<<"$env"; then echo on; else echo off; fi
 }
 composer_idle() {
 	local tok ids sid code body
@@ -80,7 +83,12 @@ composer_idle() {
 		P "composer: a pane record (or an unlistable composer dir) exists"
 		return 1
 	}
-	composer_flag_on "$APP" || return 0
+	local flag
+	flag=$(composer_flag_state "$APP") || {
+		P "composer: could not read the app container's environment"
+		return 1
+	}
+	[[ $flag == on ]] || return 0
 	tok=$(admin_token) && [[ -n $tok ]] || {
 		P "composer: could not mint an admin token"
 		return 1
@@ -110,8 +118,14 @@ sessions_snapshot() {
 }
 
 recreate_records_resolved() {
-	local f st
-	for f in $(find "$WR/.st-control" -name recreate-attempt.json 2>/dev/null); do
+	local f st list
+	[[ -d $WR/.st-control ]] || return 0
+	# A find that cannot read part of the tree must not read as "no records".
+	list=$(find "$WR/.st-control" -name recreate-attempt.json) || {
+		P "recreation records: .st-control could not be fully listed"
+		return 1
+	}
+	for f in $list; do
 		st=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"])' "$f" 2>/dev/null || echo unreadable)
 		[[ $st == resolved ]] || {
 			P "recreation record not resolved: $f ($st)"
@@ -173,8 +187,8 @@ recover_after_failed_start() { # $1 = what failed
 		docker tag "$OLD_IMG" "$APP_IMAGE:latest" || true
 		stop failed-not-started deploy "$1; the new image never replaced the running one — previous backend ${OLD_IMG:7:12} still up and healthy"
 	fi
-	if [[ $(rollback_policy "$MIG_FROM" "$MIG_TO") != previous-image ]]; then
-		stop failed-rollback-withheld deploy "$1; migrations $MIG_FROM -> $MIG_TO may have run, so the previous code is not proven compatible — no automatic rollback. Backup: ${BACKUP_DIR:-none}. Owner decision needed."
+	if [[ $ROLLBACK != previous-image ]]; then
+		stop failed-rollback-withheld deploy "$1; automatic rollback withheld (migrations $MIG_FROM -> $MIG_TO, from known by $FROM_SOURCE): the previous code is not proven compatible with the schema. Backup: ${BACKUP_DIR:-none}. Owner decision needed."
 	fi
 	P "$1: rolling back to the previous image ${OLD_IMG:7:12}"
 	if start_image "$OLD_IMG" && health_wait && [[ $(running_image) == "$OLD_IMG" ]]; then
@@ -183,16 +197,35 @@ recover_after_failed_start() { # $1 = what failed
 	stop rollback-failed deploy "$1; rollback to ${OLD_IMG:7:12} ALSO failed — owner intervention needed"
 }
 
+# ── Exit: every way out writes a result ──
+
+# `stop` writes the result itself; anything else that ends the run — a `die` from the library, a `set -e` abort,
+# SIGTERM (RuntimeMaxSec, systemctl stop) — lands here. If the new image was tagged but is not what runs, :latest
+# goes back to the previous image so a later manual `compose up` cannot start unverified code. (SIGKILL and a
+# power loss skip this; `status` then warns about the tag and `deploy-status` says aborted-unknown.)
+on_exit() {
+	local rc=$1
+	trap - EXIT
+	[[ -e $DD/result.json ]] && return
+	if ((STARTED)) && [[ -n $OLD_IMG && -n $APP_IMAGE && $(running_image 2>/dev/null) != "$NEW_IMG" ]]; then
+		docker tag "$OLD_IMG" "$APP_IMAGE:latest" 2>/dev/null || true
+	fi
+	result aborted "$(tail -1 "$DD/progress.log" 2>/dev/null | cut -c1-200)" "the pipeline exited (rc $rc) without a result; see private/ and the journal of st-ops-deploy-$ID"
+}
+
 # ── The pipeline ──
 
 deploy_run() {
 	ID=${1:-}
-	SHA='' FROM='' TREE='' BACKUP_DIR='' NEW_IMG='' OLD_IMG='' MIG_FROM='' MIG_TO=''
+	SHA='' FROM='' TREE='' BACKUP_DIR='' NEW_IMG='' OLD_IMG='' MIG_FROM='' MIG_TO='' ROLLBACK=withheld FROM_SOURCE=''
+	APP_IMAGE='' STARTED=0
 	is_request_id "$ID" || exit 2
 	DD=$(request_dir "$ID")
 	[[ -d $DD/used && -f $DD/request.txt && -f $DD/request.txt.sig ]] || exit 2
 	mkdir -p "$DD/private"
 	chmod 0700 "$DD/private"
+	trap 'on_exit $?' EXIT
+	trap 'exit 143' TERM
 	ST_OPS_VERB=deploy-run
 	ST_OPS_IDENT=$(request_field "$DD/request.txt" requested-by || echo unknown)
 	load_conf
@@ -203,7 +236,8 @@ deploy_run() {
 	TREE=$(request_field "$DD/request.txt" tree) && is_sha "$TREE" || stop refused request "tree field"
 	[[ $(request_field "$DD/request.txt" scope) == backend-v1 ]] || stop refused request "scope field"
 	# Re-verified here, not trusted from request time: the signature approves THIS request, and the world may have
-	# moved in the meantime (expiry, a second deploy, a re-run CI).
+	# moved since it was created (a second deploy, a re-run CI). Expiry was checked when `deploy` consumed the
+	# approval, immediately before this unit started; it is not re-checked mid-run.
 	verify_signature "$DD/request.txt" "$DD/request.txt.sig" || stop refused signature "signature no longer verifies"
 	P "deploy $ID: $FROM -> $SHA"
 
@@ -216,16 +250,24 @@ deploy_run() {
 	[[ -z $(scope_violations "$(changed_paths "$FROM" "$SHA")") ]] || stop refused scope "outside the v1 backend scope"
 	MIG_FROM=$(migration_version "$FROM")
 	MIG_TO=$(migration_version "$SHA")
-	[[ "$MIG_FROM -> $MIG_TO" == $(request_field "$DD/request.txt" migrations) ]] || stop refused request "migration jump differs from the signed one"
+	[[ "$MIG_FROM -> $MIG_TO" == "$(request_field "$DD/request.txt" migrations)" ]] || stop refused request "migration jump differs from the signed one"
 	ci_green "$SHA" >>"$DD/progress.log" || stop refused ci "CI not green"
-	[[ $(deployed_sha) == "$FROM" ]] || stop refused state "the deployed SHA is no longer the signed 'from'"
+	local info
+	info=$(deployed_info) || stop refused state "cannot read the deployed SHA"
+	[[ ${info%% *} == "$FROM" ]] || stop refused state "the deployed SHA is no longer the signed 'from'"
+	FROM_SOURCE=${info#* }
+	ROLLBACK=$(rollback_policy "$MIG_FROM" "$MIG_TO" "$FROM_SOURCE")
+	# The owner signed knowing whether a failure would roll back; never act on a different policy.
+	[[ $ROLLBACK == "$(request_field "$DD/request.txt" auto-rollback)" ]] || stop refused request "rollback policy differs from the signed one"
 	P "provenance + CI + scope ok (migrations $MIG_FROM -> $MIG_TO, auto-rollback $(rollback_policy "$MIG_FROM" "$MIG_TO"))"
 
 	# ── 2. Preflight ──
-	API="http://localhost:$(st_port)"
-	WR=$(st_workspace_root)
 	APP=$(app_container)
 	[[ -n $APP ]] || stop refused preflight "app container of project $COMPOSE_PROJECT not found"
+	WR=$(app_workspace_root "$APP") || stop refused preflight "cannot read the app's workspace bind ($APP_WORKSPACE_MOUNT)"
+	local port
+	port=$(app_api_port "$APP") || stop refused preflight "cannot read the app's published port"
+	API="http://localhost:$port"
 	OLD_IMG=$(docker inspect "$APP" --format '{{.Image}}')
 	APP_IMAGE="$COMPOSE_PROJECT-app"
 	# The running image must be the one compose's tag names, or "previous image" and "what compose starts" differ.
@@ -261,6 +303,7 @@ deploy_run() {
 	composer_idle || stop refused preflight "a composer send started during the backup"
 
 	# ── 6. Start ──
+	STARTED=1
 	start_image "$NEW_IMG" || recover_after_failed_start "compose up failed"
 	health_wait || recover_after_failed_start "health failed"
 	[[ $(running_image) == "$NEW_IMG" ]] || recover_after_failed_start "the running image is not the one built"
@@ -316,10 +359,15 @@ take_backup() {
 	rc=$?
 	rm -f "$envs"
 	((rc == 0)) || return 1
-	python3 -I - "$BACKUP_DIR" "$start" >>"$DD/progress.log" 2>&1 <<'PY'
+	python3 -I - "$BACKUP_DIR" "$start" "$WR" >>"$DD/progress.log" 2>&1 <<'PY'
 import json, os, re, subprocess, sys
-d, start = sys.argv[1], sys.argv[2]
+d, start, wr = sys.argv[1], sys.argv[2], sys.argv[3]
 m = json.load(open(os.path.join(d, "manifest.json")))
+# A backup of the wrong (empty) root verifies perfectly against its own manifest: compare with the real one.
+on_disk = {n for n in os.listdir(wr) if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", n)}
+assert not on_disk or m["workspaces"], f"no workspace in the backup but {len(on_disk)} session dirs in {wr}"
+for sid in m["workspaces"]:
+    assert sid in on_disk, f"backup names {sid[:8]} that is not under {wr}"
 assert m.get("version") == 1 and m["createdAt"][:19] >= start[:19] and m.get("tables"), "manifest"
 for t, n in m["tables"].items():
     rows = [l for l in open(os.path.join(d, f"{t}.jsonl"), encoding="utf-8").read().split("\n") if l.strip()]

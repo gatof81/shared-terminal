@@ -26,7 +26,7 @@ is_request_id() { [[ $1 =~ ^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$ ]]; }
 load_conf() {
 	local f="$ST_OPS_ETC/deploy.conf" k v
 	[[ -f $f ]] || die conf "missing $f"
-	REPO_URL='' ST_DIR='' COMPOSE_PROJECT='' REQUIRED_CHECKS='' REQUEST_TTL='' MIN_FREE_KIB=''
+	REPO_URL='' ST_DIR='' COMPOSE_PROJECT='' REQUIRED_WORKFLOW='' REQUIRED_CHECKS='' REQUEST_TTL='' MIN_FREE_KIB=''
 	while IFS='=' read -r k v; do
 		[[ -z $k || $k == \#* ]] && continue
 		v=${v#\"}; v=${v%\"}
@@ -34,13 +34,14 @@ load_conf() {
 		REPO_URL) [[ $v =~ ^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\.git$ ]] || die conf "REPO_URL"; REPO_URL=$v ;;
 		ST_DIR) [[ $v =~ ^/[A-Za-z0-9._/-]+$ ]] || die conf "ST_DIR"; ST_DIR=$v ;;
 		COMPOSE_PROJECT) [[ $v =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || die conf "COMPOSE_PROJECT"; COMPOSE_PROJECT=$v ;;
+		REQUIRED_WORKFLOW) [[ $v =~ ^\.github/workflows/[A-Za-z0-9._-]+\.ya?ml$ ]] || die conf "REQUIRED_WORKFLOW"; REQUIRED_WORKFLOW=$v ;;
 		REQUIRED_CHECKS) REQUIRED_CHECKS=$v ;;
 		REQUEST_TTL) [[ $v =~ ^[0-9]{2,6}$ ]] || die conf "REQUEST_TTL"; REQUEST_TTL=$v ;;
 		MIN_FREE_KIB) [[ $v =~ ^[0-9]{1,12}$ ]] || die conf "MIN_FREE_KIB"; MIN_FREE_KIB=$v ;;
 		*) die conf "unknown key $k" ;;
 		esac
 	done <"$f"
-	[[ -n $REPO_URL && -n $ST_DIR && -n $COMPOSE_PROJECT && -n $REQUIRED_CHECKS && -n $REQUEST_TTL && -n $MIN_FREE_KIB ]] || die conf "incomplete"
+	[[ -n $REPO_URL && -n $ST_DIR && -n $COMPOSE_PROJECT && -n $REQUIRED_WORKFLOW && -n $REQUIRED_CHECKS && -n $REQUEST_TTL && -n $MIN_FREE_KIB ]] || die conf "incomplete"
 }
 
 # identities: `<name> <SHA256:fingerprint>` per line. A key that is not listed gets nothing, even if sshd let it in.
@@ -81,28 +82,65 @@ on_main() {
 # Root never runs git inside the diego-owned checkout: its .git/config and hooks (core.fsmonitor, filters,
 # post-checkout, …) are diego's, and running them as root would hand that account root through st-ops. Whatever
 # is read or done there runs AS diego, which grants nothing diego does not already have.
-as_owner_of_checkout() { runuser -u "$(stat -c %U "$ST_DIR")" -- "$@"; }
+as_owner_of_checkout() {
+	local uid
+	uid=$(stat -c %u "$ST_DIR") || return 1
+	# A root-owned checkout would make "as its owner" mean root: refuse rather than run its git as root.
+	[[ $uid =~ ^[0-9]+$ && $uid != 0 ]] || {
+		echo "st-ops: $ST_DIR is owned by uid $uid; refusing to run git there as root" >&2
+		return 1
+	}
+	local user
+	user=$(getent passwd "$uid" | cut -d: -f1)
+	[[ -n $user ]] || return 1
+	runuser -u "$user" -- "$@"
+}
 checkout_head() { as_owner_of_checkout git -C "$ST_DIR" rev-parse HEAD; }
 
 app_container() {
 	docker ps -q --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" --filter label=com.docker.compose.service=app | head -1
 }
 
-# The deployed SHA is the label st-ops puts on the image it builds; before the first st-ops deploy (an image
-# built by hand with compose, no label) it is the checkout's HEAD.
+# The deployed SHA is the label st-ops puts on the image it builds (`<sha> image-label`). Without one — the first
+# st-ops deploy, or after a manual deploy — the only answer is the checkout's HEAD (`<sha> checkout-head`), which
+# is NOT proof of what runs: "merged and pulled, deploy pending" is a normal state here. Callers must treat that
+# source as unverified (no automatic rollback: the migration jump computed from it may be wrong).
 APP_SHA_LABEL=io.shared-terminal.st-ops.sha
-deployed_sha() {
+deployed_info() {
 	local cid img sha
 	cid=$(app_container)
 	if [[ -n $cid ]]; then
 		img=$(docker inspect "$cid" --format '{{.Image}}')
 		sha=$(docker image inspect "$img" --format "{{index .Config.Labels \"$APP_SHA_LABEL\"}}" 2>/dev/null || true)
 		if is_sha "$sha"; then
-			echo "$sha"
+			echo "$sha image-label"
 			return 0
 		fi
 	fi
-	checkout_head
+	sha=$(checkout_head) || return 1
+	echo "$sha checkout-head"
+}
+deployed_sha() {
+	local info
+	info=$(deployed_info) || return 1
+	echo "${info%% *}"
+}
+
+# Facts about the running backend come from Docker, never from parsing .env (a comment, an `export`, a duplicate
+# line would make a parse disagree with what compose resolved): the workspace root is the host side of the bind
+# the app mounts at /var/shared-terminal/workspaces, the API port is the host port published for 3001/tcp.
+APP_WORKSPACE_MOUNT=/var/shared-terminal/workspaces
+app_workspace_root() { # $1 = container
+	local src
+	src=$(docker inspect "$1" --format "{{range .Mounts}}{{if eq .Destination \"$APP_WORKSPACE_MOUNT\"}}{{.Source}}{{end}}{{end}}") || return 1
+	[[ $src =~ ^/[A-Za-z0-9._/-]+$ && -d $src ]] || return 1
+	echo "$src"
+}
+app_api_port() { # $1 = container
+	local p
+	p=$(docker inspect "$1" --format '{{with index .NetworkSettings.Ports "3001/tcp"}}{{(index . 0).HostPort}}{{end}}') || return 1
+	[[ $p =~ ^[0-9]{2,5}$ ]] || return 1
+	echo "$p"
 }
 
 # v1 scope = backend code only, as an ALLOWLIST: the image st-ops builds is Dockerfile + backend/ of the SHA,
@@ -120,50 +158,72 @@ scope_violations() { grep -vE "$ALLOWED_PATHS_RE" <<<"$1" | grep -v '^$' || true
 # partially — the ledger row is written after apply()) before the new backend failed, and the old code boots
 # against any newer schema without checking compatibility (migrateDb skips unknown versions). So: any
 # migration in the jump ⇒ no automatic rollback, the owner decides with the fresh backup at hand.
-rollback_policy() { # $1 = migration version at from, $2 = at sha
-	if [[ $1 =~ ^[0-9]+$ && $2 =~ ^[0-9]+$ && $1 == "$2" ]]; then echo previous-image; else echo withheld; fi
+rollback_policy() { # $1 = migration version at from, $2 = at sha, $3 = how `from` is known (deployed_info)
+	if [[ ${3:-} == image-label && $1 =~ ^[0-9]+$ && $2 =~ ^[0-9]+$ && $1 == "$2" ]]; then
+		echo previous-image
+	else
+		echo withheld
+	fi
 }
 
-changed_paths() { mirror diff --name-only "$1" "$2"; }
+# --no-renames: with rename detection `--name-only` prints only the NEW side, so moving a refused file (e.g.
+# `.dockerignore`) under docs/ would pass the allowlist. Both sides of every change are checked.
+changed_paths() { mirror diff --no-renames --name-only "$1" "$2"; }
 
 migration_version() {
 	mirror show "$1:backend/src/db.ts" 2>/dev/null | grep -oE 'version: [0-9]+' | tail -1 | grep -oE '[0-9]+' || echo "?"
 }
 
-# ── CI: check-runs of the exact SHA, public API ─────────────────────────
+# ── CI: the required workflow's own push run on main, public API ─────────
 
-fetch_check_runs() {
+gh_api() { # $1 = path under /repos/<owner>/<repo>/
 	local repo=${REPO_URL#https://github.com/}
 	repo=${repo%.git}
-	timeout 30 curl -sf -H 'Accept: application/vnd.github+json' \
-		"https://api.github.com/repos/$repo/commits/$1/check-runs?per_page=100"
+	timeout 30 curl -sf -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$repo/$1"
 }
+fetch_workflow_runs() { gh_api "actions/runs?head_sha=$1&event=push&branch=main&per_page=100"; }
+fetch_check_runs() { gh_api "commits/$1/check-runs?per_page=100"; }
 
-# Every required name must be present, the LATEST run of that name completed with `success`, and created by
-# GitHub Actions or the Pages app (a check-run's name alone is not identity). Prints one line per check.
+# A check-run's name — even with the github-actions app — is not identity: any workflow job with `checks: write`
+# can post a "success" check-run with any name on any SHA, and the operator (B) can push workflows. So a required
+# check counts only from the check suite of REQUIRED_WORKFLOW's own run for this exact SHA, triggered by a push to
+# main (the latest such run decides). Prints one line per check.
 ci_green() {
-	local json
-	json=$(fetch_check_runs "$1") || {
+	local runs checks
+	runs=$(fetch_workflow_runs "$1") || {
+		echo "ci: could not read workflow runs"
+		return 1
+	}
+	checks=$(fetch_check_runs "$1") || {
 		echo "ci: could not read check-runs"
 		return 1
 	}
-	CI_REQUIRED=$REQUIRED_CHECKS python3 -I -c '
+	CI_SHA=$1 CI_WORKFLOW=$REQUIRED_WORKFLOW CI_REQUIRED=$REQUIRED_CHECKS python3 -I -c '
 import json, os, sys
-runs = json.load(sys.stdin).get("check_runs", [])
-apps = {"github-actions", "cloudflare-workers-and-pages"}
-ok = True
+runs_doc, checks_doc = sys.argv[1], sys.argv[2]
+sha, wf = os.environ["CI_SHA"], os.environ["CI_WORKFLOW"]
+runs = [r for r in json.loads(runs_doc).get("workflow_runs", [])
+        if r.get("path") == wf and r.get("event") == "push" and r.get("head_branch") == "main" and r.get("head_sha") == sha]
+if not runs:
+    print(f"ci: no push run of {wf} on main for {sha[:12]}"); sys.exit(1)
+run = max(runs, key=lambda r: (r.get("run_attempt") or 0, r.get("id") or 0, r.get("created_at") or ""))
+status, conclusion, suite, rid = run.get("status"), run.get("conclusion"), run.get("check_suite_id"), run.get("id")
+print(f"ci: run {rid} of {wf}: {status}/{conclusion}")
+ok = status == "completed" and conclusion == "success" and isinstance(suite, int)
+checks = json.loads(checks_doc).get("check_runs", [])
 for name in os.environ["CI_REQUIRED"].split("|"):
-    mine = [r for r in runs if r.get("name") == name and (r.get("app") or {}).get("slug") in apps]
+    mine = [c for c in checks if c.get("name") == name and (c.get("check_suite") or {}).get("id") == suite
+            and (c.get("app") or {}).get("slug") == "github-actions" and c.get("head_sha") == sha]
     if not mine:
-        print(f"ci: MISSING {name}"); ok = False; continue
-    last = max(mine, key=lambda r: (r.get("started_at") or "", r.get("id") or 0))
+        print(f"ci: MISSING {name} in that run"); ok = False; continue
+    last = max(mine, key=lambda c: (c.get("started_at") or "", c.get("id") or 0))
     good = last.get("status") == "completed" and last.get("conclusion") == "success"
     verdict = "ok" if good else "NOT GREEN"
-    status, conclusion = last.get("status"), last.get("conclusion")
-    print(f"ci: {verdict} {name} ({status}/{conclusion})")
+    cst, ccon = last.get("status"), last.get("conclusion")
+    print(f"ci: {verdict} {name} ({cst}/{ccon})")
     ok = ok and good
 sys.exit(0 if ok else 1)
-' <<<"$json"
+' "$runs" "$checks"
 }
 
 # ── Requests and the owner's signature ──────────────────────────────────
@@ -247,28 +307,25 @@ verb_status() {
 	sha=$(deployed_sha 2>/dev/null || echo "?")
 	echo "deployed: $sha"
 	if is_sha "$sha" && [[ -d $ST_OPS_STATE/mirror.git ]] && on_main "$sha"; then echo "deployed-on-main: yes (mirror)"; else echo "deployed-on-main: unknown/no"; fi
-	health=$(timeout 5 curl -s "http://localhost:$(st_port)/health" || true)
+	local cid port
+	cid=$(app_container)
+	port=$( [[ -n $cid ]] && app_api_port "$cid" || true)
+	health=$( [[ -n $port ]] && timeout 5 curl -s "http://localhost:$port/health" || true)
 	echo "health: ${health:-unreachable}"
+	# A deploy killed between `docker tag` and `compose up` (or by a reboot) leaves :latest naming another image
+	# than the one running: the next manual `compose up` would start unverified code.
+	if [[ -n $cid && $(docker image inspect "$COMPOSE_PROJECT-app:latest" --format '{{.Id}}' 2>/dev/null) != "$(docker inspect "$cid" --format '{{.Image}}')" ]]; then
+		echo "WARNING: $COMPOSE_PROJECT-app:latest is not the running image (interrupted deploy or manual build)"
+	fi
 	echo "disk-free-kib: $(df --output=avail -k /var/lib/docker | tail -1 | tr -d ' ')"
 	docker ps -a --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" --format 'compose: {{.Label "com.docker.compose.service"}} {{.State}} {{.Status}}'
 	docker ps -a --filter name=^/st- --format 'session: {{.Names}} {{.State}} {{.Status}}' | sort
 	local wr bk
-	wr=$(st_workspace_root)
-	bk=$(ls -1d "$wr"/.backups/20* 2>/dev/null | sort | tail -1)
+	wr=$( [[ -n $cid ]] && app_workspace_root "$cid" || true)
+	bk=$( [[ -n $wr ]] && ls -1d "$wr"/.backups/20* 2>/dev/null | sort | tail -1)
 	echo "last-nightly-backup: ${bk:+$(basename "$bk")} manifest=$([[ -s $bk/manifest.json ]] && echo yes || echo NO)"
 	echo "last-offhost: $(grep -E 'off-host' /home/diego/shared-terminal-backup.log 2>/dev/null | tail -1 || echo '?')"
 	echo "pending-request: $(pending_request || echo none)"
-}
-
-st_port() {
-	local p
-	p=$(grep -E '^PORT=' "$ST_DIR/.env" | cut -d= -f2- | tr -d "\"' ")
-	[[ $p =~ ^[0-9]{2,5}$ ]] && echo "$p" || echo 3001
-}
-st_workspace_root() {
-	local w
-	w=$(grep -E '^WORKSPACE_ROOT=' "$ST_DIR/.env" | cut -d= -f2- | tr -d "\"' ")
-	[[ $w =~ ^/[A-Za-z0-9._/-]+$ ]] && echo "$w" || echo /var/shared-terminal/workspaces
 }
 
 verb_logs() {
@@ -281,7 +338,7 @@ verb_logs() {
 }
 
 verb_request_deploy() {
-	local sha=${1:-} from tree d id now exp paths sens out mfrom mto commits
+	local sha=${1:-} info from source tree d id now exp paths sens out mfrom mto commits rollback
 	(($# <= 1)) || die usage "request-deploy <40-hex sha>   (v1 has a single scope: backend code)"
 	is_sha "$sha" || die usage "request-deploy <40-hex sha>"
 	with_lock
@@ -290,7 +347,9 @@ verb_request_deploy() {
 	mirror_fetch
 	mirror cat-file -e "$sha^{commit}" 2>/dev/null || die sha "$sha is not in $REPO_URL"
 	on_main "$sha" || die provenance "$sha is not on main's first-parent history"
-	from=$(deployed_sha)
+	info=$(deployed_info) || die state "cannot read the deployed SHA"
+	from=${info%% *}
+	source=${info#* }
 	is_sha "$from" || die state "cannot read the deployed SHA"
 	[[ $from != "$sha" ]] || die state "$sha is already deployed"
 	mirror cat-file -e "$from^{commit}" 2>/dev/null || die provenance "the deployed SHA $from is not in the public repo: deploy manually"
@@ -304,6 +363,7 @@ verb_request_deploy() {
 	mfrom=$(migration_version "$from")
 	mto=$(migration_version "$sha")
 	commits=$(mirror rev-list --count "$from..$sha")
+	rollback=$(rollback_policy "$mfrom" "$mto" "$source")
 	now=$(now_epoch)
 	exp=$((now + REQUEST_TTL))
 	id="$(date -u -d "@$now" +%Y%m%dT%H%M%SZ)-${sha:0:12}"
@@ -318,14 +378,22 @@ verb_request_deploy() {
 		echo "tree: $tree"
 		echo "scope: backend-v1"
 		echo "from: $from"
+		echo "from-source: $source"
+		echo "runs-as: root-equivalent (the app container mounts /var/run/docker.sock): review the diff before signing"
+		echo "compare: ${REPO_URL%.git}/compare/$from...$sha"
 		echo "commits: $commits"
 		echo "migrations: $mfrom -> $mto"
-		echo "auto-rollback: $(rollback_policy "$mfrom" "$mto")"
+		echo "auto-rollback: $rollback"
 		echo "sensitive-paths: ${sens:-none}"
 		echo "requested-by: $ST_OPS_IDENT"
 		echo "created: $(date -u -d "@$now" +%FT%TZ)"
 		echo "expires: $(date -u -d "@$exp" +%FT%TZ)"
 		echo "expires-epoch: $exp"
+		# Indented (never a `key: ` line) and printable-only: commit subjects are the operator's text.
+		echo "commit-list:"
+		mirror log --first-parent --format='%h %s' "$from..$sha" | head -40 | LC_ALL=C tr -c '[:print:]\n' '?' | sed 's/^/  /'
+		echo "diffstat:"
+		mirror diff --no-renames --stat=120 "$from" "$sha" | tail -60 | LC_ALL=C tr -c '[:print:]\n' '?' | sed 's/^/  /'
 	} >"$d/request.txt"
 	chmod 0644 "$d/request.txt"
 	st_ops_audit "rc=0 request=$id sha=$sha"
@@ -356,7 +424,9 @@ verb_deploy() {
 	rm -f "$sig"
 	# `used` is written BEFORE the pipeline starts: an approval is consumed by the attempt, never re-playable.
 	mkdir "$d/used"
-	systemd-run --quiet --collect --unit "st-ops-deploy-$id" "$ST_OPS_LIB/st-ops-deploy-run" "$id" ||
+	# RuntimeMaxSec: a hung build or daemon call ends in SIGTERM (the pipeline's trap records `aborted`) instead of
+	# holding deploy.lock forever.
+	systemd-run --quiet --collect --unit "st-ops-deploy-$id" -p RuntimeMaxSec=3600 "$ST_OPS_LIB/st-ops-deploy-run" "$id" ||
 		die start "systemd-run failed"
 	st_ops_audit "rc=0 deploy-started=$id"
 	echo "Deploy $id started (unit st-ops-deploy-$id). Follow it with: ssh st-ops deploy-status $id"
@@ -367,7 +437,20 @@ verb_deploy_status() {
 	is_request_id "$id" || die usage "deploy-status <request id>"
 	d=$(request_dir "$id")
 	[[ -f $d/request.txt ]] || die request "no such request"
-	echo "state: $(if [[ -e $d/result.json ]]; then echo finished; elif [[ -e $d/used ]]; then echo started; elif [[ -e $d/cancelled ]]; then echo cancelled; elif request_expired "$d/request.txt"; then echo expired; else echo pending-signature; fi)"
+	local state
+	if [[ -e $d/result.json ]]; then
+		state=finished
+	elif [[ -e $d/used ]]; then
+		# No result and no unit: killed without its trap (SIGKILL, reboot). The outcome is unknown.
+		if systemctl is-active --quiet "st-ops-deploy-$id" 2>/dev/null; then state=running; else state="aborted-unknown (no result written and the unit is gone: check status)"; fi
+	elif [[ -e $d/cancelled ]]; then
+		state=cancelled
+	elif request_expired "$d/request.txt"; then
+		state=expired
+	else
+		state=pending-signature
+	fi
+	echo "state: $state"
 	[[ -f $d/progress.log ]] && cat "$d/progress.log"
 	[[ -f $d/result.json ]] && cat "$d/result.json"
 	return 0

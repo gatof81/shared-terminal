@@ -1,6 +1,6 @@
 # ops/vm100 — `st-ops`: operación de Shared Terminal sin root
 
-Estado: **propuesta, revisión 2 (2026-11-03), NO-GO de instalación: nada instalado ni concedido.** Decisión del responsable: la sesión B
+Estado: **propuesta, revisión 3 (2026-11-03, tras la revisión independiente), NO-GO de instalación: nada instalado ni concedido.** Decisión del responsable: la sesión B
 debe poder operar y desplegar Shared Terminal sin depender de A, **sin** root general, sin `sudo`, sin
 el grupo `docker` y sin la identidad SSH de A; cada deploy requiere el GO explícito del responsable, y
 el servidor verifica SHA, procedencia de `main`, CI, backup, preflight y resultado.
@@ -62,9 +62,13 @@ En `request-deploy` y **otra vez** al comenzar el pipeline (el mundo puede haber
 2. Procedencia: el SHA está en la cadena **first-parent** de `main` (un commit integrado en `main`, no
    uno que solo existe en una rama mergeada) y desciende del SHA desplegado (st-ops no hace rollbacks
    a pedido).
-3. CI: cada check requerido (`deploy.conf → REQUIRED_CHECKS`: backend, frontend, e2e, docker smoke,
-   Cloudflare Pages) existe en ese SHA, emitido por GitHub Actions o la app de Pages, y su última
-   ejecución terminó en `success`.
+3. CI: solo cuenta la **corrida propia de `.github/workflows/ci.yml`** disparada por `push` a `main`
+   para ese SHA exacto (la última, si hubo re-ejecuciones), y de ella solo los check-runs de **su**
+   check suite: el nombre de un check-run —ni siquiera con la app `github-actions`— no es identidad,
+   porque cualquier workflow con `checks: write` puede publicar un "success" con cualquier nombre sobre
+   cualquier SHA, y B puede empujar workflows. Requeridos (backend): `Backend`, `Frontend`, `Frontend e2e`.
+   Un cambio de `ci.yml` que llegue a `main` sigue siendo posible (B mergea); por eso `.github/` aparece
+   en `sensitive-paths` y la firma —con el diff revisado— es el control real.
 4. Alcance **v1 = código de backend**, como *allowlist* (`ALLOWED_PATHS_RE`): `backend/src/`,
    `backend/{tsconfig,biome}.json`, `backend/vitest.config.ts`, `frontend/` (lo despliega Pages, no
    st-ops), `docs/`, `.github/`, `ops/`, `*.md` de la raíz, `LICENSE`, `.gitignore`, `.env.example`.
@@ -73,7 +77,9 @@ En `request-deploy` y **otra vez** al comenzar el pipeline (el mundo puede haber
    desplegado es exactamente lo firmado: la imagen = `Dockerfile` + `backend/` del árbol firmado, con
    la definición de compose que ya está desplegada (byte a byte la del árbol firmado). Las rutas
    sensibles permitidas (`.github/`, `db.ts`, `ops/`) y el salto de migraciones van **en el texto
-   firmado**, junto con `auto-rollback: previous-image | withheld`.
+   firmado**, junto con `auto-rollback: previous-image | withheld`, `from-source`, la lista de commits
+   (first-parent), el diffstat (`--no-renames`: un archivo movido cuenta por sus dos lados), un enlace
+   `compare` y la línea fija `runs-as: root-equivalent (…docker.sock)`.
 5. Firma: `ssh-keygen -Y verify` sobre los bytes exactos de `request.txt`, principal `owner`, namespace
    propio; caducidad; un solo uso (`used` se escribe **antes** de lanzar el pipeline: una aprobación
    se consume con el intento, nunca se puede reproducir); árbol del SHA = el firmado; el SHA desplegado
@@ -102,8 +108,14 @@ En `request-deploy` y **otra vez** al comenzar el pipeline (el mundo puede haber
 8. Verificación: health, `/api/auth/status` 200, flags de `app` idénticos, `.env` intacto, sesiones
    intactas, la etiqueta de la imagen nombra el SHA, las líneas de arranque de captura/composer siguen.
    Si algo difiere ⇒ `deployed-unverified`, sin revertir: decide el responsable.
-9. Registro **como `diego`**: `git fetch` + `checkout --detach <sha>` del checkout, para que un
+9. Registro **como el dueño del checkout**: `git fetch` + `checkout --detach <sha>` del checkout, para que un
    `compose up --build` manual posterior no reconstruya código viejo. Si falla, el resultado lo avisa.
+
+Toda salida escribe un resultado: `stop` lo escribe; cualquier otra (un `die`, un abort de `set -e`,
+SIGTERM por `RuntimeMaxSec=3600` o `systemctl stop`) pasa por el `trap` de salida, que escribe `aborted` y,
+si la imagen nueva quedó etiquetada `:latest` sin estar corriendo, devuelve la etiqueta a la anterior (así un
+`compose up` manual posterior no arranca código no verificado). SIGKILL o un corte de energía saltan el
+`trap`: `deploy-status` responde `aborted-unknown` y `status` avisa si `:latest` no es la imagen que corre.
 
 Nunca: edita `.env`, toca un contenedor de sesión, reconstruye la imagen de sesión, hace `prune`,
 imprime un valor de configuración (la salida de comandos va a `private/`, root 0700).
@@ -120,8 +132,17 @@ a byte con el firmado; compose usa la copia de root con `-p`/`-f` explícitos, s
 Lo poco que se hace en el checkout —leer `HEAD` antes del primer deploy con etiqueta, y el registro del
 paso 9— corre como `diego` (`runuser`), que no gana nada que no tenga.
 
-El SHA desplegado es la etiqueta de la imagen que corre; antes del primer deploy por st-ops, el `HEAD`
-del checkout leído como `diego`.
+El SHA desplegado es la etiqueta de la imagen que corre (`from-source: image-label`). Sin etiqueta —el
+primer deploy por st-ops, o tras un deploy manual— solo queda el `HEAD` del checkout leído como `diego`
+(`from-source: checkout-head`), que **no** prueba qué corre ("mergeado y con pull, deploy pendiente" es un
+estado normal acá): en ese caso el rollback automático queda `withheld` aunque no haya migración, porque
+el salto calculado desde ese `from` puede estar mal. Un checkout cuyo dueño es root se rechaza.
+
+El workspace root y el puerto de la API salen de `docker inspect` del `app` (la fuente del bind montado en
+`/var/shared-terminal/workspaces` y el puerto publicado de `3001/tcp`), nunca de parsear `.env`: un
+`export`, un comentario o una línea duplicada harían que el parseo no coincida con lo que resolvió compose,
+y con una raíz equivocada las comprobaciones del composer, de las recreaciones y del backup pasarían en
+vacío. El backup además se compara con los directorios de sesión que hay de verdad en esa raíz.
 
 ### Composer: falla cerrado
 
@@ -183,10 +204,33 @@ Si B mostrara un texto distinto del guardado, la firma no verifica contra la sol
 **Revocación inmediata**: borrar la línea de `authorized_keys` (efecto en el siguiente login), o
 `sudo bash ops/vm100/uninstall.sh` (quita el acceso de todas las claves, conserva `/var/lib/st-ops`).
 
+## Revisión independiente (2026-11-03, sobre `15cdec5`)
+
+Sin BLOCKER; seis SHOULD-FIX y tres NIT, todos resueltos en la revisión 3:
+
+| Hallazgo | Resolución |
+| --- | --- |
+| CI falsificable por B (check-runs con el nombre correcto desde otro workflow) | CI atado a la suite de la corrida `push` de `ci.yml` en `main` para el SHA |
+| El texto firmado presentaba `backend/src/` como inocuo, pero `app` monta `docker.sock` | `runs-as: root-equivalent`, lista de commits, diffstat y `compare` en el texto firmado; el README pide revisar el diff |
+| Sin etiqueta, `from` = HEAD del checkout podía declarar seguro un rollback con migración | `from-source`; `checkout-head` ⇒ `auto-rollback: withheld` |
+| Workspace root adivinado desde `.env`: con una raíz errónea composer/recreación/backup pasaban en vacío | raíz y puerto desde `docker inspect`; backup comparado con los directorios reales; `find` que falla ⇒ falla cerrado |
+| Un deploy abortado/matado no escribía resultado y podía dejar `:latest` en código no verificado | `trap` de salida, `RuntimeMaxSec`, `aborted-unknown`, aviso en `status` |
+| La detección de renombres ocultaba el lado borrado | `--no-renames` en el alcance y en el diffstat |
+| NIT: leer el flag del composer fallando = flag apagado | `docker inspect` fallido ⇒ no ocioso |
+| NIT: comparación de migraciones sin comillas; comentario de expiración inexacto | comillas; comentario corregido (la expiración se verifica al consumir la aprobación) |
+| NIT: `runuser` con un checkout de root | checkout de uid 0 ⇒ rechazo |
+
+Sigue sin test: el pipeline `deploy_run` completo con Docker de verdad y `take_backup` (primera ejecución
+supervisada en VM100).
+
 ## Límites conocidos (no los resuelve st-ops)
 
 - La cuenta `diego` sigue siendo root efectivo con seis claves; st-ops protege **de B**, no de quien
   tenga una clave de `diego`. La auditoría de esas claves es un paso aparte.
+- **La firma es el único control que B no puede producir.** CI y alcance acotan lo que llega a la firma,
+  pero B escribe el código, lo mergea y redacta la solicitud; como `app` monta `docker.sock`, cualquier
+  línea de `backend/src/` es root en VM100 tras el deploy. Antes de firmar: abrir el `compare` del texto y
+  leer el diff completo.
 - B sigue actuando en GitHub como el responsable: puede mergear a `main` (0 revisiones requeridas).
   st-ops no confía en eso para el GO, pero el merge sigue siendo disciplina. Recomendado: identidad
   propia de B en GitHub (cuenta de máquina o token fine-grained sin merge) y una revisión obligatoria
@@ -205,7 +249,7 @@ Si B mostrara un texto distinto del guardado, la firma no verifica contra la sol
 
 ## Tests
 
-`bash ops/vm100/test/run.sh` (140 casos) — sin root, sin Docker, sin red: dispatcher (metacaracteres,
+`bash ops/vm100/test/run.sh` (173 casos) — sin root, sin Docker, sin red: dispatcher (metacaracteres,
 longitud, login sin clave), configuración, identidades, CI (re-ejecución gana, app ajena no cuenta, check
 ausente), firmas reales (otros bytes, otro namespace, clave del operador), procedencia (rama lateral;
 `on_main` con 3000 commits bajo `pipefail` y SIGPIPE por defecto), alcance (allowlist en ambos sentidos),
