@@ -85,12 +85,13 @@ test("classic.UserPromptSubmit sin prompt.submit en vuelo (p. ej. un comando): r
 	assert.deepEqual(h.recs.map((r) => [r.event, r.attached, r.inflight]), [["classic.UserPromptSubmit", false, 0]]);
 });
 
-test("dos pasadas clásicas con el mismo prompt_id (gestionada + resto) ligan; con ids distintos no", async () => {
+test("corrección 2: más de un classic.UserPromptSubmit en un envío no liga, aun con el mismo prompt_id", async () => {
 	const h = harness();
-	await h.submit({ text: "x", origin: { kind: "composer" }, wait: false }, { classicTimes: 2, ids: ["P-1", "P-1"] });
+	await h.submit({ text: "x", origin: { kind: "channel", server: EXPECTED_SERVER }, isMeta: true, wait: false }, { classicTimes: 2, ids: ["P-1", "P-1"] });
 	await h.submit({ text: "y", origin: { kind: "composer" }, wait: false }, { classicTimes: 2, ids: ["P-2", "P-3"] });
 	const [a, b] = sub(h.recs);
-	assert.equal(a.bound_prompt_id, "P-1");
+	assert.equal(a.classic_count, 2);
+	assert.equal(a.bound_prompt_id, null, "duplicado ⇒ sin atribución");
 	assert.equal(b.bound_prompt_id, null);
 	assert.deepEqual(b.classic_prompt_ids, ["P-2", "P-3"]);
 });
@@ -168,13 +169,15 @@ function fixture() {
 		mod.push(m({ event: "classic.Stop", prompt_id: P, session_id: SID }));
 		hooks.push({ event: "UserPromptSubmit", prompt_id: P, session_id: SID, test_ids: [id], channel_tag_count: tags });
 		hooks.push({ event: "Stop", prompt_id: P, session_id: SID });
+		if (kind === "channel") hooks.push({ event: "PostToolUse", prompt_id: P, session_id: SID, tool_name: "mcp__plugin_fakechat_fakechat__reply", ok: true, reply_to: id, text_ok_ids: [id] });
 	}
-	return { mod, hooks, send: { id: "P0B01-aaaaaa", result: "hook", fakechat_reply: { latency_ms: 5000 } }, controls: ctrls, debugLines: [] };
+	return { mod, hooks, send: { id: "P0B01-aaaaaa", result: "hook", fakechat_reply: { latency_ms: 5000, reply_to_matches: true, exact: true } }, controls: ctrls, debugLines: [] };
 }
 
 test("analizador: fixture completo ⇒ PASS, y el informe usa alias", () => {
 	const r = analyze(fixture());
 	assert.equal(r.verdict, "PASS", JSON.stringify(r.reasons));
+	assert.match(r.scope, /^A: procedencia y correlación dentro del CLI/, "el PASS de XB-1 no es un PASS de integridad");
 	const red = redact(r);
 	assert.deepEqual([red.facts.channel.prompt_id, red.facts.typed.prompt_id, red.facts.pasted_tag.prompt_id], ["P1", "P2", "P3"]);
 	assert.equal(JSON.stringify(red).includes("P-1"), false);
@@ -206,7 +209,7 @@ test("analizador: casos negativos", () => {
 		["Stop del mod ausente", (f) => {
 			f.mod = f.mod.filter((r) => !(r.event === "classic.Stop" && r.prompt_id === "P-1"));
 			renumber(f);
-		}, "FAIL", /channel:chain-incomplete/],
+		}, "FAIL", /channel:stops-logger=1-mod=0/],
 		["UPS del logger duplicado", (f) => f.hooks.push({ ...f.hooks[0] }), "FAIL", /channel:ups-not-unique/],
 		["sesión distinta entre mod y logger", (f) => (f.hooks[0].session_id = "otra"), "FAIL", /channel:chain-incomplete/],
 		["respuesta de Fakechat no observada", (f) => (f.send.fakechat_reply = null), "FAIL", /reply-not-observed/],
@@ -214,6 +217,30 @@ test("analizador: casos negativos", () => {
 		["sin archivo de controles", (f) => (f.controls = null), "INCONCLUSIVE", /no-control-file/],
 		["hook del mod saltado en el debug log", (f) => f.debugLines.push("2026-11-03T00:00:00Z st-provenance-probe: prompt.submit hook skipped: threw"), "FAIL", /mod-hook-failed/],
 		["registro ilegible del mod", (f) => (f.badModFiles = 1), "FAIL", /unreadable-mod-record/],
+		// Corrección 1: exactamente un Stop por fuente y por prompt_id (R8 sin cambios)
+		["segundo Stop del logger para el canal", (f) => f.hooks.push({ event: "Stop", prompt_id: "P-1", session_id: SID }), "FAIL", /channel:stops-logger=2-mod=1/],
+		["segundo Stop del mod para el canal", (f) => {
+			f.mod.push({ inst: "i1", seq: f.mod.length + 1, t: 99, event: "classic.Stop", prompt_id: "P-1", session_id: SID });
+		}, "FAIL", /channel:stops-logger=1-mod=2/],
+		["segundo Stop del logger para un control", (f) => f.hooks.push({ event: "Stop", prompt_id: "P-2", session_id: SID }), "FAIL", /typed:stops-logger=2/],
+		// Corrección 2: un envío con dos classic no se atribuye (aunque un registro dijera lo contrario)
+		["envío del canal con dos classic", (f) => Object.assign(sub2(f, "P-1"), { classic_count: 2 }), "FAIL", /channel:chain-incomplete/],
+		["envío del canal sin atribución por classic duplicado", (f) => Object.assign(sub2(f, "P-1"), { classic_count: 2, bound_prompt_id: null }), "FAIL", /channel:unbound/],
+		// Corrección 3: tres prompt_id distintos, también entre los dos controles
+		["los dos controles con el mismo prompt_id", (f) => {
+			f.hooks.find((h) => h.event === "UserPromptSubmit" && h.test_ids.includes(ctrls.pasted_tag.id)).prompt_id = "P-2";
+			f.mod = f.mod.filter((r) => r.prompt_id !== "P-3" && r.bound_prompt_id !== "P-3");
+			f.hooks = f.hooks.filter((h) => h.prompt_id !== "P-3");
+			renumber(f);
+		}, "FAIL", /prompt-ids-not-distinct/],
+		// Corrección 4: respuesta exacta y correlacionada
+		["respuesta de Fakechat con texto no exacto", (f) => (f.send.fakechat_reply.exact = false), "FAIL", /reply-not-observed/],
+		["respuesta dirigida a otro mensaje", (f) => (f.send.fakechat_reply.reply_to_matches = false), "FAIL", /reply-not-observed/],
+		["sin PostToolUse de reply para el prompt_id", (f) => (f.hooks = f.hooks.filter((h) => h.event !== "PostToolUse")), "FAIL", /reply-not-observed/],
+		["reply registrado bajo otro prompt_id", (f) => (f.hooks.find((h) => h.event === "PostToolUse").prompt_id = "P-2"), "FAIL", /reply-not-observed/],
+		["dos reply para el mismo prompt_id", (f) => f.hooks.push({ ...f.hooks.find((h) => h.event === "PostToolUse") }), "FAIL", /reply-not-observed/],
+		["reply fallido (PostToolUse no ok)", (f) => (f.hooks.find((h) => h.event === "PostToolUse").ok = false), "FAIL", /reply-not-observed/],
+		["reply con otro destinatario en el logger", (f) => Object.assign(f.hooks.find((h) => h.event === "PostToolUse"), { reply_to: "P0B01-ffffff", text_ok_ids: [] }), "FAIL", /reply-not-observed/],
 		["la etiqueta pegada no llegó como etiqueta", (f) => (f.hooks.find((h) => (h.test_ids ?? []).includes(ctrls.pasted_tag.id)).channel_tag_count = 0), "INCONCLUSIVE", /pasted-tag-did-not-arrive/],
 	];
 	for (const [name, mut, verdict, why] of cases) {

@@ -36,7 +36,10 @@ export function controlTexts(hex = () => randomBytes(3).toString("hex")) {
 // mod: parsed mod records; hooks: parsed hooks.jsonl lines; send: the XB row of
 // sends-B.jsonl; controls: xb-controls.json; debugLines: claude-debug.log lines.
 export function analyze({ mod, hooks, send, controls, debugLines = [], badModFiles = 0 }) {
-	const out = { verdict: null, reasons: [], facts: {} };
+	// XB-1 judges provenance and correlation INSIDE the CLI only. Integrity of
+	// the evidence on its way to the backend (the relay) is a separate, later
+	// criterion this run cannot pass or fail.
+	const out = { scope: "A: procedencia y correlación dentro del CLI (no evalúa la integridad hasta el backend)", verdict: null, reasons: [], facts: {} };
 	const fail = (r) => out.reasons.push(`FAIL:${r}`);
 	const inconclusive = (r) => out.reasons.push(`INCONCLUSIVE:${r}`);
 	const F = out.facts;
@@ -102,18 +105,32 @@ export function analyze({ mod, hooks, send, controls, debugLines = [], badModFil
 			session_matches_logger: s.bound_session_id === ups[0].session_id,
 			outcome: s.outcome,
 			logger_stop: hooks.filter((h) => h.event === "Stop" && h.prompt_id === P).length,
+			logger_ups_for_prompt_id: hooks.filter((h) => h.event === "UserPromptSubmit" && h.prompt_id === P).length,
 			mod_stop: mod.filter((r) => r.event === "classic.Stop" && r.prompt_id === P).length,
 			logger_tag_count: ups[0].channel_tag_count ?? null,
 		});
 		const originOk = expect === "channel" ? s.origin_kind === "channel" && res.origin_server_matches : s.origin_kind === "composer" && !res.origin_server_present;
-		const ok = originOk && !s.overlap && s.classic_text_equal_all && res.session_matches_logger && s.outcome === "entered" && res.logger_stop >= 1 && res.mod_stop >= 1;
-		return { ...res, ok, why: ok ? null : !originOk ? `origin-${s.origin_kind}` : "chain-incomplete" };
+		// R8 unchanged: exactly one Stop per source for the prompt. A second Stop
+		// (the end-turn path R8 describes) is a failure here, never "≥ 1".
+		const stopsOk = res.logger_stop === 1 && res.mod_stop === 1;
+		const chainOk = !s.overlap && s.classic_count === 1 && s.classic_text_equal_all && res.session_matches_logger && s.outcome === "entered" && res.logger_ups_for_prompt_id === 1;
+		const ok = originOk && chainOk && stopsOk;
+		return { ...res, ok, why: ok ? null : !originOk ? `origin-${s.origin_kind}` : !stopsOk ? `stops-logger=${res.logger_stop}-mod=${res.mod_stop}` : "chain-incomplete" };
 	};
 
 	if (!send || !send.id) inconclusive("no-channel-send-row");
 	else {
 		F.channel = one(send.id, "channel");
-		F.channel.reply_observed = send.result === "hook" && !!send.fakechat_reply;
+		// The reply counts only if it is the exact text, addressed to this
+		// message, and the one reply tool call of this prompt_id (logger).
+		const P = F.channel.prompt_id;
+		const replies = P ? hooks.filter((h) => h.event === "PostToolUse" && /fakechat__reply$/.test(h.tool_name ?? "") && h.prompt_id === P) : [];
+		const fr = send.fakechat_reply;
+		F.channel.reply_tool_calls = replies.length;
+		F.channel.reply_exact = fr?.exact === true;
+		F.channel.reply_to_matches = fr?.reply_to_matches === true;
+		F.channel.reply_observed = send.result === "hook" && F.channel.reply_exact && F.channel.reply_to_matches && replies.length === 1
+			&& replies[0].ok === true && (replies[0].reply_to === send.id || (replies[0].text_ok_ids ?? []).includes(send.id));
 		if (!F.channel.id_seen) inconclusive(`channel:${F.channel.why}`);
 		else if (!F.channel.ok) fail(`channel:${F.channel.why}`);
 		if (!F.channel.reply_observed) fail("channel:reply-not-observed");
@@ -128,7 +145,8 @@ export function analyze({ mod, hooks, send, controls, debugLines = [], badModFil
 		if (!F[k].id_seen) inconclusive(`${k}:${F[k].why}`);
 		else if (!F[k].ok) fail(`${k}:${F[k].why}`);
 	}
-	if (F.channel?.prompt_id && [F.typed?.prompt_id, F.pasted_tag?.prompt_id].includes(F.channel.prompt_id)) fail("prompt-ids-not-distinct");
+	const pids = [F.channel?.prompt_id, F.typed?.prompt_id, F.pasted_tag?.prompt_id].filter(Boolean);
+	if (new Set(pids).size !== pids.length) fail("prompt-ids-not-distinct");
 	if (F.submits_channel_origin !== 1) fail(`channel-origin-submissions=${F.submits_channel_origin}`);
 	if (F.pasted_tag?.id_seen && F.pasted_tag.logger_tag_count !== 1) inconclusive("pasted-tag-did-not-arrive-as-a-tag");
 

@@ -14,6 +14,10 @@
 //     submissions in flight at once, e.g. a prompt typed at Enter while a
 //     channel prompt is being processed) leaves every one involved unbound:
 //     fail-closed, never a guess by time or text.
+//   - Exactly ONE classic.UserPromptSubmit may be attached. Two (a managed
+//     pass plus the rest, or a mod that calls next twice) leave the submission
+//     unbound, even with the same prompt_id: XB-1 attributes nothing it cannot
+//     tie to a single hook delivery.
 //   - Text equality between the two is a consistency check, never the key.
 //
 // Observational: every handler calls next(e) exactly once with the event it
@@ -77,7 +81,7 @@ export function createProbe({ inst, now }) {
 				const ids = [...new Set(s.classic.map((c) => c.prompt_id))];
 				const sids = [...new Set(s.classic.map((c) => c.session_id))];
 				const textEqual = s.classic.length > 0 && s.classic.every((c) => c.prompt !== null && c.prompt === s.text);
-				const bound = !s.overlap && s.classic.length >= 1 && ids.length === 1 && ids[0] !== null && sids.length === 1 && textEqual;
+				const bound = !s.overlap && s.classic.length === 1 && ids.length === 1 && ids[0] !== null && sids.length === 1 && textEqual;
 				await emit(sink, {
 					event: "prompt.submit",
 					origin_kind: s.origin_kind,
