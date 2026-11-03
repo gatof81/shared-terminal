@@ -19,6 +19,7 @@ Evidencia hasta ahora (2026-11-03):
 | [02-architecture-rfc.md](./02-architecture-rfc.md) | Evidencia sobre Channels, alternativas, componentes, fallos, seguridad, decisiones |
 | [03-protocol.md](./03-protocol.md) | Identidades, persistencia, estados de entrega, API, límites, recuperación |
 | [04-poc.md](./04-poc.md) | POC aislada con un agente y criterios GO / NO-GO fijados de antemano |
+| [08-host-chat-guests.md](./08-host-chat-guests.md) | **Propuesta (no aprobada)**: conversación individual por agente con invitados temporales vía `@menciones`; impacto en 01, 02, 03, 05 y 06 |
 | [05-roadmap.md](./05-roadmap.md) | Fases y PRs independientes, dependencias, riesgos |
 | [06-ux.md](./06-ux.md) | Chat del proyecto, menciones, presencia, estados, Control Directo |
 | [07-review.md](./07-review.md) | Revisión crítica independiente y cómo se resolvió cada hallazgo |
