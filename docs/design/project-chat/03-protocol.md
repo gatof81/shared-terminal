@@ -7,6 +7,10 @@ las mediciones de [04-poc.md](./04-poc.md).
 
 Referencias: [RFC](./02-architecture-rfc.md) §5. Secciones de CONVERSATION.md citadas como §x.y.
 
+Actualización 2026-11-03: los mensajes viven en **conversaciones anfitrionas** (una por agente, con
+invitados temporales y modo Colaboración; RFC §5.2, §5.6 y decisiones R10–R15). Las reglas de
+entrega, la atribución (§3.1), el clasificador (§5) y el kill switch (§6.4) no cambian.
+
 ---
 
 ## 1. Identidades
@@ -16,17 +20,24 @@ Referencias: [RFC](./02-architecture-rfc.md) §5. Secciones de CONVERSATION.md c
 | `project_id` | UUID v4 | backend | la vida del proyecto | D1 `projects` |
 | `agent_id` | UUID v4 | backend | la vida del agente en el proyecto | D1 `project_agents` |
 | `handle` | `^[a-z][a-z0-9-]{1,31}$`, único por proyecto | owner | renombrable (los mensajes guardan `agent_id`) | D1 |
+| `provider` | `claude-code` en v1; `codex` reservado (sin adaptador) | owner al crear el agente | la vida del agente | D1 `project_agents` |
+| `role` | texto ≤ 60, para el selector | owner | editable | D1 `project_agents` |
+| `chat_id` | UUID v4 | backend | la vida de la conversación anfitriona (sobrevive a `/clear`, `/resume`, reinicios); el anfitrión **nunca** cambia | D1 `chats` + ruta del log |
+| `participation_id` | UUID v4 | backend al invitar | una participación (`chat_id`, `agent_id`); **nuevo** en cada reinvitación | D1 `chat_participants` + eventos |
+| `participants_version` | entero por `chat_id`, +1 en cada cambio del conjunto de participaciones no terminales | backend | hasta el siguiente cambio | D1 `chats` + eventos |
+| `grant_id` | UUID v4 | backend al activar Colaboración | un permiso de Colaboración | log de la conversación |
 | `st_session_id` | existente | — | — | D1 `sessions` |
 | `start_gen` | entero por sesión, se incrementa en cada parada del contenedor (`onSessionDown`, §5.2 v1.7.2); **no** en una salida del CLI | backend | un arranque del contenedor | memoria del backend |
 | `endpoint_id` | UUID v4 | backend en `hello` | un proceso `st-channel` | memoria + evento de log |
 | `claude_pid` | pid del proceso padre de `st-channel` | `st-channel` (`getppid()`) | un proceso `claude` | memoria + evento |
 | `cid` | `session_id` de Claude | CLI | una conversación | captura |
-| `msg_id` | UUID v4 | backend | siempre | log del proyecto |
-| `client_message_id` | UUID v4 | cliente (humano) o `st-channel` (agente) | un intento de envío | log del proyecto |
+| `msg_id` | UUID v4 | backend | siempre | log de la conversación |
+| `client_message_id` | UUID v4 | cliente (humano) o `st-channel` (agente) | un intento de envío | log de la conversación |
 | `chain_id` | = `msg_id` del mensaje humano que abre la cadena | backend | la cadena de delegación | log |
 | `lease_id` | UUID v4 | backend en `next` | un intento de transporte | memoria + evento |
 
-Invariante: un mensaje se dirige a `agent_id`. `endpoint_id`, `claude_pid` y `cid` son evidencia de
+Invariante: un mensaje se dirige a `agent_id` **dentro de un `chat_id`**, y cada entrega queda ligada
+al `participation_id` vigente del destinatario. `endpoint_id`, `claude_pid` y `cid` son evidencia de
 entrega, nunca destino elegido por el cliente.
 
 ## 2. Persistencia
@@ -46,6 +57,8 @@ CREATE TABLE IF NOT EXISTS project_agents (
   project_id     TEXT NOT NULL REFERENCES projects(project_id),
   handle         TEXT NOT NULL,
   st_session_id  TEXT NOT NULL REFERENCES sessions(session_id),
+  provider       TEXT NOT NULL DEFAULT 'claude-code' CHECK (provider IN ('claude-code')), -- 'codex' reservado: se agrega con su adaptador
+  role           TEXT,                       -- ≤ 60, para el selector
   created_at     TEXT NOT NULL DEFAULT (datetime('now')),
   removed_at     TEXT,
   UNIQUE (project_id, handle)
@@ -60,23 +73,67 @@ CREATE TABLE IF NOT EXISTS project_agent_edges (
   mode           TEXT NOT NULL CHECK (mode IN ('allow')),  -- ausencia = aprobación humana
   PRIMARY KEY (project_id, from_agent_id, to_agent_id)
 );
+-- conversación anfitriona (diseño para P3; la migración se escribe en P3, no ahora)
+CREATE TABLE IF NOT EXISTS chats (
+  chat_id               TEXT PRIMARY KEY,
+  project_id            TEXT NOT NULL REFERENCES projects(project_id),
+  owner_user_id         TEXT NOT NULL REFERENCES users(id),
+  host_agent_id         TEXT NOT NULL REFERENCES project_agents(agent_id),  -- nunca cambia
+  participants_version  INTEGER NOT NULL DEFAULT 1,
+  created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+  archived_at           TEXT
+);
+-- una conversación anfitriona activa por agente (R10)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chats_active_host
+  ON chats(host_agent_id) WHERE archived_at IS NULL;
+CREATE TABLE IF NOT EXISTS chat_participants (
+  participation_id  TEXT PRIMARY KEY,
+  chat_id           TEXT NOT NULL REFERENCES chats(chat_id),
+  agent_id          TEXT NOT NULL REFERENCES project_agents(agent_id),  -- del mismo proyecto que el chat (R14)
+  role              TEXT NOT NULL CHECK (role IN ('host','guest')),
+  state             TEXT NOT NULL CHECK (state IN ('invited','awaiting_approval','active','declined','removed')),
+  invited_by        TEXT NOT NULL,             -- 'user:<id>' | 'agent:<agent_id>'
+  created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+  ended_at          TEXT
+);
+-- a lo sumo una participación no terminal por (chat, agente)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_participants_live
+  ON chat_participants(chat_id, agent_id) WHERE state IN ('invited','awaiting_approval','active');
 ```
 
-Borrado: "quitar" un agente pone `removed_at`; un proyecto se archiva. Nada se borra en v1 salvo el
-hard delete de la sesión, que **MUST** fallar con 409 `agent-active` mientras la sesión sea un agente
+Borrado: "quitar" un agente pone `removed_at` (y sus participaciones pasan a `removed`); un proyecto
+se archiva; una conversación anfitriona se archiva (`archived_at`). Nada se borra en v1 salvo el hard
+delete de la sesión, que **MUST** fallar con 409 `agent-active` mientras la sesión sea un agente
 activo (el owner lo quita primero). Ninguna columna existente cambia.
 
-### 2.2 Log del proyecto (host)
+`chats` y `chat_participants` son el **conjunto vigente**: el cambio de participaciones es un CAS sobre
+`participants_version` (la escritura incluye `WHERE participants_version = ?`), y el log de la
+conversación registra cada cambio con la versión resultante como historia. El monitor guarda en
+memoria las participaciones de las conversaciones con entregas no terminales (escritura directa,
+invalidada antes y después de cada escritura, el mismo patrón que `portMappings.ts` y el cache de propiedad de `sessionManager.ts`), así la condición 5 de
+RFC §5.5 no agrega una lectura a D1 por `next`. **Los permisos de Colaboración no tienen tabla D1**:
+viven sólo en el log de la conversación (son temporales, se consumen en el camino caliente del
+préstamo y su único escritor es el del log); el snapshot del índice guarda el permiso vivo y su
+consumo.
+
+### 2.2 Logs de las conversaciones (host)
 
 ```
-<WORKSPACE_ROOT>/.projects/<project_id>/chat.events.jsonl   append-only, seq por proyecto
-<WORKSPACE_ROOT>/.projects/<project_id>/chat.index.json     snapshot atómico (estado plegado)
+<WORKSPACE_ROOT>/.projects/<project_id>/chats/<chat_id>.events.jsonl   append-only, seq por conversación
+<WORKSPACE_ROOT>/.projects/<project_id>/chats/<chat_id>.index.json     snapshot atómico (estado plegado)
+<WORKSPACE_ROOT>/.projects/<project_id>/runtimes.events.jsonl          append-only, eventos `runtime` del proyecto
 ```
+
+Un log por conversación anfitriona: mensajes, participaciones, permisos de Colaboración y entregas
+de esa conversación. Los eventos `runtime` (registro, `degraded`, `cleared`) son del **agente**, no
+de una conversación —un agente participa en varias y "uno en vuelo por agente" vale entre todas—,
+así que viven en un log del proyecto con el mismo formato y las mismas garantías. Lo que sigue vale
+para los dos.
 
 Del patrón de `conversation/store.ts` se toman sólo el formato (`seq` asignado por el único
 escritor, **persistido ⇔ línea escrita con `seq`**, snapshot recuperado desde el archivo, rotación
 L7). **No** se toma su cola: el store de conversaciones no hace fsync y, bajo presión (L6/G1),
-descarta eventos con `gap backpressure`. El log del proyecto *MUST NOT* descartar nunca: cada
+descarta eventos con `gap backpressure`. Estos logs *MUST NOT* descartar nunca: cada
 escritura resuelve sólo tras `write` + `fsync` del archivo (patrón de `paneRecord.ts` /
 `recreateAttempt.ts`, incluido el fsync de directorios al crear), y si no puede escribir, la
 operación falla (503 en la API, `next` sin préstamo) en lugar de perder una línea. Por eso un
@@ -85,13 +142,26 @@ su efecto.
 
 | `ev` | Campos | Identidad (dedupe) |
 | --- | --- | --- |
-| `message` | `msg_id`, `client_message_id`, `author{kind: human\|agent, user_id?\|agent_id?}`, `to[]` (agent_ids), `kind: request\|info\|progress\|result\|question`, `text` (≤ **M1**), `in_reply_to?`, `chain{chain_id, depth}` | `author` + `client_message_id` |
-| `delivery` | `msg_id`, `agent_id`, `state` (§3), `reason?`, `lease_id?`, `endpoint_id?`, `start_gen?`, `relay{generation, dropped}?` (lectura de base, en `transporting`/`transported`), `cid?`, `prompt_id?`, `turn_seq?`, `by?` | `msg_id` + `agent_id` + `state` |
-| `approval` | `msg_id`, `agent_id`, `decision: approved\|denied`, `by` (user_id) | `msg_id` + `agent_id` |
+| `chat` | `chat_id`, `project_id`, `host_agent_id`, `event: created\|archived`, `by` (user_id) | `chat_id` + `event` |
+| `participant` | `participation_id`, `agent_id`, `role: host\|guest`, `event: invited\|joined\|declined\|removed`, `by` (`user:<id>` o `agent:<agent_id>`), `awaiting_approval?` (en `invited` pedido por un agente), `participants_version` (resultante), `reason?` (`agent-removed`, `chat-archived`) | `participation_id` + `event` |
+| `collab_grant` | `grant_id`, `chat_id`, `by` (user_id), `participants: [{agent_id, participation_id}]`, `max_deliveries`, `expires_at`, `created_at` — exactamente el alcance que se mostró al activar | `grant_id` |
+| `collab_revoked` | `grant_id`, `by` (user_id) | `grant_id` |
+| `collab_ended` | `grant_id`, `reason: budget\|expired\|participant-removed\|chat-archived` | `grant_id` |
+| `message` | `msg_id`, `chat_id`, `client_message_id`, `author{kind: human\|agent, user_id?\|agent_id?, participation_id?}`, `to[]` (agent_ids resueltos), `routing: default-host\|explicit`, `participants_version`, `context[]` (`msg_id`s elegidos por la persona; vacío por defecto), `kind: request\|info\|progress\|result\|question`, `text` (≤ **M1**), `in_reply_to?`, `chain{chain_id, depth}` | `author` + `client_message_id` |
+| `delivery` | `msg_id`, `chat_id`, `agent_id`, `participation_id` (del destinatario), `state` (§3), `reason?`, `authorized_by?` (`approval`\|`edge`\|`collab:<grant_id>`, sólo autor agente), `collab_n?` (unidad consumida, en `transporting`), `marks?` (`after_removal`, `after_collab_end`), `lease_id?`, `endpoint_id?`, `start_gen?`, `relay{generation, dropped}?` (lectura de base, en `transporting`/`transported`), `cid?`, `prompt_id?`, `turn_seq?`, `by?` | `msg_id` + `agent_id` + `state` |
+| `approval` | `msg_id`, `agent_id`, `decision: approved\|denied`, `context[]?` (agregado por la persona al aprobar), `by` (user_id) | `msg_id` + `agent_id` |
 | `runtime` | `agent_id`, `endpoint_id`, `event: registered\|retired\|ambiguous\|degraded\|cleared`, `start_gen`, `pane`, `claude_pid`, `claude_start_time`, `cli_version`, `reason?`, `trigger_msg_id?` (la entrega que causó `degraded`), `by?` (usuario que pulsó "Probar el canal otra vez" en `cleared`) | `endpoint_id` + `event` + `trigger_msg_id` (o `seq` del evento para `cleared`): un segundo `degraded` tras un `cleared` no se descarta como repetido |
 | `gap` | como §4.5 | — |
 
-El texto vive **sólo** aquí. La captura de la conversación guarda `channel_prompt` sin texto (§5).
+Orden en el log: `participant{invited}` se escribe **antes** del `message` que invita; un
+`collab_grant` antes de cualquier entrega que lo cite; `collab_ended{budget}` inmediatamente después
+del `transporting` que consumió la última unidad. Las líneas del log de runtimes van a su archivo.
+Una invitación pedida por un agente es `participant{invited, by: agent:…, awaiting_approval: true}`;
+su decisión es `joined` o `declined` con el `by` del usuario. Una invitada por la persona pasa a
+`joined` con su primera entrega prestada.
+
+El texto vive **sólo** aquí. La captura de la conversación del CLI guarda `channel_prompt` sin texto
+(§5). `context[]` guarda referencias, no copias: el texto citado se arma al prestar la entrega.
 
 ## 3. Estados de entrega
 
@@ -101,13 +171,13 @@ con `in_reply_to`. Las tres cosas no se mezclan.
 
 ```mermaid
 stateDiagram-v2
-  [*] --> awaiting_approval: autor agente sin arista allow
-  [*] --> queued: autor humano, o arista allow
+  [*] --> awaiting_approval: autor agente sin arista allow ni Colaboración viva
+  [*] --> queued: autor humano, arista allow o Colaboración viva
   awaiting_approval --> queued: approval approved
   awaiting_approval --> denied: approval denied
-  awaiting_approval --> cancelled: owner cancela
-  queued --> transporting: next (lease)
-  queued --> cancelled: owner cancela
+  awaiting_approval --> cancelled: owner cancela / participante retirado / conversación archivada
+  queued --> transporting: next (lease; condiciones 5 y 6 del RFC §5.5)
+  queued --> cancelled: owner cancela / participante retirado / conversación archivada / Colaboración terminada / arista quitada
   queued --> failed: expired / agent-removed
   transporting --> transported: st-channel informa
   transporting --> uncertain: lease vence / reinicio del backend
@@ -144,7 +214,7 @@ stateDiagram-v2
 | `interrupted` | el turno aceptado terminó sin `turn_end` (`turn_failed`, `session_end`, parada) | log | sí |
 | `unconfirmed` | no hubo aceptación y hay evidencia de que el CLI ya no lo tiene (abajo); pudo haber llegado al modelo sin hook (relay perdido); **sin reintento automático** | log | sí |
 | `failed{reason}` | no se transportó: `expired`, `agent-removed`, `queue-full`, `persist-failed` | log | sí |
-| `denied` / `cancelled` | decisión humana | log | sí |
+| `denied` / `cancelled{reason}` | decisión humana o consecuencia de una: `by-owner`, `participant-removed` (retirado el destinatario o el agente autor), `chat-archived`, `collab-ended` (la Colaboración que la autorizaba terminó antes del préstamo), `edge-removed` (la arista que la autorizaba ya no existe en el préstamo) | log | sí |
 
 Reglas:
 
@@ -181,6 +251,17 @@ Reglas:
 5. Un `channel_prompt` (o `user_prompt{origin: mixed}`) cuyo `st_msg` corresponde a una entrega ya
    terminal se persiste como evidencia `late_after_terminal`, se muestra en la UI ("el agente sí lo
    recibió, después") y **no** cambia el estado.
+6. *MUST*: una entrega en vuelo (`transporting`, `transported`, `uncertain`, `accepted`) **no se
+   cancela** por un retiro, un archivo o el fin de una Colaboración: Channels no tiene cancelación y
+   el CLI puede tenerla. Sigue su curso hasta su estado terminal normal y se anota con `marks`:
+   `after_removal` ("llegó después del retiro") o `after_collab_end` ("en curso al terminar la
+   colaboración"). Su resultado se muestra así marcado y no se entrega a nadie (R12).
+7. *MUST*: la condición de participación (`participation_id` del destinatario `active`) y la
+   autorización de un autor agente (`approval`, `edge` entre participantes activos, o
+   `collab:<grant_id>` vivo, de la misma conversación y con presupuesto) se comprueban **en el
+   préstamo**, bajo el lock del agente y antes de escribir `transporting`. Si fallan, la entrega pasa a
+   `cancelled{…}` y nada se presta. Para `collab`, la unidad de presupuesto se consume en esa misma
+   escritura (`collab_n`).
 
 ### 3.1 Atribución del resultado (decisión R8)
 
@@ -228,7 +309,7 @@ Salida sin cierre (`no-close`): si tras `accepted` dos probes con el runtime **e
 `prompt_id = P`, la entrega pasa a `ended_unattributed{no-close}` (el `Stop` se perdió o el turno se
 cerró con otro id). Así un hook perdido no bloquea al agente hasta `T_queue`. Caso que queda en manos de la persona:
 si un diálogo o un borrador en el Terminal impiden que el runtime esté "en su prompt", `no-close`
-no se dispara y la entrega sigue `accepted`; el roster muestra "necesita el Terminal" y la cola
+no se dispara y la entrega sigue `accepted`; la disponibilidad muestra "necesita el Terminal" y la cola
 del agente espera. No se fuerza nada: es el mismo bloqueo que la persona ve en el Terminal.
 
 Un `turn_end` adicional con `prompt_id = P` después del cierre y antes de cualquier prompt nuevo (un
@@ -245,17 +326,22 @@ notificación de tarea, aparece un `internal_prompt` en la ventana (A4).
 
 ## 4. Elegibilidad, orden y concurrencia
 
-- **Orden**: por agente, FIFO por `seq` de `queued`. Entre agentes no hay orden global.
+- **Orden**: por agente, FIFO. Dentro de una conversación, por `seq` de `queued`; entre las
+  conversaciones de un mismo agente, por orden de llegada al backend (el `seq` es por conversación),
+  sin prioridad por conversación en v1. Entre agentes no hay orden global.
 - **Uno en vuelo por agente**: un agente con una entrega en `transporting`, `transported`,
-  `uncertain` o `accepted` no recibe otra.
+  `uncertain` o `accepted` no recibe otra, **en ninguna** de las conversaciones donde participa. La
+  entrega en vuelo lleva su `chat_id`; las respuestas se enrutan por `in_reply_to → chat_id`, nunca
+  por "la última conversación".
 - **"En su prompt"** (definición estricta, usada por la elegibilidad y por las reglas 2b (b), 2b (c)
   y `no-close`): probe de la conversación del runtime (`probe.pid = claude_pid`) con identidad
   verificada (§5.3 v1.7.2), `status = idle` o `waiting` con `waitingFor ∈ {ausente, "input needed"}`
   (regla de v1.7.4), **y** la región de entrada del pane vacía según el parser de
   `composer-not-empty` de §8.1.3 (`capture-pane`, lectura; no escribe nada). Un diálogo abierto o un
   borrador en el input **no** es "en su prompt".
-- **Elegible** ⇔ regla 1–4 del RFC §5.5: runtime único del `start_gen` actual, no `degraded` ∧ "en
-  su prompt" ∧ nada en vuelo ∧ pane sin registro del Composer sin liberar.
+- **Elegible** ⇔ reglas 1–6 del RFC §5.5: runtime único del `start_gen` actual, no `degraded` ∧ "en
+  su prompt" ∧ nada en vuelo ∧ pane sin registro del Composer sin liberar ∧ participación `active`
+  con el mismo `participation_id` ∧ (autor humano, o autorización válida en ese momento: §3 regla 7).
 - La evaluación ocurre en el `next` bajo un lock en memoria por agente: una **instancia propia** de
   `SessionLifecycleLock` para el monitor (como hace el Composer en `composer.ts`), clave
   `project-agent:<agent_id>`, modo `fail`. No el singleton de ciclo de vida, cuyo guard
@@ -332,16 +418,26 @@ con el Terminal y está marcada.
 | `POST` | `/api/projects/:pid/agents` | `{handle, sessionId}` → 201; 409 `session-taken` / `handle-taken`; la sesión debe ser del owner |
 | `DELETE` | `/api/projects/:pid/agents/:aid` | quita (`removed_at`); entregas no terminales ⇒ `failed{agent-removed}` |
 | `PUT` | `/api/projects/:pid/edges` | `[{from, to}]` (modo `allow`) |
-| `POST` | `/api/projects/:pid/messages` | `{text, to: [handle], kind?, inReplyTo?, clientMessageId}` → 202 `{msgId, deliveries:[{agent, state}]}`; idempotente por `clientMessageId` (misma respuesta) |
-| `GET` | `/api/projects/:pid/messages?before=<seq>&limit≤200` | página del log plegada (mensajes + último estado de cada entrega) |
-| `POST` | `/api/projects/:pid/messages/:mid/approve` | `{agent, decision}` |
+| `POST` | `/api/projects/:pid/agents/:aid/chats` | crea la conversación anfitriona de ese agente → 201 `{chatId, participantsVersion}`; 409 `host-chat-active` si ya tiene una activa (R10) |
+| `GET` | `/api/projects/:pid/agents/:aid/chats` | conversaciones de ese anfitrión: la activa y las archivadas |
+| `POST` | `/api/chats/:cid/archive` | archiva: colas ⇒ `cancelled{chat-archived}`, Colaboración ⇒ `collab_ended{chat-archived}`, solo lectura |
+| `GET` | `/api/chats/:cid` | metadatos, participantes (`participationId`, `agentId`, handle, proveedor, rol, `role`, `state`), `participantsVersion`, Colaboración viva (alcance, consumo, vencimiento) |
+| `POST` | `/api/chats/:cid/messages` | `{text, to: [agentId], invite?: [agentId], participantsVersion, context?: [msgId], kind?, inReplyTo?, clientMessageId}` → 202 `{msgId, deliveries:[{agentId, participationId, state}]}`. Sin mención el cliente manda el anfitrión en `to` (`routing: default-host`); el servidor **nunca** infiere `to` ni lee `@` del texto. Cada `to` tiene que ser participante activo o estar en `invite` (agente del mismo proyecto, R14; ≤ M9 participantes) ⇒ si no, 400 `not-a-participant`. 409 `participants-changed` si `participantsVersion` no es la vigente (nada se persiste; el cliente conserva el borrador); 409 `chat-archived`. `context` sólo admite mensajes de esta conversación, se cuenta en M1 y viene vacío por defecto (R15). Idempotente por `clientMessageId` (misma respuesta) |
+| `GET` | `/api/chats/:cid/messages?before=<seq>&limit≤200` | página del log plegada (mensajes + último estado de cada entrega + eventos de participación y Colaboración) |
+| `POST` | `/api/chats/:cid/context-preview` | `{context: [msgId], to: [agentId]}` → el texto exacto que recibiría cada destinatario y su tamaño frente a M1; sin efectos |
+| `DELETE` | `/api/chats/:cid/participants/:participationId` | retirar (sólo invitados; el anfitrión no se retira) ⇒ `participant{removed}`, +1 `participantsVersion`, efectos de RFC §5.6 |
+| `POST` | `/api/chats/:cid/participants/:participationId/decision` | `{decision: approved\|denied}` para una invitación pedida por un agente ⇒ `joined`/`declined` |
+| `POST` | `/api/chats/:cid/messages/:mid/approve` | `{agentId, decision, context?: [msgId]}`: la persona puede agregar contexto al aprobar un mensaje de agente |
+| `POST` | `/api/chats/:cid/messages/:mid/cancel` | sólo `awaiting_approval`/`queued` |
+| `POST` | `/api/chats/:cid/collab` | `{participants: [participationId], maxDeliveries?, expiresInSec?, participantsVersion}` → 201 `{grantId, …}` con el alcance registrado tal como se mostró; por defecto 6 entregas y 30 min, topes M11/M12 ⇒ 400; ≥ 2 participantes activos; 409 `collab-active` (ya hay uno vivo), `participants-changed`, `chat-archived` |
+| `DELETE` | `/api/chats/:cid/collab/:grantId` | "Detener" ⇒ `collab_revoked{by}`; colas bajo el permiso ⇒ `cancelled{collab-ended}`; idempotente |
 | `POST` | `/api/projects/:pid/agents/:aid/channel/retry` | "Probar el canal otra vez": owner-only; 409 `not-degraded` salvo con el runtime `degraded`; escribe `runtime cleared{by}`; no toca ninguna entrega (el `unconfirmed` no se reenvía); la siguiente entrega en cola vuelve a ser elegible |
-| `POST` | `/api/projects/:pid/messages/:mid/cancel` | sólo `awaiting_approval`/`queued` |
-| `GET` | `/api/projects/:pid/agents` | roster con presencia (`state`, `statusEvidence`, `runtime: {registered, degraded?, reason?}`, `queueDepth`) |
-| `WS` | `/ws/project/<pid>` | protocolo de §6.1 de CONVERSATION.md: `subscribe{after}` → replay sin huecos + vivo; nueva ruta en `WS_PATH_PREFIXES` con test en `wsUpgrade.test.ts` |
+| `GET` | `/api/projects/:pid/agents` | directorio con disponibilidad (`handle`, `provider`, `role`, `state`, `statusEvidence`, `runtime: {registered, degraded?, reason?}`, `queueDepth`) para el selector `@` |
+| `WS` | `/ws/project/<pid>` | protocolo de §6.1 de CONVERSATION.md con `subscribe{chat, after}` (como `subscribe{conv, after}`) → replay sin huecos + vivo de esa conversación; nueva ruta en `WS_PATH_PREFIXES` con test en `wsUpgrade.test.ts` |
 
 Menciones: el cliente envía `to` explícito; el servidor no interpreta `@` dentro del texto (evita que
-un agente "mencione" por texto y cree entregas implícitas).
+un agente "mencione" por texto y cree entregas implícitas). Las rutas `/api/chats/:cid/*` comprueban
+que la conversación sea del owner (404 si no, como un `chat_id` inexistente).
 
 ### 6.2 Endpoint de canal (`/ingest/channel/*`, token de ingesta)
 
@@ -354,12 +450,16 @@ endpoint es nuestro proceso, no un hook del CLI.
 | `POST` | `/ingest/channel/hello` | `{pane, claudePid, claudeStartTime, cliVersion, relayGeneration, relayDropped, nonce}` (`claudeStartTime` = campo 22 de `/proc/<claudePid>/stat`) | `{endpointId, agent: {handle, project} \| null, pollWaitSec}`. Antes de declarar ambigüedad, el monitor comprueba los runtimes anteriores de la sesión: uno cuyo `claude_pid` ya no existe (probe sin ese `pid`, o `/proc` por `execCapture`) se retira primero. Sólo dos procesos vivos ⇒ ambos `ambiguous`; la ambigüedad termina cuando queda uno (salida, `bye` o la misma comprobación en el siguiente `next`) |
 | `GET` | `/ingest/channel/next?endpoint=…&relayGeneration=…&relayDropped=…` | long-poll ≤ 25 s; 204 puede traer `{relayCheck: true}` (§3.1 A7) | 200 `{leaseId, leaseTtlMs, msgId, content, meta}`. *MUST*: `st-channel` no escribe la notificación si ya pasó `requestSentAt + leaseTtlMs − 2 s` (medido desde que **envió** el `next`, cota conservadora porque el lease del servidor empieza después); en ese caso descarta el lease sin escribir nada. Así un 200 retrasado por la red nunca produce una escritura después de que el lease venció y la entrega pudo volverse terminal \| 204 \| 410 `retired` (el endpoint debe volver a `hello`) |
 | `POST` | `/ingest/channel/transported` | `{endpointId, leaseId, relayGeneration, relayDropped}` (lectura tomada justo antes de escribir la notificación; es la base de A7 y de la regla 2b) | 204; lease desconocido o vencido ⇒ 409 (el monitor ya lo marcó `uncertain`) |
-| `POST` | `/ingest/channel/post` | `{endpointId, clientMessageId, to?: [handle], kind, text, inReplyTo?}` | `{msgId, deliveries}`; 429 por límites; el resultado de la herramienta MCP se lo cuenta al modelo |
+| `POST` | `/ingest/channel/post` | `{endpointId, clientMessageId, to?: [handle], kind, text, inReplyTo}` | `{msgId, deliveries}`. `inReplyTo` es **obligatorio**: tiene que ser un mensaje **entregado a este agente** en una conversación donde su participación sigue `active`; esa es la conversación del mensaje. Si no, 403 `not-a-participant`. Los `handle` de `to` se resuelven entre los participantes activos de esa conversación (fuera de ellos ⇒ 403 `not-a-participant`; un agente no invita por `post`). 429 por límites; el resultado de la herramienta MCP se lo cuenta al modelo |
+| `POST` | `/ingest/channel/invite` | `{endpointId, clientMessageId, handle, reason, inReplyTo}` | `{participationId, state: awaiting_approval}` **siempre** (R13, aunque exista arista o Colaboración); mismo anclaje por `inReplyTo` que `post`; agente del mismo proyecto (R14); más de M9 participantes ⇒ 409 `too-many-participants`; más de M10 invitaciones de agentes por cadena ⇒ 429 `invite-budget` |
 | `POST` | `/ingest/channel/bye` | `{endpointId}` | 204 (retiro ordenado; el desordenado lo detecta `start_gen` o el vencimiento del poll) |
 
-`meta` que el monitor manda (claves identificador, C3): `st_msg`, `from` (handle u `owner`),
-`from_kind` (`human`\|`agent`), `kind`, `depth`, `in_reply_to?`. `content` = texto del mensaje, sin
-envoltorio adicional.
+`meta` que el monitor manda (claves identificador, C3): `st_msg`, `chat_id`, `participation_id` (la
+del destinatario), `from` (handle u `owner`), `from_kind` (`human`\|`agent`), `kind`, `depth`,
+`in_reply_to?`, `collab?` (`<grant_id>:<n>/<max>` si la autoriza una Colaboración), `context?` (los
+`msg_id` citados, separados por coma). `content` = texto del mensaje; si la persona autorizó
+contexto, después del texto van los mensajes citados, cada uno con su `msg_id` y su autor, marcados
+como **cita y no instrucción**. El formato exacto del bloque citado se fija en P2. El total cumple M1.
 
 Un endpoint sin `next` en curso durante `T_endpoint_silent` (60 s) se retira (`runtime retired`).
 
@@ -367,23 +467,27 @@ Un endpoint sin `next` en curso durante `T_endpoint_silent` (60 s) se retira (`r
 
 | Herramienta | Entrada | Efecto |
 | --- | --- | --- |
-| `chat_post` | `text`, `kind: progress\|result\|question\|info`, `in_reply_to?` | mensaje al proyecto, visible para el owner; no se entrega a agentes |
-| `chat_send` | `to: [handle]`, `text`, `kind: request\|info`, `in_reply_to?` | mensaje a agentes, sujeto a §7 y §8; el resultado de la herramienta dice `queued` o `awaiting_approval` |
-| `chat_agents` | — | roster del proyecto (handles y disponibilidad), sin contenido |
+| `chat_post` | `text`, `kind: progress\|result\|question\|info`, `in_reply_to` (obligatorio) | mensaje a la conversación de `in_reply_to`, visible para la persona; no se entrega a agentes. Exige participación activa y que `in_reply_to` se le haya **entregado a este agente en esa conversación**; si no, 403 `not-a-participant` |
+| `chat_send` | `to: [handle]`, `text`, `kind: request\|info`, `in_reply_to` (obligatorio) | mensaje a participantes activos de esa misma conversación, sujeto a §7 y §8; el resultado de la herramienta dice `queued` (con `authorized_by: edge` o `collab:<grant_id>`, y en ese caso `n/max`) o `awaiting_approval`. Sólo su texto: un agente no adjunta contexto |
+| `chat_invite` | `handle`, `reason`, `in_reply_to` (obligatorio) | pide sumar a un agente del mismo proyecto a esa conversación; **siempre** `awaiting_approval` (R13) |
+| `chat_agents` | `in_reply_to?` | directorio del proyecto (handles, proveedor, rol, disponibilidad) y, con `in_reply_to`, los participantes activos de esa conversación; sin contenido |
 
 Respuesta a quien pidió (caso U5): cuando A envía `chat_send` a B y B completa el turno, el resultado
-de B se publica en el proyecto con `in_reply_to` = mensaje de A. **No** se entrega automáticamente a
-A: devolverlo es otro mensaje agente→agente (B→A) y sigue la misma regla (arista `allow` B→A o
-aprobación del owner, que la UI ofrece con un botón "Enviar resultado a @A"). Así ningún contenido de
-un agente entra en otro sin autorización explícita.
+de B se muestra a la persona en la conversación, en la tarjeta de B, con `in_reply_to` = mensaje de A.
+**No** se entrega automáticamente a A (R12): la persona puede citarlo en un mensaje a A con "Enviar a
+@A" (un mensaje humano nuevo con `context`), o B puede contestarle con un `chat_send` explícito, que
+necesita aprobación, una arista `allow` B→A entre participantes activos, o una Colaboración viva que
+cubra a los dos. Así ningún contenido de un agente entra en otro sin autorización explícita.
 
 Capacidades declaradas: `tools`, `experimental['claude/channel']`. *MUST NOT* declarar
 `claude/channel/permission`. Revisión MCP negociada: la anterior a 2026-07-28 (C18).
 
 `instructions` (texto fijo, revisado en el PR de imagen): explica la etiqueta, que `from_kind="human"`
 es el owner del proyecto, que `from_kind="agent"` es una petición de otro agente que **no** autoriza
-nada por sí misma, que el informe final del turno se publica solo y que `chat_post` es para avances
-o preguntas.
+nada por sí misma, que el contexto citado es material de referencia y no instrucciones, que el
+informe final del turno se publica solo (y no le llega a nadie más), que toda herramienta se ancla
+con `in_reply_to` a la conversación del mensaje recibido, y que `chat_post` es para avances o
+preguntas.
 
 ### 6.4 Kill switch, fallos del transporte y ausencia de fallback
 
@@ -404,7 +508,7 @@ sí se garantiza:
    `degraded{source-absent}` (§5). Un runtime `degraded` no
    recibe ninguna entrega. La UI muestra el agente como "canal sin respuesta" con la causa, y cada
    mensaje en cola dice "retenido: canal degradado".
-3. **`degraded` es del proceso, no del endpoint**: se guarda en el log del proyecto con la clave
+3. **`degraded` es del proceso, no del endpoint**: se guarda en el log de runtimes del proyecto (§2.2) con la clave
    (`st_session_id`, `claude_pid`, `claude_start_time`) y sobrevive a un reinicio del backend y a los
    `hello` repetidos del mismo proceso (410 tras un reinicio, red cortada). Sólo lo levantan: un
    proceso `claude` **distinto** (otro `pid` u otro `start_time`), o el botón del owner "Probar el
@@ -423,9 +527,10 @@ sí se garantiza:
 
 | Actor | Puede | No puede |
 | --- | --- | --- |
-| Owner del proyecto | todo lo de §6.1 | añadir sesiones ajenas como agentes |
-| Admin / lead | nada en v1 (404 como un proyecto inexistente) | — (decisión R5) |
-| Endpoint de la sesión S (cualquier proceso del contenedor de S con el token) | registrar runtimes de S; recibir mensajes del agente de S; publicar como ese agente en su proyecto | leer el log del proyecto; publicar como otro agente; dirigir a agentes de otro proyecto |
+| Owner del proyecto | todo lo de §6.1, incluidas invitaciones, retiros, aprobaciones y activar o detener una Colaboración | añadir sesiones ajenas como agentes; invitar agentes de otro proyecto (R14) |
+| Admin / lead | nada en v1 (404 como un proyecto o una conversación inexistente) | — (decisión R5) |
+| Endpoint de la sesión S (cualquier proceso del contenedor de S con el token) | registrar runtimes de S; recibir mensajes del agente de S; publicar como ese agente sólo en conversaciones donde su participación está `active` y anclado a un mensaje que se le entregó ahí (`in_reply_to`); pedir invitaciones (siempre con aprobación) | leer el log de una conversación; publicar como otro agente; publicar en una conversación donde no participa (403 `not-a-participant`); dirigir a agentes de otro proyecto o que no participan; invitar sin aprobación; crear, extender o ampliar una Colaboración |
+| Agente → agente | `chat_send` a participantes activos de la misma conversación | entregar sin aprobación humana, arista `allow` entre participantes activos de esa conversación, o Colaboración viva que cubra a los dos (§3 regla 7) |
 
 **Frontera de confianza.** `ST_INGEST_TOKEN` se crea con el contenedor y sobrevive a stop/start
 (CONVERSATION.md §2.4); está en el entorno del contenedor, así que **cualquier** proceso que el
@@ -433,8 +538,8 @@ agente ejecute puede llamar a `hello`, a `next` o falsificar un hook. `endpoint_
 Consecuencia aceptada: `accepted` y `completed` significan "lo que reporta el contenedor del agente",
 no una prueba de un tercero. Lo que el token **no** permite es actuar fuera de esa sesión: ni leer el
 proyecto, ni hablar como otro agente, ni saltarse la aprobación agente→agente, que vive en el
-backend. Un agente comprometido puede como mucho estropear sus propias entregas.
-| Agente → agente | `chat_send` dentro del proyecto | entregar sin arista `allow` o aprobación humana |
+backend, ni publicar en una conversación donde no participa. Un agente comprometido puede como
+mucho estropear sus propias entregas y, dentro de una Colaboración viva, gastar su presupuesto.
 
 ## 8. Límites
 
@@ -443,22 +548,31 @@ backend. Un agente comprometido puede como mucho estropear sus propias entregas.
 | M1 | texto de un mensaje | 16 KiB UTF-8 | 400 `too-large` (sin truncar: es una orden) |
 | M2 | entregas no terminales por agente | 20 | 409 `queue-full` (humano) / resultado de herramienta (agente) |
 | M3 | destinatarios por mensaje | 5 | 400 |
-| M4 | profundidad de cadena (`depth`, humano = 0) | 3 | `chat_send` rechazado `depth-exceeded` |
+| M4 | profundidad de cadena (`depth`, humano = 0) fuera de Colaboración | 3 | `chat_send` rechazado `depth-exceeded` |
 | M5 | mensajes de agentes por cadena | 20 | rechazado `chain-budget` |
 | M6 | mensajes salientes por agente | 10/min, 200/día | 429 |
 | M7 | auto-envío | prohibido | 400 |
 | M8 | mensajes humanos | 30/min por usuario | 429 |
+| M9 | participantes no terminales por conversación (anfitrión incluido) | 6 | 409 `too-many-participants` |
+| M10 | invitaciones iniciadas por agentes por cadena | 2 | `chat_invite` rechazado `invite-budget` |
+| M11 | `max_deliveries` de una Colaboración | 6 por defecto, tope 20 | 400 al activar; al agotarse ⇒ `collab_ended{budget}` |
+| M12 | duración de una Colaboración | 30 min por defecto, tope 2 h | 400 al activar; al vencer ⇒ `collab_ended{expired}` |
+| M13 | Colaboraciones vivas por conversación | 1 | 409 `collab-active` |
+| — | profundidad dentro de una Colaboración | la acota `max_deliveries` (M11), nunca por encima del tope por cadena M5 = 20; M4 no se aplica a las entregas `collab:` | `chat_send` fuera del permiso ⇒ camino normal (aprobación o arista) |
 | T_lease | informe `transported` tras `next` | 10 s | `uncertain{lease}` |
 | T_accept | `channel_prompt` tras `transported` | **(POC)**: 3 × p99 medido, mínimo 15 s | `uncertain{no-evidence}` |
 | T_queue | vida en `queued`/`awaiting_approval` | 24 h | `failed{expired}` |
 | T_fresh | antigüedad máxima de la evidencia "en su prompt" al prestar | 2 s (el `next` hace su propio probe) | probe dirigido |
 | T_settle | espera tras el cierre antes de decidir la atribución (§3.1 A7) | **(POC)**: ≥ 3 × la latencia máxima hook→backend medida, mínimo 5 s | decisión con lo que haya; sin lectura limpia del relay ⇒ `relay-unverified` |
 | T_clear | separación de los dos probes de la regla 2b (c) | **(POC)**: 3 × la latencia máxima de despertar medida en G2, mínimo 30 s | `uncertain` → `unconfirmed{…}` según la regla 2b (`no-evidence`, `relay-loss` o `not-transported`) |
-| L7' | log del proyecto | 64 MiB | rotación como §4.4 L7 |
+| L7' | log de una conversación anfitriona, y log de runtimes | 64 MiB cada uno | rotación como §4.4 L7 |
 
 ## 9. Recuperación
 
-1. **Arranque del backend**: abrir cada log de proyecto con agentes activos; toda entrega
+1. **Arranque del backend**: abrir el log de runtimes de cada proyecto con agentes activos y el log
+   de cada conversación con entregas no terminales; un permiso de Colaboración vencido durante la
+   caída se cierra con `collab_ended{expired}` (y su cola, `cancelled{collab-ended}`) antes de
+   aceptar `next`; un permiso vivo conserva su consumo, que está en el log. Toda entrega
    `transporting`/`transported` ⇒ `uncertain{orphaned}` (sale por la regla 2b de §3). Toda entrega
    `accepted` se decide con **las mismas condiciones A1–A7 de §3.1** sobre los eventos persistidos de
    la conversación: nunca hay un atajo de recuperación hacia `completed`. A7 usa la lectura de base
@@ -475,5 +589,9 @@ backend. Un agente comprometido puede como mucho estropear sus propias entregas.
    `hello`/`next`, o por `T_endpoint_silent`; entregas en vuelo ⇒ `unconfirmed{runtime-retired}` o
    `interrupted`.
 3. **Recreación** (3.0d): igual que una parada. El agente sigue ligado a la misma `st_session_id`.
-4. **Pérdida del log** (archivo ilegible): el proyecto queda `unverifiable`, el `POST` responde 409 y
-   nada se entrega. Ningún estado se infiere sin el archivo.
+4. **Pérdida del log** (archivo ilegible): la conversación queda `unverifiable`, el `POST` responde
+   409 y nada se entrega desde ella. Si el ilegible es el log de runtimes, ningún agente del proyecto
+   recibe nada (el estado `degraded` no se puede probar). Ningún estado se infiere sin el archivo.
+5. **D1 y log en desacuerdo sobre participantes** (caída entre las dos escrituras): D1 es el
+   conjunto vigente; al abrir la conversación el monitor escribe el `participant` que falta con
+   `recovered: true`. Ninguna entrega se presta a una participación que no esté `active` en D1.

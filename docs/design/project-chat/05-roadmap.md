@@ -4,6 +4,10 @@ Estado: borrador. Cada fase es uno o más PRs independientes, con su bandera apa
 comportamiento neutro cuando está apagada. **Nada de P2 en adelante empieza sin el GO de la POC.**
 No interfiere con el release conjunto pendiente (#502–#511): todo es aditivo y va detrás de banderas.
 
+Actualización 2026-11-03: la experiencia es la **conversación del agente con invitados temporales**
+(R10–R15 en [02 §9](./02-architecture-rfc.md#9-decisiones-del-responsable-2026-11-02)). Cambian P3,
+P7, P8 y P9, y se agrega P10. La POC, sus gates y PASS-B no cambian.
+
 ```mermaid
 flowchart LR
   P0[P0 docs + skill] --> P1[P1 POC]
@@ -15,23 +19,25 @@ flowchart LR
   P3 --> P6[P6 entrega humano→agente]
   P4 --> P6
   P5 --> P6
-  P6 --> P7[P7 UI Project Chat]
-  P7 --> P8[P8 agente→proyecto y agente→agente]
-  P8 --> P9[P9 Chat por defecto + Control Directo]
+  P6 --> P7[P7 UI: conversación del agente en la vista Chat]
+  P7 --> P8[P8 invitaciones, aprobaciones, Colaboración]
+  P8 --> P9[P9 envío por defecto vía monitor + Control Directo]
+  P2 --> P10[P10 interfaz de adaptadores, sólo diseño]
 ```
 
 | Fase | Contenido | PRs | Depende de | Riesgo principal | Sale cuando |
 | --- | --- | --- | --- | --- | --- |
-| **P0** | Estos documentos + skill `architecture-spec` | 1 (docs, draft) | — | — | el responsable cierra las decisiones R1–R8 |
+| **P0** | Estos documentos + skill `architecture-spec` | 1 (docs, draft) | — | — | el responsable cierra las decisiones (R1–R9 el 2026-11-02; R10–R15 el 2026-11-03) |
 | **P1** | POC aislada (§04): primero **sólo** la fase 0 con `fakechat` (autorización propia); la POC completa con un GO separado. Sólo con la suscripción del responsable | rama sin merge + 1 PR de docs con resultados | P0; autorización de la fase 0 | Channels bloqueado para la suscripción (C15, C17, #105326) ⇒ NO-GO, sin cambiar a API | tabla de resultados + recomendación |
 | **P2** | `docs/PROJECT_CHAT.md` vinculante (protocolo con los valores de la POC) | 1 (docs) | GO | que la POC deje hipótesis abiertas | aprobado por el responsable |
-| **P3** | Migración D1 (3 tablas), `projectChat/store.ts` (formato de `conversation/store.ts`, escritura con fsync de `paneRecord.ts`, sin ruta de descarte), rutas de lectura y CRUD de proyectos/agentes, `/ws/project/` en `WS_PATH_PREFIXES` | 2 (backend, luego API+WS) | P2 | duplicar lógica del store en vez de extraerla | tests de store (seq, snapshot, rotación) y de `wsUpgrade` |
+| **P3** | Migración D1 (`projects`, `project_agents` con `provider`/`role`, `project_agent_edges`, `chats`, `chat_participants`; protocolo §2.1), `projectChat/store.ts` con **un log por conversación anfitriona** más el log de runtimes del proyecto (formato de `conversation/store.ts`, escritura con fsync de `paneRecord.ts`, sin ruta de descarte), rutas de lectura, CRUD de proyectos/agentes y de conversaciones anfitrionas (una activa por agente, archivar), participaciones con `participants_version`, `/ws/project/` en `WS_PATH_PREFIXES` | 2 (backend, luego API+WS) | P2 | duplicar lógica del store en vez de extraerla; D1 y log en desacuerdo sobre participantes | tests de store (seq, snapshot, rotación), del CAS de `participants_version`, del índice "una activa por anfitrión" y de `wsUpgrade` |
 | **P4** | Clasificador `channel_prompt` en la ingesta + copia idéntica en el frontend; render como marcador. **Cambio de contrato previo** (CONVERSATION.md §4.6): identidad de `user_prompt`/`internal_prompt` = `prompt_id` + hash del `prompt`, para no descartar la entrada encolada de §8.2.1 | 1 | P2 | falsos positivos con texto humano | tests de tabla como `internalPrompt` |
 | **P5** | `st-channel` (Python stdlib) en la imagen; `/st-relay/status` con contador acumulado de pérdidas (§3.1 A7 del protocolo); plugin y marketplace local; managed settings `channelsEnabled`/`allowedChannelPlugins` y alias con `--channels` **sólo** para sesiones de agente; `CHANNEL_CLI_VERSIONS`; smoke en el Session Image workflow (variantes de CLI) | 2 (imagen, activación) | P2 | cambios de la API de Channels entre versiones | smoke con la variante de CLI validada |
-| **P6** | Monitor: `/ingest/channel/*`, elegibilidad, estados, recuperación; exclusión mutua con el Composer (§8.1.3 gana una precondición `monitor-delivery-in-flight`, cambio de contrato pequeño y propio) | 2 | P3–P5 | carreras entre `next`, hooks y probe | tests de la matriz de fallos de la POC con fakes; smoke real |
-| **P7** | UI: lista de proyectos, chat, menciones, roster, estados, tarjetas de resultado; v2 shell; Playwright con el mock backend | 2–3 | P6 | regresión del invariante del Terminal (vista nunca redimensiona) | e2e + capturas |
-| **P8** | `chat_post`, `chat_send`, aprobaciones, aristas `allow`, límites M2–M7 | 2 | P7 | bucles y presión de cola | tests de límites y de cadena |
-| **P9** | Project Chat como vista por defecto; Composer movido a "Control Directo" | 1 (frontend) | P8 + piloto | confusión entre los dos caminos | decisión del responsable tras el piloto |
+| **P6** | Monitor: `/ingest/channel/*`, elegibilidad (incluida la participación `active` con el mismo `participation_id` al prestar), estados, recuperación; exclusión mutua con el Composer (§8.1.3 gana una precondición `monitor-delivery-in-flight`, cambio de contrato pequeño y propio) | 2 | P3–P5 | carreras entre `next`, hooks y probe | tests de la matriz de fallos de la POC con fakes; smoke real |
+| **P7** | UI: **extiende la vista Chat existente de la sesión** (no es una pantalla de proyecto): carril del anfitrión y tarjetas de invitado, chip del anfitrión prellenado, selector `@` (nombre, proveedor, rol, disponibilidad), "Invitar a @x", vista previa del contexto sin nada preseleccionado, barra de participantes con "Retirar", estados de entrega; Proyectos como directorio; v2 shell; Playwright con el mock backend | 2–3 | P6 | regresión del invariante del Terminal (vista nunca redimensiona); confundir la tarjeta de un invitado con el anfitrión | e2e + capturas |
+| **P8** | `chat_post`, `chat_send`, `chat_invite` (siempre con aprobación), anclaje por `in_reply_to`, aprobaciones de mensajes e invitaciones, aristas `allow` entre participantes activos, **modo Colaboración** (permiso, presupuesto, vencimiento, "Detener", banner), límites M2–M13 | 2–3 | P7 | bucles, presión de cola, alcance de la Colaboración | tests de límites, de cadena, de 403 `not-a-participant` y de cada fin de Colaboración (`budget`, `expired`, `participant-removed`, `chat-archived`, revocada) |
+| **P9** | El envío por defecto de la conversación anfitriona pasa al monitor **sólo tras el GO de Channels**; hasta entonces sigue el Composer 3.2. Composer como "Control Directo" | 1 (frontend) | P8 + piloto + GO de Channels | confusión entre los dos caminos | decisión del responsable tras el piloto |
+| **P10** | Interfaz de adaptadores de runtime (`provider`, capacidades declaradas; RFC §5.2): **sólo diseño**, ningún adaptador nuevo, sin Codex ni ChatGPT | 1 (docs) | P2 | atar el monitor a Channels por descuido | revisión: estados de entrega y R8 sin referencias a Channels fuera del adaptador Claude Code |
 
 ## Riesgos transversales
 
@@ -43,3 +49,5 @@ flowchart LR
 | Costo de mantener `st-channel` | Proceso sin estado, ≤ ~400 líneas, sin dependencias; smoke por variante de CLI |
 | D1 en caliente | Sólo metadatos; los mensajes no tocan D1 |
 | Recreación necesaria para habilitar un agente | Motor 3.0d existente; habilitar es explícito por sesión |
+| Turnos no pedidos entre agentes (ping-pong) | La respuesta de un invitado no vuelve sola (R12); la Colaboración sólo la activa la persona, por conversación, con presupuesto (≤ 20) y vencimiento (≤ 2 h), y se detiene con un clic |
+| Entregas a un conjunto que la persona no vio | `to[]` explícito + `participants_version` (409 `participants-changed`); participación comprobada al prestar |

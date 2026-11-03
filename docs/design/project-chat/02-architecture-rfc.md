@@ -5,6 +5,12 @@ la POC ([04-poc.md](./04-poc.md)) dé GO y el responsable apruebe las decisiones
 contrato vinculante, si se aprueba, se redacta como documento propio (ver roadmap, fase P2) con el
 mismo estilo que [CONVERSATION.md](../../CONVERSATION.md).
 
+Actualización 2026-11-03: la experiencia principal pasa de un chat por proyecto a la **conversación
+del agente con invitados temporales** (decisiones R10–R15 de §9, propuesta en
+[08](./08-host-chat-guests.md)). Cambian el modelo (§5.2), las filas de §5.3, la `meta` de §5.4, la
+elegibilidad (§5.5), el capítulo agente a agente (§5.6, con invitaciones y modo Colaboración) y la
+seguridad (§7). La evidencia sobre Channels, las alternativas y los gates no cambian.
+
 Documentos hermanos: [visión](./01-vision.md) · [protocolo](./03-protocol.md) ·
 [POC](./04-poc.md) · [roadmap](./05-roadmap.md) · [UX](./06-ux.md) ·
 [revisión independiente](./07-review.md).
@@ -34,7 +40,8 @@ estable, ni de mensajes entre agentes.
 
 Objetivos:
 
-1. Un chat por proyecto donde humanos y agentes intercambian mensajes con menciones.
+1. Una conversación por agente (anfitrión) donde la persona le escribe y, con menciones, invita a
+   otros agentes del proyecto como participantes temporales.
 2. Entrega a una sesión interactiva **existente** sin escribir en tmux.
 3. Separar tres hechos: **transportado**, **aceptado** (evidencia de que el agente lo tomó) y
    **resultado**.
@@ -135,13 +142,13 @@ modelo.
 ```mermaid
 flowchart LR
   subgraph Browser
-    UI[Project Chat UI]
+    UI[Vista Chat de la sesión\nconversación del agente]
   end
   subgraph Backend["Backend (proceso existente)"]
     API[routes/projects.ts]
     MON[projectChat/monitor.ts]
-    LOG[(log del proyecto\nhost, append-only)]
-    D1[(D1: projects,\nproject_agents)]
+    LOG[(logs por conversación\nhost, append-only)]
+    D1[(D1: projects, project_agents,\nchats, chat_participants)]
     CAP[conversation/service.ts\ncaptura existente]
     CHI[/ingest/channel/*/]
   end
@@ -161,9 +168,9 @@ flowchart LR
 
 | Componente | Nuevo / reutilizado | Responsabilidad |
 | --- | --- | --- |
-| `projectChat/monitor.ts` (backend) | **Nuevo módulo**, mismo proceso | Fuente de verdad de mensajes y entregas; elegibilidad; límites; política entre agentes; correlación con la evidencia. |
-| Log del proyecto `<WORKSPACE_ROOT>/.projects/<projectId>/chat.events.jsonl` | **Nuevo archivo**: formato de `conversation/store.ts` (seq, snapshot, rotación) pero escritura con fsync y **sin** ruta de descarte (protocolo §2.2) | Contenido y transiciones. El contenido **nunca** entra en D1. |
-| D1 `projects`, `project_agents`, `project_agent_edges` | **Nuevas tablas**, migración append-only | Metadatos: propiedad, membresía, handles, política. Sin contenido. |
+| `projectChat/monitor.ts` (backend) | **Nuevo módulo**, mismo proceso | Fuente de verdad de mensajes y entregas; elegibilidad; participaciones; Colaboración; límites; política entre agentes; correlación con la evidencia. |
+| Log por conversación `<WORKSPACE_ROOT>/.projects/<projectId>/chats/<chatId>.events.jsonl`, más un log de runtimes del proyecto | **Nuevos archivos**: formato de `conversation/store.ts` (seq, snapshot, rotación) pero escritura con fsync y **sin** ruta de descarte (protocolo §2.2) | Contenido, participaciones, permisos de Colaboración y transiciones. El contenido **nunca** entra en D1. |
+| D1 `projects`, `project_agents`, `project_agent_edges`, `chats`, `chat_participants` | **Nuevas tablas**, migración append-only (diseño para P3) | Metadatos: propiedad, directorio de agentes, handles, proveedor y rol, conversaciones anfitrionas, participaciones vigentes, política. Sin contenido. |
 | `/ingest/channel/*` (backend) | **Nuevas rutas**, montadas como `/ingest/claude/hook` (antes de `express.json`, lector de cuerpo acotado) | API del endpoint de canal autenticada con el token de ingesta de la sesión. |
 | `st-channel` (imagen) | **Nuevo proceso**, hijo stdio del CLI, Python stdlib como `relay.py` | Adaptador Channels: registra el runtime, recibe el mensaje del monitor, emite la notificación, expone herramientas de publicación. **Sin estado durable.** |
 | Captura de conversación | **Reutilizada**, un clasificador nuevo (`channel_prompt`) | Evidencia de aceptación y de fin de turno. |
@@ -178,36 +185,75 @@ No hay procesos nuevos en el host, ni colas externas, ni otra base de datos.
 ```mermaid
 erDiagram
   USER ||--o{ PROJECT : owns
-  PROJECT ||--o{ PROJECT_AGENT : has
+  PROJECT ||--o{ PROJECT_AGENT : "directorio de @handles"
   PROJECT_AGENT ||--|| ST_SESSION : "runs in (v1: 1 sesión por agente)"
+  PROJECT_AGENT ||--o{ CHAT : "anfitrión de (v1: 1 activa)"
+  CHAT ||--o{ PARTICIPATION : "anfitrión + invitados"
+  PARTICIPATION }o--|| PROJECT_AGENT : es
+  CHAT ||--o{ COLLAB_GRANT : "Colaboración (temporal)"
   ST_SESSION ||--o{ RUNTIME : "arranque × proceso claude con st-channel"
   RUNTIME ||--o{ CONVERSATION : "session_id vivo (cambia con /clear, /resume)"
-  PROJECT ||--o{ MESSAGE : "log del proyecto"
+  CHAT ||--o{ MESSAGE : "log de la conversación anfitriona"
   MESSAGE ||--o{ DELIVERY : "una por destinatario"
-  DELIVERY }o--o| CONVERSATION : "aceptada en (cid, prompt_id)"
+  DELIVERY }o--o| CONVERSATION : "aceptada en (cid, prompt_id) del runtime de ese agente"
 ```
 
 - **Proyecto**: propiedad de un usuario (owner-only en v1, como las conversaciones, phase3 §3.4).
+  Es **directorio y frontera de permisos**: los `@handles` son únicos en el proyecto, las aristas
+  `allow` son del proyecto y un invitado tiene que ser agente del mismo proyecto (R14). No es una
+  sala de chat.
 - **Agente**: identidad lógica estable (`agent_id` UUID + `@handle`), ligada a **una** sesión ST del
   mismo owner. Sobrevive a reinicios del CLI, `--resume`, `/clear`, paradas y recreaciones del
-  contenedor.
+  contenedor. Declara `provider` (`claude-code` en v1; `codex` reservado, sin implementar) y `role`
+  (texto corto del owner, para el selector).
+- **Conversación anfitriona** (`chat_id`): la conversación individual de la persona con un agente.
+  Su dueño es la persona; su **anfitrión** es un `agent_id` fijado al crearla que **nunca cambia**,
+  así "sin mención" tiene siempre un significado estable. En v1 hay **una activa por agente**; se
+  archiva (queda de solo lectura, con su historial) para empezar otra (R10). No es la conversación
+  del CLI: sobrevive a `/clear`, `/resume` y reinicios.
+- **Participación** (`participation_id`): (`chat_id`, `agent_id`, `role: host|guest`, `state`). Cambia
+  con cada reinvitación, así una entrega, un préstamo, una respuesta o un permiso de Colaboración de
+  una participación anterior **nunca** se engancha a la nueva. Ciclo de vida en §5.6.
+- **Permiso de Colaboración** (`grant_id`): autorización temporal, por conversación, que la persona da
+  a un conjunto de participaciones (§5.6).
 - **Runtime**: la instancia concreta que puede recibir: (`st_session_id`, generación de arranque
   `startGen` de §5.2 v1.7.2, `endpoint_id` de `st-channel`, `claude_pid`, `pane`). Muere con el
   proceso.
-- **Conversación**: el `session_id` de Claude que está vivo en ese proceso; es **evidencia** de dónde
-  se procesó un mensaje, nunca la dirección del mensaje.
+- **Conversación del CLI** (`cid`): el `session_id` de Claude que está vivo en ese proceso; es
+  **evidencia** de dónde se procesó un mensaje, nunca la dirección del mensaje.
 
-Los mensajes se dirigen a **agentes**; el monitor resuelve agente → runtime en el momento de entregar
-y registra en qué conversación se aceptó.
+Los mensajes se dirigen a **agentes** (`agent_id`, nunca el handle) dentro de una conversación
+anfitriona; el monitor resuelve agente → runtime en el momento de entregar y registra en qué
+conversación del CLI se aceptó. Ver una conversación no es recibirla: un participante sólo procesa
+lo que se le **entrega**.
+
+**Adaptador de runtime (sólo diseño; ninguno nuevo se implementa).** El agente lógico se separa del
+adaptador que lo ejecuta. El adaptador declara sus capacidades y el monitor y la UI se rigen por
+ellas; un agente cuyo adaptador no declara una capacidad requerida no es elegible ("sin canal").
+
+| Capacidad | Adaptador Claude Code (este diseño) | Requisito para cualquier otro proveedor |
+| --- | --- | --- |
+| Transporte a una sesión interactiva | Channels (si pasa la POC); Composer sólo como Control Directo | Propio, con su POC y gates equivalentes a G1–G12 |
+| Evidencia de aceptación | `channel_prompt` (G3, hoy no cumplido) / PASS-A/PASS-B | Evidencia verificable del propio proveedor; sin ella ⇒ `unconfirmed`, igual que hoy |
+| Resultado | `turn_end` (R8) | Un fin de turno correlacionable; si no existe, `ended_unattributed` |
+| Identidad del runtime | pid/`starttime`/pane, probe | Equivalente verificable, o el agente no es elegible |
+| Captura del historial | `conversation/` | Adaptador de captura propio; el historial nunca se fusiona con el de otro proveedor |
+
+Los estados de entrega y R8 ya son neutrales al proveedor; `channel_prompt`, `st-channel` y el
+CLAUDE.md del agente son **del adaptador Claude Code**. Codex, ChatGPT y credenciales de otros
+proveedores quedan fuera de alcance.
 
 ### 5.3 Un solo historial por hecho
 
 | Hecho | Único lugar donde vive | Cómo aparece en la otra vista |
 | --- | --- | --- |
-| Texto de un mensaje humano o de un agente al proyecto | Log del proyecto | En la conversación del agente aparece como `channel_prompt` **sin texto** (referencia `st_msg`), igual que `internal_prompt` (§4.2.1) |
-| Ejecución del agente (deltas, herramientas, informe final) | Log de la conversación (captura) | En el proyecto aparece como tarjeta de resultado que **referencia** (`cid`, `seq` del `turn_end`) y se renderiza desde la captura |
-| Mensaje enviado por Control Directo (Composer) | Log de la conversación (`user_prompt` + `composer_send`) | En el proyecto: marcador "Control directo" con enlace, sin copia |
-| Estado del agente (trabajando, esperando, desconectado) | Captura (`state.ts`) + runtime en memoria | Presencia en el roster |
+| Texto de un mensaje humano o de un agente a la conversación | Log de la conversación anfitriona (`chat_id`) | En la conversación del CLI del destinatario aparece como `channel_prompt` **sin texto** (referencia `st_msg`), igual que `internal_prompt` (§4.2.1) |
+| Turnos del anfitrión (deltas, herramientas, informe final) | Log de la conversación del CLI del anfitrión (captura) | En el **carril principal** de la conversación anfitriona, renderizados desde la captura por referencia (`cid`, `prompt_id`), como la vista Chat de hoy |
+| Turno de un invitado | Log de la conversación del CLI del invitado (captura) | **Tarjeta de invitado** con `@handle`, proveedor y "→ respondiendo a": referencia al `turn_end` de la entrega a ese invitado (R8), más sus `chat_post` con `in_reply_to`. Nunca en la burbuja del anfitrión |
+| Contexto citado en un envío (`context[]`) | Los mensajes originales en el log de la conversación | El evento `message` guarda sólo los `msg_id` elegidos; el texto se arma al prestar la entrega, como cita con autor, y no se persiste otra vez |
+| Participaciones y permisos de Colaboración | D1 (conjunto vigente) + log de la conversación (historia: `participant`, `collab_*`) | Barra de participantes y banner de Colaboración |
+| Mensaje enviado por Control Directo (Composer) | Log de la conversación del CLI (`user_prompt` + `composer_send`) | En la conversación anfitriona: marcador "Control directo" con enlace, sin copia |
+| Estado del agente (trabajando, esperando, desconectado) | Captura (`state.ts`) + runtime en memoria | Disponibilidad en el selector `@` y en la barra de participantes |
 
 ### 5.4 Entrega: transporte, aceptación y resultado
 
@@ -218,13 +264,13 @@ sequenceDiagram
   participant S as st-channel (contenedor)
   participant C as claude (CLI)
   participant K as Captura (hooks)
-  H->>M: POST message {to:@dev, text, clientMessageId}
+  H->>M: POST message {chatId, to:[agent_id], participantsVersion, text, context[], clientMessageId}
   M->>M: persistir message + delivery queued
   Note over M: elegible ⇔ runtime único ∧ agente en prompt (evidencia verificada) ∧ nada en vuelo
   S->>M: GET /ingest/channel/next (long-poll)
   M-->>S: {msg, lease}
   M->>M: delivery transporting
-  S->>C: notifications/claude/channel {content, meta:{st_msg,…}}
+  S->>C: notifications/claude/channel {content, meta:{st_msg, chat_id, participation_id,…}}
   S->>M: POST transported {lease}
   M->>M: delivery transported
   C->>K: UserPromptSubmit (source=system, prompt=<channel … st_msg=…>)
@@ -235,6 +281,10 @@ sequenceDiagram
   M->>M: delivery completed + result ref (cid, seq)
   M-->>H: WS: estados y tarjeta de resultado
 ```
+
+El flujo no cambia con las conversaciones anfitrionas: la `meta` de la notificación gana `chat_id` y
+`participation_id` (la del destinatario), y `content` puede llevar, después del texto, el contexto que
+la persona autorizó, marcado como **cita y no instrucción** (protocolo §6.2).
 
 - **Transportado** = `st-channel` informó que escribió la notificación en el stdio del CLI. No dice
   que el CLI la haya encolado (C7).
@@ -262,7 +312,21 @@ Un mensaje se entrega a un agente sólo si:
 2. la conversación viva de ese runtime (probe: entrada con `pid = claude_pid`) está en
    `waiting_input` **con identidad verificada** (§5.3 v1.7.2, regla de prompt de v1.7.4);
 3. el agente no tiene otra entrega `transporting`/`transported`/`accepted` sin completar;
-4. el pane no tiene una operación del Composer sin liberar (registro de pane, §8.1.4.1).
+4. el pane no tiene una operación del Composer sin liberar (registro de pane, §8.1.4.1);
+5. el destinatario tiene una participación `active` en la conversación del mensaje **con el mismo
+   `participation_id`** que registró la entrega, comprobado **en el momento del préstamo** (`next`).
+   Si no (retirado, reinvitado, conversación archivada), la entrega no se presta y pasa a
+   `cancelled{participant-removed}` o `cancelled{chat-archived}`;
+6. si el autor es un agente, la entrega tiene una **autorización válida en el momento del
+   préstamo**: una aprobación humana registrada; una arista `allow` del proyecto entre dos
+   participantes **activos** de esa conversación; o un permiso de Colaboración **vivo** de esa
+   misma conversación que cubre las participaciones del autor y del destinatario y al que le queda
+   presupuesto (§5.6). Una Colaboración terminada ⇒ `cancelled{collab-ended}`; una arista quitada ⇒
+   `cancelled{edge-removed}`.
+
+Las condiciones 5 y 6 se suman a las anteriores: la exclusión mutua con el Composer, "uno en vuelo
+por agente" (que vale entre todas las conversaciones donde participa) y la definición estricta de "en
+su prompt" no cambian.
 
 Con eso, el caso documentado de agrupamiento en `busy` (C6) sólo puede ocurrir por una carrera con
 algo que **no** es el monitor (la persona escribe en el Terminal en el mismo instante, o termina una
@@ -270,26 +334,110 @@ tarea en background). Esa carrera se detecta por `prompt_id` dentro de la ventan
 entrega termina `ended_unattributed{mixed-input}`: nunca se atribuye un informe compartido a un solo
 mensaje (protocolo §3.1).
 
-### 5.6 Agente a agente
+### 5.6 Participantes, invitaciones, agente a agente y Colaboración
 
-- Un agente publica con herramientas MCP de `st-channel` (`chat_post`, `chat_send`), nunca escribiendo
-  en el chat por otro camino.
-- Un mensaje de agente a agente **no se entrega** sin autorización: por defecto queda
-  `awaiting_approval` hasta que el owner lo aprueba en la UI. El owner puede declarar aristas
-  `from → to` en modo `allow` para un proyecto.
+**Enrutamiento.** El servidor **nunca** interpreta el texto: las menciones son chips y el cliente
+manda siempre `to[]` explícito (`agent_id`) más `participants_version`.
+- Sin mención, el cliente pone el chip del anfitrión, visible y removible; el servidor **no infiere**
+  el destinatario.
+- Con mención, reciben **sólo** los de `to[]`; mencionar a `@otro` no entrega también al anfitrión
+  (R11). Para ambos, `@anfitrión @otro`.
+- Si `participants_version` no es la vigente, 409 `participants-changed` y el borrador se conserva:
+  nunca se envía a un conjunto que la persona no vio.
+- El `message` registra `routing: default-host | explicit`, `participants_version` y el `to[]`
+  resuelto.
+
+**Ciclo de vida de una participación.**
+
+```
+            invitar (persona)                    primer mensaje entregado
+  (ninguno) ───────────────► invited ────────────────────────────► active
+                 │  invitar (agente) ⇒ awaiting_approval ─aprobada─┘   │
+                 │                         └─rechazada─► declined       │
+                 └──────────────── retirar (persona) ◄──────────────────┘
+                                           │
+                                           ▼
+                                        removed   (historial intacto; reinvitar = participation_id nuevo)
+```
+
+- **Invitar desde la persona.** La primera `@mención` de un agente que no participa muestra "Invitar
+  a @x a esta conversación" antes de enviar; enviar es la confirmación. El servidor registra
+  `participant{invited}` **antes** del `message`. Sólo agentes del mismo proyecto (R14).
+- **Invitar desde un agente** (`chat_invite`): siempre `awaiting_approval` en v1, **aunque exista una
+  arista `allow` y aunque haya una Colaboración activa** (R13). Las aristas y la Colaboración
+  autorizan mensajes entre participantes actuales, nunca agregar participantes.
+- **Retirar** (sólo la persona, desde la barra de participantes): las entregas `queued` o
+  `awaiting_approval` para ese agente, y las que ese agente originó y todavía no se prestaron, pasan a
+  `cancelled{participant-removed}`; las entregas en vuelo (`transporting`/`transported`/`uncertain`/
+  `accepted`) **no se pueden recuperar** (Channels no tiene cancelación): siguen su curso y su
+  resultado se muestra marcado "llegó después del retiro"; todo `chat_post`/`chat_send` posterior de
+  ese agente en esa conversación ⇒ 403 `not-a-participant`; un permiso de Colaboración que lo
+  incluía termina (`participant-removed`); el historial no se toca.
+- **El anfitrión no se retira**: se archiva la conversación (`archived`, colas canceladas con
+  `chat-archived`, Colaboración terminada, solo lectura).
+- **Sesión del invitado eliminada o recreada**: la participación sigue (el `agent_id` es estable) y
+  la disponibilidad lo muestra. Si se quita el **agente** del proyecto, todas sus participaciones
+  pasan a `removed`.
+
+**Contexto.** Un destinatario recibe el mensaje que lo menciona y sólo el contexto que la persona
+elige en ese envío: mensajes anteriores de la conversación, o resultados de otros participantes,
+como cita con autor. Nada viene preseleccionado y la UI muestra una vista previa del total antes de
+enviar (R15). La conversación del CLI del anfitrión (herramientas, salidas, archivos), sus
+credenciales, su entorno y sus rutas **nunca** viajan. Un `chat_send` de un agente lleva sólo su
+texto; el contexto adicional lo agrega la persona al aprobarlo, nunca el agente solo.
+
+**Agente a agente.**
+- Un agente publica con herramientas MCP de `st-channel` (`chat_post`, `chat_send`, `chat_invite`),
+  nunca escribiendo en el chat por otro camino. Cada llamada se ancla a una conversación por su
+  `in_reply_to`, que tiene que ser un mensaje **entregado a ese agente en esa conversación**; nunca
+  por "la última conversación".
+- Un mensaje de agente a agente **no se entrega** sin autorización. El campo `authorized_by` de la
+  entrega dice cuál: `approval` (por defecto queda `awaiting_approval` hasta que el owner lo aprueba),
+  `edge` (arista `allow` `from → to` del proyecto, válida **sólo** entre participantes activos de la
+  conversación donde se envía) o `collab:<grant_id>` (abajo). El modo Colaboración es el camino
+  preferido y más simple.
+- **La respuesta de un invitado no vuelve sola al anfitrión** (R12): se muestra a la persona, que
+  puede citarla en un mensaje al anfitrión con "Enviar a @anfitrión". Dentro de una Colaboración el
+  intercambio ocurre sólo por `chat_send` explícitos; el `turn_end` de un participante nunca se
+  reenvía.
 - Toda entrega lleva `from_kind="agent"` en `meta`; las instrucciones del servidor dicen que es una
   petición de un par, no del owner. Esto es **defensa en profundidad**, no la garantía: la garantía
-  es que nada llega sin aprobación o arista explícita (los agentes corren con
-  `--dangerously-skip-permissions`, así que cualquier texto entregado tiene el poder completo del
-  contenedor destino).
-- Límites anti-bucle (protocolo §8): profundidad de cadena ≤ 3, ≤ 20 mensajes por cadena, ≤ 10
-  mensajes salientes por minuto por agente, ≤ 5 destinatarios, sin auto-envío, cola por agente ≤ 20.
+  es que nada llega sin aprobación, arista explícita o Colaboración autorizada por la persona (los
+  agentes corren con `--dangerously-skip-permissions`, así que cualquier texto entregado tiene el
+  poder completo del contenedor destino).
+- Límites anti-bucle (protocolo §8): profundidad de cadena ≤ 3 fuera de Colaboración, ≤ 20 mensajes
+  por cadena, ≤ 10 mensajes salientes por minuto por agente, ≤ 5 destinatarios, sin auto-envío, cola
+  por agente ≤ 20; participantes por conversación ≤ 6; invitaciones iniciadas por agentes ≤ 2 por
+  cadena.
+
+**Modo Colaboración (R12, modificada por el responsable).**
+
+| Aspecto | Regla |
+| --- | --- |
+| Alcance | Por conversación (`chat_id`), temporal, activado **sólo por la persona** con el diálogo "Activar colaboración" y valores por defecto simples. Un único "Detener" lo revoca en cualquier momento. A lo sumo un permiso vivo por conversación |
+| El permiso | Evento append-only `collab_grant{grant_id, chat_id, by (user_id), participants: [{agent_id, participation_id}], max_deliveries (6 por defecto, tope 20), expires_at (30 min por defecto, tope 2 h), created_at}`. El alcance se muestra antes de activar y se registra exactamente como se mostró |
+| Qué autoriza | Un `chat_send` explícito de un participante del permiso a otro participante **del permiso**, **en esa misma conversación**, se entrega sin aprobación por mensaje. Cada entrega así consume una unidad del presupuesto y lleva `authorized_by: collab:<grant_id>` |
+| Qué **no** autoriza | Reenvío automático de respuestas (sólo `chat_send` explícitos); invitar (R13 sigue); destinatarios fuera del permiso; otras conversaciones (`grant.chat_id == msg.chat_id`); participantes reinvitados después del permiso (su `participation_id` cambió); ampliar las aristas del proyecto |
+| Fin | `collab_revoked{grant_id, by}` o `collab_ended{grant_id, reason: budget\|expired\|participant-removed\|chat-archived}`. Las entregas originadas por agentes bajo el permiso que siguen en cola pasan a `cancelled{collab-ended}`; las que ya están en vuelo no se pueden recuperar: siguen y se marcan "en curso al terminar la colaboración" |
+| Bucles | Presupuesto y vencimiento, más el límite de tasa por agente (M6) y la prohibición de auto-envío (M7). Dentro de un permiso la profundidad de la cadena la acota `max_deliveries`, nunca por encima del tope duro por cadena (M5 = 20) |
+
+El presupuesto se consume **al prestar** (cuando se escribe `transporting`), no al encolar, para que
+la condición 6 de §5.5 ("le queda presupuesto en el momento del préstamo") y el contador que ve la
+persona digan lo mismo. El consumo es una línea del log de la conversación, que tiene un único
+escritor: dos préstamos simultáneos para agentes distintos no pueden gastar la misma unidad. Cuando
+se consume la última, el monitor escribe `collab_ended{budget}` y cancela lo que quedaba en cola bajo
+ese permiso.
 
 ### 5.7 Relación con Composer y Terminal
 
 - El monitor **nunca** llama al Composer. Un fallo de Channels se informa y se detiene.
-- El Composer pasa a ser **Control Directo**: acción explícita de la persona, desde el panel del
-  agente, con el aviso de que escribe en el terminal. Sin cambios de contrato (§8 sigue vigente).
+- **Camino de envío por defecto de la conversación anfitriona.** Hasta el GO de Channels (POC y sus
+  gates sin cambios), escribirle al anfitrión sigue siendo el Composer 3.2 de la vista Chat, como
+  hoy. El envío por defecto pasa al monitor **sólo tras ese GO** (roadmap P9); invitados y
+  Colaboración necesitan el monitor y no existen antes.
+- El Composer pasa a ser **Control Directo**: acción explícita de la persona, desde el menú de la
+  sesión del agente, con el aviso de que escribe en el terminal. Sin cambios de contrato (§8 sigue
+  vigente).
 - Exclusión mutua: el monitor no entrega si el pane tiene un registro del Composer sin liberar
   (regla 4). La regla inversa (el Composer rechaza con 409 si hay una entrega del monitor en vuelo)
   es un cambio pequeño de §8.1.3 que se hace en su propio PR (roadmap P6), no en esta fase.
@@ -311,32 +459,53 @@ mensaje (protocolo §3.1).
 | Hook perdido (relay) | Sin `channel_prompt` ⇒ `uncertain` y después `unconfirmed` aunque Claude haya trabajado | Explicación "sin evidencia"; el `turn_end` posterior se muestra en el hilo del agente |
 | Dos `claude` con canal en el mismo contenedor | `runtime-ambiguous` | Aviso con la acción (cerrar uno) |
 | Disco lleno en el host | Escritura del log falla ⇒ el `POST` responde 503, nada se entrega | Error inmediato |
+| Invitado retirado con una entrega en vuelo | No se puede recuperar; sigue su curso | El resultado aparece marcado "llegó después del retiro"; lo que estaba en cola se ve `cancelled{participant-removed}` |
+| La Colaboración termina con entregas pendientes | En cola ⇒ `cancelled{collab-ended}`; en vuelo siguen | Banner con el motivo; cada entrega en vuelo marcada "en curso al terminar la colaboración" |
+| Participantes cambiaron mientras la persona escribía | 409 `participants-changed`, nada se persiste | El borrador se conserva y se muestra el conjunto nuevo |
 
 Principio: **at-most-once en el transporte, evidencia para confirmar, la persona decide el
 reintento**. Es la misma política que el Composer (§8.1.7) y la que pidió el responsable.
 
 ## 7. Seguridad
 
-- **Aislamiento**: proyectos owner-only; todos los agentes de un proyecto pertenecen al owner; una
-  sesión pertenece como mucho a un proyecto activo. Admin/lead no leen el chat en v1 (decisión
+- **Aislamiento**: proyectos y conversaciones anfitrionas owner-only; todos los agentes de un
+  proyecto pertenecen al owner; una sesión pertenece como mucho a un proyecto activo. Admin/lead no leen el chat en v1 (decisión
   abierta §9).
 - **Autenticación del endpoint**: token de ingesta de la sesión (`ST_INGEST_TOKEN`, creado con el
   contenedor y conservado entre stop/start), validado contra `ingest_token_hash` + `SESSION_ID`.
   Autoriza sólo a: registrar runtimes de **esa** sesión, recibir mensajes de **su** agente y publicar
-  **como** ese agente en **su** proyecto. Cualquier proceso del contenedor tiene el token: la
+  **como** ese agente sólo en las conversaciones de **su** proyecto donde tiene una participación
+  activa. Cualquier proceso del contenedor tiene el token: la
   evidencia de aceptación es tan fiable como el contenedor del agente, nunca más (protocolo §7).
 - **Prompt injection**: (1) entre agentes, aprobación o arista explícita (§5.6); (2) el contenido de
   mensajes de agentes se marca `from_kind="agent"`; (3) el CLI escapa `content` y `meta` (B: `Bd`,
   `EPt`) — **H**, la POC lo prueba con un `</channel>` y atributos falsos dentro del contenido;
   (4) el clasificador de `channel_prompt` acepta sólo una etiqueta bien formada cuyo `st_msg` exista
   en una entrega `transported` de ese runtime; un texto humano que imite la etiqueta no confirma nada.
+- **Fuga de contexto**: un invitado sólo recibe el mensaje que lo menciona y el contexto que la
+  persona eligió en ese envío, con vista previa (R15); el hilo del CLI del anfitrión, su entorno, sus
+  credenciales y sus rutas nunca viajan (§5.6). Un agente no puede adjuntar contexto: lo agrega la
+  persona al aprobar. El contexto se marca como cita, no como instrucción (defensa en profundidad).
+- **Publicar en conversaciones ajenas**: `chat_post`, `chat_send` y `chat_invite` exigen un
+  `in_reply_to` entregado **a ese agente** en **esa** conversación y una participación `active`; si
+  no, 403 `not-a-participant`. Una entrega se enruta por `in_reply_to → chat_id`, nunca por "la última
+  conversación". Un agente en varias conversaciones no puede cruzar contenido de una a otra.
+- **Alcance de la Colaboración**: el permiso nombra participaciones (`participation_id`), no agentes
+  en abstracto, y una conversación (`grant.chat_id == msg.chat_id`); un reinvitado no queda cubierto;
+  no autoriza invitar ni amplía aristas; termina por presupuesto, vencimiento, retiro, archivo o
+  "Detener". Sólo la persona lo crea: ninguna herramienta MCP puede pedirlo ni extenderlo.
+- **Invitaciones**: invitar a otro agente desde un agente requiere siempre aprobación (R13); los
+  invitados son del mismo proyecto (R14) y el selector muestra handle, nombre, proveedor, rol y
+  sesión; un handle ambiguo no se confirma.
 - **Sin relay de permisos**: `st-channel` no declara `claude/channel/permission` (quien responde por
   el canal podría aprobar herramientas, D).
 - **Sin flag de desarrollo en producción**: la POC usa `--dangerously-load-development-channels`; la
   producción usa un plugin en un marketplace local de la imagen, admitido por `allowedChannelPlugins`
   en managed settings (C14, **H**). Si eso no funciona, la decisión vuelve al responsable (§9).
 - **Auditoría**: un envío de admin sobre sesión ajena no existe en v1 (owner-only). Las aprobaciones
-  agente→agente quedan en el log del proyecto con el usuario que aprobó.
+  agente→agente, las invitaciones, los retiros y los permisos de Colaboración (activación, "Detener",
+  fin) quedan en el log de la conversación con el usuario que los decidió; cada entrega entre agentes
+  dice qué la autorizó (`authorized_by`).
 
 ## 8. Compatibilidad
 
@@ -376,3 +545,21 @@ el monitor, mergear ni desplegar.
 | — | Autenticación de la POC (**decisión definitiva**, reemplaza la propuesta anterior de API key de Console) | **Sólo la suscripción de Claude del responsable**, con el login oficial de Claude Code. Sin Console ni API keys de pago. Sin extraer ni reutilizar tokens OAuth o credenciales de sesiones existentes |
 | — | Consumo de la POC | **Ningún gasto adicional**: sólo lo incluido en la suscripción, con el uso extra desactivado. La propuesta anterior de USD 30 queda sin efecto |
 | — | Secuencia | Primero **sólo la fase 0** con `fakechat`, previa autorización para esa prueba: disponibilidad con la suscripción y despertar de una sesión inactiva. Bloqueo de Channels para la suscripción ⇒ **NO-GO**, sin cambiar a API. Si funciona ⇒ resultados y **GO separado** para la POC completa (04-poc.md §1.7, §7) |
+
+### Decisiones del 2026-11-03: conversación del agente con invitados
+
+El responsable aprobó la dirección de [08-host-chat-guests.md](./08-host-chat-guests.md) con las
+decisiones D1–D6 (D3 modificada: se agrega el modo Colaboración). R1–R9 siguen vigentes. No cambian
+los gates de Channels (G1–G12, G3 sin cumplir, G3-A no aprobado, R8, PASS-A/PASS-B, la POC), el
+Composer 3.2 como Control Directo y recuperación, ni lo que sigue sin autorizar.
+
+| # | = | Decisión | Resolución del responsable |
+| --- | --- | --- | --- |
+| R10 | D1 | Conversaciones anfitrionas por agente | **Una activa por agente** en v1; se puede archivar y su historial se conserva |
+| R11 | D2 | Destinatarios de un mensaje | Una mención explícita entrega **sólo** a los seleccionados, no también al anfitrión. Sin mención ⇒ el anfitrión. El cliente manda siempre `to[]` explícito y `participants_version`; el servidor nunca infiere destinatarios ni analiza menciones en el texto |
+| R12 | D3 (**modificada**) | Respuesta de un invitado | Por defecto se muestra a la persona y **no** se entrega automáticamente al anfitrión. Se agrega un **modo Colaboración** autorizado explícitamente por la persona, por conversación y temporal (§5.6) |
+| R13 | D4 | Un agente invita a otro | Siempre con autorización humana en v1, **aunque exista una arista `allow`** (y aunque haya una Colaboración activa) |
+| R14 | D5 | Origen de los invitados | Sólo agentes del **mismo proyecto** en v1 |
+| R15 | D6 | Contexto de un envío | Nada preseleccionado; vista previa del contexto autorizado antes de enviar |
+| — | — | Otros proveedores | El modelo queda listo para otros (como Codex): `agent.provider`, `agent.role` y una interfaz de adaptador con capacidades declaradas (§5.2), **sin implementar ningún adaptador**. Sin integración con ChatGPT |
+| — | — | Camino de envío | El envío por defecto de la conversación anfitriona pasa al monitor **sólo tras el GO de Channels**; hasta entonces sigue el Composer 3.2 |
