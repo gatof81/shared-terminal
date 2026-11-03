@@ -60,6 +60,7 @@ def fixture():
         "rocheck": {"create": "EROFS", "mkdir": "EROFS", "rename": "EROFS", "unlink": "EROFS"},
         "debug": {"mod_lines": 2, "mod_bad_lines": 0},
         "preflight": None,
+        "manifest": {"items": {"mod": "ok"}, "files": {"c.jsonl": True}, "mod_files": 7, "complete": True},
     }
 
 
@@ -109,7 +110,7 @@ class Pass(unittest.TestCase):
         for name, rows in (("c.jsonl", D["c"]), ("h.jsonl", D["h"])):
             with open(f"{d}/{name}", "w") as f:
                 f.writelines(json.dumps(x) + "\n" for x in rows)
-        for name, key in (("cliinfo.json", "cliinfo"), ("base-c.json", "base_c"), ("base-h.json", "base_h"), ("control-c.json", "control"), ("rocheck.json", "rocheck")):
+        for name, key in (("capture-manifest.json", "manifest"), ("cliinfo.json", "cliinfo"), ("base-c.json", "base_c"), ("base-h.json", "base_h"), ("control-c.json", "control"), ("rocheck.json", "rocheck")):
             dump(f"{d}/{name}", D[key])
         with open(f"{d}/claude-debug.log", "w") as f:
             f.write("x st-passb0-probe loaded\ny unrelated failed\n")
@@ -157,6 +158,8 @@ NEGATIVES = [
     ("rocheck missing", lambda D: D.update(rocheck=None), "INCONCLUSIVE", "rocheck-missing"),
     ("server log missing", lambda D: D.update(h=None), "INCONCLUSIVE", "server-log-missing"),
     ("call missing", lambda D: D["mod"].pop(5), "INCONCLUSIVE", "mod-calls-missing"),
+    ("capture incomplete", lambda D: D["manifest"].update(complete=False, items={"mod": "failed:1"}), "INCONCLUSIVE", "capture-incomplete"),
+    ("capture manifest missing", lambda D: D.update(manifest=None), "INCONCLUSIVE", "capture-manifest-missing"),
 ]
 
 

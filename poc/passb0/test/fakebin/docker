@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Fake `docker` for test_runner.py: state in $FAKE_DOCKER_STATE (JSON), call log appended.
+Implements only what run-b0.sh calls; anything else exits 99 so a new call is noticed."""
+import json, os, shutil, sys, uuid
+
+SP = os.environ["FAKE_DOCKER_STATE"]
+S = json.load(open(SP))
+a = sys.argv[1:]
+S.setdefault("calls", []).append(a)
+
+
+def save():
+    json.dump(S, open(SP, "w"))
+
+
+def out(s="", code=0):
+    save()
+    if s:
+        print(s)
+    sys.exit(code)
+
+
+def find(ref):
+    for c in S.get("containers", []):
+        if ref in (c["id"], c["name"]) or c["id"].startswith(ref):
+            return c
+    return None
+
+
+def size(v):
+    return int(v[:-1]) * 1024 ** 3 if v.endswith("g") else int(v)
+
+
+if a[:1] == ["info"]:
+    out(S.get("info", '["name=seccomp,profile=builtin"]'))
+if a[:2] == ["image", "inspect"]:
+    out(S["image_id"]) if a[2] in (S["image"], S["image_id"]) else out("", 1)
+if a[:2] == ["image", "history"]:
+    out(S["history"])
+if a[:1] == ["ps"]:
+    f = a[a.index("--filter") + 1]
+    k, _, v = f.partition("=")
+    hits = []
+    for c in S.get("containers", []):
+        if k == "label":
+            lk, _, lv = v.partition("=")
+            if lk in c["labels"] and (not lv or c["labels"][lk] == lv):
+                hits.append(c["id"])
+        elif k == "name" and c["name"] == v.strip("^/$"):
+            hits.append(c["id"])
+    out("\n".join(hits))
+if a[:1] == ["run"]:
+    if S.get("fail_run"):
+        out("", 125)
+    args = a[1:]
+    get = lambda f: args[args.index(f) + 1]
+    labels = dict([get("--label").split("=", 1)])
+    mounts = []
+    for i, x in enumerate(args):
+        if x == "--mount":
+            kv = dict(p.split("=", 1) if "=" in p else (p, True) for p in args[i + 1].split(","))
+            mounts.append({"Type": kv["type"], "Source": kv["src"], "Destination": kv["dst"], "RW": not kv.get("readonly")})
+    hc = {"Memory": size(get("--memory")), "MemorySwap": size(get("--memory-swap")), "NanoCpus": int(float(get("--cpus")) * 1e9),
+          "PidsLimit": int(get("--pids-limit")), "CapDrop": [get("--cap-drop")], "CapAdd": None, "SecurityOpt": [get("--security-opt")],
+          "Privileged": False, "NetworkMode": get("--network"), "RestartPolicy": {"Name": get("--restart")}, "PidMode": "", "IpcMode": "private",
+          "UTSMode": "", "Binds": None, "Devices": [], "VolumesFrom": None}
+    hc.update(S.get("override_hostconfig", {}))
+    c = {"id": uuid.uuid4().hex * 2, "name": get("--name"), "labels": labels, "user": get("--user"), "hc": hc, "mounts": mounts + S.get("extra_mounts", [])}
+    S.setdefault("containers", []).append(c)
+    out(c["id"])
+if a[:1] == ["inspect"]:
+    if a[1] == "-f":
+        c = find(a[3])
+        if not c:
+            out("", 1)
+        fmt = a[2]
+        if fmt == "{{.Id}}":
+            out(c["id"])
+        if fmt == "{{.Name}}":
+            out("/" + c["name"])
+        if "Labels" in fmt:
+            out(c["labels"].get("passb0.experiment", ""))
+        out("", 99)
+    c = find(a[1])
+    if not c:
+        out("[]", 1)
+    out(json.dumps([{"Id": c["id"], "Name": "/" + c["name"], "Config": {"Labels": c["labels"], "User": c["user"]}, "HostConfig": c["hc"], "Mounts": c["mounts"]}]))
+if a[:1] == ["exec"]:
+    rest = a[1:]
+    if rest[0] == "-d":
+        rest = rest[1:]
+    assert rest[:2] == ["-u", "developer"], rest
+    c = find(rest[2])
+    if not c:
+        out("Error: No such container", 1)
+    cmd = rest[3:]
+    if cmd[:2] == ["claude", "--version"]:
+        out(f"{S.get('cli_version', '2.1.314')} (Claude Code)")
+    if cmd[:1] == ["mkdir"] and S.get("fail_mkdir"):
+        out("mkdir: cannot create directory", 1)
+    if cmd[:2] == ["id", "-u"]:
+        out("1000")
+    if "cliinfo" in cmd and "--out" not in cmd:
+        out(json.dumps({"cli": S.get("cli_procs", []), "mods_flag_cached": True}))
+    if cmd[:1] == ["sh"] and "claude-debug.log" in cmd[-1] and S.get("debug_missing"):
+        out("", 2)
+    out("")
+if a[:1] == ["cp"]:
+    src, dst = a[1], a[2]
+    name, _, path = src.partition(":")
+    if not find(name):
+        out("Error: No such container", 1)
+    local = os.path.join(S["cfs"], path.lstrip("/"))
+    if path.endswith("/."):
+        base = local[:-2]
+        if not os.path.isdir(base):
+            out("Error: Could not find the file", 1)
+        shutil.copytree(base, dst, dirs_exist_ok=True)
+        out("")
+    if not os.path.exists(local):
+        out("Error: Could not find the file", 1)
+    target = os.path.join(dst, os.path.basename(local))
+    shutil.copytree(local, target, dirs_exist_ok=True) if os.path.isdir(local) else shutil.copy(local, target)
+    out("")
+if a[:1] == ["rm"]:
+    S["containers"] = [c for c in S.get("containers", []) if c["id"] != a[-1]]
+    out(a[-1])
+out("unhandled", 99)

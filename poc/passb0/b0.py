@@ -9,6 +9,10 @@ because `python3 -I` does not put the script's directory on sys.path.
     b0.py client  --sock PATH --label base|control [--held PATH] [--out FILE]
     b0.py rocheck --dir DIR [--out FILE]
     b0.py cliinfo [--out FILE]
+    b0.py stop    --identity FILE [--timeout-s N]
+    b0.py imageversion            (reads `docker image history --no-trunc` text on stdin)
+    b0.py checklimits INSPECT_JSON STAMP KIT RUN
+    b0.py manifest RESULTS_DIR name=status...
 
 Records hold facts only: pids, uids, inode numbers, booleans, hashes and error
 classes. Nothing here reads a process's environment or command line, a prompt,
@@ -21,6 +25,8 @@ import json
 import os
 import re
 import secrets
+import select
+import signal
 import socket
 import struct
 import sys
@@ -86,6 +92,11 @@ def sha256_file(path):
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def boot_id():
+    with open("/proc/sys/kernel/random/boot_id", encoding="utf-8") as f:
+        return f.read().strip()
 
 
 def proc_facts(pid, expect_container=None, hash_exe=True):
@@ -237,6 +248,13 @@ class Server:
         self.count = 0
         self.stop = threading.Event()
         self.listener = None
+
+    def identity(self):
+        """What `stop` must find before it signals this process: pid alone can be reused."""
+        with open("/proc/self/cmdline", "rb") as f:
+            argv_sha = hashlib.sha256(f.read()).hexdigest()
+        return {"pid": os.getpid(), "starttime": read_starttime(os.getpid()), "boot_id": boot_id(),
+                "uid": os.getuid(), "argv_sha256": argv_sha, "sock": self.sock}
 
     def open(self):
         if os.path.lexists(self.sock):
@@ -469,6 +487,117 @@ def cliinfo():
     return {"cli": procs, "mods_flag_cached": flag}
 
 
+# ── stop: signal the host server only if it is provably the same process ──
+
+def stop(identity_path, timeout_s=10):
+    """SIGTERM the server named by its identity file, through a pidfd.
+
+    The pidfd is opened FIRST and the identity is checked AFTER: if the pid had been
+    reused before the open, the starttime (or cmdline) differs and nothing is sent;
+    if it is reused after the open, the pidfd still names the original process, which
+    the kernel never confuses with the new one. Idempotent: a server already gone is
+    `already-exited`, never an error and never a signal.
+    """
+    with open(identity_path, encoding="utf-8") as f:
+        ident = json.load(f)
+    pid = ident.get("pid")
+    if not isinstance(pid, int) or pid <= 1:
+        return {"result": "refused", "why": "bad-identity"}
+    if ident.get("boot_id") != boot_id():
+        return {"result": "already-exited", "why": "rebooted"}
+    try:
+        pidfd = os.pidfd_open(pid)
+    except ProcessLookupError:
+        return {"result": "already-exited"}
+    try:
+        try:
+            same = read_starttime(pid) == ident.get("starttime")
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                same = same and hashlib.sha256(f.read()).hexdigest() == ident.get("argv_sha256")
+            same = same and read_status(pid).get("uid") == ident.get("uid") == os.getuid()
+        except (FileNotFoundError, ProcessLookupError):
+            return {"result": "already-exited"}
+        if not same:
+            return {"result": "refused", "why": "identity-mismatch"}
+        try:
+            signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+        except ProcessLookupError:
+            return {"result": "already-exited"}
+        # A pidfd becomes readable when its process exits.
+        exited = bool(select.select([pidfd], [], [], timeout_s)[0])
+        return {"result": "stopped" if exited else "still-running", "sock_removed": not os.path.lexists(ident.get("sock", ""))}
+    finally:
+        os.close(pidfd)
+
+
+# ── imageversion: the CLI version an image was built with, read-only ──────
+
+def image_version(history_text):
+    """From `docker image history --no-trunc --format '{{.CreatedBy}}'`: the build-arg value
+    of the ONE layer that npm-installs @anthropic-ai/claude-code. Anything else (no such
+    layer, two of them, a version not spelled in the layer) is `null`: unknown stops B0."""
+    layers = [l for l in history_text.splitlines() if "npm install -g" in l and "@anthropic-ai/claude-code" in l]
+    found = set()
+    for l in layers:
+        m = re.search(r"CLAUDE_CODE_VERSION=(\d+\.\d+\.\d+)\b", l) or re.search(r"@anthropic-ai/claude-code@(\d+\.\d+\.\d+)\b", l)
+        found.add(m.group(1) if m else None)
+    version = next(iter(found)) if len(layers) == 1 and len(found) == 1 else None
+    return {"version": version, "install_layers": len(layers)}
+
+
+# ── checklimits: what Docker applied to the experiment container ──────────
+
+GIB2 = 2 * 1024 ** 3
+
+
+def check_limits(inspect, stamp, kit, run):
+    """Every reason the container differs from the procedure; [] means exactly as asked."""
+    c = inspect[0] if isinstance(inspect, list) and len(inspect) == 1 else {}
+    cfg, hc = c.get("Config") or {}, c.get("HostConfig") or {}
+    bad = []
+
+    def want(cond, why):
+        if not cond:
+            bad.append(why)
+
+    want((cfg.get("Labels") or {}).get("passb0.experiment") == stamp, "label")
+    want(cfg.get("User") == "developer", "user")
+    want(hc.get("Memory") == GIB2 and hc.get("MemorySwap") == GIB2, "memory")
+    want(hc.get("NanoCpus") == 10 ** 9, "cpus")
+    want(hc.get("PidsLimit") == 256, "pids")
+    want("ALL" in (hc.get("CapDrop") or []) and not hc.get("CapAdd"), "capabilities")
+    want("no-new-privileges:true" in (hc.get("SecurityOpt") or []), "no-new-privileges")
+    want(hc.get("Privileged") is False, "privileged")
+    want(hc.get("NetworkMode") == "bridge", "network")
+    want((hc.get("RestartPolicy") or {}).get("Name") in ("no", ""), "restart")
+    want(hc.get("PidMode", "") == "" and hc.get("IpcMode", "private") in ("private", "shareable", "") and hc.get("UTSMode", "") == "", "namespaces")
+    want(not hc.get("Binds") and not hc.get("Devices") and not hc.get("VolumesFrom"), "binds-devices")
+    mounts = sorted((m.get("Type"), m.get("Source"), m.get("Destination"), m.get("RW")) for m in c.get("Mounts") or [])
+    want(mounts == sorted([("bind", kit, "/opt/passb0-kit", False), ("bind", run, "/run/st-attest", False)]), "mounts")
+    want(not any("docker.sock" in str(m) for m in c.get("Mounts") or []), "docker-sock")
+    return bad
+
+
+# ── manifest: what capture actually brought back ──────────────────────────
+
+EXPECTED_FILES = ("c.jsonl", "h.jsonl", "cliinfo.json", "base-c.json", "base-h.json", "control-c.json",
+                  "rocheck.json", "claude-debug.log", "measure.json", "preflight.json", "held-h.json")
+
+
+def manifest(res, items):
+    parsed = {}
+    for it in items:
+        name, _, status = it.partition("=")
+        parsed[name] = status
+    files = {f: os.path.isfile(os.path.join(res, f)) for f in EXPECTED_FILES}
+    mod_dir = os.path.join(res, "mod")
+    mod_files = len([f for f in os.listdir(mod_dir) if f.endswith(".json")]) if os.path.isdir(mod_dir) else 0
+    complete = all(s == "ok" for s in parsed.values()) and all(files.values()) and mod_files > 0
+    m = {"items": parsed, "files": files, "mod_files": mod_files, "complete": complete}
+    write_json_atomic(os.path.join(res, "capture-manifest.json"), m)
+    return m
+
+
 def emit(obj, out):
     if out:
         write_json_atomic(out, obj)
@@ -488,6 +617,19 @@ def main(argv=None):
     s.add_argument("--deadline-s", type=int, default=1800)
     s.add_argument("--max-conns", type=int, default=64)
     s.add_argument("--no-hash-exe", action="store_true")
+    s.add_argument("--identity")
+    st = sub.add_parser("stop")
+    st.add_argument("--identity", required=True)
+    st.add_argument("--timeout-s", type=int, default=10)
+    sub.add_parser("imageversion")
+    cl = sub.add_parser("checklimits")
+    cl.add_argument("inspect")
+    cl.add_argument("stamp")
+    cl.add_argument("kit")
+    cl.add_argument("run")
+    mf = sub.add_parser("manifest")
+    mf.add_argument("res")
+    mf.add_argument("items", nargs="*")
     w = sub.add_parser("waitheld")
     w.add_argument("--held", required=True)
     w.add_argument("--after-ms", type=int, default=0)
@@ -512,6 +654,11 @@ def main(argv=None):
             p.error("--scope host needs --expect-container")
         srv = Server(a.scope, a.sock, a.out, a.held, a.expect_container, a.hold_ms, a.max_conns, not a.no_hash_exe)
         srv.open()
+        # SIGTERM ends the accept loop, so serve()'s finally removes the socket file.
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, lambda *_: srv.stop.set())
+        if a.identity:
+            write_json_atomic(a.identity, srv.identity())
         print(json.dumps({"listening": True, "scope": a.scope, "pid": os.getpid()}), flush=True)
         srv.serve(a.deadline_s)
     elif a.cmd == "waitheld":
@@ -527,6 +674,21 @@ def main(argv=None):
         emit(rocheck(a.dir), a.out)
     elif a.cmd == "cliinfo":
         emit(cliinfo(), a.out)
+    elif a.cmd == "stop":
+        r = stop(a.identity, a.timeout_s)
+        print(json.dumps(r))
+        sys.exit(0 if r["result"] in ("stopped", "already-exited") else 1)
+    elif a.cmd == "checklimits":
+        with open(a.inspect, encoding="utf-8") as f:
+            bad = check_limits(json.load(f), a.stamp, a.kit, a.run)
+        print(json.dumps({"ok": not bad, "differs": bad}))
+        sys.exit(0 if not bad else 1)
+    elif a.cmd == "manifest":
+        print(json.dumps(manifest(a.res, a.items)))
+    elif a.cmd == "imageversion":
+        r = image_version(sys.stdin.read())
+        print(json.dumps(r))
+        sys.exit(0 if r["version"] else 1)
 
 
 if __name__ == "__main__":

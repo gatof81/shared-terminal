@@ -240,6 +240,99 @@ class RoCheck(unittest.TestCase):
         self.assertEqual(set(r.values()), {"EACCES"})
 
 
+class Stop(unittest.TestCase):
+    def start_server(self):
+        d = tempfile.mkdtemp()
+        sock, ident = os.path.join(d, "h.sock"), os.path.join(d, "id.json")
+        p = subprocess.Popen([sys.executable, "-I", B0, "server", "--scope", "host", "--sock", sock, "--out", d,
+                              "--held", os.path.join(d, "held"), "--expect-container", "x" * 64, "--identity", ident],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(100):
+            if os.path.exists(ident) and os.path.exists(sock):
+                break
+            time.sleep(0.05)
+        return p, sock, ident
+
+    def test_stops_the_verified_process_and_its_socket_goes(self):
+        p, sock, ident = self.start_server()
+        self.assertEqual(b0.stop(ident), {"result": "stopped", "sock_removed": True})
+        self.assertEqual(p.wait(5), 0)
+        self.assertFalse(os.path.exists(sock))
+        self.assertEqual(b0.stop(ident), {"result": "already-exited"})  # idempotent
+
+    def test_refuses_when_starttime_or_cmdline_differ(self):
+        p, sock, ident = self.start_server()
+        try:
+            for key, val in (("starttime", 1), ("argv_sha256", "0" * 64), ("uid", 4242)):
+                with open(ident) as f:
+                    good = json.load(f)
+                bad = dict(good, **{key: val})
+                with open(ident + key, "w") as f:
+                    json.dump(bad, f)
+                with self.subTest(key):
+                    self.assertEqual(b0.stop(ident + key)["result"], "refused")
+                    self.assertIsNone(p.poll())
+        finally:
+            b0.stop(ident)
+            p.wait(5)
+
+    def test_dead_pid_and_other_boot_are_already_exited(self):
+        p = subprocess.Popen(["true"])
+        p.wait()
+        d = tempfile.mkdtemp()
+        ident = os.path.join(d, "id.json")
+        with open(ident, "w") as f:
+            json.dump({"pid": p.pid, "starttime": 1, "boot_id": b0.boot_id(), "uid": os.getuid(), "argv_sha256": "", "sock": ""}, f)
+        self.assertIn(b0.stop(ident)["result"], ("already-exited", "refused"))
+        with open(ident, "w") as f:
+            json.dump({"pid": os.getpid(), "boot_id": "other"}, f)
+        self.assertEqual(b0.stop(ident), {"result": "already-exited", "why": "rebooted"})
+
+
+class ImageVersion(unittest.TestCase):
+    L = 'RUN |1 CLAUDE_CODE_VERSION={v} /bin/sh -c npm install -g "@anthropic-ai/claude-code@${{CLAUDE_CODE_VERSION}}" # buildkit'
+
+    def test_cases(self):
+        one = self.L.format(v="2.1.314")
+        self.assertEqual(b0.image_version("USER developer\n" + one)["version"], "2.1.314")
+        self.assertEqual(b0.image_version(self.L.format(v="2.1.308"))["version"], "2.1.308")
+        self.assertIsNone(b0.image_version("USER developer")["version"])
+        self.assertIsNone(b0.image_version(one + "\n" + self.L.format(v="2.1.316"))["version"])
+        self.assertIsNone(b0.image_version('RUN /bin/sh -c npm install -g "@anthropic-ai/claude-code@latest"')["version"])
+        self.assertEqual(b0.image_version('RUN /bin/sh -c npm install -g @anthropic-ai/claude-code@2.1.314')["version"], "2.1.314")
+
+
+class CheckLimits(unittest.TestCase):
+    def good(self):
+        hc = {"Memory": b0.GIB2, "MemorySwap": b0.GIB2, "NanoCpus": 10 ** 9, "PidsLimit": 256, "CapDrop": ["ALL"], "CapAdd": None,
+              "SecurityOpt": ["no-new-privileges:true"], "Privileged": False, "NetworkMode": "bridge", "RestartPolicy": {"Name": "no"},
+              "PidMode": "", "IpcMode": "private", "UTSMode": "", "Binds": None, "Devices": [], "VolumesFrom": None}
+        mounts = [{"Type": "bind", "Source": "/k", "Destination": "/opt/passb0-kit", "RW": False},
+                  {"Type": "bind", "Source": "/r", "Destination": "/run/st-attest", "RW": False}]
+        return [{"Config": {"Labels": {"passb0.experiment": "S"}, "User": "developer"}, "HostConfig": hc, "Mounts": mounts}]
+
+    def test_good_and_each_deviation(self):
+        self.assertEqual(b0.check_limits(self.good(), "S", "/k", "/r"), [])
+        cases = {
+            "label": lambda c: c["Config"]["Labels"].update({"passb0.experiment": "T"}),
+            "memory": lambda c: c["HostConfig"].update(Memory=0),
+            "cpus": lambda c: c["HostConfig"].update(NanoCpus=2 * 10 ** 9),
+            "pids": lambda c: c["HostConfig"].update(PidsLimit=None),
+            "capabilities": lambda c: c["HostConfig"].update(CapAdd=["SYS_PTRACE"]),
+            "no-new-privileges": lambda c: c["HostConfig"].update(SecurityOpt=[]),
+            "privileged": lambda c: c["HostConfig"].update(Privileged=True),
+            "network": lambda c: c["HostConfig"].update(NetworkMode="sessions-net"),
+            "namespaces": lambda c: c["HostConfig"].update(PidMode="host"),
+            "mounts": lambda c: c["Mounts"][0].update(RW=True),
+            "docker-sock": lambda c: c["Mounts"].append({"Type": "bind", "Source": "/var/run/docker.sock", "Destination": "/var/run/docker.sock", "RW": True}),
+        }
+        for why, mutate in cases.items():
+            with self.subTest(why):
+                c = self.good()
+                mutate(c[0])
+                self.assertIn(why, b0.check_limits(c, "S", "/k", "/r"))
+
+
 class CliInfo(unittest.TestCase):
     def test_shape_only(self):
         r = b0.cliinfo()

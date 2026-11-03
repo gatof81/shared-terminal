@@ -69,6 +69,7 @@ def load(d):
         "rocheck": _json(os.path.join(d, "rocheck.json")),
         "debug": debug,
         "preflight": _json(os.path.join(d, "preflight.json")),
+        "manifest": _json(os.path.join(d, "capture-manifest.json")),
     }
 
 
@@ -84,6 +85,15 @@ def analyze(D):
     def done():
         verdict = "FAIL" if fails else "INCONCLUSIVE" if incs else "PASS"
         return {"scope": SCOPE, "verdict": verdict, "reasons": fails + incs, "facts": facts}
+
+    # ── the capture brought everything back (an incomplete one never passes) ──
+    man = D.get("manifest")
+    if not isinstance(man, dict):
+        inc("capture-manifest-missing")
+    elif man.get("complete") is not True:
+        inc("capture-incomplete")
+        facts["capture_failed_items"] = sorted(k for k, v in (man.get("items") or {}).items() if v != "ok")
+        facts["capture_missing_files"] = sorted(k for k, v in (man.get("files") or {}).items() if not v)
 
     # ── the mod ran, once, completely ──
     mod = D["mod"]
