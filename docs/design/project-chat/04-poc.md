@@ -1405,7 +1405,7 @@ Mandame `report.json`: tiene alias y booleanos.
 
 **Nada se repite sin una decisión tuya.** Un PASS-B0 sólo responde la viabilidad del socket (§1.14.8).
 
-#### 1.14.10 Corrida 1 en VM100 (2026-11-03): INCONCLUSIVE; diagnóstico en curso (kit de desarrollo `f8679d6`)
+#### 1.14.10 Corrida 1 en VM100 (2026-11-03): INCONCLUSIVE; diagnóstico (cerrado en §1.14.11)
 
 **Lo que informó el responsable** (kit `d224ebe`, carpeta `~/passb0-20261103-151611`):
 - **Entorno:** kernel `6.8.0-147-generic`, `ptrace_scope=1`, los 13 hashes OK. La etiqueta
@@ -1543,6 +1543,245 @@ python3 -I "$BASE/diag/diag.py" "$BASE" --full-log "$BASE/diag/claude-debug.full
 Después se sigue el mismo procedimiento de §1.14.9 en una carpeta nueva (`STAMP` nuevo), con el
 paso 0 apuntando al SHA nuevo y su lista de hashes. Debe dar **PASS** sin tocar ningún criterio,
 y los hechos `hold-h_sync` y `hold-h_fd` deben estar completos.
+
+#### 1.14.11 Diagnóstico cerrado de la corrida 1; kit `9996286` (**segunda corrida no autorizada**)
+
+**Evidencia:** `diag.py` (`f8679d6`) sobre `~/passb0-20261103-151611`, ejecutado por el
+responsable en VM100. Valores como booleanos y milisegundos desde el inicio de cada llamada.
+
+**B. `checker-not-synchronized:hold-h` — causa: permisos (H1).**
+
+| Hecho (`diag-1.json`) | Valor |
+| --- | --- |
+| `host_server.uid_is_1000` | `false` |
+| `held-h.json` | modo `0600`, dueño = el servidor del host (≠ 1000) |
+| `held_file_written` | 4 ms |
+| `held_file_conn_matches_call` | `true` |
+| `waitheld.waited` / `fdcheck_ran` | `false` / `false` |
+| fin de la llamada | 8013 ms (la retención de 8 s completa) |
+
+- El archivo correcto existió desde los 4 ms. Un checker con uid 1000 no puede abrir un archivo
+  `0600` de otro uid, así que `waitheld` agotó su espera y `fdcheck` no corrió.
+- **H3 descartada:** el archivo estaba a 4 ms, no tarde. **H4 sin sustento:** H1 explica todo.
+  **H2** no aplica: la única línea marcada es otra (abajo).
+- **Límite:** la corrida 1 no registró el errno de la lectura. `EACCES` se deduce del modo,
+  del dueño y del uid del lector; no está observado. La corrida 2 lo registra
+  (`waitheld.held_last_error`).
+- `hold-c` sincronizó porque el servidor interno escribe su archivo como uid 1000.
+- **Corrección** (desde `f8679d6`): el servidor escribe sólo ese archivo de control de B0 con
+  `0644` explícito (`write_json_atomic(..., mode=0o644)`). `h.jsonl` y `results/` siguen
+  privados.
+- Test: `test_b0.py`, `HeldFile`. El servidor real corre bajo `umask 077`; el archivo queda
+  `0644` y `h.jsonl` privado. Quitar el modo hace fallar el test.
+
+**A. `debug-log-mod-problem` — falso positivo de una plantilla concreta, no un fallo de carga.**
+- **La línea marcada:**
+  `hooks modules not loaded until workspace trust is accepted: st-passb0-probe, …`.
+- **Qué hace el código de 2.1.314:**
+  - `loadPluginHooks` la registra mientras la confianza de la carpeta está pendiente, con
+    los módulos que retiene.
+  - Al aceptar la confianza corre `loadHooksModulesHeldForTrust`, que vuelve a cargar.
+  - Un módulo que carga registra `hooks module <nombre>@<origen> loaded (…)`.
+- En la corrida 1, después aparece la carga de `st-passb0-probe@inline` y las cinco llamadas
+  corrieron.
+- **Corrección** (`analyze.py`, `debug_scan`). La línea retenida se exime sólo con estas tres
+  condiciones:
+  - el mensaje es **exactamente** esa plantilla;
+  - la lista nombra a `st-passb0-probe` como elemento propio, no `st-passb0-probe-x`;
+  - **después**, en el mismo log, hay una línea `hooks module st-passb0-probe@… loaded (` que no
+    reporta un problema.
+  - `not loaded` sigue en el filtro.
+  - Cualquier otra línea marcada sigue contando.
+  - Los hechos nuevos `debug_mod_trust_held_then_loaded` y
+    `debug_mod_trust_held_never_loaded` dicen cuál fue el caso.
+  - `diag.py` marca la misma exención en cada línea (`exempt_trust_held_then_loaded`).
+- **Tests** (`test_analyze.py`, `DebugLog`, con las plantillas del CLI):
+  - retenida y después cargada ⇒ PASS;
+  - retenida y nunca cargada ⇒ INCONCLUSIVE;
+  - retenida con `failed to load` antes o después de la carga ⇒ INCONCLUSIVE;
+  - la carga **antes** de la retención no la resuelve;
+  - `hooks module … not loaded: …`, `skipped: re-entry`, `plugin hooks after workspace trust: … failed`
+    y la retención de otro módulo ⇒ INCONCLUSIVE;
+  - la carga de otro módulo (`st-passb0-probe2`) no la resuelve;
+  - una línea de carga que reporta `error` no la resuelve.
+- **Mutaciones** (6, todas detectadas):
+  - quitar el orden;
+  - no revisar la línea de carga;
+  - quitar la pertenencia a la lista;
+  - borrar `not loaded` del filtro;
+  - eximir sin carga;
+  - aceptar la carga de cualquier módulo.
+
+**Otros datos de la corrida 1.**
+- **`server_exe_error=EACCES` en h1, h2 y hold-h.**
+  - **Es esperado.** El servidor del host corre con tu uid y el CLI con 1000. Leer
+    `/proc/<pid>/exe` exige acceso de ptrace, y con `ptrace_scope=1` y otro uid se niega.
+  - No tiene relación con `held-h.json`: es otro archivo, el que el **host** no puede leer del
+    contenedor.
+  - El analizador nunca comparó `exe` del lado host. Lo dice un comentario nuevo en
+    `analyze.py`.
+  - **Siguen valiendo en el host:**
+    - `SO_PEERCRED` (pid y uid 1000);
+    - `NSpid` hasta el pid del CLI en el contenedor;
+    - cgroup del contenedor;
+    - `tgid`;
+    - relectura estable;
+    - `NSpid` del pidfd.
+  - **El SHA-256 del ejecutable** y el `starttime` frente al CLI se comprueban **dentro** del
+    contenedor (c1 y hold-c, mismo uid). Ahí coincidieron.
+- **Dos líneas `type root … EROFS`.**
+  - **Son efecto esperado del montaje de solo lectura.** El CLI intenta escribir en la carpeta
+    del mod (`/opt/passb0-kit/mod`, montada ro) una raíz de tipos para editor: `types/` y un
+    `tsconfig`.
+  - Al fallar registra `type root of <mod> not laid: EROFS: …` y sigue (telemetría
+    `lay_failed`). No afecta la carga.
+  - No son las cuatro `EROFS` de `rocheck`: esas prueban el directorio del **socket**.
+  - El filtro no las marca, y hay un test con esa forma
+    (`test_read_only_type_root_is_not_flagged`).
+  - **Límite:** no vi el texto exacto. Si alguna no tiene la forma `type root of … not laid:` o
+    `type root under …`, mandámela.
+- Las cinco conexiones conservaron la atribución al CLI.
+
+**Kit `999628642ccbe31de9a3c2abc6791c875ad0341c`** (rama `poc/channels-phase0`; no aprobado para
+correr). Diferencia con `d224ebe`:
+- todo `f8679d6`:
+  - `held` en `0644`;
+  - motivos de `waitheld`/`fdcheck`;
+  - `hold-h_sync`;
+  - `diag.py`;
+- la exención anterior;
+- un test nuevo de `pickChild`: el motivo de `fdcheck` sólo se conserva si tiene forma de
+  motivo. Su mutación ahora se detecta.
+
+Ningún otro criterio cambió.
+
+**Tests:**
+- runner: 30;
+- servidores: 25;
+- analizador: 16, con 46 mutaciones de criterio más las 6 de arriba;
+- `diag`: 5;
+- mod: 13;
+- `claude plugin validate`: pasa.
+
+El tarball de GitHub de ese SHA coincide byte a byte con estos 15 hashes:
+
+```
+2ae3a335437a8743e2ed0d4f269de93be70b7b27338751305d56a44118bcb5c6  analyze.py
+73bc795d3eddb294a30d529b3994b9900113663d2c5eddffb239b5a9fc750b4d  b0.py
+6676f48339f5021686a3a9f33d3826521d82ffcfff7f528f813b2b24d5e41333  diag.py
+c77dcffd3df92dead59e05482a3c2b0c935e9b279830a71ba199f49096bc1767  mod/.claude-plugin/plugin.json
+d87f4cbc7a53b0d733c13dd4c7f81e49d7ede3b21163e0d64e2234176d43100d  mod/hooks/hooks.json
+d168fc6fc643a0b19085b55a76263149770394bc825fe10a8421cc9127be035c  mod/hooks/probe.mjs
+47aa77c452e02165e542f5067ead5aebb89aae3a46f6f7e28fca971eca43735c  mod/hooks/register.mjs
+42950a275aed0da211b71fc763c7cab5e705481d9acb8f0bd0da432ab740d699  README.md
+9006cc347a90e81faf971bc5b5df9ad496112f99d3e30f69d96db115af0ae781  run-b0.sh
+ac1e593a088b32a4d4245c385dc3693207ebb8275289bf6b76b5c6b7ee367209  test/fakebin/docker
+35e833175694ad484c90633932a6ac6a88199d584e4837680415d3c50018a1df  test/probe.test.mjs
+af280094dcd13c8b51a7f5c75aa5a78fb13e577cf824ecc05a7ff24c5c017fd5  test/test_analyze.py
+5f82dd2ff5099558eac74bddea58215664775cf3488640ffd53372162ebc46a7  test/test_b0.py
+5ddb66ee9ba63206b3f4a66fa24886db472b1e3f43a01e14d2f2a6f8542e82b2  test/test_diag.py
+119028ca34b0bdf6a87b26296c45ceae4b7ce23bbe84b31f939aed831ca0b7f2  test/test_runner.py
+```
+
+`run-b0.sh` no cambió desde `d224ebe`.
+
+**Cierre de la corrida 1** (VM100; necesita tu autorización de `cleanup`). Usa el kit **de la
+corrida 1** (`d224ebe`, en `$BASE/kit`), no el nuevo:
+
+```bash
+BASE=~/passb0-20261103-151611
+R1() { bash "$BASE/kit/poc/passb0/run-b0.sh" "$BASE" "$1"; echo "fase $1: salida=$?"; }
+# 1. La evidencia está intacta antes de tocar nada:
+(cd "$BASE/results" && sha256sum -c --strict --quiet SHA256SUMS) && echo "OK: results"
+# 2. Una copia fuera de la carpeta, con su hash (results, state, env y diag; ningún secreto):
+( umask 077; tar -C "$HOME" -czf "$HOME/passb0-20261103-151611.evidence.tgz" \
+    passb0-20261103-151611/results passb0-20261103-151611/state passb0-20261103-151611/env passb0-20261103-151611/diag
+  sha256sum "$HOME/passb0-20261103-151611.evidence.tgz" > "$HOME/passb0-20261103-151611.evidence.tgz.sha256" )
+# 3. cleanup: borra el contenedor sólo con fundamento `captured` y para el servidor del host por identidad:
+R1 cleanup
+# 4. Verificación:
+cat "$BASE/results/removal.json"; cat "$BASE/results/cleanup.json"
+(cd "$BASE/results" && sha256sum -c --strict --quiet SHA256SUMS) && echo "OK: results tras cleanup"
+sha256sum -c "$HOME/passb0-20261103-151611.evidence.tgz.sha256"
+docker ps -a -q --filter label=passb0.experiment | wc -l      # debe dar 0
+```
+
+**Qué se espera:**
+- `fase cleanup: salida=0`;
+- `removal.json` con `"basis": "captured"`;
+- `cleanup.json` con `{"clean": true}`;
+- las dos comprobaciones `OK`;
+- `0` contenedores.
+
+**Si sale distinto:**
+- con **66** o **67**, no sigas y mandame la salida;
+- con 66 no autorices el descarte: la captura de la corrida 1 se verificó, así que un 66 sería
+  un hecho nuevo.
+- con 67 y `la imagen cambió`: `cleanup` compara el id actual de `shared-terminal-session` con
+  el de `preflight`. Si reconstruiste el tag después de la corrida, el mensaje es esperado.
+  Mandámelo igual: el contenedor ya estará borrado y el resto del cierre se puede verificar.
+
+El debug log completo sigue sólo dentro del contenedor y se va con él. El diagnóstico está
+cerrado sin él, así que la copia de §1.14.10 ya no hace falta.
+
+**Segunda medición aislada (borrador; no autorizada).**
+
+**Requisitos:**
+- cierre de la corrida 1 verificado;
+- tu aprobación de este kit y de los comandos.
+
+**Procedimiento:**
+- Es el de §1.14.9, en una carpeta nueva (`STAMP` nuevo), con dos cambios en el paso 0:
+  - `COMMIT=999628642ccbe31de9a3c2abc6791c875ad0341c`;
+  - el bloque `SUMS` con los 15 hashes de arriba.
+- La comprobación `diff` de la lista exacta de archivos se mantiene: ahora son 15, con
+  `diag.py` y `test/test_diag.py`.
+- `IMAGE=shared-terminal-session`, que ya trae 2.1.314.
+- El resto es igual:
+  - `preflight`, `setup`, `servers`;
+  - terminal B: el CLI, aceptando sólo tema y confianza;
+  - `measure`, `capture`, `validate`, `cleanup`.
+- Los límites, montajes, operaciones P1–P6 y criterios son los de §1.14.9. Sólo cambia la
+  exención exacta de A.
+
+**Para aceptar un PASS** hay que ver, además del veredicto:
+- `hold-h_fd` con un único poseedor, el CLI, con `O_CLOEXEC`, sin herencia y `scan_denied=0`;
+- **ningún** `hold-h_sync`: sólo aparece cuando no sincroniza;
+- `debug_mod_bad_lines=0`;
+- `debug_mod_trust_held_then_loaded` en 0 o 1, y `debug_mod_trust_held_never_loaded=0`.
+
+Si vuelve a dar INCONCLUSIVE por `hold-h`, `hold-h_sync` trae el motivo (`EACCES`, `ENOENT`,
+`stale`…) y se corre `diag.py` antes de cualquier otra cosa.
+
+**Evaluación de seguridad de repetir.**
+- **Aislamiento:**
+  - la corrida 1 aplicó los límites pedidos;
+  - montajes de solo lectura (`EROFS` ×4 en el socket, más las dos de la raíz de tipos del mod);
+  - sin `docker.sock`;
+  - un contenedor;
+  - el servidor del host se apaga solo a los 3000 s, y `cleanup` sólo lo señala si su identidad
+    coincide.
+  - La corrida 2 usa el mismo `run-b0.sh` y no agrega operaciones privilegiadas.
+- **El único cambio con efecto fuera del contenedor** es el modo `0644` del archivo `held-h.json`
+  en `~/passb0-<STAMP>/run/`.
+  - Contiene un token de conexión, el inodo del par y una hora; no es una credencial.
+  - Otros usuarios locales de VM100 podrían leerlo durante la corrida (≤ 3000 s).
+  - El directorio `run/` ya era `0755` para que el contenedor alcance el socket.
+  - `cleanup` lo borra después de copiarlo.
+  - **No se traslada a B1:** con HMAC ningún archivo legible por otro uid puede tener material
+    de clave.
+- **Validez:**
+  - las dos causas de la corrida 1 están identificadas con evidencia;
+  - la corrección de cada una tiene un test que falla sin ella;
+  - ningún criterio de PASS se debilitó: la exención es una sola plantilla y exige la carga
+    posterior.
+  - Por eso una segunda corrida puede dar evidencia confiable.
+- **La imagen real** pasó a 2.1.314 por decisión tuya. Está dentro de las versiones
+  validadas: Composer y `/etc/st-control`.
+
+**Mi conclusión:** repetir es seguro una vez cerrada y verificada la corrida 1. No ejecuto ni
+apruebo la corrida 2.
+
 
 ## 2. Versiones
 
