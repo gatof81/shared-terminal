@@ -3207,7 +3207,7 @@ export class DockerManager {
 			);
 		} catch (err) {
 			logger.warn(
-				`[docker] capture attestation not written for ${sessionId} (${containerId.slice(0, 12)}): ${(err as Error).message}`,
+				`[docker] capture attestation (${basis}) for ${sessionId} (${containerId.slice(0, 12)}) failed: ${(err as Error).message}`,
 			);
 			return false;
 		}

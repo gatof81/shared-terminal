@@ -1033,6 +1033,14 @@ Restore guards:
   rejected=…; revocation …` reports each. `rejected > 0` means the
   attestations do not verify with this key (wrong key or damaged backup).
   See docs/CONVERSATION.md §2.7.5.1.
+- **Tampered backups.** Every `workspaces/<name>.tar.gz` must be named
+  after a session listed in that backup's manifest (refused before any
+  write otherwise); a session's root dirs must be directories, and nothing
+  under `.conversations/<sid>/` or `.st-control/<sid>/` may be a link.
+- **Global emergency cut.** `.conversations/REVOKED_ALL`, when present, is
+  copied to `<backup>/REVOKED_ALL` (`globalRevocation: true` in the
+  manifest) and restored in effect unless the destination has its own —
+  lift it with `npm run conversation:enable-all`.
 
 Previously-`running` sessions land as `stopped` with a NULL container id
 — the destination host has none of the source's containers, matching what

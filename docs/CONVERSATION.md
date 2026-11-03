@@ -1136,8 +1136,16 @@ la sesión, como **evidencia**. La restauración no lo extrae a su lugar vivo, n
   siempre el estado más nuevo y no se toca (ni se deshace una vigente ni se reactiva una
   levantada). Una revocación ya levantada en el backup no se instala; una vigente en el backup
   vuelve vigente (fail-closed: descartarla desharía en silencio una desactivación de emergencia)
-  y la habilitación oficial la levanta como a cualquier otra. `REVOKED_ALL` no forma parte del
-  backup.
+  y la habilitación oficial la levanta como a cualquier otra;
+- `REVOKED_ALL` (corte global de emergencia), copiado al backup y marcado en el manifiesto
+  (`globalRevocation`): vuelve vigente si el destino no tiene el suyo, antes de cualquier
+  escritura en D1; se levanta con `conversation:enable-all`.
+
+Un backup alterado no puede ampliar esto: cada tarball debe llamarse como una sesión **de su
+manifiesto** (forma de id de sesión), y las raíces de la sesión deben ser directorios y nada bajo
+`.conversations/<sid>/` ni `.st-control/<sid>/` puede ser un enlace (tipos del listado `tar -tv`,
+antes de extraer); además no se publica una revocación a través de un `.conversations/<sid>` del
+destino que no sea el directorio real.
 
 El registro de recreación, los registros de pane del composer, `relay.enabled` y
 `defer-skill-seed` describen contenedores u operaciones en curso del **origen** y quedan solo

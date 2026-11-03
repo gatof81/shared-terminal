@@ -275,9 +275,14 @@ export async function writeAttestation(
 		// rename consumed the temp; link left it (and every early return did).
 		if (!published || opts.noClobber) await fs.rm(tmp, { force: true });
 	}
-	await fsyncDir(dir);
-	await fsyncDir(path.dirname(dir));
-	await fsyncDir(workspaceRoot);
+	try {
+		await fsyncDir(dir);
+		await fsyncDir(path.dirname(dir));
+		await fsyncDir(workspaceRoot);
+	} catch (err) {
+		// The file IS at its live name; only its durability is unconfirmed.
+		throw new Error(`published, durability not confirmed: ${(err as Error).message}`);
+	}
 	return true;
 }
 

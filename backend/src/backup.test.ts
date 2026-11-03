@@ -77,7 +77,13 @@ vi.mock("./db.js", () => ({
 	}),
 }));
 
-import { classifyTarStderr, findEncryptedBlob, runBackup, runRestore } from "./backup.js";
+import {
+	classifyTarStderr,
+	findEncryptedBlob,
+	installControlEvidence,
+	runBackup,
+	runRestore,
+} from "./backup.js";
 import {
 	ATTESTATION_KEY_INFO,
 	classifyAttestation,
@@ -90,6 +96,8 @@ import { hashIngestToken } from "./conversation/registry.js";
 import {
 	checkRevocation,
 	retireSessionRevocation,
+	revokedAllPath,
+	writeGlobalRevocation,
 	writeSessionRevocation,
 } from "./conversation/revocation.js";
 import { deriveSubkey, encryptSecret } from "./secrets.js";
@@ -633,25 +641,93 @@ describe("restore of the control evidence (.st-control + revocation markers)", (
 		).toBe(before);
 	});
 
-	it("a symlink posing as an attestation is rejected (only regular files are read)", async () => {
+	it("a tarball with a link under the control or conversations dir is refused before anything is extracted", async () => {
+		for (const planted of [
+			`.st-control/${SID}/capture-attestation.${CID}.json`,
+			`.conversations/${SID}`,
+		]) {
+			await seedWorkspace(SID, { [`${SID}/a.txt`]: "a" });
+			await backupThenLoseWorkspaceRoot();
+			const src = mkdtempSync(path.join(os.tmpdir(), "st-evil-ctl-"));
+			const outside = mkdtempSync(path.join(os.tmpdir(), "st-outside-"));
+			await fs.mkdir(path.join(src, SID), { recursive: true });
+			await fs.mkdir(path.dirname(path.join(src, planted)), { recursive: true });
+			await fs.writeFile(path.join(outside, "real.json"), JSON.stringify(attestation()));
+			await fs.symlink(path.join(outside, "real.json"), path.join(src, planted));
+			execFileSync("tar", [
+				"-czf",
+				path.join(outDir, "workspaces", `${SID}.tar.gz`),
+				"-C",
+				src,
+				SID,
+				planted.split("/").slice(0, 2).join("/"),
+			]);
+			await expect(runRestore(outDir)).rejects.toThrow(/not a plain file or directory/);
+			expect(await has(live(".st-control", SID, `capture-attestation.${CID}.json`))).toBe(false);
+			expect(await has(live(".conversations", SID))).toBe(false);
+			await fs.rm(src, { recursive: true, force: true });
+			await fs.rm(outside, { recursive: true, force: true });
+			await fs.rm(outDir, { recursive: true, force: true });
+		}
+	});
+
+	it("a tarball not named after a session of this backup is refused before any write (no `.conversations.tar.gz`)", async () => {
+		await seedWorkspace(SID, { [`${SID}/a.txt`]: "a" });
 		await backupThenLoseWorkspaceRoot();
-		const src = mkdtempSync(path.join(os.tmpdir(), "st-evil-ctl-"));
-		await fs.mkdir(path.join(src, ".st-control", SID), { recursive: true });
-		await fs.writeFile(path.join(src, "real.json"), JSON.stringify(attestation()));
-		await fs.symlink(
-			path.join(src, "real.json"),
-			path.join(src, ".st-control", SID, `capture-attestation.${CID}.json`),
-		);
+		const src = mkdtempSync(path.join(os.tmpdir(), "st-evil-name-"));
+		await fs.mkdir(path.join(src, ".conversations", "victim"), { recursive: true });
+		await fs.writeFile(path.join(src, ".conversations", "victim", "LIFTED"), '{"lifts":"x"}');
 		execFileSync("tar", [
 			"-czf",
-			path.join(outDir, "workspaces", `${SID}.tar.gz`),
+			path.join(outDir, "workspaces", ".conversations.tar.gz"),
 			"-C",
 			src,
-			`.st-control/${SID}`,
+			".conversations",
 		]);
-		await runRestore(outDir);
-		expect(await has(live(".st-control", SID, `capture-attestation.${CID}.json`))).toBe(false);
+		await expect(runRestore(outDir)).rejects.toThrow(/not a session of this backup/);
+		expect(dbState.inserts).toHaveLength(0);
+		expect(await has(live(".conversations", "victim", "LIFTED"))).toBe(false);
 		await fs.rm(src, { recursive: true, force: true });
+	});
+
+	it("a global emergency cut (REVOKED_ALL) is carried and comes back in effect; never replaces the destination's", async () => {
+		await seedWorkspace(SID, { [`${SID}/a.txt`]: "a" });
+		await writeGlobalRevocation(WORKSPACE_ROOT, { at: "t", by: "cli" });
+		const bytes = await fs.readFile(revokedAllPath(WORKSPACE_ROOT), "utf8");
+		await backupThenLoseWorkspaceRoot();
+		const m = JSON.parse(await fs.readFile(path.join(outDir, "manifest.json"), "utf8"));
+		expect(m.globalRevocation).toBe(true);
+		await runRestore(outDir);
+		expect(await fs.readFile(revokedAllPath(WORKSPACE_ROOT), "utf8")).toBe(bytes);
+		expect(await checkRevocation(WORKSPACE_ROOT, SID)).toBe("global");
+
+		// Destination with its own marker: kept byte for byte.
+		await fs.writeFile(revokedAllPath(WORKSPACE_ROOT), '{"mine":1}');
+		await runRestore(outDir, { force: true });
+		expect(await fs.readFile(revokedAllPath(WORKSPACE_ROOT), "utf8")).toBe('{"mine":1}');
+	});
+
+	it("never writes a revocation through a destination `.conversations/<sid>` that is a link", async () => {
+		const ev = mkdtempSync(path.join(os.tmpdir(), "st-ev-"));
+		const outside = mkdtempSync(path.join(os.tmpdir(), "st-outside-"));
+		await writeSessionRevocation(ev, SID, { at: "t", by: "cli" }); // in effect in the "backup"
+		await fs.mkdir(live(".conversations"), { recursive: true });
+		await fs.symlink(outside, live(".conversations", SID));
+		const r = await installControlEvidence(ev, SID);
+		expect(r.revocation).toBe("destination-kept");
+		expect(await fs.readdir(outside)).toEqual([]);
+		await fs.rm(ev, { recursive: true, force: true });
+		await fs.rm(outside, { recursive: true, force: true });
+	});
+
+	it("no REVOKED_ALL at backup time ⇒ none restored, none in the manifest", async () => {
+		await seedWorkspace(SID, { [`${SID}/a.txt`]: "a" });
+		await backupThenLoseWorkspaceRoot();
+		expect(
+			JSON.parse(await fs.readFile(path.join(outDir, "manifest.json"), "utf8")).globalRevocation,
+		).toBeUndefined();
+		await runRestore(outDir);
+		expect(await has(revokedAllPath(WORKSPACE_ROOT))).toBe(false);
 	});
 
 	describe("revocations: never undone, never resurrected", () => {

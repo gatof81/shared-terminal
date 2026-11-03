@@ -47,7 +47,13 @@ import {
 	readAttestation,
 	writeAttestation,
 } from "./conversation/captureAttestation.js";
-import { LIFTED_FILE, REVOKED_FILE, readSessionRevocation } from "./conversation/revocation.js";
+import {
+	LIFTED_FILE,
+	REVOKED_ALL_FILE,
+	REVOKED_FILE,
+	readSessionRevocation,
+	revokedAllPath,
+} from "./conversation/revocation.js";
 import { d1Query, migrateDb } from "./db.js";
 import { logger } from "./logger.js";
 import { CONTROL_DIR, fsyncDir } from "./recreateAttempt.js";
@@ -56,6 +62,8 @@ import { decryptSecret, deriveSubkey, type EncryptedSecret } from "./secrets.js"
 const execFileP = promisify(execFile);
 
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
+// The shape of a session id as a path component (conversation/ids.ts).
+const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
 // FK-dependency order — restore replays top to bottom. Each entry names
 // its deterministic ORDER BY so two backups of identical data are
@@ -90,6 +98,8 @@ export interface BackupManifest {
 	schemaVersion: number;
 	tables: Record<string, number>;
 	workspaces: Record<string, WorkspaceEntry>;
+	/** `.conversations/REVOKED_ALL` existed: copied to `<backup>/REVOKED_ALL`. */
+	globalRevocation?: true;
 }
 
 export interface WorkspaceEntry {
@@ -195,6 +205,15 @@ export async function runBackup(outDir: string): Promise<BackupManifest> {
 		}
 		manifest.workspaces[session_id] = entry;
 		logger.info(`[backup] workspace ${session_id}: ${fileCount} entries, ${tarBytes} bytes`);
+	}
+
+	// The global emergency cut is not inside any session's tarball.
+	try {
+		await fs.copyFile(revokedAllPath(WORKSPACE_ROOT), path.join(outDir, REVOKED_ALL_FILE));
+		manifest.globalRevocation = true;
+		logger.warn("[backup] global conversation revocation (REVOKED_ALL) is in effect — carried");
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
 	}
 
 	// Manifest last: an interrupted run leaves a dir without manifest.json,
@@ -383,6 +402,33 @@ export async function runRestore(inDir: string, opts: { force?: boolean } = {}):
 		}
 	}
 
+	// Every tarball must be a session of THIS backup, named by a session id.
+	// The name becomes the allowlist prefix and the exclusion patterns below:
+	// a tarball named `.conversations.tar.gz` would otherwise turn
+	// `.conversations/<victim>/LIFTED` into an in-scope entry that no
+	// exclusion matches. Checked before any write.
+	const wsDir = path.join(inDir, "workspaces");
+	const tarballs = await fs.readdir(wsDir).catch(() => [] as string[]);
+	for (const file of tarballs) {
+		if (!file.endsWith(".tar.gz")) continue;
+		const sid = file.slice(0, -".tar.gz".length);
+		if (!SESSION_ID_RE.test(sid) || !Object.keys(manifest.workspaces ?? {}).includes(sid)) {
+			throw new Error(`workspace tarball ${file} is not a session of this backup — refusing`);
+		}
+	}
+
+	// A global emergency cut (`conversation:disable -- --all`) in effect at
+	// the backup comes back in effect (fail-closed, like a per-session one:
+	// dropping it would end the cut without anyone running enable-all). Never
+	// replaces the destination's own marker. Installed before any D1 write.
+	if (manifest.globalRevocation === true) {
+		const bytes = await fs.readFile(path.join(inDir, REVOKED_ALL_FILE), "utf8");
+		const installed = await publishNoClobber(revokedAllPath(WORKSPACE_ROOT), bytes);
+		logger.warn(
+			`[restore] global conversation revocation (REVOKED_ALL) ${installed ? "installed" : "already present on the destination — kept"}; lift with conversation:enable-all`,
+		);
+	}
+
 	// Replay in FK order. INSERT OR REPLACE so a --force re-run over a
 	// partially-restored target converges instead of dying on PK dupes.
 	//
@@ -423,8 +469,6 @@ export async function runRestore(inDir: string, opts: { force?: boolean } = {}):
 	// Untar workspaces. Entry allowlist first: a tampered tarball must not
 	// be able to write outside <sid>/ or .uploads/<sid>/ under
 	// WORKSPACE_ROOT (classic tar path traversal).
-	const wsDir = path.join(inDir, "workspaces");
-	const tarballs = await fs.readdir(wsDir).catch(() => [] as string[]);
 	let evidenceDir: string | undefined;
 	for (const file of tarballs) {
 		if (!file.endsWith(".tar.gz")) continue;
@@ -449,6 +493,44 @@ export async function runRestore(inDir: string, opts: { force?: boolean } = {}):
 		if (!ok) {
 			throw new Error(`workspace tarball ${file} contains out-of-scope paths — refusing`);
 		}
+		// Member TYPES, from the verbose listing (same order, one line per
+		// member). The session's root dirs must be directories and nothing
+		// under its conversations or control dir may be a link: tar never
+		// writes through a symlink it created itself, but the install step
+		// below does write under `.conversations/<sid>/` — a planted
+		// `.conversations/<sid> -> /elsewhere` would make it write there.
+		// Workspace content (`<sid>/…`, uploads) keeps its links.
+		const { stdout: verbose } = await execFileP("tar", ["-tvzf", tarPath], {
+			maxBuffer: 64 * 1024 * 1024,
+		});
+		const types = verbose
+			.split("\n")
+			.filter((l) => l.trim() !== "")
+			.map((l) => l[0]);
+		if (types.length !== entries.length) {
+			throw new Error(`workspace tarball ${file}: listing mismatch — refusing`);
+		}
+		const roots = new Set([
+			sid,
+			`.uploads/${sid}`,
+			`.conversations/${sid}`,
+			`${CONTROL_DIR}/${sid}`,
+		]);
+		entries.forEach((e, i) => {
+			const name = e.replace(/\/$/, "");
+			const t = types[i];
+			const bad = roots.has(name)
+				? t !== "d"
+				: (name.startsWith(`.conversations/${sid}/`) ||
+						name.startsWith(`${CONTROL_DIR}/${sid}/`)) &&
+					t !== "-" &&
+					t !== "d";
+			if (bad) {
+				throw new Error(
+					`workspace tarball ${file}: ${JSON.stringify(name)} is not a plain file or directory — refusing`,
+				);
+			}
+		});
 		// Everything EXCEPT the session's control dir and its revocation
 		// markers goes to its live place. Those must never be overwritten by
 		// an older copy: a backup's `.st-control` would bring back a recreation
@@ -519,6 +601,16 @@ async function makeEvidenceDir(createdAt: string): Promise<string> {
 	return dir;
 }
 
+/** `p` is a directory (not a link to one) whose real path is `expected`. */
+async function isRealDir(p: string, expected: string): Promise<boolean> {
+	try {
+		if (!(await fs.lstat(p)).isDirectory()) return false;
+		return (await fs.realpath(p)) === (await fs.realpath(expected).catch(() => expected));
+	} catch {
+		return false;
+	}
+}
+
 async function isRegularFile(p: string): Promise<boolean> {
 	try {
 		return (await fs.lstat(p)).isFile();
@@ -574,7 +666,9 @@ export async function installControlEvidence(
 ): Promise<ControlInstall> {
 	const out: ControlInstall = { installed: 0, kept: 0, rejected: 0, revocation: "none" };
 	const stagedControl = path.join(evidenceDir, CONTROL_DIR, sessionId);
-	const names = await fs.readdir(stagedControl).catch(() => [] as string[]);
+	const names = (await isRealDir(stagedControl, path.join(evidenceDir, CONTROL_DIR, sessionId)))
+		? await fs.readdir(stagedControl).catch(() => [] as string[])
+		: [];
 	const attestationName = new RegExp(
 		`^${ATTESTATION_FILE_PREFIX.replace(/\./g, "\\.")}([0-9a-f]{64})\\.json$`,
 	);
@@ -631,8 +725,19 @@ export async function installControlEvidence(
 		const inEffect = liftedOk
 			? await readSessionRevocation(evidenceDir, sessionId)
 			: await fs.readFile(stagedRevoked, "utf8");
+		const liveDir = path.dirname(liveRevoked);
+		const expectedDir = path.join(await fs.realpath(workspaceRoot), ".conversations", sessionId);
 		if (inEffect === null) out.revocation = "lifted-in-backup";
-		else {
+		else if (
+			(await fs.lstat(liveDir).catch(() => null)) !== null &&
+			!(await isRealDir(liveDir, expectedDir))
+		) {
+			// Not the real directory (a link): never write through it.
+			logger.warn(
+				`[restore] control ${sessionId}: ${liveDir} is not a plain directory — revocation not installed`,
+			);
+			out.revocation = "destination-kept";
+		} else {
 			// link(2) decides atomically: any destination REVOKED (the newer
 			// state, whatever its LIFTED says) is never replaced.
 			out.revocation = (await publishNoClobber(liveRevoked, inEffect))
