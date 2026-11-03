@@ -52,6 +52,8 @@ services:
       - PORT_PROXY_BASE_DOMAIN=${PORT_PROXY_BASE_DOMAIN:-}
       - COOKIE_DOMAIN=${COOKIE_DOMAIN:-}
       - SESSION_IMAGE=${SESSION_IMAGE:-shared-terminal-session}
+      - SESSION_IMAGE_PINS=${SESSION_IMAGE_PINS:-on}
+      - SESSION_IMAGE_PIN_REPO=${SESSION_IMAGE_PIN_REPO:-shared-terminal-session-pin}
       - WORKSPACE_ROOT=/var/shared-terminal/workspaces
       # Shared network the dispatcher uses to reach session containers by
       # name. Must equal the `sessions-net` network defined below; forwarded

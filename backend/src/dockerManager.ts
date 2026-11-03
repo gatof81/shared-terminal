@@ -20,6 +20,13 @@ import {
 } from "./containerStats.js";
 import { withRelayNoProxy } from "./conversation/noProxy.js";
 import { d1Query } from "./db.js";
+import {
+	pinDockerOf,
+	pinSessionImages,
+	pinsEnabled,
+	protectContainerImage,
+	protectImage,
+} from "./imagePins.js";
 import { logger } from "./logger.js";
 import { clearPortMappings, mappingsFromConfig, setPortMappings } from "./portMappings.js";
 
@@ -3869,10 +3876,64 @@ export class DockerManager {
 		);
 	}
 
+	/**
+	 * Best-effort image pin (imagePins.ts): never fails the caller — a spawn
+	 * proceeds exactly as before this protection existed.
+	 */
+	private async pinImage(ref: string, what: string): Promise<void> {
+		if (!pinsEnabled()) return;
+		try {
+			const r = await protectImage(pinDockerOf(this.docker), ref);
+			if (r === "image-missing") logger.warn(`[docker] image pin (${what}): ${ref} not found`);
+		} catch (err) {
+			logger.warn(`[docker] image pin (${what}) failed for ${ref}: ${(err as Error).message}`);
+		}
+	}
+
+	private async pinContainerImage(containerId: string, what: string): Promise<void> {
+		if (!pinsEnabled()) return;
+		try {
+			const r = await protectContainerImage(pinDockerOf(this.docker), containerId);
+			if (r === "image-missing")
+				logger.warn(`[docker] image pin (${what}): image of ${containerId.slice(0, 12)} is gone`);
+		} catch (err) {
+			logger.warn(
+				`[docker] image pin (${what}) failed for container ${containerId.slice(0, 12)}: ${(err as Error).message}`,
+			);
+		}
+	}
+
+	/**
+	 * Boot pass (imagePins.ts): the image of every session container, in any
+	 * state (retained `-old-`/`-new-` ones included). Images already gone are
+	 * reported loudly — a pin cannot bring them back.
+	 */
+	async pinAllSessionImages(): Promise<void> {
+		if (!pinsEnabled()) {
+			logger.info("[docker] image pins disabled (SESSION_IMAGE_PINS=off)");
+			return;
+		}
+		try {
+			const r = await pinSessionImages(pinDockerOf(this.docker));
+			logger.info(
+				`[docker] image pins: ${r.pinned.length} pinned, ${r.already.length} already, ${r.missing.length} missing, ${r.failed.length} failed`,
+			);
+			for (const m of r.missing)
+				logger.warn(
+					`[docker] image pins: ${m.imageId} is GONE but still used by ${m.containers.join(", ")}`,
+				);
+			for (const f of r.failed)
+				logger.warn(`[docker] image pins: ${f.imageId} not pinned: ${f.error}`);
+		} catch (err) {
+			logger.warn(`[docker] image pins: boot pass failed: ${(err as Error).message}`);
+		}
+	}
+
 	async reconcile(): Promise<void> {
 		logger.info("[docker] reconciling session state with Docker…");
 		this.reconcileLastRunAt = Date.now();
 		await this.sweepUploadTmp();
+		await this.pinAllSessionImages();
 		const result = await d1Query<{ session_id: string; container_id: string | null }>(
 			"SELECT session_id, container_id FROM sessions WHERE status = 'running'",
 		);

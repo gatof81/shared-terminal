@@ -69,6 +69,29 @@ cp .env.example .env
 docker build -t shared-terminal-session ./session-image
 ```
 
+> **Rebuilding on a host with sessions (containerd image store).** On
+> Docker 29 with `driver-type: io.containerd.snapshotter.v1`, re-building
+> the tag removes the image it pointed to **at once, even while containers
+> run on it** (incident 2026-11-03: it cost B/HA/HZ their capture). The
+> backend therefore pins the image of every session container under
+> `shared-terminal-session-pin:<64-hex image id>` (`backend/src/imagePins.ts`):
+> before and after every create, and for every session container — running,
+> stopped or retained — at each boot. Before a rebuild, check that nothing
+> is unprotected:
+>
+> ```bash
+> docker compose exec app npm run images:pins          # exit 1 = an in-use image is missing or unpinned
+> docker compose exec app npm run images:pins -- pin   # pin now (adds tags only)
+> ```
+>
+> Until the backend that carries this has booted once, pin by hand: for each
+> image id used by a session container,
+> `docker tag <imageId> shared-terminal-session-pin:<imageId without sha256:>`.
+> Pins are removed only on request (`images:pins -- prune` dry run;
+> `-- prune --write` untags pins no container uses, re-checking first; an
+> image goes with its last tag). `SESSION_IMAGE_PINS=off` disables pinning.
+> A pin cannot bring back an image already gone.
+
 ### 5. Create workspace directory
 
 ```bash
