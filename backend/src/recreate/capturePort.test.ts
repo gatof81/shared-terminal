@@ -40,7 +40,7 @@ import {
 	hooksFilePath,
 	writeHooksFile,
 } from "../conversation/activation.js";
-import type { AttestationRead } from "../conversation/captureAttestation.js";
+import { type AttestationRead, signAttestation } from "../conversation/captureAttestation.js";
 import {
 	type ContainerView,
 	deferSeedExists,
@@ -65,6 +65,7 @@ function port(
 		/** §2.7.5.1 wiring on the fake service: what every attestation read returns. */
 		attestation?: AttestationRead;
 		imageExists?: boolean;
+		imageId?: string;
 	} = {},
 ) {
 	const converge = vi.fn(async () => "kept");
@@ -74,9 +75,9 @@ function port(
 		token,
 		managedMount: true,
 		controlMount: true,
-		imageId: "sha256:n",
+		imageId: opts.imageId ?? "sha256:n",
 		imageRelay2: opts.imageExists !== false,
-		id: "n".repeat(64),
+		id: "a".repeat(64),
 		imageExists: opts.imageExists,
 		labels: { "io.shared-terminal.conversation-relay": "2" },
 	});
@@ -179,6 +180,36 @@ describe("authorize (step 5) inside the attempt's epoch", () => {
 			expect(c.pendingReasons).toContain("attestation-contradiction");
 			expect(await hooksFileExists(root, SID)).toBe(false);
 		}
+	});
+
+	it("§2.7.5.1 and a VALID attestation for N with its image gone: the recreation's authority grants (step 5)", async () => {
+		committedRow();
+		const key = Buffer.alloc(32, 1);
+		const img = `sha256:${"e".repeat(64)}`;
+		const record = signAttestation(
+			{
+				sessionId: SID,
+				containerId: "a".repeat(64),
+				imageId: img,
+				basis: "recreate",
+				attemptId: "a1",
+			},
+			key,
+		);
+		const { p } = port(async () => true, {
+			imageExists: false,
+			imageId: img,
+			attestation: { kind: "present", record },
+		});
+		const c = await p.authorize(SID, new AttemptRun(Date.now() + 10_000));
+		expect(c).toMatchObject({ effective: true, pendingReasons: [] });
+		expect(await hooksFileExists(root, SID)).toBe(true);
+		// Same facts without the attestation: the image rule alone denies.
+		await fs.rm(path.join(root, ".claude-managed"), { recursive: true, force: true });
+		const bare = port(async () => true, { imageExists: false, imageId: img });
+		expect((await bare.p.authorize(SID, new AttemptRun(Date.now() + 10_000))).effective).toBe(
+			false,
+		);
 	});
 
 	it("the gate is not consulted: the attempt itself is the actor (no circular block)", async () => {

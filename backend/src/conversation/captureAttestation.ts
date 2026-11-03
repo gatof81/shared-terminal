@@ -18,8 +18,9 @@
  * label alone:
  *   - HMAC-SHA256 with a subkey of SECRETS_ENCRYPTION_KEY (a file written by
  *     anything without the key does not verify);
- *   - bound to sessionId, the full container id and the image id; a record
- *     for another container is simply not applicable;
+ *   - bound to sessionId, the full container id and the image id; only the
+ *     file of the inspected container is read, and one whose content names
+ *     another container is a contradiction;
  *   - any record that does not verify, or names this container with another
  *     image or session, is a CONTRADICTION and denies — also when the image
  *     still exists.
@@ -80,7 +81,7 @@ export type AttestationRead =
 
 /**
  * valid: this container, this image, this session, signed.
- * absent: no record, or a record for ANOTHER container (stale, not applicable).
+ * absent: no file for this container (other containers' files are never read).
  * contradiction: a record that does not verify or disagrees about this
  * container — evidence of tampering or corruption: deny.
  */
