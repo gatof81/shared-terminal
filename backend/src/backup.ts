@@ -66,6 +66,8 @@ const TABLES: ReadonlyArray<{ name: string; orderBy: string; sinceSchema?: numbe
 	// workspace tarball (`.conversations/<sid>` is added below);
 	// `.claude-managed/` is NOT backed up: reconcile regenerates it.
 	{ name: "claude_conversations", orderBy: "session_id", sinceSchema: 16 },
+	// §6.2 — FK → sessions; owner data, not reconstructible from the events.
+	{ name: "conversation_user_meta", orderBy: "st_session_id, cid", sinceSchema: 18 },
 	{ name: "sessions_port_mappings", orderBy: "session_id, container_port" },
 	{ name: "templates", orderBy: "id" },
 	{ name: "invite_codes", orderBy: "code_hash" },

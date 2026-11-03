@@ -17,10 +17,12 @@
 import type { Request, Response, Router } from "express";
 import type { AuthedRequest } from "../auth.js";
 import { requireAuth } from "../auth.js";
+import { normalizeTitle } from "../conversation/conversationTitle.js";
 import { G5_RESPONSE_BYTES } from "../conversation/limits.js";
 import { readOne, readPage } from "../conversation/reader.js";
 import type { ConversationService } from "../conversation/service.js";
 import { InFlightLimiter } from "../inFlightLimiter.js";
+import { logger } from "../logger.js";
 import { NotFoundError } from "../sessionManager.js";
 import { holdSlotUntilResponseEnds } from "./files.js";
 import { assertOwnedByOr404, handleSessionError, type RouteContext } from "./shared.js";
@@ -39,7 +41,7 @@ function intParam(v: unknown): number | undefined {
 
 export function registerConversationRoutes(router: Router, ctx: RouteContext): void {
 	const { sessions, conversation, composer } = ctx;
-	const { conversationIp } = ctx.limiters;
+	const { conversationIp, conversationMetaIp } = ctx.limiters;
 	const readSlots = new InFlightLimiter(READ_IN_FLIGHT_PER_USER, READ_IN_FLIGHT_TOTAL);
 
 	/**
@@ -113,6 +115,7 @@ export function registerConversationRoutes(router: Router, ctx: RouteContext): v
 							checkedAt: null,
 						},
 						conversations: [],
+						meta: "ok",
 					});
 					return;
 				}
@@ -121,10 +124,11 @@ export function registerConversationRoutes(router: Router, ctx: RouteContext): v
 				// polling the list for status/activity must not pay — nor make
 				// the container pay — for it on every tick.
 				if (req.query.capture === "0") {
-					const summaries = await conversation.summaries(req.params.id);
+					const { conversations, meta } = await conversation.summariesWithMeta(req.params.id);
 					res.json({
 						capture: null,
-						conversations: await decorate(req.params.id, null, summaries),
+						conversations: await decorate(req.params.id, null, conversations),
+						meta,
 					});
 					return;
 				}
@@ -133,6 +137,76 @@ export function registerConversationRoutes(router: Router, ctx: RouteContext): v
 					...data,
 					conversations: await decorate(req.params.id, data.capture, data.conversations),
 				});
+			} catch (err) {
+				handleSessionError(err, res);
+			}
+		},
+	);
+
+	/**
+	 * v1.8 §6.2 — rename/archive. Owner-only like every route here (a name
+	 * is content). Per-field: only the keys present are written. The title
+	 * itself is never logged.
+	 */
+	router.patch(
+		"/sessions/:id/conversations/:cid",
+		requireAuth,
+		conversationMetaIp,
+		async (req: Request, res: Response) => {
+			const { userId } = req as AuthedRequest;
+			try {
+				await assertOwnedByOr404(sessions, req.params.id, userId);
+				res.setHeader("Cache-Control", "no-store");
+				if (!conversation) throw new NotFoundError();
+				const body: unknown = req.body;
+				if (
+					!req.is("application/json") ||
+					typeof body !== "object" ||
+					body === null ||
+					Array.isArray(body)
+				) {
+					res.status(400).json({ error: "invalid-body" });
+					return;
+				}
+				const keys = Object.keys(body);
+				const fields = body as { title?: unknown; archived?: unknown };
+				if (
+					keys.length === 0 ||
+					keys.some((k) => k !== "title" && k !== "archived") ||
+					("archived" in fields && typeof fields.archived !== "boolean")
+				) {
+					res.status(400).json({ error: "invalid-body" });
+					return;
+				}
+				const patch: { title?: string | null; archived?: boolean } = {};
+				if ("title" in fields) {
+					const t = normalizeTitle(fields.title);
+					if (!t.ok) {
+						res.status(400).json({ error: t.code });
+						return;
+					}
+					patch.title = t.value;
+				}
+				if ("archived" in fields) patch.archived = fields.archived as boolean;
+				let summary: Awaited<ReturnType<ConversationService["setOwnerMeta"]>>;
+				try {
+					summary = await conversation.setOwnerMeta(req.params.id, req.params.cid, patch);
+				} catch (err) {
+					logger.warn(
+						`[conversation] owner meta write failed for ${req.params.id}/${req.params.cid}: ${(err as Error).message}`,
+					);
+					res.status(503).json({ error: "meta-unavailable" });
+					return;
+				}
+				if (!summary) {
+					res.status(404).json({ error: "conversation-not-found" });
+					return;
+				}
+				logger.info(
+					`[conversation] owner meta ${req.params.id}/${req.params.cid}: ${Object.keys(patch).join("+")}`,
+				);
+				const [decorated] = await decorate(req.params.id, null, [summary]);
+				res.json(decorated);
 			} catch (err) {
 				handleSessionError(err, res);
 			}

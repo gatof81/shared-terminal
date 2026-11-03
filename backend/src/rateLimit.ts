@@ -160,6 +160,11 @@ export interface RateLimitConfig {
 		ipMax: number;
 		ipWindowMs: number;
 	};
+	/** v1.8 §6.2 — rename/archive writes; optional so older fixtures type-check. */
+	conversationMeta?: {
+		ipMax: number;
+		ipWindowMs: number;
+	};
 }
 
 // Defaults match issue #10: login 10/15min, register 5/1h, per-username 10/15min.
@@ -181,6 +186,7 @@ const DEFAULT_FILE_RAW_LIMIT = { ipMax: 120, ipWindowMs: 60 * 1000 };
 // a file click is one more; nobody reviews two files a second for long.
 const DEFAULT_GIT_LIMIT = { ipMax: 120, ipWindowMs: 60 * 1000 };
 const DEFAULT_CONVERSATION_LIMIT = { ipMax: 300, ipWindowMs: 60 * 1000 };
+const DEFAULT_CONVERSATION_META_LIMIT = { ipMax: 60, ipWindowMs: 60 * 1000 };
 
 export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 	login: {
@@ -256,6 +262,7 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 	fileRaw: DEFAULT_FILE_RAW_LIMIT,
 	git: DEFAULT_GIT_LIMIT,
 	conversation: DEFAULT_CONVERSATION_LIMIT,
+	conversationMeta: DEFAULT_CONVERSATION_META_LIMIT,
 };
 
 // ── IP-based limiters (express-rate-limit) ─────────────────────────────────
@@ -276,6 +283,7 @@ export interface AuthRateLimiters {
 	fileRawIp: RateLimitRequestHandler;
 	gitIp: RateLimitRequestHandler;
 	conversationIp: RateLimitRequestHandler;
+	conversationMetaIp: RateLimitRequestHandler;
 }
 
 export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
@@ -396,6 +404,14 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		legacyHeaders: false,
 		message: { error: "Too many conversation requests from this IP, try again later", scope: "ip" },
 	});
+	const conversationMetaCfg = cfg.conversationMeta ?? DEFAULT_CONVERSATION_META_LIMIT;
+	const conversationMetaIp = rateLimit({
+		windowMs: conversationMetaCfg.ipWindowMs,
+		limit: conversationMetaCfg.ipMax,
+		standardHeaders: "draft-7",
+		legacyHeaders: false,
+		message: { error: "Too many conversation updates from this IP, try again later", scope: "ip" },
+	});
 	const gitCfg = cfg.git ?? DEFAULT_GIT_LIMIT;
 	const gitIp = rateLimit({
 		windowMs: gitCfg.ipWindowMs,
@@ -420,6 +436,7 @@ export function createAuthRateLimiters(cfg: RateLimitConfig): AuthRateLimiters {
 		fileRawIp,
 		gitIp,
 		conversationIp,
+		conversationMetaIp,
 	};
 }
 
