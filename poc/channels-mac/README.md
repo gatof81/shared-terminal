@@ -64,9 +64,9 @@ locales sólo aplican a sesiones abiertas en `TEST`.
 
 ```bash
 bun "$KIT/manage.mjs" install "$TEST"
+bun "$KIT/manage.mjs" check "$TEST"
 # debe decir: eventos con el logger: (7 eventos) · autotest: exit=0 stdout="" escribió=true
 # y: sonda del transcript: exit=0 stdout="" veredicto=verified
-# debe decir: eventos con el logger: (7 eventos) · autotest: exit=0 stdout="" escribió=true
 ```
 
 `install` guarda una copia exacta de tu `settings.local.json` (si existía) en `TEST/.poc0/`.
