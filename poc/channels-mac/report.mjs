@@ -44,11 +44,11 @@ export function buildReport(sends, hooks) {
 		"| --- | --- | --- | --- | --- | --- |",
 		...rows.filter((r) => r.transcript_a).map((r) => {
 			const a = r.transcript_a;
-			const v = (m) => (m ? `${m.status}${m.reasons?.length ? ` (${m.reasons.join(", ")})` : ""}` : "—");
+			const v = (m) => (m ? `${m.status}${m.reasons?.length ? ` (${m.reasons.join(", ")})` : ""}; unicidad: ${m.uniqueness?.scope === "whole-file" ? `global ${yn(m.uniqueness.unique_global)}` : `sólo en los bytes leídos ${yn(m.uniqueness?.unique_in_observed)} (global no comprobada)`}` : "—");
 			return `| \`${r.id}\` | ${a.category} | ${v(a.at_hook)} | ${v(a.later)} | ${a.at_hook?.read_ms ?? "—"} | ${a.at_hook?.content_equals_prompt == null ? "—" : yn(a.at_hook.content_equals_prompt)} |`;
 		}),
 		"",
-		"`present-at-hook` = el registro ya era legible en el archivo cuando corrió el hook (no prueba durabilidad en disco). `late` = ausente al hook y verificado después. `missing` = ausente en ambas lecturas. `invalid` = cualquier otra forma (duplicado, ilegible, otro origen…). El timestamp de creación del registro no se usa.",
+		"`present-at-hook` = el registro ya era legible en el archivo cuando corrió el hook (no prueba durabilidad en disco) y la relectura completa posterior también verifica; `verified-in-observed-bytes` = verificado sólo en la cola leída, sin unicidad global. `late` = ausente al hook y verificado después. `missing` = ausente en ambas lecturas. `invalid` = cualquier otra forma (duplicado, ilegible, otro origen…). El timestamp de creación del registro no se usa.",
 		"",
 		"### Por mensaje",
 		"",

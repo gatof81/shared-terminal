@@ -12,7 +12,7 @@ import { closeSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, rea
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { channelTags, matchTranscript } from "./transcript-match.mjs";
+import { matchTranscript, parseChannelElement } from "./transcript-match.mjs";
 
 const OUT = join(dirname(fileURLToPath(import.meta.url)), "out");
 const SERVER = process.env.POC0_CHANNEL_SERVER ?? "plugin:fakechat:fakechat";
@@ -25,8 +25,8 @@ try {
 	const e = JSON.parse(readFileSync(0, "utf8"));
 	if (e?.hook_event_name !== "UserPromptSubmit") process.exit(0);
 	const prompt = typeof e.prompt === "string" ? e.prompt : "";
-	const tags = channelTags(prompt);
-	const messageId = tags.length === 1 ? tags[0].message_id ?? null : null;
+	const el = parseChannelElement(prompt);
+	const messageId = el.ok ? el.attrs.message_id ?? null : null;
 	const rec = { ts: new Date(t0).toISOString(), t_ms: t0, session_id: e.session_id ?? null, prompt_id: e.prompt_id ?? null,
 		message_id: /^P0[A-Z]\d{2}-[0-9a-f]{6}$/.test(messageId ?? "") ? messageId : messageId ? "otro" : null };
 	const reasons = [];
@@ -62,7 +62,9 @@ try {
 		}
 	}
 	const all = [...reasons, ...(m?.reasons ?? [])];
-	Object.assign(rec, m ?? {}, { status: all.length === 0 ? "verified" : "unverified", reasons: all, read_ms: Date.now() - t0 });
+	// The scope-qualified status comes from the matcher; any reason of the
+	// probe's own (path, file, read) can only turn it into "unverified".
+	Object.assign(rec, m ?? {}, { status: all.length === 0 && m ? m.status : "unverified", reasons: all, read_ms: Date.now() - t0 });
 	mkdirSync(OUT, { recursive: true });
 	appendFileSync(join(OUT, "transcript-probe.jsonl"), `${JSON.stringify(rec)}\n`);
 } catch {}

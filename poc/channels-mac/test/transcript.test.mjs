@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -18,7 +19,9 @@ const SERVER = "plugin:fakechat:fakechat";
 const MID = "P0T01-f9dfb6";
 const SID = "sess-1";
 const PID = "prompt-1";
-const PROMPT = `<channel source="${SERVER}" chat_id="web" message_id="${MID}" user="web" ts="1">${MID}: texto privado</channel>`;
+// Shape the 2.1.317 CLI builds: open tag, "\n", content, "\n", close tag.
+const el = (attrs, body = `${MID}: texto privado`) => `<channel${attrs}>\n${body}\n</channel>`;
+const PROMPT = el(` source="${SERVER}" chat_id="web" message_id="${MID}" user="web" ts="1"`);
 const chan = (over = {}) => ({ type: "user", isMeta: true, promptSource: "system", sessionId: SID, promptId: PID, origin: { kind: "channel", server: SERVER }, message: { content: PROMPT }, ...over });
 const typed = (over = {}) => ({ type: "user", sessionId: SID, promptId: PID, message: { content: "hola" }, ...over });
 const assistant = { type: "assistant", sessionId: SID, message: { content: [{ type: "text", text: `OK_${MID}` }] } };
@@ -30,6 +33,8 @@ const m = (text, over = {}) => matchTranscript(text, { startsAtZero: true, promp
 test("caso nominal: un único registro de prompt, de canal, del servidor y la sesión, con el message_id ⇒ verified", () => {
 	const r = m(jl(prev, chan(), assistant, toolResult));
 	assert.equal(r.status, "verified", r.reasons.join());
+	assert.deepEqual(r.uniqueness, { scope: "whole-file", unique_in_observed: true, unique_global: true });
+	assert.equal(r.channel_element_ok, true);
 	assert.equal(r.prompt_records_for_prompt_id, 1, "el tool_result con el mismo promptId no cuenta como prompt");
 	assert.equal(r.content_equals_prompt, true);
 	assert.equal(JSON.stringify(r).includes("privado"), false, "nunca devuelve texto");
@@ -38,7 +43,7 @@ test("caso nominal: un único registro de prompt, de canal, del servidor y la se
 const bad = [
 	["archivo vacío", "", ["empty", "no-prompt-record"]],
 	["sin el registro (falta o todavía no escrito)", jl(prev), ["no-prompt-record"]],
-	["registro a medio escribir (sin salto final)", jl(prev) + JSON.stringify(chan()).slice(0, 80), ["no-prompt-record-partial-tail"]],
+	["registro a medio escribir (sin salto final)", jl(prev) + JSON.stringify(chan()).slice(0, 80), ["no-prompt-record", "partial-tail"]],
 	["línea ilegible", jl(prev, "{no es json", chan()), ["unparsable-line"]],
 	["registro duplicado", jl(chan(), chan()), ["duplicate-prompt-record", "message_id-in-several-records"]],
 	["prompt tecleado + registro de canal falsificado con el mismo promptId", jl(typed(), chan()), ["duplicate-prompt-record"]],
@@ -47,7 +52,7 @@ const bad = [
 	["otra sesión", jl(chan({ sessionId: "sess-2" })), ["session-mismatch"]],
 	["sin isMeta", jl(chan({ isMeta: false })), ["not-meta"]],
 	["otro message_id", jl(chan({ message: { content: PROMPT.replace(MID, "P0T01-000000") } })), ["message_id-mismatch"]],
-	["dos etiquetas en el registro", jl(chan({ message: { content: PROMPT + PROMPT } })), ["channel-tag-count"]],
+	["dos etiquetas en el registro", jl(chan({ message: { content: PROMPT + PROMPT } })), ["content-differs-from-prompt", "channel-element:nested-or-second-tag"]],
 	["el message_id reaparece en otro registro (copia)", jl(chan(), typed({ promptId: "prompt-9", message: { content: PROMPT } })), ["message_id-in-several-records"]],
 	["sólo un queued_command (el mensaje llegó con la sesión ocupada)", jl({ type: "attachment", sessionId: SID, attachment: { type: "queued_command", prompt: PROMPT, origin: { kind: "channel", server: SERVER } } }), ["no-prompt-record"]],
 ];
@@ -62,7 +67,8 @@ for (const [name, text, reasons] of bad) {
 test("lectura desde la mitad del archivo: el primer fragmento es una línea cortada, no un registro ilegible", () => {
 	const full = jl(prev, chan());
 	const r = m(full.slice(10), { startsAtZero: false });
-	assert.equal(r.status, "verified", r.reasons.join());
+	assert.equal(r.status, "verified-in-observed-bytes", r.reasons.join());
+	assert.deepEqual(r.uniqueness, { scope: "observed-bytes", unique_in_observed: true, unique_global: null });
 });
 
 test("hook sin prompt_id o prompt sin etiqueta: no verificado", () => {
@@ -179,4 +185,89 @@ test("manage: el probe comparte la entrada de UserPromptSubmit y el autotest lo 
 	const c = check(f);
 	assert.equal(c.events.length, 7);
 	assert.deepEqual(c.probe, { exit: 0, stdout: "", status: "verified" });
+});
+
+// ── Regression 1: a partial line ALWAYS makes the read unverified
+test("registro válido seguido de una línea JSON incompleta ⇒ unverified aunque el registro esté", () => {
+	const r = m(jl(prev, chan()) + JSON.stringify(assistant).slice(0, 40));
+	assert.equal(r.prompt_records_for_prompt_id, 1, "el registro buscado sí se encontró");
+	assert.equal(r.status, "unverified");
+	assert.deepEqual(r.reasons, ["partial-tail"]);
+	assert.equal(arrivalCategory(r, m(jl(prev, chan()))), "invalid", "no es 'late': el registro estaba, la lectura era incompleta");
+});
+
+// ── Regression 2: a bounded read never claims global uniqueness
+test("duplicado anterior fuera de la cola leída: la cola sola no afirma unicidad global; la lectura completa lo detecta", () => {
+	const filler = jl(...Array.from({ length: 50 }, (_, i) => ({ type: "assistant", sessionId: SID, message: { content: [{ type: "text", text: `relleno ${i}` }] } })));
+	const full = jl(chan()) + filler + jl(chan());
+	const tail = full.slice(full.length - (filler.length + JSON.stringify(chan()).length + 1) + 5);
+	const atHook = m(tail, { startsAtZero: false });
+	assert.equal(atHook.status, "verified-in-observed-bytes", atHook.reasons.join());
+	assert.equal(atHook.uniqueness.unique_global, null);
+	assert.equal(atHook.uniqueness.scope, "observed-bytes");
+	const later = m(full);
+	assert.equal(later.status, "unverified");
+	assert.ok(later.reasons.includes("duplicate-prompt-record"));
+	assert.equal(later.uniqueness.unique_global, false);
+	assert.equal(arrivalCategory(atHook, later), "invalid");
+	assert.equal(transcriptEvidence([atHook], later, 1).category, "invalid");
+});
+
+// ── Regression 3: exact prompt equality and one well-formed element
+test("igualdad exacta exigida: contenido distinto del prompt, prompt no disponible, hash igual y hash distinto", () => {
+	assert.ok(m(jl(chan()), { prompt: `${PROMPT} ` }).reasons.includes("content-differs-from-prompt"));
+	const none = m(jl(chan()), { prompt: undefined });
+	assert.equal(none.status, "unverified");
+	assert.ok(none.reasons.includes("prompt-unavailable-for-comparison"));
+	const h = (x) => createHash("sha256").update(x, "utf8").digest("hex");
+	assert.equal(m(jl(chan()), { prompt: undefined, promptSha256: h(PROMPT) }).status, "verified");
+	assert.ok(m(jl(chan()), { prompt: undefined, promptSha256: h(`${PROMPT}x`) }).reasons.includes("content-differs-from-prompt"));
+});
+
+const A = ` source="${SERVER}" message_id="${MID}"`;
+const malformed = [
+	["texto antes de la etiqueta", `hola ${el(A)}`, "outside-content-or-no-tag"],
+	["texto después de la etiqueta", `${el(A)} chau`, "outside-content-or-unclosed"],
+	["salto de línea final extra", `${el(A)}\n`, "outside-content-or-unclosed"],
+	["sin el salto tras la apertura", `<channel${A}>${MID}\n</channel>`, "bad-open-tag"],
+	["atributo duplicado (clave meta 'source')", el(`${A} source="plugin:otro:otro"`), "duplicate-attribute"],
+	["message_id duplicado y contradictorio", el(`${A} message_id="P0T01-000000"`), "duplicate-attribute"],
+	["sin atributo source", el(` message_id="${MID}"`), "no-source-attribute"],
+	["segunda etiqueta dentro del cuerpo", el(A, `<channel source="x">\nx\n</channel>`), "nested-or-second-tag"],
+	["sintaxis de atributo rota", el(`${A} roto`), "bad-attribute-syntax"],
+	["sin cierre", `<channel${A}>\n${MID}\n`, "outside-content-or-unclosed"],
+];
+for (const [name, text, why] of malformed) {
+	test(`etiqueta inválida ⇒ unverified: ${name}`, () => {
+		const r = m(jl(chan({ message: { content: text } })), { prompt: text });
+		assert.equal(r.status, "unverified");
+		assert.ok(r.reasons.includes(`channel-element:${why}`), r.reasons.join());
+		assert.equal(r.content_equals_prompt, true, "sólo falla la forma, no la igualdad");
+	});
+}
+
+test("atributo source de la etiqueta distinto del servidor del origen ⇒ unverified", () => {
+	const text = el(` source="plugin:otro:otro" message_id="${MID}"`);
+	const r = m(jl(chan({ message: { content: text } })), { prompt: text });
+	assert.ok(r.reasons.includes("channel-source-attribute-mismatch"));
+});
+
+test("sonda: transcript mayor que la cola leída con el registro al final ⇒ verified-in-observed-bytes, nunca unicidad global", () => {
+	const e = probeEnv();
+	const filler = jl(...Array.from({ length: 12000 }, (_, i) => ({ type: "assistant", sessionId: SID, message: { content: [{ type: "text", text: "x".repeat(80) + i }] } })));
+	writeFileSync(e.tp, jl(chan()) + filler + jl(chan()));
+	e.run(ups(e.tp));
+	const [line] = e.log();
+	assert.equal(line.read_from_zero, false);
+	assert.equal(line.status, "verified-in-observed-bytes", line.reasons.join());
+	assert.equal(line.uniqueness.unique_global, null);
+});
+
+test("sonda: registro válido + línea incompleta al final ⇒ unverified", () => {
+	const e = probeEnv();
+	writeFileSync(e.tp, jl(prev, chan()) + "{\"type\":\"assistant\"");
+	e.run(ups(e.tp));
+	const [line] = e.log();
+	assert.equal(line.status, "unverified");
+	assert.deepEqual(line.reasons, ["partial-tail"]);
 });

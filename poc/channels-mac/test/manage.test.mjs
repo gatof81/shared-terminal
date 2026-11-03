@@ -1,6 +1,7 @@
 // Regression 1: uninstall restores settings.local.json byte for byte when
 // nothing else changed it, and removes only the kit's hooks otherwise.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -91,4 +92,57 @@ test("settings.local.json inválido: install se niega", () => {
 	writeFileSync(settings(f), "{ no es json");
 	assert.throws(() => install(f, { bunPath }), /no es JSON válido/);
 	assert.equal(readFileSync(settings(f), "utf8"), "{ no es json");
+});
+
+// The owner's Mac has the PREVIOUS kit installed (logger only on
+// UserPromptSubmit). The new manage.mjs must retire it, keep every log, and
+// then install the new kit with the probe.
+function oldInstall(f, prior) {
+	const poc = join(f, ".poc0");
+	mkdirSync(join(poc, "out"), { recursive: true });
+	const h = { type: "command", command: `"${bunPath}" "${join(poc, "hook-logger.mjs")}"`, timeout: 5 };
+	const fz = "mcp__plugin_fakechat_fakechat__.*";
+	const base = prior === null ? {} : JSON.parse(prior);
+	base.hooks = base.hooks ?? {};
+	for (const [ev, entry] of Object.entries({ SessionStart: { hooks: [h] }, UserPromptSubmit: { hooks: [h] }, Stop: { hooks: [h] }, StopFailure: { hooks: [h] },
+		Notification: { hooks: [h] }, PostToolUse: { matcher: fz, hooks: [h] }, PostToolUseFailure: { matcher: fz, hooks: [h] } })) base.hooks[ev] = [...(base.hooks[ev] ?? []), entry];
+	mkdirSync(join(f, ".claude"), { recursive: true });
+	const after = `${JSON.stringify(base, null, 2)}\n`;
+	writeFileSync(settings(f), after);
+	if (prior !== null) writeFileSync(join(poc, "settings.local.json.before"), prior);
+	const sha = (b) => createHash("sha256").update(b).digest("hex");
+	writeFileSync(join(poc, "installed.json"), JSON.stringify({ existed: prior !== null, createdClaudeDir: false, beforeSha: prior === null ? null : sha(prior), afterSha: sha(after), bunPath }));
+	for (const x of ["hook-logger.mjs", "send.mjs", "report.mjs", "idle.mjs", "classify.mjs"]) writeFileSync(join(poc, x), "// viejo");
+	writeFileSync(join(poc, "out", "hooks.jsonl"), '{"event":"UserPromptSubmit"}\n');
+	writeFileSync(join(poc, "out", "sends-T.jsonl"), '{"id":"P0T01-f9dfb6"}\n');
+}
+
+test("kit anterior instalado: el manage nuevo lo retira byte por byte, conserva los logs e instala la sonda", () => {
+	const f = folder();
+	oldInstall(f, PRIOR);
+	const logsBefore = readFileSync(join(f, ".poc0", "out", "hooks.jsonl"), "utf8") + readFileSync(join(f, ".poc0", "out", "sends-T.jsonl"), "utf8");
+	const r = uninstall(f);
+	assert.equal(r.mode, "restaurado-exacto");
+	assert.equal(readFileSync(settings(f), "utf8"), PRIOR);
+	assert.equal(existsSync(join(f, ".poc0", "hook-logger.mjs")), false);
+	assert.equal(readFileSync(join(f, ".poc0", "out", "hooks.jsonl"), "utf8") + readFileSync(join(f, ".poc0", "out", "sends-T.jsonl"), "utf8"), logsBefore);
+	install(f, { bunPath });
+	const s = JSON.parse(readFileSync(settings(f), "utf8"));
+	assert.equal(s.hooks.UserPromptSubmit.at(-1).hooks.length, 2);
+	assert.equal(uninstall(f).mode, "restaurado-exacto");
+	assert.equal(readFileSync(settings(f), "utf8"), PRIOR);
+});
+
+test("kit anterior + permiso guardado por Claude durante T: se quitan sólo los hooks del kit", () => {
+	const f = folder();
+	oldInstall(f, PRIOR);
+	const cur = JSON.parse(readFileSync(settings(f), "utf8"));
+	cur.permissions.allow.push("Bash(ls:*)");
+	writeFileSync(settings(f), JSON.stringify(cur));
+	const r = uninstall(f);
+	assert.match(r.mode, /sólo-hooks-del-kit-quitados/);
+	const s = JSON.parse(readFileSync(settings(f), "utf8"));
+	assert.deepEqual(s.permissions.allow, ["mcp__plugin_fakechat_fakechat__reply", "Bash(ls:*)"]);
+	assert.equal(JSON.stringify(s).includes(".poc0/"), false);
+	assert.deepEqual(s.hooks, { Stop: [{ hooks: [{ type: "command", command: "echo mía" }] }] });
 });

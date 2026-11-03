@@ -142,7 +142,7 @@ export function check(folder) {
 	const cfg = join(scratch, "cfg");
 	const tp = join(cfg, "projects", "-selftest", "selftest.jsonl");
 	mkdirSync(dirname(tp), { recursive: true });
-	const prompt = '<channel source="plugin:fakechat:fakechat" message_id="P0X01-000000">x</channel>';
+	const prompt = '<channel source="plugin:fakechat:fakechat" message_id="P0X01-000000">\nx\n</channel>';
 	writeFileSync(tp, `${JSON.stringify({ type: "user", isMeta: true, sessionId: "selftest", promptId: "pp", origin: { kind: "channel", server: "plugin:fakechat:fakechat" }, message: { content: prompt } })}\n`);
 	const pr = spawnSync(meta.bunPath, [join(scratch, "transcript-probe.mjs")], {
 		input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "selftest", prompt_id: "pp", prompt, transcript_path: tp }),

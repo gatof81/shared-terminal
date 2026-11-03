@@ -112,8 +112,10 @@ function laterTranscriptCheck(ups, id, tSend) {
 	const t = Date.now();
 	if (files.length === 1) {
 		try {
+			// Exact equality with the hook's prompt through the logger's SHA-256
+			// of it: the harness never holds the prompt text itself.
 			later = matchTranscript(readFileSync(files[0], "utf8"), { startsAtZero: true, promptId: ups.prompt_id, messageId: id, sessionId: ups.session_id,
-				server: process.env.POC0_CHANNEL_SERVER ?? "plugin:fakechat:fakechat" });
+				server: process.env.POC0_CHANNEL_SERVER ?? "plugin:fakechat:fakechat", promptSha256: ups.prompt_sha256 });
 		} catch {
 			later = { status: "unverified", reasons: ["unreadable"], prompt_records_for_prompt_id: 0 };
 		}
