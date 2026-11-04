@@ -12,7 +12,7 @@ never merged.
 | `marketplace/` | The local marketplace B1a mounts read-only at `/opt/st-b1/marketplace`, listing `st-b1-probe` by relative path: the only way 2.1.314 seats a local plugin in the organization tier. |
 | `marketplace/plugins/st-b1-probe` | The managed probe: one fact record per event (`session.start`, `classic.SessionStart`, `classic.SessionEnd`), plus whether mod code can reach `Bun.ant.setDumpable` (B1b H8; `typeof` only, nothing is called). |
 | `analyze_b1a.py`, `analyze_b1b.py` | Verdicts (PASS / FAIL / INCONCLUSIVE) from the captured facts. Aliases and booleans only. |
-| `test/` | `test_analyze_b1a.py` and `test_analyze_b1b.py`: a PASS fixture built from the real 2.1.314 log templates plus one mutation per criterion. `test_b1.py`: helpers on real processes (a non-dumpable target made with `prctl(PR_SET_DUMPABLE, 0)`, a dumpable control, real ptrace as an ancestor). `test_runner.py`: the runner against a fake `docker`. |
+| `test/` | `test_analyze_b1a.py` and `test_analyze_b1b.py`: a PASS fixture built from the real 2.1.314 log templates plus one mutation per criterion. `test_b1.py`: helpers on real processes (a non-dumpable target made with `prctl(PR_SET_DUMPABLE, 0)`, a dumpable control, real ptrace as an ancestor). `test_runner.py`: the runner against a fake `docker` (including that setup stops if `NetworkMode` is not `none`). |
 
 B1a attempt rule: an attempt counts as **blocked** only with no marker of the attacker's code,
 the control in the same start (the managed probe in the organization tier, or the CLI refusing
