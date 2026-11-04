@@ -240,8 +240,12 @@ export async function listPins(d: PinDocker, repo = PIN_REPO): Promise<PinEntry[
 
 /**
  * Orphan pins: no container at all uses their image. Dry run unless `write`;
- * with `write`, the containers are listed AGAIN right before each removal
- * and a pin whose image gained a container meanwhile is kept. A mismatched
+ * with `write`, the tag's target and then the containers are read again right
+ * before each removal (either changed ⇒ kept). This NARROWS but does not close
+ * the race: the untag is by ref, with no compare-and-delete in the Docker API,
+ * so a spawn that pins and creates between `listContainers` and `removeTag`
+ * can still lose its pin. Safe only under an exclusion of creates — which is
+ * why no caller passes `write: true` today (the CLI refuses it). A mismatched
  * pin is never removed (someone moved it by hand — look first).
  */
 export async function pruneOrphanPins(

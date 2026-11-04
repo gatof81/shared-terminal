@@ -701,14 +701,33 @@ describe("prune --write is disabled in the CLI (owner review of #521)", () => {
 		expect(await runImagePinsCli(["prune", "--write", "--backend-stopped"], d, {}, cli)).toBe(2);
 		expect(removed).toEqual([]);
 		expect(await d.inspectImage(id("5"))).not.toBeNull();
-		d.containers.push(sessionC("st-55555555-555", id("5"), "created")); // the create lands
-		expect(await d.inspectImage(id("5"))).not.toBeNull();
+		// The create lands: the image it needed was never untagged.
+		d.containers.push(sessionC("st-55555555-555", id("5"), "created"));
+		expect((await d.inspectImage(pinRef(id("5"), "shared-terminal-session-pin")))?.Id).toBe(
+			id("5"),
+		);
 	});
 
-	it("the dry run and status still work", async () => {
+	it("the extracted CLI keeps status / pin / list / usage and their exit codes", async () => {
+		const noFile = { SESSION_IMAGE_PIN_EXCEPTIONS: "/nonexistent/st-image-pins/exceptions.json" };
 		const d = vm100();
-		const { io: cli } = io();
-		expect(await runImagePinsCli(["prune"], d, {}, cli)).toBe(0);
-		expect(await runImagePinsCli(["bogus"], d, {}, cli)).toBe(2);
+		const { o, io: cli } = io();
+		// status: NO-GO (unpinned in-use images) = 1 …
+		expect(await runImagePinsCli([], d, noFile, cli)).toBe(1);
+		expect((o.out.at(-1) as { gate: string }).gate).toBe("NO-GO");
+		// … pin (on) = 0 …
+		expect(await runImagePinsCli(["pin"], d, noFile, cli)).toBe(0);
+		// … then status GO = 0.
+		expect(await runImagePinsCli(["status"], d, noFile, cli)).toBe(0);
+		expect((o.out.at(-1) as { gate: string }).gate).toBe("GO");
+		// Pins off: status NO-GO and pin refused, both 1.
+		expect(await runImagePinsCli([], d, { ...noFile, SESSION_IMAGE_PINS: "off" }, cli)).toBe(1);
+		expect(await runImagePinsCli(["pin"], d, { ...noFile, SESSION_IMAGE_PINS: "off" }, cli)).toBe(
+			1,
+		);
+		expect(await runImagePinsCli(["list"], d, noFile, cli)).toBe(0);
+		expect(await runImagePinsCli(["prune"], d, noFile, cli)).toBe(0);
+		expect(await runImagePinsCli(["bogus"], d, noFile, cli)).toBe(2);
+		expect(await runImagePinsCli(["status", "extra"], d, noFile, cli)).toBe(2);
 	});
 });
