@@ -16,11 +16,20 @@ never merged.
 
 B1a attempt rule: an attempt counts as **blocked** only with no marker of the attacker's code,
 the control in the same start (the managed probe in the organization tier, or the CLI refusing
-to start with the sideload message), and decisive evidence that the CLI met the attack. Anything
-less is INCONCLUSIVE; a marker is a FAIL. N15 (dev mods), `@synced` and prompt/tool events need a
-login and stay listed as pending, never as blocked.
+to start with the sideload message), and decisive evidence that the CLI met the attack — for the
+impostors (N10/N11/N13), a debug line naming the planted copy's recorded path, so "it just wasn't
+found" never passes as "blocked". A rogue hooks module that LOADED is a FAIL even with no marker.
+Settings-validation errors are checked in every attempt, not only the baseline. Anything short of
+blocked is INCONCLUSIVE. classic.SessionEnd is a fact, not a PASS requirement (attempts end with
+C-c). The runner uses --network none: N4 serves on the container loopback. N15 (dev mods),
+`@synced` and prompt/tool events need a login and stay pending, never blocked.
 
 B1b measures other processes' access to a CLI started from a root `0711` copy, against a
-positive control (the same CLI from the readable copy). It does not measure process integrity:
-code inside the CLI can make it dumpable again, and a tracer attached before the exec keeps the
-registers. Both are reported as residual facts. H5 is analytic: no crash is ever caused.
+**per-operation** positive control (the same CLI from the readable copy). READ mode
+(environ/auxv/maps, which Yama does not restrict) is judged in the non-ancestor case; ATTACH mode
+is judged as an ancestor (H4), where Yama grants an ancestor of a dumpable child — a non-ancestor
+ATTACH denial is a fact, not credited to H-ND. A denial counts for H-ND only where the same
+operation succeeds against the control. It does not measure process integrity: code inside the CLI
+can make it dumpable again, and a tracer attached before the exec keeps the registers (H4b). H5 is
+an observed precondition, not a demonstration; no crash is ever caused. PID/starttime stability is
+not executable identity.
