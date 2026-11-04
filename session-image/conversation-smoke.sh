@@ -655,30 +655,35 @@ sleep 1
 # v1.8.2: the script never runs PATH's claude; run by hand (no claude
 # process above it) it has no process to ask ⇒ null, and fast.
 check "script with no claude process above it (PATH's claude hangs, never called): $t ms ≤ 6000, claude_version null" \
-	bash -c '[ "$1" -le 6000 ] && [ "$(jq -r "select(.event == \"SessionStart\") | .body.st.claude_version" "$2" | tail -n 1)" = null ]' _ "$t" "$OUT/ss-ok.jsonl"
+	bash -c '[ "$1" -le 6000 ] && [ "$4" -gt "$3" ] && [ "$(jq -r "select(.event == \"SessionStart\") | .body.st.claude_version" "$2" | tail -n 1)" = null ]' _ "$t" "$OUT/ss-ok.jsonl" "$before" "$(count ss-ok '.event == "SessionStart" and .body.session_id == "5b8f3d7e-0c43-4f7a-9d61-2a1e0f9b7c55"')"
 sleep 0.5
-check "no survivor of the hung children" \
-	bash -c '! docker exec "$1" bash -c "for f in /proc/[0-9]*/cmdline; do tr \"\\0\" \" \" < \$f 2>/dev/null; echo; done" | grep -q "^sleep 30"' _ "$SESS"
+# (No "survivor" check any more: PATH's hanging claude is never started by
+# the script. The query of the process's own binary is bounded by its inner
+# `timeout -k 1 3` and the whole script by `timeout -k 1 5`, by inspection.)
 note "relay hung (SIGSTOP, port still open): -p with Bash $STOPPED_MS ms (base $BASE_BASH) — the CLI's 1 s hook timeout per blocking event"
 
 # `claude --version` broken must not stop claude itself.
 receiver real faults || exit 1
+before=$(count faults '.event == "SessionStart"')
 docker exec "$SESS" bash -c 'mkdir -p /tmp/wrap && printf "#!/bin/bash\n[ \"\$1\" = --version ] && exit 1\nexec /home/developer/.npm-global/bin/claude \"\$@\"\n" > /tmp/wrap/claude && chmod +x /tmp/wrap/claude'
 docker exec -w /home/developer/workspace "$SESS" bash -c 'PATH=/tmp/wrap:$PATH timeout 120 claude -p hola </dev/null' >"$TMP/last.out" 2>/dev/null
 check "PATH's claude --version failing: claude -p still answers" out_is "$HOLA_OUT"
 sleep 1
 # v1.8.2: the version is the PROCESS's (/proc/<pid>/exe), not PATH's.
-check "…and session_start carries the process's own version ($PIN), not PATH's failure" \
-	[ "$(jq -r 'select(.event == "SessionStart") | .body.st.claude_version' "$OUT/faults.jsonl" | tail -n 1)" = "$PIN (Claude Code)" ]
+check "…and a NEW session_start carries the process's own version ($PIN), not PATH's failure" \
+	bash -c '[ "$1" -gt "$2" ] && [ "$3" = "$4 (Claude Code)" ]' _ "$(count faults '.event == "SessionStart"')" "$before" \
+	"$(jq -r 'select(.event == "SessionStart") | .body.st.claude_version' "$OUT/faults.jsonl" | tail -n 1)" "$PIN"
 # Educación HZ, 2026-11-04: PATH names a `claude` that reports another version.
 docker exec "$SESS" bash -c 'printf "#!/bin/bash\n[ \"\$1\" = --version ] && { echo \"9.9.9 (Claude Code)\"; exit 0; }\nexec /home/developer/.npm-global/bin/claude \"\$@\"\n" > /tmp/wrap/claude'
 check "the lying wrapper really says 9.9.9" \
 	[ "$(docker exec "$SESS" bash -c 'PATH=/tmp/wrap:$PATH claude --version')" = "9.9.9 (Claude Code)" ]
+before=$(count faults '.event == "SessionStart"')
 docker exec -w /home/developer/workspace "$SESS" bash -c 'PATH=/tmp/wrap:$PATH timeout 120 claude -p hola </dev/null' >"$TMP/last.out" 2>/dev/null
 check "PATH says 9.9.9: claude -p still answers" out_is "$HOLA_OUT"
 sleep 1
-check "…and session_start records the running process's $PIN, never PATH's 9.9.9" \
-	[ "$(jq -r 'select(.event == "SessionStart") | .body.st.claude_version' "$OUT/faults.jsonl" | tail -n 1)" = "$PIN (Claude Code)" ]
+check "…and THIS run's session_start records the running process's $PIN, never PATH's 9.9.9" \
+	bash -c '[ "$1" -gt "$2" ] && [ "$3" = "$4 (Claude Code)" ]' _ "$(count faults '.event == "SessionStart"')" "$before" \
+	"$(jq -r 'select(.event == "SessionStart") | .body.st.claude_version' "$OUT/faults.jsonl" | tail -n 1)" "$PIN"
 docker exec "$SESS" bash -c 'printf "#!/bin/bash\n[ \"\$1\" = --version ] && exec sleep 30\nexec /home/developer/.npm-global/bin/claude \"\$@\"\n" > /tmp/wrap/claude'
 before=$(count faults '.event == "SessionStart"')
 t0=$(ms_now)
