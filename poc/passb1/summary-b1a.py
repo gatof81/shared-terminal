@@ -61,10 +61,18 @@ def verify_sums(res):
         listed[rel] = want
     if not listed:                              # empty / blank-only list
         return False
+    # A lexical path check is not enough: a symlink INSIDE the capture (as the file itself, or as a
+    # parent component) could redirect a read OUTSIDE it. Refuse a symlinked entry and require every
+    # resolved path to stay within the capture dir (owner D5).
+    base = os.path.realpath(res)
     try:
         for rel, want in listed.items():
+            full = os.path.join(res, rel)
+            real = os.path.realpath(full)
+            if os.path.islink(full) or not (real == base or real.startswith(base + os.sep)):
+                return False
             h = hashlib.sha256()
-            with open(os.path.join(res, rel), "rb") as f:
+            with open(full, "rb") as f:
                 for chunk in iter(lambda: f.read(1 << 20), b""):
                     h.update(chunk)
             if h.hexdigest() != want:
@@ -115,17 +123,24 @@ def legacy_n17_user(res):
     return {"outcome": "inconclusive", "why": "mcp-add-outcome-unknown"}
 
 
+def attempt_markers(res, aid):
+    """The attacker-code markers an attempt's own result.json recorded, or [] if none / unreadable.
+    A non-empty list is proof the attack EXECUTED, independent of whether the id is in PASS scope."""
+    if not res:
+        return []
+    try:
+        with open(os.path.join(res, "attempts", aid, "result.json"), encoding="utf-8") as fh:
+            return json.load(fh).get("markers") or []
+    except (OSError, ValueError):
+        return []
+
+
 def legacy_n17_started(res):
     """run 1 stored the MCP attempt as 'N17' (not split). A STARTED server there — user or project
     side — is a breach that run 2 cannot erase (owner C2). Returns the started marker, or None."""
-    d = os.path.join(res, "attempts", "N17")
-    if not os.path.isdir(d):
+    if not os.path.isdir(os.path.join(res, "attempts", "N17")):
         return None
-    try:
-        with open(os.path.join(d, "result.json"), encoding="utf-8") as fh:
-            markers = json.load(fh).get("markers") or []
-    except (OSError, ValueError):
-        return None
+    markers = attempt_markers(res, "N17")
     return next((m for m in ("mcp-user", "mcp-project") if m in markers), None)
 
 
@@ -194,9 +209,21 @@ def main(argv=None):
         counts[row["outcome"]] = counts.get(row["outcome"], 0) + 1
         rows.append({"attempt": aid, **row, "provenance": prov})
 
-    excluded = {aid: {"status": "excluded-from-scope", "reason": A.EXCLUDED[aid]} for aid in A.EXCLUDED}
+    # Retired attacks (N10/N11/N13) are out of the PASS CRITERIA, but a demonstrated EXECUTION of
+    # one in the original evidence of a VALID run is still a breach: report FAIL with provenance,
+    # and never re-count it as blocked (owner D2).
+    excluded, excluded_executed = {}, []
+    for aid in A.EXCLUDED:
+        ex = {"status": "excluded-from-scope", "reason": A.EXCLUDED[aid]}
+        m = (attempt_markers(a.run1, aid) if s1 == "valid" else []) or (attempt_markers(a.run2, aid) if s2 == "valid" else [])
+        if m:
+            prov = f"run1:{a.run1_sha}" if (s1 == "valid" and attempt_markers(a.run1, aid)) else f"run2:{a.run2_sha}"
+            ex["observed_execution"] = {"markers": sorted(m), "provenance": prov}
+            excluded_executed.append(aid)
+        excluded[aid] = ex
+
     runs_valid = s1 == "valid" and s2 == "valid"
-    if counts["loaded"]:
+    if counts["loaded"] or excluded_executed:
         verdict = "FAIL"
     elif not runs_valid or counts["inconclusive"]:
         verdict = "INCONCLUSIVE"

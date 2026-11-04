@@ -38,32 +38,45 @@ class McpApprovalDriver(unittest.TestCase):
     the CLI kept running, AND an independent accept signal — which 2.1.314 does not emit, so a real
     approval stays INCONCLUSIVE."""
 
-    def test_selected_option_reads_the_pointer_line(self):
+    def test_classify_selection_yields_only_enums(self):
+        # D4: the raw option label is classified to a known enum before anything is persisted.
         pane = ("New MCP server found in this project: st-b1-rogue-n17p\n"
                 "\n  ❯ 1. Use this MCP server\n  2. Continue without this MCP server\n")
-        self.assertEqual(b1.selected_option(pane), "1. Use this MCP server")
-        self.assertEqual(b1.selected_option("> Use this and all MCP servers\n  Other"), "Use this and all MCP servers")
-        self.assertIsNone(b1.selected_option("no pointer here\n  2. plain line\n"))
+        self.assertEqual(b1.classify_selection(pane), "approve")
+        self.assertEqual(b1.classify_selection("> Use this and all MCP servers\n  Other"), "approve")
+        self.assertEqual(b1.classify_selection("❯ 3. Continue without this MCP server"), "decline")
+        self.assertEqual(b1.classify_selection("❯ Some other menu entry"), "other")
+        self.assertIsNone(b1.classify_selection("no pointer here\n  2. plain line\n"))
+        self.assertIn(b1.classify_selection(pane), (None, "approve", "decline", "other"))
 
     def test_real_approval_without_signal_is_not_confirmed(self):
         # The approve option selected and the dialog closed while running — but no acceptance signal
         # on 2.1.314, so NOT "confirmed" (=> analyzer INCONCLUSIVE).
-        self.assertEqual(b1.mcp_approval_result("1. Use this MCP server", "running", True, False), "selected-no-signal")
+        self.assertEqual(b1.mcp_approval_result("approve", "running", True, False), "selected-no-signal")
 
     def test_confirmed_only_with_an_independent_signal(self):
-        self.assertEqual(b1.mcp_approval_result("1. Use this MCP server", "running", True, True), "confirmed")
+        self.assertEqual(b1.mcp_approval_result("approve", "running", True, True), "confirmed")
 
     def test_continue_without_is_declined(self):
-        self.assertEqual(b1.mcp_approval_result("2. Continue without this MCP server", "running", True, False), "declined")
+        self.assertEqual(b1.mcp_approval_result("decline", "running", True, False), "declined")
 
     def test_dialog_gone_by_cli_exit_is_not_approval(self):
-        self.assertEqual(b1.mcp_approval_result("1. Use this MCP server", "exit", True, False), "dismissed-by-exit")
+        self.assertEqual(b1.mcp_approval_result("approve", "exit", True, False), "dismissed-by-exit")
 
     def test_persistent_dialog_is_screen_only(self):
-        self.assertEqual(b1.mcp_approval_result("1. Use this MCP server", "persistent", True, False), "screen-only")
+        self.assertEqual(b1.mcp_approval_result("approve", "persistent", True, False), "screen-only")
 
     def test_never_seen_is_none(self):
         self.assertEqual(b1.mcp_approval_result(None, None, False, False), "none")
+
+    def test_one_start_init_persists_no_raw_name_or_option_text(self):
+        # D4: the per-start dict exposes booleans + enums only — no mcp_approval_server / _selected.
+        import inspect as _inspect
+        src = _inspect.getsource(b1.one_start)
+        self.assertNotIn("mcp_approval_server", src)
+        self.assertNotIn("mcp_approval_selected\"", src)
+        self.assertIn("mcp_approval_selection", src)
+        self.assertIn("mcp_approval_name_matches", src)
 
 
 class HndStat(unittest.TestCase):

@@ -31,6 +31,10 @@ ORG_TIERS = {"prepend", "append"}       # managed seats (§1.14.14.2); "user" is
 KNOWN_TIERS = ORG_TIERS | {"user", "builtin", "core"}
 EXIT = ("N1", "N2", "N3", "N4", "N5a", "N5b")
 START = ("N6", "N7a", "N7b", "N8", "N9", "N12", "N14", "N16", "N17-user", "N17-project", "N19")
+# The ONLY legitimate focused scope (run 2). A --scope must equal exactly this set (P0, the
+# baseline, is always evaluated and may be listed harmlessly); anything else is refused so a run
+# can never claim a general PASS from a partial or empty set of attacks (§1.14.19, owner D5).
+RUN2_SCOPE = frozenset({"N14", "N17-project"})
 # N10/N11/N13 are retired, not blocked: for a directory marketplace 2.1.314 reads the plugin in
 # place and never consults the cache/seed, so a same-name copy there is not a load path (shown
 # locally, §1.14.18.1). Cache poisoning is meaningful only for remote sources, whose control is
@@ -335,6 +339,9 @@ def analyze(D, scope=None):
 
     rows = {}
     judged = tuple(x for x in EXIT + START if scope is None or x in scope)
+    if scope is not None and not judged:
+        # A focused run that judges ZERO attacks must never read as a general PASS (owner D5).
+        incs.append("scope-empty")
     for aid in judged:
         a = att.get(aid)
         if a is None:
@@ -356,16 +363,39 @@ def analyze(D, scope=None):
     return done()
 
 
+def parse_scope(argv):
+    """Returns (scope_tuple_or_None, error_or_None) for the CLI tail after `report DIR`. A --scope
+    must be present with a value, name only KNOWN ids, and equal exactly RUN2_SCOPE (P0 allowed as
+    the baseline). Empty / unknown / incomplete are refused so a focused run can't masquerade as a
+    general PASS (owner D5)."""
+    if len(argv) == 3:
+        return None, None
+    if len(argv) != 5 or argv[3] != "--scope":
+        return None, "uso: report DIR [--scope id,id,...]"
+    ids = [x for x in argv[4].split(",") if x]
+    known = set(EXIT) | set(START) | {"P0"}
+    attacks = set(ids) - {"P0"}
+    if not attacks:
+        return None, "scope vacío: no se juzga ningún ataque"
+    unknown = set(ids) - known
+    if unknown:
+        return None, f"scope con ids desconocidos: {','.join(sorted(unknown))}"
+    if attacks != set(RUN2_SCOPE):
+        return None, f"scope incompleto/incorrecto para corrida 2: se exige exactamente {','.join(sorted(RUN2_SCOPE))}"
+    return tuple(ids), None
+
+
 def main(argv):
     # report RESULTS_DIR [--scope id,id,...]
     if len(argv) < 3 or argv[1] != "report":
         print(__doc__.strip(), file=sys.stderr)
         return 64
-    scope = None
-    if len(argv) >= 5 and argv[3] == "--scope":
-        # A focused run (run 2) judges only these attempts; the global controls are always
-        # checked (see analyze), so --scope can never hide a global failure.
-        scope = tuple(x for x in argv[4].split(",") if x)
+    scope, err = parse_scope(argv)
+    if err:
+        print(err, file=sys.stderr)
+        return 64
+    # A focused run (run 2) judges only these attempts; the global controls are always checked
+    # (see analyze), so --scope can never hide a global failure.
     res = analyze(load(argv[2]), scope=scope)
     print(json.dumps(res, indent=2, ensure_ascii=False))
     return 0 if res["verdict"] == "PASS" else 2

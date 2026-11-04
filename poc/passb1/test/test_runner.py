@@ -180,11 +180,13 @@ class B1a(Runner):
         ids = [c[c.index("--id") + 1] for c in self.state()["calls"] if "attempt" in c]
         self.assertEqual(ids, ["P0", "N14", "N17-project"])
 
-    def retained_run1(self):
-        """A retained run-1 container as it would exist on VM100."""
+    def retained_run1(self, labels=None):
+        """The retained run-1 container AS e00ef29 CREATED IT: `--label passb1.experiment=<stamp>
+        --label passb1.kind=b1a`, and NO passb1.run label (that label was introduced later). The
+        preflight must accept exactly this legacy shape (D1)."""
         rid = "a" * 64
         self.patch(containers=[{"id": rid, "name": "passb1a-exp-20261104-142810",
-                                "labels": {"passb1.experiment": "20261104-142810", "passb1.run": "1", "passb1.kind": "b1a"},
+                                "labels": labels if labels is not None else {"passb1.experiment": "20261104-142810", "passb1.kind": "b1a"},
                                 "user": "developer", "hc": {}, "mounts": []}])
         return rid
 
@@ -194,6 +196,29 @@ class B1a(Runner):
         self.assertOk(self.phase("preflight"), "preflight")
         # The retained run-1 container is left untouched.
         self.assertIn(rid, [c["id"] for c in self.state()["containers"]])
+
+    def test_run2_accepts_the_real_legacy_run1_without_a_run_label(self):
+        # D1: the real e00ef29 container has NO passb1.run label. Preflight must accept it, pinned
+        # by id + name + kind=b1a + the exact experiment stamp.
+        rid = self.retained_run1(labels={"passb1.experiment": "20261104-142810", "passb1.kind": "b1a"})
+        self.rewrite_env(RUN2="1", EXP=f"passb1a-run2-exp-{self.stamp}", RUN1_ID=rid, RUN1_EXP="passb1a-exp-20261104-142810")
+        self.assertOk(self.phase("preflight"), "preflight")
+
+    def test_run2_refuses_retained_labelled_run2(self):
+        # A run-2 container (passb1.run=2) can never stand in for the legacy run-1 retention.
+        rid = self.retained_run1(labels={"passb1.experiment": "20261104-142810", "passb1.kind": "b1a", "passb1.run": "2"})
+        self.rewrite_env(RUN2="1", EXP=f"passb1a-run2-exp-{self.stamp}", RUN1_ID=rid, RUN1_EXP="passb1a-exp-20261104-142810")
+        self.assertFailedClosed(self.phase("preflight"))
+
+    def test_run2_refuses_wrong_experiment_stamp(self):
+        rid = self.retained_run1(labels={"passb1.experiment": "19990101-000000", "passb1.kind": "b1a"})
+        self.rewrite_env(RUN2="1", EXP=f"passb1a-run2-exp-{self.stamp}", RUN1_ID=rid, RUN1_EXP="passb1a-exp-20261104-142810")
+        self.assertFailedClosed(self.phase("preflight"))
+
+    def test_run2_refuses_retained_wrong_kind(self):
+        rid = self.retained_run1(labels={"passb1.experiment": "20261104-142810", "passb1.kind": "b1b"})
+        self.rewrite_env(RUN2="1", EXP=f"passb1a-run2-exp-{self.stamp}", RUN1_ID=rid, RUN1_EXP="passb1a-exp-20261104-142810")
+        self.assertFailedClosed(self.phase("preflight"))
 
     def test_run2_refuses_an_unknown_passb1_container(self):
         self.patch(containers=[{"id": "b" * 64, "name": "passb1a-exp-OTHER",

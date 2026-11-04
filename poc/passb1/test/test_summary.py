@@ -148,6 +148,19 @@ class Summary(unittest.TestCase):
         self.assertEqual(out["runs"]["run2"]["sha_source"], "operator-declared")
         self.assertIn("declaradas por el operador", out["provenance_note"])
 
+    def test_retired_attack_executed_in_run1_fails_with_provenance(self):
+        # D2: N10 is OUT of the PASS criteria, but a demonstrated execution in run 1 is a breach.
+        def n10_executed(d, D):
+            p = os.path.join(d, "attempts", "N10")
+            os.makedirs(p)
+            T.put(os.path.join(p, "result.json"), json.dumps({"id": "N10", "markers": ["st-b1-rogue-n10.json"]}))
+        code, out = summary(run1_dir(mut=n10_executed), run2_dir())
+        self.assertEqual((code, out["verdict"]), (2, "FAIL"), out)
+        self.assertIn("observed_execution", out["excluded"]["N10"])
+        self.assertTrue(out["excluded"]["N10"]["observed_execution"]["provenance"].startswith("run1:"))
+        # Not re-counted as blocked and not in the per-attempt rows.
+        self.assertNotIn("N10", [r["attempt"] for r in out["attempts"]])
+
 
 class VerifySums(unittest.TestCase):
     """C1: SHA256SUMS must be complete and cover every file; an empty or partial list cannot pass."""
@@ -236,6 +249,26 @@ class VerifySums(unittest.TestCase):
         with open(os.path.join(d, "applied.json"), "a") as f:
             f.write(" ")   # change a covered file after the sums were written
         self.assertFalse(S.verify_sums(d))
+
+    def test_symlink_entry_pointing_outside_rejected(self):
+        # D5: a symlink INSIDE the capture that redirects a read OUTSIDE it must be refused, even
+        # with a correct hash — the lexical ".." check alone would miss this.
+        d = run2_dir()
+        outside = os.path.join(os.path.dirname(d), f"sym-target-{os.getpid()}.bin")
+        payload = b"a secret reached through a symlink"
+        with open(outside, "wb") as f:
+            f.write(payload)
+        try:
+            os.symlink(outside, os.path.join(d, "sneaky"))
+        except (OSError, NotImplementedError):
+            os.remove(outside)
+            self.skipTest("no symlink support")
+        try:
+            digest = hashlib.sha256(payload).hexdigest()
+            self.write_sums(d, self.sums(d) + [f"{digest}  sneaky"])
+            self.assertFalse(S.verify_sums(d))
+        finally:
+            os.remove(outside)
 
 
 if __name__ == "__main__":

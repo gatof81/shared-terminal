@@ -95,21 +95,28 @@ preflight() {
 	local existing other
 	existing=$(D ps -a -q --no-trunc --filter label=passb1.experiment)
 	if [ "$RUN2" = 1 ]; then
-		# The retained run-1 container MUST exist and be EXACTLY it, and nothing else passb1 may
-		# be present: matched by full id, name, and the exact labels (run=1, kind=b1a, a non-empty
-		# experiment stamp). A declared RUN1_ID that is not there is a fail-closed stop.
+		# The retained run-1 container MUST exist and be EXACTLY it, and nothing else passb1 may be
+		# present: matched by full id, name, kind=b1a and the EXACT experiment stamp embedded in
+		# RUN1_EXP. The run-1 kit (e00ef29) set NO passb1.run label — it was introduced later — so
+		# its ABSENCE is admitted ONLY for this fully-pinned legacy container; if the label IS
+		# present it must be 1 (a run-2 container labelled passb1.run=2 is refused). A declared
+		# RUN1_ID that is not there is a fail-closed stop.
+		local r1stamp r1run
+		r1stamp=${RUN1_EXP#passb1a-exp-}
+		[ "$r1stamp" != "$RUN1_EXP" ] || die "RUN1_EXP no tiene el formato passb1a-exp-<stamp>" 1
 		D inspect "$RUN1_ID" > /dev/null 2>&1 || die "el contenedor de la corrida 1 (RUN1_ID) no existe: no se crea nada" 1
 		for other in $existing; do
 			[ "$other" = "$RUN1_ID" ] || die "hay un contenedor passb1 que no es la corrida 1 retenida (${other:0:12}): no se toca nada" 1
 		done
 		[ "$(D inspect -f '{{.Name}}' "$RUN1_ID")" = "/$RUN1_EXP" ] \
 			|| die "el contenedor retenido no tiene el nombre esperado $RUN1_EXP" 1
-		[ "$(D inspect -f '{{index .Config.Labels "passb1.run"}}' "$RUN1_ID")" = 1 ] \
-			|| die "el contenedor retenido no está etiquetado passb1.run=1" 1
 		[ "$(D inspect -f '{{index .Config.Labels "passb1.kind"}}' "$RUN1_ID")" = b1a ] \
 			|| die "el contenedor retenido no es passb1.kind=b1a" 1
-		[ -n "$(D inspect -f '{{index .Config.Labels "passb1.experiment"}}' "$RUN1_ID")" ] \
-			|| die "el contenedor retenido no tiene la etiqueta passb1.experiment" 1
+		[ "$(D inspect -f '{{index .Config.Labels "passb1.experiment"}}' "$RUN1_ID")" = "$r1stamp" ] \
+			|| die "el contenedor retenido no tiene el stamp de experimento exacto ($r1stamp)" 1
+		r1run=$(D inspect -f '{{index .Config.Labels "passb1.run"}}' "$RUN1_ID")
+		[ -z "$r1run" ] || [ "$r1run" = 1 ] \
+			|| die "el contenedor retenido tiene passb1.run=$r1run (sólo se admite ausente o 1)" 1
 	else
 		[ -z "$existing" ] || die "ya hay contenedores passb1: limpiarlos primero"
 	fi

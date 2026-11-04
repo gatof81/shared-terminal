@@ -202,6 +202,55 @@ class Scope(unittest.TestCase):
         self.assertEqual(r["verdict"], "INCONCLUSIVE")
         self.assertIn("cli-version-mismatch:after", r["reasons"])
 
+    def test_empty_scope_never_passes(self):
+        # D5: a focused run that judges zero attacks is INCONCLUSIVE, never a general PASS.
+        for sc in ((), {"P0"}):
+            with self.subTest(sc):
+                r = A.analyze(fixture(), scope=sc)
+                self.assertEqual(r["verdict"], "INCONCLUSIVE")
+                self.assertIn("scope-empty", r["reasons"])
+
+
+class ScopeParser(unittest.TestCase):
+    """D5: the CLI --scope parser rejects empty / unknown / incomplete scopes."""
+
+    def ok(self, tail, expect):
+        scope, err = A.parse_scope(["analyze_b1a.py", "report", "D"] + tail)
+        self.assertIsNone(err, err)
+        self.assertEqual(scope, expect)
+
+    def bad(self, tail):
+        scope, err = A.parse_scope(["analyze_b1a.py", "report", "D"] + tail)
+        self.assertIsNotNone(err)
+        self.assertIsNone(scope)
+
+    def test_no_scope_is_full_run(self):
+        self.ok([], None)
+
+    def test_canonical_run2_scope_ok(self):
+        self.ok(["--scope", "P0,N14,N17-project"], ("P0", "N14", "N17-project"))
+
+    def test_scope_without_a_value_refused(self):
+        self.bad(["--scope"])
+
+    def test_empty_scope_refused(self):
+        self.bad(["--scope", ""])
+        self.bad(["--scope", "P0"])
+
+    def test_unknown_id_refused(self):
+        self.bad(["--scope", "N14,N99"])
+
+    def test_incomplete_run2_scope_refused(self):
+        self.bad(["--scope", "N14"])
+        self.bad(["--scope", "N17-project"])
+
+    def test_extra_attack_refused(self):
+        self.bad(["--scope", "N14,N17-project,N6"])
+
+    def test_main_refuses_a_bad_scope_with_usage_code(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(A.main(["analyze_b1a.py", "report", tempfile.mkdtemp(), "--scope", "N14"]), 64)
+
 
 class Load(unittest.TestCase):
     def test_round_trip_and_exit_code(self):

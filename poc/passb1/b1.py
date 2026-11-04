@@ -252,16 +252,18 @@ SCREENS = {
     "mcp_approval": re.compile(r"New MCP server found in this project"),
 }
 
-# N17-project approval: the label of the APPROVE option, and an independent signal that the server
-# was actually accepted (not merely that the dialog closed).
+# N17-project approval: the label of the APPROVE / DECLINE options, and an independent signal that
+# the server was actually accepted (not merely that the dialog closed).
 MCP_APPROVE_OPTION = re.compile(r"Use this(?: and all)? MCP server")
+MCP_DECLINE_OPTION = re.compile(r"Continue without")
 MCP_ACCEPTED_SIGNAL = re.compile(r"MCP server \S+ (?:connected|added to this project|enabled)")
 # The menu cursor: tmux `capture-pane -p` keeps the pointer glyph even without colour.
 MENU_POINTER = re.compile(r"^\s*(?:❯|>)\s+(\S.*?)\s*$")
 
 
 def selected_option(text):
-    """The menu option the cursor points at (the first pointer line), or None."""
+    """The RAW menu option the cursor points at (the first pointer line), or None. Internal only —
+    the raw label is classified into an enum before anything is persisted (owner D4)."""
     for line in text.splitlines():
         m = MENU_POINTER.match(line)
         if m:
@@ -269,18 +271,31 @@ def selected_option(text):
     return None
 
 
-def mcp_approval_result(selected, dismissed, screen_seen, accept_signal):
+def classify_selection(text):
+    """The highlighted option as a KNOWN ENUM — "approve" / "decline" / "other" / None — so no raw
+    option text is ever stored (owner D4)."""
+    sel = selected_option(text)
+    if sel is None:
+        return None
+    if MCP_APPROVE_OPTION.search(sel):
+        return "approve"
+    if MCP_DECLINE_OPTION.search(sel):
+        return "decline"
+    return "other"
+
+
+def mcp_approval_result(selection, dismissed, screen_seen, accept_signal):
     """Separate SELECTION, CONFIRMATION and RESULT (owner C3). A dialog that merely disappeared
     proves nothing: it can vanish because the CLI exited or because "Continue without" was chosen.
     "confirmed" is reserved for the approve option being the selection, the dialog closing while
     the CLI kept RUNNING, AND an independent acceptance signal. 2.1.314 emits no such signal for a
     policy-blocked project server, so a real approval lands as "selected-no-signal" => the analyzer
-    keeps N17-project INCONCLUSIVE, never blocked, never a fabricated approval."""
-    approve = bool(selected and MCP_APPROVE_OPTION.search(selected))
+    keeps N17-project INCONCLUSIVE, never blocked, never a fabricated approval. `selection` is the
+    enum from classify_selection, never raw text."""
     if dismissed == "running":
-        if approve and accept_signal:
+        if selection == "approve" and accept_signal:
             return "confirmed"
-        if approve:
+        if selection == "approve":
             return "selected-no-signal"
         return "declined"               # dismissed while running, approve option NOT selected
     if dismissed == "exit":
@@ -321,12 +336,14 @@ def probe_records(ws):
 TWO_STARTS = {"N12"}
 
 
-def one_start(aid, n, A, ws, cli, args, full_env, timeout, settle):
+def one_start(aid, n, A, ws, cli, args, full_env, timeout, settle, expect_mcp=None):
     """Starts the CLI once in tmux, answers only what the agent itself could answer (trust,
-    theme, a project MCP server), waits for the probe or the exit, and stops it."""
+    theme, a project MCP server), waits for the probe or the exit, and stops it. `expect_mcp` is the
+    fixture's project-server name, compared IN PLACE so the raw name is never persisted (D4)."""
     sess, rcf = f"{aid}-{n}", os.path.join(A, f"rc-{n}")
-    out = {"screens": {k: False for k in SCREENS}, "rc": None, "timed_out": False, "mcp_approval_server": None,
-           "mcp_approval_selected": None, "mcp_approval_dismissed": None, "mcp_approval_accept_signal": False}
+    out = {"screens": {k: False for k in SCREENS}, "rc": None, "timed_out": False,
+           "mcp_approval_identified": False, "mcp_approval_name_matches": False,
+           "mcp_approval_selection": None, "mcp_approval_dismissed": None, "mcp_approval_accept_signal": False}
     envs = " ".join(f"{k}={sh_quote(v)}" for k, v in sorted(full_env.items()))
     argv = " ".join(sh_quote(x) for x in [cli, *args, "--debug-file", os.path.join(A, f"debug-{n}.log")])
     cmd = f"cd {sh_quote(ws)} && env -i {envs} {argv} 2> {sh_quote(os.path.join(A, f'stderr-{n}.txt'))}; echo $? > {sh_quote(rcf)}"
@@ -352,17 +369,20 @@ def one_start(aid, n, A, ws, cli, args, full_env, timeout, settle):
                 if k == "mcp_approval":
                     m = re.search(r"New MCP server found in this project:\s*(\S+)", text)
                     if m:
-                        out["mcp_approval_server"] = m.group(1)
+                        # Compare the raw name to the fixture HERE; persist only booleans (D4).
+                        out["mcp_approval_identified"] = True
+                        out["mcp_approval_name_matches"] = (m.group(1) == expect_mcp)
                 keys = {"trust": ("Down", "Enter"), "theme": ("Enter",),
                         # "Use this MCP server" is two lines above the default "Continue without".
                         "mcp_approval": ("Up", "Up", "Enter")}[k]
                 if k == "mcp_approval":
                     # Navigate, then read the HIGHLIGHTED option the instant before confirming:
-                    # selection, confirmation and result are three different things (owner C3).
+                    # selection, confirmation and result are three different things (owner C3). Only
+                    # the enum is stored, never the raw option text (owner D4).
                     for key in keys[:-1]:
                         tmux("send-keys", "-t", sess, key, check=False)
                         time.sleep(0.5)
-                    out["mcp_approval_selected"] = selected_option(pane_text(sess))
+                    out["mcp_approval_selection"] = classify_selection(pane_text(sess))
                     tmux("send-keys", "-t", sess, keys[-1], check=False)
                     time.sleep(0.5)
                     after = pane_text(sess)
@@ -440,7 +460,8 @@ def attempt(aid, root, cli, timeout=60, settle=4):
                 f.write(r.stdout + r.stderr)
             res["pre"].append({"alias": p["alias"], "rc": r.returncode})
         for n in range(1, 3 if aid in TWO_STARTS else 2):
-            res["starts"].append(one_start(aid, n, A, ws, cli, args, {**base_env, **env}, timeout, settle))
+            res["starts"].append(one_start(aid, n, A, ws, cli, args, {**base_env, **env}, timeout, settle,
+                                            expect_mcp=meta.get("mcp_project_server")))
     finally:
         for s in servers:
             s.terminate()
@@ -471,19 +492,20 @@ def attempt(aid, root, cli, timeout=60, settle=4):
     res["markers"] = sorted(set(files_in(os.path.join(ws, ".passb1", "out", "marker")) + files_in(os.path.join(A, "marker"))))
     # Sanitized MCP approval capture (N17-project): what server the approval screen named, whether
     # the harness approved it, and whether it then started (its marker).
-    approver = next((st.get("mcp_approval_server") for st in res["starts"] if st.get("mcp_approval_server")), None)
     if meta.get("mcp_project_server") is not None:
         screen_seen = any(st["screens"].get("mcp_approval") for st in res["starts"])
-        selected = next((st.get("mcp_approval_selected") for st in res["starts"] if st.get("mcp_approval_selected")), None)
+        identified = any(st.get("mcp_approval_identified") for st in res["starts"])
+        name_matches = any(st.get("mcp_approval_name_matches") for st in res["starts"])
+        selection = next((st.get("mcp_approval_selection") for st in res["starts"] if st.get("mcp_approval_selection")), None)
         dismissed = next((st.get("mcp_approval_dismissed") for st in res["starts"] if st.get("mcp_approval_dismissed")), None)
         accept_signal = any(st.get("mcp_approval_accept_signal") for st in res["starts"])
-        res["mcp_approval"] = {"identified": approver is not None,
-                               "server": "project-server" if approver else None,   # alias, not the raw name
-                               "name_matches_fixture": approver == meta.get("mcp_project_server"),
-                               # Selection, confirmation and result kept apart (owner C3); a menu
-                               # LABEL is not a secret, but the raw server name is never echoed.
-                               "selected": selected, "dismissed": dismissed, "accept_signal": accept_signal,
-                               "approved": mcp_approval_result(selected, dismissed, screen_seen, accept_signal),
+        # Sanitized (owner D4): only an alias, booleans and known enums — never the raw server name
+        # or the raw option text.
+        res["mcp_approval"] = {"identified": identified,
+                               "server": "project-server" if identified else None,
+                               "name_matches_fixture": name_matches,
+                               "selection": selection, "dismissed": dismissed, "accept_signal": accept_signal,
+                               "approved": mcp_approval_result(selection, dismissed, screen_seen, accept_signal),
                                "started": "mcp-project" in res["markers"]}
     write_json(os.path.join(A, "result.json"), res)
     return res
