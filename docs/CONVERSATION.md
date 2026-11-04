@@ -2443,9 +2443,17 @@ fijo y **sin shell**:
    del propio proceso (también si fue reemplazado en disco, `" (deleted)"`: el kernel conserva el
    inodo), con un entorno vacío (ni token, ni proxy, ni HOME donde escribir) y el autoactualizador
    apagado. Medido: es un camino rápido (≈ 8 ms), sale con 0 y no crea nada.
-3. `cat /proc/<pid>/stat` y `readlink /proc/<pid>/exe` otra vez: el mismo `starttime` y el mismo
-   ejecutable que antes del paso 1 (un pid reutilizado o un proceso que hizo `exec` en medio vuelve
-   la respuesta ajena).
+3. `cat /proc/<pid>/stat`, `readlink /proc/<pid>/exe` y el dispositivo:inodo de ese archivo
+   (`stat -L`, leído también justo antes del paso 2) otra vez: el mismo `starttime`, la misma ruta y
+   el mismo archivo (un pid reutilizado, o un proceso que hizo `execve` —que conserva pid y
+   `starttime`— vuelve la respuesta ajena).
+
+Todos los programas van por **ruta absoluta** (`/usr/bin/…`): Docker resuelve el primer elemento del
+argv con el `PATH` del contenedor, que empieza en `~/.npm-global/bin`, dentro del workspace. Cada exec
+tiene además una cota del lado del host (10 s; se deja de esperar, nada se aborta), para que un hijo
+que escape del `timeout` con el stream abierto no retenga el lock del pane. El **precheck** antes de
+la primera tecla (§8.1.5) compara también la ruta del ejecutable con la de la consulta: un `execve`
+entre la consulta y el envío responde `binding-stale`.
 
 La salida debe ser exactamente `X.Y.Z (Claude Code)` (un salto de línea final admitido), de 128
 bytes como mucho y una release plana. Si no se puede establecer, el envío se rechaza con 409
@@ -2457,10 +2465,10 @@ establecida pero fuera de la lista responde `version: "<X.Y.Z>"` con `detail: "n
 respuestas incluyen `reportedVersion` (el texto del hook, como dato).
 
 Una caché en memoria y acotada guarda solo respuestas positivas, por `(contenedor, pid, starttime,
-ejecutable)`: un proceso no cambia de versión mientras vive. **No sustituye ninguna comprobación**:
-identidad, primer plano, estado, región de entrada y todo lo demás se repiten en cada envío, y la
-clave incluye lo que esas comprobaciones establecen, así que solo puede acertar para el proceso que
-acaban de verificar. Cada envío que pasa deja en el log la versión y la regla que lo autorizó.
+ruta del ejecutable)`, con el dispositivo:inodo del archivo que respondió; un acierto solo vale si
+una lectura nueva de ese inodo coincide (una reinstalación puede dejar otro archivo en la misma
+ruta). **No sustituye ninguna comprobación**: identidad, primer plano, estado, región de entrada y
+todo lo demás se repiten en cada envío. Cada envío que pasa deja en el log la versión y la regla que lo autorizó.
 
 #### 8.1.10 Lo que tmux no permite garantizar atómicamente
 

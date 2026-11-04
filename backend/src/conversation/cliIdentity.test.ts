@@ -33,8 +33,10 @@ function fakeExec(o: {
 	versionExit?: number | null;
 	afterStart?: string;
 	afterExe?: string;
+	inodes?: string[];
 	throwOn?: "status" | "version" | "stat";
 }) {
+	const inodes = [...(o.inodes ?? [])];
 	const calls: Array<{ cmd: string[]; user?: string }> = [];
 	const exec = async (cmd: string[], user?: string): Promise<ComposerExecResult> => {
 		calls.push({ cmd, user });
@@ -55,6 +57,10 @@ function fakeExec(o: {
 			if (o.throwOn === "stat") throw new Error("docker down");
 			return r(stat(4242, o.afterStart ?? "777"));
 		}
+		if (j.includes("stat -L")) {
+			const v = inodes.shift() ?? "64768:4242";
+			return r(v === "" ? "" : `${v}\n`, v === "" ? 1 : 0);
+		}
 		if (j.includes("readlink")) return r(`${o.afterExe ?? NPM}\n`);
 		throw new Error(`unexpected ${j}`);
 	};
@@ -66,13 +72,13 @@ describe("argv: fixed, no shell, the process's own binary, empty environment", (
 	it("version query", () => {
 		const a = versionArgv(4242);
 		expect(a).toEqual([
-			"env",
+			"/usr/bin/env",
 			"-i",
 			"PATH=/usr/bin:/bin",
 			"HOME=/nonexistent",
 			"DISABLE_AUTOUPDATER=1",
 			"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
-			"timeout",
+			"/usr/bin/timeout",
 			"-k",
 			"1",
 			"3",
@@ -133,15 +139,20 @@ describe("readLiveCliVersion", () => {
 		expect(await readLiveCliVersion(f.exec, 4242, before)).toEqual({
 			ok: true,
 			version: "2.1.316",
+			inode: "64768:4242",
 		});
 		const v = f.calls.find((c) => c.cmd.at(-1) === "--version");
 		expect(v?.user).toBe("1000");
 		expect(f.calls.map((c) => c.cmd.at(-1))).toEqual([
 			"/proc/4242/status",
+			"/proc/4242/exe", // device:inode before
 			"--version",
 			"/proc/4242/stat",
-			"/proc/4242/exe",
+			"/proc/4242/exe", // readlink after
+			"/proc/4242/exe", // device:inode after
 		]);
+		// Every program by absolute path (the container's PATH starts in the workspace).
+		for (const c of f.calls) expect(c.cmd[0]).toMatch(/^\/usr\/bin\//);
 		// Reads run as the image's USER (no explicit user); only the binary run is pinned.
 		expect(f.calls.filter((c) => c.user !== undefined)).toHaveLength(1);
 	});
@@ -151,6 +162,7 @@ describe("readLiveCliVersion", () => {
 		expect(await readLiveCliVersion(f.exec, 4242, { start: "777", exe })).toEqual({
 			ok: true,
 			version: "2.1.317",
+			inode: "64768:4242",
 		});
 	});
 	it.each([
@@ -164,19 +176,27 @@ describe("readLiveCliVersion", () => {
 			"uid-root-or-mixed",
 			1,
 		],
-		["timeout (exit 124)", {}, { versionExit: 124 }, "version-exec-failed", 2],
-		["exit unknown", {}, { versionExit: null }, "version-exec-failed", 2],
-		["invalid output", {}, { version: "Claude Code\n" }, "version-output-invalid", 2],
-		["pre-release", {}, { version: "2.1.320-beta.1 (Claude Code)\n" }, "version-output-invalid", 2],
+		["exe inode unreadable", {}, { inodes: [""] }, "identity-changed", 2],
+		["timeout (exit 124)", {}, { versionExit: 124 }, "version-exec-failed", 3],
+		["exit unknown", {}, { versionExit: null }, "version-exec-failed", 3],
+		["invalid output", {}, { version: "Claude Code\n" }, "version-output-invalid", 3],
+		["pre-release", {}, { version: "2.1.320-beta.1 (Claude Code)\n" }, "version-output-invalid", 3],
 		[
 			"process replaced during the query (starttime)",
 			{},
 			{ afterStart: "778" },
 			"identity-changed",
-			4,
+			6,
 		],
-		["exec replaced the binary (exe)", {}, { afterExe: NATIVE }, "identity-changed", 4],
-		["docker error", {}, { throwOn: "version" as const }, "exec-error", 2],
+		["exec replaced the binary (exe path)", {}, { afterExe: NATIVE }, "identity-changed", 6],
+		[
+			"another file at the same path (reinstall / execve of a new file)",
+			{},
+			{ inodes: ["64768:4242", "64768:9999"] },
+			"identity-changed",
+			6,
+		],
+		["docker error", {}, { throwOn: "version" as const }, "exec-error", 3],
 	])("%s ⇒ %s (fail closed)", async (_n, b, o, why, nCalls) => {
 		const f = fakeExec(o);
 		expect(await readLiveCliVersion(f.exec, 4242, { ...before, ...b })).toEqual({ ok: false, why });
@@ -189,13 +209,13 @@ describe("readLiveCliVersion", () => {
 describe("LiveVersionCache", () => {
 	it("keys on container, pid, starttime and exe; bounded", () => {
 		const c = new LiveVersionCache(2);
-		c.set("c1", 1, "10", NPM, "2.1.316");
-		expect(c.get("c1", 1, "10", NPM)).toBe("2.1.316");
+		c.set("c1", 1, "10", NPM, { version: "2.1.316", inode: "1:2" });
+		expect(c.get("c1", 1, "10", NPM)).toEqual({ version: "2.1.316", inode: "1:2" });
 		expect(c.get("c1", 1, "11", NPM)).toBeUndefined(); // pid reused by another process
 		expect(c.get("c2", 1, "10", NPM)).toBeUndefined();
 		expect(c.get("c1", 1, "10", NATIVE)).toBeUndefined();
-		c.set("c1", 2, "10", NPM, "a");
-		c.set("c1", 3, "10", NPM, "b");
+		c.set("c1", 2, "10", NPM, { version: "a", inode: "1:2" });
+		c.set("c1", 3, "10", NPM, { version: "b", inode: "1:2" });
 		expect(c.size).toBe(2);
 		expect(c.get("c1", 1, "10", NPM)).toBeUndefined();
 	});

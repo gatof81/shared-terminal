@@ -23,9 +23,13 @@
  *      with an empty environment — no token, no proxy, no HOME to write to,
  *      the auto-updater off. Measured: `--version` is a fast path (≈ 8 ms),
  *      exit 0, creates nothing under HOME;
- *   3. `cat /proc/<pid>/stat` and `readlink /proc/<pid>/exe` again: the same
- *      `starttime` and the same executable as before step 1 (a pid reused or
- *      a process replaced in between makes the answer about someone else).
+ *   3. `cat /proc/<pid>/stat`, `readlink /proc/<pid>/exe` and the device:inode
+ *      of that file again (`stat -L`, also read just before step 2): the same
+ *      `starttime`, path and file as before (a pid reused, or a process that
+ *      exec'd something — execve keeps pid and starttime — makes the answer
+ *      about someone else).
+ * Every program is named by absolute path (the container's PATH starts in
+ * the workspace).
  * Output: exactly `X.Y.Z (Claude Code)` (one trailing newline allowed),
  * ≤ 128 bytes, a plain release. Anything else — a `node` runtime (the old JS
  * CLI: `--version` would print node's), a non-zero or unknown exit, a
@@ -48,24 +52,41 @@ function pidText(pid: number): string {
 	return s;
 }
 
+// Absolute paths for every program (2nd review of #523): Docker resolves an
+// exec's first argv element with the CONTAINER's PATH, which starts at
+// ~/.npm-global/bin — in the workspace, i.e. under the session user's
+// control. /usr/bin is the image's (merged /usr on Ubuntu 24.04).
+const TIMEOUT = "/usr/bin/timeout";
+const read = (prog: string, ...args: string[]) => [
+	TIMEOUT,
+	"-k",
+	"2",
+	String(READ_TIMEOUT_S),
+	prog,
+	...args,
+];
 export function statusArgv(pid: number): string[] {
-	return ["timeout", "-k", "2", String(READ_TIMEOUT_S), "cat", `/proc/${pidText(pid)}/status`];
+	return read("/usr/bin/cat", `/proc/${pidText(pid)}/status`);
 }
 export function statArgv(pid: number): string[] {
-	return ["timeout", "-k", "2", String(READ_TIMEOUT_S), "cat", `/proc/${pidText(pid)}/stat`];
+	return read("/usr/bin/cat", `/proc/${pidText(pid)}/stat`);
 }
 export function exeLinkArgv(pid: number): string[] {
-	return ["timeout", "-k", "2", String(READ_TIMEOUT_S), "readlink", `/proc/${pidText(pid)}/exe`];
+	return read("/usr/bin/readlink", `/proc/${pidText(pid)}/exe`);
+}
+/** Device:inode of the file the process executes (follows /proc/<pid>/exe, deleted files included). */
+export function exeInodeArgv(pid: number): string[] {
+	return read("/usr/bin/stat", "-L", "-c", "%d:%i", `/proc/${pidText(pid)}/exe`);
 }
 export function versionArgv(pid: number): string[] {
 	return [
-		"env",
+		"/usr/bin/env",
 		"-i",
 		"PATH=/usr/bin:/bin",
 		"HOME=/nonexistent",
 		"DISABLE_AUTOUPDATER=1",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
-		"timeout",
+		TIMEOUT,
 		"-k",
 		"1",
 		String(VERSION_TIMEOUT_S),
@@ -107,8 +128,13 @@ export function isNodeRuntime(exe: string): boolean {
 	return /^node(\d+(\.\d+)*)?$/.test(p.slice(p.lastIndexOf("/") + 1));
 }
 
+export function parseInode(out: string): string | null {
+	const m = out.match(/^(\d+:\d+)\n?$/);
+	return m ? (m[1] as string) : null;
+}
+
 export type LiveVersion =
-	| { ok: true; version: string }
+	| { ok: true; version: string; inode: string }
 	| {
 			ok: false;
 			why:
@@ -139,6 +165,9 @@ export async function readLiveCliVersion(
 		if (!uids) return { ok: false, why: "uid-unreadable" };
 		if (uids.real !== uids.effective || uids.real === 0)
 			return { ok: false, why: "uid-root-or-mixed" };
+		const inodeBefore = await exec(exeInodeArgv(pid));
+		const inode = inodeBefore.exitCode === 0 ? parseInode(inodeBefore.stdout) : null;
+		if (!inode) return { ok: false, why: "identity-changed" };
 		const v = await exec(versionArgv(pid), String(uids.real));
 		if (v.exitCode !== 0) return { ok: false, why: "version-exec-failed" };
 		const version = parseVersionOutput(v.stdout);
@@ -147,39 +176,54 @@ export async function readLiveCliVersion(
 		// exec'd something else in between makes the answer someone else's.
 		const after = await exec(statArgv(pid));
 		const link = await exec(exeLinkArgv(pid));
+		const inodeAfter = await exec(exeInodeArgv(pid));
 		if (
 			after.exitCode !== 0 ||
 			parseStarttime(after.stdout) !== before.start ||
 			link.exitCode !== 0 ||
-			link.stdout.replace(/\n$/, "") !== before.exe
+			link.stdout.replace(/\n$/, "") !== before.exe ||
+			inodeAfter.exitCode !== 0 ||
+			parseInode(inodeAfter.stdout) !== inode
 		)
 			return { ok: false, why: "identity-changed" };
-		return { ok: true, version };
+		return { ok: true, version, inode };
 	} catch {
 		return { ok: false, why: "exec-error" };
 	}
 }
 
 /**
- * Positive answers only, keyed by (container, pid, starttime, exe): a process
- * keeps its version for its whole life. It never stands in for the per-send
- * checks — identity, foreground and the rest run on every send, and the key
- * includes what they establish, so a hit is only possible for the process
- * they just verified.
+ * Positive answers only, keyed by (container, pid, starttime, exe path), each
+ * with the device:inode of the file that answered. A hit is used only after a
+ * fresh inode read of /proc/<pid>/exe matches (the caller does it): an execve
+ * keeps pid and starttime, and a reinstall can put another file at the same
+ * path. It never stands in for the per-send checks — identity, foreground
+ * and the rest run on every send.
  */
 export class LiveVersionCache {
-	private readonly map = new Map<string, string>();
+	private readonly map = new Map<string, { version: string; inode: string }>();
 	constructor(private readonly max = 256) {}
 	private key(containerId: string, pid: number, start: string, exe: string): string {
 		return `${containerId}\u0000${pid}\u0000${start}\u0000${exe}`;
 	}
-	get(containerId: string, pid: number, start: string, exe: string): string | undefined {
+	get(
+		containerId: string,
+		pid: number,
+		start: string,
+		exe: string,
+	): { version: string; inode: string } | undefined {
 		return this.map.get(this.key(containerId, pid, start, exe));
 	}
-	set(containerId: string, pid: number, start: string, exe: string, version: string): void {
+	set(
+		containerId: string,
+		pid: number,
+		start: string,
+		exe: string,
+		entry: { version: string; inode: string },
+	): void {
 		const k = this.key(containerId, pid, start, exe);
 		this.map.delete(k);
-		this.map.set(k, version);
+		this.map.set(k, entry);
 		while (this.map.size > this.max) {
 			const oldest = this.map.keys().next().value as string;
 			this.map.delete(oldest);

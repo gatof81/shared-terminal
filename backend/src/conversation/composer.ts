@@ -39,7 +39,27 @@
 import { logger } from "../logger.js";
 import { SessionBusyError, SessionLifecycleLock } from "../sessionLifecycleLock.js";
 import type { SessionMeta } from "../types.js";
-import { type LiveVersion, LiveVersionCache, readLiveCliVersion } from "./cliIdentity.js";
+import {
+	exeInodeArgv,
+	type LiveVersion,
+	LiveVersionCache,
+	parseInode,
+	readLiveCliVersion,
+} from "./cliIdentity.js";
+
+/** Host-side bound per live-version exec (in-container: `timeout -k 1 3` / `-k 2 5`). */
+const LIVE_EXEC_DEADLINE_MS = 10_000;
+function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const expired = new Promise<never>((_, reject) => {
+		timer = setTimeout(() => reject(new Error("live-version exec deadline")), ms);
+		timer.unref?.();
+	});
+	// The losing promise is left to settle on its own (never aborted).
+	p.catch(() => undefined);
+	return Promise.race([p, expired]).finally(() => clearTimeout(timer));
+}
+
 import {
 	CONSUME_MAX_POLLS,
 	CONSUME_POLL_MS,
@@ -635,7 +655,9 @@ export class ComposerService {
 			);
 			return this.reject("needs-terminal", 409, { detail: `foreground:${paneState.command}` });
 		}
-		const identity = { pid: entry.pid, start: facts.proc.start };
+		// pid + starttime + exe: an execve keeps the first two, so the binary
+		// the version was established for is part of the identity too.
+		const identity = { pid: entry.pid, start: facts.proc.start, exe: facts.exe };
 		const region = await this.readInputRegion(containerId, paneId);
 		if (region.kind !== "empty") {
 			return this.reject("composer-not-empty", 409, {
@@ -907,7 +929,7 @@ export class ComposerService {
 		op: LiveOp,
 		normalized: string,
 		panePid: number,
-		identity: { pid: number; start: string },
+		identity: { pid: number; start: string; exe: string },
 	): Promise<void> {
 		const r = op.record;
 		const plan = segment(normalized);
@@ -925,7 +947,13 @@ export class ComposerService {
 			if (pre.kind !== "settled") return this.toUncertain(op, "precheck", finishActive);
 			const f = pre.exitCode === 0 ? parsePaneFacts(pre.stdout) : null;
 			const stale =
-				!f || f.pane.panePid !== panePid || !f.ancestry || f.proc.start !== identity.start;
+				!f ||
+				f.pane.panePid !== panePid ||
+				!f.ancestry ||
+				f.proc.start !== identity.start ||
+				// v1.8.2: the same binary the version was established for (an
+				// execve keeps pid and starttime).
+				f.exe !== identity.exe;
 			if (stale || f.pane.inMode || f.pane.dead || foregroundFault(f, identity.pid) !== null) {
 				await this.toFailed(op, "precheck", 0, finishActive, {
 					status: 409,
@@ -1507,10 +1535,12 @@ export class ComposerService {
 		start: string,
 		exe: string,
 	): Promise<LiveVersion> {
-		const hit = this.liveVersions.get(containerId, pid, start, exe);
-		if (hit) return { ok: true, version: hit };
-		const r = await readLiveCliVersion(
-			(cmd, user) =>
+		// Bounded host-side too (2nd review of #523): `timeout` kills the
+		// binary's process group, but a child that escaped it with the stream
+		// open would keep the exec — and this pane's lock — forever. Past the
+		// deadline we stop waiting (nothing is aborted) and refuse.
+		const exec = (cmd: string[], user?: string) =>
+			withDeadline(
 				this.deps.docker.exec(
 					containerId,
 					cmd,
@@ -1518,10 +1548,23 @@ export class ComposerService {
 					async () => true,
 					user ? { user } : undefined,
 				),
-			pid,
-			{ start, exe },
-		);
-		if (r.ok) this.liveVersions.set(containerId, pid, start, exe, r.version);
+				LIVE_EXEC_DEADLINE_MS,
+			);
+		const hit = this.liveVersions.get(containerId, pid, start, exe);
+		if (hit) {
+			// A hit counts only for the same FILE (an execve or a reinstall at
+			// the same path keeps pid, starttime and path).
+			try {
+				const r = await exec(exeInodeArgv(pid));
+				if (r.exitCode === 0 && parseInode(r.stdout) === hit.inode)
+					return { ok: true, version: hit.version, inode: hit.inode };
+			} catch {
+				// fall through to a full query
+			}
+		}
+		const r = await readLiveCliVersion(exec, pid, { start, exe });
+		if (r.ok)
+			this.liveVersions.set(containerId, pid, start, exe, { version: r.version, inode: r.inode });
 		return r;
 	}
 

@@ -54,6 +54,7 @@ function stepOf(cmd: string[]): Step {
 	if (j.endsWith("--version")) return "version";
 	if (j.endsWith("/status")) return "status";
 	if (j.endsWith("/stat")) return "stat";
+	if (j.includes("stat -L")) return "inode";
 	if (j.includes("readlink /proc/")) return "exelink";
 	if (j.includes("load-buffer")) return "paste";
 	if (j.includes(CSI_U_NEWLINE)) return "newline";
@@ -115,6 +116,11 @@ class FakeDocker implements ComposerDockerPort {
 	/** starttime / exe read AFTER the version query; null = same as before. */
 	afterStart: string | null = null;
 	afterExe: string | null = null;
+	/** device:inode of /proc/<pid>/exe, per read in order; then `inode`. */
+	inodeSeq: string[] = [];
+	inode = "64768:4242";
+	/** Called after each exec's step is known (before its answer is built). */
+	onStep: ((step: Step) => void) | null = null;
 	container: "running" | "stopped" | "gone" = "running";
 	/** Per step: outcomes for successive execs of that step; default exit 0. */
 	script = new Map<Step, Array<{ exit: number | null } | "park" | "reject">>();
@@ -144,6 +150,7 @@ class FakeDocker implements ComposerDockerPort {
 		opts?: { user?: string },
 	) {
 		const step = stepOf(cmd);
+		this.onStep?.(step);
 		const id = `e${++this.n}-${step}`;
 		const call: Call = {
 			id,
@@ -185,7 +192,9 @@ class FakeDocker implements ComposerDockerPort {
 									? `${cmd.at(-1)?.split("/")[2]} (claude) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 ${this.afterStart ?? this.proc.start ?? "1000"} 0 0\n`
 									: step === "exelink"
 										? `${this.afterExe ?? this.exe}\n`
-										: "";
+										: step === "inode"
+											? `${this.inodeSeq.shift() ?? this.inode}\n`
+											: "";
 		return { execId: id, exitCode: outcome.exit, stdout };
 	}
 	async execState(id: string) {
@@ -924,7 +933,7 @@ describe("§8.1.9 v1.8.2: the version of the PROCESS decides, never the hook's t
 		expect(v[0]?.user).toBe("1000");
 		expect(v[0]?.cmd).toEqual(
 			expect.arrayContaining([
-				"env",
+				"/usr/bin/env",
 				"-i",
 				"DISABLE_AUTOUPDATER=1",
 				`/proc/${CLAUDE_PID}/exe`,
@@ -1038,6 +1047,40 @@ describe("§8.1.9 v1.8.2: the version of the PROCESS decides, never the hook's t
 		docker.proc = { start: "5555" };
 		docker.live = "2.1.317 (Claude Code)\n";
 		const r = await send(service, "three", "c3c3c3c3-3333-4333-8333-333333333333");
+		expect(r.body).toMatchObject({ error: "cli-unvalidated", version: "2.1.317" });
+		expect(versionCalls()).toHaveLength(2);
+	});
+
+	it("an execve AFTER the version query (same pid and starttime, another binary) is caught by the precheck: binding-stale, nothing typed", async () => {
+		await seedConversation(CID, { claudeVersion: "2.1.314 (Claude Code)" });
+		let inodeReads = 0;
+		docker.onStep = (step) => {
+			// The query's last read is the second device:inode; right after it
+			// the process execs another Claude binary.
+			if (step === "inode" && ++inodeReads === 2)
+				queueMicrotask(() => {
+					docker.exe = "/home/developer/.local/share/claude/versions/2.1.317";
+				});
+		};
+		const r = await send(both(), "no");
+		expect(r.body).toMatchObject({ error: "binding-stale" });
+		expect(docker.effectSteps()).toEqual([]);
+	});
+
+	it("a cache hit counts only for the same FILE: another inode at the same path re-runs the query", async () => {
+		await seedConversation(CID, { claudeVersion: "2.1.314 (Claude Code)" });
+		const service = both();
+		const p1 = send(service, "one");
+		await until(() => docker.effectSteps().includes("enter"));
+		await promptArrives("one");
+		expect((await p1).body).toMatchObject({ result: "delivered" });
+		await until(recordGone, "first release");
+		await lockFree(service);
+		expect(versionCalls()).toHaveLength(1);
+		// Same pid, starttime and path — but a reinstalled file, now 2.1.317.
+		docker.inode = "64768:9999";
+		docker.live = "2.1.317 (Claude Code)\n";
+		const r = await send(service, "two", ID2);
 		expect(r.body).toMatchObject({ error: "cli-unvalidated", version: "2.1.317" });
 		expect(versionCalls()).toHaveLength(2);
 	});
