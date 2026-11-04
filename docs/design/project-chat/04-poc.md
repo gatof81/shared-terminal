@@ -3085,6 +3085,149 @@ Con los extractos de los seis, cada motivo cae en **una** de esas cuatro clases 
 decidimos si hace falta una segunda corrida y con qué cambios mínimos y pruebas de regresión. El
 kit `e00ef29` queda intacto; no se re-ejecuta `measure` ni `cleanup`, no se corre B1b, y no se
 toca Composer, L1/L2 ni el gateway.
+#### 1.14.17 PASS-B1a corrida 1: diagnóstico puntual de los seis INCONCLUSIVE y diseño de una segunda corrida focalizada (**nada ejecutado**)
+
+Clasificación del responsable contra la evidencia real (SHA256SUMS revalidado): N9 camino no
+completado (causa pendiente); N10/N11/N13 ataques no ejercidos; N14 medición inválida / fallo de
+arranque; N17 realmente indeterminado. PASS-B1a sigue INCONCLUSIVE; ningún hallazgo afirma una
+violación ni permite cerrar los seis como blocked. Abajo, separando **hecho observado**,
+**inferencia** y **hipótesis**. Yo no accedo a VM100: los hechos de VM100 son los que extrajo el
+responsable; los hechos "local" son de mis corridas sin política en el contenedor de desarrollo.
+
+##### 1.14.17.1 N14 — rc=1 sin probe
+
+- **Hechos (VM100):** `rc=1`, `timed_out=false`, ningún `session.start` ni `classic.SessionStart`,
+  **ningún** módulo de hooks cargado (ni el probe administrado), y **ninguna** línea de bloqueo de
+  `skills-dir`.
+- **Hecho (local, sin política):** el **mismo fixture** de N14 arrancó normal — cargó
+  `st-b1-rogue-n14@skills-dir … tier user`, aceptó la confianza y llegó a `session.start`. Es
+  decir, el contenido en `~/.claude/skills` **no** tumba al CLI por sí solo.
+- **Inferencia:** como el probe administrado sí cargó en los otros 12 intentos (mismo settings,
+  mismo marketplace), en N14 el CLI salió **antes** de la etapa de carga de plugins, o el proceso
+  terminó temprano con error. `timed_out=false` ⇒ el CLI escribió su rc solo; no lo cortó el
+  harness.
+- **Hipótesis (ordenadas), con la evidencia que las decide:**
+  1. **Instrumentación (confianza no aceptada en esa corrida).** La tecla `Down` se perdió y el
+     `Enter` cayó en "No, exit" ⇒ el CLI salió antes de cargar nada. *Decide:* en `result.json`,
+     `screens.trust` y `trust_still_shown`; en `debug-1`, que **no** exista la línea
+     `post-trust: re-discover project @skills-dir plugins` ni ningún `loaded (`. Si el debug
+     termina en el diálogo de confianza ⇒ instrumentación.
+  2. **Interacción CLI↔política en la re-discovery de `@skills-dir`.** Con la allowlist, el paso
+     post-trust de re-descubrimiento de `skills-dir` lanzó un error que abortó el arranque.
+     *Decide:* una excepción/stack en las últimas líneas de `debug-1` después de `post-trust`.
+  3. **Otro error de arranque** (settings/managed). Menos probable: los otros 12 comparten esos
+     settings y cargaron.
+- **Clase:** medición inválida hasta decidir entre H1 (instrumentación) y H2 (interacción real).
+  No es, con lo que hay, una protección ni un ataque ejercido.
+- **Evidencia mínima que falta:** `screens`, `trust_still_shown` y las **últimas ~20 líneas** de
+  `debug-1.log.filtered` de N14.
+
+##### 1.14.17.2 N17 — qué originó la pantalla de aprobación
+
+- **Hechos (VM100):** `mcp-add` (el `claude mcp add` de scope user) devolvió `1`; el debug **no**
+  nombra `st-b1-rogue-n17p/u`; `mcp_approval_screen=true`; hay indicadores genéricos de error y de
+  marketplace, sin correlación demostrada con el servidor intruso; sin marcador.
+- **Hecho (binario 2.1.314):** la pantalla **"New MCP server found in this project: \<nombre\>"** es
+  exclusiva de servidores de **`.mcp.json` del proyecto**; un servidor agregado por
+  `claude mcp add --scope user` **no** la dispara.
+- **Inferencia:** la pantalla de aprobación corresponde al servidor **de proyecto**
+  `st-b1-rogue-n17p` (el de `.mcp.json`), no al de user. El `mcp add` de user falló por separado
+  (`rc=1`).
+- **Hipótesis:**
+  1. Tras aprobar, la política (`allowedMcpServers: []` + `allowManagedMcpServersOnly`) impidió que
+     el servidor arrancara ⇒ sin marcador. Sería **protección**, pero no hay línea positiva que lo
+     diga. 2.1.314 tiene el texto `not allowed by your organization`; si aparece nombrando al
+     servidor, es protección demostrada.
+  2. El `mcp add` de user fue rechazado por política (mismo texto) o falló operativamente; `rc=1`
+     solo no distingue.
+- **Clase:** realmente indeterminado, de acuerdo. No se puede atribuir ni a protección ni a ataque
+  ejercido sin una línea que correlacione el servidor con un rechazo o un arranque.
+- **Evidencia mínima que falta:** en `debug-1`, cualquier línea `MCP server "st-b1-rogue-n17*"` o
+  `not allowed by your organization`; y la salida de `pre-mcp-add.txt.filtered`. **Límite real del
+  harness:** el nombre del servidor de proyecto sólo aparece en la **pantalla** (captura del pane),
+  que el harness no guardó — por eso no se puede confirmar `n17p` sólo con los archivos actuales.
+
+##### 1.14.17.3 N9 — el error concreto de los dos comandos
+
+- **Hechos (VM100):** `marketplace-add=1`, `plugin-install=1`; **ninguna** salida contiene un
+  rechazo de política; el probe cargó en `prepend`.
+- **Hecho (local, sin política):** `marketplace-add=0`, `plugin-install=0` y el plugin corrió. El
+  camino es ejercitable; la política cambió el resultado (0→1) en VM100.
+- **Inferencia:** algo en el arranque con política hizo fallar `marketplace add` (y, en cascada,
+  `install`). No se lo puede llamar "blocked" porque **no** apareció un rechazo de política.
+- **Advertencia (no interpretar rc≠0 como rechazo).** `rc=1` por sí solo no prueba política. Hay
+  que leer el **texto**. 2.1.314 tiene rechazos de marketplace que **no** contienen la palabra
+  "policy"; conviene buscarlos explícitamente:
+  - **Rechazo por política** (si alguno aparece ⇒ fue protección, y el criterio de N9 debería
+    contarlo): `is not in the allowed marketplace list`; `blocked by enterprise policy`;
+    `marketplace allowlist (strictKnownMarketplaces) does not include …`;
+    `marketplace was not added. Remove it from extraKnownMarketplaces in settings`.
+  - **Operativo** (si aparece ⇒ el camino no se completó por una causa ajena a la política):
+    `only plain directories are allowed there` / `realpath` del directorio del marketplace;
+    `not a git repository`; `must be logged in`; `Failed to parse marketplace file` /
+    `Marketplace configuration file is corrupted`; del lado install,
+    `not found in any marketplace, skipping` (consecuencia de que el add no quedó registrado).
+- **Clase:** depende del **texto** de las dos salidas (el responsable las tiene). Si es un rechazo
+  de marketplace ⇒ protección demostrada en el paso `add` (no en `install`), y el criterio de N9 se
+  amplía (ver §1.14.17.5). Si es operativo ⇒ camino no completado por el harness.
+- **Evidencia mínima que falta:** las líneas de `pre-marketplace-add.txt.filtered` y
+  `pre-plugin-install.txt.filtered` comparadas contra las dos listas de arriba.
+
+##### 1.14.17.4 N10/N11/N13 — cómo ejercer de verdad el camino impostor
+
+- **Hechos (VM100):** la ruta plantada no aparece, no se leyó ni se descartó como duplicado; sí se
+  leyó el `hooks.json` del marketplace legítimo; el probe cargó en `prepend`.
+- **Hecho (local, sin política):** el impostor en la caché/seed **no** cargó **ni siquiera sin
+  política** (marker vacío en N10/N11/N13). La copia del mismo nombre en esas rutas **no es por sí
+  sola un camino de carga**: hace falta que un marketplace **registrado** resuelva el plugin desde
+  ahí.
+- **Inferencia:** el fixture actual no ejerce ningún "shadow" del plugin administrado; por eso
+  "no considerado" no es protección, es un ataque que no ocurre.
+- **Propuesta para ejercerlo de verdad, con control positivo** (diseño; no ejecutar):
+  - **Control positivo (sin política):** construir la configuración donde el CLI **sí** cargaría la
+    copia de la caché/seed y verlo cargar (marker del impostor). Dos variantes a diseñar:
+    - **remota con digests:** un marketplace remoto simulado servido por loopback, el plugin
+      instalado en la caché, y una copia del mismo nombre con **otro contenido** en la caché;
+      sin `pluginDigests` el CLI carga de la caché (control positivo), con `pluginDigests` fijados
+      en managed settings debe rechazar la copia que no coincide con el digest;
+    - **seed→cache:** poblar el seed dir con un marketplace **aprobado** que resuelva
+      `st-b1-probe` y luego plantar en la caché una copia del mismo nombre con otro contenido; el
+      control positivo (sin la protección) la carga, y bajo política debe cargar sólo la correcta.
+  - **La prueba bajo política** entonces compara el **digest/inodo** del módulo que cargó contra el
+    aprobado. "Blocked" exige: el CLI **alcanzó** la copia impostora (línea que la nombra o la
+    lee) y la **rechazó** por digest/origen, con el control positivo demostrando que, sin la
+    protección, esa copia **sí** se cargaba.
+  - Si en 2.1.314 no existe ninguna configuración donde una copia de caché del mismo nombre llegue
+    a cargarse (es decir, el mecanismo de caché siempre valida contra el marketplace de origen),
+    entonces N10/N11/N13 **no son ataques** para esta versión y se retiran, documentando por qué.
+
+##### 1.14.17.5 Plan de una eventual segunda corrida focalizada (diseño; **no autorizado**)
+
+**Principio:** no se rebaja ningún criterio. Los 13 blocked de la corrida 1 no se re-ejecutan; la
+corrida 2 toca sólo los seis intentos y sus controles.
+
+**Cambios mínimos propuestos (cada uno con tu visto bueno antes de tocar el kit):**
+
+| Caso | Cambio mínimo | Prueba de regresión |
+| --- | --- | --- |
+| N14 | Robustez de arranque del harness: reintentar la confianza con relectura del pane y abortar el intento como `harness-startup-failed` (no como blocked/inconclusive de política) si no aparece `post-trust`; subir `settle`. Capturar la **cola** del debug del arranque | Test del driver: un arranque que no logra aceptar la confianza se marca `harness-startup-failed`, nunca `blocked` |
+| N17 | Guardar la **captura del pane** de la pantalla de aprobación (nombre del servidor) y agregar al patrón de evidencia la línea `MCP server "…"` y `not allowed by your organization`; separar el resultado de `.mcp.json` (proyecto) del de `claude mcp add` (user) | Tests del analizador: servidor nombrado+rechazado ⇒ blocked; aprobado pero sin arrancar y sin línea de política ⇒ INCONCLUSIVE (no blocked) |
+| N9 | Detectar el rechazo **del propio** `marketplace add` con las cuatro cadenas de rechazo de marketplace (ninguna asume "policy"); un `install` que falla por `not found in any marketplace` tras un `add` rechazado ⇒ blocked en el paso add. Un rc≠0 **sin** ninguna de esas cadenas sigue siendo INCONCLUSIVE (`install-error`) | Tests: add rechazado (cada una de las 4 cadenas)+install-not-found ⇒ blocked; add con error operativo ⇒ INCONCLUSIVE; install con éxito ⇒ FAIL |
+| N10/N11/N13 | Rediseño con control positivo (§1.14.17.4) o retiro documentado | Tests: control positivo carga la copia impostora sin la protección; bajo protección, sólo la correcta por digest |
+
+**Criterios de la corrida 2, fijados de antemano** (por intento):
+- **blocked** sólo con el control del mismo arranque presente **y** la evidencia específica del
+  rechazo (texto de política de marketplace para N9; servidor nombrado+rechazado para N17; copia
+  impostora alcanzada+rechazada por digest con control positivo para N10/N11/N13; `@skills-dir`
+  bloqueado con el probe cargado para N14).
+- **FAIL** con cualquier marcador, un `install` exitoso (N9), o la copia impostora cargada.
+- **INCONCLUSIVE** si falta el control, la evidencia específica o la medición
+  (`harness-startup-failed` para N14 sin arranque válido).
+- **N15, `@synced` y los eventos con login** siguen pendientes, nunca blocked.
+
+**No autorizado todavía:** ni la corrida 2, ni tocar el kit `e00ef29`, ni `measure`/`cleanup`,
+ni B1b, ni Composer/L1/L2/gateway, ni merge/deploy. El contenedor y la evidencia de la corrida 1
+quedan retenidos.
 ## 2. Versiones
 
 | Variante | CLI | Motivo |
