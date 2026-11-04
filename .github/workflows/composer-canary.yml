@@ -7,11 +7,13 @@ name: Composer CLI canary
 # such a release — patch, minor or major — is ADMITTED without anyone having
 # run §8.2.6 against it. This job runs that revalidation (the composer smoke
 # in both install layouts, plus the conversation smoke) against the newest
-# published release, daily and on demand.
+# published releases (the three newest plain X.Y.Z, so a release that was
+# `latest` only between two runs is still covered), daily and on demand.
 #
 # It is NOT a prior guarantee of compatibility: a release can reach sessions
-# before the next run, and the smokes cover the §8.2.6 list, not every CLI
-# behaviour. It is the fastest signal we have to exclude a broken release.
+# before the next run, more than three releases between two runs leave the
+# older ones untested (dispatch with cli=<version> for any version a session
+# log shows), and the smokes cover the §8.2.6 list, not every CLI behaviour. It is the fastest signal we have to exclude a broken release.
 #
 # A red run opens (or comments on) an issue with the exclusion procedure. It
 # never changes production: putting the version in COMPOSER_CLI_DENY and
@@ -32,14 +34,47 @@ on:
 
 permissions:
   contents: read
-  # Only to make a failure visible as an issue (never touches production).
-  issues: write
 
 jobs:
+  resolve:
+    name: Versions under test
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.v.outputs.versions }}
+    steps:
+      - name: Resolve
+        id: v
+        env:
+          REQUESTED: ${{ inputs.cli }}
+        run: |
+          set -euo pipefail
+          plain='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if [ -n "${REQUESTED:-}" ]; then
+            [[ "$REQUESTED" =~ $plain ]] || { echo "not a plain release: $REQUESTED"; exit 1; }
+            list=$(jq -cn --arg v "$REQUESTED" '[$v]')
+          else
+            # Plain releases only (the backend's rule), newest three by semver.
+            list=$(npm view @anthropic-ai/claude-code versions --json \
+              | jq -c '[.[] | select(test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))]
+                       | sort_by(split(".") | map(tonumber)) | .[-3:] | reverse')
+          fi
+          for v in $(jq -r '.[]' <<<"$list"); do [[ "$v" =~ $plain ]] || { echo "bad: $v"; exit 1; }; done
+          echo "versions=$list" >> "$GITHUB_OUTPUT"
+          echo "### Claude Code under test: $list" >> "$GITHUB_STEP_SUMMARY"
+
   canary:
-    name: Composer + conversation smokes on the newest CLI
+    name: Composer + conversation smokes, CLI ${{ matrix.cli }}
+    needs: resolve
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    # This job installs and runs an unvetted third-party release: it gets a
+    # read-only token. The issue is opened by `report`, which runs no CLI.
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        cli: ${{ fromJSON(needs.resolve.outputs.versions) }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -53,28 +88,16 @@ jobs:
           cache: npm
           cache-dependency-path: backend/package-lock.json
 
-      - name: Resolve the version under test
-        id: v
-        env:
-          REQUESTED: ${{ inputs.cli }}
-        run: |
-          set -euo pipefail
-          v="${REQUESTED:-$(npm view @anthropic-ai/claude-code@latest version)}"
-          # Plain X.Y.Z only: the same rule the backend applies (cliPolicy.ts).
-          [[ "$v" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo "not a plain release: $v"; exit 1; }
-          echo "cli=$v" >> "$GITHUB_OUTPUT"
-          echo "### Claude Code $v" >> "$GITHUB_STEP_SUMMARY"
-
       - name: Install backend deps
         working-directory: backend
         run: npm ci
 
-      - name: Build session image with CLI ${{ steps.v.outputs.cli }}
-        run: docker build --build-arg CLAUDE_CODE_VERSION=${{ steps.v.outputs.cli }} -t shared-terminal-session:canary ./session-image
+      - name: Build session image with CLI ${{ matrix.cli }}
+        run: docker build --build-arg CLAUDE_CODE_VERSION=${{ matrix.cli }} -t shared-terminal-session:canary ./session-image
 
       - name: Conversation hooks smoke (control dir validation)
         env:
-          ST_CLI_PIN: ${{ steps.v.outputs.cli }}
+          ST_CLI_PIN: ${{ matrix.cli }}
         run: ./session-image/conversation-smoke.sh shared-terminal-session:canary
 
       - name: Composer terminal smoke (§8.2.6)
@@ -90,26 +113,54 @@ jobs:
       - name: Verdict
         if: always()
         env:
-          CLI: ${{ steps.v.outputs.cli }}
+          CLI: ${{ matrix.cli }}
           OUTCOME: ${{ job.status }}
         run: |
           if [ "$OUTCOME" = "success" ]; then
             echo "PASS for $CLI — evidence to add it to COMPOSER_CLI_VERSIONS and the cli-variants matrix." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "FAIL for $CLI — see the issue opened by this run; exclude it with COMPOSER_CLI_DENY." >> "$GITHUB_STEP_SUMMARY"
+            mkdir -p failed && echo "$CLI" > "failed/$CLI"
           fi
 
-      - name: Open or update the failure issue
-        if: failure() && steps.v.outputs.cli != ''
+      - name: Record a failure for the report job
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: failed-${{ matrix.cli }}
+          path: failed/
+
+  report:
+    name: Make failures visible (issue)
+    needs: [resolve, canary]
+    if: always() && needs.resolve.result == 'success' && needs.canary.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      actions: read
+    steps:
+      - name: Collect the failed versions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: failed-*
+          path: failed
+          merge-multiple: true
+
+      - name: Open, reopen or comment on one issue per failed version
         env:
           GH_TOKEN: ${{ github.token }}
-          CLI: ${{ steps.v.outputs.cli }}
+          GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          title="Composer CLI canary FAILED for Claude Code $CLI"
-          body=$(cat <<MD
-          The daily §8.2.6 revalidation failed against Claude Code **$CLI**: $RUN_URL
+          plain='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          for f in failed/*; do
+            [ -e "$f" ] || continue
+            CLI=$(basename "$f")
+            [[ "$CLI" =~ $plain ]] || continue
+            title="Composer CLI canary FAILED for Claude Code $CLI"
+            body=$(cat <<MD
+          The §8.2.6 revalidation failed against Claude Code **$CLI**: $RUN_URL
 
           With \`COMPOSER_CLI_MIN_VERSION\` set, the composer may be typing into sessions that run this release. Nothing was changed automatically.
 
@@ -118,9 +169,17 @@ jobs:
           2. If the CLI's: on the backend host add \`$CLI\` to \`COMPOSER_CLI_DENY\` in \`.env\` (comma-separated, plain X.Y.Z).
           3. \`docker compose up -d --no-build app\` (restart only; the backend refuses to start on a malformed list).
           4. Check the log line \`[server] composer CLI policy: …\` lists \`deny $CLI\`, and that a send on such a session answers 409 \`cli-unvalidated\` / \`denied\`.
-          5. Re-run this workflow (\`workflow_dispatch\`, cli=$CLI) after a fix; remove the entry only with a green run.
+          5. Keep this issue open while the version is denied; close it only after a green run (\`workflow_dispatch\`, cli=$CLI) and the DENY entry removed.
           MD
-          )
-          n=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')
-          if [ -n "$n" ]; then gh issue comment "$n" --body "Failed again: $RUN_URL"
-          else gh issue create --title "$title" --body "$body"; fi
+            )
+            # Exact title match, any state (search is full-text; the jq filter decides).
+            hit=$(gh issue list --state all --search "in:title \"$title\"" --json number,title,state \
+              --jq "map(select(.title == \"$title\")) | .[0] // empty")
+            if [ -z "$hit" ]; then
+              gh issue create --title "$title" --body "$body"
+            else
+              n=$(jq -r .number <<<"$hit")
+              [ "$(jq -r .state <<<"$hit")" = "OPEN" ] || gh issue reopen "$n"
+              gh issue comment "$n" --body "Failed again: $RUN_URL"
+            fi
+          done

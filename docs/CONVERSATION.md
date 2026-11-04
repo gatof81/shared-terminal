@@ -2497,9 +2497,11 @@ futura conserve lo que §8.2 midió: CSI u como salto de línea, el umbral de en
 minor o major puede cambiar la interfaz del CLI por completo. Una regresión ahí puede producir un
 envío **mal entregado** —texto partido, enviado antes de tiempo, interpretado como comando— que
 ninguna comprobación detecta. El canario diario de CI (`.github/workflows/composer-canary.yml`:
-§8.2.6 contra la release más reciente publicada) **no es una garantía previa**: una release puede
-llegar a una sesión antes de la siguiente ejecución, y sus smokes cubren la lista de §8.2.6, no todo
-el comportamiento del CLI. Un canario rojo abre una incidencia con el procedimiento para añadir la
+§8.2.6 contra las **tres** releases planas más recientes publicadas) **no es una garantía previa**:
+una release puede llegar a una sesión antes de la siguiente ejecución; si salen más de tres entre dos
+ejecuciones, las más viejas no se prueban (lanzarlo a mano con `cli=<versión>` para cualquier versión
+que aparezca en el log de una sesión), y sus smokes cubren la lista de §8.2.6, no todo el
+comportamiento del CLI. Un canario rojo abre una incidencia con el procedimiento para añadir la
 versión a `COMPOSER_CLI_DENY`; nunca cambia producción. Sin mínima, el riesgo no existe y el coste es
 que cada actualización automática del CLI deja el composer en `cli-unvalidated` hasta revalidar.
 
