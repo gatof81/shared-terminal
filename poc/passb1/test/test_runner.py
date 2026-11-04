@@ -4,11 +4,16 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 KIT = os.path.dirname(HERE)
+sys.path.insert(0, KIT)
+sys.path.insert(0, HERE)
+import test_analyze_b1a as T  # noqa: E402  (fixtures for a scoped-valid capture)
+import test_summary as TS  # noqa: E402  (write_attempt / write_globals)
 RUNNER = os.path.join(KIT, "run-b1.sh")
 IMAGE_ID = "sha256:" + "ab" * 32
 HIST_OK = 'RUN |1 CLAUDE_CODE_VERSION=2.1.314 /bin/sh -c npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" # buildkit'
@@ -179,7 +184,7 @@ class B1a(Runner):
         """A retained run-1 container as it would exist on VM100."""
         rid = "a" * 64
         self.patch(containers=[{"id": rid, "name": "passb1a-exp-20261104-142810",
-                                "labels": {"passb1.experiment": "20261104-142810", "passb1.run": "1"},
+                                "labels": {"passb1.experiment": "20261104-142810", "passb1.run": "1", "passb1.kind": "b1a"},
                                 "user": "developer", "hc": {}, "mounts": []}])
         return rid
 
@@ -236,6 +241,36 @@ class B1a(Runner):
         self.assertFailedClosed(r, 2)
         with open(os.path.join(self.res, "report.json")) as f:
             self.assertEqual(json.load(f)["verdict"], "INCONCLUSIVE")
+
+    def scoped_valid_res(self, mut=None):
+        """A run-2 shaped capture that analyze(scope=P0/N14/N17-project) passes."""
+        shutil.rmtree(self.res, ignore_errors=True)
+        os.makedirs(self.res)
+        D = T.fixture()
+        if mut:
+            mut(D)
+        for aid in ("P0", "N14", "N17-project"):
+            TS.write_attempt(self.res, aid, D["attempts"][aid])
+        TS.write_globals(self.res, D)
+        os.makedirs(os.path.join(self.base, "state"), exist_ok=True)
+        open(os.path.join(self.base, "state", "capture.attempted"), "w").close()
+
+    def test_run2_validate_is_scoped_but_keeps_global_controls(self):
+        # C4: under RUN2=1, validate judges only the focused subset — but a global-control failure
+        # still fails, even in scoped mode.
+        self.rewrite_env(RUN2="1", EXP=f"passb1a-run2-exp-{self.stamp}", RUN1_ID="a" * 64, RUN1_EXP="passb1a-exp-20261104-142810")
+        self.scoped_valid_res()
+        r = self.phase("validate")
+        self.assertOk(r, "validate")
+        with open(os.path.join(self.res, "report.json")) as f:
+            rep = json.load(f)
+        self.assertEqual(rep["verdict"], "PASS", rep["reasons"])
+        self.assertEqual(set(rep["facts"]["attempts"]), {"N14", "N17-project"})
+        self.scoped_valid_res(mut=lambda D: D["cli_after"].update(version="2.1.315"))
+        r = self.phase("validate")
+        self.assertFailedClosed(r, 2)
+        with open(os.path.join(self.res, "report.json")) as f:
+            self.assertIn("cli-version-mismatch:after", json.load(f)["reasons"])
 
     def test_cleanup_refuses_evidence_without_capture(self):
         self.through("measure")

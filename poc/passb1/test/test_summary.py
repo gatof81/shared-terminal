@@ -128,6 +128,115 @@ class Summary(unittest.TestCase):
         code, out = summary(run1_dir(), r2)
         self.assertNotEqual(out["verdict"], "PASS (reduced scope)")
 
+    def test_loaded_in_run1_is_never_erased_by_run2(self):
+        # C2: N14 LOADED in run 1, N14 blocked in run 2 => consolidated FAIL, attributed to run 1.
+        def n14_loaded(d, D):
+            p = os.path.join(d, "attempts", "N14", "debug-1.log.filtered")
+            with open(p, encoding="utf-8") as f:
+                prev = f.read()
+            T.put(p, prev + T.P + "hooks module st-b1-rogue-n14@skills-dir loaded (worker, environment 3, tier user); events: session.start\n")
+        code, out = summary(run1_dir(mut=n14_loaded), run2_dir())
+        self.assertEqual((code, out["verdict"]), (2, "FAIL"), out)
+        n14 = next(r for r in out["attempts"] if r["attempt"] == "N14")
+        self.assertEqual(n14["outcome"], "loaded")
+        self.assertTrue(n14["provenance"].startswith("run1:"), n14)
+        self.assertIn("not-erasable", n14.get("note", ""))
+
+    def test_run_sha_is_declared_not_a_verified_identity(self):
+        code, out = summary(run1_dir(), run2_dir())
+        self.assertEqual(out["runs"]["run1"]["sha_source"], "operator-declared")
+        self.assertEqual(out["runs"]["run2"]["sha_source"], "operator-declared")
+        self.assertIn("declaradas por el operador", out["provenance_note"])
+
+
+class VerifySums(unittest.TestCase):
+    """C1: SHA256SUMS must be complete and cover every file; an empty or partial list cannot pass."""
+
+    def sums(self, d):
+        with open(os.path.join(d, "SHA256SUMS")) as f:
+            return f.read().splitlines()
+
+    def write_sums(self, d, lines):
+        with open(os.path.join(d, "SHA256SUMS"), "w") as f:
+            f.write("\n".join(lines) + "\n")
+
+    def test_valid_dir_passes(self):
+        self.assertTrue(S.verify_sums(run2_dir()))
+
+    def test_missing_file_rejected(self):
+        d = run2_dir(); os.remove(os.path.join(d, "SHA256SUMS"))
+        self.assertFalse(S.verify_sums(d))
+
+    def test_empty_or_blank_only_rejected(self):
+        for body in ("", "\n  \n\n"):
+            with self.subTest(repr(body)):
+                d = run2_dir()
+                with open(os.path.join(d, "SHA256SUMS"), "w") as f:
+                    f.write(body)
+                self.assertFalse(S.verify_sums(d))
+
+    def test_partial_list_missing_an_entry_rejected(self):
+        # Drop applied.json's line but leave the file: it is now uncovered AND mandatory-omitted.
+        d = run2_dir()
+        self.write_sums(d, [ln for ln in self.sums(d) if not ln.endswith("  applied.json")])
+        self.assertFalse(S.verify_sums(d))
+
+    def test_mandatory_file_omitted_rejected(self):
+        d = run2_dir()
+        os.remove(os.path.join(d, "applied.json"))
+        self.write_sums(d, [ln for ln in self.sums(d) if not ln.endswith("  applied.json")])
+        self.assertFalse(S.verify_sums(d))
+
+    def test_duplicate_entry_rejected(self):
+        d = run2_dir(); lines = self.sums(d)
+        self.write_sums(d, lines + [lines[0]])
+        self.assertFalse(S.verify_sums(d))
+
+    def test_invalid_path_rejected(self):
+        # A traversal entry pointing at a REAL file OUTSIDE the capture, with its correct hash: only
+        # the path guard can reject this (the file opens and matches), so it proves the guard works.
+        d = run2_dir()
+        outside = os.path.join(os.path.dirname(d), f"outside-{os.getpid()}.bin")
+        payload = b"a secret that lives outside the capture"
+        with open(outside, "wb") as f:
+            f.write(payload)
+        try:
+            digest = hashlib.sha256(payload).hexdigest()
+            self.write_sums(d, self.sums(d) + [f"{digest}  ../{os.path.basename(outside)}"])
+            self.assertFalse(S.verify_sums(d))
+        finally:
+            os.remove(outside)
+        for rel in ("/abs/path", "a/../../b"):
+            with self.subTest(rel):
+                d2 = run2_dir()
+                self.write_sums(d2, self.sums(d2) + [f"{'a' * 64}  {rel}"])
+                self.assertFalse(S.verify_sums(d2))
+
+    def test_malformed_line_or_bad_digest_rejected(self):
+        for bad in ("zz" + "a" * 62 + "  applied.json", "deadbeef applied.json"):
+            with self.subTest(bad):
+                d = run2_dir()
+                self.write_sums(d, self.sums(d) + [bad])
+                self.assertFalse(S.verify_sums(d))
+
+    def test_uncovered_present_file_rejected(self):
+        d = run2_dir()
+        with open(os.path.join(d, "surprise.bin"), "w") as f:
+            f.write("not in the sums")
+        self.assertFalse(S.verify_sums(d))
+
+    def test_post_capture_report_json_is_allowed_uncovered(self):
+        d = run2_dir()
+        with open(os.path.join(d, "report.json"), "w") as f:  # written AFTER capture's SHA256SUMS
+            f.write('{"verdict": "PASS"}')
+        self.assertTrue(S.verify_sums(d))
+
+    def test_hash_mismatch_rejected(self):
+        d = run2_dir()
+        with open(os.path.join(d, "applied.json"), "a") as f:
+            f.write(" ")   # change a covered file after the sums were written
+        self.assertFalse(S.verify_sums(d))
+
 
 if __name__ == "__main__":
     unittest.main()

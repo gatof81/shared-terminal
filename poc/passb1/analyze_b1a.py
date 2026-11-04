@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """PASS-B1a analyzer (04-poc.md §1.14.15). Standard library only.
 
-    analyze_b1a.py report RESULTS_DIR      verdict as JSON; exit 0 only on PASS
+    analyze_b1a.py report RESULTS_DIR [--scope id,id,...]   verdict as JSON; exit 0 only on PASS
 
 An attempt counts as BLOCKED only with all three, in that same CLI start:
   1. no marker of the attacker's code (a marker is a FAIL, whatever else is there);
@@ -357,10 +357,16 @@ def analyze(D, scope=None):
 
 
 def main(argv):
-    if len(argv) != 3 or argv[1] != "report":
+    # report RESULTS_DIR [--scope id,id,...]
+    if len(argv) < 3 or argv[1] != "report":
         print(__doc__.strip(), file=sys.stderr)
         return 64
-    res = analyze(load(argv[2]))
+    scope = None
+    if len(argv) >= 5 and argv[3] == "--scope":
+        # A focused run (run 2) judges only these attempts; the global controls are always
+        # checked (see analyze), so --scope can never hide a global failure.
+        scope = tuple(x for x in argv[4].split(",") if x)
+    res = analyze(load(argv[2]), scope=scope)
     print(json.dumps(res, indent=2, ensure_ascii=False))
     return 0 if res["verdict"] == "PASS" else 2
 

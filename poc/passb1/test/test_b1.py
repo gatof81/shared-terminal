@@ -32,6 +32,40 @@ def stat_from_other_process(pid):
     return json.loads(r.stdout)
 
 
+class McpApprovalDriver(unittest.TestCase):
+    """C3: a disappeared dialog does not prove approval. The driver separates SELECTION,
+    CONFIRMATION and RESULT; "confirmed" needs the approve option selected, the dialog closed while
+    the CLI kept running, AND an independent accept signal — which 2.1.314 does not emit, so a real
+    approval stays INCONCLUSIVE."""
+
+    def test_selected_option_reads_the_pointer_line(self):
+        pane = ("New MCP server found in this project: st-b1-rogue-n17p\n"
+                "\n  ❯ 1. Use this MCP server\n  2. Continue without this MCP server\n")
+        self.assertEqual(b1.selected_option(pane), "1. Use this MCP server")
+        self.assertEqual(b1.selected_option("> Use this and all MCP servers\n  Other"), "Use this and all MCP servers")
+        self.assertIsNone(b1.selected_option("no pointer here\n  2. plain line\n"))
+
+    def test_real_approval_without_signal_is_not_confirmed(self):
+        # The approve option selected and the dialog closed while running — but no acceptance signal
+        # on 2.1.314, so NOT "confirmed" (=> analyzer INCONCLUSIVE).
+        self.assertEqual(b1.mcp_approval_result("1. Use this MCP server", "running", True, False), "selected-no-signal")
+
+    def test_confirmed_only_with_an_independent_signal(self):
+        self.assertEqual(b1.mcp_approval_result("1. Use this MCP server", "running", True, True), "confirmed")
+
+    def test_continue_without_is_declined(self):
+        self.assertEqual(b1.mcp_approval_result("2. Continue without this MCP server", "running", True, False), "declined")
+
+    def test_dialog_gone_by_cli_exit_is_not_approval(self):
+        self.assertEqual(b1.mcp_approval_result("1. Use this MCP server", "exit", True, False), "dismissed-by-exit")
+
+    def test_persistent_dialog_is_screen_only(self):
+        self.assertEqual(b1.mcp_approval_result("1. Use this MCP server", "persistent", True, False), "screen-only")
+
+    def test_never_seen_is_none(self):
+        self.assertEqual(b1.mcp_approval_result(None, None, False, False), "none")
+
+
 class HndStat(unittest.TestCase):
     def test_non_dumpable_target_is_root_owned_and_unreadable(self):
         p = target(nd=True)

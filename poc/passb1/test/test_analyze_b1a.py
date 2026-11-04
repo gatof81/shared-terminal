@@ -187,6 +187,22 @@ class Negatives(unittest.TestCase):
         self.assertEqual(run(m)["verdict"], "FAIL")
 
 
+class Scope(unittest.TestCase):
+    """C4: a focused run judges only its subset, but every global control is still checked."""
+
+    def test_focused_scope_judges_only_the_subset(self):
+        r = A.analyze(fixture(), scope={"N14", "N17-project"})
+        self.assertEqual(r["verdict"], "PASS", r["reasons"])
+        self.assertEqual(set(r["facts"]["attempts"]), {"N14", "N17-project"})
+
+    def test_scope_cannot_hide_a_global_failure(self):
+        D = fixture()
+        D["cli_after"].update(version="2.1.315")
+        r = A.analyze(D, scope={"N14", "N17-project"})
+        self.assertEqual(r["verdict"], "INCONCLUSIVE")
+        self.assertIn("cli-version-mismatch:after", r["reasons"])
+
+
 class Load(unittest.TestCase):
     def test_round_trip_and_exit_code(self):
         D = fixture()
