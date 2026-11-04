@@ -18,11 +18,17 @@ const dbStubs = vi.hoisted(() => ({
 vi.mock("./db.js", () => dbStubs);
 
 import {
+	ATTESTATION_KEY_INFO,
+	classifyAttestation,
+	readAttestation,
+} from "./conversation/captureAttestation.js";
+import {
 	CaptureAuthority,
 	relayEnabledExists,
 	writeRelayEnabled,
 } from "./conversation/captureAuth.js";
 import { DockerManager, goModeKind } from "./dockerManager.js";
+import { _clearKeyCacheForTesting, deriveSubkey } from "./secrets.js";
 import type { SessionManager } from "./sessionManager.js";
 
 function dm(opts: {
@@ -74,6 +80,8 @@ describe("inspectCapture", () => {
 			controlMount: true,
 			imageId: "sha256:aaa",
 			imageRelay2: true,
+			imageExists: true,
+			labels: {},
 		});
 	});
 	it("3.0c-style container: no control mount; an image without the label; no token", async () => {
@@ -129,6 +137,9 @@ describe("inspectCapture", () => {
 			controlMount: false,
 			imageId: "sha256:gone",
 			imageRelay2: false,
+			// §2.7.5.1: the deletion itself is reported, so an attestation can decide.
+			imageExists: false,
+			labels: {},
 		});
 		await m.inspectCapture("cid");
 		expect(imageInspect).toHaveBeenCalledTimes(2); // a 404 is not cached
@@ -635,5 +646,65 @@ describe("recreatePort (CONVERSATION.md §2.7)", () => {
 		await expect(p.stop("n")).resolves.toBeUndefined();
 		await p.remove("n");
 		expect(remove).toHaveBeenCalledWith();
+	});
+});
+
+// ── §2.7.5.1 capability attestation, issued at creation ─────────────────────
+
+describe("attestCaptureContainer (spawn / recreation N)", () => {
+	const CID = "a".repeat(64);
+	const IMG = `sha256:${"e".repeat(64)}`;
+	const created = (labels: Record<string, string>) => ({
+		...base,
+		Id: CID,
+		Image: IMG,
+		Config: { ...base.Config, Labels: labels },
+	});
+	let root: string;
+	beforeEach(async () => {
+		root = await fs.mkdtemp(path.join(os.tmpdir(), "st-attest-dm-"));
+		vi.stubEnv("SECRETS_ENCRYPTION_KEY", Buffer.alloc(32, 3).toString("base64"));
+		_clearKeyCacheForTesting();
+	});
+	afterEach(async () => {
+		vi.unstubAllEnvs();
+		_clearKeyCacheForTesting();
+		await fs.rm(root, { recursive: true, force: true });
+	});
+
+	it("re-checks the image NOW and writes an attestation that verifies for this container and image", async () => {
+		const { m } = dm({
+			container: created({ "io.shared-terminal.conversation-relay": "2" }),
+			images: { [IMG]: { "io.shared-terminal.conversation-relay": "2" } },
+		});
+		expect(await m.attestCaptureContainer("s1", CID, "spawn", null, root)).toBe(true);
+		const read = await readAttestation(root, "s1", CID);
+		expect(read.kind).toBe("present");
+		expect(
+			classifyAttestation(
+				read,
+				{ sessionId: "s1", containerId: CID, imageId: IMG },
+				deriveSubkey(ATTESTATION_KEY_INFO),
+			),
+		).toBe("valid");
+	});
+	it.each([
+		["the image is already gone", {}],
+		["the image lacks the label", { [IMG]: {} }],
+	])("never attests when %s (only what was verified at creation is bound)", async (_n, images) => {
+		const { m } = dm({
+			container: created({ "io.shared-terminal.conversation-relay": "2" }),
+			images,
+		});
+		expect(await m.attestCaptureContainer("s1", CID, "spawn", null, root)).toBe(false);
+		expect((await readAttestation(root, "s1", CID)).kind).toBe("absent");
+	});
+	it("never attests a container without the relay label", async () => {
+		const { m } = dm({
+			container: created({}),
+			images: { [IMG]: { "io.shared-terminal.conversation-relay": "2" } },
+		});
+		expect(await m.attestCaptureContainer("s1", CID, "recreate", "att-1", root)).toBe(false);
+		expect((await readAttestation(root, "s1", CID)).kind).toBe("absent");
 	});
 });

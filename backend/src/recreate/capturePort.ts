@@ -90,6 +90,10 @@ export function conversationRecreatePort(service: ConversationService): Recreate
 	 * convergence or restore already inside the authority when either
 	 * ends (a probe still out, say) writes nothing after it (E5).
 	 */
+	// §2.7.5.1 — the service's attestation wiring (absent on a test double:
+	// then the image rule alone decides, as before v1.8.1).
+	const attestation = () =>
+		typeof service.attestationDeps === "function" ? service.attestationDeps() : {};
 	const ownerAuthority = (mayAct: () => boolean) =>
 		new CaptureAuthority({
 			workspaceRoot: root,
@@ -102,6 +106,8 @@ export function conversationRecreatePort(service: ConversationService): Recreate
 			removeHooksFile: (s) => removeHooksFile(root, s),
 			hooksFileExists: (s) => hooksFileExists(root, s),
 			mayWrite: mayAct,
+			// §2.7.5.1 — the same attestation rule as the service's authority.
+			...attestation(),
 		});
 	return {
 		enabled: deps.enabled,
@@ -135,6 +141,7 @@ export function conversationRecreatePort(service: ConversationService): Recreate
 				hooksFileExists: (s) => hooksFileExists(root, s),
 				identifyWaitMs: Math.min(RELAY_IDENTIFY_WAIT_MS, run.remaining()),
 				mayWrite: () => run.epochOpen,
+				...attestation(),
 			});
 			let w: Awaited<ReturnType<CaptureAuthority["applyWriteDetailed"]>>;
 			try {

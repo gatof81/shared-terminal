@@ -29,6 +29,7 @@ import {
 	removeHooksFile,
 	writeHooksFile,
 } from "./activation.js";
+import { type AttestationRead, readAttestation } from "./captureAttestation.js";
 import {
 	CaptureAuthority,
 	type CaptureBlock,
@@ -198,6 +199,12 @@ export interface ServiceDeps extends ActivationDeps {
 	/** 3.0d Docker view for capture authorization (§2.7.5–§2.7.6); absent
 	 *  in tests that don't exercise it — then no container is ever seen. */
 	captureDocker?: CaptureDockerPort;
+	/**
+	 * §2.7.5.1 — key that verifies capability attestations (a subkey of
+	 * SECRETS_ENCRYPTION_KEY). Not wired ⇒ attestations are ignored and the
+	 * image rule alone decides.
+	 */
+	captureAttestationKey?: () => Buffer;
 }
 
 const NO_DOCKER: CaptureDockerPort = {
@@ -336,6 +343,20 @@ export class ConversationService {
 	};
 
 	readonly authority: CaptureAuthority;
+	private readonly captureAttestationKey?: () => Buffer;
+	/**
+	 * §2.7.5.1 — the same attestation wiring for every CaptureAuthority built
+	 * elsewhere (the recreation's): one rule, one source, or none at all.
+	 */
+	attestationDeps(): {
+		readAttestation?: (sessionId: string, containerId: string) => Promise<AttestationRead>;
+		attestationKey?: () => Buffer;
+	} {
+		const key = this.captureAttestationKey;
+		if (!key) return {};
+		const root = this.deps.workspaceRoot;
+		return { readAttestation: (sid, cid) => readAttestation(root, sid, cid), attestationKey: key };
+	}
 
 	constructor(private readonly deps: ServiceDeps) {
 		this.authority = new CaptureAuthority({
@@ -349,8 +370,13 @@ export class ConversationService {
 			writeHooksFile: (sid) => writeHooksFile(this.activationDeps, sid),
 			removeHooksFile: (sid) => removeHooksFile(deps.workspaceRoot, sid),
 			hooksFileExists: (sid) => hooksFileExists(deps.workspaceRoot, sid),
+			readAttestation: deps.captureAttestationKey
+				? (sid, cid) => readAttestation(deps.workspaceRoot, sid, cid)
+				: undefined,
+			attestationKey: deps.captureAttestationKey,
 			now: deps.now,
 		});
+		this.captureAttestationKey = deps.captureAttestationKey;
 		this.now = deps.now ?? Date.now;
 		this.heartbeat = new HeartbeatCoalescer(async (key) => {
 			const [st, cid] = key.split("/");

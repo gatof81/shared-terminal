@@ -40,6 +40,7 @@ import {
 	hooksFilePath,
 	writeHooksFile,
 } from "../conversation/activation.js";
+import { type AttestationRead, signAttestation } from "../conversation/captureAttestation.js";
 import {
 	type ContainerView,
 	deferSeedExists,
@@ -57,7 +58,16 @@ const N = "n".repeat(64);
 let root: string;
 let token: string;
 
-function port(probe: () => Promise<boolean>, opts: { running?: boolean } = {}) {
+function port(
+	probe: () => Promise<boolean>,
+	opts: {
+		running?: boolean;
+		/** §2.7.5.1 wiring on the fake service: what every attestation read returns. */
+		attestation?: AttestationRead;
+		imageExists?: boolean;
+		imageId?: string;
+	} = {},
+) {
 	const converge = vi.fn(async () => "kept");
 	const view = (): ContainerView => ({
 		exists: true,
@@ -65,8 +75,11 @@ function port(probe: () => Promise<boolean>, opts: { running?: boolean } = {}) {
 		token,
 		managedMount: true,
 		controlMount: true,
-		imageId: "sha256:n",
-		imageRelay2: true,
+		imageId: opts.imageId ?? "sha256:n",
+		imageRelay2: opts.imageExists !== false,
+		id: "a".repeat(64),
+		imageExists: opts.imageExists,
+		labels: { "io.shared-terminal.conversation-relay": "2" },
 	});
 	const probeRelay = vi.fn(probe);
 	const service = {
@@ -77,6 +90,14 @@ function port(probe: () => Promise<boolean>, opts: { running?: boolean } = {}) {
 			probeRelay,
 		},
 		authority: { converge },
+		...(opts.attestation
+			? {
+					attestationDeps: () => ({
+						readAttestation: async () => opts.attestation,
+						attestationKey: () => Buffer.alloc(32, 1),
+					}),
+				}
+			: {}),
 	} as unknown as ConversationService;
 	return { p: conversationRecreatePort(service), probeRelay, converge };
 }
@@ -144,6 +165,50 @@ describe("authorize (step 5) inside the attempt's epoch", () => {
 		expect(await hooksFileExists(root, SID)).toBe(true);
 		expect(run.evidence.map((e) => e.label)).toEqual(
 			expect.arrayContaining(["inspect N (capture)", "probe N relay"]),
+		);
+	});
+
+	it("§2.7.5.1 the recreation's authority applies the same attestation rule: a contradiction denies, image present or not", async () => {
+		committedRow();
+		for (const imageExists of [true, false]) {
+			const { p } = port(async () => true, {
+				imageExists,
+				attestation: { kind: "unreadable", error: "corrupt" },
+			});
+			const c = await p.authorize(SID, new AttemptRun(Date.now() + 10_000));
+			expect(c.effective).toBe(false);
+			expect(c.pendingReasons).toContain("attestation-contradiction");
+			expect(await hooksFileExists(root, SID)).toBe(false);
+		}
+	});
+
+	it("§2.7.5.1 and a VALID attestation for N with its image gone: the recreation's authority grants (step 5)", async () => {
+		committedRow();
+		const key = Buffer.alloc(32, 1);
+		const img = `sha256:${"e".repeat(64)}`;
+		const record = signAttestation(
+			{
+				sessionId: SID,
+				containerId: "a".repeat(64),
+				imageId: img,
+				basis: "recreate",
+				attemptId: "a1",
+			},
+			key,
+		);
+		const { p } = port(async () => true, {
+			imageExists: false,
+			imageId: img,
+			attestation: { kind: "present", record },
+		});
+		const c = await p.authorize(SID, new AttemptRun(Date.now() + 10_000));
+		expect(c).toMatchObject({ effective: true, pendingReasons: [] });
+		expect(await hooksFileExists(root, SID)).toBe(true);
+		// Same facts without the attestation: the image rule alone denies.
+		await fs.rm(path.join(root, ".claude-managed"), { recursive: true, force: true });
+		const bare = port(async () => true, { imageExists: false, imageId: img });
+		expect((await bare.p.authorize(SID, new AttemptRun(Date.now() + 10_000))).effective).toBe(
+			false,
 		);
 	});
 

@@ -51,6 +51,17 @@ export interface RecreateDockerPort {
 	buildCreate(sessionId: string, spec: RecreateCreateSpec): Promise<object>;
 	/** Returns N's id. */
 	create(options: object): Promise<string>;
+	/**
+	 * §2.7.5.1 — attest N (just created from the checked image) for capture.
+	 * Re-checks image and label itself; `mayAct` right before the write.
+	 * Optional: absent ⇒ no attestation (the image rule alone applies).
+	 */
+	attest?(
+		sessionId: string,
+		containerId: string,
+		attemptId: string,
+		mayAct: () => boolean,
+	): Promise<boolean>;
 	rename(id: string, name: string): Promise<void>;
 	start(id: string): Promise<void>;
 	/** Resolves when stopped (already stopped included); 404 rejects with `statusCode: 404`. */

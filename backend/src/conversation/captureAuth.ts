@@ -4,8 +4,12 @@
  *
  * Three levels of authorization (§2.7.5):
  *   - WRITE (in place): flag ∧ requested ∧ no revocation ∧ the D1 container
- *     exists, is running and has BOTH mounts (managed + control) ∧ its own
- *     image carries `conversation-relay="2"` ∧ token↔hash correspondence;
+ *     exists, is running and has BOTH mounts (managed + control) ∧ it is
+ *     relay-capable ∧ token↔hash correspondence. Relay-capable (§2.7.5.1,
+ *     v1.8.1): its own image carries `conversation-relay="2"` — or, when
+ *     that image no longer exists, a valid capability attestation for this
+ *     exact container (captureAttestation.ts) plus the relay label the
+ *     container itself carries from its creation;
  *   - RETAIN: the same without "running" — a stop keeps what was written;
  *   - SPAWN PREPARATION: lives in activation.ts (`prepareSpawnCapture`): the
  *     container does not exist yet, correspondence holds by construction.
@@ -30,6 +34,11 @@ import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { logger } from "../logger.js";
+import {
+	type AttestationCheck,
+	type AttestationRead,
+	classifyAttestation,
+} from "./captureAttestation.js";
 import { assertSafeComponent } from "./ids.js";
 import { type SessionCaptureRow, tokenMatchesHash } from "./registry.js";
 import type { RevocationState } from "./revocation.js";
@@ -69,6 +78,15 @@ export type ContainerView =
 			imageId: string;
 			/** The container's OWN image carries `conversation-relay="2"`. */
 			imageRelay2: boolean;
+			/** Full container id (binds an attestation). Absent ⇒ no attestation applies. */
+			id?: string;
+			/**
+			 * false ⇒ Docker no longer has the image (404). Absent ⇒ treated as
+			 * existing, i.e. the image rule alone decides (never a grant).
+			 */
+			imageExists?: boolean;
+			/** The container's OWN labels (fixed at creation). */
+			labels?: Record<string, string>;
 	  };
 
 export interface CaptureDockerPort {
@@ -206,6 +224,8 @@ export interface CaptureFacts {
 	currentImageRelay2: boolean;
 	marker: boolean;
 	hooksFile: boolean;
+	/** §2.7.5.1 — the capability attestation for the D1 container. Absent ⇒ "absent". */
+	attestation?: AttestationCheck;
 }
 
 export function correspondenceOf(facts: CaptureFacts): Correspondence {
@@ -228,9 +248,25 @@ function sessionAllowed(f: CaptureFacts): boolean {
 	return f.flag && requested(f) && f.revocation === "none" && !f.unresolved;
 }
 
+/**
+ * §2.7.5.1 — the container can run the relay. The image rule wherever the
+ * image still exists; without it, only a valid attestation for THIS
+ * container plus its own (creation-time, immutable) relay label. A
+ * contradicting attestation denies in every case.
+ */
+function relayCapable(f: CaptureFacts): boolean {
+	const c = f.container;
+	if (!c?.exists) return false;
+	if (f.attestation === "contradiction") return false;
+	if (c.imageExists === false) {
+		return f.attestation === "valid" && c.labels?.[RELAY_IMAGE_LABEL] === RELAY_IMAGE_LABEL_VALUE;
+	}
+	return c.imageRelay2;
+}
+
 function containerCapable(f: CaptureFacts): boolean {
 	const c = f.container;
-	return !!c && c.exists && c.managedMount && c.controlMount && c.imageRelay2;
+	return !!c && c.exists && c.managedMount && c.controlMount && relayCapable(f);
 }
 
 /** §2.7.5 — authorization to WRITE the marker and the hooks file in place. */
@@ -259,6 +295,7 @@ export type PendingReason =
 	| "container-without-capture"
 	| "token-mismatch"
 	| "image-without-relay"
+	| "attestation-contradiction"
 	| "stopped"
 	| "hooks-file-missing"
 	| "relay-unavailable";
@@ -295,13 +332,16 @@ export function baseCapture(f: CaptureFacts): Omit<CaptureBlock, "effective" | "
 		const withoutCapture = !c.token || !c.managedMount || !c.controlMount;
 		if (withoutCapture) reasons.push("container-without-capture");
 		else if (corr === "mismatch") reasons.push("token-mismatch");
-		if (!c.imageRelay2) reasons.push("image-without-relay");
+		const capable = relayCapable(f);
+		if (f.attestation === "contradiction") reasons.push("attestation-contradiction");
+		else if (!capable) reasons.push("image-without-relay");
 		if (!c.running) reasons.push("stopped");
-		// A container whose own image lacks the relay label — including an image
-		// deleted after the container was created (404 ⇒ no label) — can never
-		// regain write or retain authorization in place: only a new container
-		// from the current image can.
-		requiresRecreate = withoutCapture || corr === "mismatch" || !c.imageRelay2;
+		// A container that is not relay-capable — its own image lacks the label,
+		// or that image is gone and no valid attestation binds this container
+		// (§2.7.5.1) — cannot regain write or retain authorization in place:
+		// only a new container from the current image can (or, for a container
+		// the backend itself created, an attestation from its recreation record).
+		requiresRecreate = withoutCapture || corr === "mismatch" || !capable;
 		if (corr === "match" && (!f.marker || !f.hooksFile)) reasons.push("hooks-file-missing");
 	}
 	const effectiveAfterRestart = noContainer
@@ -327,6 +367,12 @@ export interface CaptureAuthorityDeps {
 	checkRevocation: (sessionId: string) => Promise<RevocationState>;
 	isRecreateUnresolved: (sessionId: string) => Promise<boolean>;
 	writeHooksFile: (sessionId: string) => Promise<void>;
+	/**
+	 * §2.7.5.1 — read the capability attestation and the key to verify it.
+	 * Not wired ⇒ every attestation is "absent" (the image rule alone).
+	 */
+	readAttestation?: (sessionId: string, containerId: string) => Promise<AttestationRead>;
+	attestationKey?: () => Buffer;
 	removeHooksFile: (sessionId: string) => Promise<void>;
 	hooksFileExists: (sessionId: string) => Promise<boolean>;
 	now?: () => number;
@@ -397,7 +443,33 @@ export class CaptureAuthority {
 			currentImageRelay2: !!current?.relay2,
 			marker: await relayEnabledExists(this.deps.workspaceRoot, sessionId),
 			hooksFile: await this.deps.hooksFileExists(sessionId).catch(() => false),
+			attestation: await this.attestationFor(sessionId, container),
 		};
+	}
+
+	/**
+	 * Fail-closed: a read or key error is a contradiction (deny), never a
+	 * grant; with nothing wired it is "absent" and the image rule decides.
+	 */
+	private async attestationFor(
+		sessionId: string,
+		container: ContainerView | null,
+	): Promise<AttestationCheck> {
+		const read = this.deps.readAttestation;
+		const key = this.deps.attestationKey;
+		if (!read || !key || !container?.exists || !container.id) return "absent";
+		try {
+			return classifyAttestation(
+				await read(sessionId, container.id),
+				{ sessionId, containerId: container.id, imageId: container.imageId },
+				key(),
+			);
+		} catch (err) {
+			logger.warn(
+				`[conversation] capture attestation unverifiable for ${sessionId}: ${(err as Error).message}`,
+			);
+			return "contradiction";
+		}
 	}
 
 	/**

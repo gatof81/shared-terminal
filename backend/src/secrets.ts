@@ -43,7 +43,7 @@
  *   the wrong length.
  */
 
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
 
 const KEY_BYTES = 32; // AES-256 = 256-bit key
 const IV_BYTES = 12; // GCM-recommended 96-bit IV
@@ -91,6 +91,17 @@ function getKey(): Buffer {
 export function validateSecretsKey(): void {
 	cachedKey = null;
 	getKey(); // throws if invalid
+}
+
+/**
+ * A key for another purpose, derived from SECRETS_ENCRYPTION_KEY with
+ * HKDF-SHA256 and a purpose label (`info`). Domain separation: the AES key
+ * itself is never reused as, say, an HMAC key, and no new secret has to be
+ * provisioned. Same rotation caveat as the AES key: changing
+ * SECRETS_ENCRYPTION_KEY invalidates whatever was bound with a subkey.
+ */
+export function deriveSubkey(info: string): Buffer {
+	return Buffer.from(hkdfSync("sha256", getKey(), Buffer.alloc(0), info, KEY_BYTES));
 }
 
 /**

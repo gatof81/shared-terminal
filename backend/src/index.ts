@@ -21,6 +21,7 @@ import {
 import { BellSweeper } from "./bellSweeper.js";
 import { BootstrapBroadcaster, drainInFlightBootstraps } from "./bootstrap.js";
 import { parseAllowUsers } from "./conversation/allowUsers.js";
+import { ATTESTATION_KEY_INFO } from "./conversation/captureAttestation.js";
 import { ComposerService, composerFlagEnabled, parseCliVersions } from "./conversation/composer.js";
 import { createIngestHandler } from "./conversation/ingestRoute.js";
 import { PaneRecordStore } from "./conversation/paneRecord.js";
@@ -38,7 +39,7 @@ import { RecreationEngine } from "./recreate/engine.js";
 import { RecreateAttemptStore } from "./recreateAttempt.js";
 import { requestIdMiddleware } from "./requestContext.js";
 import { buildRouter } from "./routes.js";
-import { validateSecretsKey } from "./secrets.js";
+import { deriveSubkey, validateSecretsKey } from "./secrets.js";
 import { sessionLifecycleLock } from "./sessionLifecycleLock.js";
 import { SessionManager } from "./sessionManager.js";
 import { parseTrustProxy, TrustProxyError, warnIfProductionMisconfigured } from "./trustProxy.js";
@@ -144,6 +145,8 @@ const conversation = new ConversationService({
 		currentImage: () => docker.currentSessionImage(),
 		probeRelay: (sid, cid) => docker.probeRelay(sid, cid),
 	},
+	// §2.7.5.1 — capability attestations survive the loss of a container's image.
+	captureAttestationKey: () => deriveSubkey(ATTESTATION_KEY_INFO),
 });
 docker.setConversationHooks({
 	prepareSpawn: async (sid) => {

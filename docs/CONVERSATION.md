@@ -25,7 +25,7 @@ vinculante para los PRs
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
 `ac1024d`); si los dos documentos difieren, manda este;
 este archivo define lo que el código debe cumplir y lo que cada PR debe demostrar. Cambiar un
-contrato exige un PR de docs antes o junto con el código. **v1.7.1**: §8.1.5 paso 2b, consumo del paste antes del siguiente byte, y `too-many-segments` en 48 pastes por el presupuesto T_http (hallazgos del smoke con CLI 2.1.314 y de la revisión durante la implementación 3.2, 2026-10-30). **v1.7.2** (aprobado por el responsable como P1 de backend de Chat, 2026-11-02, tras la reanudación real de Educación HZ): §5.2 el binding vale para UN arranque del contenedor —toda parada lo retira de todas las conversaciones de la sesión, residentes o no—; §5.3 el probe solo lleva a `waiting_input` con identidad verificada (entrada `interactive`, `pid` descendiente del `pane_pid` del pane ligado), nunca revive `ended`, un estado ilegible no es `idle`, y el silencio de 10 min y un probe dirigido tras `SessionStart` se despachan de verdad; §8.1.3 `binding-stale` también para una entrada del probe con `kind ≠ interactive` aunque descienda del pane **v1.7.3**: §8.1.3 identidad de foreground por proceso (identidad, sesión, tty, grupo de primer plano, `starttime` repetido en el precheck) en lugar del nombre `pane_current_command`, que el instalador nativo hace igual a la versión (falso negativo en Educación HZ, 2026-11-02). **v1.7.4** (#510, aprobado por el responsable 2026-11-02): §8.1.3 el envío exige que el probe confirme el prompt (`idle`, o `waiting` + `input needed`); `status` ausente/ilegible y `waiting` sin `waitingFor` responden `needs-terminal` antes de cualquier efecto. **v1.8** (aprobado por el responsable 2026-11-03): §6.2 metadata del dueño —renombrar y archivar— en la tabla propia `conversation_user_meta` (migración v18), fuera de la captura; §6 la lista añade `customTitle`, `archivedAt` y `meta`; §9 backup y borrado de esa tabla
+contrato exige un PR de docs antes o junto con el código. **v1.7.1**: §8.1.5 paso 2b, consumo del paste antes del siguiente byte, y `too-many-segments` en 48 pastes por el presupuesto T_http (hallazgos del smoke con CLI 2.1.314 y de la revisión durante la implementación 3.2, 2026-10-30). **v1.7.2** (aprobado por el responsable como P1 de backend de Chat, 2026-11-02, tras la reanudación real de Educación HZ): §5.2 el binding vale para UN arranque del contenedor —toda parada lo retira de todas las conversaciones de la sesión, residentes o no—; §5.3 el probe solo lleva a `waiting_input` con identidad verificada (entrada `interactive`, `pid` descendiente del `pane_pid` del pane ligado), nunca revive `ended`, un estado ilegible no es `idle`, y el silencio de 10 min y un probe dirigido tras `SessionStart` se despachan de verdad; §8.1.3 `binding-stale` también para una entrada del probe con `kind ≠ interactive` aunque descienda del pane **v1.7.3**: §8.1.3 identidad de foreground por proceso (identidad, sesión, tty, grupo de primer plano, `starttime` repetido en el precheck) en lugar del nombre `pane_current_command`, que el instalador nativo hace igual a la versión (falso negativo en Educación HZ, 2026-11-02). **v1.7.4** (#510, aprobado por el responsable 2026-11-02): §8.1.3 el envío exige que el probe confirme el prompt (`idle`, o `waiting` + `input needed`); `status` ausente/ilegible y `waiting` sin `waitingFor` responden `needs-terminal` antes de cualquier efecto. **v1.8** (aprobado por el responsable 2026-11-03): §6.2 metadata del dueño —renombrar y archivar— en la tabla propia `conversation_user_meta` (migración v18), fuera de la captura; §6 la lista añade `customTitle`, `archivedAt` y `meta`; §9 backup y borrado de esa tabla. **v1.8.1** (propuesta, pendiente de aprobación; incidente 2026-11-03): §2.7.5 condición 5 «capaz de relay» — la imagen propia con `="2"` mientras exista, y si Docker ya no la tiene, una **acreditación de capacidad** firmada al crear el contenedor y ligada a su id inmutable (§2.7.5.1); una acreditación contradictoria deniega siempre
 
 Convenciones: *MUST*/*MUST NOT* son requisitos verificados por test; *SHOULD* son requisitos
 verificados en revisión. "Bytes" significa siempre bytes UTF-8 del contenido, salvo donde se dice
@@ -970,7 +970,9 @@ contenedor existente:
 3. sin marca de revocación, por sesión ni global;
 4. el contenedor de D1 existe, está **en marcha** y tiene **ambos montajes** (gestionado y de
    control);
-5. su imagen lleva `conversation-relay="2"`;
+5. es **capaz de relay** (§2.7.5.1, v1.8.1): su imagen lleva `conversation-relay="2"`; o, si esa
+   imagen ya no existe en Docker, hay una acreditación de capacidad válida para **este**
+   contenedor y el propio contenedor lleva la etiqueta `="2"` desde su creación;
 6. correspondencia token ↔ hash (§2.7.6).
 
 **Autorización de conservación**, para **mantener** marca y archivo ya escritos mientras el
@@ -1054,6 +1056,109 @@ o una ilegible, responde `control-marker-incompatible` en el preflight y en el P
     recrearse hasta validar esa versión;
   - D8 (fail-closed) y todas las garantías de preservación de §2.7 siguen igual; esta decisión no
     autoriza recrear sesiones reales.
+
+#### 2.7.5.1 Acreditación de capacidad (v1.8.1)
+
+**Por qué.** La condición 5 se leía sobre la imagen *tal como existe ahora* (#513). En el almacén
+de imágenes de containerd (Docker 29), reconstruir un tag elimina la imagen anterior **aunque haya
+contenedores corriendo sobre ella** (reproducido en VM100, 2026-11-03). Tras el siguiente
+arranque del backend, `reconcile` encontró "sin etiqueta" y retiró marca y archivo de hooks de
+todas las sesiones que capturaban, sin que esos contenedores hubieran cambiado. La autorización
+de un contenedor en marcha no puede depender de que Docker conserve un objeto que cualquier
+rebuild borra.
+
+**Qué es.** Un registro **por contenedor**,
+`<WORKSPACE_ROOT>/.st-control/<sid>/capture-attestation.<containerId>.json` (acreditar N nunca
+reemplaza el de O: un rollback a O conserva el suyo), root `0644`, escrito de forma atómica y
+durable (temp + fsync + rename + fsync del dir de la sesión, de `.st-control` y de la raíz):
+`{v:1, sessionId, containerId (64 hex), imageId (sha256:…), relay:"2", basis, attemptId,
+issuedAt, mac}`. `mac` = HMAC-SHA256 de los campos en orden fijo, con una subclave HKDF de
+`SECRETS_ENCRYPTION_KEY` (`info = "st-capture-attestation/v1"`). No contiene secretos; sin la
+clave no se puede fabricar.
+
+**Quién la emite y cuándo** — solo el backend, en el momento en que observa el hecho:
+
+1. `spawn` con captura preparada: tras crear el contenedor (nunca uno adoptado bajo su nombre) y
+   antes de arrancarlo;
+2. recreación, paso 1: tras crear N desde el ID de imagen verificado, como request propio del
+   intento (`attest N`), con `mayAct` antes de crear nada **y otra vez inmediatamente antes de
+   publicar** (el `rename`, sin `await` entre la consulta y la publicación): una época que se
+   cierra durante la escritura o el fsync no publica, y el temporal se borra. Un `rename` ya
+   emitido cuando la época se cierra no se puede revocar; por eso la resolución espera a que el
+   request `attest N` responda antes de actuar (`run.settled()`), como con todo request del
+   intento;
+3. en ambos casos se **re-verifica en ese momento** que la imagen del contenedor exista y lleve
+   `="2"` y que el contenedor lleve la etiqueta; si no, no se emite (fallo silencioso hacia la
+   regla de imagen, con log).
+
+**Cómo decide** (`classifyAttestation`, puro; se lee solo el archivo del contenedor de D1
+inspeccionado): `valid` (firma correcta, mismo `sessionId`, mismo `containerId`, mismo
+`imageId`); `absent` (no hay archivo para ese contenedor — los de contenedores anteriores nunca
+se leen); `contradiction` (no verifica, no se puede leer, su contenido nombra a otro contenedor,
+o nombra a este con otra imagen o sesión). Rige igual en la autoridad del servicio y en las de
+la recreación (paso 5, restauración de O, convergencia).
+
+- Imagen presente: decide la regla de imagen, como hasta ahora. Una acreditación **no** puede
+  autorizar una imagen presente sin la etiqueta.
+- Imagen ausente (404): capaz de relay ⇔ `valid` ∧ etiqueta `="2"` del propio contenedor.
+- `contradiction` deniega en todos los casos, con `pendingReasons: ["attestation-contradiction"]`
+  y `requiresRecreate`.
+- Las condiciones 1–4 y 6, la revocación, la recreación no resuelta y la identificación del relay
+  por probe fresco (§2.7.6, D7) no cambian.
+
+**Contenedores existentes** (creados antes de v1.8.1): no se infiere confianza retroactiva. La
+única vía es `npm run conversation:attest -- <sid> [--write]` (dry run por defecto), que acredita
+**solo** si el registro de recreación del backend es `resolved` + `committed`, no es un rollback,
+nombra exactamente al contenedor de D1, y las etiquetas que el motor puso a ese contenedor al
+crearlo (`session`, `recreate-attempt`, `recreate-of`) y su etiqueta `="2"` coinciden; además
+captura permitida, ambos montajes y token ↔ hash. Si la imagen aún existe debe llevar la
+etiqueta. Un contenedor de un `spawn` sin registro, o cualquier discrepancia, se rechaza (requiere
+recreación). Una acreditación contradictoria existente nunca se sobrescribe. La herramienta corre
+fuera del lock de ciclo de vida del backend, así que **inmediatamente antes de publicar** vuelve
+a leer el contenedor de D1, `requested`, la revocación, la recreación no resuelta y el registro
+(byte a byte) y se niega ante cualquier cambio (`changed-during-check`); publica con `link(2)`,
+que nunca reemplaza un archivo que haya aparecido mientras tanto. La herramienta no
+escribe marca ni archivo: la restauración es el procedimiento oficial de escritura (`PATCH
+/api/admin/sessions/:id/conversation {enabled:true}`), con su probe de identificación.
+
+**Backup y restauración** (`backup.ts`). El backup incluye `.st-control/<sid>` en el tarball de
+la sesión, como **evidencia**. La restauración no lo extrae a su lugar vivo, ni tampoco
+`.conversations/<sid>/REVOKED|LIFTED`: los deja en `<WORKSPACE_ROOT>/.restore-evidence/<backup>-<rnd>/`
+(0700, el backend nunca lo lee) y de ahí instala solo:
+
+- las acreditaciones que verifican con la clave de **este** despliegue, nombran esta sesión y el
+  contenedor de su nombre de archivo, son archivos regulares, y no reemplazan una ya presente
+  (`link(2)`). No conceden nada por sí solas (un hecho firmado sobre la creación de un contenedor
+  concreto; el resto de §2.7.5 sigue exigido). En otro host son inertes; en el mismo host Docker
+  tras perder `WORKSPACE_ROOT`, evitan recrear una sesión cuya imagen ya no existe;
+- la revocación **en efecto** en el backup (la regla del receptor: `REVOKED` no nombrado por
+  `LIFTED`), solo si el destino no tiene `REVOKED` propio (`link(2)`): una marca del destino es
+  siempre el estado más nuevo y no se toca (ni se deshace una vigente ni se reactiva una
+  levantada). Una revocación ya levantada en el backup no se instala; una vigente en el backup
+  vuelve vigente (fail-closed: descartarla desharía en silencio una desactivación de emergencia)
+  y la habilitación oficial la levanta como a cualquier otra;
+- `REVOKED_ALL` (corte global de emergencia), copiado al backup y marcado en el manifiesto
+  (`globalRevocation`): vuelve vigente si el destino no tiene el suyo, antes de cualquier
+  escritura en D1; se levanta con `conversation:enable-all`.
+
+Un backup alterado no puede ampliar esto: cada tarball debe llamarse como una sesión **de su
+manifiesto** (forma de id de sesión), y las raíces de la sesión deben ser directorios y nada bajo
+`.conversations/<sid>/` ni `.st-control/<sid>/` puede ser un enlace (tipos del listado `tar -tv`,
+antes de extraer); además no se publica una revocación a través de un `.conversations/<sid>` del
+destino que no sea el directorio real.
+
+El registro de recreación, los registros de pane del composer, `relay.enabled` y
+`defer-skill-seed` describen contenedores u operaciones en curso del **origen** y quedan solo
+como evidencia: los gates que los leen actuarían sobre ese estado viejo. La restauración deja
+cada sesión `stopped` sin contenedor, y la captura se restablece con el procedimiento oficial.
+
+**Clave.** Cambiar `SECRETS_ENCRYPTION_KEY` invalida todas las acreditaciones: cada una pasa a
+`contradiction` y su sesión pierde la captura aunque su imagen exista, hasta recrearla (mismo
+coste que ya tiene la rotación para los secretos, §1/SECURITY.md).
+
+**Hot reload.** Restaurar marca y archivo no garantiza que un proceso Claude ya en marcha vuelva
+a emitir hooks (§2.3, `emissionStopsAfterRestart`): la recuperación solo se declara cuando llegan
+eventos reales.
 
 #### 2.7.6 Semántica de `capture`
 
