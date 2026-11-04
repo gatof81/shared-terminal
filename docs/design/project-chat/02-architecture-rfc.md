@@ -512,6 +512,11 @@ reintento**. Es la misma política que el Composer (§8.1.7) y la que pidió el 
   - la recuperación (B3);
   - el hash del binario desde el host.
 
+  El diseño de B1 (04-poc.md §1.14.14) encontró que el agente puede relanzar el CLI con un
+  entorno que reubica o anula la política (`CLAUDE_CODE_MANAGED_SETTINGS_PATH`, entre otros).
+  Ninguna managed setting lo impide, así que el gateway deberá rechazar esos arranques al
+  inscribir (I-env).
+
   Hasta que PASS-B pase, la evidencia sigue valiendo lo que vale el contenedor.
 - **Sin relay de permisos**: `st-channel` no declara `claude/channel/permission` (quien responde por
   el canal podría aprobar herramientas, D).

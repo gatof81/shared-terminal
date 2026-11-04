@@ -17,7 +17,11 @@ Evidencia hasta ahora (2026-11-03):
 - **PASS-B** (integridad hasta el backend) **no está alcanzado**:
   - B1 (instalación administrada y H-ND), B2 (ataques, con el gateway) y B3 (recuperación)
     siguen pendientes y no autorizados;
-  - el siguiente gate es **PASS-B1**;
+  - el siguiente gate es **PASS-B1**. Su diseño está en
+    [04-poc.md §1.14.14](./04-poc.md#11414-pass-b1-diseño-de-b1a-y-b1b-evidencia-estática-de-21314-riesgos-y-plan-no-ejecutado)
+    y no está ejecutado. Se divide en B1a (instalación administrada) y B1b (H-ND). La inspección
+    estática encontró controles del arranque que ninguna política cierra, así que la inscripción
+    del gateway deberá verificarlos (I-env);
   - PASS-A + PASS-B0 no habilitan el Monitor ni reemplazan a G3.
 
 Dirección de producto (2026-11-03): **conversación de cada agente con invitados temporales vía
