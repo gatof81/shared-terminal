@@ -27,6 +27,12 @@ El código del kernel de VM100 (`Ubuntu-6.8.0-147.147`) le da la razón:
 arranque tiene que venir de **quién lo creó** y de que **ningún proceso del agente haya tenido
 control sobre él** entre su creación y su inscripción.
 
+> **Precisión (2026-11-04, responsable).** La identidad del proceso que verifica el gateway
+> (pidfd/NSpid/cgroup/starttime) es **independiente de la autorización de captura**. #520 permite
+> que la imagen original ya no exista, pero su atestación firmada sigue atada al **ID de imagen
+> original y al contenedor concreto**. Hay que preservar esa distinción: la captura efectiva nunca
+> establece por sí sola la autenticidad de un Channel ni la elegibilidad de envío.
+
 ## 2. Qué tiene que poder demostrar la raíz de confianza
 
 Para un proceso P que pide inscribirse en el gateway:
