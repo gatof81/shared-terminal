@@ -3341,42 +3341,43 @@ queda intacto como el de la corrida 1), con los cambios de §1.14.18.2–§1.14.
 regresión (y el barrido de mutaciones), y los criterios PASS/FAIL/INCONCLUSIVE de arriba fijados de
 antemano. No se re-ejecutan los 13 intentos ya **blocked**. Nada de esto está autorizado: espera tu
 revisión del diseño.
-#### 1.14.19 Kit de corrida 2 de PASS-B1a (`7f4c034`): auditado dos veces (NO-GO de `37fd028` y de `5eb257a`) y corregido, validado localmente; **tercera auditoría estática pendiente, no ejecutado**
+#### 1.14.19 Kit de corrida 2 de PASS-B1a (`f11c467`): auditado tres veces (NO-GO de `37fd028`, `5eb257a` y `7f4c034`) y corregido, validado localmente; **decisión de diseño D3 pendiente, no ejecutado**
 
 GO del responsable para implementar el kit de corrida 2 con cuatro condiciones (§1.14.18), NO-GO
-para ejecutarlo. El kit pasó **dos auditorías estáticas independientes del responsable**, cada una
-**NO-GO para VM100** con GO sólo para corregir el kit y sus tests locales, y cada hallazgo se
-corrigió **primero con un test que reproduce el fallo y luego el arreglo**:
+para ejecutarlo. El kit pasó **tres auditorías estáticas independientes del responsable**, cada una
+**NO-GO para VM100** con GO sólo para correcciones focalizadas, y cada hallazgo se corrigió
+**primero con un test que reproduce el fallo y luego el arreglo**:
 
-- **Auditoría 1** (de `37fd028` contra `e00ef29`): seis hallazgos **B1–B6** + controles → commit `5eb257a`.
-- **Auditoría 2** (de `5eb257a`): cuatro hallazgos **C1–C4** + dos ajustes → commit `7f4c034`.
+- **Auditoría 1** (de `37fd028` contra `e00ef29`): seis hallazgos **B1–B6** + controles → `5eb257a`.
+- **Auditoría 2** (de `5eb257a`): cuatro hallazgos **C1–C4** + dos ajustes → `7f4c034`.
+- **Auditoría 3** (de `7f4c034`): **D1, D2, D4, D5** corregidos + **D3** como decisión de diseño → `f11c467`.
 
-El commit `e00ef29` de la corrida 1 y los kits auditados `37fd028` / `5eb257a` quedan **intactos en
-la historia**. El próximo gate es una **tercera** auditoría estática; recién después se decide la
-segunda ejecución.
+El commit `e00ef29` de la corrida 1 y los kits auditados `37fd028` / `5eb257a` / `7f4c034` quedan
+**intactos en la historia**. El próximo gate es la **decisión del responsable sobre D3** (y una
+revisión de las correcciones D1/D2/D4/D5); recién después se decide la segunda ejecución.
 
-**SHA del kit:** `7f4c0341969bebfce093d8cb3713c7f190706895`. 17 archivos. Tarball de GitHub
-(`/tarball/7f4c034…`) verificado contra estos hashes y la lista exacta (sin archivos de más ni de
+**SHA del kit:** `f11c467c00db98490d5b50d0dc61cd30da67f8aa`. 17 archivos. Tarball de GitHub
+(`/tarball/f11c467…`) verificado contra estos hashes y la lista exacta (sin archivos de más ni de
 menos):
 
 ```
-a90031eca9d071060896659f2d2167e8c92d7f3e9e2e0d8a99ff32e4d2862951  analyze_b1a.py
+fc5775a4e746e9d57057c174c829f445f035282b9b89a6219124ea92992db6f3  analyze_b1a.py
 e33dc88811b9472ccbea4819e8af0cf9443ec575e76d8c1385d804fc9b87011f  analyze_b1b.py
-7b226bd9b2e0dfa68169c9673ab54711fe3ac7afd34f5242934341bc3e3a993a  b1.py
+8a0f8ce22f457e406f910fd1356ac299f6eef99ea2eb8cfee30b8826cc595ce3  b1.py
 23a02a6dd40271761c57dcfe6ed265e550aacab8afda376fd0fa3e670c488932  managed/b1a.json
 3a090f524c93fa3be45fa35ebd347b86ffe47801cacf6ede819095ecd71e2a55  marketplace/.claude-plugin/marketplace.json
 c38e42b9a8ba4360b72465813088fe98b5e69a7ff5bf16ec4a43bc56ccb75514  marketplace/plugins/st-b1-probe/.claude-plugin/plugin.json
 d87f4cbc7a53b0d733c13dd4c7f81e49d7ede3b21163e0d64e2234176d43100d  marketplace/plugins/st-b1-probe/hooks/hooks.json
 707c35831bd4fa99d4e21f550c64a52de1ae2172c7fe5e4bdab16fb4245e0cf7  marketplace/plugins/st-b1-probe/hooks/register.mjs
 bfac25ae1fa9ffb8faf7895440cc7506d39bbef80c280b55bdb22523e2e8e4e9  README.md
-bc23edcaa19c0f8b368df8d86d4dd380232f9202158b91ea5b05c3fc6d1981d4  run-b1.sh
-0822d0fcaaa2e7c31979e1929943e01881da8d64c46b807492c26ac7a42f1942  summary-b1a.py
+f7a5efa21d93614e367eb8bcd5751bdcbb4126ac098997d0f548b08212b67546  run-b1.sh
+d268778c0bdfc543372204ca44d0c5dfbbdd0fb5e10cda7245d3cf5c30904a0b  summary-b1a.py
 9779770693681d5a0ca281c2bc8fa92701a8eac4c2fc8f00c7d9ed802dbe3624  test/fakebin/docker
-62da78fec7739620826878e875eafb42f5a0af2edce1d783c22958ad889cd676  test/test_analyze_b1a.py
+c7418347977a0c94e67eab762714a138e656a59ebff5173a728709cf26cf60a0  test/test_analyze_b1a.py
 a45744f700d780ee041179a919fe4f87d153049bb01b9287735e11ce2e92bf14  test/test_analyze_b1b.py
-630aa4e06b200ae725cd8eeef5d3e7388486f203bcfd4af65f90d2aba790c3d3  test/test_b1.py
-0d451185f012889e6b357353259ad27b97b10e668ae43db1c59354b7556b58e6  test/test_runner.py
-dda76a6aaa188e357886eeaaef36a713cde826fd9a7bb2315e648752a06faf61  test/test_summary.py
+b814d049cb504c54766a4a0bc41b7b4b1a0556f104b2a6d1fe41d8297ec3e52a  test/test_b1.py
+d4dd16ae8bd2599a80ce8c5fcd9aa4a9863ce9077ddc15ee8c845bd3ed8603d8  test/test_runner.py
+a63201c843dba852f975240b8ef52d3ba6279ceaa92e5cfc0f3e51f7b03f7b1d  test/test_summary.py
 ```
 
 **Auditoría 1 — hallazgos corregidos en `5eb257a`** (diff `37fd028..5eb257a`; cada uno con un test
@@ -3444,6 +3445,53 @@ que primero reproduce el fallo):
   verifica por corrida (`SHA256SUMS` + `applied.{managed,market}_sha256` == el árbol del kit local);
   el vínculo con el commit es la verificación del tarball por hashes, fuera del resumen.
 
+**Auditoría 3 — D1/D2/D4/D5 corregidos en `f11c467`** (diff `7f4c034..f11c467`; cada uno con un test
+que primero reproduce el fallo):
+- **D1 — el preflight rechazaba el contenedor real de la corrida 1.** Se verificó en `e00ef29` que
+  el `docker run` original etiquetaba `passb1.experiment=<stamp>` y `passb1.kind=b1a` pero **no**
+  `passb1.run` (esa etiqueta se agregó después). El preflight ahora fija el contenedor retenido por
+  **id completo + nombre + kind=b1a + el stamp de experimento exacto** embebido en `RUN1_EXP`, y
+  **admite la ausencia de `passb1.run` sólo para ese contenedor legacy**; si la etiqueta está
+  presente debe ser `1` (un `passb1.run=2` se rechaza). El test se construye a partir del shape real
+  de `e00ef29`, no de la config del kit nuevo.
+- **D2 — el consolidado debía inspeccionar también los ataques retirados.** N10/N11/N13 siguen fuera
+  de los criterios PASS, pero una **ejecución demostrada** de uno en la evidencia de una corrida
+  **válida** produce ahora un **FAIL consolidado con procedencia**, sin volver a contarlo como
+  blocked (`attempt_markers` + `excluded_executed`; test: marcador de N10 en corrida 1).
+- **D4 — saneamiento.** El driver **no persiste** nombres MCP sin normalizar ni texto crudo de
+  opciones. `one_start` compara el nombre del servidor con el fixture **en el lugar** (guarda sólo
+  los booleanos `mcp_approval_identified` / `_name_matches`) y guarda la selección como **enum
+  conocido** (`classify_selection`: approve/decline/other), nunca la etiqueta cruda.
+- **D5 — alcance del analizador + symlinks.** `analyze_b1a.parse_scope` rechaza un `--scope` vacío,
+  desconocido o incompleto (debe ser exactamente `RUN2_SCOPE = {N14, N17-project}`, con P0
+  permitido); `analyze` agrega una guarda `scope-empty` para que una corrida de cero ataques nunca
+  sea un PASS aparentemente general; y `verify_sums` agrega **contención por `realpath` + rechazo de
+  symlink** para que una entrada del manifiesto no pueda leer fuera del directorio de captura.
+
+**D3 — decisión de diseño (N17-project): qué resultado verificable produce con 2.1.314.** El
+criterio de C3/B4 exige una **señal independiente de aceptación** que, por el diagnóstico propio,
+2.1.314 **no emite** para un servidor de proyecto bloqueado por política. Por eso, **con el kit
+actual N17-project sólo puede producir INCONCLUSIVE** (`mcp-project-approval-not-confirmed`) — nunca
+*blocked*. Lo verificable que SÍ tenemos en 2.1.314 es: (a) el diálogo identifica el servidor del
+proyecto y su identidad coincide con el fixture (saneado a alias); (b) la opción resaltada al
+confirmar fue *Use this MCP server* (`classify_selection == "approve"`, leída del puntero del panel);
+(c) el diálogo se cerró **con el CLI aún vivo** (`dismissed == "running"`); (d) el servidor **no
+arrancó** (sin marcador); (e) una línea de rechazo por política que **nombra `st-b1-rogue-n17p`**
+(`MCP server "…n17p": not allowed by your organization`). Lo que **no** existe es un evento positivo
+de "aceptado/conectado". Dos lecturas, para tu decisión (**no implementada**; no se baja el
+criterio por mi cuenta):
+- **Opción A (statu quo, estricta):** exigir una señal positiva de aceptación ⇒ **N17-project sólo
+  da INCONCLUSIVE** bajo 2.1.314. Honesta, pero *blocked* es inalcanzable para esa celda; **no se
+  debe correr buscando un PASS que sabemos inalcanzable**.
+- **Opción B (propuesta, requiere tu GO):** reconocer que la **línea de rechazo (e)** ES la señal
+  independiente verificable: sólo aparece porque el CLI actuó sobre la aprobación y la política lo
+  detuvo — un *Continue without* (`declined`) no genera ese "not allowed by your organization" para
+  n17p. La cadena verificable (a)+(b)+(c)+(d)+(e) + control del mismo arranque demuestra "bloqueado
+  **aunque el usuario apruebe**" sin un evento positivo. Esto **no baja** el criterio: identifica la
+  señal correcta. Cambio de código propuesto (pendiente de tu GO): derivar la aceptación de la
+  cadena-de-rechazo en lugar de una línea "connected" inexistente. Hasta tu decisión, el kit queda
+  en la Opción A (INCONCLUSIVE), que es el default seguro.
+
 **Cambios base (las cuatro condiciones, de `37fd028`, conservados):** N9 juzgado por los dos
 comandos (`pre_text`); N14 medición-primero con probe en el mismo arranque; N17 dividido en
 `N17-user`/`N17-project`; consolidación bajo SHA distintos con procedencia por hallazgo, N10/N11/N13
@@ -3453,18 +3501,20 @@ acepta `RUN2=1` para ejecutar **sólo** P0, N14 y N17-project, etiqueta `passb1.
 `pass<kind>-run2-exp-<STAMP>`.
 
 **Resultados locales de los tests** (sin VM100, con fixtures y controles descartables; todas OK):
-- `test_analyze_b1a.py`: **9** (incluye el scope focalizado y que no oculta un fallo global);
-  `test_analyze_b1b.py`: **4** (B1b sin cambios);
-- `test_b1.py`: **22** (procesos reales + los 4 escenarios de aprobación MCP de C3);
-  `test_runner.py`: **31** (coexistencia con la corrida 1 retenida por id/nombre/etiquetas, rechazo
-  de contenedores desconocidos/nombre equivocado, `RUN2` inválido, `KIND≠b1a`, etiqueta `passb1.run`
-  verificada, subconjunto de corrida 2, `validate` focalizado que mantiene los controles globales,
-  `NetworkMode none`);
-- `test_summary.py`: **19** (PASS de alcance reducido + procedencia, legacy-N17, run2 ausente,
-  fallos globales, baseline, `SHA256SUMS` alterado/ausente, la batería de `verify_sums` de C1,
-  loaded-en-corrida-1 de C2, SHA declarado de los ajustes);
-- **57 mutaciones de código**, todas detectadas (0 MISSED, 0 pattern-not-found); `claude plugin
-  validate` pasa; `bash -n run-b1.sh` limpio. **85 tests en total.**
+- `test_analyze_b1a.py`: **18** (scope focalizado, que no oculta un fallo global, guarda de
+  scope-vacío, y el parser CLI `--scope` de D5); `test_analyze_b1b.py`: **4** (B1b sin cambios);
+- `test_b1.py`: **23** (procesos reales + los 4 escenarios de aprobación MCP de C3, el clasificador
+  de selección por enum y la verificación de saneamiento de D4); `test_runner.py`: **35**
+  (coexistencia con la corrida 1 retenida por id/nombre/etiquetas, **el contenedor legacy real sin
+  `passb1.run`** aceptado y un `passb1.run=2`/stamp/kind equivocados rechazados — D1; `RUN2`
+  inválido, `KIND≠b1a`, etiqueta `passb1.run` verificada, subconjunto de corrida 2, `validate`
+  focalizado que mantiene los controles globales, `NetworkMode none`);
+- `test_summary.py`: **21** (PASS de alcance reducido + procedencia, legacy-N17, run2 ausente,
+  fallos globales, baseline, `SHA256SUMS` alterado/ausente, la batería de `verify_sums` de C1 + el
+  symlink de D5, loaded-en-corrida-1 de C2, **ejecución de un ataque retirado de D2**, SHA declarado
+  de los ajustes);
+- **64 mutaciones de código**, todas detectadas (0 MISSED, 0 pattern-not-found); `claude plugin
+  validate` pasa; `bash -n run-b1.sh` limpio. **101 tests en total.**
 
 **Criterios de la corrida 2, fijados de antemano** (idénticos a §1.14.18.5): *blocked* sólo con el
 control del mismo arranque y la evidencia específica del rechazo; *FAIL* con cualquier marcador, un
@@ -3473,15 +3523,17 @@ evidencia o la medición (`harness-startup-failed`). N15, `@synced` y los evento
 pendientes, nunca blocked.
 
 **Procedimiento para la revisión independiente (auditoría estática; no ejecutar):** leer el diff de
-la corrección `5eb257a..7f4c034` (y, para el panorama completo, `e00ef29..7f4c034`) de `poc/passb1/`,
+la corrección `7f4c034..f11c467` (y, para el panorama completo, `e00ef29..f11c467`) de `poc/passb1/`,
 correr las suites y el barrido de mutaciones localmente (`python3 test/test_analyze_b1a.py`,
-`test_analyze_b1b.py`, `test_b1.py`, `test_runner.py`, `test_summary.py`), y revisar que: el modo
-`RUN2=1` del runner sólo itere P0/N14/N17-project; su preflight sólo conviva con el contenedor
-retenido de la corrida 1 por id+nombre+etiquetas exactas y falle si `RUN1_ID` no existe; `validate`
-bajo `RUN2=1` use `--scope` sin perder los controles globales; `verify_sums` rechace listas
-incompletas/alteradas; y el consolidado marque FAIL ante un `loaded` en cualquier corrida válida. La
-corrida 2 en VM100 queda sujeta a tu autorización tras esa auditoría. El contenedor y la evidencia de
-la corrida 1 permanecen retenidos; `e00ef29`, `37fd028` y `5eb257a` no se alteran.
+`test_analyze_b1b.py`, `test_b1.py`, `test_runner.py`, `test_summary.py`), y revisar que: el preflight
+acepte el contenedor legacy real de la corrida 1 (sin `passb1.run`) pero lo fije por
+id+nombre+kind+stamp exactos (D1); el consolidado marque FAIL ante un `loaded` en cualquier corrida
+válida **o** una ejecución de N10/N11/N13 (C2/D2); el driver no persista nombres ni texto crudo (D4);
+`parse_scope` rechace scopes vacíos/desconocidos/incompletos y `verify_sums` rechace symlinks y rutas
+fuera de la captura (D5). **D3 requiere tu decisión** (Opción A INCONCLUSIVE vs. Opción B
+cadena-de-rechazo) **antes** de cualquier corrida. La corrida 2 en VM100 queda sujeta a tu
+autorización. El contenedor y la evidencia de la corrida 1 permanecen retenidos; `e00ef29`,
+`37fd028`, `5eb257a` y `7f4c034` no se alteran.
 ## 2. Versiones
 
 | Variante | CLI | Motivo |
