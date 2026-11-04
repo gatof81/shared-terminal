@@ -44,10 +44,10 @@ def fixture():
         extra = (P + f"Skipping duplicate hooks file for plugin st-b1-probe: {imp}/hooks/hooks.json (resolves to already-loaded file)\n"
                  if aid in A.IMPOSTOR else "" if aid == "N9" else P + MET_LINE[aid] + "\n")
         pre_rc = [{"alias": "marketplace-add", "rc": 1}, {"alias": "plugin-install", "rc": 1}] if aid == "N9" else []
-        pre_txt = 'Plugin "st-b1-rogue-n9" is blocked by your organization\'s policy and cannot be installed\n' if aid == "N9" else ""
+        pt = {"plugin-install": 'Plugin "st-b1-rogue-n9" is blocked by your organization\'s policy and cannot be installed\n'} if aid == "N9" else {}
         att[aid] = {"result": {"id": aid, "kind": "start", "rc": 130, "timed_out": False, "markers": [], "probe": PROBE_RECS,
                                "impostor_paths": [imp] if aid in A.IMPOSTOR else [], "pre": pre_rc},
-                    "debug": PROBE_LINES + extra, "stderr": "", "pre": pre_txt, "has_debug": True}
+                    "debug": PROBE_LINES + extra, "stderr": "", "pre": "".join(pt.values()), "pre_text": pt, "has_debug": True}
     att["N18"] = {"result": {"id": "N18", "kind": "fact", "rc": 130, "markers": [], "probe": []}, "debug": "", "stderr": "", "pre": "", "has_debug": True}
     applied = {"managed_files": ["b1a.json"], "managed_sha256": A.tree_sha256(os.path.join(A.KIT, "managed")),
                "market_sha256": A.tree_sha256(os.path.join(A.KIT, "marketplace")),
@@ -117,9 +117,13 @@ NEGATIVES = [
     ("hooks watched but folder not trusted", lambda D: a(D, "N16").update(debug=a(D, "N16")["debug"].replace("post-trust", "pre")), "INCONCLUSIVE", "not-shown-blocked:N16"),
     ("MCP name only in mcp-add output", lambda D: a(D, "N17").update(debug=PROBE_LINES, pre='MCP server "st-b1-rogue-n17u" added to user config\n'),
      "INCONCLUSIVE", "not-shown-blocked:N17"),
-    ("N9 install succeeded without a marker", lambda D: a(D, "N9")["result"].update(pre=[{"alias": "marketplace-add", "rc": 0}, {"alias": "plugin-install", "rc": 0}]) or a(D, "N9").update(pre=""),
+    ("N9 install succeeded (rc 0, no refusal)", lambda D: a(D, "N9")["result"].update(pre=[{"alias": "plugin-install", "rc": 0}]) or a(D, "N9").update(pre_text={"plugin-install": "Installed st-b1-rogue-n9\n"}),
      "FAIL", "loaded:N9"),
-    ("N9 install outcome unknown", lambda D: a(D, "N9")["result"].update(pre=[{"alias": "plugin-install", "rc": None}]) or a(D, "N9").update(pre=""),
+    ("N9 rc 0 but refusal text is from another command", lambda D: a(D, "N9")["result"].update(pre=[{"alias": "marketplace-add", "rc": 1}, {"alias": "plugin-install", "rc": 0}]) or a(D, "N9").update(pre_text={"marketplace-add": "blocked by your organization's policy\n", "plugin-install": "Installed st-b1-rogue-n9\n"}),
+     "FAIL", "loaded:N9"),
+    ("N9 install rc non-zero generic error", lambda D: a(D, "N9")["result"].update(pre=[{"alias": "plugin-install", "rc": 1}]) or a(D, "N9").update(pre_text={"plugin-install": "Error: network unreachable\n"}),
+     "INCONCLUSIVE", "not-shown-blocked:N9"),
+    ("N9 install outcome unknown (no rc)", lambda D: a(D, "N9")["result"].update(pre=[{"alias": "plugin-install", "rc": None}]) or a(D, "N9").update(pre_text={}),
      "INCONCLUSIVE", "not-shown-blocked:N9"),
     ("N12 control only in an earlier start", lambda D: a(D, "N12").update(probe_kinds=[], debug=PROBE_LINES + P + MET_LINE["N12"] + "\n"),
      "INCONCLUSIVE", "not-shown-blocked:N12"),
@@ -148,11 +152,25 @@ class Pass(unittest.TestCase):
         # The plugin did not run (no marker), but `plugin install` succeeded: a rogue was
         # installed from an unapproved marketplace. That is a FAIL, never "blocked".
         def m(D):
-            a(D, "N9")["result"].update(pre=[{"alias": "marketplace-add", "rc": 0}, {"alias": "plugin-install", "rc": 0}])
-            a(D, "N9").update(pre="")
+            a(D, "N9")["result"].update(pre=[{"alias": "plugin-install", "rc": 0}])
+            a(D, "N9").update(pre_text={"plugin-install": "Installed st-b1-rogue-n9\n"})
         r = run(m)
         self.assertEqual(r["verdict"], "FAIL")
         self.assertEqual(r["facts"]["attempts"]["N9"], {"outcome": "loaded", "why": "installed:N9"})
+
+    def test_n9_refusal_must_come_from_the_install_command_itself(self):
+        # rc 0 and a refusal printed by `marketplace add` must NOT be read as the install being
+        # refused: the install succeeded -> FAIL, never blocked.
+        def m(D):
+            a(D, "N9")["result"].update(pre=[{"alias": "marketplace-add", "rc": 1}, {"alias": "plugin-install", "rc": 0}])
+            a(D, "N9").update(pre_text={"marketplace-add": "blocked by your organization's policy\n", "plugin-install": "Installed\n"})
+        self.assertEqual(run(m)["facts"]["attempts"]["N9"], {"outcome": "loaded", "why": "installed:N9"})
+
+    def test_n9_operational_error_is_inconclusive(self):
+        def m(D):
+            a(D, "N9")["result"].update(pre=[{"alias": "plugin-install", "rc": 1}])
+            a(D, "N9").update(pre_text={"plugin-install": "Error: network unreachable\n"})
+        self.assertEqual(run(m)["facts"]["attempts"]["N9"], {"outcome": "inconclusive", "why": "install-error"})
 
     def test_n12_needs_control_and_seed_in_the_same_start(self):
         # Two starts: the seed loads on the second. If the control (the org-tier probe) is only
@@ -215,6 +233,40 @@ class Negatives(unittest.TestCase):
 
 
 class Load(unittest.TestCase):
+    def test_n12_last_start_is_read_strictly_from_disk(self):
+        # Two starts on disk: start 1 carries the full control + seed, start 2 is empty. load()
+        # must read start 2 strictly (no fallback to start 1 or the concatenation), so N12 is
+        # INCONCLUSIVE — start 1's control cannot stand in for start 2.
+        D = fixture()
+        d = tempfile.mkdtemp()
+        for aid, x in D["attempts"].items():
+            p = os.path.join(d, "attempts", aid)
+            os.makedirs(p)
+            res = dict(x["result"])
+            if aid == "N12":
+                # start 2 has the control events but an EMPTY debug; start 1 and the combined log
+                # carry the probe-load lines and the seed. Strict reading of start 2 => no control.
+                res["starts"] = [{"probe_kinds": ["classic.SessionStart", "session.start"]},
+                                 {"probe_kinds": ["classic.SessionStart", "session.start"]}]
+                put(os.path.join(p, "debug-1.log.filtered"), PROBE_LINES + P + MET_LINE["N12"] + "\n")
+                put(os.path.join(p, "debug-2.log.filtered"), "")
+                put(os.path.join(p, "debug.log.filtered"), PROBE_LINES + P + MET_LINE["N12"] + "\n")
+            else:
+                res.setdefault("starts", [{"probe_kinds": x.get("probe_kinds")}])
+                put(os.path.join(p, "debug-1.log.filtered"), x["debug"])
+                put(os.path.join(p, "debug.log.filtered"), x["debug"])
+            put(os.path.join(p, "result.json"), json.dumps(res))
+            put(os.path.join(p, "stderr-1.txt.filtered"), x["stderr"])
+            put(os.path.join(p, "stderr.txt.filtered"), x["stderr"])
+            for alias, txt in (x.get("pre_text") or {}).items():
+                put(os.path.join(p, f"pre-{alias}.txt.filtered"), txt)
+        for name, key in (("applied.json", "applied"), ("capture-manifest.json", "manifest"), ("preflight.json", "preflight"),
+                          ("cli-version-before.json", "cli_before"), ("cli-version-after.json", "cli_after")):
+            put(os.path.join(d, name), json.dumps(D[key]))
+        r = A.analyze(A.load(d))
+        self.assertEqual(r["verdict"], "INCONCLUSIVE")
+        self.assertEqual(r["facts"]["attempts"]["N12"]["outcome"], "inconclusive")
+
     def test_round_trip_from_files(self):
         D = fixture()
         d = tempfile.mkdtemp()
@@ -224,6 +276,8 @@ class Load(unittest.TestCase):
             put(os.path.join(p, "result.json"), json.dumps(x["result"]))
             put(os.path.join(p, "debug.log.filtered"), x["debug"])
             put(os.path.join(p, "stderr.txt.filtered"), x["stderr"])
+            for alias, txt in (x.get("pre_text") or {}).items():
+                put(os.path.join(p, f"pre-{alias}.txt.filtered"), txt)
         for name, key in (("applied.json", "applied"), ("capture-manifest.json", "manifest"), ("preflight.json", "preflight"),
                           ("cli-version-before.json", "cli_before"), ("cli-version-after.json", "cli_after")):
             put(os.path.join(d, name), json.dumps(D[key]))

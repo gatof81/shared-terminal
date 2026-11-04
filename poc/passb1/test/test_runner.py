@@ -134,6 +134,12 @@ class B1a(Runner):
         self.assertFailedClosed(self.phase("setup"))
         self.assertFalse(self.marker("setup.ok"))
 
+    def test_setup_fails_closed_when_docker_gives_a_network(self):
+        self.assertOk(self.phase("preflight"), "preflight")
+        self.patch(override_hostconfig={"NetworkMode": "bridge"})
+        self.assertFailedClosed(self.phase("setup"))
+        self.assertFalse(self.marker("setup.ok"))
+
     def test_measure_runs_every_attempt_in_order(self):
         self.through("measure")
         ids = [c[c.index("--id") + 1] for c in self.state()["calls"] if "attempt" in c]

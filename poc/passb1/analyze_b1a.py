@@ -88,19 +88,31 @@ def load(d):
         a = os.path.join(adir, aid)
         res = _json(os.path.join(a, "result.json")) or {}
         starts = res.get("starts") or []
-        per_start = [_text(os.path.join(a, f"debug-{i + 1}.log.filtered")) for i in range(len(starts))]
-        combined = _text(os.path.join(a, "debug.log.filtered"))
-        # The start where the attack is in effect is the last one; evaluate the control there.
-        last_debug = next((t for t in reversed(per_start) if t), combined)
-        last_kinds = (starts[-1].get("probe_kinds") if starts and isinstance(starts[-1], dict) else None)
+        n = len(starts)
+        # The attack is in effect in the LAST start. Use that start's own debug, stderr and probe
+        # events — STRICTLY, with no fallback to an earlier start or to a concatenation, so start
+        # 1's control can never stand in for start 2 (owner finding #2). If the last start left no
+        # file, its evidence is simply absent and the attempt is INCONCLUSIVE.
+        if n:
+            last_debug = _text(os.path.join(a, f"debug-{n}.log.filtered"))
+            last_stderr = _text(os.path.join(a, f"stderr-{n}.txt.filtered"))
+            last_kinds = starts[-1].get("probe_kinds") if isinstance(starts[-1], dict) else None
+        else:  # a result without per-start info (e.g. a hand-made fixture): the combined files
+            last_debug = _text(os.path.join(a, "debug.log.filtered"))
+            last_stderr = _text(os.path.join(a, "stderr.txt.filtered"))
+            last_kinds = None
+        # Per-command pre output, kept apart so one command's text is not read as another's.
+        pre_text = {f[len("pre-"):-len(".txt.filtered")]: _text(os.path.join(a, f))
+                    for f in sorted(os.listdir(a)) if f.startswith("pre-") and f.endswith(".txt.filtered")}
         att[aid] = {
             "result": res or None,
             "debug": last_debug,
-            "all_debug": combined or "".join(per_start),
             "probe_kinds": last_kinds,
-            "stderr": _text(os.path.join(a, "stderr.txt.filtered")),
-            "pre": "".join(_text(os.path.join(a, f)) for f in sorted(os.listdir(a)) if f.startswith("pre-")),
-            "has_debug": os.path.exists(os.path.join(a, "debug.log.filtered")) or bool(per_start),
+            "stderr": last_stderr,
+            "pre": "".join(pre_text.values()),
+            "pre_text": pre_text,
+            "starts": n,
+            "has_debug": bool(last_debug),
         }
     return {"attempts": att, "applied": _json(os.path.join(d, "applied.json")), "manifest": _json(os.path.join(d, "capture-manifest.json")),
             "preflight": _json(os.path.join(d, "preflight.json")), "cli_before": _json(os.path.join(d, "cli-version-before.json")),
@@ -158,15 +170,21 @@ def classify(aid, a):
     # add` / `plugin install` must be REFUSED by policy; a successful install is a breach even
     # if the plugin never executed this session.
     if aid == "N9":
+        # Judge the `plugin install` command on ITS OWN output and rc — never a concatenation
+        # with `marketplace add`, whose refusal does not prove the install was refused.
         rc = {e.get("alias"): e.get("rc") for e in (r.get("pre") or []) if isinstance(e, dict)}
-        refused = bool(INSTALL_REFUSED.search(a["pre"])) or (rc.get("plugin-install") not in (0, None))
-        installed_ok = rc.get("plugin-install") == 0 and not INSTALL_REFUSED.search(a["pre"])
-        if installed_ok:
+        install_out = (a.get("pre_text") or {}).get("plugin-install", "")
+        install_rc = rc.get("plugin-install")
+        install_refused = bool(INSTALL_REFUSED.search(install_out))   # the install's own refusal text
+        if install_rc == 0 and not install_refused:
             return "loaded", "installed:N9"          # a rogue was installed from an unapproved marketplace
         if not org_ok(ps):
             return "inconclusive", "no-control:probe-not-in-org-tier"
-        if refused:
+        if install_refused:
             return "blocked", "install-refused"
+        if install_rc not in (0, None):
+            # A non-zero rc with no policy-refusal text is an operational error, not a proof.
+            return "inconclusive", "install-error"
         return "inconclusive", "install-outcome-unknown"
     if not org_ok(ps):
         return "inconclusive", "no-control:probe-not-in-org-tier"

@@ -181,7 +181,7 @@ class Fixtures(unittest.TestCase):
 class CheckLimits(unittest.TestCase):
     def inspect(self, **over):
         hc = {"CapDrop": ["ALL"], "CapAdd": None, "SecurityOpt": ["no-new-privileges:true"], "Privileged": False, "PidsLimit": 256,
-              "Memory": 2 * 1024 ** 3, "MemorySwap": 2 * 1024 ** 3, "NanoCpus": 10 ** 9, "PidMode": "", "IpcMode": "private",
+              "Memory": 2 * 1024 ** 3, "MemorySwap": 2 * 1024 ** 3, "NanoCpus": 10 ** 9, "NetworkMode": "none", "PidMode": "", "IpcMode": "private",
               "Binds": None, "VolumesFrom": None, "Devices": []}
         hc.update(over)
         return {"Config": {"Labels": {"passb1.experiment": "S"}, "User": "developer"}, "HostConfig": hc,
@@ -190,7 +190,8 @@ class CheckLimits(unittest.TestCase):
     def test_good_and_each_deviation(self):
         self.assertEqual(b1.check_limits(self.inspect(), "S", "/k", ["/k:/opt/passb1-kit"]), [])
         for over, why in (({"CapAdd": ["SYS_PTRACE"]}, "caps"), ({"SecurityOpt": []}, "no-new-privileges"), ({"Privileged": True}, "privileged"),
-                          ({"PidMode": "host"}, "namespaces"), ({"Binds": ["/:/host"]}, "extra-binds")):
+                          ({"PidMode": "host"}, "namespaces"), ({"Binds": ["/:/host"]}, "extra-binds"),
+                          ({"NetworkMode": "bridge"}, "network"), ({"NetworkMode": "host"}, "network"), ({"NetworkMode": None}, "network")):
             with self.subTest(why):
                 self.assertIn(why, b1.check_limits(self.inspect(**over), "S", "/k", ["/k:/opt/passb1-kit"]))
         i = self.inspect()

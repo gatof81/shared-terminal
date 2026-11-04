@@ -677,6 +677,9 @@ def check_limits(inspect, stamp, kit, mounts):
     want(hc.get("PidsLimit") == 256, "pids")
     want(hc.get("Memory") == 2 * 1024 ** 3 and hc.get("MemorySwap") == 2 * 1024 ** 3, "memory")
     want(hc.get("NanoCpus") == 10 ** 9, "cpus")
+    # No external network for either experiment (04-poc.md §1.14.15.6): a seed/rogue marketplace
+    # cannot be cloned and no CLI update can be downloaded. N4 uses only the container loopback.
+    want(hc.get("NetworkMode") == "none", "network")
     want(hc.get("PidMode") in ("", None) and hc.get("IpcMode") in ("private", "", None), "namespaces")
     want(not hc.get("Binds") and not hc.get("VolumesFrom") and not hc.get("Devices"), "extra-binds")
     got = sorted((m.get("Source"), m.get("Destination"), m.get("RW"), m.get("Type")) for m in c.get("Mounts") or [])
