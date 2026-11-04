@@ -148,18 +148,36 @@ class Summary(unittest.TestCase):
         self.assertEqual(out["runs"]["run2"]["sha_source"], "operator-declared")
         self.assertIn("declaradas por el operador", out["provenance_note"])
 
-    def test_retired_attack_executed_in_run1_fails_with_provenance(self):
-        # D2: N10 is OUT of the PASS criteria, but a demonstrated execution in run 1 is a breach.
-        def n10_executed(d, D):
-            p = os.path.join(d, "attempts", "N10")
-            os.makedirs(p)
-            T.put(os.path.join(p, "result.json"), json.dumps({"id": "N10", "markers": ["st-b1-rogue-n10.json"]}))
-        code, out = summary(run1_dir(mut=n10_executed), run2_dir())
+    def write_excluded(self, d, aid, markers=None, debug=""):
+        p = os.path.join(d, "attempts", aid)
+        os.makedirs(p)
+        T.put(os.path.join(p, "result.json"), json.dumps({"id": aid, "markers": markers or []}))
+        T.put(os.path.join(p, "debug-1.log.filtered"), debug)
+
+    def test_retired_attack_executed_marker_in_run1_fails_with_provenance(self):
+        # D2: N10 is OUT of the PASS criteria, but its own "impostor" marker in run 1 is a breach.
+        code, out = summary(run1_dir(mut=lambda d, D: self.write_excluded(d, "N10", markers=["impostor"])), run2_dir())
         self.assertEqual((code, out["verdict"]), (2, "FAIL"), out)
-        self.assertIn("observed_execution", out["excluded"]["N10"])
+        self.assertEqual(out["excluded"]["N10"]["observed_execution"]["evidence"], "marker:impostor")
         self.assertTrue(out["excluded"]["N10"]["observed_execution"]["provenance"].startswith("run1:"))
-        # Not re-counted as blocked and not in the per-attempt rows.
-        self.assertNotIn("N10", [r["attempt"] for r in out["attempts"]])
+        self.assertNotIn("N10", [r["attempt"] for r in out["attempts"]])  # not re-counted as blocked
+
+    def test_retired_attack_loaded_without_a_marker_in_run1_fails(self):
+        # D2 refinement: code LOAD of the impostor with NO marker is still a breach. A non-org-tier
+        # st-b1-probe load is the planted copy (the legit probe only seats in prepend/append).
+        nonorg = T.P + "hooks module st-b1-probe@st-b1 loaded (worker, environment 3, tier user); events: session.start\n"
+        code, out = summary(run1_dir(mut=lambda d, D: self.write_excluded(d, "N11", markers=[], debug=T.PROBE_LINES + nonorg)), run2_dir())
+        self.assertEqual((code, out["verdict"]), (2, "FAIL"), out)
+        self.assertEqual(out["excluded"]["N11"]["observed_execution"]["evidence"], "nonorg-load:tier=user")
+        self.assertTrue(out["excluded"]["N11"]["observed_execution"]["provenance"].startswith("run1:"))
+
+    def test_retired_attack_mere_discovery_is_not_execution(self):
+        # D2: a bare `Read hooks.json` of the impostor path (discovery) + only the legit org-tier
+        # load must NOT count as execution — the reduced-scope PASS still holds.
+        discovery = T.P + "Read hooks.json for plugin st-b1-probe (enabled=true): /home/u/.claude/plugins/cache/st-b1/st-b1-probe/0.0.1/hooks/hooks.json\n"
+        code, out = summary(run1_dir(mut=lambda d, D: self.write_excluded(d, "N13", markers=[], debug=T.PROBE_LINES + discovery)), run2_dir())
+        self.assertEqual((code, out["verdict"]), (0, "PASS (reduced scope)"), out)
+        self.assertNotIn("observed_execution", out["excluded"]["N13"])
 
 
 class VerifySums(unittest.TestCase):

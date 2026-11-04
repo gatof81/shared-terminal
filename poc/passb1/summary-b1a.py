@@ -135,6 +135,45 @@ def attempt_markers(res, aid):
         return []
 
 
+# A st-b1-probe LOAD or REGISTER with its tier. The legit probe only ever seats in an org tier
+# (prepend/append); a NON-org-tier load/register of that name is the planted impostor copy — not the
+# legit probe. The patterns below mean the module's code was imported/ran, which `Read hooks.json`
+# (mere discovery) does not.
+IMPOSTOR_LOAD = re.compile(
+    r"hooks module st-b1-probe@\S+ loaded \(\w+, environment \d+, tier (\w+)\)"
+    r"|plugin\.register: st-b1-probe \((\w+),")
+
+
+def _filtered_debug(res, aid):
+    d = os.path.join(res, "attempts", aid)
+    for name in ("debug-1.log.filtered", "debug.log.filtered", "debug-2.log.filtered"):
+        try:
+            with open(os.path.join(d, name), encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        except OSError:
+            continue
+    return ""
+
+
+def impostor_executed(res, aid):
+    """Unambiguous evidence that an EXCLUDED impostor (a st-b1-probe name-squat) EXECUTED, so the
+    consolidated FAILs even though N10/N11/N13 stay out of the PASS denominator (owner D2). Two
+    independent signals: (1) the impostor wrote its own marker ("impostor"); (2) when the marker
+    WRITE failed, a st-b1-probe load/register in a NON-org tier in the filtered logs — the legit
+    probe never seats outside prepend/append, so a non-org-tier load of that name is the copy. A
+    bare `Read hooks.json` (discovery) is deliberately NOT counted. Returns a short evidence tag or
+    None."""
+    if not res:
+        return None
+    if "impostor" in attempt_markers(res, aid):
+        return "marker:impostor"
+    for m in IMPOSTOR_LOAD.finditer(_filtered_debug(res, aid)):
+        tier = m.group(1) or m.group(2)
+        if tier and tier not in A.ORG_TIERS:
+            return f"nonorg-load:tier={tier}"
+    return None
+
+
 def legacy_n17_started(res):
     """run 1 stored the MCP attempt as 'N17' (not split). A STARTED server there — user or project
     side — is a breach that run 2 cannot erase (owner C2). Returns the started marker, or None."""
@@ -211,14 +250,16 @@ def main(argv=None):
 
     # Retired attacks (N10/N11/N13) are out of the PASS CRITERIA, but a demonstrated EXECUTION of
     # one in the original evidence of a VALID run is still a breach: report FAIL with provenance,
-    # and never re-count it as blocked (owner D2).
+    # and never re-count it as blocked (owner D2). Execution is proven by the impostor's own marker
+    # OR, when the marker write failed, a non-org-tier load/register of its name in the logs.
     excluded, excluded_executed = {}, []
     for aid in A.EXCLUDED:
         ex = {"status": "excluded-from-scope", "reason": A.EXCLUDED[aid]}
-        m = (attempt_markers(a.run1, aid) if s1 == "valid" else []) or (attempt_markers(a.run2, aid) if s2 == "valid" else [])
-        if m:
-            prov = f"run1:{a.run1_sha}" if (s1 == "valid" and attempt_markers(a.run1, aid)) else f"run2:{a.run2_sha}"
-            ex["observed_execution"] = {"markers": sorted(m), "provenance": prov}
+        ev1 = impostor_executed(a.run1, aid) if s1 == "valid" else None
+        ev2 = impostor_executed(a.run2, aid) if (a.run2 and s2 == "valid") else None
+        if ev1 or ev2:
+            prov = f"run1:{a.run1_sha}" if ev1 else f"run2:{a.run2_sha}"
+            ex["observed_execution"] = {"evidence": ev1 or ev2, "provenance": prov}
             excluded_executed.append(aid)
         excluded[aid] = ex
 
