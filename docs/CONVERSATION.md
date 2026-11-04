@@ -25,7 +25,7 @@ vinculante para los PRs
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
 `ac1024d`); si los dos documentos difieren, manda este;
 este archivo define lo que el código debe cumplir y lo que cada PR debe demostrar. Cambiar un
-contrato exige un PR de docs antes o junto con el código. **v1.7.1**: §8.1.5 paso 2b, consumo del paste antes del siguiente byte, y `too-many-segments` en 48 pastes por el presupuesto T_http (hallazgos del smoke con CLI 2.1.314 y de la revisión durante la implementación 3.2, 2026-10-30). **v1.7.2** (aprobado por el responsable como P1 de backend de Chat, 2026-11-02, tras la reanudación real de Educación HZ): §5.2 el binding vale para UN arranque del contenedor —toda parada lo retira de todas las conversaciones de la sesión, residentes o no—; §5.3 el probe solo lleva a `waiting_input` con identidad verificada (entrada `interactive`, `pid` descendiente del `pane_pid` del pane ligado), nunca revive `ended`, un estado ilegible no es `idle`, y el silencio de 10 min y un probe dirigido tras `SessionStart` se despachan de verdad; §8.1.3 `binding-stale` también para una entrada del probe con `kind ≠ interactive` aunque descienda del pane **v1.7.3**: §8.1.3 identidad de foreground por proceso (identidad, sesión, tty, grupo de primer plano, `starttime` repetido en el precheck) en lugar del nombre `pane_current_command`, que el instalador nativo hace igual a la versión (falso negativo en Educación HZ, 2026-11-02). **v1.7.4** (#510, aprobado por el responsable 2026-11-02): §8.1.3 el envío exige que el probe confirme el prompt (`idle`, o `waiting` + `input needed`); `status` ausente/ilegible y `waiting` sin `waitingFor` responden `needs-terminal` antes de cualquier efecto. **v1.8** (aprobado por el responsable 2026-11-03): §6.2 metadata del dueño —renombrar y archivar— en la tabla propia `conversation_user_meta` (migración v18), fuera de la captura; §6 la lista añade `customTitle`, `archivedAt` y `meta`; §9 backup y borrado de esa tabla. **v1.8.1** (propuesta, pendiente de aprobación; incidente 2026-11-03): §2.7.5 condición 5 «capaz de relay» — la imagen propia con `="2"` mientras exista, y si Docker ya no la tiene, una **acreditación de capacidad** firmada al crear el contenedor y ligada a su id inmutable (§2.7.5.1); una acreditación contradictoria deniega siempre
+contrato exige un PR de docs antes o junto con el código. **v1.7.1**: §8.1.5 paso 2b, consumo del paste antes del siguiente byte, y `too-many-segments` en 48 pastes por el presupuesto T_http (hallazgos del smoke con CLI 2.1.314 y de la revisión durante la implementación 3.2, 2026-10-30). **v1.7.2** (aprobado por el responsable como P1 de backend de Chat, 2026-11-02, tras la reanudación real de Educación HZ): §5.2 el binding vale para UN arranque del contenedor —toda parada lo retira de todas las conversaciones de la sesión, residentes o no—; §5.3 el probe solo lleva a `waiting_input` con identidad verificada (entrada `interactive`, `pid` descendiente del `pane_pid` del pane ligado), nunca revive `ended`, un estado ilegible no es `idle`, y el silencio de 10 min y un probe dirigido tras `SessionStart` se despachan de verdad; §8.1.3 `binding-stale` también para una entrada del probe con `kind ≠ interactive` aunque descienda del pane **v1.7.3**: §8.1.3 identidad de foreground por proceso (identidad, sesión, tty, grupo de primer plano, `starttime` repetido en el precheck) en lugar del nombre `pane_current_command`, que el instalador nativo hace igual a la versión (falso negativo en Educación HZ, 2026-11-02). **v1.7.4** (#510, aprobado por el responsable 2026-11-02): §8.1.3 el envío exige que el probe confirme el prompt (`idle`, o `waiting` + `input needed`); `status` ausente/ilegible y `waiting` sin `waitingFor` responden `needs-terminal` antes de cualquier efecto. **v1.8** (aprobado por el responsable 2026-11-03): §6.2 metadata del dueño —renombrar y archivar— en la tabla propia `conversation_user_meta` (migración v18), fuera de la captura; §6 la lista añade `customTitle`, `archivedAt` y `meta`; §9 backup y borrado de esa tabla. **v1.8.1** (propuesta, pendiente de aprobación; incidente 2026-11-03): §2.7.5 condición 5 «capaz de relay» — la imagen propia con `="2"` mientras exista, y si Docker ya no la tiene, una **acreditación de capacidad** firmada al crear el contenedor y ligada a su id inmutable (§2.7.5.1); una acreditación contradictoria deniega siempre. **v1.8.1 aprobado por el responsable el 2026-11-04.** **v1.8.2** (propuesta, pendiente de aprobación; hallazgo de Educación HZ, 2026-11-04): §8.1.9 la versión que decide es la del **proceso** que recibirá el texto, preguntada a su propio ejecutable (`/proc/<pid>/exe --version`, sin shell, como su uid, entorno vacío, autoactualizador apagado, `starttime` y ejecutable iguales antes y después); la `claude_version` del `session_start` —que el hook toma del `PATH`— queda como metadato y nunca autoriza
 
 Convenciones: *MUST*/*MUST NOT* son requisitos verificados por test; *SHOULD* son requisitos
 verificados en revisión. "Bytes" significa siempre bytes UTF-8 del contenido, salvo donde se dice
@@ -2045,7 +2045,7 @@ incertidumbre no se envía**; nunca "por si acaso".
 | `busy` | probe `status: busy` |
 | `needs-terminal` | probe `waitingFor ∉ {∅, "input needed"}` (incluye `"dialog open"` y `"permission prompt"`); **(v1.7.4)** o el probe **no confirma que el CLI está en su prompt**: solo `status: idle`, o `status: waiting` con `waitingFor: "input needed"`, admiten el envío; un `status` ausente, desconocido o ilegible responde `detail: "status-unknown"` y un `waiting` sin `waitingFor` responde `detail: "waiting-unspecified"` (las observaciones de §8.2 nunca mostraron un `waiting` sin `waitingFor`: su ausencia no es evidencia de `input needed`); o `pane_in_mode = 1`; o `pane_dead = 1`; o el proceso del probe **no es el CLI en el primer plano del terminal** (identidad de foreground, abajo; `detail: foreground:<pane_current_command>`) |
 | `composer-not-empty` | la **región de entrada** del CLI (definición abajo) contiene texto propio, o no se pudo delimitar |
-| `cli-unvalidated` | la `claude_version` del `session_start` de la conversación ligada —es la versión del **proceso realmente en el pane**, el mismo cuyo `pid` verifica `binding-stale`— no está en `COMPOSER_CLI_VERSIONS` (§8.1.9), o falta |
+| `cli-unvalidated` | **(v1.8.2)** la versión del **proceso realmente en el pane** —el `pid` que verifica `binding-stale`, preguntada a su propio ejecutable (§8.1.9)— no está en `COMPOSER_CLI_VERSIONS` (`detail: not-allowed`), o no se pudo establecer con evidencia fiable (`version: null`, `detail: unverifiable:<motivo>`). La `claude_version` del `session_start` no decide |
 
 Identidad de foreground (fail-closed, v1.7.3). Una sola lectura —`tmux display` del pane,
 `/proc/<pid>/stat` del `pid` del probe y del `pane_pid`, la ascendencia y `readlink /proc/<pid>/exe`—
@@ -2420,12 +2420,47 @@ operación o de ninguna.
 Todo §8 describe el comportamiento observado del CLI **2.1.314** (§8.2). La allowlist de
 recreación (§2.7.1, `cliCompat.ts`) está validada con 2.1.308: son **contratos distintos** y ninguno
 se amplía por el otro. `COMPOSER_CLI_VERSIONS` (env, por defecto `2.1.314`) es la lista de versiones
-con las que §8.2 se repitió. La versión que se comprueba es la del **proceso que recibirá el
-texto**: la `claude_version` del `session_start` de la conversación ligada, cuyo `pid` es el que
-`binding-stale` verifica bajo `pane_pid`; un proceso no cambia de versión mientras vive, y un
-`claude` relanzado produce un `session_start` nuevo. Fuera de la lista o sin versión ⇒ 409
-`cli-unvalidated`. Añadir una versión exige repetir la lista de revalidación de §8.2.6 y adjuntar los
-resultados al PR que la añada.
+con las que §8.2 se repitió. Fuera de la lista ⇒ 409 `cli-unvalidated`. Añadir una versión exige
+repetir la lista de revalidación de §8.2.6 y adjuntar los resultados al PR que la añada.
+
+**Qué versión se comprueba (v1.8.2).** La del **proceso que recibirá el texto**, preguntada a su
+propio ejecutable. Hasta v1.8.1 era la `claude_version` del `session_start`, pero el hook la obtiene
+con `claude --version` a través del `PATH`, que no tiene por qué ser el binario de la conversación:
+en Educación HZ (2026-11-04) el proceso era el 2.1.316 de npm mientras el `PATH` encontraba el
+lanzador nativo en 2.1.317, y el composer rechazó un proceso validado. El caso inverso —un proceso no
+validado admitido bajo una etiqueta validada— es igual de posible, así que ese texto **nunca
+autoriza**: queda como metadato, y una discrepancia solo se registra en el log.
+
+La consulta (`cliIdentity.ts`) se hace después de todas las comprobaciones dinámicas de §8.1.3, sobre
+el `pid` que el probe nombró y que esas comprobaciones verificaron (bajo `pane_pid`, en primer plano,
+con su `starttime` y su ejecutable leídos en la misma petición), dentro de su contenedor, con argv
+fijo y **sin shell**:
+
+1. `cat /proc/<pid>/status`: uid real y efectivo, que deben ser iguales y distintos de 0. La
+   consulta corre con ese uid (`User` del exec), **nunca como root**.
+2. `env -i PATH=/usr/bin:/bin HOME=/nonexistent DISABLE_AUTOUPDATER=1
+   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 timeout -k 1 3 /proc/<pid>/exe --version`: el binario
+   del propio proceso (también si fue reemplazado en disco, `" (deleted)"`: el kernel conserva el
+   inodo), con un entorno vacío (ni token, ni proxy, ni HOME donde escribir) y el autoactualizador
+   apagado. Medido: es un camino rápido (≈ 8 ms), sale con 0 y no crea nada.
+3. `cat /proc/<pid>/stat` y `readlink /proc/<pid>/exe` otra vez: el mismo `starttime` y el mismo
+   ejecutable que antes del paso 1 (un pid reutilizado o un proceso que hizo `exec` en medio vuelve
+   la respuesta ajena).
+
+La salida debe ser exactamente `X.Y.Z (Claude Code)` (un salto de línea final admitido), de 128
+bytes como mucho y una release plana. Si no se puede establecer, el envío se rechaza con 409
+`cli-unvalidated`, `version: null` y `detail: "unverifiable:<motivo>"`: `node-runtime` (el CLI
+antiguo en JS: `--version` respondería por node), `uid-unreadable`, `uid-root-or-mixed`,
+`version-exec-failed` (salida distinta de 0 o desconocida, timeout), `version-output-invalid`,
+`identity-changed` o `exec-error`. Nunca hay fallback al `PATH` ni a la versión del hook. Una versión
+establecida pero fuera de la lista responde `version: "<X.Y.Z>"` con `detail: "not-allowed"`; ambas
+respuestas incluyen `reportedVersion` (el texto del hook, como dato).
+
+Una caché en memoria y acotada guarda solo respuestas positivas, por `(contenedor, pid, starttime,
+ejecutable)`: un proceso no cambia de versión mientras vive. **No sustituye ninguna comprobación**:
+identidad, primer plano, estado, región de entrada y todo lo demás se repiten en cada envío, y la
+clave incluye lo que esas comprobaciones establecen, así que solo puede acertar para el proceso que
+acaban de verificar. Cada envío que pasa deja en el log la versión y la regla que lo autorizó.
 
 #### 8.1.10 Lo que tmux no permite garantizar atómicamente
 

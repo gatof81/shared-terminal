@@ -11,7 +11,8 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { logger } from "../logger.js";
 import type { SessionMeta } from "../types.js";
 import {
 	type ComposerDockerPort,
@@ -43,12 +44,17 @@ interface Call {
 	cmd: string[];
 	stdin: string | null;
 	started: boolean;
+	user?: string;
 }
 function stepOf(cmd: string[]): Step {
 	const j = cmd.join(" ");
 	if (j.includes("tmux display")) return "display";
 	if (j.includes("capture-pane")) return "capture";
 	if (j.includes("st-ancestry")) return "ancestry";
+	if (j.endsWith("--version")) return "version";
+	if (j.endsWith("/status")) return "status";
+	if (j.endsWith("/stat")) return "stat";
+	if (j.includes("readlink /proc/")) return "exelink";
 	if (j.includes("load-buffer")) return "paste";
 	if (j.includes(CSI_U_NEWLINE)) return "newline";
 	if (j.endsWith("Enter")) return "enter";
@@ -103,6 +109,12 @@ class FakeDocker implements ComposerDockerPort {
 			"",
 		].join("\n");
 	}
+	/** §8.1.9 v1.8.2 — the live process: `/proc/<pid>/exe --version` and the reads around it. */
+	live = "2.1.314 (Claude Code)\n";
+	uidLine = "Uid:\t1000\t1000\t1000\t1000";
+	/** starttime / exe read AFTER the version query; null = same as before. */
+	afterStart: string | null = null;
+	afterExe: string | null = null;
 	container: "running" | "stopped" | "gone" = "running";
 	/** Per step: outcomes for successive execs of that step; default exit 0. */
 	script = new Map<Step, Array<{ exit: number | null } | "park" | "reject">>();
@@ -129,10 +141,18 @@ class FakeDocker implements ComposerDockerPort {
 		cmd: string[],
 		stdin: Buffer | null,
 		onCreated: (id: string) => Promise<boolean>,
+		opts?: { user?: string },
 	) {
 		const step = stepOf(cmd);
 		const id = `e${++this.n}-${step}`;
-		const call: Call = { id, step, cmd, stdin: stdin?.toString("utf8") ?? null, started: false };
+		const call: Call = {
+			id,
+			step,
+			cmd,
+			stdin: stdin?.toString("utf8") ?? null,
+			started: false,
+			user: opts?.user,
+		};
 		this.calls.push(call);
 		const q = this.script.get(step);
 		const plan = q && q.length > 0 ? q.shift()! : { exit: 0 };
@@ -157,7 +177,15 @@ class FakeDocker implements ComposerDockerPort {
 					? (this.dump ?? `${RULE}\n❯ ${this.typed}\n${RULE}\n  ⏵⏵ auto mode on`)
 					: step === "ancestry"
 						? `${this.ancestry}\n`
-						: "";
+						: step === "version"
+							? this.live
+							: step === "status"
+								? `Name:\tclaude\n${this.uidLine}\nGid:\t1000\t1000\t1000\t1000\n`
+								: step === "stat"
+									? `${cmd.at(-1)?.split("/")[2]} (claude) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 ${this.afterStart ?? this.proc.start ?? "1000"} 0 0\n`
+									: step === "exelink"
+										? `${this.afterExe ?? this.exe}\n`
+										: "";
 		return { execId: id, exitCode: outcome.exit, stdout };
 	}
 	async execState(id: string) {
@@ -619,9 +647,10 @@ describe("validation and preconditions (§8.1.2, §8.1.3): no effect, no record"
 		captureEffective = false;
 		await expectCode("capture-inactive");
 		captureEffective = true;
-		await seedConversation(CID, { claudeVersion: "2.1.310" });
-		await expectCode("cli-unvalidated");
-		await seedConversation(CID, { claudeVersion: "2.1.314" });
+		// v1.8.2: the PROCESS's version decides (the hook's text does not).
+		docker.live = "2.1.310 (Claude Code)\n";
+		await expectCode("cli-unvalidated", "not-allowed");
+		docker.live = "2.1.314 (Claude Code)\n";
 		meta = { ...meta, status: "stopped" };
 		await expectCode("session-not-running");
 		meta = { ...meta, status: "running" };
@@ -857,10 +886,168 @@ describe("CLI version match (pilot finding, VM100 2026-10-31)", () => {
 		await until(async () => (await composerStates()).at(-1) === "released", "released persisted");
 		await lockFree(service);
 		await seedConversation(CID, { claudeVersion: "2.1.316 (Claude Code)" });
+		// A relaunched claude: another process (new starttime), another binary version.
+		docker.proc = { start: "2000" };
+		docker.live = "2.1.316 (Claude Code)\n";
 		const r = await send(service, "no", ID2);
 		expect(r.status).toBe(409);
-		expect(r.body).toMatchObject({ error: "cli-unvalidated", version: "2.1.316 (Claude Code)" });
+		expect(r.body).toMatchObject({
+			error: "cli-unvalidated",
+			version: "2.1.316",
+			reportedVersion: "2.1.316 (Claude Code)",
+			detail: "not-allowed",
+		});
 		expect(docker.effectSteps().filter((s) => s === "enter")).toHaveLength(1);
+	});
+});
+
+describe("§8.1.9 v1.8.2: the version of the PROCESS decides, never the hook's text", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+	const both = () => makeService({ cliVersions: new Set(["2.1.314", "2.1.316"]) });
+	const logs = (spy: ReturnType<typeof vi.spyOn>) =>
+		spy.mock.calls.map((c: unknown[]) => String(c[0])).join("\n");
+	const versionCalls = () => docker.calls.filter((c) => c.step === "version");
+
+	it("Educación HZ, 2026-11-04: hook said 2.1.317 (PATH), the process is 2.1.316 ⇒ delivered", async () => {
+		const info = vi.spyOn(logger, "info");
+		await seedConversation(CID, { claudeVersion: "2.1.317 (Claude Code)" });
+		docker.live = "2.1.316 (Claude Code)\n";
+		const service = both();
+		const p = send(service, "ok");
+		await until(() => docker.effectSteps().includes("enter"));
+		await promptArrives("ok");
+		expect((await p).body).toMatchObject({ result: "delivered" });
+		const v = versionCalls();
+		expect(v).toHaveLength(1);
+		expect(v[0]?.user).toBe("1000");
+		expect(v[0]?.cmd).toEqual(
+			expect.arrayContaining([
+				"env",
+				"-i",
+				"DISABLE_AUTOUPDATER=1",
+				`/proc/${CLAUDE_PID}/exe`,
+				"--version",
+			]),
+		);
+		expect(logs(info)).toMatch(
+			/runs CLI 2\.1\.316; its session_start reported "2\.1\.317 \(Claude Code\)" \(metadata only/,
+		);
+		expect(logs(info)).toMatch(/CLI 2\.1\.316 of pid \d+ authorized by COMPOSER_CLI_VERSIONS/);
+	});
+
+	it("the reverse: hook said 2.1.316, the process is 2.1.317 ⇒ 409 cli-unvalidated, no effect", async () => {
+		await seedConversation(CID, { claudeVersion: "2.1.316 (Claude Code)" });
+		docker.live = "2.1.317 (Claude Code)\n";
+		const r = await send(both(), "no");
+		expect(r.status).toBe(409);
+		expect(r.body).toMatchObject({
+			error: "cli-unvalidated",
+			version: "2.1.317",
+			reportedVersion: "2.1.316 (Claude Code)",
+			detail: "not-allowed",
+		});
+		expect(docker.effectSteps()).toEqual([]);
+		expect(await recordGone()).toBe(true);
+	});
+
+	it("no hook version at all: the process's version still decides", async () => {
+		await seedConversation(CID, { claudeVersion: null });
+		docker.live = "2.1.314 (Claude Code)\n";
+		const service = both();
+		const p = send(service, "ok");
+		await until(() => docker.effectSteps().includes("enter"));
+		await promptArrives("ok");
+		expect((await p).body).toMatchObject({ result: "delivered" });
+	});
+
+	it.each([
+		[
+			"process replaced during the query",
+			() => (docker.afterStart = "9999"),
+			"unverifiable:identity-changed",
+		],
+		[
+			"a node runtime (old JS CLI)",
+			() => (docker.exe = "/usr/bin/node"),
+			"unverifiable:node-runtime",
+		],
+		[
+			"timeout",
+			() => docker.script.set("version", [{ exit: 124 }]),
+			"unverifiable:version-exec-failed",
+		],
+		[
+			"invalid output",
+			() => (docker.live = "Update available\n"),
+			"unverifiable:version-output-invalid",
+		],
+		["root process", () => (docker.uidLine = "Uid:\t0\t0\t0\t0"), "unverifiable:uid-root-or-mixed"],
+		[
+			"exec cannot be created",
+			() => docker.script.set("version", ["reject"]),
+			"unverifiable:exec-error",
+		],
+	])("%s ⇒ 409 cli-unvalidated/%s even with a validated hook version, nothing sent", async (_n, arrange, detail) => {
+		await seedConversation(CID, { claudeVersion: "2.1.314 (Claude Code)" });
+		arrange();
+		const r = await send(both(), "no");
+		expect(r.status).toBe(409);
+		expect(r.body).toMatchObject({ error: "cli-unvalidated", version: null, detail });
+		expect(docker.effectSteps()).toEqual([]);
+		expect(await recordGone()).toBe(true);
+		expect(docker.calls.some((c) => c.user === "0")).toBe(false);
+	});
+
+	it("a deleted binary (replaced by an update while running) is still queried and admitted by its own version", async () => {
+		docker.exe = "/home/developer/.local/share/claude/versions/2.1.316 (deleted)";
+		await seedConversation(CID, { claudeVersion: "2.1.317 (Claude Code)" });
+		docker.live = "2.1.316 (Claude Code)\n";
+		const service = both();
+		const p = send(service, "ok");
+		await until(() => docker.effectSteps().includes("enter"));
+		await promptArrives("ok");
+		expect((await p).body).toMatchObject({ result: "delivered" });
+	});
+
+	it("cache: a second send to the SAME process skips the query but NOT the identity/foreground reads; a new process is queried again", async () => {
+		await seedConversation(CID, { claudeVersion: "2.1.314 (Claude Code)" });
+		const service = both();
+		const p1 = send(service, "one");
+		await until(() => docker.effectSteps().includes("enter"));
+		await promptArrives("one");
+		expect((await p1).body).toMatchObject({ result: "delivered" });
+		await until(recordGone, "first release");
+		await lockFree(service);
+		const displaysAfterFirst = docker.calls.filter((c) => c.step === "display").length;
+		expect(versionCalls()).toHaveLength(1);
+
+		const p2 = send(service, "two", ID2);
+		await until(() => docker.effectSteps().filter((x) => x === "enter").length === 2);
+		await promptArrives("two");
+		expect((await p2).body).toMatchObject({ result: "delivered" });
+		expect(versionCalls()).toHaveLength(1);
+		expect(docker.calls.filter((c) => c.step === "display").length).toBeGreaterThan(
+			displaysAfterFirst,
+		);
+		await until(recordGone, "second release");
+		await lockFree(service);
+
+		// Same pid, another process (relaunched; pid reused): queried again, and refused here.
+		docker.proc = { start: "5555" };
+		docker.live = "2.1.317 (Claude Code)\n";
+		const r = await send(service, "three", "c3c3c3c3-3333-4333-8333-333333333333");
+		expect(r.body).toMatchObject({ error: "cli-unvalidated", version: "2.1.317" });
+		expect(versionCalls()).toHaveLength(2);
+	});
+
+	it("the version query comes after every dynamic check: a busy pane is refused without running the binary", async () => {
+		await seedConversation(CID, { claudeVersion: "2.1.314 (Claude Code)" });
+		docker.dump = `${RULE}\n❯ partial\n${RULE}\n`;
+		const r = await send(both(), "no");
+		expect(r.body).toMatchObject({ error: "composer-not-empty" });
+		expect(versionCalls()).toHaveLength(0);
 	});
 });
 

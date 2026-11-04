@@ -43,6 +43,8 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { readLiveCliVersion } from "./cliIdentity.js";
+import { cliVersionOf } from "./composer.js";
 import {
 	ancestryArgv,
 	CONSUME_MAX_POLLS,
@@ -105,6 +107,8 @@ interface Run {
 interface Driver {
 	/** Run an argv (the backend's exact shapes) with optional stdin. */
 	exec(argv: string[], stdin?: string): Promise<Run>;
+	/** The same, as `user` (the live-version query's exec `User`). */
+	execAs(argv: string[], user: string): Promise<Run>;
 	/** The hook log's lines so far. */
 	hookLines(): Promise<string[]>;
 	/** Project path as the CLI sees it. */
@@ -151,7 +155,12 @@ class LocalDriver implements Driver {
 		const i = argv.indexOf("tmux");
 		if (i >= 0) return this.tmux(argv.slice(i + 1), stdin);
 		const b = argv.indexOf("bash");
+		if (b < 0) return collect(spawn(argv[0]!, argv.slice(1)), stdin);
 		return collect(spawn(argv[b]!, argv.slice(b + 1)), stdin);
+	}
+	execAs(argv: string[]): Promise<Run> {
+		// Local mode runs everything as the invoking user, the CLI's own.
+		return collect(spawn(argv[0]!, argv.slice(1)));
 	}
 	async hookLines(): Promise<string[]> {
 		const t = await fs.readFile(HOOK_LOG_HOST, "utf8").catch(() => "");
@@ -237,6 +246,9 @@ class DockerDriver implements Driver {
 	}
 	private dexec(args: string[], stdin?: string): Promise<Run> {
 		return collect(spawn("docker", ["exec", "-i", this.sess, ...args]), stdin);
+	}
+	execAs(argv: string[], user: string): Promise<Run> {
+		return collect(spawn("docker", ["exec", "-u", user, this.sess, ...argv]));
 	}
 	exec(argv: string[], stdin?: string): Promise<Run> {
 		return this.dexec(argv, stdin);
@@ -595,6 +607,64 @@ async function main(): Promise<void> {
 				foregroundFault(facts, claudePid) === null,
 				foregroundFault(facts, claudePid),
 			);
+		}
+		// §8.1.9 v1.8.2: the version of THIS process, asked of its own binary
+		// with the backend's exact argv (cliIdentity.ts), never PATH's claude.
+		if (facts) {
+			phase("§8.1.9 v1.8.2: the live process's version");
+			const viaDriver = async (cmd: string[], user?: string) => {
+				const r = user ? await drv.execAs(cmd, user) : await drv.exec(cmd);
+				return { execId: "smoke", exitCode: r.code, stdout: r.out };
+			};
+			const live = await readLiveCliVersion(viaDriver, claudePid, {
+				start: facts.proc.start,
+				exe: facts.exe,
+			});
+			const pathVersion = cliVersionOf(await drv.cliVersion());
+			check("live version read from /proc/<pid>/exe as the CLI's uid", live.ok, live);
+			if (MODE === "docker") {
+				// One CLI in the image: the process's version is the pinned one.
+				check(
+					"live version = the pinned CLI the pane runs",
+					live.ok && live.version === pathVersion,
+					{ live, pathVersion },
+				);
+			} else {
+				// Local mode shares the host's CLIs (a running Claude may be an older,
+				// replaced binary while PATH already has the update): note only.
+				note(`live ${live.ok ? live.version : live.why}; PATH's claude says ${pathVersion}`);
+			}
+			// Educación HZ, 2026-11-04: PATH can name another `claude`. A shim
+			// that lies on PATH changes what a PATH lookup says, not the answer.
+			const shim = await drv.exec([
+				"bash",
+				"-c",
+				"mkdir -p /tmp/st-shim && printf '#!/bin/sh\\necho \"9.9.9 (Claude Code)\"\\n' > /tmp/st-shim/claude && chmod +x /tmp/st-shim/claude && PATH=/tmp/st-shim:$PATH claude --version",
+			]);
+			check(
+				"a PATH shim makes `claude --version` lie",
+				shim.out.trim() === "9.9.9 (Claude Code)",
+				shim.out,
+			);
+			const again = await readLiveCliVersion(viaDriver, claudePid, {
+				start: facts.proc.start,
+				exe: facts.exe,
+			});
+			check(
+				"…and the live query still answers the process's own version",
+				again.ok && live.ok && again.version === live.version,
+				again,
+			);
+			const gone = await readLiveCliVersion(viaDriver, claudePid, {
+				start: String(Number(facts.proc.start) + 1),
+				exe: facts.exe,
+			});
+			check(
+				"a starttime that is not this process's ⇒ refused (identity-changed)",
+				!gone.ok && gone.why === "identity-changed",
+				gone,
+			);
+			await drv.exec(["rm", "-rf", "/tmp/st-shim"]);
 		}
 		const idle = inputRegion(await screen());
 		check(

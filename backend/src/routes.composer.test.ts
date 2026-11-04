@@ -104,6 +104,18 @@ class FakeDocker implements ComposerDockerPort {
 	) {
 		const j = cmd.join(" ");
 		const id = `e${++this.n}`;
+		// §8.1.9 v1.8.2 live-version reads (cliIdentity.ts): answered, not counted as steps.
+		const pid = j.match(/\/proc\/(\d+)\//)?.[1];
+		if (!j.includes("tmux display") && pid) {
+			const out = j.endsWith("--version")
+				? "2.1.314 (Claude Code)\n"
+				: j.endsWith("/status")
+					? "Uid:\t1000\t1000\t1000\t1000\n"
+					: j.endsWith("/stat")
+						? `${pid} (claude) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 1000 0\n`
+						: "/home/developer/.npm-global/bin/claude\n";
+			return { execId: id, exitCode: 0, stdout: out };
+		}
 		const step = j.includes("tmux display")
 			? "display"
 			: j.includes("capture-pane")

@@ -39,6 +39,7 @@
 import { logger } from "../logger.js";
 import { SessionBusyError, SessionLifecycleLock } from "../sessionLifecycleLock.js";
 import type { SessionMeta } from "../types.js";
+import { type LiveVersion, LiveVersionCache, readLiveCliVersion } from "./cliIdentity.js";
 import {
 	CONSUME_MAX_POLLS,
 	CONSUME_POLL_MS,
@@ -91,6 +92,8 @@ export interface ComposerDockerPort {
 		cmd: string[],
 		stdin: Buffer | null,
 		onCreated: (execId: string) => Promise<boolean>,
+		/** `user`: run as that uid (the live-version query, never root). Default: the image's USER. */
+		opts?: { user?: string },
 	): Promise<ComposerExecResult>;
 	execState(execId: string): Promise<{ running: boolean; exitCode: number | null } | null>;
 	containerState(containerId: string): Promise<"running" | "stopped" | "gone">;
@@ -294,6 +297,7 @@ export class ComposerService {
 	private readonly recovered = new Set<string>();
 	private readonly userSends = new Map<string, number[]>();
 	private readonly cliVersions: ReadonlySet<string>;
+	private readonly liveVersions = new LiveVersionCache();
 	private readonly now: () => number;
 	private readonly after: (ms: number) => Promise<void>;
 	private readonly tHttp: number;
@@ -638,12 +642,41 @@ export class ComposerService {
 				detail: region.kind === "unknown" ? region.reason : "text",
 			});
 		}
-		// `claudeVersion` is the hook's raw `claude --version` text
-		// ("2.1.314 (Claude Code)"); the allowlist holds bare X.Y.Z.
-		const cliVersion = cliVersionOf(a.index.claudeVersion);
-		if (!cliVersion || !this.cliVersions.has(cliVersion)) {
-			return this.reject("cli-unvalidated", 409, { version: a.index.claudeVersion });
+		// §8.1.9 v1.8.2: the version of the PROCESS that will receive the text,
+		// asked of its own binary — never the hook's `claude_version`, which
+		// came from PATH (Educación HZ: process 2.1.316, hook 2.1.317). The
+		// cache only saves the query for the process the checks above just
+		// verified (its key is that pid's starttime and exe).
+		const hookVersion = cliVersionOf(a.index.claudeVersion);
+		const live = await this.liveVersion(containerId, entry.pid, facts.proc.start, facts.exe);
+		if (!live.ok) {
+			logger.info(
+				`[composer] ${sid} ${paneId}: not sending, the CLI version of pid ${entry.pid} cannot be verified (${live.why}; hook reported ${JSON.stringify(a.index.claudeVersion ?? null)})`,
+			);
+			return this.reject("cli-unvalidated", 409, {
+				version: null,
+				reportedVersion: a.index.claudeVersion ?? null,
+				detail: `unverifiable:${live.why}`,
+			});
 		}
+		if (hookVersion !== live.version) {
+			logger.info(
+				`[composer] ${sid} ${paneId}: pid ${entry.pid} runs CLI ${live.version}; its session_start reported ${JSON.stringify(a.index.claudeVersion ?? null)} (metadata only, not used)`,
+			);
+		}
+		if (!this.cliVersions.has(live.version)) {
+			logger.info(
+				`[composer] ${sid} ${paneId}: not sending, CLI ${live.version} of pid ${entry.pid} is not in COMPOSER_CLI_VERSIONS`,
+			);
+			return this.reject("cli-unvalidated", 409, {
+				version: live.version,
+				reportedVersion: a.index.claudeVersion ?? null,
+				detail: "not-allowed",
+			});
+		}
+		logger.info(
+			`[composer] ${sid} ${paneId} ${clientMessageId}: CLI ${live.version} of pid ${entry.pid} authorized by COMPOSER_CLI_VERSIONS`,
+		);
 
 		// ── Audit before any effect (§8.1.1), fail-closed ──
 		// A shutdown that began during the preconditions is decided before the
@@ -1465,6 +1498,31 @@ export class ComposerService {
 		} catch {
 			return null;
 		}
+	}
+
+	/** §8.1.9 v1.8.2 — the live process's version (cliIdentity.ts), cached per verified process. */
+	private async liveVersion(
+		containerId: string,
+		pid: number,
+		start: string,
+		exe: string,
+	): Promise<LiveVersion> {
+		const hit = this.liveVersions.get(containerId, pid, start, exe);
+		if (hit) return { ok: true, version: hit };
+		const r = await readLiveCliVersion(
+			(cmd, user) =>
+				this.deps.docker.exec(
+					containerId,
+					cmd,
+					null,
+					async () => true,
+					user ? { user } : undefined,
+				),
+			pid,
+			{ start, exe },
+		);
+		if (r.ok) this.liveVersions.set(containerId, pid, start, exe, r.version);
+		return r;
 	}
 
 	private async readInputRegion(containerId: string, paneId: string) {
