@@ -3341,23 +3341,24 @@ queda intacto como el de la corrida 1), con los cambios de §1.14.18.2–§1.14.
 regresión (y el barrido de mutaciones), y los criterios PASS/FAIL/INCONCLUSIVE de arriba fijados de
 antemano. No se re-ejecutan los 13 intentos ya **blocked**. Nada de esto está autorizado: espera tu
 revisión del diseño.
-#### 1.14.19 Kit de corrida 2 de PASS-B1a (`f11c467`): auditado tres veces (NO-GO de `37fd028`, `5eb257a` y `7f4c034`) y corregido, validado localmente; **decisión de diseño D3 pendiente, no ejecutado**
+#### 1.14.19 Kit de corrida 2 de PASS-B1a (`824a2a2`): auditado cuatro veces (NO-GO cada una) y corregido, validado localmente; **D3 = Opción A (INCONCLUSIVE), limitación de 2.1.314 documentada; no ejecutado**
 
 GO del responsable para implementar el kit de corrida 2 con cuatro condiciones (§1.14.18), NO-GO
-para ejecutarlo. El kit pasó **tres auditorías estáticas independientes del responsable**, cada una
-**NO-GO para VM100** con GO sólo para correcciones focalizadas, y cada hallazgo se corrigió
+para ejecutarlo. El kit pasó **cuatro auditorías estáticas independientes del responsable**, cada
+una **NO-GO para VM100** con GO sólo para correcciones focalizadas, y cada hallazgo se corrigió
 **primero con un test que reproduce el fallo y luego el arreglo**:
 
 - **Auditoría 1** (de `37fd028` contra `e00ef29`): seis hallazgos **B1–B6** + controles → `5eb257a`.
 - **Auditoría 2** (de `5eb257a`): cuatro hallazgos **C1–C4** + dos ajustes → `7f4c034`.
 - **Auditoría 3** (de `7f4c034`): **D1, D2, D4, D5** corregidos + **D3** como decisión de diseño → `f11c467`.
+- **Auditoría 4** (de `f11c467`): D1/D4/D5 aprobados; **D2** afinado (ejecución sin marcador) → `824a2a2`; **D3 → Opción A** (experimento local de causalidad **INCONCLUSIVE**, ver abajo).
 
-El commit `e00ef29` de la corrida 1 y los kits auditados `37fd028` / `5eb257a` / `7f4c034` quedan
-**intactos en la historia**. El próximo gate es la **decisión del responsable sobre D3** (y una
-revisión de las correcciones D1/D2/D4/D5); recién después se decide la segunda ejecución.
+El commit `e00ef29` de la corrida 1 y los kits auditados `37fd028` / `5eb257a` / `7f4c034` /
+`f11c467` quedan **intactos en la historia**. El próximo gate es la revisión del ajuste D2 y del
+resultado de D3; recién después se decide la segunda ejecución.
 
-**SHA del kit:** `f11c467c00db98490d5b50d0dc61cd30da67f8aa`. 17 archivos. Tarball de GitHub
-(`/tarball/f11c467…`) verificado contra estos hashes y la lista exacta (sin archivos de más ni de
+**SHA del kit:** `824a2a2e1dd885b31e342bf4675392c439378aa2`. 17 archivos. Tarball de GitHub
+(`/tarball/824a2a2…`) verificado contra estos hashes y la lista exacta (sin archivos de más ni de
 menos):
 
 ```
@@ -3371,13 +3372,13 @@ d87f4cbc7a53b0d733c13dd4c7f81e49d7ede3b21163e0d64e2234176d43100d  marketplace/pl
 707c35831bd4fa99d4e21f550c64a52de1ae2172c7fe5e4bdab16fb4245e0cf7  marketplace/plugins/st-b1-probe/hooks/register.mjs
 bfac25ae1fa9ffb8faf7895440cc7506d39bbef80c280b55bdb22523e2e8e4e9  README.md
 f7a5efa21d93614e367eb8bcd5751bdcbb4126ac098997d0f548b08212b67546  run-b1.sh
-d268778c0bdfc543372204ca44d0c5dfbbdd0fb5e10cda7245d3cf5c30904a0b  summary-b1a.py
+d4f17b1c1a599089d442b5ca05835d5e1372edc15ce0fba177a92f5efb718596  summary-b1a.py
 9779770693681d5a0ca281c2bc8fa92701a8eac4c2fc8f00c7d9ed802dbe3624  test/fakebin/docker
 c7418347977a0c94e67eab762714a138e656a59ebff5173a728709cf26cf60a0  test/test_analyze_b1a.py
 a45744f700d780ee041179a919fe4f87d153049bb01b9287735e11ce2e92bf14  test/test_analyze_b1b.py
 b814d049cb504c54766a4a0bc41b7b4b1a0556f104b2a6d1fe41d8297ec3e52a  test/test_b1.py
 d4dd16ae8bd2599a80ce8c5fcd9aa4a9863ce9077ddc15ee8c845bd3ed8603d8  test/test_runner.py
-a63201c843dba852f975240b8ef52d3ba6279ceaa92e5cfc0f3e51f7b03f7b1d  test/test_summary.py
+1f938aec1462fc6da4cc89616f918a880c3429df2729db530a21f2516fb4b5d8  test/test_summary.py
 ```
 
 **Auditoría 1 — hallazgos corregidos en `5eb257a`** (diff `37fd028..5eb257a`; cada uno con un test
@@ -3492,6 +3493,36 @@ criterio por mi cuenta):
   cadena-de-rechazo en lugar de una línea "connected" inexistente. Hasta tu decisión, el kit queda
   en la Opción A (INCONCLUSIVE), que es el default seguro.
 
+**Auditoría 4 — D2 afinado en `824a2a2`; D1/D4/D5 aprobados; D3 resuelto como Opción A:**
+- **D2 (afinado).** El consolidado ya veía los marcadores de N10/N11/N13, pero el criterio general
+  dice que la **carga demostrada** de código atacante es FAIL **aunque no se escriba el marcador**.
+  `summary.impostor_executed` ahora también detecta ejecución **inequívoca** del impostor excluido en
+  los logs filtrados: una carga/registro de `st-b1-probe` en un **tier NO-organizacional** (el probe
+  legítimo sólo se asienta en prepend/append, así que una carga de ese nombre fuera del tier org es
+  la copia plantada). Un **mero `Read hooks.json` (descubrimiento) NO cuenta**. N10/N11/N13 siguen
+  **fuera del denominador de PASS**; una ejecución observada da FAIL con la procedencia original.
+  Tests: marcador ⇒ FAIL; carga non-org sin marcador ⇒ FAIL; sólo descubrimiento ⇒ sigue PASS.
+- **D3 — resultado técnico del experimento local de causalidad (descartable, 2.1.314).** Elegiste
+  Opción A por ahora y pediste demostrar causalidad antes de considerar B. Preparé un experimento
+  **local descartable** con HOME aislado (sin login, sólo loopback, sin VM100), con las 4
+  condiciones **definidas de antemano** (C1 sin política + aprobar ⇒ ejecuta; C2 sin política +
+  *Continue without* ⇒ no ejecuta; C3 con política + declinar ⇒ ¿aparece el rechazo de n17p?; C4
+  con política + aprobar ⇒ correlación temporal del rechazo con la acción). **Resultado:**
+  - **C1 ✓** (aprobar ⇒ el servidor ejecuta: marcador `mcp-project`) y **C2 ✓** (declinar ⇒ no
+    ejecuta). La mecánica aprobar→ejecución / declinar→no-ejecución queda confirmada localmente.
+  - **C3/C4 no son testeables localmente.** La **única vía de política disponible sin root** es el
+    knob `CLAUDE_CODE_MANAGED_SETTINGS_PATH`: **asienta el guard** (`cc-plugin-sec-default@builtin
+    seated outermost: this machine has managed settings`, *Fast mode disabled by your organization*)
+    pero **no aplica la allowlist de MCP**. Control decisivo: bajo esa política, `claude mcp add`
+    (ruta N17-user) **no fue rechazado** (rc=0, "Added stdio MCP server"), mientras que en VM100
+    (drop-in dir root `… /managed-settings.d/`) la corrida 1 **sí** lo rechazó. Por tanto el rechazo
+    de MCP está atado al **drop-in root**, que no existe localmente.
+  - **Veredicto: INCONCLUSIVE localmente ⇒ se mantiene la Opción A.** La causalidad del rechazo de
+    n17p (Opción B) **no se demuestra** con herramientas locales; exigiría la política real por
+    drop-in root (el experimento con las 4 condiciones queda listo para correrse bajo esa política
+    en la corrida 2, que es el paso gateado). **N17-project permanece INCONCLUSIVE** y se documenta
+    la limitación de 2.1.314. No se bajó el criterio ni se corrió buscando un PASS inalcanzable.
+
 **Cambios base (las cuatro condiciones, de `37fd028`, conservados):** N9 juzgado por los dos
 comandos (`pre_text`); N14 medición-primero con probe en el mismo arranque; N17 dividido en
 `N17-user`/`N17-project`; consolidación bajo SHA distintos con procedencia por hallazgo, N10/N11/N13
@@ -3509,12 +3540,13 @@ acepta `RUN2=1` para ejecutar **sólo** P0, N14 y N17-project, etiqueta `passb1.
   `passb1.run`** aceptado y un `passb1.run=2`/stamp/kind equivocados rechazados — D1; `RUN2`
   inválido, `KIND≠b1a`, etiqueta `passb1.run` verificada, subconjunto de corrida 2, `validate`
   focalizado que mantiene los controles globales, `NetworkMode none`);
-- `test_summary.py`: **21** (PASS de alcance reducido + procedencia, legacy-N17, run2 ausente,
+- `test_summary.py`: **23** (PASS de alcance reducido + procedencia, legacy-N17, run2 ausente,
   fallos globales, baseline, `SHA256SUMS` alterado/ausente, la batería de `verify_sums` de C1 + el
-  symlink de D5, loaded-en-corrida-1 de C2, **ejecución de un ataque retirado de D2**, SHA declarado
-  de los ajustes);
-- **64 mutaciones de código**, todas detectadas (0 MISSED, 0 pattern-not-found); `claude plugin
-  validate` pasa; `bash -n run-b1.sh` limpio. **101 tests en total.**
+  symlink de D5, loaded-en-corrida-1 de C2; **D2 afinado:** ejecución de un ataque retirado por
+  marcador y por carga non-org sin marcador ⇒ FAIL, y mero descubrimiento ⇒ sigue PASS; SHA
+  declarado de los ajustes);
+- **66 mutaciones de código**, todas detectadas (0 MISSED, 0 pattern-not-found); `claude plugin
+  validate` pasa; `bash -n run-b1.sh` limpio. **103 tests en total.**
 
 **Criterios de la corrida 2, fijados de antemano** (idénticos a §1.14.18.5): *blocked* sólo con el
 control del mismo arranque y la evidencia específica del rechazo; *FAIL* con cualquier marcador, un
@@ -3523,17 +3555,20 @@ evidencia o la medición (`harness-startup-failed`). N15, `@synced` y los evento
 pendientes, nunca blocked.
 
 **Procedimiento para la revisión independiente (auditoría estática; no ejecutar):** leer el diff de
-la corrección `7f4c034..f11c467` (y, para el panorama completo, `e00ef29..f11c467`) de `poc/passb1/`,
+la corrección `f11c467..824a2a2` (y, para el panorama completo, `e00ef29..824a2a2`) de `poc/passb1/`,
 correr las suites y el barrido de mutaciones localmente (`python3 test/test_analyze_b1a.py`,
 `test_analyze_b1b.py`, `test_b1.py`, `test_runner.py`, `test_summary.py`), y revisar que: el preflight
 acepte el contenedor legacy real de la corrida 1 (sin `passb1.run`) pero lo fije por
 id+nombre+kind+stamp exactos (D1); el consolidado marque FAIL ante un `loaded` en cualquier corrida
 válida **o** una ejecución de N10/N11/N13 (C2/D2); el driver no persista nombres ni texto crudo (D4);
 `parse_scope` rechace scopes vacíos/desconocidos/incompletos y `verify_sums` rechace symlinks y rutas
-fuera de la captura (D5). **D3 requiere tu decisión** (Opción A INCONCLUSIVE vs. Opción B
-cadena-de-rechazo) **antes** de cualquier corrida. La corrida 2 en VM100 queda sujeta a tu
+fuera de la captura (D5); y que el consolidado marque FAIL ante una ejecución de impostor **sin
+marcador** (carga non-org) sin contar un mero descubrimiento (D2 afinado). **D3 quedó en la Opción A
+(INCONCLUSIVE)**: el experimento local no pudo demostrar causalidad porque la allowlist de MCP sólo
+se aplica por el drop-in root, inexistente localmente; la Opción B requeriría correr las 4
+condiciones bajo la política real (paso gateado). La corrida 2 en VM100 queda sujeta a tu
 autorización. El contenedor y la evidencia de la corrida 1 permanecen retenidos; `e00ef29`,
-`37fd028`, `5eb257a` y `7f4c034` no se alteran.
+`37fd028`, `5eb257a`, `7f4c034` y `f11c467` no se alteran.
 ## 2. Versiones
 
 | Variante | CLI | Motivo |
