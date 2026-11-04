@@ -3228,6 +3228,119 @@ corrida 2 toca sólo los seis intentos y sus controles.
 **No autorizado todavía:** ni la corrida 2, ni tocar el kit `e00ef29`, ni `measure`/`cleanup`,
 ni B1b, ni Composer/L1/L2/gateway, ni merge/deploy. El contenedor y la evidencia de la corrida 1
 quedan retenidos.
+#### 1.14.18 PASS-B1a: propuesta de cambios mínimos (kit y analizador), tests de regresión y corrida 2 focalizada (**diseño; pendiente de revisión**)
+
+Cierres del responsable contra la evidencia final (SHA256SUMS revalidado): **N9** rechazo
+explícito de política en `marketplace add`; **N14** la confianza del workspace no se aceptó;
+**N17-user** rechazo demostrado del camino de usuario, **N17-project** inconcluso. Esto es **diseño**:
+no toco el kit `e00ef29`, el analizador ni la evidencia de la corrida 1; espera tu revisión antes
+de implementar o ejecutar nada.
+
+##### 1.14.18.1 N10/N11/N13 — demostración local: no son ataques para 2.1.314
+
+- **Hecho (local, sin política).** Con una marketplace de **directorio local** —la misma forma que
+  usa el probe administrado de B1a— instalé un plugin, confirmé que el CLI lo registró con
+  `installPath` en la caché (`…/plugins/cache/<mk>/<plugin>/<ver>`) y que cargó. Después **envenené
+  la copia de la caché** (`register.mjs` → marcador `POISONED`) y volví a arrancar **sin
+  reinstalar**: el CLI siguió escribiendo `ORIG` y el debug mostró que leyó el `hooks.json`
+  **del repo en el lugar** (`…/repo/plugins/<plugin>/hooks/hooks.json`), no el de la caché (la copia
+  de caché quedó con `POISONED`, sin usarse).
+- **Inferencia.** Para una fuente de **directorio**, 2.1.314 lee los plugins **en el lugar**; la
+  caché/seed **no es un camino de carga**. Una copia del mismo nombre plantada en la caché nunca se
+  consulta. Esto explica el `impostor-location-not-considered` de la corrida 1: el ataque, tal como
+  está construido, **no ocurre**.
+- **Hecho (binario 2.1.314).** El tier de organización para un plugin de fuente **remota** (que sí
+  carga desde una copia/caché) se concede sólo cuando managed settings nombran sus **`pluginDigests`**
+  y lo listan en `prependPlugins`/`appendPlugins`. Es decir, el control de integridad de una copia
+  en caché es `pluginDigests`, un mecanismo distinto del que ejercita B1a.
+- **Propuesta: retirar N10/N11/N13 como no aplicables** al mecanismo observado (marketplace de
+  directorio leído en el lugar), **sin** contarlos como blocked. Documentar que el envenenamiento de
+  caché sólo es significativo para plugins de fuente **remota**, cuyo control es `pluginDigests`, y
+  dejarlo como un experimento **separado y futuro** (requiere red y digests; fuera de B1a).
+
+##### 1.14.18.2 N9 — criterio que reconoce el rechazo en `marketplace add`
+
+- **Evidencia (VM100).** `marketplace add` rc=1 con *"Marketplace source … is blocked by enterprise
+  policy. Allowed sources: …"*; `plugin install` rc=1 porque el plugin no está en el marketplace
+  rechazado. **Protección demostrada en el paso `add`.**
+- **Cambio mínimo (analizador).** N9 = **blocked** cuando: la salida **del propio** `marketplace
+  add` contiene un rechazo de política de marketplace **y** `plugin install` **no** tuvo éxito (no
+  instaló). Un `install` con éxito sigue siendo **FAIL**. Un rc≠0 **sin** ninguna de las cadenas de
+  rechazo sigue siendo **INCONCLUSIVE** (`install-error`): no se confunde un error operativo con un
+  rechazo.
+  - Cadenas de rechazo de marketplace (2.1.314), ninguna asume la palabra "policy":
+    `is blocked by enterprise policy`, `is not in the allowed marketplace list`,
+    `marketplace allowlist (strictKnownMarketplaces) does not include`,
+    `marketplace was not added. Remove it from extraKnownMarketplaces`.
+- **Tests (analizador).**
+  - *Positivo:* `marketplace-add` con cada una de las cuatro cadenas + `install` rc≠0 con
+    `not found in any marketplace` ⇒ **blocked** (`install-refused-at-add`).
+  - *Negativos:* `install` rc=0 ⇒ **FAIL** (`installed:N9`); `add`/`install` rc≠0 con un error
+    operativo y **sin** cadena de rechazo ⇒ **INCONCLUSIVE** (`install-error`); rechazo en `add`
+    pero `install` **con éxito** ⇒ **FAIL** (contradicción: algo instaló).
+- **No hace falta repetir N9**: su evidencia de la corrida 1 ya satisface el criterio nuevo.
+
+##### 1.14.18.3 N14 — el harness verifica la confianza, no asume que teclear la acepta
+
+- **Evidencia (VM100).** El CLI leyó el `hooks.json` administrado y descubrió los plugins, pero el
+  debug termina en *"hooks modules not loaded until workspace trust is accepted"* y *"Skipping
+  SessionEnd:other hook execution - workspace trust not accepted"*. **La confianza no se aceptó;**
+  no está demostrado por qué.
+- **Cambio mínimo (harness).** Tras responder el diálogo de confianza, **confirmar positivamente**
+  que se aceptó antes de medir: esperar en el debug/pane una señal inequívoca de post-confianza
+  (p. ej. `post-trust: re-discover project @skills-dir plugins`, o el probe `loaded (`), con
+  reintentos acotados. Si no se confirma, el intento termina **`harness-startup-failed`**, que es un
+  estado de medición, **nunca** `blocked` ni un INCONCLUSIVE de política. Enviar teclas no cuenta
+  como éxito. Subir el `settle` y capturar la **cola** del debug del arranque.
+- **Tests (driver).**
+  - *Positivo:* un arranque que alcanza la señal de post-confianza ⇒ se mide normal.
+  - *Negativos:* un arranque donde la confianza no se confirma ⇒ `harness-startup-failed`
+    (y el analizador lo trata como medición inválida, no como blocked); un arranque que queda en el
+    diálogo de confianza ⇒ ídem.
+- **Requiere** una corrida 2 **sólo de N14** para obtener una medición válida (con el control del
+  probe establecido).
+
+##### 1.14.18.4 N17 — separar user y project; capturar identidad y resultado de la aprobación
+
+- **Evidencia (VM100).** `pre-mcp-add` devolvió *"Cannot add MCP server: your organization's managed
+  settings allow only MCP servers that plugins provide."* ⇒ **N17-user: rechazo demostrado.** Además
+  `mcp_approval_screen=true` sin identificar el servidor de proyecto ⇒ **N17-project: inconcluso**
+  (el nombre vive sólo en la captura del pane, que el harness no guardó).
+- **Cambio mínimo (kit + analizador).**
+  - Dividir el intento en **N17-user** (`claude mcp add` de scope user) y **N17-project**
+    (`.mcp.json`).
+  - **N17-user = blocked** cuando la salida de `mcp add` contiene *"allow only MCP servers that
+    plugins provide"* (o `not allowed by your organization`), rc≠0, sin marcador.
+  - **N17-project:** el harness **captura de forma saneada** la pantalla de aprobación MCP — el
+    nombre del servidor (alias) y el resultado tras responder (aprobado/denegado) y si el servidor
+    arrancó (marcador). *blocked* exige que el servidor de proyecto, tras aprobarlo, **no** arranque
+    y que aparezca la línea de política que lo nombra (`MCP server "…": not allowed by your
+    organization`); si se aprueba y no hay línea que correlacione ⇒ INCONCLUSIVE; si arranca
+    (marcador) ⇒ FAIL.
+- **Controles (diseño).**
+  - *Positivo (sin política):* el servidor de proyecto, aprobado, **arranca** (marcador) — demuestra
+    que el camino se ejerce y que la captura del nombre funciona.
+  - *Negativo (con política):* aprobado pero no arranca, con la línea de política que lo nombra ⇒
+    blocked; sin esa línea ⇒ INCONCLUSIVE.
+- **Tests (analizador):** N17-user con el texto de rechazo ⇒ blocked; N17-project aprobado+no-arranca
+  +línea de política ⇒ blocked; aprobado+no-arranca sin línea ⇒ INCONCLUSIVE; arrancó ⇒ FAIL.
+- **Requiere** una corrida 2 de N17 (sólo para N17-project; N17-user ya está demostrado por la
+  evidencia de la corrida 1).
+
+##### 1.14.18.5 Alcance de una eventual corrida 2 (mínima)
+
+| Caso | ¿Corrida 2? | Por qué |
+| --- | --- | --- |
+| N9 | **No** | La evidencia de la corrida 1 + el criterio nuevo lo cierran como **blocked** (rechazo en `add`) |
+| N10/N11/N13 | **No** | **Retirados** como no aplicables a una marketplace de directorio (demostrado local); el envenenamiento de caché es un experimento remoto separado con `pluginDigests` |
+| N14 | **Sí** | Necesita una medición válida tras la corrección de confianza del harness |
+| N17 | **Sólo N17-project** | N17-user ya demostrado; N17-project necesita la captura saneada de la aprobación |
+
+**Antes de ejecutar la corrida 2:** se fija un kit nuevo por SHA con sus hashes (el `e00ef29`
+queda intacto como el de la corrida 1), con los cambios de §1.14.18.2–§1.14.18.4 y sus tests de
+regresión (y el barrido de mutaciones), y los criterios PASS/FAIL/INCONCLUSIVE de arriba fijados de
+antemano. No se re-ejecutan los 13 intentos ya **blocked**. Nada de esto está autorizado: espera tu
+revisión del diseño.
 ## 2. Versiones
 
 | Variante | CLI | Motivo |
