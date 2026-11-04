@@ -114,10 +114,16 @@ if [ -n "${claude_pid:-}" ]; then
 	case "$exe_base" in
 	'' | node | node[0-9]*) ;; # the old JS CLI: --version would answer for node
 	*)
-		v=$(env -i PATH=/usr/bin:/bin HOME=/nonexistent DISABLE_AUTOUPDATER=1 \
-			CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
-			timeout -k 1 3 "/proc/$claude_pid/exe" --version 2>/dev/null | head -c 128) || v=""
-		if [ -n "$start_before" ] && [ "$(starttime_of "$claude_pid")" = "$start_before" ] &&
+		# pipefail inside the substitution: its status is the binary's (or
+		# timeout's 124), not head's. A valid-looking line from a binary that
+		# then fails or hangs is not a version (owner review of #524).
+		v=$(
+			set -o pipefail
+			env -i PATH=/usr/bin:/bin HOME=/nonexistent DISABLE_AUTOUPDATER=1 \
+				CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+				timeout -k 1 3 "/proc/$claude_pid/exe" --version 2>/dev/null | head -c 128
+		) || v=""
+		if [ -n "$v" ] && [ -n "$start_before" ] && [ "$(starttime_of "$claude_pid")" = "$start_before" ] &&
 			[ "$(readlink "/proc/$claude_pid/exe" 2>/dev/null)" = "$exe" ] &&
 			[[ "$v" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\ \(Claude\ Code\)$ ]]; then
 			claude_version=$v

@@ -83,6 +83,13 @@ int main(int argc, char **argv) {
 		FILE *f = fopen(p, "r"); if (f) { if (!fgets(mode, sizeof mode, f)) mode[0] = 0; fclose(f); }
 		if (!strncmp(mode, "fail", 4)) { fprintf(stderr, "boom\\n"); return 1; }
 		if (!strncmp(mode, "bad", 3)) { puts("Update available"); return 0; }
+		if (!strncmp(mode, "okfail", 6)) { puts("2.1.308 (Claude Code)"); fflush(stdout); return 3; }
+		if (!strncmp(mode, "okhang", 6)) {
+			puts("2.1.308 (Claude Code)"); fflush(stdout);
+			snprintf(p, sizeof p, "%s/hang.pid", d);
+			f = fopen(p, "w"); if (f) { fprintf(f, "%d", (int)getpid()); fclose(f); }
+			for (;;) pause();
+		}
 		if (!strncmp(mode, "hang", 4)) {
 			snprintf(p, sizeof p, "%s/hang.pid", d);
 			f = fopen(p, "w"); if (f) { fprintf(f, "%d", (int)getpid()); fclose(f); }
@@ -115,7 +122,7 @@ beforeAll(async () => {
 afterAll(async () => {
 	await fs.rm(helperDir, { recursive: true, force: true });
 });
-async function parentMode(mode: "ok" | "fail" | "hang" | "bad") {
+async function parentMode(mode: "ok" | "fail" | "hang" | "bad" | "okfail" | "okhang") {
 	await fs.writeFile(path.join(helperDir, "mode"), mode);
 	await fs.rm(path.join(helperDir, "hang.pid"), { force: true });
 	return path.join(helperDir, "hang.pid");
@@ -401,6 +408,23 @@ describe("session-start.sh — the version is the firing process's, never PATH's
 		expect(received).toHaveLength(1);
 		expect(JSON.parse(received[0].body).st.claude_version).toBeNull();
 	});
+	it("a valid version line but a NON-ZERO exit ⇒ null (the binary's status counts, not head's)", async () => {
+		await parentMode("okfail");
+		await curlShim(await listen("ok"));
+		const r = await run(withToken);
+		expect(r).toMatchObject({ code: 0, stdout: "" });
+		expect(JSON.parse(received[0].body).st.claude_version).toBeNull();
+	});
+	it("a valid version line, then the binary hangs past the 3 s timeout ⇒ null, event sent, no survivor", async () => {
+		const pidFile = await parentMode("okhang");
+		await curlShim(await listen("ok"));
+		const r = await run(withToken);
+		expect(r.code).toBe(0);
+		expect(r.ms).toBeLessThan(6000);
+		expect(received).toHaveLength(1);
+		expect(JSON.parse(received[0].body).st.claude_version).toBeNull();
+		expect(isAlive(Number(await fs.readFile(pidFile, "utf8")))).toBe(false);
+	}, 15_000);
 	it("the query runs with an empty environment: no token, no proxy, no HOME reaches the binary", async () => {
 		await curlShim(await listen("ok"));
 		await run({ ...withToken, http_proxy: "http://127.0.0.1:9", SECRET_X: "s3cr3t" });
