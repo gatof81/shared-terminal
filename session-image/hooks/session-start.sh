@@ -9,8 +9,9 @@
 #
 # SessionStart is the one event that can't use an http hook, so this script
 # posts its stdin JSON to the same relay, adding an `st` block
-# with what only the container knows: the CLI version, the tmux session and
-# pane, and an allowlisted subset of the parent CLI's flags.
+# with what only the container knows: the version of the CLI process that
+# fired it, the tmux session and pane, and an allowlisted subset of that
+# process's flags.
 #
 # The CLI does not enforce `timeout` on async command hooks, so the script
 # bounds itself: the whole thing, children included, is under one
@@ -34,7 +35,6 @@ INGEST_URL="http://127.0.0.1:47613/ingest/claude/hook"
 input=$(head -c 65536)
 [ -n "$input" ] || exit 0
 
-claude_version=$(timeout 3 claude --version 2>/dev/null | head -c 64) || claude_version=""
 
 # Only ask tmux when this process actually runs inside a tmux pane: without
 # $TMUX a bare `tmux display-message` would answer for whatever server it
@@ -93,6 +93,37 @@ if claude_pid=$(find_claude_pid); then
 			;;
 		esac
 	done
+fi
+
+# The CLI version OF THE PROCESS THAT FIRED THIS HOOK — never `claude` from
+# PATH, which can be another installation (Educación HZ, 2026-11-04: the
+# conversation ran npm 2.1.316 while PATH's native launcher said 2.1.317, and
+# that is what this hook used to record). The process's own binary is
+# /proc/<pid>/exe, runnable even when replaced on disk (" (deleted)"). Empty
+# environment (no token, no proxy, no HOME to write to), auto-updater off,
+# bounded; the same process before and after (starttime); strict output.
+# Anything uncertain ⇒ null: the backend never authorizes on this value
+# anyway (CONVERSATION.md §8.1.9, v1.8.2) — it is what Chat displays.
+claude_version=""
+starttime_of() { awk '{ sub(/^.*\) /, ""); print $20 }' "/proc/$1/stat" 2>/dev/null; }
+if [ -n "${claude_pid:-}" ]; then
+	exe=$(readlink "/proc/$claude_pid/exe" 2>/dev/null) || exe=""
+	exe_base=${exe% (deleted)}
+	exe_base=${exe_base##*/}
+	start_before=$(starttime_of "$claude_pid")
+	case "$exe_base" in
+	'' | node | node[0-9]*) ;; # the old JS CLI: --version would answer for node
+	*)
+		v=$(env -i PATH=/usr/bin:/bin HOME=/nonexistent DISABLE_AUTOUPDATER=1 \
+			CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+			timeout -k 1 3 "/proc/$claude_pid/exe" --version 2>/dev/null | head -c 128) || v=""
+		if [ -n "$start_before" ] && [ "$(starttime_of "$claude_pid")" = "$start_before" ] &&
+			[ "$(readlink "/proc/$claude_pid/exe" 2>/dev/null)" = "$exe" ] &&
+			[[ "$v" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\ \(Claude\ Code\)$ ]]; then
+			claude_version=$v
+		fi
+		;;
+	esac
 fi
 
 body=$(
