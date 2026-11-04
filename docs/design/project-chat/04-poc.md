@@ -2099,7 +2099,7 @@ texto ni log sin depurar sale de VM100.
 
 #### 1.14.14 PASS-B1: diseño de B1a y B1b, evidencia estática de 2.1.314, riesgos y plan (**no ejecutado**)
 
-> Implementado en §1.14.15 (kit `22b2da3`), con las correcciones que trajo la validación local.
+> Implementado en §1.14.15 (kit `761dcb5`), con las correcciones que trajo la validación local.
 
 **GO del responsable (2026-11-03):** diseñar B1 e inspeccionar estáticamente Claude Code 2.1.314.
 - **No autoriza:**
@@ -2470,7 +2470,7 @@ harness:
 5. **I-env:** aceptar que la integridad de la instalación (B1a) se declare dependiente de la
    inscripción del gateway, y agregar K1–K5 a los ataques de B2.
 
-#### 1.14.15 Kit PASS-B1 (`22b2da3`): implementación, validación local, procedimiento y criterios (**no ejecutado en VM100**)
+#### 1.14.15 Kit PASS-B1 (`761dcb5`): implementación, validación local, procedimiento y criterios (**no ejecutado en VM100**)
 
 **GO del responsable (2026-11-04):**
 - **Autoriza:** implementar el kit `poc/passb1`, con tests sintéticos y validaciones locales.
@@ -2544,7 +2544,7 @@ N10, N11 y N13 (impostores del probe administrado) sólo tienen sentido frente a
 
 ##### 1.14.15.2 Contenido del kit
 
-`poc/channels-phase0@22b2da3ab33e73f6d3f7a0522410dae29d7ae311`, carpeta `poc/passb1/` (la lista exacta está en los hashes):
+`poc/channels-phase0@761dcb5609d62562e54593ed02108b662bc0f1f5`, carpeta `poc/passb1/` (la lista exacta está en los hashes):
 - **`run-b1.sh`:** runner por fases. Mismo modelo fail-closed que B0:
   - marcas de estado;
   - lector estricto de `env`;
@@ -2603,7 +2603,7 @@ Cada experimento usa su propia carpeta y su propio paso 0. En los dos, `IMAGE=sh
 # Paso 0 (como en §1.14.9), con KIND=b1a o KIND=b1b. Se ejecuta como un script.
 bash -euo pipefail -s <<'STEP0'
 KIND=b1a                    # o b1b
-COMMIT=22b2da3ab33e73f6d3f7a0522410dae29d7ae311
+COMMIT=761dcb5609d62562e54593ed02108b662bc0f1f5
 STAMP=$(date +%Y%m%d-%H%M%S)
 BASE=$HOME/pass$KIND-$STAMP
 test ! -e "$BASE"
@@ -2611,21 +2611,21 @@ mkdir -m 0700 "$BASE"; mkdir -m 0700 "$BASE/kit" "$BASE/results"
 gh api "repos/gatof81/shared-terminal/tarball/$COMMIT" > "$BASE/kit.tgz"
 tar xzpf "$BASE/kit.tgz" -C "$BASE/kit" --strip-components=1
 cat > "$BASE/kit.sha256" <<'SUMS'
-323b79a8b2f60c14c3dc9c4cbf25da832df3faeb2e0c68826dbadd6c75aee8e0  analyze_b1a.py
-cfe6cf6c5b852e34aceeebca622eebd9354d9e1f5c4002708013cc1e3dcd2177  analyze_b1b.py
-883b9070ef5fd942dcbe0494a86b5f5c9144029e00344259a5570591451d23c3  b1.py
+646302e8852e37323c8507a3adaf8cb8a572c06d7e0a64c39f8ebc091ee92bfd  analyze_b1a.py
+aca8104529c438dd05f65194cd2df136ca123becae82bea4437cba7d81832ed3  analyze_b1b.py
+2f4b3f70a0c0b1c2b91f1a5292a9f9d755c0b5b103328552ab9fb608bea31587  b1.py
 23a02a6dd40271761c57dcfe6ed265e550aacab8afda376fd0fa3e670c488932  managed/b1a.json
 3a090f524c93fa3be45fa35ebd347b86ffe47801cacf6ede819095ecd71e2a55  marketplace/.claude-plugin/marketplace.json
 c38e42b9a8ba4360b72465813088fe98b5e69a7ff5bf16ec4a43bc56ccb75514  marketplace/plugins/st-b1-probe/.claude-plugin/plugin.json
 d87f4cbc7a53b0d733c13dd4c7f81e49d7ede3b21163e0d64e2234176d43100d  marketplace/plugins/st-b1-probe/hooks/hooks.json
 707c35831bd4fa99d4e21f550c64a52de1ae2172c7fe5e4bdab16fb4245e0cf7  marketplace/plugins/st-b1-probe/hooks/register.mjs
-9bc847bd7545ad0863f92f66b7be943391860f7e708f1c81adcf4ba7a68d53e5  README.md
-0406bd615f747203a71ffe6da584059b31f5c2dd160ba3609dd8ab677f80a8ea  run-b1.sh
+d12427a320a32eb9e1abe72dd9edbfe2052ce5cd45810feb0996c3bdfbd7004d  README.md
+c2003e2eec05307419af0ce96a874ae6500c1f32ecdb538ca9a2c1727c07d777  run-b1.sh
 1845ebe18b0f73588cadb23ae345dd61f0ae68df52cc30f723366fa64ae958ec  test/fakebin/docker
-674442cf8e46ed1b479983dfd4f7ccc2c0821d2a939153c5f3e292cad6ab18d3  test/test_analyze_b1a.py
-c1193c68769192d93aeffdbc8f710a806a7ed74d2faa97168761da402b880fde  test/test_analyze_b1b.py
-dd77ddcf0e72102741067323e6154e8d0a6407860734404bc80dc5c97a405969  test/test_b1.py
-9bf7280658936343a2675c507e8c3eb3e54cda5b9c3f810c104f7a9c7aa14982  test/test_runner.py
+d0118c1ba3c66b6d4269d59236b96b646d9db7a3ee3646eae662aca7d1e191dd  test/test_analyze_b1a.py
+74b10b1dbcb1aa71169799017b4575ff53fedcfa414a2a910c6ba94b47bef750  test/test_analyze_b1b.py
+a0277ae2174175b0425ec0ff649a13f5e9e50a8be0818ce4d5e4ebfcc8953f2e  test/test_b1.py
+d69869d97a21b6491fad368e83c7ef998759ac45d65ba4af220c8062eb27cc90  test/test_runner.py
 SUMS
 cd "$BASE/kit/poc/passb1"
 sha256sum -c --strict --quiet "$BASE/kit.sha256"
@@ -2723,6 +2723,117 @@ R cleanup      # 66: evidencia sin copia verificada; 67: algo que no es nuestro 
   Los logs del CLI se filtran dentro del contenedor y los crudos se borran con él.
 - **Los fixtures intrusos son inofensivos:** sólo crean un archivo de marca en carpetas del
   intento.
+
+##### 1.14.15.6 Correcciones por la revisión independiente (2026-11-04; kit `761dcb5`)
+
+GO del responsable para corregir el kit y los documentos; NO-GO para ejecutar en VM100, construir
+imágenes, mergear, desplegar o tocar sesiones reales.
+
+**B1a — evitar falsos PASS:**
+- **Impostores (N10/N11/N13).** "Blocked" ya no sale de que el probe administrado cargue bien. El
+  intento se da por bloqueado sólo si el CLI **consideró** la copia plantada: una línea del debug
+  que **nombra la ruta exacta** donde se plantó (la registra `b1.py` en `impostor_paths`) y el
+  probe se leyó en el lugar. Si el CLI nunca miró esa ruta, es INCONCLUSIVE
+  (`impostor-location-not-considered`), a resolver con el log de VM100. Tests nuevos para los dos
+  casos.
+- **Un mod intruso que CARGÓ es FAIL aunque no deje marca.** El analizador marca FAIL si el debug
+  tiene `hooks module st-b1-rogue-… loaded (` o `plugin.register: st-b1-rogue-…`, sin depender del
+  archivo de marca. Cubre "un plugin cargado que no emitió la marca".
+- **`classic.SessionEnd`.** El diseño nombraba `SessionStart` y `SessionEnd`, pero el intento
+  termina con C-c y `SessionEnd` puede no dispararse. Se **reduce el alcance**: el PASS exige
+  `classic.SessionStart`; `SessionEnd` se informa como hecho (`classic_session_end_seen`).
+- **Validación de settings en todos los intentos**, no sólo P0: cualquier error de validación en
+  cualquier log da INCONCLUSIVE (`settings-invalid`, con la lista en `settings_invalid_in`).
+- **Correlación reforzada.** Un intento es bloqueado sólo con el control del mismo arranque (el
+  probe en tier de organización, o el rechazo al arrancar) **y** evidencia decisiva de que el CLI
+  encontró el ataque. La sola ausencia de marca nunca basta.
+- **`--network none`.** Confirmado que N4 sirve su zip en el loopback del propio contenedor, que
+  existe con `none`, y que `disableSideloadFlags` rechaza `--plugin-url` antes de cualquier fetch.
+  B1a ya no usa `bridge`: ninguna red externa en ninguno de los dos experimentos.
+- N15, `@synced` y los eventos con login siguen como cobertura pendiente, nunca bloqueados.
+
+**B1b — controles positivos por operación:**
+- **Una negación se acredita a H-ND sólo si la misma operación tiene éxito contra el control**
+  (la misma CLI desde la copia legible), bajo las mismas condiciones. Eso descarta una causa
+  independiente (seccomp, `/proc` ausente).
+- **READ y ATTACH separados.** Yama 1 restringe sólo ATTACH. Para un lector **no ancestro**:
+  - READ (`environ`, `auxv`, `maps`) se juzga en el caso no-ancestro; el control debe poder leer;
+  - ATTACH (`mem`, `process_vm_readv`, `ptrace`, `pidfd_getfd`) a un no-ancestro lo niega Yama
+    aunque el proceso sea volcable, así que **no se atribuye a H-ND**: es un hecho. ATTACH se
+    demuestra en H4 (ancestro), donde Yama deja que un ancestro se adjunte a un hijo volcable.
+- **H4** exige éxito del control por operación (READ y ATTACH) o queda INCONCLUSIVE.
+- **H4b** sigue como riesgo residual explícito: un trazador anterior al `exec` conserva los
+  registros.
+- **H5 analítico.** `suid_dumpable=2` y apport son precondiciones **observadas**, no una
+  demostración práctica de que nunca se exponga un core (`demonstrated:false`). No se provoca
+  ningún crash.
+- **Identidad del ejecutable ≠ estabilidad de PID/starttime.** Un `exec` conserva pid y
+  `starttime`; el ejecutable correcto es H6b/H6c, no esto. `pid_starttime_stable` se informa aparte
+  y H6c sigue pendiente de autorización.
+
+**Arquitectura de lanzamiento (09-launch-trust.md):**
+- Corregida la afirmación de que Yama 1 protege **todas** las lecturas de `/proc`. Yama restringe
+  sólo ATTACH; `environ`/`auxv`/`maps` (modo READ) las puede leer un proceso del mismo uid, no
+  ancestro, si el objetivo es volcable. Por eso **L1 por sí solo no protege la clave HMAC** de una
+  lectura READ: hace falta H-ND o no poner la clave en el entorno/argv (entregarla por un fd). La
+  identidad del lanzamiento (L1–L6) **no** depende de leer la memoria.
+- Agregado el diseño de una **POC mínima de L1 y L2** (§5bis de ese documento), con los ejes:
+  raíz de confianza del lanzamiento y del `exec`, protección READ y ATTACH, inyección por
+  loader/Bun/config/HOME/cwd, continuidad del PTY y reconexión, recreación y reinicio del
+  supervisor, impacto en Composer 3.2 y tmux, privilegios del daemon root y superficie de Docker,
+  recuperación sin afirmar identidades no demostrables. **Nada se implementa ni se corre.**
+- L1 **no** está aprobado como arquitectura y **no** se autoriza sacar a Claude de tmux. La
+  preferencia provisional del responsable es un supervisor/gateway separado del backend, con
+  privilegios mínimos; tampoco es un GO.
+
+**Estado de los tests tras las correcciones:**
+- analizador B1a: 7 tests, 42 mutaciones de criterio;
+- analizador B1b: 4 tests, 35 mutaciones de criterio;
+- `test_b1.py`: 15; `test_runner.py`: 22;
+- mutaciones de código: 31, todas detectadas;
+- `claude plugin validate`: pasa.
+
+Hashes del kit `761dcb5` (tarball de GitHub verificado; lista de archivos exacta):
+
+```
+646302e8852e37323c8507a3adaf8cb8a572c06d7e0a64c39f8ebc091ee92bfd  analyze_b1a.py
+aca8104529c438dd05f65194cd2df136ca123becae82bea4437cba7d81832ed3  analyze_b1b.py
+2f4b3f70a0c0b1c2b91f1a5292a9f9d755c0b5b103328552ab9fb608bea31587  b1.py
+23a02a6dd40271761c57dcfe6ed265e550aacab8afda376fd0fa3e670c488932  managed/b1a.json
+3a090f524c93fa3be45fa35ebd347b86ffe47801cacf6ede819095ecd71e2a55  marketplace/.claude-plugin/marketplace.json
+c38e42b9a8ba4360b72465813088fe98b5e69a7ff5bf16ec4a43bc56ccb75514  marketplace/plugins/st-b1-probe/.claude-plugin/plugin.json
+d87f4cbc7a53b0d733c13dd4c7f81e49d7ede3b21163e0d64e2234176d43100d  marketplace/plugins/st-b1-probe/hooks/hooks.json
+707c35831bd4fa99d4e21f550c64a52de1ae2172c7fe5e4bdab16fb4245e0cf7  marketplace/plugins/st-b1-probe/hooks/register.mjs
+d12427a320a32eb9e1abe72dd9edbfe2052ce5cd45810feb0996c3bdfbd7004d  README.md
+c2003e2eec05307419af0ce96a874ae6500c1f32ecdb538ca9a2c1727c07d777  run-b1.sh
+1845ebe18b0f73588cadb23ae345dd61f0ae68df52cc30f723366fa64ae958ec  test/fakebin/docker
+d0118c1ba3c66b6d4269d59236b96b646d9db7a3ee3646eae662aca7d1e191dd  test/test_analyze_b1a.py
+74b10b1dbcb1aa71169799017b4575ff53fedcfa414a2a910c6ba94b47bef750  test/test_analyze_b1b.py
+a0277ae2174175b0425ec0ff649a13f5e9e50a8be0818ce4d5e4ebfcc8953f2e  test/test_b1.py
+d69869d97a21b6491fad368e83c7ef998759ac45d65ba4af220c8062eb27cc90  test/test_runner.py
+```
+
+##### 1.14.15.7 CI de la PR #512: diagnóstico del test D8 (no es una regresión de esta rama)
+
+El commit documental falló una vez en el job de backend:
+`src/recreate/engine.test.ts`, caso D8 "backend restart with an attempt open or uncertain",
+que esperaba `uncertain` y obtuvo `resolved`.
+
+**Diagnóstico: flaky por tiempo bajo carga de CI, no una regresión de esta PR.**
+- La rama no toca `backend/`: `git diff d5c7e12 HEAD -- backend` está **vacío**. El código de
+  recreación es idéntico a `main` (`d5c7e12`), cuyo CI pasó.
+- El test usa temporizadores de reloj real (`tRecMs:80`, `tRbMs:80`, `tick(50)`/`tick(100)`) y
+  "reinicia" el motor creando uno nuevo sobre el mismo disco mientras el `create` viejo se resuelve
+  tarde. Es sensible a la carga.
+- Localmente, con el mismo código: 5/5 aislado, 12/12 en paralelo y 3/3 la suite completa
+  (132 archivos, 2746 tests) pasan.
+
+**No modifiqué el código de recreación.** El `resolve()` tras `stop()` ya está guardado por
+`!lease.held || this.stopped`; la hipótesis es una carrera de tiempo entre la resolución tardía
+del `create` viejo y el `stop()`/`recoverOnBoot`, agravada por la carga del runner. La corrección,
+si se confirma, es del test (temporizadores deterministas), bajo un diagnóstico y una autorización
+aparte; no es de esta PR. Recomiendo re-ejecutar el job. **La PR no se presenta como totalmente
+verde.**
 
 ## 2. Versiones
 

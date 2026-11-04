@@ -21,7 +21,7 @@ El código del kernel de VM100 (`Ubuntu-6.8.0-147.147`) le da la razón:
 | `/proc/<pid>/exe` es estado del kernel (`mm->exe_file`). Cambiarlo con `prctl(PR_SET_MM_EXE_FILE)` exige `CAP_SYS_RESOURCE`, que el contenedor no tiene | `kernel/sys.c` | Es fiable, salvo un `exec` posterior |
 | Un trazador que se adjuntó **antes** del `exec` de un binario ilegible conserva el control de los registros. `ptrace_access_vm()` le niega la memoria (dumpable ≠ 1), pero `GETREGS` y `SETREGS` no pasan por esa comprobación. `LSM_UNSAFE_PTRACE` sólo afecta a cambios de credenciales | `kernel/ptrace.c`, `fs/exec.c` | Con registros puede inyectar syscalls: `prctl(PR_SET_DUMPABLE,1)`, `mmap` de código propio, `execve`. **H-ND no protege a un proceso cuyo padre del mismo uid lo trazaba antes del `exec`**. Con `ptrace_scope=1`, cualquier ancestro uid 1000 (el shell del pane, el servidor tmux o un padre preparado por el agente) puede hacerlo |
 | `prctl(PR_SET_DUMPABLE, 1)` está permitido al propio proceso, sin privilegios | `kernel/sys.c` | Código ajeno **dentro** del CLI deshace H-ND |
-| Yama `ptrace_scope=1` limita sólo el modo ATTACH, y sólo a quien no es ancestro. `mem`, `process_vm_readv`, `pidfd_getfd` y `ptrace` usan ATTACH. `environ`, `auxv` y `maps` usan READ, que Yama no limita | `security/yama`, `fs/proc/base.c` | Un proceso **sin ancestros del agente** tiene la memoria y los fds protegidos por Yama, aun sin H-ND |
+| Yama `ptrace_scope=1` limita sólo el modo ATTACH, y sólo a quien no es ancestro. `mem`, `process_vm_readv`, `pidfd_getfd` y `ptrace` usan ATTACH. `environ`, `auxv` y `maps` usan READ, que Yama no limita | `security/yama`, `fs/proc/base.c` | Un proceso **sin ancestros del agente** tiene protegido por Yama sólo el ATTACH (`mem`, fds, `process_vm_readv`), aun sin H-ND; **no** las lecturas READ de `environ`/`auxv`/`maps`, que un mismo-uid volcable sí puede leer. Para esas hace falta H-ND o no poner secretos ahí |
 
 **Conclusión.** Leer el proceso después de lanzarlo no prueba cómo se lanzó. La integridad del
 arranque tiene que venir de **quién lo creó** y de que **ningún proceso del agente haya tenido
@@ -70,13 +70,24 @@ mismo paso abre un pidfd y comprueba `starttime`, el inodo del ejecutable, `Trac
 cgroup del contenedor. Guarda el registro de forma durable, con el patrón de `recreateAttempt.ts`.
 
 **Por qué cumple L4.** El proceso que crea `runc exec` tiene como padre a containerd-shim (o a
-`runc`). Ningún proceso uid 1000 es su ancestro, así que, con `ptrace_scope=1`:
-- nadie del agente puede adjuntarse a P (ATTACH);
-- nadie puede abrir su `mem`;
-- nadie puede usar `process_vm_readv` ni `pidfd_getfd`.
+`runc`). Ningún proceso uid 1000 es su ancestro, así que, con `ptrace_scope=1`, ningún proceso
+del agente puede **adjuntarse** a P (modo ATTACH): ni `ptrace`, ni abrir su `mem`, ni
+`process_vm_readv`, ni `pidfd_getfd`. Sus hijos (Bash, MCP, hooks) son descendientes, y Yama no
+deja a un descendiente trazar a su ancestro.
 
-Eso vale **aun sin H-ND**. Los hijos de P (Bash, MCP, hooks) son descendientes y Yama no les deja
-trazar a su ancestro. H-ND queda como defensa en profundidad, no como requisito.
+**Pero L4 por sí solo no protege toda la memoria de P.** Yama restringe **sólo** ATTACH. Las
+lecturas en modo READ de `/proc/<pid>/` —`environ`, `auxv`, `maps`— pasan por
+`PTRACE_MODE_READ_FSCREDS`, que Yama no mira: a un proceso **volcable** del mismo uid, aunque no
+sea ancestro, el kernel le permite leerlas (`__ptrace_may_access`: mismo uid + volcable). Así que,
+**sin H-ND**, un proceso del agente podría leer `environ` y `maps` de P y sacar de ahí la clave
+HMAC del gateway si viaja por el entorno. Entonces:
+- **La identidad del lanzamiento (L1–L6) no depende de leer la memoria de P**: la da el supervisor
+  por construcción (pidfd, inodo, sin ancestros del agente). L1 la cumple **aun sin H-ND**.
+- **Proteger los secretos de P frente a una lectura READ del mismo uid es un requisito aparte**,
+  que se cumple con **H-ND** (vuelve `environ`/`maps`/`mem` de propiedad root e ilegibles) **o**
+  manteniendo la clave fuera del entorno y de la línea de comandos, entregada por un fd que P lee
+  una vez y guardada sólo en memoria que READ no alcanza con H-ND. El `mem` (ATTACH) ya lo cubre
+  Yama para un no-ancestro; `environ`/`maps` (READ) no.
 
 **Inscripción.** El gateway recibe la conexión y obtiene el pid del host por `SO_PEERCRED`
 (B0, §1.14.13). Busca el registro con ese pid y `starttime`, con el pidfd vivo. Verifica:
@@ -130,19 +141,28 @@ CLI. El CLI y sus herramientas quedarían con el uid de tmux, y el problema sól
 | Superficie nueva en el host | — | Un daemon root (supervisor + gateway) con `docker exec` y `/proc` del host | Un gateway root, más un perfil seccomp por sesión o Yama 2 |
 | Costo de producto | — | Terminal y Composer del CLI de agente se rehacen | Sin depuradores en las sesiones y Composer adaptado |
 
-## 5. Recomendación
+## 5. Preferencia provisional (no es un GO)
 
-**L1** como raíz de confianza del lanzamiento.
-- **Por qué:**
-  - es la única opción que cumple L1–L4 por construcción;
-  - no depende de H-ND ni de relajar o endurecer seccomp o Yama;
+El responsable **no** aprobó L1 como arquitectura definitiva ni autorizó sacar a Claude de tmux.
+Su preferencia provisional es un supervisor/gateway **separado del backend, con privilegios
+mínimos**, y eso tampoco es un GO de implementación. El CLI de agente sigue en tmux hasta una
+decisión posterior. Esta sección registra hacia dónde apunta la evidencia; el diseño comparado y
+la POC mínima están en §5bis.
+
+Hacia **L1** apunta lo siguiente:
+- **A favor:**
+  - es la única opción que da la identidad del lanzamiento (L1–L4) por construcción;
+  - no exige relajar ni endurecer seccomp o Yama;
   - deja a las herramientas del agente como están.
-- **Lo que cuesta:**
+- **En contra:**
   - el CLI de agente sale de tmux;
   - el Composer necesita otro transporte, en un contrato nuevo. Hoy no se toca: el Composer 3.2
     sigue igual y este diseño no lo cambia.
-- **H-ND (B1b)** se mantiene como medición y defensa en profundidad. Su resultado ya no decide
-  L1.
+- **H-ND (B1b) o "sin secreto en el entorno" es un requisito de L1, no un extra.** L1 da la
+  identidad del lanzamiento sin leer la memoria de P, pero la clave HMAC del gateway hay que
+  protegerla de una lectura READ del mismo uid (`environ`/`maps`): con H-ND, o entregándola por un
+  fd y no dejándola nunca en el entorno, la línea de comandos ni memoria legible. El `mem` lo
+  cubre Yama para un no-ancestro.
 
 **Antes de implementar nada:**
 1. **B1a** sigue igual: la raíz de confianza del lanzamiento no reemplaza a la política
@@ -160,10 +180,51 @@ CLI. El CLI y sus herramientas quedarían con el uid de tmux, y el problema sól
    código dentro del proceso aunque el entorno sea fijo, y L1 tendría que fijar también el
    directorio de trabajo y HOME. Se agrega a K5.
 
+## 5bis. Diseño de POC mínima de L1 y L2 (comparación técnica; **sin implementar ni ejecutar**)
+
+Dos POC chicas, aisladas, para decidir entre L1 y L2 antes de comprometer una arquitectura.
+Ninguna se construye ni se corre con esta entrega: es el diseño para una revisión aparte.
+
+**POC-L1 (supervisor del host + `docker exec`).** Un daemon de prueba, fuera del backend, que:
+1. lanza un proceso dentro de un contenedor descartable con `docker exec -t`, con `argv` y `envp`
+   fijos y **sin** la clave en el entorno;
+2. toma su identidad al crearlo (pid del host por el `exec inspect`, pidfd, `starttime`, inodo del
+   ejecutable, `TracerPid`, cgroup) y la guarda;
+3. le entrega la clave por un fd (no por `envp`);
+4. expone un socket donde el "proceso lanzado" se inscribe, y el daemon lo acepta sólo si el
+   `SO_PEERCRED` coincide con el registro, el pidfd sigue vivo y el inodo del ejecutable no cambió.
+
+**POC-L2 (lanzador en el contenedor + ptrace negado + H-ND).** Un lanzador estático de root `0711`
+en un pane de tmux que abre el socket antes de su `exec`, el gateway lo inscribe por su inodo, y
+después hace `execve` del CLI de root `0711`; con un perfil seccomp de sesión que niega `ptrace`,
+`process_vm_readv/writev` y `pidfd_getfd`.
+
+**Ejes de evaluación** (cada POC se mide en todos):
+
+| Eje | Qué se mide | L1 | L2 |
+| --- | --- | --- | --- |
+| Raíz de confianza del lanzamiento y del `exec` | Que el proceso inscripto lo creó la raíz y que ningún proceso del agente fue su ancestro ni su trazador antes del `exec` | Por construcción (padre = shim, no uid 1000) | Por el inodo del lanzador + comprobación posterior al `exec`; depende de negar ptrace |
+| Protección READ | `environ`, `auxv`, `maps` ilegibles para el mismo uid no-ancestro | Sólo con H-ND o sin secreto en el entorno | Con H-ND |
+| Protección ATTACH | `mem`, `process_vm_readv`, `pidfd_getfd`, `ptrace` negados | Yama (no-ancestro) | Yama + seccomp |
+| Inyección por loader/Bun/config/HOME/cwd | `LD_PRELOAD`, `NODE_OPTIONS`, `BUN_OPTIONS`, `BUN_INSPECT`, `bunfig.toml`, settings de usuario/proyecto | `envp` fijo; falta fijar HOME y cwd y descartar `bunfig.toml` (pendiente H) | Igual, más el lanzador estático que ignora `LD_PRELOAD` |
+| Continuidad del PTY, reconexión | Si el flujo sobrevive a una reconexión del cliente | El supervisor sirve el PTY; una reconexión vuelve a adjuntarse a él | tmux ya lo resuelve |
+| Recreación del contenedor | Relanzar el CLI tras recrear | El supervisor relanza (con `--resume`) | El pane relanza el lanzador |
+| Reinicio del supervisor | Qué pasa con la identidad inscripta | Se pierde el PTY y la inscripción ⇒ `unverified` hasta relanzar; el registro durable **explica**, no readopta | Igual con el gateway |
+| Impacto en Composer 3.2 y tmux | Qué hay que rehacer | El CLI sale de tmux; Composer necesita otro transporte (contrato nuevo) | tmux se mantiene; H-ND rompe `readlink /proc/<pid>/exe` del Composer, que habría que mover al host |
+| Privilegios del daemon root y superficie de Docker | Qué puede hacer el componente nuevo | Un daemon root con `docker exec` y `/proc` del host; preferido **separado** del backend | Un gateway root; además un perfil seccomp por sesión |
+| Recuperación sin afirmar identidades no demostrables | Qué se declara tras un reinicio o una muerte | Nunca readopta por memoria; sin registro verificable ⇒ `unverified` | Igual |
+
+**Qué decide la POC.** Si L1 protege los secretos **sin** H-ND (clave sólo por fd, nunca en
+`environ`), evita depender de H-ND y del sandbox. Si no, L1 y L2 quedan al mismo nivel en
+protección y la decisión pasa a costo de producto (tmux y Composer) y a superficie del daemon.
+
 ## 6. Decisiones que se piden
 
-1. L1 como dirección, o comparar L1 y L2 con un prototipo antes de decidir.
-2. Dónde vive el supervisor/gateway: un daemon root aparte (recomendado, porque sobrevive a los
-   reinicios del backend) o dentro del backend con `pid: host`.
-3. Aceptar que el CLI de las sesiones de agente deje tmux (L1). Implica un contrato nuevo de
-   Composer y de terminal para ese CLI, en una fase posterior.
+Ninguna es un GO de implementación.
+1. Autorizar la **POC mínima** de §5bis para L1 y L2 (diseño primero, luego ejecución aparte), o
+   pedir sólo la comparación técnica sin prototipo.
+2. Dónde viviría el supervisor/gateway: la preferencia provisional del responsable es un **daemon
+   root separado del backend, con privilegios mínimos**; la alternativa es dentro del backend con
+   `pid: host`.
+3. Si en algún momento el CLI de agente puede dejar tmux. Hoy **no**: el Composer 3.2 y la
+   terminal de ese CLI no se tocan.
