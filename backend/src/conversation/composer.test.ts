@@ -14,6 +14,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { logger } from "../logger.js";
 import type { SessionMeta } from "../types.js";
+import { parsePolicy } from "./cliPolicy.js";
 import {
 	type ComposerDockerPort,
 	ComposerService,
@@ -1140,6 +1141,98 @@ describe("§8.1.9 v1.8.2: the version of the PROCESS decides, never the hook's t
 		const r = await send(both(), "no");
 		expect(r.body).toMatchObject({ error: "composer-not-empty" });
 		expect(versionCalls()).toHaveLength(0);
+	});
+});
+
+describe("§8.1.9 v1.8.3: open minimum + deny list, decided on the LIVE version", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+	const openPolicy = (deny?: string) =>
+		makeService({
+			cliPolicy: parsePolicy({
+				COMPOSER_CLI_VERSIONS: "2.1.314,2.1.316",
+				COMPOSER_CLI_MIN_VERSION: "2.1.314",
+				COMPOSER_CLI_DENY: deny,
+			}),
+		});
+	const logs = (spy: ReturnType<typeof vi.spyOn>) =>
+		spy.mock.calls.map((c: unknown[]) => String(c[0])).join("\n");
+
+	it.each([
+		["2.1.317", "the HZ auto-update"],
+		["2.2.0", "a minor"],
+		["3.0.0", "a major"],
+	])("plain `claude` at %s (%s) is delivered, and the log names the open rule", async (ver) => {
+		const info = vi.spyOn(logger, "info");
+		await seedConversation(CID, { claudeVersion: `${ver} (Claude Code)` });
+		docker.live = `${ver} (Claude Code)\n`;
+		const service = openPolicy();
+		const p = send(service, "ok");
+		await until(() => docker.effectSteps().includes("enter"));
+		await promptArrives("ok");
+		expect((await p).body).toMatchObject({ result: "delivered" });
+		expect(logs(info)).toContain(
+			`CLI ${ver} of pid ${CLAUDE_PID} authorized by COMPOSER_CLI_MIN_VERSION >=2.1.314`,
+		);
+	});
+
+	it("deny wins above the minimum: 409 cli-unvalidated/denied, nothing sent", async () => {
+		await seedConversation(CID, { claudeVersion: "2.1.318 (Claude Code)" });
+		docker.live = "2.1.318 (Claude Code)\n";
+		const r = await send(openPolicy("2.1.318"), "no");
+		expect(r.status).toBe(409);
+		expect(r.body).toMatchObject({
+			error: "cli-unvalidated",
+			version: "2.1.318",
+			detail: "denied",
+		});
+		expect(docker.effectSteps()).toEqual([]);
+		expect(await recordGone()).toBe(true);
+	});
+
+	it("below the minimum ⇒ not-allowed", async () => {
+		await seedConversation(CID, { claudeVersion: "2.1.313 (Claude Code)" });
+		docker.live = "2.1.313 (Claude Code)\n";
+		const r = await send(openPolicy(), "no");
+		expect(r.body).toMatchObject({
+			error: "cli-unvalidated",
+			version: "2.1.313",
+			detail: "not-allowed",
+		});
+	});
+
+	it("the hook's metadata never authorizes: hook 3.0.0, process 2.1.313 ⇒ refused", async () => {
+		await seedConversation(CID, { claudeVersion: "3.0.0 (Claude Code)" });
+		docker.live = "2.1.313 (Claude Code)\n";
+		const r = await send(openPolicy(), "no");
+		expect(r.body).toMatchObject({
+			error: "cli-unvalidated",
+			version: "2.1.313",
+			reportedVersion: "3.0.0 (Claude Code)",
+			detail: "not-allowed",
+		});
+	});
+
+	it("a pre-release process is unverifiable before the policy is even asked (open minimum cannot admit it)", async () => {
+		await seedConversation(CID, { claudeVersion: "2.1.320 (Claude Code)" });
+		docker.live = "2.1.320-rc.1 (Claude Code)\n";
+		const r = await send(openPolicy(), "no");
+		expect(r.body).toMatchObject({
+			error: "cli-unvalidated",
+			version: null,
+			detail: "unverifiable:version-output-invalid",
+		});
+		expect(docker.effectSteps()).toEqual([]);
+	});
+
+	it("every dynamic check still runs first: a busy pane is refused under the open policy", async () => {
+		await seedConversation(CID, { claudeVersion: "3.0.0 (Claude Code)" });
+		docker.live = "3.0.0 (Claude Code)\n";
+		docker.dump = `${RULE}\n❯ partial\n${RULE}\n`;
+		const r = await send(openPolicy(), "no");
+		expect(r.body).toMatchObject({ error: "composer-not-empty" });
+		expect(docker.calls.filter((c) => c.step === "version")).toHaveLength(0);
 	});
 });
 

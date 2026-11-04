@@ -22,7 +22,12 @@ import { BellSweeper } from "./bellSweeper.js";
 import { BootstrapBroadcaster, drainInFlightBootstraps } from "./bootstrap.js";
 import { parseAllowUsers } from "./conversation/allowUsers.js";
 import { ATTESTATION_KEY_INFO } from "./conversation/captureAttestation.js";
-import { ComposerService, composerFlagEnabled, parseCliVersions } from "./conversation/composer.js";
+import {
+	policyWarnings as cliPolicyWarnings,
+	describePolicy as describeCliPolicy,
+	parsePolicy as parseCliPolicy,
+} from "./conversation/cliPolicy.js";
+import { ComposerService, composerFlagEnabled } from "./conversation/composer.js";
 import { createIngestHandler } from "./conversation/ingestRoute.js";
 import { PaneRecordStore } from "./conversation/paneRecord.js";
 import { ConversationService } from "./conversation/service.js";
@@ -188,9 +193,12 @@ logger.info(
 // live under `.st-control/<sid>/composer/`, and the ack listens to the same
 // persisted-event stream the WS uses.
 const COMPOSER_ENABLED = composerFlagEnabled(process.env.CONVERSATION_COMPOSER_ENABLED);
+// §8.1.9: exact list + optional open minimum + deny list. A malformed
+// setting throws here and the backend refuses to start.
+const COMPOSER_CLI_POLICY = parseCliPolicy(process.env);
 const composer = new ComposerService({
 	enabled: COMPOSER_ENABLED,
-	cliVersions: parseCliVersions(process.env.COMPOSER_CLI_VERSIONS),
+	cliPolicy: COMPOSER_CLI_POLICY,
 	store: conversationStore,
 	conversation: {
 		probeSession: (sid) => conversation.probeSession(sid),
@@ -203,9 +211,15 @@ const composer = new ComposerService({
 });
 logger.info(
 	COMPOSER_ENABLED
-		? `[server] composer ENABLED (CLI versions: ${[...parseCliVersions(process.env.COMPOSER_CLI_VERSIONS)].join(", ")})`
+		? `[server] composer ENABLED (CLI versions: ${[...COMPOSER_CLI_POLICY.exact].join(", ")})`
 		: "[server] composer disabled (CONVERSATION_COMPOSER_ENABLED unset)",
 );
+// Same line as before the policy existed (deploy checks match it), then the
+// whole policy on its own line.
+if (COMPOSER_ENABLED) {
+	logger.info(`[server] composer CLI policy: ${describeCliPolicy(COMPOSER_CLI_POLICY)}`);
+	for (const w of cliPolicyWarnings(COMPOSER_CLI_POLICY)) logger.warn(`[server] ${w}`);
+}
 // Single shared bootstrap broadcaster (PR 185b2b). Owned at the server
 // scope so the route's runAsyncBootstrap and the WS handler's
 // /ws/bootstrap subscriber see the same per-session listener sets and

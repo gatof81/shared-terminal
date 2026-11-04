@@ -89,6 +89,8 @@ services:
       - CONVERSATION_COMPOSER_ENABLED=${CONVERSATION_COMPOSER_ENABLED:-}
       - UI_SHELL=${UI_SHELL:-}
       - COMPOSER_CLI_VERSIONS=${COMPOSER_CLI_VERSIONS:-}
+      - COMPOSER_CLI_MIN_VERSION=${COMPOSER_CLI_MIN_VERSION:-}
+      - COMPOSER_CLI_DENY=${COMPOSER_CLI_DENY:-}
       # §2.7.7 carry-over recreation: a path inside this container on the same
       # filesystem as Docker's data root (DEPLOYMENT.md "Activating an
       # existing session"). Unset ⇒ carry-overs refuse (disk-space-unknown).

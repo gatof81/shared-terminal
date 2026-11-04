@@ -10,6 +10,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { parsePolicy } from "./conversation/cliPolicy.js";
 import { composerFlagEnabled, parseCliVersions } from "./conversation/composer.js";
 
 const compose = readFileSync(path.resolve(__dirname, "../../docker-compose.yml"), "utf8");
@@ -41,6 +42,32 @@ describe("docker-compose.yml → composer env (3.2)", () => {
 		expect(env.get("CONVERSATION_COMPOSER_ENABLED")).toBe(shape("CONVERSATION_COMPOSER_ENABLED"));
 		expect(env.get("COMPOSER_CLI_VERSIONS")).toBe(shape("COMPOSER_CLI_VERSIONS"));
 		expect(env.get("CONVERSATION_ENABLED")).toBe(shape("CONVERSATION_ENABLED"));
+	});
+
+	it("COMPOSER_CLI_MIN_VERSION / COMPOSER_CLI_DENY are forwarded with the empty default ⇒ no minimum, no deny (behaviour-neutral)", () => {
+		const env = appEnvironment();
+		const shape = (name: string) => `$\{${name}:-}`;
+		expect(env.get("COMPOSER_CLI_MIN_VERSION")).toBe(shape("COMPOSER_CLI_MIN_VERSION"));
+		expect(env.get("COMPOSER_CLI_DENY")).toBe(shape("COMPOSER_CLI_DENY"));
+		const unset = parsePolicy({
+			COMPOSER_CLI_VERSIONS: interpolate(env.get("COMPOSER_CLI_VERSIONS")!, {}),
+			COMPOSER_CLI_MIN_VERSION: interpolate(env.get("COMPOSER_CLI_MIN_VERSION")!, {}),
+			COMPOSER_CLI_DENY: interpolate(env.get("COMPOSER_CLI_DENY")!, {}),
+		});
+		expect(unset.min).toBeNull();
+		expect(unset.deny.size).toBe(0);
+		const vars = {
+			COMPOSER_CLI_VERSIONS: "2.1.314,2.1.316",
+			COMPOSER_CLI_MIN_VERSION: "2.1.314",
+			COMPOSER_CLI_DENY: "2.1.318",
+		};
+		const set = parsePolicy({
+			COMPOSER_CLI_VERSIONS: interpolate(env.get("COMPOSER_CLI_VERSIONS")!, vars),
+			COMPOSER_CLI_MIN_VERSION: interpolate(env.get("COMPOSER_CLI_MIN_VERSION")!, vars),
+			COMPOSER_CLI_DENY: interpolate(env.get("COMPOSER_CLI_DENY")!, vars),
+		});
+		expect(set.min).toBe("2.1.314");
+		expect([...set.deny]).toEqual(["2.1.318"]);
 	});
 
 	it("nothing in .env ⇒ the container gets empty strings ⇒ composer off, default allowlist", () => {
