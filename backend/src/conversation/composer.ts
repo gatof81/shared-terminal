@@ -141,6 +141,8 @@ export interface ComposerDeps {
 	tAckMs?: number;
 	/** Per-user sends per minute (`composerUser`). */
 	userRatePerMinute?: number;
+	/** Host-side bound per live-version exec (§8.1.9); tests shorten it. */
+	liveExecDeadlineMs?: number;
 }
 
 // ── Results ─────────────────────────────────────────────────────────────────
@@ -318,6 +320,8 @@ export class ComposerService {
 	private readonly userSends = new Map<string, number[]>();
 	private readonly cliVersions: ReadonlySet<string>;
 	private readonly liveVersions = new LiveVersionCache();
+	/** Live-version execs not yet settled, per container (incl. those past their deadline). */
+	private readonly liveOutstanding = new Map<string, number>();
 	private readonly now: () => number;
 	private readonly after: (ms: number) => Promise<void>;
 	private readonly tHttp: number;
@@ -1539,17 +1543,27 @@ export class ComposerService {
 		// binary's process group, but a child that escaped it with the stream
 		// open would keep the exec — and this pane's lock — forever. Past the
 		// deadline we stop waiting (nothing is aborted) and refuse.
-		const exec = (cmd: string[], user?: string) =>
-			withDeadline(
-				this.deps.docker.exec(
-					containerId,
-					cmd,
-					null,
-					async () => true,
-					user ? { user } : undefined,
-				),
-				LIVE_EXEC_DEADLINE_MS,
+		// One hung query per container is enough: while an exec of an earlier
+		// query is still outstanding (past its deadline), refuse instead of
+		// leaving another stream behind (2nd review of #523).
+		if ((this.liveOutstanding.get(containerId) ?? 0) > 0) return { ok: false, why: "exec-error" };
+		const exec = (cmd: string[], user?: string) => {
+			const p = this.deps.docker.exec(
+				containerId,
+				cmd,
+				null,
+				async () => true,
+				user ? { user } : undefined,
 			);
+			this.liveOutstanding.set(containerId, (this.liveOutstanding.get(containerId) ?? 0) + 1);
+			const done = () => {
+				const n = (this.liveOutstanding.get(containerId) ?? 1) - 1;
+				if (n <= 0) this.liveOutstanding.delete(containerId);
+				else this.liveOutstanding.set(containerId, n);
+			};
+			p.then(done, done);
+			return withDeadline(p, this.deps.liveExecDeadlineMs ?? LIVE_EXEC_DEADLINE_MS);
+		};
 		const hit = this.liveVersions.get(containerId, pid, start, exe);
 		if (hit) {
 			// A hit counts only for the same FILE (an execve or a reinstall at

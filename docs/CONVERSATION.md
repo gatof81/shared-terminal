@@ -2453,7 +2453,14 @@ argv con el `PATH` del contenedor, que empieza en `~/.npm-global/bin`, dentro de
 tiene además una cota del lado del host (10 s; se deja de esperar, nada se aborta), para que un hijo
 que escape del `timeout` con el stream abierto no retenga el lock del pane. El **precheck** antes de
 la primera tecla (§8.1.5) compara también la ruta del ejecutable con la de la consulta: un `execve`
-entre la consulta y el envío responde `binding-stale`.
+entre la consulta y el envío responde `binding-stale`. Mientras una consulta anterior siga pendiente
+en un contenedor (pasada su cota), otra en el mismo contenedor se rechaza (`exec-error`) en vez de
+dejar otro stream colgado.
+
+**Límite aceptado.** El precheck compara la **ruta**, no el inodo: un `execve` del mismo proceso a
+**otro archivo en la misma ruta** (una reinstalación) en los milisegundos entre la verificación de la
+versión y el precheck no se detecta. Requiere que el CLI se re-ejecute a sí mismo justo entonces, lo
+que no hace; cerrarlo exigiría leer el inodo en el script de hechos del pane.
 
 La salida debe ser exactamente `X.Y.Z (Claude Code)` (un salto de línea final admitido), de 128
 bytes como mucho y una release plana. Si no se puede establecer, el envío se rechaza con 409

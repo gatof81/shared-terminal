@@ -121,6 +121,9 @@ class FakeDocker implements ComposerDockerPort {
 	inode = "64768:4242";
 	/** Called after each exec's step is known (before its answer is built). */
 	onStep: ((step: Step) => void) | null = null;
+	/** When true, the live-version binary run never settles (a child kept the stream open). */
+	hangVersion = false;
+	releaseVersion: (() => void) | null = null;
 	container: "running" | "stopped" | "gone" = "running";
 	/** Per step: outcomes for successive execs of that step; default exit 0. */
 	script = new Map<Step, Array<{ exit: number | null } | "park" | "reject">>();
@@ -161,6 +164,12 @@ class FakeDocker implements ComposerDockerPort {
 			user: opts?.user,
 		};
 		this.calls.push(call);
+		if (step === "version" && this.hangVersion) {
+			await new Promise<void>((r) => {
+				this.releaseVersion = r;
+			});
+			return { execId: "hung", exitCode: null, stdout: "" };
+		}
 		const q = this.script.get(step);
 		const plan = q && q.length > 0 ? q.shift()! : { exit: 0 };
 		if (plan === "reject") throw new Error("docker: cannot create exec");
@@ -1065,6 +1074,31 @@ describe("§8.1.9 v1.8.2: the version of the PROCESS decides, never the hook's t
 		const r = await send(both(), "no");
 		expect(r.body).toMatchObject({ error: "binding-stale" });
 		expect(docker.effectSteps()).toEqual([]);
+	});
+
+	it("a version run that never returns: refused at the host-side deadline, the pane lock is free, and the container gets no second hung query", async () => {
+		await seedConversation(CID, { claudeVersion: "2.1.314 (Claude Code)" });
+		docker.hangVersion = true;
+		const service = makeService({
+			cliVersions: new Set(["2.1.314", "2.1.316"]),
+			liveExecDeadlineMs: 50,
+		});
+		const r = await send(service, "no");
+		expect(r.body).toMatchObject({ error: "cli-unvalidated", detail: "unverifiable:exec-error" });
+		expect(docker.effectSteps()).toEqual([]);
+		await lockFree(service);
+		// Still hung: the next send does not start another query on that container.
+		const r2 = await send(service, "no", ID2);
+		expect(r2.body).toMatchObject({ error: "cli-unvalidated", detail: "unverifiable:exec-error" });
+		expect(docker.calls.filter((c) => c.step === "version")).toHaveLength(1);
+		// Once it settles, queries are possible again.
+		docker.hangVersion = false;
+		docker.releaseVersion?.();
+		await new Promise((res) => setTimeout(res, 10));
+		const p3 = send(service, "ok", "c3c3c3c3-3333-4333-8333-333333333333");
+		await until(() => docker.effectSteps().includes("enter"));
+		await promptArrives("ok");
+		expect((await p3).body).toMatchObject({ result: "delivered" });
 	});
 
 	it("a cache hit counts only for the same FILE: another inode at the same path re-runs the query", async () => {
