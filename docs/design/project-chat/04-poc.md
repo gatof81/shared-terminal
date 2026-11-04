@@ -3341,68 +3341,91 @@ queda intacto como el de la corrida 1), con los cambios de §1.14.18.2–§1.14.
 regresión (y el barrido de mutaciones), y los criterios PASS/FAIL/INCONCLUSIVE de arriba fijados de
 antemano. No se re-ejecutan los 13 intentos ya **blocked**. Nada de esto está autorizado: espera tu
 revisión del diseño.
-#### 1.14.19 Kit de corrida 2 de PASS-B1a (`37fd028`): implementado, validado localmente; **auditoría estática pendiente, no ejecutado**
+#### 1.14.19 Kit de corrida 2 de PASS-B1a (`5eb257a`): auditado (NO-GO de `37fd028`) y corregido, validado localmente; **nueva auditoría estática pendiente, no ejecutado**
 
 GO del responsable para implementar el kit de corrida 2 con cuatro condiciones (§1.14.18), NO-GO
-para ejecutarlo. Implementado en la rama `poc/channels-phase0`; el commit `e00ef29` de la corrida 1
-queda **intacto en la historia**. El próximo gate es una auditoría estática del kit nuevo; recién
-después se decide la segunda ejecución.
+para ejecutarlo. El primer kit (`37fd028`) fue sometido a una **auditoría estática independiente del
+responsable** contra `e00ef29`: **NO-GO para VM100**, GO sólo para corregir el kit y sus tests
+locales. La auditoría devolvió seis hallazgos (B1–B6) y controles adicionales; cada uno se corrigió
+**primero con un test que reproduce el fallo y luego el arreglo**, en el commit `5eb257a` sobre
+`37fd028`. El commit `e00ef29` de la corrida 1 queda **intacto en la historia**; `37fd028` también
+se conserva como la línea base auditada. El próximo gate es una **nueva** auditoría estática del kit
+corregido; recién después se decide la segunda ejecución.
 
-**SHA del kit:** `37fd028691d8acff25be7542bbbec59ed3f492d9`. 17 archivos (se agregan
-`summary-b1a.py` y `test/test_summary.py`). Tarball de GitHub verificado contra estos hashes y la
-lista exacta:
+**SHA del kit:** `5eb257a0b96608a365d6a78def4e407c8c67e2db`. 17 archivos. Tarball de GitHub
+(`/tarball/5eb257a…`) verificado contra estos hashes y la lista exacta (sin archivos de más ni de
+menos):
 
 ```
-495f52b368ae8041202f7c5956e3b98c8040468744739c0738f96b1cb89d67fa  analyze_b1a.py
+7404104699c51a24c82c51643e3d0d1fc141d1e6487f03dbd1adbaf13326bd3f  analyze_b1a.py
 e33dc88811b9472ccbea4819e8af0cf9443ec575e76d8c1385d804fc9b87011f  analyze_b1b.py
-b7d5ecfcab44aa8f12c6a420bc1935eb8626565fc9a8a1f8f7e3a83a857a2533  b1.py
+027a052e36c6a24407d79473f805eee2e8c6f481949dc2a3a301fd34dc08d357  b1.py
 23a02a6dd40271761c57dcfe6ed265e550aacab8afda376fd0fa3e670c488932  managed/b1a.json
 3a090f524c93fa3be45fa35ebd347b86ffe47801cacf6ede819095ecd71e2a55  marketplace/.claude-plugin/marketplace.json
 c38e42b9a8ba4360b72465813088fe98b5e69a7ff5bf16ec4a43bc56ccb75514  marketplace/plugins/st-b1-probe/.claude-plugin/plugin.json
 d87f4cbc7a53b0d733c13dd4c7f81e49d7ede3b21163e0d64e2234176d43100d  marketplace/plugins/st-b1-probe/hooks/hooks.json
 707c35831bd4fa99d4e21f550c64a52de1ae2172c7fe5e4bdab16fb4245e0cf7  marketplace/plugins/st-b1-probe/hooks/register.mjs
 bfac25ae1fa9ffb8faf7895440cc7506d39bbef80c280b55bdb22523e2e8e4e9  README.md
-6ab27ef4a7bae5722b878e1b67ec08c77b3d047851073d74203d34f95aecbca9  run-b1.sh
-7556ecdf064caa05df23a9dc725f177c049d391b0f330a3ae1751203396e56da  summary-b1a.py
-1845ebe18b0f73588cadb23ae345dd61f0ae68df52cc30f723366fa64ae958ec  test/fakebin/docker
-42218f64d60f8024639220179bb7ecbc3e5eff75ec5756aadd7a391a33928ddb  test/test_analyze_b1a.py
+974c88ee1d9fc358b45402f0ddc174d8612ac91c4c6264007bc48fb80ca3f705  run-b1.sh
+131f26f9b330e00b12c1d4930e80744b5c166cc8e04032ce4534e2dab5881d1d  summary-b1a.py
+9779770693681d5a0ca281c2bc8fa92701a8eac4c2fc8f00c7d9ed802dbe3624  test/fakebin/docker
+935a78c649ca1fc55888292f5c9ef1a54a8d414e8fa0fbcbf5e78047a3ae3297  test/test_analyze_b1a.py
 a45744f700d780ee041179a919fe4f87d153049bb01b9287735e11ce2e92bf14  test/test_analyze_b1b.py
 e2b086bf3896b95046921be7c652cfccfbf457b23cc591ebd7b3c7c4eec048cb  test/test_b1.py
-ec8c9a4f47a634b3ba65411975ddcfaf60752941ba9d36fc6106745e5586c610  test/test_runner.py
-967f8649c0f8fe3a7ccd36260591df9c377bdd3cf04df2421665c94ef5e32c04  test/test_summary.py
+4018ff7dc79284c00fb2f3534a4e71d5b2ca4b1770cdaf420b903526260c64f9  test/test_runner.py
+5728c52f67f554af649ff343d7375a1a975939595a3f41627f92a9d8a3d23ace  test/test_summary.py
 ```
 
-**Cambios frente a `e00ef29`** (las cuatro condiciones):
-1. **N9** (cond. 1): `analyze_b1a` juzga los **dos** comandos por su propia salida y rc,
-   correlacionando plugin↔marketplace con el mensaje real de VM100
-   `not found in marketplace "st-b1-rogue-mk9"`. **blocked** sólo con rechazo de política en
-   `marketplace add` **y** un fallo de `install` correlacionado; un rechazo de `add` + un fallo de
-   `install` no relacionado ⇒ INCONCLUSIVE; un `install` con éxito ⇒ FAIL. `load()` guarda la
-   salida por comando (`pre_text`).
-2. **N14** (cond. 2): primero medición. Para juzgar el ataque se exige que el probe administrado se
-   establezca en **el mismo arranque** (`session.start` + tier de organización); si no, el arranque
-   es `harness-startup-failed` (INCONCLUSIVE de medición, nunca blocked). La confianza se confirma
-   por una señal de post-confianza, no por suponer que teclear la aceptó; los reintentos son
-   acotados y re-leen la pantalla.
-3. **N17** (cond. 3): dividido en `N17-user` (blocked con el texto real
-   *"allow only MCP servers that plugins provide"*) y `N17-project` (captura **saneada** de la
-   aprobación MCP: servidor identificado + aprobado, que **no** arrancó, con una línea de rechazo
-   que lo nombra ⇒ blocked; sin línea atribuible ⇒ INCONCLUSIVE; arrancó ⇒ FAIL). Un mensaje
-   genérico no es prueba. El nombre del servidor se guarda como alias, no en crudo.
-4. **Consolidación** (cond. 4): `e00ef29` (corrida 1) y el kit nuevo (corrida 2) quedan bajo SHA
-   distintos. `summary-b1a.py` (solo lectura) imprime un resumen combinado que cita la
-   **procedencia** de cada hallazgo (qué corrida y SHA), con N10/N11/N13 **excluidos del alcance**
-   (no blocked) y la advertencia de que un PASS de alcance reducido **no** es la seguridad general
-   de Channels. El runner acepta `RUN2=1` para ejecutar **sólo** P0, N14 y N17-project, con etiqueta
-   `passb1.run=2` y nombre de contenedor `pass<kind>-run2-exp-<STAMP>` (identificación inequívoca).
-   N10/N11/N13 se retiran de la lista de intentos.
+**Hallazgos de la auditoría estática, corregidos en `5eb257a`** (diff `37fd028..5eb257a`; cada uno
+con un test que primero reproduce el fallo):
+- **B1 — preflight incompatible con la corrida 1 retenida.** `RUN2=1` ahora **convive sólo** con el
+  contenedor esperado de la corrida 1, identificado por **id completo (64-hex) Y nombre
+  (`/$RUN1_EXP`) Y etiqueta `passb1.experiment`**; cualquier otro contenedor `passb1` aborta sin
+  tocar nada. `RUN1_ID` y `RUN1_EXP` (distinto del EXP de la corrida 2) son obligatorios bajo
+  `RUN2=1`. El contenedor retenido nunca se elimina.
+- **B2 — consolidado incompatible con la evidencia real.** La corrida 1 (`e00ef29`) guardó el
+  intento MCP como `N17`, no `N17-user`. `summary-b1a.py` agrega un adaptador **legacy limitado**
+  que extrae **sólo** la evidencia de N17-user (el rechazo de `claude mcp add`) del directorio
+  legacy; el resto de N17 no se reinterpreta.
+- **B3 — falso PASS del consolidado.** Una corrida contribuye **sólo si es VÁLIDA**: su
+  `SHA256SUMS` verifica (fail-closed, re-hash de cada archivo) **y** `analyze` no reporta ningún
+  fallo **global** (manifest, versión del CLI, config aplicada, baseline, guard). Una corrida
+  inválida nunca contribuye ni produce un PASS de alcance reducido.
+- **B4 — falso *blocked* de N17-project.** *blocked* exige ahora: control del **mismo arranque**
+  (tier de organización), aprobación **confirmada** (la selección **cerró** la pantalla, no sólo la
+  mostró), identidad que **coincide con el fixture** (`name_matches_fixture`), y una línea de
+  rechazo que **nombra `st-b1-rogue-n17p`**. Screen-only, no-confirmada, identidad distinta o
+  mensaje genérico/n17u ⇒ INCONCLUSIVE; arrancó ⇒ FAIL.
+- **B5 — falso negativo de N9.** Un `plugin install` con **rc=0** es **FAIL incondicional** (ya no
+  se exculpa por ningún texto). La correlación de fallo de install debe **nombrar a la vez** el
+  plugin (`st-b1-rogue-n9`) y el marketplace rechazado (`st-b1-rogue-mk9`); un `not found in any
+  marketplace` genérico ya **no** alcanza como correlación.
+- **B6 — N14 y validación parcial.** *blocked* de N14 requiere una línea que **nombre el mecanismo
+  `skills-dir` concretamente** (`Plugins from …/.claude/skills/… blocked by your organization's
+  managed settings`); la frase genérica ya no basta. `analyze(scope=…)` juzga **sólo** los ids del
+  subconjunto focalizado (corrida 2 = {N14, N17-project}) pero **siempre** evalúa todos los
+  controles globales, de modo que una corrida focalizada no puede ocultar un fallo global.
+- **Otros controles.** `RUN2` se valida (`0|1`); `RUN2=1` exige `KIND=b1a`; la etiqueta
+  `passb1.run=$RUNTAG` se **verifica con `docker inspect`** tras crear el contenedor, no sólo se
+  envía. Todo sigue **fail-closed**.
 
-**Resultados locales de los tests** (sin VM100, con fixtures y controles descartables):
-- `test_analyze_b1a.py`: fixture PASS + 44 mutaciones de criterio;
-- `test_analyze_b1b.py`: 42 mutaciones (sin cambios de B1b);
-- `test_b1.py`: 15 (procesos reales); `test_runner.py`: 24 (incluye el subconjunto de corrida 2 y
-  la verificación de `NetworkMode none`); `test_summary.py`: 2;
-- **44 mutaciones de código**, todas detectadas; `claude plugin validate` pasa.
+**Cambios base (las cuatro condiciones, de `37fd028`, conservados):** N9 juzgado por los dos
+comandos (`pre_text`); N14 medición-primero con probe en el mismo arranque; N17 dividido en
+`N17-user`/`N17-project`; consolidación bajo SHA distintos con procedencia por hallazgo, N10/N11/N13
+**excluidos del alcance** (retirados de la lista de intentos, reportados en `excluded`) y la
+advertencia de que un PASS de alcance reducido **no** es la seguridad general de Channels. El runner
+acepta `RUN2=1` para ejecutar **sólo** P0, N14 y N17-project, etiqueta `passb1.run=2`, nombre
+`pass<kind>-run2-exp-<STAMP>`.
+
+**Resultados locales de los tests** (sin VM100, con fixtures y controles descartables; todas OK):
+- `test_analyze_b1a.py`: **7**; `test_analyze_b1b.py`: **4** (B1b sin cambios);
+- `test_b1.py`: **15** (procesos reales); `test_runner.py`: **30** (coexistencia con la corrida 1
+  retenida, rechazo de contenedores desconocidos/nombre equivocado, `RUN2` inválido, `KIND≠b1a`,
+  etiqueta `passb1.run` aplicada, subconjunto de corrida 2, `NetworkMode none`);
+- `test_summary.py`: **6** (PASS de alcance reducido + procedencia, legacy-N17, run2 ausente,
+  fallos globales, baseline, `SHA256SUMS` alterado/ausente);
+- **50 mutaciones de código**, todas detectadas (0 MISSED, 0 pattern-not-found); `claude plugin
+  validate` pasa.
 
 **Criterios de la corrida 2, fijados de antemano** (idénticos a §1.14.18.5): *blocked* sólo con el
 control del mismo arranque y la evidencia específica del rechazo; *FAIL* con cualquier marcador, un
@@ -3410,12 +3433,14 @@ control del mismo arranque y la evidencia específica del rechazo; *FAIL* con cu
 evidencia o la medición (`harness-startup-failed`). N15, `@synced` y los eventos con login siguen
 pendientes, nunca blocked.
 
-**Procedimiento para la revisión independiente (auditoría estática; no ejecutar):** leer el diff
-`e00ef29..37fd028` de `poc/passb1/`, correr las suites y el barrido de mutaciones localmente
-(`python3 test/test_analyze_b1a.py`, `test_runner.py`, `test_summary.py`, `test_b1.py`), y revisar
-que el modo `RUN2=1` del runner sólo itere P0/N14/N17-project. La corrida 2 en VM100 queda sujeta a
-tu autorización tras esa auditoría. El contenedor y la evidencia de la corrida 1 permanecen
-retenidos; `e00ef29` no se altera.
+**Procedimiento para la revisión independiente (auditoría estática; no ejecutar):** leer el diff de
+la corrección `37fd028..5eb257a` (y, para el panorama completo, `e00ef29..5eb257a`) de
+`poc/passb1/`, correr las suites y el barrido de mutaciones localmente (`python3
+test/test_analyze_b1a.py`, `test_analyze_b1b.py`, `test_b1.py`, `test_runner.py`,
+`test_summary.py`), y revisar que el modo `RUN2=1` del runner sólo itere P0/N14/N17-project y que su
+preflight sólo conviva con el contenedor retenido de la corrida 1 (id+nombre+etiqueta). La corrida 2
+en VM100 queda sujeta a tu autorización tras esa auditoría. El contenedor y la evidencia de la
+corrida 1 permanecen retenidos; `e00ef29` y `37fd028` no se alteran.
 ## 2. Versiones
 
 | Variante | CLI | Motivo |
