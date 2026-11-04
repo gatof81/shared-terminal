@@ -289,6 +289,8 @@ def one_start(aid, n, A, ws, cli, args, full_env, timeout, settle):
     envs = " ".join(f"{k}={sh_quote(v)}" for k, v in sorted(full_env.items()))
     argv = " ".join(sh_quote(x) for x in [cli, *args, "--debug-file", os.path.join(A, f"debug-{n}.log")])
     cmd = f"cd {sh_quote(ws)} && env -i {envs} {argv} 2> {sh_quote(os.path.join(A, f'stderr-{n}.txt'))}; echo $? > {sh_quote(rcf)}"
+    probe_dir = os.path.join(ws, ".passb1", "out", "probe")
+    before = set(files_in(probe_dir))
     starts_before = sum(1 for r in probe_records(ws) if r.get("kind") == "session.start")
     tmux("new-session", "-d", "-s", sess, "-x", "200", "-y", "50", "sh", "-c", cmd)
     t0 = time.monotonic()
@@ -338,6 +340,18 @@ def one_start(aid, n, A, ws, cli, args, full_env, timeout, settle):
         out["trust_still_shown"] = bool(SCREENS["trust"].search(pane_text(sess)))
     finally:
         tmux("kill-session", "-t", sess, check=False)
+    # The probe files this start added (distinct inst per load): the control for THIS start.
+    new = sorted(set(files_in(probe_dir)) - before)
+    kinds = []
+    for rel in new:
+        try:
+            with open(os.path.join(probe_dir, rel), encoding="utf-8") as f:
+                r = json.loads(f.read())
+            if isinstance(r, dict) and r.get("probe") == PROBE and r.get("kind"):
+                kinds.append(r["kind"])
+        except (OSError, ValueError):
+            pass
+    out["probe_kinds"] = sorted(set(kinds))
     return out
 
 

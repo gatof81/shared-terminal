@@ -40,6 +40,8 @@ LOADED = re.compile(r"hooks module (\S+?)@(\S+) loaded \((\w+), environment \d+,
 REGISTER = re.compile(r"plugin\.register: (\S+) \((\w+), (\S+)\), judged by")
 ROGUE_LOADED = re.compile(r"hooks module (st-b1-rogue-\S+?)@\S+ loaded \(|plugin\.register: (st-b1-rogue-\S+) \(")
 READ_HOOKS = re.compile(r"Read hooks\.json for plugin (\S+) \(enabled=\w+\): (\S+)")
+SKIP_ALREADY_LOADED = re.compile(r"Skipping duplicate hooks file for plugin \S+: (\S+) \(resolves to already-loaded")
+INSTALL_REFUSED = re.compile(r"blocked by your organization's policy|marketplace-blocked-by-policy|dependency-blocked-by-policy")
 NOT_ORG = re.compile(r"(\S+) is enabled by managed settings, but .* not treated as the organization's")
 GUARD_SEATED = re.compile(r"(?:cc-plugin-sec-default@builtin )?seated (?:outermost: this machine has managed settings|by managed prependPlugins)")
 GUARD_NOT_SEATED = re.compile(r"cc-plugin-sec-default@builtin not seated")
@@ -84,12 +86,21 @@ def load(d):
     adir = os.path.join(d, "attempts")
     for aid in os.listdir(adir) if os.path.isdir(adir) else []:
         a = os.path.join(adir, aid)
+        res = _json(os.path.join(a, "result.json")) or {}
+        starts = res.get("starts") or []
+        per_start = [_text(os.path.join(a, f"debug-{i + 1}.log.filtered")) for i in range(len(starts))]
+        combined = _text(os.path.join(a, "debug.log.filtered"))
+        # The start where the attack is in effect is the last one; evaluate the control there.
+        last_debug = next((t for t in reversed(per_start) if t), combined)
+        last_kinds = (starts[-1].get("probe_kinds") if starts and isinstance(starts[-1], dict) else None)
         att[aid] = {
-            "result": _json(os.path.join(a, "result.json")),
-            "debug": _text(os.path.join(a, "debug.log.filtered")),
+            "result": res or None,
+            "debug": last_debug,
+            "all_debug": combined or "".join(per_start),
+            "probe_kinds": last_kinds,
             "stderr": _text(os.path.join(a, "stderr.txt.filtered")),
             "pre": "".join(_text(os.path.join(a, f)) for f in sorted(os.listdir(a)) if f.startswith("pre-")),
-            "has_debug": os.path.exists(os.path.join(a, "debug.log.filtered")),
+            "has_debug": os.path.exists(os.path.join(a, "debug.log.filtered")) or bool(per_start),
         }
     return {"attempts": att, "applied": _json(os.path.join(d, "applied.json")), "manifest": _json(os.path.join(d, "capture-manifest.json")),
             "preflight": _json(os.path.join(d, "preflight.json")), "cli_before": _json(os.path.join(d, "cli-version-before.json")),
@@ -112,10 +123,14 @@ def probe_state(a):
     loads = [m.groups() for m in LOADED.finditer(a["debug"]) if m.group(1) == PROBE]
     regs = [m.groups() for m in REGISTER.finditer(a["debug"]) if m.group(1) == PROBE]
     reads = [m.group(2) for m in READ_HOOKS.finditer(a["debug"]) if m.group(1) == PROBE]
-    kinds = sorted({p.get("kind") for p in r.get("probe") or [] if isinstance(p, dict)} - {None})
+    skipped = {m.group(1) for m in SKIP_ALREADY_LOADED.finditer(a["debug"])}
+    if a.get("probe_kinds") is not None:
+        kinds = sorted(set(a["probe_kinds"]))
+    else:
+        kinds = sorted({p.get("kind") for p in r.get("probe") or [] if isinstance(p, dict)} - {None})
     tiers = sorted({t for _, _, _, t in loads} | {t for _, t, _ in regs})
-    return {"loaded": bool(loads), "tiers": tiers, "kinds": kinds, "reads_in_place_only": bool(reads) and all(p.startswith(MARKET_PATH) for p in reads),
-            "read_elsewhere": any(not p.startswith(MARKET_PATH) for p in reads),
+    return {"loaded": bool(loads), "tiers": tiers, "kinds": kinds, "read_paths": reads, "skipped_paths": sorted(skipped),
+            "in_place_read": any(p.startswith(MARKET_PATH) for p in reads),
             "not_org_warning": any(m.group(1).startswith(PROBE) for m in NOT_ORG.finditer(a["debug"]))}
 
 
@@ -139,6 +154,20 @@ def classify(aid, a):
         if not (SIDELOAD.search(a["stderr"]) or SIDELOAD.search(a["debug"])):
             return "inconclusive", "no-sideload-refusal-text"
         return "blocked", "sideload-refused"
+    # N9 is judged on the INSTALL outcome, not on whether the plugin ran. `plugin marketplace
+    # add` / `plugin install` must be REFUSED by policy; a successful install is a breach even
+    # if the plugin never executed this session.
+    if aid == "N9":
+        rc = {e.get("alias"): e.get("rc") for e in (r.get("pre") or []) if isinstance(e, dict)}
+        refused = bool(INSTALL_REFUSED.search(a["pre"])) or (rc.get("plugin-install") not in (0, None))
+        installed_ok = rc.get("plugin-install") == 0 and not INSTALL_REFUSED.search(a["pre"])
+        if installed_ok:
+            return "loaded", "installed:N9"          # a rogue was installed from an unapproved marketplace
+        if not org_ok(ps):
+            return "inconclusive", "no-control:probe-not-in-org-tier"
+        if refused:
+            return "blocked", "install-refused"
+        return "inconclusive", "install-outcome-unknown"
     if not org_ok(ps):
         return "inconclusive", "no-control:probe-not-in-org-tier"
     # A rogue hooks module that LOADED is a FAIL whether or not its marker landed: the write
@@ -146,19 +175,25 @@ def classify(aid, a):
     if any(m.group(1) or m.group(2) for m in ROGUE_LOADED.finditer(a["debug"])):
         return "loaded", "rogue-loaded-no-marker"
     if aid in IMPOSTOR:
-        # The impostor shares the probe's name. "Blocked" requires that the CLI actually
-        # considered the planted copy (a debug line naming its path) and did not run it; the
-        # probe must have run in place. If the CLI never looked at the planted location, we
-        # cannot call it blocked — that is INCONCLUSIVE, to be settled by the VM100 log.
-        paths = (a["result"] or {}).get("impostor_paths") or []
-        considered = [p for p in paths if p and p in a["debug"]]
-        if ps["read_elsewhere"]:
-            return "blocked", "impostor-read-not-run"
-        if considered and ps["reads_in_place_only"]:
-            return "blocked", "impostor-considered-ran-in-place"
+        # The impostor shares the probe's NAME, so name+tier is not enough — check the ORIGIN of
+        # the module that loaded. "Blocked" requires: the planted copy was considered (named in
+        # the log); it was NOT read to load (either not read, or read and then skipped as an
+        # already-loaded duplicate); and the module that loaded came from the in-place marketplace
+        # (an in-place Read hooks.json). A read of the cache copy that is not a skip means we
+        # cannot prove it was rejected — INCONCLUSIVE, never blocked.
+        paths = [p for p in ((a["result"] or {}).get("impostor_paths") or []) if p]
+        considered = any(p in a["debug"] for p in paths)
+        impostor_reads = [rp for rp in ps["read_paths"] if any(rp.startswith(p) for p in paths)]
+        impostor_read_to_load = any(rp not in ps["skipped_paths"] for rp in impostor_reads)
         if not paths:
             return "inconclusive", "impostor-path-not-recorded"
-        return "inconclusive", "impostor-location-not-considered"
+        if impostor_read_to_load:
+            return "inconclusive", "impostor-origin-unverified"
+        if not considered:
+            return "inconclusive", "impostor-location-not-considered"
+        if not ps["in_place_read"]:
+            return "inconclusive", "impostor-origin-unverified"
+        return "blocked", "impostor-considered-ran-in-place"
     text = a["debug"] if aid in DEBUG_ONLY else a["debug"] + a["stderr"] + a["pre"]
     # Each entry is a pattern, or a tuple of patterns that must all match.
     if not any(all(re.search(q, text) for q in (p if isinstance(p, tuple) else (p,))) for p in MET.get(aid, [])):
@@ -218,7 +253,7 @@ def analyze(D):
         incs.append("settings-invalid")
         facts["settings_invalid_in"] = bad_settings
     ps = probe_state(p0)
-    facts["probe"] = {k: ps[k] for k in ("loaded", "tiers", "kinds", "reads_in_place_only", "not_org_warning")}
+    facts["probe"] = {k: ps[k] for k in ("loaded", "tiers", "kinds", "in_place_read", "not_org_warning")}
     if ps["loaded"] and "user" in ps["tiers"]:
         fails.append("probe-user-tier")
     elif ps["tiers"] and not set(ps["tiers"]) <= KNOWN_TIERS:

@@ -252,7 +252,7 @@ capture() {
 		X sh -c 'set -e; pat="st-b1|sec-default|hooks module|hooks modules|plugin\.register|Read hooks\.json|[Pp]lugin|[Mm]arketplace|disableSideloadFlags|allowManaged|strictKnown|blockedMarket|organization|seated|skills-dir|seed|MCP|mcp|[Hh]ook|[Ss]ettings|policy"
 			for a in /home/developer/b1/*/; do id=$(basename "$a"); d=/tmp/passb1/out/attempts/$id; mkdir -p "$d"
 				[ ! -f "$a/result.json" ] || cp "$a/result.json" "$d/"
-				for f in debug.log stderr.txt pre-marketplace-add.txt pre-plugin-install.txt pre-mcp-add.txt; do
+				for f in debug.log debug-1.log debug-2.log stderr.txt pre-marketplace-add.txt pre-plugin-install.txt pre-mcp-add.txt; do
 					[ ! -f "$a/$f" ] || { grep -E "$pat" "$a/$f" > "$d/$f.filtered" || true; }; done
 				[ ! -d "$a/ws/.passb1/out/probe" ] || cp -r "$a/ws/.passb1/out/probe" "$d/"
 			done'

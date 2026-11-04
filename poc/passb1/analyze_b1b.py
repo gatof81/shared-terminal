@@ -49,7 +49,20 @@ def load(d):
         "cli_before": _json(os.path.join(d, "cli-version-before.json")), "cli_after": _json(os.path.join(d, "cli-version-after.json"))}
 
 
-def denied(v):
+# A denial counts for H-ND only when it is a PERMISSION denial. Any other errno does not prove
+# a restriction (the op may not have reached the check): it is inconclusive, never H-ND credit.
+PERM = ("EACCES", "EPERM")
+
+
+def perm_denied(v):
+    return v in PERM
+
+
+def other_error(v):
+    return v is not None and v != "ok" and v not in PERM
+
+
+def denied(v):  # kept for H4b (residual, reported only)
     return v not in (None, "ok")
 
 
@@ -128,15 +141,18 @@ def analyze(D):
         owners = {e: (s.get("owner_uid") or {}).get(e) for e in PROC_ENTRIES}
         reads = s.get("reads") or {}
         facts[tag] = {"owners_root": all(v == 0 for v in owners.values()),
-                      "read_denied": {k: denied(reads.get(k)) for k in READ_MODE},
+                      "read": {k: reads.get(k) for k in READ_MODE},
                       "attach_fact": {k: reads.get(k) for k in ATTACH_MODE}}
         if any(v == 1000 for v in owners.values()):
             fails.append(f"H2-dumpable:{tag}")
         elif not all(v == 0 for v in owners.values()):
             incs.append(f"H2-owner-unknown:{tag}")
-        # Every READ op denied on the root copy AND granted on the control (checked above).
-        if not all(facts[tag]["read_denied"].values()):
+        # Every READ op must be a PERMISSION denial on the root copy (granted on the control,
+        # checked above). "ok" is a real leak (FAIL); another errno proves nothing (INCONCLUSIVE).
+        if any(reads.get(k) == "ok" for k in READ_MODE):
             fails.append(f"H3-read-readable:{tag}")
+        elif not all(perm_denied(reads.get(k)) for k in READ_MODE):
+            incs.append(f"H3-read-errno-not-permission:{tag}")
 
     # Executable identity is separate from PID/starttime stability: an exec keeps both. The root
     # copy running the right inode is H6b/H6c, not this; here only that the process did not vanish.
@@ -153,14 +169,17 @@ def analyze(D):
     else:
         cplain = (ac.get("plain") or {}).get("reads") or {}
         hplain = (ah.get("plain") or {}).get("reads") or {}
-        ctl_ok = [k for k in READ_MODE + ATTACH_MODE if cplain.get(k) == "ok"]
-        facts["H4"] = {"control_ok": ctl_ok, "root_denied": {k: denied(hplain.get(k)) for k in READ_MODE + ATTACH_MODE}}
-        if set(ctl_ok) != set(READ_MODE + ATTACH_MODE):
+        ops = READ_MODE + ATTACH_MODE
+        ctl_ok = [k for k in ops if cplain.get(k) == "ok"]
+        facts["H4"] = {"control_ok": ctl_ok, "root": {k: hplain.get(k) for k in ops}}
+        if set(ctl_ok) != set(ops):
             # Without a per-op control success (incl. ATTACH, which Yama grants an ancestor of a
             # dumpable child) a denial against the root copy cannot be credited to H-ND.
             incs.append("H4-control-incomplete")
-        elif not all(facts["H4"]["root_denied"].values()):
+        elif any(hplain.get(k) == "ok" for k in ops):
             fails.append("H4-ancestor-can-read")
+        elif not all(perm_denied(hplain.get(k)) for k in ops):
+            incs.append("H4-root-errno-not-permission")
         pre, cpre = ah.get("traced_before_exec") or {}, ac.get("traced_before_exec") or {}
         # Residual, reported only: a tracer from before the exec loses the memory, keeps the registers.
         facts["H4b_residual_pre_exec_tracer"] = {"stopped_at_exec": pre.get("stopped_at_exec"), "peekdata_denied": denied(pre.get("peekdata")),
@@ -179,11 +198,15 @@ def analyze(D):
     # H6a: nobody of this uid can change the root copy or its folder.
     im = D.get("immut") or {}
     ch = {k: im.get(k) for k in ("open_write", "chmod", "rename", "unlink", "hardlink_tmp", "create_in_dir", "rename_dir")}
-    facts["H6a_denied"] = {k: denied(v) for k, v in ch.items()}
+    facts["H6a"] = dict(ch)
     if not im:
         incs.append("H6a-missing")
     elif any(v == "ok" for v in ch.values()) or (im.get("file") or {}).get("uid") != 0 or (im.get("file") or {}).get("mode") != "0o711":
         fails.append("H6a-root-copy-changeable")
+    elif not all(perm_denied(v) for v in ch.values()):
+        # Every change refused, but not all with a permission errno (e.g. ENOENT): cannot prove
+        # the root copy is immutable to this uid.
+        incs.append("H6a-errno-not-permission")
     inv = (D.get("inventory") or {}).get("copies") or []
     facts["H6b_copies"] = [{k: c.get(k) for k in ("path_class", "readable", "same_sha256")} for c in inv]
     if not any(c.get("path_class") == "opt-st-hnd" and c.get("readable") is False for c in inv):

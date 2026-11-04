@@ -42,10 +42,12 @@ def fixture():
     for aid in A.START:
         imp = f"/home/developer/b1/{aid}/home/.claude/plugins/cache/st-b1/st-b1-probe/0.0.1"
         extra = (P + f"Skipping duplicate hooks file for plugin st-b1-probe: {imp}/hooks/hooks.json (resolves to already-loaded file)\n"
-                 if aid in A.IMPOSTOR else P + MET_LINE[aid] + "\n")
+                 if aid in A.IMPOSTOR else "" if aid == "N9" else P + MET_LINE[aid] + "\n")
+        pre_rc = [{"alias": "marketplace-add", "rc": 1}, {"alias": "plugin-install", "rc": 1}] if aid == "N9" else []
+        pre_txt = 'Plugin "st-b1-rogue-n9" is blocked by your organization\'s policy and cannot be installed\n' if aid == "N9" else ""
         att[aid] = {"result": {"id": aid, "kind": "start", "rc": 130, "timed_out": False, "markers": [], "probe": PROBE_RECS,
-                               "impostor_paths": [imp] if aid in A.IMPOSTOR else []},
-                    "debug": PROBE_LINES + extra, "stderr": "", "pre": "", "has_debug": True}
+                               "impostor_paths": [imp] if aid in A.IMPOSTOR else [], "pre": pre_rc},
+                    "debug": PROBE_LINES + extra, "stderr": "", "pre": pre_txt, "has_debug": True}
     att["N18"] = {"result": {"id": "N18", "kind": "fact", "rc": 130, "markers": [], "probe": []}, "debug": "", "stderr": "", "pre": "", "has_debug": True}
     applied = {"managed_files": ["b1a.json"], "managed_sha256": A.tree_sha256(os.path.join(A.KIT, "managed")),
                "market_sha256": A.tree_sha256(os.path.join(A.KIT, "marketplace")),
@@ -105,7 +107,7 @@ NEGATIVES = [
     ("exit but the probe ran", lambda D: a(D, "N5a")["result"].update(probe=PROBE_RECS), "INCONCLUSIVE", "not-shown-blocked:N5a"),
     ("start without control", lambda D: a(D, "N7a")["result"].update(probe=[]), "INCONCLUSIVE", "not-shown-blocked:N7a"),
     ("start with probe in user tier", lambda D: a(D, "N8").update(debug=a(D, "N8")["debug"].replace("tier prepend", "tier user")), "INCONCLUSIVE", "not-shown-blocked:N8"),
-    ("attack not met", lambda D: a(D, "N9").update(debug=PROBE_LINES), "INCONCLUSIVE", "not-shown-blocked:N9"),
+    ("attack not met", lambda D: a(D, "N14").update(debug=PROBE_LINES), "INCONCLUSIVE", "not-shown-blocked:N14"),
     ("impostor with no read evidence", lambda D: a(D, "N11").update(debug=PROBE_LINES.replace(f"Read hooks.json for plugin st-b1-probe (enabled=true): {MK}\n", "")),
      "INCONCLUSIVE", "not-shown-blocked:N11"),
     ("attempt not run", lambda D: D["attempts"].pop("N14"), "INCONCLUSIVE", "not-shown-blocked:N14"),
@@ -115,6 +117,12 @@ NEGATIVES = [
     ("hooks watched but folder not trusted", lambda D: a(D, "N16").update(debug=a(D, "N16")["debug"].replace("post-trust", "pre")), "INCONCLUSIVE", "not-shown-blocked:N16"),
     ("MCP name only in mcp-add output", lambda D: a(D, "N17").update(debug=PROBE_LINES, pre='MCP server "st-b1-rogue-n17u" added to user config\n'),
      "INCONCLUSIVE", "not-shown-blocked:N17"),
+    ("N9 install succeeded without a marker", lambda D: a(D, "N9")["result"].update(pre=[{"alias": "marketplace-add", "rc": 0}, {"alias": "plugin-install", "rc": 0}]) or a(D, "N9").update(pre=""),
+     "FAIL", "loaded:N9"),
+    ("N9 install outcome unknown", lambda D: a(D, "N9")["result"].update(pre=[{"alias": "plugin-install", "rc": None}]) or a(D, "N9").update(pre=""),
+     "INCONCLUSIVE", "not-shown-blocked:N9"),
+    ("N12 control only in an earlier start", lambda D: a(D, "N12").update(probe_kinds=[], debug=PROBE_LINES + P + MET_LINE["N12"] + "\n"),
+     "INCONCLUSIVE", "not-shown-blocked:N12"),
     ("impostor location never considered", lambda D: a(D, "N10").update(debug=PROBE_LINES), "INCONCLUSIVE", "not-shown-blocked:N10"),
     ("impostor path not recorded", lambda D: a(D, "N11")["result"].update(impostor_paths=[]), "INCONCLUSIVE", "not-shown-blocked:N11"),
     ("rogue hooks module loaded without a marker", lambda D: a(D, "N6").update(debug=a(D, "N6")["debug"] + P + "hooks module st-b1-rogue-n6@st-b1-rogue-mk6 loaded (worker, environment 3, tier user); events: session.start\n"),
@@ -136,6 +144,38 @@ class Pass(unittest.TestCase):
         self.assertIn("N15", r["pending"])
         self.assertIn("@synced", r["pending"])
 
+    def test_n9_install_success_without_marker_is_not_blocked(self):
+        # The plugin did not run (no marker), but `plugin install` succeeded: a rogue was
+        # installed from an unapproved marketplace. That is a FAIL, never "blocked".
+        def m(D):
+            a(D, "N9")["result"].update(pre=[{"alias": "marketplace-add", "rc": 0}, {"alias": "plugin-install", "rc": 0}])
+            a(D, "N9").update(pre="")
+        r = run(m)
+        self.assertEqual(r["verdict"], "FAIL")
+        self.assertEqual(r["facts"]["attempts"]["N9"], {"outcome": "loaded", "why": "installed:N9"})
+
+    def test_n12_needs_control_and_seed_in_the_same_start(self):
+        # Two starts: the seed loads on the second. If the control (the org-tier probe) is only
+        # in the first start and the second shows the seed, that is not a PASS.
+        # Last start loaded the probe (tier lines present) but emitted no session.start of its
+        # own (probe_kinds=[]); the accumulated result still lists session.start from start 1.
+        r = run(lambda D: a(D, "N12").update(probe_kinds=[], debug=PROBE_LINES + P + MET_LINE["N12"] + "\n"))
+        self.assertEqual(r["facts"]["attempts"]["N12"]["outcome"], "inconclusive")
+        self.assertEqual(r["verdict"], "INCONCLUSIVE")
+        # When the last start carries both the control and the seed, N12 is blocked.
+        ok = run(lambda D: a(D, "N12").update(probe_kinds=["classic.SessionStart", "session.start"],
+                                              debug=PROBE_LINES + P + MET_LINE["N12"] + "\n"))
+        self.assertEqual(ok["facts"]["attempts"]["N12"], {"outcome": "blocked", "why": "met-not-run"})
+
+    def test_impostor_without_an_in_place_read_cannot_be_tied_to_the_org_copy(self):
+        imp = "/home/developer/b1/N11/cache/st-b1/st-b1-probe/0.0.1"
+        # The probe loaded (org tier) and the impostor path is named in a skip line, but there is
+        # no in-place Read hooks.json: the loaded module's origin is unproven -> INCONCLUSIVE.
+        loaded_only = (P + "hooks module st-b1-probe@st-b1 loaded (worker, environment 2, tier prepend); events: session.start,classic.SessionStart\n"
+                       + P + f"Skipping duplicate hooks file for plugin st-b1-probe: {imp}/hooks/hooks.json (resolves to already-loaded file)\n")
+        r = run(lambda D: a(D, "N11").update(result={**a(D, "N11")["result"], "impostor_paths": [imp]}, debug=loaded_only))
+        self.assertEqual(r["facts"]["attempts"]["N11"], {"outcome": "inconclusive", "why": "impostor-origin-unverified"})
+
     def test_impostor_blocked_only_when_the_planted_path_was_considered(self):
         r = A.analyze(fixture())
         for aid in A.IMPOSTOR:
@@ -144,10 +184,14 @@ class Pass(unittest.TestCase):
         self.assertFalse(r["facts"]["classic_session_end_seen"])
         self.assertEqual(r["verdict"], "PASS")
 
-    def test_impostor_read_from_cache_but_not_run_is_blocked(self):
+    def test_impostor_read_from_cache_that_could_have_loaded_is_not_blocked(self):
+        # A Read hooks.json from the cache copy, with no "already-loaded" skip, means the CLI may
+        # have loaded the impostor: it is NOT proof of rejection (owner finding #4) -> INCONCLUSIVE.
+        imp = "/home/developer/b1/N10/home/.claude/plugins/cache/st-b1/st-b1-probe/0.0.1"
         def m(D):
-            a(D, "N10").update(debug=PROBE_LINES + P + "Read hooks.json for plugin st-b1-probe (enabled=true): /home/developer/b1/N10/home/.claude/plugins/cache/st-b1/st-b1-probe/0.0.1/hooks/hooks.json\n")
-        self.assertEqual(run(m)["facts"]["attempts"]["N10"], {"outcome": "blocked", "why": "impostor-read-not-run"})
+            a(D, "N10").update(result={**a(D, "N10")["result"], "impostor_paths": [imp]},
+                               debug=PROBE_LINES + P + f"Read hooks.json for plugin st-b1-probe (enabled=true): {imp}/hooks/hooks.json\n")
+        self.assertEqual(run(m)["facts"]["attempts"]["N10"], {"outcome": "inconclusive", "why": "impostor-origin-unverified"})
 
     def test_n18_is_a_fact_not_an_outcome(self):
         r = A.analyze(fixture())
