@@ -2099,6 +2099,8 @@ texto ni log sin depurar sale de VM100.
 
 #### 1.14.14 PASS-B1: diseño de B1a y B1b, evidencia estática de 2.1.314, riesgos y plan (**no ejecutado**)
 
+> Implementado en §1.14.15 (kit `22b2da3`), con las correcciones que trajo la validación local.
+
 **GO del responsable (2026-11-03):** diseñar B1 e inspeccionar estáticamente Claude Code 2.1.314.
 - **No autoriza:**
   - construir imágenes;
@@ -2196,6 +2198,11 @@ built-in plugins load regardless" (E).
    - `LD_PRELOAD`, `NODE_OPTIONS` y `BUN_OPTIONS` existen en el binario, y el inspector de Bun
      (`BUN_INSPECT`) está compilado. Si un ejecutable autónomo los respeta, dan código o
      depuración **dentro** del proceso (H; lo decide B1b).
+
+   > **Corregido (2026-11-04).** El responsable rechazó I-env tal como está escrito: `environ` y
+   > `cmdline` son memoria del proceso y se pueden reescribir. La integridad del arranque pasa a
+   > una raíz de confianza del lanzamiento ([09-launch-trust.md](./09-launch-trust.md)). Además,
+   > K1 casi seguro no aplica a 2.1.314 (§1.14.15.1, fila 1).
 
    Una política que el propio proceso lee no puede defenderse de quien elige con qué política
    arranca ese proceso. **Consecuencia:** la inscripción del gateway (B2) tiene que leer como root
@@ -2462,6 +2469,260 @@ harness:
    (recomendado) o autorizarlo en el descartable.
 5. **I-env:** aceptar que la integridad de la instalación (B1a) se declare dependiente de la
    inscripción del gateway, y agregar K1–K5 a los ataques de B2.
+
+#### 1.14.15 Kit PASS-B1 (`22b2da3`): implementación, validación local, procedimiento y criterios (**no ejecutado en VM100**)
+
+**GO del responsable (2026-11-04):**
+- **Autoriza:** implementar el kit `poc/passb1`, con tests sintéticos y validaciones locales.
+- **No autoriza:**
+  - ejecutar en VM100;
+  - construir imágenes;
+  - cambios de producción;
+  - merge ni deploy.
+- G3, G3-A, R8 y Composer no cambian.
+
+**Decisiones aplicadas:**
+1. **B1a.** Positivas y N1–N19 con controles que fallan cerrados. Un camino no ejecutado nunca
+   cuenta como bloqueado.
+2. **B1b.** Copia de root `0711` dentro del descartable, sin construir imagen. No se relaja ni
+   `CapDrop ALL` ni `no-new-privileges`. Si la preparación falla, el resultado es INCONCLUSIVE.
+3. **H6c.** Diseñada (`b1.py hostexe`, solo lectura, con identidad estricta por pidfd y
+   `starttime`) y **bloqueada**: se niega a correr (salida 77) salvo que
+   `B1B_HOSTEXE_AUTHORIZED` sea el id del contenedor, y ningún procedimiento la define. B1b la
+   informa como pendiente.
+4. **Sin login.** N15, `@synced` y los eventos de prompt y herramientas quedan como cobertura
+   pendiente, nunca como bloqueados.
+5. **K1–K5** pasan a B2, con resultados separados de B1a. La raíz de confianza del lanzamiento
+   está en [09-launch-trust.md](./09-launch-trust.md).
+
+##### 1.14.15.1 Correcciones a §1.14.14 por la implementación y la validación local
+
+**Validación local.** Se hizo en este contenedor de desarrollo con el mismo CLI 2.1.314 (SHA-256
+`4487042b…`) y el mismo kernel 6.8.0-147, con estas condiciones:
+- HOME aislado por intento y entorno vacío (`env -i`);
+- sin login ni credenciales;
+- **sin política administrada**: `/etc/claude-code` es de root, así que el tier de organización no
+  se puede probar acá.
+
+| # | Hallazgo | Consecuencia |
+| --- | --- | --- |
+| 1 | **K1 casi seguro no es un bypass en 2.1.314.** La función que leería `CLAUDE_CODE_MANAGED_SETTINGS_PATH` está vaciada en el build publicado (`function Kus(){return}`), y el CLI local, con la variable definida, leyó `/etc/claude-code/managed-settings.json` igual | Se corrige el hallazgo 3 de §1.14.14.3. K1 sigue en B2 como medición |
+| 2 | Las managed settings de `managed/b1a.json`, cargadas como settings de usuario, **no dan errores de validación**. El marketplace de directorio se lee en el lugar y el probe carga y registra `session.start`, `classic.SessionStart` y `classic.SessionEnd` **sin login**. Las plantillas reales del log son `hooks module <x>@<mk> loaded (worker, environment N, tier T)` y `plugin.register: <x> (T, …), judged by …` | Formas y plantillas confirmadas. La etiqueta del tier de organización sigue sin fijar: el analizador acepta sólo `prepend`/`append` y cualquier otra da INCONCLUSIVE |
+| 3 | **Controles positivos.** Cada fixture intruso **corre** cuando no hay política (tabla de abajo). Sin eso, que falte una marca no probaría nada | Cada intento puede producir un FAIL real |
+| 4 | **Errores del harness encontrados y corregidos:** las teclas mandadas juntas se pierden en el selector de confianza (ahora con pausa y reintento); el diálogo de servidores MCP del proyecto no está numerado y su opción por defecto es "Continue without…" | Sin estas correcciones, un intento podía quedar "sin marca" porque nunca llegó al punto de cargar el intruso |
+| 5 | **N12:** el directorio de semillas se sincroniza **después** de la carga de plugins del arranque, así que lo que trae carga en el **segundo** arranque del mismo HOME. Además `known_marketplaces.json` exige `lastUpdated` | N12 se hace con dos arranques |
+| 6 | **N16:** 2.1.314 no registra que una política salteó un hook. Como evidencia de que el ataque se encontró se usan dos líneas: la del vigilante de settings, que nombra los tres archivos con hooks, y la de `post-trust`. Un hook que corre deja `Hooks: SessionStart:…`, y eso es FAIL | Evidencia decisiva definida y probada |
+| 7 | **N17:** el CLI nombra cada servidor (`MCP server "<nombre>"`). La salida de `claude mcp add` sólo dice que se escribió la entrada, así que no cuenta como evidencia | Evidencia tomada sólo del debug del CLI |
+| 8 | **N15:** los dev mods los entrega una skill y se preguntan al terminar un turno. Eso necesita el modelo, o sea login | Pendiente |
+| 9 | **H5:** en este host, `fs.suid_dumpable=2` y `core_pattern` es una tubería (apport). Un core de un proceso no volcable iría, como root, al manejador **del host** (`fs/coredump.c`). Con `0` no hay core | H5 es **analítica**: no se provoca ningún crash |
+| 10 | **`/proc/<pid>/fdinfo/`** conserva el euid de la tarea aunque no sea volcable: es un directorio r-x para todos (`task_dump_owner`) | H2 no lo cuenta como señal |
+| 11 | **H7 sin red.** B1b usa `--network none`, así que ninguna versión nueva del CLI entra al contenedor. Se prueba que `update` no toca la copia de root (hash, dueño y modo antes y después) y que el mismo proceso sigue igual | Cumple "sin versiones nuevas del CLI" |
+| 12 | **H8 (nuevo, sólo informativo).** El probe registra si el código de un mod alcanza `Bun.ant.setDumpable`, con `typeof` y sin llamarlo. El kernel deja que un proceso vuelva a ser volcable (`prctl(PR_SET_DUMPABLE,1)`), así que H-ND vale sólo mientras no corra código ajeno en el CLI | Se informa aparte, sin entrar en el PASS |
+
+**Controles positivos locales** (driver final, sin política; una fila por intento):
+
+| Intento | Camino | Marca sin política |
+| --- | --- | --- |
+| N1 | `--plugin-dir` | `st-b1-rogue-n1` |
+| N2 | `--plugin-dir-no-mcp` | `st-b1-rogue-n2` |
+| N3 | `CLAUDE_CODE_PLUGIN_DIRS` | `st-b1-rogue-n3` |
+| N4 | `--plugin-url` (zip en loopback) | `st-b1-rogue-n4` |
+| N5a | `--agents` | ninguna: una definición de agente no ejecuta código; en B1a sólo cuenta el rechazo al arrancar |
+| N5b | `--mcp-config` | `mcp-n5b` |
+| N6 | settings de usuario + marketplace intruso | `st-b1-rogue-n6` |
+| N7a | `.claude/settings.json` | `st-b1-rogue-n7a` |
+| N7b | `.claude/settings.local.json` | `st-b1-rogue-n7b` |
+| N8 | `--settings` | `st-b1-rogue-n8` |
+| N9 | `plugin marketplace add` + `plugin install` | `st-b1-rogue-n9` |
+| N12 | `CLAUDE_CODE_PLUGIN_SEED_DIR` (dos arranques) | `st-b1-rogue-n12` |
+| N14 | `~/.claude/skills` (`@skills-dir`) | `st-b1-rogue-n14` |
+| N16 | hooks de usuario, proyecto y local | `hook-user`, `hook-project`, `hook-local` |
+| N17 | `.mcp.json` + `claude mcp add` | `mcp-project`, `mcp-user` |
+| N19 | `CLAUDE_CONFIG_DIR` | `st-b1-rogue-n19`, `hook-n19` |
+
+N10, N11 y N13 (impostores del probe administrado) sólo tienen sentido frente al marketplace administrado, que acá no existe: su evidencia en VM100 es que el probe se leyó en el lugar, en el tier de organización, y que el impostor no corrió. P0 y N18 necesitan la política administrada.
+
+##### 1.14.15.2 Contenido del kit
+
+`poc/channels-phase0@22b2da3ab33e73f6d3f7a0522410dae29d7ae311`, carpeta `poc/passb1/` (la lista exacta está en los hashes):
+- **`run-b1.sh`:** runner por fases. Mismo modelo fail-closed que B0:
+  - marcas de estado;
+  - lector estricto de `env`;
+  - borrado sólo con fundamento y por id exacto;
+  - versión del CLI antes y después.
+
+  `KIND=b1a` o `KIND=b1b` en `BASE/env`. Cada experimento usa su propia carpeta, `STAMP`,
+  contenedor y veredicto.
+- **`b1.py`:** el driver de intentos y las mediciones de H-ND. Además, `checklimits` compara los
+  montajes exactos, y `applied` calcula los hashes y prueba la escritura de la política y del
+  marketplace montados.
+- **`managed/b1a.json`, `marketplace/` y el probe `st-b1-probe`.**
+- **Analizadores:** `analyze_b1a.py` y `analyze_b1b.py`.
+- **`README.md`.**
+- **Tests:**
+
+| Suite | Tests | Qué cubre |
+| --- | --- | --- |
+| `test_analyze_b1a.py` | 6 (37 mutaciones de criterio) | Fixture PASS con las plantillas reales; un marcador es FAIL; cada falta de control o de evidencia es INCONCLUSIVE |
+| `test_analyze_b1b.py` | 4 (32 mutaciones de criterio) | Fixture PASS; control positivo obligatorio; H4b y H8 sólo informativos |
+| `test_b1.py` | 15 | Procesos reales: objetivo no volcable (`prctl(0)`) frente a control volcable, desde otro proceso y como ancestro con ptrace real; `immut` sin destruir; inventario; fixtures; `checklimits`; `hostexe` bloqueada |
+| `test_runner.py` | 22 | Runner con `docker` falso: orden de fases, STOP por versión, política o marketplace distintos del kit, montajes exactos, la copia de root sin relajar el contenedor, preparación fallida ⇒ cerrado, una copia que no arranca es evidencia, control que no arranca ⇒ cerrado, todos los fundamentos de `cleanup` |
+
+**Mutaciones de código:** 28, todas detectadas. Cubren los analizadores, `b1.py` y el
+runner:
+- ignorar marcadores;
+- no exigir el texto de rechazo;
+- aceptar cualquier tier;
+- no exigir evidencia;
+- dar por bloqueado un impostor sin evidencia;
+- ignorar un hook que corrió;
+- contar la salida de `mcp add`;
+- ignorar el guard sin asiento;
+- política escribible;
+- hash del kit;
+- intento faltante;
+- sin control positivo;
+- H2, H3, H4, H5, H6a y H7 ignorados;
+- preparación sin verificar;
+- contar `fdinfo`;
+- `immut` sin restaurar;
+- lectura de `environ` falsificada;
+- `hostexe` sin bloqueo;
+- capacidades sin verificar;
+- hash de la copia sin verificar;
+- descarte con cualquier id;
+- política sin comparar;
+- contenedor detenido tomado como "sin evidencia".
+
+##### 1.14.15.3 Procedimiento (borrador; **no autorizado**)
+
+Cada experimento usa su propia carpeta y su propio paso 0. En los dos, `IMAGE=shared-terminal-session`
+(2.1.314).
+
+```bash
+# Paso 0 (como en §1.14.9), con KIND=b1a o KIND=b1b. Se ejecuta como un script.
+bash -euo pipefail -s <<'STEP0'
+KIND=b1a                    # o b1b
+COMMIT=22b2da3ab33e73f6d3f7a0522410dae29d7ae311
+STAMP=$(date +%Y%m%d-%H%M%S)
+BASE=$HOME/pass$KIND-$STAMP
+test ! -e "$BASE"
+mkdir -m 0700 "$BASE"; mkdir -m 0700 "$BASE/kit" "$BASE/results"
+gh api "repos/gatof81/shared-terminal/tarball/$COMMIT" > "$BASE/kit.tgz"
+tar xzpf "$BASE/kit.tgz" -C "$BASE/kit" --strip-components=1
+cat > "$BASE/kit.sha256" <<'SUMS'
+323b79a8b2f60c14c3dc9c4cbf25da832df3faeb2e0c68826dbadd6c75aee8e0  analyze_b1a.py
+cfe6cf6c5b852e34aceeebca622eebd9354d9e1f5c4002708013cc1e3dcd2177  analyze_b1b.py
+883b9070ef5fd942dcbe0494a86b5f5c9144029e00344259a5570591451d23c3  b1.py
+23a02a6dd40271761c57dcfe6ed265e550aacab8afda376fd0fa3e670c488932  managed/b1a.json
+3a090f524c93fa3be45fa35ebd347b86ffe47801cacf6ede819095ecd71e2a55  marketplace/.claude-plugin/marketplace.json
+c38e42b9a8ba4360b72465813088fe98b5e69a7ff5bf16ec4a43bc56ccb75514  marketplace/plugins/st-b1-probe/.claude-plugin/plugin.json
+d87f4cbc7a53b0d733c13dd4c7f81e49d7ede3b21163e0d64e2234176d43100d  marketplace/plugins/st-b1-probe/hooks/hooks.json
+707c35831bd4fa99d4e21f550c64a52de1ae2172c7fe5e4bdab16fb4245e0cf7  marketplace/plugins/st-b1-probe/hooks/register.mjs
+9bc847bd7545ad0863f92f66b7be943391860f7e708f1c81adcf4ba7a68d53e5  README.md
+0406bd615f747203a71ffe6da584059b31f5c2dd160ba3609dd8ab677f80a8ea  run-b1.sh
+1845ebe18b0f73588cadb23ae345dd61f0ae68df52cc30f723366fa64ae958ec  test/fakebin/docker
+674442cf8e46ed1b479983dfd4f7ccc2c0821d2a939153c5f3e292cad6ab18d3  test/test_analyze_b1a.py
+c1193c68769192d93aeffdbc8f710a806a7ed74d2faa97168761da402b880fde  test/test_analyze_b1b.py
+dd77ddcf0e72102741067323e6154e8d0a6407860734404bc80dc5c97a405969  test/test_b1.py
+9bf7280658936343a2675c507e8c3eb3e54cda5b9c3f810c104f7a9c7aa14982  test/test_runner.py
+SUMS
+cd "$BASE/kit/poc/passb1"
+sha256sum -c --strict --quiet "$BASE/kit.sha256"
+diff <(find . -type f | sed 's|^\./||' | sort) <(awk '{print $2}' "$BASE/kit.sha256" | sort)
+KIT=$BASE/kit/poc/passb1
+extra=""
+if [ "$KIND" = b1a ]; then
+  # Copias del kit, legibles por uid 1000 y montadas en solo lectura.
+  mkdir -m 0755 "$BASE/managed"; cp "$KIT/managed/b1a.json" "$BASE/managed/"; chmod 0644 "$BASE/managed/b1a.json"
+  cp -r "$KIT/marketplace" "$BASE/marketplace"; chmod -R a+rX "$BASE/marketplace"
+  extra="MAN=$BASE/managed MKT=$BASE/marketplace"
+fi
+printf '%s\n' "KIND=$KIND" "STAMP=$STAMP" "KIT=$KIT" "RES=$BASE/results" "EXP=pass$KIND-exp-$STAMP" \
+  "IMAGE=shared-terminal-session" "COMMIT=$COMMIT" $extra > "$BASE/env"
+echo "BASE=$BASE"; echo "OK: paso 0"
+STEP0
+```
+
+```bash
+BASE=~/passb1a-AAAAMMDD-HHMMSS      # el que imprimió el paso 0
+R() { bash "$BASE/kit/poc/passb1/run-b1.sh" "$BASE" "$1"; echo "fase $1: salida=$?"; }
+R preflight    # solo lectura; 3 = STOP por versión
+R setup        # crea el contenedor y verifica lo aplicado (B1b: además prepara la copia de root)
+R measure      # B1a: 21 arranques secuenciales (unos 20 min); B1b: unos 8 min (incluye 5 min de observación)
+R capture      # 4 = captura incompleta: la evidencia queda y validate dará INCONCLUSIVE
+R validate     # imprime report.json; salida 0 sólo con PASS
+R cleanup      # 66: evidencia sin copia verificada; 67: algo que no es nuestro o no quedó limpio
+```
+
+**Notas:**
+- **Nada se hace en una terminal B.** El harness lanza cada CLI en tmux dentro del contenedor y
+  contesta sólo lo que el agente podría contestar: confianza, tema y servidor MCP del proyecto.
+  No hay login.
+- **`preflight` falla** si queda **cualquier** contenedor `passb0` o `passb1`.
+- **B1a y B1b no corren a la vez.** Los dos usan la etiqueta `passb1.experiment`.
+- **Qué mandar:** `report.json` y `removal.json`. Los logs filtrados y los registros quedan en
+  `$BASE/results`, en VM100.
+
+##### 1.14.15.4 Criterios
+
+**B1a** (`analyze_b1a.py`):
+- **PASS** sólo si se cumple todo esto:
+  - captura completa;
+  - 2.1.314 en `preflight`, antes y después;
+  - política y marketplace iguales a los del kit, sólo `b1a.json` y sin escritura posible;
+  - sin errores de validación;
+  - P0 con:
+    - el probe en tier `prepend`/`append`;
+    - sin advertencia "not treated as the organization's";
+    - `session.start` y `classic.SessionStart`;
+    - el guard asentado y cargado;
+  - **cada** N1–N14, N16, N17 y N19 bloqueado: sin marcador, con el control del mismo arranque
+    y con evidencia decisiva.
+- **FAIL:**
+  - cualquier marcador;
+  - un hook que corrió (N16);
+  - el probe en tier `user`;
+  - el guard sin asiento;
+  - la política o el marketplace escribibles.
+- **INCONCLUSIVE:**
+  - el resto: intento faltante, sin control, sin evidencia, etiqueta de tier desconocida,
+    settings inválidas, versión, captura.
+- **Siempre se informan:**
+  - lo pendiente (N15, `@synced`, eventos con login);
+  - que la integridad final depende de la raíz de confianza del lanzamiento;
+  - N18 como hecho.
+
+**B1b** (`analyze_b1b.py`):
+- **PASS** sólo si se cumple todo esto:
+  - la copia de root es la esperada (hash, uid 0, `711`);
+  - el control positivo es legible en modo READ;
+  - H1: la copia de root arranca y el mod corre;
+  - H2/H3: dos muestras, al inicio y a los 5 min, con dueño root y todas las lecturas negadas;
+  - H4: como ancestro, todo negado, y el control legible como ancestro;
+  - H5: `suid_dumpable` 0 o 2;
+  - H6a: la copia y su carpeta no se pueden cambiar;
+  - H6b: la copia de root existe y no es legible;
+  - H7: `update` no la cambia y el proceso es el mismo.
+- **FAIL:** cualquier fila que falle, incluido "no arranca" (H1).
+- **INCONCLUSIVE:** preparación fallida, control ciego, `ptrace_scope` ≠ 1, faltantes o captura.
+- **Siempre aparte:** H4b (un trazador previo al `exec` conserva los registros), H8 y H6c
+  (pendiente).
+- **Alcance:** B1b **no** prueba la integridad del proceso, sólo el acceso de otros procesos.
+
+##### 1.14.15.5 Revisión de seguridad del kit
+
+- **Sin privilegios nuevos fuera del contenedor descartable.** B1a no usa root. B1b usa
+  `docker exec -u 0` dentro del descartable, con `CapDrop: ALL` y `no-new-privileges`: es root sin
+  capacidades, que sólo puede crear archivos en carpetas de root.
+- **Sin red en B1b** (`--network none`). B1a usa `bridge` para que el CLI arranque como en B0;
+  N4 sirve su zip en el loopback del propio contenedor.
+- **H5 sin crash.** Con este host (`suid_dumpable=2` y apport), un crash enviaría un core al host.
+- **H6c bloqueada** en el código y fuera del procedimiento.
+- **Lo que sale de VM100:** sólo veredictos y hechos (alias, booleanos, errno, clases de ruta).
+  Los logs del CLI se filtran dentro del contenedor y los crudos se borran con él.
+- **Los fixtures intrusos son inofensivos:** sólo crean un archivo de marca en carpetas del
+  intento.
 
 ## 2. Versiones
 

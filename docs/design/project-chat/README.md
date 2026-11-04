@@ -19,9 +19,10 @@ Evidencia hasta ahora (2026-11-03):
     siguen pendientes y no autorizados;
   - el siguiente gate es **PASS-B1**. Su diseño está en
     [04-poc.md §1.14.14](./04-poc.md#11414-pass-b1-diseño-de-b1a-y-b1b-evidencia-estática-de-21314-riesgos-y-plan-no-ejecutado)
-    y no está ejecutado. Se divide en B1a (instalación administrada) y B1b (H-ND). La inspección
-    estática encontró controles del arranque que ninguna política cierra, así que la inscripción
-    del gateway deberá verificarlos (I-env);
+    y no está ejecutado. Se divide en B1a (instalación administrada) y B1b (H-ND). El kit
+    `poc/passb1` está implementado y validado localmente (§1.14.15), sin ejecutar en VM100;
+  - la integridad del arranque necesita una **raíz de confianza del lanzamiento**, diseñada en
+    [09-launch-trust.md](./09-launch-trust.md) y sin implementar;
   - PASS-A + PASS-B0 no habilitan el Monitor ni reemplazan a G3.
 
 Dirección de producto (2026-11-03): **conversación de cada agente con invitados temporales vía
@@ -34,6 +35,7 @@ aplicadas a 01, 02, 03, 05 y 06 (R10–R15 en 02 §9). Los gates de Channels no 
 | [02-architecture-rfc.md](./02-architecture-rfc.md) | Evidencia sobre Channels, alternativas, componentes, fallos, seguridad, decisiones |
 | [03-protocol.md](./03-protocol.md) | Identidades, persistencia, estados de entrega, API, límites, recuperación |
 | [04-poc.md](./04-poc.md) | POC aislada con un agente y criterios GO / NO-GO fijados de antemano |
+| [09-launch-trust.md](./09-launch-trust.md) | Raíz de confianza del lanzamiento del CLI (diseño previo a B2; sin implementar): por qué leer `/proc` no alcanza, opciones L0–L3 y recomendación |
 | [08-host-chat-guests.md](./08-host-chat-guests.md) | **Aprobada (2026-11-03), ya aplicada**: registro de la propuesta de conversación individual por agente con invitados temporales vía `@menciones` (D1–D6; D3 modificada con el modo Colaboración) |
 | [05-roadmap.md](./05-roadmap.md) | Fases y PRs independientes, dependencias, riesgos |
 | [06-ux.md](./06-ux.md) | Conversación del agente, invitados, menciones, participantes, Colaboración, estados, Control Directo |
