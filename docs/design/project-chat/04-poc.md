@@ -3341,7 +3341,7 @@ queda intacto como el de la corrida 1), con los cambios de §1.14.18.2–§1.14.
 regresión (y el barrido de mutaciones), y los criterios PASS/FAIL/INCONCLUSIVE de arriba fijados de
 antemano. No se re-ejecutan los 13 intentos ya **blocked**. Nada de esto está autorizado: espera tu
 revisión del diseño.
-#### 1.14.19 Kit de corrida 2 de PASS-B1a (`824a2a2`): auditado cuatro veces (NO-GO cada una) y corregido, validado localmente; **D3 = Opción A (INCONCLUSIVE), limitación de 2.1.314 documentada; no ejecutado**
+#### 1.14.19 Kit de corrida 2 de PASS-B1a (`8eafe1a`): auditado cuatro veces (NO-GO cada una) y corregido, validado localmente; **D3 = Opción A (INCONCLUSIVE); corrida 2 autorizada condicionalmente (diagnóstica, P0/N14/N17-project) — pendiente de ejecución en VM100 por el responsable**
 
 GO del responsable para implementar el kit de corrida 2 con cuatro condiciones (§1.14.18), NO-GO
 para ejecutarlo. El kit pasó **cuatro auditorías estáticas independientes del responsable**, cada
@@ -3351,14 +3351,16 @@ una **NO-GO para VM100** con GO sólo para correcciones focalizadas, y cada hall
 - **Auditoría 1** (de `37fd028` contra `e00ef29`): seis hallazgos **B1–B6** + controles → `5eb257a`.
 - **Auditoría 2** (de `5eb257a`): cuatro hallazgos **C1–C4** + dos ajustes → `7f4c034`.
 - **Auditoría 3** (de `7f4c034`): **D1, D2, D4, D5** corregidos + **D3** como decisión de diseño → `f11c467`.
-- **Auditoría 4** (de `f11c467`): D1/D4/D5 aprobados; **D2** afinado (ejecución sin marcador) → `824a2a2`; **D3 → Opción A** (experimento local de causalidad **INCONCLUSIVE**, ver abajo).
+- **Auditoría 4** (de `f11c467`): D1/D4/D5 aprobados; **D2** afinado (ejecución sin marcador) → `824a2a2`; **D3 → Opción A** (experimento local de causalidad **INCONCLUSIVE**, ver abajo); **ajuste final del marcador** (`impostor.json`, abajo) → `8eafe1a`.
 
 El commit `e00ef29` de la corrida 1 y los kits auditados `37fd028` / `5eb257a` / `7f4c034` /
-`f11c467` quedan **intactos en la historia**. El próximo gate es la revisión del ajuste D2 y del
-resultado de D3; recién después se decide la segunda ejecución.
+`f11c467` / `824a2a2` quedan **intactos en la historia**. Tras el ajuste del marcador, el
+responsable **autorizó condicionalmente la corrida 2** (diagnóstica, sólo P0/N14/N17-project, con el
+kit fijado por SHA); su **ejecución ocurre en VM100 y la realiza el responsable** (esta sesión no
+tiene Docker ni acceso a VM100).
 
-**SHA del kit:** `824a2a2e1dd885b31e342bf4675392c439378aa2`. 17 archivos. Tarball de GitHub
-(`/tarball/824a2a2…`) verificado contra estos hashes y la lista exacta (sin archivos de más ni de
+**SHA del kit:** `8eafe1a30b6e06f10b083658455779c37ad85d2c`. 17 archivos. Tarball de GitHub
+(`/tarball/8eafe1a…`) verificado contra estos hashes y la lista exacta (sin archivos de más ni de
 menos):
 
 ```
@@ -3372,13 +3374,13 @@ d87f4cbc7a53b0d733c13dd4c7f81e49d7ede3b21163e0d64e2234176d43100d  marketplace/pl
 707c35831bd4fa99d4e21f550c64a52de1ae2172c7fe5e4bdab16fb4245e0cf7  marketplace/plugins/st-b1-probe/hooks/register.mjs
 bfac25ae1fa9ffb8faf7895440cc7506d39bbef80c280b55bdb22523e2e8e4e9  README.md
 f7a5efa21d93614e367eb8bcd5751bdcbb4126ac098997d0f548b08212b67546  run-b1.sh
-d4f17b1c1a599089d442b5ca05835d5e1372edc15ce0fba177a92f5efb718596  summary-b1a.py
+d91991cbd5e356132491ad22ca8b7f47d23e98606b49d0db745b3ec523ce358d  summary-b1a.py
 9779770693681d5a0ca281c2bc8fa92701a8eac4c2fc8f00c7d9ed802dbe3624  test/fakebin/docker
 c7418347977a0c94e67eab762714a138e656a59ebff5173a728709cf26cf60a0  test/test_analyze_b1a.py
 a45744f700d780ee041179a919fe4f87d153049bb01b9287735e11ce2e92bf14  test/test_analyze_b1b.py
 b814d049cb504c54766a4a0bc41b7b4b1a0556f104b2a6d1fe41d8297ec3e52a  test/test_b1.py
 d4dd16ae8bd2599a80ce8c5fcd9aa4a9863ce9077ddc15ee8c845bd3ed8603d8  test/test_runner.py
-1f938aec1462fc6da4cc89616f918a880c3429df2729db530a21f2516fb4b5d8  test/test_summary.py
+dc73414e08a2a05476355c9c4e95630012e8cbbd8501ead099c433ddf7c999fa  test/test_summary.py
 ```
 
 **Auditoría 1 — hallazgos corregidos en `5eb257a`** (diff `37fd028..5eb257a`; cada uno con un test
@@ -3502,6 +3504,12 @@ criterio por mi cuenta):
   la copia plantada). Un **mero `Read hooks.json` (descubrimiento) NO cuenta**. N10/N11/N13 siguen
   **fuera del denominador de PASS**; una ejecución observada da FAIL con la procedencia original.
   Tests: marcador ⇒ FAIL; carga non-org sin marcador ⇒ FAIL; sólo descubrimiento ⇒ sigue PASS.
+- **D2 (ajuste final del marcador, `8eafe1a`).** `impostor_plugin()` escribe
+  `.passb1/out/marker/impostor.json` y `result.json["markers"]` guarda **nombres de archivo
+  relativos**, así que `impostor_executed` matchea el nombre exacto **`impostor.json`**, no la cadena
+  `"impostor"`. Test negativo nuevo: otro marcador (p. ej. `mcp-project`) sin carga non-org **no** se
+  atribuye al impostor (sigue PASS); la carga non-org sin marcador y el descubrimiento siguen como
+  antes.
 - **D3 — resultado técnico del experimento local de causalidad (descartable, 2.1.314).** Elegiste
   Opción A por ahora y pediste demostrar causalidad antes de considerar B. Preparé un experimento
   **local descartable** con HOME aislado (sin login, sólo loopback, sin VM100), con las 4
@@ -3540,13 +3548,13 @@ acepta `RUN2=1` para ejecutar **sólo** P0, N14 y N17-project, etiqueta `passb1.
   `passb1.run`** aceptado y un `passb1.run=2`/stamp/kind equivocados rechazados — D1; `RUN2`
   inválido, `KIND≠b1a`, etiqueta `passb1.run` verificada, subconjunto de corrida 2, `validate`
   focalizado que mantiene los controles globales, `NetworkMode none`);
-- `test_summary.py`: **23** (PASS de alcance reducido + procedencia, legacy-N17, run2 ausente,
+- `test_summary.py`: **24** (PASS de alcance reducido + procedencia, legacy-N17, run2 ausente,
   fallos globales, baseline, `SHA256SUMS` alterado/ausente, la batería de `verify_sums` de C1 + el
   symlink de D5, loaded-en-corrida-1 de C2; **D2 afinado:** ejecución de un ataque retirado por
-  marcador y por carga non-org sin marcador ⇒ FAIL, y mero descubrimiento ⇒ sigue PASS; SHA
-  declarado de los ajustes);
-- **66 mutaciones de código**, todas detectadas (0 MISSED, 0 pattern-not-found); `claude plugin
-  validate` pasa; `bash -n run-b1.sh` limpio. **103 tests en total.**
+  marcador `impostor.json` y por carga non-org sin marcador ⇒ FAIL, otro marcador **no** atribuido
+  al impostor ⇒ PASS, y mero descubrimiento ⇒ sigue PASS; SHA declarado de los ajustes);
+- **67 mutaciones de código**, todas detectadas (0 MISSED, 0 pattern-not-found); `claude plugin
+  validate` pasa; `bash -n run-b1.sh` limpio. **104 tests en total.**
 
 **Criterios de la corrida 2, fijados de antemano** (idénticos a §1.14.18.5): *blocked* sólo con el
 control del mismo arranque y la evidencia específica del rechazo; *FAIL* con cualquier marcador, un
@@ -3554,8 +3562,27 @@ control del mismo arranque y la evidencia específica del rechazo; *FAIL* con cu
 evidencia o la medición (`harness-startup-failed`). N15, `@synced` y los eventos con login siguen
 pendientes, nunca blocked.
 
-**Procedimiento para la revisión independiente (auditoría estática; no ejecutar):** leer el diff de
-la corrección `f11c467..824a2a2` (y, para el panorama completo, `e00ef29..824a2a2`) de `poc/passb1/`,
+**Corrida 2 (diagnóstica) — procedimiento y checklist de STOP (la ejecuta el responsable en VM100;
+esta sesión no tiene Docker ni acceso a VM100):** con el kit fijado por SHA `8eafe1a`, el `env` de
+corrida 2 declara `KIND=b1a RUN2=1 EXP=passb1a-run2-exp-<STAMP>` y la identidad del contenedor
+legacy retenido `RUN1_ID=<id 64-hex> RUN1_EXP=passb1a-exp-20261104-142810`. Fases en orden:
+`preflight → setup → measure → capture → validate`; **no** correr `cleanup` en ninguno de los dos
+contenedores, ni tras una captura correcta — conservar ambos hasta revisar resultados. El
+`preflight` del runner es fail-closed y **se detiene (STOP)** ante cualquier discrepancia: imagen ≠
+2.1.314 (exit 3), contenedor legacy que no sea EXACTAMENTE el retenido (id + nombre + `kind=b1a` +
+stamp exacto; `passb1.run` ausente admitido sólo para él), otro contenedor `passb1`, nombre `EXP`
+ocupado, o `MAN`/`MKT` que no sean byte a byte los del kit; `setup` revalida los límites de Docker
+(`NetworkMode=none`, `CapDrop=ALL`, `no-new-privileges`) y la versión 2.1.314 dentro del contenedor,
+y `capture` reverifica `SHA256SUMS`. **El almacenamiento disponible no lo chequea el runner: el
+operador debe verificarlo antes de `setup`.** Cualquier divergencia del entorno respecto de lo
+esperado ⇒ detenerse y consultar antes de ejecutar. La corrida 2 **puede terminar INCONCLUSIVE**
+(previsto); N17-project **no** se reinterpreta como *blocked* sin nueva evidencia causal. Tras
+`capture`/`validate`: presentar `SHA256SUMS` verificado, los resultados **separados** de
+P0/N14/N17-project y el consolidado con **ambas procedencias**, sin datos sensibles.
+
+**Procedimiento para la revisión independiente (auditoría estática; no ejecutar):** leer el diff
+final del marcador `824a2a2..8eafe1a` (y, para el panorama completo, `e00ef29..8eafe1a`) de
+`poc/passb1/`,
 correr las suites y el barrido de mutaciones localmente (`python3 test/test_analyze_b1a.py`,
 `test_analyze_b1b.py`, `test_b1.py`, `test_runner.py`, `test_summary.py`), y revisar que: el preflight
 acepte el contenedor legacy real de la corrida 1 (sin `passb1.run`) pero lo fije por
@@ -3566,9 +3593,11 @@ fuera de la captura (D5); y que el consolidado marque FAIL ante una ejecución d
 marcador** (carga non-org) sin contar un mero descubrimiento (D2 afinado). **D3 quedó en la Opción A
 (INCONCLUSIVE)**: el experimento local no pudo demostrar causalidad porque la allowlist de MCP sólo
 se aplica por el drop-in root, inexistente localmente; la Opción B requeriría correr las 4
-condiciones bajo la política real (paso gateado). La corrida 2 en VM100 queda sujeta a tu
-autorización. El contenedor y la evidencia de la corrida 1 permanecen retenidos; `e00ef29`,
-`37fd028`, `5eb257a`, `7f4c034` y `f11c467` no se alteran.
+condiciones bajo la política real (paso gateado). La corrida 2 quedó **autorizada
+condicionalmente** (diagnóstica, P0/N14/N17-project) y la ejecuta el responsable en VM100 con el
+checklist de STOP de arriba. El contenedor y la evidencia de la corrida 1 permanecen retenidos, y
+**no se corre `cleanup`** en ninguno de los dos contenedores; `e00ef29`, `37fd028`, `5eb257a`,
+`7f4c034`, `f11c467` y `824a2a2` no se alteran.
 ## 2. Versiones
 
 | Variante | CLI | Motivo |
