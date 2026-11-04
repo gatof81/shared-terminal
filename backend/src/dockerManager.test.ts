@@ -907,7 +907,7 @@ describe("DockerManager.searchTabHistory (#357)", () => {
 
 describe("DockerManager.reconcile", () => {
 	afterEach(() => {
-		delete process.env.SESSION_IMAGE_PINS;
+		vi.restoreAllMocks();
 	});
 	// d1Query is a module-level mock; reset between tests so a mockResolvedValueOnce
 	// from one test can't bleed into the next (or into any future test elsewhere
@@ -916,8 +916,8 @@ describe("DockerManager.reconcile", () => {
 		dbStubs.d1Query.mockReset();
 		dbStubs.d1Query.mockResolvedValue({ results: [], meta: { changes: 0 } });
 		// The image-pin boot pass (imagePins.ts) has its own tests; these
-		// fakes have no image API and count warns, so it is off here.
-		process.env.SESSION_IMAGE_PINS = "off";
+		// fakes have no image API and count warns, so it is stubbed here.
+		vi.spyOn(DockerManager.prototype, "pinAllSessionImages").mockResolvedValue(undefined);
 	});
 
 	function makeDockerWithInspectError(err: Error & { statusCode?: number }): {

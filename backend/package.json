@@ -22,7 +22,7 @@
     "composer:resolve": "node dist/conversation/composerCli.js",
     "recreate:admin": "node dist/recreate/adminCli.js",
     "restore": "node dist/backup.js restore",
-    "docker:build-session": "docker build -t shared-terminal-session ../session-image"
+    "docker:build-session": "../scripts/build-session-image.sh"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

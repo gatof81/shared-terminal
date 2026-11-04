@@ -146,18 +146,23 @@ services:
   # here would leave an idle parasite container running forever.
   #
   # With `profiles: ["build"]` this service is never started by a plain
-  # `docker compose up`. To (re)build the image, run:
+  # `docker compose up`. To (re)build the session image, run
   #
-  #     docker compose build session-image
+  #     scripts/build-session-image.sh        (or: cd backend && npm run docker:build-session)
   #
-  # (`docker compose build <name>` works regardless of profile.) Or use
-  # the standalone `docker build -t shared-terminal-session ./session-image`
-  # from the repo root — both produce the same image.
+  # which gates on `images:pins`, builds a candidate and only then moves the
+  # live tag. `docker compose build session-image` only produces the
+  # `:candidate` tag; a hand-typed `docker build -t shared-terminal-session`
+  # is NOT protected (see docs/DEPLOYMENT.md).
   session-image:
     profiles: ["build"]
     build:
       context: ./session-image
-    image: shared-terminal-session
+    # A CANDIDATE tag, never the live one: moving `shared-terminal-session`
+    # deletes the image it left on the containerd store, even under running
+    # sessions (incident 2026-11-03). Promote it only through
+    # scripts/build-session-image.sh, which gates on `images:pins` first.
+    image: shared-terminal-session:candidate
 
 # Shared network for the backend ⋈ session containers. Declared `external` so
 # its real Docker name is exactly `sessions-net` (a compose-managed network

@@ -262,3 +262,261 @@ export async function pruneOrphanPins(
 	}
 	return { orphans, removed, kept };
 }
+
+// ── Strict protection for creates (owner condition P1/P2, 2026-11-04) ─────
+
+/** A create that cannot be protected must not happen. */
+export class ImagePinError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "ImagePinError";
+	}
+}
+
+/**
+ * Resolve `ref` (a tag or an id) to the immutable image id a create will use
+ * and pin THAT id, verified — or throw. The resolve and the pin are not one
+ * atomic step: if a rebuild removes the resolved image in between, the pin
+ * fails (404) and so does this call; it never falls back to another id or to
+ * the moved tag. The caller then creates from the returned id, never from a
+ * tag, so the created container's image is exactly the pinned one.
+ */
+export async function ensurePinned(d: PinDocker, ref: string, repo = PIN_REPO): Promise<string> {
+	const image = await d.inspectImage(ref).catch((err: unknown) => {
+		throw new ImagePinError(`cannot resolve ${ref}: ${(err as Error).message}`);
+	});
+	if (!image || !IMAGE_ID_RE.test(image.Id)) throw new ImagePinError(`image ${ref} not found`);
+	let outcome: PinOutcome;
+	try {
+		outcome = await protectImage(d, image.Id, repo);
+	} catch (err) {
+		throw new ImagePinError(`pin of ${image.Id} failed: ${(err as Error).message}`);
+	}
+	if (outcome === "image-missing")
+		throw new ImagePinError(
+			`image ${image.Id} (from ${ref}) disappeared before it could be pinned`,
+		);
+	return image.Id;
+}
+
+/** After a create from `imageId`: the container runs exactly it, and (pins on) its pin still names it. */
+export async function verifyCreated(
+	d: PinDocker,
+	containerId: string,
+	imageId: string,
+	opts: { pins: boolean; repo?: string },
+): Promise<void> {
+	const c = await d.inspectContainer(containerId);
+	if (!c) throw new ImagePinError(`created container ${containerId.slice(0, 12)} not found`);
+	if (c.Image !== imageId)
+		throw new ImagePinError(
+			`container ${containerId.slice(0, 12)} runs ${c.Image}, not the pinned ${imageId}`,
+		);
+	if (!opts.pins) return;
+	const pin = await d.inspectImage(pinRef(imageId, opts.repo ?? PIN_REPO));
+	if (pin?.Id !== imageId) throw new ImagePinError(`pin of ${imageId} is gone or moved`);
+}
+
+// ── Historical exceptions (owner condition P3) ──────────────────────────────
+
+/**
+ * An image that was already lost when this protection arrived (incident
+ * 2026-11-03) cannot be pinned. Each such case is listed by the operator as
+ * an EXACT (containerId, imageId) pair; nothing else can make a missing image
+ * pass. The file lives outside every session's mounts and must be root-owned
+ * and not group/world-writable; anything unexpected about it is an error
+ * (fail closed: the gate is NO-GO, never "no exceptions").
+ */
+export interface PinException {
+	containerId: string;
+	imageId: string;
+	name: string;
+	reason: string;
+	incident: string;
+	approvedBy: string;
+	approvedAt: string;
+}
+const EXC_KEYS = [
+	"approvedAt",
+	"approvedBy",
+	"containerId",
+	"imageId",
+	"incident",
+	"name",
+	"reason",
+];
+const CONTAINER_ID_RE = /^[0-9a-f]{64}$/;
+
+export function defaultExceptionsPath(workspaceRoot: string): string {
+	return `${workspaceRoot.replace(/\/+$/, "")}/.st-image-pins/exceptions.json`;
+}
+
+export function parseExceptions(text: string): PinException[] {
+	let raw: unknown;
+	try {
+		raw = JSON.parse(text);
+	} catch {
+		throw new Error("exceptions file: not JSON");
+	}
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+		throw new Error("exceptions file: not an object");
+	const top = raw as Record<string, unknown>;
+	if (Object.keys(top).sort().join(",") !== "exceptions,version" || top.version !== 1)
+		throw new Error('exceptions file: expected exactly {"version": 1, "exceptions": [...]}');
+	if (!Array.isArray(top.exceptions)) throw new Error("exceptions file: exceptions is not a list");
+	const seen = new Set<string>();
+	return top.exceptions.map((e, i) => {
+		if (typeof e !== "object" || e === null || Array.isArray(e))
+			throw new Error(`exception #${i}: not an object`);
+		const o = e as Record<string, unknown>;
+		if (Object.keys(o).sort().join(",") !== EXC_KEYS.join(","))
+			throw new Error(`exception #${i}: expected exactly the keys ${EXC_KEYS.join(", ")}`);
+		for (const k of EXC_KEYS)
+			if (typeof o[k] !== "string" || (o[k] as string).trim() === "")
+				throw new Error(`exception #${i}: ${k} must be a non-empty string`);
+		if (!CONTAINER_ID_RE.test(o.containerId as string))
+			throw new Error(`exception #${i}: containerId must be the full 64-hex id`);
+		if (!IMAGE_ID_RE.test(o.imageId as string))
+			throw new Error(`exception #${i}: imageId must be the full sha256:<64 hex> id`);
+		if (Number.isNaN(Date.parse(o.approvedAt as string)))
+			throw new Error(`exception #${i}: approvedAt is not a date`);
+		const key = `${o.containerId}/${o.imageId}`;
+		if (seen.has(key)) throw new Error(`exception #${i}: duplicate pair`);
+		seen.add(key);
+		return o as unknown as PinException;
+	});
+}
+
+export interface ExceptionsSource {
+	/** null = no file (no exceptions); throws on anything else unexpected. */
+	read(): Promise<{ text: string; uid: number; mode: number } | null>;
+	expectUid?: number;
+}
+
+export async function loadExceptions(src: ExceptionsSource): Promise<PinException[]> {
+	const f = await src.read();
+	if (!f) return [];
+	if (f.uid !== (src.expectUid ?? 0)) throw new Error("exceptions file: not owned by root");
+	if ((f.mode & 0o022) !== 0) throw new Error("exceptions file: group/world-writable");
+	return parseExceptions(f.text);
+}
+
+export function fileExceptionsSource(path: string): ExceptionsSource {
+	return {
+		read: async () => {
+			const fs = await import("node:fs/promises");
+			let st: import("node:fs").Stats;
+			try {
+				st = await fs.lstat(path);
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+				throw err;
+			}
+			if (!st.isFile()) throw new Error("exceptions file: not a regular file");
+			const dir = await fs.lstat(path.slice(0, path.lastIndexOf("/")));
+			if (!dir.isDirectory() || dir.uid !== 0 || (dir.mode & 0o022) !== 0)
+				throw new Error("exceptions dir: must be a root-owned directory not group/world-writable");
+			return { text: await fs.readFile(path, "utf8"), uid: st.uid, mode: st.mode };
+		},
+	};
+}
+
+// ── The gate ────────────────────────────────────────────────────────────────
+
+export type RowState = "pinned" | "unpinned" | "excepted" | "missing";
+export interface GateRow {
+	container: string;
+	containerId: string;
+	state: string;
+	imageId: string;
+	result: RowState;
+	exception?: { incident: string; reason: string; approvedBy: string; approvedAt: string };
+}
+export interface GateReport {
+	gate: "GO" | "NO-GO";
+	reasons: string[];
+	protection: "enabled" | "disabled";
+	rows: GateRow[];
+	/** Listed pairs that matched nothing (container gone, image back): shown, never removed. */
+	staleExceptions: Array<{ containerId: string; imageId: string; why: string }>;
+}
+
+/**
+ * GO only when protection is on, the exceptions file is valid, and every
+ * session container's image is pinned or excepted by its exact pair. A
+ * missing image without its exact pair (a NEW loss, or a new container on an
+ * old lost image) is NO-GO. Nothing is ever removed.
+ */
+export async function evaluate(
+	d: PinDocker,
+	opts: { pins: boolean; exceptions: () => Promise<PinException[]>; repo?: string },
+): Promise<GateReport> {
+	const reasons: string[] = [];
+	if (!opts.pins)
+		reasons.push("protection disabled (SESSION_IMAGE_PINS=off): images in use are NOT protected");
+	let exceptions: PinException[] = [];
+	try {
+		exceptions = await opts.exceptions();
+	} catch (err) {
+		reasons.push(`exceptions unusable: ${(err as Error).message}`);
+	}
+	const byPair = new Map(exceptions.map((e) => [`${e.containerId}/${e.imageId}`, e]));
+	const used = new Set<string>();
+	const rows: GateRow[] = [];
+	const containers = await d.listContainers();
+	for (const c of containers) {
+		if (!isSessionContainer(c) || !c.ImageID) continue;
+		const image = await d.inspectImage(c.ImageID);
+		const name = nameOf(c);
+		const base = { container: name, containerId: c.Id, state: c.State ?? "?", imageId: c.ImageID };
+		if (image) {
+			const pin = await d.inspectImage(pinRef(c.ImageID, opts.repo ?? PIN_REPO));
+			const pinned = pin?.Id === c.ImageID;
+			rows.push({ ...base, result: pinned ? "pinned" : "unpinned" });
+			if (!pinned)
+				reasons.push(`${name}: image ${c.ImageID.slice(7, 19)} exists but is NOT pinned`);
+			continue;
+		}
+		const e = byPair.get(`${c.Id}/${c.ImageID}`);
+		if (e) {
+			used.add(`${c.Id}/${c.ImageID}`);
+			rows.push({
+				...base,
+				result: "excepted",
+				exception: {
+					incident: e.incident,
+					reason: e.reason,
+					approvedBy: e.approvedBy,
+					approvedAt: e.approvedAt,
+				},
+			});
+		} else {
+			rows.push({ ...base, result: "missing" });
+			reasons.push(
+				`${name}: image ${c.ImageID.slice(7, 19)} is MISSING and no exception names this exact container`,
+			);
+		}
+	}
+	const staleExceptions: GateReport["staleExceptions"] = [];
+	for (const e of exceptions) {
+		if (used.has(`${e.containerId}/${e.imageId}`)) continue;
+		const c = containers.find((x) => x.Id === e.containerId);
+		staleExceptions.push({
+			containerId: e.containerId,
+			imageId: e.imageId,
+			why: !c
+				? "container no longer exists"
+				: c.ImageID !== e.imageId
+					? "container runs another image"
+					: "image exists again",
+		});
+	}
+	rows.sort((a, b) => a.container.localeCompare(b.container));
+	return {
+		gate: reasons.length === 0 ? "GO" : "NO-GO",
+		reasons,
+		protection: opts.pins ? "enabled" : "disabled",
+		rows,
+		staleExceptions,
+	};
+}
