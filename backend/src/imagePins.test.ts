@@ -28,6 +28,7 @@ import {
 	pruneOrphanPins,
 	verifyCreated,
 } from "./imagePins.js";
+import { runImagePinsCli } from "./imagePinsCli.js";
 
 const REPO = "shared-terminal-session-pin";
 const id = (c: string) => `sha256:${c.repeat(64)}`;
@@ -273,8 +274,34 @@ describe("cleanup is never automatic and never takes an image in use", () => {
 		};
 		const r = await pruneOrphanPins(d, { write: true }, REPO);
 		expect(r.removed).toEqual([]);
-		expect(r.kept).toEqual([pinRef(id("5"), REPO)]);
+		expect(r.kept).toEqual([
+			{ ref: pinRef(id("5"), REPO), why: "a container uses the image again" },
+		]);
 		expect(await d.inspectImage(id("5"))).not.toBeNull();
+	});
+
+	it("the tag is moved to another image between the listing and the removal ⇒ kept, neither image lost", async () => {
+		const d = await withOrphan();
+		d.addImage(id("8"), "other:tag");
+		const realInspect = d.inspectImage.bind(d);
+		let moved = false;
+		d.inspectImage = async (ref) => {
+			if (!moved && ref === pinRef(id("5"), REPO)) {
+				moved = true;
+				await d.tagImage(id("8"), REPO, "5".repeat(64)); // someone re-points the pin name
+			}
+			return realInspect(ref);
+		};
+		const removeSpy: string[] = [];
+		const realRemove = d.removeTag.bind(d);
+		d.removeTag = async (ref) => {
+			removeSpy.push(ref);
+			return realRemove(ref);
+		};
+		const r = await pruneOrphanPins(d, { write: true }, REPO);
+		expect(removeSpy).toEqual([]);
+		expect(r.kept).toEqual([{ ref: pinRef(id("5"), REPO), why: "tag now names another image" }]);
+		expect(await d.inspectImage(id("8"))).not.toBeNull();
 	});
 
 	it("a mismatched pin (tag not naming its image) is never removed", async () => {
@@ -626,5 +653,62 @@ describe("P3 — the exceptions file", () => {
 		const altered = ex(fullId("a").replace(/a$/, "b"), id("e"));
 		expect((await gate(d, [altered])).gate).toBe("NO-GO");
 		expect((await gate(d, [ex(fullId("a"), id("e"))])).gate).toBe("GO");
+	});
+});
+
+describe("prune --write is disabled in the CLI (owner review of #521)", () => {
+	const io = () => {
+		const o: { out: unknown[]; err: string[] } = { out: [], err: [] };
+		return { o, io: { out: (v: unknown) => o.out.push(v), err: (l: string) => o.err.push(l) } };
+	};
+	function spied(d: FakeDocker) {
+		const removed: string[] = [];
+		const real = d.removeTag.bind(d);
+		d.removeTag = async (ref) => {
+			removed.push(ref);
+			return real(ref);
+		};
+		return removed;
+	}
+
+	it.each([
+		[["prune", "--write"]],
+		[["prune", "--write", "--backend-stopped"]],
+		[["prune", "--force"]],
+	])("%j ⇒ exit 2, nothing removed", async (argv) => {
+		const d = vm100();
+		d.containers = [];
+		d.addImage(id("5"), "shared-terminal-session:latest");
+		await protectImage(d, id("5"), "shared-terminal-session-pin");
+		const removed = spied(d);
+		const { o, io: cli } = io();
+		expect(await runImagePinsCli(argv as string[], d, {}, cli)).toBe(2);
+		expect(removed).toEqual([]);
+		expect(o.err.join()).toMatch(/disabled in this version/);
+	});
+
+	it("backend active: a spawn's fresh pin (no container yet) shows as an orphan in the dry run, and nothing can remove it", async () => {
+		const d = vm100();
+		d.containers = [];
+		d.addImage(id("5")); // only reachable through the pin: an untag would delete it
+		await ensurePinned(d, id("5"), "shared-terminal-session-pin"); // the spawn pinned; its create is in flight
+		const removed = spied(d);
+		const { o, io: cli } = io();
+		expect(await runImagePinsCli(["prune"], d, {}, cli)).toBe(0);
+		expect((o.out[0] as { orphans: string[] }).orphans).toContain(
+			pinRef(id("5"), "shared-terminal-session-pin"),
+		);
+		expect(await runImagePinsCli(["prune", "--write", "--backend-stopped"], d, {}, cli)).toBe(2);
+		expect(removed).toEqual([]);
+		expect(await d.inspectImage(id("5"))).not.toBeNull();
+		d.containers.push(sessionC("st-55555555-555", id("5"), "created")); // the create lands
+		expect(await d.inspectImage(id("5"))).not.toBeNull();
+	});
+
+	it("the dry run and status still work", async () => {
+		const d = vm100();
+		const { io: cli } = io();
+		expect(await runImagePinsCli(["prune"], d, {}, cli)).toBe(0);
+		expect(await runImagePinsCli(["bogus"], d, {}, cli)).toBe(2);
 	});
 });

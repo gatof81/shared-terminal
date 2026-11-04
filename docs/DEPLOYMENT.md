@@ -123,11 +123,12 @@ containers run on it**. Every image a session container uses therefore carries
   immutable id, without a pin; every create and every boot logs that images
   are UNPROTECTED, and the gate is **NO-GO** for as long as it is off.
 - **Cleanup**: `images:pins -- prune` (dry run) lists pins no container
-  uses. Removing them is never automatic and only with the backend stopped (a
-  spawn pins before it creates, so a fresh pin has no container yet):
-  `docker compose stop app && docker compose run --rm app npm run images:pins -- prune --write --backend-stopped`,
-  which re-lists containers before each untag; without the acknowledgement
-  the CLI refuses.
+  uses. **Removal is disabled in this version** (`prune --write` exits 2
+  whatever the flags): a spawn pins before it creates, so a fresh pin has no
+  container yet, and a separate process cannot prove the backend is not
+  creating. Orphan pins only cost disk; cleanup is postponed until removal
+  can exclude creates (the library already re-reads the tag's target and
+  the containers right before each untag).
 - **Not protectable from here**: a hand-typed `docker build -t
   shared-terminal-session`, `docker tag` onto that name, `docker rmi -f` of a
   pin, `docker image prune -a` of an image no container uses, another tool's

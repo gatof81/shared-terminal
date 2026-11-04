@@ -27,9 +27,11 @@
  *     host restarts; the boot pass repairs anything a crash left unpinned.
  *
  * Never automatic: removing a pin. A pin whose image no container uses any
- * more ("orphan") is only reported; `npm run images:pins -- prune --write
- * --backend-stopped` removes those tags (the image itself goes with its last
- * tag — nothing uses it). Best-effort ONLY where nothing is being created:
+ * more ("orphan") is only reported (`npm run images:pins -- prune`, dry run).
+ * Removal (`--write`) is DISABLED in the CLI: a spawn pins before it creates,
+ * so a fresh pin has no container yet, and a separate process cannot prove
+ * the backend is not creating (owner review of #521: postpone cleanup rather
+ * than open a path to image loss). Best-effort ONLY where nothing is being created:
  * the boot pass and an adopted (already existing) container.
  *
  * Not covered: `docker image rm -f` / `docker rmi` of a pin by hand, or
@@ -246,17 +248,26 @@ export async function pruneOrphanPins(
 	d: PinDocker,
 	opts: { write: boolean },
 	repo = PIN_REPO,
-): Promise<{ orphans: string[]; removed: string[]; kept: string[] }> {
+): Promise<{ orphans: string[]; removed: string[]; kept: Array<{ ref: string; why: string }> }> {
 	const pins = await listPins(d, repo);
 	const orphans = pins.filter((p) => p.usedBy.length === 0 && !p.mismatched).map((p) => p.ref);
 	const removed: string[] = [];
-	const kept: string[] = [];
+	const kept: Array<{ ref: string; why: string }> = [];
 	if (!opts.write) return { orphans, removed, kept };
 	for (const ref of orphans) {
 		const pin = pins.find((p) => p.ref === ref) as PinEntry;
+		// Immediately before each untag, everything the decision rested on is
+		// read again (owner review of #521): the tag still names the SAME
+		// image it named in the listing, and no container (any state) uses
+		// that image. Either changed ⇒ the pin is kept.
+		const target = await d.inspectImage(ref);
+		if (target?.Id !== pin.imageId) {
+			kept.push({ ref, why: target ? "tag now names another image" : "tag gone" });
+			continue;
+		}
 		const now = await d.listContainers();
 		if (now.some((c) => c.ImageID === pin.imageId)) {
-			kept.push(ref);
+			kept.push({ ref, why: "a container uses the image again" });
 			continue;
 		}
 		await d.removeTag(ref);
