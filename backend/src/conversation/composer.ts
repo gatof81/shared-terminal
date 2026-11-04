@@ -64,6 +64,14 @@ function withDeadline<T>(p: Promise<T>, ms: number, onExpire?: () => void): Prom
 }
 
 import {
+	type CliPolicy,
+	decide,
+	describePolicy,
+	exactPolicy,
+	parseExact,
+	ruleText,
+} from "./cliPolicy.js";
+import {
 	CONSUME_MAX_POLLS,
 	CONSUME_POLL_MS,
 	captureArgv,
@@ -130,8 +138,10 @@ export interface ComposerConversationPort {
 
 export interface ComposerDeps {
 	enabled: boolean;
-	/** `COMPOSER_CLI_VERSIONS` (§8.1.9). */
+	/** `COMPOSER_CLI_VERSIONS` alone (§8.1.9); ignored when `cliPolicy` is given. */
 	cliVersions?: ReadonlySet<string>;
+	/** Exact list + optional open minimum + deny list (§8.1.9, v1.8.3). */
+	cliPolicy?: CliPolicy;
 	store: ConversationStore;
 	conversation: ComposerConversationPort;
 	sessions: { getOrThrow(sessionId: string): Promise<SessionMeta> };
@@ -204,19 +214,9 @@ export function composerFlagEnabled(raw: string | undefined): boolean {
 	return raw === "true" || raw === "1";
 }
 
+/** `COMPOSER_CLI_VERSIONS` alone (the exact list); see cliPolicy.ts for the whole policy. */
 export function parseCliVersions(raw: string | undefined): Set<string> {
-	const entries = (raw ?? "")
-		.split(",")
-		.map((v) => v.trim())
-		.filter((v) => v.length > 0);
-	if (entries.length === 0) return new Set(DEFAULT_CLI_VERSIONS);
-	const bad = entries.filter((v) => !/^\d+\.\d+\.\d+$/.test(v));
-	// Configured but unusable must not silently become the default: the
-	// operator would believe only their list is allowed (same stance as
-	// TRUST_PROXY). Refuse to start.
-	if (bad.length > 0)
-		throw new Error(`COMPOSER_CLI_VERSIONS: not a version: ${bad.join(", ")} (expected X.Y.Z)`);
-	return new Set(entries);
+	return parseExact(raw);
 }
 
 /** Events read per conversation (newest) when an ack is re-evaluated after the fact. */
@@ -321,7 +321,7 @@ export class ComposerService {
 	private readonly recentFinals = new Map<string, HttpResult>();
 	private readonly recovered = new Set<string>();
 	private readonly userSends = new Map<string, number[]>();
-	private readonly cliVersions: ReadonlySet<string>;
+	private readonly cliPolicy: CliPolicy;
 	private readonly liveVersions = new LiveVersionCache();
 	/** Live-version execs past their deadline and not yet settled, per container. */
 	private readonly liveHung = new Map<string, number>();
@@ -338,7 +338,7 @@ export class ComposerService {
 	};
 
 	constructor(private readonly deps: ComposerDeps) {
-		this.cliVersions = deps.cliVersions ?? new Set(DEFAULT_CLI_VERSIONS);
+		this.cliPolicy = deps.cliPolicy ?? exactPolicy(deps.cliVersions ?? DEFAULT_CLI_VERSIONS);
 		this.now = deps.now ?? (() => Date.now());
 		this.after = deps.after ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
 		this.tHttp = deps.tHttpMs ?? T_HTTP_MS;
@@ -693,18 +693,20 @@ export class ComposerService {
 				`[composer] ${sid} ${paneId}: pid ${entry.pid} runs CLI ${live.version}; its session_start reported ${JSON.stringify(a.index.claudeVersion ?? null)} (metadata only, not used)`,
 			);
 		}
-		if (!this.cliVersions.has(live.version)) {
+		// §8.1.9 v1.8.3: deny → exact list → open minimum, on the LIVE version.
+		const cli = decide(this.cliPolicy, live.version);
+		if (!cli.ok) {
 			logger.info(
-				`[composer] ${sid} ${paneId}: not sending, CLI ${live.version} of pid ${entry.pid} is not in COMPOSER_CLI_VERSIONS`,
+				`[composer] ${sid} ${paneId}: not sending, CLI ${live.version} of pid ${entry.pid} ${cli.why} (${describePolicy(this.cliPolicy)})`,
 			);
 			return this.reject("cli-unvalidated", 409, {
 				version: live.version,
 				reportedVersion: a.index.claudeVersion ?? null,
-				detail: "not-allowed",
+				detail: cli.why,
 			});
 		}
 		logger.info(
-			`[composer] ${sid} ${paneId} ${clientMessageId}: CLI ${live.version} of pid ${entry.pid} authorized by COMPOSER_CLI_VERSIONS`,
+			`[composer] ${sid} ${paneId} ${clientMessageId}: CLI ${live.version} of pid ${entry.pid} authorized by ${ruleText(this.cliPolicy, cli)}`,
 		);
 
 		// ── Audit before any effect (§8.1.1), fail-closed ──
