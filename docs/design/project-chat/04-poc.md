@@ -1044,6 +1044,12 @@ Reglas comunes:
 
 **PASS-B1: integridad de la instalación** (después de B0 PASS; contenedor descartable con sus
 propios managed settings de solo lectura).
+
+> **Actualizado (2026-11-03) en §1.14.14.** La inspección de 2.1.314 corrige este esbozo:
+> `allowManagedModsOnly` es una opción del guard (`pluginConfigs["cc-plugin-sec-default@builtin"].options`);
+> el tier de organización exige un marketplace de directorio declarado en managed settings; hay controles
+> del arranque (`CLAUDE_CODE_MANAGED_SETTINGS_PATH`, entre otros) que ninguna política cierra. B1 se divide
+> en B1a (instalación) y B1b (H-ND), con veredictos independientes.
 - **Configuración:**
   - marketplace local de solo lectura con `st-provenance`;
   - `enabledPlugins`;
@@ -1120,16 +1126,17 @@ recomendación es **NO-GO** para esta arquitectura en producción. Las opciones 
 sandbox o quedarse con la evidencia informativa. No se fuerza una solución insegura para mantener
 Channels.
 
-#### 1.14.8 Recomendación
+#### 1.14.8 Recomendación (histórica: B0 se ejecutó y dio PASS, §1.14.13)
 
-**GO para construir el prototipo de PASS-B0, y sólo eso:**
+**GO para construir el prototipo de PASS-B0, y sólo eso** (cumplido: kits y corridas en §1.14.9–§1.14.13):
 - el mod de prueba;
 - los dos servidores de medición;
 - el analizador y sus tests sintéticos.
 
-Ejecutarlo requiere una autorización aparte, con las tres decisiones de §1.14.6. B0 es barato y
-descartable, y responde la pregunta que bloquea todo lo demás: si el par del socket es de verdad el
-proceso del CLI.
+Ejecutarlo requirió una autorización aparte, con las tres decisiones de §1.14.6, que el responsable
+dio por fases (§1.14.9–§1.14.12). B0 era barato y descartable, y respondía la pregunta que
+bloqueaba todo lo demás: si el par del socket es de verdad el proceso del CLI. La respuesta fue sí
+(§1.14.13).
 
 **Un PASS-B0 no valida la arquitectura.** Hay dos límites que no dependen de B0 y que deciden el
 GO/NO-GO final:
@@ -1140,7 +1147,11 @@ Con un FAIL en B0, el diseño basado en el pid queda descartado y se pasa direct
 
 **Resultado (2026-11-03):** PASS en la corrida 4. Estado, conclusiones y siguiente gate en §1.14.13.
 
-#### 1.14.9 Prototipo PASS-B0 y procedimiento (kit `poc/channels-phase0@d224ebe`; **no ejecutado**)
+#### 1.14.9 Prototipo PASS-B0 y procedimiento (kit original `d224ebe`; ejecutado con `9996286` y `447f639`, §1.14.10–§1.14.13)
+
+**Estado:** procedimiento histórico. Las corridas 1 a 4 lo usaron con los kits de §1.14.10–§1.14.12
+y la corrida 4 dio PASS (§1.14.13). Las autorizaciones, los "no ejecutado" y el "GO limitado" que
+aparecen abajo describen la situación en su fecha; no son el estado actual.
 
 **Decisiones del responsable (2026-11-03):**
 - **GO** para el prototipo y su implementación.
@@ -1946,8 +1957,19 @@ a26b7301cbb47f831ed42ad4a4e3ef2f54645fc8c04adbae58c6d4d070811a00  test/test_anal
 **Resultado:** `verdict=PASS`, `reasons=[]`. Es una sola muestra, con el alcance de §1.14.6:
 viabilidad del socket.
 
-La corrida 3 no se informó en este documento. El PASS corresponde a la corrida 4, sobre la
-carpeta `~/passb0-20261103-203739`.
+El PASS corresponde **exclusivamente** a la corrida 4, sobre la carpeta
+`~/passb0-20261103-203739`.
+
+**La corrida 3 no produjo ninguna medición válida.**
+- **Qué pasó:** el contenedor terminó por el vencimiento normal de su `sleep 3600`, con salida 0 y
+  sin OOM, antes de llegar a `measure`. El mod no escribió ningún registro.
+- **Cierre, por el responsable:**
+  1. recuperó el debug log;
+  2. inventarió los 31 cambios del sistema de archivos del contenedor;
+  3. verificó los respaldos;
+  4. cerró con `basis=discard-authorized` y `cleanup.clean=true`.
+- La evidencia queda sólo en VM100, como la de las otras corridas.
+- No cuenta como muestra, ni a favor ni en contra.
 
 **Versiones y entorno:**
 
@@ -2050,8 +2072,8 @@ texto ni log sin depurar sale de VM100.
 - R8 y G1–G12 no cambian.
 - PASS-A y PASS-B0 juntos no habilitan el Monitor.
 
-**Siguiente gate: PASS-B1, integridad de la instalación** (diseño en §1.14.6). Nada de esto está
-autorizado.
+**Siguiente gate: PASS-B1, integridad de la instalación.** El diseño se actualizó en §1.14.14
+(B1a y B1b). El GO del 2026-11-03 es sólo de diseño e inspección estática.
 
 | Dependencia | Estado | Quién |
 | --- | --- | --- |
@@ -2074,6 +2096,372 @@ autorizado.
 - G3: `source=system` sigue ausente (#94675);
 - la decisión sobre G3-A;
 - la alternativa de evidencia sólo informativa (§1.14.7), que es una decisión de producto.
+
+#### 1.14.14 PASS-B1: diseño de B1a y B1b, evidencia estática de 2.1.314, riesgos y plan (**no ejecutado**)
+
+**GO del responsable (2026-11-03):** diseñar B1 e inspeccionar estáticamente Claude Code 2.1.314.
+- **No autoriza:**
+  - construir imágenes;
+  - ejecutar en VM100;
+  - cambios de producción;
+  - merge ni deploy.
+- G3, G3-A, R8, G1–G12 y Composer no cambian.
+
+B1 se divide en dos pruebas **independientes**. Cada una tiene su propio veredicto, y un FAIL de
+una no se compensa con la otra:
+- **B1a:** integridad de la instalación.
+- **B1b:** H-ND.
+
+##### 1.14.14.1 Fuentes de la evidencia estática
+
+- **(B) Binario.** `@anthropic-ai/claude-code@2.1.314`, `bin/claude.exe`:
+  - SHA-256 `4487042b4c4f5d88d4568f68ae98aae0b1ffae58864cf57fb868641bc5f84594`;
+  - 298 229 464 bytes;
+  - ELF x86-64.
+
+  Es la copia de este contenedor de desarrollo, la misma versión que validó B0. Se leyó con
+  búsquedas en sus cadenas, en el código JS embebido y en el parseo de sus cabeceras ELF. Nada se
+  ejecutó con configuraciones nuevas.
+- **(K) Kernel.** Fuentes del tag `Ubuntu-6.8.0-147.147` del árbol noble, el kernel de VM100:
+  - `fs/exec.c`;
+  - `kernel/ptrace.c`;
+  - `fs/proc/base.c`.
+- **Grados de certeza** que se usan abajo:
+  - **E** (estático): leído en el código o en la descripción del propio binario.
+  - **H** (hipótesis): inferido; lo decide la prueba.
+
+  Una descripción `.describe()` del esquema de settings dice qué **promete** el CLI. Que lo cumpla
+  se prueba en B1a.
+
+##### 1.14.14.2 Claves de managed settings en 2.1.314 (verificadas en el binario)
+
+| Clave (ruta exacta) | Qué dice el binario | Grado | Rol en B1a |
+| --- | --- | --- | --- |
+| `pluginConfigs["cc-plugin-sec-default@builtin"].options.allowManagedModsOnly` | **No es una clave de primer nivel.** Es una opción del plugin incorporado `cc-plugin-sec-default` (el guard), y se lee sólo de `policySettings`. Cuenta como activa cualquier valor que no sea `false` ni ausente. Al rechazar un mod registra: "mods are limited to your organization's by policy (allowManagedModsOnly); X was not loaded" | E | `true` |
+| `disableSideloadFlags` | "rejects the --plugin-dir, --plugin-url, --agents, and non-sdk --mcp-config CLI flags at startup … Only honored from managed settings". El código también rechaza `--plugin-dir-no-mcp` y la variable `CLAUDE_CODE_PLUGIN_DIRS`, y termina el proceso con "… disabled by your organization's managed settings (disableSideloadFlags)". **No** cubre otras entradas de MCP (SDK, `claude mcp add`, `.mcp.json`) | E | `true` |
+| `allowManagedHooksOnly` | "only hooks from managed settings and from plugins that managed settings enable run. User, project, and local hooks and the hooks of plugins the user installed are ignored" | E | `true` |
+| `strictPluginOnlyCustomization` | `true` bloquea `~/.claude/{surface}/`, `.claude/{surface}/`, los hooks de `settings.json` y `.mcp.json` para las superficies skills, agents, hooks y MCP. Si el valor es inválido, se trata como `true` | E | `true` |
+| `strictKnownMarketplaces` / `blockedMarketplaces` | Lista permitida y lista bloqueada de marketplaces. Admiten fuentes `directory`, `file`, `hostPattern` y `pathPattern`. **Cualquier** lista permitida bloquea la autocarga de `~/.claude/skills` (plugins `@skills-dir`) salvo que incluya `{"source":"skills-dir"}` | E | sólo el directorio RO de la prueba |
+| `extraKnownMarketplaces` (en managed) | Declara la fuente del marketplace. Es condición del tier de organización (abajo) | E | el directorio RO |
+| `enabledPlugins` (en managed) | Habilita el plugin | E | `st-b1-probe@st-b1` |
+| `allowManagedMcpServersOnly` + `allowedMcpServers` | `allowedMcpServers` se lee sólo de managed. `[]` significa que el usuario no puede usar servidores propios. `deniedMcpServers` se suma desde todas las fuentes | E | `true` y `[]` |
+| `disableAllHooks` | Apaga **todos** los hooks y mods, también los nuestros | E | **no** se define: B1a tiene un negativo para el caso de que el agente lo active desde settings de usuario |
+| Valores restrictivos inválidos | "was present but invalid; treating it as … (its restrictive value)": falla cerrado | E | negativo de configuración |
+
+**Tier de organización** (E). El binario dice cuándo un mod habilitado por managed settings **no**
+es de la organización: "it is not read in place from a local folder its marketplace is registered
+from: it loads from a copy (the plugin cache, an archive or a seed directory) … not treated as the
+organization's: its hooks module runs in the user tier, and does not load where only managed hooks
+may".
+- **Queda en el tier de organización sólo si:**
+  - managed settings lo habilitan;
+  - su marketplace está declarado en `extraKnownMarketplaces` (managed) como **directorio local**;
+  - ese marketplace lo lista por **ruta relativa**;
+  - se lee **en el lugar**, no desde una copia.
+- **Para fuentes remotas** hacen falta `pluginDigests` y `prependPlugins` o `appendPlugins`. B1a
+  no las usa.
+- **Etiqueta del tier.** La línea de carga es
+  `hooks module <label> loaded (<kind>, environment <id>, tier <tier>)`. El binario usa los
+  valores `user`, `builtin` y `core` y las posiciones `prepend` y `append`. **La etiqueta exacta del
+  tier de organización no está confirmada (H).** El prototipo la fija antes de la corrida;
+  mientras no esté fijada, P1 es INCONCLUSIVE.
+
+**Cuándo los mods no corren** (E). Son las razones que el propio CLI enumera:
+- "hooks modules are switched off in this process";
+- la organización deshabilita todos los hooks;
+- prohíbe sideload;
+- bloquea plugins de carpetas locales;
+- sólo admite hooks administrados;
+- `disableAllHooks` en settings;
+- modo seguro;
+- modo `bare`;
+- carpeta no confiable ("the workspace is not trusted").
+
+Interruptor de despliegue: con él apagado los mods instalados no cargan, pero "an organization's and
+built-in plugins load regardless" (E).
+
+##### 1.14.14.3 Hallazgos estáticos que cambian el diseño
+
+1. **`allowManagedModsOnly` está bajo el guard.** Es una opción de `cc-plugin-sec-default`; escrita
+   en el primer nivel no haría nada. Esto corrige §1.14.6.
+2. **El tier de organización exige leer el mod en el lugar.** Hace falta un marketplace de
+   directorio declarado en managed settings. Un plugin en la caché, un archivo comprimido o
+   `CLAUDE_CODE_PLUGIN_SEED_DIR` cae al tier de usuario.
+3. **Hay controles en el arranque que ninguna política puede cerrar.** El agente controla tmux
+   (A1), así que puede relanzar el CLI con cualquier entorno, argumentos o binario:
+   - `CLAUDE_CODE_MANAGED_SETTINGS_PATH` reemplaza la carpeta de políticas ("this machine's policy
+     folder (or the one CLAUDE_CODE_MANAGED_SETTINGS_PATH names)"). Con eso no hay política;
+   - lo mismo vale para `CLAUDE_CODE_REMOTE_SETTINGS_PATH`, `CLAUDE_CODE_MOCK_REMOTE_SETTINGS` y
+     `CLAUDE_CONFIG_DIR`;
+   - `LD_PRELOAD`, `NODE_OPTIONS` y `BUN_OPTIONS` existen en el binario, y el inspector de Bun
+     (`BUN_INSPECT`) está compilado. Si un ejecutable autónomo los respeta, dan código o
+     depuración **dentro** del proceso (H; lo decide B1b).
+
+   Una política que el propio proceso lee no puede defenderse de quien elige con qué política
+   arranca ese proceso. **Consecuencia:** la inscripción del gateway (B2) tiene que leer como root
+   el `environ` y la `cmdline` **iniciales** del CLI y rechazar esas variables y banderas. Es el
+   invariante **I-env**, nuevo. B1a mide estos caminos como hechos de clase K y no los cuenta como
+   bloqueados.
+4. **En producción el binario está en el workspace.** `~/.npm-global` se migra al bind mount del
+   workspace, pertenece a uid 1000 y se autoactualiza (`session-image/Dockerfile`). H-ND exige una
+   copia de root **fuera** del workspace, y que el gateway ate la identidad a **ese** inodo
+   (`/proc/<pid>/exe` → uid 0, modo sin lectura para otros, dispositivo e inodo), no sólo al hash.
+   El hash del binario es público y el agente puede bajar la misma versión.
+5. **2.1.314 ya se vuelve no volcable a sí mismo en un caso.** El ejecutor de revisiones de código
+   llama a `Bun.ant.setDumpable(false)` (`prctl(PR_SET_DUMPABLE,0)`) y explica: "so the review's
+   commands could read its tokens from memory". **No hay** ninguna llamada que lo vuelva a 1 (E).
+   Es un precedente directo de H-ND en el mismo binario.
+6. **El código de Bun se mapea al ejecutar** (E):
+   - la sección `.bun`, de 171,5 MiB, está en un `PT_LOAD`, así que el kernel la mapea al
+     ejecutar y Bun no necesita leer su propio archivo para cargar el código;
+   - en el JS embebido, `/proc/self/exe` sólo se **abre** para el ayudante seccomp del sandbox
+     de Bash ("sandbox: failed to open /proc/self/exe …"). Con `0711`, **el sandbox de Bash del
+     CLI no funcionaría** (H). Las sesiones hoy no lo usan, pero queda como restricción de
+     producto;
+   - **el código nativo de Bun no se inspeccionó.** Si el runtime abre su propio archivo por otro
+     motivo, se ve en H1 de B1b.
+7. **Plugins `@synced` desde claude.ai.** Es otro camino de carga y exige login. Sin login **no se
+   prueba** y, por la regla del responsable, no cuenta como bloqueado.
+8. **Mods que escribe Claude** ("Turn on the mods Claude writes in this session?",
+   `CLAUDE_DEV_MODS_DIR`). Es otro camino de carga con una aprobación de la persona en la terminal.
+   **A1 puede contestarla con `send-keys`**, así que B1a la contesta por el agente.
+
+##### 1.14.14.4 B1a: integridad de la instalación (diseño)
+
+**Entorno.** Las mismas reglas que B0 (§1.14.6, §1.14.9): un contenedor descartable con el mismo
+`USER`, `CapDrop`, `no-new-privileges` y `PidsLimit`, sin `sessions-net`, nada en D1 y 2.1.314 de la
+imagen real.
+- **No hace falta construir una imagen:** la imagen ya trae `/etc/claude-code/managed-settings.d/`
+  (root, 0755).
+- **Dos montajes de solo lectura**, de archivos de root en una carpeta nueva del host:
+  - `…/b1a-<STAMP>/managed/` → `/etc/claude-code/managed-settings.d/`;
+  - `…/b1a-<STAMP>/marketplace/` → `/opt/st-b1/marketplace/`.
+- **Mod administrado `st-b1-probe`:**
+  - registra `session.start` y `classic.SessionStart` (más `classic.SessionEnd` al salir);
+  - escribe sólo hechos;
+  - el marketplace lo lista por ruta relativa (`./plugins/st-b1-probe`).
+- **Managed settings propuestas.** Las formas exactas se validan antes de pedir la ejecución, con
+  `claude plugin validate` y una carga fuera de línea:
+
+```json
+{
+  "extraKnownMarketplaces": { "st-b1": { "source": { "source": "directory", "path": "/opt/st-b1/marketplace" } } },
+  "strictKnownMarketplaces": [ { "source": "directory", "path": "/opt/st-b1/marketplace" } ],
+  "enabledPlugins": { "st-b1-probe@st-b1": true },
+  "disableSideloadFlags": true,
+  "allowManagedHooksOnly": true,
+  "strictPluginOnlyCustomization": true,
+  "allowManagedMcpServersOnly": true,
+  "allowedMcpServers": [],
+  "pluginConfigs": { "cc-plugin-sec-default@builtin": { "options": { "allowManagedModsOnly": true } } }
+}
+```
+
+**Validación de la configuración aplicada** (como `checklimits` en B0). Se registra:
+- los montajes, de solo lectura y de root;
+- que uid 1000 no puede crear, renombrar ni borrar en ninguno (`EROFS` o `EACCES`);
+- el SHA-256 del archivo de settings visto **dentro** del contenedor, igual al del kit;
+- las líneas del debug log donde el CLI lee la política: carpeta, archivos y errores de
+  validación. Si hay **cualquier** error de validación de settings, el resultado es
+  INCONCLUSIVE.
+
+**Positivas**, todas en el mismo arranque:
+
+| # | Qué se observa | Evidencia exigida |
+| --- | --- | --- |
+| P1 | `st-b1-probe` carga en el tier de organización | La línea `hooks module st-b1-probe@st-b1 loaded (…, tier <org>)` con la etiqueta fijada en el prototipo, y ninguna advertencia "not treated as the organization's" |
+| P2 | El guard está cargado y `allowManagedModsOnly` está en vigor | Línea de carga de `cc-plugin-sec-default@builtin` y la opción leída de `policySettings` |
+| P3 | Llegan los eventos `classic.*` | Registros del mod para `classic.SessionStart` (y `classic.SessionEnd` al salir), con `seq` contiguo. **Sin login**, `classic.UserPromptSubmit` y `classic.PreToolUse` **no se prueban**: quedan como hecho no medido, salvo que el responsable decida el login de §1.14.6 |
+| P4 | Momento de carga frente a la confianza | Si el mod de organización carga antes o después de aceptar la confianza de la carpeta (en B0, el de `--plugin-dir` esperó). Es un hecho: no decide el veredicto |
+
+**Negativas.** Cada una se ejecuta en un **arranque nuevo** del CLI, como `developer`, con las
+mismas managed settings.
+- **El intento:** un mod intruso `st-b1-rogue-<n>` que, si corre, escribe una marca en una
+  carpeta que el analizador recoge. Si el camino no es de mods sino de hooks o MCP, el intruso es un
+  hook de comando o un servidor que escribe la marca.
+- **Cada intento cuenta como bloqueado sólo con las tres cosas a la vez:**
+  1. **no hay marca;**
+  2. **el control del mismo arranque está presente:** `st-b1-probe` registró `session.start` en
+     ese proceso, o el CLI terminó con el mensaje de rechazo documentado;
+  3. **aparece la línea de rechazo** que el binario usa para ese camino.
+- **Si falta 2 o 3, el intento es INCONCLUSIVE**, nunca "bloqueado".
+
+| # | Camino | Rechazo esperado (texto del binario) |
+| --- | --- | --- |
+| N1 | `--plugin-dir <intruso>` | Sale: "--plugin-dir is disabled by your organization's managed settings (disableSideloadFlags)" |
+| N2 | `--plugin-dir-no-mcp` | Igual que N1 |
+| N3 | `CLAUDE_CODE_PLUGIN_DIRS=<intruso>` | Igual que N1, con la indicación de la variable |
+| N4 | `--plugin-url` (servidor HTTP local del harness) | Igual que N1 |
+| N5 | `--agents` y `--mcp-config` (no SDK) | Igual que N1 |
+| N6 | `~/.claude/settings.json` con `extraKnownMarketplaces` y `enabledPlugins` hacia un marketplace intruso | `strictKnownMarketplaces` lo rechaza, o el mod queda en el tier de usuario y no carga por `allowManagedModsOnly` |
+| N7 | Lo mismo en `.claude/settings.json` (proyecto) y `.claude/settings.local.json` | Igual que N6 |
+| N8 | `--settings <archivo>` con lo mismo | Igual que N6 |
+| N9 | `claude plugin marketplace add <dir>` y `claude plugin install` | "blocked by your organization's policy" o "marketplace-blocked-by-policy" |
+| N10 | Copia **con el mismo nombre** `st-b1-probe` en `~/.claude/plugins/cache/…` (impostor) | Carga sólo la del lugar, en el tier de organización; la copia no corre |
+| N11 | `CLAUDE_CODE_PLUGIN_CACHE_DIR` hacia una caché del agente con el impostor | Igual que N10 |
+| N12 | `CLAUDE_CODE_PLUGIN_SEED_DIR` con el impostor | Tier de usuario ⇒ no carga ("from a copy … not treated as the organization's") |
+| N13 | `CLAUDE_CODE_PLUGIN_USE_ZIP_CACHE=1` con la caché del agente | Igual que N12 |
+| N14 | Plugin con módulo de hooks en `~/.claude/skills` (`@skills-dir`) | "Plugins from … are blocked by your organization's managed settings (strictKnownMarketplaces …)" |
+| N15 | Mods que escribe Claude (`CLAUDE_DEV_MODS_DIR`), con la pregunta de aprobación **contestada por el harness** vía tmux, como haría A1 | "mods are limited to your organization's by policy (allowManagedModsOnly)" |
+| N16 | Hooks de comando en settings de usuario, proyecto y local | Ignorados por `allowManagedHooksOnly` |
+| N17 | `.mcp.json` y `claude mcp add` (stdio) | Rechazados por `allowedMcpServers: []` |
+| N18 | `disableAllHooks: true` en settings de usuario | No se exige rechazo: es un hecho de disponibilidad. Se registra si apaga nuestro mod. Apagarlo nunca produce evidencia válida |
+| N19 | `CLAUDE_CONFIG_DIR` hacia una carpeta del agente con settings intrusas | Tier de usuario ⇒ no carga |
+
+**Clase K: controles del arranque que la política no puede cerrar.** Se miden como hechos. **Nunca
+se cuentan como bloqueados**, y cada uno pasa a B2 como requisito de I-env.
+
+| # | Camino | Qué se registra |
+| --- | --- | --- |
+| K1 | `CLAUDE_CODE_MANAGED_SETTINGS_PATH=<carpeta del agente>` | Si carga el intruso. Esperado: sí, porque no hay política |
+| K2 | `CLAUDE_CODE_REMOTE_SETTINGS_PATH` y `CLAUDE_CODE_MOCK_REMOTE_SETTINGS` | Igual que K1 |
+| K3 | `--bare`, modo seguro | Si nuestro mod deja de cargar (disponibilidad) |
+| K4 | Otro binario del CLI (la copia del workspace o una bajada por el agente) | Va a B1b y B2: identidad del inodo |
+| K5 | `LD_PRELOAD`, `NODE_OPTIONS`, `BUN_OPTIONS`, `BUN_INSPECT` | Van a B1b (H8) y a B2 (#9) |
+
+**Veredicto de B1a** (estricto; el analizador sigue el modelo de B0):
+- **PASS** sólo si se cumple todo esto:
+  - captura completa;
+  - CLI 2.1.314 antes y después;
+  - configuración aplicada verificada y sin errores de validación;
+  - P1, P2 y P3 (sin las partes que exigen login);
+  - **cada** N1–N17 y N19 intentado, con la marca ausente, el control presente y la línea de
+    rechazo.
+
+  Los hechos K se informan aparte. El texto del veredicto dice que la integridad de la instalación
+  **depende de I-env**.
+- **FAIL:**
+  - cualquier marca de un intruso en N1–N17 o N19;
+  - el mod administrado cargó en el tier de usuario;
+  - el guard no cargó con `allowManagedModsOnly` definido;
+  - un impostor (N10–N13) corrió en lugar del mod administrado o junto con él.
+- **INCONCLUSIVE:**
+  - un N no ejecutado, o sin control ni línea de rechazo;
+  - la etiqueta del tier no fijada;
+  - errores de validación de settings;
+  - el mod administrado no cargó;
+  - versión distinta;
+  - captura incompleta.
+
+  **Un camino no probado nunca cuenta como bloqueado.** `@synced` (sin login) queda listado como
+  **no probado**.
+
+##### 1.14.14.5 B1b: H-ND, por separado (diseño)
+
+**Qué afirma:** un CLI 2.1.314 ejecutado desde un archivo de **root con modo `0711`**:
+1. arranca y funciona;
+2. queda no volcable;
+3. no puede ser leído ni adjuntado por el mismo uid, ni siquiera por un ancestro.
+
+**Base en el kernel** (K, tag de VM100):
+- `would_dump()` marca `BINPRM_FLAGS_ENFORCE_NONDUMP` cuando quien ejecuta no puede leer el
+  archivo, y lleva `mm->user_ns` hasta un namespace con privilegios sobre el inodo: el inicial,
+  para un archivo de root.
+- `begin_new_exec()` entonces llama a `set_dumpable(mm, suid_dumpable)`, nunca a
+  `SUID_DUMP_USER`.
+- `__ptrace_may_access()` niega cuando dumpable ≠ `SUID_DUMP_USER` y no hay capacidad en
+  `mm->user_ns`. Eso aplica también a los ancestros: Yama no lo cambia.
+- `environ`, `auxv`, `fd`, `maps` y `mem` (este último en modo ATTACH) pasan por esa
+  comprobación.
+- `cmdline` y `status` siguen legibles: **nada secreto puede ir en los argumentos.**
+
+**Variante aislada sin construir imagen** (recomendada). Usa un contenedor descartable de la imagen
+real; la imagen no se toca.
+1. Con `docker exec -u 0` (root sin capacidades, `CapDrop: ALL`):
+   `install -d -o root -g root -m 0755 /opt/st-hnd` y
+   `install -o root -g root -m 0711 <claude.exe de la imagen> /opt/st-hnd/claude-2.1.314`.
+2. Comprobar el SHA-256 contra `4487042b…`.
+3. Lanzar el CLI como `developer` desde esa ruta.
+- **Si el responsable prefiere una imagen variante** (`FROM` la imagen por su ID, con la copia
+  `0711`), eso es construir una imagen y necesita su autorización. Queda como alternativa.
+- **En los dos casos** hay que registrar en el preflight:
+  - `fs.suid_dumpable` y `kernel.core_pattern`;
+  - `ptrace_scope`;
+  - si Docker usa `userns-remap`.
+
+**Comprobaciones:**
+
+| # | Qué | Evidencia | FAIL si |
+| --- | --- | --- | --- |
+| H1 | Arranque y funcionamiento | `--version` = 2.1.314; arranque interactivo hasta la pantalla de confianza; el mod de B0 (`--plugin-dir`, sin managed settings en B1b) registra `session.start` y una llamada `$.process.run` | No arranca, o falla al leerse a sí mismo (`EACCES` sobre su archivo) |
+| H2 | Estado efectivo | Las entradas de `/proc/<pid>/` del CLI pertenecen a root (`task_dump_owner` con dumpable ≠ 1), medido al inicio, después de cargar el mod y a los 5 min | Alguna medición con dueño uid 1000 (dumpable volvió a 1) |
+| H3 | Lectura desde el mismo uid, **no** ancestro | `environ`, `auxv`, `maps`, `mem`, `readlink fd/*` y `fdinfo`; `process_vm_readv`; `ptrace(PTRACE_SEIZE)`; `pidfd_getfd`. Cada intento con su errno | Cualquier lectura o adjunción tiene éxito |
+| H4 | Lo mismo desde un **ancestro controlado** | Un padre `python3` del harness hace `fork` + `exec` del CLI y prueba H3. Yama `ptrace_scope=1` le permitiría adjuntarse; H-ND no | Ídem |
+| H5 | Volcados de memoria | Como el agente: `prlimit --core=unlimited` y `kill -SEGV` al CLI. Se busca cualquier core legible por uid 1000 (cwd, `/tmp`, la ruta de `core_pattern` vista desde el contenedor) | Aparece un core legible |
+| H6 | Copias y reemplazo | (a) `/opt/st-hnd` y el binario no se pueden escribir, renombrar ni borrar como uid 1000; (b) el inventario de copias **legibles** del CLI en el contenedor (por SHA-256 y nombre) se registra; la copia de la imagen en `~/.npm-global` existe y es esperada; (c) `/proc/<pid>/exe` del CLI lanzado es el inodo de `/opt/st-hnd` | (a) se puede reemplazar; (c) no es ese inodo |
+| H7 | Actualización | Con el autoactualizador **habilitado**, durante 10 min; además `claude update` y `npm i -g` como uid 1000. Se mira que el proceso siga en el inodo de `/opt` y que `/opt` no cambie | El proceso se relanza desde otro binario por sí solo, o `/opt` cambia |
+| H8 | Inyección dentro del proceso (clase K) | Relanzar el binario `0711` con `BUN_INSPECT`, `BUN_OPTIONS=--preload …` o `NODE_OPTIONS=--require …`. `LD_PRELOAD` necesita una biblioteca compilada que la imagen no trae: no se prueba en B1b y queda para B2 | No decide el veredicto. Se informa si alguna da código dentro del proceso: entonces H-ND sólo vale con I-env |
+| H9 | Sandbox de Bash | Si el sandbox del CLI está activo, `/proc/self/exe` no se puede abrir | No decide el veredicto. Restricción de producto |
+
+**Límite de H6(c).** Con dumpable ≠ 1, uid 1000 no puede hacer `readlink /proc/<pid>/exe`, y un
+root sin capacidades dentro del contenedor tampoco. Medirlo exige un lector con `CAP_SYS_PTRACE` en
+el host, que es lo que tendría el gateway. **Decisión del responsable:** autorizar un `stat` de
+solo lectura como root en el host para H6(c), o dejar H6(c) INCONCLUSIVE en B1b y probarlo en B2.
+
+**Veredicto de B1b**, que se informa **siempre aparte** de B1a:
+- **PASS:** H1–H7 cumplidas.
+- **FAIL:** cualquier fila de H1–H7 en estado FAIL. Un FAIL de H1 (no arranca) significa que H-ND
+  no es viable para 2.1.314: A5 queda como residuo y se vuelve a §1.14.7.
+- **INCONCLUSIVE:** precondiciones distintas (`ptrace_scope`, `suid_dumpable`, `userns-remap`),
+  una fila no ejecutada, H6(c) sin lector autorizado o captura incompleta.
+
+**Limitaciones de H-ND**, aunque pase:
+- protege sólo al proceso ejecutado desde ese inodo. Un CLI relanzado desde una copia legible es
+  volcable, así que el gateway tiene que atar la identidad al inodo (hallazgo 4);
+- no protege de código que corre **dentro** del proceso: `LD_PRELOAD`, opciones de Bun o Node, el
+  inspector. Eso es I-env;
+- `cmdline` y `status` siguen legibles;
+- los hijos (Bash) son volcables después de su `exec`. Nada secreto puede llegarles por el entorno;
+- depende de `suid_dumpable` para los volcados y de no tener `userns-remap`, y vale para el kernel
+  medido;
+- es incompatible con el sandbox de Bash del CLI (hallazgo 6).
+
+##### 1.14.14.6 Kit, fases y limpieza (reutiliza B0)
+
+**Kit nuevo** en `poc/channels-phase0`, `poc/passb1/`, por SHA con hashes y lista exacta:
+- `run-b1a.sh` y `run-b1b.sh`, con las mismas fases (`preflight`, `setup`, `servers` si hace falta,
+  `measure`, `capture`, `validate`, `cleanup`);
+- marcas `state/<fase>.ok`;
+- **fundamento obligatorio para borrar** (`captured`, `no-evidence`, `discard-authorized`);
+- comprobación del id del contenedor y de la versión del CLI antes y después.
+
+**El `measure` de B1a** ejecuta N1–N19 de forma **secuencial**, un arranque del CLI por intento. El
+harness:
+- lanza cada arranque en tmux;
+- acepta sólo la confianza, el tema y la pregunta de N15;
+- no hace login;
+- espera la marca del control o la salida del CLI.
+
+**Analizadores:**
+- `analyze-b1a.py` y `analyze-b1b.py`, de biblioteca estándar;
+- una prueba sintética por criterio, con mutaciones, como en B0;
+- los informes llevan alias, booleanos y textos de rechazo **por plantilla**, nunca el log crudo.
+
+**La evidencia queda en VM100.** A la PR sólo llegan veredictos y hechos depurados.
+
+##### 1.14.14.7 Riesgos
+
+| Riesgo | Efecto | Mitigación |
+| --- | --- | --- |
+| La forma exacta de las claves (`extraKnownMarketplaces` anidado, etiqueta del tier) difiere de lo leído | P1 INCONCLUSIVE o mod no cargado | Validar las settings fuera de línea con el CLI local antes de pedir la corrida, sin VM100 |
+| Muchos caminos de carga (más de 20) y versiones futuras con caminos nuevos | Un camino nuevo sin probar | La lista vale **sólo** para 2.1.314; cada versión nueva repite la inspección (R9) |
+| K1/K2: la política se reubica por entorno | Sin I-env, B1a no protege nada frente a un relanzamiento | I-env en el gateway (B2) y prueba adversarial |
+| `@synced` y eventos que exigen login | Caminos o eventos no probados | Listados como no probados; login sólo con la decisión de §1.14.6 |
+| H-ND rompe el arranque de Bun | A5 queda como residuo | B1b separado; §1.14.7 |
+| Lectura de `/proc/<pid>/exe` como root en el host para H6(c) | Operación privilegiada nueva | Decisión explícita, o diferirla a B2 |
+| `0644` y archivos de control | Exposición en el host | Ningún material de clave en B1. Los archivos de settings y marketplace son de root y sin secretos |
+| El harness contesta preguntas de la terminal (confianza, N15) | Simula a A1; si se equivoca de pantalla, el arranque queda trabado | Respuestas por plantilla de pantalla y tiempo límite ⇒ INCONCLUSIVE |
+
+##### 1.14.14.8 Decisiones que se piden al responsable
+
+1. Revisar este diseño. Con su aprobación, **GO para escribir el kit** `poc/passb1`: código, tests
+   sintéticos y validación local de las settings con el CLI de este contenedor. No toca VM100.
+2. **B1b:** la variante sin imagen (`docker exec -u 0` en el descartable) o una imagen variante.
+3. **H6(c):** un `stat` como root en el host, o diferirlo a B2.
+4. **Login** para las partes de P3 que lo exigen y para `@synced`: mantener "sin login"
+   (recomendado) o autorizarlo en el descartable.
+5. **I-env:** aceptar que la integridad de la instalación (B1a) se declare dependiente de la
+   inscripción del gateway, y agregar K1–K5 a los ataques de B2.
 
 ## 2. Versiones
 
