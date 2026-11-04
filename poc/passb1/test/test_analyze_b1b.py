@@ -60,20 +60,23 @@ NEGATIVES = [
     ("root copy does not run", lambda D: D.update(version={"version": None}), "FAIL", "H1-root-copy-does-not-run"),
     ("mods do not run from root copy", lambda D: D["probe"].update(hnd=[]), "FAIL", "H1-mods-do-not-run-from-root-copy"),
     ("control did not start", lambda D: D["probe"].update(ctl=[]), "INCONCLUSIVE", "H1-control-did-not-start"),
-    ("control not readable", lambda D: D["stat-ctl-t0"]["reads"].update(environ="EACCES"), "INCONCLUSIVE", "control-not-readable"),
+    ("control environ unreadable", lambda D: D["stat-ctl-t0"]["reads"].update(environ="EACCES"), "INCONCLUSIVE", "control-read-mode-incomplete"),
     ("control owner root", lambda D: D["stat-ctl-t0"]["owner_uid"].update(environ=0), "INCONCLUSIVE", "control-not-readable"),
     ("dumpable at start", lambda D: D["stat-hnd-t0"]["owner_uid"].update(environ=1000), "FAIL", "H2-dumpable:stat-hnd-t0"),
     ("dumpable later", lambda D: D["stat-hnd-t1"]["owner_uid"].update(mem=1000), "FAIL", "H2-dumpable:stat-hnd-t1"),
     ("owner unreadable", lambda D: D["stat-hnd-t0"]["owner_uid"].update(maps="ENOENT"), "INCONCLUSIVE", "H2-owner-unknown:stat-hnd-t0"),
-    ("environ readable", lambda D: D["stat-hnd-t0"]["reads"].update(environ="ok"), "FAIL", "H3-readable:stat-hnd-t0"),
-    ("fd link readable", lambda D: D["stat-hnd-t1"]["reads"].update(fd_link="ok"), "FAIL", "H3-readable:stat-hnd-t1"),
-    ("read not attempted", lambda D: D["stat-hnd-t0"]["reads"].pop("auxv"), "FAIL", "H3-readable:stat-hnd-t0"),
+    ("environ readable", lambda D: D["stat-hnd-t0"]["reads"].update(environ="ok"), "FAIL", "H3-read-readable:stat-hnd-t0"),
+    ("fd link readable", lambda D: D["stat-hnd-t1"]["reads"].update(fd_link="ok"), "FAIL", "H3-read-readable:stat-hnd-t1"),
+    ("read not attempted", lambda D: D["stat-hnd-t0"]["reads"].pop("auxv"), "FAIL", "H3-read-readable:stat-hnd-t0"),
     ("later sample missing", lambda D: D.pop("stat-hnd-t1"), "INCONCLUSIVE", "stat-hnd-t1-missing"),
     ("process replaced", lambda D: D["stat-hnd-t1"].update(starttime=9999, starttime_after=9999), "INCONCLUSIVE", "H7-process-changed"),
     ("ancestor reads memory", lambda D: D["anc_hnd"]["plain"]["reads"].update(mem="ok"), "FAIL", "H4-ancestor-can-read"),
     ("ancestor can seize", lambda D: D["anc_hnd"]["plain"]["reads"].update(ptrace_seize="ok"), "FAIL", "H4-ancestor-can-read"),
-    ("ancestor control blind", lambda D: D["anc_ctl"]["plain"]["reads"].update(mem="EACCES"), "INCONCLUSIVE", "H4-control-not-readable"),
+    ("ancestor control cannot attach", lambda D: D["anc_ctl"]["plain"]["reads"].update(mem="EACCES"), "INCONCLUSIVE", "H4-control-incomplete"),
     ("ancestor missing", lambda D: D.update(anc_hnd=None), "INCONCLUSIVE", "H4-missing"),
+    ("control READ incomplete blocks H-ND credit", lambda D: D["stat-ctl-t0"]["reads"].update(maps="EACCES"), "INCONCLUSIVE", "control-read-mode-incomplete"),
+    ("H4 control cannot attach => no credit", lambda D: D["anc_ctl"]["plain"]["reads"].update(ptrace_seize="EPERM"), "INCONCLUSIVE", "H4-control-incomplete"),
+    ("pid/starttime changed", lambda D: D["stat-hnd-t1"].update(starttime=7777, starttime_after=7777), "INCONCLUSIVE", "H7-process-changed"),
     ("user cores allowed", lambda D: D["sysinfo"].update(suid_dumpable="1"), "FAIL", "H5-suid-dumpable-allows-user-cores"),
     ("root copy writable", lambda D: D["immut"].update(open_write="ok"), "FAIL", "H6a-root-copy-changeable"),
     ("folder replaceable", lambda D: D["immut"].update(rename_dir="ok"), "FAIL", "H6a-root-copy-changeable"),
@@ -89,7 +92,12 @@ class Pass(unittest.TestCase):
     def test_nominal(self):
         r = B.analyze(fixture())
         self.assertEqual(r["verdict"], "PASS", r["reasons"])
-        self.assertEqual(r["facts"]["H5_core"], "root-only-host-context")
+        self.assertEqual(r["facts"]["H5_core_precondition"]["disposition"], "root-only-host-context")
+        self.assertFalse(r["facts"]["H5_core_precondition"]["demonstrated"])
+        # Every H-ND denial has a matching per-op control success.
+        self.assertEqual(set(r["facts"]["control"]["read_mode_ok"]), set(B.READ_MODE))
+        self.assertEqual(set(r["facts"]["H4"]["control_ok"]), set(B.READ_MODE + B.ATTACH_MODE))
+        self.assertTrue(r["facts"]["pid_starttime_stable"])
         self.assertIn("H6c", r["pending"])
 
     def test_residuals_are_reported_never_folded_in(self):

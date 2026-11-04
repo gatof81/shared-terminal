@@ -22,7 +22,8 @@ import sys
 KIT = os.path.dirname(os.path.abspath(__file__))
 
 SCOPE = ("B1a: integridad de la instalación administrada de 2.1.314 frente a los caminos de carga N1–N19 "
-         "ejercidos sin login; no evalúa el lanzamiento (09-launch-trust.md), H-ND (B1b) ni ataques al gateway (B2)")
+         "ejercidos sin login; no evalúa el lanzamiento (09-launch-trust.md), H-ND (B1b) ni ataques al gateway (B2). "
+         "classic.SessionEnd se informa como hecho, no se exige para PASS (el intento termina con C-c)")
 WANT_CLI = "2.1.314"
 PROBE = "st-b1-probe"
 MARKET_PATH = "/opt/st-b1/marketplace/"
@@ -37,6 +38,7 @@ PENDING = {"N15": "dev mods: los entrega una skill y se preguntan al terminar un
 SIDELOAD = re.compile(r"disabled by your organization's managed settings \(disableSideloadFlags\)")
 LOADED = re.compile(r"hooks module (\S+?)@(\S+) loaded \((\w+), environment \d+, tier (\w+)\)")
 REGISTER = re.compile(r"plugin\.register: (\S+) \((\w+), (\S+)\), judged by")
+ROGUE_LOADED = re.compile(r"hooks module (st-b1-rogue-\S+?)@\S+ loaded \(|plugin\.register: (st-b1-rogue-\S+) \(")
 READ_HOOKS = re.compile(r"Read hooks\.json for plugin (\S+) \(enabled=\w+\): (\S+)")
 NOT_ORG = re.compile(r"(\S+) is enabled by managed settings, but .* not treated as the organization's")
 GUARD_SEATED = re.compile(r"(?:cc-plugin-sec-default@builtin )?seated (?:outermost: this machine has managed settings|by managed prependPlugins)")
@@ -139,12 +141,24 @@ def classify(aid, a):
         return "blocked", "sideload-refused"
     if not org_ok(ps):
         return "inconclusive", "no-control:probe-not-in-org-tier"
+    # A rogue hooks module that LOADED is a FAIL whether or not its marker landed: the write
+    # could fail for an unrelated reason, so "no marker" is never enough on its own.
+    if any(m.group(1) or m.group(2) for m in ROGUE_LOADED.finditer(a["debug"])):
+        return "loaded", "rogue-loaded-no-marker"
     if aid in IMPOSTOR:
+        # The impostor shares the probe's name. "Blocked" requires that the CLI actually
+        # considered the planted copy (a debug line naming its path) and did not run it; the
+        # probe must have run in place. If the CLI never looked at the planted location, we
+        # cannot call it blocked — that is INCONCLUSIVE, to be settled by the VM100 log.
+        paths = (a["result"] or {}).get("impostor_paths") or []
+        considered = [p for p in paths if p and p in a["debug"]]
         if ps["read_elsewhere"]:
             return "blocked", "impostor-read-not-run"
-        if ps["reads_in_place_only"]:
-            return "blocked", "in-place-only"
-        return "inconclusive", "no-read-evidence"
+        if considered and ps["reads_in_place_only"]:
+            return "blocked", "impostor-considered-ran-in-place"
+        if not paths:
+            return "inconclusive", "impostor-path-not-recorded"
+        return "inconclusive", "impostor-location-not-considered"
     text = a["debug"] if aid in DEBUG_ONLY else a["debug"] + a["stderr"] + a["pre"]
     # Each entry is a pattern, or a tuple of patterns that must all match.
     if not any(all(re.search(q, text) for q in (p if isinstance(p, tuple) else (p,))) for p in MET.get(aid, [])):
@@ -199,8 +213,10 @@ def analyze(D):
         incs.append("baseline-missing")
         facts["attempts"] = {}
         return done()
-    if SETTINGS_INVALID.search(p0["debug"]):
+    bad_settings = sorted(aid for aid, a in att.items() if a and SETTINGS_INVALID.search(a["debug"]))
+    if bad_settings:
         incs.append("settings-invalid")
+        facts["settings_invalid_in"] = bad_settings
     ps = probe_state(p0)
     facts["probe"] = {k: ps[k] for k in ("loaded", "tiers", "kinds", "reads_in_place_only", "not_org_warning")}
     if ps["loaded"] and "user" in ps["tiers"]:
@@ -209,8 +225,9 @@ def analyze(D):
         incs.append("tier-label-unknown")
     elif not org_ok(ps):
         incs.append("probe-not-org")
-    if not ("classic.SessionStart" in ps["kinds"]):
-        incs.append("classic-events-missing")
+    facts["classic_session_end_seen"] = "classic.SessionEnd" in ps["kinds"]
+    if "classic.SessionStart" not in ps["kinds"]:
+        incs.append("classic-sessionstart-missing")
     guard = {"seated": bool(GUARD_SEATED.search(p0["debug"])), "not_seated": bool(GUARD_NOT_SEATED.search(p0["debug"])),
              "loaded": bool(GUARD_LOADED.search(p0["debug"]))}
     facts["guard"] = guard

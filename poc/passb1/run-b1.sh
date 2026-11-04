@@ -103,10 +103,11 @@ setup() {
 	if [ "$KIND" = b1a ]; then
 		mounts+=(--mount "type=bind,src=$MAN,dst=/etc/claude-code/managed-settings.d,readonly"
 			--mount "type=bind,src=$MKT,dst=/opt/st-b1/marketplace,readonly")
-		net=bridge  # --plugin-url (N4) is served on the container's own loopback
-	else
-		net=none    # no update can be downloaded: no new CLI version enters (§1.14.15)
 	fi
+	# No external network for either experiment: no CLI update can be downloaded, no rogue
+	# marketplace can be cloned. N4 serves its zip on the container's own loopback, which is
+	# present under `none`, and disableSideloadFlags refuses --plugin-url before any fetch.
+	net=none
 	D run -d --name "$EXP" --label "$LABEL" --label "passb1.kind=$KIND" --init --entrypoint /usr/bin/sleep \
 		--user developer --workdir /home/developer --cap-drop ALL --security-opt no-new-privileges:true \
 		--pids-limit 256 --memory 2g --memory-swap 2g --cpus 1 --network "$net" --restart no \

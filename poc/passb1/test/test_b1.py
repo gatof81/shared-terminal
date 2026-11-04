@@ -145,7 +145,7 @@ class Fixtures(unittest.TestCase):
                 home = os.path.join(A, "home")
                 os.makedirs(os.path.join(A, "ws"))
                 b1.seed_home(home)
-                kind, args, env, pre = b1.prepare(aid, A, home, None)
+                kind, args, env, pre = b1.prepare(aid, A, home, {})
                 self.assertIn(kind, ("start", "exit", "fact"))
                 blob = json.dumps([args, env, pre])
                 for other in b1.ATTEMPTS:
@@ -169,7 +169,7 @@ class Fixtures(unittest.TestCase):
         for aid in b1.ATTEMPTS:
             A = tempfile.mkdtemp()
             os.makedirs(os.path.join(A, "ws"))
-            kind = b1.prepare(aid, A, os.path.join(A, "home"), None)[0]
+            kind = b1.prepare(aid, A, os.path.join(A, "home"), {})[0]
             self.assertEqual(kind == "exit", aid in ("N1", "N2", "N3", "N4", "N5a", "N5b"), aid)
 
     def test_pending_paths_are_not_attempts(self):

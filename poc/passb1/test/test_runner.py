@@ -118,6 +118,7 @@ class B1a(Runner):
     def test_setup_mounts_exactly_kit_policy_and_marketplace_read_only(self):
         self.through("setup")
         run = next(c for c in self.state()["calls"] if c[:1] == ["run"])
+        self.assertEqual(run[run.index("--network") + 1], "none")
         mounts = [run[i + 1] for i, x in enumerate(run) if x == "--mount"]
         self.assertEqual(sorted(mounts), sorted([f"type=bind,src={KIT},dst=/opt/passb1-kit,readonly",
                                                  f"type=bind,src={self.man},dst=/etc/claude-code/managed-settings.d,readonly",

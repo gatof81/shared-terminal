@@ -141,7 +141,7 @@ PENDING = {"N15": "needs the model: dev mods are handed out by a skill and asked
            "@synced": "needs a claude.ai login"}
 
 
-def prepare(aid, A, home, cfg):
+def prepare(aid, A, home, meta):
     """Builds the attempt's fixtures. Returns (kind, extra_args, extra_env, pre_commands)."""
     mdir = os.path.join(A, "marker")
     rog = lambda n: os.path.join(A, "rogue", n)  # noqa: E731
@@ -191,11 +191,11 @@ def prepare(aid, A, home, cfg):
         pre.append({"cli": ["plugin", "install", "st-b1-rogue-n9@st-b1-rogue-mk9"], "alias": "plugin-install"})
         return "start", args, env, pre
     if aid == "N10":
-        impostor_plugin(os.path.join(home, ".claude", "plugins", "cache", "st-b1", PROBE, "0.0.1"))
+        meta["impostor_paths"] = [impostor_plugin(os.path.join(home, ".claude", "plugins", "cache", "st-b1", PROBE, "0.0.1"))]
         return "start", args, env, pre
     if aid == "N11":
         c = os.path.join(A, "cache")
-        impostor_plugin(os.path.join(c, "st-b1", PROBE, "0.0.1"))
+        meta["impostor_paths"] = [impostor_plugin(os.path.join(c, "st-b1", PROBE, "0.0.1"))]
         env["CLAUDE_CODE_PLUGIN_CACHE_DIR"] = c
         return "start", args, env, pre
     if aid == "N12":
@@ -204,13 +204,13 @@ def prepare(aid, A, home, cfg):
         write_json(os.path.join(seed, "known_marketplaces.json"),
                    {"st-b1-rogue-mk12": {"source": {"source": "directory", "path": mk}, "installLocation": mk,
                                          "lastUpdated": "2026-11-04T00:00:00.000Z"}})
-        impostor_plugin(os.path.join(seed, "cache", "st-b1", PROBE, "0.0.1"))
+        meta["impostor_paths"] = [impostor_plugin(os.path.join(seed, "cache", "st-b1", PROBE, "0.0.1"))]
         env["CLAUDE_CODE_PLUGIN_SEED_DIR"] = seed
         user_settings(home, {"enabledPlugins": {"st-b1-rogue-n12@st-b1-rogue-mk12": True}})
         return "start", args, env, pre
     if aid == "N13":
         c = os.path.join(A, "zipcache")
-        impostor_plugin(os.path.join(c, "plugins", "st-b1", PROBE, "0.0.1"))
+        meta["impostor_paths"] = [impostor_plugin(os.path.join(c, "plugins", "st-b1", PROBE, "0.0.1"))]
         env.update(CLAUDE_CODE_PLUGIN_USE_ZIP_CACHE="1", CLAUDE_CODE_PLUGIN_CACHE_DIR=c)
         return "start", args, env, pre
     if aid == "N14":
@@ -348,10 +348,11 @@ def attempt(aid, root, cli, timeout=60, settle=4):
     home, ws = os.path.join(A, "home"), os.path.join(A, "ws")
     os.makedirs(ws)
     seed_home(home)
-    kind, args, env, pre = prepare(aid, A, home, None)
+    meta = {}
+    kind, args, env, pre = prepare(aid, A, home, meta)
     base_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": home, "TERM": "xterm-256color", "LANG": "C.UTF-8",
                 "DISABLE_AUTOUPDATER": "1"}
-    res = {"id": aid, "kind": kind, "pre": [], "starts": []}
+    res = {"id": aid, "kind": kind, "impostor_paths": meta.get("impostor_paths", []), "pre": [], "starts": []}
     servers = []
     try:
         for p in pre:

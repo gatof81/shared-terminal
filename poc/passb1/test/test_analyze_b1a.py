@@ -40,8 +40,11 @@ def fixture():
         att[aid] = {"result": {"id": aid, "kind": "exit", "rc": 1, "timed_out": False, "markers": [], "probe": []},
                     "debug": "", "stderr": REFUSAL, "pre": "", "has_debug": True}
     for aid in A.START:
-        extra = "" if aid in A.IMPOSTOR else P + MET_LINE[aid] + "\n"
-        att[aid] = {"result": {"id": aid, "kind": "start", "rc": 130, "timed_out": False, "markers": [], "probe": PROBE_RECS},
+        imp = f"/home/developer/b1/{aid}/home/.claude/plugins/cache/st-b1/st-b1-probe/0.0.1"
+        extra = (P + f"Skipping duplicate hooks file for plugin st-b1-probe: {imp}/hooks/hooks.json (resolves to already-loaded file)\n"
+                 if aid in A.IMPOSTOR else P + MET_LINE[aid] + "\n")
+        att[aid] = {"result": {"id": aid, "kind": "start", "rc": 130, "timed_out": False, "markers": [], "probe": PROBE_RECS,
+                               "impostor_paths": [imp] if aid in A.IMPOSTOR else []},
                     "debug": PROBE_LINES + extra, "stderr": "", "pre": "", "has_debug": True}
     att["N18"] = {"result": {"id": "N18", "kind": "fact", "rc": 130, "markers": [], "probe": []}, "debug": "", "stderr": "", "pre": "", "has_debug": True}
     applied = {"managed_files": ["b1a.json"], "managed_sha256": A.tree_sha256(os.path.join(A.KIT, "managed")),
@@ -88,7 +91,7 @@ NEGATIVES = [
     ("probe not loaded", lambda D: a(D, "P0").update(debug=""), "INCONCLUSIVE", "probe-not-org"),
     ("not-the-organization's warning", lambda D: a(D, "P0").update(debug=a(D, "P0")["debug"] + P + "st-b1-probe@st-b1 is enabled by managed settings, but it is not read in place from a local folder its marketplace is registered from: it loads from a copy (…), so it is not treated as the organization's\n"),
      "INCONCLUSIVE", "probe-not-org"),
-    ("classic events missing", lambda D: a(D, "P0")["result"].update(probe=PROBE_RECS[:1]), "INCONCLUSIVE", "classic-events-missing"),
+    ("classic.SessionStart missing", lambda D: a(D, "P0")["result"].update(probe=PROBE_RECS[:1]), "INCONCLUSIVE", "classic-sessionstart-missing"),
     ("guard not seated", lambda D: a(D, "P0").update(debug=a(D, "P0")["debug"].replace("seated outermost: this machine has managed settings", "cc-plugin-sec-default@builtin not seated: no managed settings and not a Team or Enterprise organization (none)")),
      "FAIL", "guard-not-seated"),
     ("guard not loaded", lambda D: a(D, "P0").update(debug=a(D, "P0")["debug"].replace("hooks module cc-plugin-sec-default@builtin loaded", "x")), "INCONCLUSIVE", "guard-unverified"),
@@ -112,6 +115,14 @@ NEGATIVES = [
     ("hooks watched but folder not trusted", lambda D: a(D, "N16").update(debug=a(D, "N16")["debug"].replace("post-trust", "pre")), "INCONCLUSIVE", "not-shown-blocked:N16"),
     ("MCP name only in mcp-add output", lambda D: a(D, "N17").update(debug=PROBE_LINES, pre='MCP server "st-b1-rogue-n17u" added to user config\n'),
      "INCONCLUSIVE", "not-shown-blocked:N17"),
+    ("impostor location never considered", lambda D: a(D, "N10").update(debug=PROBE_LINES), "INCONCLUSIVE", "not-shown-blocked:N10"),
+    ("impostor path not recorded", lambda D: a(D, "N11")["result"].update(impostor_paths=[]), "INCONCLUSIVE", "not-shown-blocked:N11"),
+    ("rogue hooks module loaded without a marker", lambda D: a(D, "N6").update(debug=a(D, "N6")["debug"] + P + "hooks module st-b1-rogue-n6@st-b1-rogue-mk6 loaded (worker, environment 3, tier user); events: session.start\n"),
+     "FAIL", "loaded:N6"),
+    ("rogue registered without a marker", lambda D: a(D, "N8").update(debug=a(D, "N8")["debug"] + P + "plugin.register: st-b1-rogue-n8 (user, st-b1-rogue-n8@st-b1-rogue-mk8), judged by core alone: admitted\n"),
+     "FAIL", "loaded:N8"),
+    ("settings invalid in a non-P0 attempt", lambda D: a(D, "N9").update(debug=a(D, "N9")["debug"] + P + '"allowManagedHooksOnly" was present but invalid; treating it as true\n'),
+     "INCONCLUSIVE", "settings-invalid"),
     ("met only by another attempt's name", lambda D: a(D, "N19").update(debug=PROBE_LINES + P + MET_LINE["N6"] + "\n"), "INCONCLUSIVE", "not-shown-blocked:N19"),
 ]
 
@@ -124,6 +135,14 @@ class Pass(unittest.TestCase):
         self.assertEqual(set(r["facts"]["attempts"]), set(A.EXIT + A.START))
         self.assertIn("N15", r["pending"])
         self.assertIn("@synced", r["pending"])
+
+    def test_impostor_blocked_only_when_the_planted_path_was_considered(self):
+        r = A.analyze(fixture())
+        for aid in A.IMPOSTOR:
+            self.assertEqual(r["facts"]["attempts"][aid]["why"], "impostor-considered-ran-in-place")
+        # SessionEnd is a fact, not required: absent here (the harness ends with C-c), PASS holds.
+        self.assertFalse(r["facts"]["classic_session_end_seen"])
+        self.assertEqual(r["verdict"], "PASS")
 
     def test_impostor_read_from_cache_but_not_run_is_blocked(self):
         def m(D):

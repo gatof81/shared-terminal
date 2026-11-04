@@ -100,56 +100,79 @@ def analyze(D):
     rh = D["probe"].get("hnd_reach") or {}
     facts["H8_mod_can_reach_set_dumpable"] = None if not rh else rh.get("set_dumpable") == "function"
 
-    # Positive control: the readable copy must be readable in READ mode, or the denials prove nothing.
+    # Positive control, per operation. A denial against the root copy counts for H-ND only
+    # where the SAME operation SUCCEEDS against the dumpable control under identical conditions
+    # (same reader relationship, same kernel): that is what rules out an independent cause.
     ctl = D.get("stat-ctl-t0")
-    if not isinstance(ctl, dict) or ctl.get("reads", {}).get("environ") != "ok" or (ctl.get("owner_uid") or {}).get("environ") != 1000:
+    if not isinstance(ctl, dict) or (ctl.get("owner_uid") or {}).get("environ") != 1000:
         incs.append("control-not-readable")
-        facts["control"] = None if not isinstance(ctl, dict) else {"environ": ctl.get("reads", {}).get("environ")}
+        facts["control"] = None if not isinstance(ctl, dict) else {"owner_environ": (ctl.get("owner_uid") or {}).get("environ")}
         return done()
-    facts["control"] = {"read_mode_ok": [k for k in READ_MODE if ctl["reads"].get(k) == "ok"]}
+    cr = ctl.get("reads") or {}
+    # A non-ancestor reader: Yama 1 restricts ATTACH only, so READ must succeed on the control
+    # and ATTACH may legitimately be denied to it. So H3 (non-ancestor) is judged on READ only;
+    # ATTACH for a non-ancestor is reported as a fact and NOT attributed to H-ND. ATTACH is
+    # demonstrated by H4 (ancestor), where Yama lets the ancestor attach to a dumpable child.
+    read_ctl_ok = [k for k in READ_MODE if cr.get(k) == "ok"]
+    facts["control"] = {"read_mode_ok": read_ctl_ok, "attach_mode_on_control": {k: cr.get(k) for k in ATTACH_MODE}}
+    if set(read_ctl_ok) != set(READ_MODE):
+        incs.append("control-read-mode-incomplete")
+        return done()
 
-    # H2/H3: non-ancestor, at start and later (the same process).
+    # H2/H3: non-ancestor, at start and later (the same process). READ only; owners root.
     for tag in ("stat-hnd-t0", "stat-hnd-t1"):
         s = D.get(tag)
         if not isinstance(s, dict):
             incs.append(f"{tag}-missing")
             continue
         owners = {e: (s.get("owner_uid") or {}).get(e) for e in PROC_ENTRIES}
+        reads = s.get("reads") or {}
         facts[tag] = {"owners_root": all(v == 0 for v in owners.values()),
-                      "denied": {k: denied((s.get("reads") or {}).get(k)) for k in READ_MODE + ATTACH_MODE}}
+                      "read_denied": {k: denied(reads.get(k)) for k in READ_MODE},
+                      "attach_fact": {k: reads.get(k) for k in ATTACH_MODE}}
         if any(v == 1000 for v in owners.values()):
             fails.append(f"H2-dumpable:{tag}")
         elif not all(v == 0 for v in owners.values()):
             incs.append(f"H2-owner-unknown:{tag}")
-        if not all(facts[tag]["denied"].values()):
-            fails.append(f"H3-readable:{tag}")
+        # Every READ op denied on the root copy AND granted on the control (checked above).
+        if not all(facts[tag]["read_denied"].values()):
+            fails.append(f"H3-read-readable:{tag}")
+
+    # Executable identity is separate from PID/starttime stability: an exec keeps both. The root
+    # copy running the right inode is H6b/H6c, not this; here only that the process did not vanish.
     t0, t1 = D.get("stat-hnd-t0") or {}, D.get("stat-hnd-t1") or {}
-    if t0 and t1 and (t0.get("starttime") != t1.get("starttime") or t1.get("starttime") != t1.get("starttime_after")):
+    facts["pid_starttime_stable"] = bool(t0 and t1 and t0.get("starttime") == t1.get("starttime") == t1.get("starttime_after"))
+    if t0 and t1 and not facts["pid_starttime_stable"]:
         incs.append("H7-process-changed")
 
-    # H4: as an ancestor (Yama lets it attach; H-ND must not), against its control.
+    # H4: as an ancestor. Yama lets an ancestor ATTACH to a dumpable child, so the control must
+    # SUCCEED per op (READ and ATTACH); H-ND credit for each denied op requires that success.
     ah, ac = D.get("anc_hnd"), D.get("anc_ctl")
     if not (isinstance(ah, dict) and isinstance(ac, dict)):
         incs.append("H4-missing")
     else:
-        cplain = ac.get("plain") or {}
-        if (cplain.get("reads") or {}).get("mem") != "ok" or (cplain.get("reads") or {}).get("environ") != "ok":
-            incs.append("H4-control-not-readable")
-        else:
-            plain = ah.get("plain") or {}
-            dn = {k: denied((plain.get("reads") or {}).get(k)) for k in READ_MODE + ATTACH_MODE}
-            facts["H4"] = {"denied": dn}
-            if not all(dn.values()):
-                fails.append("H4-ancestor-can-read")
+        cplain = (ac.get("plain") or {}).get("reads") or {}
+        hplain = (ah.get("plain") or {}).get("reads") or {}
+        ctl_ok = [k for k in READ_MODE + ATTACH_MODE if cplain.get(k) == "ok"]
+        facts["H4"] = {"control_ok": ctl_ok, "root_denied": {k: denied(hplain.get(k)) for k in READ_MODE + ATTACH_MODE}}
+        if set(ctl_ok) != set(READ_MODE + ATTACH_MODE):
+            # Without a per-op control success (incl. ATTACH, which Yama grants an ancestor of a
+            # dumpable child) a denial against the root copy cannot be credited to H-ND.
+            incs.append("H4-control-incomplete")
+        elif not all(facts["H4"]["root_denied"].values()):
+            fails.append("H4-ancestor-can-read")
         pre, cpre = ah.get("traced_before_exec") or {}, ac.get("traced_before_exec") or {}
         # Residual, reported only: a tracer from before the exec loses the memory, keeps the registers.
         facts["H4b_residual_pre_exec_tracer"] = {"stopped_at_exec": pre.get("stopped_at_exec"), "peekdata_denied": denied(pre.get("peekdata")),
                                                  "getregs_kept": pre.get("getregs") == "ok", "control_peekdata_ok": cpre.get("peekdata") == "ok"}
 
-    # H5: analytic, never a crash (a core of a non-dumpable task goes to root destinations in
-    # the host's context, or nowhere; fs/coredump.c).
+    # H5: analytic, never a crash. suid_dumpable and core_pattern are OBSERVED preconditions
+    # (what the kernel would do with a core of a non-dumpable task: fs/coredump.c), not a
+    # practical demonstration that no core is ever exposed. Reported as a precondition.
     sd = si.get("suid_dumpable")
-    facts["H5_core"] = {"0": "no-core-possible", "2": "root-only-host-context"}.get(sd, "unexpected")
+    facts["H5_core_precondition"] = {"suid_dumpable": sd, "core_pattern_is_pipe": si.get("core_pattern_is_pipe"),
+                                     "disposition": {"0": "no-core-possible", "2": "root-only-host-context"}.get(sd, "unexpected"),
+                                     "demonstrated": False}
     if sd not in ("0", "2"):
         fails.append("H5-suid-dumpable-allows-user-cores")
 
