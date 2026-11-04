@@ -34,8 +34,14 @@ for k in KIND STAMP KIT RES EXP IMAGE COMMIT; do [ -n "${E[$k]:-}" ] || die "env
 KIND=${E[KIND]} STAMP=${E[STAMP]} KIT=${E[KIT]} RES=${E[RES]} EXP=${E[EXP]} IMAGE=${E[IMAGE]}
 [[ $KIND == b1a || $KIND == b1b ]] || die "env: KIND debe ser b1a o b1b" 64
 RUN2=${E[RUN2]:-0}
+case $RUN2 in 0|1) ;; *) die "env: RUN2 inválido (sólo 0 o 1)" 64 ;; esac
 if [ "$RUN2" = 1 ]; then
+	[ "$KIND" = b1a ] || die "env: RUN2=1 sólo con KIND=b1a" 64
 	[[ $EXP == "pass$KIND-run2-exp-$STAMP" ]] || die "env: EXP (run2) no corresponde a KIND y STAMP" 64
+	for k in RUN1_ID RUN1_EXP; do [ -n "${E[$k]:-}" ] || die "env: RUN2=1 requiere $k (el contenedor retenido de la corrida 1)" 64; done
+	RUN1_ID=${E[RUN1_ID]} RUN1_EXP=${E[RUN1_EXP]}
+	[[ $RUN1_ID =~ ^[0-9a-f]{64}$ ]] || die "env: RUN1_ID no es un id completo" 64
+	[ "$RUN1_EXP" != "$EXP" ] || die "env: RUN1_EXP no puede ser el EXP de la corrida 2" 64
 else
 	[[ $EXP == "pass$KIND-exp-$STAMP" ]] || die "env: EXP no corresponde a KIND y STAMP" 64
 fi
@@ -86,7 +92,22 @@ preflight() {
 		echo "STOP: la imagen trae Claude Code '${ver:-desconocida}', no $WANT_CLI. No se crea nada." >&2
 		exit 3
 	fi
-	[ -z "$(D ps -a -q --filter label=passb1.experiment)" ] || die "ya hay contenedores passb1: limpiarlos primero"
+	local existing other
+	existing=$(D ps -a -q --no-trunc --filter label=passb1.experiment)
+	if [ "$RUN2" = 1 ]; then
+		# Exactly the retained run-1 container may coexist, matched by id AND name AND label.
+		for other in $existing; do
+			if [ "$other" != "$RUN1_ID" ]; then
+				die "hay un contenedor passb1 que no es la corrida 1 retenida (${other:0:12}): no se toca nada" 1
+			fi
+			[ "$(D inspect -f '{{.Name}}' "$other")" = "/$RUN1_EXP" ] \
+				|| die "el contenedor retenido no tiene el nombre esperado $RUN1_EXP" 1
+			[ "$(D inspect -f '{{index .Config.Labels "passb1.experiment"}}' "$other")" != "" ] \
+				|| die "el contenedor retenido no tiene la etiqueta passb1.experiment" 1
+		done
+	else
+		[ -z "$existing" ] || die "ya hay contenedores passb1: limpiarlos primero"
+	fi
 	[ -z "$(D ps -a -q --filter label=passb0.experiment)" ] || die "hay contenedores passb0: limpiarlos primero"
 	[ -z "$(D ps -a -q --filter "name=^/$EXP\$")" ] || die "el nombre $EXP está ocupado"
 	if [ "$KIND" = b1a ]; then
@@ -120,6 +141,7 @@ setup() {
 		"${mounts[@]}" "$id" 7200 > "$STATE/container_id"
 	[[ $(cat "$STATE/container_id") =~ ^[0-9a-f]{64}$ ]] || die "docker run no devolvió un id de contenedor"
 	[ "$(D inspect -f '{{.Id}}' "$EXP")" = "$(cat "$STATE/container_id")" ] || die "el nombre $EXP no apunta al contenedor creado"
+	[ "$(D inspect -f '{{index .Config.Labels "passb1.run"}}' "$EXP")" = "$RUNTAG" ] || die "la etiqueta passb1.run=$RUNTAG no se aplicó"
 	D inspect "$EXP" > "$STATE/inspect.json"
 	if [ "$KIND" = b1a ]; then
 		python3 -I "$KIT/b1.py" checklimits "$STATE/inspect.json" "$STAMP" "$KIT" "$KIT:/opt/passb1-kit" \

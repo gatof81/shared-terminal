@@ -288,7 +288,7 @@ def one_start(aid, n, A, ws, cli, args, full_env, timeout, settle):
     """Starts the CLI once in tmux, answers only what the agent itself could answer (trust,
     theme, a project MCP server), waits for the probe or the exit, and stops it."""
     sess, rcf = f"{aid}-{n}", os.path.join(A, f"rc-{n}")
-    out = {"screens": {k: False for k in SCREENS}, "rc": None, "timed_out": False, "mcp_approval_server": None}
+    out = {"screens": {k: False for k in SCREENS}, "rc": None, "timed_out": False, "mcp_approval_server": None, "mcp_approval_confirmed": False}
     envs = " ".join(f"{k}={sh_quote(v)}" for k, v in sorted(full_env.items()))
     argv = " ".join(sh_quote(x) for x in [cli, *args, "--debug-file", os.path.join(A, f"debug-{n}.log")])
     cmd = f"cd {sh_quote(ws)} && env -i {envs} {argv} 2> {sh_quote(os.path.join(A, f'stderr-{n}.txt'))}; echo $? > {sh_quote(rcf)}"
@@ -321,6 +321,11 @@ def one_start(aid, n, A, ws, cli, args, full_env, timeout, settle):
                 for key in keys:
                     tmux("send-keys", "-t", sess, key, check=False)
                     time.sleep(0.5)
+                if k == "mcp_approval":
+                    # Confirmed only if the "use" selection actually dismissed the screen; the
+                    # screen still showing means the selection was not effectively confirmed.
+                    if not SCREENS["mcp_approval"].search(pane_text(sess)):
+                        out["mcp_approval_confirmed"] = True
                 tries[k] += 1
                 next_try = time.monotonic() + 2
             if control_at is None and sum(1 for r in probe_records(ws) if r.get("kind") == "session.start") > starts_before:
@@ -420,10 +425,13 @@ def attempt(aid, root, cli, timeout=60, settle=4):
     # the harness approved it, and whether it then started (its marker).
     approver = next((st.get("mcp_approval_server") for st in res["starts"] if st.get("mcp_approval_server")), None)
     if meta.get("mcp_project_server") is not None:
+        screen_seen = any(st["screens"].get("mcp_approval") for st in res["starts"])
+        confirmed = any(st.get("mcp_approval_confirmed") for st in res["starts"])
         res["mcp_approval"] = {"identified": approver is not None,
                                "server": "project-server" if approver else None,   # alias, not the raw name
                                "name_matches_fixture": approver == meta.get("mcp_project_server"),
-                               "approved": any(st["screens"].get("mcp_approval") for st in res["starts"]),
+                               # "confirmed" only when the selection dismissed the screen.
+                               "approved": "confirmed" if confirmed else "screen-only" if screen_seen else "none",
                                "started": "mcp-project" in res["markers"]}
     write_json(os.path.join(A, "result.json"), res)
     return res

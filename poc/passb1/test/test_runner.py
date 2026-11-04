@@ -163,8 +163,10 @@ class B1a(Runner):
         self.assertNotIn("N10", ids)  # retired, out of scope
 
     def test_run2_runs_only_the_focused_subset(self):
-        # A run-2 env runs exactly P0 (control), N14 and N17-project, under a distinct run tag.
-        self.rewrite_env(RUN2="1", EXP=f"passb1a-run2-exp-{self.stamp}")
+        # A run-2 env (with the retained run-1 container present) runs exactly P0, N14 and
+        # N17-project, under a distinct run tag.
+        rid = self.retained_run1()
+        self.rewrite_env(RUN2="1", EXP=f"passb1a-run2-exp-{self.stamp}", RUN1_ID=rid, RUN1_EXP="passb1a-exp-20261104-142810")
         self.assertOk(self.phase("preflight"), "preflight")
         self.assertOk(self.phase("setup"), "setup")
         run = next(c for c in self.state()["calls"] if c[:1] == ["run"])
@@ -172,6 +174,51 @@ class B1a(Runner):
         self.assertOk(self.phase("measure"), "measure")
         ids = [c[c.index("--id") + 1] for c in self.state()["calls"] if "attempt" in c]
         self.assertEqual(ids, ["P0", "N14", "N17-project"])
+
+    def retained_run1(self):
+        """A retained run-1 container as it would exist on VM100."""
+        rid = "a" * 64
+        self.patch(containers=[{"id": rid, "name": "passb1a-exp-20261104-142810",
+                                "labels": {"passb1.experiment": "20261104-142810", "passb1.run": "1"},
+                                "user": "developer", "hc": {}, "mounts": []}])
+        return rid
+
+    def test_run2_coexists_only_with_the_retained_run1(self):
+        rid = self.retained_run1()
+        self.rewrite_env(RUN2="1", EXP=f"passb1a-run2-exp-{self.stamp}", RUN1_ID=rid, RUN1_EXP="passb1a-exp-20261104-142810")
+        self.assertOk(self.phase("preflight"), "preflight")
+        # The retained run-1 container is left untouched.
+        self.assertIn(rid, [c["id"] for c in self.state()["containers"]])
+
+    def test_run2_refuses_an_unknown_passb1_container(self):
+        self.patch(containers=[{"id": "b" * 64, "name": "passb1a-exp-OTHER",
+                                "labels": {"passb1.experiment": "OTHER"}, "user": "developer", "hc": {}, "mounts": []}])
+        self.rewrite_env(RUN2="1", EXP=f"passb1a-run2-exp-{self.stamp}", RUN1_ID="a" * 64, RUN1_EXP="passb1a-exp-20261104-142810")
+        self.assertFailedClosed(self.phase("preflight"))
+        self.assertIn("b" * 64, [c["id"] for c in self.state()["containers"]])  # untouched
+
+    def test_run2_refuses_retained_with_wrong_name(self):
+        rid = "a" * 64
+        self.patch(containers=[{"id": rid, "name": "passb1a-exp-WRONG",
+                                "labels": {"passb1.experiment": "20261104-142810"}, "user": "developer", "hc": {}, "mounts": []}])
+        self.rewrite_env(RUN2="1", EXP=f"passb1a-run2-exp-{self.stamp}", RUN1_ID=rid, RUN1_EXP="passb1a-exp-20261104-142810")
+        self.assertFailedClosed(self.phase("preflight"))
+
+    def test_run2_invalid_value_rejected(self):
+        self.rewrite_env(RUN2="2", EXP=f"passb1a-exp-{self.stamp}")
+        self.assertFailedClosed(self.phase("preflight"), 64)
+
+    def test_run2_requires_b1a(self):
+        self.rewrite_env(KIND="b1b", RUN2="1", EXP=f"passb1b-run2-exp-{self.stamp}", RUN1_ID="a" * 64, RUN1_EXP="x")
+        self.assertFailedClosed(self.phase("preflight"), 64)
+
+    def test_run2_verifies_run_label_applied(self):
+        rid = self.retained_run1()
+        self.rewrite_env(RUN2="1", EXP=f"passb1a-run2-exp-{self.stamp}", RUN1_ID=rid, RUN1_EXP="passb1a-exp-20261104-142810")
+        self.assertOk(self.phase("preflight"), "preflight")
+        self.patch(drop_run_label=True)
+        self.assertFailedClosed(self.phase("setup"))
+        self.assertFalse(self.marker("setup.ok"))
 
     def test_capture_verifies_and_cleanup_removes_on_captured(self):
         self.through("capture")

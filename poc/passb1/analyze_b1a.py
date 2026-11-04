@@ -52,10 +52,12 @@ SKIP_ALREADY_LOADED = re.compile(r"Skipping duplicate hooks file for plugin \S+:
 # the first). N9 keys on the ADD command's own output.
 MARKET_REFUSED = re.compile(r"is blocked by enterprise policy|is not in the allowed marketplace list|strictKnownMarketplaces\) does not include|marketplace was not added\. Remove it from extraKnownMarketplaces|blocked by your organization's policy|marketplace-blocked-by-policy")
 # The real VM100 install failure that correlates plugin <-> rejected marketplace.
-INSTALL_NOT_IN_MK = re.compile(r'not found in marketplace "st-b1-rogue-mk9"|st-b1-rogue-n9@st-b1-rogue-mk9 .*not found|not found in any marketplace')
+# The install failure must name BOTH the plugin and the rejected marketplace. A bare
+# 'not found in any marketplace' is NOT sufficient correlation (B5).
+INSTALL_NOT_IN_MK = re.compile(r'(?=.*st-b1-rogue-n9)(?=.*st-b1-rogue-mk9).*not found in marketplace')
 # The managed-settings MCP refusal texts (user path).
 MCP_USER_REFUSED = re.compile(r"allow only MCP servers that plugins provide|Cannot add MCP server: your organization|not allowed by your organization")
-MCP_SERVER_DENIED = re.compile(r'MCP server "(st-b1-rogue-n17[pu])"[^\n]*(not allowed by your organization|denied|blocked by)')
+MCP_SERVER_DENIED_N17P = re.compile(r'MCP server "st-b1-rogue-n17p"[^\n]*(not allowed by your organization|denied|blocked by)')
 NOT_ORG = re.compile(r"(\S+) is enabled by managed settings, but .* not treated as the organization's")
 GUARD_SEATED = re.compile(r"(?:cc-plugin-sec-default@builtin )?seated (?:outermost: this machine has managed settings|by managed prependPlugins)")
 GUARD_NOT_SEATED = re.compile(r"cc-plugin-sec-default@builtin not seated")
@@ -191,8 +193,8 @@ def classify(aid, a):
         pt = a.get("pre_text") or {}
         add_out, install_out = pt.get("marketplace-add", ""), pt.get("plugin-install", "")
         add_rc, install_rc = rc.get("marketplace-add"), rc.get("plugin-install")
-        if install_rc == 0 and not MARKET_REFUSED.search(install_out):
-            return "loaded", "installed:N9"
+        if install_rc == 0:
+            return "loaded", "installed:N9"   # a successful install is FAIL regardless of any text
         if not org_ok(ps):
             return "inconclusive", "no-control:probe-not-in-org-tier"
         add_refused = bool(MARKET_REFUSED.search(add_out)) and add_rc not in (0, None)
@@ -215,13 +217,18 @@ def classify(aid, a):
             return "inconclusive", "mcp-add-error"
         return "inconclusive", "mcp-add-outcome-unknown"
     if aid == "N17-project":
-        # The project path (.mcp.json). Needs the sanitized approval capture: the server was
-        # identified and approved, then did NOT start and a refusal line names it. A generic
-        # message is never proof; no attributable refusal => INCONCLUSIVE.
+        # The project path (.mcp.json). Needs a valid same-start control, a CONFIRMED approval of
+        # the project server whose identity matches the fixture, no start, and a refusal line that
+        # names n17p. Screen-only, unconfirmed approval, wrong identity or a generic/n17u message
+        # are INCONCLUSIVE; a confirmed start is FAIL (handled by the marker check above).
         ap = (r.get("mcp_approval") or {})
-        if not (ap.get("identified") and ap.get("approved")):
-            return "inconclusive", "mcp-project-not-approved-or-unidentified"
-        if MCP_SERVER_DENIED.search(a["debug"]):
+        if not org_ok(ps):
+            return "inconclusive", "no-control:probe-not-in-org-tier"
+        if not (ap.get("identified") and ap.get("name_matches_fixture")):
+            return "inconclusive", "mcp-project-identity-unverified"
+        if ap.get("approved") != "confirmed":
+            return "inconclusive", "mcp-project-approval-not-confirmed"
+        if MCP_SERVER_DENIED_N17P.search(a["debug"]):
             return "blocked", "mcp-project-denied-after-approval"
         return "inconclusive", "mcp-project-no-attributable-refusal"
     if aid == "N14":
@@ -232,7 +239,10 @@ def classify(aid, a):
             return "inconclusive", "harness-startup-failed"
         if any(m.group(1) or m.group(2) for m in ROGUE_LOADED.finditer(a["debug"])):
             return "loaded", "skills-dir-rogue-loaded"
-        if re.search(r"skills-dir[^\n]*blocked|blocked[^\n]*skills-dir|are blocked by your organization's managed settings", a["debug"]):
+        # The line must name the skills mechanism concretely; a bare "blocked by managed settings"
+        # (no skills path) is not enough.
+        if re.search(r"Plugins from \S*/\.claude/skills/[^\n]*blocked by your organization's managed settings|"
+                     r"skills-dir[^\n]*blocked by your organization's managed settings", a["debug"]):
             return "blocked", "skills-dir-scan-blocked"
         return "inconclusive", "skills-dir-block-not-logged"
     if not org_ok(ps):
@@ -250,7 +260,10 @@ def classify(aid, a):
     return "blocked", "met-not-run"
 
 
-def analyze(D):
+def analyze(D, scope=None):
+    # scope: when given, only these attempt ids are judged for per-attempt reasons (a focused run,
+    # e.g. run 2 = {N14, N17-project}); global controls (manifest, CLI, applied, baseline, guard)
+    # are always checked, so a focused run can never hide a global failure.
     fails, incs, facts = [], [], {}
 
     def done():
@@ -321,7 +334,8 @@ def analyze(D):
         incs.append("guard-unverified")
 
     rows = {}
-    for aid in EXIT + START:
+    judged = tuple(x for x in EXIT + START if scope is None or x in scope)
+    for aid in judged:
         a = att.get(aid)
         if a is None:
             rows[aid] = {"outcome": "inconclusive", "why": "not-run"}

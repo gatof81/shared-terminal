@@ -64,6 +64,8 @@ if a[:1] == ["run"]:
     args = a[1:]
     get = lambda f: args[args.index(f) + 1]
     labels = dict(args[i + 1].split("=", 1) for i, x in enumerate(args) if x == "--label")
+    if S.get("drop_run_label"):
+        labels.pop("passb1.run", None)
     mounts = []
     for i, x in enumerate(args):
         if x == "--mount":
@@ -87,7 +89,9 @@ if a[:1] == ["inspect"]:
         if fmt == "{{.Name}}":
             out("/" + c["name"])
         if "Labels" in fmt:
-            out(c["labels"].get("passb1.experiment", ""))
+            import re as _re
+            mk = _re.search(r'Labels \"([^\"]+)\"', fmt)
+            out(c["labels"].get(mk.group(1) if mk else "passb1.experiment", ""))
         out("", 99)
     c = find(a[1])
     if not c:
