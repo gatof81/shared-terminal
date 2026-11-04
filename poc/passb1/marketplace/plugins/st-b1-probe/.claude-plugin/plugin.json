@@ -1,0 +1,1 @@
+{"name":"st-b1-probe","version":"0.0.1","description":"PASS-B1a managed probe: writes one fact record per event, never text.","author":{"name":"Shared Terminal POC"}}

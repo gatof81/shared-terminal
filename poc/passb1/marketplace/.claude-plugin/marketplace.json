@@ -1,0 +1,14 @@
+{
+  "name": "st-b1",
+  "owner": {
+    "name": "Shared Terminal POC"
+  },
+  "description": "PASS-B1a test marketplace: one managed probe, read in place from a read-only directory.",
+  "plugins": [
+    {
+      "name": "st-b1-probe",
+      "source": "./plugins/st-b1-probe",
+      "description": "PASS-B1a managed probe: records which events reach an organization-tier mod. Facts only."
+    }
+  ]
+}

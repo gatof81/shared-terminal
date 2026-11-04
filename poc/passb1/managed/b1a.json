@@ -1,0 +1,11 @@
+{
+  "extraKnownMarketplaces": { "st-b1": { "source": { "source": "directory", "path": "/opt/st-b1/marketplace" } } },
+  "strictKnownMarketplaces": [ { "source": "directory", "path": "/opt/st-b1/marketplace" } ],
+  "enabledPlugins": { "st-b1-probe@st-b1": true },
+  "disableSideloadFlags": true,
+  "allowManagedHooksOnly": true,
+  "strictPluginOnlyCustomization": true,
+  "allowManagedMcpServersOnly": true,
+  "allowedMcpServers": [],
+  "pluginConfigs": { "cc-plugin-sec-default@builtin": { "options": { "allowManagedModsOnly": true } } }
+}
