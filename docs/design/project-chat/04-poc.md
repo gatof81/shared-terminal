@@ -2099,7 +2099,7 @@ texto ni log sin depurar sale de VM100.
 
 #### 1.14.14 PASS-B1: diseño de B1a y B1b, evidencia estática de 2.1.314, riesgos y plan (**no ejecutado**)
 
-> Implementado en §1.14.15 (kit `761dcb5`), con las correcciones que trajo la validación local.
+> Implementado en §1.14.15 (kit `8705c05`), con las correcciones que trajo la validación local.
 
 **GO del responsable (2026-11-03):** diseñar B1 e inspeccionar estáticamente Claude Code 2.1.314.
 - **No autoriza:**
@@ -2470,7 +2470,7 @@ harness:
 5. **I-env:** aceptar que la integridad de la instalación (B1a) se declare dependiente de la
    inscripción del gateway, y agregar K1–K5 a los ataques de B2.
 
-#### 1.14.15 Kit PASS-B1 (`761dcb5`): implementación, validación local, procedimiento y criterios (**no ejecutado en VM100**)
+#### 1.14.15 Kit PASS-B1 (`8705c05`): implementación, validación local, procedimiento y criterios (**no ejecutado en VM100**)
 
 **GO del responsable (2026-11-04):**
 - **Autoriza:** implementar el kit `poc/passb1`, con tests sintéticos y validaciones locales.
@@ -2544,7 +2544,7 @@ N10, N11 y N13 (impostores del probe administrado) sólo tienen sentido frente a
 
 ##### 1.14.15.2 Contenido del kit
 
-`poc/channels-phase0@761dcb5609d62562e54593ed02108b662bc0f1f5`, carpeta `poc/passb1/` (la lista exacta está en los hashes):
+`poc/channels-phase0@8705c059ba0cde55ba58617b30e6e1df1dbd6cb5`, carpeta `poc/passb1/` (la lista exacta está en los hashes):
 - **`run-b1.sh`:** runner por fases. Mismo modelo fail-closed que B0:
   - marcas de estado;
   - lector estricto de `env`;
@@ -2603,7 +2603,7 @@ Cada experimento usa su propia carpeta y su propio paso 0. En los dos, `IMAGE=sh
 # Paso 0 (como en §1.14.9), con KIND=b1a o KIND=b1b. Se ejecuta como un script.
 bash -euo pipefail -s <<'STEP0'
 KIND=b1a                    # o b1b
-COMMIT=761dcb5609d62562e54593ed02108b662bc0f1f5
+COMMIT=8705c059ba0cde55ba58617b30e6e1df1dbd6cb5
 STAMP=$(date +%Y%m%d-%H%M%S)
 BASE=$HOME/pass$KIND-$STAMP
 test ! -e "$BASE"
@@ -2611,19 +2611,19 @@ mkdir -m 0700 "$BASE"; mkdir -m 0700 "$BASE/kit" "$BASE/results"
 gh api "repos/gatof81/shared-terminal/tarball/$COMMIT" > "$BASE/kit.tgz"
 tar xzpf "$BASE/kit.tgz" -C "$BASE/kit" --strip-components=1
 cat > "$BASE/kit.sha256" <<'SUMS'
-646302e8852e37323c8507a3adaf8cb8a572c06d7e0a64c39f8ebc091ee92bfd  analyze_b1a.py
-aca8104529c438dd05f65194cd2df136ca123becae82bea4437cba7d81832ed3  analyze_b1b.py
-2f4b3f70a0c0b1c2b91f1a5292a9f9d755c0b5b103328552ab9fb608bea31587  b1.py
+c8c9c1dafa0a270d507ac0799fe129949f758384b8c49bd5c3e7a7a687f3f767  analyze_b1a.py
+e33dc88811b9472ccbea4819e8af0cf9443ec575e76d8c1385d804fc9b87011f  analyze_b1b.py
+ad11a4b7d7ab381deec1e9193e93c60495cfc126fa9b39a1877e0ed33db5595d  b1.py
 23a02a6dd40271761c57dcfe6ed265e550aacab8afda376fd0fa3e670c488932  managed/b1a.json
 3a090f524c93fa3be45fa35ebd347b86ffe47801cacf6ede819095ecd71e2a55  marketplace/.claude-plugin/marketplace.json
 c38e42b9a8ba4360b72465813088fe98b5e69a7ff5bf16ec4a43bc56ccb75514  marketplace/plugins/st-b1-probe/.claude-plugin/plugin.json
 d87f4cbc7a53b0d733c13dd4c7f81e49d7ede3b21163e0d64e2234176d43100d  marketplace/plugins/st-b1-probe/hooks/hooks.json
 707c35831bd4fa99d4e21f550c64a52de1ae2172c7fe5e4bdab16fb4245e0cf7  marketplace/plugins/st-b1-probe/hooks/register.mjs
-d12427a320a32eb9e1abe72dd9edbfe2052ce5cd45810feb0996c3bdfbd7004d  README.md
-c2003e2eec05307419af0ce96a874ae6500c1f32ecdb538ca9a2c1727c07d777  run-b1.sh
+bb37c017652ba5b6c93423a66cfa39434ceb852878b7bd1bc517343ed2a323e7  README.md
+8901c93ea9cd887815fa8c5ba27a002f554a398e3bb57a5f66d19bd1062ad90a  run-b1.sh
 1845ebe18b0f73588cadb23ae345dd61f0ae68df52cc30f723366fa64ae958ec  test/fakebin/docker
-d0118c1ba3c66b6d4269d59236b96b646d9db7a3ee3646eae662aca7d1e191dd  test/test_analyze_b1a.py
-74b10b1dbcb1aa71169799017b4575ff53fedcfa414a2a910c6ba94b47bef750  test/test_analyze_b1b.py
+c347d430627f2e01fac59c8ec529f5fb07ce7619fa3743a032fcd7114ad542cf  test/test_analyze_b1a.py
+a45744f700d780ee041179a919fe4f87d153049bb01b9287735e11ce2e92bf14  test/test_analyze_b1b.py
 a0277ae2174175b0425ec0ff649a13f5e9e50a8be0818ce4d5e4ebfcc8953f2e  test/test_b1.py
 d69869d97a21b6491fad368e83c7ef998759ac45d65ba4af220c8062eb27cc90  test/test_runner.py
 SUMS
@@ -2724,7 +2724,7 @@ R cleanup      # 66: evidencia sin copia verificada; 67: algo que no es nuestro 
 - **Los fixtures intrusos son inofensivos:** sólo crean un archivo de marca en carpetas del
   intento.
 
-##### 1.14.15.6 Correcciones por la revisión independiente (2026-11-04; kit `761dcb5`)
+##### 1.14.15.6 Primera revisión independiente (2026-11-04)
 
 GO del responsable para corregir el kit y los documentos; NO-GO para ejecutar en VM100, construir
 imágenes, mergear, desplegar o tocar sesiones reales.
@@ -2786,34 +2786,74 @@ imágenes, mergear, desplegar o tocar sesiones reales.
   preferencia provisional del responsable es un supervisor/gateway separado del backend, con
   privilegios mínimos; tampoco es un GO.
 
-**Estado de los tests tras las correcciones:**
-- analizador B1a: 7 tests, 42 mutaciones de criterio;
-- analizador B1b: 4 tests, 35 mutaciones de criterio;
+**Estado de los tests (tras la segunda revisión, §1.14.15.8):**
+- analizador B1a: 10 tests, 45 mutaciones de criterio;
+- analizador B1b: 4 tests, 42 mutaciones de criterio;
 - `test_b1.py`: 15; `test_runner.py`: 22;
-- mutaciones de código: 31, todas detectadas;
+- mutaciones de código: 38, todas detectadas;
 - `claude plugin validate`: pasa.
 
-Hashes del kit `761dcb5` (tarball de GitHub verificado; lista de archivos exacta):
+Hashes del kit `8705c05` (tarball de GitHub verificado; lista de archivos exacta):
 
 ```
-646302e8852e37323c8507a3adaf8cb8a572c06d7e0a64c39f8ebc091ee92bfd  analyze_b1a.py
-aca8104529c438dd05f65194cd2df136ca123becae82bea4437cba7d81832ed3  analyze_b1b.py
-2f4b3f70a0c0b1c2b91f1a5292a9f9d755c0b5b103328552ab9fb608bea31587  b1.py
+c8c9c1dafa0a270d507ac0799fe129949f758384b8c49bd5c3e7a7a687f3f767  analyze_b1a.py
+e33dc88811b9472ccbea4819e8af0cf9443ec575e76d8c1385d804fc9b87011f  analyze_b1b.py
+ad11a4b7d7ab381deec1e9193e93c60495cfc126fa9b39a1877e0ed33db5595d  b1.py
 23a02a6dd40271761c57dcfe6ed265e550aacab8afda376fd0fa3e670c488932  managed/b1a.json
 3a090f524c93fa3be45fa35ebd347b86ffe47801cacf6ede819095ecd71e2a55  marketplace/.claude-plugin/marketplace.json
 c38e42b9a8ba4360b72465813088fe98b5e69a7ff5bf16ec4a43bc56ccb75514  marketplace/plugins/st-b1-probe/.claude-plugin/plugin.json
 d87f4cbc7a53b0d733c13dd4c7f81e49d7ede3b21163e0d64e2234176d43100d  marketplace/plugins/st-b1-probe/hooks/hooks.json
 707c35831bd4fa99d4e21f550c64a52de1ae2172c7fe5e4bdab16fb4245e0cf7  marketplace/plugins/st-b1-probe/hooks/register.mjs
 d12427a320a32eb9e1abe72dd9edbfe2052ce5cd45810feb0996c3bdfbd7004d  README.md
-c2003e2eec05307419af0ce96a874ae6500c1f32ecdb538ca9a2c1727c07d777  run-b1.sh
+8901c93ea9cd887815fa8c5ba27a002f554a398e3bb57a5f66d19bd1062ad90a  run-b1.sh
 1845ebe18b0f73588cadb23ae345dd61f0ae68df52cc30f723366fa64ae958ec  test/fakebin/docker
-d0118c1ba3c66b6d4269d59236b96b646d9db7a3ee3646eae662aca7d1e191dd  test/test_analyze_b1a.py
-74b10b1dbcb1aa71169799017b4575ff53fedcfa414a2a910c6ba94b47bef750  test/test_analyze_b1b.py
+c347d430627f2e01fac59c8ec529f5fb07ce7619fa3743a032fcd7114ad542cf  test/test_analyze_b1a.py
+a45744f700d780ee041179a919fe4f87d153049bb01b9287735e11ce2e92bf14  test/test_analyze_b1b.py
 a0277ae2174175b0425ec0ff649a13f5e9e50a8be0818ce4d5e4ebfcc8953f2e  test/test_b1.py
 d69869d97a21b6491fad368e83c7ef998759ac45d65ba4af220c8062eb27cc90  test/test_runner.py
 ```
 
-##### 1.14.15.7 CI de la PR #512: diagnóstico del test D8 (no es una regresión de esta rama)
+##### 1.14.15.7 Segunda revisión independiente (2026-11-04; kit `8705c05`)
+
+GO para corregir el kit y los documentos; sigue NO-GO para VM100, builds, merge y deploy. Cuatro
+falsos PASS más, cada uno con un test que primero los reproducía.
+
+1. **B1a / N9 — separar instalación, habilitación y ejecución.** El analizador ignoraba los
+   códigos de salida de `plugin marketplace add` y `plugin install`. Ahora N9 se juzga por el
+   **resultado de la instalación**, no por si el plugin corrió:
+   - `plugin install` con éxito (rc 0, sin el texto de rechazo de política) ⇒ **FAIL**
+     (`installed:N9`): se instaló un plugin de un marketplace no aprobado, aunque no se haya
+     ejecutado;
+   - rechazo de política (texto `blocked by your organization's policy` /
+     `marketplace-blocked-by-policy`, o rc ≠ 0) ⇒ bloqueado;
+   - cualquier otra cosa ⇒ INCONCLUSIVE.
+   Test nuevo: instalación con éxito sin marcador ⇒ no PASS.
+
+2. **B1a / N12 — correlación por arranque.** `b1.py` concatenaba los debug de los dos arranques y
+   acumulaba los registros del probe, así que el analizador podía tomar el control del **primer**
+   arranque y la evidencia de la semilla del **segundo**. Ahora `b1.py` guarda, por arranque, su
+   propio debug (`debug-<n>.log`) y las clases de evento del probe que aparecieron en **ese**
+   arranque; el analizador evalúa el control y la evidencia en el **último** arranque (donde la
+   semilla tiene efecto). Test nuevo: primer arranque con probe válido, segundo sin él pero con la
+   evidencia de la semilla ⇒ no PASS.
+
+3. **B1b / clases de error.** `denied()` daba por denegado cualquier valor distinto de `ok`/`None`.
+   Ahora sólo **`EACCES`/`EPERM`** acreditan una restricción de permisos a H-ND; `ENOENT`, `ESRCH`,
+   `EINVAL`, `ENOSYS` (o una lectura no intentada) ⇒ INCONCLUSIVE, no crédito. Se aplica en H2/H3,
+   H4 y H6a. Mutaciones por cada clase de error.
+
+4. **Impostores N10/N11/N13 — origen del módulo cargado.** Una línea `Read hooks.json` desde el
+   caché ya **no** es prueba de rechazo. Ahora se juzga el **origen** del módulo que cargó, no sólo
+   su nombre y tier:
+   - bloqueado sólo si la copia plantada fue considerada **y saltada** como duplicado ya cargado
+     (`Skipping duplicate hooks file … already-loaded`) **y** el módulo cargó desde el marketplace
+     en el lugar (una `Read hooks.json` bajo `/opt/st-b1/marketplace/`);
+   - una `Read hooks.json` de la copia del caché que no sea un salto ⇒ el impostor pudo cargar ⇒
+     INCONCLUSIVE (`impostor-origin-unverified`);
+   - sin lectura en el lugar que ate el módulo cargado a la copia de la organización ⇒ INCONCLUSIVE.
+
+
+##### 1.14.15.8 CI de la PR #512: diagnóstico del test D8 (no es una regresión de esta rama)
 
 El commit documental falló una vez en el job de backend:
 `src/recreate/engine.test.ts`, caso D8 "backend restart with an attempt open or uncertain",
