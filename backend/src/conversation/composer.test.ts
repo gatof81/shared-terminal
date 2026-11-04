@@ -1101,6 +1101,21 @@ describe("§8.1.9 v1.8.2: the version of the PROCESS decides, never the hook's t
 		expect((await p3).body).toMatchObject({ result: "delivered" });
 	});
 
+	it("queries merely in flight do not block another pane's send (only one past its deadline does)", async () => {
+		await seedConversation(CID, { claudeVersion: "2.1.314 (Claude Code)" });
+		const service = makeService({ cliVersions: new Set(["2.1.314", "2.1.316"]) });
+		// The version run of the first send is slow but within its deadline.
+		docker.hangVersion = true;
+		const first = send(service, "one");
+		await until(() => docker.calls.some((c) => c.step === "version"), "first query started");
+		const svc = service as unknown as { liveHung: Map<string, number> };
+		expect(svc.liveHung.size).toBe(0);
+		docker.hangVersion = false;
+		docker.releaseVersion?.();
+		await first; // answered (refused: the slow run produced no output) — it never hung past its deadline
+		expect(svc.liveHung.size).toBe(0);
+	});
+
 	it("a cache hit counts only for the same FILE: another inode at the same path re-runs the query", async () => {
 		await seedConversation(CID, { claudeVersion: "2.1.314 (Claude Code)" });
 		const service = both();

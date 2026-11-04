@@ -49,10 +49,13 @@ import {
 
 /** Host-side bound per live-version exec (in-container: `timeout -k 1 3` / `-k 2 5`). */
 const LIVE_EXEC_DEADLINE_MS = 10_000;
-function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
+function withDeadline<T>(p: Promise<T>, ms: number, onExpire?: () => void): Promise<T> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const expired = new Promise<never>((_, reject) => {
-		timer = setTimeout(() => reject(new Error("live-version exec deadline")), ms);
+		timer = setTimeout(() => {
+			onExpire?.();
+			reject(new Error("live-version exec deadline"));
+		}, ms);
 		timer.unref?.();
 	});
 	// The losing promise is left to settle on its own (never aborted).
@@ -320,8 +323,8 @@ export class ComposerService {
 	private readonly userSends = new Map<string, number[]>();
 	private readonly cliVersions: ReadonlySet<string>;
 	private readonly liveVersions = new LiveVersionCache();
-	/** Live-version execs not yet settled, per container (incl. those past their deadline). */
-	private readonly liveOutstanding = new Map<string, number>();
+	/** Live-version execs past their deadline and not yet settled, per container. */
+	private readonly liveHung = new Map<string, number>();
 	private readonly now: () => number;
 	private readonly after: (ms: number) => Promise<void>;
 	private readonly tHttp: number;
@@ -1544,9 +1547,10 @@ export class ComposerService {
 		// open would keep the exec — and this pane's lock — forever. Past the
 		// deadline we stop waiting (nothing is aborted) and refuse.
 		// One hung query per container is enough: while an exec of an earlier
-		// query is still outstanding (past its deadline), refuse instead of
-		// leaving another stream behind (2nd review of #523).
-		if ((this.liveOutstanding.get(containerId) ?? 0) > 0) return { ok: false, why: "exec-error" };
+		// query is still unsettled PAST its deadline, refuse instead of leaving
+		// another stream behind (2nd review of #523). Execs merely in flight
+		// (a concurrent send on another pane) do not count (final review).
+		if ((this.liveHung.get(containerId) ?? 0) > 0) return { ok: false, why: "exec-error" };
 		const exec = (cmd: string[], user?: string) => {
 			const p = this.deps.docker.exec(
 				containerId,
@@ -1555,14 +1559,16 @@ export class ComposerService {
 				async () => true,
 				user ? { user } : undefined,
 			);
-			this.liveOutstanding.set(containerId, (this.liveOutstanding.get(containerId) ?? 0) + 1);
-			const done = () => {
-				const n = (this.liveOutstanding.get(containerId) ?? 1) - 1;
-				if (n <= 0) this.liveOutstanding.delete(containerId);
-				else this.liveOutstanding.set(containerId, n);
-			};
-			p.then(done, done);
-			return withDeadline(p, this.deps.liveExecDeadlineMs ?? LIVE_EXEC_DEADLINE_MS);
+			return withDeadline(p, this.deps.liveExecDeadlineMs ?? LIVE_EXEC_DEADLINE_MS, () => {
+				// Expired: hung until it settles (it is never aborted).
+				this.liveHung.set(containerId, (this.liveHung.get(containerId) ?? 0) + 1);
+				const settled = () => {
+					const n = (this.liveHung.get(containerId) ?? 1) - 1;
+					if (n <= 0) this.liveHung.delete(containerId);
+					else this.liveHung.set(containerId, n);
+				};
+				p.then(settled, settled);
+			});
 		};
 		const hit = this.liveVersions.get(containerId, pid, start, exe);
 		if (hit) {

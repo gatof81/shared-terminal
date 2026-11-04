@@ -2045,7 +2045,7 @@ incertidumbre no se envía**; nunca "por si acaso".
 | `busy` | probe `status: busy` |
 | `needs-terminal` | probe `waitingFor ∉ {∅, "input needed"}` (incluye `"dialog open"` y `"permission prompt"`); **(v1.7.4)** o el probe **no confirma que el CLI está en su prompt**: solo `status: idle`, o `status: waiting` con `waitingFor: "input needed"`, admiten el envío; un `status` ausente, desconocido o ilegible responde `detail: "status-unknown"` y un `waiting` sin `waitingFor` responde `detail: "waiting-unspecified"` (las observaciones de §8.2 nunca mostraron un `waiting` sin `waitingFor`: su ausencia no es evidencia de `input needed`); o `pane_in_mode = 1`; o `pane_dead = 1`; o el proceso del probe **no es el CLI en el primer plano del terminal** (identidad de foreground, abajo; `detail: foreground:<pane_current_command>`) |
 | `composer-not-empty` | la **región de entrada** del CLI (definición abajo) contiene texto propio, o no se pudo delimitar |
-| `cli-unvalidated` | **(v1.8.2)** la versión del **proceso realmente en el pane** —el `pid` que verifica `binding-stale`, preguntada a su propio ejecutable (§8.1.9)— no está en `COMPOSER_CLI_VERSIONS` (`detail: not-allowed`), o no se pudo establecer con evidencia fiable (`version: null`, `detail: unverifiable:<motivo>`). La `claude_version` del `session_start` no decide |
+| `cli-unvalidated` | **(v1.8.2)** la versión del **proceso realmente en el pane** —el `pid` que verifica `binding-stale`, preguntada a su propio ejecutable (§8.1.9)— no está en `COMPOSER_CLI_VERSIONS` (`detail: not-allowed`), o no se pudo establecer con evidencia consistente (`version: null`, `detail: unverifiable:<motivo>`). La `claude_version` del `session_start` no decide |
 
 Identidad de foreground (fail-closed, v1.7.3). Una sola lectura —`tmux display` del pane,
 `/proc/<pid>/stat` del `pid` del probe y del `pane_pid`, la ascendencia y `readlink /proc/<pid>/exe`—
@@ -2456,6 +2456,14 @@ la primera tecla (§8.1.5) compara también la ruta del ejecutable con la de la 
 entre la consulta y el envío responde `binding-stale`. Mientras una consulta anterior siga pendiente
 en un contenedor (pasada su cota), otra en el mismo contenedor se rechaza (`exec-error`) en vez de
 dejar otro stream colgado.
+
+**Qué garantiza y qué no.** La respuesta la produce código que controla la sesión: el usuario de la
+sesión es dueño de `~/.npm-global`, del workspace y de sus procesos, y cualquier binario que pase la
+identidad de §8.1.3 puede imprimir cualquier `X.Y.Z (Claude Code)`. Esta comprobación es un **filtro
+de compatibilidad para la deriva honesta** (un `PATH` que nombra otra instalación, un binario
+reemplazado por una actualización) en una sesión que coopera; **no autentica** el proceso receptor ni
+el origen de ningún mensaje, y nada más debe apoyarse en ella como raíz de confianza. Un usuario hostil
+de la sesión no gana nada engañándola: ya puede escribir en su propio pane.
 
 **Límite aceptado.** El precheck compara la **ruta**, no el inodo: un `execve` del mismo proceso a
 **otro archivo en la misma ruta** (una reinstalación) en los milisegundos entre la verificación de la
