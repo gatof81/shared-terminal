@@ -2907,6 +2907,142 @@ si se confirma, es del test (temporizadores deterministas), bajo un diagnóstico
 aparte; no es de esta PR. Recomiendo re-ejecutar el job. **La PR no se presenta como totalmente
 verde.**
 
+#### 1.14.16 PASS-B1a corrida 1 en VM100 (2026-11-04): INCONCLUSIVE; diagnóstico de los 6 intentos no concluyentes (solo lectura)
+
+**Resultado** (kit `e00ef29`, `BASE=/home/diego/passb1a-20261104-142810`, contenedor
+`49e1e4c5…`): `measure`=0, `capture`=0, `SHA256SUMS` verificado, `validate`=2 → **INCONCLUSIVE**.
+13 intentos **blocked**, 6 **inconclusive**, **ninguno loaded**. Que no haya ningún `loaded` es el
+resultado fuerte: ningún camino de carga dejó correr código intruso ni dejó marca.
+
+**No tengo acceso a VM100 desde mi contenedor**, así que abajo fundamento cada caso con la lógica
+exacta de `analyze_b1a.py` (que produce esos motivos) y con los controles locales sin política, y
+doy los comandos de solo lectura para extraer los campos que confirman cada hipótesis. Nada de
+esto repite `measure`, recrea contenedores, corre `cleanup` ni toca el kit, los logs o los
+settings.
+
+##### 1.14.16.1 Respaldo comprobable (primero; solo lectura)
+
+```bash
+BASE=/home/diego/passb1a-20261104-142810
+(cd "$BASE/results" && sha256sum -c --strict --quiet SHA256SUMS) && echo "OK: results intactos"
+( umask 077; tar -C "$(dirname "$BASE")" -czf "$BASE.evidence.tgz" \
+    "$(basename "$BASE")/results" "$(basename "$BASE")/state" "$(basename "$BASE")/env"
+  sha256sum "$BASE.evidence.tgz" > "$BASE.evidence.tgz.sha256" )
+sha256sum -c "$BASE.evidence.tgz.sha256"
+```
+
+##### 1.14.16.2 Qué produce cada motivo, hipótesis y clasificación
+
+Los archivos capturados por intento están en `$BASE/results/attempts/<id>/`: `result.json`,
+`debug-1.log.filtered` (y `-2` si hubo dos arranques), `stderr-1.txt.filtered`, `pre-*.txt.filtered`
+y `probe/`. Están **filtrados y con alias**; se pueden leer sin exponer secretos.
+
+**N9 — `install-error`.** El analizador lo da cuando `plugin install` devolvió rc ≠ 0 y su
+**propia** salida no tiene el texto de rechazo de política.
+- **Qué pasó (hipótesis).** B1a corre con `--network none` y el marketplace de N9 es un directorio
+  local no aprobado. `plugin marketplace add` lo rechaza por `strictKnownMarketplaces`; entonces
+  `plugin install …@st-b1-rogue-mk9` falla porque ese marketplace no quedó registrado — un error
+  genérico, no el texto de rechazo del propio `install`.
+- **¿Ejerció el ataque?** Parcial: el ataque tiene dos pasos y la política lo frena en el primero
+  (`marketplace add`). El `install` no llegó a evaluarse por sus méritos.
+- **Clasificación: cobertura del criterio.** La política casi seguro bloqueó, pero en el paso
+  `marketplace add`, y el criterio (por tu pedido de la 1.ª revisión) sólo mira el `install`. No es
+  una limitación del CLI ni una protección no demostrada en sentido estricto.
+- **Para confirmar:** `cat $BASE/results/attempts/N9/pre-marketplace-add.txt.filtered`
+  (¿`blocked by your organization's policy` / `marketplace-blocked-by-policy`?) y
+  `pre-plugin-install.txt.filtered` (¿`not found in any marketplace` / no registrado?), más los rc
+  en `result.json` (`.pre`).
+- **Experimento mínimo (no ejecutar):** ninguno nuevo; alcanza con leer esas dos salidas ya
+  capturadas. Si confirman rechazo en `add` + install por marketplace ausente, la continuación es
+  un cambio de criterio **con tu visto bueno**: N9 = blocked cuando la salida **del propio**
+  `marketplace add` muestra el rechazo de política y el `install` falla por marketplace ausente
+  (manteniendo que un `install` con éxito sigue siendo FAIL).
+
+**N10 / N11 / N13 — `impostor-location-not-considered`.** El analizador lo da cuando la ruta
+plantada del impostor nunca aparece en el debug (el CLI no la miró).
+- **Qué pasó (hipótesis, con respaldo local).** El impostor se planta en la caché de plugins
+  (`~/.claude/plugins/cache/…`), en `CLAUDE_CODE_PLUGIN_CACHE_DIR`, en el seed dir o en la zip
+  cache. En mis corridas locales **sin política**, N10/N11/N13 **nunca** cargaron el impostor
+  (marker vacío): una copia del mismo nombre en esas rutas **no es por sí sola un camino de
+  carga**. El probe administrado se resuelve de un marketplace de **directorio leído en el lugar**,
+  que nunca consulta la caché.
+- **¿Ejerció el ataque?** No. El camino no existe para un plugin administrado servido desde un
+  directorio: la copia plantada nunca entra en consideración.
+- **Clasificación: limitación del harness.** El fixture no ejerce un verdadero "shadow" del plugin
+  administrado. No es una protección demostrada ni una limitación del CLI.
+- **Para confirmar:** en `debug-1.log.filtered` de cada uno, que **no** haya ninguna línea con la
+  ruta de la caché/seed para `st-b1-probe`, y que sí esté la `Read hooks.json … /opt/st-b1/
+  marketplace/…` en el lugar.
+- **Experimento mínimo (no ejecutar): rediseño, no re-corrida.** O (a) quitar N10/N11/N13 como
+  ataques para marketplaces de directorio; o (b) construir un shadow real: poblar la **caché**
+  desde un marketplace aprobado y después plantar una copia del mismo nombre con otro contenido, y
+  verificar que el CLI carga la aprobada por digest/inodo. Para fuentes remotas el control real es
+  `pluginDigests`; una prueba de envenenamiento de caché va ahí. Sólo diseño.
+
+**N14 — `no-control:probe-not-in-org-tier`.** El analizador lo da cuando, en ese arranque, el probe
+administrado **no** quedó cargado en tier de organización con `session.start` (falló el control, no
+el ataque).
+- **Qué pasó (hipótesis).** El ataque es un plugin en `~/.claude/skills` (`@skills-dir`). Local sin
+  política, ese rogue **sí** carga (marker presente): es un camino real, y con
+  `strictKnownMarketplaces` el escaneo `@skills-dir` queda apagado salvo que la lista incluya
+  `{"source":"skills-dir"}`. Pero el resultado es `no-control`: el **probe** no se estableció en ese
+  arranque. Lo más probable es que el probe no alcanzara a emitir `session.start` antes del corte,
+  o que la advertencia de `skills-dir` cambiara el log.
+- **¿Ejerció el ataque?** El camino es real, pero no se puede afirmar "blocked" porque falta el
+  control del mismo arranque.
+- **Clasificación: brecha de medición del harness** (probable), a confirmar.
+- **Para confirmar:** en `result.json` de N14, `starts[-1].probe_kinds` (¿incluye `session.start`?),
+  `screens`, `rc`, `timed_out`; en `debug-1.log.filtered`, si está
+  `hooks module st-b1-probe@st-b1 loaded (… tier prepend|append)` y alguna línea `skills-dir …
+  blocked`.
+- **Experimento mínimo (no ejecutar):** re-correr **sólo** N14 con un `settle` mayor para que el
+  probe emita `session.start` con margen. Si el probe sigue sin establecerse **sólo** cuando hay un
+  plugin en `~/.claude/skills`, es una interacción del CLI a documentar.
+
+**N17 — `attack-not-met`.** El analizador lo da cuando el debug del último arranque no nombra
+ningún `MCP server "st-b1-rogue-n17p|u"`.
+- **Qué pasó (hipótesis).** Local sin política, los dos servidores MCP (`.mcp.json` y
+  `claude mcp add`) **sí** arrancan (markers `mcp-project`, `mcp-user`): camino real. Con
+  `allowedMcpServers: []` + `allowManagedMcpServersOnly`, la política no los permite y el CLI
+  probablemente los rechaza **antes** de nombrarlos, así que no aparece la línea
+  `MCP server "…"` que el criterio espera.
+- **¿Ejerció el ataque?** Sí se intentó (se escribió `.mcp.json` y se corrió `claude mcp add`), pero
+  el CLI no dejó la línea que el criterio usa como evidencia.
+- **Clasificación: protección no demostrada / cobertura de patrón.** La política casi seguro
+  rechaza, pero la evidencia positiva que pide el criterio no se emite.
+- **Para confirmar:** `grep -i mcp $BASE/results/attempts/N17/debug-1.log.filtered` (¿hay una línea
+  de rechazo tipo `not allowed by your organization` / `denied` nombrando el servidor?) y
+  `cat …/pre-mcp-add.txt.filtered` (¿`claude mcp add` imprime el rechazo?).
+- **Experimento mínimo (no ejecutar):** leer esas líneas. Si existe una línea de rechazo, la
+  continuación es agregarla al patrón de evidencia de N17 (cambio de harness). Si el CLI es
+  **silencioso** cuando un servidor no está permitido, N17 sólo se puede probar con el control sin
+  política (ya lo tengo) más una línea de rechazo; si no hay ninguna, es una decisión tuya sobre
+  qué evidencia aceptar.
+
+##### 1.14.16.3 Separación harness vs política
+
+| Caso | Motivo | Camino de ataque real | Clasificación |
+| --- | --- | --- | --- |
+| N9 | install-error | sí (2 pasos; frenado en `marketplace add`) | **Cobertura del criterio** (correlacionar el `add`); decisión tuya |
+| N10/N11/N13 | impostor-location-not-considered | **no** (la caché no es camino de carga de un plugin de directorio) | **Limitación del harness** (rediseño) |
+| N14 | no-control | sí (`@skills-dir`) | **Medición del harness** (control no estableció), a confirmar |
+| N17 | attack-not-met | sí (servidores MCP) | **Protección no demostrada / patrón** |
+
+**Ninguno de los 6 indica que una protección falló.** 13 intentos quedaron bloqueados con
+evidencia, y los 6 no concluyentes son, según esta lectura, tres cosas distintas: un criterio
+demasiado estrecho (N9), un ataque que el harness no ejerce (N10/N11/N13), una medición que no
+capturó el control (N14) y una protección que el CLI no deja probar por log positivo (N17).
+
+##### 1.14.16.4 Continuación propuesta (nada autorizado)
+
+1. **Leer, sin ejecutar nada**, los extractos de §1.14.16.2 de los seis intentos y confirmarme
+   cuáles coinciden con las hipótesis. Con eso cierro cada caso como harness o como política.
+2. **Cambios de harness** (tras tu visto bueno, sin re-ejecutar aún): el criterio de N9
+   (correlacionar el rechazo del propio `marketplace add`), el patrón de evidencia de N17 (línea de
+   rechazo del servidor), y el rediseño de N10/N11/N13 (shadow real por caché/digest o quitarlos).
+3. **N14** probablemente sólo necesita más `settle`; es un ajuste de medición, no de criterio.
+4. Una **segunda corrida de B1a** sólo después de cerrar esos cambios, con el mismo procedimiento
+   por fases, kit fijado y sin tocar los 13 intentos ya bloqueados.
 ## 2. Versiones
 
 | Variante | CLI | Motivo |
