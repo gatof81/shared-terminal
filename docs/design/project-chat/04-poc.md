@@ -2907,6 +2907,19 @@ si se confirma, es del test (temporizadores deterministas), bajo un diagnóstico
 aparte; no es de esta PR. Recomiendo re-ejecutar el job. **La PR no se presenta como totalmente
 verde.**
 
+#### 1.14.15.10 Precisiones de política de versiones y atestación (2026-11-04)
+
+- **Versiones.** `#522` (`COMPOSER_CLI_MIN_VERSION`, denylist, fail-closed) es de Composer. **No**
+  es la autorización única de versiones para Channels. Se reutiliza la identificación confiable de
+  la versión del **proceso** (PR-A/#523) y los mecanismos comunes de validación, pero
+  `CHANNEL_CLI_VERSIONS` sigue siendo una **lista propia** de versiones validadas para Channels: un
+  mínimo abierto del Composer no habilita una versión no probada de Channels. La elegibilidad de
+  Composer y la de Channels son independientes.
+- **Atestación.** La verificación por pidfd/NSpid/cgroup del futuro gateway es independiente de la
+  autorización de captura (#520). La atestación firmada de #520 sigue atada al ID de imagen
+  **original** y al contenedor concreto aunque la imagen ya no exista; captura efectiva ≠
+  autenticidad de Channel ≠ elegibilidad de envío.
+
 #### 1.14.16 PASS-B1a corrida 1 en VM100 (2026-11-04): INCONCLUSIVE; diagnóstico de los 6 intentos no concluyentes (solo lectura)
 
 **Resultado** (kit `e00ef29`, `BASE=/home/diego/passb1a-20261104-142810`, contenedor
@@ -3043,6 +3056,35 @@ capturó el control (N14) y una protección que el CLI no deja probar por log po
 3. **N14** probablemente sólo necesita más `settle`; es un ajuste de medición, no de criterio.
 4. Una **segunda corrida de B1a** sólo después de cerrar esos cambios, con el mismo procedimiento
    por fases, kit fijado y sin tocar los 13 intentos ya bloqueados.
+##### 1.14.16.5 Evidencia mínima a extraer (solo lectura) y tabla de decisión de cuatro vías
+
+Todo sale de `$BASE/results/attempts/<id>/`, que ya está filtrado y con alias. Para cada uno de
+los seis intentos hace falta **sólo** esto (nada más sale de VM100):
+
+| Intento | De `result.json` | De los logs/salidas filtrados |
+| --- | --- | --- |
+| N9 | `.pre` (rc de `marketplace-add` y de `plugin-install`) | `pre-marketplace-add.txt.filtered` y `pre-plugin-install.txt.filtered`: ¿texto de rechazo de política, "not found in any marketplace", o error operativo? |
+| N10/N11/N13 | `.impostor_paths` (basename), `.starts[].probe_kinds` | `debug-1.log.filtered`: ¿alguna línea nombra la ruta plantada (caché/seed) para `st-b1-probe`? ¿está la `Read hooks.json … <market>…` en el lugar y el `… loaded (… tier prepend\|append)`? |
+| N14 | `.starts[-1].probe_kinds`, `.screens`, `.rc`, `.timed_out`, nº de arranques | `debug-1.log.filtered`: ¿`hooks module st-b1-probe@st-b1 loaded (… tier …)`? ¿línea `skills-dir … blocked`? ¿algún error que abortó el probe? |
+| N17 | `.markers`, `.screens.mcp_approval` | `debug-1.log.filtered`: líneas `MCP server "…"` (¿rechazo nombrando el servidor, o ninguna línea?); `pre-mcp-add.txt.filtered`: ¿`claude mcp add` imprime rechazo o éxito? |
+
+**Extractor consolidado** (solo lectura; no escribe nada; colapsa rutas absolutas y hex a
+`<path>`/`<market>`/`<hex>`). Se corre con el texto que te paso en el traspaso:
+`python3 -I extract-b1a.py "$BASE/results"`.
+
+**Cómo se clasifica cada caso con esa evidencia:**
+
+| Observación | Clase |
+| --- | --- |
+| La política rechaza con su texto en el **propio** comando (install) o nombra el servidor como denegado (N17), o aparece la línea de bloqueo del escaneo `skills-dir` con el probe establecido (N14) | **Protección demostrada** (el criterio debería contarlo; ajustar el patrón/criterio) |
+| `marketplace add` rechazado por política y `plugin install` falla por marketplace ausente (N9); o el probe en el lugar y la ruta del impostor **nunca** nombrada (N10/N11/N13) | **Camino de ataque no ejercido** (el ataque se frena antes, o no existe para esta forma de marketplace) |
+| El probe no emitió `session.start` / `timed_out` antes del corte, o `probe_kinds` del último arranque vacío sin causa de política (N14) | **Falla de instrumentación** (medición; se corrige con más `settle`, no con el criterio) |
+| Rechazo sin ninguna línea positiva y sin control que lo respalde, o evidencia contradictoria (N17 silencioso) | **Realmente indeterminado** (decidir qué evidencia aceptamos, o rediseñar la prueba) |
+
+Con los extractos de los seis, cada motivo cae en **una** de esas cuatro clases y recién ahí
+decidimos si hace falta una segunda corrida y con qué cambios mínimos y pruebas de regresión. El
+kit `e00ef29` queda intacto; no se re-ejecuta `measure` ni `cleanup`, no se corre B1b, y no se
+toca Composer, L1/L2 ni el gateway.
 ## 2. Versiones
 
 | Variante | CLI | Motivo |
