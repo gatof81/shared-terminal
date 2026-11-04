@@ -155,12 +155,21 @@ class Summary(unittest.TestCase):
         T.put(os.path.join(p, "debug-1.log.filtered"), debug)
 
     def test_retired_attack_executed_marker_in_run1_fails_with_provenance(self):
-        # D2: N10 is OUT of the PASS criteria, but its own "impostor" marker in run 1 is a breach.
-        code, out = summary(run1_dir(mut=lambda d, D: self.write_excluded(d, "N10", markers=["impostor"])), run2_dir())
+        # D2: N10 is OUT of the PASS criteria, but its own `impostor.json` marker in run 1 is a
+        # breach. impostor_plugin() writes `.passb1/out/marker/impostor.json`, so the matcher keys
+        # on the exact FILE NAME, not a bare "impostor".
+        code, out = summary(run1_dir(mut=lambda d, D: self.write_excluded(d, "N10", markers=["impostor.json"])), run2_dir())
         self.assertEqual((code, out["verdict"]), (2, "FAIL"), out)
-        self.assertEqual(out["excluded"]["N10"]["observed_execution"]["evidence"], "marker:impostor")
+        self.assertEqual(out["excluded"]["N10"]["observed_execution"]["evidence"], "marker:impostor.json")
         self.assertTrue(out["excluded"]["N10"]["observed_execution"]["provenance"].startswith("run1:"))
         self.assertNotIn("N10", [r["attempt"] for r in out["attempts"]])  # not re-counted as blocked
+
+    def test_retired_attack_other_marker_is_not_the_impostor(self):
+        # A marker that is NOT `impostor.json` (and no non-org load) must NOT be attributed to the
+        # impostor — the reduced-scope PASS still holds.
+        code, out = summary(run1_dir(mut=lambda d, D: self.write_excluded(d, "N10", markers=["mcp-project", "impostor"])), run2_dir())
+        self.assertEqual((code, out["verdict"]), (0, "PASS (reduced scope)"), out)
+        self.assertNotIn("observed_execution", out["excluded"]["N10"])
 
     def test_retired_attack_loaded_without_a_marker_in_run1_fails(self):
         # D2 refinement: code LOAD of the impostor with NO marker is still a breach. A non-org-tier

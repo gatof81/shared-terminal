@@ -165,8 +165,11 @@ def impostor_executed(res, aid):
     None."""
     if not res:
         return None
-    if "impostor" in attempt_markers(res, aid):
-        return "marker:impostor"
+    # `markers` holds relative FILE NAMES; impostor_plugin() writes `.passb1/out/marker/impostor.json`
+    # (ROGUE_REGISTER's `<name>.json`), so match that exact name — a different marker is NOT the
+    # impostor and must not be attributed to it.
+    if "impostor.json" in attempt_markers(res, aid):
+        return "marker:impostor.json"
     for m in IMPOSTOR_LOAD.finditer(_filtered_debug(res, aid)):
         tier = m.group(1) or m.group(2)
         if tier and tier not in A.ORG_TIERS:
