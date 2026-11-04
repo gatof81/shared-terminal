@@ -3563,7 +3563,11 @@ evidencia o la medición (`harness-startup-failed`). N15, `@synced` y los evento
 pendientes, nunca blocked.
 
 **Corrida 2 (diagnóstica) — procedimiento y checklist de STOP (la ejecuta el responsable en VM100;
-esta sesión no tiene Docker ni acceso a VM100):** con el kit fijado por SHA `8eafe1a`, el `env` de
+esta sesión no tiene Docker ni acceso a VM100).** El handoff completo (SHA, identidad del
+contenedor legacy con comprobaciones read-only, `env` sin credenciales, comandos exactos por fase
+diferenciando solo-lectura de las que crean/ejecutan, condiciones STOP, verificación de
+`SHA256SUMS` y generación de resultados separados + consolidado) está en
+[run2-handoff.md](./run2-handoff.md). Resumen: con el kit fijado por SHA `8eafe1a`, el `env` de
 corrida 2 declara `KIND=b1a RUN2=1 EXP=passb1a-run2-exp-<STAMP>` y la identidad del contenedor
 legacy retenido `RUN1_ID=<id 64-hex> RUN1_EXP=passb1a-exp-20261104-142810`. Fases en orden:
 `preflight → setup → measure → capture → validate`; **no** correr `cleanup` en ninguno de los dos
