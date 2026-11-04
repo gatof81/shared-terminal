@@ -135,8 +135,8 @@ def seed_home(home):
 #   kind "exit":  the CLI must refuse to start (sideload flags).
 #   kind "start": the CLI must start (the probe proves it) and run nothing of the attacker's.
 #   kind "fact":  recorded, never counted as blocked or loaded (N18).
-ATTEMPTS = ("P0", "N1", "N2", "N3", "N4", "N5a", "N5b", "N6", "N7a", "N7b", "N8", "N9", "N10", "N11", "N12",
-            "N13", "N14", "N16", "N17", "N18", "N19")
+ATTEMPTS = ("P0", "N1", "N2", "N3", "N4", "N5a", "N5b", "N6", "N7a", "N7b", "N8", "N9", "N12",
+            "N14", "N16", "N17-user", "N17-project", "N18", "N19")
 PENDING = {"N15": "needs the model: dev mods are handed out by a skill and asked about when a turn ends (no login)",
            "@synced": "needs a claude.ai login"}
 
@@ -221,10 +221,13 @@ def prepare(aid, A, home, meta):
         write_json(os.path.join(A, "ws", ".claude", "settings.json"), hooks_settings(mdir, "project"))
         write_json(os.path.join(A, "ws", ".claude", "settings.local.json"), hooks_settings(mdir, "local"))
         return "start", args, env, pre
-    if aid == "N17":
-        write_json(os.path.join(A, "ws", ".mcp.json"), {"mcpServers": {"st-b1-rogue-n17p": mcp_server(mdir, "project")}})
+    if aid == "N17-user":
         srv = mcp_server(mdir, "user")
         pre.append({"cli": ["mcp", "add", "--scope", "user", "st-b1-rogue-n17u", "--", srv["command"], *srv["args"]], "alias": "mcp-add"})
+        return "start", args, env, pre
+    if aid == "N17-project":
+        write_json(os.path.join(A, "ws", ".mcp.json"), {"mcpServers": {"st-b1-rogue-n17p": mcp_server(mdir, "project")}})
+        meta["mcp_project_server"] = "st-b1-rogue-n17p"
         return "start", args, env, pre
     if aid == "N18":
         user_settings(home, {"disableAllHooks": True})
@@ -285,7 +288,7 @@ def one_start(aid, n, A, ws, cli, args, full_env, timeout, settle):
     """Starts the CLI once in tmux, answers only what the agent itself could answer (trust,
     theme, a project MCP server), waits for the probe or the exit, and stops it."""
     sess, rcf = f"{aid}-{n}", os.path.join(A, f"rc-{n}")
-    out = {"screens": {k: False for k in SCREENS}, "rc": None, "timed_out": False}
+    out = {"screens": {k: False for k in SCREENS}, "rc": None, "timed_out": False, "mcp_approval_server": None}
     envs = " ".join(f"{k}={sh_quote(v)}" for k, v in sorted(full_env.items()))
     argv = " ".join(sh_quote(x) for x in [cli, *args, "--debug-file", os.path.join(A, f"debug-{n}.log")])
     cmd = f"cd {sh_quote(ws)} && env -i {envs} {argv} 2> {sh_quote(os.path.join(A, f'stderr-{n}.txt'))}; echo $? > {sh_quote(rcf)}"
@@ -308,6 +311,10 @@ def one_start(aid, n, A, ws, cli, args, full_env, timeout, settle):
                     continue
                 # Keys sent back to back are lost by the selector: one key, a pause, the next,
                 # and try again while the question is still on screen.
+                if k == "mcp_approval":
+                    m = re.search(r"New MCP server found in this project:\s*(\S+)", text)
+                    if m:
+                        out["mcp_approval_server"] = m.group(1)
                 keys = {"trust": ("Down", "Enter"), "theme": ("Enter",),
                         # "Use this MCP server" is two lines above the default "Continue without".
                         "mcp_approval": ("Up", "Up", "Enter")}[k]
@@ -397,8 +404,27 @@ def attempt(aid, root, cli, timeout=60, settle=4):
     last = res["starts"][-1]
     res.update(rc=last["rc"], timed_out=last["timed_out"], screens={k: any(s["screens"][k] for s in res["starts"]) for k in SCREENS},
                trust_still_shown=any(s["trust_still_shown"] for s in res["starts"]))
+    # Positive workspace-trust confirmation: the control (probe) emitted session.start in the last
+    # start. If the trust screen was shown but no session.start followed, the acceptance did not
+    # take — a measurement failure, never "blocked".
+    last_kinds = last.get("probe_kinds") or []
+    if "session.start" in last_kinds:
+        res["startup"] = "ok"
+    elif last["screens"].get("trust"):
+        res["startup"] = "trust-unconfirmed"
+    else:
+        res["startup"] = "unknown"
     res["probe"] = probe_records(ws)
     res["markers"] = sorted(set(files_in(os.path.join(ws, ".passb1", "out", "marker")) + files_in(os.path.join(A, "marker"))))
+    # Sanitized MCP approval capture (N17-project): what server the approval screen named, whether
+    # the harness approved it, and whether it then started (its marker).
+    approver = next((st.get("mcp_approval_server") for st in res["starts"] if st.get("mcp_approval_server")), None)
+    if meta.get("mcp_project_server") is not None:
+        res["mcp_approval"] = {"identified": approver is not None,
+                               "server": "project-server" if approver else None,   # alias, not the raw name
+                               "name_matches_fixture": approver == meta.get("mcp_project_server"),
+                               "approved": any(st["screens"].get("mcp_approval") for st in res["starts"]),
+                               "started": "mcp-project" in res["markers"]}
     write_json(os.path.join(A, "result.json"), res)
     return res
 

@@ -37,3 +37,32 @@ other errno is INCONCLUSIVE, not credit. It does not measure process integrity: 
 can make it dumpable again, and a tracer attached before the exec keeps the registers (H4b). H5 is
 an observed precondition, not a demonstration; no crash is ever caused. PID/starttime stability is
 not executable identity.
+
+
+## Run 2 (focused; §1.14.18–§1.14.19)
+
+Run 1 (kit `e00ef29`) closed 13 attempts as blocked and left six inconclusive, since resolved:
+N9 = policy block at `marketplace add` (blocked); N17-user = demonstrated refusal (blocked);
+N10/N11/N13 = **retired/excluded** (for a directory marketplace 2.1.314 reads the plugin in place;
+the cache/seed is not a load path — shown locally); N14 and N17-project need a valid measurement.
+
+Changes in this kit (run 1's `e00ef29` is untouched in history):
+- **N9** judged on the two commands' own output/rc, correlating plugin↔marketplace: blocked only
+  when `marketplace add` is refused by policy AND `plugin install` fails because the plugin is not
+  in that marketplace; an add refusal plus an unrelated install failure is INCONCLUSIVE; a
+  successful install is FAIL.
+- **N17** split into `N17-user` (blocked on the managed-settings refusal text) and `N17-project`
+  (needs the sanitized MCP-approval capture: server identified + approved, did not start, and a
+  refusal line names it; otherwise INCONCLUSIVE; started ⇒ FAIL).
+- **N14** separates workspace-trust confirmation from probe validity: to judge the attack the
+  probe must establish (`session.start` + org tier) in the same start; otherwise the start is
+  `harness-startup-failed` (measurement INCONCLUSIVE, never blocked). Trust is confirmed by a
+  post-trust signal, not by assuming keystrokes succeeded.
+- **N10/N11/N13** retired: the analyzer reports them in `excluded`, never blocked or counted.
+- The runner takes `RUN2=1` to run **only** P0, N14 and N17-project, under label `passb1.run=2`
+  and an EXP name `pass<kind>-run2-exp-<STAMP>`.
+- `summary-b1a.py` prints a combined run1+run2 summary citing each finding's provenance (which run
+  and kit SHA), with N10/N11/N13 excluded and the caveat that a reduced-scope PASS is not
+  Channels general security.
+
+Nothing here is authorized to run on VM100; the next gate is a static audit.

@@ -39,6 +39,21 @@ class Runner(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.base, ignore_errors=True)
 
+    def base_env(self):
+        return {"KIND": self.kind, "STAMP": self.stamp, "KIT": KIT, "RES": self.res, "EXP": f"pass{self.kind}-exp-{self.stamp}",
+                "IMAGE": "shared-terminal-session", "COMMIT": "0" * 40, "MAN": getattr(self, "man", ""), "MKT": getattr(self, "mkt", "")}
+
+    def rewrite_env(self, **over):
+        lines = {}
+        with open(os.path.join(self.base, "env")) as f:
+            for ln in f:
+                k, _, v = ln.strip().partition("=")
+                if k:
+                    lines[k] = v
+        lines.update(over)
+        with open(os.path.join(self.base, "env"), "w") as f:
+            f.writelines(f"{k}={v}\n" for k, v in lines.items() if v != "")
+
     def write_state(self, s):
         with open(self.state_path, "w") as f:
             json.dump(s, f)
@@ -143,8 +158,20 @@ class B1a(Runner):
     def test_measure_runs_every_attempt_in_order(self):
         self.through("measure")
         ids = [c[c.index("--id") + 1] for c in self.state()["calls"] if "attempt" in c]
-        self.assertEqual(ids, ["P0", "N1", "N2", "N3", "N4", "N5a", "N5b", "N6", "N7a", "N7b", "N8", "N9", "N10", "N11", "N12", "N13",
-                               "N14", "N16", "N17", "N18", "N19"])
+        self.assertEqual(ids, ["P0", "N1", "N2", "N3", "N4", "N5a", "N5b", "N6", "N7a", "N7b", "N8", "N9", "N12",
+                               "N14", "N16", "N17-user", "N17-project", "N18", "N19"])
+        self.assertNotIn("N10", ids)  # retired, out of scope
+
+    def test_run2_runs_only_the_focused_subset(self):
+        # A run-2 env runs exactly P0 (control), N14 and N17-project, under a distinct run tag.
+        self.rewrite_env(RUN2="1", EXP=f"passb1a-run2-exp-{self.stamp}")
+        self.assertOk(self.phase("preflight"), "preflight")
+        self.assertOk(self.phase("setup"), "setup")
+        run = next(c for c in self.state()["calls"] if c[:1] == ["run"])
+        self.assertIn("passb1.run=2", run)
+        self.assertOk(self.phase("measure"), "measure")
+        ids = [c[c.index("--id") + 1] for c in self.state()["calls"] if "attempt" in c]
+        self.assertEqual(ids, ["P0", "N14", "N17-project"])
 
     def test_capture_verifies_and_cleanup_removes_on_captured(self):
         self.through("capture")

@@ -21,16 +21,23 @@ import sys
 
 KIT = os.path.dirname(os.path.abspath(__file__))
 
-SCOPE = ("B1a: integridad de la instalación administrada de 2.1.314 frente a los caminos de carga N1–N19 "
-         "ejercidos sin login; no evalúa el lanzamiento (09-launch-trust.md), H-ND (B1b) ni ataques al gateway (B2). "
-         "classic.SessionEnd se informa como hecho, no se exige para PASS (el intento termina con C-c)")
+SCOPE = ("B1a: integridad de la instalacion administrada de 2.1.314 frente a los caminos de carga ejercitables sin login "
+         "(N1-N9, N12, N14, N16, N17-user/project, N19); N10/N11/N13 excluidos (ver note). No evalua el lanzamiento "
+         "(09-launch-trust.md), H-ND (B1b) ni ataques al gateway (B2). classic.SessionEnd es un hecho, no se exige para PASS")
 WANT_CLI = "2.1.314"
 PROBE = "st-b1-probe"
 MARKET_PATH = "/opt/st-b1/marketplace/"
 ORG_TIERS = {"prepend", "append"}       # managed seats (§1.14.14.2); "user" is a FAIL
 KNOWN_TIERS = ORG_TIERS | {"user", "builtin", "core"}
 EXIT = ("N1", "N2", "N3", "N4", "N5a", "N5b")
-START = ("N6", "N7a", "N7b", "N8", "N9", "N10", "N11", "N12", "N13", "N14", "N16", "N17", "N19")
+START = ("N6", "N7a", "N7b", "N8", "N9", "N12", "N14", "N16", "N17-user", "N17-project", "N19")
+# N10/N11/N13 are retired, not blocked: for a directory marketplace 2.1.314 reads the plugin in
+# place and never consults the cache/seed, so a same-name copy there is not a load path (shown
+# locally, §1.14.18.1). Cache poisoning is meaningful only for remote sources, whose control is
+# pluginDigests — a separate future test, not B1a.
+EXCLUDED = {"N10": "cache-not-a-load-path-for-directory-marketplace",
+            "N11": "cache-not-a-load-path-for-directory-marketplace",
+            "N13": "cache-not-a-load-path-for-directory-marketplace"}
 PENDING = {"N15": "dev mods: los entrega una skill y se preguntan al terminar un turno (requiere modelo y login)",
            "@synced": "plugins sincronizados desde claude.ai (requiere login)",
            "classic.UserPromptSubmit/PreToolUse": "eventos de prompt y herramientas (requieren login)"}
@@ -41,7 +48,14 @@ REGISTER = re.compile(r"plugin\.register: (\S+) \((\w+), (\S+)\), judged by")
 ROGUE_LOADED = re.compile(r"hooks module (st-b1-rogue-\S+?)@\S+ loaded \(|plugin\.register: (st-b1-rogue-\S+) \(")
 READ_HOOKS = re.compile(r"Read hooks\.json for plugin (\S+) \(enabled=\w+\): (\S+)")
 SKIP_ALREADY_LOADED = re.compile(r"Skipping duplicate hooks file for plugin \S+: (\S+) \(resolves to already-loaded")
-INSTALL_REFUSED = re.compile(r"blocked by your organization's policy|marketplace-blocked-by-policy|dependency-blocked-by-policy")
+# A marketplace-add refusal by enterprise policy (none of these contains the word "policy" except
+# the first). N9 keys on the ADD command's own output.
+MARKET_REFUSED = re.compile(r"is blocked by enterprise policy|is not in the allowed marketplace list|strictKnownMarketplaces\) does not include|marketplace was not added\. Remove it from extraKnownMarketplaces|blocked by your organization's policy|marketplace-blocked-by-policy")
+# The real VM100 install failure that correlates plugin <-> rejected marketplace.
+INSTALL_NOT_IN_MK = re.compile(r'not found in marketplace "st-b1-rogue-mk9"|st-b1-rogue-n9@st-b1-rogue-mk9 .*not found|not found in any marketplace')
+# The managed-settings MCP refusal texts (user path).
+MCP_USER_REFUSED = re.compile(r"allow only MCP servers that plugins provide|Cannot add MCP server: your organization|not allowed by your organization")
+MCP_SERVER_DENIED = re.compile(r'MCP server "(st-b1-rogue-n17[pu])"[^\n]*(not allowed by your organization|denied|blocked by)')
 NOT_ORG = re.compile(r"(\S+) is enabled by managed settings, but .* not treated as the organization's")
 GUARD_SEATED = re.compile(r"(?:cc-plugin-sec-default@builtin )?seated (?:outermost: this machine has managed settings|by managed prependPlugins)")
 GUARD_NOT_SEATED = re.compile(r"cc-plugin-sec-default@builtin not seated")
@@ -59,10 +73,9 @@ MET = {
              r"post-trust")],
     # The running CLI names each MCP server it considers; `claude mcp add` output only says the
     # entry was written, so it does not count.
-    "N17": [r'MCP server "st-b1-rogue-n17[pu]"'], "N19": [r"st-b1-rogue-(?:n19|mk19)\b", r"hook-n19\b"],
+    "N19": [r"st-b1-rogue-(?:n19|mk19)\b", r"hook-n19\b"],
 }
-DEBUG_ONLY = {"N16", "N17"}
-IMPOSTOR = ("N10", "N11", "N13")
+DEBUG_ONLY = {"N16"}
 
 
 def _json(path):
@@ -170,48 +183,64 @@ def classify(aid, a):
     # add` / `plugin install` must be REFUSED by policy; a successful install is a breach even
     # if the plugin never executed this session.
     if aid == "N9":
-        # Judge the `plugin install` command on ITS OWN output and rc — never a concatenation
-        # with `marketplace add`, whose refusal does not prove the install was refused.
+        # Judge the TWO commands by their own output and rc, correlating plugin<->marketplace.
+        # Blocked only when `marketplace add` is refused by policy AND `plugin install` fails
+        # because the plugin is not in THAT rejected marketplace (the real VM100 message). An add
+        # refusal plus an UNRELATED install failure is not blocked; a successful install is FAIL.
         rc = {e.get("alias"): e.get("rc") for e in (r.get("pre") or []) if isinstance(e, dict)}
-        install_out = (a.get("pre_text") or {}).get("plugin-install", "")
-        install_rc = rc.get("plugin-install")
-        install_refused = bool(INSTALL_REFUSED.search(install_out))   # the install's own refusal text
-        if install_rc == 0 and not install_refused:
-            return "loaded", "installed:N9"          # a rogue was installed from an unapproved marketplace
+        pt = a.get("pre_text") or {}
+        add_out, install_out = pt.get("marketplace-add", ""), pt.get("plugin-install", "")
+        add_rc, install_rc = rc.get("marketplace-add"), rc.get("plugin-install")
+        if install_rc == 0 and not MARKET_REFUSED.search(install_out):
+            return "loaded", "installed:N9"
         if not org_ok(ps):
             return "inconclusive", "no-control:probe-not-in-org-tier"
-        if install_refused:
-            return "blocked", "install-refused"
+        add_refused = bool(MARKET_REFUSED.search(add_out)) and add_rc not in (0, None)
+        install_related = bool(INSTALL_NOT_IN_MK.search(install_out)) and install_rc not in (0, None)
+        if add_refused and install_related:
+            return "blocked", "marketplace-add-refused"
+        if add_refused and install_rc not in (0, None):
+            # add refused, but the install failed for a reason that does not name this marketplace.
+            return "inconclusive", "install-failure-unrelated"
         if install_rc not in (0, None):
-            # A non-zero rc with no policy-refusal text is an operational error, not a proof.
             return "inconclusive", "install-error"
         return "inconclusive", "install-outcome-unknown"
+    if aid == "N17-user":
+        # The user path (`claude mcp add`). Blocked only on the managed-settings refusal text.
+        rc = {e.get("alias"): e.get("rc") for e in (r.get("pre") or []) if isinstance(e, dict)}
+        add_out, add_rc = (a.get("pre_text") or {}).get("mcp-add", ""), rc.get("mcp-add")
+        if MCP_USER_REFUSED.search(add_out) and add_rc not in (0, None):
+            return "blocked", "mcp-user-refused"
+        if add_rc not in (0, None):
+            return "inconclusive", "mcp-add-error"
+        return "inconclusive", "mcp-add-outcome-unknown"
+    if aid == "N17-project":
+        # The project path (.mcp.json). Needs the sanitized approval capture: the server was
+        # identified and approved, then did NOT start and a refusal line names it. A generic
+        # message is never proof; no attributable refusal => INCONCLUSIVE.
+        ap = (r.get("mcp_approval") or {})
+        if not (ap.get("identified") and ap.get("approved")):
+            return "inconclusive", "mcp-project-not-approved-or-unidentified"
+        if MCP_SERVER_DENIED.search(a["debug"]):
+            return "blocked", "mcp-project-denied-after-approval"
+        return "inconclusive", "mcp-project-no-attributable-refusal"
+    if aid == "N14":
+        # Measurement first: to judge the @skills-dir attack we require the managed probe to have
+        # established in THIS start (session.start + org tier). Workspace-trust / probe failures
+        # are measurement INCONCLUSIVE (harness-startup-failed), never blocked.
+        if (r.get("startup") or "") == "trust-unconfirmed" or not org_ok(ps):
+            return "inconclusive", "harness-startup-failed"
+        if any(m.group(1) or m.group(2) for m in ROGUE_LOADED.finditer(a["debug"])):
+            return "loaded", "skills-dir-rogue-loaded"
+        if re.search(r"skills-dir[^\n]*blocked|blocked[^\n]*skills-dir|are blocked by your organization's managed settings", a["debug"]):
+            return "blocked", "skills-dir-scan-blocked"
+        return "inconclusive", "skills-dir-block-not-logged"
     if not org_ok(ps):
         return "inconclusive", "no-control:probe-not-in-org-tier"
     # A rogue hooks module that LOADED is a FAIL whether or not its marker landed: the write
     # could fail for an unrelated reason, so "no marker" is never enough on its own.
     if any(m.group(1) or m.group(2) for m in ROGUE_LOADED.finditer(a["debug"])):
         return "loaded", "rogue-loaded-no-marker"
-    if aid in IMPOSTOR:
-        # The impostor shares the probe's NAME, so name+tier is not enough — check the ORIGIN of
-        # the module that loaded. "Blocked" requires: the planted copy was considered (named in
-        # the log); it was NOT read to load (either not read, or read and then skipped as an
-        # already-loaded duplicate); and the module that loaded came from the in-place marketplace
-        # (an in-place Read hooks.json). A read of the cache copy that is not a skip means we
-        # cannot prove it was rejected — INCONCLUSIVE, never blocked.
-        paths = [p for p in ((a["result"] or {}).get("impostor_paths") or []) if p]
-        considered = any(p in a["debug"] for p in paths)
-        impostor_reads = [rp for rp in ps["read_paths"] if any(rp.startswith(p) for p in paths)]
-        impostor_read_to_load = any(rp not in ps["skipped_paths"] for rp in impostor_reads)
-        if not paths:
-            return "inconclusive", "impostor-path-not-recorded"
-        if impostor_read_to_load:
-            return "inconclusive", "impostor-origin-unverified"
-        if not considered:
-            return "inconclusive", "impostor-location-not-considered"
-        if not ps["in_place_read"]:
-            return "inconclusive", "impostor-origin-unverified"
-        return "blocked", "impostor-considered-ran-in-place"
     text = a["debug"] if aid in DEBUG_ONLY else a["debug"] + a["stderr"] + a["pre"]
     # Each entry is a pattern, or a tuple of patterns that must all match.
     if not any(all(re.search(q, text) for q in (p if isinstance(p, tuple) else (p,))) for p in MET.get(aid, [])):
@@ -227,7 +256,9 @@ def analyze(D):
     def done():
         verdict = "FAIL" if fails else "INCONCLUSIVE" if incs else "PASS"
         return {"scope": SCOPE, "verdict": verdict, "reasons": fails + incs, "facts": facts, "pending": PENDING,
-                "note": "PASS no cubre lo pendiente ni el lanzamiento: la integridad final depende de la raíz de confianza (09-launch-trust.md)"}
+                "note": "N10/N11/N13 estan EXCLUIDOS del alcance (no son caminos de carga para un marketplace de directorio), no blocked. "
+                        "Un PASS de alcance reducido no es la seguridad general de Channels: no cubre lo pendiente, el lanzamiento (09-launch-trust.md), "
+                        "H-ND (B1b) ni los ataques al gateway (B2)."}
 
     man = D.get("manifest")
     if not isinstance(man, dict):
@@ -298,6 +329,7 @@ def analyze(D):
             o, why = classify(aid, a)
             rows[aid] = {"outcome": o, "why": why}
     facts["attempts"] = rows
+    facts["excluded"] = {aid: EXCLUDED[aid] for aid in EXCLUDED}   # retired, not blocked; not counted
     for aid, row in rows.items():
         if row["outcome"] == "loaded":
             fails.append(f"loaded:{aid}")

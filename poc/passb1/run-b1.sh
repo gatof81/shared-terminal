@@ -26,14 +26,19 @@ BASE=$1 PHASE=$2
 # Strict KEY=VALUE reader: the env file is data, never sourced.
 declare -A E
 while IFS='=' read -r k v; do
-	[[ $k =~ ^[A-Z_]+$ ]] || die "env: clave inválida" 64
+	[[ $k =~ ^[A-Z_][A-Z0-9_]*$ ]] || die "env: clave inválida" 64
 	[[ $v =~ ^[A-Za-z0-9_./:@+-]*$ ]] || die "env: valor inválido para $k" 64
 	E[$k]=$v
 done < "$BASE/env"
 for k in KIND STAMP KIT RES EXP IMAGE COMMIT; do [ -n "${E[$k]:-}" ] || die "env: falta $k" 64; done
 KIND=${E[KIND]} STAMP=${E[STAMP]} KIT=${E[KIT]} RES=${E[RES]} EXP=${E[EXP]} IMAGE=${E[IMAGE]}
 [[ $KIND == b1a || $KIND == b1b ]] || die "env: KIND debe ser b1a o b1b" 64
-[[ $EXP == "pass$KIND-exp-$STAMP" ]] || die "env: EXP no corresponde a KIND y STAMP" 64
+RUN2=${E[RUN2]:-0}
+if [ "$RUN2" = 1 ]; then
+	[[ $EXP == "pass$KIND-run2-exp-$STAMP" ]] || die "env: EXP (run2) no corresponde a KIND y STAMP" 64
+else
+	[[ $EXP == "pass$KIND-exp-$STAMP" ]] || die "env: EXP no corresponde a KIND y STAMP" 64
+fi
 if [ "$KIND" = b1a ]; then
 	for k in MAN MKT; do [ -n "${E[$k]:-}" ] || die "env: falta $k" 64; done
 	MAN=${E[MAN]} MKT=${E[MKT]}
@@ -41,6 +46,7 @@ fi
 STATE=$BASE/state
 mkdir -p "$STATE"
 LABEL="passb1.experiment=$STAMP"
+RUNTAG=$([ "$RUN2" = 1 ] && echo 2 || echo 1)
 WANT_CLI=2.1.314
 # The released 2.1.314 binary (04-poc.md §1.14.14.1); B1b installs exactly this file.
 WANT_SHA=4487042b4c4f5d88d4568f68ae98aae0b1ffae58864cf57fb868641bc5f84594
@@ -108,7 +114,7 @@ setup() {
 	# marketplace can be cloned. N4 serves its zip on the container's own loopback, which is
 	# present under `none`, and disableSideloadFlags refuses --plugin-url before any fetch.
 	net=none
-	D run -d --name "$EXP" --label "$LABEL" --label "passb1.kind=$KIND" --init --entrypoint /usr/bin/sleep \
+	D run -d --name "$EXP" --label "$LABEL" --label "passb1.kind=$KIND" --label "passb1.run=$RUNTAG" --init --entrypoint /usr/bin/sleep \
 		--user developer --workdir /home/developer --cap-drop ALL --security-opt no-new-privileges:true \
 		--pids-limit 256 --memory 2g --memory-swap 2g --cpus 1 --network "$net" --restart no \
 		"${mounts[@]}" "$id" 7200 > "$STATE/container_id"
@@ -167,7 +173,13 @@ measure_b1a() {
 	# Sequential: one fresh CLI start per attempt; a failed attempt is recorded, not fatal.
 	local cli id
 	cli=$(X sh -c 'command -v claude')
-	for id in P0 N1 N2 N3 N4 N5a N5b N6 N7a N7b N8 N9 N10 N11 N12 N13 N14 N16 N17 N18 N19; do
+	local ids
+	if [ "$RUN2" = 1 ]; then
+		ids="P0 N14 N17-project"           # focused run 2: control + the two cases that need it
+	else
+		ids="P0 N1 N2 N3 N4 N5a N5b N6 N7a N7b N8 N9 N12 N14 N16 N17-user N17-project N18 N19"
+	fi
+	for id in $ids; do
 		# The previous attempt's tmux session is gone; its CLI may need a moment to exit.
 		X sh -c 'for i in $(seq 1 20); do pgrep -u developer -f "^[^ ]*claude( |$)" > /dev/null || exit 0; sleep 0.5; done; exit 1' \
 			|| die "quedó un CLI de un intento anterior"
