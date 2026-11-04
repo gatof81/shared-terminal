@@ -418,6 +418,20 @@ describe("P1/P2 — strict pin before a create", () => {
 	});
 });
 
+describe("fail closed on a session container whose image cannot be named (review of #521)", () => {
+	it.each([[undefined], [""], ["not-an-id"]])("ImageID %j ⇒ NO-GO with a reason", async (bad) => {
+		const d = vm100();
+		await pinSessionImages(d, REPO);
+		d.containers.push({
+			...sessionC("st-99999999-999", id("e")),
+			ImageID: bad as string | undefined,
+		});
+		const g = await gate(d);
+		expect(g.gate).toBe("NO-GO");
+		expect(g.reasons.join()).toMatch(/st-99999999-999: image id unknown/);
+	});
+});
+
 describe("P1 — protection disabled", () => {
 	it("SESSION_IMAGE_PINS=off ⇒ the gate is NO-GO, whatever else is true", async () => {
 		const d = vm100();

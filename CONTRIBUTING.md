@@ -34,8 +34,12 @@ cp .env.example .env
 ### 4. Build the session container image
 
 ```bash
-docker build -t shared-terminal-session ./session-image
+docker build -t shared-terminal-session ./session-image   # dev host without sessions
 ```
+
+On a host that already has sessions use `scripts/build-session-image.sh`
+instead: rebuilding the tag directly can delete images running sessions use
+(docs/DEPLOYMENT.md "Session image pins").
 
 ### 5. Run in development mode
 

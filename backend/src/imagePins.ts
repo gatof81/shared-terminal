@@ -16,19 +16,21 @@
  *
  * When:
  *   - spawn / recreation: the image a container is about to be created from
- *     is pinned BEFORE the create (a rebuild racing the create can then no
- *     longer take it), and the image the created container actually runs
- *     is pinned right AFTER (covers a tag that moved in between);
+ *     is resolved to its immutable id, pinned and read back BEFORE the create
+ *     — or the create does not happen (ensurePinned / ImagePinError); the
+ *     create uses that id, never the tag; AFTER it, the container is checked
+ *     to run exactly that id with its pin intact (verifyCreated), else it is
+ *     removed before it is recorded or started;
  *   - backend boot (reconcile): every container that is a session container
  *     — running, stopped, retained `-old-`/`-new-` ones included — gets its
  *     image pinned. Pins are ordinary tags: they persist across daemon and
  *     host restarts; the boot pass repairs anything a crash left unpinned.
  *
  * Never automatic: removing a pin. A pin whose image no container uses any
- * more ("orphan") is only reported; `npm run images:pins -- prune --write`
- * removes those tags (the image itself goes with its last tag, which is the
- * point — nothing uses it). Pinning is protective only and best-effort: a
- * failure is logged and changes nothing else (the spawn proceeds as before).
+ * more ("orphan") is only reported; `npm run images:pins -- prune --write
+ * --backend-stopped` removes those tags (the image itself goes with its last
+ * tag — nothing uses it). Best-effort ONLY where nothing is being created:
+ * the boot pass and an adopted (already existing) container.
  *
  * Not covered: `docker image rm -f` / `docker rmi` of a pin by hand, or
  * `docker image prune -a` of an image NO container uses (a retained
@@ -465,7 +467,13 @@ export async function evaluate(
 	const rows: GateRow[] = [];
 	const containers = await d.listContainers();
 	for (const c of containers) {
-		if (!isSessionContainer(c) || !c.ImageID) continue;
+		if (!isSessionContainer(c)) continue;
+		if (!c.ImageID || !IMAGE_ID_RE.test(c.ImageID)) {
+			// Fail closed: a session container whose image cannot even be named
+			// is not "fine" (review of #521).
+			reasons.push(`${nameOf(c)}: image id unknown (${JSON.stringify(c.ImageID ?? null)})`);
+			continue;
+		}
 		const image = await d.inspectImage(c.ImageID);
 		const name = nameOf(c);
 		const base = { container: name, containerId: c.Id, state: c.State ?? "?", imageId: c.ImageID };

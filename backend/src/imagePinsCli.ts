@@ -17,10 +17,14 @@
  *   npm run images:pins -- list            every pin tag and what uses it
  *   npm run images:pins -- prune           orphan pins (no container uses the
  *                                          image), dry run
- *   npm run images:pins -- prune --write   removes those tags — the image
+ *   npm run images:pins -- prune --write --backend-stopped
+ *                                          removes those tags — the image
  *                                          goes with its last tag. Never
- *                                          automatic; run with the backend
- *                                          stopped (a spawn may be pinning).
+ *                                          automatic; refused without the
+ *                                          acknowledgement that the backend
+ *                                          is stopped (a spawn pins before it
+ *                                          creates). Run via `docker compose
+ *                                          run --rm app …` after `stop app`.
  *
  * Exceptions: SESSION_IMAGE_PIN_EXCEPTIONS, default
  * <WORKSPACE_ROOT>/.st-image-pins/exceptions.json (root-owned, not
@@ -44,7 +48,11 @@ import {
 
 async function main(argv: string[]): Promise<number> {
 	const [cmd = "status", flag] = argv;
-	const d = pinDockerOf(new Dockerode({ socketPath: "/var/run/docker.sock" }));
+	// Same connection rule as DockerManager: DOCKER_HOST (the
+	// docker-socket-proxy shape) when set, else the canonical socket.
+	const d = pinDockerOf(
+		new Dockerode(process.env.DOCKER_HOST ? undefined : { socketPath: "/var/run/docker.sock" }),
+	);
 	const out = (v: unknown) => process.stdout.write(`${JSON.stringify(v, null, 2)}\n`);
 	if (cmd === "status" && !flag) {
 		const wr = process.env.WORKSPACE_ROOT ?? "/var/shared-terminal/workspaces";
@@ -73,11 +81,27 @@ async function main(argv: string[]): Promise<number> {
 		out(await listPins(d));
 		return 0;
 	}
-	if (cmd === "prune" && (!flag || flag === "--write")) {
-		out(await pruneOrphanPins(d, { write: flag === "--write" }));
+	if (cmd === "prune" && !flag) {
+		out(await pruneOrphanPins(d, { write: false }));
 		return 0;
 	}
-	process.stderr.write("usage: images:pins -- [status | pin | list | prune [--write]]\n");
+	if (cmd === "prune" && flag === "--write") {
+		// A spawn pins before it creates: a pin with no container yet is not
+		// an orphan. Only with the backend stopped (`docker compose stop app`
+		// then `docker compose run --rm app npm run images:pins -- prune
+		// --write --backend-stopped`) is "no container uses it" final.
+		if (argv[2] !== "--backend-stopped") {
+			process.stderr.write(
+				"prune --write needs --backend-stopped: stop the backend first (docker compose stop app), then run it with `docker compose run --rm app`\n",
+			);
+			return 2;
+		}
+		out(await pruneOrphanPins(d, { write: true }));
+		return 0;
+	}
+	process.stderr.write(
+		"usage: images:pins -- [status | pin | list | prune [--write --backend-stopped]]\n",
+	);
 	return 2;
 }
 

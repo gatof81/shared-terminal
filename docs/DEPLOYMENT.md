@@ -122,17 +122,24 @@ containers run on it**. Every image a session container uses therefore carries
 - **`SESSION_IMAGE_PINS=off`** (kill switch): creates still use the resolved
   immutable id, without a pin; every create and every boot logs that images
   are UNPROTECTED, and the gate is **NO-GO** for as long as it is off.
-- **Cleanup**: `images:pins -- prune` (dry run) / `-- prune --write` untags
-  pins no container uses, re-listing containers before each untag. Never
-  automatic; run it with the backend stopped (a spawn may be pinning).
+- **Cleanup**: `images:pins -- prune` (dry run) lists pins no container
+  uses. Removing them is never automatic and only with the backend stopped (a
+  spawn pins before it creates, so a fresh pin has no container yet):
+  `docker compose stop app && docker compose run --rm app npm run images:pins -- prune --write --backend-stopped`,
+  which re-lists containers before each untag; without the acknowledgement
+  the CLI refuses.
 - **Not protectable from here**: a hand-typed `docker build -t
   shared-terminal-session`, `docker tag` onto that name, `docker rmi -f` of a
   pin, `docker image prune -a` of an image no container uses, another tool's
   build, and an image lost before its first pin. The project's own build paths
   go through the gate: `scripts/build-session-image.sh`, `npm run
   docker:build-session` (calls it), and `docker compose build session-image`
-  (produces only `shared-terminal-session:candidate`; promote it with the
-  script).
+  (produces only `shared-terminal-session:candidate`, never used by the
+  backend; build with the script instead).
+- **Docker API needs**: spawns and recreations now call the images API
+  (inspect + tag) before every create; with the docker-socket-proxy shape
+  (SECURITY.md) the proxy must grant `IMAGES: 1`, or every create fails.
+  The `images:pins` CLI honours `DOCKER_HOST` like the backend.
 
 ### 5. Create workspace directory
 
@@ -163,9 +170,15 @@ cp .env.example .env
 # IMPORTANT: change JWT_SECRET and fill in CLOUDFLARE_* / D1_DATABASE_ID
 nano .env
 
-# Build the session image (first time + whenever session-image/ changes)
-docker compose build session-image
-# or equivalently: docker build -t shared-terminal-session ./session-image
+# Build the session image.
+#  - FIRST install (no session exists yet):
+docker build -t shared-terminal-session ./session-image
+#  - Any later rebuild (sessions exist): NEVER the line above — it is the
+#    2026-11-03 incident's mechanism. Use the gated script, with the backend
+#    running (it asks it for the images:pins gate):
+#      scripts/build-session-image.sh
+#  (`docker compose build session-image` only produces
+#   shared-terminal-session:candidate, which the backend never uses.)
 
 # Create the shared session network (first time only). The backend and every
 # session container join this network so the port dispatcher can reach a
@@ -659,7 +672,9 @@ explicit authorization. The detailed plan, with the pilot checklist, is in
 1. Tag the current image for the rollback:
    `docker tag shared-terminal-session shared-terminal-session:pre-3.0`.
 2. `git pull` to the approved SHA, then
-   `docker build -t shared-terminal-session ./session-image`. Check
+   `docker build -t shared-terminal-session ./session-image` (historical
+   record of the 3.0d rollout; today use `scripts/build-session-image.sh`,
+   see "Session image pins"). Check
    `docker image inspect shared-terminal-session --format '{{index .Config.Labels "io.shared-terminal.conversation-relay"}}'`
    prints `2`.
 3. `docker compose up -d --build`. Compose recreates only `app` (with the

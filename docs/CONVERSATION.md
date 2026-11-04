@@ -665,7 +665,8 @@ Si las marcas fueran incompatibles con el CLI (§2.7.5), responde `control-marke
      cerrada) el intento falla **antes** de que `N` exista (rollback resuelto). `create N` sigue
      siendo **una sola** llamada a Docker. Tras crearlo, request propio `pin N`: `N` corre
      exactamente `<imageId>` y su tag sigue nombrándola; si no, rollback (se borra `N`). Con
-     `SESSION_IMAGE_PINS=off` ambos pasos se omiten y el arranque del backend lo advierte.
+     `SESSION_IMAGE_PINS=off`, `pin image` solo resuelve el id (sin tag, con advertencia) y
+     `pin N` solo verifica que `N` corre ese id; el arranque del backend lo advierte.
    - Se crea `N`:
      - con el nombre `st-<12>-new-<ts>` e `Image: <imageId>`;
      - con el env, binds (gestionado y control, ro), caps y red de siempre;
