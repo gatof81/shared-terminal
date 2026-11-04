@@ -31,6 +31,15 @@ vi.mock("node:fs", () => ({
 	},
 }));
 
+// Image pins (imagePins.ts) have their own tests (imagePins.test.ts,
+// dockerManager.imagePins.test.ts); this file's Docker fake has no image API,
+// so the strict pin is stood in by an identity resolve and a passing check.
+vi.mock("./imagePins.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("./imagePins.js")>()),
+	ensurePinned: vi.fn(async (_d: unknown, ref: string) => ref),
+	verifyCreated: vi.fn(async () => undefined),
+}));
+
 import { DockerManager } from "./dockerManager.js";
 import type { SessionManager } from "./sessionManager.js";
 

@@ -20,6 +20,19 @@ import {
 } from "./containerStats.js";
 import { withRelayNoProxy } from "./conversation/noProxy.js";
 import { d1Query } from "./db.js";
+import {
+	defaultExceptionsPath,
+	ensurePinned,
+	evaluate,
+	fileExceptionsSource,
+	ImagePinError,
+	loadExceptions,
+	pinDockerOf,
+	pinSessionImages,
+	pinsEnabled,
+	protectContainerImage,
+	verifyCreated,
+} from "./imagePins.js";
 import { logger } from "./logger.js";
 import { clearPortMappings, mappingsFromConfig, setPortMappings } from "./portMappings.js";
 
@@ -699,6 +712,14 @@ export class DockerManager {
 				);
 			}
 		}
+		// imagePins.ts (owner conditions P1/P2): the image this create uses, as
+		// an immutable id, pinned and verified BEFORE the create — or no create
+		// at all. Never the mutable tag: the container gets exactly the pinned
+		// image, so a rebuild racing this spawn can no longer take it.
+		const createImage = await this.imageForCreate(
+			capture.imageId ?? SESSION_IMAGE,
+			`spawn ${sessionId}`,
+		);
 		// §2.7.5.1 — only a container created HERE is attested, never one
 		// adopted under its name (that one was not created from the checked image).
 		let freshlyCreated = false;
@@ -713,7 +734,9 @@ export class DockerManager {
 							meta,
 							config,
 							envArray,
-							capture,
+							// Only the image is overridden: `capture.imageId` still
+							// says whether capture was prepared (attestation below).
+							{ ...capture, imageId: createImage },
 							uploadsHostDir,
 							meta.containerName,
 						),
@@ -734,6 +757,31 @@ export class DockerManager {
 		// (container_id NULL) plus the deterministic name let `kill()`'s
 		// identity-checked lookup finish the job later.
 		const containerId = container.id;
+		if (freshlyCreated) {
+			// It runs exactly the pinned image, and the pin is still there; else
+			// the never-started container is removed by its id (fail closed).
+			try {
+				await verifyCreated(pinDockerOf(this.docker), containerId, createImage, {
+					pins: pinsEnabled(),
+				});
+			} catch (verifyErr) {
+				let removal = "removed";
+				try {
+					await container.remove({ force: true, v: true });
+				} catch (removeErr) {
+					if (!isNotFound(removeErr))
+						removal = `removal NOT confirmed: ${(removeErr as Error).message}`;
+				}
+				logger.error(
+					`[docker] spawn ${sessionId}: created container ${containerId.slice(0, 12)} failed the image check (${(verifyErr as Error).message}); ${removal}`,
+				);
+				throw verifyErr;
+			}
+		} else {
+			// Adopted (its own stopped container under its name): pin what it
+			// runs if that image still exists; never fail the adoption on it.
+			await this.pinContainerImage(containerId, `spawn ${sessionId} (adopted)`);
+		}
 		try {
 			await this.sessions.setContainerId(sessionId, containerId);
 		} catch (persistErr) {
@@ -3333,6 +3381,14 @@ export class DockerManager {
 			},
 			create: async (options) =>
 				(await d.createContainer(options as Dockerode.ContainerCreateOptions)).id,
+			// imagePins.ts — the engine's own "pin image" (before create N) and
+			// "pin N" (after) requests; a failure stops the attempt before N exists.
+			pinImage: async (imageId, mayAct) => {
+				if (!mayAct()) throw new Error("epoch closed: no pin");
+				await this.imageForCreate(imageId, "recreate N");
+			},
+			verifyPinned: (containerId, imageId) =>
+				verifyCreated(pinDockerOf(d), containerId, imageId, { pins: pinsEnabled() }),
 			// §2.7.5.1 — its own request in the engine (after N's id is known), so
 			// "create N" stays one Docker call and a closed epoch writes nothing.
 			attest: (sid, id, attemptId, mayAct) =>
@@ -3869,10 +3925,84 @@ export class DockerManager {
 		);
 	}
 
+	/**
+	 * The immutable image id a create uses (imagePins.ts). Pins on: resolved
+	 * AND pinned AND verified, or ImagePinError — the caller must not create.
+	 * Pins off (`SESSION_IMAGE_PINS=off`): resolved to an id (never the tag),
+	 * with a warning per create; the gate (`images:pins`) is NO-GO meanwhile.
+	 */
+	private async imageForCreate(ref: string, what: string): Promise<string> {
+		const d = pinDockerOf(this.docker);
+		if (pinsEnabled()) return ensurePinned(d, ref);
+		const img = await d.inspectImage(ref);
+		if (!img) throw new ImagePinError(`image ${ref} not found`);
+		logger.warn(
+			`[docker] image pins DISABLED: ${what} creates from ${img.Id.slice(7, 19)} UNPROTECTED (a rebuild of its tag can delete it)`,
+		);
+		return img.Id;
+	}
+
+	private async pinContainerImage(containerId: string, what: string): Promise<void> {
+		if (!pinsEnabled()) return;
+		try {
+			const r = await protectContainerImage(pinDockerOf(this.docker), containerId);
+			if (r === "image-missing")
+				logger.warn(`[docker] image pin (${what}): image of ${containerId.slice(0, 12)} is gone`);
+		} catch (err) {
+			logger.warn(
+				`[docker] image pin (${what}) failed for container ${containerId.slice(0, 12)}: ${(err as Error).message}`,
+			);
+		}
+	}
+
+	/**
+	 * Boot pass (imagePins.ts): the image of every session container, in any
+	 * state (retained `-old-`/`-new-` ones included). Images already gone are
+	 * reported loudly — a pin cannot bring them back.
+	 */
+	async pinAllSessionImages(): Promise<void> {
+		const d = pinDockerOf(this.docker);
+		try {
+			if (pinsEnabled()) {
+				const r = await pinSessionImages(d);
+				logger.info(
+					`[docker] image pins: ${r.pinned.length} pinned, ${r.already.length} already, ${r.missing.length} missing, ${r.failed.length} failed`,
+				);
+				for (const f of r.failed)
+					logger.warn(`[docker] image pins: ${f.imageId} not pinned: ${f.error}`);
+			}
+			// The same gate the operator runs (`npm run images:pins`), logged:
+			// every exception used is named, every NEW missing image is an error.
+			const g = await evaluate(d, {
+				pins: pinsEnabled(),
+				exceptions: () =>
+					loadExceptions(
+						fileExceptionsSource(
+							process.env.SESSION_IMAGE_PIN_EXCEPTIONS ?? defaultExceptionsPath(WORKSPACE_ROOT),
+						),
+					),
+			});
+			for (const row of g.rows.filter((x) => x.result === "excepted"))
+				logger.warn(
+					`[docker] image pins: ${row.container} runs MISSING image ${row.imageId.slice(7, 19)} — excepted (${row.exception?.incident}; approved by ${row.exception?.approvedBy} ${row.exception?.approvedAt})`,
+				);
+			for (const st of g.staleExceptions)
+				logger.warn(
+					`[docker] image pins: exception ${st.containerId.slice(0, 12)}/${st.imageId.slice(7, 19)} unused (${st.why}) — review it; nothing is removed`,
+				);
+			if (g.gate === "GO") logger.info("[docker] image pins gate: GO");
+			else
+				for (const reason of g.reasons) logger.error(`[docker] image pins gate NO-GO: ${reason}`);
+		} catch (err) {
+			logger.warn(`[docker] image pins: boot pass failed: ${(err as Error).message}`);
+		}
+	}
+
 	async reconcile(): Promise<void> {
 		logger.info("[docker] reconciling session state with Docker…");
 		this.reconcileLastRunAt = Date.now();
 		await this.sweepUploadTmp();
+		await this.pinAllSessionImages();
 		const result = await d1Query<{ session_id: string; container_id: string | null }>(
 			"SELECT session_id, container_id FROM sessions WHERE status = 'running'",
 		);

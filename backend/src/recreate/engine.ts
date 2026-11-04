@@ -1151,6 +1151,15 @@ export class RecreationEngine {
 					},
 				}),
 			);
+			// imagePins.ts — its own request, before the create: an image that
+			// cannot be pinned (gone, daemon error, epoch closed) stops the
+			// attempt before N exists; "create N" stays ONE Docker call.
+			const pinImage = this.deps.docker.pinImage;
+			if (pinImage) {
+				await run.call("pin image", () =>
+					pinImage.call(this.deps.docker, facts.image.imageId, () => run.epochOpen),
+				);
+			}
 			await run.call("create N", () =>
 				this.deps.docker.create(options).then((id) => {
 					// Kept whatever the epoch: the resolution must know N.
@@ -1159,6 +1168,14 @@ export class RecreationEngine {
 				}),
 			);
 			const nId = a.nId as string;
+			// N runs exactly the pinned image and the pin is intact (else the
+			// ordinary rollback removes N).
+			const verifyPinned = this.deps.docker.verifyPinned;
+			if (verifyPinned) {
+				await run.call("pin N", () =>
+					verifyPinned.call(this.deps.docker, nId, facts.image.imageId),
+				);
+			}
 			// §2.7.5.1 — bind N to the image it was just created from, so its
 			// capture survives the loss of that image (a tag rebuild). Its own
 			// request: a hang here never hides N's id, and a closed epoch writes

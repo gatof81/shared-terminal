@@ -56,6 +56,14 @@ export interface RecreateDockerPort {
 	 * Re-checks image and label itself; `mayAct` right before the write.
 	 * Optional: absent ⇒ no attestation (the image rule alone applies).
 	 */
+	/**
+	 * imagePins.ts — pin the image N will be created from, verified, BEFORE
+	 * create N; throws when it cannot (the attempt stops before N exists).
+	 * `mayAct` is asked first. Optional: absent ⇒ no pin step.
+	 */
+	pinImage?(imageId: string, mayAct: () => boolean): Promise<void>;
+	/** After create N: N runs exactly `imageId` and its pin is intact; throws otherwise. */
+	verifyPinned?(containerId: string, imageId: string): Promise<void>;
 	attest?(
 		sessionId: string,
 		containerId: string,

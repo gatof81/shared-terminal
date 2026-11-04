@@ -22,8 +22,9 @@ npm run dev        # vite on :5173, proxies /api and /ws to VITE_API_URL (defaul
 npm run build      # tsc && vite build
 
 # Session container image (required before creating a session)
-docker build -t shared-terminal-session ./session-image
-# or: cd backend && npm run docker:build-session
+docker build -t shared-terminal-session ./session-image   # FIRST install only (no sessions yet)
+# With sessions on the host, ALWAYS the gated path (images:pins before the build and before the tag moves):
+scripts/build-session-image.sh   # or: cd backend && npm run docker:build-session
 
 # Backend deploy (frontend is deployed separately to Cloudflare Pages)
 docker compose up -d --build
@@ -63,6 +64,10 @@ Three pieces cooperate:
 Replay on reconnect is a `tmux capture-pane -p -e` snapshot of the current pane (colour + position preserved), not a raw byte stream — there is no `RingBuffer`. To avoid a live/replay ordering race, `attach()` installs an armed `bufferedListener` that collects live bytes into a local tail array during the attach window; `wsHandler` sends the replay, then calls `flushTail()` which drains the tail in order and flips the listener to forward-directly. From the moment the listener is armed onward, the client-visible sequence is deterministic: `[replay][every live delta in arrival order]`.
 
 Multiple browser tabs attaching to the same session share the same tmux exec (each has its own `attachId`, listener, and resize). Destroying the host side of that exec never ends the process in the container (#444), so the attach runs through `TMUX_ATTACH_SCRIPT` — a bash wrapper that prints the client's in-container pid as a sentinel line (consumed before any byte reaches a listener) and `exec`s tmux — and `detach()` of the last listener releases exactly that client with `TMUX_CLIENTS_SCRIPT` (`tmux detach-client`, argv-checked in `/proc`, never a kill of the server or session); every spawn sweeps the tab's OTHER attach clients — only those that STARTED before its own (`/proc/<pid>/stat` start time, read when the script runs), so a sweep that Docker executes late can never detach a newer client, and the script acts only on a verified identity (server pid confirmed, listing succeeded, pid listed; on any query error it does nothing) — which is how the leftovers of a dead backend process or of a stream that died host-side disappear. `tmuxClients.smoke.ts` proves both against the real image in the Session Image workflow; a change to the attach command shape must keep the two scripts and that smoke in step.
+
+### Session image pins
+
+`imagePins.ts`: on the containerd image store a tag rebuild deletes the old image even under running containers (incident 2026-11-03), so every image a session container uses carries `shared-terminal-session-pin:<64-hex id>`. **Creates are protected or do not happen**: `spawn` resolves the tag to an immutable id once, `ensurePinned` (pin + read-back; an image that vanished between resolve and pin, a daemon error or a pin that does not land ⇒ `ImagePinError`, no create), creates FROM THE ID, then `verifyCreated` (runs exactly that id, pin intact; else the never-started container is removed). The recreation engine does the same as its own `pin image` (before `create N`, which stays one Docker call; `mayAct`) and `pin N` requests. Boot pass in `reconcile()` pins every existing session-container image (retained included) and logs the gate. `npm run images:pins` is the gate: GO only with protection on, a valid root-owned exceptions file (`<WORKSPACE_ROOT>/.st-image-pins/exceptions.json`, exact `(containerId, imageId)` pairs for images lost before pins existed) and every image pinned or excepted by its exact pair; anything else NO-GO. `SESSION_IMAGE_PINS=off` ⇒ creates from the resolved id unpinned with warnings, gate NO-GO. Nothing removes pins/exceptions/images automatically; `prune --write` is DISABLED in the CLI (dry run only) because a spawn's fresh pin has no container yet — the library's removal re-checks the tag target and the containers before each untag, for a future version that can exclude creates. Spawn/recreate need the Docker images API (socket-proxy: `IMAGES: 1`). Project build paths go through `scripts/build-session-image.sh` (gate, candidate tag, gate again, move); `docker compose build session-image` only yields `:candidate`.
 
 ### Persistence model
 

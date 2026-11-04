@@ -15,13 +15,14 @@
     "format": "biome format src/ --write",
     "db:migrate": "node -e \"require('./dist/db.js').migrateDb().then(() => console.log('done'))\"",
     "backup": "node dist/backup.js backup",
+    "images:pins": "node dist/imagePinsCli.js",
     "conversation:disable": "node dist/conversation/cli.js disable",
     "conversation:enable-all": "node dist/conversation/cli.js enable-all",
     "conversation:attest": "node dist/conversation/attestCli.js attest",
     "composer:resolve": "node dist/conversation/composerCli.js",
     "recreate:admin": "node dist/recreate/adminCli.js",
     "restore": "node dist/backup.js restore",
-    "docker:build-session": "docker build -t shared-terminal-session ../session-image"
+    "docker:build-session": "../scripts/build-session-image.sh"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

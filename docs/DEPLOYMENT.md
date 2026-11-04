@@ -66,8 +66,81 @@ cp .env.example .env
 ### 4. Build the session image
 
 ```bash
-docker build -t shared-terminal-session ./session-image
+docker build -t shared-terminal-session ./session-image   # first install only: no session exists yet
 ```
+
+On a host that already has sessions, **never** run that line: use
+`scripts/build-session-image.sh` (or `cd backend && npm run docker:build-session`),
+which gates on `images:pins` before the build and again right before moving
+the tag (see "Session image pins" below).
+
+### Session image pins (incident 2026-11-03, `backend/src/imagePins.ts`)
+
+On Docker 29 with the containerd image store, moving a tag (a rebuild of
+`shared-terminal-session`) removes the image it left **at once, even while
+containers run on it**. Every image a session container uses therefore carries
+`shared-terminal-session-pin:<64-hex image id>`:
+
+- **Creates are protected or do not happen.** `spawn` resolves the tag to an
+  immutable id once, pins and verifies that id, and creates the container
+  from the id (never the tag); afterwards it checks the container runs exactly
+  that id and the pin still names it — else the never-started container is
+  removed. A pin that cannot be established (the image vanished between
+  resolve and pin, a daemon error, a pin that does not land) fails the spawn:
+  **no container is created**. The recreation does the same as its own
+  `pin image` / `pin N` requests (CONVERSATION.md §2.7.2 step 1).
+- **Boot pass** (each backend start): pins the image of every session
+  container that still exists — running, stopped, retained `-old-`/`-new-` —
+  and logs the gate: each exception used, each unused exception, and every
+  NEW missing image as an error. Idempotent: the pin name is derived from the
+  id.
+- **The gate** — `docker compose exec app npm run images:pins` — exits 0 (GO)
+  only when protection is on, the exceptions file is valid, and every session
+  container's image is pinned or excepted by its exact pair. Anything else is
+  NO-GO (exit 1). Run it before any rebuild, prune or deploy.
+- **Historical exceptions**: images already lost before this protection
+  existed cannot be pinned. List each as an exact pair in
+  `<WORKSPACE_ROOT>/.st-image-pins/exceptions.json` (override:
+  `SESSION_IMAGE_PIN_EXCEPTIONS`). The directory and file must be root-owned
+  and not group/world-writable (`install -d -m 755 -o root -g root`, file
+  `0644 root:root`); they sit outside every session's mounts. Format (strict:
+  exactly these keys, full ids, no wildcards, no duplicates):
+
+  ```json
+  {"version": 1, "exceptions": [
+    {"containerId": "<64 hex>", "imageId": "sha256:<64 hex>", "name": "st-…",
+     "reason": "…", "incident": "2026-11-03 containerd rebuild",
+     "approvedBy": "…", "approvedAt": "2026-11-04T…Z"}
+  ]}
+  ```
+
+  A missing image of a container NOT listed by its exact pair — a new loss,
+  or a new container on an old lost image — keeps the gate NO-GO. An
+  unreadable, malformed or unprotected file makes the gate NO-GO (never "no
+  exceptions"). Nothing ever removes an exception, a tag or an image
+  automatically; unused exceptions are reported for the operator to review.
+- **`SESSION_IMAGE_PINS=off`** (kill switch): creates still use the resolved
+  immutable id, without a pin; every create and every boot logs that images
+  are UNPROTECTED, and the gate is **NO-GO** for as long as it is off.
+- **Cleanup**: `images:pins -- prune` (dry run) lists pins no container
+  uses. **Removal is disabled in this version** (`prune --write` exits 2
+  whatever the flags): a spawn pins before it creates, so a fresh pin has no
+  container yet, and a separate process cannot prove the backend is not
+  creating. Orphan pins only cost disk; cleanup is postponed until removal
+  can exclude creates (the library already re-reads the tag's target and
+  the containers right before each untag).
+- **Not protectable from here**: a hand-typed `docker build -t
+  shared-terminal-session`, `docker tag` onto that name, `docker rmi -f` of a
+  pin, `docker image prune -a` of an image no container uses, another tool's
+  build, and an image lost before its first pin. The project's own build paths
+  go through the gate: `scripts/build-session-image.sh`, `npm run
+  docker:build-session` (calls it), and `docker compose build session-image`
+  (produces only `shared-terminal-session:candidate`, never used by the
+  backend; build with the script instead).
+- **Docker API needs**: spawns and recreations now call the images API
+  (inspect + tag) before every create; with the docker-socket-proxy shape
+  (SECURITY.md) the proxy must grant `IMAGES: 1`, or every create fails.
+  The `images:pins` CLI honours `DOCKER_HOST` like the backend.
 
 ### 5. Create workspace directory
 
@@ -98,9 +171,15 @@ cp .env.example .env
 # IMPORTANT: change JWT_SECRET and fill in CLOUDFLARE_* / D1_DATABASE_ID
 nano .env
 
-# Build the session image (first time + whenever session-image/ changes)
-docker compose build session-image
-# or equivalently: docker build -t shared-terminal-session ./session-image
+# Build the session image.
+#  - FIRST install (no session exists yet):
+docker build -t shared-terminal-session ./session-image
+#  - Any later rebuild (sessions exist): NEVER the line above — it is the
+#    2026-11-03 incident's mechanism. Use the gated script, with the backend
+#    running (it asks it for the images:pins gate):
+#      scripts/build-session-image.sh
+#  (`docker compose build session-image` only produces
+#   shared-terminal-session:candidate, which the backend never uses.)
 
 # Create the shared session network (first time only). The backend and every
 # session container join this network so the port dispatcher can reach a
@@ -594,7 +673,9 @@ explicit authorization. The detailed plan, with the pilot checklist, is in
 1. Tag the current image for the rollback:
    `docker tag shared-terminal-session shared-terminal-session:pre-3.0`.
 2. `git pull` to the approved SHA, then
-   `docker build -t shared-terminal-session ./session-image`. Check
+   `docker build -t shared-terminal-session ./session-image` (historical
+   record of the 3.0d rollout; today use `scripts/build-session-image.sh`,
+   see "Session image pins"). Check
    `docker image inspect shared-terminal-session --format '{{index .Config.Labels "io.shared-terminal.conversation-relay"}}'`
    prints `2`.
 3. `docker compose up -d --build`. Compose recreates only `app` (with the

@@ -413,11 +413,16 @@ services:
       # every tab attach fails when execOneShot can't read its
       # exit code.
       POST: 1 # POST verbs (create/start/exec/resize/stop)
+      IMAGES: 1 # /images/* — image inspect + tag. Since the session image
+      # pins (#521) EVERY spawn and recreation resolves its image to an id
+      # and pins it (POST /images/{id}/tag) before the create; without this
+      # flag every POST /sessions and every respawn fails, even with
+      # SESSION_IMAGE_PINS=off (the create still resolves the id).
       DELETE: 1 # DELETE /containers/{id} for container.remove() on
       # session kill — without this the call is silently swallowed
       # by dockerManager's try/catch and stopped containers pile up
       # on the host indefinitely.
-      # Default-deny everything else: IMAGES, NETWORKS, VOLUMES,
+      # Default-deny everything else: NETWORKS, VOLUMES,
       # SERVICES, SWARM, NODES, INFO, AUTH, BUILD, COMMIT, etc.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
