@@ -1,0 +1,4 @@
+# st-ops may run exactly one root program; it re-validates every argument itself (the dispatcher is not trusted).
+# env_reset (Ubuntu default) drops the caller's environment, so nothing from the SSH session reaches root.
+Defaults:st-ops env_reset, !requiretty, use_pty
+st-ops ALL=(root) NOPASSWD: /usr/local/lib/st-ops/st-ops-root
