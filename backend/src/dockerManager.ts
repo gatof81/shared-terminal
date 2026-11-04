@@ -3438,15 +3438,19 @@ export class DockerManager {
 			cmd: string[],
 			stdin: Buffer | null,
 			onCreated: (execId: string) => Promise<boolean>,
+			opts?: { user?: string },
 		): Promise<{ execId: string; exitCode: number | null; stdout: string }>;
 		execState(execId: string): Promise<{ running: boolean; exitCode: number | null } | null>;
 		containerState(containerId: string): Promise<"running" | "stopped" | "gone">;
 	} {
 		const d = this.docker;
 		return {
-			exec: async (containerId, cmd, stdin, onCreated) => {
+			exec: async (containerId, cmd, stdin, onCreated, opts) => {
 				const exec = await d.getContainer(containerId).exec({
 					Cmd: cmd,
+					// Explicit only where the caller asks (the live-version query
+					// runs as the probed process's own uid, never root).
+					...(opts?.user ? { User: opts.user } : {}),
 					AttachStdin: stdin !== null,
 					AttachStdout: true,
 					AttachStderr: true,
