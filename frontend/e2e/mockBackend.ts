@@ -73,6 +73,8 @@ interface Conversation {
 	paneId?: string | null;
 	/** The tmux tab the conversation's pane lives in (default "tab-1"). */
 	tabId?: string | null;
+	/** Lost-event gaps reported in the list (default 0). */
+	gapsCount?: number;
 	/** `GET …/agents` (default none): the captured subagents of this conversation. */
 	agents?: Array<{
 		agentId: string;
@@ -953,7 +955,7 @@ export class MockBackend {
 			lastSeq: last?.seq ?? 0,
 			firstRetainedSeq: 1,
 			eventsCount: c.events.length,
-			gapsCount: 0,
+			gapsCount: c.gapsCount ?? 0,
 			claudeVersion: "2.1.314",
 			canSendInput: c.canSendInput,
 			customTitle: this.metaUnavailable ? null : (c.customTitle ?? null),

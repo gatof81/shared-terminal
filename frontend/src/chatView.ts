@@ -1847,16 +1847,21 @@ function agentCard(a: AgentView): HTMLElement {
 	li.dataset.agent = a.agentId;
 	const top = el("div", "chat-agent-top");
 	top.appendChild(el("span", "chat-agent-type", a.agentType || "agent"));
-	top.appendChild(
-		statusChip(
-			{
-				status: a.status === "done" ? "ended" : "running",
-				evidence: "",
-				at: a.endedAt ?? a.startedAt,
-			},
-			{ staleness: false },
-		),
-	);
+	// "done" is confirmed by a SubagentStop; without one the agent is only
+	// "started, no end yet" — never presented as working (nothing times it out).
+	if (a.status === "done")
+		top.appendChild(
+			statusChip(
+				{ status: "ended", evidence: "", at: a.endedAt ?? a.startedAt },
+				{ staleness: false },
+			),
+		);
+	else {
+		const chip = el("span", "chat-status tone-muted");
+		chip.appendChild(el("span", "chat-dot"));
+		chip.appendChild(el("span", "chat-status-label", "Started, no end yet"));
+		top.appendChild(chip);
+	}
 	li.appendChild(top);
 	const bits: string[] = [a.agentId.slice(0, 8)];
 	bits.push(`${a.toolIds.size} tool${a.toolIds.size === 1 ? "" : "s"}`);

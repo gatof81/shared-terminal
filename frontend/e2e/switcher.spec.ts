@@ -310,6 +310,7 @@ test.describe("conversation switcher", () => {
 				.find((c) => c.cid === "conv-2")!
 				.events.map((e) => ({ ...e, ts: "2026-10-31T10:29:00Z" })),
 			agents: agentsOne,
+			gapsCount: 1,
 		});
 		await app.login("alice");
 		await openSwitcher(app, page);
@@ -324,6 +325,8 @@ test.describe("conversation switcher", () => {
 		);
 		await expect(option(page, "Refactor auth flow")).toContainText("No recent activity");
 		await expect(page.locator(".switcher-agent")).toHaveCount(1);
+		// Lost events in that conversation: the agents line says ends may be missing.
+		await expect(option(page, "Live one")).toContainText("ends may be missing");
 	});
 
 	test("an agent list that fails leaves the conversation row as it is", async ({
