@@ -71,6 +71,27 @@ test.describe("chat: active vs earlier", () => {
 		);
 	});
 
+	test("a conversation that never had a pane (e.g. a background Claude session) is not told it was taken over", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		const c1 = backend.conversations[0]!;
+		c1.status = "unknown";
+		c1.statusEvidence = "timeout";
+		c1.paneId = null;
+		c1.canSendInput = false;
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.switchView("chat");
+		await page.locator("#chat-list .chat-conv-row", { hasText: "Refactor auth flow" }).click();
+		const status = page.locator(".chat-composer-status");
+		await expect(status).toContainText("Chat can't tie this conversation to a terminal pane");
+		await expect(status).toContainText("background session");
+		await expect(status).not.toContainText("took it over");
+		await expect(status).not.toContainText("started in it");
+	});
+
 	test("a conversation still bound to its pane that cannot take input does not claim the pane was lost", async ({
 		app,
 		backend,
@@ -88,6 +109,7 @@ test.describe("chat: active vs earlier", () => {
 		const status = page.locator(".chat-composer-status");
 		await expect(status).toContainText("Sending from Chat is not available");
 		await expect(status).not.toContainText("no longer has a terminal pane");
+		await expect(status).not.toContainText("can't tie this conversation");
 	});
 
 	test("a long turn that keeps emitting events stays Active although its status time is old", async ({
