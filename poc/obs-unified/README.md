@@ -150,8 +150,11 @@ probe/wrong inst/missing inst rejected, correct accepted; B4 attribution needs f
 decision-at-last-read / failed-read ⇒ partial, full only when a read strictly brackets the decision,
 plus advancing-clock regressions (time after the decision with no read ⇒ partial) and a pre-trust
 decision needing a strictly-earlier read; **F1 cleanup-by-owner** — SIGTERM-only / SIGKILL-escalation
-/ never-dies / already-gone / perm-error / inner-backstop / signals-handle-not-pid, and the runner
-reaping by the owner handle on ambiguous identity with honest `cleanup_accredited`; B5
+/ never-dies / already-gone / perm-error / **owner-exit-but-namespace-not-empty ⇒ NOT reaped** /
+unverifiable-namespace / signals-held-owner-not-pid, plus runner routes (owner acquired atomically
+from spawn then reaped; reap-raises still tears down + aborts cleanup-not-reaped; teardown-raises
+swallowed; unexpected-error ⇒ aborted/INCONCLUSIVE with cleanup info; spawn-failure leaves nothing);
+B5
 truncation/replacement degrade continuity ⇒ P0 inconclusive, append keeps continuity; plus the
 retained round-1 cases and smoke-cleanup mocks). Earlier run (round 1) was **36 passed**: B1/B2 regressions (not-seated ≠ valid guard;
 `events:` declaration ≠ session.start; session.start needs an execution record); classifiers
@@ -196,11 +199,13 @@ blockers from the last review are now code, not stubs:
   trust-gate into the Observer, captures pane+debug from init, feeds probe records, derives the
   critical window from the reads, and reaps. The `sysio` seam makes every ERROR PATH testable.
 - **(2) per-instance isolation + cleanup with STABLE IDENTITY (F1)**: each control is its own instance
-  (unique id, tmux socket, fresh namespaces); the runner captures an OWNER HANDLE (a pidfd to the
-  `unshare` process) at SPAWN, verifies isolation BEFORE capture, and reaps the disposable PID
-  namespace by that handle AFTER — never by a pgid (shareable) nor a bare pid (reusable). It fails
-  closed (`ok:false` + reason), and accredits cleanup via the owner handle even when the inner
-  identity is ambiguous.
+  (unique id, fresh namespaces); the runner ACQUIRES the owner ATOMICALLY — `spawn` CREATES and HOLDS
+  the `unshare` leader as a `subprocess.Popen` child (no post-launch pid lookup ⇒ no reuse race),
+  verifies isolation BEFORE capture, reaps the disposable PID namespace by that held handle AFTER
+  (never a pgid, never a bare pid), and ACCREDITS cleanup only when the namespace is VERIFIED empty
+  (owner exit alone is not enough). It fails closed (`ok:false` + reason), a partial launch self-cleans
+  inside spawn, teardown always runs even if reap raises, and every result carries
+  `cleanup_accredited`.
 - **(3) independent positive validation**: the orchestrator re-validates the positive snapshot
   (`validate_positive`: authority + correlation + a REAL skills-dir:loaded) and requires the fixture
   digest — an INDEPENDENT `fixture_digest()` sha256 of the planted dir, returned per instance — to
@@ -218,12 +223,14 @@ fixture bytes in both controls). No real positive load, or a digest mismatch ⇒
 
 **Isolation + supervision (F1):** `isolation_argv` builds `unshare --map-root-user --net --pid --fork
 --mount-proc --kill-child …` (fresh net ns = only `lo`; fresh pid ns, CLI as PID 1; `--kill-child`
-makes the `unshare` the namespace owner). `RealSys.spawn` captures the OWNER HANDLE (a pidfd to that
-unshare) at spawn; `supervised_pid` opens the verified INNER handle (pidfd to the ns init);
-`reap(owner, inner)` = `cleanup_by_owner` — SIGTERM→wait→SIGKILL→wait on the owned handle (which
-`--kill-child`-reaps the namespace), then confirms the init exited. **Never a pgid, never a bare pid
-⇒ no reuse race, no signal to a shared group.** **Fail-closed:** any isolation / capture / cleanup
-failure ⇒ `aborted:true`, verdict INCONCLUSIVE, controls empty — never reinterpreted.
+makes the `unshare` the namespace owner). `RealSys.spawn` CREATES and HOLDS that `unshare` as our own
+`subprocess.Popen` child on a PTY — the held handle is the owner from creation, no pane_pid lookup —
+and captures, from the owner, the PID-namespace inode (`/proc/<pid>/ns/pid_for_children`).
+`reap(owner)` = `cleanup_by_owner` — SIGTERM→wait→SIGKILL→wait on the held child (`proc.send_signal`
+/ `proc.poll`, which `--kill-child`-reaps the namespace), then ACCREDITS cleanup only when a /proc
+scan confirms NO process still carries that ns inode. **Never a pgid, never a bare pid ⇒ no reuse
+race, no signal to a shared group; owner-exit alone never credits cleanup.** **Fail-closed:** any
+isolation / capture / cleanup failure ⇒ `aborted:true`, verdict INCONCLUSIVE, controls empty.
 
 The pieces still owner-required for the REAL run are wired by the (not-run) real runner:
 
@@ -233,10 +240,12 @@ CLI under `unshare -rn --pid --fork --mount-proc <...>`:
   `loopback` inside, and an outbound probe failing. HOME isolation alone is explicitly insufficient.
 - `-r` → map to a user namespace so `-n/--pid` need no root.
 - `--pid --fork --mount-proc --kill-child` → the CLI is PID 1 of a fresh PID namespace, owned by the
-  `unshare`. Cleanup signals a STABLE HANDLE (pidfd) to that unshare leader — not a pid number, not a
-  pgid; `--kill-child` (PR_SET_PDEATHSIG) then SIGKILLs the ns init, whose death reaps the whole
-  namespace — **verifiable identity across the lifecycle, immune to pid reuse, never a shared group,
-  no `pkill -f`, no orphans**. If a tool needs a container instead, use a **throwaway** `--network none`
+  `unshare` WE hold as our own child (a `subprocess.Popen`, from creation — not a pane looked up
+  later). Cleanup signals that HELD child by its handle — not a pid number, not a pgid; `--kill-child`
+  (PR_SET_PDEATHSIG) then SIGKILLs the ns init, whose death reaps the whole namespace, and we then
+  VERIFY emptiness by a /proc scan for the ns inode — **unambiguous identity from creation, immune to
+  pid reuse, never a shared group, no `pkill -f`, no orphans, no credit from owner-exit alone**. If a
+  tool needs a container instead, use a **throwaway** `--network none`
   container built from the pinned image, labelled distinctly, removed on exit — **never** the
   retained PASS-B1 containers or real sessions. (No container is created now.)
 
@@ -284,10 +293,10 @@ True); the actual kernel/CLI behaviour still needs a real run to confirm.
 
 | Path | Verified now with mocks/simulated | Still needs REAL validation (a run) |
 | --- | --- | --- |
-| **D1 isolation + identity** | `interpret_isolation`; **host-side identity**: `parse_ns_inode`, `verify_isolated` (fresh net+pid ns), `resolve_supervised_pid` (unique descendant in a fresh pid ns; 0/>1 ⇒ None); runner fails closed on ambiguous identity | that `nsenter` into the resolved host pid's net ns really yields only `lo` + failing outbound, and that /proc resolution finds exactly the unshare'd child on the host |
-| **F1 reap (was D2)** | `cleanup_by_owner`: SIGTERM→wait→SIGKILL→wait on a STABLE OWNER HANDLE (pidfd-shaped), confirm via `exited`; never-dies/None-owner ⇒ False; signals HANDLES only (no pgid, no bare pid ⇒ no reuse race, no shared group); owner captured at spawn so cleanup is accredited even on ambiguous inner identity | that `pidfd_send_signal` to the `--kill-child` unshare + the pidfd-exit poll actually reap the `--pid` namespace on the host |
+| **D1 isolation + identity** | `interpret_isolation`; **owner-keyed identity**: `parse_ns_inode`, `verify_isolated` (owner's net ns + `pid_for_children` ns both fresh), `ns_is_empty` (no live proc carries the ns inode; unknown ⇒ False); no descendant lookup | that `nsenter` into the OWNER's net ns really yields only `lo` + failing outbound on the host |
+| **F1 reap (was D2)** | `cleanup_by_owner`: SIGTERM→wait→SIGKILL→wait on a HELD OWNER HANDLE (a Popen child), `owner_exited` via `proc.poll`; accredits ONLY when `namespace_empty` is verified true (owner-exit alone insufficient — point 4); never-dies/None-owner/unverifiable-ns ⇒ False; signals the held child only (no pgid, no bare pid ⇒ no reuse race, no shared group) | that `proc.send_signal`+`--kill-child` + the /proc ns scan actually reap the `--pid` namespace on the host |
 | **(1) runner** | error paths spawn/isolation/capture/cleanup; trust-aborted recorded not crash; happy ⇒ snapshot+digest | the real `unshare`+tmux launch and pane/debug/probe wiring |
-| **(2) per-instance** | unique inst/sock/namespaces; owner handle at spawn; isolation-before + owner-reap-after per instance; fail-closed via runner | that namespaces are truly per-instance and don't leak between controls on the host |
+| **(2) per-instance** | unique inst/namespaces; owner acquired atomically at spawn (held Popen); isolation-before + owner-reap-after per instance; reap-raises still tears down; unexpected ⇒ aborted; fail-closed via runner | that namespaces are truly per-instance and don't leak between controls on the host |
 | **(3) independent positive** | `validate_positive` (authority + real `skills-dir:loaded`); `fixture_digest` independent + content-sensitive; digest cross-check pos==neg | that the positive control (no policy) actually LOADS the fixture on 2.1.314 |
 | **D3 pre-trust capture** | capture tick ordered BEFORE `trust_gate`; the pre-trust read is the strictly-before bound, so a decision caught only later is bracketed; a decision already present on the first poll ⇒ partial (F2) | that a real pre-trust skills-dir decision is caught by the parallel loop with a read strictly before it |
 | **D4 e2e config** | `verify_cli` (version + sha, fail-closed); orchestrator entry wiring | that `CLAUDE_CODE_MANAGED_SETTINGS_PATH` really seats the probe/guard AND that `strictKnownMarketplaces` ENFORCES skills-dir (OPEN since inv2 §4-bis / D3) |
@@ -299,9 +308,10 @@ answer it, under the GO/NO-GO above. Until a real run passes all rows, N14 stays
 `blocked-low` is the ceiling.
 
 ### Production-wiring blockers (latest review) — status
-- **B1 namespace identity** (critical): isolation_argv no longer writes `$$` (PID-ns-local); the host
-  resolves+verifies the unshare'd child via /proc (`resolve_supervised_pid`/`verify_isolated`) before
-  any nsenter/signal; ambiguous identity ⇒ fail-closed. Mock-tested; real /proc resolution still needs a run.
+- **B1 namespace identity** (critical): isolation_argv no longer writes `$$` (PID-ns-local). Under F1
+  the identity now comes from the HELD owner (a Popen child), not a /proc descendant lookup; the owner's
+  net ns and `pid_for_children` ns are verified fresh (`verify_isolated`). Mock-tested; real nsenter/ns
+  scan still needs a run.
 - **B2 clock scale** (critical): the window scale issue is subsumed by **F2** — there are no window
   timestamps any more; coverage is derived from the read timestamps directly. The non-zero-monotonic-
   start regression still passes. Fully mock-verified.
@@ -318,23 +328,27 @@ answer it, under the GO/NO-GO above. Until a real run passes all rows, N14 stays
   + marker `st-b1-rogue-n14.json`, byte-for-byte equal to the kit's `ROGUE_REGISTER` for
   st-b1-rogue-n14 (asserted in-test against `poc/passb1/b1.py`; 8eafe1a untouched).
 
-### Review F1–F2 — status
-- **F1 stable identity during cleanup** (critical): the pgid/`getpgid`→`killpg` reap is GONE — it had
-  a PID-reuse race (the pid could be recycled between discovery and `getpgid`) and signalled a GROUP
-  that could be shared with host processes. Replaced by `cleanup_by_owner(owner, inner, …)`, which
-  signals STABLE HANDLES only: the OWNER handle (a pidfd to the `unshare`, captured at SPAWN) and, as
-  confirmation, the INNER handle (a pidfd to the verified ns init). A pidfd pins the EXACT process for
-  its whole lifetime — a signal can never land on a reused pid (ProcessLookupError once gone), and we
-  never touch a pgid. `isolation_argv` adds `--kill-child`, so killing the owned unshare reaps the
-  whole fresh PID namespace (PDEATHSIG to the init, then init-death reaps every member); the
-  namespace's freshness (`verify_isolated`) is what proves the reaped unit is EXCLUSIVELY the
-  experiment's. **Cleanup when initial identification fails:** the owner handle exists at spawn, BEFORE
-  the inner identity resolution, so even when `supervised_pid` is ambiguous the runner still reaps the
-  namespace by the owner handle and reports `cleanup_accredited` — closing tmux is never the proof.
-  Mock-verified (SIGTERM-only / SIGKILL-escalation / never-dies / already-gone / perm-error /
-  inner-backstop / handle-not-pid / runner owner-reap-on-ambiguity); real pidfd/`--kill-child` reap
-  still needs a run.
-- **F2 real temporal window** (high): `window_open()/window_close()` are GONE. They sampled `clock()`
+### Review F1 — status (round 2; F2 accepted)
+- **F1 round 1** (pidfd-of-the-pane-pid) was improved but still acquired the owner by looking up
+  `pane_pid` from tmux AFTER launch and opening a pidfd on it — a launched-but-unowned window and a
+  pid that could be reused before the pidfd pinned it. **Round 2 fixes acquisition AND conservation:**
+  `spawn` now CREATES and HOLDS the `unshare` leader as OUR OWN `subprocess.Popen` child (on a PTY,
+  `start_new_session`). The Popen IS the owner from the instant of creation — there is NO post-launch
+  pid lookup, and the kernel will not recycle the pid until we reap it (`proc.wait`), so identity is
+  demonstrable and reuse-proof. `cleanup_by_owner(owner, …)` signals the held child (`proc.send_signal`
+  — never a pgid, never a bare pid), and `--kill-child` (PR_SET_PDEATHSIG) reaps the namespace on the
+  owner's death. **Point 4 — no credit from owner-exit alone:** cleanup is accredited ONLY when
+  `namespace_empty()` (a /proc scan for the PID-ns inode captured from the owner at creation) verifies
+  the namespace emptied; the owner having exited is necessary, not sufficient. **Error handling:** a
+  partial launch self-cleans inside `spawn` (kill+wait before re-raise) so nothing runs unowned
+  (point 1); the runner's `reap` is wrapped so `teardown` ALWAYS runs even if reap raises (point 2) and
+  a reap failure yields a safe, recorded `cleanup_accredited: false` / `cleanup-not-reaped`; an
+  unexpected error ends as aborted/INCONCLUSIVE carrying the cleanup outcome (point 3). Mock-verified
+  (owner-exit-but-ns-not-empty ⇒ not reaped / never-dies / already-gone / perm-error / unverifiable-ns
+  / signals-held-owner-not-pid; runner: atomic-acquire-then-reap, reap-raises-still-tears-down-and-
+  aborts, teardown-raises-swallowed, unexpected-error-aborts-with-cleanup-info, spawn-failure-leaves-
+  nothing); real Popen/`--kill-child`/ns-scan reap still needs a run.
+- **F2 real temporal window** (high) — **ACCEPTED by the owner (unchanged):** `window_open()/window_close()` are GONE. They sampled `clock()`
   AFTER `from_pane`, so with a real advancing clock the last read sat before `window_close` (⇒
   partial) and only sub-ms rounding faked a `full` — without demonstrating observation before the
   decision. Coverage is now DERIVED from the actual reads: window = `[first read, last read]`, and

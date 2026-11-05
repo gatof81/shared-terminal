@@ -577,10 +577,13 @@ class FakeSys:
     """Scripts the make_runner IO seam so every ERROR PATH is testable without a CLI."""
 
     def __init__(self, scratch, *, fail=None, isolation=True, pane_none=False, reaped=True,
-                 trust="confirmed", loaded=True, host_pid=4321, pane_fail_after=None):
+                 trust="confirmed", loaded=True, pane_fail_after=None, reap_raises=False,
+                 teardown_raises=False):
         self.scratch, self.fail, self.isolation, self.pane_none = scratch, fail, isolation, pane_none
         self.reaped, self.trust, self.loaded = reaped, trust, loaded
-        self.host_pid, self.pane_fail_after, self._pane_calls = host_pid, pane_fail_after, 0
+        self.pane_fail_after, self._pane_calls = pane_fail_after, 0
+        self.reap_raises, self.teardown_raises = reap_raises, teardown_raises
+        self.reap_calls, self.teardown_calls = [], []
 
     def setup(self, kind, home, ws):
         os.makedirs(ws, exist_ok=True)
@@ -599,14 +602,9 @@ class FakeSys:
     def spawn(self, argv, sock):
         if self.fail == "spawn":
             raise RuntimeError("spawn boom")
-        return {"owner": True}                             # F1: OWNER handle captured at spawn
+        return {"owner": True}                             # F1: held owner handle, acquired atomically
 
-    def supervised_pid(self, sock):
-        if self.host_pid is None:
-            return None                                    # ambiguous inner identity
-        return {"pid": self.host_pid}                      # INNER handle
-
-    def check_isolation(self, inner):
+    def check_isolation(self, owner):
         return self.isolation
 
     def pane(self, sock):
@@ -624,11 +622,16 @@ class FakeSys:
     def probe_inst(self, ws):
         return INST
 
-    def reap(self, owner, inner):
+    def reap(self, owner):
+        self.reap_calls.append(owner)
+        if self.reap_raises:
+            raise RuntimeError("reap boom")
         return self.reaped
 
     def teardown(self, sock):
-        pass
+        self.teardown_calls.append(sock)
+        if self.teardown_raises:
+            raise RuntimeError("teardown boom")
 
 
 def mk_runner(sysio):
@@ -810,26 +813,13 @@ class Blocker1Identity(unittest.TestCase):
         self.assertFalse(E.verify_isolated("hn", "hp", "tn", "hp"))   # same pidns as host
         self.assertFalse(E.verify_isolated(None, "hp", "tn", "tp"))   # missing value
 
-    def test_resolve_supervised_pid_unique(self):
-        host = "HOST"
-        procs = {100: {"ppid": 1, "pidns": host}, 200: {"ppid": 100, "pidns": host},
-                 300: {"ppid": 200, "pidns": "FRESH"}}
-        self.assertEqual(E.resolve_supervised_pid(100, procs, host), 300)
-
-    def test_resolve_supervised_pid_ambiguous_none(self):
-        host = "HOST"
-        procs = {100: {"ppid": 1, "pidns": host}, 200: {"ppid": 100, "pidns": "FRESH"},
-                 300: {"ppid": 100, "pidns": "FRESH2"}}
-        self.assertIsNone(E.resolve_supervised_pid(100, procs, host))   # >1 candidate
-
-    def test_resolve_supervised_pid_none_fresh(self):
-        host = "HOST"
-        procs = {100: {"ppid": 1, "pidns": host}, 200: {"ppid": 100, "pidns": host}}
-        self.assertIsNone(E.resolve_supervised_pid(100, procs, host))   # 0 candidates
-
-    def test_runner_identity_ambiguous_fails_closed(self):
-        r = mk_runner(FakeSys(None, host_pid=None))("positive")
-        self.assertEqual((r["ok"], r["reason"]), (False, "identity-ambiguous"))
+    def test_ns_is_empty(self):
+        # F1: the disposable PID namespace is empty iff NO live process carries its inode. An unknown
+        # target inode (None) is NOT verifiable ⇒ False (fail-closed — never credit emptiness blind).
+        self.assertTrue(E.ns_is_empty("FRESH", ["HOST", "HOST", "OTHER"]))     # none in FRESH
+        self.assertFalse(E.ns_is_empty("FRESH", ["HOST", "FRESH"]))            # one still in FRESH
+        self.assertFalse(E.ns_is_empty(None, ["HOST"]))                        # unknown target
+        self.assertFalse(E.ns_is_empty("FRESH", ["FRESH"]))
 
 
 class Blocker2ClockScale(unittest.TestCase):
@@ -845,114 +835,93 @@ SIGKILL = __import__("signal").SIGKILL
 
 
 class F1CleanupByOwner(unittest.TestCase):
-    """F1: reap by a STABLE OWNER HANDLE, never a pgid and never a bare pid. A handle pins one
-    process; `send_signal`/`exited` act on THAT process only — immune to PID reuse by construction
-    (there is no pid arithmetic that could select a different process), and never signals a group."""
+    """F1: reap by a HELD OWNER HANDLE (a child we created), never a pgid and never a bare pid.
+    `signal_owner`/`owner_exited` act on THAT child only (no pid arithmetic ⇒ immune to reuse), and
+    cleanup is accredited ONLY when `namespace_empty` verifies the namespace emptied — owner exit is
+    necessary, not sufficient (point 4)."""
 
     def test_none_owner_never_signals_and_is_not_reaped(self):
         sent = []
-        self.assertFalse(E.cleanup_by_owner(None, object(), send_signal=lambda h, s: sent.append(h),
-                                            exited=lambda h: True, sleep=lambda s: None))
+        self.assertFalse(E.cleanup_by_owner(None, signal_owner=lambda s: sent.append(s),
+                                            owner_exited=lambda: True, namespace_empty=lambda: True,
+                                            sleep=lambda s: None))
         self.assertEqual(sent, [])                       # no owned handle -> no signal, no claim
 
-    def test_owner_dies_on_sigterm_no_sigkill(self):
-        owner, state, sent = object(), {"alive": True}, []
+    def test_owner_dies_on_sigterm_ns_empty_no_sigkill(self):
+        state, sent = {"alive": True}, []
 
-        def sig(h, s):
-            sent.append((h, s))
+        def sig(s):
+            sent.append(s)
             state["alive"] = False
 
-        self.assertTrue(E.cleanup_by_owner(owner, None, send_signal=sig,
-                                           exited=lambda h: not state["alive"], sleep=lambda s: None))
-        self.assertEqual(sent, [(owner, SIGTERM)])       # owner handle only; no SIGKILL needed
+        self.assertTrue(E.cleanup_by_owner(object(), signal_owner=sig,
+                                           owner_exited=lambda: not state["alive"],
+                                           namespace_empty=lambda: True, sleep=lambda s: None))
+        self.assertEqual(sent, [SIGTERM])                # held owner only; no SIGKILL needed
+
+    def test_owner_exits_but_namespace_not_empty_is_not_reaped(self):
+        # POINT 4: the owner exited but a process still lives in the namespace -> NOT accredited.
+        self.assertFalse(E.cleanup_by_owner(object(), signal_owner=lambda s: None,
+                                            owner_exited=lambda: True, namespace_empty=lambda: False,
+                                            sleep=lambda s: None, verify_grace=0.2, tick=0.1))
 
     def test_owner_escalates_to_sigkill(self):
-        owner, sent = object(), []
-
-        def sig(h, s):
-            sent.append(s)
-
-        self.assertTrue(E.cleanup_by_owner(owner, None, send_signal=sig,
-                                           exited=lambda h: SIGKILL in sent, sleep=lambda s: None,
+        sent = []
+        self.assertTrue(E.cleanup_by_owner(object(), signal_owner=lambda s: sent.append(s),
+                                           owner_exited=lambda: SIGKILL in sent,
+                                           namespace_empty=lambda: True, sleep=lambda s: None,
                                            term_grace=0.4, kill_grace=0.4, tick=0.2))
         self.assertIn(SIGKILL, sent)
 
     def test_owner_never_dies_is_not_reaped(self):
-        self.assertFalse(E.cleanup_by_owner(object(), None, send_signal=lambda h, s: None,
-                                            exited=lambda h: False, sleep=lambda s: None,
-                                            term_grace=0.4, kill_grace=0.4, tick=0.2))
+        self.assertFalse(E.cleanup_by_owner(object(), signal_owner=lambda s: None,
+                                            owner_exited=lambda: False, namespace_empty=lambda: True,
+                                            sleep=lambda s: None, term_grace=0.4, kill_grace=0.4, tick=0.2))
 
-    def test_owner_already_gone_is_reaped(self):
-        # ProcessLookupError from send_signal == the pinned process is already gone (it can NEVER be
-        # a reused pid), so that is a confirmed exit.
-        def gone(h, s):
+    def test_owner_already_gone_still_verifies_namespace(self):
+        # ProcessLookupError == the held child is already gone (never a reused pid); even so we MUST
+        # verify the namespace emptied before accrediting.
+        def gone(s):
             raise ProcessLookupError
 
-        self.assertTrue(E.cleanup_by_owner(object(), None, send_signal=gone,
-                                           exited=lambda h: False, sleep=lambda s: None))
+        self.assertTrue(E.cleanup_by_owner(object(), signal_owner=gone, owner_exited=lambda: False,
+                                           namespace_empty=lambda: True, sleep=lambda s: None))
+        self.assertFalse(E.cleanup_by_owner(object(), signal_owner=gone, owner_exited=lambda: False,
+                                            namespace_empty=lambda: False, sleep=lambda s: None,
+                                            verify_grace=0.2, tick=0.1))
 
     def test_permission_error_is_not_read_as_exit(self):
-        def denied(h, s):
-            raise PermissionError                        # OSError subclass, but NOT proof of exit
+        def denied(s):
+            raise PermissionError                        # OSError subclass, NOT proof of exit
 
-        self.assertFalse(E.cleanup_by_owner(object(), None, send_signal=denied,
-                                            exited=lambda h: False, sleep=lambda s: None,
+        self.assertFalse(E.cleanup_by_owner(object(), signal_owner=denied, owner_exited=lambda: False,
+                                            namespace_empty=lambda: True, sleep=lambda s: None,
                                             term_grace=0.2, kill_grace=0.2, tick=0.1))
 
-    def test_inner_confirmed_without_extra_signal(self):
-        owner, inner, sent = object(), object(), []
-        # owner dies on its signal; inner is already gone (--kill-child reaped it) -> not signalled.
-        self.assertTrue(E.cleanup_by_owner(owner, inner, send_signal=lambda h, s: sent.append(h),
-                                           exited=lambda h: True, sleep=lambda s: None))
-        self.assertEqual(sent, [owner])                  # init never signalled — already exited
+    def test_unverifiable_namespace_is_not_credited(self):
+        # ns identity unknown ⇒ ns_is_empty/namespace_empty stays False ⇒ never accredited, even
+        # though the owner exited cleanly.
+        self.assertFalse(E.cleanup_by_owner(object(), signal_owner=lambda s: None,
+                                            owner_exited=lambda: True,
+                                            namespace_empty=lambda: E.ns_is_empty(None, ["HOST"]),
+                                            sleep=lambda s: None, verify_grace=0.2, tick=0.1))
 
-    def test_inner_backstop_signalled_if_still_alive(self):
-        owner, inner, state = object(), object(), {}
-        state[owner], state[inner], sent = True, True, []
-
-        def sig(h, s):
-            state[h] = False                             # whatever we signal, dies
-            sent.append(h)
-
-        self.assertTrue(E.cleanup_by_owner(owner, inner, send_signal=sig,
-                                           exited=lambda h: not state[h], sleep=lambda s: None))
-        self.assertIn(owner, sent)
-        self.assertIn(inner, sent)                       # backstop reached the init when it lingered
-
-    def test_signals_only_the_handle_never_a_pid(self):
-        # PID-reuse immunity by construction: the function signals the HANDLE objects it is given and
-        # does NO pid lookup, so a stranger that reused the numeric pid is structurally unreachable.
-        owner, targets = object(), []
-        self.assertTrue(E.cleanup_by_owner(owner, None, send_signal=lambda h, s: targets.append(h),
-                                           exited=lambda h: h is owner, sleep=lambda s: None))
-        self.assertEqual(targets, [owner])               # the exact owned handle, not a pid number
+    def test_signals_only_the_held_owner_never_a_pid(self):
+        # The function performs NO pid lookup; it signals the held owner via signal_owner, so a
+        # stranger that reused the numeric pid is structurally unreachable.
+        sent = []
+        self.assertTrue(E.cleanup_by_owner(object(), signal_owner=lambda s: sent.append(s),
+                                           owner_exited=lambda: True, namespace_empty=lambda: True,
+                                           sleep=lambda s: None))
+        self.assertEqual(sent, [SIGTERM])                # exactly one signal to the held owner
 
 
 class F1RunnerCleanup(unittest.TestCase):
-    """F1 in the runner: the owner handle is captured at SPAWN (before inner resolution), so cleanup
-    is accredited even when the inner identity is ambiguous — and honestly reported when it fails."""
+    """F1 in the runner: the owner is acquired atomically from spawn; cleanup runs on every post-spawn
+    path, teardown runs even if reap raises, unexpected errors abort without losing cleanup info, and
+    a clean run whose namespace cannot be reaped is NOT credited."""
 
-    def test_identity_ambiguous_still_reaps_by_owner(self):
-        calls = []
-
-        class FS(FakeSys):
-            def reap(self, owner, inner):
-                calls.append((owner, inner))
-                return True
-
-        r = mk_runner(FS(None, host_pid=None))("positive")
-        self.assertEqual((r["ok"], r["reason"]), (False, "identity-ambiguous"))
-        self.assertEqual(len(calls), 1)
-        self.assertIsNone(calls[0][1])                   # inner is None (ambiguous)...
-        self.assertIsNotNone(calls[0][0])                # ...but the OWNER handle reaps the namespace
-        self.assertTrue(r["cleanup_accredited"])         # accredited via the owner handle
-
-    def test_identity_ambiguous_cleanup_failure_is_reported(self):
-        r = mk_runner(FakeSys(None, host_pid=None, reaped=False))("positive")
-        self.assertEqual((r["ok"], r["reason"]), (False, "identity-ambiguous"))
-        self.assertFalse(r["cleanup_accredited"])        # owner reap failed -> not accredited (honest)
-
-    def test_owner_handle_captured_before_inner_resolution(self):
+    def test_owner_acquired_from_spawn_then_reaped(self):
         order = []
 
         class FS(FakeSys):
@@ -960,16 +929,57 @@ class F1RunnerCleanup(unittest.TestCase):
                 order.append("spawn")
                 return super().spawn(argv, sock)
 
-            def supervised_pid(self, sock):
-                order.append("supervised_pid")
-                return super().supervised_pid(sock)
-
-            def reap(self, owner, inner):
+            def reap(self, owner):
                 order.append("reap")
-                return True
+                return super().reap(owner)
 
-        mk_runner(FS(None, host_pid=None))("positive")
-        self.assertEqual(order, ["spawn", "supervised_pid", "reap"])   # owner exists before inner
+        r = mk_runner(FS(None))("positive")
+        self.assertTrue(r["ok"])
+        self.assertEqual(order, ["spawn", "reap"])       # no post-launch pid lookup between them
+        self.assertTrue(r["cleanup_accredited"])
+
+    def test_reap_exception_still_tears_down_and_aborts(self):
+        # Point 2: reap raising must NOT skip teardown. Point 1: the outcome is a safe, recorded
+        # not-accredited cleanup, and the clean run becomes cleanup-not-reaped (never a silent pass).
+        fs = FakeSys(None, reap_raises=True)
+        r = mk_runner(fs)("positive")
+        self.assertEqual((r["ok"], r["reason"]), (False, "cleanup-not-reaped"))
+        self.assertFalse(r["cleanup_accredited"])
+        self.assertEqual(len(fs.teardown_calls), 1)      # teardown ran despite the reap exception
+
+    def test_teardown_exception_does_not_mask_result(self):
+        fs = FakeSys(None, teardown_raises=True)
+        r = mk_runner(fs)("positive")
+        self.assertTrue(r["ok"])                          # teardown failure is swallowed, reap stood
+        self.assertTrue(r["cleanup_accredited"])
+
+    def test_unexpected_error_aborts_inconclusive_with_cleanup_info(self):
+        # Point 3: an unexpected error mid-run ⇒ aborted/INCONCLUSIVE, and cleanup still runs + is
+        # reported (no lost information).
+        class FS(FakeSys):
+            def check_isolation(self, owner):
+                raise RuntimeError("kernel hiccup")
+
+        fs = FS(None)
+        r = mk_runner(fs)("positive")
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["reason"].startswith("unexpected:"))
+        self.assertIn("cleanup_accredited", r)            # cleanup outcome preserved
+        self.assertEqual(len(fs.reap_calls), 1)           # owner was still reaped
+        self.assertEqual(len(fs.teardown_calls), 1)
+
+    def test_spawn_failure_leaves_nothing_to_clean(self):
+        fs = FakeSys(None, fail="spawn")
+        r = mk_runner(fs)("positive")
+        self.assertEqual((r["ok"], r["reason"]), (False, "spawn-failed"))
+        self.assertTrue(r["cleanup_accredited"])          # nothing was left running
+        self.assertEqual(fs.reap_calls, [])               # no reap/teardown without an owner
+        self.assertEqual(fs.teardown_calls, [])
+
+    def test_clean_run_unverified_namespace_not_credited(self):
+        r = mk_runner(FakeSys(None, reaped=False))("positive")
+        self.assertEqual((r["ok"], r["reason"]), (False, "cleanup-not-reaped"))
+        self.assertFalse(r["cleanup_accredited"])
 
 
 class E2WindowSequencing(unittest.TestCase):
@@ -983,15 +993,11 @@ class E2WindowSequencing(unittest.TestCase):
 
         def spawn(self, argv, sock):
             self.clk.t += 0.5
-            super().spawn(argv, sock)
+            return super().spawn(argv, sock)
 
-        def supervised_pid(self, sock):
+        def check_isolation(self, owner):
             self.clk.t += 0.2
-            return super().supervised_pid(sock)
-
-        def check_isolation(self, host_pid):
-            self.clk.t += 0.2
-            return super().check_isolation(host_pid)
+            return super().check_isolation(owner)
 
         def pane(self, sock):
             self.clk.t += 0.3
