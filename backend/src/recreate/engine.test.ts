@@ -721,6 +721,14 @@ describe("late answers: no write of the recreation after the epoch closed", () =
 		const h = await setup({ tRecMs: 80, tRbMs: 80 });
 		h.docker.hooks.set("create", () => new Promise(() => {}));
 		await h.engine.recreate(SID, IMG_N);
+		// Reaching `uncertain` takes T_rec + T_rb plus durable (fsync'd) record
+		// writes: wait for the state rather than a fixed 400 ms, which a loaded
+		// CI runner overran (9 of 40 failed runs, 2026-11-05).
+		await vi.waitFor(async () => expect(await recordOf(h)).toMatchObject({ state: "uncertain" }), {
+			timeout: 5000,
+			interval: 20,
+		});
+		// …and nothing resolves it with time: well past both deadlines it stays.
 		await tick(400);
 		expect(await recordOf(h)).toMatchObject({ state: "uncertain" });
 		expect(h.capture.deferSeed).toBe(true);
