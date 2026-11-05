@@ -318,18 +318,20 @@ function showAuth() {
 
 /**
  * The header's "●" was always green, so it read as a connection light that
- * never changed. It is one now: whether the last session-list refresh reached
- * the server (sessionCore.refreshSessions sets it). Amber = retrying.
+ * never changed. It is one now: whether the last session-list request got a
+ * good answer (sessionCore.refreshSessions sets it; a client-side render error
+ * does not count). Amber = the server is unreachable, answered with an error,
+ * or has not answered for three poll ticks — retrying either way.
  */
 export function setServerReachable(ok: boolean): void {
 	for (const elx of [userDisplay, sidebarUserDisplay]) {
 		elx.classList.toggle("unreachable", !ok);
-		elx.title = ok ? "Connected to the server" : "Can't reach the server — retrying";
+		elx.title = ok ? "Connected to the server" : "Can't refresh from the server — retrying";
 	}
 	userDisplay.setAttribute("role", "img");
 	userDisplay.setAttribute(
 		"aria-label",
-		ok ? "Connected to the server" : "Can't reach the server — retrying",
+		ok ? "Connected to the server" : "Can't refresh from the server — retrying",
 	);
 }
 
@@ -782,8 +784,18 @@ const AUTO_POLL_INTERVAL_MS = 5_000;
 const OBSERVABLES_POLL_EVERY_N_TICKS = 6;
 let autoPollTickCount = 0;
 let autoPollInFlight = false;
+// Ticks skipped because the previous refresh is still waiting on the server.
+let autoPollStalled = 0;
 async function autoPollTick(): Promise<void> {
-	if (autoPollInFlight) return;
+	if (autoPollInFlight) {
+		// A request the server accepted but never answers would keep the
+		// light green until the browser/Tunnel gives up (~100 s). After three
+		// skipped ticks say so; nothing is aborted (that frees nothing
+		// server-side) and the answer, when it lands, sets the light again.
+		if (++autoPollStalled >= 3) setServerReachable(false);
+		return;
+	}
+	autoPollStalled = 0;
 	if (document.visibilityState !== "visible") return;
 	// Guard on auth — without this the poll keeps firing on the login
 	// screen and after logout/session-expiry, each tick toasting a red

@@ -327,8 +327,11 @@ export async function refreshSessions() {
 	// module-variable to get out of sync with the DOM.
 	const includeTerminated = showTerminatedToggle.checked;
 	const gen = ++listGen;
+	// Only the request decides the reachability light, not a render error after it.
+	let answered = false;
 	try {
 		const list = await listSessions(includeTerminated);
+		answered = true;
 		// Superseded (a newer request, or a logout) or answered for an
 		// account that is no longer the one signed in: not ours to apply.
 		if (gen !== listGen || !isLoggedIn()) return;
@@ -350,7 +353,7 @@ export async function refreshSessions() {
 		}
 	} catch (err) {
 		if (gen !== listGen) return;
-		setServerReachable(false);
+		if (!answered) setServerReachable(false);
 		showToast((err as Error).message, true);
 	}
 }

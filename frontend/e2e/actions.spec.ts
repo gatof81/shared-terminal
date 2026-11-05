@@ -242,7 +242,7 @@ test.describe("server reachability", () => {
 		await app.openSidebar();
 		await page.click("#sidebar-refresh-btn");
 		await expect(dot).toHaveClass(/unreachable/);
-		await expect(dot).toHaveAttribute("aria-label", /Can't reach the server/);
+		await expect(dot).toHaveAttribute("aria-label", /Can't refresh from the server/);
 		backend.override = null;
 		await page.click("#sidebar-refresh-btn");
 		await expect(dot).not.toHaveClass(/unreachable/);
