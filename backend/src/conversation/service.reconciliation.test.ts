@@ -871,3 +871,126 @@ describe("v1.7.2 integrity gate (#505 review)", () => {
 		expect((await state("c1"))?.status).toBe("waiting_input");
 	});
 });
+
+describe("v1.8.5 — who may hold a pane (§5.2): resume, takeover and the children of a pane", () => {
+	const panes = async () =>
+		Object.fromEntries((await service.summaries("s1")).map((x) => [x.sessionId, x.paneId]));
+	async function interactiveIn(cid: string, source = "startup") {
+		session("s1");
+		await service.ingest("s1", "%0", hook("SessionStart", { source, ...PANE }, cid));
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "a", prompt_id: `p-${cid}` }, cid),
+		);
+	}
+
+	it("a `claude -p` started from the interactive conversation's Bash (same pane) does not take the pane", async () => {
+		await interactiveIn("main");
+		await service.ingest(
+			"s1",
+			"%0",
+			hook(
+				"SessionStart",
+				{ source: "startup", st: { pane: "%0", tmux_session: "tab-1", argv_flags: ["-p"] } },
+				"child",
+			),
+		);
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "x", prompt_id: "pc" }, "child"),
+		);
+		await store.flush("s1", "main");
+		await store.flush("s1", "child");
+		expect(await panes()).toMatchObject({ main: "%0", child: null });
+		expect((await state("main"))?.statusEvidence).not.toBe("binding_lost");
+	});
+
+	it("a teammate reporting from the same pane does not take it either", async () => {
+		await interactiveIn("main");
+		await service.ingest(
+			"s1",
+			"%0",
+			hook(
+				"SessionStart",
+				{ source: "startup", st: { pane: "%0", argv_flags: ["--agent-name=helper"] } },
+				"mate",
+			),
+		);
+		await store.flush("s1", "mate");
+		expect(await panes()).toMatchObject({ main: "%0", mate: null });
+	});
+
+	it("a conversation whose SessionStart was never seen (kind unknown) never takes a held pane, but binds a free one", async () => {
+		await interactiveIn("main");
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "x", prompt_id: "pu" }, "orphan"),
+		);
+		await store.flush("s1", "orphan");
+		expect(await panes()).toMatchObject({ main: "%0", orphan: null });
+		// On a free pane it binds (the only reporter there).
+		await service.ingest(
+			"s1",
+			"%1",
+			hook("UserPromptSubmit", { prompt: "y", prompt_id: "pf" }, "free"),
+		);
+		await store.flush("s1", "free");
+		expect((await panes()).free).toBe("%1");
+	});
+
+	it("a new interactive conversation in the pane (/clear, a new claude) takes it: the old one is binding_lost", async () => {
+		await interactiveIn("old");
+		now += 1000;
+		await interactiveIn("new", "clear");
+		expect(await panes()).toMatchObject({ old: null, new: "%0" });
+		expect(await state("old")).toMatchObject({ status: "unknown", statusEvidence: "binding_lost" });
+	});
+
+	it("resuming the earlier conversation in that pane restores its binding (and releases the other)", async () => {
+		await interactiveIn("a");
+		now += 1000;
+		await interactiveIn("b", "clear");
+		now += 1000;
+		await service.ingest("s1", "%0", hook("SessionStart", { source: "resume", ...PANE }, "a"));
+		expect(await panes()).toMatchObject({ a: "%0", b: null });
+	});
+
+	it("an interactive conversation that lost its pane gets it back from its next prompt in that pane", async () => {
+		await interactiveIn("a");
+		now += 1000;
+		await interactiveIn("b", "clear");
+		// The person goes back to `a` in that pane (e.g. via the CLI's own switch): its prompt comes from %0.
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "back", prompt_id: "pa2" }, "a"),
+		);
+		await store.flush("s1", "a");
+		expect((await panes()).a).toBe("%0");
+	});
+
+	it("a session whose hooks carry no pane (a background Claude session: no TMUX_PANE) is never bound and releases nobody", async () => {
+		await interactiveIn("main");
+		session("s1");
+		await service.ingest(
+			"s1",
+			undefined,
+			hook(
+				"SessionStart",
+				{ source: "fork", st: { argv_flags: ["--fork-session", "--resume"] } },
+				"bg",
+			),
+		);
+		await service.ingest(
+			"s1",
+			undefined,
+			hook("UserPromptSubmit", { prompt: "z", prompt_id: "pb" }, "bg"),
+		);
+		await store.flush("s1", "bg");
+		expect(await panes()).toMatchObject({ main: "%0", bg: null });
+		expect((await state("bg"))?.canSendInput).toBe(false);
+	});
+});

@@ -895,9 +895,31 @@ export class ConversationService {
 		});
 	}
 
-	/** §5.2 — the newest conversation keeps a pane; the previous holder loses it. */
+	/**
+	 * §5.2 — the newest INTERACTIVE conversation keeps a pane; the previous
+	 * holder loses it (v1.8.5).
+	 *
+	 * A pane's foreground is one interactive CLI. Everything else that reports
+	 * from it runs INSIDE that CLI's pane without owning it: a `claude -p`
+	 * (headless) or a teammate started from its Bash tool inherits TMUX_PANE,
+	 * so its hooks carry the pane too. Letting it take the pane stripped the
+	 * real conversation's binding (and with it Chat input) for a child that
+	 * cannot take input at all. So:
+	 * - headless / teammate: never bound, never release anyone;
+	 * - unknown (no SessionStart seen): binds a FREE pane only — it may be such
+	 *   a child whose SessionStart was missed, so it never takes one over;
+	 * - interactive: binds and takes over, as before.
+	 * Nothing here decides Composer delivery: §8.1.3 still verifies the
+	 * process in the pane on every send.
+	 */
 	private bindPane(index: ConversationIndex, pane: string): void {
 		if (index.paneId === pane) return;
+		if (index.kind === "headless" || index.kind === "teammate") return;
+		if (index.kind !== "interactive" && this.residentHolderOf(index, pane) !== null) return;
+		if (index.kind !== "interactive") {
+			index.paneId = pane;
+			return;
+		}
 		index.paneId = pane;
 		const at = this.now();
 		for (const other of this.runtime.values()) {
@@ -918,6 +940,16 @@ export class ConversationService {
 			// can be applied since each one first re-opens the index).
 			void this.releaseEvictedHolder(other, pane, at);
 		}
+	}
+
+	/** Another resident conversation of the same session that holds `pane`, if any. */
+	private residentHolderOf(index: ConversationIndex, pane: string): string | null {
+		for (const other of this.runtime.values()) {
+			if (other.stSessionId !== index.stSessionId || other.cid === index.cid) continue;
+			const otherIndex = this.deps.store.getResidentIndex(other.stSessionId, other.cid);
+			if (otherIndex?.paneId === pane) return other.cid;
+		}
+		return null;
 	}
 
 	private async releaseEvictedHolder(other: ConvRuntime, pane: string, at: number): Promise<void> {
