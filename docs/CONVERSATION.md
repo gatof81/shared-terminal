@@ -179,8 +179,8 @@ Entrada: JSON de `SessionStart` por stdin. Comportamiento (implementado en
    salida = entrada + `{ "st": { "claude_version", "tmux_session", "pane", "argv_flags" } }` donde:
    - `claude_version` = la versión del **proceso `claude` que disparó el hook** (el que
      `find_claude_pid` encuentra subiendo por `/proc`), preguntada a su propio binario:
-     `env -i PATH=/usr/bin:/bin HOME=/nonexistent DISABLE_AUTOUPDATER=1 timeout -k 1 3
-     /proc/<pid>/exe --version`, con el mismo `starttime` y ejecutable antes y después, **salida 0** (el estado del binario, o el
+     `env -i PATH=/usr/bin:/bin HOME=/nonexistent DISABLE_AUTOUPDATER=1
+     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 timeout -k 1 3 /proc/<pid>/exe --version`, con el mismo `starttime` y ejecutable antes y después, **salida 0** (el estado del binario, o el
      124 del `timeout`, no el del `head` que acota la salida) y salida exacta `X.Y.Z (Claude Code)`;
      null si no hay tal proceso, si es un runtime `node`, si falla, si excede el timeout o si la
      salida no es esa (**v1.8.2**, imágenes nuevas: hasta entonces era `claude --version` del

@@ -573,8 +573,9 @@ tab_start --dangerously-skip-permissions && tab_turn "ST_SCENARIO=bash"
 check "interactive, backend answering non-JSON: no hook error on screen" [ "$(hook_errors)" = 0 ]
 # Fixed strings that only the hook machinery produces. The bare port number
 # was a substring match: "47613" turned up inside unrelated ids/numbers of a
-# model request and failed CI by chance (#524 review); host-qualified it can't.
-check "nothing about hooks ever reaches the model" [ "$(grep -c -F -e 'st-backend' -e 'hook error' -e "127.0.0.1:$RELAY_PORT" -e "localhost:$RELAY_PORT" -e '/ingest/claude/hook' -e '/st-relay/' "$OUT/model-requests.jsonl")" = 0 ]
+# model request and failed CI by chance (#524 review); qualified by host or
+# "port " it can't. Case-insensitive like hook_errors().
+check "nothing about hooks ever reaches the model" [ "$(grep -c -i -F -e 'st-backend' -e 'hook error' -e "127.0.0.1:$RELAY_PORT" -e "localhost:$RELAY_PORT" -e "port $RELAY_PORT" -e '/ingest/claude/hook' -e '/st-relay/' "$OUT/model-requests.jsonl")" = 0 ]
 # Keep-alive race (§2.6): the CLI pools idle sockets for 5 s; a relay that
 # closed idle ones after its 2 s read timeout lost the hook sent at that
 # moment, shown as "hook error" (4/20 turns at a 1.97 s gap locally, and
