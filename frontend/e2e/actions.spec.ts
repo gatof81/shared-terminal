@@ -89,11 +89,66 @@ test.describe("session actions", () => {
 		await app.openSidebar();
 		await app.sessionRow("my-project").locator(".session-menu-btn").click();
 		await page.locator('[role="menuitem"][data-action="stop"]').click();
+		// Stop interrupts a running Claude: it is confirmed first.
+		const dialog = page.locator(".dialog-card");
+		await expect(dialog).toContainText("Stop session");
+		await expect(dialog).toContainText("interrupted");
+		await dialog.locator(".modal-danger-action").click();
 		await expect
 			.poll(() => backend.requests.some((r) => r.method === "POST" && r.path.endsWith("/stop")))
 			.toBe(true);
 		await expect(app.sessionRow("my-project").locator('[data-action="start"]')).toBeVisible();
 		await expect(app.sessionRow("my-project").locator('[data-action="stop"]')).toHaveCount(0);
+	});
+
+	test("Stop can be cancelled: nothing is sent", async ({ app, backend, page }) => {
+		await app.login("alice");
+		await app.openSidebar();
+		await app.sessionRow("my-project").locator(".session-menu-btn").click();
+		await page.locator('[role="menuitem"][data-action="stop"]').click();
+		await page.locator(".dialog-card .dialog-cancel").click();
+		await expect(page.locator(".dialog-card")).toHaveCount(0);
+		expect(backend.requests.some((r) => r.method === "POST" && r.path.endsWith("/stop"))).toBe(
+			false,
+		);
+	});
+
+	test("desktop: the row's quick Stop asks first too; cancelling sends nothing", async ({
+		app,
+		backend,
+		page,
+		isMobile,
+	}) => {
+		test.skip(isMobile, "the quick Stop is a desktop affordance");
+		await app.login("alice");
+		await app.openSidebar();
+		const row = app.sessionRow("my-project");
+		await row.hover();
+		await row.locator('.session-action-btn[data-action="stop"]').click();
+		await expect(page.locator(".dialog-card")).toContainText("Stop session");
+		await page.locator(".dialog-card .dialog-cancel").click();
+		await expect(page.locator(".dialog-card")).toHaveCount(0);
+		expect(backend.requests.some((r) => r.method === "POST" && r.path.endsWith("/stop"))).toBe(
+			false,
+		);
+	});
+
+	test("touch: no one-tap Stop on the row, and the row's buttons are 44px targets", async ({
+		app,
+		isMobile,
+	}) => {
+		test.skip(!isMobile, "touch layout only");
+		await app.login("alice");
+		await app.openSidebar();
+		const row = app.sessionRow("my-project");
+		// Rendered (so the CSS is what hides it), not shown.
+		await expect(row.locator('[data-action="stop"]')).toHaveCount(1);
+		await expect(row.locator('[data-action="stop"]')).toBeHidden();
+		const box = await row.locator(".session-menu-btn").boundingBox();
+		expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
+		expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+		const start = await app.sessionRow("docs").locator('[data-action="start"]').boundingBox();
+		expect(start?.height ?? 0).toBeGreaterThanOrEqual(44);
 	});
 
 	test("a stopped session: Start from the terminal's state panel attaches the terminal", async ({
