@@ -114,6 +114,9 @@ describe("items, sections and search", () => {
 		expect(matches(i, "AUTH")).toBe(true);
 		expect(matches(i, "auth my-proj")).toBe(true);
 		expect(matches(i, "auth docs")).toBe(false);
+		// One rule across title, project and extra names (its agents).
+		expect(matches(i, "auth explore", ["Explore"])).toBe(true);
+		expect(matches(i, "auth plan", ["Explore"])).toBe(false);
 	});
 });
 

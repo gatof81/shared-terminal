@@ -270,9 +270,11 @@ test.describe("conversation switcher", () => {
 		await expect(page.locator(".switcher-agent", { hasText: "general-purpose" })).toHaveCount(0);
 		await agentRow.click();
 		await expect(page).toHaveURL(new RegExp(`#/sessions/${SESSION_IDS.running}/chat/conv-1$`));
-		await expect(
-			page.locator('#chat-agents .chat-agent.focused[data-agent="agentaaaa1111"]'),
-		).toBeVisible();
+		const card = page.locator('#chat-agents .chat-agent.focused[data-agent="agentaaaa1111"]');
+		await expect(card).toBeVisible();
+		// The card says what the switcher said: no end reported, not "Working".
+		await expect(card).toContainText("Started, no end yet");
+		await expect(card).not.toContainText("Working");
 	});
 
 	test("subagents are not asked for when the conversation's evidence is stale, nor when its turn ended (waiting for input)", async ({
