@@ -1065,4 +1065,63 @@ describe("v1.8.5 — who may hold a pane (§5.2): resume, takeover and the child
 		expect(await panes()).toMatchObject({ main: "%0", bg: null });
 		expect((await state("bg"))?.canSendInput).toBe(false);
 	});
+
+	it("G4: a teammate/unknown never ends up sharing a pane with an evicted live holder", async () => {
+		await interactiveIn("main");
+		await store.flush("s1", "main");
+		await store.close("s1", "main"); // evicted: runtime kept, index only on disk
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "x", prompt_id: "pu" }, "orphan"),
+		);
+		await service.ingest(
+			"s1",
+			"%0",
+			hook(
+				"SessionStart",
+				{ source: "startup", st: { pane: "%0", argv_flags: ["--agent-name=h"] } },
+				"mate",
+			),
+		);
+		// Let the async disk checks settle, then read: one holder only.
+		await new Promise((r) => setTimeout(r, 20));
+		await store.flush("s1", "orphan");
+		await store.flush("s1", "mate");
+		const p = await panes();
+		expect(p).toMatchObject({ main: "%0", orphan: null, mate: null });
+		expect(Object.values(p).filter((x) => x === "%0")).toHaveLength(1);
+	});
+
+	it("G4: an evicted holder that has ended does not keep a free pane from an unknown", async () => {
+		vi.useFakeTimers();
+		try {
+			await interactiveIn("done");
+			await service.ingest("s1", "%0", hook("SessionEnd", { reason: "prompt_input_exit" }, "done"));
+			now += SESSION_END_GRACE_MS + 1;
+			await vi.advanceTimersByTimeAsync(SESSION_END_GRACE_MS + 1);
+			await store.flush("s1", "done");
+			await store.close("s1", "done");
+			await service.ingest(
+				"s1",
+				"%0",
+				hook("UserPromptSubmit", { prompt: "x", prompt_id: "pz" }, "late"),
+			);
+			await vi.advanceTimersByTimeAsync(20);
+			await store.flush("s1", "late");
+			expect((await panes()).late).toBe("%0");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("G4: an interactive conversation still takes the pane from an evicted holder (unchanged)", async () => {
+		await interactiveIn("old");
+		await store.flush("s1", "old");
+		await store.close("s1", "old");
+		now += 1000;
+		await interactiveIn("new", "clear");
+		await vi.waitFor(async () => expect(await panes()).toMatchObject({ old: null, new: "%0" }));
+		expect(await state("old")).toMatchObject({ status: "unknown", statusEvidence: "binding_lost" });
+	});
 });

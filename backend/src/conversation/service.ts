@@ -921,8 +921,14 @@ export class ConversationService {
 	private bindPane(index: ConversationIndex, pane: string): void {
 		if (index.paneId === pane) return;
 		if (index.kind === "headless") return;
-		if (index.kind !== "interactive" && this.residentHolderOf(index, pane) !== null) return;
 		if (index.kind !== "interactive") {
+			if (this.residentHolderOf(index, pane) !== null) return;
+			// An evicted (G4) holder is only on disk: decide after reading it,
+			// so two conversations never end up holding one pane.
+			if (this.hasEvictedPeers(index)) {
+				void this.bindIfStillFree(index.stSessionId, index.cid, pane);
+				return;
+			}
 			index.paneId = pane;
 			return;
 		}
@@ -950,10 +956,8 @@ export class ConversationService {
 
 	/**
 	 * Another LIVE resident conversation of the same session that holds `pane`
-	 * (ended / disconnected ones do not count, as in uniqueByPane). An evicted
-	 * (G4) holder is not consulted: it may coexist on the pane until the next
-	 * interactive conversation takes it over — harmless for the composer, whose
-	 * lock is per pane and which proves the process on every send (§8.1.3).
+	 * (ended / disconnected ones do not count, as in uniqueByPane). Evicted
+	 * (G4) conversations are checked by bindIfStillFree.
 	 */
 	private residentHolderOf(index: ConversationIndex, pane: string): string | null {
 		for (const other of this.runtime.values()) {
@@ -965,6 +969,45 @@ export class ConversationService {
 			return other.cid;
 		}
 		return null;
+	}
+
+	/** True when the session has conversations whose index is not resident (G4). */
+	private hasEvictedPeers(index: ConversationIndex): boolean {
+		for (const other of this.runtime.values()) {
+			if (other.stSessionId !== index.stSessionId || other.cid === index.cid) continue;
+			if (!this.deps.store.getResidentIndex(other.stSessionId, other.cid)) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Bind a teammate / unknown conversation to `pane` only if no live
+	 * conversation holds it — resident ones re-checked at the moment of the
+	 * write, evicted ones read from disk first. Never takes a pane over; an
+	 * unreadable evicted index counts as a holder (fail closed: unbound).
+	 */
+	private async bindIfStillFree(stSessionId: string, cid: string, pane: string): Promise<void> {
+		for (const other of [...this.runtime.values()]) {
+			if (other.stSessionId !== stSessionId || other.cid === cid) continue;
+			if (this.deps.store.getResidentIndex(other.stSessionId, other.cid)) continue;
+			try {
+				const idx = await this.deps.store.open(other.stSessionId, other.cid);
+				const st = idx.state.status;
+				if (idx.paneId === pane && st !== "ended" && st !== "disconnected") return;
+			} catch {
+				return;
+			}
+		}
+		// Not resident any more: unbound for now; its next event from the pane
+		// retries (every `!paneId` path does).
+		let bound = false;
+		const applied = this.deps.store.update(stSessionId, cid, (i) => {
+			if (i.paneId !== null || i.kind === "interactive" || i.kind === "headless") return;
+			if (this.residentHolderOf(i, pane) !== null) return;
+			i.paneId = pane;
+			bound = true;
+		});
+		if (applied && bound) this.markDirty(stSessionId, cid);
 	}
 
 	private async releaseEvictedHolder(other: ConvRuntime, pane: string, at: number): Promise<void> {

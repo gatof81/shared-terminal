@@ -1753,9 +1753,10 @@ Casos que *MUST* estar en el test:
     `agent_id` y nunca llegan aquí) y `unknown` (sin `SessionStart` visto: puede ser un hijo con el
     `SessionStart` perdido) solo se ligan a un pane que ninguna conversación **viva y residente**
     tenga (`ending` todavía cuenta; `ended`/`disconnected` no): nunca retiran a otra. Un teammate en
-    `teammate-mode` tmux conserva así su propio pane. Un titular expulsado de memoria (G4) puede
-    coexistir hasta que una `interactive` tome el pane: el composer bloquea por pane y prueba el
-    proceso en cada envío (§8.1.3);
+    `teammate-mode` tmux conserva así su propio pane. Un titular expulsado de memoria (G4) se lee del
+    disco antes de ligar (un índice ilegible cuenta como titular: queda sin pane), de modo que dos
+    conversaciones nunca comparten un pane; ninguna de las dos puede habilitar el composer
+    (`canSendInput` exige `interactive` y §8.1.3 prueba el proceso en cada envío);
   - `interactive` se liga y retira a la anterior, como hasta ahora.
   Una sesión cuyos hooks no traen pane —p. ej. una sesión **en segundo plano** del CLI (`claude
   daemon run`, `bg-pty-host`), cuyo entorno no tiene `TMUX_PANE` y que el probe lista con
