@@ -1876,7 +1876,8 @@ export interface ConversationSocket {
 export function openConversationSocket(
 	sessionId: string,
 	onFrame: (f: ConversationServerFrame) => void,
-	onState?: (connected: boolean) => void,
+	/** `refused`: the server closed with 1008 and no reconnect will follow. */
+	onState?: (connected: boolean, refused?: boolean) => void,
 ): ConversationSocket {
 	let ws: WebSocket | null = null;
 	let closed = false;
@@ -1918,7 +1919,7 @@ export function openConversationSocket(
 		sock.addEventListener("close", (e) => {
 			if (ws !== sock) return;
 			ws = null;
-			onState?.(false);
+			onState?.(false, e.code === 1008);
 			// 1008: refused (not the owner, too many sockets) — don't hammer.
 			if (closed || e.code === 1008) return;
 			timer = setTimeout(connect, backoff);

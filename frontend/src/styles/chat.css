@@ -174,12 +174,6 @@
   flex-shrink: 0;
   color: var(--c-faint);
 }
-.chat-live.on {
-  color: var(--c-ok);
-}
-.chat-live.on .chat-dot {
-  box-shadow: 0 0 0 3px rgba(var(--c-ok-rgb), 0.18);
-}
 
 /* Body grid */
 #chat-body {

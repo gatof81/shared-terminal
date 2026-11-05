@@ -182,6 +182,9 @@ let socket: ConversationSocket | null = null;
 let liveConnected = false;
 /** The socket was connected at least once this session view: a drop is worth a banner. */
 let everConnected = false;
+// The socket stopped for good (1008 refusal, or the conversation not found):
+// nothing is reconnecting, so the UI must not say it is.
+let socketGaveUp = false;
 let mobilePane: "list" | "thread" = "list";
 let agentsOpen = false;
 let listTimer: ReturnType<typeof setInterval> | null = null;
@@ -248,6 +251,7 @@ function resetState(sessionId: string | null): void {
 	threads.clear();
 	cur = null;
 	everConnected = false;
+	socketGaveUp = false;
 	mobilePane = "list";
 	agentsOpen = false;
 	seen.clear();
@@ -560,18 +564,20 @@ function openSocket(): void {
 		// One socket per session view; `follow` retargets it per thread, and
 		// onFrame filters by the selected conversation.
 		const gen = generation;
+		socketGaveUp = false;
 		socket = openConversationSocket(
 			sid,
 			(f) => {
 				if (gen === generation) onFrame(f);
 			},
-			(connected) => {
+			(connected, refused) => {
 				if (gen !== generation) return;
 				liveConnected = connected;
 				if (connected) everConnected = true;
+				if (refused) socketGaveUp = true;
 				// The "connection lost" banner follows the socket now, not the
 				// next thread render (which may be a long time coming offline).
-				threadEl.classList.toggle("offline", !liveConnected && everConnected);
+				syncOffline();
 				renderSummary();
 				renderThreadHead();
 			},
@@ -584,6 +590,22 @@ function closeSocket(): void {
 	socket?.close();
 	socket = null;
 	liveConnected = false;
+	// Every caller closes on purpose (view switch, deselect, session change):
+	// the next socket's connect window is "Connecting…", not a lost connection.
+	// Real drops arrive only through the socket's own onState(false).
+	everConnected = false;
+}
+
+/** The thread's connection banner: shown while reconnecting or after the socket gave up. */
+function syncOffline(): void {
+	const down = !liveConnected && (everConnected || socketGaveUp);
+	threadEl.classList.toggle("offline", down);
+	const banner = threadEl.querySelector<HTMLElement>(".chat-offline");
+	if (banner) {
+		banner.textContent = socketGaveUp
+			? "Not receiving new events. Reopen the conversation or refresh the list to try again."
+			: "Connection lost — reconnecting. New events will appear when it is back.";
+	}
 }
 
 function onFrame(f: ConversationServerFrame): void {
@@ -622,6 +644,9 @@ function onFrame(f: ConversationServerFrame): void {
 		jumpToLatest();
 	} else if (f.type === "error" && f.code === "not-found") {
 		closeSocket();
+		socketGaveUp = true;
+		syncOffline();
+		renderThreadHead();
 	}
 }
 
@@ -722,10 +747,17 @@ function connectionChip(): HTMLElement | null {
 	if (liveConnected) return null;
 	const live = el("span", "chat-live off");
 	live.appendChild(el("span", "chat-dot"));
-	live.appendChild(el("span", undefined, everConnected ? "Reconnecting…" : "Connecting…"));
-	live.title = everConnected
-		? "Connection lost — new events will appear when it is back"
-		: "Connecting to receive new events as they happen";
+	const text = socketGaveUp
+		? "Not receiving events"
+		: everConnected
+			? "Reconnecting…"
+			: "Connecting…";
+	live.appendChild(el("span", undefined, text));
+	live.title = socketGaveUp
+		? "The server stopped sending new events. Reopen the conversation or refresh the list to try again."
+		: everConnected
+			? "Connection lost — new events will appear when it is back"
+			: "Connecting to receive new events as they happen";
 	return live;
 }
 
@@ -1333,7 +1365,7 @@ function renderThread(opts: { stick: boolean; restore?: boolean }): void {
 		threadEl.appendChild(floatPill());
 		threadEl.appendChild(composer());
 	}
-	threadEl.classList.toggle("offline", !liveConnected && everConnected);
+	syncOffline();
 	const model = buildThread(t.window.events);
 	const blocks = groupBlocks(model.items);
 	const nodes: HTMLElement[] = [];
@@ -1867,6 +1899,7 @@ function composer(): HTMLElement {
 	const ta = el("textarea");
 	ta.rows = 1;
 	ta.setAttribute("aria-label", "Message to Claude");
+	ta.setAttribute("aria-describedby", "chat-composer-status");
 	const sendBtn = button("Send", "files-btn primary chat-send", () => void submitComposer());
 	const reason = st ? composerBlockReason(c, st) : "Open a conversation to send a message.";
 	const can = reason === null;
@@ -1900,6 +1933,9 @@ function composer(): HTMLElement {
 /** The composer's status line: the notice, or the hint, or the block reason. */
 function composerStatus(st: ComposerState | null, reason: string | null): HTMLElement {
 	const status = el("div", "chat-composer-status");
+	// The textarea points here (aria-describedby): a blocked composer's
+	// reason is read with it, now that the placeholder no longer carries it.
+	status.id = "chat-composer-status";
 	const can = reason === null;
 	if (st?.notice) {
 		status.classList.add(st.notice.tone);
@@ -1918,7 +1954,7 @@ function composerStatus(st: ComposerState | null, reason: string | null): HTMLEl
 		}
 		status.appendChild(button("Open terminal", "chat-link", () => setView("terminal")));
 	} else if (can) {
-		// Touch keyboards have no Ctrl+Enter: there the Send button sends.
+		// Narrow (mobile) layout: the Send button is the affordance there.
 		status.appendChild(
 			el(
 				"span",

@@ -938,6 +938,53 @@ describe("Chat overlay — connection indicator", () => {
 		await flush();
 		expect(chip()?.textContent).toContain("Reconnecting…");
 		expect($("chat-thread").classList.contains("offline")).toBe(true);
+		expect($("chat-thread").querySelector(".chat-offline")?.textContent).toContain("reconnecting");
+		sock.onState?.(true);
+		await flush();
+		expect(chip()).toBeNull();
+		expect($("chat-thread").classList.contains("offline")).toBe(false);
+	});
+
+	it("a refused socket (1008) says it is not receiving events, never that it is reconnecting", async () => {
+		await openChat();
+		await openThread([ev("user_prompt", { prompt: "x" })]);
+		const chip = () => $("chat-thread").querySelector<HTMLElement>(".chat-thread-head .chat-live");
+		sock.onState?.(true);
+		await flush();
+		(sock.onState as unknown as (c: boolean, refused: boolean) => void)(false, true);
+		await flush();
+		expect(chip()?.textContent).toContain("Not receiving events");
+		expect(chip()?.textContent).not.toContain("Reconnecting");
+		expect($("chat-thread").classList.contains("offline")).toBe(true);
+		expect($("chat-thread").querySelector(".chat-offline")?.textContent).toContain(
+			"Not receiving new events",
+		);
+	});
+
+	it("leaving and coming back is a fresh connect, not a lost connection", async () => {
+		await openChat();
+		await openThread([ev("user_prompt", { prompt: "x" })]);
+		sock.onState?.(true);
+		await flush();
+		vs.setView("terminal");
+		vs.setView("chat");
+		await flush();
+		const chip = $("chat-thread").querySelector<HTMLElement>(".chat-thread-head .chat-live");
+		expect(chip?.textContent ?? "").not.toContain("Reconnecting");
+		expect($("chat-thread").classList.contains("offline")).toBe(false);
+	});
+
+	it("a 'not-found' error frame stops the socket and says so", async () => {
+		await openChat();
+		await openThread([ev("user_prompt", { prompt: "x" })]);
+		sock.onState?.(true);
+		await flush();
+		sock.onFrame?.({ type: "error", code: "not-found", conv: "c1" });
+		await flush();
+		expect(sock.close).toHaveBeenCalled();
+		expect(
+			$("chat-thread").querySelector<HTMLElement>(".chat-thread-head .chat-live")?.textContent,
+		).toContain("Not receiving events");
 	});
 });
 
@@ -975,6 +1022,8 @@ describe("Composer", () => {
 		// The reason is in the status line, once; the placeholder stays short.
 		expect(status().textContent).toMatch(/blocked/);
 		expect(composerTextarea().placeholder).toBe("Message Claude…");
+		// The reason is the textarea's accessible description.
+		expect(composerTextarea().getAttribute("aria-describedby")).toBe(status().id);
 		await openSendable();
 		expect(composerTextarea().disabled).toBe(false);
 		expect(sendBtn().disabled).toBe(false);
