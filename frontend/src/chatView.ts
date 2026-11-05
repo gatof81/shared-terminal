@@ -78,8 +78,16 @@ import {
 	toolsSummary,
 } from "./conversationModel.js";
 import { formatBytes, relativeDate } from "./format.js";
-import { activeSessionId, isMobile, sessions, showCopySuccessToast, showToast } from "./main.js";
+import {
+	activeSessionId,
+	currentTabs,
+	isMobile,
+	sessions,
+	showCopySuccessToast,
+	showToast,
+} from "./main.js";
 import { renderMarkdown } from "./markdown.js";
+import { showTerminalTab } from "./sessionCore.js";
 import { button, el, stateBox } from "./ui.js";
 import { readLastConversation, writeHistoryHint, writeLastConversation } from "./viewPolicy.js";
 import {
@@ -1935,6 +1943,24 @@ function composer(): HTMLElement {
 	return box;
 }
 
+/**
+ * "Open terminal" for a conversation goes to ITS tab — the one whose pane runs
+ * that Claude — and says which. When the tab is unknown (the hook carried no
+ * tmux session) or no longer listed, the label says so before the click, and
+ * the click shows the Terminal without switching tabs.
+ */
+function openTerminalButton(c: ConversationSummary | undefined): HTMLButtonElement {
+	if (!c) return button("Open terminal", "chat-link", () => setView("terminal"));
+	const tab = c.tabId ? currentTabs.find((t) => t.tabId === c.tabId) : undefined;
+	const label = tab ? `Open terminal · ${tab.label}` : "Open terminal (its tab is unknown)";
+	const b = button(label, "chat-link", () => {
+		if (!showTerminalTab(c.tabId) && tab)
+			showToast(`Could not switch to ${tab.label}; check the active tab before typing.`, true);
+	});
+	b.dataset.openTerminalTab = tab?.tabId ?? "";
+	return b;
+}
+
 /** The composer's status line: the notice, or the hint, or the block reason. */
 function composerStatus(st: ComposerState | null, reason: string | null): HTMLElement {
 	const status = el("div", "chat-composer-status");
@@ -1957,7 +1983,7 @@ function composerStatus(st: ComposerState | null, reason: string | null): HTMLEl
 				}),
 			);
 		}
-		status.appendChild(button("Open terminal", "chat-link", () => setView("terminal")));
+		status.appendChild(openTerminalButton(selected()));
 	} else if (can) {
 		// Narrow (mobile) layout: the Send button is the affordance there.
 		status.appendChild(
@@ -1971,7 +1997,7 @@ function composerStatus(st: ComposerState | null, reason: string | null): HTMLEl
 		);
 	} else {
 		status.appendChild(el("span", undefined, reason ?? ""));
-		status.appendChild(button("Open terminal", "chat-link", () => setView("terminal")));
+		status.appendChild(openTerminalButton(selected()));
 	}
 	return status;
 }

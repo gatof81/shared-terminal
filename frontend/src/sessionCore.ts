@@ -76,6 +76,7 @@ import {
 	landView,
 	reflectRoute,
 	registerRouteDetail,
+	setView,
 	showFilesOnly,
 	syncSessionViews,
 	type View,
@@ -948,6 +949,25 @@ function updateChipBadge(tabId: string) {
 	const badge = badgeFor(tabId);
 	chip.classList.toggle("activity-output", badge === "output");
 	chip.classList.toggle("activity-bell", badge === "bell");
+}
+
+/**
+ * Show the Terminal on one of the active session's tabs (Chat's "Open
+ * terminal" for a conversation: its pane lives in that tab, and landing on
+ * whichever tab happened to be active sent people to the wrong Claude).
+ * Returns false — the Terminal shown, the tab untouched — when the tab is not
+ * one of the session's: the caller says so instead of pretending.
+ */
+export function showTerminalTab(tabId: string | null): boolean {
+	setView("terminal");
+	if (tabId === null || !currentTabs.some((t) => t.tabId === tabId)) return false;
+	try {
+		openTab(tabId);
+	} catch (err) {
+		showToast((err as Error).message, true);
+		return false;
+	}
+	return currentActiveTabId === tabId;
 }
 
 function openTab(tabId: string) {
