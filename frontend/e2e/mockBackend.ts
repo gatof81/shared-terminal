@@ -73,6 +73,16 @@ interface Conversation {
 	paneId?: string | null;
 	/** The tmux tab the conversation's pane lives in (default "tab-1"). */
 	tabId?: string | null;
+	/** `GET …/agents` (default none): the captured subagents of this conversation. */
+	agents?: Array<{
+		agentId: string;
+		agentType: string;
+		status: "running" | "done";
+		startedSeq: number;
+		endedSeq?: number;
+		toolCount: number;
+		hasResult: boolean;
+	}>;
 	/** v1.8 §6.2 owner metadata. */
 	customTitle?: string | null;
 	archivedAt?: string | null;
@@ -802,6 +812,12 @@ export class MockBackend {
 							: this.conversations.map((c) => this.summary(c)),
 					meta: this.metaUnavailable ? "unavailable" : "ok",
 				});
+			}
+			const agentsOf = /^\/conversations\/([^/]+)\/agents$/.exec(rest);
+			if (agentsOf && method === "GET") {
+				const c = this.conversations.find((x) => x.cid === decodeURIComponent(agentsOf[1]!));
+				if (!c) return json(404, { error: "Conversation not found" });
+				return json(200, { agents: c.agents ?? [] });
 			}
 			// v1.8 §6.2 — rename / archive (owner-only, per field, same title rules as the server).
 			const metaPatch = /^\/conversations\/([^/]+)$/.exec(rest);

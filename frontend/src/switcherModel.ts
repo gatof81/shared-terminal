@@ -167,10 +167,48 @@ export function explainProjectError(s: Extract<ProjectState, { kind: "error" }>)
  * settle in exactly one state; after `isCancelled` nothing new starts and
  * nothing more is reported.
  */
-export class ProjectLoader {
+/**
+ * A counting semaphore: at most `size` holders. Shared by everything one
+ * switcher loads (project lists, agent lists), so the whole switcher stays
+ * within one bound.
+ */
+export class Slots {
 	private active = 0;
 	private readonly waiting: Array<() => void> = [];
-	private readonly concurrency: number;
+	constructor(private readonly size: number) {}
+	async acquire(): Promise<void> {
+		if (this.active >= this.size) await new Promise<void>((r) => this.waiting.push(r));
+		this.active++;
+	}
+	release(): void {
+		this.active--;
+		this.waiting.shift()?.();
+	}
+	/** Run `fn` holding a slot, bounded by `timeoutMs` (the abort only stops waiting). */
+	async run<T>(
+		fn: (signal: AbortSignal) => Promise<T>,
+		timeoutMs: number,
+	): Promise<{ value?: T; error?: unknown; timedOut: boolean }> {
+		await this.acquire();
+		const ctrl = new AbortController();
+		let timedOut = false;
+		const timer = setTimeout(() => {
+			timedOut = true;
+			ctrl.abort();
+		}, timeoutMs);
+		try {
+			return { value: await fn(ctrl.signal), timedOut: false };
+		} catch (error) {
+			return { error, timedOut };
+		} finally {
+			clearTimeout(timer);
+			this.release();
+		}
+	}
+}
+
+export class ProjectLoader {
+	private readonly slots: Slots;
 	private readonly timeoutMs: number;
 
 	constructor(
@@ -180,9 +218,11 @@ export class ProjectLoader {
 			concurrency?: number;
 			timeoutMs?: number;
 			isCancelled?: () => boolean;
+			/** Share the bound with other loads of the same switcher (agents). */
+			slots?: Slots;
 		} = {},
 	) {
-		this.concurrency = Math.max(1, opts.concurrency ?? SWITCHER_CONCURRENCY);
+		this.slots = opts.slots ?? new Slots(Math.max(1, opts.concurrency ?? SWITCHER_CONCURRENCY));
 		this.timeoutMs = opts.timeoutMs ?? SWITCHER_TIMEOUT_MS;
 	}
 
@@ -191,13 +231,11 @@ export class ProjectLoader {
 	}
 
 	private async acquire(): Promise<void> {
-		if (this.active >= this.concurrency) await new Promise<void>((r) => this.waiting.push(r));
-		this.active++;
+		await this.slots.acquire();
 	}
 
 	private release(): void {
-		this.active--;
-		this.waiting.shift()?.();
+		this.slots.release();
 	}
 
 	private async one(p: { sessionId: string; name: string }): Promise<void> {

@@ -697,8 +697,24 @@ function scheduleRender(): void {
 	});
 }
 
+// An agent to show once its conversation is open (the switcher's "↳ agent"
+// rows): navigation only — the Agents panel opens with that card in view.
+// Only honoured for a short while: a request whose conversation never opened
+// must not pop the panel open the next time someone opens it by hand.
+let pendingAgentFocus: { cid: string; agentId: string; at: number } | null = null;
+const AGENT_FOCUS_TTL_MS = 15_000;
+
+/** Open the Agents panel on `agentId` when conversation `cid` is next shown. */
+export function focusAgentWhenOpen(cid: string, agentId: string): void {
+	pendingAgentFocus = { cid, agentId, at: Date.now() };
+	if (selectedCid === cid && cur !== null) renderAll();
+}
+
 function renderAll(opts: { scrollToEnd?: boolean; restoreScroll?: boolean } = {}): void {
 	if (!isActive()) return;
+	if (pendingAgentFocus && Date.now() - pendingAgentFocus.at > AGENT_FOCUS_TTL_MS)
+		pendingAgentFocus = null;
+	if (pendingAgentFocus && pendingAgentFocus.cid === selectedCid && cur !== null) agentsOpen = true;
 	const inThread = mobilePane === "thread" && selectedCid !== null;
 	bodyEl.classList.toggle("show-thread", inThread);
 	bodyEl.classList.toggle("show-agents", agentsOpen && selectedCid !== null);
@@ -1815,6 +1831,15 @@ function renderAgents(): void {
 	const ul = el("ul", "chat-agent-list");
 	for (const a of agents) ul.appendChild(agentCard(a));
 	agentsEl.appendChild(ul);
+	const want = pendingAgentFocus;
+	if (want && want.cid === selectedCid) {
+		pendingAgentFocus = null;
+		const card = ul.querySelector<HTMLElement>(`[data-agent="${CSS.escape(want.agentId)}"]`);
+		if (card) {
+			card.classList.add("focused");
+			card.scrollIntoView({ block: "nearest" });
+		}
+	}
 }
 
 function agentCard(a: AgentView): HTMLElement {

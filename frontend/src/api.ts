@@ -1,3 +1,4 @@
+import type { AgentEntry } from "./agentsSummary.js";
 /**
  * api.ts — REST client for the shared-terminal backend.
  */
@@ -1840,6 +1841,32 @@ export async function fetchConversationSummaries(
 	if (!body || !Array.isArray(body.conversations))
 		return { ok: false, status: res.status, error: "Unexpected answer from the server" };
 	return { ok: true, conversations: body.conversations, meta: body.meta };
+}
+
+/**
+ * A conversation's subagents (captured SubagentStart/Stop), for the switcher.
+ * Same contract as fetchConversationSummaries: a status instead of a throw on
+ * a refusal, an AbortError when `signal` stopped the wait.
+ */
+export async function fetchConversationAgents(
+	sessionId: string,
+	cid: string,
+	signal: AbortSignal,
+): Promise<{ ok: true; agents: AgentEntry[] } | { ok: false; status: number; error: string }> {
+	const res = await apiFetch(
+		`/sessions/${encodeURIComponent(sessionId)}/conversations/${encodeURIComponent(cid)}/agents`,
+		{ signal },
+	);
+	if (!res.ok) {
+		const error = await errorMessage(res);
+		if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+		return { ok: false, status: res.status, error };
+	}
+	const body = (await res.json().catch(() => null)) as { agents?: unknown } | null;
+	if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+	if (!body || !Array.isArray(body.agents))
+		return { ok: false, status: res.status, error: "Unexpected answer from the server" };
+	return { ok: true, agents: body.agents as AgentEntry[] };
 }
 
 export async function fetchConversationEvents(
