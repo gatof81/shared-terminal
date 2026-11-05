@@ -907,7 +907,7 @@ describe("v1.8.5 — who may hold a pane (§5.2): resume, takeover and the child
 		expect((await state("main"))?.statusEvidence).not.toBe("binding_lost");
 	});
 
-	it("a teammate reporting from the same pane does not take it either", async () => {
+	it("a teammate never takes a held pane, but keeps its own (tmux-mode split pane)", async () => {
 		await interactiveIn("main");
 		await service.ingest(
 			"s1",
@@ -920,6 +920,58 @@ describe("v1.8.5 — who may hold a pane (§5.2): resume, takeover and the child
 		);
 		await store.flush("s1", "mate");
 		expect(await panes()).toMatchObject({ main: "%0", mate: null });
+		await service.ingest(
+			"s1",
+			"%1",
+			hook(
+				"SessionStart",
+				{ source: "startup", st: { pane: "%1", argv_flags: ["--agent-name=other"] } },
+				"mate2",
+			),
+		);
+		await store.flush("s1", "mate2");
+		expect(await panes()).toMatchObject({ main: "%0", mate2: "%1" });
+	});
+
+	it("a conversation bound as unknown lets go of the pane when its SessionStart shows it is a claude -p", async () => {
+		session("s1");
+		await service.ingest(
+			"s1",
+			"%3",
+			hook("UserPromptSubmit", { prompt: "x", prompt_id: "pk" }, "kid"),
+		);
+		await store.flush("s1", "kid");
+		expect((await panes()).kid).toBe("%3");
+		await service.ingest(
+			"s1",
+			"%3",
+			hook("SessionStart", { source: "startup", st: { pane: "%3", argv_flags: ["-p"] } }, "kid"),
+		);
+		await store.flush("s1", "kid");
+		expect((await panes()).kid).toBeNull();
+	});
+
+	it("an exiting holder still keeps an unknown conversation off the pane until the probe finds it gone", async () => {
+		await interactiveIn("done");
+		await service.ingest("s1", "%0", hook("SessionEnd", { reason: "prompt_input_exit" }, "done"));
+		// `ending`: the CLI may still be in the pane — conservative, no bind.
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "x", prompt_id: "pn" }, "late"),
+		);
+		await store.flush("s1", "late");
+		expect((await panes()).late).toBeNull();
+		// The probe finds no process: the holder is released; the next report binds.
+		box.probe = [];
+		await service.probeAndApply("s1");
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "y", prompt_id: "pn2" }, "late"),
+		);
+		await store.flush("s1", "late");
+		expect((await panes()).late).toBe("%0");
 	});
 
 	it("a conversation whose SessionStart was never seen (kind unknown) never takes a held pane, but binds a free one", async () => {

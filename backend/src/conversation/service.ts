@@ -841,6 +841,12 @@ export class ConversationService {
 				if (typeof event.data.session_title === "string") index.title = event.data.session_title;
 				const tmuxSession = event.data.tmux_session;
 				if (typeof tmuxSession === "string") index.tabId = tmuxSession;
+				// Bound earlier as `unknown`, now known to be a `claude -p`: it never
+				// held that pane (§5.2 v1.8.5).
+				if (index.kind === "headless" && index.paneId !== null) {
+					index.paneId = null;
+					index.tabId = null;
+				}
 				const p = (event.data.pane as string | undefined) ?? pane;
 				if (p) this.bindPane(index, p);
 				if (event.data.source === "resume" || event.data.source === "fork") {
@@ -899,22 +905,24 @@ export class ConversationService {
 	 * §5.2 — the newest INTERACTIVE conversation keeps a pane; the previous
 	 * holder loses it (v1.8.5).
 	 *
-	 * A pane's foreground is one interactive CLI. Everything else that reports
-	 * from it runs INSIDE that CLI's pane without owning it: a `claude -p`
-	 * (headless) or a teammate started from its Bash tool inherits TMUX_PANE,
-	 * so its hooks carry the pane too. Letting it take the pane stripped the
+	 * A pane's foreground is one interactive CLI. A `claude -p` (headless)
+	 * started from its Bash tool runs INSIDE that pane and inherits TMUX_PANE,
+	 * so its hooks carry the pane too; letting it take the pane stripped the
 	 * real conversation's binding (and with it Chat input) for a child that
 	 * cannot take input at all. So:
-	 * - headless / teammate: never bound, never release anyone;
-	 * - unknown (no SessionStart seen): binds a FREE pane only — it may be such
-	 *   a child whose SessionStart was missed, so it never takes one over;
+	 * - headless: never bound, never releases anyone;
+	 * - teammate (its own CLI; in-process teammates never reach here — they
+	 *   report under the leader's session with an agent_id) and unknown (no
+	 *   SessionStart seen — possibly a child whose SessionStart was missed):
+	 *   bind a pane no live resident conversation holds, never take one over
+	 *   (a tmux-mode teammate keeps its own split pane);
 	 * - interactive: binds and takes over, as before.
 	 * Nothing here decides Composer delivery: §8.1.3 still verifies the
 	 * process in the pane on every send.
 	 */
 	private bindPane(index: ConversationIndex, pane: string): void {
 		if (index.paneId === pane) return;
-		if (index.kind === "headless" || index.kind === "teammate") return;
+		if (index.kind === "headless") return;
 		if (index.kind !== "interactive" && this.residentHolderOf(index, pane) !== null) return;
 		if (index.kind !== "interactive") {
 			index.paneId = pane;
@@ -942,12 +950,21 @@ export class ConversationService {
 		}
 	}
 
-	/** Another resident conversation of the same session that holds `pane`, if any. */
+	/**
+	 * Another LIVE resident conversation of the same session that holds `pane`
+	 * (ended / disconnected ones do not count, as in uniqueByPane). An evicted
+	 * (G4) holder is not consulted: it may coexist on the pane until the next
+	 * interactive conversation takes it over — harmless for the composer, whose
+	 * lock is per pane and which proves the process on every send (§8.1.3).
+	 */
 	private residentHolderOf(index: ConversationIndex, pane: string): string | null {
 		for (const other of this.runtime.values()) {
 			if (other.stSessionId !== index.stSessionId || other.cid === index.cid) continue;
 			const otherIndex = this.deps.store.getResidentIndex(other.stSessionId, other.cid);
-			if (otherIndex?.paneId === pane) return other.cid;
+			if (!otherIndex || otherIndex.paneId !== pane) continue;
+			const st = otherIndex.state.status;
+			if (st === "ended" || st === "disconnected") continue;
+			return other.cid;
 		}
 		return null;
 	}
