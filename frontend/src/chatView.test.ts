@@ -925,6 +925,22 @@ describe("Chat overlay — §4.2.1 internal notifications are not 'You'", () => 
 });
 
 // ── 3.2 composer (CONVERSATION.md §8, §10 "3.2 composer") ───────────────────
+describe("Chat overlay — connection indicator", () => {
+	it("says nothing while the event socket delivers; Connecting…/Reconnecting… otherwise", async () => {
+		await openChat();
+		await openThread([ev("user_prompt", { prompt: "x" })]);
+		const chip = () => $("chat-thread").querySelector<HTMLElement>(".chat-thread-head .chat-live");
+		expect(chip()?.textContent).toContain("Connecting…");
+		sock.onState?.(true);
+		await flush();
+		expect(chip()).toBeNull();
+		sock.onState?.(false);
+		await flush();
+		expect(chip()?.textContent).toContain("Reconnecting…");
+		expect($("chat-thread").classList.contains("offline")).toBe(true);
+	});
+});
+
 describe("Composer", () => {
 	const composerTextarea = () =>
 		$("chat-thread").querySelector<HTMLTextAreaElement>(".chat-composer textarea")!;
@@ -956,7 +972,9 @@ describe("Composer", () => {
 			composer: { blocked: true, reason: "effects-pending", clientMessageId: "abc" },
 		});
 		expect(composerTextarea().disabled).toBe(true);
-		expect(composerTextarea().placeholder).toMatch(/blocked/);
+		// The reason is in the status line, once; the placeholder stays short.
+		expect(status().textContent).toMatch(/blocked/);
+		expect(composerTextarea().placeholder).toBe("Message Claude…");
 		await openSendable();
 		expect(composerTextarea().disabled).toBe(false);
 		expect(sendBtn().disabled).toBe(false);
@@ -965,11 +983,11 @@ describe("Composer", () => {
 	it("is disabled while Claude is working or a permission prompt is open; a stale live claim does not block", async () => {
 		await openSendable({ status: "running" });
 		expect(composerTextarea().disabled).toBe(true);
-		expect(composerTextarea().placeholder).toMatch(/working/);
+		expect(status().textContent).toMatch(/working/);
 		await openSendable({ status: "waiting_permission" });
-		expect(composerTextarea().placeholder).toMatch(/permission/);
+		expect(status().textContent).toMatch(/permission/);
 		await openSendable({ status: "ended" });
-		expect(composerTextarea().placeholder).toMatch(/has ended/);
+		expect(status().textContent).toMatch(/has ended/);
 		await openSendable({
 			status: "running",
 			statusAt: new Date(Date.now() - 11 * 60 * 1000).toISOString(),

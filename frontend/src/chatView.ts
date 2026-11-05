@@ -569,6 +569,9 @@ function openSocket(): void {
 				if (gen !== generation) return;
 				liveConnected = connected;
 				if (connected) everConnected = true;
+				// The "connection lost" banner follows the socket now, not the
+				// next thread render (which may be a long time coming offline).
+				threadEl.classList.toggle("offline", !liveConnected && everConnected);
 				renderSummary();
 				renderThreadHead();
 			},
@@ -709,13 +712,20 @@ function statusChip(
 	return chip;
 }
 
-function liveDot(): HTMLElement {
-	const live = el("span", `chat-live ${liveConnected ? "on" : "off"}`);
+/**
+ * The event socket's state, shown only when it is NOT delivering: "Live"
+ * already names conversation activity (the list's Live section and the
+ * "N live" pill), so a second, always-on "Live" for the socket made the two
+ * indistinguishable. Connected = nothing to say.
+ */
+function connectionChip(): HTMLElement | null {
+	if (liveConnected) return null;
+	const live = el("span", "chat-live off");
 	live.appendChild(el("span", "chat-dot"));
-	live.appendChild(el("span", undefined, liveConnected ? "Live" : "Offline"));
-	live.title = liveConnected
-		? "Connected: new events arrive as they happen"
-		: "Not connected — reconnecting";
+	live.appendChild(el("span", undefined, everConnected ? "Reconnecting…" : "Connecting…"));
+	live.title = everConnected
+		? "Connection lost — new events will appear when it is back"
+		: "Connecting to receive new events as they happen";
 	return live;
 }
 
@@ -1256,7 +1266,8 @@ function threadHeadChildren(c: ConversationSummary): HTMLElement[] {
 		b.setAttribute("aria-controls", "chat-agents");
 		right.appendChild(b);
 	}
-	right.appendChild(liveDot());
+	const conn = connectionChip();
+	if (conn) right.appendChild(conn);
 	right.appendChild(metaMenuButton(c, "head"));
 	out.push(right);
 	return out;
@@ -1861,7 +1872,9 @@ function composer(): HTMLElement {
 	const can = reason === null;
 	ta.disabled = !can;
 	sendBtn.disabled = !can;
-	ta.placeholder = can ? "Message Claude… (Ctrl+Enter to send)" : reason;
+	// The reason a send is blocked lives in the status line only; the
+	// placeholder repeating it was cut off on narrow screens.
+	ta.placeholder = "Message Claude…";
 	if (st) {
 		ta.value = st.draft;
 		ta.addEventListener("input", () => {
@@ -1905,8 +1918,15 @@ function composerStatus(st: ComposerState | null, reason: string | null): HTMLEl
 		}
 		status.appendChild(button("Open terminal", "chat-link", () => setView("terminal")));
 	} else if (can) {
+		// Touch keyboards have no Ctrl+Enter: there the Send button sends.
 		status.appendChild(
-			el("span", undefined, "Ctrl+Enter sends · / and ! commands belong in the Terminal"),
+			el(
+				"span",
+				undefined,
+				isMobile()
+					? "/ and ! commands belong in the Terminal"
+					: "Ctrl+Enter sends · / and ! commands belong in the Terminal",
+			),
 		);
 	} else {
 		status.appendChild(el("span", undefined, reason ?? ""));
@@ -1941,7 +1961,9 @@ function renderComposer(): void {
 	const reason = composerBlockReason(selected(), st);
 	const can = reason === null;
 	ta.disabled = !can;
-	ta.placeholder = can ? "Message Claude… (Ctrl+Enter to send)" : reason;
+	// The reason a send is blocked lives in the status line only; the
+	// placeholder repeating it was cut off on narrow screens.
+	ta.placeholder = "Message Claude…";
 	// The draft is the state; the DOM follows it only when they differ (a
 	// send cleared it, a result restored it), never while they agree.
 	if (ta.value !== st.draft) {
