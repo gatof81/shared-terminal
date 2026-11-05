@@ -65,6 +65,7 @@ import {
 	updateToolbar,
 } from "./sessionCore.js";
 import { initShellV2 } from "./shellV2.js";
+import { closeSwitcher, initSwitcher, openSwitcher } from "./switcher.js";
 import { clearAllBadges } from "./tabActivity.js";
 import type { TerminalSession } from "./terminal.js";
 import {
@@ -618,6 +619,9 @@ function handleLogout(toastMessage?: string): void {
 	// idempotent when no observe is active, so calling it
 	// unconditionally needs no guard.
 	closeObserveModal();
+	// The conversation switcher lists this account's titles and may still be
+	// loading them: close it before the login view shows.
+	closeSwitcher();
 	void logout();
 	// A list request still in flight was sent with this account's cookie:
 	// its answer must not be applied after the next person signs in.
@@ -884,6 +888,16 @@ document.addEventListener("keydown", (e) => {
 	if (escapeHandledByDialog(e)) return;
 	if (!mainEl.classList.contains("sidebar-open")) return;
 	setSidebarOpen(false);
+});
+
+// Conversation switcher: header button + Ctrl/⌘+K (switcher.ts); on a phone
+// the drawer's own entry, which closes the drawer first so the switcher is
+// not opened underneath it.
+initSwitcher(() => isLoggedIn());
+const sidebarSwitcherBtn = document.getElementById("sidebar-switcher-btn");
+sidebarSwitcherBtn?.addEventListener("click", () => {
+	if (isMobile()) setSidebarOpen(false);
+	openSwitcher(document.getElementById("sidebar-toggle"));
 });
 
 // On mobile, picking a session should dismiss the drawer so the user can

@@ -1811,6 +1811,37 @@ export async function fetchConversations(
 	return res.json();
 }
 
+/**
+ * The light list form (`?capture=0`, no relay probe) for the cross-project
+ * switcher: answers with the HTTP status instead of throwing on a refusal, so
+ * a 429 can be told from a failure; `signal` bounds how long it is awaited
+ * (a read-only GET — stopping the wait frees nothing and costs nothing).
+ */
+export async function fetchConversationSummaries(
+	sessionId: string,
+	signal: AbortSignal,
+): Promise<
+	| { ok: true; conversations: ConversationSummary[]; meta?: "ok" | "unavailable" }
+	| { ok: false; status: number; error: string }
+> {
+	const res = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}/conversations?capture=0`, {
+		signal,
+	});
+	if (!res.ok) {
+		const error = await errorMessage(res);
+		// Stopped waiting while the error body was read: a timeout, not that error.
+		if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+		return { ok: false, status: res.status, error };
+	}
+	const body = (await res.json().catch(() => null)) as ConversationList | null;
+	// The body read was cut by the time limit: a timeout, not a malformed answer.
+	if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+	// A malformed answer is a failure, never "no conversations".
+	if (!body || !Array.isArray(body.conversations))
+		return { ok: false, status: res.status, error: "Unexpected answer from the server" };
+	return { ok: true, conversations: body.conversations, meta: body.meta };
+}
+
 export async function fetchConversationEvents(
 	sessionId: string,
 	cid: string,

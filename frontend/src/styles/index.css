@@ -25,5 +25,6 @@
 @import "./chat.css";
 /* Shared components (components/*.ts): styled on top of everything above. */
 @import "./dialog.css";
+@import "./switcher.css";
 /* Shell v2 overrides, keyed on html[data-shell="v2"] (uiShell.ts). Last on purpose. */
 @import "./shell-v2.css";
