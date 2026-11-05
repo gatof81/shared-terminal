@@ -843,10 +843,8 @@ export class ConversationService {
 				if (typeof tmuxSession === "string") index.tabId = tmuxSession;
 				// Bound earlier as `unknown`, now known to be a `claude -p`: it never
 				// held that pane (§5.2 v1.8.5).
-				if (index.kind === "headless" && index.paneId !== null) {
-					index.paneId = null;
-					index.tabId = null;
-				}
+				// (Its tmux tab stays as information, like any headless one's.)
+				if (index.kind === "headless" && index.paneId !== null) index.paneId = null;
 				const p = (event.data.pane as string | undefined) ?? pane;
 				if (p) this.bindPane(index, p);
 				if (event.data.source === "resume" || event.data.source === "fork") {

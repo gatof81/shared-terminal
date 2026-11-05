@@ -221,6 +221,7 @@ afterEach(async () => {
 });
 
 import {
+	SESSION_END_GRACE_MS,
 	SILENCE_PROBE_AFTER_MS,
 	TARGETED_PROBE_DELAY_MS,
 	UNKNOWN_AFTER_SILENCE_MS,
@@ -951,10 +952,29 @@ describe("v1.8.5 — who may hold a pane (§5.2): resume, takeover and the child
 		expect((await panes()).kid).toBeNull();
 	});
 
-	it("an exiting holder still keeps an unknown conversation off the pane until the probe finds it gone", async () => {
+	it("once the end grace has elapsed the exited holder (ended · hook:SessionEnd) no longer keeps the pane", async () => {
+		vi.useFakeTimers();
+		try {
+			await interactiveIn("done");
+			await service.ingest("s1", "%0", hook("SessionEnd", { reason: "prompt_input_exit" }, "done"));
+			now += SESSION_END_GRACE_MS + 1;
+			await vi.advanceTimersByTimeAsync(SESSION_END_GRACE_MS + 1);
+			await service.ingest(
+				"s1",
+				"%0",
+				hook("UserPromptSubmit", { prompt: "x", prompt_id: "pg" }, "late"),
+			);
+			await store.flush("s1", "late");
+			expect((await panes()).late).toBe("%0");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("an exiting holder still keeps an unknown conversation off the pane until the end grace elapses or the probe finds it gone", async () => {
 		await interactiveIn("done");
 		await service.ingest("s1", "%0", hook("SessionEnd", { reason: "prompt_input_exit" }, "done"));
-		// `ending`: the CLI may still be in the pane — conservative, no bind.
+		// `ending` (≤ the end grace): the CLI may still be in the pane — no bind.
 		await service.ingest(
 			"s1",
 			"%0",
