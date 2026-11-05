@@ -34,8 +34,8 @@ ATTRIB = {"fixture": "st-b1-rogue-n14", "differential": "loaded-without-policy@c
 
 
 class ManualClock:
-    def __init__(self):
-        self.t = 0.0
+    def __init__(self, start=0.0):
+        self.t = start
 
     def __call__(self):
         return self.t
@@ -56,9 +56,10 @@ def p0_ok():
 FIXTURE_DIGEST = "d34db33fcafef00d"
 
 
-def n14_full_block(attributed=True, differential=True, digest=FIXTURE_DIGEST, diff_digest=FIXTURE_DIGEST):
-    clk = ManualClock()
-    o = obs(attempt="N14", clock=clk).set_window(max_gap=0.3)
+def n14_full_block(attributed=True, differential=True, digest=FIXTURE_DIGEST, diff_digest=FIXTURE_DIGEST,
+                   clock_start=0.0):
+    clk = ManualClock(clock_start)
+    o = obs(attempt="N14", clock=clk).set_window(max_gap=0.3)   # t0 == clock_start
     o.from_debug(PROBE)
     o.from_probe_records(PROBE_RECORDS, start_inst=INST)
     o.fact("trust", "confirmed")
@@ -69,11 +70,13 @@ def n14_full_block(attributed=True, differential=True, digest=FIXTURE_DIGEST, di
             det["differential"] = {"control_run": "ctrl-run-1", "evidence": "skills-dir:loaded",
                                    "fixture_digest": diff_digest}
         o.fact("skills-dir", "block-attributable", source="control", detail=det)
-    o.window_open(0.05)
-    o.window_close(0.25)
-    for t, txt in [(0.0, PROBE), (0.1, SKILLS_BLOCK), (0.2, PROBE), (0.3, PROBE)]:
-        clk.t = t
-        o.from_pane(txt)
+    b = clock_start                                     # window + reads on offsets from the start
+    clk.t = b + 0.0;  o.from_pane(PROBE)                # before the window
+    clk.t = b + 0.05; o.window_open()
+    clk.t = b + 0.1;  o.from_pane(SKILLS_BLOCK)         # decision inside the window
+    clk.t = b + 0.2;  o.from_pane(PROBE)
+    clk.t = b + 0.25; o.window_close()
+    clk.t = b + 0.3;  o.from_pane(PROBE)                # after the window closes
     return o
 
 
@@ -209,8 +212,10 @@ class B4Coverage(unittest.TestCase):
 
     def test_not_observed_before_open_is_partial(self):
         clk, o = self.mk()
-        o.window_open(0.0)
-        o.window_close(0.2)
+        clk.t = 0.0
+        o.window_open()
+        clk.t = 0.2
+        o.window_close()
         for t in (0.1, 0.2, 0.3):                        # first read 0.1 > open 0.0
             clk.t = t
             o.from_pane(PROBE)
@@ -218,8 +223,10 @@ class B4Coverage(unittest.TestCase):
 
     def test_gap_too_large_is_partial(self):
         clk, o = self.mk()
-        o.window_open(0.05)
-        o.window_close(0.9)
+        clk.t = 0.05
+        o.window_open()
+        clk.t = 0.9
+        o.window_close()
         for t in (0.0, 0.1, 0.9):                        # gap 0.8 > max_gap 0.3
             clk.t = t
             o.from_pane(PROBE)
@@ -227,8 +234,10 @@ class B4Coverage(unittest.TestCase):
 
     def test_decision_outside_window_is_partial(self):
         clk, o = self.mk()
-        o.window_open(0.05)
-        o.window_close(0.15)
+        clk.t = 0.05
+        o.window_open()
+        clk.t = 0.15
+        o.window_close()
         for t, txt in [(0.0, PROBE), (0.1, PROBE), (0.2, SKILLS_BLOCK), (0.3, PROBE)]:  # decision 0.2 > close 0.15
             clk.t = t
             o.from_pane(txt)
@@ -378,8 +387,10 @@ class C4WindowFromInit(unittest.TestCase):
         # C4: the skills-dir block may be notified BEFORE trust; a window opened at INIT covers it.
         clk = ManualClock()
         o = obs(attempt="N14", clock=clk).set_window(max_gap=0.3)
-        o.window_open(0.0)                                 # initialization, not trust-confirmed
-        o.window_close(0.3)
+        clk.t = 0.0
+        o.window_open()  # initialization, not trust-confirmed
+        clk.t = 0.3
+        o.window_close()
         for t, txt in [(0.0, SKILLS_BLOCK), (0.1, PROBE), (0.2, PROBE), (0.3, PROBE)]:
             clk.t = t
             o.from_pane(txt)                               # decision at init (t=0)
@@ -477,8 +488,10 @@ def e2e_negative(digest=FIXTURE_DIGEST):
     o.from_probe_records(PROBE_RECORDS, start_inst=INST)
     o.fact("trust", "confirmed")
     o.fixture_identity(digest)                       # same fixture digest as positive
-    o.window_open(0.05)
-    o.window_close(0.25)
+    clk.t = 0.05
+    o.window_open()
+    clk.t = 0.25
+    o.window_close()
     for t, txt in [(0.0, PROBE), (0.1, SKILLS_BLOCK), (0.2, PROBE), (0.3, PROBE)]:
         clk.t = t
         o.from_pane(txt)
@@ -491,8 +504,10 @@ def e2e_absent():
     o.from_debug(PROBE)
     o.from_probe_records(PROBE_RECORDS, start_inst=INST)
     o.fact("trust", "confirmed")
-    o.window_open(0.05)
-    o.window_close(0.25)
+    clk.t = 0.05
+    o.window_open()
+    clk.t = 0.25
+    o.window_close()
     for t in [0.0, 0.1, 0.2, 0.3]:
         clk.t = t
         o.from_pane(PROBE)                           # benign reads, no skills-dir signal
@@ -513,9 +528,10 @@ class FakeSys:
     """Scripts the make_runner IO seam so every ERROR PATH is testable without a CLI."""
 
     def __init__(self, scratch, *, fail=None, isolation=True, pane_none=False, reaped=True,
-                 trust="confirmed", loaded=True):
+                 trust="confirmed", loaded=True, host_pid=4321, pane_fail_after=None):
         self.scratch, self.fail, self.isolation, self.pane_none = scratch, fail, isolation, pane_none
         self.reaped, self.trust, self.loaded = reaped, trust, loaded
+        self.host_pid, self.pane_fail_after, self._pane_calls = host_pid, pane_fail_after, 0
 
     def setup(self, kind, home, ws):
         os.makedirs(ws, exist_ok=True)
@@ -535,15 +551,19 @@ class FakeSys:
         if self.fail == "spawn":
             raise RuntimeError("spawn boom")
 
-    def check_isolation(self, sock):
+    def supervised_pid(self, sock):
+        return self.host_pid                               # None simulates ambiguous identity
+
+    def check_isolation(self, host_pid):
         return self.isolation
 
     def pane(self, sock):
-        return None if self.pane_none else PROBE
+        self._pane_calls += 1
+        if self.pane_none or (self.pane_fail_after is not None and self._pane_calls > self.pane_fail_after):
+            return None
+        return PROBE
 
     def read_text(self, path):
-        if path.endswith("pgid"):
-            return "4321\n"
         return PROBE + (N14_LOADED if self.loaded else "")
 
     def probe_records(self, ws):
@@ -552,23 +572,22 @@ class FakeSys:
     def probe_inst(self, ws):
         return INST
 
-    def reap(self, sock, pgid):
+    def reap(self, sock, host_pid):
         return self.reaped
 
 
 def mk_runner(sysio):
     return E.make_runner(sysio, cli="/bin/claude", scratch=tempfile.mkdtemp(),
-                         trust_gate=lambda s, sock, pg, on_poll: (on_poll(), {"state": sysio.trust})[1],
+                         trust_gate=lambda s, sock, hp, on_poll: (on_poll(), {"state": sysio.trust})[1],
                          clock=ManualClock(), settle_polls=2)
 
 
 class E2ESmokePure(unittest.TestCase):
     def test_isolation_argv(self):
-        argv = E.isolation_argv("/bin/claude", "/h", "/w", "/w/dbg", "/w/pgid", policy_path="/h/m.json")
+        argv = E.isolation_argv("/bin/claude", "/h", "/w", "/w/dbg", policy_path="/h/m.json")
         self.assertEqual(argv[0], "unshare")
         for flag in ("--map-root-user", "--net", "--pid", "--fork", "--mount-proc"):
             self.assertIn(flag, argv)
-        self.assertIn("echo $$ > /w/pgid", argv[-1])
         self.assertIn("CLAUDE_CODE_MANAGED_SETTINGS_PATH=/h/m.json", argv[-1])
 
     def test_fixture_digest_independent_and_stable(self):
@@ -755,6 +774,78 @@ class E2EConsistency(unittest.TestCase):
                                             "absent": ok(e2e_negative(), FIXTURE_DIGEST)}))
         self.assertFalse(r["controls_consistent"])
         self.assertEqual(r["verdict"][0], "inconclusive")
+
+
+class Blocker1Identity(unittest.TestCase):
+    def test_parse_ns_inode(self):
+        self.assertEqual(E.parse_ns_inode("net:[4026531992]"), "4026531992")
+        self.assertIsNone(E.parse_ns_inode(None))
+        self.assertIsNone(E.parse_ns_inode("weird"))
+
+    def test_verify_isolated(self):
+        self.assertTrue(E.verify_isolated("hn", "hp", "tn", "tp"))
+        self.assertFalse(E.verify_isolated("hn", "hp", "hn", "tp"))   # same netns as host
+        self.assertFalse(E.verify_isolated("hn", "hp", "tn", "hp"))   # same pidns as host
+        self.assertFalse(E.verify_isolated(None, "hp", "tn", "tp"))   # missing value
+
+    def test_resolve_supervised_pid_unique(self):
+        host = "HOST"
+        procs = {100: {"ppid": 1, "pidns": host}, 200: {"ppid": 100, "pidns": host},
+                 300: {"ppid": 200, "pidns": "FRESH"}}
+        self.assertEqual(E.resolve_supervised_pid(100, procs, host), 300)
+
+    def test_resolve_supervised_pid_ambiguous_none(self):
+        host = "HOST"
+        procs = {100: {"ppid": 1, "pidns": host}, 200: {"ppid": 100, "pidns": "FRESH"},
+                 300: {"ppid": 100, "pidns": "FRESH2"}}
+        self.assertIsNone(E.resolve_supervised_pid(100, procs, host))   # >1 candidate
+
+    def test_resolve_supervised_pid_none_fresh(self):
+        host = "HOST"
+        procs = {100: {"ppid": 1, "pidns": host}, 200: {"ppid": 100, "pidns": host}}
+        self.assertIsNone(E.resolve_supervised_pid(100, procs, host))   # 0 candidates
+
+    def test_runner_identity_ambiguous_fails_closed(self):
+        r = mk_runner(FakeSys(None, host_pid=None))("positive")
+        self.assertEqual((r["ok"], r["reason"]), (False, "identity-ambiguous"))
+
+
+class Blocker2ClockScale(unittest.TestCase):
+    def test_coverage_full_with_nonzero_clock_start(self):
+        # Regression: the window + reads must share one scale even when the monotonic clock starts
+        # far from 0 (not just ManualClock(0)).
+        self.assertEqual(n14_full_block(clock_start=1000.0).coverage(), "full")
+        self.assertEqual(V.verdict_n14(n14_full_block(clock_start=1000.0).snapshot())[0], "blocked-low")
+
+
+class Blocker3FixtureWorkspace(unittest.TestCase):
+    def test_isolation_argv_cds_and_verifies_cwd(self):
+        inner = E.isolation_argv("/c", "/h", "/w/ws", "/w/ws/dbg")[-1]
+        self.assertIn("cd ", inner)
+        self.assertIn("pwd -P", inner)
+        self.assertIn("exit 97", inner)
+        self.assertNotIn("echo $$", inner)               # Blocker 1: no PID-ns-local pgid write
+
+    def test_fixture_reproduces_the_attack(self):
+        rs = E.RealSys("/c", "sha", "/mk")
+        d = tempfile.mkdtemp()
+        rs._plant_fixture(os.path.join(d, "fx"))
+        with open(os.path.join(d, "fx", "hooks", "r.mjs")) as fh:
+            reg = fh.read()
+        self.assertIn("session.start", reg)              # registers a real hook
+        self.assertIn("marker", reg)                     # leaves execution evidence
+        self.assertNotIn("register(on){}", reg.replace(" ", ""))   # not the empty stub
+
+
+class Blocker4SilentFailures(unittest.TestCase):
+    def test_capture_failure_during_trust_invalidates(self):
+        # pane ok for the pre-trust tick, then fails on the gate's poll -> run invalidated.
+        r = mk_runner(FakeSys(None, pane_fail_after=1))("negative")
+        self.assertEqual((r["ok"], r["reason"]), (False, "capture-failed-during-trust"))
+
+    def test_spawn_result_failure_is_spawn_failed(self):
+        r = mk_runner(FakeSys(None, fail="spawn"))("positive")
+        self.assertEqual((r["ok"], r["reason"]), (False, "spawn-failed"))
 
 
 if __name__ == "__main__":

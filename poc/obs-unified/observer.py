@@ -121,12 +121,14 @@ class Observer:
             self.win["max_gap"] = max_gap
         return self
 
-    def window_open(self, t):
-        self.window["open"] = t
+    def window_open(self):
+        # B2: store the window boundary on the SAME relative scale as reads/events (clock()-t0), not
+        # an absolute timestamp — otherwise coverage compares different scales.
+        self.window["open"] = round(self.clock() - self.t0, 3)
         return self
 
-    def window_close(self, t):
-        self.window["close"] = t
+    def window_close(self):
+        self.window["close"] = round(self.clock() - self.t0, 3)
         return self
 
     def coverage(self):

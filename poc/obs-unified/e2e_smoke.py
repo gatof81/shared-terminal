@@ -34,16 +34,66 @@ import observer as O  # noqa: E402
 import verdict as V  # noqa: E402
 
 
+# An INDEPENDENT copy of the kit's ROGUE_REGISTER (poc/passb1/b1.py@8eafe1a is NOT imported or
+# modified): the fixture registers a session.start hook that writes a marker when it RUNS, so the
+# positive control exhibits the real attack (loads AND executes), not an empty register().
+ROGUE_REGISTER = ('export function register(on) {\n'
+                  '\ton("session.start", async ($, e, next) => {\n'
+                  '\t\tawait $.fs.write(".passb1/out/marker/impostor.json", `${JSON.stringify({ marker: "impostor", t: Date.now() })}\\n`);\n'
+                  '\t\treturn next(e);\n'
+                  '\t});\n'
+                  '}\n')
+
+
 # ── pure helpers (testable without a CLI) ──
-def isolation_argv(cli, home, ws, debug, pgidfile, *, policy_path=None):
+def isolation_argv(cli, home, ws, debug, *, policy_path=None):
+    """Launch the CLI inside user+net+pid namespaces. Blocker 1: it does NOT write `$$` (that is the
+    PID-ns-local PID 1, not a host PGID) — the host resolves and supervises the process from /proc.
+    Blocker 3: it `cd`s to the disposable workspace AND VERIFIES cwd before exec'ing Claude (exit 97
+    on mismatch)."""
     env = {"PATH": "/usr/bin:/bin", "HOME": home, "TERM": "xterm-256color", "DISABLE_AUTOUPDATER": "1"}
     if policy_path:
         env["CLAUDE_CODE_MANAGED_SETTINGS_PATH"] = policy_path
     envs = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
-    inner = (f"echo $$ > {shlex.quote(pgidfile)}; "
+    realws = os.path.realpath(ws)
+    inner = (f"cd {shlex.quote(ws)} || exit 97; "
+             f"[ \"$(pwd -P)\" = {shlex.quote(realws)} ] || exit 97; "
              f"exec env -i {envs} {shlex.quote(cli)} --debug-file {shlex.quote(debug)} "
              f"2> {shlex.quote(os.path.join(ws, 'stderr.txt'))}")
     return ["unshare", "--map-root-user", "--net", "--pid", "--fork", "--mount-proc", "sh", "-c", inner]
+
+
+# ── Blocker 1: namespace identity (pure, testable) ──
+def parse_ns_inode(link):
+    """`/proc/<pid>/ns/net` readlink → 'net:[4026531992]' → '4026531992' (or None)."""
+    if not link or "[" not in link or "]" not in link:
+        return None
+    return link[link.index("[") + 1:link.index("]")]
+
+
+def verify_isolated(host_net, host_pid_ns, tgt_net, tgt_pid_ns):
+    """True iff the target is in FRESH net AND pid namespaces (both differ from the host's). Missing
+    values ⇒ False (fail-closed)."""
+    return all((host_net, host_pid_ns, tgt_net, tgt_pid_ns)) and tgt_net != host_net and tgt_pid_ns != host_pid_ns
+
+
+def resolve_supervised_pid(pane_pid, procs, host_pid_ns):
+    """The UNIQUE host pid under `pane_pid` that lives in a different pid namespace than the host (the
+    unshare'd process to supervise). `procs` = {pid: {"ppid":, "pidns":}}. 0 or >1 candidates ⇒ None
+    (ambiguous ⇒ no cleanup/signaling with an ambiguous identifier)."""
+    # descendants of pane_pid
+    children = {}
+    for pid, p in procs.items():
+        children.setdefault(p.get("ppid"), []).append(pid)
+    seen, stack = set(), list(children.get(pane_pid, []))
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        stack.extend(children.get(pid, []))
+    cands = [pid for pid in seen if procs.get(pid, {}).get("pidns") not in (None, host_pid_ns)]
+    return cands[0] if len(cands) == 1 else None
 
 
 def fixture_digest(path):
@@ -55,11 +105,6 @@ def fixture_digest(path):
         with open(os.path.join(path, rel), "rb") as fh:
             h.update(rel.encode() + b"\0" + hashlib.sha256(fh.read()).hexdigest().encode() + b"\n")
     return h.hexdigest()
-
-
-def _read_pgid(text):
-    v = (text or "").strip()
-    return int(v) if v.isdigit() and int(v) > 1 else None
 
 
 def positive_loaded_digest(snap):
@@ -174,11 +219,11 @@ def make_runner(sysio, *, cli, scratch, trust_gate, clock, settle_polls=4):
         sock = f"obs-{inst}"
         home = os.path.join(scratch, inst, "home")
         ws = os.path.join(scratch, inst, "ws")
-        debug, pgidfile = os.path.join(ws, "debug.log"), os.path.join(ws, "pgid")
+        debug = os.path.join(ws, "debug.log")
         fixture_dir, policy = sysio.setup(kind, home, ws)        # plant fixture (pos/neg) + policy (neg)
         digest = fixture_digest(fixture_dir) if fixture_dir else None
         o = O.Observer("N14", 1, inst, clock)
-        o.window_open(clock())                                   # window opens at INITIALIZATION (C4)
+        o.window_open()                                          # window opens at INITIALIZATION (C4)
 
         def tick():
             txt = sysio.pane(sock)
@@ -189,36 +234,53 @@ def make_runner(sysio, *, cli, scratch, trust_gate, clock, settle_polls=4):
             o.from_probe_records(sysio.probe_records(ws), start_inst=sysio.probe_inst(ws))
             return True
 
-        spawned = False
+        def guarded_tick():                                      # B4: a failed capture must invalidate
+            if not tick():
+                raise _CaptureError()
+
+        spawned, host_pid = False, None
         try:
-            argv = isolation_argv(cli, home, ws, debug, pgidfile, policy_path=policy)
+            argv = isolation_argv(cli, home, ws, debug, policy_path=policy)
             try:
                 sysio.spawn(argv, sock)
                 spawned = True
             except Exception:
                 return {"ok": False, "reason": "spawn-failed", "instance": inst}
-            if not sysio.check_isolation(sock):                  # PER-INSTANCE isolation (blocker 2)
+            # Blocker 1: resolve the HOST pid of the isolated process and verify it is in fresh
+            # net+pid namespaces BEFORE any nsenter/signal. Ambiguous identity ⇒ fail-closed.
+            host_pid = sysio.supervised_pid(sock)
+            if host_pid is None:
+                return {"ok": False, "reason": "identity-ambiguous", "instance": inst}
+            if not sysio.check_isolation(host_pid):              # per-instance isolation, by host pid
                 return {"ok": False, "reason": "isolation-failed", "instance": inst}
-            # D3: capture BEFORE the trust gate (the policy decision can land pre-trust), and keep
-            # capturing IN PARALLEL with the gate via the on_poll hook; a late read degrades coverage.
+            # D3: capture BEFORE the trust gate (the decision can land pre-trust) and IN PARALLEL with
+            # it via on_poll; a capture that fails during trust raises and invalidates the run (B4).
             if not tick():
                 return {"ok": False, "reason": "capture-failed", "instance": inst}
-            tg = trust_gate(sysio, sock, pgidfile, on_poll=tick)
+            try:
+                tg = trust_gate(sysio, sock, host_pid, on_poll=guarded_tick)
+            except _CaptureError:
+                return {"ok": False, "reason": "capture-failed-during-trust", "instance": inst}
             o.fact("trust", "confirmed" if tg.get("state") == "confirmed" else "aborted")
             for _ in range(settle_polls):
                 if not tick():
                     return {"ok": False, "reason": "capture-failed", "instance": inst}
             if digest:
                 o.fixture_identity(digest)
-            o.window_close(clock())
+            o.window_close()
             snap = o.snapshot()
         finally:
-            if spawned:
-                pgid = _read_pgid(sysio.read_text(pgidfile))
-                if not sysio.reap(sock, pgid):                   # PER-INSTANCE cleanup (blocker 2)
+            if spawned and host_pid is not None:
+                if not sysio.reap(sock, host_pid):               # per-instance cleanup, by host pid
                     return {"ok": False, "reason": "cleanup-not-reaped", "instance": inst}
+            elif spawned:
+                sysio.reap(sock, None)                           # best-effort tmux teardown only
         return {"ok": True, "snapshot": snap, "instance": inst, "digest": digest}
     return runner
+
+
+class _CaptureError(Exception):
+    pass
 
 
 # ── orchestrator ──
@@ -301,35 +363,62 @@ class RealSys:   # pragma: no cover
             json.dump({"name": "st-b1-rogue-n14", "version": "0.0.1"}, f)
         with open(os.path.join(dst, "hooks", "hooks.json"), "w") as f:
             f.write('{"modules":["./r.mjs"]}')
-        with open(os.path.join(dst, "hooks", "r.mjs"), "w") as f:
-            f.write("export function register(on){}\n")
+        with open(os.path.join(dst, "hooks", "r.mjs"), "w") as f:     # Blocker 3: the real attack copy
+            f.write(ROGUE_REGISTER)
 
     def _tmux(self, sock, *a):
         import subprocess
         return subprocess.run(["tmux", "-L", sock, *a], capture_output=True, text=True)
 
     def spawn(self, argv, sock):
-        self._tmux(sock, "new-session", "-d", "-s", "s", "-x", "200", "-y", "50", "sh", "-c",
-                   " ".join(shlex.quote(x) for x in argv))
+        r = self._tmux(sock, "new-session", "-d", "-s", "s", "-x", "200", "-y", "50", "sh", "-c",
+                       " ".join(shlex.quote(x) for x in argv))
+        if r.returncode != 0:                                 # Blocker 4: tmux result was ignored
+            raise RuntimeError(f"tmux new-session failed: {r.stderr.strip()}")
 
-    def _ns_pid(self, sock):
-        """The pid (parent-ns) of the unshare leader for THIS instance's socket, for nsenter."""
+    def _readlink(self, pid, ns):
+        try:
+            return os.readlink(f"/proc/{pid}/ns/{ns}")
+        except OSError:
+            return None
+
+    def _ppid(self, pid):
+        try:
+            with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
+                data = fh.read()
+            return int(data[data.rindex(")") + 2:].split()[1])   # field after comm (comm may hold spaces)
+        except (OSError, ValueError, IndexError):
+            return None
+
+    def supervised_pid(self, sock):
+        """Blocker 1: the HOST pid of the isolated process — the UNIQUE descendant of this socket's
+        tmux pane pid that lives in a fresh pid namespace — verified to be in fresh net+pid namespaces
+        before it is used for nsenter/signals. Ambiguous or non-isolated ⇒ None (fail-closed)."""
         r = self._tmux(sock, "list-panes", "-t", "s", "-F", "#{pane_pid}")
-        pid = r.stdout.strip()
-        return int(pid) if pid.isdigit() else None
+        pane = r.stdout.strip()
+        if not pane.isdigit():
+            return None
+        host_net, host_pidns = (parse_ns_inode(self._readlink("self", n)) for n in ("net", "pid"))
+        procs = {}
+        for e in os.listdir("/proc"):
+            if e.isdigit():
+                procs[int(e)] = {"ppid": self._ppid(int(e)), "pidns": parse_ns_inode(self._readlink(int(e), "pid"))}
+        cand = resolve_supervised_pid(int(pane), procs, host_pidns)
+        if cand is None:
+            return None
+        tgt_net = parse_ns_inode(self._readlink(cand, "net"))
+        if not verify_isolated(host_net, host_pidns, tgt_net, procs[cand]["pidns"]):
+            return None
+        return cand
 
-    def check_isolation(self, sock):
-        """D1: a REAL check INSIDE this instance's net namespace — nsenter the leader pid, list links
-        and attempt an outbound connect — then INTERPRET the result (only `lo` + outbound blocked).
-        Any nsenter/probe failure ⇒ False (fail-closed)."""
+    def check_isolation(self, host_pid):
+        """D1: a REAL check INSIDE the resolved host pid's net namespace — nsenter, list links and
+        attempt an outbound connect — then INTERPRET the result. Any failure ⇒ False (fail-closed)."""
         import subprocess
-        pid = self._ns_pid(sock)
-        if pid is None:
-            return False
-        links = subprocess.run(["nsenter", "-t", str(pid), "-n", "sh", "-c",
+        links = subprocess.run(["nsenter", "-t", str(host_pid), "-n", "sh", "-c",
                                 "ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1"],
                                capture_output=True, text=True)
-        probe = subprocess.run(["nsenter", "-t", str(pid), "-n", sys.executable, "-I", "-c",
+        probe = subprocess.run(["nsenter", "-t", str(host_pid), "-n", sys.executable, "-I", "-c",
                                 "import socket,sys\ntry: socket.create_connection(('1.1.1.1',53),1); sys.exit(1)\n"
                                 "except OSError: sys.exit(0)"], capture_output=True, text=True)
         if links.returncode != 0:
@@ -374,32 +463,45 @@ class RealSys:   # pragma: no cover
                 continue
         return False
 
-    def reap(self, sock, pgid):
-        """D2: ACTIVELY terminate the isolated process group and WAIT for its disappearance, with a
-        timeout and an exit check. Delegates the sequence to the pure supervise_reap()."""
+    def reap(self, sock, host_pid):
+        """D2: ACTIVELY terminate the isolated process GROUP (derived from the host pid via getpgid —
+        never assuming PID == PGID) and WAIT for its disappearance, with a timeout and exit check.
+        Delegates the sequence to the pure supervise_reap()."""
         import time
         self._tmux(sock, "kill-server")
-        reaped = supervise_reap(pgid, signal_group=os.killpg, group_alive=self._group_alive, sleep=time.sleep)
-        return reaped
+        if host_pid is None:
+            return False
+        try:
+            pgid = os.getpgid(host_pid)
+        except (ProcessLookupError, PermissionError, OSError):
+            return not self._group_alive(host_pid)   # already gone counts as reaped only if truly gone
+        return supervise_reap(pgid, signal_group=os.killpg, group_alive=self._group_alive, sleep=time.sleep)
 
 
 # ── real trust-gate wiring + operational entry point (pragma: no cover — not run before GO) ──
-def real_trust_gate(sysio, sock, pgidfile, on_poll):   # pragma: no cover
+def real_trust_gate(sysio, sock, host_pid, on_poll):   # pragma: no cover
     """Drive the corrected trust-gate (poc/inv1-trust) over this instance's tmux socket, feeding the
-    Observer on every poll (D3: capture in parallel). Returns the gate result dict."""
+    Observer on every poll (D3: capture in parallel). `on_poll()` RAISES on a failed capture, which
+    propagates out and invalidates the run (B4). Returns the gate result dict."""
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "inv1-trust"))
     import trustgate as TG
 
     class _IO(TG.IO):
         def pane(self):
-            on_poll()
+            on_poll()                                   # raises _CaptureError on a failed capture
             return sysio.pane(sock) or ""
 
         def send(self, key):
             sysio._tmux(sock, "send-keys", "-t", "s", key)
 
         def exited(self):
-            return bool(_read_pgid(sysio.read_text(pgidfile))) and not sysio._group_alive(_read_pgid(sysio.read_text(pgidfile)))
+            try:
+                os.kill(host_pid, 0)
+                return False
+            except ProcessLookupError:
+                return True
+            except OSError:
+                return False
 
         def now(self):
             import time

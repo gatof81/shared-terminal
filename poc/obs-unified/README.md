@@ -140,7 +140,7 @@ it. Until then N17-project stays Option A (INCONCLUSIVE).
 
 ## Local results (pure simulated; no CLI)
 
-`python3 test_obs_unified.py` → **74 passed** (round-2: B1 guard precedence on incremental
+`python3 test_obs_unified.py` → **85 passed** (round-2: B1 guard precedence on incremental
 contradictory reads; B2 authority matrix — pane cannot prove session.start/guard/trust/attribution,
 unknown signal & foreign ctx rejected, legitimate combos pass; B3 probe identity — arbitrary/wrong
 probe/wrong inst/missing inst rejected, correct accepted; B4 attribution needs fixture+differential,
@@ -270,8 +270,8 @@ True); the actual kernel/CLI behaviour still needs a real run to confirm.
 
 | Path | Verified now with mocks/simulated | Still needs REAL validation (a run) |
 | --- | --- | --- |
-| **D1 isolation** | `interpret_isolation(links, outbound_blocked)`: only `lo` + outbound blocked ⇒ True; extra iface / outbound-ok / empty ⇒ False | that `nsenter` into THIS instance's net ns really yields only `lo` and a failing outbound connect |
-| **D2 reap** | `supervise_reap`: SIGTERM→wait→SIGKILL→exit/timeout; never-dies ⇒ False; None pgid ⇒ False; group-based (no PID==PGID) | that `os.killpg` + the `/proc` group scan actually reap the `--pid` namespace on the host |
+| **D1 isolation + identity** | `interpret_isolation`; **host-side identity**: `parse_ns_inode`, `verify_isolated` (fresh net+pid ns), `resolve_supervised_pid` (unique descendant in a fresh pid ns; 0/>1 ⇒ None); runner fails closed on ambiguous identity | that `nsenter` into the resolved host pid's net ns really yields only `lo` + failing outbound, and that /proc resolution finds exactly the unshare'd child on the host |
+| **D2 reap** | `supervise_reap`: SIGTERM→wait→SIGKILL→exit/timeout; never-dies/None ⇒ False; GROUP-based, pgid derived via `getpgid` (no PID==PGID) | that `os.killpg` + the `/proc` group scan actually reap the `--pid` namespace on the host |
 | **(1) runner** | error paths spawn/isolation/capture/cleanup; trust-aborted recorded not crash; happy ⇒ snapshot+digest | the real `unshare`+tmux launch and pane/debug/probe wiring |
 | **(2) per-instance** | unique inst/sock/pgid; isolation-before + reap-after per instance; fail-closed via runner | that namespaces are truly per-instance and don't leak between controls on the host |
 | **(3) independent positive** | `validate_positive` (authority + real `skills-dir:loaded`); `fixture_digest` independent + content-sensitive; digest cross-check pos==neg | that the positive control (no policy) actually LOADS the fixture on 2.1.314 |
@@ -283,3 +283,15 @@ The single biggest open real question remains whether `strictKnownMarketplaces` 
 skills-dir block via the managed-settings mechanism available locally — the smoke is designed to
 answer it, under the GO/NO-GO above. Until a real run passes all rows, N14 stays INCONCLUSIVE and
 `blocked-low` is the ceiling.
+
+### Production-wiring blockers (latest review) — status
+- **B1 namespace identity** (critical): isolation_argv no longer writes `$$` (PID-ns-local); the host
+  resolves+verifies the unshare'd child via /proc (`resolve_supervised_pid`/`verify_isolated`) before
+  any nsenter/signal; ambiguous identity ⇒ fail-closed. Mock-tested; real /proc resolution still needs a run.
+- **B2 clock scale** (critical): `window_open()/window_close()` now sample `clock()-t0` (same scale as
+  reads/events). Regression with a non-zero monotonic start passes. Fully mock-verified.
+- **B3 fixture + cwd**: the fixture now installs the real attack (session.start hook + marker,
+  independent copy of the kit's ROGUE_REGISTER; 8eafe1a untouched); isolation_argv `cd`s to the
+  disposable ws and VERIFIES cwd (`pwd -P`, exit 97). Mock-tested; the actual LOAD under 2.1.314 needs a run.
+- **B4 silent failures**: a capture that fails during trust raises and invalidates the run
+  (`capture-failed-during-trust`); `RealSys.spawn` checks the `tmux` result and raises. Mock-tested.
