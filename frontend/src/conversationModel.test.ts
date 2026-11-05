@@ -590,3 +590,38 @@ describe("lastEvidenceAt", () => {
 		).toBe("2026-11-02T11:00:00Z");
 	});
 });
+
+describe("runMode (the server's probe, as evidence for wording)", () => {
+	it("the newest probe of the current process says how the CLI runs it", () => {
+		const t = buildThread([
+			ev("session_start", { source: "resume" }),
+			ev("probe", { status: "idle", kind: "background", verified: false }),
+			ev("user_prompt", { prompt: "hi" }),
+		]);
+		expect(t.runMode).toMatchObject({ kind: "background", verified: false });
+	});
+
+	it("a later session_start or session_end makes an earlier probe say nothing", () => {
+		expect(
+			buildThread([ev("probe", { kind: "background" }), ev("session_start", { source: "resume" })])
+				.runMode,
+		).toBeNull();
+		expect(
+			buildThread([ev("probe", { kind: "background" }), ev("session_end", { reason: "other" })])
+				.runMode,
+		).toBeNull();
+	});
+
+	it("a newer probe replaces an older one; a subagent's event never sets it; no probe = null", () => {
+		expect(
+			buildThread([
+				ev("probe", { kind: "background" }),
+				ev("probe", { kind: "interactive", verified: true }),
+			]).runMode,
+		).toMatchObject({ kind: "interactive", verified: true });
+		expect(
+			buildThread([ev("probe", { kind: "background" }, { agent_id: "a1" })]).runMode,
+		).toBeNull();
+		expect(buildThread([ev("user_prompt", { prompt: "x" })]).runMode).toBeNull();
+	});
+});

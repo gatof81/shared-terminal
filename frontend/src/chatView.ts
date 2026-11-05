@@ -1329,6 +1329,16 @@ function renderThreadHead(): void {
 	if (sel) head.querySelector<HTMLElement>(sel)?.focus();
 }
 
+/**
+ * The server's newest probe of the open conversation (in its window, and
+ * about the current process) said `kind: background`. Wording only: Chat's
+ * input stays decided by the server's canSendInput.
+ */
+function runsInBackground(c: ConversationSummary): boolean {
+	if (!cur || cur.cid !== c.sessionId) return false;
+	return buildThread(cur.window.events).runMode?.kind === "background";
+}
+
 function threadHeadChildren(c: ConversationSummary): HTMLElement[] {
 	const out: HTMLElement[] = [];
 	const title = el("div", "chat-thread-title");
@@ -1339,6 +1349,7 @@ function threadHeadChildren(c: ConversationSummary): HTMLElement[] {
 		bits.push(`automatic title: ${auto}`);
 	if (isArchived(c)) bits.push("archived");
 	if (c.kind === "headless" || c.kind === "teammate") bits.push(c.kind);
+	if (runsInBackground(c)) bits.push("background session");
 	if (c.claudeVersion) bits.push(`Claude Code ${c.claudeVersion}`);
 	bits.push(`${c.eventsCount} events`);
 	title.appendChild(el("span", "chat-thread-sub", bits.join(" · ")));
@@ -1968,6 +1979,8 @@ function composerBlockReason(c: ConversationSummary | undefined, st: ComposerSta
 		//   where a message would go.
 		if (c.statusEvidence === "binding_lost")
 			return "This conversation no longer has a terminal pane — another conversation started in it, or the session was restarted. Its history stays readable; type in the Terminal to continue.";
+		if (c.paneId === null && runsInBackground(c))
+			return "Claude Code runs this conversation as a background session. The terminal shows a client attached to it, not the conversation itself, so Chat can't prove where a message would land and doesn't send. Its history stays live here; to write to it, type in the Terminal.";
 		if (c.paneId === null)
 			return "Chat can't tie this conversation to a terminal pane, so it can't confirm where a message would go (for example, Claude runs it as a background session). Its history stays readable; type in the Terminal to continue.";
 		return "Sending from Chat is not available for this conversation.";
