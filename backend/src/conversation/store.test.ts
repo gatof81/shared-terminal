@@ -217,6 +217,120 @@ describe("ConversationStore — queue budgets and disk failure", () => {
 	});
 });
 
+/** A StoreFs whose index-file writes for `cid` wait on `gate()` while held. */
+function gatedFs(match: (p: string) => boolean, op: "writeFile" | "mkdir" = "writeFile") {
+	let hold: Promise<void> | null = null;
+	let release: () => void = () => undefined;
+	const held = async (p: unknown) => {
+		if (hold && match(String(p))) {
+			const h = hold;
+			hold = null; // only the first matching call is held
+			await h;
+		}
+	};
+	const fsx: StoreFs = {
+		mkdir: async (p, o) => {
+			if (op === "mkdir") await held(p);
+			return fs.mkdir(p, o);
+		},
+		appendFile: (p, d) => fs.appendFile(p, d),
+		writeFile: async (p, d) => {
+			if (op === "writeFile") await held(p);
+			return fs.writeFile(p, d);
+		},
+		rename: (a, b) => fs.rename(a, b),
+		rm: (p, o) => fs.rm(p, o),
+		stat: (p) => fs.stat(p),
+		readFile: (p, e) => fs.readFile(p, e),
+		readdir: (p) => fs.readdir(p),
+	} as StoreFs;
+	return {
+		fs: fsx,
+		hold() {
+			hold = new Promise<void>((r) => {
+				release = r;
+			});
+		},
+		release: () => release(),
+	};
+}
+const tick = () => new Promise((r) => setTimeout(r, 20));
+
+describe("ConversationStore — index writes racing an eviction (concurrency)", () => {
+	it("reopening during the eviction write adopts the entry being written: one resident, nothing only-in-memory lost", async () => {
+		let store!: ConversationStore;
+		const g = gatedFs((p) => p.startsWith(store.indexPath("s1", "c0")));
+		store = new ConversationStore({
+			workspaceRoot: root,
+			fs: g.fs,
+			limits: { residentIndexes: 1 },
+		});
+		await store.open("s1", "c0");
+		store.enqueue("s1", "c0", ev(0));
+		await store.flush("s1", "c0");
+		store.update("s1", "c0", (i) => {
+			i.paneId = "%0"; // only in memory
+		});
+		g.hold();
+		const evicting = store.open("s1", "c1"); // evicts c0; its write is held
+		await tick();
+		const reopened = await store.open("s1", "c0"); // during the write
+		expect(reopened.paneId).toBe("%0");
+		expect(store.getResidentIndex("s1", "c0")).toBe(reopened);
+		g.release();
+		await evicting;
+		await store.flush("s1", "c0");
+		const onDisk = JSON.parse(await fs.readFile(store.indexPath("s1", "c0"), "utf8"));
+		expect(onDisk.paneId).toBe("%0");
+	});
+
+	it("two writes of one index land in order: an older snapshot never replaces a newer one", async () => {
+		let store!: ConversationStore;
+		const g = gatedFs((p) => p.startsWith(store.indexPath("s1", "c0")));
+		store = new ConversationStore({ workspaceRoot: root, fs: g.fs });
+		await store.open("s1", "c0");
+		store.enqueue("s1", "c0", ev(0));
+		await store.flush("s1", "c0");
+		store.update("s1", "c0", (i) => {
+			i.paneId = "%1";
+		});
+		g.hold();
+		const first = store.flush("s1", "c0"); // held inside its write
+		await tick();
+		store.update("s1", "c0", (i) => {
+			i.paneId = "%2";
+		});
+		const second = store.flush("s1", "c0");
+		await tick();
+		g.release();
+		await Promise.all([first, second]);
+		const onDisk = JSON.parse(await fs.readFile(store.indexPath("s1", "c0"), "utf8"));
+		expect(onDisk.paneId).toBe("%2");
+	});
+
+	it("a purge while an index write is in flight leaves no index behind (its mkdir would recreate the directory)", async () => {
+		let store!: ConversationStore;
+		// Held at the write's mkdir: released after the rm, it would recreate the dir.
+		const g = gatedFs((p) => p === store.sessionDir("s1"), "mkdir");
+		store = new ConversationStore({ workspaceRoot: root, fs: g.fs });
+		await store.open("s1", "c0");
+		store.enqueue("s1", "c0", ev(0));
+		await store.flush("s1", "c0");
+		store.update("s1", "c0", (i) => {
+			i.paneId = "%0";
+		});
+		g.hold();
+		const writing = store.flush("s1", "c0"); // past its dirty check, held at mkdir
+		await tick();
+		const purge = store.purgeSession("s1");
+		await tick();
+		g.release();
+		await purge;
+		await writing;
+		await expect(fs.stat(store.sessionDir("s1"))).rejects.toThrow();
+	});
+});
+
 describe("ConversationStore — G4 resident LRU", () => {
 	it("keeps at most N indexes resident and flushes evicted ones to disk", async () => {
 		const store = new ConversationStore({ workspaceRoot: root, limits: { residentIndexes: 3 } });

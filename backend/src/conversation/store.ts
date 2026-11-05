@@ -251,6 +251,13 @@ export class ConversationStore {
 	// G4 — an entry between leaving `resident` and its snapshot write landing.
 	// peekIndex answers from it, since the file on disk is still older then.
 	private readonly evicting = new Map<string, Resident>();
+	/**
+	 * The last index write of each conversation. Writes of one index run one
+	 * after another (each renames a temp file over the snapshot), so an older
+	 * write can never land after a newer one, and two writers never share the
+	 * temp file at the same time.
+	 */
+	private readonly indexWrites = new Map<string, Promise<void>>();
 	/** B2 — single-flight opens: concurrent first events share one load. */
 	private readonly opening = new Map<string, Promise<ConversationIndex>>();
 	/** B4 — sessions being purged: opens/appends for them are refused. */
@@ -320,6 +327,18 @@ export class ConversationStore {
 			this.resident.delete(key);
 			this.resident.set(key, existing);
 			return existing.index;
+		}
+		// G4 — reopened while its eviction write is in flight: the entry being
+		// written IS the current state (the file is still older, and loading it
+		// would register a second entry missing what was only in memory).
+		// Adopt it back; the in-flight write is harmless (same object, and the
+		// next write is ordered after it).
+		const leaving = this.evicting.get(key);
+		if (leaving) {
+			this.evicting.delete(key);
+			this.resident.set(key, leaving);
+			await this.evictIfNeeded();
+			return leaving.index;
 		}
 		// B2 — two concurrent first events for the same conversation must
 		// share ONE load and ONE resident entry; a second entry would carry
@@ -787,8 +806,22 @@ export class ConversationStore {
 		r.flushTimer.unref?.();
 	}
 
-	private async writeIndex(r: Resident): Promise<void> {
+	private writeIndex(r: Resident): Promise<void> {
+		const key = `${r.index.stSessionId}/${r.index.cid}`;
+		const prev = this.indexWrites.get(key) ?? Promise.resolve();
+		const next = prev.then(() => this.writeIndexNow(r));
+		this.indexWrites.set(key, next);
+		void next.finally(() => {
+			if (this.indexWrites.get(key) === next) this.indexWrites.delete(key);
+		});
+		return next;
+	}
+
+	private async writeIndexNow(r: Resident): Promise<void> {
 		if (!r.dirty) return;
+		// B4 — a purge removes the directory; a write that would recreate it
+		// must not start (one already running is awaited by the purge).
+		if (this.purging.has(r.index.stSessionId)) return;
 		r.dirty = false;
 		r.eventsSinceFlush = 0;
 		if (r.flushTimer) {
@@ -973,6 +1006,21 @@ export class ConversationStore {
 				if (r.flushTimer) clearTimeout(r.flushTimer);
 				r.dirty = false;
 				this.resident.delete(key);
+			}
+			// An eviction write already running would recreate the directory
+			// after the rm: drop the leaving entries and wait for every write
+			// of this session to settle first (new ones refuse, see writeIndexNow).
+			for (const [key, r] of Array.from(this.evicting)) {
+				if (!key.startsWith(`${stSessionId}/`)) continue;
+				r.dirty = false;
+				this.evicting.delete(key);
+			}
+			// Until none is left: a write chained while we waited is awaited too
+			// (and refuses to touch the disk, since `purging` holds the id).
+			for (;;) {
+				const w = [...this.indexWrites].find(([key]) => key.startsWith(`${stSessionId}/`));
+				if (!w) break;
+				await w[1].catch(() => undefined);
 			}
 			await this.fs.rm(dir, { force: true, recursive: true });
 		} finally {
