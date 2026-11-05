@@ -37,9 +37,14 @@ import verdict as V  # noqa: E402
 # An INDEPENDENT copy of the kit's ROGUE_REGISTER (poc/passb1/b1.py@8eafe1a is NOT imported or
 # modified): the fixture registers a session.start hook that writes a marker when it RUNS, so the
 # positive control exhibits the real attack (loads AND executes), not an empty register().
-ROGUE_REGISTER = ('export function register(on) {\n'
+# Rendered to match the kit's rogue_plugin("st-b1-rogue-n14") EXACTLY (module `register.mjs`, marker
+# `st-b1-rogue-n14.json`) — E3 equivalence, verified against b1.ROGUE_REGISTER in the tests.
+N14_NAME = "st-b1-rogue-n14"
+ROGUE_REGISTER = ('// PASS-B1a rogue mod: if this code runs, the path that loaded it is NOT blocked.\n'
+                  '// It writes one marker naming itself and does nothing else.\n'
+                  'export function register(on) {\n'
                   '\ton("session.start", async ($, e, next) => {\n'
-                  '\t\tawait $.fs.write(".passb1/out/marker/impostor.json", `${JSON.stringify({ marker: "impostor", t: Date.now() })}\\n`);\n'
+                  f'\t\tawait $.fs.write(".passb1/out/marker/{N14_NAME}.json", `${{JSON.stringify({{ marker: "{N14_NAME}", t: Date.now() }})}}\\n`);\n'
                   '\t\treturn next(e);\n'
                   '\t});\n'
                   '}\n')
@@ -181,6 +186,20 @@ def supervise_reap(pgid, *, signal_group, group_alive, sleep, term_grace=5.0, ki
     return not group_alive(pgid)
 
 
+def supervised_cleanup(host_pid, *, getpgid, signal_group, group_alive, sleep):
+    """E1: establish the process GROUP identity (getpgid) BEFORE any tmux teardown, then actively
+    reap that group. A None pid, a gone pid (ProcessLookupError), or a permission error ⇒ we never
+    established a group we can signal/verify ⇒ False (never signals an ambiguous identity; a perm
+    error is NOT 'terminated'; never queries a PID as if it were a PGID)."""
+    if host_pid is None:
+        return False
+    try:
+        pgid = getpgid(host_pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+    return supervise_reap(pgid, signal_group=signal_group, group_alive=group_alive, sleep=sleep)
+
+
 def verify_cli(*, get_version, get_sha, want_version="2.1.314", want_sha=None):
     """D4: the CLI must be the pinned version AND (if a sha is pinned) match the binary sha. Any
     probe error or mismatch ⇒ False (fail-closed). Pure over injected probes."""
@@ -223,13 +242,18 @@ def make_runner(sysio, *, cli, scratch, trust_gate, clock, settle_polls=4):
         fixture_dir, policy = sysio.setup(kind, home, ws)        # plant fixture (pos/neg) + policy (neg)
         digest = fixture_digest(fixture_dir) if fixture_dir else None
         o = O.Observer("N14", 1, inst, clock)
-        o.window_open()                                          # window opens at INITIALIZATION (C4)
 
         def tick():
             txt = sysio.pane(sock)
             if txt is None:
                 return False
             o.from_pane(txt, ok=True)
+            # E2: open the critical window at the FIRST successful read — not at Observer init, which
+            # (with a real advancing clock) is strictly before any read and would make coverage
+            # partial. The first read is right after spawn (pre-trust, so C4's pre-trust decision is
+            # still covered); window_close is after the last tick.
+            if o.window["open"] is None:
+                o.window_open()
             o.from_debug(sysio.read_text(debug))
             o.from_probe_records(sysio.probe_records(ws), start_inst=sysio.probe_inst(ws))
             return True
@@ -270,11 +294,14 @@ def make_runner(sysio, *, cli, scratch, trust_gate, clock, settle_polls=4):
             o.window_close()
             snap = o.snapshot()
         finally:
-            if spawned and host_pid is not None:
-                if not sysio.reap(sock, host_pid):               # per-instance cleanup, by host pid
+            if spawned:
+                # E1: reap the isolated GROUP by verified identity FIRST (while it still exists),
+                # THEN tear tmux down. With no identity we never claim a reap (the run already
+                # returned identity-ambiguous; the teardown is best-effort, not proof of cleanup).
+                reaped = sysio.reap(host_pid) if host_pid is not None else False
+                sysio.teardown(sock)
+                if host_pid is not None and not reaped:
                     return {"ok": False, "reason": "cleanup-not-reaped", "instance": inst}
-            elif spawned:
-                sysio.reap(sock, None)                           # best-effort tmux teardown only
         return {"ok": True, "snapshot": snap, "instance": inst, "digest": digest}
     return runner
 
@@ -362,8 +389,8 @@ class RealSys:   # pragma: no cover
         with open(os.path.join(dst, ".claude-plugin", "plugin.json"), "w") as f:
             json.dump({"name": "st-b1-rogue-n14", "version": "0.0.1"}, f)
         with open(os.path.join(dst, "hooks", "hooks.json"), "w") as f:
-            f.write('{"modules":["./r.mjs"]}')
-        with open(os.path.join(dst, "hooks", "r.mjs"), "w") as f:     # Blocker 3: the real attack copy
+            f.write('{"modules":["./register.mjs"]}')              # E3: same module name as the kit
+        with open(os.path.join(dst, "hooks", "register.mjs"), "w") as f:   # real attack copy; marker st-b1-rogue-n14.json
             f.write(ROGUE_REGISTER)
 
     def _tmux(self, sock, *a):
@@ -463,19 +490,18 @@ class RealSys:   # pragma: no cover
                 continue
         return False
 
-    def reap(self, sock, host_pid):
-        """D2: ACTIVELY terminate the isolated process GROUP (derived from the host pid via getpgid —
-        never assuming PID == PGID) and WAIT for its disappearance, with a timeout and exit check.
-        Delegates the sequence to the pure supervise_reap()."""
+    def reap(self, host_pid):
+        """E1/D2: reap the isolated GROUP by verified identity, BEFORE any tmux teardown. Establish
+        the pgid via getpgid (never assume PID == PGID; a gone/perm-error pid ⇒ cannot prove ⇒
+        False), then supervise_reap SIGTERM→wait→SIGKILL→exit/timeout. Delegates to the pure
+        supervised_cleanup()."""
         import time
+        return supervised_cleanup(host_pid, getpgid=os.getpgid, signal_group=os.killpg,
+                                  group_alive=self._group_alive, sleep=time.sleep)
+
+    def teardown(self, sock):
+        """Best-effort tmux teardown — called AFTER reap; not a proof of process cleanup."""
         self._tmux(sock, "kill-server")
-        if host_pid is None:
-            return False
-        try:
-            pgid = os.getpgid(host_pid)
-        except (ProcessLookupError, PermissionError, OSError):
-            return not self._group_alive(host_pid)   # already gone counts as reaped only if truly gone
-        return supervise_reap(pgid, signal_group=os.killpg, group_alive=self._group_alive, sleep=time.sleep)
 
 
 # ── real trust-gate wiring + operational entry point (pragma: no cover — not run before GO) ──

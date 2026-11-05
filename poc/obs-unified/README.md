@@ -140,7 +140,7 @@ it. Until then N17-project stays Option A (INCONCLUSIVE).
 
 ## Local results (pure simulated; no CLI)
 
-`python3 test_obs_unified.py` → **85 passed** (round-2: B1 guard precedence on incremental
+`python3 test_obs_unified.py` → **94 passed** (round-2: B1 guard precedence on incremental
 contradictory reads; B2 authority matrix — pane cannot prove session.start/guard/trust/attribution,
 unknown signal & foreign ctx rejected, legitimate combos pass; B3 probe identity — arbitrary/wrong
 probe/wrong inst/missing inst rejected, correct accepted; B4 attribution needs fixture+differential,
@@ -295,3 +295,17 @@ answer it, under the GO/NO-GO above. Until a real run passes all rows, N14 stays
   disposable ws and VERIFIES cwd (`pwd -P`, exit 97). Mock-tested; the actual LOAD under 2.1.314 needs a run.
 - **B4 silent failures**: a capture that fails during trust raises and invalidates the run
   (`capture-failed-during-trust`); `RealSys.spawn` checks the `tmux` result and raises. Mock-tested.
+
+### Latest review (E1–E3) — status
+- **E1 cleanup/identity** (critical): `supervised_cleanup()` establishes the GROUP identity
+  (`getpgid`) BEFORE any tmux teardown; a None/gone/permission-error pid ⇒ cannot prove ⇒ False
+  (never signals an ambiguous id, never reads a perm error as 'terminated', never queries a PID as a
+  PGID). The runner reaps by identity first, then tears tmux down; with no identity it never claims
+  cleanup (the run already returned `identity-ambiguous`). Race / pid-gone / identification-failure
+  tested. Mock-verified; real /proc group reap still needs a run.
+- **E2 critical window** (high): the window now OPENS at the FIRST successful read (not at Observer
+  init), so with a real advancing clock the reads bracket [open, close]. Regression uses a clock that
+  advances during spawn/isolation/ticks ⇒ `full`; a failed read still ⇒ partial (not relaxed).
+- **E3 fixture equivalence** (medium): the disposable copy now uses `register.mjs` + marker
+  `st-b1-rogue-n14.json`, byte-for-byte equal to the kit's `ROGUE_REGISTER` rendered for
+  st-b1-rogue-n14 (asserted in-test by reading `poc/passb1/b1.py`; 8eafe1a untouched).

@@ -572,8 +572,11 @@ class FakeSys:
     def probe_inst(self, ws):
         return INST
 
-    def reap(self, sock, host_pid):
+    def reap(self, host_pid):
         return self.reaped
+
+    def teardown(self, sock):
+        pass
 
 
 def mk_runner(sysio):
@@ -818,6 +821,97 @@ class Blocker2ClockScale(unittest.TestCase):
         self.assertEqual(V.verdict_n14(n14_full_block(clock_start=1000.0).snapshot())[0], "blocked-low")
 
 
+class E1Cleanup(unittest.TestCase):
+    """E1: cleanup establishes the GROUP identity BEFORE teardown; never signals ambiguous ids nor
+    treats gone/perm errors as 'terminated'."""
+
+    def test_none_pid_never_signals_or_reaps(self):
+        sent = []
+        self.assertFalse(E.supervised_cleanup(None, getpgid=lambda p: 1 / 0, signal_group=lambda p, s: sent.append(s),
+                                              group_alive=lambda p: False, sleep=lambda s: None))
+        self.assertEqual(sent, [])                       # no signal to an ambiguous identity
+
+    def test_pid_gone_cannot_prove_reaped(self):
+        def gone(p):
+            raise ProcessLookupError
+
+        self.assertFalse(E.supervised_cleanup(123, getpgid=gone, signal_group=lambda p, s: None,
+                                              group_alive=lambda p: False, sleep=lambda s: None))
+
+    def test_permission_error_is_not_terminated(self):
+        def denied(p):
+            raise PermissionError
+
+        self.assertFalse(E.supervised_cleanup(123, getpgid=denied, signal_group=lambda p, s: None,
+                                              group_alive=lambda p: False, sleep=lambda s: None))
+
+    def test_group_reaped_true(self):
+        state = {"alive": True}
+        self.assertTrue(E.supervised_cleanup(123, getpgid=lambda p: 55, signal_group=lambda p, s: state.update(alive=False),
+                                             group_alive=lambda p: state["alive"], sleep=lambda s: None))
+
+    def test_race_pid_disappears_after_getpgid(self):
+        # getpgid succeeds, then the group is already gone on the first liveness check -> reaped.
+        self.assertTrue(E.supervised_cleanup(123, getpgid=lambda p: 55, signal_group=lambda p, s: None,
+                                             group_alive=lambda p: False, sleep=lambda s: None))
+
+    def test_identity_failure_in_runner_does_not_claim_cleanup(self):
+        # host_pid None -> runner aborts identity-ambiguous; reap is never called with a real id.
+        reaped_calls = []
+
+        class FS(FakeSys):
+            def reap(self, host_pid):
+                reaped_calls.append(host_pid)
+                return True                               # even if it lied, the run must not pass
+
+        r = mk_runner(FS(None, host_pid=None))("positive")
+        self.assertEqual((r["ok"], r["reason"]), (False, "identity-ambiguous"))
+        self.assertEqual(reaped_calls, [])               # reap never invoked without an identity
+
+
+class E2WindowSequencing(unittest.TestCase):
+    """E2: with a clock that ADVANCES during spawn/isolation/ticks, the window must still bracket the
+    reads (opened at the first read), and coverage is NOT relaxed on a failed read."""
+
+    class AdvancingFS(FakeSys):
+        def __init__(self, clk, **kw):
+            super().__init__(None, **kw)
+            self.clk = clk
+
+        def spawn(self, argv, sock):
+            self.clk.t += 0.5
+            super().spawn(argv, sock)
+
+        def supervised_pid(self, sock):
+            self.clk.t += 0.2
+            return super().supervised_pid(sock)
+
+        def check_isolation(self, host_pid):
+            self.clk.t += 0.2
+            return super().check_isolation(host_pid)
+
+        def pane(self, sock):
+            self.clk.t += 0.3
+            return super().pane(sock)
+
+    def _run(self, **kw):
+        clk = ManualClock(1000.0)
+        fs = self.AdvancingFS(clk, **kw)
+        runner = E.make_runner(fs, cli="/c", scratch=tempfile.mkdtemp(),
+                               trust_gate=lambda s, sock, hp, on_poll: (on_poll(), {"state": "confirmed"})[1],
+                               clock=clk, settle_polls=3)
+        return runner("positive")
+
+    def test_advancing_clock_still_full(self):
+        r = self._run()
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["snapshot"]["coverage"], "full")        # window opened at first read, brackets reads
+
+    def test_failed_read_still_partial(self):
+        r = self._run(pane_fail_after=2)                           # a later read fails
+        self.assertIn(r.get("reason"), ("capture-failed", "capture-failed-during-trust"))
+
+
 class Blocker3FixtureWorkspace(unittest.TestCase):
     def test_isolation_argv_cds_and_verifies_cwd(self):
         inner = E.isolation_argv("/c", "/h", "/w/ws", "/w/ws/dbg")[-1]
@@ -830,11 +924,24 @@ class Blocker3FixtureWorkspace(unittest.TestCase):
         rs = E.RealSys("/c", "sha", "/mk")
         d = tempfile.mkdtemp()
         rs._plant_fixture(os.path.join(d, "fx"))
-        with open(os.path.join(d, "fx", "hooks", "r.mjs")) as fh:
+        with open(os.path.join(d, "fx", "hooks", "register.mjs")) as fh:   # E3: register.mjs, not r.mjs
             reg = fh.read()
         self.assertIn("session.start", reg)              # registers a real hook
-        self.assertIn("marker", reg)                     # leaves execution evidence
+        self.assertIn("st-b1-rogue-n14.json", reg)       # E3: kit's marker, not impostor.json
         self.assertNotIn("register(on){}", reg.replace(" ", ""))   # not the empty stub
+        with open(os.path.join(d, "fx", "hooks", "hooks.json")) as fh:
+            self.assertIn("./register.mjs", fh.read())
+
+    def test_e3_fixture_equivalent_to_kit_without_touching_8eafe1a(self):
+        # Render the kit's own ROGUE_REGISTER for st-b1-rogue-n14 and compare to the disposable copy.
+        import importlib.util
+        kit_b1 = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "passb1", "b1.py")
+        spec = importlib.util.spec_from_file_location("kit_b1", kit_b1)
+        b1 = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(b1)
+        import re
+        expected = b1.ROGUE_REGISTER % {"name": re.sub(r"[^a-z0-9-]", "", "st-b1-rogue-n14")}
+        self.assertEqual(E.ROGUE_REGISTER, expected)     # byte-for-byte equivalence
 
 
 class Blocker4SilentFailures(unittest.TestCase):
