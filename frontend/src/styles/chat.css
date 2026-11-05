@@ -1116,11 +1116,17 @@
   }
 }
 @media (max-width: 768px) {
-  .chat-thread-title {
+  /* The summary bar above already shows this conversation's name and
+     status: the head drops both (one status, not two) and keeps its
+     sub-line (archived · version · events) next to its tools. */
+  .chat-thread-name {
     display: none;
   }
   .chat-thread-head {
-    padding: 0.35rem 0.75rem;
+    padding: 0.25rem 0.75rem;
+  }
+  .chat-thread-tools .chat-status {
+    display: none;
   }
   .chat-scroll {
     padding: 0.6rem 0.65rem 1rem;
