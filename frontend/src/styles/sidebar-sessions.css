@@ -245,9 +245,12 @@
   outline: 2px solid var(--c-accent);
   outline-offset: 1px;
 }
+.session-last-conv[aria-current="page"] {
+  color: var(--c-accent);
+}
 @media (max-width: 768px) {
   .session-last-conv {
-    min-height: 2.25rem;
+    min-height: 44px;
     font-size: 0.8rem;
   }
 }

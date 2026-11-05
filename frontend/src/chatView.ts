@@ -90,6 +90,7 @@ import { renderMarkdown } from "./markdown.js";
 import { renderSessionList, showTerminalTab } from "./sessionCore.js";
 import { button, el, stateBox } from "./ui.js";
 import {
+	clearLastConversationTitle,
 	readLastConversation,
 	readLastConversationTitle,
 	writeHistoryHint,
@@ -888,7 +889,14 @@ function rememberLastTitle(sid: string): void {
 	const cid = readLastConversation(sid);
 	if (cid === null) return;
 	const row = rowOf(cid);
-	if (!row) return;
+	if (!row) {
+		// Not in a loaded list any more: the link would open nothing.
+		if (list.status === "loaded" && readLastConversationTitle(sid, cid) !== null) {
+			clearLastConversationTitle(sid);
+			renderSessionList();
+		}
+		return;
+	}
 	const title = titleOf(row);
 	if (readLastConversationTitle(sid, cid) === title) return;
 	writeLastConversationTitle(sid, cid, title);

@@ -111,6 +111,28 @@ export function writeLastConversationTitle(sessionId: string, cid: string, title
 	write(LAST_TITLE_KEY + sessionId, `${cid}\n${title}`);
 }
 
+export function clearLastConversationTitle(sessionId: string): void {
+	write(LAST_TITLE_KEY + sessionId, null);
+}
+
+/**
+ * Titles are content (the list is owner-only): none may outlive the account
+ * on this browser. Logout drops every stored one; the links come back the
+ * next time Chat is opened in each project.
+ */
+export function forgetAllLastConversationTitles(): void {
+	try {
+		const keys: string[] = [];
+		for (let i = 0; i < localStorage.length; i++) {
+			const k = localStorage.key(i);
+			if (k?.startsWith(LAST_TITLE_KEY)) keys.push(k);
+		}
+		for (const k of keys) localStorage.removeItem(k);
+	} catch {
+		// Storage unavailable: nothing was stored either.
+	}
+}
+
 /** Drop everything remembered for a session (hard delete). */
 export function forgetSession(sessionId: string): void {
 	write(VIEW_KEY + sessionId, null);

@@ -936,6 +936,20 @@ describe("Chat overlay — §4.2.1 internal notifications are not 'You'", () => 
 });
 
 // ── 3.2 composer (CONVERSATION.md §8, §10 "3.2 composer") ───────────────────
+describe("Chat overlay — sidebar's last-conversation link", () => {
+	it("names the link once, and re-renders the sidebar only when the title changes", async () => {
+		localStorage.clear();
+		await openChat();
+		await openThread([ev("user_prompt", { prompt: "x" })]);
+		const calls = core.renderSessionList.mock.calls.length;
+		expect(calls).toBeGreaterThan(0);
+		// Same list again: nothing to rename, no sidebar render.
+		$("chat-refresh-btn").click();
+		await flush();
+		expect(core.renderSessionList.mock.calls.length).toBe(calls);
+	});
+});
+
 describe("Chat overlay — connection indicator", () => {
 	it("says nothing while the event socket delivers; Connecting…/Reconnecting… otherwise", async () => {
 		await openChat();

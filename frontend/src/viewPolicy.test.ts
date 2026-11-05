@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
 	chooseLanding,
+	forgetAllLastConversationTitles,
 	forgetSession,
 	readHistoryHint,
 	readLastConversation,
@@ -94,5 +95,14 @@ describe("last conversation title (sidebar link)", () => {
 		writeLastConversationTitle("s1", "c1", "x");
 		forgetSession("s1");
 		expect(readLastConversationTitle("s1", "c1")).toBeNull();
+	});
+	it("logout forgets every stored title, and only those", () => {
+		writeLastConversationTitle("s1", "c1", "x");
+		writeLastConversationTitle("s2", "c9", "y");
+		writeLastConversation("s1", "c1");
+		forgetAllLastConversationTitles();
+		expect(readLastConversationTitle("s1", "c1")).toBeNull();
+		expect(readLastConversationTitle("s2", "c9")).toBeNull();
+		expect(readLastConversation("s1")).toBe("c1");
 	});
 });

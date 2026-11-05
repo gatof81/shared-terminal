@@ -491,7 +491,12 @@ export function renderSessionList() {
 			const last = document.createElement("button");
 			last.type = "button";
 			last.className = "session-last-conv";
+			// Focus restore after each 5 s re-render finds controls by role.
+			last.dataset.role = "last-conv";
 			last.dataset.cid = lastCid;
+			const route = readRoute();
+			if (route?.sessionId === s.sessionId && route.view === "chat" && route.detail === lastCid)
+				last.setAttribute("aria-current", "page");
 			last.textContent = `↳ ${lastTitle}`;
 			last.title = `Open the last conversation: ${lastTitle}`;
 			last.setAttribute("aria-label", `Open the last conversation in ${s.name}: ${lastTitle}`);
