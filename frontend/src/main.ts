@@ -65,6 +65,7 @@ import {
 	updateToolbar,
 } from "./sessionCore.js";
 import { initShellV2 } from "./shellV2.js";
+import { initSwitcher, openSwitcher } from "./switcher.js";
 import { clearAllBadges } from "./tabActivity.js";
 import type { TerminalSession } from "./terminal.js";
 import {
@@ -884,6 +885,16 @@ document.addEventListener("keydown", (e) => {
 	if (escapeHandledByDialog(e)) return;
 	if (!mainEl.classList.contains("sidebar-open")) return;
 	setSidebarOpen(false);
+});
+
+// Conversation switcher: header button + Ctrl/⌘+K (switcher.ts); on a phone
+// the drawer's own entry, which closes the drawer first so the switcher is
+// not opened underneath it.
+initSwitcher(() => isLoggedIn());
+const sidebarSwitcherBtn = document.getElementById("sidebar-switcher-btn");
+sidebarSwitcherBtn?.addEventListener("click", () => {
+	if (isMobile()) setSidebarOpen(false);
+	openSwitcher(document.getElementById("sidebar-toggle"));
 });
 
 // On mobile, picking a session should dismiss the drawer so the user can

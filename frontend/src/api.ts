@@ -1811,6 +1811,29 @@ export async function fetchConversations(
 	return res.json();
 }
 
+/**
+ * The light list form (`?capture=0`, no relay probe) for the cross-project
+ * switcher: answers with the HTTP status instead of throwing on a refusal, so
+ * a 429 can be told from a failure; `signal` bounds how long it is awaited
+ * (a read-only GET — stopping the wait frees nothing and costs nothing).
+ */
+export async function fetchConversationSummaries(
+	sessionId: string,
+	signal: AbortSignal,
+): Promise<
+	{ ok: true; conversations: ConversationSummary[] } | { ok: false; status: number; error: string }
+> {
+	const res = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}/conversations?capture=0`, {
+		signal,
+	});
+	if (!res.ok) return { ok: false, status: res.status, error: await errorMessage(res) };
+	const body = (await res.json().catch(() => null)) as ConversationList | null;
+	// A malformed answer is a failure, never "no conversations".
+	if (!body || !Array.isArray(body.conversations))
+		return { ok: false, status: res.status, error: "Unexpected answer from the server" };
+	return { ok: true, conversations: body.conversations };
+}
+
 export async function fetchConversationEvents(
 	sessionId: string,
 	cid: string,

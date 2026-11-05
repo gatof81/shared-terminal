@@ -92,6 +92,23 @@
           </svg>
         </button>
         <h1 id="app-title">⬛ Shared Terminal</h1>
+        <!-- Cross-project conversation switcher (switcher.ts). Desktop: here;
+             phones: the sidebar drawer's button below (the merged header bar
+             has no room). -->
+        <button
+          id="switcher-btn"
+          type="button"
+          title="Go to a conversation (Ctrl+K / ⌘K)"
+          aria-label="Go to a conversation"
+          aria-keyshortcuts="Control+K Meta+K"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="7"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+          <span>Conversations</span>
+          <kbd aria-hidden="true">Ctrl K</kbd>
+        </button>
         <button
           id="chrome-toggle"
           type="button"
@@ -173,6 +190,7 @@
               Show terminated
             </label>
           </div>
+          <button id="sidebar-switcher-btn" type="button">Go to a conversation…</button>
           <button id="new-session-btn" type="button">+ New session</button>
           <div id="session-list"></div>
           <div id="observable-section" class="hidden">

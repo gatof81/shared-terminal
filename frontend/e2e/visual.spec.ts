@@ -103,6 +103,18 @@ test.describe("visual", () => {
 		await shot(page, "chat-archived-live");
 	});
 
+	test("conversation switcher", async ({ app, page }) => {
+		await app.login("alice");
+		if (app.mobile) {
+			await app.openSidebar();
+			await page.click("#sidebar-switcher-btn");
+		} else {
+			await page.click("#switcher-btn");
+		}
+		await expect(page.locator(".switcher-option")).toHaveCount(2);
+		await shot(page, "switcher");
+	});
+
 	test("terminal stopped state", async ({ app, page }) => {
 		await app.login("alice");
 		await app.openSession("docs");
