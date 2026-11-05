@@ -601,7 +601,12 @@ class FakeSys:
         return fixture, policy
 
     def spawn(self, argv, sock):
-        if self.fail == "spawn":
+        if self.fail == "spawn":                           # no child was created
+            raise E.SpawnError("before-launch", cause=RuntimeError("spawn boom"))
+        if self.fail == "spawn-after":                     # a child exists; partial handle returned
+            raise E.SpawnError("after-launch", owner={"owner": True, "partial": True},
+                               cause=RuntimeError("readiness timed out"))
+        if self.fail == "spawn-unknown":                   # violates the contract: says nothing
             raise RuntimeError("spawn boom")
         return {"owner": True}                             # F1: held owner handle, acquired atomically
 
@@ -1260,6 +1265,279 @@ class Blocker4SilentFailures(unittest.TestCase):
     def test_spawn_result_failure_is_spawn_failed(self):
         r = mk_runner(FakeSys(None, fail="spawn"))("positive")
         self.assertEqual((r["ok"], r["reason"]), (False, "spawn-failed"))
+
+
+
+# ── RealSys round-3 review (R3-1…R3-4): deterministic, no Claude, no unshare, no Docker ──
+def _trustgate():
+    import importlib.util
+    tg_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "inv1-trust", "trustgate.py")
+    spec = importlib.util.spec_from_file_location("trustgate_r3", tg_path)
+    tg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tg)
+    return tg
+
+
+TRUST_DIALOG = ("Do you trust the files in this folder?\r\n"
+                "❯ 1. Yes, I trust this folder\r\n  2. No, exit\r\n")
+
+
+class R31AlternateScreen(unittest.TestCase):
+    """R3-1: a dialog drawn on one buffer must never be readable from the other, and any sequence
+    with a visual effect we don't model must invalidate the frame instead of leaving a stale one."""
+
+    def test_dialog_on_alt_screen_disappears_on_leave_without_2J(self):
+        tg = _trustgate()
+        s = E.ScreenState(rows=10, cols=60)
+        s.feed("$ claude\r\n")
+        s.feed("\x1b[?1049h" + TRUST_DIALOG)                 # TUI draws the dialog on the ALT screen
+        self.assertEqual(tg.pointer_option(s.frame()), "yes")
+        s.feed("\x1b[?1049l")                                 # leaves the alt screen — NO CSI 2J
+        out = s.frame()
+        self.assertEqual(out, "$ claude")                     # the primary buffer, exactly as it was
+        self.assertIsNone(tg.pointer_option(out))             # the dialog is NOT readable any more
+
+    def test_primary_dialog_hidden_while_alt_screen_shown(self):
+        tg = _trustgate()
+        s = E.ScreenState(rows=10, cols=60)
+        s.feed(TRUST_DIALOG)
+        s.feed("\x1b[?1049hloading...")
+        self.assertEqual(s.frame(), "loading...")
+        self.assertIsNone(tg.pointer_option(s.frame()))       # hidden dialog is not "yes"
+        s.feed("\x1b[?1049l")
+        self.assertEqual(tg.pointer_option(s.frame()), "yes")  # visible again → correctly readable
+
+    def test_other_alt_modes(self):
+        for mode in ("47", "1047"):
+            s = E.ScreenState(rows=4, cols=20)
+            s.feed("primary")
+            s.feed(f"\x1b[?{mode}halt")
+            self.assertEqual(s.frame(), "alt")
+            s.feed(f"\x1b[?{mode}l")
+            self.assertEqual(s.frame(), "primary")
+
+    def test_unsupported_visual_sequences_invalidate(self):
+        for seq in ("\x1b[2L", "\x1b[3M", "\x1b[4P", "\x1b[2@", "\x1b[5X", "\x1b[1;10r", "\x1b[2S",
+                    "\x1b[4h", "\x1b[?6h", "\x1bZ"):
+            s = E.ScreenState(rows=4, cols=20)
+            s.feed("hello" + seq)
+            self.assertIsNone(s.frame(), repr(seq))           # never a frame we cannot vouch for
+
+    def test_recovery_needs_full_clear_AND_absolute_cursor(self):
+        s = E.ScreenState(rows=4, cols=20)
+        s.feed("old\x1b[2L")
+        self.assertIsNone(s.frame())
+        s.feed("\x1b[2J")                                     # cells known, cursor not yet
+        self.assertIsNone(s.frame())
+        s.feed("\x1b[1;1Hfresh")                              # absolute position → valid again
+        self.assertEqual(s.frame(), "fresh")
+
+    def test_nonvisual_sequences_keep_frame_valid(self):
+        s = E.ScreenState(rows=4, cols=30)
+        s.feed("\x1b[?25l\x1b[?2004h\x1b[?2026h\x1b[>1u\x1b[?u\x1b[?6n\x1b[2 q\x1b[32mok\x1b[0m"
+               "\x1b[?2026l\x1b[?25h")
+        self.assertEqual(s.frame(), "ok")
+
+    def test_osc_title_is_consumed_not_painted_even_split(self):
+        s = E.ScreenState(rows=4, cols=30)
+        s.feed("\x1b]0;my ti")                                # OSC split across reads
+        s.feed("tle\x07hello\x1b]2;x\x1b\\!")                 # BEL- and ST-terminated
+        self.assertEqual(s.frame(), "hello!")
+
+    def test_save_restore_cursor(self):
+        s = E.ScreenState(rows=4, cols=30)
+        s.feed("ab\x1b7\r\nzz\x1b8c")
+        self.assertEqual(s.frame(), "abc\nzz")
+
+    def test_realsys_pane_is_none_on_invalid_frame(self):
+        rfd, wfd = os.pipe()
+        try:
+            rs = E.RealSys("/c", "sha", "/mk")
+            rs._inst["s"] = {"master": rfd, "screen": E.ScreenState(rows=4, cols=20)}
+            os.write(wfd, b"ok")
+            self.assertEqual(rs.pane("s"), "ok")
+            os.write(wfd, b"\x1b[3L")                         # unmodelled visual effect
+            self.assertIsNone(rs.pane("s"))                   # ⇒ the runner fails closed
+        finally:
+            os.close(rfd)
+            os.close(wfd)
+
+
+class R34IncrementalUtf8(unittest.TestCase):
+    """R3-4: a multibyte character split across reads is reassembled, never turned into U+FFFD."""
+
+    def test_pointer_glyph_split_across_three_feeds(self):
+        tg = _trustgate()
+        s = E.ScreenState(rows=6, cols=60)
+        s.feed(b"Do you trust the files in this folder?\r\n")
+        for chunk in (b"\xe2", b"\x9d", b"\xaf 1. Yes, I trust this folder\r\n"):
+            s.feed(chunk)
+        out = s.frame()
+        self.assertIn("❯ 1. Yes", out)
+        self.assertNotIn("�", out)
+        self.assertEqual(tg.pointer_option(out), "yes")
+
+    def test_split_glyph_through_realsys_pane(self):
+        rfd, wfd = os.pipe()
+        try:
+            rs = E.RealSys("/c", "sha", "/mk")
+            rs._inst["s"] = {"master": rfd, "screen": E.ScreenState(rows=4, cols=40)}
+            os.write(wfd, b"\xe2\x9d")                        # first two bytes of U+276F
+            self.assertNotIn("�", rs.pane("s"))
+            os.write(wfd, b"\xaf done")
+            self.assertEqual(rs.pane("s"), "❯ done")
+        finally:
+            os.close(rfd)
+            os.close(wfd)
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "PTY/ctty semantics checked on Linux")
+class R32PtyInitialisation(unittest.TestCase):
+    """R3-2: the PTY has the ScreenState geometry and is the child's controlling TTY, and the Popen is
+    still our own child. Exercised with a throwaway Python child — never Claude."""
+
+    CHILD = ("import os\n"
+             "s = os.get_terminal_size(0)\n"
+             "open('/dev/tty', 'rb').close()\n"
+             "print('R', s.lines, s.columns, os.getsid(0) == os.getpid(),"
+             " os.tcgetpgrp(0) == os.getpgrp(), flush=True)\n")
+
+    def _run(self, **kw):
+        proc, master = E.open_owned_pty_child([sys.executable, "-I", "-c", self.CHILD], **kw)
+        out = b""
+        try:
+            import select
+            while select.select([master], [], [], 5)[0]:
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError:                               # EIO once the child closed the slave
+                    break
+                if not chunk:
+                    break
+                out += chunk
+            self.assertEqual(proc.wait(timeout=10), 0, out)   # waitable ⇒ it is OUR child
+        finally:
+            os.close(master)
+        return out.decode()
+
+    def test_default_geometry_matches_screenstate_and_ctty(self):
+        out = self._run()
+        self.assertIn(f"R {E.PTY_ROWS} {E.PTY_COLS} True True", out)
+        st = E.ScreenState()
+        self.assertEqual((st.rows, st.cols), (E.PTY_ROWS, E.PTY_COLS))
+
+    def test_explicit_geometry(self):
+        self.assertIn("R 24 80 True True", self._run(rows=24, cols=80))
+
+    def test_winsize_failure_is_before_launch_and_closes_fds(self):
+        fds = os.pipe()                                       # not a tty ⇒ TIOCSWINSZ fails
+        launched = []
+        with self.assertRaises(E.SpawnError) as cm:
+            E.open_owned_pty_child(["/bin/true"], openpty=lambda: fds,
+                                   popen=lambda *a, **k: launched.append(1))
+        self.assertEqual(cm.exception.stage, "before-launch")
+        self.assertIsNone(cm.exception.owner)
+        self.assertEqual(launched, [])                        # no process was started
+        for fd in fds:
+            with self.assertRaises(OSError):
+                os.fstat(fd)                                  # both descriptors were closed
+
+    def test_popen_failure_is_before_launch_and_closes_fds(self):
+        import pty
+        opened = []
+
+        def openpty():
+            m, sl = pty.openpty()
+            opened.extend([m, sl])
+            return m, sl
+
+        def popen(*a, **k):
+            raise FileNotFoundError("no such binary")
+
+        with self.assertRaises(E.SpawnError) as cm:
+            E.open_owned_pty_child(["/nonexistent"], openpty=openpty, popen=popen)
+        self.assertEqual(cm.exception.stage, "before-launch")
+        for fd in opened:
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+
+
+class R33SpawnCleanupAccreditation(unittest.TestCase):
+    """R3-3: spawn failures say whether a process exists; only "no process was ever created" is
+    reported clean; after launch the held handle is reaped and accreditation needs verification."""
+
+    def test_runner_before_launch_is_clean_without_reap(self):
+        fs = FakeSys(None, fail="spawn")
+        r = mk_runner(fs)("positive")
+        self.assertEqual((r["ok"], r["reason"], r["stage"]), (False, "spawn-failed", "before-launch"))
+        self.assertTrue(r["cleanup_accredited"])
+        self.assertEqual((fs.reap_calls, fs.teardown_calls), ([], []))
+
+    def test_runner_after_launch_reaps_partial_handle(self):
+        for reaped in (True, False):
+            fs = FakeSys(None, fail="spawn-after", reaped=reaped)
+            r = mk_runner(fs)("positive")
+            self.assertEqual((r["ok"], r["reason"], r["stage"]), (False, "spawn-failed", "after-launch"))
+            self.assertEqual(fs.reap_calls, [{"owner": True, "partial": True}])   # by the held handle
+            self.assertEqual(len(fs.teardown_calls), 1)
+            self.assertIs(r["cleanup_accredited"], reaped)    # exactly what reap could verify
+
+    def test_runner_unknown_spawn_failure_not_accredited(self):
+        fs = FakeSys(None, fail="spawn-unknown")
+        r = mk_runner(fs)("positive")
+        self.assertEqual((r["reason"], r["stage"]), ("spawn-failed", "unknown"))
+        self.assertFalse(r["cleanup_accredited"])
+
+    class FakeProc:
+        pid = 999999
+
+        def __init__(self):
+            self.killed = self.waited = False
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            self.waited = True
+            return 0
+
+    def test_realsys_readiness_failure_raises_after_launch_with_handle(self):
+        rfd, wfd = os.pipe()
+        proc = self.FakeProc()
+        rs = E.RealSys("/c", "sha", "/mk")
+        try:
+            with mock.patch("e2e_smoke.open_owned_pty_child", return_value=(proc, rfd)), \
+                 mock.patch("e2e_smoke.poll_ns_ready", side_effect=RuntimeError("readiness timed out")):
+                with self.assertRaises(E.SpawnError) as cm:
+                    rs.spawn(["unshare"], "s")
+            e = cm.exception
+            self.assertEqual(e.stage, "after-launch")
+            self.assertIs(e.owner["proc"], proc)              # the held handle survives the failure
+            self.assertIsNone(e.owner["ns_pid"])              # namespace identity NOT acquired
+            self.assertFalse(proc.killed or proc.waited)      # spawn did not kill+swallow on its own
+            self.assertNotIn("s", rs._inst)
+            # …so cleanup of this handle can never be accredited without a verified namespace:
+            self.assertFalse(rs._namespace_empty(e.owner))
+            self.assertFalse(E.cleanup_by_owner(e.owner, signal_owner=lambda sig: None,
+                                                owner_exited=lambda: True,
+                                                namespace_empty=lambda: rs._namespace_empty(e.owner),
+                                                sleep=lambda t: None, verify_grace=0.2, tick=0.1))
+        finally:
+            os.close(rfd)
+            os.close(wfd)
+
+    def test_realsys_before_launch_propagates(self):
+        rs = E.RealSys("/c", "sha", "/mk")
+        with mock.patch("e2e_smoke.open_owned_pty_child",
+                        side_effect=E.SpawnError("before-launch", cause=OSError("openpty"))):
+            with self.assertRaises(E.SpawnError) as cm:
+                rs.spawn(["unshare"], "s")
+        self.assertEqual(cm.exception.stage, "before-launch")
+        self.assertIsNone(cm.exception.owner)
 
 
 if __name__ == "__main__":

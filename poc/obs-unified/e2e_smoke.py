@@ -28,6 +28,7 @@ Three blockers implemented here:
       returned per instance) to match between positive and negative. Absent any of these, the
       differential is None and N14 stays INCONCLUSIVE. `blocked-low` is the MAX for a pane attribution.
 """
+import codecs
 import hashlib
 import os
 import re
@@ -171,26 +172,125 @@ def key_to_bytes(key):
     raise ValueError(f"unmapped key: {key!r}")
 
 
+# R3-2: ONE source of truth for the PTY geometry — the size set on the PTY (TIOCSWINSZ) and the size of
+# the ScreenState that renders it must agree, or the TUI lays out for one grid and we read another.
+PTY_ROWS, PTY_COLS = 50, 200
+
+
+class SpawnError(Exception):
+    """R3-3: a spawn failure that says WHETHER A PROCESS EXISTS. `stage="before-launch"` ⇒ no child was
+    ever created (Popen raised, or we failed before it) and every descriptor has been closed — there is
+    nothing to clean. `stage="after-launch"` ⇒ a child WAS created; `owner` is the (possibly partial)
+    held handle so the caller can still clean up by that handle even though identity acquisition
+    (e.g. namespace readiness) failed. spawn never kills it and claims success on its own."""
+
+    def __init__(self, stage, owner=None, cause=None):
+        super().__init__(f"spawn failed ({stage}): {cause!r}")
+        self.stage, self.owner, self.cause = stage, owner, cause
+
+
+def open_owned_pty_child(argv, *, rows=PTY_ROWS, cols=PTY_COLS, openpty=None, popen=None):
+    """R3-2: start `argv` as OUR OWN child on a correctly initialised PTY and return `(proc, master)`.
+      • the window size is set on the slave BEFORE the child starts (TIOCSWINSZ) — a bare openpty is
+        0×0, and a TUI then lays out for no screen at all;
+      • the child gets the PTY as its CONTROLLING TTY: `start_new_session` runs setsid() in the child
+        and CPython runs `preexec_fn` after it, where TIOCSCTTY on fd 0 (already the slave) acquires
+        it — without this, `/dev/tty` cannot be opened in the child. The child stays a session leader
+        and the Popen stays the stable owner handle.
+    Any failure before a child exists raises SpawnError("before-launch") with both fds closed (and
+    Popen raising guarantees no child was left: CPython reaps a child whose exec failed)."""
+    import fcntl
+    import pty
+    import struct
+    import subprocess
+    import termios
+    openpty = openpty or pty.openpty
+    popen = popen or subprocess.Popen
+    master = slave = None
+    try:
+        master, slave = openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        proc = popen(argv, stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
+                     close_fds=True, preexec_fn=_acquire_controlling_tty)
+    except BaseException as exc:
+        for fd in (slave, master):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        raise SpawnError("before-launch", cause=exc) from exc
+    try:
+        os.close(slave)                               # the child holds its own copy
+    except OSError:
+        pass
+    return proc, master
+
+
+def _acquire_controlling_tty():   # pragma: no cover — runs in the child between fork and exec
+    import fcntl
+    import termios
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+
 class ScreenState:
-    """P0-2: a minimal, BOUNDED terminal screen model so a read reflects the CURRENT frame (what
-    `tmux capture-pane -p` shows) — NOT an accumulating history where a dismissed dialog lingers and
-    corrupts `pointer_option` / stability / disappearance detection. It interprets the escape subset a
-    TUI uses to redraw in place: cursor positioning (CUP/CUU/CUD/CUF/CUB/CHA/VPA), erase in display/
-    line (ED/EL), and CR/LF/BS/TAB; SGR (colour) and anything unrecognised are ignored. The grid is a
-    fixed size, so malformed input can never grow it (bounded)."""
+    """P0-2/R3-1/R3-4: a minimal, BOUNDED terminal screen model so a read reflects the CURRENT frame
+    (what `tmux capture-pane -p` shows) — never an accumulating history, and never a frame we cannot
+    vouch for. It implements the subset a TUI uses to redraw in place — cursor positioning (CUP/CUU/
+    CUD/CUF/CUB/CHA/VPA), erase in display/line (ED/EL), CR/LF/BS/TAB, save/restore cursor (DECSC/
+    DECRC, CSI s/u), IND/NEL/RI, RIS — plus the ALTERNATE SCREEN (`CSI ?1049/?1047/?47 h|l`): entering
+    it shows a blank buffer, leaving it restores the primary buffer exactly as it was, so a dialog drawn
+    on one buffer is never visible from the other.
 
-    _CSI = re.compile(r"\x1b\[([0-9;?]*)([ -/]*)([@-~])")
-    _ESC2 = re.compile(r"\x1b[@-Z\\-_]")
+    Fail-closed rule (R3-1): any sequence with a visual effect we do not model (insert/delete lines or
+    chars, scroll regions, insert mode, unknown private modes, unknown escapes, …) marks the buffer
+    INVALID and `frame()` returns None until BOTH the cells and the cursor are re-established
+    absolutely — a full clear (ED 2/3) plus an absolute cursor position (CUP), a reset (RIS), or an
+    alternate-screen switch. Sequences without visual effect (SGR, cursor visibility, bracketed
+    paste, synchronized output, mouse/focus reporting, device queries, OSC/DCS/APC/PM strings such as
+    window titles) are consumed and never painted. Bytes are decoded INCREMENTALLY (R3-4), so a
+    multibyte character split across reads is never turned into U+FFFD. Grid and pending input are
+    bounded, so malformed input can never grow them."""
 
-    def __init__(self, rows=50, cols=200):
-        self.rows, self.cols = rows, cols
-        self.grid = [[" "] * cols for _ in range(rows)]
+    _CSI = re.compile(r"\x1b\[([0-9;:?<=>]*)([ -/]*)([@-~])")
+    _CSI_PARTIAL = re.compile(r"\x1b\[[0-9;:?<=>]*[ -/]*\Z")
+    _ALT_MODES = {"47", "1047", "1049"}
+    # private modes that change only input/reporting/cursor shape — no effect on the cell grid
+    _NONVISUAL_PRIVATE = {"1", "12", "25", "1000", "1002", "1003", "1004", "1005", "1006", "1015",
+                          "2004", "2026"}
+    _MAX_PENDING = 4096
+
+    def __init__(self, rows=None, cols=None):
+        self.rows = rows if rows is not None else PTY_ROWS
+        self.cols = cols if cols is not None else PTY_COLS
+        self.grid = self._blank()
         self.r = self.c = 0
-        self._buf = b""
+        self.valid = True
+        self._grid_known = self._cursor_known = True
+        self._saved_cursor = (0, 0)
+        self._primary = None              # saved primary buffer while the alternate screen is shown
+        self._dec = codecs.getincrementaldecoder("utf-8")("replace")
+        self._pending = ""                # decoded text held back (an incomplete escape)
 
-    def _put(self, ch):
+    def _blank(self):
+        return [[" "] * self.cols for _ in range(self.rows)]
+
+    def _clamp(self):
         self.r = max(0, min(self.r, self.rows - 1))
         self.c = max(0, min(self.c, self.cols - 1))
+
+    def _invalidate(self):
+        # Unknown effect ⇒ neither the cells nor the cursor position can be vouched for. Validity comes
+        # back only when BOTH are re-established absolutely: a full clear (ED 2/3) and an absolute
+        # cursor position (CUP), or a reset / alternate-screen switch.
+        self._grid_known = self._cursor_known = False
+        self.valid = False
+
+    def _recheck(self):
+        self.valid = self._grid_known and self._cursor_known
+
+    def _put(self, ch):
+        self._clamp()
         self.grid[self.r][self.c] = ch
         self.c = min(self.c + 1, self.cols - 1)       # clamp at the right margin (no auto-scroll)
 
@@ -202,7 +302,7 @@ class ScreenState:
             self.r = self.rows - 1
 
     def _erase_line(self, mode):
-        self.r = max(0, min(self.r, self.rows - 1))
+        self._clamp()
         row = self.grid[self.r]
         if mode == 1:
             rng = range(0, min(self.c + 1, self.cols))
@@ -215,7 +315,9 @@ class ScreenState:
 
     def _erase_display(self, mode):
         if mode in (2, 3):
-            self.grid = [[" "] * self.cols for _ in range(self.rows)]
+            self.grid = self._blank()
+            self._grid_known = True                   # a full clear makes the CELLS known again
+            self._recheck()
         elif mode == 1:
             self._erase_line(1)
             for rr in range(0, self.r):
@@ -225,12 +327,52 @@ class ScreenState:
             for rr in range(self.r + 1, self.rows):
                 self.grid[rr] = [" "] * self.cols
 
-    def _csi(self, params, final):
-        nums = [int(p) for p in params.split(";") if p.isdigit()]
+    def _reset(self):
+        self.grid = self._blank()
+        self.r = self.c = 0
+        self.valid = self._grid_known = self._cursor_known = True
+        self._saved_cursor = (0, 0)
+        self._primary = None
+
+    def _set_alt(self, enter):
+        if enter and self._primary is None:
+            self._primary = (self.grid, self.r, self.c, self._grid_known, self._cursor_known)
+            self.grid, self.r, self.c = self._blank(), 0, 0
+            self._grid_known = self._cursor_known = True
+        elif not enter and self._primary is not None:
+            self.grid, self.r, self.c, self._grid_known, self._cursor_known = self._primary
+            self._primary = None
+        self._recheck()
+        # entering twice / leaving without entering: no change
+
+    def _private_mode(self, params, final):
+        modes = [m for m in params[1:].split(";") if m]
+        for m in modes:
+            if m in self._ALT_MODES:
+                self._set_alt(final == "h")
+            elif m not in self._NONVISUAL_PRIVATE:
+                self._invalidate()                    # a mode with effects we don't model
+
+    def _csi(self, params, inter, final):
+        if params[:1] == "?" and final in "hl" and not inter:
+            self._private_mode(params, final)
+            return
+        if inter or params[:1] in ("?", "<", "=", ">"):
+            # intermediates / private markers: device/mode queries (`CSI ?6n`, `CSI >c`, `CSI ?…$p`),
+            # cursor shape (`CSI 2 SP q`) and keyboard-protocol push/pop/query (`CSI >1u`, `CSI <u`,
+            # `CSI ?u`) have no grid effect; anything else does → invalidate
+            if final not in "cnpqu":
+                self._invalidate()
+            return
+        if final == "m":                              # SGR — colour only
+            return
+        nums = [int(p) if p.isdigit() else 0 for p in params.split(";")] if params else []
         n0 = nums[0] if nums else 0
         if final in "Hf":
             self.r = (nums[0] - 1) if nums and nums[0] > 0 else 0
             self.c = (nums[1] - 1) if len(nums) >= 2 and nums[1] > 0 else 0
+            self._cursor_known = True                 # absolute position: the cursor is known again
+            self._recheck()
         elif final == "A":
             self.r -= max(1, n0)
         elif final == "B":
@@ -247,54 +389,111 @@ class ScreenState:
             self._erase_display(n0)
         elif final == "K":
             self._erase_line(n0)
-        # m (SGR), private modes (?…), and anything else: ignored
-        self.r = max(0, min(self.r, self.rows - 1))
-        self.c = max(0, min(self.c, self.cols - 1))
+        elif final == "s":
+            self._saved_cursor = (self.r, self.c)
+        elif final == "u":
+            self.r, self.c = self._saved_cursor
+        elif final in "nct":                          # status/device/window queries — no grid effect
+            return
+        else:
+            self._invalidate()                        # L M P @ X S T r h l b … — not modelled
+        self._clamp()
+
+    def _escape(self, s, i):
+        """Handle the escape at s[i]. Returns the index after it, or None if it is incomplete."""
+        n = len(s)
+        if i + 1 >= n:
+            return None
+        nxt = s[i + 1]
+        if nxt == "[":
+            m = self._CSI.match(s, i)
+            if m:
+                self._csi(m.group(1), m.group(2), m.group(3))
+                return m.end()
+            if self._CSI_PARTIAL.match(s, i):
+                return None
+            self._invalidate()                        # malformed CSI: skip the ESC, distrust the frame
+            return i + 1
+        if nxt in "]P_^X":                            # OSC / DCS / APC / PM / SOS string
+            j = i + 2
+            while j < n:
+                if nxt == "]" and s[j] == "\x07":
+                    return j + 1
+                if s[j] == "\x1b":
+                    if j + 1 >= n:
+                        return None
+                    if s[j + 1] == "\\":
+                        return j + 2
+                j += 1
+            return None                               # unterminated — wait for more input
+        if nxt in "()*+":                             # charset designation: ESC ( X
+            return i + 3 if i + 2 < n else None
+        if nxt == "7":
+            self._saved_cursor = (self.r, self.c)
+        elif nxt == "8":
+            self.r, self.c = self._saved_cursor
+        elif nxt == "D":
+            self._newline()
+        elif nxt == "E":
+            self.c = 0
+            self._newline()
+        elif nxt == "M":
+            if self.r > 0:
+                self.r -= 1
+            else:
+                self._invalidate()                    # reverse index at the top scrolls — not modelled
+        elif nxt == "c":
+            self._reset()
+        elif nxt in "=>":                             # keypad modes — no grid effect
+            pass
+        else:
+            self._invalidate()
+        self._clamp()
+        return i + 2
 
     def feed(self, data):
-        """Process raw PTY bytes (bytes or str). An incomplete trailing escape is held across calls."""
-        if isinstance(data, str):
-            data = data.encode("utf-8", "replace")
-        self._buf += data
-        s = self._buf.decode("utf-8", "replace")
-        i, n, consumed = 0, len(s), 0
+        """Process raw PTY bytes (bytes are decoded incrementally; str is taken as already decoded)."""
+        text = self._dec.decode(data) if isinstance(data, (bytes, bytearray)) else data
+        s = self._pending + text
+        i, n = 0, len(s)
         while i < n:
             ch = s[i]
             if ch == "\x1b":
-                m = self._CSI.match(s, i)
-                if m:
-                    self._csi(m.group(1), m.group(3))
-                    i = m.end()
-                elif self._ESC2.match(s, i):
-                    i += 2
-                else:
-                    break                               # incomplete escape — wait for more bytes
-            elif ch == "\r":
+                j = self._escape(s, i)
+                if j is None:
+                    break                             # incomplete escape — wait for more bytes
+                i = j
+                continue
+            if ch == "\r":
                 self.c = 0
-                i += 1
             elif ch == "\n":
                 self._newline()
-                i += 1
             elif ch == "\b":
                 self.c = max(0, self.c - 1)
-                i += 1
             elif ch == "\t":
                 self.c = min(self.cols - 1, (self.c // 8 + 1) * 8)
-                i += 1
-            elif ch < " ":
-                i += 1                                  # drop other C0 control chars
+            elif ch < " " or ch == "\x7f":
+                pass                                  # other C0 controls / DEL: no grid effect
             else:
                 self._put(ch)
-                i += 1
-            consumed = i
-        self._buf = s[consumed:].encode("utf-8", "replace")
+            i += 1
+        self._pending = s[i:]
+        if len(self._pending) > self._MAX_PENDING:    # bound held-back input; we lost sync
+            self._pending = ""
+            self._invalidate()
 
     def render(self):
-        """The CURRENT visible screen as text, with trailing blank cells/rows trimmed."""
+        """The grid of the visible buffer as text, trailing blank cells/rows trimmed. Use `frame()`
+        when the result must be trustworthy."""
         lines = ["".join(row).rstrip() for row in self.grid]
         while lines and not lines[-1]:
             lines.pop()
         return "\n".join(lines)
+
+    def frame(self):
+        """The CURRENT frame, or None when the visible buffer has seen a sequence we cannot model
+        (fail-closed: callers treat None as a failed capture)."""
+        return self.render() if self.valid else None
 
 
 def fixture_digest(path):
@@ -485,14 +684,26 @@ def make_runner(sysio, *, cli, scratch, trust_gate, clock, settle_polls=4):
         try:
             argv = isolation_argv(cli, home, ws, debug, policy_path=policy)
             # F1: ACQUIRE the owner ATOMICALLY — `spawn` CREATES and HOLDS the child (a Popen), so the
-            # handle exists from creation with no later pid lookup. Contract: it returns a held handle
-            # or raises leaving NOTHING running (a partial launch must self-clean inside spawn). So a
-            # spawn failure needs no reap here — there is no orphan.
+            # handle exists from creation with no later pid lookup. Contract (R3-3): it returns a held
+            # handle, or raises SpawnError saying whether a child exists and, if so, carrying its
+            # handle — never a silent self-kill whose outcome is lost.
             try:
                 owner = sysio.spawn(argv, sock)
+            except SpawnError as exc:
+                if exc.owner is None:
+                    # before-launch: no child was ever created and spawn closed its fds — the ONE case
+                    # where "nothing to clean" is a fact, not an assumption.
+                    return {"ok": False, "reason": "spawn-failed", "stage": exc.stage,
+                            "instance": inst, "cleanup_accredited": True}
+                # R3-3 after-launch: a child exists. Keep its held handle so the finally below reaps
+                # it like any other run; the accreditation is whatever that reap can VERIFY.
+                owner = exc.owner
+                result = {"ok": False, "reason": "spawn-failed", "stage": exc.stage, "instance": inst}
+                return result
             except Exception:
-                return {"ok": False, "reason": "spawn-failed", "instance": inst,
-                        "cleanup_accredited": True}             # nothing was left running
+                # A spawn that fails without saying whether a process exists cannot be proven clean.
+                return {"ok": False, "reason": "spawn-failed", "stage": "unknown", "instance": inst,
+                        "cleanup_accredited": False}
             if not sysio.check_isolation(owner):
                 result = {"ok": False, "reason": "isolation-failed", "instance": inst}
                 return result
@@ -641,61 +852,41 @@ class RealSys:   # pragma: no cover
             return None
 
     def spawn(self, argv, sock):
-        """F1: CREATE and HOLD the owner ATOMICALLY. We start `argv` (the `unshare` leader) as OUR OWN
-        child via `subprocess.Popen` on a PTY (`start_new_session` ⇒ its own session/pgroup). The
-        Popen object IS the owner handle from the instant of creation: the kernel will not recycle its
-        pid until we reap it (`proc.wait`), so there is NO post-launch pid lookup and NO reuse race.
-        From the owner we capture (AFTER a bounded readiness wait — P0-3) the inode of the PID
-        namespace it creates (`/proc/<pid>/ns/pid_for_children`) and its (immediate) net ns — the
-        identity used later to VERIFY the namespace emptied, again without any descendant lookup. All
-        of `pty.openpty`, `Popen`, the readiness wait, and teardown are guarded so descriptors are
-        always closed and nothing is left running without a handle (point 1); no cleanup is asserted
-        that cannot be demonstrated."""
-        import pty
-        import subprocess
+        """F1: CREATE and HOLD the owner ATOMICALLY. `open_owned_pty_child` starts `argv` (the `unshare`
+        leader) as OUR OWN `subprocess.Popen` child on a correctly sized PTY that is the child's
+        controlling TTY (R3-2). The Popen IS the owner handle from the instant of creation: the kernel
+        will not recycle its pid until we reap it, so there is no post-launch pid lookup and no reuse
+        race. After a bounded readiness wait (P0-3) we record, from the owner, the inode of the PID
+        namespace it creates (`pid_for_children`) and its net ns — the identity later used to VERIFY
+        the namespace emptied.
+
+        R3-3 — failures say whether a process exists, and spawn never claims a cleanup it did not prove:
+          • before a child exists ⇒ SpawnError("before-launch"), fds already closed, nothing to clean;
+          • after the child exists (readiness timeout, owner died, any error) ⇒
+            SpawnError("after-launch", owner=<partial handle>). spawn does NOT kill/wait it here and
+            swallow the outcome: the caller reaps it by the held handle like any other run, and since a
+            partial handle has no verified namespace identity (`ns_pid` None), `ns_is_empty` cannot be
+            satisfied — cleanup is reported NOT accredited rather than assumed."""
         import time
-        master = slave = proc = None
+        proc, master = open_owned_pty_child(argv, rows=PTY_ROWS, cols=PTY_COLS)
+        owner = {"proc": proc, "master": master, "ns_pid": None, "ns_net": None,
+                 "host_net": None, "host_pid": None, "screen": ScreenState(PTY_ROWS, PTY_COLS)}
         try:
-            master, slave = pty.openpty()
-            proc = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave,
-                                    start_new_session=True, close_fds=True)
-            os.close(slave)
-            slave = None
             host_net, host_pid = (parse_ns_inode(self._readlink("self", n)) for n in ("net", "pid"))
-            # P0-3: explicit, bounded readiness — `unshare` sets up the namespaces asynchronously after
-            # Popen returns, so we POLL (no arbitrary sleep) until the owner's net + pid_for_children
-            # inodes are present AND fresh, re-checking the owner is still alive. Timeout/owner-death
-            # ⇒ raise (handled below). This replaces reading the inodes immediately (the race).
+            owner["host_net"], owner["host_pid"] = host_net, host_pid
+            # P0-3: `unshare` sets up the namespaces asynchronously after Popen returns, so we POLL (no
+            # arbitrary sleep) until the owner's net + pid_for_children inodes are present AND fresh,
+            # re-checking the owner is still alive; timeout / owner death ⇒ raise (below).
             _h, _hp, ns_net, ns_pid = poll_ns_ready(
                 sample=lambda: (host_net, host_pid,
                                 parse_ns_inode(self._readlink(proc.pid, "net")),
                                 parse_ns_inode(self._readlink(proc.pid, "pid_for_children"))),
                 alive=lambda: proc.poll() is None, now=time.monotonic, sleep=time.sleep)
-            handle = {"proc": proc, "master": master, "ns_pid": ns_pid, "ns_net": ns_net,
-                      "host_net": host_net, "host_pid": host_pid, "screen": ScreenState()}
-            self._inst[sock] = handle
-            master = None                               # ownership moved to the handle
-            return handle
-        except BaseException:
-            # point 1: a failure AT OR AFTER launch must never leave an unowned process — reap the held
-            # child (if any) and close every descriptor we still hold. We assert no cleanup we cannot
-            # demonstrate: the child is killed+waited, the fds are closed, and we re-raise.
-            if proc is not None:
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
-                try:
-                    proc.wait(timeout=5)
-                except Exception:
-                    pass
-            for fd in (slave, master):
-                if fd is not None:
-                    try:
-                        os.close(fd)
-                    except OSError:
-                        pass
-            raise
+        except BaseException as exc:
+            raise SpawnError("after-launch", owner=owner, cause=exc) from exc
+        owner["ns_net"], owner["ns_pid"] = ns_net, ns_pid
+        self._inst[sock] = owner
+        return owner
 
     def check_isolation(self, owner):
         """D1: `--net` is immediate, so the OWNER (unshare) is itself in the fresh net ns. Verify both
@@ -732,7 +923,7 @@ class RealSys:   # pragma: no cover
                 h["screen"].feed(chunk)
         except OSError:
             return None
-        return h["screen"].render()
+        return h["screen"].frame()            # None if the frame cannot be vouched for (R3-1)
 
     def _send(self, sock, key):
         """P0-1: translate the key NAME to real terminal bytes before writing to the PTY (never the

@@ -142,7 +142,7 @@ it. Until then N17-project stays Option A (INCONCLUSIVE).
 
 ## Local results (pure simulated; no CLI)
 
-`python3 test_obs_unified.py` → **123 passed** (incl. RealSys round-3: **P0-1** key_to_bytes
+`python3 test_obs_unified.py` → **143 passed** (incl. RealSys round-4 R3-1…R3-4: alternate screen / invalidation / OSC / UTF-8 split / PTY geometry+ctty via a throwaway child / spawn stage accreditation — 10/10 targeted mutations killed; RealSys round-3: **P0-1** key_to_bytes
 name→bytes/unmapped-raises; **P0-2** ScreenState current-frame + dismissed-dialog-gone + the real
 `pointer_option` on the frame; **P0-3** poll_ns_ready ready/after-N/owner-death/timeout; **P1-4**
 scan_proc_pidns + ns_is_empty unverifiable-fail-closed; RealSys over real pipes + injected /proc) ·
@@ -369,6 +369,29 @@ answer it, under the GO/NO-GO above. Until a real run passes all rows, N14 stays
     dialog is gone; a read error ⇒ None) and injected `/proc` (`_namespace_empty` fail-closed).
   - Still pragma/unrun for the real kernel paths: real `unshare`+PTY launch, `nsenter` isolation, and
     `--kill-child`/ns-scan reap on the host.
+- **F1 round 4 (owner R3-1…R3-4 on 0a24b98; P0-1/P0-3/P1-4 closed by the owner):**
+  - **R3-1 alternate screen / fail-closed frame** — `ScreenState` models `CSI ?1049/?1047/?47 h|l`
+    (separate primary/alternate buffers; leaving restores the primary exactly), so a trust dialog on one
+    buffer is never readable from the other. Any sequence with a visual effect it does not model
+    (IL/DL/DCH/ICH/ECH/SU/SD, scroll regions, insert mode, unknown private modes or escapes, malformed
+    CSI) INVALIDATES the buffer; `frame()` is None (⇒ `pane()` None ⇒ the run fails closed) until both
+    cells AND cursor are re-established absolutely (ED 2/3 + CUP, RIS, or a buffer switch). OSC/DCS/APC/
+    PM strings (window titles) are consumed, never painted; DECSC/DECRC, IND/NEL/RI handled; non-visual
+    modes (cursor visibility, bracketed paste, sync output, mouse/focus, keyboard protocol, queries) keep
+    the frame valid.
+  - **R3-2 PTY initialisation** — `open_owned_pty_child` sets TIOCSWINSZ to `PTY_ROWS×PTY_COLS` (the same
+    constants `ScreenState` uses) before the child starts, and makes the PTY the child's CONTROLLING TTY
+    (TIOCSCTTY in `preexec_fn`, which CPython runs after `start_new_session`'s setsid). Verified with a
+    throwaway Python child: size = requested, `/dev/tty` opens, child is session leader and foreground
+    pgrp, and the Popen is waitable (our own child). A bare openpty reproduced the reported 0×0 / no
+    `/dev/tty`.
+  - **R3-3 spawn cleanup accreditation** — `SpawnError(stage, owner)`: `before-launch` (no child ever
+    existed, fds closed) is the only case reported clean; `after-launch` carries the held (partial)
+    handle and spawn no longer kills+swallows — the runner reaps it by that handle and the accreditation
+    is whatever `reap` verifies (a partial handle has no namespace identity ⇒ never accredited); a spawn
+    error that does not state its stage ⇒ `cleanup_accredited: false`.
+  - **R3-4 incremental UTF-8** — an incremental decoder reassembles a multibyte char split across reads
+    (e.g. `❯` over three feeds), never U+FFFD.
 - **F2 real temporal window** (high) — **ACCEPTED by the owner (unchanged):** `window_open()/window_close()` are GONE. They sampled `clock()`
   AFTER `from_pane`, so with a real advancing clock the last read sat before `window_close` (⇒
   partial) and only sub-ms rounding faked a `full` — without demonstrating observation before the
