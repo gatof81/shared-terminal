@@ -297,7 +297,8 @@
 .chat-conv-bottom {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.5rem;
   min-width: 0;
   font-size: 0.72rem;
   color: var(--c-muted);
@@ -368,6 +369,19 @@
 .chat-conv-item {
   display: flex;
   align-items: stretch;
+}
+/* The ⋯ / Unarchive tools are siblings of the row button (a button cannot
+   hold buttons), so hover and selection are painted on the whole item:
+   otherwise the highlight stopped short of the row's own actions. */
+.chat-conv-item:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+.chat-conv-item:has(.chat-conv-row.selected) {
+  background: var(--c-accent-bg);
+}
+.chat-conv-item .chat-conv-row:hover,
+.chat-conv-item .chat-conv-row.selected {
+  background: transparent;
 }
 .chat-conv-item .chat-conv-row {
   flex: 1;

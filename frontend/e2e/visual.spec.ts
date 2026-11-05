@@ -71,6 +71,38 @@ test.describe("visual", () => {
 		await shot(page, "chat");
 	});
 
+	test("chat rename dialog", async ({ app, backend, page }) => {
+		// Action hierarchy: filled primary, outlined Cancel, quiet alternate at the left.
+		backend.conversations.find((c) => c.cid === "conv-2")!.customTitle = "Mío";
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.switchView("chat");
+		await page.locator('[data-meta-cid="conv-2"][data-meta-where="list"]').click();
+		await page.locator('.action-menu [data-action="rename"]').click();
+		await expect(page.locator(".dialog-card input")).toHaveValue("Mío");
+		await shot(page, "chat-rename-dialog");
+	});
+
+	test("chat archived live row with a long title", async ({ app, backend, page }) => {
+		// Archived but live again: the badge wraps under the status instead of
+		// running under the Unarchive button, and the highlight covers the tools.
+		const c1 = backend.conversations.find((c) => c.cid === "conv-1")!;
+		c1.archivedAt = "2026-10-31T09:00:00.000Z";
+		c1.customTitle =
+			"Migrar la autenticación de sesiones al cookie nuevo y limpiar los tests viejos";
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.switchView("chat");
+		await page.locator("#chat-list .chat-conv-row", { hasText: "Migrar" }).click();
+		await expect(page.locator("#chat-thread .chat-thread-name")).toContainText("Migrar");
+		if (await page.locator("#chat-back-btn").isVisible())
+			await page.locator("#chat-back-btn").click();
+		await expect(page.locator("#chat-list .chat-conv-archived")).toHaveText(
+			"Archived · active again",
+		);
+		await shot(page, "chat-archived-live");
+	});
+
 	test("terminal stopped state", async ({ app, page }) => {
 		await app.login("alice");
 		await app.openSession("docs");
