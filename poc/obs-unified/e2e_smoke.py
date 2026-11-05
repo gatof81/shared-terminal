@@ -30,6 +30,7 @@ Three blockers implemented here:
 """
 import hashlib
 import os
+import re
 import secrets
 import shlex
 import signal
@@ -97,14 +98,203 @@ def verify_isolated(host_net, host_pid_ns, tgt_net, tgt_pid_ns):
     return all((host_net, host_pid_ns, tgt_net, tgt_pid_ns)) and tgt_net != host_net and tgt_pid_ns != host_pid_ns
 
 
-def ns_is_empty(target_ns_inode, pid_ns_inodes):
-    """F1: the disposable PID namespace is empty IFF NO live process is in it. `target_ns_inode` is
-    the namespace the owner created (captured from the owner at creation, never a later descendant
-    lookup); `pid_ns_inodes` is the set/iterable of every live process's pid-ns inode now. An unknown
-    target (None) ⇒ False: we cannot verify emptiness, so we never credit it (fail-closed)."""
+def ns_is_empty(target_ns_inode, pid_ns_inodes, *, unverifiable=0):
+    """F1/P1-4: the disposable PID namespace is empty IFF (a) its inode is known, (b) NO live process
+    carries it, AND (c) EVERY relevant process could be inspected. `target_ns_inode` is the namespace
+    the owner created (captured from the owner at creation, never a descendant lookup);
+    `pid_ns_inodes` are the pid-ns inodes we COULD read now; `unverifiable` counts live processes
+    whose pid-ns we could NOT read (present-but-unreadable). Any unverifiable process could be in the
+    namespace, so a positive 'empty' is NEVER credited while `unverifiable > 0` (fail-closed). An
+    unknown target (None) ⇒ False for the same reason. A process that has EXITED is not unverifiable
+    (it is gone, not unknown) — that distinction is `scan_proc_pidns`'s job."""
     if not target_ns_inode:
         return False
-    return target_ns_inode not in set(pid_ns_inodes)
+    if target_ns_inode in set(pid_ns_inodes):
+        return False
+    return unverifiable == 0
+
+
+def scan_proc_pidns(pids, read_inode, still_present):
+    """P1-4: classify the pid-namespace of every live process for the emptiness check. `read_inode`
+    (pid)->inode|None; `still_present(pid)->bool`. Returns (inodes, unverifiable): a readable inode is
+    collected; a None inode for a process that is STILL PRESENT is UNVERIFIABLE (we could not inspect
+    a relevant process ⇒ fail-closed); a None inode for a process no longer present is skipped (it
+    exited — gone, not unknown)."""
+    inodes, unverifiable = [], 0
+    for pid in pids:
+        ino = read_inode(pid)
+        if ino is not None:
+            inodes.append(ino)
+        elif still_present(pid):
+            unverifiable += 1
+    return inodes, unverifiable
+
+
+def poll_ns_ready(*, sample, alive, now, sleep, timeout=10.0, interval=0.05):
+    """P0-3: wait for the owner's namespaces to be READY — present AND fresh — with a BOUNDED timeout
+    and NO arbitrary sleep (re-sample on a fixed interval until ready or deadline). `sample()` returns
+    `(host_net, host_pid, owner_net, owner_pid_for_children)`; a sample is ready when `verify_isolated`
+    holds (both namespaces present and differing from the host — identity verification, closing the
+    race with `unshare` initialisation). `alive()` is owner liveness. Returns the ready sample; raises
+    (fail-closed) if the owner dies first or the deadline passes."""
+    deadline = now() + timeout
+    while True:
+        if not alive():
+            raise RuntimeError("owner exited during namespace readiness")
+        s = sample()
+        if verify_isolated(*s):
+            return s
+        if now() >= deadline:
+            raise RuntimeError("namespace readiness timed out")
+        sleep(interval)
+
+
+# P0-1: the trust-gate sends KEY NAMES ("Down","Enter"); a PTY needs the REAL terminal byte
+# sequences. An explicit, bounded allowlist — a named key never travels as its literal text.
+_KEY_BYTES = {
+    "Enter": b"\r", "Return": b"\r", "Tab": b"\t", "Space": b" ", "Escape": b"\x1b", "Esc": b"\x1b",
+    "BSpace": b"\x7f", "Backspace": b"\x7f",
+    "Up": b"\x1b[A", "Down": b"\x1b[B", "Right": b"\x1b[C", "Left": b"\x1b[D",
+    "Home": b"\x1b[H", "End": b"\x1b[F", "PageUp": b"\x1b[5~", "PageDown": b"\x1b[6~",
+}
+
+
+def key_to_bytes(key):
+    """P0-1: translate a trust-gate key NAME into real terminal bytes. A named key uses the allowlist;
+    a single printable character passes through as its UTF-8 bytes; anything else raises (bounded — we
+    never write a literal like "Down" into the PTY as text, which the kit's blind driver effectively
+    did)."""
+    if key in _KEY_BYTES:
+        return _KEY_BYTES[key]
+    if isinstance(key, str) and len(key) == 1 and key.isprintable():
+        return key.encode()
+    raise ValueError(f"unmapped key: {key!r}")
+
+
+class ScreenState:
+    """P0-2: a minimal, BOUNDED terminal screen model so a read reflects the CURRENT frame (what
+    `tmux capture-pane -p` shows) — NOT an accumulating history where a dismissed dialog lingers and
+    corrupts `pointer_option` / stability / disappearance detection. It interprets the escape subset a
+    TUI uses to redraw in place: cursor positioning (CUP/CUU/CUD/CUF/CUB/CHA/VPA), erase in display/
+    line (ED/EL), and CR/LF/BS/TAB; SGR (colour) and anything unrecognised are ignored. The grid is a
+    fixed size, so malformed input can never grow it (bounded)."""
+
+    _CSI = re.compile(r"\x1b\[([0-9;?]*)([ -/]*)([@-~])")
+    _ESC2 = re.compile(r"\x1b[@-Z\\-_]")
+
+    def __init__(self, rows=50, cols=200):
+        self.rows, self.cols = rows, cols
+        self.grid = [[" "] * cols for _ in range(rows)]
+        self.r = self.c = 0
+        self._buf = b""
+
+    def _put(self, ch):
+        self.r = max(0, min(self.r, self.rows - 1))
+        self.c = max(0, min(self.c, self.cols - 1))
+        self.grid[self.r][self.c] = ch
+        self.c = min(self.c + 1, self.cols - 1)       # clamp at the right margin (no auto-scroll)
+
+    def _newline(self):
+        self.r += 1
+        if self.r >= self.rows:
+            self.grid.pop(0)
+            self.grid.append([" "] * self.cols)
+            self.r = self.rows - 1
+
+    def _erase_line(self, mode):
+        self.r = max(0, min(self.r, self.rows - 1))
+        row = self.grid[self.r]
+        if mode == 1:
+            rng = range(0, min(self.c + 1, self.cols))
+        elif mode == 2:
+            rng = range(self.cols)
+        else:
+            rng = range(self.c, self.cols)
+        for i in rng:
+            row[i] = " "
+
+    def _erase_display(self, mode):
+        if mode in (2, 3):
+            self.grid = [[" "] * self.cols for _ in range(self.rows)]
+        elif mode == 1:
+            self._erase_line(1)
+            for rr in range(0, self.r):
+                self.grid[rr] = [" "] * self.cols
+        else:
+            self._erase_line(0)
+            for rr in range(self.r + 1, self.rows):
+                self.grid[rr] = [" "] * self.cols
+
+    def _csi(self, params, final):
+        nums = [int(p) for p in params.split(";") if p.isdigit()]
+        n0 = nums[0] if nums else 0
+        if final in "Hf":
+            self.r = (nums[0] - 1) if nums and nums[0] > 0 else 0
+            self.c = (nums[1] - 1) if len(nums) >= 2 and nums[1] > 0 else 0
+        elif final == "A":
+            self.r -= max(1, n0)
+        elif final == "B":
+            self.r += max(1, n0)
+        elif final == "C":
+            self.c += max(1, n0)
+        elif final == "D":
+            self.c -= max(1, n0)
+        elif final == "G":
+            self.c = max(0, n0 - 1)
+        elif final == "d":
+            self.r = max(0, n0 - 1)
+        elif final == "J":
+            self._erase_display(n0)
+        elif final == "K":
+            self._erase_line(n0)
+        # m (SGR), private modes (?…), and anything else: ignored
+        self.r = max(0, min(self.r, self.rows - 1))
+        self.c = max(0, min(self.c, self.cols - 1))
+
+    def feed(self, data):
+        """Process raw PTY bytes (bytes or str). An incomplete trailing escape is held across calls."""
+        if isinstance(data, str):
+            data = data.encode("utf-8", "replace")
+        self._buf += data
+        s = self._buf.decode("utf-8", "replace")
+        i, n, consumed = 0, len(s), 0
+        while i < n:
+            ch = s[i]
+            if ch == "\x1b":
+                m = self._CSI.match(s, i)
+                if m:
+                    self._csi(m.group(1), m.group(3))
+                    i = m.end()
+                elif self._ESC2.match(s, i):
+                    i += 2
+                else:
+                    break                               # incomplete escape — wait for more bytes
+            elif ch == "\r":
+                self.c = 0
+                i += 1
+            elif ch == "\n":
+                self._newline()
+                i += 1
+            elif ch == "\b":
+                self.c = max(0, self.c - 1)
+                i += 1
+            elif ch == "\t":
+                self.c = min(self.cols - 1, (self.c // 8 + 1) * 8)
+                i += 1
+            elif ch < " ":
+                i += 1                                  # drop other C0 control chars
+            else:
+                self._put(ch)
+                i += 1
+            consumed = i
+        self._buf = s[consumed:].encode("utf-8", "replace")
+
+    def render(self):
+        """The CURRENT visible screen as text, with trailing blank cells/rows trimmed."""
+        lines = ["".join(row).rstrip() for row in self.grid]
+        while lines and not lines[-1]:
+            lines.pop()
+        return "\n".join(lines)
 
 
 def fixture_digest(path):
@@ -394,7 +584,7 @@ class RealSys:   # pragma: no cover
 
     def __init__(self, cli, want_sha, probe_marketplace, want_cli="2.1.314"):
         self.cli, self.want_sha, self.probe_marketplace, self.want_cli = cli, want_sha, probe_marketplace, want_cli
-        self._inst = {}        # sock -> owner handle {proc, master, ns_pid, ns_net, host_net, host_pid, buf}
+        self._inst = {}        # sock -> owner handle {proc, master, ns_pid, ns_net, host_net, host_pid, screen}
 
     def get_version(self):
         import subprocess
@@ -455,36 +645,56 @@ class RealSys:   # pragma: no cover
         child via `subprocess.Popen` on a PTY (`start_new_session` ⇒ its own session/pgroup). The
         Popen object IS the owner handle from the instant of creation: the kernel will not recycle its
         pid until we reap it (`proc.wait`), so there is NO post-launch pid lookup and NO reuse race.
-        From the owner we capture the inode of the PID namespace it creates
-        (`/proc/<pid>/ns/pid_for_children`) and its (immediate) net ns — the identity used later to
-        VERIFY the namespace emptied, again without any descendant lookup. If ANY post-launch step
-        fails, we kill+wait the held child before re-raising, so `spawn` never leaves a process running
-        without a handle (point 1)."""
+        From the owner we capture (AFTER a bounded readiness wait — P0-3) the inode of the PID
+        namespace it creates (`/proc/<pid>/ns/pid_for_children`) and its (immediate) net ns — the
+        identity used later to VERIFY the namespace emptied, again without any descendant lookup. All
+        of `pty.openpty`, `Popen`, the readiness wait, and teardown are guarded so descriptors are
+        always closed and nothing is left running without a handle (point 1); no cleanup is asserted
+        that cannot be demonstrated."""
         import pty
         import subprocess
-        master, slave = pty.openpty()
-        proc = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave,
-                                start_new_session=True, close_fds=True)
+        import time
+        master = slave = proc = None
         try:
+            master, slave = pty.openpty()
+            proc = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave,
+                                    start_new_session=True, close_fds=True)
             os.close(slave)
+            slave = None
             host_net, host_pid = (parse_ns_inode(self._readlink("self", n)) for n in ("net", "pid"))
-            handle = {"proc": proc, "master": master,
-                      "ns_pid": parse_ns_inode(self._readlink(proc.pid, "pid_for_children")),
-                      "ns_net": parse_ns_inode(self._readlink(proc.pid, "net")),
-                      "host_net": host_net, "host_pid": host_pid, "buf": bytearray()}
+            # P0-3: explicit, bounded readiness — `unshare` sets up the namespaces asynchronously after
+            # Popen returns, so we POLL (no arbitrary sleep) until the owner's net + pid_for_children
+            # inodes are present AND fresh, re-checking the owner is still alive. Timeout/owner-death
+            # ⇒ raise (handled below). This replaces reading the inodes immediately (the race).
+            _h, _hp, ns_net, ns_pid = poll_ns_ready(
+                sample=lambda: (host_net, host_pid,
+                                parse_ns_inode(self._readlink(proc.pid, "net")),
+                                parse_ns_inode(self._readlink(proc.pid, "pid_for_children"))),
+                alive=lambda: proc.poll() is None, now=time.monotonic, sleep=time.sleep)
+            handle = {"proc": proc, "master": master, "ns_pid": ns_pid, "ns_net": ns_net,
+                      "host_net": host_net, "host_pid": host_pid, "screen": ScreenState()}
             self._inst[sock] = handle
+            master = None                               # ownership moved to the handle
             return handle
         except BaseException:
-            # point 1: a failure AFTER launch must never leave an unowned process — reap the held child.
-            try:
-                proc.kill()
-                proc.wait(timeout=5)
-            except Exception:
-                pass
-            try:
-                os.close(master)
-            except OSError:
-                pass
+            # point 1: a failure AT OR AFTER launch must never leave an unowned process — reap the held
+            # child (if any) and close every descriptor we still hold. We assert no cleanup we cannot
+            # demonstrate: the child is killed+waited, the fds are closed, and we re-raise.
+            if proc is not None:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+            for fd in (slave, master):
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
             raise
 
     def check_isolation(self, owner):
@@ -506,9 +716,10 @@ class RealSys:   # pragma: no cover
         return interpret_isolation(links.stdout.split(), probe.returncode == 0)
 
     def pane(self, sock):
-        """Read what the owned PTY has produced so far (non-blocking) and return the accumulated text
-        with CSI escapes stripped so classifier substrings match. A read error ⇒ None (fail closed)."""
-        import re
+        """P0-2: feed the owned PTY's new bytes into the instance's ScreenState and return the CURRENT
+        rendered frame (what `tmux capture-pane -p` would show) — not an accumulating history where a
+        dismissed dialog would linger and fool `pointer_option`/stability/disappearance. A read error
+        ⇒ None (fail closed)."""
         import select
         h = self._inst.get(sock)
         if h is None:
@@ -518,15 +729,17 @@ class RealSys:   # pragma: no cover
                 chunk = os.read(h["master"], 65536)
                 if not chunk:
                     break
-                h["buf"].extend(chunk)
+                h["screen"].feed(chunk)
         except OSError:
             return None
-        return re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", h["buf"].decode("utf-8", "replace"))
+        return h["screen"].render()
 
     def _send(self, sock, key):
+        """P0-1: translate the key NAME to real terminal bytes before writing to the PTY (never the
+        literal text)."""
         h = self._inst.get(sock)
         if h is not None:
-            os.write(h["master"], key.encode() if isinstance(key, str) else key)
+            os.write(h["master"], key_to_bytes(key))
 
     def read_text(self, path):
         try:
@@ -559,11 +772,17 @@ class RealSys:   # pragma: no cover
         return owner["proc"].poll() is not None     # poll() reaps the zombie — the pid is freed for no one
 
     def _namespace_empty(self, owner):
-        """INDEPENDENTLY verify the disposable PID namespace emptied: NO live process carries its
-        inode. Keyed on the inode captured from the OWNER at creation (never a descendant lookup); an
-        unknown inode ⇒ not verifiable ⇒ False (point 4)."""
-        live = [parse_ns_inode(self._readlink(int(e), "pid")) for e in os.listdir("/proc") if e.isdigit()]
-        return ns_is_empty(owner.get("ns_pid"), live)
+        """INDEPENDENTLY verify the disposable PID namespace emptied (points 4 + P1-4): NO live process
+        carries its inode AND every relevant process could be inspected. Keyed on the inode captured
+        from the OWNER at creation (never a descendant lookup). `scan_proc_pidns` separates a process
+        we could not read while it is STILL PRESENT (unverifiable ⇒ fail closed) from one that has
+        since EXITED (gone ⇒ skipped); an unknown target inode ⇒ False."""
+        pids = [e for e in os.listdir("/proc") if e.isdigit()]
+        inodes, unverifiable = scan_proc_pidns(
+            pids,
+            read_inode=lambda p: parse_ns_inode(self._readlink(int(p), "pid")),
+            still_present=lambda p: os.path.exists(f"/proc/{p}"))
+        return ns_is_empty(owner.get("ns_pid"), inodes, unverifiable=unverifiable)
 
     def reap(self, owner):
         """F1: reap by the HELD owner handle — SIGTERM→wait→SIGKILL→wait on the owned child (its death

@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import observer as O  # noqa: E402
@@ -980,6 +981,203 @@ class F1RunnerCleanup(unittest.TestCase):
         r = mk_runner(FakeSys(None, reaped=False))("positive")
         self.assertEqual((r["ok"], r["reason"]), (False, "cleanup-not-reaped"))
         self.assertFalse(r["cleanup_accredited"])
+
+
+# ── RealSys round-2 review: deterministic tests of RealSys's OWN behaviour (not FakeSys) ──
+class P01KeyTranslation(unittest.TestCase):
+    """P0-1: trust-gate key NAMES become real terminal byte sequences, never literal text."""
+
+    def test_named_keys(self):
+        self.assertEqual(E.key_to_bytes("Down"), b"\x1b[B")     # the two keys the gate actually sends
+        self.assertEqual(E.key_to_bytes("Enter"), b"\r")
+        self.assertEqual(E.key_to_bytes("Up"), b"\x1b[A")
+        self.assertEqual(E.key_to_bytes("Escape"), b"\x1b")
+
+    def test_single_printable_passthrough(self):
+        self.assertEqual(E.key_to_bytes("y"), b"y")
+
+    def test_unmapped_raises(self):
+        with self.assertRaises(ValueError):
+            E.key_to_bytes("Downn")                             # must NEVER be transmitted as text
+        with self.assertRaises(ValueError):
+            E.key_to_bytes("")
+
+
+class P02ScreenState(unittest.TestCase):
+    """P0-2: a bounded screen model yields the CURRENT frame — dismissed dialogs do not linger."""
+
+    def test_cr_overwrites_in_place(self):
+        s = E.ScreenState(rows=3, cols=10)
+        s.feed("hello\rHELLO")
+        self.assertEqual(s.render(), "HELLO")
+
+    def test_cursor_home_overwrite(self):
+        s = E.ScreenState(rows=3, cols=10)
+        s.feed("aaa")
+        s.feed("\x1b[Hb")                                       # CUP home + 'b'
+        self.assertEqual(s.render(), "baa")
+
+    def test_dismissed_dialog_does_not_persist(self):
+        s = E.ScreenState(rows=6, cols=40)
+        s.feed("❯ Yes, proceed\r\n  No, exit\r\n")
+        self.assertIn("Yes, proceed", s.render())
+        s.feed("\x1b[2J\x1b[H")                                 # clear + home (redraw)
+        s.feed("All set. Working...")
+        out = s.render()
+        self.assertEqual(out, "All set. Working...")
+        self.assertNotIn("Yes, proceed", out)                  # the old dialog is GONE (core of P0-2)
+
+    def test_erase_to_end_of_line(self):
+        s = E.ScreenState(rows=2, cols=10)
+        s.feed("abcdef")
+        s.feed("\x1b[1G\x1b[K")                                 # col 1 + erase-to-EOL
+        self.assertEqual(s.render(), "")
+
+    def test_incomplete_escape_held_across_feeds(self):
+        s = E.ScreenState(rows=2, cols=10)
+        s.feed("x\x1b[")                                        # CSI split mid-sequence
+        s.feed("Hy")                                            # completes \x1b[H then 'y'
+        self.assertEqual(s.render(), "y")
+
+    def test_bounded_grid_does_not_grow(self):
+        s = E.ScreenState(rows=2, cols=4)
+        s.feed("A" * 1000 + "\n" * 1000)
+        self.assertEqual(len(s.grid), 2)
+        self.assertTrue(all(len(r) == 4 for r in s.grid))
+
+    def test_pointer_option_reads_current_frame(self):
+        # the trust-gate's OWN classifier must read the pointer off the current rendered frame.
+        import importlib.util
+        tg_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "inv1-trust", "trustgate.py")
+        spec = importlib.util.spec_from_file_location("trustgate", tg_path)
+        tg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tg)
+        s = E.ScreenState(rows=5, cols=60)
+        s.feed("Do you trust the files in this folder?\r\n"
+               "\x1b[32m❯ 1. Yes, I trust this folder\x1b[0m\r\n  2. No, exit\r\n")
+        self.assertEqual(tg.pointer_option(s.render()), "yes")  # SGR stripped, pointer on the frame
+
+
+class P03NamespaceReadiness(unittest.TestCase):
+    """P0-3: bounded readiness poll (no arbitrary sleep), fail-closed on owner death / timeout."""
+
+    def test_ready_immediately(self):
+        self.assertEqual(E.poll_ns_ready(sample=lambda: ("hn", "hp", "tn", "tp"), alive=lambda: True,
+                                         now=lambda: 0.0, sleep=lambda s: None),
+                         ("hn", "hp", "tn", "tp"))
+
+    def test_becomes_ready_after_polls(self):
+        seq = [("hn", "hp", None, None), ("hn", "hp", "tn", None), ("hn", "hp", "tn", "tp")]
+        st = {"i": 0, "slept": 0, "t": 0.0}
+
+        def sample():
+            s = seq[min(st["i"], len(seq) - 1)]
+            st["i"] += 1
+            return s
+
+        def sleep(_):
+            st["slept"] += 1
+            st["t"] += 0.05
+
+        s = E.poll_ns_ready(sample=sample, alive=lambda: True, now=lambda: st["t"], sleep=sleep,
+                            timeout=10.0, interval=0.05)
+        self.assertEqual(s, ("hn", "hp", "tn", "tp"))
+        self.assertEqual(st["slept"], 2)                        # polled, no arbitrary one-shot sleep
+
+    def test_owner_death_raises(self):
+        with self.assertRaises(RuntimeError):
+            E.poll_ns_ready(sample=lambda: ("hn", "hp", None, None), alive=lambda: False,
+                            now=lambda: 0.0, sleep=lambda s: None)
+
+    def test_timeout_raises(self):
+        st = {"t": 0.0}
+
+        def sleep(_):
+            st["t"] += 0.05
+
+        with self.assertRaises(RuntimeError):
+            E.poll_ns_ready(sample=lambda: ("hn", "hp", "hn", "hp"),   # never fresh (tn==hn)
+                            alive=lambda: True, now=lambda: st["t"], sleep=sleep,
+                            timeout=0.2, interval=0.05)
+
+
+class P14NamespaceEmptiness(unittest.TestCase):
+    """P1-4: a process we could not inspect while it is still present must NOT yield a positive
+    'empty' — only an exited process is safely skipped."""
+
+    def test_ns_is_empty_unverifiable_blocks_credit(self):
+        self.assertTrue(E.ns_is_empty("FRESH", ["HOST"], unverifiable=0))
+        self.assertFalse(E.ns_is_empty("FRESH", ["HOST"], unverifiable=1))   # present-but-unreadable
+        self.assertFalse(E.ns_is_empty("FRESH", ["HOST", "FRESH"], unverifiable=0))
+
+    def test_scan_separates_unverifiable_from_exited(self):
+        inode = {"1": "HOST", "2": None, "3": None}             # 2 unreadable+present, 3 exited
+        inodes, unver = E.scan_proc_pidns(["1", "2", "3"], read_inode=lambda p: inode[p],
+                                          still_present=lambda p: p != "3")
+        self.assertEqual(sorted(inodes), ["HOST"])
+        self.assertEqual(unver, 1)                              # only pid 2 (present + unreadable)
+
+    def test_scan_all_unreadable_present_fails_closed(self):
+        inodes, unver = E.scan_proc_pidns(["1", "2"], read_inode=lambda p: None,
+                                          still_present=lambda p: True)
+        self.assertEqual((inodes, unver), ([], 2))
+        self.assertFalse(E.ns_is_empty("FRESH", inodes, unverifiable=unver))
+
+
+class RealSysIO(unittest.TestCase):
+    """Deterministic tests of RealSys's OWN fd/wiring behaviour using real OS pipes and injected
+    /proc — NO CLI, NO unshare, NO Docker (the real smoke stays unrun)."""
+
+    def _rs(self):
+        return E.RealSys("/bin/claude", "sha", "/mk")
+
+    def test_send_translates_key_to_pty_bytes(self):
+        rfd, wfd = os.pipe()
+        try:
+            rs = self._rs()
+            rs._inst["s"] = {"master": wfd, "screen": E.ScreenState()}
+            rs._send("s", "Down")
+            rs._send("s", "Enter")
+            self.assertEqual(os.read(rfd, 64), b"\x1b[B\r")     # real key events, not "DownEnter"
+        finally:
+            os.close(rfd)
+            os.close(wfd)
+
+    def test_pane_returns_current_frame_from_pty(self):
+        rfd, wfd = os.pipe()
+        try:
+            rs = self._rs()
+            rs._inst["s"] = {"master": rfd, "screen": E.ScreenState(rows=5, cols=40)}
+            os.write(wfd, "❯ Yes, proceed\r\n  No, exit\r\n".encode())
+            self.assertIn("Yes, proceed", rs.pane("s"))
+            os.write(wfd, b"\x1b[2J\x1b[Hdone")                 # redraw: clear + new content
+            out = rs.pane("s")
+            self.assertEqual(out, "done")
+            self.assertNotIn("Yes, proceed", out)               # old dialog gone through the PTY (P0-2)
+        finally:
+            os.close(rfd)
+            os.close(wfd)
+
+    def test_pane_read_error_is_none(self):
+        rs = self._rs()
+        rfd, wfd = os.pipe()
+        os.close(rfd)                                           # a closed fd -> select/read raises
+        rs._inst["s"] = {"master": rfd, "screen": E.ScreenState()}
+        self.assertIsNone(rs.pane("s"))                         # fail closed
+        os.close(wfd)
+
+    def test_namespace_empty_wiring_fail_closed(self):
+        rs = self._rs()
+        owner = {"ns_pid": "FRESH"}
+        with mock.patch("e2e_smoke.os.listdir", return_value=["1", "2"]), \
+             mock.patch("e2e_smoke.os.path.exists", return_value=True):
+            rs._readlink = lambda pid, ns: "pid:[HOST]"         # none in FRESH, all readable
+            self.assertTrue(rs._namespace_empty(owner))
+            rs._readlink = lambda pid, ns: "pid:[FRESH]" if pid == 2 else "pid:[HOST]"
+            self.assertFalse(rs._namespace_empty(owner))        # a process still in FRESH
+            rs._readlink = lambda pid, ns: None                 # unreadable + present
+            self.assertFalse(rs._namespace_empty(owner))        # P1-4: unverifiable ⇒ not credited
 
 
 class E2WindowSequencing(unittest.TestCase):
