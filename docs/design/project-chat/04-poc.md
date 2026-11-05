@@ -3341,7 +3341,7 @@ queda intacto como el de la corrida 1), con los cambios de §1.14.18.2–§1.14.
 regresión (y el barrido de mutaciones), y los criterios PASS/FAIL/INCONCLUSIVE de arriba fijados de
 antemano. No se re-ejecutan los 13 intentos ya **blocked**. Nada de esto está autorizado: espera tu
 revisión del diseño.
-#### 1.14.19 Kit de corrida 2 de PASS-B1a (`8eafe1a`): auditado cuatro veces (NO-GO cada una) y corregido, validado localmente; **D3 = Opción A (INCONCLUSIVE); corrida 2 autorizada condicionalmente (diagnóstica, P0/N14/N17-project) — pendiente de ejecución en VM100 por el responsable**
+#### 1.14.19 Kit de corrida 2 de PASS-B1a (`8eafe1a`): auditado cuatro veces (NO-GO cada una) y corregido, validado localmente; **D3 = Opción A (INCONCLUSIVE); corrida 2 ejecutada en VM100 → resultado INCONCLUSIVE (ver §1.14.20)**
 
 GO del responsable para implementar el kit de corrida 2 con cuatro condiciones (§1.14.18), NO-GO
 para ejecutarlo. El kit pasó **cuatro auditorías estáticas independientes del responsable**, cada
@@ -3602,6 +3602,78 @@ condicionalmente** (diagnóstica, P0/N14/N17-project) y la ejecuta el responsabl
 checklist de STOP de arriba. El contenedor y la evidencia de la corrida 1 permanecen retenidos, y
 **no se corre `cleanup`** en ninguno de los dos contenedores; `e00ef29`, `37fd028`, `5eb257a`,
 `7f4c034`, `f11c467` y `824a2a2` no se alteran.
+
+#### 1.14.20 Corrida 2 (diagnóstica) ejecutada en VM100 — resultado **INCONCLUSIVE** (cierre; no se repite)
+
+El responsable ejecutó la corrida 2 en VM100 con el kit fijado por SHA `8eafe1a` (handoff
+[run2-handoff.md](./run2-handoff.md)) y generó el consolidado con **ambos** conjuntos de evidencia.
+**Resultado final: INCONCLUSIVE.** La corrida se **cierra, no se repite.** Los resultados **no se
+reinterpretan**; el kit auditado **no se modifica**. Ambos contenedores y ambas evidencias quedan
+**retenidos** (sin `cleanup`).
+
+**Integridad de captura ≠ validez de controles globales (distinción explícita).** Son dos ejes
+independientes y aquí divergen:
+- **Integridad de captura** (`SHA256SUMS`): **OK en ambas corridas** — la evidencia está completa y
+  sin alterar; nada se perdió ni se manipuló.
+- **Validez de controles globales** (baseline/probe/guard/CLI/applied, vía `analyze`): **run 1
+  válida; run 2 INVÁLIDA.** Run 2 es inválida **no** por un problema de captura, sino porque un
+  **control global** falló (el baseline P0 no estableció los hooks, ver abajo). Una corrida con
+  `SHA256SUMS` OK puede ser inválida por controles, y es exactamente lo que ocurrió: la evidencia es
+  fiable, pero no habilita un veredicto de alcance reducido.
+
+**Procedencia de los hallazgos (consolidado: 15 blocked, 0 loaded, 2 inconclusive).**
+- **0 loaded** en cualquiera de las dos corridas — ningún ataque ejecutó código (ni impostor
+  excluido): no hay brecha demostrada.
+- **15 blocked** aportados por **run 1 (`e00ef29`, válida)** — los intentos fuera del subconjunto
+  de run 2 (incluido N17-user por el adaptador legacy).
+- **2 inconclusive**, ambos del subconjunto de run 2, marcados **`run2-invalid`** (no se pueden
+  juzgar porque la corrida que los posee es inválida por controles globales):
+  - **N14** → `inconclusive / run2-invalid`.
+  - **N17-project** → `inconclusive / run2-invalid`.
+
+**Diagnóstico (de la evidencia retenida, sin repetir `measure`).**
+- **P0 (run 2)** terminó con **rc=1 antes de confirmar el workspace-trust**; los hooks **no llegaron
+  a cargarse** ⇒ el baseline/probe del control global de run 2 no se estableció ⇒ run 2 inválida.
+  (En run 1 el mismo P0 fue válido.)
+- **N14 y N17-project (run 2)** sí registraron `session.start`, probe organizacional y guard en sus
+  propios arranques — el fallo es del **baseline global P0**, no de esos intentos; aun así, un
+  baseline inválido invalida la corrida completa, así que no son juzgables.
+- **N14** no emitió la evidencia específica de rechazo de `skills-dir`: aun con una corrida válida,
+  N14 quedaría inconclusive por falta de la línea concreta de bloqueo (consistente con la limitación
+  ya observada en 2.1.314).
+- **N17-project** mantiene la limitación de la **Opción A**: sin señal verificable de aprobación
+  confirmada en 2.1.314, es INCONCLUSIVE. **Un INCONCLUSIVE es un resultado esperado y aceptable; no
+  se reinterpreta como *blocked* sin nueva evidencia causal.**
+
+**Lectura.** El experimento diagnóstico no demostró una brecha (0 loaded) ni cerró los dos intentos
+del subconjunto como *blocked*, por un fallo de baseline en run 2 (P0) y las limitaciones de
+evidencia de 2.1.314 en N14/N17-project. Es un **INCONCLUSIVE honesto**: la seguridad de Channels en
+estos dos caminos **sigue sin demostrarse**, y un PASS de alcance reducido **no** está habilitado.
+
+**Investigaciones futuras (independientes; registradas, no autorizadas).**
+1. **Fallo de trust en P0 (run 2).** Por qué P0 terminó rc=1 antes de confirmar el workspace-trust y
+   no cargó hooks, siendo que en run 1 el mismo P0 fue válido. Hipótesis: fragilidad de timing en el
+   tecleo/confirmación del trust por el harness, o una diferencia de estado del contenedor. **Es el
+   defecto que invalidó run 2 y bloquea juzgar N14/N17-project.** Investigable sobre la **evidencia
+   de run 2 ya retenida** (debug/pane de P0), **sin** una nueva corrida en VM100.
+2. **Ausencia de rechazo demostrable en N14 (`@skills-dir`).** Si 2.1.314 emite —en algún canal— una
+   línea decisiva de que el plugin plantado en `~/.claude/skills/` fue rechazado por política, o si
+   estructuralmente no la emite (en cuyo caso N14 es INCONCLUSIVE por diseño de 2.1.314, a
+   documentar como límite).
+3. **Causalidad aprobación/bloqueo en N17-project (Opción B).** Si el rechazo específico de n17p
+   ocurre **como consecuencia** de aprobar el servidor del proyecto (y no antes de la interacción ni
+   al elegir *Continue without*), usando el experimento de 4 condiciones (§1.14.19 D3) **bajo la
+   política real por drop-in root**. Sólo si se demuestra causalidad podría considerarse la Opción B
+   como criterio formal de *blocked*; si no, N17-project permanece INCONCLUSIVE.
+
+**Recomendación de prioridad (antes de volver a pedir una ejecución en VM100):** empezar por la
+**#1 (trust de P0)**. Es el defecto gateador —sin un baseline P0 válido, run 2 es inválida y
+N14/N17-project no son juzgables— y es **diagnosticable sobre la evidencia ya retenida, sin una nueva
+corrida**. Las #2 y #3 son más abiertas y podrían concluir en "límite de 2.1.314"; además, re-correr
+antes de resolver #1 repetiría el mismo INCONCLUSIVE. Orden sugerido: #1 (sobre evidencia retenida)
+→ si P0 se vuelve fiable, recién entonces evaluar una corrida acotada para #2/#3, asumiendo que
+pueden seguir INCONCLUSIVE por diseño de 2.1.314.
+
 ## 2. Versiones
 
 | Variante | CLI | Motivo |
