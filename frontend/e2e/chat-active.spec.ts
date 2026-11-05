@@ -130,4 +130,31 @@ test.describe("chat: active vs earlier", () => {
 		await expect(page.locator("#chat-summary .chat-summary-active")).toHaveText("1 live");
 		await expect(list.locator(".chat-conv-row").first()).toContainText("Waiting for input");
 	});
+
+	test("'Open terminal' from a busy conversation lands on that conversation's tab, not the active one", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		const c1 = backend.conversations[0]!;
+		c1.status = "running";
+		c1.tabId = "tab-2";
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.expectTerminalReady();
+		await expect(page.locator("#terminal-tabs .tab-chip.active")).toHaveAttribute(
+			"data-tab-id",
+			"tab-1",
+		);
+		await app.switchView("chat");
+		await page.locator("#chat-list .chat-conv-row", { hasText: "Refactor auth flow" }).click();
+		const link = page.locator(".chat-composer-status button", { hasText: "Open terminal" });
+		await expect(link).toHaveText("Open terminal · Tab 2");
+		await link.click();
+		await expect(page.locator("#terminal-tabs .tab-chip.active")).toHaveAttribute(
+			"data-tab-id",
+			"tab-2",
+		);
+		await expect(page.locator("#terminal-container .tab-pane.active")).toContainText("(tab-2)");
+	});
 });

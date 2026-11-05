@@ -11,6 +11,7 @@ const mainState = vi.hoisted(() => ({
 	activeSessionId: null as string | null,
 	sessions: [] as { sessionId: string; name: string; status: string }[],
 	currentTerminals: new Map<string, unknown>(),
+	currentTabs: [] as { tabId: string; label: string; createdAt: number }[],
 	mobile: false,
 	showToast: vi.fn(),
 	showCopySuccessToast: vi.fn(),
@@ -25,6 +26,9 @@ vi.mock("./main.js", () => ({
 	},
 	get currentTerminals() {
 		return mainState.currentTerminals;
+	},
+	get currentTabs() {
+		return mainState.currentTabs;
 	},
 	getActiveTerminal: () => ({ focus: vi.fn() }),
 	isMobile: () => mainState.mobile,
@@ -53,7 +57,13 @@ const api = vi.hoisted(() => ({
 	),
 }));
 vi.mock("./api.js", () => api);
-vi.mock("./sessionCore.js", () => ({ refreshSessions: vi.fn(async () => {}) }));
+const core = vi.hoisted(() => ({
+	refreshSessions: vi.fn(async () => {}),
+	showTerminalTab: vi.fn(
+		(_tabId: string | null): "opened" | "not-running" | "unknown" | "failed" => "opened",
+	),
+}));
+vi.mock("./sessionCore.js", () => core);
 
 type ViewSwitch = typeof import("./viewSwitch.js");
 let vs: ViewSwitch;
@@ -1041,6 +1051,44 @@ describe("Composer", () => {
 		await openSendable();
 		expect(composerTextarea().disabled).toBe(false);
 		expect(sendBtn().disabled).toBe(false);
+	});
+
+	it("'Open terminal' names and opens the conversation's own tab; an unknown tab is said, not guessed", async () => {
+		mainState.currentTabs = [
+			{ tabId: "t1", label: "Tab 1", createdAt: 1 },
+			{ tabId: "t2", label: "Tab 2", createdAt: 2 },
+		];
+		await openSendable({ status: "running", tabId: "t2" });
+		const link = () =>
+			[...status().querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+				b.textContent?.startsWith("Open terminal"),
+			)!;
+		expect(link().textContent).toBe("Open terminal · Tab 2");
+		link().click();
+		expect(core.showTerminalTab).toHaveBeenLastCalledWith("t2");
+		expect(mainState.showToast).not.toHaveBeenCalled();
+		// Listed but the switch did not happen: said, with the tab's name.
+		core.showTerminalTab.mockReturnValueOnce("failed");
+		link().click();
+		expect(mainState.showToast).toHaveBeenLastCalledWith(
+			"Could not switch to Tab 2; check the active tab before typing.",
+			true,
+		);
+		// Named on the button but gone from the list by the click: said too.
+		mainState.showToast.mockClear();
+		core.showTerminalTab.mockReturnValueOnce("unknown");
+		link().click();
+		expect(mainState.showToast).toHaveBeenCalledTimes(1);
+		// A stopped session: the Terminal shows its state; no extra toast.
+		mainState.showToast.mockClear();
+		core.showTerminalTab.mockReturnValueOnce("not-running");
+		link().click();
+		expect(mainState.showToast).not.toHaveBeenCalled();
+		await openSendable({ status: "running", tabId: null });
+		expect(link().textContent).toBe("Open terminal (its tab is unknown)");
+		await openSendable({ status: "running", tabId: "gone" });
+		expect(link().textContent).toBe("Open terminal (its tab is unknown)");
+		mainState.currentTabs = [];
 	});
 
 	it("is disabled while Claude is working or a permission prompt is open; a stale live claim does not block", async () => {
