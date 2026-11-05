@@ -132,8 +132,12 @@ export function openSwitcher(opener?: Element | null): void {
 	let activeKey: string | null = null;
 	const keyOf = (r: Row) => `${r.item.sessionId}/${r.item.cid}${r.agentId ? `#${r.agentId}` : ""}`;
 
-	// Subagents of the conversations with FRESH evidence (needs you / working):
-	// "working" for an agent of a stale conversation would be a guess.
+	// Subagents, only of conversations whose FRESH evidence says work is going
+	// on (running, background tasks, a permission prompt). Not of a stale one,
+	// and not of `waiting_input`: its turn_end with no background tasks says
+	// nothing is still running, so an unended agent there would contradict it.
+	const AGENT_STATUSES = new Set(["running", "waiting_background", "waiting_permission"]);
+	const gapsOf = new Map<string, number>();
 	const agents = new Map<
 		string,
 		{ kind: "loading" } | { kind: "ok"; g: AgentsAtAGlance } | { kind: "error" }
@@ -183,13 +187,11 @@ export function openSwitcher(opener?: Element | null): void {
 		const q = input.value;
 		shown = [];
 		listEl.replaceChildren();
-		const agentMatches = (i: SwitcherItem) => {
+		const agentNames = (i: SwitcherItem) => {
 			const a = agents.get(conversationKey(i));
-			if (a?.kind !== "ok") return false;
-			const t = q.trim().toLocaleLowerCase();
-			return t !== "" && a.g.working.some((w) => agentName(w).toLocaleLowerCase().includes(t));
+			return a?.kind === "ok" ? a.g.working.map(agentName) : [];
 		};
-		const sections = sectionize(allItems().filter((i) => matches(i, q) || agentMatches(i)));
+		const sections = sectionize(allItems().filter((i) => matches(i, q, agentNames(i))));
 		let n = 0;
 		for (const s of sections) {
 			const group = el("div", "switcher-group");
@@ -209,8 +211,13 @@ export function openSwitcher(opener?: Element | null): void {
 				main.appendChild(el("span", "switcher-option-title", item.title));
 				main.appendChild(el("span", "switcher-option-project", item.projectName));
 				const ag = agents.get(conversationKey(item));
-				if (ag?.kind === "ok" && ag.g.total > 0)
-					main.appendChild(el("span", "switcher-option-agents", agentsLine(ag.g)));
+				if (ag?.kind === "ok" && ag.g.total > 0) {
+					let line = agentsLine(ag.g);
+					// Lost events: an agent's end may be among them.
+					if (ag.g.working.length > 0 && (gapsOf.get(conversationKey(item)) ?? 0) > 0)
+						line += " · some events were lost, ends may be missing";
+					main.appendChild(el("span", "switcher-option-agents", line));
+				}
 				o.appendChild(main);
 				const side = el("div", "switcher-option-side");
 				const chip = el("span", `chat-status tone-${item.status.tone}`);
@@ -241,10 +248,10 @@ export function openSwitcher(opener?: Element | null): void {
 						so.id = `switcher-opt-${n++}`;
 						so.setAttribute("role", "option");
 						so.setAttribute("aria-selected", "false");
-						so.setAttribute("aria-label", `${agentName(w)}, working, in ${item.title}`);
+						so.setAttribute("aria-label", `${agentName(w)}, started, no end yet, in ${item.title}`);
 						so.dataset.agentId = w.agentId;
 						so.appendChild(el("span", "switcher-agent-name", `↳ ${agentName(w)}`));
-						so.appendChild(el("span", "switcher-agent-state", "working"));
+						so.appendChild(el("span", "switcher-agent-state", "started, no end yet"));
 						const arow: Row = { item, agentId: w.agentId };
 						const aidx = shown.length;
 						so.addEventListener("click", () => go(arow));
@@ -255,14 +262,17 @@ export function openSwitcher(opener?: Element | null): void {
 						group.appendChild(so);
 					}
 					const more = ag.g.working.length - MAX_AGENT_ROWS;
-					if (more > 0)
-						group.appendChild(
-							el(
-								"div",
-								"switcher-agent-more",
-								`+${more} more working — open the conversation to see them`,
-							),
+					if (more > 0) {
+						// Visual only: the count is already in the conversation option's
+						// own text (agentsLine), which is what a screen reader reads.
+						const m = el(
+							"div",
+							"switcher-agent-more",
+							`+${more} more — open the conversation to see them`,
 						);
+						m.setAttribute("aria-hidden", "true");
+						group.appendChild(m);
+					}
 				}
 			}
 			listEl.appendChild(group);
@@ -347,13 +357,16 @@ export function openSwitcher(opener?: Element | null): void {
 			if (!visibleInSwitcher(c, now)) continue;
 			const item = toItem(c, p, now);
 			if (item.bucket !== "attention" && item.bucket !== "working") continue;
+			if (!AGENT_STATUSES.has(c.status)) continue;
 			const key = conversationKey(item);
+			gapsOf.set(key, c.gapsCount ?? 0);
 			if (agents.has(key)) continue;
 			agents.set(key, { kind: "loading" });
 			void slots
 				.run(
 					(signal) => fetchConversationAgents(item.sessionId, item.cid, signal),
 					SWITCHER_TIMEOUT_MS,
+					() => closed,
 				)
 				.then((r) => {
 					if (closed) return;

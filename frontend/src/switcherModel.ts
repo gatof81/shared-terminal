@@ -113,11 +113,14 @@ export function sectionize(
 	return out;
 }
 
-/** Every whitespace-separated term must appear in the title or the project name. */
-export function matches(item: SwitcherItem, query: string): boolean {
+/**
+ * Every whitespace-separated term must appear in the title, the project name
+ * or one of `extra` (e.g. its agents' names) — one rule for all of them.
+ */
+export function matches(item: SwitcherItem, query: string, extra: readonly string[] = []): boolean {
 	const terms = query.toLocaleLowerCase().split(/\s+/).filter(Boolean);
 	if (terms.length === 0) return true;
-	const hay = `${item.title}\n${item.projectName}`.toLocaleLowerCase();
+	const hay = [item.title, item.projectName, ...extra].join("\n").toLocaleLowerCase();
 	return terms.every((t) => hay.includes(t));
 }
 
@@ -159,15 +162,6 @@ export function explainProjectError(s: Extract<ProjectState, { kind: "error" }>)
 }
 
 /**
- * Loads project lists for one switcher: at most `concurrency` requests in
- * flight across EVERY `load` call (the first load and each Retry share the
- * slots, so retrying a burst of 429s cannot exceed the bound). A request's
- * `timeoutMs` starts when it gets its slot, not while it waits for one (the
- * abort only stops waiting for a read-only GET). `onUpdate` sees each project
- * settle in exactly one state; after `isCancelled` nothing new starts and
- * nothing more is reported.
- */
-/**
  * A counting semaphore: at most `size` holders. Shared by everything one
  * switcher loads (project lists, agent lists), so the whole switcher stays
  * within one bound.
@@ -188,8 +182,14 @@ export class Slots {
 	async run<T>(
 		fn: (signal: AbortSignal) => Promise<T>,
 		timeoutMs: number,
-	): Promise<{ value?: T; error?: unknown; timedOut: boolean }> {
+		isCancelled?: () => boolean,
+	): Promise<{ value?: T; error?: unknown; timedOut: boolean; cancelled?: boolean }> {
 		await this.acquire();
+		// Closed while waiting for a slot: start nothing (the slot goes on).
+		if (isCancelled?.()) {
+			this.release();
+			return { timedOut: false, cancelled: true };
+		}
 		const ctrl = new AbortController();
 		let timedOut = false;
 		const timer = setTimeout(() => {
@@ -207,6 +207,15 @@ export class Slots {
 	}
 }
 
+/**
+ * Loads project lists for one switcher: at most `concurrency` requests in
+ * flight across EVERY `load` call (the first load and each Retry share the
+ * slots, so retrying a burst of 429s cannot exceed the bound). A request's
+ * `timeoutMs` starts when it gets its slot, not while it waits for one (the
+ * abort only stops waiting for a read-only GET). `onUpdate` sees each project
+ * settle in exactly one state; after `isCancelled` nothing new starts and
+ * nothing more is reported.
+ */
 export class ProjectLoader {
 	private readonly slots: Slots;
 	private readonly timeoutMs: number;

@@ -4,9 +4,11 @@
  *
  * Input is the backend's per-conversation agent list (`GET …/agents`): each
  * agent's start and end come from captured hooks (SubagentStart /
- * SubagentStop), so "working" means "started, no end reported yet". Callers
- * show it only next to a conversation whose own evidence is fresh — an agent
- * of a stale conversation is not presented as working.
+ * SubagentStop). "done" is confirmed by a SubagentStop; an agent without one
+ * is only "started, no end yet" — nothing times it out, an interruption or a
+ * lost event leaves it so — and it is never called "working". Callers show
+ * those only next to a conversation whose own fresh evidence says work is
+ * going on (running, background tasks, a permission prompt).
  */
 
 export interface AgentEntry {
@@ -33,11 +35,11 @@ export function atAGlance(agents: readonly AgentEntry[]): AgentsAtAGlance {
 	return { working, done: agents.length - working.length, total: agents.length };
 }
 
-/** "2 agents working · 1 done", "1 agent done", "" when there are none. */
+/** "2 agents started, no end yet · 1 done", "1 agent done", "" when there are none. */
 export function agentsLine(g: AgentsAtAGlance): string {
 	const parts: string[] = [];
 	if (g.working.length > 0)
-		parts.push(`${g.working.length} agent${g.working.length === 1 ? "" : "s"} working`);
+		parts.push(`${g.working.length} agent${g.working.length === 1 ? "" : "s"} started, no end yet`);
 	if (g.done > 0)
 		parts.push(
 			g.working.length > 0 ? `${g.done} done` : `${g.done} agent${g.done === 1 ? "" : "s"} done`,

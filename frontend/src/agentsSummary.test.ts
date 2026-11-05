@@ -23,9 +23,9 @@ describe("agentsSummary", () => {
 	});
 	it("says what there is, in words", () => {
 		expect(agentsLine(atAGlance([]))).toBe("");
-		expect(agentsLine(atAGlance([a({})]))).toBe("1 agent working");
+		expect(agentsLine(atAGlance([a({})]))).toBe("1 agent started, no end yet");
 		expect(agentsLine(atAGlance([a({}), a({ status: "done" }), a({ status: "done" })]))).toBe(
-			"1 agent working · 2 done",
+			"1 agent started, no end yet · 2 done",
 		);
 		expect(agentsLine(atAGlance([a({ status: "done" })]))).toBe("1 agent done");
 	});
