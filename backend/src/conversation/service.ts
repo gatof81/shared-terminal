@@ -1018,8 +1018,8 @@ export class ConversationService {
 	 * evicted; while an eviction's snapshot write is in flight it answers from
 	 * the entry being written); a missing or unreadable one counts as a holder
 	 * (fail closed: unbound). Resident holders are re-checked at the write,
-	 * and a peer skipped as resident that G4 evicted meanwhile cancels the
-	 * bind (it was checked by neither path); a stop since the event (start
+	 * and a non-resident peer not read in this pass (skipped as resident, or
+	 * new, and evicted since) cancels the bind — checked by neither path; a stop since the event (start
 	 * generation changed) cancels it; an evicted holder that is over lets go.
 	 * A cancelled bind is retried by the conversation's next event (every
 	 * `!paneId` path does).
@@ -1031,13 +1031,11 @@ export class ConversationService {
 		gen: number,
 	): Promise<void> {
 		const overHolders: ConvRuntime[] = [];
-		const skippedResident: ConvRuntime[] = [];
+		const peeked = new Set<string>();
 		for (const other of [...this.runtime.values()]) {
 			if (other.stSessionId !== stSessionId || other.cid === cid) continue;
-			if (this.deps.store.getResidentIndex(other.stSessionId, other.cid)) {
-				skippedResident.push(other);
-				continue;
-			}
+			if (this.deps.store.getResidentIndex(other.stSessionId, other.cid)) continue;
+			peeked.add(other.cid);
 			const snap = await this.deps.store.peekIndex(other.stSessionId, other.cid);
 			if (snap === null) return;
 			if (snap.paneId !== pane) continue;
@@ -1045,7 +1043,12 @@ export class ConversationService {
 			overHolders.push(other);
 		}
 		if (this.startGenOf(stSessionId) !== gen) return;
-		for (const other of skippedResident) {
+		// Every peer that is not resident now must have been read in this pass:
+		// one skipped as resident and evicted since, or one that appeared during
+		// the reads and was evicted, was checked by neither path.
+		for (const other of this.runtime.values()) {
+			if (other.stSessionId !== stSessionId || other.cid === cid) continue;
+			if (peeked.has(other.cid)) continue;
 			if (!this.deps.store.getResidentIndex(other.stSessionId, other.cid)) return;
 		}
 		let bound = false;

@@ -232,4 +232,43 @@ describe("ConversationStore — G4 resident LRU", () => {
 		expect(idx.lastSeq).toBe(1);
 		expect(await store.peekIndex("s1", "c50")).toMatchObject({ cid: "c50", lastSeq: 1 });
 	});
+
+	it("peekIndex during an eviction's snapshot write answers the entry being written, not the older file", async () => {
+		let hold: Promise<void> | null = null;
+		let release!: () => void;
+		const gated: StoreFs = {
+			mkdir: (p, o) => fs.mkdir(p, o),
+			appendFile: (p, d) => fs.appendFile(p, d),
+			writeFile: async (p, d) => {
+				if (hold && String(p).startsWith(store.indexPath("s1", "c0"))) await hold;
+				return fs.writeFile(p, d);
+			},
+			rename: (a, b) => fs.rename(a, b),
+			rm: (p, o) => fs.rm(p, o),
+			stat: (p) => fs.stat(p),
+			readFile: (p, e) => fs.readFile(p, e),
+			readdir: (p) => fs.readdir(p),
+		} as StoreFs;
+		const store = new ConversationStore({
+			workspaceRoot: root,
+			fs: gated,
+			limits: { residentIndexes: 1 },
+		});
+		await store.open("s1", "c0");
+		store.enqueue("s1", "c0", ev(0));
+		await store.flush("s1", "c0"); // on disk: paneId null
+		store.update("s1", "c0", (i) => {
+			i.paneId = "%0"; // only in memory
+		});
+		hold = new Promise<void>((r) => {
+			release = r;
+		});
+		const opening = store.open("s1", "c1"); // evicts c0; its write is held
+		await new Promise((r) => setTimeout(r, 20));
+		expect(store.getResidentIndex("s1", "c0")).toBeUndefined();
+		expect((await store.peekIndex("s1", "c0"))?.paneId).toBe("%0");
+		release();
+		await opening;
+		expect((await store.peekIndex("s1", "c0"))?.paneId).toBe("%0");
+	});
 });
