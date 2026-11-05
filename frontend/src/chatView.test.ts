@@ -1074,6 +1074,11 @@ describe("Composer", () => {
 			"Could not switch to Tab 2; check the active tab before typing.",
 			true,
 		);
+		// Named on the button but gone from the list by the click: said too.
+		mainState.showToast.mockClear();
+		core.showTerminalTab.mockReturnValueOnce("unknown");
+		link().click();
+		expect(mainState.showToast).toHaveBeenCalledTimes(1);
 		// A stopped session: the Terminal shows its state; no extra toast.
 		mainState.showToast.mockClear();
 		core.showTerminalTab.mockReturnValueOnce("not-running");

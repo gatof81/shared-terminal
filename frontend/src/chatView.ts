@@ -1956,9 +1956,12 @@ function openTerminalButton(c: ConversationSummary | undefined): HTMLButtonEleme
 	const b = button(label, "chat-link", () => {
 		// A listed tab that could not be opened is the one case to warn about;
 		// a stopped session shows its own state in the Terminal.
-		if (tab && showTerminalTab(c.tabId) === "failed")
+		const r = showTerminalTab(c.tabId);
+		// The button named a tab and it was not opened (gone from the list
+		// since, or the switch failed): say so. A stopped session shows its
+		// own state in the Terminal.
+		if (tab && (r === "failed" || r === "unknown"))
 			showToast(`Could not switch to ${tab.label}; check the active tab before typing.`, true);
-		else if (!tab) showTerminalTab(c.tabId);
 	});
 	b.dataset.openTerminalTab = tab?.tabId ?? "";
 	return b;
