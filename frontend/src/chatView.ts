@@ -1856,7 +1856,7 @@ function composer(): HTMLElement {
 	const ta = el("textarea");
 	ta.rows = 1;
 	ta.setAttribute("aria-label", "Message to Claude");
-	const sendBtn = button("Send", "files-btn chat-send", () => void submitComposer());
+	const sendBtn = button("Send", "files-btn primary chat-send", () => void submitComposer());
 	const reason = st ? composerBlockReason(c, st) : "Open a conversation to send a message.";
 	const can = reason === null;
 	ta.disabled = !can;
