@@ -137,6 +137,9 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.session-state.failed {
+  color: var(--c-err-soft);
+}
 .session-actions {
   display: flex;
   gap: 2px;

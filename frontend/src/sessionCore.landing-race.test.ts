@@ -52,6 +52,7 @@ vi.mock("./main.js", () => ({
 	get closingTabs() {
 		return mainState.closingTabs;
 	},
+	setServerReachable: vi.fn(),
 	setSessions: (v: Sess[]) => {
 		mainState.sessions = v;
 	},

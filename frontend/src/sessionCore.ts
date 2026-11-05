@@ -45,6 +45,7 @@ import {
 	setChromeOpen,
 	setCurrentActiveTabId,
 	setCurrentTabs,
+	setServerReachable,
 	setSessions,
 	showCopySuccessToast,
 	showToast,
@@ -326,13 +327,17 @@ export async function refreshSessions() {
 	// module-variable to get out of sync with the DOM.
 	const includeTerminated = showTerminatedToggle.checked;
 	const gen = ++listGen;
+	// Only the request decides the reachability light, not a render error after it.
+	let answered = false;
 	try {
 		const list = await listSessions(includeTerminated);
+		answered = true;
 		// Superseded (a newer request, or a logout) or answered for an
 		// account that is no longer the one signed in: not ours to apply.
 		if (gen !== listGen || !isLoggedIn()) return;
 		const firstLoad = !listLoaded;
 		listLoaded = true;
+		setServerReachable(true);
 		setSessions(list);
 		console.debug(
 			`[sessions] fetched ${sessions.length} session(s) (includeTerminated=${includeTerminated})`,
@@ -348,6 +353,7 @@ export async function refreshSessions() {
 		}
 	} catch (err) {
 		if (gen !== listGen) return;
+		if (!answered) setServerReachable(false);
 		showToast((err as Error).message, true);
 	}
 }
@@ -416,6 +422,21 @@ export function renderSessionList() {
 			memLine.className = "session-usage";
 			memLine.textContent = `Mem ${formatBytes(s.usage.memBytes)} (${s.usage.memPercent.toFixed(0)}%)`;
 			nameCol.appendChild(memLine);
+		} else if (s.status !== "running") {
+			// The dot's colour alone told stopped / terminated / failed apart.
+			// The row's aria-label already says it: this line is for the eye.
+			const state = document.createElement("span");
+			state.className = `session-usage session-state ${s.status}`;
+			state.setAttribute("aria-hidden", "true");
+			state.textContent =
+				s.status === "stopped"
+					? "Stopped"
+					: s.status === "terminated"
+						? "Terminated · files kept"
+						: s.status === "failed"
+							? "Failed · open the log"
+							: s.status;
+			nameCol.appendChild(state);
 		}
 		select.appendChild(nameCol);
 		select.addEventListener("click", () => {
