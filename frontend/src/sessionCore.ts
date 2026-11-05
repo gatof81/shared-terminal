@@ -955,19 +955,25 @@ function updateChipBadge(tabId: string) {
  * Show the Terminal on one of the active session's tabs (Chat's "Open
  * terminal" for a conversation: its pane lives in that tab, and landing on
  * whichever tab happened to be active sent people to the wrong Claude).
- * Returns false — the Terminal shown, the tab untouched — when the tab is not
- * one of the session's: the caller says so instead of pretending.
+ * The Terminal is shown in every case; the tab is switched only on "opened".
+ * "not-running": the session is down (the Terminal shows its stopped state,
+ * nothing else to say); "unknown": not one of the session's tabs; "failed":
+ * listed, but the switch did not happen — the caller says so.
  */
-export function showTerminalTab(tabId: string | null): boolean {
+export function showTerminalTab(
+	tabId: string | null,
+): "opened" | "not-running" | "unknown" | "failed" {
 	setView("terminal");
-	if (tabId === null || !currentTabs.some((t) => t.tabId === tabId)) return false;
+	const s = sessions.find((x) => x.sessionId === activeSessionId);
+	if (!s || s.status !== "running") return "not-running";
+	if (tabId === null || !currentTabs.some((t) => t.tabId === tabId)) return "unknown";
 	try {
 		openTab(tabId);
 	} catch (err) {
 		showToast((err as Error).message, true);
-		return false;
+		return "failed";
 	}
-	return currentActiveTabId === tabId;
+	return currentActiveTabId === tabId ? "opened" : "failed";
 }
 
 function openTab(tabId: string) {

@@ -59,7 +59,9 @@ const api = vi.hoisted(() => ({
 vi.mock("./api.js", () => api);
 const core = vi.hoisted(() => ({
 	refreshSessions: vi.fn(async () => {}),
-	showTerminalTab: vi.fn((_tabId: string | null) => true),
+	showTerminalTab: vi.fn(
+		(_tabId: string | null): "opened" | "not-running" | "unknown" | "failed" => "opened",
+	),
 }));
 vi.mock("./sessionCore.js", () => core);
 
@@ -1064,6 +1066,19 @@ describe("Composer", () => {
 		expect(link().textContent).toBe("Open terminal · Tab 2");
 		link().click();
 		expect(core.showTerminalTab).toHaveBeenLastCalledWith("t2");
+		expect(mainState.showToast).not.toHaveBeenCalled();
+		// Listed but the switch did not happen: said, with the tab's name.
+		core.showTerminalTab.mockReturnValueOnce("failed");
+		link().click();
+		expect(mainState.showToast).toHaveBeenLastCalledWith(
+			"Could not switch to Tab 2; check the active tab before typing.",
+			true,
+		);
+		// A stopped session: the Terminal shows its state; no extra toast.
+		mainState.showToast.mockClear();
+		core.showTerminalTab.mockReturnValueOnce("not-running");
+		link().click();
+		expect(mainState.showToast).not.toHaveBeenCalled();
 		await openSendable({ status: "running", tabId: null });
 		expect(link().textContent).toBe("Open terminal (its tab is unknown)");
 		await openSendable({ status: "running", tabId: "gone" });
