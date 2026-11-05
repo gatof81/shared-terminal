@@ -1109,10 +1109,113 @@ describe("v1.8.5 — who may hold a pane (§5.2): resume, takeover and the child
 			);
 			await vi.advanceTimersByTimeAsync(20);
 			await store.flush("s1", "late");
-			expect((await panes()).late).toBe("%0");
+			await store.flush("s1", "done");
+			// One holder: the ended one let go (state kept — not a binding_lost).
+			expect(await panes()).toMatchObject({ late: "%0", done: null });
+			expect((await state("done"))?.status).toBe("ended");
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it("a resident holder that has ended lets go when an unknown binds the pane: one holder", async () => {
+		vi.useFakeTimers();
+		try {
+			await interactiveIn("done");
+			await service.ingest("s1", "%0", hook("SessionEnd", { reason: "prompt_input_exit" }, "done"));
+			now += SESSION_END_GRACE_MS + 1;
+			await vi.advanceTimersByTimeAsync(SESSION_END_GRACE_MS + 1);
+			await service.ingest(
+				"s1",
+				"%0",
+				hook("UserPromptSubmit", { prompt: "x", prompt_id: "pz" }, "late"),
+			);
+			const p = await panes();
+			expect(p).toMatchObject({ late: "%0", done: null });
+			expect(Object.values(p).filter((x) => x === "%0")).toHaveLength(1);
+			expect((await state("done"))?.status).toBe("ended");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("resuming the interactive conversation after an unknown bound a freed pane leaves exactly one holder", async () => {
+		await interactiveIn("a");
+		now += 1000;
+		await interactiveIn("b", "clear"); // a: binding_lost, b holds %0
+		await service.ingest("s1", "%0", hook("SessionEnd", { reason: "clear" }, "b"));
+		now += 1000;
+		await service.ingest("s1", "%0", hook("SessionStart", { source: "resume", ...PANE }, "a"));
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "u", prompt_id: "pu" }, "u"),
+		);
+		now += 1000;
+		await service.ingest("s1", "%0", hook("SessionStart", { source: "resume", ...PANE }, "a"));
+		const p = await panes();
+		expect(p.a).toBe("%0");
+		expect(Object.values(p).filter((x) => x === "%0")).toHaveLength(1);
+	});
+
+	it("G4: an evicted peer whose index snapshot is unreadable keeps an unknown unbound (fail closed)", async () => {
+		await interactiveIn("main");
+		await store.flush("s1", "main");
+		await store.close("s1", "main");
+		await fs.writeFile(store.indexPath("s1", "main"), "{not json");
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "x", prompt_id: "pu" }, "orphan"),
+		);
+		await new Promise((r) => setTimeout(r, 20));
+		await store.flush("s1", "orphan");
+		expect(
+			(await service.summaries("s1")).find((x) => x.sessionId === "orphan")?.paneId,
+		).toBeNull();
+	});
+
+	it("G4: an interactive conversation that binds while an unknown's disk check is pending wins — one holder", async () => {
+		// Reads of `ev`'s index can be held, so the unknown's bind waits on it.
+		let gate: Promise<void> = Promise.resolve();
+		const gated: StoreFs = {
+			mkdir: (p, o) => fs.mkdir(p, o),
+			appendFile: (p, d) => fs.appendFile(p, d),
+			writeFile: (p, d) => fs.writeFile(p, d),
+			rename: (a, b) => fs.rename(a, b),
+			rm: (p, o) => fs.rm(p, o),
+			stat: (p) => fs.stat(p),
+			readFile: async (p, e) => {
+				if (String(p) === store.indexPath("s1", "ev")) await gate;
+				return fs.readFile(p, e);
+			},
+			readdir: (p) => fs.readdir(p),
+		} as StoreFs;
+		await service.shutdown();
+		store = new ConversationStore({ workspaceRoot: root, now: () => now, fs: gated });
+		service = makeService();
+		// An evicted peer (ended, its own pane gone) makes the unknown's bind async.
+		await interactiveIn("ev");
+		await service.ingest("s1", "%0", hook("SessionEnd", { reason: "clear" }, "ev"));
+		await store.flush("s1", "ev");
+		await store.close("s1", "ev");
+		let release!: () => void;
+		gate = new Promise<void>((r) => {
+			release = r;
+		});
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "x", prompt_id: "pu" }, "orphan"),
+		);
+		now += 1000;
+		await interactiveIn("main");
+		release();
+		await new Promise((r) => setTimeout(r, 20));
+		await store.flush("s1", "orphan");
+		const p = await panes();
+		expect(p).toMatchObject({ main: "%0", orphan: null });
+		expect(Object.values(p).filter((x) => x === "%0")).toHaveLength(1);
 	});
 
 	it("G4: an interactive conversation still takes the pane from an evicted holder (unchanged)", async () => {

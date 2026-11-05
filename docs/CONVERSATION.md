@@ -1751,13 +1751,17 @@ Casos que *MUST* estar en el test:
     como `unknown` y su `SessionStart` revela `-p`, suelta ese pane;
   - `teammate` (un CLI propio; los teammates in-process reportan bajo la sesión del líder con
     `agent_id` y nunca llegan aquí) y `unknown` (sin `SessionStart` visto: puede ser un hijo con el
-    `SessionStart` perdido) solo se ligan a un pane que ninguna conversación **viva y residente**
-    tenga (`ending` todavía cuenta; `ended`/`disconnected` no): nunca retiran a otra. Un teammate en
-    `teammate-mode` tmux conserva así su propio pane. Un titular expulsado de memoria (G4) se lee del
-    disco antes de ligar (un índice ilegible cuenta como titular: queda sin pane), de modo que dos
-    conversaciones nunca comparten un pane; ninguna de las dos puede habilitar el composer
+    `SessionStart` perdido) solo se ligan a un pane que ninguna conversación **viva** —residente o
+    expulsada de memoria por G4— tenga (`ending` todavía cuenta; `ended`/`disconnected` no): nunca
+    retiran a una conversación viva. Un titular que ya terminó (`ended`/`disconnected`) suelta el
+    pane al ligarse otra (`pane_id`/`tab_id = NULL`, su estado se conserva: no es `binding_lost`).
+    Un teammate en `teammate-mode` tmux conserva así su propio pane. El titular expulsado (G4) se
+    lee de su snapshot del índice antes de ligar (un snapshot ausente o ilegible cuenta como
+    titular: queda sin pane; una parada entre el evento y la lectura cancela el binding), de modo
+    que dos conversaciones nunca comparten un pane; ninguna de las dos puede habilitar el composer
     (`canSendInput` exige `interactive` y §8.1.3 prueba el proceso en cada envío);
-  - `interactive` se liga y retira a la anterior, como hasta ahora.
+  - `interactive` se liga y retira a la anterior, como hasta ahora; también cuando ya tenía ese
+    pane (un `resume` o un `SessionStart` desde el pane deja un único titular).
   Una sesión cuyos hooks no traen pane —p. ej. una sesión **en segundo plano** del CLI (`claude
   daemon run`, `bg-pty-host`), cuyo entorno no tiene `TMUX_PANE` y que el probe lista con
   `kind: background`— nunca se liga: el pane está ocupado por el cliente del CLI, no por el proceso

@@ -919,19 +919,28 @@ export class ConversationService {
 	 * process in the pane on every send.
 	 */
 	private bindPane(index: ConversationIndex, pane: string): void {
-		if (index.paneId === pane) return;
 		if (index.kind === "headless") return;
 		if (index.kind !== "interactive") {
+			if (index.paneId === pane) return;
 			if (this.residentHolderOf(index, pane) !== null) return;
-			// An evicted (G4) holder is only on disk: decide after reading it,
-			// so two conversations never end up holding one pane.
+			// An evicted (G4) holder is only on disk: decide after reading its
+			// snapshot, so two conversations never end up holding one pane.
 			if (this.hasEvictedPeers(index)) {
-				void this.bindIfStillFree(index.stSessionId, index.cid, pane);
+				void this.bindIfStillFree(
+					index.stSessionId,
+					index.cid,
+					pane,
+					this.startGenOf(index.stSessionId),
+				);
 				return;
 			}
+			this.releaseEndedResidentHolders(index, pane);
 			index.paneId = pane;
 			return;
 		}
+		// Interactive: (re)take the pane. Runs even when it already holds it —
+		// a resume or a new SessionStart from the pane then heals a duplicate
+		// left by any other route.
 		index.paneId = pane;
 		const at = this.now();
 		for (const other of this.runtime.values()) {
@@ -947,28 +956,50 @@ export class ConversationService {
 				continue;
 			}
 			// v1.7.2 §5.2: an index evicted by G4 still holds its binding on
-			// disk; open it to check (async — this caller is synchronous, the
-			// release lands right after, before any later event of `other`
-			// can be applied since each one first re-opens the index).
+			// disk; check its snapshot, open it only if it holds this pane
+			// (async — this caller is synchronous, the release lands right
+			// after, before any later event of `other` can be applied since
+			// each one first re-opens the index).
 			void this.releaseEvictedHolder(other, pane, at);
 		}
 	}
 
+	private static isOver(status: string): boolean {
+		return status === "ended" || status === "disconnected";
+	}
+
 	/**
 	 * Another LIVE resident conversation of the same session that holds `pane`
-	 * (ended / disconnected ones do not count, as in uniqueByPane). Evicted
-	 * (G4) conversations are checked by bindIfStillFree.
+	 * (ended / disconnected ones do not count, as in uniqueByPane; `ending`
+	 * does — the CLI may still be in the pane). Evicted (G4) conversations are
+	 * checked by bindIfStillFree.
 	 */
 	private residentHolderOf(index: ConversationIndex, pane: string): string | null {
 		for (const other of this.runtime.values()) {
 			if (other.stSessionId !== index.stSessionId || other.cid === index.cid) continue;
 			const otherIndex = this.deps.store.getResidentIndex(other.stSessionId, other.cid);
 			if (!otherIndex || otherIndex.paneId !== pane) continue;
-			const st = otherIndex.state.status;
-			if (st === "ended" || st === "disconnected") continue;
+			if (ConversationService.isOver(otherIndex.state.status)) continue;
 			return other.cid;
 		}
 		return null;
+	}
+
+	/**
+	 * A pane bound by a teammate / unknown over holders that are over: they
+	 * let go of it (state kept — they ended; this is not a `binding_lost`), so
+	 * one pane never has two holders.
+	 */
+	private releaseEndedResidentHolders(index: ConversationIndex, pane: string): void {
+		for (const other of this.runtime.values()) {
+			if (other.stSessionId !== index.stSessionId || other.cid === index.cid) continue;
+			const otherIndex = this.deps.store.getResidentIndex(other.stSessionId, other.cid);
+			if (!otherIndex || otherIndex.paneId !== pane) continue;
+			if (!ConversationService.isOver(otherIndex.state.status)) continue;
+			otherIndex.paneId = null;
+			otherIndex.tabId = null;
+			this.markDirty(other.stSessionId, other.cid);
+		}
 	}
 
 	/** True when the session has conversations whose index is not resident (G4). */
@@ -982,36 +1013,66 @@ export class ConversationService {
 
 	/**
 	 * Bind a teammate / unknown conversation to `pane` only if no live
-	 * conversation holds it — resident ones re-checked at the moment of the
-	 * write, evicted ones read from disk first. Never takes a pane over; an
-	 * unreadable evicted index counts as a holder (fail closed: unbound).
+	 * conversation holds it. Evicted peers are read from their index SNAPSHOT
+	 * (peekIndex — no events-file scan, nothing made resident, nothing else
+	 * evicted; eviction writes the snapshot, so it is current); a missing or
+	 * unreadable one counts as a holder (fail closed: unbound). Resident
+	 * holders are re-checked at the write; a stop since the event (start
+	 * generation changed) cancels it; an evicted holder that is over lets go.
 	 */
-	private async bindIfStillFree(stSessionId: string, cid: string, pane: string): Promise<void> {
+	private async bindIfStillFree(
+		stSessionId: string,
+		cid: string,
+		pane: string,
+		gen: number,
+	): Promise<void> {
+		const overHolders: ConvRuntime[] = [];
 		for (const other of [...this.runtime.values()]) {
 			if (other.stSessionId !== stSessionId || other.cid === cid) continue;
 			if (this.deps.store.getResidentIndex(other.stSessionId, other.cid)) continue;
-			try {
-				const idx = await this.deps.store.open(other.stSessionId, other.cid);
-				const st = idx.state.status;
-				if (idx.paneId === pane && st !== "ended" && st !== "disconnected") return;
-			} catch {
-				return;
-			}
+			const snap = await this.deps.store.peekIndex(other.stSessionId, other.cid);
+			if (snap === null) return;
+			if (snap.paneId !== pane) continue;
+			if (!ConversationService.isOver(snap.state.status)) return;
+			overHolders.push(other);
 		}
+		if (this.startGenOf(stSessionId) !== gen) return;
 		// Not resident any more: unbound for now; its next event from the pane
 		// retries (every `!paneId` path does).
 		let bound = false;
 		const applied = this.deps.store.update(stSessionId, cid, (i) => {
 			if (i.paneId !== null || i.kind === "interactive" || i.kind === "headless") return;
 			if (this.residentHolderOf(i, pane) !== null) return;
+			this.releaseEndedResidentHolders(i, pane);
 			i.paneId = pane;
 			bound = true;
 		});
-		if (applied && bound) this.markDirty(stSessionId, cid);
+		if (!applied || !bound) return;
+		this.markDirty(stSessionId, cid);
+		for (const other of overHolders) void this.releaseEvictedOverHolder(other, pane);
+	}
+
+	/** An evicted holder that is over lets go of `pane` on disk (state kept). */
+	private async releaseEvictedOverHolder(other: ConvRuntime, pane: string): Promise<void> {
+		try {
+			const idx = await this.deps.store.open(other.stSessionId, other.cid);
+			if (idx.paneId !== pane || !ConversationService.isOver(idx.state.status)) return;
+			this.deps.store.update(other.stSessionId, other.cid, (i) => {
+				if (i.paneId !== pane || !ConversationService.isOver(i.state.status)) return;
+				i.paneId = null;
+				i.tabId = null;
+			});
+			await this.heartbeat.flushNow(`${other.stSessionId}/${other.cid}`);
+		} catch {
+			/* unreadable index: nothing to release */
+		}
 	}
 
 	private async releaseEvictedHolder(other: ConvRuntime, pane: string, at: number): Promise<void> {
 		try {
+			// Cheap first: only a snapshot that holds this pane is opened.
+			const snap = await this.deps.store.peekIndex(other.stSessionId, other.cid);
+			if (snap !== null && snap.paneId !== pane) return;
 			const idx = await this.deps.store.open(other.stSessionId, other.cid);
 			if (idx.paneId !== pane) return;
 			this.deps.store.update(other.stSessionId, other.cid, (i) => {
