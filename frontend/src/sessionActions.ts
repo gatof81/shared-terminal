@@ -198,7 +198,7 @@ export function terminalState(ctx: SessionActionContext): {
 			return {
 				title: "This session is stopped",
 				detail:
-					"Files and Chat history stay available. Start it to use the terminal and Git, and to send from Chat.",
+					"Files and Chat history stay available. Start it to use the terminal and Git; to send from Chat, resume Claude in the terminal.",
 				actions: pick("start"),
 			};
 		case "terminated":
