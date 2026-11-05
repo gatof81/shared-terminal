@@ -56,8 +56,9 @@ path is `claude-skills`, **and** a separate attribution control is present — o
   execution preserved). `start_inst` is required.
 - **B4** — `block-attributable` is credited only with a verified `fixture` AND a `differential`
   (proof the SAME fixture loads without policy); a bare declared event is not enough. Coverage is
-  delimited by the attempt's CRITICAL WINDOW (`window_open`/`window_close`): `full` needs reads
-  bracketing it, no oversized gap, and the decision inside it — late/incomplete ⇒ never blocked-low.
+  derived from the ACTUAL reads (F2): the critical window is `[first read, last read]`, `full` needs
+  no oversized gap and every pane DECISION STRICTLY bracketed (a read before AND after it) — late/
+  incomplete ⇒ never blocked-low.
 - **B5** — `from_debug` detects truncation/replacement/rotation (cursor shrink or consumed-prefix
   change) and sets `debug_continuity=False`, degrading coverage and making `verdict_p0`
   INCONCLUSIVE instead of reusing stale evidence.
@@ -92,10 +93,11 @@ rejected by `validate_snapshot` ⇒ the verdict is INCONCLUSIVE.
 - **C3** — guard is accumulated from ATOMIC sub-facts (`guard-seated`, `guard-loaded`) that may
   arrive in different debug fragments; `verdict_p0` needs both, and a later `guard-not-seated` still
   invalidates (B1) — contradictions never yield a false positive.
-- **C4** — the critical window opens at **initialization**, not at trust-confirmed. Static check: the
-  skills-dir block (`cli_plugin_init` / `yvn`) sits in a plugin-init path and a pre-trust
-  `cli_plugin_init` path exists, so we do NOT assume it fires only after trust; coverage must span
-  init → control close (a decision at init is inside the window).
+- **C4** — the skills-dir block (`cli_plugin_init` / `yvn`) sits in a plugin-init path and a pre-trust
+  `cli_plugin_init` path exists, so we do NOT assume it fires only after trust. Under F2 this is
+  enforced by evidence: crediting `full` requires a read STRICTLY BEFORE the decision (so we prove we
+  were already observing when it was taken) AND one strictly after; a block already present on our
+  very first poll is not demonstrable ⇒ partial ⇒ INCONCLUSIVE.
 
 ## Per-control behaviour
 
@@ -140,13 +142,17 @@ it. Until then N17-project stays Option A (INCONCLUSIVE).
 
 ## Local results (pure simulated; no CLI)
 
-`python3 test_obs_unified.py` → **94 passed** (round-2: B1 guard precedence on incremental
+`python3 test_obs_unified.py` → **102 passed** (round-2: B1 guard precedence on incremental
 contradictory reads; B2 authority matrix — pane cannot prove session.start/guard/trust/attribution,
 unknown signal & foreign ctx rejected, legitimate combos pass; B3 probe identity — arbitrary/wrong
-probe/wrong inst/missing inst rejected, correct accepted; B4 attribution needs fixture+differential,
-critical-window coverage — window-not-delimited / not-before-open / gap / decision-outside /
-failed-read ⇒ partial, full only when observed through the decision, insufficient ⇒ never blocked;
-B5 truncation/replacement degrade continuity ⇒ P0 inconclusive, append keeps continuity; plus the
+probe/wrong inst/missing inst rejected, correct accepted; B4 attribution needs fixture+differential;
+**F2 read-derived coverage** — no-reads ⇒ none, benign reads ⇒ full, gap / decision-at-first-read /
+decision-at-last-read / failed-read ⇒ partial, full only when a read strictly brackets the decision,
+plus advancing-clock regressions (time after the decision with no read ⇒ partial) and a pre-trust
+decision needing a strictly-earlier read; **F1 cleanup-by-owner** — SIGTERM-only / SIGKILL-escalation
+/ never-dies / already-gone / perm-error / inner-backstop / signals-handle-not-pid, and the runner
+reaping by the owner handle on ambiguous identity with honest `cleanup_accredited`; B5
+truncation/replacement degrade continuity ⇒ P0 inconclusive, append keeps continuity; plus the
 retained round-1 cases and smoke-cleanup mocks). Earlier run (round 1) was **36 passed**: B1/B2 regressions (not-seated ≠ valid guard;
 `events:` declaration ≠ session.start; session.start needs an execution record); classifiers
 (controls/load, no session.start from debug, pane block path_kind, generic block not attributed, no
@@ -187,11 +193,14 @@ the REAL runner — implemented, **unit-tested with fakes, and run NOTHING real*
 blockers from the last review are now code, not stubs:
 - **(1) real end-to-end runner** `make_runner(sysio,…)` + `RealSys` (the actual unshare/tmux IO,
   `pragma: no cover`): per control it plants fixture/policy, launches under isolation, wires the
-  trust-gate into the Observer, captures pane+debug from init, feeds probe records, opens/closes the
-  window, and reaps. The `sysio` seam makes every ERROR PATH testable without a CLI.
-- **(2) per-instance isolation + cleanup**: each control is its own instance (unique id, tmux
-  socket, pgid, namespaces); the runner verifies isolation BEFORE capture and reap AFTER, for THAT
-  instance, and fails closed (`ok:false` + reason) — never reinterpreted.
+  trust-gate into the Observer, captures pane+debug from init, feeds probe records, derives the
+  critical window from the reads, and reaps. The `sysio` seam makes every ERROR PATH testable.
+- **(2) per-instance isolation + cleanup with STABLE IDENTITY (F1)**: each control is its own instance
+  (unique id, tmux socket, fresh namespaces); the runner captures an OWNER HANDLE (a pidfd to the
+  `unshare` process) at SPAWN, verifies isolation BEFORE capture, and reaps the disposable PID
+  namespace by that handle AFTER — never by a pgid (shareable) nor a bare pid (reusable). It fails
+  closed (`ok:false` + reason), and accredits cleanup via the owner handle even when the inner
+  identity is ambiguous.
 - **(3) independent positive validation**: the orchestrator re-validates the positive snapshot
   (`validate_positive`: authority + correlation + a REAL skills-dir:loaded) and requires the fixture
   digest — an INDEPENDENT `fixture_digest()` sha256 of the planted dir, returned per instance — to
@@ -207,11 +216,14 @@ the differential ONLY from the positive control's own `skills-dir:loaded` event 
 differential exists AND its digest equals the negative run's own recorded fixture digest (same
 fixture bytes in both controls). No real positive load, or a digest mismatch ⇒ INCONCLUSIVE.
 
-**Isolation + supervision:** `isolation_argv` builds `unshare --map-root-user --net --pid --fork
---mount-proc …` (fresh net ns = only `lo`; fresh pid ns, CLI as PID 1). `real_check_isolation`
-verifies only `lo` + a failing outbound connect; `real_check_cleanup(pgid)` verifies the pid
-namespace was reaped. **Fail-closed:** any isolation / capture / cleanup failure ⇒ `aborted:true`,
-verdict INCONCLUSIVE, controls empty — never reinterpreted.
+**Isolation + supervision (F1):** `isolation_argv` builds `unshare --map-root-user --net --pid --fork
+--mount-proc --kill-child …` (fresh net ns = only `lo`; fresh pid ns, CLI as PID 1; `--kill-child`
+makes the `unshare` the namespace owner). `RealSys.spawn` captures the OWNER HANDLE (a pidfd to that
+unshare) at spawn; `supervised_pid` opens the verified INNER handle (pidfd to the ns init);
+`reap(owner, inner)` = `cleanup_by_owner` — SIGTERM→wait→SIGKILL→wait on the owned handle (which
+`--kill-child`-reaps the namespace), then confirms the init exited. **Never a pgid, never a bare pid
+⇒ no reuse race, no signal to a shared group.** **Fail-closed:** any isolation / capture / cleanup
+failure ⇒ `aborted:true`, verdict INCONCLUSIVE, controls empty — never reinterpreted.
 
 The pieces still owner-required for the REAL run are wired by the (not-run) real runner:
 
@@ -220,10 +232,11 @@ CLI under `unshare -rn --pid --fork --mount-proc <...>`:
 - `-n` → a fresh NETWORK namespace with only `lo`: verifiable by `ip -o link` showing just
   `loopback` inside, and an outbound probe failing. HOME isolation alone is explicitly insufficient.
 - `-r` → map to a user namespace so `-n/--pid` need no root.
-- `--pid --fork --mount-proc` → the CLI is PID 1 of a fresh PID namespace. Cleanup kills the
-  `unshare` leader; the kernel then reaps the whole PID namespace — **verifiable identity, no pgid
-  reuse, no `pkill -f`, no orphans** (supersedes `/proc/<pgid>/comm`, which stays only as a
-  belt-and-suspenders). If a tool needs a container instead, use a **throwaway** `--network none`
+- `--pid --fork --mount-proc --kill-child` → the CLI is PID 1 of a fresh PID namespace, owned by the
+  `unshare`. Cleanup signals a STABLE HANDLE (pidfd) to that unshare leader — not a pid number, not a
+  pgid; `--kill-child` (PR_SET_PDEATHSIG) then SIGKILLs the ns init, whose death reaps the whole
+  namespace — **verifiable identity across the lifecycle, immune to pid reuse, never a shared group,
+  no `pkill -f`, no orphans**. If a tool needs a container instead, use a **throwaway** `--network none`
   container built from the pinned image, labelled distinctly, removed on exit — **never** the
   retained PASS-B1 containers or real sessions. (No container is created now.)
 
@@ -239,9 +252,10 @@ wired into the `Observer` (its result → `fact("trust", …)`); the **N14 fixtu
 - **negative/policy** — fixture + policy ⇒ expect pane `skills-dir:blocked`, no load;
 - **absent** — no fixture ⇒ no skills-dir signal at all.
 
-**Observer wiring:** `window_open` at CLI **initialization** (not trust-confirmed — C4), `window_close` after the control settles;
-poll the pane (→ `from_pane`), read the debug tail (→ `from_debug`), feed probe records with the
-verified `inst` (→ `from_probe_records`); emit sanitized enums only. **Fail-closed** on any launch
+**Observer wiring:** poll the pane (→ `from_pane`) from the pre-trust tick through the settle ticks,
+read the debug tail (→ `from_debug`), feed probe records with the verified `inst` (→
+`from_probe_records`); emit sanitized enums only. The critical window is DERIVED from those reads
+(F2) and a decision is credited only when strictly bracketed by them. **Fail-closed** on any launch
 error, timeout, coverage `partial/none`, or lost continuity ⇒ INCONCLUSIVE.
 
 ### GO / NO-GO criteria for executing the smoke (objective)
@@ -271,11 +285,11 @@ True); the actual kernel/CLI behaviour still needs a real run to confirm.
 | Path | Verified now with mocks/simulated | Still needs REAL validation (a run) |
 | --- | --- | --- |
 | **D1 isolation + identity** | `interpret_isolation`; **host-side identity**: `parse_ns_inode`, `verify_isolated` (fresh net+pid ns), `resolve_supervised_pid` (unique descendant in a fresh pid ns; 0/>1 ⇒ None); runner fails closed on ambiguous identity | that `nsenter` into the resolved host pid's net ns really yields only `lo` + failing outbound, and that /proc resolution finds exactly the unshare'd child on the host |
-| **D2 reap** | `supervise_reap`: SIGTERM→wait→SIGKILL→exit/timeout; never-dies/None ⇒ False; GROUP-based, pgid derived via `getpgid` (no PID==PGID) | that `os.killpg` + the `/proc` group scan actually reap the `--pid` namespace on the host |
+| **F1 reap (was D2)** | `cleanup_by_owner`: SIGTERM→wait→SIGKILL→wait on a STABLE OWNER HANDLE (pidfd-shaped), confirm via `exited`; never-dies/None-owner ⇒ False; signals HANDLES only (no pgid, no bare pid ⇒ no reuse race, no shared group); owner captured at spawn so cleanup is accredited even on ambiguous inner identity | that `pidfd_send_signal` to the `--kill-child` unshare + the pidfd-exit poll actually reap the `--pid` namespace on the host |
 | **(1) runner** | error paths spawn/isolation/capture/cleanup; trust-aborted recorded not crash; happy ⇒ snapshot+digest | the real `unshare`+tmux launch and pane/debug/probe wiring |
-| **(2) per-instance** | unique inst/sock/pgid; isolation-before + reap-after per instance; fail-closed via runner | that namespaces are truly per-instance and don't leak between controls on the host |
+| **(2) per-instance** | unique inst/sock/namespaces; owner handle at spawn; isolation-before + owner-reap-after per instance; fail-closed via runner | that namespaces are truly per-instance and don't leak between controls on the host |
 | **(3) independent positive** | `validate_positive` (authority + real `skills-dir:loaded`); `fixture_digest` independent + content-sensitive; digest cross-check pos==neg | that the positive control (no policy) actually LOADS the fixture on 2.1.314 |
-| **D3 pre-trust capture** | capture tick ordered BEFORE `trust_gate`; late read ⇒ coverage partial (B4) | that a real pre-trust skills-dir decision is caught by the parallel loop |
+| **D3 pre-trust capture** | capture tick ordered BEFORE `trust_gate`; the pre-trust read is the strictly-before bound, so a decision caught only later is bracketed; a decision already present on the first poll ⇒ partial (F2) | that a real pre-trust skills-dir decision is caught by the parallel loop with a read strictly before it |
 | **D4 e2e config** | `verify_cli` (version + sha, fail-closed); orchestrator entry wiring | that `CLAUDE_CODE_MANAGED_SETTINGS_PATH` really seats the probe/guard AND that `strictKnownMarketplaces` ENFORCES skills-dir (OPEN since inv2 §4-bis / D3) |
 | **D5 consistency** | `check_controls_consistency`: positive loaded-not-blocked, negative blocked-not-loaded, absent empty; contradiction ⇒ inconclusive | that the three real runs actually produce loaded / blocked / none as expected |
 
@@ -288,24 +302,45 @@ answer it, under the GO/NO-GO above. Until a real run passes all rows, N14 stays
 - **B1 namespace identity** (critical): isolation_argv no longer writes `$$` (PID-ns-local); the host
   resolves+verifies the unshare'd child via /proc (`resolve_supervised_pid`/`verify_isolated`) before
   any nsenter/signal; ambiguous identity ⇒ fail-closed. Mock-tested; real /proc resolution still needs a run.
-- **B2 clock scale** (critical): `window_open()/window_close()` now sample `clock()-t0` (same scale as
-  reads/events). Regression with a non-zero monotonic start passes. Fully mock-verified.
+- **B2 clock scale** (critical): the window scale issue is subsumed by **F2** — there are no window
+  timestamps any more; coverage is derived from the read timestamps directly. The non-zero-monotonic-
+  start regression still passes. Fully mock-verified.
 - **B3 fixture + cwd**: the fixture now installs the real attack (session.start hook + marker,
   independent copy of the kit's ROGUE_REGISTER; 8eafe1a untouched); isolation_argv `cd`s to the
   disposable ws and VERIFIES cwd (`pwd -P`, exit 97). Mock-tested; the actual LOAD under 2.1.314 needs a run.
 - **B4 silent failures**: a capture that fails during trust raises and invalidates the run
   (`capture-failed-during-trust`); `RealSys.spawn` checks the `tmux` result and raises. Mock-tested.
 
-### Latest review (E1–E3) — status
-- **E1 cleanup/identity** (critical): `supervised_cleanup()` establishes the GROUP identity
-  (`getpgid`) BEFORE any tmux teardown; a None/gone/permission-error pid ⇒ cannot prove ⇒ False
-  (never signals an ambiguous id, never reads a perm error as 'terminated', never queries a PID as a
-  PGID). The runner reaps by identity first, then tears tmux down; with no identity it never claims
-  cleanup (the run already returned `identity-ambiguous`). Race / pid-gone / identification-failure
-  tested. Mock-verified; real /proc group reap still needs a run.
-- **E2 critical window** (high): the window now OPENS at the FIRST successful read (not at Observer
-  init), so with a real advancing clock the reads bracket [open, close]. Regression uses a clock that
-  advances during spawn/isolation/ticks ⇒ `full`; a failed read still ⇒ partial (not relaxed).
-- **E3 fixture equivalence** (medium): the disposable copy now uses `register.mjs` + marker
-  `st-b1-rogue-n14.json`, byte-for-byte equal to the kit's `ROGUE_REGISTER` rendered for
-  st-b1-rogue-n14 (asserted in-test by reading `poc/passb1/b1.py`; 8eafe1a untouched).
+### Review E1–E3 — CLOSED
+- **E1 cleanup/identity** — superseded by **F1** below (the pgid/getpgid reap is replaced by a stable
+  owner handle). **E2 critical window** — superseded by **F2** (the window is now derived from reads,
+  no `window_open/close`). **E3 fixture equivalence** — CLOSED: the disposable copy uses `register.mjs`
+  + marker `st-b1-rogue-n14.json`, byte-for-byte equal to the kit's `ROGUE_REGISTER` for
+  st-b1-rogue-n14 (asserted in-test against `poc/passb1/b1.py`; 8eafe1a untouched).
+
+### Review F1–F2 — status
+- **F1 stable identity during cleanup** (critical): the pgid/`getpgid`→`killpg` reap is GONE — it had
+  a PID-reuse race (the pid could be recycled between discovery and `getpgid`) and signalled a GROUP
+  that could be shared with host processes. Replaced by `cleanup_by_owner(owner, inner, …)`, which
+  signals STABLE HANDLES only: the OWNER handle (a pidfd to the `unshare`, captured at SPAWN) and, as
+  confirmation, the INNER handle (a pidfd to the verified ns init). A pidfd pins the EXACT process for
+  its whole lifetime — a signal can never land on a reused pid (ProcessLookupError once gone), and we
+  never touch a pgid. `isolation_argv` adds `--kill-child`, so killing the owned unshare reaps the
+  whole fresh PID namespace (PDEATHSIG to the init, then init-death reaps every member); the
+  namespace's freshness (`verify_isolated`) is what proves the reaped unit is EXCLUSIVELY the
+  experiment's. **Cleanup when initial identification fails:** the owner handle exists at spawn, BEFORE
+  the inner identity resolution, so even when `supervised_pid` is ambiguous the runner still reaps the
+  namespace by the owner handle and reports `cleanup_accredited` — closing tmux is never the proof.
+  Mock-verified (SIGTERM-only / SIGKILL-escalation / never-dies / already-gone / perm-error /
+  inner-backstop / handle-not-pid / runner owner-reap-on-ambiguity); real pidfd/`--kill-child` reap
+  still needs a run.
+- **F2 real temporal window** (high): `window_open()/window_close()` are GONE. They sampled `clock()`
+  AFTER `from_pane`, so with a real advancing clock the last read sat before `window_close` (⇒
+  partial) and only sub-ms rounding faked a `full` — without demonstrating observation before the
+  decision. Coverage is now DERIVED from the actual reads: window = `[first read, last read]`, and
+  `full` requires every pane DECISION STRICTLY bracketed (a read at t<d AND a read at t>d). The strict
+  bracket is the guarantee — a read before the decision proves we were already observing when it was
+  taken; a decision at/before the first read (observed too late) or at/after the last read ⇒ partial ⇒
+  INCONCLUSIVE. Regressions advance the clock specifically between reads and around the decision (incl.
+  time passing after the decision with NO further read ⇒ partial, and before the first read ⇒ partial).
+  Fully mock-verified.

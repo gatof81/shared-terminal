@@ -100,8 +100,7 @@ class Observer:
         self._debug_cursor = 0    # B6: only classify the newly-appended debug tail
         self._dbg_prefix = ""     # B5: the exact debug text already consumed (for continuity check)
         self._dbg_disc = False    # B5: debug truncation/replacement/rotation detected
-        self.reads = []           # (t, ok) per pane read
-        self.window = {"open": None, "close": None}   # B4: the attempt's CRITICAL window (driver-set)
+        self.reads = []           # (t, ok) per pane read — the critical window is DERIVED from these
         self.win = {"max_gap": 1.0}                   # max tolerated gap between consecutive reads
 
     def _emit(self, concern, signal, source, confidence, detail=None):
@@ -121,22 +120,25 @@ class Observer:
             self.win["max_gap"] = max_gap
         return self
 
-    def window_open(self):
-        # B2: store the window boundary on the SAME relative scale as reads/events (clock()-t0), not
-        # an absolute timestamp — otherwise coverage compares different scales.
-        self.window["open"] = round(self.clock() - self.t0, 3)
-        return self
-
-    def window_close(self):
-        self.window["close"] = round(self.clock() - self.t0, 3)
-        return self
-
     def coverage(self):
-        """Temporal coverage (B4): delimited by the attempt's CRITICAL WINDOW (window_open /
-        window_close), not just by count/duration. `full` requires: debug continuity intact; no
-        failed read; the critical window delimited; a successful read at/before it opened AND at/
-        after it closed; no gap > max_gap across reads; and every pane DECISION falls inside the
-        window. Anything else is partial/none — late/incomplete capture never credits a block."""
+        """Temporal coverage (F2): the critical window is DERIVED from the reads we actually made —
+        [first successful read, last successful read] — NEVER from separate driver timestamps.
+
+        The old `window_open`/`window_close` recorded a fresh `clock()` sample that raced the reads:
+        `from_pane` stamped the read FIRST, then `window_open` sampled a strictly later instant, and
+        `window_close` was sampled AFTER the last read. With a real advancing clock the last read
+        then sat before `window_close` (=> partial), and only favourable sub-millisecond rounding
+        made the brackets coincide (=> an accidental `full`) — without ever demonstrating that we had
+        observed the system BEFORE the decision was taken.
+
+        So coverage is now defined by evidence, not by timestamps we move: `full` requires debug
+        continuity intact; no failed read; at least one read; no gap > max_gap between consecutive
+        reads; and every pane DECISION STRICTLY bracketed by reads — a successful read at t < d AND a
+        successful read at t > d. The strict bracket is the real guarantee the owner asked for: a
+        read before the decision proves we were already watching when it was taken (we did not attach
+        mid-stream and catch only its tail), and a read after proves we watched it settle. A decision
+        at/before the first read (initialisation we started watching too late to witness) or at/after
+        the last read is NOT bracketed => partial. Late/incomplete capture never credits a block."""
         if self._dbg_disc:
             return "partial"                     # B5: debug continuity lost — degrade
         oks = sorted(t for t, ok in self.reads if ok)
@@ -144,16 +146,12 @@ class Observer:
             return "none"
         if len(self.reads) != len(oks):
             return "partial"                     # any failed read
-        wo, wc = self.window["open"], self.window["close"]
-        if wo is None or wc is None:
-            return "partial"                     # critical window not delimited
-        if oks[0] > wo or oks[-1] < wc:
-            return "partial"                     # did not observe before open / after close
         if any(b - a > self.win["max_gap"] for a, b in zip(oks, oks[1:])):
             return "partial"                     # a gap larger than tolerated
+        first, last = oks[0], oks[-1]
         decisions = [e["t"] for e in self.events if e["source"] == "pane"]
-        if any(not (wo <= d <= wc) for d in decisions):
-            return "partial"                     # a decision landed outside the critical window
+        if any(not (first < d < last) for d in decisions):
+            return "partial"                     # a decision not STRICTLY bracketed by reads
         return "full"
 
     def fact(self, concern, signal, source="gate", confidence="high", detail=None):
@@ -209,7 +207,9 @@ class Observer:
             self._emit(c, s, "pane", conf, d)
 
     def snapshot(self):
+        oks = sorted(t for t, ok in self.reads if ok)
+        window = {"open": oks[0] if oks else None, "close": oks[-1] if oks else None}  # DERIVED (F2)
         return {"schema": SCHEMA, **self.ctx, "coverage": self.coverage(),
-                "debug_continuity": not self._dbg_disc, "window": dict(self.window),
+                "debug_continuity": not self._dbg_disc, "window": window,
                 "pane_reads": self.pane_reads, "pane_fails": self.pane_fails,
                 "events": list(self.events)}

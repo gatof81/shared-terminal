@@ -70,13 +70,11 @@ def n14_full_block(attributed=True, differential=True, digest=FIXTURE_DIGEST, di
             det["differential"] = {"control_run": "ctrl-run-1", "evidence": "skills-dir:loaded",
                                    "fixture_digest": diff_digest}
         o.fact("skills-dir", "block-attributable", source="control", detail=det)
-    b = clock_start                                     # window + reads on offsets from the start
-    clk.t = b + 0.0;  o.from_pane(PROBE)                # before the window
-    clk.t = b + 0.05; o.window_open()
-    clk.t = b + 0.1;  o.from_pane(SKILLS_BLOCK)         # decision inside the window
-    clk.t = b + 0.2;  o.from_pane(PROBE)
-    clk.t = b + 0.25; o.window_close()
-    clk.t = b + 0.3;  o.from_pane(PROBE)                # after the window closes
+    b = clock_start                                     # reads on offsets from the start; the window
+    clk.t = b + 0.0;  o.from_pane(PROBE)                # is DERIVED [first read, last read] (F2)
+    clk.t = b + 0.1;  o.from_pane(SKILLS_BLOCK)         # decision STRICTLY bracketed: read before AND
+    clk.t = b + 0.2;  o.from_pane(PROBE)                # after it
+    clk.t = b + 0.3;  o.from_pane(PROBE)
     return o
 
 
@@ -199,46 +197,43 @@ class B4N14(unittest.TestCase):
 
 
 class B4Coverage(unittest.TestCase):
+    """F2: the critical window is DERIVED from the reads (first→last); `full` needs continuous reads
+    and every pane decision STRICTLY bracketed by a read before AND after it. No driver window."""
+
     def mk(self):
         clk = ManualClock()
         return clk, obs(clock=clk).set_window(max_gap=0.3)
 
-    def test_window_not_delimited_is_partial(self):
+    def test_no_reads_is_none(self):
+        _, o = self.mk()
+        self.assertEqual(o.coverage(), "none")
+
+    def test_benign_reads_no_decision_is_full(self):
         clk, o = self.mk()
         for t in (0.0, 0.1, 0.2):
             clk.t = t
-            o.from_pane(PROBE)                           # no window_open/close
-        self.assertEqual(o.coverage(), "partial")
-
-    def test_not_observed_before_open_is_partial(self):
-        clk, o = self.mk()
-        clk.t = 0.0
-        o.window_open()
-        clk.t = 0.2
-        o.window_close()
-        for t in (0.1, 0.2, 0.3):                        # first read 0.1 > open 0.0
-            clk.t = t
-            o.from_pane(PROBE)
-        self.assertEqual(o.coverage(), "partial")
+            o.from_pane(PROBE)                           # no decision to bracket -> full
+        self.assertEqual(o.coverage(), "full")
 
     def test_gap_too_large_is_partial(self):
         clk, o = self.mk()
-        clk.t = 0.05
-        o.window_open()
-        clk.t = 0.9
-        o.window_close()
         for t in (0.0, 0.1, 0.9):                        # gap 0.8 > max_gap 0.3
             clk.t = t
             o.from_pane(PROBE)
         self.assertEqual(o.coverage(), "partial")
 
-    def test_decision_outside_window_is_partial(self):
+    def test_decision_at_first_read_is_partial(self):
+        # F2: a decision on the VERY FIRST read means we never observed the system before it was
+        # taken (we attached mid-stream) -> not strictly bracketed -> partial.
         clk, o = self.mk()
-        clk.t = 0.05
-        o.window_open()
-        clk.t = 0.15
-        o.window_close()
-        for t, txt in [(0.0, PROBE), (0.1, PROBE), (0.2, SKILLS_BLOCK), (0.3, PROBE)]:  # decision 0.2 > close 0.15
+        for t, txt in [(0.0, SKILLS_BLOCK), (0.1, PROBE), (0.2, PROBE)]:
+            clk.t = t
+            o.from_pane(txt)
+        self.assertEqual(o.coverage(), "partial")
+
+    def test_decision_at_last_read_is_partial(self):
+        clk, o = self.mk()
+        for t, txt in [(0.0, PROBE), (0.1, PROBE), (0.2, SKILLS_BLOCK)]:   # decision == last read
             clk.t = t
             o.from_pane(txt)
         self.assertEqual(o.coverage(), "partial")
@@ -259,7 +254,7 @@ class B4Coverage(unittest.TestCase):
         o.fact("trust", "confirmed")
         o.fact("skills-dir", "block-attributable", source="control", detail=ATTRIB)
         clk.t = 0.0
-        o.from_pane(SKILLS_BLOCK)                        # one read, no window -> partial
+        o.from_pane(SKILLS_BLOCK)                        # one read == the decision -> not bracketed -> partial
         self.assertEqual(V.verdict_n14(o.snapshot())[0], "inconclusive")
 
 
@@ -382,19 +377,81 @@ class C3FragmentedGuard(unittest.TestCase):
         self.assertEqual(V.verdict_p0(o.snapshot())[0], "baseline-invalid")
 
 
-class C4WindowFromInit(unittest.TestCase):
-    def test_early_pre_trust_decision_covered_when_window_opens_at_init(self):
-        # C4: the skills-dir block may be notified BEFORE trust; a window opened at INIT covers it.
+class C4PreTrustDecision(unittest.TestCase):
+    """C4 under F2: the skills-dir block may be notified BEFORE trust. We credit full coverage ONLY
+    when a read strictly PRECEDES the decision (demonstrating we were already observing when it was
+    taken) — a block already present on our very first poll is NOT demonstrable (partial)."""
+
+    def test_decision_already_present_on_first_poll_is_partial(self):
         clk = ManualClock()
         o = obs(attempt="N14", clock=clk).set_window(max_gap=0.3)
-        clk.t = 0.0
-        o.window_open()  # initialization, not trust-confirmed
-        clk.t = 0.3
-        o.window_close()
         for t, txt in [(0.0, SKILLS_BLOCK), (0.1, PROBE), (0.2, PROBE), (0.3, PROBE)]:
             clk.t = t
-            o.from_pane(txt)                               # decision at init (t=0)
-        self.assertEqual(o.coverage(), "full")             # early decision is inside [init, close]
+            o.from_pane(txt)                               # block on the FIRST read — observed too late
+        self.assertEqual(o.coverage(), "partial")
+
+    def test_pre_trust_read_before_decision_is_full(self):
+        clk = ManualClock()
+        o = obs(attempt="N14", clock=clk).set_window(max_gap=0.3)
+        for t, txt in [(0.0, PROBE), (0.1, SKILLS_BLOCK), (0.2, PROBE), (0.3, PROBE)]:
+            clk.t = t
+            o.from_pane(txt)                               # a pre-trust read (0.0) strictly before 0.1
+        self.assertEqual(o.coverage(), "full")
+
+
+class F2CriticalWindow(unittest.TestCase):
+    """F2 regressions with a REAL advancing clock. The old code sampled window_open AFTER from_pane
+    and window_close AFTER the last read, so an advancing clock left the last read before the close
+    (=> partial) and only sub-ms rounding faked a full. Coverage is now derived from the actual read
+    timestamps, so advancing time BETWEEN reads (incl. around the decision) changes nothing about the
+    strict-bracket guarantee — and crucially cannot manufacture a `full` without a read after the
+    decision. A monotonic-like start (far from 0) is used so no absolute/relative scale can coincide."""
+
+    def mk(self):
+        clk = ManualClock(1000.0)
+        return clk, obs(attempt="N14", clock=clk).set_window(max_gap=0.3)
+
+    def test_advancing_between_reads_full_when_bracketed(self):
+        clk, o = self.mk()
+        clk.t += 0.10; o.from_pane(PROBE)                  # strictly before
+        clk.t += 0.10; o.from_pane(SKILLS_BLOCK)           # decision; clock advanced since the first read
+        clk.t += 0.10; o.from_pane(PROBE)                  # strictly after
+        self.assertEqual(o.coverage(), "full")
+
+    def test_time_passes_after_decision_but_no_read_is_partial(self):
+        # Advance time AFTER the decision yet take NO further read: the decision is the LAST read, so
+        # it is not strictly bracketed -> partial. (The old window_close-after-last-read bug would
+        # have rounded this to full and credited observation that never happened.)
+        clk, o = self.mk()
+        clk.t += 0.10; o.from_pane(PROBE)
+        clk.t += 0.10; o.from_pane(SKILLS_BLOCK)
+        clk.t += 0.50                                      # wall-clock advances, but we stop reading
+        self.assertEqual(o.coverage(), "partial")
+
+    def test_time_passes_before_first_read_decision_is_partial(self):
+        # Spawn/init time passes (the clock advances) and the decision is already on our FIRST read:
+        # we never demonstrated observation before it -> partial, regardless of how much time elapsed.
+        clk, o = self.mk()
+        clk.t += 0.80; o.from_pane(SKILLS_BLOCK)           # decision on the first read
+        clk.t += 0.10; o.from_pane(PROBE)
+        self.assertEqual(o.coverage(), "partial")
+
+    def test_verdict_partial_window_is_inconclusive_not_blocked(self):
+        # A decision caught only at the last read (not bracketed) must never reach blocked-low.
+        clk = ManualClock(1000.0)
+        o = obs(attempt="N14", clock=clk).set_window(max_gap=0.3)
+        o.from_debug(PROBE)
+        o.from_probe_records(PROBE_RECORDS, start_inst=INST)
+        o.fact("trust", "confirmed")
+        o.fixture_identity(FIXTURE_DIGEST)
+        o.fact("skills-dir", "block-attributable", source="control",
+               detail={"fixture": "st-b1-rogue-n14",
+                       "differential": {"control_run": "ctrl-run-1", "evidence": "skills-dir:loaded",
+                                        "fixture_digest": FIXTURE_DIGEST}})
+        clk.t += 0.10; o.from_pane(PROBE)
+        clk.t += 0.10; o.from_pane(SKILLS_BLOCK)           # decision is the LAST read -> partial
+        self.assertEqual(o.coverage(), "partial")
+        self.assertEqual(V.verdict_n14(o.snapshot())[0], "inconclusive")
 
 
 class N17(unittest.TestCase):
@@ -488,13 +545,9 @@ def e2e_negative(digest=FIXTURE_DIGEST):
     o.from_probe_records(PROBE_RECORDS, start_inst=INST)
     o.fact("trust", "confirmed")
     o.fixture_identity(digest)                       # same fixture digest as positive
-    clk.t = 0.05
-    o.window_open()
-    clk.t = 0.25
-    o.window_close()
     for t, txt in [(0.0, PROBE), (0.1, SKILLS_BLOCK), (0.2, PROBE), (0.3, PROBE)]:
         clk.t = t
-        o.from_pane(txt)
+        o.from_pane(txt)                             # decision 0.1 strictly bracketed by 0.0 and 0.3
     return o.snapshot()                              # NO block-attributable — orchestrator stamps it
 
 
@@ -504,13 +557,9 @@ def e2e_absent():
     o.from_debug(PROBE)
     o.from_probe_records(PROBE_RECORDS, start_inst=INST)
     o.fact("trust", "confirmed")
-    clk.t = 0.05
-    o.window_open()
-    clk.t = 0.25
-    o.window_close()
     for t in [0.0, 0.1, 0.2, 0.3]:
         clk.t = t
-        o.from_pane(PROBE)                           # benign reads, no skills-dir signal
+        o.from_pane(PROBE)                           # benign reads, no skills-dir signal (no decision)
     return o.snapshot()
 
 
@@ -550,11 +599,14 @@ class FakeSys:
     def spawn(self, argv, sock):
         if self.fail == "spawn":
             raise RuntimeError("spawn boom")
+        return {"owner": True}                             # F1: OWNER handle captured at spawn
 
     def supervised_pid(self, sock):
-        return self.host_pid                               # None simulates ambiguous identity
+        if self.host_pid is None:
+            return None                                    # ambiguous inner identity
+        return {"pid": self.host_pid}                      # INNER handle
 
-    def check_isolation(self, host_pid):
+    def check_isolation(self, inner):
         return self.isolation
 
     def pane(self, sock):
@@ -572,7 +624,7 @@ class FakeSys:
     def probe_inst(self, ws):
         return INST
 
-    def reap(self, host_pid):
+    def reap(self, owner, inner):
         return self.reaped
 
     def teardown(self, sock):
@@ -589,8 +641,8 @@ class E2ESmokePure(unittest.TestCase):
     def test_isolation_argv(self):
         argv = E.isolation_argv("/bin/claude", "/h", "/w", "/w/dbg", policy_path="/h/m.json")
         self.assertEqual(argv[0], "unshare")
-        for flag in ("--map-root-user", "--net", "--pid", "--fork", "--mount-proc"):
-            self.assertIn(flag, argv)
+        for flag in ("--map-root-user", "--net", "--pid", "--fork", "--mount-proc", "--kill-child"):
+            self.assertIn(flag, argv)                       # F1: --kill-child makes unshare the ns owner
         self.assertIn("CLAUDE_CODE_MANAGED_SETTINGS_PATH=/h/m.json", argv[-1])
 
     def test_fixture_digest_independent_and_stable(self):
@@ -705,48 +757,15 @@ class E2ERunnerErrorPaths(unittest.TestCase):
 
 
 class RealSysLogic(unittest.TestCase):
-    """D1/D2/D4/D5 real decision logic — verified by MOCKS, not by FakeSys returning True."""
+    """D1/D4/D5 real decision logic — verified by MOCKS, not by FakeSys returning True. (The reap
+    logic moved from the pgid-based D2 `supervise_reap` to the handle-based F1 `cleanup_by_owner`;
+    its mock-verified tests live in F1CleanupByOwner.)"""
 
     def test_d1_interpret_isolation(self):
         self.assertTrue(E.interpret_isolation(["lo"], True))        # only lo + outbound blocked
         self.assertFalse(E.interpret_isolation(["lo", "eth0"], True))   # extra interface
         self.assertFalse(E.interpret_isolation(["lo"], False))      # outbound SUCCEEDED
         self.assertFalse(E.interpret_isolation([], True))           # nothing captured
-
-    def test_d2_supervise_reap_sigterm_enough(self):
-        import signal
-        sent, state = [], {"alive": True}
-
-        def alive(p):
-            return state["alive"]
-
-        def sig(p, s):
-            sent.append(s)
-            state["alive"] = False                                  # dies on SIGTERM
-
-        self.assertTrue(E.supervise_reap(123, signal_group=sig, group_alive=alive, sleep=lambda s: None))
-        self.assertEqual(sent, [signal.SIGTERM])                    # no SIGKILL needed
-
-    def test_d2_supervise_reap_escalates_to_sigkill(self):
-        import signal
-        sent = []
-
-        def sig(p, s):
-            sent.append(s)
-
-        def alive(p):
-            return signal.SIGKILL not in sent                       # dies only after SIGKILL
-
-        self.assertTrue(E.supervise_reap(123, signal_group=sig, group_alive=alive, sleep=lambda s: None,
-                                         term_grace=0.4, kill_grace=0.4, tick=0.2))
-        self.assertIn(signal.SIGKILL, sent)
-
-    def test_d2_supervise_reap_fails_if_never_dies(self):
-        self.assertFalse(E.supervise_reap(123, signal_group=lambda p, s: None, group_alive=lambda p: True,
-                                          sleep=lambda s: None, term_grace=0.4, kill_grace=0.4, tick=0.2))
-
-    def test_d2_supervise_reap_none_pgid(self):
-        self.assertFalse(E.supervise_reap(None, signal_group=lambda p, s: None, group_alive=lambda p: False, sleep=lambda s: None))
 
     def test_d4_verify_cli(self):
         self.assertTrue(E.verify_cli(get_version=lambda: "2.1.314", get_sha=lambda: "abc", want_sha="abc"))
@@ -821,57 +840,141 @@ class Blocker2ClockScale(unittest.TestCase):
         self.assertEqual(V.verdict_n14(n14_full_block(clock_start=1000.0).snapshot())[0], "blocked-low")
 
 
-class E1Cleanup(unittest.TestCase):
-    """E1: cleanup establishes the GROUP identity BEFORE teardown; never signals ambiguous ids nor
-    treats gone/perm errors as 'terminated'."""
+SIGTERM = __import__("signal").SIGTERM
+SIGKILL = __import__("signal").SIGKILL
 
-    def test_none_pid_never_signals_or_reaps(self):
+
+class F1CleanupByOwner(unittest.TestCase):
+    """F1: reap by a STABLE OWNER HANDLE, never a pgid and never a bare pid. A handle pins one
+    process; `send_signal`/`exited` act on THAT process only — immune to PID reuse by construction
+    (there is no pid arithmetic that could select a different process), and never signals a group."""
+
+    def test_none_owner_never_signals_and_is_not_reaped(self):
         sent = []
-        self.assertFalse(E.supervised_cleanup(None, getpgid=lambda p: 1 / 0, signal_group=lambda p, s: sent.append(s),
-                                              group_alive=lambda p: False, sleep=lambda s: None))
-        self.assertEqual(sent, [])                       # no signal to an ambiguous identity
+        self.assertFalse(E.cleanup_by_owner(None, object(), send_signal=lambda h, s: sent.append(h),
+                                            exited=lambda h: True, sleep=lambda s: None))
+        self.assertEqual(sent, [])                       # no owned handle -> no signal, no claim
 
-    def test_pid_gone_cannot_prove_reaped(self):
-        def gone(p):
+    def test_owner_dies_on_sigterm_no_sigkill(self):
+        owner, state, sent = object(), {"alive": True}, []
+
+        def sig(h, s):
+            sent.append((h, s))
+            state["alive"] = False
+
+        self.assertTrue(E.cleanup_by_owner(owner, None, send_signal=sig,
+                                           exited=lambda h: not state["alive"], sleep=lambda s: None))
+        self.assertEqual(sent, [(owner, SIGTERM)])       # owner handle only; no SIGKILL needed
+
+    def test_owner_escalates_to_sigkill(self):
+        owner, sent = object(), []
+
+        def sig(h, s):
+            sent.append(s)
+
+        self.assertTrue(E.cleanup_by_owner(owner, None, send_signal=sig,
+                                           exited=lambda h: SIGKILL in sent, sleep=lambda s: None,
+                                           term_grace=0.4, kill_grace=0.4, tick=0.2))
+        self.assertIn(SIGKILL, sent)
+
+    def test_owner_never_dies_is_not_reaped(self):
+        self.assertFalse(E.cleanup_by_owner(object(), None, send_signal=lambda h, s: None,
+                                            exited=lambda h: False, sleep=lambda s: None,
+                                            term_grace=0.4, kill_grace=0.4, tick=0.2))
+
+    def test_owner_already_gone_is_reaped(self):
+        # ProcessLookupError from send_signal == the pinned process is already gone (it can NEVER be
+        # a reused pid), so that is a confirmed exit.
+        def gone(h, s):
             raise ProcessLookupError
 
-        self.assertFalse(E.supervised_cleanup(123, getpgid=gone, signal_group=lambda p, s: None,
-                                              group_alive=lambda p: False, sleep=lambda s: None))
+        self.assertTrue(E.cleanup_by_owner(object(), None, send_signal=gone,
+                                           exited=lambda h: False, sleep=lambda s: None))
 
-    def test_permission_error_is_not_terminated(self):
-        def denied(p):
-            raise PermissionError
+    def test_permission_error_is_not_read_as_exit(self):
+        def denied(h, s):
+            raise PermissionError                        # OSError subclass, but NOT proof of exit
 
-        self.assertFalse(E.supervised_cleanup(123, getpgid=denied, signal_group=lambda p, s: None,
-                                              group_alive=lambda p: False, sleep=lambda s: None))
+        self.assertFalse(E.cleanup_by_owner(object(), None, send_signal=denied,
+                                            exited=lambda h: False, sleep=lambda s: None,
+                                            term_grace=0.2, kill_grace=0.2, tick=0.1))
 
-    def test_group_reaped_true(self):
-        state = {"alive": True}
-        self.assertTrue(E.supervised_cleanup(123, getpgid=lambda p: 55, signal_group=lambda p, s: state.update(alive=False),
-                                             group_alive=lambda p: state["alive"], sleep=lambda s: None))
+    def test_inner_confirmed_without_extra_signal(self):
+        owner, inner, sent = object(), object(), []
+        # owner dies on its signal; inner is already gone (--kill-child reaped it) -> not signalled.
+        self.assertTrue(E.cleanup_by_owner(owner, inner, send_signal=lambda h, s: sent.append(h),
+                                           exited=lambda h: True, sleep=lambda s: None))
+        self.assertEqual(sent, [owner])                  # init never signalled — already exited
 
-    def test_race_pid_disappears_after_getpgid(self):
-        # getpgid succeeds, then the group is already gone on the first liveness check -> reaped.
-        self.assertTrue(E.supervised_cleanup(123, getpgid=lambda p: 55, signal_group=lambda p, s: None,
-                                             group_alive=lambda p: False, sleep=lambda s: None))
+    def test_inner_backstop_signalled_if_still_alive(self):
+        owner, inner, state = object(), object(), {}
+        state[owner], state[inner], sent = True, True, []
 
-    def test_identity_failure_in_runner_does_not_claim_cleanup(self):
-        # host_pid None -> runner aborts identity-ambiguous; reap is never called with a real id.
-        reaped_calls = []
+        def sig(h, s):
+            state[h] = False                             # whatever we signal, dies
+            sent.append(h)
+
+        self.assertTrue(E.cleanup_by_owner(owner, inner, send_signal=sig,
+                                           exited=lambda h: not state[h], sleep=lambda s: None))
+        self.assertIn(owner, sent)
+        self.assertIn(inner, sent)                       # backstop reached the init when it lingered
+
+    def test_signals_only_the_handle_never_a_pid(self):
+        # PID-reuse immunity by construction: the function signals the HANDLE objects it is given and
+        # does NO pid lookup, so a stranger that reused the numeric pid is structurally unreachable.
+        owner, targets = object(), []
+        self.assertTrue(E.cleanup_by_owner(owner, None, send_signal=lambda h, s: targets.append(h),
+                                           exited=lambda h: h is owner, sleep=lambda s: None))
+        self.assertEqual(targets, [owner])               # the exact owned handle, not a pid number
+
+
+class F1RunnerCleanup(unittest.TestCase):
+    """F1 in the runner: the owner handle is captured at SPAWN (before inner resolution), so cleanup
+    is accredited even when the inner identity is ambiguous — and honestly reported when it fails."""
+
+    def test_identity_ambiguous_still_reaps_by_owner(self):
+        calls = []
 
         class FS(FakeSys):
-            def reap(self, host_pid):
-                reaped_calls.append(host_pid)
-                return True                               # even if it lied, the run must not pass
+            def reap(self, owner, inner):
+                calls.append((owner, inner))
+                return True
 
         r = mk_runner(FS(None, host_pid=None))("positive")
         self.assertEqual((r["ok"], r["reason"]), (False, "identity-ambiguous"))
-        self.assertEqual(reaped_calls, [])               # reap never invoked without an identity
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0][1])                   # inner is None (ambiguous)...
+        self.assertIsNotNone(calls[0][0])                # ...but the OWNER handle reaps the namespace
+        self.assertTrue(r["cleanup_accredited"])         # accredited via the owner handle
+
+    def test_identity_ambiguous_cleanup_failure_is_reported(self):
+        r = mk_runner(FakeSys(None, host_pid=None, reaped=False))("positive")
+        self.assertEqual((r["ok"], r["reason"]), (False, "identity-ambiguous"))
+        self.assertFalse(r["cleanup_accredited"])        # owner reap failed -> not accredited (honest)
+
+    def test_owner_handle_captured_before_inner_resolution(self):
+        order = []
+
+        class FS(FakeSys):
+            def spawn(self, argv, sock):
+                order.append("spawn")
+                return super().spawn(argv, sock)
+
+            def supervised_pid(self, sock):
+                order.append("supervised_pid")
+                return super().supervised_pid(sock)
+
+            def reap(self, owner, inner):
+                order.append("reap")
+                return True
+
+        mk_runner(FS(None, host_pid=None))("positive")
+        self.assertEqual(order, ["spawn", "supervised_pid", "reap"])   # owner exists before inner
 
 
 class E2WindowSequencing(unittest.TestCase):
-    """E2: with a clock that ADVANCES during spawn/isolation/ticks, the window must still bracket the
-    reads (opened at the first read), and coverage is NOT relaxed on a failed read."""
+    """With a clock that ADVANCES during spawn/isolation/ticks, coverage (derived from the real read
+    timestamps, F2) is full for continuous benign reads, and is NOT relaxed on a failed read."""
 
     class AdvancingFS(FakeSys):
         def __init__(self, clk, **kw):
@@ -905,7 +1008,7 @@ class E2WindowSequencing(unittest.TestCase):
     def test_advancing_clock_still_full(self):
         r = self._run()
         self.assertTrue(r["ok"])
-        self.assertEqual(r["snapshot"]["coverage"], "full")        # window opened at first read, brackets reads
+        self.assertEqual(r["snapshot"]["coverage"], "full")        # window derived from reads; no decision
 
     def test_failed_read_still_partial(self):
         r = self._run(pane_fail_after=2)                           # a later read fails

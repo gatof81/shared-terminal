@@ -11,12 +11,15 @@ One run, THREE controls, clearly differentiated:
 Three blockers implemented here:
   (1) REAL end-to-end runner (`make_runner` + `RealSys`): per control it plants the fixture/policy,
       launches the CLI under isolation, wires the trust-gate into the Observer, captures pane+debug
-      FROM INITIALIZATION, feeds probe records, opens/closes the critical window, and verifies
-      cleanup. IO sits behind an injectable `sysio` seam so every ERROR PATH is unit-tested with a
-      fake; `RealSys` (the actual unshare/tmux/subprocess IO) is `pragma: no cover`.
-  (2) PER-INSTANCE isolation + cleanup: each control is its own instance (unique id, tmux socket,
-      pgid file, namespaces); the runner verifies isolation BEFORE capture and reap AFTER, for THAT
-      instance, and fails closed (ok:false + reason) on any failure — never reinterpreted.
+      FROM INITIALIZATION, feeds probe records, derives the critical window from the reads, and
+      verifies cleanup. IO sits behind an injectable `sysio` seam so every ERROR PATH is unit-tested
+      with a fake; `RealSys` (the actual unshare/tmux/subprocess IO) is `pragma: no cover`.
+  (2) PER-INSTANCE isolation + cleanup with STABLE IDENTITY (F1): each control is its own instance
+      (unique id, tmux socket, fresh namespaces); the runner captures an OWNER HANDLE (a pidfd to
+      the `unshare` process) at spawn, verifies isolation BEFORE capture, and reaps the disposable
+      PID namespace by that handle AFTER — never by a pgid (shareable) nor a bare pid (reusable). It
+      fails closed (ok:false + reason) on any failure, and accredits cleanup via the owner handle
+      even when the inner identity is ambiguous.
   (3) INDEPENDENT validation of the positive control: the orchestrator does not trust the runner's
       claim — it re-validates the positive snapshot (authority+correlation), confirms a REAL
       skills-dir:loaded, and requires the fixture digest (an INDEPENDENT sha256 of the planted dir,
@@ -27,6 +30,7 @@ import hashlib
 import os
 import secrets
 import shlex
+import signal
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -55,7 +59,14 @@ def isolation_argv(cli, home, ws, debug, *, policy_path=None):
     """Launch the CLI inside user+net+pid namespaces. Blocker 1: it does NOT write `$$` (that is the
     PID-ns-local PID 1, not a host PGID) — the host resolves and supervises the process from /proc.
     Blocker 3: it `cd`s to the disposable workspace AND VERIFIES cwd before exec'ing Claude (exit 97
-    on mismatch)."""
+    on mismatch).
+
+    F1: `--kill-child` makes the `unshare` process the OWNER of the disposable PID namespace — when
+    unshare dies for ANY reason (including a SIGKILL it cannot catch) the kernel delivers SIGKILL to
+    the namespace init via PR_SET_PDEATHSIG, and a PID-namespace init's death reaps every remaining
+    member. The caller holds a stable handle (a pidfd) to this unshare process, so cleanup is a
+    single signal to ONE owned process — never a signal to a process GROUP that could be shared with
+    host processes, and never keyed on a bare pid number that could be reused."""
     env = {"PATH": "/usr/bin:/bin", "HOME": home, "TERM": "xterm-256color", "DISABLE_AUTOUPDATER": "1"}
     if policy_path:
         env["CLAUDE_CODE_MANAGED_SETTINGS_PATH"] = policy_path
@@ -65,7 +76,8 @@ def isolation_argv(cli, home, ws, debug, *, policy_path=None):
              f"[ \"$(pwd -P)\" = {shlex.quote(realws)} ] || exit 97; "
              f"exec env -i {envs} {shlex.quote(cli)} --debug-file {shlex.quote(debug)} "
              f"2> {shlex.quote(os.path.join(ws, 'stderr.txt'))}")
-    return ["unshare", "--map-root-user", "--net", "--pid", "--fork", "--mount-proc", "sh", "-c", inner]
+    return ["unshare", "--map-root-user", "--net", "--pid", "--fork", "--mount-proc", "--kill-child",
+            "sh", "-c", inner]
 
 
 # ── Blocker 1: namespace identity (pure, testable) ──
@@ -164,40 +176,55 @@ def interpret_isolation(link_names, outbound_blocked):
     return bool(names) and names == {"lo"} and bool(outbound_blocked)
 
 
-def supervise_reap(pgid, *, signal_group, group_alive, sleep, term_grace=5.0, kill_grace=3.0, tick=0.2):
-    """D2: ACTIVELY terminate the isolated process GROUP and WAIT for its disappearance. SIGTERM, wait
-    up to term_grace; if still alive SIGKILL, wait up to kill_grace; reaped IFF the group is gone at
-    the end. Operates on the GROUP (never assumes PID == PGID); `group_alive(pgid)->bool` and
-    `signal_group(pgid, sig)` are injected. A None pgid (identity unknown) is never 'reaped'."""
-    import signal as _sig
-    if pgid is None:
+def cleanup_by_owner(owner, inner, *, send_signal, exited, sleep, term_grace=5.0, kill_grace=3.0, tick=0.2):
+    """F1: reap the disposable isolation unit by a STABLE OWNER HANDLE held across the WHOLE lifecycle
+    — never by a pgid (a process group can be shared with host processes) and never by a bare pid
+    number (a pid can be reused between discovery and the signal, so `getpgid(pid)` → `killpg` could
+    land on an unrelated group — the race this replaces).
+
+    A handle PINS exactly one process for its whole lifetime (in RealSys a pidfd from `pidfd_open`):
+      • `send_signal(handle, sig)` signals THAT process and no other — it raises ProcessLookupError
+        once the process is gone and can NEVER be redirected onto a reused pid;
+      • `exited(handle) -> bool` reports whether THAT exact process has terminated.
+
+    `owner`  — handle to the `unshare` process, captured at SPAWN (so it exists even when the inner
+               identity resolution fails). unshare runs `--kill-child`, so killing it reaps the whole
+               fresh PID namespace (PDEATHSIG to the init, then init-death reaps every member).
+    `inner`  — handle to the namespace INIT, resolved+verified AFTER spawn, or None when identity was
+               ambiguous. Used to CONFIRM the namespace emptied; a backstop signal if it somehow did
+               not. Its freshness (a PID namespace the host does not share) was proven at discovery
+               (`verify_isolated`), which is what makes the unit EXCLUSIVELY the experiment's.
+
+    Reaped IFF the owner has exited AND (no inner handle, or the inner init has also exited). A None
+    owner ⇒ False: with no owned handle we do NOT claim termination — closing the tmux socket is not
+    proof the isolated process died."""
+    if owner is None:
         return False
-    for sig, grace in ((_sig.SIGTERM, term_grace), (_sig.SIGKILL, kill_grace)):
-        try:
-            signal_group(pgid, sig)
-        except (ProcessLookupError, OSError):
-            pass
-        waited = 0.0
-        while waited < grace:
-            if not group_alive(pgid):
+
+    def drive(handle):
+        # SIGTERM then (if needed) SIGKILL, each followed by a bounded wait on the SAME handle.
+        # A ProcessLookupError means the pinned process is already gone (it cannot be a reused pid),
+        # so that is a confirmed exit; any other OSError is transient/denied and is NOT read as exit.
+        for sig, grace in ((signal.SIGTERM, term_grace), (signal.SIGKILL, kill_grace)):
+            try:
+                send_signal(handle, sig)
+            except ProcessLookupError:
                 return True
-            sleep(tick)
-            waited += tick
-    return not group_alive(pgid)
+            except OSError:
+                pass
+            waited = 0.0
+            while waited < grace:
+                if exited(handle):
+                    return True
+                sleep(tick)
+                waited += tick
+        return exited(handle)
 
-
-def supervised_cleanup(host_pid, *, getpgid, signal_group, group_alive, sleep):
-    """E1: establish the process GROUP identity (getpgid) BEFORE any tmux teardown, then actively
-    reap that group. A None pid, a gone pid (ProcessLookupError), or a permission error ⇒ we never
-    established a group we can signal/verify ⇒ False (never signals an ambiguous identity; a perm
-    error is NOT 'terminated'; never queries a PID as if it were a PGID)."""
-    if host_pid is None:
+    if not drive(owner):
         return False
-    try:
-        pgid = getpgid(host_pid)
-    except (ProcessLookupError, PermissionError, OSError):
-        return False
-    return supervise_reap(pgid, signal_group=signal_group, group_alive=group_alive, sleep=sleep)
+    if inner is None:
+        return True                      # owner (unshare --kill-child) reaped the namespace
+    return exited(inner) or drive(inner)  # confirm the init is gone; backstop-signal it if not
 
 
 def verify_cli(*, get_version, get_sha, want_version="2.1.314", want_sha=None):
@@ -247,13 +274,11 @@ def make_runner(sysio, *, cli, scratch, trust_gate, clock, settle_polls=4):
             txt = sysio.pane(sock)
             if txt is None:
                 return False
+            # F2: the critical window is DERIVED from these reads (first→last) — there is no separate
+            # window timestamp to open/close. The pre-trust read (the first one, taken right after
+            # spawn) is what later lets a pre-trust decision be STRICTLY bracketed; a settle read is
+            # the strictly-after bound. coverage() does the bracketing — the runner only reads.
             o.from_pane(txt, ok=True)
-            # E2: open the critical window at the FIRST successful read — not at Observer init, which
-            # (with a real advancing clock) is strictly before any read and would make coverage
-            # partial. The first read is right after spawn (pre-trust, so C4's pre-trust decision is
-            # still covered); window_close is after the last tick.
-            if o.window["open"] is None:
-                o.window_open()
             o.from_debug(sysio.read_text(debug))
             o.from_probe_records(sysio.probe_records(ws), start_inst=sysio.probe_inst(ws))
             return True
@@ -262,47 +287,57 @@ def make_runner(sysio, *, cli, scratch, trust_gate, clock, settle_polls=4):
             if not tick():
                 raise _CaptureError()
 
-        spawned, host_pid = False, None
+        owner, inner, result = None, None, None
         try:
             argv = isolation_argv(cli, home, ws, debug, policy_path=policy)
             try:
-                sysio.spawn(argv, sock)
-                spawned = True
+                owner = sysio.spawn(argv, sock)                 # F1: OWNER handle captured at SPAWN
             except Exception:
                 return {"ok": False, "reason": "spawn-failed", "instance": inst}
-            # Blocker 1: resolve the HOST pid of the isolated process and verify it is in fresh
-            # net+pid namespaces BEFORE any nsenter/signal. Ambiguous identity ⇒ fail-closed.
-            host_pid = sysio.supervised_pid(sock)
-            if host_pid is None:
-                return {"ok": False, "reason": "identity-ambiguous", "instance": inst}
-            if not sysio.check_isolation(host_pid):              # per-instance isolation, by host pid
-                return {"ok": False, "reason": "isolation-failed", "instance": inst}
+            # F1: resolve the namespace INIT handle (verified fresh net+pid ns) for capture
+            # attribution. Ambiguous ⇒ None, but we STILL hold `owner`, so the finally reaps the
+            # disposable namespace by the owner handle regardless — see the cleanup note there.
+            inner = sysio.supervised_pid(sock)
+            if inner is None:
+                result = {"ok": False, "reason": "identity-ambiguous", "instance": inst}
+                return result
+            if not sysio.check_isolation(inner):                # per-instance isolation, by the handle
+                result = {"ok": False, "reason": "isolation-failed", "instance": inst}
+                return result
             # D3: capture BEFORE the trust gate (the decision can land pre-trust) and IN PARALLEL with
             # it via on_poll; a capture that fails during trust raises and invalidates the run (B4).
             if not tick():
-                return {"ok": False, "reason": "capture-failed", "instance": inst}
+                result = {"ok": False, "reason": "capture-failed", "instance": inst}
+                return result
             try:
-                tg = trust_gate(sysio, sock, host_pid, on_poll=guarded_tick)
+                tg = trust_gate(sysio, sock, inner, on_poll=guarded_tick)
             except _CaptureError:
-                return {"ok": False, "reason": "capture-failed-during-trust", "instance": inst}
+                result = {"ok": False, "reason": "capture-failed-during-trust", "instance": inst}
+                return result
             o.fact("trust", "confirmed" if tg.get("state") == "confirmed" else "aborted")
             for _ in range(settle_polls):
                 if not tick():
-                    return {"ok": False, "reason": "capture-failed", "instance": inst}
+                    result = {"ok": False, "reason": "capture-failed", "instance": inst}
+                    return result
             if digest:
                 o.fixture_identity(digest)
-            o.window_close()
-            snap = o.snapshot()
+            result = {"ok": True, "snapshot": o.snapshot(), "instance": inst, "digest": digest}
+            return result
         finally:
-            if spawned:
-                # E1: reap the isolated GROUP by verified identity FIRST (while it still exists),
-                # THEN tear tmux down. With no identity we never claim a reap (the run already
-                # returned identity-ambiguous; the teardown is best-effort, not proof of cleanup).
-                reaped = sysio.reap(host_pid) if host_pid is not None else False
+            if owner is not None:
+                # F1: reap the disposable PID namespace by the STABLE OWNER HANDLE (never a pgid,
+                # never a bare pid), THEN tear tmux down. This runs on EVERY exit path that got as far
+                # as a spawn — including identity-ambiguous: even with no verified inner handle, the
+                # owner handle (unshare --kill-child) tears the namespace down, so cleanup is still
+                # accredited (reported as `cleanup_accredited`); tmux teardown is never the proof.
+                reaped = sysio.reap(owner, inner)
                 sysio.teardown(sock)
-                if host_pid is not None and not reaped:
+                if inner is None:
+                    if result is not None:                       # identity-ambiguous (not an exception)
+                        result["cleanup_accredited"] = reaped
+                        return result
+                elif not reaped:
                     return {"ok": False, "reason": "cleanup-not-reaped", "instance": inst}
-        return {"ok": True, "snapshot": snap, "instance": inst, "digest": digest}
     return runner
 
 
@@ -397,11 +432,26 @@ class RealSys:   # pragma: no cover
         import subprocess
         return subprocess.run(["tmux", "-L", sock, *a], capture_output=True, text=True)
 
+    def _open_handle(self, pid):
+        """F1: a STABLE handle to `pid` — a pidfd (os.pidfd_open) plus the pid for diagnostics. The
+        pidfd refers to THAT process for its whole lifetime; a signal through it raises
+        ProcessLookupError once it is gone and can never be redirected onto a reused pid."""
+        return {"pid": pid, "pidfd": os.pidfd_open(pid)}
+
     def spawn(self, argv, sock):
-        r = self._tmux(sock, "new-session", "-d", "-s", "s", "-x", "200", "-y", "50", "sh", "-c",
-                       " ".join(shlex.quote(x) for x in argv))
+        """F1: start the instance and return the OWNER HANDLE — a pidfd to the `unshare` process. The
+        pane runs `exec unshare …`, so the pane pid IS the unshare, which owns the fresh PID namespace
+        and (via `--kill-child`, see isolation_argv) reaps it when killed. Capturing this handle at
+        SPAWN is what guarantees cleanup even when the later inner-identity resolution fails."""
+        cmd = "exec " + " ".join(shlex.quote(x) for x in argv)
+        r = self._tmux(sock, "new-session", "-d", "-s", "s", "-x", "200", "-y", "50", "sh", "-c", cmd)
         if r.returncode != 0:                                 # Blocker 4: tmux result was ignored
             raise RuntimeError(f"tmux new-session failed: {r.stderr.strip()}")
+        p = self._tmux(sock, "list-panes", "-t", "s", "-F", "#{pane_pid}")
+        pane = p.stdout.strip()
+        if not pane.isdigit():
+            raise RuntimeError("could not resolve the unshare (pane) pid to own")
+        return self._open_handle(int(pane))                   # OWNER handle: the unshare process
 
     def _readlink(self, pid, ns):
         try:
@@ -418,9 +468,11 @@ class RealSys:   # pragma: no cover
             return None
 
     def supervised_pid(self, sock):
-        """Blocker 1: the HOST pid of the isolated process — the UNIQUE descendant of this socket's
-        tmux pane pid that lives in a fresh pid namespace — verified to be in fresh net+pid namespaces
-        before it is used for nsenter/signals. Ambiguous or non-isolated ⇒ None (fail-closed)."""
+        """Blocker 1/F1: the INNER handle — a pidfd to the namespace INIT, the UNIQUE descendant of
+        this socket's tmux pane pid that lives in a fresh pid namespace, verified to be in fresh
+        net+pid namespaces (which is what proves the unit is EXCLUSIVELY the experiment's) before the
+        handle is opened. Ambiguous or non-isolated ⇒ None (fail-closed); the owner handle from
+        spawn still reaps the namespace in that case."""
         r = self._tmux(sock, "list-panes", "-t", "s", "-F", "#{pane_pid}")
         pane = r.stdout.strip()
         if not pane.isdigit():
@@ -436,12 +488,13 @@ class RealSys:   # pragma: no cover
         tgt_net = parse_ns_inode(self._readlink(cand, "net"))
         if not verify_isolated(host_net, host_pidns, tgt_net, procs[cand]["pidns"]):
             return None
-        return cand
+        return self._open_handle(cand)                        # INNER handle: the namespace init
 
-    def check_isolation(self, host_pid):
-        """D1: a REAL check INSIDE the resolved host pid's net namespace — nsenter, list links and
-        attempt an outbound connect — then INTERPRET the result. Any failure ⇒ False (fail-closed)."""
+    def check_isolation(self, inner):
+        """D1: a REAL check INSIDE the resolved init's net namespace — nsenter, list links and attempt
+        an outbound connect — then INTERPRET the result. Any failure ⇒ False (fail-closed)."""
         import subprocess
+        host_pid = inner["pid"]
         links = subprocess.run(["nsenter", "-t", str(host_pid), "-n", "sh", "-c",
                                 "ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1"],
                                capture_output=True, text=True)
@@ -478,26 +531,32 @@ class RealSys:   # pragma: no cover
         recs = self.probe_records(ws)
         return next((r.get("inst") for r in recs if isinstance(r, dict) and r.get("inst")), None)
 
-    def _group_alive(self, pgid):
-        """True iff ANY process still belongs to pgid (scans /proc — never assumes PID == PGID)."""
-        for e in os.listdir("/proc"):
-            if not e.isdigit():
-                continue
-            try:
-                if os.getpgid(int(e)) == pgid:
-                    return True
-            except (ProcessLookupError, PermissionError, OSError):
-                continue
-        return False
+    def _pidfd_signal(self, handle, sig):
+        """Signal the EXACT process the handle pins (pidfd) — never a pid number, never a group.
+        Raises ProcessLookupError once that process is gone (it can't hit a reused pid)."""
+        signal.pidfd_send_signal(handle["pidfd"], sig)
 
-    def reap(self, host_pid):
-        """E1/D2: reap the isolated GROUP by verified identity, BEFORE any tmux teardown. Establish
-        the pgid via getpgid (never assume PID == PGID; a gone/perm-error pid ⇒ cannot prove ⇒
-        False), then supervise_reap SIGTERM→wait→SIGKILL→exit/timeout. Delegates to the pure
-        supervised_cleanup()."""
+    def _pidfd_exited(self, handle):
+        """True iff the pinned process has terminated: a pidfd becomes readable on process exit."""
+        import select
+        return bool(select.select([handle["pidfd"]], [], [], 0)[0])
+
+    def reap(self, owner, inner):
+        """F1: reap the disposable PID namespace by the STABLE OWNER HANDLE (the unshare pidfd) —
+        SIGTERM→wait→SIGKILL→wait on the owned process (which `--kill-child`-reaps the namespace),
+        then confirm the init exited. NEVER a pgid, never a bare pid, so no PID-reuse race and no
+        signal to a possibly-shared group. Closes the pidfds afterwards."""
         import time
-        return supervised_cleanup(host_pid, getpgid=os.getpgid, signal_group=os.killpg,
-                                  group_alive=self._group_alive, sleep=time.sleep)
+        try:
+            return cleanup_by_owner(owner, inner, send_signal=self._pidfd_signal,
+                                    exited=self._pidfd_exited, sleep=time.sleep)
+        finally:
+            for h in (owner, inner):
+                if h is not None:
+                    try:
+                        os.close(h["pidfd"])
+                    except OSError:
+                        pass
 
     def teardown(self, sock):
         """Best-effort tmux teardown — called AFTER reap; not a proof of process cleanup."""
@@ -505,10 +564,11 @@ class RealSys:   # pragma: no cover
 
 
 # ── real trust-gate wiring + operational entry point (pragma: no cover — not run before GO) ──
-def real_trust_gate(sysio, sock, host_pid, on_poll):   # pragma: no cover
+def real_trust_gate(sysio, sock, inner, on_poll):   # pragma: no cover
     """Drive the corrected trust-gate (poc/inv1-trust) over this instance's tmux socket, feeding the
     Observer on every poll (D3: capture in parallel). `on_poll()` RAISES on a failed capture, which
-    propagates out and invalidates the run (B4). Returns the gate result dict."""
+    propagates out and invalidates the run (B4). Returns the gate result dict. Liveness is read from
+    the INNER handle's pidfd (stable identity), not a bare pid (F1)."""
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "inv1-trust"))
     import trustgate as TG
 
@@ -521,13 +581,8 @@ def real_trust_gate(sysio, sock, host_pid, on_poll):   # pragma: no cover
             sysio._tmux(sock, "send-keys", "-t", "s", key)
 
         def exited(self):
-            try:
-                os.kill(host_pid, 0)
-                return False
-            except ProcessLookupError:
-                return True
-            except OSError:
-                return False
+            import select
+            return bool(select.select([inner["pidfd"]], [], [], 0)[0])
 
         def now(self):
             import time
