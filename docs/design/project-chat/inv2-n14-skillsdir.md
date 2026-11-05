@@ -68,6 +68,27 @@ la línea de rechazo **no** prueba "no bloqueado"; prueba sólo que su canal no 
   **consistentes** con "bloqueado pero no capturado" y con "no intentado/insuficiente" —
   **indistinguibles** entre sí con la evidencia retenida. No se reinterpreta como blocked.
 
+## 4-bis. Límite del análisis estático y la única subpregunta abierta (2026-11-05)
+
+El gate `Wie` lee `be("policySettings").strictKnownMarketplaces` (y `.blockedMarketplaces`): bloquea
+skills-dir cuando `strictKnownMarketplaces` existe y **no** incluye `{"source":"skills-dir"}`, o
+cuando está en `blockedMarketplaces`. **Lo que NO se puede determinar con confianza desde el binario
+minificado** es qué **fuente** de settings administrados puebla `policySettings`: solo el **drop-in
+root** (`/etc/claude-code/managed-settings.d/`) o también el knob `CLAUDE_CODE_MANAGED_SETTINGS_PATH`.
+El accesor (`be`) es un nombre reutilizado en varios ámbitos y el ensamblado no es una cadena
+greppable; **no se sigue analizando para no inventar certeza.**
+
+Esto importa porque en D3 la allowlist de MCP (`allowManagedMcpServersOnly`) **no** se enforzaba por
+el env-knob aunque el guard sí quedaba "seated". Si `strictKnownMarketplaces` se comporta igual, una
+prueba local con env-knob **no** reproduciría el bloqueo de N14 (haría falta el drop-in root, fuera
+del alcance local); si en cambio se enforce por el env-knob, una prueba local **sí** podría
+demostrar el bloqueo y validar el clasificador del observador contra el pane real. **Es la única
+subpregunta abierta de #2 y solo se resuelve con una corrida local descartable** (env-knob +
+plugin en `~/.claude/skills/` + `strictKnownMarketplaces` sin `source:skills-dir`), que es una
+**ejecución real** y requiere **aprobación específica** (no autorizada aún; el observador unificado
+también está pendiente de revisión). **No cambia el veredicto de #2:** sigue INCONCLUSIVE por
+observabilidad.
+
 ## 5. Propuesta mínima de instrumentación (prueba local descartable; NO es cambio al kit)
 
 Dado que el rechazo existe pero sólo en el pane, capturar la **decisión** como enum saneado (sin
