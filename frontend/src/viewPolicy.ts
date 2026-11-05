@@ -93,9 +93,50 @@ export function writeLastConversation(sessionId: string, cid: string | null): vo
 	write(LAST_KEY + sessionId, cid);
 }
 
+// The last conversation's title, for the sidebar's "↳ last conversation"
+// link (no request needed to name it). Only ever shown next to the cid it was
+// written for: a title from another conversation is never paired with it.
+const LAST_TITLE_KEY = "st.chat.lastTitle.";
+
+export function readLastConversationTitle(sessionId: string, cid: string): string | null {
+	const v = read(LAST_TITLE_KEY + sessionId);
+	if (!v) return null;
+	const nl = v.indexOf("\n");
+	if (nl < 0 || v.slice(0, nl) !== cid) return null;
+	const title = v.slice(nl + 1);
+	return title.length > 0 ? title : null;
+}
+
+export function writeLastConversationTitle(sessionId: string, cid: string, title: string): void {
+	write(LAST_TITLE_KEY + sessionId, `${cid}\n${title}`);
+}
+
+export function clearLastConversationTitle(sessionId: string): void {
+	write(LAST_TITLE_KEY + sessionId, null);
+}
+
+/**
+ * Titles are content (the list is owner-only): none may outlive the account
+ * on this browser. Logout drops every stored one; the links come back the
+ * next time Chat is opened in each project.
+ */
+export function forgetAllLastConversationTitles(): void {
+	try {
+		const keys: string[] = [];
+		for (let i = 0; i < localStorage.length; i++) {
+			const k = localStorage.key(i);
+			if (k?.startsWith(LAST_TITLE_KEY)) keys.push(k);
+		}
+		for (const k of keys) localStorage.removeItem(k);
+	} catch {
+		// Storage unavailable: nothing was stored either.
+	}
+}
+
 /** Drop everything remembered for a session (hard delete). */
 export function forgetSession(sessionId: string): void {
 	write(VIEW_KEY + sessionId, null);
 	write(HISTORY_KEY + sessionId, null);
 	write(LAST_KEY + sessionId, null);
+	write(LAST_TITLE_KEY + sessionId, null);
 }

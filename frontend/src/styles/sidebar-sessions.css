@@ -68,6 +68,7 @@
 
 .session-item {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
   padding: 0.5rem 0.6rem;
@@ -215,4 +216,41 @@
 .session-menu-btn:hover {
   background: rgba(255, 255, 255, 0.08);
   color: var(--c-text);
+}
+
+/* "↳ last conversation": its own line under the project, aligned with the
+   name (dot 8px + the row's 0.5rem gap). */
+.session-last-conv {
+  flex-basis: 100%;
+  min-width: 0;
+  margin: 0.1rem 0 0 calc(8px + 0.5rem);
+  padding: 0.1rem 0.3rem;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: var(--c-muted);
+  font: inherit;
+  font-size: 0.72rem;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.session-last-conv:hover {
+  color: var(--c-accent);
+  background: rgba(255, 255, 255, 0.04);
+}
+.session-last-conv:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 1px;
+}
+.session-last-conv[aria-current="page"] {
+  color: var(--c-accent);
+}
+@media (max-width: 768px) {
+  .session-last-conv {
+    min-height: 44px;
+    font-size: 0.8rem;
+  }
 }

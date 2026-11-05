@@ -55,7 +55,7 @@ import { renderSidebarObservables } from "./myGroups.js";
 import { openBootstrapLogModal } from "./newSession.js";
 import { openObserveModalFor } from "./observeModal.js";
 import { openPortsModalFor } from "./ports.js";
-import { clear as clearRoute, type Route, readRoute } from "./router.js";
+import { clear as clearRoute, type Route, readRoute, routeHash } from "./router.js";
 import {
 	type SessionActionContext,
 	type SessionActionId,
@@ -65,7 +65,13 @@ import {
 import { badgeFor, clearBadge, recordOutput } from "./tabActivity.js";
 import { openTerminalSession, type SessionStatus } from "./terminal.js";
 import { currentShell } from "./uiShell.js";
-import { readHistoryHint, readViewPref, writeHistoryHint } from "./viewPolicy.js";
+import {
+	readHistoryHint,
+	readLastConversation,
+	readLastConversationTitle,
+	readViewPref,
+	writeHistoryHint,
+} from "./viewPolicy.js";
 import {
 	applyRouteView,
 	beginLanding,
@@ -75,6 +81,7 @@ import {
 	endRouteApply,
 	landingFor,
 	landView,
+	onViewChange,
 	reflectRoute,
 	registerRouteDetail,
 	setView,
@@ -370,6 +377,28 @@ function reattachIfStarted(): void {
 	void openSession(id);
 }
 
+/**
+ * Mark the "↳ last conversation" link that is the open conversation, in place:
+ * in-app navigation writes the address with push/replaceState (no event, no
+ * sidebar render), so the mark is re-synced on navigation, not only on polls.
+ */
+export function syncLastConversationCurrent(): void {
+	const route = readRoute();
+	for (const b of sessionList.querySelectorAll<HTMLElement>(".session-last-conv")) {
+		const sid = b.closest<HTMLElement>(".session-item")?.dataset.sessionId;
+		const on =
+			route !== null &&
+			route.view === "chat" &&
+			route.sessionId === sid &&
+			route.detail === b.dataset.cid;
+		if (on) b.setAttribute("aria-current", "page");
+		else b.removeAttribute("aria-current");
+	}
+}
+
+// Leaving Chat (or coming back) changes which link is the open conversation.
+onViewChange(() => syncLastConversationCurrent());
+
 export function renderSessionList() {
 	// Re-rendered on every 5 s poll: keep the keyboard user's place.
 	const active = document.activeElement;
@@ -444,6 +473,11 @@ export function renderSessionList() {
 			void runSessionAction(s, s.status === "failed" ? "viewLog" : "open");
 		});
 		item.appendChild(select);
+		// With the "↳ last conversation" line the row has room between its
+		// controls; a tap there is a tap on the row (select), not a dead zone.
+		item.addEventListener("click", (e) => {
+			if (e.target === item) select.click();
+		});
 
 		const actions = document.createElement("span");
 		actions.className = "session-actions";
@@ -475,6 +509,31 @@ export function renderSessionList() {
 		more.addEventListener("click", () => openSessionMenu(s, more));
 		actions.appendChild(more);
 		item.appendChild(actions);
+
+		// One click back to this project's last conversation, from anywhere.
+		// Named from what Chat remembered (no request); no status shown —
+		// knowing it would mean asking every project.
+		const lastCid = s.status === "failed" ? null : readLastConversation(s.sessionId);
+		const lastTitle = lastCid ? readLastConversationTitle(s.sessionId, lastCid) : null;
+		if (lastCid && lastTitle) {
+			const last = document.createElement("button");
+			last.type = "button";
+			last.className = "session-last-conv";
+			// Focus restore after each 5 s re-render finds controls by role.
+			last.dataset.role = "last-conv";
+			last.dataset.cid = lastCid;
+			const route = readRoute();
+			if (route?.sessionId === s.sessionId && route.view === "chat" && route.detail === lastCid)
+				last.setAttribute("aria-current", "page");
+			last.textContent = `↳ ${lastTitle}`;
+			last.title = `Open the last conversation: ${lastTitle}`;
+			last.setAttribute("aria-label", `Open the last conversation in ${s.name}: ${lastTitle}`);
+			last.addEventListener("click", () => {
+				const hash = routeHash({ sessionId: s.sessionId, view: "chat", detail: lastCid });
+				if (window.location.hash !== hash) window.location.hash = hash;
+			});
+			item.appendChild(last);
+		}
 
 		sessionList.appendChild(item);
 	}

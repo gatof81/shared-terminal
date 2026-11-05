@@ -77,6 +77,7 @@ import {
 	readStoredBar,
 	resolveShell,
 } from "./uiShell.js";
+import { forgetAllLastConversationTitles } from "./viewPolicy.js";
 import { isOverlayActive, overlayLabel } from "./viewSwitch.js";
 
 // ── DOM refs ────────────────────────────────────────────────────────────────
@@ -622,6 +623,7 @@ function handleLogout(toastMessage?: string): void {
 	// The conversation switcher lists this account's titles and may still be
 	// loading them: close it before the login view shows.
 	closeSwitcher();
+	forgetAllLastConversationTitles();
 	void logout();
 	// A list request still in flight was sent with this account's cookie:
 	// its answer must not be applied after the next person signs in.
