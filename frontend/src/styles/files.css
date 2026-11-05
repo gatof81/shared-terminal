@@ -121,6 +121,12 @@ span.files-crumb {
   border-color: var(--c-ok-strong);
   color: var(--c-white);
 }
+/* The generic hover turns text accent-blue, unreadable on the green fill. */
+.files-btn.primary:hover:not(:disabled) {
+  background: var(--c-ok-strong);
+  border-color: var(--c-ok-strong);
+  color: var(--c-white);
+}
 .files-btn[aria-pressed="true"] {
   border-color: var(--c-accent);
   color: var(--c-accent);

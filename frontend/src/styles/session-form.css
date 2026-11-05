@@ -66,6 +66,11 @@
   flex-direction: column;
   gap: 0.35rem;
 }
+/* `display: flex` above beats the UA's [hidden] rule, so a field the code
+   hides (the template-only Description on New session) stayed visible. */
+.session-field[hidden] {
+  display: none;
+}
 .session-field-label {
   font-size: 0.78rem;
   color: var(--c-muted);

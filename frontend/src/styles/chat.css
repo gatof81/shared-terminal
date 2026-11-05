@@ -1072,7 +1072,7 @@
   color: var(--c-warn, #b26a00);
 }
 .chat-composer-status.error {
-  color: var(--c-danger, #c0392b);
+  color: var(--c-err);
 }
 .chat-composer-status .chat-link {
   padding: 0;

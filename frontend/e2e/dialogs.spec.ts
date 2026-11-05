@@ -9,6 +9,9 @@ test.describe("dialogs", () => {
 		const modal = page.locator("#new-session-modal");
 		await expect(modal).toHaveClass(/open/);
 		await expect(page.locator("#new-session-input")).toBeFocused();
+		// The template-only Description field is hidden on New session (its
+		// flex rule used to beat [hidden]).
+		await expect(page.locator("#edit-template-description-field")).toBeHidden();
 		await expect(page.locator("#app-view")).toHaveAttribute("inert", "");
 		await app.escape();
 		await expect(modal).not.toHaveClass(/open/);
