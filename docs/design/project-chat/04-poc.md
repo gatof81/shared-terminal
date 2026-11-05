@@ -3655,7 +3655,15 @@ estos dos caminos **sigue sin demostrarse**, y un PASS de alcance reducido **no*
    no cargó hooks, siendo que en run 1 el mismo P0 fue válido. Hipótesis: fragilidad de timing en el
    tecleo/confirmación del trust por el harness, o una diferencia de estado del contenedor. **Es el
    defecto que invalidó run 2 y bloquea juzgar N14/N17-project.** Investigable sobre la **evidencia
-   de run 2 ya retenida** (debug/pane de P0), **sin** una nueva corrida en VM100.
+   de run 2 ya retenida** (`result.json` de P0), **sin** una nueva corrida en VM100.
+   **Análisis estático entregado en [inv1-p0-trust.md](./inv1-p0-trust.md)** (solo lectura, sin tocar
+   el kit ni los contenedores): el mecanismo está demostrado (un `Down` perdido en el trust en frío ⇒
+   `Enter` sobre `No, exit` ⇒ salida sin hooks); cuál de H1/H2/H3 ocurrió es determinable leyendo el
+   `result.json` de P0 retenido (`screens.trust`/`tries`/`trust_still_shown`/`timed_out`/`probe_kinds`),
+   salvo la "selección exacta" que **no** se capturó (pane transitorio) — residuo INCONCLUSIVE. Nota:
+   el camino de trust no registra selección/snapshot (a diferencia del de MCP); de ahí la propuesta de
+   instrumentación mínima (gate de readiness + `trust_selection`) a validar en una prueba local
+   descartable **antes** de repetir un control P0.
 2. **Ausencia de rechazo demostrable en N14 (`@skills-dir`).** Si 2.1.314 emite —en algún canal— una
    línea decisiva de que el plugin plantado en `~/.claude/skills/` fue rechazado por política, o si
    estructuralmente no la emite (en cuyo caso N14 es INCONCLUSIVE por diseño de 2.1.314, a
