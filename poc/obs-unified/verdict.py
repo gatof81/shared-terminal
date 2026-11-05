@@ -22,13 +22,15 @@ AUTHORITY = {
     ("control", "session.start"): {("probe", "high")},
     ("control", "classic.SessionStart"): {("probe", "high")},
     ("control", "probe-org-tier"): {("debug", "high")},
-    ("control", "guard-seated-loaded"): {("debug", "high")},
+    ("control", "guard-seated"): {("debug", "high")},
+    ("control", "guard-loaded"): {("debug", "high")},
     ("control", "guard-not-seated"): {("debug", "high")},
     ("trust", "confirmed"): {("gate", "high")},
     ("trust", "aborted"): {("gate", "high")},
     ("skills-dir", "loaded"): {("debug", "high")},
     ("skills-dir", "blocked"): {("pane", "low")},
     ("skills-dir", "block-attributable"): {("control", "high")},
+    ("skills-dir", "fixture"): {("control", "high")},
 }
 
 
@@ -75,12 +77,17 @@ def verdict_p0(snap):
         return "inconclusive", "debug-continuity-lost"     # B5: cannot trust debug-derived controls
     controls = {e["signal"] for e in ev if e["concern"] == "control"}
     trust_ok = any(e["concern"] == "trust" and e["signal"] == "confirmed" for e in ev)
-    need = {"session.start", "probe-org-tier", "guard-seated-loaded"}
     if not trust_ok:
         return "inconclusive", "trust-not-confirmed"
-    if not need <= controls:
-        return "baseline-invalid", "missing-controls:" + ",".join(sorted(need - controls))
-    return "baseline-ok", "trust+session.start+probe-org+guard(same-start)"
+    # C1: classic.SessionStart is a GLOBAL control in analyze_b1a@8eafe1a (classic-sessionstart-
+    # missing) — do not relax it. C3: guard validity = seated AND loaded (sub-facts may arrive in
+    # different fragments); a later not-seated already invalidated above (B1).
+    guard_ok = "guard-seated" in controls and "guard-loaded" in controls
+    need = {"session.start", "classic.SessionStart", "probe-org-tier"}
+    missing = sorted(need - controls) + ([] if guard_ok else ["guard-seated+loaded"])
+    if missing:
+        return "baseline-invalid", "missing-controls:" + ",".join(missing)
+    return "baseline-ok", "trust+session.start+classic.SessionStart+probe-org+guard(same-start)"
 
 
 def verdict_n14(snap):
@@ -105,9 +112,19 @@ def verdict_n14(snap):
     if not attrib:
         return "inconclusive", "block-observed-low-not-attributable"
     d = attrib[0].get("detail") or {}
-    if d.get("fixture") != "st-b1-rogue-n14" or not d.get("differential"):
-        return "inconclusive", "attribution-unverified(need fixture+differential)"
-    return "blocked-low", "skills-dir-blocked(attributed;pane-low;corroborated:no-load,same-start)"
+    # C2: the differential must be a VERIFIABLE reference to a positive control, bound to THIS run's
+    # fixture by content digest — not a driver assertion. Require: named N14 fixture; a differential
+    # object naming the control run and asserting it loaded; AND a fixture_digest equal to the digest
+    # THIS run independently recorded (observer.fixture_identity). A bare flag is never credited.
+    diff = d.get("differential")
+    fixture = next((e.get("detail") or {} for e in _sig(ev, "skills-dir", lambda s: s == "fixture")), {})
+    if d.get("fixture") != "st-b1-rogue-n14":
+        return "inconclusive", "attribution-wrong-or-missing-fixture"
+    if not isinstance(diff, dict) or not diff.get("control_run") or diff.get("control_loaded") is not True:
+        return "inconclusive", "attribution-not-a-validated-differential"
+    if not fixture.get("digest") or diff.get("fixture_digest") != fixture.get("digest"):
+        return "inconclusive", "attribution-fixture-digest-mismatch"
+    return "blocked-low", "skills-dir-blocked(attributed-differential;pane-low;no-load,same-start)"
 
 
 def verdict_n17_project(snap):

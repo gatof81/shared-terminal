@@ -59,10 +59,14 @@ def classify_debug(text):
     out = []
     if PROBE_LOADED_ORG.search(t):
         out.append(("control", "probe-org-tier", "high", None))
-    if GUARD_NOT_SEATED.search(t):                 # B1: negative state takes precedence
+    # C3: emit ATOMIC guard sub-facts so seated/loaded can arrive in SEPARATE debug fragments and
+    # still accumulate; verdict_p0 combines them and still lets a later `not-seated` win (B1).
+    if GUARD_NOT_SEATED.search(t):
         out.append(("control", "guard-not-seated", "high", None))
-    elif GUARD_SEATED_POS.search(t) and GUARD_LOADED.search(t):
-        out.append(("control", "guard-seated-loaded", "high", None))
+    if GUARD_SEATED_POS.search(t):
+        out.append(("control", "guard-seated", "high", None))
+    if GUARD_LOADED.search(t):
+        out.append(("control", "guard-loaded", "high", None))
     if ROGUE_N14_LOADED.search(t):
         out.append(("skills-dir", "loaded", "high", None))   # FAIL signal (attacker executed)
     return out
@@ -153,6 +157,12 @@ class Observer:
     def fact(self, concern, signal, source="gate", confidence="high", detail=None):
         """Record a fact from our own driver (trust/mcp gate): selection, dismissed, confirmed, …"""
         self._emit(concern, signal, source, confidence, detail)
+
+    def fixture_identity(self, digest, *, name="st-b1-rogue-n14"):
+        """Record THIS run's N14 fixture identity (a content digest), from the harness that planted
+        it (control source). The N14 attribution's differential must reference the SAME digest, so a
+        bare driver assertion cannot stand in for a validated positive control (C2)."""
+        self._emit("skills-dir", "fixture", "control", "high", detail={"name": name, "digest": digest})
 
     def from_debug(self, text):
         # B6: classify ONLY complete lines past the cursor, so existing events are never re-scanned.

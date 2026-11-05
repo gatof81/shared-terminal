@@ -52,16 +52,21 @@ def p0_ok():
     return o
 
 
-def n14_full_block(attributed=True, differential=True):
+FIXTURE_DIGEST = "d34db33fcafef00d"
+
+
+def n14_full_block(attributed=True, differential=True, digest=FIXTURE_DIGEST, diff_digest=FIXTURE_DIGEST):
     clk = ManualClock()
     o = obs(attempt="N14", clock=clk).set_window(max_gap=0.3)
     o.from_debug(PROBE)
     o.from_probe_records(PROBE_RECORDS, start_inst=INST)
     o.fact("trust", "confirmed")
     if attributed:
+        o.fixture_identity(digest)                      # this run's N14 fixture identity
         det = {"fixture": "st-b1-rogue-n14"}
         if differential:
-            det["differential"] = ATTRIB["differential"]
+            det["differential"] = {"control_run": "ctrl-run-1", "control_loaded": True,
+                                   "fixture_digest": diff_digest}
         o.fact("skills-dir", "block-attributable", source="control", detail=det)
     o.window_open(0.05)
     o.window_close(0.25)
@@ -75,7 +80,7 @@ def n14_full_block(attributed=True, differential=True):
 class Round1Regressions(unittest.TestCase):
     def test_not_seated_is_not_a_valid_guard(self):
         facts = {(c, s) for c, s, _, _ in O.classify_debug(NOT_SEATED + PROBE.splitlines()[-1] + "\n")}
-        self.assertNotIn(("control", "guard-seated-loaded"), facts)
+        self.assertNotIn(("control", "guard-seated"), facts)   # no positive seating
         self.assertIn(("control", "guard-not-seated"), facts)
 
     def test_events_declaration_is_not_session_start(self):
@@ -90,7 +95,7 @@ class B1GuardPrecedence(unittest.TestCase):
         self.assertEqual(V.verdict_p0(o.snapshot())[0], "baseline-ok")
         o.from_debug(PROBE + NOT_SEATED)               # a LATER chunk says not seated
         sigs = {e["signal"] for e in o.events if e["concern"] == "control"}
-        self.assertIn("guard-seated-loaded", sigs)     # both present...
+        self.assertIn("guard-seated", sigs)            # both present...
         self.assertIn("guard-not-seated", sigs)
         self.assertEqual(V.verdict_p0(o.snapshot())[0], "baseline-invalid")   # ...negative wins
 
@@ -114,7 +119,7 @@ class B2Authority(unittest.TestCase):
         self.assertIn("unauthorized", V.verdict(self.forged(concern="trust", signal="confirmed", source="pane", confidence="low"))[1])
 
     def test_pane_cannot_prove_guard(self):
-        self.assertIn("unauthorized", V.verdict(self.forged(concern="control", signal="guard-seated-loaded", source="pane", confidence="low"))[1])
+        self.assertIn("unauthorized", V.verdict(self.forged(concern="control", signal="guard-seated", source="pane", confidence="low"))[1])
 
     def test_pane_cannot_attribute_n14(self):
         self.assertIn("unauthorized", V.verdict(self.forged(concern="skills-dir", signal="block-attributable", source="pane", confidence="low"))[1])
@@ -166,12 +171,18 @@ class B4N14(unittest.TestCase):
     def test_block_without_attribution_inconclusive(self):
         self.assertEqual(V.verdict_n14(n14_full_block(attributed=False).snapshot())[0], "inconclusive")
 
-    def test_attribution_needs_differential_not_bare(self):
+    def test_c2_bare_assertion_not_a_validated_differential(self):
         v = V.verdict_n14(n14_full_block(attributed=True, differential=False).snapshot())
         self.assertEqual(v[0], "inconclusive")
-        self.assertIn("attribution-unverified", v[1])
+        self.assertIn("not-a-validated-differential", v[1])
 
-    def test_attributed_with_differential_is_blocked_low(self):
+    def test_c2_digest_mismatch_not_credited(self):
+        # fixture recorded as one digest, differential references another -> not the same fixture.
+        v = V.verdict_n14(n14_full_block(digest="AAAA", diff_digest="BBBB").snapshot())
+        self.assertEqual(v[0], "inconclusive")
+        self.assertIn("digest-mismatch", v[1])
+
+    def test_c2_validated_differential_is_blocked_low(self):
         self.assertEqual(V.verdict_n14(n14_full_block(attributed=True, differential=True).snapshot())[0], "blocked-low")
 
     def test_loaded_is_fail_even_degraded(self):
@@ -318,6 +329,60 @@ class P0(unittest.TestCase):
         o = obs(attempt="P0")
         o.fact("trust", "confirmed")
         self.assertEqual(V.verdict_p0(o.snapshot())[0], "baseline-invalid")
+
+    def test_c1_classic_sessionstart_is_required(self):
+        # session.start WITHOUT classic.SessionStart must never be baseline-ok (kit global control).
+        o = obs(attempt="P0")
+        o.from_debug(PROBE)
+        o.from_probe_records([{"probe": "st-b1-probe", "inst": INST, "kind": "session.start"}], start_inst=INST)
+        o.fact("trust", "confirmed")
+        v = V.verdict_p0(o.snapshot())
+        self.assertEqual(v[0], "baseline-invalid")
+        self.assertIn("classic.SessionStart", v[1])
+
+
+SEG_PROBE_ORG_SEATED = (P + "hooks module st-b1-probe@st-b1 loaded (worker, environment 2, tier prepend); events: x\n"
+                        + P + "seated outermost: this machine has managed settings\n")
+GUARD_LOADED_LINE = P + "hooks module cc-plugin-sec-default@builtin loaded (native, environment 1, tier builtin)\n"
+
+
+class C3FragmentedGuard(unittest.TestCase):
+    def base(self):
+        o = obs(attempt="P0")
+        o.from_probe_records(PROBE_RECORDS, start_inst=INST)
+        o.fact("trust", "confirmed")
+        return o
+
+    def test_seated_without_loaded_is_invalid(self):
+        o = self.base()
+        o.from_debug(SEG_PROBE_ORG_SEATED)                 # seated + probe-org, NOT loaded yet
+        self.assertEqual(V.verdict_p0(o.snapshot())[0], "baseline-invalid")
+
+    def test_fragments_accumulate_to_valid(self):
+        o = self.base()
+        o.from_debug(SEG_PROBE_ORG_SEATED)                 # fragment 1
+        o.from_debug(SEG_PROBE_ORG_SEATED + GUARD_LOADED_LINE)   # fragment 2 appends loaded
+        self.assertEqual(V.verdict_p0(o.snapshot())[0], "baseline-ok")
+
+    def test_later_not_seated_invalidates_accumulated(self):
+        o = self.base()
+        o.from_debug(SEG_PROBE_ORG_SEATED + GUARD_LOADED_LINE)
+        self.assertEqual(V.verdict_p0(o.snapshot())[0], "baseline-ok")
+        o.from_debug(SEG_PROBE_ORG_SEATED + GUARD_LOADED_LINE + NOT_SEATED)
+        self.assertEqual(V.verdict_p0(o.snapshot())[0], "baseline-invalid")
+
+
+class C4WindowFromInit(unittest.TestCase):
+    def test_early_pre_trust_decision_covered_when_window_opens_at_init(self):
+        # C4: the skills-dir block may be notified BEFORE trust; a window opened at INIT covers it.
+        clk = ManualClock()
+        o = obs(attempt="N14", clock=clk).set_window(max_gap=0.3)
+        o.window_open(0.0)                                 # initialization, not trust-confirmed
+        o.window_close(0.3)
+        for t, txt in [(0.0, SKILLS_BLOCK), (0.1, PROBE), (0.2, PROBE), (0.3, PROBE)]:
+            clk.t = t
+            o.from_pane(txt)                               # decision at init (t=0)
+        self.assertEqual(o.coverage(), "full")             # early decision is inside [init, close]
 
 
 class N17(unittest.TestCase):

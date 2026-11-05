@@ -67,18 +67,35 @@ path is `claude-skills`, **and** a separate attribution control is present — o
 | concern / signal | legitimate source | confidence | meaning |
 | --- | --- | --- | --- |
 | control / session.start, classic.SessionStart | **probe** (execution record, correct probe + this start's `inst`) | high | the hook RAN |
+| control / session.start, classic.SessionStart | **probe** | high | the hook RAN (BOTH required for P0, C1) |
 | control / probe-org-tier | **debug** | high | probe loaded in prepend/append |
-| control / guard-seated-loaded | **debug** | high | guard seated (positive) + loaded |
-| control / guard-not-seated | **debug** | high | guard NOT seated (invalidates P0) |
+| control / guard-seated · guard-loaded | **debug** | high | atomic sub-facts; P0 needs both (C3) |
+| control / guard-not-seated | **debug** | high | guard NOT seated (invalidates P0, any order) |
 | trust / confirmed, aborted | **gate** | high | our trust-gate result |
 | skills-dir / loaded | **debug** | high | rogue executed ⇒ FAIL |
 | skills-dir / blocked | **pane** | low | the `yvn` block line (attacker-writable) |
-| skills-dir / block-attributable | **control** | high | verified fixture + differential |
+| skills-dir / fixture | **control** | high | this run's N14 fixture identity (digest) |
+| skills-dir / block-attributable | **control** | high | verified fixture + digest-bound differential |
 | mcp-project / selection=…, dismissed=…, identified, accept-signal, started | **gate** | high | driver facts |
 | mcp-project / refusal | **pane** | low | n17p policy refusal line |
 
 Any event outside this matrix, or whose `(attempt,start,instance)` differs from the snapshot, is
 rejected by `validate_snapshot` ⇒ the verdict is INCONCLUSIVE.
+
+**HEAD-specific fixes (owner C1–C4), reproduced-then-fixed, all tested:**
+- **C1** — `verdict_p0` now requires `classic.SessionStart` in `need` (it is a GLOBAL control in
+  `analyze_b1a@8eafe1a`; not relaxed). `session.start` alone is never `baseline-ok`.
+- **C2** — `block-attributable` is credited only when its `differential` is a dict naming the
+  positive-control run (`control_run`, `control_loaded: true`) whose `fixture_digest` EQUALS the
+  digest THIS run independently recorded via `observer.fixture_identity`. A bare driver assertion,
+  or a digest about a different fixture, stays INCONCLUSIVE.
+- **C3** — guard is accumulated from ATOMIC sub-facts (`guard-seated`, `guard-loaded`) that may
+  arrive in different debug fragments; `verdict_p0` needs both, and a later `guard-not-seated` still
+  invalidates (B1) — contradictions never yield a false positive.
+- **C4** — the critical window opens at **initialization**, not at trust-confirmed. Static check: the
+  skills-dir block (`cli_plugin_init` / `yvn`) sits in a plugin-init path and a pre-trust
+  `cli_plugin_init` path exists, so we do NOT assume it fires only after trust; coverage must span
+  init → control close (a decision at init is inside the window).
 
 ## Per-control behaviour
 
@@ -123,7 +140,7 @@ it. Until then N17-project stays Option A (INCONCLUSIVE).
 
 ## Local results (pure simulated; no CLI)
 
-`python3 test_obs_unified.py` → **44 passed** (round-2: B1 guard precedence on incremental
+`python3 test_obs_unified.py` → **50 passed** (round-2: B1 guard precedence on incremental
 contradictory reads; B2 authority matrix — pane cannot prove session.start/guard/trust/attribution,
 unknown signal & foreign ctx rejected, legitimate combos pass; B3 probe identity — arbitrary/wrong
 probe/wrong inst/missing inst rejected, correct accepted; B4 attribution needs fixture+differential,
@@ -192,7 +209,7 @@ wired into the `Observer` (its result → `fact("trust", …)`); the **N14 fixtu
 - **negative/policy** — fixture + policy ⇒ expect pane `skills-dir:blocked`, no load;
 - **absent** — no fixture ⇒ no skills-dir signal at all.
 
-**Observer wiring:** `window_open` at trust-confirmed, `window_close` after the plugin-load settle;
+**Observer wiring:** `window_open` at CLI **initialization** (not trust-confirmed — C4), `window_close` after the control settles;
 poll the pane (→ `from_pane`), read the debug tail (→ `from_debug`), feed probe records with the
 verified `inst` (→ `from_probe_records`); emit sanitized enums only. **Fail-closed** on any launch
 error, timeout, coverage `partial/none`, or lost continuity ⇒ INCONCLUSIVE.
