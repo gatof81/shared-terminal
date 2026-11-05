@@ -21,7 +21,9 @@ test.describe("chat", () => {
 		await expect(thread.locator(".chat-user")).toContainText("Refactor the auth flow");
 		await expect(thread.locator(".chat-assistant")).toContainText("moved the cookie check");
 		await expect(thread.locator(".chat-tools")).toContainText("Edit");
-		await expect(thread.locator(".chat-live")).toContainText("Live");
+		// Connected: the socket chip says nothing ("Live" is reserved for
+		// conversation activity); it appears only while (re)connecting.
+		await expect(thread.locator(".chat-live")).toHaveCount(0);
 
 		// A new assistant message arrives over the socket while reading.
 		backend.pushConversationEvent("conv-1", {

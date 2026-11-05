@@ -925,6 +925,83 @@ describe("Chat overlay — §4.2.1 internal notifications are not 'You'", () => 
 });
 
 // ── 3.2 composer (CONVERSATION.md §8, §10 "3.2 composer") ───────────────────
+describe("Chat overlay — connection indicator", () => {
+	it("says nothing while the event socket delivers; Connecting…/Reconnecting… otherwise", async () => {
+		await openChat();
+		await openThread([ev("user_prompt", { prompt: "x" })]);
+		const chip = () => $("chat-thread").querySelector<HTMLElement>(".chat-thread-head .chat-live");
+		expect(chip()?.textContent).toContain("Connecting…");
+		sock.onState?.(true);
+		await flush();
+		expect(chip()).toBeNull();
+		sock.onState?.(false);
+		await flush();
+		expect(chip()?.textContent).toContain("Reconnecting…");
+		expect($("chat-thread").classList.contains("offline")).toBe(true);
+		expect($("chat-thread").querySelector(".chat-offline")?.textContent).toContain("reconnecting");
+		sock.onState?.(true);
+		await flush();
+		expect(chip()).toBeNull();
+		expect($("chat-thread").classList.contains("offline")).toBe(false);
+	});
+
+	it("a refused socket (1008) says it is not receiving events, never that it is reconnecting", async () => {
+		await openChat();
+		await openThread([ev("user_prompt", { prompt: "x" })]);
+		const chip = () => $("chat-thread").querySelector<HTMLElement>(".chat-thread-head .chat-live");
+		sock.onState?.(true);
+		await flush();
+		(sock.onState as unknown as (c: boolean, refused: boolean) => void)(false, true);
+		await flush();
+		expect(chip()?.textContent).toContain("Not receiving events");
+		expect(chip()?.textContent).not.toContain("Reconnecting");
+		expect($("chat-thread").classList.contains("offline")).toBe(true);
+		expect($("chat-thread").querySelector(".chat-offline")?.textContent).toContain(
+			"Not receiving new events",
+		);
+		// Following the banner's advice builds a new socket.
+		const opened = api.openConversationSocket.mock.calls.length;
+		api.fetchConversationEvents.mockResolvedValueOnce({
+			events: [ev("user_prompt", { prompt: "x" })],
+			hasMore: false,
+			firstRetainedSeq: 1,
+		});
+		$("chat-refresh-btn").click();
+		await flush();
+		expect(api.openConversationSocket.mock.calls.length).toBe(opened + 1);
+		sock.onState?.(true);
+		await flush();
+		expect(chip()).toBeNull();
+		expect($("chat-thread").classList.contains("offline")).toBe(false);
+	});
+
+	it("leaving and coming back is a fresh connect, not a lost connection", async () => {
+		await openChat();
+		await openThread([ev("user_prompt", { prompt: "x" })]);
+		sock.onState?.(true);
+		await flush();
+		vs.setView("terminal");
+		vs.setView("chat");
+		await flush();
+		const chip = $("chat-thread").querySelector<HTMLElement>(".chat-thread-head .chat-live");
+		expect(chip?.textContent ?? "").not.toContain("Reconnecting");
+		expect($("chat-thread").classList.contains("offline")).toBe(false);
+	});
+
+	it("a 'not-found' error frame stops the socket and says so", async () => {
+		await openChat();
+		await openThread([ev("user_prompt", { prompt: "x" })]);
+		sock.onState?.(true);
+		await flush();
+		sock.onFrame?.({ type: "error", code: "not-found", conv: "c1" });
+		await flush();
+		expect(sock.close).toHaveBeenCalled();
+		expect(
+			$("chat-thread").querySelector<HTMLElement>(".chat-thread-head .chat-live")?.textContent,
+		).toContain("Not receiving events");
+	});
+});
+
 describe("Composer", () => {
 	const composerTextarea = () =>
 		$("chat-thread").querySelector<HTMLTextAreaElement>(".chat-composer textarea")!;
@@ -956,7 +1033,11 @@ describe("Composer", () => {
 			composer: { blocked: true, reason: "effects-pending", clientMessageId: "abc" },
 		});
 		expect(composerTextarea().disabled).toBe(true);
-		expect(composerTextarea().placeholder).toMatch(/blocked/);
+		// The reason is in the status line, once; the placeholder stays short.
+		expect(status().textContent).toMatch(/blocked/);
+		expect(composerTextarea().placeholder).toBe("Message Claude…");
+		// The reason is the textarea's accessible description.
+		expect(composerTextarea().getAttribute("aria-describedby")).toBe(status().id);
 		await openSendable();
 		expect(composerTextarea().disabled).toBe(false);
 		expect(sendBtn().disabled).toBe(false);
@@ -965,11 +1046,11 @@ describe("Composer", () => {
 	it("is disabled while Claude is working or a permission prompt is open; a stale live claim does not block", async () => {
 		await openSendable({ status: "running" });
 		expect(composerTextarea().disabled).toBe(true);
-		expect(composerTextarea().placeholder).toMatch(/working/);
+		expect(status().textContent).toMatch(/working/);
 		await openSendable({ status: "waiting_permission" });
-		expect(composerTextarea().placeholder).toMatch(/permission/);
+		expect(status().textContent).toMatch(/permission/);
 		await openSendable({ status: "ended" });
-		expect(composerTextarea().placeholder).toMatch(/has ended/);
+		expect(status().textContent).toMatch(/has ended/);
 		await openSendable({
 			status: "running",
 			statusAt: new Date(Date.now() - 11 * 60 * 1000).toISOString(),
