@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseUnifiedDiff } from "./diff.js";
+import { lineNumberDigits, parseUnifiedDiff } from "./diff.js";
 
 const PATCH = [
 	"diff --git a/src/app.ts b/src/app.ts",
@@ -116,5 +116,22 @@ describe("parseUnifiedDiff", () => {
 		const d = parseUnifiedDiff(big);
 		expect(performance.now() - t0).toBeLessThan(500);
 		expect(d.additions).toBe(50);
+	});
+});
+
+describe("lineNumberDigits", () => {
+	it("is the digit count of the largest old or new line number, at least 3", () => {
+		const row = (oldNo: number | null, newNo: number | null) =>
+			({ kind: "context", oldNo, newNo, text: "" }) as const;
+		expect(lineNumberDigits([])).toBe(3);
+		expect(lineNumberDigits([row(1, 1), row(null, 42)])).toBe(3);
+		expect(lineNumberDigits([row(998, 1003), row(null, null)])).toBe(4);
+		expect(lineNumberDigits([row(123456, null)])).toBe(6);
+	});
+	it("ignores hunk/meta rows (no numbers) — the case that used to widen the gutters", () => {
+		const { rows } = parseUnifiedDiff(
+			"diff --git a/a.ts b/a.ts\nindex 1111111..2222222 100644\n--- a/a.ts\n+++ b/a.ts\n@@ -1,2 +1,2 @@ a very long hunk header that should not matter at all\n-x\n+y\n z\n",
+		);
+		expect(lineNumberDigits(rows)).toBe(3);
 	});
 });

@@ -111,3 +111,19 @@ export function parseUnifiedDiff(patch: string): ParsedDiff {
 	}
 	return { rows, additions, deletions, hasHunks };
 }
+
+/**
+ * Width, in digits, of the line-number gutters (at least 3). The diff grid
+ * gives each number column exactly this width: with `max-content` columns,
+ * the full-width hunk/meta rows (white-space: pre) had their min-content
+ * shared out to the number columns only, pushing the code half a pane to the
+ * right (mobile: mostly off-screen).
+ */
+export function lineNumberDigits(rows: readonly DiffRow[]): number {
+	let max = 0;
+	for (const r of rows) {
+		if (r.oldNo !== null && r.oldNo > max) max = r.oldNo;
+		if (r.newNo !== null && r.newNo > max) max = r.newNo;
+	}
+	return Math.max(3, String(max).length);
+}

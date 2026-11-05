@@ -29,7 +29,7 @@ import {
 	type GitDiff,
 	type GitStatus,
 } from "./api.js";
-import { parseUnifiedDiff } from "./diff.js";
+import { lineNumberDigits, parseUnifiedDiff } from "./diff.js";
 import { relativeDate } from "./format.js";
 import { activeSessionId, isMobile, sessions } from "./main.js";
 import { runSessionAction } from "./sessionCore.js";
@@ -789,6 +789,7 @@ function appendDiffRows(
 
 function diffTable(rows: ReturnType<typeof parseUnifiedDiff>["rows"]): HTMLElement {
 	const table = el("div", "git-diff-table");
+	table.style.setProperty("--no-w", `${lineNumberDigits(rows)}ch`);
 	const frag = document.createDocumentFragment();
 	for (const r of rows) {
 		const row = el("div", `git-diff-row kind-${r.kind}`);

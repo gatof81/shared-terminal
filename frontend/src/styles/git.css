@@ -269,7 +269,12 @@
    gutters stay aligned; long lines scroll horizontally. */
 .git-diff-table {
   display: grid;
-  grid-template-columns: max-content max-content 1.2em minmax(0, max-content);
+  /* Fixed gutters (--no-w = digits of the largest line number, set by
+     gitView.ts; + the cells' 1rem padding): the full-width hunk/meta rows
+     then widen only the code column instead of the number columns. */
+  grid-template-columns:
+    calc(var(--no-w, 3ch) + 1rem) calc(var(--no-w, 3ch) + 1rem)
+    1.2em minmax(0, max-content);
   min-width: 100%;
   width: max-content;
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
