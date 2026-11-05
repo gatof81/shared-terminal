@@ -342,6 +342,21 @@ describe("ConversationStore — index writes racing an eviction (concurrency)", 
 		await expect(fs.stat(store.sessionDir("s1"))).rejects.toThrow();
 	});
 
+	it("evictions settle completely: nothing stays in the evicting map, and a purge leaves nothing readable", async () => {
+		const store = new ConversationStore({ workspaceRoot: root, limits: { residentIndexes: 1 } });
+		for (let i = 0; i < 5; i++) {
+			await store.open("s1", `c${i}`);
+			store.enqueue("s1", `c${i}`, ev(i));
+			await store.flush("s1", `c${i}`);
+		}
+		await tick();
+		const evicting = (store as unknown as { evicting: Map<string, unknown> }).evicting;
+		expect(evicting.size).toBe(0);
+		await store.purgeSession("s1");
+		expect(evicting.size).toBe(0);
+		expect(await store.peekIndex("s1", "c0")).toBeNull();
+	});
+
 	it("two writes of one index land in order: an older snapshot never replaces a newer one", async () => {
 		let store!: ConversationStore;
 		const g = gatedFs((p) => p.startsWith(store.indexPath("s1", "c0")));

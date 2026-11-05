@@ -813,11 +813,10 @@ export class ConversationStore {
 		// the writes queued behind it nor surface as an unhandled rejection.
 		const next = prev.catch(() => undefined).then(() => this.writeIndexNow(r));
 		this.indexWrites.set(key, next);
-		void next
-			.catch(() => undefined)
-			.finally(() => {
-				if (this.indexWrites.get(key) === next) this.indexWrites.delete(key);
-			});
+		const done = () => {
+			if (this.indexWrites.get(key) === next) this.indexWrites.delete(key);
+		};
+		void next.then(done, done);
 		return next;
 	}
 
@@ -964,12 +963,15 @@ export class ConversationStore {
 			this.resident.delete(oldestKey);
 			this.evicting.set(oldestKey, r);
 			this.stats.evictions++;
+			const write = this.writeIndex(r);
 			try {
-				await this.writeIndex(r);
+				await write;
 			} finally {
-				// Adopted and evicted again meanwhile: a later write of this key is
-				// still queued and the entry must keep answering peekIndex/open.
-				if (this.evicting.get(oldestKey) === r && !this.indexWrites.has(oldestKey))
+				// Adopted and evicted again meanwhile: a LATER write of this key is
+				// queued and the entry must keep answering peekIndex/open until it
+				// lands. Decided by identity, not by when the map's own cleanup ran.
+				const queued = this.indexWrites.get(oldestKey);
+				if (this.evicting.get(oldestKey) === r && (queued === undefined || queued === write))
 					this.evicting.delete(oldestKey);
 			}
 		}
@@ -1023,6 +1025,10 @@ export class ConversationStore {
 				const w = [...this.indexWrites].find(([key]) => key.startsWith(`${stSessionId}/`));
 				if (!w) break;
 				await w[1].catch(() => undefined);
+			}
+			// Nothing of the session stays readable from memory (peekIndex/open).
+			for (const key of Array.from(this.evicting.keys())) {
+				if (key.startsWith(`${stSessionId}/`)) this.evicting.delete(key);
 			}
 			await this.fs.rm(dir, { force: true, recursive: true });
 		} finally {
