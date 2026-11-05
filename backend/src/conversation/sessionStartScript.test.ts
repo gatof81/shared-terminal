@@ -1,8 +1,16 @@
 /**
  * sessionStartScript.test.ts — the image's SessionStart registration hook
  * (`session-image/hooks/session-start.sh`, docs/CONVERSATION.md §2.3), run
- * as the real bash script with stand-ins for `claude`, `tmux` and the
- * receiver on PATH / localhost.
+ * as the real bash script with stand-ins for `tmux` and the receiver on
+ * PATH / localhost, under a PARENT `claude` process.
+ *
+ * v1.8.2: the script asks the binary of the claude process that fired it
+ * (`/proc/<pid>/exe --version`), never PATH's `claude`. A bash stand-in can't
+ * play that parent (its exe would be bash), so a tiny C program named
+ * `claude` is compiled once: `claude --version` answers per a `mode` file
+ * next to it (ok / fail / hang / bad), and `claude <script> [flags…]` runs
+ * the hook as its child — as the CLI does. PATH's `claude` is a liar that
+ * answers 9.9.9: the recorded version must never be it.
  *
  * `curl` is the real binary. Where the test needs the request to land on a
  * local server, a `curl` shim earlier on PATH rewrites the fixed relay URL
@@ -15,13 +23,13 @@
  * hook) is session-image/conversation-smoke.sh.
  */
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { promises as fs, readFileSync } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 const SCRIPT = path.resolve(__dirname, "../../../session-image/hooks/session-start.sh");
 const TOKEN = "a".repeat(64);
@@ -59,17 +67,70 @@ async function writeExe(name: string, body: string) {
 	return p;
 }
 
-/** A `claude` whose `--version` answers, fails or hangs. */
-async function fakeClaude(mode: "ok" | "fail" | "hang") {
-	const pidFile = path.join(dir, "claude.pid");
-	const body = {
-		ok: 'echo "2.1.308 (Claude Code)"',
-		fail: "echo boom >&2; exit 1",
-		// `exec` so the recorded pid IS the hanging process.
-		hang: `echo $$ > ${pidFile}; exec sleep 30`,
-	}[mode];
-	await writeExe("claude", body);
-	return pidFile;
+// ── The parent `claude` (a real executable) ─────────────────────────────
+const HELPER_C = `#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <libgen.h>
+#include <sys/wait.h>
+int main(int argc, char **argv) {
+	if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+		char exe[4096]; ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+		if (n < 0) return 2; exe[n] = 0;
+		char *d = dirname(exe); char p[4300]; char mode[64] = {0};
+		snprintf(p, sizeof p, "%s/mode", d);
+		FILE *f = fopen(p, "r"); if (f) { if (!fgets(mode, sizeof mode, f)) mode[0] = 0; fclose(f); }
+		if (!strncmp(mode, "fail", 4)) { fprintf(stderr, "boom\\n"); return 1; }
+		if (!strncmp(mode, "bad", 3)) { puts("Update available"); return 0; }
+		if (!strncmp(mode, "okfail", 6)) { puts("2.1.308 (Claude Code)"); fflush(stdout); return 3; }
+		if (!strncmp(mode, "okhang", 6)) {
+			puts("2.1.308 (Claude Code)"); fflush(stdout);
+			snprintf(p, sizeof p, "%s/hang.pid", d);
+			f = fopen(p, "w"); if (f) { fprintf(f, "%d", (int)getpid()); fclose(f); }
+			for (;;) pause();
+		}
+		if (!strncmp(mode, "hang", 4)) {
+			snprintf(p, sizeof p, "%s/hang.pid", d);
+			f = fopen(p, "w"); if (f) { fprintf(f, "%d", (int)getpid()); fclose(f); }
+			for (;;) pause();
+		}
+		snprintf(p, sizeof p, "%s/env.dump", d);
+		f = fopen(p, "w"); if (f) { extern char **environ; for (char **e = environ; *e; e++) fprintf(f, "%s\\n", *e); fclose(f); }
+		puts("2.1.308 (Claude Code)"); return 0;
+	}
+	if (argc < 2) return 2;
+	pid_t c = fork();
+	if (c == 0) { execl("/bin/bash", "bash", argv[1], (char *)0); _exit(127); }
+	int st; waitpid(c, &st, 0); return 0;
+}
+`;
+let helperDir: string;
+let helper: string;
+beforeAll(async () => {
+	helperDir = await fs.mkdtemp(path.join(os.tmpdir(), "st-ss-helper-"));
+	await fs.writeFile(path.join(helperDir, "claude.c"), HELPER_C);
+	helper = path.join(helperDir, "claude");
+	execFileSync("cc", ["-O0", "-o", helper, path.join(helperDir, "claude.c")]);
+	// The same binary under the name `node`, reached through a `claude`
+	// symlink: argv0 says claude, the exe is a node runtime.
+	await fs.mkdir(path.join(helperDir, "rt"));
+	await fs.copyFile(helper, path.join(helperDir, "rt", "node"));
+	await fs.chmod(path.join(helperDir, "rt", "node"), 0o755);
+	await fs.symlink(path.join(helperDir, "rt", "node"), path.join(helperDir, "rt", "claude"));
+});
+afterAll(async () => {
+	await fs.rm(helperDir, { recursive: true, force: true });
+});
+async function parentMode(mode: "ok" | "fail" | "hang" | "bad" | "okfail" | "okhang") {
+	await fs.writeFile(path.join(helperDir, "mode"), mode);
+	await fs.rm(path.join(helperDir, "hang.pid"), { force: true });
+	return path.join(helperDir, "hang.pid");
+}
+
+/** PATH's `claude`: a liar (Educación HZ: PATH named another installation). */
+async function pathClaude() {
+	await writeExe("claude", 'echo "9.9.9 (Claude Code)"');
 }
 
 /** Point the script's fixed URL at `port` (or leave it alone with null). */
@@ -110,14 +171,19 @@ function run(
 	env: Record<string, string>,
 	stdin = JSON.stringify(INPUT),
 	argv0?: string[],
+	parent: true | false | "node" = true,
 ): Promise<RunResult> {
 	return new Promise((resolve) => {
 		const t0 = performance.now();
-		// argv0: run the script under a parent process whose argv[0] is
-		// `claude`, as the CLI is when it fires the hook.
-		const [cmd, args] = argv0
-			? ["bash", ["-c", 'exec -a claude bash -c "bash \\"$0\\"; true" "$@"', SCRIPT, ...argv0]]
-			: ["bash", [SCRIPT]];
+		// The hook runs as a child of the `claude` process, as the CLI fires
+		// it; `parent: false` runs it with no claude above (by hand).
+		const [cmd, args] =
+			parent === false
+				? ["bash", [SCRIPT]]
+				: [
+						parent === "node" ? path.join(helperDir, "rt", "claude") : helper,
+						[SCRIPT, ...(argv0 ?? [])],
+					];
 		const child = spawn(cmd, args as string[], {
 			env: { PATH: `${bin}:/usr/bin:/bin`, HOME: dir, ...env },
 			stdio: ["pipe", "pipe", "pipe"],
@@ -155,7 +221,8 @@ beforeEach(async () => {
 	curlLog = path.join(dir, "curl.argv");
 	server = null;
 	received = [];
-	await fakeClaude("ok");
+	await pathClaude();
+	await parentMode("ok");
 });
 afterEach(async () => {
 	await new Promise<void>((r) => (server ? server.close(() => r()) : r()));
@@ -188,6 +255,7 @@ describe("session-start.sh — activation", () => {
 		expect(headers["content-type"]).toBe("application/json");
 		// session_id stays the first key: the relay reads it from there.
 		expect(body.startsWith(`{"session_id":"${INPUT.session_id}"`)).toBe(true);
+		// The PARENT process's binary answered 2.1.308; PATH's claude says 9.9.9.
 		expect(JSON.parse(body)).toEqual({
 			...INPUT,
 			st: {
@@ -291,16 +359,16 @@ describe("session-start.sh — bounded in time (≤ 6 s whatever happens)", () =
 		expect(r.ms).toBeLessThan(6000);
 	}, 15_000);
 
-	it("`claude --version` fails: claude_version null, the event is still sent", async () => {
-		await fakeClaude("fail");
+	it("the parent's `--version` fails: claude_version null, the event is still sent", async () => {
+		await parentMode("fail");
 		await curlShim(await listen("ok"));
 		const r = await run(withToken);
 		expect(r).toMatchObject({ code: 0, stdout: "", stderr: "" });
 		expect(JSON.parse(received[0].body).st.claude_version).toBeNull();
 	});
 
-	it("`claude --version` hangs: capped at 3 s, claude_version null, event sent, no survivor", async () => {
-		const pidFile = await fakeClaude("hang");
+	it("the parent's `--version` hangs: capped at 3 s, claude_version null, event sent, no survivor", async () => {
+		const pidFile = await parentMode("hang");
 		await curlShim(await listen("ok"));
 		const r = await run(withToken);
 		expect(r.code).toBe(0);
@@ -310,12 +378,65 @@ describe("session-start.sh — bounded in time (≤ 6 s whatever happens)", () =
 		expect(isAlive(Number(await fs.readFile(pidFile, "utf8")))).toBe(false);
 	}, 15_000);
 
-	it("claude hangs AND the receiver hangs: the outer timeout ends everything within 6 s", async () => {
-		const pidFile = await fakeClaude("hang");
+	it("the parent hangs AND the receiver hangs: the outer timeout ends everything within 6 s", async () => {
+		const pidFile = await parentMode("hang");
 		await curlShim(await listen("hang"));
 		const r = await run(withToken);
 		expect(r.ms).toBeLessThan(6000);
 		expect(r.stdout).toBe("");
 		expect(isAlive(Number(await fs.readFile(pidFile, "utf8")))).toBe(false);
 	}, 15_000);
+});
+
+describe("session-start.sh — the version is the firing process's, never PATH's (v1.8.2)", () => {
+	it("Educación HZ: PATH's claude says 9.9.9, the process is 2.1.308 ⇒ 2.1.308", async () => {
+		await curlShim(await listen("ok"));
+		const lie = execFileSync(path.join(bin, "claude"), ["--version"]).toString().trim();
+		expect(lie).toBe("9.9.9 (Claude Code)");
+		await run(withToken);
+		expect(JSON.parse(received[0].body).st.claude_version).toBe("2.1.308 (Claude Code)");
+	});
+	it.each([
+		["output that is not exactly `X.Y.Z (Claude Code)`", "bad", true],
+		["no claude process above the script (run by hand)", "ok", false],
+		["a node runtime (argv0 claude, exe node)", "ok", "node"],
+	] as const)("%s ⇒ null, never PATH's 9.9.9", async (_n, mode, parent) => {
+		await parentMode(mode);
+		await curlShim(await listen("ok"));
+		const r = await run(withToken, undefined, undefined, parent);
+		expect(r).toMatchObject({ code: 0, stdout: "" });
+		expect(received).toHaveLength(1);
+		expect(JSON.parse(received[0].body).st.claude_version).toBeNull();
+	});
+	it("a valid version line but a NON-ZERO exit ⇒ null (the binary's status counts, not head's)", async () => {
+		await parentMode("okfail");
+		await curlShim(await listen("ok"));
+		const r = await run(withToken);
+		expect(r).toMatchObject({ code: 0, stdout: "" });
+		expect(JSON.parse(received[0].body).st.claude_version).toBeNull();
+	});
+	it("a valid version line, then the binary hangs past the 3 s timeout ⇒ null, event sent, no survivor", async () => {
+		const pidFile = await parentMode("okhang");
+		await curlShim(await listen("ok"));
+		const r = await run(withToken);
+		expect(r.code).toBe(0);
+		expect(r.ms).toBeLessThan(6000);
+		expect(received).toHaveLength(1);
+		expect(JSON.parse(received[0].body).st.claude_version).toBeNull();
+		expect(isAlive(Number(await fs.readFile(pidFile, "utf8")))).toBe(false);
+	}, 15_000);
+	it("the query runs with an empty environment: no token, no proxy, no HOME reaches the binary", async () => {
+		await curlShim(await listen("ok"));
+		await run({ ...withToken, http_proxy: "http://127.0.0.1:9", SECRET_X: "s3cr3t" });
+		const env = (await fs.readFile(path.join(helperDir, "env.dump"), "utf8"))
+			.trim()
+			.split("\n")
+			.sort();
+		expect(env).toEqual([
+			"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+			"DISABLE_AUTOUPDATER=1",
+			"HOME=/nonexistent",
+			"PATH=/usr/bin:/bin",
+		]);
+	});
 });

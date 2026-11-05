@@ -571,7 +571,11 @@ done
 receiver text200 rx-tab
 tab_start --dangerously-skip-permissions && tab_turn "ST_SCENARIO=bash"
 check "interactive, backend answering non-JSON: no hook error on screen" [ "$(hook_errors)" = 0 ]
-check "nothing about hooks ever reaches the model" [ "$(grep -c -e 'st-backend' -e 'hook error' -e "$RELAY_PORT" "$OUT/model-requests.jsonl")" = 0 ]
+# Fixed strings that only the hook machinery produces. The bare port number
+# was a substring match: "47613" turned up inside unrelated ids/numbers of a
+# model request and failed CI by chance (#524 review); qualified by host or
+# "port " it can't. Case-insensitive like hook_errors().
+check "nothing about hooks ever reaches the model" [ "$(grep -c -i -F -e 'st-backend' -e 'hook error' -e "127.0.0.1:$RELAY_PORT" -e "localhost:$RELAY_PORT" -e "port $RELAY_PORT" -e '/ingest/claude/hook' -e '/st-relay/' "$OUT/model-requests.jsonl")" = 0 ]
 # Keep-alive race (§2.6): the CLI pools idle sockets for 5 s; a relay that
 # closed idle ones after its 2 s read timeout lost the hook sent at that
 # moment, shown as "hook error" (4/20 turns at a 1.97 s gap locally, and
@@ -646,27 +650,44 @@ STOPPED_MS=$LAST_MS
 check "relay hung: claude -p with Bash still answers" out_is "$BASH_OUT"
 check "relay hung: -p with Bash ≤ base + 1 s × 6 blocking events + 1.5 s ($STOPPED_MS ms)" [ "$STOPPED_MS" -le $((BASE_BASH + 6000 + 1500)) ]
 t=$(script_run /tmp/hangbin)
-check "script, claude --version AND relay hung: $t ms ≤ 6000" [ "$t" -le 6000 ]
+check "script, a hanging PATH claude AND relay hung: $t ms ≤ 6000" [ "$t" -le 6000 ]
 docker exec "$SESS" kill -CONT "$RELAY_PID"
 sleep 1
 before=$(count ss-ok '.event == "SessionStart" and .body.session_id == "5b8f3d7e-0c43-4f7a-9d61-2a1e0f9b7c55"')
 t=$(script_run /tmp/hangbin)
 sleep 1
-check "script, claude --version hangs: $t ms ≤ 6000, event still sent with claude_version null" \
-	bash -c '[ "$1" -le 6000 ] && [ "$(jq -r "select(.event == \"SessionStart\") | .body.st.claude_version" "$2" | tail -n 1)" = null ]' _ "$t" "$OUT/ss-ok.jsonl"
+# v1.8.2: the script never runs PATH's claude; run by hand (no claude
+# process above it) it has no process to ask ⇒ null, and fast.
+check "script with no claude process above it (PATH's claude hangs, never called): $t ms ≤ 6000, claude_version null" \
+	bash -c '[ "$1" -le 6000 ] && [ "$4" -gt "$3" ] && [ "$(jq -r "select(.event == \"SessionStart\") | .body.st.claude_version" "$2" | tail -n 1)" = null ]' _ "$t" "$OUT/ss-ok.jsonl" "$before" "$(count ss-ok '.event == "SessionStart" and .body.session_id == "5b8f3d7e-0c43-4f7a-9d61-2a1e0f9b7c55"')"
 sleep 0.5
-check "no survivor of the hung children" \
-	bash -c '! docker exec "$1" bash -c "for f in /proc/[0-9]*/cmdline; do tr \"\\0\" \" \" < \$f 2>/dev/null; echo; done" | grep -q "^sleep 30"' _ "$SESS"
+# (No "survivor" check any more: PATH's hanging claude is never started by
+# the script. The query of the process's own binary is bounded by its inner
+# `timeout -k 1 3` and the whole script by `timeout -k 1 5`, by inspection.)
 note "relay hung (SIGSTOP, port still open): -p with Bash $STOPPED_MS ms (base $BASE_BASH) — the CLI's 1 s hook timeout per blocking event"
 
 # `claude --version` broken must not stop claude itself.
 receiver real faults || exit 1
+before=$(count faults '.event == "SessionStart"')
 docker exec "$SESS" bash -c 'mkdir -p /tmp/wrap && printf "#!/bin/bash\n[ \"\$1\" = --version ] && exit 1\nexec /home/developer/.npm-global/bin/claude \"\$@\"\n" > /tmp/wrap/claude && chmod +x /tmp/wrap/claude'
 docker exec -w /home/developer/workspace "$SESS" bash -c 'PATH=/tmp/wrap:$PATH timeout 120 claude -p hola </dev/null' >"$TMP/last.out" 2>/dev/null
-check "claude --version failing: claude -p still answers" out_is "$HOLA_OUT"
+check "PATH's claude --version failing: claude -p still answers" out_is "$HOLA_OUT"
 sleep 1
-check "…and session_start arrives with claude_version null" \
-	[ "$(jq -r 'select(.event == "SessionStart") | .body.st.claude_version' "$OUT/faults.jsonl" | tail -n 1)" = null ]
+# v1.8.2: the version is the PROCESS's (/proc/<pid>/exe), not PATH's.
+check "…and a NEW session_start carries the process's own version ($PIN), not PATH's failure" \
+	bash -c '[ "$1" -gt "$2" ] && [ "$3" = "$4 (Claude Code)" ]' _ "$(count faults '.event == "SessionStart"')" "$before" \
+	"$(jq -r 'select(.event == "SessionStart") | .body.st.claude_version' "$OUT/faults.jsonl" | tail -n 1)" "$PIN"
+# Educación HZ, 2026-11-04: PATH names a `claude` that reports another version.
+docker exec "$SESS" bash -c 'printf "#!/bin/bash\n[ \"\$1\" = --version ] && { echo \"9.9.9 (Claude Code)\"; exit 0; }\nexec /home/developer/.npm-global/bin/claude \"\$@\"\n" > /tmp/wrap/claude'
+check "the lying wrapper really says 9.9.9" \
+	[ "$(docker exec "$SESS" bash -c 'PATH=/tmp/wrap:$PATH claude --version')" = "9.9.9 (Claude Code)" ]
+before=$(count faults '.event == "SessionStart"')
+docker exec -w /home/developer/workspace "$SESS" bash -c 'PATH=/tmp/wrap:$PATH timeout 120 claude -p hola </dev/null' >"$TMP/last.out" 2>/dev/null
+check "PATH says 9.9.9: claude -p still answers" out_is "$HOLA_OUT"
+sleep 1
+check "…and THIS run's session_start records the running process's $PIN, never PATH's 9.9.9" \
+	bash -c '[ "$1" -gt "$2" ] && [ "$3" = "$4 (Claude Code)" ]' _ "$(count faults '.event == "SessionStart"')" "$before" \
+	"$(jq -r 'select(.event == "SessionStart") | .body.st.claude_version' "$OUT/faults.jsonl" | tail -n 1)" "$PIN"
 docker exec "$SESS" bash -c 'printf "#!/bin/bash\n[ \"\$1\" = --version ] && exec sleep 30\nexec /home/developer/.npm-global/bin/claude \"\$@\"\n" > /tmp/wrap/claude'
 before=$(count faults '.event == "SessionStart"')
 t0=$(ms_now)
@@ -674,7 +695,7 @@ docker exec -w /home/developer/workspace "$SESS" bash -c 'PATH=/tmp/wrap:$PATH t
 HANG_MS=$(($(ms_now) - t0))
 check "claude --version hanging: claude -p still answers ($HANG_MS ms)" out_is "$HOLA_OUT"
 sleep 4
-note "claude --version hanging under -p: session_start delivered $(($(count faults '.event == "SessionStart"') - before)) time(s) (the CLI cancels async hooks still running at -p teardown)"
+note "PATH's claude --version hanging under -p (never called by the script since v1.8.2): session_start delivered $(($(count faults '.event == "SessionStart"') - before)) time(s) (the CLI cancels async hooks still running at -p teardown)"
 # Script and relay missing (an image without them, or a broken one): the CLI keeps working.
 session yes file -v "$EMPTY":/opt/st/hooks:ro || exit 1
 claude_p hola

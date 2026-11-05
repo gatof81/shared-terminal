@@ -177,7 +177,15 @@ Entrada: JSON de `SessionStart` por stdin. Comportamiento (implementado en
 2. Si `ST_INGEST_TOKEN` está vacío o no definido: exit 0 sin salida ni red.
 3. Lee como máximo 64 KiB de stdin; si no es un objeto JSON, exit 0 sin red. Construye el JSON de
    salida = entrada + `{ "st": { "claude_version", "tmux_session", "pane", "argv_flags" } }` donde:
-   - `claude_version` = `timeout 3 claude --version` (null si falla);
+   - `claude_version` = la versión del **proceso `claude` que disparó el hook** (el que
+     `find_claude_pid` encuentra subiendo por `/proc`), preguntada a su propio binario:
+     `env -i PATH=/usr/bin:/bin HOME=/nonexistent DISABLE_AUTOUPDATER=1
+     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 timeout -k 1 3 /proc/<pid>/exe --version`, con el mismo `starttime` y ejecutable antes y después, **salida 0** (el estado del binario, o el
+     124 del `timeout`, no el del `head` que acota la salida) y salida exacta `X.Y.Z (Claude Code)`;
+     null si no hay tal proceso, si es un runtime `node`, si falla, si excede el timeout o si la
+     salida no es esa (**v1.8.2**, imágenes nuevas: hasta entonces era `claude --version` del
+     `PATH`, que puede ser otra instalación — Educación HZ, 2026-11-04). Es **metadato** que muestra
+     Chat: el composer nunca autoriza con él (§8.1.9);
    - `tmux_session` = `timeout 1 tmux display-message -p -t "$TMUX_PANE" '#S'`, solo si `$TMUX` y
      `$TMUX_PANE` están definidos (null si no, o si falla): sin `$TMUX`, un `tmux` sin `-t` respondería
      por el servidor que encuentre, no por el pane del hook;
