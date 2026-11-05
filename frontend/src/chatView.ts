@@ -1910,8 +1910,16 @@ function composerBlockReason(c: ConversationSummary | undefined, st: ComposerSta
 		// stays readable here, input goes through the terminal.
 		// paneId, not tabId: the tab can be unknown on a well-bound pane
 		// (the hook carried no tmux session), and canSendInput follows the pane.
-		if (c.statusEvidence === "binding_lost" || c.paneId === null)
-			return "This conversation no longer has a terminal pane — another conversation took it over, or the session was restarted. Its history stays readable; type in the Terminal to continue.";
+		// Two different situations, said apart (B, 2026-11-05: a background
+		// Claude session was told "another conversation took it over"):
+		// - binding_lost: another conversation started in its pane;
+		// - no pane ever: its hooks carry none (e.g. Claude runs it as a
+		//   background session) — nothing was taken; Chat just cannot prove
+		//   where a message would go.
+		if (c.statusEvidence === "binding_lost")
+			return "This conversation no longer has a terminal pane — another conversation started in it, or the session was restarted. Its history stays readable; type in the Terminal to continue.";
+		if (c.paneId === null)
+			return "Chat can't tie this conversation to a terminal pane, so it can't confirm where a message would go (for example, Claude runs it as a background session). Its history stays readable; type in the Terminal to continue.";
 		return "Sending from Chat is not available for this conversation.";
 	}
 	// The CLI must be at its prompt (§10 "3.2 composer": waiting_input/idle). The
