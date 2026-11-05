@@ -35,7 +35,6 @@ INGEST_URL="http://127.0.0.1:47613/ingest/claude/hook"
 input=$(head -c 65536)
 [ -n "$input" ] || exit 0
 
-
 # Only ask tmux when this process actually runs inside a tmux pane: without
 # $TMUX a bare `tmux display-message` would answer for whatever server it
 # finds (the exec API's `-p` runs have no pane), and `-t` pins the answer to
