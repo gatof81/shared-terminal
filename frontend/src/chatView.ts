@@ -1936,10 +1936,13 @@ function autosize(ta: HTMLTextAreaElement): void {
 	if (!ta.isConnected) return;
 	const sc = threadScroller();
 	const top = sc?.scrollTop ?? 0;
-	const stick = sc !== null && nearBottom(sc);
+	// The tracked state, not a live read: it is the pre-measure truth.
+	const stick = sc !== null && (cur?.atBottom ?? nearBottom(sc));
 	ta.style.height = "auto";
 	if (ta.scrollHeight > 0) ta.style.height = `${ta.scrollHeight + 2}px`;
-	if (sc) sc.scrollTop = stick ? sc.scrollHeight : top;
+	// Instant, not the scroller's smooth behaviour: an animated restore fires
+	// scroll events mid-way that would mark the reader as not at the bottom.
+	if (sc) setScrollNow(sc, stick ? sc.scrollHeight : top);
 }
 
 function composer(): HTMLElement {
