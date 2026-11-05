@@ -338,8 +338,11 @@ export function initSwitcher(isLoggedIn: () => boolean): void {
 	const kbd = btn?.querySelector("kbd");
 	if (mac && kbd) kbd.textContent = "⌘K";
 	document.addEventListener("keydown", (e) => {
-		// e.code: the K key on any layout (a non-Latin layout reports another e.key).
-		if (e.code !== "KeyK" && e.key !== "k" && e.key !== "K") return;
+		// The key labelled K; the physical K position (e.code) only when the
+		// layout types no Latin letter there (Cyrillic, Greek…) — on Colemak
+		// or Dvorak that key is another letter's shortcut (Ctrl+E, Ctrl+T).
+		const k = e.key.length === 1 ? e.key.toLowerCase() : "";
+		if (k !== "k" && !(e.code === "KeyK" && !/^[a-z]$/.test(k))) return;
 		if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
 		if (!isLoggedIn() || isAnyDialogOpen() || isTypingTarget(e.target)) return;
 		e.preventDefault();
