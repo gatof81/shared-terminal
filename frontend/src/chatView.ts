@@ -1902,6 +1902,36 @@ function composerBlockReason(c: ConversationSummary | undefined, st: ComposerSta
 	return null;
 }
 
+/**
+ * Whether the textarea takes typing — separate from whether Send is enabled.
+ * While Claude is working, waiting on a permission or not yet confirmed at
+ * its prompt (or another send is settling), the person can write the next
+ * message; Send stays off until the composer allows it, and nothing is ever
+ * sent on its own when that changes (no queue: the click is the send). Kept
+ * off where a draft cannot go anywhere (ended, unreachable, no pane, not
+ * interactive), while a send is in flight, and after a failed delivery until
+ * the Terminal has been checked.
+ */
+function composerDraftable(c: ConversationSummary | undefined, st: ComposerState): boolean {
+	if (!c || st.sending) return false;
+	if (st.notice?.blockUntilChecked && !st.checked) return false;
+	if (
+		c.status === "ended" ||
+		c.status === "ending" ||
+		c.status === "disconnected" ||
+		c.status === "error"
+	)
+		return false;
+	return c.canSendInput || c.composer?.blocked === true;
+}
+
+/** Grow the textarea with its content; CSS max-height caps it, then it scrolls. */
+function autosize(ta: HTMLTextAreaElement): void {
+	if (!ta.isConnected) return;
+	ta.style.height = "auto";
+	if (ta.scrollHeight > 0) ta.style.height = `${ta.scrollHeight + 2}px`;
+}
+
 function composer(): HTMLElement {
 	const box = el("div", "chat-composer");
 	const c = selected();
@@ -1916,7 +1946,7 @@ function composer(): HTMLElement {
 	const sendBtn = button("Send", "files-btn primary chat-send", () => void submitComposer());
 	const reason = st ? composerBlockReason(c, st) : "Open a conversation to send a message.";
 	const can = reason === null;
-	ta.disabled = !can;
+	ta.disabled = !(st && composerDraftable(c, st));
 	sendBtn.disabled = !can;
 	// The reason a send is blocked lives in the status line only; the
 	// placeholder repeating it was cut off on narrow screens.
@@ -1925,9 +1955,10 @@ function composer(): HTMLElement {
 		ta.value = st.draft;
 		ta.addEventListener("input", () => {
 			st.draft = ta.value;
-			ta.rows = Math.min(6, Math.max(1, ta.value.split("\n").length));
+			autosize(ta);
 		});
-		ta.rows = Math.min(6, Math.max(1, st.draft.split("\n").length));
+		// Measured once it is in the document.
+		requestAnimationFrame(() => autosize(ta));
 	}
 	ta.addEventListener("keydown", (e) => {
 		if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
@@ -1935,7 +1966,7 @@ function composer(): HTMLElement {
 			void submitComposer();
 		}
 	});
-	const status = composerStatus(st, reason);
+	const status = composerStatus(st, reason, st !== null && composerDraftable(c, st));
 	row.appendChild(ta);
 	row.appendChild(sendBtn);
 	box.appendChild(status);
@@ -1968,7 +1999,11 @@ function openTerminalButton(c: ConversationSummary | undefined): HTMLButtonEleme
 }
 
 /** The composer's status line: the notice, or the hint, or the block reason. */
-function composerStatus(st: ComposerState | null, reason: string | null): HTMLElement {
+function composerStatus(
+	st: ComposerState | null,
+	reason: string | null,
+	draftable: boolean,
+): HTMLElement {
 	const status = el("div", "chat-composer-status");
 	// The textarea points here (aria-describedby): a blocked composer's
 	// reason is read with it, now that the placeholder no longer carries it.
@@ -2003,6 +2038,15 @@ function composerStatus(st: ComposerState | null, reason: string | null): HTMLEl
 		);
 	} else {
 		status.appendChild(el("span", undefined, reason ?? ""));
+		// Typing is open while Send waits: say what happens to the draft.
+		if (draftable && reason !== null)
+			status.appendChild(
+				el(
+					"span",
+					"chat-composer-draft-note",
+					"You can keep writing; Send turns on when Claude is ready.",
+				),
+			);
 		status.appendChild(openTerminalButton(selected()));
 	}
 	return status;
@@ -2033,7 +2077,7 @@ function renderComposer(): void {
 	const st = composerStateFor(cid);
 	const reason = composerBlockReason(selected(), st);
 	const can = reason === null;
-	ta.disabled = !can;
+	ta.disabled = !composerDraftable(selected(), st);
 	// The reason a send is blocked lives in the status line only; the
 	// placeholder repeating it was cut off on narrow screens.
 	ta.placeholder = "Message Claude…";
@@ -2041,12 +2085,12 @@ function renderComposer(): void {
 	// send cleared it, a result restored it), never while they agree.
 	if (ta.value !== st.draft) {
 		ta.value = st.draft;
-		ta.rows = Math.min(6, Math.max(1, st.draft.split("\n").length));
+		autosize(ta);
 	}
 	const sendBtn = old.querySelector<HTMLButtonElement>(".chat-send");
 	if (sendBtn) sendBtn.disabled = !can;
 	const status = old.querySelector<HTMLElement>(".chat-composer-status");
-	if (status) status.replaceWith(composerStatus(st, reason));
+	if (status) status.replaceWith(composerStatus(st, reason, composerDraftable(selected(), st)));
 }
 
 async function submitComposer(): Promise<void> {
