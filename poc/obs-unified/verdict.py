@@ -120,7 +120,11 @@ def verdict_n14(snap):
     fixture = next((e.get("detail") or {} for e in _sig(ev, "skills-dir", lambda s: s == "fixture")), {})
     if d.get("fixture") != "st-b1-rogue-n14":
         return "inconclusive", "attribution-wrong-or-missing-fixture"
-    if not isinstance(diff, dict) or not diff.get("control_run") or diff.get("control_loaded") is not True:
+    # C2: the differential must reference a positive control whose REAL evidence was a skills-dir
+    # LOAD of the SAME-digest fixture — not a `control_loaded: true` flag. The smoke's orchestrator
+    # derives `evidence` from the positive control's own `skills-dir:loaded` event
+    # (e2e_smoke.validate_differential); a driver cannot legitimately mint it.
+    if not isinstance(diff, dict) or not diff.get("control_run") or diff.get("evidence") != "skills-dir:loaded":
         return "inconclusive", "attribution-not-a-validated-differential"
     if not fixture.get("digest") or diff.get("fixture_digest") != fixture.get("digest"):
         return "inconclusive", "attribution-fixture-digest-mismatch"

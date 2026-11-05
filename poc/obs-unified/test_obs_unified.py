@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import observer as O  # noqa: E402
 import verdict as V  # noqa: E402
 import smoke as S  # noqa: E402
+import e2e_smoke as E  # noqa: E402
 
 P = "2026-11-05T10:00:00.000Z [DEBUG] "
 PROBE = (P + "hooks module st-b1-probe@st-b1 loaded (worker, environment 2, tier prepend); events: session.start,classic.SessionStart\n"
@@ -65,7 +66,7 @@ def n14_full_block(attributed=True, differential=True, digest=FIXTURE_DIGEST, di
         o.fixture_identity(digest)                      # this run's N14 fixture identity
         det = {"fixture": "st-b1-rogue-n14"}
         if differential:
-            det["differential"] = {"control_run": "ctrl-run-1", "control_loaded": True,
+            det["differential"] = {"control_run": "ctrl-run-1", "evidence": "skills-dir:loaded",
                                    "fixture_digest": diff_digest}
         o.fact("skills-dir", "block-attributable", source="control", detail=det)
     o.window_open(0.05)
@@ -459,6 +460,116 @@ class SmokeCleanup(unittest.TestCase):
             self.assertEqual(calls, [])
         finally:
             S.tmux = orig
+
+
+def e2e_positive(digest=FIXTURE_DIGEST, loaded=True):
+    o = obs(attempt="N14", start=1, instance="pos-1")
+    o.from_debug(PROBE + (N14_LOADED if loaded else ""))
+    o.from_probe_records(PROBE_RECORDS, start_inst=INST)
+    o.fixture_identity(digest)
+    return o.snapshot()
+
+
+def e2e_negative(digest=FIXTURE_DIGEST):
+    clk = ManualClock()
+    o = obs(attempt="N14", start=1, instance="neg-1", clock=clk).set_window(max_gap=0.3)
+    o.from_debug(PROBE)
+    o.from_probe_records(PROBE_RECORDS, start_inst=INST)
+    o.fact("trust", "confirmed")
+    o.fixture_identity(digest)                       # same fixture digest as positive
+    o.window_open(0.05)
+    o.window_close(0.25)
+    for t, txt in [(0.0, PROBE), (0.1, SKILLS_BLOCK), (0.2, PROBE), (0.3, PROBE)]:
+        clk.t = t
+        o.from_pane(txt)
+    return o.snapshot()                              # NO block-attributable — orchestrator stamps it
+
+
+def e2e_absent():
+    clk = ManualClock()
+    o = obs(attempt="N14", start=1, instance="abs-1", clock=clk).set_window(max_gap=0.3)
+    o.from_debug(PROBE)
+    o.from_probe_records(PROBE_RECORDS, start_inst=INST)
+    o.fact("trust", "confirmed")
+    o.window_open(0.05)
+    o.window_close(0.25)
+    for t in [0.0, 0.1, 0.2, 0.3]:
+        clk.t = t
+        o.from_pane(PROBE)                           # benign reads, no skills-dir signal
+    return o.snapshot()
+
+
+def fake_runner(snaps):
+    def run(kind):
+        s = snaps.get(kind)
+        return s if isinstance(s, dict) and "ok" in s else {"ok": True, "snapshot": s}
+    return run
+
+
+class E2ESmoke(unittest.TestCase):
+    def test_isolation_argv(self):
+        argv = E.isolation_argv("/bin/claude", "/h", "/w", "/w/dbg", "/w/pgid", policy_path="/h/m.json")
+        self.assertEqual(argv[0], "unshare")
+        for flag in ("--map-root-user", "--net", "--pid", "--fork", "--mount-proc"):
+            self.assertIn(flag, argv)
+        inner = argv[-1]
+        self.assertIn("echo $$ > /w/pgid", inner)                 # writes its own PGID first
+        self.assertIn("exec env -i", inner)
+        self.assertIn("CLAUDE_CODE_MANAGED_SETTINGS_PATH=/h/m.json", inner)
+
+    def test_build_attribution_from_real_load(self):
+        self.assertEqual(E.build_attribution(e2e_positive())["evidence"], "skills-dir:loaded")
+        self.assertEqual(E.build_attribution(e2e_positive())["fixture_digest"], FIXTURE_DIGEST)
+        self.assertIsNone(E.build_attribution(e2e_positive(loaded=False)))   # no real load -> None
+
+    def test_three_controls_differentiated_and_blocked_low(self):
+        r = E.run_three_controls(fake_runner({"positive": e2e_positive(), "negative": e2e_negative(), "absent": e2e_absent()}),
+                                 check_isolation=lambda: True, check_cleanup=lambda: True)
+        self.assertFalse(r["aborted"])
+        self.assertIn("loaded", r["controls"]["positive"]["skills_dir"])
+        self.assertIn("blocked", r["controls"]["negative"]["skills_dir"])
+        self.assertEqual(r["controls"]["absent"]["skills_dir"], [])
+        self.assertTrue(r["differential_validated"])
+        self.assertEqual(r["verdict"][0], "blocked-low")          # max for a pane-supported attribution
+
+    def test_c2_no_real_positive_load_is_inconclusive(self):
+        r = E.run_three_controls(fake_runner({"positive": e2e_positive(loaded=False), "negative": e2e_negative(), "absent": e2e_absent()}),
+                                 check_isolation=lambda: True, check_cleanup=lambda: True)
+        self.assertFalse(r["differential_validated"])
+        self.assertEqual(r["verdict"][0], "inconclusive")         # no validated differential
+
+    def test_c2_digest_must_match_between_controls(self):
+        r = E.run_three_controls(fake_runner({"positive": e2e_positive(digest="AAAA"), "negative": e2e_negative(digest="BBBB"), "absent": e2e_absent()}),
+                                 check_isolation=lambda: True, check_cleanup=lambda: True)
+        self.assertEqual(r["verdict"][0], "inconclusive")         # different fixture -> not attributable
+
+    def test_fail_closed_on_isolation(self):
+        r = E.run_three_controls(fake_runner({}), check_isolation=lambda: False, check_cleanup=lambda: True)
+        self.assertTrue(r["aborted"])
+        self.assertEqual(r["verdict"][0], "inconclusive")
+        self.assertEqual(r["controls"], {})
+        self.assertIn("isolation", r["reason"])
+
+    def test_fail_closed_on_capture_error(self):
+        snaps = {"positive": {"ok": False, "reason": "capture-timeout"}, "negative": e2e_negative(), "absent": e2e_absent()}
+        r = E.run_three_controls(fake_runner(snaps), check_isolation=lambda: True, check_cleanup=lambda: True)
+        self.assertTrue(r["aborted"])
+        self.assertIn("positive:capture-timeout", r["reason"])
+
+    def test_fail_closed_on_cleanup(self):
+        r = E.run_three_controls(fake_runner({"positive": e2e_positive(), "negative": e2e_negative(), "absent": e2e_absent()}),
+                                 check_isolation=lambda: True, check_cleanup=lambda: False)
+        self.assertTrue(r["aborted"])
+        self.assertIn("cleanup", r["reason"])
+
+    def test_never_strong_blocked(self):
+        r = E.run_three_controls(fake_runner({"positive": e2e_positive(), "negative": e2e_negative(), "absent": e2e_absent()}),
+                                 check_isolation=lambda: True, check_cleanup=lambda: True)
+        self.assertNotEqual(r["verdict"][0], "blocked")           # only ever blocked-low / inconclusive / FAIL
+
+    def test_real_check_cleanup_detects_alive_group(self):
+        self.assertFalse(E.real_check_cleanup(os.getpgrp()))      # our own group is alive -> not reaped
+        self.assertTrue(E.real_check_cleanup(2 ** 22))            # a non-existent group -> reaped
 
 
 if __name__ == "__main__":

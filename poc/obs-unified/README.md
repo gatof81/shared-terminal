@@ -140,7 +140,7 @@ it. Until then N17-project stays Option A (INCONCLUSIVE).
 
 ## Local results (pure simulated; no CLI)
 
-`python3 test_obs_unified.py` → **50 passed** (round-2: B1 guard precedence on incremental
+`python3 test_obs_unified.py` → **60 passed** (round-2: B1 guard precedence on incremental
 contradictory reads; B2 authority matrix — pane cannot prove session.start/guard/trust/attribution,
 unknown signal & foreign ctx rejected, legitimate combos pass; B3 probe identity — arbitrary/wrong
 probe/wrong inst/missing inst rejected, correct accepted; B4 attribution needs fixture+differential,
@@ -180,10 +180,31 @@ original time kept; appended line ⇒ exactly one new event); smoke cleanup mock
   and does not by itself resolve N14/N17-project — it makes their *blocked* evidence observable,
   which is necessary but not sufficient.
 
-## Isolated smoke — executable design (PREPARED, not run; needs explicit GO)
+## Isolated smoke — IMPLEMENTED, not run (`e2e_smoke.py`; needs explicit operational GO)
 
-The current `smoke.py` is a **skeleton** (launch + cleanup only). The executable isolated smoke adds
-the pieces owner-required; it still runs **nothing** until a specific GO.
+`smoke.py` stays the launch+cleanup skeleton; **`e2e_smoke.py`** is the end-to-end orchestrator
+(three controls, isolation, C2 validated differential, fail-closed) — implemented, **unit-tested
+with fakes, and run NOTHING real** until a specific GO. Its orchestrator takes an injected `runner`
+and `check_isolation`/`check_cleanup`, so all logic is tested without a CLI; the real runner
+(`unshare` launch + trust-gate + capture) is `pragma: no cover`.
+
+**Three controls, differentiated output** (`run_three_controls`): `positive` (fixture, no policy ⇒
+`skills-dir:loaded`), `negative` (fixture + policy ⇒ pane `skills-dir:blocked`, no load), `absent`
+(no fixture ⇒ no skills-dir signal). The result's `controls` block reports each separately.
+
+**C2 — validated differential from REAL evidence:** `build_attribution(positive_snapshot)` derives
+the differential ONLY from the positive control's own `skills-dir:loaded` event bound to the fixture
+`digest`; a driver-declared flag is gone. The negative run is credited `blocked-low` only when that
+differential exists AND its digest equals the negative run's own recorded fixture digest (same
+fixture bytes in both controls). No real positive load, or a digest mismatch ⇒ INCONCLUSIVE.
+
+**Isolation + supervision:** `isolation_argv` builds `unshare --map-root-user --net --pid --fork
+--mount-proc …` (fresh net ns = only `lo`; fresh pid ns, CLI as PID 1). `real_check_isolation`
+verifies only `lo` + a failing outbound connect; `real_check_cleanup(pgid)` verifies the pid
+namespace was reaped. **Fail-closed:** any isolation / capture / cleanup failure ⇒ `aborted:true`,
+verdict INCONCLUSIVE, controls empty — never reinterpreted.
+
+The pieces still owner-required for the REAL run are wired by the (not-run) real runner:
 
 **Isolation (network + process), verifiably, without root or touching PASS-B1 containers:** run the
 CLI under `unshare -rn --pid --fork --mount-proc <...>`:
