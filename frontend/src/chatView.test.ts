@@ -961,6 +961,11 @@ describe("Chat overlay — connection indicator", () => {
 		);
 		// Following the banner's advice builds a new socket.
 		const opened = api.openConversationSocket.mock.calls.length;
+		api.fetchConversationEvents.mockResolvedValueOnce({
+			events: [ev("user_prompt", { prompt: "x" })],
+			hasMore: false,
+			firstRetainedSeq: 1,
+		});
 		$("chat-refresh-btn").click();
 		await flush();
 		expect(api.openConversationSocket.mock.calls.length).toBe(opened + 1);
