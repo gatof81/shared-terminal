@@ -28,6 +28,7 @@ import {
 	parsePolicy as parseCliPolicy,
 } from "./conversation/cliPolicy.js";
 import { ComposerService, composerFlagEnabled } from "./conversation/composer.js";
+import { IngestOriginVerifier } from "./conversation/ingestOrigin.js";
 import { createIngestHandler } from "./conversation/ingestRoute.js";
 import { PaneRecordStore } from "./conversation/paneRecord.js";
 import { ConversationService } from "./conversation/service.js";
@@ -117,6 +118,12 @@ const docker = new DockerManager(sessions);
 // service rejects everything as `disabled`, writes no file, injects no
 // token and mounts no bind — behaviour-neutral by construction.
 const CONVERSATION_ENABLED = process.env.CONVERSATION_ENABLED === "true";
+// CONVERSATION.md §3.1.1 (v1.8.6) — bind hook ingest to the session container's
+// network origin. Off by default and kept off until the operator has verified,
+// read-only, that the backend sees the containers' sessions-net addresses:
+// on a deployment where it doesn't (a proxy/NAT in between), turning it on
+// would reject all capture.
+const INGEST_REQUIRE_SESSION_ORIGIN = process.env.INGEST_REQUIRE_SESSION_ORIGIN === "true";
 // 3.0d (§7): owners whose NEW sessions are born with capture requested.
 const CONVERSATION_ALLOW_USERS = parseAllowUsers(process.env.CONVERSATION_ALLOW_USERS);
 const WORKSPACE_ROOT_FOR_CONVERSATION =
@@ -152,6 +159,12 @@ const conversation = new ConversationService({
 	},
 	// §2.7.5.1 — capability attestations survive the loss of a container's image.
 	captureAttestationKey: () => deriveSubkey(ATTESTATION_KEY_INFO),
+	// §3.1.1 — absent unless the flag is on: off is the exact pre-v1.8.6 route.
+	ingestOrigin: INGEST_REQUIRE_SESSION_ORIGIN
+		? new IngestOriginVerifier({
+				inspectSessionNetwork: (cid) => docker.inspectSessionNetwork(cid),
+			})
+		: undefined,
 });
 docker.setConversationHooks({
 	prepareSpawn: async (sid) => {

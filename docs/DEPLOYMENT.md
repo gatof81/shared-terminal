@@ -400,11 +400,42 @@ session emits anything.
 | --- | --- | --- |
 | `CONVERSATION_ENABLED` | unset (`false`) | Master switch. Off: `POST /ingest/claude/hook` answers 204 and discards (`ingest_rejected{disabled}`), no session gets a hooks file, an ingest token, `relay.enabled` or the extra read-only bind mounts, and boot `reconcile` deletes every stale `conversation.json` and `relay.enabled`. On: capture is still **per-session opt-in** (`sessions.conversation_requested`). |
 | `CONVERSATION_ALLOW_USERS` | unset | Comma-separated user ids whose **new** sessions are born with capture requested (`conversation_requested=1`); the owner decides, also for an admin create on behalf of someone. Existing sessions are never touched. Requested is not effective: the flag, no revocation and an image with the relay still apply. Entries that are not user ids are ignored with a warning. Keep it **empty until the pilot has passed** (stage 3 is a separate decision). |
+| `INGEST_REQUIRE_SESSION_ORIGIN` | unset (`false`) | CONVERSATION.md §3.1.1 (v1.8.6). On: a hook-ingest request is accepted only if its TCP peer (`req.socket.remoteAddress`, never a header) is an address of the session's **current** container on `SESSIONS_NETWORK`, inspected by id; anything else is `ingest_rejected{wrong_origin}` (still 204). Off: identical to before, no Docker inspection. **Keep it off until the read-only check below passes.** |
 | `PORT` | `3001` | Passed to capturing session containers as `ST_BACKEND_PORT`: the relay forwards to `http://st-backend:<PORT>/ingest/claude/hook`. The hooks file itself always targets the relay, `http://127.0.0.1:47613/ingest/claude/hook`. |
 
-Both variables are forwarded by `docker-compose.yml` with empty defaults
+These variables are forwarded by `docker-compose.yml` with empty defaults
 (before 3.0d `CONVERSATION_ENABLED` was not, so setting it in `.env` did
 nothing under compose).
+
+#### Ingest network origin — read-only check before `INGEST_REQUIRE_SESSION_ORIGIN=true`
+
+The flag is only safe if the backend sees each session container's own
+`sessions-net` address as the TCP peer of the relay's requests. A proxy, NAT,
+`network_mode: host` or a published port in between would make every peer
+look like a gateway, and turning the flag on would then reject **all**
+capture. The check below changes nothing: run it on the deployment host,
+with the flag still off.
+
+```bash
+# 1. the backend container is attached to sessions-net (expect an entry)
+docker inspect <backend-container> --format '{{json .NetworkSettings.Networks}}' | jq 'keys'
+# 2. a capturing session's address on sessions-net
+docker inspect st-<first-12-of-session-id> \
+  --format '{{(index .NetworkSettings.Networks "sessions-net").IPAddress}}'
+# 3. while that session is active (its relay is posting hooks), the peers of the
+#    backend's connections, as the backend's own network namespace sees them
+for i in $(seq 1 30); do docker exec <backend-container> sh -c \
+  'cat /proc/net/tcp /proc/net/tcp6 2>/dev/null' ; sleep 1; done > /tmp/peers.txt
+```
+
+Decode the remote addresses in `/tmp/peers.txt` (hex, little-endian for IPv4)
+for connections whose local port is the backend `PORT` (`0BB9` = 3001), or
+use `ss -tn` instead if the backend image has it. **Pass:** the session's
+address from step 2 appears as a peer of port 3001, and no gateway address
+(`*.*.*.1` of `sessions-net`) does for that traffic. Only then set the flag,
+restart the backend, and watch `GET /api/admin/stats → conversation →
+originRejectedSinceBoot` stay empty while capture keeps working. Any
+`wrong_origin` on a legitimate session ⇒ set the flag back off and restart.
 
 ### Composer (3.2, `docs/CONVERSATION.md` §8)
 

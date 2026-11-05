@@ -216,6 +216,8 @@ describe("ingest route — pathname without the query string", () => {
 			authorization: "Bearer x",
 			stSession: "s1",
 			tmuxPane: "%2",
+			// §3.1.1: always the socket's peer (loopback for this test client)
+			remoteAddress: expect.stringMatching(/^(::ffff:)?127\.0\.0\.1$/),
 		});
 		expect(svc.takeRate).toHaveBeenCalledWith("s1", Buffer.byteLength(body));
 		expect(svc.ingest).toHaveBeenCalledWith(
@@ -316,5 +318,33 @@ describe("ingest route — no rejection escapes the middleware", () => {
 		expect(await post("{}", AUTH)).toEqual({ status: 204, text: "" });
 		await vi.waitFor(() => expect(svc.ingest).toHaveBeenCalledTimes(2));
 		expect(svc.noteBackpressure).not.toHaveBeenCalled();
+	});
+});
+
+describe("ingest route — §3.1.1 origin source", () => {
+	it("passes the socket's peer to authorize; forwarding headers never reach it", async () => {
+		const r = await post(JSON.stringify({ hook_event_name: "Stop", session_id: "c1" }), {
+			authorization: "Bearer t",
+			"x-st-session": "s1",
+			"x-forwarded-for": "172.18.0.5",
+			"x-real-ip": "172.18.0.5",
+			forwarded: "for=172.18.0.5",
+		});
+		expect(r).toEqual({ status: 204, text: "" });
+		expect(svc.authorize).toHaveBeenCalledTimes(1);
+		const headers = (svc.authorize.mock.calls[0] as unknown[])[0] as { remoteAddress?: string };
+		// The test client connects over loopback: that, and only that, is the peer.
+		expect(["127.0.0.1", "::ffff:127.0.0.1"]).toContain(headers.remoteAddress);
+		expect(JSON.stringify(headers)).not.toContain("172.18.0.5");
+	});
+
+	it("a wrong_origin rejection keeps the contract: 204, empty body, nothing ingested", async () => {
+		svc.authorize.mockResolvedValueOnce({ accepted: false, reason: "wrong_origin" } as never);
+		const r = await post(JSON.stringify({ hook_event_name: "Stop", session_id: "c1" }), {
+			authorization: "Bearer t",
+			"x-st-session": "s1",
+		});
+		expect(r).toEqual({ status: 204, text: "" });
+		expect(svc.ingest).not.toHaveBeenCalled();
 	});
 });

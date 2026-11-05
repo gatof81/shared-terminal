@@ -82,6 +82,13 @@ export const TARGETED_PROBE_DELAY_MS = 3_000;
 /** §3.1 — token cache TTL (belt and braces next to the revocation marker). */
 export const TOKEN_CACHE_TTL_MS = 60_000;
 
+/**
+ * §3.1.1 — life of a POSITIVE network-origin view (session, container_id →
+ * addresses). Short on purpose: it bounds the residual window in which a
+ * container that died without a teardown still has its address accepted.
+ */
+export const ORIGIN_CACHE_TTL_MS = 10_000;
+
 /** §3.3 / §4.4 — index snapshot cadence. */
 export const INDEX_FLUSH_EVERY_EVENTS = 50;
 export const INDEX_FLUSH_INTERVAL_MS = 5_000;

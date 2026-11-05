@@ -119,6 +119,10 @@ export function createIngestHandler(opts: IngestRouteOptions) {
 			authorization: header(req, "authorization"),
 			stSession: header(req, "x-st-session"),
 			tmuxPane: pane,
+			// §3.1.1 — the TCP peer, from the socket itself. Never a forwarding
+			// header nor `req.ip`: both are whatever the client (or the Tunnel)
+			// says, and the check exists precisely to not believe the client.
+			remoteAddress: req.socket.remoteAddress,
 		});
 		if (!("ok" in auth)) {
 			drain(req);
