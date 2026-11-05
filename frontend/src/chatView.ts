@@ -782,6 +782,9 @@ function renderSummary(): void {
 		col.appendChild(el("span", "chat-summary-title", titleOf(c)));
 		const sub = el("span", "chat-summary-sub");
 		sub.appendChild(statusChip(currentStatus(c), { age: true }));
+		// The head's sub-line (where desktop says "archived") is hidden on a
+		// phone: the summary carries the mark instead.
+		if (isArchived(c)) sub.appendChild(el("span", "chat-conv-archived", "Archived"));
 		col.appendChild(sub);
 		summaryEl.appendChild(col);
 		return;

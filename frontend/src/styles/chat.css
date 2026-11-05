@@ -76,6 +76,8 @@
 }
 .chat-summary-sub {
   display: flex;
+  align-items: center;
+  gap: 0.4rem;
   min-width: 0;
 }
 .chat-back {
@@ -1120,7 +1122,14 @@
     display: none;
   }
   .chat-thread-head {
-    padding: 0.35rem 0.75rem;
+    padding: 0.25rem 0.75rem;
+    justify-content: flex-end;
+  }
+  /* The summary bar above already shows this conversation's status (and,
+     on a phone, the head's title is hidden): one status, not two. The head
+     keeps only its tools (Agents, connection, ⋯). */
+  .chat-thread-tools .chat-status {
+    display: none;
   }
   .chat-scroll {
     padding: 0.6rem 0.65rem 1rem;

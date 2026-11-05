@@ -238,7 +238,16 @@ test.describe("chat states", () => {
 		};
 		await expect(row("Fix tests")).toContainText("Ended");
 		await row("Fix tests").click();
-		await expect(page.locator(".chat-thread-head .chat-status")).toContainText("Ended");
+		// One visible status for the open conversation: the head's on desktop,
+		// the summary bar's on a phone (the head's chip is hidden there).
+		const shown = page
+			.locator(app.mobile ? "#chat-summary .chat-status" : ".chat-thread-head .chat-status")
+			.filter({ visible: true });
+		await expect(shown).toContainText("Ended");
+		if (app.mobile)
+			await expect(page.locator("#chat-view .chat-status").filter({ visible: true })).toHaveCount(
+				1,
+			);
 		await expect(page.locator(".chat-composer-status")).toContainText("has ended");
 		await toList();
 		// The list's status is the summary's; the composer explains the same thing.
