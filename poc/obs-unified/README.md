@@ -140,7 +140,7 @@ it. Until then N17-project stays Option A (INCONCLUSIVE).
 
 ## Local results (pure simulated; no CLI)
 
-`python3 test_obs_unified.py` → **60 passed** (round-2: B1 guard precedence on incremental
+`python3 test_obs_unified.py` → **65 passed** (round-2: B1 guard precedence on incremental
 contradictory reads; B2 authority matrix — pane cannot prove session.start/guard/trust/attribution,
 unknown signal & foreign ctx rejected, legitimate combos pass; B3 probe identity — arbitrary/wrong
 probe/wrong inst/missing inst rejected, correct accepted; B4 attribution needs fixture+differential,
@@ -182,11 +182,20 @@ original time kept; appended line ⇒ exactly one new event); smoke cleanup mock
 
 ## Isolated smoke — IMPLEMENTED, not run (`e2e_smoke.py`; needs explicit operational GO)
 
-`smoke.py` stays the launch+cleanup skeleton; **`e2e_smoke.py`** is the end-to-end orchestrator
-(three controls, isolation, C2 validated differential, fail-closed) — implemented, **unit-tested
-with fakes, and run NOTHING real** until a specific GO. Its orchestrator takes an injected `runner`
-and `check_isolation`/`check_cleanup`, so all logic is tested without a CLI; the real runner
-(`unshare` launch + trust-gate + capture) is `pragma: no cover`.
+`smoke.py` stays the launch+cleanup skeleton; **`e2e_smoke.py`** is the end-to-end orchestrator +
+the REAL runner — implemented, **unit-tested with fakes, and run NOTHING real** until a GO. Three
+blockers from the last review are now code, not stubs:
+- **(1) real end-to-end runner** `make_runner(sysio,…)` + `RealSys` (the actual unshare/tmux IO,
+  `pragma: no cover`): per control it plants fixture/policy, launches under isolation, wires the
+  trust-gate into the Observer, captures pane+debug from init, feeds probe records, opens/closes the
+  window, and reaps. The `sysio` seam makes every ERROR PATH testable without a CLI.
+- **(2) per-instance isolation + cleanup**: each control is its own instance (unique id, tmux
+  socket, pgid, namespaces); the runner verifies isolation BEFORE capture and reap AFTER, for THAT
+  instance, and fails closed (`ok:false` + reason) — never reinterpreted.
+- **(3) independent positive validation**: the orchestrator re-validates the positive snapshot
+  (`validate_positive`: authority + correlation + a REAL skills-dir:loaded) and requires the fixture
+  digest — an INDEPENDENT `fixture_digest()` sha256 of the planted dir, returned per instance — to
+  match between positive and negative. Otherwise the differential is None ⇒ INCONCLUSIVE.
 
 **Three controls, differentiated output** (`run_three_controls`): `positive` (fixture, no policy ⇒
 `skills-dir:loaded`), `negative` (fixture + policy ⇒ pane `skills-dir:blocked`, no load), `absent`

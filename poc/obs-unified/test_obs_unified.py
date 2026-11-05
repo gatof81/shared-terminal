@@ -499,77 +499,168 @@ def e2e_absent():
     return o.snapshot()
 
 
-def fake_runner(snaps):
+def ok(snap, digest):
+    return {"ok": True, "snapshot": snap, "digest": digest}
+
+
+def runner_of(results):
     def run(kind):
-        s = snaps.get(kind)
-        return s if isinstance(s, dict) and "ok" in s else {"ok": True, "snapshot": s}
+        return results[kind]
     return run
 
 
-class E2ESmoke(unittest.TestCase):
+class FakeSys:
+    """Scripts the make_runner IO seam so every ERROR PATH is testable without a CLI."""
+
+    def __init__(self, scratch, *, fail=None, isolation=True, pane_none=False, reaped=True,
+                 trust="confirmed", loaded=True):
+        self.scratch, self.fail, self.isolation, self.pane_none = scratch, fail, isolation, pane_none
+        self.reaped, self.trust, self.loaded = reaped, trust, loaded
+
+    def setup(self, kind, home, ws):
+        os.makedirs(ws, exist_ok=True)
+        fixture = policy = None
+        if kind in ("positive", "negative"):
+            fixture = os.path.join(home, ".claude", "skills", "st-b1-rogue-n14")
+            os.makedirs(os.path.join(fixture, "hooks"), exist_ok=True)
+            with open(os.path.join(fixture, "hooks", "hooks.json"), "w") as fh:
+                fh.write('{"modules":["./r.mjs"]}')
+        if kind == "negative":
+            policy = os.path.join(home, "m.json")
+            with open(policy, "w") as fh:
+                fh.write("{}")
+        return fixture, policy
+
+    def spawn(self, argv, sock):
+        if self.fail == "spawn":
+            raise RuntimeError("spawn boom")
+
+    def check_isolation(self, sock):
+        return self.isolation
+
+    def pane(self, sock):
+        return None if self.pane_none else PROBE
+
+    def read_text(self, path):
+        if path.endswith("pgid"):
+            return "4321\n"
+        return PROBE + (N14_LOADED if self.loaded else "")
+
+    def probe_records(self, ws):
+        return PROBE_RECORDS
+
+    def probe_inst(self, ws):
+        return INST
+
+    def reap(self, sock, pgid):
+        return self.reaped
+
+
+def mk_runner(sysio):
+    return E.make_runner(sysio, cli="/bin/claude", scratch=tempfile.mkdtemp(),
+                         trust_gate=lambda s, sock, pg: {"state": sysio.trust},
+                         clock=ManualClock(), settle_polls=2)
+
+
+class E2ESmokePure(unittest.TestCase):
     def test_isolation_argv(self):
         argv = E.isolation_argv("/bin/claude", "/h", "/w", "/w/dbg", "/w/pgid", policy_path="/h/m.json")
         self.assertEqual(argv[0], "unshare")
         for flag in ("--map-root-user", "--net", "--pid", "--fork", "--mount-proc"):
             self.assertIn(flag, argv)
-        inner = argv[-1]
-        self.assertIn("echo $$ > /w/pgid", inner)                 # writes its own PGID first
-        self.assertIn("exec env -i", inner)
-        self.assertIn("CLAUDE_CODE_MANAGED_SETTINGS_PATH=/h/m.json", inner)
+        self.assertIn("echo $$ > /w/pgid", argv[-1])
+        self.assertIn("CLAUDE_CODE_MANAGED_SETTINGS_PATH=/h/m.json", argv[-1])
+
+    def test_fixture_digest_independent_and_stable(self):
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "hooks"))
+        with open(os.path.join(d, "hooks", "r.mjs"), "w") as fh:
+            fh.write("a")
+        dig1 = E.fixture_digest(d)
+        self.assertEqual(dig1, E.fixture_digest(d))                 # stable
+        with open(os.path.join(d, "hooks", "r.mjs"), "w") as fh:
+            fh.write("b")
+        self.assertNotEqual(dig1, E.fixture_digest(d))              # content-sensitive
 
     def test_build_attribution_from_real_load(self):
         self.assertEqual(E.build_attribution(e2e_positive())["evidence"], "skills-dir:loaded")
-        self.assertEqual(E.build_attribution(e2e_positive())["fixture_digest"], FIXTURE_DIGEST)
-        self.assertIsNone(E.build_attribution(e2e_positive(loaded=False)))   # no real load -> None
+        self.assertIsNone(E.build_attribution(e2e_positive(loaded=False)))
+
+    def test_validate_positive_rejects_forged_snapshot(self):
+        snap = e2e_positive()
+        snap["events"].append({**snap["events"][0], "start": 99})   # foreign-ctx (unvalidatable)
+        ok_, dig = E.validate_positive(snap)
+        self.assertFalse(ok_)
+
+
+class E2EOrchestrator(unittest.TestCase):
+    def good(self, pos_dig=FIXTURE_DIGEST, neg_dig=FIXTURE_DIGEST, loaded=True):
+        return runner_of({"positive": ok(e2e_positive(digest=pos_dig, loaded=loaded), pos_dig if loaded else None),
+                          "negative": ok(e2e_negative(digest=neg_dig), neg_dig),
+                          "absent": ok(e2e_absent(), None)})
 
     def test_three_controls_differentiated_and_blocked_low(self):
-        r = E.run_three_controls(fake_runner({"positive": e2e_positive(), "negative": e2e_negative(), "absent": e2e_absent()}),
-                                 check_isolation=lambda: True, check_cleanup=lambda: True)
+        r = E.run_three_controls(self.good())
         self.assertFalse(r["aborted"])
         self.assertIn("loaded", r["controls"]["positive"]["skills_dir"])
         self.assertIn("blocked", r["controls"]["negative"]["skills_dir"])
         self.assertEqual(r["controls"]["absent"]["skills_dir"], [])
+        self.assertTrue(r["positive_validated"])
         self.assertTrue(r["differential_validated"])
-        self.assertEqual(r["verdict"][0], "blocked-low")          # max for a pane-supported attribution
+        self.assertEqual(r["verdict"][0], "blocked-low")
+        self.assertNotEqual(r["verdict"][0], "blocked")
 
-    def test_c2_no_real_positive_load_is_inconclusive(self):
-        r = E.run_three_controls(fake_runner({"positive": e2e_positive(loaded=False), "negative": e2e_negative(), "absent": e2e_absent()}),
-                                 check_isolation=lambda: True, check_cleanup=lambda: True)
+    def test_no_real_positive_load_inconclusive(self):
+        r = E.run_three_controls(self.good(loaded=False))
         self.assertFalse(r["differential_validated"])
-        self.assertEqual(r["verdict"][0], "inconclusive")         # no validated differential
-
-    def test_c2_digest_must_match_between_controls(self):
-        r = E.run_three_controls(fake_runner({"positive": e2e_positive(digest="AAAA"), "negative": e2e_negative(digest="BBBB"), "absent": e2e_absent()}),
-                                 check_isolation=lambda: True, check_cleanup=lambda: True)
-        self.assertEqual(r["verdict"][0], "inconclusive")         # different fixture -> not attributable
-
-    def test_fail_closed_on_isolation(self):
-        r = E.run_three_controls(fake_runner({}), check_isolation=lambda: False, check_cleanup=lambda: True)
-        self.assertTrue(r["aborted"])
         self.assertEqual(r["verdict"][0], "inconclusive")
+
+    def test_digest_mismatch_between_controls_inconclusive(self):
+        r = E.run_three_controls(self.good(pos_dig="AAAA", neg_dig="BBBB"))
+        self.assertFalse(r["differential_validated"])
+        self.assertEqual(r["verdict"][0], "inconclusive")
+
+    def test_fail_closed_isolation(self):
+        r = E.run_three_controls(runner_of({"positive": {"ok": False, "reason": "isolation-failed"}}))
+        self.assertTrue(r["aborted"])
         self.assertEqual(r["controls"], {})
-        self.assertIn("isolation", r["reason"])
+        self.assertIn("positive:isolation-failed", r["reason"])
 
-    def test_fail_closed_on_capture_error(self):
-        snaps = {"positive": {"ok": False, "reason": "capture-timeout"}, "negative": e2e_negative(), "absent": e2e_absent()}
-        r = E.run_three_controls(fake_runner(snaps), check_isolation=lambda: True, check_cleanup=lambda: True)
+    def test_fail_closed_capture(self):
+        r = E.run_three_controls(runner_of({"positive": ok(e2e_positive(), FIXTURE_DIGEST),
+                                            "negative": {"ok": False, "reason": "capture-failed"}}))
         self.assertTrue(r["aborted"])
-        self.assertIn("positive:capture-timeout", r["reason"])
+        self.assertIn("negative:capture-failed", r["reason"])
 
-    def test_fail_closed_on_cleanup(self):
-        r = E.run_three_controls(fake_runner({"positive": e2e_positive(), "negative": e2e_negative(), "absent": e2e_absent()}),
-                                 check_isolation=lambda: True, check_cleanup=lambda: False)
-        self.assertTrue(r["aborted"])
-        self.assertIn("cleanup", r["reason"])
 
-    def test_never_strong_blocked(self):
-        r = E.run_three_controls(fake_runner({"positive": e2e_positive(), "negative": e2e_negative(), "absent": e2e_absent()}),
-                                 check_isolation=lambda: True, check_cleanup=lambda: True)
-        self.assertNotEqual(r["verdict"][0], "blocked")           # only ever blocked-low / inconclusive / FAIL
+class E2ERunnerErrorPaths(unittest.TestCase):
+    def test_spawn_failure(self):
+        r = mk_runner(FakeSys(None, fail="spawn"))("positive")
+        self.assertEqual((r["ok"], r["reason"]), (False, "spawn-failed"))
 
-    def test_real_check_cleanup_detects_alive_group(self):
-        self.assertFalse(E.real_check_cleanup(os.getpgrp()))      # our own group is alive -> not reaped
-        self.assertTrue(E.real_check_cleanup(2 ** 22))            # a non-existent group -> reaped
+    def test_isolation_failure(self):
+        r = mk_runner(FakeSys(None, isolation=False))("positive")
+        self.assertEqual((r["ok"], r["reason"]), (False, "isolation-failed"))
+
+    def test_capture_failure(self):
+        r = mk_runner(FakeSys(None, pane_none=True))("positive")
+        self.assertEqual((r["ok"], r["reason"]), (False, "capture-failed"))
+
+    def test_cleanup_not_reaped(self):
+        r = mk_runner(FakeSys(None, reaped=False))("positive")
+        self.assertEqual((r["ok"], r["reason"]), (False, "cleanup-not-reaped"))
+
+    def test_trust_aborted_is_recorded_not_crash(self):
+        r = mk_runner(FakeSys(None, trust="aborted"))("negative")
+        self.assertTrue(r["ok"])
+        trust = [e["signal"] for e in r["snapshot"]["events"] if e["concern"] == "trust"]
+        self.assertEqual(trust, ["aborted"])
+
+    def test_happy_runner_returns_snapshot_and_digest(self):
+        r = mk_runner(FakeSys(None))("positive")
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["digest"])                                # independent fixture hash
+        self.assertEqual(r["snapshot"]["attempt"], "N14")
 
 
 if __name__ == "__main__":
