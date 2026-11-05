@@ -1,7 +1,7 @@
 /* ── Dialog component ───────────────────────────────────────────
    Only what the shared confirm/prompt/alert dialogs (components/
-   dialog.ts) add on top of the .modal / .modal-card / .modal-actions
-   rules in modal.css. */
+   dialog.ts) add on top of the .modal / .modal-card rules in modal.css;
+   the action row (.modal-actions) is styled here. */
 .dialog-card {
   width: 420px;
 }
@@ -29,6 +29,50 @@
 .dialog-cancel:hover {
   background: rgba(255, 255, 255, 0.06);
 }
+/* The action row. Shared dialogs had no rule here, so their buttons sat
+   flush against each other. Order of weight: the primary (or danger)
+   action is filled, Cancel is outlined, and an alternate answer (e.g.
+   "Use automatic title") is a quiet text button pushed to the far left,
+   so it never reads as the default. */
+.dialog-card .modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.modal-primary-action {
+  background: var(--c-ok-bg);
+  border: 1px solid var(--c-ok-strong);
+  border-radius: 6px;
+  padding: 0.45rem 0.9rem;
+  color: var(--c-white);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.modal-primary-action:hover:not(:disabled) {
+  background: var(--c-ok-strong);
+}
+.modal-primary-action:disabled,
+.dialog-cancel:disabled,
+.dialog-alternate:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.dialog-alternate {
+  margin-right: auto;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+  color: var(--c-accent);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.dialog-alternate:hover:not(:disabled) {
+  background: var(--c-accent-bg);
+}
 .modal-danger-action {
   background: #da3633;
   border: 1px solid var(--c-err);
@@ -48,7 +92,15 @@
 }
 .modal-card:focus-visible,
 .dialog-cancel:focus-visible,
+.dialog-alternate:focus-visible,
+.modal-primary-action:focus-visible,
 .modal-danger-action:focus-visible {
   outline: 2px solid var(--c-accent);
   outline-offset: 2px;
+}
+@media (max-width: 768px) {
+  /* Touch targets: 44px. */
+  .dialog-card .modal-actions button {
+    min-height: 2.75rem;
+  }
 }

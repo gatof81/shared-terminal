@@ -259,6 +259,104 @@ describe("promptDialog", () => {
 	});
 });
 
+describe("promptDialog onConfirm (async step, dialog stays open)", () => {
+	it("keeps the dialog open with the server's message, disables Save meanwhile, closes on success", async () => {
+		let answer: (v: string | null) => void = () => {};
+		const onConfirm = vi.fn(() => new Promise<string | null>((r) => (answer = r)));
+		const p = promptDialog({ title: "Rename", initialValue: "x", onConfirm });
+		const input = document.querySelector<HTMLInputElement>(".dialog-card input")!;
+		const form = input.closest("form")!;
+		const save = document.querySelector<HTMLButtonElement>(".modal-primary-action")!;
+		input.value = " Nuevo ";
+		form.dispatchEvent(new Event("submit", { cancelable: true }));
+		expect(onConfirm).toHaveBeenCalledWith("Nuevo");
+		expect(save.disabled).toBe(true);
+		// A second submit while pending is ignored.
+		form.dispatchEvent(new Event("submit", { cancelable: true }));
+		expect(onConfirm).toHaveBeenCalledTimes(1);
+		answer("Too long: at most 80 characters.");
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(isAnyDialogOpen()).toBe(true);
+		expect(save.disabled).toBe(false);
+		const err = document.querySelector<HTMLElement>(".modal-field-error")!;
+		expect(err.hidden).toBe(false);
+		expect(err.textContent).toBe("Too long: at most 80 characters.");
+		expect(input.value).toBe(" Nuevo ");
+		form.dispatchEvent(new Event("submit", { cancelable: true }));
+		answer(null);
+		await expect(p).resolves.toBe("Nuevo");
+		expect(isAnyDialogOpen()).toBe(false);
+	});
+	it("while onConfirm runs, Escape, × and Cancel cannot dismiss it (the outcome is never lost)", async () => {
+		let answer: (v: string | null) => void = () => {};
+		const p = promptDialog({
+			title: "Rename",
+			onConfirm: () => new Promise<string | null>((r) => (answer = r)),
+		});
+		const input = document.querySelector<HTMLInputElement>(".dialog-card input")!;
+		input.value = "a";
+		input.closest("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+		document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+		(document.querySelector(".dialog-cancel") as HTMLElement).click();
+		(document.querySelector(".dialog-card .modal-close") as HTMLElement).click();
+		expect(isAnyDialogOpen()).toBe(true);
+		expect(document.querySelector<HTMLButtonElement>(".dialog-cancel")!.disabled).toBe(true);
+		answer("refused");
+		await new Promise((r) => setTimeout(r, 0));
+		expect(document.querySelector<HTMLElement>(".modal-field-error")?.textContent).toBe("refused");
+		// Dismissable again once the answer is in.
+		document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+		await expect(p).resolves.toBeNull();
+	});
+	it("the alternate button submits its fixed value through onConfirm, without validation", async () => {
+		const onConfirm = vi.fn(async () => null);
+		const p = promptDialog({
+			title: "Rename",
+			initialValue: "mine",
+			validate: () => "never valid",
+			onConfirm,
+			alternate: { label: "Use automatic title", value: "" },
+		});
+		const alt = [...document.querySelectorAll<HTMLButtonElement>(".dialog-card button")].find(
+			(b) => b.textContent === "Use automatic title",
+		)!;
+		alt.click();
+		await expect(p).resolves.toBe("");
+		expect(onConfirm).toHaveBeenCalledWith("");
+	});
+	it("an onConfirm rejecting with a non-Error still releases the dialog", async () => {
+		const p = promptDialog({ title: "Rename", onConfirm: () => Promise.reject(undefined) });
+		const input = document.querySelector<HTMLInputElement>(".dialog-card input")!;
+		input.value = "a";
+		input.closest("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+		await new Promise((r) => setTimeout(r, 0));
+		expect(document.querySelector<HTMLElement>(".modal-field-error")?.textContent).toBe(
+			"Something went wrong",
+		);
+		expect(document.querySelector<HTMLButtonElement>(".modal-primary-action")!.disabled).toBe(
+			false,
+		);
+		(document.querySelector(".dialog-cancel") as HTMLElement).click();
+		await expect(p).resolves.toBeNull();
+	});
+	it("a thrown onConfirm is shown as its message and the dialog stays open", async () => {
+		const p = promptDialog({
+			title: "Rename",
+			onConfirm: async () => {
+				throw new Error("boom");
+			},
+		});
+		const input = document.querySelector<HTMLInputElement>(".dialog-card input")!;
+		input.value = "a";
+		input.closest("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+		await new Promise((r) => setTimeout(r, 0));
+		expect(document.querySelector<HTMLElement>(".modal-field-error")?.textContent).toBe("boom");
+		(document.querySelector(".dialog-cancel") as HTMLElement).click();
+		await expect(p).resolves.toBeNull();
+	});
+});
+
 describe("alertDialog", () => {
 	it("has no Cancel, resolves on OK, and keeps multi-line text as paragraphs", async () => {
 		const p = alertDialog({ title: "Invite code", message: "Copy now:\n\nABC-123" });

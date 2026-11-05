@@ -23,6 +23,11 @@
  *
  * Everything is built with textContent / renderMarkdown — no innerHTML.
  * Sending messages is 3.2: the composer is shown disabled with the reason.
+ *
+ * v1.8 §6.2: the owner renames/archives from a ⋯ menu per row and in the
+ * thread header; the list filters Active / Archived / All (chatMeta.ts holds
+ * the rules). None of it touches the thread, the socket, the composer or the
+ * terminal: a change only re-renders the list and the header.
  */
 
 import {
@@ -33,8 +38,26 @@ import {
 	fetchConversationEvents,
 	fetchConversations,
 	openConversationSocket,
+	patchConversationMeta,
 	sendConversationMessage,
 } from "./api.js";
+import {
+	automaticTitle,
+	CHAT_FILTERS,
+	type ChatFilter,
+	displayTitle,
+	explainMetaError,
+	filterCounts,
+	inFilter,
+	isArchived,
+	MetaOverlay,
+	metaOutcomeUnknown,
+	readFilter,
+	titleProblem,
+	writeFilter,
+} from "./chatMeta.js";
+import { openActionMenu } from "./components/actionMenu.js";
+import { promptDialog } from "./components/dialog.js";
 import { explainCode, normalizeText, validateText } from "./composerText.js";
 import {
 	type AgentView,
@@ -171,6 +194,14 @@ let restorePending = false;
 /** Highest seq the reader has seen per conversation (the unread dot). */
 const seen = new Map<string, number>();
 let seenBaselined = false;
+// v1.8 §6.2 — owner metadata.
+let filter: ChatFilter = readFilter();
+let metaState: "ok" | "unavailable" = "ok";
+const metaOverlay = new MetaOverlay();
+/** Conversations with a rename/archive request in flight (their actions are disabled meanwhile). */
+const metaBusy = new Set<string>();
+/** Where the last rename/archive was started from, so focus can go back there after the re-render. */
+let metaFocusWhere: "list" | "head" = "list";
 
 // ── View switching ──────────────────────────────────────────────────────────
 
@@ -207,6 +238,9 @@ function resetState(sessionId: string | null): void {
 	closeSocket();
 	stateSessionId = sessionId;
 	list = { status: "idle" };
+	metaState = "ok";
+	metaOverlay.clear();
+	metaBusy.clear();
 	selectedCid = null;
 	threadStatus = "idle";
 	threadError = "";
@@ -327,6 +361,8 @@ async function loadList(opts: { quiet?: boolean } = {}): Promise<void> {
 		const data = await fetchConversations(sid, { capture: !quiet });
 		if (gen !== generation || req !== listReq) return;
 		const capture = data.capture ?? (list.status === "loaded" ? list.capture : null);
+		metaOverlay.apply(data.conversations, req);
+		metaState = data.meta ?? "ok";
 		list = { status: "loaded", capture, conversations: data.conversations };
 		// The landing policy's memory (viewPolicy.ts): Chat first next time, if there is history.
 		writeHistoryHint(sid, data.conversations.length > 0);
@@ -629,7 +665,7 @@ function selected(): ConversationSummary | undefined {
 }
 
 function titleOf(c: ConversationSummary): string {
-	return c.title?.trim() || (c.kind === "headless" ? "Headless run" : "Untitled conversation");
+	return displayTitle(c);
 }
 
 function currentStatus(c: ConversationSummary): LiveStatus {
@@ -702,7 +738,7 @@ function renderSummary(): void {
 			(x) => presentStatus(x.status, lastEvidenceAt(x), now).active,
 		).length;
 		summaryEl.appendChild(el("span", "chat-summary-count", String(list.conversations.length)));
-		if (active > 0) summaryEl.appendChild(el("span", "chat-summary-active", `${active} active`));
+		if (active > 0) summaryEl.appendChild(el("span", "chat-summary-active", `${active} live`));
 	}
 }
 
@@ -758,17 +794,27 @@ function skeletonThread(): HTMLElement {
 
 function renderList(): void {
 	if (!isActive()) return;
-	// Live frames re-render the rows; a reader arrowing through them must not lose their place.
-	const focused =
-		document.activeElement instanceof HTMLElement && listEl.contains(document.activeElement)
-			? document.activeElement.dataset.cid
-			: undefined;
+	// Live frames and polls re-render the rows; whoever is on a row, its ⋯, its Unarchive
+	// or a filter button (keyboard, screen reader) must stay on the same control.
+	const focusSel = focusedListControl();
 	listEl.replaceChildren();
 	try {
 		renderListInner();
 	} finally {
-		if (focused) listEl.querySelector<HTMLElement>(`[data-cid="${focused}"]`)?.focus();
+		if (focusSel) listEl.querySelector<HTMLElement>(focusSel)?.focus();
 	}
+}
+
+/** A selector that finds the focused list control again after a re-render, or null. */
+function focusedListControl(): string | null {
+	const a = document.activeElement;
+	if (!(a instanceof HTMLElement) || !listEl.contains(a)) return null;
+	const d = a.dataset;
+	if (d.metaCid) return `[data-meta-cid="${CSS.escape(d.metaCid)}"][data-meta-where="list"]`;
+	if (d.unarchiveCid) return `[data-unarchive-cid="${CSS.escape(d.unarchiveCid)}"]`;
+	if (d.filter) return `.chat-filter-btn[data-filter="${CSS.escape(d.filter)}"]`;
+	if (d.cid) return `.chat-conv-row[data-cid="${CSS.escape(d.cid)}"]`;
+	return null;
 }
 
 function renderListInner(): void {
@@ -788,6 +834,7 @@ function renderListInner(): void {
 	}
 	const banner = captureBanner(list.capture);
 	if (banner) listEl.appendChild(banner);
+	if (metaState === "unavailable") listEl.appendChild(metaBanner());
 	if (list.conversations.length === 0) {
 		// Three different situations read as "nothing here" — say which.
 		const cap = list.capture;
@@ -807,21 +854,90 @@ function renderListInner(): void {
 		listEl.appendChild(empty);
 		return;
 	}
-	// "Active" = a live claim with fresh evidence. Unknown, stale, ended,
+	// "Live" = a live claim with fresh evidence. Unknown, stale, ended,
 	// disconnected and errored conversations are all listed under "Earlier",
-	// still openable and readable.
+	// still openable and readable. (v1.8: the heading is "Live", so it never
+	// reads like the "Active" filter.)
 	const now = Date.now();
-	const active = list.conversations.filter(
-		(c) => presentStatus(c.status, lastEvidenceAt(c), now).active,
-	);
-	const rest = list.conversations.filter((c) => !active.includes(c));
+	const isLive = (c: ConversationSummary) => presentStatus(c.status, lastEvidenceAt(c), now).active;
+	// With the metadata unreadable the archive state is unknown: every
+	// conversation is shown and the filters wait.
+	const effective: ChatFilter = metaState === "unavailable" ? "all" : filter;
+	listEl.appendChild(filterBar(filterCounts(list.conversations, isLive), effective));
+	const shown = list.conversations.filter((c) => inFilter(c, effective, isLive(c)));
+	if (shown.length === 0) {
+		const empty = stateBox(
+			"empty",
+			effective === "archived"
+				? "No archived conversations. Archive one from its ⋯ menu; it stays readable here."
+				: "Every conversation is archived.",
+		);
+		empty.classList.add("chat-empty");
+		if (effective !== "all")
+			empty.appendChild(button("Show all", "files-btn", () => pickFilter("all")));
+		listEl.appendChild(empty);
+		return;
+	}
+	const active = shown.filter(isLive);
+	const rest = shown.filter((c) => !active.includes(c));
 	const sectioned = active.length > 0 && rest.length > 0;
-	if (sectioned) listEl.appendChild(el("h3", "chat-list-title", "Active"));
+	if (sectioned) listEl.appendChild(el("h3", "chat-list-title", "Live"));
 	listEl.appendChild(convList(active.length > 0 ? active : rest));
 	if (sectioned) {
 		listEl.appendChild(el("h3", "chat-list-title", "Earlier"));
 		listEl.appendChild(convList(rest));
 	}
+}
+
+function metaBanner(): HTMLElement {
+	const box = el("div", "chat-banner chat-meta-banner");
+	box.setAttribute("role", "status");
+	box.appendChild(el("strong", undefined, "Names and archive state unavailable."));
+	box.appendChild(
+		el(
+			"span",
+			undefined,
+			" Showing every conversation with its automatic title; your names are not lost. Refresh to try again.",
+		),
+	);
+	return box;
+}
+
+/** Active · Archived · All — a group of toggle buttons (one pressed). */
+function filterBar(counts: ReturnType<typeof filterCounts>, effective: ChatFilter): HTMLElement {
+	const bar = el("div", "chat-filter");
+	bar.setAttribute("role", "group");
+	bar.setAttribute("aria-label", "Show conversations");
+	const disabled = metaState === "unavailable";
+	for (const f of CHAT_FILTERS) {
+		const b = el("button", "chat-filter-btn");
+		b.type = "button";
+		b.dataset.filter = f.id;
+		b.setAttribute("aria-pressed", String(f.id === effective));
+		b.disabled = disabled;
+		b.appendChild(el("span", undefined, f.label));
+		b.appendChild(el("span", "chat-filter-count", String(counts[f.id])));
+		// An archived conversation that is live again is surfaced in Active,
+		// and the Archived button says how many of its own are live.
+		if (f.id === "archived" && counts.archivedLive > 0) {
+			const badge = el("span", "chat-filter-live", `${counts.archivedLive} live`);
+			b.appendChild(badge);
+		}
+		b.setAttribute(
+			"aria-label",
+			`${f.label}: ${counts[f.id]}${f.id === "archived" && counts.archivedLive > 0 ? `, ${counts.archivedLive} live again` : ""}`,
+		);
+		b.addEventListener("click", () => pickFilter(f.id));
+		bar.appendChild(b);
+	}
+	return bar;
+}
+
+function pickFilter(f: ChatFilter): void {
+	filter = f;
+	writeFilter(f);
+	renderList();
+	listEl.querySelector<HTMLElement>(`.chat-filter-btn[data-filter="${f}"]`)?.focus();
 }
 
 function convList(items: ConversationSummary[]): HTMLElement {
@@ -836,6 +952,7 @@ function convList(items: ConversationSummary[]): HTMLElement {
 		row.setAttribute("aria-current", String(current));
 		const shown = presentStatus(c.status, lastEvidenceAt(c), Date.now());
 		const tone = shown.tone;
+		if (isArchived(c)) row.classList.add("archived");
 		row.classList.add(`tone-${tone}`);
 		const dot = el("span", `chat-conv-dot tone-${tone}`);
 		dot.title = shown.label;
@@ -854,6 +971,17 @@ function convList(items: ConversationSummary[]): HTMLElement {
 				el("span", "chat-conv-warn", `${c.gapsCount} gap${c.gapsCount === 1 ? "" : "s"}`),
 			);
 		}
+		if (isArchived(c)) {
+			// Archived and live again (shown in Active): say both, so it is found and understood.
+			const liveAgain = shown.active;
+			bottom.appendChild(
+				el(
+					"span",
+					`chat-conv-archived${liveAgain ? " live" : ""}`,
+					liveAgain ? "Archived · active again" : "Archived",
+				),
+			);
+		}
 		if (isUnread(c) && !current) {
 			const n = el("span", "chat-conv-unread");
 			n.setAttribute("aria-label", "New activity");
@@ -862,10 +990,186 @@ function convList(items: ConversationSummary[]): HTMLElement {
 		main.appendChild(bottom);
 		row.appendChild(main);
 		row.addEventListener("click", () => void openConversation(c.sessionId));
+		li.classList.add("chat-conv-item");
 		li.appendChild(row);
+		// Siblings of the row button (a button cannot hold buttons): reachable with Tab.
+		const tools = el("span", "chat-conv-tools");
+		if (isArchived(c) && shown.active) {
+			const un = button("Unarchive", "files-btn chat-conv-unarchive", () => {
+				if (metaBusy.has(c.sessionId)) return;
+				metaFocusWhere = "list";
+				void setArchived(c, false);
+			});
+			un.setAttribute("aria-label", `Unarchive: ${titleOf(c)}`);
+			un.dataset.unarchiveCid = c.sessionId;
+			markBusy(un, c.sessionId);
+			tools.appendChild(un);
+		}
+		tools.appendChild(metaMenuButton(c, "list"));
+		li.appendChild(tools);
 		ul.appendChild(li);
 	}
 	return ul;
+}
+
+// ── Rename / archive (v1.8 §6.2) ────────────────────────────────────────────
+
+function metaMenuButton(c: ConversationSummary, where: "list" | "head"): HTMLButtonElement {
+	const b = el("button", "chat-meta-btn", "⋯");
+	b.type = "button";
+	b.dataset.metaCid = c.sessionId;
+	b.dataset.metaWhere = where;
+	b.title = "Rename or archive";
+	b.setAttribute("aria-label", `Actions: ${titleOf(c)}`);
+	b.setAttribute("aria-haspopup", "menu");
+	// With the metadata unreadable the current name/archive state is unknown: no guessed actions.
+	b.disabled = metaState === "unavailable";
+	if (metaState === "unavailable") b.title = "Names and archive state are unavailable right now";
+	// Busy = aria-disabled, not `disabled`: a disabled button cannot keep the keyboard focus.
+	markBusy(b, c.sessionId);
+	b.addEventListener("click", () => {
+		if (metaBusy.has(c.sessionId)) return;
+		metaFocusWhere = where;
+		openMetaMenu(c.sessionId, b);
+	});
+	return b;
+}
+
+function markBusy(b: HTMLElement, cid: string): void {
+	if (!metaBusy.has(cid)) return;
+	b.setAttribute("aria-disabled", "true");
+	b.classList.add("busy");
+}
+
+/** Back to this conversation's ⋯ where the action started (after any dialog's own focus return). */
+function refocusMeta(cid: string): void {
+	const where = metaFocusWhere;
+	setTimeout(() => {
+		const target =
+			document.querySelector<HTMLElement>(
+				`[data-meta-cid="${CSS.escape(cid)}"][data-meta-where="${where}"]`,
+			) ?? document.querySelector<HTMLElement>(`[data-meta-cid="${CSS.escape(cid)}"]`);
+		if (target && target.offsetParent !== null && !isFocusInDialog()) target.focus();
+	}, 0);
+}
+
+function isFocusInDialog(): boolean {
+	return document.activeElement?.closest(".modal.open") != null;
+}
+
+function openMetaMenu(cid: string, opener: HTMLElement): void {
+	const c = rowOf(cid);
+	if (!c) return;
+	const custom = c.customTitle?.trim() || null;
+	const auto = automaticTitle(c);
+	openActionMenu({
+		title: titleOf(c),
+		opener,
+		items: [
+			{ id: "rename", label: "Rename…", hint: custom ? undefined : "Give it your own name" },
+			{
+				id: "restore",
+				label: "Restore automatic title",
+				hint: auto ? `“${auto}”` : "No automatic title yet",
+				enabled: custom !== null,
+				reason: "It already shows the automatic title",
+			},
+			isArchived(c)
+				? { id: "unarchive", label: "Unarchive", hint: "Back to Active" }
+				: { id: "archive", label: "Archive", hint: "Hide from Active; nothing is deleted" },
+		],
+		onPick: (id) => {
+			if (id === "rename") void renameConversation(cid);
+			else if (id === "restore")
+				void applyMeta(cid, { title: null }, "Automatic title restored").then(
+					(f) => f !== null && showToast(f, true),
+				);
+			else if (id === "archive" || id === "unarchive") void setArchived(c, id === "archive");
+		},
+	});
+}
+
+async function renameConversation(cid: string): Promise<void> {
+	const c = rowOf(cid);
+	if (!c) return;
+	const auto = automaticTitle(c);
+	await promptDialog({
+		title: "Rename conversation",
+		message: auto
+			? `Your name is shown instead of the automatic title (“${auto}”). Leave it empty to go back to the automatic title.`
+			: "Your name is shown instead of the automatic title. Leave it empty to go back to the automatic title.",
+		label: "Name",
+		placeholder: auto ?? "Conversation name",
+		initialValue: c.customTitle ?? "",
+		confirmLabel: "Save",
+		// §6.2: a button back to the automatic title, in the dialog itself.
+		alternate: auto ? { label: "Use automatic title", value: "" } : undefined,
+		validate: (v) => (v === "" ? null : titleProblem(v)),
+		// The dialog stays open until the server answered: a refusal is explained where it was typed.
+		onConfirm: (v) =>
+			applyMeta(
+				cid,
+				{ title: v === "" ? null : v },
+				v === "" ? "Automatic title restored" : "Renamed",
+			),
+	});
+}
+
+async function setArchived(c: ConversationSummary, archived: boolean): Promise<void> {
+	const failure = await applyMeta(c.sessionId, { archived }, archived ? "Archived" : "Unarchived");
+	if (failure !== null) showToast(failure, true);
+}
+
+/**
+ * One rename/archive request. Not optimistic: the row changes when the
+ * server answered, with what it answered. Resolves null on success, else
+ * the explanation (the caller shows it inline or as a toast).
+ */
+async function applyMeta(
+	cid: string,
+	patch: { title?: string | null; archived?: boolean },
+	done: string,
+): Promise<string | null> {
+	const sid = stateSessionId;
+	// Never "success" without a request: the rename dialog would close as saved.
+	if (sid === null) return "No session is open.";
+	if (metaBusy.has(cid))
+		return "Another change to this conversation is still in progress. Try again in a moment.";
+	const gen = generation;
+	metaBusy.add(cid);
+	renderList();
+	renderThreadHead();
+	const r = await patchConversationMeta(sid, cid, patch);
+	if (gen !== generation)
+		return "The session changed while saving; check the list of that session.";
+	metaBusy.delete(cid);
+	if (!r.ok) {
+		renderList();
+		renderThreadHead();
+		// The write may have landed: re-read instead of guessing.
+		if (metaOutcomeUnknown(r.status, r.code)) void loadList({ quiet: true });
+		refocusMeta(cid);
+		return explainMetaError(r.status, r.code);
+	}
+	// Recorded whether or not the row is in view (the list may be reloading right now):
+	// a list request that left before this answer must not bring the old state back.
+	metaOverlay.record(r.summary, listReq);
+	const row = rowOf(cid);
+	if (row) {
+		// Only the owner's fields: status/binding come from the capture, and a
+		// list or socket frame newer than this answer may already be applied.
+		row.title = r.summary.title;
+		row.customTitle = r.summary.customTitle ?? null;
+		row.archivedAt = r.summary.archivedAt ?? null;
+	}
+	renderSummary();
+	renderThreadHead();
+	renderList();
+	if (announcer) announcer.textContent = `${done}: ${displayTitle(r.summary)}`;
+	// The list re-rendered under the person's focus: put it back on this conversation's ⋯ where
+	// the action started. A macrotask, so it runs after a dialog's own close/focus-return.
+	refocusMeta(cid);
+	return null;
 }
 
 // Roving keyboard navigation over the rows (↑ ↓ Home End); Enter/Space open, as buttons do.
@@ -906,7 +1210,18 @@ function renderThreadHead(): void {
 	const head = threadEl.querySelector<HTMLElement>(".chat-thread-head");
 	const c = selected();
 	if (!head || !c) return;
+	// Status frames rebuild the header: keep the keyboard on its ⋯ / Agents button.
+	const a = document.activeElement;
+	const sel =
+		a instanceof HTMLElement && head.contains(a)
+			? a.dataset.metaWhere === "head"
+				? '[data-meta-where="head"]'
+				: a.classList.contains("chat-agents-btn")
+					? ".chat-agents-btn"
+					: null
+			: null;
 	head.replaceChildren(...threadHeadChildren(c));
+	if (sel) head.querySelector<HTMLElement>(sel)?.focus();
 }
 
 function threadHeadChildren(c: ConversationSummary): HTMLElement[] {
@@ -914,6 +1229,10 @@ function threadHeadChildren(c: ConversationSummary): HTMLElement[] {
 	const title = el("div", "chat-thread-title");
 	title.appendChild(el("span", "chat-thread-name", titleOf(c)));
 	const bits: string[] = [];
+	const auto = automaticTitle(c);
+	if (c.customTitle?.trim() && auto && auto !== c.customTitle.trim())
+		bits.push(`automatic title: ${auto}`);
+	if (isArchived(c)) bits.push("archived");
 	if (c.kind === "headless" || c.kind === "teammate") bits.push(c.kind);
 	if (c.claudeVersion) bits.push(`Claude Code ${c.claudeVersion}`);
 	bits.push(`${c.eventsCount} events`);
@@ -938,6 +1257,7 @@ function threadHeadChildren(c: ConversationSummary): HTMLElement[] {
 		right.appendChild(b);
 	}
 	right.appendChild(liveDot());
+	right.appendChild(metaMenuButton(c, "head"));
 	out.push(right);
 	return out;
 }
