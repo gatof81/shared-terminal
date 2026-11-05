@@ -1015,10 +1015,14 @@ export class ConversationService {
 	 * Bind a teammate / unknown conversation to `pane` only if no live
 	 * conversation holds it. Evicted peers are read from their index SNAPSHOT
 	 * (peekIndex — no events-file scan, nothing made resident, nothing else
-	 * evicted; eviction writes the snapshot, so it is current); a missing or
-	 * unreadable one counts as a holder (fail closed: unbound). Resident
-	 * holders are re-checked at the write; a stop since the event (start
+	 * evicted; while an eviction's snapshot write is in flight it answers from
+	 * the entry being written); a missing or unreadable one counts as a holder
+	 * (fail closed: unbound). Resident holders are re-checked at the write,
+	 * and a peer skipped as resident that G4 evicted meanwhile cancels the
+	 * bind (it was checked by neither path); a stop since the event (start
 	 * generation changed) cancels it; an evicted holder that is over lets go.
+	 * A cancelled bind is retried by the conversation's next event (every
+	 * `!paneId` path does).
 	 */
 	private async bindIfStillFree(
 		stSessionId: string,
@@ -1027,9 +1031,13 @@ export class ConversationService {
 		gen: number,
 	): Promise<void> {
 		const overHolders: ConvRuntime[] = [];
+		const skippedResident: ConvRuntime[] = [];
 		for (const other of [...this.runtime.values()]) {
 			if (other.stSessionId !== stSessionId || other.cid === cid) continue;
-			if (this.deps.store.getResidentIndex(other.stSessionId, other.cid)) continue;
+			if (this.deps.store.getResidentIndex(other.stSessionId, other.cid)) {
+				skippedResident.push(other);
+				continue;
+			}
 			const snap = await this.deps.store.peekIndex(other.stSessionId, other.cid);
 			if (snap === null) return;
 			if (snap.paneId !== pane) continue;
@@ -1037,8 +1045,9 @@ export class ConversationService {
 			overHolders.push(other);
 		}
 		if (this.startGenOf(stSessionId) !== gen) return;
-		// Not resident any more: unbound for now; its next event from the pane
-		// retries (every `!paneId` path does).
+		for (const other of skippedResident) {
+			if (!this.deps.store.getResidentIndex(other.stSessionId, other.cid)) return;
+		}
 		let bound = false;
 		const applied = this.deps.store.update(stSessionId, cid, (i) => {
 			if (i.paneId !== null || i.kind === "interactive" || i.kind === "headless") return;

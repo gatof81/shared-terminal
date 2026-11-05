@@ -1102,20 +1102,22 @@ describe("v1.8.5 — who may hold a pane (§5.2): resume, takeover and the child
 			await vi.advanceTimersByTimeAsync(SESSION_END_GRACE_MS + 1);
 			await store.flush("s1", "done");
 			await store.close("s1", "done");
-			await service.ingest(
-				"s1",
-				"%0",
-				hook("UserPromptSubmit", { prompt: "x", prompt_id: "pz" }, "late"),
-			);
-			await vi.advanceTimersByTimeAsync(20);
+		} finally {
+			vi.useRealTimers();
+		}
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "x", prompt_id: "pz" }, "late"),
+		);
+		// The release of the evicted holder is real disk I/O: wait for the outcome.
+		await vi.waitFor(async () => {
 			await store.flush("s1", "late");
 			await store.flush("s1", "done");
 			// One holder: the ended one let go (state kept — not a binding_lost).
 			expect(await panes()).toMatchObject({ late: "%0", done: null });
-			expect((await state("done"))?.status).toBe("ended");
-		} finally {
-			vi.useRealTimers();
-		}
+		});
+		expect((await state("done"))?.status).toBe("ended");
 	});
 
 	it("a resident holder that has ended lets go when an unknown binds the pane: one holder", async () => {
@@ -1175,9 +1177,17 @@ describe("v1.8.5 — who may hold a pane (§5.2): resume, takeover and the child
 		).toBeNull();
 	});
 
-	it("G4: an interactive conversation that binds while an unknown's disk check is pending wins — one holder", async () => {
-		// Reads of `ev`'s index can be held, so the unknown's bind waits on it.
+	/**
+	 * A live evicted peer `ev` on ANOTHER pane (%9) whose index reads are held
+	 * until the returned release: an unknown's bind on %0 then waits on that
+	 * read and, the peer not holding %0, reaches the checks at the write.
+	 */
+	async function evictedPeerOnOtherPane(
+		before?: () => Promise<void>,
+		{ firstReadOnly = false } = {},
+	): Promise<() => void> {
 		let gate: Promise<void> = Promise.resolve();
+		let armed = false;
 		const gated: StoreFs = {
 			mkdir: (p, o) => fs.mkdir(p, o),
 			appendFile: (p, d) => fs.appendFile(p, d),
@@ -1186,7 +1196,10 @@ describe("v1.8.5 — who may hold a pane (§5.2): resume, takeover and the child
 			rm: (p, o) => fs.rm(p, o),
 			stat: (p) => fs.stat(p),
 			readFile: async (p, e) => {
-				if (String(p) === store.indexPath("s1", "ev")) await gate;
+				if (armed && String(p) === store.indexPath("s1", "ev")) {
+					if (firstReadOnly) armed = false;
+					await gate;
+				}
 				return fs.readFile(p, e);
 			},
 			readdir: (p) => fs.readdir(p),
@@ -1194,15 +1207,84 @@ describe("v1.8.5 — who may hold a pane (§5.2): resume, takeover and the child
 		await service.shutdown();
 		store = new ConversationStore({ workspaceRoot: root, now: () => now, fs: gated });
 		service = makeService();
-		// An evicted peer (ended, its own pane gone) makes the unknown's bind async.
-		await interactiveIn("ev");
-		await service.ingest("s1", "%0", hook("SessionEnd", { reason: "clear" }, "ev"));
+		session("s1");
+		await before?.();
+		await service.ingest(
+			"s1",
+			"%9",
+			hook("SessionStart", { source: "startup", st: { pane: "%9", tmux_session: "tab-9" } }, "ev"),
+		);
 		await store.flush("s1", "ev");
 		await store.close("s1", "ev");
 		let release!: () => void;
 		gate = new Promise<void>((r) => {
 			release = r;
 		});
+		armed = true;
+		return release;
+	}
+
+	it("G4: a stop while an unknown's disk check is pending cancels its bind (the pane belongs to the old start)", async () => {
+		// Only the unknown's read is held: the stop completes (its own release
+		// included) before that read lands, so only the generation check stops it.
+		const release = await evictedPeerOnOtherPane(undefined, { firstReadOnly: true });
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "x", prompt_id: "pu" }, "orphan"),
+		);
+		// Watch every write to `orphan` from the stop on: none may bind it to %0.
+		const seen: (string | null)[] = [];
+		const update = store.update.bind(store);
+		vi.spyOn(store, "update").mockImplementation((sid, cid, fn) => {
+			const r = update(sid, cid, fn);
+			if (cid === "orphan") seen.push(store.getResidentIndex(sid, cid)?.paneId ?? null);
+			return r;
+		});
+		await service.onSessionDown("s1");
+		// The next start: the conversation is loaded again by an event with no pane.
+		session("s1");
+		await service.ingest("s1", undefined, hook("Notification", { message: "m" }, "orphan"));
+		release();
+		await new Promise((r) => setTimeout(r, 20));
+		expect(seen).not.toContain("%0");
+		await store.flush("s1", "orphan");
+		expect((await panes()).orphan).toBeNull();
+	});
+
+	it("G4: a peer evicted while an unknown's disk check is pending cancels the bind (fail closed); the next event retries", async () => {
+		// `r` is resident (skipped by the disk loop) and checked before `ev`.
+		const release = await evictedPeerOnOtherPane(async () => {
+			await service.ingest(
+				"s1",
+				"%5",
+				hook("SessionStart", { source: "startup", st: { pane: "%5", tmux_session: "tab-5" } }, "r"),
+			);
+		});
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "x", prompt_id: "pu" }, "orphan"),
+		);
+		await store.flush("s1", "r");
+		await store.close("s1", "r"); // evicted during the pending check: seen by neither path
+		release();
+		await new Promise((r) => setTimeout(r, 20));
+		await store.flush("s1", "orphan");
+		expect((await panes()).orphan).toBeNull();
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "y", prompt_id: "pu2" }, "orphan"),
+		);
+		await vi.waitFor(async () => {
+			await store.flush("s1", "orphan");
+			expect((await panes()).orphan).toBe("%0");
+		});
+	});
+
+	it("G4: an interactive conversation that binds while an unknown's disk check is pending wins — one holder", async () => {
+		const release = await evictedPeerOnOtherPane();
 		await service.ingest(
 			"s1",
 			"%0",
