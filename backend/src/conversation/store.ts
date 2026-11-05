@@ -814,7 +814,11 @@ export class ConversationStore {
 		const next = prev.catch(() => undefined).then(() => this.writeIndexNow(r));
 		this.indexWrites.set(key, next);
 		const done = () => {
-			if (this.indexWrites.get(key) === next) this.indexWrites.delete(key);
+			if (this.indexWrites.get(key) !== next) return;
+			this.indexWrites.delete(key);
+			// The last write of a leaving entry landed, whoever queued it (an
+			// eviction, a flush timer, a flush): it no longer needs to answer.
+			if (this.evicting.get(key) === r) this.evicting.delete(key);
 		};
 		void next.then(done, done);
 		return next;
