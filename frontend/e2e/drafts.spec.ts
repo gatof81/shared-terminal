@@ -1,5 +1,7 @@
 import { expect, test } from "./fixtures.js";
+import { SESSION_IDS } from "./mockBackend.js";
 
+const S = SESSION_IDS.running;
 const CONV = "Refactor auth flow";
 
 test.describe("composer drafts", () => {
@@ -16,11 +18,9 @@ test.describe("composer drafts", () => {
 		await expect(ta).toBeEnabled();
 		await ta.fill("Half-written thought");
 
-		await page.reload();
-		await expect(page.locator("#app-view")).toBeVisible();
-		await app.openSession("my-project");
-		await app.switchView("chat");
-		await page.locator("#chat-list .chat-conv-row", { hasText: CONV }).click();
+		// A fresh page on that conversation (on a phone, chat-first already
+		// reopens it in place, so the list row is not the way back).
+		await app.login("alice", `#/sessions/${S}/chat/conv-1`);
 		await expect(ta).toHaveValue("Half-written thought");
 		// Restored as text only: nothing was sent.
 		expect(backend.requests.some((r) => r.method === "POST" && r.path.endsWith("/messages"))).toBe(
@@ -30,11 +30,8 @@ test.describe("composer drafts", () => {
 		await ta.fill("Half-written thought, finished.");
 		await page.locator(".chat-send").click();
 		await expect(ta).toHaveValue("");
-		await page.reload();
-		await expect(page.locator("#app-view")).toBeVisible();
-		await app.openSession("my-project");
-		await app.switchView("chat");
-		await page.locator("#chat-list .chat-conv-row", { hasText: CONV }).click();
+		await app.login("alice", `#/sessions/${S}/chat/conv-1`);
+		await expect(ta).toBeEnabled();
 		await expect(ta).toHaveValue("");
 	});
 
