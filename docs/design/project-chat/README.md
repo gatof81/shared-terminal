@@ -35,6 +35,7 @@ aplicadas a 01, 02, 03, 05 y 06 (R10–R15 en 02 §9). Los gates de Channels no 
 | [02-architecture-rfc.md](./02-architecture-rfc.md) | Evidencia sobre Channels, alternativas, componentes, fallos, seguridad, decisiones |
 | [03-protocol.md](./03-protocol.md) | Identidades, persistencia, estados de entrega, API, límites, recuperación |
 | [04-poc.md](./04-poc.md) | POC aislada con un agente y criterios GO / NO-GO fijados de antemano |
+| [10-g3-sender-identity.md](./10-g3-sender-identity.md) | **Informe (2026-11-05), sin implementar**: G3 dividido en emisor, vínculo, enrutamiento y aceptación; estado real con evidencia en `main`; riesgos (token *bearer* sin ligadura de origen); propuesta de tres factores; invariantes I-1–I-10; matriz de pruebas; plan PR-G3-0/1/2 |
 | [09-launch-trust.md](./09-launch-trust.md) | Raíz de confianza del lanzamiento del CLI (diseño previo a B2; sin implementar): por qué leer `/proc` no alcanza, opciones L0–L3 y recomendación |
 | [08-host-chat-guests.md](./08-host-chat-guests.md) | **Aprobada (2026-11-03), ya aplicada**: registro de la propuesta de conversación individual por agente con invitados temporales vía `@menciones` (D1–D6; D3 modificada con el modo Colaboración) |
 | [05-roadmap.md](./05-roadmap.md) | Fases y PRs independientes, dependencias, riesgos |
