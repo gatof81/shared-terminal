@@ -1868,8 +1868,10 @@ function agentCard(a: AgentView): HTMLElement {
 	if (a.failedToolIds.size > 0) bits.push(`${a.failedToolIds.size} failed`);
 	const started = new Date(a.startedAt).getTime();
 	const ended = a.endedAt ? new Date(a.endedAt).getTime() : Date.now();
+	// Without an end event the span to now is not a run time (the end may
+	// just be missing): say when it started instead.
 	if (!Number.isNaN(started) && !Number.isNaN(ended) && ended >= started)
-		bits.push(duration(ended - started));
+		bits.push(a.endedAt ? duration(ended - started) : `started ${duration(ended - started)} ago`);
 	const metaLine = el("div", "chat-agent-meta", bits.join(" · "));
 	if (a.failedToolIds.size > 0) metaLine.classList.add("has-failed");
 	li.appendChild(metaLine);
@@ -1885,7 +1887,7 @@ function agentCard(a: AgentView): HTMLElement {
 		r.appendChild(markdown(result));
 		li.appendChild(r);
 	} else if (a.status === "running") {
-		li.appendChild(el("div", "chat-note", "Working — result not available yet."));
+		li.appendChild(el("div", "chat-note", "No end reported yet, so no result to show."));
 	}
 	return li;
 }
