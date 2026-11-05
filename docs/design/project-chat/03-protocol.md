@@ -40,6 +40,17 @@ Invariante: un mensaje se dirige a `agent_id` **dentro de un `chat_id`**, y cada
 al `participation_id` vigente del destinatario. `endpoint_id`, `claude_pid` y `cid` son evidencia de
 entrega, nunca destino elegido por el cliente.
 
+**Principal y vínculo (G3.1–G3.2, [10-g3-sender-identity.md](./10-g3-sender-identity.md)).** El principal
+autenticado de un agente es **su sesión, es decir el contenedor de esa sesión**, nunca el modelo ni
+un proceso concreto: "lo escribió el agente A" significa "lo envió el contenedor de la sesión de A".
+El **vínculo vigente** es la tupla (`agent_id`, `project_id`, `st_session_id`, `container_id`), con la
+fila activa de `project_agents` como época. v1 no reasigna una sesión en el lugar: reasignar es quitar
+el agente y crear otro, con un `agent_id` nuevo. Si una versión futura permite cambiar la sesión de un
+agente existente, *MUST* agregar `binding_epoch` y la regla de §6.1 sobre entregas en vuelo. Toda
+evidencia (hook, `transported`, post) se evalúa contra el vínculo vigente; la de un vínculo anterior se
+registra y no cambia estados del agente nuevo. Ningún campo del cuerpo (`from`, `source`, handle,
+`author`, etiquetas, texto, `@`) aporta identidad.
+
 ## 2. Persistencia
 
 ### 2.1 D1 (metadatos, migración append-only)
@@ -421,7 +432,7 @@ con el Terminal y está marcada.
 | --- | --- | --- |
 | `POST` | `/api/projects` | `{name}` → `{projectId}` |
 | `GET` | `/api/projects` | lista del owner |
-| `POST` | `/api/projects/:pid/agents` | `{handle, sessionId}` → 201; 409 `session-taken` / `handle-taken`; la sesión debe ser del owner |
+| `POST` | `/api/projects/:pid/agents` | `{handle, sessionId}` → 201; 409 `session-taken` / `handle-taken`; 409 `previous-agent-in-flight` si la sesión tuvo un agente anterior con entregas no terminales (R-G6); la sesión debe ser del owner |
 | `DELETE` | `/api/projects/:pid/agents/:aid` | quita (`removed_at`); entregas no terminales ⇒ `failed{agent-removed}` |
 | `PUT` | `/api/projects/:pid/edges` | `[{from, to}]` (modo `allow`) |
 | `POST` | `/api/projects/:pid/agents/:aid/chats` | crea la conversación anfitriona de ese agente → 201 `{chatId, participantsVersion}`; 409 `host-chat-active` si ya tiene una activa (R10) |
@@ -447,8 +458,22 @@ que la conversación sea del owner (404 si no, como un `chat_id` inexistente).
 
 ### 6.2 Endpoint de canal (`/ingest/channel/*`, token de ingesta)
 
-Autenticación como `/ingest/claude/hook`: `Authorization: Bearer $ST_INGEST_TOKEN` + `X-ST-Session`
-validados contra `ingest_token_hash`. A diferencia del hook, **responde con cuerpo y códigos**: el
+Autenticación: el principal es la sesión S (§1). Cada request pasa **tres comprobaciones de
+autorización**, todas del backend (no son factores de MFA), y la primera que falla decide:
+1. `Authorization: Bearer $ST_INGEST_TOKEN` + `X-ST-Session` contra `ingest_token_hash` (como
+   `/ingest/claude/hook`) ⇒ 401 `bad-token`;
+2. **origen de red**: `req.socket.remoteAddress`, normalizada (IPv4 mapeada en IPv6 ⇒ IPv4,
+   minúsculas, sin zona), *MUST* ser la IP en `sessions-net` del `container_id` vigente de S en D1,
+   obtenida inspeccionando ese contenedor **por id** (corriendo, con ese mismo id). *MUST NOT* usar un
+   header, `req.ip`, DNS ni una IP cacheada sin el `container_id` como clave. Una identidad que no se
+   puede comprobar (inspección fallida, contenedor detenido o reemplazado, IP ausente o ambigua) ⇒
+   403 `wrong-origin`. Así un token filtrado no sirve desde el túnel, desde loopback ni desde otro
+   contenedor. Es el mismo mecanismo que CONVERSATION.md §3 aplica a la ingesta de hooks cuando su
+   bandera está activa;
+3. un **vínculo activo** de S con un agente del proyecto ⇒ 403 `not-bound`.
+
+Ninguna de las tres sustituye la evidencia de aceptación del receptor (§5, G3.4). A diferencia del
+hook, **responde con cuerpo y códigos**: el
 endpoint es nuestro proceso, no un hook del CLI.
 
 | Método | Ruta | Cuerpo | Respuesta |
@@ -461,7 +486,9 @@ endpoint es nuestro proceso, no un hook del CLI.
 | `POST` | `/ingest/channel/bye` | `{endpointId}` | 204 (retiro ordenado; el desordenado lo detecta `start_gen` o el vencimiento del poll) |
 
 `meta` que el monitor manda (claves identificador, C3): `st_msg`, `chat_id`, `participation_id` (la
-del destinatario), `from` (handle u `owner`), `from_kind` (`human`\|`agent`), `kind`, `depth`,
+del destinatario), `from_agent_id` (el `agent_id` del autor; ausente si es la persona), `from` (handle
+u `owner`, **sólo para mostrar**: un handle es renombrable y no identifica), `from_kind`
+(`human`\|`agent`), `kind`, `depth`,
 `in_reply_to?`, `collab?` (`<grant_id>:<n>/<max>` si la autoriza una Colaboración), `context?` (los
 `msg_id` citados, separados por coma). `content` = texto del mensaje; si la persona autorizó
 contexto, después del texto van los mensajes citados, cada uno con su `msg_id` y su autor, marcados
@@ -538,7 +565,9 @@ sí se garantiza:
 | Endpoint de la sesión S (cualquier proceso del contenedor de S con el token) | registrar runtimes de S; recibir mensajes del agente de S; publicar como ese agente sólo en conversaciones donde su participación está `active` y anclado a un mensaje que se le entregó ahí (`in_reply_to`); pedir invitaciones (siempre con aprobación) | leer el log de una conversación; publicar como otro agente; publicar en una conversación donde no participa (403 `not-a-participant`); dirigir a agentes de otro proyecto o que no participan; invitar sin aprobación; crear, extender o ampliar una Colaboración |
 | Agente → agente | `chat_send` a participantes activos de la misma conversación | entregar sin aprobación humana, arista `allow` entre participantes activos de esa conversación, o Colaboración viva que cubra a los dos (§3 regla 7) |
 
-**Frontera de confianza.** `ST_INGEST_TOKEN` se crea con el contenedor y sobrevive a stop/start
+**Frontera de confianza.** El principal es la sesión, es decir su contenedor (§1); las tres
+comprobaciones de §6.2 deciden si un request habla por ella. `ST_INGEST_TOKEN` se crea con el
+contenedor y sobrevive a stop/start
 (CONVERSATION.md §2.4); está en el entorno del contenedor, así que **cualquier** proceso que el
 agente ejecute puede llamar a `hello`, a `next` o falsificar un hook. `endpoint_id` no autentica.
 Consecuencia aceptada: `accepted` y `completed` significan "lo que reporta el contenedor del agente",
@@ -546,6 +575,12 @@ no una prueba de un tercero. Lo que el token **no** permite es actuar fuera de e
 proyecto, ni hablar como otro agente, ni saltarse la aprobación agente→agente, que vive en el
 backend, ni publicar en una conversación donde no participa. Un agente comprometido puede como
 mucho estropear sus propias entregas y, dentro de una Colaboración viva, gastar su presupuesto.
+**Fuera del contenedor el token solo no alcanza** (R-G1): la comprobación de origen de §6.2 rechaza un
+token filtrado que se use desde Internet (túnel), desde loopback del host o desde otro contenedor de
+`sessions-net`. **Dependencia con la captura** (R-G5): el canal usa el token de captura, así que
+desactivar o revocar la captura de una sesión (incluida la CLI de emergencia) suspende el hash y corta
+también su canal (fail-closed). Una sesión de agente *MUST* tener la captura activa, que además es la
+fuente de la evidencia de §5.
 
 ## 8. Límites
 

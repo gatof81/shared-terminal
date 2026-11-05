@@ -1,6 +1,8 @@
 # G3 — autenticidad del emisor y atribución verificable (informe técnico)
 
-Estado: **informe y propuesta, sin implementar.** Revisa el diseño de este directorio (en particular
+Estado: **informe y propuesta; decisiones del responsable (2026-11-05): PR-G3-0 GO, PR-G3-1 GO sólo
+implementación y pruebas (bandera apagada, sin merge ni deploy), PR-G3-2 NO-GO por ahora (gate del
+roadmap), G3.4 sigue bloqueado.** Revisa el diseño de este directorio (en particular
 [03-protocol.md](./03-protocol.md) §1, §2.2, §3, §5, §6 y §7, y [04-poc.md](./04-poc.md) §1.13–§1.14) y
 el código de `main` en `1ec4d6c`. No cambia R1–R15, G1–G12 ni el roadmap; donde propone un cambio de
 contrato, lo dice. No toca UI, Composer, F1/F2/N14/N17, VM100 ni el kit auditado.
@@ -21,9 +23,11 @@ contrato, lo dice. No toca UI, Composer, F1/F2/N14/N17, VM100 ni el kit auditado
   revocación). Tiene una debilidad que importa poco para la captura y mucho para un canal entre
   agentes: **el token es la única barrera**. No se verifica el origen de red, y según la receta de
   despliegue documentada la ruta es alcanzable a través del túnel público.
-- **Propuesta mínima:** el emisor agente se autentica con tres factores, todos verificados por el
-  backend: token de la sesión, origen de red igual al contenedor vigente de esa sesión en
-  `sessions-net`, y vínculo activo agente↔sesión en D1. La autoría la estampa el backend y nunca sale
+- **Propuesta mínima:** el principal autenticado es **la sesión, es decir su contenedor**, no el
+  modelo. Un request de agente se acepta sólo si pasa **tres comprobaciones de autorización**, todas
+  hechas por el backend (no son factores de MFA): el token de la sesión, que el origen de red
+  (`req.socket.remoteAddress`) sea la IP del `container_id` vigente de esa sesión en `sessions-net`,
+  y que la sesión tenga un vínculo activo con un agente en D1. La autoría la estampa el backend y nunca sale
   del cuerpo. La aceptación (G3 original) sigue siendo un gate aparte, y mientras no se cumpla ningún
   resultado de entrega se presenta como verificado.
 - **PR pequeño posible ahora, independiente del smoke y de la UI:** atar `/ingest/*` al origen de red
@@ -71,7 +75,7 @@ propuesta no lo reemplaza: sin G3.4 una entrega nunca pasa de "el contenedor des
 | **R-G3** | `meta.from` lleva un `handle`, que es renombrable | Media | 03 §6.2 manda `from` (handle u `owner`). Con renombres o intercambio de nombres, el modelo receptor puede confundir quién le habló antes y quién ahora. La identidad para el modelo debe ser `from_agent_id` (estable), y el handle sólo un dato a mostrar |
 | **R-G4** | El registro del runtime (`hello`) es autodeclarado | Media, contenida | `claudePid` y `claudeStartTime` los informa `st-channel`, un proceso del contenedor. Basta para enrutar (no puede salir de su sesión) y el monitor lo correlaciona con probes, pero no prueba qué proceso es. La prueba fuerte es la del socket Unix con credenciales del par (PASS-B0), que todavía es investigación |
 | **R-G5** | El canal hereda el ciclo de vida del token de captura | Baja, pero sin contrato | Desactivar la captura o revocarla (CLI de emergencia) suspende el hash (`registry.ts:93,125,132`) y por lo tanto corta también el canal. Es fail-closed y deseable, pero el contrato del canal tiene que decirlo, y también que una sesión de agente exige la captura activa |
-| **R-G6** | Reasignar una sesión a otro agente | Media | 03 §2.1 permite quitar un agente y asociar la misma sesión a otro. El mismo contenedor, con el mismo token y el mismo CLI, puede tener entregas en vuelo o hooks tardíos del agente anterior. Hace falta un **vínculo con época** y la regla de no reasignar mientras haya entregas no terminales del agente anterior |
+| **R-G6** | Reasignar una sesión a otro agente | Media | 03 §2.1 permite quitar un agente y asociar la misma sesión a otro. El mismo contenedor, con el mismo token y el mismo CLI, puede tener entregas en vuelo o hooks tardíos del agente anterior. Hace falta evaluar toda evidencia contra el **vínculo vigente** (la fila activa de `project_agents`) y la regla de no reasignar mientras haya entregas no terminales del agente anterior |
 | **R-G7** | Aceptación y resultado informados por el propio destinatario | Aceptado, hay que mostrarlo | Hasta G3.4, `accepted` y `completed` son lo que **informa el contenedor destino** (03 §7). Un agente comprometido puede falsear su propia finalización, pero no la de otro agente. La UI no debe presentarlo como verificado por un tercero |
 | **R-G8** | Gate del roadmap | Proceso | 05: "Nada de P2 en adelante empieza sin el GO de la POC". Un PR que cree el modelo de Project Chat necesita que el responsable lo autorice explícitamente |
 
@@ -82,7 +86,7 @@ propuesta no lo reemplaza: sin G3.4 una entrega nunca pasa de "el contenedor des
 | Principal | Credencial | Autoridad que lo verifica | Lo que **nunca** cuenta como identidad |
 | --- | --- | --- | --- |
 | Persona (owner del proyecto) | Cookie JWT `st_token` (`requireAuth`) | Backend; owner-only, admin/lead 404 (R5) | cualquier campo del cuerpo |
-| Agente A | (1) `ST_INGEST_TOKEN` de su sesión S, (2) conexión desde la IP vigente del contenedor de S en `sessions-net`, (3) vínculo activo A↔S en D1 | Backend; el vínculo lo escribe sólo el owner por REST, y el contenedor y el token los fija el backend al crear el contenedor | `source`, `from`, nombre, handle, etiqueta `<channel …>`, `@mención`, `endpointId`, `claudePid` |
+| Agente A (principal autenticado: la sesión S, o sea su contenedor) | Comprobaciones de autorización, no factores: (1) `ST_INGEST_TOKEN` de S; (2) `req.socket.remoteAddress` = IP del `container_id` vigente de S en `sessions-net`; (3) vínculo activo A↔S en D1 | Backend; el vínculo lo escribe sólo el owner por REST, y el contenedor y el token los fija el backend al crear el contenedor | `source`, `from`, nombre, handle, etiqueta `<channel …>`, `@mención`, `endpointId`, `claudePid` |
 | Runtime (instancia de ejecución) de A | Ninguna propia: es evidencia, no identidad (03 §1) | Correlación del monitor (`start_gen`, probe, pane) | — |
 
 Regla general: **todo lo que llega en el cuerpo es declarado; sólo lo que el backend deriva de la
@@ -99,14 +103,14 @@ sequenceDiagram
   participant L as Log de la conversación (fsync)
   participant B as Contenedor de B (st-channel + CLI)
   A->>BE: POST /ingest/channel/post {clientMessageId, to:[handle], text, inReplyTo}<br/>Bearer token + X-ST-Session=S_A
-  BE->>BE: (1) token ↔ hash de S_A · (2) remoteAddress = IP vigente de st-<S_A> en sessions-net
+  BE->>BE: (1) token ↔ hash de S_A · (2) req.socket.remoteAddress = IP del container_id vigente de S_A en sessions-net
   BE->>D1: (3) agente activo de S_A ⇒ A (agent_id, project) · época del vínculo
   BE->>BE: inReplyTo entregado a A en el chat C · participación de A activa
   BE->>BE: to: handles ⇒ agent_ids entre participantes activos de C, mismo proyecto
   BE->>BE: autorización: approval / edge / collab vivo (nunca por @ ni por texto)
   BE->>L: message{author:{kind:agent, agent_id:A, participation_id, binding}} + delivery{queued|awaiting_approval}
   BE-->>A: 202 {msgId, deliveries}
-  B->>BE: GET /ingest/channel/next (mismos 3 factores, para S_B)
+  B->>BE: GET /ingest/channel/next (mismas 3 comprobaciones, para S_B)
   BE->>BE: elegibilidad (03 §4) + re-chequeo de participación y autorización bajo lock
   BE->>L: delivery{transporting, lease_id, endpoint_id, start_gen}
   BE-->>B: 200 {leaseId, msgId, content, meta{from_agent_id, from (display), from_kind:agent, …}}
@@ -144,17 +148,19 @@ flowchart LR
 Confiables: kernel y Docker del host, backend, D1, los logs del host y el owner. No confiable: todo
 lo que corre dentro de cualquier contenedor de sesión, incluidos el modelo, sus herramientas,
 servidores MCP y `st-channel` (es nuestro código, pero corre donde el agente tiene código arbitrario
-como el mismo uid, 04 §1.14.2). Supuesto verificable que hace válido el factor (2): los contenedores
+como el mismo uid, 04 §1.14.2). Supuesto verificable que hace válida la comprobación (2): los contenedores
 corren con `CapDrop: ALL` y `no-new-privileges` (`dockerManager.ts:1002,1018`). Sin `NET_RAW` ni
 `NET_ADMIN` no pueden falsificar ni cambiar su IP de origen en el bridge.
 
 ### 4.4 Vínculo agente ↔ proyecto ↔ sesión ↔ instancia, y su ciclo de vida
 
-El vínculo verificado es la tupla **(`agent_id`, `project_id`, `st_session_id`, `container_id`,
-`binding_epoch`)**, más `start_gen` como generación de ejecución:
+El vínculo verificado es la tupla **(`agent_id`, `project_id`, `st_session_id`, `container_id`)**,
+más `start_gen` como generación de ejecución:
 - `container_id` sale de D1 `sessions` (lo escribe el backend antes de `start()`);
-- `binding_epoch` es nuevo: un entero por fila de `project_agents`, que se incrementa cada vez que la
-  sesión se asocia a un agente;
+- la **época del vínculo es la fila activa de `project_agents`**: v1 no reasigna una sesión en el
+  lugar (reasignar es quitar el agente y crear otro, con un `agent_id` nuevo), así que no hace falta
+  una columna. Si una versión futura permite cambiar la sesión de un agente existente, tiene que
+  agregar `binding_epoch` y la misma regla de no reasignar con entregas en vuelo;
 - `start_gen` lo lleva el servicio de conversación en memoria.
 
 | Evento | Token | Contenedor / IP | `start_gen` | Vínculo A↔S | Qué pasa con lo que estaba en vuelo |
@@ -164,17 +170,19 @@ El vínculo verificado es la tupla **(`agent_id`, `project_id`, `st_session_id`,
 | Recreación (3.0d) | **rota** | **nuevo** `container_id`, nueva IP | +1 | igual: la sesión sigue siendo la misma | lo del contenedor anterior se rechaza por token y por origen; entregas como en una parada (03 §9.3) |
 | Reinicio del backend | igual | igual | memoria perdida | igual (D1) | `uncertain{orphaned}`; 410 a los endpoints ⇒ `hello` (03 §9.1) |
 | Quitar el agente | — | — | — | `removed_at` | no terminales ⇒ `failed{agent-removed}` / `cancelled`; posts de S ⇒ 403 |
-| Reasignar la sesión a otro agente A' | igual | igual | igual | **época nueva** | **rechazado (409 `previous-agent-in-flight`) mientras haya entregas no terminales del agente anterior**; una vez permitido, todo hook o post se evalúa contra la época vigente y nada se atribuye a A' por haber sido de A |
+| Reasignar la sesión a otro agente A' (quitar A, crear A') | igual | igual | igual | **vínculo nuevo** (`agent_id` de A') | **rechazado (409 `previous-agent-in-flight`) mientras haya entregas no terminales del agente anterior**; una vez permitido, todo hook o post se evalúa contra el vínculo vigente y nada se atribuye a A' por haber sido de A |
 | Hard delete de la sesión | — | — | — | — | 409 `agent-active` mientras sea un agente activo (03 §2.1) |
 
 ### 4.5 Invariantes (*MUST*, verificados por test)
 
 1. **I-1 Identidad sólo derivada.** El autor de un mensaje es `user:<id>` del JWT o el `agent_id`
-   resuelto por los tres factores. Ningún campo del cuerpo (`from`, `source`, `handle`, `author`,
+   resuelto por las tres comprobaciones. Ningún campo del cuerpo (`from`, `source`, `handle`, `author`,
    texto, etiquetas, `@`) participa en la autenticación ni en la autoría.
-2. **I-2 Tres factores para un agente.** Un request de `/ingest/channel/*` se acepta sólo si el token
-   coincide con el hash de S, **el origen de red es la IP vigente del contenedor de S en
-   `sessions-net`**, y S tiene un vínculo activo con un agente. Cualquier fallo responde 401/403 (el
+2. **I-2 Tres comprobaciones para un agente.** Un request de `/ingest/channel/*` se acepta sólo si
+   el token coincide con el hash de S, **`req.socket.remoteAddress` (normalizada) es la IP del
+   `container_id` vigente de S en `sessions-net`** (nunca un header, `req.ip` ni un dato del cliente),
+   y S tiene un vínculo activo con un agente. Una identidad que no se puede comprobar (inspección
+   fallida, contenedor detenido o reemplazado, IP ausente o ambigua) es un rechazo. Cualquier fallo responde 401/403 (el
    canal sí contesta con códigos, 03 §6.2), y nunca se escribe nada.
 3. **I-3 Sin cruce de proyecto.** El emisor, cada destinatario y la conversación son del mismo
    `project_id`. Se comprueba en el `post` **y otra vez** en el préstamo.
@@ -188,8 +196,9 @@ El vínculo verificado es la tupla **(`agent_id`, `project_id`, `st_session_id`,
 7. **I-7 Idempotencia y replay.** Clave del mensaje = (`author`, `client_message_id`) (03 §2.2); un
    reenvío con la misma clave devuelve la misma respuesta y no crea otro mensaje. Un `lease_id` se usa
    una vez; un `endpoint_id` de un `start_gen` anterior recibe 410.
-8. **I-8 Época del vínculo.** Toda evidencia (hook, `transported`, post) se evalúa contra la época
-   vigente; lo de una época anterior se registra como evidencia y no cambia estados del agente nuevo.
+8. **I-8 Vínculo vigente.** Toda evidencia (hook, `transported`, post) se evalúa contra el vínculo
+   vigente de la sesión; lo de un vínculo anterior se registra como evidencia y no cambia estados del
+   agente nuevo.
 9. **I-9 Desconocido no es éxito.** Sin G3.4, una entrega nunca llega a `accepted`/`completed`
    verificado; `uncertain`/`unconfirmed` no disparan reintento automático (03 §3 reglas 1 y 2b).
 10. **I-10 Fail-closed ante el estado del canal.** Captura desactivada o revocada ⇒ token suspendido
@@ -200,7 +209,7 @@ El vínculo verificado es la tupla **(`agent_id`, `project_id`, `st_session_id`,
 | Nivel | Estado (03 §3) | Qué lo demuestra | Quién lo afirma | ¿Habilita algo? |
 | --- | --- | --- | --- | --- |
 | Persistido | `queued` / `awaiting_approval` | línea con fsync en el log | backend | nada todavía |
-| Entregado al transporte | `transporting` → `transported` | lease durable + informe del `st-channel` destino | contenedor destino (autenticado con los tres factores) | sólo la espera de aceptación |
+| Entregado al transporte | `transporting` → `transported` | lease durable + informe del `st-channel` destino | contenedor destino (con las tres comprobaciones) | sólo la espera de aceptación |
 | Aceptado por el agente | `accepted` | **G3.4**: `channel_prompt` verificado (o la alternativa B) del pane del runtime del lease | CLI destino; hoy **no hay evidencia válida** | el turno se sigue |
 | Finalizado | `completed` | `turn_end` con atribución A1–A7 (03 §3.1) | captura del destino | mostrar el informe como resultado |
 | Desconocido | `uncertain` → `unconfirmed{…}` / `ended_unattributed` | ausencia o ambigüedad de evidencia | — | **nada**: ni éxito ni reintento automático; la persona decide |
@@ -208,7 +217,7 @@ El vínculo verificado es la tupla **(`agent_id`, `project_id`, `st_session_id`,
 ## 6. Matriz de pruebas
 
 Capa: **U** = unitaria (lógica pura), **R** = ruta con fakes (supertest), **I** = integración con
-fakes de Docker/DNS, **S** = smoke real (sólo con autorización; fuera de este PR).
+fakes de Docker, **S** = smoke real (sólo con autorización; fuera de este PR).
 
 | # | Escenario adversarial | Esperado | Capa |
 | --- | --- | --- | --- |
@@ -223,7 +232,7 @@ fakes de Docker/DNS, **S** = smoke real (sólo con autorización; fuera de este 
 | T9 | Endpoint de un `start_gen` anterior (stop/start) | 410 ⇒ `hello` | U, I |
 | T10 | Petición del contenedor anterior tras una recreación (token viejo y/o IP vieja) | 401/403 | I |
 | T11 | Sesión reasignada de A a A' con entregas de A en vuelo | 409 `previous-agent-in-flight` | U |
-| T12 | Hook tardío de la época de A tras la reasignación | sólo evidencia; ningún estado de A' cambia | U |
+| T12 | Hook tardío del vínculo de A tras la reasignación | sólo evidencia; ningún estado de A' cambia | U |
 | T13 | Agente quitado con entregas en `queued` | `failed{agent-removed}`; posts 403 | U, R |
 | T14 | Agente desconectado (sin runtime) | entrega `queued`, sin préstamo, sin reintento | U |
 | T15 | Captura revocada (CLI de emergencia) | canal 401; nada se presta | U, I |
@@ -237,13 +246,13 @@ fakes de Docker/DNS, **S** = smoke real (sólo con autorización; fuera de este 
 
 | PR | Contenido | Depende de | ¿Bloqueado por el roadmap? | Tamaño |
 | --- | --- | --- | --- | --- |
-| **PR-G3-0** (docs) | Este informe más los cambios de contrato en 03: §1 (`binding_epoch`), §6.2 (factor de origen, códigos, `from_agent_id`), §7 (semántica "el contenedor del agente", R-G5, R-G6) | revisión del responsable | No (docs, PR #512) | chico |
-| **PR-G3-1** (backend) | Ligar la ingesta al origen de red del contenedor de la sesión: resolver `st-<sid12>` en `sessions-net` (el mismo DNS que usa el dispatcher), comparar con `req.socket.remoteAddress` y rechazar lo que llegue por el túnel o desde otro contenedor. Contador `ingest_rejected{wrong_origin}`, la respuesta sigue siendo 204. **Cambio previo de contrato** en CONVERSATION.md §3. Bandera `INGEST_REQUIRE_SESSION_ORIGIN` (apagada por defecto; se enciende tras verificar el despliegue). Tests T1, T2, T10 y T20 en la ruta de captura | PR-G3-0 aprobado; verificación (de lectura) de que el backend ve la IP real del contenedor en `sessions-net` | **No**: endurece la captura existente | chico (un módulo, una línea en `authorize`, tests) |
+| **PR-G3-0** (docs) | Este informe más los cambios de contrato en 03: §1 (vínculo vigente), §6.1 (409 `previous-agent-in-flight`), §6.2 (comprobación de origen, códigos, `from_agent_id`), §7 (principal = la sesión/contenedor, R-G5, R-G6) | revisión del responsable | No (docs, PR #512) | chico |
+| **PR-G3-1** (backend) | Ligar la ingesta al origen de red del contenedor de la sesión: la IP esperada sale de inspeccionar **por id** el `container_id` vigente de la sesión en D1 (debe estar corriendo, con ese mismo id, y con una IP en `sessions-net`); **no** se usa DNS. Se compara con `req.socket.remoteAddress` normalizada (IPv4 mapeada en IPv6, mayúsculas, zona), nunca con un header ni con `req.ip`, y se rechaza lo que llegue por el túnel, por loopback o desde otro contenedor, y toda identidad que no se pueda comprobar. Contador `ingest_rejected{wrong_origin}`, la respuesta sigue siendo 204. **Cambio previo de contrato** en CONVERSATION.md §3. Bandera `INGEST_REQUIRE_SESSION_ORIGIN` (apagada por defecto; con la bandera apagada la ruta no cambia y no hace ninguna inspección; se enciende sólo tras una verificación de lectura del despliegue real hecha por el operador). Tests adversariales: token de A desde la IP de B, túnel/loopback, headers falsificados (`X-Forwarded-For`, `X-Real-IP`), IPv4 mapeada en IPv6, IP reutilizada, recreación, contenedor detenido, fallo de inspección y cambios de identidad concurrentes; costo: una inspección por contenedor (single-flight y caché ligada al `container_id`, invalidada en la baja de la sesión) | PR-G3-0 aprobado; verificación (de lectura) de que el backend ve la IP real del contenedor en `sessions-net` | **No**: endurece la captura existente | chico (un módulo, una línea en `authorize`, tests) |
 | **PR-G3-2** (lógica pura, opcional) | `projectChat/principal.ts`: funciones puras de autoría, resolución de `to`, anclaje, proyecto y época, con tests de tabla (T3–T7, T11–T13, T19). Sin rutas, migración ni bandera | PR-G3-0 | **Sí**: es P3 adelantado; requiere decisión explícita | chico |
 | P3 → P8 | Lo del roadmap, ya con I-1 a I-10 como criterios de salida | GO de la POC, P2 | Sí | — |
 
 Dependencias que no se resuelven con estos PRs:
-- **G3.4** (aceptación): `source=system` en una versión validada, o la alternativa B (PASS-B1 → B2 →
+- **G3.4** (aceptación): la autenticación del emisor **no** la sustituye. Hace falta `source=system` en una versión validada, o la alternativa B (PASS-B1 → B2 →
   B3, con la raíz de confianza del lanzamiento de 09).
 - Verificar la configuración real del túnel y que el backend recibe la IP real de los contenedores.
   Es una lectura en el despliegue, que debe hacer el responsable porque está en VM100.
