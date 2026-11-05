@@ -134,6 +134,13 @@ export interface ThreadModel {
 	agents: AgentView[];
 	/** Distinct `tool_use_id`s in the main thread. */
 	toolCount: number;
+	/**
+	 * How the CLI runs this conversation, per the server's newest probe in the
+	 * window (`probe` event: `kind` as `claude agents --json` reported it).
+	 * Null when no probe is in the window, or a later session_start/end
+	 * means it described a previous process. Evidence for wording only.
+	 */
+	runMode: { kind: string; verified: boolean; seq: number } | null;
 }
 
 const LOST_FRAGMENT = "[… fragment lost …]";
@@ -266,6 +273,7 @@ export function buildThread(events: readonly ConversationEvent[]): ThreadModel {
 	// tool_use_id, so the Agent tool_starts of the main thread are matched
 	// to agent_starts in order of appearance. Best effort, display only.
 	const pendingAgentTools: string[] = [];
+	let runMode: ThreadModel["runMode"] = null;
 	const agentByTool = new Map<string, string>();
 
 	const pushInternal = (
@@ -558,7 +566,13 @@ export function buildThread(events: readonly ConversationEvent[]): ThreadModel {
 					});
 				}
 				break;
+			case "probe":
+				// Main thread only: a subagent's events never carry the CLI's run mode.
+				if (!e.agent_id && str(d.kind))
+					runMode = { kind: str(d.kind), verified: d.verified === true, seq: e.seq };
+				break;
 			case "session_start": {
+				runMode = null;
 				const source = str(d.source);
 				if (source === "resume" || source === "compact" || source === "clear") {
 					items.push({
@@ -578,6 +592,7 @@ export function buildThread(events: readonly ConversationEvent[]): ThreadModel {
 				break;
 			}
 			case "session_end":
+				runMode = null;
 				items.push({
 					kind: "marker",
 					key: `e${e.seq}`,
@@ -606,6 +621,7 @@ export function buildThread(events: readonly ConversationEvent[]): ThreadModel {
 		items,
 		agents: [...agents.values()].sort((a, b) => a.startedSeq - b.startedSeq),
 		toolCount: tools.size,
+		runMode,
 	};
 }
 
