@@ -222,3 +222,38 @@ test.describe("session actions", () => {
 		expect(backend.terminalSockets.filter((s) => !s.closed)).toHaveLength(1);
 	});
 });
+
+test.describe("server reachability", () => {
+	test("the header dot turns amber when the session list can't be refreshed, green again when it can", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		await app.login("alice");
+		const dot = page.locator("#user-display");
+		await expect(dot).not.toHaveClass(/unreachable/);
+		backend.override = async (method, path, route) => {
+			if (method === "GET" && /^(\/api)?\/sessions(\?|$)/.test(path)) {
+				await route.fulfill({ status: 502, body: JSON.stringify({ error: "Bad gateway" }) });
+				return true;
+			}
+			return false;
+		};
+		await app.openSidebar();
+		await page.click("#sidebar-refresh-btn");
+		await expect(dot).toHaveClass(/unreachable/);
+		await expect(dot).toHaveAttribute("aria-label", /Can't reach the server/);
+		backend.override = null;
+		await page.click("#sidebar-refresh-btn");
+		await expect(dot).not.toHaveClass(/unreachable/);
+	});
+});
+
+test.describe("sidebar status text", () => {
+	test("a stopped session says so in words, not only by its dot's colour", async ({ app }) => {
+		await app.login("alice");
+		await app.openSidebar();
+		await expect(app.sessionRow("docs").locator(".session-state")).toHaveText("Stopped");
+		await expect(app.sessionRow("my-project").locator(".session-state")).toHaveCount(0);
+	});
+});

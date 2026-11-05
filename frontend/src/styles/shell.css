@@ -91,6 +91,10 @@ main.chrome-open #chrome-toggle-icon {
   font-size: 0.8rem;
   color: var(--c-ok);
 }
+#user-display.unreachable,
+#sidebar-user-display.unreachable {
+  color: var(--c-warn);
+}
 #logout-btn {
   background: transparent;
   border: 1px solid var(--c-border);

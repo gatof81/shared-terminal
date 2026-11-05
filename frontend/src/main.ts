@@ -316,6 +316,23 @@ function showAuth() {
 	authUsername.focus();
 }
 
+/**
+ * The header's "●" was always green, so it read as a connection light that
+ * never changed. It is one now: whether the last session-list refresh reached
+ * the server (sessionCore.refreshSessions sets it). Amber = retrying.
+ */
+export function setServerReachable(ok: boolean): void {
+	for (const elx of [userDisplay, sidebarUserDisplay]) {
+		elx.classList.toggle("unreachable", !ok);
+		elx.title = ok ? "Connected to the server" : "Can't reach the server — retrying";
+	}
+	userDisplay.setAttribute("role", "img");
+	userDisplay.setAttribute(
+		"aria-label",
+		ok ? "Connected to the server" : "Can't reach the server — retrying",
+	);
+}
+
 function showApp() {
 	authView.style.display = "none";
 	appView.style.display = "flex";
@@ -324,6 +341,7 @@ function showApp() {
 	// a future swap of "●" for the actual username only needs editing
 	// a single line.
 	sidebarUserDisplay.textContent = userDisplay.textContent;
+	setServerReachable(true);
 	applyAdminVisibility();
 	void refreshNotificationsToggle();
 	// Route any hash AFTER the session list has loaded: the deep-link
