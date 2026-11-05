@@ -574,7 +574,12 @@ function openSocket(): void {
 				if (gen !== generation) return;
 				liveConnected = connected;
 				if (connected) everConnected = true;
-				if (refused) socketGaveUp = true;
+				if (refused) {
+					socketGaveUp = true;
+					// 1008 never reconnects: drop the dead object so the next
+					// openSocket (reopen, Refresh) builds a new one, as the banner says.
+					socket = null;
+				}
 				// The "connection lost" banner follows the socket now, not the
 				// next thread render (which may be a long time coming offline).
 				syncOffline();

@@ -959,6 +959,15 @@ describe("Chat overlay — connection indicator", () => {
 		expect($("chat-thread").querySelector(".chat-offline")?.textContent).toContain(
 			"Not receiving new events",
 		);
+		// Following the banner's advice builds a new socket.
+		const opened = api.openConversationSocket.mock.calls.length;
+		$("chat-refresh-btn").click();
+		await flush();
+		expect(api.openConversationSocket.mock.calls.length).toBe(opened + 1);
+		sock.onState?.(true);
+		await flush();
+		expect(chip()).toBeNull();
+		expect($("chat-thread").classList.contains("offline")).toBe(false);
 	});
 
 	it("leaving and coming back is a fresh connect, not a lost connection", async () => {
