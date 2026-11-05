@@ -1,7 +1,7 @@
 /* ── Dialog component ───────────────────────────────────────────
    Only what the shared confirm/prompt/alert dialogs (components/
-   dialog.ts) add on top of the .modal / .modal-card / .modal-actions
-   rules in modal.css. */
+   dialog.ts) add on top of the .modal / .modal-card rules in modal.css;
+   the action row (.modal-actions) is styled here. */
 .dialog-card {
   width: 420px;
 }
