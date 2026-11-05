@@ -15,17 +15,24 @@ Confidence: facts from the `--debug-file` or the trust/mcp gate are HIGH (the CL
 output, or our own driver). Facts read from the PANE are LOW — the pane is attacker-writable, so a
 pane-derived "blocked" is only corroborating, never decisive on its own (see verdict.py).
 """
+import json
 import re
 
 SCHEMA = "obs/1"
 
 # ── HIGH-confidence signals: the CLI's own [DEBUG] lines (2.1.314 phrasings) ──
-SESSION_START = re.compile(r"\bst-b1-probe\b.*session\.start|probe.*session\.start")
 PROBE_LOADED_ORG = re.compile(
     r"hooks module st-b1-probe@\S+ loaded \(\w+, environment \d+, tier (prepend|append)\)")
-GUARD_SEATED = re.compile(r"cc-plugin-sec-default@builtin .*seated|seated outermost: this machine has managed settings")
+# Positive guard seating ONLY (the kit's exact phrasings). The negative "not seated" must never be
+# read as valid (B1), so it is matched separately and takes precedence in classify_debug.
+GUARD_SEATED_POS = re.compile(
+    r"cc-plugin-sec-default@builtin seated (?:outermost: this machine has managed settings|by managed prependPlugins)"
+    r"|(?<!not )seated outermost: this machine has managed settings")
+GUARD_NOT_SEATED = re.compile(r"cc-plugin-sec-default@builtin not seated")
 GUARD_LOADED = re.compile(r"hooks module cc-plugin-sec-default@builtin loaded \(")
 ROGUE_N14_LOADED = re.compile(r"hooks module st-b1-rogue-n14@\S+ loaded \(|plugin\.register: st-b1-rogue-n14 \(")
+# session.start is proven ONLY by the probe's EXECUTION records (from_probe_records), NOT by the
+# "events: session.start" DECLARATION on the load line (B2).
 
 # ── LOW-confidence signals: the transient PANE (attacker-writable) ──
 # The real 2.1.314 skills-dir block builder `yvn`, specific via its hardcoded skills-dir advice.
@@ -46,14 +53,15 @@ def _path_kind(path):
 
 
 def classify_debug(text):
-    """HIGH-confidence facts from the debug file. Returns [(concern, signal, confidence, detail)]."""
+    """HIGH-confidence facts from the debug file. Returns [(concern, signal, confidence, detail)].
+    Does NOT emit session.start — that needs an execution record (B2)."""
     t = text or ""
     out = []
     if PROBE_LOADED_ORG.search(t):
         out.append(("control", "probe-org-tier", "high", None))
-    if SESSION_START.search(t):
-        out.append(("control", "session.start", "high", None))
-    if GUARD_SEATED.search(t) and GUARD_LOADED.search(t):
+    if GUARD_NOT_SEATED.search(t):                 # B1: negative state takes precedence
+        out.append(("control", "guard-not-seated", "high", None))
+    elif GUARD_SEATED_POS.search(t) and GUARD_LOADED.search(t):
         out.append(("control", "guard-seated-loaded", "high", None))
     if ROGUE_N14_LOADED.search(t):
         out.append(("skills-dir", "loaded", "high", None))   # FAIL signal (attacker executed)
@@ -84,31 +92,83 @@ class Observer:
         self.events = []
         self.pane_reads = 0
         self.pane_fails = 0
+        self._emitted = set()     # B6: identity dedup — a signal is emitted once, original t kept
+        self._debug_cursor = 0    # B6: only classify the newly-appended debug tail
+        self.reads = []           # B4: (t, ok) per pane read — the observation window
+        # B4 window policy: expected cadence, minimum successful reads, minimum window length, and
+        # the max tolerated gap between consecutive reads (default = 2× cadence).
+        self.win = {"expected": 0.5, "min_reads": 3, "min_window": 1.0, "max_gap": 1.0}
 
     def _emit(self, concern, signal, source, confidence, detail=None):
+        # Identity = (concern, signal, source, detail). Re-reads never re-emit; the FIRST event
+        # keeps its original t/coverage (provenance preserved) — B6.
+        key = (concern, signal, source, json.dumps(detail, sort_keys=True))
+        if key in self._emitted:
+            return
+        self._emitted.add(key)
         self.events.append({
             "schema": SCHEMA, **self.ctx, "concern": concern, "signal": signal,
             "source": source, "confidence": confidence, "detail": detail,
             "t": round(self.clock() - self.t0, 3), "coverage": self.coverage()})
 
+    def set_window(self, *, expected=None, min_reads=None, min_window=None, max_gap=None):
+        for k, v in (("expected", expected), ("min_reads", min_reads),
+                     ("min_window", min_window), ("max_gap", max_gap)):
+            if v is not None:
+                self.win[k] = v
+        return self
+
     def coverage(self):
-        # none  = no reads, or every read failed (nothing usable captured)
-        # partial = some reads failed; full = all reads succeeded
-        if self.pane_reads == 0 or self.pane_fails == self.pane_reads:
-            return "none"
-        return "full" if self.pane_fails == 0 else "partial"
+        """Temporal coverage (B4): a single successful read is NOT `full`. `full` requires enough
+        successful reads over a long-enough window with no oversized gap AND observation that
+        continued past the last pane DECISION (block/refusal) — so late/incomplete capture is
+        `partial` and never credits a block. Values: none | partial | full."""
+        oks = [t for t, ok in self.reads if ok]
+        if not oks:
+            return "none"                        # nothing usable captured
+        if len(self.reads) != len(oks):
+            return "partial"                     # any failed read
+        if len(oks) < self.win["min_reads"]:
+            return "partial"                     # too few reads
+        if oks[-1] - oks[0] < self.win["min_window"]:
+            return "partial"                     # window too short / capture too brief
+        if any(b - a > self.win["max_gap"] for a, b in zip(oks, oks[1:])):
+            return "partial"                     # a gap larger than tolerated (missed interval)
+        # Must have kept observing AFTER the last pane decision (so no-load corroboration is real).
+        decisions = [e["t"] for e in self.events if e["source"] == "pane"]
+        if decisions and oks[-1] <= max(decisions):
+            return "partial"                     # stopped at/before the decision settled
+        return "full"
 
     def fact(self, concern, signal, source="gate", confidence="high", detail=None):
         """Record a fact from our own driver (trust/mcp gate): selection, dismissed, confirmed, …"""
         self._emit(concern, signal, source, confidence, detail)
 
     def from_debug(self, text):
-        for c, s, conf, d in classify_debug(text):
+        # B6: the debug file is read whole repeatedly; classify ONLY complete lines past the cursor,
+        # so existing events are never re-scanned (identity dedup is the belt-and-suspenders).
+        text = text or ""
+        end = text.rfind("\n") + 1          # only complete lines
+        chunk = text[self._debug_cursor:end]
+        if not chunk:
+            return
+        self._debug_cursor = end
+        for c, s, conf, d in classify_debug(chunk):
             self._emit(c, s, "debug", conf, d)
 
+    def from_probe_records(self, records):
+        """session.start / classic.SessionStart from the kit probe's EXECUTION records — the fact
+        that the hook RAN, not the "events:" declaration (B2)."""
+        kinds = {r.get("kind") for r in (records or []) if isinstance(r, dict)}
+        for kind in ("session.start", "classic.SessionStart"):
+            if kind in kinds:
+                self._emit("control", kind, "probe", "high")
+
     def from_pane(self, text, *, ok=True):
+        good = bool(ok and (text or "").strip())
+        self.reads.append((round(self.clock() - self.t0, 3), good))   # B4: timestamped window
         self.pane_reads += 1
-        if not ok or not (text or "").strip():
+        if not good:
             self.pane_fails += 1
             return
         for c, s, conf, d in classify_pane(text):

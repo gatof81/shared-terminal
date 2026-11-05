@@ -15,6 +15,26 @@ Hard rules:
 """
 
 
+ALLOWED_SOURCES = {"debug", "pane", "gate", "probe", "control"}
+ALLOWED_CONCERNS = {"control", "trust", "skills-dir", "mcp-project"}
+
+
+def validate_snapshot(snap):
+    """B5: reject a snapshot whose events don't all match its (attempt, start, instance), or whose
+    source/concern/signal are unknown/empty — intentional or accidental mixing. Fail-closed."""
+    ctx = (snap.get("attempt"), snap.get("start"), snap.get("instance"))
+    for e in snap.get("events", []):
+        if (e.get("attempt"), e.get("start"), e.get("instance")) != ctx:
+            return False, "correlation-violation:foreign-attempt/start/instance"
+        if e.get("source") not in ALLOWED_SOURCES:
+            return False, f"invalid-source:{e.get('source')}"
+        if e.get("concern") not in ALLOWED_CONCERNS:
+            return False, f"invalid-concern:{e.get('concern')}"
+        if not e.get("signal"):
+            return False, "invalid-signal:empty"
+    return True, "ok"
+
+
 def _sig(events, concern, pred=None):
     return [e for e in events if e["concern"] == concern and (pred is None or pred(e["signal"]))]
 
@@ -39,13 +59,17 @@ def verdict_n14(snap):
         return "inconclusive", "insufficient-capture"     # never PASS/blocked on bad capture
     if verdict_p0(snap)[0] != "baseline-ok":
         return "inconclusive", "baseline-not-ok"
-    blocked = _sig(ev, "skills-dir", lambda s: s == "blocked")
-    if blocked:
-        detail = blocked[0].get("detail") or {}
-        if detail.get("path_kind") != "claude-skills":
-            return "inconclusive", "block-not-attributable-to-skills-dir"
-        return "blocked-low", "skills-dir-blocked(pane,low;corroborated:no-load,same-start)"
-    return "inconclusive", "no-load-and-no-observable-rejection"   # req 4: absence != blocked
+    observed = _sig(ev, "skills-dir", lambda s: s == "blocked")
+    if not observed:
+        return "inconclusive", "no-load-and-no-observable-rejection"   # req 4: absence != blocked
+    if (observed[0].get("detail") or {}).get("path_kind") != "claude-skills":
+        return "inconclusive", "block-observed-not-claude-skills"
+    # B3: a .claude/skills warning on the pane is `block-observed-low` — NOT `blocked`. Crediting it
+    # requires a SEPARATE attribution control (verified fixture + a differential proving THIS fixture
+    # loads without policy); pane text alone never grants blocked.
+    if not _sig(ev, "skills-dir", lambda s: s == "block-attributable"):
+        return "inconclusive", "block-observed-low-not-attributable"
+    return "blocked-low", "skills-dir-blocked(attributed;pane-low;corroborated:no-load,same-start)"
 
 
 def verdict_n17_project(snap):
@@ -63,7 +87,11 @@ def verdict_n17_project(snap):
 
 
 def verdict(snap):
-    """Dispatch by attempt. Unknown/other attempts => inconclusive (never PASS)."""
+    """Validate (B5) then dispatch by attempt. A mixed/malformed snapshot or an unknown attempt =>
+    inconclusive (never PASS)."""
+    ok, why = validate_snapshot(snap)
+    if not ok:
+        return "inconclusive", why
     a = snap.get("attempt")
     fn = {"P0": verdict_p0, "N14": verdict_n14, "N17-project": verdict_n17_project}.get(a)
     if fn is None:

@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""DISPOSABLE smoke that would wire the unified observer to the REAL 2.1.314 CLI in an isolated
-HOME. **Not run during the #521 canary window** (no real CLI / Docker / smokes until Claude A
-confirms). Kept here so the launch + cleanup are reviewable now and runnable later.
+"""DISPOSABLE **skeleton** smoke for wiring the unified observer to the REAL 2.1.314 CLI in an
+isolated HOME. It is NOT end-to-end: it does NOT wire the trust-gate and does NOT set up the N14
+fixture or the managed policy — it only launches the CLI and feeds pane/debug into the Observer to
+exercise the launch + cleanup. **Not run during the #521 canary window** (no real CLI/Docker/smoke).
 
 Process-group cleanup (owner req 8): the CLI is launched under `setsid --wait`, so the inner shell
-becomes a session/group LEADER and `exec claude` keeps that PID == PGID. That PGID is written to a
-file, and cleanup signals exactly that group — it never guesses from the tmux pane pid, never uses
-`pkill -f`, so it cannot kill foreign processes and does not leave orphans. A UNIQUE tmux socket is
-used per run.
+becomes a session/group LEADER and `exec claude` keeps that PID == PGID, written to a file. Cleanup
+signals ONLY that group, and only after a best-effort check that `/proc/<pgid>/comm` still looks
+like our CLI (reducing — NOT eliminating — the risk of signaling a REUSED pgid). It never guesses
+from the tmux pane pid and never uses `pkill -f`. CAVEAT: if the process starts but never writes the
+PGID file, cleanup cannot target it and the detached `setsid` child may ORPHAN — absolute absence of
+orphans is NOT promised.
 
 NETWORK (req 7/owner #4): this does NOT isolate the network (isolated HOME + no login only).
 Verifiable isolation would require a network namespace or a container (see the future-smoke note in
@@ -33,6 +36,9 @@ def tmux(*a):
     return subprocess.run(["tmux", "-L", SOCK, *a], capture_output=True, text=True)
 
 
+CLI_COMMS = {"claude", "claude.exe", "node", "bun"}
+
+
 def _read_pgid(path):
     """The CLI's own process-group id, or None. Targeted cleanup depends only on this."""
     try:
@@ -43,13 +49,25 @@ def _read_pgid(path):
         return None
 
 
-def _cleanup(pgidfile, base):
+def _group_is_ours(pgid, proc_root="/proc"):
+    """Best-effort: does /proc/<pgid>/comm still look like our CLI? Reduces (does NOT eliminate) the
+    risk of signaling a REUSED pgid. Unknown/mismatch => False (we do not signal)."""
+    try:
+        with open(os.path.join(proc_root, str(pgid), "comm"), encoding="utf-8") as fh:
+            return fh.read().strip() in CLI_COMMS
+    except OSError:
+        return False
+
+
+def _cleanup(pgidfile, base, *, killpg=os.killpg, group_is_ours=_group_is_ours):
     pgid = _read_pgid(pgidfile)
     tmux("kill-server")                       # our unique socket only
-    if pgid is not None:
+    # Only signal a pgid we wrote AND that still looks like our CLI (reused-group guard). If the
+    # process never wrote its pgid, we do NOT guess — the detached child may orphan (documented).
+    if pgid is not None and group_is_ours(pgid):
         for sig in (signal.SIGTERM, signal.SIGKILL):
             try:
-                os.killpg(pgid, sig)          # exactly the CLI's group
+                killpg(pgid, sig)             # exactly the CLI's group
             except (ProcessLookupError, PermissionError, OSError):
                 break
             time.sleep(0.3)

@@ -26,8 +26,24 @@ single snapshot, so a signal from another start can never validate a block (req 
 
 **Confidence:** `debug`/`gate` = HIGH (CLI's own structured output / our driver); `pane` = LOW
 (attacker-writable). A pane `blocked` is credited only when the same start shows **no attacker
-load** (had the rogue run it would be FAIL; not having run, it could not forge the block text) and
-the path is `claude-skills` — otherwise INCONCLUSIVE (req 4/6).
+load** (had the rogue run it would be FAIL; not having run, it could not forge the block text), the
+path is `claude-skills`, **and** a separate attribution control is present — otherwise INCONCLUSIVE
+(req 4/6).
+
+**Audit-review fixes (owner B1–B6), all with regression/adversarial tests:**
+- **B1** — guard: the positive seating regex no longer matches `not seated`; the NEGATIVE state
+  (`guard-not-seated`) takes precedence, so a not-seated guard can never validate.
+- **B2** — `session.start` comes ONLY from the probe's EXECUTION records (`from_probe_records`),
+  never from the `events: session.start` DECLARATION on the load line.
+- **B3** — see N14 above: `block-observed-low` is split from `block-attributable`; pane text alone
+  is never `blocked`.
+- **B4** — `coverage` is TEMPORAL: `full` needs enough successful reads over a long-enough window,
+  no oversized gap, AND observation continued PAST the last pane decision; otherwise `partial`.
+  Late/incomplete capture ⇒ INCONCLUSIVE.
+- **B5** — `verdict()` first `validate_snapshot()`: any event whose `(attempt,start,instance)` ≠ the
+  snapshot's, or with an unknown source/concern or empty signal, is rejected ⇒ INCONCLUSIVE.
+- **B6** — `from_debug()` advances a cursor over complete lines and dedups by identity, so re-reading
+  the whole file never re-emits; the first event's time/provenance is preserved.
 
 ## Per-control behaviour
 
@@ -35,10 +51,13 @@ the path is `claude-skills` — otherwise INCONCLUSIVE (req 4/6).
   observer records `trust:confirmed` as a fact, but `verdict_p0` requires `confirmed` **AND**
   `session.start` **AND** `probe-org-tier` **AND** `guard-seated-loaded` in the same start — trust
   alone is `baseline-invalid`. Confirming trust is **not** a valid P0.
-- **N14 (req 4):** `skills-dir:loaded` ⇒ **FAIL** (high, any coverage). A pane `skills-dir:blocked`
-  ⇒ `blocked-low` only with full coverage, baseline-ok, `path_kind=claude-skills`, and no load. No
-  load **and** no observable rejection ⇒ **INCONCLUSIVE** (absence ≠ blocked). A generic marketplace
-  block (no `source:skills-dir` advice) is not attributed.
+- **N14 (req 4 / B3):** `skills-dir:loaded` ⇒ **FAIL** (high, any coverage). A pane
+  `skills-dir:blocked` is only `block-observed-low` — it becomes **`blocked-low`** solely with full
+  coverage, baseline-ok, `path_kind=claude-skills`, no load **AND** a separate
+  **`block-attributable`** control (verified fixture + a differential proving THIS fixture loads
+  without policy). **Pane text alone never grants blocked.** No load and no observable rejection ⇒
+  INCONCLUSIVE (absence ≠ blocked); a generic marketplace block (no `source:skills-dir` advice) is
+  not attributed.
 - **N17-project (req 5):** identity, selection, dialog-close and accept-signal are recorded as
   **independent** facts. `selection=approve` + `dismissed=running` + **no** accept-signal ⇒
   `selected-no-signal` ⇒ **INCONCLUSIVE** (never blocked). `started` ⇒ FAIL.
@@ -69,28 +88,38 @@ it. Until then N17-project stays Option A (INCONCLUSIVE).
 
 ## Local results (pure simulated; no CLI — canary window)
 
-`python3 test_obs_unified.py` → **22 passed**: classifiers (controls/load/block/path_kind, generic
-block not attributed, no raw text persisted); coverage degradation + all-failed ⇒ `none`;
-correlation on every event; P0 (trust-alone invalid, full-controls ok, controls-without-trust
-inconclusive); N14 (loaded ⇒ FAIL even with degraded capture; blocked-low with full capture;
-insufficient capture ⇒ inconclusive, **never PASS**; no-signal ⇒ inconclusive; forged block + real
-load ⇒ FAIL; block without baseline ⇒ inconclusive); N17 (selected-no-signal ⇒ inconclusive,
-started ⇒ FAIL, decline ≠ approval); dispatch (unknown attempt ⇒ inconclusive; cross-start cannot
-leak); smoke `_read_pgid` targeted-cleanup selector (garbage/missing ⇒ None). `smoke.py` was **not
-run** (canary).
+`python3 test_obs_unified.py` → **36 passed**: B1/B2 regressions (not-seated ≠ valid guard;
+`events:` declaration ≠ session.start; session.start needs an execution record); classifiers
+(controls/load, no session.start from debug, pane block path_kind, generic block not attributed, no
+raw text); **B4 temporal coverage** (single/too-few/short-window/large-gap/failed-read ⇒ partial,
+all-failed ⇒ none, observed-through-decision ⇒ full); P0 (trust-alone invalid, not-seated
+invalidates, full ok); **B3 N14** (loaded ⇒ FAIL even degraded; block without attribution ⇒
+inconclusive; attributed+full ⇒ blocked-low; insufficient capture ⇒ inconclusive; forged block +
+real load ⇒ FAIL; no-signal ⇒ inconclusive); N17 (selected-no-signal ⇒ inconclusive, started ⇒
+FAIL); **B5 correlation** (foreign attempt/start/instance, unknown source, unknown concern ⇒
+inconclusive; cross-start cannot leak); **B6 incremental** (re-read whole file ⇒ no re-emit,
+original time kept; appended line ⇒ exactly one new event); smoke cleanup mocked (`_read_pgid`,
+`_group_is_ours` reused-group guard, `_cleanup` signals only our live group). `smoke.py` **not run**
+(canary).
 
-## Residual risks
+## Residual risks (classified)
 
-- **Pane is attacker-writable** → a pane `blocked` is LOW confidence; corroborated by same-start
-  no-load + path_kind, but not cryptographically attributable. The only HIGH-integrity block signal
-  (telemetry `cli_plugin_init=policy_blocked`) is not locally capturable.
-- **Capture gaps** (lost polls, UI redraw, resize) → `coverage` `partial`/`none` ⇒ INCONCLUSIVE,
-  never PASS. This is intentional but means flaky capture never credits a block.
-- **TOCTOU / timing** inherited from the trust-gate: narrowed, not eliminated.
-- **No network isolation** in `smoke.py` (isolated HOME + no login only).
-- **Not adopted**: this is an experimental result; integrating it into the kit is a separate,
-  audited decision, and does not by itself resolve N14/N17-project — it makes their *blocked*
-  evidence observable, which is necessary but not sufficient.
+- **HIGH — pane integrity.** A pane `blocked` is LOW-confidence (attacker-writable). Mitigated by
+  same-start no-load corroboration + `path_kind` + a required attribution control, but NOT
+  cryptographic. The only HIGH-integrity block signal (telemetry `cli_plugin_init=policy_blocked`)
+  is **not locally capturable** → N14 `blocked` can only ever be `blocked-low`.
+- **MEDIUM — attribution strength (B3).** `block-attributable` depends on a differential control
+  (same fixture loads without policy). If that control is weak/absent, N14 stays INCONCLUSIVE — no
+  silent downgrade, but it means "blocked" needs an extra experiment to earn.
+- **MEDIUM — capture completeness (B4).** Lost polls / UI redraw / resize ⇒ `partial`/`none` ⇒
+  INCONCLUSIVE. Intentional (never PASS on flaky capture) but means real captures can be discarded.
+- **MEDIUM — smoke process hygiene (B/owner #8).** Reused-pgid guard reduces but does not eliminate
+  the risk; if the CLI never writes its PGID the detached child can ORPHAN. **Absolute absence of
+  orphans is not promised.** No network isolation.
+- **LOW — TOCTOU/timing** inherited from the trust-gate: narrowed, not eliminated.
+- **LOW — not adopted.** Experimental only; integrating into the kit is a separate audited decision
+  and does not by itself resolve N14/N17-project — it makes their *blocked* evidence observable,
+  which is necessary but not sufficient.
 
 ## Future isolated smoke (proposal; gated, not now)
 
