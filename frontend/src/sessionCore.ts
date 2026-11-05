@@ -473,6 +473,11 @@ export function renderSessionList() {
 			void runSessionAction(s, s.status === "failed" ? "viewLog" : "open");
 		});
 		item.appendChild(select);
+		// With the "↳ last conversation" line the row has room between its
+		// controls; a tap there is a tap on the row (select), not a dead zone.
+		item.addEventListener("click", (e) => {
+			if (e.target === item) select.click();
+		});
 
 		const actions = document.createElement("span");
 		actions.className = "session-actions";
