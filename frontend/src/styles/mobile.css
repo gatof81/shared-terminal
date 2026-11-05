@@ -138,6 +138,19 @@
      work without a hover state on touch. Show them always on mobile. */
   .session-actions {
     opacity: 1;
+    gap: 0.25rem;
+  }
+  /* Touch: 44px targets. Stop is not a quick action here — next to ⋯ on a
+     small row it was one mis-tap from interrupting a running Claude; it
+     stays in the ⋯ menu, behind its confirmation. */
+  .session-action-btn,
+  .session-menu-btn {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+    font-size: 1rem;
+  }
+  .session-action-btn.stop {
+    display: none;
   }
 
   /* Actions (+) button lives at the right edge of the mobile header.

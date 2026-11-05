@@ -148,7 +148,17 @@ export async function runSessionAction(s: SessionInfo, id: SessionActionId): Pro
 				showToast((err as Error).message, true);
 			}
 			return;
-		case "stop":
+		case "stop": {
+			// Stopping interrupts whatever runs in the container (a Claude
+			// mid-turn included), so every entry point — the row's quick
+			// button, the ⋯ menu, the session menu — asks first.
+			const ok = await confirmDialog({
+				title: "Stop session",
+				message: `Stop "${s.name}"?\n\nEverything running in it stops now — a Claude working in a terminal tab is interrupted mid-task. Workspace files are kept; you can start it again later.`,
+				confirmLabel: "Stop session",
+				danger: true,
+			});
+			if (!ok) return;
 			try {
 				await stopSession(s.sessionId);
 				await refreshSessions();
@@ -156,6 +166,7 @@ export async function runSessionAction(s: SessionInfo, id: SessionActionId): Pro
 				showToast((err as Error).message, true);
 			}
 			return;
+		}
 		case "newTab":
 			if (s.sessionId === activeSessionId) await addTab();
 			return;
