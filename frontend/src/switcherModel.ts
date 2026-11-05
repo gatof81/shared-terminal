@@ -113,11 +113,14 @@ export function sectionize(
 	return out;
 }
 
-/** Every whitespace-separated term must appear in the title or the project name. */
-export function matches(item: SwitcherItem, query: string): boolean {
+/**
+ * Every whitespace-separated term must appear in the title, the project name
+ * or one of `extra` (e.g. its agents' names) — one rule for all of them.
+ */
+export function matches(item: SwitcherItem, query: string, extra: readonly string[] = []): boolean {
 	const terms = query.toLocaleLowerCase().split(/\s+/).filter(Boolean);
 	if (terms.length === 0) return true;
-	const hay = `${item.title}\n${item.projectName}`.toLocaleLowerCase();
+	const hay = [item.title, item.projectName, ...extra].join("\n").toLocaleLowerCase();
 	return terms.every((t) => hay.includes(t));
 }
 
@@ -159,6 +162,52 @@ export function explainProjectError(s: Extract<ProjectState, { kind: "error" }>)
 }
 
 /**
+ * A counting semaphore: at most `size` holders. Shared by everything one
+ * switcher loads (project lists, agent lists), so the whole switcher stays
+ * within one bound.
+ */
+export class Slots {
+	private active = 0;
+	private readonly waiting: Array<() => void> = [];
+	constructor(private readonly size: number) {}
+	async acquire(): Promise<void> {
+		if (this.active >= this.size) await new Promise<void>((r) => this.waiting.push(r));
+		this.active++;
+	}
+	release(): void {
+		this.active--;
+		this.waiting.shift()?.();
+	}
+	/** Run `fn` holding a slot, bounded by `timeoutMs` (the abort only stops waiting). */
+	async run<T>(
+		fn: (signal: AbortSignal) => Promise<T>,
+		timeoutMs: number,
+		isCancelled?: () => boolean,
+	): Promise<{ value?: T; error?: unknown; timedOut: boolean; cancelled?: boolean }> {
+		await this.acquire();
+		// Closed while waiting for a slot: start nothing (the slot goes on).
+		if (isCancelled?.()) {
+			this.release();
+			return { timedOut: false, cancelled: true };
+		}
+		const ctrl = new AbortController();
+		let timedOut = false;
+		const timer = setTimeout(() => {
+			timedOut = true;
+			ctrl.abort();
+		}, timeoutMs);
+		try {
+			return { value: await fn(ctrl.signal), timedOut: false };
+		} catch (error) {
+			return { error, timedOut };
+		} finally {
+			clearTimeout(timer);
+			this.release();
+		}
+	}
+}
+
+/**
  * Loads project lists for one switcher: at most `concurrency` requests in
  * flight across EVERY `load` call (the first load and each Retry share the
  * slots, so retrying a burst of 429s cannot exceed the bound). A request's
@@ -168,9 +217,7 @@ export function explainProjectError(s: Extract<ProjectState, { kind: "error" }>)
  * nothing more is reported.
  */
 export class ProjectLoader {
-	private active = 0;
-	private readonly waiting: Array<() => void> = [];
-	private readonly concurrency: number;
+	private readonly slots: Slots;
 	private readonly timeoutMs: number;
 
 	constructor(
@@ -180,9 +227,11 @@ export class ProjectLoader {
 			concurrency?: number;
 			timeoutMs?: number;
 			isCancelled?: () => boolean;
+			/** Share the bound with other loads of the same switcher (agents). */
+			slots?: Slots;
 		} = {},
 	) {
-		this.concurrency = Math.max(1, opts.concurrency ?? SWITCHER_CONCURRENCY);
+		this.slots = opts.slots ?? new Slots(Math.max(1, opts.concurrency ?? SWITCHER_CONCURRENCY));
 		this.timeoutMs = opts.timeoutMs ?? SWITCHER_TIMEOUT_MS;
 	}
 
@@ -191,13 +240,11 @@ export class ProjectLoader {
 	}
 
 	private async acquire(): Promise<void> {
-		if (this.active >= this.concurrency) await new Promise<void>((r) => this.waiting.push(r));
-		this.active++;
+		await this.slots.acquire();
 	}
 
 	private release(): void {
-		this.active--;
-		this.waiting.shift()?.();
+		this.slots.release();
 	}
 
 	private async one(p: { sessionId: string; name: string }): Promise<void> {

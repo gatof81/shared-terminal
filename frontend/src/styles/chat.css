@@ -956,6 +956,11 @@
   flex-direction: column;
   gap: 0.5rem;
 }
+/* An agent opened from the switcher: briefly marked so the eye finds it. */
+.chat-agent.focused {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -2px;
+}
 .chat-agent {
   border: 1px solid var(--c-border-soft);
   border-radius: 8px;

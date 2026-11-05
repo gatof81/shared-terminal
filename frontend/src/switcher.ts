@@ -12,7 +12,13 @@
  * Chat; nothing is sent to any session.
  */
 
-import { type ConversationSummary, fetchConversationSummaries } from "./api.js";
+import { type AgentsAtAGlance, agentName, agentsLine, atAGlance } from "./agentsSummary.js";
+import {
+	type ConversationSummary,
+	fetchConversationAgents,
+	fetchConversationSummaries,
+} from "./api.js";
+import { focusAgentWhenOpen } from "./chatView.js";
 import { createDialog, isAnyDialogOpen } from "./components/dialog.js";
 import { relativeDate } from "./format.js";
 import { isMobile, sessions } from "./main.js";
@@ -23,6 +29,9 @@ import {
 	matches,
 	type Project,
 	ProjectLoader,
+	Slots,
+	SWITCHER_CONCURRENCY,
+	SWITCHER_TIMEOUT_MS,
 	type SwitcherItem,
 	sectionize,
 	toItem,
@@ -114,12 +123,27 @@ export function openSwitcher(opener?: Element | null): void {
 	root.appendChild(card);
 	document.body.appendChild(root);
 
-	let shown: SwitcherItem[] = [];
+	// A row is a conversation, or one of its working agents under it.
+	type Row = { item: SwitcherItem; agentId?: string };
+	let shown: Row[] = [];
 	let active = 0;
-	// The highlight follows the conversation, not the row index: a project
+	// The highlight follows the row's identity, not its index: a project
 	// answering later can insert rows above it.
 	let activeKey: string | null = null;
-	const keyOf = (i: SwitcherItem) => `${i.sessionId}/${i.cid}`;
+	const keyOf = (r: Row) => `${r.item.sessionId}/${r.item.cid}${r.agentId ? `#${r.agentId}` : ""}`;
+
+	// Subagents, only of conversations whose FRESH evidence says work is going
+	// on (running, background tasks, a permission prompt). Not of a stale one,
+	// and not of `waiting_input`: its turn_end with no background tasks says
+	// nothing is still running, so an unended agent there would contradict it.
+	const AGENT_STATUSES = new Set(["running", "waiting_background", "waiting_permission"]);
+	const gapsOf = new Map<string, number>();
+	const agents = new Map<
+		string,
+		{ kind: "loading" } | { kind: "ok"; g: AgentsAtAGlance } | { kind: "error" }
+	>();
+	const conversationKey = (i: SwitcherItem) => `${i.sessionId}/${i.cid}`;
+	const MAX_AGENT_ROWS = 3;
 
 	const allItems = (): SwitcherItem[] => {
 		const out: SwitcherItem[] = [];
@@ -131,8 +155,12 @@ export function openSwitcher(opener?: Element | null): void {
 		return out;
 	};
 
-	const go = (item: SwitcherItem) => {
+	const go = (row: Row) => {
+		const item = row.item;
 		dialog.close();
+		// Navigation only: the conversation opens in Chat with the Agents panel
+		// on that agent's card. No control over the agent is offered.
+		if (row.agentId) focusAgentWhenOpen(item.cid, row.agentId);
 		// The app's own resolver (hashchange → applyRoute) opens the project,
 		// Chat and the conversation: the same path as a pasted link.
 		const hash = routeHash({ sessionId: item.sessionId, view: "chat", detail: item.cid });
@@ -159,7 +187,11 @@ export function openSwitcher(opener?: Element | null): void {
 		const q = input.value;
 		shown = [];
 		listEl.replaceChildren();
-		const sections = sectionize(allItems().filter((i) => matches(i, q)));
+		const agentNames = (i: SwitcherItem) => {
+			const a = agents.get(conversationKey(i));
+			return a?.kind === "ok" ? a.g.working.map(agentName) : [];
+		};
+		const sections = sectionize(allItems().filter((i) => matches(i, q, agentNames(i))));
 		let n = 0;
 		for (const s of sections) {
 			const group = el("div", "switcher-group");
@@ -178,6 +210,14 @@ export function openSwitcher(opener?: Element | null): void {
 				const main = el("div", "switcher-option-main");
 				main.appendChild(el("span", "switcher-option-title", item.title));
 				main.appendChild(el("span", "switcher-option-project", item.projectName));
+				const ag = agents.get(conversationKey(item));
+				if (ag?.kind === "ok" && ag.g.total > 0) {
+					let line = agentsLine(ag.g);
+					// Lost events: an agent's end may be among them.
+					if (ag.g.working.length > 0 && (gapsOf.get(conversationKey(item)) ?? 0) > 0)
+						line += " · some events were lost, ends may be missing";
+					main.appendChild(el("span", "switcher-option-agents", line));
+				}
 				o.appendChild(main);
 				const side = el("div", "switcher-option-side");
 				const chip = el("span", `chat-status tone-${item.status.tone}`);
@@ -193,13 +233,47 @@ export function openSwitcher(opener?: Element | null): void {
 						),
 					);
 				o.appendChild(side);
+				const row: Row = { item };
 				const idx = shown.length;
-				o.addEventListener("click", () => go(item));
+				o.addEventListener("click", () => go(row));
 				o.addEventListener("mousemove", () => {
 					if (active !== idx) setActive(idx);
 				});
-				shown.push(item);
+				shown.push(row);
 				group.appendChild(o);
+				// Its working agents, each a row of its own (keyboard-reachable).
+				if (ag?.kind === "ok") {
+					for (const w of ag.g.working.slice(0, MAX_AGENT_ROWS)) {
+						const so = el("div", "switcher-option switcher-agent");
+						so.id = `switcher-opt-${n++}`;
+						so.setAttribute("role", "option");
+						so.setAttribute("aria-selected", "false");
+						so.setAttribute("aria-label", `${agentName(w)}, started, no end yet, in ${item.title}`);
+						so.dataset.agentId = w.agentId;
+						so.appendChild(el("span", "switcher-agent-name", `↳ ${agentName(w)}`));
+						so.appendChild(el("span", "switcher-agent-state", "started, no end yet"));
+						const arow: Row = { item, agentId: w.agentId };
+						const aidx = shown.length;
+						so.addEventListener("click", () => go(arow));
+						so.addEventListener("mousemove", () => {
+							if (active !== aidx) setActive(aidx);
+						});
+						shown.push(arow);
+						group.appendChild(so);
+					}
+					const more = ag.g.working.length - MAX_AGENT_ROWS;
+					if (more > 0) {
+						// Visual only: the count is already in the conversation option's
+						// own text (agentsLine), which is what a screen reader reads.
+						const m = el(
+							"div",
+							"switcher-agent-more",
+							`+${more} more — open the conversation to see them`,
+						);
+						m.setAttribute("aria-hidden", "true");
+						group.appendChild(m);
+					}
+				}
 			}
 			listEl.appendChild(group);
 		}
@@ -274,14 +348,46 @@ export function openSwitcher(opener?: Element | null): void {
 		}
 	};
 
-	// One loader per switcher: the first load and every Retry share its slots.
+	// One bound per switcher: project lists, every Retry and the agent lists
+	// share the same slots.
+	const slots = new Slots(SWITCHER_CONCURRENCY);
+	const loadAgents = (p: Project) => {
+		if (p.state.kind !== "ok") return;
+		for (const c of p.state.conversations as ConversationSummary[]) {
+			if (!visibleInSwitcher(c, now)) continue;
+			const item = toItem(c, p, now);
+			if (item.bucket !== "attention" && item.bucket !== "working") continue;
+			if (!AGENT_STATUSES.has(c.status)) continue;
+			const key = conversationKey(item);
+			gapsOf.set(key, c.gapsCount ?? 0);
+			if (agents.has(key)) continue;
+			agents.set(key, { kind: "loading" });
+			void slots
+				.run(
+					(signal) => fetchConversationAgents(item.sessionId, item.cid, signal),
+					SWITCHER_TIMEOUT_MS,
+					() => closed,
+				)
+				.then((r) => {
+					if (closed) return;
+					// A failed agent list just shows no agents line (the
+					// conversation row itself is unaffected); no retry of its own.
+					agents.set(
+						key,
+						r.value?.ok ? { kind: "ok", g: atAGlance(r.value.agents) } : { kind: "error" },
+					);
+					render();
+				});
+		}
+	};
 	const loader = new ProjectLoader(
 		fetchConversationSummaries,
 		(p) => {
 			projects.set(p.sessionId, p);
 			render();
+			loadAgents(p);
 		},
-		{ isCancelled: () => closed },
+		{ isCancelled: () => closed, slots },
 	);
 	const load = (list: Array<{ sessionId: string; name: string }>) => loader.load(list);
 
@@ -297,8 +403,8 @@ export function openSwitcher(opener?: Element | null): void {
 			setActive(active - 1);
 			e.preventDefault();
 		} else if (e.key === "Enter") {
-			const item = shown[active];
-			if (item) go(item);
+			const row = shown[active];
+			if (row) go(row);
 			e.preventDefault();
 		}
 	});

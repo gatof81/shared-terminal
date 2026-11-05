@@ -697,8 +697,24 @@ function scheduleRender(): void {
 	});
 }
 
+// An agent to show once its conversation is open (the switcher's "↳ agent"
+// rows): navigation only — the Agents panel opens with that card in view.
+// Only honoured for a short while: a request whose conversation never opened
+// must not pop the panel open the next time someone opens it by hand.
+let pendingAgentFocus: { cid: string; agentId: string; at: number } | null = null;
+const AGENT_FOCUS_TTL_MS = 15_000;
+
+/** Open the Agents panel on `agentId` when conversation `cid` is next shown. */
+export function focusAgentWhenOpen(cid: string, agentId: string): void {
+	pendingAgentFocus = { cid, agentId, at: Date.now() };
+	if (selectedCid === cid && cur !== null) renderAll();
+}
+
 function renderAll(opts: { scrollToEnd?: boolean; restoreScroll?: boolean } = {}): void {
 	if (!isActive()) return;
+	if (pendingAgentFocus && Date.now() - pendingAgentFocus.at > AGENT_FOCUS_TTL_MS)
+		pendingAgentFocus = null;
+	if (pendingAgentFocus && pendingAgentFocus.cid === selectedCid && cur !== null) agentsOpen = true;
 	const inThread = mobilePane === "thread" && selectedCid !== null;
 	bodyEl.classList.toggle("show-thread", inThread);
 	bodyEl.classList.toggle("show-agents", agentsOpen && selectedCid !== null);
@@ -1815,6 +1831,15 @@ function renderAgents(): void {
 	const ul = el("ul", "chat-agent-list");
 	for (const a of agents) ul.appendChild(agentCard(a));
 	agentsEl.appendChild(ul);
+	const want = pendingAgentFocus;
+	if (want && want.cid === selectedCid) {
+		pendingAgentFocus = null;
+		const card = ul.querySelector<HTMLElement>(`[data-agent="${CSS.escape(want.agentId)}"]`);
+		if (card) {
+			card.classList.add("focused");
+			card.scrollIntoView({ block: "nearest" });
+		}
+	}
 }
 
 function agentCard(a: AgentView): HTMLElement {
@@ -1822,24 +1847,31 @@ function agentCard(a: AgentView): HTMLElement {
 	li.dataset.agent = a.agentId;
 	const top = el("div", "chat-agent-top");
 	top.appendChild(el("span", "chat-agent-type", a.agentType || "agent"));
-	top.appendChild(
-		statusChip(
-			{
-				status: a.status === "done" ? "ended" : "running",
-				evidence: "",
-				at: a.endedAt ?? a.startedAt,
-			},
-			{ staleness: false },
-		),
-	);
+	// "done" is confirmed by a SubagentStop; without one the agent is only
+	// "started, no end yet" — never presented as working (nothing times it out).
+	if (a.status === "done")
+		top.appendChild(
+			statusChip(
+				{ status: "ended", evidence: "", at: a.endedAt ?? a.startedAt },
+				{ staleness: false },
+			),
+		);
+	else {
+		const chip = el("span", "chat-status tone-muted");
+		chip.appendChild(el("span", "chat-dot"));
+		chip.appendChild(el("span", "chat-status-label", "Started, no end yet"));
+		top.appendChild(chip);
+	}
 	li.appendChild(top);
 	const bits: string[] = [a.agentId.slice(0, 8)];
 	bits.push(`${a.toolIds.size} tool${a.toolIds.size === 1 ? "" : "s"}`);
 	if (a.failedToolIds.size > 0) bits.push(`${a.failedToolIds.size} failed`);
 	const started = new Date(a.startedAt).getTime();
 	const ended = a.endedAt ? new Date(a.endedAt).getTime() : Date.now();
+	// Without an end event the span to now is not a run time (the end may
+	// just be missing): say when it started instead.
 	if (!Number.isNaN(started) && !Number.isNaN(ended) && ended >= started)
-		bits.push(duration(ended - started));
+		bits.push(a.endedAt ? duration(ended - started) : `started ${duration(ended - started)} ago`);
 	const metaLine = el("div", "chat-agent-meta", bits.join(" · "));
 	if (a.failedToolIds.size > 0) metaLine.classList.add("has-failed");
 	li.appendChild(metaLine);
@@ -1855,7 +1887,7 @@ function agentCard(a: AgentView): HTMLElement {
 		r.appendChild(markdown(result));
 		li.appendChild(r);
 	} else if (a.status === "running") {
-		li.appendChild(el("div", "chat-note", "Working — result not available yet."));
+		li.appendChild(el("div", "chat-note", "No end reported yet, so no result to show."));
 	}
 	return li;
 }

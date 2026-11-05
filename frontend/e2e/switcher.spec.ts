@@ -219,4 +219,134 @@ test.describe("conversation switcher", () => {
 		await expect(page.locator("#auth-view")).toBeVisible();
 		await expect(page.locator(".switcher-card")).toHaveCount(0);
 	});
+
+	test("subagents with no end yet are rows of their own under a running conversation; choosing one opens Chat on that agent", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		const c1 = backend.conversations.find((c) => c.cid === "conv-1")!;
+		c1.status = "running";
+		const last = c1.events[c1.events.length - 1]!;
+		const ev = (seq: number, name: string, agentId: string, type: string) => ({
+			...last,
+			seq,
+			ev: name,
+			agent_id: null,
+			data: { agent_id: agentId, agent_type: type },
+		});
+		c1.events.push(
+			ev(last.seq + 1, "agent_start", "agentaaaa1111", "Explore"),
+			ev(last.seq + 2, "agent_start", "agentbbbb2222", "general-purpose"),
+			ev(last.seq + 3, "agent_end", "agentbbbb2222", "general-purpose"),
+		);
+		c1.agents = [
+			{
+				agentId: "agentaaaa1111",
+				agentType: "Explore",
+				status: "running",
+				startedSeq: last.seq + 1,
+				toolCount: 2,
+				hasResult: false,
+			},
+			{
+				agentId: "agentbbbb2222",
+				agentType: "general-purpose",
+				status: "done",
+				startedSeq: last.seq + 2,
+				endedSeq: last.seq + 3,
+				toolCount: 1,
+				hasResult: true,
+			},
+		];
+		await app.login("alice");
+		await openSwitcher(app, page);
+		await expect(option(page, "Refactor auth flow")).toContainText(
+			"1 agent started, no end yet · 1 done",
+		);
+		const agentRow = page.locator(".switcher-agent", { hasText: "Explore" });
+		await expect(agentRow).toContainText("started, no end yet");
+		await expect(agentRow).not.toContainText("working");
+		await expect(page.locator(".switcher-agent", { hasText: "general-purpose" })).toHaveCount(0);
+		await agentRow.click();
+		await expect(page).toHaveURL(new RegExp(`#/sessions/${SESSION_IDS.running}/chat/conv-1$`));
+		const card = page.locator('#chat-agents .chat-agent.focused[data-agent="agentaaaa1111"]');
+		await expect(card).toBeVisible();
+		// The card says what the switcher said: no end reported, not "Working".
+		await expect(card).toContainText("Started, no end yet");
+		await expect(card).not.toContainText("Working");
+	});
+
+	test("subagents are not asked for when the conversation's evidence is stale, nor when its turn ended (waiting for input)", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		const agentsOne = [
+			{
+				agentId: "agentaaaa1111",
+				agentType: "Explore",
+				status: "running" as const,
+				startedSeq: 1,
+				toolCount: 0,
+				hasResult: false,
+			},
+		];
+		// conv-1: a live claim gone stale. conv-2 (reused as a fresh one): waiting for input.
+		const c1 = backend.conversations.find((c) => c.cid === "conv-1")!;
+		c1.status = "running";
+		c1.statusAt = "2026-10-31T09:00:00Z";
+		for (const e of c1.events) e.ts = "2026-10-31T09:00:00Z";
+		c1.agents = agentsOne;
+		const c2 = backend.conversations.find((c) => c.cid === "conv-2")!;
+		c2.status = "waiting_input";
+		c2.agents = agentsOne;
+		// Positive control: a fresh RUNNING conversation whose agents ARE asked for.
+		backend.conversations.push({
+			...backend.conversations.find((c) => c.cid === "conv-1")!,
+			cid: "conv-3",
+			title: "Live one",
+			status: "running",
+			statusAt: undefined,
+			events: backend.conversations
+				.find((c) => c.cid === "conv-2")!
+				.events.map((e) => ({ ...e, ts: "2026-10-31T10:29:00Z" })),
+			agents: agentsOne,
+			gapsCount: 1,
+		});
+		await app.login("alice");
+		await openSwitcher(app, page);
+		await expect
+			.poll(() => backend.requests.some((r) => r.path.endsWith("/conversations/conv-3/agents")))
+			.toBe(true);
+		expect(backend.requests.some((r) => r.path.endsWith("/conversations/conv-1/agents"))).toBe(
+			false,
+		);
+		expect(backend.requests.some((r) => r.path.endsWith("/conversations/conv-2/agents"))).toBe(
+			false,
+		);
+		await expect(option(page, "Refactor auth flow")).toContainText("No recent activity");
+		await expect(page.locator(".switcher-agent")).toHaveCount(1);
+		// Lost events in that conversation: the agents line says ends may be missing.
+		await expect(option(page, "Live one")).toContainText("ends may be missing");
+	});
+
+	test("an agent list that fails leaves the conversation row as it is", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.override = async (method, path, route) => {
+			if (method === "GET" && path.endsWith("/agents")) {
+				await route.fulfill({ status: 500, body: JSON.stringify({ error: "boom" }) });
+				return true;
+			}
+			return false;
+		};
+		await app.login("alice");
+		await openSwitcher(app, page);
+		await expect(option(page, "Refactor auth flow")).toContainText("Waiting for input");
+		await expect(page.locator(".switcher-option-agents")).toHaveCount(0);
+		await expect(page.locator(".switcher-error")).toHaveCount(0);
+	});
 });

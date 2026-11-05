@@ -178,3 +178,40 @@
     min-height: 3.25rem;
   }
 }
+
+/* Subagents of a conversation with fresh evidence (switcher.ts). */
+.switcher-option-agents {
+  font-size: 0.72rem;
+  color: var(--c-accent);
+}
+.switcher-agent {
+  margin-left: 1.25rem;
+  padding: 0.3rem 0.6rem;
+  min-height: 0;
+  gap: 0.5rem;
+}
+.switcher-agent-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.8rem;
+  color: var(--c-text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.switcher-agent-state {
+  font-size: 0.7rem;
+  color: var(--c-ok);
+  flex-shrink: 0;
+}
+.switcher-agent-more {
+  margin-left: 1.85rem;
+  font-size: 0.72rem;
+  color: var(--c-faint);
+  padding: 0.1rem 0 0.2rem;
+}
+@media (max-width: 768px) {
+  .switcher-agent {
+    min-height: 2.75rem;
+  }
+}
