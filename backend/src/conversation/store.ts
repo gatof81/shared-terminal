@@ -809,11 +809,15 @@ export class ConversationStore {
 	private writeIndex(r: Resident): Promise<void> {
 		const key = `${r.index.stSessionId}/${r.index.cid}`;
 		const prev = this.indexWrites.get(key) ?? Promise.resolve();
-		const next = prev.then(() => this.writeIndexNow(r));
+		// writeIndexNow catches its I/O errors; a throw anyway must neither skip
+		// the writes queued behind it nor surface as an unhandled rejection.
+		const next = prev.catch(() => undefined).then(() => this.writeIndexNow(r));
 		this.indexWrites.set(key, next);
-		void next.finally(() => {
-			if (this.indexWrites.get(key) === next) this.indexWrites.delete(key);
-		});
+		void next
+			.catch(() => undefined)
+			.finally(() => {
+				if (this.indexWrites.get(key) === next) this.indexWrites.delete(key);
+			});
 		return next;
 	}
 
@@ -963,7 +967,10 @@ export class ConversationStore {
 			try {
 				await this.writeIndex(r);
 			} finally {
-				if (this.evicting.get(oldestKey) === r) this.evicting.delete(oldestKey);
+				// Adopted and evicted again meanwhile: a later write of this key is
+				// still queued and the entry must keep answering peekIndex/open.
+				if (this.evicting.get(oldestKey) === r && !this.indexWrites.has(oldestKey))
+					this.evicting.delete(oldestKey);
 			}
 		}
 	}
@@ -1007,14 +1014,9 @@ export class ConversationStore {
 				r.dirty = false;
 				this.resident.delete(key);
 			}
-			// An eviction write already running would recreate the directory
-			// after the rm: drop the leaving entries and wait for every write
-			// of this session to settle first (new ones refuse, see writeIndexNow).
-			for (const [key, r] of Array.from(this.evicting)) {
-				if (!key.startsWith(`${stSessionId}/`)) continue;
-				r.dirty = false;
-				this.evicting.delete(key);
-			}
+			// A write already running would recreate the directory after the
+			// rm: wait for every write of this session to settle first (new ones
+			// refuse, see writeIndexNow).
 			// Until none is left: a write chained while we waited is awaited too
 			// (and refuses to touch the disk, since `purging` holds the id).
 			for (;;) {

@@ -218,7 +218,7 @@ describe("ConversationStore — queue budgets and disk failure", () => {
 });
 
 /** A StoreFs whose index-file writes for `cid` wait on `gate()` while held. */
-function gatedFs(match: (p: string) => boolean, op: "writeFile" | "mkdir" = "writeFile") {
+function gatedFs(match: (p: string) => boolean, op: "writeFile" | "mkdir" | "rm" = "writeFile") {
 	let hold: Promise<void> | null = null;
 	let release: () => void = () => undefined;
 	const held = async (p: unknown) => {
@@ -239,7 +239,11 @@ function gatedFs(match: (p: string) => boolean, op: "writeFile" | "mkdir" = "wri
 			return fs.writeFile(p, d);
 		},
 		rename: (a, b) => fs.rename(a, b),
-		rm: (p, o) => fs.rm(p, o),
+		rm: async (p, o) => {
+			await fs.rm(p, o);
+			// Held AFTER the removal: anything written meanwhile would outlive it.
+			if (op === "rm") await held(p);
+		},
 		stat: (p) => fs.stat(p),
 		readFile: (p, e) => fs.readFile(p, e),
 		readdir: (p) => fs.readdir(p),
@@ -282,6 +286,60 @@ describe("ConversationStore — index writes racing an eviction (concurrency)", 
 		await store.flush("s1", "c0");
 		const onDisk = JSON.parse(await fs.readFile(store.indexPath("s1", "c0"), "utf8"));
 		expect(onDisk.paneId).toBe("%0");
+	});
+
+	it("adopted, then evicted again while the first write is held: the entry keeps answering until its last write lands", async () => {
+		let store!: ConversationStore;
+		const g = gatedFs((p) => p.startsWith(store.indexPath("s1", "c0")));
+		store = new ConversationStore({
+			workspaceRoot: root,
+			fs: g.fs,
+			limits: { residentIndexes: 1 },
+		});
+		await store.open("s1", "c0");
+		store.enqueue("s1", "c0", ev(0));
+		await store.flush("s1", "c0");
+		store.update("s1", "c0", (i) => {
+			i.paneId = "%0";
+		});
+		g.hold();
+		const first = store.open("s1", "c1"); // evicts c0, write #1 held
+		await tick();
+		await store.open("s1", "c0"); // adopted back
+		store.update("s1", "c0", (i) => {
+			i.paneId = "%9";
+		});
+		const second = store.open("s1", "c2"); // evicts c0 again, write #2 queued behind #1
+		await tick();
+		g.release();
+		await first;
+		expect((await store.peekIndex("s1", "c0"))?.paneId).toBe("%9");
+		await second;
+		expect((await store.open("s1", "c0")).paneId).toBe("%9");
+		await store.flush("s1", "c0");
+		const onDisk = JSON.parse(await fs.readFile(store.indexPath("s1", "c0"), "utf8"));
+		expect(onDisk.paneId).toBe("%9");
+	});
+
+	it("a write that becomes due while the purge's rm runs does not touch the disk", async () => {
+		let store!: ConversationStore;
+		const g = gatedFs((p) => p === store.sessionDir("s1"), "rm");
+		store = new ConversationStore({ workspaceRoot: root, fs: g.fs });
+		await store.open("s1", "c0");
+		store.enqueue("s1", "c0", ev(0));
+		await store.flush("s1", "c0");
+		// A reference kept from before the purge (as a flush timer would hold it).
+		const r = (store as unknown as { resident: Map<string, { dirty: boolean }> }).resident.get(
+			"s1/c0",
+		)!;
+		g.hold();
+		const purge = store.purgeSession("s1"); // held inside its rm
+		await tick();
+		r.dirty = true;
+		await (store as unknown as { writeIndex(x: unknown): Promise<void> }).writeIndex(r);
+		g.release();
+		await purge;
+		await expect(fs.stat(store.sessionDir("s1"))).rejects.toThrow();
 	});
 
 	it("two writes of one index land in order: an older snapshot never replaces a newer one", async () => {
