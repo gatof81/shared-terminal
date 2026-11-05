@@ -76,8 +76,6 @@
 }
 .chat-summary-sub {
   display: flex;
-  align-items: center;
-  gap: 0.4rem;
   min-width: 0;
 }
 .chat-back {
@@ -1118,16 +1116,15 @@
   }
 }
 @media (max-width: 768px) {
-  .chat-thread-title {
+  /* The summary bar above already shows this conversation's name and
+     status: the head drops both (one status, not two) and keeps its
+     sub-line (archived · version · events) next to its tools. */
+  .chat-thread-name {
     display: none;
   }
   .chat-thread-head {
     padding: 0.25rem 0.75rem;
-    justify-content: flex-end;
   }
-  /* The summary bar above already shows this conversation's status (and,
-     on a phone, the head's title is hidden): one status, not two. The head
-     keeps only its tools (Agents, connection, ⋯). */
   .chat-thread-tools .chat-status {
     display: none;
   }
