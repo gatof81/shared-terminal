@@ -142,7 +142,7 @@ it. Until then N17-project stays Option A (INCONCLUSIVE).
 
 ## Local results (pure simulated; no CLI)
 
-`python3 test_obs_unified.py` → **143 passed** (incl. RealSys round-4 R3-1…R3-4: alternate screen / invalidation / OSC / UTF-8 split / PTY geometry+ctty via a throwaway child / spawn stage accreditation — 10/10 targeted mutations killed; RealSys round-3: **P0-1** key_to_bytes
+`python3 test_obs_unified.py` → **158 passed** (incl. closing round: ?2026 synchronized output fail-closed, ED 3 = scrollback only, per-control `cleanup_accredited` in `run_three_controls`, preflight logic — 6/6 targeted mutations killed; RealSys round-4 R3-1…R3-4: alternate screen / invalidation / OSC / UTF-8 split / PTY geometry+ctty via a throwaway child / spawn stage accreditation — 10/10 targeted mutations killed; RealSys round-3: **P0-1** key_to_bytes
 name→bytes/unmapped-raises; **P0-2** ScreenState current-frame + dismissed-dialog-gone + the real
 `pointer_option` on the frame; **P0-3** poll_ns_ready ready/after-N/owner-death/timeout; **P1-4**
 scan_proc_pidns + ns_is_empty unverifiable-fail-closed; RealSys over real pipes + injected /proc) ·
@@ -402,3 +402,23 @@ answer it, under the GO/NO-GO above. Until a real run passes all rows, N14 stays
   INCONCLUSIVE. Regressions advance the clock specifically between reads and around the decision (incl.
   time passing after the decision with NO further read ⇒ partial, and before the first read ⇒ partial).
   Fully mock-verified.
+
+### Closing F1 round (owner review of e34845a) — status
+- **CSI ?2026 synchronized output** is no longer treated as non-visual: between `?2026h` and `?2026l`
+  the grid holds an update the terminal has NOT presented, so `ScreenState.frame()` is None and
+  `RealSys.pane()` waits at most `sync_wait` (0.5 s) for the end of the update, else returns None. The
+  trust-gate therefore gets `""` and `revalidate_before_enter` never says `ok` off an intermediate frame.
+- **CSI 3J** erases the scrollback only (xterm): the visible grid is untouched, and it never
+  re-establishes the cells of an invalid frame (only ED 2 does).
+- **`run_three_controls`** keeps `cleanup_accredited` per control (`true`/`false`/`null`, booleans only)
+  on every return, aborts included.
+- **`preflight_infra.py`** — infrastructure preflight WITHOUT Claude (throwaway Python payload):
+  spawn → ns readiness → check_isolation → PTY frame → reap/namespace verification, JSON of booleans.
+  It REFUSES inside a Shared Terminal session or container. Not executed on a disposable host yet:
+  on the authoring host it refused (`shared-terminal-session`).
+- **Isolation limits detected (read-only, on the authoring host):** `apparmor_restrict_unprivileged_userns=1`
+  (Ubuntu 24.04 default) — unprivileged `unshare --map-root-user` is expected to be blocked unless an
+  AppArmor profile allows it or the run is root, in which case spawn/readiness fails closed
+  (INCONCLUSIVE); and `ip` (iproute2) is absent — `check_isolation` then returns False (fail closed).
+  The disposable host must have iproute2 and permit user namespaces.
+

@@ -1540,5 +1540,173 @@ class R33SpawnCleanupAccreditation(unittest.TestCase):
         self.assertIsNone(cm.exception.owner)
 
 
+
+# ── closing review of e34845a: ?2026 synchronized output, ED 3, per-control cleanup ──
+class R5SynchronizedOutput(unittest.TestCase):
+    """?2026h…?2026l: between h and l the update is NOT presented; no frame (and so no Enter) from it."""
+
+    YES = ("Do you trust the files in this folder?\r\n"
+           "❯ 1. Yes, I trust this folder\r\n  2. No, exit\r\n")
+
+    def test_frame_none_while_update_open(self):
+        s = E.ScreenState(rows=6, cols=60)
+        s.feed("\x1b[?2026h" + self.YES)
+        self.assertIsNone(s.frame())                          # intermediate, never presented
+        s.feed("\x1b[?2026l")
+        self.assertIn("Yes, I trust this folder", s.frame())  # presented now
+
+    def test_intermediate_yes_never_visible_when_final_differs(self):
+        tg = _trustgate()
+        s = E.ScreenState(rows=6, cols=60)
+        s.feed("\x1b[?2026h" + self.YES)                     # mid-update the grid says "yes"…
+        self.assertIsNone(tg.pointer_option(s.frame() or ""))
+        s.feed("\x1b[2J\x1b[HWorking\x1b[?2026l")             # …but the presented frame never did
+        self.assertEqual(s.frame(), "Working")
+        self.assertIsNone(tg.pointer_option(s.frame()))
+
+    def test_realsys_pane_refuses_open_update_and_gate_will_not_enter(self):
+        tg = _trustgate()
+        rfd, wfd = os.pipe()
+        try:
+            rs = E.RealSys("/c", "sha", "/mk")
+            rs.sync_wait = 0                                  # deterministic: no waiting
+            rs._inst["s"] = {"master": rfd, "screen": E.ScreenState(rows=6, cols=60)}
+            os.write(wfd, ("\x1b[?2026h" + self.YES).encode())
+            frame = rs.pane("s")
+            self.assertIsNone(frame)
+            # exactly what real_trust_gate passes to the gate (`pane() or ""`): Enter is NOT authorised
+            self.assertNotEqual(tg.revalidate_before_enter(frame or "", False)[0], "ok")
+            os.write(wfd, b"\x1b[?2026l")                     # the update completes
+            self.assertEqual(tg.pointer_option(rs.pane("s")), "yes")
+        finally:
+            os.close(rfd)
+            os.close(wfd)
+
+    def test_reset_clears_open_update(self):
+        s = E.ScreenState(rows=4, cols=20)
+        s.feed("\x1b[?2026hx\x1bcok")
+        self.assertEqual(s.frame(), "ok")
+
+
+class R5EraseScrollback(unittest.TestCase):
+    """ED 3 erases scrollback only (xterm): the visible grid is untouched and nothing becomes known."""
+
+    def test_3J_keeps_visible_grid(self):
+        s = E.ScreenState(rows=4, cols=20)
+        s.feed("keep\x1b[3J")
+        self.assertEqual(s.frame(), "keep")
+
+    def test_3J_does_not_restore_an_invalid_frame(self):
+        s = E.ScreenState(rows=4, cols=20)
+        s.feed("old\x1b[2L")                                  # invalid
+        s.feed("\x1b[3J\x1b[1;1H")                            # scrollback erase + CUP: cells NOT known
+        self.assertIsNone(s.frame())
+        s.feed("\x1b[2J")                                     # a real full clear does
+        self.assertIsNotNone(s.frame())
+
+
+class R5CleanupPerControl(unittest.TestCase):
+    """run_three_controls keeps each control's cleanup outcome, aborts included — booleans only."""
+
+    def test_abort_keeps_cleanup_of_controls_run_so_far(self):
+        r = E.run_three_controls(runner_of({
+            "positive": {**ok(e2e_positive(), FIXTURE_DIGEST), "cleanup_accredited": True},
+            "negative": {"ok": False, "reason": "cleanup-not-reaped", "cleanup_accredited": False,
+                         "instance": "negative-abc"}}))
+        self.assertTrue(r["aborted"])
+        self.assertEqual(r["cleanup_accredited"], {"positive": True, "negative": False})
+
+    def test_success_reports_all_three(self):
+        res = {"positive": ok(e2e_positive(), FIXTURE_DIGEST), "negative": ok(e2e_negative(), FIXTURE_DIGEST),
+               "absent": ok(e2e_absent(), None)}
+        for k in res:
+            res[k]["cleanup_accredited"] = True
+        r = E.run_three_controls(runner_of(res))
+        self.assertFalse(r["aborted"])
+        self.assertEqual(r["cleanup_accredited"], {"positive": True, "negative": True, "absent": True})
+
+    def test_missing_or_non_boolean_is_none_not_true(self):
+        r = E.run_three_controls(runner_of({
+            "positive": {"ok": False, "reason": "spawn-failed", "cleanup_accredited": "yes",
+                         "instance": "p"}}))
+        self.assertEqual(r["cleanup_accredited"], {"positive": None})
+        r = E.run_three_controls(runner_of({"positive": {"ok": False, "reason": "x"}}))
+        self.assertEqual(r["cleanup_accredited"], {"positive": None})
+
+
+
+class PreflightInfra(unittest.TestCase):
+    """The no-Claude infrastructure preflight: refuses inside Shared Terminal sessions / containers,
+    and reports cleanup per spawn stage — exercised with a fake RealSys, nothing is spawned."""
+
+    def setUp(self):
+        import preflight_infra as PF
+        self.PF = PF
+
+    def test_refuses_inside_shared_terminal_session(self):
+        self.assertEqual(self.PF.refusal({"SESSION_ID": "x"}, dockerenv="/nonexistent"),
+                         "shared-terminal-session:SESSION_ID")
+        self.assertEqual(self.PF.refusal({"ST_INGEST_TOKEN": "t"}, dockerenv="/nonexistent"),
+                         "shared-terminal-session:ST_INGEST_TOKEN")
+
+    def test_refuses_inside_container(self):
+        f = tempfile.NamedTemporaryFile(delete=False)
+        f.close()
+        try:
+            self.assertEqual(self.PF.refusal({}, dockerenv=f.name), "inside-container")
+        finally:
+            os.unlink(f.name)
+        self.assertIsNone(self.PF.refusal({}, dockerenv="/nonexistent"))
+
+    class FakeRS:
+        def __init__(self, exc=None, frames=("", "x\nPREFLIGHT-READY"), iso=True, reaped=True):
+            self.exc, self.frames, self.iso, self.reaped = exc, list(frames), iso, reaped
+            self.reaps, self.teardowns = [], []
+
+        def spawn(self, argv, sock):
+            assert "claude" not in " ".join(argv)               # never Claude
+            assert argv[0] == "unshare" and "--kill-child" in argv
+            if self.exc:
+                raise self.exc
+            return {"proc": object(), "ns_pid": "P", "ns_net": "N"}
+
+        def check_isolation(self, owner):
+            return self.iso
+
+        def pane(self, sock):
+            return self.frames.pop(0) if self.frames else None
+
+        def reap(self, owner):
+            self.reaps.append(owner)
+            return self.reaped
+
+        def teardown(self, sock):
+            self.teardowns.append(sock)
+
+    def test_success_report(self):
+        rs = self.FakeRS()
+        r = self.PF.run(rs, ready_timeout=2)
+        self.assertEqual(r, {"spawned": True, "stage": None, "ns_identity": True, "isolation": True,
+                             "pty_frame_ok": True, "cleanup_accredited": True})
+        self.assertEqual((len(rs.reaps), rs.teardowns), (1, ["preflight"]))
+
+    def test_after_launch_failure_reaps_by_handle(self):
+        rs = self.FakeRS(exc=E.SpawnError("after-launch", owner={"proc": "p"}), reaped=False)
+        r = self.PF.run(rs)
+        self.assertEqual((r["stage"], r["cleanup_accredited"]), ("after-launch", False))
+        self.assertEqual(rs.reaps, [{"proc": "p"}])
+
+    def test_before_launch_failure_is_clean_without_reap(self):
+        rs = self.FakeRS(exc=E.SpawnError("before-launch"))
+        r = self.PF.run(rs)
+        self.assertEqual((r["stage"], r["cleanup_accredited"], rs.reaps), ("before-launch", True, []))
+
+    def test_isolation_failure_still_reaps(self):
+        rs = self.FakeRS(iso=False)
+        r = self.PF.run(rs, ready_timeout=2)
+        self.assertFalse(r["isolation"])
+        self.assertEqual(len(rs.reaps), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

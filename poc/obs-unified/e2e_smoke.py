@@ -257,7 +257,8 @@ class ScreenState:
     _ALT_MODES = {"47", "1047", "1049"}
     # private modes that change only input/reporting/cursor shape — no effect on the cell grid
     _NONVISUAL_PRIVATE = {"1", "12", "25", "1000", "1002", "1003", "1004", "1005", "1006", "1015",
-                          "2004", "2026"}
+                          "2004"}
+    _SYNC_MODE = "2026"
     _MAX_PENDING = 4096
 
     def __init__(self, rows=None, cols=None):
@@ -269,6 +270,9 @@ class ScreenState:
         self._grid_known = self._cursor_known = True
         self._saved_cursor = (0, 0)
         self._primary = None              # saved primary buffer while the alternate screen is shown
+        # Synchronized output (CSI ?2026h … ?2026l): between h and l the terminal has NOT presented the
+        # update yet — the grid holds an intermediate frame the user never saw. frame() refuses it.
+        self.in_sync = False
         self._dec = codecs.getincrementaldecoder("utf-8")("replace")
         self._pending = ""                # decoded text held back (an incomplete escape)
 
@@ -314,7 +318,10 @@ class ScreenState:
             row[i] = " "
 
     def _erase_display(self, mode):
-        if mode in (2, 3):
+        if mode == 3:
+            return                                    # xterm: erase saved lines (scrollback) only — the
+            #                                           visible grid is untouched, so nothing becomes known
+        if mode == 2:
             self.grid = self._blank()
             self._grid_known = True                   # a full clear makes the CELLS known again
             self._recheck()
@@ -333,6 +340,7 @@ class ScreenState:
         self.valid = self._grid_known = self._cursor_known = True
         self._saved_cursor = (0, 0)
         self._primary = None
+        self.in_sync = False
 
     def _set_alt(self, enter):
         if enter and self._primary is None:
@@ -350,6 +358,8 @@ class ScreenState:
         for m in modes:
             if m in self._ALT_MODES:
                 self._set_alt(final == "h")
+            elif m == self._SYNC_MODE:
+                self.in_sync = final == "h"
             elif m not in self._NONVISUAL_PRIVATE:
                 self._invalidate()                    # a mode with effects we don't model
 
@@ -491,9 +501,13 @@ class ScreenState:
         return "\n".join(lines)
 
     def frame(self):
-        """The CURRENT frame, or None when the visible buffer has seen a sequence we cannot model
-        (fail-closed: callers treat None as a failed capture)."""
-        return self.render() if self.valid else None
+        """The CURRENT presented frame, or None when the visible buffer has seen a sequence we cannot
+        model OR a synchronized update (?2026h) is still open — its grid is intermediate and was never
+        presented, so the trust-gate must not read a pointer off it (fail-closed: callers treat None
+        as a failed capture)."""
+        if not self.valid or self.in_sync:
+            return None                               # unvouched, or an update not yet presented
+        return self.render()
 
 
 def fixture_digest(path):
@@ -764,10 +778,16 @@ def run_three_controls(runner):
     base = {"controls": {}, "verdict": ("inconclusive", None), "differential_validated": False,
             "positive_validated": False, "aborted": False, "reason": None}
     snaps, digs = {}, {}
+    # Per-control cleanup outcome, kept on EVERY return (aborts included): only the boolean the runner
+    # verified (None = the runner reported nothing) — no paths, ids or pane text.
+    cleanup = {}
     for kind in ("positive", "negative", "absent"):
         res = runner(kind)
+        ca = res.get("cleanup_accredited")
+        cleanup[kind] = ca if isinstance(ca, bool) else None
         if not res.get("ok"):
-            return {**base, "aborted": True, "reason": f"{kind}:{res.get('reason', 'capture-error')}"}
+            return {**base, "aborted": True, "reason": f"{kind}:{res.get('reason', 'capture-error')}",
+                    "cleanup_accredited": cleanup}
         snaps[kind], digs[kind] = res["snapshot"], res.get("digest")
     # Blocker 3: INDEPENDENTLY validate the positive control; require its digest to equal both its
     # own independently-hashed fixture AND the negative run's (same fixture bytes in both).
@@ -783,7 +803,7 @@ def run_three_controls(runner):
     return {"controls": controls, "verdict": V.verdict(neg),
             "differential_validated": differential is not None, "positive_validated": pos_ok,
             "controls_consistent": cons_ok, "consistency_reason": cons_reason,
-            "aborted": False, "reason": None}
+            "aborted": False, "reason": None, "cleanup_accredited": cleanup}
 
 
 # ── RealSys: the actual IO (pragma: no cover — not run during the canary / before operational GO) ──
@@ -795,6 +815,7 @@ class RealSys:   # pragma: no cover
 
     def __init__(self, cli, want_sha, probe_marketplace, want_cli="2.1.314"):
         self.cli, self.want_sha, self.probe_marketplace, self.want_cli = cli, want_sha, probe_marketplace, want_cli
+        self.sync_wait = 0.5   # max seconds pane() waits for an open ?2026 update to be presented
         self._inst = {}        # sock -> owner handle {proc, master, ns_pid, ns_net, host_net, host_pid, screen}
 
     def get_version(self):
@@ -912,6 +933,7 @@ class RealSys:   # pragma: no cover
         dismissed dialog would linger and fool `pointer_option`/stability/disappearance. A read error
         ⇒ None (fail closed)."""
         import select
+        import time
         h = self._inst.get(sock)
         if h is None:
             return None
@@ -921,9 +943,20 @@ class RealSys:   # pragma: no cover
                 if not chunk:
                     break
                 h["screen"].feed(chunk)
+            # ?2026: if a synchronized update is still open, wait (bounded) for its end; if it does not
+            # arrive, return None — never the intermediate frame.
+            deadline = time.monotonic() + self.sync_wait
+            while h["screen"].in_sync:
+                left = deadline - time.monotonic()
+                if left <= 0 or not select.select([h["master"]], [], [], left)[0]:
+                    break
+                chunk = os.read(h["master"], 65536)
+                if not chunk:
+                    break
+                h["screen"].feed(chunk)
         except OSError:
             return None
-        return h["screen"].frame()            # None if the frame cannot be vouched for (R3-1)
+        return h["screen"].frame()            # None if unvouched or mid-update (R3-1, ?2026)
 
     def _send(self, sock, key):
         """P0-1: translate the key NAME to real terminal bytes before writing to the PTY (never the
