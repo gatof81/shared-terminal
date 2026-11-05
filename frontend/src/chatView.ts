@@ -87,9 +87,15 @@ import {
 	showToast,
 } from "./main.js";
 import { renderMarkdown } from "./markdown.js";
-import { showTerminalTab } from "./sessionCore.js";
+import { renderSessionList, showTerminalTab } from "./sessionCore.js";
 import { button, el, stateBox } from "./ui.js";
-import { readLastConversation, writeHistoryHint, writeLastConversation } from "./viewPolicy.js";
+import {
+	readLastConversation,
+	readLastConversationTitle,
+	writeHistoryHint,
+	writeLastConversation,
+	writeLastConversationTitle,
+} from "./viewPolicy.js";
 import {
 	getView,
 	onSessionSync,
@@ -414,6 +420,7 @@ async function openConversation(
 	restorePending = false;
 	selectedCid = cid;
 	writeLastConversation(sid, cid);
+	rememberLastTitle(sid);
 	threadError = "";
 	mobilePane = "thread";
 	if (isMobile()) agentsOpen = false;
@@ -872,7 +879,24 @@ function focusedListControl(): string | null {
 	return null;
 }
 
+/**
+ * Keep the sidebar's "↳ last conversation" link named after the current title
+ * of this project's last conversation (a rename included): written only when
+ * it changed, then the sidebar re-renders (a DOM pass, no request).
+ */
+function rememberLastTitle(sid: string): void {
+	const cid = readLastConversation(sid);
+	if (cid === null) return;
+	const row = rowOf(cid);
+	if (!row) return;
+	const title = titleOf(row);
+	if (readLastConversationTitle(sid, cid) === title) return;
+	writeLastConversationTitle(sid, cid, title);
+	renderSessionList();
+}
+
 function renderListInner(): void {
+	if (list.status === "loaded" && stateSessionId !== null) rememberLastTitle(stateSessionId);
 	if (list.status === "idle" || list.status === "loading") {
 		listEl.appendChild(skeletonList());
 		return;

@@ -59,6 +59,7 @@ const api = vi.hoisted(() => ({
 vi.mock("./api.js", () => api);
 const core = vi.hoisted(() => ({
 	refreshSessions: vi.fn(async () => {}),
+	renderSessionList: vi.fn(),
 	showTerminalTab: vi.fn(
 		(_tabId: string | null): "opened" | "not-running" | "unknown" | "failed" => "opened",
 	),

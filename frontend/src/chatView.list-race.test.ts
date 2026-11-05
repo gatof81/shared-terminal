@@ -42,7 +42,11 @@ const api = vi.hoisted(() => ({
 	openConversationSocket: vi.fn(() => ({ follow: vi.fn(), close: vi.fn() })),
 }));
 vi.mock("./api.js", () => api);
-vi.mock("./sessionCore.js", () => ({ refreshSessions: vi.fn(async () => {}) }));
+vi.mock("./sessionCore.js", () => ({
+	refreshSessions: vi.fn(async () => {}),
+	renderSessionList: vi.fn(),
+	showTerminalTab: vi.fn(() => "opened"),
+}));
 
 type ViewSwitch = typeof import("./viewSwitch.js");
 let vs: ViewSwitch;

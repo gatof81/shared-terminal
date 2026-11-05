@@ -4,9 +4,11 @@ import {
 	forgetSession,
 	readHistoryHint,
 	readLastConversation,
+	readLastConversationTitle,
 	readViewPref,
 	writeHistoryHint,
 	writeLastConversation,
+	writeLastConversationTitle,
 	writeViewPref,
 } from "./viewPolicy.js";
 
@@ -73,5 +75,24 @@ describe("per-session memory", () => {
 		expect(readViewPref("s1")).toBeNull();
 		expect(readHistoryHint("s1")).toBeNull();
 		expect(readLastConversation("s1")).toBeNull();
+	});
+});
+
+describe("last conversation title (sidebar link)", () => {
+	beforeEach(() => localStorage.clear());
+	it("is read back only for the conversation it was written for", () => {
+		writeLastConversationTitle("s1", "c1", "Refactor auth");
+		expect(readLastConversationTitle("s1", "c1")).toBe("Refactor auth");
+		expect(readLastConversationTitle("s1", "c2")).toBeNull();
+		expect(readLastConversationTitle("s2", "c1")).toBeNull();
+	});
+	it("keeps a title with newlines or colons intact", () => {
+		writeLastConversationTitle("s1", "c1", "a: b\nc");
+		expect(readLastConversationTitle("s1", "c1")).toBe("a: b\nc");
+	});
+	it("is dropped with the session's other memory", () => {
+		writeLastConversationTitle("s1", "c1", "x");
+		forgetSession("s1");
+		expect(readLastConversationTitle("s1", "c1")).toBeNull();
 	});
 });

@@ -55,7 +55,7 @@ import { renderSidebarObservables } from "./myGroups.js";
 import { openBootstrapLogModal } from "./newSession.js";
 import { openObserveModalFor } from "./observeModal.js";
 import { openPortsModalFor } from "./ports.js";
-import { clear as clearRoute, type Route, readRoute } from "./router.js";
+import { clear as clearRoute, type Route, readRoute, routeHash } from "./router.js";
 import {
 	type SessionActionContext,
 	type SessionActionId,
@@ -65,7 +65,13 @@ import {
 import { badgeFor, clearBadge, recordOutput } from "./tabActivity.js";
 import { openTerminalSession, type SessionStatus } from "./terminal.js";
 import { currentShell } from "./uiShell.js";
-import { readHistoryHint, readViewPref, writeHistoryHint } from "./viewPolicy.js";
+import {
+	readHistoryHint,
+	readLastConversation,
+	readLastConversationTitle,
+	readViewPref,
+	writeHistoryHint,
+} from "./viewPolicy.js";
 import {
 	applyRouteView,
 	beginLanding,
@@ -475,6 +481,26 @@ export function renderSessionList() {
 		more.addEventListener("click", () => openSessionMenu(s, more));
 		actions.appendChild(more);
 		item.appendChild(actions);
+
+		// One click back to this project's last conversation, from anywhere.
+		// Named from what Chat remembered (no request); no status shown —
+		// knowing it would mean asking every project.
+		const lastCid = s.status === "failed" ? null : readLastConversation(s.sessionId);
+		const lastTitle = lastCid ? readLastConversationTitle(s.sessionId, lastCid) : null;
+		if (lastCid && lastTitle) {
+			const last = document.createElement("button");
+			last.type = "button";
+			last.className = "session-last-conv";
+			last.dataset.cid = lastCid;
+			last.textContent = `↳ ${lastTitle}`;
+			last.title = `Open the last conversation: ${lastTitle}`;
+			last.setAttribute("aria-label", `Open the last conversation in ${s.name}: ${lastTitle}`);
+			last.addEventListener("click", () => {
+				const hash = routeHash({ sessionId: s.sessionId, view: "chat", detail: lastCid });
+				if (window.location.hash !== hash) window.location.hash = hash;
+			});
+			item.appendChild(last);
+		}
 
 		sessionList.appendChild(item);
 	}
