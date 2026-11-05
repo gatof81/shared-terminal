@@ -558,7 +558,7 @@ class FakeSys:
 
 def mk_runner(sysio):
     return E.make_runner(sysio, cli="/bin/claude", scratch=tempfile.mkdtemp(),
-                         trust_gate=lambda s, sock, pg: {"state": sysio.trust},
+                         trust_gate=lambda s, sock, pg, on_poll: (on_poll(), {"state": sysio.trust})[1],
                          clock=ManualClock(), settle_polls=2)
 
 
@@ -661,6 +661,100 @@ class E2ERunnerErrorPaths(unittest.TestCase):
         self.assertTrue(r["ok"])
         self.assertTrue(r["digest"])                                # independent fixture hash
         self.assertEqual(r["snapshot"]["attempt"], "N14")
+
+    def test_d3_capture_happens_before_trust_gate(self):
+        order = []
+
+        class FS(FakeSys):
+            def pane(self, sock):
+                order.append("pane")
+                return super().pane(sock)
+
+        def tg(sysio, sock, pg, on_poll):
+            order.append("trust")
+            on_poll()
+            return {"state": "confirmed"}
+
+        r = E.make_runner(FS(None), cli="/c", scratch=tempfile.mkdtemp(), trust_gate=tg,
+                          clock=ManualClock(), settle_polls=1)("negative")
+        self.assertTrue(r["ok"])
+        self.assertEqual(order[0], "pane")                          # D3: capture BEFORE the gate
+        self.assertLess(order.index("pane"), order.index("trust"))
+
+
+class RealSysLogic(unittest.TestCase):
+    """D1/D2/D4/D5 real decision logic — verified by MOCKS, not by FakeSys returning True."""
+
+    def test_d1_interpret_isolation(self):
+        self.assertTrue(E.interpret_isolation(["lo"], True))        # only lo + outbound blocked
+        self.assertFalse(E.interpret_isolation(["lo", "eth0"], True))   # extra interface
+        self.assertFalse(E.interpret_isolation(["lo"], False))      # outbound SUCCEEDED
+        self.assertFalse(E.interpret_isolation([], True))           # nothing captured
+
+    def test_d2_supervise_reap_sigterm_enough(self):
+        import signal
+        sent, state = [], {"alive": True}
+
+        def alive(p):
+            return state["alive"]
+
+        def sig(p, s):
+            sent.append(s)
+            state["alive"] = False                                  # dies on SIGTERM
+
+        self.assertTrue(E.supervise_reap(123, signal_group=sig, group_alive=alive, sleep=lambda s: None))
+        self.assertEqual(sent, [signal.SIGTERM])                    # no SIGKILL needed
+
+    def test_d2_supervise_reap_escalates_to_sigkill(self):
+        import signal
+        sent = []
+
+        def sig(p, s):
+            sent.append(s)
+
+        def alive(p):
+            return signal.SIGKILL not in sent                       # dies only after SIGKILL
+
+        self.assertTrue(E.supervise_reap(123, signal_group=sig, group_alive=alive, sleep=lambda s: None,
+                                         term_grace=0.4, kill_grace=0.4, tick=0.2))
+        self.assertIn(signal.SIGKILL, sent)
+
+    def test_d2_supervise_reap_fails_if_never_dies(self):
+        self.assertFalse(E.supervise_reap(123, signal_group=lambda p, s: None, group_alive=lambda p: True,
+                                          sleep=lambda s: None, term_grace=0.4, kill_grace=0.4, tick=0.2))
+
+    def test_d2_supervise_reap_none_pgid(self):
+        self.assertFalse(E.supervise_reap(None, signal_group=lambda p, s: None, group_alive=lambda p: False, sleep=lambda s: None))
+
+    def test_d4_verify_cli(self):
+        self.assertTrue(E.verify_cli(get_version=lambda: "2.1.314", get_sha=lambda: "abc", want_sha="abc"))
+        self.assertFalse(E.verify_cli(get_version=lambda: "2.1.308", get_sha=lambda: "abc", want_sha="abc"))
+        self.assertFalse(E.verify_cli(get_version=lambda: "2.1.314", get_sha=lambda: "zzz", want_sha="abc"))
+
+        def boom():
+            raise RuntimeError
+
+        self.assertFalse(E.verify_cli(get_version=boom, get_sha=lambda: "abc", want_sha="abc"))
+
+    def _sum(self, pos, neg, ab):
+        return {"positive": {"skills_dir": pos}, "negative": {"skills_dir": neg}, "absent": {"skills_dir": ab}}
+
+    def test_d5_consistency(self):
+        digs = {"positive": "d", "negative": "d", "absent": None}
+        self.assertTrue(E.check_controls_consistency(self._sum(["loaded"], ["blocked"], []), digs)[0])
+        self.assertFalse(E.check_controls_consistency(self._sum(["blocked"], ["blocked"], []), digs)[0])      # pos not loaded
+        self.assertFalse(E.check_controls_consistency(self._sum(["loaded"], ["loaded", "blocked"], []), digs)[0])  # neg loaded
+        self.assertFalse(E.check_controls_consistency(self._sum(["loaded"], ["blocked"], ["blocked"]), digs)[0])   # absent active
+
+
+class E2EConsistency(unittest.TestCase):
+    def test_contradicting_control_blocks_blocked_low(self):
+        # absent shows a block (and a digest) -> inconsistent -> inconclusive, NOT blocked-low.
+        r = E.run_three_controls(runner_of({"positive": ok(e2e_positive(), FIXTURE_DIGEST),
+                                            "negative": ok(e2e_negative(), FIXTURE_DIGEST),
+                                            "absent": ok(e2e_negative(), FIXTURE_DIGEST)}))
+        self.assertFalse(r["controls_consistent"])
+        self.assertEqual(r["verdict"][0], "inconclusive")
 
 
 if __name__ == "__main__":

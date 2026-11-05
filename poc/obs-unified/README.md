@@ -140,7 +140,7 @@ it. Until then N17-project stays Option A (INCONCLUSIVE).
 
 ## Local results (pure simulated; no CLI)
 
-`python3 test_obs_unified.py` → **65 passed** (round-2: B1 guard precedence on incremental
+`python3 test_obs_unified.py` → **74 passed** (round-2: B1 guard precedence on incremental
 contradictory reads; B2 authority matrix — pane cannot prove session.start/guard/trust/attribution,
 unknown signal & foreign ctx rejected, legitimate combos pass; B3 probe identity — arbitrary/wrong
 probe/wrong inst/missing inst rejected, correct accepted; B4 attribution needs fixture+differential,
@@ -261,3 +261,25 @@ verifiable. A NO-GO on isolation/identity keeps N14 at **INCONCLUSIVE** — we d
 Only after a clean smoke showing (positive ⇒ loaded) and (negative ⇒ blocked + no load +
 `coverage:full`) would a verdict-layer rule for N14 `blocked` be worth proposing — never before, and
 the N17-project C3/C4 causal rule stays out of scope here.
+
+
+## RealSys blockers — mock-verified vs. needs-real-validation (owner D1–D5)
+
+The real IO logic is now in PURE, mocked-tested functions (a test never trusts a stub returning
+True); the actual kernel/CLI behaviour still needs a real run to confirm.
+
+| Path | Verified now with mocks/simulated | Still needs REAL validation (a run) |
+| --- | --- | --- |
+| **D1 isolation** | `interpret_isolation(links, outbound_blocked)`: only `lo` + outbound blocked ⇒ True; extra iface / outbound-ok / empty ⇒ False | that `nsenter` into THIS instance's net ns really yields only `lo` and a failing outbound connect |
+| **D2 reap** | `supervise_reap`: SIGTERM→wait→SIGKILL→exit/timeout; never-dies ⇒ False; None pgid ⇒ False; group-based (no PID==PGID) | that `os.killpg` + the `/proc` group scan actually reap the `--pid` namespace on the host |
+| **(1) runner** | error paths spawn/isolation/capture/cleanup; trust-aborted recorded not crash; happy ⇒ snapshot+digest | the real `unshare`+tmux launch and pane/debug/probe wiring |
+| **(2) per-instance** | unique inst/sock/pgid; isolation-before + reap-after per instance; fail-closed via runner | that namespaces are truly per-instance and don't leak between controls on the host |
+| **(3) independent positive** | `validate_positive` (authority + real `skills-dir:loaded`); `fixture_digest` independent + content-sensitive; digest cross-check pos==neg | that the positive control (no policy) actually LOADS the fixture on 2.1.314 |
+| **D3 pre-trust capture** | capture tick ordered BEFORE `trust_gate`; late read ⇒ coverage partial (B4) | that a real pre-trust skills-dir decision is caught by the parallel loop |
+| **D4 e2e config** | `verify_cli` (version + sha, fail-closed); orchestrator entry wiring | that `CLAUDE_CODE_MANAGED_SETTINGS_PATH` really seats the probe/guard AND that `strictKnownMarketplaces` ENFORCES skills-dir (OPEN since inv2 §4-bis / D3) |
+| **D5 consistency** | `check_controls_consistency`: positive loaded-not-blocked, negative blocked-not-loaded, absent empty; contradiction ⇒ inconclusive | that the three real runs actually produce loaded / blocked / none as expected |
+
+The single biggest open real question remains whether `strictKnownMarketplaces` enforces the
+skills-dir block via the managed-settings mechanism available locally — the smoke is designed to
+answer it, under the GO/NO-GO above. Until a real run passes all rows, N14 stays INCONCLUSIVE and
+`blocked-low` is the ceiling.

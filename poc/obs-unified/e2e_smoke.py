@@ -104,6 +104,67 @@ def _summary(snap):
             "skills_dir": sorted({e["signal"] for e in snap.get("events", []) if e["concern"] == "skills-dir"})}
 
 
+# ── pure, testable decision logic for the REAL IO (so a test verifies the RESULT, not that a stub
+#    returned True) ──
+def interpret_isolation(link_names, outbound_blocked):
+    """D1: isolation holds IFF the instance's net namespace shows ONLY `lo` (and `lo` is present)
+    AND an outbound connect was BLOCKED. Empty/None link set, any extra interface, or a successful
+    outbound connect ⇒ False (fail-closed)."""
+    names = {n.strip() for n in (link_names or []) if n and n.strip()}
+    return bool(names) and names == {"lo"} and bool(outbound_blocked)
+
+
+def supervise_reap(pgid, *, signal_group, group_alive, sleep, term_grace=5.0, kill_grace=3.0, tick=0.2):
+    """D2: ACTIVELY terminate the isolated process GROUP and WAIT for its disappearance. SIGTERM, wait
+    up to term_grace; if still alive SIGKILL, wait up to kill_grace; reaped IFF the group is gone at
+    the end. Operates on the GROUP (never assumes PID == PGID); `group_alive(pgid)->bool` and
+    `signal_group(pgid, sig)` are injected. A None pgid (identity unknown) is never 'reaped'."""
+    import signal as _sig
+    if pgid is None:
+        return False
+    for sig, grace in ((_sig.SIGTERM, term_grace), (_sig.SIGKILL, kill_grace)):
+        try:
+            signal_group(pgid, sig)
+        except (ProcessLookupError, OSError):
+            pass
+        waited = 0.0
+        while waited < grace:
+            if not group_alive(pgid):
+                return True
+            sleep(tick)
+            waited += tick
+    return not group_alive(pgid)
+
+
+def verify_cli(*, get_version, get_sha, want_version="2.1.314", want_sha=None):
+    """D4: the CLI must be the pinned version AND (if a sha is pinned) match the binary sha. Any
+    probe error or mismatch ⇒ False (fail-closed). Pure over injected probes."""
+    try:
+        if get_version() != want_version:
+            return False
+        if want_sha is not None and get_sha() != want_sha:
+            return False
+    except Exception:
+        return False
+    return True
+
+
+def check_controls_consistency(summaries, digests):
+    """D5: the three controls must each match expectations before any blocked-low is accepted.
+      positive — skills-dir LOADED, not blocked, has a fixture digest;
+      negative — skills-dir BLOCKED, not loaded, has a fixture digest;
+      absent   — NO skills-dir signal at all, no fixture digest.
+    Returns (ok, reason). A contradiction (e.g. negative loaded, absent shows load/block) ⇒ not ok."""
+    pos, neg, ab = (set(summaries[k]["skills_dir"]) for k in ("positive", "negative", "absent"))
+    if "loaded" not in pos or "blocked" in pos or not digests.get("positive"):
+        return False, "positive-not-loaded-without-policy"
+    if "blocked" not in neg or "loaded" in neg or not digests.get("negative"):
+        return False, "negative-not-blocked-with-policy"
+    if ab or digests.get("absent"):
+        return False, "absent-shows-skills-dir-activity"
+    return True, "ok"
+
+
 # ── the REAL runner (blockers 1 & 2), IO behind an injectable `sysio` seam ──
 def make_runner(sysio, *, cli, scratch, trust_gate, clock, settle_polls=4):
     """Return runner(kind)->{ok, snapshot, instance, digest, reason}. Per-instance isolation+cleanup;
@@ -118,6 +179,16 @@ def make_runner(sysio, *, cli, scratch, trust_gate, clock, settle_polls=4):
         digest = fixture_digest(fixture_dir) if fixture_dir else None
         o = O.Observer("N14", 1, inst, clock)
         o.window_open(clock())                                   # window opens at INITIALIZATION (C4)
+
+        def tick():
+            txt = sysio.pane(sock)
+            if txt is None:
+                return False
+            o.from_pane(txt, ok=True)
+            o.from_debug(sysio.read_text(debug))
+            o.from_probe_records(sysio.probe_records(ws), start_inst=sysio.probe_inst(ws))
+            return True
+
         spawned = False
         try:
             argv = isolation_argv(cli, home, ws, debug, pgidfile, policy_path=policy)
@@ -128,15 +199,15 @@ def make_runner(sysio, *, cli, scratch, trust_gate, clock, settle_polls=4):
                 return {"ok": False, "reason": "spawn-failed", "instance": inst}
             if not sysio.check_isolation(sock):                  # PER-INSTANCE isolation (blocker 2)
                 return {"ok": False, "reason": "isolation-failed", "instance": inst}
-            tg = trust_gate(sysio, sock, pgidfile)
+            # D3: capture BEFORE the trust gate (the policy decision can land pre-trust), and keep
+            # capturing IN PARALLEL with the gate via the on_poll hook; a late read degrades coverage.
+            if not tick():
+                return {"ok": False, "reason": "capture-failed", "instance": inst}
+            tg = trust_gate(sysio, sock, pgidfile, on_poll=tick)
             o.fact("trust", "confirmed" if tg.get("state") == "confirmed" else "aborted")
             for _ in range(settle_polls):
-                txt = sysio.pane(sock)
-                if txt is None:                                  # capture error
+                if not tick():
                     return {"ok": False, "reason": "capture-failed", "instance": inst}
-                o.from_pane(txt, ok=True)
-                o.from_debug(sysio.read_text(debug))
-                o.from_probe_records(sysio.probe_records(ws), start_inst=sysio.probe_inst(ws))
             if digest:
                 o.fixture_identity(digest)
             o.window_close(clock())
@@ -162,15 +233,18 @@ def run_three_controls(runner):
         snaps[kind], digs[kind] = res["snapshot"], res.get("digest")
     # Blocker 3: INDEPENDENTLY validate the positive control; require its digest to equal both its
     # own independently-hashed fixture AND the negative run's (same fixture bytes in both).
+    summaries = {k: _summary(snaps[k]) for k in ("positive", "negative", "absent")}
+    cons_ok, cons_reason = check_controls_consistency(summaries, digs)   # D5: all three must match
     pos_ok, pos_dig = validate_positive(snaps["positive"])
     differential = None
-    if pos_ok and pos_dig and pos_dig == digs.get("positive") == digs.get("negative"):
+    if cons_ok and pos_ok and pos_dig and pos_dig == digs.get("positive") == digs.get("negative"):
         differential = build_attribution(snaps["positive"])
     neg = _with_attribution(snaps["negative"], differential) if differential else snaps["negative"]
-    controls = {k: _summary(snaps[k]) for k in ("positive", "negative", "absent")}
+    controls = dict(summaries)
     controls["negative"] = _summary(neg)
     return {"controls": controls, "verdict": V.verdict(neg),
             "differential_validated": differential is not None, "positive_validated": pos_ok,
+            "controls_consistent": cons_ok, "consistency_reason": cons_reason,
             "aborted": False, "reason": None}
 
 
@@ -179,21 +253,44 @@ class RealSys:   # pragma: no cover
     """unshare/tmux/subprocess IO for the real smoke. Each method is per-instance (keyed by the
     unique tmux socket). Implemented for the eventual run; executed only after an operational GO."""
 
-    def __init__(self, cli, image_sha, want_cli="2.1.314"):
-        self.cli, self.image_sha, self.want_cli = cli, image_sha, want_cli
+    def __init__(self, cli, want_sha, probe_marketplace, want_cli="2.1.314"):
+        self.cli, self.want_sha, self.probe_marketplace, self.want_cli = cli, want_sha, probe_marketplace, want_cli
+
+    def get_version(self):
+        import subprocess
+        out = subprocess.run([self.cli, "--version"], capture_output=True, text=True).stdout
+        return out.split()[0] if out.split() else None
+
+    def get_sha(self):
+        resolved = os.path.realpath(self.cli)
+        with open(resolved, "rb") as fh:
+            h = hashlib.sha256()
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
 
     def setup(self, kind, home, ws):
+        """Per-control config (D4). ALL controls seat the org PROBE + guard via managed settings that
+        declare the probe marketplace (so P0's session.start/probe-org/guard appear); the NEGATIVE
+        control ADDS `strictKnownMarketplaces` (without source:skills-dir) to block the fixture;
+        POSITIVE omits it (the fixture loads); ABSENT plants no fixture. Applied by the intended
+        mechanism: CLAUDE_CODE_MANAGED_SETTINGS_PATH (the returned path)."""
         import json
         os.makedirs(os.path.join(home, ".claude"), exist_ok=True)
         os.makedirs(ws, exist_ok=True)
-        json.dump({"hasCompletedOnboarding": True, "theme": "dark"}, open(os.path.join(home, ".claude.json"), "w"))
-        fixture = policy = None
+        with open(os.path.join(home, ".claude.json"), "w") as f:
+            json.dump({"hasCompletedOnboarding": True, "theme": "dark"}, f)
+        managed = {"extraKnownMarketplaces": {"st-probe": {"source": {"source": "directory", "path": self.probe_marketplace}}},
+                   "enabledPlugins": {"st-b1-probe@st-probe": True}}
+        if kind == "negative":
+            managed["strictKnownMarketplaces"] = []     # blocks any non-org source incl. skills-dir
+        policy = os.path.join(home, "managed.json")
+        with open(policy, "w") as f:
+            json.dump(managed, f)
+        fixture = None
         if kind in ("positive", "negative"):
             fixture = os.path.join(home, ".claude", "skills", "st-b1-rogue-n14")
             self._plant_fixture(fixture)
-        if kind == "negative":
-            policy = os.path.join(home, "managed.json")
-            json.dump({"strictKnownMarketplaces": []}, open(policy, "w"))
         return fixture, policy
 
     def _plant_fixture(self, dst):
@@ -215,13 +312,29 @@ class RealSys:   # pragma: no cover
         self._tmux(sock, "new-session", "-d", "-s", "s", "-x", "200", "-y", "50", "sh", "-c",
                    " ".join(shlex.quote(x) for x in argv))
 
-    def check_isolation(self, sock):
-        # run the net check INSIDE the same namespaces (nsenter into the session's pid) — only lo +
-        # a failing outbound connect. Returns False (fail-closed) on any uncertainty.
-        return self._run_in_ns(sock, ["sh", "-c", "ip -o link show | awk -F': ' '{print $2}'"]) is not None  # placeholder shape
+    def _ns_pid(self, sock):
+        """The pid (parent-ns) of the unshare leader for THIS instance's socket, for nsenter."""
+        r = self._tmux(sock, "list-panes", "-t", "s", "-F", "#{pane_pid}")
+        pid = r.stdout.strip()
+        return int(pid) if pid.isdigit() else None
 
-    def _run_in_ns(self, sock, cmd):
-        return None   # implemented against the live namespace at run time
+    def check_isolation(self, sock):
+        """D1: a REAL check INSIDE this instance's net namespace — nsenter the leader pid, list links
+        and attempt an outbound connect — then INTERPRET the result (only `lo` + outbound blocked).
+        Any nsenter/probe failure ⇒ False (fail-closed)."""
+        import subprocess
+        pid = self._ns_pid(sock)
+        if pid is None:
+            return False
+        links = subprocess.run(["nsenter", "-t", str(pid), "-n", "sh", "-c",
+                                "ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1"],
+                               capture_output=True, text=True)
+        probe = subprocess.run(["nsenter", "-t", str(pid), "-n", sys.executable, "-I", "-c",
+                                "import socket,sys\ntry: socket.create_connection(('1.1.1.1',53),1); sys.exit(1)\n"
+                                "except OSError: sys.exit(0)"], capture_output=True, text=True)
+        if links.returncode != 0:
+            return False
+        return interpret_isolation(links.stdout.split(), probe.returncode == 0)
 
     def pane(self, sock):
         r = self._tmux(sock, "capture-pane", "-p", "-t", "s")
@@ -249,14 +362,63 @@ class RealSys:   # pragma: no cover
         recs = self.probe_records(ws)
         return next((r.get("inst") for r in recs if isinstance(r, dict) and r.get("inst")), None)
 
+    def _group_alive(self, pgid):
+        """True iff ANY process still belongs to pgid (scans /proc — never assumes PID == PGID)."""
+        for e in os.listdir("/proc"):
+            if not e.isdigit():
+                continue
+            try:
+                if os.getpgid(int(e)) == pgid:
+                    return True
+            except (ProcessLookupError, PermissionError, OSError):
+                continue
+        return False
+
     def reap(self, sock, pgid):
+        """D2: ACTIVELY terminate the isolated process group and WAIT for its disappearance, with a
+        timeout and an exit check. Delegates the sequence to the pure supervise_reap()."""
+        import time
         self._tmux(sock, "kill-server")
-        if pgid is None:
-            return False
-        try:
-            os.killpg(pgid, 0)
-            return False      # still alive => not reaped
-        except (ProcessLookupError, PermissionError):
-            return True
-        except OSError:
-            return False
+        reaped = supervise_reap(pgid, signal_group=os.killpg, group_alive=self._group_alive, sleep=time.sleep)
+        return reaped
+
+
+# ── real trust-gate wiring + operational entry point (pragma: no cover — not run before GO) ──
+def real_trust_gate(sysio, sock, pgidfile, on_poll):   # pragma: no cover
+    """Drive the corrected trust-gate (poc/inv1-trust) over this instance's tmux socket, feeding the
+    Observer on every poll (D3: capture in parallel). Returns the gate result dict."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "inv1-trust"))
+    import trustgate as TG
+
+    class _IO(TG.IO):
+        def pane(self):
+            on_poll()
+            return sysio.pane(sock) or ""
+
+        def send(self, key):
+            sysio._tmux(sock, "send-keys", "-t", "s", key)
+
+        def exited(self):
+            return bool(_read_pgid(sysio.read_text(pgidfile))) and not sysio._group_alive(_read_pgid(sysio.read_text(pgidfile)))
+
+        def now(self):
+            import time
+            return time.monotonic()
+
+        def sleep(self, s):
+            import time
+            time.sleep(s)
+
+    return TG.drive_trust(_IO())
+
+
+def run_smoke(cli, want_sha, probe_marketplace, scratch):   # pragma: no cover
+    """Operational entry point: pin+verify the CLI, then run the three controls under RealSys. FAIL-
+    CLOSED: a CLI pin/verify failure aborts before anything launches. Executed only after GO."""
+    import time
+    sysio = RealSys(cli, want_sha, probe_marketplace)
+    if not verify_cli(get_version=sysio.get_version, get_sha=sysio.get_sha, want_sha=want_sha):
+        return {"aborted": True, "reason": "cli-pin-verify-failed", "controls": {},
+                "verdict": ("inconclusive", "cli-pin-verify-failed")}
+    runner = make_runner(sysio, cli=cli, scratch=scratch, trust_gate=real_trust_gate, clock=time.monotonic)
+    return run_three_controls(runner)
