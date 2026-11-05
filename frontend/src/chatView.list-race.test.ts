@@ -45,6 +45,7 @@ vi.mock("./api.js", () => api);
 vi.mock("./sessionCore.js", () => ({
 	refreshSessions: vi.fn(async () => {}),
 	renderSessionList: vi.fn(),
+	syncLastConversationCurrent: vi.fn(),
 	showTerminalTab: vi.fn(() => "opened"),
 }));
 

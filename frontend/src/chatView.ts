@@ -87,7 +87,7 @@ import {
 	showToast,
 } from "./main.js";
 import { renderMarkdown } from "./markdown.js";
-import { renderSessionList, showTerminalTab } from "./sessionCore.js";
+import { renderSessionList, showTerminalTab, syncLastConversationCurrent } from "./sessionCore.js";
 import { button, el, stateBox } from "./ui.js";
 import {
 	clearLastConversationTitle,
@@ -428,6 +428,7 @@ async function openConversation(
 	// Opening a conversation is a step Back undoes (a no-op while a route
 	// is being applied); reopening the last one on landing is not.
 	reflectRoute({ push: switching && opts.restore !== true });
+	syncLastConversationCurrent();
 	const cached = threads.get(cid);
 	if (cached && !opts.fresh && Date.now() - cached.loadedAt < THREAD_CACHE_FRESH_MS) {
 		// Warm: show it now, re-follow from its seq (the server replays only

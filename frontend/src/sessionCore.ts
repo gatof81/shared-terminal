@@ -81,6 +81,7 @@ import {
 	endRouteApply,
 	landingFor,
 	landView,
+	onViewChange,
 	reflectRoute,
 	registerRouteDetail,
 	setView,
@@ -375,6 +376,28 @@ function reattachIfStarted(): void {
 	setActiveSessionId(null);
 	void openSession(id);
 }
+
+/**
+ * Mark the "↳ last conversation" link that is the open conversation, in place:
+ * in-app navigation writes the address with push/replaceState (no event, no
+ * sidebar render), so the mark is re-synced on navigation, not only on polls.
+ */
+export function syncLastConversationCurrent(): void {
+	const route = readRoute();
+	for (const b of sessionList.querySelectorAll<HTMLElement>(".session-last-conv")) {
+		const sid = b.closest<HTMLElement>(".session-item")?.dataset.sessionId;
+		const on =
+			route !== null &&
+			route.view === "chat" &&
+			route.sessionId === sid &&
+			route.detail === b.dataset.cid;
+		if (on) b.setAttribute("aria-current", "page");
+		else b.removeAttribute("aria-current");
+	}
+}
+
+// Leaving Chat (or coming back) changes which link is the open conversation.
+onViewChange(() => syncLastConversationCurrent());
 
 export function renderSessionList() {
 	// Re-rendered on every 5 s poll: keep the keyboard user's place.

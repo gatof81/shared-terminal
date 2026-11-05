@@ -60,6 +60,7 @@ vi.mock("./api.js", () => api);
 const core = vi.hoisted(() => ({
 	refreshSessions: vi.fn(async () => {}),
 	renderSessionList: vi.fn(),
+	syncLastConversationCurrent: vi.fn(),
 	showTerminalTab: vi.fn(
 		(_tabId: string | null): "opened" | "not-running" | "unknown" | "failed" => "opened",
 	),
@@ -947,6 +948,16 @@ describe("Chat overlay — sidebar's last-conversation link", () => {
 		$("chat-refresh-btn").click();
 		await flush();
 		expect(core.renderSessionList.mock.calls.length).toBe(calls);
+	});
+
+	it("a remembered conversation that is no longer listed loses its link", async () => {
+		localStorage.clear();
+		localStorage.setItem("st.chat.last.s1", "gone");
+		localStorage.setItem("st.chat.lastTitle.s1", "gone\nOld title");
+		const before = core.renderSessionList.mock.calls.length;
+		await openChat();
+		expect(localStorage.getItem("st.chat.lastTitle.s1")).toBeNull();
+		expect(core.renderSessionList.mock.calls.length).toBe(before + 1);
 	});
 });
 
