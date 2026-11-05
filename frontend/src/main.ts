@@ -33,7 +33,7 @@ import {
 // else imports them by name, so the side-effect imports keep them in.
 import "./filesView.js";
 import "./gitView.js";
-import "./chatView.js";
+import { forgetComposerState } from "./chatView.js";
 import { escapeHandledByDialog } from "./components/dialog.js";
 import { showCopySuccessToast, showToast } from "./components/toast.js";
 import "./invites.js";
@@ -624,6 +624,8 @@ function handleLogout(toastMessage?: string): void {
 	// loading them: close it before the login view shows.
 	closeSwitcher();
 	forgetAllLastConversationTitles();
+	// Unsent drafts are the person's words: none survives for the next account.
+	forgetComposerState();
 	void logout();
 	// A list request still in flight was sent with this account's cookie:
 	// its answer must not be applied after the next person signs in.

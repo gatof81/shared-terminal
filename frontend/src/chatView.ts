@@ -77,6 +77,7 @@ import {
 	toolLine,
 	toolsSummary,
 } from "./conversationModel.js";
+import { forgetAllDrafts, readDraft, writeDraft } from "./draftStore.js";
 import { formatBytes, relativeDate } from "./format.js";
 import {
 	activeSessionId,
@@ -1906,6 +1907,8 @@ interface ComposerNotice {
 	conversation?: string;
 }
 interface ComposerState {
+	/** The project the conversation belongs to: the stored draft's key. */
+	sessionId: string | null;
 	draft: string;
 	sending: boolean;
 	notice: ComposerNotice | null;
@@ -1917,10 +1920,25 @@ const composerStates = new Map<string, ComposerState>();
 function composerStateFor(cid: string): ComposerState {
 	let st = composerStates.get(cid);
 	if (!st) {
-		st = { draft: "", sending: false, notice: null, pending: null, checked: false };
+		const sessionId = stateSessionId;
+		// A draft left on this browser (a reload, a closed tab) comes back as
+		// text in the box — never as a send.
+		const draft = sessionId !== null ? readDraft(sessionId, cid) : "";
+		st = { sessionId, draft, sending: false, notice: null, pending: null, checked: false };
 		composerStates.set(cid, st);
 	}
 	return st;
+}
+
+function setDraft(cid: string, st: ComposerState, text: string): void {
+	st.draft = text;
+	if (st.sessionId !== null) writeDraft(st.sessionId, cid, text);
+}
+
+/** Logout: the next account on this browser starts with no composer state at all. */
+export function forgetComposerState(): void {
+	composerStates.clear();
+	forgetAllDrafts();
 }
 
 /** Why the composer is disabled right now, in the person's words; null when it can send. */
@@ -2040,7 +2058,7 @@ function composer(): HTMLElement {
 	if (st) {
 		ta.value = st.draft;
 		ta.addEventListener("input", () => {
-			st.draft = ta.value;
+			setDraft(cid as string, st, ta.value);
 			autosize(ta);
 		});
 		// Measured once it is in the document.
@@ -2227,12 +2245,12 @@ function applyComposerResult(
 	if (status === 202) {
 		switch (body.result) {
 			case "delivered":
-				st.draft = "";
+				setDraft(cid, st, "");
 				st.notice = null;
 				// The bubble stays until the real `user_prompt` arrives over the socket.
 				return;
 			case "misdelivered":
-				st.draft = "";
+				setDraft(cid, st, "");
 				st.pending = null;
 				st.notice = {
 					tone: "info",
