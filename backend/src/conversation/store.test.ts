@@ -387,6 +387,37 @@ describe("ConversationStore — index writes racing an eviction (concurrency)", 
 		expect((await store.peekIndex("s1", "c0"))?.paneId).toBe("%2");
 	});
 
+	it("a flush timer armed on an evicting entry never fires a write after the purge", async () => {
+		let store!: ConversationStore;
+		const g = gatedFs((p) => p.startsWith(store.indexPath("s1", "c0")));
+		store = new ConversationStore({
+			workspaceRoot: root,
+			fs: g.fs,
+			limits: { residentIndexes: 1, flushIntervalMs: 150 },
+		});
+		await store.open("s1", "c0");
+		store.enqueue("s1", "c0", ev(0));
+		await store.flush("s1", "c0");
+		store.update("s1", "c0", (i) => {
+			i.paneId = "%1";
+		});
+		g.hold();
+		const w1 = store.flush("s1", "c0"); // W1 held (its timer cleared)
+		await tick();
+		store.update("s1", "c0", (i) => {
+			i.paneId = "%2"; // dirty again, timer armed
+		});
+		const opening = store.open("s1", "c1"); // evicts c0: W2 queued behind W1
+		await tick();
+		const purge = store.purgeSession("s1");
+		await tick();
+		g.release();
+		await purge;
+		await Promise.all([w1, opening.catch(() => undefined)]);
+		await new Promise((r) => setTimeout(r, 250)); // past the timer
+		await expect(fs.stat(store.sessionDir("s1"))).rejects.toThrow();
+	});
+
 	it("two writes of one index land in order: an older snapshot never replaces a newer one", async () => {
 		let store!: ConversationStore;
 		const g = gatedFs((p) => p.startsWith(store.indexPath("s1", "c0")));

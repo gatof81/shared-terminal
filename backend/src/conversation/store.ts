@@ -828,7 +828,16 @@ export class ConversationStore {
 		if (!r.dirty) return;
 		// B4 — a purge removes the directory; a write that would recreate it
 		// must not start (one already running is awaited by the purge).
-		if (this.purging.has(r.index.stSessionId)) return;
+		if (this.purging.has(r.index.stSessionId)) {
+			// Disarm it too: a flush timer still armed on an entry the purge
+			// does not hold (an evicting one) would fire after the rm.
+			r.dirty = false;
+			if (r.flushTimer) {
+				clearTimeout(r.flushTimer);
+				r.flushTimer = null;
+			}
+			return;
+		}
 		r.dirty = false;
 		r.eventsSinceFlush = 0;
 		if (r.flushTimer) {
@@ -967,17 +976,10 @@ export class ConversationStore {
 			this.resident.delete(oldestKey);
 			this.evicting.set(oldestKey, r);
 			this.stats.evictions++;
-			const write = this.writeIndex(r);
-			try {
-				await write;
-			} finally {
-				// Adopted and evicted again meanwhile: a LATER write of this key is
-				// queued and the entry must keep answering peekIndex/open until it
-				// lands. Decided by identity, not by when the map's own cleanup ran.
-				const queued = this.indexWrites.get(oldestKey);
-				if (this.evicting.get(oldestKey) === r && (queued === undefined || queued === write))
-					this.evicting.delete(oldestKey);
-			}
+			// The entry leaves `evicting` when the LAST write of its key lands
+			// (writeIndex's `done`), so an entry adopted and evicted again keeps
+			// answering peekIndex/open until its newest snapshot is on disk.
+			await this.writeIndex(r);
 		}
 	}
 
@@ -1030,7 +1032,9 @@ export class ConversationStore {
 				if (!w) break;
 				await w[1].catch(() => undefined);
 			}
-			// Nothing of the session stays readable from memory (peekIndex/open).
+			// Defensive: every evicting entry left with its last write above, so
+			// this normally finds nothing; nothing of the session may stay
+			// readable from memory (peekIndex/open) whatever the order was.
 			for (const key of Array.from(this.evicting.keys())) {
 				if (key.startsWith(`${stSessionId}/`)) this.evicting.delete(key);
 			}
