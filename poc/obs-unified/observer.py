@@ -94,10 +94,11 @@ class Observer:
         self.pane_fails = 0
         self._emitted = set()     # B6: identity dedup — a signal is emitted once, original t kept
         self._debug_cursor = 0    # B6: only classify the newly-appended debug tail
-        self.reads = []           # B4: (t, ok) per pane read — the observation window
-        # B4 window policy: expected cadence, minimum successful reads, minimum window length, and
-        # the max tolerated gap between consecutive reads (default = 2× cadence).
-        self.win = {"expected": 0.5, "min_reads": 3, "min_window": 1.0, "max_gap": 1.0}
+        self._dbg_prefix = ""     # B5: the exact debug text already consumed (for continuity check)
+        self._dbg_disc = False    # B5: debug truncation/replacement/rotation detected
+        self.reads = []           # (t, ok) per pane read
+        self.window = {"open": None, "close": None}   # B4: the attempt's CRITICAL window (driver-set)
+        self.win = {"max_gap": 1.0}                   # max tolerated gap between consecutive reads
 
     def _emit(self, concern, signal, source, confidence, detail=None):
         # Identity = (concern, signal, source, detail). Re-reads never re-emit; the FIRST event
@@ -111,33 +112,42 @@ class Observer:
             "source": source, "confidence": confidence, "detail": detail,
             "t": round(self.clock() - self.t0, 3), "coverage": self.coverage()})
 
-    def set_window(self, *, expected=None, min_reads=None, min_window=None, max_gap=None):
-        for k, v in (("expected", expected), ("min_reads", min_reads),
-                     ("min_window", min_window), ("max_gap", max_gap)):
-            if v is not None:
-                self.win[k] = v
+    def set_window(self, *, max_gap=None):
+        if max_gap is not None:
+            self.win["max_gap"] = max_gap
+        return self
+
+    def window_open(self, t):
+        self.window["open"] = t
+        return self
+
+    def window_close(self, t):
+        self.window["close"] = t
         return self
 
     def coverage(self):
-        """Temporal coverage (B4): a single successful read is NOT `full`. `full` requires enough
-        successful reads over a long-enough window with no oversized gap AND observation that
-        continued past the last pane DECISION (block/refusal) — so late/incomplete capture is
-        `partial` and never credits a block. Values: none | partial | full."""
-        oks = [t for t, ok in self.reads if ok]
+        """Temporal coverage (B4): delimited by the attempt's CRITICAL WINDOW (window_open /
+        window_close), not just by count/duration. `full` requires: debug continuity intact; no
+        failed read; the critical window delimited; a successful read at/before it opened AND at/
+        after it closed; no gap > max_gap across reads; and every pane DECISION falls inside the
+        window. Anything else is partial/none — late/incomplete capture never credits a block."""
+        if self._dbg_disc:
+            return "partial"                     # B5: debug continuity lost — degrade
+        oks = sorted(t for t, ok in self.reads if ok)
         if not oks:
-            return "none"                        # nothing usable captured
+            return "none"
         if len(self.reads) != len(oks):
             return "partial"                     # any failed read
-        if len(oks) < self.win["min_reads"]:
-            return "partial"                     # too few reads
-        if oks[-1] - oks[0] < self.win["min_window"]:
-            return "partial"                     # window too short / capture too brief
+        wo, wc = self.window["open"], self.window["close"]
+        if wo is None or wc is None:
+            return "partial"                     # critical window not delimited
+        if oks[0] > wo or oks[-1] < wc:
+            return "partial"                     # did not observe before open / after close
         if any(b - a > self.win["max_gap"] for a, b in zip(oks, oks[1:])):
-            return "partial"                     # a gap larger than tolerated (missed interval)
-        # Must have kept observing AFTER the last pane decision (so no-load corroboration is real).
+            return "partial"                     # a gap larger than tolerated
         decisions = [e["t"] for e in self.events if e["source"] == "pane"]
-        if decisions and oks[-1] <= max(decisions):
-            return "partial"                     # stopped at/before the decision settled
+        if any(not (wo <= d <= wc) for d in decisions):
+            return "partial"                     # a decision landed outside the critical window
         return "full"
 
     def fact(self, concern, signal, source="gate", confidence="high", detail=None):
@@ -145,24 +155,36 @@ class Observer:
         self._emit(concern, signal, source, confidence, detail)
 
     def from_debug(self, text):
-        # B6: the debug file is read whole repeatedly; classify ONLY complete lines past the cursor,
-        # so existing events are never re-scanned (identity dedup is the belt-and-suspenders).
+        # B6: classify ONLY complete lines past the cursor, so existing events are never re-scanned.
+        # B5: detect truncation / replacement / rotation — if the file shrank below the cursor or the
+        # already-consumed prefix changed, continuity is LOST; mark it (degrades coverage) and do NOT
+        # trust the old cursor (reclassify from 0; identity dedup prevents duplicate emits).
         text = text or ""
+        if len(text) < self._debug_cursor or text[:self._debug_cursor] != self._dbg_prefix:
+            self._dbg_disc = True
+            self._debug_cursor = 0
+            self._dbg_prefix = ""
         end = text.rfind("\n") + 1          # only complete lines
         chunk = text[self._debug_cursor:end]
         if not chunk:
             return
         self._debug_cursor = end
+        self._dbg_prefix = text[:end]
         for c, s, conf, d in classify_debug(chunk):
             self._emit(c, s, "debug", conf, d)
 
-    def from_probe_records(self, records):
-        """session.start / classic.SessionStart from the kit probe's EXECUTION records — the fact
-        that the hook RAN, not the "events:" declaration (B2)."""
-        kinds = {r.get("kind") for r in (records or []) if isinstance(r, dict)}
-        for kind in ("session.start", "classic.SessionStart"):
-            if kind in kinds:
-                self._emit("control", kind, "probe", "high")
+    def from_probe_records(self, records, *, expect_probe="st-b1-probe", start_inst=None):
+        """session.start / classic.SessionStart from the probe's EXECUTION records — the fact that
+        the hook RAN (B2), and ONLY for the EXPECTED probe whose `inst` is THIS start's (B3).
+        Arbitrary records, the wrong probe, or a missing/other `inst` are ignored; `start_inst` is
+        required (we never attribute execution to the current start without it)."""
+        if start_inst is None:
+            return
+        for r in records or []:
+            if not isinstance(r, dict) or r.get("probe") != expect_probe or r.get("inst") != start_inst:
+                continue
+            if r.get("kind") in ("session.start", "classic.SessionStart"):
+                self._emit("control", r["kind"], "probe", "high", detail={"inst": start_inst})
 
     def from_pane(self, text, *, ok=True):
         good = bool(ok and (text or "").strip())
@@ -176,5 +198,6 @@ class Observer:
 
     def snapshot(self):
         return {"schema": SCHEMA, **self.ctx, "coverage": self.coverage(),
+                "debug_continuity": not self._dbg_disc, "window": dict(self.window),
                 "pane_reads": self.pane_reads, "pane_fails": self.pane_fails,
                 "events": list(self.events)}

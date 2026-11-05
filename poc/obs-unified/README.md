@@ -45,6 +45,41 @@ path is `claude-skills`, **and** a separate attribution control is present — o
 - **B6** — `from_debug()` advances a cursor over complete lines and dedups by identity, so re-reading
   the whole file never re-emits; the first event's time/provenance is preserved.
 
+**Round-2 audit fixes (owner B1–B5), reproduced-then-fixed, all tested:**
+- **B1** — `verdict_p0` invalidates on ANY `guard-not-seated` in the start, even if a
+  `guard-seated-loaded` appeared earlier (incremental, contradictory reads) — the negative wins.
+- **B2** — `validate_snapshot` enforces an AUTHORITY MATRIX (below): each `(concern, signal)` is
+  valid only from its proper `(source, confidence)`. A pane event can never prove `session.start`,
+  a valid guard, trust, or N14 attribution; unknown/contradictory combinations are rejected.
+- **B3** — `from_probe_records` emits `session.start` only for the EXPECTED probe whose `inst` is
+  THIS start's; arbitrary records, wrong probe, or missing/other `inst` are ignored (declaration ≠
+  execution preserved). `start_inst` is required.
+- **B4** — `block-attributable` is credited only with a verified `fixture` AND a `differential`
+  (proof the SAME fixture loads without policy); a bare declared event is not enough. Coverage is
+  delimited by the attempt's CRITICAL WINDOW (`window_open`/`window_close`): `full` needs reads
+  bracketing it, no oversized gap, and the decision inside it — late/incomplete ⇒ never blocked-low.
+- **B5** — `from_debug` detects truncation/replacement/rotation (cursor shrink or consumed-prefix
+  change) and sets `debug_continuity=False`, degrading coverage and making `verdict_p0`
+  INCONCLUSIVE instead of reusing stale evidence.
+
+### Signal & authority matrix (B2)
+
+| concern / signal | legitimate source | confidence | meaning |
+| --- | --- | --- | --- |
+| control / session.start, classic.SessionStart | **probe** (execution record, correct probe + this start's `inst`) | high | the hook RAN |
+| control / probe-org-tier | **debug** | high | probe loaded in prepend/append |
+| control / guard-seated-loaded | **debug** | high | guard seated (positive) + loaded |
+| control / guard-not-seated | **debug** | high | guard NOT seated (invalidates P0) |
+| trust / confirmed, aborted | **gate** | high | our trust-gate result |
+| skills-dir / loaded | **debug** | high | rogue executed ⇒ FAIL |
+| skills-dir / blocked | **pane** | low | the `yvn` block line (attacker-writable) |
+| skills-dir / block-attributable | **control** | high | verified fixture + differential |
+| mcp-project / selection=…, dismissed=…, identified, accept-signal, started | **gate** | high | driver facts |
+| mcp-project / refusal | **pane** | low | n17p policy refusal line |
+
+Any event outside this matrix, or whose `(attempt,start,instance)` differs from the snapshot, is
+rejected by `validate_snapshot` ⇒ the verdict is INCONCLUSIVE.
+
 ## Per-control behaviour
 
 - **Trust (req 3):** reuses the corrected trust-gate (verify `yes` immediately before Enter). The
@@ -86,9 +121,16 @@ it. Until then N17-project stays Option A (INCONCLUSIVE).
 | N14 | same-start control + attributable skills-dir block + no load | load = debug (yes); **block = pane only** | a **correlated pane→enum capture of the block** (this prototype) — and acceptance that pane is low-confidence (mitigated by no-load corroboration). The HIGH-integrity signal (`cli_plugin_init=policy_blocked` telemetry) is **not locally capturable** |
 | N17-project | confirmed approval + no start + attributable refusal (Option A), OR the C3/C4 causal chain (Option B) | selection/dismissed/identity/refusal all capturable as facts | a **verifiable accept signal** (2.1.314 emits none ⇒ Option A stays INCONCLUSIVE); Option B needs the 4-condition run **under the real root drop-in policy** |
 
-## Local results (pure simulated; no CLI — canary window)
+## Local results (pure simulated; no CLI)
 
-`python3 test_obs_unified.py` → **36 passed**: B1/B2 regressions (not-seated ≠ valid guard;
+`python3 test_obs_unified.py` → **44 passed** (round-2: B1 guard precedence on incremental
+contradictory reads; B2 authority matrix — pane cannot prove session.start/guard/trust/attribution,
+unknown signal & foreign ctx rejected, legitimate combos pass; B3 probe identity — arbitrary/wrong
+probe/wrong inst/missing inst rejected, correct accepted; B4 attribution needs fixture+differential,
+critical-window coverage — window-not-delimited / not-before-open / gap / decision-outside /
+failed-read ⇒ partial, full only when observed through the decision, insufficient ⇒ never blocked;
+B5 truncation/replacement degrade continuity ⇒ P0 inconclusive, append keeps continuity; plus the
+retained round-1 cases and smoke-cleanup mocks). Earlier run (round 1) was **36 passed**: B1/B2 regressions (not-seated ≠ valid guard;
 `events:` declaration ≠ session.start; session.start needs an execution record); classifiers
 (controls/load, no session.start from debug, pane block path_kind, generic block not attributed, no
 raw text); **B4 temporal coverage** (single/too-few/short-window/large-gap/failed-read ⇒ partial,
@@ -121,12 +163,54 @@ original time kept; appended line ⇒ exactly one new event); smoke cleanup mock
   and does not by itself resolve N14/N17-project — it makes their *blocked* evidence observable,
   which is necessary but not sufficient.
 
-## Future isolated smoke (proposal; gated, not now)
+## Isolated smoke — executable design (PREPARED, not run; needs explicit GO)
 
-Once the canary window closes and after owner review: run `smoke.py` under a **network namespace**
-(`unshare -rn`, no root needed) or a disposable container to get verifiable isolation; wire the
-trust-gate + pane/debug capture into the `Observer`; and validate end-to-end on the real 2.1.314
-that (a) a blocked skills-dir plugin yields `skills-dir:blocked` with `coverage:full` and no load,
-and (b) an unblocked one yields `skills-dir:loaded` (FAIL). Disposable HOME, targeted process-group
-cleanup, no raw text. Only after that evidence would a verdict-layer rule for N14 `blocked` (and,
-separately, the N17-project C3/C4 causal rule) be worth proposing — never before.
+The current `smoke.py` is a **skeleton** (launch + cleanup only). The executable isolated smoke adds
+the pieces owner-required; it still runs **nothing** until a specific GO.
+
+**Isolation (network + process), verifiably, without root or touching PASS-B1 containers:** run the
+CLI under `unshare -rn --pid --fork --mount-proc <...>`:
+- `-n` → a fresh NETWORK namespace with only `lo`: verifiable by `ip -o link` showing just
+  `loopback` inside, and an outbound probe failing. HOME isolation alone is explicitly insufficient.
+- `-r` → map to a user namespace so `-n/--pid` need no root.
+- `--pid --fork --mount-proc` → the CLI is PID 1 of a fresh PID namespace. Cleanup kills the
+  `unshare` leader; the kernel then reaps the whole PID namespace — **verifiable identity, no pgid
+  reuse, no `pkill -f`, no orphans** (supersedes `/proc/<pgid>/comm`, which stays only as a
+  belt-and-suspenders). If a tool needs a container instead, use a **throwaway** `--network none`
+  container built from the pinned image, labelled distinctly, removed on exit — **never** the
+  retained PASS-B1 containers or real sessions. (No container is created now.)
+
+**Setup:** disposable HOME+workspace; CLI pinned to **2.1.314** and verified by `--version` AND the
+image/binary sha before launch (fail-closed on mismatch); the **trust-gate** (`poc/inv1-trust`)
+wired into the `Observer` (its result → `fact("trust", …)`); the **N14 fixture**
+(`~/.claude/skills/st-b1-rogue-n14`) and managed **policy** (`strictKnownMarketplaces` without
+`source:skills-dir`) configured.
+
+**Controls (distinguish load vs block vs no-discovery):**
+- **positive/no-policy** — same fixture, no policy ⇒ expect `skills-dir:loaded` (and it supplies the
+  **differential** backing `block-attributable`);
+- **negative/policy** — fixture + policy ⇒ expect pane `skills-dir:blocked`, no load;
+- **absent** — no fixture ⇒ no skills-dir signal at all.
+
+**Observer wiring:** `window_open` at trust-confirmed, `window_close` after the plugin-load settle;
+poll the pane (→ `from_pane`), read the debug tail (→ `from_debug`), feed probe records with the
+verified `inst` (→ `from_probe_records`); emit sanitized enums only. **Fail-closed** on any launch
+error, timeout, coverage `partial/none`, or lost continuity ⇒ INCONCLUSIVE.
+
+### GO / NO-GO criteria for executing the smoke (objective)
+
+**GO only if ALL hold:** (1) `unshare -rn` available and the in-namespace network check shows only
+`lo` + a failing outbound probe; (2) CLI `--version` == 2.1.314 AND binary sha matches the pin;
+(3) disposable HOME/workspace under a scratch dir, never `~/.claude` or `WORKSPACE_ROOT`; (4) no
+PASS-B1 container is created/started/modified and none is needed; (5) cleanup verified to reap the
+PID namespace (post-run: the leader and children gone); (6) the three controls are wired so the run
+can tell load/block/absent apart.
+
+**NO-GO (do not run / abort) if ANY:** network isolation unverifiable; CLI/sha mismatch; `unshare`
+or `--mount-proc` unavailable (⇒ propose the throwaway `--network none` container instead, still
+gated); any step would touch a retained container or a real session; cleanup identity not
+verifiable. A NO-GO on isolation/identity keeps N14 at **INCONCLUSIVE** — we do not relax it.
+
+Only after a clean smoke showing (positive ⇒ loaded) and (negative ⇒ blocked + no load +
+`coverage:full`) would a verdict-layer rule for N14 `blocked` be worth proposing — never before, and
+the N17-project C3/C4 causal rule stays out of scope here.

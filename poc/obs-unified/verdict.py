@@ -15,23 +15,49 @@ Hard rules:
 """
 
 
-ALLOWED_SOURCES = {"debug", "pane", "gate", "probe", "control"}
-ALLOWED_CONCERNS = {"control", "trust", "skills-dir", "mcp-project"}
+# B2 — AUTHORITY MATRIX. Which (source, confidence) may legitimately carry each (concern, signal).
+# A pane event can therefore NEVER demonstrate session.start, a valid guard, trust, or N14
+# attribution — those require their proper high-integrity source. Anything not listed is rejected.
+AUTHORITY = {
+    ("control", "session.start"): {("probe", "high")},
+    ("control", "classic.SessionStart"): {("probe", "high")},
+    ("control", "probe-org-tier"): {("debug", "high")},
+    ("control", "guard-seated-loaded"): {("debug", "high")},
+    ("control", "guard-not-seated"): {("debug", "high")},
+    ("trust", "confirmed"): {("gate", "high")},
+    ("trust", "aborted"): {("gate", "high")},
+    ("skills-dir", "loaded"): {("debug", "high")},
+    ("skills-dir", "blocked"): {("pane", "low")},
+    ("skills-dir", "block-attributable"): {("control", "high")},
+}
+
+
+def authorized(concern, signal, source, confidence):
+    """True iff (source, confidence) may legitimately carry (concern, signal) — the authority matrix
+    (B2). mcp-project has variable signal suffixes, handled explicitly."""
+    key = (concern, signal)
+    if key in AUTHORITY:
+        return (source, confidence) in AUTHORITY[key]
+    if concern == "mcp-project":
+        if signal == "refusal":
+            return (source, confidence) == ("pane", "low")
+        if signal in {"identified", "accept-signal", "started"} or signal.startswith(("selection=", "dismissed=")):
+            return (source, confidence) == ("gate", "high")
+    return False
 
 
 def validate_snapshot(snap):
-    """B5: reject a snapshot whose events don't all match its (attempt, start, instance), or whose
-    source/concern/signal are unknown/empty — intentional or accidental mixing. Fail-closed."""
+    """Reject a snapshot whose events don't all match its (attempt, start, instance) (B5/correlation),
+    or that carry an UNAUTHORIZED concern+signal+source+confidence combination (B2) — intentional or
+    accidental mixing / forging. Fail-closed."""
     ctx = (snap.get("attempt"), snap.get("start"), snap.get("instance"))
     for e in snap.get("events", []):
         if (e.get("attempt"), e.get("start"), e.get("instance")) != ctx:
             return False, "correlation-violation:foreign-attempt/start/instance"
-        if e.get("source") not in ALLOWED_SOURCES:
-            return False, f"invalid-source:{e.get('source')}"
-        if e.get("concern") not in ALLOWED_CONCERNS:
-            return False, f"invalid-concern:{e.get('concern')}"
         if not e.get("signal"):
             return False, "invalid-signal:empty"
+        if not authorized(e.get("concern"), e.get("signal"), e.get("source"), e.get("confidence")):
+            return False, f"unauthorized:{e.get('concern')}/{e.get('signal')}/{e.get('source')}/{e.get('confidence')}"
     return True, "ok"
 
 
@@ -41,6 +67,12 @@ def _sig(events, concern, pred=None):
 
 def verdict_p0(snap):
     ev = snap["events"]
+    # B1: ANY guard-not-seated in this start invalidates the baseline, even if a guard-seated-loaded
+    # appeared earlier (incremental, contradictory reads) — the negative state wins.
+    if any(e["concern"] == "control" and e["signal"] == "guard-not-seated" for e in ev):
+        return "baseline-invalid", "guard-not-seated(negative-precedence)"
+    if not snap.get("debug_continuity", True):
+        return "inconclusive", "debug-continuity-lost"     # B5: cannot trust debug-derived controls
     controls = {e["signal"] for e in ev if e["concern"] == "control"}
     trust_ok = any(e["concern"] == "trust" and e["signal"] == "confirmed" for e in ev)
     need = {"session.start", "probe-org-tier", "guard-seated-loaded"}
@@ -64,11 +96,17 @@ def verdict_n14(snap):
         return "inconclusive", "no-load-and-no-observable-rejection"   # req 4: absence != blocked
     if (observed[0].get("detail") or {}).get("path_kind") != "claude-skills":
         return "inconclusive", "block-observed-not-claude-skills"
-    # B3: a .claude/skills warning on the pane is `block-observed-low` — NOT `blocked`. Crediting it
-    # requires a SEPARATE attribution control (verified fixture + a differential proving THIS fixture
-    # loads without policy); pane text alone never grants blocked.
-    if not _sig(ev, "skills-dir", lambda s: s == "block-attributable"):
+    # B3/B4: a .claude/skills warning on the pane is `block-observed-low` — NOT `blocked`. Crediting
+    # it needs a SEPARATE attribution control that is NOT a bare declared event: it must name the
+    # verified N14 fixture AND carry a differential (proof the SAME fixture LOADS without policy, so
+    # the block is attributable to THIS fixture, not an unrelated skills warning). Pane text alone,
+    # or an attribution event without that evidence, stays INCONCLUSIVE.
+    attrib = _sig(ev, "skills-dir", lambda s: s == "block-attributable")
+    if not attrib:
         return "inconclusive", "block-observed-low-not-attributable"
+    d = attrib[0].get("detail") or {}
+    if d.get("fixture") != "st-b1-rogue-n14" or not d.get("differential"):
+        return "inconclusive", "attribution-unverified(need fixture+differential)"
     return "blocked-low", "skills-dir-blocked(attributed;pane-low;corroborated:no-load,same-start)"
 
 
