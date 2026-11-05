@@ -140,7 +140,7 @@
     opacity: 1;
     gap: 0.25rem;
   }
-  /* Touch: 44px targets. Stop is not a quick action here — next to ⋯ on a
+  /* Narrow (≤768px, phone) layout: 44px targets. Stop is not a quick action here — next to ⋯ on a
      small row it was one mis-tap from interrupting a running Claude; it
      stays in the ⋯ menu, behind its confirmation. */
   .session-action-btn,

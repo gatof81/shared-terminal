@@ -154,7 +154,7 @@ export async function runSessionAction(s: SessionInfo, id: SessionActionId): Pro
 			// button, the ⋯ menu, the session menu — asks first.
 			const ok = await confirmDialog({
 				title: "Stop session",
-				message: `Stop "${s.name}"?\n\nEverything running in it stops now — a Claude working in a terminal tab is interrupted mid-task. Workspace files are kept; you can start it again later.`,
+				message: `Stop "${s.name}"?\n\nEverything running in it stops now — a Claude working in a terminal tab is interrupted mid-task. Its files and anything installed in the container are kept; you can start it again later.`,
 				confirmLabel: "Stop session",
 				danger: true,
 			});
