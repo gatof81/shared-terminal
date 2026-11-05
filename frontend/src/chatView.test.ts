@@ -1044,6 +1044,7 @@ describe("Composer", () => {
 		});
 		expect(sendBtn().disabled).toBe(true);
 		expect(composerTextarea().disabled).toBe(false);
+		expect(status().textContent).toMatch(/previous send is settled/);
 		// The reason is in the status line, once; the placeholder stays short.
 		expect(status().textContent).toMatch(/blocked/);
 		expect(composerTextarea().placeholder).toBe("Message Claude…");

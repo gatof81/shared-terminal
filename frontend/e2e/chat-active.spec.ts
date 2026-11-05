@@ -56,7 +56,9 @@ test.describe("chat: active vs earlier", () => {
 		// Unknown: readable, and the composer explains how it resolves.
 		await row("Resumed session").click();
 		await expect(page.locator("#chat-thread .chat-assistant")).toContainText("All green");
-		await expect(page.locator(".chat-composer textarea")).toBeDisabled();
+		// The next message can be written; only Send waits (owner priority 2).
+		await expect(page.locator(".chat-composer textarea")).toBeEnabled();
+		await expect(page.locator(".chat-composer .chat-send")).toBeDisabled();
 		await expect(page.locator(".chat-composer-status")).toContainText("State unknown");
 		await expect(page.locator(".chat-composer-status")).toContainText("Terminal");
 		if (app.mobile) await page.click("#chat-back-btn");

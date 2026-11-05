@@ -1925,11 +1925,21 @@ function composerDraftable(c: ConversationSummary | undefined, st: ComposerState
 	return c.canSendInput || c.composer?.blocked === true;
 }
 
-/** Grow the textarea with its content; CSS max-height caps it, then it scrolls. */
+/**
+ * Grow the textarea with its content; CSS max-height caps it, then it scrolls.
+ * The measurement collapses the box to one row for a moment, which lets the
+ * thread above clamp its scrollTop; the reader's place is put back after
+ * (kept at the bottom if they were there), or every keystroke of a long
+ * draft would pull the thread up while Claude streams.
+ */
 function autosize(ta: HTMLTextAreaElement): void {
 	if (!ta.isConnected) return;
+	const sc = threadScroller();
+	const top = sc?.scrollTop ?? 0;
+	const stick = sc !== null && nearBottom(sc);
 	ta.style.height = "auto";
 	if (ta.scrollHeight > 0) ta.style.height = `${ta.scrollHeight + 2}px`;
+	if (sc) sc.scrollTop = stick ? sc.scrollHeight : top;
 }
 
 function composer(): HTMLElement {
@@ -2044,7 +2054,11 @@ function composerStatus(
 				el(
 					"span",
 					"chat-composer-draft-note",
-					"You can keep writing; Send turns on when Claude is ready.",
+					// A send settling on the pane clears on the backend, not when
+					// Claude reaches its prompt: say which wait this is.
+					selected()?.composer?.blocked
+						? "You can keep writing; Send turns on once the previous send is settled."
+						: "You can keep writing; Send turns on when Claude is ready.",
 				),
 			);
 		status.appendChild(openTerminalButton(selected()));
