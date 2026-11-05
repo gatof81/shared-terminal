@@ -3667,7 +3667,17 @@ estos dos caminos **sigue sin demostrarse**, y un PASS de alcance reducido **no*
 2. **Ausencia de rechazo demostrable en N14 (`@skills-dir`).** Si 2.1.314 emite —en algún canal— una
    línea decisiva de que el plugin plantado en `~/.claude/skills/` fue rechazado por política, o si
    estructuralmente no la emite (en cuyo caso N14 es INCONCLUSIVE por diseño de 2.1.314, a
-   documentar como límite).
+   documentar como límite). **Investigación entregada en
+   [inv2-n14-skillsdir.md](./inv2-n14-skillsdir.md)** (estática, solo lectura): `@skills-dir` es una
+   fuente de plugin (`source:"skills-dir"`) gobernada por `strictKnownMarketplaces`; la frase de
+   rechazo existe (builder `yvn`) pero se emite **sólo a la UI (`✗`) y a telemetría
+   (`cli_plugin_init=policy_blocked`), nunca al `--debug-file`**. El kit captura sólo debug+stderr
+   (pane transitorio), así que **"N14 blocked" NO es demostrable con los canales actuales**
+   (INCONCLUSIVE por observabilidad, no por seguridad); sólo "N14 loaded" (FAIL) es observable.
+   Instrumentación mínima propuesta: capturar la decisión como enum saneado desde el pane (prototipo
+   descartable `poc/inv2-skillsdir/`, 5/5 tests). **Recomendación:** el obstáculo es transversal
+   (trust, skills-dir, MCP se reportan a UI/telemetría, no a debug), así que conviene una única
+   instrumentación pane→enum antes de abrir la investigación #3, no caso por caso.
 3. **Causalidad aprobación/bloqueo en N17-project (Opción B).** Si el rechazo específico de n17p
    ocurre **como consecuencia** de aprobar el servidor del proyecto (y no antes de la interacción ni
    al elegir *Continue without*), usando el experimento de 4 condiciones (§1.14.19 D3) **bajo la
