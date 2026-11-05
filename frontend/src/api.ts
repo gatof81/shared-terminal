@@ -1821,17 +1821,25 @@ export async function fetchConversationSummaries(
 	sessionId: string,
 	signal: AbortSignal,
 ): Promise<
-	{ ok: true; conversations: ConversationSummary[] } | { ok: false; status: number; error: string }
+	| { ok: true; conversations: ConversationSummary[]; meta?: "ok" | "unavailable" }
+	| { ok: false; status: number; error: string }
 > {
 	const res = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}/conversations?capture=0`, {
 		signal,
 	});
-	if (!res.ok) return { ok: false, status: res.status, error: await errorMessage(res) };
+	if (!res.ok) {
+		const error = await errorMessage(res);
+		// Stopped waiting while the error body was read: a timeout, not that error.
+		if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+		return { ok: false, status: res.status, error };
+	}
 	const body = (await res.json().catch(() => null)) as ConversationList | null;
+	// The body read was cut by the time limit: a timeout, not a malformed answer.
+	if (signal.aborted) throw new DOMException("Aborted", "AbortError");
 	// A malformed answer is a failure, never "no conversations".
 	if (!body || !Array.isArray(body.conversations))
 		return { ok: false, status: res.status, error: "Unexpected answer from the server" };
-	return { ok: true, conversations: body.conversations };
+	return { ok: true, conversations: body.conversations, meta: body.meta };
 }
 
 export async function fetchConversationEvents(

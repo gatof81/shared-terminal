@@ -151,6 +151,9 @@
 .switcher-error {
   color: var(--c-warn);
 }
+.switcher-note {
+  color: var(--c-muted);
+}
 .switcher-error .chat-link {
   margin-left: 0.25rem;
 }
@@ -167,6 +170,9 @@
     max-height: 100dvh;
     border-radius: 0;
     padding-top: max(0.75rem, env(safe-area-inset-top, 0px));
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom, 0px));
+    padding-left: max(1rem, env(safe-area-inset-left, 0px));
+    padding-right: max(1rem, env(safe-area-inset-right, 0px));
   }
   .switcher-option {
     min-height: 3.25rem;

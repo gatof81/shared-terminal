@@ -7,6 +7,7 @@ import {
 	loadProjects,
 	matches,
 	type Project,
+	ProjectLoader,
 	sectionize,
 	toItem,
 	visibleInSwitcher,
@@ -189,5 +190,51 @@ describe("loadProjects — bounded, per-project failures, never a fake empty lis
 		});
 		expect(started).toEqual(["s1"]);
 		expect(seen).toEqual([]);
+	});
+
+	it("the first load and later retries share the same slots", async () => {
+		let inFlight = 0;
+		let peak = 0;
+		const fetchList: FetchList = async () => {
+			inFlight++;
+			peak = Math.max(peak, inFlight);
+			await new Promise((r) => setTimeout(r, 5));
+			inFlight--;
+			return { ok: true, conversations: [] };
+		};
+		const loader = new ProjectLoader(fetchList, () => {}, { concurrency: 2 });
+		await Promise.all([loader.load(projects.slice(0, 2)), loader.load(projects.slice(2))]);
+		expect(peak).toBe(2);
+	});
+
+	it("a request's time limit starts when it gets its slot, not while it waits", async () => {
+		vi.useFakeTimers();
+		try {
+			const fetchList: FetchList = (sid) =>
+				new Promise((res) =>
+					setTimeout(() => res({ ok: true, conversations: [] }), sid === "s1" ? 80 : 10),
+				);
+			const seen: Project[] = [];
+			const done = loadProjects(projects.slice(0, 2), fetchList, (p) => seen.push(p), {
+				concurrency: 1,
+				timeoutMs: 100,
+			});
+			await vi.advanceTimersByTimeAsync(200);
+			await done;
+			expect(seen.map((p) => p.state.kind)).toEqual(["ok", "ok"]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("a list whose names/archive state could not be read is marked, not hidden", async () => {
+		const fetchList: FetchList = async () => ({
+			ok: true,
+			conversations: [conv()],
+			meta: "unavailable",
+		});
+		const seen: Project[] = [];
+		await loadProjects(projects.slice(0, 1), fetchList, (p) => seen.push(p));
+		expect(seen[0]?.state).toMatchObject({ kind: "ok", metaUnavailable: true });
 	});
 });

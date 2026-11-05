@@ -59,6 +59,12 @@ test.describe("conversation switcher", () => {
 		await expect(page).toHaveURL(new RegExp(`#/sessions/${SESSION_IDS.running}/chat/conv-1$`));
 		await expect(page.locator("#chat-thread .chat-assistant")).toContainText("cookie check");
 
+		// The light, polling-safe list form (no relay probe).
+		expect(
+			backend.requests
+				.slice(reqBefore)
+				.some((r) => r.path.endsWith(`${SESSION_IDS.running}/conversations?capture=0`)),
+		).toBe(true);
 		// Navigation only: GETs, no input or resize to the terminal.
 		expect(backend.requests.slice(reqBefore).filter((r) => r.method !== "GET")).toEqual([]);
 		expect(
@@ -153,5 +159,64 @@ test.describe("conversation switcher", () => {
 		await page.locator("#chat-thread .chat-assistant").first().click();
 		await page.keyboard.press("Control+k");
 		await expect(page.locator(".switcher-card")).toBeVisible();
+	});
+
+	test("opens a conversation of ANOTHER project: the project, Chat and the thread", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.sessions.find((x) => x.sessionId === SESSION_IDS.stopped)!.status = "running";
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.expectTerminalReady();
+		await openSwitcher(app, page);
+		await page.fill("#switcher-input", "docs refactor");
+		await expect(page.locator(".switcher-option")).toHaveCount(1);
+		await page.keyboard.press("Enter");
+		await expect(page).toHaveURL(new RegExp(`#/sessions/${SESSION_IDS.stopped}/chat/conv-1$`));
+		await expect(page.locator("#terminal-session-name")).toContainText("docs");
+		await expect(page.locator("#chat-thread .chat-assistant")).toContainText("cookie check");
+	});
+
+	test("Ctrl+K inside the terminal stays the shell's (kill-line)", async ({ app, page }) => {
+		await app.login("alice");
+		await app.openSession("my-project");
+		await app.expectTerminalReady();
+		await page.locator(".tab-pane.active .xterm-helper-textarea").focus();
+		await page.keyboard.press("Control+k");
+		await expect(page.locator(".switcher-card")).toHaveCount(0);
+	});
+
+	test("names/archive unavailable: the project says its titles are the automatic ones", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		backend.metaUnavailable = true;
+		await app.login("alice");
+		await openSwitcher(app, page);
+		await expect(page.locator(".switcher-note")).toContainText(
+			"names and archive state unavailable",
+		);
+		await expect(page.locator(".switcher-option").first()).toBeVisible();
+	});
+
+	test("a session that expires while it loads closes it before the login view shows", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		await app.login("alice");
+		backend.override = async (method, path, route) => {
+			if (method === "GET" && path.includes("/conversations")) {
+				await route.fulfill({ status: 401, body: JSON.stringify({ error: "Unauthorized" }) });
+				return true;
+			}
+			return false;
+		};
+		await openSwitcher(app, page).catch(() => undefined);
+		await expect(page.locator("#auth-view")).toBeVisible();
+		await expect(page.locator(".switcher-card")).toHaveCount(0);
 	});
 });

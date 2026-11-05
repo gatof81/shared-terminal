@@ -125,7 +125,12 @@ export function matches(item: SwitcherItem, query: string): boolean {
 
 export type ProjectState =
 	| { kind: "loading" }
-	| { kind: "ok"; conversations: ConversationSummary[] }
+	| {
+			kind: "ok";
+			conversations: ConversationSummary[];
+			/** §6.2: names/archive could not be read — titles shown are the automatic ones. */
+			metaUnavailable: boolean;
+	  }
 	| { kind: "error"; reason: "rate-limited" | "timeout" | "failed"; detail: string };
 
 export interface Project {
@@ -134,12 +139,13 @@ export interface Project {
 	state: ProjectState;
 }
 
-/** One project's list request, as the switcher needs it: a status, never a throw. */
+/** One project's list request, as the switcher needs it: a status, never a refusal thrown. */
 export type FetchList = (
 	sessionId: string,
 	signal: AbortSignal,
 ) => Promise<
-	{ ok: true; conversations: ConversationSummary[] } | { ok: false; status: number; error: string }
+	| { ok: true; conversations: ConversationSummary[]; meta?: "ok" | "unavailable" }
+	| { ok: false; status: number; error: string }
 >;
 
 export const SWITCHER_CONCURRENCY = 3;
@@ -153,35 +159,66 @@ export function explainProjectError(s: Extract<ProjectState, { kind: "error" }>)
 }
 
 /**
- * Load every project's list, at most `concurrency` at a time, each bounded by
- * `timeoutMs` (the abort only stops waiting for a read-only list request).
- * `onUpdate` sees each project settle; the promise resolves when all have.
- * A request that throws or times out marks that project failed — the others
- * continue.
+ * Loads project lists for one switcher: at most `concurrency` requests in
+ * flight across EVERY `load` call (the first load and each Retry share the
+ * slots, so retrying a burst of 429s cannot exceed the bound). A request's
+ * `timeoutMs` starts when it gets its slot, not while it waits for one (the
+ * abort only stops waiting for a read-only GET). `onUpdate` sees each project
+ * settle in exactly one state; after `isCancelled` nothing new starts and
+ * nothing more is reported.
  */
-export async function loadProjects(
-	projects: Array<{ sessionId: string; name: string }>,
-	fetchList: FetchList,
-	onUpdate: (p: Project) => void,
-	opts: { concurrency?: number; timeoutMs?: number; isCancelled?: () => boolean } = {},
-): Promise<void> {
-	const concurrency = Math.max(1, opts.concurrency ?? SWITCHER_CONCURRENCY);
-	const timeoutMs = opts.timeoutMs ?? SWITCHER_TIMEOUT_MS;
-	let next = 0;
-	const worker = async () => {
-		while (next < projects.length) {
-			if (opts.isCancelled?.()) return;
-			const p = projects[next++] as { sessionId: string; name: string };
+export class ProjectLoader {
+	private active = 0;
+	private readonly waiting: Array<() => void> = [];
+	private readonly concurrency: number;
+	private readonly timeoutMs: number;
+
+	constructor(
+		private readonly fetchList: FetchList,
+		private readonly onUpdate: (p: Project) => void,
+		private readonly opts: {
+			concurrency?: number;
+			timeoutMs?: number;
+			isCancelled?: () => boolean;
+		} = {},
+	) {
+		this.concurrency = Math.max(1, opts.concurrency ?? SWITCHER_CONCURRENCY);
+		this.timeoutMs = opts.timeoutMs ?? SWITCHER_TIMEOUT_MS;
+	}
+
+	load(projects: Array<{ sessionId: string; name: string }>): Promise<void> {
+		return Promise.all(projects.map((p) => this.one(p))).then(() => undefined);
+	}
+
+	private async acquire(): Promise<void> {
+		if (this.active >= this.concurrency) await new Promise<void>((r) => this.waiting.push(r));
+		this.active++;
+	}
+
+	private release(): void {
+		this.active--;
+		this.waiting.shift()?.();
+	}
+
+	private async one(p: { sessionId: string; name: string }): Promise<void> {
+		await this.acquire();
+		let state: ProjectState;
+		try {
+			if (this.opts.isCancelled?.()) return;
 			const ctrl = new AbortController();
 			let timedOut = false;
 			const timer = setTimeout(() => {
 				timedOut = true;
 				ctrl.abort();
-			}, timeoutMs);
-			let state: ProjectState;
+			}, this.timeoutMs);
 			try {
-				const r = await fetchList(p.sessionId, ctrl.signal);
-				if (r.ok) state = { kind: "ok", conversations: r.conversations };
+				const r = await this.fetchList(p.sessionId, ctrl.signal);
+				if (r.ok)
+					state = {
+						kind: "ok",
+						conversations: r.conversations,
+						metaUnavailable: r.meta === "unavailable",
+					};
 				else if (r.status === 429)
 					state = { kind: "error", reason: "rate-limited", detail: r.error };
 				else state = { kind: "error", reason: "failed", detail: r.error };
@@ -192,9 +229,20 @@ export async function loadProjects(
 			} finally {
 				clearTimeout(timer);
 			}
-			if (opts.isCancelled?.()) return;
-			onUpdate({ sessionId: p.sessionId, name: p.name, state });
+		} finally {
+			this.release();
 		}
-	};
-	await Promise.all(Array.from({ length: Math.min(concurrency, projects.length) }, worker));
+		if (this.opts.isCancelled?.()) return;
+		this.onUpdate({ sessionId: p.sessionId, name: p.name, state });
+	}
+}
+
+/** One-shot form of ProjectLoader (a single load with its own slots). */
+export function loadProjects(
+	projects: Array<{ sessionId: string; name: string }>,
+	fetchList: FetchList,
+	onUpdate: (p: Project) => void,
+	opts: { concurrency?: number; timeoutMs?: number; isCancelled?: () => boolean } = {},
+): Promise<void> {
+	return new ProjectLoader(fetchList, onUpdate, opts).load(projects);
 }

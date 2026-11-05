@@ -65,7 +65,7 @@ import {
 	updateToolbar,
 } from "./sessionCore.js";
 import { initShellV2 } from "./shellV2.js";
-import { initSwitcher, openSwitcher } from "./switcher.js";
+import { closeSwitcher, initSwitcher, openSwitcher } from "./switcher.js";
 import { clearAllBadges } from "./tabActivity.js";
 import type { TerminalSession } from "./terminal.js";
 import {
@@ -619,6 +619,9 @@ function handleLogout(toastMessage?: string): void {
 	// idempotent when no observe is active, so calling it
 	// unconditionally needs no guard.
 	closeObserveModal();
+	// The conversation switcher lists this account's titles and may still be
+	// loading them: close it before the login view shows.
+	closeSwitcher();
 	void logout();
 	// A list request still in flight was sent with this account's cookie:
 	// its answer must not be applied after the next person signs in.

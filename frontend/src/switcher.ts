@@ -20,9 +20,9 @@ import { routeHash } from "./router.js";
 import {
 	BUCKET_LABEL,
 	explainProjectError,
-	loadProjects,
 	matches,
 	type Project,
+	ProjectLoader,
 	type SwitcherItem,
 	sectionize,
 	toItem,
@@ -41,6 +41,13 @@ function el<K extends keyof HTMLElementTagNameMap>(
 }
 
 let openNow = false;
+// Closes the open switcher (logout / session expiry): another account's
+// titles must not stay on screen, nor keep loading into it.
+let closeCurrent: (() => void) | null = null;
+
+export function closeSwitcher(): void {
+	closeCurrent?.();
+}
 
 /** The person's running projects, in sidebar order. */
 function runningProjects(): Array<{ sessionId: string; name: string }> {
@@ -109,6 +116,10 @@ export function openSwitcher(opener?: Element | null): void {
 
 	let shown: SwitcherItem[] = [];
 	let active = 0;
+	// The highlight follows the conversation, not the row index: a project
+	// answering later can insert rows above it.
+	let activeKey: string | null = null;
+	const keyOf = (i: SwitcherItem) => `${i.sessionId}/${i.cid}`;
 
 	const allItems = (): SwitcherItem[] => {
 		const out: SwitcherItem[] = [];
@@ -135,6 +146,8 @@ export function openSwitcher(opener?: Element | null): void {
 			return;
 		}
 		active = (i + opts.length) % opts.length;
+		const it = shown[active];
+		activeKey = it ? keyOf(it) : null;
 		for (const [n, o] of opts.entries()) o.setAttribute("aria-selected", String(n === active));
 		const cur = opts[active] as HTMLElement;
 		input.setAttribute("aria-activedescendant", cur.id);
@@ -191,7 +204,8 @@ export function openSwitcher(opener?: Element | null): void {
 			listEl.appendChild(group);
 		}
 		renderStatus(q);
-		setActive(Math.min(active, Math.max(0, shown.length - 1)));
+		const keep = activeKey === null ? -1 : shown.findIndex((i) => keyOf(i) === activeKey);
+		setActive(keep >= 0 ? keep : 0);
 	};
 
 	const renderStatus = (q: string) => {
@@ -228,6 +242,21 @@ export function openSwitcher(opener?: Element | null): void {
 					`Loading ${loading} of ${all.length} project${all.length === 1 ? "" : "s"}…`,
 				),
 			);
+		// §6.2: with the names/archive state unreadable, the titles are the
+		// automatic ones and archived conversations are listed too — say so.
+		for (const p of all) {
+			if (p.state.kind !== "ok" || !p.state.metaUnavailable) continue;
+			const row = el("p", "switcher-note");
+			row.appendChild(el("strong", undefined, p.name));
+			row.appendChild(
+				el(
+					"span",
+					undefined,
+					" — names and archive state unavailable: showing automatic titles, archived ones included.",
+				),
+			);
+			statusEl.appendChild(row);
+		}
 		for (const p of failed) {
 			if (p.state.kind !== "error") continue;
 			const row = el("p", "switcher-error");
@@ -245,19 +274,19 @@ export function openSwitcher(opener?: Element | null): void {
 		}
 	};
 
-	const load = (list: Array<{ sessionId: string; name: string }>) =>
-		loadProjects(
-			list,
-			fetchConversationSummaries,
-			(p) => {
-				projects.set(p.sessionId, p);
-				render();
-			},
-			{ isCancelled: () => closed },
-		);
+	// One loader per switcher: the first load and every Retry share its slots.
+	const loader = new ProjectLoader(
+		fetchConversationSummaries,
+		(p) => {
+			projects.set(p.sessionId, p);
+			render();
+		},
+		{ isCancelled: () => closed },
+	);
+	const load = (list: Array<{ sessionId: string; name: string }>) => loader.load(list);
 
 	input.addEventListener("input", () => {
-		active = 0;
+		activeKey = null;
 		render();
 	});
 	input.addEventListener("keydown", (e) => {
@@ -279,9 +308,11 @@ export function openSwitcher(opener?: Element | null): void {
 		onClose: () => {
 			closed = true;
 			openNow = false;
+			closeCurrent = null;
 			root.remove();
 		},
 	});
+	closeCurrent = () => dialog.close();
 	dialog.open(opener ?? document.activeElement);
 	render();
 	void load(runningProjects());
@@ -302,8 +333,13 @@ export function initSwitcher(isLoggedIn: () => boolean): void {
 	wired = true;
 	const btn = document.getElementById("switcher-btn");
 	btn?.addEventListener("click", () => openSwitcher(btn));
+	// The hint says the key this keyboard has.
+	const mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+	const kbd = btn?.querySelector("kbd");
+	if (mac && kbd) kbd.textContent = "⌘K";
 	document.addEventListener("keydown", (e) => {
-		if (e.key !== "k" && e.key !== "K") return;
+		// e.code: the K key on any layout (a non-Latin layout reports another e.key).
+		if (e.code !== "KeyK" && e.key !== "k" && e.key !== "K") return;
 		if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
 		if (!isLoggedIn() || isAnyDialogOpen() || isTypingTarget(e.target)) return;
 		e.preventDefault();
