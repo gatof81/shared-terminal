@@ -24,8 +24,14 @@ export default defineConfig<ShellOptions>({
 		timeout: 7_000,
 		toHaveScreenshot: {
 			// Same Chromium build and the same vendored fonts everywhere (see
-			// e2e/fixtures.ts), so only anti-aliasing noise is left.
-			maxDiffPixelRatio: 0.02,
+			// e2e/fixtures.ts). Measured 2026-11-05: independent CI runs of the
+			// same code render byte-identical screenshots (0 differing pixels),
+			// while the old 2% ratio let a real layout regression through — the
+			// Git diff's code column moved half a pane (0.78% of pixels, #526)
+			// and stale baselines kept passing (#525). An absolute margin keeps
+			// a little slack for noise without hiding a moved column or a
+			// restyled button.
+			maxDiffPixels: 100,
 			// pixelmatch's default YIQ threshold (0.2) lets a dark-grey toast on
 			// the near-black background pass as "same pixel"; 0.1 counts it —
 			// and with it any stale baseline (`--update-snapshots` only rewrites
