@@ -349,7 +349,8 @@ span.files-crumb {
   tab-size: 4;
 }
 .files-code-gutter {
-  color: var(--c-dim);
+  /* Line numbers are read: --c-faint (AA), not the decorative --c-dim. */
+  color: var(--c-faint);
   text-align: right;
   user-select: none;
   border-right: 1px solid var(--c-border-soft);

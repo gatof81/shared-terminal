@@ -293,7 +293,8 @@
   padding: 0 0.5rem;
 }
 .git-diff-no {
-  color: var(--c-dim);
+  /* Line numbers are read: --c-faint (AA), not the decorative --c-dim. */
+  color: var(--c-faint);
   text-align: right;
   user-select: none;
   min-width: 3ch;

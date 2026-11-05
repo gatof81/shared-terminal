@@ -24,7 +24,11 @@
   --c-text: #e6edf3;
   --c-text-2: #c9d1d9;
   --c-muted: #8b949e;
-  --c-faint: #6e7681;
+  /* AA (≥ 4.5:1) on every surface it sits on, selected rows included
+     (5.62 bg · 5.14 surface · 4.81 surface-2 · 4.76 accent-bg). The old
+     #6e7681 was 3.5–4.1:1 for 0.66–0.72rem timestamps and counts. */
+  --c-faint: #848d97;
+  /* Decorative only (separators, rules): 2.3:1, never for text to read. */
   --c-dim: #484f58;
   --c-white: #fff;
 
