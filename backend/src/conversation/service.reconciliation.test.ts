@@ -221,6 +221,7 @@ afterEach(async () => {
 });
 
 import {
+	SESSION_END_GRACE_MS,
 	SILENCE_PROBE_AFTER_MS,
 	TARGETED_PROBE_DELAY_MS,
 	UNKNOWN_AFTER_SILENCE_MS,
@@ -869,5 +870,443 @@ describe("v1.7.2 integrity gate (#505 review)", () => {
 		expect(probes).toBeLessThanOrEqual(8);
 		expect(probes).toBeGreaterThanOrEqual(6);
 		expect((await state("c1"))?.status).toBe("waiting_input");
+	});
+});
+
+describe("v1.8.5 — who may hold a pane (§5.2): resume, takeover and the children of a pane", () => {
+	const panes = async () =>
+		Object.fromEntries((await service.summaries("s1")).map((x) => [x.sessionId, x.paneId]));
+	async function interactiveIn(cid: string, source = "startup") {
+		session("s1");
+		await service.ingest("s1", "%0", hook("SessionStart", { source, ...PANE }, cid));
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "a", prompt_id: `p-${cid}` }, cid),
+		);
+	}
+
+	it("a `claude -p` started from the interactive conversation's Bash (same pane) does not take the pane", async () => {
+		await interactiveIn("main");
+		await service.ingest(
+			"s1",
+			"%0",
+			hook(
+				"SessionStart",
+				{ source: "startup", st: { pane: "%0", tmux_session: "tab-1", argv_flags: ["-p"] } },
+				"child",
+			),
+		);
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "x", prompt_id: "pc" }, "child"),
+		);
+		await store.flush("s1", "main");
+		await store.flush("s1", "child");
+		expect(await panes()).toMatchObject({ main: "%0", child: null });
+		expect((await state("main"))?.statusEvidence).not.toBe("binding_lost");
+	});
+
+	it("a teammate never takes a held pane, but keeps its own (tmux-mode split pane)", async () => {
+		await interactiveIn("main");
+		await service.ingest(
+			"s1",
+			"%0",
+			hook(
+				"SessionStart",
+				{ source: "startup", st: { pane: "%0", argv_flags: ["--agent-name=helper"] } },
+				"mate",
+			),
+		);
+		await store.flush("s1", "mate");
+		expect(await panes()).toMatchObject({ main: "%0", mate: null });
+		await service.ingest(
+			"s1",
+			"%1",
+			hook(
+				"SessionStart",
+				{ source: "startup", st: { pane: "%1", argv_flags: ["--agent-name=other"] } },
+				"mate2",
+			),
+		);
+		await store.flush("s1", "mate2");
+		expect(await panes()).toMatchObject({ main: "%0", mate2: "%1" });
+	});
+
+	it("a conversation bound as unknown lets go of the pane when its SessionStart shows it is a claude -p", async () => {
+		session("s1");
+		await service.ingest(
+			"s1",
+			"%3",
+			hook("UserPromptSubmit", { prompt: "x", prompt_id: "pk" }, "kid"),
+		);
+		await store.flush("s1", "kid");
+		expect((await panes()).kid).toBe("%3");
+		await service.ingest(
+			"s1",
+			"%3",
+			hook("SessionStart", { source: "startup", st: { pane: "%3", argv_flags: ["-p"] } }, "kid"),
+		);
+		await store.flush("s1", "kid");
+		expect((await panes()).kid).toBeNull();
+	});
+
+	it("once the end grace has elapsed the exited holder (ended · hook:SessionEnd) no longer keeps the pane", async () => {
+		vi.useFakeTimers();
+		try {
+			await interactiveIn("done");
+			await service.ingest("s1", "%0", hook("SessionEnd", { reason: "prompt_input_exit" }, "done"));
+			now += SESSION_END_GRACE_MS + 1;
+			await vi.advanceTimersByTimeAsync(SESSION_END_GRACE_MS + 1);
+			await service.ingest(
+				"s1",
+				"%0",
+				hook("UserPromptSubmit", { prompt: "x", prompt_id: "pg" }, "late"),
+			);
+			await store.flush("s1", "late");
+			expect((await panes()).late).toBe("%0");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("an exiting holder still keeps an unknown conversation off the pane until the end grace elapses or the probe finds it gone", async () => {
+		await interactiveIn("done");
+		await service.ingest("s1", "%0", hook("SessionEnd", { reason: "prompt_input_exit" }, "done"));
+		// `ending` (≤ the end grace): the CLI may still be in the pane — no bind.
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "x", prompt_id: "pn" }, "late"),
+		);
+		await store.flush("s1", "late");
+		expect((await panes()).late).toBeNull();
+		// The probe finds no process: the holder is released; the next report binds.
+		box.probe = [];
+		await service.probeAndApply("s1");
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "y", prompt_id: "pn2" }, "late"),
+		);
+		await store.flush("s1", "late");
+		expect((await panes()).late).toBe("%0");
+	});
+
+	it("a conversation whose SessionStart was never seen (kind unknown) never takes a held pane, but binds a free one", async () => {
+		await interactiveIn("main");
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "x", prompt_id: "pu" }, "orphan"),
+		);
+		await store.flush("s1", "orphan");
+		expect(await panes()).toMatchObject({ main: "%0", orphan: null });
+		// On a free pane it binds (the only reporter there).
+		await service.ingest(
+			"s1",
+			"%1",
+			hook("UserPromptSubmit", { prompt: "y", prompt_id: "pf" }, "free"),
+		);
+		await store.flush("s1", "free");
+		expect((await panes()).free).toBe("%1");
+	});
+
+	it("a new interactive conversation in the pane (/clear, a new claude) takes it: the old one is binding_lost", async () => {
+		await interactiveIn("old");
+		now += 1000;
+		await interactiveIn("new", "clear");
+		expect(await panes()).toMatchObject({ old: null, new: "%0" });
+		expect(await state("old")).toMatchObject({ status: "unknown", statusEvidence: "binding_lost" });
+	});
+
+	it("resuming the earlier conversation in that pane restores its binding (and releases the other)", async () => {
+		await interactiveIn("a");
+		now += 1000;
+		await interactiveIn("b", "clear");
+		now += 1000;
+		await service.ingest("s1", "%0", hook("SessionStart", { source: "resume", ...PANE }, "a"));
+		expect(await panes()).toMatchObject({ a: "%0", b: null });
+	});
+
+	it("an interactive conversation that lost its pane gets it back from its next prompt in that pane", async () => {
+		await interactiveIn("a");
+		now += 1000;
+		await interactiveIn("b", "clear");
+		// The person goes back to `a` in that pane (e.g. via the CLI's own switch): its prompt comes from %0.
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "back", prompt_id: "pa2" }, "a"),
+		);
+		await store.flush("s1", "a");
+		expect((await panes()).a).toBe("%0");
+	});
+
+	it("a session whose hooks carry no pane (a background Claude session: no TMUX_PANE) is never bound and releases nobody", async () => {
+		await interactiveIn("main");
+		session("s1");
+		await service.ingest(
+			"s1",
+			undefined,
+			hook(
+				"SessionStart",
+				{ source: "fork", st: { argv_flags: ["--fork-session", "--resume"] } },
+				"bg",
+			),
+		);
+		await service.ingest(
+			"s1",
+			undefined,
+			hook("UserPromptSubmit", { prompt: "z", prompt_id: "pb" }, "bg"),
+		);
+		await store.flush("s1", "bg");
+		expect(await panes()).toMatchObject({ main: "%0", bg: null });
+		expect((await state("bg"))?.canSendInput).toBe(false);
+	});
+
+	it("G4: a teammate/unknown never ends up sharing a pane with an evicted live holder", async () => {
+		await interactiveIn("main");
+		await store.flush("s1", "main");
+		await store.close("s1", "main"); // evicted: runtime kept, index only on disk
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "x", prompt_id: "pu" }, "orphan"),
+		);
+		await service.ingest(
+			"s1",
+			"%0",
+			hook(
+				"SessionStart",
+				{ source: "startup", st: { pane: "%0", argv_flags: ["--agent-name=h"] } },
+				"mate",
+			),
+		);
+		// Let the async disk checks settle, then read: one holder only.
+		await new Promise((r) => setTimeout(r, 20));
+		await store.flush("s1", "orphan");
+		await store.flush("s1", "mate");
+		const p = await panes();
+		expect(p).toMatchObject({ main: "%0", orphan: null, mate: null });
+		expect(Object.values(p).filter((x) => x === "%0")).toHaveLength(1);
+	});
+
+	it("G4: an evicted holder that has ended does not keep a free pane from an unknown", async () => {
+		vi.useFakeTimers();
+		try {
+			await interactiveIn("done");
+			await service.ingest("s1", "%0", hook("SessionEnd", { reason: "prompt_input_exit" }, "done"));
+			now += SESSION_END_GRACE_MS + 1;
+			await vi.advanceTimersByTimeAsync(SESSION_END_GRACE_MS + 1);
+			await store.flush("s1", "done");
+			await store.close("s1", "done");
+		} finally {
+			vi.useRealTimers();
+		}
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "x", prompt_id: "pz" }, "late"),
+		);
+		// The release of the evicted holder is real disk I/O: wait for the outcome.
+		await vi.waitFor(async () => {
+			await store.flush("s1", "late");
+			await store.flush("s1", "done");
+			// One holder: the ended one let go (state kept — not a binding_lost).
+			expect(await panes()).toMatchObject({ late: "%0", done: null });
+		});
+		expect((await state("done"))?.status).toBe("ended");
+	});
+
+	it("a resident holder that has ended lets go when an unknown binds the pane: one holder", async () => {
+		vi.useFakeTimers();
+		try {
+			await interactiveIn("done");
+			await service.ingest("s1", "%0", hook("SessionEnd", { reason: "prompt_input_exit" }, "done"));
+			now += SESSION_END_GRACE_MS + 1;
+			await vi.advanceTimersByTimeAsync(SESSION_END_GRACE_MS + 1);
+			await service.ingest(
+				"s1",
+				"%0",
+				hook("UserPromptSubmit", { prompt: "x", prompt_id: "pz" }, "late"),
+			);
+			const p = await panes();
+			expect(p).toMatchObject({ late: "%0", done: null });
+			expect(Object.values(p).filter((x) => x === "%0")).toHaveLength(1);
+			expect((await state("done"))?.status).toBe("ended");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("resuming the interactive conversation after an unknown bound a freed pane leaves exactly one holder", async () => {
+		await interactiveIn("a");
+		now += 1000;
+		await interactiveIn("b", "clear"); // a: binding_lost, b holds %0
+		await service.ingest("s1", "%0", hook("SessionEnd", { reason: "clear" }, "b"));
+		now += 1000;
+		await service.ingest("s1", "%0", hook("SessionStart", { source: "resume", ...PANE }, "a"));
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "u", prompt_id: "pu" }, "u"),
+		);
+		now += 1000;
+		await service.ingest("s1", "%0", hook("SessionStart", { source: "resume", ...PANE }, "a"));
+		const p = await panes();
+		expect(p.a).toBe("%0");
+		expect(Object.values(p).filter((x) => x === "%0")).toHaveLength(1);
+	});
+
+	it("G4: an evicted peer whose index snapshot is unreadable keeps an unknown unbound (fail closed)", async () => {
+		await interactiveIn("main");
+		await store.flush("s1", "main");
+		await store.close("s1", "main");
+		await fs.writeFile(store.indexPath("s1", "main"), "{not json");
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "x", prompt_id: "pu" }, "orphan"),
+		);
+		await new Promise((r) => setTimeout(r, 20));
+		await store.flush("s1", "orphan");
+		expect(
+			(await service.summaries("s1")).find((x) => x.sessionId === "orphan")?.paneId,
+		).toBeNull();
+	});
+
+	/**
+	 * A live evicted peer `ev` on ANOTHER pane (%9) whose index reads are held
+	 * until the returned release: an unknown's bind on %0 then waits on that
+	 * read and, the peer not holding %0, reaches the checks at the write.
+	 */
+	async function evictedPeerOnOtherPane(
+		before?: () => Promise<void>,
+		{ firstReadOnly = false } = {},
+	): Promise<() => void> {
+		let gate: Promise<void> = Promise.resolve();
+		let armed = false;
+		const gated: StoreFs = {
+			mkdir: (p, o) => fs.mkdir(p, o),
+			appendFile: (p, d) => fs.appendFile(p, d),
+			writeFile: (p, d) => fs.writeFile(p, d),
+			rename: (a, b) => fs.rename(a, b),
+			rm: (p, o) => fs.rm(p, o),
+			stat: (p) => fs.stat(p),
+			readFile: async (p, e) => {
+				if (armed && String(p) === store.indexPath("s1", "ev")) {
+					if (firstReadOnly) armed = false;
+					await gate;
+				}
+				return fs.readFile(p, e);
+			},
+			readdir: (p) => fs.readdir(p),
+		} as StoreFs;
+		await service.shutdown();
+		store = new ConversationStore({ workspaceRoot: root, now: () => now, fs: gated });
+		service = makeService();
+		session("s1");
+		await before?.();
+		await service.ingest(
+			"s1",
+			"%9",
+			hook("SessionStart", { source: "startup", st: { pane: "%9", tmux_session: "tab-9" } }, "ev"),
+		);
+		await store.flush("s1", "ev");
+		await store.close("s1", "ev");
+		let release!: () => void;
+		gate = new Promise<void>((r) => {
+			release = r;
+		});
+		armed = true;
+		return release;
+	}
+
+	it("G4: a stop while an unknown's disk check is pending cancels its bind (the pane belongs to the old start)", async () => {
+		// Only the unknown's read is held: the stop completes (its own release
+		// included) before that read lands, so only the generation check stops it.
+		const release = await evictedPeerOnOtherPane(undefined, { firstReadOnly: true });
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "x", prompt_id: "pu" }, "orphan"),
+		);
+		// Watch every write to `orphan` from the stop on: none may bind it to %0.
+		const seen: (string | null)[] = [];
+		const update = store.update.bind(store);
+		vi.spyOn(store, "update").mockImplementation((sid, cid, fn) => {
+			const r = update(sid, cid, fn);
+			if (cid === "orphan") seen.push(store.getResidentIndex(sid, cid)?.paneId ?? null);
+			return r;
+		});
+		await service.onSessionDown("s1");
+		// The next start: the conversation is loaded again by an event with no pane.
+		session("s1");
+		await service.ingest("s1", undefined, hook("Notification", { message: "m" }, "orphan"));
+		release();
+		await new Promise((r) => setTimeout(r, 20));
+		expect(seen).not.toContain("%0");
+		await store.flush("s1", "orphan");
+		expect((await panes()).orphan).toBeNull();
+	});
+
+	it("G4: a peer evicted while an unknown's disk check is pending cancels the bind (fail closed); the next event retries", async () => {
+		// `r` is resident (skipped by the disk loop) and checked before `ev`.
+		const release = await evictedPeerOnOtherPane(async () => {
+			await service.ingest(
+				"s1",
+				"%5",
+				hook("SessionStart", { source: "startup", st: { pane: "%5", tmux_session: "tab-5" } }, "r"),
+			);
+		});
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "x", prompt_id: "pu" }, "orphan"),
+		);
+		await store.flush("s1", "r");
+		await store.close("s1", "r"); // evicted during the pending check: seen by neither path
+		release();
+		await new Promise((r) => setTimeout(r, 20));
+		await store.flush("s1", "orphan");
+		expect((await panes()).orphan).toBeNull();
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "y", prompt_id: "pu2" }, "orphan"),
+		);
+		await vi.waitFor(async () => {
+			await store.flush("s1", "orphan");
+			expect((await panes()).orphan).toBe("%0");
+		});
+	});
+
+	it("G4: an interactive conversation that binds while an unknown's disk check is pending wins — one holder", async () => {
+		const release = await evictedPeerOnOtherPane();
+		await service.ingest(
+			"s1",
+			"%0",
+			hook("UserPromptSubmit", { prompt: "x", prompt_id: "pu" }, "orphan"),
+		);
+		now += 1000;
+		await interactiveIn("main");
+		release();
+		await new Promise((r) => setTimeout(r, 20));
+		await store.flush("s1", "orphan");
+		const p = await panes();
+		expect(p).toMatchObject({ main: "%0", orphan: null });
+		expect(Object.values(p).filter((x) => x === "%0")).toHaveLength(1);
+	});
+
+	it("G4: an interactive conversation still takes the pane from an evicted holder (unchanged)", async () => {
+		await interactiveIn("old");
+		await store.flush("s1", "old");
+		await store.close("s1", "old");
+		now += 1000;
+		await interactiveIn("new", "clear");
+		await vi.waitFor(async () => expect(await panes()).toMatchObject({ old: null, new: "%0" }));
+		expect(await state("old")).toMatchObject({ status: "unknown", statusEvidence: "binding_lost" });
 	});
 });

@@ -248,6 +248,9 @@ export class ConversationStore {
 	private readonly fs: StoreFs;
 	private readonly now: () => number;
 	private readonly resident = new Map<string, Resident>();
+	// G4 — an entry between leaving `resident` and its snapshot write landing.
+	// peekIndex answers from it, since the file on disk is still older then.
+	private readonly evicting = new Map<string, Resident>();
 	/** B2 — single-flight opens: concurrent first events share one load. */
 	private readonly opening = new Map<string, Promise<ConversationIndex>>();
 	/** B4 — sessions being purged: opens/appends for them are refused. */
@@ -391,7 +394,8 @@ export class ConversationStore {
 
 	/** Read the snapshot from disk without making it resident (list endpoint). */
 	async peekIndex(stSessionId: string, cid: string): Promise<ConversationIndex | null> {
-		const resident = this.resident.get(`${stSessionId}/${cid}`);
+		const key = `${stSessionId}/${cid}`;
+		const resident = this.resident.get(key) ?? this.evicting.get(key);
 		if (resident) return resident.index;
 		try {
 			const raw = await this.fs.readFile(this.indexPath(stSessionId, cid), "utf8");
@@ -921,8 +925,13 @@ export class ConversationStore {
 				continue;
 			}
 			this.resident.delete(oldestKey);
+			this.evicting.set(oldestKey, r);
 			this.stats.evictions++;
-			await this.writeIndex(r);
+			try {
+				await this.writeIndex(r);
+			} finally {
+				if (this.evicting.get(oldestKey) === r) this.evicting.delete(oldestKey);
+			}
 		}
 	}
 
