@@ -142,5 +142,81 @@ class TrustGate(unittest.TestCase):
             self.assertNotIn(v, (TRUST_YES, TRUST_NO, BLANK, PROMPT))
 
 
+class ScriptIO(T.IO):
+    """Exact per-read control: pane() returns panes[i] then advances; exited() flips True once
+    `exit_at_read` pane reads have happened. Used to place a change precisely at the pre-Enter read.
+    For sel-stable input with stable_polls=2 the driver's read order is: readiness (1,2),
+    stable_option (3,4), **pre-Enter re-validation (5)**, then Phase D's gone-check (6)."""
+
+    def __init__(self, panes, exit_at_read=None):
+        self.panes, self.exit_at_read = list(panes), exit_at_read
+        self.i, self.keys, self.t = 0, [], 0.0
+
+    def pane(self):
+        f = self.panes[min(self.i, len(self.panes) - 1)]
+        self.i += 1
+        return f
+
+    def send(self, key):
+        self.keys.append(key)
+
+    def exited(self):
+        return self.exit_at_read is not None and self.i >= self.exit_at_read
+
+    def now(self):
+        self.t += 0.05
+        return self.t
+
+    def sleep(self, s):
+        self.t += s
+
+
+class Revalidate(unittest.TestCase):
+    """Owner #1: the pre-Enter re-validation narrows (not eliminates) the TOCTOU window."""
+
+    def test_verdicts(self):
+        self.assertEqual(T.revalidate_before_enter(TRUST_YES, False), ("ok", "yes"))
+        self.assertEqual(T.revalidate_before_enter(TRUST_NO, False), ("changed", "no"))
+        self.assertEqual(T.revalidate_before_enter(PROMPT, False), ("gone", None))
+        self.assertEqual(T.revalidate_before_enter(TRUST_YES, True), ("exited", None))  # exit wins
+        self.assertEqual(T.revalidate_before_enter(BLANK, False), ("gone", None))
+
+
+class TOCTOU(unittest.TestCase):
+    """Driver aborts without Enter if the screen/selection/process changes between the stable read
+    and the confirm. The change is placed at the pre-Enter re-validation read (#5)."""
+
+    def drive(self, panes, exit_at_read=None):
+        io = ScriptIO(panes, exit_at_read=exit_at_read)
+        r = T.drive_trust(io, poll=0.01, stable_polls=2, settle=0.05)
+        return r, io
+
+    def test_selection_changed_before_enter_aborts(self):
+        r, io = self.drive([TRUST_YES, TRUST_YES, TRUST_YES, TRUST_YES, TRUST_NO])
+        self.assertEqual(r["state"], "selection-changed-before-enter")
+        self.assertFalse(r["enter_sent"])
+        self.assertNotIn("Enter", io.keys)
+        self.assertEqual(r["selection_before_enter"], "no")
+
+    def test_screen_gone_before_enter_aborts(self):
+        r, io = self.drive([TRUST_YES, TRUST_YES, TRUST_YES, TRUST_YES, PROMPT])
+        self.assertEqual(r["state"], "screen-gone-before-enter")
+        self.assertFalse(r["enter_sent"])
+        self.assertNotIn("Enter", io.keys)
+
+    def test_process_exited_before_enter_aborts(self):
+        r, io = self.drive([TRUST_YES] * 6, exit_at_read=5)
+        self.assertEqual(r["state"], "exited-before-enter")
+        self.assertFalse(r["enter_sent"])
+        self.assertNotIn("Enter", io.keys)
+
+    def test_stable_through_revalidation_confirms(self):
+        # Control: nothing changes at the pre-Enter read -> Enter sent, screen gone after -> confirmed.
+        r, io = self.drive([TRUST_YES, TRUST_YES, TRUST_YES, TRUST_YES, TRUST_YES, PROMPT, PROMPT])
+        self.assertEqual(r["state"], "confirmed")
+        self.assertTrue(r["enter_sent"])
+        self.assertEqual(io.keys, ["Enter"])
+
+
 if __name__ == "__main__":
     unittest.main()

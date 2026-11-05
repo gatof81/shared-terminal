@@ -14,6 +14,11 @@ What it fixes vs. the audited kit's `one_start` trust drive (which blindly sent 
   4. records the post-Enter result, process state and MONOTONIC timings.
 
 Privacy: it emits only ENUMS and STRUCTURED STATES — never raw pane text / snapshots.
+
+SCOPE (owner finding #2): `state:"confirmed"` means ONLY that workspace-trust was confirmed via a
+verified `yes`. It does NOT prove a valid P0 baseline. Any eventual integration MUST still require
+`session.start` + the organizational probe + the guard IN THE SAME START (the audited kit's existing
+global controls); this gate is necessary, not sufficient.
 """
 import re
 
@@ -40,6 +45,25 @@ def pointer_option(text):
 def _pointer_line(text):
     m = POINTER.search(text or "")
     return m.group(0).strip() if m else None
+
+
+def revalidate_before_enter(pane_text, exited):
+    """Re-check the trust dialog IMMEDIATELY before pressing Enter. This NARROWS — it does NOT
+    eliminate — the TOCTOU window: there is always a residual gap between this read and the key
+    actually reaching the CLI, so atomicity is never promised. Returns (verdict, option):
+      'exited'  — the process ended in the interval (do not send Enter);
+      'gone'    — the trust dialog vanished in the interval (do not send Enter);
+      'changed' — the pointer is no longer on `yes` (do not send Enter);
+      'ok'      — still a live dialog with `yes` highlighted (send Enter, accepting the residual gap).
+    """
+    if exited:
+        return "exited", None
+    if not TRUST_PRESENT.search(pane_text or ""):
+        return "gone", None
+    opt = pointer_option(pane_text)
+    if opt != "yes":
+        return "changed", opt
+    return "ok", opt
 
 
 class IO:
@@ -131,6 +155,17 @@ def drive_trust(io, *, poll=0.2, stable_polls=2, ready_timeout=30.0, max_nav=5, 
     # ── Phase C: confirm ONLY on a verified `yes`; otherwise STOP without sending Enter ──
     if opt != "yes":
         r["state"] = "not-yes-aborted"   # a lost Down can never confirm "No, exit"
+        return r
+
+    # ── Phase C′: re-validate IMMEDIATELY before Enter (narrows TOCTOU; NOT atomic — see
+    # revalidate_before_enter). The process must still be alive, the dialog still present and the
+    # pointer still on `yes`; if anything changed in the interval, abort without sending Enter.
+    verdict, opt2 = revalidate_before_enter(io.pane(), io.exited())
+    if opt2 is not None:
+        r["selection_before_enter"] = opt2
+    if verdict != "ok":
+        r["state"] = {"exited": "exited-before-enter", "gone": "screen-gone-before-enter",
+                      "changed": "selection-changed-before-enter"}[verdict]
         return r
 
     # ── Phase D: send Enter, then classify the outcome by process + screen state ──
