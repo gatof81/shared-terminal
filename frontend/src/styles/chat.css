@@ -1040,7 +1040,9 @@
   flex: 1;
   min-width: 0;
   resize: none;
-  max-height: 9rem;
+  /* Grows with the text (autosize in chatView.ts) up to here, then scrolls. */
+  max-height: 12rem;
+  overflow-y: auto;
   background: var(--c-bg);
   color: var(--c-text);
   border: 1px solid var(--c-border);
@@ -1052,6 +1054,9 @@
 }
 .chat-composer textarea:disabled {
   color: var(--c-muted);
+}
+.chat-composer-draft-note {
+  color: var(--c-faint);
 }
 .chat-composer-status {
   display: flex;
@@ -1104,6 +1109,12 @@
   }
 }
 /* Mobile: one pane, agents as a bottom sheet, bigger targets */
+@media (max-width: 768px) {
+  /* The soft keyboard takes half the screen: a shorter cap keeps the thread visible. */
+  .chat-composer textarea {
+    max-height: 7.5rem;
+  }
+}
 @media (max-width: 768px) {
   .chat-thread-title {
     display: none;

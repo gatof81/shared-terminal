@@ -1034,7 +1034,7 @@ describe("Composer", () => {
 		ta.dispatchEvent(new Event("input"));
 	}
 
-	it("is disabled with the reason when the server says so; enabled when canSendInput", async () => {
+	it("a send settling elsewhere: Send is off with the reason; the draft stays writable", async () => {
 		await openChat();
 		await openThread([ev("user_prompt", { prompt: "x" })]);
 		expect(composerTextarea().disabled).toBe(true);
@@ -1042,7 +1042,9 @@ describe("Composer", () => {
 			canSendInput: false,
 			composer: { blocked: true, reason: "effects-pending", clientMessageId: "abc" },
 		});
-		expect(composerTextarea().disabled).toBe(true);
+		expect(sendBtn().disabled).toBe(true);
+		expect(composerTextarea().disabled).toBe(false);
+		expect(status().textContent).toMatch(/previous send is settled/);
 		// The reason is in the status line, once; the placeholder stays short.
 		expect(status().textContent).toMatch(/blocked/);
 		expect(composerTextarea().placeholder).toBe("Message Claude…");
@@ -1091,14 +1093,24 @@ describe("Composer", () => {
 		mainState.currentTabs = [];
 	});
 
-	it("is disabled while Claude is working or a permission prompt is open; a stale live claim does not block", async () => {
+	it("while Claude works or a permission is open, Send is off and writing is on; ended and pane-less take no draft", async () => {
 		await openSendable({ status: "running" });
-		expect(composerTextarea().disabled).toBe(true);
+		expect(sendBtn().disabled).toBe(true);
+		expect(composerTextarea().disabled).toBe(false);
 		expect(status().textContent).toMatch(/working/);
+		expect(status().textContent).toMatch(/keep writing/);
 		await openSendable({ status: "waiting_permission" });
+		expect(sendBtn().disabled).toBe(true);
+		expect(composerTextarea().disabled).toBe(false);
 		expect(status().textContent).toMatch(/permission/);
 		await openSendable({ status: "ended" });
+		expect(sendBtn().disabled).toBe(true);
+		expect(composerTextarea().disabled).toBe(true);
 		expect(status().textContent).toMatch(/has ended/);
+		expect(status().textContent).not.toMatch(/keep writing/);
+		await openSendable({ canSendInput: false, paneId: null });
+		expect(sendBtn().disabled).toBe(true);
+		expect(composerTextarea().disabled).toBe(true);
 		await openSendable({
 			status: "running",
 			statusAt: new Date(Date.now() - 11 * 60 * 1000).toISOString(),
@@ -1106,6 +1118,34 @@ describe("Composer", () => {
 			lastEventAt: new Date(Date.now() - 11 * 60 * 1000).toISOString(),
 		});
 		expect(composerTextarea().disabled).toBe(false);
+		expect(sendBtn().disabled).toBe(false);
+	});
+
+	it("a draft written while Claude works survives the state change and is never sent on its own", async () => {
+		await openSendable({ status: "running" });
+		type("next: run the tests");
+		// Ctrl+Enter while Send is off sends nothing.
+		composerTextarea().dispatchEvent(
+			new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }),
+		);
+		await flush();
+		expect(api.sendConversationMessage).not.toHaveBeenCalled();
+		// Claude reaches its prompt: the list says so on the next refresh.
+		api.fetchConversations.mockResolvedValue({
+			capture: { requested: true, effective: true, effectiveAfterRestart: true },
+			conversations: [conv({ canSendInput: true, composer: { blocked: false } })],
+		});
+		api.fetchConversationEvents.mockResolvedValueOnce({
+			events: [ev("user_prompt", { prompt: "earlier" })],
+			hasMore: false,
+			firstRetainedSeq: 1,
+		});
+		$("chat-refresh-btn").click();
+		await flush();
+		expect(sendBtn().disabled).toBe(false);
+		expect(composerTextarea().value).toBe("next: run the tests");
+		// Ready is not a trigger: only the person's click sends.
+		expect(api.sendConversationMessage).not.toHaveBeenCalled();
 	});
 
 	it("a composer re-render keeps the same textarea element, its draft and the caret (no replace while typing)", async () => {
