@@ -421,4 +421,11 @@ answer it, under the GO/NO-GO above. Until a real run passes all rows, N14 stays
   AppArmor profile allows it or the run is root, in which case spawn/readiness fails closed
   (INCONCLUSIVE); and `ip` (iproute2) is absent — `check_isolation` then returns False (fail closed).
   The disposable host must have iproute2 and permit user namespaces.
+- **F1 cerrado a nivel de implementación (revisión del owner sobre `7e21340`).** El preflight externo
+  está documentado en [`PREFLIGHT-HANDOFF.md`](./PREFLIGHT-HANDOFF.md): VM descartable separada de
+  VM100, ejecución como root, 3 corridas, criterios PASS/FAIL y verificación de residuos. Dos notas del
+  owner: (1) `refusal()` es una protección parcial y no demuestra que el host no sea VM100; la identidad
+  se verifica por fuera; (2) una excepción inesperada puede impedir que se emita el JSON, y en ese caso
+  el resultado es FAIL, el cleanup no se acredita y se conserva el error (stderr). Límite conocido:
+  `check_isolation` usa `nsenter -n` sin `-U`, por lo que se espera que requiera root.
 
