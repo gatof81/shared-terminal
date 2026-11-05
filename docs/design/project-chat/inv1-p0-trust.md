@@ -49,7 +49,8 @@ persiste snapshots del panel**. No afirmamos tener capturas del pane: no existen
 Cada arranque guarda en `starts[0]`: `screens` (por pantalla), `tries`, `trust_still_shown`,
 `timed_out`, `rc`, `probe_kinds`, y a nivel intento `startup` (`ok` / `trust-unconfirmed` /
 `unknown`). Con sólo **leer** el `result.json` de P0 retenido (read-only, sin nueva corrida) se
-separan las hipótesis:
+**acota** la causa — se refutan H2/H3 y queda compatible con H1 — aunque **no** se demuestra el
+mecanismo exacto (qué opción recibió el `Enter`):
 
 | Firma en `result.json` de P0 | Interpretación |
 | --- | --- |
@@ -63,16 +64,27 @@ trust funcionó: `startup="ok"`, `probe_kinds` con `session.start`. La diferenci
 
 ## 3. Hipótesis ordenadas por evidencia
 
-1. **H1 — carrera del keypress en el trust en frío (mejor ajuste).** El `Down` se pierde o llega
-   antes de que la pantalla sea interactiva en el **primer** arranque; el `Enter` confirma `No, exit`;
-   el CLI sale `rc=1` sin hooks. Es la única hipótesis **totalmente consistente** con "rc=1 sin
-   confirmar trust + sin hooks" y con que P0 (primer arranque) falle y los siguientes no.
-   **Confirmable** leyendo el `result.json` de P0 (firma H1 arriba). *Lo que NO es verificable ni con
-   `result.json`: qué opción estaba resaltada al apretar `Enter`* — no se capturó (ver §1.6/§1.1).
-2. **H2 — salida temprana antes del trust.** Refutable/confirmable con `screens.trust`. Menos probable
-   dado que el responsable describe el fallo "sin confirmar trust" (implica que la pantalla se alcanzó),
-   pero no se puede descartar sin leer el campo.
-3. **H3 — teclas trabadas y salida por C-c.** Distinguible por `trust_still_shown`/`timed_out`.
+**Campos reales de P0 (run 2), leídos del `result.json` retenido (2026-11-05):**
+`startup=trust-unconfirmed`, `rc=1`, `timed_out=false`, `screens.trust=true`, `trust_still_shown=false`,
+`tries.trust=1`, `probe_kinds=[]`.
+
+**Lectura precisa (corrección del responsable):** esta firma es **compatible** con H1 y **refuta H2 y
+H3** — `screens.trust=true` descarta H2 (la pantalla de trust SÍ se renderizó) y
+`trust_still_shown=false` + `timed_out=false` descartan H3 (ni trabada ni salida por C-c). **Pero NO
+demuestra H1:** no prueba que el `Down` se haya perdido ni **qué opción recibió el `Enter`**. La firma
+acota la causa a "vio trust, no quedó confirmado, el proceso salió solo (`tries.trust=1`, sin
+reintento)", sin establecer el **mecanismo exacto** dentro de H1.
+
+1. **H1 — carrera del keypress en el trust en frío (hipótesis principal, aceptada).** El `Down` se
+   pierde o llega antes de que la pantalla sea interactiva en el **primer** arranque; el `Enter`
+   confirma `No, exit`; el CLI sale `rc=1` sin hooks. Es la hipótesis **compatible con la firma
+   observada** y con que P0 (primer arranque) falle y los siguientes no. *Lo que la evidencia NO
+   demuestra: que el `Down` se perdiera, ni qué opción estaba resaltada al apretar `Enter`* — no se
+   capturó (ver §1.6/§1.1). Queda como **hipótesis principal, no como hecho demostrado**.
+2. **H2 — salida temprana antes del trust. REFUTADA** por `screens.trust=true` (la pantalla se
+   renderizó).
+3. **H3 — teclas trabadas y salida por C-c. REFUTADA** por `trust_still_shown=false` + `timed_out=false`
+   (ni trabada ni salida por C-c).
 4. **Causa raíz del "por qué sólo P0" (transversal a H1–H3):** temporización de **arranque en frío**
    — el primer `claude` del contenedor tarda más en volverse interactivo que los siguientes, y el
    driver no espera a que la pantalla de trust esté **estable** antes de teclear. Es **plausible** y
@@ -83,12 +95,12 @@ trust funcionó: `startup="ok"`, `probe_kinds` con `session.start`. La diferenci
 
 - **Con lo que hay en esta sesión (código + hechos reportados): sólo hipótesis.** El código prueba el
   *mecanismo* (cómo un `Down` perdido causa salida sin trust) pero no *qué pasó* en esa corrida.
-- **Con la evidencia retenida en VM100 (solo lectura, sin repetir P0):** el `result.json` de P0
-  **probablemente distingue H1/H2/H3** por la tabla de §2. Lo que **ningún** dato retenido puede
-  establecer es la **selección exacta** al momento del `Enter` (no hay snapshot ni `trust_selection`),
-  así que entre "`Down` perdido" y "CLI que se autocerró con trust en pantalla" podría quedar un
-  residuo **INCONCLUSIVE**. No inventamos certeza: si `result.json` no alcanza, la causa queda
-  **INCONCLUSIVE**.
+- **Con la evidencia retenida en VM100 (ya leída, 2026-11-05, solo lectura):** el `result.json` de P0
+  **refuta H2 y H3** y es **compatible con H1** (§3), pero **no demuestra el mecanismo exacto**: la
+  **selección al momento del `Enter`** no se capturó (no hay snapshot ni `trust_selection`), así que
+  entre "`Down` perdido ⇒ `Enter` sobre `No, exit`" y "CLI que se autocerró con trust en pantalla"
+  queda un **residuo INCONCLUSIVE**. H1 se acepta como **hipótesis principal**, no como hecho
+  demostrado. No inventamos certeza.
 
 ## 5. Límites de observabilidad (verificados en el código)
 
