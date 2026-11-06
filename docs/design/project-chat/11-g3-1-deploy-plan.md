@@ -1,6 +1,7 @@
 # G3-1 — plan operativo de despliegue y ventana `observe` (sólo planificación)
 
-Estado: **plan, nada ejecutado.** G3-1 está mergeado en `main` como `a93232f` (PR #545). Este
+Estado: **plan, nada ejecutado. Revisado el 2026-11-06:** P8 y P9 corregidos y Pages separado de VM100.
+El alcance y la verificación de `D` están en [12-g3-1-release-scope.md](./12-g3-1-release-scope.md). G3-1 está mergeado en `main` como `a93232f` (PR #545). Este
 documento no autoriza ejecutar nada: el deploy, la ventana `observe` y cualquier paso posterior hacia
 `true` necesitan cada uno su propia autorización del responsable. G3-2 sigue en NO-GO, y el preflight
 de F1 es una tarea independiente del operador.
@@ -19,18 +20,25 @@ o un release conjunto con esa lista, o un deploy acotado (otra decisión, con ot
 
 | # | Qué | Cómo (lectura) | Se registra |
 | --- | --- | --- | --- |
-| P1 | Versión efectiva del backend | No hay endpoint de versión. Se usan `git -C <repo-de-deploy> rev-parse HEAD`, `git -C <repo> status --porcelain` (vacío) y `docker compose ps app`; además, `docker inspect $(docker compose ps -q app) --format '{{.Image}} {{.Created}}'` | SHA desplegado (`D`), checkout limpio, imagen y fecha del contenedor |
+| P1 | Versión efectiva del backend | **Por contenido**, no por el HEAD del checkout: el digest de `dist/**/*.js` del contenedor en ejecución contra la tabla de 12 §1, junto con la identidad de la imagen (`docker inspect` del contenedor y de su imagen). Si no coincide con ninguna fila, `D` queda no verificado | `D`, digest, `image=`, `created=` |
 | P2 | El código de G3-1 **no** está todavía | `docker compose exec app grep -c INGEST_REQUIRE_SESSION_ORIGIN dist/index.js` | `0` |
 | P3 | Alcance | `git log --oneline D..a93232f` | la lista que aprueba el responsable (§0) |
 | P4 | Bandera ausente | `grep -c '^INGEST_REQUIRE_SESSION_ORIGIN=' .env` y `docker compose exec app printenv INGEST_REQUIRE_SESSION_ORIGIN` | `0` y vacío |
 | P5 | Estado de captura | `GET /api/admin/stats` → `.conversation` (cookie de admin; no pegar el JWT en logs compartidos): `enabledSessions`, `effectiveSessions`, `eventsSinceBoot`, `rejectedSinceBoot`, `gapsSinceBoot` | valores y hora de lectura |
 | P6 | Pérdidas del relay (línea de base) | Sólo conteos, nunca contenido: `grep -c '"reason":"relay_dropped"'` y `grep -c '"reason":"relay_restart"'` sobre `<WORKSPACE_ROOT>/.conversations/*/*.events.jsonl` | totales por archivo y la suma |
 | P7 | Inventario de contenedores | `docker ps -a --filter name=st- --format '{{.ID}} {{.Names}} {{.Status}}'`, que incluye los PASS-B1 retenidos | la lista completa, para compararla después |
-| P8 | Nada en curso | Ninguna recreación sin resolver (`<WORKSPACE_ROOT>/.st-control/*/recreate-attempt.json` con estado distinto de `resolved` ⇒ **no desplegar**) y ningún envío del Composer en curso (`<WORKSPACE_ROOT>/.st-control/*/composer/*.json` inexistentes) | resultado |
-| P9 | Punto de recuperación | `docker compose exec app npm run backup` (DEPLOYMENT.md «Backup & restore») | ruta del backup y su `manifest.json` |
+| P8 | Nada en curso | **Recreaciones:** `jq -r .state` de cada `<WORKSPACE_ROOT>/.st-control/*/recreate-attempt.json` es `resolved` (uno ilegible ⇒ NO-GO). **Composer, por estado y no por presencia de archivos:** `GET /api/admin/sessions/:id/composer/panes` de cada sesión devuelve `panes: []` y `unreadable: []`; cualquier entrada (`phase` activa, `result`/`effects` `pending`, `pending` no vacío) o `unreadable` ⇒ NO-GO; 404 = Composer apagado | resultado por sesión |
 
 Si cualquier fila sale distinta de lo esperado, se detiene todo y se informa. No se corrige en el
 momento.
+
+**Etapa intermedia, con autorización propia (escritura):** el **backup** (`docker compose exec app npm
+run backup`, DEPLOYMENT.md «Backup & restore»), inmediatamente antes del deploy. Se registran la ruta y
+el `manifest.json`. Ya no forma parte de la verificación de sólo lectura.
+
+**Frontend y backend se despliegan por caminos distintos.** Cloudflare Pages construye cada commit de
+`main` por su cuenta; VM100 sólo cambia con este procedimiento. El estado de cada uno se registra por
+separado (12 §5), y este plan cubre **sólo** el backend.
 
 ## 2. Deploy (con la bandera apagada)
 
