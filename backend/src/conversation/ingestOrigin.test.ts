@@ -7,7 +7,7 @@
  * container, single-flight, positive-only cache).
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	IngestOriginVerifier,
 	isLoopback,
@@ -293,5 +293,82 @@ describe("IngestOriginVerifier — inspection deadline (fail-closed)", () => {
 		await new Promise((r) => setTimeout(r, 5));
 		port.answer(running(CID_A, [A_IP]));
 		expect(await pending).toEqual({ ok: true });
+	});
+});
+
+describe("IngestOriginVerifier — bounded inspections while Docker hangs (P2)", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	/** An inspect that never answers unless the test releases it; counts real calls. */
+	function hungPort() {
+		const resolvers: Array<(v: SessionNetworkView) => void> = [];
+		const port = {
+			calls: 0,
+			inspectSessionNetwork: (_cid: string) => {
+				port.calls++;
+				return new Promise<SessionNetworkView>((r) => resolvers.push(r));
+			},
+			release: (i: number, v: SessionNetworkView) => resolvers[i]?.(v),
+		};
+		return port;
+	}
+
+	it("successive bursts past the deadline: every request ends in time, one Docker call stays pending", async () => {
+		vi.useFakeTimers();
+		const port = hungPort();
+		const v = new IngestOriginVerifier(port, { inspectTimeoutMs: 500 });
+		for (let burst = 0; burst < 5; burst++) {
+			let done = false;
+			const all = Promise.all(Array.from({ length: 10 }, () => v.verify("sA", CID_A, A_IP))).then(
+				(r) => {
+					done = true;
+					return r;
+				},
+			);
+			await vi.advanceTimersByTimeAsync(500);
+			expect(done).toBe(true); // nothing waits past the deadline
+			const results = await all;
+			const cause = burst === 0 ? "inspect_timeout" : "inspect_pending";
+			expect(results.every((r) => !r.ok && r.cause === cause)).toBe(true);
+			expect(port.calls).toBe(1); // the hung inspection is never duplicated
+			await vi.advanceTimersByTimeAsync(700); // > 500 ms before the next burst
+		}
+		// Docker finally answers the hung call: its late answer is not credited,
+		// but the slot frees and the next request inspects afresh.
+		port.release(0, running(CID_A, [A_IP]));
+		await vi.advanceTimersByTimeAsync(0);
+		const next = v.verify("sA", CID_A, A_IP);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(port.calls).toBe(2);
+		port.release(1, running(CID_A, [A_IP]));
+		expect(await next).toEqual({ ok: true });
+	});
+
+	it("the bound is per session: a hung session never blocks another, and holds at one call each", async () => {
+		vi.useFakeTimers();
+		const port = hungPort();
+		const v = new IngestOriginVerifier(port, { inspectTimeoutMs: 500 });
+		for (let burst = 0; burst < 3; burst++) {
+			const all = Promise.all([v.verify("sA", CID_A, A_IP), v.verify("sB", CID_N, B_IP)]);
+			await vi.advanceTimersByTimeAsync(500);
+			const [a, b] = await all;
+			expect(a.ok || b.ok).toBe(false);
+			await vi.advanceTimersByTimeAsync(700);
+		}
+		expect(port.calls).toBe(2); // one per session, never more
+	});
+
+	it("a container change while the old call hangs is refused, not inspected twice", async () => {
+		vi.useFakeTimers();
+		const port = hungPort();
+		const v = new IngestOriginVerifier(port, { inspectTimeoutMs: 500 });
+		const first = v.verify("sA", CID_A, A_IP);
+		await vi.advanceTimersByTimeAsync(500);
+		expect(await first).toEqual({ ok: false, cause: "inspect_timeout" });
+		v.invalidate("sA"); // e.g. a recreation moved D1 to N while O's inspect is still hung
+		expect(await v.verify("sA", CID_N, A_IP)).toEqual({ ok: false, cause: "inspect_pending" });
+		expect(port.calls).toBe(1);
 	});
 });

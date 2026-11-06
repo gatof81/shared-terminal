@@ -31,7 +31,13 @@
  *     share ONE inspection, which bounds the cost on the ingest path;
  *   - an inspection has a deadline (ORIGIN_INSPECT_TIMEOUT_MS): past it the
  *     answer is `inspect_timeout`, and the late answer, whenever it arrives,
- *     reaches no code that could accept or cache — it is simply dropped.
+ *     reaches no code that could accept or cache — it is simply dropped;
+ *   - the deadline bounds the REQUEST, not Docker's call, so there is at most
+ *     ONE unsettled Docker call per session: while a call that outlived its
+ *     deadline is still pending, every new request for that session is
+ *     refused at once (`inspect_pending`) instead of opening another one. A
+ *     hung daemon therefore costs one pending call per session, however
+ *     much traffic keeps arriving (observe mode included).
  * Anything that cannot be verified is a rejection. The caller keeps the
  * route's contract (always 204, empty body); causes go to counters only and
  * never carry an address.
@@ -62,6 +68,7 @@ export type OriginCause =
 	| "no_container"
 	| "inspect_failed"
 	| "inspect_timeout"
+	| "inspect_pending"
 	| "container_gone"
 	| "not_running"
 	| "container_replaced"
@@ -137,6 +144,8 @@ export class IngestOriginVerifier {
 	private readonly cache = new Map<string, CacheEntry>();
 	private readonly generation = new Map<string, number>();
 	private readonly inflight = new Map<string, Promise<Resolved>>();
+	/** Per session: a Docker call that has not settled yet (see the header). */
+	private readonly unsettled = new Map<string, Promise<void>>();
 	private readonly now: () => number;
 	private readonly ttlMs: number;
 	private readonly inspectTimeoutMs: number;
@@ -198,10 +207,18 @@ export class IngestOriginVerifier {
 	}
 
 	private async inspect(stSessionId: string, containerId: string, gen: number): Promise<Resolved> {
+		// One unsettled Docker call per session: a previous call that outlived
+		// its deadline is still pending ⇒ refuse now, never pile up another.
+		if (this.unsettled.has(stSessionId)) return fail("inspect_pending");
 		let view: SessionNetworkView;
 		const call = this.port.inspectSessionNetwork(containerId);
-		// A late rejection must not surface as an unhandled rejection.
-		call.catch(() => undefined);
+		// Frees the slot when Docker finally answers (or fails); swallowing the
+		// rejection here also keeps a late one from surfacing as unhandled.
+		const settled: Promise<void> = call.then(
+			() => this.release(stSessionId, settled),
+			() => this.release(stSessionId, settled),
+		);
+		this.unsettled.set(stSessionId, settled);
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const deadline = new Promise<"timeout">((resolve) => {
 			timer = setTimeout(() => resolve("timeout"), this.inspectTimeoutMs);
@@ -213,10 +230,14 @@ export class IngestOriginVerifier {
 			if (first === "timeout") return fail("inspect_timeout");
 			view = first;
 		} catch {
+			this.release(stSessionId, settled); // settled (rejected) within the deadline
 			return fail("inspect_failed");
 		} finally {
 			clearTimeout(timer);
 		}
+		// Answered within the deadline: the call has settled, free the slot now
+		// rather than one microtask later.
+		this.release(stSessionId, settled);
 		// The identity was invalidated while Docker answered: this view may
 		// describe a container the session no longer has.
 		if (this.genOf(stSessionId) !== gen) return fail("identity_changed");
@@ -231,5 +252,9 @@ export class IngestOriginVerifier {
 		if (addresses.size === 0) return fail("no_address");
 		this.cache.set(stSessionId, { containerId, addresses, expiresAt: this.now() + this.ttlMs });
 		return { ok: true, addresses };
+	}
+
+	private release(stSessionId: string, call: Promise<void>): void {
+		if (this.unsettled.get(stSessionId) === call) this.unsettled.delete(stSessionId);
 	}
 }

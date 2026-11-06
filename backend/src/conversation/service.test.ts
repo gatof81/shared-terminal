@@ -1504,3 +1504,40 @@ describe("authorize — §3.1.1 observe mode (activation gate)", () => {
 		expect(off.originObservedSinceBoot).toBeUndefined();
 	});
 });
+
+describe("authorize — §3.1.1 observe mode with Docker hung (P2 bound)", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+	it("traffic past the deadline never piles up inspections, and observe still never refuses", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		session("s1");
+		const port = {
+			inspectSessionNetwork: vi.fn(() => new Promise<SessionNetworkView>(() => undefined)),
+		};
+		const svc = new ConversationService({
+			workspaceRoot: root,
+			enabled: true,
+			port: 3001,
+			store,
+			now: () => now,
+			ingestOrigin: new IngestOriginVerifier(port, { now: () => now }),
+			ingestOriginMode: "observe",
+		});
+		try {
+			for (let burst = 0; burst < 4; burst++) {
+				const all = Promise.all(
+					Array.from({ length: 5 }, () => svc.authorize(H({ remoteAddress: "172.18.0.5" }))),
+				);
+				await vi.advanceTimersByTimeAsync(500);
+				expect((await all).every((r) => "ok" in r && r.ok)).toBe(true);
+				await vi.advanceTimersByTimeAsync(700);
+			}
+			expect(port.inspectSessionNetwork).toHaveBeenCalledTimes(1);
+			expect(svc.stats.originObserved).toEqual({ inspect_timeout: 5, inspect_pending: 15 });
+		} finally {
+			vi.useRealTimers();
+			await svc.shutdown();
+		}
+	});
+});
