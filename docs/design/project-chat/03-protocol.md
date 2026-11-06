@@ -662,3 +662,26 @@ fuente de la evidencia de §5.
      participante de un permiso vivo, el permiso termina con `collab_ended{participant-removed}`,
      como siempre.
    - Ninguna entrega se presta a una participación que no esté `active` en D1 **y** en el log.
+
+## 10. Tareas por agente (propuesta 2026-11-06, no vinculante)
+
+Diseño completo en [13-agent-tasks.md](./13-agent-tasks.md); nada de esto está aprobado ni
+implementado. Lo que se propone fijar en este protocolo es **sólo la capa A** (13 §2):
+
+- Identidades nuevas: `task_id` (UUID v4, la identidad), `task_key` (`T-<n>` por proyecto, alias),
+  `assignee_agent_id` (no se reasigna en v1), `creator` (`user:`/`agent:`, estampado por el backend),
+  `rev` (+1 en cada transición), `version` (+1 en cada cambio de definición aplicado),
+  `instruction_id`, `client_instruction_id`, `attempt_id` (un despacho).
+- Sobre `{verb, task_id, if_rev, definition?, reason?, client_instruction_id}`; `task_id` obligatorio
+  salvo en `CREATE`. El servidor **nunca** interpreta instrucciones de tareas escritas en el texto de un
+  mensaje.
+- Errores: 409 `stale-rev`, `task-active` (un `UPDATE` sobre una activa), `task-not-active` (un
+  `CHANGE` sobre una pendiente), `change-pending`, `idempotency-conflict`, `tasks-unverifiable`; 403
+  `not-task-creator` / `not-task-assignee`.
+- Tres confirmaciones: `received` (persistida), `applied` (CAS del backend sobre una pendiente, o
+  `task_ack` del agente sobre una activa) y, para `STOP`, `stopped` sólo con la evidencia de 13 §3.5.
+- La meta de una entrega gana `task_id`, `attempt_id`, `version` y, en las de control,
+  `instruction_id` y `verb`. Los estados de entrega (§3), la atribución (§3.1) y la recuperación (§9)
+  se aplican sin cambios a despachos y entregas de control.
+- Herramientas MCP futuras de `st-channel` (capa B): `task_checkpoint`, `task_ack`, `task_report`.
+

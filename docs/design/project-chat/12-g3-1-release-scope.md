@@ -1,6 +1,7 @@
 # Release de G3-1 — informe de alcance (diagnóstico, nada ejecutado)
 
-Estado: **diagnóstico preparado desde el repositorio; `D` NO VERIFICADO.** Claude no tiene ni debe
+Estado: **diagnóstico preparado desde el repositorio. Actualizado el 2026-11-06 con el preflight de
+sólo lectura de Claude A (§7): candidato `D` = clase `1befd89`, digest todavía NO VERIFICADO.** Claude no tiene ni debe
 tener acceso a VM100. Lo que exige el host lo hace un operador autorizado, **sólo con lecturas**: sin
 backup, deploy, build, recreación, cambio de variables ni operación que altere contenedores o
 sesiones. `observe` no se inicia. G3-2 sigue en NO-GO. Destino propuesto: `a93232f` (#545). Hoy
@@ -141,6 +142,8 @@ de los tests.
 
 ## 6. Recomendación y condiciones
 
+**Actualización:** con el preflight de A, la propuesta vigente está en §7.3.
+
 **Recomendación:** release conjunto a un **SHA fijo, `a93232f`** (o `04f602b`, con el mismo backend),
 condicionado a la clase de `D` que verifique el operador, según el Apéndice A:
 - **`D` en `f113359`, `cf18fe0` o `1befd89`** ⇒ release conjunto: delta chico, sin migración ni
@@ -166,6 +169,73 @@ condicionado a la clase de `D` que verifique el operador, según el Apéndice A:
 **NO-GO** ante cualquier condición sin cumplir, ante `D` sin verificar, o si alguna lectura exigiera
 una operación de escritura. **El backup** (antes P9) es escritura y pasa a una etapa posterior,
 autorizada por separado, inmediatamente antes de ejecutar el deploy.
+
+## 7. Preflight de Claude A (2026-11-06): reportado, comprobado y pendiente
+
+### 7.1 Lo reportado por A (lecturas en VM100, sin interrumpir #547)
+
+| Tema | Reportado por A | Comprobado por B en el repo | Valor probatorio |
+| --- | --- | --- | --- |
+| Checkout de deploy | `1befd89` (#541), con una modificación local **aprobada** en `session-image/Dockerfile` | — | contexto: **no** prueba qué backend corre (§1) |
+| Backend | contenedor `da75082e`, imagen `221e6851`, `healthy` | — | identidad registrada; falta ligarla al código por digest |
+| G3-1 | no está en el `dist` ejecutado | coherente con cualquier clase anterior a `a93232f` | no distingue entre clases |
+| `INGEST_REQUIRE_SESSION_ORIGIN` | ausente | — | P4 cumplida |
+| Captura | 3 sesiones habilitadas, 3 efectivas | — | línea de base de V5 |
+| Composer | 0 operaciones registradas | — | ver 7.2 (método) |
+| Recreaciones | 3 resueltas, ninguna sin resolver | — | P8 (parte de recreaciones) |
+| Contenedores | activos y retenidos inventariados, PASS-B1 incluidos | — | línea de base de V4 |
+| Disco | 36 GB libres, 82 % usado | — | no alcanza por sí solo para decidir el gate de espacio (11 §1.1) |
+| Backup anterior | disponible, también en el NAS | — | no reemplaza el backup nuevo (11 §2) |
+| Alcance `1befd89..a93232f` | #548, #544, #551, #545; sólo #545 es runtime de backend; sin migraciones | **sí**: `git log` da esos 4; `backend/` cambia sólo en #545 (más tests de #544); `db.ts` y `session-image/` sin cambios; compose agrega sólo la línea de la bandera (vacía) | alcance confirmado |
+| `main` después de `a93232f` | #550 (docs), #552 (frontend), sin backend | **sí** | el destino sigue fijo en `a93232f` |
+
+Con eso el release cae en la fila **`1befd89`** del Apéndice A (delta = sólo #545, sin migración,
+sin configuración con efecto por defecto), **a condición** de que el digest lo confirme. El checkout
+en `1befd89` no se toma como prueba.
+
+### 7.2 Evidencia que falta (para pedírsela a A; todo lecturas)
+
+Ninguna requiere escribir, reiniciar ni tocar sesiones. Se pide cuando el responsable lo coordine,
+sin interrumpir #547.
+
+1. **Digest efectivo (bloqueante).** El comando 2 de §1 sobre el contenedor `da75082e`. Esperado:
+   `3f1816a2feea8a6ed7e0aadb915388f840091fdd000234a41429a969367db252`. Cualquier otro valor ⇒ NO-GO
+   de este procedimiento.
+2. **Imagen de rollback.** `docker image inspect 221e6851 --format '{{.Id}} {{json .RepoTags}} {{.Size}}'`
+   y `docker compose config --images` (nombre de la imagen del servicio `app`; no imprime secretos).
+3. **Excepción del Dockerfile.** `git rev-parse HEAD`, `git symbolic-ref -q HEAD || echo detached`,
+   `git status --porcelain`, `git diff --stat` y `sha256sum session-image/Dockerfile`. Sirve para
+   comprobar después del checkout que quedó idéntica (11 §3 paso 2).
+4. **Espacio.** `df -h` del filesystem de `WORKSPACE_ROOT` y de `docker info --format '{{.DockerRootDir}}'`;
+   `docker system df`; `du -sh` de `WORKSPACE_ROOT` excluyendo `.backups`; `du -sh` y fecha del
+   último backup local, y fecha de la copia en el NAS.
+5. **Composer, por el método de P8.** Confirmar que «0 operaciones» sale de
+   `GET /api/admin/sessions/:id/composer/panes` por sesión (`panes: []`, `unreadable: []`) o de un
+   404 (Composer apagado), y no de contar archivos. Si el Composer está encendido, el valor de
+   `CONVERSATION_COMPOSER_ENABLED`.
+6. **Recreaciones.** Si algún `recreate-attempt.json` tiene un contenedor `retained` (se registra para
+   no tocarlo; no bloquea el deploy).
+7. **Líneas de base con hora:** `.conversation` completo (`eventsSinceBoot`, `rejectedSinceBoot`,
+   `gapsSinceBoot`), sesiones por estado, conteos de `relay_dropped`/`relay_restart` (P6) y cantidad
+   de líneas `error` del log del backend en la última hora (P13).
+
+Las lecturas 1–6 deciden si el procedimiento puede aprobarse. La 7 se repite de todos modos en la
+ventana del deploy.
+
+### 7.3 Condiciones de §6 con la evidencia actual
+
+| # | Condición | Estado |
+| --- | --- | --- |
+| 1 | `D` verificado por digest, imagen registrada | **pendiente** (imagen registrada; digest no) |
+| 2 | Lista de PRs aprobada | lista confirmada (7.1); **falta la aprobación del responsable** |
+| 3 | Variables registradas | `INGEST_REQUIRE_SESSION_ORIGIN` ausente; el delta no cambia ninguna otra variable |
+| 4 | Migraciones | no aplica: ninguna en el rango |
+| 5 | Nada en vuelo | recreaciones cumplida; Composer pendiente de método (7.2 punto 5). Se repite en la ventana |
+| 6 | Alias de Pages | no condiciona este release: el backend del rango no cambia ninguna ruta que use el frontend |
+
+**Propuesta:** release **acotado a G3-1**, a `a93232f` fijo, con el procedimiento de
+[11-g3-1-deploy-plan.md](./11-g3-1-deploy-plan.md) §1–§4. Sigue en NO-GO hasta: (a) el digest de 7.2
+punto 1, (b) las lecturas 2–6, y (c) la aprobación del procedimiento y de cada etapa de escritura.
 
 ## Apéndice A — matriz de decisión por clase de `D` (precalculada; `D` lo aporta el operador)
 
