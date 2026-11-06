@@ -1,0 +1,280 @@
+{
+  "_note": "Design data for the frontend mock backend, from 15-ux-alignment-and-contract.md §3: agent and session shapes are P3a; one task example is T1 (owner-created, pending), the other T2 (dispatched, active). Not an existing API. Follows the recommendations pending approval (D-UX0..D-UX10); template stays null until E3.",
+  "GET /api/projects/:pid/agents (P3a)": {
+    "projectId": "6b1f2c3d-0000-4000-8000-000000000001",
+    "generatedAt": "2026-11-10T14:02:45Z",
+    "agents": [
+      {
+        "agentId": "a0000000-0000-4000-8000-0000000000a1",
+        "handle": "architect-hz",
+        "role": "Architect",
+        "provider": "claude-code",
+        "template": null,
+        "binding": {
+          "bindingId": "b0000000-0000-4000-8000-0000000000b1",
+          "epoch": 1,
+          "sessionId": "3f2a0000-0000-4000-8000-000000000001",
+          "state": "active"
+        },
+        "presence": {
+          "value": "waiting_input",
+          "source": "probe",
+          "at": "2026-11-10T14:02:11Z"
+        }
+      },
+      {
+        "agentId": "a0000000-0000-4000-8000-0000000000a2",
+        "handle": "developer-hz",
+        "role": "Developer",
+        "provider": "claude-code",
+        "template": null,
+        "binding": {
+          "bindingId": "b0000000-0000-4000-8000-0000000000b2",
+          "epoch": 1,
+          "sessionId": "a7240000-0000-4000-8000-000000000002",
+          "state": "active"
+        },
+        "presence": {
+          "value": "working",
+          "source": "hook",
+          "at": "2026-11-10T14:02:40Z"
+        }
+      },
+      {
+        "agentId": "a0000000-0000-4000-8000-0000000000a3",
+        "handle": "developer-hz-2",
+        "role": "Developer",
+        "provider": "claude-code",
+        "template": null,
+        "binding": {
+          "bindingId": "b0000000-0000-4000-8000-0000000000b5",
+          "epoch": 1,
+          "sessionId": "7e110000-0000-4000-8000-000000000003",
+          "state": "active"
+        },
+        "presence": {
+          "value": "unknown",
+          "source": "capture",
+          "at": "2026-11-10T13:31:02Z"
+        }
+      },
+      {
+        "agentId": "a0000000-0000-4000-8000-0000000000a4",
+        "handle": "qa-hz",
+        "role": "QA & Release",
+        "provider": "claude-code",
+        "template": null,
+        "binding": {
+          "bindingId": "b0000000-0000-4000-8000-0000000000b3",
+          "epoch": 1,
+          "sessionId": "9c0d0000-0000-4000-8000-000000000004",
+          "state": "active"
+        },
+        "presence": {
+          "value": "disconnected",
+          "source": "session",
+          "at": "2026-11-10T12:40:00Z"
+        }
+      },
+      {
+        "agentId": "a0000000-0000-4000-8000-0000000000a5",
+        "handle": "designer-hz",
+        "role": "Designer",
+        "provider": "claude-code",
+        "template": null,
+        "binding": {
+          "bindingId": "b0000000-0000-4000-8000-0000000000b4",
+          "epoch": 1,
+          "sessionId": "d5e60000-0000-4000-8000-000000000005",
+          "state": "active"
+        },
+        "presence": {
+          "value": "needs_attention",
+          "detail": "waiting_permission",
+          "source": "hook",
+          "at": "2026-11-10T14:01:58Z"
+        }
+      }
+    ],
+    "can": {
+      "createAgent": {
+        "allowed": true
+      }
+    }
+  },
+  "GET /api/projects/:pid/agents/:aid (P3a)": {
+    "agentId": "a0000000-0000-4000-8000-0000000000a2",
+    "handle": "developer-hz",
+    "role": "Developer",
+    "provider": "claude-code",
+    "template": null,
+    "binding": {
+      "bindingId": "b0000000-0000-4000-8000-0000000000b2",
+      "epoch": 1,
+      "sessionId": "a7240000-0000-4000-8000-000000000002",
+      "state": "active",
+      "createdAt": "2026-11-10T13:05:00Z"
+    },
+    "presence": {
+      "value": "working",
+      "source": "hook",
+      "at": "2026-11-10T14:02:40Z"
+    },
+    "projectId": "6b1f2c3d-0000-4000-8000-000000000001",
+    "capabilities": {
+      "capture": true,
+      "channels": false,
+      "directControl": true
+    },
+    "bindings": [
+      {
+        "bindingId": "b0000000-0000-4000-8000-0000000000b2",
+        "epoch": 1,
+        "sessionId": "a7240000-0000-4000-8000-000000000002",
+        "state": "active",
+        "createdAt": "2026-11-10T13:05:00Z",
+        "retiredAt": null,
+        "retireReason": null
+      }
+    ],
+    "can": {
+      "remove": {
+        "allowed": true
+      }
+    }
+  },
+  "GET /api/sessions rows (P3a, binding field)": [
+    {
+      "sessionId": "a7240000-0000-4000-8000-000000000002",
+      "name": "hz-dev",
+      "status": "running",
+      "binding": {
+        "projectId": "6b1f2c3d-0000-4000-8000-000000000001",
+        "agentId": "a0000000-0000-4000-8000-0000000000a2",
+        "handle": "developer-hz",
+        "bindingId": "b0000000-0000-4000-8000-0000000000b2",
+        "epoch": 1
+      }
+    },
+    {
+      "sessionId": "01d00000-0000-4000-8000-000000000099",
+      "name": "my-old-session",
+      "status": "running",
+      "binding": null
+    }
+  ],
+  "GET /api/projects/:pid/tasks/:tid (T2 example)": {
+    "taskId": "70000000-0000-4000-8000-000000000101",
+    "taskKey": "T-101",
+    "projectId": "6b1f2c3d-0000-4000-8000-000000000001",
+    "assigneeAgentId": "a0000000-0000-4000-8000-0000000000a2",
+    "creator": "user:u-1",
+    "state": "active",
+    "rev": 7,
+    "version": 2,
+    "definition": "Corregir el login que falla con SSO.",
+    "attempt": {
+      "attemptId": "e0000000-0000-4000-8000-000000000001",
+      "bindingId": "b0000000-0000-4000-8000-0000000000b2",
+      "startedAt": "2026-11-10T13:20:00Z"
+    },
+    "notices": [
+      {
+        "kind": "awaiting_stop_report",
+        "instructionId": "10000000-0000-4000-8000-000000000002",
+        "since": "2026-11-10T14:01:12Z"
+      }
+    ],
+    "instructions": [
+      {
+        "instructionId": "10000000-0000-4000-8000-000000000001",
+        "verb": "CHANGE",
+        "by": "user:u-1",
+        "state": "superseded",
+        "reason": "stop",
+        "receivedAt": "2026-11-10T13:58:00Z"
+      },
+      {
+        "instructionId": "10000000-0000-4000-8000-000000000002",
+        "verb": "STOP",
+        "by": "user:u-1",
+        "state": "acknowledged",
+        "receivedAt": "2026-11-10T14:00:05Z",
+        "deliveredAt": "2026-11-10T14:01:10Z",
+        "acknowledgedAt": "2026-11-10T14:01:12Z"
+      }
+    ],
+    "refs": [
+      {
+        "kind": "message",
+        "chatId": "c0000000-0000-4000-8000-000000000002",
+        "msgId": "f0000000-0000-4000-8000-000000000009"
+      },
+      {
+        "kind": "pr",
+        "ref": "example-org/educacion-hz#612",
+        "verification": "claimed",
+        "claimedBy": "agent:a0000000-0000-4000-8000-0000000000a2",
+        "bindingId": "b0000000-0000-4000-8000-0000000000b2"
+      },
+      {
+        "kind": "message",
+        "chatId": "c0000000-0000-4000-8000-000000000002",
+        "msgId": "f0000000-0000-4000-8000-000000000011",
+        "note": "QA result posted by @qa-hz; its evidence lives in that message"
+      }
+    ],
+    "report": null,
+    "can": {
+      "update": {
+        "allowed": false,
+        "reason": "task-active"
+      },
+      "change": {
+        "allowed": false,
+        "reason": "stop-pending"
+      },
+      "stop": {
+        "allowed": false,
+        "reason": "stop-pending"
+      }
+    }
+  },
+  "GET /api/projects/:pid/tasks/:tid (T1 example)": {
+    "taskId": "70000000-0000-4000-8000-000000000102",
+    "taskKey": "T-102",
+    "projectId": "6b1f2c3d-0000-4000-8000-000000000001",
+    "assigneeAgentId": "a0000000-0000-4000-8000-0000000000a4",
+    "creator": "user:u-1",
+    "state": "queued",
+    "rev": 2,
+    "version": 2,
+    "definition": "Validar el login con SSO en el preview.",
+    "notices": [],
+    "instructions": [
+      {
+        "instructionId": "10000000-0000-4000-8000-000000000003",
+        "verb": "UPDATE",
+        "by": "user:u-1",
+        "state": "applied",
+        "receivedAt": "2026-11-10T13:45:00Z",
+        "appliedAt": "2026-11-10T13:45:00Z",
+        "version": 2
+      }
+    ],
+    "refs": [],
+    "report": null,
+    "can": {
+      "update": {
+        "allowed": true
+      },
+      "change": {
+        "allowed": false,
+        "reason": "task-not-active"
+      },
+      "stop": {
+        "allowed": true
+      }
+    }
+  }
+}
