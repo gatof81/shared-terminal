@@ -67,6 +67,7 @@ import {
 import { initShellV2 } from "./shellV2.js";
 import { closeSwitcher, initSwitcher, openSwitcher } from "./switcher.js";
 import { clearAllBadges } from "./tabActivity.js";
+import { resetTabTitle, setTitleParts } from "./tabTitle.js";
 import type { TerminalSession } from "./terminal.js";
 import {
 	applyBar,
@@ -78,7 +79,7 @@ import {
 	resolveShell,
 } from "./uiShell.js";
 import { forgetAllLastConversationTitles } from "./viewPolicy.js";
-import { isOverlayActive, overlayLabel } from "./viewSwitch.js";
+import { getView, isOverlayActive, onViewChange, overlayLabel } from "./viewSwitch.js";
 
 // ── DOM refs ────────────────────────────────────────────────────────────────
 
@@ -209,6 +210,9 @@ export let currentFontSize = readFontSize();
 
 // ── State ───────────────────────────────────────────────────────────────────
 
+// The tab names the view next to the project (tabTitle.ts).
+onViewChange((next) => setTitleParts({ view: next }));
+
 export let sessions: SessionInfo[] = [];
 export let activeSessionId: string | null = null;
 let isRegisterMode = false;
@@ -240,9 +244,17 @@ export let sessionsLoadedOnce = false;
 export function setSessions(v: SessionInfo[]): void {
 	sessionsLoadedOnce = true;
 	sessions = v;
+	// A rename, or the list landing after the selection: the tab follows.
+	syncTabTitleProject();
 }
 export function setActiveSessionId(v: string | null): void {
 	activeSessionId = v;
+	syncTabTitleProject();
+}
+function syncTabTitleProject(): void {
+	const s =
+		activeSessionId === null ? undefined : sessions.find((x) => x.sessionId === activeSessionId);
+	setTitleParts({ project: s?.name ?? null, view: getView() });
 }
 export function setCurrentTabs(v: Tab[]): void {
 	currentTabs = v;
@@ -640,6 +652,7 @@ function handleLogout(toastMessage?: string): void {
 	// initial fetches, flashing own sessions as read-only rows. PR #397
 	// review SHOULD-FIX.
 	sessionsLoadedOnce = false;
+	resetTabTitle();
 	// The sidebar and the terminal area must not keep the previous
 	// user's rows, toolbar or state panel behind the login view (they
 	// would show for a moment to the next person to sign in on this
