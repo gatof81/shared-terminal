@@ -1,0 +1,257 @@
+{
+  "_note": "Fixtures for the frontend mock backend, from 15-ux-alignment-and-contract.md §3. Design data only (not an API that exists). Pending approval of D-UX1..D-UX8.",
+  "GET /api/projects/:pid": {
+    "projectId": "6b1f2c3d-0000-4000-8000-000000000001",
+    "name": "Educación HZ",
+    "createdAt": "2026-11-10T13:00:00Z",
+    "archivedAt": null,
+    "agents": [
+      {
+        "agentId": "a0000000-0000-4000-8000-0000000000a1",
+        "handle": "architect-hz",
+        "role": "Architect",
+        "provider": "claude-code",
+        "template": null,
+        "binding": {
+          "bindingId": "b0000000-0000-4000-8000-0000000000b1",
+          "epoch": 1,
+          "sessionId": "3f2a0000-0000-4000-8000-000000000001",
+          "state": "active"
+        },
+        "availability": {
+          "value": "ready",
+          "source": "probe",
+          "at": "2026-11-10T14:02:11Z"
+        },
+        "queue": {
+          "mode": "paused",
+          "accreditation": null,
+          "depth": 0,
+          "heldChats": 0
+        },
+        "activeTask": null
+      },
+      {
+        "agentId": "a0000000-0000-4000-8000-0000000000a2",
+        "handle": "developer-hz",
+        "role": "Developer",
+        "provider": "claude-code",
+        "template": {
+          "templateId": "t0000000-0000-4000-8000-0000000000d1",
+          "templateVersion": 3
+        },
+        "binding": {
+          "bindingId": "b0000000-0000-4000-8000-0000000000b2",
+          "epoch": 1,
+          "sessionId": "a7240000-0000-4000-8000-000000000002",
+          "state": "active"
+        },
+        "availability": {
+          "value": "working",
+          "source": "hook",
+          "at": "2026-11-10T14:02:40Z"
+        },
+        "queue": {
+          "mode": "paused",
+          "accreditation": null,
+          "depth": 1,
+          "heldChats": 1
+        },
+        "activeTask": {
+          "taskId": "70000000-0000-4000-8000-000000000101",
+          "taskKey": "T-101",
+          "title": "Corregir login"
+        }
+      },
+      {
+        "agentId": "a0000000-0000-4000-8000-0000000000a3",
+        "handle": "developer-hz-2",
+        "role": "Developer",
+        "provider": "claude-code",
+        "template": {
+          "templateId": "t0000000-0000-4000-8000-0000000000d1",
+          "templateVersion": 3
+        },
+        "binding": null,
+        "availability": {
+          "value": "unknown",
+          "source": "none",
+          "at": null
+        },
+        "queue": {
+          "mode": "paused",
+          "accreditation": null,
+          "depth": 0,
+          "heldChats": 0
+        },
+        "activeTask": null
+      },
+      {
+        "agentId": "a0000000-0000-4000-8000-0000000000a4",
+        "handle": "qa-hz",
+        "role": "QA & Release",
+        "provider": "claude-code",
+        "template": null,
+        "binding": {
+          "bindingId": "b0000000-0000-4000-8000-0000000000b3",
+          "epoch": 1,
+          "sessionId": "9c0d0000-0000-4000-8000-000000000004",
+          "state": "active"
+        },
+        "availability": {
+          "value": "stopped",
+          "source": "session",
+          "at": "2026-11-10T12:40:00Z"
+        },
+        "queue": {
+          "mode": "paused",
+          "accreditation": null,
+          "depth": 1,
+          "heldChats": 0
+        },
+        "activeTask": null
+      },
+      {
+        "agentId": "a0000000-0000-4000-8000-0000000000a5",
+        "handle": "designer-hz",
+        "role": "Designer",
+        "provider": "claude-code",
+        "template": null,
+        "binding": {
+          "bindingId": "b0000000-0000-4000-8000-0000000000b4",
+          "epoch": 1,
+          "sessionId": "d5e60000-0000-4000-8000-000000000005",
+          "state": "active"
+        },
+        "availability": {
+          "value": "needs_you",
+          "source": "hook",
+          "at": "2026-11-10T14:01:58Z"
+        },
+        "queue": {
+          "mode": "paused",
+          "accreditation": null,
+          "depth": 0,
+          "heldChats": 0
+        },
+        "activeTask": null
+      }
+    ],
+    "counts": {
+      "tasks": {
+        "pending": 2,
+        "inProgress": 1,
+        "needsAttention": 1,
+        "done": 7
+      }
+    },
+    "can": {
+      "createAgent": {
+        "allowed": true
+      },
+      "archive": {
+        "allowed": true
+      }
+    },
+    "generatedAt": "2026-11-10T14:02:45Z"
+  },
+  "GET /api/projects/:pid/tasks/:tid": {
+    "taskId": "70000000-0000-4000-8000-000000000101",
+    "taskKey": "T-101",
+    "projectId": "6b1f2c3d-0000-4000-8000-000000000001",
+    "assigneeAgentId": "a0000000-0000-4000-8000-0000000000a2",
+    "creator": "user:u-1",
+    "state": "active",
+    "rev": 7,
+    "version": 2,
+    "definition": "Corregir el login que falla con SSO.",
+    "attempt": {
+      "attemptId": "e0000000-0000-4000-8000-000000000001",
+      "bindingId": "b0000000-0000-4000-8000-0000000000b2",
+      "startedAt": "2026-11-10T13:20:00Z"
+    },
+    "attention": [
+      {
+        "reason": "waiting_safe_point",
+        "instructionId": "10000000-0000-4000-8000-000000000002",
+        "since": "2026-11-10T14:00:05Z"
+      }
+    ],
+    "instructions": [
+      {
+        "instructionId": "10000000-0000-4000-8000-000000000001",
+        "verb": "CHANGE",
+        "by": "user:u-1",
+        "state": "superseded",
+        "reason": "stop",
+        "receivedAt": "2026-11-10T13:58:00Z"
+      },
+      {
+        "instructionId": "10000000-0000-4000-8000-000000000002",
+        "verb": "STOP",
+        "by": "user:u-1",
+        "state": "acknowledged",
+        "receivedAt": "2026-11-10T14:00:05Z",
+        "deliveredAt": "2026-11-10T14:01:10Z",
+        "acknowledgedAt": "2026-11-10T14:01:12Z",
+        "appliedAt": null
+      }
+    ],
+    "refs": [
+      {
+        "kind": "message",
+        "chatId": "c0000000-0000-4000-8000-000000000002",
+        "msgId": "m0000000-0000-4000-8000-000000000009"
+      },
+      {
+        "kind": "pr",
+        "ref": "example-org/educacion-hz#612",
+        "verification": "claimed",
+        "claimedBy": "agent:a0000000-0000-4000-8000-0000000000a2",
+        "bindingId": "b0000000-0000-4000-8000-0000000000b2"
+      },
+      {
+        "kind": "test_report",
+        "ref": "qa/run-2026-11-10-1",
+        "verification": "claimed",
+        "claimedBy": "agent:a0000000-0000-4000-8000-0000000000a4",
+        "bindingId": "b0000000-0000-4000-8000-0000000000b3"
+      }
+    ],
+    "report": null,
+    "can": {
+      "update": {
+        "allowed": false,
+        "reason": "task-active"
+      },
+      "change": {
+        "allowed": false,
+        "reason": "stop-pending"
+      },
+      "stop": {
+        "allowed": false,
+        "reason": "stop-pending"
+      }
+    }
+  },
+  "GET /api/sessions (rows, binding field only)": [
+    {
+      "sessionId": "a7240000-0000-4000-8000-000000000002",
+      "name": "hz-dev",
+      "status": "running",
+      "binding": {
+        "projectId": "6b1f2c3d-0000-4000-8000-000000000001",
+        "agentId": "a0000000-0000-4000-8000-0000000000a2",
+        "handle": "developer-hz",
+        "bindingId": "b0000000-0000-4000-8000-0000000000b2",
+        "epoch": 1
+      }
+    },
+    {
+      "sessionId": "01d00000-0000-4000-8000-000000000099",
+      "name": "my-old-session",
+      "status": "running",
+      "binding": null
+    }
+  ]
+}
