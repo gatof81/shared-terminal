@@ -1,6 +1,6 @@
 # Per-project attention signal: design (not implemented)
 
-Status: **proposal, 2026-11-06.** Owner-requested design for the backend part of the multi-project navigation work (frontend PRs #535, #536, #539, #548). Nothing here is implemented, and this document authorises nothing.
+Status: **design accepted by the owner, 2026-11-06** (decisions below), not implemented. Owner-requested design for the backend part of the multi-project navigation work (frontend PRs #535, #536, #539, #548). Nothing here is implemented, and this document authorises nothing.
 
 ## Problem
 
@@ -37,7 +37,9 @@ A cheap, honest, per-project signal that the sidebar, the header and a future ce
       "working": 2,
       "newestAttentionAt": "…",
       "lastEvidenceAt": "…",
-      "agentsWithoutEnd": 3
+      "agentsWithoutEnd": 3,
+      "complete": true,
+      "metaUnavailable": false
     },
     { "sessionId": "…", "available": false, "reason": "not-running" | "capture-off" | "unreadable" }
   ]
@@ -45,11 +47,13 @@ A cheap, honest, per-project signal that the sidebar, the header and a future ce
 ```
 
 - **Projects listed:** only the caller's **running** sessions with capture requested. Every other session is absent, and the client shows no badge for it, never a zero.
+- **`complete`:** false when anything that could change the counts was unreadable (see "Partial results never look complete").
+- **`metaUnavailable`:** the archive state couldn't be read, so archived conversations may be counted.
 - **`attention`, `working`:** counted with the same rule the frontend uses (`bucketOf` → `presentStatus`):
   - a live-claim status counts only if `now − max(statusAt, lastEventAt) < STALE_EVIDENCE_MS`;
   - `waiting_permission` and `waiting_input` mean attention;
   - `running` and `waiting_background` mean working;
-  - archived conversations (v1.8 §6.2) don't count.
+  - archived conversations (v1.8 §6.2) don't count; the archive state comes from an in-memory cache (see "Archive state without D1 on the hot path").
 - **`agentsWithoutEnd`:** subagents started with no `agent_end` seen, in conversations that count as working or attention. It is labelled "started, no end yet" everywhere and is never "working".
 - **`staleAfterMs`:** sent so client and server can't drift. The frontend's constant becomes a fallback.
 - **`available: false`:** says *why* the project has no number (not running, capture off, unreadable index). The client shows "—" with that reason, never 0.
@@ -62,9 +66,29 @@ A cheap, honest, per-project signal that the sidebar, the header and a future ce
 - **Per-user cache:** 5 s TTL with single-flight, so a header and a sidebar polling together cost one computation.
 - **Rate limit:** a new `activityIp` limiter, next to `fileBrowseIp`. Each request also holds an `InFlightLimiter` slot per user, released when the response ends (the Files and Git pattern).
 
-### Freshness
+### Archive state without D1 on the hot path
 
-- **v1, polling:** the frontend polls every 20 s while the page is visible (`document.visibilityState`), pauses while hidden, and refreshes once on focus. With 5 projects that is one request every 20 s, against today's 5 requests per switcher open.
+Archived conversations must not count, and the archive state lives in D1 (`conversation_user_meta`, v1.8 §6.2). Reading it on every request would put D1 back on the hot path. So:
+- **Cache.** A per-session in-memory map `cid → archivedAt` is filled lazily by **one** query per session (the same `SELECT … FROM conversation_user_meta WHERE st_session_id = ?` the list already runs), then kept.
+- **Invalidation by the only writers, in-process.** The owner's `PATCH …/conversations/:cid` (`registry` upsert) updates the cache entry after its D1 write commits. A purge (`DELETE … WHERE st_session_id = ?`) drops the session's entry. There is no other writer while the backend runs. `npm run restore` runs with the backend stopped and the cache starts empty.
+- **Safety net.** A 5-minute TTL per session, so a missed invalidation can't last.
+- **Unreadable meta.** When D1 fails, the cold read gives `metaUnavailable: true` for that project. Its counts include archived conversations and the response says so: the client shows "may include archived conversations" and never presents those numbers as exact. The switcher already does the same (#535 `metaUnavailable`).
+
+Steady state is no D1 query: one per session per 5 minutes at most, plus one after each owner rename or archive.
+
+### Partial results never look complete
+
+- **Per-project flag.** Each project carries `complete: boolean`. It is false when the conversation index of some conversation was unreadable (`peekIndex` null), or `metaUnavailable` is set.
+- **Client wording.** An incomplete project's badge reads "at least N" and its tooltip says why.
+- **Unknown ≠ zero.** A project that could not be summarised at all is `available: false`, never a 0.
+- **Header totals.** A header total over projects where any is incomplete or unavailable says "at least N".
+- **Freshness of the last answer.** When the last poll failed, every badge shows its last value with "as of <time>", and after 2 missed polls (40 s) it switches to "—".
+
+### Freshness (owner decisions, 2026-11-06)
+
+- **v1, polling:** the frontend polls every **20 s** while the page is **visible** (`document.visibilityState`), pauses while hidden, and refreshes once when the page regains focus or visibility. With 5 projects that is one request every 20 s, against today's 5 requests per switcher open.
+- **Single flight.** At most one request in flight per page. A tick or focus event that fires while a request is pending is coalesced into that request, never a second one. The sidebar, the header and the switcher read the same client cache.
+- **Backoff.** On 429 the client honours `Retry-After` when present. Otherwise, and on network errors or 5xx, it backs off exponentially: 20 s → 40 s → 80 s → 160 s, capped at 5 min, with ±20 % jitter. It resets on the first success. While backing off, the badges follow the "as of <time>" / "—" rule above. A 401 stops polling, and the existing session-expiry flow takes over.
 - **v2, optional push:** `WS /ws/activity` emits a frame when a project's counts change, coalesced to 2 s. It has to be added to `WS_PATH_PREFIXES` (`wsUpgrade.ts`) and get its own upgrade test. It is deferred until polling proves too slow or too costly.
 
 ## UI (frontend, built on existing pieces)
@@ -72,10 +96,11 @@ A cheap, honest, per-project signal that the sidebar, the header and a future ce
 - **Sidebar project row:** a small badge.
   - "● 1 needs you" in the attention tone, "2 working" muted, nothing when both are 0.
   - "—" with a tooltip when `available: false`.
+  - **Subagents appear only in the tooltip** ("3 subagents started, no end yet"), never as a separate counter (owner decision).
   - The badge opens the switcher filtered to that project, or the project's own last conversation (#536).
 - **Header:**
   - the switcher button shows the total "needs you" count;
-  - `document.title` gets a `(N)` prefix only for attention, so a background tab can show it.
+  - **no `(N)` prefix in `document.title`** by default (owner decision). The tab title stays as #551 set it.
 - **Switcher (#548):** its at-a-glance line can use the same numbers before the per-project lists finish loading. Opening it still loads the lists for titles.
 - **Central activity view (future):** a page or overlay listing projects × conversations × agents, built from:
   - `switcherModel` (bucketOf, sectionize, `ProjectLoader`/`Slots`, `parallelSummary`);
@@ -114,8 +139,13 @@ A cheap, honest, per-project signal that the sidebar, the header and a future ce
 2. Frontend reads the endpoint when present. When absent (404 from an older backend), nothing changes.
 3. Measure request rate and computation time in `/api/admin/stats → activity` for a week before considering v2 push.
 
-## Open decisions for the owner
+## Owner decisions (2026-11-06)
 
-- **Poll interval:** 20 s proposed. Shorter means fresher badges at linear cost.
-- **Title prefix:** whether to add `(N)` at all, since some people find it noisy. It could be opt-in.
-- **Agents count:** whether the sidebar shows it (proposed: in the tooltip only).
+- Polling every 20 s, only while the page is visible, plus a refresh when it regains focus.
+- No `(N)` prefix in `document.title` by default.
+- Subagents only in the sidebar tooltip, not as an extra counter.
+- Backoff on 429 and network errors; no duplicate concurrent requests (see Freshness).
+
+## Implementation PRs
+
+Separate PRs. The backend endpoint needs the owner's approval to merge and deploy. The frontend handles a missing endpoint (404 → nothing shown), so it can ship before the backend.
