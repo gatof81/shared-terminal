@@ -595,13 +595,18 @@ describe("unresolved rollback ⇒ 500 {unresolved:true}, marker kept, session ga
 
 describe("late answers: no write of the recreation after the epoch closed", () => {
 	it("create answering after T_rec and T_rb ⇒ N found by label and removed; marker retired only then; never started", async () => {
-		const h = await setup({ tRecMs: 100, tRbMs: 100 });
+		// T_rec runs from the lock: room for the preconditions and begin() so
+		// the held create is really sent inside it (see "dockerd never answering").
+		const h = await setup({ tRecMs: 2000, tRbMs: 100 });
 		const gate = deferred();
-		h.docker.hooks.set("create", () => gate.promise);
-		expect(await h.engine.recreate(SID, IMG_N)).toMatchObject({
-			step: "prepare",
-			unresolved: true,
+		let created = false;
+		h.docker.hooks.set("create", () => {
+			created = true;
+			return gate.promise;
 		});
+		const r = await h.engine.recreate(SID, IMG_N);
+		expect(created).toBe(true);
+		expect(r).toMatchObject({ step: "prepare", unresolved: true });
 		expect(h.capture.deferSeed).toBe(true);
 		gate.resolve();
 		await vi.waitFor(async () => expect(await recordOf(h)).toMatchObject({ state: "resolved" }), {
@@ -610,35 +615,56 @@ describe("late answers: no write of the recreation after the epoch closed", () =
 		expect([...h.docker.containers.keys()]).toEqual([O_ID]);
 		expect(h.docker.log.some((l) => l.startsWith("start:") || l.startsWith("rename:"))).toBe(false);
 		expect(h.capture.deferSeed).toBe(false);
-	});
+	}, 10_000);
 
 	it("rename applying late ⇒ the resolution uses the names it observes", async () => {
-		const h = await setup({ tRecMs: 100, tRbMs: 100 });
+		// 100 ms from the lock was spent before step 2 on a loaded runner: the
+		// engine (correctly) rolled back at step 1 (`step: "prepare"`, resolved)
+		// and the held rename was never sent. Room for steps 0–1, and proof
+		// the rename was the request left hanging.
+		const h = await setup({ tRecMs: 2000, tRbMs: 100 });
 		const gate = deferred();
+		let renaming = false;
 		h.docker.hooks.set("rename", async (a) => {
-			if (a[0] === O_ID && String(a[1]).includes("-old-")) await gate.promise;
+			if (a[0] === O_ID && String(a[1]).includes("-old-")) {
+				renaming = true;
+				await gate.promise;
+			}
 		});
-		expect(await h.engine.recreate(SID, IMG_N)).toMatchObject({ step: "rename", unresolved: true });
+		const r = await h.engine.recreate(SID, IMG_N);
+		expect(renaming).toBe(true);
+		expect(r).toMatchObject({ step: "rename", unresolved: true });
 		gate.resolve();
 		await vi.waitFor(async () => expect(await recordOf(h)).toMatchObject({ state: "resolved" }), {
 			timeout: 2000,
 		});
 		expect(h.docker.containers.get(O_ID)?.name).toBe(CANONICAL);
 		expect([...h.docker.containers.keys()]).toEqual([O_ID]);
-	});
+	}, 10_000);
 
 	it("a hung step 3 closes the epoch; rollback once what was in flight answers", async () => {
-		const h = await setup({ tRecMs: 120, tRbMs: 400 });
+		// T_rec runs from the lock: 120 ms could run out before step 3 was
+		// reached (rollback at an earlier step, start never sent). Room for
+		// steps 0–2; the answer is released only once start was sent AND T_rec
+		// is certainly past (its deadline precedes start's send + T_rec), and
+		// T_rb is wide so that release always lands inside the rollback.
+		const T_REC = 1000;
+		const h = await setup({ tRecMs: T_REC, tRbMs: 3000 });
 		const gate = deferred();
-		h.docker.hooks.set("start", () => gate.promise);
+		const started = deferred();
+		h.docker.hooks.set("start", (a) => {
+			if (a[0] !== O_ID) started.resolve();
+			return gate.promise;
+		});
 		const p = h.engine.recreate(SID, IMG_N);
-		await tick(200);
+		await started.promise;
+		await tick(T_REC + 50);
 		gate.resolve(); // start applies late: N runs, but nothing continues from it
 		const r = await p;
 		expect(r).toEqual({ ok: false, status: 500, code: "recreate-failed", step: "start" });
 		expect(h.d1.writes).not.toContain("cas");
 		expect([...h.docker.containers.keys()]).toEqual([O_ID]);
-	});
+	}, 10_000);
 
 	it("CAS applied after the client timed out ⇒ N is never removed; after T_d1 it converges on N", async () => {
 		const h = await setup();
@@ -690,14 +716,28 @@ describe("late answers: no write of the recreation after the epoch closed", () =
 	});
 
 	it("hangs after the commit (probe, seed): abandoned at T_rec, no op waits longer, resolved committed on the answer", async () => {
-		const h = await setup({ tRecMs: 250, tRbMs: 100 });
+		// T_rec runs from the lock, so 250 ms also covered steps 0–4: a loaded
+		// runner could reach the commit past it (rollback, not this test). Room
+		// for that; the bounds then show the answer came AT T_rec (not before,
+		// not after waiting for the held seed), with slack a busy runner's
+		// fsync'd record writes fit in.
+		const T_REC = 1500;
+		const T_RB = 100;
+		const h = await setup({ tRecMs: T_REC, tRbMs: T_RB });
 		const gate = deferred();
+		let seeding = false;
 		h.docker.hooks.set("exec", async (a) => {
-			if (String(a[1]).includes("seed-skills")) await gate.promise;
+			if (String(a[1]).includes("seed-skills")) {
+				seeding = true;
+				await gate.promise;
+			}
 		});
 		const t0 = Date.now();
 		const r = await h.engine.recreate(SID, IMG_N);
-		expect(Date.now() - t0).toBeLessThan(250 + 100 + 200);
+		const elapsed = Date.now() - t0;
+		expect(seeding).toBe(true);
+		expect(elapsed).toBeGreaterThanOrEqual(T_REC - 10);
+		expect(elapsed).toBeLessThan(T_REC + T_RB + 1000);
 		expect(r).toMatchObject({ ok: true, outcome: "committed", unresolved: true });
 		expect((r as { incomplete: string[] }).incomplete).toEqual(
 			expect.arrayContaining(["seed-skills", "remove O"]),
@@ -715,7 +755,7 @@ describe("late answers: no write of the recreation after the epoch closed", () =
 			h.docker.execs.slice(execsAtTimeout).filter((e) => e[1] !== "/opt/st/seed-skills.sh"),
 		).toEqual([]);
 		expect(h.docker.containers.has(O_ID)).toBe(false);
-	});
+	}, 10_000);
 
 	it("dockerd never answering ⇒ uncertain indefinitely (no time-based resolution)", async () => {
 		// T_rec runs from the lock, so it also covers the preconditions and the

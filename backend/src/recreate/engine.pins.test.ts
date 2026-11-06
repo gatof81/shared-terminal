@@ -92,16 +92,22 @@ describe("recreation image pins (owner conditions P1/P2)", () => {
 	});
 
 	it("the epoch closes DURING the pin step ⇒ no create, even when the pin answers late", async () => {
-		const h = await setup({ tRecMs: 100, tRbMs: 100 });
+		// T_rec runs from the lock: 100 ms could run out before the pin step on
+		// a loaded runner (no pin ever held, `lateMayAct` never set). Room for
+		// the preconditions and begin(), and proof the pin was really held.
+		const h = await setup({ tRecMs: 1500, tRbMs: 100 });
 		const gate = deferred();
+		let pinning = false;
 		let lateMayAct: boolean | null = null;
 		wirePins(h, {
 			pin: async (_img, mayAct) => {
+				pinning = true;
 				await gate.promise;
 				lateMayAct = mayAct();
 			},
 		});
 		const r = await h.engine.recreate(SID, IMG_N);
+		expect(pinning).toBe(true);
 		expect(r).toMatchObject({ ok: false });
 		gate.resolve();
 		await vi.waitFor(async () => expect(await recordOf(h)).toMatchObject({ state: "resolved" }), {
@@ -111,7 +117,7 @@ describe("recreation image pins (owner conditions P1/P2)", () => {
 		expect(lateMayAct).toBe(false);
 		expect(h.docker.log.some((l) => l.startsWith("create:"))).toBe(false);
 		expect([...h.docker.containers.keys()]).toEqual([O_ID]);
-	});
+	}, 10_000);
 
 	it("N does not run the pinned image (or its pin is gone) ⇒ rollback removes N; D1 never moves", async () => {
 		const h = await setup();

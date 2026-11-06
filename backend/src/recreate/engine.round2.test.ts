@@ -144,7 +144,10 @@ describe("E1 — `Running: false` without an exit code does not end a pending ex
 
 describe("E2 — the real setPorts: DELETE out at T_rec, late answer ⇒ no new INSERT", () => {
 	it("the late continuation stops; only the resolution rewrites the mappings", async () => {
-		const h = await setup({ tRecMs: 250, tRbMs: 100 });
+		// T_rec runs from the lock: 250 ms could run out before step 6 on a
+		// loaded runner (rollback, no DELETE ever held). Room for steps 0–5;
+		// the held DELETE shows up in `pending` below, so reaching it is proven.
+		const h = await setup({ tRecMs: 1500, tRbMs: 100 });
 		h.d1.config = {
 			...h.d1.config,
 			ports: [
@@ -169,7 +172,7 @@ describe("E2 — the real setPorts: DELETE out at T_rec, late answer ⇒ no new 
 		// Nothing between the late DELETE and the resolution's own rewrite.
 		const seq = ports().map((s) => s.split(" ")[0]);
 		expect(seq).toEqual(["DELETE", "DELETE", "INSERT", "INSERT"]);
-	});
+	}, 10_000);
 });
 
 // ── E5: shutdown reaches into the real convergence ─────────────────────────
@@ -406,12 +409,39 @@ describe("E6 — an authorization that did not complete is pending, never `resol
 		const { ctl, files } = realCapture(h);
 		let identified = false;
 		ctl.probe = async () => identified;
+		// The files are checked once step 5's own authorization has ANSWERED.
+		// Its identification wait is what is left of T_rec, so on a loaded
+		// runner the engine's T_rec answer won the race and recreate()
+		// returned while that request was still out, its marker not yet
+		// withdrawn by its late continuation ("late or not, nothing of this
+		// attempt's authorization stays" — capturePort.ts).
+		const authorized = deferred();
+		const realAuthorize = h.capture.authorize;
+		h.capture.authorize = async (sid, run) => {
+			try {
+				return await realAuthorize(sid, run);
+			} finally {
+				authorized.resolve();
+			}
+		};
+		// And the resolution's repair (converge), which starts in the
+		// background once that request settled, puts the marker up by the
+		// write procedure's order while it waits for identification: held
+		// until checked, so the check sees step 5's leftovers only.
+		const repair = deferred();
+		const realConverge = h.capture.converge;
+		h.capture.converge = async (sid, mayAct) => {
+			await repair.promise;
+			return realConverge(sid, mayAct);
+		};
 		const r = await h.engine.recreate(SID, IMG_N);
 		expect(r).toMatchObject({ ok: true, outcome: "committed", unresolved: true });
 		// Identification may use up what is left of T_rec, so step 5 may end
 		// on the epoch rather than with a capture block: pending either way.
 		expect((r as { pending: string[] }).pending).toContain("authorize (not done)");
+		await authorized.promise;
 		expect(await files()).toEqual({ marker: false, hooksFile: false });
+		repair.resolve();
 		await tick(150);
 		expect(await recordOf(h)).toMatchObject({ state: "uncertain" });
 		await expectIncompatibleRefused(h);
@@ -504,19 +534,28 @@ describe("A2 — a PATCH /ports during a recreation: config and dispatcher agree
 	}
 
 	it("while the recreation is unresolved the edit is refused (recreate-unresolved) and the resolution converges config and mappings", async () => {
-		const h = await setup();
+		// The resolution of an ambiguous CAS waits only until casSentAt + T_d1.
+		// With FAST's 80 ms, a loaded runner spent that on the fsync'd
+		// `uncertain` write alone: the pass queued for the lock before
+		// recreate() even answered, the PATCH (wait mode, as the route) queued
+		// behind it and ran once it had resolved — correct, but then nothing
+		// was unresolved when the edit ran. T_d1 long enough that the edit
+		// below always meets the attempt unresolved, and proof no pass holds
+		// the lock when it is sent.
+		const h = await setup({ tD1Ms: 1500 });
 		h.d1.config = { ...h.d1.config, ports: PUBLIC };
 		h.d1.casMode = "ambiguous-applied";
 		const r = await h.engine.recreate(SID, IMG_N);
 		expect(r).toMatchObject({ ok: false, step: "commit", unresolved: true });
+		expect(h.lock.heldBy(SID)).toBeNull();
 		await expect(patchPorts(h, [])).rejects.toBeInstanceOf(RecreateUnresolvedError);
 		await vi.waitFor(async () => expect(await recordOf(h)).toMatchObject({ state: "resolved" }), {
-			timeout: 2000,
+			timeout: 5000,
 		});
 		expect(h.d1.config.ports).toEqual(PUBLIC);
 		expect(h.d1.mappings).toEqual(PUBLIC);
 		// Resolved: the same edit now goes through and both follow it.
 		await patchPorts(h, []);
 		expect(h.d1.mappings).toEqual([]);
-	});
+	}, 10_000);
 });
