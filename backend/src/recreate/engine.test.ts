@@ -718,32 +718,43 @@ describe("late answers: no write of the recreation after the epoch closed", () =
 	});
 
 	it("dockerd never answering ⇒ uncertain indefinitely (no time-based resolution)", async () => {
-		const h = await setup({ tRecMs: 80, tRbMs: 80 });
-		h.docker.hooks.set("create", () => new Promise(() => {}));
-		await h.engine.recreate(SID, IMG_N);
-		// Reaching `uncertain` takes T_rec + T_rb plus durable (fsync'd) record
-		// writes: wait for the state rather than a fixed 400 ms, which a loaded
-		// CI runner overran (9 of 40 failed runs, 2026-11-05).
-		await vi.waitFor(async () => expect(await recordOf(h)).toMatchObject({ state: "uncertain" }), {
-			timeout: 5000,
-			interval: 20,
+		// T_rec runs from the lock, so it also covers the preconditions and the
+		// fsync'd begin(): 80 ms was spent before `create` on a loaded runner,
+		// and the engine then (correctly) never started or rolled back with no
+		// effects. Room for that, and proof the hanging create was really sent.
+		const h = await setup({ tRecMs: 2000, tRbMs: 80 });
+		let created = false;
+		h.docker.hooks.set("create", () => {
+			created = true;
+			return new Promise(() => {});
 		});
-		// …and nothing resolves it with time: well past both deadlines it stays.
+		const r = await h.engine.recreate(SID, IMG_N);
+		expect(created).toBe(true);
+		expect(r).toMatchObject({ ok: false, unresolved: true });
+		// recreate() returns only after markUncertain wrote the record.
+		expect(await recordOf(h)).toMatchObject({ state: "uncertain" });
 		await tick(400);
 		expect(await recordOf(h)).toMatchObject({ state: "uncertain" });
 		expect(h.capture.deferSeed).toBe(true);
 		h.engine.stop();
-	});
+	}, 10_000);
 });
 
 // ── Restart (D8) and the boot pass ─────────────────────────────────────────
 
 describe("backend restart with an attempt open or uncertain (D8: fail-closed)", () => {
 	it("stays recreate-unresolved; no scan, no time and no answer resolves it", async () => {
-		const h = await setup({ tRecMs: 80, tRbMs: 80 });
+		// Same T_rec-from-the-lock hazard as above: room for the preconditions,
+		// and proof the held create was sent before the "restart".
+		const h = await setup({ tRecMs: 2000, tRbMs: 80 });
 		const gate = deferred<void>();
-		h.docker.hooks.set("create", () => gate.promise);
+		let created = false;
+		h.docker.hooks.set("create", () => {
+			created = true;
+			return gate.promise;
+		});
 		await h.engine.recreate(SID, IMG_N);
+		expect(created).toBe(true);
 		h.engine.stop();
 		// "Restart": a new store and engine over the same disk and Docker.
 		const attempts = new RecreateAttemptStore(h.root);
@@ -778,7 +789,7 @@ describe("backend restart with an attempt open or uncertain (D8: fail-closed)", 
 		await expect(lock.run(SID, "start", async () => 1)).rejects.toBeInstanceOf(
 			RecreateUnresolvedError,
 		);
-	});
+	}, 10_000);
 });
 
 describe("the boot pass", () => {
