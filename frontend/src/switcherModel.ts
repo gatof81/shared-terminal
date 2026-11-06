@@ -13,22 +13,24 @@
  */
 
 import type { ConversationSummary } from "./api.js";
+import { attentionKind } from "./attentionRule.js";
 import { displayTitle, isArchived } from "./chatMeta.js";
 import { lastEvidenceAt, presentStatus, type StatusPresentation } from "./conversationModel.js";
 
 // ── Ranking ─────────────────────────────────────────────────────────────────
 
 /** Section order, top to bottom. */
-export type Bucket = "attention" | "working" | "recent" | "quiet";
+export type Bucket = "attention" | "working" | "ready" | "recent" | "quiet";
 
 export const BUCKET_LABEL: Record<Bucket, string> = {
 	attention: "Needs you",
 	working: "Working",
+	ready: "Ready",
 	recent: "Recent",
 	quiet: "Unknown or no recent activity",
 };
 
-const BUCKET_ORDER: Bucket[] = ["attention", "working", "recent", "quiet"];
+const BUCKET_ORDER: Bucket[] = ["attention", "working", "ready", "recent", "quiet"];
 
 export interface SwitcherItem {
 	sessionId: string;
@@ -43,9 +45,11 @@ export interface SwitcherItem {
 }
 
 /**
- * The bucket follows the presentation:
- * - attention: a FRESH live claim that waits on the person (permission, input);
- * - working: a fresh live claim of activity (running, background tasks);
+ * The bucket is attentionRule.ts's verdict (owner option A, 2026-11-06) — the
+ * same rule the per-project attention signal uses:
+ * - attention ("Needs you"): a FRESH permission prompt;
+ * - working: a fresh claim of activity (running, background tasks);
+ * - ready: Claude fresh at its prompt — secondary, after the work in progress;
  * - quiet: `unknown`, or a live claim gone stale (nothing proves Claude is there);
  * - recent: everything else (ended, error, disconnected…), by last evidence.
  */
@@ -57,13 +61,19 @@ export function bucketOf(
 	status: StatusPresentation;
 } {
 	const status = presentStatus(c.status, lastEvidenceAt(c), now);
-	if (status.active) {
-		if (c.status === "waiting_permission" || c.status === "waiting_input")
+	switch (attentionKind(c, now)) {
+		case "attention":
 			return { bucket: "attention", status };
-		return { bucket: "working", status };
+		case "working":
+			return { bucket: "working", status };
+		case "ready":
+			return { bucket: "ready", status };
+		case "stale":
+		case "unknown":
+			return { bucket: "quiet", status };
+		default:
+			return { bucket: "recent", status };
 	}
-	if (status.stale || c.status === "unknown") return { bucket: "quiet", status };
-	return { bucket: "recent", status };
 }
 
 /** `c.sessionId` is the CONVERSATION id (the API's name for it); the project is passed in. */
@@ -302,6 +312,8 @@ export interface ParallelSummary {
 	attentionProjects: string[];
 	working: number;
 	workingProjects: number;
+	/** Claude at its prompt (fresh): secondary, never "needs you". */
+	ready: number;
 	/** Projects whose list is still loading or failed: the counts may be short. */
 	incomplete: number;
 }
@@ -319,6 +331,7 @@ export function parallelSummary(
 	const work = new Set<string>();
 	let attention = 0;
 	let working = 0;
+	let ready = 0;
 	for (const i of items) {
 		if (i.bucket === "attention") {
 			attention++;
@@ -326,6 +339,8 @@ export function parallelSummary(
 		} else if (i.bucket === "working") {
 			working++;
 			work.add(i.sessionId);
+		} else if (i.bucket === "ready") {
+			ready++;
 		}
 	}
 	return {
@@ -333,6 +348,7 @@ export function parallelSummary(
 		attentionProjects: [...att].sort(),
 		working,
 		workingProjects: work.size,
+		ready,
 		incomplete: projects.filter((p) => p.state.kind !== "ok").length,
 	};
 }
@@ -348,6 +364,8 @@ export function parallelSummaryText(s: ParallelSummary): string | null {
 		parts.push(
 			`${s.working} working in ${s.workingProjects} project${s.workingProjects === 1 ? "" : "s"}`,
 		);
+	// Secondary and discreet: a count, no project names.
+	if (s.ready > 0) parts.push(`${s.ready} ready`);
 	if (parts.length === 0) return null;
 	const tail =
 		s.incomplete > 0

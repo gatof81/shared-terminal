@@ -41,12 +41,13 @@ test.describe("conversation switcher", () => {
 
 		await openSwitcher(app, page);
 		const groups = page.locator(".switcher-group-title");
-		await expect(groups).toHaveText(["Needs you", "Recent"]);
+		// Claude at its prompt is "Ready", not "Needs you" (owner option A).
+		await expect(groups).toHaveText(["Ready", "Recent"]);
 		await expect(option(page, "Refactor auth flow")).toContainText("my-project");
 		await expect(option(page, "Refactor auth flow")).toContainText("Waiting for input");
 		await expect(option(page, "Fix tests")).toContainText("Ended");
 		// Parallel work at a glance, above the list, from fresh evidence only.
-		await expect(page.locator(".switcher-summary")).toHaveText("Now: 1 needs you (my-project).");
+		await expect(page.locator(".switcher-summary")).toHaveText("Now: 1 ready.");
 		// Only running projects are asked ("docs" is stopped).
 		expect(
 			backend.requests
@@ -72,6 +73,19 @@ test.describe("conversation switcher", () => {
 		expect(
 			sock.sent.slice(sentBefore).filter((f) => f.type === "input" || f.type === "resize"),
 		).toEqual([]);
+	});
+
+	test("a fresh permission prompt is the only 'Needs you', and the at-a-glance line names its project", async ({
+		app,
+		backend,
+		page,
+	}) => {
+		const c1 = backend.conversations.find((c) => c.cid === "conv-1")!;
+		c1.status = "waiting_permission";
+		await app.login("alice");
+		await openSwitcher(app, page);
+		await expect(page.locator(".switcher-group-title")).toHaveText(["Needs you", "Recent"]);
+		await expect(page.locator(".switcher-summary")).toHaveText("Now: 1 needs you (my-project).");
 	});
 
 	test("a stale wait is not 'Needs you': it is listed as no recent activity", async ({

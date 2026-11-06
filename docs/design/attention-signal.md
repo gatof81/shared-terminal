@@ -1,6 +1,6 @@
 # Per-project attention signal: design (not implemented)
 
-Status: **design, revision 2 (2026-11-06).** The owner accepted the direction and the decisions listed at the end. Revision 2 folds in an independent review. One owner decision is still open: what "needs you" means (§ Semantics). Nothing is implemented.
+Status: **accepted design, revision 2 (2026-11-06).** All owner decisions are taken (listed at the end). The shared rule (`frontend/src/attentionRule.ts`) and the switcher's use of it are implemented. The backend endpoint is not, and needs review and a separate deploy GO.
 
 ## Problem
 
@@ -28,7 +28,7 @@ A cheap, honest, per-project signal for the sidebar, the header and a future cen
   - The rule is `presentStatus`'s, applied server-side with the server's clock. The response carries `generatedAt`, so a client with a skewed clock can tell.
 - **One pure module:** the bucket rule moves into a module kept byte-identical between frontend and backend, like `composerText.ts`. The switcher (`bucketOf`) and the endpoint then cannot drift.
 - **Archive state does not change a count.** This is the switcher's rule (`visibleInSwitcher`) and contract §6.2: an archived conversation with a fresh live claim is shown and counted, because it came back to life. Only fresh live claims are counted at all, so the archive state can never change a number. **Consequence: the endpoint never reads `conversation_user_meta`.** The archive cache in revision 1 is gone.
-- **What "needs you" means — OWNER DECISION NEEDED.** An interactive Claude sitting at its prompt is `waiting_input`. The silence sweep probes every live claim after 8 minutes, and `probe:idle` renews `statusAt`, so that claim never goes stale. Counting `waiting_input` as "needs you" would put a permanent badge on every open CLI, and a real permission prompt would be lost among them.
+- **What "needs you" means — DECIDED: option A (owner, 2026-11-06).** An interactive Claude sitting at its prompt is `waiting_input`. The silence sweep probes every live claim after 8 minutes, and `probe:idle` renews `statusAt`, so that claim never goes stale. Counting `waiting_input` as "needs you" would put a permanent badge on every open CLI, and a real permission prompt would be lost among them.
   - **A (recommended):** "needs you" = `waiting_permission` only. `waiting_input` becomes a muted "ready" count. The frontend's `statusTone` already separates them (`waiting_input` is "ready", `waiting_permission` is "attention"). The switcher's `bucketOf` changes in the same PR, so both surfaces agree.
   - **B:** keep today's rule, which matches the switcher, and accept the noise in writing.
 - **Working:** `running` and `waiting_background` with a fresh claim.
@@ -169,7 +169,7 @@ Cost per computation is therefore one readdir and one stat per non-resident conv
   - No `(N)` prefix in `document.title`.
   - Subagents only in the sidebar tooltip.
   - Backoff on 429 and network errors, and no duplicate concurrent requests.
-- **(pending)** What "needs you" means: option A (recommended, permission prompts only, with "ready" shown apart) or option B (today's switcher rule).
+- **(2026-11-06)** What "needs you" means: **option A**. "Needs you" is `waiting_permission` with fresh evidence only; "ready" is `waiting_input`, a secondary, discreet indicator; "working" is `running` and `waiting_background` with fresh evidence. The rule is shared between backend and frontend as one pure module: `frontend/src/attentionRule.ts`, which the switcher already uses and the backend endpoint must copy byte-identically.
 
 ## Assumptions
 
