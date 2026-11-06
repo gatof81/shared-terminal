@@ -46,6 +46,7 @@ A cheap, honest, per-project signal for the sidebar, the header and a future cen
     { "sessionId": "…", "available": true, "complete": true,
       "attention": 1, "ready": 2, "working": 1,
       "oldestAttentionAt": "…", "lastEvidenceAt": "…", "agentsWithoutEnd": 3 },
+    // oldestAttentionAt = min(lastEvidenceAt(c)) over the conversations counted as attention
     { "sessionId": "…", "available": false, "reason": "capture-off" | "unreadable" | "unavailable" }
   ]
 }
@@ -69,14 +70,23 @@ The sessions come from the caller's own **running** sessions: `sessions.listForU
 
 ### Where the conversations come from (enumeration)
 
-The set is **`runtime` ∪ the conversations on disk** (`store.listConversationIds(sid)`, a readdir of `<WORKSPACE_ROOT>/.conversations/<sid>`). It is not D1 rows, and it is not `runtime` alone. `runtime` comes up short in four cases:
+The set is **`runtime` ∪ the conversations on disk**, from a readdir of `<WORKSPACE_ROOT>/.conversations/<sid>`. It is not D1 rows, and it is not `runtime` alone.
+
+The readdir needs a **strict** variant of `store.listConversationIds`. The current one catches every error and returns `[]`, which would make an EACCES or EIO look like "no conversations" and report `complete:true`. The strict variant (e.g. `listConversationIdsStrict`):
+- ENOENT → the session has no conversations yet: empty and complete;
+- any other error → `available:false, reason:"unreadable"`.
+
+The existing reconcile caller keeps the lenient one.
+
+`runtime` comes up short in three cases:
 - after a backend restart whose boot reconcile was skipped or partial: D1 down at boot, `recreate-unresolved`, or an `OwnerUnverified` throw;
 - while a new conversation is between index creation and its owner reservation;
 - during a D1 outage, when ingest cannot create runtimes.
 
-For each conversation:
-- **resident:** `store.getResidentIndex`;
-- **not resident:** `stat` the index file first. If its mtime is older than `staleAfterMs`, the index cannot hold fresh evidence, so it is skipped without being read. Otherwise it goes through `store.peekIndex`, which reads the snapshot, scans no events and makes nothing resident.
+For each conversation, in this order:
+1. **Resident, or leaving memory:** a store helper returns the in-memory index from `resident` **or `evicting`**, the same first branch as `peekIndex`. While an eviction's snapshot write is in flight, the file on disk still carries the older mtime, so a stat would wrongly skip a fresh conversation.
+2. **Index file on disk:** `stat` it. If its mtime is older than `staleAfterMs`, it cannot hold fresh evidence and is skipped unread. Otherwise `store.peekIndex` reads the snapshot: no events scan, nothing made resident. A null result gives `complete:false`.
+3. **No index file, only `.events.jsonl`:** `stat` the events file. If it is old, the conversation is skipped. If it is recent, or the stat fails, `complete:false`. This keeps an old orphan events file from leaving the project at "at least N" forever.
 
 Cost per computation is therefore one readdir and one stat per non-resident conversation, plus snapshot reads only for recent ones.
 
@@ -95,7 +105,7 @@ Cost per computation is therefore one readdir and one stat per non-resident conv
   - **429:** honour `Retry-After`, clamped to [20 s, 5 min]. The backend's CORS middleware must add `Access-Control-Expose-Headers: Retry-After`; cross-origin (Pages → Tunnel) the header is unreadable without it, and the change gets a test.
   - **No `Retry-After`, network errors, 5xx:** exponential backoff 20 s → 40 s → 80 s → 160 s, capped at 5 min, ±20 % jitter. It resets on the first success.
   - **404 (older backend):** polling stops for the page's lifetime and no badges are shown. It does not back off.
-  - **401:** polling stops, and the session-expiry flow takes over.
+  - **401:** polling stops, and the session-expiry flow takes over. Polling **resumes when a new auth epoch starts** (login).
 - **Account switches:** the request goes through `api.ts`'s epoch-checked path (`authEpoch`). The cache entry stores its epoch, and an answer or a 401 from another epoch is dropped (CLAUDE.md, Auth). Logout clears the cache.
 - **Staleness on the client:** if the last success is **more than 40 s** old (wall clock, whatever the backoff), badges show their last value with "as of <time>". After 2 minutes they show "—".
 
@@ -129,7 +139,7 @@ Cost per computation is therefore one readdir and one stat per non-resident conv
 
 - **Backend unit:**
   - the bucket rule at and across the 10 min boundary, including an archived conversation with a fresh claim, which is counted;
-  - enumeration: a disk-only conversation with a fresh claim after a restart with D1 down at boot is counted; an old index is skipped without being read; a `peekIndex` null on a recent index gives `complete:false`; a readdir failure gives `unreadable`;
+  - enumeration: a disk-only conversation with a fresh claim after a restart with D1 down at boot is counted; an old index is skipped without being read; a `peekIndex` null on a recent index gives `complete:false`; a strict-readdir failure other than ENOENT gives `unreadable`, and ENOENT gives empty and complete; a fresh conversation whose eviction write is in flight is counted; an events-only conversation that is old is skipped, and a recent one gives `complete:false`;
   - `capture-off` for flag off, revocation and not requested; `unavailable` for `recreate-unresolved`;
   - the cache TTL and single-flight; one InFlight slot per computation;
   - ownership;
@@ -139,7 +149,7 @@ Cost per computation is therefore one readdir and one stat per non-resident conv
   - 429 from `activityIp` with `Retry-After`, **and** `Access-Control-Expose-Headers` contains `Retry-After` on a CORS request;
   - no probe or exec, and exactly one D1 read per computation (spies).
 - **Frontend:**
-  - polling pauses while the page is hidden; focus refreshes but never during a backoff; `Retry-After` is clamped; 404 stops polling; 401 stops polling;
+  - polling pauses while the page is hidden; focus refreshes but never during a backoff; `Retry-After` is clamped; 404 stops polling; 401 stops polling, and it resumes on the next login epoch;
   - an answer from another epoch is dropped, and logout clears the cache;
   - badges: attention, ready (option A), working, at-least, unavailable, "as of", "—";
   - `document.title` is never changed by the signal;
