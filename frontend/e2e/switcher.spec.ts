@@ -45,6 +45,8 @@ test.describe("conversation switcher", () => {
 		await expect(option(page, "Refactor auth flow")).toContainText("my-project");
 		await expect(option(page, "Refactor auth flow")).toContainText("Waiting for input");
 		await expect(option(page, "Fix tests")).toContainText("Ended");
+		// Parallel work at a glance, above the list, from fresh evidence only.
+		await expect(page.locator(".switcher-summary")).toHaveText("Now: 1 needs you (my-project).");
 		// Only running projects are asked ("docs" is stopped).
 		expect(
 			backend.requests
@@ -88,6 +90,8 @@ test.describe("conversation switcher", () => {
 			"Unknown or no recent activity",
 		]);
 		await expect(option(page, "Refactor auth flow")).toContainText("No recent activity");
+		// …and the at-a-glance line does not count it as needing anyone.
+		await expect(page.locator(".switcher-summary")).toBeHidden();
 	});
 
 	test("search narrows by conversation or project, and says when nothing matches", async ({
