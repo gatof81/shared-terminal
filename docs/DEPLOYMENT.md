@@ -428,7 +428,7 @@ point where they are authenticated, with the `observe` mode, which **never refus
 
 4. **PASS** only if `byCause` has `match` and nothing else, `sessionsNotMatched` is `0`, and
    `sessionsMatched` equals the number of sessions that produced hooks during the window. Any other
-   cause (`mismatch` above all, or `inspect_timeout` or `inspect_failed`) is a **FAIL**: stay on
+   cause (`mismatch` above all, or `inspect_timeout`, `inspect_pending` or `inspect_failed`) is a **FAIL**: stay on
    `observe` or go back to `false`, and investigate before trying again.
 5. Only after a PASS: set `true`, restart, and confirm that
    `.conversation.originRejectedSinceBoot` stays empty while capture keeps working. Any

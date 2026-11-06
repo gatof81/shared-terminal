@@ -1458,13 +1458,20 @@ El principal sigue siendo la sesión (su contenedor), no un proceso ni el modelo
   `container_id` como clave.
 - **Rechazo** (`originRejected{cause}`), en este orden: `no_remote`, `loopback` (127/8, `::1`),
   `no_container` (fila sin `container_id`), `inspect_failed` (error del daemon), `inspect_timeout`
-  (sin respuesta del daemon en **500 ms**), `container_gone`
+  (sin respuesta del daemon en **500 ms**), `inspect_pending` (la llamada anterior de esa sesión sigue
+  sin respuesta, ver «Plazo»), `container_gone`
   (404), `not_running`, `container_replaced` (el `Id` no coincide), `no_address` (sin dirección en esa
   red), `identity_changed` (la identidad se invalidó mientras se inspeccionaba) y `mismatch`. Una
   identidad que no se puede comprobar **es** un rechazo.
 - **Plazo:** la inspección tiene un tope de **500 ms** (`ORIGIN_INSPECT_TIMEOUT_MS`). La comprobación
   corre antes del 204, y el relay abandona un reenvío a los 2 s. Pasado el tope es un rechazo
-  (`inspect_timeout`), y la respuesta tardía, llegue cuando llegue, no puede acreditar ni cachear.
+  (`inspect_timeout`), y la respuesta tardía, llegue cuando llegue, no puede acreditar ni cachear. El
+  plazo acota la **request**, no la llamada a Docker; por eso hay como mucho **una llamada a Docker sin
+  resolver por sesión**. Mientras la que superó su plazo siga pendiente, toda request nueva de esa
+  sesión se rechaza en el acto (`inspect_pending`) sin abrir otra, también en `observe`. Con el daemon
+  colgado, el costo queda en una llamada pendiente por sesión, sea cual sea el tráfico. Cuando Docker
+  por fin responde, se libera el lugar (sin acreditar esa respuesta) y la request siguiente inspecciona
+  de nuevo.
 - **Costo y caché:** sólo se cachean vistas positivas (corriendo, mismo id, con dirección), con
   clave (sesión, `container_id`) y TTL **10 s**. Las inspecciones concurrentes de una misma clave
   comparten una sola llamada. La caché se invalida junto con la del token: baja del contenedor,
