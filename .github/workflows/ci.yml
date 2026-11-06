@@ -114,6 +114,11 @@ jobs:
           docker run --rm --network none --entrypoint sh st-backend-hygiene \
             -c 'cd /app && find dist -type f | LC_ALL=C sort | xargs sha256sum' > "$RUNNER_TEMP/img.txt"
           diff -u "$RUNNER_TEMP/ref.txt" "$RUNNER_TEMP/img.txt"
+          # Release evidence: the same two digests an operator computes from a
+          # running container (every dist file, and the *.js-only manifest).
+          echo "dist all files: $(wc -l < "$RUNNER_TEMP/img.txt") $(sha256sum < "$RUNNER_TEMP/img.txt" | cut -c1-64)"
+          grep '\.js$' "$RUNNER_TEMP/img.txt" > "$RUNNER_TEMP/img-js.txt"
+          echo "dist *.js: $(wc -l < "$RUNNER_TEMP/img-js.txt") $(sha256sum < "$RUNNER_TEMP/img-js.txt" | cut -c1-64)"
 
       - name: Build stage carries nothing from the host
         run: |
