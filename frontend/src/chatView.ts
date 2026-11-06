@@ -969,6 +969,19 @@ function renderListInner(): void {
 	// conversation is shown and the filters wait.
 	const effective: ChatFilter = metaState === "unavailable" ? "all" : filter;
 	listEl.appendChild(filterBar(filterCounts(list.conversations, isLive), effective));
+	// On a phone the header has no switcher button and the sidebar's is two
+	// taps away: from the list, one tap reaches every running project's
+	// conversations. (The event name mirrors switcher.ts OPEN_SWITCHER_EVENT.)
+	if (isMobile()) {
+		const go = button("Other projects' conversations…", "chat-switcher-entry", () =>
+			document.dispatchEvent(
+				new CustomEvent("st:open-switcher", {
+					detail: { opener: listEl.querySelector(".chat-switcher-entry") },
+				}),
+			),
+		);
+		listEl.appendChild(go);
+	}
 	const shown = list.conversations.filter((c) => inFilter(c, effective, isLive(c)));
 	if (shown.length === 0) {
 		const empty = stateBox(
