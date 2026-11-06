@@ -84,8 +84,8 @@ services:
       # .env-less boot stays byte-identical.
       - CONVERSATION_ENABLED=${CONVERSATION_ENABLED:-}
       - CONVERSATION_ALLOW_USERS=${CONVERSATION_ALLOW_USERS:-}
-      # CONVERSATION.md §3.1.1 — empty ⇒ off. Turn on ONLY after the read-only
-      # origin check in DEPLOYMENT.md ("Ingest network origin").
+      # CONVERSATION.md §3.1.1 — empty ⇒ off; `observe` = activation gate (never
+      # refuses); `true` ONLY after that gate passes (DEPLOYMENT.md "Ingest network origin").
       - INGEST_REQUIRE_SESSION_ORIGIN=${INGEST_REQUIRE_SESSION_ORIGIN:-}
       # Composer 3.2 (docs/CONVERSATION.md §8, DEPLOYMENT.md "Composer").
       # Same trap, same shape: empty ⇒ the backend keeps the composer OFF

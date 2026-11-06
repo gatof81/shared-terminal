@@ -89,6 +89,14 @@ export const TOKEN_CACHE_TTL_MS = 60_000;
  */
 export const ORIGIN_CACHE_TTL_MS = 10_000;
 
+/**
+ * §3.1.1 — deadline of one origin inspection. The check runs BEFORE the 204,
+ * and the in-container relay gives up on an upstream request after 2 s
+ * (relay.py SOCKET_TIMEOUT): a hung daemon must cost far less than that, and
+ * a past-deadline answer is a refusal, never late credit.
+ */
+export const ORIGIN_INSPECT_TIMEOUT_MS = 500;
+
 /** §3.3 / §4.4 — index snapshot cadence. */
 export const INDEX_FLUSH_EVERY_EVENTS = 50;
 export const INDEX_FLUSH_INTERVAL_MS = 5_000;

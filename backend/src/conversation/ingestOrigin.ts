@@ -28,14 +28,17 @@
  *     inspection that started under an older generation does not count
  *     (`identity_changed`) and caches nothing;
  *   - concurrent requests for the same (session, container_id, generation)
- *     share ONE inspection, which bounds the cost on the ingest path.
+ *     share ONE inspection, which bounds the cost on the ingest path;
+ *   - an inspection has a deadline (ORIGIN_INSPECT_TIMEOUT_MS): past it the
+ *     answer is `inspect_timeout`, and the late answer, whenever it arrives,
+ *     reaches no code that could accept or cache — it is simply dropped.
  * Anything that cannot be verified is a rejection. The caller keeps the
  * route's contract (always 204, empty body); causes go to counters only and
  * never carry an address.
  */
 
 import { isIPv4, isIPv6 } from "node:net";
-import { ORIGIN_CACHE_TTL_MS } from "./limits.js";
+import { ORIGIN_CACHE_TTL_MS, ORIGIN_INSPECT_TIMEOUT_MS } from "./limits.js";
 
 export type SessionNetworkView =
 	| { exists: false }
@@ -58,6 +61,7 @@ export type OriginCause =
 	| "loopback"
 	| "no_container"
 	| "inspect_failed"
+	| "inspect_timeout"
 	| "container_gone"
 	| "not_running"
 	| "container_replaced"
@@ -135,13 +139,15 @@ export class IngestOriginVerifier {
 	private readonly inflight = new Map<string, Promise<Resolved>>();
 	private readonly now: () => number;
 	private readonly ttlMs: number;
+	private readonly inspectTimeoutMs: number;
 
 	constructor(
 		private readonly port: SessionNetworkPort,
-		opts: { now?: () => number; ttlMs?: number } = {},
+		opts: { now?: () => number; ttlMs?: number; inspectTimeoutMs?: number } = {},
 	) {
 		this.now = opts.now ?? Date.now;
 		this.ttlMs = opts.ttlMs ?? ORIGIN_CACHE_TTL_MS;
+		this.inspectTimeoutMs = opts.inspectTimeoutMs ?? ORIGIN_INSPECT_TIMEOUT_MS;
 	}
 
 	/** Forget everything about the session's identity (see the header). */
@@ -193,10 +199,23 @@ export class IngestOriginVerifier {
 
 	private async inspect(stSessionId: string, containerId: string, gen: number): Promise<Resolved> {
 		let view: SessionNetworkView;
+		const call = this.port.inspectSessionNetwork(containerId);
+		// A late rejection must not surface as an unhandled rejection.
+		call.catch(() => undefined);
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const deadline = new Promise<"timeout">((resolve) => {
+			timer = setTimeout(() => resolve("timeout"), this.inspectTimeoutMs);
+		});
 		try {
-			view = await this.port.inspectSessionNetwork(containerId);
+			const first = await Promise.race([call, deadline]);
+			// Past the deadline: refuse. `call` may still settle later; nothing
+			// awaits it any more, so its answer can neither accept nor cache.
+			if (first === "timeout") return fail("inspect_timeout");
+			view = first;
 		} catch {
 			return fail("inspect_failed");
+		} finally {
+			clearTimeout(timer);
 		}
 		// The identity was invalidated while Docker answered: this view may
 		// describe a container the session no longer has.

@@ -181,8 +181,19 @@ export interface ConversationAdminStats {
 	effectiveSessions: number;
 	eventsSinceBoot: number;
 	rejectedSinceBoot: { byReason: Record<string, number> };
-	/** §3.1.1 — present only while INGEST_REQUIRE_SESSION_ORIGIN is on. */
+	/** §3.1.1 — present only while INGEST_REQUIRE_SESSION_ORIGIN=true (enforce). */
 	originRejectedSinceBoot?: { byCause: Record<string, number> };
+	/**
+	 * §3.1.1 — present only while INGEST_REQUIRE_SESSION_ORIGIN=observe: what
+	 * the check WOULD have decided for each authenticated request (`match` =
+	 * would accept), and how many distinct sessions matched / did not. Counts
+	 * only — no session id, address or token.
+	 */
+	originObservedSinceBoot?: {
+		byCause: Record<string, number>;
+		sessionsMatched: number;
+		sessionsNotMatched: number;
+	};
 	gapsSinceBoot: number;
 	unattributedGaps: number;
 	bytesOnDisk: number;
@@ -221,6 +232,13 @@ export interface ServiceDeps extends ActivationDeps {
 	 * the pre-v1.8.6 one (no inspection, no new dependency).
 	 */
 	ingestOrigin?: IngestOriginVerifier;
+	/**
+	 * §3.1.1 — `enforce` (flag `true`, the default when a verifier is wired)
+	 * refuses a non-matching origin; `observe` (flag `observe`, the activation
+	 * gate) runs the same check on real authenticated requests and only counts
+	 * the outcome — it never refuses.
+	 */
+	ingestOriginMode?: "enforce" | "observe";
 }
 
 const NO_DOCKER: CaptureDockerPort = {
@@ -351,6 +369,10 @@ export class ConversationService {
 		rejected: {} as Record<string, number>,
 		/** §3.1.1 — causes behind `rejected.wrong_origin`. Never an address. */
 		originRejected: {} as Record<string, number>,
+		/** §3.1.1 observe mode — would-be outcomes (`match` or a cause). */
+		originObserved: {} as Record<string, number>,
+		originObservedMatched: new Set<string>(),
+		originObservedNotMatched: new Set<string>(),
 		duplicates: 0,
 		gaps: 0,
 		unattributedGaps: 0,
@@ -460,7 +482,15 @@ export class ConversationService {
 		const origin = this.deps.ingestOrigin;
 		if (origin) {
 			const verdict = await origin.verify(stSessionId, entry.containerId, headers.remoteAddress);
-			if (!verdict.ok) {
+			if (this.deps.ingestOriginMode === "observe") {
+				// Activation gate: the evidence is exactly "requests that
+				// authenticated as S came from S's container". Never refuses.
+				const key = verdict.ok ? "match" : verdict.cause;
+				this.stats.originObserved[key] = (this.stats.originObserved[key] ?? 0) + 1;
+				(verdict.ok ? this.stats.originObservedMatched : this.stats.originObservedNotMatched).add(
+					stSessionId,
+				);
+			} else if (!verdict.ok) {
 				this.stats.originRejected[verdict.cause] =
 					(this.stats.originRejected[verdict.cause] ?? 0) + 1;
 				return this.reject("wrong_origin");
@@ -1576,8 +1606,17 @@ export class ConversationService {
 			effectiveSessions: effective,
 			eventsSinceBoot: this.stats.eventsSinceBoot,
 			rejectedSinceBoot: { byReason: { ...this.stats.rejected } },
-			...(this.deps.ingestOrigin
+			...(this.deps.ingestOrigin && this.deps.ingestOriginMode !== "observe"
 				? { originRejectedSinceBoot: { byCause: { ...this.stats.originRejected } } }
+				: {}),
+			...(this.deps.ingestOrigin && this.deps.ingestOriginMode === "observe"
+				? {
+						originObservedSinceBoot: {
+							byCause: { ...this.stats.originObserved },
+							sessionsMatched: this.stats.originObservedMatched.size,
+							sessionsNotMatched: this.stats.originObservedNotMatched.size,
+						},
+					}
 				: {}),
 			gapsSinceBoot: this.stats.gaps,
 			unattributedGaps: this.stats.unattributedGaps,

@@ -225,3 +225,73 @@ describe("IngestOriginVerifier", () => {
 		expect(await v.verify("sB", CID_N, A_IP)).toEqual({ ok: false, cause: "mismatch" });
 	});
 });
+
+describe("IngestOriginVerifier — inspection deadline (fail-closed)", () => {
+	/** An inspect that answers only when the test says so. */
+	function controlledPort() {
+		let settle: { ok: (v: SessionNetworkView) => void; err: (e: Error) => void } | null = null;
+		const port = {
+			calls: 0,
+			inspectSessionNetwork: async () => {
+				port.calls++;
+				return new Promise<SessionNetworkView>((ok, err) => {
+					settle = { ok, err };
+				});
+			},
+			answer: (v: SessionNetworkView) => settle?.ok(v),
+			fail: (e: Error) => settle?.err(e),
+		};
+		return port;
+	}
+
+	it("a hung inspection is refused at the deadline", async () => {
+		const port = controlledPort();
+		const v = new IngestOriginVerifier(port, { inspectTimeoutMs: 30 });
+		const t0 = Date.now();
+		expect(await v.verify("sA", CID_A, A_IP)).toEqual({ ok: false, cause: "inspect_timeout" });
+		expect(Date.now() - t0).toBeLessThan(500);
+	});
+
+	it("a late positive answer neither accredits nor caches", async () => {
+		const port = controlledPort();
+		const v = new IngestOriginVerifier(port, { inspectTimeoutMs: 30 });
+		expect(await v.verify("sA", CID_A, A_IP)).toEqual({ ok: false, cause: "inspect_timeout" });
+		port.answer(running(CID_A, [A_IP])); // arrives after the deadline
+		await new Promise((r) => setTimeout(r, 10));
+		// Nothing was cached from it: the next request inspects again (and hangs ⇒ refused again).
+		expect(await v.verify("sA", CID_A, A_IP)).toEqual({ ok: false, cause: "inspect_timeout" });
+		expect(port.calls).toBe(2);
+	});
+
+	it("a late rejection is swallowed (no unhandled rejection)", async () => {
+		const unhandled = vi.fn();
+		process.on("unhandledRejection", unhandled);
+		try {
+			const port = controlledPort();
+			const v = new IngestOriginVerifier(port, { inspectTimeoutMs: 20 });
+			expect((await v.verify("sA", CID_A, A_IP)).ok).toBe(false);
+			port.fail(new Error("daemon finally answered with an error"));
+			await new Promise((r) => setTimeout(r, 20));
+			expect(unhandled).not.toHaveBeenCalled();
+		} finally {
+			process.off("unhandledRejection", unhandled);
+		}
+	});
+
+	it("a burst during a hang shares one inspection and one refusal", async () => {
+		const port = controlledPort();
+		const v = new IngestOriginVerifier(port, { inspectTimeoutMs: 30 });
+		const all = await Promise.all(Array.from({ length: 20 }, () => v.verify("sA", CID_A, A_IP)));
+		expect(all.every((r) => !r.ok && r.cause === "inspect_timeout")).toBe(true);
+		expect(port.calls).toBe(1);
+	});
+
+	it("an answer inside the deadline still works", async () => {
+		const port = controlledPort();
+		const v = new IngestOriginVerifier(port, { inspectTimeoutMs: 200 });
+		const pending = v.verify("sA", CID_A, A_IP);
+		await new Promise((r) => setTimeout(r, 5));
+		port.answer(running(CID_A, [A_IP]));
+		expect(await pending).toEqual({ ok: true });
+	});
+});

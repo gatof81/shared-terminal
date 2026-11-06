@@ -1426,3 +1426,81 @@ describe("authorize — §3.1.1 network origin (v1.8.6)", () => {
 		}
 	});
 });
+
+describe("authorize — §3.1.1 observe mode (activation gate)", () => {
+	const IP = "172.18.0.5";
+	function svcWith(mode: "observe" | "enforce" | undefined, view: SessionNetworkView) {
+		const port = { inspectSessionNetwork: vi.fn(async () => view) };
+		return new ConversationService({
+			workspaceRoot: root,
+			enabled: true,
+			port: 3001,
+			store,
+			now: () => now,
+			ingestOrigin: new IngestOriginVerifier(port, { now: () => now }),
+			ingestOriginMode: mode,
+		});
+	}
+	const up: SessionNetworkView = { exists: true, id: "cid-s1", running: true, addresses: [IP] };
+
+	it("never refuses: a non-matching peer is accepted and only counted", async () => {
+		session("s1");
+		session("s2", { container_id: "cid-s1" }); // s2's request will come from another container
+		const svc = svcWith("observe", up);
+		try {
+			expect(await svc.authorize(H({ remoteAddress: IP }))).toEqual({
+				ok: true,
+				stSessionId: "s1",
+			});
+			expect(await svc.authorize(H({ stSession: "s2", remoteAddress: "172.18.0.77" }))).toEqual({
+				ok: true,
+				stSessionId: "s2",
+			});
+			expect(svc.stats.rejected.wrong_origin).toBeUndefined();
+			expect(svc.stats.originObserved).toEqual({ match: 1, mismatch: 1 });
+			const stats = await svc.adminStats();
+			expect(stats.originObservedSinceBoot).toEqual({
+				byCause: { match: 1, mismatch: 1 },
+				sessionsMatched: 1,
+				sessionsNotMatched: 1,
+			});
+			expect(stats.originRejectedSinceBoot).toBeUndefined();
+			// counts only: no session id, address or token in the exposed block
+			const exposed = JSON.stringify(stats.originObservedSinceBoot);
+			for (const secret of ["s1", "s2", IP, "172.18.0.77", TOKEN])
+				expect(exposed).not.toContain(secret);
+		} finally {
+			await svc.shutdown();
+		}
+	});
+
+	it("still runs after the token rows: an unauthenticated request is never observed", async () => {
+		session("s1", { ingest_token_hash: hashIngestToken(generateIngestToken()) });
+		const svc = svcWith("observe", up);
+		try {
+			expect(await svc.authorize(H({ remoteAddress: IP }))).toEqual({
+				accepted: false,
+				reason: "bad_token",
+			});
+			expect(svc.stats.originObserved).toEqual({});
+		} finally {
+			await svc.shutdown();
+		}
+	});
+
+	it("enforce exposes rejections and no observe block; flag off exposes neither", async () => {
+		session("s1");
+		const enforce = svcWith("enforce", up);
+		try {
+			await enforce.authorize(H({ remoteAddress: "172.18.0.77" }));
+			const st = await enforce.adminStats();
+			expect(st.originRejectedSinceBoot).toEqual({ byCause: { mismatch: 1 } });
+			expect(st.originObservedSinceBoot).toBeUndefined();
+		} finally {
+			await enforce.shutdown();
+		}
+		const off = await service.adminStats();
+		expect(off.originRejectedSinceBoot).toBeUndefined();
+		expect(off.originObservedSinceBoot).toBeUndefined();
+	});
+});
