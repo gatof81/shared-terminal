@@ -39,6 +39,27 @@ async function recreateBounded(h: H, ms = 2000) {
 	return Promise.race([h.engine.recreate(SID, IMG_N), tick(ms).then(() => "hung" as const)]);
 }
 
+/**
+ * T_rec runs from the lock, so it also covers the preconditions, steps 1–4
+ * and their fsync'd record writes: a 200–250 ms budget ran out before the
+ * step a test holds on a loaded runner (the engine then correctly rolled
+ * back or answered with something else pending). Tests that hold a step
+ * after the commit until T_rec use this one, with room for all of that.
+ */
+const T_REC_ROOM = 1500;
+
+/** The seed exec held on `gate`; `reached()` proves it was really sent. */
+function holdSeed(h: H, gate: Promise<void>) {
+	let sent = false;
+	h.docker.hooks.set("exec", async (a) => {
+		if (String(a[1]).includes("seed-skills")) {
+			sent = true;
+			await gate;
+		}
+	});
+	return { reached: () => sent };
+}
+
 async function expectIncompatibleRefused(h: H) {
 	for (const op of INCOMPATIBLE) {
 		const fn = vi.fn(async () => undefined);
@@ -79,13 +100,12 @@ describe("E1 — an exec whose exit is unknown keeps the attempt uncertain", () 
 	});
 
 	it("late answer: the seed answers after T_rec, with its exit unknown ⇒ still uncertain, verbs refused", async () => {
-		const h = await setup({ tRecMs: 250, tRbMs: 100 });
+		const h = await setup({ tRecMs: T_REC_ROOM, tRbMs: 100 });
 		const gate = deferred();
-		h.docker.hooks.set("exec", async (a) => {
-			if (String(a[1]).includes("seed-skills")) await gate.promise;
-		});
+		const seed = holdSeed(h, gate.promise);
 		h.docker.unknownExit.add(SEED);
 		const r = await h.engine.recreate(SID, IMG_N);
+		expect(seed.reached()).toBe(true);
 		expect(r).toMatchObject({ ok: true, unresolved: true });
 		gate.resolve();
 		await tick(200);
@@ -95,7 +115,7 @@ describe("E1 — an exec whose exit is unknown keeps the attempt uncertain", () 
 		await vi.waitFor(async () => expect(await recordOf(h)).toMatchObject({ state: "resolved" }), {
 			timeout: 2000,
 		});
-	});
+	}, 10_000);
 
 	it("the resolution's own seed with exit unknown (CAS applied late) ⇒ not resolved until it is seen ended", async () => {
 		const h = await setup();
@@ -188,13 +208,19 @@ describe("E2 — T_rec covers authorization, file writes and D1 writes after the
 	];
 	for (const [label, install] of hangs) {
 		it(`${label} hanging ⇒ answered at T_rec, uncertain with it named; the late answer continues nothing; converges and resolves after`, async () => {
-			const h = await setup({ tRecMs: 250, tRbMs: 100 });
+			const T_RB = 100;
+			const h = await setup({ tRecMs: T_REC_ROOM, tRbMs: T_RB });
 			const gate = deferred();
 			install(h, gate.promise);
 			const t0 = Date.now();
-			const r = await recreateBounded(h);
+			const r = await recreateBounded(h, T_REC_ROOM + 3000);
+			const elapsed = Date.now() - t0;
 			expect(r).not.toBe("hung");
-			expect(Date.now() - t0).toBeLessThan(250 + 100 + 200);
+			// Answered AT T_rec: not before it (the held request was out), and
+			// not by waiting for that request — with slack a busy runner's
+			// fsync'd record writes fit in (a fixed 200 ms overran on CI).
+			expect(elapsed).toBeGreaterThanOrEqual(T_REC_ROOM - 10);
+			expect(elapsed).toBeLessThan(T_REC_ROOM + T_RB + 1000);
 			expect(r).toMatchObject({ ok: true, outcome: "committed", unresolved: true });
 			expect((r as { pending: string[] }).pending.join(" ")).toMatch(/no answer yet/);
 			expect(await recordOf(h)).toMatchObject({ state: "uncertain" });
@@ -218,25 +244,24 @@ describe("E2 — T_rec covers authorization, file writes and D1 writes after the
 			expect(h.capture.deferSeed).toBe(false);
 			expect(h.docker.containers.has(O_ID)).toBe(false);
 			expect(h.capture.calls).toContain("converge done");
-		});
+		}, 10_000);
 	}
 });
 
 describe("E2 — a seed still out at T_rec", () => {
 	it("is never issued a second time by the resolution", async () => {
-		const h = await setup({ tRecMs: 250, tRbMs: 100 });
+		const h = await setup({ tRecMs: T_REC_ROOM, tRbMs: 100 });
 		const gate = deferred();
-		h.docker.hooks.set("exec", async (a) => {
-			if (String(a[1]).includes("seed-skills")) await gate.promise;
-		});
-		const r = await recreateBounded(h);
+		const seed = holdSeed(h, gate.promise);
+		const r = await recreateBounded(h, T_REC_ROOM + 3000);
+		expect(seed.reached()).toBe(true);
 		expect(r).toMatchObject({ ok: true, unresolved: true });
 		gate.resolve();
 		await vi.waitFor(async () => expect(await recordOf(h)).toMatchObject({ state: "resolved" }), {
 			timeout: 2000,
 		});
 		expect(h.docker.execs.filter((e) => e[1] === SEED)).toHaveLength(1);
-	});
+	}, 10_000);
 });
 
 // ── E3: resolve only after converging, under the lock ──────────────────────
@@ -398,15 +423,25 @@ describe("control-marker-incompatible — only a CLI /etc/st-control was validat
 
 describe("D8 — a crash between the CAS and step 6.1 stays unresolved without evidence", () => {
 	it("restart while authorizing on N ⇒ uncertain + orphaned, defer-skill-seed kept, nothing converges it", async () => {
-		const h = await setup({ tRecMs: 200, tRbMs: 80 });
+		// The "crash" must land while step 5 is held, before T_rec. T_rec runs
+		// from the lock, so 200 ms also covered the preconditions, steps 1–4
+		// and their fsync'd record writes: on a loaded runner it expired during
+		// the held authorization, and the engine's own `uncertain` write (in
+		// flight across stop() — one process here, unlike a real crash) landed
+		// after recoverOnBoot's and erased `orphanedAt`. Room for the steps
+		// before, and proof the hold was reached before the "restart".
+		const h = await setup({ tRecMs: 2000, tRbMs: 80 });
 		const gate = deferred();
 		const real = h.capture.authorizeImpl;
+		let authorizing = false;
 		h.capture.authorizeImpl = async (run) => {
+			authorizing = true;
 			await gate.promise;
 			return real(run);
 		};
 		const pending = h.engine.recreate(SID, IMG_N);
-		await vi.waitFor(() => expect(h.d1.row.container_id).not.toBe(O_ID));
+		await vi.waitFor(() => expect(authorizing).toBe(true), { timeout: 1500 });
+		expect(h.d1.row.container_id).not.toBe(O_ID); // past the CAS
 		h.engine.stop(); // the process goes away mid step 5
 		const attempts = new RecreateAttemptStore(h.root);
 		await attempts.recoverOnBoot();
@@ -434,5 +469,5 @@ describe("D8 — a crash between the CAS and step 6.1 stays unresolved without e
 				RecreateUnresolvedError,
 			);
 		}
-	});
+	}, 10_000);
 });

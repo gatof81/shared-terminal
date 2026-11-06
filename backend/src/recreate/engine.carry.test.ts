@@ -435,6 +435,12 @@ describe("carry-over recreation (§2.7.7)", () => {
 			detail: "rename",
 		});
 		for (let i = 0; i < 50 && (await recordOf(h))?.state !== "resolved"; i++) await tick(20);
+		// `resolved` on disk is not "pass over": the background resolution
+		// still holds the lock until its write's await chain unwinds, and on a
+		// loaded runner the second rollback (fail mode) met it there and
+		// answered 409 `busy` — correct, but not what this test is about.
+		for (let i = 0; i < 50 && h.lock.heldBy(SID) !== null; i++) await tick(20);
+		expect(h.lock.heldBy(SID)).toBeNull();
 		const rec = await recordOf(h);
 		expect(rec).toMatchObject({
 			state: "resolved",
