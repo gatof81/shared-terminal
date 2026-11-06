@@ -5,7 +5,11 @@ FROM node:22-slim AS build
 WORKDIR /build
 COPY backend/package.json backend/package-lock.json ./
 RUN npm ci
-COPY backend/ .
+# Named paths, never `COPY backend/ .`: with the root .dockerignore this is
+# belt and braces, so a stale backend/dist or node_modules on the build host
+# cannot reach the image even if that file is ever loosened.
+COPY backend/tsconfig.json ./
+COPY backend/src ./src
 RUN npm run build
 
 FROM node:22-slim AS runtime
