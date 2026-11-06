@@ -228,8 +228,8 @@ sin interrumpir #547.
    desde el que se ejecutará Compose (tiene que estar vacío), `docker compose version` y
    `command -v jq`.
 8. **Líneas de base con hora:** `.conversation` completo (`eventsSinceBoot`, `rejectedSinceBoot`,
-   `gapsSinceBoot`), sesiones por estado, conteos de `relay_dropped`/`relay_restart` (P6) y cantidad
-   de líneas `"level":50`/`60` del log del backend en la última hora (P13).
+   `gapsSinceBoot`), la lista `sessionId → status` de P9 (proyectada con jq, sin `envVars`), conteos de `relay_dropped`/`relay_restart` (P6) y el
+   conjunto de mensajes distintos `"level":50`/`60` del log retenido del backend, con o sin su arranque (P13).
 
 Las lecturas 1–7 deciden si el procedimiento puede aprobarse. La 8 se repite de todos modos en la
 ventana del deploy.

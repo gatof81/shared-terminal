@@ -48,11 +48,11 @@ del deploy, inmediatamente antes de §3: el preflight anterior es contexto, no e
 | P6 | Pérdidas del relay (línea de base) | conteos de `relay_dropped` / `relay_restart` en `.conversations/*/*.events.jsonl` | registrados | pendiente |
 | P7 | Inventario de contenedores | `docker ps -a --no-trunc --filter name=st- --format '{{.ID}} {{.Names}} {{.State}}'` (`State`, no `Status`: `Status` cambia con el tiempo) | lista completa registrada | A |
 | P8 | Nada en vuelo | recreaciones: `jq -r .state` de cada `recreate-attempt.json` = `resolved` (y si alguna tiene `retained`); Composer: `GET …/composer/panes` por sesión = `panes: []`, `unreadable: []` (404 = apagado) | todo `resolved`; sin panes | A: 3 recreaciones `resolved`, «0 operaciones»; **pendiente:** confirmar que el Composer se midió por panes y por sesión, y si hay `retained` |
-| P9 | Sesiones | `GET /api/admin/sessions` → lista `sessionId → status` (y `createdAt`) | registrada; se repite en §3 paso 5 para V10 | pendiente |
+| P9 | Sesiones | `GET /api/admin/sessions` proyectado con `jq '.[] \| {sessionId,status,createdAt}'` (cada fila trae también `envVars`: no se registra) → lista `sessionId → status` | registrada; se repite en §3 paso 5 para V10 | pendiente |
 | P10 | Espacio | `df -h` del filesystem de `WORKSPACE_ROOT` y del data-root de Docker; `docker system df`; tamaño estimado del backup | §1.1 | A: 36 GB libres, 82 %; **pendiente:** el resto |
 | P11 | Imagen de rollback y nombre de la imagen de compose | `docker image inspect 221e6851 --format '{{.Id}} {{json .RepoTags}} {{.Size}}'`; `docker inspect da75082e --format '{{.Config.Image}}'`; `docker compose config --images` (los dos nombres tienen que coincidir: es la `<imagen de compose>` de §3 y §4); `docker run --rm --network none --entrypoint node 221e6851 -v` | ID completo, etiqueta, tamaño, nombre de la imagen y versión de Node | pendiente |
 | P12 | Excepción local del Dockerfile y árbol de deploy | `git rev-parse HEAD`, `git symbolic-ref -q HEAD` (rama o detached), `git status --porcelain`, `git diff --stat`, `sha256sum session-image/Dockerfile`, `test -e .dockerignore && echo present` | sólo `M session-image/Dockerfile`; hash registrado; **sin** `.dockerignore` en la raíz (si existe uno sin versionar, el checkout de `R` no puede crearlo ⇒ se detiene) | A (existe y está aprobada); **pendiente:** las lecturas exactas |
-| P13 | Línea de base del log | `docker compose logs --since 1h app` → cantidad de líneas con `"level":50` o `"level":60` (pino JSON: error y fatal; no contar la palabra «error») | registrada (para V1) | pendiente |
+| P13 | Línea de base del log | todo el log retenido del contenedor actual, **incluido su arranque si la rotación lo conserva** (`docker logs da75082e`): el **conjunto de mensajes distintos** con `"level":50` o `"level":60` (pino JSON: error y fatal; no contar la palabra «error») | conjunto registrado (para V1), con la indicación de si cubre el arranque | pendiente |
 
 **Si cualquier fila sale distinta de lo esperado, se detiene todo y se informa. No se corrige en el
 momento.** Un digest distinto de `1b116d5a…` invalida este procedimiento entero (12 §7.4).
@@ -134,7 +134,8 @@ los streams de exec, cuyo registro está en memoria.
    - P8 (recreaciones y panes del Composer); cualquier cosa en vuelo ⇒ se espera o se aborta, nunca
      se reinicia encima;
    - **ningún bootstrap posible en curso:** en `GET /api/admin/sessions`, ninguna sesión con
-     `createdAt` en los últimos 10 minutos (el tope del bootstrap); si hay una, se espera;
+     `createdAt` en los últimos **15 minutos** (el tope del bootstrap es de 10 min y empieza después del
+     insert y del spawn); si hay una, se espera;
    - la lista `sessionId → status` de P9 se vuelve a tomar **ahora** (es la base de V10);
    - **la bandera, como la va a ver el backend nuevo:** desde el checkout de `R`,
      `docker compose config --format json | jq -r '.services.app.environment.INGEST_REQUIRE_SESSION_ORIGIN'`
@@ -154,16 +155,16 @@ los streams de exec, cuyo registro está en memoria.
 
 | # | Esperado |
 | --- | --- |
-| V1 | `app` en ejecución y `healthy`; log de arranque sin entradas `"level":50`/`60` nuevas frente a P13 y **sin** la advertencia `INGEST_REQUIRE_SESSION_ORIGIN=… is not true\|observe\|false` |
+| V1 | `app` en ejecución y `healthy`; en el log del contenedor nuevo, ningún mensaje `"level":50`/`60` cuyo texto no esté en el conjunto de P13 (se compara por texto del mensaje, no por cantidad; si P13 no cubría el arranque, un error que sólo aparece en el arranque se informa y lo juzga el responsable antes de cualquier rollback) y **sin** la advertencia `INGEST_REQUIRE_SESSION_ORIGIN=… is not true\|observe\|false` |
 | V2 | Digests del `dist` del contenedor en ejecución = los del paso 4 (`d1f310d8…` y `0e50e8fd…`/416) y su imagen = la registrada en el paso 4; `grep -c INGEST_REQUIRE_SESSION_ORIGIN dist/index.js` > 0; ID de la imagen nueva registrado |
 | V3 | **Bandera apagada:** `printenv INGEST_REQUIRE_SESSION_ORIGIN` vacío; en `.conversation` **no** aparecen `originRejectedSinceBoot` ni `originObservedSinceBoot` |
 | V4 | Inventario P7 idéntico (ID, nombre y `State`) de los `st-*`, retenidos y PASS-B1 incluidos |
 | V5 | Captura: `enabledSessions = effectiveSessions = 3`; con actividad real `eventsSinceBoot` crece y Chat muestra eventos nuevos de las tres |
-| V6 | Pérdidas: a lo sumo **un** `gap` `relay_dropped`/`relay_restart` por conversación, y tiene que ser el **primer evento de esa conversación después del reinicio**. El relay informa la pérdida en el siguiente envío que sí llega, así que en una sesión quieta ese `gap` puede aparecer mucho después del reinicio. Cualquier otro `gap`, o uno más adelante en la conversación, es FAIL. Límite: las pérdidas que el relay no puede atribuir a una conversación quedan sólo en contadores del proceso |
+| V6 | Pérdidas: a lo sumo **un** `gap` `relay_dropped`/`relay_restart` por conversación, y tiene que ser el **primer evento de esa conversación después del reinicio**. Junto a él, inmediatamente antes de ese mismo primer evento, se aceptan `gap` `missing_delta`/`missing_prompt`: son la consecuencia en esa conversación de lo que se perdió durante el corte. El relay informa la pérdida en el siguiente envío que sí llega, así que en una sesión quieta ese `gap` puede aparecer mucho después del reinicio. Cualquier otro motivo de `gap`, o cualquier `gap` más adelante en la conversación, es FAIL. Límite: las pérdidas que el relay no puede atribuir a una conversación quedan sólo en contadores del proceso |
 | V7 | Composer: `…/composer/panes` de cada sesión sigue vacío; recreaciones: todas `resolved` |
 | V8 | Excepción del Dockerfile intacta: `git status --porcelain` y `sha256sum session-image/Dockerfile` idénticos a P12 (`HEAD` = `R` y `.dockerignore` presente, como se espera); `st-backend-rollback:1befd89` presente |
 | V9 | Variables no secretas del contenedor iguales a las de antes, salvo la diferencia esperada: aparece `INGEST_REQUIRE_SESSION_ORIGIN=` **vacía**. Si P11 y el paso 4 dieron versiones distintas de Node, `NODE_VERSION` también difiere (aceptado por el responsable en el paso 4) |
-| V10 | La lista `sessionId → status` es igual a la del paso 5. Toda diferencia tiene que estar explicada por una línea del log del sweeper de inactividad o de la reconciliación de una sesión cuyo contenedor ya no corría. Ninguna sesión viva pasa a `stopped` |
+| V10 | La lista `sessionId → status` es igual a la del paso 5. Ninguna sesión pasa a `stopped` sin una de estas dos explicaciones en el log: el sweeper de inactividad, o la reconciliación de una sesión cuyo contenedor ya no corría |
 
 ## 4. Rollback
 
