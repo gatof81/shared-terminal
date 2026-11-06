@@ -215,3 +215,11 @@
     min-height: 2.75rem;
   }
 }
+
+.switcher-summary {
+  margin: 0;
+  padding: 0.35rem 0.85rem;
+  font-size: 0.75rem;
+  color: var(--c-muted);
+  border-bottom: 1px solid var(--c-border);
+}

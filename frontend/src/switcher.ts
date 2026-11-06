@@ -29,6 +29,8 @@ import {
 	matches,
 	type Project,
 	ProjectLoader,
+	parallelSummary,
+	parallelSummaryText,
 	Slots,
 	SWITCHER_CONCURRENCY,
 	SWITCHER_TIMEOUT_MS,
@@ -106,6 +108,11 @@ export function openSwitcher(opener?: Element | null): void {
 	input.setAttribute("aria-autocomplete", "list");
 	input.setAttribute("aria-label", "Search conversations or projects");
 	card.appendChild(input);
+
+	// Parallel work across the loaded projects, above the list it summarises.
+	const summaryEl = el("p", "switcher-summary");
+	summaryEl.hidden = true;
+	card.appendChild(summaryEl);
 
 	const listEl = el("div", "switcher-list");
 	listEl.id = "switcher-list";
@@ -308,6 +315,10 @@ export function openSwitcher(opener?: Element | null): void {
 							: "No conversations yet in your running projects.";
 			statusEl.appendChild(el("p", "switcher-empty", msg));
 		}
+		// Parallel work at a glance (fresh evidence only; never the query's subset).
+		const summary = all.length > 0 ? parallelSummaryText(parallelSummary(allItems(), all)) : null;
+		summaryEl.textContent = summary ?? "";
+		summaryEl.hidden = summary === null;
 		if (loading > 0)
 			statusEl.appendChild(
 				el(

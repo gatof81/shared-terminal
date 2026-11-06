@@ -8,6 +8,8 @@ import {
 	matches,
 	type Project,
 	ProjectLoader,
+	parallelSummary,
+	parallelSummaryText,
 	sectionize,
 	toItem,
 	visibleInSwitcher,
@@ -239,5 +241,52 @@ describe("loadProjects — bounded, per-project failures, never a fake empty lis
 		const seen: Project[] = [];
 		await loadProjects(projects.slice(0, 1), fetchList, (p) => seen.push(p));
 		expect(seen[0]?.state).toMatchObject({ kind: "ok", metaUnavailable: true });
+	});
+});
+
+describe("parallel work at a glance", () => {
+	const a = { sessionId: "s1", name: "alpha" };
+	const b = { sessionId: "s2", name: "beta" };
+	const ok = (p: { sessionId: string; name: string }): Project => ({
+		...p,
+		state: { kind: "ok", conversations: [], metaUnavailable: false },
+	});
+	it("counts only fresh live claims: needs-you by project name, working by project count", () => {
+		const items = [
+			toItem(conv({ sessionId: "c1", status: "waiting_permission" }), a, NOW),
+			toItem(conv({ sessionId: "c2", status: "running" }), a, NOW),
+			toItem(conv({ sessionId: "c3", status: "running" }), b, NOW),
+			// A stale claim is not activity.
+			toItem(
+				conv({
+					sessionId: "c4",
+					status: "running",
+					statusAt: ago(STALE_EVIDENCE_MS + 60_000),
+					lastEventAt: ago(STALE_EVIDENCE_MS + 60_000),
+				}),
+				b,
+				NOW,
+			),
+			toItem(conv({ sessionId: "c5", status: "ended" }), b, NOW),
+		];
+		const s = parallelSummary(items, [ok(a), ok(b)]);
+		expect(s).toMatchObject({
+			attention: 1,
+			attentionProjects: ["alpha"],
+			working: 2,
+			workingProjects: 2,
+			incomplete: 0,
+		});
+		expect(parallelSummaryText(s)).toBe("Now: 1 needs you (alpha) · 2 working in 2 projects.");
+	});
+	it("says the counts may be short while a project is loading or failed; nothing to say ⇒ null", () => {
+		const s = parallelSummary(
+			[toItem(conv({ sessionId: "c2", status: "running" }), a, NOW)],
+			[ok(a), { ...b, state: { kind: "loading" } }],
+		);
+		expect(parallelSummaryText(s)).toBe(
+			"Now: 1 working in 1 project — 1 project not loaded, so this may be incomplete.",
+		);
+		expect(parallelSummaryText(parallelSummary([], [ok(a)]))).toBeNull();
 	});
 });

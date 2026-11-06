@@ -293,3 +293,65 @@ export function loadProjects(
 ): Promise<void> {
 	return new ProjectLoader(fetchList, onUpdate, opts).load(projects);
 }
+
+// ── Parallel work at a glance ────────────────────────────────────────────
+
+export interface ParallelSummary {
+	attention: number;
+	/** Names of the projects with a conversation that needs the person. */
+	attentionProjects: string[];
+	working: number;
+	workingProjects: number;
+	/** Projects whose list is still loading or failed: the counts may be short. */
+	incomplete: number;
+}
+
+/**
+ * What runs in parallel across the loaded projects, from the same buckets the
+ * list shows: only FRESH live claims count (bucketOf already sends a stale
+ * claim to "quiet"), so an estimate is never presented as activity.
+ */
+export function parallelSummary(
+	items: readonly SwitcherItem[],
+	projects: readonly Project[],
+): ParallelSummary {
+	const att = new Set<string>();
+	const work = new Set<string>();
+	let attention = 0;
+	let working = 0;
+	for (const i of items) {
+		if (i.bucket === "attention") {
+			attention++;
+			att.add(i.projectName);
+		} else if (i.bucket === "working") {
+			working++;
+			work.add(i.sessionId);
+		}
+	}
+	return {
+		attention,
+		attentionProjects: [...att].sort(),
+		working,
+		workingProjects: work.size,
+		incomplete: projects.filter((p) => p.state.kind !== "ok").length,
+	};
+}
+
+/** The summary line, or null when there is nothing worth saying. */
+export function parallelSummaryText(s: ParallelSummary): string | null {
+	const parts: string[] = [];
+	if (s.attention > 0)
+		parts.push(
+			`${s.attention} need${s.attention === 1 ? "s" : ""} you (${s.attentionProjects.join(", ")})`,
+		);
+	if (s.working > 0)
+		parts.push(
+			`${s.working} working in ${s.workingProjects} project${s.workingProjects === 1 ? "" : "s"}`,
+		);
+	if (parts.length === 0) return null;
+	const tail =
+		s.incomplete > 0
+			? ` — ${s.incomplete} project${s.incomplete === 1 ? "" : "s"} not loaded, so this may be incomplete`
+			: "";
+	return `Now: ${parts.join(" · ")}${tail}.`;
+}
