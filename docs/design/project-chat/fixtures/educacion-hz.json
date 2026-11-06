@@ -1,5 +1,5 @@
 {
-  "_note": "Design data for the frontend mock backend, from 15-ux-alignment-and-contract.md §3 (P3a shapes; the task is T1). Not an existing API. Follows the recommendations pending approval (D-UX0..D-UX10; template stays null until E3).",
+  "_note": "Design data for the frontend mock backend, from 15-ux-alignment-and-contract.md §3: agent and session shapes are P3a; one task example is T1 (owner-created, pending), the other T2 (dispatched, active). Not an existing API. Follows the recommendations pending approval (D-UX0..D-UX10); template stays null until E3.",
   "GET /api/projects/:pid/agents (P3a)": {
     "projectId": "6b1f2c3d-0000-4000-8000-000000000001",
     "generatedAt": "2026-11-10T14:02:45Z",
@@ -249,13 +249,8 @@
     "state": "queued",
     "rev": 2,
     "version": 2,
-    "definition": "Validar el login corregido en el preview (después de T-101).",
-    "notices": [
-      {
-        "kind": "queue-paused",
-        "since": "2026-11-10T13:40:00Z"
-      }
-    ],
+    "definition": "Validar el login con SSO en el preview.",
+    "notices": [],
     "instructions": [
       {
         "instructionId": "10000000-0000-4000-8000-000000000003",
@@ -267,12 +262,7 @@
         "version": 2
       }
     ],
-    "refs": [
-      {
-        "kind": "task",
-        "taskId": "70000000-0000-4000-8000-000000000101"
-      }
-    ],
+    "refs": [],
     "report": null,
     "can": {
       "update": {
