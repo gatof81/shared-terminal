@@ -348,3 +348,32 @@ describe("ingest route — §3.1.1 origin source", () => {
 		expect(svc.ingest).not.toHaveBeenCalled();
 	});
 });
+
+describe("ingest route — a request object without a socket (Session Image harness shape)", () => {
+	it("still authorizes and ingests: the peer is simply unknown, never a crash", async () => {
+		// session-image/test/st-receiver.mts replays each request as a Readable
+		// carrying only headers/method/url. With the origin check off the route
+		// must behave exactly as before, so a missing socket cannot throw.
+		const { Readable } = await import("node:stream");
+		const body = Buffer.from(JSON.stringify({ hook_event_name: "Stop", session_id: "c1" }));
+		const replay = Readable.from([body]) as unknown as http.IncomingMessage;
+		Object.assign(replay, {
+			headers: {
+				...AUTH,
+				"content-type": "application/json",
+				"content-length": String(body.length),
+			},
+			method: "POST",
+			url: INGEST_PATH,
+		});
+		const res = new http.ServerResponse(replay);
+		const handler = createIngestHandler({ service: svc, maxBodyBytes: 1024 });
+		await handler(replay, res, () => {
+			throw new Error("fell through");
+		});
+		await vi.waitFor(() => expect(svc.ingest).toHaveBeenCalledTimes(1));
+		expect(res.statusCode).toBe(204);
+		const headers = (svc.authorize.mock.calls[0] as unknown[])[0] as { remoteAddress?: string };
+		expect(headers.remoteAddress).toBeUndefined();
+	});
+});

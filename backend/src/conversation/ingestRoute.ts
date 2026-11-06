@@ -122,7 +122,10 @@ export function createIngestHandler(opts: IngestRouteOptions) {
 			// §3.1.1 — the TCP peer, from the socket itself. Never a forwarding
 			// header nor `req.ip`: both are whatever the client (or the Tunnel)
 			// says, and the check exists precisely to not believe the client.
-			remoteAddress: req.socket.remoteAddress,
+			// Optional: a request object without a socket (the Session Image
+			// harness replays requests that way) must not throw — with the check
+			// off the route is unchanged, with it on an unknown peer is a refusal.
+			remoteAddress: req.socket?.remoteAddress,
 		});
 		if (!("ok" in auth)) {
 			drain(req);
