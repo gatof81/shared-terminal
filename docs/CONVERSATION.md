@@ -2862,13 +2862,28 @@ texto.
 `composer_send` en el log de la conversación (sobreviven a reinicios del backend y recargas de la
 página), escritos una sola vez por operación y tipo (idempotentes: se leen los eventos antes de
 escribir), nunca un ack nuevo:
-- `duplicated` (**probada**): después del ack, un `session_start resume`, un segundo `user_prompt`
-  del mismo hash con `prompt_id` nuevo y un probe que muestra el job con **otro pid**, **y ningún
-  `turn_end`/`turn_failed` con el `prompt_id` del ack antes de ese resume** (revisión 3, ronda 3:
-  `RESUME_INTERRUPTED_TURN` solo re-ejecuta un turno sin terminar; si el turno ya había terminado,
-  la repetición es un prompt nuevo —p. ej. `claude stop` + `--bg --resume` y la persona vuelve a
-  escribir lo mismo— y a lo sumo es `possible-duplicate{turn-finished-before-resume}`); registra
-  `first_prompt_id`, `prompt_id` y el pid nuevo;
+- `duplicated` (**probada**) solo si se cumplen **todas** (revisión 3, ronda 3.1). Registra
+  `first_prompt_id`, `prompt_id` y el pid nuevo.
+  - después del ack, un `session_start resume` y luego un `user_prompt` humano del mismo hash con
+    `prompt_id` nuevo;
+  - un probe muestra el job con **otro pid**;
+  - entre el ack y esa repetición **no hay ningún `gap`**: un `turn_end` perdido no se distingue de
+    "el turno nunca terminó";
+  - entre el ack y la repetición **no hay ningún `turn_end`/`turn_failed`, con cualquier
+    `prompt_id` o sin él**. `RESUME_INTERRUPTED_TURN` solo re-ejecuta un turno sin terminar, y
+    §8.2.1 vio Stops de turnos encolados con `prompt_id` que nadie anunció, así que un fin de turno
+    con otro id puede ser el del nuestro;
+  - la repetición es el **primer** `user_prompt` humano después del ack (ninguno antes ni después
+    del resume).
+
+  Cualquier otra secuencia —p. ej. `claude stop` a mitad de turno, `--bg --resume`, otro turno que
+  termina y el mismo texto tipeado mucho después— es a lo sumo `possible-duplicate`, con los motivos
+  (`gap`, `turn-finished-before-resume`, `turn-end-before-resume`, `turn-end-before-repeat`,
+  `prompt-before-repeat`).
+
+  Evidencia del CLI real: el `Stop` de un turno `nextTurn` lleva el `prompt_id` del ack (smoke,
+  caso 16, en 2.1.314, 2.1.316 y 2.1.318). Aun así la regla no depende de ese id: cualquier fin de
+  turno bloquea.
 - `possible-duplicate` (**no confirmada**): lo mismo, pero ningún probe puede mostrar el
   re-lanzamiento (probe fallido o job no listado tras un reintento); registra los dos
   `prompt_id` y el motivo. Si después llega la prueba, se escribe además `duplicated`.
@@ -2877,6 +2892,18 @@ Mismo pid: no es un re-lanzamiento (p. ej. la persona escribió lo mismo) y no s
 es `t0` + T_ack_bg juzgada con el **tiempo de la evidencia** (el `ts` del `session_start resume`),
 no con el reloj del momento: un backend que estuvo caído durante la ventana la juzga al recuperar
 (una comprobación de puesta al día, sin quedar escuchando).
+
+**Alcance de las lecturas (revisión 3, ronda 3.1).** Lo que el transporte lee, y hasta dónde:
+- el ack recorre **todas** las conversaciones de la sesión con eventos posteriores a `t0` (para
+  `misdelivered`), hasta 4096 eventos de cada una, archivo rotado incluido;
+- cada transcript se lee como una **cola de 8 MiB** (lo anterior no se ve: un ack fuera de ella es
+  `unconfirmed`; un elemento de la cola encolado antes de ella no cuenta para `queue-pending`);
+- el re-armado de la vigilancia de duplicados tras un reinicio mira **24 h** hacia atrás y solo en
+  sesiones de `COMPOSER_BG_SESSIONS` con la bandera encendida;
+- un `job-*.json` sobrante —en una sesión fuera de la lista o con la bandera apagada— **sigue**
+  teniendo, mientras se drena (recuperación, `reconcile`, resolución), probes, el exec de inspect
+  (`list`) y lecturas de transcript del lado del host para asentarse por evidencia; nunca un
+  `reply`.
 
 ##### 8.1.12.6 Estados, persistencia y reinicios
 
@@ -3029,7 +3056,9 @@ No es una corrección de seguridad (§8.1.12.7). Se migra por validación:
 Con `CONVERSATION_COMPOSER_BG_ENABLED` sin definir (o la sesión fuera de `COMPOSER_BG_SESSIONS`)
 el comportamiento es el anterior: el camino del pane hace los mismos execs (argv, stdin, usuario),
 los mismos eventos, la misma respuesta HTTP y los mismos archivos; una conversación sin pane responde
-`409 not-interactive` sin probe ni exec; `canSendInput`/`composer` de §6 no cambian y no hay
+`409 not-interactive` sin probe ni exec (salvo el drenaje de un `job-*.json` sobrante, que sí hace
+probes, inspects y lecturas de transcript para asentarse —nunca un `reply`—; ver "Alcance de las
+lecturas" en §8.1.12.5); `canSendInput`/`composer` de §6 no cambian y no hay
 `transport`; el arranque no registra nada nuevo. Dos diferencias declaradas: (1) `job-<short>.json`
 se interpreta (antes, archivo inesperado ⇒ sesión `unverifiable`), lo que permite drenar registros
 que dejó un periodo con la bandera encendida; (2) con la bandera apagada una
