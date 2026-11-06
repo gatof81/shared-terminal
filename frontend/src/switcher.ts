@@ -444,12 +444,22 @@ function isTypingTarget(t: EventTarget | null): boolean {
 	return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
 }
 
+/** Dispatched on `document` to open the switcher from another module. */
+export const OPEN_SWITCHER_EVENT = "st:open-switcher";
+
 let wired = false;
 export function initSwitcher(isLoggedIn: () => boolean): void {
 	if (wired) return;
 	wired = true;
 	const btn = document.getElementById("switcher-btn");
 	btn?.addEventListener("click", () => openSwitcher(btn));
+	// Other views ask through an event (chatView would otherwise import this
+	// module, which already imports chatView). The opener gets focus back.
+	document.addEventListener(OPEN_SWITCHER_EVENT, (e) => {
+		if (!isLoggedIn()) return;
+		const opener = (e as CustomEvent<{ opener?: Element | null }>).detail?.opener ?? null;
+		openSwitcher(opener);
+	});
 	// The hint says the key this keyboard has.
 	const mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 	const kbd = btn?.querySelector("kbd");
