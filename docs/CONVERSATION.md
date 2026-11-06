@@ -2799,6 +2799,13 @@ rechaza. Alternativas evaluadas:
    job), el daemon (status y roster, peer pid, su starttime **y su exe**) y el `nonce` del job.
    Cualquier diferencia aborta sin efecto (`binding-stale` o `busy`).
 
+**Riesgos residuales declarados de §8.1.12 (lista):** la carrera `/clear`/`/resume` contra el
+`reply` (abajo); el falso positivo de ack por texto idéntico de otro cliente del daemon
+(§8.1.12.5); un `claude stop` voluntario a mitad de turno seguido de `--bg --resume` y el mismo
+texto tipeado como siguiente prompt, que puede marcarse `duplicated` (§8.1.12.5); una duplicación
+con evidencia fuera de la ventana de 4096 eventos, que puede quedar sin identificar (§8.1.12.5).
+`duplicated` es evidencia fuerte de una ejecución duplicada, no certeza absoluta.
+
 **Riesgo residual declarado (carrera `/clear`/`/resume` contra el `reply`).** La ventana entre el
 paso 5 y el momento en que el daemon enruta la línea no se puede cerrar desde fuera del CLI (decenas
 de ms; el smoke la reprodujo solo con el Enter de `/clear` a ~0 ms del inicio del exec). Una `/clear`
@@ -2862,8 +2869,9 @@ texto.
 `composer_send` en el log de la conversación (sobreviven a reinicios del backend y recargas de la
 página), escritos una sola vez por operación y tipo (idempotentes: se leen los eventos antes de
 escribir), nunca un ack nuevo:
-- `duplicated` (**probada**) solo si se cumplen **todas** (revisión 3, ronda 3.1). Registra
-  `first_prompt_id`, `prompt_id` y el pid nuevo.
+- `duplicated` (**evidencia fuerte**, no certeza absoluta: significa que la evidencia disponible
+  apunta con fuerza a una ejecución duplicada; ver los riesgos residuales abajo) solo si se cumplen
+  **todas** (revisión 3, ronda 3.1). Registra `first_prompt_id`, `prompt_id` y el pid nuevo.
   - después del ack, un `session_start resume` y luego un `user_prompt` humano del mismo hash con
     `prompt_id` nuevo;
   - un probe muestra el job con **otro pid**;
@@ -2884,6 +2892,17 @@ escribir), nunca un ack nuevo:
   Evidencia del CLI real: el `Stop` de un turno `nextTurn` lleva el `prompt_id` del ack (smoke,
   caso 16, en 2.1.314, 2.1.316 y 2.1.318). Aun así la regla no depende de ese id: cualquier fin de
   turno bloquea.
+
+  **Riesgos residuales de `duplicated` (declarados, aprobación del responsable):**
+  - un `claude stop` **voluntario a mitad de turno**, seguido de `--bg --resume` y el mismo texto
+    tipeado a mano como **siguiente prompt inmediato**, deja exactamente la misma huella que una
+    re-ejecución automática (resume, otro pid, ningún fin de turno, primer prompt humano) y puede
+    marcarse `duplicated` aunque nada se haya ejecutado dos veces por sí solo;
+  - una duplicación cuya evidencia queda **fuera de la ventana de 4096 eventos** que se recorre
+    (o del archivo rotado) puede quedar sin identificar: ni `duplicated` ni `possible-duplicate`.
+
+  Por eso `duplicated` es una señal fuerte para que la persona revise el Terminal, nunca una
+  afirmación irrefutable, y la interfaz la presenta como tal (§8.1.12.8).
 - `possible-duplicate` (**no confirmada**): lo mismo, pero ningún probe puede mostrar el
   re-lanzamiento (probe fallido o job no listado tras un reintento); registra los dos
   `prompt_id` y el motivo. Si después llega la prueba, se escribe además `duplicated`.
@@ -2987,7 +3006,10 @@ no con el reloj del momento: un backend que estuvo caído durante la ventana la 
   - `delivered`: "Entregado a Claude", solo con el ack completo;
   - `unconfirmed`: "No confirmado: puede haberse perdido o seguir en cola. Revisá el Terminal antes
     de reenviar.";
-  - `duplicated` (probada): "Claude Code reinició la sesión y este mensaje se ejecutó dos veces.";
+  - `duplicated` (evidencia fuerte, nunca certeza): "Evidencia fuerte de que este mensaje se
+    ejecutó dos veces: Claude Code reinició la sesión y el mismo texto volvió a enviarse. Revisá el
+    Terminal." (UI: "Strong evidence this message ran twice: Claude Code restarted the session and
+    the same text was submitted again. Check the Terminal.");
   - `possible-duplicate` (no confirmada): "Claude Code retomó la sesión y el mismo texto volvió a
     aparecer: este mensaje pudo ejecutarse dos veces (no confirmado).";
   - `duplicate-pending{unconfirmed-unacknowledged}`: el borrador se conserva y "Revisé el Terminal"

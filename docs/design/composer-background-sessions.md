@@ -97,7 +97,10 @@ Implemented behind `CONVERSATION_COMPOSER_BG_ENABLED` + `COMPOSER_BG_SESSIONS` +
 - **D2 transcript unavailable**: 409 `transcript-unavailable` before the effect; after acceptance the send
   ends `unconfirmed{transcript-unavailable}`, never `failed`, never retried.
 - **D3** custom `CLAUDE_CONFIG_DIR`: 409 `unsupported-config-dir`, no inferred path.
-- **D4** `duplicated` (proven, both prompt ids, new pid) and `possible-duplicate` (unproven): persistent
+- **D4** `duplicated` (strong evidence of a duplicated execution, never absolute certainty — a voluntary
+  `claude stop` mid-turn + `--bg --resume` + the same text retyped as the very next prompt can look
+  identical, and evidence outside the 4096-event scan window may go unidentified; both
+  are declared residual risks in §8.1.12.5) and `possible-duplicate` (weaker, unconfirmed): persistent
   events, one per send and kind, re-armed after a restart.
 
 ## Canary plan (first production canary — NOT authorised by this document)
