@@ -15,8 +15,8 @@ A y qué falta). Referencias: CONVERSATION.md §3.1.1 (v1.8.6), DEPLOYMENT.md (�
 
 | | Valor | Fuente |
 | --- | --- | --- |
-| Backend en producción (`D`) | clase `1befd89` (#541) | **reportado por A** (checkout `1befd89`, contenedor `da75082e`, imagen `221e6851`); **pendiente:** digest del `dist` ejecutado = `3f1816a2…` (12 §1). El checkout por sí solo no prueba qué corre |
-| Destino | `a93232f` (#545), digest esperado `d1f310d8…` | repo |
+| Backend en producción (`D`) | `1befd89+R1` | digest medido por A = `1b116d5a…` (104): los 103 de `1befd89` más `dist/ringBuffer.js` huérfano, identificado (12 §7.4). **No coincide con la tabla: aceptarlo es la decisión D1** |
+| Destino | `a93232f` (#545), digest esperado `d1f310d8…`, **o** el commit de la corrección de higiene según D2 (12 §7.4), con el mismo digest | repo |
 | PRs en `1befd89..a93232f` | #548 (frontend), #544 (tests), #551 (frontend), #545 (backend + compose + docs) | A, y verificado por B en el repo |
 | Runtime del backend que cambia | **sólo #545**, apagado por defecto (`INGEST_REQUIRE_SESSION_ORIGIN` vacía) | repo |
 | Migraciones | ninguna (`db.ts` sin cambios en el rango) | repo |
@@ -36,7 +36,7 @@ del deploy, inmediatamente antes de §3: el preflight anterior es contexto, no e
 
 | # | Qué | Cómo (lectura) | Esperado | Estado |
 | --- | --- | --- | --- | --- |
-| P1 | Identidad del backend | digest de `dist/**/*.js` del contenedor en ejecución (12 §1) + `docker inspect` del contenedor y de su imagen | `3f1816a2…`; imagen `221e6851…` | **pendiente** (digest); A: contenedor e imagen |
+| P1 | Identidad del backend | digest de `dist/**/*.js` del contenedor en ejecución (12 §1) + `docker inspect` del contenedor y de su imagen | `1b116d5a…` (fila `1befd89+R1`, si se aprueba D1-a); imagen `221e6851…` | A: medido, **no coincide con la tabla**; en la ventana se repite sólo para comprobar que nada cambió |
 | P2 | G3-1 no está | `docker compose exec app grep -c INGEST_REQUIRE_SESSION_ORIGIN dist/index.js` | `0` | A (reportado «G3-1 no está en el `dist`») |
 | P3 | Alcance | `git log --oneline 1befd89..a93232f` | los 4 PRs de §0 | A + B |
 | P4 | Bandera ausente | `grep -c '^INGEST_REQUIRE_SESSION_ORIGIN=' .env`; `printenv` en el contenedor | `0` y vacío | A |
@@ -51,7 +51,7 @@ del deploy, inmediatamente antes de §3: el preflight anterior es contexto, no e
 | P13 | Línea de base del log | `docker compose logs --since 1h app` → cantidad de líneas `error` | registrada (para V1) | pendiente |
 
 **Si cualquier fila sale distinta de lo esperado, se detiene todo y se informa. No se corrige en el
-momento.** Un digest que no coincide con `3f1816a2…` invalida este procedimiento entero (12, Apéndice A).
+momento.** Un digest distinto de `1b116d5a…` invalida este procedimiento entero (12 §7.4).
 
 ### 1.1 Espacio necesario
 
@@ -105,15 +105,19 @@ nadie recrea, inicia ni detiene sesiones.
      `git pull` ni `git switch --discard-changes`.
    - Después: `git rev-parse HEAD` = `a93232f…`; `git status --porcelain` idéntico al de antes;
      `sha256sum session-image/Dockerfile` idéntico.
-3. **Construir sin reiniciar:** `docker compose build app`. Sólo `app`: el servicio `session-image`
+3. **Construir sin reiniciar.** Sólo con D2-B: antes, `mv backend/dist <fuera-del-repo>/backend-dist.<ts>`
+   (se conserva, no se borra). Después `docker compose build app`. Sólo `app`: el servicio `session-image`
    está en el perfil `build` y **no** se nombra; nunca `--profile build`,
    `docker build -t shared-terminal-session` ni `scripts/build-session-image.sh`.
 4. **Verificar la imagen nueva antes de usarla:**
    `docker run --rm --network none --entrypoint sh <imagen de compose> -c 'cd /app && find dist -type f -name "*.js" | LC_ALL=C sort | xargs sha256sum' | sha256sum`
-   tiene que dar `d1f310d8…`. Si no, NO-GO: el backend sigue siendo `1befd89`, sin reinicio.
+   tiene que dar `d1f310d8…` (D2-B o D2-C; con D2-A sería `886281d9…`, no recomendado). Si no, NO-GO:
+   el backend sigue siendo el actual, sin reinicio.
 5. **Gate final:** repetir P8 (recreaciones y panes del Composer) en este momento. Cualquier cosa en
    vuelo ⇒ se espera o se aborta, nunca se reinicia encima.
-6. `docker compose up -d --no-build app`. Nunca `docker compose down`, `--remove-orphans`,
+6. `docker compose up -d --no-deps --no-build app`. `app` no declara `depends_on`, así que
+   `--no-deps` no cambia nada hoy; se agrega para que un `depends_on` futuro no levante ni recree
+   otro servicio en este paso. Nunca `docker compose down`, `--remove-orphans`,
    `restart` de otros servicios, ni operaciones sobre contenedores `st-*`.
 
 ### 3.1 Verificación posterior (lecturas)
@@ -121,7 +125,7 @@ nadie recrea, inicia ni detiene sesiones.
 | # | Esperado |
 | --- | --- |
 | V1 | `app` en ejecución y `healthy`; log de arranque sin errores nuevos frente a P13 y **sin** la advertencia `INGEST_REQUIRE_SESSION_ORIGIN=… is not true\|observe\|false` |
-| V2 | Digest del `dist` del contenedor en ejecución = `d1f310d8…`; `grep -c INGEST_REQUIRE_SESSION_ORIGIN dist/index.js` > 0; ID de la imagen nueva registrado |
+| V2 | Digest del `dist` del contenedor en ejecución = el verificado en el paso 4; `grep -c INGEST_REQUIRE_SESSION_ORIGIN dist/index.js` > 0; ID de la imagen nueva registrado |
 | V3 | **Bandera apagada:** `printenv INGEST_REQUIRE_SESSION_ORIGIN` vacío; en `.conversation` **no** aparecen `originRejectedSinceBoot` ni `originObservedSinceBoot` |
 | V4 | Inventario P7 idéntico: mismos IDs, nombres y estados de los `st-*`, retenidos y PASS-B1 incluidos |
 | V5 | Captura: `enabledSessions = effectiveSessions = 3`; con actividad real `eventsSinceBoot` crece y Chat muestra eventos nuevos de las tres |
@@ -141,18 +145,19 @@ nadie recrea, inicia ni detiene sesiones.
   2. `git checkout --detach 1befd89` con las mismas reglas que §3 paso 2 (la excepción del
      Dockerfile se conserva y se verifica igual).
   3. `docker tag st-backend-rollback:1befd89 <imagen de compose>` y
-     `docker compose up -d --no-build app`.
-  4. Verificar: digest = `3f1816a2…`, imagen = `221e6851…`, y V1, V3–V10.
+     `docker compose up -d --no-deps --no-build app`.
+  4. Verificar: digest = `1b116d5a…` (la misma imagen de antes, con su residuo R1), imagen =
+     `221e6851…`, y V1, V3–V10.
 - **Qué preserva:** contenedores de sesión intactos; `.conversations/` nunca se borra; `.env` no se
   tocó. El `.env` no necesita cambio: `1befd89` no reenvía la variable.
 - **Rollback de la ventana `observe`** (sin tocar el código): quitar la variable de `.env` (o ponerla
-  en `false`) y ejecutar `docker compose up -d --no-build app`, que recrea sólo el contenedor del
+  en `false`) y ejecutar `docker compose up -d --no-deps --no-build app`, que recrea sólo el contenedor del
   backend con el entorno nuevo.
 
 ## 5. Ventana `observe` (otra autorización)
 
 **Activación:**
-1. `INGEST_REQUIRE_SESSION_ORIGIN=observe` en `.env`, y luego `docker compose up -d --no-build app`. Esto
+1. `INGEST_REQUIRE_SESSION_ORIGIN=observe` en `.env`, y luego `docker compose up -d --no-deps --no-build app`. Esto
    reinicia el backend: hay que planificar la hora.
 2. Verificar: `printenv` muestra `observe`, y aparece `originObservedSinceBoot` mientras no aparece
    `originRejectedSinceBoot`.

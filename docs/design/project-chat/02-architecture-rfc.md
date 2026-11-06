@@ -447,7 +447,7 @@ ese permiso.
 - El Terminal no cambia. Con `--channels` activo el CLI desactiva `AskUserQuestion` y plan mode
   (C20): por eso el canal se habilita **por agente**, no en todas las sesiones.
 
-### 5.8 Tareas independientes por agente (propuesta 2026-11-06, sin aprobar)
+### 5.8 Tareas independientes por agente (diseño consolidado 2026-11-06, sin GO de implementación)
 
 Cambia el no-objetivo anterior «tareas tipo Jira» sólo en esto: una **tarea direccionable mínima**
 ([13-agent-tasks.md](./13-agent-tasks.md)). Regla: **un agente no interrumpe un trabajo no relacionado
@@ -463,10 +463,14 @@ cuando recibe una instrucción nueva.**
   señales, parada del contenedor ni reinicio del CLI.
 - Recibida ≠ aplicada ≠ detenida; un `STOP` pedido nunca se convierte en confirmado sin evidencia
   (informe del agente + `turn_end` atribuible + prompt verificado).
+- La cola de un agente empieza `paused` (siempre para agentes existentes); `auto` sólo con una
+  acreditación explícita de que no tiene trabajo ajeno al sistema, que se pierde ante cualquier
+  trabajo no registrado. Un mensaje libre no interrumpe una tarea activa: queda retenido salvo que la
+  persona elija intercalarlo, y nunca cuenta como `UPDATE`/`CHANGE`.
 - El despacho es una entrega más del monitor (§5.4–§5.5, sin cambios). Las instrucciones emitidas
   por agentes requieren aprobación humana y G3-2 (NO-GO). Ninguna tarea otorga permisos.
 
-Capas, decisiones TD1–TD11 y gates TG1–TG4: 13 §1, §8 y §9.
+Capas, decisiones TD1–TD11 y gates TG1–TG5: 13 §1, §8 y §9.
 
 ## 6. Fallos y recuperación
 
