@@ -1,9 +1,10 @@
-# G3-1 — procedimiento de release acotado y ventana `observe` (sólo planificación)
+# G3-1 + higiene de la imagen — procedimiento de release y ventana `observe` (nada ejecutado)
 
-Estado: **propuesta final del procedimiento, nada ejecutado. Revisado el 2026-11-06 con el preflight
-de sólo lectura de Claude A** (operador de VM100). El deploy sigue en **NO-GO** hasta que el
-responsable apruebe este procedimiento; cada etapa de escritura (§2 backup, §3 deploy, §5 `observe`)
-necesita además su propia autorización. G3-2 sigue en NO-GO y el preflight de F1 es una tarea
+Estado: **procedimiento final, nada ejecutado (2026-11-06).** Decisiones del responsable: D1-a
+(identidad `1befd89+R1`) y D2-C (candidato = `main` con la corrección de higiene, PR #555). El deploy
+necesita el merge de #555 y la autorización explícita del responsable; cada etapa de escritura (§2
+backup, §3 deploy, §5 `observe`) necesita además su propia autorización. La lista única para el
+operador está en §8. G3-2 sigue en NO-GO y el preflight de F1 es una tarea
 independiente del operador.
 
 Alcance y tabla de digests: [12-g3-1-release-scope.md](./12-g3-1-release-scope.md) (§7 = qué reportó
@@ -11,19 +12,22 @@ A y qué falta). Referencias: CONVERSATION.md §3.1.1 (v1.8.6), DEPLOYMENT.md (�
 «Backend (Docker Compose)», «Backup & restore», «Rollback (from 3.0d)»),
 [10-g3-sender-identity.md](./10-g3-sender-identity.md).
 
-## 0. Alcance: release acotado a G3-1 sobre el SHA fijo `a93232f`
+## 0. Alcance: G3-1 + higiene de la imagen, sobre un SHA fijo `R`
+
+`R` = el commit de `main` que resulte del merge (squash) de **#555**. Se fija en este documento en el
+momento del merge; hasta entonces el procedimiento no se puede ejecutar.
 
 | | Valor | Fuente |
 | --- | --- | --- |
-| Backend en producción (`D`) | `1befd89+R1` | digest medido por A = `1b116d5a…` (104): los 103 de `1befd89` más `dist/ringBuffer.js` huérfano, identificado (12 §7.4). **No coincide con la tabla: aceptarlo es la decisión D1** |
-| Destino | `a93232f` (#545), digest esperado `d1f310d8…`, **o** el commit de la corrección de higiene según D2 (12 §7.4), con el mismo digest | repo |
-| PRs en `1befd89..a93232f` | #548 (frontend), #544 (tests), #551 (frontend), #545 (backend + compose + docs) | A, y verificado por B en el repo |
-| Runtime del backend que cambia | **sólo #545**, apagado por defecto (`INGEST_REQUIRE_SESSION_ORIGIN` vacía) | repo |
-| Migraciones | ninguna (`db.ts` sin cambios en el rango) | repo |
-| Compose / `.env.example` | sólo una línea nueva que reenvía `INGEST_REQUIRE_SESSION_ORIGIN` con valor vacío por defecto | repo |
-| `session-image/` | **sin cambios** en el rango (`git diff 1befd89 a93232f -- session-image` vacío) | repo |
-| `main` después de `a93232f` | #550 (docs) y #552 (frontend): **no** entran; el destino sigue fijo en `a93232f` | A y repo |
-| Frontend | Pages, camino aparte; no forma parte de este procedimiento. Sin acople: el frontend actual sólo usa rutas que ya existen en `1befd89` (el único cambio de backend del rango es la ingesta) | repo |
+| Backend en producción (`D`) | **`1befd89+R1`** (D1-a): `dist/**/*.js` = `1b116d5a…` (104) = los 103 de `1befd89` + `dist/ringBuffer.js` `236c9aa6…` (compilado de `e61910d`, inerte). Imagen `221e6851`, contenedor `da75082e` | A (medición) + B (reproducción exacta, 12 §7.4) |
+| Destino `R` | `main` tras #555. `dist/**/*.js` = **`d1f310d8…` (104)**; `dist` completo = **`0e50e8fd…` (416)**, idénticos a `a93232f` | repo (build reproducible) y CI de #555 |
+| Cambios de runtime del backend `D → R` | **sólo #545** (G3-1, apagado por defecto) | repo |
+| Cambios de build | **#555**: `.dockerignore` raíz (allowlist), `COPY` por nombre en el `Dockerfile`, `prebuild` que limpia `dist`, job de CI `backend-image` | repo |
+| Resto de `1befd89..R` | #548, #551, #552, #553 (frontend); #544 (tests); #550, #542 (docs) | repo |
+| Migraciones | ninguna | repo |
+| Compose / `.env.example` | sólo la línea que reenvía `INGEST_REQUIRE_SESSION_ORIGIN`, vacía por defecto | repo |
+| `session-image/` | **sin cambios** en `1befd89..R` | repo |
+| Frontend | Pages, camino aparte; no forma parte de este procedimiento. Sin acople: el backend de `R` no cambia ninguna ruta que use el frontend | repo |
 
 Fuera de este release, sin excepción: construir o etiquetar la imagen de sesión, recrear sesiones,
 tocar contenedores retenidos (PASS-B1 incluidos), cambiar `.env`, activar `observe` o `true`.
@@ -36,9 +40,9 @@ del deploy, inmediatamente antes de §3: el preflight anterior es contexto, no e
 
 | # | Qué | Cómo (lectura) | Esperado | Estado |
 | --- | --- | --- | --- | --- |
-| P1 | Identidad del backend | digest de `dist/**/*.js` del contenedor en ejecución (12 §1) + `docker inspect` del contenedor y de su imagen | `1b116d5a…` (fila `1befd89+R1`, si se aprueba D1-a); imagen `221e6851…` | A: medido, **no coincide con la tabla**; en la ventana se repite sólo para comprobar que nada cambió |
+| P1 | Identidad del backend | digest de `dist/**/*.js` del contenedor en ejecución (12 §1) + `docker inspect` del contenedor y de su imagen | `1b116d5a…` (fila `1befd89+R1`, D1-a); imagen `221e6851…`; contenedor `da75082e…` | A: medido; en la ventana se repite para comprobar que nada cambió |
 | P2 | G3-1 no está | `docker compose exec app grep -c INGEST_REQUIRE_SESSION_ORIGIN dist/index.js` | `0` | A (reportado «G3-1 no está en el `dist`») |
-| P3 | Alcance | `git log --oneline 1befd89..a93232f` | los 4 PRs de §0 | A + B |
+| P3 | Alcance | `git log --oneline 1befd89..R` | los PRs de §0 | B (al fijar `R`) |
 | P4 | Bandera ausente | `grep -c '^INGEST_REQUIRE_SESSION_ORIGIN=' .env`; `printenv` en el contenedor | `0` y vacío | A |
 | P5 | Captura | `GET /api/admin/stats` → `.conversation` | `enabledSessions = effectiveSessions = 3` | A (3/3); pendiente: `eventsSinceBoot`, `rejectedSinceBoot`, `gapsSinceBoot` con hora |
 | P6 | Pérdidas del relay (línea de base) | conteos de `relay_dropped` / `relay_restart` en `.conversations/*/*.events.jsonl` | registrados | pendiente |
@@ -47,7 +51,7 @@ del deploy, inmediatamente antes de §3: el preflight anterior es contexto, no e
 | P9 | Sesiones por estado | `GET /api/admin/stats` → sesiones por estado | registrado (para V10) | pendiente |
 | P10 | Espacio | `df -h` del filesystem de `WORKSPACE_ROOT` y del data-root de Docker; `docker system df`; tamaño estimado del backup | §1.1 | A: 36 GB libres, 82 %; **pendiente:** el resto |
 | P11 | Imagen de rollback | `docker image inspect 221e6851 --format '{{.Id}} {{json .RepoTags}} {{.Size}}'`; nombre de imagen de compose (`docker compose config --images`) | ID completo, etiqueta y tamaño | pendiente |
-| P12 | Excepción local del Dockerfile | `git rev-parse HEAD`, `git symbolic-ref -q HEAD` (rama o detached), `git status --porcelain`, `git diff --stat`, `sha256sum session-image/Dockerfile` | sólo `M session-image/Dockerfile`; hash registrado | A (existe y está aprobada); **pendiente:** las lecturas exactas |
+| P12 | Excepción local del Dockerfile y árbol de deploy | `git rev-parse HEAD`, `git symbolic-ref -q HEAD` (rama o detached), `git status --porcelain`, `git diff --stat`, `sha256sum session-image/Dockerfile`, `test -e .dockerignore && echo present` | sólo `M session-image/Dockerfile`; hash registrado; **sin** `.dockerignore` en la raíz (si existe uno sin versionar, el checkout de `R` no puede crearlo ⇒ se detiene) | A (existe y está aprobada); **pendiente:** las lecturas exactas |
 | P13 | Línea de base del log | `docker compose logs --since 1h app` → cantidad de líneas `error` | registrada (para V1) | pendiente |
 
 **Si cualquier fila sale distinta de lo esperado, se detiene todo y se informa. No se corrige en el
@@ -99,20 +103,25 @@ nadie recrea, inicia ni detiene sesiones.
 2. **Checkout preservando la excepción del Dockerfile.**
    - Antes: guardar `git status --porcelain`, `sha256sum session-image/Dockerfile` y
      `git diff -- session-image/Dockerfile > <fuera-del-repo>/Dockerfile.local.patch`.
-   - `git fetch origin` y `git checkout --detach a93232f` (**sin** `-f`). Como el rango no cambia
+   - `git fetch origin` y `git checkout --detach R` (**sin** `-f`). Como `1befd89..R` no cambia
      `session-image/Dockerfile`, git conserva la modificación local. **Si git se niega, se detiene:**
      nunca `git stash`, `git checkout -f`, `git checkout -- …`, `git reset --hard`, `git clean`,
      `git pull` ni `git switch --discard-changes`.
-   - Después: `git rev-parse HEAD` = `a93232f…`; `git status --porcelain` idéntico al de antes;
-     `sha256sum session-image/Dockerfile` idéntico.
-3. **Construir sin reiniciar.** Sólo con D2-B: antes, `mv backend/dist <fuera-del-repo>/backend-dist.<ts>`
-   (se conserva, no se borra). Después `docker compose build app`. Sólo `app`: el servicio `session-image`
+   - Después: `git rev-parse HEAD` = `R`; `git status --porcelain` idéntico al de antes;
+     `sha256sum session-image/Dockerfile` idéntico; `.dockerignore` presente y versionado.
+   - El `backend/dist` local del checkout **no se toca**: con #555 no entra en el contexto del build.
+3. **Construir sin reiniciar:** `docker compose build app`. Sólo `app`: el servicio `session-image`
    está en el perfil `build` y **no** se nombra; nunca `--profile build`,
    `docker build -t shared-terminal-session` ni `scripts/build-session-image.sh`.
-4. **Verificar la imagen nueva antes de usarla:**
-   `docker run --rm --network none --entrypoint sh <imagen de compose> -c 'cd /app && find dist -type f -name "*.js" | LC_ALL=C sort | xargs sha256sum' | sha256sum`
-   tiene que dar `d1f310d8…` (D2-B o D2-C; con D2-A sería `886281d9…`, no recomendado). Si no, NO-GO:
-   el backend sigue siendo el actual, sin reinicio.
+4. **Verificar la imagen nueva antes de usarla** (contenedor descartable, sin red):
+   - `docker run --rm --network none --entrypoint sh <imagen de compose> -c 'cd /app && find dist -type f -name "*.js" | LC_ALL=C sort | xargs sha256sum' | sha256sum`
+     ⇒ **`d1f310d83394c672133be555402ca1ea5067b79d3a8d1a9b181bb8fae7d3b124`**;
+   - lo mismo sin `-name "*.js"` (todo el `dist`) ⇒ **`0e50e8fdca9174b6c8590468b992efce852307f1d36ddf7601e770fcbbe46193`**, y
+     `find dist -type f | wc -l` ⇒ **416**;
+   - registrar el ID de la imagen nueva.
+
+   Cualquier otro valor ⇒ NO-GO: el backend sigue siendo el actual, sin reinicio, y se informa. No se
+   acepta ningún archivo extra: la excepción R1 vale **sólo** para la imagen `221e6851`.
 5. **Gate final:** repetir P8 (recreaciones y panes del Composer) en este momento. Cualquier cosa en
    vuelo ⇒ se espera o se aborta, nunca se reinicia encima.
 6. `docker compose up -d --no-deps --no-build app`. `app` no declara `depends_on`, así que
@@ -125,7 +134,7 @@ nadie recrea, inicia ni detiene sesiones.
 | # | Esperado |
 | --- | --- |
 | V1 | `app` en ejecución y `healthy`; log de arranque sin errores nuevos frente a P13 y **sin** la advertencia `INGEST_REQUIRE_SESSION_ORIGIN=… is not true\|observe\|false` |
-| V2 | Digest del `dist` del contenedor en ejecución = el verificado en el paso 4; `grep -c INGEST_REQUIRE_SESSION_ORIGIN dist/index.js` > 0; ID de la imagen nueva registrado |
+| V2 | Digests del `dist` del contenedor en ejecución = los del paso 4 (`d1f310d8…` y `0e50e8fd…`/416) y su imagen = la registrada en el paso 4; `grep -c INGEST_REQUIRE_SESSION_ORIGIN dist/index.js` > 0; ID de la imagen nueva registrado |
 | V3 | **Bandera apagada:** `printenv INGEST_REQUIRE_SESSION_ORIGIN` vacío; en `.conversation` **no** aparecen `originRejectedSinceBoot` ni `originObservedSinceBoot` |
 | V4 | Inventario P7 idéntico: mismos IDs, nombres y estados de los `st-*`, retenidos y PASS-B1 incluidos |
 | V5 | Captura: `enabledSessions = effectiveSessions = 3`; con actividad real `eventsSinceBoot` crece y Chat muestra eventos nuevos de las tres |
@@ -143,11 +152,12 @@ nadie recrea, inicia ni detiene sesiones.
   1. Comprobar P8 de nuevo: **nunca** volver atrás con una recreación sin resolver ni un envío del
      Composer pendiente (DEPLOYMENT.md).
   2. `git checkout --detach 1befd89` con las mismas reglas que §3 paso 2 (la excepción del
-     Dockerfile se conserva y se verifica igual).
+     Dockerfile se conserva y se verifica igual). **Nunca se reconstruye desde ese checkout:** sin
+     #555, un build volvería a meter el `backend/dist` del host. El rollback es sólo por imagen.
   3. `docker tag st-backend-rollback:1befd89 <imagen de compose>` y
      `docker compose up -d --no-deps --no-build app`.
-  4. Verificar: digest = `1b116d5a…` (la misma imagen de antes, con su residuo R1), imagen =
-     `221e6851…`, y V1, V3–V10.
+  4. Verificar: imagen del contenedor = `221e6851…` (ID completo de P11) y `dist/**/*.js` =
+     `1b116d5a…` (identidad `1befd89+R1`, D1-a; ningún otro valor se acepta), más V1, V3–V10.
 - **Qué preserva:** contenedores de sesión intactos; `.conversations/` nunca se borra; `.env` no se
   tocó. El `.env` no necesita cambio: `1befd89` no reenvía la variable.
 - **Rollback de la ventana `observe`** (sin tocar el código): quitar la variable de `.env` (o ponerla
@@ -186,7 +196,7 @@ informa. No se reintenta ni se ajusta nada sobre la marcha.
 El operador devuelve, sin tokens, cookies ni contenido de conversaciones:
 
 1. P1–P13, la verificación del backup (§2) y V1–V10, con valores y horas.
-2. La lista aprobada del alcance (P3), el SHA desplegado (`a93232f`) y el anterior (`1befd89`, con su digest).
+2. La lista aprobada del alcance (P3), el SHA desplegado (`R`, con sus digests) y el anterior (`1befd89+R1`, imagen `221e6851`).
 3. Las lecturas de la línea de base y de la ventana `observe`, al inicio y al final:
    `.conversation.originObservedSinceBoot`, `eventsSinceBoot`, `rejectedSinceBoot`, `gapsSinceBoot`,
    y los conteos de P6.
@@ -212,3 +222,37 @@ rollback (volver a `observe` o `false`).
 - **Versión:** no hay identidad de build en la API. P1, P2, §3 paso 4 y V2 la establecen desde el host, por contenido.
 - **Atribución por sesión:** `observe` informa cantidades de sesiones, no cuáles. Si
   `sessionsNotMatched > 0`, el diagnóstico de cuál sesión falló necesita otra autorización.
+
+## 8. Lista única para el operador (Claude A)
+
+Todo en VM100, en el checkout de deploy, en este orden. Cada bloque necesita la autorización que
+indica; ante cualquier diferencia: **detenerse e informar, sin corregir**.
+
+**A. Preflight (sólo lecturas; se puede hacer antes del día del deploy).** Son las lecturas 2–7 de
+12 §7.2, más P12 con la comprobación de `.dockerignore`. Con esto se decide READY FOR DEPLOY.
+
+**B. Ventana del deploy** (autorización del responsable; coordinada con quien use sesiones):
+1. Gate previo P1–P13 (§1), repetido en la ventana. P1 = `1b116d5a…`, imagen `221e6851…`.
+2. Gate de espacio (§1.1): con el estimado del backup, ≥ 20 GB libres y uso < 90 % después del backup
+   y del build.
+3. **Backup** (§2; autorización propia): `npm run backup`, verificación del manifiesto y, si el
+   responsable lo decide, copia al NAS con `sha256sum`.
+4. `docker tag <ID completo de 221e6851> st-backend-rollback:1befd89`.
+5. Checkout de `R` preservando la excepción del Dockerfile (§3 paso 2).
+6. `docker compose build app` (§3 paso 3), sin el perfil `build` ni la imagen de sesión.
+7. Verificar la imagen nueva: `d1f310d8…`, `0e50e8fd…`/416 (§3 paso 4). Si no coincide, NO-GO, sin
+   reinicio.
+8. Gate final P8 (§3 paso 5).
+9. `docker compose up -d --no-deps --no-build app` (§3 paso 6).
+10. V1–V10 (§3.1).
+11. Si algo falla: rollback (§4), sólo por imagen, y verificación contra `221e6851…` / `1b116d5a…`.
+
+**Nunca, en todo el procedimiento:**
+- `docker compose down`, `--remove-orphans`, `--profile build`;
+- `docker build -t shared-terminal-session`, `scripts/build-session-image.sh`;
+- `prune` de imágenes, del sistema o del builder;
+- `git stash`, `reset --hard`, `checkout -f`, `clean`;
+- tocar contenedores `st-*` (retenidos y PASS-B1 incluidos), recrear sesiones o cambiar `.env`;
+- `restore`;
+- activar `observe` o `true` (§5, otra autorización).
+

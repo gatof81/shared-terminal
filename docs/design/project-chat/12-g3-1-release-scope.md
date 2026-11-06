@@ -1,9 +1,9 @@
 # Release de G3-1 — informe de alcance (diagnóstico, nada ejecutado)
 
 Estado: **diagnóstico preparado desde el repositorio. Actualizado el 2026-11-06 con el preflight de
-sólo lectura de Claude A (§7). El digest efectivo NO coincide con la tabla (`1b116d5a…`, 104 archivos):
-diagnosticado en §7.4 como `1befd89` + un artefacto huérfano identificado; el gate de §1 sigue
-fallando hasta que el responsable decida §7.4 D1.** Claude no tiene ni debe
+sólo lectura de Claude A (§7). Digest efectivo `1b116d5a…` = `1befd89+R1`, aceptado por el
+responsable (D1-a) **sólo** para ese artefacto; candidato = `main` con la corrección de higiene #555
+(D2-C).** Claude no tiene ni debe
 tener acceso a VM100. Lo que exige el host lo hace un operador autorizado, **sólo con lecturas**: sin
 backup, deploy, build, recreación, cambio de variables ni operación que altere contenedores o
 sesiones. `observe` no se inicia. G3-2 sigue en NO-GO. Destino propuesto: `a93232f` (#545). Hoy
@@ -59,6 +59,12 @@ La identidad de la imagen (`image=` / `created=`) se registra junto al digest.
 | `cf18fe0` | #537 | `0ad8772f560c0827070354f4bbebbfa626d4ece17d9fa5d8c96232a1288878f5` | 103 |
 | `1befd89` | #541 | `3f1816a2feea8a6ed7e0aadb915388f840091fdd000234a41429a969367db252` | 103 |
 | `a93232f` | #545 | `d1f310d83394c672133be555402ca1ea5067b79d3a8d1a9b181bb8fae7d3b124` | 104 |
+| `1befd89+R1` | #541 + residuo R1 (D1-a, §7.4) | `1b116d5aa878d1ca34a2d8c614efa0a4598be744f729ffbb7dfe8ff7db7c2836` | 104 |
+
+**Fila `1befd89+R1`: excepción enumerada, válida sólo para la imagen `221e6851`.** Es el
+manifiesto de `1befd89` más exactamente la línea `236c9aa6efbf944a8c21eed7318cf4580ff138d050784dd8e6c4a34c892f992c  dist/ringBuffer.js`,
+compilado de `e61910d:backend/src/ringBuffer.ts`. No autoriza ningún otro archivo ni relaja ninguna
+otra comprobación. Cualquier imagen nueva tiene que dar una fila sin residuo.
 
 Para regenerar una fila (sin Docker): `git archive <sha> backend/src backend/tsconfig.json`, enlazar
 un `node_modules` instalado con ese mismo lockfile, correr `tsc -p tsconfig.json` y aplicar el mismo
@@ -249,7 +255,7 @@ de §1 falla**: ese valor no está en la tabla. Esta prueba no se vuelve a pedir
    están cubiertos; ninguno es código que Node ejecute aquí (el backend no importa `.json`, `git grep`
    vacío), pero no se afirma nada sobre ellos.
 
-#### D1 — Cómo aceptar la identidad del backend anterior
+#### D1 — Cómo aceptar la identidad del backend anterior — **decidida: D1-a**
 
 | Opción | Qué significa | Ventaja | Costo |
 | --- | --- | --- | --- |
@@ -260,7 +266,7 @@ de §1 falla**: ese valor no está en la tabla. Esta prueba no se vuelve a pedir
 Con D1-a, la identidad de la imagen de rollback (`221e6851`) es la misma fila, así que el rollback
 se verifica contra `1b116d5a…` (11 §4), no contra `3f1816a2…`.
 
-#### D2 — ¿La corrección del build obliga a cambiar el SHA candidato?
+#### D2 — ¿La corrección del build obliga a cambiar el SHA candidato? — **decidida: D2-C**
 
 **Hecho que obliga a decidir:** si se construye `a93232f` en el mismo checkout, el `backend/dist`
 del host vuelve a entrar. La imagen nueva daría `a93232f+R1` (`886281d971e5798a3d1336a03d633118defe0d3afabed8911b0e5bfdc16182fa`
@@ -277,7 +283,8 @@ si el residuo es sólo R1) y **la verificación de 11 §3 paso 4 (`d1f310d8…`)
 el PR, D2-B es aceptable; D2-A no se recomienda. Hasta que se decida, el procedimiento de 11 queda en
 NO-GO.
 
-**Propuesta de corrección (rama local `fix/backend-image-hygiene`, sin push, sin PR, sin merge):**
+**Corrección: PR #555** (`fix/backend-image-hygiene`; draft, sin merge). El estado de sus checks y de su
+revisión está en el informe de release. Contenido:
 
 - `.dockerignore` raíz como **allowlist**: `*` y luego sólo `backend/package.json`,
   `backend/package-lock.json`, `backend/tsconfig.json` y `backend/src/`. No afecta la imagen de sesión
@@ -292,23 +299,24 @@ NO-GO.
   construye el `Dockerfile` real y exige que el `dist` de la imagen sea idéntico a la referencia y
   que la etapa de build no tenga nada del host.
 - Verificado en local sin Docker: con un `dist/ringBuffer.js` plantado, `npm run build` lo elimina y
-  el digest sigue siendo `d1f310d8…` (104 archivos). La prueba con Docker sólo puede correr en CI: hace
-  falta tu autorización para pushear la rama y abrir un PR **draft**.
+  el digest sigue siendo `d1f310d8…` (104 `.js`; `0e50e8fd…` con los 416 archivos del `dist`).
+- En CI, el commit de la prueba solo **falló** como se esperaba: la única diferencia fue
+  `+… dist/planted-orphan.js` sobre 416 archivos de referencia.
 
 ### 7.5 Condiciones de §6 con la evidencia actual
 
 | # | Condición | Estado |
 | --- | --- | --- |
-| 1 | `D` verificado por digest, imagen registrada | **falla** contra la tabla; diagnosticado como `1befd89+R1` (§7.4). Se cumple sólo si el responsable aprueba D1-a |
-| 2 | Lista de PRs aprobada | lista confirmada (7.1); **falta la aprobación del responsable** |
+| 1 | `D` verificado por digest, imagen registrada | **cumplida** como `1befd89+R1` (D1-a), imagen `221e6851` |
+| 2 | Lista de PRs aprobada | `1befd89..R` = 7.1 + #553, #542 (frontend/docs) + #555 (build); se aprueba con el merge de #555 |
 | 3 | Variables registradas | `INGEST_REQUIRE_SESSION_ORIGIN` ausente; el delta no cambia ninguna otra variable |
 | 4 | Migraciones | no aplica: ninguna en el rango |
 | 5 | Nada en vuelo | recreaciones cumplida; Composer pendiente de método (7.2 punto 5). Se repite en la ventana |
 | 6 | Alias de Pages | no condiciona este release: el backend del rango no cambia ninguna ruta que use el frontend |
 
-**Propuesta:** release **acotado a G3-1**, con el SHA candidato según D2 (§7.4), con el procedimiento de
-[11-g3-1-deploy-plan.md](./11-g3-1-deploy-plan.md) §1–§4. Sigue en NO-GO hasta: (a) las decisiones D1 y D2 de §7.4, (b) las lecturas 2–6 de §7.2 (la 1 ya
-está hecha y no se repite), y (c) la aprobación del procedimiento y de cada etapa de escritura.
+**Propuesta:** release **G3-1 + higiene de la imagen**, al SHA `R` de `main` tras el merge de #555, con el procedimiento de
+[11-g3-1-deploy-plan.md](./11-g3-1-deploy-plan.md) §1–§4. Pendiente para el deploy: (a) el merge de #555, que fija `R`; (b) las lecturas 2–7 de §7.2 (la 1 ya
+está hecha y no se repite); (c) la autorización del deploy y de cada etapa de escritura.
 
 ## Apéndice A — matriz de decisión por clase de `D` (precalculada; `D` lo aporta el operador)
 
