@@ -1,8 +1,8 @@
 # Project Chat — tareas independientes por agente (propuesta de diseño, sin implementar)
 
 Estado: **diseño documental consolidado, 2026-11-06 (GO del responsable para consolidar el diseño;
-NO hay GO de implementación).** Aprobadas TD1, TD2, TD5, TD6, TD7, TD9, TD10 y TD11; TD3, TD4 y TD8
-revisadas según las condiciones del responsable (§8). No hay backend, UI ni migraciones de tareas. Cambia un no-objetivo del RFC
+NO hay GO de implementación).** **TD1–TD11 aprobadas** como arquitectura (TD3, TD4 y TD8 con la redacción revisada, confirmada el
+2026-11-06; TG5 obligatorio). No hay backend, UI ni migraciones de tareas. Cambia un no-objetivo del RFC
 («tareas tipo Jira», 02 §2) **sólo en lo que dice §1**: no es un Jira, y no amplía G3-2, que sigue en
 NO-GO. Los gates de Channels (G1–G12, G3, PASS-A/PASS-B, R8) no cambian. Los que siguen siendo
 obligatorios están en §9.
@@ -334,18 +334,17 @@ Jira, Linear o GitHub Issues; agentes que crean tareas sin aprobación humana.
 | --- | --- | --- |
 | TD1 | El no-objetivo «tareas tipo Jira» pasa a «tareas direccionables mínimas (§1), sin gestión de proyectos (§7)» en 01 y 02 | **aprobada** |
 | TD2 | Una tarea activa por agente en v1 | **aprobada** |
-| TD3 | Despacho FIFO automático sólo con la cola `auto` habilitada explícitamente y una acreditación vigente de que el agente no tiene trabajo ajeno al sistema; el prompt no lo prueba. Agentes existentes (como A en #547) empiezan en `paused` y nada se despacha en silencio (§3.1) | **condicionada**, aplicada así |
-| TD4 | MVP: toda instrucción de un agente con aprobación humana y G3-2. Futuro: permisos delegados acotados (alcance, verbos, presupuesto, vencimiento, revocables) que nunca autorizan deploys, operaciones destructivas ni amplían privilegios (§4.1) | **revisada**; la delegación es sólo diseño y necesitará su propia aprobación |
+| TD3 | Despacho FIFO automático sólo con la cola `auto` habilitada explícitamente y una acreditación vigente de que el agente no tiene trabajo ajeno al sistema; el prompt no lo prueba. Agentes existentes (como A en #547) empiezan en `paused` y nada se despacha en silencio (§3.1) | **aprobada** (redacción revisada) |
+| TD4 | MVP: toda instrucción de un agente con aprobación humana y G3-2. Futuro: permisos delegados acotados (alcance, verbos, presupuesto, vencimiento, revocables) que nunca autorizan deploys, operaciones destructivas ni amplían privilegios (§4.1) | **aprobada**; la delegación es sólo diseño futuro |
 | TD5 | Puntos seguros = SP1 + SP2; sin interrupción forzada; la vía manual queda fuera del contrato | **aprobada** |
 | TD6 | «Detenida» = informe + `turn_end` limpio + prompt verificado; certifica lo que el agente reportó, **no** la ausencia de efectos externos pendientes (§3.5) | **aprobada**, con la aclaración |
 | TD7 | Log por proyecto + snapshot, sin tabla D1 en el MVP | **aprobada** |
-| TD8 | Tres envíos explícitos (`chat`, `task.create`, `task.change`); un `chat` queda retenido mientras haya una tarea activa; intercalar en SP1 es una elección explícita por mensaje y nunca un `UPDATE`/`CHANGE` (§5) | **revisada** (más conservadora), pendiente de confirmar |
+| TD8 | Tres envíos explícitos (`chat`, `task.create`, `task.change`); un `chat` queda retenido mientras haya una tarea activa; intercalar en SP1 es una elección explícita por mensaje y nunca un `UPDATE`/`CHANGE` (§5) | **aprobada** (redacción revisada) |
 | TD9 | `task_key` = `T-<n>` por proyecto, nunca reutilizado | **aprobada** |
 | TD10 | El Composer/Control Directo no es un canal de instrucciones de tareas | **aprobada** |
 | TD11 | Reanudar `stopped`/`interrupted` queda fuera del MVP | **aprobada** |
 
-Abiertas para el responsable: la confirmación del texto de TD3, TD4 y TD8 tal como quedó aplicado;
-la delegación de TD4 se decidirá aparte cuando haya implementación de la capa C.
+La delegación de TD4 se decidirá aparte cuando haya implementación de la capa C.
 
 ## 9. Gates de la POC que siguen siendo obligatorios
 

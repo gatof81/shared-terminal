@@ -1,7 +1,9 @@
 # Equipos de agentes por proyecto — investigación y propuesta (no vinculante)
 
-Estado: **investigación, 2026-11-06. Sólo análisis y diseño.** No modifica ningún contrato aprobado
-(01, 02, 03, 05, 10 y 13 siguen siendo la referencia vigente). No hay implementación, migraciones,
+Estado: **AD1–AD12 aprobadas por el responsable (2026-11-06) como arquitectura, no como autorización
+de implementación.** Aplicado a 03 §1 y §2.1 (`project_agents` sin sesión + `agent_bindings`); el resto
+sigue siendo referencia de diseño. No se implementan cambios de vínculo, varias sesiones simultáneas,
+delegaciones ni activación de agentes detenidos. No hay implementación, migraciones,
 endpoints ni cambios de runtime. Ninguna parte toca G3-1 ni su release. G3-2 sigue en NO-GO. Los gates
 de Channels (G1–G12), G3, PASS-A/PASS-B, R8 y TG1–TG5 se mantienen.
 

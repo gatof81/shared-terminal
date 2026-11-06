@@ -26,6 +26,8 @@ entrega, la atribución (§3.1), el clasificador (§5) y el kill switch (§6.4) 
 | `participation_id` | UUID v4 | backend al invitar | una participación (`chat_id`, `agent_id`); **nuevo** en cada reinvitación | D1 `chat_participants` + eventos |
 | `participants_version` | entero por `chat_id`, +1 en cada cambio del conjunto de participaciones no terminales | backend | hasta el siguiente cambio | D1 `chats` + eventos |
 | `grant_id` | UUID v4 | backend al activar Colaboración | un permiso de Colaboración | log de la conversación |
+| `binding_id` | UUID v4 | backend al vincular agente ↔ sesión | un vínculo; el historial se conserva | D1 `agent_bindings` |
+| `binding_epoch` | entero por agente, 1, 2, …, nunca reutilizado | backend | un vínculo | D1 `agent_bindings` |
 | `st_session_id` | existente | — | — | D1 `sessions` |
 | `start_gen` | entero por sesión, se incrementa en cada parada del contenedor (`onSessionDown`, §5.2 v1.7.2); **no** en una salida del CLI | backend | un arranque del contenedor | memoria del backend |
 | `endpoint_id` | UUID v4 | backend en `hello` | un proceso `st-channel` | memoria + evento de log |
@@ -43,12 +45,16 @@ entrega, nunca destino elegido por el cliente.
 **Principal y vínculo (G3.1–G3.2, [10-g3-sender-identity.md](./10-g3-sender-identity.md)).** El principal
 autenticado de un agente es **su sesión, es decir el contenedor de esa sesión**, nunca el modelo ni
 un proceso concreto: "lo escribió el agente A" significa "lo envió el contenedor de la sesión de A".
-El **vínculo vigente** es la tupla (`agent_id`, `project_id`, `st_session_id`, `container_id`), con la
-fila activa de `project_agents` como época. v1 no reasigna una sesión en el lugar: reasignar es quitar
-el agente y crear otro, con un `agent_id` nuevo. Si una versión futura permite cambiar la sesión de un
-agente existente, *MUST* agregar `binding_epoch` y la regla de §6.1 sobre entregas en vuelo. Toda
-evidencia (hook, `transported`, post) se evalúa contra el vínculo vigente; la de un vínculo anterior se
-registra y no cambia estados del agente nuevo. Ningún campo del cuerpo (`from`, `source`, handle,
+El **vínculo vigente** es la tupla (`agent_id`, `binding_id`, `project_id`, `st_session_id`,
+`container_id`): la fila `active` de `agent_bindings` (AD1, 2026-11-06,
+[14-agent-teams-research.md](./14-agent-teams-research.md) §3). **La identidad del agente no depende de
+su sesión**: mensajes, participaciones, tareas y aristas apuntan a `agent_id`; toda evidencia
+(entrega prestada, `transported`, hook, post, `task_ack`, `task_report`, intento) registra el
+`binding_id` con el que ocurrió. En el MVP hay **un vínculo vivo por agente y por sesión, como
+política** (índices únicos), y la operación de cambiar de vínculo **no se implementa** (AD2); sus
+reglas quedan fijadas en 14 §3.2 (`draining` → `retired`, 409 `binding-draining`, nada en vuelo del
+vínculo anterior). Toda evidencia se evalúa contra el vínculo vigente; la de un vínculo anterior se
+registra y no cambia ningún estado. Ningún campo del cuerpo (`from`, `source`, handle,
 `author`, etiquetas, texto, `@`) aporta identidad.
 
 ## 2. Persistencia
@@ -67,16 +73,31 @@ CREATE TABLE IF NOT EXISTS project_agents (
   agent_id       TEXT PRIMARY KEY,
   project_id     TEXT NOT NULL REFERENCES projects(project_id),
   handle         TEXT NOT NULL,
-  st_session_id  TEXT NOT NULL REFERENCES sessions(session_id),
   provider       TEXT NOT NULL DEFAULT 'claude-code' CHECK (provider IN ('claude-code')), -- 'codex' reservado: se agrega con su adaptador
-  role           TEXT,                       -- ≤ 60, para el selector
+  role           TEXT,                       -- ≤ 60, texto libre: ningún comportamiento depende del rol (AD3)
+  template_id    TEXT,                       -- plantilla de origen, copiada al crear (AD4); NULL sin plantilla
+  template_version INTEGER,
   created_at     TEXT NOT NULL DEFAULT (datetime('now')),
   removed_at     TEXT,
   UNIQUE (project_id, handle)
 );
--- una sesión pertenece como mucho a un agente activo (v1: agente ↔ sesión 1:1)
-CREATE UNIQUE INDEX IF NOT EXISTS idx_project_agents_session
-  ON project_agents(st_session_id) WHERE removed_at IS NULL;
+-- vínculo versionado agente ↔ sesión (AD1); el historial nunca se borra
+CREATE TABLE IF NOT EXISTS agent_bindings (
+  binding_id     TEXT PRIMARY KEY,
+  agent_id       TEXT NOT NULL REFERENCES project_agents(agent_id),
+  epoch          INTEGER NOT NULL,
+  st_session_id  TEXT NOT NULL REFERENCES sessions(session_id),
+  state          TEXT NOT NULL CHECK (state IN ('active','draining','retired')),
+  created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  retired_at     TEXT,
+  retire_reason  TEXT,
+  UNIQUE (agent_id, epoch)
+);
+-- MVP, por política (se puede levantar sin cambiar la identidad, AD8):
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_bindings_live_agent
+  ON agent_bindings(agent_id) WHERE state IN ('active','draining');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_bindings_live_session
+  ON agent_bindings(st_session_id) WHERE state IN ('active','draining');
 CREATE TABLE IF NOT EXISTS project_agent_edges (
   project_id     TEXT NOT NULL REFERENCES projects(project_id),
   from_agent_id  TEXT NOT NULL REFERENCES project_agents(agent_id),
@@ -114,8 +135,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_participants_live
 
 Borrado: "quitar" un agente pone `removed_at` (y sus participaciones pasan a `removed`); un proyecto
 se archiva; una conversación anfitriona se archiva (`archived_at`). Nada se borra en v1 salvo el hard
-delete de la sesión, que **MUST** fallar con 409 `agent-active` mientras la sesión sea un agente
-activo (el owner lo quita primero). Ninguna columna existente cambia.
+delete de la sesión, que **MUST** fallar con 409 `agent-active` mientras la sesión tenga un vínculo
+`active` o `draining` (el owner quita el agente primero, lo que retira el vínculo). Ninguna columna existente cambia.
 
 `chats` y `chat_participants` son el **conjunto vigente**: el cambio de participaciones es un CAS sobre
 `participants_version` (la escritura incluye `WHERE participants_version = ?`), y el log de la
