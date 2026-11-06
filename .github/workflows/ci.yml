@@ -61,6 +61,65 @@ jobs:
       - name: Tests
         run: npm test
 
+  # The backend image must contain exactly what a clean `tsc` of the checked-out
+  # sources produces — nothing from the build host's working tree. A deploy
+  # checkout accumulates a local backend/dist (and node_modules) over time, tsc
+  # never deletes outputs whose source is gone, and the build context is the
+  # repo root, so a stale dist/ringBuffer.js from a months-old local build rode
+  # into production (2026-11-06). This job contaminates the tree the way that
+  # host was, builds the real Dockerfile, and requires the image's dist to be
+  # byte-identical to a clean build: any extra, missing or different file fails.
+  backend-image:
+    name: Backend image (clean dist, no host residue)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      # Same lockfile as the image's build stage, so the same tsc: the clean
+      # build here is the reference the image is compared against.
+      - name: Reference build (clean)
+        working-directory: backend
+        run: |
+          npm ci
+          rm -rf dist
+          npx tsc -p tsconfig.json
+          find dist -type f | LC_ALL=C sort | xargs sha256sum > "$RUNNER_TEMP/ref.txt"
+          wc -l < "$RUNNER_TEMP/ref.txt"
+
+      # What the deploy host had, plus the other host-only things the old
+      # `COPY backend/ .` would have carried into the build stage.
+      - name: Contaminate the working tree
+        run: |
+          echo 'throw new Error("host residue reached the image")' > backend/dist/planted-orphan.js
+          mkdir -p backend/node_modules/.planted && touch backend/node_modules/.planted/marker
+          echo 'PLANTED_SECRET=1' > backend/.env
+
+      - name: Build the backend image
+        run: |
+          docker build -t st-backend-hygiene .
+          docker build --target build -t st-backend-hygiene-build .
+
+      - name: Image dist equals the clean build
+        run: |
+          docker run --rm --network none --entrypoint sh st-backend-hygiene \
+            -c 'cd /app && find dist -type f | LC_ALL=C sort | xargs sha256sum' > "$RUNNER_TEMP/img.txt"
+          diff -u "$RUNNER_TEMP/ref.txt" "$RUNNER_TEMP/img.txt"
+
+      - name: Build stage carries nothing from the host
+        run: |
+          docker run --rm --network none --entrypoint sh st-backend-hygiene-build \
+            -c 'test ! -e /build/node_modules/.planted && test ! -e /build/.env && test ! -e /build/dist/planted-orphan.js'
+
   frontend:
     name: Frontend (tsc + vite build)
     runs-on: ubuntu-latest
