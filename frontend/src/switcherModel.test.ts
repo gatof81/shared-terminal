@@ -44,9 +44,9 @@ function conv(over: Partial<ConversationSummary> = {}): ConversationSummary {
 }
 
 describe("bucketOf — states come from the presentation, never from age or canSendInput alone", () => {
-	it("a fresh permission or input wait needs the person", () => {
+	it("only a fresh permission prompt needs the person; Claude fresh at its prompt is 'ready' (option A)", () => {
 		expect(bucketOf(conv({ status: "waiting_permission" }), NOW).bucket).toBe("attention");
-		expect(bucketOf(conv({ status: "waiting_input" }), NOW).bucket).toBe("attention");
+		expect(bucketOf(conv({ status: "waiting_input" }), NOW).bucket).toBe("ready");
 	});
 	it("a fresh run or background wait is working", () => {
 		expect(bucketOf(conv({ status: "running" }), NOW).bucket).toBe("working");
@@ -78,7 +78,7 @@ describe("bucketOf — states come from the presentation, never from age or canS
 	it("canSendInput does not change the bucket", () => {
 		expect(bucketOf(conv({ status: "running", canSendInput: true }), NOW).bucket).toBe("working");
 		expect(bucketOf(conv({ status: "waiting_input", canSendInput: false }), NOW).bucket).toBe(
-			"attention",
+			"ready",
 		);
 	});
 });
@@ -89,7 +89,7 @@ describe("items, sections and search", () => {
 		const i = toItem(conv({ sessionId: "conv-9" }), proj, NOW);
 		expect(i).toMatchObject({ sessionId: "s1", projectName: "my-project", cid: "conv-9" });
 	});
-	it("sections in order attention → working → recent → quiet, newest first inside", () => {
+	it("sections in order attention → working → ready → recent → quiet, newest first inside", () => {
 		const items = [
 			toItem(conv({ sessionId: "a", status: "ended", lastEventAt: ago(5000) }), proj, NOW),
 			toItem(conv({ sessionId: "b", status: "unknown" }), proj, NOW),
@@ -102,8 +102,9 @@ describe("items, sections and search", () => {
 			),
 		];
 		const s = sectionize(items);
-		expect(s.map((x) => x.bucket)).toEqual(["attention", "working", "recent", "quiet"]);
-		expect(s[0]?.items.map((i) => i.cid)).toEqual(["e", "d"]);
+		expect(s.map((x) => x.bucket)).toEqual(["attention", "working", "ready", "recent", "quiet"]);
+		expect(s[0]?.items.map((i) => i.cid)).toEqual(["e"]);
+		expect(s[2]?.items.map((i) => i.cid)).toEqual(["d"]);
 	});
 	it("archived conversations appear only while live again (the Chat 'Active' set)", () => {
 		expect(visibleInSwitcher(conv({ archivedAt: ago(1000), status: "ended" }), NOW)).toBe(false);
@@ -288,5 +289,12 @@ describe("parallel work at a glance", () => {
 			"Now: 1 working in 1 project — 1 project not loaded, so this may be incomplete.",
 		);
 		expect(parallelSummaryText(parallelSummary([], [ok(a)]))).toBeNull();
+		// Ready is a count only, after the rest, never "needs you".
+		const r = parallelSummary(
+			[toItem(conv({ sessionId: "c9", status: "waiting_input" }), a, NOW)],
+			[ok(a)],
+		);
+		expect(r).toMatchObject({ attention: 0, ready: 1 });
+		expect(parallelSummaryText(r)).toBe("Now: 1 ready.");
 	});
 });
