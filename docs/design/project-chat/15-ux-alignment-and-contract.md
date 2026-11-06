@@ -118,8 +118,9 @@ sesiones por agente (E9); verificación de evidencias (E8).
    - La UI se entera por `features.projectChat` en `GET /api/auth/status`, que es una superficie
      nueva (E-6).
 5. **Owner-only** (R5): lo ajeno da 404, igual que lo inexistente. No hay admin, lead ni observe (B6).
-6. **Cada campo lleva su fase.** Un campo de una fase que todavía no está habilitada no aparece, nunca
-   se simula.
+6. **Cada campo lleva su fase.** Un campo de una fase que todavía no está habilitada no aparece y nunca
+   se simula. La única excepción son las columnas **reservadas** (como `template`), que aparecen siempre
+   como `null`.
 
 ### 3.2 Entidades (ejemplo: Educación HZ)
 
@@ -184,12 +185,16 @@ comentados. *Fixtures*: [`fixtures/educacion-hz.json`](./fixtures/educacion-hz.j
 | --- | --- | --- | --- | --- |
 | `working` | trabajando | conversación viva `running`/`waiting_background` con evidencia fresca (< 10 min) | P3a | trabajando |
 | `waiting_input` | esperando input | `waiting_input` fresco; **verificado sólo si `source: probe`** (`hook:Stop` lo pone sin comprobar identidad, CONVERSATION.md §5.3) | P3a | «listo», no «necesita atención» |
-| `needs_attention` | esperando permiso / terminal | `waiting_permission` (P3a), indicado en `detail`; `needs-terminal` es un código del Composer y sólo aparece con su probe (P6) | P3a / P6 | necesita atención |
-| `disconnected` | desconectado | la sesión del vínculo no está `running`, o la captura dice `disconnected` o `ended · probe:absent` (sin `claude`) | P3a | — |
+| `needs_attention` | esperando permiso | `waiting_permission`, indicado en `detail`. `needs-terminal` es una precondición que el Composer comprueba en cada envío (3.2): nunca se muestra como presencia | P3a | necesita atención |
+| `disconnected` | desconectado | la sesión del vínculo no está `running`, o la conversación que decide (ver abajo) está `disconnected` o `ended` (por hook `SessionEnd` o por `probe:absent`) | P3a | — |
 | `no_channel` | sin canal | runtime no registrado | **P6** | — |
 | `degraded` | canal sin respuesta | runtime `degraded` | **P6** | necesita atención |
 | `ambiguous` | ambiguo | dos runtimes | **P6** | necesita atención |
 | `unknown` | — | sin evidencia, con evidencia vieja, o estados de captura `error`/`ending` | P3a | nunca cuenta como cero |
+
+**Qué conversación decide:** la más reciente de la sesión vinculada que tenga un pane ligado en el
+arranque actual del contenedor (CONVERSATION.md §5.2, bindings por arranque). Una conversación vieja
+`ended` (por ejemplo, tras `/clear`) no hace parecer desconectado a un agente vivo.
 
 **En P3a** la presencia sale **sólo** de `sessions.status` y del estado de la captura, igual que
 `GET …/conversations?capture=0`, sin probe ni Docker. Ningún agente aparece como `no_channel` porque
@@ -213,8 +218,8 @@ directamente de la lista:
 
 ```jsonc
 // GET /api/projects/:pid/tasks/:tid   (lectura nueva E-5, de T1; este ejemplo muestra datos de T2:
-// despacho, intento y STOP de una tarea activa. En T1 sólo existen awaiting_approval/queued/cancelled
-// e instrucciones UPDATE/STOP sobre pendientes, aplicadas por el backend)
+// despacho, intento y STOP de una tarea activa. En T1 sólo existen queued/cancelled (awaiting_approval
+// desde T3) e instrucciones UPDATE/STOP sobre pendientes, aplicadas por el backend)
 {
   "taskId": "70…0101", "taskKey": "T-101", "projectId": "6b1f2c3d-…",
   "assigneeAgentId": "a0…a2", "creator": "user:u-1", "state": "active", "rev": 7, "version": 2,
@@ -326,9 +331,9 @@ completo.
 
 | # | Decisión | Opciones | Recomendación |
 | --- | --- | --- | --- |
-| **D-UX0** | Precedencia. #554 atribuye al responsable los 5 estados, «los roles vienen de plantillas» y los repos/políticas de proyecto; esto contradice TD1–TD11, AD3/AD4 y R5 | (a) valen TD, AD y R5; (b) vale lo que cita #554 y se revisan 13 y 14 | **(a)**. Si el responsable confirma (b), se reabren 13 §2.3 y AD3/AD4 |
+| **D-UX0** | Precedencia. #554 atribuye al responsable los 5 estados y «los roles vienen de plantillas», que contradicen TD1–TD11 y AD3/AD4; y los repos/políticas de proyecto, que se piden confirmar como futuros | (a) valen TD, AD y R5; (b) vale lo que cita #554 y se revisan 13 y 14 | **(a)**. Si el responsable confirma (b), se reabren 13 §2.3 y AD3/AD4 |
 | D-UX1 (B1) | Estados de tarea del contrato | (a) los 10 de 13 + grupos; (b) los 5 de #554 | **(a)** |
-| D-UX2 (B2, E-8) | Dónde vive la conversación | (a) `#/projects/<pid>/agents/<aid>/chat[/<chatId>]`, con `#/sessions/<sid>/hostchat/<chatId>` como alias (segmento propio, porque `#/sessions/<sid>/chat/<detail>` ya lleva el `cid` de la captura y los dos son UUID; esto corrige también 06 §1) y la actividad del proyecto como proyección (E6); (b) un canal de proyecto con hilos | **(a)**, que enmienda 06 §1 y 05 P7. Con AD1 la conversación pertenece al **agente**, así que una URL atada a la sesión se rompe cuando cambia el vínculo. Se usa el mismo componente que la vista Chat: B define el protocolo y A la UI |
+| D-UX2 (B2, E-8) | Dónde vive la conversación | (a) `#/projects/<pid>/agents/<aid>/chat[/<chatId>]`, con `#/sessions/<sid>/hostchat/<chatId>` como alias. El alias tiene segmento propio porque `#/sessions/<sid>/chat/<detail>` ya lleva el `cid` de la captura y los dos son UUID; esto corrige también 06 §1. Es **sólo una redirección**: resuelve `chatId` → agente anfitrión → `#/projects/<pid>/agents/<aid>/chat/<chatId>`, ignora `<sid>` (o responde «no encontrado» si la conversación no es del owner) y nunca se guarda como vista y la actividad del proyecto como proyección (E6); (b) un canal de proyecto con hilos | **(a)**, que enmienda 06 §1 y 05 P7. Con AD1 la conversación pertenece al **agente**, así que una URL atada a la sesión se rompe cuando cambia el vínculo. Se usa el mismo componente que la vista Chat: B define el protocolo y A la UI |
 | D-UX3 (B4) | Rol y plantilla | (a) rol libre + procedencia; (b) `roleTemplateId` vivo | **(a)** |
 | D-UX4 (B5) | `members[]` | (a) fuera del MVP; (b) incluir | **(a)** |
 | D-UX5 | Aprobación de deploys (D-8) | (a) fuera del sistema: el pedido es un mensaje o una tarea para una persona, y «aprobar» no ejecuta nada; (b) un flujo del sistema | **(a)** en el MVP |
