@@ -34,7 +34,7 @@ flowchart LR
 ```
 
 Actualización 2026-11-06 (b): **P3a — directorio de proyecto** (`projects`, `project_agents`,
-`agent_bindings` y sus lecturas, detrás de `PROJECTS_ENABLED`, sin conversaciones, entregas ni
+`agent_bindings` y sus lecturas, detrás de `PROJECT_CHAT_ENABLED`, sin conversaciones, entregas ni
 Channels) se propone desacoplada del GO de la POC: [15](./15-ux-alignment-and-contract.md) §5,
 decisión **D-UX8, pendiente de aprobación**. Hasta esa decisión, P3 sigue detrás del GO.
 

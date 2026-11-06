@@ -30,11 +30,14 @@ en esta versión.
   el mismo día:
   1. estados de tarea «queued, active, blocked, interrupted, completed», contra TD1–TD11 (13 §2.3);
   2. «los roles vienen de plantillas», contra AD3/AD4;
-  3. «Project agrupa agentes, recursos, repositorios y políticas», contra los repos por sesión y R5.
+  3. «Project agrupa agentes, recursos, repositorios y políticas». No contradice ninguna decisión
+     aprobada: hoy los repos son de cada sesión (14 §1), así que repos y políticas de proyecto serían
+     una capacidad **futura**. Se pide confirmar que quedan fuera del MVP.
 - **Seis diferencias bloqueantes de contrato** (§2.1, B1–B6). Además de las anteriores: el canal de
   proyecto con hilos, las evidencias sin marca de «afirmada», `members[]` y el acceso de
   admin/lead/observe.
-- **Contrato propuesto** (§3): una sola lectura nueva justificada, y cada campo etiquetado con su fase.
+- **Contrato propuesto** (§3): una sola lectura nueva en P3a (más las de tareas en T1), y cada campo
+  etiquetado con su fase.
 - **Próximo incremento:**
   - ya permitido por los gates: este contrato, los *fixtures* y los refactors de solo frontend que A
     identificó;
@@ -75,7 +78,7 @@ Coincidencias sin acción:
 | **B1** | Estados de tarea: #554 usa 5 (`queued`, `active`, `blocked`, `interrupted`, `completed`) y trata `interrupted` como no terminal. 13 define 10 (`awaiting_approval`, `queued`, `dispatching`, `dispatch_uncertain`, `active`, `completed`, `stopped`, `cancelled`, `failed`, `interrupted`, este último terminal y sin reanudación, TD11) más los estados de instrucción (13 §2.4) | Con 5 estados la UI no distingue «detenida según el agente» de «completada», «cancelada antes de empezar» de «falló», ni «despacho incierto» de «activa», que son justo las distinciones de TD6 y 13 §2.4 | **Canónicos = los de 13.** Los de #554 pasan a ser **grupos de presentación** (§3.4); `blocked` pasa a ser **avisos**. El registro de instrucciones usa los estados de 13 §2.4 |
 | **B2** | `/projects/<pid>/channel[/<threadId>]`: un canal de proyecto con hilos, con `message.created{threadId}` | La arquitectura tiene **una conversación anfitriona por agente** con invitados (R10–R15), y la vista de proyecto es una **proyección** (AD7). Un canal con hilos sería otra fuente de verdad, o una entidad nueva sin anfitrión, en contra de R10 | D-UX2 |
 | **B3** | `refs[]` sin estado de verificación, y «QA ✓» en el wireframe | Una afirmación del agente se vería como un hecho (AD10) | Las referencias de evidencia llevan `verification: "claimed"` (MVP), `claimedBy` y `bindingId`; la UI dice «según @qa-hz». ✓ sólo con verificación (E8, futuro) |
-| **B4** | `roleTemplateId` como referencia viva del agente | AD4: la plantilla se **copia**, y una referencia viva cambiaría agentes existentes al editarla. 14 D-T prevé un perfil de permisos *sugerido* en la plantilla, pero sólo se aplica con la confirmación del owner al crear el agente | Agent: `role` (texto) + `template: {templateId, templateVersion} \| null`, sólo como procedencia. `RoleTemplate` es E3 |
+| **B4** | `roleTemplateId` como referencia viva del agente | AD4: la plantilla se **copia**, y una referencia viva cambiaría agentes existentes al editarla. 14 D-T prevé un perfil de permisos *sugerido* en la plantilla, pero sólo se aplica con la confirmación del owner al crear el agente | Agent: `role` (texto) + `template: {templateId, templateVersion} \| null`, sólo como procedencia y **desde E3**. En P3a la columna queda reservada y siempre `null` (14 D-T) |
 | **B5** | `Project.members[]` | R5 y 01 §5: proyectos de **un** owner en fase 1 | Sin `members` en el MVP; compartir proyectos es una decisión futura |
 | **B6** | Admin, lead y observe sobre proyectos (#554 §10, D-7); agentes creados «por un camino admin» (#554 §5) | R5; 03 §7 «Admin / lead: nada en v1 (404)»; 13 §4 dice lo mismo | Sin acceso de admin, lead ni observe a proyectos, agentes ni tareas en v1. Los agentes los crea **sólo el owner**, con `POST …/agents` |
 
@@ -108,7 +111,8 @@ sesiones por agente (E9); verificación de evidencias (E8).
    identidad.
 3. **Todo estado que se muestra lleva evidencia** `{value, source, at}`. Si falta o está vieja, el
    valor es `unknown`.
-4. **Bandera:** todo va detrás de `PROJECT_CHAT_ENABLED` (02 §8).
+4. **Bandera:** todo va detrás de `PROJECT_CHAT_ENABLED` (02 §8). Encenderla para P3a habilita sólo
+   P3a; cada fase posterior llega con su propia sub-bandera o GO (02 §8: «y por agente»).
    - Con la bandera apagada, las rutas no se montan (404) y las respuestas existentes quedan
      byte-idénticas.
    - La UI se entera por `features.projectChat` en `GET /api/auth/status`, que es una superficie
@@ -134,11 +138,11 @@ comentados. *Fixtures*: [`fixtures/educacion-hz.json`](./fixtures/educacion-hz.j
       // T1: "activeTask"   T2: "queue"   P6: "runtime": {registered, degraded?, reason?}
     },
     { "agentId": "a0…a2", "handle": "developer-hz", "role": "Developer", "provider": "claude-code",
-      "template": { "templateId": "d0…d1", "templateVersion": 3 },
+      "template": null,
       "binding": { "bindingId": "b0…b2", "epoch": 1, "sessionId": "a724…", "state": "active" },
       "presence": { "value": "working", "source": "hook", "at": "2026-11-10T14:02:40Z" } },
     { "agentId": "a0…a3", "handle": "developer-hz-2", "role": "Developer", "provider": "claude-code",
-      "template": { "templateId": "d0…d1", "templateVersion": 3 },
+      "template": null,
       "binding": { "bindingId": "b0…b5", "epoch": 1, "sessionId": "7e11…", "state": "active" },
       "presence": { "value": "unknown", "source": "capture", "at": "2026-11-10T13:31:02Z" } },  // evidencia vieja (> 10 min)
     { "agentId": "a0…a4", "handle": "qa-hz", "role": "QA & Release",
@@ -156,7 +160,7 @@ comentados. *Fixtures*: [`fixtures/educacion-hz.json`](./fixtures/educacion-hz.j
 // GET /api/projects/:pid/agents/:aid   (lectura NUEVA: E-3) — detalle con el historial de vínculos
 {
   "agentId": "a0…a2", "projectId": "6b1f2c3d-…", "handle": "developer-hz", "role": "Developer",
-  "provider": "claude-code", "template": { "templateId": "d0…d1", "templateVersion": 3 },
+  "provider": "claude-code", "template": null,
   "capabilities": { "capture": true, "channels": false, "directControl": true },  // declaradas por el adaptador (02 §5.2); channels sólo tras el GO
   "binding": { "bindingId": "b0…b2", "epoch": 1, "sessionId": "a724…", "state": "active", "createdAt": "2026-11-10T13:05:00Z" },
   "bindings": [ { "bindingId": "b0…b2", "epoch": 1, "sessionId": "a724…", "state": "active",
@@ -179,13 +183,13 @@ comentados. *Fixtures*: [`fixtures/educacion-hz.json`](./fixtures/educacion-hz.j
 | `value` | 06 §5 | Fuente | Fase | Atención (#550, opción A) |
 | --- | --- | --- | --- | --- |
 | `working` | trabajando | conversación viva `running`/`waiting_background` con evidencia fresca (< 10 min) | P3a | trabajando |
-| `waiting_input` | esperando input | `waiting_input` verificado y fresco | P3a | «listo», no «necesita atención» |
-| `needs_attention` | esperando permiso / terminal | `waiting_permission` o `needs-terminal`, indicado en `detail` | P3a | necesita atención |
-| `disconnected` | desconectado | en P3a, la sesión del vínculo no está `running`; desde P6, también un probe sin `claude` | P3a / P6 | — |
+| `waiting_input` | esperando input | `waiting_input` fresco; **verificado sólo si `source: probe`** (`hook:Stop` lo pone sin comprobar identidad, CONVERSATION.md §5.3) | P3a | «listo», no «necesita atención» |
+| `needs_attention` | esperando permiso / terminal | `waiting_permission` (P3a), indicado en `detail`; `needs-terminal` es un código del Composer y sólo aparece con su probe (P6) | P3a / P6 | necesita atención |
+| `disconnected` | desconectado | la sesión del vínculo no está `running`, o la captura dice `disconnected` o `ended · probe:absent` (sin `claude`) | P3a | — |
 | `no_channel` | sin canal | runtime no registrado | **P6** | — |
 | `degraded` | canal sin respuesta | runtime `degraded` | **P6** | necesita atención |
 | `ambiguous` | ambiguo | dos runtimes | **P6** | necesita atención |
-| `unknown` | — | sin evidencia, o con evidencia vieja | P3a | nunca cuenta como cero |
+| `unknown` | — | sin evidencia, con evidencia vieja, o estados de captura `error`/`ending` | P3a | nunca cuenta como cero |
 
 **En P3a** la presencia sale **sólo** de `sessions.status` y del estado de la captura, igual que
 `GET …/conversations?capture=0`, sin probe ni Docker. Ningún agente aparece como `no_channel` porque
@@ -208,7 +212,9 @@ directamente de la lista:
 (13 §3.1).
 
 ```jsonc
-// GET /api/projects/:pid/tasks/:tid   (T1; lectura nueva E-5)
+// GET /api/projects/:pid/tasks/:tid   (lectura nueva E-5, de T1; este ejemplo muestra datos de T2:
+// despacho, intento y STOP de una tarea activa. En T1 sólo existen awaiting_approval/queued/cancelled
+// e instrucciones UPDATE/STOP sobre pendientes, aplicadas por el backend)
 {
   "taskId": "70…0101", "taskKey": "T-101", "projectId": "6b1f2c3d-…",
   "assigneeAgentId": "a0…a2", "creator": "user:u-1", "state": "active", "rev": 7, "version": 2,
@@ -241,8 +247,8 @@ y la tarea **referencia** ese mensaje.
 
 | Superficie | Fase | Tipo | Justificación |
 | --- | --- | --- | --- |
-| `POST /api/projects`, `GET /api/projects` | P3a | existe en 03 | — |
-| `POST /api/projects/:pid/agents` | P3a | existe en 03; **E-1** | `role` y la procedencia de la plantilla (AD3/AD4); `clientRequestId` para idempotencia |
+| `POST /api/projects`, `GET /api/projects` | P3a | existe en 03; **E-9** para `POST` | `clientRequestId` |
+| `POST /api/projects/:pid/agents` | P3a | existe en 03; **E-1** | `role` (AD3) y `clientRequestId` para idempotencia |
 | `GET /api/projects/:pid/agents` | P3a | existe en 03; **E-2** | presencia de 06 §5 y `binding`; runtime y cola aparecen en su fase |
 | `GET /api/projects/:pid/agents/:aid` | P3a | **nueva (E-3)** | página del agente con el historial de vínculos. Meterlo en la lista la haría crecer con cada vínculo |
 | `DELETE /api/projects/:pid/agents/:aid` | P3a | existe en 03, **sin cambios** | retira el agente y su vínculo (`retired`, `agent-removed`). Entregas no terminales ⇒ `failed{agent-removed}` (03), que en P3a no existen |
@@ -285,8 +291,11 @@ y la tarea **referencia** ese mensaje.
 | 409 `tasks-unverifiable` | log de tareas ilegible | 13 §6 | «no se puede verificar; nada se despacha» |
 | 409 `participants-changed` | 03 §6.1 | 03 | conserva el borrador |
 
-**Idempotencia:** cada `POST` lleva un id de cliente (`clientRequestId`, `clientMessageId` o
-`clientInstructionId`), creado en cada clic. Igual que el Composer, nunca se reintenta solo.
+**Idempotencia:** cada `POST` **nuevo o enmendado en este documento** lleva un id de cliente
+(`clientRequestId`, `clientInstructionId`; `clientMessageId` ya existe en 03), creado en cada clic.
+Igual que el Composer, nunca se reintenta solo. Los demás `POST` de 03 (`archive`, `collab`,
+`decision`, `approve`, `cancel`, `channel/retry`) no cambian aquí: su idempotencia se decide en P3
+completo.
 
 ### 3.7 Historial y compatibilidad
 
@@ -303,7 +312,7 @@ y la tarea **referencia** ese mensaje.
 
 | Id | Texto vigente | Propuesta |
 | --- | --- | --- |
-| E-1 | 03 §6.1 `POST …/agents {handle, sessionId}` | `{handle, role, sessionId, template?, clientRequestId}`; crea el agente y su `agent_bindings{epoch: 1}` |
+| E-1 | 03 §6.1 `POST …/agents {handle, sessionId}` | `{handle, role, sessionId, clientRequestId}` (P3a; `template` recién en E3); crea el agente y su `agent_bindings{epoch: 1}` |
 | E-2 | 03 §6.1 `GET …/agents` → `state`, `statusEvidence`, `runtime`, `queueDepth` | `presence{value, detail?, source, at}` (06 §5), `binding` y `template`; `runtime` (P6) y `queue` (T2) aparecen en su fase |
 | E-3 | — | `GET /api/projects/:pid/agents/:aid` |
 | E-4 | `GET /api/sessions` sin datos de proyecto | + `binding` derivado, sólo con la bandera encendida |
@@ -311,6 +320,7 @@ y la tarea **referencia** ese mensaje.
 | E-6 | `GET /api/auth/status` sin `features` | `features.projectChat: boolean` |
 | E-7 | 03 §6.1 `WS /ws/project/<pid>` con `subscribe{chat, after}` | + `subscribe{tasks, after}`, con el seq del log de tareas, y `subscribe{agents}`, con *snapshot* + deltas y sin garantía de huecos |
 | E-8 | 06 §1: conversación en `#/sessions/<sid>/chat/<chatId>`; 05 P7: «no es una pantalla de proyecto» | ver D-UX2 |
+| E-9 | 03 §6.1 `POST /api/projects {name}` | `{name, clientRequestId}` |
 
 ## 4. Decisiones que necesitan aprobación
 
@@ -318,7 +328,7 @@ y la tarea **referencia** ese mensaje.
 | --- | --- | --- | --- |
 | **D-UX0** | Precedencia. #554 atribuye al responsable los 5 estados, «los roles vienen de plantillas» y los repos/políticas de proyecto; esto contradice TD1–TD11, AD3/AD4 y R5 | (a) valen TD, AD y R5; (b) vale lo que cita #554 y se revisan 13 y 14 | **(a)**. Si el responsable confirma (b), se reabren 13 §2.3 y AD3/AD4 |
 | D-UX1 (B1) | Estados de tarea del contrato | (a) los 10 de 13 + grupos; (b) los 5 de #554 | **(a)** |
-| D-UX2 (B2, E-8) | Dónde vive la conversación | (a) `#/projects/<pid>/agents/<aid>/chat[/<chatId>]`, con `#/sessions/<sid>/chat/<chatId>` como alias y la actividad del proyecto como proyección (E6); (b) un canal de proyecto con hilos | **(a)**, que enmienda 06 §1 y 05 P7. Con AD1 la conversación pertenece al **agente**, así que una URL atada a la sesión se rompe cuando cambia el vínculo. Se usa el mismo componente que la vista Chat: B define el protocolo y A la UI |
+| D-UX2 (B2, E-8) | Dónde vive la conversación | (a) `#/projects/<pid>/agents/<aid>/chat[/<chatId>]`, con `#/sessions/<sid>/hostchat/<chatId>` como alias (segmento propio, porque `#/sessions/<sid>/chat/<detail>` ya lleva el `cid` de la captura y los dos son UUID; esto corrige también 06 §1) y la actividad del proyecto como proyección (E6); (b) un canal de proyecto con hilos | **(a)**, que enmienda 06 §1 y 05 P7. Con AD1 la conversación pertenece al **agente**, así que una URL atada a la sesión se rompe cuando cambia el vínculo. Se usa el mismo componente que la vista Chat: B define el protocolo y A la UI |
 | D-UX3 (B4) | Rol y plantilla | (a) rol libre + procedencia; (b) `roleTemplateId` vivo | **(a)** |
 | D-UX4 (B5) | `members[]` | (a) fuera del MVP; (b) incluir | **(a)** |
 | D-UX5 | Aprobación de deploys (D-8) | (a) fuera del sistema: el pedido es un mensaje o una tarea para una persona, y «aprobar» no ejecuta nada; (b) un flujo del sistema | **(a)** en el MVP |
@@ -326,7 +336,7 @@ y la tarea **referencia** ese mensaje.
 | D-UX7 | Nombres (D-1) | «Subagentes» | aceptar |
 | D-UX8 | Directorio P3a antes del GO de la POC | (a) P3 entero tras el GO, como hoy; (b) **P3a** ahora, detrás de la bandera, sin conversaciones, entregas, tareas ni Channels | **(b)**: identidad y vínculo no dependen del transporte. P3a **no** satisface la dependencia P3 de T1, que sigue tras el GO |
 | D-UX9 (B6) | Acceso de admin, lead y observe; quién crea los agentes | (a) sólo el owner en v1 (R5); (b) los tiers de hoy | **(a)** |
-| D-UX10 | Enmiendas E-1 a E-8 | aprobar o ajustar | aprobarlas junto con lo anterior |
+| D-UX10 | Enmiendas E-1 a E-9 | aprobar o ajustar | aprobarlas junto con lo anterior |
 
 ## 5. Roadmap de la próxima etapa
 
@@ -341,7 +351,7 @@ y la tarea **referencia** ese mensaje.
 | T1 | T0 + P3 completo (no P3a) | bloqueada |
 | T2 | T1 + P6 + TG1–TG5 | bloqueada |
 | T3 | T2 + P8 + G3-2 | bloqueada |
-| Release de G3-1 | merge de #555, preflight de A y autorización explícita | **nada ejecutado**; READY FOR OPERATOR PREFLIGHT |
+| Release de G3-1 | merge de #555, preflight de A y autorización explícita | **nada ejecutado** (11: «Procedimiento final, nada ejecutado»); falta el preflight de A (11 §8.A) |
 | G3-1 `observe` / `true` | `observe` necesita autorización propia; `true`, el PASS de `observe` | pendientes |
 | G3-2 | — | NO-GO |
 
