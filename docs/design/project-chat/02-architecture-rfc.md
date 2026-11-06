@@ -50,8 +50,8 @@ Objetivos:
 6. Reutilizar backend, captura, activación y almacenamiento existentes; ningún servicio nuevo fuera
    del contenedor, ninguna base de datos ni cola nueva.
 
-No-objetivos (fase 1): tareas tipo Jira, asignaciones con estados de flujo, proyectos con varios
-humanos, edición de mensajes, adjuntos, relay de permisos, agentes headless (`-p`), teammates.
+No-objetivos (fase 1): gestión de proyectos tipo Jira (tableros, prioridades, fechas, dependencias,
+flujos configurables; 13 §7), proyectos con varios humanos, edición de mensajes, adjuntos, relay de permisos, agentes headless (`-p`), teammates.
 
 ## 3. Evidencia sobre Claude Code Channels
 
@@ -446,6 +446,27 @@ ese permiso.
   es un cambio pequeño de §8.1.3 que se hace en su propio PR (roadmap P6), no en esta fase.
 - El Terminal no cambia. Con `--channels` activo el CLI desactiva `AskUserQuestion` y plan mode
   (C20): por eso el canal se habilita **por agente**, no en todas las sesiones.
+
+### 5.8 Tareas independientes por agente (propuesta 2026-11-06, sin aprobar)
+
+Cambia el no-objetivo anterior «tareas tipo Jira» sólo en esto: una **tarea direccionable mínima**
+([13-agent-tasks.md](./13-agent-tasks.md)). Regla: **un agente no interrumpe un trabajo no relacionado
+cuando recibe una instrucción nueva.**
+
+- Trabajo nuevo = una tarea `queued` en la cola del agente; nunca se inserta en la conversación
+  activa. Una tarea activa por agente.
+- `CREATE`/`UPDATE`/`CHANGE`/`STOP` nombran siempre su `task_id`, con CAS sobre `rev` e idempotencia
+  por `client_instruction_id`. `UPDATE` sólo sobre pendientes, `CHANGE` sólo sobre activas: el verbo
+  equivocado es 409, nunca una conversión silenciosa.
+- Sobre una tarea activa, cambio y detención se piden y **los aplica el agente** en un punto seguro
+  (fin de turno, o la herramienta `task_checkpoint` dentro del turno). Nunca escritura en tmux,
+  señales, parada del contenedor ni reinicio del CLI.
+- Recibida ≠ aplicada ≠ detenida; un `STOP` pedido nunca se convierte en confirmado sin evidencia
+  (informe del agente + `turn_end` atribuible + prompt verificado).
+- El despacho es una entrega más del monitor (§5.4–§5.5, sin cambios). Las instrucciones emitidas
+  por agentes requieren aprobación humana y G3-2 (NO-GO). Ninguna tarea otorga permisos.
+
+Capas, decisiones TD1–TD11 y gates TG1–TG4: 13 §1, §8 y §9.
 
 ## 6. Fallos y recuperación
 

@@ -23,7 +23,19 @@ flowchart LR
   P7 --> P8[P8 invitaciones, aprobaciones, Colaboración]
   P8 --> P9[P9 envío por defecto vía monitor + Control Directo]
   P2 --> P10[P10 interfaz de adaptadores, sólo diseño]
+  P0 --> T0[T0 contrato de tareas, docs]
+  T0 --> T1[T1 almacén de tareas + API del owner, sin despacho]
+  P3 --> T1
+  T1 --> T2[T2 despacho + puntos seguros + CHANGE/STOP]
+  P6 --> T2
+  T2 --> T3[T3 instrucciones de agentes con aprobación]
+  P8 --> T3
+  G32[GO de G3-2] --> T3
 ```
+
+Actualización 2026-11-06: se agrega la línea **T** de tareas por agente
+([13-agent-tasks.md](./13-agent-tasks.md)), **sólo como propuesta**: nada de T1 en adelante empieza sin
+la aprobación de TD1–TD11 y sus dependencias. No cambia P1–P10 ni la POC.
 
 | Fase | Contenido | PRs | Depende de | Riesgo principal | Sale cuando |
 | --- | --- | --- | --- | --- | --- |
@@ -37,6 +49,10 @@ flowchart LR
 | **P7** | UI: **extiende la vista Chat existente de la sesión** (no es una pantalla de proyecto): carril del anfitrión y tarjetas de invitado, chip del anfitrión prellenado, selector `@` (nombre, proveedor, rol, disponibilidad), "Invitar a @x", vista previa del contexto sin nada preseleccionado, barra de participantes con "Retirar", estados de entrega; Proyectos como directorio; v2 shell; Playwright con el mock backend | 2–3 | P6 | regresión del invariante del Terminal (vista nunca redimensiona); confundir la tarjeta de un invitado con el anfitrión | e2e + capturas |
 | **P8** | `chat_post`, `chat_send`, `chat_invite` (siempre con aprobación), anclaje por `in_reply_to`, aprobaciones de mensajes e invitaciones, aristas `allow` entre participantes activos, **modo Colaboración** (permiso, presupuesto, vencimiento, "Detener", banner), límites M2–M13 | 2–3 | P7 | bucles, presión de cola, alcance de la Colaboración | tests de límites, de cadena, de 403 `not-a-participant` y de cada fin de Colaboración (`budget`, `expired`, `participant-removed`, `chat-archived`, revocada) |
 | **P9** | El envío por defecto de la conversación anfitriona pasa al monitor **sólo tras el GO de Channels**; hasta entonces sigue el Composer 3.2. Composer como "Control Directo" | 1 (frontend) | P8 + piloto + GO de Channels | confusión entre los dos caminos | decisión del responsable tras el piloto |
+| **T0** | Contrato mínimo de tareas (capa A, 13 §2) en estos documentos | 1 (docs, este draft) | P0 | confundirlo con gestión de proyectos | el responsable aprueba TD1–TD11 |
+| **T1** | Log de tareas por proyecto + snapshot (13 §6), API del owner (`CREATE`, `UPDATE`, `STOP` de pendientes = cancelar), lista de la cola en la UI; **sin despacho** | 2 (backend, UI) | T0, P3 | duplicar el store en vez de extraerlo | tests de CAS, idempotencia, verbo/estado y recuperación desde el log |
+| **T2** | Despacho como entrega del monitor, una activa por agente, SP1/SP2, `CHANGE`/`STOP` de activas, `task_*` en `st-channel` | 2 | T1, P6, TG1–TG4 en la POC | instrucciones que esperan para siempre sin punto seguro | matriz de 13 §5–§6 con fakes + smoke real |
+| **T3** | Instrucciones emitidas por agentes, siempre con aprobación humana | 1–2 | T2, P8, **GO de G3-2** | ampliar G3-2 por la puerta de atrás | tests de 403 por creador/asignado y de aprobación |
 | **P10** | Interfaz de adaptadores de runtime (`provider`, capacidades declaradas; RFC §5.2): **sólo diseño**, ningún adaptador nuevo, sin Codex ni ChatGPT | 1 (docs) | P2 | atar el monitor a Channels por descuido | revisión: estados de entrega y R8 sin referencias a Channels fuera del adaptador Claude Code |
 
 ## Riesgos transversales

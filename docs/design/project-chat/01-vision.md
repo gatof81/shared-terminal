@@ -85,7 +85,13 @@ Modelo multiproveedor **sólo como modelo**: cada agente declara `provider` (`cl
 `codex` reservado) y `role`, y su runtime se describe por un adaptador con capacidades declaradas.
 No se implementa ningún adaptador fuera de Claude Code ni ninguna integración con ChatGPT.
 
-Fuera (fase 1): tareas con estados de flujo, asignaciones, tableros (no es Jira); proyectos
+**Tareas direccionables por agente** (propuesta 2026-11-06, [13-agent-tasks.md](./13-agent-tasks.md),
+pendiente de aprobación TD1–TD11): trabajo nuevo para un agente se encola como tarea con identidad
+estable (`task_id`, `T-<n>`) y no interrumpe la que está en curso; `UPDATE`/`CHANGE`/`STOP` nombran
+siempre su tarea y se aplican en puntos seguros, nunca escribiendo en el Terminal.
+
+Fuera (fase 1): gestión de proyectos — tableros, prioridades, fechas, dependencias, flujos
+configurables, tareas para humanos (no es Jira; lista en 13 §7); proyectos
 compartidos entre personas; invitados de otro proyecto; varias conversaciones anfitrionas activas
 por agente; admin/lead leyendo chats; varios agentes por contenedor; agentes headless (`-p`) y
 teammates; adjuntos; edición o borrado de mensajes; reenvío automático de respuestas entre agentes;
