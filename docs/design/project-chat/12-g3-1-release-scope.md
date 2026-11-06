@@ -6,8 +6,9 @@ responsable (D1-a) **sólo** para ese artefacto; candidato = `main` con la corre
 (D2-C).** Claude no tiene ni debe
 tener acceso a VM100. Lo que exige el host lo hace un operador autorizado, **sólo con lecturas**: sin
 backup, deploy, build, recreación, cambio de variables ni operación que altere contenedores o
-sesiones. `observe` no se inicia. G3-2 sigue en NO-GO. Destino propuesto: `a93232f` (#545). Hoy
-`main` está en `04f602b` (#550, sólo docs), con el **mismo backend compilado** que `a93232f`.
+sesiones. `observe` no se inicia. G3-2 sigue en NO-GO. **Destino vigente: `R` = `main` tras el merge
+de #555** (D2-C, §7.4), con el mismo backend compilado que `a93232f`. Las menciones a `a93232f` como
+destino en §1–§6 y en el Apéndice A son el análisis anterior a esa decisión.
 
 ## 1. SHA efectivo `D` del backend e identidad de su imagen
 
@@ -150,7 +151,7 @@ de los tests.
 
 ## 6. Recomendación y condiciones
 
-**Actualización:** con el preflight de A, la propuesta vigente está en §7.3.
+**Actualización:** con el preflight de A, la propuesta vigente está en §7.5 (destino `R`, §7.4).
 
 **Recomendación:** release conjunto a un **SHA fijo, `a93232f`** (o `04f602b`, con el mismo backend),
 condicionado a la clase de `D` que verifique el operador, según el Apéndice A:
@@ -195,7 +196,7 @@ autorizada por separado, inmediatamente antes de ejecutar el deploy.
 | Disco | 36 GB libres, 82 % usado | — | no alcanza por sí solo para decidir el gate de espacio (11 §1.1) |
 | Backup anterior | disponible, también en el NAS | — | no reemplaza el backup nuevo (11 §2) |
 | Alcance `1befd89..a93232f` | #548, #544, #551, #545; sólo #545 es runtime de backend; sin migraciones | **sí**: `git log` da esos 4; `backend/` cambia sólo en #545 (más tests de #544); `db.ts` y `session-image/` sin cambios; compose agrega sólo la línea de la bandera (vacía) | alcance confirmado |
-| `main` después de `a93232f` | #550 (docs), #552 (frontend), sin backend | **sí** | el destino sigue fijo en `a93232f` |
+| `main` después de `a93232f` | #550 (docs), #552 (frontend), sin backend | **sí**; después llegaron #553 (frontend) y #542 (docs), también sin backend | superado por D2-C: el destino es `R` |
 
 Con eso el release cae en la fila **`1befd89`** del Apéndice A (delta = sólo #545, sin migración,
 sin configuración con efecto por defecto), **a condición** de que el digest lo confirme. El checkout
@@ -207,8 +208,10 @@ Ninguna requiere escribir, reiniciar ni tocar sesiones. Se pide cuando el respon
 sin interrumpir #547.
 
 1. ~~Digest efectivo~~ **hecho** (`1b116d5a…`, §7.4). No se repite.
-2. **Imagen de rollback.** `docker image inspect 221e6851 --format '{{.Id}} {{json .RepoTags}} {{.Size}}'`
-   y `docker compose config --images` (nombre de la imagen del servicio `app`; no imprime secretos).
+2. **Imagen de rollback.** `docker image inspect 221e6851 --format '{{.Id}} {{json .RepoTags}} {{.Size}}'`,
+   `docker inspect da75082e --format '{{.Config.Image}}'` y `docker compose config --images` (nombre de
+   la imagen del servicio `app`; tienen que coincidir; no imprimen secretos), y
+   `docker run --rm --network none --entrypoint node 221e6851 -v` (versión de Node de la imagen actual).
 3. **Excepción del Dockerfile.** `git rev-parse HEAD`, `git symbolic-ref -q HEAD || echo detached`,
    `git status --porcelain`, `git diff --stat` y `sha256sum session-image/Dockerfile`. Sirve para
    comprobar después del checkout que quedó idéntica (11 §3 paso 2).
@@ -221,11 +224,14 @@ sin interrumpir #547.
    `CONVERSATION_COMPOSER_ENABLED`.
 6. **Recreaciones.** Si algún `recreate-attempt.json` tiene un contenedor `retained` (se registra para
    no tocarlo; no bloquea el deploy).
-7. **Líneas de base con hora:** `.conversation` completo (`eventsSinceBoot`, `rejectedSinceBoot`,
+7. **Entorno del operador y herramientas:** `printenv INGEST_REQUIRE_SESSION_ORIGIN` en el shell
+   desde el que se ejecutará Compose (tiene que estar vacío), `docker compose version` y
+   `command -v jq`.
+8. **Líneas de base con hora:** `.conversation` completo (`eventsSinceBoot`, `rejectedSinceBoot`,
    `gapsSinceBoot`), sesiones por estado, conteos de `relay_dropped`/`relay_restart` (P6) y cantidad
-   de líneas `error` del log del backend en la última hora (P13).
+   de líneas `"level":50`/`60` del log del backend en la última hora (P13).
 
-Las lecturas 1–6 deciden si el procedimiento puede aprobarse. La 7 se repite de todos modos en la
+Las lecturas 1–7 deciden si el procedimiento puede aprobarse. La 8 se repite de todos modos en la
 ventana del deploy.
 
 ### 7.4 Discrepancia del digest (2026-11-06): diagnóstico y dos decisiones separadas
@@ -315,12 +321,12 @@ revisión está en el informe de release. Contenido:
 | 6 | Alias de Pages | no condiciona este release: el backend del rango no cambia ninguna ruta que use el frontend |
 
 **Propuesta:** release **G3-1 + higiene de la imagen**, al SHA `R` de `main` tras el merge de #555, con el procedimiento de
-[11-g3-1-deploy-plan.md](./11-g3-1-deploy-plan.md) §1–§4. Pendiente para el deploy: (a) el merge de #555, que fija `R`; (b) las lecturas 2–7 de §7.2 (la 1 ya
+[11-g3-1-deploy-plan.md](./11-g3-1-deploy-plan.md) §1–§4. Pendiente para el deploy: (a) el merge de #555, que fija `R`; (b) las lecturas 2–8 de §7.2 (la 1 ya
 está hecha y no se repite); (c) la autorización del deploy y de cada etapa de escritura.
 
 ## Apéndice A — matriz de decisión por clase de `D` (precalculada; `D` lo aporta el operador)
 
-El delta es siempre `D..a93232f` (sólo backend). Columnas: PRs de backend que entran, si se aplicaría
+El delta es siempre `D..a93232f` (sólo backend; con D2-C el destino es `R`, que tiene el mismo backend compilado). Columnas: PRs de backend que entran, si se aplicaría
 v18, configuración nueva cuyo **valor por defecto** cambia el comportamiento, riesgo dominante del
 paso y tipo de release recomendado.
 
