@@ -9,10 +9,10 @@ sesiones. `observe` no se inicia. G3-2 sigue en NO-GO. Destino propuesto: `a9323
 ## 1. SHA efectivo `D` del backend e identidad de su imagen
 
 **Hoy no se puede probar desde fuera del host.** GitHub no registra despliegues del backend (la API
-de deployments está vacía) y ningún PR anota un SHA desplegado. Lo único disponible son reportes:
-el responsable informó el 2026-11-05 que #521 estaba desplegado y que «Claude A desplegó #537». Eso
-apunta a la clase de `cf18fe0`, pero **es un reporte, no evidencia**. El HEAD del checkout de deploy
-tampoco prueba qué imagen corre.
+de deployments está vacía) y ningún PR anota un SHA desplegado. Hay menciones de despliegues
+anteriores, pero no son evidencia y **este informe no infiere `D` de ellas**: lo establece Claude A
+(operador de VM100) con la prueba de abajo. El HEAD del checkout de deploy tampoco prueba qué imagen
+corre.
 
 **Prueba por contenido (lecturas, la hace el operador).** El JS compilado de `dist/` es reproducible:
 `tsc` sale fijado por el lockfile, idéntico en todo el rango; los source maps usan rutas relativas;
@@ -81,8 +81,7 @@ un `node_modules` instalado con ese mismo lockfile, correr `tsc -p tsconfig.json
 | #541 | backend | Escrituras del índice frente a la expulsión G4 y la purga | — | — |
 | #545 | backend + ops | Origen de red de la ingesta (G3-1) | `INGEST_REQUIRE_SESSION_ORIGIN` (vacía = apagada) | Neutro apagada |
 
-**Si `D` = clase `cf18fe0`** (lo reportado, sin verificar), el delta de backend es sólo **#541 + #545**:
-sin migración ni configuración nueva.
+El delta concreto depende de `D`. El Apéndice A lo precalcula para cada clase posible.
 
 **Frontend** (Cloudflare Pages, no VM100): #504, #506, #507, #511 (una parte), #519, #525, #526, #528–#536,
 #538–#540, #543, #548, #551. **Docs y tests:** #515, #516, #527 (config de Playwright), #544, #550 y el resto
@@ -125,7 +124,7 @@ de los tests.
   - por debajo de `f113359` (#521): se pierde la protección de imágenes;
   - por debajo de `7506531` (#502): vuelve el teardown que no es fail-closed.
 - **Rollback viable:** volver a `D` con `docker compose up -d --build app`, nunca con una recreación
-  sin resolver. Con `D` = clase `cf18fe0` no hay migración que cruzar.
+  sin resolver. Si `D` ≥ `1585512`, no hay migración que cruzar (Apéndice A).
 
 ## 5. Frontend (Pages) separado del backend (VM100)
 
@@ -143,11 +142,11 @@ de los tests.
 ## 6. Recomendación y condiciones
 
 **Recomendación:** release conjunto a un **SHA fijo, `a93232f`** (o `04f602b`, con el mismo backend),
-condicionado a `D`:
-- **`D` verificado = clase `cf18fe0` o `1befd89`** ⇒ release conjunto. El delta es pequeño (#541 y
-  #545 apagado), sin migración ni configuración nueva.
-- **`D` verificado más antiguo** ⇒ **acotado**: otro plan revisado, porque el delta suma la migración
-  v18, pins `on` por defecto y la política del Composer.
+condicionado a la clase de `D` que verifique el operador, según el Apéndice A:
+- **`D` en `f113359`, `cf18fe0` o `1befd89`** ⇒ release conjunto: delta chico, sin migración ni
+  configuración nueva con efecto por defecto.
+- **`D` en `1bd575b` o anterior** ⇒ **acotado**: otro plan revisado, porque el delta suma pins `on` por
+  defecto y, según la clase, la política del Composer y la migración v18.
 - **`D` no verificado** ⇒ NO-GO.
 
 **GO para preparar la ejecución** sólo si se cumple todo:
@@ -167,3 +166,27 @@ condicionado a `D`:
 **NO-GO** ante cualquier condición sin cumplir, ante `D` sin verificar, o si alguna lectura exigiera
 una operación de escritura. **El backup** (antes P9) es escritura y pasa a una etapa posterior,
 autorizada por separado, inmediatamente antes de ejecutar el deploy.
+
+## Apéndice A — matriz de decisión por clase de `D` (precalculada; `D` lo aporta el operador)
+
+El delta es siempre `D..a93232f` (sólo backend). Columnas: PRs de backend que entran, si se aplicaría
+v18, configuración nueva cuyo **valor por defecto** cambia el comportamiento, riesgo dominante del
+paso y tipo de release recomendado.
+
+| Clase de `D` | PRs de backend que entran | v18 | Config. nueva con efecto por defecto | Riesgo dominante | Release |
+| --- | --- | --- | --- | --- | --- |
+| `a93232f` | — (ya desplegado) | no | — | — | nada que desplegar |
+| `1befd89` | #545 | no | — (`INGEST_REQUIRE_SESSION_ORIGIN` vacía = apagada) | mínimo | conjunto |
+| `cf18fe0` | #541, #545 | no | — | bajo (escrituras del índice de captura) | conjunto |
+| `f113359` | #537, #541, #545 | no | — | bajo: al reiniciar, los panes se ligan sólo a conversaciones `interactive` | conjunto |
+| `1bd575b` | #521 + las anteriores | no | **`SESSION_IMAGE_PINS=on`** (compose) | crear sesiones falla si los pins no están preparados; el build exige el script protegido | **acotado** |
+| `27bda46` | #522 + las anteriores | no | + política del Composer (`COMPOSER_CLI_MIN_VERSION`/`COMPOSER_CLI_DENY`, vacías ⇒ lista exacta) | envíos del Composer bloqueados en CLIs fuera de la lista | **acotado** |
+| `d5c7e12` | #523 + las anteriores | no | ídem | ídem; la versión decisiva pasa a ser la del proceso | **acotado** |
+| `1585512` | #520 + las anteriores | no | — (subclave de `SECRETS_ENCRYPTION_KEY`) | #513 sin #520 corre hoy: la captura se retira si falta una imagen; el deploy lo corrige sólo para contenedores acreditados | **acotado** |
+| `407870e` | #518 + las anteriores | **sí** | — | migración v18; el `PATCH` que usa el frontend #519 falla hoy | **acotado** |
+| `dd30374` | #513 + las anteriores | **sí** | — | ídem + el cambio de #513 | **acotado** |
+| `001c0b7` … `2ea5700` | #511, #508, #505, #503, #502 + las anteriores | **sí** | `JWT_SECRET` válido para los CLIs del host (#503) | delta grande: teardown, reconciliación, Composer, captura, migración | **acotado** (plan propio) |
+
+Lectura rápida: el corte está en **#521**. Si la clase de `D` es `f113359` o posterior, el release
+conjunto no trae migración ni configuración con efecto por defecto. Si es anterior, sí.
+
