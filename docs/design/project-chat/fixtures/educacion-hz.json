@@ -1,5 +1,5 @@
 {
-  "_note": "Design data for the frontend mock backend, from 15-ux-alignment-and-contract.md §3 (P3a shapes; the task is T1). Not an existing API. Follows the recommendations pending approval (D-UX0..D-UX10).",
+  "_note": "Design data for the frontend mock backend, from 15-ux-alignment-and-contract.md §3 (P3a shapes; the task is T1). Not an existing API. Follows the recommendations pending approval (D-UX0..D-UX10; template stays null until E3).",
   "GET /api/projects/:pid/agents (P3a)": {
     "projectId": "6b1f2c3d-0000-4000-8000-000000000001",
     "generatedAt": "2026-11-10T14:02:45Z",
@@ -27,10 +27,7 @@
         "handle": "developer-hz",
         "role": "Developer",
         "provider": "claude-code",
-        "template": {
-          "templateId": "d0000000-0000-4000-8000-0000000000d1",
-          "templateVersion": 3
-        },
+        "template": null,
         "binding": {
           "bindingId": "b0000000-0000-4000-8000-0000000000b2",
           "epoch": 1,
@@ -48,10 +45,7 @@
         "handle": "developer-hz-2",
         "role": "Developer",
         "provider": "claude-code",
-        "template": {
-          "templateId": "d0000000-0000-4000-8000-0000000000d1",
-          "templateVersion": 3
-        },
+        "template": null,
         "binding": {
           "bindingId": "b0000000-0000-4000-8000-0000000000b5",
           "epoch": 1,
@@ -113,10 +107,7 @@
     "handle": "developer-hz",
     "role": "Developer",
     "provider": "claude-code",
-    "template": {
-      "templateId": "d0000000-0000-4000-8000-0000000000d1",
-      "templateVersion": 3
-    },
+    "template": null,
     "binding": {
       "bindingId": "b0000000-0000-4000-8000-0000000000b2",
       "epoch": 1,
@@ -172,7 +163,7 @@
       "binding": null
     }
   ],
-  "GET /api/projects/:pid/tasks/:tid (T1)": {
+  "GET /api/projects/:pid/tasks/:tid (T2 example)": {
     "taskId": "70000000-0000-4000-8000-000000000101",
     "taskKey": "T-101",
     "projectId": "6b1f2c3d-0000-4000-8000-000000000001",
@@ -246,6 +237,53 @@
       "stop": {
         "allowed": false,
         "reason": "stop-pending"
+      }
+    }
+  },
+  "GET /api/projects/:pid/tasks/:tid (T1 example)": {
+    "taskId": "70000000-0000-4000-8000-000000000102",
+    "taskKey": "T-102",
+    "projectId": "6b1f2c3d-0000-4000-8000-000000000001",
+    "assigneeAgentId": "a0000000-0000-4000-8000-0000000000a4",
+    "creator": "user:u-1",
+    "state": "queued",
+    "rev": 2,
+    "version": 2,
+    "definition": "Validar el login corregido en el preview (después de T-101).",
+    "notices": [
+      {
+        "kind": "queue-paused",
+        "since": "2026-11-10T13:40:00Z"
+      }
+    ],
+    "instructions": [
+      {
+        "instructionId": "10000000-0000-4000-8000-000000000003",
+        "verb": "UPDATE",
+        "by": "user:u-1",
+        "state": "applied",
+        "receivedAt": "2026-11-10T13:45:00Z",
+        "appliedAt": "2026-11-10T13:45:00Z",
+        "version": 2
+      }
+    ],
+    "refs": [
+      {
+        "kind": "task",
+        "taskId": "70000000-0000-4000-8000-000000000101"
+      }
+    ],
+    "report": null,
+    "can": {
+      "update": {
+        "allowed": true
+      },
+      "change": {
+        "allowed": false,
+        "reason": "task-not-active"
+      },
+      "stop": {
+        "allowed": true
       }
     }
   }
