@@ -25,7 +25,7 @@ vinculante para los PRs
 y, para 3.0d, en [docs/design/phase3-3.0d-activation.md](./design/phase3-3.0d-activation.md) (v5,
 `ac1024d`); si los dos documentos difieren, manda este;
 este archivo define lo que el código debe cumplir y lo que cada PR debe demostrar. Cambiar un
-contrato exige un PR de docs antes o junto con el código. **v1.7.1**: §8.1.5 paso 2b, consumo del paste antes del siguiente byte, y `too-many-segments` en 48 pastes por el presupuesto T_http (hallazgos del smoke con CLI 2.1.314 y de la revisión durante la implementación 3.2, 2026-10-30). **v1.7.2** (aprobado por el responsable como P1 de backend de Chat, 2026-11-02, tras la reanudación real de Educación HZ): §5.2 el binding vale para UN arranque del contenedor —toda parada lo retira de todas las conversaciones de la sesión, residentes o no—; §5.3 el probe solo lleva a `waiting_input` con identidad verificada (entrada `interactive`, `pid` descendiente del `pane_pid` del pane ligado), nunca revive `ended`, un estado ilegible no es `idle`, y el silencio de 10 min y un probe dirigido tras `SessionStart` se despachan de verdad; §8.1.3 `binding-stale` también para una entrada del probe con `kind ≠ interactive` aunque descienda del pane **v1.7.3**: §8.1.3 identidad de foreground por proceso (identidad, sesión, tty, grupo de primer plano, `starttime` repetido en el precheck) en lugar del nombre `pane_current_command`, que el instalador nativo hace igual a la versión (falso negativo en Educación HZ, 2026-11-02). **v1.7.4** (#510, aprobado por el responsable 2026-11-02): §8.1.3 el envío exige que el probe confirme el prompt (`idle`, o `waiting` + `input needed`); `status` ausente/ilegible y `waiting` sin `waitingFor` responden `needs-terminal` antes de cualquier efecto. **v1.8** (aprobado por el responsable 2026-11-03): §6.2 metadata del dueño —renombrar y archivar— en la tabla propia `conversation_user_meta` (migración v18), fuera de la captura; §6 la lista añade `customTitle`, `archivedAt` y `meta`; §9 backup y borrado de esa tabla. **v1.8.1** (propuesta, pendiente de aprobación; incidente 2026-11-03): §2.7.5 condición 5 «capaz de relay» — la imagen propia con `="2"` mientras exista, y si Docker ya no la tiene, una **acreditación de capacidad** firmada al crear el contenedor y ligada a su id inmutable (§2.7.5.1); una acreditación contradictoria deniega siempre. **v1.8.1 aprobado por el responsable el 2026-11-04.** **v1.8.2** (propuesta, pendiente de aprobación; hallazgo de Educación HZ, 2026-11-04): §8.1.9 la versión que decide es la del **proceso** que recibirá el texto, preguntada a su propio ejecutable (`/proc/<pid>/exe --version`, sin shell, como su uid, entorno vacío, autoactualizador apagado, `starttime` y ejecutable iguales antes y después); la `claude_version` del `session_start` —que el hook toma del `PATH`— queda como metadato y nunca autoriza. **v1.8.3** (propuesta, pendiente de aprobación): §8.1.9 política de versiones del composer, siempre sobre la versión del proceso de v1.8.2 — `COMPOSER_CLI_DENY` gana siempre, `COMPOSER_CLI_VERSIONS` exacta, y `COMPOSER_CLI_MIN_VERSION` **opcional y abierta** (toda release estable ≥ una versión validada, incluidos cambios minor y major, sin techo); prereleases y versiones no verificables siempre rechazadas; el riesgo de admitir versiones futuras sin validación queda declarado. **v1.8.4** (propuesta, pendiente de aprobación; protección de imágenes, #521): §2.7.2 paso 1, los requests `pin image` (antes de `create N`, obligatorio: sin tag verificado no hay `N`) y `pin N` (después, verificación); el `spawn` de `DockerManager` crea siempre desde el ID inmutable ya protegido, nunca desde el tag **v1.8.5** (propuesta, pendiente de aprobación; hallazgo en B, 2026-11-05): §5.2 solo una conversación `interactive` toma un pane (retirando a la anterior); `headless` nunca se liga; `teammate` y `unknown` solo a un pane que ninguna conversación viva tenga, sin retirar a nadie; una sesión sin pane en sus hooks (sesión en segundo plano del CLI) nunca se liga y el pane no se infiere por ascendencia. **v1.8.5 aprobado por el responsable el 2026-11-05.** **v1.8.6** (propuesta, pendiente de aprobación; G3, PR-G3-1): §3.1.1 la ingesta puede exigir que el **origen de red** de la conexión sea el contenedor vigente de la sesión en `sessions-net` (bandera `INGEST_REQUIRE_SESSION_ORIGIN`: `false` por defecto, `observe` para la puerta de activación, `true` para exigirlo). Así un token filtrado no sirve desde el túnel, desde loopback ni desde otro contenedor. Con la bandera apagada nada cambia.
+contrato exige un PR de docs antes o junto con el código. **v1.7.1**: §8.1.5 paso 2b, consumo del paste antes del siguiente byte, y `too-many-segments` en 48 pastes por el presupuesto T_http (hallazgos del smoke con CLI 2.1.314 y de la revisión durante la implementación 3.2, 2026-10-30). **v1.7.2** (aprobado por el responsable como P1 de backend de Chat, 2026-11-02, tras la reanudación real de Educación HZ): §5.2 el binding vale para UN arranque del contenedor —toda parada lo retira de todas las conversaciones de la sesión, residentes o no—; §5.3 el probe solo lleva a `waiting_input` con identidad verificada (entrada `interactive`, `pid` descendiente del `pane_pid` del pane ligado), nunca revive `ended`, un estado ilegible no es `idle`, y el silencio de 10 min y un probe dirigido tras `SessionStart` se despachan de verdad; §8.1.3 `binding-stale` también para una entrada del probe con `kind ≠ interactive` aunque descienda del pane **v1.7.3**: §8.1.3 identidad de foreground por proceso (identidad, sesión, tty, grupo de primer plano, `starttime` repetido en el precheck) en lugar del nombre `pane_current_command`, que el instalador nativo hace igual a la versión (falso negativo en Educación HZ, 2026-11-02). **v1.7.4** (#510, aprobado por el responsable 2026-11-02): §8.1.3 el envío exige que el probe confirme el prompt (`idle`, o `waiting` + `input needed`); `status` ausente/ilegible y `waiting` sin `waitingFor` responden `needs-terminal` antes de cualquier efecto. **v1.8** (aprobado por el responsable 2026-11-03): §6.2 metadata del dueño —renombrar y archivar— en la tabla propia `conversation_user_meta` (migración v18), fuera de la captura; §6 la lista añade `customTitle`, `archivedAt` y `meta`; §9 backup y borrado de esa tabla. **v1.8.1** (propuesta, pendiente de aprobación; incidente 2026-11-03): §2.7.5 condición 5 «capaz de relay» — la imagen propia con `="2"` mientras exista, y si Docker ya no la tiene, una **acreditación de capacidad** firmada al crear el contenedor y ligada a su id inmutable (§2.7.5.1); una acreditación contradictoria deniega siempre. **v1.8.1 aprobado por el responsable el 2026-11-04.** **v1.8.2** (propuesta, pendiente de aprobación; hallazgo de Educación HZ, 2026-11-04): §8.1.9 la versión que decide es la del **proceso** que recibirá el texto, preguntada a su propio ejecutable (`/proc/<pid>/exe --version`, sin shell, como su uid, entorno vacío, autoactualizador apagado, `starttime` y ejecutable iguales antes y después); la `claude_version` del `session_start` —que el hook toma del `PATH`— queda como metadato y nunca autoriza. **v1.8.3** (propuesta, pendiente de aprobación): §8.1.9 política de versiones del composer, siempre sobre la versión del proceso de v1.8.2 — `COMPOSER_CLI_DENY` gana siempre, `COMPOSER_CLI_VERSIONS` exacta, y `COMPOSER_CLI_MIN_VERSION` **opcional y abierta** (toda release estable ≥ una versión validada, incluidos cambios minor y major, sin techo); prereleases y versiones no verificables siempre rechazadas; el riesgo de admitir versiones futuras sin validación queda declarado. **v1.8.4** (propuesta, pendiente de aprobación; protección de imágenes, #521): §2.7.2 paso 1, los requests `pin image` (antes de `create N`, obligatorio: sin tag verificado no hay `N`) y `pin N` (después, verificación); el `spawn` de `DockerManager` crea siempre desde el ID inmutable ya protegido, nunca desde el tag **v1.8.5** (propuesta, pendiente de aprobación; hallazgo en B, 2026-11-05): §5.2 solo una conversación `interactive` toma un pane (retirando a la anterior); `headless` nunca se liga; `teammate` y `unknown` solo a un pane que ninguna conversación viva tenga, sin retirar a nadie; una sesión sin pane en sus hooks (sesión en segundo plano del CLI) nunca se liga y el pane no se infiere por ascendencia. **v1.8.5 aprobado por el responsable el 2026-11-05.** **v1.8.6** (propuesta, pendiente de aprobación; G3, PR-G3-1): §3.1.1 la ingesta puede exigir que el **origen de red** de la conexión sea el contenedor vigente de la sesión en `sessions-net` (bandera `INGEST_REQUIRE_SESSION_ORIGIN`: `false` por defecto, `observe` para la puerta de activación, `true` para exigirlo). Así un token filtrado no sirve desde el túnel, desde loopback ni desde otro contenedor. Con la bandera apagada nada cambia. **v1.9** (propuesta, revisión 2, pendiente de aprobación; B, 2026-11-05): §8.1.12 composer para sesiones en segundo plano del CLI por el op `reply` con `nextTurn` fijo, sin el pane (el cliente `attach`/`agents` sigue rechazado); v1 sin encolado intencional (doble lectura idle); identidad de job, proceso y daemon (peer pid) antes del efecto; ack con `prompt_id` nuevo más confirmación en el transcript y exclusión de hashes recientes (falso positivo residual declarado); estados `accepted`/`unconfirmed`/`duplicated`, sin reintentos; la seguridad corregida por la auditoría (la frontera es el uid, no la clave); migración por validación. **v1.9 revisión 3** (decisiones del responsable tras la auditoría de la implementación, #547): ack emparejado con NUESTRO enqueue; exclusión de textos idénticos solo por operaciones pendientes o cola ambigua (la regla de 10 min se elimina; repetir un texto está permitido) con reconocimiento durable de un `unconfirmed`; transcript inaccesible ⇒ 409 antes del efecto, `unconfirmed` después; `CLAUDE_CONFIG_DIR` propio fuera del MVP; marcas `duplicated`/`possible-duplicate` persistentes e idempotentes; respuesta desconocida del daemon ⇒ `uncertain`; alcance por sesión (`COMPOSER_BG_SESSIONS`); con la bandera apagada, sin cambios salvo dos diferencias declaradas (§8.1.12.11).
 
 Convenciones: *MUST*/*MUST NOT* son requisitos verificados por test; *SHOULD* son requisitos
 verificados en revisión. "Bytes" significa siempre bytes UTF-8 del contenido, salvo donde se dice
@@ -2718,6 +2718,374 @@ Invariantes (*MUST*, con tests sobre un `tmux` simulado y un smoke con el CLI re
     reconciliación y la liberación usan la **misma** exclusión por pane; una operación activa
     responde 409 `operation-active` a la resolución y a la reconciliación, y nunca se libera
     mientras una continuación conserve autorización.
+
+#### 8.1.12 (v1.9, propuesta — revisión 3) Transporte para sesiones en segundo plano del CLI
+
+Evidencia: `docs/design/composer-background-sessions.md`. Tres rondas en sandbox con 2.1.314,
+2.1.316 y 2.1.318 (investigación del mecanismo, experimentos de cola, atribución, sesiones y
+reinicios) y una auditoría de seguridad independiente. Nada se probó sobre sesiones reales.
+
+##### 8.1.12.1 Problema y alternativas
+
+Una conversación que el CLI corre como **sesión en segundo plano** (`claude daemon`, con su propio
+pty y sin `TMUX_PANE`; probe `kind: background`) no tiene pane: §5.2 nunca la liga y el composer la
+rechaza. Alternativas evaluadas:
+
+| Alternativa | Decisión | Motivo (evidencia) |
+|---|---|---|
+| A. Binding al pane del cliente `claude attach` | **Rechazada** | El cliente cambia de job **en el mismo PID** (`←`/agent view) y nada externo dice qué job muestra. En agent view, paste + Enter **crea una sesión nueva**. |
+| B. Escribir en `pty/<short>.sock` | **Rechazada** | Es entrada cruda: se concatena con el borrador de la persona y se envía junto. No hay identidad de destino. |
+| C. `rv/<short>.sock` | **Rechazada** | Admite un solo peer, y conectarse corta el enlace del daemon. |
+| D. Op `reply` sin `nextTurn` | **Rechazada** | Ejecuta `/` y `!`, **responde un AskUserQuestion pendiente** sin `UserPromptSubmit`, puede caer a un paste en el pty (que escapa del bracketed paste) y no verifica el build (sin `ESKEW`). |
+| E. Op `reply` con `nextTurn: true` | **Propuesta** | Texto literal como próximo prompt, sin respuesta a diálogos ni paste al pty, y `ESKEW` ante un build distinto. Igual en las tres versiones. |
+| F. Cola explícita ("enviar cuando termine") | **Diferida (v2)** | Ver §8.1.12.3. |
+
+##### 8.1.12.2 Lo que `reply` garantiza y lo que no
+
+- `{"ok":true}` significa **solo** "el daemon lo pasó al worker". No hay id de prompt, ni
+  cancelación, ni consulta de la cola, ni una variante condicional: claves como `ifIdle` se ignoran.
+- Un texto aceptado puede **perderse sin aviso**: teardown del job, `shutdown` del daemon, crash del
+  worker, o la persona que lo saca con ↑ en el Terminal y lo edita.
+- Tras un crash del worker, el daemon lo re-lanza con `RESUME_INTERRUPTED_TURN` y el prompt
+  interrumpido se ejecuta **otra vez**, con un `UserPromptSubmit` nuevo.
+- Varios textos en cola se envían en **un** turno del modelo.
+- Ninguna de estas propiedades se puede cambiar desde fuera. El contrato las trata como hechos.
+
+##### 8.1.12.3 Semántica v1: conservadora, sin encolado intencional
+
+- El envío *MUST* rechazarse con `409 busy` / `needs-terminal`, sin efectos, salvo que **dos**
+  lecturas digan `idle` sin `waitingFor`:
+  - el probe fresco de la petición;
+  - una relectura de `sessions/<pid>.json` del job dentro del **mismo exec** que hace el `reply`,
+    inmediatamente antes de conectarse.
+
+  `waiting` en cualquier forma da `needs-terminal`.
+- La ventana residual entre la relectura y la llegada del `reply` es de **decenas de ms**. Medido:
+  el estado `busy` aparece ~19 ms después de un Enter humano, y un `reply` 25 ms después ya quedó
+  en cola. Si cae en esa ventana, el texto queda en cola por la propia cola del CLI y el resultado
+  lo dice (`accepted`, §8.1.12.6). Nunca se encola a propósito.
+- **Cola explícita, para una v2 aparte.** Sería un botón distinto, "Enviar cuando Claude termine",
+  con un estado visible "en cola en el CLI" seguido por los `queue-operation` del transcript, y la
+  advertencia de que se puede perder o editar. Solo se diseña después de operar la v1.
+
+##### 8.1.12.4 Identidad antes del efecto (sin efectos; cada lectura queda en el registro)
+
+0. **Alcance (revisión 3):** el transporte existe solo con `CONVERSATION_COMPOSER_BG_ENABLED`
+   encendida **y** la sesión listada en `COMPOSER_BG_SESSIONS` (vacía ⇒ ninguna sesión). Fuera de
+   eso todo es como sin la bandera (§8.1.12.11).
+1. **Probe fresco:** **una sola** entrada `kind: background` con `sessionId = cid` (dos entradas ⇒
+   `binding-stale{ambiguous}`). Se registran `short` (`id`), `pid` y `status`. El `sessionId` sale
+   del probe y no del registro del daemon, que queda viejo después de `/clear` o `/resume`.
+2. **Proceso del job:** `pid` + `starttime` + exe vía `/proc`, como en `cliIdentity.ts`. Su
+   versión (`/proc/<pid>/exe --version`) está en `COMPOSER_BG_CLI_VERSIONS`, una lista exacta y
+   sin mínimo abierto.
+3. **Daemon identificado:**
+   - pid del supervisor leído de `daemon.status.json`/`roster.json`;
+   - el `SO_PEERCRED` del `control.sock` *MUST* ser ese pid;
+   - su exe y su versión se verifican igual que en el paso 2;
+   - versión del daemon = versión del job, las dos en la lista.
+
+   Un socket falso (cualquier proceso del uid puede crear uno en ese dir) no pasa esta verificación.
+3b. **Directorio de configuración (revisión 3, D3):** solo el predeterminado del contenedor,
+   `/home/developer/.claude` (el del `HOME` del worker, o un `CLAUDE_CONFIG_DIR` igual a él). Un
+   worker con otro `CLAUDE_CONFIG_DIR` se rechaza con `409 unsupported-config-dir` y una explicación
+   para la persona; no se infiere ninguna ruta ni hay alternativa. Es lo que garantiza que el
+   transcript que el ack necesita está donde el backend lo lee.
+4. **Job vigente:** el `nonce` del job en `list` se registra. Un job re-creado bajo el mismo `short`
+   (stop y `--bg --resume` del mismo `sessionId`, verificado) tiene otro nonce, otro pid y otro
+   `starttime`, y se rechaza como `binding-stale`.
+5. **Relectura en el exec, justo antes del `reply`:** `sessions/<pid>.json` con `sessionId = cid`,
+   `status = idle`, y `starttime` igual; además el proceso (starttime, exe, padre = el pty host del
+   job), el daemon (status y roster, peer pid, su starttime **y su exe**) y el `nonce` del job.
+   Cualquier diferencia aborta sin efecto (`binding-stale` o `busy`).
+
+**Riesgos residuales declarados de §8.1.12 (lista):** la carrera `/clear`/`/resume` contra el
+`reply` (abajo); el falso positivo de ack por texto idéntico de otro cliente del daemon
+(§8.1.12.5); un `claude stop` voluntario a mitad de turno seguido de `--bg --resume` y el mismo
+texto tipeado como siguiente prompt, que puede marcarse `duplicated` (§8.1.12.5); una duplicación
+con evidencia fuera de la ventana de 4096 eventos, que puede quedar sin identificar (§8.1.12.5).
+`duplicated` es evidencia fuerte de una ejecución duplicada, no certeza absoluta.
+
+**Riesgo residual declarado (carrera `/clear`/`/resume` contra el `reply`).** La ventana entre el
+paso 5 y el momento en que el daemon enruta la línea no se puede cerrar desde fuera del CLI (decenas
+de ms; el smoke la reprodujo solo con el Enter de `/clear` a ~0 ms del inicio del exec). Una `/clear`
+o `/resume` en esa ventana manda el texto a **otra conversación del mismo job**. El ack lo detecta
+solo si un probe liga esa conversación al job (mismo `short` y `pid`): entonces `misdelivered`;
+si no, `unconfirmed`. Nunca `delivered`. No se corrige ni se reenvía.
+
+##### 8.1.12.5 Atribución del ack (sin inventar identificadores)
+
+**t0** (revisión 3, explícito): el instante de ingesta del propio evento `prepared` de la
+operación en el reloj del backend (§8.1.7; tras un reinicio, su `ts`), anterior al exec del
+`reply`. La latencia `enqueue − t0` del enqueue emparejado se registra en el evento `delivered`
+(`enqueue_ms`) y en el log del backend, como evidencia de cuánto de la ventana de 2 s se usó.
+
+El CLI no propaga ningún id del `reply`: el hook trae las mismas claves que un prompt tipeado y el
+`reply` fija `origin: human`. El ack *MUST* reunir **todas** estas condiciones:
+1. Un `user_prompt` con `session_id = cid`, el mismo `textHash`, después de `t0`, y un `prompt_id`
+   **nuevo**: no puede ser el del turno en curso, porque un texto tipeado con la sesión ocupada
+   dispara el hook al encolarse llevando el `prompt_id` del turno que corre.
+2. En el **transcript** de esa conversación, que se lee en el host a través del opener de
+   workspace sin seguir enlaces, **emparejado** (auditoría ronda 1): la cola del CLI se reproduce en
+   orden desde `t0` (enqueue empuja, dequeue pasa la cabeza a "tomado", la entrada `queued` consume
+   el más antiguo tomado, `popAll` u otra operación vacía la cola). *MUST*:
+   - exactamente **un** `enqueue` del mismo contenido en [`t0`, `t0` + 2 s] — el nuestro (dos ⇒
+     ambiguo, no confirma);
+   - que la entrada de usuario `promptSource: "queued"` con `promptId` = el del hook sea la que
+     consume **ese** elemento;
+   - ningún `popAll` ni otro `enqueue` del mismo contenido entre los dos.
+
+   Un texto tipeado con la sesión idle queda excluido (`promptSource: "typed"`, sin enqueue); un
+   texto idéntico posterior de otro cliente ya no confirma el nuestro.
+3. **Exclusión previa (revisión 3, decisión del responsable D1): por operaciones pendientes y
+   evidencia ambigua, nunca por que el texto haya aparecido antes.** Repetir un texto ("continue")
+   está permitido. El envío se rechaza (`409 duplicate-pending`, sin efectos) solo si:
+   - `own-pending`: un envío nuestro del mismo texto a esa conversación sigue sin resolver (tiene
+     registro de job: `accepted`, `uncertain`, en curso); con el mismo job, el registro ya da
+     `send-in-progress`;
+   - `unconfirmed-unacknowledged`: un envío nuestro del mismo texto terminó `unconfirmed` y la
+     persona no confirmó haber revisado el Terminal. El siguiente envío de ese texto lleva
+     `acknowledgeUnconfirmed: <clientMessageId>`, que el backend persiste como
+     `composer_send{state: acknowledged}` sobre aquel envío (durable) antes de seguir;
+   - `queue-pending`: el transcript muestra un elemento del mismo contenido todavía en la cola del
+     CLI, o tomado y sin ejecutar (estado de cola ambiguo).
+
+   Un envío anterior confirmado o resuelto (`delivered`, `misdelivered`, `failed`, `resolved`)
+   nunca bloquea; un prompt anterior del mismo texto que ya se ejecutó tampoco. **La regla de los
+   10 min de un `user_prompt` humano del mismo hash se elimina:** un prompt anterior a `t0` no puede
+   tomarse por el nuestro (el ack exige un `prompt_id` nuevo después de `t0` emparejado con NUESTRO
+   enqueue), así que no aportaba ambigüedad, solo una prohibición.
+
+**Falso positivo residual, acotado y declarado:** solo queda si otro cliente del daemon (otro
+backend, agent view) encola *exactamente* el mismo texto dentro de nuestra ventana de 2 s **y** el
+nuestro se pierde sin dejar operación de cola, **y** el suyo ocupa el lugar FIFO del nuestro. Una
+persona que tipea el mismo texto con la sesión ocupada no lo produce: su hook lleva el `prompt_id`
+del turno en curso (cond. 1) y, si su enqueue cae en la ventana, hay dos ⇒ ambiguo (cond. 2). Nunca
+produce un envío doble. Los casos ambiguos se prueban de forma determinista con secuencias
+sintéticas de transcript y hooks (§8.1.12.9, caso 12); `delivered` nunca se fija por coincidencia de
+texto.
+
+**Repetición tras re-lanzamiento (revisión 3, D4), dos marcas persistentes distintas**, eventos
+`composer_send` en el log de la conversación (sobreviven a reinicios del backend y recargas de la
+página), escritos una sola vez por operación y tipo (idempotentes: se leen los eventos antes de
+escribir), nunca un ack nuevo:
+- `duplicated` (**evidencia fuerte**, no certeza absoluta: significa que la evidencia disponible
+  apunta con fuerza a una ejecución duplicada; ver los riesgos residuales abajo) solo si se cumplen
+  **todas** (revisión 3, ronda 3.1). Registra `first_prompt_id`, `prompt_id` y el pid nuevo.
+  - después del ack, un `session_start resume` y luego un `user_prompt` humano del mismo hash con
+    `prompt_id` nuevo;
+  - un probe muestra el job con **otro pid**;
+  - entre el ack y esa repetición **no hay ningún `gap`**: un `turn_end` perdido no se distingue de
+    "el turno nunca terminó";
+  - entre el ack y la repetición **no hay ningún `turn_end`/`turn_failed`, con cualquier
+    `prompt_id` o sin él**. `RESUME_INTERRUPTED_TURN` solo re-ejecuta un turno sin terminar, y
+    §8.2.1 vio Stops de turnos encolados con `prompt_id` que nadie anunció, así que un fin de turno
+    con otro id puede ser el del nuestro;
+  - la repetición es el **primer** `user_prompt` humano después del ack (ninguno antes ni después
+    del resume).
+
+  Cualquier otra secuencia —p. ej. `claude stop` a mitad de turno, `--bg --resume`, otro turno que
+  termina y el mismo texto tipeado mucho después— es a lo sumo `possible-duplicate`, con los motivos
+  (`gap`, `turn-finished-before-resume`, `turn-end-before-resume`, `turn-end-before-repeat`,
+  `prompt-before-repeat`).
+
+  Evidencia del CLI real: el `Stop` de un turno `nextTurn` lleva el `prompt_id` del ack (smoke,
+  caso 16, en 2.1.314, 2.1.316 y 2.1.318). Aun así la regla no depende de ese id: cualquier fin de
+  turno bloquea.
+
+  **Riesgos residuales de `duplicated` (declarados, aprobación del responsable):**
+  - un `claude stop` **voluntario a mitad de turno**, seguido de `--bg --resume` y el mismo texto
+    tipeado a mano como **siguiente prompt inmediato**, deja exactamente la misma huella que una
+    re-ejecución automática (resume, otro pid, ningún fin de turno, primer prompt humano) y puede
+    marcarse `duplicated` aunque nada se haya ejecutado dos veces por sí solo;
+  - una duplicación cuya evidencia queda **fuera de la ventana de 4096 eventos** que se recorre
+    (o del archivo rotado) puede quedar sin identificar: ni `duplicated` ni `possible-duplicate`.
+
+  Por eso `duplicated` es una señal fuerte para que la persona revise el Terminal, nunca una
+  afirmación irrefutable, y la interfaz la presenta como tal (§8.1.12.8).
+- `possible-duplicate` (**no confirmada**): lo mismo, pero ningún probe puede mostrar el
+  re-lanzamiento (probe fallido o job no listado tras un reintento); registra los dos
+  `prompt_id` y el motivo. Si después llega la prueba, se escribe además `duplicated`.
+
+Mismo pid: no es un re-lanzamiento (p. ej. la persona escribió lo mismo) y no se marca. La ventana
+es `t0` + T_ack_bg juzgada con el **tiempo de la evidencia** (el `ts` del `session_start resume`),
+no con el reloj del momento: un backend que estuvo caído durante la ventana la juzga al recuperar
+(una comprobación de puesta al día, sin quedar escuchando).
+
+**Alcance de las lecturas (revisión 3, ronda 3.1).** Lo que el transporte lee, y hasta dónde:
+- el ack recorre **todas** las conversaciones de la sesión con eventos posteriores a `t0` (para
+  `misdelivered`), hasta 4096 eventos de cada una, archivo rotado incluido;
+- cada transcript se lee como una **cola de 8 MiB** (lo anterior no se ve: un ack fuera de ella es
+  `unconfirmed`; un elemento de la cola encolado antes de ella no cuenta para `queue-pending`);
+- el re-armado de la vigilancia de duplicados tras un reinicio mira **24 h** hacia atrás y solo en
+  sesiones de `COMPOSER_BG_SESSIONS` con la bandera encendida;
+- un `job-*.json` sobrante —en una sesión fuera de la lista o con la bandera apagada— **sigue**
+  teniendo, mientras se drena (recuperación, `reconcile`, resolución), probes, el exec de inspect
+  (`list`) y lecturas de transcript del lado del host para asentarse por evidencia; nunca un
+  `reply`.
+
+##### 8.1.12.6 Estados, persistencia y reinicios
+
+- **Registro durable:** `.st-control/<sid>/composer/job-<short>.json`. Mismo formato, fsync y reglas
+  que el registro por pane (§8.1.4). Exclusión `composer:<sid>:job:<short>`. Se escribe `prepared`
+  antes del efecto, y el id del exec entra en el registro antes de iniciarlo.
+- **Transiciones** (sin reintentos automáticos en ningún caso):
+
+| Desde | Evidencia | Hacia |
+|---|---|---|
+| prepared | el exec terminó con `ENOJOB`, `ERESPAWNING`, `ENOREPLY`, `ESKEW`, `EAUTH`, `EUNVERIFIED` o con un aborto de la relectura | **failed** (sin efecto; el borrador se conserva) |
+| prepared | el exec terminó con `ok:true` | **accepted** |
+| prepared | exec de terminación desconocida, conexión perdida después de escribir, o reinicio del backend con el exec sin asentar | **uncertain** (registro `orphaned` tras un reinicio; nunca se reenvía) |
+| accepted | ack completo (§8.1.12.5) en `cid` | **delivered** |
+| accepted | ack completo en otra conversación del mismo job | **misdelivered** |
+| accepted | T_ack_bg = 10 min sin ack, o el job desapareció (`list` sin él), se re-lanzó (otro nonce), el daemon no responde y el worker ya no existe, o el contenedor paró | **unconfirmed**: "puede haberse perdido o seguir en cola" |
+| accepted | (revisión 3, D2) el transcript no se puede leer: la entrega no se puede probar | sigue **accepted**; a T_ack_bg **unconfirmed{transcript-unavailable}**; nunca `failed`, nunca reintento |
+| prepared | el daemon respondió algo que no es `ok` ni uno de los seis códigos (p. ej. `{"ok":true}` sin `op`) | **uncertain** (auditoría ronda 1: pudo haberlo tomado) |
+| delivered | segundo `user_prompt` del mismo hash tras un re-lanzamiento con otro pid | **delivered** + `duplicated` (persistente) |
+| delivered | lo mismo sin poder probar el re-lanzamiento | **delivered** + `possible-duplicate` (persistente) |
+| unconfirmed | la persona confirma que revisó el Terminal y reenvía el mismo texto | `acknowledged` (evento) sobre el envío `unconfirmed` |
+| accepted o uncertain | resolución administrativa (§8.1.11) `discarded` / `sent-manually` | **resolved** (declaración; los efectos siguen por evidencia) |
+| uncertain | acks completos en más de una conversación (sin atribución inequívoca) | **unconfirmed{ambiguous}** |
+
+- **Transcript inaccesible antes del efecto (D2):** `409 transcript-unavailable`, nada se envía (sin
+  transcript no hay ack posible).
+- **Reinicio del backend:** los registros se releen. `prepared` con un exec pendiente se asienta por
+  `execState`. `accepted` re-evalúa el ack con los eventos y el transcript, incluido el archivo
+  rotado. Nada se reenvía.
+- **Reinicio o `shutdown` del daemon, o crash del worker:** se pierde lo que estaba en cola (está
+  verificado; nada lo persiste ni lo reproduce), así que `accepted` termina en `unconfirmed`. Un
+  crash puede además duplicar el prompt en curso, lo que se marca `duplicated`.
+- **Borrador persistente (frontend):**
+  - se borra solo con `delivered` o `misdelivered`;
+  - con `accepted`, se conserva y se bloquea;
+  - con `failed`, `uncertain` o `unconfirmed`, se conserva, y el próximo envío exige confirmar que se
+    revisó el Terminal (igual que tras un 502 `delivery-failed`).
+- **Liberación del registro:** solo con un resultado final (`delivered`, `misdelivered`, `failed`,
+  `unconfirmed`), o con resolución administrativa (§8.1.11) para `uncertain`.
+- **Vuelta atrás (auditoría de la implementación, ronda 1):** un backend sin soporte de este transporte
+  no conoce `job-<short>.json` y deja toda la sesión `unverifiable` para el composer. Antes de volver a
+  uno, se apaga la bandera y se drenan los registros de job (`reconcile` / resolución de §8.1.11, que
+  aceptan `job:<short>` con la bandera encendida o apagada) hasta que no quede ninguno
+  (DEPLOYMENT.md, "Composer for CLI background sessions").
+
+##### 8.1.12.7 Seguridad (corregida por la auditoría)
+
+- **La frontera es el uid del contenedor, no la clave.** `control.key` es un handshake de versión
+  del cliente:
+  - `attach` sin clave da lectura y escritura del pty de cualquier job;
+  - `subscribe`, `kill`, `shutdown`, `list` y `has` no la piden;
+  - en **todas** las versiones, el socket pty entrega el scrollback a cualquier cliente del mismo
+    uid; en 2.1.316 y posteriores, después de su primer frame, aunque el token sea incorrecto.
+
+  La entrada al pty sí exige `ptyAuth`. Cualquier código que corre como ese uid (incluidos comandos
+  que ejecute Claude) ya puede leer, escribir y matar estas sesiones. Esta propuesta no amplía ese
+  poder.
+- **El alcance de la exposición es local al contenedor.** Son sockets de ruta en el `/tmp` privado
+  del contenedor (0700): no son alcanzables desde otros contenedores ni por la red, y nada del
+  producto (observe, proxy, relay) los alcanza. La clave y los tokens (`roster.json`, en claro)
+  **sí** están en el bind mount del workspace y en los backups: la clave se lee **solo dentro** del
+  contenedor (en el host, root seguiría enlaces del usuario), y Files ya rechaza `.st/`.
+- **`nextTurn: true` está fijado en el cliente,** sin ningún camino que lo omita. `ESKEW` es final y
+  nunca se reintenta en otro modo. El smoke verifica los bytes enviados.
+- **`normalizeText`/`validateText` se aplican sin cambios:** bytes de control, límites de tamaño y
+  rechazo de `/` y `!`. `nextTurn` deja pasar ESC, NUL y CR tal cual, así que el filtro es nuestro.
+- **El cliente** es un programa de la imagen con ruta absoluta (`/usr/bin/python3 -I`, `env -i`),
+  nunca el `claude` del workspace. Corre como el uid de la sesión, escribe **una** línea JSON
+  ≤ 1 MiB e imprime solo un enum de códigos fijo, nunca el texto de error del daemon. El texto viaja
+  solo por stdin del exec, y `docker exec inspect` no conserva stdin.
+- **Daemon identificado en cada entrega** (§8.1.12.4, paso 3).
+
+##### 8.1.12.8 Experiencia de usuario
+
+- **Antes del primer envío** a una sesión en segundo plano, un aviso de una vez por conversación:
+  "Esta conversación corre en segundo plano. Un mensaje aceptado por Claude Code **no se puede
+  cancelar desde Chat**; mientras espera se puede editar o quitar desde el Terminal (↑)."
+- **Cada resultado tiene su texto, y ninguno se parece al de otro:**
+  - `accepted`: "Aceptado por Claude Code — todavía **no** entregado a Claude", con un indicador
+    propio, nunca el ✓;
+  - `delivered`: "Entregado a Claude", solo con el ack completo;
+  - `unconfirmed`: "No confirmado: puede haberse perdido o seguir en cola. Revisá el Terminal antes
+    de reenviar.";
+  - `duplicated` (evidencia fuerte, nunca certeza): "Evidencia fuerte de que este mensaje se
+    ejecutó dos veces: Claude Code reinició la sesión y el mismo texto volvió a enviarse. Revisá el
+    Terminal." (UI: "Strong evidence this message ran twice: Claude Code restarted the session and
+    the same text was submitted again. Check the Terminal.");
+  - `possible-duplicate` (no confirmada): "Claude Code retomó la sesión y el mismo texto volvió a
+    aparecer: este mensaje pudo ejecutarse dos veces (no confirmado).";
+  - `duplicate-pending{unconfirmed-unacknowledged}`: el borrador se conserva y "Revisé el Terminal"
+    habilita reenviar; el reenvío lleva `acknowledgeUnconfirmed`. Las otras dos variantes
+    (`own-pending`, `queue-pending`) y `transcript-unavailable` tienen su propio texto;
+  - `unsupported-config-dir` (D3): "Esta sesión en segundo plano usa un `CLAUDE_CONFIG_DIR`
+    propio. Chat solo admite el `~/.claude` predeterminado; escribí en el Terminal."
+- **La burbuja optimista** se muestra como "pendiente" y se reemplaza solo por el `user_prompt` del
+  ack (el que lleva el `prompt_id` de su `delivered`), nunca por las mismas palabras tipeadas.
+
+##### 8.1.12.9 Pruebas que acreditan el comportamiento (requisito de cada versión de la lista)
+
+El smoke `bg-reply` del job `cli-variants` usa el CLI real, una API falsa en loopback, y sandbox o
+contenedor desechable. Debe cubrir:
+1. Idle: ack completo en `cid` y `promptSource: queued`.
+2. Busy en la relectura: `409 busy`, sin efectos y sin `queue-operation`.
+3. Busy en la ventana (forzado): `accepted` y luego `delivered` tras el turno.
+4. AskUserQuestion pendiente: `needs-terminal` y el diálogo sin responder.
+5. Un texto con `/` o `!`: rechazado por `validateText`.
+6. Que los bytes enviados llevan `nextTurn: true`.
+7. `/clear` entre la relectura y el `reply`: `misdelivered`.
+8. Stop y `--bg --resume` con el mismo `short`: `binding-stale`.
+9. `ESKEW` con un daemon de otra versión (smoke de versiones mezcladas, `BGSMOKE_ONLY=9`: un job
+   ocupado de la versión vieja adoptado por un daemon nuevo). Se acreditan las dos capas: el envío
+   de producción se rechaza **antes** de cualquier efecto (`cli-unvalidated{daemon-skew}`), el
+   programa cliente de producción ejecutado con esos mismos parámetros recibe `ESKEW` (⇒ `failed`),
+   y un `reply {nextTurn:true}` crudo también.
+10. Un socket falso en el dir del daemon: rechazado por peer pid.
+11. Texto idéntico tipeado con la sesión idle: no cuenta como ack (`typed`).
+12. Texto idéntico tipeado con la sesión ocupada dentro de la ventana: el caso residual documentado.
+    **Límite de la evidencia:** con el CLI real no se reproduce de forma determinista (las palabras
+    tipeadas quedaron `typed`, nunca en cola); se acredita con tests deterministas sobre secuencias
+    sintéticas de transcript y hooks — tipeado con la sesión ocupada antes y después de nuestro
+    enqueue, dos enqueues idénticos en la ventana, el nuestro quitado con ↑ y re-enviado por la
+    persona (tipeado o en cola), un hueco de hook — y en ninguno `delivered` se fija por coincidencia.
+13. `shutdown` del daemon con el texto en cola: `unconfirmed`.
+14. Crash del worker: `duplicated` marcado.
+15. Reinicio del backend con `prepared` y con `accepted`: se re-evalúa y no se reenvía.
+
+Además (revisión 3), en el modo docker, una fase de **layout de producción** (L101–L105): el contenedor
+de sesión con su entrypoint real, sin `CLAUDE_CONFIG_DIR`, el symlink `~/.claude` →
+`workspace/.st/claude-state`, el socket del daemon bajo el hash del literal `/home/developer/.claude`,
+el prefijo de `transcript_path`, la comprobación D3 sobre el predeterminado real y un envío leído con
+el lector de producción `workspaceTranscripts`.
+
+Además, tests unitarios de cada transición y cada código, y un test de integración del composer con
+probe y hooks falsos.
+
+##### 8.1.12.10 Migración de versiones (gradual, sin intervenir sesiones vivas)
+
+No es una corrección de seguridad (§8.1.12.7). Se migra por validación:
+1. Cada versión entra en `COMPOSER_BG_CLI_VERSIONS` solo con el smoke verde.
+2. El flag `CONVERSATION_COMPOSER_BG_ENABLED` arranca apagado. Una sesión con una versión fuera de
+   la lista recibe `cli-unvalidated` y nada se rompe.
+3. Las imágenes nuevas se fijan a la versión validada mediante los pins de #521, así que solo los
+   contenedores nuevos la reciben al crearse.
+4. Una sesión existente cambia solo en su próxima recreación natural, o con una recreación opt-in
+   del dueño (§2.7). Nunca durante un turno.
+5. La versión real la decide el CLI del workspace, no la imagen. No se fuerza ningún update: cuando
+   el dueño actualiza, el próximo `claude` toma el daemon y re-lanza los jobs idle, y los ocupados
+   responden `ESKEW` (`failed`) hasta quedar idle. Se recomienda actualizar sin jobs a mitad de un
+   turno.
+
+##### 8.1.12.11 Con la bandera apagada (revisión 3)
+
+Con `CONVERSATION_COMPOSER_BG_ENABLED` sin definir (o la sesión fuera de `COMPOSER_BG_SESSIONS`)
+el comportamiento es el anterior: el camino del pane hace los mismos execs (argv, stdin, usuario),
+los mismos eventos, la misma respuesta HTTP y los mismos archivos; una conversación sin pane responde
+`409 not-interactive` sin probe ni exec (salvo el drenaje de un `job-*.json` sobrante, que sí hace
+probes, inspects y lecturas de transcript para asentarse —nunca un `reply`—; ver "Alcance de las
+lecturas" en §8.1.12.5); `canSendInput`/`composer` de §6 no cambian y no hay
+`transport`; el arranque no registra nada nuevo. Dos diferencias declaradas: (1) `job-<short>.json`
+se interpreta (antes, archivo inesperado ⇒ sesión `unverifiable`), lo que permite drenar registros
+que dejó un periodo con la bandera encendida; (2) con la bandera apagada una
+`COMPOSER_BG_CLI_VERSIONS` o `COMPOSER_BG_SESSIONS` mal formada **solo avisa** (con la bandera
+encendida impide arrancar).
 
 ### 8.2 Validación previa — resultados (CLI 2.1.314, 2026-10-30)
 
