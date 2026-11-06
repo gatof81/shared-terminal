@@ -186,7 +186,8 @@ No hay procesos nuevos en el host, ni colas externas, ni otra base de datos.
 erDiagram
   USER ||--o{ PROJECT : owns
   PROJECT ||--o{ PROJECT_AGENT : "directorio de @handles"
-  PROJECT_AGENT ||--|| ST_SESSION : "runs in (v1: 1 sesión por agente)"
+  PROJECT_AGENT ||--o{ AGENT_BINDING : "vínculos versionados (MVP: 1 vivo)"
+  AGENT_BINDING }o--|| ST_SESSION : "runs in"
   PROJECT_AGENT ||--o{ CHAT : "anfitrión de (v1: 1 activa)"
   CHAT ||--o{ PARTICIPATION : "anfitrión + invitados"
   PARTICIPATION }o--|| PROJECT_AGENT : es
@@ -202,8 +203,9 @@ erDiagram
   Es **directorio y frontera de permisos**: los `@handles` son únicos en el proyecto, las aristas
   `allow` son del proyecto y un invitado tiene que ser agente del mismo proyecto (R14). No es una
   sala de chat.
-- **Agente**: identidad lógica estable (`agent_id` UUID + `@handle`), ligada a **una** sesión ST del
-  mismo owner. Sobrevive a reinicios del CLI, `--resume`, `/clear`, paradas y recreaciones del
+- **Agente**: identidad lógica estable (`agent_id` UUID + `@handle`), que se ejecuta en una sesión ST
+  del mismo owner a través de un **vínculo versionado** (`agent_bindings`, AD1; un vínculo vivo en el
+  MVP). Sobrevive a reinicios del CLI, `--resume`, `/clear`, paradas y recreaciones del
   contenedor. Declara `provider` (`claude-code` en v1; `codex` reservado, sin implementar) y `role`
   (texto corto del owner, para el selector).
 - **Conversación anfitriona** (`chat_id`): la conversación individual de la persona con un agente.
@@ -582,7 +584,7 @@ el monitor, mergear ni desplegar.
 | --- | --- | --- |
 | R1 | Dependencia de un research preview con kill switch remoto | **Sí, condicional a una POC exitosa.** Channels puede ser el transporte principal, pero no una dependencia indispensable del producto: degradación visible y ningún fallback automático (protocolo §6.4) |
 | R2 | Alternativa si Channels no despierta o no sobrevive a `--resume` | **Sí, evaluar `asyncRewake`** (POC E13) si Channels falla. **No** se aprueba automáticamente para producción |
-| R3 | Agente ↔ sesión | **1:1** |
+| R3 | Agente ↔ sesión | **1:1** (desde AD1, 2026-11-06: un vínculo vivo por agente **como política**; la identidad del agente es independiente de la sesión, `agent_bindings`) |
 | R4 | Agente → agente | **Aprobación humana por defecto** y reglas explícitas (aristas `allow`) |
 | R5 | Visibilidad | **Owner-only en v1** |
 | R6 | Carga del canal | **Plugin local autorizado** (`allowedChannelPlugins`); **sin** flags de desarrollo en producción |
@@ -610,3 +612,14 @@ Composer 3.2 como Control Directo y recuperación, ni lo que sigue sin autorizar
 | R15 | D6 | Contexto de un envío | Nada preseleccionado; vista previa del contexto autorizado antes de enviar |
 | — | — | Otros proveedores | El modelo queda listo para otros (como Codex): `agent.provider`, `agent.role` y una interfaz de adaptador con capacidades declaradas (§5.2), **sin implementar ningún adaptador**. Sin integración con ChatGPT |
 | — | — | Camino de envío | El envío por defecto de la conversación anfitriona pasa al monitor **sólo tras el GO de Channels**; hasta entonces sigue el Composer 3.2 |
+
+### Decisiones del 2026-11-06: tareas y equipos de agentes
+
+Aprobadas **como arquitectura, sin autorización de implementación**. R1–R15, los gates de Channels,
+G3, PASS-A/PASS-B, R8 y el NO-GO de G3-2 no cambian.
+
+| # | Decisión | Resolución |
+| --- | --- | --- |
+| TD1–TD11 | Tareas independientes por agente ([13](./13-agent-tasks.md) §8) | aprobadas; TD3 (cola `paused`, `auto` explícito con acreditación que se pierde fail-closed, TG5), TD4 (aprobación humana + G3-2 en el MVP; delegación sólo diseño) y TD8 (`chat` separado de `task.*`, retenido ante una tarea activa, intercalar explícito sólo en SP1) con la redacción revisada |
+| AD1–AD12 | Equipos de agentes ([14](./14-agent-teams-research.md) §10) | aprobadas según la recomendación: `project_agents` + `agent_bindings` antes de P3 (03 §2.1); un vínculo vivo por agente en el MVP; roles libres; plantillas por copia; tres sobres (mensaje, solicitud de trabajo, autorización); vista de proyecto como proyección; sin afirmar aislamiento de red mientras `sessions-net` sea compartida; evidencias = afirmaciones; ninguna solicitud entre agentes antes de G3-2. No se implementan cambios de vínculo, varias sesiones, delegaciones ni activación de agentes detenidos |
+
